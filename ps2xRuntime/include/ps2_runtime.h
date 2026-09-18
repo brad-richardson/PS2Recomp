@@ -270,6 +270,7 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
 // (0x...) or decimal addresses; each names an 8-byte window
 // [addr, addr+8). Every guest write that overlaps a window prints one
 // [diag:watch] line. Unset/empty = disabled; callers pay one bool check.
+class PS2Runtime;
 bool ps2DiagWatchEnabled();
 void ps2DiagWatchSetThread(int id);
 void ps2DiagWatchReportDirect(uint32_t writeAddr,
