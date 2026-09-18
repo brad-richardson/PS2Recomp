@@ -1089,5 +1089,10 @@ namespace ps2_stubs
         }
         setReturnS32(ctx, 1);
     }
+
+    uint32_t getCdCallbackStackTop()
+    {
+        return g_cdCallbackStackTop;
+    }
 }
 

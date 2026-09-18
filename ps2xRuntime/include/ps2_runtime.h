@@ -266,6 +266,28 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
     // TODO we dont need this anymore so on next release it will be deleted
 }
 
+// P1f watchpoint on guest RAM. PS2X_DIAG_WATCH is a comma list of hex
+// (0x...) or decimal addresses; each names an 8-byte window
+// [addr, addr+8). Every guest write that overlaps a window prints one
+// [diag:watch] line. Unset/empty = disabled; callers pay one bool check.
+bool ps2DiagWatchEnabled();
+void ps2DiagWatchSetThread(int id);
+void ps2DiagWatchReportDirect(uint32_t writeAddr,
+                              uint32_t width,
+                              uint64_t valueLo,
+                              uint64_t valueHi,
+                              uint32_t pc,
+                              int threadId,
+                              uint32_t ra,
+                              uint32_t sp);
+void ps2DiagWatchReport(uint8_t *rdram,
+                        uint32_t writeAddr,
+                        uint32_t width,
+                        uint64_t valueLo,
+                        uint64_t valueHi,
+                        const R5900Context *ctx,
+                        const PS2Runtime *runtime);
+
 class PS2Runtime
 {
 public:

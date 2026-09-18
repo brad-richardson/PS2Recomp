@@ -21,6 +21,10 @@ namespace ps2_syscalls
     void diagSyscallsPeriodicFlush();
 }
 void diagCallsPeriodicFlush();
+namespace ps2_stubs
+{
+    uint32_t getCdCallbackStackTop();
+}
 
 namespace
 {
@@ -269,6 +273,72 @@ void EeScheduler::run()
                     std::cerr << " priority=" << diagThread.currentPriority
                               << " scheduled=" << scheduled << std::endl;
                 }
+                // P1f stack map, same gate as the thread table.
+                for (const auto &[stackId, stackThread] : m_threads)
+                {
+                    (void)stackId;
+                    const uint32_t stackSp = getRegU32(&stackThread.activeContext(), 29);
+                    std::cerr << "[diag:stacks] block=" << (s_diagBlock - 1)
+                              << " thread id=" << stackThread.id
+                              << " stack=0x" << std::hex << stackThread.stack
+                              << " stackSize=0x" << stackThread.stackSize
+                              << " sp=0x" << stackSp
+                              << " entry=0x" << stackThread.entry
+                              << " pc=0x" << stackThread.activeContext().pc << std::dec << std::endl;
+                    for (size_t invIdx = 0; invIdx < stackThread.invocations.size(); ++invIdx)
+                    {
+                        const GuestInvocation &inv = stackThread.invocations[invIdx];
+                        std::cerr << "[diag:stacks] block=" << (s_diagBlock - 1)
+                                  << " active thread=" << stackThread.id
+                                  << " idx=" << invIdx
+                                  << " kind=" << static_cast<int>(inv.kind)
+                                  << " pc=0x" << std::hex << inv.context.pc
+                                  << " sp=0x" << getRegU32(&inv.context, 29) << std::dec << std::endl;
+                    }
+                }
+                for (const auto &[invKey, invTop] : m_invocationStackTops)
+                {
+                    const uint32_t keyThread = static_cast<uint32_t>(invKey >> 32u);
+                    const uint32_t keyDepth = static_cast<uint32_t>(invKey & 0xFFFFFFFFu);
+                    std::cerr << "[diag:stacks] block=" << (s_diagBlock - 1)
+                              << " invocation key=0x" << std::hex << invKey << std::dec
+                              << " thread=" << keyThread
+                              << " depth=" << keyDepth
+                              << " top=0x" << std::hex << invTop << std::dec << std::endl;
+                }
+                std::cerr << "[diag:stacks] block=" << (s_diagBlock - 1)
+                          << " cdCallbackStackTop=0x" << std::hex << ps2_stubs::getCdCallbackStackTop() << std::dec
+                          << std::endl;
+                for (const auto &[intcId, intcHandler] : m_intcHandlers)
+                {
+                    std::cerr << "[diag:stacks] block=" << (s_diagBlock - 1)
+                              << " intc id=" << intcId
+                              << " cause=" << intcHandler.cause
+                              << " handler=0x" << std::hex << intcHandler.handler
+                              << " sp=0x" << intcHandler.sp << std::dec << std::endl;
+                }
+                for (const auto &[dmacId, dmacHandler] : m_dmacHandlers)
+                {
+                    std::cerr << "[diag:stacks] block=" << (s_diagBlock - 1)
+                              << " dmac id=" << dmacId
+                              << " cause=" << dmacHandler.cause
+                              << " handler=0x" << std::hex << dmacHandler.handler
+                              << " sp=0x" << dmacHandler.sp << std::dec << std::endl;
+                }
+                for (const auto &[alarmId, alarm] : m_alarms)
+                {
+                    std::cerr << "[diag:stacks] block=" << (s_diagBlock - 1)
+                              << " alarm id=" << alarmId
+                              << " handler=0x" << std::hex << alarm.handler
+                              << " sp=0x" << alarm.sp << std::dec << std::endl;
+                }
+                for (const GuestInvocation &pending : m_pendingInvocations)
+                {
+                    std::cerr << "[diag:stacks] block=" << (s_diagBlock - 1)
+                              << " pending kind=" << static_cast<int>(pending.kind)
+                              << " pc=0x" << std::hex << pending.context.pc
+                              << " sp=0x" << getRegU32(&pending.context, 29) << std::dec << std::endl;
+                }
                 g_diagSchedCounts.clear();
                 ps2_syscalls::diagSyscallsPeriodicFlush();
                 diagCallsPeriodicFlush();
@@ -481,6 +551,10 @@ void EeScheduler::run()
         {
             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
             m_guestExecuting.store(true, std::memory_order_release);
+            if (ps2DiagWatchEnabled())
+            {
+                ps2DiagWatchSetThread(m_currentThreadId);
+            }
             function(m_rdram, &context, &m_runtime);
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
@@ -686,6 +760,17 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
                                   : getRegU32(&caller, 29);
     SET_GPR_U32(&target->context, 29, stackTop);
     SET_GPR_U32(&target->context, 31, 0u);
+    if (diagPeriodMs() != 0u)
+    {
+        std::cerr << "[diag:start-thread] id=" << id
+                  << " func=0x" << std::hex << target->entry
+                  << " stack=0x" << target->stack
+                  << " stack_size=0x" << target->stackSize
+                  << " gp=0x" << target->gp << std::dec
+                  << " priority=" << target->initialPriority
+                  << " attr=0x" << std::hex << target->attr << std::dec
+                  << " initial_sp=0x" << std::hex << stackTop << std::dec << std::endl;
+    }
     enqueueReady(*target);
     requestPreemptionIfHigher(*target, interruptSafe);
     publishSnapshot();
@@ -1483,6 +1568,20 @@ void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
         if (m_rdram && physical <= PS2_RAM_SIZE - sizeof(uint64_t))
         {
             const uint64_t zero = 0u;
+            if (ps2DiagWatchEnabled())
+            {
+                uint32_t watchPc = 0u;
+                uint32_t watchRa = 0u;
+                uint32_t watchSp = 0u;
+                if (const GuestThread *owner = currentThread())
+                {
+                    const R5900Context &actx = owner->activeContext();
+                    watchPc = actx.pc;
+                    watchRa = getRegU32(&actx, 31);
+                    watchSp = getRegU32(&actx, 29);
+                }
+                ps2DiagWatchReportDirect(tickAddress, 8u, 0u, 0u, watchPc, m_currentThreadId, watchRa, watchSp);
+            }
             std::memcpy(m_rdram + physical, &zero, sizeof(zero));
         }
     }
@@ -2169,6 +2268,20 @@ void EeScheduler::writeGuestU32(uint32_t address, uint32_t value)
     if (!m_rdram || physical > PS2_RAM_SIZE - sizeof(value))
     {
         return;
+    }
+    if (ps2DiagWatchEnabled())
+    {
+        uint32_t watchPc = 0u;
+        uint32_t watchRa = 0u;
+        uint32_t watchSp = 0u;
+        if (const GuestThread *owner = currentThread())
+        {
+            const R5900Context &actx = owner->activeContext();
+            watchPc = actx.pc;
+            watchRa = getRegU32(&actx, 31);
+            watchSp = getRegU32(&actx, 29);
+        }
+        ps2DiagWatchReportDirect(address, 4u, value, 0u, watchPc, m_currentThreadId, watchRa, watchSp);
     }
     std::memcpy(m_rdram + physical, &value, sizeof(value));
 }

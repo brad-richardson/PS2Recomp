@@ -1129,6 +1129,137 @@ void diagCallsPeriodicFlush()
     g_diagCallCounts.clear();
 }
 
+// P1f watchpoint (PS2X_DIAG_WATCH). Cached parse; unset/empty = disabled.
+namespace
+{
+    const std::vector<uint32_t> &diagWatchAddrs()
+    {
+        static const std::vector<uint32_t> addrs = [] {
+            std::vector<uint32_t> out;
+            if (const char *env = std::getenv("PS2X_DIAG_WATCH"))
+            {
+                std::string s(env);
+                size_t pos = 0;
+                while (pos <= s.size())
+                {
+                    size_t comma = s.find(',', pos);
+                    std::string tok = s.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+                    size_t a = 0;
+                    while (a < tok.size() && std::isspace(static_cast<unsigned char>(tok[a])))
+                    {
+                        ++a;
+                    }
+                    size_t b = tok.size();
+                    while (b > a && std::isspace(static_cast<unsigned char>(tok[b - 1])))
+                    {
+                        --b;
+                    }
+                    if (b > a)
+                    {
+                        std::string t = tok.substr(a, b - a);
+                        char *end = nullptr;
+                        const unsigned long parsed = std::strtoul(t.c_str(), &end, 0);
+                        if (end != t.c_str())
+                        {
+                            out.push_back(static_cast<uint32_t>(parsed));
+                        }
+                    }
+                    if (comma == std::string::npos)
+                    {
+                        break;
+                    }
+                    pos = comma + 1;
+                }
+            }
+            return out;
+        }();
+        return addrs;
+    }
+
+    std::atomic<int> g_diagWatchThreadId{-999};
+
+    void diagWatchEmit(uint32_t writeAddr,
+                       uint32_t width,
+                       uint64_t valueLo,
+                       uint64_t valueHi,
+                       uint32_t pc,
+                       int threadId,
+                       uint32_t ra,
+                       uint32_t sp)
+    {
+        const std::vector<uint32_t> &watches = diagWatchAddrs();
+        if (watches.empty())
+        {
+            return;
+        }
+        for (const uint32_t w : watches)
+        {
+            if (writeAddr < w + 8u && w < writeAddr + width)
+            {
+                std::cerr << "[diag:watch] addr=0x" << std::hex << writeAddr << std::dec
+                          << " width=" << width << " value=0x" << std::hex;
+                if (width <= 8u)
+                {
+                    std::cerr << valueLo;
+                }
+                else
+                {
+                    std::cerr.width(16);
+                    std::cerr.fill('0');
+                    std::cerr << valueHi;
+                    std::cerr.width(16);
+                    std::cerr.fill('0');
+                    std::cerr << valueLo;
+                    std::cerr.fill(' ');
+                }
+                std::cerr << std::dec << " pc=0x" << std::hex << pc << std::dec
+                          << " thread=" << threadId
+                          << " ra=0x" << std::hex << ra
+                          << " sp=0x" << sp << std::dec << std::endl;
+            }
+        }
+    }
+}
+
+bool ps2DiagWatchEnabled()
+{
+    return !diagWatchAddrs().empty();
+}
+
+void ps2DiagWatchSetThread(int id)
+{
+    g_diagWatchThreadId.store(id, std::memory_order_relaxed);
+}
+
+void ps2DiagWatchReportDirect(uint32_t writeAddr,
+                              uint32_t width,
+                              uint64_t valueLo,
+                              uint64_t valueHi,
+                              uint32_t pc,
+                              int threadId,
+                              uint32_t ra,
+                              uint32_t sp)
+{
+    diagWatchEmit(writeAddr, width, valueLo, valueHi, pc, threadId, ra, sp);
+}
+
+void ps2DiagWatchReport(uint8_t *rdram,
+                        uint32_t writeAddr,
+                        uint32_t width,
+                        uint64_t valueLo,
+                        uint64_t valueHi,
+                        const R5900Context *ctx,
+                        const PS2Runtime *runtime)
+{
+    (void)rdram;
+    (void)runtime;
+    const uint32_t pc = ctx != nullptr ? ctx->pc : 0u;
+    const uint32_t ra = ctx != nullptr ? getRegU32(ctx, 31) : 0u;
+    const uint32_t sp = ctx != nullptr ? getRegU32(ctx, 29) : 0u;
+    const int tid = g_diagWatchThreadId.load(std::memory_order_relaxed);
+    diagWatchEmit(writeAddr, width, valueLo, valueHi, pc, tid, ra, sp);
+}
+
 bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
 {
     uint32_t slot = 0u;
@@ -2160,6 +2291,10 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
 {
     ps2TraceGuestWrite(rdram, vaddr, 1u, value, 0u, "WRITE8", ctx);
+    if (ps2DiagWatchEnabled())
+    {
+        ps2DiagWatchReport(rdram, vaddr, 1u, value, 0u, ctx, this);
+    }
     try
     {
         m_memory.write8(vaddr, value);
@@ -2173,6 +2308,10 @@ void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8
 void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint16_t value)
 {
     ps2TraceGuestWrite(rdram, vaddr, 2u, value, 0u, "WRITE16", ctx);
+    if (ps2DiagWatchEnabled())
+    {
+        ps2DiagWatchReport(rdram, vaddr, 2u, value, 0u, ctx, this);
+    }
     try
     {
         m_memory.write16(vaddr, value);
@@ -2186,6 +2325,10 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
 {
     ps2TraceGuestWrite(rdram, vaddr, 4u, value, 0u, "WRITE32", ctx);
+    if (ps2DiagWatchEnabled())
+    {
+        ps2DiagWatchReport(rdram, vaddr, 4u, value, 0u, ctx, this);
+    }
     try
     {
         m_memory.write32(vaddr, value);
@@ -2200,6 +2343,10 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value)
 {
     ps2TraceGuestWrite(rdram, vaddr, 8u, value, 0u, "WRITE64", ctx);
+    if (ps2DiagWatchEnabled())
+    {
+        ps2DiagWatchReport(rdram, vaddr, 8u, value, 0u, ctx, this);
+    }
     try
     {
         m_memory.write64(vaddr, value);
@@ -2215,6 +2362,10 @@ void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m
     alignas(16) uint64_t _parts[2];
     _mm_storeu_si128(reinterpret_cast<__m128i *>(_parts), value);
     ps2TraceGuestWrite(rdram, vaddr, 16u, _parts[0], _parts[1], "WRITE128", ctx);
+    if (ps2DiagWatchEnabled())
+    {
+        ps2DiagWatchReport(rdram, vaddr, 16u, _parts[0], _parts[1], ctx, this);
+    }
     try
     {
         m_memory.write128(vaddr, value);
