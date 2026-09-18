@@ -164,7 +164,7 @@ namespace
         }
     }
 
-    std::string formatDispatchHistory()
+    std::string formatDispatchHistoryImpl()
     {
         const DispatchHistory &h = g_dispatchHistory;
         const uint32_t count = h.wrapped ? static_cast<uint32_t>(h.pcs.size()) : h.next;
@@ -1193,7 +1193,7 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
               << " tableBase=0x" << g_ps2RecompiledFunctionTableBase
               << " tableEnd=0x" << g_ps2RecompiledFunctionTableEnd
               << " codeRegion=" << (m_memory.isCodeAddress(address) ? "yes" : "no")
-              << " trace=" << formatDispatchHistory()
+              << " trace=" << formatDispatchHistoryImpl()
               << std::dec << std::endl;
 
     static RecompiledFunction missingFunction = [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1225,6 +1225,26 @@ void PS2Runtime::resetMissingFunctionReportOnce()
     m_missingFunctionReported.store(false, std::memory_order_release);
 }
 
+std::string PS2Runtime::formatDispatchHistory() const
+{
+    return formatDispatchHistoryImpl();
+}
+
+namespace
+{
+    bool diagReportAll()
+    {
+        static const bool reportAll = [] {
+            if (const char *env = std::getenv("PS2X_DIAG_REPORT_ALL"))
+            {
+                return env[0] == '1' && env[1] == '\0';
+            }
+            return false;
+        }();
+        return reportAll;
+    }
+}
+
 void PS2Runtime::reportMissingFunction(uint8_t *rdram,
                                        R5900Context *ctx,
                                        uint32_t targetPc,
@@ -1234,6 +1254,7 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
 {
     const MissingFunctionPolicy policy = missingFunctionPolicy();
     const bool firstReport = !m_missingFunctionReported.exchange(true, std::memory_order_acq_rel);
+    const bool shouldPrint = firstReport || diagReportAll();
 
     const uint32_t pc = ctx->pc;
     const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
@@ -1314,7 +1335,7 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
         readGuestU32Offset(a0Word0, 0x08u, vtableSlot8) &&
         readGuestU32Offset(a0Word0, 0x0cu, vtableSlotC);
 
-    if (firstReport)
+    if (shouldPrint)
     {
         std::ostringstream oss;
         oss << "[guest-branch:missing-target] kind=" << describeGuestBranchKind(kind)
@@ -1355,7 +1376,7 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
             << " vtbl[c]=0x" << vtableSlotC
             << " codeRegion=" << (m_memory.isCodeAddress(targetPc) ? "yes" : "no")
             << " policy=" << static_cast<uint32_t>(policy)
-            << " trace=" << formatDispatchHistory()
+            << " trace=" << formatDispatchHistoryImpl()
             << std::dec;
 
         static std::mutex s_missingFunctionLogMutex;

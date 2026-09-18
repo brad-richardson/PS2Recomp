@@ -343,6 +343,7 @@ public:
     void setMissingFunctionPolicy(MissingFunctionPolicy policy);
     MissingFunctionPolicy missingFunctionPolicy() const;
     void resetMissingFunctionReportOnce();
+    std::string formatDispatchHistory() const;
 
     static const IoPaths &getIoPaths();
     static void setIoPaths(const IoPaths &paths);

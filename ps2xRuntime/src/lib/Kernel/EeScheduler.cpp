@@ -393,6 +393,24 @@ void EeScheduler::run()
                 }
                 continue;
             }
+            if (diagPeriod != 0u)
+            {
+                uint64_t dormantScheduled = 0u;
+                if (auto it = g_diagSchedCounts.find(running->id); it != g_diagSchedCounts.end())
+                {
+                    dormantScheduled = it->second;
+                }
+                std::cerr << "[diag:dormant] id=" << running->id
+                          << " entry=0x" << std::hex << running->entry
+                          << " pc=0x" << context.pc
+                          << " ra=0x" << getRegU32(&context, 31)
+                          << " sp=0x" << getRegU32(&context, 29)
+                          << " gp=0x" << getRegU32(&context, 28)
+                          << " v0=0x" << getRegU32(&context, 2)
+                          << " a0=0x" << getRegU32(&context, 4) << std::dec
+                          << " scheduled=" << dormantScheduled
+                          << " trace=" << m_runtime.formatDispatchHistory() << std::endl;
+            }
             makeDormant(*running);
             m_currentThreadId = 0;
             continue;
@@ -429,6 +447,24 @@ void EeScheduler::run()
                                                 context.pc,
                                                 PS2Runtime::GuestBranchKind::DirectJump,
                                                 "EE scheduler");
+                if (diagPeriod != 0u)
+                {
+                    uint64_t dormantScheduled = 0u;
+                    if (auto it = g_diagSchedCounts.find(running->id); it != g_diagSchedCounts.end())
+                    {
+                        dormantScheduled = it->second;
+                    }
+                    std::cerr << "[diag:dormant] id=" << running->id
+                              << " entry=0x" << std::hex << running->entry
+                              << " pc=0x" << context.pc
+                              << " ra=0x" << getRegU32(&context, 31)
+                              << " sp=0x" << getRegU32(&context, 29)
+                              << " gp=0x" << getRegU32(&context, 28)
+                              << " v0=0x" << getRegU32(&context, 2)
+                              << " a0=0x" << getRegU32(&context, 4) << std::dec
+                              << " scheduled=" << dormantScheduled
+                              << " trace=" << m_runtime.formatDispatchHistory() << std::endl;
+                }
                 makeDormant(*running);
                 m_currentThreadId = 0;
             }
