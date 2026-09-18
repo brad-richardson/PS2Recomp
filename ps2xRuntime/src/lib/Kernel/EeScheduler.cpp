@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstring>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 
@@ -168,12 +170,42 @@ void EeScheduler::run()
         if (m_currentThreadId == 0)
         {
             GuestThread *next = selectReady();
+            // Diagnostic idle dump (function statics keep this to run()).
+            static auto idleSince = std::chrono::steady_clock::time_point{};
+            static bool idleDumpPrinted = false;
             if (!next && m_pendingInvocations.empty())
             {
                 publishSnapshot();
+                const auto idleNow = std::chrono::steady_clock::now();
+                if (idleSince == std::chrono::steady_clock::time_point{})
+                {
+                    idleSince = idleNow;
+                }
+                else if (!idleDumpPrinted &&
+                         idleNow - idleSince >= std::chrono::seconds(3))
+                {
+                    idleDumpPrinted = true;
+                    const EeKernelSnapshot idleSnap = snapshot();
+                    std::cerr << "[ee:idle] no runnable thread for 3s; threads="
+                              << idleSnap.threads.size() << std::endl;
+                    for (const EeThreadSnapshot &idleThread : idleSnap.threads)
+                    {
+                        std::cerr << "[ee:idle] id=" << idleThread.id
+                                  << " status="
+                                  << static_cast<int>(idleThread.status)
+                                  << " waitReason="
+                                  << static_cast<int>(idleThread.waitReason)
+                                  << " waitId=" << idleThread.waitId << " pc=0x"
+                                  << std::hex << idleThread.pc << std::dec
+                                  << " entry=0x" << std::hex << idleThread.entry
+                                  << std::dec << std::endl;
+                    }
+                }
                 waitForEvent();
                 continue;
             }
+            idleSince = std::chrono::steady_clock::time_point{};
+            idleDumpPrinted = false;
             if (next)
             {
                 makeRunning(*next);
