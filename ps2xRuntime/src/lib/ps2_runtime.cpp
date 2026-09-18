@@ -1091,6 +1091,44 @@ namespace
     }
 }
 
+// Flushes the pending call-target histogram when a period boundary has
+// passed. Called from the dispatchGuestBranch hook below and from the
+// scheduler tick so a quiet steady state still emits (possibly empty)
+// blocks.
+void diagCallsPeriodicFlush()
+{
+    const uint64_t period = diagPeriodMs();
+    if (period == 0u)
+    {
+        return;
+    }
+    const uint64_t now = diagNowMs();
+    if (g_diagCallLastMs == 0u)
+    {
+        g_diagCallLastMs = now;
+        return;
+    }
+    if (now - g_diagCallLastMs < period)
+    {
+        return;
+    }
+    g_diagCallLastMs = now;
+    std::vector<std::pair<uint32_t, CallDiagEntry>> sorted(g_diagCallCounts.begin(), g_diagCallCounts.end());
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto &a, const auto &b) { return a.second.count > b.second.count; });
+    std::cerr << "[diag:stubs] block=" << g_diagCallBlock++
+              << " distinct=" << sorted.size()
+              << " period_ms=" << period << std::endl;
+    for (size_t i = 0; i < sorted.size() && i < 30u; ++i)
+    {
+        std::cerr << "[diag:stub] target=0x" << std::hex << sorted[i].first << std::dec
+                  << " count=" << sorted[i].second.count
+                  << " firstRa=0x" << std::hex << sorted[i].second.firstRa
+                  << " lastRa=0x" << std::hex << sorted[i].second.lastRa << std::dec << std::endl;
+    }
+    g_diagCallCounts.clear();
+}
+
 bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
 {
     uint32_t slot = 0u;
@@ -1403,7 +1441,6 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     ++s_diagCallTick;
     if (diagPeriodMs() != 0u)
     {
-        const uint64_t diagPeriod = diagPeriodMs();
         const uint32_t callerRa = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
         CallDiagEntry &entry = g_diagCallCounts[targetPc];
         if (entry.count == 0u)
@@ -1412,29 +1449,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         }
         entry.lastRa = callerRa;
         ++entry.count;
-        const uint64_t diagNow = diagNowMs();
-        if (g_diagCallLastMs == 0u)
-        {
-            g_diagCallLastMs = diagNow;
-        }
-        else if (diagNow - g_diagCallLastMs >= diagPeriod)
-        {
-            g_diagCallLastMs = diagNow;
-            std::vector<std::pair<uint32_t, CallDiagEntry>> sorted(g_diagCallCounts.begin(), g_diagCallCounts.end());
-            std::sort(sorted.begin(), sorted.end(),
-                      [](const auto &a, const auto &b) { return a.second.count > b.second.count; });
-            std::cerr << "[diag:stubs] block=" << g_diagCallBlock++
-                      << " distinct=" << sorted.size()
-                      << " period_ms=" << diagPeriod << std::endl;
-            for (size_t i = 0; i < sorted.size() && i < 30u; ++i)
-            {
-                std::cerr << "[diag:stub] target=0x" << std::hex << sorted[i].first << std::dec
-                          << " count=" << sorted[i].second.count
-                          << " firstRa=0x" << std::hex << sorted[i].second.firstRa
-                          << " lastRa=0x" << std::hex << sorted[i].second.lastRa << std::dec << std::endl;
-            }
-            g_diagCallCounts.clear();
-        }
+        diagCallsPeriodicFlush();
     }
 
     RecompiledFunction targetFn = lookupFunction(targetPc);

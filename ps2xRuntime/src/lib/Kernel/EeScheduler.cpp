@@ -13,6 +13,15 @@
 #include <stdexcept>
 #include <unordered_map>
 
+// P1c histogram flushers owned by other translation units (defined in
+// Kernel/Syscalls/Dispatcher.cpp and ps2_runtime.cpp). Called from the
+// periodic tick below so quiet periods still emit blocks.
+namespace ps2_syscalls
+{
+    void diagSyscallsPeriodicFlush();
+}
+void diagCallsPeriodicFlush();
+
 namespace
 {
     constexpr int KE_OK = 0;
@@ -261,6 +270,8 @@ void EeScheduler::run()
                               << " scheduled=" << scheduled << std::endl;
                 }
                 g_diagSchedCounts.clear();
+                ps2_syscalls::diagSyscallsPeriodicFlush();
+                diagCallsPeriodicFlush();
             }
         }
 
