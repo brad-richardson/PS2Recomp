@@ -378,6 +378,26 @@ namespace ps2_stubs
 
         if (ok)
         {
+            if (diagPeriodMs() != 0u)
+            {
+                const uint32_t payloadOff = selected.buf & PS2_RAM_MASK;
+                char payloadHex[17];
+                const char *payloadDigits = "0123456789abcdef";
+                for (int payloadI = 0; payloadI < 8; ++payloadI)
+                {
+                    unsigned payloadB = 0u;
+                    const uint32_t payloadAddr = payloadOff + static_cast<uint32_t>(payloadI);
+                    if (rdram != nullptr && payloadAddr < PS2_RAM_SIZE)
+                    {
+                        payloadB = rdram[payloadAddr];
+                    }
+                    payloadHex[2 * payloadI] = payloadDigits[(payloadB >> 4) & 0xFu];
+                    payloadHex[2 * payloadI + 1] = payloadDigits[payloadB & 0xFu];
+                }
+                payloadHex[16] = '\0';
+                std::cerr << "[diag:cd] sceCdRead payload lbn=0x" << std::hex << selected.lbn
+                          << " buf=0x" << selected.buf << " bytes=" << payloadHex << std::dec << std::endl;
+            }
             g_cdStreamingLbn = selected.lbn + selected.sectors;
             setReturnS32(ctx, 1); // command accepted/success
             queueCdCallback(ctx, runtime, 1u); // SCECdFuncRead
