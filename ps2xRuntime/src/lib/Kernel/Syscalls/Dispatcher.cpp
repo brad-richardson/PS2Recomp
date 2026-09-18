@@ -2,10 +2,92 @@
 #include "Dispatcher.h"
 #include "System.h"
 
+#include <cstdlib>
+
+namespace
+{
+    // P1c steady-state diagnostics, gated on PS2X_DIAG_PERIOD_MS (unset =
+    // compiled in, nothing printed, callers pay only a counter increment).
+    uint64_t diagPeriodMs()
+    {
+        static const uint64_t period = [] {
+            if (const char *env = std::getenv("PS2X_DIAG_PERIOD_MS"))
+            {
+                if (env[0] != '\0')
+                {
+                    char *end = nullptr;
+                    const unsigned long long parsed = std::strtoull(env, &end, 10);
+                    if (end != env)
+                    {
+                        return static_cast<uint64_t>(parsed);
+                    }
+                }
+            }
+            return static_cast<uint64_t>(0);
+        }();
+        return period;
+    }
+
+    uint64_t diagNowMs()
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    }
+
+    struct SyscallDiagEntry
+    {
+        uint64_t count = 0;
+        uint32_t firstPc = 0;
+        uint32_t lastPc = 0;
+    };
+}
+
 namespace ps2_syscalls
 {
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        static uint64_t s_diagTick = 0;
+        ++s_diagTick;
+        static std::unordered_map<uint32_t, SyscallDiagEntry> s_diagCounts;
+        static uint64_t s_diagLastMs = 0;
+        static uint64_t s_diagBlock = 0;
+        const uint64_t diagPeriod = diagPeriodMs();
+        if (diagPeriod != 0u)
+        {
+            const uint32_t callerPc = (ctx != nullptr) ? ctx->pc : 0u;
+            SyscallDiagEntry &entry = s_diagCounts[syscallNumber];
+            if (entry.count == 0u)
+            {
+                entry.firstPc = callerPc;
+            }
+            entry.lastPc = callerPc;
+            ++entry.count;
+            const uint64_t diagNow = diagNowMs();
+            if (s_diagLastMs == 0u)
+            {
+                s_diagLastMs = diagNow;
+            }
+            else if (diagNow - s_diagLastMs >= diagPeriod)
+            {
+                s_diagLastMs = diagNow;
+                std::vector<std::pair<uint32_t, SyscallDiagEntry>> sorted(s_diagCounts.begin(), s_diagCounts.end());
+                std::sort(sorted.begin(), sorted.end(),
+                          [](const auto &a, const auto &b) { return a.second.count > b.second.count; });
+                std::cerr << "[diag:syscalls] block=" << s_diagBlock++
+                          << " distinct=" << sorted.size()
+                          << " period_ms=" << diagPeriod << std::endl;
+                for (size_t i = 0; i < sorted.size() && i < 20u; ++i)
+                {
+                    std::cerr << "[diag:syscall] id=0x" << std::hex << sorted[i].first << std::dec
+                              << " count=" << sorted[i].second.count
+                              << " first=0x" << std::hex << sorted[i].second.firstPc
+                              << " last=0x" << std::hex << sorted[i].second.lastPc << std::dec << std::endl;
+                }
+                s_diagCounts.clear();
+            }
+        }
+
         if (dispatchSyscallOverride(syscallNumber, rdram, ctx, runtime))
         {
             return true;

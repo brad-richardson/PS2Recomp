@@ -38,6 +38,31 @@ namespace ps2_stubs
         uint32_t g_cdCallbackGp = 0u;
         uint32_t g_cdCallbackStackTop = 0u;
 
+        // P1c steady-state diagnostics, gated on PS2X_DIAG_PERIOD_MS (unset =
+        // compiled in, nothing printed). The tag mark lets the scheduler log
+        // when it starts the queued invocation (see EeScheduler::run()).
+        constexpr uint64_t kCdCallbackDiagTagBase = 0x4344434200000000ULL;
+
+        uint64_t diagPeriodMs()
+        {
+            static const uint64_t period = [] {
+                if (const char *env = std::getenv("PS2X_DIAG_PERIOD_MS"))
+                {
+                    if (env[0] != '\0')
+                    {
+                        char *end = nullptr;
+                        const unsigned long long parsed = std::strtoull(env, &end, 10);
+                        if (end != env)
+                        {
+                            return static_cast<uint64_t>(parsed);
+                        }
+                    }
+                }
+                return static_cast<uint64_t>(0);
+            }();
+            return period;
+        }
+
         void queueCdCallback(R5900Context *ctx, PS2Runtime *runtime, uint32_t func)
         {
             (void)ctx;
@@ -47,12 +72,18 @@ namespace ps2_stubs
             }
             GuestInvocation invocation{};
             invocation.kind = GuestInvocationKind::Interrupt;
+            invocation.tag = kCdCallbackDiagTagBase | static_cast<uint64_t>(func);
             invocation.context.pc = g_cdCallbackFn;
             SET_GPR_U32(&invocation.context, 4, func);
             SET_GPR_U32(&invocation.context, 5, 0u);
             SET_GPR_U32(&invocation.context, 28, g_cdCallbackGp);
             SET_GPR_U32(&invocation.context, 29, g_cdCallbackStackTop);
             SET_GPR_U32(&invocation.context, 31, 0u);
+            if (diagPeriodMs() != 0u)
+            {
+                std::cerr << "[cd:callback] queued func=" << func
+                          << " cb=0x" << std::hex << g_cdCallbackFn << std::dec << std::endl;
+            }
             runtime->eeScheduler().queueInvocation(std::move(invocation));
         }
 

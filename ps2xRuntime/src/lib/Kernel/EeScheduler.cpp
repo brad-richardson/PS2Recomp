@@ -6,10 +6,12 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace
 {
@@ -72,6 +74,63 @@ namespace
         } while (candidate != first);
         return 0;
     }
+
+    // P1c steady-state diagnostics. Everything below is gated on
+    // PS2X_DIAG_PERIOD_MS: unset/empty/0 means compiled in, nothing printed,
+    // and callers pay only a counter increment plus a cached static check.
+    uint64_t diagPeriodMs()
+    {
+        static const uint64_t period = [] {
+            if (const char *env = std::getenv("PS2X_DIAG_PERIOD_MS"))
+            {
+                if (env[0] != '\0')
+                {
+                    char *end = nullptr;
+                    const unsigned long long parsed = std::strtoull(env, &end, 10);
+                    if (end != env)
+                    {
+                        return static_cast<uint64_t>(parsed);
+                    }
+                }
+            }
+            return static_cast<uint64_t>(0);
+        }();
+        return period;
+    }
+
+    uint64_t diagNowMs()
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    }
+
+    // Shared printer for the Fix C thread table. Fix C callers pass "ee:idle";
+    // the periodic P1c dump passes "diag:thread" and appends priority plus
+    // the per-thread schedule count.
+    void printEeThreadDiagLine(std::ostream &os, const char *prefix, const EeThreadSnapshot &thread)
+    {
+        os << "[" << prefix << "] id=" << thread.id
+           << " status=" << static_cast<int>(thread.status)
+           << " waitReason=" << static_cast<int>(thread.waitReason)
+           << " waitId=" << thread.waitId << " pc=0x"
+           << std::hex << thread.pc << std::dec
+           << " entry=0x" << std::hex << thread.entry << std::dec;
+    }
+
+    // Tag mark for CD-completion invocations queued by queueCdCallback
+    // (Kernel/Stubs/CD.cpp). Upper 32 bits are the 'CDCB' magic, lower 32
+    // bits are the SCE callback function id.
+    constexpr uint64_t kCdCallbackDiagTagBase = 0x4344434200000000ULL;
+    constexpr uint64_t kCdCallbackDiagTagMask = 0xFFFFFFFF00000000ULL;
+
+    bool isCdCallbackDiagTag(uint64_t tag)
+    {
+        return (tag & kCdCallbackDiagTagMask) == kCdCallbackDiagTagBase;
+    }
+
+    // Per-thread schedule counts since the last periodic dump.
+    std::unordered_map<int, uint64_t> g_diagSchedCounts;
 }
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
@@ -159,12 +218,50 @@ void EeScheduler::run()
     assertExecutor();
     m_running.store(true, std::memory_order_release);
 
+    // P1c steady-state diagnostics state. When PS2X_DIAG_PERIOD_MS is unset
+    // the per-iteration cost below is one counter increment plus a check.
+    static uint64_t s_diagTick = 0;
+    static uint64_t s_diagLastMs = 0;
+    static uint64_t s_diagBlock = 0;
+
     while (!m_stopRequested.load(std::memory_order_acquire))
     {
         processPendingEvents();
         if (m_stopRequested.load(std::memory_order_acquire))
         {
             break;
+        }
+
+        ++s_diagTick;
+        const uint64_t diagPeriod = diagPeriodMs();
+        if (diagPeriod != 0u)
+        {
+            const uint64_t diagNow = diagNowMs();
+            if (s_diagLastMs == 0u)
+            {
+                s_diagLastMs = diagNow;
+            }
+            else if (diagNow - s_diagLastMs >= diagPeriod)
+            {
+                s_diagLastMs = diagNow;
+                publishSnapshot();
+                const EeKernelSnapshot diagSnap = snapshot();
+                std::cerr << "[diag:threads] block=" << s_diagBlock++
+                          << " threads=" << diagSnap.threads.size()
+                          << " period_ms=" << diagPeriod << std::endl;
+                for (const EeThreadSnapshot &diagThread : diagSnap.threads)
+                {
+                    uint64_t scheduled = 0u;
+                    if (auto it = g_diagSchedCounts.find(diagThread.id); it != g_diagSchedCounts.end())
+                    {
+                        scheduled = it->second;
+                    }
+                    printEeThreadDiagLine(std::cerr, "diag:thread", diagThread);
+                    std::cerr << " priority=" << diagThread.currentPriority
+                              << " scheduled=" << scheduled << std::endl;
+                }
+                g_diagSchedCounts.clear();
+            }
         }
 
         if (m_currentThreadId == 0)
@@ -190,15 +287,8 @@ void EeScheduler::run()
                               << idleSnap.threads.size() << std::endl;
                     for (const EeThreadSnapshot &idleThread : idleSnap.threads)
                     {
-                        std::cerr << "[ee:idle] id=" << idleThread.id
-                                  << " status="
-                                  << static_cast<int>(idleThread.status)
-                                  << " waitReason="
-                                  << static_cast<int>(idleThread.waitReason)
-                                  << " waitId=" << idleThread.waitId << " pc=0x"
-                                  << std::hex << idleThread.pc << std::dec
-                                  << " entry=0x" << std::hex << idleThread.entry
-                                  << std::dec << std::endl;
+                        printEeThreadDiagLine(std::cerr, "ee:idle", idleThread);
+                        std::cerr << std::endl;
                     }
                 }
                 waitForEvent();
@@ -209,12 +299,25 @@ void EeScheduler::run()
             if (next)
             {
                 makeRunning(*next);
+                if (diagPeriod != 0u)
+                {
+                    ++g_diagSchedCounts[next->id];
+                }
             }
             else
             {
                 GuestThread *owner = &acquireInvocationThread();
                 GuestInvocation invocation = std::move(m_pendingInvocations.front());
                 m_pendingInvocations.pop_front();
+                if (diagPeriod != 0u)
+                {
+                    ++g_diagSchedCounts[owner->id];
+                    if (isCdCallbackDiagTag(invocation.tag))
+                    {
+                        std::cerr << "[cd:callback] start func=" << (invocation.tag & 0xFFFFFFFFu)
+                                  << " cb=0x" << std::hex << invocation.context.pc << std::dec << std::endl;
+                    }
+                }
                 owner->status = EeThreadStatus::Running;
                 m_currentThreadId = owner->id;
                 renewTimeSlice();
@@ -288,6 +391,11 @@ void EeScheduler::run()
         {
             GuestInvocation invocation = std::move(m_pendingInvocations.front());
             m_pendingInvocations.pop_front();
+            if (diagPeriod != 0u && isCdCallbackDiagTag(invocation.tag))
+            {
+                std::cerr << "[cd:callback] start func=" << (invocation.tag & 0xFFFFFFFFu)
+                          << " cb=0x" << std::hex << invocation.context.pc << std::dec << std::endl;
+            }
             if (getRegU32(&invocation.context, 29) == 0u)
             {
                 SET_GPR_U32(&invocation.context, 29, invocationStackTop());

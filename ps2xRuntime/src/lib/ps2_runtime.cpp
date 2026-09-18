@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <chrono>
@@ -26,6 +27,7 @@
 #include <thread>
 #include <unordered_map>
 #include <sstream>
+#include <vector>
 
 namespace ps2_stubs
 {
@@ -1031,6 +1033,46 @@ void PS2Runtime::configureIoPathsFromElf(const std::string &elfPath)
 
 namespace
 {
+    // P1c steady-state diagnostics, gated on PS2X_DIAG_PERIOD_MS (unset =
+    // compiled in, nothing printed, callers pay only a counter increment).
+    uint64_t diagPeriodMs()
+    {
+        static const uint64_t period = [] {
+            if (const char *env = std::getenv("PS2X_DIAG_PERIOD_MS"))
+            {
+                if (env[0] != '\0')
+                {
+                    char *end = nullptr;
+                    const unsigned long long parsed = std::strtoull(env, &end, 10);
+                    if (end != env)
+                    {
+                        return static_cast<uint64_t>(parsed);
+                    }
+                }
+            }
+            return static_cast<uint64_t>(0);
+        }();
+        return period;
+    }
+
+    uint64_t diagNowMs()
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    }
+
+    struct CallDiagEntry
+    {
+        uint64_t count = 0;
+        uint32_t firstRa = 0;
+        uint32_t lastRa = 0;
+    };
+
+    std::unordered_map<uint32_t, CallDiagEntry> g_diagCallCounts;
+    uint64_t g_diagCallLastMs = 0;
+    uint64_t g_diagCallBlock = 0;
+
     bool generatedFunctionTableSlot(uint32_t address, uint32_t &slot)
     {
         if ((address & 3u) != 0u || g_ps2RecompiledFunctionTableSlotCount == 0u)
@@ -1352,6 +1394,47 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         }
 
         return false;
+    }
+
+    // P1c HLE stub/call histogram at the register_functions.cpp binding
+    // lookup (lookupFunction below resolves the guest call target to the
+    // registered host function). Counts per call target with first/last $ra.
+    static uint64_t s_diagCallTick = 0;
+    ++s_diagCallTick;
+    if (diagPeriodMs() != 0u)
+    {
+        const uint64_t diagPeriod = diagPeriodMs();
+        const uint32_t callerRa = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+        CallDiagEntry &entry = g_diagCallCounts[targetPc];
+        if (entry.count == 0u)
+        {
+            entry.firstRa = callerRa;
+        }
+        entry.lastRa = callerRa;
+        ++entry.count;
+        const uint64_t diagNow = diagNowMs();
+        if (g_diagCallLastMs == 0u)
+        {
+            g_diagCallLastMs = diagNow;
+        }
+        else if (diagNow - g_diagCallLastMs >= diagPeriod)
+        {
+            g_diagCallLastMs = diagNow;
+            std::vector<std::pair<uint32_t, CallDiagEntry>> sorted(g_diagCallCounts.begin(), g_diagCallCounts.end());
+            std::sort(sorted.begin(), sorted.end(),
+                      [](const auto &a, const auto &b) { return a.second.count > b.second.count; });
+            std::cerr << "[diag:stubs] block=" << g_diagCallBlock++
+                      << " distinct=" << sorted.size()
+                      << " period_ms=" << diagPeriod << std::endl;
+            for (size_t i = 0; i < sorted.size() && i < 30u; ++i)
+            {
+                std::cerr << "[diag:stub] target=0x" << std::hex << sorted[i].first << std::dec
+                          << " count=" << sorted[i].second.count
+                          << " firstRa=0x" << std::hex << sorted[i].second.firstRa
+                          << " lastRa=0x" << std::hex << sorted[i].second.lastRa << std::dec << std::endl;
+            }
+            g_diagCallCounts.clear();
+        }
     }
 
     RecompiledFunction targetFn = lookupFunction(targetPc);
