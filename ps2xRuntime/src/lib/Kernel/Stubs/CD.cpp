@@ -265,6 +265,13 @@ namespace ps2_stubs
         const uint32_t a0 = getRegU32(ctx, 4); // usually lbn
         const uint32_t a1 = getRegU32(ctx, 5); // usually sector count
         const uint32_t a2 = getRegU32(ctx, 6); // usually destination buffer
+        if (diagPeriodMs() != 0u)
+        {
+            std::cerr << "[diag:cd] sceCdRead lbn=0x" << std::hex << a0
+                      << " sectors=" << std::dec << a1
+                      << " buf=0x" << std::hex << a2
+                      << " ret=0x" << ctx->pc << std::dec << std::endl;
+        }
 
         struct CdReadArgs
         {
@@ -471,6 +478,12 @@ namespace ps2_stubs
         const uint32_t stackAddr = getRegU32(ctx, 5);
         const uint32_t stackSize = getRegU32(ctx, 6);
         g_cdCallbackStackTop = stackAddr + stackSize;
+        if (diagPeriodMs() != 0u)
+        {
+            std::cerr << "[diag:cd] sceCdInitEeCB stack=0x" << std::hex << stackAddr
+                      << " size=0x" << stackSize
+                      << " ret=0x" << ctx->pc << std::dec << std::endl;
+        }
         setReturnS32(ctx, 1);
     }
 
@@ -1057,3 +1070,4 @@ namespace ps2_stubs
         setReturnS32(ctx, 1);
     }
 }
+
