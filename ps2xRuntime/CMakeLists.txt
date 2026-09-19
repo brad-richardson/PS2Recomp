@@ -614,6 +614,16 @@ if(PS2X_IS_ANDROID)
     target_sources(ps2EntryRunner PRIVATE src/lib/ps2_android_runtime.cpp)
 endif()
 
+if(PS2X_IS_IOS)
+    # I6: simctl install requires a CFBundleIdentifier (was: install exit
+    # 13 "Missing bundle ID"). Xcode-generator iOS executables are always
+    # bundles, so only the identifier is needed. Desktop-inert: PS2X_IS_IOS
+    # is OFF when CMAKE_SYSTEM_NAME is Darwin.
+    set_target_properties(ps2EntryRunner PROPERTIES
+        MACOSX_BUNDLE_GUI_IDENTIFIER "org.ps2x.ps2entryrunner"
+    )
+endif()
+
 if(APPLE)
     # iOS/tvOS/watchOS executables are bundles: install() requires a BUNDLE
     # DESTINATION for them. No-op on macOS desktop (ps2EntryRunner is not a
