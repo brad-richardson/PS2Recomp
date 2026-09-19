@@ -157,6 +157,18 @@ namespace
         }();
         return enabled;
     }
+
+    // P1u object-pointer capture for unknown-id waits. Gated on
+    // PS2X_DIAG_SEMA_S0 (unset/empty = wait lines byte-identical to P1s,
+    // callers pay only a cached static check).
+    bool diagSemaS0Enabled()
+    {
+        static const bool enabled = [] {
+            const char *env = std::getenv("PS2X_DIAG_SEMA_S0");
+            return env != nullptr && env[0] != '\0';
+        }();
+        return enabled;
+    }
 }
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
@@ -1261,7 +1273,12 @@ void EeScheduler::waitSemaphore(int id)
                       << " waker=" << m_currentThreadId << " pc=0x" << std::hex << self->activeContext().pc
                       << " ra=0x" << getRegU32(&self->activeContext(), 31) << std::dec
                       << " inInt=" << (m_insideInterrupt ? 1 : 0)
-                      << " result=" << KE_UNKNOWN_SEMID << std::endl;
+                      << " result=" << KE_UNKNOWN_SEMID;
+            if (diagSemaS0Enabled())
+            {
+                std::cerr << " s0=0x" << std::hex << getRegU32(&self->activeContext(), 16) << std::dec;
+            }
+            std::cerr << std::endl;
         }
         return;
     }
