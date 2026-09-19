@@ -425,6 +425,7 @@ namespace ps2recomp
                     {
                         // Look for the LUI instruction that sets up the high bits
                         uint32_t baseAddr = 0;
+                        uint32_t luiAddr = 0;
                         for (int i = 1; i <= 5 && static_cast<int>(inst.address) - i * 4 >= static_cast<int>(func.start); i++)
                         {
                             uint32_t prevAddr = inst.address - i * 4;
@@ -438,7 +439,34 @@ namespace ps2recomp
                             if (OPCODE(prevInst) == OPCODE_LUI && RT(prevInst) == inst.rs)
                             {
                                 baseAddr = IMMEDIATE(prevInst) << 16;
+                                luiAddr = prevAddr;
                                 break;
+                            }
+                        }
+
+                        // Account for the low half: apply same-register ORI/ADDIU
+                        // writers between the LUI and the access, in program order.
+                        if (luiAddr != 0)
+                        {
+                            for (uint32_t midAddr = luiAddr + 4; midAddr < inst.address; midAddr += 4)
+                            {
+                                uint32_t midInst = 0;
+                                if (!tryReadWord(m_elfParser.get(), midAddr, midInst))
+                                {
+                                    continue;
+                                }
+
+                                if (RT(midInst) == inst.rs && RS(midInst) == inst.rs)
+                                {
+                                    if (OPCODE(midInst) == OPCODE_ORI)
+                                    {
+                                        baseAddr |= IMMEDIATE(midInst);
+                                    }
+                                    else if (OPCODE(midInst) == OPCODE_ADDIU)
+                                    {
+                                        baseAddr += static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(IMMEDIATE(midInst))));
+                                    }
+                                }
                             }
                         }
 
