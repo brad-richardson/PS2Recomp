@@ -99,9 +99,29 @@ namespace
 
     constexpr uint32_t kGsCsrRegOffset = 0x1000u;
 
+    // GS CSR bits 15:14: FIFO status, a read-only 2-bit field. Values 00 =
+    // in-between, 01 = empty, 10 = almost-full, 11 = reserved; reset is 01
+    // (empty), i.e. masked reads give 0x4000. Step 1 cites: DobieStation
+    // src/core/gsregisters.cpp:319 (FIFO_status << 14; reset 0x1 "Empty" :428;
+    // Full on feed_GIF :253, Empty on drained path queue :295), PCSX2
+    // pcsx2/GS.h CSR_FifoState (:16-22) + tGS_CSR::Reset (:140-146, FIFO =
+    // EMPTY, REV 0x1B, ID 0x55), gsKit ee/gs/include/gsInit.h struct
+    // gsRegisters (FIFO:2 ro), Play! Source/gs/GSHandler.h CSR_FIFO_* and
+    // GSHandler.cpp:166 (ResetBase: m_nCSR = CSR_FIFO_EMPTY | REV << 16).
+    // HLE: this runtime has no GIF/FIFO subsystem, so the field is hard-wired
+    // to EMPTY at init and guest writes to these bits are ignored (read-only
+    // on hardware -- SSX3 issues CSR writes with 00 there, e.g. sd of 2/8 to
+    // 0x12001000 at 0x2ec6cc/0x37c0dc, which must not clobber it). Replace
+    // with GIF-path occupancy tracking (cf. PCSX2 CalculateFIFOCSR /
+    // DobieStation feed_GIF) once a GIF FIFO exists. SSX3 spins while
+    // (CSR&0xC000)!=0x4000 (0x375d10, 0x2ec694, ...).
+    constexpr uint64_t kGsCsrFifoMask = 0xC000ull;
+    constexpr uint64_t kGsCsrFifoEmpty = 0x4000ull;
+
     // Atomically apply a 32-bit write to one half (off=0 low dword, off=4 high
     // dword) of the GS CSR register. Bits 0..1 of the low dword (SIGNAL/FINISH) are
-    // write-one-to-clear; everything else is a plain merge. Uses compare_exchange
+    // write-one-to-clear; bits 15:14 (FIFO) are read-only hard-wired EMPTY (see
+    // above); everything else is a plain merge. Uses compare_exchange
     // so the whole read-modify-write is a single atomic step -- this register is
     // also touched by the vsync worker (FIELD bit) and the GIF (SIGNAL/FINISH) on
     // other threads, so a load-then-store here would race with them.
@@ -118,6 +138,8 @@ namespace
                 uint32_t mergedLow = (oldLow & kW1cMask) | (value & ~kW1cMask);
                 desired = (expected & 0xFFFFFFFF00000000ull) | static_cast<uint64_t>(mergedLow);
                 desired &= ~static_cast<uint64_t>(value & kW1cMask);
+                // FIFO is read-only, HLE'd as always-empty (see above).
+                desired = (desired & ~kGsCsrFifoMask) | kGsCsrFifoEmpty;
             }
             else
             {
@@ -138,6 +160,8 @@ namespace
         {
             desired = (expected & kW1cMask) | (value & ~kW1cMask);
             desired &= ~(value & kW1cMask);
+            // FIFO is read-only, HLE'd as always-empty (see above).
+            desired = (desired & ~kGsCsrFifoMask) | kGsCsrFifoEmpty;
         } while (!csr.compare_exchange_weak(expected, desired));
     }
 
@@ -359,8 +383,9 @@ bool PS2Memory::initialize(size_t ramSize)
         // Initialize GS registers
         memset(&gs_regs, 0, sizeof(gs_regs));
         // memset zero-fills std::atomic<uint64_t>::csr's bytes, which is not itself
-        // a guaranteed-valid atomic store; make the zero-initialization explicit.
-        gs_regs.csr.store(0);
+        // a guaranteed-valid atomic store; make the initialization explicit.
+        // CSR resets with FIFO (bits 15:14) = EMPTY, i.e. 0x4000 (see above).
+        gs_regs.csr.store(kGsCsrFifoEmpty);
         gs_regs.dispfb1 = (0ULL << 0) | (10ULL << 9) | (0ULL << 15) | (0ULL << 32) | (0ULL << 43);
         gs_regs.display1 = (0ULL << 0) | (0ULL << 12) | (0ULL << 23) | (0ULL << 27) | (639ULL << 32) | (447ULL << 44);
         gs_regs.dispfb2 = gs_regs.dispfb1;

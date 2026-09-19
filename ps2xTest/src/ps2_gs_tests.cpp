@@ -422,17 +422,28 @@ void register_ps2_gs_tests()
             constexpr uint32_t kGsCsr = 0x12001000u;
             constexpr uint32_t kGsImr = 0x12001010u;
 
+            // CSR bits 15:14 (FIFO) are read-only hard-wired EMPTY (0x4000): guest
+            // writes cannot change them (hardware behavior, see ps2_memory.cpp).
+            t.Equals(mem.read64(kGsCsr), 0x4000ull, "CSR should reset with FIFO EMPTY");
+
             const uint64_t csrPattern = 0xA1B2C3D4E5F60718ull;
             mem.write64(kGsCsr, csrPattern);
-            t.Equals(mem.read64(kGsCsr), csrPattern, "64-bit CSR read should match prior 64-bit write");
-            t.Equals(mem.read32(kGsCsr), static_cast<uint32_t>(csrPattern & 0xFFFFFFFFull), "CSR low dword read should match");
+            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D4E5F64718ull, "64-bit CSR read should match prior 64-bit write except read-only FIFO");
+            t.Equals(mem.read32(kGsCsr), 0xE5F64718u, "CSR low dword read should match except read-only FIFO");
             t.Equals(mem.read32(kGsCsr + 4u), static_cast<uint32_t>(csrPattern >> 32), "CSR high dword read should match");
 
             mem.write32(kGsCsr, 0x11223344u);
-            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D411223344ull, "32-bit low write should preserve CSR high dword");
+            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D411227344ull, "32-bit low write should preserve CSR high dword except read-only FIFO");
 
             mem.write32(kGsCsr + 4u, 0x55667788u);
-            t.Equals(mem.read64(kGsCsr), 0x5566778811223344ull, "32-bit high write should preserve CSR low dword");
+            t.Equals(mem.read64(kGsCsr), 0x5566778811227344ull, "32-bit high write should preserve CSR low dword");
+
+            // SSX3's CSR write shapes (FINISH/VSINT enables with 00 in 15:14)
+            // must not clobber the FIFO-EMPTY exit state.
+            mem.write64(kGsCsr, 0x8ull);
+            t.Equals(mem.read64(kGsCsr), 0x4008ull, "guest CSR write with 00 in bits 15:14 should keep FIFO EMPTY");
+            mem.write64(kGsCsr, 0x2ull);
+            t.Equals(mem.read64(kGsCsr), 0x4000ull, "FINISH write-one-to-clear should still clear bit 1 with FIFO EMPTY");
 
             const uint64_t imrPattern = 0x0123456789ABCDEFull;
             mem.write64(kGsImr, imrPattern);
