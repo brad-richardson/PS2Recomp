@@ -47,6 +47,12 @@ if(ANDROID)
     set(PS2X_IS_ANDROID ON)
 endif()
 
+set(PS2X_IS_IOS OFF)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(PS2X_IS_IOS ON)
+endif()
+
 option(PS2X_VITA_CREATE_PACKAGE "Create Vita eboot/vpk targets" ON)
 set(PS2X_VITA_APP_NAME "PS2 Retro X" CACHE STRING "Display name for the Vita bubble")
 set(PS2X_VITA_TITLEID "RANJ00001" CACHE STRING "9-character Vita title id")
@@ -242,7 +248,7 @@ else()
     endif()
 endif()
 
-if(PS2X_IS_ANDROID)
+if(PS2X_IS_ANDROID OR PS2X_IS_IOS)
     set(PS2X_ENABLE_FFMPEG_DEFAULT OFF)
 else()
     set(PS2X_ENABLE_FFMPEG_DEFAULT ON)
