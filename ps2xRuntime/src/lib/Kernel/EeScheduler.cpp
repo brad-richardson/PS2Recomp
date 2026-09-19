@@ -144,6 +144,19 @@ namespace
 
     // Per-thread schedule counts since the last periodic dump.
     std::unordered_map<int, uint64_t> g_diagSchedCounts;
+
+    // P1s sema delivery-mechanism diagnostics. Gated on PS2X_DIAG_SEMA
+    // (unset/empty = compiled in, nothing printed, callers pay only a
+    // cached static check). One line per signal/wait with the waker
+    // context and the wake decision.
+    bool diagSemaEnabled()
+    {
+        static const bool enabled = [] {
+            const char *env = std::getenv("PS2X_DIAG_SEMA");
+            return env != nullptr && env[0] != '\0';
+        }();
+        return enabled;
+    }
 }
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
@@ -1135,27 +1148,83 @@ int EeScheduler::deleteSemaphore(int id, bool interruptSafe)
 int EeScheduler::signalSemaphore(int id, bool interruptSafe)
 {
     assertExecutor();
+    const bool semaDiag = diagSemaEnabled();
+    const GuestThread *waker = semaDiag ? currentThread() : nullptr;
+    const uint32_t wakerPc = waker ? waker->activeContext().pc : 0u;
+    const uint32_t wakerRa = waker ? getRegU32(&waker->activeContext(), 31) : 0u;
+    const size_t wakerInvDepth = waker ? waker->invocations.size() : 0u;
+    const int wakerInvKind = (waker && !waker->invocations.empty())
+                                 ? static_cast<int>(waker->invocations.back().kind)
+                                 : -1;
+    const uint64_t wakerInvTag = (waker && !waker->invocations.empty()) ? waker->invocations.back().tag : 0u;
     EeSemaphore *object = semaphore(id);
     if (!object)
     {
+        if (semaDiag)
+        {
+            std::cerr << "[diag:sema] op=signal id=" << id << " count=-1->-1 waiters=0->0"
+                      << " waker=" << m_currentThreadId << " pc=0x" << std::hex << wakerPc
+                      << " ra=0x" << wakerRa << std::dec << " inInt=" << (m_insideInterrupt ? 1 : 0)
+                      << " iSafe=" << (interruptSafe ? 1 : 0) << " invKind=" << wakerInvKind
+                      << " invDepth=" << wakerInvDepth << " cbFunc=" << std::hex << wakerInvTag << std::dec
+                      << " target=- tStatus=-1 tSusp=-1 result=" << KE_UNKNOWN_SEMID << std::endl;
+        }
         return KE_UNKNOWN_SEMID;
     }
+    const int countBefore = object->count;
+    const size_t waitersBefore = object->waiters.size();
     if (!object->waiters.empty())
     {
         const int waiterId = object->waiters.front();
         object->waiters.pop_front();
         GuestThread *waiter = thread(waiterId);
         assert(waiter != nullptr);
+        const int targetStatus = static_cast<int>(waiter->status);
+        const int targetSusp = waiter->suspendCount;
+        const int targetWaitReason = static_cast<int>(waiter->wait.reason);
+        const int targetWaitId = waitObjectId(waiter->wait);
         makeReady(*waiter, id, interruptSafe);
         publishSnapshot();
+        if (semaDiag)
+        {
+            std::cerr << "[diag:sema] op=signal id=" << id << " count=" << countBefore << "->" << object->count
+                      << " waiters=" << waitersBefore << "->" << object->waiters.size()
+                      << " waker=" << m_currentThreadId << " pc=0x" << std::hex << wakerPc
+                      << " ra=0x" << wakerRa << std::dec << " inInt=" << (m_insideInterrupt ? 1 : 0)
+                      << " iSafe=" << (interruptSafe ? 1 : 0) << " invKind=" << wakerInvKind
+                      << " invDepth=" << wakerInvDepth << " cbFunc=" << std::hex << wakerInvTag << std::dec
+                      << " target=" << waiterId << " tStatus=" << targetStatus << " tSusp=" << targetSusp
+                      << " tWaitReason=" << targetWaitReason << " tWaitId=" << targetWaitId
+                      << " result=" << id << std::endl;
+        }
         return id;
     }
     if (object->count == object->maxCount)
     {
+        if (semaDiag)
+        {
+            std::cerr << "[diag:sema] op=signal id=" << id << " count=" << countBefore << "->" << object->count
+                      << " waiters=" << waitersBefore << "->" << object->waiters.size()
+                      << " waker=" << m_currentThreadId << " pc=0x" << std::hex << wakerPc
+                      << " ra=0x" << wakerRa << std::dec << " inInt=" << (m_insideInterrupt ? 1 : 0)
+                      << " iSafe=" << (interruptSafe ? 1 : 0) << " invKind=" << wakerInvKind
+                      << " invDepth=" << wakerInvDepth << " cbFunc=" << std::hex << wakerInvTag << std::dec
+                      << " target=- tStatus=-1 tSusp=-1 result=" << KE_SEMA_OVF << std::endl;
+        }
         return KE_SEMA_OVF;
     }
     ++object->count;
     publishSnapshot();
+    if (semaDiag)
+    {
+        std::cerr << "[diag:sema] op=signal id=" << id << " count=" << countBefore << "->" << object->count
+                  << " waiters=" << waitersBefore << "->" << object->waiters.size()
+                  << " waker=" << m_currentThreadId << " pc=0x" << std::hex << wakerPc
+                  << " ra=0x" << wakerRa << std::dec << " inInt=" << (m_insideInterrupt ? 1 : 0)
+                  << " iSafe=" << (interruptSafe ? 1 : 0) << " invKind=" << wakerInvKind
+                  << " invDepth=" << wakerInvDepth << " cbFunc=" << std::hex << wakerInvTag << std::dec
+                  << " target=- tStatus=-1 tSusp=-1 result=" << id << std::endl;
+    }
     return id;
 }
 
@@ -1179,25 +1248,53 @@ int EeScheduler::pollSemaphore(int id)
 void EeScheduler::waitSemaphore(int id)
 {
     assertExecutor();
+    const bool semaDiag = diagSemaEnabled();
     EeSemaphore *object = semaphore(id);
     if (!object)
     {
         GuestThread *self = currentThread();
         assert(self != nullptr);
         setReturnS32(&self->activeContext(), KE_UNKNOWN_SEMID);
+        if (semaDiag)
+        {
+            std::cerr << "[diag:sema] op=wait id=" << id << " count=-1->-1 parked=0"
+                      << " waker=" << m_currentThreadId << " pc=0x" << std::hex << self->activeContext().pc
+                      << " ra=0x" << getRegU32(&self->activeContext(), 31) << std::dec
+                      << " inInt=" << (m_insideInterrupt ? 1 : 0)
+                      << " result=" << KE_UNKNOWN_SEMID << std::endl;
+        }
         return;
     }
     if (object->count != 0)
     {
+        const int countBefore = object->count;
         --object->count;
         GuestThread *self = currentThread();
         assert(self != nullptr);
         setReturnS32(&self->activeContext(), id);
         publishSnapshot();
+        if (semaDiag)
+        {
+            std::cerr << "[diag:sema] op=wait id=" << id << " count=" << countBefore << "->" << object->count
+                      << " parked=0"
+                      << " waker=" << m_currentThreadId << " pc=0x" << std::hex << self->activeContext().pc
+                      << " ra=0x" << getRegU32(&self->activeContext(), 31) << std::dec
+                      << " inInt=" << (m_insideInterrupt ? 1 : 0)
+                      << " result=" << id << std::endl;
+        }
         return;
     }
     GuestThread *self = currentThread();
     assert(self != nullptr);
+    if (semaDiag)
+    {
+        std::cerr << "[diag:sema] op=wait id=" << id << " count=0->0 parked=1"
+                  << " waker=" << m_currentThreadId << " pc=0x" << std::hex << self->activeContext().pc
+                  << " ra=0x" << getRegU32(&self->activeContext(), 31) << std::dec
+                  << " inInt=" << (m_insideInterrupt ? 1 : 0)
+                  << " waiters=" << object->waiters.size() << "->" << (object->waiters.size() + 1)
+                  << " result=park" << std::endl;
+    }
     object->waiters.push_back(self->id);
     blockCurrent(EeWaitState{EeWaitReason::Semaphore, EeSemaphoreWait{id}});
 }
