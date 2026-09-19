@@ -589,11 +589,23 @@ if(PS2X_IS_ANDROID)
     target_sources(ps2EntryRunner PRIVATE src/lib/ps2_android_runtime.cpp)
 endif()
 
-install(TARGETS ps2_runtime ps2EntryRunner
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-)
+if(APPLE)
+    # iOS/tvOS/watchOS executables are bundles: install() requires a BUNDLE
+    # DESTINATION for them. No-op on macOS desktop (ps2EntryRunner is not a
+    # MACOSX_BUNDLE there, so no extra install rule is generated).
+    install(TARGETS ps2_runtime ps2EntryRunner
+        RUNTIME DESTINATION bin
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        BUNDLE DESTINATION bin
+    )
+else()
+    install(TARGETS ps2_runtime ps2EntryRunner
+        RUNTIME DESTINATION bin
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+    )
+endif()
 
 if(WIN32 AND PS2X_ENABLE_FFMPEG)
     install(DIRECTORY "${FFMPEG_BIN_DIR}/"
