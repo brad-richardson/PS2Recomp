@@ -1115,7 +1115,13 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
 int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uint32_t option)
 {
     assertExecutor();
-    if (maxCount <= 0 || initCount < 0 || initCount > maxCount)
+    // P1v: real PS2 hardware accepts max_count=0 (SSX 3 ships two unchecked
+    // all-zero creates at boot and runs on hardware), so treat an exact zero
+    // max as a binary semaphore. Provisional: reference emulators are LLE
+    // and ps2tek/ps2sdk are silent on the stored-max semantics; a negative
+    // max stays rejected and init is validated against the effective max.
+    const int effectiveMax = (maxCount == 0) ? 1 : maxCount;
+    if (effectiveMax <= 0 || initCount < 0 || initCount > effectiveMax)
     {
         return KE_ERROR;
     }
@@ -1127,7 +1133,7 @@ int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uin
     EeSemaphore semaphore{};
     semaphore.id = id;
     semaphore.count = initCount;
-    semaphore.maxCount = maxCount;
+    semaphore.maxCount = effectiveMax;
     semaphore.initCount = initCount;
     semaphore.attr = attr;
     semaphore.option = option;

@@ -607,6 +607,44 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(semaphore->option, semaParam.option, "semaphore option must be decoded from offset 0x14");
         });
 
+        tc.Run("CreateSema with zero max_count returns a usable binary semaphore (P1v)", [](TestCase &t)
+        {
+            TestEnv env;
+            EeSemaStatus zeroParam{};
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &zeroParam, sizeof(zeroParam));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int zeroId = getRegS32(env.ctx, 2);
+            t.IsTrue(zeroId > 0, "zero-max CreateSema must return a usable id, not KE_ERROR");
+            const EeSemaphore *zeroSema = env.runtime.eeScheduler().semaphore(zeroId);
+            t.IsTrue(zeroSema != nullptr, "zero-max CreateSema must create an object");
+            if (zeroSema != nullptr)
+            {
+                t.Equals(zeroSema->maxCount, 1, "zero max_count is accepted as a binary semaphore (max 1)");
+                t.Equals(zeroSema->count, 0, "a zero-max semaphore starts at init_count 0");
+            }
+
+            EeSemaStatus validParam{};
+            validParam.max_count = 7;
+            validParam.init_count = 3;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &validParam, sizeof(validParam));
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int validId = getRegS32(env.ctx, 2);
+            const EeSemaphore *validSema = env.runtime.eeScheduler().semaphore(validId);
+            t.IsTrue(validId > 0 && validSema != nullptr, "valid creates still succeed");
+            if (validSema != nullptr)
+            {
+                t.Equals(validSema->maxCount, 7, "a valid max_count is stored unchanged");
+                t.Equals(validSema->count, 3, "a valid init_count is stored unchanged");
+            }
+
+            EeSemaStatus negParam{};
+            negParam.max_count = -2;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &negParam, sizeof(negParam));
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "a negative max_count is still rejected");
+        });
+
         tc.Run("EE scheduler selects absolute priority then FIFO", [](TestCase &t)
         {
             TestEnv env;
