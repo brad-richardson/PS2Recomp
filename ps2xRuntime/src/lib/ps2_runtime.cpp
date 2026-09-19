@@ -1379,6 +1379,28 @@ namespace
         }();
         return reportAll;
     }
+
+    // P1n driver-entry probe (P14-1d). PS2X_DIAG_DRIVER_PROBE=1 enables one
+    // [diag:driver-entry] line per dispatch to 0x3dd1d8; unset/empty = off.
+    bool diagDriverProbeEnabled()
+    {
+        static const bool enabled = [] {
+            if (const char *env = std::getenv("PS2X_DIAG_DRIVER_PROBE"))
+            {
+                return env[0] == '1' && env[1] == '\0';
+            }
+            return false;
+        }();
+        return enabled;
+    }
+
+    void diagDriverEntryEmit(uint32_t sp, uint32_t ra, uint32_t sourcePc, bool checkpointed)
+    {
+        std::cerr << "[diag:driver-entry] sp=0x" << std::hex << sp
+                  << " ra=0x" << ra
+                  << " sourcePc=0x" << sourcePc
+                  << std::dec << " checkpointed=" << (checkpointed ? 1 : 0) << std::endl;
+    }
 }
 
 void PS2Runtime::reportMissingFunction(uint8_t *rdram,
@@ -1556,6 +1578,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // this charge bounds straight-line call chains that have no local loop.
     if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
     {
+        // P1n driver-entry probe (P14-1d): checkpoint path.
+        if (targetPc == 0x3DD1D8u && diagDriverProbeEnabled())
+        {
+            const uint32_t sp = (ctx != nullptr) ? getRegU32(ctx, 29) : 0u;
+            const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+            diagDriverEntryEmit(sp, ra, sourcePc, true);
+        }
         return false;
     }
 
@@ -1607,6 +1636,14 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         entry.lastRa = callerRa;
         ++entry.count;
         diagCallsPeriodicFlush();
+    }
+
+    // P1n driver-entry probe (P14-1d): call path.
+    if (targetPc == 0x3DD1D8u && diagDriverProbeEnabled())
+    {
+        const uint32_t sp = (ctx != nullptr) ? getRegU32(ctx, 29) : 0u;
+        const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+        diagDriverEntryEmit(sp, ra, sourcePc, false);
     }
 
     RecompiledFunction targetFn = lookupFunction(targetPc);
