@@ -79,6 +79,18 @@ else()
 
     if(PS2X_IS_ANDROID)
         set(PLATFORM "Android" CACHE STRING "" FORCE)
+    elseif(PS2X_IS_IOS)
+        # I4: iOS uses raylib's SDL backend (raylib-wall Option C) with GLES2.
+        # SDL2 itself comes from a prebuilt SDL2-for-iOS via SDL2_DIR
+        # passthrough (SDL2_DIR is a cache var, so it flows into the raylib
+        # FetchContent configure): no FetchContent for SDL, keeping SDL's own
+        # configure out of every runtime configure and reusing one proven
+        # prebuilt bit-for-bit.
+        set(PLATFORM "SDL" CACHE STRING "" FORCE)
+        set(OPENGL_VERSION "ES 2.0" CACHE STRING "" FORCE)
+        if(NOT SDL2_DIR)
+            message(FATAL_ERROR "PS2X: iOS builds need -DSDL2_DIR=<SDL2-for-iOS install>/lib/cmake/SDL2 (prebuilt SDL2 release-2.32.10 for iphonesimulator)")
+        endif()
     endif()
 
     FetchContent_Declare(
