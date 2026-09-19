@@ -101,6 +101,13 @@ else()
     )
     FetchContent_MakeAvailable(raylib)
 
+    if(PS2X_IS_IOS)
+        # I4: miniaudio (raylib raudio.c) includes AVFoundation on Apple
+        # targets, so the raylib TU set compiles as ObjC. Scoped to the raylib
+        # target on purpose: -x in CMAKE_C_FLAGS would also poison link lines.
+        target_compile_options(raylib PRIVATE -x objective-c)
+    endif()
+
     if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
         FetchContent_Declare(
             imgui
