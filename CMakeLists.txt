@@ -34,11 +34,27 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
     set(PS2X_IS_AARCH64_TARGET ON)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm|^ARM")
     set(PS2X_IS_ARM_TARGET ON)
+elseif(CMAKE_OSX_ARCHITECTURES MATCHES "arm64|aarch64")
+    # The Xcode generator leaves CMAKE_SYSTEM_PROCESSOR unset; honor the
+    # requested Apple architectures instead so sse2neon still fetches.
+    message(STATUS "CMAKE_SYSTEM_PROCESSOR unset; inferring ARM target from CMAKE_OSX_ARCHITECTURES")
+    set(PS2X_IS_ARM_TARGET ON)
+    set(PS2X_IS_AARCH64_TARGET ON)
+elseif(CMAKE_SYSTEM_NAME MATCHES "^(iOS|tvOS|watchOS|visionOS)$")
+    # Apple mobile OSes are ARM-only; assume ARM when the toolchain names
+    # no processor rather than silently skipping sse2neon.
+    message(STATUS "CMAKE_SYSTEM_PROCESSOR unset; inferring ARM target from CMAKE_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}")
+    set(PS2X_IS_ARM_TARGET ON)
+    set(PS2X_IS_AARCH64_TARGET ON)
 endif()
 
 if((CMAKE_C_COMPILER MATCHES "arm-vita-eabi") OR
    (CMAKE_CXX_COMPILER MATCHES "arm-vita-eabi"))
     set(PS2X_IS_ARM_TARGET ON)
+endif()
+
+if(NOT PS2X_IS_ARM_TARGET AND NOT CMAKE_SYSTEM_PROCESSOR AND CMAKE_CROSSCOMPILING)
+    message(FATAL_ERROR "PS2X: CMAKE_SYSTEM_PROCESSOR is unset while cross-compiling and no ARM target could be inferred; set CMAKE_SYSTEM_PROCESSOR in the toolchain file")
 endif()
 
 if(PS2X_IS_ARM_TARGET)
