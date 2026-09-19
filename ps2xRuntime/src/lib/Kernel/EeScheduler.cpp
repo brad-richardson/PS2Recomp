@@ -1550,7 +1550,11 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
         SET_GPR_U32(&invocation.context, 4, cause);
         SET_GPR_U32(&invocation.context, 5, handler.argument);
         SET_GPR_U32(&invocation.context, 28, handler.gp);
-        SET_GPR_U32(&invocation.context, 29, handler.sp);
+        // P1f: never run a handler on its registration-time thread sp (that
+        // stack belongs to a live guest thread; the 0x3e4db8 prologue stored
+        // zeros over thread 1's ra slot at 0x1ffff00). sp=0 makes the run()
+        // dequeue path assign invocationStackTop() from the reserved region.
+        SET_GPR_U32(&invocation.context, 29, 0u);
         SET_GPR_U32(&invocation.context, 31, 0u);
         queueInvocation(std::move(invocation));
     }
@@ -2204,7 +2208,9 @@ void EeScheduler::processEvent(const EeEvent &event)
         SET_GPR_U32(&invocation.context, 5, static_cast<uint32_t>(alarm.ticks));
         SET_GPR_U32(&invocation.context, 6, alarm.argument);
         SET_GPR_U32(&invocation.context, 28, alarm.gp);
-        SET_GPR_U32(&invocation.context, 29, alarm.sp);
+        // P1f: same as dispatchIrq above; the SetAlarm caller sp belongs to
+        // a live guest thread, so take sp from the reserved region instead.
+        SET_GPR_U32(&invocation.context, 29, 0u);
         SET_GPR_U32(&invocation.context, 31, 0u);
         queueInvocation(std::move(invocation));
         break;

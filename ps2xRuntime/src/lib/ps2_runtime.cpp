@@ -512,8 +512,11 @@ PS2Runtime::PS2Runtime()
     m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
-    m_asyncCallbackStackFloor = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-    m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    // P1f: keep invocation stacks in kernel-reserved low RAM ([0x80000,
+    // 0x100000)), below the ELF image and guest heap and far from every
+    // guest thread stack (which grows down from the RAM top).
+    m_asyncCallbackStackFloor = 0x00080000u;
+    m_asyncCallbackStackTop = 0x00100000u;
 }
 
 void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
@@ -935,10 +938,12 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         }
     }
     {
+        // P1f: invocation stacks stay in kernel-reserved low RAM ([0x80000,
+        // 0x100000)); the ELF image, guest heap, and guest thread stacks all
+        // live at or above 0x100000, so this region cannot collide with them.
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
-        const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
-        m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
-        m_asyncCallbackStackTop = PS2_RAM_SIZE;
+        m_asyncCallbackStackFloor = 0x00080000u;
+        m_asyncCallbackStackTop = 0x00100000u;
     }
 
     LoadedModule module;

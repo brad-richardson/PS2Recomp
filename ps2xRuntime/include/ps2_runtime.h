@@ -518,8 +518,11 @@ private:
     uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
     bool m_guestHeapConfigured = false;
-    uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
-    uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    // P1f: async-callback (invocation) stacks live in the EE kernel-reserved
+    // low RAM below the ELF image and guest heap, never at the RAM top where
+    // guest thread stacks live. See reserveAsyncCallbackStack.
+    uint32_t m_asyncCallbackStackFloor = 0x00080000u;
+    uint32_t m_asyncCallbackStackTop = 0x00100000u;
 
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
     std::atomic<bool> m_missingFunctionReported{false};
