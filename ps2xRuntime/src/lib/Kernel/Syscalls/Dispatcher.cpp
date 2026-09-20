@@ -89,7 +89,7 @@ namespace ps2_syscalls
 
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        traceChannelEmit(syscallNumber); // T18: gated file append only; no guest-state writes
+        traceChannelEmit(syscallNumber, (ctx != nullptr) ? ctx->pc : 0u); // T18+T22: gated file append only; no guest-state writes
         static uint64_t s_diagTick = 0;
         ++s_diagTick;
         if (diagPeriodMs() != 0u)

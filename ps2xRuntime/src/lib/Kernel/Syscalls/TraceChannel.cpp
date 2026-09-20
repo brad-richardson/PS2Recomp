@@ -69,6 +69,7 @@ namespace
     struct TraceChannelState
     {
         bool enabled = false;
+        bool emitPc = false; // T22: PS2X_TRACE_SYSCALLS_PC non-empty = on
         FILE *file = nullptr;
         std::mutex mutex;
         std::chrono::steady_clock::time_point openedAt;
@@ -80,6 +81,8 @@ namespace
             {
                 return;
             }
+            const char *pcGate = std::getenv("PS2X_TRACE_SYSCALLS_PC");
+            emitPc = (pcGate != nullptr && pcGate[0] != '\0');
             FILE *f = std::fopen(path, "w");
             if (f == nullptr)
             {
@@ -114,7 +117,7 @@ namespace
 
 namespace ps2_syscalls
 {
-    void traceChannelEmit(uint32_t syscallId)
+    void traceChannelEmit(uint32_t syscallId, uint32_t callerPc)
     {
         TraceChannelState &state = channelState();
         if (!state.enabled)
@@ -144,7 +147,15 @@ namespace ps2_syscalls
                                    std::chrono::steady_clock::now() - state.openedAt)
                                    .count();
         std::lock_guard<std::mutex> lock(state.mutex);
-        std::fprintf(state.file, "[%8.4f] Bios    : Bios call: %s (%x)\n",
-                     elapsed, name, call);
+        if (state.emitPc)
+        {
+            std::fprintf(state.file, "[%8.4f] Bios    : Bios call: %s (%x) pc=0x%x\n",
+                         elapsed, name, call, callerPc);
+        }
+        else
+        {
+            std::fprintf(state.file, "[%8.4f] Bios    : Bios call: %s (%x)\n",
+                         elapsed, name, call);
+        }
     }
 }
