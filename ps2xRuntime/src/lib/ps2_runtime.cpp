@@ -1401,6 +1401,142 @@ namespace
                   << " sourcePc=0x" << sourcePc
                   << std::dec << " checkpointed=" << (checkpointed ? 1 : 0) << std::endl;
     }
+
+    // P1ad 394ED0 park probe. PS2X_DIAG_394ED0=1 enables one [diag:394ed0]
+    // line per fresh guest dispatch to 0x394ED0 (the hash-intern routine
+    // main parks in); unset/empty = off. Read-only: GPRs plus masked RAM
+    // reads, no guest writes, no control-flow change. Unreadable words
+    // print as WILD (never a masked alias). Capped; the cap line marks it.
+    bool diag394Ed0Enabled()
+    {
+        static const bool enabled = [] {
+            if (const char *env = std::getenv("PS2X_DIAG_394ED0"))
+            {
+                return env[0] == '1' && env[1] == '\0';
+            }
+            return false;
+        }();
+        return enabled;
+    }
+
+    uint32_t diag394Ed0Read(const uint8_t *rdram, uint64_t addr, bool &ok)
+    {
+        ok = (rdram != nullptr) && (addr + 3u < PS2_RAM_SIZE);
+        return ok ? Ps2FastRead32(rdram, static_cast<uint32_t>(addr)) : 0u;
+    }
+
+    void diag394Ed0Word(std::ostream &out, const uint8_t *rdram, uint64_t addr)
+    {
+        bool ok = false;
+        const uint32_t value = diag394Ed0Read(rdram, addr, ok);
+        if (ok)
+        {
+            out << "0x" << std::hex << value << std::dec;
+        }
+        else
+        {
+            out << "WILD";
+        }
+    }
+
+    void diag394Ed0Emit(const uint8_t *rdram, R5900Context *ctx, uint32_t sourcePc)
+    {
+        static uint64_t seq = 0;
+        static uint64_t emitted = 0;
+        static constexpr uint64_t kDiag394Ed0Cap = 20000u;
+        const uint64_t n = seq++;
+        if (emitted >= kDiag394Ed0Cap)
+        {
+            if (emitted == kDiag394Ed0Cap)
+            {
+                std::cerr << "[diag:394ed0] cap=" << kDiag394Ed0Cap << " reached" << std::endl;
+                ++emitted;
+            }
+            return;
+        }
+        ++emitted;
+        const uint32_t a0 = (ctx != nullptr) ? getRegU32(ctx, 4) : 0u;
+        const uint32_t a1 = (ctx != nullptr) ? getRegU32(ctx, 5) : 0u;
+        const uint32_t a2 = (ctx != nullptr) ? getRegU32(ctx, 6) : 0u;
+        const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+        const uint64_t base = a0;
+        const uint64_t bucketAddr = base + 0x674A0u + ((a2 & 0xFFu) << 2);
+        bool headOk = false;
+        const uint32_t head = diag394Ed0Read(rdram, bucketAddr, headOk);
+        std::cerr << "[diag:394ed0] n=" << n
+                  << " ra=0x" << std::hex << ra
+                  << " src=0x" << sourcePc << std::dec
+                  << " a0=0x" << std::hex << a0
+                  << " a1=0x" << a1
+                  << " a2=0x" << a2 << std::dec
+                  << " total=";
+        diag394Ed0Word(std::cerr, rdram, base);
+        std::cerr << " pool=";
+        diag394Ed0Word(std::cerr, rdram, base + 0x51480u);
+        std::cerr << " head=";
+        if (headOk)
+        {
+            std::cerr << "0x" << std::hex << head << std::dec;
+        }
+        else
+        {
+            std::cerr << "WILD";
+        }
+        std::cerr << " key=[";
+        for (int i = 0; i < 4; ++i)
+        {
+            if (i != 0)
+            {
+                std::cerr << ' ';
+            }
+            diag394Ed0Word(std::cerr, rdram, static_cast<uint64_t>(a1) + i * 4u);
+        }
+        std::cerr << "] chain=[";
+        uint32_t seen[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        uint32_t node = head;
+        bool nodeOk = headOk;
+        bool cycleFound = false;
+        for (int i = 0; i < 8 && nodeOk && node != 0u; ++i)
+        {
+            bool repeat = false;
+            for (int j = 0; j < i; ++j)
+            {
+                if (seen[j] == node)
+                {
+                    repeat = true;
+                }
+            }
+            if (i != 0)
+            {
+                std::cerr << ' ';
+            }
+            if (repeat)
+            {
+                std::cerr << "CYCLE@0x" << std::hex << node << std::dec;
+                cycleFound = true;
+                break;
+            }
+            seen[i] = node;
+            std::cerr << "0x" << std::hex << node << std::dec;
+            node = diag394Ed0Read(rdram, static_cast<uint64_t>(node) + 0x14u, nodeOk);
+        }
+        if (cycleFound)
+        {
+        }
+        else if (nodeOk && node == 0u)
+        {
+            std::cerr << " NULL";
+        }
+        else if (!nodeOk)
+        {
+            std::cerr << " WILD";
+        }
+        else
+        {
+            std::cerr << " ...";
+        }
+        std::cerr << "]" << std::endl;
+    }
 }
 
 void PS2Runtime::reportMissingFunction(uint8_t *rdram,
@@ -1644,6 +1780,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         const uint32_t sp = (ctx != nullptr) ? getRegU32(ctx, 29) : 0u;
         const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
         diagDriverEntryEmit(sp, ra, sourcePc, false);
+    }
+
+    // P1ad 394ED0 park probe: fresh dispatches only (checkpoint resumes do
+    // not re-dispatch). Read-only; see diag394Ed0Emit above.
+    if (targetPc == 0x394ED0u && diag394Ed0Enabled())
+    {
+        diag394Ed0Emit(rdram, ctx, sourcePc);
     }
 
     RecompiledFunction targetFn = lookupFunction(targetPc);
