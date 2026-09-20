@@ -632,6 +632,17 @@ if(PS2X_IS_IOS)
     # the FATAL_ERROR above. Desktop-inert: PS2X_IS_IOS is OFF on Darwin.
     find_package(SDL2 REQUIRED)
     target_link_libraries(ps2EntryRunner PRIVATE SDL2::SDL2main)
+    # I7b: the iOS 27 sim traps in UIKit scene setup before SDL_main runs
+    # when the bundle has no scene manifest (EXC_BREAKPOINT in
+    # __UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption;
+    # I7 minprobe A traps / B runs). Point Xcode at our template:
+    # verbatim copy of CMake's generated plist + the minimal manifest
+    # (no scene delegate class; SDL's delegate handles it). The template
+    # hardcodes the identifier (same value as GUI_IDENTIFIER above).
+    # Desktop-inert: PS2X_IS_IOS-gated.
+    set_target_properties(ps2EntryRunner PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist"
+    )
 endif()
 
 if(APPLE)
