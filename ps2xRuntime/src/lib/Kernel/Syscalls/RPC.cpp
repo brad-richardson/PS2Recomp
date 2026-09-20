@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "RPC.h"
 #include "../../ps2_iop_transport.h"
+#include "game_overrides.h"
 
 namespace ps2_syscalls
 {
@@ -149,6 +150,33 @@ namespace ps2_syscalls
         }
 
     } // namespace
+
+    namespace
+    {
+        // P1ac: SSX3-only gate for the SIF ready-handshake completion in
+        // sceSifSendCmd below. Set by the ps2_game_overrides descriptor
+        // (SLUS_207.72, entry 0x100008); the HLE process loads one ELF, so
+        // a process-wide flag matches the registry's apply-once-at-load
+        // model.
+        std::atomic<bool> g_ssx3SifHandshakeEnabled{false};
+
+        void applySsx3SifHandshake(PS2Runtime &runtime)
+        {
+            (void)runtime;
+            g_ssx3SifHandshakeEnabled.store(true, std::memory_order_relaxed);
+        }
+    } // namespace
+
+    PS2_REGISTER_GAME_OVERRIDE("ssx3-sif-handshake",
+                               "SLUS_207.72",
+                               0x00100008u,
+                               0u,
+                               applySsx3SifHandshake);
+
+    void resetSsx3SifHandshakeForTesting()
+    {
+        g_ssx3SifHandshakeEnabled.store(false, std::memory_order_relaxed);
+    }
 
     void SifStopModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -985,6 +1013,41 @@ namespace ps2_syscalls
         if (sizeExtra > 0 && srcExtra && destExtra)
         {
             rpcCopyToRdram(rdram, destExtra, srcExtra, sizeExtra);
+        }
+
+        // P1ac: complete the SSX3 EE<->IOP SIF ready-handshake host-side.
+        // The game sends SET_SREG(1,1) then spins on sregs[1] (guest
+        // 0x52BE04); on HW the IOP's reply arrives via SIF0 DMA and EE
+        // set_sreg writes the word, but the HLE has no IOP SIF peer (this
+        // send is otherwise a no-op). Any nonzero exits the beqz poll;
+        // the value mirrors the sent value and Sony's SetReg(RPCINIT,1).
+        if (g_ssx3SifHandshakeEnabled.load(std::memory_order_relaxed) &&
+            cid == 0x80000001u)
+        {
+            constexpr uint32_t kSregIndexOffset = 4u * sizeof(uint32_t);
+            const uint32_t *sregIndex = nullptr;
+            if (packetAddr != 0u &&
+                packetSize >= 5u * sizeof(uint32_t) &&
+                packetAddr <= UINT32_MAX - kSregIndexOffset)
+            {
+                sregIndex = getEeGuestStruct<uint32_t>(rdram, packetAddr + kSregIndexOffset);
+            }
+            if (sregIndex != nullptr && *sregIndex == 1u)
+            {
+                constexpr uint32_t kSsx3Sregs1Addr = 0x52BE04u;
+                uint8_t *sregs1 = getMemPtr(rdram, kSsx3Sregs1Addr);
+                if (sregs1 != nullptr)
+                {
+                    const uint32_t one = 1u;
+                    std::memcpy(sregs1, &one, sizeof(one));
+                    static int handshakeCount = 0;
+                    if (handshakeCount < 5)
+                    {
+                        std::cerr << "[sif-handshake] sregs[1]=1" << std::endl;
+                        ++handshakeCount;
+                    }
+                }
+            }
         }
 
         static int logCount = 0;
