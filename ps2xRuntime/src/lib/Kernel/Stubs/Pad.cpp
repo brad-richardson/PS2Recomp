@@ -1,6 +1,8 @@
 #include "Common.h"
 #include "Pad.h"
 
+#include <chrono>
+
 namespace ps2_stubs
 {
     namespace
@@ -66,6 +68,227 @@ namespace ps2_stubs
         PadInputState g_padOverrideState{};
         PadPortState g_padPorts[kPadPortCount]{};
         int g_padReadLogCount = 0;
+
+        // E2a stimulus hook: env-armed pad-state flip + 326EB0 dormant-arm
+        // tripwires. Unset PS2X_PAD_STIM_AFTER (default) = one relaxed atomic
+        // check per pad call, zero behavior change.
+        struct PadStimulus
+        {
+            std::mutex mutex;
+            bool initDone = false;
+            bool enabled = false;
+            uint64_t afterReads = 0;
+            uint64_t wallMinSec = 0;
+            std::chrono::steady_clock::time_point startWall{};
+            uint64_t totalReads = 0;
+            uint64_t totalGetState = 0;
+            uint64_t totalPortOpens = 0;
+            uint64_t postFirePortOpens = 0;
+            bool fired = false;
+            std::vector<uint32_t> preFireGetStateRa;
+            std::vector<uint32_t> postFireNewRa;
+        };
+        PadStimulus g_padStim;
+        std::atomic<bool> g_padStimInitDone{false};
+        std::atomic<bool> g_padStimArmed{false};
+
+        constexpr uint64_t kPadStimMilestoneReads = 25000ull;
+        constexpr uint64_t kPadStimWaitMilestoneReads = 1000ull;
+        constexpr uint16_t kPadStimButtons = 0x0000; // active-low: all pressed
+        constexpr uint8_t kPadStimLx = 0x00;
+        constexpr uint8_t kPadStimLy = 0x00;
+        constexpr uint8_t kPadStimRx = 0xFF;
+        constexpr uint8_t kPadStimRy = 0xFF;
+
+        uint64_t padStimWallSecLocked()
+        {
+            const auto now = std::chrono::steady_clock::now();
+            return static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::seconds>(now - g_padStim.startWall).count());
+        }
+
+        void padStimInitLocked()
+        {
+            if (g_padStim.initDone)
+            {
+                return;
+            }
+            g_padStim.initDone = true;
+            g_padStim.startWall = std::chrono::steady_clock::now();
+            const char *after = std::getenv("PS2X_PAD_STIM_AFTER");
+            const char *wallMin = std::getenv("PS2X_PAD_STIM_WALLMIN");
+            const unsigned long long afterN = after ? std::strtoull(after, nullptr, 10) : 0ull;
+            const unsigned long long wallN = wallMin ? std::strtoull(wallMin, nullptr, 10) : 0ull;
+            if (afterN > 0ull)
+            {
+                g_padStim.enabled = true;
+                g_padStim.afterReads = static_cast<uint64_t>(afterN);
+                g_padStim.wallMinSec = static_cast<uint64_t>(wallN);
+                g_padStimArmed.store(true, std::memory_order_relaxed);
+                std::fprintf(stderr,
+                             "[padstim] armed after=%llu wallmin=%llus "
+                             "flip=buttons:0xFFFF->0x0000,lx:0x80->0x00,ly:0x80->0x00,"
+                             "rx:0x80->0xFF,ry:0x80->0xFF\n",
+                             afterN, wallN);
+            }
+        }
+
+        void padStimEnsureInit()
+        {
+            if (g_padStimInitDone.load(std::memory_order_relaxed))
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(g_padStim.mutex);
+            padStimInitLocked();
+            g_padStimInitDone.store(true, std::memory_order_relaxed);
+        }
+
+        bool padStimHasRa(const std::vector<uint32_t> &vec, uint32_t ra)
+        {
+            for (const uint32_t v : vec)
+            {
+                if (v == ra)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void padStimOnRead(PadInputState &state)
+        {
+            padStimEnsureInit();
+            if (!g_padStimArmed.load(std::memory_order_relaxed))
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(g_padStim.mutex);
+            if (!g_padStim.enabled)
+            {
+                return;
+            }
+            ++g_padStim.totalReads;
+            const uint64_t reads = g_padStim.totalReads;
+            if (!g_padStim.fired)
+            {
+                const uint64_t wall = padStimWallSecLocked();
+                const bool readsPast = reads >= g_padStim.afterReads;
+                if (readsPast && wall >= g_padStim.wallMinSec)
+                {
+                    g_padStim.fired = true;
+                    std::fprintf(stderr,
+                                 "[padstim] FIRED reads=%llu wall=%llus getstate=%llu "
+                                 "portopens=%llu preFireGetStateRaN=%llu\n",
+                                 static_cast<unsigned long long>(reads),
+                                 static_cast<unsigned long long>(wall),
+                                 static_cast<unsigned long long>(g_padStim.totalGetState),
+                                 static_cast<unsigned long long>(g_padStim.totalPortOpens),
+                                 static_cast<unsigned long long>(g_padStim.preFireGetStateRa.size()));
+                }
+                else if (reads % kPadStimMilestoneReads == 0ull ||
+                         (readsPast && reads % kPadStimWaitMilestoneReads == 0ull))
+                {
+                    std::fprintf(stderr,
+                                 "[padstim] progress reads=%llu wall=%llus getstate=%llu "
+                                 "portopens=%llu readsPast=%d\n",
+                                 static_cast<unsigned long long>(reads),
+                                 static_cast<unsigned long long>(wall),
+                                 static_cast<unsigned long long>(g_padStim.totalGetState),
+                                 static_cast<unsigned long long>(g_padStim.totalPortOpens),
+                                 readsPast ? 1 : 0);
+                }
+            }
+            else if (reads % kPadStimMilestoneReads == 0ull)
+            {
+                std::fprintf(stderr,
+                             "[padstim] post reads=%llu wall=%llus getstate=%llu "
+                             "portopens=%llu postFirePortOpens=%llu postFireNewRaN=%llu\n",
+                             static_cast<unsigned long long>(reads),
+                             static_cast<unsigned long long>(padStimWallSecLocked()),
+                             static_cast<unsigned long long>(g_padStim.totalGetState),
+                             static_cast<unsigned long long>(g_padStim.totalPortOpens),
+                             static_cast<unsigned long long>(g_padStim.postFirePortOpens),
+                             static_cast<unsigned long long>(g_padStim.postFireNewRa.size()));
+            }
+            if (g_padStim.fired)
+            {
+                state.buttons = kPadStimButtons;
+                state.lx = kPadStimLx;
+                state.ly = kPadStimLy;
+                state.rx = kPadStimRx;
+                state.ry = kPadStimRy;
+            }
+        }
+
+        void padStimOnGetState(uint32_t ra)
+        {
+            padStimEnsureInit();
+            if (!g_padStimArmed.load(std::memory_order_relaxed))
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(g_padStim.mutex);
+            if (!g_padStim.enabled)
+            {
+                return;
+            }
+            ++g_padStim.totalGetState;
+            if (!g_padStim.fired)
+            {
+                if (g_padStim.preFireGetStateRa.size() < 64 &&
+                    !padStimHasRa(g_padStim.preFireGetStateRa, ra))
+                {
+                    g_padStim.preFireGetStateRa.push_back(ra);
+                }
+                return;
+            }
+            if (!padStimHasRa(g_padStim.preFireGetStateRa, ra) &&
+                !padStimHasRa(g_padStim.postFireNewRa, ra))
+            {
+                if (g_padStim.postFireNewRa.size() < 64)
+                {
+                    g_padStim.postFireNewRa.push_back(ra);
+                }
+                std::fprintf(stderr,
+                             "[padstim] GETSTATE-NEWRA ra=0x%08x reads=%llu wall=%llus "
+                             "getstate=%llu\n",
+                             ra,
+                             static_cast<unsigned long long>(g_padStim.totalReads),
+                             static_cast<unsigned long long>(padStimWallSecLocked()),
+                             static_cast<unsigned long long>(g_padStim.totalGetState));
+            }
+        }
+
+        void padStimOnPortOpen(uint32_t ra, int port, int slot)
+        {
+            padStimEnsureInit();
+            if (!g_padStimArmed.load(std::memory_order_relaxed))
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(g_padStim.mutex);
+            if (!g_padStim.enabled)
+            {
+                return;
+            }
+            ++g_padStim.totalPortOpens;
+            if (!g_padStim.fired)
+            {
+                return;
+            }
+            ++g_padStim.postFirePortOpens;
+            if (g_padStim.postFirePortOpens <= 10ull)
+            {
+                std::fprintf(stderr,
+                             "[padstim] PORTOPEN post-fire n=%llu ra=0x%08x port=%d slot=%d "
+                             "reads=%llu wall=%llus\n",
+                             static_cast<unsigned long long>(g_padStim.postFirePortOpens),
+                             ra, port, slot,
+                             static_cast<unsigned long long>(g_padStim.totalReads),
+                             static_cast<unsigned long long>(padStimWallSecLocked()));
+            }
+        }
 
         uint8_t axisToByte(float axis)
         {
@@ -314,6 +537,8 @@ namespace ps2_stubs
                     applyKeyboardState(state, portState.analogMode);
                 }
             }
+
+            padStimOnRead(state); // E2a: no-op unless PS2X_PAD_STIM_AFTER set
 
             fillPadStatus(outData, state, portState);
 
@@ -604,6 +829,8 @@ namespace ps2_stubs
     void scePadPortOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)runtime;
+        padStimOnPortOpen(getRegU32(ctx, 31), static_cast<int>(getRegU32(ctx, 4)),
+                          static_cast<int>(getRegU32(ctx, 5))); // E2a tripwire: 3FF708 arm
         const uint32_t dmaAddr = getRegU32(ctx, 6);
         uint8_t *dmaStr = getMemPtr(rdram, dmaAddr);
         std::lock_guard<std::mutex> lock(g_padStateMutex);
