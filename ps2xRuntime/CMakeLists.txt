@@ -9,6 +9,7 @@ option(PS2X_ENABLE_RUNNER_UNITY_BUILD "Build ps2EntryRunner with CMake unity bui
 set(PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE 32 CACHE STRING "Unity build batch size for ps2EntryRunner")
 option(PS2X_ENABLE_RUNNER_PCH "Precompile the heavy runtime headers for ps2EntryRunner" ON)
 option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
+option(PS2X_DEV_NO_THINLTO "Dev builds only: skip ThinLTO IPO on the runner link chain (ps2_runtime, ps2EntryRunner) for faster incremental links; Release untouched" OFF)
 
 option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" OFF)
 option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
@@ -580,6 +581,15 @@ endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     EnableFastReleaseMode(ps2_runtime)
     EnableFastReleaseMode(ps2EntryRunner)
+
+    if(PS2X_DEV_NO_THINLTO)
+        # Dev-only: undo the INTERPROCEDURAL_OPTIMIZATION_RELEASE set above so the
+        # runner objects compile and link without ThinLTO (faster incremental
+        # links). Default OFF: with the option unset this block is a no-op and
+        # Release flags are byte-identical with or without this change.
+        set_property(TARGET ps2_runtime PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+        set_property(TARGET ps2EntryRunner PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    endif()
 
     if(WIN32 AND NOT PS2X_SHOW_WINDOWS_CONSOLE)
         if(MSVC)
