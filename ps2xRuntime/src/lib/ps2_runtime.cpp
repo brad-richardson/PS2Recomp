@@ -376,6 +376,99 @@ namespace
     }
 }
 
+// K1 P0: env-gated presentation-frame capture (PS2X_FRAME_DUMP_DIR).
+// Unset/empty = disabled (zero behavior change). When set, saves the
+// first two uploads plus an always-overwritten latest pair:
+//   upload-<seq>.png + .txt sidecar (frame number, tick, dimensions,
+//   display/source FBP, preferred flag, fallback flag, FNV-1a hash,
+//   SMODE2/PMODE) and upload-latest.png/.txt rewritten every upload so
+// the settled park frame survives SIGTERM.
+namespace
+{
+const char *frameDumpDir()
+{
+    static const char *dir = [] {
+        const char *env = std::getenv("PS2X_FRAME_DUMP_DIR");
+        return (env && env[0] != '\0') ? env : nullptr;
+    }();
+    return dir;
+}
+
+uint32_t fnv1a32(const uint8_t *data, size_t size)
+{
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < size; ++i)
+    {
+        hash ^= data[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+void dumpPresentationFrame(const uint8_t *rgba,
+                           uint32_t width,
+                           uint32_t height,
+                           uint64_t tick,
+                           uint32_t displayFbp,
+                           uint32_t sourceFbp,
+                           bool preferred,
+                           bool fallback,
+                           uint64_t smode2,
+                           uint64_t pmode)
+{
+    const char *dir = frameDumpDir();
+    if (!dir || !rgba || width == 0u || height == 0u || width > 4096u || height > 4096u)
+    {
+        return;
+    }
+    static uint64_t s_dumpSeq = 0u;
+    const uint64_t seq = s_dumpSeq++;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+
+    Image img{};
+    img.data = const_cast<uint8_t *>(rgba);
+    img.width = static_cast<int>(width);
+    img.height = static_cast<int>(height);
+    img.mipmaps = 1;
+    img.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+    const size_t byteSize = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+    const uint32_t hash = fnv1a32(rgba, byteSize);
+
+    char pngPath[1024];
+    char txtPath[1024];
+    const bool keep = seq < 2u;
+    if (keep)
+    {
+        std::snprintf(pngPath, sizeof(pngPath), "%s/%s-%llu.png", dir, fallback ? "fallback" : "upload",
+                      static_cast<unsigned long long>(seq));
+        ExportImage(img, pngPath);
+    }
+    std::snprintf(pngPath, sizeof(pngPath), "%s/%s-latest.png", dir, fallback ? "fallback" : "upload");
+    ExportImage(img, pngPath);
+    std::snprintf(txtPath, sizeof(txtPath), "%s/%s-latest.txt", dir, fallback ? "fallback" : "upload");
+    if (keep)
+    {
+        char keepTxt[1024];
+        std::snprintf(keepTxt, sizeof(keepTxt), "%s/%s-%llu.txt", dir, fallback ? "fallback" : "upload",
+                      static_cast<unsigned long long>(seq));
+        std::ofstream(keepTxt) << "seq=" << seq << " tick=" << tick << " size=" << width << "x" << height
+                               << " displayFbp=" << displayFbp << " sourceFbp=" << sourceFbp
+                               << " preferred=" << (preferred ? 1 : 0) << " fallback=" << (fallback ? 1 : 0)
+                               << " fnv1a=" << std::hex << hash << std::dec << " smode2=0x" << std::hex
+                               << smode2 << " pmode=0x" << pmode << std::dec << "\n";
+    }
+    std::ofstream(txtPath) << "seq=" << seq << " tick=" << tick << " size=" << width << "x" << height
+                           << " displayFbp=" << displayFbp << " sourceFbp=" << sourceFbp
+                           << " preferred=" << (preferred ? 1 : 0) << " fallback=" << (fallback ? 1 : 0)
+                           << " fnv1a=" << std::hex << hash << std::dec << " smode2=0x" << std::hex << smode2
+                           << " pmode=0x" << pmode << std::dec << "\n";
+    std::cerr << "[frame:dump] seq=" << seq << " tick=" << tick << " size=" << width << "x" << height
+              << " fbp=" << displayFbp << "/" << sourceFbp << " fallback=" << (fallback ? 1 : 0) << " fnv1a="
+              << std::hex << hash << std::dec << std::endl;
+}
+} // namespace
+
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
 {
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
@@ -418,6 +511,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                                                    &usedPreferredDisplaySource))
     {
         Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
+        dumpPresentationFrame(static_cast<const uint8_t *>(blank.data), FB_WIDTH, FB_HEIGHT, currentTick, 0u,
+                              0u, false, true, rt->memory().gs().smode2, rt->memory().gs().pmode);
         UpdateTexture(tex, blank.data);
         UnloadImage(blank);
         outWidth = FB_WIDTH;
@@ -452,6 +547,13 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     s_lastPreferred = usedPreferredDisplaySource;
     s_lastWidth = width;
     s_lastHeight = height;
+    if (!s_scratch.empty() && width != 0u && height != 0u &&
+        s_scratch.size() == static_cast<size_t>(width) * static_cast<size_t>(height) * 4u)
+    {
+        dumpPresentationFrame(s_scratch.data(), width, height, currentTick, displayFbp, sourceFbp,
+                              usedPreferredDisplaySource, false, rt->memory().gs().smode2,
+                              rt->memory().gs().pmode);
+    }
 
     std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
     if (!s_scratch.empty() && width != 0u && height != 0u)
