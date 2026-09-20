@@ -63,58 +63,12 @@ namespace ps2_stubs
             return period;
         }
 
-        // P1t: SSX3 registers its CD-completion callback at 0x3E3AD8, which
-        // sits mid-function (inside sub_003E39A8's range) with no exact table
-        // entry, so the scheduler silently drops the invocation (!hasFunction
-        // + nonempty invocations zeroes pc). The containing recompiled
-        // function cannot enter mid-block (its pc switch has no 0x3E3AD8
-        // case; default falls through to the function top), so the exact
-        // entry points at this faithful host emulation of the 8 straight-line
-        // MIPS insns instead. Yields to any real recompiled entry (CSV split).
-        constexpr uint32_t kSsx3CdCallbackPc = 0x3E3AD8u;
-
-        void ssx3CdCallbackSemaSignal(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-        {
-            // 0x3e3ad8: lui $v0,0x52
-            SET_GPR_S32(ctx, 2, 0x00520000);
-            // 0x3e3adc: addiu $sp,$sp,-0x10
-            SET_GPR_S32(ctx, 29, (int32_t)ADD32(GPR_U32(ctx, 29), 4294967280));
-            // 0x3e3ae0: lw $a0,-0x63B4($v0) ($a0 = *(0x519C4C))
-            SET_GPR_S32(ctx, 4, (int32_t)FAST_READ32(0x519C4Cu));
-            // 0x3e3ae4: sd $ra,0x0($sp)
-            WRITE64(ADD32(GPR_U32(ctx, 29), 0), GPR_U64(ctx, 31));
-            // 0x3e3ae8: jal 0x423DD0 (iSignalSema; ra = 0x3E3AF0)
-            SET_GPR_U32(ctx, 31, 0x3E3AF0u);
-            ctx->pc = 0x423DD0u;
-            if (!runtime->dispatchGuestBranch(rdram,
-                                              ctx,
-                                              0x423DD0u,
-                                              0x3E3AE8u,
-                                              0x3E3AF0u,
-                                              PS2Runtime::GuestBranchKind::DirectCall,
-                                              "JAL"))
-            {
-                return;
-            }
-            ctx->pc = 0x3E3AF0u;
-            // 0x3e3af0: ld $ra,0x0($sp)
-            SET_GPR_U64(ctx, 31, READ64(ADD32(GPR_U32(ctx, 29), 0)));
-            // 0x3e3af4: jr $ra / 0x3e3af8 (delay): addiu $sp,$sp,+0x10
-            const uint32_t target = GPR_U32(ctx, 31);
-            SET_GPR_S32(ctx, 29, (int32_t)ADD32(GPR_U32(ctx, 29), 16));
-            ctx->pc = target;
-        }
-
         void queueCdCallback(R5900Context *ctx, PS2Runtime *runtime, uint32_t func)
         {
             (void)ctx;
             if (g_cdCallbackFn == 0u || runtime == nullptr)
             {
                 return;
-            }
-            if (g_cdCallbackFn == kSsx3CdCallbackPc && !runtime->hasFunction(g_cdCallbackFn))
-            {
-                runtime->registerFunction(g_cdCallbackFn, ssx3CdCallbackSemaSignal);
             }
             GuestInvocation invocation{};
             invocation.kind = GuestInvocationKind::Interrupt;
