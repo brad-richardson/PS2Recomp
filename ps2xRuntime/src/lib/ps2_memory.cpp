@@ -1565,6 +1565,64 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     processPendingTransfers();
                 }
             }
+
+            if (channelBase == 0x1000D000u || channelBase == 0x1000D400u)
+            {
+                // SPR_FROM (0x1000D000): scratchpad -> RAM.
+                // SPR_TO   (0x1000D400): RAM -> scratchpad.
+                // Normal mode completes synchronously: copy QWC quads, advance
+                // MADR/SADR, clear QWC/STR, raise the channel's D_STAT CIS.
+                const bool sprFrom = (channelBase == 0x1000D000u);
+                const uint32_t sprMode = (value >> 2) & 0x3u;
+                if (sprMode == 0u && m_rdram && m_scratchpad)
+                {
+                    const uint64_t bytes64 = static_cast<uint64_t>(qwc) * 16ull;
+                    const uint32_t totalBytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+                    uint32_t bytes = totalBytes;
+                    uint32_t ramAddr = madr & PS2_RAM_MASK;
+                    uint32_t sprAddr = m_ioRegisters[channelBase + 0x80u] & (PS2_SCRATCHPAD_SIZE - 1u);
+                    while (bytes > 0u)
+                    {
+                        uint32_t ramChunk = PS2_RAM_SIZE - ramAddr;
+                        uint32_t sprChunk = PS2_SCRATCHPAD_SIZE - sprAddr;
+                        uint32_t chunk = bytes;
+                        if (chunk > ramChunk)
+                            chunk = ramChunk;
+                        if (chunk > sprChunk)
+                            chunk = sprChunk;
+                        if (chunk == 0u)
+                            break;
+                        if (sprFrom)
+                            std::memcpy(m_rdram + ramAddr, m_scratchpad + sprAddr, chunk);
+                        else
+                            std::memcpy(m_scratchpad + sprAddr, m_rdram + ramAddr, chunk);
+                        bytes -= chunk;
+                        ramAddr += chunk;
+                        if (ramAddr >= PS2_RAM_SIZE)
+                            ramAddr = 0u;
+                        sprAddr += chunk;
+                        if (sprAddr >= PS2_SCRATCHPAD_SIZE)
+                            sprAddr = 0u;
+                    }
+
+                    m_ioRegisters[channelBase + 0x10u] = madr + totalBytes;
+                    m_ioRegisters[channelBase + 0x20u] = 0u;
+                    m_ioRegisters[channelBase + 0x80u] = sprAddr;
+                    m_ioRegisters[address] &= ~0x100u;
+
+                    static constexpr uint32_t D_STAT = 0x1000E010u;
+                    uint32_t dstat = m_ioRegisters.count(D_STAT) ? m_ioRegisters[D_STAT] : 0u;
+                    dstat |= (1u << (sprFrom ? 8u : 9u));
+                    const uint32_t status = dstat & 0x3FFu;
+                    const uint32_t mask = (dstat >> 16) & 0x3FFu;
+                    if ((status & mask) != 0u)
+                        dstat |= (1u << 31);
+                    else
+                        dstat &= ~(1u << 31);
+                    m_ioRegisters[D_STAT] = dstat;
+                    queueCompletedDmacCause(sprFrom ? 8u : 9u);
+                }
+            }
         }
         return true;
     }

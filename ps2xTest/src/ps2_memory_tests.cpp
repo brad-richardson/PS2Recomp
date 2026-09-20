@@ -1961,5 +1961,89 @@ void register_ps2_memory_tests()
             t.IsTrue(threwRead32, "unaligned read32 should throw");
             t.IsTrue(threwWrite64, "unaligned write64 should throw");
         });
+
+        tc.Run("SPR_FROM normal-mode DMA copies scratchpad to RAM and completes the channel", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kSprFrom = 0x1000D000u;
+            constexpr uint32_t kDStat = 0x1000E010u;
+            constexpr uint32_t kSadr = 0x100u;
+            constexpr uint32_t kDst = 0x00010000u;
+            constexpr uint32_t kQwc = 64u; // one SSX3 bucket array, as observed on hw
+
+            uint8_t *spr = mem.getScratchpad();
+            uint8_t *rdram = mem.getRDRAM();
+            for (uint32_t i = 0; i < kQwc * 16u; ++i)
+            {
+                spr[kSadr + i] = static_cast<uint8_t>((i * 7u + 3u) & 0xFFu);
+            }
+            std::memset(rdram + kDst, 0xA5u, kQwc * 16u);
+
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x10u, 0x80000000u | kDst), "SPR_FROM MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x20u, kQwc), "SPR_FROM QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x80u, kSadr), "SPR_FROM SADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x00u, 0x100u), "SPR_FROM CHCR STR write should succeed");
+
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < kQwc * 16u; ++i)
+            {
+                if (rdram[kDst + i] != static_cast<uint8_t>((i * 7u + 3u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "SPR_FROM should move QWC quads from scratchpad+SADR to RAM MADR&0x01FFFFFF");
+            t.Equals(mem.readIORegister(kSprFrom + 0x10u), (0x80000000u | kDst) + kQwc * 16u, "SPR_FROM should advance MADR past the transfer");
+            t.Equals(mem.readIORegister(kSprFrom + 0x20u), 0u, "SPR_FROM should clear QWC on completion");
+            t.Equals(mem.readIORegister(kSprFrom + 0x80u), kSadr + kQwc * 16u, "SPR_FROM should advance SADR past the transfer");
+            t.IsTrue((mem.readIORegister(kSprFrom + 0x00u) & 0x100u) == 0u, "SPR_FROM should report STR clear once done");
+            t.IsTrue((mem.readIORegister(kDStat) & (1u << 8)) != 0u, "SPR_FROM completion should set D_STAT CIS bit 8");
+        });
+
+        tc.Run("SPR_TO normal-mode DMA copies RAM to scratchpad with SADR wraparound", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kSprTo = 0x1000D400u;
+            constexpr uint32_t kDStat = 0x1000E010u;
+            constexpr uint32_t kSadr = PS2_SCRATCHPAD_SIZE - 32u;
+            constexpr uint32_t kSrc = 0x00020000u;
+            constexpr uint32_t kQwc = 4u; // 64 bytes: 32 to the tail, 32 wrapped to the head
+
+            uint8_t *spr = mem.getScratchpad();
+            uint8_t *rdram = mem.getRDRAM();
+            for (uint32_t i = 0; i < kQwc * 16u; ++i)
+            {
+                rdram[kSrc + i] = static_cast<uint8_t>((i * 11u + 5u) & 0xFFu);
+            }
+            std::memset(spr, 0x5Au, PS2_SCRATCHPAD_SIZE);
+
+            t.IsTrue(mem.writeIORegister(kSprTo + 0x10u, kSrc), "SPR_TO MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprTo + 0x20u, kQwc), "SPR_TO QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprTo + 0x80u, kSadr), "SPR_TO SADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprTo + 0x00u, 0x100u), "SPR_TO CHCR STR write should succeed");
+
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < kQwc * 16u; ++i)
+            {
+                const uint32_t sprOff = (kSadr + i) & (PS2_SCRATCHPAD_SIZE - 1u);
+                if (spr[sprOff] != static_cast<uint8_t>((i * 11u + 5u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "SPR_TO should move QWC quads from RAM to scratchpad with 16KB SADR wraparound");
+            t.Equals(mem.readIORegister(kSprTo + 0x10u), kSrc + kQwc * 16u, "SPR_TO should advance MADR past the transfer");
+            t.Equals(mem.readIORegister(kSprTo + 0x20u), 0u, "SPR_TO should clear QWC on completion");
+            t.Equals(mem.readIORegister(kSprTo + 0x80u), (kSadr + kQwc * 16u) & (PS2_SCRATCHPAD_SIZE - 1u),
+                     "SPR_TO should advance SADR with 14-bit wraparound");
+            t.IsTrue((mem.readIORegister(kSprTo + 0x00u) & 0x100u) == 0u, "SPR_TO should report STR clear once done");
+            t.IsTrue((mem.readIORegister(kDStat) & (1u << 9)) != 0u, "SPR_TO completion should set D_STAT CIS bit 9");
+        });
     });
 }
