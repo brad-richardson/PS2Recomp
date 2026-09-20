@@ -1287,9 +1287,13 @@ int EeScheduler::pollSemaphore(int id)
         ps2_log::emitDrop("sched/pollSemaphore", "KE_UNKNOWN_SEMID", dropArgs);
         return KE_UNKNOWN_SEMID;
     }
+    // P10: the EE kernel misses with plain -1 (PollSema 0x80004dc0: blez at
+    // 0x80004de4 falls back to the jr/addiu v0,zero,-1 pair; no -419 exists
+    // in KERNEL), so return KE_ERROR, not KE_SEMA_ZERO. No [drop]: a miss is
+    // a normal answer (P1w exclusion kept). Unknown ids stay KE_UNKNOWN_SEMID.
     if (object->count == 0)
     {
-        return KE_SEMA_ZERO;
+        return KE_ERROR;
     }
     --object->count;
     publishSnapshot();

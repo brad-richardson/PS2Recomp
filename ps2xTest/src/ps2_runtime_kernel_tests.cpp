@@ -697,6 +697,42 @@ void register_ps2_runtime_kernel_tests()
             }
         });
 
+        tc.Run("PollSema on a zero-count semaphore returns KE_ERROR like the kernel (P10)", [](TestCase &t)
+        {
+            TestEnv env;
+            EeSemaStatus param{};
+            param.max_count = 1;
+            param.init_count = 0;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &param, sizeof(param));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int semaId = getRegS32(env.ctx, 2);
+            t.IsTrue(semaId > 0, "the poll test semaphore must be created");
+
+            // Kernel PollSema (0x80004dc0) misses with plain -1: blez at
+            // 0x80004de4 falls back to the jr/addiu v0,zero,-1 pair, and no
+            // -419 immediate exists anywhere in KERNEL (P10 re-derivation).
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "a zero-count poll must miss with KE_ERROR (-1), not KE_SEMA_ZERO");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), semaId, "a waiter-less signal succeeds");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), semaId, "a poll at count 1 consumes and returns the id");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "the next poll misses again with KE_ERROR");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            iPollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "iPollSema shares the kernel -1 miss value");
+        });
+
         tc.Run("Drop census lines format exactly and the kill-switch gates emission (P1w)", [](TestCase &t)
         {
             t.Equals(ps2_log::formatDropLine("sched/x", "r", "a=1"), "[drop] sched/x r a=1",
