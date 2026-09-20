@@ -6,14 +6,21 @@ verdict instead of a hand waved "same". Exit 0 iff there are zero
 non-throughput deltas (i.e. no KEY_DELTA/COUNT_DELTA verdicts).
 
 Row classes (documented contended rows are NEVER exact):
-  EXACT rows:   thread status/wait, semaphore table+creates, drop census,
-                sif/rpc unhandled-call multiset, sendcmd rows (<= cap).
+  EXACT rows:   thread status/wait, semaphore table (count/max/init, plus
+                waiter counts only when the sampled thread-wait sets
+                agree) + creates, drop census, sif/rpc unhandled-call
+                multiset, sendcmd rows (<= cap).
   THROUGHPUT:   sched counts, gs true counts, dma/gif/gsw/vif counters,
                 sema-hist counts, and hot-pc counts emitter-vs-emitter.
                 Compared with --tolerance (percent, default 10): within ->
                 TOL_OK, beyond -> COUNT_DELTA.
   SAMPLED:      thread pc, and thread status while live (Running/Ready
                 on either side); parked-thread status/wait stay exact.
+                Sema-table waiter counts are wall-clock samples exactly
+                like thread status: SAMPLED when the complementary
+                thread-wait sets differ (correlation printed), EXACT
+                when they agree. Cumulative wait/signal histories stay
+                the deterministic signal (throughput-gated).
   SATURATED:    miner-side log caps ([gs:kick]<96, [gs:copy-reg]<64,
                 [gs:gif]<48, [sceSifSendCmd]<5, [diag:stub] top-30/block).
   STALE:        tick-derived gs rows (dma/gif/gsw/vif) across mixed
@@ -98,6 +105,21 @@ def hist_get(hist, sid, pc):
     return hist.get(str(sid), {}).get(pc, 0)
 
 
+def sema_wait_set(threads, sid):
+    """IDs of threads sampled waiting on sema sid (complementary set)."""
+    return sorted(tid for tid, t in threads.items()
+                  if t["status"] == 2 and t["wait_reason"] == 2 and t["wait_id"] == sid)
+
+
+def waiter_note(name_a, wa, name_b, wb, sid):
+    """Correlation note: which thread <-> which sema, per side."""
+    def fmt(tids):
+        if not tids:
+            return "none"
+        return ",".join(f"t{tid}" for tid in tids) + f"->sema{sid}"
+    return f"waiters sampled: {name_a} {fmt(wa)} vs {name_b} {fmt(wb)}"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Diff two park snapshots as a ladder table.")
     ap.add_argument("a_json")
@@ -138,7 +160,9 @@ def main(argv=None):
         else:
             lad.add(f"thread.{tid}.pc", x["pc"], y["pc"], "SAMPLED", "wall-clock sample")
 
-    # Semaphore table (emitter-only; miner omits it).
+    # Semaphore table (emitter-only; miner omits it). Waiter counts are
+    # SIGTERM wall-clock samples: exact only when the complementary
+    # thread-wait sets agree; the cumulative histories stay the signal.
     asema, bsema = sema_rows(ahead), sema_rows(bhead)
     if not asema and not bsema:
         lad.add("semaphores.table", "-", "-", "BLIND", "no table on either side")
@@ -150,9 +174,19 @@ def main(argv=None):
                 lad.add(f"sema.{sid}.present", sid in asema, sid in bsema, "KEY_DELTA")
                 continue
             x, y = asema[sid], bsema[sid]
-            lad.exact(f"sema.{sid}.table",
-                      (x["count"], x["max"], x["init"], x["waiters"]),
-                      (y["count"], y["max"], y["init"], y["waiters"]))
+            xa = (x["count"], x["max"], x["init"], x["waiters"])
+            xb = (y["count"], y["max"], y["init"], y["waiters"])
+            wa, wb = sema_wait_set(at, sid), sema_wait_set(bt, sid)
+            if xa == xb and wa == wb:
+                lad.add(f"sema.{sid}.table", xa, xb, "EXACT")
+            elif (xa[:3] != xb[:3]):
+                lad.add(f"sema.{sid}.table", xa, xb, "KEY_DELTA")
+            elif wa != wb:
+                lad.add(f"sema.{sid}.table", xa, xb, "SAMPLED",
+                        waiter_note(lad.name_a, wa, lad.name_b, wb, sid))
+            else:
+                lad.add(f"sema.{sid}.table", xa, xb, "KEY_DELTA",
+                        "waiters disagree despite agreed wait-set")
 
     # Sema creates: exact multiset.
     def creates(snap):
