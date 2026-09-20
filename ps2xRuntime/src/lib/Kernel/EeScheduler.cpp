@@ -1149,17 +1149,14 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
 int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uint32_t option)
 {
     assertExecutor();
-    // P1v: real PS2 hardware accepts max_count=0 (SSX 3 ships two unchecked
-    // all-zero creates at boot and runs on hardware), so treat an exact zero
-    // max as a binary semaphore. Provisional: reference emulators are LLE
-    // and ps2tek/ps2sdk are silent on the stored-max semantics; a negative
-    // max stays rejected and init is validated against the effective max.
-    const int effectiveMax = (maxCount == 0) ? 1 : maxCount;
-    if (effectiveMax <= 0 || initCount < 0 || initCount > effectiveMax)
+    // P1aa (amends P1v per the P1z kernel disassembly): stock EE CreateSema
+    // rejects ONLY init<0 (+ id exhaustion); max is stored as-is with no
+    // clamp and no validation, so negatives and init>max are accepted.
+    if (initCount < 0)
     {
         char dropArgs[64];
-        std::snprintf(dropArgs, sizeof(dropArgs), "init=%d max=%d effmax=%d",
-                      initCount, maxCount, effectiveMax);
+        std::snprintf(dropArgs, sizeof(dropArgs), "init=%d max=%d",
+                      initCount, maxCount);
         ps2_log::emitDrop("sched/createSemaphore", "KE_ERROR", dropArgs);
         return KE_ERROR;
     }
@@ -1172,7 +1169,7 @@ int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uin
     EeSemaphore semaphore{};
     semaphore.id = id;
     semaphore.count = initCount;
-    semaphore.maxCount = effectiveMax;
+    semaphore.maxCount = maxCount;
     semaphore.initCount = initCount;
     semaphore.attr = attr;
     semaphore.option = option;
@@ -1262,24 +1259,8 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
         }
         return id;
     }
-    if (object->count == object->maxCount)
-    {
-        if (semaDiag)
-        {
-            std::cerr << "[diag:sema] op=signal id=" << id << " count=" << countBefore << "->" << object->count
-                      << " waiters=" << waitersBefore << "->" << object->waiters.size()
-                      << " waker=" << m_currentThreadId << " pc=0x" << std::hex << wakerPc
-                      << " ra=0x" << wakerRa << std::dec << " inInt=" << (m_insideInterrupt ? 1 : 0)
-                      << " iSafe=" << (interruptSafe ? 1 : 0) << " invKind=" << wakerInvKind
-                      << " invDepth=" << wakerInvDepth << " cbFunc=" << std::hex << wakerInvTag << std::dec
-                      << " target=- tStatus=-1 tSusp=-1 result=" << KE_SEMA_OVF << std::endl;
-        }
-        char dropArgs[64];
-        std::snprintf(dropArgs, sizeof(dropArgs), "id=%d count=%d max=%d",
-                      id, object->count, object->maxCount);
-        ps2_log::emitDrop("sched/signalSemaphore", "KE_SEMA_OVF", dropArgs);
-        return KE_SEMA_OVF;
-    }
+    // P1aa (amends P1v per the P1z kernel disassembly): the EE signal path
+    // has no OVF check, so waiter-less signals always ++count and return id.
     ++object->count;
     publishSnapshot();
     if (semaDiag)

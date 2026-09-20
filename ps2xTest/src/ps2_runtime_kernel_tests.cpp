@@ -610,7 +610,7 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(semaphore->option, semaParam.option, "semaphore option must be decoded from offset 0x14");
         });
 
-        tc.Run("CreateSema with zero max_count returns a usable binary semaphore (P1v)", [](TestCase &t)
+        tc.Run("CreateSema stores max_count as-is and waiter-less signals never overflow (P1aa; amends P1v)", [](TestCase &t)
         {
             TestEnv env;
             EeSemaStatus zeroParam{};
@@ -623,7 +623,7 @@ void register_ps2_runtime_kernel_tests()
             t.IsTrue(zeroSema != nullptr, "zero-max CreateSema must create an object");
             if (zeroSema != nullptr)
             {
-                t.Equals(zeroSema->maxCount, 1, "zero max_count is accepted as a binary semaphore (max 1)");
+                t.Equals(zeroSema->maxCount, 0, "zero max_count is stored as-is (kernel has no clamp, P1z)");
                 t.Equals(zeroSema->count, 0, "a zero-max semaphore starts at init_count 0");
             }
 
@@ -645,7 +645,56 @@ void register_ps2_runtime_kernel_tests()
             negParam.max_count = -2;
             std::memcpy(env.rdram.data() + K_PARAM_ADDR, &negParam, sizeof(negParam));
             CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "a negative max_count is still rejected");
+            const int negId = getRegS32(env.ctx, 2);
+            t.IsTrue(negId > 0, "a negative max_count is accepted (kernel checks only init<0, P1z-2)");
+            const EeSemaphore *negSema = env.runtime.eeScheduler().semaphore(negId);
+            if (negSema != nullptr)
+            {
+                t.Equals(negSema->maxCount, -2, "a negative max_count is stored as-is");
+            }
+
+            EeSemaStatus overParam{};
+            overParam.max_count = 3;
+            overParam.init_count = 5;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &overParam, sizeof(overParam));
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int overId = getRegS32(env.ctx, 2);
+            t.IsTrue(overId > 0, "init_count above max_count is accepted (no init<=max check in the kernel)");
+            const EeSemaphore *overSema = env.runtime.eeScheduler().semaphore(overId);
+            if (overSema != nullptr)
+            {
+                t.Equals(overSema->maxCount, 3, "an over-init max_count is stored unchanged");
+                t.Equals(overSema->count, 5, "an over-init init_count is stored unchanged");
+            }
+
+            EeSemaStatus badParam{};
+            badParam.max_count = 4;
+            badParam.init_count = -1;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &badParam, sizeof(badParam));
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "a negative init_count is still rejected");
+
+            // P1v's own race window, kernel-true: two waiter-less signals hold
+            // count 2 and both waits succeed; no KE_SEMA_OVF exists (P1z-3).
+            TestEnv win;
+            EeScheduler &ee = win.runtime.eeScheduler();
+            ee.reset(win.rdram.data(), win.ctx);
+            ee.bindMainContextForSyscall(win.ctx, win.rdram.data());
+            const int winId = ee.createSemaphore(0, 0, 0u, 0u);
+            t.IsTrue(winId > 0, "the race-window semaphore must be created");
+            const EeSemaphore *winSema = ee.semaphore(winId);
+            t.IsTrue(winSema != nullptr, "the race-window semaphore must exist");
+            if (winSema != nullptr)
+            {
+                t.Equals(ee.signalSemaphore(winId, false), winId, "the first waiter-less signal succeeds");
+                t.Equals(ee.signalSemaphore(winId, false), winId, "the second waiter-less signal succeeds (no OVF)");
+                t.Equals(ee.semaphore(winId)->count, 2, "two waiter-less signals hold count 2");
+                ee.waitSemaphore(winId);
+                t.Equals(getRegS32(ee.thread(1)->context, 2), winId, "the first wait consumes");
+                ee.waitSemaphore(winId);
+                t.Equals(getRegS32(ee.thread(1)->context, 2), winId, "the second wait consumes");
+                t.Equals(ee.semaphore(winId)->count, 0, "both waits consumed the count back to 0");
+            }
         });
 
         tc.Run("Drop census lines format exactly and the kill-switch gates emission (P1w)", [](TestCase &t)
