@@ -41,7 +41,6 @@ namespace
     constexpr int KE_NOT_SUSPEND = -415;
     constexpr int KE_NOT_WAIT = -416;
     constexpr int KE_RELEASE_WAIT = -418;
-    constexpr int KE_SEMA_ZERO = -419;
     constexpr int KE_SEMA_OVF = -420;
     constexpr int KE_EVF_COND = -421;
     constexpr int KE_WAIT_DELETE = -425;
@@ -1187,7 +1186,9 @@ int EeScheduler::deleteSemaphore(int id, bool interruptSafe)
         char dropArgs[32];
         std::snprintf(dropArgs, sizeof(dropArgs), "id=%d", id);
         ps2_log::emitDrop("sched/deleteSemaphore", "KE_UNKNOWN_SEMID", dropArgs);
-        return KE_UNKNOWN_SEMID;
+        // P12: stock DeleteSema returns plain -1 for unknown ids
+        // (0x80004a94 b -> addiu v0,zero,-1; no -408 in KERNEL).
+        return KE_ERROR;
     }
     std::deque<int> waiters = std::move(it->second.waiters);
     m_semaphores.erase(it);
@@ -1224,12 +1225,14 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
                       << " ra=0x" << wakerRa << std::dec << " inInt=" << (m_insideInterrupt ? 1 : 0)
                       << " iSafe=" << (interruptSafe ? 1 : 0) << " invKind=" << wakerInvKind
                       << " invDepth=" << wakerInvDepth << " cbFunc=" << std::hex << wakerInvTag << std::dec
-                      << " target=- tStatus=-1 tSusp=-1 result=" << KE_UNKNOWN_SEMID << std::endl;
+                      << " target=- tStatus=-1 tSusp=-1 result=" << KE_ERROR << std::endl;
         }
         char dropArgs[32];
         std::snprintf(dropArgs, sizeof(dropArgs), "id=%d", id);
         ps2_log::emitDrop("sched/signalSemaphore", "KE_UNKNOWN_SEMID", dropArgs);
-        return KE_UNKNOWN_SEMID;
+        // P12: stock SignalSema returns plain -1 for unknown ids
+        // (0x80004c04 b -> addiu v0,zero,-1; no -408 in KERNEL).
+        return KE_ERROR;
     }
     const int countBefore = object->count;
     const size_t waitersBefore = object->waiters.size();
@@ -1285,12 +1288,15 @@ int EeScheduler::pollSemaphore(int id)
         char dropArgs[32];
         std::snprintf(dropArgs, sizeof(dropArgs), "id=%d", id);
         ps2_log::emitDrop("sched/pollSemaphore", "KE_UNKNOWN_SEMID", dropArgs);
-        return KE_UNKNOWN_SEMID;
+        // P12: unknown ids miss with plain -1 too (PollSema 0x80004dc0:
+        // invalid ids fall through to the same jr/addiu v0,zero,-1 pair
+        // at 0x80004dcc; no -408 exists in KERNEL).
+        return KE_ERROR;
     }
     // P10: the EE kernel misses with plain -1 (PollSema 0x80004dc0: blez at
     // 0x80004de4 falls back to the jr/addiu v0,zero,-1 pair; no -419 exists
     // in KERNEL), so return KE_ERROR, not KE_SEMA_ZERO. No [drop]: a miss is
-    // a normal answer (P1w exclusion kept). Unknown ids stay KE_UNKNOWN_SEMID.
+    // a normal answer (P1w exclusion kept).
     if (object->count == 0)
     {
         return KE_ERROR;
@@ -1309,14 +1315,17 @@ void EeScheduler::waitSemaphore(int id)
     {
         GuestThread *self = currentThread();
         assert(self != nullptr);
-        setReturnS32(&self->activeContext(), KE_UNKNOWN_SEMID);
+        // P12: stock WaitSema returns plain -1 for unknown ids (0x80004d30
+        // b -> addiu v0,zero,-1, passed through the wrapper which only
+        // special-cases -2; no -408 in KERNEL). No park, like the kernel.
+        setReturnS32(&self->activeContext(), KE_ERROR);
         if (semaDiag)
         {
             std::cerr << "[diag:sema] op=wait id=" << id << " count=-1->-1 parked=0"
                       << " waker=" << m_currentThreadId << " pc=0x" << std::hex << self->activeContext().pc
                       << " ra=0x" << getRegU32(&self->activeContext(), 31) << std::dec
                       << " inInt=" << (m_insideInterrupt ? 1 : 0)
-                      << " result=" << KE_UNKNOWN_SEMID;
+                      << " result=" << KE_ERROR;
             if (diagSemaS0Enabled())
             {
                 std::cerr << " s0=0x" << std::hex << getRegU32(&self->activeContext(), 16) << std::dec;

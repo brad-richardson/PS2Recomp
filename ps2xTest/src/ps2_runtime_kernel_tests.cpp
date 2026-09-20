@@ -37,7 +37,6 @@ namespace
     constexpr int KE_UNKNOWN_THID = -407;
     constexpr int KE_UNKNOWN_SEMID = -408;
     constexpr int KE_DORMANT = -413;
-    constexpr int KE_SEMA_ZERO = -419;
     constexpr int KE_SEMA_OVF = -420;
     constexpr int KE_WAIT_DELETE = -425;
     constexpr int KE_RELEASE_WAIT = -418;
@@ -741,6 +740,45 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "iPollSema shares the kernel -1 miss value");
         });
 
+        tc.Run("unknown semaphore ids return KE_ERROR like the kernel on every sema path (P12)", [](TestCase &t)
+        {
+            // Stock-kernel unknown-id returns (P12 re-derivation, P1z
+            // method): delete 0x80004a94 (b), signal 0x80004c04 (b), wait
+            // 0x80004d30 (b), poll 0x80004dcc (jr), refer 0x80004e04 (jr)
+            // all land on addiu v0,zero,-1 — for out-of-range AND freed
+            // (count<0) ids alike — and no -408 immediate exists anywhere
+            // in KERNEL.
+            constexpr int kBogus = 9999;
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+
+            t.Equals(ee.deleteSemaphore(kBogus, false), KE_ERROR,
+                     "DeleteSema on a never-created id must miss with KE_ERROR (-1)");
+            t.Equals(ee.signalSemaphore(kBogus, false), KE_ERROR,
+                     "SignalSema on a never-created id must miss with KE_ERROR (-1)");
+            t.Equals(ee.pollSemaphore(kBogus), KE_ERROR,
+                     "PollSema on a never-created id must miss with KE_ERROR (-1)");
+            ee.waitSemaphore(kBogus);
+            t.Equals(getRegS32(ee.thread(1)->context, 2), KE_ERROR,
+                     "WaitSema on a never-created id must miss with KE_ERROR (-1)");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(kBogus));
+            setRegU32(env.ctx, 5, K_STATUS_ADDR);
+            ReferSemaStatus(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR,
+                     "ReferSemaStatus on a never-created id must miss with KE_ERROR (-1)");
+
+            const int doomed = ee.createSemaphore(0, 1, 0u, 0u);
+            t.IsTrue(doomed > 0, "the throwaway semaphore must be created");
+            t.Equals(ee.deleteSemaphore(doomed, false), doomed, "deleting the throwaway succeeds");
+            t.Equals(ee.signalSemaphore(doomed, false), KE_ERROR,
+                     "SignalSema on a deleted id must miss with KE_ERROR (-1)");
+            t.Equals(ee.pollSemaphore(doomed), KE_ERROR,
+                     "PollSema on a deleted id must miss with KE_ERROR (-1)");
+        });
+
         tc.Run("Drop census lines format exactly and the kill-switch gates emission (P1w)", [](TestCase &t)
         {
             t.Equals(ps2_log::formatDropLine("sched/x", "r", "a=1"), "[drop] sched/x r a=1",
@@ -1200,7 +1238,7 @@ void register_ps2_runtime_kernel_tests()
 
             setRegU32(env.ctx, 4, 0x7FFFu);
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "PollSema should reject unknown semaphore ids");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "PollSema should reject unknown semaphore ids with KE_ERROR like the kernel (P12)");
 
             setRegU32(env.ctx, 4, 0xFFFFFFFFu);
             t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");

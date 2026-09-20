@@ -34,7 +34,6 @@ constexpr int KE_NOT_DORMANT = -414;
 constexpr int KE_NOT_SUSPEND = -415;
 constexpr int KE_NOT_WAIT = -416;
 constexpr int KE_RELEASE_WAIT = -418;
-constexpr int KE_SEMA_ZERO = -419;
 constexpr int KE_SEMA_OVF = -420;
 constexpr int KE_EVF_COND = -421;
 constexpr int KE_EVF_MULTI = -422;

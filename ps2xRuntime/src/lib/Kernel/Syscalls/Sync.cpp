@@ -159,7 +159,10 @@ namespace ps2_syscalls
         if (!semaphore)
         {
             ps2_log::emitDrop("syscall/ReferSemaStatus", "KE_UNKNOWN_SEMID");
-            setReturnS32(ctx, KE_UNKNOWN_SEMID);
+            // P12: stock ReferSemaStatus returns plain -1 for unknown ids
+            // (0x80004e04 jr/addiu v0,zero,-1, also via the 0x80004e1c bltz
+            // for freed slots; no -408 in KERNEL).
+            setReturnS32(ctx, KE_ERROR);
             return;
         }
         auto *status = getEeGuestStruct<ee_sema_t>(rdram, getRegU32(ctx, 5));
