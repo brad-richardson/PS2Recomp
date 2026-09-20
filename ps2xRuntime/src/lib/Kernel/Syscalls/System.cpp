@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "Ssx3CopiedPayload.h"
 #include "System.h"
 
 namespace ps2_syscalls
@@ -438,6 +439,13 @@ namespace ps2_syscalls
 
         if (!runtime->hasFunction(handler))
         {
+            // K1: the game's copied syscall payload (SSX3 0x80075000) has
+            // no function-table entry by construction; serve the
+            // provenance-checked HLE equivalent before the KE_ERROR drop.
+            if (tryDispatchSsx3CopiedPayload(syscallNumber, handler, rdram, ctx))
+            {
+                return true;
+            }
             char dropArgs[64];
             std::snprintf(dropArgs, sizeof(dropArgs), "syscall=0x%x handler=0x%x", syscallNumber, handler);
             ps2_log::emitDrop("syscall/dispatchSyscallOverride", "KE_ERROR", dropArgs);
@@ -500,6 +508,7 @@ namespace ps2_syscalls
         const uint32_t syscallIndex = getRegU32(ctx, 4);
         const uint32_t handler = getRegU32(ctx, 5);
         runtime->setEeSyscallOverride(rdram, syscallIndex, handler);
+        noteSsx3CopiedPayloadInstall(syscallIndex, handler);
 
         setReturnS32(ctx, 0);
     }

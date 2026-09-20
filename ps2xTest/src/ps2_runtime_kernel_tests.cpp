@@ -25,6 +25,8 @@ namespace ps2_syscalls
     // Defined in ps2xRuntime Syscalls/RPC.cpp; TU-local forward declaration
     // (same pattern as the resetSifState declaration in ps2_runtime.cpp).
     void resetSsx3SifHandshakeForTesting();
+    // Defined in ps2xRuntime Syscalls/Ssx3CopiedPayload.cpp (K1).
+    void resetSsx3CopiedPayloadForTesting();
 }
 
 namespace
@@ -1934,6 +1936,192 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(readGuestU32(env.rdram.data(), kSregs1Addr), 0u,
                      "SET_SREG for a slot other than 1 must not touch sregs[1]");
             resetSsx3SifHandshakeForTesting();
+        });
+
+        tc.Run("SSX3 copied payload lookup serves all six installer keys (K1)", [](TestCase &t)
+        {
+            TestEnv env;
+            resetSsx3CopiedPayloadForTesting();
+            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+
+            // The game's own six pairs (ELF 0x4564C0, destination 0x80075300).
+            constexpr uint32_t kPairs[] = {
+                0x55u, 0x80075038u, 0x56u, 0x800750C8u, 0x57u, 0x80075108u,
+                0x58u, 0x80075158u, 0x59u, 0x800751A8u, 0x03u, 0x80075330u,
+            };
+            constexpr uint32_t kSrc = 0x4561C0u;
+            constexpr uint32_t kDstPhys = 0x75000u;
+            constexpr uint32_t kSize = 0x330u;
+            for (uint32_t i = 0; i < kSize; ++i)
+            {
+                env.rdram[kSrc + i] = static_cast<uint8_t>((i * 31u + 7u) & 0xFFu);
+            }
+            writeGuestWords(env.rdram.data(), kSrc + 0x300u, kPairs, std::size(kPairs));
+            std::memcpy(env.rdram.data() + kDstPhys, env.rdram.data() + kSrc, kSize);
+
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x5Bu, 0x80075000u);
+            for (size_t i = 0; i < std::size(kPairs); i += 2)
+            {
+                setRegU32(env.ctx, 4, kPairs[i]);
+                t.IsTrue(callSyscall(0x5Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                         "copied-payload lookup should dispatch");
+                t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), kPairs[i + 1],
+                         "copied-payload lookup should return the payload's own value");
+            }
+            setRegU32(env.ctx, 4, 0x54u);
+            t.IsTrue(callSyscall(0x5Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "a lookup miss should still dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0u,
+                     "a lookup miss should return 0 like the payload");
+            resetSsx3CopiedPayloadForTesting();
+        });
+
+        tc.Run("SSX3 copied payload helpers validate like the payload (K1)", [](TestCase &t)
+        {
+            TestEnv env;
+            resetSsx3CopiedPayloadForTesting();
+            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+
+            constexpr uint32_t kSrc = 0x4561C0u;
+            constexpr uint32_t kDstPhys = 0x75000u;
+            constexpr uint32_t kSize = 0x330u;
+            for (uint32_t i = 0; i < kSize; ++i)
+            {
+                env.rdram[kSrc + i] = static_cast<uint8_t>((i * 31u + 7u) & 0xFFu);
+            }
+            std::memcpy(env.rdram.data() + kDstPhys, env.rdram.data() + kSrc, kSize);
+
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x55u, 0x80075038u);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x56u, 0x800750C8u);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x57u, 0x80075108u);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x58u, 0x80075158u);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x59u, 0x800751A8u);
+
+            setRegU32(env.ctx, 4, 0x2Fu);
+            t.IsTrue(callSyscall(0x56u, env.rdram.data(), &env.ctx, &env.runtime), "0x56 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), 0x2F, "0x56 with a0<0x30 should return the index");
+            setRegU32(env.ctx, 4, 0x30u);
+            t.IsTrue(callSyscall(0x56u, env.rdram.data(), &env.ctx, &env.runtime), "0x56 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x56 with a0>=0x30 should return -1");
+
+            constexpr uint32_t kOut0 = 0x00002000u;
+            constexpr uint32_t kOut1 = 0x00002100u;
+            constexpr uint32_t kOut2 = 0x00002200u;
+            constexpr uint32_t kOut3 = 0x00002300u;
+            writeGuestU32(env.rdram.data(), kOut0, 0xDEADBEEFu);
+            writeGuestU32(env.rdram.data(), kOut1, 0xDEADBEEFu);
+            writeGuestU32(env.rdram.data(), kOut2, 0xDEADBEEFu);
+            writeGuestU32(env.rdram.data(), kOut3, 0xDEADBEEFu);
+            setRegU32(env.ctx, 4, 0x10u);
+            setRegU32(env.ctx, 5, kOut0);
+            setRegU32(env.ctx, 6, kOut1);
+            setRegU32(env.ctx, 7, kOut2);
+            setRegU32(env.ctx, 8, kOut3);
+            t.IsTrue(callSyscall(0x57u, env.rdram.data(), &env.ctx, &env.runtime), "0x57 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), 0x10, "0x57 with a0<0x30 should return the index");
+            t.Equals(readGuestU32(env.rdram.data(), kOut0), 0u, "0x57 should store empty-TLB zeros");
+            t.Equals(readGuestU32(env.rdram.data(), kOut1), 0u, "0x57 should store empty-TLB zeros");
+            t.Equals(readGuestU32(env.rdram.data(), kOut2), 0u, "0x57 should store empty-TLB zeros");
+            t.Equals(readGuestU32(env.rdram.data(), kOut3), 0u, "0x57 should store empty-TLB zeros");
+            setRegU32(env.ctx, 4, 0x30u);
+            t.IsTrue(callSyscall(0x57u, env.rdram.data(), &env.ctx, &env.runtime), "0x57 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x57 with a0>=0x30 should return -1");
+
+            for (const uint32_t a1 : {0x00123456u, 0x309ABCDEu, 0x40FEDCBAu})
+            {
+                setRegU32(env.ctx, 5, a1);
+                t.IsTrue(callSyscall(0x55u, env.rdram.data(), &env.ctx, &env.runtime),
+                         "0x55 should dispatch");
+                t.Equals(getRegS32(env.ctx, 2), 0, "0x55 with a valid top nibble should succeed");
+            }
+            for (const uint32_t a1 : {0x10123456u, 0x20123456u, 0x50123456u})
+            {
+                setRegU32(env.ctx, 5, a1);
+                t.IsTrue(callSyscall(0x55u, env.rdram.data(), &env.ctx, &env.runtime),
+                         "0x55 should dispatch");
+                t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x55 with an invalid top nibble should return -1");
+            }
+
+            t.IsTrue(callSyscall(0x58u, env.rdram.data(), &env.ctx, &env.runtime), "0x58 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x58 with no HLE mappings should miss with -1");
+
+            setRegU32(env.ctx, 4, 0x1001u);
+            t.IsTrue(callSyscall(0x59u, env.rdram.data(), &env.ctx, &env.runtime), "0x59 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x59 with a misaligned size should return -1");
+            setRegU32(env.ctx, 4, 0x1000u);
+            t.IsTrue(callSyscall(0x59u, env.rdram.data(), &env.ctx, &env.runtime), "0x59 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x59 with a small size should return -1");
+            setRegU32(env.ctx, 4, 0u);
+            t.IsTrue(callSyscall(0x59u, env.rdram.data(), &env.ctx, &env.runtime), "0x59 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), 0, "0x59 with size 0 should succeed with 0");
+            setRegU32(env.ctx, 4, 0x10000000u);
+            t.IsTrue(callSyscall(0x59u, env.rdram.data(), &env.ctx, &env.runtime), "0x59 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), 0, "0x59 should allocate wired index 0 first");
+            t.IsTrue(callSyscall(0x59u, env.rdram.data(), &env.ctx, &env.runtime), "0x59 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), 1, "0x59 should allocate wired index 1 next");
+            resetSsx3CopiedPayloadForTesting();
+        });
+
+        tc.Run("SSX3 copied payload refuses broken copies and other games (K1)", [](TestCase &t)
+        {
+            TestEnv env;
+            resetSsx3CopiedPayloadForTesting();
+
+            constexpr uint32_t kSrc = 0x4561C0u;
+            constexpr uint32_t kDstPhys = 0x75000u;
+            constexpr uint32_t kSize = 0x330u;
+            for (uint32_t i = 0; i < kSize; ++i)
+            {
+                env.rdram[kSrc + i] = static_cast<uint8_t>((i * 31u + 7u) & 0xFFu);
+            }
+            std::memcpy(env.rdram.data() + kDstPhys, env.rdram.data() + kSrc, kSize);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x5Bu, 0x80075000u);
+
+            setRegU32(env.ctx, 4, 0x55u);
+            t.IsTrue(callSyscall(0x5Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "an unarmed quirk should still dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR,
+                     "an unarmed quirk should keep the existing KE_ERROR drop path");
+
+            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+            env.rdram[kDstPhys + 0x10u] ^= 0xFFu;
+            setRegU32(env.ctx, 4, 0x55u);
+            t.IsTrue(callSyscall(0x5Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "a broken copy should still dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR,
+                     "a broken copy should keep the existing KE_ERROR drop path");
+
+            env.rdram[kDstPhys + 0x10u] ^= 0xFFu;
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x54u, 0x80075000u);
+            setRegU32(env.ctx, 4, 0x55u);
+            t.IsTrue(callSyscall(0x54u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "an unmatched pair should still dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR,
+                     "an unmatched (syscall, handler) pair should keep the KE_ERROR drop path");
+            resetSsx3CopiedPayloadForTesting();
+        });
+
+        tc.Run("SetSyscall publishes markers the scanner cross-checks (K1)", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kTableBase = 0x80011F80u;
+            setRegU32(env.ctx, 4, 0x83u);
+            setRegU32(env.ctx, 5, 0x42C168u);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall should dispatch for the 0x83 marker");
+            setRegU32(env.ctx, 4, 0x5Au);
+            setRegU32(env.ctx, 5, 0x42C130u);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall should dispatch for the 0x5A marker");
+
+            constexpr uint32_t kMarkA = (kTableBase + 0x83u * 4u) & 0x1FFFFFFFu;
+            constexpr uint32_t kMarkB = (kTableBase + 0x5Au * 4u) & 0x1FFFFFFFu;
+            t.Equals(readGuestU32(env.rdram.data(), kMarkA), 0x42C168u,
+                     "the 0x83 marker should be visible in the KSEG0 mirror");
+            t.Equals(readGuestU32(env.rdram.data(), kMarkB), 0x42C130u,
+                     "the 0x5A marker should be visible in the KSEG0 mirror");
+            t.Equals(kMarkA - 0x83u * 4u, kMarkB - 0x5Au * 4u,
+                     "both markers should cross-check to the same table base");
         });
     });
 }
