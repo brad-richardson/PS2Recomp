@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -136,6 +137,44 @@ inline std::string formatDropLine(const std::string &site, const std::string &re
     return out.str();
 }
 
+// T1 in-memory census of PRINTED [drop] lines, keyed by site+reason (the
+// P24-2a census shape: args vary per call and stay in the log only). The
+// bump sits after the mute check so the census equals the visible lines.
+// Drops are exceptional: one map increment, no hot-path cost. Single
+// writer (EE executor / analyzer pass); no lock, like the P1c counters.
+struct DropCensusRow
+{
+    std::string site;
+    std::string reason;
+    uint64_t count = 0;
+};
+
+inline std::map<std::pair<std::string, std::string>, uint64_t> &dropCensusCounts()
+{
+    static std::map<std::pair<std::string, std::string>, uint64_t> counts;
+    return counts;
+}
+
+inline void recordDropCensus(const std::string &site, const std::string &reason)
+{
+    ++dropCensusCounts()[{site, reason}];
+}
+
+inline std::vector<DropCensusRow> snapshotDropCensus()
+{
+    std::vector<DropCensusRow> rows;
+    for (const auto &[key, count] : dropCensusCounts())
+    {
+        rows.push_back(DropCensusRow{key.first, key.second, count});
+    }
+    return rows;
+}
+
+inline void resetDropCensusForTesting()
+{
+    dropCensusCounts().clear();
+}
+
 inline void emitDropTo(std::ostream &out,
                        const std::string &site,
                        const std::string &reason,
@@ -146,6 +185,7 @@ inline void emitDropTo(std::ostream &out,
         return;
     }
     out << formatDropLine(site, reason, args) << std::endl;
+    recordDropCensus(site, reason);
 }
 
 inline void emitDrop(const std::string &site, const std::string &reason, const std::string &args = "")

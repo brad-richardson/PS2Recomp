@@ -2,6 +2,7 @@
 #include "RPC.h"
 #include "../../ps2_iop_transport.h"
 #include "game_overrides.h"
+#include "ps2_park_snapshot.h"
 
 namespace ps2_syscalls
 {
@@ -217,9 +218,15 @@ namespace ps2_syscalls
     {
         const uint32_t pathAddr = getRegU32(ctx, 4); // $a0
         const std::string modulePath = readGuestCStringBounded(rdram, pathAddr, kMaxSifModulePathBytes);
+        const int parkTid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
         if (modulePath.empty())
         {
             ps2_log::emitDrop("syscall/SifLoadModule", "error");
+            ps2_park::ParkRpcEvent parkLoad;
+            parkLoad.op = "load";
+            parkLoad.tid = parkTid;
+            parkLoad.claimed = false;
+            ps2_park::tallyRpcEvent(std::move(parkLoad));
             setReturnS32(ctx, -1);
             return;
         }
@@ -228,6 +235,12 @@ namespace ps2_syscalls
         if (moduleId <= 0)
         {
             ps2_log::emitDrop("syscall/SifLoadModule", "error");
+            ps2_park::ParkRpcEvent parkLoad;
+            parkLoad.op = "load";
+            parkLoad.tid = parkTid;
+            parkLoad.claimed = false;
+            parkLoad.path = modulePath;
+            ps2_park::tallyRpcEvent(std::move(parkLoad));
             setReturnS32(ctx, -1);
             return;
         }
@@ -242,6 +255,15 @@ namespace ps2_syscalls
             }
         }
         logSifModuleAction("load", moduleId, modulePath, refs);
+
+        // T1: every LoadModule call lands in the snapshot tally.
+        ps2_park::ParkRpcEvent parkLoad;
+        parkLoad.op = "load";
+        parkLoad.sid = static_cast<uint32_t>(moduleId);
+        parkLoad.tid = parkTid;
+        parkLoad.claimed = true;
+        parkLoad.path = modulePath;
+        ps2_park::tallyRpcEvent(std::move(parkLoad));
 
         setReturnS32(ctx, moduleId);
     }
@@ -294,6 +316,13 @@ namespace ps2_syscalls
             event.result = -1;
             pushSifRpcDebugEvent(event);
             ps2_log::emitDrop("syscall/SifBindRpc", "error");
+            ps2_park::ParkRpcEvent parkBind;
+            parkBind.op = "bind";
+            parkBind.sid = rpcId;
+            parkBind.fno = mode;
+            parkBind.tid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
+            parkBind.claimed = false;
+            ps2_park::tallyRpcEvent(std::move(parkBind));
             setReturnS32(ctx, -1);
             return;
         }
@@ -309,6 +338,7 @@ namespace ps2_syscalls
         client->hdr.mode = mode;
 
         uint32_t serverPtr = 0;
+        bool parkServerPrebound = false;
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
             client->hdr.rpc_id = g_rpc_next_id++;
@@ -316,6 +346,7 @@ namespace ps2_syscalls
             if (it != g_rpc_servers.end())
             {
                 serverPtr = it->second.sd_ptr;
+                parkServerPrebound = true;
             }
             g_rpc_clients[clientPtr] = {};
             g_rpc_clients[clientPtr].sid = rpcId;
@@ -359,6 +390,15 @@ namespace ps2_syscalls
         event.mode = mode;
         event.result = 0;
         pushSifRpcDebugEvent(event);
+        // T1: claimed = a server was already registered for this sid
+        // (vs the dummy allocated above so the bind loop proceeds).
+        ps2_park::ParkRpcEvent parkBind;
+        parkBind.op = "bind";
+        parkBind.sid = rpcId;
+        parkBind.fno = mode;
+        parkBind.tid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
+        parkBind.claimed = parkServerPrebound;
+        ps2_park::tallyRpcEvent(std::move(parkBind));
         setReturnS32(ctx, 0);
     }
 
@@ -501,6 +541,15 @@ namespace ps2_syscalls
             std::snprintf(dropArgs, sizeof(dropArgs), "sid=0x%x rpc=0x%x mode=0x%x",
                           sidHint, rpcNum, mode);
             ps2_log::emitDrop("syscall/SifCallRpc", "missing-client", dropArgs);
+            ps2_park::ParkRpcEvent parkCall;
+            parkCall.op = "call";
+            parkCall.sid = sidHint;
+            parkCall.fno = rpcNum;
+            parkCall.sendSize = sendSize;
+            parkCall.recvSize = receiveSize;
+            parkCall.tid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
+            parkCall.claimed = false;
+            ps2_park::tallyRpcEvent(std::move(parkCall));
             setReturnS32(ctx, -1);
             return;
         }
@@ -672,6 +721,17 @@ namespace ps2_syscalls
                 }
 #endif
                 pushSifRpcDebugEvent(event);
+                // T1: one tally row per completed call; claimed = the HLE
+                // handled it or a server function ran (same `handled`).
+                ps2_park::ParkRpcEvent parkCall;
+                parkCall.op = "call";
+                parkCall.sid = sid;
+                parkCall.fno = rpcNum;
+                parkCall.sendSize = sendSize;
+                parkCall.recvSize = receiveSize;
+                parkCall.tid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
+                parkCall.claimed = handled;
+                ps2_park::tallyRpcEvent(std::move(parkCall));
             };
 
             setReturnS32(&parent, 0);
@@ -1021,6 +1081,8 @@ namespace ps2_syscalls
         // set_sreg writes the word, but the HLE has no IOP SIF peer (this
         // send is otherwise a no-op). Any nonzero exits the beqz poll;
         // the value mirrors the sent value and Sony's SetReg(RPCINIT,1).
+        // T1: claimed = the host acted on this send (handshake applied).
+        bool parkClaimed = false;
         if (g_ssx3SifHandshakeEnabled.load(std::memory_order_relaxed) &&
             cid == 0x80000001u)
         {
@@ -1040,6 +1102,7 @@ namespace ps2_syscalls
                 {
                     const uint32_t one = 1u;
                     std::memcpy(sregs1, &one, sizeof(one));
+                    parkClaimed = true;
                     static int handshakeCount = 0;
                     if (handshakeCount < 5)
                     {
@@ -1059,6 +1122,17 @@ namespace ps2_syscalls
                                                  << " extra=0x" << destExtra << std::dec << std::endl);
             ++logCount;
         }
+
+        // T1: every SendCmd lands in the snapshot tally (the log line
+        // above caps at 5; the tally does not).
+        ps2_park::ParkRpcEvent parkSend;
+        parkSend.op = "sendcmd";
+        parkSend.sid = cid;
+        parkSend.sendSize = packetSize;
+        parkSend.recvSize = sizeExtra;
+        parkSend.tid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
+        parkSend.claimed = parkClaimed;
+        ps2_park::tallyRpcEvent(std::move(parkSend));
 
         // Return non-zero on success.
         setReturnS32(ctx, 1);

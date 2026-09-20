@@ -1,5 +1,6 @@
 #include "ps2_runtime.h"
 #include "ps2_log.h"
+#include "ps2_park_snapshot.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "game_overrides.h"
@@ -1761,6 +1762,9 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // registered host function). Counts per call target with first/last $ra.
     static uint64_t s_diagCallTick = 0;
     ++s_diagCallTick;
+    // T1: cumulative hot-pc tally, always on (the P1c map above is
+    // per-period and cleared; the snapshot needs the whole boot).
+    ps2_park::tallyDispatch(targetPc, (ctx != nullptr) ? getRegU32(ctx, 31) : 0u);
     if (diagPeriodMs() != 0u)
     {
         const uint32_t callerRa = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;

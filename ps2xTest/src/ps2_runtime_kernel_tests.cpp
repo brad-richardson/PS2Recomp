@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "game_overrides.h"
 #include "ps2_log.h"
+#include "ps2_park_snapshot.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
@@ -814,6 +815,120 @@ void register_ps2_runtime_kernel_tests()
             {
                 unsetenv("PS2X_DROP_SILENCE");
             }
+        });
+
+        tc.Run("Park tallies count dispatches, semas, RPC, GS and drops (T1)", [](TestCase &t)
+        {
+            ps2_park::resetTalliesForTesting();
+            ps2_log::resetDropCensusForTesting();
+
+            ps2_park::tallyDispatch(0x41ea18u, 0x41aac0u);
+            ps2_park::tallyDispatch(0x41ea18u, 0x41aaccu);
+            ps2_park::tallyDispatch(0x326478u, 0x3260ecu);
+            const auto &hot = ps2_park::hotPcCounts();
+            t.Equals(hot.size(), static_cast<size_t>(2), "two distinct dispatch targets tallied");
+            t.Equals(hot.at(0x41ea18u).count, static_cast<uint64_t>(2), "repeat target counts twice");
+            t.Equals(hot.at(0x41ea18u).firstRa, static_cast<uint32_t>(0x41aac0u), "first ra kept");
+            t.Equals(hot.at(0x41ea18u).lastRa, static_cast<uint32_t>(0x41aaccu), "last ra kept");
+
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+            const int sema = ee.createSemaphore(1, 5, 0u, 0u);
+            t.IsTrue(sema > 0, "throwaway sema created");
+            ee.waitSemaphore(sema);
+            t.Equals(ee.signalSemaphore(sema, false), sema, "signal returns the id");
+            t.Equals(ps2_park::semaCreates().size(), static_cast<size_t>(1), "one create row");
+            t.Equals(ps2_park::semaCreates()[0].id, sema, "create row names the sema");
+            t.Equals(ps2_park::semaCreates()[0].maxCount, 5, "create row keeps max");
+            t.Equals(ps2_park::semaWaitHist()[sema].size(), static_cast<size_t>(1), "one waiter pc");
+            t.Equals(ps2_park::semaSignalHist()[sema].size(), static_cast<size_t>(1), "one signaller pc");
+            ps2_park::tallySched(1);
+            ps2_park::tallySched(3);
+            t.Equals(ps2_park::schedCounts()[1], static_cast<uint64_t>(1), "sched count per thread");
+
+            ps2_park::ParkRpcEvent call;
+            call.op = "call";
+            call.sid = 0x80000211u;
+            call.fno = 0x1u;
+            call.sendSize = 16u;
+            call.recvSize = 144u;
+            call.tid = 3;
+            call.claimed = false;
+            ps2_park::tallyRpcEvent(call);
+            t.Equals(ps2_park::rpcEvents().size(), static_cast<size_t>(1), "one rpc row");
+            t.Equals(ps2_park::rpcEvents()[0].sid, static_cast<uint32_t>(0x80000211u), "rpc row keeps sid");
+
+            ps2_park::tallyGsKick(true);
+            ps2_park::tallyGsKick(false);
+            ps2_park::tallyGsGif();
+            ps2_park::tallyGsCopyReg();
+            t.Equals(ps2_park::gsKickCount().load(), static_cast<uint64_t>(2), "two kicks");
+            t.Equals(ps2_park::gsKickDrawingCount().load(), static_cast<uint64_t>(1), "one drawing kick");
+            t.Equals(ps2_park::gsGifPacketCount().load(), static_cast<uint64_t>(1), "one gif packet");
+            t.Equals(ps2_park::gsCopyRegCount().load(), static_cast<uint64_t>(1), "one copy reg");
+
+            std::ostringstream sink;
+            ps2_log::emitDropTo(sink, "sched/x", "KE_ERROR", "id=9");
+            ps2_log::emitDropTo(sink, "sched/x", "KE_ERROR", "id=10");
+            const auto census = ps2_log::snapshotDropCensus();
+            t.Equals(census.size(), static_cast<size_t>(1), "census groups by site+reason");
+            t.Equals(census[0].count, static_cast<uint64_t>(2), "both drops counted");
+        });
+
+        tc.Run("Park snapshot JSON/table render the exact schema (T1)", [](TestCase &t)
+        {
+            ps2_park::ParkSnapshotData data;
+            data.source = "emitter";
+            ps2_park::ParkThreadRow thread;
+            thread.id = 3;
+            thread.status = 2;
+            thread.statusName = "Waiting";
+            thread.waitReason = 2;
+            thread.waitReasonName = "Semaphore";
+            thread.waitId = 30;
+            thread.pc = 0x423de8u;
+            thread.ra = 0x31aca4u;
+            thread.sp = 0x61ff00u;
+            thread.entry = 0x31ac60u;
+            thread.priority = 101;
+            thread.scheduled = 43u;
+            thread.chain = {0x31aca4u, 0x31a700u};
+            data.threads.push_back(thread);
+            ps2_park::ParkSemaRow sema;
+            sema.id = 30;
+            sema.count = 0;
+            sema.maxCount = 1024;
+            sema.initCount = 0;
+            sema.waiters = 1;
+            data.semaphores.push_back(sema);
+            ps2_park::ParkRpcEvent load;
+            load.op = "load";
+            load.sid = 7u;
+            load.tid = 1;
+            load.claimed = true;
+            load.path = "cdrom0:/data/x.\"irx\"\n";
+            data.rpc.push_back(load);
+
+            const std::string json = ps2_park::renderParkJson(data);
+            t.IsTrue(json.find("\"schema\": \"ps2x-park-snapshot/1\"") != std::string::npos,
+                     "json carries the schema tag");
+            t.IsTrue(json.find("\"status_name\": \"Waiting\"") != std::string::npos,
+                     "json carries thread rows");
+            t.IsTrue(json.find("\"chain\": [\"0x31aca4\", \"0x31a700\"]") != std::string::npos,
+                     "json renders the ra chain as hex");
+            t.IsTrue(json.find("x.\\\"irx\\\"\n") == std::string::npos,
+                     "raw quotes must not leak into json");
+            t.IsTrue(json.find("x.\\\"irx\\\"\\n") != std::string::npos,
+                     "json escapes quotes and newlines in paths");
+
+            const std::string table = ps2_park::renderParkTable(data);
+            t.IsTrue(table.find("park snapshot (emitter") != std::string::npos,
+                     "table carries the source header");
+            t.IsTrue(table.find("id=3 Waiting wait=Semaphore:30 pc=0x423de8") != std::string::npos,
+                     "table renders the thread line");
+            t.IsTrue(table.find("load claimed n=1") != std::string::npos,
+                     "table tallies sif/rpc by op and side");
         });
 
         tc.Run("EE scheduler selects absolute priority then FIFO", [](TestCase &t)
