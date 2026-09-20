@@ -27,6 +27,7 @@ namespace ps2_stubs
 namespace
 {
     constexpr int KE_OK = 0;
+    constexpr int KE_ERROR = -1;
     constexpr int KE_SEMA_ZERO = -419;
 
     constexpr uint32_t K_SIF_RPC_MODE_NOWAIT = 0x01u;
@@ -946,7 +947,7 @@ void register_ps2_sif_rpc_tests()
 
             setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_SEMA_ZERO, "semaphore should start at zero before nowait rpc");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "zero-count poll must miss with KE_ERROR (-1), like the kernel");
 
             std::memset(env.rdram.data() + kRecvAddr, 0, 16u);
             setRegU32(env.ctx, 4, kClientAddr);
