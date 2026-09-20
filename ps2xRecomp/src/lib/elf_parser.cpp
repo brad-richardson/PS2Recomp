@@ -1,4 +1,5 @@
 #include "ps2recomp/elf_parser.h"
+#include "ps2recomp/instructions.h"
 #include "ps2recomp/recompiler_reporter.h"
 #include "ps2recomp/types.h"
 #include <iostream>
@@ -531,6 +532,88 @@ namespace
             outFunctions.push_back(std::move(func));
         }
     }
+
+    // T5: materialized .text pointers are function entries. Any constant
+    // folded by a LUI+ORI/ADDIU sequence that lands inside EE code is a
+    // split candidate, so mid-function callback registrations (the 0x3E3AD8
+    // class: 10 briefs, P1k-P1t) get exact table entries instead of silent
+    // scheduler drops. N64Recomp does this for lui/addiu pairs.
+    void ScanMaterializedCodeEntries(const std::vector<ps2recomp::Section> &sections,
+                                     std::unordered_set<uint32_t> &outStarts)
+    {
+        for (const auto &section : sections)
+        {
+            // VU overlay sections are not EE code (loaded at address 0); the
+            // JAL fallback scan above tolerates them because map loads wipe
+            // its noise, but these entries merge after the wipe.
+            if (!section.isCode || !section.data || section.size < 4 || section.address == 0)
+            {
+                continue;
+            }
+
+            const uint32_t wordCount = section.size / 4;
+            for (uint32_t index = 0; index < wordCount; ++index)
+            {
+                uint32_t raw = 0;
+                std::memcpy(&raw, section.data + index * 4, sizeof(uint32_t));
+
+                if (OPCODE(raw) != ps2recomp::OPCODE_LUI)
+                {
+                    continue;
+                }
+
+                const uint32_t reg = RT(raw);
+                if (reg == 0)
+                {
+                    continue;
+                }
+
+                // f2149e7 fold shape: apply same-register ORI/ADDIU writers in
+                // program order (forward window here instead of scan-back).
+                uint32_t baseAddr = IMMEDIATE(raw) << 16;
+                bool appliedLowHalf = false;
+                for (uint32_t lookahead = 1; lookahead <= 5 && index + lookahead < wordCount; ++lookahead)
+                {
+                    uint32_t midInst = 0;
+                    std::memcpy(&midInst, section.data + (index + lookahead) * 4, sizeof(uint32_t));
+
+                    if (RT(midInst) == reg && RS(midInst) == reg)
+                    {
+                        if (OPCODE(midInst) == ps2recomp::OPCODE_ORI)
+                        {
+                            baseAddr |= IMMEDIATE(midInst);
+                            appliedLowHalf = true;
+                        }
+                        else if (OPCODE(midInst) == ps2recomp::OPCODE_ADDIU)
+                        {
+                            baseAddr += static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(IMMEDIATE(midInst))));
+                            appliedLowHalf = true;
+                        }
+                    }
+                }
+
+                if (!appliedLowHalf || (baseAddr & 0x3u) != 0)
+                {
+                    continue;
+                }
+
+                for (const auto &targetSection : sections)
+                {
+                    if (!targetSection.isCode || targetSection.address == 0)
+                    {
+                        continue;
+                    }
+
+                    if (baseAddr >= targetSection.address &&
+                        baseAddr < targetSection.address + targetSection.size)
+                    {
+                        outStarts.insert(baseAddr);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 namespace ps2recomp
@@ -760,6 +843,39 @@ namespace ps2recomp
         for (const auto &func : m_extraFunctions)
         {
             addOrMerge(func);
+        }
+
+        // T5: split every already-known function at each materialized .text
+        // pointer strictly inside it. addOrMerge keeps dedup/authoritative
+        // semantics; the zero end is filled by the loop below.
+        {
+            std::unordered_set<uint32_t> materializedStarts;
+            ScanMaterializedCodeEntries(m_sections, materializedStarts);
+            for (uint32_t start : materializedStarts)
+            {
+                bool insideKnownFunction = false;
+                for (const auto &existing : functions)
+                {
+                    if (start > existing.start && start < existing.end)
+                    {
+                        insideKnownFunction = true;
+                        break;
+                    }
+                }
+                if (!insideKnownFunction)
+                {
+                    continue;
+                }
+
+                Function split{};
+                split.name = MakeAutoFunctionName(start);
+                split.start = start;
+                split.end = 0;
+                split.isRecompiled = false;
+                split.isStub = false;
+                split.isSkipped = false;
+                addOrMerge(split);
+            }
         }
 
         std::sort(functions.begin(), functions.end(),

@@ -155,6 +155,69 @@ static bool writeMinimalMipsElfWithJalFallbackTarget(const std::filesystem::path
     return writer.save(elfPath.string());
 }
 
+static bool writeMinimalMipsElfWithMaterializedEntries(const std::filesystem::path &elfPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_os_abi(ELFIO::ELFOSABI_NONE);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(0x00100000u);
+
+    ELFIO::section *text = writer.sections.add(".text");
+    text->set_type(ELFIO::SHT_PROGBITS);
+    text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+    text->set_addr_align(4);
+    text->set_address(0x00100000u);
+
+    // T5 fixture: the split point at 0x0010001C mirrors P9 §P9-1a around the
+    // 0x3E3AD8 split (jr/delay/nop boundary above a callback-head LUI), and
+    // the 0x00100024 site mirrors the real 0x3E3FB0/0x3E442C LUI+gap+ADDIU
+    // registration shape (gap filler neutral here instead of the real JAL).
+    // No symbol table: the container comes from the entry-point fallback
+    // scan, so it is non-authoritative and the splits survive the merge
+    // (SSX3 game code is likewise symbol-free).
+    const std::array<uint32_t, 12> textWords = {
+        0x3C040010u, // 0x100000: lui $a0,0x0010
+        0x34840020u, // 0x100004: ori $a0,$a0,0x0020 -> 0x00100020 (.text)
+        0x3C050020u, // 0x100008: lui $a1,0x0020
+        0x24A50010u, // 0x10000C: addiu $a1,$a1,0x0010 -> 0x00200010 (.data)
+        0x03E00008u, // 0x100010: jr $ra (boundary above split)
+        0x27BD0010u, // 0x100014: addiu $sp,$sp,0x10 (delay)
+        0x00000000u, // 0x100018: nop (padding)
+        0x3C020010u, // 0x10001C: lui $v0,0x0010 (split point: callback head)
+        0x27BDFFF0u, // 0x100020: addiu $sp,$sp,-0x10
+        0x3C060010u, // 0x100024: lui $a2,0x0010 (0x3E3FB0-class site)
+        0x00000000u, // 0x100028: nop (gap)
+        0x24C6001Cu, // 0x10002C: addiu $a2,$a2,0x001C -> 0x0010001C
+    };
+    text->set_data(reinterpret_cast<const char *>(textWords.data()),
+                   static_cast<ELFIO::Elf_Word>(textWords.size() * sizeof(uint32_t)));
+
+    ELFIO::section *data = writer.sections.add(".data");
+    data->set_type(ELFIO::SHT_PROGBITS);
+    data->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_WRITE);
+    data->set_addr_align(4);
+    data->set_address(0x00200000u);
+    const std::array<uint32_t, 2> dataWords = {0u, 0u};
+    data->set_data(reinterpret_cast<const char *>(dataWords.data()),
+                   static_cast<ELFIO::Elf_Word>(dataWords.size() * sizeof(uint32_t)));
+
+    ELFIO::segment *textSegment = writer.segments.add();
+    textSegment->set_type(ELFIO::PT_LOAD);
+    textSegment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+    textSegment->set_align(0x1000);
+    textSegment->add_section_index(text->get_index(), text->get_addr_align());
+
+    ELFIO::segment *dataSegment = writer.segments.add();
+    dataSegment->set_type(ELFIO::PT_LOAD);
+    dataSegment->set_flags(ELFIO::PF_R | ELFIO::PF_W);
+    dataSegment->set_align(0x1000);
+    dataSegment->add_section_index(data->get_index(), data->get_addr_align());
+
+    return writer.save(elfPath.string());
+}
+
 static bool writeMinimalMipsElfWithInitializer(const std::filesystem::path &elfPath,
                                                const std::string &functionName,
                                                uint32_t initializerTarget)
@@ -945,6 +1008,116 @@ void register_ps2_recompiler_tests()
             std::error_code removeError;
             std::filesystem::remove(elfPath, removeError);
             std::filesystem::remove(mapPath, removeError);
+        });
+
+        tc.Run("materialized .text pointer splits its container", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-t5-text-" + uniqueSuffix + ".elf");
+
+            const bool writeOk = writeMinimalMipsElfWithMaterializedEntries(elfPath);
+            t.IsTrue(writeOk, "temporary ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+            if (!parseOk)
+            {
+                std::error_code removeError;
+                std::filesystem::remove(elfPath, removeError);
+                return;
+            }
+
+            const auto functions = parser.extractFunctions();
+            const bool hasSplit = std::any_of(functions.begin(), functions.end(),
+                                              [](const Function &fn)
+                                              { return fn.start == 0x00100020u; });
+            t.IsTrue(hasSplit, "LUI+ORI constant inside .text should become a function entry");
+
+            const auto parentIt = std::find_if(functions.begin(), functions.end(),
+                                               [](const Function &fn)
+                                               { return fn.start == 0x00100000u; });
+            t.IsTrue(parentIt != functions.end(), "containing function should still exist");
+            if (parentIt != functions.end())
+            {
+                t.Equals(parentIt->end, 0x00100030u,
+                         "containing function keeps its range (split adds an entry, P9 non-truncation)");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+        });
+
+        tc.Run("materialized data pointer creates no entry", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-t5-data-" + uniqueSuffix + ".elf");
+
+            const bool writeOk = writeMinimalMipsElfWithMaterializedEntries(elfPath);
+            t.IsTrue(writeOk, "temporary ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+            if (!parseOk)
+            {
+                std::error_code removeError;
+                std::filesystem::remove(elfPath, removeError);
+                return;
+            }
+
+            const auto functions = parser.extractFunctions();
+            const bool hasDataEntry = std::any_of(functions.begin(), functions.end(),
+                                                  [](const Function &fn)
+                                                  { return fn.start == 0x00200010u; });
+            t.IsFalse(hasDataEntry, "LUI+ADDIU constant inside .data must not become a function entry");
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
+        });
+
+        tc.Run("0x3E3AD8-class mid-function callback splits", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path elfPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-t5-callback-" + uniqueSuffix + ".elf");
+
+            const bool writeOk = writeMinimalMipsElfWithMaterializedEntries(elfPath);
+            t.IsTrue(writeOk, "temporary ELF should be generated");
+            if (!writeOk)
+            {
+                return;
+            }
+
+            ElfParser parser(elfPath.string());
+            const bool parseOk = parser.parse();
+            t.IsTrue(parseOk, "generated ELF should parse");
+            if (!parseOk)
+            {
+                std::error_code removeError;
+                std::filesystem::remove(elfPath, removeError);
+                return;
+            }
+
+            const auto functions = parser.extractFunctions();
+            const bool hasCallbackEntry = std::any_of(functions.begin(), functions.end(),
+                                                      [](const Function &fn)
+                                                      { return fn.start == 0x0010001Cu; });
+            t.IsTrue(hasCallbackEntry,
+                     "LUI+gap+ADDIU constant at a jr/delay/nop boundary should split (0x3E3FB0 class)");
+
+            std::error_code removeError;
+            std::filesystem::remove(elfPath, removeError);
         });
 
         tc.Run("runtime call resolution includes Veronica compatibility aliases", [](TestCase &t) {
