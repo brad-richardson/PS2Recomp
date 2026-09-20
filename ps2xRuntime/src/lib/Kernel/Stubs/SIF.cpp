@@ -480,6 +480,7 @@ namespace ps2_stubs
         (void)getRegU32(ctx, 4); // trid
 
         // Transfers are applied immediately by sceSifSetDma in this runtime.
+        ps2_log::emitDrop("stub/sceSifDmaStat", "error");
         setReturnS32(ctx, -1);
     }
 
@@ -506,7 +507,14 @@ namespace ps2_stubs
         (void)runtime;
 
         const uint32_t addr = getRegU32(ctx, 4);
-        setReturnS32(ctx, freeSifHeapBlock(addr) ? 0 : -1);
+        const int freeResult = freeSifHeapBlock(addr) ? 0 : -1;
+        if (freeResult != 0)
+        {
+            char dropArgs[32];
+            std::snprintf(dropArgs, sizeof(dropArgs), "addr=0x%x", addr);
+            ps2_log::emitDrop("stub/sceSifFreeIopHeap", "error", dropArgs);
+        }
+        setReturnS32(ctx, freeResult);
     }
 
     void sceSifFreeSysMemory(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -515,7 +523,14 @@ namespace ps2_stubs
         (void)runtime;
 
         const uint32_t addr = getRegU32(ctx, 4);
-        setReturnS32(ctx, freeSifHeapBlock(addr) ? 0 : -1);
+        const int freeResult = freeSifHeapBlock(addr) ? 0 : -1;
+        if (freeResult != 0)
+        {
+            char dropArgs[32];
+            std::snprintf(dropArgs, sizeof(dropArgs), "addr=0x%x", addr);
+            ps2_log::emitDrop("stub/sceSifFreeSysMemory", "error", dropArgs);
+        }
+        setReturnS32(ctx, freeResult);
     }
 
     void sceSifGetDataTable(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -557,6 +572,7 @@ namespace ps2_stubs
                           << std::hex << size << std::dec << std::endl;
                 ++warnCount;
             }
+            ps2_log::emitDrop("stub/sceSifGetOtherData", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -585,6 +601,7 @@ namespace ps2_stubs
                 });
                 ++warnCount;
             }
+            ps2_log::emitDrop("stub/sceSifGetOtherData", "error");
             setReturnS32(ctx, -1);
             return;
         }

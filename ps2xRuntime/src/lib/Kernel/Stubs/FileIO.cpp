@@ -42,6 +42,7 @@ namespace ps2_stubs
             setReturnS32(ctx, 0);
             return;
         }
+        ps2_log::emitDrop("stub/fstat", "error");
         setReturnS32(ctx, -1);
     }
 
@@ -87,6 +88,7 @@ namespace ps2_stubs
             uint8_t *argPtr = getMemPtr(rdram, argAddr);
             if (!argPtr)
             {
+                ps2_log::emitDrop("stub/sceIoctl", "error");
                 setReturnS32(ctx, -1);
                 return;
             }
@@ -124,6 +126,7 @@ namespace ps2_stubs
         uint8_t *statBuf = getMemPtr(rdram, statAddr);
         if (!statBuf)
         {
+            ps2_log::emitDrop("stub/stat", "error");
             setReturnS32(ctx, -1);
             return;
         }

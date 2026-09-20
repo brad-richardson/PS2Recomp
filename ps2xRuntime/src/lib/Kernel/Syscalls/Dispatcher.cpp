@@ -403,7 +403,15 @@ namespace ps2_syscalls
             SetMemoryMode(rdram, ctx, runtime);
             return true;
         default:
+        {
+            // P1w: unhandled syscall number. The guest gets no handler and
+            // (unless an override was installed) no answer. Trace it.
+            char dropArgs[64];
+            std::snprintf(dropArgs, sizeof(dropArgs), "id=0x%x pc=0x%x", syscallNumber,
+                          (ctx != nullptr) ? ctx->pc : 0u);
+            ps2_log::emitDrop("dispatch/numeric", "unknown-syscall", dropArgs);
             return false;
+        }
         }
     }
 }

@@ -596,7 +596,13 @@ namespace ps2_stubs
                 frameRateNumerator = 60u;
                 break;
             default:
+            {
+                // P1w: unrecognized frame-rate code yields a zero interval.
+                char dropArgs[32];
+                std::snprintf(dropArgs, sizeof(dropArgs), "code=%u", frameRateCode);
+                ps2_log::emitDrop("stub/mpegPictureIntervalQ32", "unknown-frame-rate", dropArgs);
                 return 0u;
+            }
             }
 
             const uint64_t extensionNumerator = static_cast<uint64_t>(frameRateExtensionN) + 1u;

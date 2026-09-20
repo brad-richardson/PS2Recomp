@@ -632,6 +632,7 @@ namespace ps2_stubs
         }
         else
         {
+            ps2_log::emitDrop("stub/sceeFontClose", "error");
             setReturnS32(ctx, -1);
         }
     }

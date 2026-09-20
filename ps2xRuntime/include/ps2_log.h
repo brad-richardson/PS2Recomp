@@ -2,6 +2,7 @@
 #define PS2_LOG_H
 
 #include <algorithm>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -113,6 +114,43 @@ inline void clear_runtime_log_entries()
 {
     std::lock_guard<std::mutex> lock(runtime_log_mutex());
     runtime_log_entries().clear();
+}
+
+// P1w no-silent-drops census. Every rejected or unhandled path emits one
+// "[drop] <site> <reason> <args>" line on stderr, ON by default in every
+// build including the runner; a non-empty PS2X_DROP_SILENCE mutes. The env
+// is read fresh per call: drops are exceptional so there is no hot-path
+// cost, and the kill-switch stays testable and honors late-set env.
+// Deliberately cerr-only (no runtime-log ring append): the census channel
+// is the log, and a drop flood must not evict ring entries.
+inline bool dropsMuted()
+{
+    const char *env = std::getenv("PS2X_DROP_SILENCE");
+    return env != nullptr && env[0] != '\0';
+}
+
+inline std::string formatDropLine(const std::string &site, const std::string &reason, const std::string &args)
+{
+    std::ostringstream out;
+    out << "[drop] " << site << ' ' << reason << ' ' << (args.empty() ? "-" : args);
+    return out.str();
+}
+
+inline void emitDropTo(std::ostream &out,
+                       const std::string &site,
+                       const std::string &reason,
+                       const std::string &args = "")
+{
+    if (dropsMuted())
+    {
+        return;
+    }
+    out << formatDropLine(site, reason, args) << std::endl;
+}
+
+inline void emitDrop(const std::string &site, const std::string &reason, const std::string &args = "")
+{
+    emitDropTo(std::cerr, site, reason, args);
 }
 }
 

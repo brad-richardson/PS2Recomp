@@ -5,6 +5,7 @@
 #include "ps2recomp/sce_symbol_scanner.h"
 #include "ps2recomp/toml_generator.h"
 #include "ps2recomp/types.h"
+#include "ps2_log.h"
 #include <iostream>
 #include <sstream>
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <iomanip>
 #include <functional>
 #include <limits>
+#include <cstdio>
 #include <cstdlib>
 
 namespace ps2recomp
@@ -159,6 +161,12 @@ namespace ps2recomp
         {
             if (match.size > std::numeric_limits<uint32_t>::max() - match.address)
             {
+                // P1w: overflowing symbol-DB match is discarded (cout: the
+                // analyzer's established log channel).
+                char dropArgs[128];
+                std::snprintf(dropArgs, sizeof(dropArgs), "name=%s addr=0x%x size=0x%x",
+                              match.name.c_str(), match.address, match.size);
+                ps2_log::emitDropTo(std::cout, "analyzer/sce-match", "addr-overflow", dropArgs);
                 continue;
             }
 
@@ -1549,9 +1557,17 @@ namespace ps2recomp
         m_context.instructionCache.clear();
         for (auto &func : m_context.functions)
         {
-            if (m_libFunctions.contains(func.name) ||
-                func.start >= func.end)
+            if (m_libFunctions.contains(func.name))
             {
+                continue;
+            }
+            if (func.start >= func.end)
+            {
+                // P1w: empty-range function (bad map row) is never decoded.
+                char dropArgs[128];
+                std::snprintf(dropArgs, sizeof(dropArgs), "name=%s start=0x%x end=0x%x",
+                              func.name.c_str(), func.start, func.end);
+                ps2_log::emitDropTo(std::cout, "analyzer/decode-all", "empty-range", dropArgs);
                 continue;
             }
 
@@ -1640,6 +1656,11 @@ namespace ps2recomp
             uint32_t rawInstruction = 0;
             if (!tryReadWord(m_elfParser.get(), addr, rawInstruction))
             {
+                // P1w: unreadable word leaves a hole in the decoded function.
+                char dropArgs[128];
+                std::snprintf(dropArgs, sizeof(dropArgs), "func=%s addr=0x%x",
+                              function.name.c_str(), addr);
+                ps2_log::emitDropTo(std::cout, "analyzer/decode-function", "decode-gap", dropArgs);
                 continue;
             }
 
@@ -1842,6 +1863,10 @@ namespace ps2recomp
                 !std::getline(ss, startStr, ',') ||
                 !std::getline(ss, endStr, ','))
             {
+                // P1w: malformed CSV row is discarded.
+                char dropArgs[48];
+                std::snprintf(dropArgs, sizeof(dropArgs), "line=%d", lineNum);
+                ps2_log::emitDropTo(std::cout, "analyzer/csv-load", "malformed-row", dropArgs);
                 continue; // Skip malformed lines
             }
 
@@ -1856,6 +1881,10 @@ namespace ps2recomp
             }
             catch (...)
             {
+                // P1w: CSV row with an unparsable address is discarded.
+                char dropArgs[128];
+                std::snprintf(dropArgs, sizeof(dropArgs), "line=%d name=%s", lineNum, name.c_str());
+                ps2_log::emitDropTo(std::cout, "analyzer/csv-load", "invalid-addr-row", dropArgs);
                 continue; // Skip lines with invalid addresses
             }
 

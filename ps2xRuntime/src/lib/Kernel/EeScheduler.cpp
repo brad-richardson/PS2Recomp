@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -532,6 +533,12 @@ void EeScheduler::run()
         {
             if (!running->invocations.empty())
             {
+                // P1w: the queued invocation's entry has no table entry, so
+                // its body never runs (P1s class). Trace the discard.
+                char dropArgs[64];
+                std::snprintf(dropArgs, sizeof(dropArgs), "pc=0x%x tid=%d depth=%zu",
+                              context.pc, running->id, running->invocations.size());
+                ps2_log::emitDrop("sched/invocation-dispatch", "no-table-entry", dropArgs);
                 context.pc = 0u;
             }
             else
@@ -708,12 +715,16 @@ int EeScheduler::createThread(const EeThreadCreateParams &params)
     assertExecutor();
     if (params.priority < 1 || params.priority >= kPriorityCount)
     {
+        char dropArgs[32];
+        std::snprintf(dropArgs, sizeof(dropArgs), "priority=%d", params.priority);
+        ps2_log::emitDrop("sched/createThread", "KE_ILLEGAL_PRIORITY", dropArgs);
         return KE_ILLEGAL_PRIORITY;
     }
 
     const int id = allocateThreadId();
     if (id == 0)
     {
+        ps2_log::emitDrop("sched/createThread", "KE_ERROR", "id-exhausted");
         return KE_ERROR;
     }
 
@@ -739,15 +750,18 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
     ownedStack = 0;
     if (id <= kMainThreadId)
     {
+        ps2_log::emitDrop("sched/deleteThread", "KE_ILLEGAL_THID");
         return KE_ILLEGAL_THID;
     }
     auto it = m_threads.find(id);
     if (it == m_threads.end())
     {
+        ps2_log::emitDrop("sched/deleteThread", "KE_UNKNOWN_THID");
         return KE_UNKNOWN_THID;
     }
     if (it->second.status != EeThreadStatus::Dormant)
     {
+        ps2_log::emitDrop("sched/deleteThread", "KE_NOT_DORMANT");
         return KE_NOT_DORMANT;
     }
     if (it->second.ownsStack)
@@ -765,10 +779,12 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     GuestThread *target = thread(id);
     if (!target)
     {
+        ps2_log::emitDrop("sched/startThread", "KE_UNKNOWN_THID");
         return KE_UNKNOWN_THID;
     }
     if (target->status != EeThreadStatus::Dormant)
     {
+        ps2_log::emitDrop("sched/startThread", "KE_NOT_DORMANT");
         return KE_NOT_DORMANT;
     }
 
@@ -829,15 +845,18 @@ int EeScheduler::terminateThread(int id, uint32_t &ownedStack, bool interruptSaf
     ownedStack = 0;
     if (id == 0 || id == m_currentThreadId)
     {
+        ps2_log::emitDrop("sched/terminateThread", "KE_ILLEGAL_THID");
         return KE_ILLEGAL_THID;
     }
     GuestThread *target = thread(id);
     if (!target)
     {
+        ps2_log::emitDrop("sched/terminateThread", "KE_UNKNOWN_THID");
         return KE_UNKNOWN_THID;
     }
     if (target->status == EeThreadStatus::Dormant)
     {
+        ps2_log::emitDrop("sched/terminateThread", "KE_DORMANT");
         return KE_DORMANT;
     }
     if (target->ownsStack)
@@ -861,10 +880,12 @@ int EeScheduler::suspendThread(int id, bool interruptSafe)
     GuestThread *target = thread(id);
     if (!target)
     {
+        ps2_log::emitDrop("sched/suspendThread", "KE_UNKNOWN_THID");
         return KE_UNKNOWN_THID;
     }
     if (target->status == EeThreadStatus::Dormant)
     {
+        ps2_log::emitDrop("sched/suspendThread", "KE_DORMANT");
         return KE_DORMANT;
     }
 
@@ -902,15 +923,18 @@ int EeScheduler::resumeThread(int id, bool interruptSafe)
     assertExecutor();
     if (id == 0)
     {
+        ps2_log::emitDrop("sched/resumeThread", "KE_ILLEGAL_THID");
         return KE_ILLEGAL_THID;
     }
     GuestThread *target = thread(id);
     if (!target)
     {
+        ps2_log::emitDrop("sched/resumeThread", "KE_UNKNOWN_THID");
         return KE_UNKNOWN_THID;
     }
     if (target->suspendCount == 0)
     {
+        ps2_log::emitDrop("sched/resumeThread", "KE_NOT_SUSPEND");
         return KE_NOT_SUSPEND;
     }
     --target->suspendCount;
@@ -950,15 +974,18 @@ int EeScheduler::wakeupThread(int id, bool interruptSafe)
     assertExecutor();
     if (id == 0 || id == m_currentThreadId)
     {
+        ps2_log::emitDrop("sched/wakeupThread", "KE_ILLEGAL_THID");
         return KE_ILLEGAL_THID;
     }
     GuestThread *target = thread(id);
     if (!target)
     {
+        ps2_log::emitDrop("sched/wakeupThread", "KE_UNKNOWN_THID");
         return KE_UNKNOWN_THID;
     }
     if (target->status == EeThreadStatus::Dormant)
     {
+        ps2_log::emitDrop("sched/wakeupThread", "KE_DORMANT");
         return KE_DORMANT;
     }
     if ((target->status == EeThreadStatus::Waiting || target->status == EeThreadStatus::WaitingSuspended) &&
@@ -984,6 +1011,7 @@ int EeScheduler::cancelWakeup(int id)
     GuestThread *target = thread(id);
     if (!target)
     {
+        ps2_log::emitDrop("sched/cancelWakeup", "KE_UNKNOWN_THID");
         return KE_UNKNOWN_THID;
     }
     const int old = static_cast<int>(target->wakeupCount);
@@ -997,6 +1025,7 @@ int EeScheduler::changePriority(int id, int priority, bool interruptSafe, int &o
     assertExecutor();
     if (priority < 1 || priority >= kPriorityCount)
     {
+        ps2_log::emitDrop("sched/changePriority", "KE_ILLEGAL_PRIORITY");
         return KE_ILLEGAL_PRIORITY;
     }
     if (id == 0)
@@ -1006,6 +1035,7 @@ int EeScheduler::changePriority(int id, int priority, bool interruptSafe, int &o
     GuestThread *target = thread(id);
     if (!target)
     {
+        ps2_log::emitDrop("sched/changePriority", "KE_UNKNOWN_THID");
         return KE_UNKNOWN_THID;
     }
     oldPriority = target->currentPriority;
@@ -1045,6 +1075,7 @@ int EeScheduler::rotateReadyQueue(int priority, bool interruptSafe)
     }
     if (priority < 0 || priority >= kPriorityCount)
     {
+        ps2_log::emitDrop("sched/rotateReadyQueue", "KE_ILLEGAL_PRIORITY");
         return KE_ILLEGAL_PRIORITY;
     }
 
@@ -1075,15 +1106,18 @@ int EeScheduler::releaseWait(int id, bool interruptSafe)
     assertExecutor();
     if (id == 0)
     {
+        ps2_log::emitDrop("sched/releaseWait", "KE_ILLEGAL_THID");
         return KE_ILLEGAL_THID;
     }
     GuestThread *target = thread(id);
     if (!target)
     {
+        ps2_log::emitDrop("sched/releaseWait", "KE_UNKNOWN_THID");
         return KE_UNKNOWN_THID;
     }
     if (target->status != EeThreadStatus::Waiting && target->status != EeThreadStatus::WaitingSuspended)
     {
+        ps2_log::emitDrop("sched/releaseWait", "KE_NOT_WAIT");
         return KE_NOT_WAIT;
     }
     removeFromWaitObject(*target);
@@ -1123,11 +1157,16 @@ int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uin
     const int effectiveMax = (maxCount == 0) ? 1 : maxCount;
     if (effectiveMax <= 0 || initCount < 0 || initCount > effectiveMax)
     {
+        char dropArgs[64];
+        std::snprintf(dropArgs, sizeof(dropArgs), "init=%d max=%d effmax=%d",
+                      initCount, maxCount, effectiveMax);
+        ps2_log::emitDrop("sched/createSemaphore", "KE_ERROR", dropArgs);
         return KE_ERROR;
     }
     const int id = allocatePositiveId(m_nextSemaphoreId, m_semaphores);
     if (id == 0)
     {
+        ps2_log::emitDrop("sched/createSemaphore", "KE_ERROR", "id-exhausted");
         return KE_ERROR;
     }
     EeSemaphore semaphore{};
@@ -1148,6 +1187,9 @@ int EeScheduler::deleteSemaphore(int id, bool interruptSafe)
     auto it = m_semaphores.find(id);
     if (it == m_semaphores.end())
     {
+        char dropArgs[32];
+        std::snprintf(dropArgs, sizeof(dropArgs), "id=%d", id);
+        ps2_log::emitDrop("sched/deleteSemaphore", "KE_UNKNOWN_SEMID", dropArgs);
         return KE_UNKNOWN_SEMID;
     }
     std::deque<int> waiters = std::move(it->second.waiters);
@@ -1187,6 +1229,9 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
                       << " invDepth=" << wakerInvDepth << " cbFunc=" << std::hex << wakerInvTag << std::dec
                       << " target=- tStatus=-1 tSusp=-1 result=" << KE_UNKNOWN_SEMID << std::endl;
         }
+        char dropArgs[32];
+        std::snprintf(dropArgs, sizeof(dropArgs), "id=%d", id);
+        ps2_log::emitDrop("sched/signalSemaphore", "KE_UNKNOWN_SEMID", dropArgs);
         return KE_UNKNOWN_SEMID;
     }
     const int countBefore = object->count;
@@ -1229,6 +1274,10 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
                       << " invDepth=" << wakerInvDepth << " cbFunc=" << std::hex << wakerInvTag << std::dec
                       << " target=- tStatus=-1 tSusp=-1 result=" << KE_SEMA_OVF << std::endl;
         }
+        char dropArgs[64];
+        std::snprintf(dropArgs, sizeof(dropArgs), "id=%d count=%d max=%d",
+                      id, object->count, object->maxCount);
+        ps2_log::emitDrop("sched/signalSemaphore", "KE_SEMA_OVF", dropArgs);
         return KE_SEMA_OVF;
     }
     ++object->count;
@@ -1252,6 +1301,9 @@ int EeScheduler::pollSemaphore(int id)
     EeSemaphore *object = semaphore(id);
     if (!object)
     {
+        char dropArgs[32];
+        std::snprintf(dropArgs, sizeof(dropArgs), "id=%d", id);
+        ps2_log::emitDrop("sched/pollSemaphore", "KE_UNKNOWN_SEMID", dropArgs);
         return KE_UNKNOWN_SEMID;
     }
     if (object->count == 0)
@@ -1328,6 +1380,7 @@ int EeScheduler::createEventFlag(uint32_t initialBits, uint32_t attr, uint32_t o
     const int id = allocatePositiveId(m_nextEventFlagId, m_eventFlags);
     if (id == 0)
     {
+        ps2_log::emitDrop("sched/createEventFlag", "KE_ERROR");
         return KE_ERROR;
     }
     EeEventFlag flag{};
@@ -1347,6 +1400,7 @@ int EeScheduler::deleteEventFlag(int id, bool interruptSafe)
     auto it = m_eventFlags.find(id);
     if (it == m_eventFlags.end())
     {
+        ps2_log::emitDrop("sched/deleteEventFlag", "KE_UNKNOWN_EVFID");
         return KE_UNKNOWN_EVFID;
     }
     std::deque<int> waiters = std::move(it->second.waiters);
@@ -1368,6 +1422,7 @@ int EeScheduler::setEventFlag(int id, uint32_t bits, bool interruptSafe)
     EeEventFlag *flag = eventFlag(id);
     if (!flag)
     {
+        ps2_log::emitDrop("sched/setEventFlag", "KE_UNKNOWN_EVFID");
         return KE_UNKNOWN_EVFID;
     }
     flag->bits |= bits;
@@ -1382,6 +1437,7 @@ int EeScheduler::clearEventFlag(int id, uint32_t mask)
     EeEventFlag *flag = eventFlag(id);
     if (!flag)
     {
+        ps2_log::emitDrop("sched/clearEventFlag", "KE_UNKNOWN_EVFID");
         return KE_UNKNOWN_EVFID;
     }
     flag->bits &= mask;
@@ -1395,6 +1451,7 @@ int EeScheduler::pollEventFlag(int id, uint32_t bits, uint32_t mode, uint32_t &o
     EeEventFlag *flag = eventFlag(id);
     if (!flag)
     {
+        ps2_log::emitDrop("sched/pollEventFlag", "KE_UNKNOWN_EVFID");
         return KE_UNKNOWN_EVFID;
     }
     if (!eventCondition(flag->bits, bits, mode))
@@ -1455,11 +1512,15 @@ int EeScheduler::setAlarm(uint16_t ticks,
     assertExecutor();
     if (handler == 0u || !m_runtime.hasFunction(handler))
     {
+        char dropArgs[64];
+        std::snprintf(dropArgs, sizeof(dropArgs), "handler=0x%x ticks=%u", handler, ticks);
+        ps2_log::emitDrop("sched/setAlarm", "KE_ERROR", dropArgs);
         return KE_ERROR;
     }
     const int id = allocatePositiveId(m_nextAlarmId, m_alarms);
     if (id == 0)
     {
+        ps2_log::emitDrop("sched/setAlarm", "KE_ERROR", "id-exhausted");
         return KE_ERROR;
     }
     m_alarms.emplace(id, EeAlarm{id, ticks, handler, argument, gp, sp});
@@ -1475,6 +1536,9 @@ int EeScheduler::cancelAlarm(int id)
     assertExecutor();
     if (m_alarms.erase(id) == 0u)
     {
+        char dropArgs[32];
+        std::snprintf(dropArgs, sizeof(dropArgs), "id=%d", id);
+        ps2_log::emitDrop("sched/cancelAlarm", "KE_ERROR", dropArgs);
         return KE_ERROR;
     }
     {
@@ -1583,6 +1647,10 @@ int EeScheduler::addIrqHandler(bool dmac,
     const int id = allocatePositiveId(nextId, handlers);
     if (id == 0)
     {
+        char dropArgs[64];
+        std::snprintf(dropArgs, sizeof(dropArgs), "dmac=%d cause=%u handler=0x%x id-exhausted",
+                      dmac ? 1 : 0, cause, handler);
+        ps2_log::emitDrop("sched/addIrqHandler", "KE_ERROR", dropArgs);
         return KE_ERROR;
     }
     int &head = dmac ? m_dmacHeadOrder : m_intcHeadOrder;
@@ -1608,6 +1676,14 @@ int EeScheduler::removeIrqHandler(bool dmac, uint32_t cause, int id)
     {
         handlers.erase(it);
     }
+    else
+    {
+        // P1w: remove of an unknown id/cause is ignored yet reports KE_OK.
+        char dropArgs[64];
+        std::snprintf(dropArgs, sizeof(dropArgs), "id=%d cause=%u dmac=%d ret=KE_OK",
+                      id, cause, dmac ? 1 : 0);
+        ps2_log::emitDrop("sched/removeIrqHandler", "unknown-id", dropArgs);
+    }
     return KE_OK;
 }
 
@@ -1619,6 +1695,14 @@ int EeScheduler::setIrqHandlerEnabled(bool dmac, int id, bool enabled)
     if (it != handlers.end())
     {
         it->second.enabled = enabled;
+    }
+    else
+    {
+        // P1w: enable/disable of an unknown id is ignored yet reports KE_OK.
+        char dropArgs[64];
+        std::snprintf(dropArgs, sizeof(dropArgs), "id=%d dmac=%d enabled=%d ret=KE_OK",
+                      id, dmac ? 1 : 0, enabled ? 1 : 0);
+        ps2_log::emitDrop("sched/setIrqHandlerEnabled", "unknown-id", dropArgs);
     }
     return KE_OK;
 }
@@ -1637,6 +1721,14 @@ int EeScheduler::setIrqCauseEnabled(bool dmac, uint32_t cause, bool enabled)
         {
             mask &= ~(1u << cause);
         }
+    }
+    else
+    {
+        // P1w: out-of-range cause is ignored yet reported KE_OK. Trace it.
+        char dropArgs[64];
+        std::snprintf(dropArgs, sizeof(dropArgs), "cause=%u dmac=%d enabled=%d ret=KE_OK",
+                      cause, dmac ? 1 : 0, enabled ? 1 : 0);
+        ps2_log::emitDrop("sched/setIrqCauseEnabled", "cause-range", dropArgs);
     }
     return KE_OK;
 }
@@ -1658,6 +1750,22 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
             m_runtime.hasFunction(handler.handler))
         {
             matching.push_back(handler);
+        }
+        else if (handler.enabled && handler.cause == cause && handler.handler != 0u)
+        {
+            // P1w: enabled handler for a firing cause, but no table entry
+            // (registration does not validate). The IRQ is dropped for it.
+            char dropArgs[64];
+            std::snprintf(dropArgs, sizeof(dropArgs), "handler=0x%x cause=%u id=%d",
+                          handler.handler, cause, handler.id);
+            ps2_log::emitDrop("sched/dispatchIrq", "no-table-entry", dropArgs);
+        }
+        else if (handler.enabled && handler.cause == cause)
+        {
+            // P1w: enabled handler for a firing cause with a null entry.
+            char dropArgs[64];
+            std::snprintf(dropArgs, sizeof(dropArgs), "cause=%u id=%d", cause, handler.id);
+            ps2_log::emitDrop("sched/dispatchIrq", "null-handler", dropArgs);
         }
     }
     std::sort(matching.begin(), matching.end(), [](const EeIrqHandler &left, const EeIrqHandler &right)
@@ -2302,6 +2410,15 @@ void EeScheduler::processEvent(const EeEvent &event)
             SET_GPR_U32(&invocation.context, 31, 0u);
             queueInvocation(std::move(invocation));
         }
+        else if (m_gsVSyncCallback != 0u)
+        {
+            // P1w: a registered vsync callback with no table entry is
+            // silently skipped every vsync. Trace the discard.
+            char dropArgs[48];
+            std::snprintf(dropArgs, sizeof(dropArgs), "cb=0x%x tick=%llu",
+                          m_gsVSyncCallback, (unsigned long long)m_vsyncTick);
+            ps2_log::emitDrop("sched/vsync-callback", "no-table-entry", dropArgs);
+        }
         dispatchIrq(false, 2u);
         break;
     case EeEventType::ExternalWake:
@@ -2380,6 +2497,8 @@ int EeScheduler::waitObjectId(const EeWaitState &wait)
     case EeWaitReason::EventFlag:
         return std::get<EeEventFlagWait>(wait.payload).id;
     default:
+        // No drop line here: None/Sleep/VSync/External/Mpeg waits carry no
+        // object id by design, so 0 is the correct answer, not a discard.
         return 0;
     }
 }
@@ -2390,9 +2509,17 @@ void EeScheduler::writeGuestU32(uint32_t address, uint32_t value)
     {
         return;
     }
-    const uint32_t physical = address & 0x1FFFFFFFu;
-    if (!m_rdram || physical > PS2_RAM_SIZE - sizeof(value))
+    if (!m_rdram)
     {
+        return;
+    }
+    const uint32_t physical = address & 0x1FFFFFFFu;
+    if (physical > PS2_RAM_SIZE - sizeof(value))
+    {
+        // P1w: out-of-range result write is discarded. Trace it.
+        char dropArgs[64];
+        std::snprintf(dropArgs, sizeof(dropArgs), "addr=0x%x value=0x%x", address, value);
+        ps2_log::emitDrop("sched/writeGuestU32", "addr-range", dropArgs);
         return;
     }
     if (ps2DiagWatchEnabled())

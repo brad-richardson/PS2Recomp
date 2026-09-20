@@ -83,6 +83,7 @@ namespace ps2_stubs
         const uint8_t *src = getConstMemPtr(rdram, envAddr);
         if (!src || !runtime)
         {
+            ps2_log::emitDrop("stub/sceDmaPutEnv", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -92,6 +93,7 @@ namespace ps2_stubs
 
         if (env.sts >= kStsTable.size())
         {
+            ps2_log::emitDrop("stub/sceDmaPutEnv", "error");
             setReturnS32(ctx, -1);
             return;
         }

@@ -101,6 +101,7 @@ namespace ps2_stubs
         const uint8_t *src = getConstMemPtr(rdram, strAddr);
         if (!src)
         {
+            ps2_log::emitDrop("stub/mbtowc_r", "error");
             setReturnS32(ctx, -1);
             return;
         }

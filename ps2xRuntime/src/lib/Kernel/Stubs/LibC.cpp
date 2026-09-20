@@ -684,6 +684,12 @@ namespace ps2_stubs
             std::cerr << "puts error: Invalid address provided: 0x" << std::hex << strAddr << std::dec << std::endl;
         }
 
+        if (result < 0)
+        {
+            char dropArgs[32];
+            std::snprintf(dropArgs, sizeof(dropArgs), "addr=0x%x", strAddr);
+            ps2_log::emitDrop("stub/puts", "error", dropArgs);
+        }
         // returns non-negative on success, EOF on error.
         setReturnS32(ctx, result >= 0 ? 0 : -1); // PS2 might expect 0/-1 rather than EOF
     }
@@ -882,6 +888,7 @@ namespace ps2_stubs
         // returns the current position, or -1L on error.
         if (ret > 0xFFFFFFFFL || ret < 0)
         {
+            ps2_log::emitDrop("stub/ftell", "error");
             setReturnS32(ctx, -1);
         }
         else

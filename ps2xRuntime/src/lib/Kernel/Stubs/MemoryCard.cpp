@@ -1209,6 +1209,7 @@ namespace ps2_stubs
         // on it to tell idle polling apart from command completion.
         if (!hadPending)
         {
+            ps2_log::emitDrop("stub/sceMcSync", "error");
             setReturnS32(ctx, -1);
             return;
         }

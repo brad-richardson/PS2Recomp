@@ -148,7 +148,14 @@ namespace ps2_syscalls
         case 2: // sceDeci2Close(socket)
         {
             const int32_t socket = static_cast<int32_t>(args[0]);
-            setReturnS32(ctx, closeDeci2Socket(socket) ? KE_OK : KE_ERROR);
+            const int closeResult = closeDeci2Socket(socket) ? KE_OK : KE_ERROR;
+            if (closeResult != KE_OK)
+            {
+                char dropArgs[32];
+                std::snprintf(dropArgs, sizeof(dropArgs), "socket=%d", socket);
+                ps2_log::emitDrop("syscall/Deci2Call", "KE_ERROR", dropArgs);
+            }
+            setReturnS32(ctx, closeResult);
             return;
         }
         // WE dont need to do thouses
@@ -189,13 +196,27 @@ namespace ps2_syscalls
         case -8: // sceDeci2ExLock(socket)
         {
             const int32_t socket = static_cast<int32_t>(args[0]);
-            setReturnS32(ctx, updateDeci2LockState(socket, true) ? KE_OK : KE_ERROR);
+            const int lockResult = updateDeci2LockState(socket, true) ? KE_OK : KE_ERROR;
+            if (lockResult != KE_OK)
+            {
+                char dropArgs[32];
+                std::snprintf(dropArgs, sizeof(dropArgs), "socket=%d", socket);
+                ps2_log::emitDrop("syscall/Deci2Call", "KE_ERROR", dropArgs);
+            }
+            setReturnS32(ctx, lockResult);
             return;
         }
         case -9: // sceDeci2ExUnLock(socket)
         {
             const int32_t socket = static_cast<int32_t>(args[0]);
-            setReturnS32(ctx, updateDeci2LockState(socket, false) ? KE_OK : KE_ERROR);
+            const int unlockResult = updateDeci2LockState(socket, false) ? KE_OK : KE_ERROR;
+            if (unlockResult != KE_OK)
+            {
+                char dropArgs[32];
+                std::snprintf(dropArgs, sizeof(dropArgs), "socket=%d", socket);
+                ps2_log::emitDrop("syscall/Deci2Call", "KE_ERROR", dropArgs);
+            }
+            setReturnS32(ctx, unlockResult);
             return;
         }
         case 16: // kputs(char *s)
@@ -226,6 +247,10 @@ namespace ps2_syscalls
                           << std::dec << std::endl;
             }
 
+            // P1w: uncapped census line (the log above stops after 64).
+            char dropArgs[64];
+            std::snprintf(dropArgs, sizeof(dropArgs), "code=%d pc=0x%x", code, ctx->pc);
+            ps2_log::emitDrop("syscall/Deci2Call", "unknown-code", dropArgs);
             setReturnS32(ctx, KE_OK);
             return;
         }

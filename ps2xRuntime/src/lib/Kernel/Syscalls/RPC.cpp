@@ -191,6 +191,7 @@ namespace ps2_syscalls
         const std::string modulePath = readGuestCStringBounded(rdram, pathAddr, kMaxSifModulePathBytes);
         if (modulePath.empty())
         {
+            ps2_log::emitDrop("syscall/SifLoadModule", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -198,6 +199,7 @@ namespace ps2_syscalls
         const int32_t moduleId = trackSifModuleLoad(modulePath);
         if (moduleId <= 0)
         {
+            ps2_log::emitDrop("syscall/SifLoadModule", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -263,6 +265,7 @@ namespace ps2_syscalls
             event.flags = kSifRpcDebugFlagMissingClient;
             event.result = -1;
             pushSifRpcDebugEvent(event);
+            ps2_log::emitDrop("syscall/SifBindRpc", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -466,6 +469,10 @@ namespace ps2_syscalls
             event.flags = kSifRpcDebugFlagMissingClient | ((mode & kSifRpcModeNowait) ? kSifRpcDebugFlagNowait : 0u);
             event.result = -1;
             pushSifRpcDebugEvent(event);
+            char dropArgs[64];
+            std::snprintf(dropArgs, sizeof(dropArgs), "sid=0x%x rpc=0x%x mode=0x%x",
+                          sidHint, rpcNum, mode);
+            ps2_log::emitDrop("syscall/SifCallRpc", "missing-client", dropArgs);
             setReturnS32(ctx, -1);
             return;
         }
@@ -722,6 +729,7 @@ namespace ps2_syscalls
             event.flags = kSifRpcDebugFlagMissingClient;
             event.result = -1;
             pushSifRpcDebugEvent(event);
+            ps2_log::emitDrop("syscall/SifRegisterRpc", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -827,6 +835,7 @@ namespace ps2_syscalls
         t_SifRpcDataQueue *qd = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, qdPtr));
         if (!qd)
         {
+            ps2_log::emitDrop("syscall/SifSetRpcQueue", "error");
             setReturnS32(ctx, -1);
             return;
         }

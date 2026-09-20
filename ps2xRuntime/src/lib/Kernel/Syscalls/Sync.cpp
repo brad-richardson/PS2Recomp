@@ -87,6 +87,9 @@ namespace ps2_syscalls
         const auto *param = address == 0u ? nullptr : getEeGuestStruct<ee_sema_t>(rdram, address);
         if (!param)
         {
+            char dropArgs[32];
+            std::snprintf(dropArgs, sizeof(dropArgs), "param=0x%x", address);
+            ps2_log::emitDrop("syscall/CreateSema", "KE_ERROR", dropArgs);
             setReturnS32(ctx, KE_ERROR);
             if (diagSemaCreateEnabled())
             {
@@ -155,12 +158,14 @@ namespace ps2_syscalls
         const EeSemaphore *semaphore = ee.semaphore(static_cast<int>(getRegU32(ctx, 4)));
         if (!semaphore)
         {
+            ps2_log::emitDrop("syscall/ReferSemaStatus", "KE_UNKNOWN_SEMID");
             setReturnS32(ctx, KE_UNKNOWN_SEMID);
             return;
         }
         auto *status = getEeGuestStruct<ee_sema_t>(rdram, getRegU32(ctx, 5));
         if (!status)
         {
+            ps2_log::emitDrop("syscall/ReferSemaStatus", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -190,6 +195,7 @@ namespace ps2_syscalls
         const auto *param = address == 0u ? nullptr : getEeGuestStruct<EeEventFlagParam>(rdram, address);
         if (!param)
         {
+            ps2_log::emitDrop("syscall/CreateEventFlag", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -236,11 +242,13 @@ namespace ps2_syscalls
         const uint32_t mode = getRegU32(ctx, 6);
         if ((mode & ~WEF_MODE_MASK) != 0u)
         {
+            ps2_log::emitDrop("syscall/WaitEventFlag", "KE_ILLEGAL_MODE");
             setReturnS32(ctx, KE_ILLEGAL_MODE);
             return;
         }
         if (bits == 0u)
         {
+            ps2_log::emitDrop("syscall/WaitEventFlag", "KE_EVF_ILPAT");
             setReturnS32(ctx, KE_EVF_ILPAT);
             return;
         }
@@ -248,17 +256,20 @@ namespace ps2_syscalls
         const EeEventFlag *flag = ee.eventFlag(id);
         if (!flag)
         {
+            ps2_log::emitDrop("syscall/WaitEventFlag", "KE_UNKNOWN_EVFID");
             setReturnS32(ctx, KE_UNKNOWN_EVFID);
             return;
         }
         if ((flag->attr & EA_MULTI) == 0u && !flag->waiters.empty())
         {
+            ps2_log::emitDrop("syscall/WaitEventFlag", "KE_EVF_MULTI");
             setReturnS32(ctx, KE_EVF_MULTI);
             return;
         }
         const uint32_t resultAddress = getRegU32(ctx, 7);
         if (resultAddress != 0u && !getEeGuestStruct<uint32_t>(rdram, resultAddress))
         {
+            ps2_log::emitDrop("syscall/WaitEventFlag", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -272,11 +283,13 @@ namespace ps2_syscalls
         const uint32_t mode = getRegU32(ctx, 6);
         if ((mode & ~WEF_MODE_MASK) != 0u)
         {
+            ps2_log::emitDrop("syscall/PollEventFlag", "KE_ILLEGAL_MODE");
             setReturnS32(ctx, KE_ILLEGAL_MODE);
             return;
         }
         if (bits == 0u)
         {
+            ps2_log::emitDrop("syscall/PollEventFlag", "KE_EVF_ILPAT");
             setReturnS32(ctx, KE_EVF_ILPAT);
             return;
         }
@@ -284,11 +297,13 @@ namespace ps2_syscalls
         const EeEventFlag *flag = ee.eventFlag(id);
         if (!flag)
         {
+            ps2_log::emitDrop("syscall/PollEventFlag", "KE_UNKNOWN_EVFID");
             setReturnS32(ctx, KE_UNKNOWN_EVFID);
             return;
         }
         if ((flag->attr & EA_MULTI) == 0u && !flag->waiters.empty())
         {
+            ps2_log::emitDrop("syscall/PollEventFlag", "KE_EVF_MULTI");
             setReturnS32(ctx, KE_EVF_MULTI);
             return;
         }
@@ -298,6 +313,7 @@ namespace ps2_syscalls
             output = getEeGuestStruct<uint32_t>(rdram, getRegU32(ctx, 7));
             if (!output)
             {
+                ps2_log::emitDrop("syscall/PollEventFlag", "KE_ERROR");
                 setReturnS32(ctx, KE_ERROR);
                 return;
             }
@@ -333,12 +349,14 @@ namespace ps2_syscalls
         const EeEventFlag *flag = ee.eventFlag(static_cast<int>(getRegU32(ctx, 4)));
         if (!flag)
         {
+            ps2_log::emitDrop("syscall/ReferEventFlagStatus", "KE_UNKNOWN_EVFID");
             setReturnS32(ctx, KE_UNKNOWN_EVFID);
             return;
         }
         auto *status = getEeGuestStruct<EeEventFlagStatus>(rdram, getRegU32(ctx, 5));
         if (!status)
         {
+            ps2_log::emitDrop("syscall/ReferEventFlagStatus", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }

@@ -153,7 +153,13 @@ namespace ps2_stubs
             case 1u:  // optimized
             case 20u: // max
             default:
+            {
+                // P1w: unrecognized spindle mode falls back to X4 timing.
+                char dropArgs[32];
+                std::snprintf(dropArgs, sizeof(dropArgs), "mode=%u", spindleControl);
+                ps2_log::emitDrop("stub/dvdStreamSectorsPerSecond", "unknown-spin-mode", dropArgs);
                 return kDvdSectorsPerSecondX4;
+            }
             }
         }
 
@@ -600,6 +606,7 @@ namespace ps2_stubs
         const uint8_t *pos = getConstMemPtr(rdram, posAddr);
         if (!pos)
         {
+            ps2_log::emitDrop("stub/sceCdPosToInt", "error");
             setReturnS32(ctx, -1);
             return;
         }

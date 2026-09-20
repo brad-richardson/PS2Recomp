@@ -99,6 +99,7 @@ namespace ps2_syscalls
         {
             std::cerr << "PS2 GetOsdConfigParam error: Invalid parameter address: 0x"
                       << std::hex << paramAddr << std::dec << std::endl;
+            ps2_log::emitDrop("syscall/GetOsdConfigParam", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -125,6 +126,7 @@ namespace ps2_syscalls
         {
             std::cerr << "PS2 SetOsdConfigParam error: Invalid parameter address: 0x"
                       << std::hex << paramAddr << std::dec << std::endl;
+            ps2_log::emitDrop("syscall/SetOsdConfigParam", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -177,6 +179,7 @@ namespace ps2_syscalls
             {
                 std::cerr << "PS2 SetOsdConfigParam2 error: Invalid parameter address: 0x"
                           << std::hex << (paramAddr + i) << std::dec << std::endl;
+                ps2_log::emitDrop("syscall/SetOsdConfigParam2", "error");
                 setReturnS32(ctx, -1);
                 return;
             }
@@ -241,6 +244,7 @@ namespace ps2_syscalls
             {
                 std::cerr << "PS2 GetOsdConfigParam2 error: Invalid parameter address: 0x"
                           << std::hex << (paramAddr + i) << std::dec << std::endl;
+                ps2_log::emitDrop("syscall/GetOsdConfigParam2", "error");
                 setReturnS32(ctx, -1);
                 return;
             }
@@ -260,6 +264,7 @@ namespace ps2_syscalls
         if (!hostBuf)
         {
             std::cerr << "GetRomName error: Invalid buffer address" << std::endl;
+            ps2_log::emitDrop("syscall/GetRomName", "error");
             setReturnS32(ctx, -1); // Error
             return;
         }
@@ -316,6 +321,7 @@ namespace ps2_syscalls
         const uint32_t bufferAddr = getRegU32(ctx, 4); // $a0
         if (!rdram || bufferAddr == 0u)
         {
+            ps2_log::emitDrop("syscall/sceSifLoadModuleBuffer", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -325,6 +331,7 @@ namespace ps2_syscalls
         const int32_t moduleId = trackSifModuleLoad(moduleTag);
         if (moduleId <= 0)
         {
+            ps2_log::emitDrop("syscall/sceSifLoadModuleBuffer", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -401,6 +408,13 @@ namespace ps2_syscalls
             }
         }
 
+        // P1w: uncapped census line (the unknown-id log above goes quiet
+        // after the first hit until every 5000th).
+        {
+            char dropArgs[64];
+            std::snprintf(dropArgs, sizeof(dropArgs), "id=0x%x pc=0x%x", syscallId, ctx->pc);
+            ps2_log::emitDrop("syscall/TODO", "unimplemented-syscall", dropArgs);
+        }
         // Bootstrap default: avoid hard-failing loops that probe syscall availability.
         setReturnS32(ctx, 0);
     }
@@ -424,6 +438,7 @@ namespace ps2_syscalls
 
         if (!runtime->hasFunction(handler))
         {
+            ps2_log::emitDrop("syscall/dispatchSyscallOverride", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return true;
         }
@@ -1006,6 +1021,7 @@ namespace ps2_syscalls
         uint32_t arg = getRegU32(ctx, 5);
         if (func == 0)
         {
+            ps2_log::emitDrop("syscall/RegisterExitHandler", "error");
             setReturnS32(ctx, -1);
             return;
         }

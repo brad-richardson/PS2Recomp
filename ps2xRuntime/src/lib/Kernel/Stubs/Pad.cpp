@@ -544,8 +544,14 @@ namespace ps2_stubs
             }
             return;
         default:
+        {
+            // P1w: unrecognized pad info mode answers canned 0.
+            char dropArgs[32];
+            std::snprintf(dropArgs, sizeof(dropArgs), "mode=%d", infoMode);
+            ps2_log::emitDrop("stub/scePadInfoMode", "unknown-info-mode", dropArgs);
             setReturnS32(ctx, 0);
             return;
+        }
         }
     }
 
@@ -675,6 +681,7 @@ namespace ps2_stubs
         char *buf = reinterpret_cast<char *>(getMemPtr(rdram, strAddr));
         if (!buf)
         {
+            ps2_log::emitDrop("stub/scePadReqIntToStr", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -771,6 +778,7 @@ namespace ps2_stubs
         char *buf = reinterpret_cast<char *>(getMemPtr(rdram, strAddr));
         if (!buf)
         {
+            ps2_log::emitDrop("stub/scePadStateIntToStr", "error");
             setReturnS32(ctx, -1);
             return;
         }

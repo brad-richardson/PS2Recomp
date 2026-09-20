@@ -1,4 +1,5 @@
 #include "MiniTest.h"
+#include "ps2_log.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
@@ -8,8 +9,10 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -643,6 +646,43 @@ void register_ps2_runtime_kernel_tests()
             std::memcpy(env.rdram.data() + K_PARAM_ADDR, &negParam, sizeof(negParam));
             CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
             t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "a negative max_count is still rejected");
+        });
+
+        tc.Run("Drop census lines format exactly and the kill-switch gates emission (P1w)", [](TestCase &t)
+        {
+            t.Equals(ps2_log::formatDropLine("sched/x", "r", "a=1"), "[drop] sched/x r a=1",
+                     "drop lines use the exact [drop] site reason args shape");
+            t.Equals(ps2_log::formatDropLine("sched/x", "r", ""), "[drop] sched/x r -",
+                     "empty args render as a dash");
+
+            // Save/restore any ambient kill-switch so parallel tests are unaffected.
+            const char *prior = std::getenv("PS2X_DROP_SILENCE");
+            const std::string saved = prior != nullptr ? prior : "";
+            const bool hadPrior = prior != nullptr;
+
+            unsetenv("PS2X_DROP_SILENCE");
+            t.IsTrue(!ps2_log::dropsMuted(), "drops are on by default (kill-switch unset)");
+            std::ostringstream unmuted;
+            ps2_log::emitDropTo(unmuted, "s", "r", "a");
+            t.Equals(unmuted.str(), "[drop] s r a\n", "unmuted emission writes one line");
+
+            setenv("PS2X_DROP_SILENCE", "1", 1);
+            t.IsTrue(ps2_log::dropsMuted(), "a non-empty kill-switch mutes drops");
+            std::ostringstream muted;
+            ps2_log::emitDropTo(muted, "s", "r", "a");
+            t.Equals(muted.str(), "", "muted emission writes nothing");
+
+            setenv("PS2X_DROP_SILENCE", "", 1);
+            t.IsTrue(!ps2_log::dropsMuted(), "an empty kill-switch value still emits");
+
+            if (hadPrior)
+            {
+                setenv("PS2X_DROP_SILENCE", saved.c_str(), 1);
+            }
+            else
+            {
+                unsetenv("PS2X_DROP_SILENCE");
+            }
         });
 
         tc.Run("EE scheduler selects absolute priority then FIFO", [](TestCase &t)

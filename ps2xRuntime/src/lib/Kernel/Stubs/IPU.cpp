@@ -59,6 +59,7 @@ namespace ps2_stubs
         {
             if (!runtime->memory().initialize())
             {
+                ps2_log::emitDrop("stub/sceIpuInit", "error");
                 setReturnS32(ctx, -1);
                 return;
             }
@@ -66,6 +67,7 @@ namespace ps2_stubs
 
         if (!runtime->syncCoreSubsystems())
         {
+            ps2_log::emitDrop("stub/sceIpuInit", "error");
             setReturnS32(ctx, -1);
             return;
         }

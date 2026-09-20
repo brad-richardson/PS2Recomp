@@ -190,18 +190,21 @@ namespace ps2_syscalls
         const uint32_t address = getRegU32(ctx, 4);
         if (address == 0u)
         {
+            ps2_log::emitDrop("syscall/CreateThread", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
         const auto *param = getEeGuestStruct<ee_thread_t>(rdram, address);
         if (!param)
         {
+            ps2_log::emitDrop("syscall/CreateThread", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
 
         if (param->stack_size < 0)
         {
+            ps2_log::emitDrop("syscall/CreateThread", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -214,6 +217,7 @@ namespace ps2_syscalls
                                      stackOffset,
                                      scratch))
             {
+                ps2_log::emitDrop("syscall/CreateThread", "KE_ERROR");
                 setReturnS32(ctx, KE_ERROR);
                 return;
             }
@@ -258,16 +262,19 @@ namespace ps2_syscalls
         GuestThread *target = ee.thread(id);
         if (!target)
         {
+            ps2_log::emitDrop("syscall/StartThread", "KE_UNKNOWN_THID");
             setReturnS32(ctx, KE_UNKNOWN_THID);
             return;
         }
         if (target->status != EeThreadStatus::Dormant)
         {
+            ps2_log::emitDrop("syscall/StartThread", "KE_NOT_DORMANT");
             setReturnS32(ctx, KE_NOT_DORMANT);
             return;
         }
         if (!runtime->hasFunction(target->entry))
         {
+            ps2_log::emitDrop("syscall/StartThread", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -276,6 +283,7 @@ namespace ps2_syscalls
             target->stack = runtime->guestMalloc(target->stackSize, 16u);
             if (target->stack == 0u)
             {
+                ps2_log::emitDrop("syscall/StartThread", "KE_ERROR");
                 setReturnS32(ctx, KE_ERROR);
                 return;
             }
@@ -342,12 +350,14 @@ namespace ps2_syscalls
         const GuestThread *thread = ee.thread(id);
         if (!thread)
         {
+            ps2_log::emitDrop("syscall/ReferThreadStatus", "KE_UNKNOWN_THID");
             setReturnS32(ctx, KE_UNKNOWN_THID);
             return;
         }
         auto *status = getEeGuestStruct<ee_thread_status_t>(rdram, getRegU32(ctx, 5));
         if (!status)
         {
+            ps2_log::emitDrop("syscall/ReferThreadStatus", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -399,6 +409,7 @@ namespace ps2_syscalls
     {
         if (getRegU32(ctx, 4) == 0u)
         {
+            ps2_log::emitDrop("syscall/iCancelWakeupThread", "KE_ILLEGAL_THID");
             setReturnS32(ctx, KE_ILLEGAL_THID);
             return;
         }
