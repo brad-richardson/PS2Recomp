@@ -23,6 +23,19 @@
 #include <cstring>
 #endif
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+// I7: on iOS, SDL2main provides the real main() (UIKit app delegate +
+// runloop) and SDL_main.h renames our main to SDL_main. Desktop-inert:
+// TARGET_OS_IPHONE is 0 on macOS, and CMake links SDL2main only when
+// PS2X_IS_IOS. Chain verified: SDL.h -> SDL_main.h -> SDL_stdinc.h ->
+// SDL_config.h -> SDL_platform.h defines __IPHONEOS__ from
+// TARGET_OS_IPHONE, which selects SDL_MAIN_NEEDED.
+#if TARGET_OS_IPHONE
+#include <SDL2/SDL.h>
+#endif
+#endif
+
 namespace
 {
 #if defined(__ANDROID__)
@@ -258,3 +271,13 @@ int main(int argc, char *argv[])
     std::cerr.flush();
     std::_Exit(1);
 }
+
+// I7: keep SDL_main.h's main->SDL_main rename inside this TU: ps2EntryRunner
+// builds with unity build, so without this the rename would leak into any
+// sibling TU batched after main.cpp. (No sibling uses `main` today; this is
+// insurance while P-lane concurrently edits src/runner/.)
+#if defined(__APPLE__)
+#if TARGET_OS_IPHONE
+#undef main
+#endif
+#endif

@@ -622,6 +622,16 @@ if(PS2X_IS_IOS)
     set_target_properties(ps2EntryRunner PROPERTIES
         MACOSX_BUNDLE_GUI_IDENTIFIER "org.ps2x.ps2entryrunner"
     )
+    # I7: SDL video init fails without UIKit entry (I6 gap 1: WARNING: SDL:
+    # Failed to initialize SDL + SEGV in rlLoadTexture). Link SDL2main, which
+    # provides the real main(): UIKit app delegate + runloop that calls our
+    # main (renamed to SDL_main by SDL_main.h, included from main.cpp under
+    # TARGET_OS_IPHONE). libSDL2.a itself already links via raylib (PLATFORM
+    # SDL); only the entry object was missing. Own find_package: raylib's is
+    # scoped to its FetchContent subdir, and SDL2_DIR is guaranteed set by
+    # the FATAL_ERROR above. Desktop-inert: PS2X_IS_IOS is OFF on Darwin.
+    find_package(SDL2 REQUIRED)
+    target_link_libraries(ps2EntryRunner PRIVATE SDL2::SDL2main)
 endif()
 
 if(APPLE)
