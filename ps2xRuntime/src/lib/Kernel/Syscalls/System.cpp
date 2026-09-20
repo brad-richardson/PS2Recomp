@@ -438,7 +438,9 @@ namespace ps2_syscalls
 
         if (!runtime->hasFunction(handler))
         {
-            ps2_log::emitDrop("syscall/dispatchSyscallOverride", "KE_ERROR");
+            char dropArgs[64];
+            std::snprintf(dropArgs, sizeof(dropArgs), "syscall=0x%x handler=0x%x", syscallNumber, handler);
+            ps2_log::emitDrop("syscall/dispatchSyscallOverride", "KE_ERROR", dropArgs);
             setReturnS32(ctx, KE_ERROR);
             return true;
         }
