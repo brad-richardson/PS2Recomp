@@ -365,6 +365,43 @@ elseif(WIN32)
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyFfmpegDlls.cmake"
         CACHE INTERNAL
         "Script used to stage FFmpeg runtime DLLs beside executables")
+elseif(PS2X_IS_IOS)
+    # I23: minimal FFmpeg 7.1.x subset for iOS, built outside the repo from
+    # the I22 spike recipe (static arm64 archives + `make install` headers).
+    # Only the three libraries MPEG.cpp calls are wired (avformat/swresample
+    # are linked on other platforms but never referenced by MPEG.cpp).
+    set(PS2X_FFMPEG_IOS_ROOT "" CACHE PATH
+        "Prefix of a locally-built minimal FFmpeg 7.1.x for iOS (lib/libav*.a + include/). Recipe: ps2xRuntime/cmake/iOS-FFmpeg-7.1.1.md")
+    if(NOT PS2X_FFMPEG_IOS_ROOT)
+        message(FATAL_ERROR
+            "PS2X_ENABLE_FFMPEG=ON for iOS requires -DPS2X_FFMPEG_IOS_ROOT=<prefix> "
+            "pointing at a locally-built minimal FFmpeg 7.1.x (lib/libavcodec.a, lib/libavutil.a, "
+            "lib/libswscale.a + include/). Recipe: ps2xRuntime/cmake/iOS-FFmpeg-7.1.1.md")
+    endif()
+
+    set(PS2X_FFMPEG_IOS_INCLUDE_DIR "${PS2X_FFMPEG_IOS_ROOT}/include")
+    set(PS2X_FFMPEG_IOS_LIB_DIR "${PS2X_FFMPEG_IOS_ROOT}/lib")
+    foreach(_ps2x_ffmpeg_ios_lib avcodec avutil swscale)
+        if(NOT EXISTS "${PS2X_FFMPEG_IOS_LIB_DIR}/lib${_ps2x_ffmpeg_ios_lib}.a")
+            message(FATAL_ERROR
+                "PS2X_FFMPEG_IOS_ROOT is missing lib/lib${_ps2x_ffmpeg_ios_lib}.a "
+                "(prefix: ${PS2X_FFMPEG_IOS_ROOT}). Rebuild the prefix per ps2xRuntime/cmake/iOS-FFmpeg-7.1.1.md")
+        endif()
+        if(NOT TARGET ffmpeg_${_ps2x_ffmpeg_ios_lib})
+            add_library(ffmpeg_${_ps2x_ffmpeg_ios_lib} STATIC IMPORTED GLOBAL)
+            set_target_properties(ffmpeg_${_ps2x_ffmpeg_ios_lib} PROPERTIES
+                IMPORTED_LOCATION "${PS2X_FFMPEG_IOS_LIB_DIR}/lib${_ps2x_ffmpeg_ios_lib}.a"
+                INTERFACE_INCLUDE_DIRECTORIES "${PS2X_FFMPEG_IOS_INCLUDE_DIR}"
+            )
+        endif()
+    endforeach()
+
+    add_library(ffmpeg INTERFACE)
+    target_link_libraries(ffmpeg INTERFACE
+        ffmpeg_avcodec
+        ffmpeg_avutil
+        ffmpeg_swscale
+    )
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET GLOBAL
