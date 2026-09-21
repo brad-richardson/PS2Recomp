@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(PS2X_ENABLE_RUNNER_UNITY_BUILD "Build ps2EntryRunner with CMake unity build" ON)
 set(PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE 32 CACHE STRING "Unity build batch size for ps2EntryRunner")
 option(PS2X_ENABLE_RUNNER_PCH "Precompile the heavy runtime headers for ps2EntryRunner" ON)
+set(PS2X_GAME_CODEGEN_DIR "" CACHE PATH "ps2_recomp output dir for one game (register_functions.cpp + function .cpps + ps2_recompiled_*.h); when set, builds them as ps2_game_objects and drops the in-tree stub table")
 option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
 option(PS2X_DEV_NO_THINLTO "Dev builds only: skip ThinLTO IPO on the runner link chain (ps2_runtime, ps2EntryRunner) for faster incremental links; Release untouched" OFF)
 
@@ -474,6 +475,10 @@ elseif(EXISTS "${ROOT_MAIN_CPP}")
     list(APPEND RUNNER_SRC_FILES "${ROOT_MAIN_CPP}")
 endif()
 
+if(PS2X_GAME_CODEGEN_DIR)
+    list(REMOVE_ITEM RUNNER_SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/register_functions.cpp")
+endif()
+
 if(PS2X_IS_ANDROID)
     add_library(ps2EntryRunner SHARED
         ${RUNNER_SRC_FILES}
@@ -535,6 +540,23 @@ target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
 )
+
+if(PS2X_GAME_CODEGEN_DIR)
+    file(GLOB PS2X_GAME_SOURCES CONFIGURE_DEPENDS "${PS2X_GAME_CODEGEN_DIR}/*.cpp")
+    list(FILTER PS2X_GAME_SOURCES EXCLUDE REGEX "/\\._")
+    list(LENGTH PS2X_GAME_SOURCES PS2X_GAME_SOURCE_COUNT)
+    message(STATUS "PS2X: game objects: ${PS2X_GAME_SOURCE_COUNT} sources from ${PS2X_GAME_CODEGEN_DIR}")
+    add_library(ps2_game_objects STATIC ${PS2X_GAME_SOURCES})
+    if(PS2X_ENABLE_RUNNER_UNITY_BUILD)
+        set_target_properties(ps2_game_objects PROPERTIES
+            UNITY_BUILD ON
+            UNITY_BUILD_BATCH_SIZE "${PS2X_RUNNER_UNITY_BUILD_BATCH_SIZE}"
+        )
+    endif()
+    target_include_directories(ps2_game_objects PRIVATE "${PS2X_GAME_CODEGEN_DIR}")
+    target_link_libraries(ps2_game_objects PUBLIC ps2_runtime)
+    target_link_libraries(ps2EntryRunner PRIVATE ps2_game_objects)
+endif()
 
 if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
     target_sources(ps2EntryRunner PRIVATE
