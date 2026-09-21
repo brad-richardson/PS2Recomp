@@ -269,7 +269,7 @@ else()
     endif()
 endif()
 
-if(PS2X_IS_ANDROID OR PS2X_IS_IOS)
+if(PS2X_IS_ANDROID)
     set(PS2X_ENABLE_FFMPEG_DEFAULT OFF)
 else()
     set(PS2X_ENABLE_FFMPEG_DEFAULT ON)
