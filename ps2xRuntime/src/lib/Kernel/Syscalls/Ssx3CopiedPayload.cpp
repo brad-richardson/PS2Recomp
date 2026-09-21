@@ -1,4 +1,5 @@
 #include "Ssx3CopiedPayload.h"
+#include "ps2_e3.h"
 #include "Common.h"
 #include "game_overrides.h"
 
@@ -100,12 +101,19 @@ bool emulateLookup(const uint8_t *rdram, R5900Context *ctx)
 
 bool writeGuestWord(uint8_t *rdram, uint32_t addr, uint32_t value)
 {
+    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, addr, 4u); // E3b R3f (0x57 zero-stores)
     uint8_t *ptr = getMemPtr(rdram, addr);
     if (!ptr)
     {
         return false;
     }
     std::memcpy(ptr, &value, sizeof(value));
+    if (e3t.active)
+    {
+        char e3x[64];
+        std::snprintf(e3x, sizeof(e3x), "v=0x%x", value);
+        ps2_e3::tapEnd(std::move(e3t), "k1-h57", rdram, e3x);
+    }
     return true;
 }
 

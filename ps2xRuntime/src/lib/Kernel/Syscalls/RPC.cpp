@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "RPC.h"
 #include "../../ps2_iop_transport.h"
 #include "game_overrides.h"
@@ -193,7 +194,9 @@ namespace ps2_syscalls
             int32_t *hostResult = reinterpret_cast<int32_t *>(getMemPtr(rdram, resultAddr));
             if (hostResult)
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, resultAddr, sizeof(int32_t)); // E3b R3b B14
                 *hostResult = knownModule ? 0 : -1;
+                ps2_e3::tapEnd(std::move(e3t), "sif-stopmod", rdram, "-");
             }
         }
 
@@ -327,6 +330,7 @@ namespace ps2_syscalls
             return;
         }
 
+        ps2_e3::Tap e3client = ps2_e3::tapBegin(rdram, clientPtr, sizeof(t_SifRpcClientData)); // E3b R3b B7
         client->command = 0;
         client->buf = 0;
         client->cbuf = 0;
@@ -361,8 +365,10 @@ namespace ps2_syscalls
                 t_SifRpcServerData *dummy = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr));
                 if (dummy)
                 {
+                    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, serverPtr, sizeof(*dummy)); // E3b R3b B7
                     std::memset(dummy, 0, sizeof(*dummy));
                     dummy->sid = static_cast<int>(rpcId);
+                    ps2_e3::tapEnd(std::move(e3t), "sif-bind", rdram, "f=dummy");
                 }
                 std::lock_guard<std::mutex> lock(g_rpc_mutex);
                 g_rpc_servers[rpcId] = {rpcId, serverPtr};
@@ -382,6 +388,7 @@ namespace ps2_syscalls
             client->buf = 0;
             client->cbuf = 0;
         }
+        ps2_e3::tapEnd(std::move(e3client), "sif-bind", rdram, "f=client");
 
         SifRpcDebugEvent event = makeRpcDebugEvent("BindRpc", ctx, runtime);
         event.clientPtr = clientPtr;
@@ -822,6 +829,7 @@ namespace ps2_syscalls
             return;
         }
 
+        ps2_e3::Tap e3sd = ps2_e3::tapBegin(rdram, sdPtr, sizeof(t_SifRpcServerData)); // E3b R3b B7
         sd->sid = static_cast<int>(sid);
         sd->func = func;
         sd->buf = buf;
@@ -839,6 +847,7 @@ namespace ps2_syscalls
         sd->base = qd;
         sd->link = 0;
         sd->next = 0;
+        ps2_e3::tapEnd(std::move(e3sd), "sif-reg", rdram, "f=server");
 
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
@@ -850,7 +859,9 @@ namespace ps2_syscalls
                 {
                     if (!queue->link)
                     {
+                        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, qd, sizeof(t_SifRpcDataQueue)); // E3b R3b B7
                         queue->link = sdPtr;
+                        ps2_e3::tapEnd(std::move(e3t), "sif-reg", rdram, "f=qlink");
                     }
                     else
                     {
@@ -862,7 +873,10 @@ namespace ps2_syscalls
                                 break;
                             if (!cur->link)
                             {
+                                ps2_e3::Tap e3t = // E3b R3b B7
+                                    ps2_e3::tapBegin(rdram, curPtr, sizeof(t_SifRpcServerData));
                                 cur->link = sdPtr;
+                                ps2_e3::tapEnd(std::move(e3t), "sif-reg", rdram, "f=clink");
                                 break;
                             }
                             if (cur->link == sdPtr)
@@ -881,9 +895,12 @@ namespace ps2_syscalls
                     t_SifRpcClientData *cd = reinterpret_cast<t_SifRpcClientData *>(getMemPtr(rdram, entry.first));
                     if (cd)
                     {
+                        ps2_e3::Tap e3t = // E3b R3b B7
+                            ps2_e3::tapBegin(rdram, entry.first, sizeof(t_SifRpcClientData));
                         cd->server = sdPtr;
                         cd->buf = sd->buf;
                         cd->cbuf = sd->cbuf;
+                        ps2_e3::tapEnd(std::move(e3t), "sif-reg", rdram, "f=client");
                     }
                 }
             }
@@ -928,12 +945,14 @@ namespace ps2_syscalls
             return;
         }
 
+        ps2_e3::Tap e3qd = ps2_e3::tapBegin(rdram, qdPtr, sizeof(t_SifRpcDataQueue)); // E3b R3b B7
         qd->thread_id = threadId;
         qd->active = 0;
         qd->link = 0;
         qd->start = 0;
         qd->end = 0;
         qd->next = 0;
+        ps2_e3::tapEnd(std::move(e3qd), "sif-setq", rdram, "f=queue");
 
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
@@ -953,7 +972,10 @@ namespace ps2_syscalls
                         break;
                     if (!cur->next)
                     {
+                        ps2_e3::Tap e3t = // E3b R3b B7
+                            ps2_e3::tapBegin(rdram, curPtr, sizeof(t_SifRpcDataQueue));
                         cur->next = qdPtr;
+                        ps2_e3::tapEnd(std::move(e3t), "sif-setq", rdram, "f=cnext");
                         break;
                     }
                     curPtr = cur->next;
@@ -997,7 +1019,9 @@ namespace ps2_syscalls
             if (cur->next == qdPtr)
             {
                 t_SifRpcDataQueue *rem = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, qdPtr));
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, curPtr, sizeof(t_SifRpcDataQueue)); // E3b R3b B7
                 cur->next = rem ? rem->next : 0;
+                ps2_e3::tapEnd(std::move(e3t), "sif-remq", rdram, "f=splice");
                 setReturnU32(ctx, qdPtr);
                 return;
             }
@@ -1024,9 +1048,15 @@ namespace ps2_syscalls
         if (qd->link == sdPtr)
         {
             t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, sdPtr));
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, qdPtr, sizeof(t_SifRpcDataQueue)); // E3b R3b B7
             qd->link = sd ? sd->link : 0;
+            ps2_e3::tapEnd(std::move(e3t), "sif-rem", rdram, "f=qlink");
             if (sd)
+            {
+                ps2_e3::Tap e3s = ps2_e3::tapBegin(rdram, sdPtr, sizeof(t_SifRpcServerData));
                 sd->link = 0;
+                ps2_e3::tapEnd(std::move(e3s), "sif-rem", rdram, "f=slink");
+            }
             setReturnU32(ctx, sdPtr);
             return;
         }
@@ -1040,9 +1070,15 @@ namespace ps2_syscalls
             if (cur->link == sdPtr)
             {
                 t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, sdPtr));
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, curPtr, sizeof(t_SifRpcServerData)); // E3b R3b B7
                 cur->link = sd ? sd->link : 0;
+                ps2_e3::tapEnd(std::move(e3t), "sif-rem", rdram, "f=clink");
                 if (sd)
+                {
+                    ps2_e3::Tap e3s = ps2_e3::tapBegin(rdram, sdPtr, sizeof(t_SifRpcServerData));
                     sd->link = 0;
+                    ps2_e3::tapEnd(std::move(e3s), "sif-rem", rdram, "f=slink");
+                }
                 setReturnU32(ctx, sdPtr);
                 return;
             }

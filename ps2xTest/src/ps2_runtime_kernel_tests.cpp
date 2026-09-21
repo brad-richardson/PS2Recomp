@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "game_overrides.h"
+#include "ps2_e3.h"
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
 #include "ps2_runtime.h"
@@ -2122,6 +2123,93 @@ void register_ps2_runtime_kernel_tests()
                      "the 0x5A marker should be visible in the KSEG0 mirror");
             t.Equals(kMarkA - 0x83u * 4u, kMarkB - 0x5Au * 4u,
                      "both markers should cross-check to the same table base");
+        });
+
+        tc.Run("E3 overlap math normalizes aliases and splits wraps (E3b)", [](TestCase &t)
+        {
+            uint64_t parsed = 0u;
+            t.IsTrue(ps2_e3::parseU64("1000", parsed) && parsed == 1000u, "decimal INV should parse");
+            t.IsTrue(ps2_e3::parseU64("0x70001C00", parsed) && parsed == 0x70001C00u, "hex base should parse");
+            t.IsTrue(!ps2_e3::parseU64("", parsed), "empty should not parse");
+            t.IsTrue(!ps2_e3::parseU64("12x", parsed), "trailing junk should not parse");
+
+            const ps2_e3::NormAddr raw = ps2_e3::normAddr(0x501420u);
+            t.IsTrue(raw.space == ps2_e3::kRamSpace && raw.off == 0x501420u, "raw RAM should stay put");
+            const ps2_e3::NormAddr kseg0 = ps2_e3::normAddr(0x8501420u);
+            t.IsTrue(kseg0.space == ps2_e3::kRamSpace && kseg0.off == 0x501420u, "KSEG0 should strip to RAM");
+            const ps2_e3::NormAddr kseg1 = ps2_e3::normAddr(0xB001420u);
+            t.IsTrue(kseg1.space == ps2_e3::kRamSpace && kseg1.off == 0x1001420u, "KSEG1 should strip to RAM");
+            const ps2_e3::NormAddr spr = ps2_e3::normAddr(0x70001C10u);
+            t.IsTrue(spr.space == ps2_e3::kSprSpace && spr.off == 0x1C10u, "scratchpad should map to SPR");
+            const ps2_e3::NormAddr sprAlias = ps2_e3::normAddr(0xF0000010u);
+            t.IsTrue(sprAlias.space == ps2_e3::kSprSpace && sprAlias.off == 0x10u, "SPR alias should map to SPR");
+
+            ps2_e3::Interval ivs[4];
+            t.Equals(ps2_e3::splitIntervals(0x501420u, 32u, ivs, 4u), static_cast<size_t>(1u),
+                     "plain RAM range should be one interval");
+            t.IsTrue(ivs[0].space == ps2_e3::kRamSpace && ivs[0].off == 0x501420u && ivs[0].len == 32u,
+                     "plain interval should keep addr/len");
+            t.Equals(ps2_e3::splitIntervals(0x1FFFFF8u, 16u, ivs, 4u), static_cast<size_t>(2u),
+                     "RAM wrap should split in two");
+            t.IsTrue(ivs[0].off == 0x1FFFFF8u && ivs[0].len == 8u && ivs[1].off == 0u && ivs[1].len == 8u,
+                     "RAM wrap halves should be [top,8) + [0,8)");
+            t.Equals(ps2_e3::splitIntervals(0x70003FF8u, 16u, ivs, 4u), static_cast<size_t>(2u),
+                     "SPR wrap should split in two");
+            t.IsTrue(ivs[0].space == ps2_e3::kSprSpace && ivs[0].off == 0x3FF8u && ivs[0].len == 8u &&
+                         ivs[1].space == ps2_e3::kRamSpace && ivs[1].off == 0u && ivs[1].len == 8u,
+                     "generic mapping past 0x70004000 falls to RAM 0 (getMemPtr semantics)");
+            t.Equals(ps2_e3::splitSpace(ps2_e3::kSprSpace, 0x3FF8u, 16u, ivs, 4u), static_cast<size_t>(2u),
+                     "engine SPR wrap should split in two");
+            t.IsTrue(ivs[0].space == ps2_e3::kSprSpace && ivs[0].off == 0x3FF8u && ivs[0].len == 8u &&
+                         ivs[1].space == ps2_e3::kSprSpace && ivs[1].off == 0u && ivs[1].len == 8u,
+                     "engine SPR wrap halves should be [top,8) + [SPR 0,8)");
+            t.Equals(ps2_e3::splitIntervals(0x1000u, 0u, ivs, 4u), static_cast<size_t>(0u),
+                     "zero length should split to nothing");
+
+            const ps2_e3::Win wins[2] = {{0x501420u, ps2_e3::kRamSpace, 0x501420u},
+                                         {0x70001C10u, ps2_e3::kSprSpace, 0x1C10u}};
+            size_t idx[8];
+            t.Equals(ps2_e3::overlapWins(ps2_e3::kRamSpace, 0x501424u, 4u, wins, 2u, idx, 8u),
+                     static_cast<size_t>(1u), "inner RAM store should hit");
+            t.Equals(idx[0], static_cast<size_t>(0u), "inner hit should be window 0");
+            t.Equals(ps2_e3::overlapWins(ps2_e3::kRamSpace, 0x501428u, 8u, wins, 2u, idx, 8u),
+                     static_cast<size_t>(0u), "abutting store should miss (boundary-exact)");
+            t.Equals(ps2_e3::overlapWins(ps2_e3::kSprSpace, 0x1C14u, 4u, wins, 2u, idx, 8u),
+                     static_cast<size_t>(1u), "inner SPR store should hit");
+            t.Equals(ps2_e3::overlapWins(ps2_e3::kRamSpace, 0x1C10u, 8u, wins, 2u, idx, 8u),
+                     static_cast<size_t>(0u), "same offset in the wrong space should miss");
+        });
+
+        tc.Run("E3 tap captures before-slices on overlap only (E3b)", [](TestCase &t)
+        {
+            std::vector<uint8_t> ram(0x2000u, 0xA5u);
+            std::vector<uint8_t> spr(0x4000u, 0x5Au);
+            uint8_t *savedSpr = ps2GetScratchpadHostPtr();
+            ps2SetScratchpadHostPtr(spr.data());
+
+            const std::vector<ps2_e3::Win> wins = {{0x1000u, ps2_e3::kRamSpace, 0x1000u},
+                                                   {0x70000100u, ps2_e3::kSprSpace, 0x100u}};
+            ps2_e3::Tap hit = ps2_e3::tapBeginImpl(ram.data(), 0x1000u, 4u, wins);
+            t.IsTrue(hit.active, "overlapping RAM tap should be active");
+            t.Equals(hit.wins.size(), static_cast<size_t>(1u), "one window should overlap");
+            t.IsTrue(hit.wins[0].beforeOk && hit.wins[0].before[0] == 0xA5u,
+                     "before-slice should carry RAM bytes");
+
+            ps2_e3::Tap miss = ps2_e3::tapBeginImpl(ram.data(), 0x2000u, 4u, wins);
+            t.IsTrue(!miss.active, "disjoint tap should stay inactive");
+
+            ps2_e3::Tap sprHit = ps2_e3::tapBeginImpl(ram.data(), 0x70000100u, 4u, wins);
+            t.IsTrue(sprHit.active, "overlapping SPR tap should be active");
+            t.IsTrue(sprHit.wins[0].beforeOk && sprHit.wins[0].before[0] == 0x5Au,
+                     "before-slice should carry SPR bytes");
+
+            uint64_t lo = 0u;
+            uint64_t hi = 0u;
+            t.IsTrue(ps2_e3::readOld(ram.data(), 0x1000u, 4u, lo, hi), "old-value gather should succeed");
+            t.Equals(lo, 0xA5A5A5A5ull, "old lo should assemble little-endian");
+            t.Equals(hi, 0ull, "old hi should be zero for width 4");
+
+            ps2SetScratchpadHostPtr(savedSpr);
         });
     });
 }

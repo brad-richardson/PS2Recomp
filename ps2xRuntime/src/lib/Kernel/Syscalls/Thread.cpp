@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "Thread.h"
 #include "runtime/ee_scheduler.h"
 
@@ -361,6 +362,7 @@ namespace ps2_syscalls
             setReturnS32(ctx, KE_ERROR);
             return;
         }
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, getRegU32(ctx, 5), sizeof(ee_thread_status_t)); // E3b R3c D7
         *status = {};
         status->status = rawThreadStatus(thread->status);
         status->func = thread->entry;
@@ -374,6 +376,7 @@ namespace ps2_syscalls
         status->waitType = rawWaitType(thread->wait.reason);
         status->waitId = waitId(*thread);
         status->wakeupCount = thread->wakeupCount;
+        ps2_e3::tapEnd(std::move(e3t), "thr-refer", rdram, "-");
         setReturnS32(ctx, KE_OK);
     }
 

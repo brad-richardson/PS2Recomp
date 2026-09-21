@@ -1,4 +1,5 @@
 #include "ps2_iop_host.h"
+#include "ps2_e3.h"
 
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
@@ -172,7 +173,12 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
     {
         uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
         ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::writeGuest", nullptr);
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, address, size); // E3b R3b
         std::memcpy(destination, source, size);
+        if (e3t.active)
+        {
+            ps2_e3::tapEnd(std::move(e3t), "iop-write", rdram, "-");
+        }
     }
     return true;
 }
@@ -193,7 +199,12 @@ bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
     {
         uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
         ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::zeroGuest", nullptr);
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, address, size); // E3b R3b
         std::memset(destination, 0, size);
+        if (e3t.active)
+        {
+            ps2_e3::tapEnd(std::move(e3t), "iop-zero", rdram, "fill=0");
+        }
     }
     return true;
 }

@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "CD.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
@@ -309,7 +310,15 @@ namespace ps2_stubs
                 return true;
             }
 
-            return readCdSectors(args.lbn, args.sectors, rdram + offset, bytes);
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, args.buf, bytes); // E3b R3c C1
+            const bool e3ok = readCdSectors(args.lbn, args.sectors, rdram + offset, bytes);
+            if (e3t.active)
+            {
+                char e3x[64];
+                std::snprintf(e3x, sizeof(e3x), "lbn=0x%x,ok=%d", args.lbn, e3ok ? 1 : 0);
+                ps2_e3::tapEnd(std::move(e3t), "cd-read", rdram, e3x);
+            }
+            return e3ok;
         };
 
         CdReadArgs selected{a0, a1, a2, "a0/a1/a2"};
@@ -366,7 +375,9 @@ namespace ps2_stubs
                 const size_t bytes = clampReadBytes(a1, offset);
                 if (bytes > 0)
                 {
+                    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, a2, bytes); // E3b R3c C2
                     std::memset(rdram + offset, 0, bytes);
+                    ps2_e3::tapEnd(std::move(e3t), "cd-read", rdram, "lbn=unresolved,ok=0");
                 }
 
                 static uint32_t unresolvedLogCount = 0;
@@ -484,7 +495,9 @@ namespace ps2_stubs
         uint32_t tocAddr = getRegU32(ctx, 4);
         if (uint8_t *toc = getMemPtr(rdram, tocAddr))
         {
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, tocAddr, 1024); // E3b R3e C5
             std::memset(toc, 0, 1024);
+            ps2_e3::tapEnd(std::move(e3t), "cd-toc", rdram, "fill=0");
         }
         setReturnS32(ctx, 1);
     }
@@ -603,7 +616,15 @@ namespace ps2_stubs
                 bytes = maxBytes;
             }
 
-            if (!readCdSectors(lbn, sectors, rdram + offset, bytes))
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, buf, bytes); // E3b R3c C3
+            const bool e3ok = readCdSectors(lbn, sectors, rdram + offset, bytes);
+            if (e3t.active)
+            {
+                char e3x[64];
+                std::snprintf(e3x, sizeof(e3x), "lbn=0x%x,ok=%d", lbn, e3ok ? 1 : 0);
+                ps2_e3::tapEnd(std::move(e3t), "cd-chain", rdram, e3x);
+            }
+            if (!e3ok)
             {
                 ok = false;
                 break;
@@ -634,6 +655,7 @@ namespace ps2_stubs
 #endif
 
         // sceCdCLOCK format (BCD fields).
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, clockAddr, 8); // E3b R3e C5
         clockData[0] = 0;
         clockData[1] = toBcd(static_cast<uint32_t>(localTm.tm_sec));
         clockData[2] = toBcd(static_cast<uint32_t>(localTm.tm_min));
@@ -642,6 +664,7 @@ namespace ps2_stubs
         clockData[5] = toBcd(static_cast<uint32_t>(localTm.tm_mday));
         clockData[6] = toBcd(static_cast<uint32_t>(localTm.tm_mon + 1));
         clockData[7] = toBcd(static_cast<uint32_t>((localTm.tm_year + 1900) % 100));
+        ps2_e3::tapEnd(std::move(e3t), "cd-clock", rdram, "bcd=wallclock");
         setReturnS32(ctx, 1);
     }
 
@@ -918,7 +941,15 @@ namespace ps2_stubs
 
                 const uint32_t readLbn = g_cdStreamingLbn;
                 const size_t readBytes = static_cast<size_t>(sectors) * kCdSectorSize;
-                if (!readCdSectors(readLbn, sectors, rdram + offset, readBytes))
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destination, readBytes); // E3b R3c C4
+                const bool e3ok = readCdSectors(readLbn, sectors, rdram + offset, readBytes);
+                if (e3t.active)
+                {
+                    char e3x[64];
+                    std::snprintf(e3x, sizeof(e3x), "lbn=0x%x,ok=%d", readLbn, e3ok ? 1 : 0);
+                    ps2_e3::tapEnd(std::move(e3t), "cd-stread", rdram, e3x);
+                }
+                if (!e3ok)
                 {
                     finishCdStRead(rdram, ctx, state, g_lastCdError);
                     return;
@@ -1092,7 +1123,9 @@ namespace ps2_stubs
         uint32_t statusPtr = getRegU32(ctx, 5);
         if (uint32_t *status = reinterpret_cast<uint32_t *>(getMemPtr(rdram, statusPtr)); status)
         {
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, statusPtr, sizeof(uint32_t)); // E3b R3e C5
             *status = 0;
+            ps2_e3::tapEnd(std::move(e3t), "cd-tray", rdram, "-");
         }
         setReturnS32(ctx, 1);
     }
@@ -1102,4 +1135,3 @@ namespace ps2_stubs
         return g_cdCallbackStackTop;
     }
 }
-

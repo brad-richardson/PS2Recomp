@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
 #include "../../ps2_iop_transport.h"
@@ -284,6 +285,10 @@ namespace ps2_stubs
                 return true;
             }
 
+            // E3b R3b (before-slices; the destinationIsIop early-return below
+            // writes the host-side mirror only, so it emits no row).
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, dstAddr, sizeBytes);
+
             const bool sourceIsIop = isSifIopHeapRange(srcAddr, sizeBytes);
             const bool destinationIsIop = isSifIopHeapRange(dstAddr, sizeBytes);
             if (sourceIsIop || destinationIsIop)
@@ -324,6 +329,12 @@ namespace ps2_stubs
                     }
                     *dst = payload[i];
                 }
+                if (e3t.active)
+                {
+                    char e3x[64];
+                    std::snprintf(e3x, sizeof(e3x), "src=0x%x,iop=%d", srcAddr, sourceIsIop ? 1 : 0);
+                    ps2_e3::tapEnd(std::move(e3t), "sif-copy", rdram, e3x);
+                }
                 return true;
             }
 
@@ -347,6 +358,12 @@ namespace ps2_stubs
                     }
                     *dst = *src;
                 }
+                if (e3t.active)
+                {
+                    char e3x[64];
+                    std::snprintf(e3x, sizeof(e3x), "src=0x%x,iop=0,dir=bwd", srcAddr);
+                    ps2_e3::tapEnd(std::move(e3t), "sif-copy", rdram, e3x);
+                }
                 return true;
             }
 
@@ -359,6 +376,12 @@ namespace ps2_stubs
                     return false;
                 }
                 *dst = *src;
+            }
+            if (e3t.active)
+            {
+                char e3x[64];
+                std::snprintf(e3x, sizeof(e3x), "src=0x%x,iop=0,dir=fwd", srcAddr);
+                ps2_e3::tapEnd(std::move(e3t), "sif-copy", rdram, e3x);
             }
             return true;
         }
@@ -609,9 +632,11 @@ namespace ps2_stubs
         // SifRpcReceiveData_t keeps src/dest/size at offsets 0x10/0x14/0x18.
         if (uint8_t *rd = getMemPtr(rdram, rdAddr))
         {
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, rdAddr + 0x10u, 12u); // E3b R3b B2
             std::memcpy(rd + 0x10u, &srcAddr, sizeof(srcAddr));
             std::memcpy(rd + 0x14u, &dstAddr, sizeof(dstAddr));
             std::memcpy(rd + 0x18u, &size, sizeof(size));
+            ps2_e3::tapEnd(std::move(e3t), "sif-getother", rdram, "f=recvdata");
         }
 
         if (runtime)

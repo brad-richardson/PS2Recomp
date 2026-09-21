@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "MemoryCard.h"
 
 namespace ps2_stubs
@@ -281,7 +282,9 @@ namespace ps2_stubs
                 return;
             }
 
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, addr, value.size() + 1u); // E3b R3c C10
             std::memcpy(dst, value.c_str(), value.size() + 1u);
+            ps2_e3::tapEnd(std::move(e3t), "mc-str", rdram, "-");
         }
 
         void writeMcDateTime(SceMcStDateTime &out, std::time_t value)
@@ -829,7 +832,10 @@ namespace ps2_stubs
                         }
                         else if (uint8_t *dst = getMemPtr(rdram, tableAddr))
                         {
+                            ps2_e3::Tap e3t = ps2_e3::tapBegin( // E3b R3c C10
+                                rdram, tableAddr, entryCount * sizeof(SceMcTblGetDir));
                             std::memcpy(dst, entries.data(), entryCount * sizeof(SceMcTblGetDir));
+                            ps2_e3::tapEnd(std::move(e3t), "mc-getdir", rdram, "-");
                             result = static_cast<int32_t>(entryCount);
                         }
                         else
@@ -887,21 +893,27 @@ namespace ps2_stubs
         {
             if (uint8_t *out = getMemPtr(rdram, typePtr))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, typePtr, sizeof(cardType)); // E3b R3c
                 std::memcpy(out, &cardType, sizeof(cardType));
+                ps2_e3::tapEnd(std::move(e3t), "mc-getinfo", rdram, "f=type");
             }
         }
         if (freePtr != 0u)
         {
             if (uint8_t *out = getMemPtr(rdram, freePtr))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, freePtr, sizeof(freeBlocks)); // E3b R3c
                 std::memcpy(out, &freeBlocks, sizeof(freeBlocks));
+                ps2_e3::tapEnd(std::move(e3t), "mc-getinfo", rdram, "f=free");
             }
         }
         if (formatPtr != 0u)
         {
             if (uint8_t *out = getMemPtr(rdram, formatPtr))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, formatPtr, sizeof(format)); // E3b R3c
                 std::memcpy(out, &format, sizeof(format));
+                ps2_e3::tapEnd(std::move(e3t), "mc-getinfo", rdram, "f=format");
             }
         }
 
@@ -1068,7 +1080,13 @@ namespace ps2_stubs
             }
             else
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, dstAddr, static_cast<size_t>(size)); // E3b R3c
                 const size_t bytesRead = std::fread(dst, 1u, static_cast<size_t>(size), it->second.file);
+                if (e3t.active && bytesRead > 0)
+                {
+                    e3t.len = bytesRead;
+                    ps2_e3::tapEnd(std::move(e3t), "mc-read", rdram, "-");
+                }
                 result = std::ferror(it->second.file) ? kMcResultDeniedPermit : static_cast<int32_t>(bytesRead);
                 if (std::ferror(it->second.file))
                 {
@@ -1220,14 +1238,18 @@ namespace ps2_stubs
         {
             if (uint8_t *out = getMemPtr(rdram, cmdPtr))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, cmdPtr, sizeof(cmd)); // E3b R3c
                 std::memcpy(out, &cmd, sizeof(cmd));
+                ps2_e3::tapEnd(std::move(e3t), "mc-sync", rdram, "f=cmd");
             }
         }
         if (resultPtr != 0u)
         {
             if (uint8_t *out = getMemPtr(rdram, resultPtr))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, resultPtr, sizeof(result)); // E3b R3c
                 std::memcpy(out, &result, sizeof(result));
+                ps2_e3::tapEnd(std::move(e3t), "mc-sync", rdram, "f=result");
             }
         }
 

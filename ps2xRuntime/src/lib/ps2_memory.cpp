@@ -1,4 +1,5 @@
 #include "runtime/ps2_memory.h"
+#include "ps2_e3.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_log.h"
@@ -1581,6 +1582,22 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint32_t bytes = totalBytes;
                     uint32_t ramAddr = madr & PS2_RAM_MASK;
                     uint32_t sprAddr = m_ioRegisters[channelBase + 0x80u] & (PS2_SCRATCHPAD_SIZE - 1u);
+                    // E3b R3a SPR/DMA host-write tap (before-slices captured here).
+                    // Explicit space intervals: the chunk loop below wraps
+                    // inside RAM/SPR space, unlike the generic mapping.
+                    const uint32_t e3Sadr0 = sprAddr;
+                    ps2_e3::Interval e3ivs[2];
+                    size_t e3niv = 0u;
+                    if (sprFrom)
+                    {
+                        e3niv = ps2_e3::splitSpace(ps2_e3::kRamSpace, madr & PS2_RAM_MASK, totalBytes, e3ivs, 2u);
+                    }
+                    else
+                    {
+                        e3niv = ps2_e3::splitSpace(ps2_e3::kSprSpace, sprAddr, totalBytes, e3ivs, 2u);
+                    }
+                    ps2_e3::Tap e3tap = ps2_e3::tapBeginIntervals(
+                        m_rdram, sprFrom ? madr : (PS2_SCRATCHPAD_BASE + sprAddr), totalBytes, e3ivs, e3niv);
                     while (bytes > 0u)
                     {
                         uint32_t ramChunk = PS2_RAM_SIZE - ramAddr;
@@ -1603,6 +1620,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         sprAddr += chunk;
                         if (sprAddr >= PS2_SCRATCHPAD_SIZE)
                             sprAddr = 0u;
+                    }
+
+                    if (e3tap.active)
+                    {
+                        char e3x[128];
+                        std::snprintf(e3x, sizeof(e3x), "madr=0x%x,sadr=0x%x,qwc=0x%x,dir=%s", madr, e3Sadr0, qwc,
+                                      sprFrom ? "from" : "to");
+                        ps2_e3::tapEnd(std::move(e3tap), sprFrom ? "spr-from" : "spr-to", m_rdram, e3x);
                     }
 
                     m_ioRegisters[channelBase + 0x10u] = madr + totalBytes;

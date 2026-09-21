@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "Ssx3CopiedPayload.h"
 #include "System.h"
 
@@ -114,7 +115,9 @@ namespace ps2_syscalls
             raw = g_osd_config_raw;
         }
 
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, paramAddr, sizeof(uint32_t)); // E3b R3c D9
         *param = raw;
+        ps2_e3::tapEnd(std::move(e3t), "osd-param", rdram, "-");
 
         setReturnS32(ctx, 0);
     }
@@ -238,6 +241,7 @@ namespace ps2_syscalls
         };
         const uint32_t copyBytes = std::min<uint32_t>(size, 4u);
 
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, paramAddr, copyBytes); // E3b R3c D10
         for (uint32_t i = 0; i < copyBytes; ++i)
         {
             uint8_t *dst = getMemPtr(rdram, paramAddr + i);
@@ -251,6 +255,7 @@ namespace ps2_syscalls
             }
             *dst = rawBytes[i];
         }
+        ps2_e3::tapEnd(std::move(e3t), "osd-param2", rdram, "-");
 
         setReturnS32(ctx, 0);
     }

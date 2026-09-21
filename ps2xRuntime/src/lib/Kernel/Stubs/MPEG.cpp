@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
 
@@ -1576,12 +1577,14 @@ namespace ps2_stubs
                 return false;
             }
 
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, addr, kMpegCallbackDataSize); // E3b R3e E9
             std::memset(data, 0, kMpegCallbackDataSize);
             *reinterpret_cast<uint32_t *>(data + 0x00u) = event.streamType;
             *reinterpret_cast<uint32_t *>(data + 0x08u) = event.dataAddr;
             *reinterpret_cast<uint32_t *>(data + 0x0Cu) = event.len;
             *reinterpret_cast<uint64_t *>(data + 0x10u) = event.pts;
             *reinterpret_cast<uint64_t *>(data + 0x18u) = event.dts;
+            ps2_e3::tapEnd(std::move(e3t), "mpeg-cb", rdram, "-");
             return true;
         }
 
@@ -1674,13 +1677,14 @@ namespace ps2_stubs
                     static_cast<size_t>(mbx) * static_cast<size_t>(outHeight) * 16u * 4u;
                 for (uint32_t y = 0u; y < outHeight; ++y)
                 {
-                    uint8_t *dst = getMemPtr(
-                        rdram,
-                        destAddr + static_cast<uint32_t>(stripOffset + static_cast<size_t>(y) * 16u * 4u));
+                    const uint32_t e3row =
+                        destAddr + static_cast<uint32_t>(stripOffset + static_cast<size_t>(y) * 16u * 4u);
+                    uint8_t *dst = getMemPtr(rdram, e3row);
                     if (!dst)
                     {
                         continue;
                     }
+                    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, e3row, 64u); // E3b R3e E9
                     for (uint32_t x = 0u; x < 16u; ++x)
                     {
                         dst[x * 4u + 0u] = 0u;
@@ -1688,6 +1692,7 @@ namespace ps2_stubs
                         dst[x * 4u + 2u] = 0u;
                         dst[x * 4u + 3u] = 0x80u;
                     }
+                    ps2_e3::tapEnd(std::move(e3t), "mpeg-strip", rdram, "blank=1");
                 }
             }
         }
@@ -1711,14 +1716,15 @@ namespace ps2_stubs
                     static_cast<size_t>(mbx) * static_cast<size_t>(outHeight) * 16u * 4u;
                 for (uint32_t y = 0u; y < outHeight; ++y)
                 {
-                    uint8_t *dst = getMemPtr(
-                        rdram,
-                        destAddr + static_cast<uint32_t>(stripOffset + static_cast<size_t>(y) * 16u * 4u));
+                    const uint32_t e3row =
+                        destAddr + static_cast<uint32_t>(stripOffset + static_cast<size_t>(y) * 16u * 4u);
+                    uint8_t *dst = getMemPtr(rdram, e3row);
                     if (!dst)
                     {
                         continue;
                     }
 
+                    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, e3row, 64u); // E3b R3e E9
                     for (uint32_t x = 0u; x < 16u; ++x)
                     {
                         const uint32_t srcX = mbx * 16u + x;
@@ -1744,6 +1750,7 @@ namespace ps2_stubs
                             dst[x * 4u + 3u] = 0x80u;
                         }
                     }
+                    ps2_e3::tapEnd(std::move(e3t), "mpeg-strip", rdram, "blank=0");
                 }
             }
         }
@@ -1969,7 +1976,11 @@ namespace ps2_stubs
             {
                 uint8_t *q = getMemPtr(rdram, ptr + 0x28u);
                 if (q)
+                {
+                    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, ptr + 0x28u, 4u); // E3b R3e E9
                     *reinterpret_cast<uint32_t *>(q) = 0u;
+                    ps2_e3::tapEnd(std::move(e3t), "mpeg-clearref", rdram, "-");
+                }
             }
         }
         setReturnU32(ctx, 1u);
@@ -1978,14 +1989,20 @@ namespace ps2_stubs
     static void mpegGuestWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
     {
         if (uint8_t *p = getMemPtr(rdram, addr))
+        {
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, addr, 4u); // E3b R3e E9 choke
             *reinterpret_cast<uint32_t *>(p) = value;
+            ps2_e3::tapEnd(std::move(e3t), "mpeg-w32", rdram, "-");
+        }
     }
     static void mpegGuestWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
     {
         if (uint8_t *p = getMemPtr(rdram, addr))
         {
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, addr, 8u); // E3b R3e E9 choke
             *reinterpret_cast<uint32_t *>(p) = static_cast<uint32_t>(value);
             *reinterpret_cast<uint32_t *>(p + 4) = static_cast<uint32_t>(value >> 32);
+            ps2_e3::tapEnd(std::move(e3t), "mpeg-w64", rdram, "-");
         }
     }
 
@@ -2404,11 +2421,13 @@ namespace ps2_stubs
             const uint32_t iVar1 = *reinterpret_cast<uint32_t *>(base + 0x40);
             if (uint8_t *inner = getMemPtr(rdram, iVar1))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, iVar1 + 0xb0u, 0x38u); // E3b R3e E9
                 *reinterpret_cast<uint32_t *>(inner + 0xb0) = 1;
                 *reinterpret_cast<uint32_t *>(inner + 0xd8) = (getRegU32(ctx, 5) & 0x0FFFFFFFu) | 0x20000000u;
                 *reinterpret_cast<uint32_t *>(inner + 0xe4) = getRegU32(ctx, 6);
                 *reinterpret_cast<uint32_t *>(inner + 0xdc) = 0;
                 *reinterpret_cast<uint32_t *>(inner + 0xe0) = 0;
+                ps2_e3::tapEnd(std::move(e3t), "mpeg-getpic", rdram, "-");
             }
         }
 

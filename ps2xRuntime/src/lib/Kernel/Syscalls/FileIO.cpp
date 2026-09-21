@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "FileIO.h"
 
 namespace ps2_syscalls
@@ -205,9 +206,17 @@ namespace ps2_syscalls
         }
 
         size_t bytesRead = 0;
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, bufAddr, size); // E3b R3c (before fread)
         {
             std::lock_guard<std::mutex> lock(g_sys_fd_mutex);
             bytesRead = fread(hostBuf, 1, size, fp);
+        }
+        if (e3t.active && bytesRead > 0)
+        {
+            char e3x[64];
+            std::snprintf(e3x, sizeof(e3x), "fd=%d", ps2Fd);
+            e3t.len = bytesRead;
+            ps2_e3::tapEnd(std::move(e3t), "fio-read", rdram, e3x);
         }
         if (bytesRead > 0)
         {

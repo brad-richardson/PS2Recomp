@@ -1,4 +1,5 @@
 #include "runtime/ee_scheduler.h"
+#include "ps2_e3.h"
 
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
@@ -753,6 +754,10 @@ void EeScheduler::run()
             if (ps2DiagWatchEnabled())
             {
                 ps2DiagWatchSetThread(m_currentThreadId);
+            }
+            if (ps2_e3::enabled())
+            {
+                ps2_e3::noteThread(m_currentThreadId);
             }
             function(m_rdram, &context, &m_runtime);
             m_guestExecuting.store(false, std::memory_order_release);
@@ -1996,6 +2001,15 @@ void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
                     watchSp = getRegU32(&actx, 29);
                 }
                 ps2DiagWatchReportDirect(tickAddress, 8u, 0u, 0u, watchPc, m_currentThreadId, watchRa, watchSp);
+                // E3b R2-direct row (pre-memcpy old value; legacy line above stays verbatim).
+                if (ps2_e3::armed() && ps2_e3::storeOverlaps(tickAddress, 8u))
+                {
+                    uint64_t e3oldLo = 0u;
+                    uint64_t e3oldHi = 0u;
+                    ps2_e3::readOld(m_rdram, tickAddress, 8u, e3oldLo, e3oldHi);
+                    ps2_e3::emitR2(2u, tickAddress, 8u, e3oldLo, e3oldHi, 0u, 0u, watchPc, m_currentThreadId,
+                                   watchRa, watchSp);
+                }
             }
             std::memcpy(m_rdram + physical, &zero, sizeof(zero));
         }
@@ -2561,6 +2575,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         break;
     case EeEventType::VBlankStart:
         ++m_vsyncTick;
+        ps2_e3::noteVBlank(m_vsyncTick); // E3b frame stamp
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
         if ((m_vsyncTick & 1u) != 0u)
         {
@@ -2576,7 +2591,16 @@ void EeScheduler::processEvent(const EeEvent &event)
             const uint32_t physical = m_vsyncTickAddress & 0x1FFFFFFFu;
             if (m_rdram && physical <= PS2_RAM_SIZE - sizeof(uint64_t))
             {
+                // E3b R3d VBlank-tick tap (BYPASS path; the flag write above
+                // FIRES via writeGuestU32 and is covered by R2-direct).
+                ps2_e3::Tap e3tick = ps2_e3::tapBegin(m_rdram, m_vsyncTickAddress, sizeof(uint64_t));
                 std::memcpy(m_rdram + physical, &m_vsyncTick, sizeof(m_vsyncTick));
+                if (e3tick.active)
+                {
+                    char e3x[64];
+                    std::snprintf(e3x, sizeof(e3x), "tick=%llu", static_cast<unsigned long long>(m_vsyncTick));
+                    ps2_e3::tapEnd(std::move(e3tick), "vblank-tick", m_rdram, e3x);
+                }
             }
         }
         m_vsyncFlagAddress = 0u;
@@ -2718,6 +2742,15 @@ void EeScheduler::writeGuestU32(uint32_t address, uint32_t value)
             watchSp = getRegU32(&actx, 29);
         }
         ps2DiagWatchReportDirect(address, 4u, value, 0u, watchPc, m_currentThreadId, watchRa, watchSp);
+        // E3b R2-direct row (pre-memcpy old value; legacy line above stays verbatim).
+        if (ps2_e3::armed() && ps2_e3::storeOverlaps(address, 4u))
+        {
+            uint64_t e3oldLo = 0u;
+            uint64_t e3oldHi = 0u;
+            ps2_e3::readOld(m_rdram, address, 4u, e3oldLo, e3oldHi);
+            ps2_e3::emitR2(2u, address, 4u, e3oldLo, e3oldHi, value, 0u, watchPc, m_currentThreadId, watchRa,
+                           watchSp);
+        }
     }
     std::memcpy(m_rdram + physical, &value, sizeof(value));
 }

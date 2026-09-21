@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "Sync.h"
 #include "runtime/ee_scheduler.h"
 
@@ -172,12 +173,14 @@ namespace ps2_syscalls
             setReturnS32(ctx, KE_ERROR);
             return;
         }
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, getRegU32(ctx, 5), sizeof(ee_sema_t)); // E3b R3c D6
         status->count = semaphore->count;
         status->max_count = semaphore->maxCount;
         status->init_count = semaphore->initCount;
         status->wait_threads = static_cast<int>(semaphore->waiters.size());
         status->attr = semaphore->attr;
         status->option = semaphore->option;
+        ps2_e3::tapEnd(std::move(e3t), "sema-refer", rdram, "-");
         setReturnS32(ctx, KE_OK);
     }
 
@@ -325,7 +328,9 @@ namespace ps2_syscalls
         const int result = ee.pollEventFlag(id, bits, mode, observed);
         if (result == KE_OK && output)
         {
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, getRegU32(ctx, 7), sizeof(uint32_t)); // E3b R3c D4
             *output = observed;
+            ps2_e3::tapEnd(std::move(e3t), "ev-poll", rdram, "-");
         }
         setReturnS32(ctx, result);
     }
@@ -363,6 +368,7 @@ namespace ps2_syscalls
             setReturnS32(ctx, KE_ERROR);
             return;
         }
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, getRegU32(ctx, 5), sizeof(EeEventFlagStatus)); // E3b R3c D5
         *status = {flag->attr,
                    flag->option,
                    flag->initBits,
@@ -370,6 +376,7 @@ namespace ps2_syscalls
                    static_cast<int32_t>(flag->waiters.size()),
                    0,
                    0};
+        ps2_e3::tapEnd(std::move(e3t), "ev-refer", rdram, "-");
         setReturnS32(ctx, KE_OK);
     }
 

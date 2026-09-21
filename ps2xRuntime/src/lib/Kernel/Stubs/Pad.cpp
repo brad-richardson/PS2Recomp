@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "Pad.h"
 
 #include <chrono>
@@ -852,7 +853,9 @@ namespace ps2_stubs
         if (dmaStr)
         {
             ps2TraceGuestRangeWrite(rdram, dmaAddr, 32u, "scePadPortOpen", ctx);
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, dmaAddr, 32u); // E3b R3e E2
             std::memset(dmaStr, 0, 32);
+            ps2_e3::tapEnd(std::move(e3t), "pad-open", rdram, "fill=0");
         }
         setReturnS32(ctx, 1);
     }
@@ -870,7 +873,15 @@ namespace ps2_stubs
         }
 
         ps2TraceGuestRangeWrite(rdram, dataAddr, 32u, "scePadRead", ctx);
-        if (!readPadPortData(port, slot, runtime, data, dataAddr))
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, dataAddr, 32u); // E3b R3e E1
+        const bool e3ok = readPadPortData(port, slot, runtime, data, dataAddr);
+        if (e3t.active)
+        {
+            char e3x[64];
+            std::snprintf(e3x, sizeof(e3x), "port=%d,slot=%d,ok=%d", port, slot, e3ok ? 1 : 0);
+            ps2_e3::tapEnd(std::move(e3t), "pad-read", rdram, e3x);
+        }
+        if (!e3ok)
         {
             setReturnS32(ctx, 0);
             return;
@@ -914,8 +925,10 @@ namespace ps2_stubs
         }
 
         const char *text = (state == 0) ? "COMPLETE" : "BUSY";
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, strAddr, 32); // E3b R3e E3
         std::strncpy(buf, text, 31);
         buf[31] = '\0';
+        ps2_e3::tapEnd(std::move(e3t), "pad-str", rdram, "fn=req");
         setReturnS32(ctx, 0);
     }
 
@@ -1028,8 +1041,10 @@ namespace ps2_stubs
             text = "DISCONNECTED";
         }
 
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, strAddr, 32); // E3b R3e E3
         std::strncpy(buf, text, 31);
         buf[31] = '\0';
+        ps2_e3::tapEnd(std::move(e3t), "pad-str", rdram, "fn=state");
         setReturnS32(ctx, 0);
     }
 
