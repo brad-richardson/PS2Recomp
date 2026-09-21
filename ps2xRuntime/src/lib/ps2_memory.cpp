@@ -1,5 +1,6 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_e3.h"
+#include "ps2_e7.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_log.h"
@@ -1082,6 +1083,8 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
 
 void PS2Memory::write128(uint32_t address, __m128i value)
 {
+    if (address == 0x10005000u && ps2_e7::enabled())
+        ps2_e7::event(gs_regs.vsyncTick.load(), "fifo-before", "mask=%u queued=%zu", m_path3Masked, m_path3MaskedFifo.size());
     if (address & 15)
     {
         throw std::runtime_error("Unaligned 128-bit write at address: 0x" + std::to_string(address));
@@ -1125,6 +1128,8 @@ void PS2Memory::write128(uint32_t address, __m128i value)
         write64(address, lo);
         write64(address + 8, hi);
     }
+    if (address == 0x10005000u && ps2_e7::enabled())
+        ps2_e7::event(gs_regs.vsyncTick.load(), "fifo-after", "mask=%u queued=%zu", m_path3Masked, m_path3MaskedFifo.size());
 }
 
 bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
@@ -1305,6 +1310,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             const uint32_t channelBase = address & 0xFFFFFF00;
             const uint32_t madr = m_ioRegisters[channelBase + 0x10];
             const uint32_t qwc = m_ioRegisters[channelBase + 0x20];
+            if (channelBase == 0x1000A000u && ps2_e7::enabled())
+                ps2_e7::event(gs_regs.vsyncTick.load(), "gif-start", "madr=0x%x qwc=%u chcr=0x%x mask=%u queued=%zu", madr, qwc, value, m_path3Masked, m_path3MaskedFifo.size());
             m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
 
             if ((channelBase == 0x1000A000u || channelBase == 0x10009000u || channelBase == 0x10008000u) &&
@@ -1725,6 +1732,7 @@ void PS2Memory::processPendingTransfers()
                         break;
                     m_seenGifCopy = true;
                     m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+                    ps2_e7::packet(gs_regs.vsyncTick.load(), "gif-dma", m_rdram + srcPhys, chunk, m_path3Masked, m_path3MaskedFifo.size(), srcPhys);
                     submitGifPacket(GifPathId::Path3, m_rdram + srcPhys, chunk, false);
                     bytesLeft -= chunk;
                     srcPhys += chunk;
@@ -1879,6 +1887,8 @@ void PS2Memory::processPendingTransfers()
         queueCompletedDmacCause(2u);
         m_ioRegisters[GIF_CHANNEL + 0x00] &= ~0x100u;
         m_ioRegisters[GIF_CHANNEL + 0x20] = 0;
+        if (ps2_e7::enabled())
+            ps2_e7::event(gs_regs.vsyncTick.load(), "gif-complete", "mask=%u queued=%zu str=0 qwc=0", m_path3Masked, m_path3MaskedFifo.size());
     }
     if (hadVif0)
     {
@@ -1926,7 +1936,10 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
     for (const auto &packet : m_path3MaskedFifo)
     {
         if (packet.size() >= 16u)
+        {
+            ps2_e7::packet(gs_regs.vsyncTick.load(), "path3-flush", packet.data(), static_cast<uint32_t>(packet.size()), m_path3Masked, m_path3MaskedFifo.size());
             emit(packet.data(), static_cast<uint32_t>(packet.size()));
+        }
     }
     m_path3MaskedFifo.clear();
 
@@ -1941,6 +1954,7 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
 
     if (pathId == GifPathId::Path3)
     {
+        ps2_e7::packet(gs_regs.vsyncTick.load(), m_path3Masked ? "path3-queue" : "path3-send", data, sizeBytes, m_path3Masked, m_path3MaskedFifo.size());
         if (m_path3Masked)
         {
             m_path3MaskedFifo.emplace_back(data, data + sizeBytes);

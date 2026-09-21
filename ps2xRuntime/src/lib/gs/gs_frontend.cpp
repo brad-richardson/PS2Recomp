@@ -1,4 +1,5 @@
 #include "runtime/gs/gs_frontend.h"
+#include "ps2_e7.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "ps2_e4.h"
 #include "ps2_log.h"
@@ -651,6 +652,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!data || sizeBytes < 16 || !m_backend)
         return;
 
+    ps2_e7::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u, "gs-enter", data, sizeBytes);
     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
         return;
 

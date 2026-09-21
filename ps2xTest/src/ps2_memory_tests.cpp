@@ -1,4 +1,5 @@
 #include "MiniTest.h"
+#include "ps2_e7.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -845,6 +846,19 @@ void register_ps2_memory_tests()
             mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&mscntCmd), sizeof(mscntCmd));
             t.IsTrue((mem.vif1_regs.stat & (1u << 7)) == 0u, "MSCNT should toggle DBF again");
             t.Equals(mem.vif1_regs.tops, 0x30u, "DBF=0 should restore TOPS to BASE");
+        });
+
+        tc.Run("E7 byte budget reserves the boundary after boot exhaustion", [](TestCase &t)
+        {
+            ps2_e7::Budget b;
+            t.IsTrue(b.admit(ps2_e7::kBootBytes, false), "exact boot limit fits");
+            t.IsFalse(b.admit(1u, false), "boot overflow is refused");
+            t.IsTrue(b.bootTruncated, "boot overflow is explicit");
+            t.IsTrue(b.admit(ps2_e7::kWindowBytes, true), "boundary remains available");
+            t.IsFalse(b.admit(1u, true), "boundary overflow is refused");
+            t.IsTrue(b.boundaryTruncated, "boundary overflow is explicit");
+            t.IsTrue(ps2_e7::window(599u) && ps2_e7::window(603u), "adjacent boundaries included");
+            t.IsFalse(ps2_e7::window(598u) || ps2_e7::window(604u), "window does not leak");
         });
 
         tc.Run("VIF MSKPATH3 uses immediate bit15", [](TestCase &t)

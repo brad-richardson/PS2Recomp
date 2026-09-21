@@ -1,6 +1,7 @@
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"
 #include <cstring>
+#include "ps2_e7.h"
 
 enum VIFCmd : uint8_t
 {
@@ -354,6 +355,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             // VIF command docs: MSKPATH3 uses IMMEDIATE bit 15.
             const bool wasMasked = m_path3Masked;
             m_path3Masked = (imm & 0x8000u) != 0u;
+            if (ps2_e7::enabled())
+                ps2_e7::event(gs_regs.vsyncTick.load(), "vif-mask", "cmd=0x%x offset=%u was=%u now=%u queued=%zu", cmd, pos - 4u, wasMasked, m_path3Masked, m_path3MaskedFifo.size());
             if (wasMasked && !m_path3Masked)
                 flushMaskedPath3Packets();
             continue;

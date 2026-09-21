@@ -7,6 +7,7 @@
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
+#include "ps2_e7.h"
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
@@ -1371,6 +1372,8 @@ static void diagWatchReportImpl(uint8_t *rdram, uint32_t writeAddr, uint32_t wid
     const uint32_t sp = ctx != nullptr ? getRegU32(ctx, 29) : 0u;
     const int tid = g_diagWatchThreadId.load(std::memory_order_relaxed);
     diagWatchEmit(writeAddr, width, valueLo, valueHi, pc, tid, ra, sp);
+    if (ps2_e7::enabled() && runtime != nullptr)
+        ps2_e7::fields(runtime->memory().gs().vsyncTick.load(), rdram, writeAddr, width, valueLo, valueHi, pc, tid);
     if (ps2_e3::armed() && ps2_e3::storeOverlaps(writeAddr, width))
     {
         uint64_t oldLo = 0u;
@@ -2904,6 +2907,8 @@ void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m
     }
     try
     {
+        if (vaddr == 0x10005000u && ps2_e7::enabled())
+            ps2_e7::event(m_memory.gs().vsyncTick.load(), "cpu-fifo", "pc=0x%x ra=0x%x lo=0x%llx hi=0x%llx mask=%u", ctx ? ctx->pc : 0u, ctx ? getRegU32(ctx,31) : 0u, static_cast<unsigned long long>(_parts[0]), static_cast<unsigned long long>(_parts[1]), m_memory.isPath3Masked());
         m_memory.write128(vaddr, value);
     }
     catch (const std::exception &)
