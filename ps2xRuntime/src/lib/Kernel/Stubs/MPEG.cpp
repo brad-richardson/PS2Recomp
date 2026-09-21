@@ -17,6 +17,8 @@ extern "C"
 }
 #endif
 
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 
@@ -38,6 +40,8 @@ namespace ps2_stubs
         };
 
 #if PS2X_HAS_FFMPEG
+        // I23: env-gated vector diagnostic (defined after MpegFfmpegDecoder).
+        void maybeRunMpegVectorDiagnostic();
         std::string ffmpegErrorString(int err)
         {
             std::array<char, AV_ERROR_MAX_STRING_SIZE> buffer{};
@@ -80,6 +84,10 @@ namespace ps2_stubs
                 {
                     return true;
                 }
+
+                // I23: once-per-process vector check on first real input (no-op unless
+                // PS2X_MPEG_VECTOR_PATH is set; decodes through an isolated instance).
+                maybeRunMpegVectorDiagnostic();
 
                 if (!ensureInitialized())
                 {
@@ -446,6 +454,133 @@ namespace ps2_stubs
             bool m_initialized = false;
             bool m_drained = false;
         };
+
+        // I23: env-gated MPEG vector diagnostic. When PS2X_MPEG_VECTOR_PATH
+        // names a readable file, its bytes are decoded once through an
+        // ISOLATED MpegFfmpegDecoder (never the playback queue — no guest
+        // state is touched) and the counters + RGBA digest are printed to
+        // stderr UNGATED (observable without AGRESSIVE_LOGS). Default (env
+        // unset): zero behavior change. The isolated feed/flush also emit
+        // the standard capped [MPEG:feed] line when AGRESSIVE_LOGS is on.
+        uint64_t mpegVectorFnv1a64(const uint8_t *data, size_t size)
+        {
+            uint64_t hash = 0xcbf29ce484222325ull;
+            for (size_t i = 0; i < size; ++i)
+            {
+                hash ^= static_cast<uint64_t>(data[i]);
+                hash *= 0x100000001b3ull;
+            }
+            return hash;
+        }
+
+        void maybeRunMpegVectorDiagnostic()
+        {
+            static bool s_vectorRan = false;
+            if (s_vectorRan)
+            {
+                return;
+            }
+            // Set before running: the isolated feed() below re-enters here.
+            s_vectorRan = true;
+            const char *path = std::getenv("PS2X_MPEG_VECTOR_PATH");
+            if (path == nullptr || *path == '\0')
+            {
+                return;
+            }
+            FILE *file = std::fopen(path, "rb");
+            if (file == nullptr)
+            {
+                std::cerr << "[MPEG:vector] error: cannot open " << path << std::endl;
+                return;
+            }
+            std::vector<uint8_t> bytes;
+            uint8_t chunk[4096];
+            size_t got = 0;
+            while ((got = std::fread(chunk, 1, sizeof(chunk), file)) > 0)
+            {
+                bytes.insert(bytes.end(), chunk, chunk + got);
+            }
+            std::fclose(file);
+            const uint64_t inputFnv = mpegVectorFnv1a64(bytes.data(), bytes.size());
+            std::cerr << "[MPEG:vector] path=" << path << " inSize=" << bytes.size() << " inputFnv64=" << std::hex
+                      << inputFnv << std::dec << std::endl;
+
+            MpegFfmpegDecoder probe;
+            std::deque<MpegDecodedFrame> frames;
+            const bool feedOk = probe.feed(bytes.data(), bytes.size(), frames);
+            const size_t afterFeed = frames.size();
+            std::cerr << "[MPEG:vector] feed: ok=" << feedOk << " newFrames=" << afterFeed << std::endl;
+            const bool flushOk = probe.flush(frames);
+            std::cerr << "[MPEG:vector] flush: ok=" << flushOk << " newFrames=" << (frames.size() - afterFeed)
+                      << " totalFrames=" << frames.size() << std::endl;
+
+            size_t rgbaTotal = 0;
+            for (const auto &frame : frames)
+            {
+                rgbaTotal += frame.rgba.size();
+            }
+            uint64_t rgbaFnv = 0xcbf29ce484222325ull;
+            for (const auto &frame : frames)
+            {
+                for (uint8_t b : frame.rgba)
+                {
+                    rgbaFnv ^= static_cast<uint64_t>(b);
+                    rgbaFnv *= 0x100000001b3ull;
+                }
+            }
+            size_t shown = 0;
+            for (const auto &frame : frames)
+            {
+                if (shown >= 8)
+                {
+                    break;
+                }
+                std::cerr << "[MPEG:vector] frame" << shown << " " << frame.width << "x" << frame.height
+                          << " rgba=" << frame.rgba.size() << std::endl;
+                ++shown;
+            }
+            std::vector<uint8_t> flat;
+            flat.reserve(rgbaTotal);
+            for (const auto &frame : frames)
+            {
+                flat.insert(flat.end(), frame.rgba.begin(), frame.rgba.end());
+            }
+            char firstHex[129] = {};
+            char lastHex[129] = {};
+            const size_t headLen = std::min<size_t>(64, flat.size());
+            for (size_t i = 0; i < headLen; ++i)
+            {
+                std::snprintf(firstHex + i * 2, 3, "%02x", flat[i]);
+            }
+            const size_t tailStart = flat.size() > 64 ? flat.size() - 64 : 0;
+            for (size_t i = tailStart; i < flat.size(); ++i)
+            {
+                std::snprintf(lastHex + (i - tailStart) * 2, 3, "%02x", flat[i]);
+            }
+            std::cerr << "[MPEG:vector] rgba=" << rgbaTotal << " fnv64=" << std::hex << rgbaFnv << std::dec
+                      << " first64=" << firstHex << " last64=" << lastHex << std::endl;
+
+            const char *tmpDir = std::getenv("TMPDIR");
+            if (tmpDir != nullptr && *tmpDir != '\0' && !flat.empty())
+            {
+                std::string outPath = std::string(tmpDir) + "/i23-vector-rgba.bin";
+                FILE *out = std::fopen(outPath.c_str(), "wb");
+                if (out != nullptr)
+                {
+                    std::fwrite(flat.data(), 1, flat.size(), out);
+                    std::fclose(out);
+                    std::cerr << "[MPEG:vector] wrote=" << outPath << " bytes=" << flat.size() << std::endl;
+                }
+                else
+                {
+                    std::cerr << "[MPEG:vector] wrote=none (open failed)" << std::endl;
+                }
+            }
+            else
+            {
+                std::cerr << "[MPEG:vector] wrote=none (no TMPDIR or empty)" << std::endl;
+            }
+        }
 #else
         // TODO
         class MpegFfmpegDecoder
