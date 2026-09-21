@@ -165,6 +165,24 @@ namespace ps2_stubs
                     });
                 }
 
+                // I23: env-gated feed trace (observable WITHOUT AGRESSIVE_LOGS —
+                // the AGRESSIVE build also forces the per-call flushed file tracker
+                // into all game objects, so surgical tracing stays available standalone).
+                static uint32_t s_feedTraceCount = 0u;
+                static int s_feedTraceOn = -1;
+                if (s_feedTraceOn < 0)
+                {
+                    const char *traceEnv = std::getenv("PS2X_MPEG_FEED_TRACE");
+                    s_feedTraceOn = (traceEnv != nullptr && *traceEnv != '\0') ? 1 : 0;
+                }
+                if (s_feedTraceOn && s_feedTraceCount < 32u)
+                {
+                    ++s_feedTraceCount;
+                    std::cerr << "[MPEG:feed-trace] inSize=" << size << " parsed=" << totalParsed
+                              << " packets=" << totalPacketsSent << " newFrames=" << (frames.size() - framesBefore)
+                              << " totalFrames=" << frames.size() << std::endl;
+                }
+
                 return true;
             }
 
