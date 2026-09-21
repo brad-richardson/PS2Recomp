@@ -1,6 +1,7 @@
 #include "runtime/ee_scheduler.h"
 #include "ps2_e3.h"
 #include "ps2_e4.h"
+#include "ps2_e15.h"
 
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
@@ -760,7 +761,9 @@ void EeScheduler::run()
             {
                 ps2_e3::noteThread(m_currentThreadId);
             }
+            ps2_e15::Trace mpegTrace("scheduler",m_vsyncTick,m_rdram,&context,context.pc,0u,m_currentThreadId);
             function(m_rdram, &context, &m_runtime);
+            mpegTrace.finish(m_vsyncTick);
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }
@@ -1743,6 +1746,7 @@ int EeScheduler::cancelAlarm(int id)
 void EeScheduler::queueInvocation(GuestInvocation invocation)
 {
     assertExecutor();
+    ps2_e15::selection(m_vsyncTick,"queue",invocation.context.pc,&invocation.context,m_currentThreadId);
     invocation.sequence = ++m_invocationSequence;
     m_pendingInvocations.push_back(std::move(invocation));
     m_checkpointPending.store(true, std::memory_order_release);
@@ -1751,6 +1755,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
 [[noreturn]] void EeScheduler::invokeCurrent(GuestInvocation invocation)
 {
     assertExecutor();
+    ps2_e15::selection(m_vsyncTick,"direct",invocation.context.pc,&invocation.context,m_currentThreadId);
     GuestThread *owner = currentThread();
     assert(owner != nullptr);
     if (getRegU32(&invocation.context, 29) == 0u)
@@ -1771,6 +1776,7 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     assert(!invocations.empty());
     for (auto it = invocations.rbegin(); it != invocations.rend(); ++it)
     {
+        ps2_e15::selection(m_vsyncTick,"sequence",it->context.pc,&it->context,m_currentThreadId);
         if (getRegU32(&it->context, 29) == 0u)
         {
             SET_GPR_U32(&it->context, 29, invocationStackTop());
@@ -2087,6 +2093,9 @@ void EeScheduler::completeExternalWait(uint32_t type, uint64_t token, int result
         }
     }
     std::sort(completed.begin(), completed.end());
+    if (ps2_e15::enabled() && type==1u)
+        ps2_e7::event(m_vsyncTick,"mpeg-complete","type=%u token=0x%llx result=%d matched=%zu thread=%d",
+            type,static_cast<unsigned long long>(token),result,completed.size(),m_currentThreadId);
     for (const int id : completed)
     {
         GuestThread *waiter = thread(id);
@@ -2101,6 +2110,13 @@ void EeScheduler::completeExternalWait(uint32_t type, uint64_t token, int result
                                             uint64_t token,
                                             std::function<void(R5900Context &)> completion)
 {
+    if (ps2_e15::enabled() && reason==EeWaitReason::Mpeg)
+    {
+        const auto *c=currentContext();
+        ps2_e7::event(m_vsyncTick,"mpeg-wait","type=%u token=0x%llx thread=%d pc=0x%x ra=0x%x sp=0x%x reason=%u",
+            type,static_cast<unsigned long long>(token),m_currentThreadId,c?c->pc:0u,
+            c?getRegU32(c,31):0u,c?getRegU32(c,29):0u,static_cast<unsigned>(reason));
+    }
     EeWaitState wait{reason, EeExternalWait{type, token}, std::move(completion)};
     blockCurrent(std::move(wait));
 }

@@ -15,7 +15,13 @@ namespace ps2_e7
 inline constexpr uint64_t kBootBytes = 4u * 1024u * 1024u;
 inline constexpr uint64_t kWindowBytes = 1u * 1024u * 1024u;
 inline constexpr uint64_t kPacketBytes = 512u * 1024u;
-inline bool window(uint64_t tick) { return tick >= 599u && tick <= 603u; }
+// E15 opt-in alignment uses only diagnostic atomics; no guest writes.
+inline bool aligned() { static const bool yes = [] { const char *p=std::getenv("PS2X_E15_ALIGN"); return p && std::strcmp(p,"1")==0; }(); return yes; }
+inline std::atomic<uint64_t> &alignedArm() { static std::atomic<uint64_t> value{UINT64_MAX}; return value; }
+inline bool window(uint64_t tick) {
+    const uint64_t a=alignedArm().load();
+    return aligned() ? (a!=UINT64_MAX && tick>=a && tick<=a+1u) : (tick>=599u && tick<=603u);
+}
 inline const char *directory()
 {
     static const char *dir = [] { const char *p = std::getenv("PS2X_E7_DIR"); return p && *p ? p : nullptr; }();
@@ -42,7 +48,7 @@ struct Sink
     FILE *file = nullptr;
     Budget budget;
     uint64_t seq = 0, packetBytes = 0, packets = 0;
-    bool opened = false, finished = false, packetTruncated = false;
+    bool opened = false, finished = false, closed = false, packetTruncated = false;
 };
 inline Sink &sink() { static Sink s; return s; }
 inline uint64_t hash(const uint8_t *data, uint32_t size)
@@ -62,10 +68,10 @@ inline void event(uint64_t tick, const char *kind, const char *fmt, ...)
         char path[1024];
         std::snprintf(path, sizeof(path), "%s/e7-events.txt", directory());
         s.file = std::fopen(path, "w");
-        if (s.file) std::fprintf(s.file, "# E7 observation only; ticks 0..603; boundary 599..603; byte caps boot=%llu boundary=%llu packets=%llu\n",
+        if (s.file) std::fprintf(s.file, "# E7 observation only; ticks 0..603; boundary 599..603 unless E15 aligned trigger; byte caps boot=%llu boundary=%llu packets=%llu\n",
             static_cast<unsigned long long>(kBootBytes), static_cast<unsigned long long>(kWindowBytes), static_cast<unsigned long long>(kPacketBytes));
     }
-    if (!s.file || s.finished) return;
+    if (!s.file || s.finished || s.closed) return;
     if (tick > 603u)
     {
         std::fprintf(s.file, "# E7 COMPLETE tick=%llu events=%llu bootBytes=%llu boundaryBytes=%llu packetBytes=%llu bootTruncated=%d boundaryTruncated=%d packetTruncated=%d\n",
@@ -90,6 +96,19 @@ inline void event(uint64_t tick, const char *kind, const char *fmt, ...)
     ++s.seq;
     std::fwrite(row, 1, static_cast<size_t>(n), s.file); std::fflush(s.file);
 }
+inline void shutdown(uint64_t tick)
+{
+    if (!enabled()) return;
+    Sink &s=sink(); std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.file || s.closed) return;
+    std::fprintf(s.file,"# E7 SHUTDOWN tick=%llu events=%llu bootBytes=%llu boundaryBytes=%llu packetBytes=%llu packetFiles=%llu bootTruncated=%d boundaryTruncated=%d packetTruncated=%d windowComplete=%d aligned=%d arm=%llu\n",
+        static_cast<unsigned long long>(tick),static_cast<unsigned long long>(s.seq),
+        static_cast<unsigned long long>(s.budget.boot),static_cast<unsigned long long>(s.budget.boundary),
+        static_cast<unsigned long long>(s.packetBytes),static_cast<unsigned long long>(s.packets),
+        s.budget.bootTruncated,s.budget.boundaryTruncated,s.packetTruncated,s.finished,aligned(),
+        static_cast<unsigned long long>(alignedArm().load()));
+    std::fflush(s.file); std::fclose(s.file); s.file=nullptr; s.closed=true;
+}
 inline void packet(uint64_t tick, const char *kind, const uint8_t *data, uint32_t size,
                    bool masked = false, size_t queued = 0u, uint32_t source = 0u)
 {
@@ -104,7 +123,7 @@ inline void packet(uint64_t tick, const char *kind, const uint8_t *data, uint32_
     if (source != 0x004ffcc0u || !window(tick)) return;
     Sink &s = sink();
     std::lock_guard<std::mutex> lock(s.mutex);
-    if (size > kPacketBytes - s.packetBytes) { s.packetTruncated = true; return; }
+    if (size > kPacketBytes - s.packetBytes || (aligned() && s.packets>=16u)) { s.packetTruncated = true; return; }
     char path[1024];
     std::snprintf(path, sizeof(path), "%s/e7-copy-tick%llu-%llu.bin", directory(),
         static_cast<unsigned long long>(tick), static_cast<unsigned long long>(++s.packets));
@@ -141,6 +160,15 @@ inline void cardWrite(uint64_t tick, const uint8_t *ram, uint32_t address,
               lo==mc && cardAddress(mc) && word(ram,mc)==0x486f78u,pc,thread);
     }
     const uint32_t ui=cardUi().load();
+    if (aligned() && ui && cardAddress(ui) && cardAddress(mc) && word(ram,mc)==0x486f78u &&
+        word(ram,ui+0x434u)==mc && address==ui+0x130u && width==4u &&
+        word(ram,address)==3u && lo==6u)
+    {
+        uint64_t unset=UINT64_MAX;
+        if (alignedArm().compare_exchange_strong(unset,tick+1u))
+            event(tick,"e15-align","UI=0x%x MC=0x%x old=3 new=6 pc=0x%x arm=%llu freeze=%llu guard=1",
+                ui,mc,pc,static_cast<unsigned long long>(tick+1u),static_cast<unsigned long long>(tick+2u));
+    }
     const uint32_t off=address-mc;
     if ((mc && (off==0u || off==4u || off==0xcu || off==0x10u || off==0x40u || off==0x4cu || off==0x184u || off==0x198u)) ||
         (ui && (address==ui+0x338u || address==ui+0x344u || address==ui+0x424u || address==ui+0x43cu || address==ui+0x440u || address==ui+0x130u || address==ui+0xb8u || address==ui+0x748u)) || (address>=0x4a3938u && address<=0x4a3944u))

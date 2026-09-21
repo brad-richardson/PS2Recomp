@@ -8,6 +8,7 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_e7.h"
+#include "ps2_e15.h"
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
@@ -444,7 +445,17 @@ void dumpPresentationFrame(const uint8_t *rgba,
     // success PNGs AND first two fallback PNGs (global seq still numbers).
     static uint64_t s_successKeep = 0u;
     static uint64_t s_fallbackKeep = 0u;
-    const bool keep = fallback ? (s_fallbackKeep++ < 2u) : (s_successKeep++ < 2u);
+    bool keep = fallback ? (s_fallbackKeep++ < 2u) : (s_successKeep++ < 2u);
+    // E15: preserve actual host uploads in the same dynamically armed interval.
+    // Four additional image/metadata pairs maximum; observation only.
+    static uint32_t s_alignedKeep = 0u;
+    if (!fallback && ps2_e7::aligned() && ps2_e7::window(tick) && s_alignedKeep < 4u)
+    {
+        ++s_alignedKeep; keep = true;
+        ps2_e7::event(tick,"e15-present","upload=%llu width=%u height=%u D=%u source=%u fnv32=0x%x smode2=0x%llx pmode=0x%llx",
+            static_cast<unsigned long long>(seq),width,height,displayFbp,sourceFbp,hash,
+            static_cast<unsigned long long>(smode2),static_cast<unsigned long long>(pmode));
+    }
     if (keep)
     {
         std::snprintf(pngPath, sizeof(pngPath), "%s/%s-%llu.png", dir, fallback ? "fallback" : "upload",
@@ -684,6 +695,8 @@ PS2Runtime::~PS2Runtime()
     {
         std::cerr << "[~PS2Runtime] cleanup exception: unknown" << std::endl;
     }
+    ps2_e15::closure(m_memory.gs().vsyncTick.load());
+    ps2_e7::shutdown(m_memory.gs().vsyncTick.load());
 }
 
 void PS2Runtime::setIopPluginSearchPaths(std::vector<std::filesystem::path> paths)
@@ -2167,7 +2180,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                 g_diagWatchThreadId.load(std::memory_order_relaxed));
     };
     noteCardCall("mc-call");
+    ps2_e15::Trace mpegTrace("branch",m_memory.gs().vsyncTick.load(),rdram,ctx,targetPc,sourcePc,
+                            g_diagWatchThreadId.load(std::memory_order_relaxed));
     targetFn(rdram, ctx, this);
+    mpegTrace.finish(m_memory.gs().vsyncTick.load());
     noteCardCall("mc-return");
 
     if (isStopRequested() || ctx->pc == 0u)

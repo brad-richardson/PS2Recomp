@@ -14,6 +14,7 @@
 // no draw/present/scheduler behavior touched.
 #pragma once
 
+#include "ps2_e7.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
 
@@ -65,6 +66,7 @@ inline bool parseU64(const char *text, uint64_t &out)
 
 inline uint64_t armTickRaw()
 {
+    if (ps2_e7::aligned()) return ps2_e7::alignedArm().load();
     static const uint64_t tick = [] {
         uint64_t parsed = kNoTick;
         if (!parseU64(std::getenv("PS2X_E4_ARM_TICK"), parsed))
@@ -87,6 +89,7 @@ inline const char *outDirRaw()
 
 inline uint64_t freezeTickRaw()
 {
+    if (ps2_e7::aligned()) { const auto a=armTickRaw(); return a==kNoTick ? kNoTick : a+1u; }
     static const uint64_t tick = [] {
         uint64_t parsed = kNoTick;
         if (parseU64(std::getenv("PS2X_E4_FREEZE_TICK"), parsed))
