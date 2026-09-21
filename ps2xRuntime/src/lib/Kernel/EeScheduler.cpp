@@ -467,6 +467,20 @@ void EeScheduler::run()
                     std::cerr << " priority=" << diagThread.currentPriority
                               << " scheduled=" << scheduled << std::endl;
                 }
+                // I18: frame/GS observation on the existing P1c console tap.
+                // Read-only relaxed-atomic reads under the same
+                // PS2X_DIAG_PERIOD_MS gate; one line per period naming
+                // vsync/GS/DMA progress past silent guest walls.
+                std::cerr << "[diag:frame] block=" << (s_diagBlock - 1)
+                          << " vsync=" << m_runtime.memory().gs().vsyncTick.load(std::memory_order_relaxed)
+                          << " kicks=" << ps2_park::gsKickCount().load(std::memory_order_relaxed)
+                          << " kicksDrawing=" << ps2_park::gsKickDrawingCount().load(std::memory_order_relaxed)
+                          << " gif=" << ps2_park::gsGifPacketCount().load(std::memory_order_relaxed)
+                          << " copyRegs=" << ps2_park::gsCopyRegCount().load(std::memory_order_relaxed)
+                          << " dma=" << m_runtime.memory().dmaStartCount()
+                          << " gifCopy=" << m_runtime.memory().gifCopyCount()
+                          << " gsWrites=" << m_runtime.memory().gsWriteCount()
+                          << " vifWrites=" << m_runtime.memory().vifWriteCount() << std::endl;
                 // P1f stack map, same gate as the thread table.
                 for (const auto &[stackId, stackThread] : m_threads)
                 {
