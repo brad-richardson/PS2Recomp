@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "runtime/ps2_memory.h"
+#include "ps2_e4.h"
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
@@ -4546,6 +4547,97 @@ void register_ps2_gs_tests()
             }
             t.IsTrue(pattern2Ok,
                      "second T4HL transfer to a different DBP should be byte-correct, proving the discarded excess bytes from the first transfer did not leak into subsequent transfer state");
+        });
+
+        tc.Run("E4 env parse accepts decimal/hex and rejects junk (E4)", [](TestCase &t)
+        {
+            uint64_t parsed = 0;
+            t.IsTrue(ps2_e4::parseU64("600", parsed) && parsed == 600u, "decimal tick should parse");
+            t.IsTrue(ps2_e4::parseU64("0x258", parsed) && parsed == 600u, "hex tick should parse");
+            t.IsTrue(!ps2_e4::parseU64("", parsed), "empty should not parse");
+            t.IsTrue(!ps2_e4::parseU64("60x", parsed), "trailing junk should not parse");
+            t.IsTrue(!ps2_e4::parseU64(nullptr, parsed), "null should not parse");
+        });
+
+        tc.Run("E4 history-entry formatter keeps the branch-table fields (E4)", [](TestCase &t)
+        {
+            GSDebugHistoryEntry draw{};
+            draw.seq = 7;
+            draw.vsyncTick = 600;
+            draw.frameIndex = 3;
+            draw.kind = GSDebugEventKind::Draw;
+            draw.prim.type = GS_PRIM_SPRITE;
+            draw.prim.tme = true;
+            draw.frame.fbp = 112;
+            draw.frame.fbw = 8;
+            draw.frame.psm = 1;
+            draw.tex0.tbp0 = 0;
+            draw.vertexCount = 2;
+            const std::string text = ps2_e4::formatHistoryEntry(draw);
+            t.IsTrue(text.find("kind=draw") != std::string::npos, "draw kind should be named");
+            t.IsTrue(text.find("fbp=112") != std::string::npos, "destination fbp should be kept");
+            t.IsTrue(text.find("tick=600") != std::string::npos, "vsync tick should be kept");
+            t.IsTrue(text.find("verts=2") != std::string::npos, "vertex count should be kept");
+
+            GSDebugHistoryEntry present{};
+            present.kind = GSDebugEventKind::Present;
+            present.displayFbp = 112;
+            present.sourceFbp = 112;
+            present.width = 512;
+            present.height = 448;
+            const std::string ptext = ps2_e4::formatHistoryEntry(present);
+            t.IsTrue(ptext.find("kind=present") != std::string::npos, "present kind should be named");
+            t.IsTrue(ptext.find("112,112,512x448") != std::string::npos, "present fbps/geometry should be kept");
+        });
+
+        tc.Run("E4 surface collector dedupes, decodes DISPFB, and caps at 16 (E4)", [](TestCase &t)
+        {
+            GSDebugHistoryEntry a{};
+            a.kind = GSDebugEventKind::Draw;
+            a.prim.tme = true;
+            a.frame.fbp = 112;
+            a.frame.fbw = 8;
+            a.frame.psm = 1;
+            a.tex0.tbp0 = 0;
+            a.tex0.tbw = 8;
+            a.tex0.psm = 0;
+            a.tex0.tw = 10;
+            a.tex0.th = 9;
+            GSDebugHistoryEntry b = a;
+            b.tex0.tbp0 = 64; // same destination, second texture
+            const std::vector<GSDebugHistoryEntry> history{a, a, b};
+            const uint64_t dispfb1 = 112u | (8u << 9) | (1u << 15);
+            const uint64_t display1 = 447ull << 44;
+            const auto collected = ps2_e4::collectSurfaces(history, dispfb1, display1, 0u, 0u);
+            t.IsTrue(!collected.second, "5 surfaces should not truncate");
+            t.Equals(collected.first.size(), static_cast<size_t>(5), "dst x1 + tex x2 + disp1 + disp2 expected");
+            bool sawTex64 = false, sawDisp1 = false;
+            for (const ps2_e4::E4Surface &s : collected.first)
+            {
+                if (s.kind == "draw-tex" && s.base == 64u)
+                {
+                    sawTex64 = true;
+                }
+                if (s.kind == "disp1" && s.base == 112u && s.bw == 8u && s.h == 448u)
+                {
+                    sawDisp1 = true;
+                }
+            }
+            t.IsTrue(sawTex64, "second texture surface should survive dedupe");
+            t.IsTrue(sawDisp1, "DISPFB1 should decode to fbp=112 fbw=8 H=448");
+
+            std::vector<GSDebugHistoryEntry> many;
+            for (uint32_t i = 0; i < 20u; ++i)
+            {
+                GSDebugHistoryEntry e{};
+                e.kind = GSDebugEventKind::Draw;
+                e.frame.fbp = 100u + i;
+                e.frame.fbw = 8;
+                many.push_back(e);
+            }
+            const auto capped = ps2_e4::collectSurfaces(many, dispfb1, display1, 0u, 0u);
+            t.IsTrue(capped.second, "22 surfaces should truncate");
+            t.Equals(capped.first.size(), ps2_e4::kMaxSurfaces, "surface set should cap at 16");
         });
     });
 }

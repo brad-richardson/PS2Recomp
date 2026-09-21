@@ -1,5 +1,6 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_cpu_backend.h"
+#include "ps2_e4.h"
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
 #include "runtime/ps2_memory.h"
@@ -342,6 +343,11 @@ void GS::recordDebugEventUnlocked(GSDebugHistoryEntry entry)
     entry.seq = m_debugNextSeq++;
     entry.vsyncTick = tick;
     entry.frameIndex = m_debugFrameIndex;
+
+    if (entry.kind == GSDebugEventKind::Draw)
+    {
+        ps2_e4::noteSubmit(tick, entry.frame.fbp); // E4 T6 census (armed window only)
+    }
 
     m_debugHistory[m_debugHistoryWrite] = entry;
     m_debugHistoryWrite = (m_debugHistoryWrite + 1u) % kDebugHistoryCapacity;
