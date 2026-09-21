@@ -477,6 +477,13 @@ endif()
 
 if(PS2X_GAME_CODEGEN_DIR)
     list(REMOVE_ITEM RUNNER_SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/register_functions.cpp")
+    # I21: E17 landed in-tree game objects (sub_*.cpp) beside the stub table.
+    # The ps2_game_objects static lib already carries these symbols (unity
+    # jumbo), so drop the in-tree copies to keep one definition per function.
+    file(GLOB PS2X_IN_TREE_GAME_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/sub_*.cpp")
+    list(REMOVE_ITEM RUNNER_SRC_FILES ${PS2X_IN_TREE_GAME_SOURCES})
+    list(LENGTH PS2X_IN_TREE_GAME_SOURCES PS2X_IN_TREE_GAME_SOURCE_COUNT)
+    message(STATUS "PS2X: dropped ${PS2X_IN_TREE_GAME_SOURCE_COUNT} in-tree game sources (game objects from ${PS2X_GAME_CODEGEN_DIR})")
 endif()
 
 if(PS2X_IS_ANDROID)
