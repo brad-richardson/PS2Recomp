@@ -861,6 +861,77 @@ void register_ps2_memory_tests()
             t.IsFalse(ps2_e7::window(598u) || ps2_e7::window(604u), "window does not leak");
         });
 
+        tc.Run("CPU VIF1 quadword FIFO consumes commands in word order", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            const uint32_t setMask = makeVifCmd(0x06u, 0u, 0x8000u);
+            const uint32_t clearMask = makeVifCmd(0x06u, 0u, 0u);
+            mem.write128(0x10005000u, _mm_set_epi32(0, 0, 0, static_cast<int>(setMask)));
+            t.IsTrue(mem.isPath3Masked(), "CPU SQ should reach MSKPATH3, not inert MMIO storage");
+            const uint32_t markA = makeVifCmd(0x07u, 0u, 0x1234u);
+            const uint32_t markB = makeVifCmd(0x07u, 0u, 0x5678u);
+            mem.write128(0x10005000u, _mm_set_epi32(static_cast<int>(markB), static_cast<int>(clearMask), static_cast<int>(markA), static_cast<int>(setMask)));
+            t.IsFalse(mem.isPath3Masked(), "later command in the same quadword should clear the mask");
+            t.Equals(mem.vif1_regs.mark, 0x5678u, "all four command words should run in FIFO order");
+        });
+
+        tc.Run("CPU VIF1 unmask flushes PATH3 before following normal GIF DMA once", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t bytes)
+            {
+                captured.emplace_back(data, data + bytes);
+            });
+            const uint32_t setMask = makeVifCmd(0x06u, 0u, 0x8000u);
+            const uint32_t clearMask = makeVifCmd(0x06u, 0u, 0u);
+            const std::vector<uint8_t> a(16u, 0x11u), b(16u, 0x22u), c(16u, 0x33u);
+            // Same prior condition as E7b: a decoded stream has masked PATH3.
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&setMask), sizeof(setMask));
+            mem.submitGifPacket(GifPathId::Path3, a.data(), static_cast<uint32_t>(a.size()));
+            mem.submitGifPacket(GifPathId::Path3, b.data(), static_cast<uint32_t>(b.size()));
+            t.Equals(captured.size(), size_t(0), "prior PATH3 packets should be retained while masked");
+            mem.write128(0x10005000u, _mm_set_epi32(0, 0, 0, static_cast<int>(clearMask)));
+            t.IsFalse(mem.isPath3Masked(), "CPU unmask should clear the interpreted-stream mask");
+            t.Equals(captured.size(), size_t(2), "CPU unmask should flush both older packets");
+            if (captured.size() == 2u)
+                t.IsTrue(captured[0] == a && captured[1] == b, "older packets should preserve FIFO order");
+            mem.write128(0x10005000u, _mm_set_epi32(0, 0, 0, static_cast<int>(clearMask)));
+            t.Equals(captured.size(), size_t(2), "repeated unmask must not replay retained packets");
+            mem.write128(0x2000u, _mm_loadu_si128(reinterpret_cast<const __m128i *>(c.data())));
+            mem.write32(0x1000a010u, 0x2000u);
+            mem.write32(0x1000a020u, 1u);
+            mem.write32(0x1000a000u, 0x101u);
+            t.Equals(captured.size(), size_t(3), "following normal GIF DMA should deliver after the flush");
+            if (captured.size() == 3u)
+                t.IsTrue(captured[0] == a && captured[1] == b && captured[2] == c, "CPU and DMA ingress must preserve packet order");
+            t.Equals(mem.read32(0x1000a020u), 0u, "normal DMA should finish with QWC zero");
+        });
+
+        tc.Run("CPU VIF1 quadword FIFO uses its full page and translated aliases", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            const __m128i mask = _mm_set_epi32(0, 0, 0, static_cast<int>(makeVifCmd(0x06u, 0u, 0x8000u)));
+            const __m128i clear = _mm_set_epi32(0, 0, 0, static_cast<int>(makeVifCmd(0x06u, 0u, 0u)));
+            for (const uint32_t address : {0x10005000u, 0x10005ff0u, 0x90005020u, 0xb0005030u})
+            {
+                mem.write128(address, mask);
+                t.IsTrue(mem.isPath3Masked(), "VIF1 page mirrors and KSEG aliases should feed one FIFO");
+                mem.write128(address, clear);
+                t.IsFalse(mem.isPath3Masked(), "mirror unmask should feed the same VIF1 state");
+            }
+            mem.write128(0x30004000u, mask);
+            t.Equals(mem.read32(0x4000u), makeVifCmd(0x06u, 0u, 0x8000u), "ordinary RAM aliases remain memory writes");
+            t.IsFalse(mem.isPath3Masked(), "RAM contents must not be decoded as FIFO commands");
+            mem.write128(0x10006000u, mask);
+            t.IsFalse(mem.isPath3Masked(), "neighboring GIF FIFO page must not route to VIF1");
+            mem.write64(0x12000070u, 0x9070u);
+            t.Equals(mem.gs().dispfb1, uint64_t(0x9070u), "display MMIO retains its existing behavior");
+        });
+
         tc.Run("VIF MSKPATH3 uses immediate bit15", [](TestCase &t)
         {
             PS2Memory mem;

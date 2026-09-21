@@ -1093,6 +1093,20 @@ void PS2Memory::write128(uint32_t address, __m128i value)
     const bool scratch = isScratchpad(address);
     uint32_t physAddr = translateAddress(address);
 
+    // The VIF1 FIFO occupies EE I/O page 0x05. A CPU quadword is one
+    // ordered VIF input transaction; splitting it into register writes
+    // loses commands such as MSKPATH3. Translate aliases before decoding.
+    // This handles complete SQ writes; narrower store behavior is unchanged.
+    if ((physAddr & 0xfffff000u) == 0x10005000u)
+    {
+        alignas(16) uint8_t packet[16];
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(packet), value);
+        processVIF1Data(packet, sizeof(packet));
+        if (ps2_e7::enabled())
+            ps2_e7::event(gs_regs.vsyncTick.load(), "fifo-after", "mask=%u queued=%zu route=interpreter", m_path3Masked, m_path3MaskedFifo.size());
+        return;
+    }
+
     if (scratch)
     {
         inRange(physAddr, sizeof(__m128i), PS2_SCRATCHPAD_SIZE, "write128 scratchpad", address);
