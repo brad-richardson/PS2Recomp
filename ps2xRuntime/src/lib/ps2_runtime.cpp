@@ -3278,4 +3278,10 @@ void PS2Runtime::run()
     CloseWindow();
 
     RUNTIME_LOG("[run] exiting loop");
+
+    // The game thread and final host diagnostic producers have finished.
+    // main uses _Exit after run(), so close observations here; the destructor
+    // retains its safe fallback (shutdown closes the shared sink once).
+    ps2_e15::closure(m_memory.gs().vsyncTick.load());
+    ps2_e7::shutdown(m_memory.gs().vsyncTick.load());
 }
