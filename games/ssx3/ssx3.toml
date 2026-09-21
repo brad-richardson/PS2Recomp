@@ -153,7 +153,6 @@ stubs = [
   "sceSifRemoveCmdHandler@0x00426050",
   "_sceSifSendCmd@0x00426078",
   "sceSifSendCmd@0x004261B0",
-  "_sceSifCmdIntrHdlr@0x00426230",
   "sceSifWriteBackDCache@0x00426358",
   "sceSifInitRpc@0x00426408",
   "_sceRpcGetFPacket@0x00426698",
