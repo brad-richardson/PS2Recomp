@@ -1678,6 +1678,13 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
                                        GuestBranchKind kind,
                                        const char *debugName)
 {
+    // E11: retain inputs to the already-reached sibling residual; no dispatch or result change.
+    if (ps2_e7::enabled() && targetPc == 0x2c5358u)
+        ps2_e7::cardCall(m_memory.gs().vsyncTick.load(), "mc-missing", rdram,
+            targetPc, sourcePc, getRegU32(ctx,4), ctx->pc, getRegU32(ctx,2),
+            getRegU32(ctx,5), getRegU32(ctx,6), getRegU32(ctx,7),
+            getRegU32(ctx,29), getRegU32(ctx,31),
+            g_diagWatchThreadId.load(std::memory_order_relaxed));
     const MissingFunctionPolicy policy = missingFunctionPolicy();
     const bool firstReport = !m_missingFunctionReported.exchange(true, std::memory_order_acq_rel);
     const bool shouldPrint = firstReport || diagReportAll();
@@ -2145,7 +2152,21 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
+    // E11: preserve entry a0 across the call for dynamic query-object joins.
+    // Observation only, sharing the existing E7 window and byte budgets.
+    const bool cardObservation = ps2_e7::enabled() && ps2_e7::cardTarget(targetPc);
+    const uint32_t cardA0 = cardObservation ? getRegU32(ctx, 4) : 0u;
+    auto noteCardCall = [&](const char *phase) {
+        if (cardObservation)
+            ps2_e7::cardCall(m_memory.gs().vsyncTick.load(), phase, rdram,
+                targetPc, sourcePc, cardA0, ctx->pc, getRegU32(ctx, 2),
+                getRegU32(ctx, 5), getRegU32(ctx, 6), getRegU32(ctx, 7),
+                getRegU32(ctx, 29), getRegU32(ctx, 31),
+                g_diagWatchThreadId.load(std::memory_order_relaxed));
+    };
+    noteCardCall("mc-call");
     targetFn(rdram, ctx, this);
+    noteCardCall("mc-return");
 
     if (isStopRequested() || ctx->pc == 0u)
     {
