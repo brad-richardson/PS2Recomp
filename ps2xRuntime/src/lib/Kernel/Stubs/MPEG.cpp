@@ -24,6 +24,8 @@ extern "C"
 
 namespace ps2_stubs
 {
+    static void getMpegPicture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, bool requestInput);
+
     namespace
     {
         struct MpegDecodedFrame
@@ -526,6 +528,22 @@ namespace ps2_stubs
             std::vector<MpegRegisteredCallback> callbacks;
         };
 
+        // One caller-owned request, retained by its invocation/wait continuations.
+        // The global index is weak so it cannot outlive an EE scheduler/runtime.
+        struct MpegNonStreamDelivery
+        {
+            PS2Runtime *runtime = nullptr;
+            uint32_t mpegAddr = 0u;
+            uint32_t type = 0u;
+            int ownerThread = 0;
+            std::vector<MpegRegisteredCallback> callbacks;
+            size_t nextCallback = 0u;
+            uint32_t callbackData = 0u;
+            uint32_t callbackEntry = 0u;
+            uint64_t tag = 0u;
+            bool cancelled = false;
+        };
+
         struct MpegStubState
         {
             bool initialized = false;
@@ -543,6 +561,7 @@ namespace ps2_stubs
             uint32_t isEndTraceCount = 0u;
             std::unordered_map<uint32_t, std::vector<MpegRegisteredCallback>> callbacksByMpeg;
             std::unordered_map<uint32_t, MpegPlaybackState> playbackByMpeg;
+            std::unordered_map<uint64_t, std::weak_ptr<MpegNonStreamDelivery>> nonStreamDeliveries;
         };
 
         std::mutex g_mpeg_stub_mutex;
@@ -1157,6 +1176,64 @@ namespace ps2_stubs
             return out;
         }
 
+        std::vector<MpegRegisteredCallback> matchingNonStreamCallbacks(uint32_t mpegAddr, uint32_t requestedType)
+        {
+            std::vector<MpegRegisteredCallback> out;
+            const auto it = g_mpeg_stub_state.callbacksByMpeg.find(mpegAddr);
+            if (it != g_mpeg_stub_state.callbacksByMpeg.end())
+            {
+                for (const MpegRegisteredCallback &callback : it->second)
+                {
+                    if (!callback.stream && callback.type == requestedType)
+                    {
+                        out.push_back(callback);
+                    }
+                }
+            }
+            return out;
+        }
+
+        uint64_t nonStreamDeliveryKey(uint32_t mpegAddr, uint32_t type)
+        {
+            return (static_cast<uint64_t>(mpegAddr) << 32u) | type;
+        }
+
+        // Called under the MPEG lock. Cancelling a queued entry changes only
+        // that owned invocation; an already executing callback retains its data
+        // until onComplete and cannot dispatch the rest of the collected list.
+        void invalidateNonStreamDeliveries(uint32_t mpegAddr)
+        {
+            for (auto it = g_mpeg_stub_state.nonStreamDeliveries.begin();
+                 it != g_mpeg_stub_state.nonStreamDeliveries.end();)
+            {
+                if (static_cast<uint32_t>(it->first >> 32u) != mpegAddr)
+                {
+                    ++it;
+                    continue;
+                }
+                if (const auto delivery = it->second.lock())
+                {
+                    delivery->cancelled = true;
+                    EeScheduler &scheduler = delivery->runtime->eeScheduler();
+                    if (GuestThread *owner = scheduler.thread(delivery->ownerThread))
+                    {
+                        for (GuestInvocation &invocation : owner->invocations)
+                        {
+                            if (invocation.kind == GuestInvocationKind::HleCall &&
+                                invocation.tag == delivery->tag &&
+                                invocation.context.pc == delivery->callbackEntry)
+                            {
+                                invocation.context.pc = 0u;
+                            }
+                        }
+                    }
+                    // This schedules a wake; it never executes guest code here.
+                    scheduler.completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_WAIT_DELETE);
+                }
+                it = g_mpeg_stub_state.nonStreamDeliveries.erase(it);
+            }
+        }
+
         void queueStreamCallbackEvent(uint32_t mpegAddr,
                                       uint32_t streamType,
                                       uint32_t dataAddr,
@@ -1629,6 +1706,63 @@ namespace ps2_stubs
             runtime->eeScheduler().queueInvocation(std::move(invocation));
         }
 
+        void dispatchGuestNonStreamCallback(uint8_t *rdram,
+                                            R5900Context *callerCtx,
+                                            const std::shared_ptr<MpegNonStreamDelivery> &delivery)
+        {
+            PS2Runtime *runtime = delivery->runtime;
+            while (!delivery->cancelled && delivery->nextCallback < delivery->callbacks.size())
+            {
+                const MpegRegisteredCallback callback = delivery->callbacks[delivery->nextCallback++];
+                if (callback.func == 0u || !runtime->hasFunction(callback.func))
+                {
+                    continue;
+                }
+                // The observed non-stream producer initializes only word 0.
+                // Do not reuse the unrelated 0x20-byte stream-event layout.
+                const uint32_t cbDataAddr = runtime->guestMalloc(sizeof(uint32_t), alignof(uint32_t));
+                uint8_t *data = cbDataAddr != 0u ? getMemPtr(rdram, cbDataAddr) : nullptr;
+                if (!data)
+                {
+                    runtime->guestFree(cbDataAddr);
+                    continue;
+                }
+                ps2_e3::Tap tap = ps2_e3::tapBegin(rdram, cbDataAddr, sizeof(uint32_t));
+                std::memcpy(data, &delivery->type, sizeof(uint32_t));
+                ps2_e3::tapEnd(std::move(tap), "mpeg-nonstream-cb", rdram, "-");
+                delivery->callbackData = cbDataAddr;
+                delivery->callbackEntry = callback.func;
+                delivery->tag = 0x4D50454700000000ull | callback.handle;
+
+                GuestInvocation invocation{};
+                invocation.kind = GuestInvocationKind::HleCall;
+                invocation.tag = delivery->tag;
+                invocation.context = *callerCtx;
+                invocation.context.pc = callback.func;
+                SET_GPR_U32(&invocation.context, 4, delivery->mpegAddr);
+                SET_GPR_U32(&invocation.context, 5, cbDataAddr);
+                SET_GPR_U32(&invocation.context, 6, callback.data);
+                // Keep the caller's stack. Zero RA is the scheduler's HLE
+                // continuation sentinel; the original RA/PC remain in parent.
+                SET_GPR_U32(&invocation.context, 31, 0u);
+                invocation.onComplete = [rdram, runtime, delivery](const R5900Context &, R5900Context &parent)
+                {
+                    runtime->guestFree(delivery->callbackData);
+                    delivery->callbackData = 0u;
+                    if (delivery->cancelled)
+                    {
+                        setReturnS32(&parent, KE_WAIT_DELETE);
+                        return;
+                    }
+                    // Callback v0 is deliberately ignored. Preserve registration
+                    // order, then continue this request without re-triggering it.
+                    dispatchGuestNonStreamCallback(rdram, &parent, delivery);
+                    getMpegPicture(rdram, &parent, runtime, false);
+                };
+                runtime->eeScheduler().invokeCurrent(std::move(invocation));
+            }
+        }
+
         void dispatchStreamCallbacks(uint8_t *rdram,
                                      R5900Context *ctx,
                                      PS2Runtime *runtime,
@@ -1757,6 +1891,11 @@ namespace ps2_stubs
 
         void resetMpegStubStateUnlocked()
         {
+            while (!g_mpeg_stub_state.nonStreamDeliveries.empty())
+            {
+                invalidateNonStreamDeliveries(static_cast<uint32_t>(
+                    g_mpeg_stub_state.nonStreamDeliveries.begin()->first >> 32u));
+            }
             g_mpeg_stub_state.initialized = false;
             g_mpeg_stub_state.nextCallbackHandle = 1u;
             g_mpeg_stub_state.cdStreamGeneration = 0u;
@@ -2023,6 +2162,7 @@ namespace ps2_stubs
 
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            invalidateNonStreamDeliveries(param_1);
             getPlaybackState(param_1) = makeFreshPlaybackState();
         }
 
@@ -2092,6 +2232,7 @@ namespace ps2_stubs
         const uint32_t mpegAddr = getRegU32(ctx, 4);
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            invalidateNonStreamDeliveries(mpegAddr);
             g_mpeg_stub_state.callbacksByMpeg.erase(mpegAddr);
             g_mpeg_stub_state.playbackByMpeg.erase(mpegAddr);
         }
@@ -2303,7 +2444,7 @@ namespace ps2_stubs
         setReturnU32(ctx, getPlaybackState(mpegAddr).decodeMode);
     }
 
-    void sceMpegGetPicture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    static void getMpegPicture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, bool requestInput)
     {
         const uint32_t mpegAddr = getRegU32(ctx, 4);
         const uint32_t imageAddr = getRegU32(ctx, 5);
@@ -2312,6 +2453,45 @@ namespace ps2_stubs
         uint32_t frameCount = 0u;
         bool haveFrame = false;
         MpegDecodedFrame frame;
+        std::shared_ptr<MpegNonStreamDelivery> delivery;
+        bool dispatchInput = false;
+        {
+            std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            // Original GetPicture's IPU-busy input request produces cbData
+            // word0=1. No other non-stream type or trigger is synthesized.
+            constexpr uint32_t inputRequestType = 1u;
+            const uint64_t key = nonStreamDeliveryKey(mpegAddr, inputRequestType);
+            auto &pending = g_mpeg_stub_state.nonStreamDeliveries[key];
+            delivery = pending.lock();
+            MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+            if (requestInput && !delivery && playback.decodedFrames.empty() &&
+                !g_mpeg_stub_state.currentCdStreamEofSeen && !playback.streamEnded && !playback.decoderFailed)
+            {
+                auto callbacks = matchingNonStreamCallbacks(mpegAddr, inputRequestType);
+                if (!callbacks.empty())
+                {
+                    delivery = std::make_shared<MpegNonStreamDelivery>();
+                    delivery->runtime = runtime;
+                    delivery->mpegAddr = mpegAddr;
+                    delivery->type = inputRequestType;
+                    delivery->callbacks = std::move(callbacks);
+                    pending = delivery;
+                    dispatchInput = true;
+                }
+            }
+            if (!delivery)
+            {
+                g_mpeg_stub_state.nonStreamDeliveries.erase(key);
+            }
+        }
+        if (dispatchInput)
+        {
+            // AddBs re-enters the MPEG mutex. Dispatch only after collecting
+            // under the lock, on the GetPicture caller rather than an RPC thread.
+            runtime->eeScheduler().bindMainContextForSyscall(*ctx, rdram);
+            delivery->ownerThread = runtime->eeScheduler().currentThreadId();
+            dispatchGuestNonStreamCallback(rdram, ctx, delivery);
+        }
         {
             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
@@ -2335,7 +2515,7 @@ namespace ps2_stubs
                     EeWaitReason::Mpeg,
                     kMpegPictureWaitType,
                     mpegAddr,
-                    [rdram, runtime](R5900Context &resumeContext)
+                    [rdram, runtime, delivery](R5900Context &resumeContext)
                     {
                         if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
                         {
@@ -2371,7 +2551,7 @@ namespace ps2_stubs
                     runtime->eeScheduler().waitVSync(
                         eligibleTick - 1u,
                         -1,
-                        [rdram, runtime](R5900Context &resumeContext)
+                        [rdram, runtime, delivery](R5900Context &resumeContext)
                         {
                             if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
                             {
@@ -2441,6 +2621,11 @@ namespace ps2_stubs
         }
 
         setReturnS32(ctx, 0);
+    }
+
+    void sceMpegGetPicture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        getMpegPicture(rdram, ctx, runtime, true);
     }
 
     void sceMpegGetPictureRAW8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2530,6 +2715,7 @@ namespace ps2_stubs
         const uint32_t param_1 = getRegU32(ctx, 4);
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            invalidateNonStreamDeliveries(param_1);
             MpegPlaybackState &playback = getPlaybackState(param_1);
             MpegPlaybackState resetState = makeFreshPlaybackStatePreservingConfig(playback);
             if (playback.streamEnded || playback.decoderFailed)
