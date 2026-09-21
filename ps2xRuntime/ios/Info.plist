@@ -7,6 +7,9 @@
      (__UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption) before
      SDL_main ever runs (I7 minprobe A traps / B runs). No scene delegate
      class: SDL's UIKit delegate handles scenes (proven by minprobe B).
+     I8: CFBundleName set to the executable name (was empty): devicectl
+     install rejects bundles with neither CFBundleName nor
+     CFBundleDisplayName (device wall; simctl did not check).
      Referenced from the PS2X_IS_IOS block via MACOSX_BUNDLE_INFO_PLIST. -->
 <plist version="1.0">
 <dict>
@@ -25,7 +28,7 @@
 	<key>CFBundleLongVersionString</key>
 	<string></string>
 	<key>CFBundleName</key>
-	<string></string>
+	<string>ps2EntryRunner</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
