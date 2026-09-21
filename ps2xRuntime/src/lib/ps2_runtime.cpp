@@ -2154,7 +2154,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     const uint32_t entryPc = ctx->pc;
     // E11: preserve entry a0 across the call for dynamic query-object joins.
     // Observation only, sharing the existing E7 window and byte budgets.
-    const bool cardObservation = ps2_e7::enabled() && ps2_e7::cardTarget(targetPc);
+    const bool cardObservation = ps2_e7::enabled() && ps2_e7::cardTarget(targetPc, sourcePc);
     const uint32_t cardA0 = cardObservation ? getRegU32(ctx, 4) : 0u;
     // E12: retain original port across predicate execution (observation only).
     const uint32_t cardA1 = cardObservation ? getRegU32(ctx, 5) : 0u;
