@@ -712,6 +712,7 @@ namespace ps2_stubs
             uint32_t getPictureWaitTraceCount = 0u;
             uint32_t pictureTraceCount = 0u;
             uint32_t isEndTraceCount = 0u;
+            uint32_t devSkipMovieTraceCount = 0u;
             std::unordered_map<uint32_t, std::vector<MpegRegisteredCallback>> callbacksByMpeg;
             std::unordered_map<uint32_t, MpegPlaybackState> playbackByMpeg;
             std::unordered_map<uint64_t, std::weak_ptr<MpegNonStreamDelivery>> nonStreamDeliveries;
@@ -720,6 +721,21 @@ namespace ps2_stubs
         std::mutex g_mpeg_stub_mutex;
         constexpr uint32_t kMpegPictureWaitType = 1u;
         MpegStubState g_mpeg_stub_state;
+        // DEV-ONLY startup-movie bypass (PS2X_SKIP_MOVIE=1). Default OFF: the
+        // value must be exactly "1"; absent, "0", "true" or empty all leave the
+        // faithful movie path untouched. Development bring-up scaffolding, NOT
+        // a fix -- see local/research/E29. Faithful movie correctness is E30.
+        bool devSkipMovie()
+        {
+            static const bool skip = [] {
+                if (const char *env = std::getenv("PS2X_SKIP_MOVIE"))
+                {
+                    return env[0] == '1' && env[1] == '\0';
+                }
+                return false;
+            }();
+            return skip;
+        }
 
         // TODO this resolution should follow runtime resolution
         constexpr uint32_t kStubMovieWidth = 320u;
@@ -2062,6 +2078,7 @@ namespace ps2_stubs
             g_mpeg_stub_state.getPictureWaitTraceCount = 0u;
             g_mpeg_stub_state.pictureTraceCount = 0u;
             g_mpeg_stub_state.isEndTraceCount = 0u;
+            g_mpeg_stub_state.devSkipMovieTraceCount = 0u;
             g_mpeg_stub_state.callbacksByMpeg.clear();
             g_mpeg_stub_state.playbackByMpeg.clear();
         }
@@ -2104,6 +2121,7 @@ namespace ps2_stubs
         g_mpeg_stub_state.getPictureWaitTraceCount = 0u;
         g_mpeg_stub_state.pictureTraceCount = 0u;
         g_mpeg_stub_state.isEndTraceCount = 0u;
+        g_mpeg_stub_state.devSkipMovieTraceCount = 0u;
 
         for (auto &[mpegAddr, playback] : g_mpeg_stub_state.playbackByMpeg)
         {
@@ -2648,6 +2666,34 @@ namespace ps2_stubs
         {
             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+            // DEV-ONLY (PS2X_SKIP_MOVIE=1) startup-movie bypass. NOT a fix, and
+            // not on any default path. Bounded to ONE thing: thread 1 does not
+            // PARK in the picture wait below. Everything before this point --
+            // the non-stream delivery, the producer dispatch, the guest's
+            // sceMpegAddBs, the parser feed -- runs exactly as it does with the
+            // flag off. Marking the playback ended puts the state machine in the
+            // same state finishPlaybackStream() and the program-end path already
+            // produce, so the guest takes its OWN end-of-stream exit (the RCMP
+            // player's counter-bounded re-ask loop at guest 0x3b1050) instead of
+            // blocking on a picture this runtime cannot yet deliver. The decoder
+            // is deliberately NOT flushed: the bypass synthesizes no frames.
+            if (devSkipMovie() && playback.decodedFrames.empty() && !playback.streamEnded)
+            {
+                playback.streamEnded = true;
+                playback.cdStreamGeneration = g_mpeg_stub_state.cdStreamGeneration;
+                if (g_mpeg_stub_state.devSkipMovieTraceCount < 32u)
+                {
+                    PS2_IF_AGRESSIVE_LOGS({
+                        std::cerr << "[MPEG:DEV-SKIP-MOVIE] bypass armed (PS2X_SKIP_MOVIE=1), mpeg=0x"
+                                  << std::hex << mpegAddr << std::dec
+                                  << " n=" << (g_mpeg_stub_state.devSkipMovieTraceCount + 1u)
+                                  << " requestInput=" << requestInput
+                                  << " sawInput=" << playback.sawInput
+                                  << " served=" << playback.picturesServed << std::endl;
+                    });
+                    ++g_mpeg_stub_state.devSkipMovieTraceCount;
+                }
+            }
             if (playback.decodedFrames.empty() &&
                 !g_mpeg_stub_state.currentCdStreamEofSeen &&
                 !playback.streamEnded &&
