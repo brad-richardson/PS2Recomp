@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace ps2_stubs
 {
@@ -78,4 +80,36 @@ namespace ps2_stubs
     PadDebugSnapshot getPadDebugSnapshot();
     void setPadOverrideState(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
     void clearPadOverrideState();
+
+    // E31 DEV-ONLY scripted pad input (PS2X_PAD_SCRIPT). One parsed entry:
+    // press `pressMask` (active-low clear mask, 0 = no buttons) and/or drive
+    // the flagged analog axes while atMs <= nowMs < atMs + holdMs, where
+    // nowMs is milliseconds since the first pad call.
+    struct PadScriptEntry
+    {
+        uint64_t atMs = 0u;
+        uint64_t holdMs = 0u;
+        uint16_t pressMask = 0u;
+        bool hasLx = false;
+        bool hasLy = false;
+        bool hasRx = false;
+        bool hasRy = false;
+        uint8_t lx = 0x80u;
+        uint8_t ly = 0x80u;
+        uint8_t rx = 0x80u;
+        uint8_t ry = 0x80u;
+    };
+
+    // Parses "t_ms:spec:hold_ms,..." where spec is '+'-joined button names
+    // (select/l3/r3/start/up/right/down/left/l2/r2/l1/r1/triangle/circle/
+    // cross/square) and/or axis assignments (lx/ly/rx/ry = 0..255).
+    // Returns false (entries untouched) on any malformed entry.
+    bool parsePadScript(const char *spec, std::vector<PadScriptEntry> &entries);
+
+    // Test hooks. Install a script without the env var, drive its clock
+    // explicitly, and restore the default-off state. Production code paths
+    // never call these.
+    bool setPadScriptForTest(const char *spec);
+    void setPadScriptNowMsForTest(uint64_t nowMs);
+    void clearPadScriptForTest();
 }

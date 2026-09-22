@@ -529,5 +529,95 @@ void register_pad_input_tests()
             const char *reqStr = reinterpret_cast<const char *>(rdram.data() + kPadDataAddr + 64);
             t.IsTrue(std::string(reqStr).find("COMPLETE") != std::string::npos, "req string should include COMPLETE");
         });
+
+        tc.Run("pad script parser accepts buttons, combos and analog", [](TestCase &t)
+               {
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScript("65000:start:500,70000:up+cross:300,80000:lx=0+ly=255:1000", entries),
+                     "well-formed script should parse");
+            t.Equals(static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(3), "script should yield three entries");
+            t.Equals(static_cast<uint32_t>(entries[0].atMs), static_cast<uint32_t>(65000), "entry 0 atMs");
+            t.Equals(static_cast<uint32_t>(entries[0].holdMs), static_cast<uint32_t>(500), "entry 0 holdMs");
+            t.Equals(static_cast<uint32_t>(entries[0].pressMask), static_cast<uint32_t>(kPadBtnStart), "entry 0 presses start");
+            t.Equals(static_cast<uint32_t>(entries[1].pressMask),
+                     static_cast<uint32_t>(static_cast<uint16_t>(kPadBtnUp | kPadBtnCross)),
+                     "entry 1 presses up+cross");
+            t.IsTrue(entries[2].hasLx && entries[2].hasLy, "entry 2 drives lx and ly");
+            t.Equals(entries[2].lx, static_cast<uint8_t>(0), "entry 2 lx");
+            t.Equals(entries[2].ly, static_cast<uint8_t>(255), "entry 2 ly");
+            t.IsTrue(!entries[2].hasRx && !entries[2].hasRy, "entry 2 leaves rx/ry alone");
+
+            const char *bad[] = {
+                nullptr, "", "65000:start", "65000:start:0", "abc:start:500",
+                "65000:nosuchbutton:500", "65000:start:500,", "65000::500",
+                "65000:start::500", "65000:lx=256:500", "65000:lz=1:500",
+                "65000:start+:500", "65000:start:500x",
+            };
+            for (const char *spec : bad)
+            {
+                std::vector<ps2_stubs::PadScriptEntry> rejected;
+                t.IsTrue(!ps2_stubs::parsePadScript(spec, rejected), "malformed script should be rejected");
+            }
+        });
+
+        tc.Run("pad script presses and releases on schedule", [](TestCase &t)
+               {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            t.IsTrue(ps2_stubs::setPadScriptForTest("1000:start+cross:500,1200:lx=0:800"), "test script should install");
+
+            ps2_stubs::setPadScriptNowMsForTest(999);
+            runPadRead(ctx, rdram);
+            t.Equals(readButtons(rdram), static_cast<uint16_t>(0xFFFFu), "no buttons pressed before the window");
+
+            ps2_stubs::setPadScriptNowMsForTest(1000);
+            runPadRead(ctx, rdram);
+            t.Equals(readButtons(rdram),
+                     static_cast<uint16_t>(0xFFFFu & ~kPadBtnStart & ~kPadBtnCross),
+                     "start+cross pressed inside the window");
+
+            ps2_stubs::setPadScriptNowMsForTest(1300);
+            runPadRead(ctx, rdram);
+            const uint8_t *data = rdram.data() + kPadDataAddr;
+            t.Equals(readButtons(rdram),
+                     static_cast<uint16_t>(0xFFFFu & ~kPadBtnStart & ~kPadBtnCross),
+                     "buttons still pressed in the overlap");
+            t.Equals(data[6], static_cast<uint8_t>(0), "lx driven in the overlap");
+            t.Equals(data[7], static_cast<uint8_t>(0x80), "ly untouched in the overlap");
+
+            ps2_stubs::setPadScriptNowMsForTest(1500);
+            runPadRead(ctx, rdram);
+            t.Equals(readButtons(rdram), static_cast<uint16_t>(0xFFFFu), "buttons released at the window end");
+            t.Equals(data[6], static_cast<uint8_t>(0), "lx still driven after the button window");
+
+            ps2_stubs::setPadScriptNowMsForTest(2000);
+            runPadRead(ctx, rdram);
+            t.Equals(readButtons(rdram), static_cast<uint16_t>(0xFFFFu), "buttons released after the script");
+            t.Equals(data[6], static_cast<uint8_t>(0x80), "lx centered after the script");
+
+            ps2_stubs::clearPadScriptForTest();
+            closePadPort(ctx, rdram);
+        });
+
+        tc.Run("pad script is off by default", [](TestCase &t)
+               {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            runPadRead(ctx, rdram);
+            t.Equals(readButtons(rdram), static_cast<uint16_t>(0xFFFFu), "reads are unmodified with no script");
+            const uint8_t *data = rdram.data() + kPadDataAddr;
+            t.Equals(data[6], static_cast<uint8_t>(0x80), "lx centered with no script");
+
+            closePadPort(ctx, rdram);
+        });
     });
 }

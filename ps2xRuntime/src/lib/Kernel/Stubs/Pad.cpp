@@ -3,6 +3,8 @@
 #include "Pad.h"
 
 #include <chrono>
+#include <string>
+#include <vector>
 
 namespace ps2_stubs
 {
@@ -291,6 +293,330 @@ namespace ps2_stubs
             }
         }
 
+        // E31 DEV-ONLY scripted pad input (PS2X_PAD_SCRIPT). Unset/empty
+        // (default) = one relaxed atomic check per pad read, zero behavior
+        // change. Format: "t_ms:spec:hold_ms,..." (see parsePadScript).
+        // Each entry presses its buttons and/or drives its analog axes while
+        // atMs <= nowMs < atMs + holdMs, where nowMs is milliseconds since
+        // the first pad call. Overlapping button entries accumulate;
+        // overlapping analog entries resolve last-active-wins per axis.
+        struct PadScriptRuntimeEntry
+        {
+            PadScriptEntry entry{};
+            bool loggedPress = false;
+            bool loggedDone = false;
+        };
+
+        struct PadScript
+        {
+            std::mutex mutex;
+            bool initDone = false;
+            bool enabled = false;
+            std::chrono::steady_clock::time_point startWall{};
+            std::vector<PadScriptRuntimeEntry> entries;
+            bool testNowSet = false;
+            uint64_t testNowMs = 0u;
+        };
+        PadScript g_padScript;
+        std::atomic<bool> g_padScriptInitDone{false};
+        std::atomic<bool> g_padScriptArmed{false};
+
+        bool padScriptParseU64(const std::string &text, uint64_t &out)
+        {
+            if (text.empty())
+            {
+                return false;
+            }
+            uint64_t value = 0u;
+            for (const char ch : text)
+            {
+                if (ch < '0' || ch > '9')
+                {
+                    return false;
+                }
+                value = value * 10u + static_cast<uint64_t>(ch - '0');
+            }
+            out = value;
+            return true;
+        }
+
+        bool padScriptButtonMask(const std::string &name, uint16_t &mask)
+        {
+            if (name == "select")
+                mask = kPadBtnSelect;
+            else if (name == "l3")
+                mask = kPadBtnL3;
+            else if (name == "r3")
+                mask = kPadBtnR3;
+            else if (name == "start")
+                mask = kPadBtnStart;
+            else if (name == "up")
+                mask = kPadBtnUp;
+            else if (name == "right")
+                mask = kPadBtnRight;
+            else if (name == "down")
+                mask = kPadBtnDown;
+            else if (name == "left")
+                mask = kPadBtnLeft;
+            else if (name == "l2")
+                mask = kPadBtnL2;
+            else if (name == "r2")
+                mask = kPadBtnR2;
+            else if (name == "l1")
+                mask = kPadBtnL1;
+            else if (name == "r1")
+                mask = kPadBtnR1;
+            else if (name == "triangle")
+                mask = kPadBtnTriangle;
+            else if (name == "circle")
+                mask = kPadBtnCircle;
+            else if (name == "cross")
+                mask = kPadBtnCross;
+            else if (name == "square")
+                mask = kPadBtnSquare;
+            else
+                return false;
+            return true;
+        }
+
+        bool padScriptParseSpec(const std::string &text, PadScriptEntry &entry)
+        {
+            if (text.empty())
+            {
+                return false;
+            }
+            bool anyToken = false;
+            size_t begin = 0u;
+            while (begin <= text.size())
+            {
+                const size_t end = text.find('+', begin);
+                const std::string token = text.substr(begin, end == std::string::npos ? end : end - begin);
+                if (token.empty())
+                {
+                    return false;
+                }
+                anyToken = true;
+                const size_t eq = token.find('=');
+                if (eq == std::string::npos)
+                {
+                    uint16_t mask = 0u;
+                    if (!padScriptButtonMask(token, mask))
+                    {
+                        return false;
+                    }
+                    entry.pressMask = static_cast<uint16_t>(entry.pressMask | mask);
+                }
+                else
+                {
+                    const std::string axis = token.substr(0, eq);
+                    const std::string valueText = token.substr(eq + 1u);
+                    uint64_t value = 0u;
+                    if (!padScriptParseU64(valueText, value) || value > 255u)
+                    {
+                        return false;
+                    }
+                    const auto byte = static_cast<uint8_t>(value);
+                    if (axis == "lx")
+                    {
+                        entry.hasLx = true;
+                        entry.lx = byte;
+                    }
+                    else if (axis == "ly")
+                    {
+                        entry.hasLy = true;
+                        entry.ly = byte;
+                    }
+                    else if (axis == "rx")
+                    {
+                        entry.hasRx = true;
+                        entry.rx = byte;
+                    }
+                    else if (axis == "ry")
+                    {
+                        entry.hasRy = true;
+                        entry.ry = byte;
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                if (end == std::string::npos)
+                {
+                    break;
+                }
+                begin = end + 1u;
+            }
+            return anyToken && (entry.pressMask != 0u || entry.hasLx || entry.hasLy || entry.hasRx || entry.hasRy);
+        }
+
+        bool padScriptParse(const char *spec, std::vector<PadScriptEntry> &entries)
+        {
+            std::vector<PadScriptEntry> parsed;
+            if (!spec || spec[0] == '\0')
+            {
+                return false;
+            }
+            const std::string text(spec);
+            size_t begin = 0u;
+            while (begin <= text.size())
+            {
+                const size_t end = text.find(',', begin);
+                const std::string item = text.substr(begin, end == std::string::npos ? end : end - begin);
+                const size_t c1 = item.find(':');
+                const size_t c2 = (c1 == std::string::npos) ? std::string::npos : item.find(':', c1 + 1u);
+                if (c1 == std::string::npos || c2 == std::string::npos || item.find(':', c2 + 1u) != std::string::npos)
+                {
+                    return false;
+                }
+                PadScriptEntry entry{};
+                if (!padScriptParseU64(item.substr(0, c1), entry.atMs))
+                {
+                    return false;
+                }
+                if (!padScriptParseU64(item.substr(c2 + 1u), entry.holdMs) || entry.holdMs == 0u)
+                {
+                    return false;
+                }
+                if (!padScriptParseSpec(item.substr(c1 + 1u, c2 - c1 - 1u), entry))
+                {
+                    return false;
+                }
+                parsed.push_back(entry);
+                if (end == std::string::npos)
+                {
+                    break;
+                }
+                begin = end + 1u;
+            }
+            if (parsed.empty())
+            {
+                return false;
+            }
+            entries = parsed;
+            return true;
+        }
+
+        void padScriptInstallLocked(const std::vector<PadScriptEntry> &parsed, const char *source)
+        {
+            g_padScript.entries.clear();
+            for (const PadScriptEntry &entry : parsed)
+            {
+                PadScriptRuntimeEntry runtime{};
+                runtime.entry = entry;
+                g_padScript.entries.push_back(runtime);
+            }
+            g_padScript.startWall = std::chrono::steady_clock::now();
+            g_padScript.enabled = true;
+            g_padScriptArmed.store(true, std::memory_order_relaxed);
+            std::fprintf(stderr, "[padscript] armed n=%llu source=%s\n",
+                         static_cast<unsigned long long>(g_padScript.entries.size()), source);
+        }
+
+        void padScriptInitLocked()
+        {
+            if (g_padScript.initDone)
+            {
+                return;
+            }
+            g_padScript.initDone = true;
+            g_padScript.startWall = std::chrono::steady_clock::now();
+            const char *spec = std::getenv("PS2X_PAD_SCRIPT");
+            if (!spec || spec[0] == '\0')
+            {
+                return;
+            }
+            std::vector<PadScriptEntry> parsed;
+            if (!padScriptParse(spec, parsed))
+            {
+                std::fprintf(stderr, "[padscript] ignoring malformed PS2X_PAD_SCRIPT\n");
+                return;
+            }
+            padScriptInstallLocked(parsed, "env");
+        }
+
+        void padScriptEnsureInit()
+        {
+            if (g_padScriptInitDone.load(std::memory_order_relaxed))
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(g_padScript.mutex);
+            padScriptInitLocked();
+            g_padScriptInitDone.store(true, std::memory_order_relaxed);
+        }
+
+        uint64_t padScriptNowMsLocked()
+        {
+            if (g_padScript.testNowSet)
+            {
+                return g_padScript.testNowMs;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            return static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - g_padScript.startWall).count());
+        }
+
+        void padScriptOnRead(PadInputState &state)
+        {
+            padScriptEnsureInit();
+            if (!g_padScriptArmed.load(std::memory_order_relaxed))
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(g_padScript.mutex);
+            if (!g_padScript.enabled)
+            {
+                return;
+            }
+            const uint64_t nowMs = padScriptNowMsLocked();
+            for (size_t i = 0; i < g_padScript.entries.size(); ++i)
+            {
+                PadScriptRuntimeEntry &runtime = g_padScript.entries[i];
+                const PadScriptEntry &entry = runtime.entry;
+                const bool active = nowMs >= entry.atMs && nowMs < entry.atMs + entry.holdMs;
+                if (active)
+                {
+                    state.buttons = static_cast<uint16_t>(state.buttons & ~entry.pressMask);
+                    if (entry.hasLx)
+                    {
+                        state.lx = entry.lx;
+                    }
+                    if (entry.hasLy)
+                    {
+                        state.ly = entry.ly;
+                    }
+                    if (entry.hasRx)
+                    {
+                        state.rx = entry.rx;
+                    }
+                    if (entry.hasRy)
+                    {
+                        state.ry = entry.ry;
+                    }
+                    if (!runtime.loggedPress)
+                    {
+                        runtime.loggedPress = true;
+                        std::fprintf(stderr,
+                                     "[padscript] press i=%llu now=%llums at=%llums hold=%llums "
+                                     "buttons=0x%04x\n",
+                                     static_cast<unsigned long long>(i),
+                                     static_cast<unsigned long long>(nowMs),
+                                     static_cast<unsigned long long>(entry.atMs),
+                                     static_cast<unsigned long long>(entry.holdMs),
+                                     entry.pressMask);
+                    }
+                }
+                else if (nowMs >= entry.atMs + entry.holdMs && !runtime.loggedDone)
+                {
+                    runtime.loggedDone = true;
+                    std::fprintf(stderr, "[padscript] release i=%llu now=%llums\n",
+                                 static_cast<unsigned long long>(i),
+                                 static_cast<unsigned long long>(nowMs));
+                }
+            }
+        }
+
         uint8_t axisToByte(float axis)
         {
             axis = std::clamp(axis, -1.0f, 1.0f);
@@ -540,6 +866,7 @@ namespace ps2_stubs
             }
 
             padStimOnRead(state); // E2a: no-op unless PS2X_PAD_STIM_AFTER set
+            padScriptOnRead(state); // E31 DEV-ONLY: no-op unless PS2X_PAD_SCRIPT set
 
             fillPadStatus(outData, state, portState);
 
@@ -1109,5 +1436,43 @@ namespace ps2_stubs
         std::lock_guard<std::mutex> lock(g_padOverrideMutex);
         g_padOverrideEnabled = false;
         g_padOverrideState = PadInputState{};
+    }
+
+    bool parsePadScript(const char *spec, std::vector<PadScriptEntry> &entries)
+    {
+        return padScriptParse(spec, entries);
+    }
+
+    bool setPadScriptForTest(const char *spec)
+    {
+        std::vector<PadScriptEntry> parsed;
+        if (!padScriptParse(spec, parsed))
+        {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(g_padScript.mutex);
+        g_padScript.initDone = true;
+        padScriptInstallLocked(parsed, "test");
+        g_padScriptInitDone.store(true, std::memory_order_relaxed);
+        return true;
+    }
+
+    void setPadScriptNowMsForTest(uint64_t nowMs)
+    {
+        std::lock_guard<std::mutex> lock(g_padScript.mutex);
+        g_padScript.testNowSet = true;
+        g_padScript.testNowMs = nowMs;
+    }
+
+    void clearPadScriptForTest()
+    {
+        std::lock_guard<std::mutex> lock(g_padScript.mutex);
+        g_padScript.initDone = true;
+        g_padScript.enabled = false;
+        g_padScript.entries.clear();
+        g_padScript.testNowSet = false;
+        g_padScript.testNowMs = 0u;
+        g_padScriptArmed.store(false, std::memory_order_relaxed);
+        g_padScriptInitDone.store(true, std::memory_order_relaxed);
     }
 }
