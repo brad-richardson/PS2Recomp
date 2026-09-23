@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
 #include "MemoryCard.h"
 
 namespace ps2_stubs
@@ -1096,6 +1097,10 @@ namespace ps2_stubs
                 {
                     e3t.len = bytesRead;
                     ps2_e3::tapEnd(std::move(e3t), "mc-read", rdram, "-");
+                    // E44 Part-3 EE watch: memcard payload (dev-only, default off).
+                    if (bytesRead > 0)
+                        ps2_e44_trace::emitRangeOverlap(rdram, ctx, dstAddr, static_cast<uint32_t>(bytesRead),
+                                                        "mc-read", 0u, false, "mc-read");
                 }
                 result = std::ferror(it->second.file) ? kMcResultDeniedPermit : static_cast<int32_t>(bytesRead);
                 if (std::ferror(it->second.file))

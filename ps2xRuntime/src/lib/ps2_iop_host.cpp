@@ -1,6 +1,7 @@
 #include "ps2_iop_host.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h"
 
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
@@ -176,6 +177,10 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
         ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::writeGuest", nullptr);
         ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, address, size); // E3b R3b
         std::memcpy(destination, source, size);
+        // E44 Part-3 EE watch: IOP/SIF write into EE RAM (dev-only,
+        // default off). No guest ctx on this path.
+        ps2_e44_trace::emitRangeOverlap(rdram, nullptr, address, static_cast<uint32_t>(size),
+                                        "iop-write", 0u, false, __func__);
         if (ps2_e41_trace::plantArmed()) // E41 plant watch
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), address,
                                           static_cast<uint32_t>(size), rdram,
@@ -206,6 +211,9 @@ bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
         ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::zeroGuest", nullptr);
         ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, address, size); // E3b R3b
         std::memset(destination, 0, size);
+        // E44 Part-3 EE watch (dev-only, default off). No ctx on this path.
+        ps2_e44_trace::emitRangeOverlap(rdram, nullptr, address, static_cast<uint32_t>(size),
+                                        "iop-zero", 0u, false, __func__);
         if (ps2_e41_trace::plantArmed()) // E41 plant watch
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), address,
                                           static_cast<uint32_t>(size), rdram,

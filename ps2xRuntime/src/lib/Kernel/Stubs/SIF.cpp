@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h"
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
 #include "../../ps2_iop_transport.h"
@@ -274,7 +275,8 @@ namespace ps2_stubs
             return canCopyAddressRange(rdram, srcAddr, sizeBytes) && canCopyAddressRange(rdram, dstAddr, sizeBytes);
         }
 
-        bool copyGuestByteRange(uint8_t *rdram, uint32_t dstAddr, uint32_t srcAddr, uint32_t sizeBytes)
+        bool copyGuestByteRange(uint8_t *rdram, uint32_t dstAddr, uint32_t srcAddr, uint32_t sizeBytes,
+                                          const R5900Context *ctx = nullptr)
         {
             if (!canCopyGuestByteRange(rdram, dstAddr, srcAddr, sizeBytes))
             {
@@ -335,6 +337,10 @@ namespace ps2_stubs
                     char e3x[64];
                     std::snprintf(e3x, sizeof(e3x), "src=0x%x,iop=%d", srcAddr, sourceIsIop ? 1 : 0);
                     ps2_e3::tapEnd(std::move(e3t), "sif-copy", rdram, e3x);
+                    // E44 Part-3 EE watch: SIF guest copy (dev-only, default
+                    // off). Bulk range; linear src mapping.
+                    ps2_e44_trace::emitRangeOverlap(rdram, ctx, dstAddr, sizeBytes,
+                                                    "sif-copy", srcAddr, true, __func__);
                 }
                 return true;
             }
@@ -364,6 +370,10 @@ namespace ps2_stubs
                     char e3x[64];
                     std::snprintf(e3x, sizeof(e3x), "src=0x%x,iop=0,dir=bwd", srcAddr);
                     ps2_e3::tapEnd(std::move(e3t), "sif-copy", rdram, e3x);
+                    // E44 Part-3 EE watch: SIF guest copy (dev-only, default
+                    // off). Bulk range; linear src mapping.
+                    ps2_e44_trace::emitRangeOverlap(rdram, ctx, dstAddr, sizeBytes,
+                                                    "sif-copy", srcAddr, true, __func__);
                 }
                 return true;
             }
@@ -383,6 +393,10 @@ namespace ps2_stubs
                 char e3x[64];
                 std::snprintf(e3x, sizeof(e3x), "src=0x%x,iop=0,dir=fwd", srcAddr);
                 ps2_e3::tapEnd(std::move(e3t), "sif-copy", rdram, e3x);
+                // E44 Part-3 EE watch: SIF guest copy (dev-only, default
+                // off). Bulk range; linear src mapping.
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, dstAddr, sizeBytes,
+                                                "sif-copy", srcAddr, true, __func__);
             }
             return true;
         }
@@ -612,7 +626,7 @@ namespace ps2_stubs
             });
         }
 
-        if (!copyGuestByteRange(rdram, dstAddr, srcAddr, size))
+        if (!copyGuestByteRange(rdram, dstAddr, srcAddr, size, ctx))
         {
             static uint32_t warnCount = 0;
             if (warnCount < 32u)
@@ -635,6 +649,8 @@ namespace ps2_stubs
         {
             ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, rdAddr + 0x10u, 12u); // E3b R3b B2
             std::memcpy(rd + 0x10u, &srcAddr, sizeof(srcAddr));
+        // E44 Part-3 EE watch (dev-only, default off).
+        ps2_e44_trace::emitRangeOverlap(rdram, ctx, rdAddr + 0x10u, 12u, "sif-recvdata", 0u, false, "sceSifGetOtherData");
             std::memcpy(rd + 0x14u, &dstAddr, sizeof(dstAddr));
             std::memcpy(rd + 0x18u, &size, sizeof(size));
             ps2_e3::tapEnd(std::move(e3t), "sif-getother", rdram, "f=recvdata");
@@ -915,7 +931,7 @@ namespace ps2_stubs
                         static_cast<uint32_t>(xfer.size),
                     });
                 }
-                if (!copyGuestByteRange(rdram, xfer.dest, xfer.src, static_cast<uint32_t>(xfer.size)))
+                if (!copyGuestByteRange(rdram, xfer.dest, xfer.src, static_cast<uint32_t>(xfer.size), ctx))
                 {
                     ok = false;
                     break;

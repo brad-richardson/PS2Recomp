@@ -68,6 +68,8 @@ inline constexpr uint64_t kMaxSprModLines = 256ull;
 // Boot C: last-writer readout lines.
 inline constexpr uint64_t kMaxLastLines = 40ull;
 inline constexpr uint32_t kItem0Base = 0x70000000u;
+// Part 3: per-word-per-changed-vsync EE readout lines.
+inline constexpr uint64_t kMaxEbLines = 400ull;
 
 // Canonical watched scratchpad offsets (word-aligned).
 inline constexpr uint32_t kFixedOffsets[kFixedWords] = {
@@ -105,6 +107,24 @@ namespace detail
         uint64_t perWord[kMaxWords] = {0u};
         LastWriter lastW[kFixedWords];
         uint64_t lastLines = 0u;
+        // Part 3: per-extra-word change record for ebwlast (one line per
+        // word per vsync the word was written in). Flushed when the tick
+        // advances (trailing tick may never flush); ebFlushTick is the
+        // last tick a flush ran on.
+        struct EbRec
+        {
+            bool dirty = false;
+            uint64_t tick = 0u;
+            uint32_t value = 0u;
+            uint32_t pc = 0u;
+            uint32_t ra = 0u;
+            char via[16] = {0};
+            char fn[64] = {0};
+        };
+        EbRec eb[kMaxExtra];
+        uint64_t ebFlushTick = 0u;
+        bool ebFlushValid = false;
+        uint64_t ebLines = 0u;
         // Part-2: VIF0 kick aggregation (flush-on-tick-advance; the
         // trailing tick is flushed by the next kick or not at all).
         bool kickValid = false;
@@ -332,6 +352,68 @@ namespace detail
         s.out << line << '\n';
     }
 
+    // Part 3: flushes one ebwlast line per dirty EXTRA word for the
+    // word's own tick (window-gated per tick; out-of-window ticks drop
+    // silently). Call with s.mutex held, from every locked tap: the
+    // flush rides the tap traffic, so no dedicated vsync hook is needed.
+    // The trailing tick may never flush (wall-kill / quiet tail).
+    inline void flushEbLocked(State &s, uint64_t tick)
+    {
+        if (s.ebFlushValid && s.ebFlushTick == tick)
+        {
+            return;
+        }
+        for (int i = 0; i < s.numExtra; ++i)
+        {
+            State::EbRec &eb = s.eb[i];
+            if (!eb.dirty)
+            {
+                continue;
+            }
+            eb.dirty = false;
+            if (eb.tick < s.from || eb.tick > s.to)
+            {
+                continue;
+            }
+            if (s.ebLines >= kMaxEbLines)
+            {
+                continue;
+            }
+            ++s.ebLines;
+            char line[192];
+            std::snprintf(line, sizeof(line),
+                          "ebwlast vsync=%llu addr=0x%08x value=0x%08x via=%s pc=0x%08x ra=0x%08x fn=%s",
+                          static_cast<unsigned long long>(eb.tick),
+                          s.extra[i] & ~3u, eb.value, eb.via, eb.pc, eb.ra, eb.fn);
+            emitLineLocked(s, line);
+            if (!s.enabled)
+            {
+                return;
+            }
+        }
+        s.ebFlushValid = true;
+        s.ebFlushTick = tick;
+    }
+
+    // Part 3: records an EXTRA word change (call with s.mutex held).
+    inline void ebNoteLocked(State &s, uint64_t tick, int extra,
+                             uint32_t value, uint32_t pc, uint32_t ra,
+                             const char *via, const char *fn)
+    {
+        if (extra < 0 || extra >= kMaxExtra)
+        {
+            return;
+        }
+        State::EbRec &eb = s.eb[extra];
+        eb.dirty = true;
+        eb.tick = tick;
+        eb.value = value;
+        eb.pc = pc;
+        eb.ra = ra;
+        std::snprintf(eb.via, sizeof(eb.via), "%s", via != nullptr ? via : "-");
+        std::snprintf(eb.fn, sizeof(eb.fn), "%s", fn != nullptr ? fn : "-");
+    }
+
 } // namespace detail
 
 // Hot-path gate: one relaxed atomic load when disabled.
@@ -360,6 +442,9 @@ inline bool storeArmed(uint32_t addr, uint32_t size)
         return false;
     }
     const uint64_t tick = ps2_e41_trace::lastVsyncTick();
+    // Part 3: flush pending EXTRA change lines on every armed check,
+    // even out-of-window (emission is per-tick window-gated inside).
+    detail::flushEbLocked(s, tick);
     if (tick < s.from || tick > s.to)
     {
         return false;
@@ -397,21 +482,31 @@ inline void emitOverlap(const uint8_t *rdram, const R5900Context *ctx,
     {
         return;
     }
+    detail::flushEbLocked(s, tick);
     const uint32_t first = addr & ~3u;
     const uint32_t span = size > 16u ? 16u : size;
     const uint64_t end = static_cast<uint64_t>(addr) + span;
     for (uint32_t w = first; static_cast<uint64_t>(w) < end; w += 4u)
     {
         const int idx = detail::watchIndexLocked(s, w);
-        if (idx < 0 || s.perWord[idx] >= kMaxLinesPerWord)
+        if (idx < 0)
         {
             continue;
         }
         uint32_t value = 0u;
         const bool ok = detail::readWordBack(rdram, w, value);
-        ++s.perWord[idx];
         const uint32_t pc = (ctx != nullptr) ? ctx->pc : 0u;
         const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+        // Part 3: EXTRA change record updates even past the spw cap.
+        if (idx >= kFixedWords && ok)
+        {
+            detail::ebNoteLocked(s, tick, idx - kFixedWords, value, pc, ra, via, fn);
+        }
+        if (s.perWord[idx] >= kMaxLinesPerWord)
+        {
+            continue;
+        }
+        ++s.perWord[idx];
         const uint32_t a0 = (ctx != nullptr) ? getRegU32(ctx, 4) : 0u;
         const uint32_t a1 = (ctx != nullptr) ? getRegU32(ctx, 5) : 0u;
         const uint32_t a2 = (ctx != nullptr) ? getRegU32(ctx, 6) : 0u;
@@ -493,6 +588,69 @@ inline void emitOverlap(const uint8_t *rdram, const R5900Context *ctx,
     }
 }
 
+// Shared range emitter for bulk host copies (libc memcpy, SIF, CD
+// reads, ELF loads). Iterates the WATCH WORDS (never the range: ranges
+// can be megabytes) testing containment in [base, base+size). One spw
+// line per contained word with cap room, plus the EXTRA change record.
+// Linear guest space assumed (no 4 GB wrap). src words map linearly
+// (srcBase + offset) when hasSrc.
+inline void emitRangeOverlap(const uint8_t *rdram, const R5900Context *ctx,
+                             uint32_t base, uint32_t size, const char *via,
+                             uint32_t srcBase, bool hasSrc, const char *fn)
+{
+    if (size == 0u)
+    {
+        return;
+    }
+    if (!enabled())
+    {
+        return;
+    }
+    const uint64_t end = static_cast<uint64_t>(base) + size;
+    auto contained = [&](uint32_t w) {
+        return static_cast<uint64_t>(w) >= base &&
+               static_cast<uint64_t>(w) + 4u <= end;
+    };
+    for (int i = 0; i < kFixedWords; ++i)
+    {
+        const uint32_t w = PS2_SCRATCHPAD_BASE + kFixedOffsets[i];
+        if (!contained(w))
+        {
+            continue;
+        }
+        const uint32_t src = hasSrc ? static_cast<uint32_t>(srcBase + (w - base)) : 0u;
+        emitOverlap(rdram, ctx, w, 4u, via, src, hasSrc, fn);
+    }
+    uint32_t extras[kMaxExtra] = {0u};
+    int n = 0;
+    {
+        detail::State &s = detail::state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        n = s.numExtra;
+        for (int i = 0; i < n; ++i)
+        {
+            extras[i] = s.extra[i];
+        }
+    }
+    for (int i = 0; i < n; ++i)
+    {
+        const uint32_t ew = extras[i] & ~3u;
+        // Realistic guest spellings of the same word (KSEG0/phys).
+        const uint32_t canon = ew & 0x1FFFFFFFu;
+        const uint32_t spell[3] = {ew, canon, 0x80000000u | canon};
+        for (int k = 0; k < 3; ++k)
+        {
+            if (!contained(spell[k]))
+            {
+                continue;
+            }
+            const uint32_t src = hasSrc ? static_cast<uint32_t>(srcBase + (spell[k] - base)) : 0u;
+            emitOverlap(rdram, ctx, spell[k], 4u, via, src, hasSrc, fn);
+            break;
+        }
+    }
+}
+
 // via label from the store width (callers pass the host fn separately).
 inline const char *viaForSize(uint32_t size)
 {
@@ -533,12 +691,15 @@ inline void trackLastWriter(const uint8_t *rdram, const R5900Context *ctx,
     }
     const uint64_t tick = ps2_e41_trace::lastVsyncTick();
     const uint32_t first = addr & ~3u;
+    detail::flushEbLocked(s, tick);
     const uint32_t span = size > 16u ? 16u : size;
     const uint64_t end = static_cast<uint64_t>(addr) + span;
+    const uint32_t pc = (ctx != nullptr) ? ctx->pc : 0u;
+    const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
     for (uint32_t w = first; static_cast<uint64_t>(w) < end; w += 4u)
     {
         const int idx = detail::watchIndexLocked(s, w);
-        if (idx < 0 || idx >= 4)
+        if (idx < 0)
         {
             continue;
         }
@@ -547,12 +708,23 @@ inline void trackLastWriter(const uint8_t *rdram, const R5900Context *ctx,
         {
             continue;
         }
+        // Part 3: EXTRA change records update here (ungated: no window,
+        // no cap), so post-cap and out-of-window stores still move ebwlast.
+        if (idx >= kFixedWords)
+        {
+            detail::ebNoteLocked(s, tick, idx - kFixedWords, value, pc, ra, via, fn);
+            continue;
+        }
+        if (idx >= 4)
+        {
+            continue;
+        }
         detail::LastWriter &rec = s.lastW[idx];
         rec.valid = true;
         rec.wtick = tick;
         rec.value = value;
-        rec.pc = (ctx != nullptr) ? ctx->pc : 0u;
-        rec.ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+        rec.pc = pc;
+        rec.ra = ra;
         std::snprintf(rec.via, sizeof(rec.via), "%s", via != nullptr ? via : "-");
         std::snprintf(rec.fn, sizeof(rec.fn), "%s", fn != nullptr ? fn : "-");
         std::snprintf(rec.src, sizeof(rec.src), "-");
@@ -578,6 +750,7 @@ inline void trackLastWriterDma(const uint8_t *rdram, uint32_t ramStart,
     {
         return;
     }
+    detail::flushEbLocked(s, tick);
     for (int i = 0; i < 4; ++i)
     {
         const uint32_t off = kFixedOffsets[i];
@@ -682,6 +855,7 @@ inline void noteSprDma(const uint8_t *rdram, uint32_t ramStart,
     {
         return;
     }
+    detail::flushEbLocked(s, tick);
     if (totalBytes == 0u)
     {
         return;
@@ -773,6 +947,7 @@ inline void noteVif0Kick()
     {
         return;
     }
+    detail::flushEbLocked(s, tick);
     if (!s.kickValid || tick != s.kickTick)
     {
         if (s.kickValid && s.kickCount > 0u)
@@ -815,6 +990,7 @@ inline void noteVif0Unk(uint32_t opcode, uint32_t imm, uint32_t num, uint32_t re
     {
         return;
     }
+    detail::flushEbLocked(s, tick);
     if (s.vif0UnkLines >= kMaxVif0UnkLines)
     {
         return;
@@ -851,6 +1027,7 @@ inline void noteVu0Call(const R5900Context *ctx, uint32_t startPC,
     {
         return;
     }
+    detail::flushEbLocked(s, tick);
     if (s.vu0CallLines >= kMaxVu0CallLines)
     {
         return;
@@ -889,6 +1066,7 @@ inline void noteSprFromDma(const uint8_t *rdram, uint32_t ramStart,
     {
         return;
     }
+    detail::flushEbLocked(s, tick);
     if (totalBytes == 0u || s.numExtra == 0)
     {
         return;
@@ -898,10 +1076,6 @@ inline void noteSprFromDma(const uint8_t *rdram, uint32_t ramStart,
     for (int i = 0; i < s.numExtra; ++i)
     {
         const int idx = kFixedWords + i;
-        if (s.perWord[idx] >= kMaxLinesPerWord)
-        {
-            continue;
-        }
         // EXTRA addrs are EE words; match them in RAM space.
         const uint32_t want = (s.extra[i] & 0x1FFFFFFFu) & PS2_RAM_MASK & ~3u;
         // Distance of this word from the transfer dest start, mod RAM.
@@ -925,6 +1099,15 @@ inline void noteSprFromDma(const uint8_t *rdram, uint32_t ramStart,
         const bool ok = (rdram != nullptr) &&
                         (want + 4u <= PS2_RAM_SIZE) &&
                         (std::memcpy(&value, rdram + want, sizeof(value)), true);
+        // Part 3: EXTRA change record updates even past the spw cap.
+        if (ok)
+        {
+            detail::ebNoteLocked(s, tick, i, value, 0u, 0u, "spr-from", "spr-from");
+        }
+        if (s.perWord[idx] >= kMaxLinesPerWord)
+        {
+            continue;
+        }
         ++s.perWord[idx];
         // Last-hit source on multi-wrap transfers (same reasoning as TO).
         uint32_t dLast = dHit;
@@ -994,6 +1177,7 @@ inline void noteSprMod(bool sprFrom, uint32_t mode, uint32_t madr,
     {
         return;
     }
+    detail::flushEbLocked(s, tick);
     if (s.sprModLines >= kMaxSprModLines)
     {
         return;
@@ -1032,6 +1216,7 @@ inline void noteItem0Walk(const R5900Context *ctx, uint32_t s1)
     {
         return;
     }
+    detail::flushEbLocked(s, tick);
     if (s.lastLines >= kMaxLastLines)
     {
         return;
@@ -1101,6 +1286,13 @@ inline void configureForTest(const char *path, uint64_t from, uint64_t to,
     {
         s.lastW[i].valid = false;
     }
+    for (int i = 0; i < kMaxExtra; ++i)
+    {
+        s.eb[i].dirty = false;
+    }
+    s.ebFlushValid = false;
+    s.ebFlushTick = 0u;
+    s.ebLines = 0u;
     detail::memSuppressed() = false;
 }
 
@@ -1141,6 +1333,13 @@ inline void clearForTest()
     {
         s.lastW[i].valid = false;
     }
+    for (int i = 0; i < kMaxExtra; ++i)
+    {
+        s.eb[i].dirty = false;
+    }
+    s.ebFlushValid = false;
+    s.ebFlushTick = 0u;
+    s.ebLines = 0u;
     detail::memSuppressed() = false;
 }
 

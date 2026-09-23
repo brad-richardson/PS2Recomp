@@ -1027,6 +1027,8 @@ namespace ps2_syscalls
             {
                 ps2TraceGuestRangeWrite(rdram, dest, size, "syscallCopy", ctx);
                 std::memcpy(destPtr, srcPtr, size);
+        // E44 Part-3 EE watch (dev-only, default off).
+        ps2_e44_trace::emitRangeOverlap(rdram, ctx, dest, size, "syscallCopy", src, true, "syscallCopy");
                 if (ps2_e41_trace::plantArmed()) // E41 plant watch
                 {
                     char src[32];

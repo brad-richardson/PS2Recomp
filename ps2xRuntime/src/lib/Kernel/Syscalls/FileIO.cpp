@@ -226,6 +226,8 @@ namespace ps2_syscalls
         if (bytesRead > 0)
         {
             ps2TraceGuestRangeWrite(rdram, bufAddr, static_cast<uint32_t>(bytesRead), "fioRead", ctx);
+        // E44 Part-3 EE watch (dev-only, default off).
+        ps2_e44_trace::emitRangeOverlap(rdram, ctx, bufAddr, static_cast<uint32_t>(bytesRead), "fioRead", 0u, false, "fioRead");
             if (ps2_e41_trace::armed()) // E41 fioread log + plant watch
             {
                 const uint64_t tick = ps2_e41_trace::lastVsyncTick();

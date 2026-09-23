@@ -1,4 +1,5 @@
 #include "ps2_e3.h" // E3b R3b B13 taps below (self-gated; unset env = no-op)
+#include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
 
 namespace
 {
@@ -312,6 +313,10 @@ namespace
                     std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
                 }
                 ps2_e3::tapEnd(std::move(e3t), "elf-seg", rdram, "spr=1,ok=1");
+                // E44 Part-3 EE watch: ELF segment into scratchpad (dev-only,
+                // default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, nullptr, ph.vaddr, ph.memsz,
+                                                "elf-load", 0u, false, __func__);
             }
             else
             {
@@ -338,6 +343,10 @@ namespace
                     std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
                 }
                 ps2_e3::tapEnd(std::move(e3t), "elf-seg", rdram, "spr=0,ok=1");
+                // E44 Part-3 EE watch: ELF segment into RAM (dev-only,
+                // default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, nullptr, ph.vaddr, ph.memsz,
+                                                "elf-load", 0u, false, __func__);
             }
 
             loadedAny = true;

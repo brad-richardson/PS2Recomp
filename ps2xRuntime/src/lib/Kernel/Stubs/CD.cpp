@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h"
 #include "CD.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
@@ -313,6 +314,10 @@ namespace ps2_stubs
 
             ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, args.buf, bytes); // E3b R3c C1
             const bool e3ok = readCdSectors(args.lbn, args.sectors, rdram + offset, bytes);
+            // E44 Part-3 EE watch: disc sectors into EE RAM (dev-only, default off).
+            if (e3ok && bytes != 0u)
+                ps2_e44_trace::emitRangeOverlap(rdram, nullptr, args.buf, static_cast<uint32_t>(bytes),
+                                                        "cd-read", 0u, false, "sceCdRead");
             if (e3t.active)
             {
                 char e3x[64];
@@ -648,6 +653,10 @@ namespace ps2_stubs
 
             ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, buf, bytes); // E3b R3c C3
             const bool e3ok = readCdSectors(lbn, sectors, rdram + offset, bytes);
+            // E44 Part-3 EE watch: async chain sectors (dev-only, default off).
+            if (e3ok && bytes != 0u)
+                ps2_e44_trace::emitRangeOverlap(rdram, nullptr, buf, static_cast<uint32_t>(bytes),
+                                                        "cd-read", 0u, false, "cd-chain");
             if (e3t.active)
             {
                 char e3x[64];
@@ -1005,6 +1014,10 @@ namespace ps2_stubs
                 const size_t readBytes = static_cast<size_t>(sectors) * kCdSectorSize;
                 ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destination, readBytes); // E3b R3c C4
                 const bool e3ok = readCdSectors(readLbn, sectors, rdram + offset, readBytes);
+                // E44 Part-3 EE watch: streaming sectors (dev-only, default off).
+                if (e3ok && readBytes != 0u)
+                    ps2_e44_trace::emitRangeOverlap(rdram, nullptr, destination, static_cast<uint32_t>(readBytes),
+                                                        "cd-read", 0u, false, "cd-streaming");
                 if (e3t.active)
                 {
                     char e3x[64];

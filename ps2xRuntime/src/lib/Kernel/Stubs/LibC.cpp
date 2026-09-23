@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h"
 #include "LibC.h"
 #include "ps2_log.h"
 
@@ -126,6 +127,9 @@ namespace ps2_stubs
         if (copied != 0u)
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, copied, "memcpy", ctx);
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, copied,
+                                                        "memcpy", srcAddr, true, "memcpy");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
             {
                 char src[32];
@@ -179,6 +183,9 @@ namespace ps2_stubs
         if (written != 0u)
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, written, "memset", ctx);
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, written,
+                                                        "memset", 0u, false, "memset");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
                                               written, rdram, "libc-memset", "fill", 0u);
@@ -227,6 +234,9 @@ namespace ps2_stubs
         if (written != 0u)
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, written, "memclr", ctx);
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, written,
+                                                        "memclr", 0u, false, "memclr");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
                                               written, rdram, "libc-memclr", "zero", 0u);
@@ -277,6 +287,9 @@ namespace ps2_stubs
         if (copied != 0u)
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, copied, "memmove", ctx);
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, copied,
+                                                        "memmove", srcAddr, true, "memmove");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
             {
                 char src[32];
@@ -342,6 +355,9 @@ namespace ps2_stubs
                 ps2_e3::tapEnd(std::move(e3t), "libc-strcpy", rdram, e3x);
             }
             ps2TraceGuestRangeWrite(rdram, destAddr, static_cast<uint32_t>(::strlen(hostSrc) + 1u), "strcpy", ctx);
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, static_cast<uint32_t>(::strlen(hostSrc) + 1u),
+                                                        "strcpy", 0u, false, "strcpy");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
             {
                 char src[32];
@@ -383,6 +399,9 @@ namespace ps2_stubs
                 ps2_e3::tapEnd(std::move(e3t), "libc-strncpy", rdram, e3x);
             }
             ps2TraceGuestRangeWrite(rdram, destAddr, size, "strncpy", ctx);
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, size,
+                                                        "strncpy", 0u, false, "strncpy");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
             {
                 char src[32];
@@ -491,6 +510,9 @@ namespace ps2_stubs
                 char e3x[64];
                 std::snprintf(e3x, sizeof(e3x), "src=0x%x", srcAddr);
                 ps2_e3::tapEnd(std::move(e3t), "libc-strcat", rdram, e3x);
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr + e3off, static_cast<uint32_t>(::strlen(hostSrc) + 1u),
+                                                        "strcat", 0u, false, "strcat");
             }
         }
         else
@@ -525,6 +547,9 @@ namespace ps2_stubs
                 char e3x[64];
                 std::snprintf(e3x, sizeof(e3x), "src=0x%x", srcAddr);
                 ps2_e3::tapEnd(std::move(e3t), "libc-strncat", rdram, e3x);
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr + e3off, e3len,
+                                                        "strncat", 0u, false, "strncat");
             }
         }
         else
@@ -711,6 +736,9 @@ namespace ps2_stubs
             if (e3ok)
             {
                 ps2TraceGuestRangeWrite(rdram, str_addr, static_cast<uint32_t>(writeLen), "sprintf", ctx);
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, str_addr, static_cast<uint32_t>(writeLen),
+                                                        "sprintf", 0u, false, "sprintf");
                 if (ps2_e41_trace::plantArmed()) // E41 plant watch
                     ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), str_addr,
                                                   static_cast<uint32_t>(writeLen), rdram,
@@ -767,6 +795,9 @@ namespace ps2_stubs
                 if (e3ok)
                 {
                     ps2TraceGuestRangeWrite(rdram, str_addr, static_cast<uint32_t>(output.size()), "snprintf", ctx);
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, str_addr, static_cast<uint32_t>(output.size()),
+                                                        "snprintf", 0u, false, "snprintf");
                     if (ps2_e41_trace::plantArmed()) // E41 plant watch
                         ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), str_addr,
                                                       static_cast<uint32_t>(output.size()), rdram,
@@ -906,6 +937,9 @@ namespace ps2_stubs
             {
                 e3t.len = items_read * static_cast<size_t>(size);
                 ps2_e3::tapEnd(std::move(e3t), "libc-fread", rdram, "-");
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, ptrAddr, static_cast<uint32_t>(items_read * size),
+                                                        "fread", 0u, false, "fread");
             }
         }
         else
@@ -1300,6 +1334,9 @@ namespace ps2_stubs
                 char e3x[32];
                 std::snprintf(e3x, sizeof(e3x), "ok=%d", e3ok ? 1 : 0);
                 ps2_e3::tapEnd(std::move(e3t), "libc-vsprintf", rdram, e3x);
+                // E44 Part-3 EE watch (dev-only, default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, ctx, str_addr, static_cast<uint32_t>(rendered.size() + 1u),
+                                                        "vsprintf", 0u, false, "vsprintf");
             }
             if (e3ok)
             {

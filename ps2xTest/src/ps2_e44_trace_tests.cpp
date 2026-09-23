@@ -487,6 +487,106 @@ namespace
             std::remove(tmp.c_str());
         });
 
+        tc.Run("range overlap covers bulk host copies", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-range.txt");
+            std::remove(tmp.c_str());
+            const uint32_t extras[2] = {0x00809670u, 0x00809B70u};
+            ps2_e44_trace::configureForTest(tmp.c_str(), 0u, 2000u, extras, 2);
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            e44SetRamWord(ram, 0x00809670u, 0x00000030u);
+            e44SetRamWord(ram, 0x00809674u, 0x00814884u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            R5900Context ctx{};
+            ctx.pc = 0x00123456u;
+
+            ps2_e41_trace::noteVsync(100u);
+            // Bulk libc-memcpy-shaped range covering the first extra quad.
+            ps2_e44_trace::emitRangeOverlap(ram.data(), &ctx, 0x00809670u, 16u,
+                                            "libc-memcpy", 0x00809000u, true, "memcpy");
+            // Disjoint range: silent.
+            ps2_e44_trace::emitRangeOverlap(ram.data(), &ctx, 0x00800000u, 16u,
+                                            "libc-memcpy", 0x00809000u, true, "memcpy");
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "spw ") == 1u, "only the covered extra word logs");
+            t.IsTrue(text.find("spw vsync=100 addr=0x00809670 value=0x00000030 via=libc-memcpy src=0x00809000") != std::string::npos,
+                     "range line carries linear src mapping");
+            t.IsTrue(text.find("pc=0x00123456") != std::string::npos &&
+                         text.find("fn=memcpy") != std::string::npos,
+                     "range line carries caller regs");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("ebwlast flushes one line per changed word per tick", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-eb.txt");
+            std::remove(tmp.c_str());
+            const uint32_t extras[1] = {0x00809670u};
+            ps2_e44_trace::configureForTest(tmp.c_str(), 0u, 2000u, extras, 1);
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            R5900Context ctx{};
+            ctx.pc = 0x00AAAAAAu;
+
+            // Two writes in tick 100 (last wins), one in tick 101; the
+            // tick-101 store drives the flush of tick 100's record via
+            // the scratchpad storm word.
+            e44SetRamWord(ram, 0x00809670u, 0x00000001u);
+            ps2_e41_trace::noteVsync(100u);
+            ps2_e44_trace::noteStore(ram.data(), &ctx, 0x00809670u, 4u, "Store32");
+            e44SetRamWord(ram, 0x00809670u, 0x00000030u);
+            ps2_e44_trace::noteStore(ram.data(), &ctx, 0x00809670u, 4u, "Store32");
+            e44SetSpWord(sp, 0u, 0x12345678u);
+            ps2_e41_trace::noteVsync(101u);
+            ps2_e44_trace::noteStore(ram.data(), &ctx, 0x70000000u, 4u, "Store32");
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "ebwlast ") == 1u, "one line for the changed tick");
+            t.IsTrue(text.find("ebwlast vsync=100 addr=0x00809670 value=0x00000030 via=store32 pc=0x00aaaaaa") != std::string::npos,
+                     "ebwlast carries last-writer state of that tick");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("eb record follows post-cap writes", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-ebcap.txt");
+            std::remove(tmp.c_str());
+            const uint32_t extras[1] = {0x00809670u};
+            ps2_e44_trace::configureForTest(tmp.c_str(), 0u, 2000u, extras, 1);
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            R5900Context ctx{};
+
+            ps2_e41_trace::noteVsync(500u);
+            e44SetRamWord(ram, 0x00809670u, 0x11111111u);
+            for (int i = 0; i < 64; ++i)
+            {
+                ps2_e44_trace::noteStore(ram.data(), &ctx, 0x00809670u, 4u, "Store32");
+            }
+            // 65th: spw-capped, but the change record must follow.
+            e44SetRamWord(ram, 0x00809670u, 0x00000030u);
+            ps2_e44_trace::noteStore(ram.data(), &ctx, 0x00809670u, 4u, "Store32");
+            e44SetSpWord(sp, 0u, 0u);
+            ps2_e41_trace::noteVsync(501u);
+            ps2_e44_trace::noteStore(ram.data(), &ctx, 0x70000000u, 4u, "Store32");
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "spw ") == 65u, "64 extra + 1 storm spw");
+            t.IsTrue(text.find("ebwlast vsync=500 addr=0x00809670 value=0x00000030") != std::string::npos,
+                     "eb record follows the post-cap write");
+            std::remove(tmp.c_str());
+        });
+
         tc.Run("spwlast caps at 40", [](TestCase &t)
         {
             const std::string tmp = e44TmpPath("ps2x-e44-lastcap40.txt");

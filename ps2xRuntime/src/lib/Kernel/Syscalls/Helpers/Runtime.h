@@ -1,5 +1,6 @@
 #include "ps2_e3.h" // E3b R3b taps below (self-gated; unset env = no-op)
 #include "ps2_e41_trace.h" // E41 plant watch (default off)
+#include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
 
 static void setRegU32(R5900Context *ctx, int reg, uint32_t value)
 {
@@ -48,6 +49,9 @@ static void rpcCopyToRdram(uint8_t *rdram, uint32_t dst, uint32_t src, size_t si
         char e3x[64];
         std::snprintf(e3x, sizeof(e3x), "src=0x%x", src);
         ps2_e3::tapEnd(std::move(e3t), "rpc-copy", rdram, e3x);
+    // E44 Part-3 EE watch (dev-only, default off). Post-copy.
+    ps2_e44_trace::emitRangeOverlap(rdram, nullptr, dst, static_cast<uint32_t>(clampedSize),
+                                    "rpc-copy", src, true, __func__);
     }
     if (ps2_e41_trace::plantArmed()) // E41 plant watch
     {
@@ -94,6 +98,9 @@ static void rpcZeroRdram(uint8_t *rdram, uint32_t dst, size_t size)
     if (e3t.active)
     {
         ps2_e3::tapEnd(std::move(e3t), "rpc-zero", rdram, "fill=0");
+    // E44 Part-3 EE watch (dev-only, default off). Post-fill.
+    ps2_e44_trace::emitRangeOverlap(rdram, nullptr, dst, static_cast<uint32_t>(clampedSize),
+                                    "rpc-zero", 0u, false, __func__);
     }
     if (ps2_e41_trace::plantArmed()) // E41 plant watch
         ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dst,

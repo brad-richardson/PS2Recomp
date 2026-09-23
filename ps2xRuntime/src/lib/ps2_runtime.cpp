@@ -1021,6 +1021,11 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
             std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
         }
 
+        // E44 Part-3 EE watch: ELF segment into RAM/scratchpad (dev-only,
+        // default off). Boot-time; in-window for Boot D (FROM=0).
+        ps2_e44_trace::emitRangeOverlap(m_memory.getRDRAM(), nullptr, ph.vaddr, ph.memsz,
+                                        "elf-load", 0u, false, __func__);
+
         RUNTIME_LOG("Loading segment: 0x" << std::hex << ph.vaddr
                                           << " - 0x" << (static_cast<uint64_t>(ph.vaddr) + static_cast<uint64_t>(ph.memsz))
                                           << " (filesz: 0x" << ph.filesz
