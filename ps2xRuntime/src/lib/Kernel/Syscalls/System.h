@@ -5,6 +5,9 @@
 namespace ps2_syscalls
 {
     bool dispatchSyscallOverride(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+    // GB3: the SMODE1 the real kernel's SetGsCrt programs for a video mode
+    // (0 = mode not modelled; SMODE1 left as it was).
+    uint64_t gsCrtSmode1ForMode(uint32_t videoMode);
     void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void SetGsCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void GsGetIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

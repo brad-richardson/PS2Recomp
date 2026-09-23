@@ -2629,13 +2629,17 @@ void EeScheduler::processEvent(const EeEvent &event)
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
         ps2_e4::noteVBlank(m_vsyncTick, m_runtime.gs(), m_runtime.memory().gs()); // E4 arm/freeze
         ps2_vq::noteVBlank(m_vsyncTick, m_runtime.gs(), m_runtime.memory().gs()); // GB2 Part 2 quiescent gate
-        if ((m_vsyncTick & 1u) != 0u)
         {
-            m_runtime.memory().gs().csr.fetch_or(0x2000ull, std::memory_order_acq_rel);
-        }
-        else
-        {
-            m_runtime.memory().gs().csr.fetch_and(~0x2000ull, std::memory_order_acq_rel);
+            // GB3: the FIELD flip is a priv store like any other; queued, it
+            // lands in stream order with the guest's own CSR writes.
+            GSRegisters &gsRegs = m_runtime.memory().gs();
+            const bool odd = (m_vsyncTick & 1u) != 0u;
+            m_runtime.memory().gsPrivStore([&gsRegs, odd]()
+                                           {
+                if (odd)
+                    gsRegs.csr.fetch_or(0x2000ull, std::memory_order_acq_rel);
+                else
+                    gsRegs.csr.fetch_and(~0x2000ull, std::memory_order_acq_rel); });
         }
         writeGuestU32(m_vsyncFlagAddress, 1u);
         if (m_vsyncTickAddress != 0u)

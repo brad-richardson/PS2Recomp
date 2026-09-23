@@ -319,6 +319,13 @@ public:
     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
+    // GB3: the GS frontend that owns the priv-register timeline. Every
+    // store to gs_regs goes through gsPrivStore: with the GS queue on it
+    // runs on the GS worker in stream order (GS::privWrite), otherwise now.
+    // Readers on the game thread use gsPrivSync() (a queue fence) first.
+    void setGsFrontend(GS *gs) { m_gsFrontend = gs; }
+    void gsPrivStore(std::function<void()> apply);
+    void gsPrivSync();
 
     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
@@ -402,6 +409,7 @@ public:
 
     GifPacketCallback m_gifPacketCallback;
     GifArbiter *m_gifArbiter = nullptr;
+    GS *m_gsFrontend = nullptr;
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
 

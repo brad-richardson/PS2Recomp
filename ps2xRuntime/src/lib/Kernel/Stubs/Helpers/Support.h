@@ -1881,13 +1881,16 @@ namespace
         if (!runtime || !runtime->syncCoreSubsystems())
             return;
         auto &regs = runtime->memory().gs();
-        regs.pmode = env.pmode;
-        regs.smode2 = env.smode2;
-        regs.dispfb1 = env.dispfb;
-        regs.display1 = env.display;
-        regs.dispfb2 = env.dispfb;
-        regs.display2 = env.display;
-        regs.bgcolor = env.bgcolor;
+        // GB3: in-stream when the GS queue is on.
+        runtime->memory().gsPrivStore([&regs, env]()
+                                      {
+            regs.pmode = env.pmode;
+            regs.smode2 = env.smode2;
+            regs.dispfb1 = env.dispfb;
+            regs.display1 = env.display;
+            regs.dispfb2 = env.dispfb;
+            regs.display2 = env.display;
+            regs.bgcolor = env.bgcolor; });
     }
 
     static void applyGsRegPairs(PS2Runtime *runtime, const GsRegPairMem *pairs, size_t pairCount)

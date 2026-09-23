@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 namespace ps2_vq
 {
@@ -75,19 +76,82 @@ namespace ps2_vq
         return fnv1a32(reinterpret_cast<const uint8_t *>(words), sizeof(words));
     }
 
+    // GB3: window + present hash + optional frame dumps.
+    //   PS2X_VQ_FROM / PS2X_VQ_TO / PS2X_VQ_STEP (defaults 100 / 1350 / 50,
+    //   GB2's 26 ticks) pick the sample ticks.
+    //   Each line also carries pres=<fnv32 of the presented RGBA rows>
+    //   pw/ph (GS::presentForDiagnostics: the backend's Present at this
+    //   stream position, no host-latch side effects).
+    //   PS2X_VQ_DUMP_DIR=<dir> writes vq-<tick>.ppm (RGB) per sample.
+    struct Window
+    {
+        uint64_t from = 100u;
+        uint64_t to = 1350u;
+        uint64_t step = 50u;
+    };
+
+    inline uint64_t envU64(const char *name, uint64_t def)
+    {
+        const char *env = std::getenv(name);
+        if (!env || !*env)
+            return def;
+        return std::strtoull(env, nullptr, 0);
+    }
+
+    inline const Window &window()
+    {
+        static const Window w = [] {
+            Window r;
+            r.from = envU64("PS2X_VQ_FROM", 100u);
+            r.to = envU64("PS2X_VQ_TO", 1350u);
+            r.step = envU64("PS2X_VQ_STEP", 50u);
+            if (r.step == 0u)
+                r.step = 1u;
+            return r;
+        }();
+        return w;
+    }
+
+    inline void dumpPpm(const char *dir, uint64_t tick, const PresentationFrame &frame)
+    {
+        char path[1024];
+        std::snprintf(path, sizeof(path), "%s/vq-%06llu.ppm", dir, static_cast<unsigned long long>(tick));
+        FILE *f = std::fopen(path, "wb");
+        if (!f)
+            return;
+        std::fprintf(f, "P6\n%u %u\n255\n", frame.width, frame.height);
+        const size_t stride = static_cast<size_t>(640u) * 4u;
+        std::vector<uint8_t> row(static_cast<size_t>(frame.width) * 3u);
+        for (uint32_t y = 0; y < frame.height; ++y)
+        {
+            const size_t off = static_cast<size_t>(y) * stride;
+            if (off + static_cast<size_t>(frame.width) * 4u > frame.pixels.size())
+                break;
+            for (uint32_t x = 0; x < frame.width; ++x)
+            {
+                row[x * 3u + 0u] = frame.pixels[off + x * 4u + 0u];
+                row[x * 3u + 1u] = frame.pixels[off + x * 4u + 1u];
+                row[x * 3u + 2u] = frame.pixels[off + x * 4u + 2u];
+            }
+            std::fwrite(row.data(), 1, row.size(), f);
+        }
+        std::fclose(f);
+    }
+
     inline void noteVBlank(uint64_t tick, GS &gs, GSRegisters &regs)
     {
         if (!enabled())
         {
             return;
         }
+        const Window &w = window();
         static bool announced = false;
         if (!announced)
         {
             announced = true;
-            std::cerr << "[vq] armed ticks 100..1350 step 50" << std::endl;
+            std::cerr << "[vq] armed ticks " << w.from << ".." << w.to << " step " << w.step << std::endl;
         }
-        if (tick < 100u || tick > 1350u || (tick % 50u) != 0u)
+        if (tick < w.from || tick > w.to || ((tick - w.from) % w.step) != 0u)
         {
             return;
         }
@@ -102,8 +166,39 @@ namespace ps2_vq
         }
         gs.unlockDisplaySnapshot();
         const uint32_t regsFnv = hashRegs(regs);
+
+        const PresentationFrame frame = gs.presentForDiagnostics();
+        uint32_t presFnv = 2166136261u;
+        if (frame)
+        {
+            const size_t stride = static_cast<size_t>(640u) * 4u;
+            const size_t rowBytes = static_cast<size_t>(frame.width) * 4u;
+            for (uint32_t y = 0; y < frame.height; ++y)
+            {
+                const size_t off = static_cast<size_t>(y) * stride;
+                if (off + rowBytes > frame.pixels.size())
+                    break;
+                for (size_t i = 0; i < rowBytes; ++i)
+                {
+                    presFnv ^= frame.pixels[off + i];
+                    presFnv *= 16777619u;
+                }
+            }
+            if (const char *dir = std::getenv("PS2X_VQ_DUMP_DIR"))
+            {
+                if (*dir)
+                    dumpPpm(dir, tick, frame);
+            }
+        }
+        else
+        {
+            presFnv = 0u;
+        }
+
         std::cerr << "[vq] tick=" << tick << " vram=" << std::hex << vramFnv << " regs=" << regsFnv
                   << std::dec << " size=" << size << " sub=" << gs.submitCount()
-                  << " reg=" << gs.regWriteCount() << std::endl;
+                  << " reg=" << gs.regWriteCount() << " priv=" << gs.privWriteCount()
+                  << " pres=" << std::hex << presFnv << std::dec << " pw=" << frame.width
+                  << " ph=" << frame.height << std::endl;
     }
 } // namespace ps2_vq
