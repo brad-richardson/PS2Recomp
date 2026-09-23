@@ -2,6 +2,7 @@
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e44_trace.h"
+#include "ps2_snd_spike.h"
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
 #include "../../ps2_iop_transport.h"
@@ -478,6 +479,7 @@ namespace ps2_stubs
     {
         const uint32_t cid = getRegU32(ctx, 4);
         const uint32_t handler = getRegU32(ctx, 5);
+        ps2_snd_spike::noteAddCmdHandler(cid, handler, getRegU32(ctx, 6), getRegU32(ctx, 28)); // AU2
         std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
         g_sifCmdHandlers[cid] = handler;
         setReturnS32(ctx, 0);
@@ -921,6 +923,14 @@ namespace ps2_stubs
             for (uint32_t i = 0; i < pendingCount; ++i)
             {
                 const Ps2SifDmaTransfer &xfer = pending[i];
+                // AU2 spike: SND-library transfers go to the spike's IOP
+                // capture instead of low EE RDRAM (PS2X_SND_TICK only).
+                if (ps2_snd_spike::onSetDma(rdram, ps2_e41_trace::lastVsyncTick(), getRegU32(ctx, 31),
+                                            xfer.src, xfer.dest, static_cast<uint32_t>(xfer.size),
+                                            static_cast<uint32_t>(xfer.attr)))
+                {
+                    continue;
+                }
                 if (runtime)
                 {
                     PS2IopTransport::notifyTransfer(runtime, rdram, {

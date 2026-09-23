@@ -16,6 +16,7 @@
 #define XXH_INLINE_ALL
 #include "runtime/third_party/xxhash.h"
 #endif
+#include "ps2_snd_spike.h"
 
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
@@ -2848,6 +2849,9 @@ void EeScheduler::processEvent(const EeEvent &event)
 #if PS2X_ENABLE_DET_HASH_TAP
         emitDetHashTap();
 #endif
+        // AU2 spike: IOP SND tick (PS2X_SND_TICK, default off).
+        ps2_snd_spike::onVBlank(m_rdram, m_vsyncTick, [this](GuestInvocation invocation)
+                                { queueInvocation(std::move(invocation)); });
         break;
     case EeEventType::ExternalWake:
         completeExternalWait(event.id, event.value, KE_OK);
