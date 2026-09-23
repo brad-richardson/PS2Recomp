@@ -24,11 +24,15 @@ class GifArbiter
 {
 public:
     using ProcessPacketFn = std::function<void(const uint8_t *, uint32_t)>;
+    // G44 shadow tap: observes each drained packet WITH its path, in the same
+    // order the CPU backend sees it. Unset = zero behavior change.
+    using ShadowPacketFn = std::function<void(GifPathId, const uint8_t *, uint32_t)>;
 
     GifArbiter() = default;
     explicit GifArbiter(ProcessPacketFn processFn);
 
     void setProcessPacketFn(ProcessPacketFn fn) { m_processFn = std::move(fn); }
+    void setShadowPacketFn(ShadowPacketFn fn) { m_shadowFn = std::move(fn); }
 
     void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
 
@@ -37,6 +41,7 @@ public:
 
 private:
     ProcessPacketFn m_processFn;
+    ShadowPacketFn m_shadowFn;
     std::vector<GifArbiterPacket> m_queue;
 
     static bool isImagePacket(const uint8_t *data, uint32_t sizeBytes);

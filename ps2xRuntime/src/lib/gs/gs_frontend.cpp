@@ -1,4 +1,5 @@
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/ps2_gs_shadow.h"
 #include "ps2_e7.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "ps2_e4.h"
@@ -128,6 +129,7 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 void GS::reset()
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    ps2x_gs_shadow::onReset(); // G44: backend re-inits on next feed
     std::memset(m_ctx, 0, sizeof(m_ctx));
     m_prim = {};
     m_primRegister = {};
@@ -1074,6 +1076,10 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     writeRegisterUnlocked(regAddr, value);
+    // G44: HLE direct writes (W1/W2) only; GIF-decode-internal writes use
+    // writeRegisterUnlocked and must NOT double-feed (paraLLEl decodes the
+    // same GIF stream itself).
+    ps2x_gs_shadow::onWriteRegister(regAddr, value);
 }
 
 void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
