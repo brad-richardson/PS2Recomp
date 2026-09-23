@@ -492,9 +492,17 @@ void onPresentFrame(uint64_t tick,
     if (!enabled())
         return;
     State &s = state();
-    s.seen.fetch_add(1u, std::memory_order_relaxed);
+    const uint64_t seen = s.seen.fetch_add(1u, std::memory_order_relaxed) + 1u;
     if (!cpuRgba || cpuWidth == 0u || cpuHeight == 0u)
         return;
+    // G44 Part-2: persist feed observability every 60 presents even when no
+    // pair is captured (0-pair runs otherwise leave no counter receipts).
+    if (seen % 60u == 0u)
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(s.dir, ec);
+        writeStatsFile(s);
+    }
     {
         // Fast path: eligibility without the backend lock.
         latchConfig();
