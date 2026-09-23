@@ -76,6 +76,7 @@ void latchConfig()
     s.latched = true;
     const char *mode = std::getenv("PS2X_GS_SHADOW");
     s.cfg.wantParallel = parseModeParallel(mode);
+    s.cfg.forceSmode1Ntsc = parseForceSmode1Ntsc(std::getenv("PS2X_GS_SHADOW_FORCE_SMODE1"));
     s.cfg.from = parseU64(std::getenv("PS2X_GS_SHADOW_FROM"), 0u);
     s.cfg.to = parseU64(std::getenv("PS2X_GS_SHADOW_TO"), ~0ull);
     s.cfg.cap = kPairCap;
@@ -240,6 +241,30 @@ void syncPrivLocked(State &s, const GSRegisters *priv)
     G44_SYNC_PRIV(extwrite);
     G44_SYNC_PRIV(bgcolor);
 #undef G44_SYNC_PRIV
+
+    // G44 Part-3 DIAGNOSTIC-ONLY (env-gated, default off): when the game
+    // leaves SMODE1 at 0, the NTSC scanout branch is unreachable
+    // (needs CMOD=NTSC && LC=ANALOG). Give the SHADOW copy the standard
+    // NTSC-480i SMODE1. Values from paraLLEl's own mode table
+    // (gs_renderer.cpp:4468 NTSC branch reads SMODE1.CMOD/LC only;
+    // SMODE2.INT/FFMD path per :4426-4435), corroborated by the G13 dump's
+    // SMODE1=0x40814504 (G29: RC=4/LC=32/T1248=1/CMOD=NTSC, rest 0 —
+    // RC/T1248 are unread on this path, so only CMOD+LC are forced).
+    // SMODE2 is left exactly as the game set it. CPU backend and guest
+    // state are untouched (this struct is never read back into them).
+    if (s.cfg.forceSmode1Ntsc && priv->smode1 == 0u)
+    {
+        dst.smode1.CMOD = 2u; // CMOD_NTSC
+        dst.smode1.LC = 32u;  // LC_ANALOG
+        // Runs under the shadow mutex; one-shot per process is enough.
+        static bool forceLogged = false;
+        if (!forceLogged)
+        {
+            forceLogged = true;
+            std::cerr << "[shadow] FORCE_SMODE1 active: game SMODE1=0 -> shadow CMOD=NTSC LC=ANALOG"
+                      << std::endl;
+        }
+    }
 }
 #endif
 
@@ -360,6 +385,11 @@ void exportSideBySide(const uint8_t *cpu, uint32_t cpuW, uint32_t cpuH,
 bool parseModeParallel(const char *value)
 {
     return value && std::strcmp(value, "parallel") == 0;
+}
+
+bool parseForceSmode1Ntsc(const char *value)
+{
+    return value && std::strcmp(value, "ntsc") == 0;
 }
 
 uint64_t parseU64(const char *value, uint64_t dflt)
@@ -552,7 +582,7 @@ void onPresentFrame(uint64_t tick,
             {
                 pr.smode1.CMOD = 2u;
                 shot = s.iface->vsync(vsync);
-                pr.smode1.CMOD = 0u;
+                pr.smode1.CMOD = cm; // restore pre-try value (FORCE_SMODE1 may own it)
                 const uint32_t n = s.skipLogged.fetch_add(1u, std::memory_order_relaxed);
                 if (n < 4u)
                     std::cerr << "[shadow] tick=" << tick

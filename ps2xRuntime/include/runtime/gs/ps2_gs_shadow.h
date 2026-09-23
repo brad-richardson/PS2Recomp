@@ -33,6 +33,10 @@ constexpr uint64_t kPairCap = 200u;
 struct Config
 {
     bool wantParallel = false;
+    // G44 Part-3 DIAGNOSTIC-ONLY: force the shadow's SMODE1 copy to
+    // NTSC-480i when the game leaves SMODE1 at 0. Shadow copy only; the
+    // CPU backend and guest state are untouched. Default off.
+    bool forceSmode1Ntsc = false;
     uint64_t from = 0u;
     uint64_t to = ~0ull;
     uint64_t cap = kPairCap;
@@ -71,6 +75,7 @@ bool initFailed();
 
 // Pure helpers (unit-tested, no Vulkan, no env latch).
 bool parseModeParallel(const char *value);
+bool parseForceSmode1Ntsc(const char *value);
 uint64_t parseU64(const char *value, uint64_t dflt);
 bool tickEligible(uint64_t tick, uint64_t from, uint64_t to, uint64_t pairsDone, uint64_t cap);
 
