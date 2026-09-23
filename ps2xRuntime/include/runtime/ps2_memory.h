@@ -210,7 +210,9 @@ struct GSRegisters
     std::atomic<uint64_t> vsyncTick;
     uint64_t imr;      // Interrupt mask
     uint64_t busdir;   // Bus direction
-    uint64_t siglblid; // Signal label ID
+    // GB2 Part 7: atomic — worker SIGNAL/LABEL masked-RMW races
+    // game-thread guest stores/loads (same reason as csr above).
+    std::atomic<uint64_t> siglblid; // Signal label ID
 };
 static_assert(sizeof(GSRegisters) == (20u * sizeof(uint64_t)), "GSRegisters layout changed unexpectedly");
 static_assert(alignof(GSRegisters) == alignof(uint64_t), "GSRegisters alignment must remain 64-bit");

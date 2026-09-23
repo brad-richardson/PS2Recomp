@@ -2877,10 +2877,34 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
     return top - 0x10u;
 }
 
+namespace
+{
+    // GB2 Part 7: matches any vaddr in the GS priv range (Part 3 matched
+    // CSR/SIGLBLID offsets only; Part 5/K proved the trigger read is a
+    // non-CSR priv addr, so the drain covers the whole range). All guest
+    // priv loads flow through PS2Runtime::Load* — no fast-path hole
+    // (Ps2IsSpecialAddress covers PS2_GS_PRIV_REG_BASE/SIZE and both the
+    // constant-MMIO translator path and the READ* macros route special
+    // addresses here). (A phys-mask-only check over-matches scratchpad
+    // 0x70001000/0x70001080; the range check excludes it.)
+    inline bool gb2IsGsPrivReg(uint32_t vaddr)
+    {
+        return (vaddr - PS2_GS_PRIV_REG_BASE) < PS2_GS_PRIV_REG_SIZE;
+    }
+}
+
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
     {
+        // Part 7: drain-only (read8 doesn't serve the priv range, so
+        // there is no meaningful value to log).
+        if (gb2IsGsPrivReg(vaddr))
+        {
+            if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                m_gs.drainQueue();
+            return m_memory.read8(vaddr);
+        }
         return m_memory.read8(vaddr);
     }
     catch (const std::exception &)
@@ -2890,36 +2914,16 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
     }
 }
 
-namespace
-{
-    // GB2 Part 3: matches exactly the vaddrs read32/read64 route to CSR /
-    // SIGLBLID (priv range + offsets 0x1000 / 0x1080, cf. gsRegPtr). Any
-    // guest load touching either register (any width/half) is a
-    // completion-visibility point. (A phys-mask-only check over-matches
-    // scratchpad 0x70001000/0x70001080; the range check excludes it.)
-    inline bool gb2IsCsrOrSiglblid(uint32_t vaddr)
-    {
-        if ((vaddr - PS2_GS_PRIV_REG_BASE) >= PS2_GS_PRIV_REG_SIZE)
-        {
-            return false;
-        }
-        const uint32_t off = (vaddr - PS2_GS_PRIV_REG_BASE) & ~0x7u;
-        return off == 0x1000u || off == 0x1080u;
-    }
-}
-
 uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
     {
-        if (gb2IsCsrOrSiglblid(vaddr))
+        // Part 7: drain-only (read16 doesn't serve the priv range).
+        if (gb2IsGsPrivReg(vaddr))
         {
-            if (ps2_pk::csrDrainEnabled() && m_gs.queueEnabled())
+            if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                 m_gs.drainQueue();
-            const uint16_t value = m_memory.read16(vaddr);
-            ps2_pk::noteCsrRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
-                                ctx ? ctx->pc : 0u, vaddr);
-            return value;
+            return m_memory.read16(vaddr);
         }
         return m_memory.read16(vaddr);
     }
@@ -2934,13 +2938,13 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
     {
-        if (gb2IsCsrOrSiglblid(vaddr))
+        if (gb2IsGsPrivReg(vaddr))
         {
-            if (ps2_pk::csrDrainEnabled() && m_gs.queueEnabled())
+            if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                 m_gs.drainQueue();
             const uint32_t value = m_memory.read32(vaddr);
-            ps2_pk::noteCsrRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
-                                ctx ? ctx->pc : 0u, vaddr);
+            ps2_pk::notePrivRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
+                                 ctx ? ctx->pc : 0u, vaddr);
             return value;
         }
         return m_memory.read32(vaddr);
@@ -2956,13 +2960,13 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
     {
-        if (gb2IsCsrOrSiglblid(vaddr))
+        if (gb2IsGsPrivReg(vaddr))
         {
-            if (ps2_pk::csrDrainEnabled() && m_gs.queueEnabled())
+            if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                 m_gs.drainQueue();
             const uint64_t value = m_memory.read64(vaddr);
-            ps2_pk::noteCsrRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
-                                ctx ? ctx->pc : 0u, vaddr);
+            ps2_pk::notePrivRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
+                                 ctx ? ctx->pc : 0u, vaddr);
             return value;
         }
         return m_memory.read64(vaddr);
@@ -2978,16 +2982,12 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
     {
-        if (gb2IsCsrOrSiglblid(vaddr))
+        // Part 7: drain-only (read128 returns zero outside RAM areas).
+        if (gb2IsGsPrivReg(vaddr))
         {
-            if (ps2_pk::csrDrainEnabled() && m_gs.queueEnabled())
+            if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                 m_gs.drainQueue();
-            const __m128i value = m_memory.read128(vaddr);
-            uint64_t lo64 = 0;
-            std::memcpy(&lo64, &value, sizeof(lo64));
-            ps2_pk::noteCsrRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), lo64,
-                                ctx ? ctx->pc : 0u, vaddr);
-            return value;
+            return m_memory.read128(vaddr);
         }
         return m_memory.read128(vaddr);
     }
