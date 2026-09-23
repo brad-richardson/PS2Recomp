@@ -1273,21 +1273,62 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
 
     const float winding = (denom < 0.0f) ? -1.0f : 1.0f;
     const float invAbsDenom = 1.0f / std::fabs(denom);
-    constexpr float kEdgeEpsilon = 1.0e-4f;
+
+    // G46: coverage uses exact edge functions in 1/16-pixel units (vertex XY
+    // is 12.4 fixed point, so this is exact) with a top-left fill rule. A
+    // pixel on an edge shared by two triangles is drawn by exactly one of
+    // them; the old inclusive epsilon test drew it twice, which showed as a
+    // bright seam along the diagonal of blended quads. Sample points and
+    // attribute interpolation are unchanged.
+    struct CoverageEdge
+    {
+        int64_t ax, ay, dx, dy;
+        bool inclusive;
+    };
+    const int64_t ex[3] = {std::llround(fx0 * 16.0f), std::llround(fx1 * 16.0f), std::llround(fx2 * 16.0f)};
+    const int64_t ey[3] = {std::llround(fy0 * 16.0f), std::llround(fy1 * 16.0f), std::llround(fy2 * 16.0f)};
+    const int64_t area16 = (ex[1] - ex[0]) * (ey[2] - ey[0]) - (ey[1] - ey[0]) * (ex[2] - ex[0]);
+    const int order[3] = {0, (area16 < 0) ? 2 : 1, (area16 < 0) ? 1 : 2};
+    CoverageEdge edges[3];
+    for (int e = 0; e < 3; ++e)
+    {
+        const int a = order[e];
+        const int b = order[(e + 1) % 3];
+        CoverageEdge &edge = edges[e];
+        edge.ax = ex[a];
+        edge.ay = ey[a];
+        edge.dx = ex[b] - ex[a];
+        edge.dy = ey[b] - ey[a];
+        // Interior is on the positive side; left edges run upward, top
+        // edges run rightward along a horizontal line.
+        edge.inclusive = edge.dy < 0 || (edge.dy == 0 && edge.dx > 0);
+    }
 
     for (int y = minY; y <= maxY; ++y)
     {
         float py = static_cast<float>(y) + 0.5f;
+        const int64_t py16 = static_cast<int64_t>(y) * 16 + 8;
         for (int x = minX; x <= maxX; ++x)
         {
             float px = static_cast<float>(x) + 0.5f;
+            const int64_t px16 = static_cast<int64_t>(x) * 16 + 8;
+
+            bool covered = true;
+            for (const CoverageEdge &edge : edges)
+            {
+                const int64_t side = edge.dx * (py16 - edge.ay) - edge.dy * (px16 - edge.ax);
+                if (side < 0 || (side == 0 && !edge.inclusive))
+                {
+                    covered = false;
+                    break;
+                }
+            }
+            if (!covered)
+                continue;
 
             float w0 = (((fy1 - fy2) * (px - fx2) + (fx2 - fx1) * (py - fy2)) * winding) * invAbsDenom;
             float w1 = (((fy2 - fy0) * (px - fx2) + (fx0 - fx2) * (py - fy2)) * winding) * invAbsDenom;
             float w2 = 1.0f - w0 - w1;
-
-            if (w0 < -kEdgeEpsilon || w1 < -kEdgeEpsilon || w2 < -kEdgeEpsilon)
-                continue;
 
             double z = v0.z * w0 + v1.z * w1 + v2.z * w2;
 

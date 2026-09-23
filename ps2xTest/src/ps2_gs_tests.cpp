@@ -3822,6 +3822,58 @@ void register_ps2_gs_tests()
                      "triangle fan quad should light at least one framebuffer row");
         });
 
+        tc.Run("GS triangles sharing an edge cover each pixel once (G46 fill rule)", [](TestCase &t)
+        {
+            // G46: a quad split into two alpha-additive triangles. Pixels whose
+            // centers lie exactly on the shared diagonal must be drawn by one
+            // triangle only, otherwise blended quads show a bright seam.
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            gs.writeRegister(GS_REG_FRAME_1, (1ull << 16)); // FBW=1, PSMCT32, FBP=0
+            gs.writeRegister(GS_REG_ZBUF_1, (1ull << 32));  // ZMSK
+            gs.writeRegister(GS_REG_SCISSOR_1, (63ull << 16) | (63ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            // Cv = (Cs - 0) * FIX(0x80 = 1.0) + Cd: each coverage adds Cs.
+            gs.writeRegister(GS_REG_ALPHA_1, (0x80ull << 32) | (1ull << 6) | (2ull << 4) | (2ull << 2) | 0ull);
+            gs.writeRegister(GS_REG_RGBAQ, 0x10ull | (0x80ull << 24) | (0x3F800000ull << 32));
+            auto xyz = [](uint32_t x, uint32_t y) -> uint64_t
+            {
+                return static_cast<uint64_t>(x * 16u) | (static_cast<uint64_t>(y * 16u) << 16);
+            };
+            const uint64_t prim = static_cast<uint64_t>(GS_PRIM_TRIANGLE) | (1ull << 6); // ABE
+            gs.writeRegister(GS_REG_PRIM, prim);
+            gs.writeRegister(GS_REG_XYZ2, xyz(4u, 4u));
+            gs.writeRegister(GS_REG_XYZ2, xyz(28u, 4u));
+            gs.writeRegister(GS_REG_XYZ2, xyz(4u, 28u));
+            gs.writeRegister(GS_REG_PRIM, prim);
+            gs.writeRegister(GS_REG_XYZ2, xyz(28u, 4u));
+            gs.writeRegister(GS_REG_XYZ2, xyz(28u, 28u));
+            gs.writeRegister(GS_REG_XYZ2, xyz(4u, 28u));
+
+            uint32_t once = 0u, twice = 0u, holes = 0u;
+            for (uint32_t y = 4u; y < 28u; ++y)
+            {
+                for (uint32_t x = 4u; x < 28u; ++x)
+                {
+                    const uint32_t r = GSMem::ReadCT32(vram.data(), 0u, 1u, x, y) & 0xFFu;
+                    if (r == 0x10u)
+                        ++once;
+                    else if (r == 0x20u)
+                        ++twice;
+                    else
+                        ++holes;
+                }
+            }
+            t.Equals(twice, 0u, "no pixel inside the quad is blended by both triangles");
+            t.Equals(holes, 0u, "every pixel inside the quad is covered");
+            t.Equals(once, 24u * 24u, "the quad's 24x24 pixels are each drawn exactly once");
+            const uint32_t outside = GSMem::ReadCT32(vram.data(), 0u, 1u, 28u, 28u) & 0xFFu;
+            t.Equals(outside, 0u, "bottom-right corner pixel (28,28) stays outside the quad");
+        });
+
         tc.Run("sceGsExecLoadImage and sceGsExecStoreImage roundtrip and free guest packets", [](TestCase &t)
         {
             PS2Runtime runtime;
