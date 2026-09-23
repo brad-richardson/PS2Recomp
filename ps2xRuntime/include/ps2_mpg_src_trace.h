@@ -1164,6 +1164,231 @@ inline void noteUploadloadCtx(const PS2Runtime *runtime, const R5900Context *ctx
     noteUploadload(vsync, addr, width, valueLo, valueHi, pc, ra, fn, ctx);
 }
 
+// E40 Part-6: render-DMA-thread state sequence (mirrors T51's PCSX2
+// format, one file, execution order). Over the vsync window:
+//  1. every guest store (WRITE32/64/128 lanes; 8/16-bit stores are not
+//     tapped) to the thread-struct fields 0x6214E0-0x62151F:
+//       st vsync=<n> addr=0x<> value=0x<> pc=0x<> ra=0x<> fn=<> intc=<0|1>
+//     (intc=1 while the executor runs an Interrupt-kind invocation).
+//  2. SignalSema/iSignalSema/WaitSema/PollSema calls whose sema id
+//     equals the live RAM word at 0x62150C (+0x5ACC) or 0x621508:
+//       sema vsync=<n> pc=0x<> ra=0x<> call=<name> id=<n>
+//  3. every INTC/DMAC handler dispatch the runtime performs:
+//       irq vsync=<n> cause=0x<> ch=<n> handler=0x<>
+//  4. D1 kicks (existing dmareg lines).
+// No sub-caps (the window is 5 vsyncs); the global file cap bounds.
+inline constexpr uint32_t kStBase = 0x006214E0u;
+inline constexpr uint32_t kStEnd = 0x00621520u; // exclusive
+inline constexpr uint32_t kSemaIdAddrA = 0x0062150Cu; // +0x5ACC
+inline constexpr uint32_t kSemaIdAddrB = 0x00621508u;
+
+inline bool isStWatched(uint32_t addr, uint32_t size)
+{
+    return addr < kStEnd && kStBase < addr + size;
+}
+
+// Gates: enabled only (window-checked inside; no sub-caps).
+inline bool stArmed()
+{
+    return enabled();
+}
+inline bool semaArmed()
+{
+    return enabled();
+}
+inline bool irqArmed()
+{
+    return enabled();
+}
+
+inline void noteSt(uint64_t vsync, uint32_t addr, uint32_t width,
+                   uint64_t valueLo, uint64_t valueHi,
+                   uint32_t pc, uint32_t ra, const char *fn, uint32_t intc)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    uint32_t lanes = 1u;
+    if (width >= 16u)
+        lanes = 4u;
+    else if (width >= 8u)
+        lanes = 2u;
+    for (uint32_t i = 0u; i < lanes; ++i)
+    {
+        const uint32_t laneAddr = addr + i * 4u;
+        uint32_t word;
+        if (i == 0u)
+            word = static_cast<uint32_t>(valueLo);
+        else if (i == 1u)
+            word = static_cast<uint32_t>(valueLo >> 32u);
+        else if (i == 2u)
+            word = static_cast<uint32_t>(valueHi);
+        else
+            word = static_cast<uint32_t>(valueHi >> 32u);
+        if (!isStWatched(laneAddr, 4u))
+        {
+            continue;
+        }
+        char line[256];
+        const int w = std::snprintf(line, sizeof(line),
+                                    "st vsync=%llu addr=0x%08x value=0x%08x pc=0x%08x ra=0x%08x fn=%s intc=%u",
+                                    static_cast<unsigned long long>(vsync), laneAddr, word,
+                                    pc, ra, fn ? fn : "?", intc);
+        if (w > 0)
+        {
+            detail::emitLineLocked(s, line);
+            if (s.capped)
+            {
+                return;
+            }
+        }
+    }
+}
+
+// Mirrored executor interrupt state (the trace header cannot see the
+// full scheduler type; EeScheduler.cpp mirrors m_insideInterrupt here
+// at its assignment sites, same pattern as the ps2_e3 slice hook).
+inline std::atomic<uint32_t> &sliceIrq()
+{
+    static std::atomic<uint32_t> n{0u};
+    return n;
+}
+
+inline void noteSliceIrq(bool inside)
+{
+    sliceIrq().store(inside ? 1u : 0u, std::memory_order_relaxed);
+}
+
+// Macro glue for the WRITE32/64/128 taps.
+inline void noteStCtx(const PS2Runtime *runtime, const R5900Context *ctx,
+                      uint32_t addr, uint32_t width,
+                      uint64_t valueLo, uint64_t valueHi, const char *fn)
+{
+    uint64_t vsync = 0u;
+    if (runtime != nullptr)
+    {
+        vsync = runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed);
+    }
+    const uint32_t intc = sliceIrq().load(std::memory_order_relaxed) != 0u ? 1u : 0u;
+    const uint32_t pc = (ctx != nullptr) ? ctx->pc : 0u;
+    const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+    noteSt(vsync, addr, width, valueLo, valueHi, pc, ra, fn, intc);
+}
+
+// Masked RAM word read for the sema-id filter (plain RAM only).
+inline uint32_t readSemaIdWord(const uint8_t *rdram, uint32_t addr, bool &ok)
+{
+    ok = false;
+    if (rdram == nullptr)
+    {
+        return 0u;
+    }
+    const uint32_t offset = addr & PS2_RAM_MASK;
+    if (offset > PS2_RAM_SIZE - sizeof(uint32_t))
+    {
+        return 0u;
+    }
+    uint32_t word = 0u;
+    std::memcpy(&word, rdram + offset, sizeof(word));
+    ok = true;
+    return word;
+}
+
+inline void noteSema(uint64_t vsync, uint32_t pc, uint32_t ra,
+                     const char *call, uint32_t id)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    char line[128];
+    const int w = std::snprintf(line, sizeof(line),
+                                "sema vsync=%llu pc=0x%08x ra=0x%08x call=%s id=%u",
+                                static_cast<unsigned long long>(vsync), pc, ra,
+                                call ? call : "?", id);
+    if (w > 0)
+    {
+        detail::emitLineLocked(s, line);
+    }
+}
+
+// Syscall-dispatch glue: logs when the sema id (a0) equals either
+// watched id word. Called from the Dispatcher sema cases.
+inline void noteSemaDispatch(const uint8_t *rdram, const R5900Context *ctx,
+                             PS2Runtime *runtime, const char *call)
+{
+    if (!semaArmed())
+    {
+        return;
+    }
+    const uint32_t id = (ctx != nullptr) ? getRegU32(ctx, 4) : 0u;
+    bool okA = false, okB = false;
+    const uint32_t watchA = readSemaIdWord(rdram, kSemaIdAddrA, okA);
+    const uint32_t watchB = readSemaIdWord(rdram, kSemaIdAddrB, okB);
+    if (!((okA && id == watchA) || (okB && id == watchB)))
+    {
+        return;
+    }
+    uint64_t vsync = 0u;
+    if (runtime != nullptr)
+    {
+        vsync = runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed);
+    }
+    const uint32_t pc = (ctx != nullptr) ? ctx->pc : 0u;
+    const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+    noteSema(vsync, pc, ra, call, id);
+}
+
+inline void noteIrq(uint64_t vsync, bool dmac, uint32_t cause, uint32_t handler)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    // ch is the DMA channel for DMAC dispatch (cause == channel there);
+    // INTC lines carry no channel (no INTC dispatch exists today).
+    const uint32_t ch = dmac ? cause : 0xFFFFFFFFu;
+    char line[128];
+    const int w = std::snprintf(line, sizeof(line),
+                                "irq vsync=%llu cause=0x%x ch=%u handler=0x%08x",
+                                static_cast<unsigned long long>(vsync), cause, ch, handler);
+    if (w > 0)
+    {
+        detail::emitLineLocked(s, line);
+    }
+}
+
 // E40 Part-4: chain-tag dump. The first kMaxCtagKicks in-window VIF1
 // chain walks log every tag they walk:
 //   ctag tag_at=0x<EE addr of tag> id=<0-7> qwc=<n> addr=0x<ref addr>

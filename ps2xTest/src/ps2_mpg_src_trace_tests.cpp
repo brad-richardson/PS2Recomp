@@ -75,6 +75,13 @@ namespace
         return READ32(addr);
     }
 
+    // WRITE-macro probe for the Part-6 st tap (same shape, struct range).
+    uint32_t srcStProbe32(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr, uint32_t value)
+    {
+        WRITE32(addr, value);
+        return READ32(addr);
+    }
+
     void srcWriteMpgPayload(uint8_t *rdram, uint32_t payload, uint16_t imm)
     {
         const uint32_t mpgCmd = srcMakeVifCmd(0x4Au, 2u, imm);
@@ -945,6 +952,173 @@ void register_ps2_mpg_src_trace_tests()
 
             ps2_mpg_src_trace::clearForTest();
             t.Equals(countLines(readWholeFile(tmp)), static_cast<size_t>(64u), "watch must stop at 64 lines");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("st line format range edges window", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-st.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str(), 1300u, 1304u),
+                     "test config should install");
+            t.IsTrue(ps2_mpg_src_trace::stArmed(), "watch must be armed after configure");
+            t.IsTrue(ps2_mpg_src_trace::isStWatched(0x006214E0u, 4u), "range head must match");
+            t.IsTrue(ps2_mpg_src_trace::isStWatched(0x0062151Cu, 4u), "last word must match");
+            t.IsTrue(!ps2_mpg_src_trace::isStWatched(0x00621520u, 4u), "range end is exclusive");
+            t.IsTrue(!ps2_mpg_src_trace::isStWatched(0x006214DCu, 4u), "word before head must not match");
+            t.IsTrue(!ps2_mpg_src_trace::isStWatched(0x00100000u, 4u), "plain RAM must not match");
+
+            // Out-of-window: silent.
+            ps2_mpg_src_trace::noteSt(1299u, 0x006214ECu, 4u, 5u, 0u,
+                                      0x00382760u, 0x00382938u, "sub_x", 0u);
+            ps2_mpg_src_trace::noteSt(1305u, 0x006214ECu, 4u, 5u, 0u,
+                                      0x00382760u, 0x00382938u, "sub_x", 0u);
+            // In-window state-word store, intc clear and set.
+            ps2_mpg_src_trace::noteSt(1302u, 0x006214ECu, 4u, 5u, 0u,
+                                      0x00382760u, 0x00382938u, "sub_dma", 0u);
+            // 64-bit store straddling the exclusive end: only lane 0 logs.
+            const uint64_t wide = (static_cast<uint64_t>(0x22u) << 32u) | 0x11u;
+            ps2_mpg_src_trace::noteSt(1302u, 0x0062151Cu, 8u, wide, 0u,
+                                      0x00382760u, 0x00382938u, "sub_dma", 1u);
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(2u), "window and range must filter");
+            t.IsTrue(text.find("st vsync=1302 addr=0x006214ec value=0x00000005 "
+                               "pc=0x00382760 ra=0x00382938 fn=sub_dma intc=0") != std::string::npos,
+                     "st must carry addr value pc ra fn intc");
+            t.IsTrue(text.find("addr=0x0062151c value=0x00000011") != std::string::npos &&
+                     text.find("intc=1") != std::string::npos,
+                     "straddling lane must log with intc=1");
+            t.IsTrue(text.find("0x00000022") == std::string::npos, "lane past the end must stay silent");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("WRITE32 macro tap logs st with host fn", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-stmacro.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+
+            R5900Context ctxStruct{};
+            R5900Context *ctx = &ctxStruct;
+            ctxStruct.pc = 0x00382920u;
+            srcSetReg(ctxStruct, 31, 0x003827E8u);
+            PS2Runtime *runtime = nullptr;
+            t.Equals(srcStProbe32(rdram, ctx, runtime, 0x006214ECu, 1u), 1u,
+                     "macro probe must write through to struct RAM");
+            t.Equals(srcStProbe32(rdram, ctx, runtime, 0x00621520u, 1u), 1u,
+                     "out-of-range store must still write through");
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(1u), "only the in-range store must log");
+            t.IsTrue(text.find("st vsync=0 addr=0x006214ec value=0x00000001 "
+                               "pc=0x00382920 ra=0x003827e8 fn=srcStProbe32 intc=0") != std::string::npos,
+                     "macro tap must log the struct store with host fn");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("slice mirror drives the st intc flag", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-stintc.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+
+            R5900Context ctxStruct{};
+            R5900Context *ctx = &ctxStruct;
+            ctxStruct.pc = 0x00123400u;
+            PS2Runtime *runtime = nullptr;
+            ps2_mpg_src_trace::noteSliceIrq(true);
+            t.Equals(srcStProbe32(rdram, ctx, runtime, 0x006214ECu, 2u), 2u,
+                     "probe must write through while mirrored in-interrupt");
+            ps2_mpg_src_trace::noteSliceIrq(false);
+            t.Equals(srcStProbe32(rdram, ctx, runtime, 0x006214ECu, 3u), 3u,
+                     "probe must write through after mirror clears");
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(2u), "both mirrored stores must log");
+            t.IsTrue(text.find("value=0x00000002") != std::string::npos &&
+                     text.find("intc=1") != std::string::npos,
+                     "mirrored in-interrupt store must log intc=1");
+            t.IsTrue(text.find("value=0x00000003") != std::string::npos &&
+                     text.find("intc=0") != std::string::npos,
+                     "cleared store must log intc=0");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("sema dispatch filters on watched ids", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-sema.txt");
+            std::remove(tmp.c_str());
+            // Default window: the null-runtime probe reports vsync=0, and the
+            // window mechanics are covered by the st/irq tests.
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()),
+                     "test config should install");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+            const uint32_t idA = 7u;
+            const uint32_t idB = 9u;
+            std::memcpy(rdram + 0x0062150Cu, &idA, sizeof(idA));
+            std::memcpy(rdram + 0x00621508u, &idB, sizeof(idB));
+
+            R5900Context ctxStruct{};
+            ctxStruct.pc = 0x003827E0u;
+            srcSetReg(ctxStruct, 31, 0x00382760u);
+            srcSetReg(ctxStruct, 4, idA);
+            PS2Runtime *runtime = nullptr;
+            ps2_mpg_src_trace::noteSemaDispatch(rdram, &ctxStruct, runtime, "WaitSema");
+            srcSetReg(ctxStruct, 4, 5u);
+            ps2_mpg_src_trace::noteSemaDispatch(rdram, &ctxStruct, runtime, "SignalSema");
+            srcSetReg(ctxStruct, 4, idB);
+            ps2_mpg_src_trace::noteSemaDispatch(rdram, &ctxStruct, runtime, "iSignalSema");
+            ps2_mpg_src_trace::noteSemaDispatch(nullptr, &ctxStruct, runtime, "PollSema");
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(2u), "only watched-id calls must log");
+            t.IsTrue(text.find("sema vsync=0 pc=0x003827e0 ra=0x00382760 call=WaitSema id=7") !=
+                         std::string::npos,
+                     "matching WaitSema must carry call and id");
+            t.IsTrue(text.find("call=iSignalSema id=9") != std::string::npos,
+                     "matching iSignalSema must log");
+            t.IsTrue(text.find("call=SignalSema ") == std::string::npos,
+                     "non-matching SignalSema must stay silent");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("irq line format and window", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-irq.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str(), 1300u, 1304u),
+                     "test config should install");
+            t.IsTrue(ps2_mpg_src_trace::irqArmed(), "watch must be armed after configure");
+
+            ps2_mpg_src_trace::noteIrq(1299u, true, 1u, 0x00123400u);
+            ps2_mpg_src_trace::noteIrq(1302u, true, 1u, 0x00123400u);
+            ps2_mpg_src_trace::noteIrq(1305u, true, 1u, 0x00123400u);
+            ps2_mpg_src_trace::noteIrq(1303u, false, 9u, 0x00123800u);
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(2u), "window must filter irq lines");
+            t.IsTrue(text.find("irq vsync=1302 cause=0x1 ch=1 handler=0x00123400") != std::string::npos,
+                     "dmac irq must carry cause ch handler");
+            t.IsTrue(text.find("irq vsync=1303 cause=0x9 ch=4294967295 handler=0x00123800") !=
+                         std::string::npos,
+                     "intc irq carries no channel");
             std::remove(tmp.c_str());
         });
 

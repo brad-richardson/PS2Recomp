@@ -329,6 +329,10 @@ public:
     void dispatchIrq(bool dmac, uint32_t cause);
     void setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress);
     [[nodiscard]] uint64_t currentVSyncTick() const noexcept;
+    // E40 Part-6: true while the executor runs a slice of an
+    // Interrupt-kind invocation (guest IRQ handler). Read on the
+    // executor thread only, like the existing internal uses.
+    [[nodiscard]] bool insideInterrupt() const noexcept { return m_insideInterrupt; }
     uint32_t setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp);
 
     [[noreturn]] void waitVSync(uint64_t afterTick, int fixedResult = -1, std::function<void(R5900Context &)> completion = {});
