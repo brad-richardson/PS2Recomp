@@ -44,7 +44,7 @@ namespace ps2recomp
             case VU0_CR_CLIP:
                 return fmt::format("SET_GPR_U32(ctx, {}, ctx->vu0_clip_flags & 0x00FFFFFFu);", rt);
             case VU0_CR_R:
-                return fmt::format("SET_GPR_U32(ctx, {}, static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_castps_si128(ctx->vu0_r))));", rt);
+                return fmt::format("SET_GPR_U32(ctx, {}, Ps2VuR(ctx) & 0x007FFFFFu);", rt); // PCSX2 CFC2 REG_R
             case VU0_CR_I:
                 return fmt::format("{{ uint32_t bits; std::memcpy(&bits, &ctx->vu0_i, sizeof(bits)); SET_GPR_U32(ctx, {}, bits); }}", rt);
             case VU0_CR_Q:
@@ -87,7 +87,7 @@ namespace ps2recomp
             case VU0_CR_CLIP:
                 return fmt::format("ctx->vu0_clip_flags = GPR_U32(ctx, {}) & 0x00FFFFFFu;", rt);
             case VU0_CR_R:
-                return fmt::format("ctx->vu0_r = _mm_castsi128_ps(_mm_set1_epi32(static_cast<int32_t>(GPR_U32(ctx, {}))));", rt);
+                return fmt::format("Ps2VuSetR(ctx, GPR_U32(ctx, {}));", rt); // PCSX2 CTC2 REG_R: 23 bits | 0x3F800000
             case VU0_CR_I:
                 return fmt::format("{{ uint32_t tmp = GPR_U32(ctx, {}); std::memcpy(&ctx->vu0_i, &tmp, sizeof(tmp)); }}", rt);
             case VU0_CR_Q:
@@ -97,7 +97,8 @@ namespace ps2recomp
             case VU0_CR_FBRST:
                 return fmt::format("ctx->vu0_fbrst = GPR_U32(ctx, {}) & 0x00000C0Cu;", rt);
             case VU0_CR_CMSAR1:
-                return fmt::format("ctx->vu0_cmsar1 = GPR_U32(ctx, {});", rt);
+                // PCSX2 CTC2 REG_CMSAR1: vu1ExecMicro(value) starts VU1.
+                return fmt::format("{{ ctx->vu0_cmsar1 = GPR_U32(ctx, {}); runtime->vu1StartMicroProgramFromEe(ctx, ctx->vu0_cmsar1); }}", rt);
             default:
                 return fmt::format("// Unimplemented CTC2 VU control register: {}", rd);
             }
@@ -263,22 +264,9 @@ namespace ps2recomp
                 }
                 case VU0_S2_VCLIPw:
                 {
-                    uint8_t field = inst.function & 0x3;
-                    std::string shuffle_pattern = fmt::format("_MM_SHUFFLE({},{},{},{})", field, field, field, field);
-
-                    return fmt::format(
-                        "{{ __m128 fs = ctx->vu0_vf[{}]; "
-                        "__m128 ft = _mm_shuffle_ps(ctx->vu0_vf[{}], ctx->vu0_vf[{}], {}); "
-                        "__m128 neg_ft = _mm_xor_ps(ft, _mm_castsi128_ps(_mm_set1_epi32(0x80000000))); "
-                        "__m128 gt = _mm_cmpgt_ps(fs, ft); "
-                        "__m128 lt = _mm_cmplt_ps(fs, neg_ft); "
-                        "uint32_t gt_mask = (uint32_t)_mm_movemask_ps(gt); "
-                        "uint32_t lt_mask = (uint32_t)_mm_movemask_ps(lt); "
-                        "uint32_t flags = ((lt_mask & 0x1) << 0) | ((gt_mask & 0x1) << 1) | "
-                        "((lt_mask & 0x2) << 1) | ((gt_mask & 0x2) << 2) | "
-                        "((lt_mask & 0x4) << 2) | ((gt_mask & 0x4) << 3); "
-                        "ctx->vu0_clip_flags = ((ctx->vu0_clip_flags << 6) | (flags & 0x3F)) & 0xFFFFFF; }}",
-                        inst.rd, inst.rt, inst.rt, shuffle_pattern);
+                    // PCSX2 _vuCLIP: +x,-x,+y,-y,+z,-z against |ft.w|.
+                    return fmt::format("ctx->vu0_clip_flags = Ps2VuClip(ctx->vu0_clip_flags, ctx->vu0_vf[{}], Ps2VuLane(ctx->vu0_vf[{}], 3));",
+                                       inst.rd, inst.rt);
                 }
                 case VU0_S2_VNOP:
                     return fmt::format("// NOP operation, no action needed for VU0");

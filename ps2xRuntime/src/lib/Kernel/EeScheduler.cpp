@@ -1,4 +1,5 @@
 #include "runtime/ee_scheduler.h"
+#include "ps2_fpmode.h"
 #include "ps2_e41_trace.h"
 #include "ps2_mpg_src_trace.h"
 #include "ps2_e3.h"
@@ -420,6 +421,9 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
 void EeScheduler::run()
 {
     assertExecutor();
+    // E53: guest EE code runs in PCSX2's FP mode (round toward zero + FZ)
+    // unless PS2X_EE_FPMODE=ieee; restored when run() returns.
+    ps2_fpmode::ScopedEeMode eeFpMode;
     m_running.store(true, std::memory_order_release);
     // T1 park snapshot: install the SIGTERM handler once when enabled.
     ps2_park::installParkTermHandler();

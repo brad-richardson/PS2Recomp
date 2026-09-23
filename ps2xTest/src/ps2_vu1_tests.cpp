@@ -809,9 +809,11 @@ void register_ps2_vu1_tests()
             };
             constexpr EfuCase cases[] = {
                 {0x70u, 11u}, {0x71u, 18u}, {0x72u, 18u}, {0x73u, 24u},
-                {0x74u, 54u}, {0x75u, 54u}, {0x76u, 12u}, {0x77u, 18u},
-                {0x78u, 12u}, {0x79u, 29u}, {0x7Au, 12u}, {0x7Cu, 54u},
-                {0x7Du, 44u}};
+                {0x74u, 54u}, {0x75u, 54u}, {0x76u, 12u},
+                // E53: PCSX2 LowerOP_T3: 0x78 ESQRT, 0x79 ERSQRT, 0x7A ERCPR,
+                // 0x7C ESIN, 0x7D EATAN, 0x7E EEXP (0x77 is undefined).
+                {0x78u, 12u}, {0x79u, 18u}, {0x7Au, 12u}, {0x7Cu, 29u},
+                {0x7Du, 54u}, {0x7Eu, 44u}};
 
             for (const EfuCase &efu : cases)
             {
@@ -839,6 +841,44 @@ void register_ps2_vu1_tests()
                          "WAITP should count every EFU stall as an elapsed VU cycle");
                 t.IsTrue(std::isfinite(vu1.state().p),
                          "architected EFU opcode should commit a finite P result");
+            }
+        });
+
+        tc.Run("EFU decode follows PCSX2 LowerOP_T3: 0x8000afbd is ERSQRT (E53)", [](TestCase &t)
+        {
+            // 0x8000afbd = ERSQRT P, vf21x (funct2 0x79), from SSX 3's hot vertex
+            // loop. With vf21.x = 4, P = 1/sqrt(4) = 0.5 (ESIN would give ~-0.76).
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            writeVuInstructionPair(fx.code, 0u, 0x8000afbdu, kVuUpperNop);
+            writeVuInstructionPair(fx.code, 8u, makeVuLowerSpecial(0x7Bu, 0u), kVuUpperNop); // WAITP
+            VU1Interpreter vu1;
+            vu1.state().vf[21][0] = 4.0f;
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                        0u, 0u, 0u, 19u);
+            t.Equals(vu1.state().p, 0.5f, "0x8000afbd with vf21.x = 4: P = 0.5, got " + std::to_string(vu1.state().p));
+
+            struct Named
+            {
+                uint8_t op;
+                float in;
+                float want;
+                uint32_t latency;
+            };
+            // ESQRT 4 = 2, ERCPR 4 = 0.25, EEXP 0 = 1 (1/(1+0)^4).
+            constexpr Named named[] = {{0x78u, 4.0f, 2.0f, 12u}, {0x7Au, 4.0f, 0.25f, 12u}, {0x7Eu, 0.0f, 1.0f, 44u}};
+            for (const Named &n : named)
+            {
+                std::memset(fx.code, 0, PS2_VU1_CODE_SIZE);
+                writeVuInstructionPair(fx.code, 0u, makeVuLowerSpecial(n.op, 1u, 0u, 0u, 0u), kVuUpperNop);
+                writeVuInstructionPair(fx.code, 8u, makeVuLowerSpecial(0x7Bu, 0u), kVuUpperNop);
+                VU1Interpreter v;
+                v.state().vf[1][0] = n.in;
+                v.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                          0u, 0u, 0u, n.latency + 1u);
+                t.IsTrue(std::fabs(v.state().p - n.want) < 1e-5f,
+                         "EFU op " + std::to_string(n.op) + ": want " + std::to_string(n.want) + ", got " + std::to_string(v.state().p));
             }
         });
 

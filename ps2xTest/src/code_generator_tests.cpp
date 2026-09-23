@@ -1878,33 +1878,29 @@ void register_code_generator_tests()
                      "jalr fallback should not dispatch directly to tail-jump delay slot");
         });
 
-        tc.Run("VU random helpers emit line comments on separate lines", [](TestCase &t) {
+        tc.Run("VU random helpers follow PCSX2's R register (E53)", [](TestCase &t) {
             CodeGenerator gen({}, {});
 
             Instruction inst{};
             inst.rd = 7;
+            inst.rt = 3;
             inst.vectorInfo.fsf = 2;
+            inst.vectorInfo.vectorField = 0x8;
 
             std::string vrnext = gen.translateVU_VRNEXT(inst);
-            printGeneratedCode("VU random helpers emit line comments on separate lines - VRNEXT", vrnext);
-            t.IsTrue(vrnext.find("// Simple LFSR-based random number generation (PS2-like behavior)\n"
-                                 "    uint32_t feedback") != std::string::npos,
-                     "VRNEXT should place the generated line comment on its own line");
+            printGeneratedCode("VU random helpers - VRNEXT", vrnext);
+            t.IsTrue(vrnext.find("Ps2VuAdvanceR(ctx)") != std::string::npos && vrnext.find("ctx->vu0_vf[3]") != std::string::npos,
+                     "VRNEXT advances the LFSR and writes ft");
 
             std::string vrinit = gen.translateVU_VRINIT(inst);
-            printGeneratedCode("VU random helpers emit line comments on separate lines - VRINIT", vrinit);
-            t.IsTrue(vrinit.find("// PS2 uses a specific LFSR initialization pattern\n"
-                                 "    if (seed == 0) seed = 1;") != std::string::npos,
-                     "VRINIT should place the generated line comment on its own line");
+            printGeneratedCode("VU random helpers - VRINIT", vrinit);
+            t.IsTrue(vrinit.find("Ps2VuSetR(ctx, Ps2VuLane(ctx->vu0_vf[7], 2))") != std::string::npos,
+                     "VRINIT seeds R from fs.fsf");
 
             std::string vrxor = gen.translateVU_VRXOR(inst);
-            printGeneratedCode("VU random helpers emit line comments on separate lines - VRXOR", vrxor);
-            t.IsTrue(vrxor.find("// XOR the current random value with the data from the VU vector register\n"
-                                "    __m128i xored") != std::string::npos,
-                     "VRXOR should keep the XOR comment on its own line");
-            t.IsTrue(vrxor.find("// Apply a simple mixing function similar to PS2's LFSR\n"
-                                "    __m128i mixed") != std::string::npos,
-                     "VRXOR should keep the LFSR comment on its own line");
+            printGeneratedCode("VU random helpers - VRXOR", vrxor);
+            t.IsTrue(vrxor.find("Ps2VuSetR(ctx, Ps2VuR(ctx) ^ Ps2VuLane(ctx->vu0_vf[7], 2))") != std::string::npos,
+                     "VRXOR xors fs.fsf into R");
         });
 
         tc.Run("resolveStubTarget allows leading underscore alias", [](TestCase &t) {

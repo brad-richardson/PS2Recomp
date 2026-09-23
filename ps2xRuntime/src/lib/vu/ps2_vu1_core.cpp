@@ -1457,12 +1457,14 @@ VU1Interpreter::InstructionUsage VU1Interpreter::decodeLowerUsage(uint32_t lower
     case 0x74:
     case 0x75:
     case 0x76:
-    case 0x77:
     case 0x78:
     case 0x79:
     case 0x7A:
     case 0x7C:
     case 0x7D:
+    case 0x7E:
+        // E53: EFU slots per PCSX2 LowerOP_T3 (0x78 ESQRT, 0x79 ERSQRT, 0x7A ERCPR,
+        // 0x7C ESIN, 0x7D EATAN, 0x7E EEXP; 0x77 is undefined).
         if (m_unit == Unit::VU0)
         {
             usage.reserved = true;
@@ -1476,7 +1478,7 @@ VU1Interpreter::InstructionUsage VU1Interpreter::decodeLowerUsage(uint32_t lower
             break;
         case 0x71:
         case 0x72:
-        case 0x77:
+        case 0x79: // ERSQRT
             usage.latency = 18u;
             break;
         case 0x73:
@@ -1484,18 +1486,18 @@ VU1Interpreter::InstructionUsage VU1Interpreter::decodeLowerUsage(uint32_t lower
             break;
         case 0x74:
         case 0x75:
-        case 0x7C:
+        case 0x7D: // EATAN
             usage.latency = 54u;
             break;
         case 0x76:
-        case 0x78:
-        case 0x7A:
+        case 0x78: // ESQRT
+        case 0x7A: // ERCPR
             usage.latency = 12u;
             break;
-        case 0x79:
+        case 0x7C: // ESIN
             usage.latency = 29u;
             break;
-        case 0x7D:
+        case 0x7E: // EEXP
             usage.latency = 44u;
             break;
         default:
@@ -2020,13 +2022,13 @@ namespace
         case 0x74: return "EATANxy";
         case 0x75: return "EATANxz";
         case 0x76: return "ESUM";
-        case 0x77: return "ERSQRT";
         case 0x78: return "ESQRT";
-        case 0x79: return "ESIN";
+        case 0x79: return "ERSQRT";
         case 0x7A: return "ERCPR";
         case 0x7B: return "WAITP";
-        case 0x7C: return "EATAN";
-        case 0x7D: return "EEXP";
+        case 0x7C: return "ESIN";
+        case 0x7D: return "EATAN";
+        case 0x7E: return "EEXP";
         default: return nullptr;
         }
     }

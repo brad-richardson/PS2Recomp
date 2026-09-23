@@ -1,4 +1,5 @@
 #include "runtime/gs/gs_frontend.h"
+#include "ps2_fpmode.h"
 #include "ps2_e7.h"
 #include "ps2_gfx_stats.h"
 #include "runtime/gs/gs_cpu_backend.h"
@@ -650,6 +651,8 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    // E53: GS math runs in host IEEE mode even when called from the EE thread (PS2 FP mode).
+    ps2_fpmode::ScopedHostMode hostFpMode;
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16 || !m_backend)
         return;
@@ -751,6 +754,8 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    // E53: GS math runs in host IEEE mode even when called from the EE thread (PS2 FP mode).
+    ps2_fpmode::ScopedHostMode hostFpMode;
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16u || !m_backend)
         return false;
@@ -1074,6 +1079,8 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
+    // E53: GS math runs in host IEEE mode even when called from the EE thread (PS2 FP mode).
+    ps2_fpmode::ScopedHostMode hostFpMode;
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     writeRegisterUnlocked(regAddr, value);
 }

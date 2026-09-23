@@ -95,6 +95,13 @@ if(PS2X_IS_ARM_TARGET)
     endif()
 endif()
 
+# E53: the EE FPU and VU round the product of a multiply-add before the add
+# (PCSX2 FPU.cpp MADD_S). Clang/GCC fuse a*b+c written in one expression into
+# a hardware FMA by default, which changes guest math; keep them separate.
+if(NOT MSVC)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>)
+endif()
+
 if(PS2X_BUILD_RECOMP)
     add_subdirectory("ps2xRecomp")
 endif()

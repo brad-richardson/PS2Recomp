@@ -84,6 +84,11 @@ add_custom_command(
     DEPENDS e52_snippet_gen
     VERBATIM)
 add_custom_target(e52_snippets DEPENDS ${E52_SNIPPETS_DIR}/e52_snippets.h)
+# E53: the audit tests set the EE FP mode at run time; keep clang from folding
+# their constant inputs at compile time in the default rounding mode.
+if(NOT MSVC)
+    set_source_files_properties(src/ps2_fpu_cop2_audit_tests.cpp PROPERTIES COMPILE_OPTIONS "-frounding-math")
+endif()
 
 target_include_directories(ps2_test_lib PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include

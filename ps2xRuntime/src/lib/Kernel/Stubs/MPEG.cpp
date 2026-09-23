@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_fpmode.h"
 #include "ps2_e3.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
@@ -80,6 +81,8 @@ namespace ps2_stubs
 
             bool feed(const uint8_t *data, size_t size, std::deque<MpegDecodedFrame> &frames, int64_t pts90k = -1, int64_t dts90k = -1)
             {
+                // E53: FFmpeg runs in host IEEE mode, not the EE thread's PS2 FP mode.
+                ps2_fpmode::ScopedHostMode hostFpMode;
                 if (!data || size == 0)
                 {
                     return true;
@@ -188,6 +191,8 @@ namespace ps2_stubs
 
             bool flush(std::deque<MpegDecodedFrame> &frames)
             {
+                // E53: FFmpeg runs in host IEEE mode, not the EE thread's PS2 FP mode.
+                ps2_fpmode::ScopedHostMode hostFpMode;
                 if (!m_initialized || m_drained)
                 {
                     return true;

@@ -854,7 +854,6 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define FPU_ADD_S(a, b) ((float)(a) + (float)(b))
 #define FPU_SUB_S(a, b) ((float)(a) - (float)(b))
 #define FPU_MUL_S(a, b) ((float)(a) * (float)(b))
-#define FPU_DIV_S(a, b) ((float)(a) / (float)(b))
 // R5900 FPU semantics (PCSX2 pcsx2/FPU.cpp SQRT_S, RSQRT_S, CVT_W).
 // SQRT.S: sqrt(|ft|); +/-0 (and denormals, which the EE treats as zero)
 // give a signed zero.
@@ -894,6 +893,202 @@ static inline int32_t Ps2FpuCvtWS(float s)
         return static_cast<int32_t>(s);
     return (u & 0x80000000u) ? static_cast<int32_t>(0x80000000u) : 0x7FFFFFFF;
 }
+// E53: PCSX2 FPU.cpp fpuDouble: an operand with exponent 0 reads as a signed
+// zero, and exponent 0xFF (Inf/NaN on the host) as +/-FMAX.
+static inline float Ps2FpuDouble(float x)
+{
+    uint32_t u;
+    std::memcpy(&u, &x, sizeof(u));
+    switch (u & 0x7F800000u)
+    {
+    case 0u:
+        u &= 0x80000000u;
+        break;
+    case 0x7F800000u:
+        u = (u & 0x80000000u) | 0x7F7FFFFFu;
+        break;
+    default:
+        return x;
+    }
+    float r;
+    std::memcpy(&r, &u, sizeof(r));
+    return r;
+}
+// E53: DIV.S (PCSX2 checkDivideByZero + DIV_S): a divisor with exponent 0
+// (+/-0 or denormal) gives +/-FMAX with sign fs^ft; otherwise
+// fpuDouble(fs) / fpuDouble(ft) in the thread's rounding mode.
+static inline float Ps2FpuDivS(float s, float t)
+{
+    uint32_t us, ut;
+    std::memcpy(&us, &s, sizeof(us));
+    std::memcpy(&ut, &t, sizeof(ut));
+    if ((ut & 0x7F800000u) == 0u)
+    {
+        const uint32_t u = ((us ^ ut) & 0x80000000u) | 0x7F7FFFFFu;
+        float r;
+        std::memcpy(&r, &u, sizeof(r));
+        return r;
+    }
+    return Ps2FpuDouble(s) / Ps2FpuDouble(t);
+}
+// E53: MAX.S / MIN.S compare the raw words as sign-magnitude integers
+// (PCSX2 fp_max / fp_min).
+static inline uint32_t Ps2FpMaxBits(uint32_t a, uint32_t b)
+{
+    const int32_t sa = static_cast<int32_t>(a), sb = static_cast<int32_t>(b);
+    return static_cast<uint32_t>((sa < 0 && sb < 0) ? std::min(sa, sb) : std::max(sa, sb));
+}
+static inline uint32_t Ps2FpMinBits(uint32_t a, uint32_t b)
+{
+    const int32_t sa = static_cast<int32_t>(a), sb = static_cast<int32_t>(b);
+    return static_cast<uint32_t>((sa < 0 && sb < 0) ? std::max(sa, sb) : std::min(sa, sb));
+}
+static inline float Ps2FpuMaxS(float a, float b)
+{
+    uint32_t ua, ub;
+    std::memcpy(&ua, &a, sizeof(ua));
+    std::memcpy(&ub, &b, sizeof(ub));
+    const uint32_t u = Ps2FpMaxBits(ua, ub);
+    float r;
+    std::memcpy(&r, &u, sizeof(r));
+    return r;
+}
+static inline float Ps2FpuMinS(float a, float b)
+{
+    uint32_t ua, ub;
+    std::memcpy(&ua, &a, sizeof(ua));
+    std::memcpy(&ub, &b, sizeof(ub));
+    const uint32_t u = Ps2FpMinBits(ua, ub);
+    float r;
+    std::memcpy(&r, &u, sizeof(r));
+    return r;
+}
+#define FPU_DIV_S(a, b) Ps2FpuDivS((float)(a), (float)(b))
+#define FPU_MAX_S(a, b) Ps2FpuMaxS((float)(a), (float)(b))
+#define FPU_MIN_S(a, b) Ps2FpuMinS((float)(a), (float)(b))
+
+// ---- E53: VU0 macro-mode helpers (PCSX2 VUops.cpp / VU0.cpp semantics) ----
+
+static inline float Ps2BitsToFloat(uint32_t u)
+{
+    float f;
+    std::memcpy(&f, &u, sizeof(f));
+    return f;
+}
+static inline uint32_t Ps2FloatToBits(float f)
+{
+    uint32_t u;
+    std::memcpy(&u, &f, sizeof(u));
+    return u;
+}
+static inline uint32_t Ps2VuLane(__m128 v, int lane)
+{
+    alignas(16) uint32_t w[4];
+    _mm_store_si128(reinterpret_cast<__m128i *>(w), _mm_castps_si128(v));
+    return w[lane & 3];
+}
+// vuDouble: same operand rule as the FPU's (VU overflow checks are on in
+// PCSX2's defaults).
+static inline float Ps2VuDouble(uint32_t u) { return Ps2FpuDouble(Ps2BitsToFloat(u)); }
+
+// VDIV: Q = fs.fsf / ft.ftf (_vuDIV).
+static inline float Ps2VuDiv(uint32_t fsBits, uint32_t ftBits)
+{
+    const float ft = Ps2VuDouble(ftBits);
+    const float fs = Ps2VuDouble(fsBits);
+    if (ft == 0.0f)
+        return Ps2BitsToFloat(((ftBits ^ fsBits) & 0x80000000u) | 0x7F7FFFFFu);
+    return Ps2VuDouble(Ps2FloatToBits(fs / ft));
+}
+// VSQRT: Q = sqrt(|ft.ftf|) (_vuSQRT).
+static inline float Ps2VuSqrt(uint32_t ftBits)
+{
+    const float ft = Ps2VuDouble(ftBits);
+    return Ps2VuDouble(Ps2FloatToBits(sqrtf(fabsf(ft))));
+}
+// VRSQRT: Q = fs.fsf / sqrt(|ft.ftf|); ft = 0 gives +/-FMAX (fs != 0) or
+// +/-0 (fs = 0), signed by fs^ft (_vuRSQRT).
+static inline float Ps2VuRsqrt(uint32_t fsBits, uint32_t ftBits)
+{
+    const float ft = Ps2VuDouble(ftBits);
+    const float fs = Ps2VuDouble(fsBits);
+    const uint32_t sign = (ftBits ^ fsBits) & 0x80000000u;
+    if (ft == 0.0f)
+        return Ps2BitsToFloat(fs != 0.0f ? (sign | 0x7F7FFFFFu) : sign);
+    return Ps2VuDouble(Ps2FloatToBits(fs / sqrtf(fabsf(ft))));
+}
+// VFTOIn: scale by 2^n, then truncate; exponent >= 2^31 saturates by sign
+// (floatToInt<n>).
+static inline __m128 Ps2VuFtoi(__m128 src, int shift)
+{
+    alignas(16) uint32_t w[4];
+    _mm_store_si128(reinterpret_cast<__m128i *>(w), _mm_castps_si128(src));
+    const float scale = Ps2BitsToFloat(0x3F800000u + (static_cast<uint32_t>(shift) << 23));
+    for (int i = 0; i < 4; ++i)
+    {
+        float f = Ps2BitsToFloat(w[i]);
+        if (shift)
+            f *= scale;
+        const uint32_t u = Ps2FloatToBits(f);
+        if ((u & 0x7F800000u) >= 0x4F000000u)
+            w[i] = (u & 0x80000000u) ? 0x80000000u : 0x7FFFFFFFu;
+        else
+            w[i] = static_cast<uint32_t>(static_cast<int32_t>(f));
+    }
+    return _mm_castsi128_ps(_mm_load_si128(reinterpret_cast<const __m128i *>(w)));
+}
+// VMAX / VMINI: sign-magnitude integer compare per lane (fp_max / fp_min).
+static inline __m128 Ps2VuMax(__m128 a, __m128 b)
+{
+    const __m128i ia = _mm_castps_si128(a), ib = _mm_castps_si128(b);
+    const __m128i bothNeg = _mm_srai_epi32(_mm_and_si128(ia, ib), 31);
+    const __m128i hi = _mm_max_epi32(ia, ib), lo = _mm_min_epi32(ia, ib);
+    return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(bothNeg, lo), _mm_andnot_si128(bothNeg, hi)));
+}
+static inline __m128 Ps2VuMin(__m128 a, __m128 b)
+{
+    const __m128i ia = _mm_castps_si128(a), ib = _mm_castps_si128(b);
+    const __m128i bothNeg = _mm_srai_epi32(_mm_and_si128(ia, ib), 31);
+    const __m128i hi = _mm_max_epi32(ia, ib), lo = _mm_min_epi32(ia, ib);
+    return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(bothNeg, hi), _mm_andnot_si128(bothNeg, lo)));
+}
+// VCLIPw: shift the 24-bit clip history by 6 and set +x,-x,+y,-y,+z,-z
+// against |ft.w| with PCSX2's integer compare (_vuCLIP).
+static inline uint32_t Ps2VuClip(uint32_t clipFlags, __m128 fs, uint32_t ftwBits)
+{
+    int32_t value = static_cast<int32_t>(ftwBits);
+    value = (value & 0x7F800000) ? (value & 0x7FFFFFFF) : 0x007FFFFF;
+    const uint32_t x = Ps2VuLane(fs, 0), y = Ps2VuLane(fs, 1), z = Ps2VuLane(fs, 2);
+    uint32_t f = clipFlags << 6;
+    if (static_cast<int32_t>(x) > value) f |= 0x01u;
+    if (static_cast<int32_t>(x ^ 0x80000000u) > value) f |= 0x02u;
+    if (static_cast<int32_t>(y) > value) f |= 0x04u;
+    if (static_cast<int32_t>(y ^ 0x80000000u) > value) f |= 0x08u;
+    if (static_cast<int32_t>(z) > value) f |= 0x10u;
+    if (static_cast<int32_t>(z ^ 0x80000000u) > value) f |= 0x20u;
+    return f & 0xFFFFFFu;
+}
+// R register: 23-bit LFSR value with the exponent of 1.0, kept in every lane
+// of ctx->vu0_r (AdvanceLFSR / _vuRINIT / _vuRXOR).
+static inline uint32_t Ps2VuR(const R5900Context *ctx) { return Ps2VuLane(ctx->vu0_r, 0); }
+static inline void Ps2VuSetR(R5900Context *ctx, uint32_t r)
+{
+    ctx->vu0_r = _mm_castsi128_ps(_mm_set1_epi32(static_cast<int32_t>((r & 0x007FFFFFu) | 0x3F800000u)));
+}
+static inline uint32_t Ps2VuAdvanceR(R5900Context *ctx)
+{
+    uint32_t r = Ps2VuR(ctx);
+    const uint32_t x = (r >> 4) & 1u;
+    const uint32_t y = (r >> 22) & 1u;
+    r = (r << 1) ^ x ^ y;
+    Ps2VuSetR(ctx, r);
+    return Ps2VuR(ctx);
+}
+// VU0 data memory (4 KiB, wraps) for VLQI/VSQI/VLQD/VSQD/VILWR/VISWR.
+static inline uint8_t *Ps2Vu0DataAt(PS2Runtime *runtime, uint32_t byteAddr)
+{
+    return runtime->memory().getVU0Data() + (byteAddr & 0xFF0u);
+}
 #define FPU_SQRT_S(a) Ps2FpuSqrtS((float)(a))
 #define FPU_RSQRT_S(s, t) Ps2FpuRsqrtS((float)(s), (float)(t))
 #define FPU_ABS_S(a) fabsf((float)(a))
@@ -913,19 +1108,19 @@ static inline int32_t Ps2FpuCvtWS(float s)
 #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
 #define FPU_C_F_S(a, b) (0)
 #define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_EQ_S(a, b) ((float)(a) == (float)(b))
+#define FPU_C_EQ_S(a, b) (Ps2FpuDouble((float)(a)) == Ps2FpuDouble((float)(b)))
 #define FPU_C_UEQ_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_OLT_S(a, b) ((float)(a) < (float)(b))
+#define FPU_C_OLT_S(a, b) (Ps2FpuDouble((float)(a)) < Ps2FpuDouble((float)(b))) // EE C.LT (funct 0x34)
 #define FPU_C_ULT_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_OLE_S(a, b) ((float)(a) <= (float)(b))
+#define FPU_C_OLE_S(a, b) (Ps2FpuDouble((float)(a)) <= Ps2FpuDouble((float)(b))) // EE C.LE (funct 0x36)
 #define FPU_C_ULE_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))
 #define FPU_C_SF_S(a, b) (0)
 #define FPU_C_NGLE_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
 #define FPU_C_SEQ_S(a, b) ((float)(a) == (float)(b))
 #define FPU_C_NGL_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_LT_S(a, b) ((float)(a) < (float)(b))
+#define FPU_C_LT_S(a, b) (Ps2FpuDouble((float)(a)) < Ps2FpuDouble((float)(b)))
 #define FPU_C_NGE_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_LE_S(a, b) ((float)(a) <= (float)(b))
+#define FPU_C_LE_S(a, b) (Ps2FpuDouble((float)(a)) <= Ps2FpuDouble((float)(b)))
 #define FPU_C_NGT_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))
 
 // QFSRV: Quadword Funnel Shift Right Variable
@@ -1016,8 +1211,6 @@ inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
 #define PS2_PROT3W(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(0, 3, 2, 1))
 
 // Additional VU0 operations
-#define PS2_VSQRT(x) sqrtf(x)
-#define PS2_VRSQRT(x) (1.0f / sqrtf(x))
 
 #define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : static_cast<uint32_t>(PS2_EXTRACT_EPI32_0(ctx_ptr->r[reg_idx])))
 #define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : PS2_EXTRACT_EPI32_0(ctx_ptr->r[reg_idx]))
