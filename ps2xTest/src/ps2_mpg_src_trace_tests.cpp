@@ -804,10 +804,141 @@ void register_ps2_mpg_src_trace_tests()
 
             ps2_mpg_src_trace::clearForTest();
             const std::string text = readWholeFile(tmp);
-            t.Equals(countLines(text), static_cast<size_t>(1u), "only the arena store must log");
+            t.Equals(countLines(text), static_cast<size_t>(2u), "arena store plus read-back uploadload must log");
             t.IsTrue(text.find("arenastore vsync=0 addr=0x0063b904 value=0x30435bd0 "
                                "pc=0x00abcdef ra=0x00abce00 fn=srcArenaProbe32") != std::string::npos,
                      "macro tap must log the arena store with host fn");
+            t.IsTrue(text.find("uploadload vsync=0 pc=0x00abcdef ra=0x00abce00 fn=srcArenaProbe32 "
+                               "addr=0x0063b904 value=0x30435bd0") != std::string::npos,
+                     "read-back of the uploader word must log uploadload");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("parseArenas accepts pairs and rejects garbage", [](TestCase &t)
+        {
+            uint32_t base[8];
+            uint32_t end[8];
+            t.IsTrue(ps2_mpg_src_trace::parseArenas("0x600000-0x640000,0x700000-0x720000",
+                                                    base, end, 8) == 2,
+                     "two hex pairs must parse");
+            t.IsTrue(base[0] == 0x00600000u && end[0] == 0x00640000u, "first pair must match");
+            t.IsTrue(base[1] == 0x00700000u && end[1] == 0x00720000u, "second pair must match");
+            t.IsTrue(ps2_mpg_src_trace::parseArenas("600000-640000", base, end, 8) == 1,
+                     "0x prefix must be optional");
+            t.IsTrue(base[0] == 0x00600000u && end[0] == 0x00640000u, "bare-hex pair must match");
+            t.IsTrue(ps2_mpg_src_trace::parseArenas("0x10-0x8", base, end, 8) == -1,
+                     "lo >= hi must fail");
+            t.IsTrue(ps2_mpg_src_trace::parseArenas("xyz", base, end, 8) == -1,
+                     "non-hex must fail");
+            t.IsTrue(ps2_mpg_src_trace::parseArenas("", base, end, 8) == -1,
+                     "empty text must fail");
+            t.IsTrue(ps2_mpg_src_trace::parseArenas("0x1-0x2,", base, end, 8) == -1,
+                     "trailing comma must fail");
+            t.IsTrue(ps2_mpg_src_trace::parseArenas(nullptr, base, end, 8) == -1,
+                     "null text must fail");
+            t.IsTrue(ps2_mpg_src_trace::parseArenas("0x1-0x2,0x3-0x4", base, end, 1) == 1,
+                     "over-long lists must truncate to maxN");
+            t.IsTrue(base[0] == 0x1u && end[0] == 0x2u, "truncation must keep the head");
+        });
+
+        tc.Run("applyArenasForTest swaps ranges and restores defaults", [](TestCase &t)
+        {
+            // Disjoint range proves replacement (not union): defaults drop out.
+            ps2_mpg_src_trace::applyArenasForTest("0x500000-0x510000");
+            t.IsTrue(ps2_mpg_src_trace::isArenaWatched(0x00505000u, 4u), "custom range must match");
+            t.IsTrue(!ps2_mpg_src_trace::isArenaWatched(0x0063B900u, 4u), "default range must be gone");
+            // Part-5 wide ranges contain the defaults by design (superset hunt).
+            ps2_mpg_src_trace::applyArenasForTest("0x600000-0x640000,0x700000-0x720000");
+            t.IsTrue(ps2_mpg_src_trace::isArenaWatched(0x00600100u, 4u), "wide-only addr must match");
+            t.IsTrue(ps2_mpg_src_trace::isArenaWatched(0x0063B900u, 4u), "overlap addr must still match");
+            t.IsTrue(!ps2_mpg_src_trace::isArenaWatched(0x00650000u, 4u), "gap between ranges must not match");
+            ps2_mpg_src_trace::applyArenasForTest("garbage");
+            t.IsTrue(ps2_mpg_src_trace::isArenaWatched(0x0063B900u, 4u), "malformed env must restore defaults");
+            t.IsTrue(!ps2_mpg_src_trace::isArenaWatched(0x00600100u, 4u), "wide-only addr must be gone");
+            ps2_mpg_src_trace::clearForTest();
+        });
+
+        tc.Run("isUploaderValue matches exact alt and mirrors", [](TestCase &t)
+        {
+            t.IsTrue(ps2_mpg_src_trace::isUploaderValue(0x00435BD0u), "static uploader must match");
+            t.IsTrue(ps2_mpg_src_trace::isUploaderValue(0x20435BD0u), "0x20 mirror must match");
+            t.IsTrue(ps2_mpg_src_trace::isUploaderValue(0x80435BD0u), "0x80 mirror must match");
+            t.IsTrue(ps2_mpg_src_trace::isUploaderValue(0x00434990u), "alt range lo must match");
+            t.IsTrue(ps2_mpg_src_trace::isUploaderValue(0x004349B8u), "alt range hi must match");
+            t.IsTrue(ps2_mpg_src_trace::isUploaderValue(0x004349A0u), "alt range mid must match");
+            t.IsTrue(ps2_mpg_src_trace::isUploaderValue(0x304349B0u), "alt mirror must match");
+            t.IsTrue(!ps2_mpg_src_trace::isUploaderValue(0x00435BD1u), "off-by-one exact must not match");
+            t.IsTrue(!ps2_mpg_src_trace::isUploaderValue(0x0043498Fu), "below alt range must not match");
+            t.IsTrue(!ps2_mpg_src_trace::isUploaderValue(0x004349B9u), "above alt range must not match");
+            t.IsTrue(!ps2_mpg_src_trace::isUploaderValue(0x0044B140u), "REF code addr must not match");
+            t.IsTrue(!ps2_mpg_src_trace::isUploaderValue(0x00435BF8u), "payload head must not match");
+            t.IsTrue(!ps2_mpg_src_trace::isUploaderValue(0u), "zero must not match");
+        });
+
+        tc.Run("uploadload logs uploader-valued loads with pc ra fn", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-uploadload.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+            t.IsTrue(ps2_mpg_src_trace::uploadloadArmed(), "watch must be armed after configure");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+            const uint32_t exact = 0x00435BD0u;
+            const uint32_t alt = 0x004349A0u;
+            const uint32_t other = 0x0044B140u;
+            std::memcpy(rdram + 0x00300000u, &exact, sizeof(exact));
+            std::memcpy(rdram + 0x00300004u, &alt, sizeof(alt));
+            std::memcpy(rdram + 0x00300008u, &other, sizeof(other));
+
+            R5900Context ctxStruct{};
+            R5900Context *ctx = &ctxStruct;
+            ctxStruct.pc = 0x00367DE4u;
+            srcSetReg(ctxStruct, 31, 0x00367E00u);
+            srcSetReg(ctxStruct, 4, 0x00300000u);
+            PS2Runtime *runtime = nullptr;
+            t.Equals(srcReadProbe32(rdram, ctx, runtime, 0x00300000u), exact, "exact load must read back");
+            t.Equals(srcReadProbe32(rdram, ctx, runtime, 0x00300004u), alt, "alt load must read back");
+            t.Equals(srcReadProbe32(rdram, ctx, runtime, 0x00300008u), other, "other load must read back");
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(2u), "only uploader-valued loads must log");
+            t.IsTrue(text.find("uploadload vsync=0 pc=0x00367de4 ra=0x00367e00 fn=srcReadProbe32 "
+                               "addr=0x00300000 value=0x00435bd0") != std::string::npos,
+                     "exact load must carry pc ra fn addr value");
+            t.IsTrue(text.find("addr=0x00300004 value=0x004349a0") != std::string::npos,
+                     "alt-range load must log");
+            t.IsTrue(text.find("a0=0x00300000") != std::string::npos, "load must carry a regs");
+            t.IsTrue(text.find("0x0044b140") == std::string::npos, "non-uploader load must stay silent");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("uploadload stops at 64 lines", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-uploadload-cap.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+            const uint32_t exact = 0x00435BD0u;
+            std::memcpy(rdram + 0x00300000u, &exact, sizeof(exact));
+
+            R5900Context ctxStruct{};
+            R5900Context *ctx = &ctxStruct;
+            ctxStruct.pc = 0x00367DE4u;
+            PS2Runtime *runtime = nullptr;
+            for (uint32_t i = 0u; i < 70u; ++i)
+            {
+                srcReadProbe32(rdram, ctx, runtime, 0x00300000u);
+            }
+            t.IsTrue(!ps2_mpg_src_trace::uploadloadArmed(), "exhausted watch must disarm");
+
+            ps2_mpg_src_trace::clearForTest();
+            t.Equals(countLines(readWholeFile(tmp)), static_cast<size_t>(64u), "watch must stop at 64 lines");
             std::remove(tmp.c_str());
         });
 

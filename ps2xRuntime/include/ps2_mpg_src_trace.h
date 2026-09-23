@@ -111,17 +111,106 @@ inline constexpr const char *kReadRegNames[24] = {
     "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"};
 
 // E40 Part-4: chain-arena store watch. The per-frame VIF1 chains live in
-// two heap arenas (ranges below, from the Part-3 TADR values). Any guest
+// heap arenas (defaults below, from the Part-3 TADR values). Any guest
 // WRITE32/64/128 overlapping them whose stored 32-bit
 // word (any lane) falls in the microcode library range (or its
-// 0x20/0x30/0x80 mirrors, folded by & 0x1FFFFFFF) logs one `arenastore`
+// 0x20/0x30/0x80 mirrors, folded by & 0x0FFFFFFF) logs one `arenastore`
 // line per matching lane:
 //   arenastore vsync=<n> addr=0x<lane addr> value=0x<lane word>
 //     pc=0x<guest pc> ra=0x<> fn=<host func> + a0..s7 (low 32 hex)
 // First kMaxArenaLines in-window lines.
-inline constexpr uint32_t kArenaBase[2] = {0x0063B800u, 0x00708400u};
-inline constexpr uint32_t kArenaEnd[2] = {0x0063C400u, 0x00708D00u};
+// E40 Part-5: the watched ranges are env-configurable via
+// PS2X_MPG_SRC_ARENAS="lo-hi,lo-hi" (hex, 0x optional, up to kMaxArenas
+// ranges; truncated past the cap). Absent or malformed env keeps the
+// defaults below.
+inline constexpr int kMaxArenas = 8;
+inline constexpr uint32_t kArenaDefaultBase[2] = {0x0063B800u, 0x00708400u};
+inline constexpr uint32_t kArenaDefaultEnd[2] = {0x0063C400u, 0x00708D00u};
 inline constexpr uint64_t kMaxArenaLines = 256ull;
+
+// Parses "lo-hi,lo-hi" into base/end (at most maxN ranges). Returns the
+// range count, or -1 when any pair is malformed (empty, non-hex,
+// missing '-', lo >= hi). Over-long lists truncate to maxN.
+inline bool parseHexU32(const char *&p, uint32_t &out)
+{
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
+    {
+        p += 2;
+    }
+    uint32_t value = 0u;
+    int digits = 0;
+    for (;; ++p)
+    {
+        const char c = *p;
+        uint32_t d;
+        if (c >= '0' && c <= '9')
+            d = static_cast<uint32_t>(c - '0');
+        else if (c >= 'a' && c <= 'f')
+            d = static_cast<uint32_t>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F')
+            d = static_cast<uint32_t>(c - 'A' + 10);
+        else
+            break;
+        value = value * 16u + d;
+        ++digits;
+    }
+    if (digits == 0)
+    {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+inline int parseArenas(const char *text, uint32_t *base, uint32_t *end, int maxN)
+{
+    if (text == nullptr || maxN <= 0)
+    {
+        return -1;
+    }
+    const char *p = text;
+    int n = 0;
+    for (;;)
+    {
+        uint32_t lo = 0u, hi = 0u;
+        if (!parseHexU32(p, lo))
+        {
+            return -1;
+        }
+        if (*p != '-')
+        {
+            return -1;
+        }
+        ++p;
+        if (!parseHexU32(p, hi))
+        {
+            return -1;
+        }
+        if (lo >= hi)
+        {
+            return -1;
+        }
+        if (n < maxN)
+        {
+            base[n] = lo;
+            end[n] = hi;
+            ++n;
+        }
+        if (*p == '\0')
+        {
+            return n == 0 ? -1 : n;
+        }
+        if (*p != ',')
+        {
+            return -1;
+        }
+        ++p;
+        if (*p == '\0')
+        {
+            return -1;
+        }
+    }
+}
 
 inline constexpr uint32_t kLibLo = 0x00430000u;
 inline constexpr uint32_t kLibHi = 0x00440000u;
@@ -154,6 +243,10 @@ namespace detail
         uint64_t dmHits = 0u; // dmareg lines emitted
         uint64_t arHits = 0u; // arenastore lines emitted
         uint64_t ctagKicks = 0u; // VIF1 chain walks with tag dump
+        uint64_t ulHits = 0u; // uploadload lines emitted
+        uint32_t arenaBase[kMaxArenas]; // watched store ranges
+        uint32_t arenaEnd[kMaxArenas];
+        int arenaCount = 0;
     };
 
     inline State &state()
@@ -208,6 +301,13 @@ namespace detail
         return n;
     }
 
+    // 1 while the uploadload watch still has lines left (set under lock).
+    inline std::atomic<uint32_t> &ulOpen()
+    {
+        static std::atomic<uint32_t> n{1u};
+        return n;
+    }
+
     inline bool parseU64(const char *text, uint64_t &out)
     {
         if (!text || text[0] == '\0')
@@ -227,9 +327,36 @@ namespace detail
         return true;
     }
 
+    // Installs defaults, then the PS2X_MPG_SRC_ARENAS env override when
+    // it parses. Shared by initLocked and the test hook below.
+    inline void installArenasLocked(State &s, const char *env)
+    {
+        s.arenaBase[0] = kArenaDefaultBase[0];
+        s.arenaEnd[0] = kArenaDefaultEnd[0];
+        s.arenaBase[1] = kArenaDefaultBase[1];
+        s.arenaEnd[1] = kArenaDefaultEnd[1];
+        s.arenaCount = 2;
+        if (env != nullptr && env[0] != '\0')
+        {
+            uint32_t base[kMaxArenas];
+            uint32_t end[kMaxArenas];
+            const int n = parseArenas(env, base, end, kMaxArenas);
+            if (n > 0)
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    s.arenaBase[i] = base[i];
+                    s.arenaEnd[i] = end[i];
+                }
+                s.arenaCount = n;
+            }
+        }
+    }
+
     inline void initLocked(State &s)
     {
         s.initDone = true;
+        installArenasLocked(s, std::getenv("PS2X_MPG_SRC_ARENAS"));
         const char *file = std::getenv("PS2X_MPG_SRC_TRACE");
         if (!file || file[0] == '\0')
         {
@@ -787,12 +914,16 @@ inline void noteDmaregCtx(const PS2Runtime *runtime, const R5900Context *ctx,
 }
 
 // Lock-free pre-filter for the arena store hook: true when
-// [addr, addr+size) overlaps a chain arena. No state, no atomics.
+// [addr, addr+size) overlaps a watched arena (env-configurable; the
+// ranges are installed once at init before the tracer enables, and the
+// test hooks reinstall them under lock). Reads plain state, no atomics.
 inline bool isArenaWatched(uint32_t addr, uint32_t size)
 {
-    for (int i = 0; i < 2; ++i)
+    detail::State &s = detail::state();
+    const int n = s.arenaCount;
+    for (int i = 0; i < n; ++i)
     {
-        if (addr < kArenaEnd[i] && kArenaBase[i] < addr + size)
+        if (addr < s.arenaEnd[i] && s.arenaBase[i] < addr + size)
         {
             return true;
         }
@@ -910,6 +1041,125 @@ inline void noteArenastoreCtx(const PS2Runtime *runtime, const R5900Context *ctx
     noteArenastore(vsync, addr, width, valueLo, valueHi, pc, ra, fn, ctx);
 }
 
+// E40 Part-5: uploader-address load watch. Logs the first
+// kMaxUploadloadLines in-window guest loads (READ32/64/128, any lane)
+// whose returned 32-bit word folds (& 0x0FFFFFFF, same as arenastore)
+// to the static uploader 0x435bd0 or the alt-uploader slot range
+// 0x434990-0x4349b8 — i.e. where the chain builder reads the uploader
+// address from (the table entry):
+//   uploadload vsync=<n> pc=0x<> ra=0x<> fn=<host func> addr=0x<lane>
+//     value=0x<lane word> + a0..s7 (low 32 hex)
+inline constexpr uint32_t kUploaderExact = 0x00435BD0u;
+inline constexpr uint32_t kUploaderAltLo = 0x00434990u;
+inline constexpr uint32_t kUploaderAltHi = 0x004349B8u;
+inline constexpr uint64_t kMaxUploadloadLines = 64ull;
+
+inline bool isUploaderValue(uint32_t word)
+{
+    const uint32_t folded = word & 0x0FFFFFFFu;
+    if (folded == kUploaderExact)
+    {
+        return true;
+    }
+    return folded >= kUploaderAltLo && folded <= kUploaderAltHi;
+}
+
+// Fast gate for the per-load macro hook: enabled AND lines left.
+inline bool uploadloadArmed()
+{
+    if (!enabled())
+    {
+        return false;
+    }
+    return detail::ulOpen().load(std::memory_order_relaxed) != 0u;
+}
+
+inline void noteUploadload(uint64_t vsync, uint32_t addr, uint32_t width,
+                           uint64_t valueLo, uint64_t valueHi,
+                           uint32_t pc, uint32_t ra, const char *fn,
+                           const R5900Context *ctx)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    uint32_t lanes = 1u;
+    if (width >= 16u)
+        lanes = 4u;
+    else if (width >= 8u)
+        lanes = 2u;
+    for (uint32_t i = 0u; i < lanes; ++i)
+    {
+        if (s.ulHits >= kMaxUploadloadLines)
+        {
+            break;
+        }
+        const uint32_t laneAddr = addr + i * 4u;
+        uint32_t word;
+        if (i == 0u)
+            word = static_cast<uint32_t>(valueLo);
+        else if (i == 1u)
+            word = static_cast<uint32_t>(valueLo >> 32u);
+        else if (i == 2u)
+            word = static_cast<uint32_t>(valueHi);
+        else
+            word = static_cast<uint32_t>(valueHi >> 32u);
+        if (!isUploaderValue(word))
+        {
+            continue;
+        }
+        char line[768];
+        int w = std::snprintf(line, sizeof(line),
+                              "uploadload vsync=%llu pc=0x%08x ra=0x%08x fn=%s addr=0x%08x value=0x%08x",
+                              static_cast<unsigned long long>(vsync), pc, ra, fn ? fn : "?",
+                              laneAddr, word);
+        for (int r = 0; r < kReadRegCount && w > 0; ++r)
+        {
+            const uint32_t rv = (ctx != nullptr) ? getRegU32(ctx, kReadRegs[r]) : 0u;
+            w += std::snprintf(line + w, sizeof(line) - static_cast<size_t>(w),
+                               " %s=0x%08x", kReadRegNames[r], rv);
+        }
+        if (w > 0)
+        {
+            detail::emitLineLocked(s, line);
+            ++s.ulHits;
+            if (s.capped)
+            {
+                return;
+            }
+        }
+    }
+    if (s.ulHits >= kMaxUploadloadLines)
+    {
+        detail::ulOpen().store(0u, std::memory_order_relaxed);
+    }
+}
+
+// Macro glue for the READ32/64/128 taps: value already loaded.
+inline void noteUploadloadCtx(const PS2Runtime *runtime, const R5900Context *ctx,
+                              uint32_t addr, uint32_t width,
+                              uint64_t valueLo, uint64_t valueHi, const char *fn)
+{
+    uint64_t vsync = 0u;
+    if (runtime != nullptr)
+    {
+        vsync = runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed);
+    }
+    const uint32_t pc = (ctx != nullptr) ? ctx->pc : 0u;
+    const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+    noteUploadload(vsync, addr, width, valueLo, valueHi, pc, ra, fn, ctx);
+}
+
 // E40 Part-4: chain-tag dump. The first kMaxCtagKicks in-window VIF1
 // chain walks log every tag they walk:
 //   ctag tag_at=0x<EE addr of tag> id=<0-7> qwc=<n> addr=0x<ref addr>
@@ -997,6 +1247,8 @@ inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to =
     s.dmHits = 0u;
     s.arHits = 0u;
     s.ctagKicks = 0u;
+    s.ulHits = 0u;
+    detail::installArenasLocked(s, nullptr);
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);
     s.enabled = true;
@@ -1006,7 +1258,17 @@ inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to =
     detail::payInstalledFlag().store(0u, std::memory_order_relaxed);
     detail::dmOpen().store(1u, std::memory_order_relaxed);
     detail::arOpen().store(1u, std::memory_order_relaxed);
+    detail::ulOpen().store(1u, std::memory_order_relaxed);
     return true;
+}
+
+// Test hook for the Part-5 env path: installs arenas from text (or
+// defaults when text is null/empty/malformed), same code as initLocked.
+inline void applyArenasForTest(const char *text)
+{
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    detail::installArenasLocked(s, text);
 }
 
 inline void clearForTest()
@@ -1035,6 +1297,8 @@ inline void clearForTest()
     s.dmHits = 0u;
     s.arHits = 0u;
     s.ctagKicks = 0u;
+    s.ulHits = 0u;
+    detail::installArenasLocked(s, nullptr);
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);
     s.enabled = false;
@@ -1044,6 +1308,7 @@ inline void clearForTest()
     detail::payInstalledFlag().store(0u, std::memory_order_relaxed);
     detail::dmOpen().store(1u, std::memory_order_relaxed);
     detail::arOpen().store(1u, std::memory_order_relaxed);
+    detail::ulOpen().store(1u, std::memory_order_relaxed);
 }
 
 } // namespace ps2_mpg_src_trace

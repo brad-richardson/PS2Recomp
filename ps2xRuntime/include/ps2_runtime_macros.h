@@ -347,27 +347,47 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     if (ps2_mpg_src_trace::readArmed() &&                      \
         ps2_mpg_src_trace::isReadWatched(_addr, 4u))           \
         ps2_mpg_src_trace::noteReadCtx(runtime, ctx, _addr, 4u, ps2xE40Fn); \
-    return PS2Runtime::isSpecialAddress(_addr)                \
+    uint32_t _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load32(rdram, ctx, _addr)                  \
-        : FAST_READ32(_addr); }())
+        : FAST_READ32(_addr);                                 \
+    if (ps2_mpg_src_trace::uploadloadArmed() &&                \
+        ps2_mpg_src_trace::isUploaderValue(_rv))               \
+        ps2_mpg_src_trace::noteUploadloadCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u, ps2xE40Fn); \
+    return _rv; }())
 
 #define READ64(addr) ([&, ps2xE40Fn = __func__]() -> uint64_t {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
     if (ps2_mpg_src_trace::readArmed() &&                      \
         ps2_mpg_src_trace::isReadWatched(_addr, 8u))           \
         ps2_mpg_src_trace::noteReadCtx(runtime, ctx, _addr, 8u, ps2xE40Fn); \
-    return PS2Runtime::isSpecialAddress(_addr)                \
+    uint64_t _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load64(rdram, ctx, _addr)                  \
-        : FAST_READ64(_addr); }())
+        : FAST_READ64(_addr);                                 \
+    if (ps2_mpg_src_trace::uploadloadArmed() &&                \
+        (ps2_mpg_src_trace::isUploaderValue((uint32_t)_rv) ||  \
+         ps2_mpg_src_trace::isUploaderValue((uint32_t)(_rv >> 32u)))) \
+        ps2_mpg_src_trace::noteUploadloadCtx(runtime, ctx, _addr, 8u, _rv, 0u, ps2xE40Fn); \
+    return _rv; }())
 
 #define READ128(addr) ([&, ps2xE40Fn = __func__]() -> __m128i {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
     if (ps2_mpg_src_trace::readArmed() &&                      \
         ps2_mpg_src_trace::isReadWatched(_addr, 16u))          \
         ps2_mpg_src_trace::noteReadCtx(runtime, ctx, _addr, 16u, ps2xE40Fn); \
-    return PS2Runtime::isSpecialAddress(_addr)                \
+    __m128i _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load128(rdram, ctx, _addr)                 \
-        : FAST_READ128(_addr); }())
+        : FAST_READ128(_addr);                                \
+    if (ps2_mpg_src_trace::uploadloadArmed())                 \
+    {                                                         \
+        const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_rv)); \
+        const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_rv)); \
+        if (ps2_mpg_src_trace::isUploaderValue((uint32_t)_lo) || \
+            ps2_mpg_src_trace::isUploaderValue((uint32_t)(_lo >> 32u)) || \
+            ps2_mpg_src_trace::isUploaderValue((uint32_t)_hi) || \
+            ps2_mpg_src_trace::isUploaderValue((uint32_t)(_hi >> 32u))) \
+            ps2_mpg_src_trace::noteUploadloadCtx(runtime, ctx, _addr, 16u, _lo, _hi, ps2xE40Fn); \
+    }                                                         \
+    return _rv; }())
 
 #define WRITE8(addr, val)                                                              \
     do                                                                                 \
