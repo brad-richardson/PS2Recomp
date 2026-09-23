@@ -4,6 +4,7 @@
 #include "ps2_e43_trace.h"
 #include "ps2_e44_trace.h"
 #include "ps2_gfx_stats.h"
+#include "ps2_e51_gifdump.h"
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
 #include "ps2_stubs.h"
@@ -759,11 +760,15 @@ bool PS2Runtime::syncCoreSubsystems()
     // relaxed check per packet when stats are off.
     m_gifArbiter.setPacketListener([this](GifPathId path, uint32_t size)
                                    {
-                                       if (!ps2_gfx_stats::enabled())
+                                       const bool stats = ps2_gfx_stats::enabled();
+                                       if (!stats && !ps2_e51_gifdump::enabled())
                                        {
                                            return;
                                        }
-                                       ps2_gfx_stats::noteGifPacket(path, size);
+                                       if (stats)
+                                       {
+                                           ps2_gfx_stats::noteGifPacket(path, size);
+                                       }
                                        m_gs.noteGifPath(path);
                                    });
     m_memory.setGifArbiter(&m_gifArbiter);

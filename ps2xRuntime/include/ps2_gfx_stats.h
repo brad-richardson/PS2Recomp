@@ -479,6 +479,18 @@ inline void noteMscalPc(uint32_t startPC)
     }
 }
 
+// E51: latest MSCAL startPC (~0u when none seen or stats are off).
+inline uint32_t currentPc()
+{
+    if (!enabled())
+    {
+        return ~0u;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    return s.curPcValid ? s.curPc : ~0u;
+}
+
 // E50: screen class (classifyScreen) of the draw just counted by noteDraw.
 inline void noteDrawScreen(GifPathId path, uint32_t cls)
 {
