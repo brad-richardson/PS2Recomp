@@ -68,10 +68,26 @@ add_library(ps2_test_lib STATIC
     src/ps2_vu1_trace_tests.cpp
     src/ps2_vu1_entry_trace_tests.cpp
     src/ps2_fpu_semantics_tests.cpp
+    src/ps2_fpu_cop2_audit_tests.cpp
 )
+
+# E52: the audit tests execute the generator's own translation of each
+# encoding; e52_snippet_gen writes it into a header at build time.
+add_executable(e52_snippet_gen tools/e52_snippet_gen.cpp)
+target_include_directories(e52_snippet_gen PRIVATE ${CMAKE_SOURCE_DIR}/ps2xRecomp/include)
+target_link_libraries(e52_snippet_gen PRIVATE ps2_recomp_lib)
+set(E52_SNIPPETS_DIR ${CMAKE_CURRENT_BINARY_DIR}/e52_generated)
+add_custom_command(
+    OUTPUT ${E52_SNIPPETS_DIR}/e52_snippets.h
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${E52_SNIPPETS_DIR}
+    COMMAND $<TARGET_FILE:e52_snippet_gen> > ${E52_SNIPPETS_DIR}/e52_snippets.h
+    DEPENDS e52_snippet_gen
+    VERBATIM)
+add_custom_target(e52_snippets DEPENDS ${E52_SNIPPETS_DIR}/e52_snippets.h)
 
 target_include_directories(ps2_test_lib PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${E52_SNIPPETS_DIR}
     ${CMAKE_SOURCE_DIR}/ps2xRecomp/include
     ${CMAKE_SOURCE_DIR}/ps2xAnalyzer/include
     ${CMAKE_SOURCE_DIR}/ps2xRuntime/include
@@ -84,6 +100,8 @@ target_link_libraries(ps2_test_lib PRIVATE
     ps2_runtime
     ps2_iop
 )
+
+add_dependencies(ps2_test_lib e52_snippets)
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(ps2_test_lib PRIVATE ${CMAKE_DL_LIBS})
