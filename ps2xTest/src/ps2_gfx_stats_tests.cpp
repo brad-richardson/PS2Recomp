@@ -311,6 +311,48 @@ void register_ps2_gfx_stats_tests()
                      ps2_gfx_stats::kScrOff, "one past the last pixel is off");
         });
 
+        tc.Run("E50 T65-format class: inclusive edges and zero area", [](TestCase &t)
+        {
+            const uint16_t ofx = 0x7000u;
+            const uint16_t ofy = 0x7200u;
+            bool zero = false;
+            using ps2_gfx_stats::classifyT65;
+            t.Equals(classifyT65(2304.0f, 2304.0f, 1900.0f, 1900.0f, ofx, ofy, 0, 511, 0, 447, zero),
+                     0u, "SCAX1+1 is inside (edges inclusive)");
+            t.IsTrue(zero, "a point is zero-area");
+            t.Equals(classifyT65(2304.5f, 2310.0f, 1900.0f, 1910.0f, ofx, ofy, 0, 511, 0, 447, zero),
+                     1u, "past SCAX1+1 is off");
+            t.IsTrue(!zero, "a real triangle is not zero-area");
+            t.Equals(classifyT65(1023.5f, 3071.5f, 1023.5f, 3071.5f, ofx, ofy, 0, 511, 0, 447, zero),
+                     2u, "guard-band-wide straddles");
+        });
+
+        tc.Run("E50 GS kicks feed dN_t65 (verts, ADC prims)", [](TestCase &t)
+        {
+            const std::string tmp = statsTmpPath("ps2x-gfx-stats-e50-t65.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_gfx_stats::configureForTest(tmp.c_str()), "test config should install");
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            ps2_gfx_stats::noteVsync(40u);
+            gs.writeRegister(GS_REG_FRAME_1, 1ull << 16);
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_TRIANGLE));
+            auto xyz = [](uint32_t x, uint32_t y) { return static_cast<uint64_t>(x * 16u) | (static_cast<uint64_t>(y * 16u) << 16); };
+            gs.writeRegister(GS_REG_XYZ2, xyz(10, 10));
+            gs.writeRegister(GS_REG_XYZ2, xyz(20, 10));
+            gs.writeRegister(GS_REG_XYZ2, xyz(10, 20)); // drawn, on
+            gs.writeRegister(GS_REG_XYZ3, xyz(10, 10));
+            gs.writeRegister(GS_REG_XYZ3, xyz(20, 10));
+            gs.writeRegister(GS_REG_XYZ3, xyz(10, 20)); // ADC prim
+            ps2_gfx_stats::noteVsync(41u);
+            const std::string text = readWholeFile(tmp);
+            t.IsTrue(text.find("d1_t65=6,1,0,0,0,1") != std::string::npos,
+                     "6 kicked verts, 1 on, 1 ADC: " + text);
+            ps2_gfx_stats::clearForTest();
+            std::remove(tmp.c_str());
+        });
+
         tc.Run("E50 dN_scr and pcs fields are appended only when seen", [](TestCase &t)
         {
             const std::string tmp = statsTmpPath("ps2x-gfx-stats-e50-scr.txt");
