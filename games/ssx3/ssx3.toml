@@ -211,11 +211,11 @@ stubs = [
 # as a resume entry of its containing function (same path as direct-call
 # interior targets). Without entries, dispatchGuestBranch silently skips the
 # call. Full census + bisect in ssx3 local/research/E46/REPORT.md.
-# Boot-proven set (Part 2): all census targets except the breaker 0x3B1140
-# (refcount release; executing it kills the tick-246 menu transition — black
-# screen; mechanism verified correct, state interaction TBD), plus 0x32F8B0
-# (fires only once 0x396B40 executes). Combined boot: SC rider renders,
-# race HUD live, only 0x3B1140 x3 still skipped.
+# Boot-proven set (Part 2): all census targets, plus 0x32F8B0 (fires only
+# once 0x396B40 executes). Combined boot: SC rider renders, race HUD live.
+# 0x3B1140 (MPEG picture-node release) joined in E49 together with the MPEG
+# HLE's sceMpegIsEnd word: without that word the release keeps the one-node
+# pool full, so a bypassed startup movie never ends (E48).
 extra_function_starts = [
   "0x00140BC0",
   "0x00144928",
@@ -235,6 +235,7 @@ extra_function_starts = [
   "0x0038F7F8",
   "0x003968C8",
   "0x00396B40",
+  "0x003B1140",
 ]
 
 # Detected library-like functions without runtime handlers.

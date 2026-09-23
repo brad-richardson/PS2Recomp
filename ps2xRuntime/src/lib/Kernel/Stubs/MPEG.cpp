@@ -2341,6 +2341,10 @@ namespace ps2_stubs
         const uint32_t innerSize = static_cast<uint32_t>(iVar2_signed) - 0x118u;
 
         mpegGuestWrite32(rdram, param_1 + 0x40, uVar3);
+        // End word read by sceMpegIsEnd. The stock Create clears it through
+        // its sceMpegReset call (SSX 3: jal 0x402b58 at 0x40292c); without
+        // this a handle reusing the previous movie's work area starts ended.
+        mpegGuestWrite32(rdram, uVar3 + 0x00, 0u);
 
         const uint32_t a1_init = uVar3 + 0x118u;
         mpegGuestWrite32(rdram, puVar4 + 0x0, a1_init);
@@ -2626,6 +2630,7 @@ namespace ps2_stubs
         MpegDecodedFrame frame;
         std::shared_ptr<MpegNonStreamDelivery> delivery;
         bool dispatchInput = false;
+        bool publishEnd = false;
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             // Original GetPicture's IPU-busy input request produces cbData
@@ -2789,6 +2794,12 @@ namespace ps2_stubs
                 height = playback.height;
                 frameCount = playback.picturesServed;
             }
+            // The stock library's sceMpegIsEnd (SSX 3: 0x402b38) is a plain
+            // load of [[mpeg+0x40]+0]; nothing else tells the guest the movie
+            // is over. Publish it once playback has ended and no decoded
+            // picture is left to serve: the bypass sets streamEnded above, the
+            // faithful path at program end or producer EOF (after the flush).
+            publishEnd = playback.streamEnded && playback.decodedFrames.empty();
         }
 
         mpegGuestWrite32(rdram, mpegAddr + 0x00u, width);
@@ -2807,6 +2818,10 @@ namespace ps2_stubs
                 *reinterpret_cast<uint32_t *>(inner + 0xdc) = 0;
                 *reinterpret_cast<uint32_t *>(inner + 0xe0) = 0;
                 ps2_e3::tapEnd(std::move(e3t), "mpeg-getpic", rdram, "-");
+            }
+            if (publishEnd && iVar1 != 0u)
+            {
+                mpegGuestWrite32(rdram, iVar1 + 0x00u, 1u);
             }
         }
 

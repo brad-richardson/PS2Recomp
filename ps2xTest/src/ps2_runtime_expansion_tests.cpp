@@ -1007,6 +1007,65 @@ void register_ps2_runtime_expansion_tests()
                      "only the injected decoder frame should be counted as served");
         });
 
+        tc.Run("sceMpegGetPicture publishes the sceMpegIsEnd word once the stream has ended", [](TestCase &t)
+        {
+            // The stock sceMpegIsEnd is lw v1,0x40(a0); lw v0,0(v1) (SSX 3
+            // 0x402b38): the guest ends a movie only when that word is nonzero.
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            ps2_stubs::resetMpegStubState();
+            ps2_stubs::notifyMpegCdStreamStart();
+            R5900Context idleContext{};
+            idleContext.pc = kMpegCallbackStopPc;
+            runtime.registerFunction(kMpegCallbackStopPc, &testStopAfterMpegCallback);
+            runtime.eeScheduler().reset(rdram.data(), idleContext);
+
+            constexpr uint32_t kMpegAddr = 0x00123000u;
+            constexpr uint32_t kMpegWorkAddr = 0x00130000u;
+            constexpr uint32_t kImageAddr = 0x00140000u;
+            constexpr uint32_t kProgramEndAddr = 0x00128000u;
+            auto create = [&]()
+            {
+                R5900Context createCtx{};
+                setRegU32(createCtx, 4, kMpegAddr);
+                setRegU32(createCtx, 5, kMpegWorkAddr);
+                setRegU32(createCtx, 6, 0x2000u);
+                ps2_stubs::sceMpegCreate(rdram.data(), &createCtx, &runtime);
+                return ::getRegU32(&createCtx, 2);
+            };
+            auto endWord = [&]()
+            {
+                return Ps2FastRead32(rdram.data(), Ps2FastRead32(rdram.data(), kMpegAddr + 0x40u));
+            };
+
+            // A previous movie left the work area ended; Create must clear it.
+            Ps2FastWrite32(rdram.data(), kMpegWorkAddr, 1u);
+            t.IsTrue(create() != 0u, "sceMpegCreate should accept the work area");
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x40u), kMpegWorkAddr,
+                     "sceMpegCreate should point mpeg+0x40 at the work area");
+            t.Equals(endWord(), 0u, "sceMpegCreate should clear the end word");
+
+            // In-band program end: the stream ends with no decoded picture.
+            Ps2FastWrite32(rdram.data(), kProgramEndAddr, 0xB9010000u);
+            R5900Context demuxCtx{};
+            setRegU32(demuxCtx, 4, kMpegAddr);
+            setRegU32(demuxCtx, 5, kProgramEndAddr);
+            setRegU32(demuxCtx, 6, 4u);
+            ps2_stubs::sceMpegDemuxPss(rdram.data(), &demuxCtx, &runtime);
+            t.Equals(endWord(), 0u, "the end word is published by GetPicture, not by the demux");
+
+            R5900Context pictureCtx{};
+            setRegU32(pictureCtx, 4, kMpegAddr);
+            setRegU32(pictureCtx, 5, kImageAddr);
+            ps2_stubs::sceMpegGetPicture(rdram.data(), &pictureCtx, &runtime);
+            t.Equals(getRegS32(pictureCtx, 2), 0, "GetPicture on an ended stream should return without waiting");
+            t.Equals(endWord(), 1u, "an ended stream with no picture left should set the end word");
+
+            // The next movie reuses the same handle and work area.
+            t.IsTrue(create() != 0u, "sceMpegCreate should reopen the handle");
+            t.Equals(endWord(), 0u, "a fresh handle should not start ended");
+        });
+
         tc.Run("MPEG non-stream R1 delivers in registration order on the caller", [](TestCase &t)
         {
             const auto p = runNonStreamProbe(0u, 0u, true);
