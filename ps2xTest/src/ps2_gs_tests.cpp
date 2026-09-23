@@ -592,6 +592,22 @@ void register_ps2_gs_tests()
             }
         });
 
+        tc.Run("GB3: sceGsResetGraph(0, ...) applies SetGsCrt's SMODE1 (the game's real path)", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+            setRegU32(ctx, 4, 0u); // mode 0 = reset
+            setRegU32(ctx, 5, 1u); // interlaced
+            setRegU32(ctx, 6, 2u); // omode NTSC
+            setRegU32(ctx, 7, 0u); // field
+            runtime.memory().gs().smode1 = 0u;
+            ps2_stubs::sceGsResetGraph(rdram.data(), &ctx, &runtime);
+            t.Equals(runtime.memory().gs().smode1, 0x0000000740814504ull, "NTSC SMODE1 after reset");
+            t.Equals(runtime.memory().gs().smode2 & 0x3ull, 0x1ull, "SMODE2 INT=1 FFMD=0");
+        });
+
         tc.Run("sceGsSetDefDBuffDc seeds display envs and swap applies the selected page", [](TestCase &t)
         {
             PS2Runtime runtime;
