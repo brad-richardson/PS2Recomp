@@ -8,6 +8,22 @@
 
 #include "ps2_vu1_trace.h"
 
+// E45: VU1 FMAC exact math runs in `VuWide`. On macOS arm64 `long double`
+// is already 64-bit (static_assert below), so the default `double` is a
+// no-op there; on Linux/Android arm64 it drops 128-bit quad soft-float
+// (__addtf3 et al, ~8-9% of Select-Character time on the Odin per N4).
+// Define PS2X_VU_WIDE_QUAD=1 to keep the old quad type for A/B runs.
+#if defined(PS2X_VU_WIDE_QUAD) && PS2X_VU_WIDE_QUAD
+using VuWide = long double;
+#else
+using VuWide = double;
+#endif
+
+#if defined(__APPLE__)
+static_assert(sizeof(long double) == sizeof(double),
+              "E45 assumes macOS long double is 64-bit (Mac VU1 math unchanged)");
+#endif
+
 class GS;
 class PS2Memory;
 
@@ -297,8 +313,8 @@ private:
     void applyFmacDest(float *dst, float *result, uint8_t dest);
     void applyFmacDestAcc(float *result, uint8_t dest);
     void normalizeFmacResult(float *result, uint8_t dest, uint8_t laneFlags[4]);
-    bool calculateFmacExactResult(uint32_t component, long double &result) const;
-    uint8_t normalizeFmacExactResult(float &value, long double exactResult) const;
+    bool calculateFmacExactResult(uint32_t component, VuWide &result) const;
+    uint8_t normalizeFmacExactResult(float &value, VuWide exactResult) const;
     uint32_t calculateFmacProductSticky(uint8_t dest) const;
     void updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest, uint32_t extraSticky);
     void queueFsset(uint16_t immediate);
