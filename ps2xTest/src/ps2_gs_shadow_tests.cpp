@@ -76,6 +76,21 @@ void register_ps2_gs_shadow_tests()
             t.IsTrue(!ps2x_gs_shadow::parseModeParallel("off"), "off => off");
         });
 
+        tc.Run("force-smode1 override is explicit and off by default", [](TestCase &t)
+        {
+            t.IsTrue(ps2x_gs_shadow::parseForceSmode1Ntsc("ntsc"), "exact match enables");
+            t.IsTrue(!ps2x_gs_shadow::parseForceSmode1Ntsc(nullptr), "null => off");
+            t.IsTrue(!ps2x_gs_shadow::parseForceSmode1Ntsc(""), "empty => off");
+            t.IsTrue(!ps2x_gs_shadow::parseForceSmode1Ntsc("NTSC"), "case differs => off");
+            t.IsTrue(!ps2x_gs_shadow::parseForceSmode1Ntsc("1"), "1 => off");
+            clearShadowEnv();
+            t.IsTrue(!ps2x_gs_shadow::config().forceSmode1Ntsc, "latched default is off");
+            ::setenv("PS2X_GS_SHADOW_FORCE_SMODE1", "ntsc", 1);
+            ps2x_gs_shadow::resetForTest();
+            t.IsTrue(ps2x_gs_shadow::config().forceSmode1Ntsc, "env latches on");
+            clearShadowEnv();
+        });
+
         tc.Run("parseU64 falls back on garbage", [](TestCase &t)
         {
             t.Equals(ps2x_gs_shadow::parseU64("800", 0ull), 800ull, "plain value");
