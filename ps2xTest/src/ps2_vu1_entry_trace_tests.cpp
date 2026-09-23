@@ -203,5 +203,55 @@ void register_ps2_vu1_entry_trace_tests()
             ps2_vu1_entry_trace::clearForTest();
             std::remove(tmp.c_str());
         });
+
+        tc.Run("E50 all-mode captures each new startPC once with regs and a pair cap", [](TestCase &t)
+        {
+            const std::string tmp = traceTmpPath("ps2x-vu1-entry-e50-all.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_vu1_entry_trace::configureForTest(tmp.c_str(), {0u}, 5u),
+                     "test config should install");
+            ps2_vu1_entry_trace::setModeForTest(true, 2u, 100000u);
+
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            writeVuPair(fx.code, 0x0u, kLowerIaddiuVi3, kVuUpperNop);
+            writeVuPair(fx.code, 0x8u, kLowerBToLoop, kVuUpperNop);
+            writeVuPair(fx.code, 0x10u, 0u, kVuUpperNop);
+            writeVuPair(fx.code, 0x418u, kLowerBSelf, kVuUpperNop);
+            writeVuPair(fx.code, 0x420u, 0u, kVuUpperNop);
+
+            // Before the gate nothing registers.
+            ps2_vu1_entry_trace::noteVsync(4u);
+            ps2_vu1_entry_trace::noteMscalEntry(0x0u, false, fx.data, PS2_VU1_DATA_SIZE);
+            t.IsTrue(!ps2_vu1_entry_trace::takeArm(0x0u), "pre-gate MSCAL must not arm");
+
+            ps2_vu1_entry_trace::noteVsync(5u);
+            ps2_vu1_entry_trace::noteMscalEntry(0x0u, false, fx.data, PS2_VU1_DATA_SIZE);
+            VU1Interpreter vu;
+            vu.state().vf[7][0] = 2.5f;
+            vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                       fx.gs, &fx.mem, 0u, 0u, 0u, 1000u);
+            // A repeat of the same PC does not arm; a new PC does.
+            ps2_vu1_entry_trace::noteMscalEntry(0x0u, false, fx.data, PS2_VU1_DATA_SIZE);
+            t.IsTrue(!ps2_vu1_entry_trace::takeArm(0x0u), "repeat PC must not re-arm");
+            ps2_vu1_entry_trace::noteMscalEntry(0x10u, false, fx.data, PS2_VU1_DATA_SIZE);
+            t.IsTrue(ps2_vu1_entry_trace::takeArm(0x10u), "a new PC arms in all-mode");
+            ps2_vu1_entry_trace::finishEntry(ps2_vu1_entry_trace::armIndex(0x10u), {}, 0u, 0u);
+
+            const std::string text = readWholeFile(tmp);
+            t.IsTrue(contains(text, "entry startPC=0x0 vsync=5"), "first PC block opens");
+            t.IsTrue(contains(text, "entry startPC=0x10 vsync=5"), "second PC block opens");
+            t.IsTrue(contains(text, "reg vf0 00000000 00000000 00000000 3f800000 | 0 0 0 1"),
+                     "VF0 is dumped at entry");
+            t.IsTrue(contains(text, "reg vf7 40200000 00000000 00000000 00000000 | 2.5 0 0 0"),
+                     "VF registers are dumped as hex and float");
+            t.IsTrue(contains(text, "reg vi0 00000000 0"), "VI registers are dumped");
+            t.IsTrue(contains(text, "endentry startPC=0x0 pairs=2 arrivals=0"),
+                     "the pair stream stops at MAXPAIRS");
+            t.Equals(countOccurrences(text, "pair pc="), 2u, "only MAXPAIRS pair lines are kept");
+
+            ps2_vu1_entry_trace::clearForTest();
+            std::remove(tmp.c_str());
+        });
     });
 }

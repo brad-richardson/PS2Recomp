@@ -254,6 +254,7 @@ private:
     uint32_t m_entryTarget = 0u;
     uint32_t m_entryPairs = 0u;
     uint32_t m_entryArrivals = 0u;
+    uint32_t m_entryMaxPairs = 0u; // E50: PS2X_VU1_ENTRY_TRACE_MAXPAIRS
     std::vector<std::string> m_entryLines;
     bool m_entryStoreValid = false;
     uint32_t m_entryStoreAddr = 0u;
