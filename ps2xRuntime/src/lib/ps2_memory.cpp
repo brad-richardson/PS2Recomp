@@ -166,14 +166,17 @@ namespace
             return &gs.imr;
         case 0x1040:
             return &gs.busdir;
-        case 0x1080:
-            return &gs.siglblid;
+        // SIGLBLID (offset 0x1080): same exclusion as CSR above — it is
+        // std::atomic<uint64_t> (GB2 Part 7). Callers check for offset
+        // 0x1080 themselves and go through writeSiglblidHalf/
+        // siglblid.load()/.store() instead of gsRegPtr().
         default:
             return nullptr;
         }
     }
 
     constexpr uint32_t kGsCsrRegOffset = 0x1000u;
+    constexpr uint32_t kGsSiglblidRegOffset = 0x1080u;
 
     // GS CSR bits 15:14: FIFO status, a read-only 2-bit field. Values 00 =
     // in-between, 01 = empty, 10 = almost-full, 11 = reserved; reset is 01
@@ -239,6 +242,20 @@ namespace
             // FIFO is read-only, HLE'd as always-empty (see above).
             desired = (desired & ~kGsCsrFifoMask) | kGsCsrFifoEmpty;
         } while (!csr.compare_exchange_weak(expected, desired));
+    }
+
+    // GB2 Part 7: 32-bit guest-store merge into one half of SIGLBLID.
+    // Plain merge (no W1C bits); CAS loop because the worker's
+    // SIGNAL/LABEL masked-RMW touches the same word on other threads.
+    inline void writeSiglblidHalf(std::atomic<uint64_t> &siglblid, uint32_t off, uint32_t value)
+    {
+        uint64_t expected = siglblid.load();
+        uint64_t desired;
+        do
+        {
+            const uint64_t mask = 0xFFFFFFFFull << (off * 8u);
+            desired = (expected & ~mask) | (static_cast<uint64_t>(value) << (off * 8u));
+        } while (!siglblid.compare_exchange_weak(expected, desired));
     }
 
     constexpr std::array<uint32_t, 4> kEeTimerBases = {
@@ -462,6 +479,7 @@ bool PS2Memory::initialize(size_t ramSize)
         // a guaranteed-valid atomic store; make the initialization explicit.
         // CSR resets with FIFO (bits 15:14) = EMPTY, i.e. 0x4000 (see above).
         gs_regs.csr.store(kGsCsrFifoEmpty);
+        gs_regs.siglblid.store(0u); // atomic: explicit store after memset, like csr.
         gs_regs.dispfb1 = (0ULL << 0) | (10ULL << 9) | (0ULL << 15) | (0ULL << 32) | (0ULL << 43);
         gs_regs.display1 = (0ULL << 0) | (0ULL << 12) | (0ULL << 23) | (0ULL << 27) | (639ULL << 32) | (447ULL << 44);
         gs_regs.dispfb2 = gs_regs.dispfb1;
@@ -846,6 +864,11 @@ uint32_t PS2Memory::read32(uint32_t address)
             uint64_t val = gs_regs.csr.load();
             return (uint32_t)(val >> (off * 8));
         }
+        if (regOff == kGsSiglblidRegOffset)
+        {
+            uint64_t val = gs_regs.siglblid.load();
+            return (uint32_t)(val >> (off * 8));
+        }
         uint64_t *reg = gsRegPtr(gs_regs, address);
         if (!reg)
             return 0;
@@ -891,6 +914,10 @@ uint64_t PS2Memory::read64(uint32_t address)
         if (regOff == kGsCsrRegOffset)
         {
             return gs_regs.csr.load();
+        }
+        if (regOff == kGsSiglblidRegOffset)
+        {
+            return gs_regs.siglblid.load();
         }
         uint64_t *reg = gsRegPtr(gs_regs, address);
         return reg ? *reg : 0;
@@ -1062,6 +1089,10 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
             // Done as a single atomic RMW -- see writeCsrHalf's comment.
             writeCsrHalf(gs_regs.csr, off, value);
         }
+        else if (regOff == kGsSiglblidRegOffset)
+        {
+            writeSiglblidHalf(gs_regs.siglblid, off, value);
+        }
         else if (uint64_t *reg = gsRegPtr(gs_regs, address))
         {
             uint64_t mask = 0xFFFFFFFFULL << (off * 8);
@@ -1123,6 +1154,10 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
             // CSR: bits 0..1 are write-one-to-clear status bits. Done as a single
             // atomic RMW -- see writeCsrFull's comment.
             writeCsrFull(gs_regs.csr, value);
+        }
+        else if (regOff == kGsSiglblidRegOffset)
+        {
+            gs_regs.siglblid.store(value);
         }
         else if (uint64_t *reg = gsRegPtr(gs_regs, address))
         {
@@ -1293,6 +1328,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         if (regOff == kGsCsrRegOffset)
         {
             writeCsrHalf(gs_regs.csr, off, value);
+        }
+        else if (regOff == kGsSiglblidRegOffset)
+        {
+            writeSiglblidHalf(gs_regs.siglblid, off, value);
         }
         else if (uint64_t *reg = gsRegPtr(gs_regs, address))
         {
@@ -2584,6 +2623,10 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
         if (regOff == kGsCsrRegOffset)
         {
             return static_cast<uint32_t>((gs_regs.csr.load() >> (off * 8u)) & 0xFFFFFFFFull);
+        }
+        if (regOff == kGsSiglblidRegOffset)
+        {
+            return static_cast<uint32_t>((gs_regs.siglblid.load() >> (off * 8u)) & 0xFFFFFFFFull);
         }
         if (uint64_t *reg = gsRegPtr(gs_regs, address))
         {

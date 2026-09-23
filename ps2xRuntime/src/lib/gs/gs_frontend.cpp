@@ -1767,9 +1767,16 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         {
             uint32_t id = static_cast<uint32_t>(value & 0xFFFFFFFF);
             uint32_t mask = static_cast<uint32_t>(value >> 32);
-            uint32_t lo = static_cast<uint32_t>(m_privRegs->siglblid & 0xFFFFFFFF);
-            lo = (lo & ~mask) | (id & mask);
-            m_privRegs->siglblid = (m_privRegs->siglblid & 0xFFFFFFFF00000000ULL) | lo;
+            // GB2 Part 7: CAS loop — siglblid is atomic (game-thread
+            // guest stores race this worker masked-RMW).
+            uint64_t expected = m_privRegs->siglblid.load();
+            uint64_t desired;
+            do
+            {
+                uint32_t lo = static_cast<uint32_t>(expected & 0xFFFFFFFF);
+                lo = (lo & ~mask) | (id & mask);
+                desired = (expected & 0xFFFFFFFF00000000ULL) | lo;
+            } while (!m_privRegs->siglblid.compare_exchange_weak(expected, desired));
             m_privRegs->csr.fetch_or(0x1);
         }
         break;
@@ -1791,9 +1798,15 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         {
             uint32_t id = static_cast<uint32_t>(value & 0xFFFFFFFF);
             uint32_t mask = static_cast<uint32_t>(value >> 32);
-            uint32_t hi = static_cast<uint32_t>(m_privRegs->siglblid >> 32);
-            hi = (hi & ~mask) | (id & mask);
-            m_privRegs->siglblid = (static_cast<uint64_t>(hi) << 32) | (m_privRegs->siglblid & 0xFFFFFFFF);
+            // GB2 Part 7: CAS loop — see SIGNAL above.
+            uint64_t expected = m_privRegs->siglblid.load();
+            uint64_t desired;
+            do
+            {
+                uint32_t hi = static_cast<uint32_t>(expected >> 32);
+                hi = (hi & ~mask) | (id & mask);
+                desired = (static_cast<uint64_t>(hi) << 32) | (expected & 0xFFFFFFFF);
+            } while (!m_privRegs->siglblid.compare_exchange_weak(expected, desired));
         }
         break;
     }
