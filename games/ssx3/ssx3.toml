@@ -210,12 +210,30 @@ stubs = [
 # logs that land inside an existing CSV function's range. Each is registered
 # as a resume entry of its containing function (same path as direct-call
 # interior targets). Without entries, dispatchGuestBranch silently skips the
-# call. Full census (18 targets) in ssx3 local/research/E46/REPORT.md.
-# Boot-proven subset only: adding all 18 breaks the menu transition at tick
-# ~246 (black screen; breaker in the first firers, see the E46 report), while
-# 0x396B40 alone restores template mode 6 (item-0 w0 0x1b0), menus and the
-# race HUD. Add the remaining 17 incrementally with one boot each.
+# call. Full census + bisect in ssx3 local/research/E46/REPORT.md.
+# Boot-proven set (Part 2): all census targets except the breaker 0x3B1140
+# (refcount release; executing it kills the tick-246 menu transition — black
+# screen; mechanism verified correct, state interaction TBD), plus 0x32F8B0
+# (fires only once 0x396B40 executes). Combined boot: SC rider renders,
+# race HUD live, only 0x3B1140 x3 still skipped.
 extra_function_starts = [
+  "0x00140BC0",
+  "0x00144928",
+  "0x0014E130",
+  "0x00153200",
+  "0x00153258",
+  "0x00155380",
+  "0x001566E8",
+  "0x0026A068",
+  "0x0026A0B8",
+  "0x00284940",
+  "0x002849B8",
+  "0x00284B50",
+  "0x0030DB90",
+  "0x0032F8B0",
+  "0x00375A00",
+  "0x0038F7F8",
+  "0x003968C8",
   "0x00396B40",
 ]
 
