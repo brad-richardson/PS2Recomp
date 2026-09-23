@@ -13,6 +13,7 @@
 #endif
 
 #include "ps2_runtime.h"
+#include "ps2_mpg_src_trace.h"
 
 static inline int32_t Ps2ExtractEpi32(__m128i v, int index)
 {
@@ -360,6 +361,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         uint8_t _wv = (uint8_t)(val);                                                  \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 1u, (uint64_t)_wv, 0u, ctx, runtime);    \
+        if (ps2_mpg_src_trace::writeArmed())                                           \
+            ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 1u, (uint64_t)_wv, 0u, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                       \
             runtime->Store8(rdram, ctx, _addr, _wv);                                   \
         else                                                                           \
@@ -376,6 +379,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         uint16_t _wv = (uint16_t)(val);                                                  \
         if (ps2DiagWatchEnabled())                                                       \
             ps2DiagWatchReport(rdram, _addr, 2u, (uint64_t)_wv, 0u, ctx, runtime);      \
+        if (ps2_mpg_src_trace::writeArmed())                                             \
+            ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 2u, (uint64_t)_wv, 0u, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                         \
             runtime->Store16(rdram, ctx, _addr, _wv);                                    \
         else                                                                             \
@@ -392,6 +397,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         uint32_t _wv = (uint32_t)(val);                                                  \
         if (ps2DiagWatchEnabled())                                                       \
             ps2DiagWatchReport(rdram, _addr, 4u, (uint64_t)_wv, 0u, ctx, runtime);      \
+        if (ps2_mpg_src_trace::writeArmed())                                             \
+            ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                         \
             runtime->Store32(rdram, ctx, _addr, _wv);                                    \
         else                                                                             \
@@ -408,6 +415,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         uint64_t _wv = (uint64_t)(val);                                                \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 8u, _wv, 0u, ctx, runtime);              \
+        if (ps2_mpg_src_trace::writeArmed())                                           \
+            ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                       \
             runtime->Store64(rdram, ctx, _addr, _wv);                                  \
         else                                                                           \
@@ -426,6 +435,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value));       \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 16u, _lo, _hi, ctx, runtime);            \
+        if (ps2_mpg_src_trace::writeArmed())                                           \
+            ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                       \
             runtime->Store128(rdram, ctx, _addr, _value);                              \
         else                                                                           \

@@ -1,0 +1,417 @@
+// E40 DEV-ONLY VIF1 MPG source-address trace behind PS2X_MPG_SRC_TRACE=<file>.
+//
+// Master gate: PS2X_MPG_SRC_TRACE names the text file receiving `mpgsrc`
+// lines (one per qualifying VIF1 REF/REFS/REFE tag seen by the DMA chain
+// walker) and `tagwrite` lines (guest stores to an armed tag's addr word).
+// Unset/empty (default) = one relaxed atomic check per tap; zero
+// guest-visible behavior change, no I/O.
+// Optional binds: PS2X_MPG_SRC_TRACE_FROM / PS2X_MPG_SRC_TRACE_TO
+// (inclusive guest-vsync window; default 0..2^64-1, vsync from GS vsyncTick).
+// Hard cap: 2,000 lines total (both kinds), then the file goes quiet.
+//
+// A tag qualifies when it is a VIF1 (0x10009000) chain tag with id 0/3/4
+// (REF/REFS/REFE) AND either its REF addr falls in [0x430000,0x440000) or a
+// bounded command-boundary scan of its payload finds a VIF MPG opcode. The
+// scan is a bonus path: it walks at most 64 QWs, understands fixed-size
+// commands plus MPG (hit) and DIRECT (skip), and stops conservatively at
+// UNPACK/overrun, so out-of-range MPGs deeper in a payload may be missed
+// (stated gap). In-range tags always log.
+//
+// `mpgsrc` line:
+//   mpgsrc vsync=<n> tag_at=0x<EE addr of the tag> id=<0/3/4> qwc=<n>
+//     addr=0x<ref addr> tte_vif=<16 hex digits: tag bytes 8..16 in stream order>
+// The first time a new tag_at is logged (and the vsync is inside the
+// window), a write watch is armed on tag_at+4 (the tag's addr word, holding
+// the REF addr in bits 32..63 of the 128-bit tag). At most 64 watches.
+//
+// `tagwrite` line (one per armed watch overlapped by a guest store):
+//   tagwrite vsync=<n> addr=0x<watched word> value=0x<overlapped word>
+//     pc=0x<guest pc> ra=0x<> fn=<host func, i.e. sub_* for guest code>
+//     a0=.. a1=.. a2=.. a3=.. v0=.. v1=.. t0=.. .. t9=..
+// with the GPRs ($a0-$a3,$v0,$v1,$t0-$t9) read at the store.
+//
+// Plumbing (cited reuse, not a new mechanism): guest RAM stores funnel
+// through the WRITE8/16/32/64/128 macros in ps2_runtime_macros.h, which
+// already host the P1f watchpoint (ps2DiagWatchReport, gated by
+// PS2X_DIAG_WATCH) and the no-op ps2TraceGuestWrite tap. The E40 hook sits
+// alongside them behind writeArmed() (one relaxed atomic check when off)
+// and forwards runtime/ctx/__func__ to noteStoreCtx. Constant-address
+// stores emitted as inlined `ps2TraceGuestWrite(...); FAST_WRITE*(...)`
+// sequences in generated code bypass the macros and are NOT watched
+// (stated gap); chain-builder tag writes are dynamic (register+offset) and
+// use the macros.
+
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include "ps2_runtime.h"
+
+namespace ps2_mpg_src_trace
+{
+
+inline constexpr uint64_t kMaxLines = 2000ull;
+inline constexpr uint64_t kFlushEvery = 128ull;
+inline constexpr uint32_t kMaxWatches = 64u;
+inline constexpr uint32_t kAddrLo = 0x00430000u;
+inline constexpr uint32_t kAddrHi = 0x00440000u;
+
+// GPR indices logged on a tagwrite: a0-a3, v0-v1, t0-t9.
+inline constexpr int kWatchRegCount = 16;
+inline constexpr int kWatchRegs[16] = {4, 5, 6, 7, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25};
+inline constexpr const char *kWatchRegNames[16] = {
+    "a0", "a1", "a2", "a3", "v0", "v1",
+    "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"};
+
+namespace detail
+{
+
+    struct State
+    {
+        std::mutex mutex;
+        bool initDone = false;
+        bool enabled = false;
+        std::string path;
+        uint64_t from = 0u;
+        uint64_t to = ~0ull;
+        std::ofstream out;
+        bool outOpen = false;
+        bool capped = false;
+        uint64_t linesWritten = 0u;
+        std::vector<uint32_t> watches; // armed tag_at+4 words
+    };
+
+    inline State &state()
+    {
+        static State s;
+        return s;
+    }
+
+    inline std::atomic<bool> &initDone()
+    {
+        static std::atomic<bool> done{false};
+        return done;
+    }
+
+    inline std::atomic<bool> &enabledFlag()
+    {
+        static std::atomic<bool> on{false};
+        return on;
+    }
+
+    inline std::atomic<uint32_t> &armedCount()
+    {
+        static std::atomic<uint32_t> n{0u};
+        return n;
+    }
+
+    inline bool parseU64(const char *text, uint64_t &out)
+    {
+        if (!text || text[0] == '\0')
+        {
+            return false;
+        }
+        uint64_t value = 0u;
+        for (const char *p = text; *p != '\0'; ++p)
+        {
+            if (*p < '0' || *p > '9')
+            {
+                return false;
+            }
+            value = value * 10u + static_cast<uint64_t>(*p - '0');
+        }
+        out = value;
+        return true;
+    }
+
+    inline void initLocked(State &s)
+    {
+        s.initDone = true;
+        const char *file = std::getenv("PS2X_MPG_SRC_TRACE");
+        if (!file || file[0] == '\0')
+        {
+            return;
+        }
+        s.path = file;
+        uint64_t from = 0u;
+        uint64_t to = ~0ull;
+        if (const char *env = std::getenv("PS2X_MPG_SRC_TRACE_FROM"))
+        {
+            if (!parseU64(env, from))
+            {
+                return;
+            }
+        }
+        if (const char *env = std::getenv("PS2X_MPG_SRC_TRACE_TO"))
+        {
+            if (!parseU64(env, to))
+            {
+                return;
+            }
+        }
+        s.from = from;
+        s.to = to;
+        s.enabled = true;
+        enabledFlag().store(true, std::memory_order_relaxed);
+    }
+
+    inline void ensureInit()
+    {
+        if (initDone().load(std::memory_order_relaxed))
+        {
+            return;
+        }
+        State &s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (s.initDone)
+        {
+            initDone().store(true, std::memory_order_relaxed);
+            return;
+        }
+        initLocked(s);
+        initDone().store(true, std::memory_order_relaxed);
+    }
+
+    inline void openLocked(State &s)
+    {
+        if (s.outOpen || s.capped || s.path.empty())
+        {
+            return;
+        }
+        s.out.open(s.path, std::ios::out | std::ios::trunc);
+        s.outOpen = s.out.is_open();
+        if (!s.outOpen)
+        {
+            s.capped = true;
+        }
+    }
+
+    inline void emitLineLocked(State &s, const char *line)
+    {
+        openLocked(s);
+        if (!s.outOpen)
+        {
+            return;
+        }
+        s.out << line << '\n';
+        ++s.linesWritten;
+        // Boot harnesses SIGTERM the runner at the wall cap, which skips
+        // static destructors and drops the final stdio buffer. Flush
+        // periodically so a killed run loses at most kFlushEvery lines.
+        if ((s.linesWritten % kFlushEvery) == 0u)
+        {
+            s.out.flush();
+        }
+        if (s.linesWritten >= kMaxLines)
+        {
+            s.capped = true;
+        }
+    }
+
+} // namespace detail
+
+inline bool enabled()
+{
+    detail::ensureInit();
+    return detail::enabledFlag().load(std::memory_order_relaxed);
+}
+
+// Fast gate for the per-store macro hook: enabled AND at least one watch.
+inline bool writeArmed()
+{
+    if (!enabled())
+    {
+        return false;
+    }
+    return detail::armedCount().load(std::memory_order_relaxed) != 0u;
+}
+
+// Walker side: log one mpgsrc line and arm a watch on tagAt+4. No-ops
+// outside the vsync window (no line, no arm).
+inline void noteMpgsrc(uint64_t vsync, uint32_t tagAt, uint32_t id,
+                       uint32_t qwc, uint32_t addr,
+                       uint32_t tteWord0, uint32_t tteWord1)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    char line[192];
+    std::snprintf(line, sizeof(line),
+                  "mpgsrc vsync=%llu tag_at=0x%08x id=%u qwc=%u addr=0x%08x tte_vif=%08x%08x",
+                  static_cast<unsigned long long>(vsync), tagAt, id, qwc,
+                  addr, tteWord0, tteWord1);
+    detail::emitLineLocked(s, line);
+    if (s.capped)
+    {
+        return;
+    }
+    const uint32_t watch = tagAt + 4u;
+    bool known = false;
+    for (const uint32_t w : s.watches)
+    {
+        if (w == watch)
+        {
+            known = true;
+            break;
+        }
+    }
+    if (!known && s.watches.size() < kMaxWatches)
+    {
+        s.watches.push_back(watch);
+        detail::armedCount().store(static_cast<uint32_t>(s.watches.size()),
+                                   std::memory_order_relaxed);
+    }
+}
+
+// Store side (called from the WRITE* macros via noteStoreCtx): for every
+// armed watch overlapped by [addr, addr+width), emit one tagwrite line with
+// the overlapped 32-bit word, pc/ra/fn and the computing GPRs.
+inline void noteStore(uint64_t vsync, uint32_t addr, uint32_t width,
+                      uint64_t valueLo, uint64_t valueHi,
+                      uint32_t pc, uint32_t ra, const char *fn,
+                      const R5900Context *ctx)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    if (s.watches.empty())
+    {
+        return;
+    }
+    uint8_t bytes[16];
+    std::memcpy(bytes + 0u, &valueLo, sizeof(valueLo));
+    std::memcpy(bytes + 8u, &valueHi, sizeof(valueHi));
+    for (const uint32_t watch : s.watches)
+    {
+        if (addr + width <= watch || watch + 4u <= addr)
+        {
+            continue;
+        }
+        // Overlapped word, little-endian byte pick.
+        uint32_t value = 0u;
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            const uint32_t src = watch + i;
+            if (src < addr || src >= addr + width || src - addr >= 16u)
+            {
+                continue;
+            }
+            value |= static_cast<uint32_t>(bytes[src - addr]) << (i * 8u);
+        }
+        char line[640];
+        int w = std::snprintf(line, sizeof(line),
+                              "tagwrite vsync=%llu addr=0x%08x value=0x%08x pc=0x%08x ra=0x%08x fn=%s",
+                              static_cast<unsigned long long>(vsync), watch, value,
+                              pc, ra, fn ? fn : "?");
+        for (int r = 0; r < kWatchRegCount && w > 0; ++r)
+        {
+            const uint32_t rv = (ctx != nullptr) ? getRegU32(ctx, kWatchRegs[r]) : 0u;
+            w += std::snprintf(line + w, sizeof(line) - static_cast<size_t>(w),
+                               " %s=0x%08x", kWatchRegNames[r], rv);
+        }
+        if (w > 0)
+        {
+            detail::emitLineLocked(s, line);
+            if (s.capped)
+            {
+                return;
+            }
+        }
+    }
+}
+
+// Macro glue: extracts vsync/pc/ra/GPRs from the store site context.
+inline void noteStoreCtx(const PS2Runtime *runtime, const R5900Context *ctx,
+                         uint32_t addr, uint32_t width,
+                         uint64_t valueLo, uint64_t valueHi, const char *fn)
+{
+    uint64_t vsync = 0u;
+    if (runtime != nullptr)
+    {
+        vsync = runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed);
+    }
+    const uint32_t pc = (ctx != nullptr) ? ctx->pc : 0u;
+    const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+    noteStore(vsync, addr, width, valueLo, valueHi, pc, ra, fn, ctx);
+}
+
+inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to = ~0ull)
+{
+    if (!path || path[0] == '\0')
+    {
+        return false;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (s.outOpen)
+    {
+        s.out.close();
+        s.outOpen = false;
+    }
+    s.path = path;
+    s.from = from;
+    s.to = to;
+    s.linesWritten = 0u;
+    s.capped = false;
+    s.watches.clear();
+    s.initDone = true;
+    detail::initDone().store(true, std::memory_order_relaxed);
+    s.enabled = true;
+    detail::enabledFlag().store(true, std::memory_order_relaxed);
+    detail::armedCount().store(0u, std::memory_order_relaxed);
+    return true;
+}
+
+inline void clearForTest()
+{
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (s.outOpen)
+    {
+        s.out.close();
+        s.outOpen = false;
+    }
+    s.path.clear();
+    s.from = 0u;
+    s.to = ~0ull;
+    s.linesWritten = 0u;
+    s.capped = false;
+    s.watches.clear();
+    s.initDone = true;
+    detail::initDone().store(true, std::memory_order_relaxed);
+    s.enabled = false;
+    detail::enabledFlag().store(false, std::memory_order_relaxed);
+    detail::armedCount().store(0u, std::memory_order_relaxed);
+}
+
+} // namespace ps2_mpg_src_trace

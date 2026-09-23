@@ -1,6 +1,7 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_e3.h"
 #include "ps2_e7.h"
+#include "ps2_mpg_src_trace.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_log.h"
@@ -46,6 +47,77 @@ namespace
     inline bool isIoRegister(uint32_t addr)
     {
         return Ps2AddressInRange(addr, PS2_IO_BASE, PS2_IO_SIZE);
+    }
+
+    // E40 DEV-ONLY: bounded command-boundary scan of a VIF1 REF payload for
+    // a VIF MPG opcode (0x4A in bits 24..30). Walks at most 64 QWs;
+    // fixed-size commands step by their size, DIRECT skips its payload,
+    // UNPACK/overrun/unknown-high stop conservatively (an MPG deeper in the
+    // payload may be missed; in-range tags never need this path).
+    inline bool e40PayloadHasMpg(const uint8_t *base, uint32_t maxSz, uint32_t phys, uint32_t bytes)
+    {
+        if (bytes > 1024u)
+            bytes = 1024u;
+        if (phys >= maxSz)
+            return false;
+        if (bytes > maxSz - phys)
+            bytes = maxSz - phys;
+        uint32_t pos = 0u;
+        while (pos + 4u <= bytes)
+        {
+            uint32_t w = 0u;
+            std::memcpy(&w, base + phys + pos, sizeof(w));
+            const uint8_t opcode = static_cast<uint8_t>((w >> 24) & 0x7Fu);
+            pos += 4u;
+            switch (opcode)
+            {
+            case 0x00: // NOP
+            case 0x01: // STCYCL
+            case 0x02: // OFFSET
+            case 0x03: // BASE
+            case 0x04: // ITOP
+            case 0x05: // STMOD
+            case 0x06: // MSKPATH3
+            case 0x07: // MARK
+            case 0x10: // FLUSHE
+            case 0x11: // FLUSH
+            case 0x13: // FLUSHA
+            case 0x14: // MSCAL
+            case 0x15: // MSCALF
+            case 0x17: // MSCNT
+                break;
+            case 0x20: // STMASK
+                if (pos + 4u > bytes)
+                    return false;
+                pos += 4u;
+                break;
+            case 0x30: // STROW
+            case 0x31: // STCOL
+                if (pos + 16u > bytes)
+                    return false;
+                pos += 16u;
+                break;
+            case 0x4A: // MPG
+                return true;
+            case 0x50: // DIRECT
+            case 0x51: // DIRECTHL
+            {
+                uint32_t qw = w & 0xFFFFu;
+                if (qw == 0u)
+                    qw = 65536u;
+                const uint64_t skip = static_cast<uint64_t>(qw) * 16ull;
+                if (skip > static_cast<uint64_t>(bytes - pos))
+                    return false;
+                pos += static_cast<uint32_t>(skip);
+                break;
+            }
+            default:
+                if (opcode >= 0x60u)
+                    return false; // UNPACK or unknown-high: stop conservatively.
+                break;            // Other unknown words: step on.
+            }
+        }
+        return false;
     }
 
     inline uint64_t *gsRegPtr(GSRegisters &gs, uint32_t addr)
@@ -1431,6 +1503,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
 
                         const uint8_t *tp = tagBase + physTag;
+                        const uint32_t curTagEE = tagAddr;
                         uint64_t tag = loadScalar<uint64_t>(tp, 0, 16, "dma chain tag", tagAddr);
                         uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
@@ -1505,6 +1578,45 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             hasPayload = false;
                             endChain = true;
                             break;
+                        }
+
+                        // E40 DEV-ONLY MPG source trace: for VIF1 REF/REFS/REFE
+                        // tags, log the tag site + REF addr and arm a write
+                        // watch on the addr word when the tag qualifies
+                        // (in-range addr, or an MPG found by bounded scan).
+                        if (channelBase == 0x10009000u &&
+                            (id == 0u || id == 3u || id == 4u) &&
+                            ps2_mpg_src_trace::enabled())
+                        {
+                            bool qualifies = (addr >= ps2_mpg_src_trace::kAddrLo &&
+                                              addr < ps2_mpg_src_trace::kAddrHi);
+                            if (!qualifies && hasPayload)
+                            {
+                                try
+                                {
+                                    const bool pScratch = isScratchpad(dataAddr);
+                                    const uint32_t pPhys = translateAddress(dataAddr);
+                                    const uint8_t *pBase = pScratch ? m_scratchpad : m_rdram;
+                                    const uint32_t pMax = pScratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+                                    const uint64_t pBytes64 = static_cast<uint64_t>(tagQwc) * 16ull;
+                                    const uint32_t pBytes = (pBytes64 > 0xFFFFFFFFull)
+                                                                ? 0xFFFFFFFFu
+                                                                : static_cast<uint32_t>(pBytes64);
+                                    qualifies = e40PayloadHasMpg(pBase, pMax, pPhys, pBytes);
+                                }
+                                catch (...)
+                                {
+                                }
+                            }
+                            if (qualifies)
+                            {
+                                uint32_t tte0 = 0u, tte1 = 0u;
+                                std::memcpy(&tte0, tp + 8u, sizeof(tte0));
+                                std::memcpy(&tte1, tp + 12u, sizeof(tte1));
+                                ps2_mpg_src_trace::noteMpgsrc(
+                                    gs_regs.vsyncTick.load(std::memory_order_relaxed),
+                                    curTagEE, id, tagQwc, addr, tte0, tte1);
+                            }
                         }
 
                         // VIF0/VIF1 chain transfers with CHCR.TTE (bit 6) set move the
