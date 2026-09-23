@@ -3,6 +3,7 @@
 #include "ps2_e44_trace.h"
 #include "ps2_e7.h"
 #include "ps2_mpg_src_trace.h"
+#include "ps2_pk.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_log.h"
@@ -2191,6 +2192,8 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
         if (packet.size() >= 16u)
         {
             ps2_e7::packet(gs_regs.vsyncTick.load(), "path3-flush", packet.data(), static_cast<uint32_t>(packet.size()), m_path3Masked, m_path3MaskedFifo.size());
+            ps2_pk::noteSubmit("3", packet.data(), static_cast<uint32_t>(packet.size()),
+                               gs_regs.vsyncTick.load(std::memory_order_relaxed));
             emit(packet.data(), static_cast<uint32_t>(packet.size()));
         }
     }
@@ -2216,6 +2219,8 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
         flushMaskedPath3Packets(false);
     }
 
+    ps2_pk::noteSubmit(pathId == GifPathId::Path1 ? "1" : (pathId == GifPathId::Path2 ? "2" : "3"),
+                       data, sizeBytes, gs_regs.vsyncTick.load(std::memory_order_relaxed));
     if (m_gifArbiter)
         m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl);
     else if (m_gifPacketCallback)
@@ -2431,6 +2436,9 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
     m_seenGifCopy = true;
     m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
     gs.uploadImageNative(setupRegs[0], setupRegs[1], setupRegs[2], setupRegs[3], imageData, imageBytes);
+    if (imageBytes != 0u)
+        ps2_pk::noteSubmitNative(setupRegs, imageData, imageBytes,
+                                 gs_regs.vsyncTick.load(std::memory_order_relaxed));
 
     m_ioRegisters[GIF_CHANNEL + 0x30u] = finalTadr;
     m_ioRegisters[GIF_CHANNEL + 0x40u] = 0u;
@@ -2507,6 +2515,8 @@ bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t c
         return false;
     if (!gs.processNativePackedGIFPacket(payload, payloadBytes))
         return false;
+    ps2_pk::noteSubmit("packed", payload, payloadBytes,
+                       gs_regs.vsyncTick.load(std::memory_order_relaxed));
 
     m_dmaStartCount.fetch_add(1, std::memory_order_relaxed);
     m_seenGifCopy = true;

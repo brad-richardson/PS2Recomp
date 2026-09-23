@@ -88,6 +88,12 @@ size_t GsWorker::pendingBytes() const
     return m_queuedBytes;
 }
 
+bool GsWorker::isQuiescent() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_queue.empty() && !m_executing;
+}
+
 void GsWorker::threadMain()
 {
     ThreadNaming::SetCurrentThreadName("GsWorker");
@@ -106,10 +112,15 @@ void GsWorker::threadMain()
             cmd = std::move(m_queue.front());
             m_queue.pop_front();
             m_queuedBytes -= cmd.payloadBytes();
+            m_executing = true;
         }
         m_hasSpace.notify_all();
         m_handler(cmd);
         m_executedCount.fetch_add(1u, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_executing = false;
+        }
         if (cmd.rpc)
             cmd.rpc->signal();
     }
