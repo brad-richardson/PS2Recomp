@@ -1958,6 +1958,20 @@ namespace
         case 0x68: return "XTOP";
         case 0x69: return "XITOP";
         case 0x6C: return "XGKICK";
+        case 0x70: return "ESADD";
+        case 0x71: return "ERSADD";
+        case 0x72: return "ELENG";
+        case 0x73: return "ERLENG";
+        case 0x74: return "EATANxy";
+        case 0x75: return "EATANxz";
+        case 0x76: return "ESUM";
+        case 0x77: return "ERSQRT";
+        case 0x78: return "ESQRT";
+        case 0x79: return "ESIN";
+        case 0x7A: return "ERCPR";
+        case 0x7B: return "WAITP";
+        case 0x7C: return "EATAN";
+        case 0x7D: return "EEXP";
         default: return nullptr;
         }
     }
@@ -2427,14 +2441,28 @@ void VU1Interpreter::buildTraceDetail(const uint8_t *vuCode, uint32_t codeSize,
         s << "branch none\n";
     }
 
-    // Loop body disassembly: static span target..PC (cap 32), else the 32
-    // most-visited PCs in ascending order.
+    // Loop body disassembly: the static span target..PC plus the branch
+    // delay slot. Spans over 32 PCs keep the 32 ending at the delay slot
+    // (branch context over loop head); the flag-op scan above already
+    // covers the whole span. Without a static branch, the 32 most-visited
+    // PCs in ascending order.
     std::vector<uint32_t> bodyPcs;
     if (haveBranch && branchTargetKnown)
     {
-        for (uint32_t pc = branchTarget; pc <= branchPc && bodyPcs.size() < 32u; pc += 8u)
+        std::vector<uint32_t> span;
+        for (uint32_t pc = branchTarget; pc <= branchPc && span.size() < 4096u; pc += 8u)
         {
-            bodyPcs.push_back(pc);
+            span.push_back(pc);
+        }
+        if (branchPc + 8u <= codeSize)
+        {
+            span.push_back(branchPc + 8u); // delay slot
+        }
+        const size_t keep = 32u;
+        const size_t skip = span.size() > keep ? span.size() - keep : 0u;
+        for (size_t i = skip; i < span.size(); ++i)
+        {
+            bodyPcs.push_back(span[i]);
         }
     }
     else
@@ -2482,5 +2510,44 @@ void VU1Interpreter::buildTraceDetail(const uint8_t *vuCode, uint32_t codeSize,
         }
         s << " " << ld.text << " | " << upText << "\n";
     }
+    // Entry path: visited PCs outside the emitted body (cap 16, ascending),
+    // i.e. how the program reaches the loop and arms its limit/counter.
+    s << "entry";
+    {
+        std::vector<bool> inBody(codeSize / 8u + 1u, false);
+        for (uint32_t pc : bodyPcs)
+        {
+            if (pc / 8u < inBody.size())
+            {
+                inBody[pc / 8u] = true;
+            }
+        }
+        std::vector<std::pair<uint32_t, uint32_t>> outside; // (pc, count)
+        for (size_t i = 0u; i < m_traceHist.size(); ++i)
+        {
+            if (m_traceHist[i] != 0u && (i >= inBody.size() || !inBody[i]))
+            {
+                outside.emplace_back(static_cast<uint32_t>(i * 8u), m_traceHist[i]);
+            }
+        }
+        std::sort(outside.begin(), outside.end(),
+                  [](const auto &a, const auto &b)
+                  { return a.first < b.first; });
+        if (outside.empty())
+        {
+            s << " none";
+        }
+        for (size_t i = 0u; i < outside.size() && i < 16u; ++i)
+        {
+            std::snprintf(num, sizeof(num), " 0x%x=%u", outside[i].first, outside[i].second);
+            s << num;
+        }
+        if (outside.size() > 16u)
+        {
+            std::snprintf(num, sizeof(num), " +%u more", static_cast<unsigned>(outside.size() - 16u));
+            s << num;
+        }
+    }
+    s << "\n";
     out = s.str();
 }
