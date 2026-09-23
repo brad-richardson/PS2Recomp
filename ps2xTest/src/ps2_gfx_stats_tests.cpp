@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_gfx_stats.h"
+#include "ps2_e50_valwatch.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
@@ -309,6 +310,27 @@ void register_ps2_gfx_stats_tests()
                      ps2_gfx_stats::kScrOn, "the last pixel is on");
             t.Equals(classifyScreen(2304.0f, 2304.0f, 1900.0f, 1900.0f, ofx, ofy, 0, 511, 0, 447),
                      ps2_gfx_stats::kScrOff, "one past the last pixel is off");
+        });
+
+        tc.Run("E50 value watch logs matching lanes in window only", [](TestCase &t)
+        {
+            const std::string tmp = statsTmpPath("ps2x-e50-valwatch.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_e50_valwatch::configureForTest(tmp.c_str(), "3ee33810,0xbe73a2e6", 10u, 20u),
+                     "value list should parse");
+            t.IsTrue(ps2_e50_valwatch::armed(), "configured watch is armed");
+            t.Equals(ps2_e50_valwatch::matchLanes(16u, 0x3ee3381000000000ull, 0x00000000be73a2e6ull), 0x6u,
+                     "lanes 1 and 2 match");
+            t.Equals(ps2_e50_valwatch::matchLanes(4u, 0x3ee33811ull, 0u), 0u, "near miss does not match");
+            ps2_e50_valwatch::noteStore(9u, 0x1000u, 4u, 0x3ee33810ull, 0u, 0x200u, 0x300u, "sub_x", nullptr);
+            ps2_e50_valwatch::noteStore(12u, 0x2000u, 16u, 0x3ee3381000000000ull, 0u, 0x204u, 0x304u, "sub_y", nullptr);
+            ps2_e50_valwatch::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.IsTrue(text.find("valwatch vsync=12 addr=0x00002004 value=0x3ee33810 width=16 pc=0x00000204 ra=0x00000304 fn=sub_y") != std::string::npos,
+                     "in-window match logs the lane address: " + text);
+            t.IsTrue(text.find("vsync=9") == std::string::npos, "out-of-window store is dropped");
+            t.IsTrue(!ps2_e50_valwatch::armed(), "cleared watch is off");
+            std::remove(tmp.c_str());
         });
 
         tc.Run("E50 T65-format class: inclusive edges and zero area", [](TestCase &t)

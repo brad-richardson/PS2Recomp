@@ -14,6 +14,7 @@
 
 #include "ps2_runtime.h"
 #include "ps2_mpg_src_trace.h"
+#include "ps2_e50_valwatch.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e43_trace.h"
 #include "ps2_e44_trace.h"
@@ -552,6 +553,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                       \
             ps2DiagWatchReport(rdram, _addr, 4u, (uint64_t)_wv, 0u, ctx, runtime);      \
+        if (ps2_e50_valwatch::armed()) /* E50 */ \
+            ps2_e50_valwatch::noteStoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
         if (ps2_mpg_src_trace::writeArmed())                                             \
             ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                         \
@@ -600,6 +603,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 8u, _wv, 0u, ctx, runtime);              \
+        if (ps2_e50_valwatch::armed()) /* E50 */ \
+            ps2_e50_valwatch::noteStoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
         if (ps2_mpg_src_trace::writeArmed())                                           \
             ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                       \
@@ -644,6 +649,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_mpg_src_trace::noteTagaddrwriteCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 16u, _lo, _hi, ctx, runtime);            \
+        if (ps2_e50_valwatch::armed()) /* E50 */ \
+            ps2_e50_valwatch::noteStoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
         if (ps2_mpg_src_trace::writeArmed())                                           \
             ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                       \
