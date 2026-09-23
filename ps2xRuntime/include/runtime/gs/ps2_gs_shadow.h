@@ -19,6 +19,12 @@
 //   PS2X_GS_SHADOW_FROM first guest vsync tick captured (default 0).
 //   PS2X_GS_SHADOW_TO   last guest vsync tick captured, exclusive
 //                       (default UINT64_MAX).
+//   PS2X_GS_SHADOW_STRIDE G46: capture at most one pair per N ticks
+//                       (default 1 = every eligible present).
+//   PS2X_GS_SHADOW_REC  G46 DIAGNOSTIC: record the fed stream to this file
+//                       (GIF packets, HLE reg writes, priv regs per present)
+//                       for offline replay; stops at PS2X_GS_SHADOW_TO or at
+//                       PS2X_GS_SHADOW_REC_CAP_MB (default 3000).
 // Hard cap: 200 pairs per process.
 
 #include <cstdint>
@@ -40,6 +46,7 @@ struct Config
     uint64_t from = 0u;
     uint64_t to = ~0ull;
     uint64_t cap = kPairCap;
+    uint64_t stride = 1u;
 };
 
 const Config &config(); // parses the environment once, latched

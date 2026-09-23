@@ -50,6 +50,14 @@ struct State
     std::atomic<bool> failed{false};
     std::atomic<bool> csvHeaderWrote{false};
     std::atomic<uint32_t> skipLogged{0u};
+    std::atomic<uint64_t> nextTick{0u};
+
+    // G46 stream recorder (PS2X_GS_SHADOW_REC). Written under `mutex`.
+    std::FILE *rec = nullptr;
+    bool recDone = false;
+    uint64_t recBytes = 0u;
+    uint64_t recCap = 0u;
+    std::string recPath;
 
 #ifdef PS2X_HAS_PARALLEL_SHADOW
     Vulkan::Context *ctx = nullptr;
@@ -80,6 +88,15 @@ void latchConfig()
     s.cfg.from = parseU64(std::getenv("PS2X_GS_SHADOW_FROM"), 0u);
     s.cfg.to = parseU64(std::getenv("PS2X_GS_SHADOW_TO"), ~0ull);
     s.cfg.cap = kPairCap;
+    s.cfg.stride = parseU64(std::getenv("PS2X_GS_SHADOW_STRIDE"), 1u);
+    if (s.cfg.stride == 0u)
+        s.cfg.stride = 1u;
+    s.nextTick.store(s.cfg.from, std::memory_order_relaxed);
+    if (const char *rec = std::getenv("PS2X_GS_SHADOW_REC"); rec && rec[0] != '\0')
+    {
+        s.recPath = rec;
+        s.recCap = parseU64(std::getenv("PS2X_GS_SHADOW_REC_CAP_MB"), 3000u) * 1024ull * 1024ull;
+    }
     const char *dir = std::getenv("PS2X_GS_SHADOW_DIR");
     if (dir && dir[0] != '\0')
         s.dir = dir;
@@ -267,6 +284,51 @@ void syncPrivLocked(State &s, const GSRegisters *priv)
     }
 }
 #endif
+
+// G46 recorder. Record layout (little-endian):
+//   'G' u8 path u32 size <size bytes>        GIF packet as fed
+//   'R' u8 addr u64 value                    HLE register write
+//   'V' u64 tick <15 x u64 priv>             present: pmode..bgcolor
+// Header: "G46REC1\0". Stops (file closed) at cfg.to or the byte cap.
+void recWriteLocked(State &s, const void *a, size_t n, const void *b = nullptr, size_t m = 0u)
+{
+    if (s.recDone || s.recPath.empty())
+        return;
+    if (!s.rec)
+    {
+        s.rec = std::fopen(s.recPath.c_str(), "wb");
+        if (!s.rec)
+        {
+            s.recDone = true;
+            return;
+        }
+        std::fwrite("G46REC1", 1, 8, s.rec);
+    }
+    if (s.recBytes + n + m > s.recCap)
+    {
+        std::fclose(s.rec);
+        s.rec = nullptr;
+        s.recDone = true;
+        std::cerr << "[shadow] G46 recorder hit byte cap" << std::endl;
+        return;
+    }
+    std::fwrite(a, 1, n, s.rec);
+    if (b && m)
+        std::fwrite(b, 1, m, s.rec);
+    s.recBytes += n + m;
+}
+
+void recCloseLocked(State &s)
+{
+    if (s.rec)
+    {
+        std::fclose(s.rec);
+        s.rec = nullptr;
+    }
+    if (!s.recDone && !s.recPath.empty())
+        std::cerr << "[shadow] G46 recorder closed at " << s.recBytes << " bytes" << std::endl;
+    s.recDone = true;
+}
 
 void writeStatsFile(State &s)
 {
@@ -458,6 +520,11 @@ void onGifPacket(uint32_t path, const uint8_t *data, uint32_t sizeBytes)
     {
         if (!ensureInitLocked(s))
             return;
+        {
+            uint8_t hdr[6] = {'G', static_cast<uint8_t>(path)};
+            std::memcpy(hdr + 2, &sizeBytes, 4);
+            recWriteLocked(s, hdr, sizeof(hdr), data, sizeBytes);
+        }
         s.iface->gif_transfer(path, data, static_cast<size_t>(sizeBytes));
         s.gifFed.fetch_add(1u, std::memory_order_relaxed);
     }
@@ -485,6 +552,11 @@ void onWriteRegister(uint8_t regAddr, uint64_t value)
     {
         if (!ensureInitLocked(s))
             return;
+        {
+            uint8_t hdr[10] = {'R', regAddr};
+            std::memcpy(hdr + 2, &value, 8);
+            recWriteLocked(s, hdr, sizeof(hdr));
+        }
         s.iface->write_register(static_cast<ParallelGS::RegisterAddr>(regAddr), value);
         s.regFed.fetch_add(1u, std::memory_order_relaxed);
     }
@@ -533,10 +605,34 @@ void onPresentFrame(uint64_t tick,
         std::filesystem::create_directories(s.dir, ec);
         writeStatsFile(s);
     }
+    latchConfig();
+#ifdef PS2X_HAS_PARALLEL_SHADOW
+    if (!s.recPath.empty())
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (!s.recDone)
+        {
+            if (tick >= s.cfg.to)
+            {
+                recCloseLocked(s);
+            }
+            else if (priv)
+            {
+                uint64_t v[16] = {tick, priv->pmode, priv->smode1, priv->smode2, priv->srfsh,
+                                  priv->synch1, priv->synch2, priv->syncv, priv->dispfb1,
+                                  priv->display1, priv->dispfb2, priv->display2, priv->extbuf,
+                                  priv->extdata, priv->extwrite, priv->bgcolor};
+                const uint8_t tag = 'V';
+                recWriteLocked(s, &tag, 1u, v, sizeof(v));
+            }
+        }
+    }
+#endif
     {
         // Fast path: eligibility without the backend lock.
-        latchConfig();
         if (!tickEligible(tick, s.cfg.from, s.cfg.to, s.pairs.load(std::memory_order_relaxed), s.cfg.cap))
+            return;
+        if (tick < s.nextTick.load(std::memory_order_relaxed))
             return;
     }
 #ifdef PS2X_HAS_PARALLEL_SHADOW
@@ -545,6 +641,7 @@ void onPresentFrame(uint64_t tick,
         return;
     if (!tickEligible(tick, s.cfg.from, s.cfg.to, s.pairs.load(std::memory_order_relaxed), s.cfg.cap))
         return;
+    s.nextTick.store(tick + s.cfg.stride, std::memory_order_relaxed);
     try
     {
         if (!ensureInitLocked(s))
@@ -725,6 +822,7 @@ void resetForTest()
     s.failed.store(false);
     s.csvHeaderWrote.store(false);
     s.skipLogged.store(0u);
+    s.nextTick.store(0u);
 }
 
 } // namespace ps2x_gs_shadow
