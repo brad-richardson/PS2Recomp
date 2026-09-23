@@ -2,6 +2,7 @@
 #define PS2_GS_FRONTEND_H
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -114,6 +115,13 @@ public:
     bool queueEnabled() const { return m_worker != nullptr; }
     // Blocks until all previously enqueued commands have executed.
     void drainQueue();
+    // GB2 Part 2: monotonic counters. submitCount covers executed
+    // packets (processGIFPacket incl. the native-image shape, direct
+    // uploadImageNative, direct processNativePackedGIFPacket — each counted
+    // once at execution, so drain-then-read is exact in both modes);
+    // regWriteCount covers public writeRegister calls (HLE W1/W2 shape).
+    uint64_t submitCount() const { return m_submitCount.load(std::memory_order_relaxed); }
+    uint64_t regWriteCount() const { return m_regWriteCount.load(std::memory_order_relaxed); }
     void reset();
     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
 
@@ -277,6 +285,10 @@ private:
     // thread touches this GS; cleared only by setQueueEnabled(false) or
     // the destructor, after producer threads are joined.
     std::unique_ptr<GsWorker> m_worker;
+    // GB2 Part 2: monotonic submit counters (atomic: incremented on the
+    // worker when queued, read on the game thread after a drain).
+    std::atomic<uint64_t> m_submitCount{0};
+    std::atomic<uint64_t> m_regWriteCount{0};
 };
 
 #endif

@@ -889,6 +889,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!data || sizeBytes < 16 || !m_backend)
         return;
 
+    m_submitCount.fetch_add(1u, std::memory_order_relaxed);
     ps2_e7::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u, "gs-enter", data, sizeBytes);
     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
         return;
@@ -1006,6 +1007,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!validatePackedGifPacket(data, sizeBytes))
         return false;
 
+    m_submitCount.fetch_add(1u, std::memory_order_relaxed);
     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
                                                 {
         m_curQ = 1.0f;
@@ -1059,6 +1061,7 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    m_submitCount.fetch_add(1u, std::memory_order_relaxed);
     uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
 }
 
@@ -1346,6 +1349,7 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    m_regWriteCount.fetch_add(1u, std::memory_order_relaxed);
     writeRegisterUnlocked(regAddr, value);
 }
 
