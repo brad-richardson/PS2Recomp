@@ -7,6 +7,7 @@
 #include "ps2_vu1_entry_trace.h"
 #include "ps2_vu1_trace.h"
 #include "ps2_e15.h"
+#include "ps2_vq.h"
 
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
@@ -2623,6 +2624,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         ps2_e41_trace::noteVsync(m_vsyncTick); // E41 cdread/plant vsync mirror
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
         ps2_e4::noteVBlank(m_vsyncTick, m_runtime.gs(), m_runtime.memory().gs()); // E4 arm/freeze
+        ps2_vq::noteVBlank(m_vsyncTick, m_runtime.gs(), m_runtime.memory().gs()); // GB2 Part 2 quiescent gate
         if ((m_vsyncTick & 1u) != 0u)
         {
             m_runtime.memory().gs().csr.fetch_or(0x2000ull, std::memory_order_acq_rel);
