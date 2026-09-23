@@ -5,14 +5,17 @@
 //
 // Packets (every submitted packet, arbiter-input order):
 //   [pk] idx=<n> tick=<t> fnv=<hex32> len=<bytes> src=<1|2|3|img|packed>
-// CSR/SIGLBLID guest loads (every read COUNTED; a line is emitted only on
-// (pc,value) change, collapsing spin loops — idx gaps are spin lengths):
+// Priv-range guest loads, 32/64-bit only (every read COUNTED; a line is
+// emitted only on (pc,value) change, collapsing spin loops — idx gaps
+// are spin lengths):
 //   [csr] idx=<read ordinal> tick=<t> value=<hex> pc=<hex> addr=<hex>
 // Both streams cap at 2M lines with a TRUNCATED marker (boot-log safety).
 //
-// Also carries the Part 3 candidate-fix flag: PS2X_GS_CSR_DRAIN=1 (dev,
-// default off). When on AND the GS queue is on, a guest CSR/SIGLBLID load
-// drains the queue with a Fence first (GB1 §2c completion-visibility).
+// Also carries the candidate-fix flag: PS2X_GS_CSR_DRAIN=1 (dev, default
+// off). When on AND the GS queue is on, a guest load in the GS priv
+// range drains the queue with a Fence first (Part 3 fenced CSR/SIGLBLID
+// only; Part 7 widens to the full range — K's log proved the trigger
+// read is a non-CSR priv addr).
 //
 // Part 4: (a) all lines go to ./ps2_pklog.txt (CWD; the boot wrapper gives
 // each boot its own cwd) under one mutex — concurrent stderr writers tore
@@ -20,6 +23,14 @@
 // packet idx as [pkbytes] with the source-memory classification
 // (base=rdram+0xPHYS | spad+0xOFF | other) so a differing word maps back
 // to the VIF1 DMA source address for the PS2X_DIAG_WATCH one-word watch.
+//
+// Part 7: PS2X_GS_CSR_DRAIN=1 (kept name; now full-priv) drains the GS
+// queue before EVERY guest load in the GS priv range when the queue is
+// on (Part 5's CSR/SIGLBLID-only drain fenced the wrong set: K's CSR
+// log proved the trigger read is a non-CSR priv addr). noteCsrRead is
+// renamed notePrivRead and now logs every served priv-range load (8/16/
+// 128-bit priv loads are NOT served by read8/16/128 — pre-existing,
+// path-independent — so those widths drain but don't log).
 
 #include <atomic>
 #include <cstdint>
@@ -43,7 +54,10 @@ namespace ps2_pk
         return on;
     }
 
-    inline bool csrDrainEnabled()
+    // Part 7: same env name, widened meaning — drains before every guest
+    // load in the GS priv range (not just CSR/SIGLBLID) when the queue
+    // is on. Renamed to match (call sites updated).
+    inline bool privDrainEnabled()
     {
         static const bool on = [] {
             const char *env = std::getenv("PS2X_GS_CSR_DRAIN");
@@ -274,7 +288,9 @@ namespace ps2_pk
             emitCapture(idx, tick, "img", data, sizeBytes);
     }
 
-    inline void noteCsrRead(uint64_t tick, uint64_t value, uint32_t pc, uint32_t addr)
+    // Part 7: logs every SERVED priv-range guest load (32/64-bit). The
+    // [csr] line tag is kept for tool compat; addr disambiguates.
+    inline void notePrivRead(uint64_t tick, uint64_t value, uint32_t pc, uint32_t addr)
     {
         if (!enabled())
         {

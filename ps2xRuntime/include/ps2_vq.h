@@ -71,7 +71,7 @@ namespace ps2_vq
         words[16] = regs.vsyncTick.load(std::memory_order_relaxed);
         words[17] = regs.imr;
         words[18] = regs.busdir;
-        words[19] = regs.siglblid;
+        words[19] = regs.siglblid.load(std::memory_order_relaxed);
         return fnv1a32(reinterpret_cast<const uint8_t *>(words), sizeof(words));
     }
 

@@ -490,7 +490,7 @@ namespace
             out << "CSR      0x" << std::setw(16) << regs.csr.load() << "\n";
             out << "IMR      0x" << std::setw(16) << regs.imr << "\n";
             out << "BUSDIR   0x" << std::setw(16) << regs.busdir << "\n";
-            out << "SIGLBLID 0x" << std::setw(16) << regs.siglblid << "\n\n";
+            out << "SIGLBLID 0x" << std::setw(16) << regs.siglblid.load() << "\n\n";
             out << std::dec << std::setfill(' ');
 
             out << "[GS draw state]\n";
@@ -1512,7 +1512,7 @@ namespace
             row64("CSR", regs.csr.load());
             row64("IMR", regs.imr);
             row64("BUSDIR", regs.busdir);
-            row64("SIGLBLID", regs.siglblid);
+            row64("SIGLBLID", regs.siglblid.load());
             ImGui::EndTable();
         }
 
