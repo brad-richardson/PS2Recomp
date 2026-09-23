@@ -2,6 +2,7 @@
 #include "ps2_e3.h"
 #include "ps2_e4.h"
 #include "ps2_gfx_stats.h"
+#include "ps2_vu1_entry_trace.h"
 #include "ps2_vu1_trace.h"
 #include "ps2_e15.h"
 
@@ -2611,6 +2612,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         ps2_e3::noteVBlank(m_vsyncTick); // E3b frame stamp
         ps2_gfx_stats::noteVsync(m_vsyncTick); // E33 per-vsync census cut
         ps2_vu1_trace::noteVsync(m_vsyncTick); // E36 per-program trace window
+        ps2_vu1_entry_trace::noteVsync(m_vsyncTick); // E37 entry trace window
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
         ps2_e4::noteVBlank(m_vsyncTick, m_runtime.gs(), m_runtime.memory().gs()); // E4 arm/freeze
         if ((m_vsyncTick & 1u) != 0u)

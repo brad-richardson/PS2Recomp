@@ -249,6 +249,15 @@ private:
     // issued instruction pair. The XGKICK count resets on every run (not
     // just armed ones) so census lines never carry a stale count from an
     // earlier program; the histogram stays armed-gated (the costly part).
+    bool m_entryArmed = false;
+    uint32_t m_entryIdx = 0u;
+    uint32_t m_entryTarget = 0u;
+    uint32_t m_entryPairs = 0u;
+    uint32_t m_entryArrivals = 0u;
+    std::vector<std::string> m_entryLines;
+    bool m_entryStoreValid = false;
+    uint32_t m_entryStoreAddr = 0u;
+    uint32_t m_entryStoreWords[4]{};
     bool m_traceArmed = false;
     bool m_traceCountKicks = false;
     uint32_t m_traceProgramPC = 0u;
@@ -263,6 +272,9 @@ private:
     void run(uint8_t *vuCode, uint32_t codeSize,
              uint8_t *vuData, uint32_t dataSize,
              GS &gs, PS2Memory *memory, uint32_t maxCycles);
+    void recordEntryPair(uint32_t pc, uint32_t lo, uint32_t up,
+                         const uint8_t *vuData, uint32_t dataSize,
+                         const int32_t oldVi[16], const uint32_t oldVf[32][4]);
     void snapshotTraceHeaders(const uint8_t *vuData, uint32_t dataSize);
     void buildTraceDetail(const uint8_t *vuCode, uint32_t codeSize,
                           PS2Memory *memory, uint64_t cyclesUsed,

@@ -61,6 +61,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_runtime_expansion_tests.cpp
     src/ps2_gfx_stats_tests.cpp
     src/ps2_vu1_trace_tests.cpp
+    src/ps2_vu1_entry_trace_tests.cpp
 )
 
 target_include_directories(ps2_test_lib PRIVATE

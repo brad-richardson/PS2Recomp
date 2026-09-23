@@ -4,6 +4,7 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_gfx_stats.h"
 #include "ps2_vu1_detail.h"
+#include "ps2_vu1_entry_trace.h"
 #include "ps2_vu1_trace.h"
 
 #include <algorithm>
@@ -657,6 +658,13 @@ void VU1Interpreter::queueP(float value, uint32_t latency)
 
 void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask)
 {
+    // E37: stash the exact store payload for the pair line.
+    if (m_entryArmed)
+    {
+        m_entryStoreValid = true;
+        m_entryStoreAddr = address;
+        std::copy(words, words + 4, m_entryStoreWords);
+    }
     for (PendingStore &store : m_storePipeline)
     {
         if (!store.valid)
@@ -1622,6 +1630,19 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     // snapshot stashed by noteMscal (absent for direct callers).
     m_traceProgramPC = startPC & microAddressMask();
     m_traceCtxValid = (m_unit == Unit::VU1) && ps2_vu1_trace::consumeContext(m_traceCtx);
+    // E37: pick up the entry-trace arm stashed by the VIF1 MSCAL hook.
+    m_entryArmed = false;
+    if (m_unit == Unit::VU1 && ps2_vu1_entry_trace::enabled() &&
+        ps2_vu1_entry_trace::takeArm(m_traceProgramPC))
+    {
+        m_entryArmed = true;
+        m_entryTarget = m_traceProgramPC;
+        m_entryIdx = ps2_vu1_entry_trace::armIndex(m_traceProgramPC);
+        m_entryPairs = 0u;
+        m_entryArrivals = 0u;
+        m_entryLines.clear();
+        m_entryStoreValid = false;
+    }
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
 
@@ -1639,6 +1660,9 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
     {
         m_traceCtxValid = ps2_vu1_trace::consumeContext(m_traceCtx);
     }
+    // E37: pair streams always close inside the arming run(); a resume
+    // never continues one.
+    m_entryArmed = false;
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
 
@@ -1711,6 +1735,20 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         if (m_cycle >= budgetEnd)
             break;
 
+        // E37: pre-exec snapshot for the pair line (post-stall state).
+        int32_t entryOldVi[16]{};
+        uint32_t entryOldVf[32][4]{};
+        uint32_t entryPc = 0u, entryLo = 0u, entryUp = 0u;
+        if (m_entryArmed)
+        {
+            entryPc = m_state.pc;
+            std::memcpy(entryOldVi, m_state.vi, sizeof(entryOldVi));
+            std::memcpy(entryOldVf, m_state.vf, sizeof(entryOldVf));
+            std::memcpy(&entryLo, vuCode + m_state.pc, sizeof(entryLo));
+            std::memcpy(&entryUp, vuCode + m_state.pc + sizeof(entryLo), sizeof(entryUp));
+            m_entryStoreValid = false;
+        }
+
         uint8_t writtenVi = 0u;
         int32_t oldVi = 0;
         for (uint32_t reg = 1; reg < 16u; ++reg)
@@ -1780,6 +1818,14 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             traceIssueIdx < m_traceTaken.size())
         {
             ++m_traceTaken[traceIssueIdx];
+        }
+
+        // E37: post-exec register state, before the revert/queue block
+        // below restores the pipelined values.
+        if (m_entryArmed)
+        {
+            recordEntryPair(entryPc, entryLo, entryUp, vuData, dataSize,
+                            entryOldVi, entryOldVf);
         }
 
         if (hasUpperWrite)
@@ -1908,6 +1954,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
             buildTraceDetail(vuCode, codeSize, memory, cyclesUsed, block);
             ps2_vu1_trace::emitDetail(m_traceProgramPC, block);
         }
+    }
+    // E37: close a still-open pair stream (stop condition never hit:
+    // 0x418 never arrived, or the program/budget ended first).
+    if (m_entryArmed)
+    {
+        m_entryArmed = false;
+        ps2_vu1_entry_trace::finishEntry(m_entryIdx, m_entryLines,
+                                         m_entryPairs, m_entryArrivals);
+        m_entryLines.clear();
     }
     m_traceArmed = false;
     m_traceCountKicks = false;
@@ -2190,6 +2245,135 @@ namespace
         }
     }
 } // namespace
+
+// E37 DEV-ONLY entry pair line. Called post-exec, pre-revert: m_state
+// holds this pair's computed values; oldVi/oldVf are the pre-exec
+// (post-stall) state. Loads report the memory row read; stores report
+// the exact payload queued by queueStore (lanes merge at commit, one
+// cycle later, mirroring the interpreter model).
+void VU1Interpreter::recordEntryPair(uint32_t pc, uint32_t lo, uint32_t up,
+                                     const uint8_t *vuData, uint32_t dataSize,
+                                     const int32_t oldVi[16], const uint32_t oldVf[32][4])
+{
+    uint32_t newVf[32][4];
+    std::memcpy(newVf, m_state.vf, sizeof(newVf));
+    const int32_t *newVi = m_state.vi;
+
+    std::ostringstream s;
+    s << std::hex;
+    char num[64];
+    std::snprintf(num, sizeof(num), "pair pc=0x%x up=%08x lo=%08x", pc, up, lo);
+    s << num;
+    TraceLowerDesc ld = traceDescribeLower(lo);
+    s << " " << ld.text << " | up ";
+    if (up == 0x000002FFu)
+    {
+        s << "NOP";
+    }
+    else
+    {
+        std::snprintf(num, sizeof(num), "0x%08x", up);
+        s << num;
+    }
+    for (uint32_t r = 1u; r < 16u; ++r)
+    {
+        if (oldVi[r] != newVi[r])
+        {
+            std::snprintf(num, sizeof(num), " | vi%u:%04x->%04x", r,
+                          static_cast<uint32_t>(oldVi[r]) & 0xFFFFu,
+                          static_cast<uint32_t>(newVi[r]) & 0xFFFFu);
+            s << num;
+        }
+    }
+    static const char kLane[4] = {'x', 'y', 'z', 'w'};
+    for (uint32_t r = 1u; r < 32u; ++r)
+    {
+        for (uint32_t c = 0u; c < 4u; ++c)
+        {
+            if (oldVf[r][c] != newVf[r][c])
+            {
+                std::snprintf(num, sizeof(num), " | vf%u.%c:%08x->%08x", r,
+                              kLane[c], oldVf[r][c], newVf[r][c]);
+                s << num;
+            }
+        }
+    }
+    // VU data memory traffic. Address math mirrors execLower.
+    const uint32_t opHi = (lo >> 25) & 0x7Fu;
+    bool isLoad = (opHi == 0x00u || opHi == 0x04u);
+    bool isStore = (opHi == 0x01u || opHi == 0x05u);
+    uint32_t memRow = 0u;
+    bool haveRow = false;
+    if (opHi == 0x00u || opHi == 0x01u || opHi == 0x04u || opHi == 0x05u)
+    {
+        const int32_t base = (opHi == 0x01u || opHi == 0x05u)
+                                 ? oldVi[VIT(lo)]
+                                 : oldVi[VIS(lo)];
+        memRow = static_cast<uint32_t>(base + IMM11(lo)) & 0x3FFu;
+        haveRow = true;
+    }
+    else if (opHi == 0x40u && (lo & 0x3Fu) >= 0x3Cu)
+    {
+        const uint8_t funct2 = static_cast<uint8_t>((lo & 0x3u) | ((lo >> 4) & 0x7Cu));
+        if (funct2 == 0x34u || funct2 == 0x3Eu) // LQI, ILWR
+        {
+            memRow = static_cast<uint32_t>(static_cast<uint16_t>(oldVi[VIS(lo)])) & 0x3FFu;
+            haveRow = true;
+            isLoad = true;
+        }
+        else if (funct2 == 0x36u) // LQD (pre-decrement)
+        {
+            memRow = static_cast<uint32_t>(static_cast<uint16_t>(oldVi[VIS(lo)] - 1)) & 0x3FFu;
+            haveRow = true;
+            isLoad = true;
+        }
+        else if (funct2 == 0x35u || funct2 == 0x3Fu) // SQI, ISWR
+        {
+            memRow = static_cast<uint32_t>(static_cast<uint16_t>(oldVi[VIT(lo)])) & 0x3FFu;
+            haveRow = true;
+            isStore = true;
+        }
+        else if (funct2 == 0x37u) // SQD (pre-decrement)
+        {
+            memRow = static_cast<uint32_t>(static_cast<uint16_t>(oldVi[VIT(lo)] - 1)) & 0x3FFu;
+            haveRow = true;
+            isStore = true;
+        }
+    }
+    if (isLoad && haveRow && vuData != nullptr &&
+        static_cast<uint64_t>(memRow) * 16u + 16u <= dataSize)
+    {
+        uint32_t words[4]{};
+        std::memcpy(words, vuData + memRow * 16u, sizeof(words));
+        std::snprintf(num, sizeof(num), " | rd %u:%08x %08x %08x %08x", memRow,
+                      words[0], words[1], words[2], words[3]);
+        s << num;
+    }
+    if (isStore && m_entryStoreValid)
+    {
+        std::snprintf(num, sizeof(num), " | wr %u:%08x %08x %08x %08x",
+                      m_entryStoreAddr / 16u,
+                      m_entryStoreWords[0], m_entryStoreWords[1],
+                      m_entryStoreWords[2], m_entryStoreWords[3]);
+        s << num;
+    }
+    m_entryLines.push_back(s.str());
+    ++m_entryPairs;
+    if (pc == ps2_vu1_entry_trace::kLoopHeadPc)
+    {
+        ++m_entryArrivals;
+    }
+    // Stop after the first 0x418 arrival plus 3 loop iterations (4th
+    // arrival recorded), or at the pair cap; execution continues.
+    if (m_entryArrivals >= 4u ||
+        m_entryPairs >= ps2_vu1_entry_trace::kMaxPairsPerBlock)
+    {
+        m_entryArmed = false;
+        ps2_vu1_entry_trace::finishEntry(m_entryIdx, m_entryLines,
+                                         m_entryPairs, m_entryArrivals);
+        m_entryLines.clear();
+    }
+}
 
 void VU1Interpreter::snapshotTraceHeaders(const uint8_t *vuData, uint32_t dataSize)
 {
