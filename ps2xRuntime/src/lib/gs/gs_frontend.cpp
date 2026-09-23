@@ -1,6 +1,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_e7.h"
 #include "ps2_gfx_stats.h"
+#include "ps2_e51_gifdump.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "ps2_e4.h"
 #include "ps2_log.h"
@@ -690,6 +691,13 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         return;
 
     ps2_e7::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u, "gs-enter", data, sizeBytes);
+    // E51: raw GIF packet dump (one relaxed check when off).
+    if (ps2_e51_gifdump::enabled())
+    {
+        const uint32_t pathNo = m_curGifPath == GifPathId::Path1 ? 1u : (m_curGifPath == GifPathId::Path2 ? 2u : 3u);
+        ps2_e51_gifdump::notePacket(m_privRegs ? m_privRegs->vsyncTick.load() : 0u, pathNo,
+                                    ps2_gfx_stats::currentPc(), data, sizeBytes);
+    }
     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
         return;
 

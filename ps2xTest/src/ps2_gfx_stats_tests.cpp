@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_gfx_stats.h"
+#include "ps2_e51_gifdump.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
@@ -309,6 +310,34 @@ void register_ps2_gfx_stats_tests()
                      ps2_gfx_stats::kScrOn, "the last pixel is on");
             t.Equals(classifyScreen(2304.0f, 2304.0f, 1900.0f, 1900.0f, ofx, ofy, 0, 511, 0, 447),
                      ps2_gfx_stats::kScrOff, "one past the last pixel is off");
+        });
+
+        tc.Run("E51 GIF dump window and record layout", [](TestCase &t)
+        {
+            using ps2_e51_gifdump::keep;
+            t.IsTrue(keep(10u, 1u, 10u, 12u, 5u), "PATH1 in window");
+            t.IsTrue(!keep(9u, 1u, 10u, 12u, 5u), "PATH1 before window dropped");
+            t.IsTrue(keep(6u, 3u, 10u, 12u, 5u), "PATH3 after IMG_FROM kept");
+            t.IsTrue(!keep(4u, 2u, 10u, 12u, 5u), "PATH2 before IMG_FROM dropped");
+            t.IsTrue(!keep(13u, 3u, 10u, 12u, 5u), "nothing after TO");
+            const std::string tmp = statsTmpPath("ps2x-e51-gifdump.bin");
+            std::remove(tmp.c_str());
+            ps2_e51_gifdump::configureForTest(tmp.c_str(), 10u, 12u, 5u);
+            uint8_t pkt[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+            ps2_e51_gifdump::notePacket(11u, 1u, 0x2270u, pkt, sizeof(pkt));
+            ps2_e51_gifdump::notePacket(9u, 1u, 0x2270u, pkt, sizeof(pkt));
+            ps2_e51_gifdump::clearForTest();
+            const std::string bin = readWholeFile(tmp);
+            t.Equals(bin.size(), static_cast<size_t>(36), "one 20-byte header + 16 bytes");
+            uint32_t w[5] = {};
+            if (bin.size() >= 20)
+                std::memcpy(w, bin.data(), sizeof(w));
+            t.Equals(w[0], ps2_e51_gifdump::kMagic, "magic");
+            t.Equals(w[1], 11u, "vsync");
+            t.Equals(w[2], 1u, "path");
+            t.Equals(w[3], 0x2270u, "vu1 pc");
+            t.Equals(w[4], 16u, "size");
+            std::remove(tmp.c_str());
         });
 
         tc.Run("E50 T65-format class: inclusive edges and zero area", [](TestCase &t)
