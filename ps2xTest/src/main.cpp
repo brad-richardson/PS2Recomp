@@ -27,6 +27,7 @@ void register_ps2_e44_trace_tests();
 void register_ps2_vu1_trace_tests();
 void register_ps2_vu1_entry_trace_tests();
 void register_ps2_fpu_semantics_tests();
+void register_ps2_fpu_cop2_audit_tests();
 void reset_ps2_test_function_table();
 
 int main()
@@ -58,6 +59,7 @@ int main()
     register_ps2_vu1_trace_tests();
     register_ps2_vu1_entry_trace_tests();
     register_ps2_fpu_semantics_tests();
+    register_ps2_fpu_cop2_audit_tests();
     int res = MiniTest::Run();
     std::cout.flush();
     std::cerr.flush();
