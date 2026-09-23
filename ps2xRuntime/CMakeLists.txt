@@ -708,6 +708,14 @@ if(PS2X_IS_IOS)
     # the FATAL_ERROR above. Desktop-inert: PS2X_IS_IOS is OFF on Darwin.
     find_package(SDL2 REQUIRED)
     target_link_libraries(ps2EntryRunner PRIVATE SDL2::SDL2main)
+    # I25: iOS startup glue (ps2x.env layers, Settings switch, SDL hints,
+    # window-size sync). PS2X_IOS gates the call sites in main.cpp and
+    # ps2_runtime.cpp; CoreFoundation for CFPreferences. Kept out of unity
+    # batches so its SDL include can't leak into sibling TUs.
+    target_sources(ps2_runtime PRIVATE src/lib/ps2_ios_runtime.cpp)
+    set_source_files_properties(src/lib/ps2_ios_runtime.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_IOS=1)
+    target_link_libraries(ps2_runtime PRIVATE "-framework CoreFoundation")
     # I7b: the iOS 27 sim traps in UIKit scene setup before SDL_main runs
     # when the bundle has no scene manifest (EXC_BREAKPOINT in
     # __UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption;

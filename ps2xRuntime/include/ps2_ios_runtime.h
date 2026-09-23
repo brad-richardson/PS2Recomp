@@ -1,0 +1,17 @@
+#pragma once
+// I25: iOS-only startup and window helpers (implemented in
+// src/lib/ps2_ios_runtime.cpp, compiled only when PS2X_IS_IOS).
+
+namespace ps2x::ios
+{
+// Apply <bundle>/ps2x.env then <Documents>/ps2x.env (later wins; keys the
+// launcher already set win over both), expand ${BUNDLE} / ${DOCUMENTS},
+// honour the Settings.bundle "Auto-route" switch, create the memory-card
+// dirs, and set SDL hints (landscape, no accelerometer joystick). Call first
+// thing in main(), before anything reads the environment or starts SDL.
+void prepareEnvironment(const char *argv0);
+
+// UIKit sizes the SDL window to the screen itself; tell raylib the real
+// size so its viewport and GetScreenWidth/Height match. Call after InitWindow.
+void syncWindowSize();
+} // namespace ps2x::ios

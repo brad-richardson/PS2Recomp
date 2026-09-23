@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- I25: iOS Settings -> SSX3 PS2X. "autoRoute" is read by
+     src/lib/ps2_ios_runtime.cpp (CFPreferences); unset = on. Off clears
+     PS2X_PAD_SCRIPT so a controller drives the game. Copied into the .app
+     at staging (local/research/I25/build-install.sh). -->
+<plist version="1.0">
+<dict>
+	<key>PreferenceSpecifiers</key>
+	<array>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>Title</key>
+			<string>Check-in mode</string>
+			<key>FooterText</key>
+			<string>On: the app plays itself from the title to Select Character and a race. Off: use a paired controller. Takes effect the next time the app starts.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Auto-route</string>
+			<key>Key</key>
+			<string>autoRoute</string>
+			<key>DefaultValue</key>
+			<true/>
+		</dict>
+	</array>
+</dict>
+</plist>
