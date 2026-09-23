@@ -936,8 +936,10 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
 
     // E33: one relaxed check when stats are off.
     ps2_gfx_stats::noteXgkick();
-    // E36: per-program XGKICK count for the dev-only trace.
-    if (m_traceArmed)
+    // E36: per-program XGKICK count for the dev-only trace. Counted on
+    // every enabled run (not just histogram-armed ones) so each census
+    // line carries its own program's count.
+    if (m_traceCountKicks)
     {
         ++m_traceXgkick;
     }
@@ -1657,14 +1659,17 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     // E36: arm the dev-only per-program trace (one member branch per pair
     // when disarmed; histogram vectors only when armed).
     m_traceArmed = false;
-    if (m_unit == Unit::VU1 && ps2_vu1_trace::enabled() &&
-        ps2_vu1_trace::armFor(m_traceProgramPC))
+    m_traceCountKicks = (m_unit == Unit::VU1) && ps2_vu1_trace::enabled();
+    if (m_traceCountKicks)
+    {
+        m_traceXgkick = 0u;
+    }
+    if (m_traceCountKicks && ps2_vu1_trace::armFor(m_traceProgramPC))
     {
         m_traceArmed = true;
         const size_t pairCount = codeSize / 8u;
         m_traceHist.assign(pairCount, 0u);
         m_traceTaken.assign(pairCount, 0u);
-        m_traceXgkick = 0u;
         snapshotTraceHeaders(vuData, dataSize);
     }
     while (m_cycle < budgetEnd && !m_stopRequested)
@@ -1905,6 +1910,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
     }
     m_traceArmed = false;
+    m_traceCountKicks = false;
     m_state.cycles = m_cycle;
     if (useVuRounding && previousRoundingMode != -1)
         std::fesetround(previousRoundingMode);

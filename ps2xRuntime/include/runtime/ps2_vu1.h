@@ -246,8 +246,11 @@ private:
 
     // E36 DEV-ONLY per-program trace (PS2X_VU1_TRACE). Scratch for one
     // execute()/resume() pair; default-off cost is one member branch per
-    // issued instruction pair.
+    // issued instruction pair. The XGKICK count resets on every run (not
+    // just armed ones) so census lines never carry a stale count from an
+    // earlier program; the histogram stays armed-gated (the costly part).
     bool m_traceArmed = false;
+    bool m_traceCountKicks = false;
     uint32_t m_traceProgramPC = 0u;
     ps2_vu1_trace::MscalContext m_traceCtx{};
     bool m_traceCtxValid = false;

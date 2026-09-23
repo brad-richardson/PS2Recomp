@@ -76,6 +76,16 @@ namespace
 
     // B -1: unconditional self-loop (target = pc+8-8 = pc).
     constexpr uint32_t kLowerBSelf = (0x20u << 25) | 0x7FFu;
+    constexpr uint32_t kVuUpperNopEbit = 0x400002FFu;
+
+    uint32_t makeVuLowerSpecial(uint8_t specialOp, uint8_t is)
+    {
+        return (0x40u << 25) |
+               (static_cast<uint32_t>(is & 0x1Fu) << 11) |
+               (static_cast<uint32_t>(specialOp & 0x7Cu) << 4) |
+               static_cast<uint32_t>(specialOp & 0x3u) |
+               0x3Cu;
+    }
     // IADDIU vi01,vi01,1.
     constexpr uint32_t kLowerIaddiu = (0x08u << 25) | (1u << 16) | (1u << 11) | 1u;
     // IBNE vi01,vi02,-3 (target = pc+8-24). One NOP sits between the
@@ -173,6 +183,47 @@ void register_ps2_vu1_trace_tests()
                      "the branch line must name the tested registers and their end values");
             t.IsTrue(contains(text, "ctx=none"), "no MSCAL note means no context");
             t.IsTrue(contains(text, "IADDIU vi1,vi1,1"), "the counter increment must disassemble");
+
+            ps2_vu1_trace::clearForTest();
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("census xgkick counts each program's own kicks", [](TestCase &t)
+        {
+            const std::string tmp = traceTmpPath("ps2x-vu1-trace-e36-ownkicks.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_vu1_trace::configureForTest(tmp.c_str()), "test config should install");
+
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            uint32_t kicked = 0u;
+            fx.mem.setGifPacketCallback([&](const uint8_t *, uint32_t)
+            {
+                ++kicked;
+            });
+            // IMAGE-mode tag, NLOOP=1, at qword 0: one XGKICK delivers it.
+            const uint64_t tag = 1u | (1ull << 15) | (2ull << 58);
+            std::memcpy(fx.data, &tag, sizeof(tag));
+            writeVuPair(fx.code, 0u, kLowerBSelf, kVuUpperNop);
+            writeVuPair(fx.code, 8u, 0u, kVuUpperNop);
+            writeVuPair(fx.code, 64u, makeVuLowerSpecial(0x6Cu, 0u), kVuUpperNop);
+            writeVuPair(fx.code, 72u, 0u, kVuUpperNopEbit);
+
+            ps2_vu1_trace::noteVsync(11u);
+            VU1Interpreter vu;
+            vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                       fx.gs, &fx.mem, 0u, 0u, 0u, 32u);
+            vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                       fx.gs, &fx.mem, 64u, 0u, 0u, 256u);
+            vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                       fx.gs, &fx.mem, 0u, 0u, 0u, 32u);
+
+            t.Equals(kicked, 1u, "the healthy program must issue exactly one XGKICK");
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countOccurrences(text, "census vsync=11"), 2u,
+                     "only the two exhausted runs leave census lines");
+            t.Equals(countOccurrences(text, "census vsync=11 startPC=0x0 cycles=32 xgkick=0"), 2u,
+                     "each census line carries its own program's count, not a stale one");
 
             ps2_vu1_trace::clearForTest();
             std::remove(tmp.c_str());
