@@ -10,11 +10,30 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <fstream>
 #include <iostream>
 
 using namespace GSInternal;
+
+bool ps2xDeinterlaceBobValue(const char *value)
+{
+    if (value == nullptr || value[0] == '\0')
+        return false;
+    return std::strcmp(value, "bob") == 0;
+}
+
+uint32_t ps2xDeinterlaceSourceLine(uint32_t y, uint32_t height, bool oddField, bool bob)
+{
+    if (!bob)
+        return y;
+    uint32_t sourceY = ((y >> 1u) << 1u) + (oddField ? 1u : 0u);
+    if (sourceY >= height)
+        sourceY = height - 1u;
+    return sourceY;
+}
 
 namespace
 {
@@ -420,6 +439,29 @@ namespace
         return {(smode2 & 0x1ull) != 0ull, ((smode2 >> 1) & 0x1ull) != 0ull};
     }
 
+    // PS2X_DEINTERLACE reader. Default "weave": the value must be exactly
+    // "bob" to select the historical field-doubling presentation. Test hooks
+    // below override the cached env read; production never calls them.
+    std::optional<bool> &deinterlaceBobTestOverride()
+    {
+        static std::optional<bool> override;
+        return override;
+    }
+
+    bool deinterlaceBobEnabled()
+    {
+        if (deinterlaceBobTestOverride().has_value())
+            return *deinterlaceBobTestOverride();
+        static const bool bob = [] {
+            if (const char *env = std::getenv("PS2X_DEINTERLACE"))
+            {
+                return ps2xDeinterlaceBobValue(env);
+            }
+            return false;
+        }();
+        return bob;
+    }
+
     void applyFieldPresentation(std::vector<uint8_t> &pixels, uint32_t width, uint32_t height, bool oddField)
     {
         if (pixels.empty() || width == 0u || height < 2u)
@@ -427,9 +469,7 @@ namespace
         const std::vector<uint8_t> source = pixels;
         for (uint32_t y = 0; y < height; ++y)
         {
-            uint32_t sourceY = ((y >> 1u) << 1u) + (oddField ? 1u : 0u);
-            if (sourceY >= height)
-                sourceY = height - 1u;
+            const uint32_t sourceY = ps2xDeinterlaceSourceLine(y, height, oddField, true);
             std::memcpy(pixels.data() + y * kHostFrameWidth * 4u,
                         source.data() + sourceY * kHostFrameWidth * 4u,
                         width * 4u);
@@ -466,6 +506,16 @@ namespace
         }
         return count;
     }
+}
+
+void ps2xSetDeinterlaceBobForTest(bool bob)
+{
+    deinterlaceBobTestOverride() = bob;
+}
+
+void ps2xClearDeinterlaceBobForTest()
+{
+    deinterlaceBobTestOverride().reset();
 }
 
 GSCpuBackend::GSCpuBackend()
@@ -1870,7 +1920,7 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
                     dst[3] = pmode.amod ? dst[3] : src[3];
                 }
             normalizePresentationAlpha(result.pixels, result.width, result.height);
-            if (fieldMode)
+            if (fieldMode && deinterlaceBobEnabled())
                 applyFieldPresentation(result.pixels, result.width, result.height, oddField);
             result.displayFbp = displayFrame1.fbp;
             result.sourceFbp = selected1.fbp;
@@ -1885,7 +1935,7 @@ PresentationFrame GSCpuBackend::PresentFromLocalMemory(const GSPresentationReque
     GSFrameReg selected = displayFrame;
     if (!copySource(displayFrame, origin, result.width, result.height, true, false, selected, result.pixels, result.usedPreferred))
         return {};
-    if (fieldMode)
+    if (fieldMode && deinterlaceBobEnabled())
         applyFieldPresentation(result.pixels, result.width, result.height, oddField);
     normalizePresentationAlpha(result.pixels, result.width, result.height);
     result.displayFbp = displayFrame.fbp;

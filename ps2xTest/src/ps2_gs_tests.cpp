@@ -5,6 +5,7 @@
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/ps2_gs_memory.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -1693,8 +1694,9 @@ void register_ps2_gs_tests()
                      "single-circuit presentation should normalize the last row alpha");
         });
 
-        tc.Run("latched host presentation line-doubles interlaced field output", [](TestCase &t)
+        tc.Run("latched host presentation line-doubles interlaced field output in bob mode", [](TestCase &t)
         {
+            ps2xSetDeinterlaceBobForTest(true);
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
             GSRegisters regs{};
             regs.pmode = 0x0001ull;
@@ -1750,6 +1752,7 @@ void register_ps2_gs_tests()
                      "field presentation should duplicate later field scanlines as well");
             t.IsTrue(row0 != row2,
                      "field presentation should still preserve different source content across field rows");
+            ps2xClearDeinterlaceBobForTest();
         });
 
         tc.Run("GIF PACKED A+D writes DISPFB1 and DISPLAY1 privileged registers", [](TestCase &t)
@@ -4638,6 +4641,39 @@ void register_ps2_gs_tests()
             const auto capped = ps2_e4::collectSurfaces(many, dispfb1, display1, 0u, 0u);
             t.IsTrue(capped.second, "22 surfaces should truncate");
             t.Equals(capped.first.size(), ps2_e4::kMaxSurfaces, "surface set should cap at 16");
+        });
+
+        tc.Run("deinterlace value parses to weave unless exactly bob", [](TestCase &t)
+        {
+            t.IsFalse(ps2xDeinterlaceBobValue(nullptr), "unset weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue(""), "empty weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue("weave"), "weave weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue("BOB"), "case differs weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue("bob "), "trailing space weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue(" bob"), "leading space weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue("1"), "1 weaves");
+            t.IsTrue(ps2xDeinterlaceBobValue("bob"), "exactly bob bobs");
+        });
+
+        tc.Run("deinterlace weave is identity, bob doubles one field", [](TestCase &t)
+        {
+            constexpr uint32_t kHeight = 8u;
+            for (uint32_t y = 0u; y < kHeight; ++y)
+            {
+                t.Equals(ps2xDeinterlaceSourceLine(y, kHeight, false, false), y, "weave even field is identity");
+                t.Equals(ps2xDeinterlaceSourceLine(y, kHeight, true, false), y, "weave odd field is identity");
+            }
+            for (uint32_t y = 0u; y < kHeight; y += 2u)
+            {
+                t.Equals(ps2xDeinterlaceSourceLine(y, kHeight, false, true), y, "bob even field keeps even lines");
+                t.Equals(ps2xDeinterlaceSourceLine(y + 1u, kHeight, false, true), y, "bob even field doubles even lines");
+                t.Equals(ps2xDeinterlaceSourceLine(y, kHeight, true, true), y + 1u, "bob odd field doubles odd lines");
+                t.Equals(ps2xDeinterlaceSourceLine(y + 1u, kHeight, true, true), y + 1u, "bob odd field keeps odd lines");
+            }
+            t.IsTrue(ps2xDeinterlaceSourceLine(0u, kHeight, false, true) != ps2xDeinterlaceSourceLine(0u, kHeight, true, true),
+                     "fields alternate instead of freezing on one");
+            t.Equals(ps2xDeinterlaceSourceLine(kHeight - 1u, kHeight - 1u, true, true), kHeight - 2u,
+                     "bob clamps the odd field at an odd height");
         });
     });
 }
