@@ -7,6 +7,7 @@
 #include "ps2_vu1_entry_trace.h"
 #include "ps2_vu1_trace.h"
 #include "ps2_e15.h"
+#include "ps2_snd_spike.h"
 
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
@@ -2673,6 +2674,9 @@ void EeScheduler::processEvent(const EeEvent &event)
             ps2_log::emitDrop("sched/vsync-callback", "no-table-entry", dropArgs);
         }
         dispatchIrq(false, 2u);
+        // AU2 spike: IOP SND tick (PS2X_SND_TICK, default off).
+        ps2_snd_spike::onVBlank(m_rdram, m_vsyncTick, [this](GuestInvocation invocation)
+                                { queueInvocation(std::move(invocation)); });
         break;
     case EeEventType::ExternalWake:
         completeExternalWait(event.id, event.value, KE_OK);
