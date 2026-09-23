@@ -1624,39 +1624,6 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
 
-void VU1Interpreter::executeToEnd(uint8_t *vuCode, uint32_t codeSize,
-                                   uint8_t *vuData, uint32_t dataSize,
-                                   GS &gs, PS2Memory *memory,
-                                   uint32_t startPC, uint32_t top, uint32_t itop,
-                                   uint32_t maxCycles)
-{
-    execute(vuCode, codeSize, vuData, dataSize, gs, memory, startPC, top, itop, maxCycles);
-    continueToEnd(vuCode, codeSize, vuData, dataSize, gs, memory, top, itop, maxCycles);
-}
-
-void VU1Interpreter::resumeToEnd(uint8_t *vuCode, uint32_t codeSize,
-                                  uint8_t *vuData, uint32_t dataSize,
-                                  GS &gs, PS2Memory *memory,
-                                  uint32_t top, uint32_t itop, uint32_t maxCycles)
-{
-    resume(vuCode, codeSize, vuData, dataSize, gs, memory, top, itop, maxCycles);
-    continueToEnd(vuCode, codeSize, vuData, dataSize, gs, memory, top, itop, maxCycles);
-}
-
-void VU1Interpreter::continueToEnd(uint8_t *vuCode, uint32_t codeSize,
-                                    uint8_t *vuData, uint32_t dataSize,
-                                    GS &gs, PS2Memory *memory,
-                                    uint32_t top, uint32_t itop, uint32_t maxCycles)
-{
-    uint32_t continuations = 0u;
-    while (m_lastRunBudgetExhausted && continuations < kBudgetContinuationCap)
-    {
-        resume(vuCode, codeSize, vuData, dataSize, gs, memory, top, itop, maxCycles);
-        ++continuations;
-    }
-    m_lastRunContinuations = continuations;
-}
-
 void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                          uint8_t *vuData, uint32_t dataSize,
                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
@@ -1874,8 +1841,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     // marker (E/D/T bit, halt delay slot) exactly at/over its cycle budget
     // was truncated: its remaining draws never issue. One relaxed check
     // when stats are off.
-    m_lastRunBudgetExhausted = !programEnded && !m_stopRequested && m_cycle >= budgetEnd;
-    ps2_gfx_stats::noteVuRun(m_cycle - entryCycle, m_lastRunBudgetExhausted);
+    ps2_gfx_stats::noteVuRun(m_cycle - entryCycle,
+                             !programEnded && !m_stopRequested && m_cycle >= budgetEnd);
     m_state.cycles = m_cycle;
     if (useVuRounding && previousRoundingMode != -1)
         std::fesetround(previousRoundingMode);

@@ -775,12 +775,9 @@ bool PS2Runtime::syncCoreSubsystems()
                                          (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
                                      m_vu1.state().tBitEnabled =
                                          (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
-                                     // E33 fix: run a budget-exhausted program on to its
-                                     // end marker (up to the continuation cap)
-                                     // instead of dropping its remaining draws.
-                                     m_vu1.executeToEnd(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
-                                                        m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                        m_gs, &m_memory, startPC, top, itop, 65536);
+                                     m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                   m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                   m_gs, &m_memory, startPC, top, itop, 65536);
                                      cpuContext->vu0_vpu_stat =
                                          (cpuContext->vu0_vpu_stat & ~0x0600u) |
                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
@@ -796,9 +793,9 @@ bool PS2Runtime::syncCoreSubsystems()
                                          (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
                                      m_vu1.state().tBitEnabled =
                                          (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
-                                     m_vu1.resumeToEnd(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
-                                                       m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
-                                                       m_gs, &m_memory, top, itop, 65536);
+                                     m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                  m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                  m_gs, &m_memory, top, itop, 65536);
                                      cpuContext->vu0_vpu_stat =
                                          (cpuContext->vu0_vpu_stat & ~0x0600u) |
                                          (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
