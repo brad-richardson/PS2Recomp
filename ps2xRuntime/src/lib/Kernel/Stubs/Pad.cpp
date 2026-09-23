@@ -312,6 +312,11 @@ namespace ps2_stubs
             std::mutex mutex;
             bool initDone = false;
             bool enabled = false;
+            // E33: vsync clock. When true, entry atMs/holdMs count guest
+            // time (vsyncTick * 1000/59.94 ms) instead of host wall ms.
+            bool vsyncClock = false;
+            bool testVsyncSet = false;
+            uint64_t testVsyncTick = 0u;
             std::chrono::steady_clock::time_point startWall{};
             std::vector<PadScriptRuntimeEntry> entries;
             bool testNowSet = false;
@@ -497,6 +502,13 @@ namespace ps2_stubs
             return true;
         }
 
+        // E33: guest-vsync clock maps a vsync tick to guest milliseconds.
+        // 1000 ms per 59.94 vsyncs: ms = tick * 100000 / 5994.
+        uint64_t padScriptVsyncTickToMs(uint64_t tick)
+        {
+            return (tick * 100000ull) / 5994ull;
+        }
+
         void padScriptInstallLocked(const std::vector<PadScriptEntry> &parsed, const char *source)
         {
             g_padScript.entries.clear();
@@ -509,8 +521,9 @@ namespace ps2_stubs
             g_padScript.startWall = std::chrono::steady_clock::now();
             g_padScript.enabled = true;
             g_padScriptArmed.store(true, std::memory_order_relaxed);
-            std::fprintf(stderr, "[padscript] armed n=%llu source=%s\n",
-                         static_cast<unsigned long long>(g_padScript.entries.size()), source);
+            std::fprintf(stderr, "[padscript] armed n=%llu source=%s clock=%s\n",
+                         static_cast<unsigned long long>(g_padScript.entries.size()), source,
+                         g_padScript.vsyncClock ? "vsync" : "wall");
         }
 
         void padScriptInitLocked()
@@ -521,6 +534,10 @@ namespace ps2_stubs
             }
             g_padScript.initDone = true;
             g_padScript.startWall = std::chrono::steady_clock::now();
+            if (const char *clock = std::getenv("PS2X_PAD_SCRIPT_CLOCK"))
+            {
+                g_padScript.vsyncClock = (std::string(clock) == "vsync");
+            }
             const char *spec = std::getenv("PS2X_PAD_SCRIPT");
             if (!spec || spec[0] == '\0')
             {
@@ -546,18 +563,23 @@ namespace ps2_stubs
             g_padScriptInitDone.store(true, std::memory_order_relaxed);
         }
 
-        uint64_t padScriptNowMsLocked()
+        uint64_t padScriptNowMsLocked(uint64_t guestVsyncTick)
         {
             if (g_padScript.testNowSet)
             {
                 return g_padScript.testNowMs;
+            }
+            if (g_padScript.vsyncClock)
+            {
+                const uint64_t tick = g_padScript.testVsyncSet ? g_padScript.testVsyncTick : guestVsyncTick;
+                return padScriptVsyncTickToMs(tick);
             }
             const auto now = std::chrono::steady_clock::now();
             return static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - g_padScript.startWall).count());
         }
 
-        void padScriptOnRead(PadInputState &state)
+        void padScriptOnRead(PadInputState &state, uint64_t guestVsyncTick)
         {
             padScriptEnsureInit();
             if (!g_padScriptArmed.load(std::memory_order_relaxed))
@@ -569,7 +591,7 @@ namespace ps2_stubs
             {
                 return;
             }
-            const uint64_t nowMs = padScriptNowMsLocked();
+            const uint64_t nowMs = padScriptNowMsLocked(guestVsyncTick);
             for (size_t i = 0; i < g_padScript.entries.size(); ++i)
             {
                 PadScriptRuntimeEntry &runtime = g_padScript.entries[i];
@@ -866,7 +888,11 @@ namespace ps2_stubs
             }
 
             padStimOnRead(state); // E2a: no-op unless PS2X_PAD_STIM_AFTER set
-            padScriptOnRead(state); // E31 DEV-ONLY: no-op unless PS2X_PAD_SCRIPT set
+            // E33: vsync-clock scripts read guest time from the GS vsync
+            // tick; wall-clock scripts ignore it. Null runtime (tests) = 0.
+            const uint64_t guestVsyncTick =
+                runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
+            padScriptOnRead(state, guestVsyncTick); // E31 DEV-ONLY: no-op unless PS2X_PAD_SCRIPT set
 
             fillPadStatus(outData, state, portState);
 
@@ -1464,11 +1490,27 @@ namespace ps2_stubs
         g_padScript.testNowMs = nowMs;
     }
 
+    void setPadScriptVsyncClockForTest(bool vsyncClock)
+    {
+        std::lock_guard<std::mutex> lock(g_padScript.mutex);
+        g_padScript.vsyncClock = vsyncClock;
+    }
+
+    void setPadScriptVsyncTickForTest(uint64_t tick)
+    {
+        std::lock_guard<std::mutex> lock(g_padScript.mutex);
+        g_padScript.testVsyncSet = true;
+        g_padScript.testVsyncTick = tick;
+    }
+
     void clearPadScriptForTest()
     {
         std::lock_guard<std::mutex> lock(g_padScript.mutex);
         g_padScript.initDone = true;
         g_padScript.enabled = false;
+        g_padScript.vsyncClock = false;
+        g_padScript.testVsyncSet = false;
+        g_padScript.testVsyncTick = 0u;
         g_padScript.entries.clear();
         g_padScript.testNowSet = false;
         g_padScript.testNowMs = 0u;

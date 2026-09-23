@@ -603,6 +603,37 @@ void register_pad_input_tests()
             closePadPort(ctx, rdram);
         });
 
+        tc.Run("pad script vsync clock counts guest vsyncs not wall ms", [](TestCase &t)
+               {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            // Tick 10 = 166 guest ms, tick 11 = 183 guest ms
+            // (tick * 100000 / 5994). The window [167, 184) covers tick 11 only.
+            t.IsTrue(ps2_stubs::setPadScriptForTest("167:start:17"), "test script should install");
+            ps2_stubs::setPadScriptVsyncClockForTest(true);
+
+            ps2_stubs::setPadScriptVsyncTickForTest(10);
+            runPadRead(ctx, rdram);
+            t.Equals(readButtons(rdram), static_cast<uint16_t>(0xFFFFu), "tick 10 (166ms) is before the window");
+
+            ps2_stubs::setPadScriptVsyncTickForTest(11);
+            runPadRead(ctx, rdram);
+            t.Equals(readButtons(rdram),
+                     static_cast<uint16_t>(0xFFFFu & ~kPadBtnStart),
+                     "tick 11 (183ms) is inside the window");
+
+            ps2_stubs::setPadScriptVsyncTickForTest(12);
+            runPadRead(ctx, rdram);
+            t.Equals(readButtons(rdram), static_cast<uint16_t>(0xFFFFu), "tick 12 (200ms) is past the window");
+
+            ps2_stubs::clearPadScriptForTest();
+            closePadPort(ctx, rdram);
+        });
+
         tc.Run("pad script is off by default", [](TestCase &t)
                {
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);

@@ -84,7 +84,8 @@ namespace ps2_stubs
     // E31 DEV-ONLY scripted pad input (PS2X_PAD_SCRIPT). One parsed entry:
     // press `pressMask` (active-low clear mask, 0 = no buttons) and/or drive
     // the flagged analog axes while atMs <= nowMs < atMs + holdMs, where
-    // nowMs is milliseconds since the first pad call.
+    // nowMs is milliseconds since the first pad call (wall clock), or guest
+    // milliseconds (vsyncTick * 1000/59.94) when PS2X_PAD_SCRIPT_CLOCK=vsync.
     struct PadScriptEntry
     {
         uint64_t atMs = 0u;
@@ -111,5 +112,9 @@ namespace ps2_stubs
     // never call these.
     bool setPadScriptForTest(const char *spec);
     void setPadScriptNowMsForTest(uint64_t nowMs);
+    // E33: select the guest-vsync clock (vsyncTick * 1000/59.94 ms) instead
+    // of the wall clock, and drive the tick explicitly.
+    void setPadScriptVsyncClockForTest(bool vsyncClock);
+    void setPadScriptVsyncTickForTest(uint64_t tick);
     void clearPadScriptForTest();
 }
