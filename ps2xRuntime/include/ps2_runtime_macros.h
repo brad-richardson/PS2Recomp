@@ -483,6 +483,14 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 1u, __func__); \
         if (_e43)                                                                             \
             ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 1u, __func__, _e43p);              \
+        if (ps2_e44_trace::tplArmed())                                                     \
+            ps2_e44_trace::noteTplMaybe(rdram, ctx, _addr, 1u, __func__); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteApcMaybe(ctx, _addr); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteV1b0Maybe(ctx, _addr, 1u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteTwMaybe(rdram, ctx, _addr, 1u, __func__); \
     } while (0)
 
 #define WRITE16(addr, val)                                                               \
@@ -513,6 +521,14 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 2u, __func__); \
         if (_e43)                                                                             \
             ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 2u, __func__, _e43p);              \
+        if (ps2_e44_trace::tplArmed())                                                     \
+            ps2_e44_trace::noteTplMaybe(rdram, ctx, _addr, 2u, __func__); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteApcMaybe(ctx, _addr); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteV1b0Maybe(ctx, _addr, 2u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteTwMaybe(rdram, ctx, _addr, 2u, __func__); \
     } while (0)
 
 #define WRITE32(addr, val)                                                               \
@@ -549,6 +565,18 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 4u, __func__); \
         if (_e43)                                                                             \
             ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 4u, __func__, _e43p);              \
+        if (ps2_e44_trace::appendArmed() && ctx != nullptr && ctx->pc == 0x3797E8u) \
+            ps2_e44_trace::noteAppend(rdram, ctx); \
+        if (ps2_e44_trace::appendArmed() && ctx != nullptr) \
+            ps2_e44_trace::noteAppxMaybe(rdram, ctx); \
+        if (ps2_e44_trace::tplArmed())                                                     \
+            ps2_e44_trace::noteTplMaybe(rdram, ctx, _addr, 4u, __func__); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteApcMaybe(ctx, _addr); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteV1b0Maybe(ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteTwMaybe(rdram, ctx, _addr, 4u, __func__); \
     } while (0)
 
 #define WRITE64(addr, val)                                                             \
@@ -585,6 +613,14 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 8u, __func__); \
         if (_e43)                                                                             \
             ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 8u, __func__, _e43p);              \
+        if (ps2_e44_trace::tplArmed())                                                     \
+            ps2_e44_trace::noteTplMaybe(rdram, ctx, _addr, 8u, __func__); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteApcMaybe(ctx, _addr); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteV1b0Maybe(ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteTwMaybe(rdram, ctx, _addr, 8u, __func__); \
     } while (0)
 
 #define WRITE128(addr, val)                                                            \
@@ -621,6 +657,14 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 16u, __func__); \
         if (_e43)                                                                              \
             ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 16u, __func__, _e43p);                \
+        if (ps2_e44_trace::tplArmed())                                                     \
+            ps2_e44_trace::noteTplMaybe(rdram, ctx, _addr, 16u, __func__); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteApcMaybe(ctx, _addr); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteV1b0Maybe(ctx, _addr, 16u, _lo, _hi, __func__); \
+        if (ps2_e44_trace::appendArmed())                                                  \
+            ps2_e44_trace::noteTwMaybe(rdram, ctx, _addr, 16u, __func__); \
     } while (0)
 
 // Packed Compare Greater Than (PCGT)

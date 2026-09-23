@@ -627,6 +627,560 @@ namespace
             t.IsTrue(text.find("via=fast") != std::string::npos, "fast path carries fast via");
             std::remove(tmp.c_str());
         });
+
+        tc.Run("UCAB and mirror spellings match extras", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-seg.txt");
+            std::remove(tmp.c_str());
+            const uint32_t extras[1] = {0x00809670u};
+            ps2_e44_trace::configureForTest(tmp.c_str(), 0u, 2000u, extras, 1);
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            e44SetRamWord(ram, 0x00809670u, 0x00000030u);
+            ps2SetScratchpadHostPtr(sp.data());
+            R5900Context ctx{};
+            ctx.pc = 0x379804u;
+
+            ps2_e41_trace::noteVsync(100u);
+            const uint32_t spell[5] = {0x00809670u, 0x20809670u, 0x30809670u,
+                                       0x80809670u, 0xA0809670u};
+            for (int i = 0; i < 5; ++i)
+            {
+                ps2_e44_trace::noteStore(ram.data(), &ctx, spell[i], 4u, "Store32");
+            }
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "spw ") == 5u, "all five RAM spellings must log");
+            t.IsTrue(text.find("addr=0x30809670") != std::string::npos,
+                     "UCAB spelling logs at its own addr");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("app line matches T60 grammar exactly", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-app.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 1255u, 1450u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            e44SetRamWord(ram, 0x008095f0u, 7u);
+            e44SetRamWord(ram, 0x0061c8fcu, 0x0000000cu);
+            e44SetRamWord(ram, 0x0061c900u, 0x01414294u);
+            e44SetRamWord(ram, 0x0061c904u, 0x000002a0u);
+            e44SetRamWord(ram, 0x0061c908u, 0x00000000u);
+            e44SetRamWord(ram, 0x0061c90cu, 0xffff05ddu);
+            R5900Context ctx{};
+            ctx.pc = 0x3797e8u;
+            e44SetReg(ctx, 7, 0x008095f0u);
+            e44SetReg(ctx, 8, 0x0061c8fcu);
+            e44SetReg(ctx, 20, 0x006efd00u);
+            e44SetReg(ctx, 9, 0x006efed0u);
+            e44SetReg(ctx, 31, 0x00379780u);
+
+            ps2_e41_trace::noteVsync(1260u);
+            ps2_e44_trace::noteAppend(ram.data(), &ctx);
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            const std::string want =
+                "app vsync=1260 count=7 t0=0x61c8fc tw0=0xc tw1=0x1414294 "
+                "tw2=0x2a0 tw3=0x0 tw4=0xffff05dd s4=0x6efd00 t1=0x6efed0 "
+                "ra=0x379780\n";
+            t.IsTrue(text == want, "app line must byte-match T60 grammar");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("tpl line matches T60 grammar, change-only", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-tpl.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 1255u, 1450u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            e44SetRamWord(ram, 0x008095f0u, 3u);
+            e44SetRamWord(ram, 0x0061c8fcu, 0x0000000cu);
+            e44SetRamWord(ram, 0x0061c900u, 0x01414294u);
+            R5900Context ctx{};
+            ctx.pc = 0x3797e8u;
+            e44SetReg(ctx, 7, 0x008095f0u);
+            e44SetReg(ctx, 8, 0x0061c8fcu);
+            e44SetReg(ctx, 20, 0x006efd00u);
+            e44SetReg(ctx, 9, 0x006efed0u);
+            e44SetReg(ctx, 31, 0x00379780u);
+
+            ps2_e41_trace::noteVsync(1260u);
+            ps2_e44_trace::noteAppend(ram.data(), &ctx);
+
+            // tw0 0xc -> 0x8: mode bits clear, so tpl only (no tplm).
+            e44SetRamWord(ram, 0x0061c8fcu, 0x00000008u);
+            ctx.pc = 0x1a2618u;
+            e44SetReg(ctx, 31, 0x001a25dcu);
+            for (int r = 4; r <= 7; ++r)
+            {
+                e44SetReg(ctx, r, static_cast<uint32_t>(r));
+            }
+            e44SetReg(ctx, 2, 5u);
+            e44SetReg(ctx, 3, 6u);
+            for (int r = 16; r <= 23; ++r)
+            {
+                e44SetReg(ctx, r, 0x10u + static_cast<uint32_t>(r - 16));
+            }
+            ps2_e44_trace::noteTplMaybe(ram.data(), &ctx, 0x0061c8fcu, 4u, "setter");
+            // Identical repeat: silent. tw2 store: silent.
+            ps2_e44_trace::noteTplMaybe(ram.data(), &ctx, 0x0061c8fcu, 4u, "setter");
+            e44SetRamWord(ram, 0x0061c904u, 0x000002a1u);
+            ps2_e44_trace::noteTplMaybe(ram.data(), &ctx, 0x0061c904u, 4u, "setter");
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "tpl ") == 1u, "one change logs once; repeats stay silent");
+            t.IsTrue(e44CountPrefix(text, "tplm ") == 0u, "mode-bits-clear change emits no tplm");
+            const std::string want =
+                "tpl vsync=1260 addr=0x61c8fc old=0xc new=0x8 pc=0x1a2618 ra=0x1a25dc "
+                "a0=00000004 a1=00000005 a2=00000006 a3=00000007 "
+                "v0=00000005 v1=00000006 "
+                "s0=00000010 s1=00000011 s2=00000012 s3=00000013 "
+                "s4=00000014 s5=00000015 s6=00000016 s7=00000017\n";
+            t.IsTrue(text.find(want) != std::string::npos, "tpl line must byte-match T60 grammar");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("tplm fires on exact mode 6, caps at 200", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-tplm.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 1255u, 1450u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            e44SetRamWord(ram, 0x008095f0u, 3u);
+            e44SetRamWord(ram, 0x0061c8fcu, 0x00000008u);
+            e44SetRamWord(ram, 0x0061c900u, 0x01414294u);
+            R5900Context ctx{};
+            ctx.pc = 0x3797e8u;
+            e44SetReg(ctx, 7, 0x008095f0u);
+            e44SetReg(ctx, 8, 0x0061c8fcu);
+            e44SetReg(ctx, 31, 0x00379780u);
+
+            ps2_e41_trace::noteVsync(1260u);
+            ps2_e44_trace::noteAppend(ram.data(), &ctx);
+
+            // tw0 0x8 -> 0xcc is mode 3: tpl only, no tplm.
+            e44SetRamWord(ram, 0x0061c8fcu, 0x000000ccu);
+            ctx.pc = 0x379c28u;
+            e44SetReg(ctx, 31, 0x003a3b5cu);
+            ps2_e44_trace::noteTplMaybe(ram.data(), &ctx, 0x0061c8fcu, 4u, "setter");
+            // tw0 0xcc -> 0x1b0 is mode 6: tpl + tplm together.
+            e44SetRamWord(ram, 0x0061c8fcu, 0x000001b0u);
+            ps2_e44_trace::noteTplMaybe(ram.data(), &ctx, 0x0061c8fcu, 4u, "setter");
+
+            // Burn the filter: 250 further mode-6 toggles.
+            for (int i = 0; i < 250; ++i)
+            {
+                e44SetRamWord(ram, 0x0061c8fcu, (i % 2 == 0) ? 0x000001b1u : 0x000001b0u);
+                ps2_e44_trace::noteTplMaybe(ram.data(), &ctx, 0x0061c8fcu, 4u, "setter");
+            }
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "tpl ") == 252u, "tpl still logs every change");
+            t.IsTrue(e44CountPrefix(text, "tplm ") == 200u, "tplm caps at 200");
+            const std::string first =
+                "tplm vsync=1260 addr=0x61c8fc tw0old=0xcc tw0new=0x1b0 "
+                "tw1old=0x1414294 tw1new=0x1414294 pc=0x379c28 ra=0x3a3b5c fn=setter ";
+            t.IsTrue(text.find(first) != std::string::npos,
+                     "tplm carries tw0/tw1 old/new + pc/ra/fn");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("tplrearm on template move shares tpl budget", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-rearm.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 1255u, 1450u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            e44SetRamWord(ram, 0x008095f0u, 1u);
+            e44SetRamWord(ram, 0x0061c8fcu, 0x0000000cu);
+            e44SetRamWord(ram, 0x0062c8fcu, 0x00000030u);
+            R5900Context ctx{};
+            ctx.pc = 0x3797e8u;
+            e44SetReg(ctx, 7, 0x008095f0u);
+            e44SetReg(ctx, 8, 0x0061c8fcu);
+            e44SetReg(ctx, 31, 0x00379780u);
+
+            ps2_e41_trace::noteVsync(1260u);
+            ps2_e44_trace::noteAppend(ram.data(), &ctx);
+
+            ps2_e41_trace::noteVsync(1261u);
+            e44SetReg(ctx, 8, 0x0062c8fcu);
+            ps2_e44_trace::noteAppend(ram.data(), &ctx);
+
+            // Old base is unwatched now; new base tracks.
+            e44SetRamWord(ram, 0x0061c8fcu, 0x0000000du);
+            ps2_e44_trace::noteTplMaybe(ram.data(), &ctx, 0x0061c8fcu, 4u, "setter");
+            e44SetRamWord(ram, 0x0062c8fcu, 0x00000031u);
+            ps2_e44_trace::noteTplMaybe(ram.data(), &ctx, 0x0062c8fcu, 4u, "setter");
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "tplrearm") == 1u, "first arm silent, move emits once");
+            t.IsTrue(text.find("tplrearm vsync=1261 old=0x61c8fc new=0x62c8fc\n") != std::string::npos,
+                     "move emits tplrearm");
+            t.IsTrue(e44CountPrefix(text, "tpl ") == 1u, "only the new-base change logs");
+            t.IsTrue(text.find("addr=0x62c8fc old=0x30 new=0x31") != std::string::npos,
+                     "post-move watch follows the new base");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("appsum aggregates ungated, flushes per vsync", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-sum.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 1255u, 1450u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            e44SetRamWord(ram, 0x008095f0u, 1u);
+            e44SetRamWord(ram, 0x0061c8fcu, 0x0000000cu);
+            e44SetRamWord(ram, 0x0061c900u, 0x01414294u);
+            R5900Context ctx{};
+            ctx.pc = 0x3797e8u;
+            e44SetReg(ctx, 7, 0x008095f0u);
+            e44SetReg(ctx, 8, 0x0061c8fcu);
+            e44SetReg(ctx, 31, 0x00379780u);
+
+            // Out-of-window tick 100: no app/tpl lines, but counters run.
+            ps2_e41_trace::noteVsync(100u);
+            ps2_e44_trace::noteAppend(ram.data(), &ctx);
+            e44SetRamWord(ram, 0x0061c8fcu, 0x000000ccu);
+            ctx.pc = 0x379c28u;
+            ps2_e44_trace::noteTplMaybe(ram.data(), &ctx, 0x0061c8fcu, 4u, "setter");
+            // In-window tick 1260 flushes tick 100.
+            ps2_e41_trace::noteVsync(1260u);
+            ctx.pc = 0x3797e8u;
+            ps2_e44_trace::noteAppend(ram.data(), &ctx);
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(text.find("app vsync=100") == std::string::npos, "app lines stay window-gated");
+            t.IsTrue(text.find("tpl vsync=100") == std::string::npos, "tpl lines stay window-gated");
+            t.IsTrue(text.find("appsum vsync=100 n_app=1 n_tpl=1 mode_hist=0:1\n") != std::string::npos,
+                     "appsum aggregates out-of-window ticks");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("apc census counts per pc per vsync", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-apc.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 0u, 5000u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            R5900Context ctx{};
+            ctx.pc = 0x379804u;
+
+            ps2_e41_trace::noteVsync(100u);
+            ps2_e44_trace::noteApcMaybe(&ctx, 0x30809670u);
+            ps2_e44_trace::noteApcMaybe(&ctx, 0x30809670u);
+            ctx.pc = 0x37980cu;
+            ps2_e44_trace::noteApcMaybe(&ctx, 0x30809670u);
+            // Region edges: last byte in, first byte past the end out
+            // (UCAB spellings of 0x80B66F/0x80B670).
+            ctx.pc = 0x379810u;
+            ps2_e44_trace::noteApcMaybe(&ctx, 0x3080B66Fu);
+            ps2_e44_trace::noteApcMaybe(&ctx, 0x3080B670u);
+            ps2_e44_trace::noteApcMaybe(&ctx, 0x00100000u);
+            // Next tick flushes tick 100.
+            ps2_e41_trace::noteVsync(101u);
+            ctx.pc = 0x379804u;
+            ps2_e44_trace::noteApcMaybe(&ctx, 0x809670u);
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(text.find("apc vsync=100 pc=0x379804 count=2\n") != std::string::npos,
+                     "UCAB stores count under their pc");
+            t.IsTrue(text.find("apc vsync=100 pc=0x37980c count=1\n") != std::string::npos,
+                     "second pc counted separately");
+            t.IsTrue(text.find("apc vsync=100 pc=0x379810 count=1\n") != std::string::npos,
+                     "region end edge inclusive, past-end excluded");
+            t.IsTrue(text.find("apc vsync=101") == std::string::npos,
+                     "trailing tick never flushes");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("app caps at 300 while appsum keeps counting", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-appcap.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 0u, 5000u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            e44SetRamWord(ram, 0x008095f0u, 1u);
+            e44SetRamWord(ram, 0x0061c8fcu, 0x0000000cu);
+            R5900Context ctx{};
+            ctx.pc = 0x3797e8u;
+            e44SetReg(ctx, 7, 0x008095f0u);
+            e44SetReg(ctx, 8, 0x0061c8fcu);
+            e44SetReg(ctx, 31, 0x00379780u);
+
+            ps2_e41_trace::noteVsync(10u);
+            for (int i = 0; i < 305; ++i)
+            {
+                ps2_e44_trace::noteAppend(ram.data(), &ctx);
+            }
+            ps2_e41_trace::noteVsync(11u);
+            ps2_e44_trace::noteAppend(ram.data(), &ctx);
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "app ") == 300u, "app caps at 300");
+            t.IsTrue(text.find("appsum vsync=10 n_app=305 n_tpl=0 mode_hist=0:305\n") != std::string::npos,
+                     "appsum counts past the app cap");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("appx filters by site, floor, count and mode", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-appx.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 0u, 5000u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            e44SetRamWord(ram, 0x0061c8fcu, 0x0000000cu);
+            e44SetRamWord(ram, 0x0061c900u, 0x01414294u);
+            e44SetRamWord(ram, 0x0061c904u, 0x000002a0u);
+            e44SetRamWord(ram, 0x0061c908u, 0x00000000u);
+            e44SetRamWord(ram, 0x0061c90cu, 0xffff05ddu);
+            R5900Context ctx{};
+            e44SetReg(ctx, 8, 0x0061c8fcu);
+            e44SetReg(ctx, 3, 1u);
+            e44SetReg(ctx, 31, 0x00379780u);
+
+            // Below the 1270 floor: silent even when qualifying.
+            ps2_e41_trace::noteVsync(1269u);
+            ctx.pc = 0x37ad40u;
+            ps2_e44_trace::noteAppxMaybe(ram.data(), &ctx);
+            // Unknown pc: silent.
+            ps2_e41_trace::noteVsync(1271u);
+            ctx.pc = 0x12345678u;
+            ps2_e44_trace::noteAppxMaybe(ram.data(), &ctx);
+            // Site 1, count 1: logs.
+            ctx.pc = 0x37ad40u;
+            ps2_e44_trace::noteAppxMaybe(ram.data(), &ctx);
+            // count 5, tw0 mode 3: silent.
+            e44SetReg(ctx, 3, 5u);
+            ps2_e44_trace::noteAppxMaybe(ram.data(), &ctx);
+            // count 5, tw0 mode 6: logs.
+            e44SetRamWord(ram, 0x0061c8fcu, 0x000001b0u);
+            ps2_e44_trace::noteAppxMaybe(ram.data(), &ctx);
+            // Site 2 same filter state: logs.
+            ctx.pc = 0x37b470u;
+            ps2_e44_trace::noteAppxMaybe(ram.data(), &ctx);
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "appx ") == 3u, "floor/pc/filter gate appx");
+            const std::string want =
+                "appx vsync=1271 site=1 count=1 t0=0x61c8fc tw0=0xc tw1=0x1414294 "
+                "tw2=0x2a0 tw3=0x0 tw4=0xffff05dd ra=0x379780\n";
+            t.IsTrue(text.find(want) != std::string::npos, "appx row carries site/count/tw/ra");
+            t.IsTrue(text.find("site=2 count=5 t0=0x61c8fc tw0=0x1b0") != std::string::npos,
+                     "mode-6 row logs at site 2");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("appx caps at 300", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-appxcap.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 0u, 5000u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            e44SetRamWord(ram, 0x0061c8fcu, 0x0000000cu);
+            R5900Context ctx{};
+            ctx.pc = 0x37ad40u;
+            e44SetReg(ctx, 8, 0x0061c8fcu);
+            e44SetReg(ctx, 3, 1u);
+            e44SetReg(ctx, 31, 0x00379780u);
+
+            ps2_e41_trace::noteVsync(1300u);
+            for (int i = 0; i < 305; ++i)
+            {
+                ps2_e44_trace::noteAppxMaybe(ram.data(), &ctx);
+            }
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "appx ") == 300u, "appx caps at 300");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("v1b0 watches 32-bit lanes, caps at 200", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-v1b0.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 0u, 5000u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            R5900Context ctx{};
+            ctx.pc = 0x379804u;
+            e44SetReg(ctx, 31, 0x00379780u);
+            for (int r = 4; r <= 7; ++r)
+            {
+                e44SetReg(ctx, r, static_cast<uint32_t>(r));
+            }
+            e44SetReg(ctx, 2, 5u);
+            e44SetReg(ctx, 3, 6u);
+            for (int r = 16; r <= 23; ++r)
+            {
+                e44SetReg(ctx, r, 0x10u + static_cast<uint32_t>(r - 16));
+            }
+
+            ps2_e41_trace::noteVsync(100u);
+            // Exact 0x1b0 lane: logs. 0xcc: silent.
+            ps2_e44_trace::noteV1b0Maybe(&ctx, 0x30809670u, 4u, 0x000001b0u, 0u, "Store32");
+            ps2_e44_trace::noteV1b0Maybe(&ctx, 0x30809670u, 4u, 0x000000ccu, 0u, "Store32");
+            // 64-bit store with both lanes hot: two lines.
+            ps2_e44_trace::noteV1b0Maybe(&ctx, 0x30809670u, 8u, 0x000001b0000001b0ull, 0u, "Store64");
+            // Burn the cap.
+            for (int i = 0; i < 250; ++i)
+            {
+                ps2_e44_trace::noteV1b0Maybe(&ctx, 0x30809670u, 4u, 0x000001b0u, 0u, "Store32");
+            }
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "v1b0 ") == 200u, "v1b0 caps at 200");
+            const std::string want =
+                "v1b0 vsync=100 addr=0x30809670 lane=0 value=0x1b0 "
+                "pc=0x379804 ra=0x379780 fn=Store32 "
+                "a0=00000004 a1=00000005 a2=00000006 a3=00000007 "
+                "v0=00000005 v1=00000006 "
+                "s0=00000010 s1=00000011 s2=00000012 s3=00000013 "
+                "s4=00000014 s5=00000015 s6=00000016 s7=00000017\n";
+            t.IsTrue(text.find(want) != std::string::npos, "v1b0 carries addr/lane/value/pc/regs");
+            t.IsTrue(text.find("lane=1 value=0x1b0") != std::string::npos,
+                     "both lanes of a hot 64-bit store log");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("tw watch arms silent, logs changes, any spelling", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-tw.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 1255u, 1450u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            e44SetRamWord(ram, 0x0061c910u, 0x00000000u);
+            R5900Context ctx{};
+            ctx.pc = 0x1a2618u;
+            e44SetReg(ctx, 31, 0x001a25dcu);
+            for (int r = 4; r <= 7; ++r)
+            {
+                e44SetReg(ctx, r, static_cast<uint32_t>(r));
+            }
+            e44SetReg(ctx, 2, 5u);
+            e44SetReg(ctx, 3, 6u);
+            for (int r = 16; r <= 23; ++r)
+            {
+                e44SetReg(ctx, r, 0x10u + static_cast<uint32_t>(r - 16));
+            }
+
+            // First overlap (kuseg spelling) snapshots silently.
+            ps2_e41_trace::noteVsync(100u);
+            ps2_e44_trace::noteTwMaybe(ram.data(), &ctx, 0x0061c900u, 4u, "setter");
+            // No-change repeat: silent. Out-of-range: silent.
+            ps2_e44_trace::noteTwMaybe(ram.data(), &ctx, 0x0061c900u, 4u, "setter");
+            ps2_e44_trace::noteTwMaybe(ram.data(), &ctx, 0x00100000u, 4u, "setter");
+            // UCAB spelling of 0x61c910 w0 change 0 -> 0x1b0: logs.
+            e44SetRamWord(ram, 0x0061c910u, 0x000001b0u);
+            ps2_e44_trace::noteTwMaybe(ram.data(), &ctx, 0x3061c910u, 4u, "setter");
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "tw ") == 1u, "arming silent, one change one line");
+            const std::string want =
+                "tw vsync=100 addr=0x61c910 old=0x0 new=0x1b0 via=store32 "
+                "pc=0x1a2618 ra=0x1a25dc fn=setter "
+                "a0=00000004 a1=00000005 a2=00000006 a3=00000007 "
+                "v0=00000005 v1=00000006 "
+                "s0=00000010 s1=00000011 s2=00000012 s3=00000013 "
+                "s4=00000014 s5=00000015 s6=00000016 s7=00000017\n";
+            t.IsTrue(text.find(want) != std::string::npos, "tw carries addr/old/new/via/pc/regs");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("tw logs sub-word and multi-word stores, caps at 2000", [](TestCase &t)
+        {
+            const std::string tmp = e44TmpPath("ps2x-e44-twcap.txt");
+            std::remove(tmp.c_str());
+            ps2_e44_trace::configureForTest(tmp.c_str(), 0u, 5000u);
+            ps2_e44_trace::configureAppendForTest();
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> sp(PS2_SCRATCHPAD_SIZE, 0u);
+            ps2SetScratchpadHostPtr(sp.data());
+            R5900Context ctx{};
+            ctx.pc = 0x379804u;
+            e44SetReg(ctx, 31, 0x00379780u);
+
+            ps2_e41_trace::noteVsync(50u);
+            // Arm on a far word; 16-bit change inside tw0 of template 0.
+            ps2_e44_trace::noteTwMaybe(ram.data(), &ctx, 0x0061c940u, 4u, "setter");
+            e44SetRamWord(ram, 0x0061c8fcu, 0x000000ccu);
+            ps2_e44_trace::noteTwMaybe(ram.data(), &ctx, 0x0061c8feu, 2u, "Store16");
+            // 64-bit store changing two adjacent words: two lines.
+            e44SetRamWord(ram, 0x0061c920u, 0x11111111u);
+            e44SetRamWord(ram, 0x0061c924u, 0x22222222u);
+            ps2_e44_trace::noteTwMaybe(ram.data(), &ctx, 0x0061c920u, 8u, "Store64");
+            // Burn the cap with single-word toggles.
+            for (int i = 0; i < 2010; ++i)
+            {
+                e44SetRamWord(ram, 0x0061c930u, static_cast<uint32_t>(i + 1));
+                ps2_e44_trace::noteTwMaybe(ram.data(), &ctx, 0x0061c930u, 4u, "setter");
+            }
+
+            ps2_e44_trace::clearForTest();
+            ps2SetScratchpadHostPtr(nullptr);
+            const std::string text = e44ReadWholeFile(tmp);
+            t.IsTrue(e44CountPrefix(text, "tw ") == 2000u, "tw caps at 2000 total");
+            t.IsTrue(text.find("addr=0x61c8fc old=0x0 new=0xcc via=store16") != std::string::npos,
+                     "sub-word store logs the containing word");
+            std::remove(tmp.c_str());
+        });
     }
 }
 

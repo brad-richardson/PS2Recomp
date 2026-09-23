@@ -5,6 +5,24 @@
 // env-configured extra EE words (PS2X_E44_EXTRA="0x<addr>[,...]", for the
 // Boot-B follow-up on a DMA source word).
 //
+// Part 4 (PS2X_E44_APPEND=1): render-list append watch for
+// sub_00376938. (a) At the count-increment store (pc 0x3797E8, same
+// basic block as the 0x3797EC append copy, post-store) logs the T60
+// app line (count, t0, tw0..tw4, s4, t1, raw ra). (b) Write-watches
+// the template words, logging T60 tpl lines for tw0/tw1 changes.
+// Amendment: tplm value filter (amendment 2: exact mode 6), cap 200;
+// per-vsync appsum aggregation (ungated counters, cap 3000 lines);
+// the apc appender-pc census over the EE item region (ungated,
+// uncapped). app/tpl/tplrearm grammars match T60 exactly for
+// diffing; tplm/appsum/apc are E44-only.
+// Amendment 2 (T61/T62 parity): appx filtered log at the three copy
+// sites (tick >= 1270, count<=1 or mode 6, cap 300) and the v1b0
+// value watch ((lane & 0x3FF) == 0x1B0, cap 200, ungated).
+// Amendment 3 (T62/T63 parity): tw change-only watch over the four
+// 0x14 templates (whole boot, no per-word cap, 2000 lines).
+// EE canonicalization folds every RAM segment (0x00/0x20/0x30/0x80/
+// 0xA0) via PS2_RAM_MASK, so UCAB (0x30) stores match extras.
+//
 // Master gate: PS2X_E44_TRACE names the text file receiving every line.
 // Unset/empty (default) = one relaxed atomic check per tap; zero
 // guest-visible behavior change, no I/O.
@@ -70,6 +88,43 @@ inline constexpr uint64_t kMaxLastLines = 40ull;
 inline constexpr uint32_t kItem0Base = 0x70000000u;
 // Part 3: per-word-per-changed-vsync EE readout lines.
 inline constexpr uint64_t kMaxEbLines = 400ull;
+// Part 4: append-copy watch (sub_00376938 render-list append).
+// kAppendCountPc is the count-increment sw, in the same basic block as
+// the 0x3797EC ldl append copy (no branch between; the count>=2600
+// beqz skips both). The WRITE-macro hook fires post-store, so the
+// observed *a3 equals T60's 0x3797EC-hook count (post-increment), and
+// $ra is logged raw (T60: constant 0x379780, verified not clobbered).
+inline constexpr uint32_t kAppendCountPc = 0x3797E8u;
+inline constexpr uint64_t kMaxAppLines = 300ull;
+inline constexpr uint64_t kMaxTplLines = 300ull;
+inline constexpr uint32_t kTplWords = 5u;
+// Part 4 amendment (T60): tplm value filter (amendment 2: exact mode
+// 6, ((new tw0 >> 6) & 0xF) == 6), per-vsync appsum aggregation, and
+// the appender-pc census over the EE item region.
+inline constexpr uint64_t kMaxTplmLines = 200ull;
+// Part 4 amendment 2 (T61/T62): appx filtered log at the three copy
+// sites (0 = 0x3797EC via trigger 0x3797E8, 1 = 0x37AD44 via trigger
+// 0x37AD40, 2 = 0x37B474 via trigger 0x37B470; each trigger is the
+// site's count-increment sw, same basic block as its copy), rows with
+// count(v1)<=1 or mode 6, tick >= kAppxFromTick, cap 300; plus the
+// v1b0 value watch (any store lane with (v & 0x3FF) == 0x1B0, cap 200,
+// ungated).
+inline constexpr uint32_t kAppxTrigger[3] = {0x3797E8u, 0x37AD40u, 0x37B470u};
+inline constexpr uint64_t kMaxAppxLines = 300ull;
+inline constexpr uint64_t kAppxFromTick = 1270ull;
+inline constexpr uint64_t kMaxV1b0Lines = 200ull;
+// Part 4 amendment 3 (T62/T63): change-only watch over the four
+// 0x14 templates at kTwBase (tw0 of template 1 at +0x14 carries the
+// SC mode word). Whole boot, no per-word cap, 2000 total lines.
+inline constexpr uint32_t kTwBase = 0x61c8fcu;
+inline constexpr uint32_t kTwSize = 0x50u;
+inline constexpr uint32_t kTwWords = 20u;
+inline constexpr uint64_t kMaxTwLines = 2000ull;
+inline constexpr uint64_t kMaxAppSumLines = 3000ull;
+inline constexpr uint32_t kApcBase = 0x809670u;
+inline constexpr uint32_t kApcStride = 0x80u;
+inline constexpr uint32_t kApcItems = 64u;
+inline constexpr int kMaxApcPc = 64;
 
 // Canonical watched scratchpad offsets (word-aligned).
 inline constexpr uint32_t kFixedOffsets[kFixedWords] = {
@@ -133,6 +188,39 @@ namespace detail
         uint64_t vif0UnkLines = 0u;
         uint64_t vu0CallLines = 0u;
         uint64_t sprModLines = 0u;
+        // Part 4: append watch. appLines caps the (a) log; tplBase
+        // arms the template write watch (0 = unarmed), with the last
+        // seen tw0/tw1 for change detection, tplLines cap (shared with
+        // tplrearm), and the tplm value-filtered cap.
+        bool appendOn = false;
+        uint64_t appLines = 0u;
+        uint32_t tplBase = 0u;
+        uint32_t tplLast0 = 0u;
+        uint32_t tplLast1 = 0u;
+        uint64_t tplLines = 0u;
+        uint64_t tplmLines = 0u;
+        // Part 4 amendment: per-vsync aggregation (ungated counters;
+        // lines are capped). sumApp = append executions, sumTpl = tw0
+        // /tw1 words changed, sumHist[m] over append tw0 with
+        // m = (tw0>>6)&0xF. apcPc/apcCount = per-pc stores into the
+        // EE item region for the in-progress tick.
+        bool sumTickValid = false;
+        uint64_t sumTick = 0u;
+        uint64_t sumApp = 0u;
+        uint64_t sumTpl = 0u;
+        uint64_t sumHist[16] = {0u};
+        uint64_t sumLines = 0u;
+        uint32_t apcPc[kMaxApcPc] = {0u};
+        uint32_t apcCount[kMaxApcPc] = {0u};
+        int numApc = 0;
+        // Part 4 amendment 2: appx/v1b0 line caps.
+        uint64_t appxLines = 0u;
+        uint64_t v1b0Lines = 0u;
+        // Part 4 amendment 3: tw block watch (lazy baseline, then
+        // change-only).
+        bool twValid = false;
+        uint32_t twLast[kTwWords] = {0u};
+        uint64_t twLines = 0u;
     };
 
     inline State &state()
@@ -151,6 +239,35 @@ namespace detail
     {
         static std::atomic<bool> on{false};
         return on;
+    }
+
+    // Part 4 fast gates (atomics so the WRITE-macro checks stay cheap).
+    inline std::atomic<bool> &appendOnFlag()
+    {
+        static std::atomic<bool> on{false};
+        return on;
+    }
+
+    inline std::atomic<bool> &tplArmedFlag()
+    {
+        static std::atomic<bool> armed{false};
+        return armed;
+    }
+
+    // Canonical RAM fold (Part 4 fix): every guest spelling of the same
+    // EE word folds to the RAM offset. UCAB 0x30809670 used to fold with
+    // & 0x1FFFFFFF to 0x10809670 and miss the 0x00809670 extra; with the
+    // RAM mask all of 0x00/0x20/0x30/0x80/0xA0 spellings agree.
+    // Non-RAM segments keep the legacy fold (no behavior change there).
+    inline uint32_t ramCanon(uint32_t addr)
+    {
+        const uint32_t seg = addr >> 24u;
+        if (seg == 0x00u || seg == 0x20u || seg == 0x30u || seg == 0x80u ||
+            seg == 0xA0u)
+        {
+            return (addr & PS2_RAM_MASK) & ~3u;
+        }
+        return (addr & 0x1FFFFFFFu) & ~3u;
     }
 
     // Guard: Store* holds this across m_memory.write so the PS2Memory-level
@@ -257,6 +374,16 @@ namespace detail
         s.from = from;
         s.to = to;
         parseExtraLocked(s, std::getenv("PS2X_E44_EXTRA"));
+        // Part 4: PS2X_E44_APPEND=1 arms the render-list append watch
+        // (same trace file and FROM/TO window as the spw watch).
+        if (const char *append = std::getenv("PS2X_E44_APPEND"))
+        {
+            if (append[0] == '1' && append[1] == '\0')
+            {
+                s.appendOn = true;
+                appendOnFlag().store(true, std::memory_order_relaxed);
+            }
+        }
         s.enabled = true;
         enabledFlag().store(true, std::memory_order_relaxed);
     }
@@ -293,10 +420,10 @@ namespace detail
                 }
             }
         }
-        const uint32_t canon = addr & 0x1FFFFFFFu & ~3u;
+        const uint32_t canon = ramCanon(addr);
         for (int i = 0; i < s.numExtra; ++i)
         {
-            if (canon == (s.extra[i] & 0x1FFFFFFFu))
+            if (canon == ramCanon(s.extra[i]))
             {
                 return kFixedWords + i;
             }
@@ -635,10 +762,13 @@ inline void emitRangeOverlap(const uint8_t *rdram, const R5900Context *ctx,
     for (int i = 0; i < n; ++i)
     {
         const uint32_t ew = extras[i] & ~3u;
-        // Realistic guest spellings of the same word (KSEG0/phys).
-        const uint32_t canon = ew & 0x1FFFFFFFu;
-        const uint32_t spell[3] = {ew, canon, 0x80000000u | canon};
-        for (int k = 0; k < 3; ++k)
+        // Every RAM-segment spelling of the same word (phys, cached
+        // mirror, UCAB, KSEG0, KSEG1), plus the configured spelling.
+        const uint32_t off = ew & PS2_RAM_MASK;
+        const uint32_t spell[6] = {ew, off, 0x20000000u | off,
+                                   0x30000000u | off, 0x80000000u | off,
+                                   0xA0000000u | off};
+        for (int k = 0; k < 6; ++k)
         {
             if (!contained(spell[k]))
             {
@@ -1077,7 +1207,7 @@ inline void noteSprFromDma(const uint8_t *rdram, uint32_t ramStart,
     {
         const int idx = kFixedWords + i;
         // EXTRA addrs are EE words; match them in RAM space.
-        const uint32_t want = (s.extra[i] & 0x1FFFFFFFu) & PS2_RAM_MASK & ~3u;
+        const uint32_t want = detail::ramCanon(s.extra[i]);
         // Distance of this word from the transfer dest start, mod RAM.
         // The copy loop wraps RAM and SPR independently, so the word is
         // hit iff its linear offset lands inside totalBytes.
@@ -1247,6 +1377,636 @@ inline void noteItem0Walk(const R5900Context *ctx, uint32_t s1)
     detail::emitLineLocked(s, line);
 }
 
+// ---- Part 4: render-list append watch (sub_00376938) ----
+
+// Hot-path gates for the WRITE-macro trigger checks: one relaxed
+// atomic load when off.
+inline bool appendArmed()
+{
+    return detail::appendOnFlag().load(std::memory_order_relaxed);
+}
+
+inline bool tplArmed()
+{
+    return detail::tplArmedFlag().load(std::memory_order_relaxed);
+}
+
+// Per-vsync aggregation flush (Part 4 amendment): emits the appsum
+// line for a completed tick (only when it saw appends or tpl changes)
+// plus one apc line per appender pc, then resets. Call with s.mutex
+// held at the top of every Part-4 tap. The trailing tick may never
+// flush (no shutdown hook), same caveat as ebwlast.
+inline void flushPerVsyncLocked(detail::State &s, uint64_t tick)
+{
+    if (!s.sumTickValid)
+    {
+        s.sumTickValid = true;
+        s.sumTick = tick;
+        return;
+    }
+    if (s.sumTick == tick)
+    {
+        return;
+    }
+    if ((s.sumApp > 0u || s.sumTpl > 0u) && s.sumLines < kMaxAppSumLines)
+    {
+        ++s.sumLines;
+        char hist[160];
+        hist[0] = '\0';
+        for (int m = 0; m < 16; ++m)
+        {
+            if (s.sumHist[m] == 0u)
+            {
+                continue;
+            }
+            char b[24];
+            std::snprintf(b, sizeof(b), "%s%x:%llu",
+                          hist[0] != '\0' ? "," : "",
+                          static_cast<unsigned>(m),
+                          static_cast<unsigned long long>(s.sumHist[m]));
+            const size_t room = sizeof(hist) - std::strlen(hist) - 1u;
+            std::strncat(hist, b, room);
+        }
+        char line[320];
+        std::snprintf(line, sizeof(line),
+                      "appsum vsync=%llu n_app=%llu n_tpl=%llu mode_hist=%s",
+                      static_cast<unsigned long long>(s.sumTick),
+                      static_cast<unsigned long long>(s.sumApp),
+                      static_cast<unsigned long long>(s.sumTpl),
+                      hist[0] != '\0' ? hist : "-");
+        detail::emitLineLocked(s, line);
+    }
+    for (int i = 0; i < s.numApc; ++i)
+    {
+        char line[128];
+        std::snprintf(line, sizeof(line), "apc vsync=%llu pc=0x%x count=%llu",
+                      static_cast<unsigned long long>(s.sumTick),
+                      s.apcPc[i],
+                      static_cast<unsigned long long>(s.apcCount[i]));
+        detail::emitLineLocked(s, line);
+    }
+    s.sumTick = tick;
+    s.sumApp = 0u;
+    s.sumTpl = 0u;
+    for (int m = 0; m < 16; ++m)
+    {
+        s.sumHist[m] = 0u;
+    }
+    s.numApc = 0;
+}
+
+// Appender-pc census tap (Part 4 amendment): call on every
+// WRITE-macro store. Counts per-vsync per-pc stores into the EE
+// list-item region [kApcBase, kApcBase + stride*items), matched in
+// RAM space (any segment spelling). No window gate and no line cap
+// (bounded by distinct pcs per vsync).
+inline void noteApcMaybe(const R5900Context *ctx, uint32_t addr)
+{
+    if (ctx == nullptr)
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.appendOn)
+    {
+        return;
+    }
+    const uint32_t canon = detail::ramCanon(addr);
+    const uint32_t lo = detail::ramCanon(kApcBase);
+    if (canon < lo || canon >= lo + kApcStride * kApcItems)
+    {
+        return;
+    }
+    const uint64_t tick = ps2_e41_trace::lastVsyncTick();
+    detail::flushEbLocked(s, tick);
+    flushPerVsyncLocked(s, tick);
+    if (!s.enabled)
+    {
+        return;
+    }
+    const uint32_t pc = ctx->pc;
+    for (int i = 0; i < s.numApc; ++i)
+    {
+        if (s.apcPc[i] == pc)
+        {
+            ++s.apcCount[i];
+            return;
+        }
+    }
+    if (s.numApc < kMaxApcPc)
+    {
+        s.apcPc[s.numApc] = pc;
+        s.apcCount[s.numApc] = 1u;
+        ++s.numApc;
+    }
+}
+
+// Multi-site filtered log (Part 4 amendment 2, T62 parity): call at
+// the END of any count-increment sw whose pc is one of kAppxTrigger
+// (post-store; v1 holds the post-increment count, t0 the template).
+// Logs only rows with count(v1) <= 1 or mode 6 (((tw0>>6)&0xF)==6),
+// tick >= kAppxFromTick, cap 300. site = index into kAppxTrigger
+// (0 = 0x3797EC, 1 = 0x37AD44, 2 = 0x37B474).
+inline void noteAppxMaybe(const uint8_t *rdram, const R5900Context *ctx)
+{
+    if (ctx == nullptr)
+    {
+        return;
+    }
+    int site = -1;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (ctx->pc == kAppxTrigger[i])
+        {
+            site = i;
+            break;
+        }
+    }
+    if (site < 0)
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.appendOn)
+    {
+        return;
+    }
+    const uint64_t tick = ps2_e41_trace::lastVsyncTick();
+    if (tick < kAppxFromTick)
+    {
+        return;
+    }
+    const uint32_t t0 = getRegU32(ctx, 8);
+    uint32_t tw[kTplWords] = {0u};
+    for (uint32_t i = 0u; i < kTplWords; ++i)
+    {
+        detail::readWordBack(rdram, t0 + 4u * i, tw[i]);
+    }
+    const uint32_t v1 = getRegU32(ctx, 3);
+    if (v1 > 1u && ((tw[0] >> 6u) & 0xFu) != 6u)
+    {
+        return;
+    }
+    if (s.appxLines >= kMaxAppxLines)
+    {
+        return;
+    }
+    ++s.appxLines;
+    const uint32_t ra = getRegU32(ctx, 31);
+    char line[320];
+    std::snprintf(line, sizeof(line),
+                  "appx vsync=%llu site=%d count=%u t0=0x%x tw0=0x%x "
+                  "tw1=0x%x tw2=0x%x tw3=0x%x tw4=0x%x ra=0x%x",
+                  static_cast<unsigned long long>(tick),
+                  site, v1, t0, tw[0], tw[1], tw[2], tw[3], tw[4], ra);
+    detail::emitLineLocked(s, line);
+}
+
+// 0x1B0 value watch (Part 4 amendment 2, T61 parity): call at the END
+// of every WRITE-macro store with the stored lanes. Logs one line per
+// 32-bit lane with (v & 0x3FF) == 0x1B0, with pc/ra/regs; no window
+// gate (the set instant is unknown), cap 200. Early-boot unrelated
+// 0x1B0-pattern stores can burn the cap; each line carries pc for
+// triage.
+inline void noteV1b0Maybe(const R5900Context *ctx, uint32_t addr,
+                          uint32_t size, uint64_t valueLo,
+                          uint64_t valueHi, const char *fn)
+{
+    if (ctx == nullptr)
+    {
+        return;
+    }
+    uint32_t lanes = size / 4u;
+    if (lanes < 1u)
+    {
+        lanes = 1u;
+    }
+    if (lanes > 4u)
+    {
+        lanes = 4u;
+    }
+    const uint64_t words[2] = {valueLo, valueHi};
+    bool hit = false;
+    for (uint32_t l = 0u; l < lanes; ++l)
+    {
+        const uint32_t v =
+            static_cast<uint32_t>((words[l / 2u] >> ((l % 2u) * 32u)) & 0xFFFFFFFFull);
+        if ((v & 0x3FFu) == 0x1B0u)
+        {
+            hit = true;
+            break;
+        }
+    }
+    if (!hit)
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.appendOn)
+    {
+        return;
+    }
+    const uint64_t tick = ps2_e41_trace::lastVsyncTick();
+    detail::flushEbLocked(s, tick);
+    flushPerVsyncLocked(s, tick);
+    if (!s.enabled)
+    {
+        return;
+    }
+    const uint32_t pc = ctx->pc;
+    const uint32_t ra = getRegU32(ctx, 31);
+    for (uint32_t l = 0u; l < lanes; ++l)
+    {
+        const uint32_t v =
+            static_cast<uint32_t>((words[l / 2u] >> ((l % 2u) * 32u)) & 0xFFFFFFFFull);
+        if ((v & 0x3FFu) != 0x1B0u)
+        {
+            continue;
+        }
+        if (s.v1b0Lines >= kMaxV1b0Lines)
+        {
+            return;
+        }
+        ++s.v1b0Lines;
+        const uint32_t a0 = getRegU32(ctx, 4);
+        const uint32_t a1 = getRegU32(ctx, 5);
+        const uint32_t a2 = getRegU32(ctx, 6);
+        const uint32_t a3 = getRegU32(ctx, 7);
+        const uint32_t v0 = getRegU32(ctx, 2);
+        const uint32_t v1 = getRegU32(ctx, 3);
+        const uint32_t s0 = getRegU32(ctx, 16);
+        const uint32_t s1 = getRegU32(ctx, 17);
+        const uint32_t s2 = getRegU32(ctx, 18);
+        const uint32_t s3 = getRegU32(ctx, 19);
+        const uint32_t s4 = getRegU32(ctx, 20);
+        const uint32_t s5 = getRegU32(ctx, 21);
+        const uint32_t s6 = getRegU32(ctx, 22);
+        const uint32_t s7 = getRegU32(ctx, 23);
+        char line[640];
+        std::snprintf(line, sizeof(line),
+                      "v1b0 vsync=%llu addr=0x%x lane=%u value=0x%x "
+                      "pc=0x%x ra=0x%x fn=%s "
+                      "a0=%08x a1=%08x a2=%08x a3=%08x "
+                      "v0=%08x v1=%08x "
+                      "s0=%08x s1=%08x s2=%08x s3=%08x "
+                      "s4=%08x s5=%08x s6=%08x s7=%08x",
+                      static_cast<unsigned long long>(tick),
+                      addr, l, v, pc, ra, fn != nullptr ? fn : "-",
+                      a0, a1, a2, a3, v0, v1,
+                      s0, s1, s2, s3, s4, s5, s6, s7);
+        detail::emitLineLocked(s, line);
+        if (!s.enabled)
+        {
+            return;
+        }
+    }
+}
+
+// Template-block watch (Part 4 amendment 3, T63 parity): call at the
+// END of every WRITE-macro store (post-write, read-back live).
+// Change-only over [kTwBase, kTwBase + kTwSize): the first overlapping
+// store snapshots the whole block silently (lazy baseline, valid
+// thereafter); later stores log one tw line per changed word and
+// refresh the lasts. Whole boot (no window gate), no per-word cap,
+// 2000 total lines. Guest-CPU stores only (pc/ra required); host
+// bulk paths cannot name a setter.
+inline void noteTwMaybe(const uint8_t *rdram, const R5900Context *ctx,
+                        uint32_t addr, uint32_t size, const char *fn)
+{
+    if (ctx == nullptr)
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.appendOn)
+    {
+        return;
+    }
+    const uint32_t lo = detail::ramCanon(kTwBase);
+    const uint32_t span = size > 16u ? 16u : size;
+    // Canonicalize the store range: UCAB/kseg spellings of block words
+    // must intersect the canonical block.
+    const uint32_t cFirst = detail::ramCanon(addr & ~3u);
+    const uint64_t cEnd = static_cast<uint64_t>(cFirst) + span;
+    const uint64_t blockEnd = static_cast<uint64_t>(lo) + kTwSize;
+    uint32_t w0 = cFirst > lo ? cFirst : lo;
+    uint64_t wEnd = cEnd < blockEnd ? cEnd : blockEnd;
+    if (static_cast<uint64_t>(w0) >= wEnd)
+    {
+        return;
+    }
+    const uint64_t tick = ps2_e41_trace::lastVsyncTick();
+    detail::flushEbLocked(s, tick);
+    flushPerVsyncLocked(s, tick);
+    if (!s.enabled)
+    {
+        return;
+    }
+    if (!s.twValid)
+    {
+        for (uint32_t i = 0u; i < kTwWords; ++i)
+        {
+            if (!detail::readWordBack(rdram, lo + 4u * i, s.twLast[i]))
+            {
+                return;
+            }
+        }
+        s.twValid = true;
+    }
+    const uint32_t pc = ctx->pc;
+    const uint32_t ra = getRegU32(ctx, 31);
+    const char *via = viaForSize(size);
+    for (uint32_t w = w0; static_cast<uint64_t>(w) < wEnd; w += 4u)
+    {
+        uint32_t now = 0u;
+        if (!detail::readWordBack(rdram, w, now))
+        {
+            continue;
+        }
+        const uint32_t idx = (w - lo) / 4u;
+        if (idx >= kTwWords || now == s.twLast[idx])
+        {
+            continue;
+        }
+        const uint32_t old = s.twLast[idx];
+        s.twLast[idx] = now;
+        if (s.twLines >= kMaxTwLines)
+        {
+            return;
+        }
+        ++s.twLines;
+        const uint32_t a0 = getRegU32(ctx, 4);
+        const uint32_t a1 = getRegU32(ctx, 5);
+        const uint32_t a2 = getRegU32(ctx, 6);
+        const uint32_t a3 = getRegU32(ctx, 7);
+        const uint32_t v0 = getRegU32(ctx, 2);
+        const uint32_t v1 = getRegU32(ctx, 3);
+        const uint32_t s0 = getRegU32(ctx, 16);
+        const uint32_t s1 = getRegU32(ctx, 17);
+        const uint32_t s2 = getRegU32(ctx, 18);
+        const uint32_t s3 = getRegU32(ctx, 19);
+        const uint32_t s4 = getRegU32(ctx, 20);
+        const uint32_t s5 = getRegU32(ctx, 21);
+        const uint32_t s6 = getRegU32(ctx, 22);
+        const uint32_t s7 = getRegU32(ctx, 23);
+        char line[640];
+        std::snprintf(line, sizeof(line),
+                      "tw vsync=%llu addr=0x%x old=0x%x new=0x%x via=%s "
+                      "pc=0x%x ra=0x%x fn=%s "
+                      "a0=%08x a1=%08x a2=%08x a3=%08x "
+                      "v0=%08x v1=%08x "
+                      "s0=%08x s1=%08x s2=%08x s3=%08x "
+                      "s4=%08x s5=%08x s6=%08x s7=%08x",
+                      static_cast<unsigned long long>(tick),
+                      w, old, now, via, pc, ra,
+                      fn != nullptr ? fn : "-",
+                      a0, a1, a2, a3, v0, v1,
+                      s0, s1, s2, s3, s4, s5, s6, s7);
+        detail::emitLineLocked(s, line);
+        if (!s.enabled)
+        {
+            return;
+        }
+    }
+}
+
+// Append tap: call at the END of the count-increment sw
+// (pc == kAppendCountPc, same basic block as the 0x3797EC append
+// copy; post-store, so *a3 already holds the T60 count). Arms (or
+// re-arms on template move) the template watch ungated; aggregates
+// the appsum census ungated; emits the (a) line (T60 app format)
+// only in-window and under the cap.
+inline void noteAppend(const uint8_t *rdram, const R5900Context *ctx)
+{
+    if (ctx == nullptr)
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.appendOn)
+    {
+        return;
+    }
+    const uint64_t tick = ps2_e41_trace::lastVsyncTick();
+    detail::flushEbLocked(s, tick);
+    flushPerVsyncLocked(s, tick);
+    if (!s.enabled)
+    {
+        return;
+    }
+    const uint32_t a3 = getRegU32(ctx, 7);
+    const uint32_t t0 = getRegU32(ctx, 8);
+    uint32_t tw0 = 0u;
+    detail::readWordBack(rdram, t0, tw0);
+    if (s.tplBase != t0)
+    {
+        const uint32_t oldBase = s.tplBase;
+        s.tplBase = t0;
+        uint32_t w1 = 0u;
+        detail::readWordBack(rdram, t0 + 4u, w1);
+        s.tplLast0 = tw0;
+        s.tplLast1 = w1;
+        detail::tplArmedFlag().store(true, std::memory_order_relaxed);
+        // Rearm line on a genuine move (T60 tplrearm format, sharing
+        // the tpl budget); the first arm stays silent.
+        if (oldBase != 0u && tick >= s.from && tick <= s.to &&
+            s.tplLines < kMaxTplLines)
+        {
+            ++s.tplLines;
+            char rline[128];
+            std::snprintf(rline, sizeof(rline),
+                          "tplrearm vsync=%llu old=0x%x new=0x%x",
+                          static_cast<unsigned long long>(tick),
+                          oldBase, t0);
+            detail::emitLineLocked(s, rline);
+            if (!s.enabled)
+            {
+                return;
+            }
+        }
+    }
+    // Unfiltered aggregation (amendment): every append counts, any tick.
+    ++s.sumApp;
+    s.sumHist[(tw0 >> 6u) & 0xFu]++;
+    if (tick < s.from || tick > s.to)
+    {
+        return;
+    }
+    if (s.appLines >= kMaxAppLines)
+    {
+        return;
+    }
+    ++s.appLines;
+    uint32_t count = 0u;
+    detail::readWordBack(rdram, a3, count);
+    uint32_t tw[kTplWords] = {0u};
+    tw[0] = tw0;
+    for (uint32_t i = 1u; i < kTplWords; ++i)
+    {
+        detail::readWordBack(rdram, t0 + 4u * i, tw[i]);
+    }
+    const uint32_t s4 = getRegU32(ctx, 20);
+    const uint32_t t1 = getRegU32(ctx, 9);
+    const uint32_t ra = getRegU32(ctx, 31);
+    char line[256];
+    std::snprintf(line, sizeof(line),
+                  "app vsync=%llu count=%u t0=0x%x tw0=0x%x tw1=0x%x "
+                  "tw2=0x%x tw3=0x%x tw4=0x%x s4=0x%x t1=0x%x ra=0x%x",
+                  static_cast<unsigned long long>(tick),
+                  count, t0, tw[0], tw[1], tw[2], tw[3], tw[4],
+                  s4, t1, ra);
+    detail::emitLineLocked(s, line);
+}
+
+// Template write tap: call at the END of every WRITE-macro store once
+// armed (post-write, so read-back is live). Change detection always
+// updates the lasts (so in-window state stays true); tpl/tplm lines
+// are window-gated. Logs one T60-format tpl line per changed word
+// (tw0/tw1 only), plus a tplm line when a tw0 change sets mode bits
+// ((new & 0x3C0) != 0). Sub-word and 64/128-bit stores are handled
+// by read-back comparison.
+inline void noteTplMaybe(const uint8_t *rdram, const R5900Context *ctx,
+                         uint32_t addr, uint32_t size, const char *fn)
+{
+    if (ctx == nullptr)
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.appendOn || s.tplBase == 0u)
+    {
+        return;
+    }
+    const uint32_t span = size > 16u ? 16u : size;
+    // Canonicalize both sides: the store and the armed base may use
+    // different segment spellings (kuseg vs UCAB) of the same words.
+    const uint32_t cBase = detail::ramCanon(s.tplBase);
+    const uint32_t cFirst = detail::ramCanon(addr & ~3u);
+    const uint64_t cEnd = static_cast<uint64_t>(cFirst) + span;
+    bool touches01 = false;
+    for (uint32_t w = cFirst; static_cast<uint64_t>(w) < cEnd; w += 4u)
+    {
+        if (w == cBase || w == cBase + 4u)
+        {
+            touches01 = true;
+            break;
+        }
+    }
+    if (!touches01)
+    {
+        return;
+    }
+    const uint64_t tick = ps2_e41_trace::lastVsyncTick();
+    detail::flushEbLocked(s, tick);
+    flushPerVsyncLocked(s, tick);
+    if (!s.enabled)
+    {
+        return;
+    }
+    uint32_t now0 = 0u, now1 = 0u;
+    if (!detail::readWordBack(rdram, s.tplBase, now0) ||
+        !detail::readWordBack(rdram, s.tplBase + 4u, now1))
+    {
+        return;
+    }
+    const uint32_t pc = ctx->pc;
+    const uint32_t ra = getRegU32(ctx, 31);
+    const bool ch0 = (now0 != s.tplLast0);
+    const bool ch1 = (now1 != s.tplLast1);
+    if (!ch0 && !ch1)
+    {
+        return;
+    }
+    const uint32_t old0 = s.tplLast0, old1 = s.tplLast1;
+    s.tplLast0 = now0;
+    s.tplLast1 = now1;
+    // Ungated churn counter feeds appsum (amendment).
+    s.sumTpl += (ch0 ? 1u : 0u) + (ch1 ? 1u : 0u);
+    const bool inWin = (tick >= s.from && tick <= s.to);
+    const uint32_t a0 = getRegU32(ctx, 4);
+    const uint32_t a1 = getRegU32(ctx, 5);
+    const uint32_t a2 = getRegU32(ctx, 6);
+    const uint32_t a3 = getRegU32(ctx, 7);
+    const uint32_t v0 = getRegU32(ctx, 2);
+    const uint32_t v1 = getRegU32(ctx, 3);
+    const uint32_t s0 = getRegU32(ctx, 16);
+    const uint32_t s1 = getRegU32(ctx, 17);
+    const uint32_t s2 = getRegU32(ctx, 18);
+    const uint32_t s3 = getRegU32(ctx, 19);
+    const uint32_t s4 = getRegU32(ctx, 20);
+    const uint32_t s5 = getRegU32(ctx, 21);
+    const uint32_t s6 = getRegU32(ctx, 22);
+    const uint32_t s7 = getRegU32(ctx, 23);
+    // tplm (amendment 2: exact mode 6; the 0x3C0 mask admitted mode
+    // 3 and flooded): tw0 change with ((new tw0 >> 6) & 0xF) == 6.
+    // Own 200-line cap; emitted alongside (not instead of) the tpl line.
+    if (ch0 && ((now0 >> 6u) & 0xFu) == 6u && inWin && s.tplmLines < kMaxTplmLines)
+    {
+        ++s.tplmLines;
+        char mline[768];
+        std::snprintf(mline, sizeof(mline),
+                      "tplm vsync=%llu addr=0x%x tw0old=0x%x tw0new=0x%x "
+                      "tw1old=0x%x tw1new=0x%x pc=0x%x ra=0x%x fn=%s "
+                      "a0=%08x a1=%08x a2=%08x a3=%08x "
+                      "v0=%08x v1=%08x "
+                      "s0=%08x s1=%08x s2=%08x s3=%08x "
+                      "s4=%08x s5=%08x s6=%08x s7=%08x",
+                      static_cast<unsigned long long>(tick),
+                      s.tplBase, old0, now0, old1, now1,
+                      pc, ra, fn != nullptr ? fn : "-",
+                      a0, a1, a2, a3, v0, v1,
+                      s0, s1, s2, s3, s4, s5, s6, s7);
+        detail::emitLineLocked(s, mline);
+        if (!s.enabled)
+        {
+            return;
+        }
+    }
+    if (!inWin)
+    {
+        return;
+    }
+    const uint32_t changed[2] = {ch0 ? 1u : 0u, ch1 ? 1u : 0u};
+    const uint32_t oldV[2] = {old0, old1};
+    const uint32_t newV[2] = {now0, now1};
+    for (int k = 0; k < 2; ++k)
+    {
+        if (!changed[k])
+        {
+            continue;
+        }
+        if (s.tplLines >= kMaxTplLines)
+        {
+            return;
+        }
+        ++s.tplLines;
+        char line[640];
+        std::snprintf(line, sizeof(line),
+                      "tpl vsync=%llu addr=0x%x old=0x%x new=0x%x "
+                      "pc=0x%x ra=0x%x "
+                      "a0=%08x a1=%08x a2=%08x a3=%08x "
+                      "v0=%08x v1=%08x "
+                      "s0=%08x s1=%08x s2=%08x s3=%08x "
+                      "s4=%08x s5=%08x s6=%08x s7=%08x",
+                      static_cast<unsigned long long>(tick),
+                      s.tplBase + 4u * static_cast<uint32_t>(k),
+                      oldV[k], newV[k], pc, ra,
+                      a0, a1, a2, a3, v0, v1,
+                      s0, s1, s2, s3, s4, s5, s6, s7);
+        detail::emitLineLocked(s, line);
+        if (!s.enabled)
+        {
+            return;
+        }
+    }
+}
+
 // Test hooks (mirror ps2_e43_trace.h conventions).
 inline void configureForTest(const char *path, uint64_t from, uint64_t to,
                              const uint32_t *extras = nullptr, int numExtras = 0)
@@ -1294,6 +2054,29 @@ inline void configureForTest(const char *path, uint64_t from, uint64_t to,
     s.ebFlushTick = 0u;
     s.ebLines = 0u;
     detail::memSuppressed() = false;
+    s.appendOn = false;
+    detail::appendOnFlag().store(false, std::memory_order_relaxed);
+    detail::tplArmedFlag().store(false, std::memory_order_relaxed);
+    s.appLines = 0u;
+    s.tplBase = 0u;
+    s.tplLast0 = 0u;
+    s.tplLast1 = 0u;
+    s.tplLines = 0u;
+    s.tplmLines = 0u;
+    s.sumTickValid = false;
+    s.sumTick = 0u;
+    s.sumApp = 0u;
+    s.sumTpl = 0u;
+    for (int m = 0; m < 16; ++m)
+    {
+        s.sumHist[m] = 0u;
+    }
+    s.sumLines = 0u;
+    s.numApc = 0;
+    s.appxLines = 0u;
+    s.v1b0Lines = 0u;
+    s.twValid = false;
+    s.twLines = 0u;
 }
 
 inline void clearForTest()
@@ -1341,6 +2124,39 @@ inline void clearForTest()
     s.ebFlushTick = 0u;
     s.ebLines = 0u;
     detail::memSuppressed() = false;
+    s.appendOn = false;
+    detail::appendOnFlag().store(false, std::memory_order_relaxed);
+    detail::tplArmedFlag().store(false, std::memory_order_relaxed);
+    s.appLines = 0u;
+    s.tplBase = 0u;
+    s.tplLast0 = 0u;
+    s.tplLast1 = 0u;
+    s.tplLines = 0u;
+    s.tplmLines = 0u;
+    s.sumTickValid = false;
+    s.sumTick = 0u;
+    s.sumApp = 0u;
+    s.sumTpl = 0u;
+    for (int m = 0; m < 16; ++m)
+    {
+        s.sumHist[m] = 0u;
+    }
+    s.sumLines = 0u;
+    s.numApc = 0;
+    s.appxLines = 0u;
+    s.v1b0Lines = 0u;
+    s.twValid = false;
+    s.twLines = 0u;
+}
+
+// Part 4 test config: arms the append/template watch on an already
+// configured (path + window) state. Call after configureForTest.
+inline void configureAppendForTest()
+{
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.appendOn = true;
+    detail::appendOnFlag().store(true, std::memory_order_relaxed);
 }
 
 } // namespace ps2_e44_trace
