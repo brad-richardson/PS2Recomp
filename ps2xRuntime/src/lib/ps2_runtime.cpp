@@ -2,6 +2,7 @@
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e43_trace.h"
+#include "ps2_e44_trace.h"
 #include "ps2_gfx_stats.h"
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
@@ -2211,6 +2212,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     {
         ps2_e43_trace::h394Pre(rdram, ctx);
     }
+    // E44 Boot-C last-writer readout (dev-only, default off): at the
+    // item-0 walk into func_394ED0. Self-gated on s1 (reg 17).
+    if (sourcePc == ps2_e43_trace::kH394Source &&
+        targetPc == ps2_e43_trace::kH394Target)
+    {
+        ps2_e44_trace::noteItem0Walk(ctx, (ctx != nullptr) ? getRegU32(ctx, 17) : 0u);
+    }
     targetFn(rdram, ctx, this);
     if (e43h394)
     {
@@ -2265,6 +2273,14 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
                   m_gs, &m_memory,
                   startPC, 0u, ctx->vu0_itop, 4096);
     copyVu0StateToContext(m_vu0.state(), ctx);
+    // E44 Part-2 VU0 call trace (dev-only, default off). m_cycle was
+    // reset by reset() above, so state().cycles is this call's usage.
+    if (ps2_e44_trace::enabled())
+    {
+        const uint64_t used = m_vu0.state().cycles;
+        ps2_e44_trace::noteVu0Call(ctx, startPC, used, used >= 4096u,
+                                   m_vu0.state().vi[1], m_vu0.state().vi[2]);
+    }
 }
 
 void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
@@ -2917,7 +2933,14 @@ void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8
     }
     try
     {
+        // E44 scratchpad write watch (dev-only, default off).
+        const bool e44 = ps2_e44_trace::storeArmed(vaddr, 1u);
+        ps2_e44_trace::detail::ScopedMemSuppress e44Suppress(e44);
         m_memory.write8(vaddr, value);
+        if (e44)
+        {
+            ps2_e44_trace::noteStore(rdram, ctx, vaddr, 1u, __func__);
+        }
     }
     catch (const std::exception &)
     {
@@ -2934,7 +2957,14 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     }
     try
     {
+        // E44 scratchpad write watch (dev-only, default off).
+        const bool e44 = ps2_e44_trace::storeArmed(vaddr, 2u);
+        ps2_e44_trace::detail::ScopedMemSuppress e44Suppress(e44);
         m_memory.write16(vaddr, value);
+        if (e44)
+        {
+            ps2_e44_trace::noteStore(rdram, ctx, vaddr, 2u, __func__);
+        }
     }
     catch (const std::exception &)
     {
@@ -2951,7 +2981,14 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     }
     try
     {
+        // E44 scratchpad write watch (dev-only, default off).
+        const bool e44 = ps2_e44_trace::storeArmed(vaddr, 4u);
+        ps2_e44_trace::detail::ScopedMemSuppress e44Suppress(e44);
         m_memory.write32(vaddr, value);
+        if (e44)
+        {
+            ps2_e44_trace::noteStore(rdram, ctx, vaddr, 4u, __func__);
+        }
         drainCompletedDmacHandlers(rdram);
     }
     catch (const std::exception &)
@@ -2969,7 +3006,14 @@ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     }
     try
     {
+        // E44 scratchpad write watch (dev-only, default off).
+        const bool e44 = ps2_e44_trace::storeArmed(vaddr, 8u);
+        ps2_e44_trace::detail::ScopedMemSuppress e44Suppress(e44);
         m_memory.write64(vaddr, value);
+        if (e44)
+        {
+            ps2_e44_trace::noteStore(rdram, ctx, vaddr, 8u, __func__);
+        }
     }
     catch (const std::exception &)
     {
@@ -2990,7 +3034,14 @@ void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m
     {
         if (vaddr == 0x10005000u && ps2_e7::enabled())
             ps2_e7::event(m_memory.gs().vsyncTick.load(), "cpu-fifo", "pc=0x%x ra=0x%x lo=0x%llx hi=0x%llx mask=%u", ctx ? ctx->pc : 0u, ctx ? getRegU32(ctx,31) : 0u, static_cast<unsigned long long>(_parts[0]), static_cast<unsigned long long>(_parts[1]), m_memory.isPath3Masked());
+        // E44 scratchpad write watch (dev-only, default off).
+        const bool e44 = ps2_e44_trace::storeArmed(vaddr, 16u);
+        ps2_e44_trace::detail::ScopedMemSuppress e44Suppress(e44);
         m_memory.write128(vaddr, value);
+        if (e44)
+        {
+            ps2_e44_trace::noteStore(rdram, ctx, vaddr, 16u, __func__);
+        }
     }
     catch (const std::exception &)
     {

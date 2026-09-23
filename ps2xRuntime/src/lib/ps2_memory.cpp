@@ -1,5 +1,6 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_e3.h"
+#include "ps2_e44_trace.h"
 #include "ps2_e7.h"
 #include "ps2_mpg_src_trace.h"
 #include "runtime/ps2_address.h"
@@ -964,6 +965,9 @@ void PS2Memory::write8(uint32_t address, uint8_t value)
     if (scratch)
     {
         m_scratchpad[physAddr] = value;
+        // E44 scratchpad write watch (dev-only, default off;
+        // silent while a Store* tap holds the guard).
+        ps2_e44_trace::noteMemWrite(m_rdram, address, 1u, "write8");
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1008,6 +1012,9 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
     if (scratch)
     {
         storeScalar<uint16_t>(m_scratchpad, physAddr, PS2_SCRATCHPAD_SIZE, value, "write16 scratchpad", address);
+        // E44 scratchpad write watch (dev-only, default off;
+        // silent while a Store* tap holds the guard).
+        ps2_e44_trace::noteMemWrite(m_rdram, address, 2u, "write16");
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1069,6 +1076,9 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
     if (scratch)
     {
         storeScalar<uint32_t>(m_scratchpad, physAddr, PS2_SCRATCHPAD_SIZE, value, "write32 scratchpad", address);
+        // E44 scratchpad write watch (dev-only, default off;
+        // silent while a Store* tap holds the guard).
+        ps2_e44_trace::noteMemWrite(m_rdram, address, 4u, "write32");
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1126,6 +1136,9 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
     if (scratch)
     {
         storeScalar<uint64_t>(m_scratchpad, physAddr, PS2_SCRATCHPAD_SIZE, value, "write64 scratchpad", address);
+        // E44 scratchpad write watch (dev-only, default off;
+        // silent while a Store* tap holds the guard).
+        ps2_e44_trace::noteMemWrite(m_rdram, address, 8u, "write64");
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1194,6 +1207,9 @@ void PS2Memory::write128(uint32_t address, __m128i value)
     {
         inRange(physAddr, sizeof(__m128i), PS2_SCRATCHPAD_SIZE, "write128 scratchpad", address);
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&m_scratchpad[physAddr]), value);
+        // E44 scratchpad write watch (dev-only, default off;
+        // silent while a Store* tap holds the guard).
+        ps2_e44_trace::noteMemWrite(m_rdram, address, 16u, "write128");
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1758,6 +1774,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 // MADR/SADR, clear QWC/STR, raise the channel's D_STAT CIS.
                 const bool sprFrom = (channelBase == 0x1000D000u);
                 const uint32_t sprMode = (value >> 2) & 0x3u;
+                // E44 Part-2 SPR MOD!=0 kick counter (dev-only, default
+                // off). Chain/interleave SPR modes are not implemented:
+                // silent drop, so every such kick is evidence.
+                if (sprMode != 0u && ps2_e44_trace::enabled())
+                {
+                    ps2_e44_trace::noteSprMod(sprFrom, sprMode, madr,
+                                              m_ioRegisters[channelBase + 0x80u], qwc);
+                }
                 if (sprMode == 0u && m_rdram && m_scratchpad)
                 {
                     const uint64_t bytes64 = static_cast<uint64_t>(qwc) * 16ull;
@@ -1813,6 +1837,22 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         ps2_e3::tapEnd(std::move(e3tap), sprFrom ? "spr-from" : "spr-to", m_rdram, e3x);
                     }
 
+                    // E44 scratchpad write watch: SPR_TO (RAM -> scratchpad)
+                    // copy only (SPR_FROM reads the scratchpad). Dev-only,
+                    // default off. madr/SADR still pre-advance.
+                    if (!sprFrom && ps2_e44_trace::enabled())
+                    {
+                        ps2_e44_trace::noteSprDma(m_rdram, madr & PS2_RAM_MASK, e3Sadr0, totalBytes);
+                        // Boot-C last-writer record (ungated; own locking).
+                        ps2_e44_trace::trackLastWriterDma(m_rdram, madr & PS2_RAM_MASK, e3Sadr0, totalBytes);
+                    }
+                    // E44 Part-2 SPR_FROM (scratchpad -> RAM) tap: EXTRA EE
+                    // words only. Dev-only, default off. madr is the RAM
+                    // dest start here, e3Sadr0 the scratchpad src start.
+                    if (sprFrom && ps2_e44_trace::enabled())
+                    {
+                        ps2_e44_trace::noteSprFromDma(m_rdram, madr & PS2_RAM_MASK, e3Sadr0, totalBytes);
+                    }
                     m_ioRegisters[channelBase + 0x10u] = madr + totalBytes;
                     m_ioRegisters[channelBase + 0x20u] = 0u;
                     m_ioRegisters[channelBase + 0x80u] = sprAddr;

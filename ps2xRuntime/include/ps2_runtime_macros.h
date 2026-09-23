@@ -16,6 +16,7 @@
 #include "ps2_mpg_src_trace.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e43_trace.h"
+#include "ps2_e44_trace.h"
 
 static inline int32_t Ps2ExtractEpi32(__m128i v, int index)
 {
@@ -252,6 +253,8 @@ static inline void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t value)
         ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
     if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
         ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
+        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
@@ -269,6 +272,8 @@ static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
             ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
     if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
         ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
+        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
@@ -276,6 +281,8 @@ static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
         ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
     if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
         ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
+        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
@@ -293,6 +300,8 @@ static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
             ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
     if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
         ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
+        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
@@ -300,6 +309,8 @@ static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
         ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
     if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
         ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
+        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
@@ -317,6 +328,8 @@ static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
             ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
     if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
         ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
+        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
@@ -324,6 +337,8 @@ static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
         ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
     if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
         ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
+        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
@@ -341,6 +356,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
     if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
         ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
+        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), static_cast<uint32_t>(PS2_EXTRACT_EPI64_0(value)), __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
@@ -348,6 +365,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
     if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
         ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
+        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), static_cast<uint32_t>(PS2_EXTRACT_EPI64_0(value)), __func__);
 }
 
 #define FAST_READ8(addr) Ps2FastRead8(rdram, (uint32_t)(addr))

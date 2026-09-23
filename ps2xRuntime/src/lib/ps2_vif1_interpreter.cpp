@@ -4,6 +4,7 @@
 #include <cstring>
 #include <string>
 #include "ps2_e7.h"
+#include "ps2_e44_trace.h"
 #include "ps2_gfx_stats.h"
 #include "ps2_mpg_src_trace.h"
 #include "ps2_vif_mpg_log.h"
@@ -154,6 +155,9 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
 {
     if (sizeBytes == 0u)
         return;
+
+    // E44 Part-2 VIF0 kick census (dev-only, default off).
+    ps2_e44_trace::noteVif0Kick();
 
     uint32_t pos = 0;
     while (pos + 4 <= sizeBytes)
@@ -335,6 +339,10 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else
         {
+            // E44 Part-2 VIF0 unknown-opcode census (dev-only, default
+            // off). No MSCAL/MSCALF/MSCNT/BASE/OFFSET branch exists, so a
+            // VU0 program kicked here is silently dropped with the tail.
+            ps2_e44_trace::noteVif0Unk(opcode, imm, num, sizeBytes - pos);
             break;
         }
     }
