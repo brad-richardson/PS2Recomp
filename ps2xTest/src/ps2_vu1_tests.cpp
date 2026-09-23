@@ -14,6 +14,7 @@
 namespace
 {
     constexpr uint32_t kVuUpperNop = 0x000002FFu;
+    constexpr uint32_t kVuUpperNopEbit = 0x400002FFu;
 
     struct Vu1Fixture
     {
@@ -1711,6 +1712,55 @@ void register_ps2_vu1_tests()
                      "reserved opcode should retain the diagnostic PC");
             t.Equals(vu1.state().vi[1], 0,
                      "instruction following a reserved opcode must not execute");
+        });
+
+        tc.Run("executeToEnd resumes budget-exhausted programs up to the cap", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            // No end marker anywhere: every slice spends its whole budget.
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                writeVuInstructionPair(fx.code, i * 8u, 0u, kVuUpperNop);
+            }
+            VU1Interpreter vuRunaway;
+            vuRunaway.executeToEnd(fx.code, PS2_VU1_CODE_SIZE,
+                                   fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                                   0u, 0u, 0u, 32u);
+            t.IsTrue(vuRunaway.lastRunBudgetExhausted(),
+                     "a program with no end marker still exhausts after the cap");
+            t.Equals(vuRunaway.lastRunContinuations(), VU1Interpreter::kBudgetContinuationCap,
+                     "the runaway guard caps continuations instead of looping forever");
+            t.Equals(vuRunaway.state().cycles,
+                     static_cast<uint64_t>(32u * (1u + VU1Interpreter::kBudgetContinuationCap)),
+                     "every slice consumes its whole budget");
+
+            // An E-bit program ends on its own terms with no continuation.
+            writeVuInstructionPair(fx.code, 0u, 0u, kVuUpperNopEbit);
+            VU1Interpreter vuClean;
+            vuClean.executeToEnd(fx.code, PS2_VU1_CODE_SIZE,
+                                 fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                                 0u, 0u, 0u, 32u);
+            t.IsTrue(!vuClean.lastRunBudgetExhausted(),
+                     "an e-bit program exhausts no budget");
+            t.Equals(vuClean.lastRunContinuations(), static_cast<uint32_t>(0),
+                     "a clean program needs no continuation");
+
+            // A program longer than one slice finishes on its second slice.
+            for (uint32_t i = 0; i < 40u; ++i)
+            {
+                writeVuInstructionPair(fx.code, i * 8u, 0u, kVuUpperNop);
+            }
+            writeVuInstructionPair(fx.code, 40u * 8u, 0u, kVuUpperNopEbit);
+            VU1Interpreter vuLong;
+            vuLong.executeToEnd(fx.code, PS2_VU1_CODE_SIZE,
+                                fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                                0u, 0u, 0u, 32u);
+            t.IsTrue(!vuLong.lastRunBudgetExhausted(),
+                     "a two-slice program ends after its continuation");
+            t.Equals(vuLong.lastRunContinuations(), static_cast<uint32_t>(1),
+                     "a two-slice program needs exactly one continuation");
         });
     });
 }

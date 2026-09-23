@@ -59,6 +59,27 @@ public:
                 GS &gs, PS2Memory *memory = nullptr,
                 uint32_t top = 0, uint32_t itop = 0, uint32_t maxCycles = 65536);
 
+    // E33 fix: run a VU1 program to its end marker instead of dropping it
+    // when one cycle budget is spent. Continues a budget-exhausted program
+    // on further slices, up to kBudgetContinuationCap, then stops even if
+    // the program still hasn't ended (runaway guard). Records whether the
+    // last slice exhausted its budget and how many continuations ran.
+    static constexpr uint32_t kBudgetContinuationCap = 16u;
+
+    void executeToEnd(uint8_t *vuCode, uint32_t codeSize,
+                      uint8_t *vuData, uint32_t dataSize,
+                      GS &gs, PS2Memory *memory = nullptr,
+                      uint32_t startPC = 0, uint32_t top = 0, uint32_t itop = 0,
+                      uint32_t maxCycles = 65536);
+
+    void resumeToEnd(uint8_t *vuCode, uint32_t codeSize,
+                     uint8_t *vuData, uint32_t dataSize,
+                     GS &gs, PS2Memory *memory = nullptr,
+                     uint32_t top = 0, uint32_t itop = 0, uint32_t maxCycles = 65536);
+
+    bool lastRunBudgetExhausted() const { return m_lastRunBudgetExhausted; }
+    uint32_t lastRunContinuations() const { return m_lastRunContinuations; }
+
     VU1State &state() { return m_state; }
     const VU1State &state() const { return m_state; }
 
@@ -239,10 +260,17 @@ private:
     bool m_stopRequested = false;
     bool m_pendingHaltD = false;
     bool m_pendingHaltT = false;
+    bool m_lastRunBudgetExhausted = false;
+    uint32_t m_lastRunContinuations = 0u;
 
     void run(uint8_t *vuCode, uint32_t codeSize,
              uint8_t *vuData, uint32_t dataSize,
              GS &gs, PS2Memory *memory, uint32_t maxCycles);
+
+    void continueToEnd(uint8_t *vuCode, uint32_t codeSize,
+                       uint8_t *vuData, uint32_t dataSize,
+                       GS &gs, PS2Memory *memory,
+                       uint32_t top, uint32_t itop, uint32_t maxCycles);
 
     InstructionUsage decodeUpperUsage(uint32_t upper) const;
     InstructionUsage decodeLowerUsage(uint32_t lower) const;
