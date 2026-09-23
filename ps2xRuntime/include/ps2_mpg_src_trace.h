@@ -2,9 +2,10 @@
 //
 // Master gate: PS2X_MPG_SRC_TRACE names the text file receiving `mpgsrc`
 // lines (one per qualifying VIF1 REF/REFS/REFE tag seen by the DMA chain
-// walker) and `tagwrite` lines (guest stores to an armed tag's addr word).
-// Unset/empty (default) = one relaxed atomic check per tap; zero
-// guest-visible behavior change, no I/O.
+// walker), `tagwrite` lines (guest stores to an armed tag's addr word)
+// and `srcread` lines (guest loads overlapping the two fixed microcode
+// source regions, first 64 hits each). Unset/empty (default) = one
+// relaxed atomic check per tap; zero guest-visible behavior change, no I/O.
 // Optional binds: PS2X_MPG_SRC_TRACE_FROM / PS2X_MPG_SRC_TRACE_TO
 // (inclusive guest-vsync window; default 0..2^64-1, vsync from GS vsyncTick).
 // Hard cap: 2,000 lines total (both kinds), then the file goes quiet.
@@ -33,13 +34,17 @@
 // Plumbing (cited reuse, not a new mechanism): guest RAM stores funnel
 // through the WRITE8/16/32/64/128 macros in ps2_runtime_macros.h, which
 // already host the P1f watchpoint (ps2DiagWatchReport, gated by
-// PS2X_DIAG_WATCH) and the no-op ps2TraceGuestWrite tap. The E40 hook sits
-// alongside them behind writeArmed() (one relaxed atomic check when off)
-// and forwards runtime/ctx/__func__ to noteStoreCtx. Constant-address
-// stores emitted as inlined `ps2TraceGuestWrite(...); FAST_WRITE*(...)`
-// sequences in generated code bypass the macros and are NOT watched
-// (stated gap); chain-builder tag writes are dynamic (register+offset) and
-// use the macros.
+// PS2X_DIAG_WATCH) and the no-op ps2TraceGuestWrite tap. The E40 store
+// hook sits alongside them behind writeArmed() (one relaxed atomic check
+// when off) and forwards runtime/ctx/__func__ to noteStoreCtx.
+// Constant-address stores emitted as inlined `ps2TraceGuestWrite(...);
+// FAST_WRITE*(...)` sequences in generated code bypass the macros and are
+// NOT watched (stated gap); chain-builder tag writes are dynamic
+// (register+offset) and use the macros. Part-2 adds the same tap shape to
+// the READ8/16/32/64/128 macros (behind readArmed() plus a lock-free
+// address pre-filter, since loads are hotter), forwarding to
+// noteReadCtx. Inlined constant-address FAST_READ* sequences bypass it
+// the same way (stated gap).
 
 #pragma once
 
@@ -71,6 +76,28 @@ inline constexpr const char *kWatchRegNames[16] = {
     "a0", "a1", "a2", "a3", "v0", "v1",
     "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"};
 
+// E40 Part-2: guest READ watch. Two fixed EE regions (the VU1 microcode
+// source image heads seen by the orchestrator): 16 bytes each. The first
+// kMaxReadHits reads overlapping each region inside the vsync window log
+// one `srcread` line:
+//   srcread vsync=<n> addr=0x<read addr> size=<bytes> pc=0x<guest pc>
+//     ra=0x<> fn=<host func, i.e. sub_* for guest code>
+//     a0..a3 v0 v1 t0..t9 s0..s7 (low 32 bits hex)
+// with the GPRs read at the load.
+inline constexpr uint32_t kReadBase[2] = {0x00435BF8u, 0x004349B8u};
+inline constexpr uint32_t kReadSize = 16u;
+inline constexpr uint64_t kMaxReadHits = 64ull;
+
+// GPR indices logged on a srcread: a0-a3, v0-v1, t0-t9, s0-s7.
+inline constexpr int kReadRegCount = 24;
+inline constexpr int kReadRegs[24] = {4, 5, 6, 7, 2, 3,
+                                      8, 9, 10, 11, 12, 13, 14, 15, 24, 25,
+                                      16, 17, 18, 19, 20, 21, 22, 23};
+inline constexpr const char *kReadRegNames[24] = {
+    "a0", "a1", "a2", "a3", "v0", "v1",
+    "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9",
+    "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"};
+
 namespace detail
 {
 
@@ -87,6 +114,7 @@ namespace detail
         bool capped = false;
         uint64_t linesWritten = 0u;
         std::vector<uint32_t> watches; // armed tag_at+4 words
+        uint64_t readHits[2] = {0u, 0u}; // per-region srcread hits
     };
 
     inline State &state()
@@ -110,6 +138,13 @@ namespace detail
     inline std::atomic<uint32_t> &armedCount()
     {
         static std::atomic<uint32_t> n{0u};
+        return n;
+    }
+
+    // 1 while any read region still has hits left (set under lock).
+    inline std::atomic<uint32_t> &readOpen()
+    {
+        static std::atomic<uint32_t> n{1u};
         return n;
     }
 
@@ -350,6 +385,102 @@ inline void noteStore(uint64_t vsync, uint32_t addr, uint32_t width,
     }
 }
 
+// Lock-free pre-filter for the per-load macro hook: true when
+// [addr, addr+size) overlaps a read region. No state, no atomics.
+inline bool isReadWatched(uint32_t addr, uint32_t size)
+{
+    for (int i = 0; i < 2; ++i)
+    {
+        if (addr < kReadBase[i] + kReadSize && kReadBase[i] < addr + size)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Fast gate for the per-load macro hook: enabled AND a region still open.
+inline bool readArmed()
+{
+    if (!enabled())
+    {
+        return false;
+    }
+    return detail::readOpen().load(std::memory_order_relaxed) != 0u;
+}
+
+// Load side (called from the READ* macros via noteReadCtx): the first
+// kMaxReadHits reads overlapping each region inside the window emit one
+// srcread line with pc/ra/fn and the pointer-forming GPRs (incl. s0-s7).
+// Out-of-window reads do not consume hits. One line per load at most
+// (the regions are disjoint).
+inline void noteRead(uint64_t vsync, uint32_t addr, uint32_t size,
+                     uint32_t pc, uint32_t ra, const char *fn,
+                     const R5900Context *ctx)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    for (int i = 0; i < 2; ++i)
+    {
+        const uint32_t base = kReadBase[i];
+        if (addr + size <= base || base + kReadSize <= addr)
+        {
+            continue;
+        }
+        if (s.readHits[i] >= kMaxReadHits)
+        {
+            continue;
+        }
+        char line[768];
+        int w = std::snprintf(line, sizeof(line),
+                              "srcread vsync=%llu addr=0x%08x size=%u pc=0x%08x ra=0x%08x fn=%s",
+                              static_cast<unsigned long long>(vsync), addr, size,
+                              pc, ra, fn ? fn : "?");
+        for (int r = 0; r < kReadRegCount && w > 0; ++r)
+        {
+            const uint32_t rv = (ctx != nullptr) ? getRegU32(ctx, kReadRegs[r]) : 0u;
+            w += std::snprintf(line + w, sizeof(line) - static_cast<size_t>(w),
+                               " %s=0x%08x", kReadRegNames[r], rv);
+        }
+        if (w > 0)
+        {
+            detail::emitLineLocked(s, line);
+            ++s.readHits[i];
+            if (s.readHits[0] >= kMaxReadHits && s.readHits[1] >= kMaxReadHits)
+            {
+                detail::readOpen().store(0u, std::memory_order_relaxed);
+            }
+        }
+        return;
+    }
+}
+
+// Macro glue: extracts vsync/pc/ra/GPRs from the load site context.
+inline void noteReadCtx(const PS2Runtime *runtime, const R5900Context *ctx,
+                        uint32_t addr, uint32_t size, const char *fn)
+{
+    uint64_t vsync = 0u;
+    if (runtime != nullptr)
+    {
+        vsync = runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed);
+    }
+    const uint32_t pc = (ctx != nullptr) ? ctx->pc : 0u;
+    const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+    noteRead(vsync, addr, size, pc, ra, fn, ctx);
+}
+
 // Macro glue: extracts vsync/pc/ra/GPRs from the store site context.
 inline void noteStoreCtx(const PS2Runtime *runtime, const R5900Context *ctx,
                          uint32_t addr, uint32_t width,
@@ -384,11 +515,14 @@ inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to =
     s.linesWritten = 0u;
     s.capped = false;
     s.watches.clear();
+    s.readHits[0] = 0u;
+    s.readHits[1] = 0u;
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);
     s.enabled = true;
     detail::enabledFlag().store(true, std::memory_order_relaxed);
     detail::armedCount().store(0u, std::memory_order_relaxed);
+    detail::readOpen().store(1u, std::memory_order_relaxed);
     return true;
 }
 
@@ -407,11 +541,14 @@ inline void clearForTest()
     s.linesWritten = 0u;
     s.capped = false;
     s.watches.clear();
+    s.readHits[0] = 0u;
+    s.readHits[1] = 0u;
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);
     s.enabled = false;
     detail::enabledFlag().store(false, std::memory_order_relaxed);
     detail::armedCount().store(0u, std::memory_order_relaxed);
+    detail::readOpen().store(1u, std::memory_order_relaxed);
 }
 
 } // namespace ps2_mpg_src_trace

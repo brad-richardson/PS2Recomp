@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_mpg_src_trace.h"
+#include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
 
 #include <cstdint>
@@ -48,6 +49,14 @@ namespace
     void srcSetReg(R5900Context &ctx, int reg, uint32_t value)
     {
         ctx.r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(value));
+    }
+
+    // READ-macro probe: exercises the Part-2 READ32 tap with the same
+    // identifier shape as generated code (rdram/ctx/runtime in scope).
+    uint32_t srcReadProbe32(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr)
+    {
+        (void)runtime;
+        return READ32(addr);
     }
 
     size_t countLines(const std::string &text)
@@ -308,6 +317,121 @@ void register_ps2_mpg_src_trace_tests()
                 t.Equals(text, std::string(), "NOP-only out-of-range payload must stay silent");
                 std::remove(tmp.c_str());
             }
+        });
+
+        tc.Run("read watch is off by default", [](TestCase &t)
+        {
+            ps2_mpg_src_trace::clearForTest();
+            t.IsTrue(!ps2_mpg_src_trace::readArmed(), "read tap must be disarmed with no file configured");
+            // The address pre-filter is stateless: regions match even when off.
+            t.IsTrue(ps2_mpg_src_trace::isReadWatched(0x00435BF8u, 4u), "region head must pre-match");
+            t.IsTrue(ps2_mpg_src_trace::isReadWatched(0x004349B8u, 16u), "second region must pre-match");
+            t.IsTrue(!ps2_mpg_src_trace::isReadWatched(0x00100000u, 4u), "plain RAM must not pre-match");
+            R5900Context ctx{};
+            ps2_mpg_src_trace::noteRead(0u, 0x00435BF8u, 4u, 1u, 2u, "sub_dead", &ctx);
+            t.IsTrue(!ps2_mpg_src_trace::readArmed(), "disabled read taps must stay off");
+        });
+
+        tc.Run("srcread line carries pc ra fn and s regs", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-srcread.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+            t.IsTrue(ps2_mpg_src_trace::readArmed(), "regions must be open after configure");
+
+            R5900Context ctx{};
+            ctx.pc = 0x003A55AAu;
+            srcSetReg(ctx, 31, 0x003A5600u); // ra
+            srcSetReg(ctx, 4, 0x00435BF0u);  // a0: source base
+            srcSetReg(ctx, 5, 0x00000002u);  // a1: index
+            srcSetReg(ctx, 6, 0x00000004u);  // a2
+            srcSetReg(ctx, 7, 0x00000000u);  // a3
+            srcSetReg(ctx, 2, 0xDEAD0001u);  // v0
+            srcSetReg(ctx, 3, 0xDEAD0002u);  // v1
+            for (int r = 8; r <= 15; ++r)
+                srcSetReg(ctx, r, 0x200u + static_cast<uint32_t>(r));
+            srcSetReg(ctx, 24, 0x218u);
+            srcSetReg(ctx, 25, 0x219u);
+            for (int r = 16; r <= 23; ++r)
+                srcSetReg(ctx, r, 0x300u + static_cast<uint32_t>(r));
+
+            // Unwatched address first: must stay silent.
+            ps2_mpg_src_trace::noteRead(1100u, 0x00100000u, 4u, 1u, 2u, "sub_x", &ctx);
+            ps2_mpg_src_trace::noteRead(1100u, 0x00435BF8u, 4u, 0x003A55AAu, 0x003A5600u,
+                                        "sub_003A4000_0x3a4000", &ctx);
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(1u), "one srcread line expected");
+            t.IsTrue(text.find("srcread vsync=1100 addr=0x00435bf8 size=4 "
+                               "pc=0x003a55aa ra=0x003a5600 fn=sub_003A4000_0x3a4000") != std::string::npos,
+                     "srcread must carry addr size pc ra fn");
+            t.IsTrue(text.find("a0=0x00435bf0 a1=0x00000002") != std::string::npos,
+                     "srcread must carry the pointer-forming regs");
+            t.IsTrue(text.find("s0=0x00000310 s1=0x00000311 s2=0x00000312 s3=0x00000313 "
+                               "s4=0x00000314 s5=0x00000315 s6=0x00000316 s7=0x00000317") != std::string::npos,
+                     "srcread must carry s0-s7 at the load");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("first 64 hits per address, windows do not consume", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-readcap.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str(), 1000u, 1400u),
+                     "test config should install");
+
+            R5900Context ctx{};
+            // Out-of-window reads must neither log nor consume hits.
+            for (uint32_t i = 0u; i < 70u; ++i)
+            {
+                ps2_mpg_src_trace::noteRead(500u, 0x00435BF8u, 4u, 1u, 2u, "sub_x", &ctx);
+            }
+            // 70 in-window reads on region 0: 64 log, then silent.
+            for (uint32_t i = 0u; i < 70u; ++i)
+            {
+                ps2_mpg_src_trace::noteRead(1200u, 0x00435BF8u, 4u, 1u, 2u, "sub_x", &ctx);
+            }
+            t.IsTrue(ps2_mpg_src_trace::readArmed(), "region 1 still open, tap must stay armed");
+            // Region 1 is independent: 3 more reads log.
+            for (uint32_t i = 0u; i < 3u; ++i)
+            {
+                ps2_mpg_src_trace::noteRead(1200u, 0x004349B8u, 4u, 1u, 2u, "sub_x", &ctx);
+            }
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(67u), "64 + 3 srcread lines expected");
+            t.IsTrue(text.find("vsync=500") == std::string::npos, "out-of-window reads must stay silent");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("READ32 macro tap logs with the host function name", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-readmacro.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+            const uint32_t marker = 0xA55A00FFu;
+            std::memcpy(rdram + 0x00435BFCu, &marker, sizeof(marker));
+
+            R5900Context ctxStruct{};
+            R5900Context *ctx = &ctxStruct;
+            ctxStruct.pc = 0x00123456u;
+            PS2Runtime *runtime = nullptr;
+            const uint32_t got = srcReadProbe32(rdram, ctx, runtime, 0x00435BFCu);
+            t.Equals(got, marker, "macro probe must return the RAM word");
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(1u), "one srcread line expected");
+            t.IsTrue(text.find("srcread vsync=0 addr=0x00435bfc size=4 "
+                               "pc=0x00123456 ra=0x00000000 fn=srcReadProbe32") != std::string::npos,
+                     "macro tap must log addr size pc ra and the host function name");
+            std::remove(tmp.c_str());
         });
     });
 }
