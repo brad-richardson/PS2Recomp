@@ -528,6 +528,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
             // E33: one relaxed check when stats are off.
             ps2_gfx_stats::noteMscal();
+            ps2_gfx_stats::noteMscalPc(startPC); // E50 per-startPC census
             if (m_vu1MscalCallback)
                 m_vu1MscalCallback(startPC, runTop, runItop);
             continue;
@@ -1023,9 +1024,22 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                     const int bits = (vl == 0u) ? 32 : ((vl == 1u) ? 16 : ((vl == 2u) ? 8 : 16));
                     std::snprintf(fmt, sizeof(fmt), "V%u_%d", vn + 1u, bits);
                 }
-                char suffix[32];
+                char suffix[96];
                 std::snprintf(suffix, sizeof(suffix), "mode=%u men=%u",
                               vif1_regs.mode & 3u, maskEnable ? 1u : 0u);
+                // E50: EE source of the payload when the delivery has a map.
+                {
+                    uint32_t srcEe = 0u;
+                    int32_t srcTag = -1;
+                    uint32_t srcTagAt = 0u;
+                    uint32_t srcMode = ps2_mpg_src_trace::PayNone;
+                    if (ps2_mpg_src_trace::lookupPay(data + pos, srcEe, srcTag, srcTagAt, srcMode))
+                    {
+                        const size_t used = std::strlen(suffix);
+                        std::snprintf(suffix + used, sizeof(suffix) - used,
+                                      " src=0x%08x tag=%d@0x%08x", srcEe, srcTag, srcTagAt);
+                    }
+                }
                 const uint32_t unpackTotal = totalBytes / 4u;
                 const uint32_t unpackAvail = (pos < sizeBytes) ? (sizeBytes - pos) / 4u : 0u;
                 const uint32_t unpackKeep = (unpackTotal > unpackAvail) ? unpackAvail : unpackTotal;

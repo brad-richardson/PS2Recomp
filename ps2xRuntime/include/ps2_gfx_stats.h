@@ -13,6 +13,16 @@
 // draw kicks per path with vertex count and screen-space xyz min/max, and
 // the top 5 (TBP0, PRIM) tuples by draw count.
 //
+// E50 additions (appended to the line only when the window saw them, so
+// pre-E50 lines are byte-identical):
+//   dN_scr=<on>,<off>,<straddle>  per-path draws classified against the
+//     drawing context's SCISSOR after subtracting XYOFFSET (noteDrawScreen;
+//     `off` = the vertex bbox misses the scissor rect entirely, `on` = the
+//     bbox lies inside it, `straddle` = the rest).
+//   pcs=<startPC>:<mscal>:<on>/<off>/<straddle>;...  per VU1 startPC
+//     (byte PC, hex): MSCAL count and the PATH1 draws attributed to the
+//     most recent MSCAL's program (noteMscalPc), ascending PC, max 64.
+//
 // Windows are cut at EeScheduler VBlankStart (noteVsync): the emitted line
 // is labeled with the vsync the window belongs to. Events before the first
 // observed VBlank open no window and are not counted. The trailing partial
@@ -56,6 +66,14 @@ namespace detail
         float yMax = 0.0f;
         double zMin = 0.0;
         double zMax = 0.0;
+        uint64_t scr[3] = {0u, 0u, 0u}; // E50: on, off, straddle
+        bool hasScr = false;
+    };
+
+    struct PcWindow
+    {
+        uint64_t mscal = 0u;
+        uint64_t scr[3] = {0u, 0u, 0u};
     };
 
     struct State
@@ -81,6 +99,11 @@ namespace detail
         uint64_t xgkick = 0u;
         PathWindow paths[3];
         std::map<std::pair<uint32_t, uint32_t>, uint64_t> topPairs;
+        // E50: per-startPC census; curPc persists across vsyncs (a program
+        // started before the cut keeps kicking after it).
+        std::map<uint32_t, PcWindow> pcs;
+        uint32_t curPc = 0u;
+        bool curPcValid = false;
     };
 
     inline State &state()
@@ -233,6 +256,44 @@ namespace detail
             }
         }
 
+        std::string e50;
+        static const char *const kScrNames[3] = {"d1_scr", "d2_scr", "d3_scr"};
+        for (size_t i = 0u; i < 3u; ++i)
+        {
+            if (!s.paths[i].hasScr)
+            {
+                continue;
+            }
+            char entry[96];
+            std::snprintf(entry, sizeof(entry), " %s=%llu,%llu,%llu", kScrNames[i],
+                          static_cast<unsigned long long>(s.paths[i].scr[0]),
+                          static_cast<unsigned long long>(s.paths[i].scr[1]),
+                          static_cast<unsigned long long>(s.paths[i].scr[2]));
+            e50 += entry;
+        }
+        if (!s.pcs.empty())
+        {
+            e50 += " pcs=";
+            size_t n = 0u;
+            for (const auto &pc : s.pcs)
+            {
+                if (n == 64u)
+                {
+                    e50 += ";+more";
+                    break;
+                }
+                char entry[96];
+                std::snprintf(entry, sizeof(entry), "%s0x%x:%llu:%llu/%llu/%llu",
+                              n == 0u ? "" : ";", pc.first,
+                              static_cast<unsigned long long>(pc.second.mscal),
+                              static_cast<unsigned long long>(pc.second.scr[0]),
+                              static_cast<unsigned long long>(pc.second.scr[1]),
+                              static_cast<unsigned long long>(pc.second.scr[2]));
+                e50 += entry;
+                ++n;
+            }
+        }
+
         char line[2048];
         std::snprintf(line, sizeof(line),
                       "vsync=%llu mscal=%llu mscnt=%llu vu_cycles=%llu vu_exhausted=%llu "
@@ -262,7 +323,7 @@ namespace detail
                       static_cast<unsigned long long>(s.paths[2].draws),
                       static_cast<unsigned long long>(s.paths[2].vertices), b3,
                       top.c_str());
-        return std::string(line);
+        return std::string(line) + e50;
     }
 
     inline void resetWindowLocked(State &s)
@@ -277,6 +338,7 @@ namespace detail
         s.paths[1] = PathWindow{};
         s.paths[2] = PathWindow{};
         s.topPairs.clear();
+        s.pcs.clear();
     }
 
     inline size_t pathIndex(GifPathId path)
@@ -295,6 +357,40 @@ namespace detail
 
 } // namespace detail
 
+// E50: screen class of one draw. Coordinates are GS primitive space in
+// pixels (XYZ/16); ofx/ofy are raw XYOFFSET (12.4); the scissor is the
+// inclusive pixel rect. 0 = on (bbox inside), 1 = off (bbox misses the
+// rect), 2 = straddle.
+inline constexpr uint32_t kScrOn = 0u;
+inline constexpr uint32_t kScrOff = 1u;
+inline constexpr uint32_t kScrStraddle = 2u;
+
+inline uint32_t classifyScreen(float xMin, float xMax, float yMin, float yMax,
+                               uint16_t ofx, uint16_t ofy,
+                               uint16_t sx0, uint16_t sx1, uint16_t sy0, uint16_t sy1)
+{
+    const float ox = static_cast<float>(ofx) / 16.0f;
+    const float oy = static_cast<float>(ofy) / 16.0f;
+    const float x0 = xMin - ox;
+    const float x1 = xMax - ox;
+    const float y0 = yMin - oy;
+    const float y1 = yMax - oy;
+    // Pixels cover [s0, s1 + 1).
+    const float left = static_cast<float>(sx0);
+    const float right = static_cast<float>(sx1) + 1.0f;
+    const float top = static_cast<float>(sy0);
+    const float bottom = static_cast<float>(sy1) + 1.0f;
+    if (x1 < left || x0 >= right || y1 < top || y0 >= bottom)
+    {
+        return kScrOff;
+    }
+    if (x0 >= left && x1 < right && y0 >= top && y1 < bottom)
+    {
+        return kScrOn;
+    }
+    return kScrStraddle;
+}
+
 // One relaxed check per call; no I/O when the flag is unset.
 inline bool enabled()
 {
@@ -311,6 +407,43 @@ inline void noteMscal()
     detail::State &s = detail::state();
     std::lock_guard<std::mutex> lock(s.mutex);
     ++s.mscal;
+}
+
+// E50: the VU1 startPC of a VIF MSCAL/MSCALF (byte PC). Counts the
+// MSCAL for that PC and attributes later PATH1 draws to it.
+inline void noteMscalPc(uint32_t startPC)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.curPc = startPC;
+    s.curPcValid = true;
+    if (s.curTickValid)
+    {
+        ++s.pcs[startPC].mscal;
+    }
+}
+
+// E50: screen class (classifyScreen) of the draw just counted by noteDraw.
+inline void noteDrawScreen(GifPathId path, uint32_t cls)
+{
+    if (!enabled() || cls > 2u)
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    const size_t idx = detail::pathIndex(path);
+    detail::PathWindow &w = s.paths[idx];
+    w.hasScr = true;
+    ++w.scr[cls];
+    if (idx == 0u && s.curPcValid && s.curTickValid)
+    {
+        ++s.pcs[s.curPc].scr[cls];
+    }
 }
 
 inline void noteMscnt()
@@ -481,6 +614,7 @@ inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to =
     s.linesWritten = 0u;
     s.capped = false;
     s.curTickValid = false;
+    s.curPcValid = false;
     detail::resetWindowLocked(s);
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);
@@ -504,6 +638,7 @@ inline void clearForTest()
     s.linesWritten = 0u;
     s.capped = false;
     s.curTickValid = false;
+    s.curPcValid = false;
     detail::resetWindowLocked(s);
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);

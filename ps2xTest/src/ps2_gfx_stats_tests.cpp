@@ -284,6 +284,64 @@ void register_ps2_gfx_stats_tests()
             t.IsTrue(text.find("d1_n=0") != std::string::npos, "path 1 stays empty");
             t.IsTrue(text.find("d3_n=0") != std::string::npos, "path 3 stays empty");
 
+            t.IsTrue(text.find("d2_scr=1,0,0") != std::string::npos,
+                     "the GS tap classifies the on-screen sprite (E50)");
+
+            ps2_gfx_stats::clearForTest();
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("E50 screen class against scissor and offset", [](TestCase &t)
+        {
+            // XYOFFSET 1792/1824 (raw 12.4), scissor 0..511 x 0..447.
+            const uint16_t ofx = 0x7000u;
+            const uint16_t ofy = 0x7200u;
+            using ps2_gfx_stats::classifyScreen;
+            t.Equals(classifyScreen(1800.0f, 1810.0f, 1830.0f, 1840.0f, ofx, ofy, 0, 511, 0, 447),
+                     ps2_gfx_stats::kScrOn, "inside the viewport is on");
+            t.Equals(classifyScreen(2270.0f, 2550.0f, 1670.0f, 1813.0f, ofx, ofy, 0, 511, 0, 447),
+                     ps2_gfx_stats::kScrOff, "above the top edge is off");
+            t.Equals(classifyScreen(2305.0f, 2400.0f, 1900.0f, 1950.0f, ofx, ofy, 0, 511, 0, 447),
+                     ps2_gfx_stats::kScrOff, "right of the right edge is off");
+            t.Equals(classifyScreen(1023.5f, 3071.5f, 1023.5f, 3071.5f, ofx, ofy, 0, 511, 0, 447),
+                     ps2_gfx_stats::kScrStraddle, "a guard-band-wide triangle straddles");
+            t.Equals(classifyScreen(2303.9f, 2303.9f, 2271.9f, 2271.9f, ofx, ofy, 0, 511, 0, 447),
+                     ps2_gfx_stats::kScrOn, "the last pixel is on");
+            t.Equals(classifyScreen(2304.0f, 2304.0f, 1900.0f, 1900.0f, ofx, ofy, 0, 511, 0, 447),
+                     ps2_gfx_stats::kScrOff, "one past the last pixel is off");
+        });
+
+        tc.Run("E50 dN_scr and pcs fields are appended only when seen", [](TestCase &t)
+        {
+            const std::string tmp = statsTmpPath("ps2x-gfx-stats-e50-scr.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_gfx_stats::configureForTest(tmp.c_str()), "test config should install");
+
+            ps2_gfx_stats::noteMscalPc(0x88u); // before any window: sets curPc, not counted
+            ps2_gfx_stats::noteVsync(1u);
+            ps2_gfx_stats::noteDraw(GifPathId::Path1, 3u, 0.0f, 1.0f, 0.0f, 1.0f, 0.0, 1.0, 0u, 4u);
+            ps2_gfx_stats::noteDrawScreen(GifPathId::Path1, ps2_gfx_stats::kScrOff);
+            ps2_gfx_stats::noteMscalPc(0x10u);
+            ps2_gfx_stats::noteMscalPc(0x10u);
+            ps2_gfx_stats::noteDraw(GifPathId::Path1, 3u, 0.0f, 1.0f, 0.0f, 1.0f, 0.0, 1.0, 0u, 4u);
+            ps2_gfx_stats::noteDrawScreen(GifPathId::Path1, ps2_gfx_stats::kScrOn);
+            ps2_gfx_stats::noteDraw(GifPathId::Path1, 3u, 0.0f, 1.0f, 0.0f, 1.0f, 0.0, 1.0, 0u, 4u);
+            ps2_gfx_stats::noteDrawScreen(GifPathId::Path1, ps2_gfx_stats::kScrStraddle);
+            ps2_gfx_stats::noteDraw(GifPathId::Path3, 2u, 0.0f, 1.0f, 0.0f, 1.0f, 0.0, 1.0, 0u, 6u);
+            ps2_gfx_stats::noteDrawScreen(GifPathId::Path3, ps2_gfx_stats::kScrOn);
+            ps2_gfx_stats::noteVsync(2u);
+            // A window with no E50 notes keeps the pre-E50 line shape.
+            ps2_gfx_stats::noteVsync(3u);
+
+            const std::string text = readWholeFile(tmp);
+            const size_t nl = text.find('\n');
+            const std::string first = text.substr(0, nl);
+            const std::string second = text.substr(nl + 1);
+            t.IsTrue(first.find(" d1_scr=1,1,1 d3_scr=1,0,0 pcs=0x10:2:1/0/1;0x88:0:0/1/0") != std::string::npos,
+                     "per-path classes and per-PC attribution are appended");
+            t.IsTrue(second.find("scr=") == std::string::npos && second.find("pcs=") == std::string::npos,
+                     "a window without E50 notes has no E50 fields");
+
             ps2_gfx_stats::clearForTest();
             std::remove(tmp.c_str());
         });

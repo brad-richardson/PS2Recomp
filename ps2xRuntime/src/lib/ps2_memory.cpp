@@ -3,6 +3,7 @@
 #include "ps2_e44_trace.h"
 #include "ps2_e7.h"
 #include "ps2_mpg_src_trace.h"
+#include "ps2_vu1_entry_trace.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_log.h"
@@ -1187,7 +1188,8 @@ void PS2Memory::write128(uint32_t address, __m128i value)
         alignas(16) uint8_t packet[16];
         _mm_storeu_si128(reinterpret_cast<__m128i *>(packet), value);
         // E40 Part-3: CPU FIFO writes carry no EE source address.
-        const bool e40Pay = ps2_mpg_src_trace::enabled();
+        // E50: the VU1 entry trace reads the same map for UNPACK `src=`.
+        const bool e40Pay = ps2_mpg_src_trace::enabled() || ps2_vu1_entry_trace::enabled();
         if (e40Pay)
         {
             ps2_mpg_src_trace::setPayMap(
@@ -1475,7 +1477,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     // Declared before appendData, which captures by ref.
                     std::vector<Ps2VifSrcSpan> e40Spans;
                     const bool e40Record = (channelBase == 0x10009000u) &&
-                                           ps2_mpg_src_trace::enabled();
+                                           (ps2_mpg_src_trace::enabled() ||
+                                            ps2_vu1_entry_trace::enabled());
                     int32_t e40TagId = -1;
                     uint32_t e40TagAt = 0u;
 
@@ -2019,7 +2022,8 @@ void PS2Memory::processPendingTransfers()
     const bool hadVif1 = !m_pendingVif1Transfers.empty();
     // E40 Part-3: install the payload source map around each delivery
     // (dev-only; one atomic check when off).
-    const bool e40Pay = ps2_mpg_src_trace::enabled();
+    // E50: the VU1 entry trace reads the same map for UNPACK `src=`.
+    const bool e40Pay = ps2_mpg_src_trace::enabled() || ps2_vu1_entry_trace::enabled();
     for (auto &p : m_pendingVif1Transfers)
     {
         if (!p.chainData.empty())

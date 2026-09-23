@@ -102,6 +102,24 @@ inline uint64_t freezeTickRaw()
     return tick;
 }
 
+// E50: PS2X_E4_HEAD=<N> keeps the FIRST N draws of the armed span (plus
+// the GIF-tag/register events between them) in e4-head.txt. Unset/0 = off.
+inline constexpr uint64_t kHeadByteCap = 32ull * 1024ull * 1024ull;
+inline constexpr uint64_t kHeadMaxDraws = 65536ull;
+
+inline uint64_t headDrawsRaw()
+{
+    static const uint64_t n = [] {
+        uint64_t parsed = 0;
+        if (!parseU64(std::getenv("PS2X_E4_HEAD"), parsed))
+        {
+            return uint64_t{0};
+        }
+        return parsed > kHeadMaxDraws ? kHeadMaxDraws : parsed;
+    }();
+    return n;
+}
+
 inline bool enabled()
 {
     return armTickRaw() != kNoTick && outDirRaw() != nullptr &&
@@ -189,6 +207,54 @@ inline std::string formatHistoryEntry(const GSDebugHistoryEntry &e)
        << " trx=" << e.trxdir << "," << e.transferPixels << " present=" << e.displayFbp << ","
        << e.sourceFbp << "," << e.width << "x" << e.height << "," << e.usedPreferred;
     return os.str();
+}
+
+// E50: head row = the tail-ring row plus XYOFFSET and the first three
+// vertices (pixels; screen = v - ofs/16).
+inline std::string formatHeadEntry(const GSDebugHistoryEntry &e)
+{
+    std::ostringstream os;
+    os << formatHistoryEntry(e);
+    if (e.kind == GSDebugEventKind::Draw)
+    {
+        os << " ofs=" << (e.ofx / 16.0) << "," << (e.ofy / 16.0) << " v=";
+        const uint32_t n = e.vertexCount < 3u ? e.vertexCount : 3u;
+        for (uint32_t i = 0; i < n; ++i)
+        {
+            os << (i ? ";" : "") << e.vx[i] << "," << e.vy[i] << "," << e.vz[i];
+        }
+    }
+    return os.str();
+}
+
+inline bool writeHeadText(const char *path, uint64_t arm, uint64_t freeze, uint64_t limit,
+                          const std::vector<GSDebugHistoryEntry> &head, uint64_t &outBytes)
+{
+    std::ostringstream os;
+    uint64_t draws = 0;
+    for (const GSDebugHistoryEntry &e : head)
+    {
+        draws += (e.kind == GSDebugEventKind::Draw) ? 1u : 0u;
+    }
+    os << "# E4 head arm=" << arm << " freeze=" << freeze << " limit=" << limit << " entries=" << head.size()
+       << " draws=" << draws << "\n";
+    for (const GSDebugHistoryEntry &e : head)
+    {
+        os << formatHeadEntry(e) << "\n";
+    }
+    const std::string text = os.str();
+    if (text.size() > kHeadByteCap)
+    {
+        return false;
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.good())
+    {
+        return false;
+    }
+    out.write(text.data(), static_cast<std::streamsize>(text.size()));
+    outBytes = text.size();
+    return out.good();
 }
 
 struct E4Surface
@@ -496,6 +562,7 @@ inline void noteVBlank(uint64_t tick, GS &gs, GSRegisters &regs)
     if (tick == arm && !armedFlag().exchange(true, std::memory_order_acq_rel))
     {
         gs.clearDebugHistory();
+        gs.setDebugHeadLimit(static_cast<size_t>(headDrawsRaw())); // E50 (0 = off)
         gs.setDebugHistoryPaused(false);
         uint32_t bytes = 0, hash = 0;
         char path[1024];
@@ -522,6 +589,17 @@ inline void noteVBlank(uint64_t tick, GS &gs, GSRegisters &regs)
         uint64_t histBytes = 0, presBytes = 0, sampBytes = 0;
         uint32_t vramBytes = 0, vramHash = 0;
         const bool histOk = writeHistoryText(histPath, arm, freeze, history, census, histBytes);
+        if (headDrawsRaw() != 0u)
+        {
+            char headPath[1024];
+            std::snprintf(headPath, sizeof(headPath), "%s/e4-head.txt", dir);
+            uint64_t headBytes = 0;
+            const std::vector<GSDebugHistoryEntry> head = gs.getDebugHead();
+            const bool headOk = writeHeadText(headPath, arm, freeze, headDrawsRaw(), head, headBytes);
+            gs.setDebugHeadLimit(0u);
+            std::cerr << "[e4:head] tick=" << tick << " entries=" << head.size() << " bytes=" << headBytes
+                      << " ok=" << (headOk ? 1 : 0) << std::endl;
+        }
         const bool vramOk = snapshotVramToFile(gs, vramPath, vramBytes, vramHash);
         // Re-read the arm snapshot receipt from disk for the present file.
         uint32_t armBytes = 0, armHash = 0;

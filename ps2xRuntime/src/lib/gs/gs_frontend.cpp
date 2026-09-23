@@ -283,11 +283,25 @@ std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
     return out;
 }
 
+void GS::setDebugHeadLimit(size_t drawLimit)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    m_debugHeadDrawLimit = drawLimit;
+}
+
+std::vector<GSDebugHistoryEntry> GS::getDebugHead() const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    return m_debugHead;
+}
+
 void GS::clearDebugHistory()
 {
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     m_debugHistoryWrite = 0;
     m_debugHistoryCount = 0;
+    m_debugHead.clear();
+    m_debugHeadDraws = 0;
     m_debugNextSeq = 1;
     m_debugFrameIndex = 0;
     m_debugLastVsyncTick = UINT64_MAX;
@@ -351,6 +365,17 @@ void GS::recordDebugEventUnlocked(GSDebugHistoryEntry entry)
     if (entry.kind == GSDebugEventKind::Draw)
     {
         ps2_e4::noteSubmit(tick, entry.frame.fbp); // E4 T6 census (armed window only)
+    }
+
+    // E50: head capture (first events of the span), off when limit is 0.
+    if (m_debugHeadDrawLimit != 0u && m_debugHeadDraws < m_debugHeadDrawLimit &&
+        m_debugHead.size() < m_debugHeadDrawLimit * 4u)
+    {
+        m_debugHead.push_back(entry);
+        if (entry.kind == GSDebugEventKind::Draw)
+        {
+            ++m_debugHeadDraws;
+        }
     }
 
     m_debugHistory[m_debugHistoryWrite] = entry;
@@ -439,6 +464,16 @@ void GS::recordDrawDebugEventUnlocked(int vertexCount)
     entry.yMin = entry.yMax = m_vtxQueue[0].y;
     entry.zMin = entry.zMax = m_vtxQueue[0].z;
     entry.aMin = entry.aMax = m_vtxQueue[0].a;
+
+    const GSContext &dctx = m_ctx[m_prim.ctxt ? 1 : 0];
+    entry.ofx = dctx.xyoffset.ofx;
+    entry.ofy = dctx.xyoffset.ofy;
+    for (int i = 0; i < count && i < 3; ++i)
+    {
+        entry.vx[i] = m_vtxQueue[i].x;
+        entry.vy[i] = m_vtxQueue[i].y;
+        entry.vz[i] = m_vtxQueue[i].z;
+    }
 
     for (int i = 1; i < count; ++i)
     {
@@ -1628,6 +1663,14 @@ void GS::vertexKick(bool drawing)
                                     xMin, xMax, yMin, yMax, zMin, zMax,
                                     batch.state.context.frame.fbp,
                                     static_cast<uint32_t>(batch.state.prim.type));
+            // E50: on/off/straddle against this draw's scissor + offset.
+            const GSContext &sctx = m_ctx[m_prim.ctxt ? 1 : 0];
+            ps2_gfx_stats::noteDrawScreen(
+                m_curGifPath,
+                ps2_gfx_stats::classifyScreen(xMin, xMax, yMin, yMax,
+                                              sctx.xyoffset.ofx, sctx.xyoffset.ofy,
+                                              sctx.scissor.x0, sctx.scissor.x1,
+                                              sctx.scissor.y0, sctx.scissor.y1));
         }
     }
 
