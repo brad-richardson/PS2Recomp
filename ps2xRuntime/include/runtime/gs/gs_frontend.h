@@ -83,6 +83,13 @@ struct GSDebugHistoryEntry
     double zMax = 0.0;
     uint8_t aMin = 0;
     uint8_t aMax = 0;
+    // E50: raw XYOFFSET of the drawing context and the first three
+    // vertices (pixels, XYZ/16; Z raw) for the E4 head dump.
+    uint16_t ofx = 0;
+    uint16_t ofy = 0;
+    float vx[3] = {0.0f, 0.0f, 0.0f};
+    float vy[3] = {0.0f, 0.0f, 0.0f};
+    double vz[3] = {0.0, 0.0, 0.0};
 
     GSBitBltBuf bitbltbuf{};
     GSTrxPos trxpos{};
@@ -131,6 +138,11 @@ public:
     GSDebugSnapshot getDebugSnapshot() const;
     std::vector<GSDebugHistoryEntry> getDebugHistory() const;
     void clearDebugHistory();
+    // E50 DEV-ONLY: keep the FIRST events of the unpaused span (until
+    // `drawLimit` draws are kept; total events capped at 4x that) next to
+    // the tail ring. 0 (default) = off. Cleared by clearDebugHistory.
+    void setDebugHeadLimit(size_t drawLimit);
+    std::vector<GSDebugHistoryEntry> getDebugHead() const;
     bool isDebugHistoryPaused() const;
     void setDebugHistoryPaused(bool paused);
     bool getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const;
@@ -246,6 +258,9 @@ private:
     uint32_t m_debugFrameIndex = 0;
     uint64_t m_debugLastVsyncTick = UINT64_MAX;
     bool m_debugHistoryPaused = true;
+    size_t m_debugHeadDrawLimit = 0;
+    size_t m_debugHeadDraws = 0;
+    std::vector<GSDebugHistoryEntry> m_debugHead;
 
     std::unique_ptr<GSRasterBackend> m_backend;
 };

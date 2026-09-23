@@ -4643,6 +4643,47 @@ void register_ps2_gs_tests()
             t.Equals(capped.first.size(), ps2_e4::kMaxSurfaces, "surface set should cap at 16");
         });
 
+        tc.Run("E4 head keeps the first N draws with offset and vertices (E50)", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            gs.clearDebugHistory();
+            gs.setDebugHeadLimit(2u);
+            gs.setDebugHistoryPaused(false);
+
+            gs.writeRegister(GS_REG_FRAME_1, 1ull << 16);
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0x7000ull | (0x7200ull << 32));
+            gs.writeRegister(GS_REG_PRIM, static_cast<uint64_t>(GS_PRIM_POINT));
+            for (uint32_t i = 0u; i < 5u; ++i)
+            {
+                const uint64_t x = (1800u + i) * 16u;
+                const uint64_t y = 1830u * 16u;
+                gs.writeRegister(GS_REG_XYZ2, x | (y << 16) | (static_cast<uint64_t>(7u + i) << 32));
+            }
+            gs.setDebugHistoryPaused(true);
+
+            const std::vector<GSDebugHistoryEntry> head = gs.getDebugHead();
+            uint32_t draws = 0u;
+            for (const GSDebugHistoryEntry &e : head)
+                draws += (e.kind == GSDebugEventKind::Draw) ? 1u : 0u;
+            t.Equals(draws, 2u, "the head stops after the draw limit");
+            t.IsTrue(head.size() >= 2u && head.front().kind == GSDebugEventKind::Register,
+                     "register events before the first draw are kept");
+            const GSDebugHistoryEntry *first = nullptr;
+            for (const GSDebugHistoryEntry &e : head)
+                if (e.kind == GSDebugEventKind::Draw && first == nullptr)
+                    first = &e;
+            t.IsTrue(first != nullptr, "a draw is recorded");
+            const std::string row = ps2_e4::formatHeadEntry(*first);
+            t.IsTrue(row.find(" ofs=1792,1824 v=1800,1830,7") != std::string::npos,
+                     "head rows carry XYOFFSET and the vertex list: " + row);
+            t.IsTrue(gs.getDebugHistory().size() > head.size(), "the tail ring keeps running past the head");
+
+            gs.clearDebugHistory();
+            t.IsTrue(gs.getDebugHead().empty(), "clearDebugHistory clears the head");
+        });
+
         tc.Run("deinterlace value parses to weave unless exactly bob", [](TestCase &t)
         {
             t.IsFalse(ps2xDeinterlaceBobValue(nullptr), "unset weaves");

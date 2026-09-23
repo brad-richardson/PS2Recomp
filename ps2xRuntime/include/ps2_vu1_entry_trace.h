@@ -5,6 +5,15 @@
 //   PS2X_VU1_ENTRY_TRACE_PCS=0x40,0x10 (byte PCs, 0x-hex or decimal,
 //     comma-separated, max 16)
 //   PS2X_VU1_ENTRY_TRACE_VSYNC=<n> (default 0)
+//   E50: PS2X_VU1_ENTRY_TRACE_PCS=all captures the first MSCAL of each
+//     distinct startPC at or after vsync n (first 16 distinct PCs).
+//   E50: PS2X_VU1_ENTRY_TRACE_MAXPAIRS=<n> caps the pair stream per block
+//     (default 16384); PS2X_VU1_ENTRY_TRACE_MAXLINES=<n> caps the file
+//     (default 100000).
+//   E50: each block also carries `reg` lines (VF0-31, VI0-15, ACC, Q, P, I
+//     at program entry: 8-digit hex words then decimal floats) right after
+//     the header, and UNPACK `vif` lines carry `src=<EE addr>` when the
+//     VIF1 delivery has an EE source map.
 // For the FIRST MSCAL at each listed startPC at or after vsync n, the
 // block holds:
 //   1. `vumem`: the full 16 KB VU1 data memory at MSCAL entry, one line
@@ -28,6 +37,7 @@
 #pragma once
 
 #include <atomic>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -56,6 +66,10 @@ struct State
     std::string path;
     std::vector<uint32_t> pcs;
     uint64_t vsyncGate = 0u;
+    bool allMode = false;
+    uint32_t maxPairs = kMaxPairsPerBlock;
+    uint64_t maxLines = kMaxLines;
+    std::vector<std::string> frozenRegs;
     uint64_t curTick = 0u;
     bool curTickValid = false;
     std::vector<bool> captured; // per pcs index
@@ -180,7 +194,12 @@ namespace detail
             return;
         }
         s.path = file;
-        if (const char *pcs = std::getenv("PS2X_VU1_ENTRY_TRACE_PCS"))
+        const char *pcsEnv = std::getenv("PS2X_VU1_ENTRY_TRACE_PCS");
+        if (pcsEnv && std::strcmp(pcsEnv, "all") == 0)
+        {
+            s.allMode = true;
+        }
+        else if (const char *pcs = pcsEnv)
         {
             const char *itemBegin = pcs;
             for (const char *p = pcs;; ++p)
@@ -208,7 +227,23 @@ namespace detail
                 s.vsyncGate = gate;
             }
         }
-        if (s.pcs.empty())
+        if (const char *mp = std::getenv("PS2X_VU1_ENTRY_TRACE_MAXPAIRS"))
+        {
+            uint64_t v = 0u;
+            if (parseU64(mp, v) && v > 0u && v <= kMaxPairsPerBlock)
+            {
+                s.maxPairs = static_cast<uint32_t>(v);
+            }
+        }
+        if (const char *ml = std::getenv("PS2X_VU1_ENTRY_TRACE_MAXLINES"))
+        {
+            uint64_t v = 0u;
+            if (parseU64(ml, v) && v > 0u)
+            {
+                s.maxLines = v;
+            }
+        }
+        if (s.pcs.empty() && !s.allMode)
         {
             return; // No targets: stay off (nothing could ever arm).
         }
@@ -265,7 +300,7 @@ namespace detail
         }
         s.out << line << '\n';
         ++s.linesWritten;
-        if (s.linesWritten >= kMaxLines)
+        if (s.linesWritten >= s.maxLines)
         {
             s.capped = true;
             s.out.close();
@@ -333,6 +368,13 @@ inline void noteMscalEntry(uint32_t startPC, bool isMscnt,
     std::lock_guard<std::mutex> lock(s.mutex);
     if (!isMscnt && s.curTickValid && s.curTick >= s.vsyncGate)
     {
+        // E50 all-mode: register each new startPC as a target on sight.
+        if (s.allMode && !s.frozenValid && s.pcs.size() < kMaxPcs &&
+            std::find(s.pcs.begin(), s.pcs.end(), startPC) == s.pcs.end())
+        {
+            s.pcs.push_back(startPC);
+            s.captured.push_back(false);
+        }
         for (size_t i = 0u; i < s.pcs.size(); ++i)
         {
             if (s.pcs[i] == startPC && !s.captured[i] && !s.frozenValid)
@@ -349,6 +391,7 @@ inline void noteMscalEntry(uint32_t startPC, bool isMscnt,
                     s.frozenVifDropped += static_cast<uint32_t>(s.frozenVif.size() - kMaxVifPerBlock);
                     s.frozenVif.resize(kMaxVifPerBlock);
                 }
+                s.frozenRegs.clear();
                 s.frozenVmem.assign(kVuMemWords, 0u);
                 if (vuData != nullptr && dataSize >= kVuMemWords * 4u)
                 {
@@ -381,6 +424,30 @@ inline bool takeArm(uint32_t startPC)
     }
     s.pendingValid = false;
     return true;
+}
+
+// E50: per-block pair cap (PS2X_VU1_ENTRY_TRACE_MAXPAIRS).
+inline uint32_t maxPairs()
+{
+    State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    return s.maxPairs;
+}
+
+// E50: caller-formatted `reg ...` lines for the frozen block (VU1 state at
+// program entry). Written after the header by finishEntry.
+inline void noteEntryRegs(const std::vector<std::string> &lines)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (s.frozenValid)
+    {
+        s.frozenRegs = lines;
+    }
 }
 
 inline uint32_t armIndex(uint32_t startPC)
@@ -418,6 +485,11 @@ inline void finishEntry(uint32_t idx, const std::vector<std::string> &pairs,
     std::snprintf(head, sizeof(head), "entry startPC=0x%x vsync=%llu",
                   s.frozenPc, static_cast<unsigned long long>(s.frozenVsync));
     detail::writeLineLocked(s, std::string(head));
+    for (const std::string &line : s.frozenRegs)
+    {
+        detail::writeLineLocked(s, line);
+    }
+    s.frozenRegs.clear();
     char row[64];
     for (uint32_t r = 0u; r < kVuMemWords / 4u; ++r)
     {
@@ -437,9 +509,9 @@ inline void finishEntry(uint32_t idx, const std::vector<std::string> &pairs,
         detail::writeLineLocked(s, std::string(drop));
     }
     size_t kept = pairs.size();
-    if (kept > kMaxPairsPerBlock)
+    if (kept > s.maxPairs)
     {
-        kept = kMaxPairsPerBlock;
+        kept = s.maxPairs;
     }
     for (size_t i = 0u; i < kept; ++i)
     {
@@ -448,7 +520,7 @@ inline void finishEntry(uint32_t idx, const std::vector<std::string> &pairs,
     char tail[128];
     std::snprintf(tail, sizeof(tail), "endentry startPC=0x%x pairs=%u arrivals=%u%s",
                   s.frozenPc, pairCount, arrivals,
-                  pairs.size() > kMaxPairsPerBlock ? " capped=1" : "");
+                  pairs.size() > s.maxPairs ? " capped=1" : "");
     detail::writeLineLocked(s, std::string(tail));
     if (s.outOpen)
     {
@@ -502,6 +574,10 @@ inline bool configureForTest(const char *path, const std::vector<uint32_t> &pcs,
     s.path = path;
     s.pcs = pcs;
     s.vsyncGate = vsyncGate;
+    s.allMode = false;
+    s.maxPairs = kMaxPairsPerBlock;
+    s.maxLines = kMaxLines;
+    s.frozenRegs.clear();
     s.curTickValid = false;
     s.curTick = 0u;
     s.captured.assign(pcs.size(), false);
@@ -521,6 +597,21 @@ inline bool configureForTest(const char *path, const std::vector<uint32_t> &pcs,
     return true;
 }
 
+// E50: all-mode / caps for tests (call after configureForTest).
+inline void setModeForTest(bool allMode, uint32_t maxPairsPerBlock, uint64_t maxLines)
+{
+    State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.allMode = allMode;
+    if (allMode)
+    {
+        s.pcs.clear();
+        s.captured.clear();
+    }
+    s.maxPairs = maxPairsPerBlock;
+    s.maxLines = maxLines;
+}
+
 inline void clearForTest()
 {
     State &s = detail::state();
@@ -533,6 +624,10 @@ inline void clearForTest()
     s.path.clear();
     s.pcs.clear();
     s.vsyncGate = 0u;
+    s.allMode = false;
+    s.maxPairs = kMaxPairsPerBlock;
+    s.maxLines = kMaxLines;
+    s.frozenRegs.clear();
     s.curTickValid = false;
     s.curTick = 0u;
     s.captured.clear();

@@ -1642,6 +1642,47 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         m_entryArrivals = 0u;
         m_entryLines.clear();
         m_entryStoreValid = false;
+        m_entryMaxPairs = ps2_vu1_entry_trace::maxPairs();
+        // E50: VU1 register state at program entry for the frozen block.
+        std::vector<std::string> regs;
+        regs.reserve(56u);
+        char line[256];
+        auto fmtVec = [&](const char *name, const float *v)
+        {
+            uint32_t w[4];
+            std::memcpy(w, v, sizeof(w));
+            std::snprintf(line, sizeof(line), "reg %s %08x %08x %08x %08x | %.9g %.9g %.9g %.9g",
+                          name, w[0], w[1], w[2], w[3], static_cast<double>(v[0]),
+                          static_cast<double>(v[1]), static_cast<double>(v[2]),
+                          static_cast<double>(v[3]));
+            regs.emplace_back(line);
+        };
+        for (int r = 0; r < 32; ++r)
+        {
+            char name[8];
+            std::snprintf(name, sizeof(name), "vf%d", r);
+            fmtVec(name, m_state.vf[r]);
+        }
+        fmtVec("acc", m_state.acc);
+        for (int r = 0; r < 16; ++r)
+        {
+            std::snprintf(line, sizeof(line), "reg vi%d %08x %d", r,
+                          static_cast<uint32_t>(m_state.vi[r]), m_state.vi[r]);
+            regs.emplace_back(line);
+        }
+        const float qpi[3] = {m_state.q, m_state.p, m_state.i};
+        static const char *const kQpi[3] = {"q", "p", "i"};
+        for (int r = 0; r < 3; ++r)
+        {
+            uint32_t w;
+            std::memcpy(&w, &qpi[r], sizeof(w));
+            std::snprintf(line, sizeof(line), "reg %s %08x %.9g", kQpi[r], w,
+                          static_cast<double>(qpi[r]));
+            regs.emplace_back(line);
+        }
+        std::snprintf(line, sizeof(line), "reg top %u itop %u", m_state.top, m_state.itop);
+        regs.emplace_back(line);
+        ps2_vu1_entry_trace::noteEntryRegs(regs);
     }
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
@@ -2366,7 +2407,7 @@ void VU1Interpreter::recordEntryPair(uint32_t pc, uint32_t lo, uint32_t up,
     // Stop after the first 0x418 arrival plus 3 loop iterations (4th
     // arrival recorded), or at the pair cap; execution continues.
     if (m_entryArrivals >= 4u ||
-        m_entryPairs >= ps2_vu1_entry_trace::kMaxPairsPerBlock)
+        m_entryPairs >= m_entryMaxPairs)
     {
         m_entryArmed = false;
         ps2_vu1_entry_trace::finishEntry(m_entryIdx, m_entryLines,
