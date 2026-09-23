@@ -855,7 +855,47 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define FPU_SUB_S(a, b) ((float)(a) - (float)(b))
 #define FPU_MUL_S(a, b) ((float)(a) * (float)(b))
 #define FPU_DIV_S(a, b) ((float)(a) / (float)(b))
-#define FPU_SQRT_S(a) sqrtf((float)(a))
+// R5900 FPU semantics (PCSX2 pcsx2/FPU.cpp SQRT_S, RSQRT_S, CVT_W).
+// SQRT.S: sqrt(|ft|); +/-0 (and denormals, which the EE treats as zero)
+// give a signed zero.
+static inline float Ps2FpuSqrtS(float t)
+{
+    uint32_t u;
+    std::memcpy(&u, &t, sizeof(u));
+    if ((u & 0x7F800000u) == 0u)
+    {
+        u &= 0x80000000u;
+        float r;
+        std::memcpy(&r, &u, sizeof(r));
+        return r;
+    }
+    return sqrtf(fabsf(t));
+}
+// RSQRT.S: fs / sqrt(|ft|); ft = +/-0 gives +/-FMAX (sign of ft).
+static inline float Ps2FpuRsqrtS(float s, float t)
+{
+    uint32_t u;
+    std::memcpy(&u, &t, sizeof(u));
+    if ((u & 0x7F800000u) == 0u)
+    {
+        u = (u & 0x80000000u) | 0x7F7FFFFFu;
+        float r;
+        std::memcpy(&r, &u, sizeof(r));
+        return r;
+    }
+    return s / sqrtf(fabsf(t));
+}
+// CVT.W.S: truncate toward zero; |x| >= 2^31 (and NaN/Inf) saturate by sign.
+static inline int32_t Ps2FpuCvtWS(float s)
+{
+    uint32_t u;
+    std::memcpy(&u, &s, sizeof(u));
+    if ((u & 0x7F800000u) <= 0x4E800000u)
+        return static_cast<int32_t>(s);
+    return (u & 0x80000000u) ? static_cast<int32_t>(0x80000000u) : 0x7FFFFFFF;
+}
+#define FPU_SQRT_S(a) Ps2FpuSqrtS((float)(a))
+#define FPU_RSQRT_S(s, t) Ps2FpuRsqrtS((float)(s), (float)(t))
 #define FPU_ABS_S(a) fabsf((float)(a))
 #define FPU_MOV_S(a) ((float)(a))
 #define FPU_NEG_S(a) (-(float)(a))
@@ -869,7 +909,7 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define FPU_FLOOR_W_S(a) ((int32_t)floorf((float)(a)))
 #define FPU_CVT_S_W(a) ((float)(int32_t)(a))
 #define FPU_CVT_S_L(a) ((float)(int64_t)(a))
-#define FPU_CVT_W_S(a) ((int32_t)nearbyintf((float)(a)))
+#define FPU_CVT_W_S(a) Ps2FpuCvtWS((float)(a))
 #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
 #define FPU_C_F_S(a, b) (0)
 #define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
