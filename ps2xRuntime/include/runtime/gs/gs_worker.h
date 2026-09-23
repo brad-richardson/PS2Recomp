@@ -137,6 +137,10 @@ public:
 
     size_t pendingCount() const;
     size_t pendingBytes() const;
+    // True when the queue is empty AND no command is executing (checked
+    // under one mutex). A Fence issued while quiescent is a proven no-op,
+    // so drainers may skip it; all prior effects are visible via the mutex.
+    bool isQuiescent() const;
     uint64_t enqueuedCount() const { return m_enqueuedCount.load(std::memory_order_relaxed); }
     uint64_t executedCount() const { return m_executedCount.load(std::memory_order_relaxed); }
 
@@ -151,6 +155,7 @@ private:
     std::condition_variable m_hasWork;
     std::condition_variable m_hasSpace;
     std::deque<GsCommand> m_queue;
+    bool m_executing = false; // set under m_mutex around the handler call
     size_t m_queuedBytes = 0;
     bool m_stopRequested = false;
     bool m_running = false;

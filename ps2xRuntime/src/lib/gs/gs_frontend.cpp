@@ -162,6 +162,8 @@ void GS::drainQueue()
 {
     if (!m_worker || t_inGsWorker)
         return;
+    if (m_worker->isQuiescent())
+        return; // provable no-op: nothing queued, nothing executing
     GsCommand cmd;
     cmd.kind = GsCmdKind::Fence;
     cmd.rpc = std::make_shared<GsRpcBase>();

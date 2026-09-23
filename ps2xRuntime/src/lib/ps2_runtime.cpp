@@ -13,6 +13,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_e7.h"
 #include "ps2_e15.h"
+#include "ps2_pk.h"
 #include "runtime/ee_scheduler.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
@@ -2884,10 +2885,37 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
     }
 }
 
+namespace
+{
+    // GB2 Part 3: matches exactly the vaddrs read32/read64 route to CSR /
+    // SIGLBLID (priv range + offsets 0x1000 / 0x1080, cf. gsRegPtr). Any
+    // guest load touching either register (any width/half) is a
+    // completion-visibility point. (A phys-mask-only check over-matches
+    // scratchpad 0x70001000/0x70001080; the range check excludes it.)
+    inline bool gb2IsCsrOrSiglblid(uint32_t vaddr)
+    {
+        if ((vaddr - PS2_GS_PRIV_REG_BASE) >= PS2_GS_PRIV_REG_SIZE)
+        {
+            return false;
+        }
+        const uint32_t off = (vaddr - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        return off == 0x1000u || off == 0x1080u;
+    }
+}
+
 uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
     {
+        if (gb2IsCsrOrSiglblid(vaddr))
+        {
+            if (ps2_pk::csrDrainEnabled() && m_gs.queueEnabled())
+                m_gs.drainQueue();
+            const uint16_t value = m_memory.read16(vaddr);
+            ps2_pk::noteCsrRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
+                                ctx ? ctx->pc : 0u, vaddr);
+            return value;
+        }
         return m_memory.read16(vaddr);
     }
     catch (const std::exception &)
@@ -2901,6 +2929,15 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
     {
+        if (gb2IsCsrOrSiglblid(vaddr))
+        {
+            if (ps2_pk::csrDrainEnabled() && m_gs.queueEnabled())
+                m_gs.drainQueue();
+            const uint32_t value = m_memory.read32(vaddr);
+            ps2_pk::noteCsrRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
+                                ctx ? ctx->pc : 0u, vaddr);
+            return value;
+        }
         return m_memory.read32(vaddr);
     }
     catch (const std::exception &)
@@ -2914,6 +2951,15 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
     {
+        if (gb2IsCsrOrSiglblid(vaddr))
+        {
+            if (ps2_pk::csrDrainEnabled() && m_gs.queueEnabled())
+                m_gs.drainQueue();
+            const uint64_t value = m_memory.read64(vaddr);
+            ps2_pk::noteCsrRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
+                                ctx ? ctx->pc : 0u, vaddr);
+            return value;
+        }
         return m_memory.read64(vaddr);
     }
     catch (const std::exception &)
@@ -2927,6 +2973,17 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     try
     {
+        if (gb2IsCsrOrSiglblid(vaddr))
+        {
+            if (ps2_pk::csrDrainEnabled() && m_gs.queueEnabled())
+                m_gs.drainQueue();
+            const __m128i value = m_memory.read128(vaddr);
+            uint64_t lo64 = 0;
+            std::memcpy(&lo64, &value, sizeof(lo64));
+            ps2_pk::noteCsrRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), lo64,
+                                ctx ? ctx->pc : 0u, vaddr);
+            return value;
+        }
         return m_memory.read128(vaddr);
     }
     catch (const std::exception &)
