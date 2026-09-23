@@ -4,6 +4,8 @@
 #include "../../ps2_iop_transport.h"
 #include "game_overrides.h"
 #include "ps2_park_snapshot.h"
+#include "ps2_e41_trace.h"
+#include "ps2_snd_spike.h"
 
 namespace ps2_syscalls
 {
@@ -584,6 +586,8 @@ namespace ps2_syscalls
             }
         }
 
+        ps2_snd_spike::noteRpc(rdram, sid, rpcNum, sendBuf, sendSize); // AU2 spike (default off)
+
         const uint32_t serverPtr = client->server;
         auto *server = serverPtr
                            ? reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr))
@@ -1105,6 +1109,26 @@ namespace ps2_syscalls
         uint32_t sizeExtra = 0;
         readStackU32(rdram, sp, 0x10, destExtra);
         readStackU32(rdram, sp, 0x14, sizeExtra);
+
+        // AU2 spike: 0x426078 (_sceSifSendCmd, reached from isceSifSendCmd
+        // with ra 0x426220) is bound here but takes (cid, mode, packet,
+        // size, src, dest, esize) in a0..t2. Only reparsed while the spike
+        // is on, so the default path is unchanged.
+        const uint32_t sendCmdRa = getRegU32(ctx, 31);
+        if (ps2_snd_spike::enabled() && sendCmdRa == ps2_snd_spike::kIsceSendCmdRa)
+        {
+            packetAddr = getRegU32(ctx, 6);
+            packetSize = getRegU32(ctx, 7);
+            srcExtra = getRegU32(ctx, 8);
+            destExtra = getRegU32(ctx, 9);
+            sizeExtra = getRegU32(ctx, 10);
+        }
+        if (runtime)
+        {
+            ps2_snd_spike::onSendCmd(rdram, ps2_e41_trace::lastVsyncTick(), sendCmdRa, cid, packetAddr, packetSize,
+                                     [runtime](GuestInvocation invocation)
+                                     { runtime->eeScheduler().queueInvocation(std::move(invocation)); });
+        }
 
         if (sizeExtra > 0 && srcExtra && destExtra)
         {
