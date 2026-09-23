@@ -1,4 +1,5 @@
 #include "ps2_e3.h" // E3b R3b taps below (self-gated; unset env = no-op)
+#include "ps2_e41_trace.h" // E41 plant watch (default off)
 
 static void setRegU32(R5900Context *ctx, int reg, uint32_t value)
 {
@@ -48,6 +49,14 @@ static void rpcCopyToRdram(uint8_t *rdram, uint32_t dst, uint32_t src, size_t si
         std::snprintf(e3x, sizeof(e3x), "src=0x%x", src);
         ps2_e3::tapEnd(std::move(e3t), "rpc-copy", rdram, e3x);
     }
+    if (ps2_e41_trace::plantArmed()) // E41 plant watch
+    {
+        char srcBuf[32];
+        std::snprintf(srcBuf, sizeof(srcBuf), "src=0x%x", src);
+        ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dst,
+                                      static_cast<uint32_t>(clampedSize), rdram,
+                                      "sif-rpc", srcBuf, 0u);
+    }
 }
 
 static void rpcZeroRdram(uint8_t *rdram, uint32_t dst, size_t size)
@@ -86,6 +95,10 @@ static void rpcZeroRdram(uint8_t *rdram, uint32_t dst, size_t size)
     {
         ps2_e3::tapEnd(std::move(e3t), "rpc-zero", rdram, "fill=0");
     }
+    if (ps2_e41_trace::plantArmed()) // E41 plant watch
+        ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dst,
+                                      static_cast<uint32_t>(clampedSize), rdram,
+                                      "sif-rpc-zero", "zero", 0u);
 }
 
 static bool readStackU32(uint8_t *rdram, uint32_t sp, uint32_t offset, uint32_t &out)

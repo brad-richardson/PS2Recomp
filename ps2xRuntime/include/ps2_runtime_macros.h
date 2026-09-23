@@ -14,6 +14,7 @@
 
 #include "ps2_runtime.h"
 #include "ps2_mpg_src_trace.h"
+#include "ps2_e41_trace.h"
 
 static inline int32_t Ps2ExtractEpi32(__m128i v, int index)
 {
@@ -246,6 +247,8 @@ static inline __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
 static inline void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t value)
 {
     rdram[addr & PS2_RAM_MASK] = value;
+    if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
+        ps2_e41_trace::noteFastWrite(rdram, addr, sizeof(value));
 }
 
 static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
@@ -259,9 +262,13 @@ static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
+            ps2_e41_trace::noteFastWrite(rdram, addr, sizeof(value));
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
+    if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
+        ps2_e41_trace::noteFastWrite(rdram, addr, sizeof(value));
 }
 
 static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
@@ -275,9 +282,13 @@ static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
+            ps2_e41_trace::noteFastWrite(rdram, addr, sizeof(value));
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
+    if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
+        ps2_e41_trace::noteFastWrite(rdram, addr, sizeof(value));
 }
 
 static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
@@ -291,9 +302,13 @@ static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
+            ps2_e41_trace::noteFastWrite(rdram, addr, sizeof(value));
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
+    if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
+        ps2_e41_trace::noteFastWrite(rdram, addr, sizeof(value));
 }
 
 static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
@@ -307,9 +322,13 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
+            ps2_e41_trace::noteFastWrite(rdram, addr, sizeof(value));
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
+    if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
+        ps2_e41_trace::noteFastWrite(rdram, addr, sizeof(value));
 }
 
 #define FAST_READ8(addr) Ps2FastRead8(rdram, (uint32_t)(addr))

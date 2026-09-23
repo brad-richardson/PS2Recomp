@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "ps2_e3.h"
+#include "ps2_e41_trace.h"
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
 #include "../../ps2_iop_transport.h"
@@ -637,6 +638,16 @@ namespace ps2_stubs
             std::memcpy(rd + 0x14u, &dstAddr, sizeof(dstAddr));
             std::memcpy(rd + 0x18u, &size, sizeof(size));
             ps2_e3::tapEnd(std::move(e3t), "sif-getother", rdram, "f=recvdata");
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            {
+                const uint64_t tick = ps2_e41_trace::lastVsyncTick();
+                char src[32];
+                std::snprintf(src, sizeof(src), "src=0x%x", srcAddr);
+                ps2_e41_trace::notePlantRange(tick, dstAddr, size, rdram,
+                                              "sif-dma", src, 0u);
+                ps2_e41_trace::notePlantRange(tick, rdAddr + 0x10u, 12u, rdram,
+                                              "sif-recvdata", "recvdata", 0u);
+            }
         }
 
         if (runtime)
@@ -908,6 +919,14 @@ namespace ps2_stubs
                 {
                     ok = false;
                     break;
+                }
+                if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                {
+                    char src[32];
+                    std::snprintf(src, sizeof(src), "src=0x%x", xfer.src);
+                    ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), xfer.dest,
+                                                  static_cast<uint32_t>(xfer.size), rdram,
+                                                  "sif-dma", src, 0u);
                 }
                 if (runtime)
                 {

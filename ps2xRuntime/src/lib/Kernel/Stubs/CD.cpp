@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "ps2_e3.h"
+#include "ps2_e41_trace.h"
 #include "CD.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
@@ -318,6 +319,24 @@ namespace ps2_stubs
                 std::snprintf(e3x, sizeof(e3x), "lbn=0x%x,ok=%d", args.lbn, e3ok ? 1 : 0);
                 ps2_e3::tapEnd(std::move(e3t), "cd-read", rdram, e3x);
             }
+            if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
+            {
+                const uint64_t tick = currentCdStreamTick(runtime);
+                CdFileEntry fileEntry{};
+                const char *file = "-";
+                std::string fileLeaf;
+                if (findRegisteredCdFileForLbn(args.lbn, fileEntry) && !fileEntry.hostPath.empty())
+                {
+                    fileLeaf = fileEntry.hostPath.filename().string();
+                    file = fileLeaf.c_str();
+                }
+                const uint64_t seq = ps2_e41_trace::noteCdRead(tick, args.lbn, args.sectors,
+                                                              args.buf, "sceCdRead", file);
+                char src[32];
+                std::snprintf(src, sizeof(src), "lbn=0x%x", args.lbn);
+                ps2_e41_trace::notePlantRange(tick, args.buf, bytes, rdram,
+                                              "sceCdRead", src, seq);
+            }
             return e3ok;
         };
 
@@ -378,6 +397,14 @@ namespace ps2_stubs
                     ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, a2, bytes); // E3b R3c C2
                     std::memset(rdram + offset, 0, bytes);
                     ps2_e3::tapEnd(std::move(e3t), "cd-read", rdram, "lbn=unresolved,ok=0");
+                    if (ps2_e41_trace::armed()) // E41 unresolved-read log + plant watch
+                    {
+                        const uint64_t tick = currentCdStreamTick(runtime);
+                        const uint64_t seq = ps2_e41_trace::noteCdRead(
+                            tick, a0, a1, a2, "sceCdRead-unresolved", "-");
+                        ps2_e41_trace::notePlantRange(tick, a2, bytes, rdram,
+                                                      "sceCdRead-zero", "zero-fill", seq);
+                    }
                 }
 
                 static uint32_t unresolvedLogCount = 0;
@@ -498,6 +525,9 @@ namespace ps2_stubs
             ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, tocAddr, 1024); // E3b R3e C5
             std::memset(toc, 0, 1024);
             ps2_e3::tapEnd(std::move(e3t), "cd-toc", rdram, "fill=0");
+            if (ps2_e41_trace::armed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(currentCdStreamTick(runtime), tocAddr, 1024u,
+                                              rdram, "cd-toc", "zero-fill", 0u);
         }
         setReturnS32(ctx, 1);
     }
@@ -624,6 +654,24 @@ namespace ps2_stubs
                 std::snprintf(e3x, sizeof(e3x), "lbn=0x%x,ok=%d", lbn, e3ok ? 1 : 0);
                 ps2_e3::tapEnd(std::move(e3t), "cd-chain", rdram, e3x);
             }
+            if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
+            {
+                const uint64_t tick = currentCdStreamTick(runtime);
+                CdFileEntry fileEntry{};
+                const char *file = "-";
+                std::string fileLeaf;
+                if (findRegisteredCdFileForLbn(lbn, fileEntry) && !fileEntry.hostPath.empty())
+                {
+                    fileLeaf = fileEntry.hostPath.filename().string();
+                    file = fileLeaf.c_str();
+                }
+                const uint64_t seq = ps2_e41_trace::noteCdRead(tick, lbn, sectors, buf,
+                                                              "sceCdReadChain", file);
+                char src[32];
+                std::snprintf(src, sizeof(src), "lbn=0x%x", lbn);
+                ps2_e41_trace::notePlantRange(tick, buf, bytes, rdram,
+                                              "sceCdReadChain", src, seq);
+            }
             if (!e3ok)
             {
                 ok = false;
@@ -665,6 +713,9 @@ namespace ps2_stubs
         clockData[6] = toBcd(static_cast<uint32_t>(localTm.tm_mon + 1));
         clockData[7] = toBcd(static_cast<uint32_t>((localTm.tm_year + 1900) % 100));
         ps2_e3::tapEnd(std::move(e3t), "cd-clock", rdram, "bcd=wallclock");
+        if (ps2_e41_trace::armed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(currentCdStreamTick(runtime), clockAddr, 8u,
+                                          rdram, "cd-clock", "wallclock", 0u);
         setReturnS32(ctx, 1);
     }
 
@@ -764,6 +815,17 @@ namespace ps2_stubs
             g_lastCdError = -1;
             setReturnS32(ctx, 0);
             return;
+        }
+
+        if (ps2_e41_trace::armed()) // E41 cdsearch log + plant watch
+        {
+            const uint64_t tick = currentCdStreamTick(runtime);
+            ps2_e41_trace::noteCdSearch(tick, path.c_str(), resolvedEntry.baseLbn,
+                                        resolvedEntry.sizeBytes);
+            char src[32];
+            std::snprintf(src, sizeof(src), "lbn=0x%x", resolvedEntry.baseLbn);
+            ps2_e41_trace::notePlantRange(tick, fileAddr, 32u, rdram,
+                                          "sceCdSearchFile", src, 0u);
         }
 
         g_cdStreamingLbn = resolvedEntry.baseLbn;
@@ -949,6 +1011,24 @@ namespace ps2_stubs
                     std::snprintf(e3x, sizeof(e3x), "lbn=0x%x,ok=%d", readLbn, e3ok ? 1 : 0);
                     ps2_e3::tapEnd(std::move(e3t), "cd-stread", rdram, e3x);
                 }
+                if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
+                {
+                    const uint64_t tick = currentCdStreamTick(runtime);
+                    CdFileEntry fileEntry{};
+                    const char *file = "-";
+                    std::string fileLeaf;
+                    if (findRegisteredCdFileForLbn(readLbn, fileEntry) && !fileEntry.hostPath.empty())
+                    {
+                        fileLeaf = fileEntry.hostPath.filename().string();
+                        file = fileLeaf.c_str();
+                    }
+                    const uint64_t seq = ps2_e41_trace::noteCdRead(
+                        tick, readLbn, sectors, destination, "sceCdStRead", file);
+                    char src[32];
+                    std::snprintf(src, sizeof(src), "lbn=0x%x", readLbn);
+                    ps2_e41_trace::notePlantRange(tick, destination, readBytes, rdram,
+                                                  "sceCdStRead", src, seq);
+                }
                 if (!e3ok)
                 {
                     finishCdStRead(rdram, ctx, state, g_lastCdError);
@@ -1126,6 +1206,9 @@ namespace ps2_stubs
             ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, statusPtr, sizeof(uint32_t)); // E3b R3e C5
             *status = 0;
             ps2_e3::tapEnd(std::move(e3t), "cd-tray", rdram, "-");
+            if (ps2_e41_trace::armed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(currentCdStreamTick(runtime), statusPtr,
+                                              sizeof(uint32_t), rdram, "cd-tray", "zero", 0u);
         }
         setReturnS32(ctx, 1);
     }

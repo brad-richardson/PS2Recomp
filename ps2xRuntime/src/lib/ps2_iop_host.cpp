@@ -1,5 +1,6 @@
 #include "ps2_iop_host.h"
 #include "ps2_e3.h"
+#include "ps2_e41_trace.h"
 
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
@@ -175,6 +176,10 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
         ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::writeGuest", nullptr);
         ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, address, size); // E3b R3b
         std::memcpy(destination, source, size);
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), address,
+                                          static_cast<uint32_t>(size), rdram,
+                                          "iop-write", "iop", 0u);
         if (e3t.active)
         {
             ps2_e3::tapEnd(std::move(e3t), "iop-write", rdram, "-");
@@ -201,6 +206,10 @@ bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
         ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::zeroGuest", nullptr);
         ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, address, size); // E3b R3b
         std::memset(destination, 0, size);
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), address,
+                                          static_cast<uint32_t>(size), rdram,
+                                          "iop-zero", "zero", 0u);
         if (e3t.active)
         {
             ps2_e3::tapEnd(std::move(e3t), "iop-zero", rdram, "fill=0");

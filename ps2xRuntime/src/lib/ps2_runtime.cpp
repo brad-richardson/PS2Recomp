@@ -1,5 +1,6 @@
 #include "ps2_runtime.h"
 #include "ps2_e3.h"
+#include "ps2_e41_trace.h"
 #include "ps2_gfx_stats.h"
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
@@ -2740,7 +2741,16 @@ uint32_t PS2Runtime::guestRealloc(uint32_t guestAddr, uint32_t newSize, uint32_t
         uint32_t dstPhys = newAddr & PS2_RAM_MASK;
         uint32_t srcPhys = oldAddr & PS2_RAM_MASK;
         if (dstPhys + copyBytes <= PS2_RAM_SIZE && srcPhys + copyBytes <= PS2_RAM_SIZE)
+        {
             std::memmove(rdram + dstPhys, rdram + srcPhys, copyBytes);
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            {
+                char src[32];
+                std::snprintf(src, sizeof(src), "src=0x%x", oldAddr);
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), newAddr,
+                                              copyBytes, rdram, "heap-realloc", src, 0u);
+            }
+        }
     }
 
     freeGuestBlockLocked(oldAddr);
@@ -3109,6 +3119,10 @@ void PS2Runtime::setEeSyscallOverride(uint8_t *rdram, uint32_t syscallNumber, ui
     }
     const uint32_t guestAddress = static_cast<uint32_t>(address);
     std::memcpy(rdram + guestAddress, &handler, sizeof(handler));
+    if (ps2_e41_trace::plantArmed()) // E41 plant watch
+        ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), guestAddress,
+                                      sizeof(handler), rdram, "irq-handler-install",
+                                      "handler", 0u);
     if (handler == 0u)
     {
         m_eeSyscallMirrorAddresses.erase(guestAddress);
@@ -3135,6 +3149,10 @@ void PS2Runtime::initializeEeKernelState(uint8_t *rdram)
     {
         const uint32_t zero = 0u;
         std::memcpy(rdram + address, &zero, sizeof(zero));
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), address,
+                                          sizeof(zero), rdram, "irq-handler-clear",
+                                          "zero", 0u);
     }
     m_eeSyscallMirrorAddresses.clear();
     const uint32_t high = kTableGuestBase >> 16;
@@ -3154,6 +3172,10 @@ void PS2Runtime::initializeEeKernelState(uint8_t *rdram)
         }
         const uint32_t guestAddress = static_cast<uint32_t>(address);
         std::memcpy(rdram + guestAddress, &handler, sizeof(handler));
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), guestAddress,
+                                          sizeof(handler), rdram, "irq-handler-restore",
+                                          "handler", 0u);
         m_eeSyscallMirrorAddresses.insert(guestAddress);
     }
 }

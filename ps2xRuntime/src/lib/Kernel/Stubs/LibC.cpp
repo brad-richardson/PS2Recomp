@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "ps2_e3.h"
+#include "ps2_e41_trace.h"
 #include "LibC.h"
 #include "ps2_log.h"
 
@@ -125,6 +126,13 @@ namespace ps2_stubs
         if (copied != 0u)
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, copied, "memcpy", ctx);
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            {
+                char src[32];
+                std::snprintf(src, sizeof(src), "src=0x%x", srcAddr);
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
+                                              copied, rdram, "libc-memcpy", src, 0u);
+            }
         }
         if (e3t.active && copied != 0u)
         {
@@ -171,6 +179,9 @@ namespace ps2_stubs
         if (written != 0u)
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, written, "memset", ctx);
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
+                                              written, rdram, "libc-memset", "fill", 0u);
         }
         if (e3t.active && written != 0u)
         {
@@ -216,6 +227,9 @@ namespace ps2_stubs
         if (written != 0u)
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, written, "memclr", ctx);
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
+                                              written, rdram, "libc-memclr", "zero", 0u);
         }
         if (e3t.active && written != 0u)
         {
@@ -263,6 +277,13 @@ namespace ps2_stubs
         if (copied != 0u)
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, copied, "memmove", ctx);
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            {
+                char src[32];
+                std::snprintf(src, sizeof(src), "src=0x%x", srcAddr);
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
+                                              copied, rdram, "libc-memmove", src, 0u);
+            }
         }
         if (e3t.active && copied != 0u)
         {
@@ -321,6 +342,14 @@ namespace ps2_stubs
                 ps2_e3::tapEnd(std::move(e3t), "libc-strcpy", rdram, e3x);
             }
             ps2TraceGuestRangeWrite(rdram, destAddr, static_cast<uint32_t>(::strlen(hostSrc) + 1u), "strcpy", ctx);
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            {
+                char src[32];
+                std::snprintf(src, sizeof(src), "src=0x%x", srcAddr);
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
+                                              static_cast<uint32_t>(::strlen(hostSrc) + 1u),
+                                              rdram, "libc-strcpy", src, 0u);
+            }
         }
         else
         {
@@ -354,6 +383,13 @@ namespace ps2_stubs
                 ps2_e3::tapEnd(std::move(e3t), "libc-strncpy", rdram, e3x);
             }
             ps2TraceGuestRangeWrite(rdram, destAddr, size, "strncpy", ctx);
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            {
+                char src[32];
+                std::snprintf(src, sizeof(src), "src=0x%x", srcAddr);
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr, size,
+                                              rdram, "libc-strncpy", src, 0u);
+            }
         }
         else
         {
@@ -675,6 +711,10 @@ namespace ps2_stubs
             if (e3ok)
             {
                 ps2TraceGuestRangeWrite(rdram, str_addr, static_cast<uint32_t>(writeLen), "sprintf", ctx);
+                if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                    ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), str_addr,
+                                                  static_cast<uint32_t>(writeLen), rdram,
+                                                  "libc-sprintf", "format", 0u);
                 ret = static_cast<int>(rendered.size());
             }
             else
@@ -727,6 +767,10 @@ namespace ps2_stubs
                 if (e3ok)
                 {
                     ps2TraceGuestRangeWrite(rdram, str_addr, static_cast<uint32_t>(output.size()), "snprintf", ctx);
+                    if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                        ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), str_addr,
+                                                      static_cast<uint32_t>(output.size()), rdram,
+                                                      "libc-snprintf", "format", 0u);
                 }
                 else
                 {

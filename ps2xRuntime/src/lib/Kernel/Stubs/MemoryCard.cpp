@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "ps2_e3.h"
+#include "ps2_e41_trace.h"
 #include "MemoryCard.h"
 
 namespace ps2_stubs
@@ -285,6 +286,10 @@ namespace ps2_stubs
             ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, addr, value.size() + 1u); // E3b R3c C10
             std::memcpy(dst, value.c_str(), value.size() + 1u);
             ps2_e3::tapEnd(std::move(e3t), "mc-str", rdram, "-");
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), addr,
+                                              static_cast<uint32_t>(value.size() + 1u),
+                                              rdram, "mc-str", "string", 0u);
         }
 
         void writeMcDateTime(SceMcStDateTime &out, std::time_t value)
@@ -836,6 +841,11 @@ namespace ps2_stubs
                                 rdram, tableAddr, entryCount * sizeof(SceMcTblGetDir));
                             std::memcpy(dst, entries.data(), entryCount * sizeof(SceMcTblGetDir));
                             ps2_e3::tapEnd(std::move(e3t), "mc-getdir", rdram, "-");
+                            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                                ps2_e41_trace::notePlantRange(
+                                    ps2_e41_trace::lastVsyncTick(), tableAddr,
+                                    static_cast<uint32_t>(entryCount * sizeof(SceMcTblGetDir)),
+                                    rdram, "mc-getdir", "dirtable", 0u);
                             result = static_cast<int32_t>(entryCount);
                         }
                         else

@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e41_trace.h"
 #include "VU.h"
 
 namespace ps2_stubs
@@ -375,6 +376,14 @@ namespace ps2_stubs
         if (dst && src)
         {
             std::memcpy(dst, src, sizeof(float) * 16u);
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            {
+                char srcBuf[32];
+                std::snprintf(srcBuf, sizeof(srcBuf), "src=0x%x", srcAddr);
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dstAddr,
+                                              sizeof(float) * 16u, rdram,
+                                              "vu-copy-matrix", srcBuf, 0u);
+            }
         }
         setReturnS32(ctx, 0);
     }
@@ -388,6 +397,14 @@ namespace ps2_stubs
         if (dst && src)
         {
             std::memcpy(dst, src, sizeof(float) * 4u);
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            {
+                char srcBuf[32];
+                std::snprintf(srcBuf, sizeof(srcBuf), "src=0x%x", srcAddr);
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dstAddr,
+                                              sizeof(float) * 4u, rdram,
+                                              "vu-copy-vector", srcBuf, 0u);
+            }
         }
         setReturnS32(ctx, 0);
     }
@@ -401,6 +418,14 @@ namespace ps2_stubs
         if (dst && src)
         {
             std::memcpy(dst, src, sizeof(float) * 3u);
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            {
+                char srcBuf[32];
+                std::snprintf(srcBuf, sizeof(srcBuf), "src=0x%x", srcAddr);
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dstAddr,
+                                              sizeof(float) * 3u, rdram,
+                                              "vu-copy-vectorxyz", srcBuf, 0u);
+            }
         }
         setReturnS32(ctx, 0);
     }

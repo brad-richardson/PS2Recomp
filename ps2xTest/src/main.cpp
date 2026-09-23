@@ -21,6 +21,7 @@ void register_ps2_runtime_expansion_tests();
 void register_ps2_gfx_stats_tests();
 void register_ps2_vif_mpg_log_tests();
 void register_ps2_mpg_src_trace_tests();
+void register_ps2_e41_trace_tests();
 void register_ps2_vu1_trace_tests();
 void register_ps2_vu1_entry_trace_tests();
 void reset_ps2_test_function_table();
@@ -48,6 +49,7 @@ int main()
     register_ps2_gfx_stats_tests();
     register_ps2_vif_mpg_log_tests();
     register_ps2_mpg_src_trace_tests();
+    register_ps2_e41_trace_tests();
     register_ps2_vu1_trace_tests();
     register_ps2_vu1_entry_trace_tests();
     int res = MiniTest::Run();

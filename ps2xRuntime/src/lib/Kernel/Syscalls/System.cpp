@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "ps2_e3.h"
+#include "ps2_e41_trace.h"
 #include "Ssx3CopiedPayload.h"
 #include "System.h"
 
@@ -118,6 +119,9 @@ namespace ps2_syscalls
         ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, paramAddr, sizeof(uint32_t)); // E3b R3c D9
         *param = raw;
         ps2_e3::tapEnd(std::move(e3t), "osd-param", rdram, "-");
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), paramAddr,
+                                          sizeof(uint32_t), rdram, "sys-osd-param", "osd", 0u);
 
         setReturnS32(ctx, 0);
     }
@@ -256,6 +260,9 @@ namespace ps2_syscalls
             *dst = rawBytes[i];
         }
         ps2_e3::tapEnd(std::move(e3t), "osd-param2", rdram, "-");
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), paramAddr,
+                                          copyBytes, rdram, "sys-osd-param2", "osd", 0u);
 
         setReturnS32(ctx, 0);
     }
@@ -282,6 +289,10 @@ namespace ps2_syscalls
 
         strncpy(hostBuf, romName, bufSize - 1);
         hostBuf[bufSize - 1] = '\0';
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), bufAddr,
+                                          static_cast<uint32_t>(bufSize), rdram,
+                                          "sys-rom-name", "romver", 0u);
 
         // returns the length of the string (excluding null?) or error
         setReturnS32(ctx, (int32_t)strlen(hostBuf));
@@ -496,6 +507,10 @@ namespace ps2_syscalls
         if (uint8_t *ptr = getMemPtr(rdram, guestAddr))
         {
             std::memcpy(ptr, &value, sizeof(value));
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), guestAddr,
+                                              sizeof(value), rdram, "sys-kernel-word",
+                                              "kernel", 0u);
         }
     }
 
@@ -1012,6 +1027,13 @@ namespace ps2_syscalls
             {
                 ps2TraceGuestRangeWrite(rdram, dest, size, "syscallCopy", ctx);
                 std::memcpy(destPtr, srcPtr, size);
+                if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                {
+                    char src[32];
+                    std::snprintf(src, sizeof(src), "src=0x%x", src);
+                    ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dest, size,
+                                                  rdram, "syscall-copy", src, 0u);
+                }
             }
         }
         setReturnS32(ctx, 0);

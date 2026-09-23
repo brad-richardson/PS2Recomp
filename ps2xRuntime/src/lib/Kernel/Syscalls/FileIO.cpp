@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "ps2_e3.h"
+#include "ps2_e41_trace.h"
 #include "FileIO.h"
 
 namespace ps2_syscalls
@@ -120,6 +121,9 @@ namespace ps2_syscalls
         }
 
         // returns the PS2 file descriptor
+        if (ps2_e41_trace::armed()) // E41 ioman-open log
+            ps2_e41_trace::noteFioOpen(ps2_e41_trace::lastVsyncTick(), ps2Path,
+                                       hostPath.c_str(), ps2Fd);
         setReturnS32(ctx, ps2Fd);
     }
 
@@ -138,6 +142,7 @@ namespace ps2_syscalls
 
         int ret = ::fclose(fp);
         releasePs2Fd(ps2Fd);
+        ps2_e41_trace::noteFioClose(ps2Fd); // E41 fd-name map drop (self-gated)
 
         {
             std::lock_guard<std::mutex> lock(g_vagAccumMutex);
@@ -221,6 +226,16 @@ namespace ps2_syscalls
         if (bytesRead > 0)
         {
             ps2TraceGuestRangeWrite(rdram, bufAddr, static_cast<uint32_t>(bytesRead), "fioRead", ctx);
+            if (ps2_e41_trace::armed()) // E41 fioread log + plant watch
+            {
+                const uint64_t tick = ps2_e41_trace::lastVsyncTick();
+                ps2_e41_trace::noteFioRead(tick, ps2Fd, bufAddr, bytesRead);
+                char src[32];
+                std::snprintf(src, sizeof(src), "fd=%d", ps2Fd);
+                ps2_e41_trace::notePlantRange(tick, bufAddr,
+                                              static_cast<uint32_t>(bytesRead), rdram,
+                                              "fio-read", src, 0u);
+            }
         }
 
         if (bytesRead < size && ferror(fp))

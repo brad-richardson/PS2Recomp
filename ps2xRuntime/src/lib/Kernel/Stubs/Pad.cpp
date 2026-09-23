@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "ps2_e3.h"
+#include "ps2_e41_trace.h"
 #include "Pad.h"
 
 #include <chrono>
@@ -1209,6 +1210,9 @@ namespace ps2_stubs
             ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, dmaAddr, 32u); // E3b R3e E2
             std::memset(dmaStr, 0, 32);
             ps2_e3::tapEnd(std::move(e3t), "pad-open", rdram, "fill=0");
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dmaAddr,
+                                              32u, rdram, "pad-open", "zero", 0u);
         }
         setReturnS32(ctx, 1);
     }
@@ -1228,6 +1232,9 @@ namespace ps2_stubs
         ps2TraceGuestRangeWrite(rdram, dataAddr, 32u, "scePadRead", ctx);
         ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, dataAddr, 32u); // E3b R3e E1
         const bool e3ok = readPadPortData(port, slot, runtime, data, dataAddr);
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dataAddr,
+                                          32u, rdram, "pad-read", "pad", 0u);
         if (e3t.active)
         {
             char e3x[64];

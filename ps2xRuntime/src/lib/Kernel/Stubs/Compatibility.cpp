@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e41_trace.h"
 #include "Compatibility.h"
 #include "ps2_log.h"
 
@@ -113,6 +114,9 @@ namespace ps2_stubs
             {
                 const uint32_t out = static_cast<uint32_t>(ch);
                 std::memcpy(dst, &out, sizeof(out));
+                if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                    ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), wcAddr,
+                                                  sizeof(out), rdram, "compat-wc", "char", 0u);
             }
         }
         setReturnS32(ctx, (ch == 0u) ? 0 : 1);

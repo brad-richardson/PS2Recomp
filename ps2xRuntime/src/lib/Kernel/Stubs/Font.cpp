@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e41_trace.h"
 #include "Font.h"
 
 namespace ps2_stubs
@@ -7,7 +8,12 @@ namespace ps2_stubs
     {
         const uint32_t addr = gp + static_cast<uint32_t>(offset);
         if (uint8_t *p = getMemPtr(rdram, addr))
+        {
             *reinterpret_cast<uint32_t *>(p) = value;
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), addr,
+                                              sizeof(value), rdram, "font-field", "u32", 0u);
+        }
     }
 
     void sceeFontInit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -110,12 +116,26 @@ namespace ps2_stubs
         {
             pointsize = raw8 - 0x40000000u;
             if (uint8_t *p = getMemPtr(rdram, kFontBase + fontOff + 0x20u))
+            {
                 *reinterpret_cast<uint32_t *>(p) = 1u;
+                if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                    ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(),
+                                                  kFontBase + fontOff + 0x20u,
+                                                  sizeof(uint32_t), rdram, "font-field",
+                                                  "flag", 0u);
+            }
         }
         else
         {
             if (uint8_t *p = getMemPtr(rdram, kFontBase + fontOff + 0x20u))
+            {
                 *reinterpret_cast<uint32_t *>(p) = 0u;
+                if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                    ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(),
+                                                  kFontBase + fontOff + 0x20u,
+                                                  sizeof(uint32_t), rdram, "font-field",
+                                                  "flag", 0u);
+            }
         }
 
         int tw = (width >= 0) ? (width >> 6) : ((width + 0x3f) >> 6);
@@ -124,14 +144,29 @@ namespace ps2_stubs
         uint32_t glyphSrc = fontDataAddr + static_cast<uint32_t>(fontDataSz) + 0x10u;
         uint32_t glyphAlloc = runtime->guestMalloc(0x2010u, 0x40u);
         if (uint8_t *p = getMemPtr(rdram, kFontBase + fontOff))
+        {
             *reinterpret_cast<uint32_t *>(p) = glyphAlloc;
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(),
+                                              kFontBase + fontOff, sizeof(uint32_t),
+                                              rdram, "font-field", "alloc", 0u);
+        }
 
         if (glyphAlloc != 0u)
         {
             uint8_t *dst = getMemPtr(rdram, glyphAlloc);
             const uint8_t *src = getConstMemPtr(rdram, glyphSrc);
             if (dst && src)
+            {
                 std::memcpy(dst, src, 0x2010u);
+                if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                {
+                    char srcBuf[32];
+                    std::snprintf(srcBuf, sizeof(srcBuf), "src=0x%x", glyphSrc);
+                    ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), glyphAlloc,
+                                                  0x2010u, rdram, "font-glyph", srcBuf, 0u);
+                }
+            }
         }
 
         uint32_t isDoubleByte = 0;
@@ -148,14 +183,29 @@ namespace ps2_stubs
                 uint8_t *dst = getMemPtr(rdram, kernAlloc);
                 const uint8_t *src = getConstMemPtr(rdram, kernSrc);
                 if (dst && src)
+                {
                     std::memcpy(dst, src, 0xc400u);
+                    if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                    {
+                        char srcBuf[32];
+                        std::snprintf(srcBuf, sizeof(srcBuf), "src=0x%x", kernSrc);
+                        ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), kernAlloc,
+                                                      0xc400u, rdram, "font-kern", srcBuf, 0u);
+                    }
+                }
             }
         }
 
         auto writeFontField = [&](uint32_t off, uint32_t val)
         {
             if (uint8_t *p = getMemPtr(rdram, kFontBase + fontOff + off))
+            {
                 *reinterpret_cast<uint32_t *>(p) = val;
+                if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                    ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(),
+                                                  kFontBase + fontOff + off,
+                                                  sizeof(val), rdram, "font-field", "field", 0u);
+            }
         };
         writeFontField(0x18u, pointsize);
         writeFontField(0x08u, static_cast<uint32_t>(tbp0));
@@ -627,7 +677,13 @@ namespace ps2_stubs
                 runtime->guestFree(glyphPtr);
             }
             if (uint8_t *p = getMemPtr(rdram, kFontBase + fontOff))
+            {
                 *reinterpret_cast<uint32_t *>(p) = 0u;
+                if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                    ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(),
+                                                  kFontBase + fontOff, sizeof(uint32_t),
+                                                  rdram, "font-close", "zero", 0u);
+            }
             setReturnS32(ctx, 0);
         }
         else
