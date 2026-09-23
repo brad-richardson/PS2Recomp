@@ -79,7 +79,9 @@ namespace ps2_mpg_src_trace
 // (first-2-kick ctag alone is ~1700 lines; per-frame mpgpay/dmareg add
 // ~8/vsync): the file must survive to vsync 1300 so the arenastore and
 // uploadload quarries are not cut off by an early global cap.
-inline constexpr uint64_t kMaxLines = 8000ull;
+// E40 Part-7: raised to 40000 for the whole-boot window 0-1300 (uncapped
+// st/sema/irq/mpgpay lines run ~19/vsync over 1300 vsyncs ≈ 24K).
+inline constexpr uint64_t kMaxLines = 40000ull;
 inline constexpr uint64_t kFlushEvery = 128ull;
 inline constexpr uint32_t kMaxWatches = 64u;
 inline constexpr uint32_t kAddrLo = 0x00430000u;
@@ -131,6 +133,11 @@ inline constexpr int kMaxArenas = 8;
 inline constexpr uint32_t kArenaDefaultBase[2] = {0x0063B800u, 0x00708400u};
 inline constexpr uint32_t kArenaDefaultEnd[2] = {0x0063C400u, 0x00708D00u};
 inline constexpr uint64_t kMaxArenaLines = 256ull;
+// E40 Part-7 sizes (struct State uses them; values documented at the watch).
+inline constexpr int kTagMaxWords = 16;
+inline constexpr uint32_t kTagDefaultAddr[4] = {0x0063B994u, 0x0063BBE4u, 0x0063BEA4u, 0x0063C134u};
+inline constexpr uint64_t kMaxTagHitsPerWord = 64ull;
+inline constexpr int kSrcRing = 16;
 
 // Parses "lo-hi,lo-hi" into base/end (at most maxN ranges). Returns the
 // range count, or -1 when any pair is malformed (empty, non-hex,
@@ -216,6 +223,43 @@ inline int parseArenas(const char *text, uint32_t *base, uint32_t *end, int maxN
     }
 }
 
+// E40 Part-7: parses "a,b,c" hex words (at most maxN). Returns the word
+// count, or -1 when any entry is malformed.
+inline int parseTagAddrs(const char *text, uint32_t *words, int maxN)
+{
+    if (text == nullptr || words == nullptr || maxN <= 0)
+    {
+        return -1;
+    }
+    const char *p = text;
+    int n = 0;
+    for (;;)
+    {
+        uint32_t w = 0u;
+        if (!parseHexU32(p, w))
+        {
+            return -1;
+        }
+        if (n < maxN)
+        {
+            words[n++] = w;
+        }
+        if (*p == '\0')
+        {
+            return n == 0 ? -1 : n;
+        }
+        if (*p != ',')
+        {
+            return -1;
+        }
+        ++p;
+        if (*p == '\0')
+        {
+            return -1;
+        }
+    }
+}
+
 inline constexpr uint32_t kLibLo = 0x00430000u;
 inline constexpr uint32_t kLibHi = 0x00440000u;
 
@@ -251,6 +295,12 @@ namespace detail
         uint32_t arenaBase[kMaxArenas]; // watched store ranges
         uint32_t arenaEnd[kMaxArenas];
         int arenaCount = 0;
+        uint32_t tagAddr[kTagMaxWords]; // watched ADDR words
+        int tagCount = 0;
+        uint64_t tagHits[kTagMaxWords]; // per-word tagaddrwrite hits
+        uint32_t srcAddr[kSrcRing]; // recent uploader-valued load addrs
+        uint32_t srcVal[kSrcRing]; // recent uploader-valued load values
+        int srcHead = 0;
     };
 
     inline State &state()
@@ -312,6 +362,13 @@ namespace detail
         return n;
     }
 
+    // 1 while at least one tagaddr word still has hits left (set under lock).
+    inline std::atomic<uint32_t> &tagOpen()
+    {
+        static std::atomic<uint32_t> n{1u};
+        return n;
+    }
+
     inline bool parseU64(const char *text, uint64_t &out)
     {
         if (!text || text[0] == '\0')
@@ -357,10 +414,45 @@ namespace detail
         }
     }
 
+    // Installs default tagaddr words, then the PS2X_MPG_SRC_TAGADDRS
+    // env override when it parses. Shared by initLocked and tests.
+    inline void installTagAddrsLocked(State &s, const char *env)
+    {
+        s.tagAddr[0] = kTagDefaultAddr[0];
+        s.tagAddr[1] = kTagDefaultAddr[1];
+        s.tagAddr[2] = kTagDefaultAddr[2];
+        s.tagAddr[3] = kTagDefaultAddr[3];
+        s.tagCount = 4;
+        if (env != nullptr && env[0] != '\0')
+        {
+            uint32_t words[kTagMaxWords];
+            const int n = parseTagAddrs(env, words, kTagMaxWords);
+            if (n > 0)
+            {
+                for (int i = 0; i < n; ++i)
+                {
+                    s.tagAddr[i] = words[i];
+                }
+                s.tagCount = n;
+            }
+        }
+        for (int i = 0; i < kTagMaxWords; ++i)
+        {
+            s.tagHits[i] = 0u;
+        }
+        for (int i = 0; i < kSrcRing; ++i)
+        {
+            s.srcAddr[i] = 0u;
+            s.srcVal[i] = 0u;
+        }
+        s.srcHead = 0;
+    }
+
     inline void initLocked(State &s)
     {
         s.initDone = true;
         installArenasLocked(s, std::getenv("PS2X_MPG_SRC_ARENAS"));
+        installTagAddrsLocked(s, std::getenv("PS2X_MPG_SRC_TAGADDRS"));
         const char *file = std::getenv("PS2X_MPG_SRC_TRACE");
         if (!file || file[0] == '\0')
         {
@@ -1389,6 +1481,233 @@ inline void noteIrq(uint64_t vsync, bool dmac, uint32_t cause, uint32_t handler)
     }
 }
 
+// E40 Part-7: chain-builder catch. A whole-boot store watch on the ADDR
+// words (tag+4) of the CALL tags seen pointing at 0x435bd0, armed from
+// vsync 0 over the SRC window, first kMaxTagHitsPerWord hits per
+// address (any value logged — the build is caught whichever uploader
+// is chosen):
+//   tagaddrwrite vsync=<n> addr=0x<> value=0x<> pc=0x<> ra=0x<> fn=<>
+//     srcload=0x<loader addr>|none + a0..s7 (low 32 hex)
+// `srcload` attributes the value to the most recent in-window guest
+// load (any width, any lane) that returned an uploader-valued word
+// (exact 0x435bd0 or the 0x434990-0x4349b8 alt range, folded with
+// mirrors) — the table-entry copy. The word list is env-configurable
+// via PS2X_MPG_SRC_TAGADDRS="a,b,c" (hex, up to kTagMaxWords);
+// absent/malformed env keeps the defaults (the four 0x63b8-set ADDR
+// words; no 0x7085 CALL offsets exist in any ctag data yet).
+// (Sizes live with the arena constants above State.)
+inline bool isTagWatched(uint32_t addr, uint32_t size)
+{
+    detail::State &s = detail::state();
+    const int n = s.tagCount;
+    for (int i = 0; i < n; ++i)
+    {
+        if (s.tagAddr[i] >= addr && s.tagAddr[i] < addr + size)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Fast gate for the per-store/per-load macro hooks: enabled AND at
+// least one watched word still has hits left (set under lock).
+inline bool tagaddrArmed()
+{
+    if (!enabled())
+    {
+        return false;
+    }
+    return detail::tagOpen().load(std::memory_order_relaxed) != 0u;
+}
+
+// Records uploader-valued load lanes for srcload attribution.
+inline void noteLoadForSrcCtx(const PS2Runtime *runtime, const R5900Context *ctx,
+                              uint32_t addr, uint32_t width,
+                              uint64_t valueLo, uint64_t valueHi)
+{
+    if (!tagaddrArmed())
+    {
+        return;
+    }
+    uint32_t lanes = 1u;
+    if (width >= 16u)
+        lanes = 4u;
+    else if (width >= 8u)
+        lanes = 2u;
+    uint32_t hitAddr[kSrcRing];
+    uint32_t hitVal[kSrcRing];
+    uint32_t hits = 0u;
+    for (uint32_t i = 0u; i < lanes && hits < kSrcRing; ++i)
+    {
+        const uint32_t laneAddr = addr + i * 4u;
+        uint32_t word;
+        if (i == 0u)
+            word = static_cast<uint32_t>(valueLo);
+        else if (i == 1u)
+            word = static_cast<uint32_t>(valueLo >> 32u);
+        else if (i == 2u)
+            word = static_cast<uint32_t>(valueHi);
+        else
+            word = static_cast<uint32_t>(valueHi >> 32u);
+        if (!isUploaderValue(word))
+        {
+            continue;
+        }
+        hitAddr[hits] = laneAddr;
+        hitVal[hits] = word;
+        ++hits;
+    }
+    if (hits == 0u)
+    {
+        return;
+    }
+    uint64_t vsync = 0u;
+    if (runtime != nullptr)
+    {
+        vsync = runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed);
+    }
+    (void)ctx;
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    for (uint32_t i = 0u; i < hits; ++i)
+    {
+        s.srcAddr[s.srcHead] = hitAddr[i];
+        s.srcVal[s.srcHead] = hitVal[i];
+        s.srcHead = (s.srcHead + 1) % kSrcRing;
+    }
+}
+
+inline void noteTagaddrwrite(uint64_t vsync, uint32_t addr, uint32_t width,
+                             uint64_t valueLo, uint64_t valueHi,
+                             uint32_t pc, uint32_t ra, const char *fn,
+                             const R5900Context *ctx)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    uint32_t lanes = 1u;
+    if (width >= 16u)
+        lanes = 4u;
+    else if (width >= 8u)
+        lanes = 2u;
+    for (uint32_t i = 0u; i < lanes; ++i)
+    {
+        const uint32_t laneAddr = addr + i * 4u;
+        uint32_t word;
+        if (i == 0u)
+            word = static_cast<uint32_t>(valueLo);
+        else if (i == 1u)
+            word = static_cast<uint32_t>(valueLo >> 32u);
+        else if (i == 2u)
+            word = static_cast<uint32_t>(valueHi);
+        else
+            word = static_cast<uint32_t>(valueHi >> 32u);
+        int slot = -1;
+        for (int t = 0; t < s.tagCount; ++t)
+        {
+            if (s.tagAddr[t] == laneAddr)
+            {
+                slot = t;
+                break;
+            }
+        }
+        if (slot < 0 || s.tagHits[slot] >= kMaxTagHitsPerWord)
+        {
+            continue;
+        }
+        // Most-recent in-window load that returned this exact value.
+        uint32_t src = 0u;
+        for (int r = 0; r < kSrcRing; ++r)
+        {
+            const int k = (s.srcHead + kSrcRing - 1 - r) % kSrcRing;
+            if (s.srcVal[k] == word && s.srcAddr[k] != 0u)
+            {
+                src = s.srcAddr[k];
+                break;
+            }
+        }
+        char line[768];
+        int w;
+        if (src != 0u)
+        {
+            w = std::snprintf(line, sizeof(line),
+                              "tagaddrwrite vsync=%llu addr=0x%08x value=0x%08x pc=0x%08x ra=0x%08x fn=%s srcload=0x%08x",
+                              static_cast<unsigned long long>(vsync), laneAddr, word,
+                              pc, ra, fn ? fn : "?", src);
+        }
+        else
+        {
+            w = std::snprintf(line, sizeof(line),
+                              "tagaddrwrite vsync=%llu addr=0x%08x value=0x%08x pc=0x%08x ra=0x%08x fn=%s srcload=none",
+                              static_cast<unsigned long long>(vsync), laneAddr, word,
+                              pc, ra, fn ? fn : "?");
+        }
+        for (int r = 0; r < kReadRegCount && w > 0; ++r)
+        {
+            const uint32_t rv = (ctx != nullptr) ? getRegU32(ctx, kReadRegs[r]) : 0u;
+            w += std::snprintf(line + w, sizeof(line) - static_cast<size_t>(w),
+                               " %s=0x%08x", kReadRegNames[r], rv);
+        }
+        if (w > 0)
+        {
+            detail::emitLineLocked(s, line);
+            ++s.tagHits[slot];
+            if (s.capped)
+            {
+                return;
+            }
+        }
+    }
+    bool anyLeft = false;
+    for (int t = 0; t < s.tagCount; ++t)
+    {
+        if (s.tagHits[t] < kMaxTagHitsPerWord)
+        {
+            anyLeft = true;
+            break;
+        }
+    }
+    if (!anyLeft)
+    {
+        detail::tagOpen().store(0u, std::memory_order_relaxed);
+    }
+}
+
+// Macro glue for the WRITE32/64/128 taps.
+inline void noteTagaddrwriteCtx(const PS2Runtime *runtime, const R5900Context *ctx,
+                                uint32_t addr, uint32_t width,
+                                uint64_t valueLo, uint64_t valueHi, const char *fn)
+{
+    uint64_t vsync = 0u;
+    if (runtime != nullptr)
+    {
+        vsync = runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed);
+    }
+    const uint32_t pc = (ctx != nullptr) ? ctx->pc : 0u;
+    const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+    noteTagaddrwrite(vsync, addr, width, valueLo, valueHi, pc, ra, fn, ctx);
+}
+
 // E40 Part-4: chain-tag dump. The first kMaxCtagKicks in-window VIF1
 // chain walks log every tag they walk:
 //   ctag tag_at=0x<EE addr of tag> id=<0-7> qwc=<n> addr=0x<ref addr>
@@ -1478,6 +1797,7 @@ inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to =
     s.ctagKicks = 0u;
     s.ulHits = 0u;
     detail::installArenasLocked(s, nullptr);
+    detail::installTagAddrsLocked(s, nullptr);
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);
     s.enabled = true;
@@ -1488,6 +1808,7 @@ inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to =
     detail::dmOpen().store(1u, std::memory_order_relaxed);
     detail::arOpen().store(1u, std::memory_order_relaxed);
     detail::ulOpen().store(1u, std::memory_order_relaxed);
+    detail::tagOpen().store(1u, std::memory_order_relaxed);
     return true;
 }
 
@@ -1498,6 +1819,15 @@ inline void applyArenasForTest(const char *text)
     detail::State &s = detail::state();
     std::lock_guard<std::mutex> lock(s.mutex);
     detail::installArenasLocked(s, text);
+}
+
+// Test hook for the Part-7 env path: installs tagaddr words the same
+// way initLocked does.
+inline void applyTagAddrsForTest(const char *text)
+{
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    detail::installTagAddrsLocked(s, text);
 }
 
 inline void clearForTest()
@@ -1528,6 +1858,7 @@ inline void clearForTest()
     s.ctagKicks = 0u;
     s.ulHits = 0u;
     detail::installArenasLocked(s, nullptr);
+    detail::installTagAddrsLocked(s, nullptr);
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);
     s.enabled = false;
@@ -1538,6 +1869,7 @@ inline void clearForTest()
     detail::dmOpen().store(1u, std::memory_order_relaxed);
     detail::arOpen().store(1u, std::memory_order_relaxed);
     detail::ulOpen().store(1u, std::memory_order_relaxed);
+    detail::tagOpen().store(1u, std::memory_order_relaxed);
 }
 
 } // namespace ps2_mpg_src_trace

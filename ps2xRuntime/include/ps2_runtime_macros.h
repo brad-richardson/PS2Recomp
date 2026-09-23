@@ -353,6 +353,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     if (ps2_mpg_src_trace::uploadloadArmed() &&                \
         ps2_mpg_src_trace::isUploaderValue(_rv))               \
         ps2_mpg_src_trace::noteUploadloadCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u, ps2xE40Fn); \
+    if (ps2_mpg_src_trace::tagaddrArmed())                     \
+        ps2_mpg_src_trace::noteLoadForSrcCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u); \
     return _rv; }())
 
 #define READ64(addr) ([&, ps2xE40Fn = __func__]() -> uint64_t {                     \
@@ -367,6 +369,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         (ps2_mpg_src_trace::isUploaderValue((uint32_t)_rv) ||  \
          ps2_mpg_src_trace::isUploaderValue((uint32_t)(_rv >> 32u)))) \
         ps2_mpg_src_trace::noteUploadloadCtx(runtime, ctx, _addr, 8u, _rv, 0u, ps2xE40Fn); \
+    if (ps2_mpg_src_trace::tagaddrArmed())                     \
+        ps2_mpg_src_trace::noteLoadForSrcCtx(runtime, ctx, _addr, 8u, _rv, 0u); \
     return _rv; }())
 
 #define READ128(addr) ([&, ps2xE40Fn = __func__]() -> __m128i {                     \
@@ -377,16 +381,21 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     __m128i _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load128(rdram, ctx, _addr)                 \
         : FAST_READ128(_addr);                                \
-    if (ps2_mpg_src_trace::uploadloadArmed())                 \
+    uint64_t _lo = 0u, _hi = 0u;                              \
+    const bool _ulArmed = ps2_mpg_src_trace::uploadloadArmed(); \
+    const bool _tagArmed = ps2_mpg_src_trace::tagaddrArmed();   \
+    if (_ulArmed || _tagArmed)                                 \
     {                                                         \
-        const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_rv)); \
-        const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_rv)); \
-        if (ps2_mpg_src_trace::isUploaderValue((uint32_t)_lo) || \
+        _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_rv)); \
+        _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_rv)); \
+        if (_ulArmed && (ps2_mpg_src_trace::isUploaderValue((uint32_t)_lo) || \
             ps2_mpg_src_trace::isUploaderValue((uint32_t)(_lo >> 32u)) || \
             ps2_mpg_src_trace::isUploaderValue((uint32_t)_hi) || \
-            ps2_mpg_src_trace::isUploaderValue((uint32_t)(_hi >> 32u))) \
+            ps2_mpg_src_trace::isUploaderValue((uint32_t)(_hi >> 32u)))) \
             ps2_mpg_src_trace::noteUploadloadCtx(runtime, ctx, _addr, 16u, _lo, _hi, ps2xE40Fn); \
     }                                                         \
+    if (_tagArmed)                                             \
+        ps2_mpg_src_trace::noteLoadForSrcCtx(runtime, ctx, _addr, 16u, _lo, _hi); \
     return _rv; }())
 
 #define WRITE8(addr, val)                                                              \
@@ -438,6 +447,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_mpg_src_trace::noteArenastoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
         if (ps2_mpg_src_trace::stArmed() && ps2_mpg_src_trace::isStWatched(_addr, 4u)) \
             ps2_mpg_src_trace::noteStCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2_mpg_src_trace::tagaddrArmed() && ps2_mpg_src_trace::isTagWatched(_addr, 4u)) \
+            ps2_mpg_src_trace::noteTagaddrwriteCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
         if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
             ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                       \
@@ -462,6 +473,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_mpg_src_trace::noteArenastoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
         if (ps2_mpg_src_trace::stArmed() && ps2_mpg_src_trace::isStWatched(_addr, 8u)) \
             ps2_mpg_src_trace::noteStCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (ps2_mpg_src_trace::tagaddrArmed() && ps2_mpg_src_trace::isTagWatched(_addr, 8u)) \
+            ps2_mpg_src_trace::noteTagaddrwriteCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
         if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
             ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                     \
@@ -488,6 +501,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2_mpg_src_trace::noteArenastoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
         if (ps2_mpg_src_trace::stArmed() && ps2_mpg_src_trace::isStWatched(_addr, 16u)) \
             ps2_mpg_src_trace::noteStCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
+        if (ps2_mpg_src_trace::tagaddrArmed() && ps2_mpg_src_trace::isTagWatched(_addr, 16u)) \
+            ps2_mpg_src_trace::noteTagaddrwriteCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 16u, _lo, _hi, ctx, runtime);            \
         if (ps2_mpg_src_trace::writeArmed())                                           \

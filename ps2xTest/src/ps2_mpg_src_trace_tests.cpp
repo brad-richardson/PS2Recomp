@@ -239,19 +239,19 @@ void register_ps2_mpg_src_trace_tests()
             std::remove(tmp.c_str());
         });
 
-        tc.Run("line cap stops the file at 8000", [](TestCase &t)
+        tc.Run("line cap stops the file at 40000", [](TestCase &t)
         {
             const std::string tmp = srcTmpPath("ps2x-mpg-src-cap.txt");
             std::remove(tmp.c_str());
             t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
-            for (uint32_t i = 0u; i < 8005u; ++i)
+            for (uint32_t i = 0u; i < 40005u; ++i)
             {
                 ps2_mpg_src_trace::noteMpgsrc(static_cast<uint64_t>(i),
                                               0x00500000u + i * 16u, 3u, 1u, 0x00435bf8u, 0u, 0u);
             }
             ps2_mpg_src_trace::clearForTest();
             const std::string text = readWholeFile(tmp);
-            t.Equals(countLines(text), static_cast<size_t>(8000u), "file must stop at the 8000-line cap");
+            t.Equals(countLines(text), static_cast<size_t>(40000u), "file must stop at the 40000-line cap");
             std::remove(tmp.c_str());
         });
 
@@ -823,7 +823,7 @@ void register_ps2_mpg_src_trace_tests()
 
         tc.Run("global cap covers the wide scene-build window", [](TestCase &t)
         {
-            t.IsTrue(ps2_mpg_src_trace::kMaxLines == 8000ull,
+            t.IsTrue(ps2_mpg_src_trace::kMaxLines == 40000ull,
                      "file cap must leave headroom past ctag + per-frame lines");
         });
 
@@ -1119,6 +1119,132 @@ void register_ps2_mpg_src_trace_tests()
             t.IsTrue(text.find("irq vsync=1303 cause=0x9 ch=4294967295 handler=0x00123800") !=
                          std::string::npos,
                      "intc irq carries no channel");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("parseTagAddrs accepts words and rejects garbage", [](TestCase &t)
+        {
+            uint32_t words[16];
+            t.IsTrue(ps2_mpg_src_trace::parseTagAddrs("0x63b994,0x63bbe4,63bea4", words, 16) == 3,
+                     "mixed-prefix words must parse");
+            t.IsTrue(words[0] == 0x0063B994u && words[1] == 0x0063BBE4u && words[2] == 0x0063BEA4u,
+                     "parsed words must match");
+            t.IsTrue(ps2_mpg_src_trace::parseTagAddrs("0x10", words, 16) == 1,
+                     "single word must parse");
+            t.IsTrue(ps2_mpg_src_trace::parseTagAddrs("", words, 16) == -1,
+                     "empty text must fail");
+            t.IsTrue(ps2_mpg_src_trace::parseTagAddrs("xyz", words, 16) == -1,
+                     "non-hex must fail");
+            t.IsTrue(ps2_mpg_src_trace::parseTagAddrs("0x1,", words, 16) == -1,
+                     "trailing comma must fail");
+            t.IsTrue(ps2_mpg_src_trace::parseTagAddrs("0x1-0x2", words, 16) == -1,
+                     "arena-style dash must fail");
+            t.IsTrue(ps2_mpg_src_trace::parseTagAddrs("0x1,0x2,0x3", words, 2) == 2,
+                     "over-long lists must truncate to maxN");
+            t.IsTrue(words[0] == 0x1u && words[1] == 0x2u, "truncation must keep the head");
+        });
+
+        tc.Run("applyTagAddrsForTest swaps words and restores defaults", [](TestCase &t)
+        {
+            t.IsTrue(ps2_mpg_src_trace::isTagWatched(0x0063B994u, 4u), "default word must match");
+            t.IsTrue(ps2_mpg_src_trace::isTagWatched(0x0063C134u, 4u), "default word 4 must match");
+            t.IsTrue(ps2_mpg_src_trace::isTagWatched(0x0063B990u, 8u), "wide store covering a word must match");
+            t.IsTrue(!ps2_mpg_src_trace::isTagWatched(0x0063B990u, 4u), "tag word itself must not match");
+            t.IsTrue(!ps2_mpg_src_trace::isTagWatched(0x00100000u, 4u), "plain RAM must not match");
+            ps2_mpg_src_trace::applyTagAddrsForTest("0x708614,0x708864");
+            t.IsTrue(ps2_mpg_src_trace::isTagWatched(0x00708614u, 4u), "custom word must match");
+            t.IsTrue(!ps2_mpg_src_trace::isTagWatched(0x0063B994u, 4u), "default word must be gone");
+            ps2_mpg_src_trace::applyTagAddrsForTest("garbage");
+            t.IsTrue(ps2_mpg_src_trace::isTagWatched(0x0063B994u, 4u), "malformed env must restore defaults");
+            ps2_mpg_src_trace::clearForTest();
+        });
+
+        tc.Run("tagaddrwrite format window srcload and per-word cap", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-tagaddr.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str(), 0u, 1300u),
+                     "test config should install");
+            t.IsTrue(ps2_mpg_src_trace::tagaddrArmed(), "watch must be armed after configure");
+
+            R5900Context ctx{};
+            ctx.pc = 0x00367DB8u;
+            srcSetReg(ctx, 31, 0x00367F00u);
+            srcSetReg(ctx, 4, 0x0063B990u);
+            // Out-of-window and unwatched: silent.
+            ps2_mpg_src_trace::noteTagaddrwrite(1400u, 0x0063B994u, 4u, 0x00435BD0u, 0u,
+                                                0x00367DB8u, 0x00367F00u, "sub_build", &ctx);
+            ps2_mpg_src_trace::noteTagaddrwrite(100u, 0x00100000u, 4u, 0x00435BD0u, 0u,
+                                                0x00367DB8u, 0x00367F00u, "sub_build", &ctx);
+            // Attribute via the source-load ring (null runtime => vsync 0, in-window).
+            ps2_mpg_src_trace::noteLoadForSrcCtx(nullptr, nullptr, 0x00500000u, 4u, 0x00435BD0u, 0u);
+            ps2_mpg_src_trace::noteLoadForSrcCtx(nullptr, nullptr, 0x00500004u, 4u, 0xDEADBEEFu, 0u);
+            ps2_mpg_src_trace::noteTagaddrwrite(100u, 0x0063B994u, 4u, 0x00435BD0u, 0u,
+                                                0x00367DB8u, 0x00367F00u, "sub_build", &ctx);
+            // Tag word itself: no ring match, srcload=none.
+            ps2_mpg_src_trace::noteTagaddrwrite(100u, 0x0063BBE4u, 4u, 0x50000000u, 0u,
+                                                0x00367DB8u, 0x00367F00u, "sub_build", &ctx);
+            // Per-word cap: 70 more stores to word 3, then word 4 must still arm.
+            for (uint32_t i = 0u; i < 70u; ++i)
+            {
+                ps2_mpg_src_trace::noteTagaddrwrite(100u, 0x0063BEA4u, 4u, 0x00435BD0u, 0u,
+                                                    0x00367DB8u, 0x00367F00u, "sub_build", &ctx);
+            }
+            t.IsTrue(ps2_mpg_src_trace::tagaddrArmed(), "words with cap left must keep the watch armed");
+            // Exhaust every default word.
+            for (uint32_t i = 0u; i < 70u; ++i)
+            {
+                ps2_mpg_src_trace::noteTagaddrwrite(100u, 0x0063B994u, 4u, 0x00435BD0u, 0u,
+                                                    0x00367DB8u, 0x00367F00u, "sub_build", &ctx);
+                ps2_mpg_src_trace::noteTagaddrwrite(100u, 0x0063BBE4u, 4u, 0x00435BD0u, 0u,
+                                                    0x00367DB8u, 0x00367F00u, "sub_build", &ctx);
+                ps2_mpg_src_trace::noteTagaddrwrite(100u, 0x0063C134u, 4u, 0x00435BD0u, 0u,
+                                                    0x00367DB8u, 0x00367F00u, "sub_build", &ctx);
+            }
+            t.IsTrue(!ps2_mpg_src_trace::tagaddrArmed(), "exhausted watch must disarm");
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            // 1 srcload hit + 1 tag-word hit + 64 (word3) + 63 (word1: 1 used)
+            // + 63 (word2: 1 used) + 64 (word4) = 256.
+            t.Equals(countLines(text), static_cast<size_t>(256u), "per-word caps must bound the file");
+            t.IsTrue(text.find("tagaddrwrite vsync=100 addr=0x0063b994 value=0x00435bd0 "
+                               "pc=0x00367db8 ra=0x00367f00 fn=sub_build srcload=0x00500000") !=
+                         std::string::npos,
+                     "hit must carry addr value pc ra fn and loader addr");
+            t.IsTrue(text.find("addr=0x0063bbe4 value=0x50000000") != std::string::npos &&
+                     text.find("srcload=none") != std::string::npos,
+                     "unattributed hit must log srcload=none");
+            t.IsTrue(text.find("a0=0x0063b990") != std::string::npos, "hit must carry a regs");
+            t.IsTrue(text.find("vsync=1400") == std::string::npos, "out-of-window hit must stay silent");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("WRITE32 macro tap logs tagaddrwrite with host fn", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-tagaddrmacro.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+
+            R5900Context ctxStruct{};
+            R5900Context *ctx = &ctxStruct;
+            ctxStruct.pc = 0x00367E10u;
+            srcSetReg(ctxStruct, 31, 0x00367F00u);
+            PS2Runtime *runtime = nullptr;
+            t.Equals(srcArenaProbe32(rdram, ctx, runtime, 0x0063B994u, 0x50000000u), 0x50000000u,
+                     "macro probe must write through to the watched word");
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(1u), "only the watched-word store must log");
+            t.IsTrue(text.find("tagaddrwrite vsync=0 addr=0x0063b994 value=0x50000000 "
+                               "pc=0x00367e10 ra=0x00367f00 fn=srcArenaProbe32 srcload=none") !=
+                         std::string::npos,
+                     "macro tap must log the watched store with host fn");
             std::remove(tmp.c_str());
         });
 
