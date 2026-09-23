@@ -232,19 +232,19 @@ void register_ps2_mpg_src_trace_tests()
             std::remove(tmp.c_str());
         });
 
-        tc.Run("line cap stops the file at 2000", [](TestCase &t)
+        tc.Run("line cap stops the file at 8000", [](TestCase &t)
         {
             const std::string tmp = srcTmpPath("ps2x-mpg-src-cap.txt");
             std::remove(tmp.c_str());
             t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
-            for (uint32_t i = 0u; i < 2005u; ++i)
+            for (uint32_t i = 0u; i < 8005u; ++i)
             {
                 ps2_mpg_src_trace::noteMpgsrc(static_cast<uint64_t>(i),
                                               0x00500000u + i * 16u, 3u, 1u, 0x00435bf8u, 0u, 0u);
             }
             ps2_mpg_src_trace::clearForTest();
             const std::string text = readWholeFile(tmp);
-            t.Equals(countLines(text), static_cast<size_t>(2000u), "file must stop at the 2000-line cap");
+            t.Equals(countLines(text), static_cast<size_t>(8000u), "file must stop at the 8000-line cap");
             std::remove(tmp.c_str());
         });
 
@@ -812,6 +812,12 @@ void register_ps2_mpg_src_trace_tests()
                                "addr=0x0063b904 value=0x30435bd0") != std::string::npos,
                      "read-back of the uploader word must log uploadload");
             std::remove(tmp.c_str());
+        });
+
+        tc.Run("global cap covers the wide scene-build window", [](TestCase &t)
+        {
+            t.IsTrue(ps2_mpg_src_trace::kMaxLines == 8000ull,
+                     "file cap must leave headroom past ctag + per-frame lines");
         });
 
         tc.Run("parseArenas accepts pairs and rejects garbage", [](TestCase &t)

@@ -75,7 +75,11 @@
 namespace ps2_mpg_src_trace
 {
 
-inline constexpr uint64_t kMaxLines = 2000ull;
+// E40 Part-5: raised from 2000 for the 150-vsync scene-build window
+// (first-2-kick ctag alone is ~1700 lines; per-frame mpgpay/dmareg add
+// ~8/vsync): the file must survive to vsync 1300 so the arenastore and
+// uploadload quarries are not cut off by an early global cap.
+inline constexpr uint64_t kMaxLines = 8000ull;
 inline constexpr uint64_t kFlushEvery = 128ull;
 inline constexpr uint32_t kMaxWatches = 64u;
 inline constexpr uint32_t kAddrLo = 0x00430000u;
