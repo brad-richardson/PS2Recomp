@@ -482,6 +482,46 @@ if(PS2X_ENABLE_AGRESSIVE_LOGS)
     )
 endif()
 
+# G44 synchronous paraLLEl shadow (GPU GS backend pathfinder). Env-gated at
+# runtime (PS2X_GS_SHADOW=parallel); unset = zero behavior change. The backend
+# itself is only linked when PS2X_GS_SHADOW_PARALLEL=ON with a LOCAL
+# parallel-gs source dir (G43 working copy); no network fetch of GS sources.
+option(PS2X_GS_SHADOW_PARALLEL "Build the paraLLEl-GS in-process shadow backend (G44)" OFF)
+set(PS2X_PARALLEL_GS_SOURCE_DIR "" CACHE PATH "Local parallel-gs source dir for the G44 shadow backend")
+
+add_library(ps2_gs_shadow STATIC
+    src/lib/gs/ps2_gs_shadow.cpp
+)
+target_include_directories(ps2_gs_shadow PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+# C++17: matches the Granite objects and keeps std::is_pod (used by
+# parallel-gs headers) available; the rest of the fork stays on C++20.
+set_target_properties(ps2_gs_shadow PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+)
+if(TARGET raylib)
+    target_link_libraries(ps2_gs_shadow PRIVATE raylib)
+    target_compile_definitions(ps2_gs_shadow PRIVATE PS2X_SHADOW_HAVE_RAYLIB=1)
+endif()
+
+if(PS2X_GS_SHADOW_PARALLEL)
+    if(NOT PS2X_PARALLEL_GS_SOURCE_DIR OR NOT EXISTS "${PS2X_PARALLEL_GS_SOURCE_DIR}/gs/gs_interface.hpp")
+        message(FATAL_ERROR "PS2X_GS_SHADOW_PARALLEL=ON requires PS2X_PARALLEL_GS_SOURCE_DIR pointing at a local parallel-gs checkout (G43 working copy)")
+    endif()
+    # Standalone: headless-appropriate (null platform, no tools), embedded
+    # slangmosh shaders, no runtime shader compiler.
+    set(PARALLEL_GS_STANDALONE ON CACHE BOOL "" FORCE)
+    add_subdirectory("${PS2X_PARALLEL_GS_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/parallel-gs-shadow" EXCLUDE_FROM_ALL)
+    target_link_libraries(ps2_gs_shadow PUBLIC parallel-gs)
+    # PUBLIC so consumers (incl. the suite) can branch on backend presence.
+    target_compile_definitions(ps2_gs_shadow PUBLIC PS2X_HAS_PARALLEL_SHADOW=1)
+    message(STATUS "PS2X: G44 parallel-gs shadow backend ON (standalone, from ${PS2X_PARALLEL_GS_SOURCE_DIR})")
+endif()
+
+target_link_libraries(ps2_runtime PUBLIC ps2_gs_shadow)
+
 if(PS2X_ENABLE_IOP_RPC_TRACE)
     target_compile_definitions(ps2_runtime PUBLIC
         PS2X_ENABLE_IOP_RPC_TRACE=1
