@@ -15,15 +15,22 @@
 //   round-toward-zero with DAZ/FTZ (DEFAULT_FPU_FP_CONTROL_REGISTER); the EE
 //   recompiler switches to round-to-nearest only for DIV.S (FPUDivFPCR).
 //
-// Names say which PCSX2 rule a test checks. No test here changes the
-// runtime; E52 is an audit (fixes are batched by the orchestrator).
+// Names say which PCSX2 rule a test checks. Numeric tests run under the EE
+// thread's PS2 FP mode (ps2_fpmode::ScopedPs2Mode: round toward zero + FZ),
+// which is what EeScheduler::run() sets for generated code (E53).
+// Assertions for per-op Inf/NaN operand clamping (audit rule G2, deferred by
+// the E53 brief) run only with PS2X_TEST_DEFERRED=1.
 #include "MiniTest.h"
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/r5900_decoder.h"
 #include "ps2_runtime_macros.h"
+#include "ps2_fpmode.h"
+#include "ps2_runtime.h"
 
+#include <cfenv>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -86,7 +93,12 @@ namespace
         auto c = freshCtx();
         setF(*c, 2, fs);
         setF(*c, 3, ft);
-        fn(c.get());
+        // Keep the compiler from folding the known inputs (e.g. x + -0 -> x),
+        // which would skip the host FPU and its flush-to-zero.
+#if defined(__GNUC__) || defined(__clang__)
+        __asm__ __volatile__("" : : "r"(c.get()) : "memory");
+#endif
+        fn(c.get(), nullptr, nullptr);
         return getF(*c, 1);
     }
 
@@ -95,6 +107,12 @@ namespace
         R5900Decoder decoder;
         CodeGenerator generator({}, {});
         return generator.translateInstruction(decoder.decodeInstruction(address, word));
+    }
+
+    bool deferredEnabled()
+    {
+        const char *v = std::getenv("PS2X_TEST_DEFERRED");
+        return v && v[0] == '1';
     }
 
     constexpr uint32_t FMAX = 0x7F7FFFFFu;
@@ -106,10 +124,31 @@ void register_ps2_fpu_cop2_audit_tests()
 {
     MiniTest::Case("E52FpuCop2Audit", [](TestCase &tc)
     {
+        tc.Run("E53 FP mode: PS2 scope = round toward zero + FZ; host scope inside it = IEEE; both restore", [](TestCase &t)
+        {
+            const uint64_t before = ps2_fpmode::readControl();
+            volatile float one = 1.0f, tiny = fb(0x33C00000u), den = fb(0x1E3CE508u);
+            {
+                ps2_fpmode::ScopedPs2Mode ps2;
+                t.IsTrue(std::fegetround() == FE_TOWARDZERO, "PS2 scope rounds toward zero");
+                t.IsTrue(ub(one + tiny) == 0x3F800000u, "PS2 scope: 1 + 0.75 ulp chops");
+                t.IsTrue(ub(den * den) == 0u, "PS2 scope: denormal product flushes to 0");
+                {
+                    ps2_fpmode::ScopedHostMode host;
+                    t.IsTrue(std::fegetround() == FE_TONEAREST, "host scope (GS) rounds to nearest");
+                    t.IsTrue(ub(one + tiny) == 0x3F800001u, "host scope: 1 + 0.75 ulp rounds up");
+                    t.IsTrue(ub(den * den) != 0u, "host scope: denormal product kept");
+                }
+                t.IsTrue(std::fegetround() == FE_TOWARDZERO, "host scope restores PS2 mode");
+            }
+            t.IsTrue(ps2_fpmode::readControl() == before, "PS2 scope restores the thread's control word");
+        });
+
         // ---- EE FPU (COP1) -------------------------------------------------
 
         tc.Run("FPU ADD/SUB/MUL.S round toward zero (PCSX2 FPUFPCR ChopZero)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             uint32_t r = fpu2(E52_ADD_S, ONE, 0x33C00000u); // 1 + 0.75 ulp
             t.IsTrue(r == 0x3F800000u, "add.s 1 + 1.5*2^-24: PCSX2 0x3f800000, got " + hex(r));
             r = fpu2(E52_SUB_S, ONE, 0x33A00000u); // 1 - 1.25 ulp(below 1)
@@ -120,22 +159,29 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("FPU results clamp overflow to +/-FMAX (checkOverflow)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             uint32_t r = fpu2(E52_ADD_S, FMAX, FMAX);
             t.IsTrue(r == FMAX, "add.s FMAX + FMAX: PCSX2 0x7f7fffff, got " + hex(r));
             r = fpu2(E52_MUL_S, NFMAX, 0x40000000u);
             t.IsTrue(r == NFMAX, "mul.s -FMAX * 2: PCSX2 0xff7fffff, got " + hex(r));
         });
 
-        tc.Run("FPU operands: Inf/NaN patterns read as +/-FMAX, denormals as +/-0 (fpuDouble)", [](TestCase &t)
+        tc.Run("FPU operands: denormals as +/-0 (fpuDouble; Inf/NaN part deferred G2)", [](TestCase &t)
         {
-            uint32_t r = fpu2(E52_MUL_S, 0x7F800000u, 0x00000000u);
-            t.IsTrue(r == 0x00000000u, "mul.s 0x7f800000 * 0: PCSX2 FMAX*0 = +0, got " + hex(r));
+            ps2_fpmode::ScopedPs2Mode fpMode;
+            uint32_t r;
+            if (deferredEnabled())
+            {
+                r = fpu2(E52_MUL_S, 0x7F800000u, 0x00000000u);
+                t.IsTrue(r == 0x00000000u, "[deferred G2] mul.s 0x7f800000 * 0: PCSX2 FMAX*0 = +0, got " + hex(r));
+            }
             r = fpu2(E52_ADD_S, 0x00400000u, 0x80000000u);
             t.IsTrue(r == 0x00000000u, "add.s denormal + -0: PCSX2 +0, got " + hex(r));
         });
 
         tc.Run("FPU results: denormals flush to signed zero (checkUnderflow)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             uint32_t r = fpu2(E52_MUL_S, 0x1E3CE508u, 0x1E3CE508u); // 1e-20^2
             t.IsTrue(r == 0x00000000u, "mul.s 1e-20 * 1e-20: PCSX2 +0, got " + hex(r));
             r = fpu2(E52_MUL_S, 0x9E3CE508u, 0x1E3CE508u);
@@ -144,6 +190,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("FPU DIV.S by zero gives +/-FMAX by sign(fs)^sign(ft) (checkDivideByZero)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             uint32_t r = fpu2(E52_DIV_S, ONE, 0x00000000u);
             t.IsTrue(r == FMAX, "1 / +0: PCSX2 +FMAX, got " + hex(r));
             r = fpu2(E52_DIV_S, ONE, 0x80000000u);
@@ -158,6 +205,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("FPU SQRT.S rounds toward zero (sqrtss under ChopZero)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             setF(*c, 3, 0x40A00000u); // 5.0
             E52_SQRT_S(c.get());
@@ -166,6 +214,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("FPU MADD.S/MADDA.S round the product before the add (no fused multiply-add)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             // (1+2^-12)^2 = 1 + 2^-11 + 2^-24 rounds to 1 + 2^-11 in both modes;
             // ACC = -(1 + 2^-11) then gives +0. A fused FMA gives 2^-24.
             auto c = freshCtx();
@@ -181,6 +230,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("FPU MAX.S/MIN.S compare as sign-magnitude integers (fp_max/fp_min)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             uint32_t r = fpu2(E52_MAX_S, 0x80000000u, 0x00000000u);
             t.IsTrue(r == 0x00000000u, "max.s(-0, +0): PCSX2 +0, got " + hex(r));
             r = fpu2(E52_MIN_S, 0x00000000u, 0x80000000u);
@@ -191,11 +241,12 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("FPU C.EQ/C.LE compare fpuDouble operands (denormal = 0, Inf pattern = FMAX)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto cond = [](auto fn, uint32_t fs, uint32_t ft) {
                 auto c = freshCtx();
                 setF(*c, 2, fs);
                 setF(*c, 3, ft);
-                fn(c.get());
+                fn(c.get(), nullptr, nullptr);
                 return (c->fcr31 & 0x800000u) != 0;
             };
             t.IsTrue(cond(E52_C_EQ_S, 0x00000001u, 0x00000000u), "c.eq.s(denormal, 0): PCSX2 true");
@@ -206,6 +257,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("FPU CVT.S.W rounds toward zero above 2^24", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             uint32_t r = fpu2(E52_CVT_S_W, 16777219u, 0u);
             t.IsTrue(r == 0x4B800001u, "cvt.s.w 16777219: PCSX2 0x4b800001, got " + hex(r));
             r = fpu2(E52_CVT_S_W, 0x7FFFFFFFu, 0u);
@@ -214,6 +266,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("FPU CVT.W.S / ABS.S / NEG.S match PCSX2 (sanity, E50 fix)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             t.IsTrue(fpu2(E52_CVT_W_S, 0xBFC00000u, 0u) == 0xFFFFFFFFu, "cvt.w.s -1.5 -> -1");
             t.IsTrue(fpu2(E52_CVT_W_S, 0x4F400000u, 0u) == 0x7FFFFFFFu, "cvt.w.s 3.2e9 -> 0x7fffffff");
             t.IsTrue(fpu2(E52_ABS_S, 0xFFC00001u, 0u) == 0x7FC00001u, "abs.s clears only the sign bit");
@@ -224,6 +277,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VADD/VMUL round toward zero (VU0FPCR ChopZero)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             setVf(*c, 3, ONE, ONE, ONE, ONE);
             setVf(*c, 4, 0x33C00000u, 0, 0, 0);
@@ -235,22 +289,27 @@ void register_ps2_fpu_cop2_audit_tests()
             t.IsTrue(lane(c->vu0_vf[4], 0) == 0x3FC00002u, "vmul: PCSX2 0x3fc00002, got " + hex(lane(c->vu0_vf[4], 0)));
         });
 
-        tc.Run("VU0 VADD/VMUL clamp overflow and Inf operands to FMAX (VU_MAC_UPDATE, vuDouble)", [](TestCase &t)
+        tc.Run("VU0 VADD clamps overflow to FMAX (VU_MAC_UPDATE; Inf-operand part deferred G2)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             setVf(*c, 3, FMAX, 0x7F800000u, ONE, ONE);
             setVf(*c, 4, FMAX, ONE, ONE, ONE);
             E52_VADD(c.get());
             t.IsTrue(lane(c->vu0_vf[5], 0) == FMAX, "vadd FMAX+FMAX: PCSX2 FMAX, got " + hex(lane(c->vu0_vf[5], 0)));
-            t.IsTrue(lane(c->vu0_vf[5], 1) == FMAX, "vadd 0x7f800000+1: PCSX2 FMAX, got " + hex(lane(c->vu0_vf[5], 1)));
-            setVf(*c, 3, 0x7F800000u, ONE, ONE, ONE);
-            setVf(*c, 5, 0x00000000u, ONE, ONE, ONE);
-            E52_VMUL(c.get());
-            t.IsTrue(lane(c->vu0_vf[4], 0) == 0x00000000u, "vmul 0x7f800000*0: PCSX2 +0, got " + hex(lane(c->vu0_vf[4], 0)));
+            if (deferredEnabled())
+            {
+                t.IsTrue(lane(c->vu0_vf[5], 1) == FMAX, "[deferred G2] vadd 0x7f800000+1: PCSX2 FMAX, got " + hex(lane(c->vu0_vf[5], 1)));
+                setVf(*c, 3, 0x7F800000u, ONE, ONE, ONE);
+                setVf(*c, 5, 0x00000000u, ONE, ONE, ONE);
+                E52_VMUL(c.get());
+                t.IsTrue(lane(c->vu0_vf[4], 0) == 0x00000000u, "[deferred G2] vmul 0x7f800000*0: PCSX2 +0, got " + hex(lane(c->vu0_vf[4], 0)));
+            }
         });
 
         tc.Run("VU0 VMUL flushes denormal results to signed zero (VU_MAC_UPDATE exp 0)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             setVf(*c, 3, 0x1E3CE508u, 0x9E3CE508u, ONE, ONE);
             setVf(*c, 5, 0x1E3CE508u, 0x1E3CE508u, ONE, ONE);
@@ -261,6 +320,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VMADDw/VMADDAz: product rounded before the add; chop on the add", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             c->vu0_acc = _mm_castsi128_ps(_mm_set_epi32(0, 0, 0, static_cast<int>(0xBF801000u)));
             setVf(*c, 6, 0x3F800800u, 0, 0, 0);
@@ -276,6 +336,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VOPMULA/VOPMSUB lane mapping (sanity)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             setVf(*c, 4, ub(1.0f), ub(2.0f), ub(3.0f), 0);
             setVf(*c, 5, ub(5.0f), ub(7.0f), ub(11.0f), 0);
@@ -289,6 +350,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VMAX/VMINI compare as sign-magnitude integers (fp_max/fp_min)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             setVf(*c, 2, 0x80000000u, 0xFFC00000u, 0x00000000u, 0x7F800000u);
             setVf(*c, 3, 0x00000000u, ONE, 0x80000000u, ONE);
@@ -303,6 +365,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VFTOI0 saturates by sign (floatToInt)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             setVf(*c, 3, 0x4F32D05Eu /* 3e9 */, 0xCF32D05Eu /* -3e9 */, 0x7F800000u, 0x3FC00000u /* 1.5 */);
             E52_VFTOI0(c.get()); // vf8
@@ -314,6 +377,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VITOF0 rounds toward zero above 2^24 (intToFloat)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             setVf(*c, 1, 16777219u, 0x7FFFFFFFu, static_cast<uint32_t>(-16777219), 0x12345678u);
             E52_VITOF0(c.get()); // vitof0.xyz vf1, vf1
@@ -325,6 +389,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VDIV (0x4a6303bc, 85 sites): x/0 = +/-FMAX, chop rounding (_vuDIV)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto q = [](uint32_t ftx) {
                 auto c = freshCtx();
                 setVf(*c, 3, ftx, 0, 0, 0);
@@ -339,6 +404,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VSQRT (0x4a0403bd, 285 sites): sqrt(|ft|), chop rounding (_vuSQRT)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto q = [](uint32_t ftx) {
                 auto c = freshCtx();
                 setVf(*c, 4, ftx, 0, 0, 0);
@@ -352,6 +418,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VRSQRT (0x4a6403be, 104 sites): Q = fs/sqrt(|ft|), ft = 0 gives +/-FMAX (_vuRSQRT)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto q = [](uint32_t ftx) {
                 auto c = freshCtx();
                 setVf(*c, 4, ftx, 0, 0, 0);
@@ -365,6 +432,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VRSQRT reads fs (synthetic 0x4a020bbe: Q = vf1.x / sqrt(vf2.x))", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             setVf(*c, 1, ub(6.0f), 0, 0, 0);
             setVf(*c, 2, ub(4.0f), 0, 0, 0);
@@ -374,6 +442,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VCLIPw flag bits: +x=bit0, -x=bit1, ..., against |ft.w| (_vuCLIP)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             setVf(*c, 1, ub(2.0f), ub(-2.0f), ub(0.5f), 0);
             setVf(*c, 2, 0, 0, 0, ub(1.0f));
@@ -387,6 +456,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("VU0 VRINIT/VRNEXT: R = 0x3f800000|23 bits; RNEXT advances the LFSR and writes ft", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             setVf(*c, 3, 0x12345678u, 0, 0, 0);
             E52_VRINIT(c.get()); // R = 0x3fb45678
@@ -397,6 +467,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("COP2 CTC2/CFC2 R keeps 23 bits (VU0.cpp CTC2/CFC2 REG_R)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             SET_GPR_U32(c.get(), 2, 0xFFFFFFFFu);
             E52_CTC2_R(c.get());
@@ -407,14 +478,57 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("COP2 CFC2 VI1 zero-extends 16 bits (sanity)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             auto c = freshCtx();
             c->vi[1] = 0xFFFFu;
             E52_CFC2_VI1(c.get());
             t.IsTrue(GPR_U64(c.get(), 3) == 0xFFFFull, "cfc2 vi1=0xffff -> 0xffff");
         });
 
+        tc.Run("COP2 VSQI/VLQI/VILWR/VISWR address VU0 data memory with the right fields (_vuSQI/_vuLQI/_vuILWR/_vuISWR)", [](TestCase &t)
+        {
+            ps2_fpmode::ScopedPs2Mode fpMode;
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize");
+            uint8_t *vu0 = runtime.memory().getVU0Data();
+            uint8_t *rdram = runtime.memory().getRDRAM();
+            t.IsTrue(vu0 != nullptr && rdram != nullptr, "VU0 data and RDRAM exist");
+            if (!vu0 || !rdram)
+                return;
+            std::memset(vu0, 0, PS2_VU0_DATA_SIZE);
+            std::memset(rdram, 0, 0x4000);
+            auto c = freshCtx();
+            c->vi[1] = 3;
+            c->vi[2] = 7;
+            setVf(*c, 1, 0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u);
+            setVf(*c, 2, 0xA0000001u, 0xA0000002u, 0xA0000003u, 0xA0000004u);
+            E52_VSQI(c.get(), &runtime, rdram); // vsqi.xyzw vf2, (vi1++)
+            uint32_t w[4];
+            std::memcpy(w, vu0 + 3 * 16, sizeof(w));
+            t.IsTrue(w[0] == 0xA0000001u && w[1] == 0xA0000002u && w[2] == 0xA0000003u && w[3] == 0xA0000004u,
+                     "vsqi stores vf2 at VU0 data qword vi1 = 3, got " + hex(w[0]));
+            t.IsTrue(c->vi[1] == 4 && c->vi[2] == 7, "vsqi post-increments vi1 only");
+            bool rdramClean = true;
+            for (uint32_t i = 0; i < 0x4000; ++i)
+                rdramClean = rdramClean && rdram[i] == 0;
+            t.IsTrue(rdramClean, "vsqi must not write EE RAM 0x0000-0x3fff");
+            c->vi[1] = 3;
+            E52_VLQI(c.get(), &runtime, rdram); // vlqi.xyzw vf1, (vi1++)
+            t.IsTrue(lane(c->vu0_vf[1], 0) == 0xA0000001u && lane(c->vu0_vf[1], 3) == 0xA0000004u,
+                     "vlqi loads VU0 data qword vi1 = 3 into vf1");
+            t.IsTrue(c->vi[1] == 4, "vlqi post-increments vi1");
+            c->vi[1] = 3;
+            E52_VILWR_Y(c.get(), &runtime, rdram); // vilwr.y vi2, (vi1)
+            t.IsTrue(c->vi[2] == 0x0002u, "vilwr.y reads the low 16 bits of word y, got " + hex(c->vi[2]));
+            c->vi[2] = 0xBEEF;
+            E52_VISWR_Z(c.get(), &runtime, rdram); // viswr.z vi2, (vi1)
+            std::memcpy(w, vu0 + 3 * 16, sizeof(w));
+            t.IsTrue(w[2] == 0x0000BEEFu && w[1] == 0xA0000002u, "viswr.z stores vi2 zero-extended into word z only, got " + hex(w[2]));
+        });
+
         tc.Run("COP2 VCALLMSR (0x4a00d839, 8 sites) starts at CMSAR0 (COP2.cpp: vu0ExecMicro(VI[CMSAR0]))", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             const std::string code = translate(0x1223f0u, 0x4a00d839u);
             t.IsTrue(code.find("vu0_cmsar0") != std::string::npos,
                      "vcallmsr must take its start from CMSAR0 (ctx->vu0_cmsar0); got: " + code);
@@ -424,6 +538,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("COP2 VSQI (0x4be1137d, 14 sites) stores vf[fs] to VU0 data at vi[it]*16 (_vuSQI)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             // vsqi.xyzw $vf2, ($vi1++): fs = 2 (bits 15:11), it = 1 (bits 20:16).
             const std::string code = translate(0x229fb0u, 0x4be1137du);
             t.IsTrue(code.find("vu0_vf[2]") != std::string::npos && code.find("vi[1]") != std::string::npos &&
@@ -435,6 +550,7 @@ void register_ps2_fpu_cop2_audit_tests()
 
         tc.Run("COP2 CTC2 CMSAR1 (0x48c4f800, 1 site) starts a VU1 microprogram (VU0.cpp CTC2 REG_CMSAR1)", [](TestCase &t)
         {
+            ps2_fpmode::ScopedPs2Mode fpMode;
             const std::string code = translate(0x3fed54u, 0x48c4f800u);
             t.IsTrue(code.find("runtime->") != std::string::npos,
                      "ctc2 to CMSAR1 must start VU1 at the written address; got: " + code);

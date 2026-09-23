@@ -2278,6 +2278,28 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
                   m_gs, &m_memory,
                   startPC, 0u, ctx->vu0_itop, 4096);
     copyVu0StateToContext(m_vu0.state(), ctx);
+    // E53: dev-only VU0 start log (PS2X_E53_VU0_LOG=1, default off): caller
+    // pc, start, cycles, and an FNV-1a of VU0 data memory after the run so an
+    // upload that lands shows up as a changing hash. First 64 starts, then
+    // every 256th.
+    {
+        static const bool e53Log = std::getenv("PS2X_E53_VU0_LOG") != nullptr;
+        if (e53Log)
+        {
+            static std::atomic<uint64_t> e53Count{0};
+            const uint64_t n = e53Count.fetch_add(1, std::memory_order_relaxed) + 1u;
+            if (n <= 64u || (n % 256u) == 0u)
+            {
+                uint32_t h = 2166136261u;
+                for (uint32_t i = 0; i < PS2_VU0_DATA_SIZE; ++i)
+                    h = (h ^ vu0Data[i]) * 16777619u;
+                std::fprintf(stderr, "[E53] vu0start n=%llu caller=0x%x startPC=0x%x cycles=%llu budget_hit=%d vu0data_fnv=%08x\n",
+                             static_cast<unsigned long long>(n), ctx->pc, startPC,
+                             static_cast<unsigned long long>(m_vu0.state().cycles),
+                             m_vu0.state().cycles >= 4096u ? 1 : 0, h);
+            }
+        }
+    }
     // E44 Part-2 VU0 call trace (dev-only, default off). m_cycle was
     // reset by reset() above, so state().cycles is this call's usage.
     if (ps2_e44_trace::enabled())
@@ -2292,6 +2314,26 @@ void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_
 {
     // VCALLMS and VCALLMSR both route here.
     executeVU0Microprogram(rdram, ctx, address);
+}
+
+void PS2Runtime::vu1StartMicroProgramFromEe(R5900Context *ctx, uint32_t cmsar1)
+{
+    // PCSX2 vu1ExecMicro(addr): TPC = addr (instruction index), run from TPC*8
+    // with the VIF1 TOP/ITOP the VU sees through XTOP/XITOP.
+    const uint32_t startPC = (cmsar1 & 0x7FFu) << 3;
+    VIFRegisters &vif1 = m_memory.vif1_regs;
+    m_vu1.state().dBitEnabled = (ctx->vu0_fbrst & (1u << 10)) != 0u;
+    m_vu1.state().tBitEnabled = (ctx->vu0_fbrst & (1u << 11)) != 0u;
+    m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                  m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                  m_gs, &m_memory, startPC, vif1.top, vif1.itop, 65536);
+    ctx->vu0_vpu_stat = (ctx->vu0_vpu_stat & ~0x0600u) |
+                        (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                        (m_vu1.state().stoppedByT ? 0x0400u : 0u);
+    static std::atomic<uint32_t> s_e53Cmsar1Starts{0};
+    const uint32_t n = s_e53Cmsar1Starts.fetch_add(1, std::memory_order_relaxed);
+    if (n < 8u)
+        std::fprintf(stderr, "[E53] CTC2 CMSAR1 VU1 start #%u startPC=0x%x\n", n + 1u, startPC);
 }
 
 void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx)

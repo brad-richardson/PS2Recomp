@@ -2,9 +2,10 @@
 // as callable functions, so ps2_fpu_cop2_audit_tests.cpp executes exactly the
 // code the generator writes into the game's codegen (no hand copies).
 //
-// Output: a header with one `static inline void E52_<name>(R5900Context *ctx)`
-// per entry. Only register-to-register encodings are listed here; encodings
-// whose translation touches memory or the runtime are checked as strings.
+// Output: a header with one
+// `static inline void E52_<name>(R5900Context *ctx, PS2Runtime *runtime, uint8_t *rdram)`
+// per entry (runtime/rdram default to null for register-only encodings).
+// Encodings that start VU programs are checked as strings.
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/r5900_decoder.h"
@@ -68,6 +69,10 @@ namespace
         {"CTC2_R", 0x0u, 0x48c2a000u},         // ctc2 $v0, $vi20 (R)
         {"CFC2_R", 0x0u, 0x4842a000u},         // cfc2 $v0, $vi20 (R)
         {"CFC2_VI1", 0x1223f4u, 0x48430801u},  // cfc2.i $v1, $vi1
+        {"VSQI", 0x229fb0u, 0x4be1137du},      // vsqi.xyzw $vf2, ($vi1++)
+        {"VLQI", 0x3feb8cu, 0x4be10b7cu},      // vlqi.xyzw $vf1, ($vi1++)
+        {"VILWR_Y", 0x0u, 0x4a820bfeu},        // vilwr.y $vi2, ($vi1) (synthetic; 0 SSX 3 sites)
+        {"VISWR_Z", 0x0u, 0x4a420bffu},        // viswr.z $vi2, ($vi1) (synthetic; 0 SSX 3 sites)
     };
 }
 
@@ -82,7 +87,9 @@ int main()
         const Instruction inst = decoder.decodeInstruction(e.address, e.word);
         const std::string code = generator.translateInstruction(inst);
         std::printf("// 0x%08x at 0x%x\n", e.word, e.address);
-        std::printf("static inline void E52_%s(R5900Context *ctx)\n{\n    %s\n}\n", e.name, code.c_str());
+        std::printf("static inline void E52_%s(R5900Context *ctx, PS2Runtime *runtime = nullptr, uint8_t *rdram = nullptr)\n"
+                    "{\n    (void)runtime;\n    (void)rdram;\n    %s\n}\n",
+                    e.name, code.c_str());
     }
     return 0;
 }

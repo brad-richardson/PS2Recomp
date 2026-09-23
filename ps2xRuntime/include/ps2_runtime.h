@@ -376,6 +376,8 @@ public:
 
     void executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
     void vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
+    // E53: CTC2 to CMSAR1 starts a VU1 micro subroutine (PCSX2 VU0.cpp CTC2 -> vu1ExecMicro).
+    void vu1StartMicroProgramFromEe(R5900Context *ctx, uint32_t cmsar1);
 
 public:
     void handleSyscall(uint8_t *rdram, R5900Context *ctx);
