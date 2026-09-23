@@ -125,6 +125,10 @@ public:
     uint64_t regWriteCount() const { return m_regWriteCount.load(std::memory_order_relaxed); }
     void reset();
     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
+    // GB3 Part 2: true while the backend takes the raw GIF stream
+    // (paraLLEl). The EE side then routes P6/P7 native fast paths through
+    // the arbiter so the backend sees every packet with its path.
+    bool rawGifBackendActive() const { return m_rawGifBackend.load(std::memory_order_acquire); }
 
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     // E33: records which GIF path the packet currently being processed came
@@ -304,6 +308,7 @@ private:
     std::atomic<uint64_t> m_submitCount{0};
     std::atomic<uint64_t> m_regWriteCount{0};
     std::atomic<uint64_t> m_privWriteCount{0};
+    std::atomic<bool> m_rawGifBackend{false};
 };
 
 #endif
