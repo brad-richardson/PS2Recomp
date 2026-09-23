@@ -210,6 +210,9 @@ void GS::executeQueuedCommand(GsCommand &cmd)
     case GsCmdKind::SetDebugPaused:
         setDebugHistoryPaused(cmd.u32a != 0u);
         break;
+    case GsCmdKind::PrivWrite:
+        privWrite(std::move(cmd.apply));
+        break;
     case GsCmdKind::Consume:
     {
         auto rpc = std::static_pointer_cast<GsRpc<std::vector<uint8_t>>>(cmd.rpc);
@@ -251,6 +254,9 @@ void GS::executeQueuedCommand(GsCommand &cmd)
         setRasterBackend(std::move(cmd.backend));
         break;
     case GsCmdKind::Fence:
+        break;
+    case GsCmdKind::DiagPresent:
+        std::static_pointer_cast<GsRpc<PresentationFrame>>(cmd.rpc)->result = presentForDiagnostics();
         break;
     }
 }
@@ -812,6 +818,33 @@ void GS::latchHostPresentationFrame()
     }
 }
 
+PresentationFrame GS::presentForDiagnostics()
+{
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::DiagPresent;
+        auto rpc = std::make_shared<GsRpc<PresentationFrame>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return std::move(rpc->result);
+    }
+    GSPresentationRequest request{};
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        if (!m_backend || !m_privRegs)
+            return {};
+        request = buildPresentationRequestUnlocked();
+    }
+    std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+    if (!m_backend)
+        return {};
+    m_backend->Flush();
+    m_backend->Sync(GSSyncReason::Presentation);
+    return m_backend->Present(request);
+}
+
 bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
                                           uint32_t &outWidth,
                                           uint32_t &outHeight,
@@ -1353,6 +1386,22 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     m_regWriteCount.fetch_add(1u, std::memory_order_relaxed);
     writeRegisterUnlocked(regAddr, value);
+}
+
+void GS::privWrite(std::function<void()> apply)
+{
+    if (!apply)
+        return;
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::PrivWrite;
+        cmd.apply = std::move(apply);
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
+    m_privWriteCount.fetch_add(1u, std::memory_order_relaxed);
+    apply();
 }
 
 void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)

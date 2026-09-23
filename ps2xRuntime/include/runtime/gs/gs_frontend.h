@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -152,6 +153,14 @@ public:
                            const uint8_t *data,
                            uint32_t sizeBytes);
     void writeRegister(uint8_t regAddr, uint64_t value);
+    // GB3: a store to the GS privileged registers (guest write32/64 to
+    // 0x12000000+, HLE IMR/DispEnv/SetGsCrt writes, the VBlank FIELD
+    // toggle). Queued mode enqueues `apply` so it runs on the worker in
+    // program order relative to the packets before and after it (packet
+    // SIGNAL/FINISH/LABEL and the HLE display regs also land there);
+    // direct mode, or a call from the worker itself, runs it now.
+    void privWrite(std::function<void()> apply);
+    uint64_t privWriteCount() const { return m_privWriteCount.load(std::memory_order_relaxed); }
 
     const uint8_t *lockDisplaySnapshot(uint32_t &outSize);
     void unlockDisplaySnapshot();
@@ -167,6 +176,11 @@ public:
     void setDebugHistoryPaused(bool paused);
     bool getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const;
     void latchHostPresentationFrame();
+    // GB3 diagnostics (VQ gate): run the backend's Present for the current
+    // state into a returned frame without touching the host latch. Queued
+    // mode runs it on the worker at stream position (an RPC). Pixels use
+    // the backend's row stride (640 * 4 bytes for both backends).
+    PresentationFrame presentForDiagnostics();
     bool copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
                                           uint32_t &outWidth,
                                           uint32_t &outHeight,
@@ -289,6 +303,7 @@ private:
     // worker when queued, read on the game thread after a drain).
     std::atomic<uint64_t> m_submitCount{0};
     std::atomic<uint64_t> m_regWriteCount{0};
+    std::atomic<uint64_t> m_privWriteCount{0};
 };
 
 #endif

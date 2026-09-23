@@ -752,6 +752,7 @@ bool PS2Runtime::syncCoreSubsystems()
     }
 
     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
+    m_memory.setGsFrontend(&m_gs); // GB3: priv stores ride the GS stream when queued
     // GB2 step (a): PS2X_GS_QUEUE=1 runs the CPU GS backend on its own
     // thread behind the command queue. Default off: direct calls, today's
     // code path. Enabled here during init, before the game thread spawns.

@@ -13,6 +13,7 @@
 #include "runtime/gs/ps2_gs_psmt8.h"
 #include "Stubs/Helpers/Support.h"
 #include "Stubs/GS.h"
+#include "Syscalls/System.h"
 
 #include <atomic>
 #include <chrono>
@@ -529,6 +530,66 @@ void register_ps2_gs_tests()
                      "GsSetCrt should leave CRT1 enabled for presentation");
             t.Equals(getRegU32Test(ctx, 2), 0u,
                      "GsSetCrt should return success");
+        });
+
+        // GB3: SetGsCrt programs SMODE1 like the real kernel (NTSC = the
+        // G13 PCSX2 dump's 0x740814504; PAL = CMOD 3), SMODE2 = INT|FFMD<<1.
+        tc.Run("GB3: SetGsCrt programs SMODE1/SMODE2 per mode like the kernel", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            struct Case
+            {
+                uint32_t interlaced, mode, frame;
+                uint64_t smode1, smode2;
+                const char *what;
+            };
+            const Case cases[] = {
+                {1u, 0x2u, 0u, 0x0000000740814504ull, 0x1ull, "NTSC 0x2 interlaced field (SSX 3 shape)"},
+                {1u, 0x0u, 1u, 0x0000000740814504ull, 0x3ull, "NTSC 0x0 alias, interlaced frame"},
+                {0u, 0x2u, 0u, 0x0000000740814504ull, 0x0ull, "NTSC non-interlaced"},
+                {1u, 0x3u, 0u, 0x0000000740816504ull, 0x1ull, "PAL 0x3 interlaced field"},
+                {1u, 0x1u, 1u, 0x0000000740816504ull, 0x3ull, "PAL 0x1 alias, frame"},
+            };
+            for (const Case &c : cases)
+            {
+                R5900Context ctx{};
+                setRegU32(ctx, 4, c.interlaced);
+                setRegU32(ctx, 5, c.mode);
+                setRegU32(ctx, 6, c.frame);
+                runtime.memory().gs().smode1 = 0u;
+                runtime.memory().gs().smode2 = 0u;
+                runtime.memory().gs().pmode = 0u;
+                GsSetCrt(rdram.data(), &ctx, &runtime);
+                t.Equals(runtime.memory().gs().smode1, c.smode1, c.what);
+                t.Equals(runtime.memory().gs().smode2, c.smode2, c.what);
+                t.Equals(runtime.memory().gs().pmode & 0x3ull, 0x1ull, "CRT1 stays enabled");
+                t.Equals(getRegU32Test(ctx, 2), 0u, "returns 0");
+            }
+            // SMODE1 field decode of the NTSC value (PCSX2 GSRegs.h layout).
+            const uint64_t v = gsCrtSmode1ForMode(2u);
+            t.Equals(v & 0x7ull, 4ull, "RC=4");
+            t.Equals((v >> 3) & 0x7Full, 32ull, "LC=32 (analog)");
+            t.Equals((v >> 10) & 0x3ull, 1ull, "T1248=1");
+            t.Equals((v >> 13) & 0x3ull, 2ull, "CMOD=2 (NTSC)");
+            t.Equals((gsCrtSmode1ForMode(3u) >> 13) & 0x3ull, 3ull, "CMOD=3 (PAL)");
+            t.Equals((v >> 16) & 0x1ull, 1ull, "PRST=1");
+            t.Equals((v >> 21) & 0xFull, 4ull, "SPML=4");
+            t.Equals((v >> 30) & 0x3ull, 1ull, "CLKSEL=1");
+            t.Equals((v >> 32) & 0x1Full, 0x7ull, "NVCK=1 SLCK2=1 VCKSEL=1 VHP=0");
+            // Unmodelled modes (VESA 0x1A, DTV 0x50) leave SMODE1 alone.
+            for (uint32_t mode : {0x1Au, 0x50u})
+            {
+                R5900Context ctx{};
+                setRegU32(ctx, 4, 0u);
+                setRegU32(ctx, 5, mode);
+                setRegU32(ctx, 6, 1u);
+                runtime.memory().gs().smode1 = 0x1111ull;
+                GsSetCrt(rdram.data(), &ctx, &runtime);
+                t.Equals(runtime.memory().gs().smode1, 0x1111ull, "unmodelled mode leaves SMODE1");
+                t.Equals(runtime.memory().gs().smode2, 0x2ull, "SMODE2 still follows the args");
+            }
         });
 
         tc.Run("sceGsSetDefDBuffDc seeds display envs and swap applies the selected page", [](TestCase &t)

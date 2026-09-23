@@ -710,6 +710,77 @@ void register_ps2_gs_queue_tests()
                             "queued state should survive the disable");
                });
 
+        // GB3 Part 1: guest priv stores ride the GS stream. The worker is
+        // held behind a gate so a FINISH/SIGNAL packet is still queued when
+        // the guest's CSR/SIGLBLID stores and the VBlank FIELD flip arrive;
+        // program order (direct semantics) must still decide the final
+        // regs. Before GB3 the stores applied at once on the game thread,
+        // so the late packet re-set FINISH and overwrote SIGLBLID.
+        tc.Run("GB3: priv stores keep program order vs queued packets (matches direct)", [](TestCase &t)
+        {
+            struct Final
+            {
+                uint64_t csr = 0, siglblid = 0, dispfb1 = 0, imr = 0;
+                uint64_t privWrites = 0;
+            };
+            auto runSequence = [](bool queued) -> Final
+            {
+                PS2Memory mem;
+                if (!mem.initialize())
+                    return {};
+                GS gs;
+                gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+                mem.setGsFrontend(&gs);
+                std::atomic<bool> gate{!queued};
+                if (queued)
+                {
+                    gs.setQueueEnabled(true);
+                    gs.privWrite([&gate]()
+                                 {
+                        while (!gate.load(std::memory_order_acquire))
+                            std::this_thread::yield(); });
+                }
+                // Packet: A+D FINISH, then A+D SIGNAL(id=0x1234, mask=0xFFFF).
+                std::vector<uint8_t> pkt;
+                appendGifTag(pkt, 2u, kFlgPacked, 1u, 0xEull);
+                appendGifAd(pkt, 0u, GS_REG_FINISH);
+                appendGifAd(pkt, 0x0000FFFF00001234ull, GS_REG_SIGNAL);
+                gs.processGIFPacket(pkt.data(), static_cast<uint32_t>(pkt.size()));
+                // Guest: clear SIGNAL|FINISH (W1C), write SIGLBLID, DISPFB1, IMR.
+                mem.write64(0x12001000u, 0x3ull);
+                mem.write64(0x12001080u, 0xABCD00005678ull);
+                mem.write32(0x12000070u, 0x1234u);
+                mem.write64(0x12001010u, 0x7F00ull);
+                // VBlank FIELD flip (odd tick), the EeScheduler path.
+                GSRegisters &regs = mem.gs();
+                mem.gsPrivStore([&regs]()
+                                { regs.csr.fetch_or(0x2000ull, std::memory_order_acq_rel); });
+                gate.store(true, std::memory_order_release);
+                gs.drainQueue();
+                mem.gsPrivSync();
+                Final f;
+                f.csr = regs.csr.load();
+                f.siglblid = regs.siglblid.load();
+                f.dispfb1 = regs.dispfb1;
+                f.imr = regs.imr;
+                f.privWrites = gs.privWriteCount();
+                gs.setQueueEnabled(false);
+                mem.setGsFrontend(nullptr);
+                return f;
+            };
+            const Final d = runSequence(false);
+            const Final q = runSequence(true);
+            t.Equals(d.csr & 0x3ull, 0ull, "direct: guest W1C clears SIGNAL|FINISH set by the earlier packet");
+            t.Equals(d.csr & 0x2000ull, 0x2000ull, "direct: FIELD set by the VBlank flip");
+            t.Equals(q.csr, d.csr, "queued CSR == direct CSR (in-stream W1C + FIELD)");
+            t.Equals(q.siglblid, d.siglblid, "queued SIGLBLID == direct (guest store after SIGNAL)");
+            t.Equals(d.siglblid, 0xABCD00005678ull, "direct SIGLBLID = the guest store");
+            t.Equals(q.dispfb1, d.dispfb1, "queued DISPFB1 == direct");
+            t.Equals(q.imr, d.imr, "queued IMR == direct");
+            t.Equals(d.privWrites, 5ull, "direct counts 5 priv stores");
+            t.Equals(q.privWrites, 6ull, "queued counts 5 priv stores + the gate");
+        });
+
         tc.Run("queue backpressure: a full ring blocks producers until drained", [](TestCase &t)
         {
             std::atomic<bool> gate{false};

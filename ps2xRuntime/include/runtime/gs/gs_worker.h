@@ -48,6 +48,7 @@ enum class GsCmdKind : uint8_t
     WriteVram,
     ClearDebugHistory,
     SetDebugPaused,
+    PrivWrite, // GB3: guest/HLE priv-register store, applied in stream order
     // RPCs (carry a fence; the caller waits for stream position).
     Consume,
     ReadVram,
@@ -60,6 +61,7 @@ enum class GsCmdKind : uint8_t
     GetPreferredSource,
     SetBackend,
     Fence,
+    DiagPresent, // GB3: present into a caller-owned frame (no latch side effects)
 };
 
 // Base fence for RPC commands. The worker signals it after executing the
@@ -110,6 +112,7 @@ struct GsCommand
     std::vector<uint8_t> bytes;              // GifPacket / UploadImageNative / NativePacked payload
     std::shared_ptr<GsRpcBase> rpc;          // non-null for RPC kinds
     std::unique_ptr<GSRasterBackend> backend; // SetBackend only
+    std::function<void()> apply;              // PrivWrite only
 
     size_t payloadBytes() const { return bytes.size(); }
 };

@@ -4,12 +4,41 @@
 #include "Ssx3CopiedPayload.h"
 #include "System.h"
 
+#include <cstdlib>
+#include <cstring>
+
 namespace ps2_syscalls
 {
+    // GB3: SMODE1 as the real kernel's SetGsCrt leaves it, per video mode.
+    // NTSC is byte-for-byte the value in the G13 PCSX2 GS dump of SSX 3
+    // (real BIOS; priv block at file offset 0x52c233: SMODE1 0x740814504,
+    // SMODE2 0x1). PAL differs only in CMOD=3, per the field table in PCSX2
+    // pcsx2/GS/GSRegs.h (SMODE1 comment, rev 9056c0834): CLKSEL=1 CMOD=2|3
+    // LC=32 NVCK=1 PRST=1 RC=4 SLCK2=1 SPML=4 T1248=1 VCKSEL=1, rest 0.
+    // Mode numbers as PCSX2's SetGsCrt syscall hook reads them
+    // (R5900OpcodeImpl.cpp: 0/2 NTSC, 1/3 PAL). Other modes (VESA, DTV,
+    // DVD) return 0: SMODE1 is then left as it was.
+    uint64_t gsCrtSmode1ForMode(uint32_t videoMode)
+    {
+        constexpr uint64_t kSmode1Ntsc = 0x0000000740814504ull;
+        constexpr uint64_t kSmode1Pal = 0x0000000740816504ull; // CMOD 2 -> 3 (bit 13)
+        switch (videoMode & 0xFFu)
+        {
+        case 0x0:
+        case 0x2:
+            return kSmode1Ntsc;
+        case 0x1:
+        case 0x3:
+            return kSmode1Pal;
+        default:
+            return 0u;
+        }
+    }
+
     void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int interlaced = getRegU32(ctx, 4); // $a0 - 0=non-interlaced, 1=interlaced
-        int videoMode = getRegU32(ctx, 5);  // $a1 - 0=NTSC, 1=PAL, 2=VESA, 3=HiVision
+        int videoMode = getRegU32(ctx, 5);  // $a1 - 0/2=NTSC, 1/3=PAL, 0x1A+=VESA, 0x50+=DTV
         int frameMode = getRegU32(ctx, 6);  // $a2 - 0=field, 1=frame
 
         if (runtime)
@@ -18,13 +47,35 @@ namespace ps2_syscalls
             const uint64_t smode2 =
                 (static_cast<uint64_t>(interlaced) & 0x1ull) |
                 ((static_cast<uint64_t>(frameMode) & 0x1ull) << 1);
+            // PS2X_GS_SETCRT_LEGACY=1: validation kill-switch, pre-GB3
+            // behavior (SMODE1 untouched). Used for the queue-off presenter A/B.
+            static const bool s_legacy = [] {
+                const char *env = std::getenv("PS2X_GS_SETCRT_LEGACY");
+                return env && std::strcmp(env, "1") == 0;
+            }();
+            const uint64_t smode1 = s_legacy ? 0u : gsCrtSmode1ForMode(static_cast<uint32_t>(videoMode));
 
-            gs.smode2 = smode2;
+            // GB3: a priv store; in-stream when the GS queue is on.
+            runtime->memory().gsPrivStore([&gs, smode1, smode2]()
+                                          {
+                if (smode1 != 0u)
+                {
+                    gs.smode1 = smode1;
+                }
+                gs.smode2 = smode2;
 
-            // Keep CRT1 enabled after the BIOS syscall selects a display mode.
-            if ((gs.pmode & 0x3ull) == 0ull)
+                // Keep CRT1 enabled after the BIOS syscall selects a display mode.
+                if ((gs.pmode & 0x3ull) == 0ull)
+                {
+                    gs.pmode |= 0x1ull;
+                } });
+
+            static std::atomic<uint32_t> s_logged{0};
+            if (s_logged.fetch_add(1u, std::memory_order_relaxed) < 8u)
             {
-                gs.pmode |= 0x1ull;
+                std::cerr << "[gs:setcrt] interlaced=" << interlaced << " mode=0x" << std::hex << videoMode
+                          << " field_frame=" << std::dec << frameMode << " smode1=0x" << std::hex << smode1
+                          << " smode2=0x" << smode2 << std::dec << std::endl;
             }
         }
 
@@ -45,6 +96,7 @@ namespace ps2_syscalls
         uint64_t imr = 0;
         if (runtime)
         {
+            runtime->memory().gsPrivSync(); // GB3: see queued IMR stores
             imr = runtime->memory().gs().imr;
         }
 
@@ -67,8 +119,11 @@ namespace ps2_syscalls
         uint64_t oldImr = 0;
         if (runtime)
         {
+            runtime->memory().gsPrivSync(); // GB3: see queued IMR stores
             oldImr = runtime->memory().gs().imr;
-            runtime->memory().gs().imr = newImr;
+            auto &gs = runtime->memory().gs();
+            runtime->memory().gsPrivStore([&gs, newImr]()
+                                          { gs.imr = newImr; });
         }
         RUNTIME_LOG("PS2 GsPutIMR: " << " new=0x" << newImr
                                      << " a0_64=0x" << GPR_U64(ctx, 4)

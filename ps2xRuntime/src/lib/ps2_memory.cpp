@@ -985,6 +985,22 @@ __m128i PS2Memory::read128(uint32_t address)
     return _mm_setzero_si128();
 }
 
+void PS2Memory::gsPrivStore(std::function<void()> apply)
+{
+    if (m_gsFrontend)
+    {
+        m_gsFrontend->privWrite(std::move(apply)); // queued or direct; counts either way
+        return;
+    }
+    apply();
+}
+
+void PS2Memory::gsPrivSync()
+{
+    if (m_gsFrontend)
+        m_gsFrontend->drainQueue();
+}
+
 void PS2Memory::write8(uint32_t address, uint8_t value)
 {
     const bool scratch = isScratchpad(address);
@@ -1081,24 +1097,27 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
 
     if (isGsPrivReg(address))
     {
-        uint32_t off = address & 7;
-        const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
-        if (regOff == kGsCsrRegOffset)
-        {
-            // CSR: bits 0..1 of the low dword are write-one-to-clear status bits.
-            // Done as a single atomic RMW -- see writeCsrHalf's comment.
-            writeCsrHalf(gs_regs.csr, off, value);
-        }
-        else if (regOff == kGsSiglblidRegOffset)
-        {
-            writeSiglblidHalf(gs_regs.siglblid, off, value);
-        }
-        else if (uint64_t *reg = gsRegPtr(gs_regs, address))
-        {
-            uint64_t mask = 0xFFFFFFFFULL << (off * 8);
-            uint64_t newVal = (*reg & ~mask) | ((uint64_t)value << (off * 8));
-            *reg = newVal;
-        }
+        // GB3: in-stream when the GS queue is on (see gsPrivStore).
+        gsPrivStore([this, address, value]()
+                    {
+            uint32_t off = address & 7;
+            const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+            if (regOff == kGsCsrRegOffset)
+            {
+                // CSR: bits 0..1 of the low dword are write-one-to-clear status bits.
+                // Done as a single atomic RMW -- see writeCsrHalf's comment.
+                writeCsrHalf(gs_regs.csr, off, value);
+            }
+            else if (regOff == kGsSiglblidRegOffset)
+            {
+                writeSiglblidHalf(gs_regs.siglblid, off, value);
+            }
+            else if (uint64_t *reg = gsRegPtr(gs_regs, address))
+            {
+                uint64_t mask = 0xFFFFFFFFULL << (off * 8);
+                uint64_t newVal = (*reg & ~mask) | ((uint64_t)value << (off * 8));
+                *reg = newVal;
+            } });
         return;
     }
 
@@ -1148,21 +1167,24 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
 
     if (isGsPrivReg(address))
     {
-        const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
-        if (regOff == kGsCsrRegOffset)
-        {
-            // CSR: bits 0..1 are write-one-to-clear status bits. Done as a single
-            // atomic RMW -- see writeCsrFull's comment.
-            writeCsrFull(gs_regs.csr, value);
-        }
-        else if (regOff == kGsSiglblidRegOffset)
-        {
-            gs_regs.siglblid.store(value);
-        }
-        else if (uint64_t *reg = gsRegPtr(gs_regs, address))
-        {
-            *reg = value;
-        }
+        // GB3: in-stream when the GS queue is on (see gsPrivStore).
+        gsPrivStore([this, address, value]()
+                    {
+            const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+            if (regOff == kGsCsrRegOffset)
+            {
+                // CSR: bits 0..1 are write-one-to-clear status bits. Done as a single
+                // atomic RMW -- see writeCsrFull's comment.
+                writeCsrFull(gs_regs.csr, value);
+            }
+            else if (regOff == kGsSiglblidRegOffset)
+            {
+                gs_regs.siglblid.store(value);
+            }
+            else if (uint64_t *reg = gsRegPtr(gs_regs, address))
+            {
+                *reg = value;
+            } });
         return;
     }
 
@@ -1323,21 +1345,23 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         // register writes through addresses in PS2_IO_BASE's range, which is
         // disjoint from PS2_GS_PRIV_REG_BASE; kept correct for direct callers.
         m_ioRegisters[address] = value;
-        const uint32_t off = address & 7u;
-        const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
-        if (regOff == kGsCsrRegOffset)
-        {
-            writeCsrHalf(gs_regs.csr, off, value);
-        }
-        else if (regOff == kGsSiglblidRegOffset)
-        {
-            writeSiglblidHalf(gs_regs.siglblid, off, value);
-        }
-        else if (uint64_t *reg = gsRegPtr(gs_regs, address))
-        {
-            const uint64_t mask = 0xFFFFFFFFull << (off * 8u);
-            *reg = (*reg & ~mask) | (static_cast<uint64_t>(value) << (off * 8u));
-        }
+        gsPrivStore([this, address, value]()
+                    {
+            const uint32_t off = address & 7u;
+            const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+            if (regOff == kGsCsrRegOffset)
+            {
+                writeCsrHalf(gs_regs.csr, off, value);
+            }
+            else if (regOff == kGsSiglblidRegOffset)
+            {
+                writeSiglblidHalf(gs_regs.siglblid, off, value);
+            }
+            else if (uint64_t *reg = gsRegPtr(gs_regs, address))
+            {
+                const uint64_t mask = 0xFFFFFFFFull << (off * 8u);
+                *reg = (*reg & ~mask) | (static_cast<uint64_t>(value) << (off * 8u));
+            } });
         m_gsWriteCount.fetch_add(1, std::memory_order_relaxed);
         return true;
     }

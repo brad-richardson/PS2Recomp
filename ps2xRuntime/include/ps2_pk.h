@@ -57,11 +57,16 @@ namespace ps2_pk
     // Part 7: same env name, widened meaning — drains before every guest
     // load in the GS priv range (not just CSR/SIGLBLID) when the queue
     // is on. Renamed to match (call sites updated).
+    //
+    // GB3: default ON (callers also require the queue to be on). Guest priv
+    // stores now ride the GS stream, so a load that skipped the fence could
+    // miss the guest's own earlier store. PS2X_GS_CSR_DRAIN=0 is the
+    // validation kill-switch; any other value (or unset) keeps the fence.
     inline bool privDrainEnabled()
     {
         static const bool on = [] {
             const char *env = std::getenv("PS2X_GS_CSR_DRAIN");
-            return env && std::strcmp(env, "1") == 0;
+            return !(env && std::strcmp(env, "0") == 0);
         }();
         return on;
     }
