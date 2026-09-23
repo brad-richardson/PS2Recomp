@@ -1038,8 +1038,9 @@ void register_ps2_runtime_expansion_tests()
                 return Ps2FastRead32(rdram.data(), Ps2FastRead32(rdram.data(), kMpegAddr + 0x40u));
             };
 
-            // A previous movie left the work area ended; Create must clear it.
-            Ps2FastWrite32(rdram.data(), kMpegWorkAddr, 1u);
+            // A previous movie left the work area dirty; Create must clear it.
+            // 7, not 1, so the GetPicture check below can't pass on stale data.
+            Ps2FastWrite32(rdram.data(), kMpegWorkAddr, 7u);
             t.IsTrue(create() != 0u, "sceMpegCreate should accept the work area");
             t.Equals(Ps2FastRead32(rdram.data(), kMpegAddr + 0x40u), kMpegWorkAddr,
                      "sceMpegCreate should point mpeg+0x40 at the work area");
