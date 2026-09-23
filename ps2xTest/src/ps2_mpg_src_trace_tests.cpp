@@ -59,6 +59,25 @@ namespace
         return READ32(addr);
     }
 
+    // WRITE-macro probe for the Part-3 dmareg tap (real runtime: DMA
+    // registers are special addresses, so Store32 must succeed).
+    uint32_t srcDmaProbe32(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr, uint32_t value)
+    {
+        WRITE32(addr, value);
+        return runtime->memory().readIORegister(addr);
+    }
+
+    void srcWriteMpgPayload(uint8_t *rdram, uint32_t payload, uint16_t imm)
+    {
+        const uint32_t mpgCmd = srcMakeVifCmd(0x4Au, 2u, imm);
+        std::memcpy(rdram + payload, &mpgCmd, sizeof(mpgCmd));
+        for (uint32_t i = 0u; i < 16u; ++i)
+        {
+            rdram[payload + 4u + i] = static_cast<uint8_t>(0xA0u + i);
+        }
+        std::memset(rdram + payload + 20u, 0x5A, 12u);
+    }
+
     size_t countLines(const std::string &text)
     {
         size_t n = 0u;
@@ -237,8 +256,10 @@ void register_ps2_mpg_src_trace_tests()
 
             uint8_t *rdram = mem.getRDRAM();
             srcWriteDmaTag(rdram, kTag, srcMakeDmaTag(1u, 3u, kMicro));
+            // TTE MPG uses a nonzero slot so this stays a pure mpgsrc
+            // test (a dest-0 TTE MPG would also emit an mpgpay line).
             const uint32_t nopCmd = srcMakeVifCmd(0x00u, 0u, 0u);
-            const uint32_t mpgCmd = srcMakeVifCmd(0x4Au, 2u, 0u);
+            const uint32_t mpgCmd = srcMakeVifCmd(0x4Au, 2u, 4u);
             std::memcpy(rdram + kTag + 8u, &nopCmd, sizeof(nopCmd));
             std::memcpy(rdram + kTag + 12u, &mpgCmd, sizeof(mpgCmd));
             for (uint32_t i = 0u; i < 16u; ++i)
@@ -255,7 +276,7 @@ void register_ps2_mpg_src_trace_tests()
             const std::string text = readWholeFile(tmp);
             char expected[256];
             std::snprintf(expected, sizeof(expected),
-                          "mpgsrc vsync=1200 tag_at=0x00027600 id=3 qwc=1 addr=0x00435bf8 tte_vif=000000004a020000\n");
+                          "mpgsrc vsync=1200 tag_at=0x00027600 id=3 qwc=1 addr=0x00435bf8 tte_vif=000000004a020004\n");
             t.Equals(text, std::string(expected), "walker must log the in-range REF tag exactly once");
             std::remove(tmp.c_str());
         });
@@ -431,6 +452,244 @@ void register_ps2_mpg_src_trace_tests()
             t.IsTrue(text.find("srcread vsync=0 addr=0x00435bfc size=4 "
                                "pc=0x00123456 ra=0x00000000 fn=srcReadProbe32") != std::string::npos,
                      "macro tap must log addr size pc ra and the host function name");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("chain mpgpay attributes dest-0 payload to EE source", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-mpgpay-chain.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            mem.gs_regs.vsyncTick.store(1310u, std::memory_order_relaxed);
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag = 0x00027C00u;
+            constexpr uint32_t kPayload = kTag + 16u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            // CNT qwc=2: TTE NOPs (upper half zero) + 32 inline payload
+            // bytes (CNT data always follows the tag).
+            srcWriteDmaTag(rdram, kTag, srcMakeDmaTag(2u, 1u, 0u));
+            srcWriteMpgPayload(rdram, kPayload, 0u);
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+            mem.processPendingTransfers();
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            char expected[256];
+            std::snprintf(expected, sizeof(expected),
+                          "mpgpay vsync=1310 imm=0 num=2 src=0x00027c14 srcmask=0x00027c14 mode=chain:1 tag_at=0x00027c00\n");
+            t.Equals(text, std::string(expected), "chain dest-0 upload must log its EE source");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("normal-mode mpgpay uses the MADR source", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-mpgpay-normal.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            mem.gs_regs.vsyncTick.store(1311u, std::memory_order_relaxed);
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kPayload = 0x00027E00u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            srcWriteMpgPayload(rdram, kPayload, 0u);
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x10u, kPayload), "write VIF1 MADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x20u, 2u), "write VIF1 QWC should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x100u), "write VIF1 CHCR STR mode0 should succeed");
+            mem.processPendingTransfers();
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            char expected[256];
+            std::snprintf(expected, sizeof(expected),
+                          "mpgpay vsync=1311 imm=0 num=2 src=0x00027e04 srcmask=0x00027e04 mode=normal tag_at=-\n");
+            t.Equals(text, std::string(expected), "normal-mode dest-0 upload must log MADR source");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("mpgpay skips nonzero imm and out-of-window vsync", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-mpgpay-window.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str(), 1300u, 1320u),
+                     "test config should install");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kPayload = 0x00027F00u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            // The drain consumes QWC, so re-arm MADR+QWC before every kick
+            // (mirrors real DMA programming).
+            srcWriteMpgPayload(rdram, kPayload, 5u);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x10u, kPayload), "write VIF1 MADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x20u, 2u), "write VIF1 QWC should succeed");
+
+            mem.gs_regs.vsyncTick.store(1310u, std::memory_order_relaxed);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x100u), "write VIF1 CHCR should succeed");
+            mem.processPendingTransfers();
+
+            srcWriteMpgPayload(rdram, kPayload, 0u);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x10u, kPayload), "write VIF1 MADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x20u, 2u), "write VIF1 QWC should succeed");
+            mem.gs_regs.vsyncTick.store(1400u, std::memory_order_relaxed);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x100u), "write VIF1 CHCR should succeed");
+            mem.processPendingTransfers();
+
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x10u, kPayload), "write VIF1 MADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x20u, 2u), "write VIF1 QWC should succeed");
+            mem.gs_regs.vsyncTick.store(1315u, std::memory_order_relaxed);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x100u), "write VIF1 CHCR should succeed");
+            mem.processPendingTransfers();
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(1u), "only the in-window dest-0 upload must log");
+            t.IsTrue(text.find("mpgpay vsync=1315 imm=0 num=2 src=0x00027f04") != std::string::npos,
+                     "in-window dest-0 upload must log its source");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("pay map lookup unit", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-paymap.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+            t.IsTrue(!ps2_mpg_src_trace::payArmed(), "no map installed yet");
+
+            alignas(16) uint8_t buf[64];
+            std::memset(buf, 0, sizeof(buf));
+            Ps2VifSrcSpan spans[2];
+            spans[0].bufOff = 0u;
+            spans[0].len = 8u;
+            spans[0].eeAddr = 0x00200008u;
+            spans[0].tagId = 1;
+            spans[0].tagAt = 0x00200000u;
+            spans[1].bufOff = 8u;
+            spans[1].len = 56u;
+            spans[1].eeAddr = 0x00300000u;
+            spans[1].tagId = 1;
+            spans[1].tagAt = 0x00200000u;
+            ps2_mpg_src_trace::setPayMap(buf, sizeof(buf), spans, 2u,
+                                          ps2_mpg_src_trace::PayChain, 0u);
+            t.IsTrue(ps2_mpg_src_trace::payArmed(), "installed map must arm the hook");
+
+            uint32_t ee = 0u;
+            int32_t tagId = -2;
+            uint32_t tagAt = 0u;
+            uint32_t mode = 0u;
+            t.IsTrue(ps2_mpg_src_trace::lookupPay(buf + 4u, ee, tagId, tagAt, mode), "TTE byte must map");
+            t.Equals(ee, 0x0020000Cu, "TTE byte maps to tagAt+8+off");
+            t.Equals(tagId, 1, "span tag id must come through");
+            t.Equals(tagAt, 0x00200000u, "span tagAt must come through");
+            t.Equals(mode, ps2_mpg_src_trace::PayChain, "chain mode must come through");
+            t.IsTrue(ps2_mpg_src_trace::lookupPay(buf + 8u, ee, tagId, tagAt, mode), "payload head must map");
+            t.Equals(ee, 0x00300000u, "payload head maps to the data EE addr");
+            t.Equals(tagAt, 0x00200000u, "span tag addr must come through");
+            t.IsTrue(!ps2_mpg_src_trace::lookupPay(buf + 64u, ee, tagId, tagAt, mode), "past-end must miss");
+
+            ps2_mpg_src_trace::clearPayMap();
+            t.IsTrue(!ps2_mpg_src_trace::payArmed(), "cleared map must disarm");
+            t.IsTrue(!ps2_mpg_src_trace::lookupPay(buf, ee, tagId, tagAt, mode), "cleared map must miss");
+            ps2_mpg_src_trace::clearForTest();
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("isDmareg names the four VIF1 regs", [](TestCase &t)
+        {
+            t.IsTrue(ps2_mpg_src_trace::isDmareg(0x10009000u), "CHCR must match");
+            t.IsTrue(ps2_mpg_src_trace::isDmareg(0x10009010u), "MADR must match");
+            t.IsTrue(ps2_mpg_src_trace::isDmareg(0x10009020u), "QWC must match");
+            t.IsTrue(ps2_mpg_src_trace::isDmareg(0x10009030u), "TADR must match");
+            t.IsTrue(!ps2_mpg_src_trace::isDmareg(0x10009004u), "CHCR+4 must not match");
+            t.IsTrue(!ps2_mpg_src_trace::isDmareg(0x10008000u), "VIF0 CHCR must not match");
+            t.IsTrue(!ps2_mpg_src_trace::isDmareg(0x10009040u), "ASR0 must not match");
+            t.Equals(std::string(ps2_mpg_src_trace::dmaregName(0x10009000u)), std::string("CHCR"), "CHCR name");
+            t.Equals(std::string(ps2_mpg_src_trace::dmaregName(0x10009010u)), std::string("MADR"), "MADR name");
+            t.Equals(std::string(ps2_mpg_src_trace::dmaregName(0x10009020u)), std::string("QWC"), "QWC name");
+            t.Equals(std::string(ps2_mpg_src_trace::dmaregName(0x10009030u)), std::string("TADR"), "TADR name");
+        });
+
+        tc.Run("dmareg line format window and 256 cap", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-dmareg.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str(), 1300u, 1320u),
+                     "test config should install");
+            t.IsTrue(ps2_mpg_src_trace::dmaregArmed(), "watch must be armed after configure");
+
+            R5900Context ctx{};
+            ctx.pc = 0x00401100u;
+            srcSetReg(ctx, 31, 0x00401200u);
+            srcSetReg(ctx, 4, 0x00435000u);
+            srcSetReg(ctx, 16, 0x00C0FFEEu);
+
+            ps2_mpg_src_trace::noteDmareg(1200u, 0x10009010u, 0x00435BF8u,
+                                          0x00401100u, 0x00401200u, "sub_dma", &ctx);
+            ps2_mpg_src_trace::noteDmareg(1310u, 0x10009010u, 0x00435BF8u,
+                                          0x00401100u, 0x00401200u, "sub_dma", &ctx);
+            for (uint32_t i = 0u; i < 260u; ++i)
+            {
+                ps2_mpg_src_trace::noteDmareg(1310u, 0x10009030u, i,
+                                              0x00401100u, 0x00401200u, "sub_dma", &ctx);
+            }
+            t.IsTrue(!ps2_mpg_src_trace::dmaregArmed(), "exhausted watch must disarm");
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(256u), "watch must stop at 256 lines");
+            t.IsTrue(text.find("vsync=1200") == std::string::npos, "out-of-window store must stay silent");
+            t.IsTrue(text.find("dmareg vsync=1310 reg=MADR value=0x00435bf8 "
+                               "pc=0x00401100 ra=0x00401200 fn=sub_dma") != std::string::npos,
+                     "dmareg must carry reg value pc ra fn");
+            t.IsTrue(text.find("a0=0x00435000") != std::string::npos, "dmareg must carry a0");
+            t.IsTrue(text.find("s0=0x00c0ffee") != std::string::npos, "dmareg must carry s0");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("WRITE32 macro tap reports MADR with host fn", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-dmamacro.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = runtime.memory().getRDRAM();
+
+            R5900Context ctxStruct{};
+            R5900Context *ctx = &ctxStruct;
+            ctxStruct.pc = 0x00552288u;
+            srcSetReg(ctxStruct, 31, 0x00552300u);
+            srcSetReg(ctxStruct, 4, 0x00435BF8u);
+
+            PS2Runtime *rt = &runtime;
+            t.Equals(srcDmaProbe32(rdram, ctx, rt, 0x10009010u, 0x00435BF8u), 0x00435BF8u,
+                     "MADR write must land in the register");
+            t.Equals(srcDmaProbe32(rdram, ctx, rt, 0x10009030u, 0x00051000u), 0x00051000u,
+                     "TADR write must land in the register");
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(2u), "two dmareg lines expected");
+            t.IsTrue(text.find("dmareg vsync=0 reg=MADR value=0x00435bf8 "
+                               "pc=0x00552288 ra=0x00552300 fn=srcDmaProbe32") != std::string::npos,
+                     "macro tap must log MADR with the host function name");
+            t.IsTrue(text.find("reg=TADR value=0x00051000") != std::string::npos,
+                     "macro tap must log TADR");
             std::remove(tmp.c_str());
         });
     });

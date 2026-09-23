@@ -1173,7 +1173,18 @@ void PS2Memory::write128(uint32_t address, __m128i value)
     {
         alignas(16) uint8_t packet[16];
         _mm_storeu_si128(reinterpret_cast<__m128i *>(packet), value);
+        // E40 Part-3: CPU FIFO writes carry no EE source address.
+        const bool e40Pay = ps2_mpg_src_trace::enabled();
+        if (e40Pay)
+        {
+            ps2_mpg_src_trace::setPayMap(
+                nullptr, 0u, nullptr, 0u, ps2_mpg_src_trace::PayFifo, 0u);
+        }
         processVIF1Data(packet, sizeof(packet));
+        if (e40Pay)
+        {
+            ps2_mpg_src_trace::clearPayMap();
+        }
         if (ps2_e7::enabled())
             ps2_e7::event(gs_regs.vsyncTick.load(), "fifo-after", "mask=%u queued=%zu route=interpreter", m_path3Masked, m_path3MaskedFifo.size());
         return;
@@ -1437,10 +1448,20 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     const int kMaxChainTags = 4096;
                     std::vector<uint8_t> chainBuf;
 
+                    // E40 Part-3 DEV-ONLY: EE source spans for VIF1 chain
+                    // bytes. Empty unless the SRC trace is enabled.
+                    // Declared before appendData, which captures by ref.
+                    std::vector<Ps2VifSrcSpan> e40Spans;
+                    const bool e40Record = (channelBase == 0x10009000u) &&
+                                           ps2_mpg_src_trace::enabled();
+                    int32_t e40TagId = -1;
+                    uint32_t e40TagAt = 0u;
+
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
                     {
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
                         uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
+                        const uint32_t total = bytes;
                         const bool scratch = isScratchpad(srcAddr);
                         uint32_t src = 0;
                         src = translateAddress(srcAddr);
@@ -1466,6 +1487,18 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 chunk = maxSz2 - src;
                             if (chunk == 0)
                                 break;
+                            // E40 Part-3: record the EE source span for the
+                            // appended bytes (dev-only; e40Record gates).
+                            if (e40Record)
+                            {
+                                Ps2VifSrcSpan span;
+                                span.bufOff = static_cast<uint32_t>(chainBuf.size());
+                                span.len = chunk;
+                                span.eeAddr = srcAddr + (total - bytes);
+                                span.tagId = e40TagId;
+                                span.tagAt = e40TagAt;
+                                e40Spans.push_back(span);
+                            }
                             chainBuf.insert(chainBuf.end(), base2 + src, base2 + src + chunk);
                             bytes -= chunk;
                             src += chunk;
@@ -1507,6 +1540,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint64_t tag = loadScalar<uint64_t>(tp, 0, 16, "dma chain tag", tagAddr);
                         uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
+                        e40TagId = static_cast<int32_t>(id);
+                        e40TagAt = curTagEE;
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
@@ -1629,7 +1664,21 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             (channelBase == 0x10009000u || channelBase == 0x10008000u) &&
                             ((chcr & (1u << 6)) != 0u);
                         if (vifTagTransfer)
+                        {
+                            // E40 Part-3: the tag's upper 8 bytes are EE
+                            // bytes tagAt+8..tagAt+16.
+                            if (e40Record)
+                            {
+                                Ps2VifSrcSpan span;
+                                span.bufOff = static_cast<uint32_t>(chainBuf.size());
+                                span.len = 8u;
+                                span.eeAddr = curTagEE + 8u;
+                                span.tagId = e40TagId;
+                                span.tagAt = e40TagAt;
+                                e40Spans.push_back(span);
+                            }
                             chainBuf.insert(chainBuf.end(), tp + 8u, tp + 16u);
+                        }
 
                         if (hasPayload)
                             appendData(dataAddr, tagQwc);
@@ -1653,6 +1702,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         pt.srcAddr = 0;
                         pt.qwc = 0;
                         pt.chainData = std::move(chainBuf);
+                        // E40 Part-3: EE source spans (non-empty for VIF1
+                        // only, and only when traced at walk time).
+                        pt.srcSpans = std::move(e40Spans);
                         if (channelBase == 0x1000A000)
                         {
                             m_pendingGifTransfers.push_back(std::move(pt));
@@ -1911,11 +1963,25 @@ void PS2Memory::processPendingTransfers()
     m_pendingVif0Transfers.clear();
 
     const bool hadVif1 = !m_pendingVif1Transfers.empty();
+    // E40 Part-3: install the payload source map around each delivery
+    // (dev-only; one atomic check when off).
+    const bool e40Pay = ps2_mpg_src_trace::enabled();
     for (auto &p : m_pendingVif1Transfers)
     {
         if (!p.chainData.empty())
         {
+            if (e40Pay)
+            {
+                ps2_mpg_src_trace::setPayMap(
+                    p.chainData.data(), static_cast<uint32_t>(p.chainData.size()),
+                    p.srcSpans.data(), static_cast<uint32_t>(p.srcSpans.size()),
+                    ps2_mpg_src_trace::PayChain, 0u);
+            }
             processVIF1Data(p.chainData.data(), static_cast<uint32_t>(p.chainData.size()));
+            if (e40Pay)
+            {
+                ps2_mpg_src_trace::clearPayMap();
+            }
         }
         else if (p.qwc > 0)
         {
@@ -1930,6 +1996,7 @@ void PS2Memory::processPendingTransfers()
             {
                 continue;
             }
+            uint32_t payEe = p.srcAddr;
             if (p.fromScratchpad)
             {
                 uint32_t bytesLeft = sizeBytes;
@@ -1942,9 +2009,20 @@ void PS2Memory::processPendingTransfers()
                         chunk = PS2_SCRATCHPAD_SIZE - srcPhys;
                     if (chunk == 0)
                         break;
+                    if (e40Pay)
+                    {
+                        ps2_mpg_src_trace::setPayMap(
+                            m_scratchpad + srcPhys, chunk, nullptr, 0u,
+                            ps2_mpg_src_trace::PayNormal, payEe);
+                    }
                     processVIF1Data(m_scratchpad + srcPhys, chunk);
+                    if (e40Pay)
+                    {
+                        ps2_mpg_src_trace::clearPayMap();
+                    }
                     bytesLeft -= chunk;
                     srcPhys += chunk;
+                    payEe += chunk;
                 }
             }
             else
@@ -1959,9 +2037,20 @@ void PS2Memory::processPendingTransfers()
                         chunk = PS2_RAM_SIZE - srcPhys;
                     if (chunk == 0)
                         break;
+                    if (e40Pay)
+                    {
+                        ps2_mpg_src_trace::setPayMap(
+                            m_rdram + srcPhys, chunk, nullptr, 0u,
+                            ps2_mpg_src_trace::PayNormal, payEe);
+                    }
                     processVIF1Data(srcPhys, chunk);
+                    if (e40Pay)
+                    {
+                        ps2_mpg_src_trace::clearPayMap();
+                    }
                     bytesLeft -= chunk;
                     srcPhys += chunk;
+                    payEe += chunk;
                 }
             }
         }

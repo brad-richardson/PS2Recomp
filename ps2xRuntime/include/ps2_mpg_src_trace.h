@@ -44,7 +44,15 @@
 // the READ8/16/32/64/128 macros (behind readArmed() plus a lock-free
 // address pre-filter, since loads are hotter), forwarding to
 // noteReadCtx. Inlined constant-address FAST_READ* sequences bypass it
-// the same way (stated gap).
+// the same way (stated gap). Part-3 adds (a) a payload source map: the
+// VIF1 chain walker records EE spans per appended byte range
+// (Ps2VifSrcSpan cargo on PendingTransfer) and each delivery installs it
+// around processVIF1Data, so the MPG handler logs `mpgpay` with the EE
+// source of dest-0 payloads (normal mode installs MADR-based spans,
+// FIFO a sourceless marker); (b) a `dmareg` watch on the VIF1 DMA
+// registers behind dmaregArmed(), tapped from WRITE8/16/32/64 (generated
+// code has no inlined stores to 0x1000xxxx, verified codegen-wide, so the
+// macros see every DMA-reg write).
 
 #pragma once
 
@@ -59,6 +67,7 @@
 #include <vector>
 
 #include "ps2_runtime.h"
+#include "ps2_vif_src_span.h"
 
 namespace ps2_mpg_src_trace
 {
@@ -115,6 +124,15 @@ namespace detail
         uint64_t linesWritten = 0u;
         std::vector<uint32_t> watches; // armed tag_at+4 words
         uint64_t readHits[2] = {0u, 0u}; // per-region srcread hits
+        // E40 Part-3 active payload source map (one delivery at a time;
+        // the EE thread delivers synchronously).
+        bool payInstalled = false;
+        const uint8_t *payBase = nullptr;
+        uint32_t payLen = 0u;
+        uint32_t payEeBase = 0u;
+        uint32_t payMode = 0u;
+        std::vector<Ps2VifSrcSpan> paySpans;
+        uint64_t dmHits = 0u; // dmareg lines emitted
     };
 
     inline State &state()
@@ -143,6 +161,20 @@ namespace detail
 
     // 1 while any read region still has hits left (set under lock).
     inline std::atomic<uint32_t> &readOpen()
+    {
+        static std::atomic<uint32_t> n{1u};
+        return n;
+    }
+
+    // 1 while a payload source map is installed (set under lock).
+    inline std::atomic<uint32_t> &payInstalledFlag()
+    {
+        static std::atomic<uint32_t> n{0u};
+        return n;
+    }
+
+    // 1 while the dmareg watch still has lines left (set under lock).
+    inline std::atomic<uint32_t> &dmOpen()
     {
         static std::atomic<uint32_t> n{1u};
         return n;
@@ -496,6 +528,236 @@ inline void noteStoreCtx(const PS2Runtime *runtime, const R5900Context *ctx,
     noteStore(vsync, addr, width, valueLo, valueHi, pc, ra, fn, ctx);
 }
 
+// E40 Part-3: payload source map. Installed around each VIF1 delivery
+// so the MPG handler can attribute dest-0 payload bytes to the EE
+// address they came from.
+inline constexpr uint32_t PayNone = 0u;
+inline constexpr uint32_t PayChain = 1u;
+inline constexpr uint32_t PayNormal = 2u;
+inline constexpr uint32_t PayFifo = 3u;
+
+// Install a map for one delivery: buffer [base, base+len) reads EE from
+// eeBase when spans is empty (normal mode), or per-span when given
+// (chain mode). Fifo carries no spans and no base.
+inline void setPayMap(const uint8_t *base, uint32_t len,
+                      const Ps2VifSrcSpan *spans, uint32_t n,
+                      uint32_t mode, uint32_t eeBase)
+{
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.payInstalled = true;
+    s.payBase = base;
+    s.payLen = len;
+    s.payEeBase = eeBase;
+    s.payMode = mode;
+    s.paySpans.clear();
+    if (spans != nullptr && n > 0u)
+    {
+        s.paySpans.assign(spans, spans + n);
+    }
+    detail::payInstalledFlag().store(1u, std::memory_order_relaxed);
+}
+
+inline void clearPayMap()
+{
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.payInstalled = false;
+    s.payBase = nullptr;
+    s.payLen = 0u;
+    s.payEeBase = 0u;
+    s.payMode = PayNone;
+    s.paySpans.clear();
+    detail::payInstalledFlag().store(0u, std::memory_order_relaxed);
+}
+
+// Fast gate for the MPG-handler hook: enabled AND a map installed.
+inline bool payArmed()
+{
+    if (!enabled())
+    {
+        return false;
+    }
+    return detail::payInstalledFlag().load(std::memory_order_relaxed) != 0u;
+}
+
+// Attribute a payload byte to its EE source. Returns false when no map
+// is installed or the pointer falls outside it.
+inline bool lookupPay(const uint8_t *p, uint32_t &ee, int32_t &tagId,
+                      uint32_t &tagAt, uint32_t &mode)
+{
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.payInstalled)
+    {
+        return false;
+    }
+    mode = s.payMode;
+    if (mode == PayFifo)
+    {
+        ee = 0u;
+        tagId = -1;
+        tagAt = 0u;
+        return true;
+    }
+    for (const Ps2VifSrcSpan &span : s.paySpans)
+    {
+        if (p >= s.payBase + span.bufOff && p < s.payBase + span.bufOff + span.len)
+        {
+            ee = span.eeAddr + static_cast<uint32_t>(p - (s.payBase + span.bufOff));
+            tagId = span.tagId;
+            tagAt = span.tagAt;
+            return true;
+        }
+    }
+    if (mode == PayNormal && s.payBase != nullptr &&
+        p >= s.payBase && p < s.payBase + s.payLen)
+    {
+        ee = s.payEeBase + static_cast<uint32_t>(p - s.payBase);
+        tagId = -1;
+        tagAt = 0u;
+        return true;
+    }
+    return false;
+}
+
+// `mpgpay` line for a dest-0 upload with a mapped source:
+//   mpgpay vsync=<n> imm=0 num=<n> src=0x<raw EE> srcmask=0x<raw & 0x1FFFFFFF>
+//     mode=<chain:<id>|normal|fifo> tag_at=0x<…> (chain) or -
+// The uncached/KSEG-mirror note: a REF addr like 0x20435BF8 aliases the
+// same RAM as 0x00435BF8; srcmask folds all mirrors to one value.
+inline void noteMpgpay(uint64_t vsync, uint32_t num, uint32_t ee,
+                       uint32_t mode, int32_t tagId, uint32_t tagAt)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    char modestr[16];
+    if (mode == PayChain)
+        std::snprintf(modestr, sizeof(modestr), "chain:%d", tagId);
+    else if (mode == PayNormal)
+        std::snprintf(modestr, sizeof(modestr), "normal");
+    else
+        std::snprintf(modestr, sizeof(modestr), "fifo");
+    char tagstr[16];
+    if (mode == PayChain)
+        std::snprintf(tagstr, sizeof(tagstr), "0x%08x", tagAt);
+    else
+        std::snprintf(tagstr, sizeof(tagstr), "-");
+    char line[192];
+    std::snprintf(line, sizeof(line),
+                  "mpgpay vsync=%llu imm=0 num=%u src=0x%08x srcmask=0x%08x mode=%s tag_at=%s",
+                  static_cast<unsigned long long>(vsync), num,
+                  ee, ee & 0x1FFFFFFFu, modestr, tagstr);
+    detail::emitLineLocked(s, line);
+}
+
+// E40 Part-3: VIF1 DMA register store watch (D1_CHCR/MADR/QWC/TADR).
+// First kMaxDmLines stores in-window log one `dmareg` line:
+//   dmareg vsync=<n> reg=<CHCR|MADR|QWC|TADR> value=0x<low 32 bits>
+//     pc=0x<guest pc> ra=0x<> fn=<host func> + a0..s7 (low 32 hex)
+inline constexpr uint32_t kDmaChcr = 0x10009000u;
+inline constexpr uint32_t kDmaMadr = 0x10009010u;
+inline constexpr uint32_t kDmaQwc = 0x10009020u;
+inline constexpr uint32_t kDmaTadr = 0x10009030u;
+inline constexpr uint64_t kMaxDmLines = 256ull;
+
+inline bool isDmareg(uint32_t addr)
+{
+    return addr == kDmaChcr || addr == kDmaMadr || addr == kDmaQwc || addr == kDmaTadr;
+}
+
+inline const char *dmaregName(uint32_t addr)
+{
+    if (addr == kDmaChcr)
+        return "CHCR";
+    if (addr == kDmaMadr)
+        return "MADR";
+    if (addr == kDmaQwc)
+        return "QWC";
+    return "TADR";
+}
+
+// Fast gate for the per-store macro hook: enabled AND lines left.
+inline bool dmaregArmed()
+{
+    if (!enabled())
+    {
+        return false;
+    }
+    return detail::dmOpen().load(std::memory_order_relaxed) != 0u;
+}
+
+inline void noteDmareg(uint64_t vsync, uint32_t addr, uint32_t value,
+                       uint32_t pc, uint32_t ra, const char *fn,
+                       const R5900Context *ctx)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    if (!isDmareg(addr) || s.dmHits >= kMaxDmLines)
+    {
+        return;
+    }
+    char line[768];
+    int w = std::snprintf(line, sizeof(line),
+                          "dmareg vsync=%llu reg=%s value=0x%08x pc=0x%08x ra=0x%08x fn=%s",
+                          static_cast<unsigned long long>(vsync), dmaregName(addr), value,
+                          pc, ra, fn ? fn : "?");
+    for (int r = 0; r < kReadRegCount && w > 0; ++r)
+    {
+        const uint32_t rv = (ctx != nullptr) ? getRegU32(ctx, kReadRegs[r]) : 0u;
+        w += std::snprintf(line + w, sizeof(line) - static_cast<size_t>(w),
+                           " %s=0x%08x", kReadRegNames[r], rv);
+    }
+    if (w > 0)
+    {
+        detail::emitLineLocked(s, line);
+        ++s.dmHits;
+        if (s.dmHits >= kMaxDmLines)
+        {
+            detail::dmOpen().store(0u, std::memory_order_relaxed);
+        }
+    }
+}
+
+// Macro glue for the WRITE* taps (do…while scope: __func__ is already
+// the host function, no capture needed).
+inline void noteDmaregCtx(const PS2Runtime *runtime, const R5900Context *ctx,
+                          uint32_t addr, uint64_t value, const char *fn)
+{
+    uint64_t vsync = 0u;
+    if (runtime != nullptr)
+    {
+        vsync = runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed);
+    }
+    const uint32_t pc = (ctx != nullptr) ? ctx->pc : 0u;
+    const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+    noteDmareg(vsync, addr, static_cast<uint32_t>(value), pc, ra, fn, ctx);
+}
+
 inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to = ~0ull)
 {
     if (!path || path[0] == '\0')
@@ -517,12 +779,21 @@ inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to =
     s.watches.clear();
     s.readHits[0] = 0u;
     s.readHits[1] = 0u;
+    s.payInstalled = false;
+    s.payBase = nullptr;
+    s.payLen = 0u;
+    s.payEeBase = 0u;
+    s.payMode = PayNone;
+    s.paySpans.clear();
+    s.dmHits = 0u;
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);
     s.enabled = true;
     detail::enabledFlag().store(true, std::memory_order_relaxed);
     detail::armedCount().store(0u, std::memory_order_relaxed);
     detail::readOpen().store(1u, std::memory_order_relaxed);
+    detail::payInstalledFlag().store(0u, std::memory_order_relaxed);
+    detail::dmOpen().store(1u, std::memory_order_relaxed);
     return true;
 }
 
@@ -543,12 +814,21 @@ inline void clearForTest()
     s.watches.clear();
     s.readHits[0] = 0u;
     s.readHits[1] = 0u;
+    s.payInstalled = false;
+    s.payBase = nullptr;
+    s.payLen = 0u;
+    s.payEeBase = 0u;
+    s.payMode = PayNone;
+    s.paySpans.clear();
+    s.dmHits = 0u;
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);
     s.enabled = false;
     detail::enabledFlag().store(false, std::memory_order_relaxed);
     detail::armedCount().store(0u, std::memory_order_relaxed);
     detail::readOpen().store(1u, std::memory_order_relaxed);
+    detail::payInstalledFlag().store(0u, std::memory_order_relaxed);
+    detail::dmOpen().store(1u, std::memory_order_relaxed);
 }
 
 } // namespace ps2_mpg_src_trace

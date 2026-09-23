@@ -374,6 +374,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
         uint8_t _wv = (uint8_t)(val);                                                  \
+        if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
+            ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 1u, (uint64_t)_wv, 0u, ctx, runtime);    \
         if (ps2_mpg_src_trace::writeArmed())                                           \
@@ -392,6 +394,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                    \
         uint32_t _addr = (addr);                                                         \
         uint16_t _wv = (uint16_t)(val);                                                  \
+        if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
+            ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                       \
             ps2DiagWatchReport(rdram, _addr, 2u, (uint64_t)_wv, 0u, ctx, runtime);      \
         if (ps2_mpg_src_trace::writeArmed())                                             \
@@ -410,6 +414,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                    \
         uint32_t _addr = (addr);                                                         \
         uint32_t _wv = (uint32_t)(val);                                                  \
+        if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
+            ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                       \
             ps2DiagWatchReport(rdram, _addr, 4u, (uint64_t)_wv, 0u, ctx, runtime);      \
         if (ps2_mpg_src_trace::writeArmed())                                             \
@@ -428,6 +434,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
         uint64_t _wv = (uint64_t)(val);                                                \
+        if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
+            ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 8u, _wv, 0u, ctx, runtime);              \
         if (ps2_mpg_src_trace::writeArmed())                                           \

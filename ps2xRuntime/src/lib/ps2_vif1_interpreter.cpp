@@ -5,6 +5,7 @@
 #include <string>
 #include "ps2_e7.h"
 #include "ps2_gfx_stats.h"
+#include "ps2_mpg_src_trace.h"
 #include "ps2_vif_mpg_log.h"
 #include "ps2_vu1_entry_trace.h"
 #include "ps2_vu1_trace.h"
@@ -598,6 +599,22 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             // MPG payload is instruction-packed and should not be QW-aligned.
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
+            // E40 Part-3 DEV-ONLY payload source: for dest-0 uploads, log
+            // the EE address these payload bytes came from (chain span,
+            // normal-mode MADR base, or fifo marker).
+            if (imm == 0u && ps2_mpg_src_trace::payArmed())
+            {
+                uint32_t srcEe = 0u;
+                int32_t srcTag = -1;
+                uint32_t srcTagAt = 0u;
+                uint32_t srcMode = ps2_mpg_src_trace::PayNone;
+                if (ps2_mpg_src_trace::lookupPay(data + pos, srcEe, srcTag, srcTagAt, srcMode))
+                {
+                    ps2_mpg_src_trace::noteMpgpay(
+                        gs_regs.vsyncTick.load(std::memory_order_relaxed),
+                        num, srcEe, srcMode, srcTag, srcTagAt);
+                }
+            }
             // E39 DEV-ONLY MPG log: classify the copy outcome before running it.
             if (ps2_vif_mpg_log::enabled())
             {
