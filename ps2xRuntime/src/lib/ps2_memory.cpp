@@ -2394,6 +2394,10 @@ void PS2Memory::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 
 bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint32_t chcr)
 {
+    // GB3 Part 2: a raw-GIF backend must see these packets (with their path)
+    // through the arbiter, like the G44 shadow below.
+    if (gs.rawGifBackendActive())
+        return false;
     // G44: when the shadow feeds, route via the arbiter so both backends see
     // identical traffic in identical order (P6).
     if (ps2x_gs_shadow::routeGifViaArbiter())
@@ -2596,6 +2600,10 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
 
 bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t chcr)
 {
+    // GB3 Part 2: a raw-GIF backend must see these packets (with their path)
+    // through the arbiter, like the G44 shadow below.
+    if (gs.rawGifBackendActive())
+        return false;
     // G44: when the shadow feeds, route via the arbiter so both backends see
     // identical traffic in identical order (P7).
     if (ps2x_gs_shadow::routeGifViaArbiter())
