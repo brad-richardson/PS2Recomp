@@ -35,49 +35,56 @@ namespace ps2_syscalls
         }
     }
 
+    void applyGsCrt(PS2Runtime *runtime, uint32_t interlaced, uint32_t videoMode, uint32_t frameMode,
+                    const char *caller)
+    {
+        if (!runtime)
+            return;
+        auto &gs = runtime->memory().gs();
+        const uint64_t smode2 =
+            (static_cast<uint64_t>(interlaced) & 0x1ull) |
+            ((static_cast<uint64_t>(frameMode) & 0x1ull) << 1);
+        // PS2X_GS_SETCRT_LEGACY=1: validation kill-switch, pre-GB3
+        // behavior (SMODE1 untouched). Used for the queue-off presenter A/B.
+        static const bool s_legacy = [] {
+            const char *env = std::getenv("PS2X_GS_SETCRT_LEGACY");
+            return env && std::strcmp(env, "1") == 0;
+        }();
+        const uint64_t smode1 = s_legacy ? 0u : gsCrtSmode1ForMode(videoMode);
+
+        // GB3: a priv store; in-stream when the GS queue is on.
+        runtime->memory().gsPrivStore([&gs, smode1, smode2]()
+                                      {
+            if (smode1 != 0u)
+            {
+                gs.smode1 = smode1;
+            }
+            gs.smode2 = smode2;
+
+            // Keep CRT1 enabled after the BIOS syscall selects a display mode.
+            if ((gs.pmode & 0x3ull) == 0ull)
+            {
+                gs.pmode |= 0x1ull;
+            } });
+
+        static std::atomic<uint32_t> s_logged{0};
+        if (s_logged.fetch_add(1u, std::memory_order_relaxed) < 8u)
+        {
+            std::cerr << "[gs:setcrt] via=" << caller << " interlaced=" << interlaced << " mode=0x" << std::hex
+                      << videoMode << " field_frame=" << std::dec << frameMode << " smode1=0x" << std::hex
+                      << smode1 << " smode2=0x" << smode2 << std::dec << (s_legacy ? " (legacy)" : "")
+                      << std::endl;
+        }
+    }
+
     void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         int interlaced = getRegU32(ctx, 4); // $a0 - 0=non-interlaced, 1=interlaced
         int videoMode = getRegU32(ctx, 5);  // $a1 - 0/2=NTSC, 1/3=PAL, 0x1A+=VESA, 0x50+=DTV
         int frameMode = getRegU32(ctx, 6);  // $a2 - 0=field, 1=frame
 
-        if (runtime)
-        {
-            auto &gs = runtime->memory().gs();
-            const uint64_t smode2 =
-                (static_cast<uint64_t>(interlaced) & 0x1ull) |
-                ((static_cast<uint64_t>(frameMode) & 0x1ull) << 1);
-            // PS2X_GS_SETCRT_LEGACY=1: validation kill-switch, pre-GB3
-            // behavior (SMODE1 untouched). Used for the queue-off presenter A/B.
-            static const bool s_legacy = [] {
-                const char *env = std::getenv("PS2X_GS_SETCRT_LEGACY");
-                return env && std::strcmp(env, "1") == 0;
-            }();
-            const uint64_t smode1 = s_legacy ? 0u : gsCrtSmode1ForMode(static_cast<uint32_t>(videoMode));
-
-            // GB3: a priv store; in-stream when the GS queue is on.
-            runtime->memory().gsPrivStore([&gs, smode1, smode2]()
-                                          {
-                if (smode1 != 0u)
-                {
-                    gs.smode1 = smode1;
-                }
-                gs.smode2 = smode2;
-
-                // Keep CRT1 enabled after the BIOS syscall selects a display mode.
-                if ((gs.pmode & 0x3ull) == 0ull)
-                {
-                    gs.pmode |= 0x1ull;
-                } });
-
-            static std::atomic<uint32_t> s_logged{0};
-            if (s_logged.fetch_add(1u, std::memory_order_relaxed) < 8u)
-            {
-                std::cerr << "[gs:setcrt] interlaced=" << interlaced << " mode=0x" << std::hex << videoMode
-                          << " field_frame=" << std::dec << frameMode << " smode1=0x" << std::hex << smode1
-                          << " smode2=0x" << smode2 << std::dec << std::endl;
-            }
-        }
+        applyGsCrt(runtime, static_cast<uint32_t>(interlaced), static_cast<uint32_t>(videoMode),
+                   static_cast<uint32_t>(frameMode), "syscall");
 
         RUNTIME_LOG("PS2 GsSetCrt: interlaced=" << interlaced
                                                 << ", videoMode=" << videoMode

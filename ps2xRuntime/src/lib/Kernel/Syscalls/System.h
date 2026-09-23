@@ -8,6 +8,12 @@ namespace ps2_syscalls
     // GB3: the SMODE1 the real kernel's SetGsCrt programs for a video mode
     // (0 = mode not modelled; SMODE1 left as it was).
     uint64_t gsCrtSmode1ForMode(uint32_t videoMode);
+    // GB3: the SetGsCrt(interlaced, mode, field) effect on the priv regs
+    // (SMODE1 per mode, SMODE2 = INT | FFMD<<1, CRT1 kept on), shared by the
+    // syscall and by HLE library stubs whose real code makes that syscall
+    // (sceGsResetGraph). `caller` tags the one-shot log line.
+    void applyGsCrt(PS2Runtime *runtime, uint32_t interlaced, uint32_t videoMode, uint32_t frameMode,
+                    const char *caller);
     void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void SetGsCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void GsGetIMR(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);

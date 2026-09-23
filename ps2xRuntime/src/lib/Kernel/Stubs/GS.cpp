@@ -6,6 +6,7 @@
 #include "runtime/gs/ps2_gs_common.h"
 #include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/ee_scheduler.h"
+#include "../Syscalls/System.h"
 
 namespace ps2_stubs
 {
@@ -822,6 +823,10 @@ namespace ps2_stubs
             g_gparam.omode = static_cast<uint8_t>(omode & 0xFF);
             g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
             writeGsGParamToScratch(runtime);
+            // GB3: the real sceGsResetGraph calls SetGsCrt(interlace, omode,
+            // ffmode) here; this HLE stub never reached syscall 0x02, so
+            // SMODE1 stayed 0 (G44's blocker). Apply the same effect.
+            ps2_syscalls::applyGsCrt(runtime, interlace, omode, ffmode, "sceGsResetGraph");
             uint64_t pmode = makePmode(1, 0, 0, 0, 0, 0x80);
             uint64_t smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
             uint64_t dispfb = makeDispFb(0, 10, 0, 0, 0);
