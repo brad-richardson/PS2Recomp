@@ -30,19 +30,32 @@
 //     One per fioRead with bytes>0 (host-file data, no LBN by construction).
 //   plant vsync=<n> addr=0x<canonical watched word> value=0x<word after write>
 //     via=<path> src=<path-specific source> seq=<cdread seq|->
+//     [E42 fields, ee-store paths only:] raw=0x<unfolded addr> fn=<host sym>
+//     fn1=<host sym one level up>
+//     [E42 fields, WRITE-macro path only:] pc=0x<guest pc> ra=0x<guest ra>
+//     a0..s7 (low 32 bits hex, E40 srcread 24-reg set)
 //     One per watched-word overlap by a non-macro EE-RAM writer, first 256
 //     hits per word. Watched words (canonical = folded): 0x63B994,
 //     0x63BBE4, 0x63BEA4, 0x63C134 (the four render-chain CALL ADDR words
 //     from E40 Part-7). Both the watched words and the write address are
 //     folded by & 0x0FFFFFFF, covering the 0x00/0x20/0x30/0x80 mirrors
 //     (E40 Part-7's raw-compare gap closed here).
+//     E42 attribution: Ps2FastWrite* taps (inlined FAST_WRITE sites, no
+//     guest ctx) resolve the host caller via dladdr in a noinline helper
+//     (fn = sub_XXXXXXXX for guest code); WRITE-macro taps (which have
+//     runtime+ctx) log pc/ra/GPRs with fn = __func__. A thread-local
+//     suppress guard keeps macro-path stores to exactly one line.
 //
 // Non-macro EE-RAM write paths tapped (each cites its via= tag):
 //   ee-store ......... Ps2FastWrite8/16/32/64/128 in ps2_runtime_macros.h
 //                      (single chokepoint for ALL EE CPU stores: the WRITE*
 //                      macros route through FAST_WRITE*, and inlined
 //                      constant-address FAST_WRITE* sequences in generated
-//                      code land here too).
+//                      code land here too). E42: inlined sites log here
+//                      with dladdr fn/fn1; macro-path stores are suppressed
+//                      here and log once as ee-store-macro with ctx.
+//   ee-store-macro ... WRITE8/16/32/64/128 macros (E42): same words, with
+//                      guest pc/ra/GPRs and fn = __func__.
 //   sceCdRead ........ CD.cpp tryRead (readCdSectors into rdram+offset).
 //   sceCdRead-zero ... CD.cpp unresolved-LBN zero fill.
 //   sceCdReadChain ... CD.cpp chain loop. sceCdStRead: continueCdStRead.
@@ -75,12 +88,14 @@
 #pragma once
 
 #include "runtime/ps2_memory.h" // PS2_RAM_SIZE / PS2_RAM_MASK
+#include "ps2_runtime.h" // R5900Context / getRegU32 (E42 ctx attribution)
 
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h> // E42: dladdr host-symbol resolution
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -422,35 +437,80 @@ inline void noteFioRead(uint64_t vsync, int fd, uint32_t bufEe, uint64_t bytes)
     detail::emitLocked(s, line);
 }
 
-// Host-side write watch: logs one plant line per watched word overlapped
-// by [dstAddr, dstAddr+size). Call AFTER the bytes are visible in rdram.
-// src cites the path-specific source (e.g. "lbn=0x<x>+0x<off>",
-// "src=0x<EE/IOP addr>", "fd=<n>"); seq is the attributing cdread seq, or
-// 0 for unattributable (printed as '-').
-inline void notePlantRange(uint64_t vsync, uint32_t dstAddr, uint64_t size,
-                           const uint8_t *rdram, const char *via,
-                           const char *src, uint64_t seq)
+// Lock-free pre-filter for the WRITE-macro plant tap: true when
+// [addr, addr+size) overlaps a watched word (folded). No state, no atomics.
+inline bool isPlantWatched(uint32_t addr, uint32_t size)
 {
-    if (size == 0u || !plantArmed())
+    if (size == 0u)
     {
-        return;
+        return false;
     }
-    const uint32_t f = foldAddr(dstAddr);
+    const uint32_t f = foldAddr(addr);
     const uint64_t fEnd = static_cast<uint64_t>(f) + size;
-    int hit = -1;
     for (int i = 0; i < kPlantWords; ++i)
     {
         const uint64_t w = kPlantWord[i];
         if (w < fEnd && static_cast<uint64_t>(f) < w + 4u)
         {
-            hit = i;
-            break;
+            return true;
         }
     }
-    if (hit < 0)
+    return false;
+}
+
+namespace detail
+{
+    // Suppress guard: WRITE-macro stores reach Ps2FastWrite* too. The
+    // macro tap sets this around its inner store so the fast-write tap
+    // stays silent and each store logs exactly once (with ctx).
+    // Thread-local: the EE runs on one thread; safe either way.
+    inline bool &fastSuppressed()
+    {
+        thread_local bool suppressed = false;
+        return suppressed;
+    }
+
+    struct ScopedFastSuppress
+    {
+        bool active = false;
+        explicit ScopedFastSuppress(bool on) : active(on)
+        {
+            if (on)
+            {
+                fastSuppressed() = true;
+            }
+        }
+        ~ScopedFastSuppress()
+        {
+            if (active)
+            {
+                fastSuppressed() = false;
+            }
+        }
+    };
+} // namespace detail
+
+// Host-side write watch: logs one plant line per watched word overlapped
+// by [dstAddr, dstAddr+size). Call AFTER the bytes are visible in rdram.
+// src cites the path-specific source (e.g. "lbn=0x<x>+0x<off>",
+// "src=0x<EE/IOP addr>", "fd=<n>"); seq is the attributing cdread seq, or
+// 0 for unattributable (printed as '-'). extra, when non-null/non-empty,
+// is appended verbatim (E42 attribution fields); null keeps the E41 line
+// format byte-identical.
+inline void notePlantRangeX(uint64_t vsync, uint32_t dstAddr, uint64_t size,
+                            const uint8_t *rdram, const char *via,
+                            const char *src, uint64_t seq, const char *extra)
+{
+    if (size == 0u || !plantArmed())
     {
         return;
     }
+    if (!isPlantWatched(dstAddr, size))
+    {
+        return;
+    }
+    const uint32_t f = foldAddr(dstAddr);
+    const uint64_t fEnd = static_cast<uint64_t>(f) + size;
     detail::State &s = detail::state();
     std::lock_guard<std::mutex> lock(s.mutex);
     if (!s.enabled || vsync < s.from || vsync > s.to)
@@ -489,15 +549,97 @@ inline void notePlantRange(uint64_t vsync, uint32_t dstAddr, uint64_t size,
         {
             std::snprintf(seqBuf, sizeof(seqBuf), "%llu", static_cast<unsigned long long>(seq));
         }
-        char line[512];
-        std::snprintf(line, sizeof(line), "plant vsync=%llu addr=0x%08x value=0x%08x via=%s src=%s seq=%s",
-                      static_cast<unsigned long long>(vsync),
-                      kPlantWord[i], value,
-                      via != nullptr ? via : "-",
-                      srcBuf[0] != '\0' ? srcBuf : "-",
-                      seqBuf);
+        char line[1024];
+        int n = std::snprintf(line, sizeof(line), "plant vsync=%llu addr=0x%08x value=0x%08x via=%s src=%s seq=%s",
+                              static_cast<unsigned long long>(vsync),
+                              kPlantWord[i], value,
+                              via != nullptr ? via : "-",
+                              srcBuf[0] != '\0' ? srcBuf : "-",
+                              seqBuf);
+        if (n > 0 && extra != nullptr && extra[0] != '\0')
+        {
+            std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), " %s", extra);
+        }
         detail::emitLocked(s, line);
     }
+}
+
+inline void notePlantRange(uint64_t vsync, uint32_t dstAddr, uint64_t size,
+                           const uint8_t *rdram, const char *via,
+                           const char *src, uint64_t seq)
+{
+    notePlantRangeX(vsync, dstAddr, size, rdram, via, src, seq, nullptr);
+}
+
+// GPR indices logged on a macro-path plant line: a0-a3, v0-v1, t0-t9,
+// s0-s7 (same 24-reg set as E40 srcread/dmareg).
+inline constexpr int kPlantRegCount = 24;
+inline constexpr int kPlantRegs[24] = {4, 5, 6, 7, 2, 3,
+                                       8, 9, 10, 11, 12, 13, 14, 15, 24, 25,
+                                       16, 17, 18, 19, 20, 21, 22, 23};
+inline constexpr const char *kPlantRegNames[24] = {
+    "a0", "a1", "a2", "a3", "v0", "v1",
+    "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9",
+    "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"};
+
+// Resolves a host return address to "name+0x<off>" via dladdr; "-" when
+// unresolvable (e.g. stripped build). out must hold >= 256 bytes.
+inline void resolveHostSym(void *addr, char *out, size_t outSize)
+{
+    if (outSize == 0u)
+    {
+        return;
+    }
+    out[0] = '\0';
+    if (addr == nullptr)
+    {
+        std::snprintf(out, outSize, "-");
+        return;
+    }
+    Dl_info info;
+    std::memset(&info, 0, sizeof(info));
+    if (dladdr(addr, &info) == 0 || info.dli_sname == nullptr)
+    {
+        std::snprintf(out, outSize, "-");
+        return;
+    }
+    const uintptr_t off = reinterpret_cast<uintptr_t>(addr) -
+                          reinterpret_cast<uintptr_t>(info.dli_saddr);
+    char nameBuf[192];
+    detail::sanitizeInto(info.dli_sname, nameBuf, sizeof(nameBuf));
+    std::snprintf(out, outSize, "%s+0x%lx", nameBuf[0] != '\0' ? nameBuf : "-",
+                  static_cast<unsigned long>(off));
+}
+
+// WRITE-macro path (E42): guest ctx is reachable here. Logs one plant
+// line per overlapped watched word with fn = __func__ (the host game
+// function for guest code), guest pc/ra, and the value-forming GPRs.
+// Call AFTER the store is visible in rdram; vsync uses the same VBlank
+// mirror as the fast-write path so both share one clock.
+inline void notePlantCtx(const R5900Context *ctx,
+                         const uint8_t *rdram, uint32_t addr, uint32_t size,
+                         const char *fn)
+{
+    if (!isPlantWatched(addr, size))
+    {
+        return;
+    }
+    const uint32_t pc = (ctx != nullptr) ? ctx->pc : 0u;
+    const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+    char extra[768];
+    int n = std::snprintf(extra, sizeof(extra), "raw=0x%08x fn=%s fn1=- pc=0x%08x ra=0x%08x",
+                          addr, fn != nullptr ? fn : "-", pc, ra);
+    for (int r = 0; r < kPlantRegCount && n > 0; ++r)
+    {
+        const uint32_t rv = (ctx != nullptr) ? getRegU32(ctx, kPlantRegs[r]) : 0u;
+        n += std::snprintf(extra + n, sizeof(extra) - static_cast<size_t>(n),
+                           " %s=0x%08x", kPlantRegNames[r], rv);
+    }
+    if (n <= 0)
+    {
+        return;
+    }
+    notePlantRangeX(lastVsyncTick(), addr, size, rdram, "ee-store-macro", "-", 0u, extra);
 }
 
 // EE CPU store tap (call from Ps2FastWrite* AFTER the write). vsync comes
@@ -509,6 +651,39 @@ inline void noteFastWrite(const uint8_t *rdram, uint32_t addr, uint32_t size)
         return;
     }
     notePlantRange(lastVsyncTick(), addr, size, rdram, "ee-store", "-", 0u);
+}
+
+// E42 fast-write site tap (call from Ps2FastWrite* AFTER the write).
+// noinline so __builtin_return_address(0) is the call site inside the
+// host caller (the sub_XXXXXXXX game function for inlined FAST_WRITE
+// sequences): resolved via dladdr to fn, with one level up as fn1 for
+// the shared-helper case (Ps2FastWrite* not inlined). Silent while a
+// WRITE-macro tap holds the suppress guard (that path logs with ctx).
+__attribute__((noinline)) inline void noteFastWriteSite(const uint8_t *rdram,
+                                                        uint32_t addr, uint32_t size)
+{
+    if (!plantArmed() || detail::fastSuppressed())
+    {
+        return;
+    }
+    if (!isPlantWatched(addr, size))
+    {
+        return;
+    }
+    void *ra0 = __builtin_return_address(0);
+    // Level-up is best-effort (may be unavailable without frame
+    // pointers); the raw addresses stay on the line so a wrong-sym
+    // guess is checkable via the +off distance.
+    void *ra1 = __builtin_frame_address(1) != nullptr ? __builtin_return_address(1) : nullptr;
+    char fn0[256];
+    char fn1[256];
+    resolveHostSym(ra0, fn0, sizeof(fn0));
+    resolveHostSym(ra1, fn1, sizeof(fn1));
+    char extra[640];
+    std::snprintf(extra, sizeof(extra),
+                  "raw=0x%08x hra0=%p fn=%s hra1=%p fn1=%s",
+                  addr, ra0, fn0, ra1, fn1);
+    notePlantRangeX(lastVsyncTick(), addr, size, rdram, "ee-store", "-", 0u, extra);
 }
 
 // Test hooks (mirror ps2_mpg_src_trace.h conventions).
