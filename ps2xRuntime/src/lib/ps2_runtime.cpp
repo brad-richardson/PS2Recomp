@@ -11,6 +11,7 @@
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/ps2_gs_shadow.h"
 #include "ps2_e7.h"
 #include "ps2_e15.h"
 #include "runtime/ee_scheduler.h"
@@ -575,6 +576,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         dumpPresentationFrame(s_scratch.data(), width, height, currentTick, displayFbp, sourceFbp,
                               usedPreferredDisplaySource, false, rt->memory().gs().smode2,
                               rt->memory().gs().pmode);
+        // G44: per-vsync shadow compare against these CPU pixels.
+        ps2x_gs_shadow::onPresentFrame(currentTick, s_scratch.data(), width, height, &rt->memory().gs());
     }
 
     std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
@@ -766,6 +769,9 @@ bool PS2Runtime::syncCoreSubsystems()
                                        ps2_gfx_stats::noteGifPacket(path, size);
                                        m_gs.noteGifPath(path);
                                    });
+    // G44: shadow observes the same drained packets with path preserved.
+    m_gifArbiter.setShadowPacketFn([](GifPathId path, const uint8_t *data, uint32_t size)
+                                   { ps2x_gs_shadow::onGifPacket(static_cast<uint32_t>(path), data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
