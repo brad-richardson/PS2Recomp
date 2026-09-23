@@ -755,6 +755,18 @@ bool PS2Runtime::syncCoreSubsystems()
     }
 
     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
+    // GB2 step (a): PS2X_GS_QUEUE=1 runs the CPU GS backend on its own
+    // thread behind the command queue. Default off: direct calls, today's
+    // code path. Enabled here during init, before the game thread spawns.
+    if (const char *queueEnv = std::getenv("PS2X_GS_QUEUE"))
+    {
+        if (std::strcmp(queueEnv, "1") == 0 && !m_gs.queueEnabled())
+        {
+            m_gs.setQueueEnabled(true);
+            std::cerr << "[gs:queue] enabled (PS2X_GS_QUEUE=1): CPU backend on GS worker thread"
+                      << std::endl;
+        }
+    }
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
     // E33: per-path GIF census + GS draw attribution. The listener runs
