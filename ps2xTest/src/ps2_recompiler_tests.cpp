@@ -901,6 +901,178 @@ void register_ps2_recompiler_tests()
             std::filesystem::remove(configPath, removeError);
         });
 
+        tc.Run("config manager parses extra_function_starts", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path configPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-extra-starts-" + uniqueSuffix + ".toml");
+
+            std::ofstream configFile(configPath);
+            t.IsTrue(static_cast<bool>(configFile), "temp config file should be writable");
+            if (!configFile)
+            {
+                return;
+            }
+
+            configFile << "[general]\n";
+            configFile << "input = \"dummy.elf\"\n";
+            configFile << "output = \"out\"\n";
+            configFile << "extra_function_starts = [\"0x396b40\", 131072, \"not-an-address\"]\n";
+            configFile.close();
+
+            ConfigManager manager(configPath.string());
+            RecompilerConfig config = manager.loadConfig();
+
+            t.Equals(config.extraFunctionStarts.size(), static_cast<size_t>(2),
+                     "two parsable extra starts should load; the bad entry is skipped");
+            if (config.extraFunctionStarts.size() >= 2)
+            {
+                t.Equals(config.extraFunctionStarts[0], 0x396B40u, "hex string should parse");
+                t.Equals(config.extraFunctionStarts[1], 0x20000u, "integer should parse");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove(configPath, removeError);
+        });
+
+        tc.Run("config manager defaults extra_function_starts to empty", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path configPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-extra-starts-empty-" + uniqueSuffix + ".toml");
+
+            std::ofstream configFile(configPath);
+            t.IsTrue(static_cast<bool>(configFile), "temp config file should be writable");
+            if (!configFile)
+            {
+                return;
+            }
+
+            configFile << "[general]\n";
+            configFile << "input = \"dummy.elf\"\n";
+            configFile << "output = \"out\"\n";
+            configFile.close();
+
+            ConfigManager manager(configPath.string());
+            RecompilerConfig config = manager.loadConfig();
+
+            t.IsTrue(config.extraFunctionStarts.empty(), "missing key should leave the list empty");
+
+            std::error_code removeError;
+            std::filesystem::remove(configPath, removeError);
+        });
+
+        tc.Run("config manager round-trips extra_function_starts", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path configPath =
+                std::filesystem::temp_directory_path() / ("ps2recomp-extra-starts-rt-" + uniqueSuffix + ".toml");
+
+            RecompilerConfig saved{};
+            saved.inputPath = "dummy.elf";
+            saved.outputPath = "out";
+            saved.extraFunctionStarts = {0x396B40u, 0x140BC0u};
+
+            ConfigManager manager(configPath.string());
+            manager.saveConfig(saved);
+            RecompilerConfig loaded = manager.loadConfig();
+
+            t.Equals(loaded.extraFunctionStarts.size(), static_cast<size_t>(2),
+                     "saved starts should reload");
+            if (loaded.extraFunctionStarts.size() >= 2)
+            {
+                t.Equals(loaded.extraFunctionStarts[0], 0x396B40u, "first start should round-trip");
+                t.Equals(loaded.extraFunctionStarts[1], 0x140BC0u, "second start should round-trip");
+            }
+
+            std::error_code removeError;
+            std::filesystem::remove(configPath, removeError);
+        });
+
+        tc.Run("extra function starts resolve to the decoded containing owner", [](TestCase &t) {
+            std::vector<Section> sections = {
+                {".text", 0x1000u, 0x3000u, 0u, true, false, false, true, nullptr}
+            };
+
+            std::vector<Function> functions = {
+                makeFunction("container", 0x1000u, 0x1018u),
+                makeFunction("other", 0x2000u, 0x2010u)
+            };
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decodedFunctions;
+            decodedFunctions[0x1000u] = {
+                makeNopLike(0x1000u),
+                makeNopLike(0x1004u),
+                makeNopLike(0x1008u),
+                makeNopLike(0x100Cu),
+                makeNopLike(0x1010u),
+                makeNopLike(0x1014u)
+            };
+            decodedFunctions[0x2000u] = {
+                makeNopLike(0x2000u),
+                makeNopLike(0x2004u)
+            };
+
+            const auto resolved = PS2Recompiler::ResolveExtraFunctionStarts(
+                functions, decodedFunctions, sections, {0x1008u, 0x1008u, 0x2004u});
+
+            t.Equals(resolved.size(), static_cast<size_t>(2), "two owners should resolve");
+            auto containerIt = resolved.find(0x1000u);
+            t.IsTrue(containerIt != resolved.end(), "container owner should exist");
+            if (containerIt != resolved.end())
+            {
+                t.Equals(containerIt->second.size(), static_cast<size_t>(1),
+                         "duplicate extra starts should dedupe");
+                if (!containerIt->second.empty())
+                {
+                    t.Equals(containerIt->second.front(), 0x1008u, "interior target should resolve");
+                }
+            }
+            auto otherIt = resolved.find(0x2000u);
+            t.IsTrue(otherIt != resolved.end(), "second owner should exist");
+            if (otherIt != resolved.end() && !otherIt->second.empty())
+            {
+                t.Equals(otherIt->second.front(), 0x2004u, "second target should resolve");
+            }
+        });
+
+        tc.Run("extra function starts skip starts, gaps and undecoded owners", [](TestCase &t) {
+            std::vector<Section> sections = {
+                {".text", 0x1000u, 0x2000u, 0u, true, false, false, true, nullptr},
+                {".data", 0x4000u, 0x1000u, 0u, false, true, false, false, nullptr}
+            };
+
+            Function container = makeFunction("container", 0x1000u, 0x1018u);
+            Function stubbed = makeFunction("stubbed", 0x1800u, 0x1810u);
+            stubbed.isRecompiled = false;
+            stubbed.isStub = true;
+            Function undecoded = makeFunction("undecoded", 0x1900u, 0x1910u);
+            std::vector<Function> functions = {container, stubbed, undecoded};
+
+            std::unordered_map<uint32_t, std::vector<Instruction>> decodedFunctions;
+            decodedFunctions[0x1000u] = {
+                makeNopLike(0x1000u),
+                makeNopLike(0x1004u)
+            };
+
+            const auto resolved = PS2Recompiler::ResolveExtraFunctionStarts(
+                functions, decodedFunctions, sections,
+                {0x1000u, 0x4800u, 0x1500u, 0x1804u, 0x1904u, 0x1004u});
+
+            t.Equals(resolved.size(), static_cast<size_t>(1), "only the decoded interior target should resolve");
+            auto containerIt = resolved.find(0x1000u);
+            t.IsTrue(containerIt != resolved.end(), "container owner should exist");
+            if (containerIt != resolved.end())
+            {
+                t.Equals(containerIt->second.size(), static_cast<size_t>(1),
+                         "start/exec-gap/stub/undecoded extras should be skipped");
+                if (!containerIt->second.empty())
+                {
+                    t.Equals(containerIt->second.front(), 0x1004u, "surviving target should be 0x1004");
+                }
+            }
+        });
+
         tc.Run("elf parser ignores STT_FUNC symbols in non-executable sections", [](TestCase &t) {
             const auto uniqueSuffix = std::to_string(
                 static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));

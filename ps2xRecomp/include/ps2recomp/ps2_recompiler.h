@@ -45,6 +45,15 @@ namespace ps2recomp
         static size_t ResliceEntryFunctions(
             std::vector<Function> &functions,
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions);
+        // E46: resolve configured extra function starts to resume entries.
+        // Returns owner function start -> interior targets. Skips addresses
+        // that are already function starts, are not executable, or have no
+        // decoded containing function.
+        static std::map<uint32_t, std::vector<uint32_t>> ResolveExtraFunctionStarts(
+            const std::vector<Function> &functions,
+            const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+            const std::vector<Section> &sections,
+            const std::vector<uint32_t> &extraStarts);
 
         static std::string ClampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength);
 

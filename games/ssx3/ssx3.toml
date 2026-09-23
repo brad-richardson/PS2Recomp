@@ -206,6 +206,19 @@ stubs = [
   "ret0@0x0042c1f0",
 ]
 
+# Extra function starts (E46): indirect-call (jalr) targets observed in boot
+# logs that land inside an existing CSV function's range. Each is registered
+# as a resume entry of its containing function (same path as direct-call
+# interior targets). Without entries, dispatchGuestBranch silently skips the
+# call. Full census (18 targets) in ssx3 local/research/E46/REPORT.md.
+# Boot-proven subset only: adding all 18 breaks the menu transition at tick
+# ~246 (black screen; breaker in the first firers, see the E46 report), while
+# 0x396B40 alone restores template mode 6 (item-0 w0 0x1b0), menus and the
+# race HUD. Add the remaining 17 incrementally with one boot each.
+extra_function_starts = [
+  "0x00396B40",
+]
+
 # Detected library-like functions without runtime handlers.
 # This is informational only; PS2Recomp ignores this list and recompiles them normally.
 untracked_stubs = [

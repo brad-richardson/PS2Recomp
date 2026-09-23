@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <exception>
+#include <map>
 #include <mutex>
 #include <queue>
 #include <unordered_set>
@@ -1883,6 +1884,24 @@ namespace ps2recomp
             }
         }
 
+        if (!m_config.extraFunctionStarts.empty())
+        {
+            const auto resolvedExtraStarts = ResolveExtraFunctionStarts(
+                m_functions, m_decodedFunctions, m_sections, m_config.extraFunctionStarts);
+            size_t resolvedExtraCount = 0u;
+            for (const auto &[ownerStart, targets] : resolvedExtraStarts)
+            {
+                auto &ownerTargets = m_resumeEntryTargetsByOwner[ownerStart];
+                ownerTargets.insert(ownerTargets.end(), targets.begin(), targets.end());
+                resolvedExtraCount += targets.size();
+            }
+            std::ostringstream extraMsg;
+            extraMsg << "resolved " << resolvedExtraCount << " of " << m_config.extraFunctionStarts.size()
+                     << " configured extra function start(s) across " << resolvedExtraStarts.size()
+                     << " owner function(s)";
+            m_reporter.progress(extraMsg.str());
+        }
+
         size_t totalTargets = 0u;
         for (auto it = m_resumeEntryTargetsByOwner.begin(); it != m_resumeEntryTargetsByOwner.end();)
         {
@@ -2229,6 +2248,106 @@ namespace ps2recomp
         std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions)
     {
         return resliceEntryFunctionsImpl(functions, decodedFunctions);
+    }
+
+    std::map<uint32_t, std::vector<uint32_t>> PS2Recompiler::ResolveExtraFunctionStarts(
+        const std::vector<Function> &functions,
+        const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+        const std::vector<Section> &sections,
+        const std::vector<uint32_t> &extraStarts)
+    {
+        std::map<uint32_t, std::vector<uint32_t>> resolved;
+
+        auto isExecutableAddress = [&](uint32_t address) -> bool
+        {
+            for (const auto &section : sections)
+            {
+                if (!section.isCode)
+                {
+                    continue;
+                }
+                if (address >= section.address && address < (section.address + section.size))
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        std::unordered_set<uint32_t> knownStarts;
+        knownStarts.reserve(functions.size());
+        for (const auto &function : functions)
+        {
+            knownStarts.insert(function.start);
+        }
+
+        for (uint32_t target : extraStarts)
+        {
+            if (!isExecutableAddress(target))
+            {
+                continue;
+            }
+
+            if (knownStarts.contains(target))
+            {
+                continue;
+            }
+
+            const Function *best = nullptr;
+            for (const auto &function : functions)
+            {
+                if (!function.isRecompiled || function.isStub || function.isSkipped)
+                {
+                    continue;
+                }
+
+                if (isEntryFunctionName(function.name))
+                {
+                    continue;
+                }
+
+                if (target < function.start || target >= function.end)
+                {
+                    continue;
+                }
+
+                auto decodedIt = decodedFunctions.find(function.start);
+                if (decodedIt == decodedFunctions.end())
+                {
+                    continue;
+                }
+
+                const auto &decoded = decodedIt->second;
+                const bool hasAddress = std::any_of(decoded.begin(), decoded.end(),
+                                                    [&](const Instruction &candidate)
+                                                    { return candidate.address == target; });
+                if (!hasAddress)
+                {
+                    continue;
+                }
+
+                if (!best || function.start > best->start)
+                {
+                    best = &function;
+                }
+            }
+
+            if (!best || best->start == target)
+            {
+                continue;
+            }
+
+            resolved[best->start].push_back(target);
+        }
+
+        for (auto &[ownerStart, targets] : resolved)
+        {
+            (void)ownerStart;
+            std::sort(targets.begin(), targets.end());
+            targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+        }
+
+        return resolved;
     }
 
     StubTarget PS2Recompiler::resolveStubTarget(const std::string &name)

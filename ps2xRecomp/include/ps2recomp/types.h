@@ -187,6 +187,11 @@ namespace ps2recomp
         std::vector<std::string> skipFunctions;
         std::unordered_map<uint32_t, std::string> patches;
         std::vector<std::string> stubImplementations;
+        // Extra function starts (E46): guest PCs that are real indirect-call
+        // (jalr) targets inside an existing function's range. Each entry is
+        // registered as a resume entry of its containing function, the same
+        // path direct-call (jal) interior targets take.
+        std::vector<uint32_t> extraFunctionStarts;
         std::unordered_map<uint32_t, uint32_t> mmioByInstructionAddress;
         std::vector<JumpTable> jumpTables;
     };

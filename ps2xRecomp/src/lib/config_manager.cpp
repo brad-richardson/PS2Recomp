@@ -83,6 +83,45 @@ namespace ps2recomp
                 config.skipFunctions = toml::find<std::vector<std::string>>(data, "skip");
             }
 
+            if (general.contains("extra_function_starts") && general.at("extra_function_starts").is_array())
+            {
+                for (const auto &entry : general.at("extra_function_starts").as_array())
+                {
+                    uint32_t address = 0;
+                    bool parsed = false;
+                    if (entry.is_string())
+                    {
+                        try
+                        {
+                            address = static_cast<uint32_t>(std::stoul(entry.as_string(), nullptr, 0));
+                            parsed = true;
+                        }
+                        catch (const std::exception &)
+                        {
+                            parsed = false;
+                        }
+                    }
+                    else if (entry.is_integer())
+                    {
+                        const int64_t value = entry.as_integer();
+                        if (value >= 0 && static_cast<uint64_t>(value) <= std::numeric_limits<uint32_t>::max())
+                        {
+                            address = static_cast<uint32_t>(value);
+                            parsed = true;
+                        }
+                    }
+
+                    if (parsed)
+                    {
+                        config.extraFunctionStarts.push_back(address);
+                    }
+                    else if (m_reporter)
+                    {
+                        m_reporter->warning("config", "Ignoring unparsable extra_function_starts entry.");
+                    }
+                }
+            }
+
             if (data.contains("patches") && data.at("patches").is_table())
             {
                 const auto &patches = toml::find(data, "patches");
@@ -276,6 +315,16 @@ namespace ps2recomp
         general["patch_cache"] = config.patchCache;
         general["skip"] = config.skipFunctions;
         general["stubs"] = config.stubImplementations;
+        {
+            toml::array extraStarts;
+            for (uint32_t address : config.extraFunctionStarts)
+            {
+                std::ostringstream addressStream;
+                addressStream << "0x" << std::hex << address;
+                extraStarts.push_back(addressStream.str());
+            }
+            general["extra_function_starts"] = extraStarts;
+        }
         data["general"] = general;
 
         if (!config.mmioByInstructionAddress.empty())
