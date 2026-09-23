@@ -1,11 +1,13 @@
-// I25: iOS env-file loader + SDL/UIKit glue. Compiled only for iOS
-// (PS2X_IS_IOS in ps2xRuntime/CMakeLists.txt).
+// I25: iOS env-file loader + SDL/UIKit glue (Objective-C++). Compiled only
+// for iOS (PS2X_IS_IOS in ps2xRuntime/CMakeLists.txt).
 #include "ps2_ios_runtime.h"
 #include "ps2_env_file.h"
 
 // SDL_MAIN_HANDLED: no main->SDL_main rename here (only main.cpp owns main).
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_syswm.h>
+#import <UIKit/UIKit.h>
 #include <CoreFoundation/CoreFoundation.h>
 
 #include <cstdio>
@@ -107,20 +109,60 @@ void prepareEnvironment(const char *argv0)
 
 void syncWindowSize()
 {
+    static bool attached = false;
+    static int lastW = -1;
+    static int lastH = -1;
     SDL_Window *window = SDL_GL_GetCurrentWindow();
     if (!window)
     {
         return;
     }
+    if (!attached)
+    {
+        // SDL 2.32 creates its UIWindow without a UIWindowScene. iOS 27
+        // requires the scene manifest (I7), and a scene-less window is
+        // never shown: the guest renders but the screen stays black. Attach
+        // it to the app's window scene; retried each frame until the scene
+        // has connected.
+        SDL_SysWMinfo info;
+        SDL_VERSION(&info.version);
+        if (SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_UIKIT && info.info.uikit.window)
+        {
+            UIWindow *uiWindow = info.info.uikit.window;
+            if (uiWindow.windowScene == nil)
+            {
+                for (UIScene *scene in UIApplication.sharedApplication.connectedScenes)
+                {
+                    if ([scene isKindOfClass:[UIWindowScene class]])
+                    {
+                        uiWindow.windowScene = (UIWindowScene *)scene;
+                        [uiWindow makeKeyAndVisible];
+                        break;
+                    }
+                }
+            }
+            attached = uiWindow.windowScene != nil;
+            if (attached)
+            {
+                std::fprintf(stderr, "[ios-window] attached to window scene\n");
+            }
+        }
+    }
+    // raylib only learns the window size from SIZE_CHANGED events, and
+    // UIKit sizes (and rotates) the window itself: forward every change.
     int w = 0;
     int h = 0;
     SDL_GetWindowSize(window, &w, &h);
+    if (w == lastW && h == lastH)
+    {
+        return;
+    }
+    lastW = w;
+    lastH = h;
     int dw = 0;
     int dh = 0;
     SDL_GL_GetDrawableSize(window, &dw, &dh);
     std::fprintf(stderr, "[ios-window] window=%dx%d drawable=%dx%d\n", w, h, dw, dh);
-    // raylib's SDL backend handles SIZE_CHANGED by re-running SetupViewport
-    // and updating its screen size (rcore_desktop_sdl.c).
     SDL_Event event{};
     event.type = SDL_WINDOWEVENT;
     event.window.event = SDL_WINDOWEVENT_SIZE_CHANGED;

@@ -11,7 +11,9 @@ namespace ps2x::ios
 // thing in main(), before anything reads the environment or starts SDL.
 void prepareEnvironment(const char *argv0);
 
-// UIKit sizes the SDL window to the screen itself; tell raylib the real
-// size so its viewport and GetScreenWidth/Height match. Call after InitWindow.
+// Attach SDL's UIWindow to the app's window scene (once it has connected)
+// and forward UIKit's window size to raylib whenever it changes, so the
+// viewport and GetScreenWidth/Height match. Call after InitWindow and once
+// per presented frame (main thread); cheap when nothing changed.
 void syncWindowSize();
 } // namespace ps2x::ios

@@ -110,7 +110,7 @@ else()
         target_compile_options(raylib PRIVATE -x objective-c)
     endif()
 
-    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
+    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_IOS)
         FetchContent_Declare(
             imgui
             GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -602,7 +602,8 @@ if(PS2X_GAME_CODEGEN_DIR)
     target_link_libraries(ps2EntryRunner PRIVATE ps2_game_objects)
 endif()
 
-if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
+# I25: iOS excluded like Android (the imgui panel covers the phone screen).
+if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_IOS)
     target_sources(ps2EntryRunner PRIVATE
         src/lib/ps2_debug_panel.cpp
     )
@@ -712,8 +713,8 @@ if(PS2X_IS_IOS)
     # window-size sync). PS2X_IOS gates the call sites in main.cpp and
     # ps2_runtime.cpp; CoreFoundation for CFPreferences. Kept out of unity
     # batches so its SDL include can't leak into sibling TUs.
-    target_sources(ps2_runtime PRIVATE src/lib/ps2_ios_runtime.cpp)
-    set_source_files_properties(src/lib/ps2_ios_runtime.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+    target_sources(ps2_runtime PRIVATE src/lib/ps2_ios_runtime.mm)
+    set_source_files_properties(src/lib/ps2_ios_runtime.mm PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
     target_compile_definitions(ps2_runtime PUBLIC PS2X_IOS=1)
     target_link_libraries(ps2_runtime PRIVATE "-framework CoreFoundation")
     # I7b: the iOS 27 sim traps in UIKit scene setup before SDL_main runs

@@ -847,6 +847,9 @@ bool PS2Runtime::initialize(const char *title)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
 #if defined(PS2X_IOS)
         ps2x::ios::syncWindowSize();
+        // raylib's SDL backend warns from GetWindowScaleDPI() on every
+        // EndDrawing on Apple targets (~60 lines/s); keep errors only.
+        SetTraceLogLevel(LOG_ERROR);
 #endif
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
@@ -3372,6 +3375,9 @@ void PS2Runtime::run()
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight);
 
+#if defined(PS2X_IOS)
+        ps2x::ios::syncWindowSize();
+#endif
         BeginDrawing();
         ClearBackground(BLACK);
         const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
