@@ -15,6 +15,7 @@
 #include "ps2_runtime.h"
 #include "ps2_mpg_src_trace.h"
 #include "ps2_e41_trace.h"
+#include "ps2_e43_trace.h"
 
 static inline int32_t Ps2ExtractEpi32(__m128i v, int index)
 {
@@ -249,6 +250,8 @@ static inline void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t value)
     rdram[addr & PS2_RAM_MASK] = value;
     if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
         ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
+        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
 }
 
 static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
@@ -264,11 +267,15 @@ static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
         }
         if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
             ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
+        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
     if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
         ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
+        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
 }
 
 static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
@@ -284,11 +291,15 @@ static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
         }
         if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
             ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
+        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
     if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
         ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
+        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
 }
 
 static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
@@ -304,11 +315,15 @@ static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
         }
         if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
             ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
+        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
     if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
         ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
+        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
 }
 
 static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
@@ -324,11 +339,15 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         }
         if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
             ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
+        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
     if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
         ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
+        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
 }
 
 #define FAST_READ8(addr) Ps2FastRead8(rdram, (uint32_t)(addr))
@@ -421,7 +440,10 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     do                                                                                 \
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
-        uint8_t _wv = (uint8_t)(val);                                                  \
+        uint8_t _wv = (uint8_t)(val); \
+        const bool _e43 = ps2_e43_trace::enabled();                                              \
+        const bool _e43p = _e43 && ps2_e43_trace::isProdPage(_addr);                             \
+        ps2_e43_trace::detail::ScopedProdSuppress _e43psup(_e43p);                                \
         const bool _e42plant = ps2_e41_trace::plantArmed() &&                          \
             ps2_e41_trace::isPlantWatched(_addr, 1u);                                  \
         ps2_e41_trace::detail::ScopedFastSuppress _e42suppress(_e42plant);              \
@@ -439,14 +461,19 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             FAST_WRITE8(_addr, _wv);                                                   \
         }                                                                              \
         if (_e42plant)                                                                 \
-            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 1u, __func__);              \
+            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 1u, __func__); \
+        if (_e43)                                                                             \
+            ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 1u, __func__, _e43p);              \
     } while (0)
 
 #define WRITE16(addr, val)                                                               \
     do                                                                                   \
     {                                                                                    \
         uint32_t _addr = (addr);                                                         \
-        uint16_t _wv = (uint16_t)(val);                                                  \
+        uint16_t _wv = (uint16_t)(val); \
+        const bool _e43 = ps2_e43_trace::enabled();                                              \
+        const bool _e43p = _e43 && ps2_e43_trace::isProdPage(_addr);                             \
+        ps2_e43_trace::detail::ScopedProdSuppress _e43psup(_e43p);                                \
         const bool _e42plant = ps2_e41_trace::plantArmed() &&                            \
             ps2_e41_trace::isPlantWatched(_addr, 2u);                                    \
         ps2_e41_trace::detail::ScopedFastSuppress _e42suppress(_e42plant);                \
@@ -464,14 +491,19 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             FAST_WRITE16(_addr, _wv);                                                    \
         }                                                                                \
         if (_e42plant)                                                                   \
-            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 2u, __func__);                \
+            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 2u, __func__); \
+        if (_e43)                                                                             \
+            ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 2u, __func__, _e43p);              \
     } while (0)
 
 #define WRITE32(addr, val)                                                               \
     do                                                                                   \
     {                                                                                    \
         uint32_t _addr = (addr);                                                         \
-        uint32_t _wv = (uint32_t)(val);                                                  \
+        uint32_t _wv = (uint32_t)(val); \
+        const bool _e43 = ps2_e43_trace::enabled();                                              \
+        const bool _e43p = _e43 && ps2_e43_trace::isProdPage(_addr);                             \
+        ps2_e43_trace::detail::ScopedProdSuppress _e43psup(_e43p);                                \
         const bool _e42plant = ps2_e41_trace::plantArmed() &&                            \
             ps2_e41_trace::isPlantWatched(_addr, 4u);                                    \
         ps2_e41_trace::detail::ScopedFastSuppress _e42suppress(_e42plant);                \
@@ -495,14 +527,19 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             FAST_WRITE32(_addr, _wv);                                                    \
         }                                                                                \
         if (_e42plant)                                                                   \
-            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 4u, __func__);                \
+            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 4u, __func__); \
+        if (_e43)                                                                             \
+            ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 4u, __func__, _e43p);              \
     } while (0)
 
 #define WRITE64(addr, val)                                                             \
     do                                                                                 \
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
-        uint64_t _wv = (uint64_t)(val);                                                \
+        uint64_t _wv = (uint64_t)(val); \
+        const bool _e43 = ps2_e43_trace::enabled();                                              \
+        const bool _e43p = _e43 && ps2_e43_trace::isProdPage(_addr);                             \
+        ps2_e43_trace::detail::ScopedProdSuppress _e43psup(_e43p);                                \
         const bool _e42plant = ps2_e41_trace::plantArmed() &&                          \
             ps2_e41_trace::isPlantWatched(_addr, 8u);                                  \
         ps2_e41_trace::detail::ScopedFastSuppress _e42suppress(_e42plant);              \
@@ -526,14 +563,19 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             FAST_WRITE64(_addr, _wv);                                                  \
         }                                                                              \
         if (_e42plant)                                                                 \
-            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 8u, __func__);              \
+            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 8u, __func__); \
+        if (_e43)                                                                             \
+            ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 8u, __func__, _e43p);              \
     } while (0)
 
 #define WRITE128(addr, val)                                                            \
     do                                                                                 \
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
-        __m128i _value = (val);                                                        \
+        __m128i _value = (val); \
+        const bool _e43 = ps2_e43_trace::enabled();                                              \
+        const bool _e43p = _e43 && ps2_e43_trace::isProdPage(_addr);                             \
+        ps2_e43_trace::detail::ScopedProdSuppress _e43psup(_e43p);                                \
         const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value));       \
         const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value));       \
         const bool _e42plant = ps2_e41_trace::plantArmed() &&                          \
@@ -557,7 +599,9 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             FAST_WRITE128(_addr, _value);                                              \
         }                                                                              \
         if (_e42plant)                                                                 \
-            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 16u, __func__);             \
+            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 16u, __func__); \
+        if (_e43)                                                                              \
+            ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 16u, __func__, _e43p);                \
     } while (0)
 
 // Packed Compare Greater Than (PCGT)

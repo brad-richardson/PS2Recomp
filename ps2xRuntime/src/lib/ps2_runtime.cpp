@@ -1,6 +1,7 @@
 #include "ps2_runtime.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
+#include "ps2_e43_trace.h"
 #include "ps2_gfx_stats.h"
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
@@ -2057,6 +2058,12 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      GuestBranchKind kind,
                                      const char *debugName)
 {
+    // E43 draw-record census (dev-only, default off; self-gated on the
+    // target pc first so the common path pays one compare).
+    if (targetPc == ps2_e43_trace::kWalkerTarget)
+    {
+        ps2_e43_trace::noteWalkerCall(rdram, ctx, sourcePc);
+    }
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
 
@@ -2197,7 +2204,18 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     noteCardCall("mc-call");
     ps2_e15::Trace mpegTrace("branch",m_memory.gs().vsyncTick.load(),rdram,ctx,targetPc,sourcePc,
                             g_diagWatchThreadId.load(std::memory_order_relaxed));
+    // E43 h394 hash-call tap (dev-only, default off): pre-capture args,
+    // run the synchronous callee, then capture v0 + the store flag.
+    const bool e43h394 = ps2_e43_trace::h394CallArmed(sourcePc, targetPc);
+    if (e43h394)
+    {
+        ps2_e43_trace::h394Pre(rdram, ctx);
+    }
     targetFn(rdram, ctx, this);
+    if (e43h394)
+    {
+        ps2_e43_trace::h394Post(ctx);
+    }
     mpegTrace.finish(m_memory.gs().vsyncTick.load());
     noteCardCall("mc-return");
 
