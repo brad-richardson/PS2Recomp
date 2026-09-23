@@ -52,7 +52,10 @@
 // FIFO a sourceless marker); (b) a `dmareg` watch on the VIF1 DMA
 // registers behind dmaregArmed(), tapped from WRITE8/16/32/64 (generated
 // code has no inlined stores to 0x1000xxxx, verified codegen-wide, so the
-// macros see every DMA-reg write).
+// macros see every DMA-reg write). Part-4 adds (a) an `arenastore` watch
+// on the two chain arenas behind arenastoreArmed() (WRITE32/64/128, one
+// line per matching 32-bit lane); (b) a `ctag` dump of every tag walked
+// in the first two in-window VIF1 chain walks.
 
 #pragma once
 
@@ -107,6 +110,22 @@ inline constexpr const char *kReadRegNames[24] = {
     "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9",
     "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"};
 
+// E40 Part-4: chain-arena store watch. The per-frame VIF1 chains live in
+// two heap arenas (ranges below, from the Part-3 TADR values). Any guest
+// WRITE32/64/128 overlapping them whose stored 32-bit
+// word (any lane) falls in the microcode library range (or its
+// 0x20/0x30/0x80 mirrors, folded by & 0x1FFFFFFF) logs one `arenastore`
+// line per matching lane:
+//   arenastore vsync=<n> addr=0x<lane addr> value=0x<lane word>
+//     pc=0x<guest pc> ra=0x<> fn=<host func> + a0..s7 (low 32 hex)
+// First kMaxArenaLines in-window lines.
+inline constexpr uint32_t kArenaBase[2] = {0x0063B800u, 0x00708400u};
+inline constexpr uint32_t kArenaEnd[2] = {0x0063C400u, 0x00708D00u};
+inline constexpr uint64_t kMaxArenaLines = 256ull;
+
+inline constexpr uint32_t kLibLo = 0x00430000u;
+inline constexpr uint32_t kLibHi = 0x00440000u;
+
 namespace detail
 {
 
@@ -133,6 +152,8 @@ namespace detail
         uint32_t payMode = 0u;
         std::vector<Ps2VifSrcSpan> paySpans;
         uint64_t dmHits = 0u; // dmareg lines emitted
+        uint64_t arHits = 0u; // arenastore lines emitted
+        uint64_t ctagKicks = 0u; // VIF1 chain walks with tag dump
     };
 
     inline State &state()
@@ -175,6 +196,13 @@ namespace detail
 
     // 1 while the dmareg watch still has lines left (set under lock).
     inline std::atomic<uint32_t> &dmOpen()
+    {
+        static std::atomic<uint32_t> n{1u};
+        return n;
+    }
+
+    // 1 while the arenastore watch still has lines left (set under lock).
+    inline std::atomic<uint32_t> &arOpen()
     {
         static std::atomic<uint32_t> n{1u};
         return n;
@@ -758,6 +786,187 @@ inline void noteDmaregCtx(const PS2Runtime *runtime, const R5900Context *ctx,
     noteDmareg(vsync, addr, static_cast<uint32_t>(value), pc, ra, fn, ctx);
 }
 
+// Lock-free pre-filter for the arena store hook: true when
+// [addr, addr+size) overlaps a chain arena. No state, no atomics.
+inline bool isArenaWatched(uint32_t addr, uint32_t size)
+{
+    for (int i = 0; i < 2; ++i)
+    {
+        if (addr < kArenaEnd[i] && kArenaBase[i] < addr + size)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// True when a stored word points into the microcode library range,
+// folding the 0x20/0x30/0x80 (and 0xA0/0xB0) EE RAM mirrors. The 0x30
+// form keeps bit 28, so the fold must clear it too (the runtime itself
+// maps 0x20000000-0x3FFFFFFF onto RDRAM).
+inline bool isArenaValue(uint32_t word)
+{
+    const uint32_t masked = word & 0x0FFFFFFFu;
+    return masked >= kLibLo && masked < kLibHi;
+}
+
+// Fast gate for the per-store macro hook: enabled AND lines left.
+inline bool arenastoreArmed()
+{
+    if (!enabled())
+    {
+        return false;
+    }
+    return detail::arOpen().load(std::memory_order_relaxed) != 0u;
+}
+
+// Store side (called from the WRITE32/64/128 macros via
+// noteArenastoreCtx): one `arenastore` line per 32-bit lane that both
+// overlaps an arena and carries a library-range word, until the cap.
+inline void noteArenastore(uint64_t vsync, uint32_t addr, uint32_t width,
+                           uint64_t valueLo, uint64_t valueHi,
+                           uint32_t pc, uint32_t ra, const char *fn,
+                           const R5900Context *ctx)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    uint32_t lanes = 1u;
+    if (width >= 16u)
+        lanes = 4u;
+    else if (width >= 8u)
+        lanes = 2u;
+    for (uint32_t i = 0u; i < lanes; ++i)
+    {
+        if (s.arHits >= kMaxArenaLines)
+        {
+            break;
+        }
+        const uint32_t laneAddr = addr + i * 4u;
+        uint32_t word;
+        if (i == 0u)
+            word = static_cast<uint32_t>(valueLo);
+        else if (i == 1u)
+            word = static_cast<uint32_t>(valueLo >> 32u);
+        else if (i == 2u)
+            word = static_cast<uint32_t>(valueHi);
+        else
+            word = static_cast<uint32_t>(valueHi >> 32u);
+        if (!isArenaWatched(laneAddr, 4u) || !isArenaValue(word))
+        {
+            continue;
+        }
+        char line[768];
+        int w = std::snprintf(line, sizeof(line),
+                              "arenastore vsync=%llu addr=0x%08x value=0x%08x pc=0x%08x ra=0x%08x fn=%s",
+                              static_cast<unsigned long long>(vsync), laneAddr, word,
+                              pc, ra, fn ? fn : "?");
+        for (int r = 0; r < kReadRegCount && w > 0; ++r)
+        {
+            const uint32_t rv = (ctx != nullptr) ? getRegU32(ctx, kReadRegs[r]) : 0u;
+            w += std::snprintf(line + w, sizeof(line) - static_cast<size_t>(w),
+                               " %s=0x%08x", kReadRegNames[r], rv);
+        }
+        if (w > 0)
+        {
+            detail::emitLineLocked(s, line);
+            ++s.arHits;
+            if (s.capped)
+            {
+                return;
+            }
+        }
+    }
+    if (s.arHits >= kMaxArenaLines)
+    {
+        detail::arOpen().store(0u, std::memory_order_relaxed);
+    }
+}
+
+// Macro glue for the WRITE32/64/128 taps (do…while scope: __func__ is
+// already the host function, no capture needed).
+inline void noteArenastoreCtx(const PS2Runtime *runtime, const R5900Context *ctx,
+                              uint32_t addr, uint32_t width,
+                              uint64_t valueLo, uint64_t valueHi, const char *fn)
+{
+    uint64_t vsync = 0u;
+    if (runtime != nullptr)
+    {
+        vsync = runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed);
+    }
+    const uint32_t pc = (ctx != nullptr) ? ctx->pc : 0u;
+    const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
+    noteArenastore(vsync, addr, width, valueLo, valueHi, pc, ra, fn, ctx);
+}
+
+// E40 Part-4: chain-tag dump. The first kMaxCtagKicks in-window VIF1
+// chain walks log every tag they walk:
+//   ctag tag_at=0x<EE addr of tag> id=<0-7> qwc=<n> addr=0x<ref addr>
+//     tte=<16 hex digits: tag bytes 8..16 in stream order>
+inline constexpr uint64_t kMaxCtagKicks = 2ull;
+
+// Called once per VIF1 chain walk: true when this walk's tags should log
+// (first kicks inside the window; out-of-window walks consume nothing).
+inline bool noteCtagKick(uint64_t vsync)
+{
+    if (!enabled())
+    {
+        return false;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return false;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return false;
+    }
+    if (s.ctagKicks >= kMaxCtagKicks)
+    {
+        return false;
+    }
+    ++s.ctagKicks;
+    return true;
+}
+
+inline void noteCtag(uint64_t vsync, uint32_t tagAt, uint32_t id,
+                     uint32_t qwc, uint32_t addr,
+                     uint32_t tteWord0, uint32_t tteWord1)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    if (vsync < s.from || vsync > s.to)
+    {
+        return;
+    }
+    char line[192];
+    std::snprintf(line, sizeof(line),
+                  "ctag tag_at=0x%08x id=%u qwc=%u addr=0x%08x tte=%08x%08x",
+                  tagAt, id, qwc, addr, tteWord0, tteWord1);
+    detail::emitLineLocked(s, line);
+}
+
 inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to = ~0ull)
 {
     if (!path || path[0] == '\0')
@@ -786,6 +995,8 @@ inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to =
     s.payMode = PayNone;
     s.paySpans.clear();
     s.dmHits = 0u;
+    s.arHits = 0u;
+    s.ctagKicks = 0u;
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);
     s.enabled = true;
@@ -794,6 +1005,7 @@ inline bool configureForTest(const char *path, uint64_t from = 0u, uint64_t to =
     detail::readOpen().store(1u, std::memory_order_relaxed);
     detail::payInstalledFlag().store(0u, std::memory_order_relaxed);
     detail::dmOpen().store(1u, std::memory_order_relaxed);
+    detail::arOpen().store(1u, std::memory_order_relaxed);
     return true;
 }
 
@@ -821,6 +1033,8 @@ inline void clearForTest()
     s.payMode = PayNone;
     s.paySpans.clear();
     s.dmHits = 0u;
+    s.arHits = 0u;
+    s.ctagKicks = 0u;
     s.initDone = true;
     detail::initDone().store(true, std::memory_order_relaxed);
     s.enabled = false;
@@ -829,6 +1043,7 @@ inline void clearForTest()
     detail::readOpen().store(1u, std::memory_order_relaxed);
     detail::payInstalledFlag().store(0u, std::memory_order_relaxed);
     detail::dmOpen().store(1u, std::memory_order_relaxed);
+    detail::arOpen().store(1u, std::memory_order_relaxed);
 }
 
 } // namespace ps2_mpg_src_trace

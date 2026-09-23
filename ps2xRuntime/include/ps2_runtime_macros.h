@@ -414,6 +414,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                    \
         uint32_t _addr = (addr);                                                         \
         uint32_t _wv = (uint32_t)(val);                                                  \
+        if (ps2_mpg_src_trace::arenastoreArmed() && ps2_mpg_src_trace::isArenaWatched(_addr, 4u)) \
+            ps2_mpg_src_trace::noteArenastoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
         if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
             ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                       \
@@ -434,6 +436,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
         uint64_t _wv = (uint64_t)(val);                                                \
+        if (ps2_mpg_src_trace::arenastoreArmed() && ps2_mpg_src_trace::isArenaWatched(_addr, 8u)) \
+            ps2_mpg_src_trace::noteArenastoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
         if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
             ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                     \
@@ -456,6 +460,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         __m128i _value = (val);                                                        \
         const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value));       \
         const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value));       \
+        if (ps2_mpg_src_trace::arenastoreArmed() && ps2_mpg_src_trace::isArenaWatched(_addr, 16u)) \
+            ps2_mpg_src_trace::noteArenastoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 16u, _lo, _hi, ctx, runtime);            \
         if (ps2_mpg_src_trace::writeArmed())                                           \

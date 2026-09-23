@@ -1440,6 +1440,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 }
                 else if (mode == 1)
                 {
+                    // E40 Part-4 DEV-ONLY: chain-tag dump for the first
+                    // in-window VIF1 kicks (dev-only; one atomic check
+                    // when off).
+                    const uint64_t e40Vsync = gs_regs.vsyncTick.load(std::memory_order_relaxed);
+                    const bool e40Ctag = (channelBase == 0x10009000u) &&
+                                         ps2_mpg_src_trace::noteCtagKick(e40Vsync);
                     uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
                     uint32_t asr0 = m_ioRegisters[channelBase + 0x40];
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
@@ -1546,6 +1552,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
+                        // E40 Part-4: tag dump for the first in-window kicks.
+                        if (e40Ctag)
+                        {
+                            uint32_t ctte0 = 0u, ctte1 = 0u;
+                            std::memcpy(&ctte0, tp + 8u, sizeof(ctte0));
+                            std::memcpy(&ctte1, tp + 12u, sizeof(ctte1));
+                            ps2_mpg_src_trace::noteCtag(e40Vsync, curTagEE, id, tagQwc, addr, ctte0, ctte1);
+                        }
 
                         uint32_t dataAddr = 0;
                         bool hasPayload = (tagQwc > 0);

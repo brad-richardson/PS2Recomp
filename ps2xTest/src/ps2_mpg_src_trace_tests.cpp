@@ -67,6 +67,14 @@ namespace
         return runtime->memory().readIORegister(addr);
     }
 
+    // WRITE-macro probe for the Part-4 arena tap (plain RAM: the FAST
+    // path serves it, so a null runtime is fine).
+    uint32_t srcArenaProbe32(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr, uint32_t value)
+    {
+        WRITE32(addr, value);
+        return READ32(addr);
+    }
+
     void srcWriteMpgPayload(uint8_t *rdram, uint32_t payload, uint16_t imm)
     {
         const uint32_t mpgCmd = srcMakeVifCmd(0x4Au, 2u, imm);
@@ -274,9 +282,13 @@ void register_ps2_mpg_src_trace_tests()
 
             ps2_mpg_src_trace::clearForTest();
             const std::string text = readWholeFile(tmp);
-            char expected[256];
+            // The same walk also emits the ctag dump (Part-4 shares the
+            // master gate): per tag the ctag line precedes the mpgsrc line.
+            char expected[512];
             std::snprintf(expected, sizeof(expected),
-                          "mpgsrc vsync=1200 tag_at=0x00027600 id=3 qwc=1 addr=0x00435bf8 tte_vif=000000004a020004\n");
+                          "ctag tag_at=0x00027600 id=3 qwc=1 addr=0x00435bf8 tte=000000004a020004\n"
+                          "mpgsrc vsync=1200 tag_at=0x00027600 id=3 qwc=1 addr=0x00435bf8 tte_vif=000000004a020004\n"
+                          "ctag tag_at=0x00027610 id=0 qwc=0 addr=0x00000000 tte=0000000000000000\n");
             t.Equals(text, std::string(expected), "walker must log the in-range REF tag exactly once");
             std::remove(tmp.c_str());
         });
@@ -335,7 +347,15 @@ void register_ps2_mpg_src_trace_tests()
                 t.IsTrue(!ps2_mpg_src_trace::writeArmed(), "NOP-only payload must not arm");
                 ps2_mpg_src_trace::clearForTest();
                 const std::string text = readWholeFile(tmp);
-                t.Equals(text, std::string(), "NOP-only out-of-range payload must stay silent");
+                // The ctag dump (Part-4) still logs the walked tags; only
+                // mpgsrc/mpgpay must stay silent here.
+                t.IsTrue(text.find("mpgsrc") == std::string::npos, "NOP-only payload must not log mpgsrc");
+                t.IsTrue(text.find("mpgpay") == std::string::npos, "NOP-only payload must not log mpgpay");
+                char expected[512];
+                std::snprintf(expected, sizeof(expected),
+                              "ctag tag_at=0x00027c00 id=3 qwc=1 addr=0x00027d00 tte=0000000000000000\n"
+                              "ctag tag_at=0x00027c10 id=0 qwc=0 addr=0x00000000 tte=0000000000000000\n");
+                t.Equals(text, std::string(expected), "only the ctag dump must appear");
                 std::remove(tmp.c_str());
             }
         });
@@ -481,8 +501,12 @@ void register_ps2_mpg_src_trace_tests()
 
             ps2_mpg_src_trace::clearForTest();
             const std::string text = readWholeFile(tmp);
-            char expected[256];
+            // The same walk also emits the ctag dump (Part-4 shares the
+            // master gate): CNT tag, END tag, then the delivery's mpgpay.
+            char expected[512];
             std::snprintf(expected, sizeof(expected),
+                          "ctag tag_at=0x00027c00 id=1 qwc=2 addr=0x00000000 tte=0000000000000000\n"
+                          "ctag tag_at=0x00027c30 id=0 qwc=0 addr=0x00000000 tte=0000000000000000\n"
                           "mpgpay vsync=1310 imm=0 num=2 src=0x00027c14 srcmask=0x00027c14 mode=chain:1 tag_at=0x00027c00\n");
             t.Equals(text, std::string(expected), "chain dest-0 upload must log its EE source");
             std::remove(tmp.c_str());
@@ -690,6 +714,152 @@ void register_ps2_mpg_src_trace_tests()
                      "macro tap must log MADR with the host function name");
             t.IsTrue(text.find("reg=TADR value=0x00051000") != std::string::npos,
                      "macro tap must log TADR");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("arena match helpers", [](TestCase &t)
+        {
+            t.IsTrue(ps2_mpg_src_trace::isArenaWatched(0x0063B800u, 4u), "arena 1 head must match");
+            t.IsTrue(ps2_mpg_src_trace::isArenaWatched(0x0063C3FCu, 4u), "arena 1 tail must match");
+            t.IsTrue(ps2_mpg_src_trace::isArenaWatched(0x00708400u, 16u), "arena 2 head must match");
+            t.IsTrue(ps2_mpg_src_trace::isArenaWatched(0x00708CFCu, 4u), "arena 2 tail must match");
+            t.IsTrue(!ps2_mpg_src_trace::isArenaWatched(0x0063C400u, 4u), "arena 1 end is exclusive");
+            t.IsTrue(!ps2_mpg_src_trace::isArenaWatched(0x00100000u, 4u), "plain RAM must not match");
+            t.IsTrue(!ps2_mpg_src_trace::isArenaWatched(0x10009010u, 4u), "DMA regs must not match");
+            t.IsTrue(ps2_mpg_src_trace::isArenaValue(0x00435BF8u), "cached library addr must match");
+            t.IsTrue(ps2_mpg_src_trace::isArenaValue(0x20435BF8u), "0x20 mirror must match");
+            t.IsTrue(ps2_mpg_src_trace::isArenaValue(0x30435BF8u), "0x30 mirror must match");
+            t.IsTrue(ps2_mpg_src_trace::isArenaValue(0x80435BF8u), "0x80 mirror must match");
+            t.IsTrue(!ps2_mpg_src_trace::isArenaValue(0x0042FFFFu), "below range must not match");
+            t.IsTrue(!ps2_mpg_src_trace::isArenaValue(0x00440000u), "range end is exclusive");
+            t.IsTrue(!ps2_mpg_src_trace::isArenaValue(0x0063B8A0u), "arena addr itself must not match");
+        });
+
+        tc.Run("arenastore line format lanes window and cap", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-arena.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str(), 1300u, 1320u),
+                     "test config should install");
+            t.IsTrue(ps2_mpg_src_trace::arenastoreArmed(), "watch must be armed after configure");
+
+            R5900Context ctx{};
+            ctx.pc = 0x00667788u;
+            srcSetReg(ctx, 31, 0x00667800u);
+            srcSetReg(ctx, 4, 0x0063B900u);
+            srcSetReg(ctx, 16, 0x00C0FFEEu);
+
+            // Out-of-window: silent. Plain value: silent. Plain addr: silent.
+            ps2_mpg_src_trace::noteArenastore(1200u, 0x0063B900u, 4u, 0x00435BF8u, 0u,
+                                              0x00667788u, 0x00667800u, "sub_x", &ctx);
+            ps2_mpg_src_trace::noteArenastore(1310u, 0x0063B900u, 4u, 0x00001000u, 0u,
+                                              0x00667788u, 0x00667800u, "sub_x", &ctx);
+            ps2_mpg_src_trace::noteArenastore(1310u, 0x00100000u, 4u, 0x00435BF8u, 0u,
+                                              0x00667788u, 0x00667800u, "sub_x", &ctx);
+            // 32-bit match, then a 64-bit store whose UPPER lane matches.
+            ps2_mpg_src_trace::noteArenastore(1310u, 0x0063B900u, 4u, 0x00435BF8u, 0u,
+                                              0x00667788u, 0x00667800u, "sub_arena", &ctx);
+            const uint64_t wide = (static_cast<uint64_t>(0x80435BD0u) << 32u) | 0xDEADu;
+            ps2_mpg_src_trace::noteArenastore(1310u, 0x00708500u, 8u, wide, 0u,
+                                              0x00667788u, 0x00667800u, "sub_arena", &ctx);
+            for (uint32_t i = 0u; i < 260u; ++i)
+            {
+                ps2_mpg_src_trace::noteArenastore(1310u, 0x0063B910u, 4u, 0x004349B8u, 0u,
+                                                  0x00667788u, 0x00667800u, "sub_arena", &ctx);
+            }
+            t.IsTrue(!ps2_mpg_src_trace::arenastoreArmed(), "exhausted watch must disarm");
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(256u), "watch must stop at 256 lines");
+            t.IsTrue(text.find("vsync=1200") == std::string::npos, "out-of-window store must stay silent");
+            t.IsTrue(text.find("arenastore vsync=1310 addr=0x0063b900 value=0x00435bf8 "
+                               "pc=0x00667788 ra=0x00667800 fn=sub_arena") != std::string::npos,
+                     "arenastore must carry addr value pc ra fn");
+            t.IsTrue(text.find("addr=0x00708504 value=0x80435bd0") != std::string::npos,
+                     "upper 64-bit lane must log its own addr and mirror value");
+            t.IsTrue(text.find("s0=0x00c0ffee") != std::string::npos, "arenastore must carry s regs");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("WRITE32 macro tap logs arena store with host fn", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-arenamacro.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str()), "test config should install");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+
+            R5900Context ctxStruct{};
+            R5900Context *ctx = &ctxStruct;
+            ctxStruct.pc = 0x00ABCDEFu;
+            srcSetReg(ctxStruct, 31, 0x00ABCE00u);
+            PS2Runtime *runtime = nullptr;
+            t.Equals(srcArenaProbe32(rdram, ctx, runtime, 0x0063B904u, 0x30435BD0u), 0x30435BD0u,
+                     "macro probe must write through to arena RAM");
+            t.Equals(srcArenaProbe32(rdram, ctx, runtime, 0x00100000u, 0x00435BF8u), 0x00435BF8u,
+                     "non-arena store must still write through");
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            t.Equals(countLines(text), static_cast<size_t>(1u), "only the arena store must log");
+            t.IsTrue(text.find("arenastore vsync=0 addr=0x0063b904 value=0x30435bd0 "
+                               "pc=0x00abcdef ra=0x00abce00 fn=srcArenaProbe32") != std::string::npos,
+                     "macro tap must log the arena store with host fn");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("ctag dumps first two in-window kicks", [](TestCase &t)
+        {
+            const std::string tmp = srcTmpPath("ps2x-mpg-src-ctag.txt");
+            std::remove(tmp.c_str());
+            t.IsTrue(ps2_mpg_src_trace::configureForTest(tmp.c_str(), 1300u, 1320u),
+                     "test config should install");
+
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTagA = 0x00027600u;
+            constexpr uint32_t kTagB = 0x00027700u;
+            constexpr uint32_t kTagC = 0x00027800u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            const uint32_t nopCmd = srcMakeVifCmd(0x00u, 0u, 0u);
+            for (uint32_t kTag : {kTagA, kTagB, kTagC})
+            {
+                srcWriteDmaTag(rdram, kTag, srcMakeDmaTag(1u, 1u, 0u));
+                std::memcpy(rdram + kTag + 16u, &nopCmd, sizeof(nopCmd));
+                std::memset(rdram + kTag + 20u, 0, 12u);
+            }
+
+            // Out-of-window kick first: must log nothing and consume nothing.
+            mem.gs_regs.vsyncTick.store(1200u, std::memory_order_relaxed);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTagA), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR should succeed");
+            mem.processPendingTransfers();
+
+            // Two in-window kicks log all their tags; the third stays silent.
+            for (uint32_t k = 0u; k < 3u; ++k)
+            {
+                const uint32_t kTag = (k == 0u) ? kTagA : ((k == 1u) ? kTagB : kTagC);
+                mem.gs_regs.vsyncTick.store(1310u + k, std::memory_order_relaxed);
+                t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR should succeed");
+                mem.processPendingTransfers();
+            }
+
+            ps2_mpg_src_trace::clearForTest();
+            const std::string text = readWholeFile(tmp);
+            char expected[512];
+            std::snprintf(expected, sizeof(expected),
+                          "ctag tag_at=0x00027600 id=1 qwc=1 addr=0x00000000 tte=0000000000000000\n"
+                          "ctag tag_at=0x00027620 id=0 qwc=0 addr=0x00000000 tte=0000000000000000\n"
+                          "ctag tag_at=0x00027700 id=1 qwc=1 addr=0x00000000 tte=0000000000000000\n"
+                          "ctag tag_at=0x00027720 id=0 qwc=0 addr=0x00000000 tte=0000000000000000\n");
+            t.Equals(text, std::string(expected), "only the first two in-window kicks must dump");
             std::remove(tmp.c_str());
         });
     });
