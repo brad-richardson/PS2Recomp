@@ -1630,8 +1630,41 @@ void GS::vertexKick(bool drawing)
         return;
     }
 
+    // E50: T65-format census (one relaxed check when stats are off).
+    const bool t65 = ps2_gfx_stats::enabled();
+    if (t65)
+        ps2_gfx_stats::noteT65Vertex(m_curGifPath);
+
     if (m_vtxCount < needed)
         return;
+
+    if (t65)
+    {
+        if (!drawing)
+        {
+            ps2_gfx_stats::noteT65Prim(m_curGifPath, true, 0u, false);
+        }
+        else
+        {
+            // Fans and strips: the vertex buffer holds the prim's vertices.
+            const int count = std::min(needed, kMaxVerts);
+            float xMin = m_vtxQueue[0].x, xMax = m_vtxQueue[0].x;
+            float yMin = m_vtxQueue[0].y, yMax = m_vtxQueue[0].y;
+            for (int i = 1; i < count; ++i)
+            {
+                xMin = std::min(xMin, m_vtxQueue[i].x);
+                xMax = std::max(xMax, m_vtxQueue[i].x);
+                yMin = std::min(yMin, m_vtxQueue[i].y);
+                yMax = std::max(yMax, m_vtxQueue[i].y);
+            }
+            const GSContext &tctx = m_ctx[m_prim.ctxt ? 1 : 0];
+            bool zeroArea = false;
+            const uint32_t cls = ps2_gfx_stats::classifyT65(
+                xMin, xMax, yMin, yMax, tctx.xyoffset.ofx, tctx.xyoffset.ofy,
+                tctx.scissor.x0, tctx.scissor.x1, tctx.scissor.y0, tctx.scissor.y1, zeroArea);
+            ps2_gfx_stats::noteT65Prim(m_curGifPath, false, cls, zeroArea);
+        }
+    }
 
     if (drawing && m_backend)
     {

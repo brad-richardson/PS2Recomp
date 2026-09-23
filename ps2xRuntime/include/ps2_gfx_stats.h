@@ -19,6 +19,11 @@
 //     drawing context's SCISSOR after subtracting XYOFFSET (noteDrawScreen;
 //     `off` = the vertex bbox misses the scissor rect entirely, `on` = the
 //     bbox lies inside it, `straddle` = the rest).
+//   dN_t65=<verts>,<on>,<off>,<straddle>,<zero>,<adc>  T65's exact
+//     definitions (PCSX2 T65-S2/S3): every kicked vertex, then each
+//     completed prim: ADC prims counted and skipped, the rest classified
+//     against [SCAX0, SCAX1+1] x [SCAY0, SCAY1+1] with inclusive edges;
+//     zero = x0 == x1 or y0 == y1 (a subset of on/off/straddle).
 //   pcs=<startPC>:<mscal>:<on>/<off>/<straddle>;...  per VU1 startPC
 //     (byte PC, hex): MSCAL count and the PATH1 draws attributed to the
 //     most recent MSCAL's program (noteMscalPc), ascending PC, max 64.
@@ -68,6 +73,9 @@ namespace detail
         double zMax = 0.0;
         uint64_t scr[3] = {0u, 0u, 0u}; // E50: on, off, straddle
         bool hasScr = false;
+        // E50 T65-format: verts, on, off, straddle, zero-area, adc.
+        uint64_t t65[6] = {0u, 0u, 0u, 0u, 0u, 0u};
+        bool hasT65 = false;
     };
 
     struct PcWindow
@@ -271,6 +279,21 @@ namespace detail
                           static_cast<unsigned long long>(s.paths[i].scr[2]));
             e50 += entry;
         }
+        static const char *const kT65Names[3] = {"d1_t65", "d2_t65", "d3_t65"};
+        for (size_t i = 0u; i < 3u; ++i)
+        {
+            if (!s.paths[i].hasT65)
+            {
+                continue;
+            }
+            const uint64_t *c = s.paths[i].t65;
+            char entry[160];
+            std::snprintf(entry, sizeof(entry), " %s=%llu,%llu,%llu,%llu,%llu,%llu", kT65Names[i],
+                          static_cast<unsigned long long>(c[0]), static_cast<unsigned long long>(c[1]),
+                          static_cast<unsigned long long>(c[2]), static_cast<unsigned long long>(c[3]),
+                          static_cast<unsigned long long>(c[4]), static_cast<unsigned long long>(c[5]));
+            e50 += entry;
+        }
         if (!s.pcs.empty())
         {
             e50 += " pcs=";
@@ -391,6 +414,35 @@ inline uint32_t classifyScreen(float xMin, float xMax, float yMin, float yMax,
     return kScrStraddle;
 }
 
+// E50: T65's class (PCSX2 T65-S3): inclusive edges on [s0, s1 + 1].
+// Returns kScrOn/kScrOff/kScrStraddle; zeroArea = x0 == x1 || y0 == y1.
+inline uint32_t classifyT65(float xMin, float xMax, float yMin, float yMax,
+                            uint16_t ofx, uint16_t ofy,
+                            uint16_t sx0, uint16_t sx1, uint16_t sy0, uint16_t sy1,
+                            bool &zeroArea)
+{
+    const float ox = static_cast<float>(ofx) / 16.0f;
+    const float oy = static_cast<float>(ofy) / 16.0f;
+    const float x0 = xMin - ox;
+    const float x1 = xMax - ox;
+    const float y0 = yMin - oy;
+    const float y1 = yMax - oy;
+    const float left = static_cast<float>(sx0);
+    const float right = static_cast<float>(sx1) + 1.0f;
+    const float top = static_cast<float>(sy0);
+    const float bottom = static_cast<float>(sy1) + 1.0f;
+    zeroArea = (xMin == xMax) || (yMin == yMax);
+    if (x1 < left || x0 > right || y1 < top || y0 > bottom)
+    {
+        return 1u;
+    }
+    if (x0 >= left && x1 <= right && y0 >= top && y1 <= bottom)
+    {
+        return 0u;
+    }
+    return 2u;
+}
+
 // One relaxed check per call; no I/O when the flag is unset.
 inline bool enabled()
 {
@@ -443,6 +495,43 @@ inline void noteDrawScreen(GifPathId path, uint32_t cls)
     if (idx == 0u && s.curPcValid && s.curTickValid)
     {
         ++s.pcs[s.curPc].scr[cls];
+    }
+}
+
+// E50 T65-format taps: one kicked vertex; one completed prim (adc = the
+// kick did not draw; otherwise cls/zeroArea from classifyT65).
+inline void noteT65Vertex(GifPathId path)
+{
+    if (!enabled())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    detail::PathWindow &w = s.paths[detail::pathIndex(path)];
+    w.hasT65 = true;
+    ++w.t65[0];
+}
+
+inline void noteT65Prim(GifPathId path, bool adc, uint32_t cls, bool zeroArea)
+{
+    if (!enabled() || cls > 2u)
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    detail::PathWindow &w = s.paths[detail::pathIndex(path)];
+    w.hasT65 = true;
+    if (adc)
+    {
+        ++w.t65[5];
+        return;
+    }
+    ++w.t65[1 + cls];
+    if (zeroArea)
+    {
+        ++w.t65[4];
     }
 }
 
