@@ -3,6 +3,10 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
+#include <vector>
+
+#include "ps2_vu1_trace.h"
 
 class GS;
 class PS2Memory;
@@ -240,9 +244,26 @@ private:
     bool m_pendingHaltD = false;
     bool m_pendingHaltT = false;
 
+    // E36 DEV-ONLY per-program trace (PS2X_VU1_TRACE). Scratch for one
+    // execute()/resume() pair; default-off cost is one member branch per
+    // issued instruction pair.
+    bool m_traceArmed = false;
+    uint32_t m_traceProgramPC = 0u;
+    ps2_vu1_trace::MscalContext m_traceCtx{};
+    bool m_traceCtxValid = false;
+    std::vector<uint32_t> m_traceHist;
+    std::vector<uint32_t> m_traceTaken;
+    uint32_t m_traceXgkick = 0u;
+    std::array<uint32_t, 32> m_traceTopQw{};
+    std::array<uint32_t, 32> m_traceItopQw{};
+
     void run(uint8_t *vuCode, uint32_t codeSize,
              uint8_t *vuData, uint32_t dataSize,
              GS &gs, PS2Memory *memory, uint32_t maxCycles);
+    void snapshotTraceHeaders(const uint8_t *vuData, uint32_t dataSize);
+    void buildTraceDetail(const uint8_t *vuCode, uint32_t codeSize,
+                          PS2Memory *memory, uint64_t cyclesUsed,
+                          std::string &out);
 
     InstructionUsage decodeUpperUsage(uint32_t upper) const;
     InstructionUsage decodeLowerUsage(uint32_t lower) const;

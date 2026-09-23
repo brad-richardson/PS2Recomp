@@ -4,6 +4,7 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_gfx_stats.h"
 #include "ps2_vu1_detail.h"
+#include "ps2_vu1_trace.h"
 
 #include <algorithm>
 #include <cfenv>
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <sstream>
 #include <ps2_log.h>
 
 namespace
@@ -934,6 +936,11 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
 
     // E33: one relaxed check when stats are off.
     ps2_gfx_stats::noteXgkick();
+    // E36: per-program XGKICK count for the dev-only trace.
+    if (m_traceArmed)
+    {
+        ++m_traceXgkick;
+    }
 
     const uint32_t sourceAddress = (qwordAddress * 16u) % m_activeVuDataSize;
     m_xgkick = {};
@@ -1609,6 +1616,10 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
     m_state.vf[0][1] = 0.0f;
     m_state.vf[0][2] = 0.0f;
     m_state.vf[0][3] = 1.0f;
+    // E36: key trace arming/dedupe on the MSCAL startPC; pick up the VIF1
+    // snapshot stashed by noteMscal (absent for direct callers).
+    m_traceProgramPC = startPC & microAddressMask();
+    m_traceCtxValid = (m_unit == Unit::VU1) && ps2_vu1_trace::consumeContext(m_traceCtx);
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
 
@@ -1621,6 +1632,11 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
     m_state.itop = itop;
     m_state.stoppedByD = false;
     m_state.stoppedByT = false;
+    // E36: an MSCNT continues the program keyed at the last execute().
+    if (m_unit == Unit::VU1)
+    {
+        m_traceCtxValid = ps2_vu1_trace::consumeContext(m_traceCtx);
+    }
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
 }
 
@@ -1638,11 +1654,36 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     const uint64_t budgetEnd = m_cycle + maxCycles;
     const uint64_t entryCycle = m_cycle;
     bool programEnded = false;
+    // E36: arm the dev-only per-program trace (one member branch per pair
+    // when disarmed; histogram vectors only when armed).
+    m_traceArmed = false;
+    if (m_unit == Unit::VU1 && ps2_vu1_trace::enabled() &&
+        ps2_vu1_trace::armFor(m_traceProgramPC))
+    {
+        m_traceArmed = true;
+        const size_t pairCount = codeSize / 8u;
+        m_traceHist.assign(pairCount, 0u);
+        m_traceTaken.assign(pairCount, 0u);
+        m_traceXgkick = 0u;
+        snapshotTraceHeaders(vuData, dataSize);
+    }
     while (m_cycle < budgetEnd && !m_stopRequested)
     {
         commitReadyPipelines();
         if (m_state.pc + 8u > codeSize)
             break;
+
+        const uint32_t traceIssuePc = m_state.pc;
+        const uint32_t traceIssueIdx = traceIssuePc / 8u;
+        if (m_traceArmed && traceIssueIdx < m_traceHist.size())
+        {
+            ++m_traceHist[traceIssueIdx];
+        }
+        // A branch "takes" when this pair newly raises branchPending (or
+        // retargets it). A delay-slot branch to the identical target is
+        // indistinguishable here; noted, negligible for hot-loop readout.
+        const bool traceWasBranchPending = m_state.branchPending;
+        const uint32_t traceWasBranchTarget = m_state.branchTarget;
 
         const DecodedInstructionPair decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
         if (decoded.upperUsage.reserved || decoded.lowerUsage.reserved)
@@ -1728,6 +1769,13 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         }
 
         m_viBranchBackupValid = false;
+
+        if (m_traceArmed && m_state.branchPending &&
+            (!traceWasBranchPending || m_state.branchTarget != traceWasBranchTarget) &&
+            traceIssueIdx < m_traceTaken.size())
+        {
+            ++m_traceTaken[traceIssueIdx];
+        }
 
         if (hasUpperWrite)
         {
@@ -1841,9 +1889,592 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     // marker (E/D/T bit, halt delay slot) exactly at/over its cycle budget
     // was truncated: its remaining draws never issue. One relaxed check
     // when stats are off.
-    ps2_gfx_stats::noteVuRun(m_cycle - entryCycle,
-                             !programEnded && !m_stopRequested && m_cycle >= budgetEnd);
+    const uint64_t cyclesUsed = m_cycle - entryCycle;
+    const bool budgetExhausted = !programEnded && !m_stopRequested && m_cycle >= budgetEnd;
+    ps2_gfx_stats::noteVuRun(cyclesUsed, budgetExhausted);
+    // E36: dev-only per-program trace. Census for every exhausted program
+    // in the window; a detail block for the first 40 distinct startPCs.
+    if (m_unit == Unit::VU1 && ps2_vu1_trace::enabled() && budgetExhausted)
+    {
+        ps2_vu1_trace::noteCensus(m_traceProgramPC, cyclesUsed, m_traceXgkick);
+        if (m_traceArmed)
+        {
+            std::string block;
+            buildTraceDetail(vuCode, codeSize, memory, cyclesUsed, block);
+            ps2_vu1_trace::emitDetail(m_traceProgramPC, block);
+        }
+    }
+    m_traceArmed = false;
     m_state.cycles = m_cycle;
     if (useVuRounding && previousRoundingMode != -1)
         std::fesetround(previousRoundingMode);
+}
+
+// E36: dev-only trace helpers. The mini-decoders below mirror the
+// dispatch in execLower (bits 31:25 primary opcode, Lower1 funct in the
+// low 6 bits, Lower1-special funct2 per DobieStation). They name loop
+// control, integer couners, flag tests and XGKICK/X TOP ops; anything
+// else prints as opHi/funct hex. Upper pairs print raw except NOP.
+
+namespace
+{
+    struct TraceLowerDesc
+    {
+        std::string text;
+        const char *branchOp = nullptr; // set for B/BAL/JR/JALR/IBcc
+        bool targetStatic = false;
+        int16_t imm = 0;
+    };
+
+    const char *traceLower1SpecialName(uint8_t funct2)
+    {
+        switch (funct2)
+        {
+        case 0x30: return "MOVE";
+        case 0x31: return "MR32";
+        case 0x34: return "LQI";
+        case 0x35: return "SQI";
+        case 0x36: return "LQD";
+        case 0x37: return "SQD";
+        case 0x38: return "DIV";
+        case 0x39: return "SQRT";
+        case 0x3A: return "RSQRT";
+        case 0x3B: return "WAITQ";
+        case 0x3C: return "MTIR";
+        case 0x3D: return "MFIR";
+        case 0x3E: return "ILWR";
+        case 0x3F: return "ISWR";
+        case 0x40: return "RNEXT";
+        case 0x41: return "RGET";
+        case 0x42: return "RINIT";
+        case 0x43: return "RXOR";
+        case 0x64: return "MFP";
+        case 0x68: return "XTOP";
+        case 0x69: return "XITOP";
+        case 0x6C: return "XGKICK";
+        default: return nullptr;
+        }
+    }
+
+    bool traceIsFlagOpName(const std::string &text)
+    {
+        static const char *kFlagOps[] = {
+            "FCAND", "FSAND", "FMAND", "FMOR", "FMEQ",
+            "FCEQ", "FSEQ", "FCSET", "FSSET", "FCOR", "FSOR", "FCGET",
+        };
+        for (const char *op : kFlagOps)
+        {
+            if (text.compare(0, std::strlen(op), op) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    TraceLowerDesc traceDescribeLower(uint32_t w)
+    {
+        TraceLowerDesc d;
+        char buf[96];
+        if (w == 0x00000000u || w == 0x8000033Cu)
+        {
+            d.text = "NOP";
+            return d;
+        }
+        const uint32_t opHi = (w >> 25) & 0x7Fu;
+        const uint8_t it = VIT(w);
+        const uint8_t is = VIS(w);
+        const uint8_t id = VID(w);
+        const int16_t imm = IMM11(w);
+        switch (opHi)
+        {
+        case 0x00:
+            std::snprintf(buf, sizeof(buf), "LQ vf%u,%d(vi%u)", FT(w), imm, is);
+            d.text = buf;
+            return d;
+        case 0x01:
+            std::snprintf(buf, sizeof(buf), "SQ vf%u,%d(vi%u)", FS(w), imm, it);
+            d.text = buf;
+            return d;
+        case 0x04:
+            std::snprintf(buf, sizeof(buf), "ILW vi%u,%d(vi%u)", it, imm, is);
+            d.text = buf;
+            return d;
+        case 0x05:
+            std::snprintf(buf, sizeof(buf), "ISW vi%u,%d(vi%u)", it, imm, is);
+            d.text = buf;
+            return d;
+        case 0x08:
+        case 0x09:
+        {
+            const int imm15 = (int)(int16_t)((w & 0x7FFu) | ((w >> 10) & 0x7800u));
+            std::snprintf(buf, sizeof(buf), "%s vi%u,vi%u,%d",
+                          opHi == 0x08 ? "IADDIU" : "ISUBIU", it, is, imm15);
+            d.text = buf;
+            return d;
+        }
+        case 0x10:
+            std::snprintf(buf, sizeof(buf), "FCEQ 0x%x", w & 0xFFFFFFu);
+            d.text = buf;
+            return d;
+        case 0x11:
+            std::snprintf(buf, sizeof(buf), "FCSET 0x%x", w & 0xFFFFFFu);
+            d.text = buf;
+            return d;
+        case 0x12:
+        case 0x13:
+        case 0x14:
+        case 0x15:
+        case 0x16:
+        case 0x17:
+        {
+            static const char *kNames[] = {"?", "?", "FCAND", "FCOR", "FSEQ", "FSSET", "FSAND", "FSOR"};
+            std::snprintf(buf, sizeof(buf), "%s vi%u,0x%x", kNames[opHi - 0x10], it, w & 0x7FFu);
+            d.text = buf;
+            return d;
+        }
+        case 0x18:
+            std::snprintf(buf, sizeof(buf), "FMEQ vi%u,vi%u", it, is);
+            d.text = buf;
+            return d;
+        case 0x1A:
+            std::snprintf(buf, sizeof(buf), "FMAND vi%u,vi%u", it, is);
+            d.text = buf;
+            return d;
+        case 0x1B:
+            std::snprintf(buf, sizeof(buf), "FMOR vi%u,vi%u", it, is);
+            d.text = buf;
+            return d;
+        case 0x1C:
+            std::snprintf(buf, sizeof(buf), "FCGET vi%u", it);
+            d.text = buf;
+            return d;
+        case 0x20:
+            std::snprintf(buf, sizeof(buf), "B %d", imm);
+            d.text = buf;
+            d.branchOp = "B";
+            d.targetStatic = true;
+            d.imm = imm;
+            return d;
+        case 0x21:
+            std::snprintf(buf, sizeof(buf), "BAL vi%u,%d", it, imm);
+            d.text = buf;
+            d.branchOp = "BAL";
+            d.targetStatic = true;
+            d.imm = imm;
+            return d;
+        case 0x24:
+            std::snprintf(buf, sizeof(buf), "JR (vi%u)", is);
+            d.text = buf;
+            d.branchOp = "JR";
+            return d;
+        case 0x25:
+            std::snprintf(buf, sizeof(buf), "JALR vi%u,(vi%u)", it, is);
+            d.text = buf;
+            d.branchOp = "JALR";
+            return d;
+        case 0x28:
+        case 0x29:
+        case 0x2C:
+        case 0x2D:
+        case 0x2E:
+        case 0x2F:
+        {
+            const char *name = "?";
+            switch (opHi)
+            {
+            case 0x28: name = "IBEQ"; break;
+            case 0x29: name = "IBNE"; break;
+            case 0x2C: name = "IBLTZ"; break;
+            case 0x2D: name = "IBGTZ"; break;
+            case 0x2E: name = "IBLEZ"; break;
+            case 0x2F: name = "IBGEZ"; break;
+            }
+            if (opHi == 0x28 || opHi == 0x29)
+            {
+                std::snprintf(buf, sizeof(buf), "%s vi%u,vi%u,%d", name, it, is, imm);
+            }
+            else
+            {
+                std::snprintf(buf, sizeof(buf), "%s vi%u,%d", name, is, imm);
+            }
+            d.text = buf;
+            d.branchOp = name;
+            d.targetStatic = true;
+            d.imm = imm;
+            return d;
+        }
+        case 0x40:
+        {
+            const uint8_t funct = w & 0x3Fu;
+            if (funct == 0x30 || funct == 0x31 || funct == 0x32 ||
+                funct == 0x34 || funct == 0x35)
+            {
+                const char *name = "?";
+                switch (funct)
+                {
+                case 0x30: name = "IADD"; break;
+                case 0x31: name = "ISUB"; break;
+                case 0x32: name = "IADDI"; break;
+                case 0x34: name = "IAND"; break;
+                case 0x35: name = "IOR"; break;
+                }
+                if (funct == 0x32)
+                {
+                    const int imm5 = (int)((int32_t)((w >> 6) & 0x1F) << 27 >> 27);
+                    std::snprintf(buf, sizeof(buf), "IADDI vi%u,vi%u,%d", it, is, imm5);
+                }
+                else
+                {
+                    std::snprintf(buf, sizeof(buf), "%s vi%u,vi%u,vi%u", name, id, is, it);
+                }
+                d.text = buf;
+                return d;
+            }
+            if (funct >= 0x3Cu)
+            {
+                const uint8_t funct2 = (uint8_t)((w & 0x3u) | ((w >> 4) & 0x7Cu));
+                const char *name = traceLower1SpecialName(funct2);
+                if (name != nullptr)
+                {
+                    if (funct2 == 0x68 || funct2 == 0x69)
+                    {
+                        std::snprintf(buf, sizeof(buf), "%s vi%u", name, it);
+                    }
+                    else if (funct2 == 0x6C)
+                    {
+                        std::snprintf(buf, sizeof(buf), "XGKICK (vi%u)", is);
+                    }
+                    else if (funct2 == 0x3C || funct2 == 0x3D)
+                    {
+                        std::snprintf(buf, sizeof(buf), "%s vi%u,vf%u", name,
+                                      funct2 == 0x3C ? id : it,
+                                      funct2 == 0x3C ? FS(w) : FT(w));
+                    }
+                    else
+                    {
+                        std::snprintf(buf, sizeof(buf), "%s vf%u,vf%u", name, FT(w), FS(w));
+                    }
+                    d.text = buf;
+                    return d;
+                }
+            }
+            std::snprintf(buf, sizeof(buf), "lower1:0x%02x", funct);
+            d.text = buf;
+            return d;
+        }
+        default:
+            std::snprintf(buf, sizeof(buf), "opHi=0x%02x", opHi);
+            d.text = buf;
+            return d;
+        }
+    }
+} // namespace
+
+void VU1Interpreter::snapshotTraceHeaders(const uint8_t *vuData, uint32_t dataSize)
+{
+    m_traceTopQw.fill(0u);
+    m_traceItopQw.fill(0u);
+    if (vuData == nullptr || dataSize == 0u)
+    {
+        return;
+    }
+    for (uint32_t slot = 0u; slot < 2u; ++slot)
+    {
+        const uint32_t row = (slot == 0u ? m_state.top : m_state.itop) & 0x3FFu;
+        const uint64_t base = static_cast<uint64_t>(row) * 16u;
+        std::array<uint32_t, 32> &dst = (slot == 0u ? m_traceTopQw : m_traceItopQw);
+        for (uint32_t i = 0u; i < 32u; ++i)
+        {
+            const uint64_t off = base + static_cast<uint64_t>(i) * 4u;
+            if (off + 4u <= dataSize)
+            {
+                uint32_t word = 0u;
+                std::memcpy(&word, vuData + off, sizeof(word));
+                dst[i] = word;
+            }
+        }
+    }
+}
+
+void VU1Interpreter::buildTraceDetail(const uint8_t *vuCode, uint32_t codeSize,
+                                      PS2Memory *memory, uint64_t cyclesUsed,
+                                      std::string &out)
+{
+    std::ostringstream s;
+    s << std::hex;
+    const uint32_t pcMask = microAddressMask();
+    char num[32];
+
+    // Header: MSCAL context + run totals.
+    const char *ctxName = "none";
+    if (m_traceCtxValid)
+    {
+        ctxName = m_traceCtx.isMscnt ? "mscnt" : "mscal";
+    }
+    std::snprintf(num, sizeof(num), "0x%x", m_traceProgramPC);
+    s << "detail startPC=" << num;
+    if (m_traceCtxValid)
+    {
+        s << " top=" << std::dec << m_traceCtx.top
+          << " itop=" << m_traceCtx.itop
+          << " base=" << m_traceCtx.base
+          << " ofst=" << m_traceCtx.ofst
+          << " tops=" << m_traceCtx.tops
+          << " itops=" << m_traceCtx.itops
+          << " dbf=" << (m_traceCtx.dbf ? 1 : 0) << std::hex;
+    }
+    else
+    {
+        s << " top=- itop=- base=- ofst=- tops=- itops=- dbf=-";
+    }
+    s << " ctx=" << ctxName;
+    s << std::dec << " cycles=" << cyclesUsed << " xgkick=" << m_traceXgkick << "\n";
+
+    // Input header qwords at TOP and ITOP (program-start snapshot).
+    s << "topq";
+    for (uint32_t w : m_traceTopQw)
+    {
+        std::snprintf(num, sizeof(num), " %08x", w);
+        s << num;
+    }
+    s << "\nitopq";
+    for (uint32_t w : m_traceItopQw)
+    {
+        std::snprintf(num, sizeof(num), " %08x", w);
+        s << num;
+    }
+    s << "\nvi";
+    for (uint32_t r = 0u; r < 16u; ++r)
+    {
+        std::snprintf(num, sizeof(num), " %08x", static_cast<uint32_t>(m_state.vi[r]));
+        s << num;
+    }
+    std::snprintf(num, sizeof(num), " mac=%08x status=%08x clip=%08x",
+                  m_state.mac, m_state.status, m_state.clip);
+    s << num;
+    std::snprintf(num, sizeof(num), " endpc=0x%x", m_state.pc);
+    s << num << "\n";
+
+    // PC-visit and branch-taken histograms, top 10 each.
+    std::vector<std::pair<uint32_t, uint32_t>> hist; // (count, pc)
+    std::vector<std::pair<uint32_t, uint32_t>> taken;
+    for (size_t i = 0u; i < m_traceHist.size(); ++i)
+    {
+        if (m_traceHist[i] != 0u)
+        {
+            hist.emplace_back(m_traceHist[i], static_cast<uint32_t>(i * 8u));
+        }
+        if (i < m_traceTaken.size() && m_traceTaken[i] != 0u)
+        {
+            taken.emplace_back(m_traceTaken[i], static_cast<uint32_t>(i * 8u));
+        }
+    }
+    const auto byCountDesc = [](const auto &a, const auto &b)
+    {
+        if (a.first != b.first)
+        {
+            return a.first > b.first;
+        }
+        return a.second < b.second;
+    };
+    std::sort(hist.begin(), hist.end(), byCountDesc);
+    std::sort(taken.begin(), taken.end(), byCountDesc);
+    s << "hist";
+    if (hist.empty())
+    {
+        s << " none";
+    }
+    for (size_t i = 0u; i < hist.size() && i < 10u; ++i)
+    {
+        std::snprintf(num, sizeof(num), " 0x%x=%u", hist[i].second, hist[i].first);
+        s << num;
+    }
+    s << "\ntaken";
+    if (taken.empty())
+    {
+        s << " none";
+    }
+    for (size_t i = 0u; i < taken.size() && i < 10u; ++i)
+    {
+        std::snprintf(num, sizeof(num), " 0x%x=%u", taken[i].second, taken[i].first);
+        s << num;
+    }
+    s << "\n";
+
+    // Hottest backward branch: max taken count among taken branches whose
+    // static target runs backward (or is the branch itself); JR/JALR are
+    // dynamic and only win when no static-backward branch took.
+    bool haveBranch = false;
+    bool branchBackward = false;
+    uint32_t branchPc = 0u;
+    TraceLowerDesc branchDesc;
+    uint32_t branchTaken = 0u;
+    uint32_t branchTarget = 0u;
+    bool branchTargetKnown = false;
+    // `taken` is hottest-first: the first entry is the hottest taken
+    // branch overall; the first static-backward entry is the hottest loop.
+    for (const auto &t : taken)
+    {
+        const uint32_t pc = t.second;
+        if (pc + 8u > codeSize)
+        {
+            continue;
+        }
+        uint32_t lo = 0u;
+        std::memcpy(&lo, vuCode + pc, sizeof(lo));
+        TraceLowerDesc d = traceDescribeLower(lo);
+        if (d.branchOp == nullptr)
+        {
+            continue;
+        }
+        bool backward = false;
+        uint32_t target = 0u;
+        bool known = false;
+        if (d.targetStatic)
+        {
+            target = (pc + 8u + static_cast<uint32_t>(d.imm * 8)) & pcMask;
+            known = true;
+            backward = target <= pc;
+        }
+        if (!haveBranch || (backward && !branchBackward))
+        {
+            haveBranch = true;
+            branchBackward = backward;
+            branchPc = pc;
+            branchDesc = d;
+            branchTaken = t.first;
+            branchTarget = target;
+            branchTargetKnown = known;
+        }
+    }
+    uint32_t branchVisits = 0u;
+    if (haveBranch && branchPc / 8u < m_traceHist.size())
+    {
+        branchVisits = m_traceHist[branchPc / 8u];
+    }
+    // Flag ops inside the loop span (static target..branch PC).
+    std::string bodyFlags = "none";
+    if (haveBranch && branchTargetKnown)
+    {
+        std::string acc;
+        for (uint32_t pc = branchTarget; pc <= branchPc && pc + 8u <= codeSize; pc += 8u)
+        {
+            uint32_t lo = 0u;
+            std::memcpy(&lo, vuCode + pc, sizeof(lo));
+            TraceLowerDesc d = traceDescribeLower(lo);
+            if (traceIsFlagOpName(d.text) && acc.find(d.text.substr(0, d.text.find(' '))) == std::string::npos)
+            {
+                if (!acc.empty())
+                {
+                    acc += ",";
+                }
+                acc += d.text.substr(0, d.text.find(' '));
+            }
+        }
+        if (!acc.empty())
+        {
+            bodyFlags = acc;
+        }
+    }
+    if (haveBranch)
+    {
+        uint32_t lo = 0u;
+        std::memcpy(&lo, vuCode + branchPc, sizeof(lo));
+        const uint8_t vis = VIS(lo);
+        const uint8_t vit = VIT(lo);
+        std::snprintf(num, sizeof(num), "0x%x", branchPc);
+        s << "branch pc=" << num << " op=" << branchDesc.branchOp;
+        const uint32_t opHi = (lo >> 25) & 0x7Fu;
+        if (opHi == 0x20)
+        {
+            std::snprintf(num, sizeof(num), " imm=%d", branchDesc.imm);
+            s << " is=- it=-" << num;
+        }
+        else if (opHi == 0x21 || opHi == 0x24 || opHi == 0x25)
+        {
+            s << " is=" << std::dec << static_cast<unsigned>(vis)
+              << " it=" << static_cast<unsigned>(vit) << std::hex;
+        }
+        else
+        {
+            s << " is=" << std::dec << static_cast<unsigned>(vis)
+              << " it=" << static_cast<unsigned>(vit);
+            std::snprintf(num, sizeof(num), " imm=%d", branchDesc.imm);
+            s << num << std::hex;
+        }
+        if (branchTargetKnown)
+        {
+            std::snprintf(num, sizeof(num), " target=0x%x", branchTarget);
+            s << num;
+        }
+        else
+        {
+            s << " target=dyn";
+        }
+        s << std::dec << " taken=" << branchTaken << " visits=" << branchVisits;
+        s << " vi_is=" << m_state.vi[vis] << " vi_it=" << m_state.vi[vit];
+        s << " bodyflags=" << bodyFlags << "\n";
+    }
+    else
+    {
+        s << "branch none\n";
+    }
+
+    // Loop body disassembly: static span target..PC (cap 32), else the 32
+    // most-visited PCs in ascending order.
+    std::vector<uint32_t> bodyPcs;
+    if (haveBranch && branchTargetKnown)
+    {
+        for (uint32_t pc = branchTarget; pc <= branchPc && bodyPcs.size() < 32u; pc += 8u)
+        {
+            bodyPcs.push_back(pc);
+        }
+    }
+    else
+    {
+        std::vector<std::pair<uint32_t, uint32_t>> byPc = hist;
+        std::sort(byPc.begin(), byPc.end(),
+                  [](const auto &a, const auto &b)
+                  { return a.second < b.second; });
+        for (size_t i = 0u; i < byPc.size() && bodyPcs.size() < 32u; ++i)
+        {
+            bodyPcs.push_back(byPc[i].second);
+        }
+    }
+    for (uint32_t pc : bodyPcs)
+    {
+        if (pc + 8u > codeSize)
+        {
+            continue;
+        }
+        uint32_t lo = 0u, up = 0u;
+        std::memcpy(&lo, vuCode + pc, sizeof(lo));
+        std::memcpy(&up, vuCode + pc + 4u, sizeof(up));
+        DecodedInstructionPair decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, pc);
+        TraceLowerDesc ld = traceDescribeLower(lo);
+        std::string upText = (up == 0x000002FFu) ? "NOP" : "upper";
+        std::snprintf(num, sizeof(num), "0x%x", pc);
+        s << "body " << num;
+        std::snprintf(num, sizeof(num), " lo=0x%08x up=0x%08x", lo, up);
+        s << num;
+        if (decoded.eBit)
+        {
+            s << " E";
+        }
+        if (decoded.dBit)
+        {
+            s << " D";
+        }
+        if (decoded.tBit)
+        {
+            s << " T";
+        }
+        if (decoded.iBit)
+        {
+            s << " I";
+        }
+        s << " " << ld.text << " | " << upText << "\n";
+    }
+    out = s.str();
 }

@@ -3,6 +3,7 @@
 #include <cstring>
 #include "ps2_e7.h"
 #include "ps2_gfx_stats.h"
+#include "ps2_vu1_trace.h"
 
 enum VIFCmd : uint8_t
 {
@@ -384,6 +385,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.top = runTop;
             vif1_regs.itop = runItop;
 
+            // E36: stash the pre-update VIF1 snapshot this MSCAL acts on
+            // for the dev-only VU1 trace (one relaxed check when off).
+            ps2_vu1_trace::noteMscal(false, startPC, runTop, runItop,
+                                     vif1_regs.base, vif1_regs.ofst,
+                                     vif1_regs.tops, vif1_regs.itops,
+                                     (vif1_regs.stat & (1u << 7)) != 0u);
+
             const bool dbf = (vif1_regs.stat & (1u << 7)) != 0u;
             if (dbf)
                 vif1_regs.tops = vif1_regs.base & 0x3FFu;
@@ -403,6 +411,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             const uint32_t runItop = vif1_regs.itops & 0x3FFu;
             vif1_regs.top = runTop;
             vif1_regs.itop = runItop;
+
+            // E36: MSCNT continues the program; no startPC of its own.
+            ps2_vu1_trace::noteMscal(true, 0u, runTop, runItop,
+                                     vif1_regs.base, vif1_regs.ofst,
+                                     vif1_regs.tops, vif1_regs.itops,
+                                     (vif1_regs.stat & (1u << 7)) != 0u);
 
             const bool dbf = (vif1_regs.stat & (1u << 7)) != 0u;
             if (dbf)
