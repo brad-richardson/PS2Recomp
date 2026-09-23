@@ -268,6 +268,59 @@ namespace
             std::remove(tmp.c_str());
         });
 
+        tc.Run("scratchpad records read off the scratchpad backing", [](TestCase &t)
+        {
+            const std::string tmp = e43TmpPath("ps2x-e43-spad.txt");
+            std::remove(tmp.c_str());
+            ps2_e43_trace::configureForTest(tmp.c_str(), 0u, ~0ull);
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            std::vector<uint8_t> spad(PS2_SCRATCHPAD_SIZE, 0u);
+            // Same low-12-bit offset in both stores, different words: the
+            // tap must read the scratchpad copy, not the folded RAM alias.
+            e43SetWord(ram, 0x00000000u, 0xDEADBEEFu);
+            uint32_t spWords[4] = {0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u};
+            std::memcpy(spad.data(), spWords, sizeof(spWords));
+            uint8_t *oldSp = ps2GetScratchpadHostPtr();
+            ps2SetScratchpadHostPtr(spad.data());
+
+            ps2_e41_trace::noteVsync(1400u);
+            e43WalkerProbe(ram.data(), 3u, 0x70000000u, 0x00363CF4u);
+
+            ps2SetScratchpadHostPtr(oldSp);
+            ps2_e43_trace::clearForTest();
+            const std::string text = e43ReadWholeFile(tmp);
+            t.IsTrue(text.find("drecs vsync=1400 src=0x00363cf4 mode=3 addr=0x70000000 wmode=4 "
+                               "w0=0x11111111 w1=0x22222222 w2=0x33333333 w3=0x44444444") !=
+                         std::string::npos,
+                     "scratchpad record must come from the scratchpad backing");
+            std::remove(tmp.c_str());
+        });
+
+        tc.Run("drec rows separate dispatch sources", [](TestCase &t)
+        {
+            const std::string tmp = e43TmpPath("ps2x-e43-src.txt");
+            std::remove(tmp.c_str());
+            ps2_e43_trace::configureForTest(tmp.c_str(), 0u, ~0ull);
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            e43SetWord(ram, 0x0085AC24u, 0x000000CCu);
+            e43SetWord(ram, 0x0061BA60u, 0x00000000u);
+
+            ps2_e41_trace::noteVsync(1401u);
+            e43WalkerProbe(ram.data(), 3u, 0x0085AC24u, 0x00363CF4u);
+            e43WalkerProbe(ram.data(), 0u, 0x0061BA60u, 0x00364460u);
+            e43WalkerProbe(ram.data(), 0u, 0x0061BA60u, 0x00364460u);
+
+            ps2_e43_trace::clearForTest();
+            const std::string text = e43ReadWholeFile(tmp);
+            t.IsTrue(text.find("drec vsync=1401 src=0x00363cf4 mode=3 count=1") != std::string::npos,
+                     "walker source must own its row");
+            t.IsTrue(text.find("drec vsync=1401 src=0x00364460 mode=0 count=2") != std::string::npos,
+                     "other source must own its row (Boot A mixed these)");
+            t.IsTrue(text.find("drec vsync=1401 src=0x00363cf4 mode=0") == std::string::npos,
+                     "walker must not carry the other caller's mode-0 counts");
+            std::remove(tmp.c_str());
+        });
+
         tc.Run("window filters census lines but keeps counting", [](TestCase &t)
         {
             const std::string tmp = e43TmpPath("ps2x-e43-window.txt");

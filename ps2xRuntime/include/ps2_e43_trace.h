@@ -11,9 +11,9 @@
 // log; default 1270..1400 — wide on purpose: run-to-run tick reach
 // varies, e42a died at ~1300; the analyzer buckets settled vsyncs),
 // PS2X_E43_PROD_MODE (0-15 or "any"; default 6).
-// Hard caps: 40000 lines total, then quiet; dprod 4096; h394 1024;
-// first-8-records-per-(vsync,mode) rule bounds drecs; learned producer
-// pages stop at 64 (matching continues).
+// Hard caps: 40000 lines total, then quiet; dprod 4096; h394 16384;
+// first-8-records-per-(vsync,mode,source) rule bounds drecs; learned
+// producer pages stop at 64 (matching continues).
 //
 // Line kinds:
 //   drec vsync=<t> src=0x<dispatch source pc> mode=<m| X> count=<n>
@@ -60,7 +60,7 @@ namespace ps2_e43_trace
 inline constexpr uint64_t kMaxLines = 40000ull;
 inline constexpr uint64_t kFlushEvery = 128ull;
 inline constexpr uint64_t kMaxDprodLines = 4096ull;
-inline constexpr uint64_t kMaxH394Lines = 1024ull;
+inline constexpr uint64_t kMaxH394Lines = 16384ull;
 inline constexpr int kDrecsPerMode = 8;
 inline constexpr int kMaxProdPages = 64;
 inline constexpr uint32_t kWalkerSource = 0x00363CF4u;
@@ -90,11 +90,20 @@ namespace detail
         uint64_t linesWritten = 0u;
         uint64_t dprodLines = 0u;
         uint64_t h394Lines = 0u;
-        // drec aggregation for the in-progress tick.
+        // drec aggregation for the in-progress tick, one entry per
+        // dispatch source (Boot A hardcoded the walker source and mixed
+        // the sub_00364360 mode-0 calls into its rows — fixed here).
+        struct SrcAgg
+        {
+            bool used = false;
+            uint32_t src = 0u;
+            uint64_t counts[17] = {0u};
+            uint64_t recsEmitted[17] = {0u};
+        };
+        static constexpr int kMaxSrcAgg = 8;
         bool tickValid = false;
         uint64_t curTick = 0u;
-        uint64_t counts[17] = {0u};
-        uint64_t recsEmitted[17] = {0u};
+        SrcAgg srcs[kMaxSrcAgg];
         // h394 in-flight call (EE is single-threaded; depth guards nesting).
         bool h394Busy = false;
         int h394Nested = 0;
@@ -309,41 +318,79 @@ namespace detail
     {
         if (!s.tickValid)
         {
+            s.tickValid = false;
             return;
         }
         const bool inWindow = s.enabled && !s.capped && s.curTick >= s.from && s.curTick <= s.to;
         if (inWindow)
         {
-            for (int m = 0; m < 17; ++m)
+            for (int e = 0; e < State::kMaxSrcAgg; ++e)
             {
-                if (s.counts[m] == 0u)
+                State::SrcAgg &agg = s.srcs[e];
+                if (!agg.used)
                 {
                     continue;
                 }
-                char line[128];
-                if (m < 16)
+                for (int m = 0; m < 17; ++m)
                 {
-                    std::snprintf(line, sizeof(line), "drec vsync=%llu src=0x%08x mode=%d count=%llu",
-                                  static_cast<unsigned long long>(s.curTick),
-                                  kWalkerSource,
-                                  m, static_cast<unsigned long long>(s.counts[m]));
+                    if (agg.counts[m] == 0u)
+                    {
+                        continue;
+                    }
+                    char line[128];
+                    if (m < 16)
+                    {
+                        std::snprintf(line, sizeof(line), "drec vsync=%llu src=0x%08x mode=%d count=%llu",
+                                      static_cast<unsigned long long>(s.curTick),
+                                      agg.src,
+                                      m, static_cast<unsigned long long>(agg.counts[m]));
+                    }
+                    else
+                    {
+                        std::snprintf(line, sizeof(line), "drec vsync=%llu src=0x%08x mode=X count=%llu",
+                                      static_cast<unsigned long long>(s.curTick),
+                                      agg.src,
+                                      static_cast<unsigned long long>(agg.counts[m]));
+                    }
+                    emitLocked(s, line);
                 }
-                else
-                {
-                    std::snprintf(line, sizeof(line), "drec vsync=%llu src=0x%08x mode=X count=%llu",
-                                  static_cast<unsigned long long>(s.curTick),
-                                  kWalkerSource,
-                                  static_cast<unsigned long long>(s.counts[m]));
-                }
-                emitLocked(s, line);
             }
         }
         s.tickValid = false;
-        for (int m = 0; m < 17; ++m)
+        for (int e = 0; e < State::kMaxSrcAgg; ++e)
         {
-            s.counts[m] = 0u;
-            s.recsEmitted[m] = 0u;
+            s.srcs[e].used = false;
+            s.srcs[e].src = 0u;
+            for (int m = 0; m < 17; ++m)
+            {
+                s.srcs[e].counts[m] = 0u;
+                s.srcs[e].recsEmitted[m] = 0u;
+            }
         }
+    }
+
+    // Finds or claims the aggregation entry for a dispatch source
+    // (call with s.mutex held). Drops sources past the cap (never in
+    // practice: two callers exist).
+    inline State::SrcAgg &aggForLocked(State &s, uint32_t sourcePc)
+    {
+        for (int e = 0; e < State::kMaxSrcAgg; ++e)
+        {
+            if (s.srcs[e].used && s.srcs[e].src == sourcePc)
+            {
+                return s.srcs[e];
+            }
+        }
+        for (int e = 0; e < State::kMaxSrcAgg; ++e)
+        {
+            if (!s.srcs[e].used)
+            {
+                s.srcs[e].used = true;
+                s.srcs[e].src = sourcePc;
+                return s.srcs[e];
+            }
+        }
+        return s.srcs[0];
     }
 
 } // namespace detail
@@ -396,9 +443,33 @@ inline void learnProdPage(uint32_t addr)
     detail::prodPageSlot(static_cast<int>(n)).store(page, std::memory_order_relaxed);
 }
 
-// Reads 4 little-endian words at folded addr; false when out of RAM range.
+// Reads 4 little-endian words at folded addr; false when unreadable.
+// Scratchpad (0x70000000) reads use the registered scratchpad backing
+// (the same store the guest Load32 path uses); all other mirrors fold
+// onto RAM as before. (Boot A read scratchpad records off rdram and
+// logged filler — fixed here.)
 inline bool readRecWords(const uint8_t *rdram, uint32_t addr, uint32_t out[4])
 {
+    if (ps2IsScratchpadAddress(addr))
+    {
+        const uint8_t *sp = ps2GetScratchpadHostPtr();
+        if (sp == nullptr)
+        {
+            return false;
+        }
+        const uint32_t off = ps2ScratchpadOffset(addr);
+        if (off + 16u > PS2_SCRATCHPAD_SIZE)
+        {
+            return false;
+        }
+        for (int i = 0; i < 4; ++i)
+        {
+            uint32_t w = 0u;
+            std::memcpy(&w, sp + off + static_cast<uint32_t>(i) * 4u, sizeof(w));
+            out[i] = w;
+        }
+        return true;
+    }
     if (rdram == nullptr)
     {
         return false;
@@ -444,7 +515,8 @@ inline void noteWalkerCall(const uint8_t *rdram, const R5900Context *ctx, uint32
         s.tickValid = true;
         s.curTick = tick;
     }
-    ++s.counts[bucket];
+    detail::State::SrcAgg &agg = detail::aggForLocked(s, sourcePc);
+    ++agg.counts[bucket];
     if (sourcePc == kWalkerSource)
     {
         learnProdPage(s3);
@@ -453,11 +525,11 @@ inline void noteWalkerCall(const uint8_t *rdram, const R5900Context *ctx, uint32
     {
         return;
     }
-    if (s.recsEmitted[bucket] >= static_cast<uint64_t>(kDrecsPerMode))
+    if (agg.recsEmitted[bucket] >= static_cast<uint64_t>(kDrecsPerMode))
     {
         return;
     }
-    ++s.recsEmitted[bucket];
+    ++agg.recsEmitted[bucket];
     uint32_t w[4] = {0u, 0u, 0u, 0u};
     const bool ok = readRecWords(rdram, s3, w);
     char modeBuf[8];
@@ -732,10 +804,15 @@ inline void configureForTest(const char *path, uint64_t from, uint64_t to)
     s.h394Lines = 0u;
     s.tickValid = false;
     s.curTick = 0u;
-    for (int m = 0; m < 17; ++m)
+    for (int e = 0; e < detail::State::kMaxSrcAgg; ++e)
     {
-        s.counts[m] = 0u;
-        s.recsEmitted[m] = 0u;
+        s.srcs[e].used = false;
+        s.srcs[e].src = 0u;
+        for (int m = 0; m < 17; ++m)
+        {
+            s.srcs[e].counts[m] = 0u;
+            s.srcs[e].recsEmitted[m] = 0u;
+        }
     }
     s.h394Busy = false;
     s.h394Nested = 0;
@@ -776,10 +853,15 @@ inline void clearForTest()
     s.h394Lines = 0u;
     s.tickValid = false;
     s.curTick = 0u;
-    for (int m = 0; m < 17; ++m)
+    for (int e = 0; e < detail::State::kMaxSrcAgg; ++e)
     {
-        s.counts[m] = 0u;
-        s.recsEmitted[m] = 0u;
+        s.srcs[e].used = false;
+        s.srcs[e].src = 0u;
+        for (int m = 0; m < 17; ++m)
+        {
+            s.srcs[e].counts[m] = 0u;
+            s.srcs[e].recsEmitted[m] = 0u;
+        }
     }
     s.h394Busy = false;
     s.h394Nested = 0;
