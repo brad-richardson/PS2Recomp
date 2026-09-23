@@ -1,6 +1,7 @@
 #include "runtime/ee_scheduler.h"
 #include "ps2_e3.h"
 #include "ps2_e4.h"
+#include "ps2_gfx_stats.h"
 #include "ps2_e15.h"
 
 #include "ps2_log.h"
@@ -2607,6 +2608,7 @@ void EeScheduler::processEvent(const EeEvent &event)
     case EeEventType::VBlankStart:
         ++m_vsyncTick;
         ps2_e3::noteVBlank(m_vsyncTick); // E3b frame stamp
+        ps2_gfx_stats::noteVsync(m_vsyncTick); // E33 per-vsync census cut
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
         ps2_e4::noteVBlank(m_vsyncTick, m_runtime.gs(), m_runtime.memory().gs()); // E4 arm/freeze
         if ((m_vsyncTick & 1u) != 0u)

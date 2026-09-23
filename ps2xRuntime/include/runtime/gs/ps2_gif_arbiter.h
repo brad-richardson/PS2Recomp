@@ -24,11 +24,16 @@ class GifArbiter
 {
 public:
     using ProcessPacketFn = std::function<void(const uint8_t *, uint32_t)>;
+    // E33: fired from drain() before each packet reaches the process
+    // function, so observers (per-path GIF census, GS draw attribution) see
+    // the path the process function itself does not carry.
+    using PacketListenerFn = std::function<void(GifPathId, uint32_t)>;
 
     GifArbiter() = default;
     explicit GifArbiter(ProcessPacketFn processFn);
 
     void setProcessPacketFn(ProcessPacketFn fn) { m_processFn = std::move(fn); }
+    void setPacketListener(PacketListenerFn fn) { m_packetListener = std::move(fn); }
 
     void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
 
@@ -37,6 +42,7 @@ public:
 
 private:
     ProcessPacketFn m_processFn;
+    PacketListenerFn m_packetListener;
     std::vector<GifArbiterPacket> m_queue;
 
     static bool isImagePacket(const uint8_t *data, uint32_t sizeBytes);

@@ -2,6 +2,7 @@
 #include "runtime/ps2_memory.h"
 #include <cstring>
 #include "ps2_e7.h"
+#include "ps2_gfx_stats.h"
 
 enum VIFCmd : uint8_t
 {
@@ -390,6 +391,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
+            // E33: one relaxed check when stats are off.
+            ps2_gfx_stats::noteMscal();
             if (m_vu1MscalCallback)
                 m_vu1MscalCallback(startPC, runTop, runItop);
             continue;
@@ -408,6 +411,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
+            // E33: one relaxed check when stats are off.
+            ps2_gfx_stats::noteMscnt();
             if (m_vu1MscntCallback)
                 m_vu1MscntCallback(runTop, runItop);
             continue;

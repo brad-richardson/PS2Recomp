@@ -2,6 +2,7 @@
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
+#include "ps2_gfx_stats.h"
 #include "ps2_vu1_detail.h"
 
 #include <algorithm>
@@ -931,6 +932,9 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
     if (m_unit != Unit::VU1 || !m_activeVuData || m_activeVuDataSize < 16u)
         return;
 
+    // E33: one relaxed check when stats are off.
+    ps2_gfx_stats::noteXgkick();
+
     const uint32_t sourceAddress = (qwordAddress * 16u) % m_activeVuDataSize;
     m_xgkick = {};
     m_xgkick.active = true;
@@ -1632,6 +1636,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     const int previousRoundingMode = std::fegetround();
     const bool useVuRounding = std::fesetround(FE_TOWARDZERO) == 0;
     const uint64_t budgetEnd = m_cycle + maxCycles;
+    const uint64_t entryCycle = m_cycle;
     bool programEnded = false;
     while (m_cycle < budgetEnd && !m_stopRequested)
     {
@@ -1832,6 +1837,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         m_pendingHaltD = false;
         m_pendingHaltT = false;
     }
+    // E33: budget census. A program that leaves the loop without an end
+    // marker (E/D/T bit, halt delay slot) exactly at/over its cycle budget
+    // was truncated: its remaining draws never issue. One relaxed check
+    // when stats are off.
+    ps2_gfx_stats::noteVuRun(m_cycle - entryCycle,
+                             !programEnded && !m_stopRequested && m_cycle >= budgetEnd);
     m_state.cycles = m_cycle;
     if (useVuRounding && previousRoundingMode != -1)
         std::fesetround(previousRoundingMode);

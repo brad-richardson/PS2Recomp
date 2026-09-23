@@ -1,5 +1,6 @@
 #include "ps2_runtime.h"
 #include "ps2_e3.h"
+#include "ps2_gfx_stats.h"
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
 #include "ps2_stubs.h"
@@ -749,6 +750,19 @@ bool PS2Runtime::syncCoreSubsystems()
     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
+    // E33: per-path GIF census + GS draw attribution. The listener runs
+    // before each packet's process call (same thread, synchronous drain),
+    // so draws kicked while processing land on this packet's path. One
+    // relaxed check per packet when stats are off.
+    m_gifArbiter.setPacketListener([this](GifPathId path, uint32_t size)
+                                   {
+                                       if (!ps2_gfx_stats::enabled())
+                                       {
+                                           return;
+                                       }
+                                       ps2_gfx_stats::noteGifPacket(path, size);
+                                       m_gs.noteGifPath(path);
+                                   });
     m_memory.setGifArbiter(&m_gifArbiter);
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {

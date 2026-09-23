@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "runtime/gs/gs_backend.h"
+#include "runtime/gs/ps2_gif_arbiter.h"
 
 struct GSDebugSnapshot
 {
@@ -107,6 +108,10 @@ public:
     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
 
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+    // E33: records which GIF path the packet currently being processed came
+    // from, so draws kicked during processing attribute to that path. Only
+    // called with stats armed; defaults to Path1 (the XGKICK-direct route).
+    void noteGifPath(GifPathId path) { m_curGifPath = path; }
     bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     void uploadImageNative(uint64_t bitbltbuf,
                            uint64_t trxpos,
@@ -186,6 +191,7 @@ private:
 
     GSContext m_ctx[2];
     GSPrimReg m_prim{};
+    GifPathId m_curGifPath = GifPathId::Path1;
     GSPrimReg m_primRegister{};
     GSPrimReg m_prmodeRegister{};
 

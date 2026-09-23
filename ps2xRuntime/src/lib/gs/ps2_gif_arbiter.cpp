@@ -56,6 +56,12 @@ void GifArbiter::drain()
         auto &pkt = m_queue[i];
         if (!pkt.data.empty())
         {
+            // E33: the listener runs first so GS draw attribution lands on
+            // this packet's path before the process function draws with it.
+            if (m_packetListener)
+            {
+                m_packetListener(pkt.pathId, static_cast<uint32_t>(pkt.data.size()));
+            }
             m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
         }
     }

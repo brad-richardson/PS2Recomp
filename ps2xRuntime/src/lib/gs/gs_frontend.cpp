@@ -1,5 +1,6 @@
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_e7.h"
+#include "ps2_gfx_stats.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "ps2_e4.h"
 #include "ps2_log.h"
@@ -159,6 +160,7 @@ void GS::reset()
     m_trxdir = 3;
     m_vtxCount = 0;
     m_vtxIndex = 0;
+    m_curGifPath = GifPathId::Path1;
     m_preferredDisplaySourceFrame = {};
     m_preferredDisplayDestFbp = 0;
     m_hasPreferredDisplaySource = false;
@@ -1595,6 +1597,31 @@ void GS::vertexKick(bool drawing)
         updatePreferredDisplaySourceForDraw(batch);
         m_backend->Submit(batch);
         recordDrawDebugEventUnlocked(needed);
+        // E33: per-path draw census. One relaxed check when stats are off.
+        if (ps2_gfx_stats::enabled())
+        {
+            float xMin = m_vtxQueue[0].x;
+            float xMax = m_vtxQueue[0].x;
+            float yMin = m_vtxQueue[0].y;
+            float yMax = m_vtxQueue[0].y;
+            double zMin = m_vtxQueue[0].z;
+            double zMax = m_vtxQueue[0].z;
+            const int count = std::min(needed, kMaxVerts);
+            for (int i = 1; i < count; ++i)
+            {
+                const GSVertex &v = m_vtxQueue[i];
+                xMin = std::min(xMin, v.x);
+                xMax = std::max(xMax, v.x);
+                yMin = std::min(yMin, v.y);
+                yMax = std::max(yMax, v.y);
+                zMin = std::min(zMin, v.z);
+                zMax = std::max(zMax, v.z);
+            }
+            ps2_gfx_stats::noteDraw(m_curGifPath, static_cast<uint32_t>(needed),
+                                    xMin, xMax, yMin, yMax, zMin, zMax,
+                                    batch.state.context.frame.fbp,
+                                    static_cast<uint32_t>(batch.state.prim.type));
+        }
     }
 
     switch (m_prim.type)
