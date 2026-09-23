@@ -1400,28 +1400,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         }
                     };
 
-                    auto appendCompactVif1TagData = [&](uint32_t localTagAddr, uint32_t qwCount)
-                    {
-                        uint32_t tagPhys = 0u;
-                        const bool tagScratch = isScratchpad(localTagAddr);
-                        tagPhys = translateAddress(localTagAddr);
-
-                        const uint8_t *localBase = tagScratch ? m_scratchpad : m_rdram;
-                        const uint32_t localMax = tagScratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
-                        if (tagPhys + 16u > localMax)
-                            return;
-
-                        // VIF packet helpers embed 8 bytes of VIF stream in the DMAtag's upper half.
-                        chainBuf.insert(chainBuf.end(), localBase + tagPhys + 8u, localBase + tagPhys + 16u);
-                        appendData(localTagAddr + 16u, qwCount);
-                    };
-
                     int tagsProcessed = 0;
                     uint32_t lastTagUpper = (chcr >> 16) & 0xFFFFu;
 
                     while (tagsProcessed < kMaxChainTags)
                     {
-                        const uint32_t currentTagAddr = tagAddr;
                         const bool tagInSPR = isScratchpad(tagAddr);
                         uint32_t physTag = 0;
                         try
@@ -1524,19 +1507,20 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                         }
 
-                        const bool compactVifLocalTag =
+                        // VIF0/VIF1 chain transfers with CHCR.TTE (bit 6) set move the
+                        // DMAtag's upper 64 bits (two embedded VIF codes) into the VIF
+                        // stream ahead of the tag's data, for every tag id. REF/REFS/REFE
+                        // tags carry e.g. NOP;MPG there with the microcode at ADDR, so
+                        // skipping them drops the MPG and the payload parses as VIF
+                        // commands. With TTE=0 no tag bits enter the stream.
+                        const bool vifTagTransfer =
                             (channelBase == 0x10009000u || channelBase == 0x10008000u) &&
-                            (id == 1u || id == 2u || id == 5u || id == 6u || id == 7u);
-                        if (compactVifLocalTag)
-                            appendCompactVif1TagData(currentTagAddr, 0u);
+                            ((chcr & (1u << 6)) != 0u);
+                        if (vifTagTransfer)
+                            chainBuf.insert(chainBuf.end(), tp + 8u, tp + 16u);
 
                         if (hasPayload)
-                        {
-                            if (compactVifLocalTag)
-                                appendData(currentTagAddr + 16u, tagQwc);
-                            else
-                                appendData(dataAddr, tagQwc);
-                        }
+                            appendData(dataAddr, tagQwc);
                         if (irq && tieEnabled)
                             endChain = true;
                         if (endChain)

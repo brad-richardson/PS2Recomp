@@ -1481,7 +1481,7 @@ void register_ps2_memory_tests()
             });
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
 
             mem.processPendingTransfers();
 
@@ -1520,7 +1520,7 @@ void register_ps2_memory_tests()
             std::memcpy(rdram + kTag + 12u, &itopCmd, sizeof(itopCmd));
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
 
             mem.processPendingTransfers();
 
@@ -1582,7 +1582,7 @@ void register_ps2_memory_tests()
             });
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kBaseAddr), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
 
             mem.processPendingTransfers();
 
@@ -1624,6 +1624,152 @@ void register_ps2_memory_tests()
             t.Equals(chcr & 0x100u, 0u, "VIF1 STR should clear after DMA chain drain");
             t.Equals(chcr & 0x70000000u, 0x70000000u, "VIF1 CHCR should expose the terminal END tag id");
             t.IsTrue((mem.readIORegister(0x1000E010u) & 0x2u) != 0u, "VIF1 DMA completion should raise D_STAT channel bit");
+        });
+
+        tc.Run("VIF1 DMA chain REF tag keeps embedded MPG when TTE is set", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag = 0x00027600u;
+            constexpr uint32_t kMicro = 0x00027700u;
+            constexpr uint32_t kSlot = 4u; // VU1 code offset = slot * 8.
+
+            uint8_t *rdram = mem.getRDRAM();
+            // REF qwc=1: two micro instructions live at ADDR.
+            writeDmaTag(rdram, kTag, makeDmaTag(1u, 3u, kMicro, false));
+            const uint32_t nopCmd = makeVifCmd(0x00u, 0u, 0u);
+            const uint32_t mpgCmd = makeVifCmd(0x4Au, 2u, kSlot);
+            std::memcpy(rdram + kTag + 8u, &nopCmd, sizeof(nopCmd));
+            std::memcpy(rdram + kTag + 12u, &mpgCmd, sizeof(mpgCmd));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kMicro + i] = static_cast<uint8_t>(0xA0u + i);
+            }
+
+            std::memset(mem.getVU1Code(), 0, PS2_VU1_CODE_SIZE);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
+            // STR + CHAIN + TTE(bit6).
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+
+            mem.processPendingTransfers();
+
+            const uint8_t *vu1Code = mem.getVU1Code();
+            bool codeOk = true;
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                if (vu1Code[kSlot * 8u + i] != static_cast<uint8_t>(0xA0u + i))
+                {
+                    codeOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(codeOk, "REF tag with TTE should upload ADDR microcode at the MPG slot");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "REF chain should clear the STR bit after drain");
+        });
+
+        tc.Run("VIF1 DMA chain REF tag drops embedded MPG when TTE is clear", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag = 0x00027800u;
+            constexpr uint32_t kMicro = 0x00027900u;
+            constexpr uint32_t kSlot = 4u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            writeDmaTag(rdram, kTag, makeDmaTag(1u, 3u, kMicro, false));
+            const uint32_t nopCmd = makeVifCmd(0x00u, 0u, 0u);
+            const uint32_t mpgCmd = makeVifCmd(0x4Au, 2u, kSlot);
+            std::memcpy(rdram + kTag + 8u, &nopCmd, sizeof(nopCmd));
+            std::memcpy(rdram + kTag + 12u, &mpgCmd, sizeof(mpgCmd));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kMicro + i] = static_cast<uint8_t>(0xA0u + i);
+            }
+
+            std::memset(mem.getVU1Code(), 0, PS2_VU1_CODE_SIZE);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
+            // STR + CHAIN, TTE(bit6) clear.
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            const uint8_t *vu1Code = mem.getVU1Code();
+            bool untouched = true;
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                if (vu1Code[kSlot * 8u + i] != 0u)
+                {
+                    untouched = false;
+                    break;
+                }
+            }
+            t.IsTrue(untouched, "REF tag without TTE should not upload microcode");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "REF chain should clear the STR bit after drain");
+        });
+
+        tc.Run("VIF1 DMA chain CNT NEXT END keep embedded MPG with TTE", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag0 = 0x00027A00u;
+            constexpr uint32_t kTag1 = kTag0 + 0x20u;
+            constexpr uint32_t kTag2 = 0x00027B00u;
+            constexpr uint32_t kSlotA = 8u;
+            constexpr uint32_t kSlotB = 12u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            const uint32_t nopCmd = makeVifCmd(0x00u, 0u, 0u);
+
+            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 1u, 0u, false)); // CNT
+            const uint32_t mpgA = makeVifCmd(0x4Au, 2u, kSlotA);
+            std::memcpy(rdram + kTag0 + 8u, &nopCmd, sizeof(nopCmd));
+            std::memcpy(rdram + kTag0 + 12u, &mpgA, sizeof(mpgA));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kTag0 + 16u + i] = static_cast<uint8_t>(0x10u + i);
+            }
+
+            writeDmaTag(rdram, kTag1, makeDmaTag(1u, 2u, kTag2, false)); // NEXT -> kTag2
+            const uint32_t mpgB = makeVifCmd(0x4Au, 2u, kSlotB);
+            std::memcpy(rdram + kTag1 + 8u, &nopCmd, sizeof(nopCmd));
+            std::memcpy(rdram + kTag1 + 12u, &mpgB, sizeof(mpgB));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kTag1 + 16u + i] = static_cast<uint8_t>(0x30u + i);
+            }
+
+            writeDmaTag(rdram, kTag2, makeDmaTag(0u, 7u, 0u, false)); // END
+            std::memcpy(rdram + kTag2 + 8u, &nopCmd, sizeof(nopCmd));
+            std::memcpy(rdram + kTag2 + 12u, &nopCmd, sizeof(nopCmd));
+
+            std::memset(mem.getVU1Code(), 0, PS2_VU1_CODE_SIZE);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag0), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+
+            mem.processPendingTransfers();
+
+            const uint8_t *vu1Code = mem.getVU1Code();
+            bool slotOkA = true;
+            bool slotOkB = true;
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                if (vu1Code[kSlotA * 8u + i] != static_cast<uint8_t>(0x10u + i))
+                    slotOkA = false;
+                if (vu1Code[kSlotB * 8u + i] != static_cast<uint8_t>(0x30u + i))
+                    slotOkB = false;
+            }
+            t.IsTrue(slotOkA, "CNT tag with TTE should upload its inline microcode");
+            t.IsTrue(slotOkB, "NEXT tag with TTE should upload its inline microcode");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "CNT/NEXT/END chain should clear the STR bit after drain");
         });
 
         tc.Run("GIF DMA chain CALL sources payload from TADR+16", [](TestCase &t)
