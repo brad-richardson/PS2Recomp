@@ -950,6 +950,10 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     GsPacketVramTrace trace{tick, index, path, m_localMemoryStorage, m_localMemorySize};
     ps2x_gs_capture::packet(tick, path, data, sizeBytes);
     ps2_e7::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u, "gs-enter", data, sizeBytes);
+    // GB3 Part 2: a raw-GIF backend (paraLLEl) renders the packet itself; the
+    // decode below still runs for CSR/transfer/preferred-source state.
+    if (m_rawGifBackend.load(std::memory_order_relaxed))
+        m_backend->RawGifPacket(static_cast<uint32_t>(m_curGifPath), data, sizeBytes);
     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
         return;
 
@@ -1423,6 +1427,8 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     m_regWriteCount.fetch_add(1u, std::memory_order_relaxed);
     writeRegisterUnlocked(regAddr, value);
+    if (m_rawGifBackend.load(std::memory_order_relaxed))
+        m_backend->RawWriteRegister(regAddr, value); // GB3: HLE W1/W2 bypass the GIF stream
     // G44: HLE direct writes (W1/W2) only; GIF-decode-internal writes use
     // writeRegisterUnlocked and must NOT double-feed (paraLLEl decodes the
     // same GIF stream itself).
@@ -2151,6 +2157,7 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 
     m_backend = std::move(backend);
     m_backend->Initialize(m_localMemoryStorage, m_localMemorySize);
+    m_rawGifBackend.store(m_backend->WantsRawGif(), std::memory_order_release);
 }
 
 uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const

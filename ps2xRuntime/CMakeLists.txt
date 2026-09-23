@@ -491,6 +491,7 @@ set(PS2X_PARALLEL_GS_SOURCE_DIR "" CACHE PATH "Local parallel-gs source dir for 
 
 add_library(ps2_gs_shadow STATIC
     src/lib/gs/ps2_gs_shadow.cpp
+    src/lib/gs/ps2_gs_parallel_backend.cpp # GB3 Part 2: live backend (same paraLLEl wiring)
 )
 target_include_directories(ps2_gs_shadow PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"

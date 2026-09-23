@@ -16,6 +16,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_stream_capture.h"
 #include "runtime/gs/ps2_gs_shadow.h"
+#include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "ps2_e7.h"
 #include "ps2_e15.h"
 #include "ps2_pk.h"
@@ -980,6 +981,29 @@ bool PS2Runtime::syncCoreSubsystems()
                       << std::endl;
         }
     }
+    // GB3 Part 2: PS2X_GS_BACKEND=parallel = paraLLEl-GS as the live backend,
+    // fed by the queue (forced on: every backend call must run on the one GS
+    // worker thread). The swap is a SetBackend RPC, so paraLLEl initializes
+    // lazily on the worker.
+    if (ps2x_gs_parallel::requested() && !m_gs.rawGifBackendActive())
+    {
+        if (!ps2x_gs_parallel::available())
+        {
+            std::cerr << "[gs:parallel] PS2X_GS_BACKEND=parallel requested, but this build has no "
+                         "paraLLEl backend (PS2X_GS_SHADOW_PARALLEL=OFF); staying on the CPU backend"
+                      << std::endl;
+        }
+        else
+        {
+            if (!m_gs.queueEnabled())
+            {
+                m_gs.setQueueEnabled(true);
+                std::cerr << "[gs:queue] enabled (forced by PS2X_GS_BACKEND=parallel)" << std::endl;
+            }
+            m_gs.setRasterBackend(ps2x_gs_parallel::create(&m_memory.gs()));
+            std::cerr << "[gs:parallel] live backend selected (PS2X_GS_BACKEND=parallel)" << std::endl;
+        }
+    }
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
     // E33: per-path GIF census + GS draw attribution. The listener runs
@@ -988,12 +1012,16 @@ bool PS2Runtime::syncCoreSubsystems()
     // relaxed check per packet when stats are off.
     m_gifArbiter.setPacketListener([this](GifPathId path, uint32_t size)
                                    {
-                                       if (!ps2_gfx_stats::enabled())
+                                       const bool stats = ps2_gfx_stats::enabled();
+                                       if (stats)
                                        {
-                                           return;
+                                           ps2_gfx_stats::noteGifPacket(path, size);
                                        }
-                                       ps2_gfx_stats::noteGifPacket(path, size);
-                                       m_gs.noteGifPath(path);
+                                       // GB3 Part 2: a raw-GIF backend needs every packet's path.
+                                       if (stats || m_gs.rawGifBackendActive())
+                                       {
+                                           m_gs.noteGifPath(path);
+                                       }
                                    });
     // G44: shadow observes the same drained packets with path preserved.
     m_gifArbiter.setShadowPacketFn([](GifPathId path, const uint8_t *data, uint32_t size)
