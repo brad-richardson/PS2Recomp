@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "runtime/gs/gs_backend.h"
+#include "runtime/gs/gs_worker.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 
 struct GSDebugSnapshot
@@ -101,9 +102,18 @@ class GS
 {
 public:
     GS();
-    ~GS() = default;
+    ~GS();
 
     void init(uint8_t *vram, uint32_t vramSize, struct GSRegisters *privRegs = nullptr);
+    // GB2 step (a): when enabled, mutation submits enqueue onto the GS
+    // worker thread and synchronous operations become stream-ordered RPCs.
+    // Disabled (default) the code path is identical to the direct calls.
+    // Enable once, while no other thread uses this GS (the runtime enables
+    // from syncCoreSubsystems during init, before the game thread spawns).
+    bool setQueueEnabled(bool enabled);
+    bool queueEnabled() const { return m_worker != nullptr; }
+    // Blocks until all previously enqueued commands have executed.
+    void drainQueue();
     void reset();
     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
 
@@ -111,7 +121,21 @@ public:
     // E33: records which GIF path the packet currently being processed came
     // from, so draws kicked during processing attribute to that path. Only
     // called with stats armed; defaults to Path1 (the XGKICK-direct route).
-    void noteGifPath(GifPathId path) { m_curGifPath = path; }
+    // GB2: queued mode enqueues the note so it keeps its stream position
+    // ahead of its packet (the arbiter listener runs before the process
+    // call); the worker assigns the field directly.
+    void noteGifPath(GifPathId path)
+    {
+        if (m_worker)
+        {
+            GsCommand cmd;
+            cmd.kind = GsCmdKind::NoteGifPath;
+            cmd.pathId = static_cast<uint8_t>(path);
+            m_worker->enqueue(std::move(cmd));
+            return;
+        }
+        m_curGifPath = path;
+    }
     bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     void uploadImageNative(uint64_t bitbltbuf,
                            uint64_t trxpos,
@@ -154,6 +178,7 @@ public:
     uint32_t ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const;
 
 private:
+    void executeQueuedCommand(GsCommand &cmd);
     void snapshotVRAM();
     void writeRegisterUnlocked(uint8_t regAddr, uint64_t value);
     void writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi);
@@ -248,6 +273,10 @@ private:
     bool m_debugHistoryPaused = true;
 
     std::unique_ptr<GSRasterBackend> m_backend;
+    // GB2: null unless setQueueEnabled(true). Published before any other
+    // thread touches this GS; cleared only by setQueueEnabled(false) or
+    // the destructor, after producer threads are joined.
+    std::unique_ptr<GsWorker> m_worker;
 };
 
 #endif

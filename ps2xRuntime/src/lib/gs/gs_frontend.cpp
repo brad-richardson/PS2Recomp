@@ -108,11 +108,149 @@ namespace
     std::atomic<uint32_t> s_debugLocalCopyCount{0};
 }
 
+// GB2: true while the calling thread is this GS's worker executing a
+// queued command. Public methods route to the queue only when a worker
+// exists AND the caller is not the worker itself, so the worker runs the
+// exact direct-call bodies without re-enqueueing.
+namespace
+{
+    thread_local bool t_inGsWorker = false;
+
+    struct GsWorkerScope
+    {
+        GsWorkerScope() { t_inGsWorker = true; }
+        ~GsWorkerScope() { t_inGsWorker = false; }
+    };
+
+    struct QueuedPreferredSource
+    {
+        bool has = false;
+        GSFrameReg source{};
+        uint32_t destFbp = 0;
+    };
+}
+
 
 GS::GS()
     : m_backend(std::make_unique<GSCpuBackend>())
 {
     reset();
+}
+
+GS::~GS() = default;
+
+bool GS::setQueueEnabled(bool enabled)
+{
+    if (enabled && !m_worker)
+    {
+        auto worker = std::make_unique<GsWorker>(GsWorker::kDefaultMaxDescriptors,
+                                                 GsWorker::kDefaultMaxPayloadBytes,
+                                                 [this](GsCommand &cmd)
+                                                 { executeQueuedCommand(cmd); });
+        worker->start();
+        m_worker = std::move(worker);
+    }
+    else if (!enabled && m_worker)
+    {
+        m_worker->stop();
+        m_worker.reset();
+    }
+    return true;
+}
+
+void GS::drainQueue()
+{
+    if (!m_worker || t_inGsWorker)
+        return;
+    GsCommand cmd;
+    cmd.kind = GsCmdKind::Fence;
+    cmd.rpc = std::make_shared<GsRpcBase>();
+    std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+    m_worker->enqueue(std::move(cmd));
+    rpc->wait();
+}
+
+void GS::executeQueuedCommand(GsCommand &cmd)
+{
+    const GsWorkerScope scope;
+    switch (cmd.kind)
+    {
+    case GsCmdKind::GifPacket:
+        processGIFPacket(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
+        break;
+    case GsCmdKind::NoteGifPath:
+        m_curGifPath = static_cast<GifPathId>(cmd.pathId);
+        break;
+    case GsCmdKind::RegWrite:
+        writeRegister(cmd.regAddr, cmd.regValue);
+        break;
+    case GsCmdKind::UploadImageNative:
+        uploadImageNative(cmd.setupRegs[0], cmd.setupRegs[1], cmd.setupRegs[2], cmd.setupRegs[3],
+                          cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
+        break;
+    case GsCmdKind::NativePacked:
+        processNativePackedGIFPacket(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
+        break;
+    case GsCmdKind::ClearCtx:
+        std::static_pointer_cast<GsRpc<bool>>(cmd.rpc)->result =
+            clearFramebufferContext(cmd.u32a, cmd.u32b);
+        break;
+    case GsCmdKind::ClearActive:
+        std::static_pointer_cast<GsRpc<bool>>(cmd.rpc)->result = clearActiveFramebuffer(cmd.u32a);
+        break;
+    case GsCmdKind::WriteVram:
+        WriteVram(cmd.u32a, cmd.u32b, cmd.u32c, cmd.u32d, cmd.u32e,
+                  static_cast<uint32_t>(cmd.regValue));
+        break;
+    case GsCmdKind::ClearDebugHistory:
+        clearDebugHistory();
+        break;
+    case GsCmdKind::SetDebugPaused:
+        setDebugHistoryPaused(cmd.u32a != 0u);
+        break;
+    case GsCmdKind::Consume:
+    {
+        auto rpc = std::static_pointer_cast<GsRpc<std::vector<uint8_t>>>(cmd.rpc);
+        rpc->result.resize(cmd.u32a);
+        const uint32_t n = consumeLocalToHostBytes(rpc->result.data(), cmd.u32a);
+        rpc->result.resize(n);
+        break;
+    }
+    case GsCmdKind::ReadVram:
+        std::static_pointer_cast<GsRpc<uint32_t>>(cmd.rpc)->result =
+            ReadVram(cmd.u32a, cmd.u32b, cmd.u32c, cmd.u32d, cmd.u32e);
+        break;
+    case GsCmdKind::RefreshSnapshot:
+        refreshDisplaySnapshot();
+        break;
+    case GsCmdKind::LatchPresent:
+        latchHostPresentationFrame();
+        break;
+    case GsCmdKind::Reset:
+        reset();
+        break;
+    case GsCmdKind::GetDebugSnapshot:
+        std::static_pointer_cast<GsRpc<GSDebugSnapshot>>(cmd.rpc)->result = getDebugSnapshot();
+        break;
+    case GsCmdKind::GetDebugHistory:
+        std::static_pointer_cast<GsRpc<std::vector<GSDebugHistoryEntry>>>(cmd.rpc)->result =
+            getDebugHistory();
+        break;
+    case GsCmdKind::IsDebugPaused:
+        std::static_pointer_cast<GsRpc<bool>>(cmd.rpc)->result = isDebugHistoryPaused();
+        break;
+    case GsCmdKind::GetPreferredSource:
+    {
+        auto rpc = std::static_pointer_cast<GsRpc<QueuedPreferredSource>>(cmd.rpc);
+        rpc->result.has = getPreferredDisplaySource(rpc->result.source, rpc->result.destFbp);
+        break;
+    }
+    case GsCmdKind::SetBackend:
+        setRasterBackend(std::move(cmd.backend));
+        break;
+    case GsCmdKind::Fence:
+        break;
+    }
 }
 
 void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
@@ -128,6 +266,16 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 
 void GS::reset()
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::Reset;
+        cmd.rpc = std::make_shared<GsRpcBase>();
+        std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     std::memset(m_ctx, 0, sizeof(m_ctx));
     m_prim = {};
@@ -230,6 +378,16 @@ const uint8_t *GS::lockDisplaySnapshot(uint32_t &outSize)
 
 GSDebugSnapshot GS::getDebugSnapshot() const
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GetDebugSnapshot;
+        auto rpc = std::make_shared<GsRpc<GSDebugSnapshot>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
 
     GSDebugSnapshot snapshot{};
@@ -270,6 +428,16 @@ GSDebugSnapshot GS::getDebugSnapshot() const
 
 std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GetDebugHistory;
+        auto rpc = std::make_shared<GsRpc<std::vector<GSDebugHistoryEntry>>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
 
     std::vector<GSDebugHistoryEntry> out;
@@ -284,6 +452,13 @@ std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
 
 void GS::clearDebugHistory()
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::ClearDebugHistory;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     m_debugHistoryWrite = 0;
     m_debugHistoryCount = 0;
@@ -294,12 +469,30 @@ void GS::clearDebugHistory()
 
 bool GS::isDebugHistoryPaused() const
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::IsDebugPaused;
+        auto rpc = std::make_shared<GsRpc<bool>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     return m_debugHistoryPaused;
 }
 
 void GS::setDebugHistoryPaused(bool paused)
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::SetDebugPaused;
+        cmd.u32a = paused ? 1u : 0u;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     m_debugHistoryPaused = paused;
 }
@@ -485,6 +678,18 @@ void GS::recordPresentDebugEventUnlocked(uint32_t displayFbp, uint32_t sourceFbp
 
 bool GS::getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GetPreferredSource;
+        auto rpc = std::make_shared<GsRpc<QueuedPreferredSource>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        outSource = rpc->result.source;
+        outDestFbp = rpc->result.destFbp;
+        return rpc->result.has;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!m_hasPreferredDisplaySource)
     {
@@ -510,6 +715,16 @@ uint32_t GS::getLastDisplayBaseBytes() const
 
 void GS::refreshDisplaySnapshot()
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::RefreshSnapshot;
+        cmd.rpc = std::make_shared<GsRpcBase>();
+        std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return;
+    }
     snapshotVRAM();
 }
 
@@ -536,6 +751,16 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
 
 void GS::latchHostPresentationFrame()
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::LatchPresent;
+        cmd.rpc = std::make_shared<GsRpcBase>();
+        std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return;
+    }
     GSPresentationRequest request{};
     {
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
@@ -650,6 +875,16 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        if (!data || sizeBytes < 16)
+            return;
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GifPacket;
+        cmd.bytes.assign(data, data + sizeBytes);
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16 || !m_backend)
         return;
@@ -751,6 +986,19 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        // The DMA-chain caller needs the verdict synchronously, but the
+        // verdict is a pure function of the bytes: validate here, decode on
+        // the worker. The worker re-validates the same bytes identically.
+        if (!data || sizeBytes < 16u || !validatePackedGifPacket(data, sizeBytes))
+            return false;
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::NativePacked;
+        cmd.bytes.assign(data, data + sizeBytes);
+        m_worker->enqueue(std::move(cmd));
+        return true;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16u || !m_backend)
         return false;
@@ -796,6 +1044,20 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
                            const uint8_t *data,
                            uint32_t sizeBytes)
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        if (!data || sizeBytes == 0)
+            return;
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::UploadImageNative;
+        cmd.setupRegs[0] = bitbltbuf;
+        cmd.setupRegs[1] = trxpos;
+        cmd.setupRegs[2] = trxreg;
+        cmd.setupRegs[3] = trxdir;
+        cmd.bytes.assign(data, data + sizeBytes);
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
 }
@@ -1074,6 +1336,15 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::RegWrite;
+        cmd.regAddr = regAddr;
+        cmd.regValue = value;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     writeRegisterUnlocked(regAddr, value);
 }
@@ -1660,18 +1931,55 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::ClearCtx;
+        cmd.u32a = contextIndex;
+        cmd.u32b = rgba;
+        auto rpc = std::make_shared<GsRpc<bool>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
 }
 
 bool GS::clearActiveFramebuffer(uint32_t rgba)
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::ClearActive;
+        cmd.u32a = rgba;
+        auto rpc = std::make_shared<GsRpc<bool>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
 }
 
 uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::Consume;
+        cmd.u32a = maxBytes;
+        auto rpc = std::make_shared<GsRpc<std::vector<uint8_t>>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        const size_t n = std::min<size_t>(rpc->result.size(), maxBytes);
+        if (dst && n != 0u)
+            std::memcpy(dst, rpc->result.data(), n);
+        return static_cast<uint32_t>(n);
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
 }
@@ -1680,6 +1988,18 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 {
     if (!backend)
         backend = std::make_unique<GSCpuBackend>();
+
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::SetBackend;
+        cmd.backend = std::move(backend);
+        cmd.rpc = std::make_shared<GsRpcBase>();
+        std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return;
+    }
 
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
@@ -1707,12 +2027,43 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 
 uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::ReadVram;
+        cmd.u32a = psm;
+        cmd.u32b = base;
+        cmd.u32c = bw;
+        cmd.u32d = x;
+        cmd.u32e = y;
+        auto rpc = std::make_shared<GsRpc<uint32_t>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     return m_backend ? m_backend->ReadVram(psm, base, bw, x, y) : 0u;
 }
 
 void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        // Fire-and-forget keeps stream order; any later RPC (ReadVram,
+        // present, consume) fences it. Direct readers of VRAM bytes all go
+        // through RPCs, so no caller can observe the write early or late.
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::WriteVram;
+        cmd.u32a = psm;
+        cmd.u32b = base;
+        cmd.u32c = bw;
+        cmd.u32d = x;
+        cmd.u32e = y;
+        cmd.regValue = value;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (m_backend)
         m_backend->WriteVram(psm, base, bw, x, y, value);
