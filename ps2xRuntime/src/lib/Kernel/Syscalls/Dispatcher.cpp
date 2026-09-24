@@ -411,6 +411,8 @@ namespace ps2_syscalls
             return true;
         default:
         {
+            if (runtime)
+                runtime->noteUnknownSyscall(syscallNumber);
             // P1w: unhandled syscall number. The guest gets no handler and
             // (unless an override was installed) no answer. Trace it.
             char dropArgs[64];

@@ -414,6 +414,8 @@ namespace ps2_syscalls
         }
 
         static std::mutex s_unknownMutex;
+        if (runtime)
+            runtime->noteUnknownSyscall(syscallId);
         static std::unordered_map<uint32_t, uint64_t> s_unknownCounts;
         {
             std::lock_guard<std::mutex> lock(s_unknownMutex);
