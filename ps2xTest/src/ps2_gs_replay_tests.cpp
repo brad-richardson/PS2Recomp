@@ -26,7 +26,7 @@ namespace
     bool readEvent(FILE *f, uint32_t &length, std::vector<uint8_t> &record)
     {
         if (std::fread(&length, sizeof(length), 1, f) != 1)
-            return std::feof(f);
+            return false;
         if (length < 9u || length > 64u * 1024u * 1024u)
             return false;
         record.resize(length);
@@ -69,6 +69,27 @@ namespace
             r.csr.load(std::memory_order_acquire), r.vsyncTick.load(std::memory_order_acquire),
             r.imr, r.busdir, r.siglblid.load(std::memory_order_acquire)};
         return fnv(reinterpret_cast<const uint8_t *>(values), sizeof(values));
+    }
+
+    uint32_t presentHash(const PresentationFrame &frame)
+    {
+        if (!frame)
+            return 0u;
+        uint32_t hash = 2166136261u;
+        const size_t stride = 640u * 4u;
+        const size_t rowBytes = static_cast<size_t>(frame.width) * 4u;
+        for (uint32_t y = 0; y < frame.height; ++y)
+        {
+            const size_t offset = static_cast<size_t>(y) * stride;
+            if (offset + rowBytes > frame.pixels.size())
+                break;
+            for (size_t i = 0; i < rowBytes; ++i)
+            {
+                hash ^= frame.pixels[offset + i];
+                hash *= 16777619u;
+            }
+        }
+        return hash;
     }
 
     void replay(TestCase &t)
@@ -115,6 +136,7 @@ namespace
             gs.setQueueEnabled(true);
 
         uint64_t packets = 0u, priv = 0u, transfers = 0u, markers = 0u;
+        uint64_t readbacks = 0u, clears = 0u;
         bool parseOk = true;
         std::vector<std::string> rows;
         while (true)
@@ -197,7 +219,7 @@ namespace
                 std::snprintf(row, sizeof(row),
                               "GB4_REPLAY tick=%llu vram=%08x priv=%08x present=%08x",
                               static_cast<unsigned long long>(tick), vramHash, privHash(regs),
-                              fnv(frame.pixels.data(), frame.pixels.size()));
+                              presentHash(frame));
                 rows.emplace_back(row);
             }
             else if (kind == 5u)
@@ -220,6 +242,43 @@ namespace
                                      rec.data() + 45, size);
                 ++packets;
             }
+            else if (kind == 6u)
+            {
+                if (length < 17u)
+                {
+                    parseOk = false;
+                    break;
+                }
+                uint32_t maxBytes = 0, size = 0;
+                std::memcpy(&maxBytes, rec.data() + 9, 4);
+                std::memcpy(&size, rec.data() + 13, 4);
+                if (size > maxBytes || size != length - 17u)
+                {
+                    parseOk = false;
+                    break;
+                }
+                std::vector<uint8_t> actual(maxBytes);
+                const uint32_t count = gs.consumeLocalToHostBytes(actual.data(), maxBytes);
+                if (count != size || std::memcmp(actual.data(), rec.data() + 17, size) != 0)
+                {
+                    parseOk = false;
+                    break;
+                }
+                ++readbacks;
+            }
+            else if (kind == 7u)
+            {
+                if (length != 17u)
+                {
+                    parseOk = false;
+                    break;
+                }
+                uint32_t context = 0, rgba = 0;
+                std::memcpy(&context, rec.data() + 9, 4);
+                std::memcpy(&rgba, rec.data() + 13, 4);
+                gs.clearFramebufferContext(context, rgba);
+                ++clears;
+            }
             else
             {
                 parseOk = false;
@@ -235,7 +294,8 @@ namespace
         std::cout << "GB4_REPLAY_SUMMARY mode=" << (queued ? "queue" : "direct")
                   << " drop_priv=" << (dropPriv ? 1 : 0) << " packets=" << packets
                   << " priv=" << priv << " transfers=" << transfers
-                  << " markers=" << markers << " samples=" << rows.size() << '\n';
+                  << " markers=" << markers << " readbacks=" << readbacks
+                  << " clears=" << clears << " samples=" << rows.size() << '\n';
         for (const auto &row : rows)
             std::cout << row << '\n';
 

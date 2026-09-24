@@ -2033,6 +2033,8 @@ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
         return rpc->result;
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    ps2x_gs_capture::clearContext(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
+                                  contextIndex, rgba);
     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
 }
 
@@ -2070,7 +2072,10 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
         return static_cast<uint32_t>(n);
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
+    const uint32_t n = m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
+    ps2x_gs_capture::localToHost(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
+                                 maxBytes, dst, n);
+    return n;
 }
 
 void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
