@@ -12,7 +12,6 @@
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <vector>
 
 namespace
 {
@@ -25,8 +24,8 @@ namespace
         bool ready = false;
         uint32_t rate = kSourceRate;
         std::string wavPath;
-        std::vector<int16_t> wav;
-        size_t wavSamples = 0;
+        std::fstream wavFile;
+        size_t wavBytes = 0;
         double phase = 0.0;
         uint32_t previous = 0;
         uint32_t next = 0;
@@ -41,11 +40,27 @@ namespace
 
     void recordWav(const int16_t *samples, size_t count)
     {
-        if (g_output.wav.empty())
+        if (!g_output.wavFile.is_open())
             return;
-        const size_t writable = std::min(count, g_output.wav.size() - g_output.wavSamples);
-        std::copy_n(samples, writable, g_output.wav.data() + g_output.wavSamples);
-        g_output.wavSamples += writable;
+        const size_t writable = std::min(count * sizeof(int16_t), kWavLimitBytes - g_output.wavBytes);
+        if (!writable)
+            return;
+        g_output.wavFile.seekp(44 + static_cast<std::streamoff>(g_output.wavBytes));
+        g_output.wavFile.write(reinterpret_cast<const char *>(samples), writable);
+        g_output.wavBytes += writable;
+        // The wall-capped boot harness terminates the runner with SIGTERM.
+        // Keep the on-disk header valid after every callback for that path.
+        g_output.wavFile.seekp(4);
+        const uint32_t riffBytes = 36u + static_cast<uint32_t>(g_output.wavBytes);
+        const char riff[4] = {static_cast<char>(riffBytes), static_cast<char>(riffBytes >> 8),
+                              static_cast<char>(riffBytes >> 16), static_cast<char>(riffBytes >> 24)};
+        g_output.wavFile.write(riff, sizeof(riff));
+        g_output.wavFile.seekp(40);
+        const uint32_t dataBytes = static_cast<uint32_t>(g_output.wavBytes);
+        const char data[4] = {static_cast<char>(dataBytes), static_cast<char>(dataBytes >> 8),
+                              static_cast<char>(dataBytes >> 16), static_cast<char>(dataBytes >> 24)};
+        g_output.wavFile.write(data, sizeof(data));
+        g_output.wavFile.flush();
     }
 
     bool nextInputFrame(uint32_t &frame)
@@ -116,13 +131,13 @@ namespace
         }
     }
 
-    void writeU16(std::ofstream &file, uint16_t value)
+    void writeU16(std::ostream &file, uint16_t value)
     {
         const char bytes[2] = {static_cast<char>(value), static_cast<char>(value >> 8)};
         file.write(bytes, sizeof(bytes));
     }
 
-    void writeU32(std::ofstream &file, uint32_t value)
+    void writeU32(std::ostream &file, uint32_t value)
     {
         const char bytes[4] = {static_cast<char>(value), static_cast<char>(value >> 8),
                                static_cast<char>(value >> 16), static_cast<char>(value >> 24)};
@@ -133,25 +148,12 @@ namespace
     {
         if (g_output.wavPath.empty())
             return;
-        const uint32_t dataBytes = static_cast<uint32_t>(g_output.wavSamples * sizeof(int16_t));
-        std::ofstream file(g_output.wavPath, std::ios::binary | std::ios::trunc);
-        file.write("RIFF", 4);
-        writeU32(file, 36u + dataBytes);
-        file.write("WAVEfmt ", 8);
-        writeU32(file, 16u);
-        writeU16(file, 1u);
-        writeU16(file, 2u);
-        writeU32(file, g_output.rate);
-        writeU32(file, g_output.rate * 4u);
-        writeU16(file, 4u);
-        writeU16(file, 16u);
-        file.write("data", 4);
-        writeU32(file, dataBytes);
-        file.write(reinterpret_cast<const char *>(g_output.wav.data()), dataBytes);
-        if (!file)
+        if (g_output.wavFile.is_open())
+            g_output.wavFile.close();
+        if (g_output.wavFile.fail() || g_output.wavBytes == 0)
             std::cerr << "[snd-output] failed writing WAV: " << g_output.wavPath << '\n';
         else
-            std::cerr << "[snd-output] WAV " << g_output.wavPath << " bytes=" << dataBytes
+            std::cerr << "[snd-output] WAV " << g_output.wavPath << " bytes=" << g_output.wavBytes
                       << " rate=" << g_output.rate << '\n';
     }
 }
@@ -172,12 +174,31 @@ bool initialize()
         std::cerr << "[snd-output] 36 kHz stream unavailable; host-side linear resampling to 48 kHz\n";
     }
     SetAudioStreamCallback(g_output.stream, audioCallback);
-    PlayAudioStream(g_output.stream);
     if (const char *wav = std::getenv("PS2X_SOUND_WAV"); wav && *wav)
     {
         g_output.wavPath = wav;
-        g_output.wav.resize(kWavLimitBytes / sizeof(int16_t));
+        g_output.wavFile.open(g_output.wavPath,
+                              std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+        if (g_output.wavFile)
+        {
+            g_output.wavFile.write("RIFF", 4);
+            writeU32(g_output.wavFile, 36u);
+            g_output.wavFile.write("WAVEfmt ", 8);
+            writeU32(g_output.wavFile, 16u);
+            writeU16(g_output.wavFile, 1u);
+            writeU16(g_output.wavFile, 2u);
+            writeU32(g_output.wavFile, g_output.rate);
+            writeU32(g_output.wavFile, g_output.rate * 4u);
+            writeU16(g_output.wavFile, 4u);
+            writeU16(g_output.wavFile, 16u);
+            g_output.wavFile.write("data", 4);
+            writeU32(g_output.wavFile, 0u);
+            g_output.wavFile.flush();
+        }
+        else
+            std::cerr << "[snd-output] failed opening WAV: " << g_output.wavPath << '\n';
     }
+    PlayAudioStream(g_output.stream);
     g_output.ready = true;
     std::cerr << "[snd-output] stream rate=" << g_output.rate << " channels=2 bits=16\n";
     return true;
@@ -192,7 +213,5 @@ void shutdown()
         g_output.ready = false;
     }
     saveWav();
-    g_output.wav.clear();
-    g_output.wav.shrink_to_fit();
 }
 }

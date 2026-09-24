@@ -235,6 +235,9 @@ extra_function_starts = [
   "0x003968C8",
   "0x00396B40",
   "0x003B1140",
+  "0x003C9518",
+  "0x003C9520",
+  "0x003C95F0",
 ]
 
 # Detected library-like functions without runtime handlers.
