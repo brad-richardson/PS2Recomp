@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -32,6 +33,7 @@
 #include "gs_util.hpp"
 #include "n8d5_tile_spirv.hpp"
 #endif
+#include "runtime/gs/ps2_gs_psmct32.h"
 
 namespace ps2x_gs_parallel
 {
@@ -151,6 +153,72 @@ bool selectedDecode(const uint8_t *vram, const ParallelGS::ScanoutResult &shot,
         else return false;
     }
     return true;
+}
+
+// N8D7L: independent full-frame selected-input oracle. Decodes the same
+// 512x224 selected field as selectedDecode, but through the fork's
+// independently implemented GSPSMCT32::addrPSMCT32 literal tables
+// (ps2_gs_psmct32.h), never the G43 bit-arithmetic swizzle. RGB-only threshold: the source
+// alpha byte is ignored. Zero new probe bytes: reads the already-mapped
+// selected_vram_staging. Worst-case added log is ~3 KiB (448 counts +
+// controls + summaries), under the 16 KiB cap. No VRAM/PNG dump.
+constexpr uint32_t kOracleVramBytes = 4u * 1024u * 1024u;
+constexpr uint32_t kOracleVramMask = 0x3FFFFFu;
+constexpr size_t kOracleTiles = 448u;
+static_assert(kOracleTiles == 448u, "oracle vector must hold all 16x16 tiles");
+
+struct OracleControl
+{
+    uint32_t gx, gy;
+    uint32_t byte;
+};
+// Literal (x,y)->byte pairs from N8D7K REPORT §3, derived from the fork
+// tables then cross-checked 8/8 against G43 after derivation. Controls,
+// not a frame classifier: odd-y entries (e.g. 63,31) are never census
+// pixels under stride 2, they only prove the read path.
+constexpr OracleControl kOracleControls[8] = {
+    {0u, 0u, 0xE0000u},
+    {31u, 0u, 0xE0534u},
+    {0u, 2u, 0xE0040u},
+    {511u, 446u, 0x1BFFF4u},
+    {64u, 0u, 0xE2000u},
+    {0u, 32u, 0xF0000u},
+    {63u, 31u, 0xE1FFCu},
+    {64u, 32u, 0xF2000u},
+};
+
+bool oracleDecodeCensus(const uint8_t *vram, uint32_t fbp, uint32_t fbw,
+                        uint32_t dbx, uint32_t dby, uint32_t phase, uint32_t stride,
+                        SelectedTiles &out, uint64_t &occupied, uint32_t &active)
+{
+    if (!vram || fbw == 0u)
+        return false;
+    out.fill(0);
+    occupied = 0;
+    active = 0;
+    const uint32_t block = fbp << 5u;
+    for (uint32_t y = 0; y < kSelectedHeight; ++y)
+        for (uint32_t x = 0; x < kSelectedWidth; ++x)
+        {
+            const uint32_t gx = x + dbx;
+            const uint32_t gy = dby + phase + y * stride;
+            if (gx >= 2048u || gy >= 2048u)
+                return false;
+            const uint32_t byte = GSPSMCT32::addrPSMCT32(block, fbw, gx, gy);
+            if (byte + 4u > kOracleVramBytes)
+                return false; // outside the 4 MiB map: OTHER, never wrap
+            const uint32_t masked = byte & kOracleVramMask;
+            uint32_t word = 0;
+            std::memcpy(&word, vram + masked, 4u);
+            const uint8_t r = uint8_t(word), g = uint8_t(word >> 8), b = uint8_t(word >> 16);
+            out[(y / 16u) * 32u + x / 16u] += std::max({r, g, b}) >= 32u;
+        }
+    for (uint16_t n : out)
+    {
+        occupied += n;
+        active += n >= 32u;
+    }
+    return out.size() == kOracleTiles;
 }
 #endif
 struct Counters
@@ -593,6 +661,76 @@ public:
                         std::cerr << "[n8d7f] input_circuit_equal=" << inputCircuitEqual
                                   << "/448 circuit_stage_equal=" << circuitStageEqual << "/448"
                                   << std::endl;
+                        // N8D7L: independent fork-table oracle on the same mapped
+                        // snapshot. Flag unset (default) emits nothing and leaves
+                        // output unchanged.
+                        const char *oracleEnv = std::getenv("PS2X_N8D7L_ORACLE");
+                        const bool oracleRequested = oracleEnv && std::strcmp(oracleEnv, "1") == 0;
+                        if (oracleRequested)
+                        {
+                            std::cerr << "[n8d7l] tick=" << request.vsyncTick
+                                      << " fbp=" << shot.selected_fbp << " fbw=" << shot.selected_fbw
+                                      << " psm=" << shot.selected_psm << " dbx=" << shot.selected_dbx
+                                      << " dby=" << shot.selected_dby << " phase=" << shot.selected_phase
+                                      << " stride=" << shot.selected_stride << " mask=" << shot.selected_mask
+                                      << " samples=" << shot.selected_samples
+                                      << " promoted=" << shot.selected_promoted << std::endl;
+                            if (shot.selected_psm != ParallelGS::PSMCT24 ||
+                                shot.selected_fbp != 112u || shot.selected_fbw != 8u ||
+                                shot.selected_samples != 1u || shot.selected_promoted != 0u ||
+                                shot.selected_mask != kOracleVramMask)
+                                std::cerr << "[n8d7l] OTHER metadata" << std::endl;
+                            else
+                            {
+                                bool controlsOk = true;
+                                for (const auto &c : kOracleControls)
+                                {
+                                    const uint32_t want =
+                                        GSPSMCT32::addrPSMCT32(112u << 5u, 8u, c.gx, c.gy);
+                                    if (want != c.byte || want + 4u > kOracleVramBytes)
+                                    {
+                                        controlsOk = false;
+                                        break;
+                                    }
+                                }
+                                if (!controlsOk)
+                                    std::cerr << "[n8d7l] OTHER control-selfcheck" << std::endl;
+                                else
+                                {
+                                    SelectedTiles oracleTiles{};
+                                    uint64_t oracleOccupied = 0;
+                                    uint32_t oracleActive = 0;
+                                    if (!oracleDecodeCensus(vram, shot.selected_fbp, shot.selected_fbw,
+                                                            shot.selected_dbx, shot.selected_dby,
+                                                            shot.selected_phase, shot.selected_stride,
+                                                            oracleTiles, oracleOccupied, oracleActive))
+                                        std::cerr << "[n8d7l] OTHER address" << std::endl;
+                                    else
+                                    {
+                                        selectedLogTiles("oracle", oracleTiles, oracleOccupied,
+                                                         oracleActive);
+                                        std::cerr << "[n8d7l] oracle_controls=";
+                                        for (size_t i = 0; i < 8u; ++i)
+                                        {
+                                            uint32_t word = 0;
+                                            std::memcpy(&word,
+                                                        vram + (kOracleControls[i].byte & kOracleVramMask),
+                                                        4u);
+                                            char buf[32];
+                                            std::snprintf(buf, sizeof(buf), "%s0x%06X=0x%08X",
+                                                          (i ? "," : ""), kOracleControls[i].byte, word);
+                                            std::cerr << buf;
+                                        }
+                                        std::cerr << std::endl;
+                                        size_t oracleInputEqual = 0;
+                                        for (size_t i = 0; i < oracleTiles.size(); ++i)
+                                            oracleInputEqual += oracleTiles[i] == inputTiles[i];
+                                        std::cerr << "[n8d7l] oracle_input_equal=" << oracleInputEqual
+                                                  << "/448" << std::endl;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
