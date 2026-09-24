@@ -457,6 +457,7 @@ add_library(ps2_runtime STATIC
     src/lib/gs/ps2_gif_arbiter.cpp
     src/lib/gs/gs_stream_capture.cpp
     src/lib/gs/gs_worker.cpp
+    src/lib/gs/gs_replay_core.cpp # N8D7M12 Part 1: shared GS replay core (no test harness)
     src/lib/ps2_audio.cpp
     src/lib/ps2_snd_audio_output.cpp
     src/lib/ps2_audio_vag.cpp
@@ -473,6 +474,16 @@ add_library(ps2_runtime STATIC
     src/lib/vu/ps2_vu1_lower.cpp
     src/lib/games_database.cpp
 )
+
+# N8D7M12 Part 1: the desktop-only N8D7M5 word-watch inside gs_replay_core.cpp
+# compiles only into test builds. Android configures with PS2X_BUILD_TEST=OFF
+# (APK builds tests OFF), so the Android-target core contains no word-watch
+# code, no PS2X_GS_REPLAY_WORDS reader, and no counter dependency. Desktop
+# diagnostics are preserved verbatim behind the flag.
+if(PS2X_BUILD_TEST)
+    set_source_files_properties(src/lib/gs/gs_replay_core.cpp PROPERTIES
+        COMPILE_DEFINITIONS PS2X_GS_REPLAY_WORD_WATCH=1)
+endif()
 
 if(PS2X_ENABLE_RUNTIME_LOGS)
     target_compile_definitions(ps2_runtime PUBLIC
