@@ -231,6 +231,7 @@ enum class EeEventType : uint8_t
     Dmac,
     ExternalWake,
     Alarm,
+    SoundTick,
 };
 
 struct EeEvent
@@ -315,6 +316,7 @@ public:
     int setAlarm(uint16_t ticks, uint32_t handler, uint32_t argument, uint32_t gp, uint32_t sp);
     int cancelAlarm(int id);
     void queueInvocation(GuestInvocation invocation);
+    void startSoundClock();
     [[noreturn]] void invokeCurrent(GuestInvocation invocation);
     [[noreturn]] void invokeCurrentSequence(std::vector<GuestInvocation> invocations);
     [[nodiscard]] bool hasInvocation(GuestInvocationKind kind, uint64_t tag) const;
@@ -443,6 +445,7 @@ private:
     bool m_rescheduleRequested = false;
     bool m_timeSliceExpired = false;
     bool m_insideInterrupt = false;
+    bool m_soundClockStarted = false;
     uint32_t m_pendingEeTimerInterrupts = 0;
     uint64_t m_eeCycle = 0;
     uint64_t m_countCycle = 0;

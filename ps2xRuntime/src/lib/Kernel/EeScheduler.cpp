@@ -491,6 +491,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
     m_insideInterrupt = false;
+    m_soundClockStarted = false;
     m_pendingEeTimerInterrupts = 0u;
     m_eeCycle = 0u;
     m_countCycle = 0u;
@@ -1916,6 +1917,17 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
     m_checkpointPending.store(true, std::memory_order_release);
 }
 
+void EeScheduler::startSoundClock()
+{
+    assertExecutor();
+    if (m_soundClockStarted || !ps2_snd_spike::enabled())
+        return;
+    m_soundClockStarted = true;
+    const uint64_t deadline = m_eeCycle + ps2_snd_spike::kTickCycles;
+    scheduleEvent(deadline, std::chrono::steady_clock::now(),
+                  EeEvent{EeEventType::SoundTick, 0u, deadline});
+}
+
 [[noreturn]] void EeScheduler::invokeCurrent(GuestInvocation invocation)
 {
     assertExecutor();
@@ -2849,9 +2861,6 @@ void EeScheduler::processEvent(const EeEvent &event)
 #if PS2X_ENABLE_DET_HASH_TAP
         emitDetHashTap();
 #endif
-        // AU2 spike: IOP SND tick (PS2X_SND_TICK, default off).
-        ps2_snd_spike::onVBlank(m_rdram, m_vsyncTick, [this](GuestInvocation invocation)
-                                { queueInvocation(std::move(invocation)); });
         break;
     case EeEventType::ExternalWake:
         completeExternalWait(event.id, event.value, KE_OK);
@@ -2860,6 +2869,15 @@ void EeScheduler::processEvent(const EeEvent &event)
         dispatchIrq(false, 3u);
         break;
     case EeEventType::Dmac:
+        break;
+    case EeEventType::SoundTick:
+        ps2_snd_spike::onSoundTick(m_rdram, event.value, [this](GuestInvocation invocation)
+                                   { queueInvocation(std::move(invocation)); });
+        {
+            const uint64_t deadline = event.value + ps2_snd_spike::kTickCycles;
+            scheduleEvent(deadline, std::chrono::steady_clock::now(),
+                          EeEvent{EeEventType::SoundTick, 0u, deadline});
+        }
         break;
     case EeEventType::Alarm:
     {

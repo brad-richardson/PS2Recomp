@@ -25,6 +25,7 @@
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
+#include "ps2_snd_audio_output.h"
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
@@ -888,6 +889,7 @@ PS2Runtime::~PS2Runtime()
         m_audioBackend.stopAll();
         m_audioBackend.setAudioReady(false);
 #else
+        ps2_snd_audio_output::shutdown();
         if (IsAudioDeviceReady())
         {
             CloseAudioDevice();
@@ -1111,6 +1113,9 @@ bool PS2Runtime::initialize(const char *title)
 #endif
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
+        if (const char *sound = std::getenv("PS2X_SOUND"); sound && std::strcmp(sound, "1") == 0 &&
+            !ps2_snd_audio_output::initialize())
+            std::cerr << "[snd-output] unable to initialize host AudioStream\n";
 #endif
         SetTargetFPS(60);
         if (m_debugUiInitCallback)

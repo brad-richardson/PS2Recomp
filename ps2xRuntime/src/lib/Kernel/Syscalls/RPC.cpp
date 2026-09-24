@@ -1101,30 +1101,19 @@ namespace ps2_syscalls
 
     void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t cid = getRegU32(ctx, 4);
-        uint32_t packetAddr = getRegU32(ctx, 5);
-        uint32_t packetSize = getRegU32(ctx, 6);
-        uint32_t srcExtra = getRegU32(ctx, 7);
-
-        uint32_t sp = getRegU32(ctx, 29);
-        uint32_t destExtra = 0;
-        uint32_t sizeExtra = 0;
-        readStackU32(rdram, sp, 0x10, destExtra);
-        readStackU32(rdram, sp, 0x14, sizeExtra);
-
-        // AU2 spike: 0x426078 (_sceSifSendCmd, reached from isceSifSendCmd
-        // with ra 0x426220) is bound here but takes (cid, mode, packet,
-        // size, src, dest, esize) in a0..t2. Only reparsed while the spike
-        // is on, so the default path is unchanged.
+        // _sceSifSendCmd at 0x426078 uses the seven-register ABI
+        // (cid, mode, pkt, size, src, dst, esize), regardless of caller.
+        std::array<uint32_t, 11> gpr{};
+        for (uint32_t i = 4; i <= 10; ++i)
+            gpr[i] = getRegU32(ctx, static_cast<int>(i));
+        const ps2_snd_spike::SendCmdArgs args = ps2_snd_spike::decodeSendCmdArgs(gpr.data(), gpr.size());
+        const uint32_t cid = args.cid;
+        uint32_t packetAddr = args.packet;
+        uint32_t packetSize = args.packetSize;
+        uint32_t srcExtra = args.srcExtra;
+        uint32_t destExtra = args.dstExtra;
+        uint32_t sizeExtra = args.extraSize;
         const uint32_t sendCmdRa = getRegU32(ctx, 31);
-        if (ps2_snd_spike::enabled() && sendCmdRa == ps2_snd_spike::kIsceSendCmdRa)
-        {
-            packetAddr = getRegU32(ctx, 6);
-            packetSize = getRegU32(ctx, 7);
-            srcExtra = getRegU32(ctx, 8);
-            destExtra = getRegU32(ctx, 9);
-            sizeExtra = getRegU32(ctx, 10);
-        }
         if (runtime)
         {
             ps2_snd_spike::onSendCmd(rdram, ps2_e41_trace::lastVsyncTick(), sendCmdRa, cid, packetAddr, packetSize,
