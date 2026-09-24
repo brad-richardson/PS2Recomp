@@ -23,14 +23,20 @@ namespace
         return hash;
     }
 
-    bool readEvent(FILE *f, uint32_t &length, std::vector<uint8_t> &record)
+    enum class ReadEventResult { Record, End, Invalid };
+
+    ReadEventResult readEvent(FILE *f, uint32_t &length, std::vector<uint8_t> &record)
     {
-        if (std::fread(&length, sizeof(length), 1, f) != 1)
-            return false;
+        const size_t prefixBytes = std::fread(&length, 1, sizeof(length), f);
+        if (prefixBytes == 0u && std::feof(f))
+            return ReadEventResult::End;
+        if (prefixBytes != sizeof(length))
+            return ReadEventResult::Invalid;
         if (length < 9u || length > 64u * 1024u * 1024u)
-            return false;
+            return ReadEventResult::Invalid;
         record.resize(length);
-        return std::fread(record.data(), 1, length, f) == length;
+        return std::fread(record.data(), 1, length, f) == length
+            ? ReadEventResult::Record : ReadEventResult::Invalid;
     }
 
     bool setPriv(GSRegisters &r, uint32_t off, uint64_t value)
@@ -135,6 +141,16 @@ namespace
         if (queued)
             gs.setQueueEnabled(true);
 
+        uint64_t bisectTo = 0u;
+        if (const char *value = std::getenv("PS2X_GS_REPLAY_BISECT_TO"))
+            bisectTo = std::strtoull(value, nullptr, 10);
+        std::ofstream packetTrace;
+        if (const char *out = std::getenv("PS2X_GS_REPLAY_PACKET_TRACE"))
+        {
+            packetTrace.open(out, std::ios::binary);
+            packetTrace << "index,tick,path,vram\n";
+        }
+
         uint64_t packets = 0u, priv = 0u, transfers = 0u, markers = 0u;
         uint64_t readbacks = 0u, clears = 0u;
         bool parseOk = true;
@@ -143,10 +159,15 @@ namespace
         {
             uint32_t length = 0;
             std::vector<uint8_t> rec;
-            if (!readEvent(f, length, rec))
+            const long recordOffset = std::ftell(f);
+            const ReadEventResult readResult = readEvent(f, length, rec);
+            if (readResult != ReadEventResult::Record)
             {
-                if (!std::feof(f))
+                if (readResult == ReadEventResult::Invalid)
+                {
+                    std::cerr << "GB4_REPLAY_PARSE_ERROR offset=" << recordOffset << '\n';
                     parseOk = false;
+                }
                 break;
             }
             const uint8_t kind = rec[0];
@@ -169,6 +190,9 @@ namespace
                 }
                 gs.noteGifPath(static_cast<GifPathId>(pathId));
                 gs.processGIFPacket(rec.data() + 14, size);
+                if (packetTrace && tick < bisectTo)
+                    packetTrace << packets << ',' << tick << ',' << static_cast<unsigned>(pathId)
+                                << ',' << std::hex << fnv(vram.data(), vram.size()) << std::dec << '\n';
                 ++packets;
             }
             else if (kind == 2u)
@@ -240,6 +264,9 @@ namespace
                 }
                 gs.uploadImageNative(regsIn[0], regsIn[1], regsIn[2], regsIn[3],
                                      rec.data() + 45, size);
+                if (packetTrace && tick < bisectTo)
+                    packetTrace << packets << ',' << tick << ",native,"
+                                << std::hex << fnv(vram.data(), vram.size()) << std::dec << '\n';
                 ++packets;
             }
             else if (kind == 6u)
@@ -288,6 +315,9 @@ namespace
         std::fclose(f);
         gs.drainQueue();
 
+        if (std::getenv("PS2X_GS_REPLAY_PACKET_TRACE"))
+            t.IsTrue(packetTrace.good(), "GB4 packet trace written");
+
         t.IsTrue(parseOk, "GB4 capture records parse cleanly");
         t.IsTrue(packets > 0u && markers > 0u, "capture has GIF packets and VBlank markers");
         t.IsTrue(!rows.empty(), "capture has sampled hashes");
@@ -335,6 +365,27 @@ void register_ps2_gs_replay_tests()
 {
     MiniTest::Case("PS2GSReplay", [](TestCase &tc)
     {
+        tc.Run("GB4 rejects a partial capture record at EOF", [](TestCase &t)
+        {
+            FILE *f = std::tmpfile();
+            if (!f)
+            {
+                t.IsTrue(false, "tmpfile opened");
+                return;
+            }
+            uint32_t length = 9u;
+            std::fwrite(&length, sizeof(length), 1, f);
+            const uint8_t body[3] = {4u, 0u, 0u};
+            std::fwrite(body, 1, sizeof(body), f);
+            std::rewind(f);
+            std::vector<uint8_t> record;
+            t.IsTrue(readEvent(f, length, record) == ReadEventResult::Invalid,
+                     "truncated body is invalid even when fread sets EOF");
+            std::rewind(f);
+            t.IsTrue(readEvent(f, length, record) == ReadEventResult::Invalid,
+                     "partial body stays invalid on a second read");
+            std::fclose(f);
+        });
         tc.Run("GB4 replays the captured GS command stream and hashes VBlank checkpoints",
                [](TestCase &t) { replay(t); });
     });
