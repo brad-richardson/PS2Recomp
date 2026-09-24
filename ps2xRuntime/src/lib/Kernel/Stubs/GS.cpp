@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h"
 #include "GS.h"
 #include "ps2_log.h"
 #include "runtime/gs/ps2_gs_common.h"

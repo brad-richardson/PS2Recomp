@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h"
 #include "Pad.h"
 
 #include <chrono>

@@ -13,10 +13,83 @@
 #endif
 
 #include "ps2_runtime.h"
+// N5: compile-time switch for the E40-E44 guest-memory watch taps below.
+// PS2X_ENABLE_DIAG_TAPS=0 swaps the trace namespaces for constexpr stubs, so
+// the taps (and their __func__/argument setup) compile to nothing in every
+// generated function. CMake option of the same name; default OFF on all platforms.
+#ifndef PS2X_ENABLE_DIAG_TAPS
+#define PS2X_ENABLE_DIAG_TAPS 0
+#endif
+#if PS2X_ENABLE_DIAG_TAPS
 #include "ps2_mpg_src_trace.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e43_trace.h"
 #include "ps2_e44_trace.h"
+namespace ps2x_tap_mpg = ::ps2_mpg_src_trace;
+namespace ps2x_tap_e41 = ::ps2_e41_trace;
+namespace ps2x_tap_e43 = ::ps2_e43_trace;
+namespace ps2x_tap_e44 = ::ps2_e44_trace;
+#else
+namespace ps2x_tap_mpg
+{
+template <class... A> constexpr bool arenastoreArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool dmaregArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isArenaWatched(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isDmareg(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isReadWatched(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isStWatched(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isTagWatched(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isUploaderValue(A &&...) noexcept { return false; }
+template <class... A> constexpr bool readArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool stArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool tagaddrArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool uploadloadArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool writeArmed(A &&...) noexcept { return false; }
+template <class... A> inline void noteArenastoreCtx(A &&...) noexcept {}
+template <class... A> inline void noteDmaregCtx(A &&...) noexcept {}
+template <class... A> inline void noteLoadForSrcCtx(A &&...) noexcept {}
+template <class... A> inline void noteReadCtx(A &&...) noexcept {}
+template <class... A> inline void noteStCtx(A &&...) noexcept {}
+template <class... A> inline void noteStoreCtx(A &&...) noexcept {}
+template <class... A> inline void noteTagaddrwriteCtx(A &&...) noexcept {}
+template <class... A> inline void noteUploadloadCtx(A &&...) noexcept {}
+} // namespace ps2x_tap_mpg
+namespace ps2x_tap_e41
+{
+template <class... A> constexpr bool isPlantWatched(A &&...) noexcept { return false; }
+template <class... A> constexpr bool plantArmed(A &&...) noexcept { return false; }
+template <class... A> inline void noteFastWriteSite(A &&...) noexcept {}
+template <class... A> inline void notePlantCtx(A &&...) noexcept {}
+namespace detail
+{
+struct ScopedFastSuppress { constexpr explicit ScopedFastSuppress(bool) noexcept {} };
+} // namespace detail
+} // namespace ps2x_tap_e41
+namespace ps2x_tap_e43
+{
+template <class... A> constexpr bool enabled(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isProdPage(A &&...) noexcept { return false; }
+template <class... A> inline void noteProdSite(A &&...) noexcept {}
+template <class... A> inline void noteWriteCtx(A &&...) noexcept {}
+namespace detail
+{
+struct ScopedProdSuppress { constexpr explicit ScopedProdSuppress(bool) noexcept {} };
+} // namespace detail
+} // namespace ps2x_tap_e43
+namespace ps2x_tap_e44
+{
+template <class... A> constexpr bool appendArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool enabled(A &&...) noexcept { return false; }
+template <class... A> constexpr bool tplArmed(A &&...) noexcept { return false; }
+template <class... A> inline void noteApcMaybe(A &&...) noexcept {}
+template <class... A> inline void noteAppend(A &&...) noexcept {}
+template <class... A> inline void noteAppxMaybe(A &&...) noexcept {}
+template <class... A> inline void noteFast(A &&...) noexcept {}
+template <class... A> inline void noteTplMaybe(A &&...) noexcept {}
+template <class... A> inline void noteTwMaybe(A &&...) noexcept {}
+template <class... A> inline void noteV1b0Maybe(A &&...) noexcept {}
+} // namespace ps2x_tap_e44
+#endif // PS2X_ENABLE_DIAG_TAPS
 
 static inline int32_t Ps2ExtractEpi32(__m128i v, int index)
 {
@@ -249,12 +322,12 @@ static inline __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
 static inline void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t value)
 {
     rdram[addr & PS2_RAM_MASK] = value;
-    if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
-        ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
-    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
-        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
-    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
-        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
+    if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+        ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
@@ -268,21 +341,21 @@ static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
-        if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
-            ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
-    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
-        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
-    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
-        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
+        if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+            ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
-    if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
-        ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
-    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
-        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
-    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
-        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
+    if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+        ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
@@ -296,21 +369,21 @@ static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
-        if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
-            ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
-    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
-        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
-    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
-        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
+        if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+            ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
-    if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
-        ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
-    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
-        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
-    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
-        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
+    if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+        ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
@@ -324,21 +397,21 @@ static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
-        if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
-            ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
-    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
-        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
-    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
-        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
+        if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+            ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
-    if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
-        ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
-    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
-        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
-    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
-        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
+    if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+        ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
@@ -352,21 +425,21 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
-        if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
-            ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
-    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
-        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
-    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
-        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), static_cast<uint32_t>(PS2_EXTRACT_EPI64_0(value)), __func__);
+        if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+            ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), static_cast<uint32_t>(PS2_EXTRACT_EPI64_0(value)), __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
-    if (ps2_e41_trace::plantArmed()) // E41 plant watch (default off)
-        ps2_e41_trace::noteFastWriteSite(rdram, addr, sizeof(value));
-    if (ps2_e43_trace::enabled()) // E43 producer watch (default off)
-        ps2_e43_trace::noteProdSite(rdram, addr, sizeof(value));
-    if (ps2_e44_trace::enabled()) // E44 scratchpad watch (default off)
-        ps2_e44_trace::noteFast(rdram, nullptr, addr, sizeof(value), static_cast<uint32_t>(PS2_EXTRACT_EPI64_0(value)), __func__);
+    if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+        ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), static_cast<uint32_t>(PS2_EXTRACT_EPI64_0(value)), __func__);
 }
 
 #define FAST_READ8(addr) Ps2FastRead8(rdram, (uint32_t)(addr))
@@ -383,76 +456,76 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 
 #define READ8(addr) ([&, ps2xE40Fn = __func__]() -> uint8_t {                       \
     uint32_t _addr = (uint32_t)(addr);                        \
-    if (ps2_mpg_src_trace::readArmed() &&                      \
-        ps2_mpg_src_trace::isReadWatched(_addr, 1u))           \
-        ps2_mpg_src_trace::noteReadCtx(runtime, ctx, _addr, 1u, ps2xE40Fn); \
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 1u))           \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 1u, ps2xE40Fn); \
     return PS2Runtime::isSpecialAddress(_addr)                \
         ? runtime->Load8(rdram, ctx, _addr)                   \
         : FAST_READ8(_addr); }())
 
 #define READ16(addr) ([&, ps2xE40Fn = __func__]() -> uint16_t {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
-    if (ps2_mpg_src_trace::readArmed() &&                      \
-        ps2_mpg_src_trace::isReadWatched(_addr, 2u))           \
-        ps2_mpg_src_trace::noteReadCtx(runtime, ctx, _addr, 2u, ps2xE40Fn); \
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 2u))           \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 2u, ps2xE40Fn); \
     return PS2Runtime::isSpecialAddress(_addr)                \
         ? runtime->Load16(rdram, ctx, _addr)                  \
         : FAST_READ16(_addr); }())
 
 #define READ32(addr) ([&, ps2xE40Fn = __func__]() -> uint32_t {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
-    if (ps2_mpg_src_trace::readArmed() &&                      \
-        ps2_mpg_src_trace::isReadWatched(_addr, 4u))           \
-        ps2_mpg_src_trace::noteReadCtx(runtime, ctx, _addr, 4u, ps2xE40Fn); \
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 4u))           \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 4u, ps2xE40Fn); \
     uint32_t _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load32(rdram, ctx, _addr)                  \
         : FAST_READ32(_addr);                                 \
-    if (ps2_mpg_src_trace::uploadloadArmed() &&                \
-        ps2_mpg_src_trace::isUploaderValue(_rv))               \
-        ps2_mpg_src_trace::noteUploadloadCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u, ps2xE40Fn); \
-    if (ps2_mpg_src_trace::tagaddrArmed())                     \
-        ps2_mpg_src_trace::noteLoadForSrcCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u); \
+    if (ps2x_tap_mpg::uploadloadArmed() &&                \
+        ps2x_tap_mpg::isUploaderValue(_rv))               \
+        ps2x_tap_mpg::noteUploadloadCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u, ps2xE40Fn); \
+    if (ps2x_tap_mpg::tagaddrArmed())                     \
+        ps2x_tap_mpg::noteLoadForSrcCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u); \
     return _rv; }())
 
 #define READ64(addr) ([&, ps2xE40Fn = __func__]() -> uint64_t {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
-    if (ps2_mpg_src_trace::readArmed() &&                      \
-        ps2_mpg_src_trace::isReadWatched(_addr, 8u))           \
-        ps2_mpg_src_trace::noteReadCtx(runtime, ctx, _addr, 8u, ps2xE40Fn); \
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 8u))           \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 8u, ps2xE40Fn); \
     uint64_t _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load64(rdram, ctx, _addr)                  \
         : FAST_READ64(_addr);                                 \
-    if (ps2_mpg_src_trace::uploadloadArmed() &&                \
-        (ps2_mpg_src_trace::isUploaderValue((uint32_t)_rv) ||  \
-         ps2_mpg_src_trace::isUploaderValue((uint32_t)(_rv >> 32u)))) \
-        ps2_mpg_src_trace::noteUploadloadCtx(runtime, ctx, _addr, 8u, _rv, 0u, ps2xE40Fn); \
-    if (ps2_mpg_src_trace::tagaddrArmed())                     \
-        ps2_mpg_src_trace::noteLoadForSrcCtx(runtime, ctx, _addr, 8u, _rv, 0u); \
+    if (ps2x_tap_mpg::uploadloadArmed() &&                \
+        (ps2x_tap_mpg::isUploaderValue((uint32_t)_rv) ||  \
+         ps2x_tap_mpg::isUploaderValue((uint32_t)(_rv >> 32u)))) \
+        ps2x_tap_mpg::noteUploadloadCtx(runtime, ctx, _addr, 8u, _rv, 0u, ps2xE40Fn); \
+    if (ps2x_tap_mpg::tagaddrArmed())                     \
+        ps2x_tap_mpg::noteLoadForSrcCtx(runtime, ctx, _addr, 8u, _rv, 0u); \
     return _rv; }())
 
 #define READ128(addr) ([&, ps2xE40Fn = __func__]() -> __m128i {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
-    if (ps2_mpg_src_trace::readArmed() &&                      \
-        ps2_mpg_src_trace::isReadWatched(_addr, 16u))          \
-        ps2_mpg_src_trace::noteReadCtx(runtime, ctx, _addr, 16u, ps2xE40Fn); \
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 16u))          \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 16u, ps2xE40Fn); \
     __m128i _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load128(rdram, ctx, _addr)                 \
         : FAST_READ128(_addr);                                \
     uint64_t _lo = 0u, _hi = 0u;                              \
-    const bool _ulArmed = ps2_mpg_src_trace::uploadloadArmed(); \
-    const bool _tagArmed = ps2_mpg_src_trace::tagaddrArmed();   \
+    const bool _ulArmed = ps2x_tap_mpg::uploadloadArmed(); \
+    const bool _tagArmed = ps2x_tap_mpg::tagaddrArmed();   \
     if (_ulArmed || _tagArmed)                                 \
     {                                                         \
         _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_rv)); \
         _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_rv)); \
-        if (_ulArmed && (ps2_mpg_src_trace::isUploaderValue((uint32_t)_lo) || \
-            ps2_mpg_src_trace::isUploaderValue((uint32_t)(_lo >> 32u)) || \
-            ps2_mpg_src_trace::isUploaderValue((uint32_t)_hi) || \
-            ps2_mpg_src_trace::isUploaderValue((uint32_t)(_hi >> 32u)))) \
-            ps2_mpg_src_trace::noteUploadloadCtx(runtime, ctx, _addr, 16u, _lo, _hi, ps2xE40Fn); \
+        if (_ulArmed && (ps2x_tap_mpg::isUploaderValue((uint32_t)_lo) || \
+            ps2x_tap_mpg::isUploaderValue((uint32_t)(_lo >> 32u)) || \
+            ps2x_tap_mpg::isUploaderValue((uint32_t)_hi) || \
+            ps2x_tap_mpg::isUploaderValue((uint32_t)(_hi >> 32u)))) \
+            ps2x_tap_mpg::noteUploadloadCtx(runtime, ctx, _addr, 16u, _lo, _hi, ps2xE40Fn); \
     }                                                         \
     if (_tagArmed)                                             \
-        ps2_mpg_src_trace::noteLoadForSrcCtx(runtime, ctx, _addr, 16u, _lo, _hi); \
+        ps2x_tap_mpg::noteLoadForSrcCtx(runtime, ctx, _addr, 16u, _lo, _hi); \
     return _rv; }())
 
 #define WRITE8(addr, val)                                                              \
@@ -460,18 +533,18 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
         uint8_t _wv = (uint8_t)(val); \
-        const bool _e43 = ps2_e43_trace::enabled();                                              \
-        const bool _e43p = _e43 && ps2_e43_trace::isProdPage(_addr);                             \
-        ps2_e43_trace::detail::ScopedProdSuppress _e43psup(_e43p);                                \
-        const bool _e42plant = ps2_e41_trace::plantArmed() &&                          \
-            ps2_e41_trace::isPlantWatched(_addr, 1u);                                  \
-        ps2_e41_trace::detail::ScopedFastSuppress _e42suppress(_e42plant);              \
-        if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
-            ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
+        const bool _e43 = ps2x_tap_e43::enabled();                                              \
+        const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
+        ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
+        const bool _e42plant = ps2x_tap_e41::plantArmed() &&                          \
+            ps2x_tap_e41::isPlantWatched(_addr, 1u);                                  \
+        ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);              \
+        if (ps2x_tap_mpg::dmaregArmed() && ps2x_tap_mpg::isDmareg(_addr)) \
+            ps2x_tap_mpg::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 1u, (uint64_t)_wv, 0u, ctx, runtime);    \
-        if (ps2_mpg_src_trace::writeArmed())                                           \
-            ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 1u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_mpg::writeArmed())                                           \
+            ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 1u, (uint64_t)_wv, 0u, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                       \
             runtime->Store8(rdram, ctx, _addr, _wv);                                   \
         else                                                                           \
@@ -480,17 +553,17 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             FAST_WRITE8(_addr, _wv);                                                   \
         }                                                                              \
         if (_e42plant)                                                                 \
-            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 1u, __func__); \
+            ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 1u, __func__); \
         if (_e43)                                                                             \
-            ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 1u, __func__, _e43p);              \
-        if (ps2_e44_trace::tplArmed())                                                     \
-            ps2_e44_trace::noteTplMaybe(rdram, ctx, _addr, 1u, __func__); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteApcMaybe(ctx, _addr); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteV1b0Maybe(ctx, _addr, 1u, (uint64_t)_wv, 0u, __func__); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteTwMaybe(rdram, ctx, _addr, 1u, __func__); \
+            ps2x_tap_e43::noteWriteCtx(ctx, rdram, _addr, 1u, __func__, _e43p);              \
+        if (ps2x_tap_e44::tplArmed())                                                     \
+            ps2x_tap_e44::noteTplMaybe(rdram, ctx, _addr, 1u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteApcMaybe(ctx, _addr); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteV1b0Maybe(ctx, _addr, 1u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteTwMaybe(rdram, ctx, _addr, 1u, __func__); \
     } while (0)
 
 #define WRITE16(addr, val)                                                               \
@@ -498,18 +571,18 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                    \
         uint32_t _addr = (addr);                                                         \
         uint16_t _wv = (uint16_t)(val); \
-        const bool _e43 = ps2_e43_trace::enabled();                                              \
-        const bool _e43p = _e43 && ps2_e43_trace::isProdPage(_addr);                             \
-        ps2_e43_trace::detail::ScopedProdSuppress _e43psup(_e43p);                                \
-        const bool _e42plant = ps2_e41_trace::plantArmed() &&                            \
-            ps2_e41_trace::isPlantWatched(_addr, 2u);                                    \
-        ps2_e41_trace::detail::ScopedFastSuppress _e42suppress(_e42plant);                \
-        if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
-            ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
+        const bool _e43 = ps2x_tap_e43::enabled();                                              \
+        const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
+        ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
+        const bool _e42plant = ps2x_tap_e41::plantArmed() &&                            \
+            ps2x_tap_e41::isPlantWatched(_addr, 2u);                                    \
+        ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);                \
+        if (ps2x_tap_mpg::dmaregArmed() && ps2x_tap_mpg::isDmareg(_addr)) \
+            ps2x_tap_mpg::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                       \
             ps2DiagWatchReport(rdram, _addr, 2u, (uint64_t)_wv, 0u, ctx, runtime);      \
-        if (ps2_mpg_src_trace::writeArmed())                                             \
-            ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 2u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_mpg::writeArmed())                                             \
+            ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 2u, (uint64_t)_wv, 0u, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                         \
             runtime->Store16(rdram, ctx, _addr, _wv);                                    \
         else                                                                             \
@@ -518,17 +591,17 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             FAST_WRITE16(_addr, _wv);                                                    \
         }                                                                                \
         if (_e42plant)                                                                   \
-            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 2u, __func__); \
+            ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 2u, __func__); \
         if (_e43)                                                                             \
-            ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 2u, __func__, _e43p);              \
-        if (ps2_e44_trace::tplArmed())                                                     \
-            ps2_e44_trace::noteTplMaybe(rdram, ctx, _addr, 2u, __func__); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteApcMaybe(ctx, _addr); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteV1b0Maybe(ctx, _addr, 2u, (uint64_t)_wv, 0u, __func__); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteTwMaybe(rdram, ctx, _addr, 2u, __func__); \
+            ps2x_tap_e43::noteWriteCtx(ctx, rdram, _addr, 2u, __func__, _e43p);              \
+        if (ps2x_tap_e44::tplArmed())                                                     \
+            ps2x_tap_e44::noteTplMaybe(rdram, ctx, _addr, 2u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteApcMaybe(ctx, _addr); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteV1b0Maybe(ctx, _addr, 2u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteTwMaybe(rdram, ctx, _addr, 2u, __func__); \
     } while (0)
 
 #define WRITE32(addr, val)                                                               \
@@ -536,24 +609,24 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                    \
         uint32_t _addr = (addr);                                                         \
         uint32_t _wv = (uint32_t)(val); \
-        const bool _e43 = ps2_e43_trace::enabled();                                              \
-        const bool _e43p = _e43 && ps2_e43_trace::isProdPage(_addr);                             \
-        ps2_e43_trace::detail::ScopedProdSuppress _e43psup(_e43p);                                \
-        const bool _e42plant = ps2_e41_trace::plantArmed() &&                            \
-            ps2_e41_trace::isPlantWatched(_addr, 4u);                                    \
-        ps2_e41_trace::detail::ScopedFastSuppress _e42suppress(_e42plant);                \
-        if (ps2_mpg_src_trace::arenastoreArmed() && ps2_mpg_src_trace::isArenaWatched(_addr, 4u)) \
-            ps2_mpg_src_trace::noteArenastoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
-        if (ps2_mpg_src_trace::stArmed() && ps2_mpg_src_trace::isStWatched(_addr, 4u)) \
-            ps2_mpg_src_trace::noteStCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
-        if (ps2_mpg_src_trace::tagaddrArmed() && ps2_mpg_src_trace::isTagWatched(_addr, 4u)) \
-            ps2_mpg_src_trace::noteTagaddrwriteCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
-        if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
-            ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
+        const bool _e43 = ps2x_tap_e43::enabled();                                              \
+        const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
+        ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
+        const bool _e42plant = ps2x_tap_e41::plantArmed() &&                            \
+            ps2x_tap_e41::isPlantWatched(_addr, 4u);                                    \
+        ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);                \
+        if (ps2x_tap_mpg::arenastoreArmed() && ps2x_tap_mpg::isArenaWatched(_addr, 4u)) \
+            ps2x_tap_mpg::noteArenastoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_mpg::stArmed() && ps2x_tap_mpg::isStWatched(_addr, 4u)) \
+            ps2x_tap_mpg::noteStCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_mpg::tagaddrArmed() && ps2x_tap_mpg::isTagWatched(_addr, 4u)) \
+            ps2x_tap_mpg::noteTagaddrwriteCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_mpg::dmaregArmed() && ps2x_tap_mpg::isDmareg(_addr)) \
+            ps2x_tap_mpg::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                       \
             ps2DiagWatchReport(rdram, _addr, 4u, (uint64_t)_wv, 0u, ctx, runtime);      \
-        if (ps2_mpg_src_trace::writeArmed())                                             \
-            ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_mpg::writeArmed())                                             \
+            ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                         \
             runtime->Store32(rdram, ctx, _addr, _wv);                                    \
         else                                                                             \
@@ -562,21 +635,21 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             FAST_WRITE32(_addr, _wv);                                                    \
         }                                                                                \
         if (_e42plant)                                                                   \
-            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 4u, __func__); \
+            ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 4u, __func__); \
         if (_e43)                                                                             \
-            ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 4u, __func__, _e43p);              \
-        if (ps2_e44_trace::appendArmed() && ctx != nullptr && ctx->pc == 0x3797E8u) \
-            ps2_e44_trace::noteAppend(rdram, ctx); \
-        if (ps2_e44_trace::appendArmed() && ctx != nullptr) \
-            ps2_e44_trace::noteAppxMaybe(rdram, ctx); \
-        if (ps2_e44_trace::tplArmed())                                                     \
-            ps2_e44_trace::noteTplMaybe(rdram, ctx, _addr, 4u, __func__); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteApcMaybe(ctx, _addr); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteV1b0Maybe(ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteTwMaybe(rdram, ctx, _addr, 4u, __func__); \
+            ps2x_tap_e43::noteWriteCtx(ctx, rdram, _addr, 4u, __func__, _e43p);              \
+        if (ps2x_tap_e44::appendArmed() && ctx != nullptr && ctx->pc == 0x3797E8u) \
+            ps2x_tap_e44::noteAppend(rdram, ctx); \
+        if (ps2x_tap_e44::appendArmed() && ctx != nullptr) \
+            ps2x_tap_e44::noteAppxMaybe(rdram, ctx); \
+        if (ps2x_tap_e44::tplArmed())                                                     \
+            ps2x_tap_e44::noteTplMaybe(rdram, ctx, _addr, 4u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteApcMaybe(ctx, _addr); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteV1b0Maybe(ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteTwMaybe(rdram, ctx, _addr, 4u, __func__); \
     } while (0)
 
 #define WRITE64(addr, val)                                                             \
@@ -584,24 +657,24 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
         uint64_t _wv = (uint64_t)(val); \
-        const bool _e43 = ps2_e43_trace::enabled();                                              \
-        const bool _e43p = _e43 && ps2_e43_trace::isProdPage(_addr);                             \
-        ps2_e43_trace::detail::ScopedProdSuppress _e43psup(_e43p);                                \
-        const bool _e42plant = ps2_e41_trace::plantArmed() &&                          \
-            ps2_e41_trace::isPlantWatched(_addr, 8u);                                  \
-        ps2_e41_trace::detail::ScopedFastSuppress _e42suppress(_e42plant);              \
-        if (ps2_mpg_src_trace::arenastoreArmed() && ps2_mpg_src_trace::isArenaWatched(_addr, 8u)) \
-            ps2_mpg_src_trace::noteArenastoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
-        if (ps2_mpg_src_trace::stArmed() && ps2_mpg_src_trace::isStWatched(_addr, 8u)) \
-            ps2_mpg_src_trace::noteStCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
-        if (ps2_mpg_src_trace::tagaddrArmed() && ps2_mpg_src_trace::isTagWatched(_addr, 8u)) \
-            ps2_mpg_src_trace::noteTagaddrwriteCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
-        if (ps2_mpg_src_trace::dmaregArmed() && ps2_mpg_src_trace::isDmareg(_addr)) \
-            ps2_mpg_src_trace::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
+        const bool _e43 = ps2x_tap_e43::enabled();                                              \
+        const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
+        ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
+        const bool _e42plant = ps2x_tap_e41::plantArmed() &&                          \
+            ps2x_tap_e41::isPlantWatched(_addr, 8u);                                  \
+        ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);              \
+        if (ps2x_tap_mpg::arenastoreArmed() && ps2x_tap_mpg::isArenaWatched(_addr, 8u)) \
+            ps2x_tap_mpg::noteArenastoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (ps2x_tap_mpg::stArmed() && ps2x_tap_mpg::isStWatched(_addr, 8u)) \
+            ps2x_tap_mpg::noteStCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (ps2x_tap_mpg::tagaddrArmed() && ps2x_tap_mpg::isTagWatched(_addr, 8u)) \
+            ps2x_tap_mpg::noteTagaddrwriteCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (ps2x_tap_mpg::dmaregArmed() && ps2x_tap_mpg::isDmareg(_addr)) \
+            ps2x_tap_mpg::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 8u, _wv, 0u, ctx, runtime);              \
-        if (ps2_mpg_src_trace::writeArmed())                                           \
-            ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (ps2x_tap_mpg::writeArmed())                                           \
+            ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                       \
             runtime->Store64(rdram, ctx, _addr, _wv);                                  \
         else                                                                           \
@@ -610,17 +683,17 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             FAST_WRITE64(_addr, _wv);                                                  \
         }                                                                              \
         if (_e42plant)                                                                 \
-            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 8u, __func__); \
+            ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 8u, __func__); \
         if (_e43)                                                                             \
-            ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 8u, __func__, _e43p);              \
-        if (ps2_e44_trace::tplArmed())                                                     \
-            ps2_e44_trace::noteTplMaybe(rdram, ctx, _addr, 8u, __func__); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteApcMaybe(ctx, _addr); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteV1b0Maybe(ctx, _addr, 8u, _wv, 0u, __func__); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteTwMaybe(rdram, ctx, _addr, 8u, __func__); \
+            ps2x_tap_e43::noteWriteCtx(ctx, rdram, _addr, 8u, __func__, _e43p);              \
+        if (ps2x_tap_e44::tplArmed())                                                     \
+            ps2x_tap_e44::noteTplMaybe(rdram, ctx, _addr, 8u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteApcMaybe(ctx, _addr); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteV1b0Maybe(ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteTwMaybe(rdram, ctx, _addr, 8u, __func__); \
     } while (0)
 
 #define WRITE128(addr, val)                                                            \
@@ -628,24 +701,24 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
         __m128i _value = (val); \
-        const bool _e43 = ps2_e43_trace::enabled();                                              \
-        const bool _e43p = _e43 && ps2_e43_trace::isProdPage(_addr);                             \
-        ps2_e43_trace::detail::ScopedProdSuppress _e43psup(_e43p);                                \
+        const bool _e43 = ps2x_tap_e43::enabled();                                              \
+        const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
+        ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
         const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value));       \
         const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value));       \
-        const bool _e42plant = ps2_e41_trace::plantArmed() &&                          \
-            ps2_e41_trace::isPlantWatched(_addr, 16u);                                 \
-        ps2_e41_trace::detail::ScopedFastSuppress _e42suppress(_e42plant);              \
-        if (ps2_mpg_src_trace::arenastoreArmed() && ps2_mpg_src_trace::isArenaWatched(_addr, 16u)) \
-            ps2_mpg_src_trace::noteArenastoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
-        if (ps2_mpg_src_trace::stArmed() && ps2_mpg_src_trace::isStWatched(_addr, 16u)) \
-            ps2_mpg_src_trace::noteStCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
-        if (ps2_mpg_src_trace::tagaddrArmed() && ps2_mpg_src_trace::isTagWatched(_addr, 16u)) \
-            ps2_mpg_src_trace::noteTagaddrwriteCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
+        const bool _e42plant = ps2x_tap_e41::plantArmed() &&                          \
+            ps2x_tap_e41::isPlantWatched(_addr, 16u);                                 \
+        ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);              \
+        if (ps2x_tap_mpg::arenastoreArmed() && ps2x_tap_mpg::isArenaWatched(_addr, 16u)) \
+            ps2x_tap_mpg::noteArenastoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
+        if (ps2x_tap_mpg::stArmed() && ps2x_tap_mpg::isStWatched(_addr, 16u)) \
+            ps2x_tap_mpg::noteStCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
+        if (ps2x_tap_mpg::tagaddrArmed() && ps2x_tap_mpg::isTagWatched(_addr, 16u)) \
+            ps2x_tap_mpg::noteTagaddrwriteCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 16u, _lo, _hi, ctx, runtime);            \
-        if (ps2_mpg_src_trace::writeArmed())                                           \
-            ps2_mpg_src_trace::noteStoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
+        if (ps2x_tap_mpg::writeArmed())                                           \
+            ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
         if (PS2Runtime::isSpecialAddress(_addr))                                       \
             runtime->Store128(rdram, ctx, _addr, _value);                              \
         else                                                                           \
@@ -654,17 +727,17 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             FAST_WRITE128(_addr, _value);                                              \
         }                                                                              \
         if (_e42plant)                                                                 \
-            ps2_e41_trace::notePlantCtx(ctx, rdram, _addr, 16u, __func__); \
+            ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 16u, __func__); \
         if (_e43)                                                                              \
-            ps2_e43_trace::noteWriteCtx(ctx, rdram, _addr, 16u, __func__, _e43p);                \
-        if (ps2_e44_trace::tplArmed())                                                     \
-            ps2_e44_trace::noteTplMaybe(rdram, ctx, _addr, 16u, __func__); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteApcMaybe(ctx, _addr); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteV1b0Maybe(ctx, _addr, 16u, _lo, _hi, __func__); \
-        if (ps2_e44_trace::appendArmed())                                                  \
-            ps2_e44_trace::noteTwMaybe(rdram, ctx, _addr, 16u, __func__); \
+            ps2x_tap_e43::noteWriteCtx(ctx, rdram, _addr, 16u, __func__, _e43p);                \
+        if (ps2x_tap_e44::tplArmed())                                                     \
+            ps2x_tap_e44::noteTplMaybe(rdram, ctx, _addr, 16u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteApcMaybe(ctx, _addr); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteV1b0Maybe(ctx, _addr, 16u, _lo, _hi, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteTwMaybe(rdram, ctx, _addr, 16u, __func__); \
     } while (0)
 
 // Packed Compare Greater Than (PCGT)

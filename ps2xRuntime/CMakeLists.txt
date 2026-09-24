@@ -464,6 +464,15 @@ if(PS2X_ENABLE_RUNTIME_LOGS)
     )
 endif()
 
+# E40-E44 guest-memory watch taps in ps2_runtime_macros.h. Keep them out of
+# every generated function by default on all platforms; dev lanes opt in.
+option(PS2X_ENABLE_DIAG_TAPS "Compile the E40-E44 guest-memory watch taps into the READ/WRITE macros" OFF)
+if(PS2X_ENABLE_DIAG_TAPS)
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DIAG_TAPS=1)
+else()
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DIAG_TAPS=0)
+endif()
+
 if(PS2X_ENABLE_AGRESSIVE_LOGS)
     target_compile_definitions(ps2_runtime PUBLIC
         AGRESSIVE_LOGS=1
