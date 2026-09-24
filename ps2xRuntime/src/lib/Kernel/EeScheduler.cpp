@@ -8,6 +8,7 @@
 #include "ps2_vu1_trace.h"
 #include "ps2_e15.h"
 #include "ps2_vq.h"
+#include "runtime/gs/gs_stream_capture.h"
 
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
@@ -2637,6 +2638,7 @@ void EeScheduler::processEvent(const EeEvent &event)
                 else
                     gsRegs.csr.fetch_and(~0x2000ull, std::memory_order_acq_rel); });
         }
+        ps2x_gs_capture::vblank(m_vsyncTick);
         writeGuestU32(m_vsyncFlagAddress, 1u);
         if (m_vsyncTickAddress != 0u)
         {

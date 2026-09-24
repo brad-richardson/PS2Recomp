@@ -11,6 +11,7 @@
 #include "game_overrides.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_stream_capture.h"
 #include "ps2_e7.h"
 #include "ps2_e15.h"
 #include "ps2_pk.h"
@@ -702,6 +703,7 @@ PS2Runtime::~PS2Runtime()
     }
     ps2_e15::closure(m_memory.gs().vsyncTick.load());
     ps2_e7::shutdown(m_memory.gs().vsyncTick.load());
+    ps2x_gs_capture::close();
 }
 
 void PS2Runtime::setIopPluginSearchPaths(std::vector<std::filesystem::path> paths)
