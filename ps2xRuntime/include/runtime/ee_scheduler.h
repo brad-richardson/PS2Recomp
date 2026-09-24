@@ -275,6 +275,9 @@ public:
     void postEvent(EeEvent event);
     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
     void accountCycles(uint32_t cycles) noexcept;
+    // Executor-only shared COP0 Count clock. A read charges at least one tick.
+    uint32_t readCount(R5900Context *ctx) noexcept;
+    void writeCount(R5900Context *ctx, uint32_t value) noexcept;
     [[nodiscard]] bool isExecutingGuest() const noexcept;
 
     // Kernel object API. All calls except postEvent/requestStop execute on the
@@ -423,6 +426,8 @@ private:
     bool m_insideInterrupt = false;
     uint32_t m_pendingEeTimerInterrupts = 0;
     uint64_t m_eeCycle = 0;
+    uint64_t m_countCycle = 0;
+    uint32_t m_count = 0;
     uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
     std::thread::id m_executorThread{};
     std::atomic<bool> m_running{false};

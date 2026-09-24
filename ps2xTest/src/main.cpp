@@ -39,6 +39,7 @@ void register_ps2_fpu_semantics_tests();
 void register_ps2_fpu_cop2_audit_tests();
 void register_ps2_mmi_interleave_tests();
 void register_ps2_lwu_tests();
+void register_ps2_ee_count_tests();
 void reset_ps2_test_function_table();
 
 int main()
@@ -82,6 +83,7 @@ int main()
     register_ps2_fpu_cop2_audit_tests();
     register_ps2_mmi_interleave_tests();
     register_ps2_lwu_tests();
+    register_ps2_ee_count_tests();
     int res = MiniTest::Run();
     std::cout.flush();
     std::cerr.flush();

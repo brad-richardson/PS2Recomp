@@ -412,6 +412,8 @@ public:
     const EeScheduler &eeScheduler() const;
     void postEeEvent(EeEvent event);
     bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
+    uint32_t readEeCount(R5900Context *ctx) noexcept;
+    void writeEeCount(R5900Context *ctx, uint32_t value) noexcept;
     [[noreturn]] void eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc);
 
     struct EeExitHandlerRegistration

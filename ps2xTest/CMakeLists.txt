@@ -73,6 +73,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_fpu_cop2_audit_tests.cpp
     src/ps2_mmi_interleave_tests.cpp
     src/ps2_lwu_tests.cpp
+    src/ps2_ee_count_tests.cpp
 )
 
 if(PS2X_ENABLE_DIAG_TAPS)

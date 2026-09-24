@@ -3529,6 +3529,16 @@ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
     return m_eeScheduler->checkpointDue(cycles);
 }
 
+uint32_t PS2Runtime::readEeCount(R5900Context *ctx) noexcept
+{
+    return m_eeScheduler->readCount(ctx);
+}
+
+void PS2Runtime::writeEeCount(R5900Context *ctx, uint32_t value) noexcept
+{
+    m_eeScheduler->writeCount(ctx, value);
+}
+
 [[noreturn]] void PS2Runtime::eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc)
 {
     const uint64_t currentTick = m_eeScheduler->currentVSyncTick();

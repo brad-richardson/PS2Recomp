@@ -380,6 +380,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_insideInterrupt = false;
     m_pendingEeTimerInterrupts = 0u;
     m_eeCycle = 0u;
+    m_countCycle = 0u;
+    m_count = mainContext.cop0_count;
     m_sliceEndCycle = kDefaultTimeSliceCycles;
     m_stopRequested.store(false, std::memory_order_release);
     m_checkpointPending.store(false, std::memory_order_release);
@@ -887,11 +889,32 @@ void EeScheduler::accountCycles(uint32_t cycles) noexcept
 {
     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
     m_eeCycle += elapsed;
+    if (GuestThread *running = currentThread())
+    {
+        running->activeContext().cop0_count =
+            m_count + static_cast<uint32_t>(m_eeCycle - m_countCycle);
+    }
     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
     if (m_pendingEeTimerInterrupts != 0u)
     {
         m_checkpointPending.store(true, std::memory_order_release);
     }
+}
+
+uint32_t EeScheduler::readCount(R5900Context *ctx) noexcept
+{
+    const uint64_t elapsed = m_eeCycle - m_countCycle;
+    m_count += static_cast<uint32_t>(elapsed == 0u ? 1u : elapsed);
+    m_countCycle = m_eeCycle;
+    ctx->cop0_count = m_count;
+    return m_count;
+}
+
+void EeScheduler::writeCount(R5900Context *ctx, uint32_t value) noexcept
+{
+    m_count = value;
+    m_countCycle = m_eeCycle;
+    ctx->cop0_count = value;
 }
 
 bool EeScheduler::isExecutingGuest() const noexcept
