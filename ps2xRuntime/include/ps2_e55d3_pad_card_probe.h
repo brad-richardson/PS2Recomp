@@ -10,6 +10,10 @@
 //              fill as hex; ok=0 carries a reason and no bytes.
 //   noteGetDir one line per sceMcGetDir call: copied=1 carries the full
 //              entryCount*64 table bytes as hex; otherwise a reason.
+//   noteGetDirPath one sibling line per sceMcGetDir call: the raw guest
+//              query and its normalized query/pattern plus host directory.
+//              Bad-port/unformatted exits carry "-" for the unresolved
+//              query/parent/pattern/host fields.
 //   noteMcRead one line per sceMcRead call: ok=1 with actual>0 carries the
 //              full payload as hex; otherwise a reason.
 // A shared monotonic seq orders all three families; each family also carries
@@ -27,6 +31,10 @@
 //     entries=<n> len=<n64> ok=1 bytes=<hex>
 //   getdir seq=<s> ... entries=<n> len=0 ok=0 reason=<bad-port|unformatted|
 //     no-dir|empty|bad-addr>
+//   getdirpath seq=<s> vsync=<t> pord=<pathOrd> port=<p> slot=<sl> max=<m>
+//     rawLen=<r> raw="<esc>" query="<esc>" parent="<esc>" pattern="<esc>"
+//     host="<esc>" (each escaped field capped at 1024 chars; unknown
+//     query/parent/pattern/host on bad-port/unformatted is "-")
 //   mcread seq=<s> vsync=<t> ord=<readOrd> fd=<f> addr=0x<8x>
 //     req=<q> len=<a> ok=1 err=<-|io-error> bytes=<hex>
 //     (err records a stream error observed alongside a positive payload;
@@ -65,6 +73,7 @@ namespace ps2_e55d3_probe
 inline constexpr uint64_t kByteCap = 16ull * 1024ull * 1024ull; // 16 MiB
 inline constexpr uint64_t kFlushEvery = 16ull;
 inline constexpr size_t kCapReserve = 256u; // worst-case cap-line bytes
+inline constexpr size_t kPathFieldMax = 1024u; // per-field escaped cap
 
 namespace detail
 {
@@ -85,6 +94,7 @@ namespace detail
         uint64_t padOrd = 0u;  // per-family ordinals (every call counts)
         uint64_t dirOrd = 0u;
         uint64_t readOrd = 0u;
+        uint64_t pathOrd = 0u; // getdirpath sibling ordinal (every GetDir counts)
     };
 
     inline State &state()
@@ -351,6 +361,157 @@ inline void noteGetDir(uint64_t vsync, int port, int slot, uint32_t tableAddr,
     }
 }
 
+// sceMcGetDir path tap. Sibling line carrying the raw guest query and its
+// normalized query/parent/pattern plus the resolved host directory. Read-only:
+// captures std::strings, never touches RDRAM, return values or results.
+// Unknown query/parent/pattern/host on bad-port/unformatted exits must be
+// passed as "-" by the caller (no normalization is moved into those branches).
+inline void noteGetDirPath(uint64_t vsync, int port, int slot, int32_t maxEntries,
+                           const std::string &rawPath, const std::string &query,
+                           const std::string &parentRel, const std::string &pattern,
+                           const std::string &hostDir)
+{
+    if (!armed())
+    {
+        return;
+    }
+    detail::State &s = detail::state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.enabled || s.capped)
+    {
+        return;
+    }
+    const uint64_t seq = ++s.seq;
+    const uint64_t pord = ++s.pathOrd;
+    const uint64_t rawLen = static_cast<uint64_t>(rawPath.size());
+    auto escapeField = [](const std::string &in, std::string &out)
+    {
+        out.clear();
+        out.reserve(in.size());
+        static constexpr char kHex[] = "0123456789abcdef";
+        for (size_t i = 0u; i < in.size(); ++i)
+        {
+            const unsigned char c = static_cast<unsigned char>(in[i]);
+            if (c == static_cast<unsigned char>('\\'))
+            {
+                if (out.size() + 2u > kPathFieldMax)
+                {
+                    break;
+                }
+                out += "\\\\";
+            }
+            else if (c == static_cast<unsigned char>('"'))
+            {
+                if (out.size() + 2u > kPathFieldMax)
+                {
+                    break;
+                }
+                out += "\\\"";
+            }
+            else if (c >= 0x20u && c <= 0x7Eu)
+            {
+                if (out.size() + 1u > kPathFieldMax)
+                {
+                    break;
+                }
+                out.push_back(static_cast<char>(c));
+            }
+            else
+            {
+                if (out.size() + 4u > kPathFieldMax)
+                {
+                    break;
+                }
+                out.push_back('\\');
+                out.push_back('x');
+                out.push_back(kHex[(c >> 4) & 0xFu]);
+                out.push_back(kHex[c & 0xFu]);
+            }
+        }
+    };
+    std::string eRaw, eQuery, eParent, ePattern, eHost;
+    escapeField(rawPath, eRaw);
+    escapeField(query, eQuery);
+    escapeField(parentRel, eParent);
+    escapeField(pattern, ePattern);
+    escapeField(hostDir, eHost);
+    std::string line;
+    line.reserve(256u + eRaw.size() + eQuery.size() + eParent.size() + ePattern.size() + eHost.size());
+    char head[256];
+    std::snprintf(head, sizeof(head),
+                  "getdirpath seq=%llu vsync=%llu pord=%llu port=%d slot=%d max=%d rawLen=%llu raw=\"",
+                  static_cast<unsigned long long>(seq),
+                  static_cast<unsigned long long>(vsync),
+                  static_cast<unsigned long long>(pord),
+                  port, slot, maxEntries,
+                  static_cast<unsigned long long>(rawLen));
+    line += head;
+    line += eRaw;
+    line += "\" query=\"";
+    line += eQuery;
+    line += "\" parent=\"";
+    line += eParent;
+    line += "\" pattern=\"";
+    line += ePattern;
+    line += "\" host=\"";
+    line += eHost;
+    line += "\"\n";
+    const uint64_t recordBytes = static_cast<uint64_t>(line.size());
+    if (s.bytesWritten + recordBytes > s.byteCap - kCapReserve)
+    {
+        // Whole-or-nothing: emit the single cap line directly (delegating to
+        // emitRecordLocked with an empty header would write a blank line here
+        // instead of the cap, since its 1-byte record still fits).
+        const uint64_t capSeq = ++s.seq;
+        char cap[192];
+        const int n = std::snprintf(cap, sizeof(cap),
+                                    "cap seq=%llu vsync=%llu bytes=%llu msg=byte-cap-reached\n",
+                                    static_cast<unsigned long long>(capSeq),
+                                    static_cast<unsigned long long>(vsync),
+                                    static_cast<unsigned long long>(s.bytesWritten));
+        if (!s.outOpen)
+        {
+            s.out.open(s.path, std::ios::out | std::ios::trunc);
+            if (!s.out.is_open())
+            {
+                s.enabled = false;
+                detail::enabledFlag().store(false, std::memory_order_relaxed);
+                return;
+            }
+            s.outOpen = true;
+        }
+        s.out << cap;
+        s.out.flush();
+        if (n > 0)
+        {
+            s.bytesWritten += static_cast<uint64_t>(n);
+        }
+        ++s.linesWritten;
+        s.capped = true;
+        s.enabled = false;
+        detail::enabledFlag().store(false, std::memory_order_relaxed);
+        return;
+    }
+    if (!s.outOpen)
+    {
+        s.out.open(s.path, std::ios::out | std::ios::trunc);
+        if (!s.out.is_open())
+        {
+            s.enabled = false;
+            detail::enabledFlag().store(false, std::memory_order_relaxed);
+            return;
+        }
+        s.outOpen = true;
+    }
+    s.out << line;
+    s.bytesWritten += recordBytes;
+    ++s.linesWritten;
+    if ((s.linesWritten % kFlushEvery) == 0u)
+    {
+        s.out.flush();
+    }
+}
+
 // sceMcRead tap. Call after the fread (or its skip/fail decision). bytes
 // must point at actual valid RDRAM bytes iff ok && actual > 0. reason on an
 // ok line is an accompanying stream note (io-error) printed as err; on a
@@ -439,6 +600,7 @@ inline void configureForTest(const char *path, uint64_t byteCap)
     s.padOrd = 0u;
     s.dirOrd = 0u;
     s.readOrd = 0u;
+    s.pathOrd = 0u;
 }
 
 inline void clearForTest()
@@ -464,6 +626,7 @@ inline void clearForTest()
     s.padOrd = 0u;
     s.dirOrd = 0u;
     s.readOrd = 0u;
+    s.pathOrd = 0u;
 }
 
 } // namespace ps2_e55d3_probe

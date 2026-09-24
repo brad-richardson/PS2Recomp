@@ -725,6 +725,9 @@ namespace ps2_stubs
                 McPortState &state = g_mcPorts[static_cast<size_t>(port)];
                 if (!state.formatted)
                 {
+                    // E55D14: path sibling (unresolved query) before status.
+                    ps2_e55d3_probe::noteGetDirPath(e55d3Tick, port, slot, maxEntries,
+                                                    rawPath, "-", "-", "-", "-");
                     // E55D3-SEM1: status-only line (card not formatted).
                     ps2_e55d3_probe::noteGetDir(e55d3Tick, port, slot, tableAddr, 0u,
                                                 maxEntries, false, "unformatted", nullptr);
@@ -776,6 +779,13 @@ namespace ps2_stubs
                         hostDir /= parentRel;
                     }
                     hostDir = hostDir.lexically_normal();
+
+                    // E55D14: path sibling for the resolved query; covers
+                    // no-dir/empty/ok/bad-addr below. Read-only.
+                    ps2_e55d3_probe::noteGetDirPath(e55d3Tick, port, slot, maxEntries,
+                                                    rawPath, guestQuery,
+                                                    parentRel.string(), pattern,
+                                                    hostDir.string());
 
                     std::error_code ec;
                     if (std::filesystem::exists(hostDir, ec) && !ec &&
@@ -883,6 +893,9 @@ namespace ps2_stubs
             }
             else
             {
+                // E55D14: path sibling (unresolved query) before status.
+                ps2_e55d3_probe::noteGetDirPath(e55d3Tick, port, slot, maxEntries,
+                                                rawPath, "-", "-", "-", "-");
                 // E55D3-SEM1: status-only line (bad port/slot).
                 ps2_e55d3_probe::noteGetDir(e55d3Tick, port, slot, tableAddr, 0u,
                                             maxEntries, false, "bad-port", nullptr);
