@@ -259,6 +259,147 @@ bool ps2xGb7c2ProbeEnabled()
     return gb7c2State().enabled;
 }
 
+// GB7C4 actual carrier glyph-row sample probe (default OFF).
+// Predeclared candidate pairs only (GB7C3 candidate-pairs.tsv):
+//   A: C1 src (343,378) -> carrier dst (342,377), packet47240 batch 10
+//   B: C1 src (369,381) -> carrier dst (368,380), batch 11
+//   C: C1 src (382,381) -> carrier dst (381,380), batch 11
+//   D: C1 src (407,378) -> carrier dst (406,377), batch 12
+// C1 frame block (fbp0<<5 = 0) and carrier tex block (tbp0 = 0) are both
+// block 0 at tbw/fbw 8, so a carrier tap swizzled address is directly
+// comparable to the C1 source word address. Destination words live in the
+// fbp112 block (CT24, which shares the C32 page tables with CT32, so the
+// same address helper applies). Rendering is untouched: the probe only
+// adds ReadVramUnlocked calls (side-effect-free) and log writes.
+namespace
+{
+struct Gb7c4ProbeState
+{
+    bool enabled = false;
+    std::ofstream out;
+    Gb7c4PacketContext ctx{};
+    uint64_t nextBatch = 0;
+    uint64_t rows = 0;
+    uint64_t bytes = 0;
+    bool capped = false;
+    // Current batch (valid while DrawPrimitive dispatches it).
+    int curKind = 0; // 0 = untraced, 1 = C1 batch, 2 = carrier batch
+    uint64_t curBatch = 0;
+    // C1 source words observed at the candidate coords (frame block 0).
+    bool c1Seen[4] = {false, false, false, false};
+    uint32_t c1Old[4] = {0, 0, 0, 0};
+    uint32_t c1New[4] = {0, 0, 0, 0};
+    uint32_t c1Addr[4] = {0, 0, 0, 0};
+    bool carrierSeen[4] = {false, false, false, false};
+    // Candidate A yielded outcome A: suppress B/C/D carrier rows.
+    bool aComplete = false;
+};
+
+Gb7c4ProbeState &gb7c4State()
+{
+    static Gb7c4ProbeState s;
+    return s;
+}
+
+constexpr uint64_t kGb7c4MaxRows = 20000u;
+constexpr uint64_t kGb7c4MaxBytes = 8u * 1024u * 1024u;
+// Candidate C1 sources (framebuffer pixels in the fbp0 block).
+constexpr int kGb7c4SrcX[4] = {343, 369, 382, 407};
+constexpr int kGb7c4SrcY[4] = {378, 381, 381, 378};
+// Candidate carrier destinations (framebuffer pixels in fbp112).
+constexpr int kGb7c4DstX[4] = {342, 368, 381, 406};
+constexpr int kGb7c4DstY[4] = {377, 380, 380, 377};
+constexpr char kGb7c4CandName[4] = {'A', 'B', 'C', 'D'};
+
+void gb7c4Emit(const char *cand, const char *kind,
+               const char *dstXy, const char *dstAddr,
+               const char *oldV, const char *newV,
+               const char *srcUv, const char *taps, const char *tapState,
+               const char *blend, const char *state, const char *test,
+               const char *classification)
+{
+    Gb7c4ProbeState &s = gb7c4State();
+    if (!s.enabled || s.capped)
+        return;
+    char line[4096];
+    const int count = std::snprintf(
+        line, sizeof(line), "%llu\t%llu\t%u\t%llu\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+        static_cast<unsigned long long>(s.ctx.tick),
+        static_cast<unsigned long long>(s.ctx.packetIndex), s.ctx.path,
+        static_cast<unsigned long long>(s.curBatch),
+        cand, kind, dstXy, dstAddr, oldV, newV, srcUv, taps, tapState,
+        blend, state, test, classification);
+    if (count <= 0 || static_cast<size_t>(count) >= sizeof(line))
+        return;
+    if (s.rows >= kGb7c4MaxRows || s.bytes + static_cast<uint64_t>(count) > kGb7c4MaxBytes)
+    {
+        s.capped = true;
+        return;
+    }
+    s.out << line;
+    if (!s.out.good())
+    {
+        s.capped = true;
+        return;
+    }
+    ++s.rows;
+    s.bytes += static_cast<uint64_t>(count);
+}
+} // namespace
+
+void ps2xGb7c4ProbeOpen(const char *path)
+{
+    Gb7c4ProbeState &s = gb7c4State();
+    if (s.enabled || !path || !*path)
+        return;
+    s.out.open(path, std::ios::binary | std::ios::trunc);
+    if (!s.out)
+        return;
+    s.out << "tick\tpacket\tpath\tbatch\tcand\tkind\tdst_xy\tdst_addr\told\tnew\tsrc_uv\ttaps\ttap_state\tblend\tstate\ttest\tclassification\n";
+    s.bytes += 95u;
+    s.ctx = Gb7c4PacketContext{};
+    s.nextBatch = 0;
+    s.rows = 0;
+    s.capped = false;
+    s.curKind = 0;
+    s.curBatch = 0;
+    for (int i = 0; i < 4; ++i)
+    {
+        s.c1Seen[i] = false;
+        s.c1Old[i] = s.c1New[i] = s.c1Addr[i] = 0u;
+        s.carrierSeen[i] = false;
+    }
+    s.aComplete = false;
+    s.enabled = s.out.good();
+}
+
+void ps2xGb7c4ProbeClose()
+{
+    Gb7c4ProbeState &s = gb7c4State();
+    if (s.enabled)
+    {
+        std::cout << "GB7C4_SUMMARY rows=" << s.rows << " bytes=" << s.bytes
+                  << " capped=" << (s.capped ? 1 : 0) << '\n';
+    }
+    s.enabled = false;
+    if (s.out.is_open())
+        s.out.close();
+}
+
+void ps2xGb7c4SetPacketContext(uint64_t tick, uint64_t packetIndex, unsigned path)
+{
+    Gb7c4ProbeState &s = gb7c4State();
+    s.ctx.tick = tick;
+    s.ctx.packetIndex = packetIndex;
+    s.ctx.path = path;
+    s.nextBatch = 0;
+}
+
+bool ps2xGb7c4ProbeEnabled()
+{
+    return gb7c4State().enabled;
+}
+
 bool ps2xDeinterlaceBobValue(const char *value)
 {
     if (value == nullptr || value[0] == '\0')
@@ -1470,6 +1611,365 @@ void GSCpuBackend::TraceGb7c2Pixel(const GSDrawState &state, int x, int y, uint3
     gb7c2Emit(srcXy, dstXy, oldS, newS, texS, "-", "-", cls);
 }
 
+uint64_t GSCpuBackend::NoteGb7c4BatchBegin(const GSPrimitiveBatch &batch)
+{
+    Gb7c4ProbeState &s = gb7c4State();
+    const uint64_t batchId = s.nextBatch++;
+    s.curBatch = batchId;
+    s.curKind = 0;
+    if (!s.enabled || s.capped)
+        return batchId;
+    const GSDrawState &state = batch.state;
+    const auto &ctx = state.context;
+    const bool isSprite = state.prim.type == GS_PRIM_SPRITE && batch.vertexCount >= 2u;
+    const bool isC1 = isSprite && !state.prim.fst &&
+                      s.ctx.tick == 600u && s.ctx.packetIndex == 47176u && s.ctx.path == 2u &&
+                      ctx.frame.fbp == 0u && ctx.tex0.tbp0 == 11017u;
+    const bool isCarrier = isSprite && state.prim.fst && state.prim.tme &&
+                           s.ctx.tick == 601u && s.ctx.packetIndex == 47240u && s.ctx.path == 3u &&
+                           ctx.frame.fbp == 112u && ctx.tex0.tbp0 == 0u;
+    if (!isC1 && !isCarrier)
+        return batchId;
+    s.curKind = isC1 ? 1 : 2;
+
+    // Clipped sprite rect (mirrors DrawSprite).
+    const int ofx = ctx.xyoffset.ofx >> 4;
+    const int ofy = ctx.xyoffset.ofy >> 4;
+    int ax0 = static_cast<int>(batch.vertices[0].x) - ofx;
+    int ay0 = static_cast<int>(batch.vertices[0].y) - ofy;
+    int ax1 = static_cast<int>(batch.vertices[1].x) - ofx;
+    int ay1 = static_cast<int>(batch.vertices[1].y) - ofy;
+    if (ax0 > ax1)
+        std::swap(ax0, ax1);
+    if (ay0 > ay1)
+        std::swap(ay0, ay1);
+    const int spanX = std::max(1, ax1 - ax0);
+    const int spanY = std::max(1, ay1 - ay0);
+    ax1 = ax0 + spanX - 1;
+    ay1 = ay0 + spanY - 1;
+    const int x0 = clampInt(ax0, ctx.scissor.x0, ctx.scissor.x1);
+    const int y0 = clampInt(ay0, ctx.scissor.y0, ctx.scissor.y1);
+    const int x1 = clampInt(ax1, ctx.scissor.x0, ctx.scissor.x1);
+    const int y1 = clampInt(ay1, ctx.scissor.y0, ctx.scissor.y1);
+
+    const GSVertex &v1 = batch.vertices[1];
+    char detail[1024];
+    std::snprintf(detail, sizeof(detail),
+                  "rect=(%d,%d)-(%d,%d) fst=%u tme=%u abe=%u frame=fbp%u,fbw%u,psm%u,fbmsk=0x%08x "
+                  "tex=tbp0-%u,tbw%u,psm%u,tw%u,th%u,tcc%u,tfx%u,cbp%u,cpsm%u,csm%u,csa%u,cld%u "
+                  "clamp=0x%llx xyoff=(%u,%u) tex1=0x%llx texa=(ta0=%u,aem=%u,ta1=%u) "
+                  "test=0x%llx alpha=0x%llx pabe=%u vrt=(%u,%u,%u,%u)",
+                  x0, y0, x1, y1, state.prim.fst ? 1u : 0u, state.prim.tme ? 1u : 0u,
+                  state.prim.abe ? 1u : 0u,
+                  ctx.frame.fbp, static_cast<unsigned>(ctx.frame.fbw),
+                  static_cast<unsigned>(ctx.frame.psm), ctx.frame.fbmsk,
+                  ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.tbw),
+                  static_cast<unsigned>(ctx.tex0.psm), static_cast<unsigned>(ctx.tex0.tw),
+                  static_cast<unsigned>(ctx.tex0.th), static_cast<unsigned>(ctx.tex0.tcc),
+                  static_cast<unsigned>(ctx.tex0.tfx), ctx.tex0.cbp,
+                  static_cast<unsigned>(ctx.tex0.cpsm), static_cast<unsigned>(ctx.tex0.csm),
+                  static_cast<unsigned>(ctx.tex0.csa), static_cast<unsigned>(ctx.tex0.cld),
+                  static_cast<unsigned long long>(ctx.clamp),
+                  static_cast<unsigned>(ctx.xyoffset.ofx),
+                  static_cast<unsigned>(ctx.xyoffset.ofy),
+                  static_cast<unsigned long long>(ctx.tex1),
+                  static_cast<unsigned>(state.texa.ta0), state.texa.aem ? 1u : 0u,
+                  static_cast<unsigned>(state.texa.ta1),
+                  static_cast<unsigned long long>(ctx.test),
+                  static_cast<unsigned long long>(ctx.alpha),
+                  state.pabe ? 1u : 0u,
+                  static_cast<unsigned>(v1.r), static_cast<unsigned>(v1.g),
+                  static_cast<unsigned>(v1.b), static_cast<unsigned>(v1.a));
+    gb7c4Emit("-", isC1 ? "batch-c1" : "batch-carrier",
+              "-", "-", "-", "-", "-", "-", "-", "-", detail, "-",
+              isC1 ? "batch-c1" : "batch-carrier");
+    return batchId;
+}
+
+void GSCpuBackend::TraceGb7c4C1Pixel(const GSDrawState &state, int x, int y, uint32_t z,
+                                     float texUf, float texVf,
+                                     uint32_t texel,
+                                     uint8_t combR, uint8_t combG, uint8_t combB, uint8_t combA,
+                                     uint32_t oldVal, int candIdx)
+{
+    Gb7c4ProbeState &s = gb7c4State();
+    if (!s.enabled || s.capped)
+        return;
+    const auto &ctx = state.context;
+    const uint32_t fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+    const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+    const uint32_t fpsm = ctx.frame.psm;
+    // New value after the (already executed) WritePixel, plus the swizzled
+    // VRAM word address from the runtime helper (not a linear offset).
+    const uint32_t newVal = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+    const uint32_t dstAddr = GSPSMCT32::addrPSMCT32(fbp, fbw, static_cast<uint32_t>(x), static_cast<uint32_t>(y));
+    // STQ pre/post-CLAMP UV plus the raw T4 nibble/CLUT at the wrapped texel.
+    const int su = static_cast<int>(texUf);
+    const int sv = static_cast<int>(texVf);
+    const uint64_t clamp = ctx.clamp;
+    const int wu = wrapTextureCoordinate(su, state.textureWidth,
+                                         static_cast<uint8_t>(clamp & 0x3u),
+                                         static_cast<uint16_t>((clamp >> 4) & 0x3FFu),
+                                         static_cast<uint16_t>((clamp >> 14) & 0x3FFu));
+    const int wv = wrapTextureCoordinate(sv, state.textureHeight,
+                                         static_cast<uint8_t>((clamp >> 2) & 0x3u),
+                                         static_cast<uint16_t>((clamp >> 24) & 0x3FFu),
+                                         static_cast<uint16_t>((clamp >> 34) & 0x3FFu));
+    const uint32_t raw = ReadVramUnlocked(ctx.tex0.psm, ctx.tex0.tbp0, ctx.tex0.tbw,
+                                          static_cast<uint32_t>(wu), static_cast<uint32_t>(wv));
+    const int clut = static_cast<int>(resolveClutIndex(static_cast<uint8_t>(raw),
+                                                       ctx.tex0.cpsm, ctx.tex0.csm,
+                                                       ctx.tex0.csa, ctx.tex0.psm));
+    // TEST/ALPHA/z outcome evaluated on the independent old value.
+    const PixelWriteMask wm = classifyAlphaTest(ctx.test, combA, static_cast<uint8_t>(fpsm));
+    char outcome[64];
+    if (!wm.writesFramebuffer())
+    {
+        std::snprintf(outcome, sizeof(outcome), "%s",
+                      wm.writeDepth ? "depth-only-no-fb-write" : "test-rejected:no-write");
+    }
+    else if (!passesDestinationAlphaTest(ctx.test, static_cast<uint8_t>(fpsm), oldVal))
+    {
+        std::snprintf(outcome, sizeof(outcome), "test-rejected:dest-alpha");
+    }
+    else
+    {
+        const uint32_t zMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+        bool zpass = false;
+        if (zMethod == 0u)
+            zpass = false;
+        else if (zMethod == 1u)
+            zpass = true;
+        else
+        {
+            const uint32_t zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+            const uint32_t storedZ = ReadVramUnlocked(ctx.zbuf.psm, zbp, fbw, x, y);
+            zpass = (zMethod == 2u) ? (z >= storedZ) : (z > storedZ);
+        }
+        if (!zpass)
+            std::snprintf(outcome, sizeof(outcome), "test-rejected:ztest");
+        else if (newVal != oldVal)
+            std::snprintf(outcome, sizeof(outcome), "traced-write");
+        else
+            std::snprintf(outcome, sizeof(outcome), "write-same-value-unknown");
+    }
+    s.c1Seen[candIdx] = true;
+    s.c1Old[candIdx] = oldVal;
+    s.c1New[candIdx] = newVal;
+    s.c1Addr[candIdx] = dstAddr;
+    const char cand[2] = {kGb7c4CandName[candIdx], '\0'};
+    char dstXy[32], dstAddrS[16], oldS[16], newS[16], srcUv[128], tapState[160], blend[64], stateS[256], testS[128];
+    std::snprintf(dstXy, sizeof(dstXy), "(%d,%d)", x, y);
+    std::snprintf(dstAddrS, sizeof(dstAddrS), "%08x", dstAddr);
+    std::snprintf(oldS, sizeof(oldS), "%08x", oldVal);
+    std::snprintf(newS, sizeof(newS), "%08x", newVal);
+    std::snprintf(srcUv, sizeof(srcUv), "preF=(%.3f,%.3f) preI=(%d,%d) post=(%d,%d)",
+                  texUf, texVf, su, sv, wu, wv);
+    std::snprintf(tapState, sizeof(tapState), "raw=%08x nibble=%x clut=%d texel=%08x",
+                  raw, raw & 0xFu, clut, texel);
+    std::snprintf(blend, sizeof(blend), "rgba-in=(%u,%u,%u,%u)", combR, combG, combB, combA);
+    std::snprintf(stateS, sizeof(stateS),
+                  "frame=fbp%u,fbw%u,psm%u tex=tbp0-%u,tbw%u,psm%u test=0x%llx alpha=0x%llx",
+                  ctx.frame.fbp, static_cast<unsigned>(ctx.frame.fbw),
+                  static_cast<unsigned>(ctx.frame.psm),
+                  ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.tbw),
+                  static_cast<unsigned>(ctx.tex0.psm),
+                  static_cast<unsigned long long>(ctx.test),
+                  static_cast<unsigned long long>(ctx.alpha));
+    std::snprintf(testS, sizeof(testS), "outcome=%s", outcome);
+    gb7c4Emit(cand, "c1-pixel", dstXy, dstAddrS, oldS, newS, srcUv, "-",
+              tapState, blend, stateS, testS, outcome);
+}
+
+void GSCpuBackend::TraceGb7c4CarrierPixel(const GSDrawState &state, int x, int y, uint32_t z,
+                                          float texUf, float texVf,
+                                          uint16_t sampleU, uint16_t sampleV,
+                                          uint32_t texel,
+                                          uint8_t combR, uint8_t combG, uint8_t combB, uint8_t combA,
+                                          uint8_t vrtR, uint8_t vrtG, uint8_t vrtB, uint8_t vrtA,
+                                          uint32_t oldVal, int candIdx)
+{
+    Gb7c4ProbeState &s = gb7c4State();
+    if (!s.enabled || s.capped)
+        return;
+    const auto &ctx = state.context;
+    const auto &tex = ctx.tex0;
+    const uint32_t fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+    const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+    const uint32_t fpsm = ctx.frame.psm;
+    const uint32_t newVal = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+    // Destination swizzled word address (CT24 shares the C32 page tables).
+    const uint32_t dstAddr = GSPSMCT32::addrPSMCT32(fbp, fbw, static_cast<uint32_t>(x), static_cast<uint32_t>(y));
+    // Recompute the four bilinear taps exactly as SampleTexture does for
+    // the FST path: float UV from the quantized fixed-point sample, minus
+    // half texel, floored, with per-tap CLAMP wrap.
+    const uint64_t clamp = ctx.clamp;
+    const uint8_t wrapU = static_cast<uint8_t>(clamp & 0x3u);
+    const uint8_t wrapV = static_cast<uint8_t>((clamp >> 2) & 0x3u);
+    const uint16_t minU = static_cast<uint16_t>((clamp >> 4) & 0x3FFu);
+    const uint16_t maxU = static_cast<uint16_t>((clamp >> 14) & 0x3FFu);
+    const uint16_t minV = static_cast<uint16_t>((clamp >> 24) & 0x3FFu);
+    const uint16_t maxV = static_cast<uint16_t>((clamp >> 34) & 0x3FFu);
+    const int texW = state.textureWidth;
+    const int texH = state.textureHeight;
+    const float tU = static_cast<float>(sampleU) / 16.0f;
+    const float tV = static_cast<float>(sampleV) / 16.0f;
+    const float sU = tU - 0.5f;
+    const float sV = tV - 0.5f;
+    const int u0 = static_cast<int>(std::floor(sU));
+    const int v0 = static_cast<int>(std::floor(sV));
+    const int u1 = u0 + 1;
+    const int v1 = v0 + 1;
+    const float fx = sU - static_cast<float>(u0);
+    const float fy = sV - static_cast<float>(v0);
+    const int preX[4] = {u0, u1, u0, u1};
+    const int preY[4] = {v0, v0, v1, v1};
+    int postX[4], postY[4];
+    uint32_t tapAddr[4], tapWord[4], tapRgba[4];
+    for (int i = 0; i < 4; ++i)
+    {
+        postX[i] = wrapTextureCoordinate(preX[i], texW, wrapU, minU, maxU);
+        postY[i] = wrapTextureCoordinate(preY[i], texH, wrapV, minV, maxV);
+        tapWord[i] = ReadVramUnlocked(tex.psm, tex.tbp0, tex.tbw,
+                                      static_cast<uint32_t>(postX[i]),
+                                      static_cast<uint32_t>(postY[i]));
+        tapRgba[i] = applyTexa(state.texa, tex.psm, tapWord[i]);
+        tapAddr[i] = GSPSMCT32::addrPSMCT32(tex.tbp0, static_cast<uint32_t>(tex.tbw),
+                                            static_cast<uint32_t>(postX[i]),
+                                            static_cast<uint32_t>(postY[i]));
+    }
+    // Single-point post-CLAMP reference for the integer UV.
+    const int suPre = static_cast<int>(sampleU >> 4);
+    const int svPre = static_cast<int>(sampleV >> 4);
+    const int suPost = wrapTextureCoordinate(suPre, texW, wrapU, minU, maxU);
+    const int svPost = wrapTextureCoordinate(svPre, texH, wrapV, minV, maxV);
+    // TEST/ALPHA/z outcome evaluated on the independent old value.
+    const PixelWriteMask wm = classifyAlphaTest(ctx.test, combA, static_cast<uint8_t>(fpsm));
+    char writeOutcome[64];
+    if (!wm.writesFramebuffer())
+    {
+        std::snprintf(writeOutcome, sizeof(writeOutcome), "%s",
+                      wm.writeDepth ? "depth-only-no-fb-write" : "test-rejected:no-write");
+    }
+    else if (!passesDestinationAlphaTest(ctx.test, static_cast<uint8_t>(fpsm), oldVal))
+    {
+        std::snprintf(writeOutcome, sizeof(writeOutcome), "test-rejected:dest-alpha");
+    }
+    else
+    {
+        const uint32_t zMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+        bool zpass = false;
+        if (zMethod == 0u)
+            zpass = false;
+        else if (zMethod == 1u)
+            zpass = true;
+        else
+        {
+            const uint32_t zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+            const uint32_t storedZ = ReadVramUnlocked(ctx.zbuf.psm, zbp, fbw, x, y);
+            zpass = (zMethod == 2u) ? (z >= storedZ) : (z > storedZ);
+        }
+        if (!zpass)
+            std::snprintf(writeOutcome, sizeof(writeOutcome), "test-rejected:ztest");
+        else if (newVal != oldVal)
+            std::snprintf(writeOutcome, sizeof(writeOutcome), "accepted-write-changed");
+        else
+            std::snprintf(writeOutcome, sizeof(writeOutcome), "accepted-write-same-unknown");
+    }
+    // Predeclared outcome ladder for this candidate.
+    const int wantX = kGb7c4SrcX[candIdx];
+    const int wantY = kGb7c4SrcY[candIdx];
+    int hitTap = -1;
+    for (int i = 0; i < 4; ++i)
+    {
+        if (postX[i] == wantX && postY[i] == wantY)
+        {
+            hitTap = i;
+            break;
+        }
+    }
+    char outcome[64];
+    if (hitTap < 0)
+    {
+        std::snprintf(outcome, sizeof(outcome), "C-not-sampled");
+    }
+    else if (!s.c1Seen[candIdx])
+    {
+        std::snprintf(outcome, sizeof(outcome), "OTHER-c1-unseen");
+    }
+    else if (tapWord[hitTap] != s.c1New[candIdx])
+    {
+        std::snprintf(outcome, sizeof(outcome), "OTHER-c1-word-mismatch");
+    }
+    else if (tapAddr[hitTap] != s.c1Addr[candIdx])
+    {
+        std::snprintf(outcome, sizeof(outcome), "OTHER-addr-mismatch");
+    }
+    else if (std::strcmp(writeOutcome, "accepted-write-changed") == 0)
+    {
+        std::snprintf(outcome, sizeof(outcome), "A-glyph-row-transported");
+        if (candIdx == 0)
+            s.aComplete = true;
+    }
+    else
+    {
+        std::snprintf(outcome, sizeof(outcome), "B-blocked-or-same");
+    }
+    s.carrierSeen[candIdx] = true;
+    const char cand[2] = {kGb7c4CandName[candIdx], '\0'};
+    char dstXy[32], dstAddrS[16], oldS[16], newS[16], srcUv[160], taps[256], tapState[320];
+    char blend[96], stateS[1024], testS[160];
+    std::snprintf(dstXy, sizeof(dstXy), "(%d,%d)", x, y);
+    std::snprintf(dstAddrS, sizeof(dstAddrS), "%08x", dstAddr);
+    std::snprintf(oldS, sizeof(oldS), "%08x", oldVal);
+    std::snprintf(newS, sizeof(newS), "%08x", newVal);
+    std::snprintf(srcUv, sizeof(srcUv),
+                  "interpF=(%.3f,%.3f) quantF=(%.4f,%.4f) preI=(%d,%d) postSingle=(%d,%d)",
+                  texUf, texVf, tU, tV, suPre, svPre, suPost, svPost);
+    std::snprintf(taps, sizeof(taps),
+                  "pre=(%d,%d);(%d,%d);(%d,%d);(%d,%d) "
+                  "post=(%d,%d);(%d,%d);(%d,%d);(%d,%d)",
+                  preX[0], preY[0], preX[1], preY[1], preX[2], preY[2], preX[3], preY[3],
+                  postX[0], postY[0], postX[1], postY[1], postX[2], postY[2], postX[3], postY[3]);
+    std::snprintf(tapState, sizeof(tapState),
+                  "addrs=(%08x,%08x,%08x,%08x) words=(%08x,%08x,%08x,%08x) "
+                  "rgba=(%08x,%08x,%08x,%08x) hitTap=%d want=(%d,%d)",
+                  tapAddr[0], tapAddr[1], tapAddr[2], tapAddr[3],
+                  tapWord[0], tapWord[1], tapWord[2], tapWord[3],
+                  tapRgba[0], tapRgba[1], tapRgba[2], tapRgba[3],
+                  hitTap, wantX, wantY);
+    std::snprintf(blend, sizeof(blend), "texel=%08x fx=%.4f fy=%.4f", texel, fx, fy);
+    std::snprintf(stateS, sizeof(stateS),
+                  "clamp=0x%llx wrapUV=(%u,%u) regionU=(%u,%u) regionV=(%u,%u) "
+                  "xyoff=(%u,%u) tex0=(tbp0=%u,tbw=%u,psm=%u,tw=%u,th=%u,tcc=%u,tfx=%u,cbp=%u,cpsm=%u,csm=%u,csa=%u,cld=%u) "
+                  "texWH=(%d,%d) lin=%u tex1=0x%llx texa=(ta0=%u,aem=%u,ta1=%u) "
+                  "frame=(fbp=%u,fbw=%u,psm=%u,fbmsk=0x%08x) alpha=0x%llx abe=%u pabe=%u "
+                  "vrt=(%u,%u,%u,%u) rgba-in=(%u,%u,%u,%u) z=%u",
+                  static_cast<unsigned long long>(clamp), wrapU, wrapV, minU, maxU, minV, maxV,
+                  static_cast<unsigned>(ctx.xyoffset.ofx),
+                  static_cast<unsigned>(ctx.xyoffset.ofy),
+                  tex.tbp0, static_cast<unsigned>(tex.tbw),
+                  static_cast<unsigned>(tex.psm), static_cast<unsigned>(tex.tw),
+                  static_cast<unsigned>(tex.th), static_cast<unsigned>(tex.tcc),
+                  static_cast<unsigned>(tex.tfx), tex.cbp,
+                  static_cast<unsigned>(tex.cpsm), static_cast<unsigned>(tex.csm),
+                  static_cast<unsigned>(tex.csa), static_cast<unsigned>(tex.cld),
+                  texW, texH, state.linearFilter ? 1u : 0u,
+                  static_cast<unsigned long long>(ctx.tex1),
+                  static_cast<unsigned>(state.texa.ta0), state.texa.aem ? 1u : 0u,
+                  static_cast<unsigned>(state.texa.ta1),
+                  ctx.frame.fbp, static_cast<unsigned>(ctx.frame.fbw),
+                  static_cast<unsigned>(ctx.frame.psm), ctx.frame.fbmsk,
+                  static_cast<unsigned long long>(ctx.alpha),
+                  state.prim.abe ? 1u : 0u, state.pabe ? 1u : 0u,
+                  vrtR, vrtG, vrtB, vrtA,
+                  combR, combG, combB, combA, z);
+    std::snprintf(testS, sizeof(testS), "test=0x%llx write=%s",
+                  static_cast<unsigned long long>(ctx.test), writeOutcome);
+    gb7c4Emit(cand, "carrier-pixel", dstXy, dstAddrS, oldS, newS, srcUv, taps,
+              tapState, blend, stateS, testS, outcome);
+}
+
 void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
 {
     if (gb7bState().enabled)
@@ -1479,6 +1979,10 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     const bool gb7c2Active = gb7c2State().enabled;
     if (gb7c2Active)
         gb7c2Batch = NoteGb7c2BatchBegin(batch);
+    // GB7C4: assign the intra-packet batch id (no render effect when OFF).
+    // Only called when open; the hook itself assigns ids and flags batches.
+    if (gb7c4State().enabled)
+        NoteGb7c4BatchBegin(batch);
     const GSDrawState &state = batch.state;
     const auto &ctx = state.context;
     PS2_IF_AGRESSIVE_LOGS({
@@ -2007,6 +2511,13 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         const uint16_t gb7c2MaxU = static_cast<uint16_t>((gb7c2Clamp >> 14) & 0x3FFu);
         const uint16_t gb7c2MinV = static_cast<uint16_t>((gb7c2Clamp >> 24) & 0x3FFu);
         const uint16_t gb7c2MaxV = static_cast<uint16_t>((gb7c2Clamp >> 34) & 0x3FFu);
+        // GB7C4: candidate glyph-row capture. Pure locals; no render effect.
+        // Only live when the probe is open (one branch per batch otherwise).
+        Gb7c4ProbeState &gb7c4 = gb7c4State();
+        const bool gb7c4Sprite = gb7c4.enabled && !gb7c4.capped && gb7c4.curKind != 0;
+        const uint32_t gb7c4Fbp = gb7c4Sprite ? GSInternal::framePageBaseToBlock(ctx.frame.fbp) : 0u;
+        const uint32_t gb7c4Fbw = gb7c4Sprite ? std::max<uint32_t>(ctx.frame.fbw, 1u) : 1u;
+        const uint32_t gb7c4Fpsm = gb7c4Sprite ? ctx.frame.psm : 0u;
 
         for (int y = drawY0; y <= drawY1; ++y)
         {
@@ -2019,6 +2530,12 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 float texUf = u0f + (u1f - u0f) * tx;
                 uint32_t texel = 0xFFFF00FFu;
                 int gb7c2Su = 0, gb7c2Sv = 0;
+                // GB7C4 candidate capture (set in whichever UV branch runs).
+                bool gb7c4Trace = false;
+                int gb7c4Cand = -1;
+                float gb7c4TexUf = 0.0f, gb7c4TexVf = 0.0f;
+                uint16_t gb7c4SampleU = 0, gb7c4SampleV = 0;
+                uint32_t gb7c4Old = 0;
                 if (state.prim.fst)
                 {
                     const int fixedU = static_cast<int>((texUf * 16.0f) + 0.5f);
@@ -2027,12 +2544,18 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                     const uint16_t sampleV = static_cast<uint16_t>(clampInt(fixedV, 0, 0xFFFF));
                     gb7c2Su = static_cast<int>(sampleU >> 4);
                     gb7c2Sv = static_cast<int>(sampleV >> 4);
+                    gb7c4TexUf = texUf;
+                    gb7c4TexVf = texVf;
+                    gb7c4SampleU = sampleU;
+                    gb7c4SampleV = sampleV;
                     texel = SampleTexture(state, 0.0f, 0.0f, 1.0f, sampleU, sampleV);
                 }
                 else
                 {
                     gb7c2Su = static_cast<int>(texUf);
                     gb7c2Sv = static_cast<int>(texVf);
+                    gb7c4TexUf = texUf;
+                    gb7c4TexVf = texVf;
                     texel = SampleTexture(state, texUf / static_cast<float>(texW), texVf / static_cast<float>(texH), 1.0f, 0u, 0u);
                 }
 
@@ -2081,6 +2604,42 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                     }
                 }
 
+                // GB7C4 candidate glyph-row trace: exact C1 source pixels and
+                // exact carrier destination pixels; independent old read
+                // before WritePixel runs unchanged below.
+                if (gb7c4Sprite)
+                {
+                    if (gb7c4.curKind == 1)
+                    {
+                        for (int ci = 0; ci < 4; ++ci)
+                        {
+                            if (x == kGb7c4SrcX[ci] && y == kGb7c4SrcY[ci])
+                            {
+                                gb7c4Trace = true;
+                                gb7c4Cand = ci;
+                                break;
+                            }
+                        }
+                    }
+                    else if (gb7c4.curKind == 2)
+                    {
+                        for (int ci = 0; ci < 4; ++ci)
+                        {
+                            if (x == kGb7c4DstX[ci] && y == kGb7c4DstY[ci])
+                            {
+                                // Candidate A already yielded: stop tracing B/C/D.
+                                if (ci > 0 && gb7c4.aComplete)
+                                    break;
+                                gb7c4Trace = true;
+                                gb7c4Cand = ci;
+                                break;
+                            }
+                        }
+                    }
+                    if (gb7c4Trace)
+                        gb7c4Old = ReadVramUnlocked(gb7c4Fpsm, gb7c4Fbp, gb7c4Fbw, x, y);
+                }
+
                 uint8_t tr = static_cast<uint8_t>(texel & 0xFF);
                 uint8_t tg = static_cast<uint8_t>((texel >> 8) & 0xFF);
                 uint8_t tb = static_cast<uint8_t>((texel >> 16) & 0xFF);
@@ -2093,6 +2652,22 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                     TraceGb7c2Pixel(state, x, y, z1, gb7c2Su, gb7c2Sv, gb7c2Wu, gb7c2Wv,
                                     texel, gb7c2Raw, gb7c2Clut,
                                     color.r, color.g, color.b, color.a, gb7c2Old);
+                }
+                if (gb7c4Trace)
+                {
+                    if (gb7c4.curKind == 1)
+                    {
+                        TraceGb7c4C1Pixel(state, x, y, z1, gb7c4TexUf, gb7c4TexVf,
+                                          texel, color.r, color.g, color.b, color.a,
+                                          gb7c4Old, gb7c4Cand);
+                    }
+                    else
+                    {
+                        TraceGb7c4CarrierPixel(state, x, y, z1, gb7c4TexUf, gb7c4TexVf,
+                                               gb7c4SampleU, gb7c4SampleV,
+                                               texel, color.r, color.g, color.b, color.a,
+                                               r, g, b, a, gb7c4Old, gb7c4Cand);
+                    }
                 }
             }
         }

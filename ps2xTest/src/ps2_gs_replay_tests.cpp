@@ -441,6 +441,30 @@ namespace
             }
         }
 
+        // GB7C4 actual carrier glyph-row sample probe (default OFF).
+        // Direct CPU replay only; predeclared candidate pairs tick600 path2
+        // packet47176 C1 sources -> tick601 path3 packet47240 carrier dests;
+        // stops after the marker-700 sample.
+        const char *gb7c4Out = std::getenv("PS2X_GS_REPLAY_GB7C4_TRACE");
+        const bool gb7c4Probe = gb7c4Out && *gb7c4Out;
+        bool gb7c4Done = false;
+        if (gb7c4Probe)
+        {
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe)
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB7C4 requires direct CPU replay with no GB5/GB5B/GB7B probe");
+                return;
+            }
+            ps2xGb7c4ProbeOpen(gb7c4Out);
+            if (!ps2xGb7c4ProbeEnabled())
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB7C4 trace could not be opened");
+                return;
+            }
+        }
+
         // GB7C2 bounded CPU pixel/ROI title-text chain probe (default OFF).
         // Direct CPU replay only; predeclared chain tick600 path2 packet47176
         // -> tick601 path3 packet47240; per-packet display-crop before/after
@@ -454,10 +478,10 @@ namespace
         uint32_t gb7c2CropRows = 0;
         if (gb7c2Probe)
         {
-            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe)
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c4Probe)
             {
                 std::fclose(f);
-                t.IsTrue(false, "GB7C2 requires direct CPU replay with no GB5/GB5B/GB7B probe");
+                t.IsTrue(false, "GB7C2 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C4 probe");
                 return;
             }
             ps2xGb7c2ProbeOpen(gb7c2Out);
@@ -501,7 +525,7 @@ namespace
         std::vector<std::string> rows;
         while (true)
         {
-            if (gb7bDone || gb7c2Done)
+            if (gb7bDone || gb7c2Done || gb7c4Done)
                 break;
             uint32_t length = 0;
             std::vector<uint8_t> rec;
@@ -579,6 +603,8 @@ namespace
                 const bool forceRtz = rtzAll || (rtzPath1 && pathId == 1u);
                 if (gb7bProbe)
                     ps2xGb7bSetPacketContext(tick, packets, pathId);
+                if (gb7c4Probe)
+                    ps2xGb7c4SetPacketContext(tick, packets, pathId);
                 if (gb7c2Probe)
                     ps2xGb7c2SetPacketContext(tick, packets, pathId);
                 {
@@ -857,6 +883,8 @@ namespace
                 rows.emplace_back(row);
                 if (gb7bProbe && tick >= 700u)
                     gb7bDone = true;
+                if (gb7c4Probe && tick >= 700u)
+                    gb7c4Done = true;
                 if (gb7c2Probe && tick >= 700u)
                     gb7c2Done = true;
             }
@@ -973,6 +1001,11 @@ namespace
         {
             ps2xGb7bProbeClose();
             t.IsTrue(gb7bDone, "GB7B replay reached marker 700");
+        }
+        if (gb7c4Probe)
+        {
+            ps2xGb7c4ProbeClose();
+            t.IsTrue(gb7c4Done, "GB7C4 replay reached marker 700");
         }
         if (gb7c2Probe)
         {
