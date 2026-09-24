@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cfenv>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -122,6 +123,108 @@ namespace
         return hash;
     }
 
+    struct Gb5IndexRow
+    {
+        uint64_t index = 0, tick = 0, offset = 0;
+        unsigned path = 0, embeddedPath = 0, bytes = 0, gifFnv = 0;
+    };
+
+    bool loadGb5Index(const char *path, std::vector<Gb5IndexRow> &rows)
+    {
+        std::ifstream in(path);
+        std::string line;
+        if (!std::getline(in, line))
+            return false;
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line != "packet_index,tick,record_offset,corrected_path,embedded_path,length,fnv32")
+            return false;
+        while (std::getline(in, line))
+        {
+            Gb5IndexRow row{};
+            unsigned long long index = 0, tick = 0, offset = 0;
+            if (std::sscanf(line.c_str(), "%llu,%llu,%llu,%u,%u,%u,%x",
+                            &index, &tick, &offset, &row.path,
+                            &row.embeddedPath, &row.bytes, &row.gifFnv) != 7)
+                return false;
+            row.index = index;
+            row.tick = tick;
+            row.offset = offset;
+            if (row.index != 143805u + rows.size() ||
+                row.tick != (rows.size() < 461u ? 949u : 950u))
+                return false;
+            rows.push_back(row);
+        }
+        return in.eof() && rows.size() == 922u;
+    }
+
+    struct Gb5Crop
+    {
+        std::vector<uint32_t> pixels;
+        uint32_t hash = 2166136261u;
+    };
+
+    struct Gb5Crops { Gb5Crop upper, lower; };
+
+    Gb5Crop cropRgb(const PresentationFrame &frame, uint32_t x0, uint32_t y0,
+                    uint32_t x1, uint32_t y1)
+    {
+        Gb5Crop crop;
+        crop.pixels.reserve(static_cast<size_t>(x1 - x0) * (y1 - y0));
+        for (uint32_t y = y0; y < y1; ++y)
+            for (uint32_t x = x0; x < x1; ++x)
+            {
+                const size_t pos = (static_cast<size_t>(y) * 640u + x) * 4u;
+                const uint32_t rgb = (static_cast<uint32_t>(frame.pixels[pos]) << 16u) |
+                    (static_cast<uint32_t>(frame.pixels[pos + 1u]) << 8u) |
+                    frame.pixels[pos + 2u];
+                crop.pixels.push_back(rgb);
+                for (unsigned shift : {16u, 8u, 0u})
+                {
+                    crop.hash ^= (rgb >> shift) & 0xffu;
+                    crop.hash *= 16777619u;
+                }
+            }
+        return crop;
+    }
+
+    bool readGb5Crops(GSCpuBackend &raw, const GSRegisters &regs,
+                      uint64_t tick, Gb5Crops &out)
+    {
+        GSPresentationRequest request{};
+        request.pmode = regs.pmode;
+        request.smode2 = regs.smode2;
+        request.dispfb1 = regs.dispfb1;
+        request.display1 = regs.display1;
+        request.dispfb2 = regs.dispfb2;
+        request.display2 = regs.display2;
+        request.bgcolor = regs.bgcolor;
+        request.vsyncTick = tick;
+        const auto displayFrame = [](uint64_t word) {
+            return GSFrameReg{static_cast<uint32_t>(word & 0x1ffu),
+                              static_cast<uint32_t>((word >> 9) & 0x3fu),
+                              static_cast<uint8_t>((word >> 15) & 0x1fu), 0u};
+        };
+        request.contextFrames[0] = displayFrame(regs.dispfb1);
+        request.contextFrames[1] = displayFrame(regs.dispfb2);
+        const PresentationFrame frame = raw.Present(request);
+        if (!frame || frame.width != 512u || frame.height != 448u ||
+            frame.displayFbp != 112u || frame.sourceFbp != 112u ||
+            frame.pixels.size() < 640u * 448u * 4u)
+            return false;
+        out.upper = cropRgb(frame, 320u, 120u, 420u, 205u);
+        out.lower = cropRgb(frame, 340u, 360u, 430u, 420u);
+        return true;
+    }
+
+    uint32_t changedPixels(const Gb5Crop &before, const Gb5Crop &after)
+    {
+        uint32_t count = 0;
+        for (size_t i = 0; i < before.pixels.size(); ++i)
+            count += before.pixels[i] != after.pixels[i];
+        return count;
+    }
+
     bool dumpTick(uint64_t tick)
     {
         const char *list = std::getenv("PS2X_GS_REPLAY_PPM_TICKS");
@@ -225,6 +328,32 @@ namespace
             gs.setRasterBackend(ps2x_gs_parallel::create(&regs));
         }
 
+        std::vector<Gb5IndexRow> gb5Index;
+        std::ofstream gb5Trace;
+        GSCpuBackend gb5Raw;
+        const char *gb5Out = std::getenv("PS2X_GS_REPLAY_GB5_TRACE");
+        const bool gb5Probe = gb5Out && *gb5Out;
+        if (gb5Probe)
+        {
+            const char *gb5IndexPath = std::getenv("PS2X_GS_REPLAY_GB5_INDEX");
+            if (parallelBackend || queued || !gb5IndexPath ||
+                !loadGb5Index(gb5IndexPath, gb5Index))
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB5 requires direct CPU replay and valid X5 index");
+                return;
+            }
+            gb5Raw.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+            gb5Trace.open(gb5Out, std::ios::binary);
+            if (!gb5Trace)
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB5 crop trace could not be opened");
+                return;
+            }
+            gb5Trace << "tick,packet_index,path,gif_bytes,gif_fnv32,upper_before,upper_after,upper_changed,lower_before,lower_after,lower_changed\n";
+        }
+
         uint64_t bisectTo = 0u;
         if (const char *value = std::getenv("PS2X_GS_REPLAY_BISECT_TO"))
             bisectTo = std::strtoull(value, nullptr, 10);
@@ -236,6 +365,7 @@ namespace
         }
 
         uint64_t packets = 0u, priv = 0u, transfers = 0u, markers = 0u, roundedPackets = 0u;
+        uint32_t gb5Rows = 0u;
         uint64_t readbacks = 0u, clears = 0u;
         bool parseOk = true;
         std::vector<std::string> rows;
@@ -273,6 +403,23 @@ namespace
                     parseOk = false;
                     break;
                 }
+                const bool gb5Packet = gb5Probe && packets >= 143805u && packets <= 144726u;
+                Gb5Crops gb5Before, gb5After;
+                const Gb5IndexRow *gb5Row = nullptr;
+                if (gb5Packet)
+                {
+                    gb5Row = &gb5Index[packets - 143805u];
+                    if (gb5Row->index != packets || gb5Row->tick != tick ||
+                        gb5Row->offset != static_cast<uint64_t>(recordOffset) ||
+                        gb5Row->path != pathId || gb5Row->embeddedPath != rec[9] ||
+                        gb5Row->bytes != size || gb5Row->gifFnv != fnv(rec.data() + 14, size) ||
+                        !readGb5Crops(gb5Raw, regs, tick, gb5Before))
+                    {
+                        parseOk = false;
+                        std::cerr << "GB5_PROBE_ERROR before packet=" << packets << '\n';
+                        break;
+                    }
+                }
                 gs.noteGifPath(static_cast<GifPathId>(pathId));
                 const bool forceRtz = rtzAll || (rtzPath1 && pathId == 1u);
                 {
@@ -283,6 +430,32 @@ namespace
                         break;
                     }
                     gs.processGIFPacket(rec.data() + 14, size);
+                }
+                if (gb5Packet)
+                {
+                    if (!readGb5Crops(gb5Raw, regs, tick, gb5After))
+                    {
+                        parseOk = false;
+                        std::cerr << "GB5_PROBE_ERROR after packet=" << packets << '\n';
+                        break;
+                    }
+                    const uint32_t upperChanged = changedPixels(gb5Before.upper, gb5After.upper);
+                    const uint32_t lowerChanged = changedPixels(gb5Before.lower, gb5After.lower);
+                    if (upperChanged || lowerChanged)
+                    {
+                        if (++gb5Rows > 1000u)
+                        {
+                            parseOk = false;
+                            std::cerr << "GB5_PROBE_ERROR row cap exceeded\n";
+                            break;
+                        }
+                        gb5Trace << tick << ',' << packets << ',' << static_cast<unsigned>(pathId) << ',' << size << ','
+                                 << std::hex << std::setw(8) << std::setfill('0') << gb5Row->gifFnv << ','
+                                 << std::setw(8) << gb5Before.upper.hash << ','
+                                 << std::setw(8) << gb5After.upper.hash << std::dec << ',' << upperChanged << ','
+                                 << std::hex << std::setw(8) << gb5Before.lower.hash << ','
+                                 << std::setw(8) << gb5After.lower.hash << std::dec << ',' << lowerChanged << '\n';
+                    }
                 }
                 if (forceRtz)
                     ++roundedPackets;
@@ -327,6 +500,20 @@ namespace
                 gs.drainQueue();
                 regs.vsyncTick.store(tick, std::memory_order_release);
                 ++markers;
+                if (gb5Probe && tick == 950u)
+                {
+                    Gb5Crops finalCrops;
+                    if (!readGb5Crops(gb5Raw, regs, tick, finalCrops))
+                    {
+                        parseOk = false;
+                        std::cerr << "GB5_PROBE_ERROR final tick=950\n";
+                        break;
+                    }
+                    std::cout << "GB5_FINAL tick=950 upper=" << std::hex
+                              << std::setw(8) << std::setfill('0') << finalCrops.upper.hash
+                              << " lower=" << std::setw(8) << finalCrops.lower.hash
+                              << std::dec << " rows=" << gb5Rows << '\n';
+                }
                 const bool sampled = tick % stride == 0u;
                 const bool named = dumpTick(tick);
                 if (!sampled && !named)
@@ -477,6 +664,8 @@ namespace
 
         if (std::getenv("PS2X_GS_REPLAY_PACKET_TRACE"))
             t.IsTrue(packetTrace.good(), "GB4 packet trace written");
+        if (gb5Probe)
+            t.IsTrue(gb5Trace.good() && packets > 144726u, "GB5 crop trace and X5 window complete");
 
         t.IsTrue(parseOk, "GB4 capture records parse cleanly");
         t.IsTrue(packets > 0u && markers > 0u, "capture has GIF packets and VBlank markers");
