@@ -15,7 +15,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 #include <vector>
+#if defined(__APPLE__)
+#include <CommonCrypto/CommonDigest.h>
+#endif
 #if defined(__ANDROID__) && defined(PS2X_HAS_PARALLEL_SHADOW)
 #include <dlfcn.h>
 #endif
@@ -24,6 +29,7 @@
 #include "context.hpp"
 #include "device.hpp"
 #include "gs_interface.hpp"
+#include "gs_util.hpp"
 #include "n8d5_tile_spirv.hpp"
 #endif
 
@@ -31,6 +37,122 @@ namespace ps2x_gs_parallel
 {
 namespace
 {
+#ifdef PS2X_HAS_PARALLEL_SHADOW
+constexpr uint32_t kSelectedWidth = 512u, kSelectedHeight = 224u;
+constexpr size_t kSelectedBytes = size_t(kSelectedWidth) * kSelectedHeight * 4u;
+using SelectedTiles = std::array<uint16_t, 448>;
+
+std::string selectedSha256(const void *data, size_t bytes)
+{
+#if defined(__APPLE__)
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data, static_cast<CC_LONG>(bytes), digest);
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (auto byte : digest)
+        out << std::setw(2) << unsigned(byte);
+    return out.str();
+#else
+    (void)data;
+    (void)bytes;
+    return "unavailable";
+#endif
+}
+
+SelectedTiles selectedTileCounts(const uint8_t *rgba, uint64_t &occupied, uint32_t &active)
+{
+    SelectedTiles counts{};
+    occupied = 0;
+    active = 0;
+    for (uint32_t y = 0; y < kSelectedHeight; ++y)
+        for (uint32_t x = 0; x < kSelectedWidth; ++x)
+        {
+            const uint8_t *p = rgba + 4u * (size_t(y) * kSelectedWidth + x);
+            counts[(y / 16u) * 32u + x / 16u] += std::max({p[0], p[1], p[2]}) >= 32u;
+        }
+    for (uint16_t n : counts)
+    {
+        occupied += n;
+        active += n >= 32u;
+    }
+    return counts;
+}
+
+void selectedLogTiles(const char *name, const SelectedTiles &counts, uint64_t occupied, uint32_t active)
+{
+    std::array<uint8_t, 896> packed{};
+    for (size_t i = 0; i < counts.size(); ++i)
+    {
+        packed[2 * i] = uint8_t(counts[i]);
+        packed[2 * i + 1] = uint8_t(counts[i] >> 8);
+    }
+    std::cerr << "[n8d7f] " << name << " tiles=448 occupied=" << occupied
+              << " active=" << active << " packed_sha256="
+              << selectedSha256(packed.data(), packed.size()) << std::endl;
+    std::cerr << "[n8d7f] " << name << "_tile_counts=";
+    for (size_t i = 0; i < counts.size(); ++i)
+        std::cerr << (i ? "," : "") << counts[i];
+    std::cerr << std::endl;
+}
+
+bool selectedDecode(const uint8_t *vram, const ParallelGS::ScanoutResult &shot,
+                    std::vector<uint8_t> &rgba)
+{
+    using namespace ParallelGS;
+    rgba.resize(kSelectedBytes);
+    const uint32_t base = shot.selected_fbp * PGS_BLOCKS_PER_PAGE;
+    for (uint32_t y = 0; y < kSelectedHeight; ++y)
+    {
+        const uint32_t sy = shot.selected_dby + shot.selected_phase + y * shot.selected_stride;
+        uint8_t *dst = rgba.data() + size_t(y) * kSelectedWidth * 4u;
+        if (shot.selected_psm == PSMCT16 || shot.selected_psm == PSMCT16S ||
+            shot.selected_psm == PSMZ16 || shot.selected_psm == PSMZ16S)
+        {
+            std::array<uint16_t, kSelectedWidth> raw{};
+            switch (shot.selected_psm)
+            {
+            case PSMCT16: vram_readback<PSMCT16>(raw.data(), vram, base, shot.selected_fbw, shot.selected_dbx, sy, kSelectedWidth, 1, shot.selected_mask); break;
+            case PSMCT16S: vram_readback<PSMCT16S>(raw.data(), vram, base, shot.selected_fbw, shot.selected_dbx, sy, kSelectedWidth, 1, shot.selected_mask); break;
+            case PSMZ16: vram_readback<PSMZ16>(raw.data(), vram, base, shot.selected_fbw, shot.selected_dbx, sy, kSelectedWidth, 1, shot.selected_mask); break;
+            default: vram_readback<PSMZ16S>(raw.data(), vram, base, shot.selected_fbw, shot.selected_dbx, sy, kSelectedWidth, 1, shot.selected_mask); break;
+            }
+            for (uint32_t x = 0; x < kSelectedWidth; ++x)
+            {
+                const uint16_t p = raw[x];
+                dst[4u*x] = uint8_t((p & 31u) << 3);
+                dst[4u*x+1] = uint8_t(((p >> 5) & 31u) << 3);
+                dst[4u*x+2] = uint8_t(((p >> 10) & 31u) << 3);
+                dst[4u*x+3] = (p & 0x8000u) ? 255u : 0u;
+            }
+        }
+        else if (shot.selected_psm == PSMCT24 || shot.selected_psm == PSMZ24)
+        {
+            std::array<uint8_t, kSelectedWidth * 3u> raw{};
+            if (shot.selected_psm == PSMCT24)
+                vram_readback<PSMCT24>(raw.data(), vram, base, shot.selected_fbw, shot.selected_dbx, sy, kSelectedWidth, 1, shot.selected_mask);
+            else
+                vram_readback<PSMZ24>(raw.data(), vram, base, shot.selected_fbw, shot.selected_dbx, sy, kSelectedWidth, 1, shot.selected_mask);
+            for (uint32_t x = 0; x < kSelectedWidth; ++x)
+            {
+                std::memcpy(dst + 4u*x, raw.data() + 3u*x, 3u);
+                dst[4u*x+3] = 128u;
+            }
+        }
+        else if (shot.selected_psm == PSMCT32 || shot.selected_psm == PSMZ32)
+        {
+            if (shot.selected_psm == PSMCT32)
+                vram_readback<PSMCT32>(dst, vram, base, shot.selected_fbw, shot.selected_dbx, sy, kSelectedWidth, 1, shot.selected_mask);
+            else
+            {
+                vram_readback<PSMZ32>(dst, vram, base, shot.selected_fbw, shot.selected_dbx, sy, kSelectedWidth, 1, shot.selected_mask);
+                for (uint32_t x = 0; x < kSelectedWidth; ++x) dst[4u*x+3] = 128u;
+            }
+        }
+        else return false;
+    }
+    return true;
+}
+#endif
 struct Counters
 {
     std::atomic<uint64_t> gifPackets{0}, gifBytes{0}, regWrites{0}, presents{0}, nullScanouts{0};
@@ -247,8 +369,13 @@ public:
         syncPriv();
         ParallelGS::VSyncInfo vsync = {};
         const char *tileEnv = std::getenv("PS2X_N8D5_TILE_CAPTURE");
-        const bool tileRequested = request.vsyncTick == 2050u && tileEnv && std::strcmp(tileEnv, "1") == 0;
+        const char *selectedEnv = std::getenv("PS2X_N8D7F_SELECTED_CAPTURE");
+        const bool selectedRequested = request.vsyncTick == 2050u && selectedEnv &&
+                                       std::strcmp(selectedEnv, "1") == 0;
+        const bool tileRequested = selectedRequested ||
+            (request.vsyncTick == 2050u && tileEnv && std::strcmp(tileEnv, "1") == 0);
         vsync.capture_scanout_stages = tileRequested;
+        vsync.capture_selected_input = selectedRequested;
         vsync.phase = static_cast<uint32_t>(request.vsyncTick & 1u);
         vsync.dst_layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
         vsync.dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
@@ -405,6 +532,71 @@ public:
                      VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
         m_device->submit(cmd);
         m_device->wait_idle();
+        if (selectedRequested)
+        {
+            std::cerr << "[n8d7f] tick=" << request.vsyncTick
+                      << " fbp=" << shot.selected_fbp << " fbw=" << shot.selected_fbw
+                      << " psm=" << shot.selected_psm << " dbx=" << shot.selected_dbx
+                      << " dby=" << shot.selected_dby << " phase=" << shot.selected_phase
+                      << " stride=" << shot.selected_stride << " mask=" << shot.selected_mask
+                      << " samples=" << shot.selected_samples << " promoted=" << shot.selected_promoted
+                      << " extent=" << shot.selected_width << "x" << shot.selected_height
+                      << " valid=" << shot.selected_valid_width << "x" << shot.selected_valid_height
+                      << " status=" << shot.selected_capture_status << std::endl;
+            if (shot.selected_capture_status != 2 || !shot.selected_vram_staging ||
+                !shot.circuit1_staging || !stages[0].counts ||
+                w != 512u || h != 448u || request.pmode != 0xff21u ||
+                shot.selected_fbp != 112u)
+                std::cerr << "[n8d7f] OTHER capture-or-alignment" << std::endl;
+            else
+            {
+                const auto *vram = static_cast<const uint8_t *>(m_device->map_host_buffer(
+                    *shot.selected_vram_staging, Vulkan::MEMORY_ACCESS_READ_BIT));
+                const auto *circuit = static_cast<const uint8_t *>(m_device->map_host_buffer(
+                    *shot.circuit1_staging, Vulkan::MEMORY_ACCESS_READ_BIT));
+                const auto *stageCounts = static_cast<const uint32_t *>(m_device->map_host_buffer(
+                    *stages[0].counts, Vulkan::MEMORY_ACCESS_READ_BIT));
+                if (!vram || !circuit || !stageCounts)
+                    std::cerr << "[n8d7f] OTHER map" << std::endl;
+                else
+                {
+                    std::vector<uint8_t> decoded;
+                    if (!selectedDecode(vram, shot, decoded))
+                        std::cerr << "[n8d7f] OTHER decode" << std::endl;
+                    else
+                    {
+                        uint64_t inputOccupied = 0, circuitOccupied = 0, stageOccupied = 0;
+                        uint32_t inputActive = 0, circuitActive = 0, stageActive = 0;
+                        const auto inputTiles = selectedTileCounts(decoded.data(), inputOccupied, inputActive);
+                        const auto circuitTiles = selectedTileCounts(circuit, circuitOccupied, circuitActive);
+                        SelectedTiles stageTiles{};
+                        for (size_t i = 0; i < stageTiles.size(); ++i)
+                        {
+                            stageTiles[i] = uint16_t(stageCounts[i + 1]);
+                            stageOccupied += stageCounts[i + 1];
+                            stageActive += stageCounts[i + 1] >= 32u;
+                        }
+                        std::cerr << "[n8d7f] bytes=5177344 vram_sha256="
+                                  << selectedSha256(vram, 4u * 1024u * 1024u)
+                                  << " input_sha256=" << selectedSha256(decoded.data(), decoded.size())
+                                  << " circuit_sha256=" << selectedSha256(circuit, kSelectedBytes)
+                                  << std::endl;
+                        selectedLogTiles("input", inputTiles, inputOccupied, inputActive);
+                        selectedLogTiles("circuit", circuitTiles, circuitOccupied, circuitActive);
+                        selectedLogTiles("stage", stageTiles, stageOccupied, stageActive);
+                        size_t inputCircuitEqual = 0, circuitStageEqual = 0;
+                        for (size_t i = 0; i < inputTiles.size(); ++i)
+                        {
+                            inputCircuitEqual += inputTiles[i] == circuitTiles[i];
+                            circuitStageEqual += circuitTiles[i] == stageTiles[i];
+                        }
+                        std::cerr << "[n8d7f] input_circuit_equal=" << inputCircuitEqual
+                                  << "/448 circuit_stage_equal=" << circuitStageEqual << "/448"
+                                  << std::endl;
+                    }
+                }
+            }
+        }
         if (tileDispatched)
             for (const auto &stage : stages)
             {
