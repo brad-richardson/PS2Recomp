@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_vq.h"
@@ -165,7 +166,7 @@ namespace
         }
 
         const char *mode = std::getenv("PS2X_GS_REPLAY_MODE");
-        const char *backend = std::getenv("PS2X_GS_BACKEND");
+        const char *backend = std::getenv("PS2X_GS_REPLAY_BACKEND");
         const bool parallelBackend = backend && std::strcmp(backend, "parallel") == 0;
         const bool queued = parallelBackend || (mode && std::strcmp(mode, "queue") == 0);
         const char *drop = std::getenv("PS2X_GS_REPLAY_DROP_PRIV");
@@ -326,17 +327,68 @@ namespace
                 gs.drainQueue();
                 regs.vsyncTick.store(tick, std::memory_order_release);
                 ++markers;
-                if (tick % stride != 0u)
+                const bool sampled = tick % stride == 0u;
+                const bool named = dumpTick(tick);
+                if (!sampled && !named)
                     continue;
-                gs.refreshDisplaySnapshot();
-                uint32_t vramSize = 0;
-                const uint8_t *vramData = gs.lockDisplaySnapshot(vramSize);
-                const uint32_t vramHash = vramData ? fnv(vramData, vramSize) : 0u;
-                gs.unlockDisplaySnapshot();
+                uint32_t vramHash = 0u;
+                if (sampled)
+                {
+                    gs.refreshDisplaySnapshot();
+                    uint32_t vramSize = 0;
+                    const uint8_t *vramData = gs.lockDisplaySnapshot(vramSize);
+                    vramHash = vramData ? fnv(vramData, vramSize) : 0u;
+                    gs.unlockDisplaySnapshot();
+                }
                 const PresentationFrame frame = gs.presentForDiagnostics();
                 if (const char *dir = std::getenv("PS2X_GS_REPLAY_PPM_DIR"))
-                    if (dumpTick(tick) && *dir && frame)
+                    if (named && *dir && frame)
                         ps2_vq::dumpPpm(dir, tick, frame);
+                if (named)
+                {
+                    std::cout << "GB4_FRAME tick=" << tick
+                              << " backend=" << (parallelBackend ? "parallel" : "cpu")
+                              << " pmode=" << std::hex << regs.pmode
+                              << " dispfb1=" << regs.dispfb1 << " dispfb2=" << regs.dispfb2
+                              << std::dec << " display_fbp=" << frame.displayFbp
+                              << " source_fbp=" << frame.sourceFbp
+                              << " preferred=" << frame.usedPreferred
+                              << " present=" << std::hex << presentHash(frame) << std::dec << '\n';
+                    if (!parallelBackend)
+                        if (const char *rawDir = std::getenv("PS2X_GS_REPLAY_RAW_PPM_DIR"))
+                            if (*rawDir)
+                            {
+                                GSCpuBackend raw;
+                                raw.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+                                GSPresentationRequest request{};
+                                request.pmode = regs.pmode;
+                                request.smode2 = regs.smode2;
+                                request.dispfb1 = regs.dispfb1;
+                                request.display1 = regs.display1;
+                                request.dispfb2 = regs.dispfb2;
+                                request.display2 = regs.display2;
+                                request.bgcolor = regs.bgcolor;
+                                request.vsyncTick = tick;
+                                const auto displayFrame = [](uint64_t word) {
+                                    return GSFrameReg{static_cast<uint32_t>(word & 0x1ffu),
+                                                      static_cast<uint32_t>((word >> 9) & 0x3fu),
+                                                      static_cast<uint8_t>((word >> 15) & 0x1fu), 0u};
+                                };
+                                request.contextFrames[0] = displayFrame(regs.dispfb1);
+                                request.contextFrames[1] = displayFrame(regs.dispfb2);
+                                const PresentationFrame rawFrame = raw.Present(request);
+                                if (rawFrame)
+                                    ps2_vq::dumpPpm(rawDir, tick, rawFrame);
+                                std::cout << "GB4_RAW_FRAME tick=" << tick
+                                          << " dispfb1_fbp=" << (regs.dispfb1 & 0x1ffu)
+                                          << " display_fbp=" << rawFrame.displayFbp
+                                          << " source_fbp=" << rawFrame.sourceFbp
+                                          << " present=" << std::hex << presentHash(rawFrame)
+                                          << std::dec << '\n';
+                            }
+                }
+                if (!sampled)
+                    continue;
                 char row[160];
                 std::snprintf(row, sizeof(row),
                               "GB4_REPLAY tick=%llu vram=%08x priv=%08x present=%08x",
