@@ -108,6 +108,20 @@ namespace
     std::atomic<uint32_t> s_debugTexaWriteCount{0};
     std::atomic<uint32_t> s_debugCvFontUploadCount{0};
     std::atomic<uint32_t> s_debugLocalCopyCount{0};
+
+    struct GsPacketVramTrace
+    {
+        uint64_t tick;
+        uint64_t index;
+        uint8_t path;
+        const uint8_t *vram;
+        uint32_t vramSize;
+
+        ~GsPacketVramTrace()
+        {
+            ps2x_gs_capture::packetDone(tick, index, path, vram, vramSize);
+        }
+    };
 }
 
 // GB2: true while the calling thread is this GS's worker executing a
@@ -928,9 +942,11 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!data || sizeBytes < 16 || !m_backend)
         return;
 
-    m_submitCount.fetch_add(1u, std::memory_order_relaxed);
-    ps2x_gs_capture::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
-                            static_cast<uint8_t>(m_curGifPath), data, sizeBytes);
+    const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+    const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
+    const uint8_t path = static_cast<uint8_t>(m_curGifPath);
+    GsPacketVramTrace trace{tick, index, path, m_localMemoryStorage, m_localMemorySize};
+    ps2x_gs_capture::packet(tick, path, data, sizeBytes);
     ps2_e7::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u, "gs-enter", data, sizeBytes);
     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
         return;
@@ -1050,9 +1066,11 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!validatePackedGifPacket(data, sizeBytes))
         return false;
 
-    m_submitCount.fetch_add(1u, std::memory_order_relaxed);
-    ps2x_gs_capture::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
-                            static_cast<uint8_t>(m_curGifPath), data, sizeBytes);
+    const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+    const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
+    const uint8_t path = static_cast<uint8_t>(m_curGifPath);
+    GsPacketVramTrace trace{tick, index, path, m_localMemoryStorage, m_localMemorySize};
+    ps2x_gs_capture::packet(tick, path, data, sizeBytes);
     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
                                                 {
         m_curQ = 1.0f;
@@ -1106,8 +1124,11 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    m_submitCount.fetch_add(1u, std::memory_order_relaxed);
-    ps2x_gs_capture::nativeUpload(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
+    const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+    const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
+    GsPacketVramTrace trace{tick, index, static_cast<uint8_t>(m_curGifPath),
+                            m_localMemoryStorage, m_localMemorySize};
+    ps2x_gs_capture::nativeUpload(tick,
                                   bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
     uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
 }
