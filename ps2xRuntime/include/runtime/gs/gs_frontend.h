@@ -116,6 +116,15 @@ public:
     bool queueEnabled() const { return m_worker != nullptr; }
     // Blocks until all previously enqueued commands have executed.
     void drainQueue();
+    // N8D7M12 Part 5F4P2: dev-only default-off fingerprint of commands in
+    // the order the GS worker actually consumes them. Fence is excluded
+    // from the digest/count (its presence is timing-dependent: drainQueue
+    // skips it when quiescent); a Fence only snapshots running->snapshot.
+    // PrivWrite contributes its kind tag only (apply is opaque).
+    void setPktSeqEnabled(bool enabled);
+    bool pktSeqEnabled() const;
+    uint64_t pktSeqSnapshot() const;
+    uint64_t pktSeqSnapshotCommands() const;
     // GB2 Part 2: monotonic counters. submitCount covers executed
     // packets (processGIFPacket incl. the native-image shape, direct
     // uploadImageNative, direct processNativePackedGIFPacket — each counted
@@ -205,6 +214,7 @@ public:
 
 private:
     void executeQueuedCommand(GsCommand &cmd);
+    void noteConsumedCommand(const GsCommand &cmd);
     void snapshotVRAM();
     void writeRegisterUnlocked(uint8_t regAddr, uint64_t value);
     void writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi);
@@ -309,6 +319,16 @@ private:
     std::atomic<uint64_t> m_regWriteCount{0};
     std::atomic<uint64_t> m_privWriteCount{0};
     std::atomic<bool> m_rawGifBackend{false};
+    // N8D7M12 Part 5F4P2: worker-consumption packet-sequence fingerprint.
+    // Guarded by m_pktSeqMutex (worker writes, replay thread reads after
+    // drain). Running digest starts at the FNV-64 offset; snapshot is 0
+    // while disabled.
+    mutable std::mutex m_pktSeqMutex;
+    bool m_pktSeqEnabled = false;
+    uint64_t m_pktSeqDigest = 14695981039346656037ull;
+    uint64_t m_pktSeqCommands = 0u;
+    uint64_t m_pktSeqSnapshot = 0u;
+    uint64_t m_pktSeqSnapshotCommands = 0u;
 };
 
 #endif

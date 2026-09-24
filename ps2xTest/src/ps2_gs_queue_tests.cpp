@@ -826,5 +826,84 @@ void register_ps2_gs_queue_tests()
             t.Equals(executed.load(std::memory_order_relaxed), 4,
                      "all four commands should execute");
         });
+
+        // N8D7M12 Part 5F4P2: worker-consumption fingerprint properties.
+        // Property-only: compares digests across instances, never
+        // reimplements the hash.
+        tc.Run("pktseq fingerprint is stable, order- and payload-sensitive, default-off silent",
+               [](TestCase &t)
+        {
+            auto runFixed = [](bool swapOrder, bool flipPayload, bool enable) {
+                struct Out
+                {
+                    uint64_t seq = 0;
+                    uint64_t commands = 0;
+                    bool enabled = false;
+                };
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GSRegisters regs{};
+                initQueueTestRegs(regs);
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+                if (!enable)
+                {
+                    if (gs.pktSeqEnabled())
+                        return Out{1u, 1u, true}; // default must be off
+                }
+                else
+                {
+                    gs.setPktSeqEnabled(true);
+                }
+                gs.setQueueEnabled(true);
+                std::vector<uint8_t> tri = makePackedTriangle(0xC0, 0x20, 0x40);
+                if (flipPayload)
+                    tri[tri.size() - 1] ^= 0xFFu;
+                gs.noteGifPath(GifPathId::Path3);
+                gs.processGIFPacket(tri.data(), static_cast<uint32_t>(tri.size()));
+                if (!swapOrder)
+                {
+                    gs.WriteVram(GS_PSM_CT32, 0u, 1u, 10u, 10u, 0x11111111u);
+                    gs.WriteVram(GS_PSM_CT32, 0u, 1u, 11u, 10u, 0x22222222u);
+                }
+                else
+                {
+                    gs.WriteVram(GS_PSM_CT32, 0u, 1u, 11u, 10u, 0x22222222u);
+                    gs.WriteVram(GS_PSM_CT32, 0u, 1u, 10u, 10u, 0x11111111u);
+                }
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+                gs.privWrite([] {});
+                gs.drainQueue();
+                Out o;
+                o.seq = gs.pktSeqSnapshot();
+                o.commands = gs.pktSeqSnapshotCommands();
+                o.enabled = gs.pktSeqEnabled();
+                if (enable)
+                {
+                    // Quiescent drain must leave the snapshot stable.
+                    gs.drainQueue();
+                    if (gs.pktSeqSnapshot() != o.seq ||
+                        gs.pktSeqSnapshotCommands() != o.commands)
+                    {
+                        o.seq ^= 0x8000000000000000ull; // mark instability
+                    }
+                }
+                return o;
+            };
+            const auto a = runFixed(false, false, true);
+            const auto b = runFixed(false, false, true);
+            t.IsTrue(a.enabled && b.enabled, "pktseq should report enabled after opt-in");
+            t.IsTrue(a.commands != 0u, "enabled fingerprint should count commands");
+            t.Equals(a.seq, b.seq, "same consumed sequence should give the same digest");
+            t.Equals(a.commands, b.commands, "same consumed sequence should give the same count");
+            const auto swapped = runFixed(true, false, true);
+            t.Equals(swapped.commands, a.commands, "reordered pair should keep the same count");
+            t.IsTrue(swapped.seq != a.seq, "reordering two distinguishable writes should change the digest");
+            const auto flipped = runFixed(false, true, true);
+            t.IsTrue(flipped.seq != a.seq, "one payload byte change should change the digest");
+            const auto off = runFixed(false, false, false);
+            t.IsTrue(!off.enabled, "pktseq should be off by default");
+            t.Equals(off.seq, 0ull, "default-off snapshot should stay silent");
+            t.Equals(off.commands, 0ull, "default-off count should stay silent");
+        });
     });
 }

@@ -219,6 +219,11 @@ Ps2xGsReplayResult ps2x_gs_replay_run()
     regs.csr.store(0x4000u, std::memory_order_relaxed);
     GS gs;
     gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+    // N8D7M12 Part 5F4P2: dev-only default-off worker-consumption
+    // fingerprint. Must precede queue enable (worker-start happens-before).
+    const char *pktSeqEnv = std::getenv("PS2X_GS_REPLAY_PKTSEQ");
+    const bool pktSeq = pktSeqEnv && std::strcmp(pktSeqEnv, "1") == 0;
+    gs.setPktSeqEnabled(pktSeq);
     if (queued)
         gs.setQueueEnabled(true);
     if (parallelBackend)
@@ -447,6 +452,19 @@ Ps2xGsReplayResult ps2x_gs_replay_run()
             const bool named = dumpTick(tick);
             if (!sampled && !named)
                 continue;
+            // N8D7M12 Part 5F4P2: sampled worker-consumption digest.
+            // Stdout only (never into rows/OUT, so parallel.hashes is
+            // untouched). drainQueue above already snapshotted at stream
+            // position, including the quiescent path.
+            if (pktSeq && sampled)
+            {
+                char seqLine[128];
+                std::snprintf(seqLine, sizeof(seqLine), "GB4_PKTSEQ tick=%llu seq=%016llx commands=%llu",
+                              static_cast<unsigned long long>(tick),
+                              static_cast<unsigned long long>(gs.pktSeqSnapshot()),
+                              static_cast<unsigned long long>(gs.pktSeqSnapshotCommands()));
+                std::cout << seqLine << '\n';
+            }
             uint32_t vramHash = 0u;
             if (sampled)
             {
