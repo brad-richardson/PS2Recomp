@@ -103,6 +103,38 @@ struct ProgramHeader
 
 namespace
 {
+    // SLUS_207.72 stores its video choice in bits 20-21 of the first options
+    // word. 0 is 4:3 and 2 is the menu's anamorphic choice. The game calls
+    // 0x228C08 to apply that choice after defaults, menu edits, and profile
+    // loading. Interpose at that call so all three paths obey the host option.
+    std::atomic<bool> g_ssx3WidescreenActive{false};
+    std::atomic<uint32_t> g_ssx3WidescreenMode{2u};
+    constexpr uint32_t kSsx3OptionsWord = 0x00535610u;
+    constexpr uint32_t kSsx3WidescreenMask = 0x00300000u;
+
+    void applySsx3Widescreen(PS2Runtime &)
+    {
+        const char *env = std::getenv("PS2X_WIDESCREEN");
+        const uint32_t mode = env && std::strcmp(env, "0") == 0 ? 0u : 2u;
+        g_ssx3WidescreenMode.store(mode, std::memory_order_relaxed);
+        g_ssx3WidescreenActive.store(true, std::memory_order_release);
+        std::fprintf(stderr, "[widescreen] SSX3 mode=%u (PS2X_WIDESCREEN=%s)\n",
+                     mode, env ? env : "default");
+    }
+
+    void enforceSsx3Widescreen(uint8_t *rdram, uint32_t sourcePc)
+    {
+        if (!rdram || !g_ssx3WidescreenActive.load(std::memory_order_acquire)) return;
+        uint32_t word = 0u;
+        std::memcpy(&word, rdram + kSsx3OptionsWord, sizeof(word));
+        const uint32_t mode = g_ssx3WidescreenMode.load(std::memory_order_relaxed);
+        const uint32_t wanted = (word & ~kSsx3WidescreenMask) | (mode << 20u);
+        if (word == wanted) return;
+        std::memcpy(rdram + kSsx3OptionsWord, &wanted, sizeof(wanted));
+        std::fprintf(stderr, "[widescreen] apply source=0x%x guest_mode=%u host_mode=%u\n",
+                     sourcePc, (word >> 20u) & 3u, mode);
+    }
+
     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
@@ -388,6 +420,12 @@ namespace
         return out;
     }
 }
+
+PS2_REGISTER_GAME_OVERRIDE("ssx3-widescreen-default",
+                           "SLUS_207.72",
+                           0x00100008u,
+                           0u,
+                           applySsx3Widescreen);
 
 // K1 P0: env-gated presentation-frame capture (PS2X_FRAME_DUMP_DIR).
 // Unset/empty = disabled (zero behavior change). When set, saves the
@@ -2298,6 +2336,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     }
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
+    if (isCall && targetPc == 0x00228C08u)
+    {
+        enforceSsx3Widescreen(rdram, sourcePc);
+    }
 
     // Every inter-function transfer is also a deterministic EE safe point.
     // Backward edges inside generated functions use eeCheckpointDue(), while
@@ -3644,7 +3686,9 @@ void PS2Runtime::run()
     {
         std::fprintf(stderr, "[vpad] off (PS2X_VIRTUAL_PAD)\n");
     }
-    const ps2x::present::Aspect presentAspect = ps2x::present::aspectFromEnv(std::getenv("PS2X_ASPECT"));
+    const bool anamorphic = g_ssx3WidescreenActive.load(std::memory_order_acquire) &&
+                            g_ssx3WidescreenMode.load(std::memory_order_relaxed) == 2u;
+    const ps2x::present::Aspect presentAspect = ps2x::present::aspectFromEnv(std::getenv("PS2X_ASPECT"), anamorphic);
     const ps2x::present::Filter presentFilter = ps2x::present::filterFromEnv(std::getenv("PS2X_PRESENT_FILTER"));
     int appliedFilter = -1;
     auto vsyncRateWall = std::chrono::steady_clock::now();

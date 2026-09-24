@@ -7,7 +7,8 @@
 // I26 (G46 §4): host presentation of the guest frame. A PS2 frame (e.g.
 // 512x448) is shown on a 4:3 TV, so by default the picture is drawn at a 4:3
 // display aspect, not at the framebuffer's pixel aspect (8:7 for 512x448).
-// PS2X_ASPECT=native keeps the old uniform-scale (pixel-aspect) behaviour.
+// SSX 3's anamorphic option uses a 16:9 display aspect. PS2X_ASPECT overrides
+// either default with native, 4:3, or 16:9.
 // Filtering: raylib's default is POINT, which at a non-integer scale (x2.946
 // on an iPhone 16 Pro Max) makes glyph stems alternate 2/3 px; so BILINEAR
 // unless both axis scales are whole numbers. PS2X_PRESENT_FILTER=point|bilinear
@@ -17,6 +18,7 @@ namespace ps2x::present
     enum class Aspect
     {
         FourThree,
+        SixteenNine,
         Native
     };
     enum class Filter
@@ -31,9 +33,16 @@ namespace ps2x::present
         float x, y, w, h;
     };
 
-    inline Aspect aspectFromEnv(const char *value)
+    inline Aspect aspectFromEnv(const char *value, bool anamorphic = false)
     {
-        return (value && std::string_view(value) == "native") ? Aspect::Native : Aspect::FourThree;
+        if (value)
+        {
+            const std::string_view override(value);
+            if (override == "native") return Aspect::Native;
+            if (override == "4:3") return Aspect::FourThree;
+            if (override == "16:9") return Aspect::SixteenNine;
+        }
+        return anamorphic ? Aspect::SixteenNine : Aspect::FourThree;
     }
 
     inline Filter filterFromEnv(const char *value)
@@ -59,8 +68,9 @@ namespace ps2x::present
         }
         else
         {
-            h = std::min(screenH, screenW * 3.0f / 4.0f);
-            w = h * 4.0f / 3.0f;
+            const float ratio = aspect == Aspect::SixteenNine ? 16.0f / 9.0f : 4.0f / 3.0f;
+            h = std::min(screenH, screenW / ratio);
+            w = h * ratio;
         }
         return Rect{(screenW - w) * 0.5f, (screenH - h) * 0.5f, w, h};
     }

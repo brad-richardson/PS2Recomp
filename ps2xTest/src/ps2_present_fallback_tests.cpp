@@ -37,6 +37,17 @@ void register_ps2_present_geometry_tests()
             const Rect p = presentRect(800.0f, 1200.0f, 512.0f, 448.0f, Aspect::FourThree);
             t.IsTrue(std::fabs(p.w - 800.0f) < 0.01f && std::fabs(p.h - 600.0f) < 0.01f, "portrait: width-bound"); });
 
+        tc.Run("anamorphic mode and explicit aspect overrides", [](TestCase &t)
+               {
+            t.IsTrue(aspectFromEnv(nullptr, true) == Aspect::SixteenNine, "anamorphic -> 16:9");
+            t.IsTrue(aspectFromEnv("4:3", true) == Aspect::FourThree, "4:3 override");
+            t.IsTrue(aspectFromEnv("16:9", false) == Aspect::SixteenNine, "16:9 override");
+            t.IsTrue(aspectFromEnv("native", true) == Aspect::Native, "native override");
+            const Rect r = presentRect(2868.0f, 1320.0f, 512.0f, 448.0f, Aspect::SixteenNine);
+            t.IsTrue(std::fabs(r.h - 1320.0f) < 0.01f && std::fabs(r.w - 2346.6667f) < 0.01f,
+                     "iPhone landscape: 16:9 fit");
+            t.IsTrue(std::fabs(r.x - 260.6667f) < 0.01f, "centred 16:9"); });
+
         tc.Run("bilinear unless both scales are whole; env forces", [](TestCase &t)
                {
             t.IsTrue(filterFromEnv(nullptr) == Filter::Auto, "unset -> auto");
