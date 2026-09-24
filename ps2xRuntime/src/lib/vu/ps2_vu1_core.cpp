@@ -97,6 +97,9 @@ void VU1Interpreter::resetScheduler()
 
 void VU1Interpreter::reset()
 {
+#if PS2X_ENABLE_DET_HASH_TAP
+    m_programStartCount = 0;
+#endif
     std::memset(&m_state, 0, sizeof(m_state));
     m_state.vf[0][3] = 1.0f;
     m_state.q = 1.0f;
@@ -1613,6 +1616,10 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
                              uint32_t startPC, uint32_t top, uint32_t itop,
                              uint32_t maxCycles)
 {
+#if PS2X_ENABLE_DET_HASH_TAP
+    if (m_unit == Unit::VU1)
+        ++m_programStartCount;
+#endif
     resetScheduler();
     m_state.pc = startPC & microAddressMask();
     m_state.ebit = false;

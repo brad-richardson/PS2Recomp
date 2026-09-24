@@ -388,6 +388,18 @@ private:
     void processPendingEvents();
     void processDueDeadlines();
     void processEvent(const EeEvent &event);
+#if PS2X_ENABLE_DET_HASH_TAP
+    struct DetHashSnapshot
+    {
+        uint64_t rdram = 0, scratchpad = 0, vu1Data = 0, vu1Code = 0;
+        uint64_t combined = 0, count = 0;
+        bool valid = false;
+    };
+    static uint64_t parseDetHashEvery(const char *value, bool &invalid);
+    DetHashSnapshot makeDetHashSnapshot() const;
+    void emitDetHashTap();
+    static std::atomic<uint32_t> s_detHashLines;
+#endif
     void finishEventWaiters(EeEventFlag &flag, bool interruptSafe);
     [[nodiscard]] static bool eventCondition(uint32_t current, uint32_t requested, uint32_t mode);
     static int waitObjectId(const EeWaitState &wait);
@@ -403,6 +415,9 @@ private:
     // ExternalWake carries no guest-cycle timestamp and is outside this
     // scheduled-event ordering guarantee.
     const bool m_cycleOnlyEvents;
+#if PS2X_ENABLE_DET_HASH_TAP
+    uint64_t m_detHashEvery = 0;
+#endif
     uint8_t *m_rdram = nullptr;
     std::array<std::deque<int>, kPriorityCount> m_readyQueues{};
     std::unordered_map<int, GuestThread> m_threads;

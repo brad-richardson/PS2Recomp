@@ -8,6 +8,12 @@
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 #include "runtime/ee_scheduler.h"
+#if PS2X_ENABLE_DET_HASH_TAP
+#define XXH_NO_XXH32
+#define XXH_NO_XXH3
+#define XXH_INLINE_ALL
+#include "runtime/third_party/xxhash.h"
+#endif
 
 #include <array>
 #include <atomic>
@@ -16,11 +22,15 @@
 #include <cstdlib>
 #include <ctime>
 #include <cstring>
+#include <cstdio>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <tuple>
 #include <vector>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 using namespace ps2_syscalls;
 
@@ -46,6 +56,12 @@ struct EeSchedulerTestAccess
     static void idle(EeScheduler &ee) { ee.waitForEvent(); }
     static void pending(EeScheduler &ee) { ee.processPendingEvents(); }
     static uint64_t cycle(const EeScheduler &ee) { return ee.m_eeCycle; }
+#if PS2X_ENABLE_DET_HASH_TAP
+    static uint64_t hashEvery(const EeScheduler &ee) { return ee.m_detHashEvery; }
+    static auto hash(const EeScheduler &ee) { return ee.makeDetHashSnapshot(); }
+    static void hashLineCount(uint32_t value) { EeScheduler::s_detHashLines.store(value); }
+#endif
+    static void vblank(EeScheduler &ee) { ee.processEvent(EeEvent{EeEventType::VBlankStart, 0, 0}); }
     static std::vector<uint32_t> queuedPcs(const EeScheduler &ee)
     {
         std::vector<uint32_t> pcs;
@@ -615,11 +631,13 @@ namespace
         };
 
         Value deterministic{"PS2X_DETERMINISTIC"};
+        Value hashEvery{"PS2X_DET_HASH_EVERY"};
         Value timezone{"TZ"};
 
         ~SavedClockEnv()
         {
             deterministic.restore();
+            hashEvery.restore();
             timezone.restore();
 #ifdef _WIN32
             _tzset();
@@ -657,6 +675,33 @@ namespace
 #endif
         return clockBytes(tm);
     }
+#if !defined(_WIN32)
+    std::string captureStderr(const std::function<void()> &action)
+    {
+        std::fflush(stderr);
+        FILE *file = std::tmpfile();
+        if (!file)
+            return {};
+        const int saved = dup(fileno(stderr));
+        if (saved < 0 || dup2(fileno(file), fileno(stderr)) < 0)
+        {
+            std::fclose(file);
+            return {};
+        }
+        action();
+        std::fflush(stderr);
+        dup2(saved, fileno(stderr));
+        close(saved);
+        std::fseek(file, 0, SEEK_END);
+        const long length = std::ftell(file);
+        std::rewind(file);
+        std::string output(length > 0 ? static_cast<size_t>(length) : 0u, '\0');
+        if (!output.empty())
+            std::fread(output.data(), 1, output.size(), file);
+        std::fclose(file);
+        return output;
+    }
+#endif
 }
 
 void register_ps2_runtime_kernel_tests()
@@ -731,6 +776,176 @@ void register_ps2_runtime_kernel_tests()
             t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "1"), "restore deterministic mode");
             checkFixed("fixed call after host-local calls");
         });
+
+#if PS2X_ENABLE_DET_HASH_TAP
+        tc.Run("XXH64 seed-zero vectors and streaming are stable", [](TestCase &t)
+        {
+            t.Equals(XXH64("", 0, 0), uint64_t{0xef46db3751d8e999ULL}, "official empty vector");
+            t.Equals(XXH64("hello", 5, 0), uint64_t{0x26c7827d889f6da3ULL}, "hello vector");
+            XXH64_state_t stream{};
+            XXH64_reset(&stream, 0);
+            XXH64_update(&stream, "he", 2);
+            XXH64_update(&stream, "llo", 3);
+            t.Equals(XXH64_digest(&stream), XXH64("hello", 5, 0), "incremental equals one-shot");
+        });
+
+        tc.Run("hash interval parser accepts only exact decimal uint64", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            const std::array<std::pair<const char *, uint64_t>, 5> valid{{
+                {nullptr, 0}, {"", 0}, {"0", 0}, {"001", 1},
+                {"18446744073709551615", UINT64_MAX}}};
+            for (const auto &[input, expected] : valid)
+            {
+                t.IsTrue(setClockEnv("PS2X_DET_HASH_EVERY", input), "set valid interval");
+                TestEnv env;
+                t.Equals(EeSchedulerTestAccess::hashEvery(env.runtime.eeScheduler()), expected,
+                         "parsed valid interval");
+                setClockEnv("PS2X_DET_HASH_EVERY", "bad");
+                t.Equals(EeSchedulerTestAccess::hashEvery(env.runtime.eeScheduler()), expected,
+                         "snapshot stays instance-local");
+            }
+            for (const char *input : {"+1", "-1", " 1", "1 ", "1x", "18446744073709551616"})
+            {
+                t.IsTrue(setClockEnv("PS2X_DET_HASH_EVERY", input), "set invalid interval");
+                TestEnv env;
+                t.Equals(EeSchedulerTestAccess::hashEvery(env.runtime.eeScheduler()), uint64_t{0},
+                         "invalid interval disabled");
+            }
+        });
+
+        tc.Run("hash stream distinguishes all four regions, ordering and little-endian count", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            setClockEnv("PS2X_DET_HASH_EVERY", "1");
+            TestEnv env;
+            PS2Memory &mem = env.runtime.memory();
+            t.IsTrue(mem.initialize(), "real PS2Memory initialized");
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(mem.getRDRAM(), env.ctx);
+            auto base = EeSchedulerTestAccess::hash(ee);
+            t.IsTrue(base.valid, "all regions available");
+            uint8_t *regions[] = {mem.getRDRAM(), mem.getScratchpad(),
+                                  mem.getVU1Data(), mem.getVU1Code()};
+            for (uint8_t *region : regions)
+            {
+                region[0] ^= 0x80u;
+                const auto changed = EeSchedulerTestAccess::hash(ee);
+                t.IsTrue(changed.valid && changed.combined != base.combined,
+                         "single byte changes complete stream");
+                const int differences = (changed.rdram != base.rdram) +
+                    (changed.scratchpad != base.scratchpad) +
+                    (changed.vu1Data != base.vu1Data) + (changed.vu1Code != base.vu1Code);
+                t.Equals(differences, 1, "exactly its own region hash changes");
+                region[0] ^= 0x80u;
+            }
+            // Ordering needs different region bytes: swapping zero-filled
+            // regions otherwise produces the same concatenated stream.
+            regions[0][0] = 0x11u;
+            regions[1][0] = 0x22u;
+            regions[2][0] = 0x33u;
+            regions[3][0] = 0x44u;
+            base = EeSchedulerTestAccess::hash(ee);
+            XXH64_state_t stream{};
+            XXH64_reset(&stream, 0);
+            XXH64_update(&stream, mem.getRDRAM(), PS2_RAM_SIZE);
+            XXH64_update(&stream, mem.getScratchpad(), PS2_SCRATCHPAD_SIZE);
+            XXH64_update(&stream, mem.getVU1Data(), PS2_VU1_DATA_SIZE);
+            XXH64_update(&stream, mem.getVU1Code(), PS2_VU1_CODE_SIZE);
+            const uint8_t zeroCount[8]{};
+            XXH64_update(&stream, zeroCount, 8);
+            t.Equals(base.combined, XXH64_digest(&stream), "specified region order and count bytes");
+            XXH64_reset(&stream, 0);
+            XXH64_update(&stream, mem.getScratchpad(), PS2_SCRATCHPAD_SIZE);
+            XXH64_update(&stream, mem.getRDRAM(), PS2_RAM_SIZE);
+            XXH64_update(&stream, mem.getVU1Data(), PS2_VU1_DATA_SIZE);
+            XXH64_update(&stream, mem.getVU1Code(), PS2_VU1_CODE_SIZE);
+            XXH64_update(&stream, zeroCount, 8);
+            t.IsTrue(base.combined != XXH64_digest(&stream), "reordered regions differ");
+            env.runtime.gs().init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            env.runtime.vu1().execute(mem.getVU1Code(), PS2_VU1_CODE_SIZE,
+                mem.getVU1Data(), PS2_VU1_DATA_SIZE, env.runtime.gs(), &mem,
+                0, 0, 0, 1);
+            const auto one = EeSchedulerTestAccess::hash(ee);
+            t.Equals(one.count, uint64_t{1}, "VU1 start count is numeric");
+            XXH64_reset(&stream, 0);
+            XXH64_update(&stream, mem.getRDRAM(), PS2_RAM_SIZE);
+            XXH64_update(&stream, mem.getScratchpad(), PS2_SCRATCHPAD_SIZE);
+            XXH64_update(&stream, mem.getVU1Data(), PS2_VU1_DATA_SIZE);
+            XXH64_update(&stream, mem.getVU1Code(), PS2_VU1_CODE_SIZE);
+            const uint8_t oneCount[8]{1, 0, 0, 0, 0, 0, 0, 0};
+            XXH64_update(&stream, oneCount, 8);
+            t.Equals(one.combined, XXH64_digest(&stream), "count uses explicit little-endian bytes");
+        });
+#if !defined(_WIN32)
+        tc.Run("VBlank hash follows guest writes and queued callback and IRQ; cap stops output", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            setClockEnv("PS2X_DET_HASH_EVERY", "1");
+            TestEnv env;
+            PS2Memory &mem = env.runtime.memory();
+            t.IsTrue(mem.initialize(), "real PS2Memory initialized");
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(mem.getRDRAM(), env.ctx);
+            constexpr uint32_t cb = 0x1100u, irq = 0x1200u;
+            env.runtime.registerFunction(cb, [](uint8_t *, R5900Context *, PS2Runtime *) {});
+            env.runtime.registerFunction(irq, [](uint8_t *, R5900Context *, PS2Runtime *) {});
+            ee.setVSyncFlag(0x1000u, 0x1010u);
+            (void)ee.setGsVSyncCallback(cb, 0, 0);
+            ee.addIrqHandler(false, 2, irq, true, 0, 0, 0);
+            EeSchedulerTestAccess::hashLineCount(0);
+            const std::string line = captureStderr([&] { EeSchedulerTestAccess::vblank(ee); });
+            uint32_t flag = 0;
+            uint64_t tick = 0;
+            std::memcpy(&flag, mem.getRDRAM() + 0x1000u, 4);
+            std::memcpy(&tick, mem.getRDRAM() + 0x1010u, 8);
+            t.Equals(flag, uint32_t{1}, "guest flag written");
+            t.Equals(tick, uint64_t{1}, "guest tick written");
+            t.IsTrue(EeSchedulerTestAccess::queuedPcs(ee) == std::vector<uint32_t>{cb, irq},
+                     "callback and IRQ queued before tap returns");
+            const auto after = EeSchedulerTestAccess::hash(ee);
+            char expected[32];
+            std::snprintf(expected, sizeof(expected), "rdram=%016llx",
+                          static_cast<unsigned long long>(after.rdram));
+            t.IsTrue(line.find("[det-hash:v1] tick=1") != std::string::npos &&
+                     line.find(expected) != std::string::npos,
+                     "emitted hash sees guest-visible writes");
+            EeSchedulerTestAccess::hashLineCount(4094);
+            const std::string capped = captureStderr([&] {
+                EeSchedulerTestAccess::vblank(ee);
+                EeSchedulerTestAccess::vblank(ee);
+                EeSchedulerTestAccess::vblank(ee);
+            });
+            t.IsTrue(capped.find("tick=2") != std::string::npos &&
+                     capped.find("line cap 4096 reached") != std::string::npos &&
+                     capped.find("tick=3") == std::string::npos,
+                     "one final hash then cap marker and stop");
+            size_t start = 0;
+            while (start < capped.size())
+            {
+                const size_t end = capped.find('\n', start);
+                t.IsTrue((end == std::string::npos ? capped.size() : end) - start < 256,
+                         "each output line stays under 256 bytes");
+                start = end == std::string::npos ? capped.size() : end + 1;
+            }
+            EeSchedulerTestAccess::hashLineCount(0);
+        });
+#endif
+#else
+#if !defined(_WIN32)
+        tc.Run("hash environment cannot emit in compile-disabled build", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            setClockEnv("PS2X_DET_HASH_EVERY", "1");
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "real PS2Memory initialized");
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.runtime.memory().getRDRAM(), env.ctx);
+            const std::string output = captureStderr([&] { EeSchedulerTestAccess::vblank(ee); });
+            t.IsTrue(output.find("[det-hash") == std::string::npos, "no hash output with env set");
+        });
+#endif
+#endif
 
         tc.Run("cycle-only scheduler parses the exact flag once per instance", [](TestCase &t)
         {

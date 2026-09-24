@@ -10,6 +10,12 @@
 #include "ps2_e15.h"
 #include "ps2_vq.h"
 #include "runtime/gs/gs_stream_capture.h"
+#if PS2X_ENABLE_DET_HASH_TAP
+#define XXH_NO_XXH32
+#define XXH_NO_XXH3
+#define XXH_INLINE_ALL
+#include "runtime/third_party/xxhash.h"
+#endif
 
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
@@ -190,7 +196,109 @@ EeScheduler::EeScheduler(PS2Runtime &runtime)
           return flag != nullptr && std::strcmp(flag, "1") == 0;
       }())
 {
+#if PS2X_ENABLE_DET_HASH_TAP
+    bool invalid = false;
+    m_detHashEvery = parseDetHashEvery(std::getenv("PS2X_DET_HASH_EVERY"), invalid);
+    if (invalid)
+        std::fputs("[det-hash] invalid PS2X_DET_HASH_EVERY; disabled\n", stderr);
+#endif
 }
+
+#if PS2X_ENABLE_DET_HASH_TAP
+std::atomic<uint32_t> EeScheduler::s_detHashLines{0};
+
+uint64_t EeScheduler::parseDetHashEvery(const char *value, bool &invalid)
+{
+    invalid = false;
+    if (value == nullptr || *value == '\0')
+        return 0;
+    uint64_t number = 0;
+    for (const unsigned char *p = reinterpret_cast<const unsigned char *>(value); *p; ++p)
+    {
+        if (*p < '0' || *p > '9' ||
+            number > (UINT64_MAX - static_cast<uint64_t>(*p - '0')) / 10u)
+        {
+            invalid = true;
+            return 0;
+        }
+        number = number * 10u + (*p - '0');
+    }
+    return number;
+}
+
+EeScheduler::DetHashSnapshot EeScheduler::makeDetHashSnapshot() const
+{
+    DetHashSnapshot result{};
+    PS2Memory &memory = m_runtime.memory();
+    const uint8_t *const rdram = memory.getRDRAM();
+    const uint8_t *const scratchpad = memory.getScratchpad();
+    const uint8_t *const vu1Data = memory.getVU1Data();
+    const uint8_t *const vu1Code = memory.getVU1Code();
+    if (!rdram || !scratchpad || !vu1Data || !vu1Code || rdram != m_rdram)
+        return result;
+
+    XXH64_state_t stream{};
+    XXH64_reset(&stream, 0);
+    const auto add = [&](const uint8_t *bytes, size_t size) {
+        const uint64_t region = XXH64(bytes, size, 0);
+        XXH64_update(&stream, bytes, size);
+        return region;
+    };
+    result.rdram = add(rdram, PS2_RAM_SIZE);
+    result.scratchpad = add(scratchpad, PS2_SCRATCHPAD_SIZE);
+    result.vu1Data = add(vu1Data, PS2_VU1_DATA_SIZE);
+    result.vu1Code = add(vu1Code, PS2_VU1_CODE_SIZE);
+    result.count = m_runtime.vu1().programStartCount();
+    uint8_t littleEndianCount[8]{};
+    for (unsigned i = 0; i < 8; ++i)
+        littleEndianCount[i] = static_cast<uint8_t>(result.count >> (8u * i));
+    XXH64_update(&stream, littleEndianCount, sizeof(littleEndianCount));
+    result.combined = XXH64_digest(&stream);
+    result.valid = true;
+    return result;
+}
+
+void EeScheduler::emitDetHashTap()
+{
+    if (m_detHashEvery == 0 || m_vsyncTick % m_detHashEvery != 0)
+        return;
+    uint32_t lines = s_detHashLines.load(std::memory_order_relaxed);
+    while (lines < 4096u && !s_detHashLines.compare_exchange_weak(
+               lines, lines + 1u, std::memory_order_relaxed)) {}
+    if (lines >= 4096u)
+        return;
+    if (lines == 4095u)
+    {
+        std::fputs("[det-hash] line cap 4096 reached; output stopped\n", stderr);
+        return;
+    }
+    const DetHashSnapshot hash = makeDetHashSnapshot();
+    if (!hash.valid)
+    {
+        m_detHashEvery = 0;
+        std::fputs("[det-hash] null or unbound region; disabled\n", stderr);
+        return;
+    }
+    char line[256];
+    const int length = std::snprintf(line, sizeof(line),
+        "[det-hash:v1] tick=%llu eeCycle=%llu rdram=%016llx scratch=%016llx vu1Data=%016llx vu1Code=%016llx combined=%016llx count=%llu",
+        static_cast<unsigned long long>(m_vsyncTick),
+        static_cast<unsigned long long>(m_eeCycle),
+        static_cast<unsigned long long>(hash.rdram),
+        static_cast<unsigned long long>(hash.scratchpad),
+        static_cast<unsigned long long>(hash.vu1Data),
+        static_cast<unsigned long long>(hash.vu1Code),
+        static_cast<unsigned long long>(hash.combined),
+        static_cast<unsigned long long>(hash.count));
+    if (length < 0 || static_cast<size_t>(length) >= sizeof(line) - 1u)
+    {
+        m_detHashEvery = 0;
+        std::fputs("[det-hash] line too long; disabled\n", stderr);
+        return;
+    }
+    std::fprintf(stderr, "%s\n", line);
+}
+#endif
 
 // T1 park snapshot fill: runs on the executor inside run() when SIGTERM
 // (or PARK_TIMEOUT_MS) fires. Reads live kernel state plus the always-on
@@ -2737,6 +2845,9 @@ void EeScheduler::processEvent(const EeEvent &event)
             ps2_log::emitDrop("sched/vsync-callback", "no-table-entry", dropArgs);
         }
         dispatchIrq(false, 2u);
+#if PS2X_ENABLE_DET_HASH_TAP
+        emitDetHashTap();
+#endif
         break;
     case EeEventType::ExternalWake:
         completeExternalWait(event.id, event.value, KE_OK);

@@ -81,6 +81,9 @@ public:
 
     VU1State &state() { return m_state; }
     const VU1State &state() const { return m_state; }
+#if PS2X_ENABLE_DET_HASH_TAP
+    uint64_t programStartCount() const { return m_programStartCount; }
+#endif
 
 private:
     enum Pipeline : uint8_t
@@ -222,6 +225,9 @@ private:
 
     Unit m_unit;
     VU1State m_state;
+#if PS2X_ENABLE_DET_HASH_TAP
+    uint64_t m_programStartCount = 0;
+#endif
     std::array<DecodedInstructionPair, kMaxDecodedPairs> m_decodedCodeCache{};
     const uint8_t *m_cachedVuCode = nullptr;
     const PS2Memory *m_cachedMemory = nullptr;

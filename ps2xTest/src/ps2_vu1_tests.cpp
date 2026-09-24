@@ -217,6 +217,29 @@ void register_ps2_vu1_tests()
 {
     MiniTest::Case("PS2VU1", [](TestCase &tc)
     {
+#if PS2X_ENABLE_DET_HASH_TAP
+        tc.Run("deterministic count includes VU1 starts, excludes resume and VU0, resets with instance", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU fixture initialized");
+            VU1Interpreter vu1;
+            VU1Interpreter vu0(VU1Interpreter::Unit::VU0);
+            t.Equals(vu1.programStartCount(), uint64_t{0}, "initial count");
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                        fx.gs, &fx.mem, 0, 0, 0, 1);
+            vu1.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                       fx.gs, &fx.mem, 0, 0, 1);
+            vu0.execute(fx.code, PS2_VU0_CODE_SIZE, fx.data, PS2_VU0_DATA_SIZE,
+                        fx.gs, &fx.mem, 0, 0, 0, 1);
+            t.Equals(vu1.programStartCount(), uint64_t{1}, "resume did not start a program");
+            t.Equals(vu0.programStartCount(), uint64_t{0}, "VU0 excluded");
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                        fx.gs, &fx.mem, 0, 0, 0, 1);
+            t.Equals(vu1.programStartCount(), uint64_t{2}, "second VU1 start");
+            vu1.reset();
+            t.Equals(vu1.programStartCount(), uint64_t{0}, "reset clears instance count");
+        });
+#endif
         tc.Run("upper ADD applies the destination mask", [](TestCase &t)
         {
             Vu1Fixture fx;
