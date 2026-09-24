@@ -3,6 +3,7 @@
 #include "ps2_e7.h"
 #include "ps2_gfx_stats.h"
 #include "runtime/gs/gs_cpu_backend.h"
+#include "runtime/gs/gs_stream_capture.h"
 #include "ps2_e4.h"
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
@@ -928,6 +929,8 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         return;
 
     m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+    ps2x_gs_capture::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
+                            static_cast<uint8_t>(m_curGifPath), data, sizeBytes);
     ps2_e7::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u, "gs-enter", data, sizeBytes);
     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
         return;
@@ -1048,6 +1051,8 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         return false;
 
     m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+    ps2x_gs_capture::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
+                            static_cast<uint8_t>(m_curGifPath), data, sizeBytes);
     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
                                                 {
         m_curQ = 1.0f;
@@ -1102,6 +1107,8 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+    ps2x_gs_capture::nativeUpload(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
+                                  bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
     uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
 }
 
@@ -1743,6 +1750,20 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             m_backend->BeginTransfer(command);
         }
         recordTransferDebugEventUnlocked();
+        ps2x_gs_capture::transfer(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
+                                  (static_cast<uint64_t>(m_bitbltbuf.sbp) |
+                                   (static_cast<uint64_t>(m_bitbltbuf.sbw) << 16) |
+                                   (static_cast<uint64_t>(m_bitbltbuf.spsm) << 24) |
+                                   (static_cast<uint64_t>(m_bitbltbuf.dbp) << 32) |
+                                   (static_cast<uint64_t>(m_bitbltbuf.dbw) << 48) |
+                                   (static_cast<uint64_t>(m_bitbltbuf.dpsm) << 56)),
+                                  (static_cast<uint64_t>(m_trxpos.ssax) |
+                                   (static_cast<uint64_t>(m_trxpos.ssay) << 16) |
+                                   (static_cast<uint64_t>(m_trxpos.dsax) << 32) |
+                                   (static_cast<uint64_t>(m_trxpos.dsay) << 48) |
+                                   (static_cast<uint64_t>(m_trxpos.dir) << 59)),
+                                  (static_cast<uint64_t>(m_trxreg.rrw) |
+                                   (static_cast<uint64_t>(m_trxreg.rrh) << 32)), m_trxdir);
         break;
     }
     case GS_REG_HWREG:

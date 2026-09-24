@@ -6,8 +6,10 @@
 #include "ps2_pk.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_stream_capture.h"
 #include "ps2_log.h"
 #include <atomic>
+#include <array>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -985,10 +987,69 @@ __m128i PS2Memory::read128(uint32_t address)
     return _mm_setzero_si128();
 }
 
-void PS2Memory::gsPrivStore(std::function<void()> apply)
+void PS2Memory::gsPrivStore(std::function<void()> apply, uint32_t captureAddress)
 {
     if (m_gsFrontend)
     {
+        if (ps2x_gs_capture::enabled())
+        {
+            static constexpr uint32_t offsets[] = {
+                0x0000u, 0x0010u, 0x0020u, 0x0030u, 0x0040u, 0x0050u, 0x0060u,
+                0x0070u, 0x0080u, 0x0090u, 0x00A0u, 0x00B0u, 0x00C0u, 0x00D0u,
+                0x00E0u, 0x1000u, 0x1010u, 0x1040u, 0x1080u};
+            auto wrapped = [this, apply = std::move(apply), captureAddress]() mutable
+            {
+                GSRegisters &r = gs_regs;
+                const auto values = [&r]()
+                {
+                    return std::array<uint64_t, 19>{r.pmode, r.smode1, r.smode2, r.srfsh,
+                        r.synch1, r.synch2, r.syncv, r.dispfb1, r.display1, r.dispfb2,
+                        r.display2, r.extbuf, r.extdata, r.extwrite, r.bgcolor,
+                        r.csr.load(std::memory_order_acquire), r.imr, r.busdir,
+                        r.siglblid.load(std::memory_order_acquire)};
+                };
+                const auto before = values();
+                apply();
+                const auto after = values();
+                const uint64_t tick = r.vsyncTick.load(std::memory_order_acquire);
+                const uint32_t forcedOffset = captureAddress == UINT32_MAX
+                    ? UINT32_MAX : (captureAddress - PS2_GS_PRIV_REG_BASE) & ~7u;
+                for (size_t i = 0; i < before.size(); ++i)
+                    if (before[i] != after[i] && offsets[i] != forcedOffset)
+                        ps2x_gs_capture::privWrite(tick, offsets[i], after[i]);
+                if (captureAddress != UINT32_MAX)
+                {
+                    const uint32_t offset = forcedOffset;
+                    uint64_t value = 0u;
+                    switch (offset)
+                    {
+                    case 0x0000: value = r.pmode; break;
+                    case 0x0010: value = r.smode1; break;
+                    case 0x0020: value = r.smode2; break;
+                    case 0x0030: value = r.srfsh; break;
+                    case 0x0040: value = r.synch1; break;
+                    case 0x0050: value = r.synch2; break;
+                    case 0x0060: value = r.syncv; break;
+                    case 0x0070: value = r.dispfb1; break;
+                    case 0x0080: value = r.display1; break;
+                    case 0x0090: value = r.dispfb2; break;
+                    case 0x00A0: value = r.display2; break;
+                    case 0x00B0: value = r.extbuf; break;
+                    case 0x00C0: value = r.extdata; break;
+                    case 0x00D0: value = r.extwrite; break;
+                    case 0x00E0: value = r.bgcolor; break;
+                    case 0x1000: value = r.csr.load(std::memory_order_acquire); break;
+                    case 0x1010: value = r.imr; break;
+                    case 0x1040: value = r.busdir; break;
+                    case 0x1080: value = r.siglblid.load(std::memory_order_acquire); break;
+                    default: break;
+                    }
+                    ps2x_gs_capture::privWrite(tick, offset, value);
+                }
+            };
+            m_gsFrontend->privWrite(std::move(wrapped));
+            return;
+        }
         m_gsFrontend->privWrite(std::move(apply)); // queued or direct; counts either way
         return;
     }
@@ -1117,7 +1178,7 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
                 uint64_t mask = 0xFFFFFFFFULL << (off * 8);
                 uint64_t newVal = (*reg & ~mask) | ((uint64_t)value << (off * 8));
                 *reg = newVal;
-            } });
+            } }, address);
         return;
     }
 
@@ -1184,7 +1245,7 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
             else if (uint64_t *reg = gsRegPtr(gs_regs, address))
             {
                 *reg = value;
-            } });
+            } }, address);
         return;
     }
 
@@ -1361,7 +1422,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
             {
                 const uint64_t mask = 0xFFFFFFFFull << (off * 8u);
                 *reg = (*reg & ~mask) | (static_cast<uint64_t>(value) << (off * 8u));
-            } });
+            } }, address);
         m_gsWriteCount.fetch_add(1, std::memory_order_relaxed);
         return true;
     }

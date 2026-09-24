@@ -324,7 +324,7 @@ public:
     // runs on the GS worker in stream order (GS::privWrite), otherwise now.
     // Readers on the game thread use gsPrivSync() (a queue fence) first.
     void setGsFrontend(GS *gs) { m_gsFrontend = gs; }
-    void gsPrivStore(std::function<void()> apply);
+    void gsPrivStore(std::function<void()> apply, uint32_t captureAddress = UINT32_MAX);
     void gsPrivSync();
 
     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
