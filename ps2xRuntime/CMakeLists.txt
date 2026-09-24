@@ -104,6 +104,19 @@ else()
     FetchContent_MakeAvailable(raylib)
 
     if(PS2X_IS_IOS)
+        # Keep the pinned raylib checkout reproducible: patch its SDL2 DPI path
+        # during configure, before raylib sources are compiled. The patch script
+        # checks the source revision by file hash and is safe to rerun.
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}"
+                "-DPS2X_RAYLIB_SOURCE_DIR=${raylib_SOURCE_DIR}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_raylib_ios_sdl2_dpi.cmake"
+            RESULT_VARIABLE PS2X_RAYLIB_DPI_PATCH_RESULT
+        )
+        if(NOT PS2X_RAYLIB_DPI_PATCH_RESULT EQUAL 0)
+            message(FATAL_ERROR "PS2X: could not apply the pinned iOS raylib SDL2 DPI patch")
+        endif()
+
         # I4: miniaudio (raylib raudio.c) includes AVFoundation on Apple
         # targets, so the raylib TU set compiles as ObjC. Scoped to the raylib
         # target on purpose: -x in CMAKE_C_FLAGS would also poison link lines.
