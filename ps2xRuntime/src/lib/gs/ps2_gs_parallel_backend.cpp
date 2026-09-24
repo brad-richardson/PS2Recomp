@@ -15,6 +15,9 @@
 #include <cstring>
 #include <iostream>
 #include <vector>
+#if defined(__ANDROID__) && defined(PS2X_HAS_PARALLEL_SHADOW)
+#include <dlfcn.h>
+#endif
 
 #ifdef PS2X_HAS_PARALLEL_SHADOW
 #include "context.hpp"
@@ -89,6 +92,102 @@ uint32_t transferBitsPerPixel(uint8_t psm)
 }
 
 #ifdef PS2X_HAS_PARALLEL_SHADOW
+#if defined(__ANDROID__)
+// G43's Turnip HAL ABI, ported from tools/gs_dump_replayer.cpp. The
+// exported HMI is an object, not a vkGetInstanceProcAddr function.
+struct HalModuleMethods
+{
+    int (*open)(const void *module, const char *id, void **device);
+};
+struct HalModule
+{
+    uint32_t tag;
+    uint16_t moduleApiVersion;
+    uint16_t halApiVersion;
+    const char *id;
+    const char *name;
+    const char *author;
+    HalModuleMethods *methods;
+};
+struct HalDevice
+{
+    uint32_t tag;
+    uint32_t version;
+    void *module;
+    uint64_t reserved[12];
+    int (*close)(void *device);
+    void *enumerateInstanceExtensions;
+    void *createInstance;
+    PFN_vkGetInstanceProcAddr getInstanceProcAddr;
+};
+static_assert(sizeof(void *) == 8, "Turnip HAL loader requires arm64");
+static_assert(offsetof(HalModule, methods) == 32, "HMI methods offset");
+static_assert(offsetof(HalDevice, close) == 112, "HAL close offset");
+static_assert(offsetof(HalDevice, enumerateInstanceExtensions) == 120, "HAL enumerate offset");
+static_assert(offsetof(HalDevice, createInstance) == 128, "HAL create offset");
+static_assert(offsetof(HalDevice, getInstanceProcAddr) == 136, "HAL get-proc offset");
+
+bool initTurnipLoader()
+{
+    void *library = dlopen("libvulkan_freedreno.so", RTLD_NOW | RTLD_LOCAL);
+    if (!library)
+    {
+        const char *error = dlerror();
+        std::cerr << "[gs:parallel] Turnip dlopen failed: " << (error ? error : "unknown") << std::endl;
+        return false;
+    }
+    dlerror(); // Clear a previous error before dlsym.
+    auto *hmi = reinterpret_cast<HalModule *>(dlsym(library, "HMI"));
+    const char *symbolError = dlerror();
+    if (symbolError || !hmi)
+    {
+        std::cerr << "[gs:parallel] Turnip HMI dlsym failed: "
+                  << (symbolError ? symbolError : "null HMI") << std::endl;
+        dlclose(library);
+        return false;
+    }
+    Dl_info mapped = {};
+    if (dladdr(hmi, &mapped) && mapped.dli_fname)
+        std::cerr << "[gs:parallel] Turnip HMI mapped base=" << mapped.dli_fbase
+                  << " file=" << mapped.dli_fname << std::endl;
+    else
+        std::cerr << "[gs:parallel] Turnip dladdr(HMI) failed" << std::endl;
+
+    if (hmi->tag != 0x48574d54 || !hmi->methods || !hmi->methods->open)
+    {
+        std::cerr << "[gs:parallel] Turnip HMI layout/open invalid" << std::endl;
+        dlclose(library);
+        return false;
+    }
+    void *device = nullptr;
+    const int rc = hmi->methods->open(hmi, "vulkan0", &device);
+    std::cerr << "[gs:parallel] Turnip HAL open rc=" << rc << " device=" << device << std::endl;
+    if (rc != 0 || !device)
+    {
+        std::cerr << "[gs:parallel] Turnip HAL open failed" << std::endl;
+        dlclose(library);
+        return false;
+    }
+    auto *hal = reinterpret_cast<HalDevice *>(device);
+    std::cerr << "[gs:parallel] Turnip HAL tag=" << std::hex << hal->tag << std::dec
+              << " close=" << reinterpret_cast<const void *>(hal->close)
+              << " enum_ext=" << hal->enumerateInstanceExtensions
+              << " create_inst=" << hal->createInstance
+              << " get_proc=" << reinterpret_cast<const void *>(hal->getInstanceProcAddr) << std::endl;
+    if (!hal->getInstanceProcAddr)
+    {
+        std::cerr << "[gs:parallel] Turnip HAL get-proc is null" << std::endl;
+        if (hal->close)
+            hal->close(device);
+        dlclose(library);
+        return false;
+    }
+    // Keep the HAL device and library resident for the lifetime of Granite.
+    // Releasing them here would leave Granite with a dangling proc address.
+    return Vulkan::Context::init_loader(hal->getInstanceProcAddr);
+}
+#endif
+
 class GSParallelBackend final : public GSRasterBackend
 {
 public:
@@ -301,7 +400,18 @@ private:
         std::cerr << "[gs:parallel] init: GRANITE_VULKAN_LIBRARY="
                   << (std::getenv("GRANITE_VULKAN_LIBRARY") ? std::getenv("GRANITE_VULKAN_LIBRARY") : "(unset)")
                   << std::endl;
-        if (!Vulkan::Context::init_loader(nullptr))
+        bool loaderOk = false;
+#if defined(__ANDROID__)
+        const char *turnip = std::getenv("PS2X_GS_TURNIP");
+        if (turnip && std::strcmp(turnip, "1") == 0)
+        {
+            std::cerr << "[gs:parallel] Turnip requested via PS2X_GS_TURNIP=1" << std::endl;
+            loaderOk = initTurnipLoader();
+        }
+        else
+#endif
+            loaderOk = Vulkan::Context::init_loader(nullptr);
+        if (!loaderOk)
             return fail("Context::init_loader failed");
         m_ctx = new Vulkan::Context();
         m_ctx->set_num_thread_indices(1);
