@@ -10,7 +10,8 @@
 namespace
 {
     constexpr uint64_t kCaptureCap = 6ull * 1024ull * 1024ull * 1024ull;
-    enum : uint8_t { Packet = 1, PrivWrite = 2, Transfer = 3, VBlank = 4, NativeUpload = 5 };
+    enum : uint8_t { Packet = 1, PrivWrite = 2, Transfer = 3, VBlank = 4, NativeUpload = 5,
+                     LocalToHost = 6, ClearContext = 7 };
 
     struct Capture
     {
@@ -178,6 +179,28 @@ namespace ps2x_gs_capture
         put64(body + 16, trxreg);
         put32(body + 24, direction);
         record(Transfer, tick, body, sizeof(body));
+    }
+
+    void localToHost(uint64_t tick, uint32_t maxBytes, const uint8_t *data, uint32_t sizeBytes)
+    {
+        if (!enabled() || (sizeBytes != 0u && !data))
+            return;
+        std::vector<uint8_t> body(8u + sizeBytes);
+        put32(body.data(), maxBytes);
+        put32(body.data() + 4, sizeBytes);
+        if (sizeBytes != 0u)
+            std::memcpy(body.data() + 8, data, sizeBytes);
+        record(LocalToHost, tick, body.data(), static_cast<uint32_t>(body.size()));
+    }
+
+    void clearContext(uint64_t tick, uint32_t contextIndex, uint32_t rgba)
+    {
+        if (!enabled())
+            return;
+        uint8_t body[8];
+        put32(body, contextIndex);
+        put32(body + 4, rgba);
+        record(ClearContext, tick, body, sizeof(body));
     }
 
     void vblank(uint64_t tick)
