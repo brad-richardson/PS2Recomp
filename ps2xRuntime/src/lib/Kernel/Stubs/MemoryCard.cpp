@@ -2,6 +2,7 @@
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
+#include "ps2_e55d3_pad_card_probe.h"
 #include "MemoryCard.h"
 
 namespace ps2_stubs
@@ -710,6 +711,10 @@ namespace ps2_stubs
         const std::string rawPath = readPs2CStringBounded(rdram, getRegU32(ctx, 6), kMcMaxPathLen);
         const int32_t maxEntries = static_cast<int32_t>(getRegU32(ctx, 8));
         const uint32_t tableAddr = getRegU32(ctx, 9);
+        // E55D3: guest vsync tick for the probe (GS clock; null runtime in
+        // tests = 0). One relaxed load per call; no I/O when disabled.
+        const uint64_t e55d3Tick =
+            runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
 
         std::vector<SceMcTblGetDir> entries;
         int32_t result = kMcResultNoEntry;
@@ -720,6 +725,9 @@ namespace ps2_stubs
                 McPortState &state = g_mcPorts[static_cast<size_t>(port)];
                 if (!state.formatted)
                 {
+                    // E55D3-SEM1: status-only line (card not formatted).
+                    ps2_e55d3_probe::noteGetDir(e55d3Tick, port, slot, tableAddr, 0u,
+                                                maxEntries, false, "unformatted", nullptr);
                     result = kMcResultNoFormat;
                 }
                 else
@@ -834,6 +842,10 @@ namespace ps2_stubs
                             std::min(entries.size(), maxEntries > 0 ? static_cast<size_t>(maxEntries) : 0u);
                         if (entryCount == 0u || tableAddr == 0u)
                         {
+                            // E55D3: status-only line (no table copied).
+                            ps2_e55d3_probe::noteGetDir(e55d3Tick, port, slot, tableAddr, entryCount,
+                                                        maxEntries, false,
+                                                        tableAddr == 0u ? "bad-addr" : "empty", nullptr);
                             result = static_cast<int32_t>(entryCount);
                         }
                         else if (uint8_t *dst = getMemPtr(rdram, tableAddr))
@@ -847,14 +859,33 @@ namespace ps2_stubs
                                     ps2_e41_trace::lastVsyncTick(), tableAddr,
                                     static_cast<uint32_t>(entryCount * sizeof(SceMcTblGetDir)),
                                     rdram, "mc-getdir", "dirtable", 0u);
+                            // E55D3: post-copy probe AFTER the table bytes
+                            // are visible. Guest bytes untouched.
+                            ps2_e55d3_probe::noteGetDir(e55d3Tick, port, slot, tableAddr, entryCount,
+                                                        maxEntries, true, nullptr, dst);
                             result = static_cast<int32_t>(entryCount);
                         }
                         else
                         {
+                            // E55D3: status-only line (bad guest address).
+                            ps2_e55d3_probe::noteGetDir(e55d3Tick, port, slot, tableAddr, entryCount,
+                                                        maxEntries, false, "bad-addr", nullptr);
                             result = kMcResultDeniedPermit;
                         }
                     }
+                    else
+                    {
+                        // E55D3-SEM1: status-only line (host dir missing).
+                        ps2_e55d3_probe::noteGetDir(e55d3Tick, port, slot, tableAddr, 0u,
+                                                    maxEntries, false, "no-dir", nullptr);
+                    }
                 }
+            }
+            else
+            {
+                // E55D3-SEM1: status-only line (bad port/slot).
+                ps2_e55d3_probe::noteGetDir(e55d3Tick, port, slot, tableAddr, 0u,
+                                            maxEntries, false, "bad-port", nullptr);
             }
 
             setMcCommandResultLocked(kMcCmdGetDir, result);
@@ -1072,6 +1103,10 @@ namespace ps2_stubs
         const uint32_t dstAddr = getRegU32(ctx, 5);
         const int32_t size = static_cast<int32_t>(getRegU32(ctx, 6));
         uint8_t *dst = (size > 0) ? getMemPtr(rdram, dstAddr) : nullptr;
+        // E55D3: guest vsync tick for the probe (GS clock; null runtime in
+        // tests = 0). One relaxed load per call; no I/O when disabled.
+        const uint64_t e55d3Tick =
+            runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
 
         int32_t result = kMcResultNoEntry;
         {
@@ -1079,14 +1114,20 @@ namespace ps2_stubs
             auto it = g_mcFiles.find(fd);
             if (size <= 0)
             {
+                // E55D3: status-only line (no payload by construction).
+                ps2_e55d3_probe::noteMcRead(e55d3Tick, fd, dstAddr, size, 0u, false, "zero-size", nullptr);
                 result = 0;
             }
             else if (it == g_mcFiles.end() || !it->second.file)
             {
+                // E55D3: status-only line (unknown/closed fd).
+                ps2_e55d3_probe::noteMcRead(e55d3Tick, fd, dstAddr, size, 0u, false, "bad-fd", nullptr);
                 result = kMcResultNoEntry;
             }
             else if (!dst)
             {
+                // E55D3: status-only line (bad guest address).
+                ps2_e55d3_probe::noteMcRead(e55d3Tick, fd, dstAddr, size, 0u, false, "bad-addr", nullptr);
                 result = kMcResultDeniedPermit;
             }
             else
@@ -1102,6 +1143,17 @@ namespace ps2_stubs
                         ps2_e44_trace::emitRangeOverlap(rdram, ctx, dstAddr, static_cast<uint32_t>(bytesRead),
                                                         "mc-read", 0u, false, "mc-read");
                 }
+                const bool ioErr = (std::ferror(it->second.file) != 0);
+                // E55D3-SEM1: every positive payload is recorded even when
+                // ferror is set (fread still filled guest RDRAM); the error
+                // rides along in err. Empty calls carry status only.
+                // Guest bytes and results untouched.
+                if (bytesRead > 0u)
+                    ps2_e55d3_probe::noteMcRead(e55d3Tick, fd, dstAddr, size, bytesRead, true,
+                                                ioErr ? "io-error" : nullptr, dst);
+                else
+                    ps2_e55d3_probe::noteMcRead(e55d3Tick, fd, dstAddr, size, bytesRead, false,
+                                                ioErr ? "io-error" : "eof", nullptr);
                 result = std::ferror(it->second.file) ? kMcResultDeniedPermit : static_cast<int32_t>(bytesRead);
                 if (std::ferror(it->second.file))
                 {

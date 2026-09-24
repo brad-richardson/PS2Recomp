@@ -32,6 +32,7 @@ void register_ps2_mpg_src_trace_tests();
 void register_ps2_e41_trace_tests();
 void register_ps2_e43_trace_tests();
 void register_ps2_e44_trace_tests();
+void register_ps2_e55d3_probe_tests();
 #endif
 void register_ps2_vu1_trace_tests();
 void register_ps2_vu1_entry_trace_tests();
@@ -76,6 +77,7 @@ int main()
     register_ps2_e41_trace_tests();
     register_ps2_e43_trace_tests();
     register_ps2_e44_trace_tests();
+    register_ps2_e55d3_probe_tests();
 #endif
     register_ps2_vu1_trace_tests();
     register_ps2_vu1_entry_trace_tests();

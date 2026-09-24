@@ -82,6 +82,7 @@ if(PS2X_ENABLE_DIAG_TAPS)
         src/ps2_e41_trace_tests.cpp
         src/ps2_e43_trace_tests.cpp
         src/ps2_e44_trace_tests.cpp
+        src/ps2_e55d3_probe_tests.cpp
     )
 endif()
 

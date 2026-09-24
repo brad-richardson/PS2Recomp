@@ -2,6 +2,7 @@
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e44_trace.h"
+#include "ps2_e55d3_pad_card_probe.h"
 #include "Pad.h"
 
 #include <chrono>
@@ -1225,9 +1226,16 @@ namespace ps2_stubs
         const int port = static_cast<int>(getRegU32(ctx, 4));
         const int slot = static_cast<int>(getRegU32(ctx, 5));
         const uint32_t dataAddr = getRegU32(ctx, 6);
+        // E55D3: guest vsync tick for the probe (same GS clock the vsync
+        // pad script uses; null runtime in tests = 0). Sampled once here so
+        // the probe row and the script share one tick per call.
+        const uint64_t e55d3Tick =
+            runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
         uint8_t *data = getMemPtr(rdram, dataAddr);
         if (!data)
         {
+            // E55D3: status-only line (no bytes written); result unchanged.
+            ps2_e55d3_probe::notePad(e55d3Tick, port, slot, dataAddr, false, "bad-addr", nullptr);
             setReturnS32(ctx, 0);
             return;
         }
@@ -1240,6 +1248,10 @@ namespace ps2_stubs
         if (ps2_e41_trace::plantArmed()) // E41 plant watch
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dataAddr,
                                           32u, rdram, "pad-read", "pad", 0u);
+        // E55D3: post-fill probe AFTER the bytes are visible. ok=false
+        // (closed port) writes a status-only line; guest bytes untouched.
+        ps2_e55d3_probe::notePad(e55d3Tick, port, slot, dataAddr, e3ok,
+                                 e3ok ? nullptr : "closed", e3ok ? data : nullptr);
         if (e3t.active)
         {
             char e3x[64];
