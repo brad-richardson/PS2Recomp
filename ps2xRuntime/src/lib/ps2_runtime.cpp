@@ -6,6 +6,7 @@
 #include "ps2_gfx_stats.h"
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
+#include "ps2_present_fallback.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "game_overrides.h"
@@ -532,7 +533,9 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                                                    &sourceFbp,
                                                    &usedPreferredDisplaySource))
     {
-        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
+        // I26: black while no guest frame exists (was magenta); PS2X_FALLBACK_MAGENTA=1 restores it (dev only).
+        static const ps2x::FallbackRgba s_fallback = ps2x::fallbackFrameColorFromEnv();
+        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, Color{s_fallback.r, s_fallback.g, s_fallback.b, s_fallback.a});
         dumpPresentationFrame(static_cast<const uint8_t *>(blank.data), FB_WIDTH, FB_HEIGHT, currentTick, 0u,
                               0u, false, true, rt->memory().gs().smode2, rt->memory().gs().pmode);
         UpdateTexture(tex, blank.data);
