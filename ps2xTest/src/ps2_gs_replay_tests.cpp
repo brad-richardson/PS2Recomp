@@ -1,6 +1,8 @@
 #include "MiniTest.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "runtime/ps2_memory.h"
+#include "ps2_vq.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -119,6 +121,26 @@ namespace
         return hash;
     }
 
+    bool dumpTick(uint64_t tick)
+    {
+        const char *list = std::getenv("PS2X_GS_REPLAY_PPM_TICKS");
+        if (!list)
+            return false;
+        while (*list)
+        {
+            char *end = nullptr;
+            const unsigned long long value = std::strtoull(list, &end, 10);
+            if (end == list)
+                return false;
+            if (value == tick)
+                return true;
+            if (*end != ',')
+                return false;
+            list = end + 1;
+        }
+        return false;
+    }
+
     void replay(TestCase &t)
     {
         const char *path = std::getenv("PS2X_GS_REPLAY_CAPTURE");
@@ -143,7 +165,9 @@ namespace
         }
 
         const char *mode = std::getenv("PS2X_GS_REPLAY_MODE");
-        const bool queued = mode && std::strcmp(mode, "queue") == 0;
+        const char *backend = std::getenv("PS2X_GS_BACKEND");
+        const bool parallelBackend = backend && std::strcmp(backend, "parallel") == 0;
+        const bool queued = parallelBackend || (mode && std::strcmp(mode, "queue") == 0);
         const char *drop = std::getenv("PS2X_GS_REPLAY_DROP_PRIV");
         const bool dropPriv = drop && std::strcmp(drop, "1") == 0;
         const char *rounding = std::getenv("PS2X_GS_REPLAY_RTZ");
@@ -189,6 +213,16 @@ namespace
         gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
         if (queued)
             gs.setQueueEnabled(true);
+        if (parallelBackend)
+        {
+            if (!ps2x_gs_parallel::available())
+            {
+                std::fclose(f);
+                t.IsTrue(false, "parallel replay requested without compiled backend");
+                return;
+            }
+            gs.setRasterBackend(ps2x_gs_parallel::create(&regs));
+        }
 
         uint64_t bisectTo = 0u;
         if (const char *value = std::getenv("PS2X_GS_REPLAY_BISECT_TO"))
@@ -300,6 +334,9 @@ namespace
                 const uint32_t vramHash = vramData ? fnv(vramData, vramSize) : 0u;
                 gs.unlockDisplaySnapshot();
                 const PresentationFrame frame = gs.presentForDiagnostics();
+                if (const char *dir = std::getenv("PS2X_GS_REPLAY_PPM_DIR"))
+                    if (dumpTick(tick) && *dir && frame)
+                        ps2_vq::dumpPpm(dir, tick, frame);
                 char row[160];
                 std::snprintf(row, sizeof(row),
                               "GB4_REPLAY tick=%llu vram=%08x priv=%08x present=%08x",
@@ -393,12 +430,23 @@ namespace
         t.IsTrue(packets > 0u && markers > 0u, "capture has GIF packets and VBlank markers");
         t.IsTrue(!rows.empty(), "capture has sampled hashes");
         std::cout << "GB4_REPLAY_SUMMARY mode=" << (queued ? "queue" : "direct")
+                  << " backend=" << (parallelBackend ? "parallel" : "cpu")
                   << " drop_priv=" << (dropPriv ? 1 : 0) << " packets=" << packets
                   << " priv=" << priv << " transfers=" << transfers
                   << " markers=" << markers << " readbacks=" << readbacks
                   << " clears=" << clears << " samples=" << rows.size()
                   << " rtz=" << (rtzAll ? "all" : (rtzPath1 ? "path1" : "off"))
                   << " rounded_packets=" << roundedPackets << '\n';
+        if (parallelBackend)
+        {
+            const auto stats = ps2x_gs_parallel::stats();
+            std::cout << "GB4_PARALLEL_STATS packets=" << stats.gifPackets
+                      << " presents=" << stats.presents
+                      << " null_scanouts=" << stats.nullScanouts
+                      << " unsupported_clears=" << stats.unsupportedClears
+                      << " unsupported_vram_io=" << stats.unsupportedVramIo
+                      << " init_ok=" << stats.initOk << " init_failed=" << stats.initFailed << '\n';
+        }
         for (const auto &row : rows)
             std::cout << row << '\n';
 
