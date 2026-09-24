@@ -32,6 +32,7 @@
 #include <cstring>
 #include <limits>
 #include <chrono>
+#include <cstdio>
 #include <atomic>
 #include <thread>
 #include <unordered_map>
@@ -3351,8 +3352,30 @@ void PS2Runtime::run()
         gameThreadFinished.store(true, std::memory_order_release); });
 
     uint64_t tick = 0;
+    // I25: PS2X_VSYNC_RATE_LOG=1 prints guest vsyncs per wall second every
+    // 5 s (diagnostic; off by default, one getenv at loop start).
+    const bool vsyncRateLog = [] {
+        const char *env = std::getenv("PS2X_VSYNC_RATE_LOG");
+        return env && env[0] == '1';
+    }();
+    auto vsyncRateWall = std::chrono::steady_clock::now();
+    uint64_t vsyncRateTick = m_memory.gs().vsyncTick.load();
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
+        if (vsyncRateLog)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            const double secs = std::chrono::duration<double>(now - vsyncRateWall).count();
+            if (secs >= 5.0)
+            {
+                const uint64_t vt = m_memory.gs().vsyncTick.load();
+                const double rate = static_cast<double>(vt - vsyncRateTick) / secs;
+                std::fprintf(stderr, "[vsync-rate] tick=%llu rate=%.2f/s (%.3fx of 59.94)\n",
+                             static_cast<unsigned long long>(vt), rate, rate / 59.94);
+                vsyncRateWall = now;
+                vsyncRateTick = vt;
+            }
+        }
         PS2_IF_AGRESSIVE_LOGS({
             tick++;
             if ((tick % 120) == 0)
