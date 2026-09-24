@@ -228,6 +228,12 @@ int main(int argc, char *argv[])
                           << std::endl;
                 std::cout.flush();
                 std::cerr.flush();
+                // Drain the logcat pipe (tick/census lines may still be held
+                // by the reader thread) before _Exit, which bypasses the
+                // atexit(stopLogcatRedirect) registration. Safe on failed
+                // init too: closes are ignored on bad fds, the pipe/thread
+                // guards skip, and this process _Exits immediately after.
+                stopLogcatRedirect();
                 std::_Exit(1);
             }
             const Ps2xGsReplayResult replayResult = ps2x_gs_replay_run();
@@ -253,11 +259,13 @@ int main(int argc, char *argv[])
                           << " stream=" << replayResult.hasStream
                           << " samples=" << replayResult.hasSamples << std::endl;
             }
-            // Same process-exit/log-flush pattern as the game boot path
-            // below: flush stdio, then _Exit (bypasses destructors/atexit,
-            // matching the existing main() behavior with its logcat thread).
+            // Drain the logcat pipe before _Exit (which bypasses
+            // atexit/stopLogcatRedirect): the tick2050 census/end marker is a
+            // required device receipt and the reader thread may still hold
+            // those lines. Default-off game boot path below is unchanged.
             std::cout.flush();
             std::cerr.flush();
+            stopLogcatRedirect();
             std::_Exit(replayOk ? 0 : 1);
         }
 #endif
