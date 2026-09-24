@@ -360,9 +360,18 @@ public:
                 std::cerr << "[n8d5b] control=" << counts[0] << " expected=128"
                           << (counts[0] == 128u ? " PASS" : " FAIL") << std::endl;
                 std::cerr << "[n8d5b] sampled_tile_counts=";
+                uint64_t sampledOccupied = 0;
+                uint32_t sampledActive = 0;
                 for (uint32_t i = 1; i <= 32u * 28u; ++i)
+                {
                     std::cerr << (i == 1 ? "" : ",") << counts[i];
+                    sampledOccupied += counts[i];
+                    sampledActive += counts[i] >= 32u;
+                }
                 std::cerr << std::endl;
+                if (counts[0] == 128u)
+                    std::cerr << "[n8d5b] sampled_summary tiles=896 occupied=" << sampledOccupied
+                              << " active=" << sampledActive << std::endl;
             }
         }
         const uint8_t *px = static_cast<const uint8_t *>(
@@ -373,6 +382,8 @@ public:
         if (tileRequested && w == 512u && h == 448u)
         {
             std::cerr << "[n8d5b] raw_tile_counts=";
+            uint64_t rawOccupied = 0;
+            uint32_t rawActive = 0;
             for (uint32_t ty = 0; ty < 28u; ++ty)
                 for (uint32_t tx = 0; tx < 32u; ++tx)
                 {
@@ -384,8 +395,12 @@ public:
                             hits += std::max({p[0], p[1], p[2]}) >= 32u;
                         }
                     std::cerr << (tx == 0u && ty == 0u ? "" : ",") << hits;
+                    rawOccupied += hits;
+                    rawActive += hits >= 32u;
                 }
             std::cerr << std::endl;
+            std::cerr << "[n8d5b] raw_summary tiles=896 occupied=" << rawOccupied
+                      << " active=" << rawActive << std::endl;
         }
 
         // Frontend contract: 640-pixel row stride (kHostFrameWidth), rows
