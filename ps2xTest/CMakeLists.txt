@@ -62,15 +62,20 @@ add_library(ps2_test_lib STATIC
     src/ps2_runtime_expansion_tests.cpp
     src/ps2_gfx_stats_tests.cpp
     src/ps2_vif_mpg_log_tests.cpp
-    src/ps2_mpg_src_trace_tests.cpp
-    src/ps2_e41_trace_tests.cpp
-    src/ps2_e43_trace_tests.cpp
-    src/ps2_e44_trace_tests.cpp
     src/ps2_vu1_trace_tests.cpp
     src/ps2_vu1_entry_trace_tests.cpp
     src/ps2_fpu_semantics_tests.cpp
     src/ps2_fpu_cop2_audit_tests.cpp
 )
+
+if(PS2X_ENABLE_DIAG_TAPS)
+    target_sources(ps2_test_lib PRIVATE
+        src/ps2_mpg_src_trace_tests.cpp
+        src/ps2_e41_trace_tests.cpp
+        src/ps2_e43_trace_tests.cpp
+        src/ps2_e44_trace_tests.cpp
+    )
+endif()
 
 # E52: the audit tests execute the generator's own translation of each
 # encoding; e52_snippet_gen writes it into a header at build time.
