@@ -225,6 +225,23 @@ namespace
         return count;
     }
 
+    bool parseGb5bTickRange(const char *text, uint64_t &lo, uint64_t &hi)
+    {
+        if (!text || !*text)
+            return false;
+        char *end = nullptr;
+        const unsigned long long first = std::strtoull(text, &end, 10);
+        if (end == text || *end != ',')
+            return false;
+        const char *second = end + 1;
+        const unsigned long long last = std::strtoull(second, &end, 10);
+        if (end == second || *end != '\0' || first == 0u || last < first)
+            return false;
+        lo = first;
+        hi = last;
+        return true;
+    }
+
     bool dumpTick(uint64_t tick)
     {
         const char *list = std::getenv("PS2X_GS_REPLAY_PPM_TICKS");
@@ -354,6 +371,54 @@ namespace
             gb5Trace << "tick,packet_index,path,gif_bytes,gif_fnv32,upper_before,upper_after,upper_changed,lower_before,lower_after,lower_changed\n";
         }
 
+        std::ofstream gb5bTrace, gb5bTimeline;
+        GSCpuBackend gb5bRaw;
+        uint64_t gb5bLo = 0u, gb5bHi = 0u, gb5bDrop = UINT64_MAX;
+        const char *gb5bOut = std::getenv("PS2X_GS_REPLAY_GB5B_TRACE");
+        const bool gb5bProbe = gb5bOut && *gb5bOut;
+        if (gb5bProbe)
+        {
+            const char *range = std::getenv("PS2X_GS_REPLAY_GB5B_TICKS");
+            if (parallelBackend || queued || gb5Probe ||
+                !parseGb5bTickRange(range, gb5bLo, gb5bHi))
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB5B requires direct CPU replay, no GB5 probe, and valid GB5B tick range");
+                return;
+            }
+            if (const char *drop = std::getenv("PS2X_GS_REPLAY_GB5B_DROP"))
+            {
+                char *end = nullptr;
+                gb5bDrop = std::strtoull(drop, &end, 10);
+                if (end == drop || *end != '\0')
+                {
+                    std::fclose(f);
+                    t.IsTrue(false, "GB5B drop index must be numeric");
+                    return;
+                }
+            }
+            gb5bRaw.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+            gb5bTrace.open(gb5bOut, std::ios::binary);
+            gb5bTimeline.open(std::string(gb5bOut) + ".timeline", std::ios::binary);
+            if (!gb5bTrace || !gb5bTimeline)
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB5B trace or timeline could not be opened");
+                return;
+            }
+            gb5bTrace << "tick,packet_index,path,gif_bytes,gif_fnv32,upper_before,upper_after,upper_changed,lower_before,lower_after,lower_changed\n";
+            gb5bTimeline << "tick,record,offset,info\n";
+        }
+        else if (const char *drop = std::getenv("PS2X_GS_REPLAY_GB5B_DROP"))
+        {
+            if (*drop)
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB5B drop requires the GB5B probe");
+                return;
+            }
+        }
+
         uint64_t bisectTo = 0u;
         if (const char *value = std::getenv("PS2X_GS_REPLAY_BISECT_TO"))
             bisectTo = std::strtoull(value, nullptr, 10);
@@ -366,6 +431,12 @@ namespace
 
         uint64_t packets = 0u, priv = 0u, transfers = 0u, markers = 0u, roundedPackets = 0u;
         uint32_t gb5Rows = 0u;
+        uint32_t gb5bRows = 0u, gb5bTimelineRows = 0u;
+        uint64_t gb5bPriv = 0u, gb5bTransfers = 0u, gb5bMarkers = 0u;
+        uint64_t gb5bReadbacks = 0u, gb5bClears = 0u, gb5bNative = 0u;
+        Gb5Crops gb5bPrevAfter;
+        uint64_t gb5bPrevTick = 0u;
+        bool gb5bPrevValid = false, gb5bSawHi = false;
         uint64_t readbacks = 0u, clears = 0u;
         bool parseOk = true;
         std::vector<std::string> rows;
@@ -420,6 +491,17 @@ namespace
                         break;
                     }
                 }
+                const bool gb5bPacket = gb5bProbe && tick >= gb5bLo && tick <= gb5bHi;
+                Gb5Crops gb5bBefore, gb5bAfter;
+                if (gb5bPacket)
+                {
+                    if (!readGb5Crops(gb5bRaw, regs, tick, gb5bBefore))
+                    {
+                        parseOk = false;
+                        std::cerr << "GB5B_PROBE_ERROR before packet=" << packets << " tick=" << tick << '\n';
+                        break;
+                    }
+                }
                 gs.noteGifPath(static_cast<GifPathId>(pathId));
                 const bool forceRtz = rtzAll || (rtzPath1 && pathId == 1u);
                 {
@@ -429,7 +511,8 @@ namespace
                         parseOk = false;
                         break;
                     }
-                    gs.processGIFPacket(rec.data() + 14, size);
+                    if (packets != gb5bDrop)
+                        gs.processGIFPacket(rec.data() + 14, size);
                 }
                 if (gb5Packet)
                 {
@@ -457,6 +540,52 @@ namespace
                                  << std::setw(8) << gb5After.lower.hash << std::dec << ',' << lowerChanged << '\n';
                     }
                 }
+                if (gb5bPacket)
+                {
+                    if (!readGb5Crops(gb5bRaw, regs, tick, gb5bAfter))
+                    {
+                        parseOk = false;
+                        std::cerr << "GB5B_PROBE_ERROR after packet=" << packets << " tick=" << tick << '\n';
+                        break;
+                    }
+                    if (gb5bPrevValid && tick == gb5bPrevTick &&
+                        (gb5bBefore.upper.hash != gb5bPrevAfter.upper.hash ||
+                         gb5bBefore.lower.hash != gb5bPrevAfter.lower.hash))
+                    {
+                        if (++gb5bTimelineRows > 5000u)
+                        {
+                            parseOk = false;
+                            std::cerr << "GB5B_PROBE_ERROR timeline cap exceeded\n";
+                            break;
+                        }
+                        gb5bTimeline << tick << ",gap," << packets << ",upper_prev="
+                                     << std::hex << std::setw(8) << std::setfill('0') << gb5bPrevAfter.upper.hash
+                                     << "_before=" << std::setw(8) << gb5bBefore.upper.hash
+                                     << "_lower_prev=" << std::setw(8) << gb5bPrevAfter.lower.hash
+                                     << "_before=" << std::setw(8) << gb5bBefore.lower.hash
+                                     << std::dec << '\n';
+                    }
+                    const uint32_t upperChanged = changedPixels(gb5bBefore.upper, gb5bAfter.upper);
+                    const uint32_t lowerChanged = changedPixels(gb5bBefore.lower, gb5bAfter.lower);
+                    if (upperChanged || lowerChanged)
+                    {
+                        if (++gb5bRows > 1000u)
+                        {
+                            parseOk = false;
+                            std::cerr << "GB5B_PROBE_ERROR row cap exceeded\n";
+                            break;
+                        }
+                        gb5bTrace << tick << ',' << packets << ',' << static_cast<unsigned>(pathId) << ',' << size << ','
+                                 << std::hex << std::setw(8) << std::setfill('0') << fnv(rec.data() + 14, size) << ','
+                                 << std::setw(8) << gb5bBefore.upper.hash << ','
+                                 << std::setw(8) << gb5bAfter.upper.hash << std::dec << ',' << upperChanged << ','
+                                 << std::hex << std::setw(8) << gb5bBefore.lower.hash << ','
+                                 << std::setw(8) << gb5bAfter.lower.hash << std::dec << ',' << lowerChanged << '\n';
+                    }
+                    gb5bPrevAfter = gb5bAfter;
+                    gb5bPrevTick = tick;
+                    gb5bPrevValid = true;
+                }
                 if (forceRtz)
                     ++roundedPackets;
                 if (packetTrace && tick < bisectTo)
@@ -478,6 +607,18 @@ namespace
                 if (!dropPriv)
                     gs.privWrite([&regs, offset, value]() { setPriv(regs, offset, value); });
                 ++priv;
+                if (gb5bProbe && tick >= gb5bLo && tick <= gb5bHi)
+                {
+                    if (++gb5bTimelineRows > 5000u)
+                    {
+                        parseOk = false;
+                        break;
+                    }
+                    gb5bTimeline << tick << ",priv," << recordOffset << ",off="
+                                 << std::hex << std::setw(4) << std::setfill('0') << offset
+                                 << "_value=" << std::setw(16) << value << std::dec << '\n';
+                    ++gb5bPriv;
+                }
             }
             else if (kind == 3u)
             {
@@ -489,6 +630,8 @@ namespace
                 // Transfer metadata is recorded for audit. Its operation is
                 // reproduced by the source packet immediately preceding it.
                 ++transfers;
+                if (gb5bProbe && tick >= gb5bLo && tick <= gb5bHi)
+                    ++gb5bTransfers;
             }
             else if (kind == 4u)
             {
@@ -500,6 +643,31 @@ namespace
                 gs.drainQueue();
                 regs.vsyncTick.store(tick, std::memory_order_release);
                 ++markers;
+                if (gb5bProbe && tick >= gb5bLo && tick <= gb5bHi)
+                {
+                    if (++gb5bTimelineRows > 5000u)
+                    {
+                        parseOk = false;
+                        break;
+                    }
+                    gb5bTimeline << tick << ",marker," << recordOffset << ",\n";
+                    ++gb5bMarkers;
+                }
+                if (gb5bProbe && tick == gb5bHi)
+                {
+                    Gb5Crops finalCrops;
+                    if (!readGb5Crops(gb5bRaw, regs, tick, finalCrops))
+                    {
+                        parseOk = false;
+                        std::cerr << "GB5B_PROBE_ERROR final tick=" << tick << '\n';
+                        break;
+                    }
+                    std::cout << "GB5B_FINAL tick=" << tick << " upper=" << std::hex
+                              << std::setw(8) << std::setfill('0') << finalCrops.upper.hash
+                              << " lower=" << std::setw(8) << finalCrops.lower.hash
+                              << std::dec << " rows=" << gb5bRows << '\n';
+                    gb5bSawHi = true;
+                }
                 if (gb5Probe && tick == 950u)
                 {
                     Gb5Crops finalCrops;
@@ -614,6 +782,16 @@ namespace
                 if (packetTrace && tick < bisectTo)
                     packetTrace << packets << ',' << tick << ",native,"
                                 << std::hex << fnv(vram.data(), vram.size()) << std::dec << '\n';
+                if (gb5bProbe && tick >= gb5bLo && tick <= gb5bHi)
+                {
+                    if (++gb5bTimelineRows > 5000u)
+                    {
+                        parseOk = false;
+                        break;
+                    }
+                    gb5bTimeline << tick << ",native," << recordOffset << ",bytes=" << size << '\n';
+                    ++gb5bNative;
+                }
                 ++packets;
             }
             else if (kind == 6u)
@@ -639,6 +817,16 @@ namespace
                     break;
                 }
                 ++readbacks;
+                if (gb5bProbe && tick >= gb5bLo && tick <= gb5bHi)
+                {
+                    if (++gb5bTimelineRows > 5000u)
+                    {
+                        parseOk = false;
+                        break;
+                    }
+                    gb5bTimeline << tick << ",readback," << recordOffset << ",bytes=" << size << '\n';
+                    ++gb5bReadbacks;
+                }
             }
             else if (kind == 7u)
             {
@@ -652,6 +840,16 @@ namespace
                 std::memcpy(&rgba, rec.data() + 13, 4);
                 gs.clearFramebufferContext(context, rgba);
                 ++clears;
+                if (gb5bProbe && tick >= gb5bLo && tick <= gb5bHi)
+                {
+                    if (++gb5bTimelineRows > 5000u)
+                    {
+                        parseOk = false;
+                        break;
+                    }
+                    gb5bTimeline << tick << ",clear," << recordOffset << ",context=" << context << '\n';
+                    ++gb5bClears;
+                }
             }
             else
             {
@@ -666,6 +864,8 @@ namespace
             t.IsTrue(packetTrace.good(), "GB4 packet trace written");
         if (gb5Probe)
             t.IsTrue(gb5Trace.good() && packets > 144726u, "GB5 crop trace and X5 window complete");
+        if (gb5bProbe)
+            t.IsTrue(gb5bTrace.good() && gb5bTimeline.good() && gb5bSawHi, "GB5B crop trace, timeline and final tick complete");
 
         t.IsTrue(parseOk, "GB4 capture records parse cleanly");
         t.IsTrue(packets > 0u && markers > 0u, "capture has GIF packets and VBlank markers");
@@ -678,6 +878,19 @@ namespace
                   << " clears=" << clears << " samples=" << rows.size()
                   << " rtz=" << (rtzAll ? "all" : (rtzPath1 ? "path1" : "off"))
                   << " rounded_packets=" << roundedPackets << '\n';
+        if (gb5bProbe)
+        {
+            std::cout << "GB5B_NONPACKET ticks=" << gb5bLo << '-' << gb5bHi
+                      << " priv=" << gb5bPriv << " transfers=" << gb5bTransfers
+                      << " markers=" << gb5bMarkers << " native=" << gb5bNative
+                      << " readbacks=" << gb5bReadbacks << " clears=" << gb5bClears
+                      << " rows=" << gb5bRows << " timeline=" << gb5bTimelineRows
+                      << " drop=";
+            if (gb5bDrop == UINT64_MAX)
+                std::cout << "none\n";
+            else
+                std::cout << gb5bDrop << '\n';
+        }
         if (parallelBackend)
         {
             const auto stats = ps2x_gs_parallel::stats();
