@@ -703,13 +703,28 @@ namespace ps2_stubs
             return;
         }
 
-        std::time_t now = std::time(nullptr);
         std::tm localTm{};
+        const char *deterministic = std::getenv("PS2X_DETERMINISTIC");
+        const bool fixedClock = deterministic != nullptr && std::strcmp(deterministic, "1") == 0;
+        if (fixedClock)
+        {
+            // Dev-only fixed UTC calendar; the BCD writer below is shared.
+            localTm.tm_year = 2004 - 1900;
+            localTm.tm_mon = 7 - 1;
+            localTm.tm_mday = 16;
+            localTm.tm_hour = 12;
+            localTm.tm_min = 34;
+            localTm.tm_sec = 56;
+        }
+        else
+        {
+            std::time_t now = std::time(nullptr);
 #ifdef _WIN32
-        localtime_s(&localTm, &now);
+            localtime_s(&localTm, &now);
 #else
-        localtime_r(&now, &localTm);
+            localtime_r(&now, &localTm);
 #endif
+        }
 
         // sceCdCLOCK format (BCD fields).
         ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, clockAddr, 8); // E3b R3e C5
@@ -721,10 +736,11 @@ namespace ps2_stubs
         clockData[5] = toBcd(static_cast<uint32_t>(localTm.tm_mday));
         clockData[6] = toBcd(static_cast<uint32_t>(localTm.tm_mon + 1));
         clockData[7] = toBcd(static_cast<uint32_t>((localTm.tm_year + 1900) % 100));
-        ps2_e3::tapEnd(std::move(e3t), "cd-clock", rdram, "bcd=wallclock");
+        const char *clockSource = fixedClock ? "fixed-utc-2004-07-16" : "wallclock-local";
+        ps2_e3::tapEnd(std::move(e3t), "cd-clock", rdram, clockSource);
         if (ps2_e41_trace::armed()) // E41 plant watch
             ps2_e41_trace::notePlantRange(currentCdStreamTick(runtime), clockAddr, 8u,
-                                          rdram, "cd-clock", "wallclock", 0u);
+                                          rdram, "cd-clock", clockSource, 0u);
         setReturnS32(ctx, 1);
     }
 

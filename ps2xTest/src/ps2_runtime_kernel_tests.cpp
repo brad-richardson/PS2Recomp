@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <cstring>
 #include <sstream>
 #include <string>
@@ -557,12 +558,147 @@ namespace
             std::memset(&ctx, 0, sizeof(ctx));
         }
     };
+
+    struct SavedClockEnv
+    {
+        struct Value
+        {
+            const char *name;
+            bool present;
+            std::string text;
+
+            explicit Value(const char *key) : name(key), present(std::getenv(key) != nullptr),
+                                              text(present ? std::getenv(key) : "") {}
+
+            void restore() const
+            {
+#ifdef _WIN32
+                _putenv_s(name, present ? text.c_str() : "");
+#else
+                if (present) setenv(name, text.c_str(), 1);
+                else unsetenv(name);
+#endif
+            }
+        };
+
+        Value deterministic{"PS2X_DETERMINISTIC"};
+        Value timezone{"TZ"};
+
+        ~SavedClockEnv()
+        {
+            deterministic.restore();
+            timezone.restore();
+#ifdef _WIN32
+            _tzset();
+#else
+            tzset();
+#endif
+        }
+    };
+
+    bool setClockEnv(const char *name, const char *value)
+    {
+#ifdef _WIN32
+        return _putenv_s(name, value == nullptr ? "" : value) == 0;
+#else
+        return value == nullptr ? unsetenv(name) == 0 : setenv(name, value, 1) == 0;
+#endif
+    }
+
+    std::array<uint8_t, 8> clockBytes(const std::tm &tm)
+    {
+        const auto bcd = [](int value) {
+            return static_cast<uint8_t>(((value / 10) << 4) | (value % 10));
+        };
+        return {0, bcd(tm.tm_sec), bcd(tm.tm_min), bcd(tm.tm_hour), 0,
+                bcd(tm.tm_mday), bcd(tm.tm_mon + 1), bcd((tm.tm_year + 1900) % 100)};
+    }
+
+    std::array<uint8_t, 8> localClockBytes(std::time_t time)
+    {
+        std::tm tm{};
+#ifdef _WIN32
+        localtime_s(&tm, &time);
+#else
+        localtime_r(&time, &tm);
+#endif
+        return clockBytes(tm);
+    }
 }
 
 void register_ps2_runtime_kernel_tests()
 {
     MiniTest::Case("PS2RuntimeKernel", [](TestCase &tc)
     {
+        tc.Run("sceCdReadClock fixed UTC and host-local passthrough", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            TestEnv env;
+            constexpr uint32_t clockAddr = 0x1800u;
+            constexpr std::array<uint8_t, 8> fixed{0x00, 0x56, 0x34, 0x12,
+                                                    0x00, 0x16, 0x07, 0x04};
+            const auto readClock = [&]() {
+                std::memset(env.rdram.data() + clockAddr, 0xA5, 8);
+                setRegU32(env.ctx, 4, clockAddr);
+                ps2_stubs::sceCdReadClock(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), 1, "valid guest clock pointer returns 1");
+                std::array<uint8_t, 8> bytes{};
+                std::memcpy(bytes.data(), env.rdram.data() + clockAddr, bytes.size());
+                return bytes;
+            };
+            const auto checkFixed = [&](const char *label) {
+                const auto actual = readClock();
+                for (size_t i = 0; i < fixed.size(); ++i)
+                    t.Equals(actual[i], fixed[i], std::string(label) + " byte " + std::to_string(i));
+            };
+            const auto checkHost = [&](const char *label) {
+                const std::time_t before = std::time(nullptr);
+                const auto actual = readClock();
+                const std::time_t after = std::time(nullptr);
+                t.IsTrue(actual == localClockBytes(before) || actual == localClockBytes(after),
+                         std::string(label) + " matches bracketing host-local time");
+            };
+
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "1"), "set deterministic mode");
+            checkFixed("first fixed call");
+            checkFixed("repeated fixed call");
+            t.IsTrue(setClockEnv("TZ", "UTC0"), "set UTC timezone");
+#ifdef _WIN32
+            _tzset();
+#else
+            tzset();
+#endif
+            checkFixed("fixed call after timezone change");
+            t.IsTrue(setClockEnv("TZ", "PST8PDT"), "change timezone again");
+#ifdef _WIN32
+            _tzset();
+#else
+            tzset();
+#endif
+            checkFixed("fixed call in second timezone");
+
+            uint8_t *priorScratchpad = ps2GetScratchpadHostPtr();
+            ps2SetScratchpadHostPtr(nullptr);
+            std::memset(env.rdram.data() + clockAddr, 0xA5, 8);
+            setRegU32(env.ctx, 4, PS2_SCRATCHPAD_BASE);
+            ps2_stubs::sceCdReadClock(env.rdram.data(), &env.ctx, &env.runtime);
+            ps2SetScratchpadHostPtr(priorScratchpad);
+            t.Equals(getRegS32(env.ctx, 2), 0, "unbacked guest scratchpad pointer returns 0");
+            for (size_t i = 0; i < 8; ++i)
+                t.Equals(env.rdram[clockAddr + i], uint8_t{0xA5}, "invalid pointer leaves RAM intact");
+
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", nullptr), "unset deterministic mode");
+            checkHost("unset flag");
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "0"), "set zero flag");
+            checkHost("zero flag");
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", ""), "set empty flag");
+            checkHost("empty flag");
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "yes"), "set other flag");
+            checkHost("other flag");
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "1"), "restore deterministic mode");
+            checkFixed("fixed call after host-local calls");
+        });
+
         tc.Run("CreateThread and CreateSema decode the exact PS2SDK EE layouts", [](TestCase &t)
         {
             TestEnv env;
