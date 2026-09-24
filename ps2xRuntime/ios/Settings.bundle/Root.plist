@@ -2,7 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- I25: iOS Settings -> SSX3 PS2X. "autoRoute" is read by
      src/lib/ps2_ios_runtime.cpp (CFPreferences); unset = on. Off clears
-     PS2X_PAD_SCRIPT so a controller drives the game. Copied into the .app
+     PS2X_PAD_SCRIPT so a controller drives the game. I26: "virtualControls"
+     (unset = on); off sets PS2X_VIRTUAL_PAD=0. Copied into the .app
      at staging (local/research/I25/build-install.sh). -->
 <plist version="1.0">
 <dict>
@@ -23,6 +24,24 @@
 			<string>Auto-route</string>
 			<key>Key</key>
 			<string>autoRoute</string>
+			<key>DefaultValue</key>
+			<true/>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>Title</key>
+			<string>Touch</string>
+			<key>FooterText</key>
+			<string>On-screen D-pad, face buttons, shoulders, Start and Select. Hidden automatically once you use a connected game controller. Takes effect the next time the app starts.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Virtual controls</string>
+			<key>Key</key>
+			<string>virtualControls</string>
 			<key>DefaultValue</key>
 			<true/>
 		</dict>

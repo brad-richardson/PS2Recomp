@@ -34,12 +34,17 @@ std::vector<std::pair<std::string, std::string>> readEnvFile(const std::filesyst
     return ps2x::parseEnvFileContent(content.str());
 }
 
-// Settings.bundle switch "autoRoute". Unset (Settings never opened) = on.
-bool autoRouteEnabled()
+// Settings.bundle switches. Unset (Settings never opened) = on.
+bool settingEnabled(CFStringRef key)
 {
     Boolean valid = false;
-    const Boolean value = CFPreferencesGetAppBooleanValue(CFSTR("autoRoute"), kCFPreferencesCurrentApplication, &valid);
+    const Boolean value = CFPreferencesGetAppBooleanValue(key, kCFPreferencesCurrentApplication, &valid);
     return !valid || value;
+}
+
+bool autoRouteEnabled()
+{
+    return settingEnabled(CFSTR("autoRoute"));
 }
 } // namespace
 
@@ -92,6 +97,14 @@ void prepareEnvironment(const char *argv0)
     {
         unsetenv("PS2X_PAD_SCRIPT");
         std::fprintf(stderr, "[ios-env] Settings: Auto-route off -> PS2X_PAD_SCRIPT cleared\n");
+    }
+
+    // I26: Settings > Virtual controls (on-screen pad; hidden anyway while
+    // a game controller is connected). Off -> PS2X_VIRTUAL_PAD=0.
+    if (launcherKeys.count("PS2X_VIRTUAL_PAD") == 0 && !settingEnabled(CFSTR("virtualControls")))
+    {
+        setenv("PS2X_VIRTUAL_PAD", "0", 1);
+        std::fprintf(stderr, "[ios-env] Settings: Virtual controls off -> PS2X_VIRTUAL_PAD=0\n");
     }
 
     if (const char *mc = std::getenv("PS2X_MC_ROOT"); mc && mc[0] != '\0')
@@ -170,5 +183,26 @@ void syncWindowSize()
     event.window.data1 = w;
     event.window.data2 = h;
     SDL_PushEvent(&event);
+}
+
+int touchPoints(float *xs, float *ys, int max)
+{
+    int n = 0;
+    const int devices = SDL_GetNumTouchDevices();
+    for (int d = 0; d < devices && n < max; ++d)
+    {
+        const SDL_TouchID id = SDL_GetTouchDevice(d);
+        const int fingers = SDL_GetNumTouchFingers(id);
+        for (int f = 0; f < fingers && n < max; ++f)
+        {
+            if (const SDL_Finger *finger = SDL_GetTouchFinger(id, f))
+            {
+                xs[n] = finger->x;
+                ys[n] = finger->y;
+                ++n;
+            }
+        }
+    }
+    return n;
 }
 } // namespace ps2x::ios

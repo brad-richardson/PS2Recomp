@@ -7,6 +7,8 @@
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
 #include "ps2_present_fallback.h"
+#include "ps2_present_geometry.h"
+#include "ps2_virtual_pad.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "game_overrides.h"
@@ -493,6 +495,122 @@ void dumpPresentationFrame(const uint8_t *rgba,
     std::cerr << "[frame:dump] seq=" << seq << " tick=" << tick << " size=" << width << "x" << height
               << " fbp=" << displayFbp << "/" << sourceFbp << " fallback=" << (fallback ? 1 : 0) << " fnv1a="
               << std::hex << hash << std::dec << std::endl;
+}
+} // namespace
+
+// I26: on-screen virtual controls, drawn by the host over the presented frame
+// (never into the guest frame). Layout and hit test in ps2_virtual_pad.h.
+namespace
+{
+bool virtualPadWanted()
+{
+    const char *env = std::getenv("PS2X_VIRTUAL_PAD");
+#if defined(PS2X_IOS)
+    return ps2x::vpad::enabledFromEnv(env); // Settings > Virtual controls; default on
+#else
+    return env && env[0] == '1'; // desktop: dev-only, the mouse is the finger
+#endif
+}
+
+// A connected controller hides the overlay once it has been used (any
+// button, or a stick past half-way) since it connected. The iOS Simulator
+// reports an always-connected device named "Gamepad" with nothing attached,
+// so "connected" alone would hide the overlay for good.
+bool gamepadInUse()
+{
+    static bool s_used = false;
+    bool any = false;
+    for (int i = 0; i < 4; ++i)
+    {
+        if (!IsGamepadAvailable(i))
+            continue;
+        any = true;
+        for (int b = GAMEPAD_BUTTON_LEFT_FACE_UP; b <= GAMEPAD_BUTTON_RIGHT_THUMB && !s_used; ++b)
+        {
+            s_used = IsGamepadButtonDown(i, b);
+        }
+        for (int a = GAMEPAD_AXIS_LEFT_X; a <= GAMEPAD_AXIS_RIGHT_Y && !s_used; ++a)
+        {
+            s_used = std::fabs(GetGamepadAxisMovement(i, a)) > 0.5f;
+        }
+    }
+    if (!any)
+    {
+        s_used = false;
+    }
+    return any && s_used;
+}
+
+int virtualPadTouches(float *xs, float *ys, int max, float screenWidth, float screenHeight)
+{
+#if defined(PS2X_IOS)
+    const int n = ps2x::ios::touchPoints(xs, ys, max);
+    for (int i = 0; i < n; ++i)
+    {
+        xs[i] *= screenWidth;
+        ys[i] *= screenHeight;
+    }
+    return n;
+#else
+    (void)screenWidth;
+    (void)screenHeight;
+    if (max < 1 || !IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+    {
+        return 0;
+    }
+    xs[0] = static_cast<float>(GetMouseX());
+    ys[0] = static_cast<float>(GetMouseY());
+    return 1;
+#endif
+}
+
+void drawVirtualPad(const ps2x::vpad::Layout &layout, uint16_t pressed)
+{
+    using namespace ps2x::vpad;
+    for (const Button &b : layout.buttons)
+    {
+        const bool down = (pressed & b.mask) != 0u;
+        const Vector2 c{b.x, b.y};
+        DrawCircleV(c, b.r, Color{255, 255, 255, static_cast<unsigned char>(down ? 110 : 45)});
+        DrawCircleLinesV(c, b.r, Color{255, 255, 255, 140});
+        const float s = b.r * 0.45f;
+        const Color ink{255, 255, 255, 200};
+        switch (b.mask)
+        {
+        case kUp:
+            DrawTriangle({b.x, b.y - s}, {b.x - s, b.y + s * 0.6f}, {b.x + s, b.y + s * 0.6f}, ink);
+            break;
+        case kDown:
+            DrawTriangle({b.x, b.y + s}, {b.x + s, b.y - s * 0.6f}, {b.x - s, b.y - s * 0.6f}, ink);
+            break;
+        case kLeft:
+            DrawTriangle({b.x - s, b.y}, {b.x + s * 0.6f, b.y + s}, {b.x + s * 0.6f, b.y - s}, ink);
+            break;
+        case kRight:
+            DrawTriangle({b.x + s, b.y}, {b.x - s * 0.6f, b.y - s}, {b.x - s * 0.6f, b.y + s}, ink);
+            break;
+        case kCross:
+            DrawLineEx({b.x - s, b.y - s}, {b.x + s, b.y + s}, 3.0f, Color{120, 170, 255, 230});
+            DrawLineEx({b.x - s, b.y + s}, {b.x + s, b.y - s}, 3.0f, Color{120, 170, 255, 230});
+            break;
+        case kCircle:
+            DrawRing(c, s * 0.8f, s * 1.05f, 0.0f, 360.0f, 32, Color{255, 110, 110, 230});
+            break;
+        case kSquare:
+            DrawRectangleLinesEx({b.x - s * 0.85f, b.y - s * 0.85f, s * 1.7f, s * 1.7f}, 3.0f, Color{255, 140, 210, 230});
+            break;
+        case kTriangle:
+            DrawTriangleLines({b.x, b.y - s}, {b.x - s, b.y + s * 0.75f}, {b.x + s, b.y + s * 0.75f}, Color{110, 230, 160, 230});
+            break;
+        default:
+        {
+            const int fontSize = std::max(8, static_cast<int>(b.r * (b.label[1] == '\0' || b.label[2] == '\0' ? 0.8f : 0.42f)));
+            const int tw = MeasureText(b.label, fontSize);
+            DrawText(b.label, static_cast<int>(b.x) - tw / 2, static_cast<int>(b.y) - fontSize / 2, fontSize, ink);
+            break;
+        }
+        }
+    }
 }
 } // namespace
 
@@ -3325,6 +3443,17 @@ void PS2Runtime::run()
         const char *env = std::getenv("PS2X_VSYNC_RATE_LOG");
         return env && env[0] == '1';
     }();
+    const bool vpadWanted = virtualPadWanted();
+    bool vpadLastPadConnected = true; // forces the first [vpad] line when the overlay shows
+    const std::vector<ps2x::vpad::TestTouch> vpadTestTouches =
+        ps2x::vpad::parseTestTouches(std::getenv("PS2X_VPAD_TEST_TOUCHES")); // DEV-ONLY
+    if (!vpadWanted)
+    {
+        std::fprintf(stderr, "[vpad] off (PS2X_VIRTUAL_PAD)\n");
+    }
+    const ps2x::present::Aspect presentAspect = ps2x::present::aspectFromEnv(std::getenv("PS2X_ASPECT"));
+    const ps2x::present::Filter presentFilter = ps2x::present::filterFromEnv(std::getenv("PS2X_PRESENT_FILTER"));
+    int appliedFilter = -1;
     auto vsyncRateWall = std::chrono::steady_clock::now();
     uint64_t vsyncRateTick = m_memory.gs().vsyncTick.load();
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
@@ -3387,16 +3516,54 @@ void PS2Runtime::run()
         const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
         const float screenWidth = static_cast<float>(GetScreenWidth());
         const float screenHeight = static_cast<float>(GetScreenHeight());
-        const float scale = std::min(screenWidth / srcWidth, screenHeight / srcHeight);
-        const float dstWidth = srcWidth * scale;
-        const float dstHeight = srcHeight * scale;
+        // I26 (G46 §4): 4:3 display aspect (PS2X_ASPECT=native keeps the
+        // pixel aspect) and bilinear filtering unless the drawable-pixel
+        // scale is whole on both axes (PS2X_PRESENT_FILTER=point|bilinear).
+        const ps2x::present::Rect pr =
+            ps2x::present::presentRect(screenWidth, screenHeight, srcWidth, srcHeight, presentAspect);
+        const float dpiScale = (screenWidth > 0.0f) ? static_cast<float>(GetRenderWidth()) / screenWidth : 1.0f;
+        const int wantFilter = ps2x::present::useBilinear(presentFilter, pr.w * dpiScale / srcWidth, pr.h * dpiScale / srcHeight)
+                                   ? TEXTURE_FILTER_BILINEAR
+                                   : TEXTURE_FILTER_POINT;
+        if (wantFilter != appliedFilter)
+        {
+            SetTextureFilter(frameTex, wantFilter);
+            appliedFilter = wantFilter;
+        }
         const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
-        const Rectangle dstRect{
-            (screenWidth - dstWidth) * 0.5f,
-            (screenHeight - dstHeight) * 0.5f,
-            dstWidth,
-            dstHeight};
+        const Rectangle dstRect{pr.x, pr.y, pr.w, pr.h};
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        // I26: virtual controls, hidden while a connected game controller is in use.
+        const bool vpadPadConnected = vpadWanted && gamepadInUse();
+        if (vpadWanted && vpadPadConnected != vpadLastPadConnected)
+        {
+            int padIndex = -1;
+            for (int i = 0; i < 4 && padIndex < 0; ++i)
+            {
+                if (IsGamepadAvailable(i))
+                    padIndex = i;
+            }
+            const char *padName = padIndex >= 0 ? GetGamepadName(padIndex) : nullptr;
+            std::fprintf(stderr, "[vpad] on=1 pad_in_use=%d first_pad=%d name=\"%s\" -> overlay %s\n", vpadPadConnected ? 1 : 0,
+                         padIndex, padName ? padName : "", vpadPadConnected ? "hidden" : "shown");
+            vpadLastPadConnected = vpadPadConnected;
+        }
+        if (vpadWanted && !vpadPadConnected)
+        {
+            const ps2x::vpad::Layout layout = ps2x::vpad::makeLayout(screenWidth, screenHeight);
+            float touchX[8];
+            float touchY[8];
+            int touches = virtualPadTouches(touchX, touchY, 8, screenWidth, screenHeight);
+            touches = ps2x::vpad::activeTestTouches(vpadTestTouches, m_memory.gs().vsyncTick.load(), screenWidth,
+                                                    screenHeight, touchX, touchY, touches, 8);
+            const uint16_t pressed = ps2x::vpad::pressedMask(layout, touchX, touchY, touches);
+            ps2x::vpad::liveMask().store(pressed, std::memory_order_relaxed);
+            drawVirtualPad(layout, pressed);
+        }
+        else if (vpadWanted)
+        {
+            ps2x::vpad::liveMask().store(0u, std::memory_order_relaxed);
+        }
         if (m_debugUiInitialized && m_debugUiDrawCallback)
         {
             m_debugUiDrawCallback(*this, m_debugUiUserData);

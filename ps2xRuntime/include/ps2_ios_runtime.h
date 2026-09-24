@@ -16,4 +16,7 @@ void prepareEnvironment(const char *argv0);
 // viewport and GetScreenWidth/Height match. Call after InitWindow and once
 // per presented frame (main thread); cheap when nothing changed.
 void syncWindowSize();
+// I26: current touches from SDL's finger state, normalised 0..1 to the
+// window (x right, y down). Returns how many were written (<= max).
+int touchPoints(float *xs, float *ys, int max);
 } // namespace ps2x::ios
