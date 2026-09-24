@@ -3,6 +3,7 @@
 // Env:
 //   PS2X_SND_LOG=<file>    event log (bounded, kMaxLines).
 //   PS2X_SND_DUMP_DIR=<d>  payload dumps (bounded, kMaxDumpBytes).
+//   PS2X_SND_TAG1=<file>   consecutive 0x620-byte tag-1 records (bounded).
 //
 // SNDDRV protocol (AU2 Part A, local/research/AU2/REPORT.md):
 //   IOP->EE cid 1, +0x10 type: 0 = tick (opt = IOP address the EE DMAs its
@@ -42,6 +43,7 @@ namespace ps2_snd_spike
 
 inline constexpr uint64_t kMaxLines = 60000ull;
 inline constexpr uint64_t kMaxDumpBytes = 256ull << 20;
+inline constexpr uint64_t kMaxTag1Bytes = 128ull << 20;
 inline constexpr uint64_t kTickCycles = 3145728ull; // 294,912,000 * 384 / 36,000
 inline constexpr uint32_t kPcmFramesPerTick = 384u;
 inline constexpr uint32_t kPcmBytesPerTick = kPcmFramesPerTick * 2u * sizeof(int16_t);
@@ -62,6 +64,8 @@ struct State
     bool init = false;
     bool enabled = false;
     FILE *log = nullptr;
+    FILE *tag1File = nullptr;
+    uint64_t tag1Bytes = 0;
     std::string dumpDir;
     uint64_t lines = 0;
     uint64_t dumpBytes = 0;
@@ -106,9 +110,10 @@ inline bool findTag1Pcm(const uint8_t *data, size_t size, Tag1PcmView &view)
             return false;
         if (tag == 1u)
         {
-            if (length < kPcmBytesPerTick)
+            // The mix tag has two reserved words after its length.
+            if (length != kPcmBytesPerTick || offset + 16u + length > size)
                 return false;
-            view = {offset + 8u, kPcmBytesPerTick};
+            view = {offset + 16u, kPcmBytesPerTick};
             return true;
         }
         offset += 8u + length;
@@ -210,6 +215,8 @@ inline void initLocked(State &s)
         s.log = std::fopen(p, "w");
     if (const char *d = std::getenv("PS2X_SND_DUMP_DIR"); d && *d)
         s.dumpDir = d;
+    if (const char *p = std::getenv("PS2X_SND_TAG1"); p && *p)
+        s.tag1File = std::fopen(p, "wb");
     s.enabled = true;
 }
 
@@ -364,7 +371,19 @@ inline bool onSetDma(const uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t
     {
         Tag1PcmView view{};
         if (findTag1Pcm(bytes.data(), bytes.size(), view))
+        {
             pcmRing().push(bytes.data() + view.offset, view.size);
+            const size_t record = view.offset - 16u;
+            if (s.tag1File && record + 0x620u <= bytes.size() &&
+                s.tag1Bytes + 0x620u <= kMaxTag1Bytes)
+            {
+                if (std::fwrite(bytes.data() + record, 1, 0x620u, s.tag1File) == 0x620u)
+                {
+                    s.tag1Bytes += 0x620u;
+                    std::fflush(s.tag1File);
+                }
+            }
+        }
     }
     if (tagbuf)
         ++s.tagbufs;

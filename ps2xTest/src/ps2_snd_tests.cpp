@@ -32,19 +32,22 @@ void register_ps2_snd_tests()
         tc.Run("tag buffer parser extracts exactly 384 stereo s16 frames", [](TestCase &t)
         {
         using namespace ps2_snd_spike;
-        std::vector<uint8_t> data(16u + 8u + kPcmBytesPerTick + 16u, 0u);
+        std::vector<uint8_t> data(16u + 16u + kPcmBytesPerTick + 16u, 0u);
         putU32(data, 0u, 0u); // tag 0: 16-byte fixed record
         putU32(data, 16u, 1u);
         putU32(data, 20u, kPcmBytesPerTick);
+        putU32(data, 24u, 0u); // two reserved tag-1 header words
+        putU32(data, 28u, 0u);
         for (size_t i = 0; i < kPcmBytesPerTick; ++i)
-            data[24u + i] = static_cast<uint8_t>(i & 0xffu);
-        putU32(data, 24u + kPcmBytesPerTick, 6u);
+            data[32u + i] = static_cast<uint8_t>(i & 0xffu);
+        putU32(data, 32u + kPcmBytesPerTick, 5u);
+        putU32(data, 36u + kPcmBytesPerTick, 17u);
         Tag1PcmView view{};
         t.IsTrue(findTag1Pcm(data.data(), data.size(), view), "tag 1 should parse");
-        t.Equals(view.offset, static_cast<size_t>(24u), "PCM begins immediately after tag and byte length");
+        t.Equals(view.offset, static_cast<size_t>(32u), "PCM begins after the 16-byte tag-1 header");
         t.Equals(view.size, static_cast<size_t>(kPcmBytesPerTick), "PCM is 1,536 bytes");
         t.Equals(data[view.offset + 511u], static_cast<uint8_t>(0xffu), "PCM payload remains byte exact");
-        t.IsFalse(findTag1Pcm(data.data(), 23u, view), "truncated tag header must be rejected");
+        t.IsFalse(findTag1Pcm(data.data(), 31u, view), "truncated tag header must be rejected");
         });
 
         tc.Run("_sceSifSendCmd decodes the seven argument registers unconditionally", [](TestCase &t)
