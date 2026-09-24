@@ -39,8 +39,26 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
 
     uint16_t btns = 0xFFFFu;
+#if defined(PS2X_IOS)
+    // I25: a Bluetooth pad (MFi/Xbox/PS) need not land at index 0, so take
+    // the first ready one; and union keyboard + gamepad (N6's Android
+    // behaviour), so a hardware keyboard works alongside a controller.
+    int kGamepad = 0;
+    for (int i = 0; i < 4; ++i)
+    {
+        if (IsGamepadAvailable(i))
+        {
+            kGamepad = i;
+            break;
+        }
+    }
+    const bool useGamepad = IsGamepadAvailable(kGamepad);
+    const bool useKeyboard = true;
+#else
     constexpr int kGamepad = 0;
     const bool useGamepad = IsGamepadAvailable(kGamepad);
+    const bool useKeyboard = !useGamepad;
+#endif
     auto clearBit = [&btns](uint16_t mask)
     { btns &= ~mask; };
 
@@ -88,7 +106,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         data[4] = static_cast<uint8_t>(128 + rx * 127);
         data[5] = static_cast<uint8_t>(128 + ry * 127);
     }
-    else
+    if (useKeyboard)
     {
         if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))
             clearBit(PAD_UP);

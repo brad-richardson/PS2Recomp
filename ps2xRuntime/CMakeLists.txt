@@ -110,7 +110,7 @@ else()
         target_compile_options(raylib PRIVATE -x objective-c)
     endif()
 
-    if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
+if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_IOS)
         FetchContent_Declare(
             imgui
             GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -613,7 +613,7 @@ if(PS2X_GAME_CODEGEN_DIR)
     target_link_libraries(ps2EntryRunner PRIVATE ps2_game_objects)
 endif()
 
-if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
+if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_IOS)
     target_sources(ps2EntryRunner PRIVATE
         src/lib/ps2_debug_panel.cpp
     )
@@ -719,6 +719,14 @@ if(PS2X_IS_IOS)
     # the FATAL_ERROR above. Desktop-inert: PS2X_IS_IOS is OFF on Darwin.
     find_package(SDL2 REQUIRED)
     target_link_libraries(ps2EntryRunner PRIVATE SDL2::SDL2main)
+    # I25: iOS startup glue (ps2x.env layers, Settings switch, SDL hints,
+    # window-size sync). PS2X_IOS gates the call sites in main.cpp and
+    # ps2_runtime.cpp; CoreFoundation for CFPreferences. Kept out of unity
+    # batches so its SDL include can't leak into sibling TUs.
+    target_sources(ps2_runtime PRIVATE src/lib/ps2_ios_runtime.mm)
+    set_source_files_properties(src/lib/ps2_ios_runtime.mm PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_IOS=1)
+    target_link_libraries(ps2_runtime PRIVATE "-framework CoreFoundation")
     # I7b: the iOS 27 sim traps in UIKit scene setup before SDL_main runs
     # when the bundle has no scene manifest (EXC_BREAKPOINT in
     # __UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption;

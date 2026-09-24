@@ -23,6 +23,10 @@
 #include <cstring>
 #endif
 
+#if defined(PS2X_IOS)
+#include "ps2_ios_runtime.h"
+#endif
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 // I7: on iOS, SDL2main provides the real main() (UIKit app delegate +
@@ -160,6 +164,15 @@ namespace
             std::cout << "Using argv boot path" << std::endl;
             return std::filesystem::path(argv[1]);
         }
+#if defined(PS2X_IOS)
+        // I25: home-screen launches pass no argv; the bundled ps2x.env names
+        // the ELF (PS2X_BOOT_ELF=${BUNDLE}/SLUS_207.72).
+        if (const char *bootElf = std::getenv("PS2X_BOOT_ELF"); bootElf && bootElf[0] != '\0')
+        {
+            std::cout << "Using PS2X_BOOT_ELF boot path" << std::endl;
+            return std::filesystem::path(bootElf);
+        }
+#endif
 #if defined(PS2X_DEFAULT_BOOT_ELF)
         std::cout << "Using default boot file" << std::endl;
         const std::filesystem::path configuredPath = std::filesystem::path(PS2X_DEFAULT_BOOT_ELF);
@@ -181,6 +194,9 @@ int main(int argc, char *argv[])
 {
 #if defined(__ANDROID__)
     redirectStdioToLogcat();
+#endif
+#if defined(PS2X_IOS)
+    ps2x::ios::prepareEnvironment(argc > 0 ? argv[0] : nullptr);
 #endif
     setupTerminateLogger();
 
@@ -245,6 +261,18 @@ int main(int argc, char *argv[])
             {
                 PS2Runtime::IoPaths ioPaths = PS2Runtime::getIoPaths();
                 ioPaths.cdImage = std::filesystem::path(cdImageEnv);
+                PS2Runtime::setIoPaths(ioPaths);
+            }
+        }
+
+        // I25: writable memory-card root (the iOS bundle is read-only, so the
+        // default <elf dir>/mc0 can't be written there). mc1 is its sibling.
+        if (const char *mcRootEnv = std::getenv("PS2X_MC_ROOT"))
+        {
+            if (mcRootEnv[0] != '\0')
+            {
+                PS2Runtime::IoPaths ioPaths = PS2Runtime::getIoPaths();
+                ioPaths.mcRoot = std::filesystem::path(mcRootEnv);
                 PS2Runtime::setIoPaths(ioPaths);
             }
         }

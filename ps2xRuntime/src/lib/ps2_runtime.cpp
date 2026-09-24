@@ -26,6 +26,9 @@
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
+#if defined(PS2X_IOS)
+#include "ps2_ios_runtime.h"
+#endif
 
 #include <iostream>
 #include <fstream>
@@ -1064,6 +1067,10 @@ bool PS2Runtime::initialize(const char *title)
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+#if defined(PS2X_IOS)
+        ps2x::ios::syncWindowSize();
+        SetTraceLogLevel(LOG_ERROR);
+#endif
         InitAudioDevice();
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
 #endif
@@ -3744,6 +3751,9 @@ void PS2Runtime::run()
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
         UploadFrame(frameTex, this, presentWidth, presentHeight);
 
+#if defined(PS2X_IOS)
+        ps2x::ios::syncWindowSize();
+#endif
         BeginDrawing();
         ClearBackground(BLACK);
         const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));

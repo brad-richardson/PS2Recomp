@@ -10,6 +10,9 @@
      I8: CFBundleName set to the executable name (was empty): devicectl
      install rejects bundles with neither CFBundleName nor
      CFBundleDisplayName (device wall; simctl did not check).
+     I25: landscape only, UILaunchScreen (without it iOS runs the app in
+     legacy screen-size mode), status bar hidden, full screen, and
+     Documents visible in the Files app (for an overriding ps2x.env).
      Referenced from the PS2X_IS_IOS block via MACOSX_BUNDLE_INFO_PLIST. -->
 <plist version="1.0">
 <dict>
@@ -41,6 +44,28 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string></string>
+	<key>CFBundleDisplayName</key>
+	<string>SSX3 PS2X</string>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIRequiresFullScreen</key>
+	<true/>
+	<key>UIStatusBarHidden</key>
+	<true/>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

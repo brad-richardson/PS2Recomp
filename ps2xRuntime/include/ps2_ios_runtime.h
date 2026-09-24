@@ -1,6 +1,6 @@
 #pragma once
 // I25: iOS-only startup and window helpers (implemented in
-// src/lib/ps2_ios_runtime.cpp, compiled only when PS2X_IS_IOS).
+// src/lib/ps2_ios_runtime.mm, compiled only when PS2X_IS_IOS).
 
 namespace ps2x::ios
 {
