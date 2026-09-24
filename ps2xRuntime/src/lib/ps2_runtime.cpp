@@ -115,7 +115,7 @@ namespace
     void applySsx3Widescreen(PS2Runtime &)
     {
         const char *env = std::getenv("PS2X_WIDESCREEN");
-        const uint32_t mode = env && std::strcmp(env, "0") == 0 ? 0u : 2u;
+        const uint32_t mode = ps2x::present::ssx3WidescreenModeFromEnv(env);
         g_ssx3WidescreenMode.store(mode, std::memory_order_relaxed);
         g_ssx3WidescreenActive.store(true, std::memory_order_release);
         std::fprintf(stderr, "[widescreen] SSX3 mode=%u (PS2X_WIDESCREEN=%s)\n",

@@ -39,7 +39,11 @@ void register_ps2_present_geometry_tests()
 
         tc.Run("anamorphic mode and explicit aspect overrides", [](TestCase &t)
                {
+            t.IsTrue(ssx3WidescreenModeFromEnv(nullptr) == 2u, "unset widescreen -> anamorphic");
+            t.IsTrue(ssx3WidescreenModeFromEnv("0") == 0u, "explicit 0 -> 4:3 guest mode");
+            t.IsTrue(ssx3WidescreenModeFromEnv("1") == 2u, "explicit 1 -> anamorphic");
             t.IsTrue(aspectFromEnv(nullptr, true) == Aspect::SixteenNine, "anamorphic -> 16:9");
+            t.IsTrue(aspectFromEnv(nullptr, false) == Aspect::FourThree, "guest mode 0 -> 4:3");
             t.IsTrue(aspectFromEnv("4:3", true) == Aspect::FourThree, "4:3 override");
             t.IsTrue(aspectFromEnv("16:9", false) == Aspect::SixteenNine, "16:9 override");
             t.IsTrue(aspectFromEnv("native", true) == Aspect::Native, "native override");

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string_view>
 
 // I26 (G46 §4): host presentation of the guest frame. A PS2 frame (e.g.
@@ -32,6 +33,11 @@ namespace ps2x::present
     {
         float x, y, w, h;
     };
+
+    inline uint32_t ssx3WidescreenModeFromEnv(const char *value)
+    {
+        return value && std::string_view(value) == "0" ? 0u : 2u;
+    }
 
     inline Aspect aspectFromEnv(const char *value, bool anamorphic = false)
     {
