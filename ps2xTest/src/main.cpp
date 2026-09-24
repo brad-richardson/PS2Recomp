@@ -7,6 +7,7 @@ void register_r5900_decoder_tests();
 void register_elf_analyzer_tests();
 void register_pad_input_tests();
 void register_ps2_env_file_tests();
+void register_ps2_present_fallback_tests();
 void register_ps2_runtime_io_tests();
 void register_ps2_runtime_kernel_tests();
 void register_ps2_runtime_interrupt_tests();
@@ -39,6 +40,7 @@ int main()
     register_elf_analyzer_tests();
     register_pad_input_tests();
     register_ps2_env_file_tests();
+    register_ps2_present_fallback_tests();
     register_ps2_runtime_io_tests();
     register_ps2_runtime_kernel_tests();
     register_ps2_runtime_interrupt_tests();
