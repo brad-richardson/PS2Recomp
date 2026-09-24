@@ -50,6 +50,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_present_fallback_tests.cpp
     src/ps2_virtual_pad_tests.cpp
     src/ps2_env_file_tests.cpp
+    src/ps2_android_env_tests.cpp
     src/ps2_runtime_io_tests.cpp
     src/ps2_runtime_kernel_tests.cpp
     src/ps2_runtime_interrupt_tests.cpp

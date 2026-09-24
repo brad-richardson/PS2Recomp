@@ -4,6 +4,10 @@ plugins {
 
 // Override with: gradlew assembleRelease -Pps2xBootElf=/absolute/path/on/device.elf
 def ps2xBootElf = project.findProperty('ps2xBootElf') ?: '/storage/emulated/0/Android/data/com.ps2x.runner/files/game.elf'
+def ps2xGameCodegenDir = project.findProperty('ps2xGameCodegenDir') ?: ''
+def ps2xGsShadowParallel = project.findProperty('ps2xGsShadowParallel') ?: 'OFF'
+def ps2xParallelGsSourceDir = project.findProperty('ps2xParallelGsSourceDir') ?: ''
+def ps2xJniLibsDir = project.findProperty('ps2xJniLibsDir') ?: ''
 
 android {
     namespace 'com.ps2x.runner'
@@ -26,14 +30,24 @@ android {
                         '-DPS2X_ENABLE_SCCACHE=OFF',
                         '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=32',
                         '-DANDROID_CPP_FEATURES=rtti exceptions',
-                        "-DPS2X_DEFAULT_BOOT_ELF=${ps2xBootElf}"
+                        '-DPS2X_ENABLE_DIAG_TAPS=OFF',
+                        '-DPS2X_ENABLE_RUNTIME_LOGS=OFF',
+                        '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF',
+                        "-DPS2X_DEFAULT_BOOT_ELF=${ps2xBootElf}",
+                        "-DPS2X_GAME_CODEGEN_DIR=${ps2xGameCodegenDir}",
+                        "-DPS2X_GS_SHADOW_PARALLEL=${ps2xGsShadowParallel}",
+                        "-DPS2X_PARALLEL_GS_SOURCE_DIR=${ps2xParallelGsSourceDir}"
                 targets 'ps2EntryRunner'
             }
         }
 
         ndk {
-            abiFilters 'arm64-v8a', 'x86_64'
+            abiFilters 'arm64-v8a'
         }
+    }
+
+    if (ps2xJniLibsDir) {
+        sourceSets.main.jniLibs.srcDirs = [ps2xJniLibsDir]
     }
 
     externalNativeBuild {
