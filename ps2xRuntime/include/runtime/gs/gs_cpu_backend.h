@@ -16,6 +16,22 @@ uint32_t ps2xDeinterlaceSourceLine(uint32_t y, uint32_t height, bool oddField, b
 void ps2xSetDeinterlaceBobForTest(bool bob);
 void ps2xClearDeinterlaceBobForTest();
 
+// GB7B bounded spatial title-glyph candidate probe (default OFF).
+// Replay-only diagnostic: the harness sets the current GIF packet context
+// before each processGIFPacket; DrawPrimitive logs textured/untextured
+// batches whose clipped rect overlaps the title crops. With the probe
+// closed/disabled every hook returns early and rendering is byte-identical.
+struct Gb7bPacketContext
+{
+    uint64_t tick = 0;
+    uint64_t packetIndex = 0;
+    unsigned path = 0;
+};
+void ps2xGb7bProbeOpen(const char *path);
+void ps2xGb7bProbeClose();
+void ps2xGb7bSetPacketContext(uint64_t tick, uint64_t packetIndex, unsigned path);
+bool ps2xGb7bProbeEnabled();
+
 class GSCpuBackend final : public GSRasterBackend
 {
 public:
@@ -47,6 +63,7 @@ private:
     void WriteVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
 
     void DrawPrimitive(const GSPrimitiveBatch &batch);
+    void NoteGb7bCandidate(const GSPrimitiveBatch &batch);
     void DrawSprite(const GSPrimitiveBatch &batch);
     void DrawTriangle(const GSPrimitiveBatch &batch);
     void DrawLine(const GSPrimitiveBatch &batch);

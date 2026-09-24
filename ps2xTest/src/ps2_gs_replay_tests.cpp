@@ -419,6 +419,28 @@ namespace
             }
         }
 
+        // GB7B bounded spatial title-glyph candidate probe (default OFF).
+        // Direct CPU replay only; stops after the marker-700 sample.
+        const char *gb7bOut = std::getenv("PS2X_GS_REPLAY_GB7B_TRACE");
+        const bool gb7bProbe = gb7bOut && *gb7bOut;
+        bool gb7bDone = false;
+        if (gb7bProbe)
+        {
+            if (parallelBackend || queued || gb5Probe || gb5bProbe)
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB7B requires direct CPU replay with no GB5/GB5B probe");
+                return;
+            }
+            ps2xGb7bProbeOpen(gb7bOut);
+            if (!ps2xGb7bProbeEnabled())
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB7B trace could not be opened");
+                return;
+            }
+        }
+
         uint64_t bisectTo = 0u;
         if (const char *value = std::getenv("PS2X_GS_REPLAY_BISECT_TO"))
             bisectTo = std::strtoull(value, nullptr, 10);
@@ -442,6 +464,8 @@ namespace
         std::vector<std::string> rows;
         while (true)
         {
+            if (gb7bDone)
+                break;
             uint32_t length = 0;
             std::vector<uint8_t> rec;
             const long recordOffset = std::ftell(f);
@@ -504,6 +528,8 @@ namespace
                 }
                 gs.noteGifPath(static_cast<GifPathId>(pathId));
                 const bool forceRtz = rtzAll || (rtzPath1 && pathId == 1u);
+                if (gb7bProbe)
+                    ps2xGb7bSetPacketContext(tick, packets, pathId);
                 {
                     ScopedReplayRtz scope(forceRtz);
                     if (!scope.ok)
@@ -750,6 +776,8 @@ namespace
                               static_cast<unsigned long long>(tick), vramHash, privHash(regs),
                               presentHash(frame));
                 rows.emplace_back(row);
+                if (gb7bProbe && tick >= 700u)
+                    gb7bDone = true;
             }
             else if (kind == 5u)
             {
@@ -859,6 +887,12 @@ namespace
         }
         std::fclose(f);
         gs.drainQueue();
+
+        if (gb7bProbe)
+        {
+            ps2xGb7bProbeClose();
+            t.IsTrue(gb7bDone, "GB7B replay reached marker 700");
+        }
 
         if (std::getenv("PS2X_GS_REPLAY_PACKET_TRACE"))
             t.IsTrue(packetTrace.good(), "GB4 packet trace written");

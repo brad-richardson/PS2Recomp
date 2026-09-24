@@ -15,8 +15,107 @@
 #include <optional>
 #include <fstream>
 #include <iostream>
+#include <sstream>
+#include <string>
 
 using namespace GSInternal;
+
+// GB7B bounded spatial title-glyph candidate probe (default OFF).
+// Logs CPU draw batches whose clipped screen rect overlaps the title
+// crops upper (320,120)-(420,205) or lower (340,360)-(430,420).
+// Caps: 20,000 rows, 8 MiB total; rendering is untouched.
+namespace
+{
+struct Gb7bProbeState
+{
+    bool enabled = false;
+    std::ofstream out;
+    Gb7bPacketContext ctx{};
+    uint64_t rows = 0;
+    uint64_t bytes = 0;
+    bool capped = false;
+};
+
+Gb7bProbeState &gb7bState()
+{
+    static Gb7bProbeState s;
+    return s;
+}
+
+constexpr uint64_t kGb7bMaxRows = 20000u;
+constexpr uint64_t kGb7bMaxBytes = 8u * 1024u * 1024u;
+constexpr int kGb7bUpperX0 = 320;
+constexpr int kGb7bUpperY0 = 120;
+constexpr int kGb7bUpperX1 = 420;
+constexpr int kGb7bUpperY1 = 205;
+constexpr int kGb7bLowerX0 = 340;
+constexpr int kGb7bLowerY0 = 360;
+constexpr int kGb7bLowerX1 = 430;
+constexpr int kGb7bLowerY1 = 420;
+
+uint64_t gb7bOverlap(int x0, int y0, int x1, int y1,
+                     int cx0, int cy0, int cx1, int cy1)
+{
+    const int ox0 = std::max(x0, cx0);
+    const int oy0 = std::max(y0, cy0);
+    const int ox1 = std::min(x1, cx1);
+    const int oy1 = std::min(y1, cy1);
+    if (ox1 < ox0 || oy1 < oy0)
+        return 0u;
+    return static_cast<uint64_t>(ox1 - ox0 + 1) *
+           static_cast<uint64_t>(oy1 - oy0 + 1);
+}
+
+uint32_t gb7bFnv(const uint8_t *data, size_t size)
+{
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < size; ++i)
+    {
+        hash ^= data[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+} // namespace
+
+void ps2xGb7bProbeOpen(const char *path)
+{
+    Gb7bProbeState &s = gb7bState();
+    if (s.enabled || !path || !*path)
+        return;
+    s.out.open(path, std::ios::binary | std::ios::trunc);
+    if (!s.out)
+        return;
+    s.out << "tick\tpacket_index\tpath\tprim\ttme\tfst\trect\trect_kind\tcrop\t"
+             "frame\ttex0\tclamp\ttest\talpha\tuv\tsource_fingerprint\t"
+             "classification\treason\n";
+    s.bytes += 118u;
+    s.ctx = Gb7bPacketContext{};
+    s.rows = 0;
+    s.capped = false;
+    s.enabled = s.out.good();
+}
+
+void ps2xGb7bProbeClose()
+{
+    Gb7bProbeState &s = gb7bState();
+    s.enabled = false;
+    if (s.out.is_open())
+        s.out.close();
+}
+
+void ps2xGb7bSetPacketContext(uint64_t tick, uint64_t packetIndex, unsigned path)
+{
+    Gb7bProbeState &s = gb7bState();
+    s.ctx.tick = tick;
+    s.ctx.packetIndex = packetIndex;
+    s.ctx.path = path;
+}
+
+bool ps2xGb7bProbeEnabled()
+{
+    return gb7bState().enabled;
+}
 
 bool ps2xDeinterlaceBobValue(const char *value)
 {
@@ -685,8 +784,220 @@ GSTransferSnapshot GSCpuBackend::GetTransferSnapshot() const
     return result;
 }
 
+void GSCpuBackend::NoteGb7bCandidate(const GSPrimitiveBatch &batch)
+{
+    Gb7bProbeState &s = gb7bState();
+    if (!s.enabled || s.capped)
+        return;
+    const GSDrawState &state = batch.state;
+    const auto &ctx = state.context;
+    if (batch.vertexCount == 0u)
+        return;
+
+    // Clipped screen rect: exact for sprites (mirrors DrawSprite), clamped
+    // vertex bbox otherwise (conservative for triangles/lines/points).
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    const char *rectKind = "bbox";
+    const char *primName = "other";
+    switch (state.prim.type)
+    {
+    case GS_PRIM_SPRITE:
+        primName = "sprite";
+        break;
+    case GS_PRIM_TRIANGLE:
+    case GS_PRIM_TRISTRIP:
+    case GS_PRIM_TRIFAN:
+        primName = "triangle";
+        break;
+    case GS_PRIM_LINE:
+    case GS_PRIM_LINESTRIP:
+        primName = "line";
+        break;
+    default:
+        primName = "point";
+        break;
+    }
+    if (state.prim.type == GS_PRIM_SPRITE && batch.vertexCount >= 2u)
+    {
+        const int ofx = ctx.xyoffset.ofx >> 4;
+        const int ofy = ctx.xyoffset.ofy >> 4;
+        int ax0 = static_cast<int>(batch.vertices[0].x) - ofx;
+        int ay0 = static_cast<int>(batch.vertices[0].y) - ofy;
+        int ax1 = static_cast<int>(batch.vertices[1].x) - ofx;
+        int ay1 = static_cast<int>(batch.vertices[1].y) - ofy;
+        if (ax0 > ax1)
+            std::swap(ax0, ax1);
+        if (ay0 > ay1)
+            std::swap(ay0, ay1);
+        const int spanX = std::max(1, ax1 - ax0);
+        const int spanY = std::max(1, ay1 - ay0);
+        ax1 = ax0 + spanX - 1;
+        ay1 = ay0 + spanY - 1;
+        if (ax1 < ctx.scissor.x0 || ax0 > ctx.scissor.x1 ||
+            ay1 < ctx.scissor.y0 || ay0 > ctx.scissor.y1)
+            return;
+        x0 = clampInt(ax0, ctx.scissor.x0, ctx.scissor.x1);
+        y0 = clampInt(ay0, ctx.scissor.y0, ctx.scissor.y1);
+        x1 = clampInt(ax1, ctx.scissor.x0, ctx.scissor.x1);
+        y1 = clampInt(ay1, ctx.scissor.y0, ctx.scissor.y1);
+        rectKind = "exact";
+    }
+    else
+    {
+        const int ofx = ctx.xyoffset.ofx >> 4;
+        const int ofy = ctx.xyoffset.ofy >> 4;
+        float fx0 = batch.vertices[0].x - static_cast<float>(ofx);
+        float fy0 = batch.vertices[0].y - static_cast<float>(ofy);
+        float fx1 = fx0, fy1 = fy0;
+        for (uint8_t i = 1; i < batch.vertexCount && i < 3u; ++i)
+        {
+            const float fx = batch.vertices[i].x - static_cast<float>(ofx);
+            const float fy = batch.vertices[i].y - static_cast<float>(ofy);
+            fx0 = std::min(fx0, fx);
+            fy0 = std::min(fy0, fy);
+            fx1 = std::max(fx1, fx);
+            fy1 = std::max(fy1, fy);
+        }
+        const int bx0 = static_cast<int>(std::floor(fx0));
+        const int by0 = static_cast<int>(std::floor(fy0));
+        const int bx1 = static_cast<int>(std::ceil(fx1));
+        const int by1 = static_cast<int>(std::ceil(fy1));
+        if (bx1 < ctx.scissor.x0 || bx0 > ctx.scissor.x1 ||
+            by1 < ctx.scissor.y0 || by0 > ctx.scissor.y1)
+            return;
+        x0 = clampInt(bx0, ctx.scissor.x0, ctx.scissor.x1);
+        y0 = clampInt(by0, ctx.scissor.y0, ctx.scissor.y1);
+        x1 = clampInt(bx1, ctx.scissor.x0, ctx.scissor.x1);
+        y1 = clampInt(by1, ctx.scissor.y0, ctx.scissor.y1);
+    }
+
+    const uint64_t upperHit = gb7bOverlap(x0, y0, x1, y1,
+                                          kGb7bUpperX0, kGb7bUpperY0,
+                                          kGb7bUpperX1 - 1, kGb7bUpperY1 - 1);
+    const uint64_t lowerHit = gb7bOverlap(x0, y0, x1, y1,
+                                          kGb7bLowerX0, kGb7bLowerY0,
+                                          kGb7bLowerX1 - 1, kGb7bLowerY1 - 1);
+    if (upperHit == 0u && lowerHit == 0u)
+        return;
+
+    // Bounded source-texel fingerprint at the CPU sample site: up to 4
+    // vertex/centroid samples through SampleTexture (read-only).
+    char fingerprint[64];
+    if (!state.prim.tme)
+    {
+        std::snprintf(fingerprint, sizeof(fingerprint), "none(untextured)");
+    }
+    else
+    {
+        uint32_t samples[4] = {0u, 0u, 0u, 0u};
+        const uint8_t n = batch.vertexCount > 3u ? 3u : batch.vertexCount;
+        for (uint8_t i = 0; i < n; ++i)
+        {
+            const GSVertex &v = batch.vertices[i];
+            if (state.prim.fst)
+                samples[i] = SampleTexture(state, 0.0f, 0.0f, 1.0f, v.u, v.v);
+            else
+                samples[i] = SampleTexture(state, v.s, v.t, v.q, 0u, 0u);
+        }
+        if (n >= 2u)
+        {
+            const GSVertex &a = batch.vertices[0];
+            const GSVertex &b = batch.vertices[1];
+            if (state.prim.fst)
+            {
+                const uint16_t mu = static_cast<uint16_t>((static_cast<uint32_t>(a.u) + b.u) / 2u);
+                const uint16_t mv = static_cast<uint16_t>((static_cast<uint32_t>(a.v) + b.v) / 2u);
+                samples[3] = SampleTexture(state, 0.0f, 0.0f, 1.0f, mu, mv);
+            }
+            else
+            {
+                samples[3] = SampleTexture(state, (a.s + b.s) * 0.5f,
+                                           (a.t + b.t) * 0.5f,
+                                           (a.q + b.q) * 0.5f, 0u, 0u);
+            }
+        }
+        else
+        {
+            samples[3] = samples[0];
+        }
+        const uint32_t fp = gb7bFnv(reinterpret_cast<const uint8_t *>(samples), sizeof(samples));
+        std::snprintf(fingerprint, sizeof(fingerprint), "texel4=%08x", fp);
+    }
+
+    const uint64_t rectArea = static_cast<uint64_t>(x1 - x0 + 1) *
+                              static_cast<uint64_t>(y1 - y0 + 1);
+    const char *classification = "overlap-candidate";
+    const char *reason = "textured batch overlaps a title crop; needs pixel-trace "
+                         "confirmation, overlap alone is not glyph proof";
+    if (!state.prim.tme)
+    {
+        classification = "untextured-overwrite";
+        reason = "untextured batch overlaps a title crop; fade/composite "
+                 "overwrite candidate, not a glyph producer";
+    }
+    else if ((upperHit >= 7650u && rectArea >= 4u * 8500u) ||
+             (lowerHit >= 4860u && rectArea >= 4u * 5400u))
+    {
+        classification = "full-crop-overwrite";
+        reason = "textured batch covers >=90% of an overlapped crop with rect "
+                 "area >=4x the crop; composite/fade candidate, not a proved "
+                 "glyph producer";
+    }
+
+    char line[1024];
+    const int count = std::snprintf(
+        line, sizeof(line),
+        "%llu\t%llu\t%u\t%s\t%u\t%u\t"
+        "(%d,%d)-(%d,%d)\t%s\tupper=%llu;lower=%llu\t"
+        "fbp=%u,fbw=%u,psm=%u\t"
+        "tbp0=%u,tbw=%u,psm=%u,tw=%u,th=%u,tcc=%u,tfx=%u,cbp=%u,cpsm=%u,csm=%u,csa=%u\t"
+        "clamp=0x%llx\ttest=0x%llx\talpha=0x%llx\t"
+        "uv0=(%u,%u);uv1=(%u,%u);stq0=(%g,%g,%g);stq1=(%g,%g,%g)\t%s\t%s\t%s\n",
+        static_cast<unsigned long long>(s.ctx.tick),
+        static_cast<unsigned long long>(s.ctx.packetIndex), s.ctx.path,
+        primName, state.prim.tme ? 1u : 0u, state.prim.fst ? 1u : 0u,
+        x0, y0, x1, y1, rectKind, static_cast<unsigned long long>(upperHit),
+        static_cast<unsigned long long>(lowerHit),
+        ctx.frame.fbp, ctx.frame.fbw, static_cast<unsigned>(ctx.frame.psm),
+        ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.tbw),
+        static_cast<unsigned>(ctx.tex0.psm), static_cast<unsigned>(ctx.tex0.tw),
+        static_cast<unsigned>(ctx.tex0.th), static_cast<unsigned>(ctx.tex0.tcc),
+        static_cast<unsigned>(ctx.tex0.tfx), ctx.tex0.cbp,
+        static_cast<unsigned>(ctx.tex0.cpsm), static_cast<unsigned>(ctx.tex0.csm),
+        static_cast<unsigned>(ctx.tex0.csa),
+        static_cast<unsigned long long>(ctx.clamp),
+        static_cast<unsigned long long>(ctx.test),
+        static_cast<unsigned long long>(ctx.alpha),
+        static_cast<unsigned>(batch.vertices[0].u >> 4),
+        static_cast<unsigned>(batch.vertices[0].v >> 4),
+        batch.vertexCount >= 2u ? static_cast<unsigned>(batch.vertices[1].u >> 4) : 0u,
+        batch.vertexCount >= 2u ? static_cast<unsigned>(batch.vertices[1].v >> 4) : 0u,
+        batch.vertices[0].s, batch.vertices[0].t, batch.vertices[0].q,
+        batch.vertexCount >= 2u ? batch.vertices[1].s : 0.0f,
+        batch.vertexCount >= 2u ? batch.vertices[1].t : 0.0f,
+        batch.vertexCount >= 2u ? batch.vertices[1].q : 1.0f,
+        fingerprint, classification, reason);
+    if (count <= 0 || static_cast<size_t>(count) >= sizeof(line))
+        return;
+    if (s.rows >= kGb7bMaxRows || s.bytes + static_cast<uint64_t>(count) > kGb7bMaxBytes)
+    {
+        s.capped = true;
+        return;
+    }
+    s.out << line;
+    if (!s.out.good())
+    {
+        s.capped = true;
+        return;
+    }
+    ++s.rows;
+    s.bytes += static_cast<uint64_t>(count);
+}
+
 void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
 {
+    if (gb7bState().enabled)
+        NoteGb7bCandidate(batch);
     const GSDrawState &state = batch.state;
     const auto &ctx = state.context;
     PS2_IF_AGRESSIVE_LOGS({
