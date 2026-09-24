@@ -43,6 +43,37 @@ namespace
         return v;
     }
 
+    // N8D7M12 Part 5F4P2: 64-bit FNV-1a helpers with explicit LE field
+    // encoding. Variable-length payloads are length-prefixed (u32 LE)
+    // so concatenations cannot alias.
+    static constexpr uint64_t kPktSeqOffset = 14695981039346656037ull;
+    static constexpr uint64_t kPktSeqPrime = 1099511628211ull;
+
+    static inline void pktSeqMixByte(uint64_t &digest, uint8_t b)
+    {
+        digest ^= static_cast<uint64_t>(b);
+        digest *= kPktSeqPrime;
+    }
+
+    static inline void pktSeqMixU32(uint64_t &digest, uint32_t v)
+    {
+        for (int i = 0; i < 4; ++i)
+            pktSeqMixByte(digest, static_cast<uint8_t>((v >> (i * 8)) & 0xFFu));
+    }
+
+    static inline void pktSeqMixU64(uint64_t &digest, uint64_t v)
+    {
+        for (int i = 0; i < 8; ++i)
+            pktSeqMixByte(digest, static_cast<uint8_t>((v >> (i * 8)) & 0xFFu));
+    }
+
+    static inline void pktSeqMixBytes(uint64_t &digest, const uint8_t *data, size_t size)
+    {
+        pktSeqMixU32(digest, static_cast<uint32_t>(size));
+        for (size_t i = 0; i < size; ++i)
+            pktSeqMixByte(digest, data[i]);
+    }
+
     struct PackedGifPacketTag
     {
         uint64_t lo = 0u;
@@ -180,7 +211,18 @@ void GS::drainQueue()
     if (!m_worker || t_inGsWorker)
         return;
     if (m_worker->isQuiescent())
+    {
+        // N8D7M12 Part 5F4P2: no Fence is enqueued here, so copy the
+        // running digest into the snapshot directly. Queue empty AND
+        // nothing executing (single replay producer) makes this stable.
+        std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+        if (m_pktSeqEnabled)
+        {
+            m_pktSeqSnapshot = m_pktSeqDigest;
+            m_pktSeqSnapshotCommands = m_pktSeqCommands;
+        }
         return; // provable no-op: nothing queued, nothing executing
+    }
     GsCommand cmd;
     cmd.kind = GsCmdKind::Fence;
     cmd.rpc = std::make_shared<GsRpcBase>();
@@ -189,8 +231,113 @@ void GS::drainQueue()
     rpc->wait();
 }
 
+void GS::setPktSeqEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+    m_pktSeqEnabled = enabled;
+    if (enabled)
+    {
+        m_pktSeqDigest = kPktSeqOffset;
+        m_pktSeqCommands = 0u;
+        m_pktSeqSnapshot = kPktSeqOffset;
+        m_pktSeqSnapshotCommands = 0u;
+    }
+    else
+    {
+        m_pktSeqSnapshot = 0u;
+        m_pktSeqSnapshotCommands = 0u;
+    }
+}
+
+bool GS::pktSeqEnabled() const
+{
+    std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+    return m_pktSeqEnabled;
+}
+
+uint64_t GS::pktSeqSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+    return m_pktSeqSnapshot;
+}
+
+uint64_t GS::pktSeqSnapshotCommands() const
+{
+    std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+    return m_pktSeqSnapshotCommands;
+}
+
+void GS::noteConsumedCommand(const GsCommand &cmd)
+{
+    std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+    if (!m_pktSeqEnabled)
+        return;
+    if (cmd.kind == GsCmdKind::Fence)
+    {
+        // Timing-dependent presence: snapshot only, never hashed/counted.
+        m_pktSeqSnapshot = m_pktSeqDigest;
+        m_pktSeqSnapshotCommands = m_pktSeqCommands;
+        return;
+    }
+    uint64_t &d = m_pktSeqDigest;
+    pktSeqMixByte(d, static_cast<uint8_t>(cmd.kind));
+    switch (cmd.kind)
+    {
+    case GsCmdKind::GifPacket:
+        // Consumed path comes from prior NoteGifPath consumption (FIFO),
+        // so read the live field, not the packet itself.
+        pktSeqMixByte(d, static_cast<uint8_t>(m_curGifPath));
+        pktSeqMixBytes(d, cmd.bytes.data(), cmd.bytes.size());
+        break;
+    case GsCmdKind::NoteGifPath:
+        pktSeqMixByte(d, cmd.pathId);
+        break;
+    case GsCmdKind::RegWrite:
+        pktSeqMixByte(d, cmd.regAddr);
+        pktSeqMixU64(d, cmd.regValue);
+        break;
+    case GsCmdKind::UploadImageNative:
+        pktSeqMixU64(d, cmd.setupRegs[0]);
+        pktSeqMixU64(d, cmd.setupRegs[1]);
+        pktSeqMixU64(d, cmd.setupRegs[2]);
+        pktSeqMixU64(d, cmd.setupRegs[3]);
+        pktSeqMixBytes(d, cmd.bytes.data(), cmd.bytes.size());
+        break;
+    case GsCmdKind::NativePacked:
+        pktSeqMixBytes(d, cmd.bytes.data(), cmd.bytes.size());
+        break;
+    case GsCmdKind::ClearCtx:
+        pktSeqMixU32(d, cmd.u32a);
+        pktSeqMixU32(d, cmd.u32b);
+        break;
+    case GsCmdKind::ClearActive:
+        pktSeqMixU32(d, cmd.u32a);
+        break;
+    case GsCmdKind::WriteVram:
+        pktSeqMixU32(d, cmd.u32a);
+        pktSeqMixU32(d, cmd.u32b);
+        pktSeqMixU32(d, cmd.u32c);
+        pktSeqMixU32(d, cmd.u32d);
+        pktSeqMixU32(d, cmd.u32e);
+        pktSeqMixU32(d, static_cast<uint32_t>(cmd.regValue));
+        break;
+    case GsCmdKind::PrivWrite:
+        // Opaque callable: kind tag only (content gap, declared).
+        break;
+    default:
+        // Side RPCs (Consume/ReadVram/RefreshSnapshot/DiagPresent/…)
+        // carry no packet bytes: kind tag only, still counted so the
+        // count stays run-deterministic under the fixed replay script.
+        break;
+    }
+    ++m_pktSeqCommands;
+}
+
 void GS::executeQueuedCommand(GsCommand &cmd)
 {
+    // N8D7M12 Part 5F4P2: hash before the handler runs so a GifPacket
+    // sees the prior-consumed m_curGifPath value.
+    noteConsumedCommand(cmd);
     const GsWorkerScope scope;
     switch (cmd.kind)
     {
