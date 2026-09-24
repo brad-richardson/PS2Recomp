@@ -37,6 +37,12 @@ uint32_t ps2xDeinterlaceSourceLine(uint32_t y, uint32_t height, bool oddField, b
 
 namespace
 {
+    // N8D7M5 executed-operation counters (default OFF).
+    std::atomic<bool> g_n8d7m5Counting{false};
+    std::atomic<uint64_t> g_n8d7m5Draw{0u};
+    std::atomic<uint64_t> g_n8d7m5Transfer{0u};
+    std::atomic<uint64_t> g_n8d7m5Clear{0u};
+
     float fabsQ(float q)
     {
         return (std::fabs(q) > 1.0e-8f) ? q : 1.0f;
@@ -343,6 +349,28 @@ namespace
         const float bottom = static_cast<float>(c01) + (static_cast<float>(c11) - static_cast<float>(c01)) * fx;
         return clampU8(static_cast<int>(std::lround(top + (bottom - top) * fy)));
     }
+}
+
+// N8D7M5 executed-operation counters (default OFF; definitions live here so
+// the counters above stay in the anonymous namespace).
+void ps2xN8D7M5SetCounting(bool enabled)
+{
+    g_n8d7m5Counting.store(enabled, std::memory_order_relaxed);
+    if (enabled)
+    {
+        g_n8d7m5Draw.store(0u, std::memory_order_relaxed);
+        g_n8d7m5Transfer.store(0u, std::memory_order_relaxed);
+        g_n8d7m5Clear.store(0u, std::memory_order_relaxed);
+    }
+}
+
+Ps2xN8D7M5Counts ps2xN8D7M5Counts()
+{
+    Ps2xN8D7M5Counts counts;
+    counts.draw = g_n8d7m5Draw.load(std::memory_order_relaxed);
+    counts.transfer = g_n8d7m5Transfer.load(std::memory_order_relaxed);
+    counts.clear = g_n8d7m5Clear.load(std::memory_order_relaxed);
+    return counts;
 }
 
 namespace
@@ -687,6 +715,8 @@ GSTransferSnapshot GSCpuBackend::GetTransferSnapshot() const
 
 void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
 {
+    if (g_n8d7m5Counting.load(std::memory_order_relaxed))
+        g_n8d7m5Draw.fetch_add(1u, std::memory_order_relaxed);
     const GSDrawState &state = batch.state;
     const auto &ctx = state.context;
     PS2_IF_AGRESSIVE_LOGS({
@@ -1487,6 +1517,8 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!data || sizeBytes == 0u || !m_vram || m_transferState.direction != 0u)
         return;
+    if (g_n8d7m5Counting.load(std::memory_order_relaxed))
+        g_n8d7m5Transfer.fetch_add(1u, std::memory_order_relaxed);
     if (m_transfer.trxreg.rrw == 0u || m_transfer.trxreg.rrh == 0u || m_transferState.totalPixels == 0u)
         return;
 
@@ -1594,6 +1626,8 @@ void GSCpuBackend::PerformLocalToLocalTransfer()
     if (!m_vram)
         return;
 
+    if (g_n8d7m5Counting.load(std::memory_order_relaxed))
+        g_n8d7m5Transfer.fetch_add(1u, std::memory_order_relaxed);
     const uint32_t rrw = m_transfer.trxreg.rrw;
     const uint32_t rrh = m_transfer.trxreg.rrh;
     const uint32_t total = rrw * rrh;
@@ -1716,6 +1750,8 @@ bool GSCpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_vram || context.frame.fbw == 0u)
         return false;
+    if (g_n8d7m5Counting.load(std::memory_order_relaxed))
+        g_n8d7m5Clear.fetch_add(1u, std::memory_order_relaxed);
 
     const uint32_t x0 = context.scissor.x0;
     const uint32_t x1 = std::max<uint32_t>(x0, context.scissor.x1);

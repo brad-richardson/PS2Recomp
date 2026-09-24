@@ -235,6 +235,85 @@ namespace
             packetTrace << "index,tick,path,vram\n";
         }
 
+        // N8D7M5 executed-word provenance (default OFF; CPU-direct replay
+        // only). PS2X_GS_REPLAY_WORDS is a comma list of hex GS-storage byte
+        // addresses (4-aligned, < VRAM size, <= 8). With no worker thread the
+        // kind-1/5/7 calls below execute synchronously, so a before/after
+        // word pair plus the advanced submitCount proves the logged packet
+        // executed the write (see REPORT §1). Queued (parallel) replays must
+        // not use this: processGIFPacket would only enqueue.
+        std::vector<uint32_t> watchAddrs;
+        bool watchValid = true;
+        if (const char *words = std::getenv("PS2X_GS_REPLAY_WORDS"))
+        {
+            if (*words)
+            {
+                const char *cursor = words;
+                while (*cursor && watchValid)
+                {
+                    char *end = nullptr;
+                    const unsigned long value = std::strtoul(cursor, &end, 0);
+                    if (end == cursor || value + 4u > vram.size() || (value & 3u) != 0u ||
+                        watchAddrs.size() >= 8u)
+                    {
+                        watchValid = false;
+                        break;
+                    }
+                    watchAddrs.push_back(static_cast<uint32_t>(value));
+                    if (*end && *end != ',')
+                    {
+                        watchValid = false;
+                        break;
+                    }
+                    cursor = (*end == ',') ? end + 1 : end;
+                }
+            }
+            if (watchValid && !watchAddrs.empty())
+                ps2xN8D7M5SetCounting(true);
+        }
+        if (!watchValid)
+        {
+            std::fclose(f);
+            t.IsTrue(false, "invalid PS2X_GS_REPLAY_WORDS (comma hex bytes, 4-aligned, <VRAM, <=8)");
+            return;
+        }
+        size_t n8d7m5Emitted = 0u, n8d7m5Dropped = 0u;
+        constexpr size_t kN8D7M5LineCap = 4096u;
+        auto snapshotWords = [&](std::vector<uint32_t> &out)
+        {
+            out.clear();
+            for (const uint32_t a : watchAddrs)
+            {
+                uint32_t w = 0u;
+                std::memcpy(&w, vram.data() + a, sizeof(w));
+                out.push_back(w);
+            }
+        };
+        auto emitWordLine = [&](uint64_t idx, uint64_t submit, uint64_t tick,
+                                const char *path, const Ps2xN8D7M5Counts &before,
+                                const Ps2xN8D7M5Counts &after, uint32_t addr,
+                                uint32_t oldW, uint32_t newW)
+        {
+            if (n8d7m5Emitted >= kN8D7M5LineCap)
+            {
+                ++n8d7m5Dropped;
+                return;
+            }
+            ++n8d7m5Emitted;
+            const bool dD = after.draw > before.draw;
+            const bool dT = after.transfer > before.transfer;
+            const bool dC = after.clear > before.clear;
+            char kind[32];
+            std::snprintf(kind, sizeof(kind), "%s%s%s%s%s",
+                          dD ? "draw" : "", (dD && (dT || dC)) ? "+" : "",
+                          dT ? "transfer" : "", (dT && dC) ? "+" : "",
+                          dC ? "clear" : ((!dD && !dT) ? "none" : ""));
+            std::cout << "[n8d7m5] word idx=" << idx << " submit=" << submit
+                      << " tick=" << tick << " path=" << path << " kind=" << kind
+                      << " addr=0x" << std::hex << addr << " old=0x" << oldW
+                      << " new=0x" << newW << std::dec << '\n';
+        };
+
         uint64_t packets = 0u, priv = 0u, transfers = 0u, markers = 0u, roundedPackets = 0u;
         uint64_t readbacks = 0u, clears = 0u;
         bool parseOk = true;
@@ -275,6 +354,13 @@ namespace
                 }
                 gs.noteGifPath(static_cast<GifPathId>(pathId));
                 const bool forceRtz = rtzAll || (rtzPath1 && pathId == 1u);
+                std::vector<uint32_t> n8d7m5Before;
+                Ps2xN8D7M5Counts n8d7m5CountsBefore{};
+                if (!watchAddrs.empty())
+                {
+                    snapshotWords(n8d7m5Before);
+                    n8d7m5CountsBefore = ps2xN8D7M5Counts();
+                }
                 {
                     ScopedReplayRtz scope(forceRtz);
                     if (!scope.ok)
@@ -283,6 +369,21 @@ namespace
                         break;
                     }
                     gs.processGIFPacket(rec.data() + 14, size);
+                }
+                if (!watchAddrs.empty())
+                {
+                    const uint64_t submitAfter = gs.submitCount();
+                    const Ps2xN8D7M5Counts countsAfter = ps2xN8D7M5Counts();
+                    const std::string pathStr = std::to_string(static_cast<unsigned>(pathId));
+                    for (size_t wi = 0u; wi < watchAddrs.size(); ++wi)
+                    {
+                        uint32_t afterW = 0u;
+                        std::memcpy(&afterW, vram.data() + watchAddrs[wi], sizeof(afterW));
+                        if (afterW != n8d7m5Before[wi])
+                            emitWordLine(packets, submitAfter, tick, pathStr.c_str(),
+                                         n8d7m5CountsBefore, countsAfter,
+                                         watchAddrs[wi], n8d7m5Before[wi], afterW);
+                    }
                 }
                 if (forceRtz)
                     ++roundedPackets;
@@ -419,8 +520,29 @@ namespace
                         parseOk = false;
                         break;
                     }
+                    std::vector<uint32_t> n8d7m5Before;
+                    Ps2xN8D7M5Counts n8d7m5CountsBefore{};
+                    if (!watchAddrs.empty())
+                    {
+                        snapshotWords(n8d7m5Before);
+                        n8d7m5CountsBefore = ps2xN8D7M5Counts();
+                    }
                     gs.uploadImageNative(regsIn[0], regsIn[1], regsIn[2], regsIn[3],
                                          rec.data() + 45, size);
+                    if (!watchAddrs.empty())
+                    {
+                        const uint64_t submitAfter = gs.submitCount();
+                        const Ps2xN8D7M5Counts countsAfter = ps2xN8D7M5Counts();
+                        for (size_t wi = 0u; wi < watchAddrs.size(); ++wi)
+                        {
+                            uint32_t afterW = 0u;
+                            std::memcpy(&afterW, vram.data() + watchAddrs[wi], sizeof(afterW));
+                            if (afterW != n8d7m5Before[wi])
+                                emitWordLine(packets, submitAfter, tick, "native",
+                                             n8d7m5CountsBefore, countsAfter,
+                                             watchAddrs[wi], n8d7m5Before[wi], afterW);
+                        }
+                    }
                 }
                 if (rtzAll)
                     ++roundedPackets;
@@ -463,7 +585,28 @@ namespace
                 uint32_t context = 0, rgba = 0;
                 std::memcpy(&context, rec.data() + 9, 4);
                 std::memcpy(&rgba, rec.data() + 13, 4);
+                std::vector<uint32_t> n8d7m5Before;
+                Ps2xN8D7M5Counts n8d7m5CountsBefore{};
+                if (!watchAddrs.empty())
+                {
+                    snapshotWords(n8d7m5Before);
+                    n8d7m5CountsBefore = ps2xN8D7M5Counts();
+                }
                 gs.clearFramebufferContext(context, rgba);
+                if (!watchAddrs.empty())
+                {
+                    const uint64_t submitAfter = gs.submitCount();
+                    const Ps2xN8D7M5Counts countsAfter = ps2xN8D7M5Counts();
+                    for (size_t wi = 0u; wi < watchAddrs.size(); ++wi)
+                    {
+                        uint32_t afterW = 0u;
+                        std::memcpy(&afterW, vram.data() + watchAddrs[wi], sizeof(afterW));
+                        if (afterW != n8d7m5Before[wi])
+                            emitWordLine(clears, submitAfter, tick, "clear",
+                                         n8d7m5CountsBefore, countsAfter,
+                                         watchAddrs[wi], n8d7m5Before[wi], afterW);
+                    }
+                }
                 ++clears;
             }
             else
@@ -474,6 +617,19 @@ namespace
         }
         std::fclose(f);
         gs.drainQueue();
+        if (!watchAddrs.empty())
+        {
+            ps2xN8D7M5SetCounting(false);
+            for (const uint32_t a : watchAddrs)
+            {
+                uint32_t w = 0u;
+                std::memcpy(&w, vram.data() + a, sizeof(w));
+                std::cout << "[n8d7m5] final addr=0x" << std::hex << a
+                          << " word=0x" << w << std::dec << '\n';
+            }
+            if (n8d7m5Dropped > 0u)
+                std::cout << "[n8d7m5] truncated dropped=" << n8d7m5Dropped << '\n';
+        }
 
         if (std::getenv("PS2X_GS_REPLAY_PACKET_TRACE"))
             t.IsTrue(packetTrace.good(), "GB4 packet trace written");

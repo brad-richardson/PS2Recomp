@@ -3,6 +3,7 @@
 #include "runtime/gs/gs_backend.h"
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <vector>
@@ -15,6 +16,21 @@ bool ps2xDeinterlaceBobValue(const char *value);
 uint32_t ps2xDeinterlaceSourceLine(uint32_t y, uint32_t height, bool oddField, bool bob);
 void ps2xSetDeinterlaceBobForTest(bool bob);
 void ps2xClearDeinterlaceBobForTest();
+
+// N8D7M5 (Mac-only test diagnostic, default OFF): counts executed CPU
+// VRAM-write operations by kind at four entry points (draw = DrawPrimitive,
+// transfer = UploadImage/PerformLocalToLocalTransfer, clear =
+// ClearFramebuffer). Counters advance only while enabled; the replay harness
+// enables them when PS2X_GS_REPLAY_WORDS is set and attributes watched-word
+// transitions to the kind(s) that advanced during the executing packet.
+struct Ps2xN8D7M5Counts
+{
+    uint64_t draw = 0u;
+    uint64_t transfer = 0u;
+    uint64_t clear = 0u;
+};
+void ps2xN8D7M5SetCounting(bool enabled);
+Ps2xN8D7M5Counts ps2xN8D7M5Counts();
 
 class GSCpuBackend final : public GSRasterBackend
 {
