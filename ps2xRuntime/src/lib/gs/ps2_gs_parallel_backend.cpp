@@ -246,6 +246,9 @@ public:
         const uint64_t t0 = nowNanos();
         syncPriv();
         ParallelGS::VSyncInfo vsync = {};
+        const char *tileEnv = std::getenv("PS2X_N8D5_TILE_CAPTURE");
+        const bool tileRequested = request.vsyncTick == 2050u && tileEnv && std::strcmp(tileEnv, "1") == 0;
+        vsync.capture_scanout_stages = tileRequested;
         vsync.phase = static_cast<uint32_t>(request.vsyncTick & 1u);
         vsync.dst_layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
         vsync.dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
@@ -274,11 +277,20 @@ public:
 
         const uint64_t r0 = nowNanos();
         auto cmd = m_device->request_command_buffer();
-        const char *tileEnv = std::getenv("PS2X_N8D5_TILE_CAPTURE");
-        const bool tileRequested = request.vsyncTick == 2050u && tileEnv && std::strcmp(tileEnv, "1") == 0;
         Vulkan::BufferHandle tileBuffer;
         Vulkan::ImageHandle controlImage;
         bool tileDispatched = false;
+        struct StageCapture
+        {
+            const char *name;
+            Vulkan::ImageHandle image;
+            Vulkan::BufferHandle counts;
+            uint32_t width = 0, height = 0, tiles = 0;
+        };
+        std::array<StageCapture, 2> stages{{
+            {"circuit1", shot.circuit1, {}},
+            {"pre_deinterlace_merged", shot.pre_deinterlace_merged, {}}
+        }};
         if (tileRequested)
         {
             const uint32_t fbp = static_cast<uint32_t>(m_priv ? (m_priv->dispfb1 & 0x1ffu) : 0u);
@@ -326,6 +338,50 @@ public:
                                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                                  VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
                     tileDispatched = true;
+                    for (auto &stage : stages)
+                    {
+                        if (!stage.image)
+                        {
+                            std::cerr << "[n8d6a] stage=" << stage.name << " ERROR missing-image" << std::endl;
+                            continue;
+                        }
+                        stage.width = stage.image->get_width();
+                        stage.height = stage.image->get_height();
+                        const uint32_t tilesX = stage.width / 16u;
+                        const uint32_t tilesY = stage.height / 16u;
+                        stage.tiles = tilesX * tilesY;
+                        if (!stage.tiles || stage.width > 4096u || stage.height > 4096u)
+                        {
+                            std::cerr << "[n8d6a] stage=" << stage.name << " ERROR dimensions"
+                                      << " width=" << stage.width << " height=" << stage.height << std::endl;
+                            continue;
+                        }
+                        Vulkan::BufferCreateInfo stageInfo = {};
+                        stageInfo.size = (1u + stage.tiles) * sizeof(uint32_t);
+                        stageInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                        stageInfo.domain = Vulkan::BufferDomain::CachedHost;
+                        stage.counts = m_device->create_buffer(stageInfo);
+                        if (!stage.counts)
+                        {
+                            std::cerr << "[n8d6a] stage=" << stage.name << " ERROR buffer" << std::endl;
+                            continue;
+                        }
+                        const Dimensions stageDims{stage.width, stage.height};
+                        cmd->image_barrier(*stage.image, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+                                           VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+                                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                                           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                           VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+                        cmd->set_program(program);
+                        cmd->set_texture(0, 0, stage.image->get_view(), Vulkan::StockSampler::NearestClamp);
+                        cmd->set_texture(0, 1, controlImage->get_view(), Vulkan::StockSampler::NearestClamp);
+                        cmd->set_storage_buffer(0, 2, *stage.counts);
+                        cmd->push_constants(&stageDims, 0, sizeof(stageDims));
+                        cmd->dispatch((1u + stage.tiles + 31u) / 32u, 1, 1);
+                        cmd->barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                     VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+                    }
                 }
                 else
                     std::cerr << "[n8d5b] control=ERROR resource-or-program" << std::endl;
@@ -350,6 +406,30 @@ public:
         m_device->submit(cmd);
         m_device->wait_idle();
         if (tileDispatched)
+            for (const auto &stage : stages)
+            {
+                if (!stage.counts)
+                    continue;
+                const auto *counts = static_cast<const uint32_t *>(
+                    m_device->map_host_buffer(*stage.counts, Vulkan::MEMORY_ACCESS_READ_BIT));
+                if (!counts)
+                {
+                    std::cerr << "[n8d6a] stage=" << stage.name << " ERROR map" << std::endl;
+                    continue;
+                }
+                uint64_t occupied = 0;
+                uint32_t active = 0;
+                for (uint32_t i = 1; i <= stage.tiles; ++i)
+                {
+                    occupied += counts[i];
+                    active += counts[i] >= 32u;
+                }
+                std::cerr << "[n8d6a] stage=" << stage.name
+                          << " width=" << stage.width << " height=" << stage.height
+                          << " tiles=" << stage.tiles << " occupied=" << occupied
+                          << " active=" << active << " control=" << counts[0] << std::endl;
+            }
+        if (tileDispatched)
         {
             const auto *counts = static_cast<const uint32_t *>(
                 m_device->map_host_buffer(*tileBuffer, Vulkan::MEMORY_ACCESS_READ_BIT));
@@ -372,6 +452,9 @@ public:
                 if (counts[0] == 128u)
                     std::cerr << "[n8d5b] sampled_summary tiles=896 occupied=" << sampledOccupied
                               << " active=" << sampledActive << std::endl;
+                std::cerr << "[n8d6a] stage=final width=" << w << " height=" << h
+                          << " tiles=896 occupied=" << sampledOccupied
+                          << " active=" << sampledActive << " control=" << counts[0] << std::endl;
             }
         }
         const uint8_t *px = static_cast<const uint8_t *>(
