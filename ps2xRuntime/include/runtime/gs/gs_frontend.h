@@ -320,11 +320,17 @@ private:
     std::atomic<uint64_t> m_privWriteCount{0};
     std::atomic<bool> m_rawGifBackend{false};
     // N8D7M12 Part 5F4P2: worker-consumption packet-sequence fingerprint.
-    // Guarded by m_pktSeqMutex (worker writes, replay thread reads after
-    // drain). Running digest starts at the FNV-64 offset; snapshot is 0
-    // while disabled.
+    // Running digest starts at the FNV-64 offset; snapshot is 0
+    // while disabled. N8D7M12 Part 5F4P3: m_pktSeqEnabled is atomic so
+    // the default-off per-command path takes only a relaxed fast check
+    // and never acquires m_pktSeqMutex while disabled. When the flag
+    // reads true the worker locks and re-checks under the mutex (toggle
+    // race), then updates digest/count exactly as before. The setter
+    // locks for race-safety; the replay sets the flag before worker
+    // start (happens-before). Digest/snapshot/commands stay guarded
+    // by m_pktSeqMutex.
     mutable std::mutex m_pktSeqMutex;
-    bool m_pktSeqEnabled = false;
+    std::atomic<bool> m_pktSeqEnabled{false};
     uint64_t m_pktSeqDigest = 14695981039346656037ull;
     uint64_t m_pktSeqCommands = 0u;
     uint64_t m_pktSeqSnapshot = 0u;

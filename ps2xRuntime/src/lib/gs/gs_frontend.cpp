@@ -215,12 +215,15 @@ void GS::drainQueue()
         // N8D7M12 Part 5F4P2: no Fence is enqueued here, so copy the
         // running digest into the snapshot directly. Queue empty AND
         // nothing executing (single replay producer) makes this stable.
+        // N8D7M12 Part 5F4P3: relaxed fast check first so default-off
+        // drains never acquire the mutex; re-check under lock for races.
+        if (!m_pktSeqEnabled.load(std::memory_order_relaxed))
+            return; // provable no-op: nothing queued, nothing executing
         std::lock_guard<std::mutex> lock(m_pktSeqMutex);
-        if (m_pktSeqEnabled)
-        {
-            m_pktSeqSnapshot = m_pktSeqDigest;
-            m_pktSeqSnapshotCommands = m_pktSeqCommands;
-        }
+        if (!m_pktSeqEnabled.load(std::memory_order_relaxed))
+            return;
+        m_pktSeqSnapshot = m_pktSeqDigest;
+        m_pktSeqSnapshotCommands = m_pktSeqCommands;
         return; // provable no-op: nothing queued, nothing executing
     }
     GsCommand cmd;
@@ -233,8 +236,10 @@ void GS::drainQueue()
 
 void GS::setPktSeqEnabled(bool enabled)
 {
+    // N8D7M12 Part 5F4P3: locked for race-safety; the relaxed store
+    // publishes the flag for the per-command fast check.
     std::lock_guard<std::mutex> lock(m_pktSeqMutex);
-    m_pktSeqEnabled = enabled;
+    m_pktSeqEnabled.store(enabled, std::memory_order_relaxed);
     if (enabled)
     {
         m_pktSeqDigest = kPktSeqOffset;
@@ -251,8 +256,8 @@ void GS::setPktSeqEnabled(bool enabled)
 
 bool GS::pktSeqEnabled() const
 {
-    std::lock_guard<std::mutex> lock(m_pktSeqMutex);
-    return m_pktSeqEnabled;
+    // N8D7M12 Part 5F4P3: race-safe relaxed load, no mutex needed.
+    return m_pktSeqEnabled.load(std::memory_order_relaxed);
 }
 
 uint64_t GS::pktSeqSnapshot() const
@@ -269,8 +274,14 @@ uint64_t GS::pktSeqSnapshotCommands() const
 
 void GS::noteConsumedCommand(const GsCommand &cmd)
 {
+    // N8D7M12 Part 5F4P3: default-off fast path. Relaxed load before
+    // the mutex, so OFF never acquires m_pktSeqMutex per command.
+    // Guarded re-check under lock covers a concurrent toggle; ON then
+    // updates digest/count exactly as before.
+    if (!m_pktSeqEnabled.load(std::memory_order_relaxed))
+        return;
     std::lock_guard<std::mutex> lock(m_pktSeqMutex);
-    if (!m_pktSeqEnabled)
+    if (!m_pktSeqEnabled.load(std::memory_order_relaxed))
         return;
     if (cmd.kind == GsCmdKind::Fence)
     {
@@ -336,7 +347,8 @@ void GS::noteConsumedCommand(const GsCommand &cmd)
 void GS::executeQueuedCommand(GsCommand &cmd)
 {
     // N8D7M12 Part 5F4P2: hash before the handler runs so a GifPacket
-    // sees the prior-consumed m_curGifPath value.
+    // sees the prior-consumed m_curGifPath value. N8D7M12 Part 5F4P3:
+    // noteConsumedCommand fast-returns while disabled without locking.
     noteConsumedCommand(cmd);
     const GsWorkerScope scope;
     switch (cmd.kind)
