@@ -184,7 +184,11 @@ namespace
 }
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
-    : m_runtime(runtime)
+    : m_runtime(runtime),
+      m_cycleOnlyEvents([] {
+          const char *flag = std::getenv("PS2X_DETERMINISTIC");
+          return flag != nullptr && std::strcmp(flag, "1") == 0;
+      }())
 {
 }
 
@@ -2558,6 +2562,21 @@ void EeScheduler::processDueDeadlines()
         std::chrono::steady_clock::time_point pacingDeadline{};
         {
             std::unique_lock lock(m_eventMutex);
+            if (m_cycleOnlyEvents)
+            {
+                // Take the whole cycle-due set before considering host time.
+                // Host deadlines cannot split a batch or change its order.
+                auto firstFuture = std::partition(m_deadlines.begin(), m_deadlines.end(),
+                                                  [this](const ScheduledEvent &item)
+                                                  { return item.deadlineCycle <= m_eeCycle; });
+                due.insert(due.end(),
+                           std::make_move_iterator(m_deadlines.begin()),
+                           std::make_move_iterator(firstFuture));
+                m_deadlines.erase(m_deadlines.begin(), firstFuture);
+                updateNextDeadline();
+            }
+            else
+            {
             const auto now = std::chrono::steady_clock::now();
             for (const ScheduledEvent &item : m_deadlines)
             {
@@ -2597,6 +2616,7 @@ void EeScheduler::processDueDeadlines()
                        std::make_move_iterator(firstFuture));
             m_deadlines.erase(m_deadlines.begin(), firstFuture);
             updateNextDeadline();
+            }
         }
 
         std::sort(due.begin(), due.end(), [](const ScheduledEvent &left, const ScheduledEvent &right)
@@ -2880,9 +2900,11 @@ void EeScheduler::waitForEvent()
     if (hasTimerDeadline)
     {
         const auto timerHostDeadline = std::chrono::steady_clock::now() + eeCyclesToHostDuration(timerCycles);
-        if (timerHostDeadline < hostDeadline)
+        const uint64_t timerCycle = m_eeCycle + timerCycles;
+        if (m_cycleOnlyEvents ? (m_deadlines.empty() || timerCycle < deadlineCycle)
+                              : (timerHostDeadline < hostDeadline))
         {
-            deadlineCycle = m_eeCycle + timerCycles;
+            deadlineCycle = timerCycle;
             hostDeadline = timerHostDeadline;
         }
     }

@@ -11,6 +11,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -18,9 +19,41 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 using namespace ps2_syscalls;
+
+// Narrow fixture access: inject records, then exercise the scheduler's real
+// due-batch and idle-wait paths. No production test mode is involved.
+struct EeSchedulerTestAccess
+{
+    using Clock = std::chrono::steady_clock;
+
+    static bool cycleOnly(const EeScheduler &ee) { return ee.m_cycleOnlyEvents; }
+    static void clearDeadlines(EeScheduler &ee)
+    {
+        ee.m_deadlines.clear();
+        ee.updateNextDeadline();
+    }
+    static void addAlarm(EeScheduler &ee, uint64_t cycle, Clock::time_point hostDeadline,
+                         uint32_t id, uint32_t handler)
+    {
+        ee.m_alarms.emplace(static_cast<int>(id), EeAlarm{static_cast<int>(id), 1u, handler, 0u, 0u, 0u});
+        ee.scheduleEvent(cycle, hostDeadline, EeEvent{EeEventType::Alarm, id, 0u});
+    }
+    static void due(EeScheduler &ee) { ee.processDueDeadlines(); }
+    static void idle(EeScheduler &ee) { ee.waitForEvent(); }
+    static void pending(EeScheduler &ee) { ee.processPendingEvents(); }
+    static uint64_t cycle(const EeScheduler &ee) { return ee.m_eeCycle; }
+    static std::vector<uint32_t> queuedPcs(const EeScheduler &ee)
+    {
+        std::vector<uint32_t> pcs;
+        for (const GuestInvocation &invocation : ee.m_pendingInvocations)
+            pcs.push_back(invocation.context.pc);
+        return pcs;
+    }
+};
 
 namespace ps2_syscalls
 {
@@ -697,6 +730,94 @@ void register_ps2_runtime_kernel_tests()
             checkHost("other flag");
             t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "1"), "restore deterministic mode");
             checkFixed("fixed call after host-local calls");
+        });
+
+        tc.Run("cycle-only scheduler parses the exact flag once per instance", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            for (const char *flag : std::array<const char *, 5>{nullptr, "", "0", "yes", "1"})
+            {
+                t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", flag), "set scheduler flag");
+                TestEnv env;
+                t.Equals(EeSchedulerTestAccess::cycleOnly(env.runtime.eeScheduler()),
+                         flag != nullptr && std::strcmp(flag, "1") == 0, "exact scheduler flag");
+                t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "0"), "change flag after construction");
+                t.Equals(EeSchedulerTestAccess::cycleOnly(env.runtime.eeScheduler()),
+                         flag != nullptr && std::strcmp(flag, "1") == 0, "mode remains instance-local");
+            }
+        });
+
+        tc.Run("cycle-only due batches ignore reversed host deadlines", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "1"), "enable cycle-only mode");
+            const auto now = EeSchedulerTestAccess::Clock::now();
+            const auto earlyHost = now - std::chrono::seconds(1);
+            const auto lateHost = now + std::chrono::hours(1);
+            const auto runPair = [&](uint64_t firstCycle, uint64_t secondCycle,
+                                     const std::vector<uint32_t> &expected) {
+                TestEnv env;
+                EeScheduler &ee = env.runtime.eeScheduler();
+                ee.reset(env.rdram.data(), env.ctx);
+                EeSchedulerTestAccess::clearDeadlines(ee);
+                EeSchedulerTestAccess::addAlarm(ee, firstCycle, lateHost, 1u, 0x1100u);
+                EeSchedulerTestAccess::addAlarm(ee, secondCycle, earlyHost, 2u, 0x1200u);
+                ee.accountCycles(120u);
+                EeSchedulerTestAccess::due(ee);
+                t.IsTrue(EeSchedulerTestAccess::queuedPcs(ee) == expected,
+                         "real dispatch uses cycle then alarm ID, not host deadline");
+            };
+            runPair(100u, 100u, {0x1100u, 0x1200u});
+            runPair(100u, 110u, {0x1100u, 0x1200u});
+        });
+
+        tc.Run("idle scheduler picks timer by cycle and preserves event equality", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            constexpr uint32_t alarmPc = 0x1100u;
+            constexpr uint32_t timerPc = 0x1300u;
+            const auto run = [&](const char *flag, uint32_t timerCycle) {
+                setClockEnv("PS2X_DETERMINISTIC", flag);
+                TestEnv env;
+                env.runtime.registerFunction(timerPc, [](uint8_t *, R5900Context *, PS2Runtime *) {});
+                EeScheduler &ee = env.runtime.eeScheduler();
+                ee.reset(env.rdram.data(), env.ctx);
+                EeSchedulerTestAccess::clearDeadlines(ee);
+                // EE timer 0 runs at half the EE clock: compare 40/50 ticks
+                // produces an interrupt at guest cycle 80/100.
+                env.runtime.memory().write32(0x10000020u, timerCycle / 2u);
+                env.runtime.memory().write32(0x10000010u, 0x180u);
+                ee.addIrqHandler(false, 9u, timerPc, true, 0u, 0u, 0u);
+                EeSchedulerTestAccess::addAlarm(ee, 100u,
+                    EeSchedulerTestAccess::Clock::now() - std::chrono::seconds(1), 1u, alarmPc);
+                EeSchedulerTestAccess::idle(ee);
+                const uint64_t firstCycle = EeSchedulerTestAccess::cycle(ee);
+                EeSchedulerTestAccess::pending(ee);
+                const auto firstPcs = EeSchedulerTestAccess::queuedPcs(ee);
+                if (firstCycle < 100u)
+                {
+                    EeSchedulerTestAccess::idle(ee);
+                    EeSchedulerTestAccess::pending(ee);
+                }
+                return std::tuple<uint64_t, std::vector<uint32_t>, std::vector<uint32_t>>{
+                    firstCycle, firstPcs, EeSchedulerTestAccess::queuedPcs(ee)};
+            };
+            const auto [timerFirstCycle, timerFirstPcs, timerThenAlarm] = run("1", 80u);
+            t.Equals(timerFirstCycle, uint64_t{80u}, "timer wins at cycle 80");
+            t.IsTrue(timerFirstPcs == std::vector<uint32_t>{timerPc}, "timer IRQ queued first");
+            t.IsTrue(timerThenAlarm == std::vector<uint32_t>{timerPc, alarmPc}, "alarm follows at cycle 100");
+
+            const auto [equalCycle, equalFirstPcs, equalAll] = run("1", 100u);
+            t.Equals(equalCycle, uint64_t{100u}, "equal timer and alarm target cycle 100");
+            t.IsTrue(equalFirstPcs == std::vector<uint32_t>{alarmPc, timerPc},
+                     "scheduled event precedes equal-cycle timer IRQ");
+            t.IsTrue(equalAll == equalFirstPcs, "equal-cycle dispatch completes in one pass");
+
+            const auto [legacyCycle, legacyFirstPcs, legacyAll] = run("0", 80u);
+            t.Equals(legacyCycle, uint64_t{100u}, "default host deadline chooses later guest event");
+            t.IsTrue(legacyFirstPcs == std::vector<uint32_t>{alarmPc, timerPc},
+                     "legacy dispatch order follows host-selected target");
+            t.IsTrue(legacyAll == legacyFirstPcs, "legacy dispatch completes in one pass");
         });
 
         tc.Run("CreateThread and CreateSema decode the exact PS2SDK EE layouts", [](TestCase &t)

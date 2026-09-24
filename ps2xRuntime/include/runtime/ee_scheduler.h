@@ -253,6 +253,7 @@ struct EeThreadCreateParams
 
 class EeScheduler
 {
+    friend struct EeSchedulerTestAccess;
 public:
     static constexpr int kMainThreadId = 1;
     static constexpr int kFirstThreadId = 2;
@@ -399,6 +400,9 @@ private:
     void copyMainContextToRuntime();
 
     PS2Runtime &m_runtime;
+    // ExternalWake carries no guest-cycle timestamp and is outside this
+    // scheduled-event ordering guarantee.
+    const bool m_cycleOnlyEvents;
     uint8_t *m_rdram = nullptr;
     std::array<std::deque<int>, kPriorityCount> m_readyQueues{};
     std::unordered_map<int, GuestThread> m_threads;
