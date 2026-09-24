@@ -302,7 +302,12 @@ public:
                 tileInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
                 tileInfo.domain = Vulkan::BufferDomain::CachedHost;
                 tileBuffer = m_device->create_buffer(tileInfo);
-                auto *program = m_device->request_program(n8d5_tile_spirv, sizeof(n8d5_tile_spirv));
+                Vulkan::ResourceLayout layout = {};
+                layout.sets[0].sampled_image_mask = 0x3u;
+                layout.sets[0].fp_mask = 0x3u;
+                layout.sets[0].storage_buffer_mask = 0x4u;
+                layout.push_constant_size = 8u;
+                auto *program = m_device->request_program(n8d5_tile_spirv, sizeof(n8d5_tile_spirv), &layout);
                 if (controlImage && tileBuffer && program)
                 {
                     struct Dimensions { uint32_t width, height; } dims{w, h};
