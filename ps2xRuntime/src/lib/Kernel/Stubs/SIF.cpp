@@ -479,7 +479,8 @@ namespace ps2_stubs
     {
         const uint32_t cid = getRegU32(ctx, 4);
         const uint32_t handler = getRegU32(ctx, 5);
-        ps2_snd_spike::noteAddCmdHandler(cid, handler, getRegU32(ctx, 6), getRegU32(ctx, 28)); // AU2
+        if (ps2_snd_spike::noteAddCmdHandler(cid, handler, getRegU32(ctx, 6), getRegU32(ctx, 28)) && runtime)
+            runtime->eeScheduler().startSoundClock();
         std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
         g_sifCmdHandlers[cid] = handler;
         setReturnS32(ctx, 0);
