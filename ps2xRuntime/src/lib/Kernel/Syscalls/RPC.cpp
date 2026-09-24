@@ -721,6 +721,8 @@ namespace ps2_syscalls
                 fillRpcDebugPreview(rdram, sendBuf, sendSize, event.sendPreview, event.sendPreviewSize);
                 fillRpcDebugPreview(rdram, receiveBuffer, receiveSize, event.recvPreview, event.recvPreviewSize);
                 event.result = 0;
+                if (!handled && runtime)
+                    runtime->noteUnhandledRpc(sid, rpcNum);
 #if PS2X_ENABLE_IOP_RPC_TRACE
                 if ((event.flags & kSifRpcDebugFlagUnhandled) != 0u)
                 {

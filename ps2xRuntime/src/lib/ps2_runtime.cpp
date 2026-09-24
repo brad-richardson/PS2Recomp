@@ -433,6 +433,35 @@ void dumpPresentationFrame(const uint8_t *rgba,
     {
         return;
     }
+    // Gate captures can request three bounded snapshots without encoding a
+    // PNG on every present. Each target accepts the first frame within the
+    // following two guest seconds, since present and vsync can be out of phase.
+    static const std::array<uint64_t, 3> selectedTicks = [] {
+        std::array<uint64_t, 3> ticks{};
+        if (const char *env = std::getenv("PS2X_FRAME_DUMP_ONCE_TICKS"))
+        {
+            unsigned long long a = 0, b = 0, c = 0;
+            if (std::sscanf(env, "%llu,%llu,%llu", &a, &b, &c) == 3)
+                ticks = {static_cast<uint64_t>(a), static_cast<uint64_t>(b), static_cast<uint64_t>(c)};
+        }
+        return ticks;
+    }();
+    if (selectedTicks[0] != 0u)
+    {
+        static std::array<bool, 3> captured{};
+        bool selected = false;
+        for (size_t i = 0; i < selectedTicks.size(); ++i)
+        {
+            if (!captured[i] && tick >= selectedTicks[i] && tick < selectedTicks[i] + 120u)
+            {
+                captured[i] = true;
+                selected = true;
+                break;
+            }
+        }
+        if (!selected)
+            return;
+    }
     static uint64_t s_dumpSeq = 0u;
     const uint64_t seq = s_dumpSeq++;
     std::error_code ec;
@@ -612,6 +641,23 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
 
 PS2Runtime::PS2Runtime()
 {
+#ifndef NDEBUG
+    MissingFunctionPolicy defaultPolicy = MissingFunctionPolicy::Stop;
+#else
+    MissingFunctionPolicy defaultPolicy = MissingFunctionPolicy::ContinueToTarget;
+#endif
+    if (const char *env = std::getenv("PS2X_MISSING_FUNCTION_POLICY"))
+    {
+        if (std::strcmp(env, "stop") == 0)
+            defaultPolicy = MissingFunctionPolicy::Stop;
+        else if (std::strcmp(env, "continue") == 0)
+            defaultPolicy = MissingFunctionPolicy::ContinueToTarget;
+        else
+            std::cerr << "[missing-function] invalid policy '" << env
+                      << "' (expected stop|continue); using build default" << std::endl;
+    }
+    m_missingFunctionPolicy.store(static_cast<uint32_t>(defaultPolicy), std::memory_order_relaxed);
+    m_abortOnMissingFunction = defaultPolicy == MissingFunctionPolicy::Stop;
     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
     m_eeScheduler = std::make_unique<EeScheduler>(*this);
@@ -669,6 +715,7 @@ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
 
 PS2Runtime::~PS2Runtime()
 {
+    printMissingFunctionCounts();
     try
     {
         requestStop();
@@ -1536,6 +1583,38 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 void PS2Runtime::setMissingFunctionPolicy(MissingFunctionPolicy policy)
 {
     m_missingFunctionPolicy.store(static_cast<uint32_t>(policy), std::memory_order_release);
+    // Programmatic policies are used by callers that handle a stopped dispatch.
+    m_abortOnMissingFunction = false;
+}
+
+void PS2Runtime::noteUnknownSyscall(uint32_t id)
+{
+    std::lock_guard<std::mutex> lock(m_coverageMutex);
+    ++m_unknownSyscallCounts[id];
+}
+
+void PS2Runtime::noteUnhandledRpc(uint32_t sid, uint32_t function)
+{
+    std::lock_guard<std::mutex> lock(m_coverageMutex);
+    ++m_unhandledRpcCounts[(static_cast<uint64_t>(sid) << 32u) | function];
+}
+
+void PS2Runtime::printMissingFunctionCounts() const
+{
+    std::lock_guard<std::mutex> lock(m_coverageMutex);
+    std::cerr << "[coverage:missing-functions] targets=" << m_missingFunctionCounts.size() << std::endl;
+    for (const auto &[target, count] : m_missingFunctionCounts)
+        std::cerr << "[coverage:missing-function] target=0x" << std::hex << target
+                  << std::dec << " hits=" << count << std::endl;
+    std::cerr << "[coverage:unknown-syscalls] ids=" << m_unknownSyscallCounts.size() << std::endl;
+    for (const auto &[id, count] : m_unknownSyscallCounts)
+        std::cerr << "[coverage:unknown-syscall] id=0x" << std::hex << id
+                  << std::dec << " hits=" << count << std::endl;
+    std::cerr << "[coverage:unhandled-rpcs] pairs=" << m_unhandledRpcCounts.size() << std::endl;
+    for (const auto &[key, count] : m_unhandledRpcCounts)
+        std::cerr << "[coverage:unhandled-rpc] sid=0x" << std::hex << (key >> 32u)
+                  << " function=0x" << static_cast<uint32_t>(key)
+                  << std::dec << " hits=" << count << std::endl;
 }
 
 PS2Runtime::MissingFunctionPolicy PS2Runtime::missingFunctionPolicy() const
@@ -1741,8 +1820,12 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
             getRegU32(ctx,29), getRegU32(ctx,31),
             g_diagWatchThreadId.load(std::memory_order_relaxed));
     const MissingFunctionPolicy policy = missingFunctionPolicy();
+    {
+        std::lock_guard<std::mutex> lock(m_coverageMutex);
+        ++m_missingFunctionCounts[targetPc];
+    }
     const bool firstReport = !m_missingFunctionReported.exchange(true, std::memory_order_acq_rel);
-    const bool shouldPrint = firstReport || diagReportAll();
+    const bool shouldPrint = policy == MissingFunctionPolicy::Stop || firstReport || diagReportAll();
 
     const uint32_t pc = ctx->pc;
     const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
@@ -1888,6 +1971,11 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
 
     if (policy == MissingFunctionPolicy::Stop)
     {
+        if (m_abortOnMissingFunction)
+        {
+            printMissingFunctionCounts();
+            std::abort();
+        }
         requestStop();
     }
 }

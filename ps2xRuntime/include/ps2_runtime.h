@@ -367,6 +367,9 @@ public:
     MissingFunctionPolicy missingFunctionPolicy() const;
     void resetMissingFunctionReportOnce();
     std::string formatDispatchHistory() const;
+    void noteUnknownSyscall(uint32_t id);
+    void noteUnhandledRpc(uint32_t sid, uint32_t function);
+    void printMissingFunctionCounts() const;
 
     static const IoPaths &getIoPaths();
     static void setIoPaths(const IoPaths &paths);
@@ -527,7 +530,12 @@ private:
     uint32_t m_asyncCallbackStackTop = 0x00100000u;
 
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
+    bool m_abortOnMissingFunction = false;
     std::atomic<bool> m_missingFunctionReported{false};
+    mutable std::mutex m_coverageMutex;
+    std::unordered_map<uint32_t, uint64_t> m_missingFunctionCounts;
+    std::unordered_map<uint32_t, uint64_t> m_unknownSyscallCounts;
+    std::unordered_map<uint64_t, uint64_t> m_unhandledRpcCounts;
     std::atomic<bool> m_stopRequested{false};
     DebugUiCallback m_debugUiInitCallback = nullptr;
     DebugUiCallback m_debugUiDrawCallback = nullptr;

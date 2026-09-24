@@ -284,6 +284,96 @@ namespace ps2recomp
             return name.rfind("entry_", 0) == 0;
         }
 
+        struct InteriorStartStats
+        {
+            size_t prologues = 0;
+            size_t prologuesRejected = 0;
+            size_t referencedLeaves = 0;
+            size_t added = 0;
+            size_t alreadyPresent = 0;
+        };
+
+        InteriorStartStats discoverInteriorFunctionStarts(
+            const std::vector<Function> &functions,
+            const std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
+            const std::vector<Section> &sections,
+            std::unordered_map<uint32_t, std::vector<uint32_t>> &resumeEntries)
+        {
+            std::unordered_set<uint32_t> dataReferences;
+            for (const Section &section : sections)
+            {
+                if (!section.isData || section.isCode || !section.data || section.size < 4u)
+                    continue;
+                for (uint32_t offset = 0; offset <= section.size - 4u; offset += 4u)
+                {
+                    uint32_t value = 0;
+                    std::memcpy(&value, section.data + offset, sizeof(value));
+                    if ((value & 7u) == 0u)
+                        dataReferences.insert(value);
+                }
+            }
+
+            InteriorStartStats stats;
+            for (const Function &function : functions)
+            {
+                if (!function.isRecompiled || function.isStub || function.isSkipped ||
+                    isEntryFunctionName(function.name))
+                    continue;
+                const auto decodedIt = decodedFunctions.find(function.start);
+                if (decodedIt == decodedFunctions.end())
+                    continue;
+                const auto &instructions = decodedIt->second;
+                auto &entries = resumeEntries[function.start];
+                for (size_t i = 2; i < instructions.size(); ++i)
+                {
+                    const Instruction &inst = instructions[i];
+                    if (inst.address <= function.start || inst.address >= function.end)
+                        continue;
+
+                    const bool prologue = inst.opcode == OPCODE_ADDIU &&
+                        inst.rs == 29u && inst.rt == 29u &&
+                        static_cast<int16_t>(inst.raw & 0xffffu) < 0;
+                    if (prologue)
+                        ++stats.prologues;
+
+                    // A return's delay instruction belongs to the preceding body.
+                    // Permit at most two NOP padding words after that slot.
+                    bool followsReturn = false;
+                    for (size_t padding = 0; padding <= 2 && i >= padding + 2; ++padding)
+                    {
+                        const size_t ret = i - padding - 2;
+                        if (instructions[ret].address + 4u * (padding + 2u) != inst.address ||
+                            instructions[ret].raw != 0x03e00008u)
+                            continue;
+                        bool nopPadding = true;
+                        for (size_t j = ret + 2; j < i; ++j)
+                            nopPadding &= instructions[j].raw == 0u;
+                        if (nopPadding)
+                        {
+                            followsReturn = true;
+                            break;
+                        }
+                    }
+                    if (prologue && !followsReturn)
+                        ++stats.prologuesRejected;
+                    const bool referencedLeaf = (inst.address & 7u) == 0u &&
+                        dataReferences.contains(inst.address) && followsReturn;
+                    if (referencedLeaf && !prologue)
+                        ++stats.referencedLeaves;
+                    if (!(followsReturn && (prologue || referencedLeaf)))
+                        continue;
+                    if (std::find(entries.begin(), entries.end(), inst.address) != entries.end())
+                        ++stats.alreadyPresent;
+                    else
+                    {
+                        entries.push_back(inst.address);
+                        ++stats.added;
+                    }
+                }
+            }
+            return stats;
+        }
+
         EntryDiscoveryStats discoverAdditionalEntryPointsImpl(
             std::vector<Function> &functions,
             std::unordered_map<uint32_t, std::vector<Instruction>> &decodedFunctions,
@@ -1900,6 +1990,18 @@ namespace ps2recomp
                      << " configured extra function start(s) across " << resolvedExtraStarts.size()
                      << " owner function(s)";
             m_reporter.progress(extraMsg.str());
+        }
+
+        const InteriorStartStats interiorStats = discoverInteriorFunctionStarts(
+            m_functions, m_decodedFunctions, m_sections, m_resumeEntryTargetsByOwner);
+        {
+            std::ostringstream msg;
+            msg << "interior starts: added=" << interiorStats.added
+                << " already-present=" << interiorStats.alreadyPresent
+                << " prologues=" << interiorStats.prologues
+                << " rejected-prologues=" << interiorStats.prologuesRejected
+                << " referenced-leaves=" << interiorStats.referencedLeaves;
+            m_reporter.progress(msg.str());
         }
 
         size_t totalTargets = 0u;
