@@ -2613,6 +2613,26 @@ void EeScheduler::processDueDeadlines()
     }
 }
 
+// Exact VBlank CSR status operation, kept in the GS priv-store stream.
+// Exposed as a narrow test seam until the scheduler has an event-injection API.
+void ps2xGsCsrVBlankStart(PS2Memory &memory, uint64_t tick)
+{
+    GSRegisters &gsRegs = memory.gs();
+    const bool odd = (tick & 1u) != 0u;
+    memory.gsPrivStore([&gsRegs, odd]()
+                       {
+        // VSINT is raised on each VBlankStart; FIELD follows tick parity.
+        if (odd)
+            gsRegs.csr.fetch_or(0x2008ull, std::memory_order_acq_rel);
+        else
+        {
+            uint64_t expected = gsRegs.csr.load();
+            while (!gsRegs.csr.compare_exchange_weak(
+                expected, (expected & ~0x2000ull) | 0x8ull,
+                std::memory_order_acq_rel));
+        } });
+}
+
 void EeScheduler::processEvent(const EeEvent &event)
 {
     switch (event.type)
@@ -2631,18 +2651,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         ps2_e4::noteVBlank(m_vsyncTick, m_runtime.gs(), m_runtime.memory().gs()); // E4 arm/freeze
         ps2_vq::noteVBlank(m_vsyncTick, m_runtime.gs(), m_runtime.memory().gs()); // GB2 Part 2 quiescent gate
         ps2x_gs_capture::vblank(m_vsyncTick); // same stream position as the live VQ sample
-        {
-            // GB3: the FIELD flip is a priv store like any other; queued, it
-            // lands in stream order with the guest's own CSR writes.
-            GSRegisters &gsRegs = m_runtime.memory().gs();
-            const bool odd = (m_vsyncTick & 1u) != 0u;
-            m_runtime.memory().gsPrivStore([&gsRegs, odd]()
-                                           {
-                if (odd)
-                    gsRegs.csr.fetch_or(0x2000ull, std::memory_order_acq_rel);
-                else
-                    gsRegs.csr.fetch_and(~0x2000ull, std::memory_order_acq_rel); });
-        }
+        ps2xGsCsrVBlankStart(m_runtime.memory(), m_vsyncTick);
         writeGuestU32(m_vsyncFlagAddress, 1u);
         if (m_vsyncTickAddress != 0u)
         {

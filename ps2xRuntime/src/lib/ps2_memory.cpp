@@ -200,15 +200,17 @@ namespace
     constexpr uint64_t kGsCsrFifoEmpty = 0x4000ull;
 
     // Atomically apply a 32-bit write to one half (off=0 low dword, off=4 high
-    // dword) of the GS CSR register. Bits 0..1 of the low dword (SIGNAL/FINISH) are
-    // write-one-to-clear; bits 15:14 (FIFO) are read-only hard-wired EMPTY (see
+    // dword) of the GS CSR register. Bits 0, 1 and 3 of the low dword
+    // (SIGNAL/FINISH/VSINT) are write-one-to-clear; bit 13 (FIELD) is
+    // timing-owned; bits 15:14 (FIFO) are read-only hard-wired EMPTY (see
     // above); everything else is a plain merge. Uses compare_exchange
     // so the whole read-modify-write is a single atomic step -- this register is
     // also touched by the vsync worker (FIELD bit) and the GIF (SIGNAL/FINISH) on
     // other threads, so a load-then-store here would race with them.
     inline void writeCsrHalf(std::atomic<uint64_t> &csr, uint32_t off, uint32_t value)
     {
-        constexpr uint32_t kW1cMask = 0x3u;
+        constexpr uint32_t kW1cMask = 0xBu;
+        constexpr uint32_t kFieldMask = 0x2000u;
         uint64_t expected = csr.load();
         uint64_t desired;
         do
@@ -216,7 +218,8 @@ namespace
             if (off == 0u)
             {
                 uint32_t oldLow = static_cast<uint32_t>(expected & 0xFFFFFFFFull);
-                uint32_t mergedLow = (oldLow & kW1cMask) | (value & ~kW1cMask);
+                uint32_t mergedLow = (oldLow & (kW1cMask | kFieldMask)) |
+                                     (value & ~(kW1cMask | kFieldMask));
                 desired = (expected & 0xFFFFFFFF00000000ull) | static_cast<uint64_t>(mergedLow);
                 desired &= ~static_cast<uint64_t>(value & kW1cMask);
                 // FIFO is read-only, HLE'd as always-empty (see above).
@@ -230,16 +233,17 @@ namespace
         } while (!csr.compare_exchange_weak(expected, desired));
     }
 
-    // Same as writeCsrHalf but for a full 64-bit CSR write (bits 0..1 are still
-    // write-one-to-clear against the current value).
+    // Same as writeCsrHalf but for a full 64-bit CSR write.
     inline void writeCsrFull(std::atomic<uint64_t> &csr, uint64_t value)
     {
-        constexpr uint64_t kW1cMask = 0x3ull;
+        constexpr uint64_t kW1cMask = 0xBull;
+        constexpr uint64_t kFieldMask = 0x2000ull;
         uint64_t expected = csr.load();
         uint64_t desired;
         do
         {
-            desired = (expected & kW1cMask) | (value & ~kW1cMask);
+            desired = (expected & (kW1cMask | kFieldMask)) |
+                      (value & ~(kW1cMask | kFieldMask));
             desired &= ~(value & kW1cMask);
             // FIFO is read-only, HLE'd as always-empty (see above).
             desired = (desired & ~kGsCsrFifoMask) | kGsCsrFifoEmpty;

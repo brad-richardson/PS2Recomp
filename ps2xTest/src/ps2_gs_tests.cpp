@@ -24,6 +24,8 @@
 
 using namespace ps2_syscalls;
 
+void ps2xGsCsrVBlankStart(PS2Memory &memory, uint64_t tick);
+
 namespace
 {
     std::atomic<uint32_t> g_gsSyncCallbackHits{0u};
@@ -431,20 +433,19 @@ void register_ps2_gs_tests()
 
             const uint64_t csrPattern = 0xA1B2C3D4E5F60718ull;
             mem.write64(kGsCsr, csrPattern);
-            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D4E5F64718ull, "64-bit CSR read should match prior 64-bit write except read-only FIFO");
-            t.Equals(mem.read32(kGsCsr), 0xE5F64718u, "CSR low dword read should match except read-only FIFO");
+            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D4E5F64710ull, "64-bit CSR read should preserve timing-owned FIELD, acknowledge VSINT, and force FIFO EMPTY");
+            t.Equals(mem.read32(kGsCsr), 0xE5F64710u, "CSR low dword read should preserve timing-owned status");
             t.Equals(mem.read32(kGsCsr + 4u), static_cast<uint32_t>(csrPattern >> 32), "CSR high dword read should match");
 
             mem.write32(kGsCsr, 0x11223344u);
-            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D411227344ull, "32-bit low write should preserve CSR high dword except read-only FIFO");
+            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D411225344ull, "32-bit low write should preserve high dword and timing-owned FIELD");
 
             mem.write32(kGsCsr + 4u, 0x55667788u);
-            t.Equals(mem.read64(kGsCsr), 0x5566778811227344ull, "32-bit high write should preserve CSR low dword");
+            t.Equals(mem.read64(kGsCsr), 0x5566778811225344ull, "32-bit high write should preserve CSR low dword");
 
-            // SSX3's CSR write shapes (FINISH/VSINT enables with 00 in 15:14)
-            // must not clobber the FIFO-EMPTY exit state.
+            // SSX3's CSR acknowledge writes must not clobber FIFO EMPTY.
             mem.write64(kGsCsr, 0x8ull);
-            t.Equals(mem.read64(kGsCsr), 0x4008ull, "guest CSR write with 00 in bits 15:14 should keep FIFO EMPTY");
+            t.Equals(mem.read64(kGsCsr), 0x4000ull, "guest CSR bit 3 write acknowledges VSINT and keeps FIFO EMPTY");
             mem.write64(kGsCsr, 0x2ull);
             t.Equals(mem.read64(kGsCsr), 0x4000ull, "FINISH write-one-to-clear should still clear bit 1 with FIFO EMPTY");
 
@@ -453,6 +454,32 @@ void register_ps2_gs_tests()
             t.Equals(mem.read64(kGsImr), imrPattern, "IMR 64-bit read should match prior write");
             t.Equals(mem.read32(kGsImr), 0x89ABCDEFu, "IMR low dword should match");
             t.Equals(mem.read32(kGsImr + 4u), 0x01234567u, "IMR high dword should match");
+        });
+
+        tc.Run("E54B: VSINT acknowledge and timing-owned FIELD survive 64/32-bit CSR writes", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            constexpr uint32_t kCsr = 0x12001000u;
+            t.Equals(mem.read64(kCsr), 0x4000ull, "reset CSR has FIFO EMPTY and no VSINT/FIELD");
+            mem.write64(kCsr, 0x8ull);
+            t.Equals(mem.read64(kCsr), 0x4000ull, "write64(8) cannot raise VSINT");
+            ps2xGsCsrVBlankStart(mem, 1u);
+            t.Equals(mem.read64(kCsr), 0x6008ull, "first VBlank raises VSINT and odd FIELD");
+            mem.write64(kCsr, 0x8ull);
+            t.Equals(mem.read64(kCsr), 0x6000ull, "write64(8) clears VSINT, preserves FIELD");
+            ps2xGsCsrVBlankStart(mem, 2u);
+            t.Equals(mem.read64(kCsr), 0x4008ull, "next VBlank raises VSINT and advances even FIELD");
+            mem.write32(kCsr, 0x8u);
+            t.Equals(mem.read64(kCsr), 0x4000ull, "write32(8) clears VSINT");
+            mem.write32(kCsr, 0x2008u);
+            t.Equals(mem.read64(kCsr), 0x4000ull, "write32 cannot set FIELD or VSINT");
+            ps2xGsCsrVBlankStart(mem, 3u);
+            t.Equals(mem.read64(kCsr), 0x6008ull, "third VBlank raises VSINT and odd FIELD");
+            mem.write32(kCsr, 0x8u);
+            t.Equals(mem.read64(kCsr), 0x6000ull, "write32 clears VSINT without clearing FIELD");
+            mem.write64(kCsr, 0x0ull);
+            t.Equals(mem.read64(kCsr), 0x6000ull, "write64(0) also preserves FIELD");
         });
 
         tc.Run("unknown GS privileged offsets are no-op and read as zero", [](TestCase &t)
