@@ -74,6 +74,7 @@ struct State
     uint32_t serial = 0;
     uint64_t ticks = 0, cid0 = 0, dmq = 0, done = 0, setdma = 0, tagbufs = 0;
     uint32_t doneRing = 0;
+    bool au6SnapDone = false;
     std::map<uint32_t, std::vector<uint8_t>> iopMem; // IOP dst -> last payload
 };
 
@@ -369,6 +370,22 @@ inline bool onSetDma(const uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t
     const bool tagbuf = dst == kTagbufIopAddr;
     if (tagbuf)
     {
+        // AU6 dev tap: one bounded EE RAM snapshot at a settled menu tick.
+        // This lets the same static/dynamic SND tables be read in both runtimes.
+        if (!s.au6SnapDone && s.serial >= 2000u)
+        {
+            if (const char *path = std::getenv("PS2X_AU6_EE_SNAP"); path && *path)
+            {
+                s.au6SnapDone = true;
+                if (FILE *f = std::fopen(path, "wb"))
+                {
+                    const size_t written = std::fwrite(rdram, 1, PS2_RAM_SIZE, f);
+                    std::fclose(f);
+                    logLocked(s, "au6-ee-snap serial=%u vsync=%llu bytes=%zu", s.serial,
+                              (unsigned long long)vsync, written);
+                }
+            }
+        }
         Tag1PcmView view{};
         if (findTag1Pcm(bytes.data(), bytes.size(), view))
         {
