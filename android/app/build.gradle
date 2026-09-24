@@ -33,6 +33,8 @@ android {
                         '-DPS2X_ENABLE_DIAG_TAPS=OFF',
                         '-DPS2X_ENABLE_RUNTIME_LOGS=OFF',
                         '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF',
+                        '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',
+                        '-DPS2X_ENABLE_DEBUG_UI=OFF',
                         "-DPS2X_DEFAULT_BOOT_ELF=${ps2xBootElf}",
                         "-DPS2X_GAME_CODEGEN_DIR=${ps2xGameCodegenDir}",
                         "-DPS2X_GS_SHADOW_PARALLEL=${ps2xGsShadowParallel}",
