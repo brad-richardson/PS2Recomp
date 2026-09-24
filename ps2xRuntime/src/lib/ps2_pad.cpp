@@ -1,5 +1,6 @@
 #include "runtime/ps2_pad.h"
 #include "ps2_host_backend.h"
+#include "ps2_virtual_pad.h"
 #include <cstring>
 
 namespace
@@ -118,6 +119,9 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         if (IsKeyDown(KEY_TAB))
             clearBit(PAD_SELECT);
     }
+
+    // I26: on-screen virtual controls (iOS overlay; always 0 elsewhere).
+    btns &= static_cast<uint16_t>(~ps2x::vpad::liveMask().load(std::memory_order_relaxed));
 
     data[2] = static_cast<uint8_t>(btns & 0xFF);
     data[3] = static_cast<uint8_t>(btns >> 8);
