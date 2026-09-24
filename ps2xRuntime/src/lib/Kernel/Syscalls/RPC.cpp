@@ -166,7 +166,9 @@ namespace ps2_syscalls
 
         void applySsx3SifHandshake(PS2Runtime &runtime)
         {
-            (void)runtime;
+            // The checked-in runtime can use an older external codegen tree
+            // whose _sceSifSendCmd stub still calls the six-argument handler.
+            runtime.replaceFunction(0x00426078u, &ps2_syscalls::_sceSifSendCmd);
             g_ssx3SifHandshakeEnabled.store(true, std::memory_order_relaxed);
         }
     } // namespace
@@ -1097,14 +1099,9 @@ namespace ps2_syscalls
         SifCallRpc(rdram, ctx, runtime);
     }
 
-    void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    static void sendCmdDecoded(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
+                               const ps2_snd_spike::SendCmdArgs &args)
     {
-        // _sceSifSendCmd at 0x426078 uses the seven-register ABI
-        // (cid, mode, pkt, size, src, dst, esize), regardless of caller.
-        std::array<uint32_t, 11> gpr{};
-        for (uint32_t i = 4; i <= 10; ++i)
-            gpr[i] = getRegU32(ctx, static_cast<int>(i));
-        const ps2_snd_spike::SendCmdArgs args = ps2_snd_spike::decodeSendCmdArgs(gpr.data(), gpr.size());
         const uint32_t cid = args.cid;
         uint32_t packetAddr = args.packet;
         uint32_t packetSize = args.packetSize;
@@ -1185,6 +1182,30 @@ namespace ps2_syscalls
 
         // Return non-zero on success.
         setReturnS32(ctx, 1);
+    }
+
+    void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // Public six-argument entry (also used by the kernel path).
+        const uint32_t sp = getRegU32(ctx, 29);
+        ps2_snd_spike::SendCmdArgs args{};
+        args.cid = getRegU32(ctx, 4);
+        args.packet = getRegU32(ctx, 5);
+        args.packetSize = getRegU32(ctx, 6);
+        args.srcExtra = getRegU32(ctx, 7);
+        readStackU32(rdram, sp, 0x10, args.dstExtra);
+        readStackU32(rdram, sp, 0x14, args.extraSize);
+        sendCmdDecoded(rdram, ctx, runtime, args);
+    }
+
+    void _sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // Private 0x426078 entry: (cid, mode, pkt, size, src, dst, esize).
+        std::array<uint32_t, 11> gpr{};
+        for (uint32_t i = 4; i <= 10; ++i)
+            gpr[i] = getRegU32(ctx, static_cast<int>(i));
+        const auto args = ps2_snd_spike::decodeSendCmdArgs(gpr.data(), gpr.size());
+        sendCmdDecoded(rdram, ctx, runtime, args);
     }
 
     void sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

@@ -1908,6 +1908,30 @@ void register_ps2_runtime_kernel_tests()
             resetSsx3SifHandshakeForTesting();
         });
 
+        tc.Run("private SIF SendCmd uses seven registers for SET_SREG", [](TestCase &t)
+        {
+            TestEnv env;
+            resetSsx3SifHandshakeForTesting();
+            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+
+            constexpr uint32_t kPacketAddr = 0x00009000u;
+            constexpr uint32_t kPacket[] = {0u, 0u, 0u, 0u, 1u, 1u};
+            writeGuestWords(env.rdram.data(), kPacketAddr, kPacket, std::size(kPacket));
+            setRegU32(env.ctx, 4, 0x80000001u);
+            setRegU32(env.ctx, 5, 1u); // mode, not packet address
+            setRegU32(env.ctx, 6, kPacketAddr);
+            setRegU32(env.ctx, 7, 0x18u);
+            setRegU32(env.ctx, 8, 0u);
+            setRegU32(env.ctx, 9, 0u);
+            setRegU32(env.ctx, 10, 0u);
+            _sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.Equals(getRegS32(env.ctx, 2), 1, "private SendCmd must return success");
+            t.Equals(readGuestU32(env.rdram.data(), 0x52BE04u), 1u,
+                     "private SendCmd must read the packet from a2");
+            resetSsx3SifHandshakeForTesting();
+        });
+
         tc.Run("SIF handshake ignores other cids and sreg slots (P1ac)", [](TestCase &t)
         {
             TestEnv env;
