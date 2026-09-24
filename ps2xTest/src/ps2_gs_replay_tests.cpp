@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cfenv>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -38,6 +39,26 @@ namespace
         return std::fread(record.data(), 1, length, f) == length
             ? ReadEventResult::Record : ReadEventResult::Invalid;
     }
+
+    struct ScopedReplayRtz
+    {
+        int previous = -1;
+        bool ok = true;
+
+        explicit ScopedReplayRtz(bool enabled)
+        {
+            if (!enabled)
+                return;
+            previous = std::fegetround();
+            ok = previous >= 0 && std::fesetround(FE_TOWARDZERO) == 0;
+        }
+
+        ~ScopedReplayRtz()
+        {
+            if (previous >= 0)
+                std::fesetround(previous);
+        }
+    };
 
     bool setPriv(GSRegisters &r, uint32_t off, uint64_t value)
     {
@@ -125,6 +146,34 @@ namespace
         const bool queued = mode && std::strcmp(mode, "queue") == 0;
         const char *drop = std::getenv("PS2X_GS_REPLAY_DROP_PRIV");
         const bool dropPriv = drop && std::strcmp(drop, "1") == 0;
+        const char *rounding = std::getenv("PS2X_GS_REPLAY_RTZ");
+        const bool rtzPath1 = rounding && std::strcmp(rounding, "path1") == 0;
+        const bool rtzAll = rounding && std::strcmp(rounding, "all") == 0;
+        if (rounding && !rtzPath1 && !rtzAll)
+        {
+            std::fclose(f);
+            t.IsTrue(false, "PS2X_GS_REPLAY_RTZ must be path1 or all");
+            return;
+        }
+        std::vector<uint8_t> packetPaths;
+        if (const char *pathFile = std::getenv("PS2X_GS_REPLAY_PATH_FILE"))
+        {
+            std::ifstream in(pathFile);
+            uint64_t index = 0u;
+            unsigned pathId = 0u;
+            while (in >> index >> pathId)
+            {
+                if (index != packetPaths.size() || pathId < 1u || pathId > 3u)
+                    break;
+                packetPaths.push_back(static_cast<uint8_t>(pathId));
+            }
+            if (packetPaths.empty() || (!in.eof() && !in.good()))
+            {
+                std::fclose(f);
+                t.IsTrue(false, "invalid PS2X_GS_REPLAY_PATH_FILE");
+                return;
+            }
+        }
         uint32_t stride = 50u;
         if (const char *step = std::getenv("PS2X_GS_REPLAY_STEP"))
         {
@@ -151,7 +200,7 @@ namespace
             packetTrace << "index,tick,path,vram\n";
         }
 
-        uint64_t packets = 0u, priv = 0u, transfers = 0u, markers = 0u;
+        uint64_t packets = 0u, priv = 0u, transfers = 0u, markers = 0u, roundedPackets = 0u;
         uint64_t readbacks = 0u, clears = 0u;
         bool parseOk = true;
         std::vector<std::string> rows;
@@ -180,7 +229,8 @@ namespace
                     parseOk = false;
                     break;
                 }
-                const uint8_t pathId = rec[9];
+                const uint8_t pathId = packetPaths.empty()
+                    ? rec[9] : (packets < packetPaths.size() ? packetPaths[packets] : 0u);
                 uint32_t size = 0;
                 std::memcpy(&size, rec.data() + 10, 4);
                 if (pathId < 1u || pathId > 3u || size != length - 14u)
@@ -189,7 +239,18 @@ namespace
                     break;
                 }
                 gs.noteGifPath(static_cast<GifPathId>(pathId));
-                gs.processGIFPacket(rec.data() + 14, size);
+                const bool forceRtz = rtzAll || (rtzPath1 && pathId == 1u);
+                {
+                    ScopedReplayRtz scope(forceRtz);
+                    if (!scope.ok)
+                    {
+                        parseOk = false;
+                        break;
+                    }
+                    gs.processGIFPacket(rec.data() + 14, size);
+                }
+                if (forceRtz)
+                    ++roundedPackets;
                 if (packetTrace && tick < bisectTo)
                     packetTrace << packets << ',' << tick << ',' << static_cast<unsigned>(pathId)
                                 << ',' << std::hex << fnv(vram.data(), vram.size()) << std::dec << '\n';
@@ -262,8 +323,18 @@ namespace
                     parseOk = false;
                     break;
                 }
-                gs.uploadImageNative(regsIn[0], regsIn[1], regsIn[2], regsIn[3],
-                                     rec.data() + 45, size);
+                {
+                    ScopedReplayRtz scope(rtzAll);
+                    if (!scope.ok)
+                    {
+                        parseOk = false;
+                        break;
+                    }
+                    gs.uploadImageNative(regsIn[0], regsIn[1], regsIn[2], regsIn[3],
+                                         rec.data() + 45, size);
+                }
+                if (rtzAll)
+                    ++roundedPackets;
                 if (packetTrace && tick < bisectTo)
                     packetTrace << packets << ',' << tick << ",native,"
                                 << std::hex << fnv(vram.data(), vram.size()) << std::dec << '\n';
@@ -325,7 +396,9 @@ namespace
                   << " drop_priv=" << (dropPriv ? 1 : 0) << " packets=" << packets
                   << " priv=" << priv << " transfers=" << transfers
                   << " markers=" << markers << " readbacks=" << readbacks
-                  << " clears=" << clears << " samples=" << rows.size() << '\n';
+                  << " clears=" << clears << " samples=" << rows.size()
+                  << " rtz=" << (rtzAll ? "all" : (rtzPath1 ? "path1" : "off"))
+                  << " rounded_packets=" << roundedPackets << '\n';
         for (const auto &row : rows)
             std::cout << row << '\n';
 

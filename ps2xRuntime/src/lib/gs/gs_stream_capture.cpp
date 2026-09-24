@@ -132,6 +132,15 @@ namespace ps2x_gs_capture
         return value;
     }
 
+    uint64_t stopAt()
+    {
+        static const uint64_t value = [] {
+            const char *env = std::getenv("PS2X_GS_CAPTURE_STOP_TICK");
+            return env && *env ? std::strtoull(env, nullptr, 10) : 0ull;
+        }();
+        return value;
+    }
+
     bool enabled()
     {
         static const bool on = [] {
@@ -243,7 +252,8 @@ namespace ps2x_gs_capture
             c.file = nullptr;
             c.stoppedAtCap = true;
         }
-        else if (c.file && bisectTo() != 0u && tick >= bisectTo())
+        else if (c.file && ((stopAt() != 0u && tick >= stopAt()) ||
+                            (bisectTo() != 0u && tick >= bisectTo())))
         {
             std::fclose(c.file);
             c.file = nullptr;
