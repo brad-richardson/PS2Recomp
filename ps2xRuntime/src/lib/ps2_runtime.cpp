@@ -1099,7 +1099,11 @@ bool PS2Runtime::initialize(const char *title)
 #if defined(PLATFORM_VITA)
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title); // raylib vita does not support audio
 #else
+#if defined(PS2X_IOS)
+        SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI);
+#else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+#endif
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
 #if defined(PS2X_IOS)
         ps2x::ios::syncWindowSize();
@@ -3797,6 +3801,8 @@ void PS2Runtime::run()
 
 #if defined(PS2X_IOS)
         ps2x::ios::syncWindowSize();
+        std::fprintf(stderr, "[ios-render] screen=%dx%d render=%dx%d\n",
+                     GetScreenWidth(), GetScreenHeight(), GetRenderWidth(), GetRenderHeight());
 #endif
         BeginDrawing();
         ClearBackground(BLACK);
