@@ -8,6 +8,7 @@
 #include "runtime/ps2_memory.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -23,6 +24,7 @@
 #include "context.hpp"
 #include "device.hpp"
 #include "gs_interface.hpp"
+#include "n8d5_tile_spirv.hpp"
 #endif
 
 namespace ps2x_gs_parallel
@@ -272,9 +274,64 @@ public:
 
         const uint64_t r0 = nowNanos();
         auto cmd = m_device->request_command_buffer();
+        const char *tileEnv = std::getenv("PS2X_N8D5_TILE_CAPTURE");
+        const bool tileRequested = request.vsyncTick == 2050u && tileEnv && std::strcmp(tileEnv, "1") == 0;
+        Vulkan::BufferHandle tileBuffer;
+        Vulkan::ImageHandle controlImage;
+        bool tileDispatched = false;
+        if (tileRequested)
+        {
+            const uint32_t fbp = static_cast<uint32_t>(m_priv ? (m_priv->dispfb1 & 0x1ffu) : 0u);
+            std::cerr << "[n8d5b] alignment tick=" << request.vsyncTick << " fbp=" << fbp
+                      << " pmode=" << std::hex << request.pmode << std::dec
+                      << " width=" << w << " height=" << h << std::endl;
+            if (w == 512u && h == 448u && fbp == 112u && request.pmode == 0xff21u)
+            {
+                // A sampled 16x16 checkerboard verifies the same shader's texture
+                // access and the small storage-buffer map before tiles are used.
+                std::array<uint32_t, 256> controlPixels = {};
+                for (uint32_t y = 0; y < 16u; ++y)
+                    for (uint32_t x = 0; x < 16u; ++x)
+                        controlPixels[y * 16u + x] = ((x + y) & 1u) ? 0xffffffffu : 0xff000000u;
+                const Vulkan::ImageInitialData controlData = {controlPixels.data()};
+                const auto controlInfo = Vulkan::ImageCreateInfo::immutable_2d_image(
+                    16u, 16u, VK_FORMAT_R8G8B8A8_UNORM);
+                controlImage = m_device->create_image(controlInfo, &controlData);
+                Vulkan::BufferCreateInfo tileInfo = {};
+                tileInfo.size = (1u + 32u * 28u) * sizeof(uint32_t);
+                tileInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                tileInfo.domain = Vulkan::BufferDomain::CachedHost;
+                tileBuffer = m_device->create_buffer(tileInfo);
+                auto *program = m_device->request_program(n8d5_tile_spirv, sizeof(n8d5_tile_spirv));
+                if (controlImage && tileBuffer && program)
+                {
+                    struct Dimensions { uint32_t width, height; } dims{w, h};
+                    cmd->image_barrier(*shot.image, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+                                       VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+                                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                       VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+                    cmd->set_program(program);
+                    cmd->set_texture(0, 0, shot.image->get_view(), Vulkan::StockSampler::NearestClamp);
+                    cmd->set_texture(0, 1, controlImage->get_view(), Vulkan::StockSampler::NearestClamp);
+                    cmd->set_storage_buffer(0, 2, *tileBuffer);
+                    cmd->push_constants(&dims, 0, sizeof(dims));
+                    cmd->dispatch((1u + 32u * 28u + 31u) / 32u, 1, 1);
+                    cmd->barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                 VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                 VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+                    tileDispatched = true;
+                }
+                else
+                    std::cerr << "[n8d5b] control=ERROR resource-or-program" << std::endl;
+            }
+            else
+                std::cerr << "[n8d5b] alignment=OTHER" << std::endl;
+        }
         cmd->image_barrier(*shot.image, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                           tileDispatched ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT :
+                                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
                            VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
         Vulkan::BufferCreateInfo info = {};
         info.size = static_cast<size_t>(w) * h * sizeof(uint32_t);
@@ -287,11 +344,44 @@ public:
                      VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
         m_device->submit(cmd);
         m_device->wait_idle();
+        if (tileDispatched)
+        {
+            const auto *counts = static_cast<const uint32_t *>(
+                m_device->map_host_buffer(*tileBuffer, Vulkan::MEMORY_ACCESS_READ_BIT));
+            if (!counts)
+                std::cerr << "[n8d5b] control=ERROR map" << std::endl;
+            else
+            {
+                std::cerr << "[n8d5b] control=" << counts[0] << " expected=128"
+                          << (counts[0] == 128u ? " PASS" : " FAIL") << std::endl;
+                std::cerr << "[n8d5b] sampled_tile_counts=";
+                for (uint32_t i = 1; i <= 32u * 28u; ++i)
+                    std::cerr << (i == 1 ? "" : ",") << counts[i];
+                std::cerr << std::endl;
+            }
+        }
         const uint8_t *px = static_cast<const uint8_t *>(
             m_device->map_host_buffer(*rb, Vulkan::MEMORY_ACCESS_READ_BIT));
         const uint64_t r1 = nowNanos();
         if (!px)
             return out;
+        if (tileRequested && w == 512u && h == 448u)
+        {
+            std::cerr << "[n8d5b] raw_tile_counts=";
+            for (uint32_t ty = 0; ty < 28u; ++ty)
+                for (uint32_t tx = 0; tx < 32u; ++tx)
+                {
+                    uint32_t hits = 0;
+                    for (uint32_t y = 0; y < 16u; ++y)
+                        for (uint32_t x = 0; x < 16u; ++x)
+                        {
+                            const uint8_t *p = px + 4u * ((ty * 16u + y) * w + tx * 16u + x);
+                            hits += std::max({p[0], p[1], p[2]}) >= 32u;
+                        }
+                    std::cerr << (tx == 0u && ty == 0u ? "" : ",") << hits;
+                }
+            std::cerr << std::endl;
+        }
 
         // Frontend contract: 640-pixel row stride (kHostFrameWidth), rows
         // of `width` valid pixels, height <= 512.
