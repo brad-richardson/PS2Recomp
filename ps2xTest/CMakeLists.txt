@@ -71,6 +71,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_fpu_semantics_tests.cpp
     src/ps2_fpu_cop2_audit_tests.cpp
     src/ps2_mmi_interleave_tests.cpp
+    src/ps2_lwu_tests.cpp
 )
 
 if(PS2X_ENABLE_DIAG_TAPS)
@@ -95,6 +96,17 @@ add_custom_command(
     DEPENDS e52_snippet_gen
     VERBATIM)
 add_custom_target(e52_snippets DEPENDS ${E52_SNIPPETS_DIR}/e52_snippets.h)
+add_executable(e54d_lwu_snippet_gen tools/e54d_lwu_snippet_gen.cpp)
+target_include_directories(e54d_lwu_snippet_gen PRIVATE ${CMAKE_SOURCE_DIR}/ps2xRecomp/include)
+target_link_libraries(e54d_lwu_snippet_gen PRIVATE ps2_recomp_lib)
+set(E54D_SNIPPETS_DIR ${CMAKE_CURRENT_BINARY_DIR}/e54d_generated)
+add_custom_command(
+    OUTPUT ${E54D_SNIPPETS_DIR}/e54d_lwu_snippets.h
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${E54D_SNIPPETS_DIR}
+    COMMAND $<TARGET_FILE:e54d_lwu_snippet_gen> > ${E54D_SNIPPETS_DIR}/e54d_lwu_snippets.h
+    DEPENDS e54d_lwu_snippet_gen
+    VERBATIM)
+add_custom_target(e54d_lwu_snippets DEPENDS ${E54D_SNIPPETS_DIR}/e54d_lwu_snippets.h)
 # E53: the audit tests set the EE FP mode at run time; keep clang from folding
 # their constant inputs at compile time in the default rounding mode.
 if(NOT MSVC)
@@ -104,6 +116,7 @@ endif()
 target_include_directories(ps2_test_lib PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${E52_SNIPPETS_DIR}
+    ${E54D_SNIPPETS_DIR}
     ${CMAKE_SOURCE_DIR}/ps2xRecomp/include
     ${CMAKE_SOURCE_DIR}/ps2xAnalyzer/include
     ${CMAKE_SOURCE_DIR}/ps2xRuntime/include
@@ -118,6 +131,7 @@ target_link_libraries(ps2_test_lib PRIVATE
 )
 
 add_dependencies(ps2_test_lib e52_snippets)
+add_dependencies(ps2_test_lib e54d_lwu_snippets)
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(ps2_test_lib PRIVATE ${CMAKE_DL_LIBS})
