@@ -102,6 +102,28 @@ bool ps2xGb7c5ProbeEnabled();
 // (read-only; no render effect whether the probe is open or not).
 void ps2xGb7c5RegisterVram(const uint8_t *vram, uint32_t vramSize);
 
+// GB7C7 tick259 packet5470 texture-word tap (default OFF).
+// Replay-only diagnostic for the single predeclared pixel: tick259 path3
+// packet5470 batch10 destination (342,377) in FBP112/FBW8/PSMCT24, sampled
+// from a CT32 tbp0=0/tbw8 texture under linear filtering. The harness sets
+// the current GIF packet context before each processGIFPacket; the backend
+// assigns an intra-packet batch id per DrawPrimitive and logs the one
+// executed sample (interp/quant UV, the actual texel argument, all four
+// tap coords/addresses/words, TEXA-resolved rgba) plus the independent
+// old/new destination words. With the probe closed/disabled every hook
+// returns early and rendering is byte-identical.
+struct Gb7c7PacketContext
+{
+    uint64_t tick = 0;
+    uint64_t packetIndex = 0;
+    unsigned path = 0;
+    uint64_t batch = 0;
+};
+void ps2xGb7c7ProbeOpen(const char *path);
+void ps2xGb7c7ProbeClose();
+void ps2xGb7c7SetPacketContext(uint64_t tick, uint64_t packetIndex, unsigned path);
+bool ps2xGb7c7ProbeEnabled();
+
 class GSCpuBackend final : public GSRasterBackend
 {
 public:
@@ -172,6 +194,19 @@ private:
     void NoteGb7c5LocalToLocalOp();
     void NoteGb7c5ClearOp(const GSContext &context, uint32_t rgba);
     void NoteGb7c5DirectOp(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y);
+    // GB7C7 texture-word tap hooks (no-ops unless the probe is open).
+    // BatchBegin assigns the intra-packet batch id (same counting as
+    // GB7C2/GB7C4/GB7C5) and flags the single candidate batch. The pixel
+    // tracer logs the one executed sample at its WritePixel call with an
+    // independent old read.
+    uint64_t NoteGb7c7BatchBegin(const GSPrimitiveBatch &batch);
+    void TraceGb7c7Pixel(const GSDrawState &state, int x, int y, uint32_t z,
+                         float texUf, float texVf,
+                         uint16_t sampleU, uint16_t sampleV,
+                         uint32_t texel,
+                         uint8_t combR, uint8_t combG, uint8_t combB, uint8_t combA,
+                         uint8_t vrtR, uint8_t vrtG, uint8_t vrtB, uint8_t vrtA,
+                         uint32_t oldVal, uint32_t oldRaw);
     void DrawSprite(const GSPrimitiveBatch &batch);
     void DrawTriangle(const GSPrimitiveBatch &batch);
     void DrawLine(const GSPrimitiveBatch &batch);

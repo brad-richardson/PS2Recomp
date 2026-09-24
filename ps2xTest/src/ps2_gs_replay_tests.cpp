@@ -427,6 +427,14 @@ namespace
         const bool gb7c5Probe = gb7c5Out && *gb7c5Out;
         bool gb7c5Done = false;
 
+        // GB7C7 texture-word tap reads its env flag early so the
+        // GB7B/GB7C2/GB7C4/GB7C5 probes below can exclude it; the trace
+        // itself is opened after the GB7C5 block. Direct CPU replay only;
+        // stops after the marker-301 sample.
+        const char *gb7c7Out = std::getenv("PS2X_GS_REPLAY_GB7C7_TRACE");
+        const bool gb7c7Probe = gb7c7Out && *gb7c7Out;
+        bool gb7c7Done = false;
+
         // GB7B bounded spatial title-glyph candidate probe (default OFF).
         // Direct CPU replay only; stops after the marker-700 sample.
         const char *gb7bOut = std::getenv("PS2X_GS_REPLAY_GB7B_TRACE");
@@ -434,10 +442,10 @@ namespace
         bool gb7bDone = false;
         if (gb7bProbe)
         {
-            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7c5Probe)
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7c5Probe || gb7c7Probe)
             {
                 std::fclose(f);
-                t.IsTrue(false, "GB7B requires direct CPU replay with no GB5/GB5B/GB7C5 probe");
+                t.IsTrue(false, "GB7B requires direct CPU replay with no GB5/GB5B/GB7C5/GB7C7 probe");
                 return;
             }
             ps2xGb7bProbeOpen(gb7bOut);
@@ -458,10 +466,10 @@ namespace
         bool gb7c4Done = false;
         if (gb7c4Probe)
         {
-            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c5Probe)
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c5Probe || gb7c7Probe)
             {
                 std::fclose(f);
-                t.IsTrue(false, "GB7C4 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C5 probe");
+                t.IsTrue(false, "GB7C4 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C5/GB7C7 probe");
                 return;
             }
             ps2xGb7c4ProbeOpen(gb7c4Out);
@@ -486,10 +494,10 @@ namespace
         uint32_t gb7c2CropRows = 0;
         if (gb7c2Probe)
         {
-            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c4Probe || gb7c5Probe)
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c4Probe || gb7c5Probe || gb7c7Probe)
             {
                 std::fclose(f);
-                t.IsTrue(false, "GB7C2 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C4/GB7C5 probe");
+                t.IsTrue(false, "GB7C2 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C4/GB7C5/GB7C7 probe");
                 return;
             }
             ps2xGb7c2ProbeOpen(gb7c2Out);
@@ -516,10 +524,10 @@ namespace
         // sample. No pixel poke in this part.
         if (gb7c5Probe)
         {
-            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c4Probe || gb7c2Probe)
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c4Probe || gb7c2Probe || gb7c7Probe)
             {
                 std::fclose(f);
-                t.IsTrue(false, "GB7C5 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C2/GB7C4 probe");
+                t.IsTrue(false, "GB7C5 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C2/GB7C4/GB7C7 probe");
                 return;
             }
             ps2xGb7c5ProbeOpen(gb7c5Out);
@@ -527,6 +535,27 @@ namespace
             {
                 std::fclose(f);
                 t.IsTrue(false, "GB7C5 trace could not be opened");
+                return;
+            }
+        }
+
+        // GB7C7 tick259 packet5470 texture-word tap (default OFF).
+        // Direct CPU replay only; single-pixel scope tick259 path3
+        // packet5470 batch10 dst (342,377); stops after the marker-301
+        // sample. No pixel poke in this part.
+        if (gb7c7Probe)
+        {
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c4Probe || gb7c2Probe || gb7c5Probe)
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB7C7 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C2/GB7C4/GB7C5 probe");
+                return;
+            }
+            ps2xGb7c7ProbeOpen(gb7c7Out);
+            if (!ps2xGb7c7ProbeEnabled())
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB7C7 trace could not be opened");
                 return;
             }
         }
@@ -554,7 +583,7 @@ namespace
         std::vector<std::string> rows;
         while (true)
         {
-            if (gb7bDone || gb7c2Done || gb7c4Done || gb7c5Done)
+            if (gb7bDone || gb7c2Done || gb7c4Done || gb7c5Done || gb7c7Done)
                 break;
             uint32_t length = 0;
             std::vector<uint8_t> rec;
@@ -638,6 +667,8 @@ namespace
                     ps2xGb7c2SetPacketContext(tick, packets, pathId);
                 if (gb7c5Probe)
                     ps2xGb7c5SetPacketContext(tick, packets, pathId);
+                if (gb7c7Probe)
+                    ps2xGb7c7SetPacketContext(tick, packets, pathId);
                 {
                     ScopedReplayRtz scope(forceRtz);
                     if (!scope.ok)
@@ -922,6 +953,8 @@ namespace
                     gb7c2Done = true;
                 if (gb7c5Probe && tick >= 601u)
                     gb7c5Done = true;
+                if (gb7c7Probe && tick >= 301u)
+                    gb7c7Done = true;
             }
             else if (kind == 5u)
             {
@@ -1052,6 +1085,11 @@ namespace
         {
             ps2xGb7c5ProbeClose();
             t.IsTrue(gb7c5Done, "GB7C5 replay reached marker 601");
+        }
+        if (gb7c7Probe)
+        {
+            ps2xGb7c7ProbeClose();
+            t.IsTrue(gb7c7Done, "GB7C7 replay reached marker 301");
         }
 
         if (std::getenv("PS2X_GS_REPLAY_PACKET_TRACE"))
