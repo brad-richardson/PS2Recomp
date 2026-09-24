@@ -441,6 +441,43 @@ namespace
             }
         }
 
+        // GB7C2 bounded CPU pixel/ROI title-text chain probe (default OFF).
+        // Direct CPU replay only; predeclared chain tick600 path2 packet47176
+        // -> tick601 path3 packet47240; per-packet display-crop before/after
+        // in the chain window via the GB5B crop helper; stops after the
+        // marker-700 sample.
+        const char *gb7c2Out = std::getenv("PS2X_GS_REPLAY_GB7C2_TRACE");
+        const bool gb7c2Probe = gb7c2Out && *gb7c2Out;
+        bool gb7c2Done = false;
+        std::ofstream gb7c2Crops;
+        GSCpuBackend gb7c2Raw;
+        uint32_t gb7c2CropRows = 0;
+        if (gb7c2Probe)
+        {
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe)
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB7C2 requires direct CPU replay with no GB5/GB5B/GB7B probe");
+                return;
+            }
+            ps2xGb7c2ProbeOpen(gb7c2Out);
+            if (!ps2xGb7c2ProbeEnabled())
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB7C2 trace could not be opened");
+                return;
+            }
+            gb7c2Raw.Initialize(vram.data(), static_cast<uint32_t>(vram.size()));
+            gb7c2Crops.open(std::string(gb7c2Out) + ".crops", std::ios::binary);
+            if (!gb7c2Crops)
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB7C2 crop trace could not be opened");
+                return;
+            }
+            gb7c2Crops << "tick,packet,path,lower_before,lower_after,lower_changed,upper_changed,classification\n";
+        }
+
         uint64_t bisectTo = 0u;
         if (const char *value = std::getenv("PS2X_GS_REPLAY_BISECT_TO"))
             bisectTo = std::strtoull(value, nullptr, 10);
@@ -464,7 +501,7 @@ namespace
         std::vector<std::string> rows;
         while (true)
         {
-            if (gb7bDone)
+            if (gb7bDone || gb7c2Done)
                 break;
             uint32_t length = 0;
             std::vector<uint8_t> rec;
@@ -526,10 +563,24 @@ namespace
                         break;
                     }
                 }
+                // GB7C2: display-crop before image for chain-window packets.
+                const bool gb7c2Packet = gb7c2Probe && packets >= 47176u && packets <= 47240u;
+                Gb5Crops gb7c2Before, gb7c2After;
+                if (gb7c2Packet)
+                {
+                    if (!readGb5Crops(gb7c2Raw, regs, tick, gb7c2Before))
+                    {
+                        parseOk = false;
+                        std::cerr << "GB7C2_PROBE_ERROR before packet=" << packets << " tick=" << tick << '\n';
+                        break;
+                    }
+                }
                 gs.noteGifPath(static_cast<GifPathId>(pathId));
                 const bool forceRtz = rtzAll || (rtzPath1 && pathId == 1u);
                 if (gb7bProbe)
                     ps2xGb7bSetPacketContext(tick, packets, pathId);
+                if (gb7c2Probe)
+                    ps2xGb7c2SetPacketContext(tick, packets, pathId);
                 {
                     ScopedReplayRtz scope(forceRtz);
                     if (!scope.ok)
@@ -611,6 +662,34 @@ namespace
                     gb5bPrevAfter = gb5bAfter;
                     gb5bPrevTick = tick;
                     gb5bPrevValid = true;
+                }
+                if (gb7c2Packet)
+                {
+                    if (!readGb5Crops(gb7c2Raw, regs, tick, gb7c2After))
+                    {
+                        parseOk = false;
+                        std::cerr << "GB7C2_PROBE_ERROR after packet=" << packets << " tick=" << tick << '\n';
+                        break;
+                    }
+                    const uint32_t lowerChanged = changedPixels(gb7c2Before.lower, gb7c2After.lower);
+                    const uint32_t upperChanged = changedPixels(gb7c2Before.upper, gb7c2After.upper);
+                    if (++gb7c2CropRows > 1000u)
+                    {
+                        parseOk = false;
+                        std::cerr << "GB7C2_PROBE_ERROR crop row cap exceeded\n";
+                        break;
+                    }
+                    const char *gb7c2Cls = "crop-clean";
+                    if (lowerChanged || upperChanged)
+                    {
+                        gb7c2Cls = (packets != 47240u && lowerChanged > 2775u)
+                                       ? "full-cover-intervened-unknown"
+                                       : "crop-changed";
+                    }
+                    gb7c2Crops << tick << ',' << packets << ',' << static_cast<unsigned>(pathId) << ','
+                               << std::hex << std::setw(8) << std::setfill('0') << gb7c2Before.lower.hash << ','
+                               << std::setw(8) << gb7c2After.lower.hash << std::dec << ',' << lowerChanged << ','
+                               << upperChanged << ',' << gb7c2Cls << '\n';
                 }
                 if (forceRtz)
                     ++roundedPackets;
@@ -778,6 +857,8 @@ namespace
                 rows.emplace_back(row);
                 if (gb7bProbe && tick >= 700u)
                     gb7bDone = true;
+                if (gb7c2Probe && tick >= 700u)
+                    gb7c2Done = true;
             }
             else if (kind == 5u)
             {
@@ -892,6 +973,12 @@ namespace
         {
             ps2xGb7bProbeClose();
             t.IsTrue(gb7bDone, "GB7B replay reached marker 700");
+        }
+        if (gb7c2Probe)
+        {
+            ps2xGb7c2ProbeClose();
+            t.IsTrue(gb7c2Done, "GB7C2 replay reached marker 700");
+            t.IsTrue(gb7c2Crops.good() && gb7c2CropRows > 0u, "GB7C2 chain-window crop trace written");
         }
 
         if (std::getenv("PS2X_GS_REPLAY_PACKET_TRACE"))

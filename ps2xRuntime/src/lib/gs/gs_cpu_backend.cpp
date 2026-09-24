@@ -117,6 +117,148 @@ bool ps2xGb7bProbeEnabled()
     return gb7bState().enabled;
 }
 
+// GB7C2 bounded CPU pixel/ROI title-text chain probe (default OFF).
+// Predeclared single chain only: tick600 path2 packet47176 (off-screen
+// fbp=0 T4 sprites, STQ) -> tick601 path3 packet47240 (same-column
+// fbp=112/tbp0=0 display blit, FST). Per candidate sprite the probe logs
+// one batch row, up to 4 interior pixels with an independent old read
+// taken immediately before WritePixel plus the new value after, and one
+// off-screen ROI before/after diff. The WritePixel-internal conditional
+// old read is never used as proof. Rendering is untouched: the probe
+// only adds ReadVramUnlocked calls (side-effect-free) and log writes.
+namespace
+{
+struct Gb7c2ProbeState
+{
+    bool enabled = false;
+    std::ofstream out;
+    Gb7c2PacketContext ctx{};
+    uint64_t nextBatch = 0;
+    uint64_t rows = 0;
+    uint64_t bytes = 0;
+    bool capped = false;
+    // Current batch (valid while DrawPrimitive dispatches it).
+    int curKind = 0; // 0 = untraced, 1 = C1 glyph batch, 2 = carrier batch
+    uint64_t curBatch = 0;
+    // C1 interior-pixel picks (framebuffer coords).
+    int pickX[4] = {0, 0, 0, 0};
+    int pickY[4] = {0, 0, 0, 0};
+    int curPicks = 0;
+    int curLogged = 0;
+    // Off-screen ROI (340,375)-(410,415) snapshots, CT32 words.
+    uint32_t roiFbp = 0;
+    uint32_t roiFbw = 8;
+    uint32_t roiPsm = 0;
+    std::vector<uint32_t> roiBefore;
+    std::vector<uint32_t> lastC1After;
+    uint32_t lastC1Hash = 0;
+    bool lastC1Valid = false;
+};
+
+Gb7c2ProbeState &gb7c2State()
+{
+    static Gb7c2ProbeState s;
+    return s;
+}
+
+constexpr uint64_t kGb7c2MaxRows = 20000u;
+constexpr uint64_t kGb7c2MaxBytes = 8u * 1024u * 1024u;
+constexpr int kGb7c2RoiX0 = 340;
+constexpr int kGb7c2RoiY0 = 375;
+constexpr int kGb7c2RoiX1 = 410;
+constexpr int kGb7c2RoiY1 = 415;
+constexpr int kGb7c2CropX0 = 340;
+constexpr int kGb7c2CropY0 = 360;
+constexpr int kGb7c2CropX1 = 430;
+constexpr int kGb7c2CropY1 = 420;
+constexpr int kGb7c2MaxPicks = 4;
+constexpr int kGb7c2MaxCarrierPixels = 8;
+
+void gb7c2Emit(const char *srcXy, const char *dstXy,
+               const char *oldV, const char *newV,
+               const char *texel, const char *roiDiff, const char *cropDiff,
+               const char *classification)
+{
+    Gb7c2ProbeState &s = gb7c2State();
+    if (!s.enabled || s.capped)
+        return;
+    char line[2048];
+    const int count = std::snprintf(
+        line, sizeof(line), "%llu\t%llu\t%u\t%llu\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+        static_cast<unsigned long long>(s.ctx.tick),
+        static_cast<unsigned long long>(s.ctx.packetIndex), s.ctx.path,
+        static_cast<unsigned long long>(s.curBatch),
+        srcXy, dstXy, oldV, newV, texel, roiDiff, cropDiff, classification);
+    if (count <= 0 || static_cast<size_t>(count) >= sizeof(line))
+        return;
+    if (s.rows >= kGb7c2MaxRows || s.bytes + static_cast<uint64_t>(count) > kGb7c2MaxBytes)
+    {
+        s.capped = true;
+        return;
+    }
+    s.out << line;
+    if (!s.out.good())
+    {
+        s.capped = true;
+        return;
+    }
+    ++s.rows;
+    s.bytes += static_cast<uint64_t>(count);
+}
+} // namespace
+
+void ps2xGb7c2ProbeOpen(const char *path)
+{
+    Gb7c2ProbeState &s = gb7c2State();
+    if (s.enabled || !path || !*path)
+        return;
+    s.out.open(path, std::ios::binary | std::ios::trunc);
+    if (!s.out)
+        return;
+    s.out << "tick\tpacket\tpath\tbatch\tsrc_xy\tdst_xy\told\tnew\ttexel\troi_diff\tcrop_diff\tclassification\n";
+    s.bytes += 84u;
+    s.ctx = Gb7c2PacketContext{};
+    s.nextBatch = 0;
+    s.rows = 0;
+    s.capped = false;
+    s.curKind = 0;
+    s.curBatch = 0;
+    s.curPicks = 0;
+    s.curLogged = 0;
+    s.roiBefore.clear();
+    s.lastC1After.clear();
+    s.lastC1Hash = 0;
+    s.lastC1Valid = false;
+    s.enabled = s.out.good();
+}
+
+void ps2xGb7c2ProbeClose()
+{
+    Gb7c2ProbeState &s = gb7c2State();
+    if (s.enabled)
+    {
+        std::cout << "GB7C2_SUMMARY rows=" << s.rows << " bytes=" << s.bytes
+                  << " capped=" << (s.capped ? 1 : 0) << '\n';
+    }
+    s.enabled = false;
+    if (s.out.is_open())
+        s.out.close();
+}
+
+void ps2xGb7c2SetPacketContext(uint64_t tick, uint64_t packetIndex, unsigned path)
+{
+    Gb7c2ProbeState &s = gb7c2State();
+    s.ctx.tick = tick;
+    s.ctx.packetIndex = packetIndex;
+    s.ctx.path = path;
+    s.nextBatch = 0;
+}
+
+bool ps2xGb7c2ProbeEnabled()
+{
+    return gb7c2State().enabled;
+}
+
 bool ps2xDeinterlaceBobValue(const char *value)
 {
     if (value == nullptr || value[0] == '\0')
@@ -994,10 +1136,349 @@ void GSCpuBackend::NoteGb7bCandidate(const GSPrimitiveBatch &batch)
     s.bytes += static_cast<uint64_t>(count);
 }
 
+uint64_t GSCpuBackend::NoteGb7c2BatchBegin(const GSPrimitiveBatch &batch)
+{
+    Gb7c2ProbeState &s = gb7c2State();
+    const uint64_t batchId = s.nextBatch++;
+    s.curBatch = batchId;
+    s.curKind = 0;
+    s.curPicks = 0;
+    s.curLogged = 0;
+    if (!s.enabled || s.capped)
+        return batchId;
+    const GSDrawState &state = batch.state;
+    const auto &ctx = state.context;
+    const bool isSprite = state.prim.type == GS_PRIM_SPRITE && batch.vertexCount >= 2u;
+    const bool isC1 = isSprite && !state.prim.fst &&
+                      s.ctx.tick == 600u && s.ctx.packetIndex == 47176u && s.ctx.path == 2u &&
+                      ctx.frame.fbp == 0u && ctx.tex0.tbp0 == 11017u;
+    const bool isCarrier = isSprite && state.prim.fst && state.prim.tme &&
+                           s.ctx.tick == 601u && s.ctx.packetIndex == 47240u && s.ctx.path == 3u &&
+                           ctx.frame.fbp == 112u && ctx.tex0.tbp0 == 0u;
+    if (!isC1 && !isCarrier)
+        return batchId;
+    s.curKind = isC1 ? 1 : 2;
+
+    // Clipped sprite rect (mirrors DrawSprite).
+    const int ofx = ctx.xyoffset.ofx >> 4;
+    const int ofy = ctx.xyoffset.ofy >> 4;
+    int ax0 = static_cast<int>(batch.vertices[0].x) - ofx;
+    int ay0 = static_cast<int>(batch.vertices[0].y) - ofy;
+    int ax1 = static_cast<int>(batch.vertices[1].x) - ofx;
+    int ay1 = static_cast<int>(batch.vertices[1].y) - ofy;
+    if (ax0 > ax1)
+        std::swap(ax0, ax1);
+    if (ay0 > ay1)
+        std::swap(ay0, ay1);
+    const int spanX = std::max(1, ax1 - ax0);
+    const int spanY = std::max(1, ay1 - ay0);
+    ax1 = ax0 + spanX - 1;
+    ay1 = ay0 + spanY - 1;
+    const int x0 = clampInt(ax0, ctx.scissor.x0, ctx.scissor.x1);
+    const int y0 = clampInt(ay0, ctx.scissor.y0, ctx.scissor.y1);
+    const int x1 = clampInt(ax1, ctx.scissor.x0, ctx.scissor.x1);
+    const int y1 = clampInt(ay1, ctx.scissor.y0, ctx.scissor.y1);
+
+    char detail[512];
+    std::snprintf(detail, sizeof(detail),
+                  "rect=(%d,%d)-(%d,%d) fst=%u tme=%u frame=fbp%u,fbw%u,psm%u "
+                  "tex=tbp0-%u,tbw%u,psm%u,tw%u,th%u,tcc%u,tfx%u,cbp%u,cpsm%u,csm%u,csa%u "
+                  "test=0x%llx alpha=0x%llx",
+                  x0, y0, x1, y1, state.prim.fst ? 1u : 0u, state.prim.tme ? 1u : 0u,
+                  ctx.frame.fbp, static_cast<unsigned>(ctx.frame.fbw),
+                  static_cast<unsigned>(ctx.frame.psm),
+                  ctx.tex0.tbp0, static_cast<unsigned>(ctx.tex0.tbw),
+                  static_cast<unsigned>(ctx.tex0.psm), static_cast<unsigned>(ctx.tex0.tw),
+                  static_cast<unsigned>(ctx.tex0.th), static_cast<unsigned>(ctx.tex0.tcc),
+                  static_cast<unsigned>(ctx.tex0.tfx), ctx.tex0.cbp,
+                  static_cast<unsigned>(ctx.tex0.cpsm), static_cast<unsigned>(ctx.tex0.csm),
+                  static_cast<unsigned>(ctx.tex0.csa),
+                  static_cast<unsigned long long>(ctx.test),
+                  static_cast<unsigned long long>(ctx.alpha));
+    gb7c2Emit("-", "-", "-", "-", detail, "-", "-",
+              isC1 ? "batch-c1" : "batch-carrier");
+
+    if (isC1)
+    {
+        // Fixed interior-pixel set: four corners, then center; deduped.
+        const int cx = (x0 + x1) / 2;
+        const int cy = (y0 + y1) / 2;
+        const int candX[5] = {x0, x1, x0, x1, cx};
+        const int candY[5] = {y0, y0, y1, y1, cy};
+        for (int i = 0; i < 5 && s.curPicks < kGb7c2MaxPicks; ++i)
+        {
+            bool dup = false;
+            for (int j = 0; j < s.curPicks; ++j)
+            {
+                if (s.pickX[j] == candX[i] && s.pickY[j] == candY[i])
+                {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup)
+            {
+                s.pickX[s.curPicks] = candX[i];
+                s.pickY[s.curPicks] = candY[i];
+                ++s.curPicks;
+            }
+        }
+        // Before snapshot of the off-screen ROI at this batch's frame format.
+        s.roiFbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+        s.roiFbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+        s.roiPsm = ctx.frame.psm;
+        const int w = kGb7c2RoiX1 - kGb7c2RoiX0 + 1;
+        const int h = kGb7c2RoiY1 - kGb7c2RoiY0 + 1;
+        s.roiBefore.assign(static_cast<size_t>(w * h), 0u);
+        for (int yy = 0; yy < h; ++yy)
+        {
+            for (int xx = 0; xx < w; ++xx)
+            {
+                s.roiBefore[static_cast<size_t>(yy * w + xx)] =
+                    ReadVramUnlocked(s.roiPsm, s.roiFbp, s.roiFbw,
+                                     kGb7c2RoiX0 + xx, kGb7c2RoiY0 + yy);
+            }
+        }
+        return batchId;
+    }
+    // Carrier batch: re-read the ROI and compare against the last C1
+    // after-image. Any change means an intervening writer (unknown).
+    const int w = kGb7c2RoiX1 - kGb7c2RoiX0 + 1;
+    const int h = kGb7c2RoiY1 - kGb7c2RoiY0 + 1;
+    char link[512];
+    if (!s.lastC1Valid || s.lastC1After.size() != static_cast<size_t>(w * h))
+    {
+        std::snprintf(link, sizeof(link), "c1=none");
+        gb7c2Emit("-", "-", "-", "-", "-", link, "-", "roi-link-no-c1-unknown");
+        return batchId;
+    }
+    uint64_t changed = 0;
+    int bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+    bool first = true;
+    for (int yy = 0; yy < h; ++yy)
+    {
+        for (int xx = 0; xx < w; ++xx)
+        {
+            const uint32_t now = ReadVramUnlocked(s.roiPsm, s.roiFbp, s.roiFbw,
+                                                  kGb7c2RoiX0 + xx, kGb7c2RoiY0 + yy);
+            if (now != s.lastC1After[static_cast<size_t>(yy * w + xx)])
+            {
+                ++changed;
+                if (first)
+                {
+                    bx0 = bx1 = kGb7c2RoiX0 + xx;
+                    by0 = by1 = kGb7c2RoiY0 + yy;
+                    first = false;
+                }
+                else
+                {
+                    bx0 = std::min(bx0, kGb7c2RoiX0 + xx);
+                    by0 = std::min(by0, kGb7c2RoiY0 + yy);
+                    bx1 = std::max(bx1, kGb7c2RoiX0 + xx);
+                    by1 = std::max(by1, kGb7c2RoiY0 + yy);
+                }
+            }
+        }
+    }
+    if (changed == 0u)
+    {
+        std::snprintf(link, sizeof(link), "c1hash=%08x equal=1 changed=0",
+                      s.lastC1Hash);
+        gb7c2Emit("-", "-", "-", "-", "-", link, "-", "roi-link-equal");
+    }
+    else
+    {
+        const uint64_t area = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
+        const bool fullCover = changed * 10u >= area * 9u;
+        std::snprintf(link, sizeof(link),
+                      "c1hash=%08x equal=0 changed=%llu bbox=(%d,%d)-(%d,%d)",
+                      s.lastC1Hash, static_cast<unsigned long long>(changed),
+                      bx0, by0, bx1, by1);
+        gb7c2Emit("-", "-", "-", "-", "-", link, "-",
+                  fullCover ? "roi-link-changed-full-cover-intervened-unknown"
+                            : "roi-link-changed-unknown-writer");
+    }
+    return batchId;
+}
+
+void GSCpuBackend::NoteGb7c2BatchEnd(const GSPrimitiveBatch &batch, uint64_t batchId)
+{
+    (void)batch;
+    (void)batchId;
+    Gb7c2ProbeState &s = gb7c2State();
+    if (!s.enabled || s.capped || s.curKind != 1)
+        return;
+    // After snapshot + diff of the off-screen ROI for this C1 batch.
+    const int w = kGb7c2RoiX1 - kGb7c2RoiX0 + 1;
+    const int h = kGb7c2RoiY1 - kGb7c2RoiY0 + 1;
+    if (s.roiBefore.size() != static_cast<size_t>(w * h))
+        return;
+    std::vector<uint32_t> after(static_cast<size_t>(w * h), 0u);
+    for (int yy = 0; yy < h; ++yy)
+    {
+        for (int xx = 0; xx < w; ++xx)
+        {
+            after[static_cast<size_t>(yy * w + xx)] =
+                ReadVramUnlocked(s.roiPsm, s.roiFbp, s.roiFbw,
+                                 kGb7c2RoiX0 + xx, kGb7c2RoiY0 + yy);
+        }
+    }
+    uint64_t changed = 0;
+    int bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+    bool first = true;
+    char coords[256] = "";
+    size_t coordLen = 0;
+    int coordCount = 0;
+    for (int yy = 0; yy < h; ++yy)
+    {
+        for (int xx = 0; xx < w; ++xx)
+        {
+            const size_t i = static_cast<size_t>(yy * w + xx);
+            if (after[i] != s.roiBefore[i])
+            {
+                ++changed;
+                const int px = kGb7c2RoiX0 + xx;
+                const int py = kGb7c2RoiY0 + yy;
+                if (first)
+                {
+                    bx0 = bx1 = px;
+                    by0 = by1 = py;
+                    first = false;
+                }
+                else
+                {
+                    bx0 = std::min(bx0, px);
+                    by0 = std::min(by0, py);
+                    bx1 = std::max(bx1, px);
+                    by1 = std::max(by1, py);
+                }
+                if (coordCount < 8)
+                {
+                    char cell[32];
+                    std::snprintf(cell, sizeof(cell), "%s(%d,%d)",
+                                  coordCount == 0 ? "" : ";", px, py);
+                    const size_t n = std::strlen(cell);
+                    if (coordLen + n < sizeof(coords))
+                    {
+                        std::memcpy(coords + coordLen, cell, n + 1);
+                        coordLen += n;
+                        ++coordCount;
+                    }
+                }
+            }
+        }
+    }
+    s.lastC1After = after;
+    s.lastC1Hash = gb7bFnv(reinterpret_cast<const uint8_t *>(after.data()),
+                           after.size() * sizeof(uint32_t));
+    s.lastC1Valid = true;
+    char diff[512];
+    const uint64_t area = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
+    if (changed == 0u)
+    {
+        std::snprintf(diff, sizeof(diff), "changed=0");
+        gb7c2Emit("-", "-", "-", "-", "-", diff, "-", "roi-clean");
+    }
+    else
+    {
+        const bool fullCover = changed * 10u >= area * 9u;
+        std::snprintf(diff, sizeof(diff),
+                      "changed=%llu bbox=(%d,%d)-(%d,%d) coords=%s",
+                      static_cast<unsigned long long>(changed), bx0, by0, bx1, by1, coords);
+        gb7c2Emit("-", "-", "-", "-", "-", diff, "-",
+                  fullCover ? "roi-full-cover-intervened-unknown" : "roi-changed");
+    }
+}
+
+void GSCpuBackend::TraceGb7c2Pixel(const GSDrawState &state, int x, int y, uint32_t z,
+                                   int su, int sv, int wu, int wv,
+                                   uint32_t texel, uint32_t rawTex, int clutIndex,
+                                   uint8_t combR, uint8_t combG, uint8_t combB, uint8_t combA,
+                                   uint32_t oldVal)
+{
+    Gb7c2ProbeState &s = gb7c2State();
+    if (!s.enabled || s.capped || s.curKind == 0)
+        return;
+    const auto &ctx = state.context;
+    const uint32_t fbp = GSInternal::framePageBaseToBlock(ctx.frame.fbp);
+    const uint32_t fbw = std::max<uint32_t>(ctx.frame.fbw, 1u);
+    const uint32_t fpsm = ctx.frame.psm;
+    // New value after the (already executed) WritePixel. The probe's own
+    // old read is independent and unconditional; the WritePixel internal
+    // read is conditional on frmw and is not used here.
+    const uint32_t newVal = ReadVramUnlocked(fpsm, fbp, fbw, x, y);
+    // TEST/ALPHA outcome evaluated on the independent old value.
+    const PixelWriteMask wm = classifyAlphaTest(ctx.test, combA, static_cast<uint8_t>(fpsm));
+    char outcome[64];
+    if (!wm.writesFramebuffer())
+    {
+        std::snprintf(outcome, sizeof(outcome), "%s",
+                      wm.writeDepth ? "depth-only-no-fb-write" : "test-rejected:no-write");
+    }
+    else if (!passesDestinationAlphaTest(ctx.test, static_cast<uint8_t>(fpsm), oldVal))
+    {
+        std::snprintf(outcome, sizeof(outcome), "test-rejected:dest-alpha");
+    }
+    else
+    {
+        const uint32_t zMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
+        bool zpass = false;
+        if (zMethod == 0u)
+            zpass = false;
+        else if (zMethod == 1u)
+            zpass = true;
+        else
+        {
+            const uint32_t zbp = GSInternal::framePageBaseToBlock(ctx.zbuf.zbp);
+            const uint32_t storedZ = ReadVramUnlocked(ctx.zbuf.psm, zbp, fbw, x, y);
+            zpass = (zMethod == 2u) ? (z >= storedZ) : (z > storedZ);
+        }
+        if (!zpass)
+            std::snprintf(outcome, sizeof(outcome), "test-rejected:ztest");
+        else if (newVal != oldVal)
+            std::snprintf(outcome, sizeof(outcome), "traced-write");
+        else
+            std::snprintf(outcome, sizeof(outcome), "write-same-value-unknown");
+    }
+    char srcXy[64], dstXy[64], oldS[16], newS[16], texS[320], cls[160];
+    std::snprintf(srcXy, sizeof(srcXy), "(%d,%d)", su, sv);
+    std::snprintf(dstXy, sizeof(dstXy), "(%d,%d)", x, y);
+    std::snprintf(oldS, sizeof(oldS), "%08x", oldVal);
+    std::snprintf(newS, sizeof(newS), "%08x", newVal);
+    if (clutIndex >= 0)
+    {
+        std::snprintf(texS, sizeof(texS),
+                      "fst=%u lin=%u wrap=(%d,%d) raw=%08x nibble=%x clut=%d rgba=%08x "
+                      "test=0x%llx alpha=0x%llx",
+                      state.prim.fst ? 1u : 0u, state.linearFilter ? 1u : 0u,
+                      wu, wv, rawTex, rawTex & 0xFu, clutIndex, texel,
+                      static_cast<unsigned long long>(ctx.test),
+                      static_cast<unsigned long long>(ctx.alpha));
+    }
+    else
+    {
+        std::snprintf(texS, sizeof(texS),
+                      "fst=%u lin=%u wrap=(%d,%d) raw=%08x rgba=%08x "
+                      "test=0x%llx alpha=0x%llx",
+                      state.prim.fst ? 1u : 0u, state.linearFilter ? 1u : 0u,
+                      wu, wv, rawTex, texel,
+                      static_cast<unsigned long long>(ctx.test),
+                      static_cast<unsigned long long>(ctx.alpha));
+    }
+    std::snprintf(cls, sizeof(cls), "%s;rgba-in=(%u,%u,%u,%u)", outcome,
+                  combR, combG, combB, combA);
+    gb7c2Emit(srcXy, dstXy, oldS, newS, texS, "-", "-", cls);
+}
+
 void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
 {
     if (gb7bState().enabled)
         NoteGb7bCandidate(batch);
+    // GB7C2: assign the intra-packet batch id (no render effect when OFF).
+    uint64_t gb7c2Batch = 0;
+    const bool gb7c2Active = gb7c2State().enabled;
+    if (gb7c2Active)
+        gb7c2Batch = NoteGb7c2BatchBegin(batch);
     const GSDrawState &state = batch.state;
     const auto &ctx = state.context;
     PS2_IF_AGRESSIVE_LOGS({
@@ -1132,6 +1613,8 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     default:
         break;
     }
+    if (gb7c2Active)
+        NoteGb7c2BatchEnd(batch, gb7c2Batch);
 }
 
 void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint8_t fog)
@@ -1509,6 +1992,22 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
         if (spriteH < 1.0f)
             spriteH = 1.0f;
 
+        // GB7C2: frame address + wrap modes for the independent old/new
+        // reads. Pure locals; no render effect. Only live when the probe
+        // is open (one branch per batch otherwise).
+        Gb7c2ProbeState &gb7c2 = gb7c2State();
+        const bool gb7c2Sprite = gb7c2.enabled && !gb7c2.capped && gb7c2.curKind != 0;
+        const uint32_t gb7c2Fbp = gb7c2Sprite ? GSInternal::framePageBaseToBlock(ctx.frame.fbp) : 0u;
+        const uint32_t gb7c2Fbw = gb7c2Sprite ? std::max<uint32_t>(ctx.frame.fbw, 1u) : 1u;
+        const uint32_t gb7c2Fpsm = gb7c2Sprite ? ctx.frame.psm : 0u;
+        const uint64_t gb7c2Clamp = ctx.clamp;
+        const uint8_t gb7c2WrapU = static_cast<uint8_t>(gb7c2Clamp & 0x3u);
+        const uint8_t gb7c2WrapV = static_cast<uint8_t>((gb7c2Clamp >> 2) & 0x3u);
+        const uint16_t gb7c2MinU = static_cast<uint16_t>((gb7c2Clamp >> 4) & 0x3FFu);
+        const uint16_t gb7c2MaxU = static_cast<uint16_t>((gb7c2Clamp >> 14) & 0x3FFu);
+        const uint16_t gb7c2MinV = static_cast<uint16_t>((gb7c2Clamp >> 24) & 0x3FFu);
+        const uint16_t gb7c2MaxV = static_cast<uint16_t>((gb7c2Clamp >> 34) & 0x3FFu);
+
         for (int y = drawY0; y <= drawY1; ++y)
         {
             float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
@@ -1519,17 +2018,67 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
                 float tx = (static_cast<float>(x - unclippedX0) + 0.5f) / spriteW;
                 float texUf = u0f + (u1f - u0f) * tx;
                 uint32_t texel = 0xFFFF00FFu;
+                int gb7c2Su = 0, gb7c2Sv = 0;
                 if (state.prim.fst)
                 {
                     const int fixedU = static_cast<int>((texUf * 16.0f) + 0.5f);
                     const int fixedV = static_cast<int>((texVf * 16.0f) + 0.5f);
                     const uint16_t sampleU = static_cast<uint16_t>(clampInt(fixedU, 0, 0xFFFF));
                     const uint16_t sampleV = static_cast<uint16_t>(clampInt(fixedV, 0, 0xFFFF));
+                    gb7c2Su = static_cast<int>(sampleU >> 4);
+                    gb7c2Sv = static_cast<int>(sampleV >> 4);
                     texel = SampleTexture(state, 0.0f, 0.0f, 1.0f, sampleU, sampleV);
                 }
                 else
                 {
+                    gb7c2Su = static_cast<int>(texUf);
+                    gb7c2Sv = static_cast<int>(texVf);
                     texel = SampleTexture(state, texUf / static_cast<float>(texW), texVf / static_cast<float>(texH), 1.0f, 0u, 0u);
+                }
+
+                // GB7C2 pixel trace: decide membership, take the independent
+                // old read, then let WritePixel run unchanged below.
+                bool gb7c2Trace = false;
+                int gb7c2Wu = 0, gb7c2Wv = 0;
+                uint32_t gb7c2Raw = 0;
+                int gb7c2Clut = -1;
+                uint32_t gb7c2Old = 0;
+                if (gb7c2Sprite)
+                {
+                    if (gb7c2.curKind == 1)
+                    {
+                        for (int pi = 0; pi < gb7c2.curPicks; ++pi)
+                        {
+                            if (gb7c2.pickX[pi] == x && gb7c2.pickY[pi] == y)
+                            {
+                                gb7c2Trace = true;
+                                break;
+                            }
+                        }
+                    }
+                    else if (gb7c2.curKind == 2 && gb7c2.curLogged < kGb7c2MaxCarrierPixels &&
+                             x >= kGb7c2CropX0 && x <= kGb7c2CropX1 &&
+                             y >= kGb7c2CropY0 && y <= kGb7c2CropY1 &&
+                             gb7c2Su >= kGb7c2RoiX0 && gb7c2Su <= kGb7c2RoiX1 &&
+                             gb7c2Sv >= kGb7c2RoiY0 && gb7c2Sv <= kGb7c2RoiY1)
+                    {
+                        gb7c2Trace = true;
+                        ++gb7c2.curLogged;
+                    }
+                    if (gb7c2Trace)
+                    {
+                        gb7c2Wu = wrapTextureCoordinate(gb7c2Su, texW, gb7c2WrapU, gb7c2MinU, gb7c2MaxU);
+                        gb7c2Wv = wrapTextureCoordinate(gb7c2Sv, texH, gb7c2WrapV, gb7c2MinV, gb7c2MaxV);
+                        gb7c2Raw = ReadVramUnlocked(tex.psm, tex.tbp0, tex.tbw, gb7c2Wu, gb7c2Wv);
+                        if (tex.psm == GS_PSM_T8 || tex.psm == GS_PSM_T8H ||
+                            tex.psm == GS_PSM_T4 || tex.psm == GS_PSM_T4HL || tex.psm == GS_PSM_T4HH)
+                        {
+                            gb7c2Clut = static_cast<int>(resolveClutIndex(
+                                static_cast<uint8_t>(gb7c2Raw),
+                                tex.cpsm, tex.csm, tex.csa, tex.psm));
+                        }
+                        gb7c2Old = ReadVramUnlocked(gb7c2Fpsm, gb7c2Fbp, gb7c2Fbw, x, y);
+                    }
                 }
 
                 uint8_t tr = static_cast<uint8_t>(texel & 0xFF);
@@ -1539,6 +2088,12 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
 
                 const TextureCombineResult color = combineTexture(tex, r, g, b, a, tr, tg, tb, ta);
                 WritePixel(state, x, y, z1, color.r, color.g, color.b, color.a, v1.fog);
+                if (gb7c2Trace)
+                {
+                    TraceGb7c2Pixel(state, x, y, z1, gb7c2Su, gb7c2Sv, gb7c2Wu, gb7c2Wv,
+                                    texel, gb7c2Raw, gb7c2Clut,
+                                    color.r, color.g, color.b, color.a, gb7c2Old);
+                }
             }
         }
     }

@@ -32,6 +32,27 @@ void ps2xGb7bProbeClose();
 void ps2xGb7bSetPacketContext(uint64_t tick, uint64_t packetIndex, unsigned path);
 bool ps2xGb7bProbeEnabled();
 
+// GB7C2 bounded CPU pixel/ROI title-text chain probe (default OFF).
+// Replay-only diagnostic for the single predeclared chain tick600 path2
+// packet47176 (off-screen fbp=0 T4 sprites) -> tick601 path3 packet47240
+// (same-column fbp=112/tbp0=0 display blit). The harness sets the current
+// GIF packet context before each processGIFPacket; the backend assigns an
+// intra-packet batch id per DrawPrimitive, logs a small fixed set of
+// interior pixels per candidate sprite with independent old/new reads,
+// and diffs the off-screen ROI per candidate batch. With the probe
+// closed/disabled every hook returns early and rendering is byte-identical.
+struct Gb7c2PacketContext
+{
+    uint64_t tick = 0;
+    uint64_t packetIndex = 0;
+    unsigned path = 0;
+    uint64_t batch = 0;
+};
+void ps2xGb7c2ProbeOpen(const char *path);
+void ps2xGb7c2ProbeClose();
+void ps2xGb7c2SetPacketContext(uint64_t tick, uint64_t packetIndex, unsigned path);
+bool ps2xGb7c2ProbeEnabled();
+
 class GSCpuBackend final : public GSRasterBackend
 {
 public:
@@ -64,6 +85,17 @@ private:
 
     void DrawPrimitive(const GSPrimitiveBatch &batch);
     void NoteGb7bCandidate(const GSPrimitiveBatch &batch);
+    // GB7C2 chain probe hooks (no-ops unless the probe is open).
+    // BeginBatch assigns the intra-packet batch id and snapshots the
+    // off-screen ROI for candidate batches; EndBatch diffs it.
+    // TraceSpritePixel logs one interior pixel around its WritePixel call.
+    uint64_t NoteGb7c2BatchBegin(const GSPrimitiveBatch &batch);
+    void NoteGb7c2BatchEnd(const GSPrimitiveBatch &batch, uint64_t batchId);
+    void TraceGb7c2Pixel(const GSDrawState &state, int x, int y, uint32_t z,
+                         int su, int sv, int wu, int wv,
+                         uint32_t texel, uint32_t rawTex, int clutIndex,
+                         uint8_t combR, uint8_t combG, uint8_t combB, uint8_t combA,
+                         uint32_t oldVal);
     void DrawSprite(const GSPrimitiveBatch &batch);
     void DrawTriangle(const GSPrimitiveBatch &batch);
     void DrawLine(const GSPrimitiveBatch &batch);
