@@ -419,6 +419,14 @@ namespace
             }
         }
 
+        // GB7C5 writer watch reads its env flag early so the
+        // GB7B/GB7C2/GB7C4 probes below can exclude it; the trace itself is
+        // opened after the GB7C2 block. Direct CPU replay only; stops after
+        // the marker-601 sample.
+        const char *gb7c5Out = std::getenv("PS2X_GS_REPLAY_GB7C5_TRACE");
+        const bool gb7c5Probe = gb7c5Out && *gb7c5Out;
+        bool gb7c5Done = false;
+
         // GB7B bounded spatial title-glyph candidate probe (default OFF).
         // Direct CPU replay only; stops after the marker-700 sample.
         const char *gb7bOut = std::getenv("PS2X_GS_REPLAY_GB7B_TRACE");
@@ -426,10 +434,10 @@ namespace
         bool gb7bDone = false;
         if (gb7bProbe)
         {
-            if (parallelBackend || queued || gb5Probe || gb5bProbe)
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7c5Probe)
             {
                 std::fclose(f);
-                t.IsTrue(false, "GB7B requires direct CPU replay with no GB5/GB5B probe");
+                t.IsTrue(false, "GB7B requires direct CPU replay with no GB5/GB5B/GB7C5 probe");
                 return;
             }
             ps2xGb7bProbeOpen(gb7bOut);
@@ -450,10 +458,10 @@ namespace
         bool gb7c4Done = false;
         if (gb7c4Probe)
         {
-            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe)
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c5Probe)
             {
                 std::fclose(f);
-                t.IsTrue(false, "GB7C4 requires direct CPU replay with no GB5/GB5B/GB7B probe");
+                t.IsTrue(false, "GB7C4 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C5 probe");
                 return;
             }
             ps2xGb7c4ProbeOpen(gb7c4Out);
@@ -478,10 +486,10 @@ namespace
         uint32_t gb7c2CropRows = 0;
         if (gb7c2Probe)
         {
-            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c4Probe)
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c4Probe || gb7c5Probe)
             {
                 std::fclose(f);
-                t.IsTrue(false, "GB7C2 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C4 probe");
+                t.IsTrue(false, "GB7C2 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C4/GB7C5 probe");
                 return;
             }
             ps2xGb7c2ProbeOpen(gb7c2Out);
@@ -500,6 +508,27 @@ namespace
                 return;
             }
             gb7c2Crops << "tick,packet,path,lower_before,lower_after,lower_changed,upper_changed,classification\n";
+        }
+
+        // GB7C5 first-displayed-glyph-pixel writer watch (default OFF).
+        // Direct CPU replay only; watches the FBP112 word backing
+        // (342,377) across packet 0..47240; stops after the marker-601
+        // sample. No pixel poke in this part.
+        if (gb7c5Probe)
+        {
+            if (parallelBackend || queued || gb5Probe || gb5bProbe || gb7bProbe || gb7c4Probe || gb7c2Probe)
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB7C5 requires direct CPU replay with no GB5/GB5B/GB7B/GB7C2/GB7C4 probe");
+                return;
+            }
+            ps2xGb7c5ProbeOpen(gb7c5Out);
+            if (!ps2xGb7c5ProbeEnabled())
+            {
+                std::fclose(f);
+                t.IsTrue(false, "GB7C5 trace could not be opened");
+                return;
+            }
         }
 
         uint64_t bisectTo = 0u;
@@ -525,7 +554,7 @@ namespace
         std::vector<std::string> rows;
         while (true)
         {
-            if (gb7bDone || gb7c2Done || gb7c4Done)
+            if (gb7bDone || gb7c2Done || gb7c4Done || gb7c5Done)
                 break;
             uint32_t length = 0;
             std::vector<uint8_t> rec;
@@ -607,6 +636,8 @@ namespace
                     ps2xGb7c4SetPacketContext(tick, packets, pathId);
                 if (gb7c2Probe)
                     ps2xGb7c2SetPacketContext(tick, packets, pathId);
+                if (gb7c5Probe)
+                    ps2xGb7c5SetPacketContext(tick, packets, pathId);
                 {
                     ScopedReplayRtz scope(forceRtz);
                     if (!scope.ok)
@@ -617,6 +648,8 @@ namespace
                     if (packets != gb5bDrop)
                         gs.processGIFPacket(rec.data() + 14, size);
                 }
+                if (gb7c5Probe && packets == 47240u)
+                    ps2xGb7c5NotePacket47240Done();
                 if (gb5Packet)
                 {
                     if (!readGb5Crops(gb5Raw, regs, tick, gb5After))
@@ -887,6 +920,8 @@ namespace
                     gb7c4Done = true;
                 if (gb7c2Probe && tick >= 700u)
                     gb7c2Done = true;
+                if (gb7c5Probe && tick >= 601u)
+                    gb7c5Done = true;
             }
             else if (kind == 5u)
             {
@@ -1012,6 +1047,11 @@ namespace
             ps2xGb7c2ProbeClose();
             t.IsTrue(gb7c2Done, "GB7C2 replay reached marker 700");
             t.IsTrue(gb7c2Crops.good() && gb7c2CropRows > 0u, "GB7C2 chain-window crop trace written");
+        }
+        if (gb7c5Probe)
+        {
+            ps2xGb7c5ProbeClose();
+            t.IsTrue(gb7c5Done, "GB7C5 replay reached marker 601");
         }
 
         if (std::getenv("PS2X_GS_REPLAY_PACKET_TRACE"))

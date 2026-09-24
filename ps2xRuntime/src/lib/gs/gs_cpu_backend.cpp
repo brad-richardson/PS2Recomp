@@ -400,6 +400,272 @@ bool ps2xGb7c4ProbeEnabled()
     return gb7c4State().enabled;
 }
 
+// GB7C5 first-displayed-glyph-pixel writer watch (default OFF).
+// Watched pixel A from GB7C4: displayed (342,377) in FBP112/FBW8/PSMCT24,
+// swizzled storage word byte address 0x0019ae38 (GSPSMCT32::addrPSMCT32
+// with block = 112<<5 = 3584, width 8; CT24 shares the C32 page tables).
+// Expected displayed word 0x00353341. The watch sits in
+// WriteVramUnlocked, the single funnel for draw pixels, host-to-local
+// uploads, local-to-local transfers, clears and direct VRAM writes, so a
+// change by any path is attributed with the current op tag; a word that
+// changes with no logged row is impossible while the probe is open and
+// uncapped (cap status is reported, and the checker returns OTHER when
+// capped). Rendering is untouched: one enabled branch plus two 4-byte
+// loads per write, and log writes only on an actual watched-word change.
+namespace
+{
+struct Gb7c5ProbeState
+{
+    bool enabled = false;
+    std::ofstream out;
+    Gb7c5PacketContext ctx{};
+    uint64_t nextBatch = 0;
+    uint64_t curBatch = 0;
+    uint64_t seq = 0;
+    uint64_t rows = 0;
+    uint64_t bytes = 0;
+    bool capped = false;
+    bool startLogged = false;
+    bool preLogged = false;
+    bool postLogged = false;
+    // Live VRAM base registered at Initialize (replay is single-threaded;
+    // snapshots read the watched word with memcpy, no lock needed).
+    const uint8_t *vram = nullptr;
+    uint32_t vramSize = 0;
+    char op[16] = "-";
+    char detail[256] = "-";
+};
+
+Gb7c5ProbeState &gb7c5State()
+{
+    static Gb7c5ProbeState s;
+    return s;
+}
+
+constexpr uint32_t kGb7c5WatchAddr = 0x0019ae38u;
+constexpr uint64_t kGb7c5MaxRows = 20000u;
+constexpr uint64_t kGb7c5MaxBytes = 8u * 1024u * 1024u;
+
+uint32_t gb7c5WatchWord()
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    if (s.vram == nullptr || s.vramSize < kGb7c5WatchAddr + 4u)
+        return 0u;
+    uint32_t word = 0u;
+    std::memcpy(&word, s.vram + kGb7c5WatchAddr, sizeof(word));
+    return word;
+}
+
+void gb7c5Emit(uint32_t x, uint32_t y, uint32_t psm, uint32_t base, uint32_t bw,
+               uint32_t oldV, uint32_t newV, const char *kind)
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    if (!s.enabled || s.capped)
+        return;
+    char line[1024];
+    const int count = std::snprintf(
+        line, sizeof(line), "%llu\t%llu\t%llu\t%u\t%llu\t%s\t%08x\t%u\t%u\t%u\t%u\t%u\t%08x\t%08x\t%s\t%s\n",
+        static_cast<unsigned long long>(s.seq),
+        static_cast<unsigned long long>(s.ctx.tick),
+        static_cast<unsigned long long>(s.ctx.packetIndex), s.ctx.path,
+        static_cast<unsigned long long>(s.curBatch),
+        s.op, kGb7c5WatchAddr, x, y, psm, base, bw, oldV, newV, kind, s.detail);
+    if (count <= 0 || static_cast<size_t>(count) >= sizeof(line))
+        return;
+    if (s.rows >= kGb7c5MaxRows || s.bytes + static_cast<uint64_t>(count) > kGb7c5MaxBytes)
+    {
+        s.capped = true;
+        return;
+    }
+    s.out << line;
+    if (!s.out.good())
+    {
+        s.capped = true;
+        return;
+    }
+    ++s.seq;
+    ++s.rows;
+    s.bytes += static_cast<uint64_t>(count);
+}
+} // namespace
+
+void ps2xGb7c5ProbeOpen(const char *path)
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    if (s.enabled || !path || !*path)
+        return;
+    s.out.open(path, std::ios::binary | std::ios::trunc);
+    if (!s.out)
+        return;
+    s.out << "seq\ttick\tpacket\tpath\tbatch\top\taddr\tx\ty\tpsm\tbase\tbw\told\tnew\tkind\tdetail\n";
+    s.bytes += 68u;
+    s.ctx = Gb7c5PacketContext{};
+    s.nextBatch = 0;
+    s.curBatch = 0;
+    s.seq = 0;
+    s.rows = 0;
+    s.capped = false;
+    s.startLogged = false;
+    s.preLogged = false;
+    s.postLogged = false;
+    std::snprintf(s.op, sizeof(s.op), "-");
+    std::snprintf(s.detail, sizeof(s.detail), "-");
+    s.enabled = s.out.good();
+}
+
+void ps2xGb7c5ProbeClose()
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    if (s.enabled)
+    {
+        std::cout << "GB7C5_SUMMARY rows=" << s.rows << " bytes=" << s.bytes
+                  << " capped=" << (s.capped ? 1 : 0) << '\n';
+    }
+    s.enabled = false;
+    if (s.out.is_open())
+        s.out.close();
+}
+
+void ps2xGb7c5SetPacketContext(uint64_t tick, uint64_t packetIndex, unsigned path)
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    s.ctx.tick = tick;
+    s.ctx.packetIndex = packetIndex;
+    s.ctx.path = path;
+    s.nextBatch = 0;
+    if (!s.enabled || s.capped)
+        return;
+    if (packetIndex == 0u && !s.startLogged)
+    {
+        s.startLogged = true;
+        const uint32_t word = gb7c5WatchWord();
+        gb7c5Emit(342u, 377u, 1u, 3584u, 8u, word, word, "snapshot-start");
+    }
+    if (packetIndex == 47240u && !s.preLogged)
+    {
+        s.preLogged = true;
+        const uint32_t word = gb7c5WatchWord();
+        gb7c5Emit(342u, 377u, 1u, 3584u, 8u, word, word, "pre-47240");
+    }
+}
+
+void ps2xGb7c5NotePacket47240Done()
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    if (!s.enabled || s.capped || s.postLogged)
+        return;
+    s.postLogged = true;
+    const uint32_t word = gb7c5WatchWord();
+    gb7c5Emit(342u, 377u, 1u, 3584u, 8u, word, word, "post-47240");
+}
+
+bool ps2xGb7c5ProbeEnabled()
+{
+    return gb7c5State().enabled;
+}
+
+void ps2xGb7c5RegisterVram(const uint8_t *vram, uint32_t vramSize)
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    s.vram = vram;
+    s.vramSize = vramSize;
+}
+
+uint64_t GSCpuBackend::NoteGb7c5BatchBegin(const GSPrimitiveBatch &batch)
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    const uint64_t batchId = s.nextBatch++;
+    s.curBatch = batchId;
+    if (!s.enabled || s.capped)
+        return batchId;
+    const GSDrawState &state = batch.state;
+    const auto &ctx = state.context;
+    const char *primName = "other";
+    switch (state.prim.type)
+    {
+    case GS_PRIM_SPRITE:
+        primName = "sprite";
+        break;
+    case GS_PRIM_TRIANGLE:
+    case GS_PRIM_TRISTRIP:
+    case GS_PRIM_TRIFAN:
+        primName = "triangle";
+        break;
+    case GS_PRIM_LINE:
+    case GS_PRIM_LINESTRIP:
+        primName = "line";
+        break;
+    case GS_PRIM_POINT:
+        primName = "point";
+        break;
+    default:
+        break;
+    }
+    std::snprintf(s.op, sizeof(s.op), "draw");
+    std::snprintf(s.detail, sizeof(s.detail),
+                  "prim=%s frame=fbp%u,fbw%u,psm%u,fbmsk=0x%08x",
+                  primName, ctx.frame.fbp, static_cast<unsigned>(ctx.frame.fbw),
+                  static_cast<unsigned>(ctx.frame.psm), ctx.frame.fbmsk);
+    return batchId;
+}
+
+void GSCpuBackend::NoteGb7c5UploadOp()
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    if (!s.enabled || s.capped)
+        return;
+    std::snprintf(s.op, sizeof(s.op), "upload");
+    std::snprintf(s.detail, sizeof(s.detail),
+                  "dst=dpsm%u,dbp%u,dbw%u rrw%u,rrh%u dsax%u,dsay%u",
+                  static_cast<unsigned>(m_transfer.bitbltbuf.dpsm),
+                  m_transfer.bitbltbuf.dbp,
+                  static_cast<unsigned>(m_transfer.bitbltbuf.dbw),
+                  m_transfer.trxreg.rrw, m_transfer.trxreg.rrh,
+                  m_transfer.trxpos.dsax, m_transfer.trxpos.dsay);
+}
+
+void GSCpuBackend::NoteGb7c5LocalToLocalOp()
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    if (!s.enabled || s.capped)
+        return;
+    std::snprintf(s.op, sizeof(s.op), "ll");
+    std::snprintf(s.detail, sizeof(s.detail),
+                  "src=spsm%u,sbp%u,sbw%u dst=dpsm%u,dbp%u,dbw%u rrw%u,rrh%u ssax%u,ssay%u dsax%u,dsay%u",
+                  static_cast<unsigned>(m_transfer.bitbltbuf.spsm),
+                  m_transfer.bitbltbuf.sbp,
+                  static_cast<unsigned>(m_transfer.bitbltbuf.sbw),
+                  static_cast<unsigned>(m_transfer.bitbltbuf.dpsm),
+                  m_transfer.bitbltbuf.dbp,
+                  static_cast<unsigned>(m_transfer.bitbltbuf.dbw),
+                  m_transfer.trxreg.rrw, m_transfer.trxreg.rrh,
+                  m_transfer.trxpos.ssax, m_transfer.trxpos.ssay,
+                  m_transfer.trxpos.dsax, m_transfer.trxpos.dsay);
+}
+
+void GSCpuBackend::NoteGb7c5ClearOp(const GSContext &context, uint32_t rgba)
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    if (!s.enabled || s.capped)
+        return;
+    std::snprintf(s.op, sizeof(s.op), "clear");
+    std::snprintf(s.detail, sizeof(s.detail),
+                  "frame=fbp%u,fbw%u,psm%u rgba=0x%08x",
+                  context.frame.fbp, static_cast<unsigned>(context.frame.fbw),
+                  static_cast<unsigned>(context.frame.psm), rgba);
+}
+
+void GSCpuBackend::NoteGb7c5DirectOp(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y)
+{
+    Gb7c5ProbeState &s = gb7c5State();
+    if (!s.enabled || s.capped)
+        return;
+    std::snprintf(s.op, sizeof(s.op), "direct");
+    std::snprintf(s.detail, sizeof(s.detail),
+                  "psm%u,base%u,bw%u xy=(%u,%u)",
+                  psm, base, bw, x, y);
+}
+
 bool ps2xDeinterlaceBobValue(const char *value)
 {
     if (value == nullptr || value[0] == '\0')
@@ -976,6 +1242,7 @@ void GSCpuBackend::Initialize(uint8_t *vram, uint32_t vramSize)
     std::lock_guard<std::mutex> lock(m_mutex);
     m_vram = vram;
     m_vramSize = vramSize;
+    ps2xGb7c5RegisterVram(vram, vramSize);
     ResetUnlocked();
 }
 
@@ -1035,6 +1302,8 @@ uint32_t GSCpuBackend::ReadVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw
 void GSCpuBackend::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (gb7c5State().enabled)
+        NoteGb7c5DirectOp(psm, base, bw, x, y);
     WriteVramUnlocked(psm, base, bw, x, y, value);
 }
 
@@ -1042,6 +1311,21 @@ void GSCpuBackend::WriteVramUnlocked(uint32_t psm, uint32_t base, uint32_t bw, u
 {
     if (!m_vram)
         return;
+    // GB7C5 writer watch: compare the actual storage word before/after.
+    // Single funnel for draw, upload, local-to-local, clear and direct
+    // writes. OFF path is one enabled branch; no render effect.
+    Gb7c5ProbeState &watch = gb7c5State();
+    if (watch.enabled && !watch.capped && m_vramSize > kGb7c5WatchAddr + 4u)
+    {
+        uint32_t before = 0u;
+        std::memcpy(&before, m_vram + kGb7c5WatchAddr, sizeof(before));
+        m_writeVramFuncs[psm & 0x3Fu](m_vram, base, bw, x, y, value);
+        uint32_t after = 0u;
+        std::memcpy(&after, m_vram + kGb7c5WatchAddr, sizeof(after));
+        if (before != after)
+            gb7c5Emit(x, y, psm, base, bw, before, after, "change");
+        return;
+    }
     m_writeVramFuncs[psm & 0x3Fu](m_vram, base, bw, x, y, value);
 }
 
@@ -1983,6 +2267,10 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
     // Only called when open; the hook itself assigns ids and flags batches.
     if (gb7c4State().enabled)
         NoteGb7c4BatchBegin(batch);
+    // GB7C5: assign the intra-packet batch id with the same counting and
+    // tag the current op as a draw (no render effect when OFF).
+    if (gb7c5State().enabled)
+        NoteGb7c5BatchBegin(batch);
     const GSDrawState &state = batch.state;
     const auto &ctx = state.context;
     PS2_IF_AGRESSIVE_LOGS({
@@ -2918,7 +3206,11 @@ void GSCpuBackend::BeginTransfer(const GSTransferCommand &command)
     m_transferState.localToHostPendingBytes = 0u;
 
     if (command.direction == 2u)
+    {
+        if (gb7c5State().enabled)
+            NoteGb7c5LocalToLocalOp();
         PerformLocalToLocalTransfer();
+    }
     else if (command.direction == 1u)
         PerformLocalToHostTransfer();
 }
@@ -2937,6 +3229,8 @@ void GSCpuBackend::UploadImage(const uint8_t *data, uint32_t sizeBytes)
     const uint32_t rrw = m_transfer.trxreg.rrw;
     const uint32_t dsax = m_transfer.trxpos.dsax;
     uint32_t offset = 0u;
+    if (gb7c5State().enabled)
+        NoteGb7c5UploadOp();
 
     auto advancePixel = [&](uint32_t count)
     {
@@ -3157,6 +3451,8 @@ bool GSCpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_vram || context.frame.fbw == 0u)
         return false;
+    if (gb7c5State().enabled)
+        NoteGb7c5ClearOp(context, rgba);
 
     const uint32_t x0 = context.scissor.x0;
     const uint32_t x1 = std::max<uint32_t>(x0, context.scissor.x1);

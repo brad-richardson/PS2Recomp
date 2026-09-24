@@ -76,6 +76,32 @@ void ps2xGb7c4ProbeClose();
 void ps2xGb7c4SetPacketContext(uint64_t tick, uint64_t packetIndex, unsigned path);
 bool ps2xGb7c4ProbeEnabled();
 
+// GB7C5 first-displayed-glyph-pixel writer watch (default OFF).
+// Replay-only diagnostic: watches the single swizzled VRAM word backing
+// displayed pixel (342,377) in FBP112/FBW8/PSMCT24 (byte address
+// 0x0019ae38). Every WriteVramUnlocked compares that storage word before
+// and after, so draw, host-to-local upload, local-to-local transfer,
+// clear and direct-VRAM mutation paths are all covered by construction.
+// The harness sets the current GIF packet context before each
+// processGIFPacket and notes packet47240's completion for the post
+// snapshot. With the probe closed/disabled every hook returns early and
+// rendering is byte-identical.
+struct Gb7c5PacketContext
+{
+    uint64_t tick = 0;
+    uint64_t packetIndex = 0;
+    unsigned path = 0;
+    uint64_t batch = 0;
+};
+void ps2xGb7c5ProbeOpen(const char *path);
+void ps2xGb7c5ProbeClose();
+void ps2xGb7c5SetPacketContext(uint64_t tick, uint64_t packetIndex, unsigned path);
+void ps2xGb7c5NotePacket47240Done();
+bool ps2xGb7c5ProbeEnabled();
+// Registers the live VRAM base for GB7C5 start/pre/post snapshots
+// (read-only; no render effect whether the probe is open or not).
+void ps2xGb7c5RegisterVram(const uint8_t *vram, uint32_t vramSize);
+
 class GSCpuBackend final : public GSRasterBackend
 {
 public:
@@ -136,6 +162,16 @@ private:
                                 uint8_t combR, uint8_t combG, uint8_t combB, uint8_t combA,
                                 uint8_t vrtR, uint8_t vrtG, uint8_t vrtB, uint8_t vrtA,
                                 uint32_t oldVal, int candIdx);
+    // GB7C5 writer-watch hooks (no-ops unless the probe is open).
+    // BatchBegin assigns the intra-packet batch id (same counting as
+    // GB7C2/GB7C4) and tags the current op as a draw with FRAME state.
+    // The transfer/upload/clear/direct hooks retag the current op so the
+    // WriteVramUnlocked watch attributes each watched-word change.
+    uint64_t NoteGb7c5BatchBegin(const GSPrimitiveBatch &batch);
+    void NoteGb7c5UploadOp();
+    void NoteGb7c5LocalToLocalOp();
+    void NoteGb7c5ClearOp(const GSContext &context, uint32_t rgba);
+    void NoteGb7c5DirectOp(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y);
     void DrawSprite(const GSPrimitiveBatch &batch);
     void DrawTriangle(const GSPrimitiveBatch &batch);
     void DrawLine(const GSPrimitiveBatch &batch);
