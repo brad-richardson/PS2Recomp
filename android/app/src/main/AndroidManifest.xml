@@ -6,6 +6,9 @@
         android:hasCode="false"
         android:isGame="true">
 
+        <!-- N11: allow simpleperf from the shell on release builds (stays non-debuggable) -->
+        <profileable android:shell="true" />
+
         <activity
             android:name="android.app.NativeActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation"
