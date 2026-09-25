@@ -4,6 +4,7 @@
 #include "ps2_e44_trace.h"
 #include "ps2_e7.h"
 #include "ps2_mpg_src_trace.h"
+#include "ps2_rr1_alpha_tap.h"
 #include "ps2_pk.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
@@ -1604,8 +1605,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     // bytes. Empty unless the SRC trace is enabled.
                     // Declared before appendData, which captures by ref.
                     std::vector<Ps2VifSrcSpan> e40Spans;
-                    const bool e40Record = (channelBase == 0x10009000u) &&
-                                           ps2_mpg_src_trace::enabled();
+                    const bool e40Record = ((channelBase == 0x10009000u) &&
+                                            ps2_mpg_src_trace::enabled()) ||
+                                           ps2_rr1::alphaTapOn();
                     int32_t e40TagId = -1;
                     uint32_t e40TagAt = 0u;
 
@@ -1698,6 +1700,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
+                        if (channelBase == 0x1000A000u)
+                            ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "gif tag at=0x%x id=%u qwc=%u addr=0x%x irq=%d", curTagEE, id, tagQwc, addr, irq ? 1 : 0);
                         // E40 Part-4: tag dump for the first in-window kicks.
                         if (e40Ctag)
                         {
@@ -2030,6 +2034,10 @@ void PS2Memory::processPendingTransfers()
         {
             m_seenGifCopy = true;
             m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
+            if (ps2_rr1::alphaTapOn())
+                ps2_rr1::scanAlpha(gs_regs.vsyncTick.load(std::memory_order_relaxed), "gifc",
+                                   p.chainData.data(), static_cast<uint32_t>(p.chainData.size()),
+                                   p.srcSpans.data(), static_cast<uint32_t>(p.srcSpans.size()), 0u);
             submitGifPacket(GifPathId::Path3, p.chainData.data(), static_cast<uint32_t>(p.chainData.size()), false);
         }
         else if (p.qwc > 0)
@@ -2079,6 +2087,9 @@ void PS2Memory::processPendingTransfers()
                     m_seenGifCopy = true;
                     m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
                     ps2_e7::packet(gs_regs.vsyncTick.load(), "gif-dma", m_rdram + srcPhys, chunk, m_path3Masked, m_path3MaskedFifo.size(), srcPhys);
+                    if (ps2_rr1::alphaTapOn())
+                        ps2_rr1::scanAlpha(gs_regs.vsyncTick.load(std::memory_order_relaxed), "gifn",
+                                           m_rdram + srcPhys, chunk, nullptr, 0u, srcPhys);
                     submitGifPacket(GifPathId::Path3, m_rdram + srcPhys, chunk, false);
                     bytesLeft -= chunk;
                     srcPhys += chunk;
@@ -2161,6 +2172,10 @@ void PS2Memory::processPendingTransfers()
                     p.srcSpans.data(), static_cast<uint32_t>(p.srcSpans.size()),
                     ps2_mpg_src_trace::PayChain, 0u);
             }
+            if (ps2_rr1::alphaTapOn())
+                ps2_rr1::scanAlpha(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1c",
+                                   p.chainData.data(), static_cast<uint32_t>(p.chainData.size()),
+                                   p.srcSpans.data(), static_cast<uint32_t>(p.srcSpans.size()), 0u);
             processVIF1Data(p.chainData.data(), static_cast<uint32_t>(p.chainData.size()));
             if (e40Pay)
             {
@@ -2227,6 +2242,9 @@ void PS2Memory::processPendingTransfers()
                             m_rdram + srcPhys, chunk, nullptr, 0u,
                             ps2_mpg_src_trace::PayNormal, payEe);
                     }
+                    if (ps2_rr1::alphaTapOn())
+                        ps2_rr1::scanAlpha(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1n",
+                                           m_rdram + srcPhys, chunk, nullptr, 0u, payEe);
                     processVIF1Data(srcPhys, chunk);
                     if (e40Pay)
                     {
@@ -2303,11 +2321,92 @@ std::vector<uint32_t> PS2Memory::consumeCompletedDmacCauses()
     return causes;
 }
 
+namespace
+{
+    // PS2X_PATH3_EOP_GATE=0 restores the pre-RR1 flush-all-on-unmask model (dev A/B only).
+    bool path3EopGateEnabled()
+    {
+        static const bool on = [] {
+            const char *env = std::getenv("PS2X_PATH3_EOP_GATE");
+            return !(env && env[0] == '0');
+        }();
+        return on;
+    }
+}
+
+std::vector<uint32_t> PS2Memory::splitGifPacketsAtEop(const uint8_t *data, uint32_t sizeBytes)
+{
+    // End offsets of each EOP-terminated GIF packet; a tail without EOP (or a
+    // tag that overruns the buffer) stays one final piece.
+    std::vector<uint32_t> ends;
+    uint64_t pos = 0u;
+    while (pos + 16u <= sizeBytes)
+    {
+        uint64_t tag = 0;
+        std::memcpy(&tag, data + pos, sizeof(tag));
+        const uint64_t nloop = tag & 0x7FFFu;
+        const bool eop = ((tag >> 15) & 1u) != 0u;
+        const uint32_t flg = static_cast<uint32_t>((tag >> 58) & 3u);
+        uint64_t nreg = (tag >> 60) & 0xFu;
+        if (nreg == 0u)
+            nreg = 16u;
+        pos += 16u;
+        if (flg == 0u)
+            pos += nloop * nreg * 16u;
+        else if (flg == 1u)
+            pos += ((nloop * nreg * 8u) + 15u) / 16u * 16u;
+        else
+            pos += nloop * 16u;
+        if (pos > sizeBytes)
+            break;
+        if (eop && pos < sizeBytes)
+            ends.push_back(static_cast<uint32_t>(pos));
+    }
+    ends.push_back(sizeBytes);
+    return ends;
+}
+
+void PS2Memory::releaseOneMaskedPath3Packet()
+{
+    if (!path3EopGateEnabled())
+    {
+        flushMaskedPath3Packets();
+        return;
+    }
+    if (m_path3Masked || m_path3MaskedFifo.empty())
+        return;
+    std::vector<uint8_t> packet = std::move(m_path3MaskedFifo.front());
+    m_path3MaskedFifo.erase(m_path3MaskedFifo.begin());
+    ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "p3 release bytes=%zu left=%zu",
+                packet.size(), m_path3MaskedFifo.size());
+    if (packet.size() < 16u)
+        return;
+    ps2_pk::setBases(m_rdram, PS2_RAM_SIZE, m_scratchpad, PS2_SCRATCHPAD_SIZE);
+    ps2_pk::noteSubmit("3", packet.data(), static_cast<uint32_t>(packet.size()),
+                       gs_regs.vsyncTick.load(std::memory_order_relaxed));
+    if (m_gifArbiter)
+    {
+        m_gifArbiter->submit(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()), false);
+        m_gifArbiter->drain();
+    }
+    else if (m_gifPacketCallback)
+    {
+        m_gifPacketCallback(packet.data(), static_cast<uint32_t>(packet.size()));
+    }
+}
+
+void PS2Memory::drainPath3IfUnmasked()
+{
+    if (!m_path3Masked && !m_path3MaskedFifo.empty())
+        flushMaskedPath3Packets();
+}
+
 void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
 {
     if (m_path3Masked || m_path3MaskedFifo.empty())
         return;
 
+    ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "p3 flush packets=%zu", m_path3MaskedFifo.size());
     auto emit = [&](const uint8_t *packetData, uint32_t packetSize)
     {
         if (m_gifArbiter)
@@ -2343,9 +2442,22 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
     if (pathId == GifPathId::Path3)
     {
         ps2_e7::packet(gs_regs.vsyncTick.load(), m_path3Masked ? "path3-queue" : "path3-send", data, sizeBytes, m_path3Masked, m_path3MaskedFifo.size());
+        ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "p3 %s bytes=%u queued=%zu", m_path3Masked ? "queue" : "send", sizeBytes, m_path3MaskedFifo.size());
         if (m_path3Masked)
         {
-            m_path3MaskedFifo.emplace_back(data, data + sizeBytes);
+            if (path3EopGateEnabled())
+            {
+                uint32_t start = 0u;
+                for (const uint32_t end : splitGifPacketsAtEop(data, sizeBytes))
+                {
+                    m_path3MaskedFifo.emplace_back(data + start, data + end);
+                    start = end;
+                }
+            }
+            else
+            {
+                m_path3MaskedFifo.emplace_back(data, data + sizeBytes);
+            }
             return;
         }
         flushMaskedPath3Packets(false);

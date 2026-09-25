@@ -1,4 +1,5 @@
 // Based on Blackline Interactive implementation
+#include "ps2_rr1_alpha_tap.h"
 #include "runtime/ps2_memory.h"
 #include <cstdio>
 #include <cstring>
@@ -400,6 +401,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
     if (sizeBytes == 0u)
         return;
+    processVIF1DataImpl(data, sizeBytes);
+    // RR1: PATH3 left unmasked at the end of a VIF1 delivery runs to completion.
+    drainPath3IfUnmasked();
+}
+
+void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
+{
 
     uint32_t pos = 0;
 
@@ -503,10 +511,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             // VIF command docs: MSKPATH3 uses IMMEDIATE bit 15.
             const bool wasMasked = m_path3Masked;
             m_path3Masked = (imm & 0x8000u) != 0u;
+            ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 MSKPATH3 was=%u now=%u queued=%zu",
+                        wasMasked, m_path3Masked, m_path3MaskedFifo.size());
             if (ps2_e7::enabled())
                 ps2_e7::event(gs_regs.vsyncTick.load(), "vif-mask", "cmd=0x%x offset=%u was=%u now=%u queued=%zu", cmd, pos - 4u, wasMasked, m_path3Masked, m_path3MaskedFifo.size());
             if (wasMasked && !m_path3Masked)
-                flushMaskedPath3Packets();
+                releaseOneMaskedPath3Packet();
             continue;
         }
         else if (opcode == VIF_MARK)
@@ -522,11 +532,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             const char *flushName = (opcode == VIF_FLUSHE) ? "FLUSHE" : ((opcode == VIF_FLUSH) ? "FLUSH" : "FLUSHA");
             e37AppendVif(flushName, num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
                          nullptr, nullptr, nullptr, 0u, false, 0u);
+            ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 %s masked=%u queued=%zu", flushName, m_path3Masked, m_path3MaskedFifo.size());
             continue;
         }
         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
         {
             uint32_t startPC = (uint32_t)imm * 8u;
+            ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 MSCAL pc=0x%x", startPC);
 
             // Values visible to the VU program for this MSCAL.
             // DobieStation semantics: ITOP = ITOPS; TOP = current TOPS;
@@ -756,6 +768,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
             if (qwCount > 0)
             {
                 const bool directHl = (opcode == VIF_DIRECTHL);
+                ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 DIRECT qw=%u masked=%u", qwCount, m_path3Masked);
                 {
                     const uint32_t totalWords = qwCount * 4u;
                     const uint32_t availWords = (pos < sizeBytes) ? (sizeBytes - pos) / 4u : 0u;

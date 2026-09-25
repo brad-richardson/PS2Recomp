@@ -990,6 +990,69 @@ void register_ps2_memory_tests()
             t.IsTrue(secondOk, "second queued PATH3 packet should flush in-order");
         });
 
+        tc.Run("PATH3 mask releases one EOP packet per MSKPATH3 unmask window", [](TestCase &t)
+        {
+            // RR1: SSX 3 masks PATH3, kicks one GIF chain holding many EOP
+            // packets, then opens MSKPATH3 0/1 windows before each object.
+            // The mask takes effect at the next EOP, so each window passes
+            // exactly one packet; PATH3 left unmasked drains the rest.
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.emplace_back(data, data + sizeBytes);
+            });
+
+            // Three PACKED A+D packets (tag NLOOP=1 EOP=1 NREG=1 REGS=0xE),
+            // plus a non-EOP tag glued to the last one: 4 tags, 3 EOP packets.
+            auto appendAd = [](std::vector<uint8_t> &out, bool eop, uint64_t value)
+            {
+                const uint64_t tag[2] = {1ull | (eop ? (1ull << 15) : 0ull) | (1ull << 60), 0xEull};
+                const uint64_t ad[2] = {value, 0x42ull}; // ALPHA_1
+                const uint8_t *a = reinterpret_cast<const uint8_t *>(tag);
+                const uint8_t *b = reinterpret_cast<const uint8_t *>(ad);
+                out.insert(out.end(), a, a + 16);
+                out.insert(out.end(), b, b + 16);
+            };
+            std::vector<uint8_t> chain;
+            appendAd(chain, true, 0x11u);
+            appendAd(chain, true, 0x22u);
+            appendAd(chain, false, 0x33u);
+            appendAd(chain, true, 0x44u);
+
+            auto firstValue = [](const std::vector<uint8_t> &packet)
+            {
+                uint64_t v = 0;
+                std::memcpy(&v, packet.data() + 16, sizeof(v));
+                return v;
+            };
+
+            const uint32_t setMask = makeVifCmd(0x06u, 0u, 0x8000u);
+            const uint32_t clearMask = makeVifCmd(0x06u, 0u, 0x0000u);
+            const uint32_t window[2] = {clearMask, setMask};
+
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&setMask), sizeof(setMask));
+            mem.submitGifPacket(GifPathId::Path3, chain.data(), static_cast<uint32_t>(chain.size()));
+            t.Equals(captured.size(), static_cast<size_t>(0u), "masked PATH3 chain should be queued");
+
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(window), sizeof(window));
+            t.Equals(captured.size(), static_cast<size_t>(1u), "one unmask window passes one EOP packet");
+            t.Equals(captured[0].size(), static_cast<size_t>(32u), "first window packet is the first EOP packet");
+            t.Equals(firstValue(captured[0]), uint64_t(0x11u), "first window passes the first packet");
+            t.IsTrue(mem.isPath3Masked(), "PATH3 is masked again after the window");
+
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(window), sizeof(window));
+            t.Equals(captured.size(), static_cast<size_t>(2u), "second window passes the next EOP packet");
+            t.Equals(firstValue(captured[1]), uint64_t(0x22u), "second window passes the second packet");
+
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&clearMask), sizeof(clearMask));
+            t.Equals(captured.size(), static_cast<size_t>(3u), "an unmask left open drains the rest");
+            t.Equals(captured[2].size(), static_cast<size_t>(64u), "a non-EOP tag stays with its packet");
+            t.Equals(firstValue(captured[2]), uint64_t(0x33u), "last packet keeps the non-EOP tag first");
+        });
+
         tc.Run("GIF arbiter prioritizes PATH1 then PATH2 then PATH3", [](TestCase &t)
         {
             std::vector<uint8_t> order;

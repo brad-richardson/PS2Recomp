@@ -343,6 +343,12 @@ public:
 
     bool isPath3Masked() const { return m_path3Masked; }
     void flushMaskedPath3Packets(bool drainImmediately = true);
+    // RR1: MSKPATH3 releases PATH3 one GIF packet (EOP) per unmask; the rest
+    // drains once VIF1 delivery ends with PATH3 still unmasked.
+    void releaseOneMaskedPath3Packet();
+    void drainPath3IfUnmasked();
+    void processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes);
+    static std::vector<uint32_t> splitGifPacketsAtEop(const uint8_t *data, uint32_t sizeBytes);
 
     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
