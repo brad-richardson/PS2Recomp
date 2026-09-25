@@ -197,6 +197,10 @@ private:
         bool writesStatus = false;
         bool writesSticky = false;
         bool writesClip = false;
+        // VB1: a newer flag write was applied at issue; this entry only ORs
+        // its sticky bits in when it lands (its MAC/status bits 0-3 are
+        // superseded, exactly as the newer entry would overwrite them).
+        bool writesStickyOr = false;
     };
 
     struct ScalarPipelineEntry
@@ -417,6 +421,8 @@ private:
     void directVfWrite(uint8_t reg, uint8_t laneMask, const float value[4], uint32_t latency);
     void directViWrite(uint8_t reg, int32_t value, uint32_t latency);
     void directAccWrite(uint8_t laneMask, const float value[4], uint32_t latency);
+    bool flagQueueAllowsDirect() const;
+    void demoteQueuedFlags(bool macStatus, bool clip);
     void recordEntryPair(uint32_t pc, uint32_t lo, uint32_t up,
                          const uint8_t *vuData, uint32_t dataSize,
                          const int32_t oldVi[16], const uint32_t oldVf[32][4]);

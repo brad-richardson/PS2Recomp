@@ -354,6 +354,8 @@ void VU1Interpreter::queueClip(uint32_t clip)
 #endif
     if (m_directFlags)
     {
+        if (m_flagValidMask != 0u)
+            demoteQueuedFlags(false, true);
         m_state.clip = m_workingClip;
         noteDirect(m_cycle + kFmacLatency);
         return;
@@ -555,6 +557,12 @@ void VU1Interpreter::commitReadyPipelines()
         {
             const uint32_t current = entry.status & 0xFu;
             m_state.status = (m_state.status & 0xFF0u) | current | ((current | entry.extraSticky) << 6);
+        }
+        if (entry.writesStickyOr)
+        {
+            // VB1 d3: sticky part of a superseded entry (see demoteQueuedFlags).
+            const uint32_t current = entry.status & 0xFu;
+            m_state.status |= ((current | entry.extraSticky) << 6) & 0xFF0u;
         }
         if (entry.writesSticky)
         {

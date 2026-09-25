@@ -275,6 +275,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::updateFmacFlags(const uint8_t
 #endif
     if (m_directFlags)
     {
+        if (m_flagValidMask != 0u)
+            demoteQueuedFlags(true, false);
         m_state.mac = mac;
         const uint32_t current = status & 0xFu;
         m_state.status = (m_state.status & 0xFF0u) | current | ((current | extraSticky) << 6);

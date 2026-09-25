@@ -166,6 +166,42 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directAccWrite(uint8_t laneMa
     noteDirect(m_cycle + latency);
 }
 
+// VB1 d3: older queued flag entries may still be in flight when a flag write
+// is applied at issue. In queue order they land first and the newer write then
+// overwrites MAC, status bits 0-3 and CLIP, while sticky bits (6-11) OR in and
+// the FDIV D/I update commutes with both. So the older entries keep only their
+// sticky OR. The static map guarantees no flag reader issues before the newer
+// entry would land, so nobody sees the order change. A queued FSSET (replaces
+// the sticky bits, which does not commute) keeps the whole pair queued.
+PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::flagQueueAllowsDirect() const
+{
+    for (uint32_t pending = m_flagValidMask; pending != 0u; pending &= pending - 1u)
+    {
+        if (m_flagPipeline[std::countr_zero(pending)].writesSticky)
+            return false;
+    }
+    return true;
+}
+
+PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::demoteQueuedFlags(bool macStatus, bool clip)
+{
+    for (uint32_t pending = m_flagValidMask; pending != 0u; pending &= pending - 1u)
+    {
+        FlagPipelineEntry &entry = m_flagPipeline[std::countr_zero(pending)];
+        if (macStatus)
+        {
+            entry.writesMac = false;
+            if (entry.writesStatus)
+            {
+                entry.writesStatus = false;
+                entry.writesStickyOr = true;
+            }
+        }
+        if (clip)
+            entry.writesClip = false;
+    }
+}
+
 // VR1 g5: moved from ps2_vu1_core.cpp and inlined, with commitReadyPipelines()'
 // own early-return gate checked at the call site (same condition, so the same
 // calls do work).
@@ -218,8 +254,9 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     // need the static no-reader window and an empty flag queue.
     const bool direct = m_directRunOk && m_cycle + kDirectMaxLatency <= ctx.budgetEnd;
     m_directStores = direct;
-    m_directFlags = direct && m_flagValidMask == 0u && m_directFlagSafe != nullptr &&
-                    m_directFlagSafe[m_state.pc >> 3] != 0u;
+    m_directFlags = direct && m_directFlagSafe != nullptr &&
+                    m_directFlagSafe[m_state.pc >> 3] != 0u &&
+                    (m_flagValidMask == 0u || flagQueueAllowsDirect());
 
     // E37: pre-exec snapshot for the pair line (post-stall state). VR1: the
     // snapshot lives in members, written and read only while m_entryArmed
