@@ -3022,6 +3022,27 @@ namespace
             ww.u32(e.first);
             ww.podVec(e.second);
         });
+        // Playback bookkeeping without a live decoder (ready() refuses one).
+        ps2_savestate::writeOrdered(w, s.playbackByMpeg, [](ps2_savestate::Writer &ww, const auto &e) {
+            const MpegPlaybackState &p = e.second;
+            ww.u32(e.first);
+            for (uint32_t v : {p.picturesServed, p.width, p.height, p.decodeMode, p.imageBufferAddr})
+                ww.u32(v);
+            for (bool v : {p.sawInput, p.sawSequenceEnd, p.streamEnded, p.decoderFailed, p.waitingForVideoSequenceHeader,
+                           p.hasFrameRateExtension})
+                ww.b(v);
+            ww.u64(p.cdStreamGeneration);
+            ww.podVec(p.videoSequenceSyncBuffer);
+            ww.podVec(p.pssBuffer);
+            ww.podVec(p.pssGuestAddrs);
+            for (uint8_t v : {p.frameRateCode, p.frameRateExtensionN, p.frameRateExtensionD})
+                ww.u8(v);
+            ww.podVec(p.videoTimingScanBuffer);
+            for (uint64_t v : {p.pictureIntervalQ32, p.nextPictureTickQ32, p.presentationEndTickQ32,
+                               p.ptsPresentationBaseTickQ32})
+                ww.u64(v);
+            ww.pod(p.firstPresentedPts90k);
+        });
     }
     bool mpegSavestateLoad(ps2_savestate::Reader &r)
     {
@@ -3038,7 +3059,26 @@ namespace
             e.first = rr.u32();
             rr.podVec(e.second);
         });
-        s.playbackByMpeg.clear();
+        ps2_savestate::readOrdered(r, s.playbackByMpeg, [](ps2_savestate::Reader &rr, auto &e) {
+            MpegPlaybackState &p = e.second;
+            e.first = rr.u32();
+            for (uint32_t *v : {&p.picturesServed, &p.width, &p.height, &p.decodeMode, &p.imageBufferAddr})
+                *v = rr.u32();
+            for (bool *v : {&p.sawInput, &p.sawSequenceEnd, &p.streamEnded, &p.decoderFailed,
+                            &p.waitingForVideoSequenceHeader, &p.hasFrameRateExtension})
+                *v = rr.b();
+            p.cdStreamGeneration = rr.u64();
+            rr.podVec(p.videoSequenceSyncBuffer);
+            rr.podVec(p.pssBuffer);
+            rr.podVec(p.pssGuestAddrs);
+            for (uint8_t *v : {&p.frameRateCode, &p.frameRateExtensionN, &p.frameRateExtensionD})
+                *v = rr.u8();
+            rr.podVec(p.videoTimingScanBuffer);
+            for (uint64_t *v : {&p.pictureIntervalQ32, &p.nextPictureTickQ32, &p.presentationEndTickQ32,
+                                &p.ptsPresentationBaseTickQ32})
+                *v = rr.u64();
+            rr.pod(p.firstPresentedPts90k);
+        });
         s.nonStreamDeliveries.clear();
         return r.ok();
     }
@@ -3046,8 +3086,23 @@ namespace
     {
         using namespace ps2_stubs;
         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
-        if (!g_mpeg_stub_state.playbackByMpeg.empty())
-            return "MPEG playback state live";
+        // A decoder whose stream has ended holds no state a later stream
+        // needs (the next one starts at a sequence header, which a fresh
+        // decoder decodes identically), so it is dropped; a mid-stream
+        // decoder or queued pictures defer the save.
+        for (const auto &[addr, playback] : g_mpeg_stub_state.playbackByMpeg)
+        {
+            const bool ended = playback.sawSequenceEnd || playback.streamEnded;
+            if (!playback.decodedFrames.empty() || (playback.decoder && !ended))
+            {
+                char why[160];
+                std::snprintf(why, sizeof(why),
+                              "MPEG decoder live addr=0x%x decoder=%d frames=%zu seqEnd=%d streamEnded=%d served=%u",
+                              addr, playback.decoder ? 1 : 0, playback.decodedFrames.size(),
+                              playback.sawSequenceEnd ? 1 : 0, playback.streamEnded ? 1 : 0, playback.picturesServed);
+                return why;
+            }
+        }
         for (const auto &[tag, weak] : g_mpeg_stub_state.nonStreamDeliveries)
         {
             (void)tag;
@@ -3057,5 +3112,5 @@ namespace
         return {};
     }
     const bool kMpegSavestateRegistered =
-        ps2_savestate::registerSection("stub:mpeg", {1u, &mpegSavestateSave, &mpegSavestateLoad, &mpegSavestateReady});
+        ps2_savestate::registerSection("stub:mpeg", {2u, &mpegSavestateSave, &mpegSavestateLoad, &mpegSavestateReady});
 }
