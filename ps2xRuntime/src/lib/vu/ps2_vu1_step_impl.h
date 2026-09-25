@@ -339,4 +339,17 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     return ctx.programEnded;
 }
 
+// VR1: the same checks, in the same order, as the top of run()'s loop, so a
+// generated pair can hand off to the next one without returning to run().
+// When it returns false run() re-evaluates its loop header; the repeated
+// commitReadyPipelines() at the same cycle is a no-op (nothing is queued in
+// between and everything ready at m_cycle was already committed).
+PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::recompChainReady(RunContext &ctx)
+{
+    if (!(m_cycle < ctx.budgetEnd && !m_stopRequested))
+        return false;
+    commitReadyPipelines();
+    return m_state.pc + 8u <= ctx.codeSize && (m_state.pc & 7u) == 0u;
+}
+
 #endif

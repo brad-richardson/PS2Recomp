@@ -143,7 +143,15 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
            "template <>\nstruct VU1RecompImage<" << hashText << ">\n{\n"
            "    using D = VU1::DecodedInstructionPair;\n"
            "    using U = VU1::InstructionUsage;\n"
-           "    using P = VU1::Pipeline;\n";
+           "    using P = VU1::Pipeline;\n"
+           "    static const VU1::RecompPairFn kPairs[" << pairCount << "];\n"
+           "    // Chain to the next pair's function (tail call) while run()'s loop\n"
+           "    // header would let it issue; otherwise return to run().\n"
+           "    static bool next(VU1 &vu, VU1::RunContext &c)\n    {\n"
+           "        if (!vu.recompChainReady(c))\n            return false;\n"
+           "        const VU1::RecompPairFn fn = kPairs[vu.m_state.pc >> 3];\n"
+           "        if (fn == nullptr)\n            return false;\n"
+           "        PS2X_VU1_MUSTTAIL return fn(vu, c);\n    }\n";
     std::vector<bool> emitted(pairCount, false);
     for (uint32_t index = 0; index < pairCount; ++index)
     {
@@ -174,10 +182,11 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
         usage(d.upperUsage);
         out << ", " << d.iBit << "," << d.eBit << "," << d.mBit << "," << d.dBit << "," << d.tBit << ","
             << unsigned(d.upperVfShadowReg) << "," << unsigned(d.suppressedLowerVf) << "};\n";
-        out << "    static bool f" << label << "(VU1 &vu, VU1::RunContext &c) { return vu.issuePair<true>(d"
-            << label << ", c); }\n";
+        out << "    static bool f" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n"
+            << "        if (vu.issuePair<true>(d" << label << ", c))\n            return true;\n"
+            << "        return next(vu, c);\n    }\n";
     }
-    out << "};\n\nnamespace\n{\n    constexpr VU1::RecompPairFn kPairs[" << pairCount << "] = {\n";
+    out << "};\n\nconst VU1::RecompPairFn VU1RecompImage<" << hashText << ">::kPairs[" << pairCount << "] = {\n";
     for (uint32_t index = 0; index < pairCount; ++index)
     {
         char label[16];
@@ -185,12 +194,12 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
         out << "        " << (emitted[index] ? std::string("&VU1RecompImage<") + hashText + ">::f" + label : std::string("nullptr"))
             << ",\n";
     }
-    out << "    };\n    const bool kRegistered = []\n    {\n"
+    out << "};\n\nnamespace\n{\n    const bool kRegistered = []\n    {\n"
            "        VU1::RecompProgram program;\n"
            "        program.hash = " << hashText << ";\n"
            "        program.codeSize = " << codeSize << "u;\n"
            "        program.pairCount = " << pairCount << "u;\n"
-           "        program.pairs = kPairs;\n"
+           "        program.pairs = VU1RecompImage<" << hashText << ">::kPairs;\n"
            "        VU1::registerRecompProgram(program);\n"
            "        return true;\n    }();\n}\n";
 

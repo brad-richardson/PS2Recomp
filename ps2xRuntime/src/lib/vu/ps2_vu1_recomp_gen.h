@@ -12,4 +12,12 @@
 #include "ps2_vu1_upper_impl.h"
 #include "ps2_vu1_lower_impl.h"
 
+// A generated pair hands off to the next one with a guaranteed tail call, so
+// a chain of pairs never grows the stack.
+#if defined(__clang__)
+#define PS2X_VU1_MUSTTAIL [[clang::musttail]]
+#else
+#define PS2X_VU1_MUSTTAIL
+#endif
+
 #endif
