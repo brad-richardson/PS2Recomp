@@ -34,6 +34,7 @@ struct Counters
 {
     std::atomic<uint64_t> gifPackets{0}, gifBytes{0}, regWrites{0}, presents{0}, nullScanouts{0};
     std::atomic<uint64_t> presentNanos{0}, readbackNanos{0}, snapshots{0};
+    std::atomic<uint64_t> copyNanos{0}; // HR1: CPU stride/alpha copy after the map
     std::atomic<uint64_t> unsupportedClears{0}, unsupportedVramIo{0}, localToHostBytes{0};
     std::atomic<bool> initOk{false}, initFailed{false};
 };
@@ -56,9 +57,11 @@ void logStats(const char *why)
     const Stats s = stats();
     const double presentMs = s.presents ? (static_cast<double>(s.presentNanos) / 1e6) / s.presents : 0.0;
     const double readbackMs = s.presents ? (static_cast<double>(s.readbackNanos) / 1e6) / s.presents : 0.0;
+    const double copyMs = s.presents ? (static_cast<double>(counters().copyNanos.load()) / 1e6) / s.presents : 0.0;
     std::cerr << "[gs:parallel] " << why << " gif=" << s.gifPackets << " gif_bytes=" << s.gifBytes
               << " regs=" << s.regWrites << " presents=" << s.presents << " null_scanouts=" << s.nullScanouts
               << " present_ms_avg=" << presentMs << " readback_ms_avg=" << readbackMs
+              << " copy_ms_avg=" << copyMs
               << " snapshots=" << s.snapshots << " unsupported_clears=" << s.unsupportedClears
               << " unsupported_vram_io=" << s.unsupportedVramIo << " l2h_bytes=" << s.localToHostBytes
               << std::endl;
@@ -256,6 +259,10 @@ public:
         // (stripes on motion, phase flips each tick), so scan the full
         // buffer as-is like the CPU weave instead of deinterlacing.
         vsync.force_progressive = true;
+        // HR1: PS2X_PGS_HIRES_SCANOUT=1 scans out 2x width/height from the
+        // super-samples (paraLLEl needs SSAA >= 4 with both axes sampled;
+        // it silently falls back to 1x scanout otherwise).
+        vsync.high_resolution_scanout = m_hiresScanout;
         m_iface->flush();
         ParallelGS::ScanoutResult shot = m_iface->vsync(vsync);
         Counters &c = counters();
@@ -276,6 +283,13 @@ public:
         const uint32_t h = shot.image->get_height();
         if (w == 0u || h == 0u || w > 4096u || h > 4096u)
             return out;
+        if (w != m_lastScanW || h != m_lastScanH)
+        {
+            std::cerr << "[gs:parallel] scanout size " << w << "x" << h << " tick=" << request.vsyncTick
+                      << " hires=" << (shot.high_resolution_scanout ? 1 : 0) << std::endl;
+            m_lastScanW = w;
+            m_lastScanH = h;
+        }
 
         const uint64_t r0 = nowNanos();
         auto cmd = m_device->request_command_buffer();
@@ -301,10 +315,13 @@ public:
             return out;
 
         // Frontend contract: 640-pixel row stride (kHostFrameWidth), rows
-        // of `width` valid pixels, height <= 512.
-        constexpr uint32_t kStride = 640u;
+        // of `width` valid pixels, height <= 512. HR1: frames that don't
+        // fit (high-resolution scanout) are packed at stride = width; the
+        // frontend infers that from the size (GS::copyLatchedHostPresentationFrame).
+        const bool large = w > 640u || h > 512u;
+        const uint32_t kStride = large ? w : 640u;
         out.width = std::min<uint32_t>(w, kStride);
-        out.height = std::min<uint32_t>(h, 512u);
+        out.height = large ? h : std::min<uint32_t>(h, 512u);
         out.pixels.assign(static_cast<size_t>(kStride) * out.height * 4u, 0u);
         // DK1: presentation pixels must be opaque. The shared presenter
         // uploads them to a raylib RGBA texture and alpha-blends the game
@@ -325,6 +342,7 @@ public:
 
         const uint64_t t1 = nowNanos();
         c.readbackNanos.fetch_add(r1 - r0, std::memory_order_relaxed);
+        c.copyNanos.fetch_add(t1 - r1, std::memory_order_relaxed);
         c.presentNanos.fetch_add(t1 - t0, std::memory_order_relaxed);
         if (n == 1u || n % 300u == 0u)
             logStats(n == 1u ? "first-present" : "periodic");
@@ -442,7 +460,8 @@ private:
         m_device->set_context(*m_ctx);
         m_device->init_frame_contexts(4);
         m_iface = new ParallelGS::GSInterface();
-        const ParallelGS::GSOptions opts = {};
+        ParallelGS::GSOptions opts = {};
+        readQualityKnobs(opts);
         if (!m_iface->init(m_device, opts))
             return fail("GSInterface::init failed");
         ParallelGS::DebugMode dm;
@@ -456,6 +475,33 @@ private:
             uploadHandoff();
         std::cerr << "[gs:parallel] init ok (live backend on the GS worker thread)" << std::endl;
         return true;
+    }
+
+    // HR1: output-quality knobs, default off (= 1x, native scanout).
+    // PS2X_PGS_SSAA=1|2|4|8|16 -> GSOptions::super_sampling (paraLLEl clamps
+    // to the device max: X4 without subgroup-size control, X8/X16 with it);
+    // PS2X_PGS_SSAA_TEXTURES=1 -> super_sampled_textures;
+    // PS2X_PGS_HIRES_SCANOUT=1 -> VSyncInfo::high_resolution_scanout.
+    void readQualityKnobs(ParallelGS::GSOptions &opts)
+    {
+        const char *ssaa = std::getenv("PS2X_PGS_SSAA");
+        const int rate = ssaa ? std::atoi(ssaa) : 1;
+        switch (rate)
+        {
+        case 2: opts.super_sampling = ParallelGS::SuperSampling::X2; break;
+        case 4: opts.super_sampling = ParallelGS::SuperSampling::X4; break;
+        case 8: opts.super_sampling = ParallelGS::SuperSampling::X8; break;
+        case 16: opts.super_sampling = ParallelGS::SuperSampling::X16; break;
+        default: opts.super_sampling = ParallelGS::SuperSampling::X1; break;
+        }
+        const char *tex = std::getenv("PS2X_PGS_SSAA_TEXTURES");
+        opts.super_sampled_textures = tex && std::strcmp(tex, "1") == 0;
+        const char *hires = std::getenv("PS2X_PGS_HIRES_SCANOUT");
+        m_hiresScanout = hires && std::strcmp(hires, "1") == 0;
+        std::cerr << "[gs:parallel] quality ssaa=" << static_cast<int>(opts.super_sampling)
+                  << " (asked " << (ssaa ? ssaa : "unset") << ")"
+                  << " ssaa_textures=" << (opts.super_sampled_textures ? 1 : 0)
+                  << " hires_scanout=" << (m_hiresScanout ? 1 : 0) << std::endl;
     }
 
     bool fail(const char *what)
@@ -579,6 +625,8 @@ private:
     bool m_initOk = false;
     bool m_initFailed = false;
     uint32_t m_l2hPending = 0u;
+    bool m_hiresScanout = false;              // HR1
+    uint32_t m_lastScanW = 0u, m_lastScanH = 0u; // HR1: log scanout size changes
     Vulkan::Context *m_ctx = nullptr;
     Vulkan::Device *m_device = nullptr;
     ParallelGS::GSInterface *m_iface = nullptr;

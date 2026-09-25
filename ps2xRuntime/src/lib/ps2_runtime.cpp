@@ -52,6 +52,9 @@
 #include <unordered_map>
 #include <sstream>
 #include <vector>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
 #endif
@@ -710,6 +713,46 @@ void drawVirtualPad(const ps2x::vpad::Layout &layout, uint16_t pressed, const ps
 }
 } // namespace
 
+// HR1: main-thread present cost split, reported by PS2X_THREAD_CPU_LOG=1.
+static std::atomic<uint64_t> g_hr1LatchNs{0}, g_hr1UploadNs{0}, g_hr1Uploads{0};
+
+#if defined(__APPLE__)
+// HR1: PS2X_THREAD_CPU_LOG=1 prints cumulative user+system CPU ms per named
+// thread of this process (Mach thread_info; works on iOS where no external
+// per-thread tool can see the app), plus the main thread's present split.
+static void logThreadCpu(uint64_t tick)
+{
+    thread_act_array_t threads = nullptr;
+    mach_msg_type_number_t count = 0;
+    if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS)
+        return;
+    std::string line = "[thread-cpu] tick=" + std::to_string(tick);
+    for (mach_msg_type_number_t i = 0; i < count; ++i)
+    {
+        thread_basic_info_data_t info{};
+        mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
+        if (thread_info(threads[i], THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info), &n) == KERN_SUCCESS)
+        {
+            char name[64] = {0};
+            if (pthread_t pt = pthread_from_mach_thread_np(threads[i]))
+                pthread_getname_np(pt, name, sizeof(name));
+            const double ms = (info.user_time.seconds + info.system_time.seconds) * 1000.0 +
+                              (info.user_time.microseconds + info.system_time.microseconds) / 1000.0;
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), " %s#%u=%.0f", name[0] ? name : "t", i, ms);
+            line += buf;
+        }
+        mach_port_deallocate(mach_task_self(), threads[i]);
+    }
+    vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), count * sizeof(thread_act_t));
+    char tail[160];
+    std::snprintf(tail, sizeof(tail), " | main_latch_ms=%.0f main_upload_ms=%.0f uploads=%llu",
+                  g_hr1LatchNs.load() / 1e6, g_hr1UploadNs.load() / 1e6,
+                  static_cast<unsigned long long>(g_hr1Uploads.load()));
+    std::fprintf(stderr, "%s%s\n", line.c_str(), tail);
+}
+#endif
+
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
 {
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
@@ -722,12 +765,33 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     static bool s_hasUploadedFrame = false;
     static std::vector<uint8_t> s_scratch;
     static std::vector<uint8_t> s_uploadBuffer(DEFAULT_FB_SIZE, 0u);
+    // HR1: the texture grows once to fit frames larger than FB_WIDTH x
+    // FB_HEIGHT (paraLLEl high-resolution scanout); after that every frame
+    // uploads its own w x h rectangle straight from s_scratch.
+    const bool texGrown = tex.width != FB_WIDTH || tex.height != FB_HEIGHT;
 
     const uint64_t currentTick = rt->eeScheduler().currentVSyncTick();
     const bool needsLatch = !s_hasLatchedInitialFrame || currentTick != s_lastPresentationTick;
+    const auto hr1T0 = std::chrono::steady_clock::now();
+    struct Hr1UploadTimer
+    {
+        std::chrono::steady_clock::time_point t0, t1;
+        bool latched = false;
+        ~Hr1UploadTimer()
+        {
+            if (!latched)
+                return;
+            const auto t2 = std::chrono::steady_clock::now();
+            g_hr1LatchNs += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+            g_hr1UploadNs += std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+            ++g_hr1Uploads;
+        }
+    } hr1Timer{hr1T0, hr1T0};
     if (needsLatch)
     {
         rt->gs().latchHostPresentationFrame();
+        hr1Timer.t1 = std::chrono::steady_clock::now();
+        hr1Timer.latched = true;
         s_lastPresentationTick = currentTick;
         s_hasLatchedInitialFrame = true;
     }
@@ -758,7 +822,11 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                               0u, false, true, rt->memory().gs().smode2, rt->memory().gs().pmode,
                               rt->memory().gs().display1, rt->memory().gs().display2,
                               rt->memory().gs().dispfb1, rt->memory().gs().dispfb2);
-        UpdateTexture(tex, blank.data);
+        if (texGrown)
+            UpdateTextureRec(tex, Rectangle{0.0f, 0.0f, static_cast<float>(FB_WIDTH), static_cast<float>(FB_HEIGHT)},
+                             blank.data);
+        else
+            UpdateTexture(tex, blank.data);
         UnloadImage(blank);
         outWidth = FB_WIDTH;
         outHeight = DEFAULT_DISPLAY_HEIGHT;
@@ -801,6 +869,28 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                               rt->memory().gs().dispfb1, rt->memory().gs().dispfb2);
         // G44: per-vsync shadow compare against these CPU pixels.
         ps2x_gs_shadow::onPresentFrame(currentTick, s_scratch.data(), width, height, &rt->memory().gs());
+    }
+
+    const bool large = static_cast<int>(width) > FB_WIDTH || static_cast<int>(height) > FB_HEIGHT;
+    if ((large || texGrown) && !s_scratch.empty() &&
+        s_scratch.size() == static_cast<size_t>(width) * static_cast<size_t>(height) * 4u)
+    {
+        if (static_cast<int>(width) > tex.width || static_cast<int>(height) > tex.height)
+        {
+            const int newW = std::max<int>(tex.width, static_cast<int>(width));
+            const int newH = std::max<int>(tex.height, static_cast<int>(height));
+            UnloadTexture(tex);
+            Image grown = GenImageColor(newW, newH, BLANK);
+            tex = LoadTextureFromImage(grown);
+            UnloadImage(grown);
+            std::fprintf(stderr, "[present] frame texture grown to %dx%d\n", newW, newH);
+        }
+        UpdateTextureRec(tex, Rectangle{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)},
+                         s_scratch.data());
+        outWidth = width;
+        outHeight = height;
+        s_hasUploadedFrame = true;
+        return;
     }
 
     std::fill(s_uploadBuffer.begin(), s_uploadBuffer.end(), 0u);
@@ -3921,6 +4011,7 @@ void PS2Runtime::run()
     const ps2x::present::Aspect presentAspect = ps2x::present::aspectFromEnv(std::getenv("PS2X_ASPECT"), anamorphic);
     const ps2x::present::Filter presentFilter = ps2x::present::filterFromEnv(std::getenv("PS2X_PRESENT_FILTER"));
     int appliedFilter = -1;
+    unsigned int appliedFilterTexId = 0u;
     auto vsyncRateWall = std::chrono::steady_clock::now();
     uint64_t vsyncRateTick = m_memory.gs().vsyncTick.load();
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
@@ -3935,6 +4026,14 @@ void PS2Runtime::run()
                 const double rate = static_cast<double>(vt - vsyncRateTick) / secs;
                 std::fprintf(stderr, "[vsync-rate] tick=%llu rate=%.2f/s (%.3fx of 59.94)\n",
                              static_cast<unsigned long long>(vt), rate, rate / 59.94);
+#if defined(__APPLE__)
+                static const bool s_threadCpuLog = [] {
+                    const char *v = std::getenv("PS2X_THREAD_CPU_LOG");
+                    return v && std::strcmp(v, "1") == 0;
+                }();
+                if (s_threadCpuLog)
+                    logThreadCpu(vt);
+#endif
                 vsyncRateWall = now;
                 vsyncRateTick = vt;
             }
@@ -3994,10 +4093,11 @@ void PS2Runtime::run()
         const int wantFilter = ps2x::present::useBilinear(presentFilter, pr.w * dpiScale / srcWidth, pr.h * dpiScale / srcHeight)
                                    ? TEXTURE_FILTER_BILINEAR
                                    : TEXTURE_FILTER_POINT;
-        if (wantFilter != appliedFilter)
+        if (wantFilter != appliedFilter || frameTex.id != appliedFilterTexId)
         {
             SetTextureFilter(frameTex, wantFilter);
             appliedFilter = wantFilter;
+            appliedFilterTexId = frameTex.id; // HR1: UploadFrame may re-create the texture
         }
         const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
         const Rectangle dstRect{pr.x, pr.y, pr.w, pr.h};
