@@ -22,6 +22,26 @@
 
 namespace
 {
+    // NP1: one worker wakeup per GIF drain instead of one per packet
+    // (Part 1: enqueue is 4.0% of Odin race samples, 3.6% via noteGifPath).
+    // Null-GS and direct-mode safe; nest-safe; never spans an RPC wait.
+    struct GifDrainBatch
+    {
+        explicit GifDrainBatch(GS *gs) : m_gs(gs)
+        {
+            if (m_gs)
+                m_gs->beginWorkerBatch();
+        }
+        ~GifDrainBatch()
+        {
+            if (m_gs)
+                m_gs->endWorkerBatch();
+        }
+        GifDrainBatch(const GifDrainBatch &) = delete;
+        GifDrainBatch &operator=(const GifDrainBatch &) = delete;
+        GS *m_gs;
+    };
+
     inline void inRange(uint32_t offset, size_t bytes, size_t regionSize, const char *op, uint32_t address)
     {
         if (static_cast<uint64_t>(offset) + static_cast<uint64_t>(bytes) > static_cast<uint64_t>(regionSize))
@@ -2283,7 +2303,10 @@ void PS2Memory::processPendingTransfers()
     m_pendingVif1Transfers.clear();
 
     if (m_gifArbiter)
+    {
+        const GifDrainBatch batch(m_gsFrontend);
         m_gifArbiter->drain();
+    }
 
     static constexpr uint32_t GIF_CHANNEL = 0x1000A000;
     static constexpr uint32_t VIF0_CHANNEL = 0x10008000;
@@ -2410,6 +2433,7 @@ void PS2Memory::releaseOneMaskedPath3Packet()
     if (m_gifArbiter)
     {
         m_gifArbiter->submit(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()), false);
+        const GifDrainBatch batch(m_gsFrontend);
         m_gifArbiter->drain();
     }
     else if (m_gifPacketCallback)
@@ -2452,7 +2476,10 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
     m_path3MaskedFifo.clear();
 
     if (m_gifArbiter && drainImmediately)
+    {
+        const GifDrainBatch batch(m_gsFrontend);
         m_gifArbiter->drain();
+    }
 }
 
 void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl)
@@ -2494,7 +2521,10 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
         m_gifPacketCallback(data, sizeBytes);
 
     if (m_gifArbiter && drainImmediately)
+    {
+        const GifDrainBatch batch(m_gsFrontend);
         m_gifArbiter->drain();
+    }
 }
 
 void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)

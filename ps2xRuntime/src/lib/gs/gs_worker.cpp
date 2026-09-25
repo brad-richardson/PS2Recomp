@@ -72,8 +72,31 @@ void GsWorker::enqueue(GsCommand cmd)
     m_queuedBytes += bytes;
     m_queue.push_back(std::move(cmd));
     m_enqueuedCount.fetch_add(1u, std::memory_order_relaxed);
+    const bool silent = m_batchDepth > 0;
+    if (silent)
+        m_batchDirty = true;
     lock.unlock();
-    m_hasWork.notify_one();
+    if (!silent)
+        m_hasWork.notify_one();
+}
+
+void GsWorker::beginBatch()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    ++m_batchDepth;
+}
+
+void GsWorker::endBatch()
+{
+    std::unique_lock<std::mutex> lock(m_mutex);
+    if (m_batchDepth == 0)
+        return;
+    const bool notify = --m_batchDepth == 0 && m_batchDirty;
+    if (m_batchDepth == 0)
+        m_batchDirty = false;
+    lock.unlock();
+    if (notify)
+        m_hasWork.notify_one();
 }
 
 size_t GsWorker::pendingCount() const

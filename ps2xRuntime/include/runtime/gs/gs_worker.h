@@ -138,6 +138,14 @@ public:
     // producer thread (game thread submits, main thread presents).
     void enqueue(GsCommand cmd);
 
+    // NP1: coalesce handoff wakeups across a drain. Between beginBatch and
+    // endBatch, enqueue() queues without notifying; endBatch notifies once
+    // if anything was queued. Nest-safe. Queue order, bounds and
+    // backpressure are unchanged; the worker's wait predicate re-check makes
+    // the deferred wakeup race-free. No batch may span a synchronous RPC wait.
+    void beginBatch();
+    void endBatch();
+
     size_t pendingCount() const;
     size_t pendingBytes() const;
     // True when the queue is empty AND no command is executing (checked
@@ -160,6 +168,8 @@ private:
     std::deque<GsCommand> m_queue;
     bool m_executing = false; // set under m_mutex around the handler call
     size_t m_queuedBytes = 0;
+    uint32_t m_batchDepth = 0; // guarded by m_mutex
+    bool m_batchDirty = false; // guarded by m_mutex
     bool m_stopRequested = false;
     bool m_running = false;
     std::thread m_thread;

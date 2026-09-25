@@ -114,6 +114,9 @@ public:
     // from syncCoreSubsystems during init, before the game thread spawns).
     bool setQueueEnabled(bool enabled);
     bool queueEnabled() const { return m_worker != nullptr; }
+    // NP1: coalesce worker wakeups to one per batch (direct mode: no-op).
+    void beginWorkerBatch() { if (m_worker) m_worker->beginBatch(); }
+    void endWorkerBatch() { if (m_worker) m_worker->endBatch(); }
     // Blocks until all previously enqueued commands have executed.
     void drainQueue();
     // N8D7M12 Part 5F4P2: dev-only default-off fingerprint of commands in
