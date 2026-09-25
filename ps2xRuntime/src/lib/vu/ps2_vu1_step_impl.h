@@ -141,15 +141,15 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     if (m_cycle >= ctx.budgetEnd)
         return true;
 
-    // E37: pre-exec snapshot for the pair line (post-stall state).
-    int32_t entryOldVi[16]{};
-    uint32_t entryOldVf[32][4]{};
+    // E37: pre-exec snapshot for the pair line (post-stall state). VR1: the
+    // snapshot lives in members, written and read only while m_entryArmed
+    // (was two zero-initialized stack arrays, 576 B cleared on every pair).
     uint32_t entryPc = 0u, entryLo = 0u, entryUp = 0u;
     if (m_entryArmed)
     {
         entryPc = m_state.pc;
-        std::memcpy(entryOldVi, m_state.vi, sizeof(entryOldVi));
-        std::memcpy(entryOldVf, m_state.vf, sizeof(entryOldVf));
+        std::memcpy(m_entryOldVi, m_state.vi, sizeof(m_entryOldVi));
+        std::memcpy(m_entryOldVf, m_state.vf, sizeof(m_entryOldVf));
         std::memcpy(&entryLo, ctx.vuCode + m_state.pc, sizeof(entryLo));
         std::memcpy(&entryUp, ctx.vuCode + m_state.pc + sizeof(entryLo), sizeof(entryUp));
         m_entryStoreValid = false;
@@ -228,7 +228,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     if (m_entryArmed)
     {
         recordEntryPair(entryPc, entryLo, entryUp, ctx.vuData, ctx.dataSize,
-                        entryOldVi, entryOldVf);
+                        m_entryOldVi, m_entryOldVf);
     }
 
     if (hasUpperWrite)

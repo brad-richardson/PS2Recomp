@@ -124,10 +124,6 @@ float VU1Interpreter::broadcast(const float *vf, uint8_t bc)
     return normalizeOperand(vf[bc & 3u]);
 }
 
-uint32_t VU1Interpreter::microAddressMask() const
-{
-    return m_unit == Unit::VU1 ? 0x3FFFu : 0x0FFFu;
-}
 
 int32_t VU1Interpreter::readBranchVi(uint8_t reg) const
 {

@@ -339,6 +339,8 @@ private:
     uint32_t m_entryArrivals = 0u;
     std::vector<std::string> m_entryLines;
     bool m_entryStoreValid = false;
+    int32_t m_entryOldVi[16]{};
+    uint32_t m_entryOldVf[32][4]{};
     uint32_t m_entryStoreAddr = 0u;
     uint32_t m_entryStoreWords[4]{};
     bool m_traceArmed = false;
@@ -473,7 +475,10 @@ private:
         std::memcpy(&value, &bits, sizeof(value));
         return value;
     }
-    uint32_t microAddressMask() const;
+    uint32_t microAddressMask() const
+    {
+        return m_unit == Unit::VU1 ? 0x3FFFu : 0x0FFFu;
+    }
     int32_t readBranchVi(uint8_t reg) const;
     void recordViWriteForBranch(uint8_t reg, int32_t oldValue);
     void reportReservedInstruction(bool upper, uint32_t instruction);
