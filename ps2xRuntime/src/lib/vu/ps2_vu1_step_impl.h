@@ -166,6 +166,21 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directAccWrite(uint8_t laneMa
     noteDirect(m_cycle + latency);
 }
 
+// VR1 g5: moved from ps2_vu1_core.cpp and inlined, with commitReadyPipelines()'
+// own early-return gate checked at the call site (same condition, so the same
+// calls do work).
+PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::advanceOneCycle()
+{
+    ++m_cycle;
+    m_state.cycles = m_cycle;
+    // LSU commits become visible at the cycle boundary before PATH1 consumes
+    // its next qword from VU memory.
+    if (m_cycle >= m_nextCommitCycle)
+        commitReadyPipelines();
+    if (m_xgkick.active)
+        progressXgkick();
+}
+
 template <bool kStatic>
 PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstructionPair &decoded, RunContext &ctx)
 {
@@ -422,7 +437,8 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::recompChainReady(RunContext &
 {
     if (!(m_cycle < ctx.budgetEnd && !m_stopRequested))
         return false;
-    commitReadyPipelines();
+    if (m_cycle >= m_nextCommitCycle)
+        commitReadyPipelines();
     return m_state.pc + 8u <= ctx.codeSize && (m_state.pc & 7u) == 0u;
 }
 

@@ -794,17 +794,6 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
     m_xgkick.issueCycle = m_cycle;
 }
 
-void VU1Interpreter::advanceOneCycle()
-{
-    ++m_cycle;
-    m_state.cycles = m_cycle;
-    // LSU commits become visible at the cycle boundary before PATH1 consumes
-    // its next qword from VU memory.
-    commitReadyPipelines();
-    if (m_xgkick.active)
-        progressXgkick();
-}
-
 void VU1Interpreter::advanceTo(uint64_t targetCycle)
 {
     while (m_cycle < targetCycle)
