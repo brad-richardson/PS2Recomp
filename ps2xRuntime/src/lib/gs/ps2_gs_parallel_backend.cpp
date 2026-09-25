@@ -306,9 +306,20 @@ public:
         out.width = std::min<uint32_t>(w, kStride);
         out.height = std::min<uint32_t>(h, 512u);
         out.pixels.assign(static_cast<size_t>(kStride) * out.height * 4u, 0u);
+        // DK1: presentation pixels must be opaque. The shared presenter
+        // uploads them to a raylib RGBA texture and alpha-blends the game
+        // quad over black, so paraLLEl scanout alpha (PS2 alpha, 0x80 on
+        // content rows) would show the frame at half brightness. The CPU
+        // backend already normalizes (normalizePresentationAlpha in
+        // gs_cpu_backend.cpp); fold the same into the copy here.
         for (uint32_t y = 0; y < out.height; ++y)
-            std::memcpy(out.pixels.data() + static_cast<size_t>(y) * kStride * 4u,
-                        px + static_cast<size_t>(y) * w * 4u, static_cast<size_t>(out.width) * 4u);
+        {
+            uint8_t *dst = out.pixels.data() + static_cast<size_t>(y) * kStride * 4u;
+            std::memcpy(dst, px + static_cast<size_t>(y) * w * 4u,
+                        static_cast<size_t>(out.width) * 4u);
+            for (uint32_t x = 0; x < out.width; ++x)
+                dst[x * 4u + 3u] = 255u;
+        }
         out.displayFbp = static_cast<uint32_t>(m_priv ? (m_priv->dispfb1 & 0x1FFu) : 0u);
         out.sourceFbp = out.displayFbp;
 
