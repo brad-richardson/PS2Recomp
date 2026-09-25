@@ -27,6 +27,7 @@
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
 #include "ps2_snd_audio_output.h"
+#include "ps2_thread_affinity.h"
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
 #include "ps2x/iop/iop_subsystem.h"
@@ -3731,6 +3732,17 @@ void PS2Runtime::run()
     std::thread gameThread([&]()
                            {
         ThreadNaming::SetCurrentThreadName("GameThread");
+        // N11: PS2X_GAME_THREAD_CPUS="6,7" pins this thread to itself (no
+        // privilege needed); unset/empty = no change. Unconditional stderr
+        // line (RUNTIME_LOG compiles out of release builds).
+        if (const char *affinityCpus = std::getenv("PS2X_GAME_THREAD_CPUS"))
+        {
+            if (affinityCpus[0] != '\0')
+            {
+                const int rc = ps2x::pinCurrentThreadToCpus(ps2x::parseCpuList(affinityCpus));
+                std::fprintf(stderr, "[affinity] game thread cpus=%s rc=%d\n", affinityCpus, rc);
+            }
+        }
         try
         {
             m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
