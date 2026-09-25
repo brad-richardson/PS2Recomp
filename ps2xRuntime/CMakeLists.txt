@@ -699,10 +699,14 @@ if(PS2X_VU1_RECOMP_DIR)
     list(FILTER PS2X_VU1_RECOMP_SOURCES EXCLUDE REGEX "/\\._")
     list(LENGTH PS2X_VU1_RECOMP_SOURCES PS2X_VU1_RECOMP_SOURCE_COUNT)
     message(STATUS "PS2X: VU1 recomp: ${PS2X_VU1_RECOMP_SOURCE_COUNT} images from ${PS2X_VU1_RECOMP_DIR}")
+    # F4: each image is a giant TU (2,048 chained pair functions); cap how many
+    # compile at once so small build boxes don't OOM. Only Ninja honors pools.
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS ps2x_vu1_gen=2)
     target_sources(ps2EntryRunner PRIVATE ${PS2X_VU1_RECOMP_SOURCES})
     set_source_files_properties(${PS2X_VU1_RECOMP_SOURCES} PROPERTIES
         SKIP_UNITY_BUILD_INCLUSION ON
         SKIP_PRECOMPILE_HEADERS ON
+        JOB_POOL_COMPILE ps2x_vu1_gen
         INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu;${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
 endif()
 
