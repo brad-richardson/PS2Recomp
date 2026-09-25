@@ -534,6 +534,10 @@ if(APPLE AND NOT PS2X_IS_IOS)
 elseif(PS2X_IS_IOS)
     target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_present_share_ios.mm)
     target_link_libraries(ps2_gs_shadow PRIVATE "-framework CoreVideo" "-framework OpenGLES" "-framework IOSurface")
+elseif(PS2X_IS_ANDROID)
+    # VK1 prototype: PS2X_PRESENT_VULKAN=1 (AHardwareBuffer + SurfaceControl).
+    target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_present_vk_android.cpp)
+    target_link_libraries(ps2_gs_shadow PRIVATE android log)
 endif()
 target_include_directories(ps2_gs_shadow PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -675,6 +679,10 @@ target_include_directories(ps2_runtime PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel
 )
+if(PS2X_IS_ANDROID)
+    # VK1: ps2_runtime.cpp reads raylib's android_app (window, activity).
+    target_include_directories(ps2_runtime PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
+endif()
 
 target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
 target_link_libraries(ps2EntryRunner

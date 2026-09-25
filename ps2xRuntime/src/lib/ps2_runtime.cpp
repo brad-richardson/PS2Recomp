@@ -20,6 +20,11 @@
 #include "runtime/gs/ps2_gs_shadow.h"
 #include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "runtime/gs/ps2_present_share.h"
+#if defined(__ANDROID__)
+#include "runtime/gs/ps2_present_vk.h"
+#include <android_native_app_glue.h>
+extern "C" struct android_app *GetAndroidApp(void); // raylib rcore_android.c
+#endif
 #if defined(PS2X_IOS)
 // HR1 spike: blend off around the shared-texture quad. Declared here because
 // rlgl.h redefines raylib.h types in this TU (raylib is built as C).
@@ -819,6 +824,15 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         return;
     }
 
+#if defined(__ANDROID__)
+    // VK1 prototype (PS2X_PRESENT_VULKAN=1): the latch above made the backend
+    // queue the frame on the SurfaceControl layer; nothing to copy or upload.
+    if (ps2x_present_vk::active())
+    {
+        s_hasUploadedFrame = true;
+        return;
+    }
+#endif
 #if defined(__APPLE__) && !defined(PS2X_IOS)
     // HR1 prototype (PS2X_PRESENT_ZERO_COPY=1): GPU blit from the backend's
     // IOSurface into the frame texture; no pixel bytes touch the CPU.
@@ -4187,6 +4201,14 @@ void PS2Runtime::run()
         });
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+#if defined(__ANDROID__)
+        if (ps2x_present_vk::enabled())
+        {
+            struct android_app *app = GetAndroidApp();
+            ps2x_present_vk::setHostWindow(app ? app->window : nullptr, app ? app->activity : nullptr,
+                                           static_cast<int>(presentAspect));
+        }
+#endif
         UploadFrame(frameTex, this, presentWidth, presentHeight);
 
 #if defined(PS2X_IOS)
@@ -4229,6 +4251,9 @@ void PS2Runtime::run()
             rlEnableColorBlend();
         }
         else
+#endif
+#if defined(__ANDROID__)
+        if (!ps2x_present_vk::active()) // VK1: the game is on the SurfaceControl layer above
 #endif
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
         // I26: virtual controls, hidden while a connected game controller is in use.

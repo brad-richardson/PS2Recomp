@@ -7,6 +7,7 @@
 #include <type_traits>
 #include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "runtime/gs/ps2_present_share.h"
+#include "runtime/gs/ps2_present_vk.h"
 #include "runtime/ps2_memory.h"
 
 #include <algorithm>
@@ -22,6 +23,7 @@
 #include <TargetConditionals.h>
 #endif
 #if defined(__ANDROID__) && defined(PS2X_HAS_PARALLEL_SHADOW)
+#include <android/hardware_buffer.h>
 #include <dlfcn.h>
 #endif
 
@@ -32,6 +34,9 @@
 #include "pgs_env_knobs.hpp" // GB9: PGS_HIER_BINNING mode parser (parallel-gs fork)
 #if defined(__APPLE__)
 #include <vulkan/vulkan_metal.h> // HR1: VK_EXT_metal_objects (IOSurface export)
+#endif
+#if defined(__ANDROID__)
+#include <vulkan/vulkan_android.h> // VK1: AHardwareBuffer import
 #endif
 #endif
 
@@ -108,8 +113,16 @@ void logStats(const char *why)
               << " present_ms_avg=" << presentMs << " readback_ms_avg=" << readbackMs
               << " copy_ms_avg=" << copyMs
               << " snapshots=" << s.snapshots << " unsupported_clears=" << s.unsupportedClears
-              << " unsupported_vram_io=" << s.unsupportedVramIo << " l2h_bytes=" << s.localToHostBytes
-              << std::endl;
+              << " unsupported_vram_io=" << s.unsupportedVramIo << " l2h_bytes=" << s.localToHostBytes;
+#if defined(__ANDROID__)
+    if (ps2x_present_vk::enabled())
+    {
+        char vk[320];
+        ps2x_present_vk::appendStats(vk, sizeof(vk));
+        std::cerr << vk;
+    }
+#endif
+    std::cerr << std::endl;
 }
 
 uint32_t transferBitsPerPixel(uint8_t psm)
@@ -244,6 +257,9 @@ public:
 
     ~GSParallelBackend() override
     {
+#if defined(__ANDROID__)
+        destroyVkSlots();
+#endif
         delete m_iface;
         delete m_device;
         delete m_ctx;
@@ -344,6 +360,16 @@ public:
             if (n == 1u || n % 300u == 0u)
                 logStats(n == 1u ? "first-present" : "periodic");
             return out; // empty: the presenter reads ps2x_present_share instead
+        }
+#endif
+#if defined(__ANDROID__)
+        if (m_vkPresent && presentVk(*shot.image, w, h, request.vsyncTick))
+        {
+            const uint64_t t1 = nowNanos();
+            c.presentNanos.fetch_add(t1 - t0, std::memory_order_relaxed);
+            if (n == 1u || n % 300u == 0u)
+                logStats(n == 1u ? "first-present" : "periodic");
+            return out; // empty: the frame went to the SurfaceControl layer
         }
 #endif
         const uint64_t r0 = nowNanos();
@@ -667,6 +693,23 @@ private:
         // HR1 prototype: IOSurface export needs VK_EXT_metal_objects.
         m_zeroCopy = ps2x_present_share::enabled();
         static const char *const kZeroCopyExt[] = {"VK_EXT_metal_objects"};
+#if defined(__ANDROID__)
+        // VK1 prototype: AHardwareBuffer import for the SurfaceControl present.
+        m_vkPresent = ps2x_present_vk::enabled();
+        static const char *const kVkPresentExt[] = {"VK_ANDROID_external_memory_android_hardware_buffer",
+                                                    "VK_EXT_queue_family_foreign"};
+        if (m_vkPresent && !m_ctx->init_instance_and_device(nullptr, 0, kVkPresentExt, 2u, kFlags))
+        {
+            std::cerr << "[present-vk] device lacks AHardwareBuffer import; falling back to readback" << std::endl;
+            m_vkPresent = false;
+            delete m_ctx;
+            m_ctx = new Vulkan::Context();
+            m_ctx->set_num_thread_indices(1);
+        }
+        else if (m_vkPresent)
+            std::cerr << "[present-vk] AHardwareBuffer import extensions enabled" << std::endl;
+        if (!m_vkPresent)
+#endif
         if (!m_ctx->init_instance_and_device(nullptr, 0, m_zeroCopy ? kZeroCopyExt : nullptr,
                                              m_zeroCopy ? 1u : 0u, kFlags))
             return fail("init_instance_and_device failed");
@@ -675,6 +718,18 @@ private:
         m_device = new Vulkan::Device();
         m_device->set_context(*m_ctx);
         m_device->init_frame_contexts(4);
+#if defined(__ANDROID__)
+        if (m_vkPresent)
+        {
+            m_getAhbProps = reinterpret_cast<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
+                vkGetDeviceProcAddr(m_device->get_device(), "vkGetAndroidHardwareBufferPropertiesANDROID"));
+            if (!m_getAhbProps)
+            {
+                std::cerr << "[present-vk] vkGetAndroidHardwareBufferPropertiesANDROID missing; readback" << std::endl;
+                m_vkPresent = false;
+            }
+        }
+#endif
         m_iface = new ParallelGS::GSInterface();
         ParallelGS::GSOptions opts = {};
         readQualityKnobs(opts);
@@ -823,6 +878,249 @@ private:
     }
 #endif
 
+#if defined(__ANDROID__)
+    // VK1 prototype (PS2X_PRESENT_VULKAN=1): four AHardwareBuffer-backed
+    // images imported into Turnip; each scanout is blitted into one and the
+    // buffer is queued on the SurfaceControl layer (ps2_present_vk_android.cpp).
+    struct VkSlot
+    {
+        AHardwareBuffer *ahb = nullptr;
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        Vulkan::ImageHandle wrapped;
+        Vulkan::Fence fence;
+        uint32_t w = 0u, h = 0u;
+    };
+    static constexpr uint32_t kVkSlots = 4u;
+
+    void destroyVkSlots()
+    {
+        if (!m_device)
+            return;
+        bool any = false;
+        for (auto &slot : m_vk)
+            any = any || slot.ahb;
+        if (!any)
+            return;
+        m_device->wait_idle();
+        const auto &t = m_device->get_device_table();
+        for (auto &slot : m_vk)
+        {
+            slot.fence.reset();
+            slot.wrapped.reset();
+            if (slot.image)
+                t.vkDestroyImage(m_device->get_device(), slot.image, nullptr);
+            if (slot.memory)
+                t.vkFreeMemory(m_device->get_device(), slot.memory, nullptr);
+            ps2x_present_vk::releaseBuffer(slot.ahb);
+            slot = VkSlot{};
+        }
+        m_vkPrev = -1;
+        m_vkW = m_vkH = 0u;
+    }
+
+    bool createVkSlots(uint32_t w, uint32_t h)
+    {
+        destroyVkSlots(); // size change (rare); waits for the GPU
+        const auto &t = m_device->get_device_table();
+        const VkDevice dev = m_device->get_device();
+        constexpr VkImageUsageFlags kUsage =
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        for (auto &slot : m_vk)
+        {
+            slot.ahb = ps2x_present_vk::allocateBuffer(w, h);
+            if (!slot.ahb)
+                return false;
+            VkAndroidHardwareBufferFormatPropertiesANDROID fmt = {
+                VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID};
+            VkAndroidHardwareBufferPropertiesANDROID props = {VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID,
+                                                              &fmt};
+            const VkResult pr = m_getAhbProps(dev, slot.ahb, &props);
+            if (&slot == &m_vk[0])
+                std::cerr << "[present-vk] AHB props rc=" << pr << " size=" << props.allocationSize
+                          << " memTypeBits=0x" << std::hex << props.memoryTypeBits << " format=" << std::dec
+                          << fmt.format << " externalFormat=" << fmt.externalFormat << " features=0x" << std::hex
+                          << fmt.formatFeatures << std::dec << std::endl;
+            if (pr != VK_SUCCESS || props.memoryTypeBits == 0u)
+                return false;
+            VkExternalMemoryImageCreateInfo ext = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+            ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+            VkImageCreateInfo ici = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &ext};
+            ici.imageType = VK_IMAGE_TYPE_2D;
+            ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+            ici.extent = {w, h, 1u};
+            ici.mipLevels = 1u;
+            ici.arrayLayers = 1u;
+            ici.samples = VK_SAMPLE_COUNT_1_BIT;
+            ici.tiling = VK_IMAGE_TILING_OPTIMAL; // required for AHB images; the driver maps the real layout
+            ici.usage = kUsage;
+            ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            if (t.vkCreateImage(dev, &ici, nullptr, &slot.image) != VK_SUCCESS)
+                return false;
+            VkImportAndroidHardwareBufferInfoANDROID imp = {VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID};
+            imp.buffer = slot.ahb;
+            VkMemoryDedicatedAllocateInfo ded = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, &imp};
+            ded.image = slot.image;
+            VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &ded};
+            mai.allocationSize = props.allocationSize;
+            mai.memoryTypeIndex = static_cast<uint32_t>(__builtin_ctz(props.memoryTypeBits));
+            if (t.vkAllocateMemory(dev, &mai, nullptr, &slot.memory) != VK_SUCCESS)
+                return false;
+            if (t.vkBindImageMemory(dev, slot.image, slot.memory, 0) != VK_SUCCESS)
+                return false;
+            Vulkan::ImageCreateInfo info = Vulkan::ImageCreateInfo::render_target(w, h, VK_FORMAT_R8G8B8A8_UNORM);
+            info.usage = kUsage;
+            info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+            slot.wrapped = m_device->wrap_image(info, slot.image);
+            if (!slot.wrapped)
+                return false;
+        }
+        m_vkW = w;
+        m_vkH = h;
+        m_vkIndex = 0u;
+        m_vkPrev = -1;
+        std::cerr << "[present-vk] " << kVkSlots << " slots " << w << "x" << h << " imported" << std::endl;
+        return true;
+    }
+
+    // PS2X_PRESENT_VK_COMPARE_TICKS="a,b": at those ticks the present is
+    // synchronous and the scanout is also read back; the buffer SurfaceFlinger
+    // gets is locked through gralloc and compared byte for byte (RGB).
+    bool vkCompareDue(uint64_t tick)
+    {
+        if (!m_vkDumpParsed)
+        {
+            m_vkDumpParsed = true;
+            if (const char *v = std::getenv("PS2X_PRESENT_VK_COMPARE_TICKS"))
+            {
+                const char *p = v;
+                while (*p)
+                {
+                    char *end = nullptr;
+                    const unsigned long long t = std::strtoull(p, &end, 10);
+                    if (end == p)
+                        break;
+                    m_vkDumpTicks.push_back(t);
+                    p = (*end == ',') ? end + 1 : end;
+                }
+            }
+        }
+        for (uint64_t &t : m_vkDumpTicks)
+        {
+            if (t != 0u && tick >= t)
+            {
+                t = 0u;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool presentVk(Vulkan::Image &src, uint32_t w, uint32_t h, uint64_t tick)
+    {
+        if ((w != m_vkW || h != m_vkH) && !createVkSlots(w, h))
+        {
+            std::cerr << "[present-vk] slot setup failed; falling back to readback" << std::endl;
+            destroyVkSlots();
+            m_vkPresent = false;
+            return false;
+        }
+        const uint32_t cur = m_vkIndex;
+        VkSlot &slot = m_vk[cur];
+        m_vkIndex = (m_vkIndex + 1u) % kVkSlots;
+        if (slot.fence)
+        {
+            slot.fence->wait();
+            slot.fence.reset();
+        }
+        ps2x_present_vk::waitReusable(slot.ahb, 100);
+        const bool compare = vkCompareDue(tick);
+        const uint32_t gfx = m_device->get_queue_info().family_indices[Vulkan::QUEUE_INDEX_GRAPHICS];
+        auto cmd = m_device->request_command_buffer();
+        cmd->image_barrier(src, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                           VK_PIPELINE_STAGE_2_BLIT_BIT | VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        VkImageMemoryBarrier2 acquire = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        acquire.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+        acquire.dstStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+        acquire.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        acquire.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; // whole image rewritten: no ownership acquire needed
+        acquire.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        acquire.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        acquire.image = slot.image;
+        acquire.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        cmd->image_barriers(1, &acquire);
+        const VkOffset3D zero = {0, 0, 0};
+        const VkOffset3D extent = {static_cast<int32_t>(w), static_cast<int32_t>(h), 1};
+        cmd->blit_image(*slot.wrapped, src, zero, extent, zero, extent, 0, 0, 0, 0, 1, VK_FILTER_NEAREST);
+        VkImageMemoryBarrier2 release = acquire; // hand the buffer to SurfaceFlinger/HWC
+        release.srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+        release.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        release.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
+        release.dstAccessMask = 0;
+        release.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        release.srcQueueFamilyIndex = gfx;
+        release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
+        cmd->image_barriers(1, &release);
+        Vulkan::BufferHandle rb;
+        if (compare)
+        {
+            Vulkan::BufferCreateInfo info = {};
+            info.size = static_cast<size_t>(w) * h * sizeof(uint32_t);
+            info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            info.domain = Vulkan::BufferDomain::CachedHost;
+            rb = m_device->create_buffer(info);
+            cmd->copy_image_to_buffer(*rb, src, 0, {}, {w, h, 1}, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
+            cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT,
+                         VK_ACCESS_2_HOST_READ_BIT);
+        }
+        m_device->submit(cmd, &slot.fence);
+        slot.w = w;
+        slot.h = h;
+        if (m_pipeline && !compare)
+        {
+            // Queue the previous frame (one frame of latency, as the readback
+            // pipeline); its blit is normally long done.
+            if (m_vkPrev >= 0)
+            {
+                VkSlot &prev = m_vk[m_vkPrev];
+                if (prev.fence)
+                {
+                    prev.fence->wait();
+                    prev.fence.reset();
+                }
+                ps2x_present_vk::queue(prev.ahb, prev.w, prev.h);
+            }
+            m_vkPrev = static_cast<int>(cur);
+            return true;
+        }
+        if (m_vkPrev >= 0) // leaving pipelined order for a compare frame: flush the pending one first
+        {
+            VkSlot &prev = m_vk[m_vkPrev];
+            if (prev.fence)
+            {
+                prev.fence->wait();
+                prev.fence.reset();
+            }
+            ps2x_present_vk::queue(prev.ahb, prev.w, prev.h);
+            m_vkPrev = -1;
+        }
+        slot.fence->wait();
+        slot.fence.reset();
+        if (compare && rb)
+        {
+            const auto *px = static_cast<const uint8_t *>(m_device->map_host_buffer(*rb, Vulkan::MEMORY_ACCESS_READ_BIT));
+            if (px)
+                ps2x_present_vk::compareBuffer(slot.ahb, px, w, h, tick, std::getenv("PS2X_PRESENT_VK_DUMP_DIR"));
+        }
+        ps2x_present_vk::queue(slot.ahb, w, h);
+        return true;
+    }
+#endif
+
     bool fail(const char *what)
     {
         std::cerr << "[gs:parallel] FATAL: " << what << " (frames will be empty)" << std::endl;
@@ -961,6 +1259,15 @@ private:
     uint32_t m_shareIndex = 0u, m_shareW = 0u, m_shareH = 0u;
     uint64_t m_shareSeq = 0u;
     bool m_zeroCopyBroken = false;
+#endif
+#if defined(__ANDROID__) && defined(PS2X_HAS_PARALLEL_SHADOW)
+    VkSlot m_vk[kVkSlots];
+    uint32_t m_vkIndex = 0u, m_vkW = 0u, m_vkH = 0u;
+    int m_vkPrev = -1; // slot submitted by the previous present, queued on the next one
+    bool m_vkPresent = false;
+    PFN_vkGetAndroidHardwareBufferPropertiesANDROID m_getAhbProps = nullptr;
+    std::vector<uint64_t> m_vkDumpTicks;
+    bool m_vkDumpParsed = false;
 #endif
     uint32_t m_lastScanW = 0u, m_lastScanH = 0u; // HR1: log scanout size changes
     Vulkan::Context *m_ctx = nullptr;
