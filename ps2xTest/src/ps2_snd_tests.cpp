@@ -206,6 +206,45 @@ void register_ps2_snd_tests()
         t.Equals(drv.statusWord(5), word, "the record word is echoed");
         });
 
+        tc.Run("keyed-off voice ENVX decays to zero with no output device, then retriggers", [](TestCase &t)
+        {
+        using namespace ps2_snd_spu;
+        // No audio output is initialized anywhere in this test: envelope
+        // decay is guest-time state, not host-callback state (AU10).
+        Spu spu;
+        uint8_t block[16] = {};
+        for (int i = 2; i < 16; ++i)
+            block[i] = 0x77; // +7 << 12 on both nibbles, no loop flags
+        spu.writeRam(0x6000u, block, sizeof(block));
+        std::vector<uint8_t> tag3(kTag3Bytes, 0u);
+        const uint16_t pitch = 0x1000u;
+        std::memcpy(tag3.data() + kTag3VoiceBase + 8u * 5u + 4u, &pitch, 2);
+        tag3[kTag3VoiceBase + 8u * 5u + 6u] = 100;
+        tag3[kTag3VoiceBase + 8u * 5u + 7u] = 100;
+        auto setWord = [&](uint32_t word)
+        {
+            std::memcpy(tag3.data() + kTag3VoiceBase + 8u * 5u, &word, 4);
+        };
+        Driver drv;
+        setWord((1u << 23) | 0x6000u);
+        drv.update(tag3.data(), spu);
+        t.Equals(drv.keyOns(), uint64_t(1), "one key on");
+        int32_t d0[2 * kTickFrames], d1[2 * kTickFrames];
+        spu.render(d0, d1, 64);
+        t.Equals(spu.envx(5), uint16_t(0x7fff), "attack completes, sustain holds at full level");
+        setWord((2u << 23) | 0x0u); // key off: same voice, zero address
+        drv.update(tag3.data(), spu);
+        spu.render(d0, d1, kTickFrames);
+        t.Equals(spu.envx(5), uint16_t(0), "release reaches ENVX 0 within one tick");
+        t.IsTrue(!spu.voice(5).on, "the released voice stops");
+        setWord((3u << 23) | 0x6000u); // retrigger at ENVX 0: no retry spin
+        drv.update(tag3.data(), spu);
+        t.Equals(drv.keyOns(), uint64_t(2), "ENVX 0 retriggers immediately");
+        t.IsTrue(spu.voice(5).on, "the retriggered voice sounds");
+        spu.render(d0, d1, 1);
+        t.IsTrue(spu.envx(5) != 0u, "the retriggered envelope rises");
+        });
+
         tc.Run("tag-3 record is found between tag 0 and tag 1", [](TestCase &t)
         {
         using namespace ps2_snd_spike;

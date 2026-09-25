@@ -1,6 +1,9 @@
-// Dev-only, default-off HLE of the SSX 3 EA SND tick and tag-1 PCM path.
-// Set PS2X_SOUND=1 to tick on the EE guest-cycle clock and feed the PCM ring.
-// Env:
+// HLE of the SSX 3 EA SND tick and tag-1 PCM path. The guest-time model
+// (sound-clock ticks, cid-0 uploads, tag-3 voice updates, status block)
+// always runs: the game waits on SND progress once its sound banks load
+// (AU10), so gating it on host audio hangs the title with sound off.
+// PS2X_SOUND=1 only enables the host audio output that drains the PCM ring;
+// without it the ring overflows and drops frames host-side. Env:
 //   PS2X_SND_LOG=<file>    event log (bounded, kMaxLines).
 //   PS2X_SND_DUMP_DIR=<d>  payload dumps (bounded, kMaxDumpBytes).
 //   PS2X_SND_TAG1=<file>   consecutive 0x620-byte tag-1 records (bounded).
@@ -271,9 +274,8 @@ inline State &state()
 inline void initLocked(State &s)
 {
     s.init = true;
-    const char *sound = std::getenv("PS2X_SOUND");
-    if (!sound || std::strcmp(sound, "1") != 0)
-        return;
+    // AU10: no PS2X_SOUND gate. Guest-visible SND state advances on guest
+    // time whether or not a host audio device consumes the PCM ring.
     if (const char *p = std::getenv("PS2X_SND_LOG"); p && *p)
         s.log = std::fopen(p, "w");
     if (const char *d = std::getenv("PS2X_SND_DUMP_DIR"); d && *d)

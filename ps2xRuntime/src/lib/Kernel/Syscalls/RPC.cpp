@@ -588,7 +588,7 @@ namespace ps2_syscalls
             }
         }
 
-        ps2_snd_spike::noteRpc(rdram, sid, rpcNum, sendBuf, sendSize); // AU2 spike (default off)
+        ps2_snd_spike::noteRpc(rdram, sid, rpcNum, sendBuf, sendSize); // SND HLE (always on, AU10)
 
         const uint32_t serverPtr = client->server;
         auto *server = serverPtr

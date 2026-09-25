@@ -1,5 +1,6 @@
-// Dev-only SPU2 voice model for the SSX 3 SND HLE (AU9), used by
-// ps2_snd_spike.h when PS2X_SOUND=1.
+// SPU2 voice model for the SSX 3 SND HLE (AU9), used by ps2_snd_spike.h.
+// It advances on the guest-time SND tick whether or not host audio output
+// is enabled (AU10).
 //
 // SSX 3 plays its race and menu sound effects on SPU2 hardware voices. The EE
 // uploads sample banks with cid-0 packets (sceSdVoiceTrans into SPU RAM) and

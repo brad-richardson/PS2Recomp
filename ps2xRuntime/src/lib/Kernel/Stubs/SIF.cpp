@@ -924,8 +924,8 @@ namespace ps2_stubs
             for (uint32_t i = 0; i < pendingCount; ++i)
             {
                 const Ps2SifDmaTransfer &xfer = pending[i];
-                // AU2 spike: SND-library transfers go to the spike's IOP
-                // capture instead of low EE RDRAM (PS2X_SND_TICK only).
+                // SND HLE: SND-library transfers go to the spike's IOP
+                // capture instead of low EE RDRAM (always on, AU10).
                 if (ps2_snd_spike::onSetDma(rdram, ps2_e41_trace::lastVsyncTick(), getRegU32(ctx, 31),
                                             xfer.src, xfer.dest, static_cast<uint32_t>(xfer.size),
                                             static_cast<uint32_t>(xfer.attr)))
