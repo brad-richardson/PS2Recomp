@@ -1,4 +1,3 @@
-#include "ssx3_file_key_compare.h"
 #include "ps2_runtime.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
@@ -434,12 +433,6 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-widescreen-default",
                            0x00100008u,
                            0u,
                            applySsx3Widescreen);
-
-PS2_REGISTER_GAME_OVERRIDE("ssx3-file-key-compare",
-                           "SLUS_207.72",
-                           0x00100008u,
-                           0u,
-                           ps2_ssx3_file_key::apply);
 
 // K1 P0: env-gated presentation-frame capture (PS2X_FRAME_DUMP_DIR).
 // Unset/empty = disabled (zero behavior change). When set, saves the
