@@ -614,6 +614,9 @@ if(PS2X_IS_ANDROID)
     )
 
     target_link_options(ps2EntryRunner PRIVATE "-Wl,--undefined=ANativeActivity_onCreate")
+    # NP1: bind intra-.so calls locally (no PLT round-trip for our own
+    # symbols). Android-only branch; JNI entry points stay exported.
+    target_link_options(ps2EntryRunner PRIVATE "-Wl,-Bsymbolic")
 else()
     add_executable(ps2EntryRunner
         ${RUNNER_SRC_FILES}
