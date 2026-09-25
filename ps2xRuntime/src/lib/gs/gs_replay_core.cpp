@@ -11,7 +11,7 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_vq.h"
 
-#include <cfenv>
+#include "ps2_fpmode.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -35,21 +35,27 @@ namespace
 
     struct ScopedReplayRtz
     {
-        int previous = -1;
+        uint64_t previous = 0;
+        bool active = false;
         bool ok = true;
 
         explicit ScopedReplayRtz(bool enabled)
         {
             if (!enabled)
                 return;
-            previous = std::fegetround();
-            ok = previous >= 0 && std::fesetround(FE_TOWARDZERO) == 0;
+            // LX1d follow-up: E53 scopes manage MXCSR only, but glibc
+            // fegetround() reads the x87 word (b4cb476/fc0cc67) — the
+            // fenv save/restore reset MXCSR RC on x86. Use the same
+            // control word the scopes use (infallible; ok stays true).
+            previous = ps2_fpmode::readControl();
+            ps2_fpmode::writeControl(ps2_fpmode::ps2Control(previous));
+            active = true;
         }
 
         ~ScopedReplayRtz()
         {
-            if (previous >= 0)
-                std::fesetround(previous);
+            if (active)
+                ps2_fpmode::writeControl(previous);
         }
     };
 
