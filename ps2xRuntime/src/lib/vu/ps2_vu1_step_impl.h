@@ -223,11 +223,16 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
 #if PS2X_ENABLE_DET_HASH_TAP
     const uint64_t vbStartCycle = m_cycle;
 #endif
+    // VR2: the dev-only E36/E37 traces run in the interpreter only (run()
+    // sends an armed run there), so generated pairs skip their checks.
     const uint32_t traceIssuePc = m_state.pc;
     const uint32_t traceIssueIdx = traceIssuePc / 8u;
-    if (m_traceArmed && traceIssueIdx < m_traceHist.size())
+    if constexpr (!kStatic)
     {
-        ++m_traceHist[traceIssueIdx];
+        if (m_traceArmed && traceIssueIdx < m_traceHist.size())
+        {
+            ++m_traceHist[traceIssueIdx];
+        }
     }
     // A branch "takes" when this pair newly raises branchPending (or
     // retargets it). A delay-slot branch to the identical target is
@@ -268,7 +273,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     // snapshot lives in members, written and read only while m_entryArmed
     // (was two zero-initialized stack arrays, 576 B cleared on every pair).
     uint32_t entryPc = 0u, entryLo = 0u, entryUp = 0u;
-    if (m_entryArmed)
+    if (!kStatic && m_entryArmed)
     {
         entryPc = m_state.pc;
         std::memcpy(m_entryOldVi, m_state.vi, sizeof(m_entryOldVi));
@@ -341,7 +346,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     m_directFlags = false;
     m_viBranchBackupValid = false;
 
-    if (m_traceArmed && m_state.branchPending &&
+    if (!kStatic && m_traceArmed && m_state.branchPending &&
         (!traceWasBranchPending || m_state.branchTarget != traceWasBranchTarget) &&
         traceIssueIdx < m_traceTaken.size())
     {
@@ -350,7 +355,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
 
     // E37: post-exec register state, before the revert/queue block
     // below restores the pipelined values.
-    if (m_entryArmed)
+    if (!kStatic && m_entryArmed)
     {
         recordEntryPair(entryPc, entryLo, entryUp, ctx.vuData, ctx.dataSize,
                         m_entryOldVi, m_entryOldVf);

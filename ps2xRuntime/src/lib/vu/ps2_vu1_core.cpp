@@ -1448,6 +1448,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     ctx.programEnded = false;
     // VR1: generated code for this code image, if one was compiled in.
     const RecompProgram *recomp = lookupRecompProgram(vuCode, codeSize, memory);
+    // VR2: generated pairs carry no E36/E37 trace hooks; an armed run (dev
+    // only) goes through the interpreter. m_entryArmed only turns off mid-run.
+    if (m_traceArmed || m_entryArmed)
+        recomp = nullptr;
     // VB1: direct commit (VU1 only, dev traces off).
     m_directRunOk = m_unit == Unit::VU1 && !m_traceArmed && !m_entryArmed &&
                     (m_directOverride < 0 ? directCommitEnabled() : m_directOverride != 0);
