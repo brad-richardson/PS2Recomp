@@ -430,8 +430,11 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     m_state.vf[0][3] = 1.0f;
     m_state.vi[0] = 0;
 
+    // VR2: generated images always cover the whole VU1 micro memory
+    // (lookupRecompProgram), so their code size and address mask are constants.
+    const uint32_t codeSize = kStatic ? kRecompCodeSize : ctx.codeSize;
     uint32_t nextPc = m_state.pc + 8u;
-    if (nextPc >= ctx.codeSize)
+    if (nextPc >= codeSize)
         nextPc = 0u;
     m_state.pc = nextPc;
 
@@ -439,7 +442,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     {
         if (m_state.branchDelay == 0u)
         {
-            m_state.pc = m_state.branchTarget & microAddressMask();
+            m_state.pc = m_state.branchTarget & (kStatic ? kRecompCodeSize - 1u : microAddressMask());
             m_state.branchPending = false;
         }
         else
@@ -484,18 +487,21 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     return ctx.programEnded;
 }
 
-// VR1: the same checks, in the same order, as the top of run()'s loop, so a
-// generated pair can hand off to the next one without returning to run().
-// When it returns false run() re-evaluates its loop header; the repeated
-// commitReadyPipelines() at the same cycle is a no-op (nothing is queued in
-// between and everything ready at m_cycle was already committed).
-PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::recompChainReady(RunContext &ctx)
+// VR1: the checks at the top of run()'s loop, so a generated pair can hand off
+// to the next one without returning to run(). When it returns false run()
+// re-evaluates its loop header.
+// VR2: only the stop request is left. The budget: issuePair stops a pair
+// that starts at or past budgetEnd before it changes any state (the stall
+// loop and the budget check come first), so the next pair returns true to
+// run() exactly where this check would have returned false. The commit: a
+// no-op here, since advanceOneCycle committed everything ready at m_cycle and
+// nothing is queued in between. The pc bound: generated images cover the
+// whole 16 KiB micro memory and every pc issuePair produces (pc + 8 wrapped
+// at the code size, or a branch target masked to it) is an in-range multiple
+// of 8.
+PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::recompChainReady(RunContext &)
 {
-    if (!(m_cycle < ctx.budgetEnd && !m_stopRequested))
-        return false;
-    if (m_cycle >= m_nextCommitCycle)
-        commitReadyPipelines();
-    return m_state.pc + 8u <= ctx.codeSize && (m_state.pc & 7u) == 0u;
+    return !m_stopRequested;
 }
 
 #endif

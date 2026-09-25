@@ -88,9 +88,13 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::findRecompProgram(uint64_t 
 const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
     const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory)
 {
+    // VR2: generated pairs assume the whole 16 KiB micro memory (constant code
+    // size, every masked pc in range; see recompChainReady).
+    if (m_unit != Unit::VU1 || codeSize != kRecompCodeSize)
+        return nullptr;
     if (m_recompTestProgram != nullptr)
-        return m_unit == Unit::VU1 && codeSize == m_recompTestProgram->codeSize ? m_recompTestProgram : nullptr;
-    if (m_unit != Unit::VU1 || memory == nullptr || vuCode != memory->getVU1Code())
+        return codeSize == m_recompTestProgram->codeSize ? m_recompTestProgram : nullptr;
+    if (memory == nullptr || vuCode != memory->getVU1Code())
         return nullptr;
     if (recompStatsEnabled() && (++m_recompRuns & 0x3FFFu) == 0u)
     {

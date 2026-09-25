@@ -392,9 +392,12 @@ private:
     // defined in ps2_vu1_step_impl.h. Returns true when run() must stop.
     template <bool kStatic>
     bool issuePair(const DecodedInstructionPair &decoded, RunContext &ctx);
-    // VR1: the run() loop header between two generated pairs (budget, stop,
-    // commit, pc bound). True when the next pair may issue from generated code.
+    // VR1: the run() loop header between two generated pairs (VR2: the stop
+    // request; see step_impl). True when the next pair may issue from
+    // generated code.
     bool recompChainReady(RunContext &ctx);
+    // VR2: generated images are used only for whole-memory VU1 code.
+    static constexpr uint32_t kRecompCodeSize = 0x4000u;
     const RecompProgram *lookupRecompProgram(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory);
     const RecompProgram *m_recompProgram = nullptr;
     const RecompProgram *m_recompTestProgram = nullptr;
