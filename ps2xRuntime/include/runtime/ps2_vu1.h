@@ -246,6 +246,22 @@ private:
     std::array<std::array<uint64_t, 4>, 32> m_vfReady{};
     std::array<uint64_t, 16> m_viReady{};
     std::array<uint64_t, 4> m_accReady{};
+    // E57: occupancy masks (bit i set = entry i valid, kept in sync with the
+    // entries' valid flags) and a lower bound on the earliest readyCycle of
+    // any queued entry. commitReadyPipelines() has no effect before
+    // m_nextCommitCycle, so it returns early; when it runs it visits only
+    // valid entries, in the same index order as a full scan.
+    uint32_t m_flagValidMask = 0;
+    uint32_t m_storeValidMask = 0;
+    uint32_t m_vfWriteValidMask = 0;
+    uint32_t m_viWriteValidMask = 0;
+    uint32_t m_accWriteValidMask = 0;
+    uint64_t m_nextCommitCycle = ~0ull;
+    void noteQueued(uint64_t readyCycle)
+    {
+        if (readyCycle < m_nextCommitCycle)
+            m_nextCommitCycle = readyCycle;
+    }
     std::array<std::array<uint64_t, 4>, 32> m_vfLatestWrite{};
     std::array<uint64_t, 16> m_viLatestWrite{};
     std::array<uint64_t, 4> m_accLatestWrite{};
