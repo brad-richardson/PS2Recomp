@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ps2_runtime.h"
+#include "ps2_vsync_pacer.h"
 
 #include <array>
 #include <atomic>
@@ -467,6 +468,10 @@ private:
     uint64_t m_eventSequence = 0;
     uint64_t m_invocationSequence = 0;
     uint64_t m_vsyncTick = 0;
+    // FP1: wall-clock guest-vsync pacer (executor thread only). Default on;
+    // PS2X_UNPACED=1 disables. Sleeps only; guest state untouched.
+    ps2_vsync_pacer::Pacer m_vsyncPacer{};
+    bool m_vsyncPace = true;
     uint32_t m_vsyncFlagAddress = 0;
     uint32_t m_vsyncTickAddress = 0;
     uint32_t m_gsVSyncCallback = 0;

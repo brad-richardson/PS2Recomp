@@ -195,7 +195,8 @@ EeScheduler::EeScheduler(PS2Runtime &runtime)
       m_cycleOnlyEvents([] {
           const char *flag = std::getenv("PS2X_DETERMINISTIC");
           return flag != nullptr && std::strcmp(flag, "1") == 0;
-      }())
+      }()),
+      m_vsyncPace(!ps2_vsync_pacer::unpacedFromProcessEnv())
 {
 #if PS2X_ENABLE_DET_HASH_TAP
     bool invalid = false;
@@ -509,6 +510,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_eventSequence = 0;
     m_invocationSequence = 0;
     m_vsyncTick = 0;
+    m_vsyncPacer = ps2_vsync_pacer::Pacer{};
     m_vsyncFlagAddress = 0;
     m_vsyncTickAddress = 0;
     m_gsVSyncCallback = 0;
@@ -2871,6 +2873,13 @@ void EeScheduler::processEvent(const EeEvent &event)
         requestStop();
         break;
     case EeEventType::VBlankStart:
+        if (m_vsyncPace)
+        {
+            // FP1: never outrun wall clock. Sleep only; no guest state changes.
+            const int64_t paceNowNs = ps2_vsync_pacer::steadyNowNs();
+            const int64_t paceSleepNs = m_vsyncPacer.onVsync(paceNowNs);
+            ps2_vsync_pacer::sleepNsUntil(paceNowNs, paceSleepNs);
+        }
         ++m_vsyncTick;
         if (m_vsyncTick == coverageTick())
         {
