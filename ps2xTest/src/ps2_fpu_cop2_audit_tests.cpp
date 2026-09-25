@@ -118,6 +118,27 @@ namespace
     constexpr uint32_t FMAX = 0x7F7FFFFFu;
     constexpr uint32_t NFMAX = 0xFF7FFFFFu;
     constexpr uint32_t ONE = 0x3F800000u;
+
+    // LX1c: the fpmode scopes manage MXCSR only on x86, never the x87
+    // control word — and glibc's fegetround() reads the x87 word. Assert
+    // on the word the scopes actually write (MXCSR RC bits 14:13).
+    bool roundTowardZero()
+    {
+#ifdef PS2X_FPMODE_X86
+        return ((ps2_fpmode::readControl() >> 13) & 3u) == 3u;
+#else
+        return std::fegetround() == FE_TOWARDZERO;
+#endif
+    }
+
+    bool roundToNearest()
+    {
+#ifdef PS2X_FPMODE_X86
+        return ((ps2_fpmode::readControl() >> 13) & 3u) == 0u;
+#else
+        return std::fegetround() == FE_TONEAREST;
+#endif
+    }
 }
 
 void register_ps2_fpu_cop2_audit_tests()
@@ -130,16 +151,16 @@ void register_ps2_fpu_cop2_audit_tests()
             volatile float one = 1.0f, tiny = fb(0x33C00000u), den = fb(0x1E3CE508u);
             {
                 ps2_fpmode::ScopedPs2Mode ps2;
-                t.IsTrue(std::fegetround() == FE_TOWARDZERO, "PS2 scope rounds toward zero");
+                t.IsTrue(roundTowardZero(), "PS2 scope rounds toward zero");
                 t.IsTrue(ub(one + tiny) == 0x3F800000u, "PS2 scope: 1 + 0.75 ulp chops");
                 t.IsTrue(ub(den * den) == 0u, "PS2 scope: denormal product flushes to 0");
                 {
                     ps2_fpmode::ScopedHostMode host;
-                    t.IsTrue(std::fegetround() == FE_TONEAREST, "host scope (GS) rounds to nearest");
+                    t.IsTrue(roundToNearest(), "host scope (GS) rounds to nearest");
                     t.IsTrue(ub(one + tiny) == 0x3F800001u, "host scope: 1 + 0.75 ulp rounds up");
                     t.IsTrue(ub(den * den) != 0u, "host scope: denormal product kept");
                 }
-                t.IsTrue(std::fegetround() == FE_TOWARDZERO, "host scope restores PS2 mode");
+                t.IsTrue(roundTowardZero(), "host scope restores PS2 mode");
             }
             t.IsTrue(ps2_fpmode::readControl() == before, "PS2 scope restores the thread's control word");
         });
