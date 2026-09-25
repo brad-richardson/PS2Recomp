@@ -1468,6 +1468,30 @@ void register_ps2_runtime_kernel_tests()
                      "a started thread's context must have vf0 = (0,0,0,1)");
         });
 
+        tc.Run("F4: every EE context, incl. StartThread's, has VU0 R = 1.0-bits", [](TestCase &t)
+        {
+            // Main sets vu0_r to 1.0 in every lane; after the RD1 ctor fix R was
+            // the last main-vs-thread delta (TC1 audit), so it moves here too.
+            auto isOneBitsR = [](const R5900Context &c) {
+                alignas(16) uint32_t w[4];
+                _mm_store_si128(reinterpret_cast<__m128i *>(w), _mm_castps_si128(c.vu0_r));
+                return w[0] == 0x3F800000u && w[1] == 0x3F800000u &&
+                       w[2] == 0x3F800000u && w[3] == 0x3F800000u;
+            };
+            R5900Context fresh{};
+            t.IsTrue(isOneBitsR(fresh), "a default-constructed context must have R = 1.0-bits");
+
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+            const int id = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u,
+                                                                0u, 20, 0u});
+            t.Equals(ee.startThread(id, 0u, env.ctx, false), KE_OK, "StartThread should succeed");
+            t.IsTrue(isOneBitsR(ee.thread(id)->context),
+                     "a started thread's context must have R = 1.0-bits");
+        });
+
         tc.Run("thread lifecycle, nested suspend, WAIT-SUSPEND, and wakeup count are centralized", [](TestCase &t)
         {
             TestEnv env;

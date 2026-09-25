@@ -151,6 +151,9 @@ struct alignas(16) R5900Context
         // startThread) and COP2 macro code reads vf0w as 1.0 (RD1).
         vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
         vu0_q = 1.0f; // Q register usually initialized to 1.0
+        // R holds 1.0 in every lane (main sets the same bits in ps2_runtime.cpp;
+        // guest threads start from R5900Context{}, so every context needs them).
+        vu0_r = _mm_castsi128_ps(_mm_set1_epi32(0x3F800000));
 
         // Reset COP0 registers
         cop0_random = 47; // Start at maximum value
