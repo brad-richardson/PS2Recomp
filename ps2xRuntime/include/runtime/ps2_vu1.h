@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -361,8 +362,52 @@ private:
     void markPairWrites(const DecodedInstructionPair &decoded);
     bool pipelinesPending() const;
 
-    float normalizeOperand(float value) const;
-    float normalizeResult(float value, uint32_t &laneFlags) const;
+    // E57: defined inline (were out-of-line in ps2_vu1_core.cpp; the N5 Odin
+    // profile shows normalizeOperand as its own 2.4 % symbol). Same bodies.
+    static float normalizeOperand(float value)
+    {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        const uint32_t exponent = (bits >> 23) & 0xFFu;
+        if (exponent == 0u)
+        {
+            bits &= 0x80000000u;
+        }
+        else if (exponent == 0xFFu)
+        {
+            bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
+        }
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
+
+    static float normalizeResult(float value, uint32_t &laneFlags)
+    {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        const uint32_t sign = bits & 0x80000000u;
+        const uint32_t magnitude = bits & 0x7FFFFFFFu;
+        const uint32_t exponent = (bits >> 23) & 0xFFu;
+
+        laneFlags = sign != 0u ? 0x2u : 0u;
+        if (magnitude == 0u)
+        {
+            laneFlags |= 0x1u;
+        }
+        else if (exponent == 0u)
+        {
+            laneFlags |= 0x5u;
+            bits = sign;
+        }
+        else if (exponent == 0xFFu)
+        {
+            laneFlags |= 0x8u;
+            bits = sign | 0x7F7FFFFFu;
+        }
+
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
     uint32_t microAddressMask() const;
     int32_t readBranchVi(uint8_t reg) const;
     void recordViWriteForBranch(uint8_t reg, int32_t oldValue);

@@ -128,51 +128,6 @@ float VU1Interpreter::broadcast(const float *vf, uint8_t bc)
     return normalizeOperand(vf[bc & 3u]);
 }
 
-float VU1Interpreter::normalizeOperand(float value) const
-{
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    const uint32_t exponent = (bits >> 23) & 0xFFu;
-    if (exponent == 0u)
-    {
-        bits &= 0x80000000u;
-    }
-    else if (exponent == 0xFFu)
-    {
-        bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
-    }
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-float VU1Interpreter::normalizeResult(float value, uint32_t &laneFlags) const
-{
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    const uint32_t sign = bits & 0x80000000u;
-    const uint32_t magnitude = bits & 0x7FFFFFFFu;
-    const uint32_t exponent = (bits >> 23) & 0xFFu;
-
-    laneFlags = sign != 0u ? 0x2u : 0u;
-    if (magnitude == 0u)
-    {
-        laneFlags |= 0x1u;
-    }
-    else if (exponent == 0u)
-    {
-        laneFlags |= 0x5u;
-        bits = sign;
-    }
-    else if (exponent == 0xFFu)
-    {
-        laneFlags |= 0x8u;
-        bits = sign | 0x7F7FFFFFu;
-    }
-
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
 uint32_t VU1Interpreter::microAddressMask() const
 {
     return m_unit == Unit::VU1 ? 0x3FFFu : 0x0FFFu;
@@ -1062,29 +1017,32 @@ void VU1Interpreter::flushPipelines()
 
 uint64_t VU1Interpreter::calculatePairReadyCycle(const DecodedInstructionPair &decoded) const
 {
+    // E57: lane tests as selects (no per-lane branches); the maximum over
+    // the same set of ready cycles as the per-lane loop.
     uint64_t ready = m_cycle;
     const InstructionUsage *usages[2] = {
         &decoded.upperUsage,
         &decoded.lowerUsage};
     for (const InstructionUsage *usage : usages)
     {
-        if (!usage)
-            continue;
         for (uint32_t index = 0; index < usage->vfReadCount; ++index)
         {
             const VfAccess &access = usage->vfRead[index];
+            const std::array<uint64_t, 4> &regReady = m_vfReady[access.reg];
             for (uint32_t component = 0; component < 4u; ++component)
             {
-                if ((access.lanes & laneForComponent(component)) != 0u)
-                    ready = std::max(ready, m_vfReady[access.reg][component]);
+                const uint64_t laneReady =
+                    (access.lanes & laneForComponent(component)) != 0u ? regReady[component] : 0u;
+                ready = std::max(ready, laneReady);
             }
         }
         for (uint32_t pending = usage->viRead & 0xFFFEu; pending != 0u; pending &= pending - 1u)
             ready = std::max(ready, m_viReady[std::countr_zero(pending)]);
         for (uint32_t component = 0; component < 4u; ++component)
         {
-            if ((usage->accRead & laneForComponent(component)) != 0u)
-                ready = std::max(ready, m_accReady[component]);
+            const uint64_t laneReady =
+                (usage->accRead & laneForComponent(component)) != 0u ? m_accReady[component] : 0u;
+            ready = std::max(ready, laneReady);
         }
     }
 
