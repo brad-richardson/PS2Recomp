@@ -23,6 +23,7 @@
 #include "context.hpp"
 #include "device.hpp"
 #include "gs_interface.hpp"
+#include "pgs_env_knobs.hpp" // GB9: PGS_HIER_BINNING mode parser (parallel-gs fork)
 #endif
 
 namespace ps2x_gs_parallel
@@ -462,10 +463,10 @@ private:
         const uint32_t subgroupSize = feats.vk11_props.subgroupSize;
         const uint32_t maxWgInv = props.limits.maxComputeWorkGroupInvocations;
         // Renderer clamp for a medium (<4096 prims, target 2) and a large
-        // (>=4096 prims, target 4) pass. Apple never engages hierarchical
-        // binning (flat-always); elsewhere hier needs >=256 prims and >4x4
-        // coarse tiles before these targets apply.
-#ifndef __APPLE__
+        // (>=4096 prims, target 4) pass. GB9: the effective rule follows
+        // PGS_HIER_BINNING (force|auto|off, unset = today's platform
+        // default); hier needs >=256 prims and >4x4 coarse tiles before
+        // these targets apply.
         auto clampTarget = [subgroupSize, maxWgInv](uint32_t target) {
             uint32_t maxInv = subgroupSize * target * target;
             while (target > 0u && maxInv > maxWgInv)
@@ -475,7 +476,6 @@ private:
             }
             return target;
         };
-#endif
         // Renderer subgroup choice: exact wave from startLog2 down to
         // 4-wide, else the fork's fixed wave64, else the free 4..128 range.
         // Flat passes start at 64-wide (log2 6), hierarchical at 32 (log2 5).
@@ -498,13 +498,14 @@ private:
             desc = "buffer";
         else if (feats.descriptor_heap_features.descriptorHeap)
             desc = "heap";
-        std::cerr << "[gs-path] hier_rule="
-#ifdef __APPLE__
-                  << "flat-always hier_t2=1 hier_t4=1"
-#else
-                  << "hier-if-large hier_t2=" << clampTarget(2u) << " hier_t4=" << clampTarget(4u)
-#endif
-                  << " subgroup_flat=" << subgroupChoice(6u) << " subgroup_hier=" << subgroupChoice(5u)
+        // GB9: print the effective rule (same parser the renderer uses).
+        const bool flatAlways = ParallelGS::pgs_hier_binning_flat_always(ParallelGS::pgs_hier_binning_mode());
+        std::cerr << "[gs-path] hier_rule=";
+        if (flatAlways)
+            std::cerr << "flat-always hier_t2=1 hier_t4=1";
+        else
+            std::cerr << "hier-if-large hier_t2=" << clampTarget(2u) << " hier_t4=" << clampTarget(4u);
+        std::cerr << " subgroup_flat=" << subgroupChoice(6u) << " subgroup_hier=" << subgroupChoice(5u)
                   << " vk11_subgroup=" << subgroupSize << " max_wg_inv=" << maxWgInv << " desc=" << desc
                   << " desc_req=push+heap+buffer"
                   << " sampler_feedback=" << (dm.disable_sampler_feedback ? "off" : "on")
