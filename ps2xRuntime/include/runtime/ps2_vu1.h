@@ -28,6 +28,17 @@ static_assert(sizeof(long double) == sizeof(double),
 class GS;
 class PS2Memory;
 
+#if defined(_MSC_VER)
+#define PS2X_VU1_ALWAYS_INLINE __forceinline
+#else
+#define PS2X_VU1_ALWAYS_INLINE __attribute__((always_inline))
+#endif
+
+// VR1: generated VU1 programs (one explicit specialization per code image,
+// emitted by PS2X_VU1_RECOMP_DUMP and compiled in from PS2X_VU1_RECOMP_DIR).
+template <uint64_t kImageHash>
+struct VU1RecompImage;
+
 struct VU1State
 {
     float vf[32][4];
@@ -80,6 +91,35 @@ public:
                 GS &gs, PS2Memory *memory = nullptr,
                 uint32_t top = 0, uint32_t itop = 0, uint32_t maxCycles = 65536);
 
+    // VR1: static recompilation hooks. A registered image is keyed by the
+    // XXH64 of the whole code memory; each pair PC has its own function (null =
+    // interpreter for that PC), so a run can enter or leave generated code at
+    // any pair (execute, resume/MSCNT, budget truncation).
+    struct RunContext
+    {
+        uint8_t *vuCode = nullptr;
+        uint32_t codeSize = 0;
+        uint8_t *vuData = nullptr;
+        uint32_t dataSize = 0;
+        GS *gs = nullptr;
+        PS2Memory *memory = nullptr;
+        uint64_t budgetEnd = 0;
+        bool programEnded = false;
+    };
+    using RecompPairFn = bool (*)(VU1Interpreter &, RunContext &);
+    struct RecompProgram
+    {
+        uint64_t hash = 0;
+        uint32_t codeSize = 0;
+        uint32_t pairCount = 0;
+        const RecompPairFn *pairs = nullptr;
+    };
+    static void registerRecompProgram(const RecompProgram &program);
+    // Writes the generated C++ for one code image (every pair that decodes
+    // without a reserved instruction). Returns false on a write error.
+    static bool emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
+                                 uint64_t hash, const std::string &path);
+
     VU1State &state() { return m_state; }
     const VU1State &state() const { return m_state; }
 #if PS2X_ENABLE_DET_HASH_TAP
@@ -87,6 +127,9 @@ public:
 #endif
 
 private:
+    template <uint64_t>
+    friend struct VU1RecompImage;
+
     enum Pipeline : uint8_t
     {
         PipelineNone = 0,
@@ -312,6 +355,20 @@ private:
     void run(uint8_t *vuCode, uint32_t codeSize,
              uint8_t *vuData, uint32_t dataSize,
              GS &gs, PS2Memory *memory, uint32_t maxCycles);
+    // VR1: one pair issue (stall, execute, queue writes, advance one cycle);
+    // defined in ps2_vu1_step_impl.h. Returns true when run() must stop.
+    template <bool kStatic>
+    bool issuePair(const DecodedInstructionPair &decoded, RunContext &ctx);
+    const RecompProgram *lookupRecompProgram(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory);
+    const RecompProgram *m_recompProgram = nullptr;
+    const uint8_t *m_recompCode = nullptr;
+    uint32_t m_recompCodeSize = 0;
+    uint64_t m_recompGeneration = 0;
+    uint64_t m_recompHash = 0;
+    bool m_recompValid = false;
+    uint64_t m_recompCycles = 0;
+    uint64_t m_interpCycles = 0;
+    uint64_t m_recompRuns = 0;
     void recordEntryPair(uint32_t pc, uint32_t lo, uint32_t up,
                          const uint8_t *vuData, uint32_t dataSize,
                          const int32_t oldVi[16], const uint32_t oldVf[32][4]);
@@ -334,6 +391,9 @@ private:
 
     void execUpper(uint32_t instr);
     void execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
+    // VR1: the executor bodies (ps2_vu1_{upper,lower}_impl.h), always inlined.
+    void execUpperImpl(uint32_t instr);
+    void execLowerImpl(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
 
     void applyDest(float *dst, const float *result, uint8_t dest);
     void applyDestAcc(const float *result, uint8_t dest);

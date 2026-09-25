@@ -471,6 +471,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_vif1_interpreter.cpp
     src/lib/vu/ps2_vu1_core.cpp
     src/lib/vu/ps2_vu1_upper.cpp
+    src/lib/vu/ps2_vu1_recomp.cpp
     src/lib/vu/ps2_vu1_lower.cpp
     src/lib/games_database.cpp
 )
@@ -684,6 +685,22 @@ if(PS2X_GAME_CODEGEN_DIR)
     target_include_directories(ps2_game_objects PRIVATE "${PS2X_GAME_CODEGEN_DIR}")
     target_link_libraries(ps2_game_objects PUBLIC ps2_runtime)
     target_link_libraries(ps2EntryRunner PRIVATE ps2_game_objects)
+endif()
+
+# VR1: generated VU1 images (vu1_<hash>.cpp from PS2X_VU1_RECOMP_DUMP). They are
+# derived from game data, so they live outside the repo like the game codegen.
+# Compiled straight into the runner so their static registrations are linked.
+set(PS2X_VU1_RECOMP_DIR "" CACHE PATH "Directory of generated VU1 images (VR1); empty = interpreter only")
+if(PS2X_VU1_RECOMP_DIR)
+    file(GLOB PS2X_VU1_RECOMP_SOURCES CONFIGURE_DEPENDS "${PS2X_VU1_RECOMP_DIR}/vu1_*.cpp")
+    list(FILTER PS2X_VU1_RECOMP_SOURCES EXCLUDE REGEX "/\\._")
+    list(LENGTH PS2X_VU1_RECOMP_SOURCES PS2X_VU1_RECOMP_SOURCE_COUNT)
+    message(STATUS "PS2X: VU1 recomp: ${PS2X_VU1_RECOMP_SOURCE_COUNT} images from ${PS2X_VU1_RECOMP_DIR}")
+    target_sources(ps2EntryRunner PRIVATE ${PS2X_VU1_RECOMP_SOURCES})
+    set_source_files_properties(${PS2X_VU1_RECOMP_SOURCES} PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON
+        SKIP_PRECOMPILE_HEADERS ON
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu;${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
 endif()
 
 if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_IOS)
