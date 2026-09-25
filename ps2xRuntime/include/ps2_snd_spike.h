@@ -126,15 +126,22 @@ inline bool findTag1Pcm(const uint8_t *data, size_t size, Tag1PcmView &view)
 class PcmRing
 {
 public:
+    // The tag-1 payload is planar: 384 s16 for one channel, then 384 for the
+    // other (SNDDRV SNDIOP_ee36_iop24_spu48 steps its EE input by 0x300 per
+    // channel). PCSX2's SPU2 input carries the first block on the right and
+    // the second on the left. The ring holds interleaved L|R frames.
     void push(const uint8_t *pcm, size_t bytes)
     {
         if (!pcm)
             return;
         const size_t frames = bytes / sizeof(uint32_t);
+        const uint8_t *left = pcm + frames * sizeof(uint16_t);
         for (size_t i = 0; i < frames; ++i)
         {
-            uint32_t frame = 0;
-            std::memcpy(&frame, pcm + i * sizeof(frame), sizeof(frame));
+            uint16_t l = 0, r = 0;
+            std::memcpy(&l, left + i * sizeof(l), sizeof(l));
+            std::memcpy(&r, pcm + i * sizeof(r), sizeof(r));
+            const uint32_t frame = static_cast<uint32_t>(l) | (static_cast<uint32_t>(r) << 16);
             const uint64_t write = m_write.load(std::memory_order_relaxed);
             uint64_t read = m_read.load(std::memory_order_acquire);
             while (write - read >= kPcmRingFrames)

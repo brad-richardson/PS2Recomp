@@ -50,6 +50,31 @@ void register_ps2_snd_tests()
         t.IsFalse(findTag1Pcm(data.data(), 31u, view), "truncated tag header must be rejected");
         });
 
+        tc.Run("PCM ring interleaves the planar tag-1 channels", [](TestCase &t)
+        {
+        using namespace ps2_snd_spike;
+        std::vector<uint8_t> pcm(kPcmBytesPerTick, 0u);
+        const size_t frames = kPcmBytesPerTick / 4u;
+        for (size_t i = 0; i < frames; ++i)
+        {
+            // First block = right channel, second block = left (PCSX2 SPU2 input).
+            const uint16_t l = static_cast<uint16_t>(i), r = static_cast<uint16_t>(0x8000u + i);
+            std::memcpy(pcm.data() + 2u * i, &r, 2u);
+            std::memcpy(pcm.data() + 2u * (frames + i), &l, 2u);
+        }
+        static PcmRing ring; // 128 KiB of slots: keep it off the stack
+        ring.push(pcm.data(), pcm.size());
+        uint32_t frame = 0;
+        t.IsTrue(ring.pop(frame), "first frame");
+        t.Equals(frame, 0x80000000u, "frame 0 = left[0] | right[0] << 16");
+        t.IsTrue(ring.pop(frame), "second frame");
+        t.Equals(frame, 0x80010001u, "frame 1 = left[1] | right[1] << 16");
+        for (size_t i = 2; i < frames; ++i)
+            ring.pop(frame);
+        t.Equals(frame, 0x817f017fu, "frame 383 = left[383] | right[383] << 16");
+        t.IsFalse(ring.pop(frame), "exactly 384 frames per tick");
+        });
+
         tc.Run("_sceSifSendCmd decodes the seven argument registers unconditionally", [](TestCase &t)
         {
         using namespace ps2_snd_spike;
