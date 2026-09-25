@@ -337,6 +337,7 @@ private:
     void applyFmacDestAcc(float *result, uint8_t dest);
     void normalizeFmacResult(float *result, uint8_t dest, uint8_t laneFlags[4]);
     bool calculateFmacExactResult(uint32_t component, VuWide &result) const;
+    bool calculateFmacExactResults(uint8_t dest, VuWide results[4]) const;
     uint8_t normalizeFmacExactResult(float &value, VuWide exactResult) const;
     uint32_t calculateFmacProductSticky(uint8_t dest) const;
     void updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest, uint32_t extraSticky);
@@ -352,14 +353,7 @@ private:
     void startXgkick(uint32_t qwordAddress);
 
     void resetScheduler();
-    // E57: the gate is inline so the (frequent) calls with nothing due cost
-    // one compare; commitDuePipelines() is the scan.
-    void commitReadyPipelines()
-    {
-        if (m_cycle >= m_nextCommitCycle)
-            commitDuePipelines();
-    }
-    void commitDuePipelines();
+    void commitReadyPipelines();
     void advanceOneCycle();
     void advanceTo(uint64_t targetCycle);
     void flushPipelines();

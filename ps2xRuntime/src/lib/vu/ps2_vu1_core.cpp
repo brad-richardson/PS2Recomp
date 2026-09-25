@@ -174,16 +174,20 @@ void VU1Interpreter::applyDestAcc(const float *result, uint8_t dest)
 void VU1Interpreter::normalizeFmacResult(float *result, uint8_t dest,
                                          uint8_t laneFlags[4])
 {
+    // E57: the exact results for all dest lanes come from one decode of the
+    // upper op (calculateFmacExactResults); whether an op has an exact form
+    // does not depend on the lane.
+    VuWide exactResults[4] = {0.0, 0.0, 0.0, 0.0};
+    const bool haveExact = calculateFmacExactResults(dest, exactResults);
     for (uint32_t component = 0; component < 4u; ++component)
     {
         laneFlags[component] = 0u;
         if ((dest & laneForComponent(component)) == 0u)
             continue;
 
-        VuWide exactResult = 0.0;
-        if (calculateFmacExactResult(component, exactResult))
+        if (haveExact)
         {
-            laneFlags[component] = normalizeFmacExactResult(result[component], exactResult);
+            laneFlags[component] = normalizeFmacExactResult(result[component], exactResults[component]);
             continue;
         }
 
@@ -373,6 +377,97 @@ bool VU1Interpreter::calculateFmacExactResult(uint32_t component,
             return false;
         }
     }
+    return true;
+}
+
+bool VU1Interpreter::calculateFmacExactResults(uint8_t dest, VuWide results[4]) const
+{
+    // E57: same per-lane expressions as calculateFmacExactResult(), with the
+    // op decode hoisted out of the lane loop. Only dest lanes are computed.
+    const uint32_t upper = m_currentUpperInstruction;
+    const uint8_t op = static_cast<uint8_t>(upper & 0x3Fu);
+    const bool isSpecial = op >= 0x3Cu;
+    const uint8_t code = isSpecial
+                             ? static_cast<uint8_t>((upper & 3u) | ((upper >> 4) & 0x7Cu))
+                             : op;
+    const float *fsRow = m_state.vf[FS(upper)];
+    const float *ftRow = m_state.vf[FT(upper)];
+    const auto operand = [](float value)
+    {
+        return static_cast<VuWide>(normalizeOperand(value));
+    };
+    const VuWide q = operand(m_state.q);
+    const VuWide i = operand(m_state.i);
+
+    VuWide vs[4];
+    VuWide vt[4];
+    VuWide acc[4];
+    for (uint32_t lane = 0; lane < 4u; ++lane)
+    {
+        vs[lane] = operand(fsRow[lane]);
+        vt[lane] = operand(ftRow[lane]);
+        acc[lane] = operand(m_state.acc[lane]);
+    }
+
+    uint8_t lanes[4];
+    uint32_t laneCount = 0u;
+    for (uint32_t component = 0; component < 4u; ++component)
+    {
+        if ((dest & laneForComponent(component)) != 0u)
+            lanes[laneCount++] = static_cast<uint8_t>(component);
+    }
+#define E57_FOR_LANES(expr)                              \
+    for (uint32_t n = 0; n < laneCount; ++n)             \
+    {                                                    \
+        const uint32_t c = lanes[n];                     \
+        results[c] = (expr);                             \
+    }
+
+    if (code <= 0x0Fu || (code >= 0x18u && code <= 0x1Bu))
+    {
+        const VuWide bc = vt[code & 3u];
+        if (code <= 0x03u)
+            E57_FOR_LANES(vs[c] + bc)
+        else if (code <= 0x07u)
+            E57_FOR_LANES(vs[c] - bc)
+        else if (code <= 0x0Bu)
+            E57_FOR_LANES(acc[c] + vs[c] * bc)
+        else if (code <= 0x0Fu)
+            E57_FOR_LANES(acc[c] - vs[c] * bc)
+        else
+            E57_FOR_LANES(vs[c] * bc)
+        return true;
+    }
+
+    static constexpr uint8_t left[4] = {1u, 2u, 0u, 3u};
+    static constexpr uint8_t right[4] = {2u, 0u, 1u, 3u};
+    switch (code)
+    {
+    case 0x1Cu: E57_FOR_LANES(vs[c] * q) break;
+    case 0x1Eu: E57_FOR_LANES(vs[c] * i) break;
+    case 0x20u: E57_FOR_LANES(vs[c] + q) break;
+    case 0x21u: E57_FOR_LANES(acc[c] + vs[c] * q) break;
+    case 0x22u: E57_FOR_LANES(vs[c] + i) break;
+    case 0x23u: E57_FOR_LANES(acc[c] + vs[c] * i) break;
+    case 0x24u: E57_FOR_LANES(vs[c] - q) break;
+    case 0x25u: E57_FOR_LANES(acc[c] - vs[c] * q) break;
+    case 0x26u: E57_FOR_LANES(vs[c] - i) break;
+    case 0x27u: E57_FOR_LANES(acc[c] - vs[c] * i) break;
+    case 0x28u: E57_FOR_LANES(vs[c] + vt[c]) break;
+    case 0x29u: E57_FOR_LANES(acc[c] + vs[c] * vt[c]) break;
+    case 0x2Au: E57_FOR_LANES(vs[c] * vt[c]) break;
+    case 0x2Cu: E57_FOR_LANES(vs[c] - vt[c]) break;
+    case 0x2Du: E57_FOR_LANES(acc[c] - vs[c] * vt[c]) break;
+    case 0x2Eu:
+        if (isSpecial)
+            E57_FOR_LANES(c == 3u ? 0.0 : vs[left[c]] * vt[right[c]])
+        else
+            E57_FOR_LANES(c == 3u ? 0.0 : acc[c] - vs[left[c]] * vt[right[c]])
+        break;
+    default:
+        return false;
+    }
+#undef E57_FOR_LANES
     return true;
 }
 
@@ -730,10 +825,13 @@ void VU1Interpreter::queueAccWrite(uint8_t laneMask, const float value[4], uint3
     reportReservedInstruction(true, 0xFFFFFFF5u);
 }
 
-void VU1Interpreter::commitDuePipelines()
+void VU1Interpreter::commitReadyPipelines()
 {
-    // E57: only reached once m_cycle >= m_nextCommitCycle (see the inline
-    // commitReadyPipelines() gate); before that a scan would change nothing.
+    // E57: nothing queued is due yet, so a full scan would change nothing.
+    // (An inline header gate with an out-of-line scan measured ~6 % slower
+    // in the race on the mini: c3 9.67 vs c2 10.28 vsyncs/s.)
+    if (m_cycle < m_nextCommitCycle)
+        return;
     uint64_t nextReady = ~0ull;
 
     for (uint32_t pending = m_flagValidMask; pending != 0u; pending &= pending - 1u)
@@ -889,10 +987,20 @@ void VU1Interpreter::progressXgkick()
         }
 
         const uint32_t qwordOffset = m_xgkick.copiedBytes;
-        for (uint32_t i = 0; i < 16u; ++i)
+        const uint32_t first = (m_xgkick.sourceAddress + m_xgkick.copiedBytes) % m_activeVuDataSize;
+        if (first + 16u <= m_activeVuDataSize)
         {
-            const uint32_t source = (m_xgkick.sourceAddress + m_xgkick.copiedBytes + i) % m_activeVuDataSize;
-            m_xgkick.packet[m_xgkick.copiedBytes + i] = m_activeVuData[source];
+            // E57: no wrap inside this qword, so (first + i) is the same byte
+            // the per-byte modulo below selects.
+            std::memcpy(m_xgkick.packet.data() + m_xgkick.copiedBytes, m_activeVuData + first, 16u);
+        }
+        else
+        {
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                const uint32_t source = (m_xgkick.sourceAddress + m_xgkick.copiedBytes + i) % m_activeVuDataSize;
+                m_xgkick.packet[m_xgkick.copiedBytes + i] = m_activeVuData[source];
+            }
         }
         m_xgkick.copiedBytes += 16u;
 
