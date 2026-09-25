@@ -2000,7 +2000,7 @@ bool intcLogEnabled()
 // boots never reach the destructor print); unset = off.
 uint64_t coverageTick()
 {
-    static const uint64_t tick = []
+    static const uint64_t tick = []() -> uint64_t
     {
         if (const char *env = std::getenv("PS2X_COVERAGE_TICK"))
         {
