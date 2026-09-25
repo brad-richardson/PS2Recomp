@@ -5,6 +5,7 @@
 // onPresentFrame's CachedHost copy), minus the shadow's SMODE1 override:
 // GB3 Part 1 programs SMODE1 through SetGsCrt/sceGsResetGraph.
 #include "runtime/gs/ps2_gs_parallel_backend.h"
+#include "runtime/gs/ps2_present_share.h"
 #include "runtime/ps2_memory.h"
 
 #include <algorithm>
@@ -14,7 +15,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <vector>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #if defined(__ANDROID__) && defined(PS2X_HAS_PARALLEL_SHADOW)
 #include <dlfcn.h>
 #endif
@@ -24,7 +29,46 @@
 #include "device.hpp"
 #include "gs_interface.hpp"
 #include "pgs_env_knobs.hpp" // GB9: PGS_HIER_BINNING mode parser (parallel-gs fork)
+#if defined(__APPLE__)
+#include <vulkan/vulkan_metal.h> // HR1: VK_EXT_metal_objects (IOSurface export)
 #endif
+#endif
+
+// HR1 prototype: shared-frame mailbox for PS2X_PRESENT_ZERO_COPY.
+namespace ps2x_present_share
+{
+namespace
+{
+std::mutex g_shareMutex;
+SharedFrame g_shareFrame;
+} // namespace
+
+bool enabled()
+{
+#if defined(__APPLE__) && TARGET_OS_OSX
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_PRESENT_ZERO_COPY");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    return on;
+#else
+    return false;
+#endif
+}
+
+void publish(const SharedFrame &frame)
+{
+    std::lock_guard<std::mutex> lock(g_shareMutex);
+    g_shareFrame = frame;
+}
+
+bool latest(SharedFrame &out)
+{
+    std::lock_guard<std::mutex> lock(g_shareMutex);
+    out = g_shareFrame;
+    return out.surface != nullptr;
+}
+} // namespace ps2x_present_share
 
 namespace ps2x_gs_parallel
 {
@@ -291,6 +335,16 @@ public:
             m_lastScanH = h;
         }
 
+#if defined(__APPLE__)
+        if (m_zeroCopy && presentShared(*shot.image, w, h))
+        {
+            const uint64_t t1 = nowNanos();
+            c.presentNanos.fetch_add(t1 - t0, std::memory_order_relaxed);
+            if (n == 1u || n % 300u == 0u)
+                logStats(n == 1u ? "first-present" : "periodic");
+            return out; // empty: the presenter reads ps2x_present_share instead
+        }
+#endif
         const uint64_t r0 = nowNanos();
         auto cmd = m_device->request_command_buffer();
         cmd->image_barrier(*shot.image, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
@@ -454,8 +508,14 @@ private:
         constexpr uint32_t kFlags = Vulkan::CONTEXT_CREATION_ENABLE_PUSH_DESCRIPTOR_BIT |
                                     Vulkan::CONTEXT_CREATION_ENABLE_DESCRIPTOR_HEAP_BIT |
                                     Vulkan::CONTEXT_CREATION_ENABLE_DESCRIPTOR_BUFFER_BIT;
-        if (!m_ctx->init_instance_and_device(nullptr, 0, nullptr, 0, kFlags))
+        // HR1 prototype: IOSurface export needs VK_EXT_metal_objects.
+        m_zeroCopy = ps2x_present_share::enabled();
+        static const char *const kZeroCopyExt[] = {"VK_EXT_metal_objects"};
+        if (!m_ctx->init_instance_and_device(nullptr, 0, m_zeroCopy ? kZeroCopyExt : nullptr,
+                                             m_zeroCopy ? 1u : 0u, kFlags))
             return fail("init_instance_and_device failed");
+        if (m_zeroCopy)
+            std::cerr << "[gs:parallel] zero-copy present (IOSurface) requested" << std::endl;
         m_device = new Vulkan::Device();
         m_device->set_context(*m_ctx);
         m_device->init_frame_contexts(4);
@@ -503,6 +563,84 @@ private:
                   << " ssaa_textures=" << (opts.super_sampled_textures ? 1 : 0)
                   << " hires_scanout=" << (m_hiresScanout ? 1 : 0) << std::endl;
     }
+
+#if defined(__APPLE__)
+    // HR1 prototype: blit the scanout into a rotating IOSurface-backed image
+    // and publish the surface. GPU-side copy only; waits on its own fence
+    // (the readback path waits for the whole device).
+    struct ShareSlot
+    {
+        Vulkan::ImageHandle image;
+        void *surface = nullptr;
+    };
+    bool createShareSlots(uint32_t w, uint32_t h)
+    {
+        auto exportFn = reinterpret_cast<PFN_vkExportMetalObjectsEXT>(
+            vkGetDeviceProcAddr(m_device->get_device(), "vkExportMetalObjectsEXT"));
+        if (!exportFn)
+            return false;
+        for (auto &slot : m_share)
+        {
+            if (slot.image)
+                m_shareGraveyard.push_back(slot.image); // GL may still hold the old surfaces
+            Vulkan::ImageCreateInfo info = Vulkan::ImageCreateInfo::render_target(w, h, VK_FORMAT_B8G8R8A8_UNORM);
+            info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                         VK_IMAGE_USAGE_SAMPLED_BIT;
+            info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+            VkExportMetalObjectCreateInfoEXT exportInfo = {VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT};
+            exportInfo.exportObjectType = VK_EXPORT_METAL_OBJECT_TYPE_METAL_IOSURFACE_BIT_EXT;
+            info.pnext = &exportInfo;
+            slot.image = m_device->create_image(info);
+            if (!slot.image)
+                return false;
+            VkExportMetalIOSurfaceInfoEXT surf = {VK_STRUCTURE_TYPE_EXPORT_METAL_IO_SURFACE_INFO_EXT};
+            surf.image = slot.image->get_image();
+            VkExportMetalObjectsInfoEXT objs = {VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
+            objs.pNext = &surf;
+            exportFn(m_device->get_device(), &objs);
+            slot.surface = surf.ioSurface;
+            std::cerr << "[gs:parallel] zero-copy slot " << w << "x" << h << " surface=" << slot.surface
+                      << std::endl;
+            if (!slot.surface)
+                return false;
+        }
+        m_shareW = w;
+        m_shareH = h;
+        return true;
+    }
+
+    bool presentShared(Vulkan::Image &src, uint32_t w, uint32_t h)
+    {
+        if (m_zeroCopyBroken)
+            return false;
+        if ((w != m_shareW || h != m_shareH) && !createShareSlots(w, h))
+        {
+            std::cerr << "[gs:parallel] zero-copy setup failed; falling back to readback" << std::endl;
+            m_zeroCopyBroken = true;
+            return false;
+        }
+        ShareSlot &slot = m_share[m_shareIndex];
+        m_shareIndex = (m_shareIndex + 1u) % 3u;
+        auto cmd = m_device->request_command_buffer();
+        cmd->image_barrier(src, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                           VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        cmd->image_barrier(*slot.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           VK_PIPELINE_STAGE_2_NONE, 0,
+                           VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        const VkOffset3D zero = {0, 0, 0};
+        const VkOffset3D extent = {static_cast<int32_t>(w), static_cast<int32_t>(h), 1};
+        cmd->blit_image(*slot.image, src, zero, extent, zero, extent, 0, 0, 0, 0, 1, VK_FILTER_NEAREST);
+        cmd->image_barrier(*slot.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                           VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                           VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
+        Vulkan::Fence fence;
+        m_device->submit(cmd, &fence);
+        fence->wait();
+        ps2x_present_share::publish({slot.surface, w, h, ++m_shareSeq});
+        return true;
+    }
+#endif
 
     bool fail(const char *what)
     {
@@ -626,6 +764,14 @@ private:
     bool m_initFailed = false;
     uint32_t m_l2hPending = 0u;
     bool m_hiresScanout = false;              // HR1
+    bool m_zeroCopy = false;                  // HR1 prototype (PS2X_PRESENT_ZERO_COPY)
+#if defined(__APPLE__) && defined(PS2X_HAS_PARALLEL_SHADOW)
+    ShareSlot m_share[3];
+    std::vector<Vulkan::ImageHandle> m_shareGraveyard;
+    uint32_t m_shareIndex = 0u, m_shareW = 0u, m_shareH = 0u;
+    uint64_t m_shareSeq = 0u;
+    bool m_zeroCopyBroken = false;
+#endif
     uint32_t m_lastScanW = 0u, m_lastScanH = 0u; // HR1: log scanout size changes
     Vulkan::Context *m_ctx = nullptr;
     Vulkan::Device *m_device = nullptr;

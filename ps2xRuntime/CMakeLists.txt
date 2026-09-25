@@ -526,6 +526,11 @@ add_library(ps2_gs_shadow STATIC
     src/lib/gs/ps2_gs_shadow.cpp
     src/lib/gs/ps2_gs_parallel_backend.cpp # GB3 Part 2: live backend (same paraLLEl wiring)
 )
+# HR1 prototype: GL side of PS2X_PRESENT_ZERO_COPY (macOS desktop only).
+if(APPLE AND NOT PS2X_IS_IOS)
+    target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_present_share_mac.cpp)
+    target_link_libraries(ps2_gs_shadow PRIVATE "-framework OpenGL" "-framework IOSurface")
+endif()
 target_include_directories(ps2_gs_shadow PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )

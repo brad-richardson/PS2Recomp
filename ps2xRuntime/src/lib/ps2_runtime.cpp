@@ -19,6 +19,7 @@
 #include "runtime/gs/gs_stream_capture.h"
 #include "runtime/gs/ps2_gs_shadow.h"
 #include "runtime/gs/ps2_gs_parallel_backend.h"
+#include "runtime/gs/ps2_present_share.h"
 #include "ps2_e7.h"
 #include "ps2_e15.h"
 #include "ps2_pk.h"
@@ -802,6 +803,60 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         return;
     }
 
+#if defined(__APPLE__) && !defined(PS2X_IOS)
+    // HR1 prototype (PS2X_PRESENT_ZERO_COPY=1): GPU blit from the backend's
+    // IOSurface into the frame texture; no pixel bytes touch the CPU.
+    if (ps2x_present_share::enabled())
+    {
+        ps2x_present_share::SharedFrame shared;
+        if (ps2x_present_share::latest(shared))
+        {
+            if (static_cast<int>(shared.width) > tex.width || static_cast<int>(shared.height) > tex.height)
+            {
+                const int newW = std::max<int>(tex.width, static_cast<int>(shared.width));
+                const int newH = std::max<int>(tex.height, static_cast<int>(shared.height));
+                UnloadTexture(tex);
+                Image grown = GenImageColor(newW, newH, BLANK);
+                tex = LoadTextureFromImage(grown);
+                UnloadImage(grown);
+                std::fprintf(stderr, "[present] frame texture grown to %dx%d\n", newW, newH);
+            }
+            if (ps2x_present_share::blitToTexture(shared, tex.id))
+            {
+                // Diagnostic: PS2X_PRESENT_SHARE_DUMP_TICKS="a,b,c" + PS2X_FRAME_DUMP_DIR.
+                static std::vector<uint64_t> s_dumpTicks = [] {
+                    std::vector<uint64_t> ticks;
+                    if (const char *v = std::getenv("PS2X_PRESENT_SHARE_DUMP_TICKS"))
+                    {
+                        std::stringstream ss(v);
+                        std::string item;
+                        while (std::getline(ss, item, ','))
+                            ticks.push_back(std::strtoull(item.c_str(), nullptr, 10));
+                    }
+                    return ticks;
+                }();
+                const char *dumpDir = std::getenv("PS2X_FRAME_DUMP_DIR");
+                for (uint64_t &t : s_dumpTicks)
+                {
+                    if (t != 0u && dumpDir && currentTick >= t)
+                    {
+                        const std::string path = std::string(dumpDir) + "/share-t" + std::to_string(t) + "-at" +
+                                                 std::to_string(currentTick) + ".ppm";
+                        std::error_code ec;
+                        std::filesystem::create_directories(dumpDir, ec);
+                        ps2x_present_share::dumpTexture(tex.id, tex.width, tex.height, shared.width,
+                                                        shared.height, path.c_str());
+                        t = 0u;
+                    }
+                }
+                outWidth = s_lastWidth = shared.width;
+                outHeight = s_lastHeight = shared.height;
+                s_hasUploadedFrame = true;
+                return;
+            }
+        }
+    }
+#endif
     s_scratch.clear();
     uint32_t width = 0u;
     uint32_t height = 0u;
