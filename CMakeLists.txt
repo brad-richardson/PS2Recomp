@@ -95,6 +95,15 @@ if(PS2X_IS_ARM_TARGET)
     endif()
 endif()
 
+# LX1c: the runtime and generated code use SSSE3/SSE4.1 intrinsics
+# (_mm_shuffle_epi8, _mm_blendv_ps, _mm_insert_epi8), but x86 defaulted to
+# the SSE2 baseline and failed to compile. MSVC x64 is untouched (its
+# /arch spelling differs; no MSVC x86 lane exists to validate it).
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(STATUS "x86-64 GCC/Clang - enabling SSE4.1 (runtime SSSE3/SSE4.1 intrinsics)")
+    add_compile_options(-msse4.1)
+endif()
+
 # E53: the EE FPU and VU round the product of a multiply-add before the add
 # (PCSX2 FPU.cpp MADD_S). Clang/GCC fuse a*b+c written in one expression into
 # a hardware FMA by default, which changes guest math; keep them separate.
