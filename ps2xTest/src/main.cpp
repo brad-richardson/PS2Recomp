@@ -6,6 +6,7 @@ void register_code_generator_tests();
 void register_r5900_decoder_tests();
 void register_elf_analyzer_tests();
 void register_pad_input_tests();
+void register_ps2_pad_latch_tests();
 void register_ps2_present_fallback_tests();
 void register_ps2_present_geometry_tests();
 void register_ps2_virtual_pad_tests();
@@ -54,6 +55,7 @@ int main()
     register_r5900_decoder_tests();
     register_elf_analyzer_tests();
     register_pad_input_tests();
+    register_ps2_pad_latch_tests();
     register_ps2_present_fallback_tests();
     register_ps2_present_geometry_tests();
     register_ps2_virtual_pad_tests();

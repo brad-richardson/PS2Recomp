@@ -47,6 +47,7 @@ add_library(ps2_test_lib STATIC
     src/r5900_decoder_tests.cpp
     src/elf_analyzer_tests.cpp
     src/pad_input_tests.cpp
+    src/ps2_pad_latch_tests.cpp
     src/ps2_present_fallback_tests.cpp
     src/ps2_virtual_pad_tests.cpp
     src/ps2_env_file_tests.cpp

@@ -2,6 +2,7 @@
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e44_trace.h"
+#include "ps2_pad_latch.h"
 #include "Pad.h"
 
 #include <chrono>
@@ -895,6 +896,16 @@ namespace ps2_stubs
             const uint64_t guestVsyncTick =
                 runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
             padScriptOnRead(state, guestVsyncTick); // E31 DEV-ONLY: no-op unless PS2X_PAD_SCRIPT set
+
+            // IN2 DEV-ONLY PS2X_PAD_READ_LOG=1: every guest read (vsync
+            // tick, final active-low buttons incl. latch + script, wall ms
+            // on the padlatch epoch). ~1 line per guest frame.
+            if (ps2x::padlatch::readLogEnabled())
+            {
+                std::fprintf(stderr, "[padread] read tick=%llu port=%d buttons=0x%04x wall=%llums\n",
+                             static_cast<unsigned long long>(guestVsyncTick), port, state.buttons,
+                             static_cast<unsigned long long>(ps2x::padlatch::wallMs()));
+            }
 
             fillPadStatus(outData, state, portState);
 

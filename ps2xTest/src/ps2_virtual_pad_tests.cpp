@@ -65,12 +65,16 @@ void register_ps2_virtual_pad_tests()
             t.IsTrue(enabledFromEnv(nullptr), "unset = on");
             t.IsTrue(enabledFromEnv("1"), "1 = on");
             t.IsFalse(enabledFromEnv("0"), "0 = off");
+            // IN2: liveMask reaches readState only on the PS2X_PAD_LATCH=0
+            // path (the latch path consumes the published mask instead).
+            setenv("PS2X_PAD_LATCH", "0", 1);
             PSPadBackend backend;
             uint8_t data[32]{};
             liveMask().store(kCross | kStart);
             t.IsTrue(backend.readState(0, 0, data, sizeof(data)), "readState ok");
             const uint16_t btns = static_cast<uint16_t>(data[2] | (data[3] << 8));
             liveMask().store(0u);
+            unsetenv("PS2X_PAD_LATCH");
             t.Equals(static_cast<uint32_t>(btns & (kCross | kStart)), 0u, "cross+start active-low");
             t.Equals(static_cast<uint32_t>(btns | kCross | kStart), 0xFFFFu, "nothing else pressed"); });
 

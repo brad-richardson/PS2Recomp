@@ -1,5 +1,6 @@
 #include "runtime/ps2_pad.h"
 #include "ps2_host_backend.h"
+#include "ps2_pad_latch.h"
 #include "ps2_virtual_pad.h"
 #include <cstdio>
 #include <cstdlib>
@@ -28,19 +29,9 @@ namespace
     constexpr uint16_t PAD_L2 = 0x0100u;
 }
 
-bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t size)
+PSRaylibPadSample ps2xSampleRaylibPad()
 {
-    if (!data || size < 32)
-        return false;
-
-    std::memset(data, 0, 32);
-    data[0] = 0x01;
-    data[1] = kPadAnalogMarker;
-    data[2] = 0xFF;
-    data[3] = 0xFF;
-    data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
-
-    uint16_t btns = 0xFFFFu;
+    PSRaylibPadSample out;
 #if defined(PS2X_IOS)
     // I25: a Bluetooth pad (MFi/Xbox/PS) need not land at index 0, so take
     // the first ready one; and union keyboard + gamepad (N6's Android
@@ -61,44 +52,99 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
     const bool useGamepad = IsGamepadAvailable(kGamepad);
     const bool useKeyboard = !useGamepad;
 #endif
-    auto clearBit = [&btns](uint16_t mask)
-    { btns &= ~mask; };
+    out.gamepad = kGamepad;
+    out.useGamepad = useGamepad;
+    uint16_t pressed = 0u;
+    auto setBit = [&pressed](uint16_t mask)
+    { pressed |= mask; };
 
     if (useGamepad)
     {
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_UP))
-            clearBit(PAD_UP);
+            setBit(PAD_UP);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_DOWN))
-            clearBit(PAD_DOWN);
+            setBit(PAD_DOWN);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
-            clearBit(PAD_LEFT);
+            setBit(PAD_LEFT);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
-            clearBit(PAD_RIGHT);
+            setBit(PAD_RIGHT);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
-            clearBit(PAD_CROSS);
+            setBit(PAD_CROSS);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
-            clearBit(PAD_CIRCLE);
+            setBit(PAD_CIRCLE);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT))
-            clearBit(PAD_SQUARE);
+            setBit(PAD_SQUARE);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP))
-            clearBit(PAD_TRIANGLE);
+            setBit(PAD_TRIANGLE);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_1))
-            clearBit(PAD_L1);
+            setBit(PAD_L1);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1))
-            clearBit(PAD_R1);
+            setBit(PAD_R1);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_TRIGGER_2))
-            clearBit(PAD_L2);
+            setBit(PAD_L2);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_TRIGGER_2))
-            clearBit(PAD_R2);
+            setBit(PAD_R2);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT))
-            clearBit(PAD_START);
+            setBit(PAD_START);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_MIDDLE_LEFT))
-            clearBit(PAD_SELECT);
+            setBit(PAD_SELECT);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_LEFT_THUMB))
-            clearBit(PAD_L3);
+            setBit(PAD_L3);
         if (IsGamepadButtonDown(kGamepad, GAMEPAD_BUTTON_RIGHT_THUMB))
-            clearBit(PAD_R3);
+            setBit(PAD_R3);
+    }
+    if (useKeyboard)
+    {
+        if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))
+            setBit(PAD_UP);
+        if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))
+            setBit(PAD_DOWN);
+        if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))
+            setBit(PAD_LEFT);
+        if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))
+            setBit(PAD_RIGHT);
+        if (IsKeyDown(KEY_X) || IsKeyDown(KEY_SPACE))
+            setBit(PAD_CROSS);
+        if (IsKeyDown(KEY_C) || IsKeyDown(KEY_ESCAPE))
+            setBit(PAD_CIRCLE);
+        if (IsKeyDown(KEY_Z) || IsKeyDown(KEY_KP_0))
+            setBit(PAD_SQUARE);
+        if (IsKeyDown(KEY_V) || IsKeyDown(KEY_KP_1))
+            setBit(PAD_TRIANGLE);
+        if (IsKeyDown(KEY_Q))
+            setBit(PAD_L1);
+        if (IsKeyDown(KEY_E))
+            setBit(PAD_R1);
+        if (IsKeyDown(KEY_LEFT_SHIFT))
+            setBit(PAD_L2);
+        if (IsKeyDown(KEY_RIGHT_SHIFT))
+            setBit(PAD_R2);
+        if (IsKeyDown(KEY_ENTER))
+            setBit(PAD_START);
+        if (IsKeyDown(KEY_TAB))
+            setBit(PAD_SELECT);
+    }
+    out.pressed = pressed;
+    return out;
+}
 
+bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
+{
+    if (!data || size < 32)
+        return false;
+
+    std::memset(data, 0, 32);
+    data[0] = 0x01;
+    data[1] = kPadAnalogMarker;
+    data[2] = 0xFF;
+    data[3] = 0xFF;
+    data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
+
+    uint16_t btns = 0xFFFFu;
+    const PSRaylibPadSample ray = ps2xSampleRaylibPad();
+    if (ray.useGamepad)
+    {
+        const int kGamepad = ray.gamepad;
         float lx = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_X);
         float ly = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_LEFT_Y);
         float rx = GetGamepadAxisMovement(kGamepad, GAMEPAD_AXIS_RIGHT_X);
@@ -108,40 +154,23 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
         data[4] = static_cast<uint8_t>(128 + rx * 127);
         data[5] = static_cast<uint8_t>(128 + ry * 127);
     }
-    if (useKeyboard)
-    {
-        if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))
-            clearBit(PAD_UP);
-        if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))
-            clearBit(PAD_DOWN);
-        if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))
-            clearBit(PAD_LEFT);
-        if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D))
-            clearBit(PAD_RIGHT);
-        if (IsKeyDown(KEY_X) || IsKeyDown(KEY_SPACE))
-            clearBit(PAD_CROSS);
-        if (IsKeyDown(KEY_C) || IsKeyDown(KEY_ESCAPE))
-            clearBit(PAD_CIRCLE);
-        if (IsKeyDown(KEY_Z) || IsKeyDown(KEY_KP_0))
-            clearBit(PAD_SQUARE);
-        if (IsKeyDown(KEY_V) || IsKeyDown(KEY_KP_1))
-            clearBit(PAD_TRIANGLE);
-        if (IsKeyDown(KEY_Q))
-            clearBit(PAD_L1);
-        if (IsKeyDown(KEY_E))
-            clearBit(PAD_R1);
-        if (IsKeyDown(KEY_LEFT_SHIFT))
-            clearBit(PAD_L2);
-        if (IsKeyDown(KEY_RIGHT_SHIFT))
-            clearBit(PAD_R2);
-        if (IsKeyDown(KEY_ENTER))
-            clearBit(PAD_START);
-        if (IsKeyDown(KEY_TAB))
-            clearBit(PAD_SELECT);
-    }
 
-    // I26: on-screen virtual controls (iOS overlay; always 0 elsewhere).
-    btns &= static_cast<uint16_t>(~ps2x::vpad::liveMask().load(std::memory_order_relaxed));
+    // IN2: the latch path takes the render-thread-published mask (port 0
+    // consumes one presented mask per guest read; other ports follow live
+    // without advancing it). PS2X_PAD_LATCH=0 keeps the pre-IN2 direct
+    // sampling (raylib buttons + liveMask) for A/B.
+    if (ps2x::padlatch::latchEnabled())
+    {
+        const uint16_t latched = (port == 0) ? ps2x::padlatch::sharedLatch().consume()
+                                             : ps2x::padlatch::sharedLatch().peekLive();
+        btns &= static_cast<uint16_t>(~latched);
+    }
+    else
+    {
+        btns &= static_cast<uint16_t>(~ray.pressed);
+        // I26: on-screen virtual controls (iOS overlay; always 0 elsewhere).
+        btns &= static_cast<uint16_t>(~ps2x::vpad::liveMask().load(std::memory_order_relaxed));
+    }
 
     // I32: the virtual analog stick overrides the left stick while the
     // overlay drives it (kStickNoOverride while the overlay is off or

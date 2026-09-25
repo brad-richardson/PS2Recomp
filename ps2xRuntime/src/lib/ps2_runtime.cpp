@@ -8,7 +8,9 @@
 #include "ps2_park_snapshot.h"
 #include "ps2_present_fallback.h"
 #include "ps2_present_geometry.h"
+#include "ps2_pad_latch.h"
 #include "ps2_virtual_pad.h"
+#include "runtime/ps2_pad.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "game_overrides.h"
@@ -3848,6 +3850,8 @@ void PS2Runtime::run()
     bool vpadLastPadConnected = true; // forces the first [vpad] line when the overlay shows
     const std::vector<ps2x::vpad::TestTouch> vpadTestTouches =
         ps2x::vpad::parseTestTouches(std::getenv("PS2X_VPAD_TEST_TOUCHES")); // DEV-ONLY
+    const std::vector<ps2x::vpad::TestTap> vpadTestTaps =
+        ps2x::vpad::parseTestTap(std::getenv("PS2X_VPAD_TEST_TAP")); // DEV-ONLY
     ps2x::vpad::StickState vpadStick;                                       // I32: floating-stick anchor, carried across frames
     float vpadTestStickX = 0.0f, vpadTestStickY = 0.0f;
     const bool vpadTestStick =
@@ -3961,6 +3965,12 @@ void PS2Runtime::run()
                          padIndex, padName ? padName : "", vpadPadConnected ? "hidden" : "shown");
             vpadLastPadConnected = vpadPadConnected;
         }
+        // IN2: the render thread publishes the vpad + raylib button union
+        // to the pad latch every host frame (host ~60 Hz vs guest reads at
+        // guest speed); readState consumes one presented mask per guest
+        // read. PS2X_PAD_LATCH=0 keeps the pre-IN2 liveMask publish.
+        const bool padLatchOn = ps2x::padlatch::latchEnabled();
+        const uint16_t raylibPressed = padLatchOn ? ps2xSampleRaylibPad().pressed : 0u;
         if (vpadWanted && !vpadPadConnected)
         {
             const ps2x::vpad::Layout layout = ps2x::vpad::makeLayout(screenWidth, screenHeight);
@@ -3969,8 +3979,12 @@ void PS2Runtime::run()
             int touches = virtualPadTouches(touchX, touchY, 8, screenWidth, screenHeight);
             touches = ps2x::vpad::activeTestTouches(vpadTestTouches, m_memory.gs().vsyncTick.load(), screenWidth,
                                                     screenHeight, touchX, touchY, touches, 8);
-            const uint16_t pressed = ps2x::vpad::pressedMask(layout, touchX, touchY, touches);
-            ps2x::vpad::liveMask().store(pressed, std::memory_order_relaxed);
+            uint16_t pressed = ps2x::vpad::pressedMask(layout, touchX, touchY, touches);
+            pressed = static_cast<uint16_t>(pressed | ps2x::vpad::activeTestTap(vpadTestTaps, ps2x::padlatch::wallMs()));
+            if (padLatchOn)
+                ps2x::padlatch::sharedLatch().publish(static_cast<uint16_t>(pressed | raylibPressed));
+            else
+                ps2x::vpad::liveMask().store(pressed, std::memory_order_relaxed);
             ps2x::vpad::StickVec stick = ps2x::vpad::updateStick(vpadStick, layout, touchX, touchY, touches);
             if (vpadTestStick)
             {
@@ -3987,8 +4001,16 @@ void PS2Runtime::run()
         }
         else if (vpadWanted)
         {
-            ps2x::vpad::liveMask().store(0u, std::memory_order_relaxed);
+            if (padLatchOn)
+                ps2x::padlatch::sharedLatch().publish(raylibPressed);
+            else
+                ps2x::vpad::liveMask().store(0u, std::memory_order_relaxed);
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
+        }
+        else if (padLatchOn)
+        {
+            // Overlay off (desktop default): raylib buttons still feed the latch.
+            ps2x::padlatch::sharedLatch().publish(raylibPressed);
         }
         if (m_debugUiInitialized && m_debugUiDrawCallback)
         {

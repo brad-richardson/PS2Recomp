@@ -9,9 +9,10 @@
 
 // I26: on-screen virtual controls (layout + hit test; no raylib/SDL here so
 // the host suite can test it). The iOS render loop draws the overlay, maps
-// the current touches through pressedMask() and publishes the result with
-// liveMask(); PSPadBackend::readState ORs it into the keyboard/gamepad
-// union, and a PS2X_PAD_SCRIPT press is applied on top of that as before.
+// the current touches through pressedMask() and publishes the result to the
+// IN2 pad latch (ps2_pad_latch.h; liveMask() only on the PS2X_PAD_LATCH=0
+// path). PSPadBackend::readState takes the latched mask, and a
+// PS2X_PAD_SCRIPT press is applied on top of that as before.
 // I32: the left D-pad is now a floating analog stick (updateStick tracks
 // the anchor across frames; liveStick() carries the left-stick bytes) and
 // the D-pad moved to the right side, above the face buttons.
@@ -23,6 +24,8 @@ namespace ps2x::vpad
 {
     // PS2 pad button bits (same values as ps2_pad.cpp / Pad.cpp).
     constexpr uint16_t kSelect = 0x0001u;
+    constexpr uint16_t kL3 = 0x0002u; // IN2: no overlay button; TEST_TAP only
+    constexpr uint16_t kR3 = 0x0004u; // IN2: no overlay button; TEST_TAP only
     constexpr uint16_t kStart = 0x0008u;
     constexpr uint16_t kUp = 0x0010u;
     constexpr uint16_t kRight = 0x0020u;
@@ -332,6 +335,95 @@ namespace ps2x::vpad
         return n;
     }
 
+    // IN2 DEV-ONLY PS2X_VPAD_TEST_TAP="ms:button:dur_ms,..." : synthetic
+    // button taps on the WALL clock (ms since the render loop's first
+    // frame, the padlatch::wallMs epoch), ORed into the published vpad
+    // mask. Unlike PS2X_VPAD_TEST_TOUCHES (guest-vsync clocked), a tap
+    // shorter than one guest frame lands between two guest reads, which
+    // is the lost-tap repro (pre-latch the guest never sees it).
+    // Button names match the pad script. Malformed items are skipped.
+    struct TestTap
+    {
+        uint64_t atMs;
+        uint16_t mask;
+        uint64_t durMs;
+    };
+
+    inline uint16_t testTapButtonMask(const std::string &name)
+    {
+        if (name == "select") return kSelect;
+        if (name == "l3") return kL3;
+        if (name == "r3") return kR3;
+        if (name == "start") return kStart;
+        if (name == "up") return kUp;
+        if (name == "right") return kRight;
+        if (name == "down") return kDown;
+        if (name == "left") return kLeft;
+        if (name == "l2") return kL2;
+        if (name == "r2") return kR2;
+        if (name == "l1") return kL1;
+        if (name == "r1") return kR1;
+        if (name == "triangle") return kTriangle;
+        if (name == "circle") return kCircle;
+        if (name == "cross") return kCross;
+        if (name == "square") return kSquare;
+        return 0u;
+    }
+
+    inline std::vector<TestTap> parseTestTap(const char *spec)
+    {
+        std::vector<TestTap> out;
+        if (!spec)
+            return out;
+        const std::string text(spec);
+        size_t begin = 0;
+        while (begin < text.size())
+        {
+            size_t end = text.find(',', begin);
+            if (end == std::string::npos)
+                end = text.size();
+            const std::string item = text.substr(begin, end - begin);
+            const size_t c1 = item.find(':');
+            const size_t c2 = (c1 == std::string::npos) ? std::string::npos : item.find(':', c1 + 1);
+            bool ok = c1 != std::string::npos && c2 != std::string::npos &&
+                      item.find(':', c2 + 1) == std::string::npos;
+            TestTap t{};
+            if (ok)
+            {
+                char *p = nullptr;
+                const char *c = item.c_str();
+                t.atMs = std::strtoull(c, &p, 10);
+                ok = p != c && *p == ':';
+                if (ok)
+                {
+                    t.mask = testTapButtonMask(item.substr(c1 + 1, c2 - c1 - 1));
+                    ok = t.mask != 0u;
+                }
+                if (ok)
+                {
+                    t.durMs = std::strtoull(item.c_str() + c2 + 1, &p, 10);
+                    ok = p != item.c_str() + c2 + 1 && *p == '\0' && t.durMs > 0;
+                }
+            }
+            if (ok)
+                out.push_back(t);
+            begin = end + 1;
+        }
+        return out;
+    }
+
+    // Union of taps active at `wallMs` (atMs <= wallMs < atMs + durMs).
+    inline uint16_t activeTestTap(const std::vector<TestTap> &taps, uint64_t wallMs)
+    {
+        uint16_t mask = 0u;
+        for (const TestTap &t : taps)
+        {
+            if (wallMs >= t.atMs && wallMs < t.atMs + t.durMs)
+                mask = static_cast<uint16_t>(mask | t.mask);
+        }
+        return mask;
+    }
+
     // PS2X_VIRTUAL_PAD: unset or anything but "0" = on (iOS sets it from
     // Settings > Virtual controls).
     inline bool enabledFromEnv(const char *value)
@@ -339,7 +431,9 @@ namespace ps2x::vpad
         return !(value && value[0] == '0');
     }
 
-    // Pressed bits published by the render thread, read by the pad backend.
+    // Pressed bits published by the render thread. IN2: read by the pad
+    // backend only on the PS2X_PAD_LATCH=0 path; the latch path publishes
+    // through ps2x::padlatch::SharedLatch instead.
     inline std::atomic<uint16_t> &liveMask()
     {
         static std::atomic<uint16_t> mask{0u};
