@@ -20,6 +20,15 @@
 #include "runtime/gs/ps2_gs_shadow.h"
 #include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "runtime/gs/ps2_present_share.h"
+#if defined(PS2X_IOS)
+// HR1 spike: blend off around the shared-texture quad. Declared here because
+// rlgl.h redefines raylib.h types in this TU (raylib is built as C).
+extern "C" {
+void rlDrawRenderBatchActive(void);
+void rlDisableColorBlend(void);
+void rlEnableColorBlend(void);
+}
+#endif
 #include "ps2_e7.h"
 #include "ps2_e15.h"
 #include "ps2_pk.h"
@@ -716,6 +725,11 @@ void drawVirtualPad(const ps2x::vpad::Layout &layout, uint16_t pressed, const ps
 
 // HR1: main-thread present cost split, reported by PS2X_THREAD_CPU_LOG=1.
 static std::atomic<uint64_t> g_hr1LatchNs{0}, g_hr1UploadNs{0}, g_hr1Uploads{0};
+#if defined(PS2X_IOS)
+// HR1 spike (PS2X_PRESENT_ZERO_COPY=1 on iOS): the shared GLES texture to draw
+// instead of frameTex; id 0 = use frameTex.
+static Texture2D g_hr1ShareTex{};
+#endif
 
 #if defined(__APPLE__)
 // HR1: PS2X_THREAD_CPU_LOG=1 prints cumulative user+system CPU ms per named
@@ -855,6 +869,26 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                 return;
             }
         }
+    }
+#endif
+#if defined(PS2X_IOS)
+    if (ps2x_present_share::enabled())
+    {
+        ps2x_present_share::SharedFrame shared;
+        if (ps2x_present_share::latest(shared))
+        {
+            const unsigned int id = ps2x_present_share::acquireTexture(shared);
+            if (id != 0u)
+            {
+                g_hr1ShareTex = Texture2D{id, static_cast<int>(shared.width), static_cast<int>(shared.height), 1,
+                                          PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                outWidth = s_lastWidth = shared.width;
+                outHeight = s_lastHeight = shared.height;
+                s_hasUploadedFrame = true;
+                return;
+            }
+        }
+        g_hr1ShareTex = Texture2D{};
     }
 #endif
     s_scratch.clear();
@@ -4156,6 +4190,19 @@ void PS2Runtime::run()
         }
         const Rectangle srcRect{0.0f, 0.0f, srcWidth, srcHeight};
         const Rectangle dstRect{pr.x, pr.y, pr.w, pr.h};
+#if defined(PS2X_IOS)
+        if (g_hr1ShareTex.id != 0u)
+        {
+            // HR1 spike: draw the shared texture opaque (PS2 alpha 0x80 would
+            // halve it, DK1); GLES2 has no swizzle, so blend off for this quad.
+            rlDrawRenderBatchActive();
+            rlDisableColorBlend();
+            DrawTexturePro(g_hr1ShareTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            rlDrawRenderBatchActive();
+            rlEnableColorBlend();
+        }
+        else
+#endif
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
         // I26: virtual controls, hidden while a connected game controller is in use.
         const bool vpadPadConnected = vpadWanted && gamepadInUse();

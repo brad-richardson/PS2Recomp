@@ -8,9 +8,14 @@
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl3.h>
 
+#include <CoreVideo/CoreVideo.h>
+#include <TargetConditionals.h>
+
 #include <cstdio>
 #include <unordered_map>
 #include <vector>
+
+#include "ps2_present_share_surface.inc"
 
 namespace ps2x_present_share
 {

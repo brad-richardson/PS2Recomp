@@ -45,7 +45,7 @@ SharedFrame g_shareFrame;
 
 bool enabled()
 {
-#if defined(__APPLE__) && TARGET_OS_OSX
+#if defined(__APPLE__) // macOS: GL blit (HR1 prototype); iOS: GLES texture cache (HR1 spike)
     static const bool on = [] {
         const char *v = std::getenv("PS2X_PRESENT_ZERO_COPY");
         return v && std::strcmp(v, "1") == 0;
@@ -624,10 +624,6 @@ private:
     };
     bool createShareSlots(uint32_t w, uint32_t h)
     {
-        auto exportFn = reinterpret_cast<PFN_vkExportMetalObjectsEXT>(
-            vkGetDeviceProcAddr(m_device->get_device(), "vkExportMetalObjectsEXT"));
-        if (!exportFn)
-            return false;
         m_device->wait_idle(); // size change (rare): retire pending blits first
         for (auto &slot : m_share)
         {
@@ -638,18 +634,16 @@ private:
             info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                          VK_IMAGE_USAGE_SAMPLED_BIT;
             info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-            VkExportMetalObjectCreateInfoEXT exportInfo = {VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT};
-            exportInfo.exportObjectType = VK_EXPORT_METAL_OBJECT_TYPE_METAL_IOSURFACE_BIT_EXT;
-            info.pnext = &exportInfo;
+            // Our own CoreVideo-compatible surface, imported into the VkImage.
+            slot.surface = ps2x_present_share::createSurface(w, h);
+            if (!slot.surface)
+                return false;
+            VkImportMetalIOSurfaceInfoEXT importInfo = {VK_STRUCTURE_TYPE_IMPORT_METAL_IO_SURFACE_INFO_EXT};
+            importInfo.ioSurface = static_cast<IOSurfaceRef>(slot.surface);
+            info.pnext = &importInfo;
             slot.image = m_device->create_image(info);
             if (!slot.image)
                 return false;
-            VkExportMetalIOSurfaceInfoEXT surf = {VK_STRUCTURE_TYPE_EXPORT_METAL_IO_SURFACE_INFO_EXT};
-            surf.image = slot.image->get_image();
-            VkExportMetalObjectsInfoEXT objs = {VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
-            objs.pNext = &surf;
-            exportFn(m_device->get_device(), &objs);
-            slot.surface = surf.ioSurface;
             std::cerr << "[gs:parallel] zero-copy slot " << w << "x" << h << " surface=" << slot.surface
                       << std::endl;
             if (!slot.surface)

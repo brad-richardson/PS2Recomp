@@ -529,7 +529,10 @@ add_library(ps2_gs_shadow STATIC
 # HR1 prototype: GL side of PS2X_PRESENT_ZERO_COPY (macOS desktop only).
 if(APPLE AND NOT PS2X_IS_IOS)
     target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_present_share_mac.cpp)
-    target_link_libraries(ps2_gs_shadow PRIVATE "-framework OpenGL" "-framework IOSurface")
+    target_link_libraries(ps2_gs_shadow PRIVATE "-framework OpenGL" "-framework IOSurface" "-framework CoreVideo")
+elseif(PS2X_IS_IOS)
+    target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_present_share_ios.mm)
+    target_link_libraries(ps2_gs_shadow PRIVATE "-framework CoreVideo" "-framework OpenGLES" "-framework IOSurface")
 endif()
 target_include_directories(ps2_gs_shadow PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"

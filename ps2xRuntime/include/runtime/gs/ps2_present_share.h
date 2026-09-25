@@ -20,7 +20,14 @@ struct SharedFrame
     uint64_t seq = 0;
 };
 
-bool enabled(); // PS2X_PRESENT_ZERO_COPY=1 on macOS desktop
+bool enabled(); // PS2X_PRESENT_ZERO_COPY=1 (macOS: GL blit; iOS: GLES texture cache)
+
+// Apple: a w x h BGRA8 IOSurface that CoreVideo, GL/GLES and Metal accept
+// (CVPixelBufferCreate with IOSurface properties; the pixel buffer stays
+// retained for the process). MoltenVK's own exported surfaces carry no pixel
+// format, which CoreVideo rejects. Returns the IOSurfaceRef, or nullptr.
+void *createSurface(uint32_t width, uint32_t height);
+void *pixelBufferFor(void *surface); // CVPixelBufferRef made by createSurface
 void publish(const SharedFrame &frame);
 bool latest(SharedFrame &out);
 
@@ -28,6 +35,11 @@ bool latest(SharedFrame &out);
 // the w x h top-left rectangle of GL_TEXTURE_2D `texId` and force its alpha
 // to one (texture swizzle). Must run on the thread that owns the GL context.
 bool blitToTexture(const SharedFrame &frame, unsigned int texId);
+
+// iOS only (ps2_present_share_ios.mm): GL_TEXTURE_2D name of the surface in
+// the current EAGL context (CVOpenGLESTextureCache), cached per surface; the
+// presenter draws it directly. 0 on failure.
+unsigned int acquireTexture(const SharedFrame &frame);
 
 // Diagnostic (PS2X_PRESENT_SHARE_DUMP_TICKS): read the GL frame texture back
 // (what DrawTexturePro samples) and write the w x h top-left region as PPM.
