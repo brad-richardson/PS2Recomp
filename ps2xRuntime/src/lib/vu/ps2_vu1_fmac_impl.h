@@ -268,6 +268,16 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::updateFmacFlags(const uint8_t
         status |= flags;
     }
 
+    // VB1: the flag commit at issue (see issuePair's m_directFlags guard).
+    if (m_directFlags)
+    {
+        m_state.mac = mac;
+        const uint32_t current = status & 0xFu;
+        m_state.status = (m_state.status & 0xFF0u) | current | ((current | extraSticky) << 6);
+        noteDirect(m_cycle + kFmacLatency);
+        return;
+    }
+
     const int slot = firstFreeEntry(m_flagValidMask, kMaxFlagEntries);
     if (slot < 0)
     {

@@ -82,6 +82,9 @@ void VU1Interpreter::resetScheduler()
     m_viWriteValidMask = 0;
     m_accWriteValidMask = 0;
     m_nextCommitCycle = ~0ull;
+    m_directPendingUntil = 0;
+    m_directStores = false;
+    m_directFlags = false;
     m_xgkick.reset();
     m_vfReady = {};
     m_viReady = {};
@@ -345,6 +348,12 @@ void VU1Interpreter::queueFsset(uint16_t immediate)
 void VU1Interpreter::queueClip(uint32_t clip)
 {
     m_workingClip = ((m_workingClip << 6) | (clip & 0x3Fu)) & 0xFFFFFFu;
+    if (m_directFlags)
+    {
+        m_state.clip = m_workingClip;
+        noteDirect(m_cycle + kFmacLatency);
+        return;
+    }
     const int slot = firstFreeEntry(m_flagValidMask, kMaxFlagEntries);
     if (slot >= 0)
     {
@@ -426,6 +435,25 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
         m_entryStoreValid = true;
         m_entryStoreAddr = address;
         std::copy(words, words + 4, m_entryStoreWords);
+    }
+    if (m_directStores)
+    {
+        // VB1: the store commit at issue. Nothing reads VU data between this
+        // issue and the next cycle boundary, where the queued store would land
+        // before PATH1 takes its next qword.
+        if (m_activeVuData && address + 16u <= m_activeVuDataSize)
+        {
+            uint32_t oldWords[4]{};
+            std::memcpy(oldWords, m_activeVuData + address, sizeof(oldWords));
+            for (uint32_t component = 0; component < 4u; ++component)
+            {
+                if ((laneMask & laneForComponent(component)) != 0u)
+                    oldWords[component] = words[component];
+            }
+            std::memcpy(m_activeVuData + address, oldWords, sizeof(oldWords));
+        }
+        noteDirect(m_cycle + 1u);
+        return;
     }
     const int slot = firstFreeEntry(m_storeValidMask, kMaxPendingStores);
     if (slot >= 0)
@@ -801,6 +829,9 @@ void VU1Interpreter::advanceTo(uint64_t targetCycle)
 bool VU1Interpreter::pipelinesPending() const
 {
     if (m_fdiv.valid || m_xgkick.active)
+        return true;
+    // VB1: writes committed at issue still count until their readyCycle.
+    if (m_cycle < m_directPendingUntil)
         return true;
     for (const ScalarPipelineEntry &entry : m_efu)
         if (entry.valid)
@@ -1431,6 +1462,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     ctx.programEnded = false;
     // VR1: generated code for this code image, if one was compiled in.
     const RecompProgram *recomp = lookupRecompProgram(vuCode, codeSize, memory);
+    // VB1: direct commit (VU1 only, dev traces off).
+    m_directRunOk = m_unit == Unit::VU1 && !m_traceArmed && !m_entryArmed && directCommitEnabled();
+    m_directFlagSafe = m_directRunOk
+                           ? directFlagMap(vuCode, codeSize,
+                                           memory != nullptr && vuCode == memory->getVU1Code())
+                           : nullptr;
     while (m_cycle < budgetEnd && !m_stopRequested)
     {
         commitReadyPipelines();

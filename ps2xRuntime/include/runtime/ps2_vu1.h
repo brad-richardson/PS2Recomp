@@ -391,6 +391,32 @@ private:
     uint64_t m_recompCycles = 0;
     uint64_t m_interpCycles = 0;
     uint64_t m_recompRuns = 0;
+    // VB1 (stage B, direct commit): VU1 writes that the scoreboard already
+    // orders (VF, VI, ACC, LSU stores) are applied at issue instead of being
+    // queued and committed at readyCycle; FMAC/CLIP flag writes too where
+    // m_directFlagMap says no flag reader can issue before they would land.
+    // Guards per pair: VU1, dev traces off, all landings inside the budget,
+    // and (flags) no queued flag entry that would commit after them.
+    // m_directPendingUntil keeps flushPipelines() cycle-exact.
+    static constexpr uint32_t kDirectMaxLatency = 4u;
+    static constexpr uint32_t kDirectFlagWindow = 5u;
+    bool m_directRunOk = false;
+    bool m_directStores = false;
+    bool m_directFlags = false;
+    uint64_t m_directPendingUntil = 0;
+    const uint8_t *m_directFlagSafe = nullptr;
+    std::vector<uint8_t> m_directFlagMap; // untracked code (tests): rebuilt per run
+    void noteDirect(uint64_t readyCycle)
+    {
+        if (readyCycle > m_directPendingUntil)
+            m_directPendingUntil = readyCycle;
+    }
+    static bool directCommitEnabled();
+    const uint8_t *directFlagMap(const uint8_t *vuCode, uint32_t codeSize, bool tracked);
+    static void buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize, std::vector<uint8_t> &map);
+    void directVfWrite(uint8_t reg, uint8_t laneMask, const float value[4], uint32_t latency);
+    void directViWrite(uint8_t reg, int32_t value, uint32_t latency);
+    void directAccWrite(uint8_t laneMask, const float value[4], uint32_t latency);
     void recordEntryPair(uint32_t pc, uint32_t lo, uint32_t up,
                          const uint8_t *vuData, uint32_t dataSize,
                          const int32_t oldVi[16], const uint32_t oldVf[32][4]);

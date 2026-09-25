@@ -121,6 +121,51 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::markPairWrites(const DecodedI
     }
 }
 
+// VB1: the commit of a queued write, applied at issue. A fresh sequence number
+// retires any older queued write to the same lanes (commit skips entries that
+// are not the latest), exactly as a newer queued write would.
+PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directVfWrite(uint8_t reg, uint8_t laneMask,
+                                                                  const float value[4], uint32_t latency)
+{
+    if (reg == 0u || laneMask == 0u)
+        return;
+    const uint64_t sequence = ++m_nextWriteSequence;
+    for (uint32_t component = 0; component < 4u; ++component)
+    {
+        if ((laneMask & laneForComponent(component)) != 0u)
+        {
+            m_state.vf[reg][component] = value[component];
+            m_vfLatestWrite[reg][component] = sequence;
+        }
+    }
+    noteDirect(m_cycle + latency);
+}
+
+PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directViWrite(uint8_t reg, int32_t value, uint32_t latency)
+{
+    if (reg == 0u)
+        return;
+    m_viLatestWrite[reg] = ++m_nextWriteSequence;
+    m_state.vi[reg] = static_cast<int16_t>(value);
+    noteDirect(m_cycle + latency);
+}
+
+PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directAccWrite(uint8_t laneMask, const float value[4], uint32_t latency)
+{
+    if (laneMask == 0u)
+        return;
+    const uint64_t sequence = ++m_nextWriteSequence;
+    for (uint32_t component = 0; component < 4u; ++component)
+    {
+        if ((laneMask & laneForComponent(component)) != 0u)
+        {
+            m_state.acc[component] = value[component];
+            m_accLatestWrite[component] = sequence;
+        }
+    }
+    noteDirect(m_cycle + latency);
+}
+
 template <bool kStatic>
 PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstructionPair &decoded, RunContext &ctx)
 {
@@ -149,6 +194,14 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     }
     if (m_cycle >= ctx.budgetEnd)
         return true;
+
+    // VB1: commit this pair's writes at issue when every landing
+    // (<= kDirectMaxLatency cycles) is inside the budget; flag writes also
+    // need the static no-reader window and an empty flag queue.
+    const bool direct = m_directRunOk && m_cycle + kDirectMaxLatency <= ctx.budgetEnd;
+    m_directStores = direct;
+    m_directFlags = direct && m_flagValidMask == 0u && m_directFlagSafe != nullptr &&
+                    m_directFlagSafe[m_state.pc >> 3] != 0u;
 
     // E37: pre-exec snapshot for the pair line (post-stall state). VR1: the
     // snapshot lives in members, written and read only while m_entryArmed
@@ -223,6 +276,8 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
         if constexpr (kStatic) execLowerImpl(decoded.lower, ctx.vuData, ctx.dataSize, *ctx.gs, ctx.memory, decoded.upper); else execLower(decoded.lower, ctx.vuData, ctx.dataSize, *ctx.gs, ctx.memory, decoded.upper);
     }
 
+    m_directStores = false;
+    m_directFlags = false;
     m_viBranchBackupValid = false;
 
     if (m_traceArmed && m_state.branchPending &&
@@ -248,7 +303,10 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
             decoded.upperUsage.vfLatency != 0u
                 ? decoded.upperUsage.vfLatency
                 : decoded.upperUsage.latency;
-        queueVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
+        if (direct)
+            directVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
+        else
+            queueVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
     }
     if (hasDistinctLowerWrite)
     {
@@ -257,7 +315,10 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
         const uint32_t latency = decoded.lowerUsage.vfLatency != 0u
                                      ? decoded.lowerUsage.vfLatency
                                      : decoded.lowerUsage.latency;
-        queueVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
+        if (direct)
+            directVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
+        else
+            queueVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
     }
     if (decoded.upperUsage.accWrite != 0u)
     {
@@ -265,8 +326,11 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
         std::memcpy(m_state.acc, oldAcc, sizeof(oldAcc));
         // ACC is forwarded to the next upper instruction. Its arithmetic
         // flags still use the normal four-cycle FMAC timeline.
-        queueAccWrite(decoded.upperUsage.accWrite, newAcc,
-                      kAccForwardLatency);
+        if (direct)
+            directAccWrite(decoded.upperUsage.accWrite, newAcc, kAccForwardLatency);
+        else
+            queueAccWrite(decoded.upperUsage.accWrite, newAcc,
+                          kAccForwardLatency);
     }
     if (writtenVi != 0u)
     {
@@ -276,7 +340,10 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
             decoded.lowerUsage.viLatency != 0u
                 ? decoded.lowerUsage.viLatency
                 : decoded.lowerUsage.latency;
-        queueViWrite(writtenVi, newVi, latency);
+        if (direct)
+            directViWrite(writtenVi, newVi, latency);
+        else
+            queueViWrite(writtenVi, newVi, latency);
     }
 
     markPairWrites(decoded);

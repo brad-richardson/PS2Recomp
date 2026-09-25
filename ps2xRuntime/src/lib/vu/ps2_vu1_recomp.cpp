@@ -22,6 +22,7 @@
 #include "runtime/third_party/xxhash.h"
 
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <memory>
@@ -212,4 +213,122 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
     const std::string text = out.str();
     file.write(text.data(), static_cast<std::streamsize>(text.size()));
     return static_cast<bool>(file);
+}
+
+// VB1: direct commit (stage B). PS2X_VU1_DIRECT=0 turns it off (queue every
+// write, as stage A did).
+bool VU1Interpreter::directCommitEnabled()
+{
+    static const bool enabled = []
+    {
+        const char *value = std::getenv("PS2X_VU1_DIRECT");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+// VB1: map[i] = 1 when pair i may commit its FMAC/CLIP flag writes at issue:
+// no flag-reading or flag-setting lower op (0x10..0x1C: FCEQ..FCGET, FSSET,
+// FCSET) in pair i itself or in any pair that can issue within the next
+// kDirectFlagWindow - 1 pairs. A flag entry lands kFmacLatency (4) cycles
+// after issue and every pair takes at least one cycle, so only those pairs
+// could have seen the old flags. Control flow: branch delay slots, static
+// targets (B/BAL/IBxx), not-taken paths, and pc wrap are followed; a dynamic
+// target (JR/JALR), an out-of-range target or a branch in a delay slot counts
+// as a reader. E/D/T bits are ignored (following past them only adds readers).
+void VU1Interpreter::buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize,
+                                        std::vector<uint8_t> &map)
+{
+    enum : uint8_t { kNone, kUncond, kCond, kDynamic };
+    constexpr int64_t kNoPending = -1;
+    constexpr int64_t kUnknown = -2;
+    const uint32_t pairs = codeSize / 8u;
+    std::vector<uint8_t> flagOp(pairs, 0u), kind(pairs, kNone);
+    std::vector<int64_t> target(pairs, kUnknown);
+    for (uint32_t i = 0; i < pairs; ++i)
+    {
+        uint32_t lower = 0, upper = 0;
+        std::memcpy(&lower, vuCode + i * 8u, sizeof(lower));
+        std::memcpy(&upper, vuCode + i * 8u + 4u, sizeof(upper));
+        if ((upper & 0x80000000u) != 0u)
+            continue; // I bit: the lower word is an immediate
+        const uint8_t opHi = static_cast<uint8_t>((lower >> 25) & 0x7Fu);
+        flagOp[i] = opHi >= 0x10u && opHi <= 0x1Cu;
+        const bool uncond = opHi == 0x20u || opHi == 0x21u;
+        const bool cond = opHi == 0x28u || opHi == 0x29u || (opHi >= 0x2Cu && opHi <= 0x2Fu);
+        if (opHi == 0x24u || opHi == 0x25u)
+            kind[i] = kDynamic;
+        else if (uncond || cond)
+        {
+            kind[i] = uncond ? kUncond : kCond;
+            const int32_t imm = static_cast<int32_t>(lower << 21) >> 21;
+            const uint32_t pc = (i * 8u + 8u + static_cast<uint32_t>(imm * 8)) & 0x3FFFu;
+            target[i] = pc + 8u <= codeSize ? static_cast<int64_t>(pc / 8u) : kUnknown;
+        }
+    }
+
+    // True when a flag reader can issue within n pairs starting at pair i.
+    // pending: the pc index after i when i is a delay slot.
+    const auto reaches = [&](const auto &self, uint32_t i, uint32_t n, int64_t pending) -> bool
+    {
+        if (n == 0u)
+            return false;
+        if (flagOp[i] != 0u)
+            return true;
+        const uint32_t next = (i + 1u) % pairs;
+        if (pending != kNoPending)
+        {
+            if (kind[i] != kNone)
+                return true;
+            if (pending == kUnknown)
+                return n > 1u;
+            return self(self, static_cast<uint32_t>(pending), n - 1u, kNoPending);
+        }
+        switch (kind[i])
+        {
+        case kUncond:
+            return self(self, next, n - 1u, target[i]);
+        case kCond:
+            return self(self, next, n - 1u, target[i]) ||
+                   self(self, next, n - 1u, static_cast<int64_t>((i + 2u) % pairs));
+        case kDynamic:
+            return self(self, next, n - 1u, kUnknown);
+        default:
+            return self(self, next, n - 1u, kNoPending);
+        }
+    };
+
+    map.assign(pairs, 0u);
+    for (uint32_t i = 0; i < pairs; ++i)
+    {
+        bool reader = reaches(reaches, i, kDirectFlagWindow, kNoPending);
+        // Pair i may also run as the delay slot of a branch at i - 1.
+        const uint32_t prev = (i + pairs - 1u) % pairs;
+        if (!reader && kind[prev] != kNone)
+            reader = reaches(reaches, i, kDirectFlagWindow,
+                             kind[prev] == kDynamic ? kUnknown : target[prev]);
+        map[i] = reader ? 0u : 1u;
+    }
+}
+
+const uint8_t *VU1Interpreter::directFlagMap(const uint8_t *vuCode, uint32_t codeSize, bool tracked)
+{
+    if (codeSize < 8u || codeSize > 0x4000u || (codeSize & 7u) != 0u)
+        return nullptr;
+    if (!tracked)
+    {
+        buildDirectFlagMap(vuCode, codeSize, m_directFlagMap);
+        return m_directFlagMap.data();
+    }
+    // Tracked VU1 code: m_recompHash is the XXH64 of this image (updated by
+    // lookupRecompProgram on every code generation change). One map per image.
+    static std::unordered_map<uint64_t, std::vector<uint8_t>> maps;
+    const uint64_t key = m_recompHash ^ (static_cast<uint64_t>(codeSize) << 48);
+    auto it = maps.find(key);
+    if (it == maps.end())
+    {
+        it = maps.emplace(key, std::vector<uint8_t>()).first;
+        buildDirectFlagMap(vuCode, codeSize, it->second);
+    }
+    return it->second.data();
 }
