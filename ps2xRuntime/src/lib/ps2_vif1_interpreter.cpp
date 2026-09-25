@@ -8,6 +8,7 @@
 #include "ps2_e44_trace.h"
 #include "ps2_gfx_stats.h"
 #include "ps2_mpg_src_trace.h"
+#include "ps2_uv1_counters.h"
 #include "ps2_vif_mpg_log.h"
 #include "ps2_vu1_entry_trace.h"
 #include "ps2_vu1_trace.h"
@@ -854,6 +855,13 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                 vuAddr = (vuAddr + (vif1_regs.tops & 0x3FFu)) & 0x3FFu;
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
+
+            // UV1: default-off per-vsync UNPACK format census.
+            ps2_uv1_vif_fmt::note(gs_regs.vsyncTick.load(std::memory_order_relaxed),
+                                  opcode, zeroExtend, vif1_regs.mode & 3u,
+                                  vif1_regs.cycle & 0xFFu,
+                                  (vif1_regs.cycle >> 8) & 0xFFu,
+                                  (imm & 0x8000u) != 0u, num);
 
             if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {

@@ -5,6 +5,7 @@
 #include "ps2_e7.h"
 #include "ps2_mpg_src_trace.h"
 #include "ps2_rr1_alpha_tap.h"
+#include "ps2_uv1_counters.h"
 #include "ps2_pk.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
@@ -1593,6 +1594,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     const uint64_t e40Vsync = gs_regs.vsyncTick.load(std::memory_order_relaxed);
                     const bool e40Ctag = (channelBase == 0x10009000u) &&
                                          ps2_mpg_src_trace::noteCtagKick(e40Vsync);
+                    // UV1: default-off per-vsync DMA stall census (chain kicks only).
+                    {
+                        const auto uv1DctrlIt = m_ioRegisters.find(0x1000E000u);
+                        const bool uv1HasDctrl = (uv1DctrlIt != m_ioRegisters.end());
+                        ps2_uv1_dma_stall::noteKick(e40Vsync, channelBase,
+                                                    uv1HasDctrl ? uv1DctrlIt->second : 0u,
+                                                    uv1HasDctrl);
+                    }
                     uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
                     uint32_t asr0 = m_ioRegisters[channelBase + 0x40];
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
@@ -1703,6 +1712,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
+                        // UV1: default-off REFS tag census.
+                        ps2_uv1_dma_stall::noteTag(e40Vsync, channelBase, id);
                         if (channelBase == 0x1000A000u)
                             ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "gif tag at=0x%x id=%u qwc=%u addr=0x%x irq=%d", curTagEE, id, tagQwc, addr, irq ? 1 : 0);
                         // E40 Part-4: tag dump for the first in-window kicks.
