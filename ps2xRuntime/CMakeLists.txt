@@ -454,6 +454,7 @@ endfunction()
 
 add_library(ps2_runtime STATIC
     src/lib/game_overrides.cpp
+    src/lib/ssx3_file_key_compare.cpp
     src/lib/gs/ps2_gif_arbiter.cpp
     src/lib/gs/gs_stream_capture.cpp
     src/lib/gs/gs_worker.cpp
