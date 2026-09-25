@@ -78,9 +78,18 @@ void VU1Interpreter::registerRecompProgram(const RecompProgram &program)
     recompRegistry()[program.hash] = program;
 }
 
+const VU1Interpreter::RecompProgram *VU1Interpreter::findRecompProgram(uint64_t hash)
+{
+    const auto &registry = recompRegistry();
+    const auto it = registry.find(hash);
+    return it != registry.end() ? &it->second : nullptr;
+}
+
 const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
     const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory)
 {
+    if (m_recompTestProgram != nullptr)
+        return m_unit == Unit::VU1 && codeSize == m_recompTestProgram->codeSize ? m_recompTestProgram : nullptr;
     if (m_unit != Unit::VU1 || memory == nullptr || vuCode != memory->getVU1Code())
         return nullptr;
     if (recompStatsEnabled() && (++m_recompRuns & 0x3FFFu) == 0u)

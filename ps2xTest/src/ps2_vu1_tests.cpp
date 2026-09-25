@@ -4,6 +4,7 @@
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
+#include "vu1_recomp_fixture.h"
 
 #include <cmath>
 #include <cstdint>
@@ -2050,5 +2051,127 @@ void register_ps2_vu1_tests()
             t.Equals(mismatches, 0u, "direct and queued commits agree at every cut");
             t.IsTrue(runs > 1000u, "differential covered many cuts");
         });
+
+#if PS2X_VU1_FIXTURE_TEST
+        // VR2: generated pairs (vu1_fixture_gen: the runtime's emitter over the
+        // synthetic images in vu1_recomp_fixture.h) against the interpreter
+        // with every write queued (the reference timing model). Every program
+        // is cut at every budget; VU state (flags included) and data memory
+        // must match at the cut, after resume() and after a fresh execute().
+        tc.Run("VR2 generated pairs match the queued interpreter at every budget cut", [](TestCase &t)
+        {
+            struct Snapshot
+            {
+                VU1State state;
+                std::vector<uint8_t> data;
+            };
+            std::vector<uint8_t> code(vu1_fixture::kCodeSize, 0u);
+            std::vector<uint8_t> initialData(PS2_VU1_DATA_SIZE, 0u);
+            GS gs;
+            uint32_t mismatches = 0u, runs = 0u, programsRun = 0u;
+            uint64_t generatedCycles = 0u;
+            vu1_fixture::Rng rnd{0x2545F4914F6CDD1Dull};
+            for (uint32_t image = 0; image < vu1_fixture::kImageCount && mismatches == 0u; ++image)
+            {
+                const VU1Interpreter::RecompProgram *generated =
+                    VU1Interpreter::findRecompProgram(vu1_fixture::kImageHash[image]);
+                t.IsTrue(generated != nullptr, "fixture image is compiled in");
+                if (generated == nullptr)
+                    return;
+                const std::vector<vu1_fixture::Program> programs = vu1_fixture::buildImage(image, code.data());
+                for (const vu1_fixture::Program &program : programs)
+                {
+                    if (mismatches != 0u)
+                        break;
+                    ++programsRun;
+                    for (uint32_t i = 0; i < 64u * 16u; i += 4u)
+                    {
+                        const float value = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 64.0f;
+                        std::memcpy(initialData.data() + i, &value, sizeof(value));
+                    }
+                    VU1State start{};
+                    for (uint32_t reg = 1; reg < 32u; ++reg)
+                        for (uint32_t lane = 0; lane < 4u; ++lane)
+                            start.vf[reg][lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                    for (uint32_t reg = 1; reg < 16u; ++reg)
+                        start.vi[reg] = static_cast<int32_t>(rnd(16u));
+                    start.mac = rnd(0x10000u);
+                    start.status = rnd(0x1000u);
+                    start.clip = rnd(0x1000000u);
+
+                    // check 0: cut; 1: cut + resume(); 2: cut + fresh execute().
+                    const auto runOnce = [&](bool useGenerated, uint32_t budget, uint32_t check) -> Snapshot
+                    {
+                        VU1Interpreter vu;
+                        if (useGenerated)
+                            vu.setRecompProgramForTest(generated);
+                        else
+                            vu.setDirectCommitForTest(0);
+                        std::memcpy(vu.state().vf, start.vf, sizeof(start.vf));
+                        std::memcpy(vu.state().vi, start.vi, sizeof(start.vi));
+                        vu.state().mac = start.mac;
+                        vu.state().status = start.status;
+                        vu.state().clip = start.clip;
+                        Snapshot snap;
+                        snap.data = initialData;
+                        vu.execute(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
+                                   nullptr, program.startPc, 0u, 0u, budget);
+                        if (check == 1u)
+                            vu.resume(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
+                                      nullptr, 0u, 0u, 4096u);
+                        else if (check == 2u)
+                            vu.execute(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
+                                       nullptr, program.startPc, 0u, 0u, 4096u);
+                        if (useGenerated)
+                            generatedCycles += vu.recompCyclesForTest();
+                        std::memcpy(&snap.state, &vu.state(), sizeof(VU1State));
+                        return snap;
+                    };
+
+                    const uint32_t maxBudget = 4u * program.length + 64u;
+                    for (uint32_t budget = 1; budget <= maxBudget && mismatches == 0u; ++budget)
+                    {
+                        for (uint32_t check = 0; check < 3u; ++check)
+                        {
+                            ++runs;
+                            const Snapshot ref = runOnce(false, budget, check);
+                            const Snapshot gen = runOnce(true, budget, check);
+                            if (std::memcmp(&ref.state, &gen.state, sizeof(VU1State)) == 0 && ref.data == gen.data)
+                                continue;
+                            ++mismatches;
+                            std::fprintf(stderr, "VR2 differential mismatch: image %u program pc 0x%x length %u budget %u check %s\n",
+                                         image, program.startPc, program.length, budget,
+                                         check == 0u ? "cut" : check == 1u ? "resume" : "fresh-execute");
+                            for (uint32_t reg = 0; reg < 32u; ++reg)
+                                if (std::memcmp(ref.state.vf[reg], gen.state.vf[reg], 16) != 0)
+                                    std::fprintf(stderr, "  vf%u ref %g %g %g %g gen %g %g %g %g\n", reg,
+                                                 ref.state.vf[reg][0], ref.state.vf[reg][1], ref.state.vf[reg][2], ref.state.vf[reg][3],
+                                                 gen.state.vf[reg][0], gen.state.vf[reg][1], gen.state.vf[reg][2], gen.state.vf[reg][3]);
+                            for (uint32_t reg = 0; reg < 16u; ++reg)
+                                if (ref.state.vi[reg] != gen.state.vi[reg])
+                                    std::fprintf(stderr, "  vi%u ref %d gen %d\n", reg, ref.state.vi[reg], gen.state.vi[reg]);
+                            std::fprintf(stderr, "  mac %x/%x status %x/%x clip %x/%x q %g/%g p %g/%g cycles %llu/%llu pc %x/%x acc %d data %d\n",
+                                         ref.state.mac, gen.state.mac, ref.state.status, gen.state.status, ref.state.clip, gen.state.clip,
+                                         ref.state.q, gen.state.q, ref.state.p, gen.state.p,
+                                         static_cast<unsigned long long>(ref.state.cycles), static_cast<unsigned long long>(gen.state.cycles),
+                                         ref.state.pc, gen.state.pc, std::memcmp(ref.state.acc, gen.state.acc, 16) != 0, ref.data != gen.data);
+                            for (uint32_t pair = 0; pair < program.length; ++pair)
+                            {
+                                uint32_t lo = 0, up = 0;
+                                std::memcpy(&lo, code.data() + program.startPc + pair * 8u, 4);
+                                std::memcpy(&up, code.data() + program.startPc + pair * 8u + 4u, 4);
+                                std::fprintf(stderr, "  pair %u lower %08x upper %08x\n", pair, lo, up);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            t.Equals(mismatches, 0u, "generated pairs and the queued interpreter agree at every cut");
+            t.IsTrue(programsRun > 200u, "both fixture images ran");
+            t.IsTrue(runs > 50000u, "differential covered many cuts");
+            t.IsTrue(generatedCycles > 100000u, "the generated pairs actually ran");
+        });
+#endif
     });
 }

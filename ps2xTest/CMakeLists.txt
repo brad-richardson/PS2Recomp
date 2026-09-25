@@ -193,6 +193,33 @@ elseif(MINGW)
     target_link_options(ps2x_tests PRIVATE "--stack,8388608")
 endif()
 
+# VR2: generated-vs-interpreter VU1 differential test. vu1_fixture_gen runs the
+# runtime's emitter over synthetic code images (random programs, not game data)
+# and the generated pairs are compiled into ps2x_tests. Generated pairs need
+# [[clang::musttail]], so other compilers skip the test.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_executable(vu1_fixture_gen tools/vu1_fixture_gen.cpp $<TARGET_OBJECTS:ps2_test_function_table>)
+    target_include_directories(vu1_fixture_gen PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/ps2xRuntime/include)
+    target_link_libraries(vu1_fixture_gen PRIVATE ps2_runtime)
+    set(VU1_FIXTURE_DIR ${CMAKE_CURRENT_BINARY_DIR}/vu1_fixture)
+    set(VU1_FIXTURE_SOURCES ${VU1_FIXTURE_DIR}/vu1_fixture_0.cpp ${VU1_FIXTURE_DIR}/vu1_fixture_1.cpp)
+    add_custom_command(
+        OUTPUT ${VU1_FIXTURE_SOURCES}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${VU1_FIXTURE_DIR}
+        COMMAND $<TARGET_FILE:vu1_fixture_gen> ${VU1_FIXTURE_DIR}
+        DEPENDS vu1_fixture_gen
+        VERBATIM)
+    target_sources(ps2x_tests PRIVATE ${VU1_FIXTURE_SOURCES})
+    set_source_files_properties(${VU1_FIXTURE_SOURCES} PROPERTIES
+        GENERATED ON
+        SKIP_UNITY_BUILD_INCLUSION ON
+        SKIP_PRECOMPILE_HEADERS ON
+        INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib/vu;${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib")
+    target_compile_definitions(ps2_test_lib PRIVATE PS2X_VU1_FIXTURE_TEST=1)
+endif()
+
 if(COMMAND ps2x_stage_ffmpeg_runtime_dlls)
     ps2x_stage_ffmpeg_runtime_dlls(ps2x_tests)
 endif()

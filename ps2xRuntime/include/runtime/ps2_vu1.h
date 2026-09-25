@@ -126,6 +126,11 @@ public:
     // VB1: test hook for the direct-commit path: -1 follows PS2X_VU1_DIRECT
     // (default on), 0 queues every write, 1 forces direct commits on.
     void setDirectCommitForTest(int mode) { m_directOverride = mode; }
+    // VR2: test hook for generated code without a tracked PS2Memory: run this
+    // registered image whenever the code size matches (null = normal lookup).
+    static const RecompProgram *findRecompProgram(uint64_t hash);
+    void setRecompProgramForTest(const RecompProgram *program) { m_recompTestProgram = program; }
+    uint64_t recompCyclesForTest() const { return m_recompCycles; }
     const VU1State &state() const { return m_state; }
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t programStartCount() const { return m_programStartCount; }
@@ -392,6 +397,7 @@ private:
     bool recompChainReady(RunContext &ctx);
     const RecompProgram *lookupRecompProgram(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory);
     const RecompProgram *m_recompProgram = nullptr;
+    const RecompProgram *m_recompTestProgram = nullptr;
     const uint8_t *m_recompCode = nullptr;
     uint32_t m_recompCodeSize = 0;
     uint64_t m_recompGeneration = 0;
