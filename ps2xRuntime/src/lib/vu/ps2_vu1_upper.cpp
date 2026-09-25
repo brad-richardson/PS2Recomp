@@ -24,6 +24,14 @@ namespace
 void VU1Interpreter::execUpper(uint32_t instr)
 {
     m_currentUpperInstruction = instr;
+    // E57: upper NOP (special 0x2F/0x30) returns before the operand
+    // normalization below, which has no side effects.
+    if ((instr & 0x3Cu) == 0x3Cu)
+    {
+        const uint8_t special = static_cast<uint8_t>((instr & 0x3u) | ((instr >> 4) & 0x7Cu));
+        if (special == 0x2Fu || special == 0x30u)
+            return;
+    }
     uint8_t dest = DEST(instr);
     uint8_t ft = FT(instr);
     uint8_t fs = FS(instr);

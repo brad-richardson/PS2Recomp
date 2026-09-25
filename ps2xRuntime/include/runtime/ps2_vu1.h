@@ -352,7 +352,14 @@ private:
     void startXgkick(uint32_t qwordAddress);
 
     void resetScheduler();
-    void commitReadyPipelines();
+    // E57: the gate is inline so the (frequent) calls with nothing due cost
+    // one compare; commitDuePipelines() is the scan.
+    void commitReadyPipelines()
+    {
+        if (m_cycle >= m_nextCommitCycle)
+            commitDuePipelines();
+    }
+    void commitDuePipelines();
     void advanceOneCycle();
     void advanceTo(uint64_t targetCycle);
     void flushPipelines();

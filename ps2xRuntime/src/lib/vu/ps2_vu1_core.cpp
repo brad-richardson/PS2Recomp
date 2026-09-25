@@ -730,11 +730,10 @@ void VU1Interpreter::queueAccWrite(uint8_t laneMask, const float value[4], uint3
     reportReservedInstruction(true, 0xFFFFFFF5u);
 }
 
-void VU1Interpreter::commitReadyPipelines()
+void VU1Interpreter::commitDuePipelines()
 {
-    // E57: nothing queued is due yet, so a full scan would change nothing.
-    if (m_cycle < m_nextCommitCycle)
-        return;
+    // E57: only reached once m_cycle >= m_nextCommitCycle (see the inline
+    // commitReadyPipelines() gate); before that a scan would change nothing.
     uint64_t nextReady = ~0ull;
 
     for (uint32_t pending = m_flagValidMask; pending != 0u; pending &= pending - 1u)
@@ -989,7 +988,8 @@ void VU1Interpreter::advanceOneCycle()
     // LSU commits become visible at the cycle boundary before PATH1 consumes
     // its next qword from VU memory.
     commitReadyPipelines();
-    progressXgkick();
+    if (m_xgkick.active)
+        progressXgkick();
 }
 
 void VU1Interpreter::advanceTo(uint64_t targetCycle)
@@ -1762,14 +1762,11 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
 
         uint8_t writtenVi = 0u;
         int32_t oldVi = 0;
-        for (uint32_t reg = 1; reg < 16u; ++reg)
+        if (const uint32_t viWrites = decoded.lowerUsage.viWrite & 0xFFFEu; viWrites != 0u)
         {
-            if ((decoded.lowerUsage.viWrite & (1u << reg)) != 0u)
-            {
-                writtenVi = static_cast<uint8_t>(reg);
-                oldVi = m_state.vi[reg];
-                break;
-            }
+            // E57: lowest written VI register (same pick as the 1..15 scan).
+            writtenVi = static_cast<uint8_t>(std::countr_zero(viWrites));
+            oldVi = m_state.vi[writtenVi];
         }
 
         const VfAccess upperWrite = decoded.upperUsage.vfWrite;
