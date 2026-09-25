@@ -1,4 +1,5 @@
 #include "runtime/ee_scheduler.h"
+#include "runtime/ee_guest_unwind.h"
 #include "ps2_fpmode.h"
 #include "ps2_e41_trace.h"
 #include "ps2_mpg_src_trace.h"
@@ -906,6 +907,7 @@ void EeScheduler::run()
                 ps2_e3::noteThread(m_currentThreadId);
             }
             ps2_e15::Trace mpegTrace("scheduler",m_vsyncTick,m_rdram,&context,context.pc,0u,m_currentThreadId);
+            ps2_guest_unwind::clear();
             function(m_rdram, &context, &m_runtime);
             mpegTrace.finish(m_vsyncTick);
             m_guestExecuting.store(false, std::memory_order_release);

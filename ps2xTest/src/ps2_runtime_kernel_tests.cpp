@@ -426,6 +426,63 @@ namespace
         }
     }
 
+    // PF1: an outer function calls F; F calls itself, and a checkpoint fires
+    // at that recursive dispatch. The suspended F leaves ctx->pc == its entry;
+    // the outer caller must keep unwinding instead of reading that as a return.
+    constexpr uint32_t K_PF1_F = 0x300600u;
+    constexpr uint32_t K_PF1_F_RET = 0x300608u;
+    constexpr uint32_t K_PF1_OUTER_RET = 0x300700u;
+    int gPf1FEntries = 0;
+
+    void pf1Outer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(1);
+        setRegU32(*ctx, 31, K_PF1_OUTER_RET);
+        if (!runtime->dispatchGuestBranch(rdram, ctx, K_PF1_F, K_SCHED_MAIN, K_PF1_OUTER_RET,
+                                          PS2Runtime::GuestBranchKind::IndirectCall, "JALR"))
+        {
+            return;
+        }
+        // Reached only if the suspended callee was mistaken for a return.
+        gSchedulerTrace->push_back(2);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void pf1F(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (++gPf1FEntries == 1)
+        {
+            gSchedulerTrace->push_back(10);
+            runtime->postEeEvent(EeEvent{EeEventType::ExternalWake, 0u, 0u});
+            setRegU32(*ctx, 31, K_PF1_F_RET);
+            if (!runtime->dispatchGuestBranch(rdram, ctx, K_PF1_F, K_PF1_F + 4u, K_PF1_F_RET,
+                                              PS2Runtime::GuestBranchKind::DirectCall, "JAL"))
+            {
+                return;
+            }
+            gSchedulerTrace->push_back(13);
+            ctx->pc = K_PF1_OUTER_RET;
+            return;
+        }
+        // The resumed recursive call: return to F's continuation.
+        gSchedulerTrace->push_back(11);
+        ctx->pc = K_PF1_F_RET;
+    }
+
+    void pf1FRet(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        gSchedulerTrace->push_back(12);
+        ctx->pc = K_PF1_OUTER_RET;
+    }
+
+    void pf1OuterRet(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(3);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
     void schedulerRotateA(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         gSchedulerTrace->push_back(10);
@@ -1655,6 +1712,27 @@ void register_ps2_runtime_kernel_tests()
 
             const std::vector<int> expected{1, 10, 20, 11};
             t.IsTrue(trace == expected, "explicit rotation should move the current head behind its FIFO peer");
+        });
+
+        tc.Run("PF1: a checkpoint at a recursive call is an unwind, not a return", [](TestCase &t)
+        {
+            TestEnv env;
+            std::vector<int> trace;
+            gSchedulerTrace = &trace;
+            gPf1FEntries = 0;
+            env.runtime.registerFunction(K_SCHED_MAIN, pf1Outer);
+            env.runtime.registerFunction(K_PF1_F, pf1F);
+            env.runtime.registerFunction(K_PF1_F_RET, pf1FRet);
+            env.runtime.registerFunction(K_PF1_OUTER_RET, pf1OuterRet);
+            env.ctx.pc = K_SCHED_MAIN;
+
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.run();
+
+            const std::vector<int> expected{1, 10, 11, 12, 3};
+            t.IsTrue(trace == expected,
+                     "the outer caller must not continue while its callee is suspended at its own entry");
         });
 
         tc.Run("starting a strictly higher-priority thread preempts immediately", [](TestCase &t)

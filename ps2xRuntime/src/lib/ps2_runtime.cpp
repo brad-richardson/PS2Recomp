@@ -33,6 +33,7 @@ void rlEnableColorBlend(void);
 #include "ps2_e15.h"
 #include "ps2_pk.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ee_guest_unwind.h"
 #include "ThreadNaming.h"
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
@@ -2683,6 +2684,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             const uint32_t ra = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
             diagDriverEntryEmit(sp, ra, sourcePc, true);
         }
+        ps2_guest_unwind::mark();
         return false;
     }
 
@@ -2831,6 +2833,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     noteCardCall("mc-return");
 
     if (isStopRequested() || ctx->pc == 0u)
+    {
+        return false;
+    }
+
+    // PF1: the callee was suspended at a checkpoint, not returned; keep
+    // unwinding even when its suspended pc happens to equal its entry.
+    if (ps2_guest_unwind::pending())
     {
         return false;
     }
@@ -3815,7 +3824,12 @@ void PS2Runtime::postEeEvent(EeEvent event)
 
 bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
-    return m_eeScheduler->checkpointDue(cycles);
+    if (!m_eeScheduler->checkpointDue(cycles))
+    {
+        return false;
+    }
+    ps2_guest_unwind::mark();
+    return true;
 }
 
 uint32_t PS2Runtime::readEeCount(R5900Context *ctx) noexcept
