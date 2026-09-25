@@ -440,7 +440,8 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-widescreen-default",
 // plus an always-overwritten latest pair:
 //   upload-<seq>.png + .txt sidecar (frame number, tick, dimensions,
 //   display/source FBP, preferred flag, fallback flag, FNV-1a hash,
-//   SMODE2/PMODE) and upload-latest.png/.txt rewritten every upload so
+//   SMODE2/PMODE, DISPLAY1/2 + DISPFB1/2 raw (ST1 diagnostic)) and
+//   upload-latest.png/.txt rewritten every upload so
 // the settled park frame survives SIGTERM.
 namespace
 {
@@ -473,7 +474,12 @@ void dumpPresentationFrame(const uint8_t *rgba,
                            bool preferred,
                            bool fallback,
                            uint64_t smode2,
-                           uint64_t pmode)
+                           uint64_t pmode,
+                           // ST1 diagnostic (local-only): raw DISPLAY/DISPFB in the sidecar.
+                           uint64_t display1,
+                           uint64_t display2,
+                           uint64_t dispfb1,
+                           uint64_t dispfb2)
 {
     const char *dir = frameDumpDir();
     if (!dir || !rgba || width == 0u || height == 0u || width > 4096u || height > 4096u)
@@ -558,13 +564,13 @@ void dumpPresentationFrame(const uint8_t *rgba,
                                << " displayFbp=" << displayFbp << " sourceFbp=" << sourceFbp
                                << " preferred=" << (preferred ? 1 : 0) << " fallback=" << (fallback ? 1 : 0)
                                << " fnv1a=" << std::hex << hash << std::dec << " smode2=0x" << std::hex
-                               << smode2 << " pmode=0x" << pmode << std::dec << "\n";
+                               << smode2 << " pmode=0x" << pmode << " display1=0x" << display1 << " display2=0x" << display2 << " dispfb1=0x" << dispfb1 << " dispfb2=0x" << dispfb2 << std::dec << "\n";
     }
     std::ofstream(txtPath) << "seq=" << seq << " tick=" << tick << " size=" << width << "x" << height
                            << " displayFbp=" << displayFbp << " sourceFbp=" << sourceFbp
                            << " preferred=" << (preferred ? 1 : 0) << " fallback=" << (fallback ? 1 : 0)
                            << " fnv1a=" << std::hex << hash << std::dec << " smode2=0x" << std::hex << smode2
-                           << " pmode=0x" << pmode << std::dec << "\n";
+                           << " pmode=0x" << pmode << " display1=0x" << display1 << " display2=0x" << display2 << " dispfb1=0x" << dispfb1 << " dispfb2=0x" << dispfb2 << std::dec << "\n";
     std::cerr << "[frame:dump] seq=" << seq << " tick=" << tick << " size=" << width << "x" << height
               << " fbp=" << displayFbp << "/" << sourceFbp << " fallback=" << (fallback ? 1 : 0) << " fnv1a="
               << std::hex << hash << std::dec << std::endl;
@@ -743,7 +749,9 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         static const ps2x::FallbackRgba s_fallback = ps2x::fallbackFrameColorFromEnv();
         Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, Color{s_fallback.r, s_fallback.g, s_fallback.b, s_fallback.a});
         dumpPresentationFrame(static_cast<const uint8_t *>(blank.data), FB_WIDTH, FB_HEIGHT, currentTick, 0u,
-                              0u, false, true, rt->memory().gs().smode2, rt->memory().gs().pmode);
+                              0u, false, true, rt->memory().gs().smode2, rt->memory().gs().pmode,
+                              rt->memory().gs().display1, rt->memory().gs().display2,
+                              rt->memory().gs().dispfb1, rt->memory().gs().dispfb2);
         UpdateTexture(tex, blank.data);
         UnloadImage(blank);
         outWidth = FB_WIDTH;
@@ -783,7 +791,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     {
         dumpPresentationFrame(s_scratch.data(), width, height, currentTick, displayFbp, sourceFbp,
                               usedPreferredDisplaySource, false, rt->memory().gs().smode2,
-                              rt->memory().gs().pmode);
+                              rt->memory().gs().pmode, rt->memory().gs().display1, rt->memory().gs().display2,
+                              rt->memory().gs().dispfb1, rt->memory().gs().dispfb2);
         // G44: per-vsync shadow compare against these CPU pixels.
         ps2x_gs_shadow::onPresentFrame(currentTick, s_scratch.data(), width, height, &rt->memory().gs());
     }
