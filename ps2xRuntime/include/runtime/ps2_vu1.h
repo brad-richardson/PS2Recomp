@@ -459,6 +459,13 @@ private:
     void queueQ(float value, uint32_t latency, uint32_t statusDi);
     void queueP(float value, uint32_t latency);
     void queueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask);
+    // VB1: store step used by the lower executors (always-inline, see
+    // ps2_vu1_fmac_impl.h). The queued path passes m_storeScratch, never a
+    // pointer to the caller's local, so a generated pair function keeps no
+    // escaping stack array (a stack protector there would turn the chained
+    // musttail hand-off into a real call).
+    void issueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask);
+    uint32_t m_storeScratch[4]{};
     void queueVfWrite(uint8_t reg, uint8_t laneMask, const float value[4], uint32_t latency);
     void queueViWrite(uint8_t reg, int32_t value, uint32_t latency);
     void queueAccWrite(uint8_t laneMask, const float value[4], uint32_t latency);

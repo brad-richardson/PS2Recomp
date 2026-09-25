@@ -436,25 +436,6 @@ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8
         m_entryStoreAddr = address;
         std::copy(words, words + 4, m_entryStoreWords);
     }
-    if (m_directStores)
-    {
-        // VB1: the store commit at issue. Nothing reads VU data between this
-        // issue and the next cycle boundary, where the queued store would land
-        // before PATH1 takes its next qword.
-        if (m_activeVuData && address + 16u <= m_activeVuDataSize)
-        {
-            uint32_t oldWords[4]{};
-            std::memcpy(oldWords, m_activeVuData + address, sizeof(oldWords));
-            for (uint32_t component = 0; component < 4u; ++component)
-            {
-                if ((laneMask & laneForComponent(component)) != 0u)
-                    oldWords[component] = words[component];
-            }
-            std::memcpy(m_activeVuData + address, oldWords, sizeof(oldWords));
-        }
-        noteDirect(m_cycle + 1u);
-        return;
-    }
     const int slot = firstFreeEntry(m_storeValidMask, kMaxPendingStores);
     if (slot >= 0)
     {

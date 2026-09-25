@@ -299,6 +299,32 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::updateFmacFlags(const uint8_t
     entry->writesStatus = true;
 }
 
+PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::issueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask)
+{
+    if (m_directStores)
+    {
+        // VB1: the store commit at issue. Nothing reads VU data between this
+        // issue and the next cycle boundary, where the queued store would land
+        // before PATH1 takes its next qword. (m_directStores implies no E37
+        // entry trace, whose stash lives in queueStore.)
+        if (m_activeVuData && address + 16u <= m_activeVuDataSize)
+        {
+            uint32_t oldWords[4]{};
+            std::memcpy(oldWords, m_activeVuData + address, sizeof(oldWords));
+            for (uint32_t component = 0; component < 4u; ++component)
+            {
+                if ((laneMask & laneForComponent(component)) != 0u)
+                    oldWords[component] = words[component];
+            }
+            std::memcpy(m_activeVuData + address, oldWords, sizeof(oldWords));
+        }
+        noteDirect(m_cycle + 1u);
+        return;
+    }
+    std::memcpy(m_storeScratch, words, sizeof(m_storeScratch));
+    queueStore(address, m_storeScratch, laneMask);
+}
+
 PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::applyFmacDest(float *dst, float *result, uint8_t dest)
 {
     uint8_t laneFlags[4]{};
