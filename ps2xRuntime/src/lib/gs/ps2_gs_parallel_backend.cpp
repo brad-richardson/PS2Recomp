@@ -596,8 +596,16 @@ private:
         m_hiresScanout = hires && std::strcmp(hires, "1") == 0;
         const char *pipe = std::getenv("PS2X_PGS_PRESENT_PIPELINE");
         m_pipeline = pipe && std::strcmp(pipe, "1") == 0;
-        std::cerr << "[gs:parallel] quality ssaa=" << static_cast<int>(opts.super_sampling)
-                  << " (asked " << (ssaa ? ssaa : "unset") << ")"
+        // Mirror GSRenderer::get_max_supported_super_sampling (parallel-gs
+        // gs_renderer.cpp): paraLLEl silently clamps to X4 unless the device
+        // can pin compute subgroup sizes (MoltenVK can't: X4 on Apple).
+        int maxRate = 4;
+        if (m_device->supports_subgroup_size_log2(true, 3, 6))
+            maxRate = 8;
+        if (m_device->supports_subgroup_size_log2(true, 4, 6))
+            maxRate = 16;
+        std::cerr << "[gs:parallel] quality ssaa=" << std::min(static_cast<int>(opts.super_sampling), maxRate)
+                  << " (asked " << (ssaa ? ssaa : "unset") << ", device max " << maxRate << ")"
                   << " ssaa_textures=" << (opts.super_sampled_textures ? 1 : 0)
                   << " hires_scanout=" << (m_hiresScanout ? 1 : 0)
                   << " present_pipeline=" << (m_pipeline ? 1 : 0) << std::endl;
