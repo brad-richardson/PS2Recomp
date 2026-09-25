@@ -532,6 +532,38 @@ void register_ps2_memory_tests()
             t.Equals(sw, 0x00008001u, "zero-extend w");
         });
 
+        tc.Run("VIF UNPACK V4-5 expands RGBA5551 to 8-bit channels", [](TestCase &t)
+        {
+            // RR1: SSX 3 unpacks vertex colours as V4-5; 5-bit channels land
+            // as c << 3 and the 1-bit alpha as a << 7 (0x80), not raw bits.
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V4-5 (opcode 0x6F), num=2, addr=0.
+            const uint16_t colours[2] = {
+                static_cast<uint16_t>(0x8000u | (0x1Fu << 10) | (0x10u << 5) | 0x04u),
+                0x7FFFu};
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Fu, 2u, 0x0000u));
+            const size_t pos = packet.size();
+            packet.resize(pos + sizeof(colours));
+            std::memcpy(packet.data() + pos, colours, sizeof(colours));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu1 = mem.getVU1Data();
+            uint32_t v[8] = {};
+            std::memcpy(v, vu1, sizeof(v));
+            t.Equals(v[0], 0x20u, "R = 4 << 3");
+            t.Equals(v[1], 0x80u, "G = 16 << 3");
+            t.Equals(v[2], 0xF8u, "B = 31 << 3");
+            t.Equals(v[3], 0x80u, "A = 1 << 7");
+            t.Equals(v[4], 0xF8u, "second R");
+            t.Equals(v[5], 0xF8u, "second G");
+            t.Equals(v[6], 0xF8u, "second B");
+            t.Equals(v[7], 0x00u, "second A clear");
+        });
+
         tc.Run("VIF UNPACK bit15 adds TOPS to destination address", [](TestCase &t)
         {
             PS2Memory mem;

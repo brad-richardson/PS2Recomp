@@ -980,13 +980,14 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                     }
                     else if (vl == 3u && vn == 3u)
                     {
-                        // V4-5: packed color-like format in a single 16-bit value.
+                        // V4-5: RGBA5551 in one 16-bit value, expanded to 8-bit
+                        // channels (RGB << 3, A << 7), as in PCSX2's UNPACK_V4_5.
                         uint16_t packed = 0;
                         std::memcpy(&packed, srcVec, sizeof(packed));
-                        decompressed[0] = packed & 0x1Fu;
-                        decompressed[1] = (packed >> 5) & 0x1Fu;
-                        decompressed[2] = (packed >> 10) & 0x1Fu;
-                        decompressed[3] = (packed >> 15) & 0x01u;
+                        decompressed[0] = (packed & 0x1Fu) << 3;
+                        decompressed[1] = ((packed >> 5) & 0x1Fu) << 3;
+                        decompressed[2] = ((packed >> 10) & 0x1Fu) << 3;
+                        decompressed[3] = ((packed >> 15) & 0x01u) << 7;
                     }
                     else
                     {
