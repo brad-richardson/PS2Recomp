@@ -1974,6 +1974,44 @@ void register_ps2_memory_tests()
             t.IsTrue(q2, "RET must resume after CALL payload and continue chain");
         });
 
+        tc.Run("DMA chain longer than 4096 tags runs to its END tag", [](TestCase &t)
+        {
+            // RR1: SSX 3's per-frame VIF1 list reaches ~5,100 tags; a 4096-tag
+            // walker cap silently dropped every object after the cut.
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kBase = 0x00100000u;
+            constexpr uint32_t kCntTags = 5000u;
+            uint8_t *rdram = mem.getRDRAM();
+
+            for (uint32_t i = 0; i <= kCntTags; ++i)
+            {
+                const uint32_t at = kBase + i * 32u;
+                const bool last = (i == kCntTags);
+                writeDmaTag(rdram, at, makeDmaTag(1u, last ? 7u : 1u, 0u, false)); // CNT ... END
+                std::memcpy(rdram + at + 16u, &i, sizeof(i));
+            }
+
+            std::vector<uint8_t> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.insert(captured.end(), data, data + sizeBytes);
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kBase), "write TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR should succeed");
+            mem.processPendingTransfers();
+
+            t.Equals(captured.size(), static_cast<size_t>((kCntTags + 1u) * 16u),
+                     "every tag's payload through the END tag is transferred");
+            uint32_t lastIndex = 0;
+            if (captured.size() >= 16u)
+                std::memcpy(&lastIndex, captured.data() + captured.size() - 16u, sizeof(lastIndex));
+            t.Equals(lastIndex, kCntTags, "the END tag's payload arrives last");
+        });
+
         tc.Run("GIF DMA chain IRQ stops only when TIE is set", [](TestCase &t)
         {
             PS2Memory mem;

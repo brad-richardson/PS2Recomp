@@ -1598,7 +1598,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
                     uint32_t asp = (chcr >> 4) & 0x3u;
                     const bool tieEnabled = (chcr & (1u << 7)) != 0u;
-                    const int kMaxChainTags = 4096;
+                    // Runaway-chain guard only. SSX 3's per-frame VIF1 list runs past
+                    // 4096 tags (RR1); the old 4096 cap silently dropped every object
+                    // after the cut.
+                    const int kMaxChainTags = 1 << 20;
                     std::vector<uint8_t> chainBuf;
 
                     // E40 Part-3 DEV-ONLY: EE source spans for VIF1 chain
@@ -1852,6 +1855,15 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                     }
 
+                    ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "chain end ch=0x%x tags=%d capped=%d bytes=%zu",
+                                channelBase, tagsProcessed, tagsProcessed >= kMaxChainTags ? 1 : 0, chainBuf.size());
+                    if (tagsProcessed >= kMaxChainTags)
+                    {
+                        static std::atomic<bool> warned{false};
+                        if (!warned.exchange(true))
+                            std::cerr << "[dma] chain tag guard hit ch=0x" << std::hex << channelBase
+                                      << " tadr=0x" << tagAddr << std::dec << " tags=" << tagsProcessed << std::endl;
+                    }
                     m_ioRegisters[channelBase + 0x30] = tagAddr;
                     m_ioRegisters[channelBase + 0x40] = asr0;
                     m_ioRegisters[channelBase + 0x50] = asr1;
