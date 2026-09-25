@@ -2,8 +2,10 @@
 #include "ps2_virtual_pad.h"
 #include "runtime/ps2_pad.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <string>
 
 // I26: virtual controls layout, hit test and the pad-backend union.
 void register_ps2_virtual_pad_tests()
@@ -102,6 +104,90 @@ void register_ps2_virtual_pad_tests()
             t.IsTrue(std::fabs((cro->y - tri->y) - 2.0f * 0.13f * 402.0f) < 1e-3f, "cross/triangle spacing");
             t.IsTrue(std::fabs((cir->x - squ->x) - 2.0f * 0.13f * 402.0f) < 1e-3f, "circle/square spacing");
             t.IsTrue(std::fabs((tri->x + cro->x) * 0.5f - (874.0f - 0.205f * 402.0f)) < 1e-3f, "face column x"); });
+
+        tc.Run("I34 layout: 1.5x stick, 80% D-pad below the face cluster, all sizes", [](TestCase &t)
+               {
+            const float sizes[][2] = {
+                {874.0f, 402.0f},  // iPhone 16 Pro landscape
+                {956.0f, 440.0f},  // iPhone 16 Pro Max landscape
+                {1180.0f, 820.0f}, // iPad Air 11" landscape
+            };
+            for (const auto &s : sizes)
+            {
+                const float w = s[0], h = s[1];
+                const Layout l = makeLayout(w, h);
+                const auto tag = std::to_string(static_cast<int>(w)) + "x" + std::to_string(static_cast<int>(h)) + " ";
+                // Stick: 1.5x the I32 radius, rest on the left in the zone,
+                // rest disc on screen and clear of L1/L2/SELECT.
+                t.IsTrue(std::fabs(l.stickR - 0.15f * h) < 1e-3f, tag + "stickR = 0.15u");
+                t.IsTrue(l.stickRestX < w * 0.5f && l.stickRestX < l.stickZoneX, tag + "stick rest left, in zone");
+                t.IsTrue(l.stickRestX - l.stickR >= 0.0f && l.stickRestY - l.stickR >= 0.0f &&
+                             l.stickRestY + l.stickR <= h,
+                         tag + "stick rest disc on screen");
+                // Face-cluster bbox (drawn circles) and the D-pad's 80%.
+                float x0 = w, x1 = 0.0f, y0 = h, y1 = 0.0f;
+                for (const Button &b : l.buttons)
+                {
+                    if (b.mask == kTriangle || b.mask == kCross || b.mask == kSquare || b.mask == kCircle)
+                    {
+                        x0 = std::min(x0, b.x - b.r);
+                        x1 = std::max(x1, b.x + b.r);
+                        y0 = std::min(y0, b.y - b.r);
+                        y1 = std::max(y1, b.y + b.r);
+                    }
+                }
+                t.IsTrue(std::fabs((x1 - x0) - 0.40f * h) < 1e-3f, tag + "face bbox width = 0.40u");
+                t.IsTrue(std::fabs((y1 - y0) - 0.40f * h) < 1e-3f, tag + "face bbox height = 0.40u");
+                t.IsTrue(std::fabs(2.0f * l.dpadR - 0.8f * (x1 - x0)) < 1e-3f, tag + "D-pad = 80% of face width");
+                t.IsTrue(std::fabs(2.0f * l.dpadR - 0.8f * (y1 - y0)) < 1e-3f, tag + "D-pad = 80% of face height");
+                // D-pad below the face centre, right of screen centre, fully on screen.
+                const float faceCy = (y0 + y1) * 0.5f;
+                t.IsTrue(l.dpadY > faceCy, tag + "D-pad below the face cluster");
+                t.IsTrue(l.dpadX > w * 0.5f, tag + "D-pad right of screen centre");
+                t.IsTrue(l.dpadX - l.dpadR >= 0.0f && l.dpadX + l.dpadR <= w && l.dpadY - l.dpadR >= 0.0f &&
+                             l.dpadY + l.dpadR <= h,
+                         tag + "D-pad disc on screen");
+                t.IsTrue(l.stickZoneX < l.dpadX - l.dpadR * 1.15f, tag + "stick zone ends left of the D-pad disc");
+                // No drawn/hit overlap: D-pad vs every button (both ways),
+                // buttons pairwise (both ways), stick rest vs all drawn.
+                auto clear = [](float d, float need) { return d > need; };
+                for (const Button &b : l.buttons)
+                {
+                    if (isDpad(b.mask))
+                        continue;
+                    const float d = std::hypot(b.x - l.dpadX, b.y - l.dpadY);
+                    t.IsTrue(clear(d, l.dpadR * 1.15f + b.r), tag + "D-pad hit vs " + b.label);
+                    t.IsTrue(clear(d, l.dpadR + 1.2f * b.r), tag + "D-pad drawn vs " + b.label + " hit");
+                    const float ds = std::hypot(b.x - l.stickRestX, b.y - l.stickRestY);
+                    t.IsTrue(clear(ds, l.stickR + b.r), tag + "stick rest vs " + b.label);
+                }
+                t.IsTrue(clear(std::hypot(l.stickRestX - l.dpadX, l.stickRestY - l.dpadY), l.stickR + l.dpadR),
+                         tag + "stick rest vs D-pad");
+                for (size_t i = 0; i < l.buttons.size(); ++i)
+                {
+                    if (isDpad(l.buttons[i].mask))
+                        continue;
+                    for (size_t j = i + 1; j < l.buttons.size(); ++j)
+                    {
+                        if (isDpad(l.buttons[j].mask))
+                            continue;
+                        const Button &a = l.buttons[i];
+                        const Button &b = l.buttons[j];
+                        const float d = std::hypot(a.x - b.x, a.y - b.y);
+                        t.IsTrue(clear(d, 1.2f * a.r + b.r) && clear(d, a.r + 1.2f * b.r),
+                                 tag + std::string(a.label) + " vs " + b.label);
+                    }
+                }
+                // Every button's own centre still presses exactly itself.
+                for (const Button &b : l.buttons)
+                {
+                    const float x = b.x, y = b.y;
+                    t.Equals(static_cast<uint32_t>(pressedMask(l, &x, &y, 1)), static_cast<uint32_t>(b.mask),
+                             tag + b.label);
+                }
+                const float cx = w * 0.5f, cyy = h * 0.5f;
+                t.Equals(static_cast<uint32_t>(pressedMask(l, &cx, &cyy, 1)), 0u, tag + "picture centre presses nothing");
+            } });
 
         tc.Run("stick: touch offset maps to left-stick bytes", [](TestCase &t)
                {

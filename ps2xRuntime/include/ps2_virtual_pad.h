@@ -15,6 +15,10 @@
 // I32: the left D-pad is now a floating analog stick (updateStick tracks
 // the anchor across frames; liveStick() carries the left-stick bytes) and
 // the D-pad moved to the right side, above the face buttons.
+// I34 (Brad): the stick is 1.5x, and the D-pad is 80% of the face-button
+// cluster's bounding box, below the cluster, pushed right to the
+// no-overlap limit (literal down-right of the cluster can't fit: the
+// cluster's right edge is 0.005u from the screen edge).
 namespace ps2x::vpad
 {
     // PS2 pad button bits (same values as ps2_pad.cpp / Pad.cpp).
@@ -49,11 +53,13 @@ namespace ps2x::vpad
         float stickZoneX;            // stick zone: touches with x < stickZoneX drive the stick
     };
 
-    // Landscape layout scaled by the window height (I32): floating analog
-    // stick on the left (resting where the I26 D-pad was), D-pad on the
-    // right above the face buttons, face buttons bottom-right, shoulders in
-    // the top corners, Select/Start at the bottom inner corners. On a wide
-    // phone this sits in the pillarbox bars beside the 4:3 picture.
+    // Landscape layout scaled by the window height (I32/I34): floating
+    // analog stick on the left (resting where the I26 D-pad was), D-pad on
+    // the right below the face buttons, face buttons bottom-right,
+    // shoulders in the top corners, Select/Start at the bottom inner
+    // corners. On a wide phone the stick and face buttons sit in the
+    // pillarbox bars beside the 4:3 picture; the I34 D-pad overlaps the
+    // picture's bottom-right (the right column is full).
     inline Layout makeLayout(float w, float h)
     {
         const float u = h;
@@ -62,22 +68,27 @@ namespace ps2x::vpad
         const float br = 0.07f * u;
         const float lx = 0.205f * u; // clusters end at 0.405u: inside the 4:3 pillarbox on a 19.5:9 phone
         const float rx = w - 0.205f * u;
-        const float dcy = 0.285f * u; // D-pad centre: drawn clear of R1/R2 above and triangle below
-        const float dOff = 0.055f * u;
-        const float dBr = 0.040f * u;
+        // I34: D-pad overall (disc diameter) = 80% of the face-cluster
+        // bounding box (2*(off+br) = 0.40u); centre below the cluster,
+        // pushed right to the no-overlap limit (see the I34 layout test).
+        const float dpadR = 0.16f * u;
+        const float dcx = w - 0.532f * u;
+        const float dcy = 0.78f * u;
+        const float dOff = dpadR * (11.0f / 19.0f); // arrow bbox == disc diameter, as I32
+        const float dBr = dpadR * (8.0f / 19.0f);
         Layout l{};
-        l.dpadX = rx;
+        l.dpadX = dcx;
         l.dpadY = dcy;
-        l.dpadR = 0.095f * u;
+        l.dpadR = dpadR;
         l.stickRestX = lx;
         l.stickRestY = cy;
-        l.stickR = 0.10f * u;
+        l.stickR = 0.15f * u; // I34: 1.5x (base, knob, drag and re-anchor scale; dead zone stays 10%)
         l.stickZoneX = 0.5f * w;
         l.buttons = {
-            {kUp, rx, dcy - dOff, dBr, "up"},
-            {kDown, rx, dcy + dOff, dBr, "down"},
-            {kLeft, rx - dOff, dcy, dBr, "left"},
-            {kRight, rx + dOff, dcy, dBr, "right"},
+            {kUp, dcx, dcy - dOff, dBr, "up"},
+            {kDown, dcx, dcy + dOff, dBr, "down"},
+            {kLeft, dcx - dOff, dcy, dBr, "left"},
+            {kRight, dcx + dOff, dcy, dBr, "right"},
             {kTriangle, rx, cy - off, br, "triangle"},
             {kCross, rx, cy + off, br, "cross"},
             {kSquare, rx - off, cy, br, "square"},
