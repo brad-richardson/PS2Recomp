@@ -11,6 +11,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VADD_Field(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VADD to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -22,6 +25,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VSUB_Field(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VSUB to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -33,6 +39,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMUL_Field(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMUL to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -44,6 +53,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VADD(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VADD to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -53,6 +65,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VSUB(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VSUB to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -62,6 +77,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMUL(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMUL to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -96,6 +114,9 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VMFIR(const Instruction &inst)
     {
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (inst.rt == 0)
+            return "// VMFIR to vf0 ignored";
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ uint32_t tmp = (uint32_t)(int32_t)(int16_t)ctx->vi[{}]; float val; std::memcpy(&val, &tmp, sizeof(val)); "
                            "__m128 res = _mm_set1_ps(val); "
@@ -200,6 +221,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMADD_Field(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMADD to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -221,6 +245,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMSUB_Field(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMSUB to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -241,6 +268,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMINI_Field(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMINI to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -260,6 +290,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMAX_Field(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMAX to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -279,6 +312,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMADD(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMADD to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -295,6 +331,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMADDq(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMADDq to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
@@ -310,6 +349,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMADDi(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMADDi to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
@@ -325,6 +367,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMAX(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMAX to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -340,6 +385,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMAXi(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMAXi to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = Ps2VuMax(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
@@ -354,6 +402,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMINIi(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMINIi to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = Ps2VuMin(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
@@ -368,6 +419,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMULi(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMULi to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
@@ -382,6 +436,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMULq(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMULq to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
@@ -396,6 +453,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VOPMSUB(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VOPMSUB to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -414,6 +474,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VADDq(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VADDq to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
@@ -428,6 +491,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VADDi(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VADDi to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = PS2_VADD(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
@@ -442,6 +508,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMSUB(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMSUB to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -458,6 +527,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMINI(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMINI to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t vft = inst.rt;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
@@ -473,6 +545,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VSUBi(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VSUBi to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
@@ -487,6 +562,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VSUBq(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VSUBq to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 res = PS2_VSUB(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
@@ -501,6 +579,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMSUBq(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMSUBq to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_q)); "
@@ -516,6 +597,9 @@ namespace ps2recomp
     std::string CodeGenerator::translateVU_VMSUBi(const Instruction &inst)
     {
         uint8_t vfd = inst.sa;
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (vfd == 0)
+            return "// VMSUBi to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         return fmt::format("{{ __m128 mul_res = PS2_VMUL(ctx->vu0_vf[{}], _mm_set1_ps(ctx->vu0_i)); "
@@ -734,6 +818,9 @@ namespace ps2recomp
 
     std::string CodeGenerator::translateVU_VITOF(const Instruction &inst, int shift)
     {
+        // vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (TC1).
+        if (inst.rt == 0)
+            return "// VITOF to vf0 ignored";
         uint8_t vfs = inst.rd;
         uint8_t dest_mask = inst.vectorInfo.vectorField;
         float scale = (shift == 0) ? 1.0f : (1.0f / static_cast<float>(1 << shift));

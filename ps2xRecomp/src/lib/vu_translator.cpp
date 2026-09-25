@@ -64,6 +64,9 @@ namespace ps2recomp
             }
         }
         case COP2_QMTC2:
+            // TC1: vf0 is hardwired to (0,0,0,1); hardware ignores writes to it (PCSX2 QMTC2 returns early for _Fs_ == 0).
+            if (rd == 0)
+                return "// QMTC2 to vf0 ignored (vf0 hardwired to (0,0,0,1))";
             return fmt::format("ctx->vu0_vf[{}] = _mm_castsi128_ps(GPR_VEC(ctx, {}));", rd, rt);
         case COP2_CTC2:
         {
