@@ -701,7 +701,12 @@ if(PS2X_VU1_RECOMP_DIR)
     message(STATUS "PS2X: VU1 recomp: ${PS2X_VU1_RECOMP_SOURCE_COUNT} images from ${PS2X_VU1_RECOMP_DIR}")
     # F4: each image is a giant TU (2,048 chained pair functions); cap how many
     # compile at once so small build boxes don't OOM. Only Ninja honors pools.
+    # Belt and suspenders: the per-source form is dropped by Android's CMake
+    # 3.22.1 (pool defined, 0 edges use it) while desktop CMake honors it, so
+    # the owning target carries the pool too. That constrains the whole (small)
+    # runner target on generators that honor it; compiled output is unchanged.
     set_property(GLOBAL APPEND PROPERTY JOB_POOLS ps2x_vu1_gen=2)
+    set_target_properties(ps2EntryRunner PROPERTIES JOB_POOL_COMPILE ps2x_vu1_gen)
     target_sources(ps2EntryRunner PRIVATE ${PS2X_VU1_RECOMP_SOURCES})
     set_source_files_properties(${PS2X_VU1_RECOMP_SOURCES} PROPERTIES
         SKIP_UNITY_BUILD_INCLUSION ON
