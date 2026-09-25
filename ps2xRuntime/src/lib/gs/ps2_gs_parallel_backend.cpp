@@ -430,6 +430,7 @@ private:
         ParallelGS::DebugMode dm;
         dm.feedback_render_target = false; // G26-corrected default (as G44)
         m_iface->set_debug_mode(dm);
+        logGpuPath(dm); // TL1: one-time GPU path line (default-on, no per-frame cost)
         m_initFailed = false;
         m_initOk = true;
         counters().initOk.store(true);
@@ -444,6 +445,71 @@ private:
         std::cerr << "[gs:parallel] FATAL: " << what << " (frames will be empty)" << std::endl;
         counters().initFailed.store(true);
         return false;
+    }
+
+    // TL1 Part 1: one-time GPU path line at paraLLEl backend init, so a Mac
+    // vs Odin baseline can be checked for path equivalence. Default-on,
+    // single line, runs once inside ensureInit (no per-frame cost). The
+    // binning fields mirror GSRenderer::get_target_hierarchical_binning and
+    // GSRenderer::set_hierarchical_binning_subgroup_config (gs/gs_renderer.cpp
+    // on the parallel-gs fork, including its wave64-fixed preference): the
+    // same Granite queries the renderer uses, so the line states the choice
+    // the renderer will make for flat (hier=1) and hierarchical passes.
+    void logGpuPath(const ParallelGS::DebugMode &dm)
+    {
+        const Vulkan::DeviceFeatures &feats = m_device->get_device_features();
+        const VkPhysicalDeviceProperties &props = m_device->get_gpu_properties();
+        const uint32_t subgroupSize = feats.vk11_props.subgroupSize;
+        const uint32_t maxWgInv = props.limits.maxComputeWorkGroupInvocations;
+        // Renderer clamp for a medium (<4096 prims, target 2) and a large
+        // (>=4096 prims, target 4) pass. Apple never engages hierarchical
+        // binning (flat-always); elsewhere hier needs >=256 prims and >4x4
+        // coarse tiles before these targets apply.
+#ifndef __APPLE__
+        auto clampTarget = [subgroupSize, maxWgInv](uint32_t target) {
+            uint32_t maxInv = subgroupSize * target * target;
+            while (target > 0u && maxInv > maxWgInv)
+            {
+                maxInv /= 4u;
+                target /= 2u;
+            }
+            return target;
+        };
+#endif
+        // Renderer subgroup choice: exact wave from startLog2 down to
+        // 4-wide, else the fork's fixed wave64, else the free 4..128 range.
+        // Flat passes start at 64-wide (log2 6), hierarchical at 32 (log2 5).
+        auto subgroupChoice = [this](uint32_t startLog2) -> const char * {
+            static const char *names[] = {"wave4", "wave8", "wave16", "wave32", "wave64", "wave128"};
+            for (uint32_t log2 = startLog2;; --log2)
+            {
+                if (m_device->supports_subgroup_size_log2(true, static_cast<uint8_t>(log2),
+                                                           static_cast<uint8_t>(log2)))
+                    return names[log2 - 2u];
+                if (log2 == 2u)
+                    break;
+            }
+            if (m_device->supports_subgroup_size_log2(true, 6, 6))
+                return "wave64-fixed";
+            return "free-4..128";
+        };
+        const char *desc = "plain";
+        if (feats.supports_descriptor_buffer)
+            desc = "buffer";
+        else if (feats.descriptor_heap_features.descriptorHeap)
+            desc = "heap";
+        std::cerr << "[gs-path] hier_rule="
+#ifdef __APPLE__
+                  << "flat-always hier_t2=1 hier_t4=1"
+#else
+                  << "hier-if-large hier_t2=" << clampTarget(2u) << " hier_t4=" << clampTarget(4u)
+#endif
+                  << " subgroup_flat=" << subgroupChoice(6u) << " subgroup_hier=" << subgroupChoice(5u)
+                  << " vk11_subgroup=" << subgroupSize << " max_wg_inv=" << maxWgInv << " desc=" << desc
+                  << " desc_req=push+heap+buffer"
+                  << " sampler_feedback=" << (dm.disable_sampler_feedback ? "off" : "on")
+                  << " feedback_rt=" << (dm.feedback_render_target ? "on" : "off") << " gpu=" << props.deviceName
+                  << std::endl;
     }
 
     void uploadHandoff()
