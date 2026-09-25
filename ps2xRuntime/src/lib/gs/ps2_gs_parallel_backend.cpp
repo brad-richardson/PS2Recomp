@@ -355,13 +355,49 @@ public:
         info.size = static_cast<size_t>(w) * h * sizeof(uint32_t);
         info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         info.domain = Vulkan::BufferDomain::CachedHost;
-        Vulkan::BufferHandle rb = m_device->create_buffer(info);
-        cmd->copy_image_to_buffer(*rb, *shot.image, 0, {}, {w, h, 1}, 0, 0,
-                                  {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
-        cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                     VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
-        m_device->submit(cmd);
-        m_device->wait_idle();
+        Vulkan::BufferHandle rb;
+        uint32_t fw = w, fh = h; // dims of the frame delivered below
+        if (m_pipeline)
+        {
+            // HR1: PS2X_PGS_PRESENT_PIPELINE=1. Two persistent readback
+            // slots: submit this frame's copy with its own fence and deliver
+            // the previous frame (one frame of latency), so the GS worker
+            // no longer drains the GPU (wait_idle) on every present.
+            ReadbackSlot &cur = m_rb[m_rbIndex];
+            ReadbackSlot &prev = m_rb[m_rbIndex ^ 1u];
+            m_rbIndex ^= 1u;
+            if (cur.fence)
+            {
+                cur.fence->wait();
+                cur.fence.reset();
+            }
+            if (!cur.buf || cur.buf->get_create_info().size < info.size)
+                cur.buf = m_device->create_buffer(info);
+            cmd->copy_image_to_buffer(*cur.buf, *shot.image, 0, {}, {w, h, 1}, 0, 0,
+                                      {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
+            cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+            m_device->submit(cmd, &cur.fence);
+            cur.w = w;
+            cur.h = h;
+            if (!prev.fence)
+                return out; // first present: nothing to deliver yet
+            prev.fence->wait();
+            prev.fence.reset();
+            rb = prev.buf;
+            fw = prev.w;
+            fh = prev.h;
+        }
+        else
+        {
+            rb = m_device->create_buffer(info);
+            cmd->copy_image_to_buffer(*rb, *shot.image, 0, {}, {w, h, 1}, 0, 0,
+                                      {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
+            cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+            m_device->submit(cmd);
+            m_device->wait_idle();
+        }
         const uint8_t *px = static_cast<const uint8_t *>(
             m_device->map_host_buffer(*rb, Vulkan::MEMORY_ACCESS_READ_BIT));
         const uint64_t r1 = nowNanos();
@@ -372,10 +408,10 @@ public:
         // of `width` valid pixels, height <= 512. HR1: frames that don't
         // fit (high-resolution scanout) are packed at stride = width; the
         // frontend infers that from the size (GS::copyLatchedHostPresentationFrame).
-        const bool large = w > 640u || h > 512u;
-        const uint32_t kStride = large ? w : 640u;
-        out.width = std::min<uint32_t>(w, kStride);
-        out.height = large ? h : std::min<uint32_t>(h, 512u);
+        const bool large = fw > 640u || fh > 512u;
+        const uint32_t kStride = large ? fw : 640u;
+        out.width = std::min<uint32_t>(fw, kStride);
+        out.height = large ? fh : std::min<uint32_t>(fh, 512u);
         out.pixels.assign(static_cast<size_t>(kStride) * out.height * 4u, 0u);
         // DK1: presentation pixels must be opaque. The shared presenter
         // uploads them to a raylib RGBA texture and alpha-blends the game
@@ -386,7 +422,7 @@ public:
         for (uint32_t y = 0; y < out.height; ++y)
         {
             uint8_t *dst = out.pixels.data() + static_cast<size_t>(y) * kStride * 4u;
-            std::memcpy(dst, px + static_cast<size_t>(y) * w * 4u,
+            std::memcpy(dst, px + static_cast<size_t>(y) * fw * 4u,
                         static_cast<size_t>(out.width) * 4u);
             for (uint32_t x = 0; x < out.width; ++x)
                 dst[x * 4u + 3u] = 255u;
@@ -558,10 +594,13 @@ private:
         opts.super_sampled_textures = tex && std::strcmp(tex, "1") == 0;
         const char *hires = std::getenv("PS2X_PGS_HIRES_SCANOUT");
         m_hiresScanout = hires && std::strcmp(hires, "1") == 0;
+        const char *pipe = std::getenv("PS2X_PGS_PRESENT_PIPELINE");
+        m_pipeline = pipe && std::strcmp(pipe, "1") == 0;
         std::cerr << "[gs:parallel] quality ssaa=" << static_cast<int>(opts.super_sampling)
                   << " (asked " << (ssaa ? ssaa : "unset") << ")"
                   << " ssaa_textures=" << (opts.super_sampled_textures ? 1 : 0)
-                  << " hires_scanout=" << (m_hiresScanout ? 1 : 0) << std::endl;
+                  << " hires_scanout=" << (m_hiresScanout ? 1 : 0)
+                  << " present_pipeline=" << (m_pipeline ? 1 : 0) << std::endl;
     }
 
 #if defined(__APPLE__)
@@ -572,6 +611,8 @@ private:
     {
         Vulkan::ImageHandle image;
         void *surface = nullptr;
+        Vulkan::Fence fence; // pipelined mode: pending blit
+        uint32_t w = 0u, h = 0u;
     };
     bool createShareSlots(uint32_t w, uint32_t h)
     {
@@ -579,8 +620,10 @@ private:
             vkGetDeviceProcAddr(m_device->get_device(), "vkExportMetalObjectsEXT"));
         if (!exportFn)
             return false;
+        m_device->wait_idle(); // size change (rare): retire pending blits first
         for (auto &slot : m_share)
         {
+            slot.fence.reset();
             if (slot.image)
                 m_shareGraveyard.push_back(slot.image); // GL may still hold the old surfaces
             Vulkan::ImageCreateInfo info = Vulkan::ImageCreateInfo::render_target(w, h, VK_FORMAT_B8G8R8A8_UNORM);
@@ -634,6 +677,22 @@ private:
         cmd->image_barrier(*slot.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
                            VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
+        if (m_pipeline)
+        {
+            // HR1: publish the previous slot (one frame of latency) instead
+            // of waiting for this blit, i.e. for all rendering before it.
+            m_device->submit(cmd, &slot.fence);
+            slot.w = w;
+            slot.h = h;
+            ShareSlot &prev = m_share[(m_shareIndex + 1u) % 3u]; // index before `slot`
+            if (prev.fence)
+            {
+                prev.fence->wait();
+                prev.fence.reset();
+                ps2x_present_share::publish({prev.surface, prev.w, prev.h, ++m_shareSeq});
+            }
+            return true;
+        }
         Vulkan::Fence fence;
         m_device->submit(cmd, &fence);
         fence->wait();
@@ -765,6 +824,15 @@ private:
     uint32_t m_l2hPending = 0u;
     bool m_hiresScanout = false;              // HR1
     bool m_zeroCopy = false;                  // HR1 prototype (PS2X_PRESENT_ZERO_COPY)
+    bool m_pipeline = false;                  // HR1: PS2X_PGS_PRESENT_PIPELINE=1
+    struct ReadbackSlot
+    {
+        Vulkan::BufferHandle buf;
+        Vulkan::Fence fence;
+        uint32_t w = 0u, h = 0u;
+    };
+    ReadbackSlot m_rb[2];
+    uint32_t m_rbIndex = 0u;
 #if defined(__APPLE__) && defined(PS2X_HAS_PARALLEL_SHADOW)
     ShareSlot m_share[3];
     std::vector<Vulkan::ImageHandle> m_shareGraveyard;
