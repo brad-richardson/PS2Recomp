@@ -828,8 +828,6 @@ void VU1Interpreter::queueAccWrite(uint8_t laneMask, const float value[4], uint3
 void VU1Interpreter::commitReadyPipelines()
 {
     // E57: nothing queued is due yet, so a full scan would change nothing.
-    // (An inline header gate with an out-of-line scan measured ~6 % slower
-    // in the race on the mini: c3 9.67 vs c2 10.28 vsyncs/s.)
     if (m_cycle < m_nextCommitCycle)
         return;
     uint64_t nextReady = ~0ull;
