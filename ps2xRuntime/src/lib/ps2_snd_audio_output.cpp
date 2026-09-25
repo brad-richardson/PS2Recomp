@@ -15,7 +15,7 @@
 
 namespace
 {
-    constexpr uint32_t kSourceRate = 36000u;
+    constexpr uint32_t kSourceRate = 48000u; // SNDDRV output rate (AU9: tag-1 upsampled 3->4)
     constexpr size_t kWavLimitBytes = 200000000u;
 
     struct Output
@@ -171,7 +171,7 @@ bool initialize()
         g_output.stream = LoadAudioStream(g_output.rate, 16, 2);
         if (!IsAudioStreamValid(g_output.stream))
             return false;
-        std::cerr << "[snd-output] 36 kHz stream unavailable; host-side linear resampling to 48 kHz\n";
+        std::cerr << "[snd-output] 48 kHz stream unavailable\n";
     }
     SetAudioStreamCallback(g_output.stream, audioCallback);
     if (const char *wav = std::getenv("PS2X_SOUND_WAV"); wav && *wav)

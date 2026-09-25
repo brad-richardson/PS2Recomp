@@ -4,6 +4,9 @@
 //   PS2X_SND_LOG=<file>    event log (bounded, kMaxLines).
 //   PS2X_SND_DUMP_DIR=<d>  payload dumps (bounded, kMaxDumpBytes).
 //   PS2X_SND_TAG1=<file>   consecutive 0x620-byte tag-1 records (bounded).
+//   PS2X_SND_VOICES=0      music only: skip the SPU voice layer (AU9).
+//   PS2X_SND_MIX_RAW=<f>   guest-time 48 kHz mix, per frame s16 music L/R then
+//                          voices L/R (bounded).
 //
 // SNDDRV protocol (AU2 Part A, local/research/AU2/REPORT.md):
 //   IOP->EE cid 1, +0x10 type: 0 = tick (opt = IOP address the EE DMAs its
@@ -16,6 +19,10 @@
 // While the spike is on, sceSifSetDma calls made from the SND library are
 // captured host-side (keyed by IOP address) instead of being copied into
 // low EE RDRAM.
+//
+// Output (AU9): each tick's tag-1 music goes through SNDDRV's 3->4 upsampler
+// to 512 frames at 48 kHz and is mixed with the SPU voice layer
+// (ps2_snd_spu.h) that the tag-3 record and the cid-0 uploads drive.
 
 #pragma once
 
@@ -23,6 +30,7 @@
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_runtime_macros.h"
+#include "ps2_snd_spu.h"
 
 #include <algorithm>
 #include <array>
@@ -44,6 +52,7 @@ namespace ps2_snd_spike
 inline constexpr uint64_t kMaxLines = 60000ull;
 inline constexpr uint64_t kMaxDumpBytes = 256ull << 20;
 inline constexpr uint64_t kMaxTag1Bytes = 128ull << 20;
+inline constexpr uint64_t kMaxMixRawBytes = 256ull << 20;
 inline constexpr uint64_t kTickCycles = 3145728ull; // 294,912,000 * 384 / 36,000
 inline constexpr uint32_t kPcmFramesPerTick = 384u;
 inline constexpr uint32_t kPcmBytesPerTick = kPcmFramesPerTick * 2u * sizeof(int16_t);
@@ -75,6 +84,12 @@ struct State
     uint64_t ticks = 0, cid0 = 0, dmq = 0, done = 0, setdma = 0, tagbufs = 0;
     uint32_t doneRing = 0;
     std::map<uint32_t, std::vector<uint8_t>> iopMem; // IOP dst -> last payload
+    bool voices = true;
+    FILE *mixRaw = nullptr;
+    uint64_t mixRawBytes = 0;
+    ps2_snd_spu::Spu spu;
+    ps2_snd_spu::Driver driver;
+    ps2_snd_spu::Upsampler34 upLeft, upRight;
 };
 
 struct Tag1PcmView
@@ -121,6 +136,31 @@ inline bool findTag1Pcm(const uint8_t *data, size_t size, Tag1PcmView &view)
     return false;
 }
 
+// The tag-3 voice record (SNDIOP_processtagbuf: {3, length} then the payload).
+inline const uint8_t *findTag3(const uint8_t *data, size_t size)
+{
+    size_t offset = 0;
+    while (data && offset + 8u <= size)
+    {
+        uint32_t tag = 0, length = 0;
+        std::memcpy(&tag, data + offset, 4);
+        if (tag == 6u)
+            return nullptr;
+        if (tag == 0u || tag == 5u)
+        {
+            offset += 16u;
+            continue;
+        }
+        std::memcpy(&length, data + offset + 4u, 4);
+        if (tag == 3u)
+            return length >= ps2_snd_spu::kTag3Bytes && offset + 8u + length <= size ? data + offset + 8u : nullptr;
+        if (tag < 1u || tag > 4u || length > size - offset - 8u)
+            return nullptr;
+        offset += (tag == 1u ? 16u : 8u) + length;
+    }
+    return nullptr;
+}
+
 // One EE-thread producer and one miniaudio callback consumer. Packed atomic
 // frames avoid data races when the producer overwrites an old slot on overflow.
 class PcmRing
@@ -155,6 +195,22 @@ public:
             m_frames[write & (kPcmRingFrames - 1u)].store(frame, std::memory_order_relaxed);
             m_write.store(write + 1u, std::memory_order_release);
         }
+    }
+
+    void pushFrame(uint32_t frame)
+    {
+        const uint64_t write = m_write.load(std::memory_order_relaxed);
+        uint64_t read = m_read.load(std::memory_order_acquire);
+        while (write - read >= kPcmRingFrames)
+        {
+            if (m_read.compare_exchange_weak(read, read + 1u, std::memory_order_acq_rel))
+            {
+                m_overflows.fetch_add(1u, std::memory_order_relaxed);
+                break;
+            }
+        }
+        m_frames[write & (kPcmRingFrames - 1u)].store(frame, std::memory_order_relaxed);
+        m_write.store(write + 1u, std::memory_order_release);
     }
 
     bool pop(uint32_t &frame)
@@ -224,6 +280,10 @@ inline void initLocked(State &s)
         s.dumpDir = d;
     if (const char *p = std::getenv("PS2X_SND_TAG1"); p && *p)
         s.tag1File = std::fopen(p, "wb");
+    if (const char *p = std::getenv("PS2X_SND_VOICES"); p && std::strcmp(p, "0") == 0)
+        s.voices = false;
+    if (const char *p = std::getenv("PS2X_SND_MIX_RAW"); p && *p)
+        s.mixRaw = std::fopen(p, "wb");
     s.enabled = true;
 }
 
@@ -347,6 +407,16 @@ inline void onSoundTick(uint8_t *rdram, uint64_t guestCycle, Queue &&queue)
     {
         wr32(rdram, s.statusAddr + 0x000u, s.serial);
         wr32(rdram, s.statusAddr + 0x23Cu, s.serial);
+        // SNDIOP_updatevoices: per SPU voice the record word and NAX (0 once
+        // the voice has ended); PCSX2 shows 0xFFFFFFFF in the 16 IOP-voice
+        // slots after them.
+        for (uint32_t v = 0; v < ps2_snd_spu::kVoices; ++v)
+        {
+            wr32(rdram, s.statusAddr + ps2_snd_spu::kStatusVoiceBase + 8u * v, s.driver.statusWord(v));
+            wr32(rdram, s.statusAddr + ps2_snd_spu::kStatusVoiceBase + 4u + 8u * v, s.driver.statusNax(v));
+        }
+        for (uint32_t o = 0x1C0u; o < 0x23Cu; o += 8u)
+            wr32(rdram, s.statusAddr + o, 0xFFFFFFFFu);
     }
     writePacket(rdram, kPacketAddr, 0u, kTagbufIopAddr);
     queue(makeHandlerCall(s, kPacketAddr));
@@ -357,6 +427,42 @@ inline void onSoundTick(uint8_t *rdram, uint64_t guestCycle, Queue &&queue)
                   (unsigned long long)s.cid0, (unsigned long long)s.dmq, (unsigned long long)s.done,
                   (unsigned long long)s.setdma, (unsigned long long)s.tagbufs,
                   (unsigned long long)pcmRing().underruns(), (unsigned long long)pcmRing().overflows());
+}
+
+// One sound tick: tag-3 voice updates, 512 frames of SPU voices, the tag-1
+// music upsampled 3->4 (block 1 = left, block 0 = right; AU8), mixed like the
+// SPU2 core chain (music into core 0 with its voices, core 1 voices added).
+inline void mixTickLocked(State &s, const uint8_t *pcm, const uint8_t *tag3)
+{
+    using namespace ps2_snd_spu;
+    int16_t right[kTag1Frames], left[kTag1Frames];
+    std::memcpy(right, pcm, sizeof(right));
+    std::memcpy(left, pcm + sizeof(right), sizeof(left));
+    int32_t music[2 * kTickFrames], dry0[2 * kTickFrames] = {}, dry1[2 * kTickFrames] = {};
+    s.upLeft.run(left, music, 2);
+    s.upRight.run(right, music + 1, 2);
+    if (s.voices && tag3)
+    {
+        s.driver.update(tag3, s.spu);
+        s.spu.render(dry0, dry1, kTickFrames);
+    }
+    int16_t raw[4 * kTickFrames];
+    for (uint32_t i = 0; i < kTickFrames; ++i)
+    {
+        const int16_t l = clamp16(clamp16(music[2 * i] + dry0[2 * i]) + dry1[2 * i]);
+        const int16_t r = clamp16(clamp16(music[2 * i + 1] + dry0[2 * i + 1]) + dry1[2 * i + 1]);
+        pcmRing().pushFrame(static_cast<uint16_t>(l) | (static_cast<uint32_t>(static_cast<uint16_t>(r)) << 16));
+        raw[4 * i] = clamp16(music[2 * i]);
+        raw[4 * i + 1] = clamp16(music[2 * i + 1]);
+        raw[4 * i + 2] = clamp16(dry0[2 * i] + dry1[2 * i]);
+        raw[4 * i + 3] = clamp16(dry0[2 * i + 1] + dry1[2 * i + 1]);
+    }
+    if (s.mixRaw && s.mixRawBytes + sizeof(raw) <= kMaxMixRawBytes &&
+        std::fwrite(raw, 1, sizeof(raw), s.mixRaw) == sizeof(raw))
+    {
+        s.mixRawBytes += sizeof(raw);
+        std::fflush(s.mixRaw);
+    }
 }
 
 // sceSifSetDma (Stubs/SIF.cpp), one descriptor. Returns true when the spike
@@ -379,7 +485,7 @@ inline bool onSetDma(const uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t
         Tag1PcmView view{};
         if (findTag1Pcm(bytes.data(), bytes.size(), view))
         {
-            pcmRing().push(bytes.data() + view.offset, view.size);
+            mixTickLocked(s, bytes.data() + view.offset, findTag3(bytes.data(), bytes.size()));
             const size_t record = view.offset - 16u;
             if (s.tag1File && record + 0x620u <= bytes.size() &&
                 s.tag1Bytes + 0x620u <= kMaxTag1Bytes)
@@ -440,6 +546,7 @@ inline void onSendCmd(uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t cid,
             std::snprintf(name, sizeof(name), "dmq-%06llu-v%llu-spu%06x-%u.bin", (unsigned long long)s.dmq,
                           (unsigned long long)vsync, spuDst, size);
             dumpLocked(s, name, it->second.data() + off, n);
+            s.spu.writeRam(spuDst, it->second.data() + off, n);
         }
     }
     if (id != 0u && s.handler != 0u)

@@ -1,7 +1,9 @@
 #include "MiniTest.h"
 #include "ps2_snd_spike.h"
 
+#include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -95,6 +97,129 @@ void register_ps2_snd_tests()
         t.Equals(args.extraSize, 0x77u, "a6 supplies extra size");
         const SendCmdArgs shortArgs = decodeSendCmdArgs(gpr.data(), 10u);
         t.Equals(shortArgs.packet, 0u, "incomplete register frame is rejected");
+        });
+
+        tc.Run("PS-ADPCM block decode matches hand-computed filter vectors", [](TestCase &t)
+        {
+        using namespace ps2_snd_spu;
+        // Filter 0, shift 0: sample = nibble << 12, low nibble first.
+        uint8_t b0[16] = {0x00, 0x00, 0xF1};
+        int16_t out[28];
+        int32_t p1 = 0, p2 = 0;
+        decodeBlock(b0, out, p1, p2);
+        t.Equals(out[0], int16_t(4096), "nibble 1 at shift 0 is 4096");
+        t.Equals(out[1], int16_t(-4096), "nibble F is -1 << 12");
+        t.Equals(out[2], int16_t(0), "zero nibble with filter 0 stays 0");
+        // Filter 1 (60/64), shift 12: prediction only after a 4096 history.
+        uint8_t b1[16] = {0x1C, 0x00, 0x00};
+        p1 = 4096;
+        p2 = 0;
+        decodeBlock(b1, out, p1, p2);
+        t.Equals(out[0], int16_t(3840), "(60 * 4096 + 32) >> 6");
+        t.Equals(out[1], int16_t(3600), "(60 * 3840 + 32) >> 6");
+        // Filter 2 (115, -52) uses both history samples.
+        uint8_t b2[16] = {0x2C, 0x00, 0x00};
+        p1 = 1000;
+        p2 = 2000;
+        decodeBlock(b2, out, p1, p2);
+        t.Equals(out[0], int16_t((115 * 1000 - 52 * 2000 + 32) >> 6), "filter 2 first sample");
+        });
+
+        tc.Run("SNDDRV envelope: instant attack, 64-sample linear release", [](TestCase &t)
+        {
+        using namespace ps2_snd_spu;
+        Adsr env;
+        env.reg1 = kDriverAdsr1;
+        env.reg2 = kDriverAdsr2;
+        env.attack();
+        int steps = 0;
+        while (env.value < 0x7fff && steps < 100)
+        {
+            env.step();
+            ++steps;
+        }
+        t.Equals(steps, 3, "linear attack, shift 0, step 7 << 11 per sample reaches 0x7fff in 3 samples");
+        for (int i = 0; i < 10; ++i)
+            env.step();
+        t.Equals(env.value, int32_t(0x7fff), "sustain holds at full level");
+        env.release();
+        int rel = 0;
+        while (env.step())
+            ++rel;
+        t.Equals(env.value, int32_t(0), "release reaches zero");
+        t.IsTrue(rel >= 62 && rel <= 64, "release shift 5 is -512 per sample: about 64 samples");
+        });
+
+        tc.Run("3->4 upsampler follows SNDDRV positions and carries history", [](TestCase &t)
+        {
+        using namespace ps2_snd_spu;
+        Upsampler34 up;
+        int16_t ramp[kTag1Frames];
+        for (uint32_t i = 0; i < kTag1Frames; ++i)
+            ramp[i] = static_cast<int16_t>(4 * i);
+        int32_t out[kTickFrames];
+        up.run(ramp, out, 1);
+        t.Equals(out[0], int32_t(0), "j = 0 sits halfway between the (zero) history and x0 = 0");
+        t.Equals(out[1], int32_t(1), "j = 1 is at input position 0.25");
+        t.Equals(out[2], int32_t(4), "j = 2 is exactly x1");
+        t.Equals(out[511], int32_t(4 * 382 + 3), "j = 511 is at position 382.75");
+        up.run(ramp, out, 1);
+        t.Equals(out[0], int32_t((4 * 383) / 2), "the next tick starts from the saved last sample");
+        });
+
+        tc.Run("driver keys a one-shot voice on and reports it ended through NAX", [](TestCase &t)
+        {
+        using namespace ps2_snd_spu;
+        Spu spu;
+        // Two blocks at 0x6000: a loud block, then a loop-end (no repeat) block.
+        uint8_t blocks[32] = {};
+        blocks[0] = 0x00;
+        for (int i = 2; i < 16; ++i)
+            blocks[i] = 0x77; // +7 << 12 on both nibbles
+        blocks[17] = 0x01;
+        spu.writeRam(0x6000u, blocks, sizeof(blocks));
+        std::vector<uint8_t> tag3(kTag3Bytes, 0u);
+        const uint32_t word = (1u << 23) | 0x6000u;
+        std::memcpy(tag3.data() + kTag3VoiceBase + 8u * 5u, &word, 4);
+        const uint16_t pitch = 0x1000u;
+        std::memcpy(tag3.data() + kTag3VoiceBase + 8u * 5u + 4u, &pitch, 2);
+        tag3[kTag3VoiceBase + 8u * 5u + 6u] = 100; // left only
+        Driver drv;
+        drv.update(tag3.data(), spu);
+        t.Equals(drv.keyOns(), uint64_t(1), "one key on");
+        t.Equals(drv.statusNax(5), 0x6000u, "a just-triggered voice reports its start address");
+        int32_t d0[2 * kTickFrames], d1[2 * kTickFrames];
+        spu.render(d0, d1, kTickFrames);
+        int32_t peakL = 0, peakR = 0;
+        for (uint32_t i = 0; i < kTickFrames; ++i)
+        {
+            peakL = std::max(peakL, std::abs(d0[2 * i]));
+            peakR = std::max(peakR, std::abs(d0[2 * i + 1]));
+        }
+        t.IsTrue(peakL > 10000, "voice 5 (core 0) is audible on the left");
+        t.Equals(peakR, int32_t(0), "volume R 0 keeps the right silent");
+        t.IsTrue(!spu.voice(5).on, "the loop-end block without repeat stops the voice");
+        t.Equals(spu.nax(5), kDriverLsax, "NAX lands on SNDDRV's LSAX");
+        drv.update(tag3.data(), spu); // same word: no retrigger
+        t.Equals(drv.keyOns(), uint64_t(1), "an unchanged word does not retrigger");
+        t.Equals(drv.statusNax(5), 0u, "a finished voice reports NAX 0");
+        t.Equals(drv.statusWord(5), word, "the record word is echoed");
+        });
+
+        tc.Run("tag-3 record is found between tag 0 and tag 1", [](TestCase &t)
+        {
+        using namespace ps2_snd_spike;
+        std::vector<uint8_t> data(0x8F0u, 0u);
+        putU32(data, 0x10u, 3u);
+        putU32(data, 0x14u, ps2_snd_spu::kTag3Bytes);
+        putU32(data, 0x2C0u, 1u);
+        putU32(data, 0x2C4u, kPcmBytesPerTick);
+        putU32(data, 0x8D0u, 5u);
+        putU32(data, 0x8E0u, 6u);
+        t.IsTrue(findTag3(data.data(), data.size()) == data.data() + 0x18u, "payload starts after {3, length}");
+        Tag1PcmView view{};
+        t.IsTrue(findTag1Pcm(data.data(), data.size(), view), "tag 1 still parses");
+        t.Equals(view.offset, size_t(0x2D0u), "tag-1 PCM after its 16-byte header");
         });
     });
 }
