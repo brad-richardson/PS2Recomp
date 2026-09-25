@@ -41,6 +41,13 @@ namespace
         std::memcpy(dst.data() + pos, &value, sizeof(uint64_t));
     }
 
+    uint32_t vu1LaneU32(PS2Memory &mem, uint32_t row, uint32_t lane)
+    {
+        uint32_t value = 0u;
+        std::memcpy(&value, mem.getVU1Data() + row * 16u + lane * 4u, sizeof(value));
+        return value;
+    }
+
     uint64_t makeDmaTag(uint16_t qwc, uint8_t id, uint32_t addr, bool irq = false)
     {
         return static_cast<uint64_t>(qwc) |
@@ -2459,6 +2466,256 @@ void register_ps2_memory_tests()
                      "SPR_TO should advance SADR with 14-bit wraparound");
             t.IsTrue((mem.readIORegister(kSprTo + 0x00u) & 0x100u) == 0u, "SPR_TO should report STR clear once done");
             t.IsTrue((mem.readIORegister(kDStat) & (1u << 9)) != 0u, "SPR_TO completion should set D_STAT CIS bit 9");
+        });
+
+        // UV1 Part 2: PCSX2 V2/V3 lane rules. V2 writes v1v0v1v0
+        // (Vif_Unpack.cpp UNPACK_V2 :76-83), except V2-32 zeroes w when the
+        // unpack data starts QW-aligned (x86/Vif_UnpackSSE.cpp xUPK_V2_32
+        // :139-151). V3 takes w from the next source vector's first element,
+        // 0 when that read crosses a source QW boundary or runs past the
+        // buffer (xUPK_V3_* :203-238). Sentinel pre-fill proves every
+        // asserted lane was written, not left stale.
+        tc.Run("UV1 V2_32 unaligned replicates v1v0v1v0", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V2_32 (opcode 0x64), NUM=2, addr=0. Data starts at pos 4
+            // (not QW-aligned) so both vectors replicate fully.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x64u, 2u, 0x0000u));
+            appendU32(packet, 0x11111111u);
+            appendU32(packet, 0x22222222u);
+            appendU32(packet, 0x33333333u);
+            appendU32(packet, 0x44444444u);
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x11111111u, "row0 x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0x22222222u, "row0 y");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x11111111u, "row0 z replicates x");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x22222222u, "row0 w replicates y");
+            t.Equals(vu1LaneU32(mem, 1u, 0u), 0x33333333u, "row1 x");
+            t.Equals(vu1LaneU32(mem, 1u, 1u), 0x44444444u, "row1 y");
+            t.Equals(vu1LaneU32(mem, 1u, 2u), 0x33333333u, "row1 z replicates x");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0x44444444u, "row1 w replicates y");
+        });
+
+        tc.Run("UV1 V2_32 QW-aligned zeroes w", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // Three NOPs pad the UNPACK data start to pos 16 (QW-aligned):
+            // z still replicates x but w is zero (xUPK_V2_32).
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x64u, 2u, 0x0000u));
+            appendU32(packet, 0x11111111u);
+            appendU32(packet, 0x22222222u);
+            appendU32(packet, 0x33333333u);
+            appendU32(packet, 0x44444444u);
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x11111111u, "row0 z replicates x");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000000u, "row0 w is zero when aligned");
+            t.Equals(vu1LaneU32(mem, 1u, 2u), 0x33333333u, "row1 z replicates x");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0x00000000u, "row1 w is zero when aligned");
+        });
+
+        tc.Run("UV1 V2_16 replicates with sign extension", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V2_16 (opcode 0x65), NUM=1. Data start is QW-aligned
+            // (3 NOPs) to lock that the w=0 rule is V2-32-only.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x65u, 1u, 0x0000u));
+            const uint16_t comps[2] = {0x00FFu, 0xFF01u};
+            size_t pos = packet.size();
+            packet.resize(pos + sizeof(comps));
+            std::memcpy(packet.data() + pos, comps, sizeof(comps));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x000000FFu, "x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0xFFFFFF01u, "y sign-extended");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x000000FFu, "z replicates x");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0xFFFFFF01u, "w replicates y even when aligned");
+        });
+
+        tc.Run("UV1 V2_8 replicates with sign extension", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V2_8 (opcode 0x66), NUM=1, unaligned data start.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x66u, 1u, 0x0000u));
+            packet.push_back(0x7Fu);
+            packet.push_back(0x80u);
+            packet.push_back(0x00u);
+            packet.push_back(0x00u);
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x0000007Fu, "x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0xFFFFFF80u, "y sign-extended");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x0000007Fu, "z replicates x");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0xFFFFFF80u, "w replicates y");
+        });
+
+        tc.Run("UV1 V3_32 w reads next vector", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V3_32 (opcode 0x68), NUM=2, then a MARK trailer word.
+            // Row0 w = vec1.x; row1 (last) w = the trailer word. Reads at
+            // stream offsets 16 and 28 cross no QW boundary.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x68u, 2u, 0x0000u));
+            appendU32(packet, 0x10101010u);
+            appendU32(packet, 0x20202020u);
+            appendU32(packet, 0x30303030u);
+            appendU32(packet, 0x40404040u);
+            appendU32(packet, 0x50505050u);
+            appendU32(packet, 0x60606060u);
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0xBEEFu));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x10101010u, "row0 x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0x20202020u, "row0 y");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x30303030u, "row0 z");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x40404040u, "row0 w reads vec1.x");
+            t.Equals(vu1LaneU32(mem, 1u, 0u), 0x40404040u, "row1 x");
+            t.Equals(vu1LaneU32(mem, 1u, 1u), 0x50505050u, "row1 y");
+            t.Equals(vu1LaneU32(mem, 1u, 2u), 0x60606060u, "row1 z");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0x0700BEEFu, "row1 w reads trailer word");
+        });
+
+        tc.Run("UV1 V3_32 last vector at buffer end zeroes w", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // NUM=1, exact-size packet: the w-read at [16,20) runs past the
+            // 16-byte buffer, so w is 0.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x68u, 1u, 0x0000u));
+            appendU32(packet, 0x10101010u);
+            appendU32(packet, 0x20202020u);
+            appendU32(packet, 0x30303030u);
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x30303030u, "z");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000000u, "w is zero past buffer end");
+        });
+
+        tc.Run("UV1 V3_16 w reads next vector with sign extension", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V3_16 (opcode 0x69), NUM=2, then a MARK trailer.
+            // Row0 w = vec1[0]; row1 w = the trailer's low u16 sign-extended.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x69u, 2u, 0x0000u));
+            const uint16_t comps[6] = {0x0001u, 0x00FFu, 0xFF02u, 0x0003u, 0x0004u, 0x0005u};
+            size_t pos = packet.size();
+            packet.resize(pos + sizeof(comps));
+            std::memcpy(packet.data() + pos, comps, sizeof(comps));
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0xBEEFu));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x00000001u, "row0 x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0x000000FFu, "row0 y");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0xFFFFFF02u, "row0 z sign-extended");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000003u, "row0 w reads vec1[0]");
+            t.Equals(vu1LaneU32(mem, 1u, 2u), 0x00000005u, "row1 z");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0xFFFFBEEFu, "row1 w reads trailer u16 sign-extended");
+        });
+
+        tc.Run("UV1 V3_16 last vector at buffer end zeroes w", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // NUM=2, exact-size packet (16 bytes): vec1's w-read at [16,18)
+            // runs past the buffer, so w is 0; vec0 still reads vec1[0].
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x69u, 2u, 0x0000u));
+            const uint16_t comps[6] = {0x0001u, 0x00FFu, 0xFF02u, 0x0003u, 0x0004u, 0x0005u};
+            size_t pos = packet.size();
+            packet.resize(pos + sizeof(comps));
+            std::memcpy(packet.data() + pos, comps, sizeof(comps));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000003u, "row0 w reads vec1[0]");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0x00000000u, "row1 w is zero past buffer end");
+        });
+
+        tc.Run("UV1 V3_8 w reads next vector with sign extension", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V3_8 (opcode 0x6A), NUM=2. totalBytes rounds 6 up to 8,
+            // so the layout is code + vec0 + vec1 + 2 pad bytes + MARK.
+            // Row0 w = vec1[0]; row1 w = pad[0] sign-extended.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Au, 2u, 0x0000u));
+            packet.push_back(0x01u);
+            packet.push_back(0x7Fu);
+            packet.push_back(0x80u);
+            packet.push_back(0x02u);
+            packet.push_back(0x03u);
+            packet.push_back(0x04u);
+            packet.push_back(0xCDu);
+            packet.push_back(0xCDu);
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0x0000u));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x00000001u, "row0 x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0x0000007Fu, "row0 y");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0xFFFFFF80u, "row0 z sign-extended");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000002u, "row0 w reads vec1[0]");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0xFFFFFFCDu, "row1 w reads pad byte sign-extended");
+        });
+
+        tc.Run("UV1 V3_8 last vector at buffer end zeroes w", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // NUM=4, exact-size packet (16 bytes): vec3's w-read at [16,17)
+            // runs past the buffer, so w is 0; the rest read the next byte.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Au, 4u, 0x0000u));
+            const uint8_t comps[12] = {0x10u, 0x11u, 0x12u, 0x20u, 0x21u, 0x22u,
+                                       0x30u, 0x31u, 0x32u, 0x40u, 0x41u, 0x42u};
+            size_t pos = packet.size();
+            packet.resize(pos + sizeof(comps));
+            std::memcpy(packet.data() + pos, comps, sizeof(comps));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000020u, "row0 w reads vec1[0]");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0x00000030u, "row1 w reads vec2[0]");
+            t.Equals(vu1LaneU32(mem, 2u, 3u), 0x00000040u, "row2 w reads vec3[0]");
+            t.Equals(vu1LaneU32(mem, 3u, 3u), 0x00000000u, "row3 w is zero past buffer end");
         });
     });
 }

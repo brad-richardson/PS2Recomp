@@ -856,6 +856,14 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
 
             const bool zeroExtend = (imm & 0x4000u) != 0u;
 
+            // UV1 Part 2: stream phase of this UNPACK's data start. Buffers
+            // concatenate whole QW payloads, so pos&15 is the VIF stream QW
+            // phase iff the first payload starts guest-QW-aligned (true for
+            // the game's QW-granular VIF chains; assumed here). PCSX2 tracks
+            // the same phase as start_aligned (Vif_Unpack.cpp:248).
+            const uint32_t uv1DataStartPos = pos;
+            const bool uv1UnpackQwAligned = ((uv1DataStartPos & 15u) == 0u);
+
             // UV1: default-off per-vsync UNPACK format census.
             ps2_uv1_vif_fmt::note(gs_regs.vsyncTick.load(std::memory_order_relaxed),
                                   opcode, zeroExtend, vif1_regs.mode & 3u,
@@ -896,9 +904,11 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                     bool decoded = false;
 
                     const uint8_t *srcVec = nullptr;
+                    uint32_t uv1MySrc = 0u;
                     if (sourceAvailable && srcIndex < sourceVectorCount)
                     {
                         srcVec = srcBase + srcIndex * bytesPerVector;
+                        uv1MySrc = srcIndex;
                         ++srcIndex;
                         decoded = true;
                     }
@@ -1000,6 +1010,59 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                     else
                     {
                         handledFormat = false;
+                    }
+
+                    // UV1 Part 2: PCSX2 V2/V3 lane rules. V2 writes v1v0v1v0
+                    // (Vif_Unpack.cpp UNPACK_V2 :76-83; xUPK_V2_* in
+                    // x86/Vif_UnpackSSE.cpp :139-201), except V2-32 zeroes w
+                    // when the unpack data starts QW-aligned (xUPK_V2_32
+                    // :139-151; PCSX2 hardcodes the aligned case for every
+                    // non-V3-16 type via key1, x86/Vif_Dynarec.cpp :471-473 —
+                    // here the real stream phase above is evaluated). V3
+                    // takes w from the next source vector's first element, 0
+                    // when that read crosses a source QW boundary (xUPK_V3_*
+                    // :203-238) or runs past the buffer end. Mask/mode
+                    // handling below is unchanged and applies to the new
+                    // lanes exactly as PCSX2's writeXYZW does (:24-59).
+                    if (decoded && handledFormat && (components == 2 || components == 3))
+                    {
+                        if (components == 2)
+                        {
+                            decompressed[2] = decompressed[0];
+                            if (vl == 0u && uv1UnpackQwAligned)
+                                decompressed[3] = 0u;
+                            else
+                                decompressed[3] = decompressed[1];
+                        }
+                        else
+                        {
+                            const uint32_t uv1ReadLen = (vl == 0u) ? 4u : ((vl == 1u) ? 2u : 1u);
+                            const uint64_t uv1ReadOff = static_cast<uint64_t>(uv1MySrc + 1u) *
+                                                        static_cast<uint64_t>(bytesPerVector);
+                            const uint64_t uv1Avail = static_cast<uint64_t>(sizeBytes - uv1DataStartPos);
+                            const uint32_t uv1Phase = static_cast<uint32_t>(
+                                (static_cast<uint64_t>(uv1DataStartPos) + uv1ReadOff) & 15u);
+                            uint32_t uv1W = 0u;
+                            if (uv1Phase + uv1ReadLen <= 16u && uv1ReadOff + uv1ReadLen <= uv1Avail)
+                            {
+                                const uint8_t *uv1Next = srcBase + uv1ReadOff;
+                                if (vl == 0u)
+                                {
+                                    std::memcpy(&uv1W, uv1Next, sizeof(uv1W));
+                                }
+                                else if (vl == 1u)
+                                {
+                                    uint16_t uv1Raw = 0u;
+                                    std::memcpy(&uv1Raw, uv1Next, sizeof(uv1Raw));
+                                    uv1W = extend16(uv1Raw);
+                                }
+                                else
+                                {
+                                    uv1W = extend8(uv1Next[0]);
+                                }
+                            }
+                            decompressed[3] = uv1W;
+                        }
                     }
 
                     // Unknown compressed format fallback: preserve legacy raw-copy behavior.
