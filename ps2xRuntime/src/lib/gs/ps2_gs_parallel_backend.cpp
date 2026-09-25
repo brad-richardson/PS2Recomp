@@ -250,6 +250,12 @@ public:
         vsync.dst_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         vsync.dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         vsync.adapt_to_internal_horizontal_resolution = true;
+        // ST1 (local-only): SSX 3 renders a full frame every vsync into one
+        // buffer (SMODE2 INT=1/FFMD=0, single circuit, DY even). The field
+        // weave shows the previous tick's lines on alternating rows
+        // (stripes on motion, phase flips each tick), so scan the full
+        // buffer as-is like the CPU weave instead of deinterlacing.
+        vsync.force_progressive = true;
         m_iface->flush();
         ParallelGS::ScanoutResult shot = m_iface->vsync(vsync);
         Counters &c = counters();
