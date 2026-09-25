@@ -101,6 +101,11 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
                      static_cast<unsigned long long>(m_vbDirectFlagWrites),
                      static_cast<unsigned long long>(m_vbQueuedFlagWrites),
                      flagWrites != 0u ? static_cast<double>(m_vbDirectFlagWrites) / static_cast<double>(flagWrites) : 0.0);
+        const uint64_t vfWrites = m_vbDirectVfWrites + m_vbQueuedVfWrites;
+        std::fprintf(stderr, "[vu1-direct] vf_direct=%llu vf_queued=%llu vf_direct_share=%.4f\n",
+                     static_cast<unsigned long long>(m_vbDirectVfWrites),
+                     static_cast<unsigned long long>(m_vbQueuedVfWrites),
+                     vfWrites != 0u ? static_cast<double>(m_vbDirectVfWrites) / static_cast<double>(vfWrites) : 0.0);
 #endif
     }
     const uint64_t generation = memory->getVU1CodeGeneration();

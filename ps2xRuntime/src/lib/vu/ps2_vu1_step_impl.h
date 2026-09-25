@@ -364,6 +364,10 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
             decoded.upperUsage.vfLatency != 0u
                 ? decoded.upperUsage.vfLatency
                 : decoded.upperUsage.latency;
+#if PS2X_ENABLE_DET_HASH_TAP
+        if (m_unit == Unit::VU1)
+            ++(directUpperVf ? m_vbDirectVfWrites : m_vbQueuedVfWrites);
+#endif
         if (directUpperVf)
             directVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
         else
@@ -376,6 +380,10 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
         const uint32_t latency = decoded.lowerUsage.vfLatency != 0u
                                      ? decoded.lowerUsage.vfLatency
                                      : decoded.lowerUsage.latency;
+#if PS2X_ENABLE_DET_HASH_TAP
+        if (m_unit == Unit::VU1)
+            ++(directLowerVf ? m_vbDirectVfWrites : m_vbQueuedVfWrites);
+#endif
         if (directLowerVf)
             directVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
         else

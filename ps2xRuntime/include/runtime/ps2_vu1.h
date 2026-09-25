@@ -494,6 +494,8 @@ private:
     uint64_t m_vbQueuedCycles = 0;
     uint64_t m_vbDirectFlagWrites = 0;
     uint64_t m_vbQueuedFlagWrites = 0;
+    uint64_t m_vbDirectVfWrites = 0;
+    uint64_t m_vbQueuedVfWrites = 0;
 #endif
     void queueVfWrite(uint8_t reg, uint8_t laneMask, const float value[4], uint32_t latency);
     void queueViWrite(uint8_t reg, int32_t value, uint32_t latency);
