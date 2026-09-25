@@ -2167,6 +2167,9 @@ void register_ps2_vu1_tests()
                     }
                 }
             }
+            std::fprintf(stderr, "[vr2-diff] images %u programs %u runs %u generated_cycles %llu mismatches %u\n",
+                         vu1_fixture::kImageCount, programsRun, runs,
+                         static_cast<unsigned long long>(generatedCycles), mismatches);
             t.Equals(mismatches, 0u, "generated pairs and the queued interpreter agree at every cut");
             t.IsTrue(programsRun > 200u, "both fixture images ran");
             t.IsTrue(runs > 50000u, "differential covered many cuts");
