@@ -13,11 +13,13 @@
 #include "ps2_vu1_lower_impl.h"
 
 // A generated pair hands off to the next one with a guaranteed tail call, so
-// a chain of pairs never grows the stack.
+// a chain of pairs never grows the stack. This header is included only by
+// generated images, so a compiler without musttail must fail here rather
+// than silently emit nesting chains (Odin S1 stack overflow).
 #if defined(__clang__)
 #define PS2X_VU1_MUSTTAIL [[clang::musttail]]
 #else
-#define PS2X_VU1_MUSTTAIL
+#error "Generated VU1 images require [[clang::musttail]]; plain tail calls nest one frame per pair"
 #endif
 
 #endif

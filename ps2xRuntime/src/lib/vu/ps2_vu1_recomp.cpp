@@ -184,7 +184,10 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
             << unsigned(d.upperVfShadowReg) << "," << unsigned(d.suppressedLowerVf) << "};\n";
         out << "    static bool f" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n"
             << "        if (vu.issuePair<true>(d" << label << ", c))\n            return true;\n"
-            << "        return next(vu, c);\n    }\n";
+            // F4-2b: the handoff must be a *guaranteed* tail call (like next()'s
+            // table call above). A plain return here nests one frame per pair
+            // and overflows small stacks (Odin S1: 512 nested f-frames).
+            << "        PS2X_VU1_MUSTTAIL return next(vu, c);\n    }\n";
     }
     out << "};\n\nconst VU1::RecompPairFn VU1RecompImage<" << hashText << ">::kPairs[" << pairCount << "] = {\n";
     for (uint32_t index = 0; index < pairCount; ++index)

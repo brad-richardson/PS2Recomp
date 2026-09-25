@@ -43,6 +43,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <chrono>
 #include <cstdio>
@@ -51,6 +52,9 @@
 #include <unordered_map>
 #include <sstream>
 #include <vector>
+#if defined(__unix__) || defined(__APPLE__)
+#include <pthread.h>
+#endif
 
 namespace ps2_stubs
 {
@@ -3807,8 +3811,19 @@ void PS2Runtime::run()
 
     std::atomic<bool> gameThreadFinished{false};
 
-    std::thread gameThread([&]()
-                           {
+    // F4-2b: PS2X_GAME_THREAD_STACK_KB=N (default-off test knob) creates the
+    // game thread with an N-KiB stack, to prove the VU1 pair chain is flat:
+    // nesting chains overflow small stacks, tail-call chains don't care.
+    // Unset/empty/0 = plain std::thread exactly as before.
+    const long gameStackKb = [] {
+        const char *env = std::getenv("PS2X_GAME_THREAD_STACK_KB");
+        if (env == nullptr || env[0] == '\0')
+            return 0L;
+        return std::strtol(env, nullptr, 10);
+    }();
+
+    std::function<void()> gameMain = [&]()
+    {
         ThreadNaming::SetCurrentThreadName("GameThread");
         // N11: PS2X_GAME_THREAD_CPUS="6,7" pins this thread to itself (no
         // privilege needed); unset/empty = no change. Unconditional stderr
@@ -3837,7 +3852,44 @@ void PS2Runtime::run()
         {
             std::cerr << "Error during program execution: unknown exception" << std::endl;
         }
-        gameThreadFinished.store(true, std::memory_order_release); });
+        gameThreadFinished.store(true, std::memory_order_release);
+    };
+
+    bool gameUsesPthread = false;
+    std::thread gameThread;
+#if defined(__unix__) || defined(__APPLE__)
+    pthread_t gamePthread;
+    if (gameStackKb > 0)
+    {
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        const bool attrOk =
+            pthread_attr_setstacksize(&attr, static_cast<size_t>(gameStackKb) * 1024u) == 0;
+        const bool createOk =
+            attrOk &&
+            pthread_create(&gamePthread, &attr,
+                           +[](void *p) -> void * {
+                (*static_cast<std::function<void()> *>(p))();
+                return nullptr;
+            },
+                           &gameMain) == 0;
+        pthread_attr_destroy(&attr);
+        if (createOk)
+        {
+            gameUsesPthread = true;
+            std::fprintf(stderr, "[stack] game thread stack=%ld KiB (PS2X_GAME_THREAD_STACK_KB)\n",
+                         gameStackKb);
+        }
+        else
+            std::fprintf(stderr, "[stack] PS2X_GAME_THREAD_STACK_KB=%ld rejected; using default stack\n",
+                         gameStackKb);
+    }
+#else
+    if (gameStackKb > 0)
+        std::fprintf(stderr, "[stack] PS2X_GAME_THREAD_STACK_KB unsupported on this platform; using default\n");
+#endif
+    if (!gameUsesPthread)
+        gameThread = std::thread(std::move(gameMain));
 
     uint64_t tick = 0;
     // I25: PS2X_VSYNC_RATE_LOG=1 prints guest vsyncs per wall second every
@@ -4027,7 +4079,13 @@ void PS2Runtime::run()
     }
 
     requestStop();
-    if (gameThread.joinable())
+    if (gameUsesPthread)
+    {
+#if defined(__unix__) || defined(__APPLE__)
+        pthread_join(gamePthread, nullptr);
+#endif
+    }
+    else if (gameThread.joinable())
     {
         gameThread.join();
     }

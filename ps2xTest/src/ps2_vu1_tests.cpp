@@ -8,7 +8,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <sstream>
 #include <vector>
 
 namespace
@@ -1774,6 +1777,48 @@ void register_ps2_vu1_tests()
                      "reserved opcode should retain the diagnostic PC");
             t.Equals(vu1.state().vi[1], 0,
                      "instruction following a reserved opcode must not execute");
+        });
+
+        tc.Run("emitted VU1 pairs hand off with a guaranteed tail call (F4-2b)", [](TestCase &t)
+        {
+            // Regression test for the Odin S1 stack overflow: every generated
+            // pair function must end in PS2X_VU1_MUSTTAIL, or deep chains nest
+            // one ordinary-call frame per pair (512+ frames blew the 1 MB
+            // GameThread stack). next() itself is musttail into the table.
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code, 0u, makeVuIaddiu(1u, 0u, 7), kVuUpperNop);
+            writeVuInstructionPair(fx.code, 8u, makeVuIaddiu(2u, 0u, 3), kVuUpperNop);
+            const std::filesystem::path tmp =
+                std::filesystem::temp_directory_path() / "ps2_f4_2b_emit_test.cpp";
+            t.IsTrue(VU1Interpreter::emitRecompSource(fx.code, 16u, 0x12345678ull, tmp.string()),
+                     "emitter should succeed");
+            std::ifstream in(tmp, std::ios::binary);
+            std::ostringstream text;
+            text << in.rdbuf();
+            in.close();
+            std::filesystem::remove(tmp);
+
+            // "return next(vu, c);" also matches inside the musttail line, so
+            // must == plain means every handoff is a guaranteed tail call.
+            const std::string &s = text.str();
+            size_t plain = 0, must = 0, pos = 0;
+            const char *kPlain = "return next(vu, c);";
+            const char *kMust = "PS2X_VU1_MUSTTAIL return next(vu, c);";
+            while ((pos = s.find(kPlain, pos)) != std::string::npos)
+            {
+                ++plain;
+                pos += 1;
+            }
+            pos = 0;
+            while ((pos = s.find(kMust, pos)) != std::string::npos)
+            {
+                ++must;
+                pos += 1;
+            }
+            t.Equals(plain, static_cast<size_t>(2u), "both valid pairs should emit handoffs");
+            t.Equals(must, plain, "every pair handoff must be a guaranteed tail call");
         });
     });
 }
