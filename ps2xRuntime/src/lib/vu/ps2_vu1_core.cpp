@@ -348,11 +348,12 @@ void VU1Interpreter::queueFsset(uint16_t immediate)
 void VU1Interpreter::queueClip(uint32_t clip)
 {
     m_workingClip = ((m_workingClip << 6) | (clip & 0x3Fu)) & 0xFFFFFFu;
+    const bool directFlags = directFlagsNow();
 #if PS2X_ENABLE_DET_HASH_TAP
     if (m_unit == Unit::VU1)
-        ++(m_directFlags ? m_vbDirectFlagWrites : m_vbQueuedFlagWrites);
+        ++(directFlags ? m_vbDirectFlagWrites : m_vbQueuedFlagWrites);
 #endif
-    if (m_directFlags)
+    if (directFlags)
     {
         if (m_flagValidMask != 0u)
             demoteQueuedFlags(false, true);

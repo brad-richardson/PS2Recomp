@@ -269,11 +269,12 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::updateFmacFlags(const uint8_t
     }
 
     // VB1: the flag commit at issue (see issuePair's m_directFlags guard).
+    const bool directFlags = directFlagsNow();
 #if PS2X_ENABLE_DET_HASH_TAP
     if (m_unit == Unit::VU1)
-        ++(m_directFlags ? m_vbDirectFlagWrites : m_vbQueuedFlagWrites);
+        ++(directFlags ? m_vbDirectFlagWrites : m_vbQueuedFlagWrites);
 #endif
-    if (m_directFlags)
+    if (directFlags)
     {
         if (m_flagValidMask != 0u)
             demoteQueuedFlags(true, false);

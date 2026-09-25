@@ -183,6 +183,15 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::flagQueueAllowsDirect() const
     return true;
 }
 
+// VR2: evaluated where an FMAC/CLIP flag write happens (at most once per
+// pair, before any lower op of the pair queues a flag entry), so pairs without
+// a flag write never load m_flagValidMask. Same value as at pair start: only
+// the stall's commits change the flag queue before the upper executes.
+PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::directFlagsNow() const
+{
+    return m_directFlags && (m_flagValidMask == 0u || flagQueueAllowsDirect());
+}
+
 PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::demoteQueuedFlags(bool macStatus, bool clip)
 {
     for (uint32_t pending = m_flagValidMask; pending != 0u; pending &= pending - 1u)
@@ -257,7 +266,8 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     // VB1: commit this pair's writes at issue when they land inside the
     // budget (all within kDirectMaxLatency). VF writes also need the static
     // map's no-supersede bit, VI writes latency 1 (ILW/ILWR stay queued),
-    // flag writes the map's no-reader bit.
+    // flag writes the map's no-reader bit and no queued FSSET
+    // (directFlagsNow).
     const bool direct = m_directRunOk && m_cycle + kDirectMaxLatency <= ctx.budgetEnd;
     const uint8_t directMap = direct && m_directFlagSafe != nullptr ? m_directFlagSafe[m_state.pc >> 3] : 0u;
     const bool directUpperVf = (directMap & kDirectMapUpperVf) != 0u;
@@ -266,8 +276,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
                           (decoded.lowerUsage.viLatency != 0u ? decoded.lowerUsage.viLatency
                                                               : decoded.lowerUsage.latency) <= 1u;
     m_directStores = direct;
-    m_directFlags = (directMap & kDirectMapFlags) != 0u &&
-                    (m_flagValidMask == 0u || flagQueueAllowsDirect());
+    m_directFlags = (directMap & kDirectMapFlags) != 0u;
 
     // E37: pre-exec snapshot for the pair line (post-stall state). VR1: the
     // snapshot lives in members, written and read only while m_entryArmed

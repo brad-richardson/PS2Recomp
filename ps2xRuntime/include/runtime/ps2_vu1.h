@@ -425,13 +425,17 @@ private:
     bool m_directRunOk = false;
     int m_directOverride = -1;
     bool m_directStores = false;
-    bool m_directFlags = false;
+    bool m_directFlags = false; // VR2: the pair's map bit; the queue check is at the flag write
     uint64_t m_directPendingUntil = 0;
     const uint8_t *m_directFlagSafe = nullptr;
     std::vector<uint8_t> m_directFlagMap; // untracked code (tests): rebuilt per run
     void noteDirect(uint64_t readyCycle)
     {
-        if (readyCycle > m_directPendingUntil)
+        // VR2: every direct write issues at m_cycle and lands within
+        // kDirectMaxLatency, so one landing at m_cycle + kDirectMaxLatency is at
+        // or past every earlier one: stored without the compare (the test
+        // folds to a constant where the latency is one, as in generated pairs).
+        if (readyCycle == m_cycle + kDirectMaxLatency || readyCycle > m_directPendingUntil)
             m_directPendingUntil = readyCycle;
     }
     static bool directCommitEnabled();
@@ -447,6 +451,7 @@ private:
     void directViWrite(uint8_t reg, int32_t value, uint32_t latency);
     void directAccWrite(uint8_t laneMask, const float value[4], uint32_t latency);
     bool flagQueueAllowsDirect() const;
+    bool directFlagsNow() const;
     void demoteQueuedFlags(bool macStatus, bool clip);
     void recordEntryPair(uint32_t pc, uint32_t lo, uint32_t up,
                          const uint8_t *vuData, uint32_t dataSize,
