@@ -26,6 +26,8 @@
 #include <cstring>
 #include <vector>
 
+struct SndSavestate; // SS1 save states (ps2_savestate.cpp)
+
 namespace ps2_snd_spu
 {
 
@@ -186,6 +188,8 @@ inline int32_t volumeValue(uint16_t reg)
 
 class Spu
 {
+    friend struct ::SndSavestate;
+
 public:
     Spu() : m_ram(kRamBytes, 0) {}
 
@@ -382,6 +386,8 @@ private:
 // u16 pitch, s8 volume L, s8 volume R), plus the EE status slots it fills.
 class Driver
 {
+    friend struct ::SndSavestate;
+
 public:
     void update(const uint8_t *tag3, Spu &spu)
     {
@@ -464,6 +470,8 @@ private:
 // 0.75 j - 0.5 (the previous tick's last sample is position -1). AU8 E7.
 class Upsampler34
 {
+    friend struct ::SndSavestate;
+
 public:
     void run(const int16_t *in, int32_t *out, size_t outStride)
     {

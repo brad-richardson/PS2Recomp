@@ -75,11 +75,21 @@ using EeWaitPayload = std::variant<std::monostate,
                                    EeVSyncWait,
                                    EeExternalWait>;
 
+// SS1 save states: names a completion closure so a restored run can rebuild
+// it (ps2_savestate::registerCompletionFactory). kind 0 = untagged, which
+// defers a save while that closure is live.
+struct EeCompletionTag
+{
+    uint32_t kind = 0;
+    uint32_t args[4] = {};
+};
+
 struct EeWaitState
 {
     EeWaitReason reason = EeWaitReason::None;
     EeWaitPayload payload{};
     std::function<void(R5900Context &)> completion;
+    EeCompletionTag tag{};
 };
 
 enum class GuestInvocationKind : uint8_t
@@ -122,6 +132,7 @@ struct GuestThread
     uint32_t tlsBase = 0;
     EeWaitState wait{};
     std::function<void(R5900Context &)> resumeCompletion;
+    EeCompletionTag resumeTag{};
     std::vector<GuestInvocation> invocations;
 
     [[nodiscard]] R5900Context &activeContext()
@@ -256,6 +267,7 @@ struct EeThreadCreateParams
 class EeScheduler
 {
     friend struct EeSchedulerTestAccess;
+    friend struct EeSchedulerSavestate;
 public:
     static constexpr int kMainThreadId = 1;
     static constexpr int kFirstThreadId = 2;
@@ -344,6 +356,9 @@ public:
     uint32_t setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp);
 
     [[noreturn]] void waitVSync(uint64_t afterTick, int fixedResult = -1, std::function<void(R5900Context &)> completion = {});
+    // SS1: same, with a tag that lets a save state rebuild the completion.
+    [[noreturn]] void waitVSyncTagged(uint64_t afterTick, int fixedResult, std::function<void(R5900Context &)> completion,
+                                      EeCompletionTag tag);
     void completeVSync(uint64_t tick);
     void completeExternalWait(uint32_t type, uint64_t token, int result);
     [[noreturn]] void waitExternal(EeWaitReason reason, uint32_t type, uint64_t token, std::function<void(R5900Context &)> completion = {});

@@ -1568,3 +1568,45 @@ namespace ps2_stubs
         setReturnS32(ctx, 1);
     }
 }
+
+// SS1 save states: memory-card HLE state. Open card files are not captured
+// (refused); the card directory on disk travels with the save file.
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    void mcSavestateSave(ps2_savestate::Writer &w)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        for (int32_t v : {g_mcNextFd, g_mcLastCmd, g_mcLastResult, g_cvMcFileCursor})
+            w.pod(v);
+        w.b(g_mcCommandPending);
+        for (const auto &port : g_mcPorts)
+        {
+            w.str(port.currentDir);
+            w.b(port.formatted);
+        }
+    }
+    bool mcSavestateLoad(ps2_savestate::Reader &r)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        for (int32_t *v : {&g_mcNextFd, &g_mcLastCmd, &g_mcLastResult, &g_cvMcFileCursor})
+            r.pod(*v);
+        g_mcCommandPending = r.b();
+        for (auto &port : g_mcPorts)
+        {
+            port.currentDir = r.str();
+            port.formatted = r.b();
+        }
+        return r.ok();
+    }
+    std::string mcSavestateReady()
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        return g_mcFiles.empty() ? std::string() : std::string("memory-card files open");
+    }
+    const bool kMcSavestateRegistered =
+        ps2_savestate::registerSection("stub:mc", {1u, &mcSavestateSave, &mcSavestateLoad, &mcSavestateReady});
+}

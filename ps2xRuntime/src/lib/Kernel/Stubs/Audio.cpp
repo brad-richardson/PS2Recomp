@@ -655,3 +655,54 @@ namespace ps2_stubs
         TODO_NAMED("sceSynthSizerLfoTriangle", rdram, ctx, runtime);
     }
 }
+
+// SS1 save states: libsd stub transfer state.
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    void audioSavestateSave(ps2_savestate::Writer &w)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_audio_stub_mutex);
+        w.b(g_audio_stub_state.initialized);
+        for (const auto &v : g_audio_stub_state.voiceTransfers)
+        {
+            for (uint32_t x : {v.sourceAddress, v.destinationAddress, v.size})
+                w.u32(x);
+            w.pod(v.mode);
+            w.b(v.completed);
+        }
+        for (const auto &b : g_audio_stub_state.blockTransfers)
+        {
+            for (uint32_t x : {b.base, b.size, b.pauseBase, b.offset, b.statusTraceCount})
+                w.u32(x);
+            w.pod(b.mode);
+            w.b(b.active);
+            w.b(b.loop);
+        }
+    }
+    bool audioSavestateLoad(ps2_savestate::Reader &r)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_audio_stub_mutex);
+        g_audio_stub_state.initialized = r.b();
+        for (auto &v : g_audio_stub_state.voiceTransfers)
+        {
+            for (uint32_t *x : {&v.sourceAddress, &v.destinationAddress, &v.size})
+                *x = r.u32();
+            r.pod(v.mode);
+            v.completed = r.b();
+        }
+        for (auto &b : g_audio_stub_state.blockTransfers)
+        {
+            for (uint32_t *x : {&b.base, &b.size, &b.pauseBase, &b.offset, &b.statusTraceCount})
+                *x = r.u32();
+            r.pod(b.mode);
+            b.active = r.b();
+            b.loop = r.b();
+        }
+        return r.ok();
+    }
+    const bool kAudioSavestateRegistered =
+        ps2_savestate::registerSection("stub:audio", {1u, &audioSavestateSave, &audioSavestateLoad, nullptr});
+}

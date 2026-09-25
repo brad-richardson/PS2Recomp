@@ -4,6 +4,7 @@
 // follow G44's shadow (ps2_gs_shadow.cpp: ensureInitLocked, syncPrivLocked,
 // onPresentFrame's CachedHost copy), minus the shadow's SMODE1 override:
 // GB3 Part 1 programs SMODE1 through SetGsCrt/sceGsResetGraph.
+#include <type_traits>
 #include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "runtime/gs/ps2_present_share.h"
 #include "runtime/ps2_memory.h"
@@ -493,6 +494,67 @@ public:
         GSTransferSnapshot s{};
         s.localToHostPendingBytes = m_l2hPending;
         return s;
+    }
+
+    // SS1 save states: VRAM (host mirror after a flush), the raw register,
+    // priv and GIF-path state paraLLEl decodes itself. Not captured: the
+    // CLUT buffer (GPU-only; cached_cbp is cleared so CLD 4/5 reload), the
+    // private vertex queue / transfer state (idle at a drained vsync), and
+    // SSAA planes (cleared by the VRAM upload).
+    void SavestateSave(std::vector<uint8_t> &out) override
+    {
+        static_assert(std::is_trivially_copyable_v<ParallelGS::RegisterState>, "RegisterState");
+        static_assert(std::is_trivially_copyable_v<ParallelGS::PrivRegisterState>, "PrivRegisterState");
+        static_assert(std::is_trivially_copyable_v<ParallelGS::GIFPath>, "GIFPath");
+        out.clear();
+        if (!ensureInit())
+            return;
+        constexpr size_t kVram = 4u * 1024u * 1024u;
+        m_iface->flush();
+        const void *p = m_iface->map_vram_read(0, kVram);
+        if (!p)
+            return;
+        const auto put = [&out](const void *src, size_t n) {
+            const auto *b = static_cast<const uint8_t *>(src);
+            out.insert(out.end(), b, b + n);
+        };
+        put(p, kVram);
+        put(&m_iface->get_register_state(), sizeof(ParallelGS::RegisterState));
+        put(&m_iface->get_priv_register_state(), sizeof(ParallelGS::PrivRegisterState));
+        for (uint32_t i = 0; i < 4u; ++i)
+            put(&m_iface->get_gif_path(i), sizeof(ParallelGS::GIFPath));
+        put(&m_l2hPending, sizeof(m_l2hPending));
+    }
+
+    bool SavestateLoad(const uint8_t *data, size_t size) override
+    {
+        constexpr size_t kVram = 4u * 1024u * 1024u;
+        const size_t want = kVram + sizeof(ParallelGS::RegisterState) + sizeof(ParallelGS::PrivRegisterState) +
+                            4u * sizeof(ParallelGS::GIFPath) + sizeof(m_l2hPending);
+        if (size != want || !ensureInit())
+            return false;
+        m_needHandoff = false;
+        void *dst = m_iface->map_vram_write(0, kVram);
+        if (!dst)
+            return false;
+        std::memcpy(dst, data, kVram);
+        m_iface->end_vram_write(0, kVram);
+        m_iface->write_register(ParallelGS::RegisterAddr::TEXFLUSH, uint64_t(0));
+        size_t off = kVram;
+        std::memcpy(&m_iface->get_register_state(), data + off, sizeof(ParallelGS::RegisterState));
+        off += sizeof(ParallelGS::RegisterState);
+        std::memcpy(&m_iface->get_priv_register_state(), data + off, sizeof(ParallelGS::PrivRegisterState));
+        off += sizeof(ParallelGS::PrivRegisterState);
+        for (uint32_t i = 0; i < 4u; ++i)
+        {
+            std::memcpy(&m_iface->get_gif_path(i), data + off, sizeof(ParallelGS::GIFPath));
+            off += sizeof(ParallelGS::GIFPath);
+        }
+        std::memcpy(&m_l2hPending, data + off, sizeof(m_l2hPending));
+        auto &regs = m_iface->get_register_state();
+        regs.cached_cbp[0] = regs.cached_cbp[1] = ~0u;
+        m_iface->clobber_register_state();
+        return true;
     }
 
     bool WantsRawGif() const override { return true; }

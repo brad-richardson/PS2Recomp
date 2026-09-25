@@ -49,4 +49,18 @@ public:
         (void)regAddr;
         (void)value;
     }
+    // SS1 save states (on the GS thread, after a drain). Idle = no transfer
+    // or local->host bytes in flight. Save/Load carry state that is not in
+    // PS2Memory (the CPU backend's VRAM is PS2Memory's, so it has none).
+    virtual bool SavestateIdle() const
+    {
+        const GSTransferSnapshot t = GetTransferSnapshot();
+        return t.localToHostPendingBytes == 0u && t.copiedPixels >= t.totalPixels;
+    }
+    virtual void SavestateSave(std::vector<uint8_t> &out) { out.clear(); }
+    virtual bool SavestateLoad(const uint8_t *data, size_t size)
+    {
+        (void)data;
+        return size == 0u;
+    }
 };

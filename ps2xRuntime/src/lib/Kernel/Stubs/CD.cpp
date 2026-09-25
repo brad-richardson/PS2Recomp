@@ -1,3 +1,4 @@
+#include "runtime/ps2_savestate.h"
 #include "Common.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
@@ -940,6 +941,34 @@ namespace ps2_stubs
         void continueCdStRead(uint8_t *rdram,
                               R5900Context *ctx,
                               PS2Runtime *runtime,
+                              CdStReadContinuation state);
+
+        // SS1: the vsync-wait resume, shared by the live wait and the
+        // save-state rebuild (EeCompletionTag kind kCompletionCdStRead).
+        std::function<void(R5900Context &)> makeCdStReadResume(uint8_t *rdram, PS2Runtime *runtime,
+                                                               CdStReadContinuation state)
+        {
+            return [rdram, runtime, state](R5900Context &resumeContext)
+            {
+                if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
+                {
+                    return;
+                }
+                continueCdStRead(rdram, &resumeContext, runtime, state);
+            };
+        }
+
+        std::function<void(R5900Context &)> rebuildCdStReadResume(const uint32_t args[4], PS2Runtime *runtime)
+        {
+            CdStReadContinuation state{args[0], args[1], args[2], args[3]};
+            return makeCdStReadResume(runtime->memory().getRDRAM(), runtime, state);
+        }
+        const bool kCdStReadFactoryRegistered =
+            ps2_savestate::registerCompletionFactory(ps2_savestate::kCompletionCdStRead, &rebuildCdStReadResume);
+
+        void continueCdStRead(uint8_t *rdram,
+                              R5900Context *ctx,
+                              PS2Runtime *runtime,
                               CdStReadContinuation state)
         {
             if (!g_cdStreamTiming.active || state.requestedSectors == 0u)
@@ -999,17 +1028,12 @@ namespace ps2_stubs
                     const uint32_t buffered = bufferedCdStreamSectors(runtime);
                     const uint32_t needed = wakeSectors > buffered ? wakeSectors - buffered : 1u;
                     const uint64_t wakeTick = cdStreamWakeTickForSectors(runtime, needed);
-                    runtime->eeScheduler().waitVSync(
+                    runtime->eeScheduler().waitVSyncTagged(
                         wakeTick - 1u,
                         -1,
-                        [rdram, runtime, state](R5900Context &resumeContext)
-                        {
-                            if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
-                            {
-                                return;
-                            }
-                            continueCdStRead(rdram, &resumeContext, runtime, state);
-                        });
+                        makeCdStReadResume(rdram, runtime, state),
+                        EeCompletionTag{ps2_savestate::kCompletionCdStRead,
+                                        {state.requestedSectors, state.buffer, state.errorAddress, state.sectorsRead}});
                 }
 
                 uint32_t sectors = std::min(remaining, available);
@@ -1246,4 +1270,43 @@ namespace ps2_stubs
     {
         return g_cdCallbackStackTop;
     }
+}
+
+// SS1 save states: CD.cpp's own globals (its Support.h copy registers
+// separately). Streaming position lives in Support.h (g_cdStreaming*).
+namespace
+{
+    void cdSavestateSave(ps2_savestate::Writer &w)
+    {
+        using namespace ps2_stubs;
+        const auto &t = g_cdStreamTiming;
+        w.b(t.initialized);
+        w.b(t.active);
+        w.b(t.paused);
+        for (uint32_t v : {t.capacitySectors, t.bankCount, t.sectorsPerBank, t.sectorsPerSecond})
+            w.u32(v);
+        for (uint64_t v : {t.producedSectors, t.consumedSectors, t.productionRemainder, t.lastVSyncTick})
+            w.u64(v);
+        w.u32(g_cdCallbackFn);
+        w.u32(g_cdCallbackGp);
+        w.u32(g_cdCallbackStackTop);
+    }
+    bool cdSavestateLoad(ps2_savestate::Reader &r)
+    {
+        using namespace ps2_stubs;
+        auto &t = g_cdStreamTiming;
+        t.initialized = r.b();
+        t.active = r.b();
+        t.paused = r.b();
+        for (uint32_t *v : {&t.capacitySectors, &t.bankCount, &t.sectorsPerBank, &t.sectorsPerSecond})
+            *v = r.u32();
+        for (uint64_t *v : {&t.producedSectors, &t.consumedSectors, &t.productionRemainder, &t.lastVSyncTick})
+            *v = r.u64();
+        g_cdCallbackFn = r.u32();
+        g_cdCallbackGp = r.u32();
+        g_cdCallbackStackTop = r.u32();
+        return r.ok();
+    }
+    const bool kCdSavestateRegistered =
+        ps2_savestate::registerSection("stub:cd", {1u, &cdSavestateSave, &cdSavestateLoad, nullptr});
 }

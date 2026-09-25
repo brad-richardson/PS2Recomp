@@ -1956,3 +1956,73 @@ namespace
         return PS2_SCRATCHPAD_BASE + kGsParamScratchOffset;
     }
 }
+
+// SS1 save states: this header's globals sit in an anonymous namespace and
+// the Stubs TUs are not unity-built, so every includer owns its own copy.
+// Each copy registers one section keyed by its TU ("support:Stubs/CD.cpp").
+// Path/size caches (leaf index, image size) are rebuilt; libc FILE handles
+// must be closed at the save point.
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    std::string supportSavestateKey()
+    {
+        const std::string path = __BASE_FILE__;
+        const size_t slash = path.find_last_of('/');
+        const size_t parent = slash == std::string::npos ? std::string::npos : path.find_last_of('/', slash - 1);
+        return "support:" + (parent == std::string::npos ? path : path.substr(parent + 1));
+    }
+
+    void supportSavestateSave(ps2_savestate::Writer &w)
+    {
+        ps2_savestate::writeOrdered(w, g_cdFilesByKey, [](ps2_savestate::Writer &ww, const auto &e) {
+            ww.str(e.first);
+            ww.str(e.second.hostPath.string());
+            ww.u32(e.second.sizeBytes);
+            ww.u32(e.second.baseLbn);
+            ww.u32(e.second.sectors);
+        });
+        w.u32(g_nextPseudoLbn);
+        w.pod(g_lastCdError);
+        w.u32(g_cdMode);
+        w.u32(g_cdStreamingLbn);
+        w.u32(g_cdStreamingEndLbn);
+        w.b(g_cdInitialized);
+        w.u32(g_iopHeapNext);
+        w.u32(g_next_file_handle);
+        ps2_savestate::writeOrderedPod(w, g_dmaPendingPolls);
+        w.pod(g_gparam);
+    }
+
+    bool supportSavestateLoad(ps2_savestate::Reader &r)
+    {
+        ps2_savestate::readOrdered(r, g_cdFilesByKey, [](ps2_savestate::Reader &rr, auto &e) {
+            e.first = rr.str();
+            e.second.hostPath = rr.str();
+            e.second.sizeBytes = rr.u32();
+            e.second.baseLbn = rr.u32();
+            e.second.sectors = rr.u32();
+        });
+        g_nextPseudoLbn = r.u32();
+        r.pod(g_lastCdError);
+        g_cdMode = r.u32();
+        g_cdStreamingLbn = r.u32();
+        g_cdStreamingEndLbn = r.u32();
+        g_cdInitialized = r.b();
+        g_iopHeapNext = r.u32();
+        g_next_file_handle = r.u32();
+        ps2_savestate::readOrderedPod(r, g_dmaPendingPolls);
+        r.pod(g_gparam);
+        return r.ok();
+    }
+
+    std::string supportSavestateReady()
+    {
+        if (!g_file_map.empty())
+            return "libc FILE handles open";
+        return {};
+    }
+
+    const bool kSupportSavestateRegistered = ps2_savestate::registerSection(
+        supportSavestateKey(), {1u, &supportSavestateSave, &supportSavestateLoad, &supportSavestateReady});
+}

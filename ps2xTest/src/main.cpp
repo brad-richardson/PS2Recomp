@@ -46,6 +46,7 @@ void register_ps2_mmi_interleave_tests();
 void register_ps2_lwu_tests();
 void register_ps2_ee_count_tests();
 void register_ps2_vsync_pacer_tests();
+void register_ps2_savestate_tests();
 void register_ps2_tc1_vf0_tests();
 void reset_ps2_test_function_table();
 
@@ -97,6 +98,7 @@ int main()
     register_ps2_lwu_tests();
     register_ps2_ee_count_tests();
     register_ps2_vsync_pacer_tests();
+    register_ps2_savestate_tests();
     register_ps2_tc1_vf0_tests();
     int res = MiniTest::Run();
     std::cout.flush();

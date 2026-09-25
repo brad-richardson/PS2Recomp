@@ -1,4 +1,6 @@
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_savestate.h"
+#include "../ps2_savestate_internal.h"
 #include "runtime/ee_guest_unwind.h"
 #include "ps2_fpmode.h"
 #include "ps2_e41_trace.h"
@@ -555,6 +557,14 @@ void EeScheduler::run()
     static uint64_t s_diagLastMs = 0;
     static uint64_t s_diagBlock = 0;
 
+    // SS1 save states (default off: saveAt 0, no resume skip). A loaded run
+    // skips its first event pass: the save was taken right after one.
+    const ps2_savestate::Config &ssConfig = ps2_savestate::config();
+    uint64_t ssSaveAt = ssConfig.saveAt;
+    bool ssSkipEvents = ps2_savestate::takeResumeSkip();
+    uint64_t ssLastDeferTick = ~0ull;
+    uint32_t ssDeferLines = 0u;
+
     while (!m_stopRequested.load(std::memory_order_acquire))
     {
         // T1: SIGTERM (or PARK_TIMEOUT_MS) writes ONE JSON + ONE table,
@@ -563,10 +573,34 @@ void EeScheduler::run()
         {
             parkSnapshotWriteOnce(*this, m_runtime);
         }
-        processPendingEvents();
+        if (ssSkipEvents)
+            ssSkipEvents = false;
+        else
+            processPendingEvents();
         if (m_stopRequested.load(std::memory_order_acquire))
         {
             break;
+        }
+        if (ssSaveAt != 0u && m_vsyncTick >= ssSaveAt)
+        {
+            std::string why;
+            if (ps2_savestate::trySave(m_runtime, m_vsyncTick, why))
+            {
+                ssSaveAt = 0u;
+                if (ssConfig.exitAfterSave)
+                {
+                    std::fprintf(stderr, "[savestate] exit after save\n");
+                    requestStop();
+                    break;
+                }
+            }
+            else if (m_vsyncTick != ssLastDeferTick && ssDeferLines < 64u)
+            {
+                ssLastDeferTick = m_vsyncTick;
+                ++ssDeferLines;
+                std::fprintf(stderr, "[savestate] deferred tick=%llu reason=%s\n",
+                             static_cast<unsigned long long>(m_vsyncTick), why.c_str());
+            }
         }
 
         ++s_diagTick;
@@ -2295,6 +2329,16 @@ uint32_t EeScheduler::setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_
         std::move(completion)});
 }
 
+[[noreturn]] void EeScheduler::waitVSyncTagged(uint64_t afterTick, int fixedResult,
+                                               std::function<void(R5900Context &)> completion, EeCompletionTag tag)
+{
+    blockCurrent(EeWaitState{
+        EeWaitReason::VSync,
+        EeVSyncWait{afterTick, fixedResult},
+        std::move(completion),
+        tag});
+}
+
 void EeScheduler::completeVSync(uint64_t tick)
 {
     assertExecutor();
@@ -2666,9 +2710,11 @@ void EeScheduler::blockCurrent(EeWaitState wait)
 void EeScheduler::makeReady(GuestThread &item, int result, bool interruptSafe)
 {
     auto completion = std::move(item.wait.completion);
+    const EeCompletionTag tag = item.wait.tag;
     item.wait = {};
     setReturnS32(&item.activeContext(), result);
     item.resumeCompletion = std::move(completion);
+    item.resumeTag = tag;
     if (item.suspendCount != 0)
     {
         item.status = EeThreadStatus::Suspended;

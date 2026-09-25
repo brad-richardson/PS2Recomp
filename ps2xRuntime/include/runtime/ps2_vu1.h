@@ -69,6 +69,8 @@ struct VU1State
 
 class VU1Interpreter
 {
+    friend struct VU1InterpreterSavestate;
+
 public:
     enum class Unit : uint8_t
     {

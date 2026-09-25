@@ -244,3 +244,21 @@ namespace ps2_stubs
         TODO_NAMED("sceDmaWatch", rdram, ctx, runtime);
     }
 }
+
+// SS1 save states: the DMA environment set by sceDmaPutEnv.
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    void dmaSavestateSave(ps2_savestate::Writer &w)
+    {
+        std::lock_guard<std::mutex> lock(ps2_stubs::g_dmaEnvMutex);
+        w.pod(ps2_stubs::g_dmaCurrentEnv);
+    }
+    bool dmaSavestateLoad(ps2_savestate::Reader &r)
+    {
+        std::lock_guard<std::mutex> lock(ps2_stubs::g_dmaEnvMutex);
+        return r.pod(ps2_stubs::g_dmaCurrentEnv);
+    }
+    const bool kDmaSavestateRegistered =
+        ps2_savestate::registerSection("stub:dma", {1u, &dmaSavestateSave, &dmaSavestateLoad, nullptr});
+}

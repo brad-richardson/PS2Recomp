@@ -3001,3 +3001,61 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 }
+
+// SS1 save states: MPEG HLE bookkeeping. A live playback (FFmpeg decoder,
+// decoded frames) or a non-stream delivery can't be captured: saves defer.
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    void mpegSavestateSave(ps2_savestate::Writer &w)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        const auto &s = g_mpeg_stub_state;
+        w.b(s.initialized);
+        w.u32(s.nextCallbackHandle);
+        for (uint64_t v : {s.cdStreamGeneration, s.cdStreamBytesProduced, s.cdStreamBytesDemuxed})
+            w.u64(v);
+        w.b(s.cdStreamEofPending);
+        w.b(s.currentCdStreamEofSeen);
+        ps2_savestate::writeOrdered(w, s.callbacksByMpeg, [](ps2_savestate::Writer &ww, const auto &e) {
+            ww.u32(e.first);
+            ww.podVec(e.second);
+        });
+    }
+    bool mpegSavestateLoad(ps2_savestate::Reader &r)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        auto &s = g_mpeg_stub_state;
+        s.initialized = r.b();
+        s.nextCallbackHandle = r.u32();
+        for (uint64_t *v : {&s.cdStreamGeneration, &s.cdStreamBytesProduced, &s.cdStreamBytesDemuxed})
+            *v = r.u64();
+        s.cdStreamEofPending = r.b();
+        s.currentCdStreamEofSeen = r.b();
+        ps2_savestate::readOrdered(r, s.callbacksByMpeg, [](ps2_savestate::Reader &rr, auto &e) {
+            e.first = rr.u32();
+            rr.podVec(e.second);
+        });
+        s.playbackByMpeg.clear();
+        s.nonStreamDeliveries.clear();
+        return r.ok();
+    }
+    std::string mpegSavestateReady()
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        if (!g_mpeg_stub_state.playbackByMpeg.empty())
+            return "MPEG playback state live";
+        for (const auto &[tag, weak] : g_mpeg_stub_state.nonStreamDeliveries)
+        {
+            (void)tag;
+            if (!weak.expired())
+                return "MPEG non-stream delivery live";
+        }
+        return {};
+    }
+    const bool kMpegSavestateRegistered =
+        ps2_savestate::registerSection("stub:mpeg", {1u, &mpegSavestateSave, &mpegSavestateLoad, &mpegSavestateReady});
+}

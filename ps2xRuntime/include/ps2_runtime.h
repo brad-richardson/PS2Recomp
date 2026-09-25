@@ -513,6 +513,7 @@ private:
 
     friend class PS2IopTransport;
     friend class EeScheduler;
+    friend struct PS2RuntimeSavestate;
 
 private:
     PS2Memory m_memory;

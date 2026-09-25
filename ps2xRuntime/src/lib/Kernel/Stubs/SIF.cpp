@@ -1079,3 +1079,54 @@ namespace ps2_stubs
         setReturnS32(ctx, 0);
     }
 }
+
+// SS1 save states: SIF regs, command handlers and the IOP heap (its storage
+// is guest-visible through readSifIopHeap and the IOP host).
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    void sifSavestateSave(ps2_savestate::Writer &w)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+        std::lock_guard<std::mutex> heapLock(g_sifHeapMutex);
+        w.u32(g_nextSifDmaTransferId);
+        ps2_savestate::writeOrderedPod(w, g_sifRegs);
+        ps2_savestate::writeOrderedPod(w, g_sifSregs);
+        ps2_savestate::writeOrderedPod(w, g_sifCmdHandlers);
+        w.u64(g_sifHeapAllocations.size());
+        for (const auto &[addr, size] : g_sifHeapAllocations)
+        {
+            w.u32(addr);
+            w.u32(size);
+        }
+        w.bytes(g_sifHeapStorage.data(), g_sifHeapStorage.size());
+        w.u32(g_sifCmdBuffer);
+        w.u32(g_sifSysCmdBuffer);
+        w.b(g_sifCmdInitialized);
+    }
+    bool sifSavestateLoad(ps2_savestate::Reader &r)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+        std::lock_guard<std::mutex> heapLock(g_sifHeapMutex);
+        g_nextSifDmaTransferId = r.u32();
+        ps2_savestate::readOrderedPod(r, g_sifRegs);
+        ps2_savestate::readOrderedPod(r, g_sifSregs);
+        ps2_savestate::readOrderedPod(r, g_sifCmdHandlers);
+        g_sifHeapAllocations.clear();
+        const uint64_t n = r.count(1u << 20);
+        for (uint64_t i = 0; i < n && r.ok(); ++i)
+        {
+            const uint32_t addr = r.u32();
+            g_sifHeapAllocations[addr] = r.u32();
+        }
+        r.bytes(g_sifHeapStorage.data(), g_sifHeapStorage.size());
+        g_sifCmdBuffer = r.u32();
+        g_sifSysCmdBuffer = r.u32();
+        g_sifCmdInitialized = r.b();
+        return r.ok();
+    }
+    const bool kSifSavestateRegistered =
+        ps2_savestate::registerSection("stub:sif", {1u, &sifSavestateSave, &sifSavestateLoad, nullptr});
+}

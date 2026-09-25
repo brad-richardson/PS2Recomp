@@ -253,3 +253,18 @@ void resetSsx3CopiedPayloadForTesting()
     g_wiredAlloc.store(0u, std::memory_order_relaxed);
 }
 } // namespace ps2_syscalls
+
+// SS1 save states: the HLE Wired allocator is guest-visible (returned by the
+// 0x59 helper).
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    void k1SavestateSave(ps2_savestate::Writer &w) { w.u32(ps2_syscalls::g_wiredAlloc.load()); }
+    bool k1SavestateLoad(ps2_savestate::Reader &r)
+    {
+        ps2_syscalls::g_wiredAlloc.store(r.u32());
+        return r.ok();
+    }
+    const bool kK1SavestateRegistered =
+        ps2_savestate::registerSection("syscalls:k1", {1u, &k1SavestateSave, &k1SavestateLoad, nullptr});
+}

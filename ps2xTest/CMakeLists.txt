@@ -80,6 +80,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_lwu_tests.cpp
     src/ps2_ee_count_tests.cpp
     src/ps2_vsync_pacer_tests.cpp
+    src/ps2_savestate_tests.cpp
     src/ps2_tc1_vf0_tests.cpp
 )
 

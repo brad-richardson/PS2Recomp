@@ -42,6 +42,7 @@ void rlEnableColorBlend(void);
 #include "ps2_thread_affinity.h"
 #include "ps2_host_backend.h"
 #include "ps2_iop_host.h"
+#include "runtime/ps2_savestate.h"
 #include "ps2x/iop/iop_subsystem.h"
 #if defined(PS2X_IOS)
 #include "ps2_ios_runtime.h"
@@ -1360,6 +1361,7 @@ bool PS2Runtime::initialize(const char *title)
 bool PS2Runtime::loadELF(const std::string &elfPath)
 {
     configureIoPathsFromElf(elfPath);
+    ps2_savestate::setElfPath(elfPath); // SS1: header ELF pin
 
     std::ifstream file(elfPath, std::ios::binary);
     if (!file)
@@ -4032,7 +4034,18 @@ void PS2Runtime::run()
         try
         {
             m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
-            m_eeScheduler->run();
+            // SS1 (DEV, default off): PS2X_SAVESTATE_LOAD restores a saved
+            // machine over the freshly initialized one, then run() resumes it.
+            bool savestateOk = true;
+            if (const std::string &ssLoad = ps2_savestate::config().loadPath; !ssLoad.empty())
+            {
+                std::string ssError;
+                savestateOk = ps2_savestate::load(*this, ssLoad, ssError);
+                if (!savestateOk)
+                    std::fprintf(stderr, "[savestate] load refused: %s\n", ssError.c_str());
+            }
+            if (savestateOk)
+                m_eeScheduler->run();
             uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
             RUNTIME_LOG("Game thread returned. PC=0x" << std::hex << pc
                       << " RA=0x" << static_cast<uint32_t>(_mm_extract_epi32(m_cpuContext.r[31], 0)) << std::dec << std::endl);

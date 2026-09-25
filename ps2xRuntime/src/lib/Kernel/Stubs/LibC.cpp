@@ -1,3 +1,4 @@
+#include "runtime/ps2_savestate.h"
 #include "Common.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
@@ -1254,11 +1255,13 @@ namespace ps2_stubs
 
     void rand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        ps2_savestate::noteHostRandUsed(); // SS1: host libc state can't be saved
         setReturnS32(ctx, std::rand() & 0x7FFF);
     }
 
     void srand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        ps2_savestate::noteHostRandUsed();
         std::srand(getRegU32(ctx, 4));
         setReturnS32(ctx, 0);
     }

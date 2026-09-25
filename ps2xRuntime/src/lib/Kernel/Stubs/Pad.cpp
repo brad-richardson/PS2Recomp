@@ -73,6 +73,9 @@ namespace ps2_stubs
         bool g_padOverrideEnabled = false;
         PadInputState g_padOverrideState{};
         PadPortState g_padPorts[kPadPortCount]{};
+        // SS1: scePadGetFrameCount's counter (guest-visible), at file scope
+        // so a save state can carry it.
+        std::atomic<uint32_t> g_padFrameCount{0};
         int g_padReadLogCount = 0;
 
         // E2a stimulus hook: env-armed pad-state flip + 326EB0 dormant-arm
@@ -1005,8 +1008,7 @@ namespace ps2_stubs
     {
         (void)rdram;
         (void)runtime;
-        static std::atomic<uint32_t> frameCount{0};
-        setReturnU32(ctx, frameCount++);
+        setReturnU32(ctx, g_padFrameCount++);
     }
 
     void scePadGetModVersion(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -1540,4 +1542,36 @@ namespace ps2_stubs
         g_padScriptArmed.store(false, std::memory_order_relaxed);
         g_padScriptInitDone.store(true, std::memory_order_relaxed);
     }
+}
+
+// SS1 save states: pad ports and override. The pad script needs no cursor:
+// it recomputes from gs().vsyncTick, so a loaded run needs the same env.
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    void padSavestateSave(ps2_savestate::Writer &w)
+    {
+        using namespace ps2_stubs;
+        static_assert(std::is_trivially_copyable_v<PadPortState>, "PadPortState");
+        static_assert(std::is_trivially_copyable_v<PadInputState>, "PadInputState");
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        std::lock_guard<std::mutex> overrideLock(g_padOverrideMutex);
+        w.pod(g_padPorts);
+        w.b(g_padOverrideEnabled);
+        w.pod(g_padOverrideState);
+        w.u32(g_padFrameCount.load());
+    }
+    bool padSavestateLoad(ps2_savestate::Reader &r)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_padStateMutex);
+        std::lock_guard<std::mutex> overrideLock(g_padOverrideMutex);
+        r.pod(g_padPorts);
+        g_padOverrideEnabled = r.b();
+        r.pod(g_padOverrideState);
+        g_padFrameCount.store(r.u32());
+        return r.ok();
+    }
+    const bool kPadSavestateRegistered =
+        ps2_savestate::registerSection("stub:pad", {1u, &padSavestateSave, &padSavestateLoad, nullptr});
 }

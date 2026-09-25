@@ -81,6 +81,24 @@ public:
 
     void log(ps2x::iop::LogLevel level, std::string_view message) override;
 
+    // SS1 save states: open host files are not captured (refused), and the
+    // token/handle counters are.
+    size_t savestateOpenHostFiles() const
+    {
+        std::lock_guard<std::mutex> lock(m_hostFileMutex);
+        return m_hostFiles.size();
+    }
+    void savestateCounters(uint64_t &nextToken, uint64_t &nextHandle) const
+    {
+        nextToken = m_nextToken;
+        nextHandle = m_nextHostFileHandle;
+    }
+    void savestateSetCounters(uint64_t nextToken, uint64_t nextHandle)
+    {
+        m_nextToken = nextToken;
+        m_nextHostFileHandle = nextHandle;
+    }
+
 private:
     friend class CallScope;
 

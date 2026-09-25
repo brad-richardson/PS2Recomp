@@ -204,6 +204,18 @@ namespace ps2x::padlatch
             m_latch = Latch{};
         }
 
+        // SS1 save states: copy of / overwrite of the whole state machine.
+        Latch savestateGet()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_latch;
+        }
+        void savestateSet(const Latch &latch)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_latch = latch;
+        }
+
     private:
         std::mutex m_mutex;
         Latch m_latch;

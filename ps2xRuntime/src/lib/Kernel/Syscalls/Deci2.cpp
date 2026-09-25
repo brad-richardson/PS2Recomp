@@ -258,3 +258,18 @@ namespace ps2_syscalls
 #endif
     }
 }
+
+// SS1 save states: DECI2 sessions are not captured; refuse while any is open.
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    void deci2SavestateSave(ps2_savestate::Writer &w) { w.pod(g_nextDeci2Socket); }
+    bool deci2SavestateLoad(ps2_savestate::Reader &r) { return r.pod(g_nextDeci2Socket); }
+    std::string deci2SavestateReady()
+    {
+        std::lock_guard<std::mutex> lock(g_deci2Mutex);
+        return g_deci2Sessions.empty() ? std::string() : std::string("DECI2 sessions open");
+    }
+    const bool kDeci2SavestateRegistered = ps2_savestate::registerSection(
+        "syscalls:deci2", {1u, &deci2SavestateSave, &deci2SavestateLoad, &deci2SavestateReady});
+}
