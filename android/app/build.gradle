@@ -8,6 +8,8 @@ def ps2xGameCodegenDir = project.findProperty('ps2xGameCodegenDir') ?: ''
 def ps2xGsShadowParallel = project.findProperty('ps2xGsShadowParallel') ?: 'OFF'
 def ps2xParallelGsSourceDir = project.findProperty('ps2xParallelGsSourceDir') ?: ''
 def ps2xJniLibsDir = project.findProperty('ps2xJniLibsDir') ?: ''
+// VR1: generated VU1 images (vu1_<hash>.cpp); empty = interpreter only.
+def ps2xVu1RecompDir = project.findProperty('ps2xVu1RecompDir') ?: ''
 
 android {
     namespace 'com.ps2x.runner'
@@ -38,7 +40,8 @@ android {
                         "-DPS2X_DEFAULT_BOOT_ELF=${ps2xBootElf}",
                         "-DPS2X_GAME_CODEGEN_DIR=${ps2xGameCodegenDir}",
                         "-DPS2X_GS_SHADOW_PARALLEL=${ps2xGsShadowParallel}",
-                        "-DPS2X_PARALLEL_GS_SOURCE_DIR=${ps2xParallelGsSourceDir}"
+                        "-DPS2X_PARALLEL_GS_SOURCE_DIR=${ps2xParallelGsSourceDir}",
+                        "-DPS2X_VU1_RECOMP_DIR=${ps2xVu1RecompDir}"
                 targets 'ps2EntryRunner'
             }
         }
