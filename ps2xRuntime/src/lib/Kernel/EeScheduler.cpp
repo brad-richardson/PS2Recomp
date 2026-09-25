@@ -1978,6 +1978,49 @@ bool EeScheduler::hasInvocation(GuestInvocationKind kind, uint64_t tag) const
                        });
 }
 
+namespace
+{
+// CT1: default-off one-line INTC log. PS2X_INTC_LOG=1 prints every
+// addIrqHandler registration and every dispatchIrq call; unset = off.
+bool intcLogEnabled()
+{
+    static const bool enabled = []
+    {
+        if (const char *env = std::getenv("PS2X_INTC_LOG"))
+        {
+            return env[0] == '1' && env[1] == '\0';
+        }
+        return false;
+    }();
+    return enabled;
+}
+
+// CT1: default-off coverage print at a fixed vsync. PS2X_COVERAGE_TICK=<n>
+// prints the [coverage:*] lines when the tick is reached (SIGTERM-stopped
+// boots never reach the destructor print); unset = off.
+uint64_t coverageTick()
+{
+    static const uint64_t tick = []
+    {
+        if (const char *env = std::getenv("PS2X_COVERAGE_TICK"))
+        {
+            uint64_t value = 0u;
+            for (const char *p = env; *p != '\0'; ++p)
+            {
+                if (*p < '0' || *p > '9')
+                {
+                    return ~0ull;
+                }
+                value = value * 10u + static_cast<uint64_t>(*p - '0');
+            }
+            return value;
+        }
+        return ~0ull;
+    }();
+    return tick;
+}
+} // namespace
+
 uint32_t EeScheduler::invocationStackTop()
 {
     assertExecutor();
@@ -2035,6 +2078,12 @@ int EeScheduler::addIrqHandler(bool dmac,
                                   sp,
                                   true,
                                   append ? ++tail : --head});
+    if (intcLogEnabled())
+    {
+        std::cerr << "[intc:add] dmac=" << (dmac ? 1 : 0) << " cause=" << cause
+                  << " handler=0x" << std::hex << handler << std::dec
+                  << " id=" << id << std::endl;
+    }
     return id;
 }
 
@@ -2110,6 +2159,12 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     const uint32_t mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
     if (cause < 32u && (mask & (1u << cause)) == 0u)
     {
+        if (intcLogEnabled())
+        {
+            std::cerr << "[intc:dispatch] tick=" << m_vsyncTick
+                      << " dmac=" << (dmac ? 1 : 0) << " cause=" << cause
+                      << " matched=0 masked=1" << std::endl;
+        }
         return;
     }
     const auto &handlers = dmac ? m_dmacHandlers : m_intcHandlers;
@@ -2141,6 +2196,12 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     }
     std::sort(matching.begin(), matching.end(), [](const EeIrqHandler &left, const EeIrqHandler &right)
               { return left.order < right.order; });
+    if (intcLogEnabled())
+    {
+        std::cerr << "[intc:dispatch] tick=" << m_vsyncTick
+                  << " dmac=" << (dmac ? 1 : 0) << " cause=" << cause
+                  << " matched=" << matching.size() << " masked=0" << std::endl;
+    }
     for (const EeIrqHandler &handler : matching)
     {
         // E40 Part-6: log every queued guest handler dispatch (T51 mirror).
@@ -2811,6 +2872,11 @@ void EeScheduler::processEvent(const EeEvent &event)
         break;
     case EeEventType::VBlankStart:
         ++m_vsyncTick;
+        if (m_vsyncTick == coverageTick())
+        {
+            std::cerr << "[coverage:tick] vsync=" << m_vsyncTick << std::endl;
+            m_runtime.printMissingFunctionCounts();
+        }
         ps2_e3::noteVBlank(m_vsyncTick); // E3b frame stamp
         ps2_gfx_stats::noteVsync(m_vsyncTick); // E33 per-vsync census cut
         ps2_vu1_trace::noteVsync(m_vsyncTick); // E36 per-program trace window
