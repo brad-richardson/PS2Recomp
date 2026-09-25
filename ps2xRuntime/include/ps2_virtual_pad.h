@@ -12,6 +12,9 @@
 // the current touches through pressedMask() and publishes the result with
 // liveMask(); PSPadBackend::readState ORs it into the keyboard/gamepad
 // union, and a PS2X_PAD_SCRIPT press is applied on top of that as before.
+// I32: the left D-pad is now a floating analog stick (updateStick tracks
+// the anchor across frames; liveStick() carries the left-stick bytes) and
+// the D-pad moved to the right side, above the face buttons.
 namespace ps2x::vpad
 {
     // PS2 pad button bits (same values as ps2_pad.cpp / Pad.cpp).
@@ -41,12 +44,16 @@ namespace ps2x::vpad
     {
         std::vector<Button> buttons; // includes the four D-pad arrows (drawn; hit-tested via the D-pad disc)
         float dpadX, dpadY, dpadR;   // D-pad disc: 8-way by angle, dead zone in the middle
+        float stickRestX, stickRestY; // floating-stick rest position (drawn dim until touched)
+        float stickR;                // stick base radius = max drag deflection, window points
+        float stickZoneX;            // stick zone: touches with x < stickZoneX drive the stick
     };
 
-    // Landscape layout scaled by the window height: D-pad bottom-left, face
-    // buttons bottom-right, shoulders in the top corners, Select/Start at
-    // the bottom inner corners. On a wide phone this sits in the pillarbox
-    // bars beside the 4:3 picture.
+    // Landscape layout scaled by the window height (I32): floating analog
+    // stick on the left (resting where the I26 D-pad was), D-pad on the
+    // right above the face buttons, face buttons bottom-right, shoulders in
+    // the top corners, Select/Start at the bottom inner corners. On a wide
+    // phone this sits in the pillarbox bars beside the 4:3 picture.
     inline Layout makeLayout(float w, float h)
     {
         const float u = h;
@@ -55,15 +62,22 @@ namespace ps2x::vpad
         const float br = 0.07f * u;
         const float lx = 0.205f * u; // clusters end at 0.405u: inside the 4:3 pillarbox on a 19.5:9 phone
         const float rx = w - 0.205f * u;
+        const float dcy = 0.285f * u; // D-pad centre: drawn clear of R1/R2 above and triangle below
+        const float dOff = 0.055f * u;
+        const float dBr = 0.040f * u;
         Layout l{};
-        l.dpadX = lx;
-        l.dpadY = cy;
-        l.dpadR = off + br;
+        l.dpadX = rx;
+        l.dpadY = dcy;
+        l.dpadR = 0.095f * u;
+        l.stickRestX = lx;
+        l.stickRestY = cy;
+        l.stickR = 0.10f * u;
+        l.stickZoneX = 0.5f * w;
         l.buttons = {
-            {kUp, lx, cy - off, br, "up"},
-            {kDown, lx, cy + off, br, "down"},
-            {kLeft, lx - off, cy, br, "left"},
-            {kRight, lx + off, cy, br, "right"},
+            {kUp, rx, dcy - dOff, dBr, "up"},
+            {kDown, rx, dcy + dOff, dBr, "down"},
+            {kLeft, rx - dOff, dcy, dBr, "left"},
+            {kRight, rx + dOff, dcy, dBr, "right"},
             {kTriangle, rx, cy - off, br, "triangle"},
             {kCross, rx, cy + off, br, "cross"},
             {kSquare, rx - off, cy, br, "square"},
@@ -123,6 +137,133 @@ namespace ps2x::vpad
             }
         }
         return mask;
+    }
+
+    // I32: floating analog stick. The render loop carries one StickState
+    // across frames; each frame updateStick() folds the current touches in.
+    // The first touch in the stick zone (left of stickZoneX) that presses
+    // no button anchors the stick; while a touch stays near the anchor it
+    // drives the vector (touch - anchor) / stickR, clamped to magnitude 1
+    // with a ~10% dead zone. A touch far from the anchor re-anchors (a new
+    // touch-down); no touch in the zone releases back to centre. Touches on
+    // buttons (L1/L2/Select on the left) are never stick touches, so stick
+    // + button multi-touch works. Coordinates are screen points: +x right,
+    // +y down, matching the gamepad axes (down is positive).
+    struct StickState
+    {
+        bool active = false;
+        float ax = 0.0f, ay = 0.0f; // anchor (touch-down point), window points
+    };
+
+    struct StickVec
+    {
+        bool active = false;
+        float ax = 0.0f, ay = 0.0f; // anchor: the drawn base centre
+        float x = 0.0f, y = 0.0f;   // normalized deflection, -1..1
+    };
+
+    inline StickVec updateStick(StickState &st, const Layout &l, const float *xs, const float *ys, int n)
+    {
+        StickVec out;
+        const float trackR = 2.5f * l.stickR; // same finger if within this of the anchor
+        int first = -1;                       // first stick-candidate touch this frame
+        int best = -1;                        // candidate nearest the anchor, within trackR
+        float bestD2 = trackR * trackR;
+        for (int i = 0; i < n; ++i)
+        {
+            if (xs[i] >= l.stickZoneX)
+                continue;
+            if (pressedMask(l, &xs[i], &ys[i], 1) != 0u)
+                continue; // on a button or the D-pad disc: not a stick touch
+            if (first < 0)
+                first = i;
+            if (st.active)
+            {
+                const float dx = xs[i] - st.ax;
+                const float dy = ys[i] - st.ay;
+                const float d2 = dx * dx + dy * dy;
+                if (d2 <= bestD2)
+                {
+                    bestD2 = d2;
+                    best = i;
+                }
+            }
+        }
+        if (st.active && best >= 0)
+        {
+            out.active = true;
+            out.ax = st.ax;
+            out.ay = st.ay;
+            float vx = (xs[best] - st.ax) / l.stickR;
+            float vy = (ys[best] - st.ay) / l.stickR;
+            const float m = std::sqrt(vx * vx + vy * vy);
+            if (m > 1.0f)
+            {
+                vx /= m;
+                vy /= m;
+            }
+            if ((m > 1.0f ? 1.0f : m) < 0.10f)
+            {
+                vx = 0.0f;
+                vy = 0.0f;
+            }
+            out.x = vx;
+            out.y = vy;
+            return out;
+        }
+        if (first >= 0)
+        {
+            st.active = true;
+            st.ax = xs[first];
+            st.ay = ys[first];
+            out.active = true;
+            out.ax = st.ax;
+            out.ay = st.ay;
+            return out; // centred until the finger moves
+        }
+        st.active = false;
+        return out; // released: recentred
+    }
+
+    // Left-stick bytes for the pad state (data[6] = LX, data[7] = LY,
+    // 0x80 centred), the same bytes the physical-gamepad path writes.
+    // Rounded (not truncated) so a full drag lands exactly on 0xFF/0x01.
+    inline void stickBytes(const StickVec &v, uint8_t &lx, uint8_t &ly)
+    {
+        lx = static_cast<uint8_t>(128 + std::lround(v.x * 127.0f));
+        ly = static_cast<uint8_t>(128 + std::lround(v.y * 127.0f));
+    }
+
+    // Stick vector published by the render thread (low byte LX, high byte
+    // LY); kStickNoOverride while the overlay is off or hidden behind a
+    // physical controller. PSPadBackend::readState applies it to
+    // data[6..7] on top of the keyboard/gamepad values.
+    constexpr uint16_t kStickNoOverride = 0xFFFFu;
+    inline std::atomic<uint16_t> &liveStick()
+    {
+        static std::atomic<uint16_t> stick{kStickNoOverride};
+        return stick;
+    }
+
+    // DEV-ONLY PS2X_VPAD_TEST_STICK="lx,ly" (floats in -1..1, clamped):
+    // injects a stick vector instead of the touch-driven one, for runs
+    // without a touch screen (the iOS Simulator here has no GUI to drag).
+    // Raw, no dead zone, so the bytes are exactly predictable.
+    inline bool parseTestStick(const char *spec, float &lx, float &ly)
+    {
+        if (!spec || !*spec)
+            return false;
+        char *p = nullptr;
+        lx = std::strtof(spec, &p);
+        if (p == spec || *p != ',')
+            return false;
+        const char *c = p + 1;
+        ly = std::strtof(c, &p);
+        if (p == c || *p != '\0')
+            return false;
+        lx = lx < -1.0f ? -1.0f : (lx > 1.0f ? 1.0f : lx);
+        ly = ly < -1.0f ? -1.0f : (ly > 1.0f ? 1.0f : ly);
+        return true;
     }
 
     // DEV-ONLY PS2X_VPAD_TEST_TOUCHES="tick:fx:fy:holdTicks,..." : synthetic

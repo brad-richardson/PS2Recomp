@@ -2,6 +2,7 @@
 #include "ps2_virtual_pad.h"
 #include "runtime/ps2_pad.h"
 
+#include <cmath>
 #include <cstdint>
 
 // I26: virtual controls layout, hit test and the pad-backend union.
@@ -69,5 +70,139 @@ void register_ps2_virtual_pad_tests()
             const uint16_t btns = static_cast<uint16_t>(data[2] | (data[3] << 8));
             liveMask().store(0u);
             t.Equals(static_cast<uint32_t>(btns & (kCross | kStart)), 0u, "cross+start active-low");
-            t.Equals(static_cast<uint32_t>(btns | kCross | kStart), 0xFFFFu, "nothing else pressed"); }); });
+            t.Equals(static_cast<uint32_t>(btns | kCross | kStart), 0xFFFFu, "nothing else pressed"); });
+
+        tc.Run("I32 layout: stick on the left, D-pad on the right, no overlap", [](TestCase &t)
+               {
+            const Layout l = makeLayout(874.0f, 402.0f);
+            t.IsTrue(l.stickRestX < 874.0f * 0.5f, "stick rests on the left");
+            t.IsTrue(l.stickRestX < l.stickZoneX, "stick rest is inside the stick zone");
+            t.IsTrue(l.dpadX > 874.0f * 0.5f, "D-pad is on the right");
+            t.IsTrue(l.dpadR * 2.0f >= 44.0f, "D-pad disc is a >= 44pt hit target");
+            t.IsTrue(l.stickZoneX < l.dpadX - l.dpadR * 1.15f, "stick zone ends left of the D-pad disc");
+            // The D-pad hit disc is drawn clear of every other button: no
+            // touch on a drawn button falls inside the disc.
+            for (const Button &b : l.buttons)
+            {
+                if (isDpad(b.mask))
+                    continue;
+                const float dx = b.x - l.dpadX;
+                const float dy = b.y - l.dpadY;
+                t.IsTrue(std::sqrt(dx * dx + dy * dy) > l.dpadR * 1.15f + b.r, b.label);
+            }
+            // Face buttons did not move: still the I26 diamond.
+            const Button *tri = nullptr, *cro = nullptr, *squ = nullptr, *cir = nullptr;
+            for (const Button &b : l.buttons)
+            {
+                if (b.mask == kTriangle) tri = &b;
+                if (b.mask == kCross) cro = &b;
+                if (b.mask == kSquare) squ = &b;
+                if (b.mask == kCircle) cir = &b;
+            }
+            t.IsTrue(std::fabs((cro->y - tri->y) - 2.0f * 0.13f * 402.0f) < 1e-3f, "cross/triangle spacing");
+            t.IsTrue(std::fabs((cir->x - squ->x) - 2.0f * 0.13f * 402.0f) < 1e-3f, "circle/square spacing");
+            t.IsTrue(std::fabs((tri->x + cro->x) * 0.5f - (874.0f - 0.205f * 402.0f)) < 1e-3f, "face column x"); });
+
+        tc.Run("stick: touch offset maps to left-stick bytes", [](TestCase &t)
+               {
+            const Layout l = makeLayout(874.0f, 402.0f);
+            StickState st;
+            uint8_t lx = 0, ly = 0;
+            auto drive = [&](float x, float y)
+            {
+                StickVec v = updateStick(st, l, &x, &y, 1);
+                stickBytes(v, lx, ly);
+                return v;
+            };
+            StickVec v = drive(l.stickRestX, l.stickRestY);
+            t.IsTrue(v.active, "touch-down anchors the stick");
+            t.Equals(lx, static_cast<uint8_t>(0x80), "lx centred on touch-down");
+            t.Equals(ly, static_cast<uint8_t>(0x80), "ly centred on touch-down");
+            drive(l.stickRestX + l.stickR, l.stickRestY);
+            t.Equals(lx, static_cast<uint8_t>(0xFF), "full right -> 0xFF");
+            t.Equals(ly, static_cast<uint8_t>(0x80), "ly centred on full right");
+            drive(l.stickRestX - l.stickR, l.stickRestY);
+            t.Equals(lx, static_cast<uint8_t>(0x01), "full left -> 0x01");
+            drive(l.stickRestX, l.stickRestY + l.stickR);
+            t.Equals(ly, static_cast<uint8_t>(0xFF), "full down -> 0xFF");
+            drive(l.stickRestX, l.stickRestY - l.stickR);
+            t.Equals(ly, static_cast<uint8_t>(0x01), "full up -> 0x01");
+            drive(l.stickRestX + 0.05f * l.stickR, l.stickRestY);
+            t.Equals(lx, static_cast<uint8_t>(0x80), "5% deflection is inside the dead zone");
+            drive(l.stickRestX + 0.11f * l.stickR, l.stickRestY);
+            t.Equals(lx, static_cast<uint8_t>(142), "11% deflection leaves the dead zone");
+            drive(l.stickRestX + 1.5f * l.stickR, l.stickRestY);
+            t.Equals(lx, static_cast<uint8_t>(0xFF), "over-drag clamps to 0xFF");
+            drive(l.stickRestX + l.stickR, l.stickRestY + l.stickR);
+            t.Equals(lx, static_cast<uint8_t>(218), "diagonal clamps to the unit circle (lx)");
+            t.Equals(ly, static_cast<uint8_t>(218), "diagonal clamps to the unit circle (ly)");
+            v = updateStick(st, l, nullptr, nullptr, 0);
+            stickBytes(v, lx, ly);
+            t.IsFalse(v.active, "release deactivates");
+            t.Equals(lx, static_cast<uint8_t>(0x80), "lx recentres on release");
+            t.Equals(ly, static_cast<uint8_t>(0x80), "ly recentres on release"); });
+
+        tc.Run("stick: track, re-anchor, button exclusion", [](TestCase &t)
+               {
+            const Layout l = makeLayout(874.0f, 402.0f);
+            StickState st;
+            float x = l.stickRestX, y = l.stickRestY;
+            StickVec v = updateStick(st, l, &x, &y, 1);
+            t.IsTrue(v.active && v.x == 0.0f && v.y == 0.0f, "anchored and centred");
+            // A second finger far away does not steal the stick.
+            float xs[2] = {l.stickRestX + 0.6f * l.stickR, 400.0f};
+            float ys[2] = {l.stickRestY, 100.0f};
+            v = updateStick(st, l, xs, ys, 2);
+            t.IsTrue(v.active && v.x > 0.4f && v.x < 0.8f && v.y == 0.0f, "nearest touch drives");
+            // The finger jumps away: re-anchor, centred until it moves.
+            x = 400.0f;
+            y = 100.0f;
+            v = updateStick(st, l, &x, &y, 1);
+            t.IsTrue(v.active && v.ax == 400.0f && v.ay == 100.0f, "jump re-anchors");
+            t.IsTrue(v.x == 0.0f && v.y == 0.0f, "centred after re-anchor");
+            // A touch on a button is never a stick touch (stick + button).
+            const Button *l1 = nullptr;
+            for (const Button &b : l.buttons)
+            {
+                if (b.mask == kL1)
+                    l1 = &b;
+            }
+            StickState st2;
+            float bx[2] = {l1->x, l.stickRestX + 0.6f * l.stickR};
+            float by[2] = {l1->y, l.stickRestY};
+            t.Equals(static_cast<uint32_t>(pressedMask(l, bx, by, 2)), static_cast<uint32_t>(kL1), "L1 still presses");
+            v = updateStick(st2, l, bx, by, 2);
+            t.IsTrue(v.active && v.ax == bx[1] && v.ay == by[1], "stick anchors at the non-button touch"); });
+
+        tc.Run("stick bytes reach the pad backend", [](TestCase &t)
+               {
+            PSPadBackend backend;
+            uint8_t data[32]{};
+            liveStick().store(static_cast<uint16_t>(0xE0u | (0x20u << 8)));
+            t.IsTrue(backend.readState(0, 0, data, sizeof(data)), "readState ok");
+            t.Equals(data[6], static_cast<uint8_t>(0xE0), "lx from the virtual stick");
+            t.Equals(data[7], static_cast<uint8_t>(0x20), "ly from the virtual stick");
+            liveStick().store(kStickNoOverride);
+            t.IsTrue(backend.readState(0, 0, data, sizeof(data)), "readState ok");
+            t.Equals(data[6], static_cast<uint8_t>(0x80), "lx centred with no override");
+            t.Equals(data[7], static_cast<uint8_t>(0x80), "ly centred with no override"); });
+
+        tc.Run("dev test stick parses", [](TestCase &t)
+               {
+            float lx = 0.0f, ly = 0.0f;
+            t.IsTrue(parseTestStick("0.75,-0.5", lx, ly), "valid parses");
+            t.IsTrue(std::fabs(lx - 0.75f) < 1e-6f && std::fabs(ly + 0.5f) < 1e-6f, "values exact");
+            StickVec v;
+            v.x = lx;
+            v.y = ly;
+            uint8_t bx = 0, by = 0;
+            stickBytes(v, bx, by);
+            t.Equals(bx, static_cast<uint8_t>(0xDF), "0.75 -> 0xDF");
+            t.Equals(by, static_cast<uint8_t>(0x40), "-0.5 -> 0x40");
+            t.IsTrue(parseTestStick("2,-3", lx, ly), "out of range parses");
+            t.IsTrue(lx == 1.0f && ly == -1.0f, "clamped to +-1");
+            t.IsFalse(parseTestStick(nullptr, lx, ly), "null rejected");
+            t.IsFalse(parseTestStick("", lx, ly), "empty rejected");
+            t.IsFalse(parseTestStick("bogus", lx, ly), "text rejected");
+            t.IsFalse(parseTestStick("0.5,", lx, ly), "half rejected"); }); });
 }

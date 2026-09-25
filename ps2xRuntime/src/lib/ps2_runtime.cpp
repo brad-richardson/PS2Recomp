@@ -636,9 +636,20 @@ int virtualPadTouches(float *xs, float *ys, int max, float screenWidth, float sc
 #endif
 }
 
-void drawVirtualPad(const ps2x::vpad::Layout &layout, uint16_t pressed)
+void drawVirtualPad(const ps2x::vpad::Layout &layout, uint16_t pressed, const ps2x::vpad::StickVec &stick)
 {
     using namespace ps2x::vpad;
+    // I32: floating stick: a dim rest ring until touched, then base + knob.
+    {
+        const float bx = stick.active ? stick.ax : layout.stickRestX;
+        const float by = stick.active ? stick.ay : layout.stickRestY;
+        const Vector2 bc{bx, by};
+        DrawCircleV(bc, layout.stickR, Color{255, 255, 255, static_cast<unsigned char>(stick.active ? 45 : 22)});
+        DrawCircleLinesV(bc, layout.stickR, Color{255, 255, 255, static_cast<unsigned char>(stick.active ? 140 : 70)});
+        const float knobR = layout.stickR * 0.42f;
+        const Vector2 kc{bx + stick.x * layout.stickR * 0.58f, by + stick.y * layout.stickR * 0.58f};
+        DrawCircleV(kc, knobR, Color{255, 255, 255, static_cast<unsigned char>(stick.active ? 120 : 50)});
+    }
     for (const Button &b : layout.buttons)
     {
         const bool down = (pressed & b.mask) != 0u;
@@ -3742,6 +3753,14 @@ void PS2Runtime::run()
     bool vpadLastPadConnected = true; // forces the first [vpad] line when the overlay shows
     const std::vector<ps2x::vpad::TestTouch> vpadTestTouches =
         ps2x::vpad::parseTestTouches(std::getenv("PS2X_VPAD_TEST_TOUCHES")); // DEV-ONLY
+    ps2x::vpad::StickState vpadStick;                                       // I32: floating-stick anchor, carried across frames
+    float vpadTestStickX = 0.0f, vpadTestStickY = 0.0f;
+    const bool vpadTestStick =
+        ps2x::vpad::parseTestStick(std::getenv("PS2X_VPAD_TEST_STICK"), vpadTestStickX, vpadTestStickY); // DEV-ONLY
+    if (vpadTestStick)
+    {
+        std::fprintf(stderr, "[vpad] test stick lx=%.3f ly=%.3f\n", vpadTestStickX, vpadTestStickY);
+    }
     if (!vpadWanted)
     {
         std::fprintf(stderr, "[vpad] off (PS2X_VIRTUAL_PAD)\n");
@@ -3857,11 +3876,24 @@ void PS2Runtime::run()
                                                     screenHeight, touchX, touchY, touches, 8);
             const uint16_t pressed = ps2x::vpad::pressedMask(layout, touchX, touchY, touches);
             ps2x::vpad::liveMask().store(pressed, std::memory_order_relaxed);
-            drawVirtualPad(layout, pressed);
+            ps2x::vpad::StickVec stick = ps2x::vpad::updateStick(vpadStick, layout, touchX, touchY, touches);
+            if (vpadTestStick)
+            {
+                stick.active = true; // drawn deflected at the rest position
+                stick.ax = layout.stickRestX;
+                stick.ay = layout.stickRestY;
+                stick.x = vpadTestStickX;
+                stick.y = vpadTestStickY;
+            }
+            uint8_t stickLX = 0x80u, stickLY = 0x80u;
+            ps2x::vpad::stickBytes(stick, stickLX, stickLY);
+            ps2x::vpad::liveStick().store(static_cast<uint16_t>(stickLX | (stickLY << 8)), std::memory_order_relaxed);
+            drawVirtualPad(layout, pressed, stick);
         }
         else if (vpadWanted)
         {
             ps2x::vpad::liveMask().store(0u, std::memory_order_relaxed);
+            ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
         }
         if (m_debugUiInitialized && m_debugUiDrawCallback)
         {
