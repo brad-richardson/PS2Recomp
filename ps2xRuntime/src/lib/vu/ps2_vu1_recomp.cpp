@@ -21,6 +21,7 @@
 #define XXH_INLINE_ALL
 #include "runtime/third_party/xxhash.h"
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -238,26 +239,59 @@ bool VU1Interpreter::directCommitEnabled()
     return enabled;
 }
 
-// VB1: map[i] = 1 when pair i may commit its FMAC/CLIP flag writes at issue:
-// no flag-reading or flag-setting lower op (0x10..0x1C: FCEQ..FCGET, FSSET,
-// FCSET) in pair i itself or in any pair that can issue within the next
+// VB1: per-pair direct-commit map, built from the code bytes.
+//
+// kDirectMapFlags: pair i may commit its FMAC/CLIP flag writes at issue: no
+// flag-reading or flag-setting lower op (0x10..0x1C: FCEQ..FCGET, FSSET,
+// FCSET) in pair i itself or in any pair that can issue in the next
 // kDirectFlagWindow - 1 pairs. A flag entry lands kFmacLatency (4) cycles
 // after issue and every pair takes at least one cycle, so only those pairs
-// could have seen the old flags. Control flow: branch delay slots, static
-// targets (B/BAL/IBxx), not-taken paths, and pc wrap are followed; a dynamic
-// target (JR/JALR), an out-of-range target or a branch in a delay slot counts
-// as a reader. E/D/T bits are ignored (following past them only adds readers).
+// could have seen the old flags.
+//
+// kDirectMapUpperVf / kDirectMapLowerVf: that VF write of pair i cannot be
+// superseded before it lands. The queue retires an older write when a newer
+// write to the same lanes issues first (m_vfLatestWrite), so the old value
+// stays in the register until the newer one lands; inside a run nobody can
+// read it (reads stall to m_vfReady), but a budget cut or a following
+// execute() would. A newer write can only issue before this one lands
+// (latency <= 4) if it is in the next three pairs and no pair on the way,
+// itself included, reads an overlapping lane (a read stalls until landing).
+//
+// Control flow for both: branch delay slots, static targets (B/BAL/IBxx),
+// not-taken paths and pc wrap are followed; a dynamic target (JR/JALR), an
+// out-of-range target, a branch in a delay slot or a reserved pair counts
+// as a hit (queue). E/D/T bits are ignored (following past them only adds
+// hits). Pair i may also run as the delay slot of a branch at i - 1.
 void VU1Interpreter::buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize,
-                                        std::vector<uint8_t> &map)
+                                        std::vector<uint8_t> &map) const
 {
     enum : uint8_t { kNone, kUncond, kCond, kDynamic };
     constexpr int64_t kNoPending = -1;
     constexpr int64_t kUnknown = -2;
     const uint32_t pairs = codeSize / 8u;
-    std::vector<uint8_t> flagOp(pairs, 0u), kind(pairs, kNone);
+    std::vector<uint8_t> flagOp(pairs, 0u), kind(pairs, kNone), reserved(pairs, 0u);
     std::vector<int64_t> target(pairs, kUnknown);
+    std::vector<std::array<uint8_t, 32>> reads(pairs), writes(pairs);
+    std::vector<VfAccess> upperWrite(pairs), lowerWrite(pairs);
     for (uint32_t i = 0; i < pairs; ++i)
     {
+        const DecodedInstructionPair d = decodeInstructionPair(vuCode, i * 8u);
+        reads[i].fill(0u);
+        writes[i].fill(0u);
+        reserved[i] = d.upperUsage.reserved || d.lowerUsage.reserved;
+        for (const InstructionUsage *usage : {&d.upperUsage, &d.lowerUsage})
+            for (uint32_t k = 0; k < usage->vfReadCount; ++k)
+                reads[i][usage->vfRead[k].reg] |= usage->vfRead[k].lanes;
+        upperWrite[i] = d.upperUsage.vfWrite;
+        const VfAccess lw = d.lowerUsage.vfWrite;
+        if (lw.reg != 0u && d.suppressedLowerVf != lw.reg &&
+            (d.upperUsage.vfWrite.reg == 0u || lw.reg != d.upperUsage.vfWrite.reg))
+            lowerWrite[i] = lw;
+        if (upperWrite[i].reg != 0u)
+            writes[i][upperWrite[i].reg] |= upperWrite[i].lanes;
+        if (lowerWrite[i].reg != 0u)
+            writes[i][lowerWrite[i].reg] |= lowerWrite[i].lanes;
+
         uint32_t lower = 0, upper = 0;
         std::memcpy(&lower, vuCode + i * 8u, sizeof(lower));
         std::memcpy(&upper, vuCode + i * 8u + 4u, sizeof(upper));
@@ -278,14 +312,19 @@ void VU1Interpreter::buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize
         }
     }
 
-    // True when a flag reader can issue within n pairs starting at pair i.
+    // True when visit() hits on some path of n pairs starting at pair i
+    // (depth 0 = i). visit returns 0 (go on), 1 (hit) or 2 (this path is done).
     // pending: the pc index after i when i is a delay slot.
-    const auto reaches = [&](const auto &self, uint32_t i, uint32_t n, int64_t pending) -> bool
+    const auto walk = [&](const auto &self, const auto &visit, uint32_t i, uint32_t n,
+                          uint32_t depth, int64_t pending) -> bool
     {
         if (n == 0u)
             return false;
-        if (flagOp[i] != 0u)
+        const int verdict = visit(i, depth);
+        if (verdict == 1)
             return true;
+        if (verdict == 2)
+            return false;
         const uint32_t next = (i + 1u) % pairs;
         if (pending != kNoPending)
         {
@@ -293,32 +332,55 @@ void VU1Interpreter::buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize
                 return true;
             if (pending == kUnknown)
                 return n > 1u;
-            return self(self, static_cast<uint32_t>(pending), n - 1u, kNoPending);
+            return self(self, visit, static_cast<uint32_t>(pending), n - 1u, depth + 1u, kNoPending);
         }
         switch (kind[i])
         {
         case kUncond:
-            return self(self, next, n - 1u, target[i]);
+            return self(self, visit, next, n - 1u, depth + 1u, target[i]);
         case kCond:
-            return self(self, next, n - 1u, target[i]) ||
-                   self(self, next, n - 1u, static_cast<int64_t>((i + 2u) % pairs));
+            return self(self, visit, next, n - 1u, depth + 1u, target[i]) ||
+                   self(self, visit, next, n - 1u, depth + 1u, static_cast<int64_t>((i + 2u) % pairs));
         case kDynamic:
-            return self(self, next, n - 1u, kUnknown);
+            return self(self, visit, next, n - 1u, depth + 1u, kUnknown);
         default:
-            return self(self, next, n - 1u, kNoPending);
+            return self(self, visit, next, n - 1u, depth + 1u, kNoPending);
         }
+    };
+    // Hit on any entry path of pair i (normal, or as the delay slot of i - 1).
+    const auto anyPath = [&](const auto &visit, uint32_t i, uint32_t n) -> bool
+    {
+        if (walk(walk, visit, i, n, 0u, kNoPending))
+            return true;
+        const uint32_t prev = (i + pairs - 1u) % pairs;
+        return kind[prev] != kNone &&
+               walk(walk, visit, i, n, 0u, kind[prev] == kDynamic ? kUnknown : target[prev]);
     };
 
     map.assign(pairs, 0u);
     for (uint32_t i = 0; i < pairs; ++i)
     {
-        bool reader = reaches(reaches, i, kDirectFlagWindow, kNoPending);
-        // Pair i may also run as the delay slot of a branch at i - 1.
-        const uint32_t prev = (i + pairs - 1u) % pairs;
-        if (!reader && kind[prev] != kNone)
-            reader = reaches(reaches, i, kDirectFlagWindow,
-                             kind[prev] == kDynamic ? kUnknown : target[prev]);
-        map[i] = reader ? 0u : 1u;
+        const auto flagVisit = [&](uint32_t q, uint32_t) { return flagOp[q] != 0u ? 1 : 0; };
+        uint8_t bits = anyPath(flagVisit, i, kDirectFlagWindow) ? 0u : kDirectMapFlags;
+        for (const bool isUpper : {true, false})
+        {
+            const VfAccess w = isUpper ? upperWrite[i] : lowerWrite[i];
+            if (w.reg == 0u)
+                continue;
+            const auto supersedeVisit = [&](uint32_t q, uint32_t depth) -> int
+            {
+                if (depth == 0u)
+                    return 0;
+                if (reserved[q] != 0u)
+                    return 1;
+                if ((reads[q][w.reg] & w.lanes) != 0u)
+                    return 2;
+                return (writes[q][w.reg] & w.lanes) != 0u ? 1 : 0;
+            };
+            if (!anyPath(supersedeVisit, i, kDirectMaxLatency))
+                bits |= isUpper ? kDirectMapUpperVf : kDirectMapLowerVf;
+        }
+        map[i] = bits;
     }
 }
 

@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1819,6 +1820,200 @@ void register_ps2_vu1_tests()
             }
             t.Equals(plain, static_cast<size_t>(2u), "both valid pairs should emit handoffs");
             t.Equals(must, plain, "every pair handoff must be a guaranteed tail call");
+        });
+
+        // VB1: the direct-commit path (writes applied at issue) against the
+        // queued path it replaces, on random programs built from FMAC/ACC/
+        // CLIP uppers and LQ/SQ/LQI/SQI/ILW/IADDIU/flag/FSSET/FCSET/DIV/
+        // WAITQ/branch lowers. Every run is cut at every budget from 1 to the
+        // program length; after each cut both paths must hold the same VU
+        // state and data memory, both after resume() to the end and after a
+        // fresh execute() (whose scheduler reset drops queued writes).
+        tc.Run("VB1 direct commit matches queued commit at every budget cut", [](TestCase &t)
+        {
+            uint64_t seed = 0x9E3779B97F4A7C15ull;
+            const auto rnd = [&seed](uint32_t n) -> uint32_t
+            {
+                seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+                return static_cast<uint32_t>((seed >> 33) % n);
+            };
+            const auto randomUpper = [&]() -> uint32_t
+            {
+                const uint8_t dest = static_cast<uint8_t>(1u + rnd(15u));
+                const uint8_t ft = static_cast<uint8_t>(1u + rnd(8u));
+                const uint8_t fs = static_cast<uint8_t>(1u + rnd(8u));
+                const uint8_t fd = static_cast<uint8_t>(1u + rnd(8u));
+                switch (rnd(6u))
+                {
+                case 0: return kVuUpperNop;
+                // OPMSUB/OPMULA (0x2E) only as .xyz, as real code writes them:
+                // their usage declares fs lanes = dest, and they read fs.xyz.
+                case 1:
+                {
+                    const uint8_t op = static_cast<uint8_t>(rnd(0x30u));
+                    return makeVuUpper(op, op == 0x2Eu ? uint8_t{0xE} : dest, ft, fs, fd);
+                }
+                case 2:
+                {
+                    const uint8_t op = static_cast<uint8_t>(0x28u + rnd(8u));
+                    return makeVuUpper(op, op == 0x2Eu ? uint8_t{0xE} : dest, ft, fs, fd);
+                }
+                case 3:
+                {
+                    static const uint8_t kAcc[] = {0x00, 0x03, 0x08, 0x0B, 0x18, 0x1A, 0x1C, 0x1E, 0x20, 0x21, 0x28, 0x29, 0x2A, 0x2D, 0x2E};
+                    const uint8_t op = kAcc[rnd(sizeof(kAcc))];
+                    return makeVuUpperSpecial(op, op == 0x2Eu ? uint8_t{0xE} : dest, ft, fs);
+                }
+                case 4: return makeVuUpperSpecial(0x1Fu, 0xEu, ft, fs); // CLIP
+                default: return makeVuUpperSpecial(static_cast<uint8_t>(0x10u + rnd(8u)), dest, ft, fs);
+                }
+            };
+            const auto randomLower = [&](uint32_t pair, uint32_t length) -> uint32_t
+            {
+                const uint8_t dest = static_cast<uint8_t>(1u + rnd(15u));
+                const uint8_t vf = static_cast<uint8_t>(1u + rnd(8u));
+                const uint8_t vi = static_cast<uint8_t>(1u + rnd(4u));
+                switch (rnd(16u))
+                {
+                case 0: return makeVuLq(dest, vf, 0u, static_cast<int16_t>(rnd(64u)));
+                case 1: return makeVuSq(dest, vf, 0u, static_cast<int16_t>(rnd(64u)));
+                case 2: return makeVuLowerSpecial(0x34u, vi, vf, 0u, dest); // LQI
+                case 3: return makeVuLowerSpecial(0x35u, vf, vi, 0u, dest); // SQI
+                case 4: return makeVuIlw(0x8u, vi, 0u, static_cast<int16_t>(rnd(64u)));
+                case 5: return makeVuIaddiu(vi, static_cast<uint8_t>(rnd(5u)), static_cast<int16_t>(rnd(8u)));
+                case 6: return makeVuFlagRegister(static_cast<uint8_t>(0x18u + 2u * rnd(2u)), vi, static_cast<uint8_t>(rnd(5u))); // FMEQ/FMAND
+                case 7: return makeVuFlagImmediate(static_cast<uint8_t>(0x14u + 2u * rnd(2u)), vi, static_cast<uint16_t>(rnd(0x1000u))); // FSEQ/FSAND
+                case 8: return makeVuFlagImmediate(0x15u, 0u, static_cast<uint16_t>(rnd(0x1000u))); // FSSET
+                case 9: return (0x12u << 25) | rnd(0x1000000u); // FCAND vi1
+                case 10: return (0x11u << 25) | rnd(0x1000000u); // FCSET
+                case 11: return makeVuDiv(static_cast<uint8_t>(1u + rnd(8u)), static_cast<uint8_t>(1u + rnd(8u)), static_cast<uint8_t>(rnd(4u)), static_cast<uint8_t>(rnd(4u)));
+                case 12: return makeVuLowerSpecial(0x3Bu, 0u); // WAITQ
+                case 13:
+                {
+                    if (pair + 3u >= length)
+                        return 0x8000033Cu;
+                    const int16_t forward = static_cast<int16_t>(1 + rnd(3u));
+                    return rnd(2u) != 0u ? makeVuIbne(vi, static_cast<uint8_t>(rnd(5u)), forward)
+                                         : makeVuBranch(forward);
+                }
+                case 14: return makeVuFlagImmediate(0x1Cu, vi, 0u); // FCGET
+                default: return 0x8000033Cu;
+                }
+            };
+
+            struct Snapshot
+            {
+                VU1State state;
+                std::vector<uint8_t> data;
+            };
+            const auto sameSnapshot = [](const Snapshot &a, const Snapshot &b)
+            {
+                return std::memcmp(&a.state, &b.state, sizeof(VU1State)) == 0 && a.data == b.data;
+            };
+
+            std::vector<uint8_t> code(PS2_VU1_CODE_SIZE, 0u);
+            std::vector<uint8_t> initialData(PS2_VU1_DATA_SIZE, 0u);
+            GS gs;
+            uint32_t mismatches = 0u, runs = 0u;
+            for (uint32_t program = 0; program < 200u && mismatches == 0u; ++program)
+            {
+                std::fill(code.begin(), code.end(), uint8_t{0});
+                const uint32_t length = 12u + rnd(28u);
+                for (uint32_t pair = 0; pair < length; ++pair)
+                {
+                    const uint32_t upper = randomUpper();
+                    writeVuInstructionPair(code.data(), pair * 8u, randomLower(pair, length), upper);
+                }
+                writeVuInstructionPair(code.data(), length * 8u, 0x8000033Cu, kVuUpperNop | 0x40000000u);
+                writeVuInstructionPair(code.data(), length * 8u + 8u, 0x8000033Cu, kVuUpperNop);
+                for (uint32_t i = 0; i < 64u * 16u; i += 4u)
+                {
+                    const float value = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 64.0f;
+                    std::memcpy(initialData.data() + i, &value, sizeof(value));
+                }
+                VU1State start{};
+                for (uint32_t reg = 1; reg < 32u; ++reg)
+                    for (uint32_t lane = 0; lane < 4u; ++lane)
+                        start.vf[reg][lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                for (uint32_t reg = 1; reg < 16u; ++reg)
+                    start.vi[reg] = static_cast<int32_t>(rnd(16u));
+
+                const auto runMode = [&](int mode, uint32_t budget, bool fresh) -> Snapshot
+                {
+                    VU1Interpreter vu;
+                    vu.setDirectCommitForTest(mode);
+                    std::memcpy(vu.state().vf, start.vf, sizeof(start.vf));
+                    std::memcpy(vu.state().vi, start.vi, sizeof(start.vi));
+                    Snapshot snap;
+                    snap.data = initialData;
+                    vu.execute(code.data(), PS2_VU1_CODE_SIZE, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
+                               nullptr, 0u, 0u, 0u, budget);
+                    if (fresh)
+                        vu.execute(code.data(), PS2_VU1_CODE_SIZE, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
+                                   nullptr, 0u, 0u, 0u, 4096u);
+                    else
+                        vu.resume(code.data(), PS2_VU1_CODE_SIZE, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
+                                  nullptr, 0u, 0u, 4096u);
+                    std::memcpy(&snap.state, &vu.state(), sizeof(VU1State));
+                    return snap;
+                };
+                const auto cutMode = [&](int mode, uint32_t budget) -> Snapshot
+                {
+                    VU1Interpreter vu;
+                    vu.setDirectCommitForTest(mode);
+                    std::memcpy(vu.state().vf, start.vf, sizeof(start.vf));
+                    std::memcpy(vu.state().vi, start.vi, sizeof(start.vi));
+                    Snapshot snap;
+                    snap.data = initialData;
+                    vu.execute(code.data(), PS2_VU1_CODE_SIZE, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
+                               nullptr, 0u, 0u, 0u, budget);
+                    std::memcpy(&snap.state, &vu.state(), sizeof(VU1State));
+                    return snap;
+                };
+
+                const uint32_t maxBudget = 4u * length + 64u;
+                for (uint32_t budget = 1; budget <= maxBudget && mismatches == 0u; ++budget)
+                {
+                    ++runs;
+                    const Snapshot pairs[3][2] = {
+                        {cutMode(0, budget), cutMode(1, budget)},
+                        {runMode(0, budget, false), runMode(1, budget, false)},
+                        {runMode(0, budget, true), runMode(1, budget, true)}};
+                    for (uint32_t kind = 0; kind < 3u; ++kind)
+                    {
+                        const Snapshot &q = pairs[kind][0];
+                        const Snapshot &d = pairs[kind][1];
+                        if (sameSnapshot(q, d))
+                            continue;
+                        ++mismatches;
+                        std::fprintf(stderr, "VB1 differential mismatch: program %u length %u budget %u check %s\n",
+                                     program, length, budget, kind == 0 ? "cut" : kind == 1 ? "resume" : "fresh-execute");
+                        for (uint32_t reg = 0; reg < 32u; ++reg)
+                            if (std::memcmp(q.state.vf[reg], d.state.vf[reg], 16) != 0)
+                                std::fprintf(stderr, "  vf%u queued %g %g %g %g direct %g %g %g %g\n", reg,
+                                             q.state.vf[reg][0], q.state.vf[reg][1], q.state.vf[reg][2], q.state.vf[reg][3],
+                                             d.state.vf[reg][0], d.state.vf[reg][1], d.state.vf[reg][2], d.state.vf[reg][3]);
+                        for (uint32_t reg = 0; reg < 16u; ++reg)
+                            if (q.state.vi[reg] != d.state.vi[reg])
+                                std::fprintf(stderr, "  vi%u queued %d direct %d\n", reg, q.state.vi[reg], d.state.vi[reg]);
+                        std::fprintf(stderr, "  mac %x/%x status %x/%x clip %x/%x q %g/%g p %g/%g cycles %llu/%llu pc %x/%x acc %d data %d\n",
+                                     q.state.mac, d.state.mac, q.state.status, d.state.status, q.state.clip, d.state.clip,
+                                     q.state.q, d.state.q, q.state.p, d.state.p,
+                                     static_cast<unsigned long long>(q.state.cycles), static_cast<unsigned long long>(d.state.cycles),
+                                     q.state.pc, d.state.pc, std::memcmp(q.state.acc, d.state.acc, 16) != 0, q.data != d.data);
+                        for (uint32_t pair = 0; pair < 20u; ++pair)
+                        {
+                            uint32_t lo = 0, up = 0;
+                            std::memcpy(&lo, code.data() + pair * 8u, 4);
+                            std::memcpy(&up, code.data() + pair * 8u + 4u, 4);
+                            std::fprintf(stderr, "  pair %u lower %08x upper %08x\n", pair, lo, up);
+                        }
+                        break;
+                    }
+                }
+            }
+            t.Equals(mismatches, 0u, "direct and queued commits agree at every cut");
+            t.IsTrue(runs > 1000u, "differential covered many cuts");
         });
     });
 }

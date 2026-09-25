@@ -249,13 +249,19 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     if (m_cycle >= ctx.budgetEnd)
         return true;
 
-    // VB1: commit this pair's writes at issue when every landing
-    // (<= kDirectMaxLatency cycles) is inside the budget; flag writes also
-    // need the static no-reader window and an empty flag queue.
+    // VB1: commit this pair's writes at issue when they land inside the
+    // budget (all within kDirectMaxLatency). VF writes also need the static
+    // map's no-supersede bit, VI writes latency 1 (ILW/ILWR stay queued),
+    // flag writes the map's no-reader bit.
     const bool direct = m_directRunOk && m_cycle + kDirectMaxLatency <= ctx.budgetEnd;
+    const uint8_t directMap = direct && m_directFlagSafe != nullptr ? m_directFlagSafe[m_state.pc >> 3] : 0u;
+    const bool directUpperVf = (directMap & kDirectMapUpperVf) != 0u;
+    const bool directLowerVf = (directMap & kDirectMapLowerVf) != 0u;
+    const bool directVi = direct &&
+                          (decoded.lowerUsage.viLatency != 0u ? decoded.lowerUsage.viLatency
+                                                              : decoded.lowerUsage.latency) <= 1u;
     m_directStores = direct;
-    m_directFlags = direct && m_directFlagSafe != nullptr &&
-                    m_directFlagSafe[m_state.pc >> 3] != 0u &&
+    m_directFlags = (directMap & kDirectMapFlags) != 0u &&
                     (m_flagValidMask == 0u || flagQueueAllowsDirect());
 
     // E37: pre-exec snapshot for the pair line (post-stall state). VR1: the
@@ -358,7 +364,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
             decoded.upperUsage.vfLatency != 0u
                 ? decoded.upperUsage.vfLatency
                 : decoded.upperUsage.latency;
-        if (direct)
+        if (directUpperVf)
             directVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
         else
             queueVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
@@ -370,7 +376,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
         const uint32_t latency = decoded.lowerUsage.vfLatency != 0u
                                      ? decoded.lowerUsage.vfLatency
                                      : decoded.lowerUsage.latency;
-        if (direct)
+        if (directLowerVf)
             directVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
         else
             queueVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
@@ -395,7 +401,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
             decoded.lowerUsage.viLatency != 0u
                 ? decoded.lowerUsage.viLatency
                 : decoded.lowerUsage.latency;
-        if (direct)
+        if (directVi)
             directViWrite(writtenVi, newVi, latency);
         else
             queueViWrite(writtenVi, newVi, latency);

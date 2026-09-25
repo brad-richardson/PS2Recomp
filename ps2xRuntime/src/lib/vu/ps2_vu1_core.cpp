@@ -1445,7 +1445,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     // VR1: generated code for this code image, if one was compiled in.
     const RecompProgram *recomp = lookupRecompProgram(vuCode, codeSize, memory);
     // VB1: direct commit (VU1 only, dev traces off).
-    m_directRunOk = m_unit == Unit::VU1 && !m_traceArmed && !m_entryArmed && directCommitEnabled();
+    m_directRunOk = m_unit == Unit::VU1 && !m_traceArmed && !m_entryArmed &&
+                    (m_directOverride < 0 ? directCommitEnabled() : m_directOverride != 0);
     m_directFlagSafe = m_directRunOk
                            ? directFlagMap(vuCode, codeSize,
                                            memory != nullptr && vuCode == memory->getVU1Code())

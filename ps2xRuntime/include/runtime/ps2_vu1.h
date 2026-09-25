@@ -121,6 +121,9 @@ public:
                                  uint64_t hash, const std::string &path);
 
     VU1State &state() { return m_state; }
+    // VB1: test hook for the direct-commit path: -1 follows PS2X_VU1_DIRECT
+    // (default on), 0 queues every write, 1 forces direct commits on.
+    void setDirectCommitForTest(int mode) { m_directOverride = mode; }
     const VU1State &state() const { return m_state; }
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t programStartCount() const { return m_programStartCount; }
@@ -399,12 +402,17 @@ private:
     // orders (VF, VI, ACC, LSU stores) are applied at issue instead of being
     // queued and committed at readyCycle; FMAC/CLIP flag writes too where
     // m_directFlagMap says no flag reader can issue before they would land.
-    // Guards per pair: VU1, dev traces off, all landings inside the budget,
-    // and (flags) no queued flag entry that would commit after them.
+    // Guards per pair: VU1, dev traces off, m_cycle + kDirectMaxLatency <=
+    // budgetEnd (every direct write lands before a budget cut), VF writes
+    // only where the static map shows no newer write can retire them before
+    // they land (the queue drops a superseded write, which a cut would show),
+    // VI writes only at latency 1, and (flags) no queued FSSET; older queued
+    // flag entries are demoted to their sticky OR (demoteQueuedFlags).
     // m_directPendingUntil keeps flushPipelines() cycle-exact.
     static constexpr uint32_t kDirectMaxLatency = 4u;
     static constexpr uint32_t kDirectFlagWindow = 5u;
     bool m_directRunOk = false;
+    int m_directOverride = -1;
     bool m_directStores = false;
     bool m_directFlags = false;
     uint64_t m_directPendingUntil = 0;
@@ -417,7 +425,13 @@ private:
     }
     static bool directCommitEnabled();
     const uint8_t *directFlagMap(const uint8_t *vuCode, uint32_t codeSize, bool tracked);
-    static void buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize, std::vector<uint8_t> &map);
+    // Per-pair bits: kDirectMapFlags (flag writes may commit at issue),
+    // kDirectMapUpperVf / kDirectMapLowerVf (that VF write cannot be
+    // superseded before it lands; see buildDirectFlagMap).
+    static constexpr uint8_t kDirectMapFlags = 1u;
+    static constexpr uint8_t kDirectMapUpperVf = 2u;
+    static constexpr uint8_t kDirectMapLowerVf = 4u;
+    void buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize, std::vector<uint8_t> &map) const;
     void directVfWrite(uint8_t reg, uint8_t laneMask, const float value[4], uint32_t latency);
     void directViWrite(uint8_t reg, int32_t value, uint32_t latency);
     void directAccWrite(uint8_t laneMask, const float value[4], uint32_t latency);
