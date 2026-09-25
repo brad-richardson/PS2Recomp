@@ -146,6 +146,10 @@ struct alignas(16) R5900Context
         std::memset(this, 0, sizeof(*this));
 
         // Initialize VU0 registers
+        // vf0 is hardwired to (0,0,0,1) on VU0. Every context needs it, not only
+        // the main one: guest threads start from R5900Context{} (EeScheduler::
+        // startThread) and COP2 macro code reads vf0w as 1.0 (RD1).
+        vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
         vu0_q = 1.0f; // Q register usually initialized to 1.0
 
         // Reset COP0 registers

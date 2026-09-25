@@ -1444,6 +1444,30 @@ void register_ps2_runtime_kernel_tests()
                       "the scheduler must publish guest execution only around the active guest call");
         });
 
+        tc.Run("RD1: every EE context, incl. StartThread's, has VU0 vf0 = (0,0,0,1)", [](TestCase &t)
+        {
+            // VU0 vf0 is hardwired to (0,0,0,1). SSX 3 builds the player's bind-pose
+            // matrices on a loader thread with vaddw.xyz vf1, vf0, vf0w (= 1,1,1); with
+            // vf0 = 0 every rotation lost its diagonal and the rider collapsed.
+            auto isHardwiredVf0 = [](const R5900Context &c) {
+                alignas(16) float f[4];
+                _mm_store_ps(f, c.vu0_vf[0]);
+                return f[0] == 0.0f && f[1] == 0.0f && f[2] == 0.0f && f[3] == 1.0f;
+            };
+            R5900Context fresh{};
+            t.IsTrue(isHardwiredVf0(fresh), "a default-constructed context must have vf0 = (0,0,0,1)");
+
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+            const int id = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u,
+                                                                0u, 20, 0u});
+            t.Equals(ee.startThread(id, 0u, env.ctx, false), KE_OK, "StartThread should succeed");
+            t.IsTrue(isHardwiredVf0(ee.thread(id)->context),
+                     "a started thread's context must have vf0 = (0,0,0,1)");
+        });
+
         tc.Run("thread lifecycle, nested suspend, WAIT-SUSPEND, and wakeup count are centralized", [](TestCase &t)
         {
             TestEnv env;
