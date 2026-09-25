@@ -106,3 +106,7 @@ namespace
     const bool kSyscallSavestateRegistered =
         ps2_savestate::registerSection("syscalls", {1u, &syscallSave, &syscallLoad, &syscallReady});
 } // namespace
+
+// Referenced from ps2_savestate.cpp: nothing else uses this object, so the
+// static-library link would drop it (and its registration) otherwise.
+void ps2_savestate_linkSyscallSection() { (void)kSyscallSavestateRegistered; }

@@ -242,6 +242,16 @@ void register_ps2_savestate_tests()
             t.Equals(b.gs().csr.load(), uint64_t{0x2008u}, "CSR restored");
         });
 
+        tc.Run("every stateful owner registers a section (static-lib link)", [](TestCase &t)
+        {
+            (void)ps2_savestate::config(); // pulls the syscall section's object in
+            const auto &sections = ps2_savestate::registeredSections();
+            for (const char *key : {"syscalls", "syscalls:k1", "syscalls:deci2", "stub:cd", "stub:sif", "stub:mc",
+                                    "stub:pad", "stub:audio", "stub:dma", "stub:mpeg", "snd", "padlatch",
+                                    "support:Stubs/CD.cpp"})
+                t.IsTrue(sections.count(key) == 1u, std::string("section registered: ") + key);
+        });
+
         tc.Run("load refuses bad files", [](TestCase &t)
         {
             PS2Runtime rt;

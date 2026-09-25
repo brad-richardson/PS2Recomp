@@ -27,6 +27,8 @@
 #include <mach-o/dyld.h>
 #endif
 
+void ps2_savestate_linkSyscallSection(); // Kernel/Syscalls/Savestate.cpp
+
 namespace ps2_savestate
 {
     // ---------------------------------------------------------------- registry
@@ -72,6 +74,7 @@ namespace ps2_savestate
     const Config &config()
     {
         static const Config cfg = [] {
+            ps2_savestate_linkSyscallSection();
             Config c;
             auto env = [](const char *k) -> std::string {
                 const char *v = std::getenv(k);
@@ -538,6 +541,51 @@ namespace ps2_savestate
         for (const auto &[k, hooks] : registeredSections())
             expected[k] = hooks.version;
 
+        // Pass 1: validate every section frame before any state is touched,
+        // so a refused file leaves the fresh machine as it was.
+        {
+            Reader scan = r;
+            std::map<std::string, bool> seen;
+            while (scan.ok() && scan.pos() < scan.size())
+            {
+                if (!scan.beginSection(key, version))
+                    break;
+                auto want = expected.find(key);
+                if (want == expected.end())
+                {
+                    error = "unknown section " + key + " (built without its owner?)";
+                    return false;
+                }
+                if (want->second != version)
+                {
+                    error = "section " + key + " version " + std::to_string(version) + " != " + std::to_string(want->second);
+                    return false;
+                }
+                if (seen[key])
+                {
+                    error = "duplicate section " + key;
+                    return false;
+                }
+                seen[key] = true;
+                scan.skipSection();
+            }
+            if (!scan.ok())
+            {
+                error = scan.error();
+                return false;
+            }
+            for (const auto &[k, v] : expected)
+            {
+                (void)v;
+                if (!seen[k])
+                {
+                    error = "missing section " + k;
+                    return false;
+                }
+            }
+        }
+
+        // Pass 2: apply.
         std::map<std::string, bool> loaded;
         while (r.ok() && r.pos() < r.size())
         {
