@@ -11,7 +11,7 @@
 
 #include <algorithm>
 #include <bit>
-#include <cfenv>
+#include "ps2_fpmode.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1413,8 +1413,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     m_activeGs = &gs;
     m_activeMemory = memory;
 
-    const int previousRoundingMode = std::fegetround();
-    const bool useVuRounding = std::fesetround(FE_TOWARDZERO) == 0;
+    // LX1d: E53 scopes manage MXCSR only, but glibc fegetround() reads
+    // the x87 word (b4cb476) — save/restore via fenv reset MXCSR RC to
+    // nearest on x86 at VU1 first run (tick-94 host split). Use the same
+    // control word the scopes use.
+    const uint64_t previousControl = ps2_fpmode::readControl();
+    ps2_fpmode::writeControl(ps2_fpmode::ps2Control(previousControl));
     const uint64_t budgetEnd = m_cycle + maxCycles;
     const uint64_t entryCycle = m_cycle;
     // E36: arm the dev-only per-program trace (one member branch per pair
@@ -1524,8 +1528,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     m_traceArmed = false;
     m_traceCountKicks = false;
     m_state.cycles = m_cycle;
-    if (useVuRounding && previousRoundingMode != -1)
-        std::fesetround(previousRoundingMode);
+    ps2_fpmode::writeControl(previousControl);
 }
 
 // E36: dev-only trace helpers. The mini-decoders below mirror the
