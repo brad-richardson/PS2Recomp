@@ -1,6 +1,7 @@
 #include "ps2_e3.h" // E3b R3b taps below (self-gated; unset env = no-op)
 #include "ps2_e41_trace.h" // E41 plant watch (default off)
 #include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
+#include <cstdlib> // getenv for the deterministic timezone override
 
 static void setRegU32(R5900Context *ctx, int reg, uint32_t value)
 {
@@ -236,9 +237,20 @@ static bool gmtimeSafe(const std::time_t *t, std::tm *out)
 #endif
 }
 
-static int getTimezoneOffsetMinutes()
+// Host UTC offset in minutes, DST-aware. tm_gmtoff (seconds east of UTC)
+// replaces the old localtime/gmtime mktime round-trip, whose tm_isdst=0
+// gmtime leg forced standard-time interpretation year-round (LX1b: a mini
+// on EDT reported -300 instead of -240). Platforms without tm_gmtoff keep
+// the legacy idiom.
+static int hostTimezoneOffsetMinutes()
 {
     std::time_t now = std::time(nullptr);
+#if defined(__APPLE__) || defined(__linux__)
+    std::tm local{};
+    if (!localtimeSafe(&now, &local))
+        return 0;
+    return static_cast<int>(local.tm_gmtoff / 60);
+#else
     std::tm local{};
     std::tm gmt{};
     if (!localtimeSafe(&now, &local) || !gmtimeSafe(&now, &gmt))
@@ -251,6 +263,57 @@ static int getTimezoneOffsetMinutes()
 
     double diff = std::difftime(localTime, gmtTime);
     return static_cast<int>(diff / 60.0);
+#endif
+}
+
+// Strict decimal-minutes parse for PS2X_TIMEZONE_MINUTES: optional '-',
+// 1+ digits, nothing else. Fails closed to 0 with one diagnostic.
+static int parseTimezoneOverrideMinutes(const char *value)
+{
+    static bool warned = false;
+    if (value == nullptr || value[0] == '\0')
+        return 0;
+    const char *p = value;
+    bool negative = false;
+    if (*p == '-')
+    {
+        negative = true;
+        ++p;
+    }
+    if (*p < '0' || *p > '9')
+        goto invalid;
+    {
+        long number = 0;
+        for (; *p >= '0' && *p <= '9'; ++p)
+        {
+            number = number * 10L + (*p - '0');
+            if (number > 100000L)
+                goto invalid;
+        }
+        if (*p != '\0')
+            goto invalid;
+        if (negative)
+            number = -number;
+        return static_cast<int>(number);
+    }
+invalid:
+    if (!warned)
+    {
+        warned = true;
+        std::fprintf(stderr, "[osd-tz] invalid PS2X_TIMEZONE_MINUTES; using 0\n");
+    }
+    return 0;
+}
+
+static int getTimezoneOffsetMinutes()
+{
+    // LX1b: the OSD timezone leaked the host zone into deterministic runs
+    // (Mac vs Linux split at det-hash tick 39). Pin it under deterministic
+    // mode; PS2X_TIMEZONE_MINUTES overrides with decimal minutes.
+    const char *deterministic = std::getenv("PS2X_DETERMINISTIC");
+    if (deterministic != nullptr && std::strcmp(deterministic, "1") == 0)
+        return parseTimezoneOverrideMinutes(std::getenv("PS2X_TIMEZONE_MINUTES"));
+    return hostTimezoneOffsetMinutes();
 }
 
 static uint32_t packOsdConfig(uint32_t spdifMode, uint32_t screenType, uint32_t videoOutput,

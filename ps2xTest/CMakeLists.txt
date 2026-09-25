@@ -75,6 +75,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_vu1_entry_trace_tests.cpp
     src/ps2_fpu_semantics_tests.cpp
     src/ps2_fpu_cop2_audit_tests.cpp
+    src/ps2_tz_offset_tests.cpp
     src/ps2_mmi_interleave_tests.cpp
     src/ps2_lwu_tests.cpp
     src/ps2_ee_count_tests.cpp

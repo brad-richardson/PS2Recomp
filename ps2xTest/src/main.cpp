@@ -15,6 +15,7 @@ void register_ps2_android_env_tests();
 void register_ps2_thread_affinity_tests();
 void register_ps2_runtime_io_tests();
 void register_ps2_runtime_kernel_tests();
+void register_ps2_tz_offset_tests();
 void register_ps2_runtime_interrupt_tests();
 void register_ps2_memory_tests();
 void register_ps2_vu1_tests();
@@ -65,6 +66,7 @@ int main()
     register_ps2_thread_affinity_tests();
     register_ps2_runtime_io_tests();
     register_ps2_runtime_kernel_tests();
+    register_ps2_tz_offset_tests();
     register_ps2_runtime_interrupt_tests();
     register_ps2_memory_tests();
     register_ps2_vu1_tests();
