@@ -841,6 +841,18 @@ PS2Runtime::PS2Runtime()
     }
     m_missingFunctionPolicy.store(static_cast<uint32_t>(defaultPolicy), std::memory_order_relaxed);
     m_abortOnMissingFunction = defaultPolicy == MissingFunctionPolicy::Stop;
+#if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
+    if (const char *sbrMode = std::getenv("PS2X_SBR_MODE"))
+    {
+        if (std::strcmp(sbrMode, "s64") == 0)
+            m_sbrUseS64 = true;
+        else if (std::strcmp(sbrMode, "s32") == 0)
+            m_sbrUseS64 = false;
+        else
+            std::cerr << "[sbr] invalid PS2X_SBR_MODE '" << sbrMode
+                      << "' (expected s32|s64); using s32" << std::endl;
+    }
+#endif
     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
     m_eeScheduler = std::make_unique<EeScheduler>(*this);
@@ -1840,7 +1852,69 @@ void PS2Runtime::printMissingFunctionCounts() const
         std::cerr << "[coverage:unhandled-rpc] sid=0x" << std::hex << (key >> 32u)
                   << " function=0x" << static_cast<uint32_t>(key)
                   << std::dec << " hits=" << count << std::endl;
+#if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
+    std::cerr << "[sbr:mismatches] pcs=" << m_sbrMismatchCounts.size() << std::endl;
+    for (const auto &[pc, count] : m_sbrMismatchCounts)
+        std::cerr << "[sbr:mismatch] pc=0x" << std::hex << pc
+                  << std::dec << " hits=" << count << std::endl;
+#endif
 }
+
+#if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
+bool PS2Runtime::sbrTripwire(int kind, R5900Context *ctx, uint32_t rs, uint32_t pc)
+{
+    const int32_t s32 = GPR_S32(ctx, rs);
+    const int64_t s64 = GPR_S64(ctx, rs);
+    bool p32 = false;
+    bool p64 = false;
+    switch (kind)
+    {
+    case 0:
+        p32 = s32 < 0;
+        p64 = s64 < 0;
+        break;
+    case 1:
+        p32 = s32 >= 0;
+        p64 = s64 >= 0;
+        break;
+    case 2:
+        p32 = s32 <= 0;
+        p64 = s64 <= 0;
+        break;
+    default:
+        p32 = s32 > 0;
+        p64 = s64 > 0;
+        break;
+    }
+    if (p32 != p64)
+    {
+        uint64_t tick = 0;
+        uint64_t eeCycle = 0;
+        if (m_eeScheduler)
+        {
+            tick = m_eeScheduler->currentVSyncTick();
+            eeCycle = m_eeScheduler->currentEeCycle();
+        }
+        noteSignedBranchMismatch(pc, rs, GPR_U64(ctx, rs), tick, eeCycle);
+    }
+    return m_sbrUseS64 ? p64 : p32;
+}
+
+void PS2Runtime::noteSignedBranchMismatch(uint32_t pc, uint32_t rs, uint64_t value, uint64_t tick, uint64_t eeCycle)
+{
+    std::lock_guard<std::mutex> lock(m_coverageMutex);
+    const bool firstSight = m_sbrMismatchCounts.find(pc) == m_sbrMismatchCounts.end();
+    ++m_sbrMismatchCounts[pc];
+    if (firstSight && m_sbrLoggedPcs < 64u)
+    {
+        ++m_sbrLoggedPcs;
+        std::cerr << "[sbr] pc=0x" << std::hex << pc << std::dec
+                  << " rs=" << rs
+                  << " value=0x" << std::hex << value << std::dec
+                  << " tick=" << tick << " cycle=" << eeCycle << std::endl;
+    }
+}
+#endif
 
 PS2Runtime::MissingFunctionPolicy PS2Runtime::missingFunctionPolicy() const
 {

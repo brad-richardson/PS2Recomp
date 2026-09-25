@@ -2206,6 +2206,11 @@ uint64_t EeScheduler::currentVSyncTick() const noexcept
     return m_vsyncTick;
 }
 
+uint64_t EeScheduler::currentEeCycle() const noexcept
+{
+    return m_eeCycle;
+}
+
 uint32_t EeScheduler::setGsVSyncCallback(uint32_t callback, uint32_t gp, uint32_t sp)
 {
     assertExecutor();

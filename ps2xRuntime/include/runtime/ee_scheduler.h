@@ -335,6 +335,7 @@ public:
     void dispatchIrq(bool dmac, uint32_t cause);
     void setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress);
     [[nodiscard]] uint64_t currentVSyncTick() const noexcept;
+    [[nodiscard]] uint64_t currentEeCycle() const noexcept;
     // E40 Part-6: true while the executor runs a slice of an
     // Interrupt-kind invocation (guest IRQ handler). Read on the
     // executor thread only, like the existing internal uses.

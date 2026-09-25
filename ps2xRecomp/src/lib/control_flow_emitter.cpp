@@ -406,10 +406,10 @@ namespace ps2recomp
             return fmt::format("GPR_U64(ctx, {}) != GPR_U64(ctx, {})", rsReg, rtReg);
         case OPCODE_BLEZ:
         case OPCODE_BLEZL:
-            return fmt::format("GPR_S32(ctx, {}) <= 0", rsReg);
+            return fmt::format("PS2X_SBR_LE(ctx, runtime, {}, 0x{:X})", rsReg, m_branchInst.address);
         case OPCODE_BGTZ:
         case OPCODE_BGTZL:
-            return fmt::format("GPR_S32(ctx, {}) > 0", rsReg);
+            return fmt::format("PS2X_SBR_GT(ctx, runtime, {}, 0x{:X})", rsReg, m_branchInst.address);
         case OPCODE_REGIMM:
             switch (m_branchInst.rt)
             {
@@ -417,12 +417,12 @@ namespace ps2recomp
             case REGIMM_BLTZL:
             case REGIMM_BLTZAL:
             case REGIMM_BLTZALL:
-                return fmt::format("GPR_S32(ctx, {}) < 0", rsReg);
+                return fmt::format("PS2X_SBR_LT(ctx, runtime, {}, 0x{:X})", rsReg, m_branchInst.address);
             case REGIMM_BGEZ:
             case REGIMM_BGEZL:
             case REGIMM_BGEZAL:
             case REGIMM_BGEZALL:
-                return fmt::format("GPR_S32(ctx, {}) >= 0", rsReg);
+                return fmt::format("PS2X_SBR_GE(ctx, runtime, {}, 0x{:X})", rsReg, m_branchInst.address);
             default:
                 return "false";
             }

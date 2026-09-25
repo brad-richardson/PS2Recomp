@@ -1293,6 +1293,21 @@ inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
 #define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : PS2_EXTRACT_EPI64_0(ctx_ptr->r[reg_idx]))
 #define GPR_VEC(ctx_ptr, reg_idx) ((reg_idx == 0) ? _mm_setzero_si128() : ctx_ptr->r[reg_idx])
 
+// SB1 signed-branch predicates (BLTZ/BGEZ/BLEZ/BGTZ families). Release builds
+// evaluate the 64-bit predicate directly (zero tripwire cost); tripwire builds
+// route through PS2Runtime::sbrTripwire, which logs 32/64-bit disagreements.
+#if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
+#define PS2X_SBR_LT(ctx_ptr, rt_ptr, rs_idx, pc_val) ((rt_ptr)->sbrTripwire(0, (ctx_ptr), (rs_idx), (pc_val)))
+#define PS2X_SBR_GE(ctx_ptr, rt_ptr, rs_idx, pc_val) ((rt_ptr)->sbrTripwire(1, (ctx_ptr), (rs_idx), (pc_val)))
+#define PS2X_SBR_LE(ctx_ptr, rt_ptr, rs_idx, pc_val) ((rt_ptr)->sbrTripwire(2, (ctx_ptr), (rs_idx), (pc_val)))
+#define PS2X_SBR_GT(ctx_ptr, rt_ptr, rs_idx, pc_val) ((rt_ptr)->sbrTripwire(3, (ctx_ptr), (rs_idx), (pc_val)))
+#else
+#define PS2X_SBR_LT(ctx_ptr, rt_ptr, rs_idx, pc_val) (GPR_S64((ctx_ptr), (rs_idx)) < 0)
+#define PS2X_SBR_GE(ctx_ptr, rt_ptr, rs_idx, pc_val) (GPR_S64((ctx_ptr), (rs_idx)) >= 0)
+#define PS2X_SBR_LE(ctx_ptr, rt_ptr, rs_idx, pc_val) (GPR_S64((ctx_ptr), (rs_idx)) <= 0)
+#define PS2X_SBR_GT(ctx_ptr, rt_ptr, rs_idx, pc_val) (GPR_S64((ctx_ptr), (rs_idx)) > 0)
+#endif
+
 static inline void Ps2SetGprLow64(R5900Context *ctx, int reg, __m128i new_low)
 {
     if (reg != 0)

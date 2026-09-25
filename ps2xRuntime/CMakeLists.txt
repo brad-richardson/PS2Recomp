@@ -501,6 +501,13 @@ else()
     target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DET_HASH_TAP=0)
 endif()
 
+option(PS2X_ENABLE_SBR_TRIPWIRE "Route signed-branch predicates through the SB1 32/64-bit tripwire" OFF)
+if(PS2X_ENABLE_SBR_TRIPWIRE)
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_SBR_TRIPWIRE=1)
+else()
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_SBR_TRIPWIRE=0)
+endif()
+
 if(PS2X_ENABLE_AGRESSIVE_LOGS)
     target_compile_definitions(ps2_runtime PUBLIC
         AGRESSIVE_LOGS=1

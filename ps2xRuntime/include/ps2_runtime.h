@@ -370,6 +370,12 @@ public:
     void noteUnknownSyscall(uint32_t id);
     void noteUnhandledRpc(uint32_t sid, uint32_t function);
     void printMissingFunctionCounts() const;
+#if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
+    // SB1 tripwire: kind 0=LT 1=GE 2=LE 3=GT. Evaluates the 32-bit and 64-bit
+    // predicates, notes disagreements, returns the PS2X_SBR_MODE selection.
+    bool sbrTripwire(int kind, R5900Context *ctx, uint32_t rs, uint32_t pc);
+    void noteSignedBranchMismatch(uint32_t pc, uint32_t rs, uint64_t value, uint64_t tick, uint64_t eeCycle);
+#endif
 
     static const IoPaths &getIoPaths();
     static void setIoPaths(const IoPaths &paths);
@@ -538,6 +544,11 @@ private:
     std::unordered_map<uint32_t, uint64_t> m_missingFunctionCounts;
     std::unordered_map<uint32_t, uint64_t> m_unknownSyscallCounts;
     std::unordered_map<uint64_t, uint64_t> m_unhandledRpcCounts;
+#if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
+    bool m_sbrUseS64 = false;
+    std::unordered_map<uint32_t, uint64_t> m_sbrMismatchCounts;
+    uint32_t m_sbrLoggedPcs = 0;
+#endif
     std::atomic<bool> m_stopRequested{false};
     DebugUiCallback m_debugUiInitCallback = nullptr;
     DebugUiCallback m_debugUiDrawCallback = nullptr;
