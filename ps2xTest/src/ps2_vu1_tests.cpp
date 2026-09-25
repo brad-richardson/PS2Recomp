@@ -336,6 +336,41 @@ void register_ps2_vu1_tests()
                      "ITOF0 should convert negative fixed-point source bits");
         });
 
+        tc.Run("RP1: MAX/MINI compare raw bits and keep integer data (no denormal flush)", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            // SSX 3's carve trail copies RGBA ints with MAX.xyzw vfN, vfM, vfM.
+            writeVuInstructionPair(fx.code, 0u, 0u, makeVuUpper(0x2Bu, 0xFu, 1u, 1u, 3u)); // MAX vf3, vf1, vf1
+            writeVuInstructionPair(fx.code, 8u, 0u, makeVuUpper(0x2Bu, 0xFu, 2u, 1u, 4u)); // MAX vf4, vf1, vf2
+            writeVuInstructionPair(fx.code, 16u, 0u, makeVuUpper(0x2Fu, 0xFu, 2u, 1u, 5u)); // MINI vf5, vf1, vf2
+            writeVuInstructionPair(fx.code, 24u, 0u, makeVuUpper(0x10u, 0xFu, 1u, 2u, 6u)); // MAXx vf6, vf2, vf1x
+
+            VU1Interpreter vu1;
+            const uint32_t a[4] = {0x6Eu, 0x7Fu, 0x80000001u, 0x3F800000u};
+            const uint32_t b[4] = {0x70u, 0x0u, 0x80000002u, 0xBF800000u};
+            std::memcpy(vu1.state().vf[1], a, sizeof(a));
+            std::memcpy(vu1.state().vf[2], b, sizeof(b));
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                        0u, 0u, 0u, 16u);
+
+            auto bits = [&](int reg) {
+                std::vector<uint32_t> out(4);
+                std::memcpy(out.data(), vu1.state().vf[reg], 16);
+                return out;
+            };
+            t.IsTrue(bits(3) == std::vector<uint32_t>{0x6Eu, 0x7Fu, 0x80000001u, 0x3F800000u},
+                     "MAX of a register with itself is a bit-exact move, integer colours included");
+            t.IsTrue(bits(4) == std::vector<uint32_t>{0x70u, 0x7Fu, 0x80000001u, 0x3F800000u},
+                     "MAX orders denormal bit patterns as sign-magnitude values");
+            t.IsTrue(bits(5) == std::vector<uint32_t>{0x6Eu, 0x0u, 0x80000002u, 0xBF800000u},
+                     "MINI orders denormal bit patterns as sign-magnitude values");
+            t.IsTrue(bits(6) == std::vector<uint32_t>{0x70u, 0x6Eu, 0x6Eu, 0x6Eu},
+                     "MAXbc broadcasts the raw ft component");
+        });
+
         tc.Run("MTIR decodes fsf as a component selector", [](TestCase &t)
         {
             Vu1Fixture fx;
