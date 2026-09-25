@@ -1681,17 +1681,17 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
     m_decodedCodeCacheValid = true;
 }
 
-VU1Interpreter::DecodedInstructionPair VU1Interpreter::getDecodedInstructionPairForPc(
+const VU1Interpreter::DecodedInstructionPair &VU1Interpreter::getDecodedInstructionPairForPc(
     const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc)
 {
     if ((pc & 7u) != 0u)
-        return decodeInstructionPair(vuCode, pc);
+        return m_decodeScratch = decodeInstructionPair(vuCode, pc);
 
     const bool trackedVu1Code = memory != nullptr &&
                                 ((m_unit == Unit::VU1 && vuCode == memory->getVU1Code()) ||
                                  (m_unit == Unit::VU0 && vuCode == memory->getVU0Code()));
     if (!trackedVu1Code)
-        return decodeInstructionPair(vuCode, pc);
+        return m_decodeScratch = decodeInstructionPair(vuCode, pc);
 
     const uint64_t generation = m_unit == Unit::VU1 ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration();
     if (!m_decodedCodeCacheValid ||
@@ -1704,7 +1704,7 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::getDecodedInstructionPair
     }
     const uint32_t pairIndex = pc / 8u;
     if (pairIndex >= kMaxDecodedPairs)
-        return decodeInstructionPair(vuCode, pc);
+        return m_decodeScratch = decodeInstructionPair(vuCode, pc);
     return m_decodedCodeCache[pairIndex];
 }
 
@@ -1833,7 +1833,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
         const bool traceWasBranchPending = m_state.branchPending;
         const uint32_t traceWasBranchTarget = m_state.branchTarget;
 
-        const DecodedInstructionPair decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
+        const DecodedInstructionPair &decoded = getDecodedInstructionPairForPc(vuCode, codeSize, memory, m_state.pc);
         if (decoded.upperUsage.reserved || decoded.lowerUsage.reserved)
         {
             reportReservedInstruction(decoded.upperUsage.reserved, decoded.upperUsage.reserved ? decoded.upper : decoded.lower);

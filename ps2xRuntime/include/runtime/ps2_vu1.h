@@ -230,6 +230,7 @@ private:
     uint64_t m_programStartCount = 0;
 #endif
     std::array<DecodedInstructionPair, kMaxDecodedPairs> m_decodedCodeCache{};
+    DecodedInstructionPair m_decodeScratch{};
     const uint8_t *m_cachedVuCode = nullptr;
     const PS2Memory *m_cachedMemory = nullptr;
     uint32_t m_cachedCodeSize = 0;
@@ -325,7 +326,10 @@ private:
     static void addVfWrite(InstructionUsage &usage, uint8_t reg, uint8_t lanes);
     static uint8_t vfReadLanes(const InstructionUsage &usage, uint8_t reg);
     DecodedInstructionPair decodeInstructionPair(const uint8_t *vuCode, uint32_t pc) const;
-    DecodedInstructionPair getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
+    // E57: returns a reference into the decode cache (or m_decodeScratch for
+    // uncached PCs) instead of a copy. The cache is only rebuilt inside this
+    // call, and nothing between two calls in run() re-enters it.
+    const DecodedInstructionPair &getDecodedInstructionPairForPc(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory, uint32_t pc);
     void rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t codeSize, const PS2Memory *memory, uint64_t generation);
 
     void execUpper(uint32_t instr);
