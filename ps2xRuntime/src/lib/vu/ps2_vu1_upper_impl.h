@@ -11,6 +11,7 @@
 #include <cstring>
 #include <limits>
 #include "ps2_vu1_detail.h"
+#include "ps2_vu1_fmac_impl.h"
 
 namespace ps2_vu1_upper_detail
 {

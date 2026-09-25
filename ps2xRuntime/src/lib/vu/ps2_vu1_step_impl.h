@@ -22,8 +22,17 @@ namespace ps2_vu1_step_detail
     {
         return static_cast<uint8_t>(1u << (3u - component));
     }
+
+    // E57: index of the first clear bit below `count`, or -1 when all
+    // `count` entries are valid (same choice as a first-free linear scan).
+    inline int firstFreeEntry(uint32_t validMask, uint32_t count)
+    {
+        const uint32_t freeBits = ~validMask & ((1u << count) - 1u);
+        return freeBits != 0u ? std::countr_zero(freeBits) : -1;
+    }
 }
 
+using ps2_vu1_step_detail::firstFreeEntry;
 using ps2_vu1_step_detail::laneForComponent;
 
 PS2X_VU1_ALWAYS_INLINE inline uint64_t VU1Interpreter::calculatePairReadyCycle(const DecodedInstructionPair &decoded) const
