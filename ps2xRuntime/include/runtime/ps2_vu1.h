@@ -256,6 +256,23 @@ private:
         uint64_t issueCycle = 0;
         bool active = false;
         bool currentTagEop = false;
+
+        // NP1: per-execute reset used to value-init the whole struct (a 64 KiB
+        // memset on every VU1/VU0 program). The packet bytes need no clearing:
+        // every read is of this-transfer data (the tag parse reads the qword
+        // just written; submit sends [0, totalBytes), all written after the
+        // reset), and no tap hashes the staging buffer. Scalars only.
+        void reset()
+        {
+            sourceAddress = 0;
+            totalBytes = 0;
+            copiedBytes = 0;
+            currentTagEnd = 0;
+            cycleCredit = 0;
+            issueCycle = 0;
+            active = false;
+            currentTagEop = false;
+        }
     };
 
     static constexpr uint32_t kFmacLatency = 4u;

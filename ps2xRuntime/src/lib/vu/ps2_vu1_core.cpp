@@ -82,7 +82,7 @@ void VU1Interpreter::resetScheduler()
     m_viWriteValidMask = 0;
     m_accWriteValidMask = 0;
     m_nextCommitCycle = ~0ull;
-    m_xgkick = {};
+    m_xgkick.reset();
     m_vfReady = {};
     m_viReady = {};
     m_accReady = {};
@@ -774,7 +774,7 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
     }
 
     const uint32_t sourceAddress = (qwordAddress * 16u) % m_activeVuDataSize;
-    m_xgkick = {};
+    m_xgkick.reset();
     m_xgkick.active = true;
     m_xgkick.sourceAddress = sourceAddress;
     m_xgkick.cycleCredit = 1u; // XGKICK's issue cycle counts toward PATH1.
