@@ -169,6 +169,9 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directAccWrite(uint8_t laneMa
 template <bool kStatic>
 PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstructionPair &decoded, RunContext &ctx)
 {
+#if PS2X_ENABLE_DET_HASH_TAP
+    const uint64_t vbStartCycle = m_cycle;
+#endif
     const uint32_t traceIssuePc = m_state.pc;
     const uint32_t traceIssueIdx = traceIssuePc / 8u;
     if (m_traceArmed && traceIssueIdx < m_traceHist.size())
@@ -403,6 +406,10 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     }
 
     advanceOneCycle();
+#if PS2X_ENABLE_DET_HASH_TAP
+    if (m_unit == Unit::VU1)
+        (direct ? m_vbDirectCycles : m_vbQueuedCycles) += m_cycle - vbStartCycle;
+#endif
     return ctx.programEnded;
 }
 

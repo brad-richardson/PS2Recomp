@@ -348,6 +348,10 @@ void VU1Interpreter::queueFsset(uint16_t immediate)
 void VU1Interpreter::queueClip(uint32_t clip)
 {
     m_workingClip = ((m_workingClip << 6) | (clip & 0x3Fu)) & 0xFFFFFFu;
+#if PS2X_ENABLE_DET_HASH_TAP
+    if (m_unit == Unit::VU1)
+        ++(m_directFlags ? m_vbDirectFlagWrites : m_vbQueuedFlagWrites);
+#endif
     if (m_directFlags)
     {
         m_state.clip = m_workingClip;

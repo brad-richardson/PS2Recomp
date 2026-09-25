@@ -90,6 +90,17 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
                      static_cast<unsigned long long>(m_recompCycles),
                      static_cast<unsigned long long>(m_interpCycles),
                      total != 0u ? static_cast<double>(m_recompCycles) / static_cast<double>(total) : 0.0);
+#if PS2X_ENABLE_DET_HASH_TAP
+        const uint64_t pairCycles = m_vbDirectCycles + m_vbQueuedCycles;
+        const uint64_t flagWrites = m_vbDirectFlagWrites + m_vbQueuedFlagWrites;
+        std::fprintf(stderr, "[vu1-direct] direct_cycles=%llu queued_cycles=%llu direct_share=%.4f flag_direct=%llu flag_queued=%llu flag_direct_share=%.4f\n",
+                     static_cast<unsigned long long>(m_vbDirectCycles),
+                     static_cast<unsigned long long>(m_vbQueuedCycles),
+                     pairCycles != 0u ? static_cast<double>(m_vbDirectCycles) / static_cast<double>(pairCycles) : 0.0,
+                     static_cast<unsigned long long>(m_vbDirectFlagWrites),
+                     static_cast<unsigned long long>(m_vbQueuedFlagWrites),
+                     flagWrites != 0u ? static_cast<double>(m_vbDirectFlagWrites) / static_cast<double>(flagWrites) : 0.0);
+#endif
     }
     const uint64_t generation = memory->getVU1CodeGeneration();
     if (m_recompValid && m_recompCode == vuCode && m_recompCodeSize == codeSize &&

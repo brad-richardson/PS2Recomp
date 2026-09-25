@@ -466,6 +466,15 @@ private:
     // musttail hand-off into a real call).
     void issueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask);
     uint32_t m_storeScratch[4]{};
+#if PS2X_ENABLE_DET_HASH_TAP
+    // VB1 stats (hash builds only; printed with PS2X_VU1_RECOMP_STATS=1):
+    // VU1 cycles spent in pairs issued with direct commits (stall included)
+    // vs queued, and FMAC/CLIP flag writes applied directly vs queued.
+    uint64_t m_vbDirectCycles = 0;
+    uint64_t m_vbQueuedCycles = 0;
+    uint64_t m_vbDirectFlagWrites = 0;
+    uint64_t m_vbQueuedFlagWrites = 0;
+#endif
     void queueVfWrite(uint8_t reg, uint8_t laneMask, const float value[4], uint32_t latency);
     void queueViWrite(uint8_t reg, int32_t value, uint32_t latency);
     void queueAccWrite(uint8_t laneMask, const float value[4], uint32_t latency);
