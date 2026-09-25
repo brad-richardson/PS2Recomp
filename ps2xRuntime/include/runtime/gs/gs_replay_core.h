@@ -8,10 +8,9 @@
 // parallel backend; no desktop test-harness symbol here (the harness must not
 // ship in the app). Behavior is unchanged: ordered path+priv+transfer+marker processing,
 // Present descriptor, tick2050 selected capture, 4 MiB snapshot and 448-tile
-// census flow through the same call sequence; the desktop-only N8D7M5
-// word-watch block is preserved verbatim behind PS2X_GS_REPLAY_WORD_WATCH
-// (defined for that TU only when PS2X_BUILD_TEST=ON; Android-target builds
-// omit it entirely) and stays inert unless PS2X_GS_REPLAY_WORDS is set.
+// census flow through the same call sequence. (TL1 Part 1b: the desktop-only
+// N8D7M5 word-watch is removed; the folded core has no probe-code
+// dependency. The wordsOk field stays as API and is always true.)
 // Unset PS2X_GS_REPLAY_CAPTURE remains a skip.
 // Normal runtime boot is untouched (no main.cpp change in Part 1).
 
@@ -34,7 +33,7 @@ Ps2xGsReplayReadResult ps2x_gs_replay_read_event(FILE *f, uint32_t &length,
                                                  std::vector<uint8_t> &record);
 
 // Narrow result/error API for one replay run. Console emission keeps the
-// existing GB4_REPLAY_SUMMARY / GB4_FRAME / GB4_REPLAY / [n8d7m5] formats so
+// existing GB4_REPLAY_SUMMARY / GB4_FRAME / GB4_REPLAY formats so
 // Mac controls compare line-for-line; the result carries the outcome for the
 // caller to assert (desktop test) or gate (future Android branch).
 struct Ps2xGsReplayResult
@@ -44,7 +43,7 @@ struct Ps2xGsReplayResult
     bool headerOk = true; // PS2XGSC1 magic present
     bool rtzOk = true; // PS2X_GS_REPLAY_RTZ empty/path1/all
     bool pathFileOk = true; // PS2X_GS_REPLAY_PATH_FILE (when set) parses
-    bool wordsOk = true; // PS2X_GS_REPLAY_WORDS (when set) parses
+    bool wordsOk = true; // TL1 Part 1b: word-watch removed; always true
     bool backendOk = true; // parallel backend available when requested
     bool parseOk = false; // every record decoded cleanly to EOF marker
     bool packetTraceOk = true; // PS2X_GS_REPLAY_PACKET_TRACE written (when set)

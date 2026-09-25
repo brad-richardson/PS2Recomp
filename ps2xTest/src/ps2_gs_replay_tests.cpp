@@ -36,10 +36,7 @@ namespace
         t.IsTrue(result.pathFileOk, "invalid PS2X_GS_REPLAY_PATH_FILE");
         if (!result.pathFileOk)
             return;
-        t.IsTrue(result.wordsOk,
-                 "invalid PS2X_GS_REPLAY_WORDS (comma hex bytes, 4-aligned, <VRAM, <=8)");
-        if (!result.wordsOk)
-            return;
+        // TL1 Part 1b: word-watch removed; result.wordsOk is always true.
 
         if (std::getenv("PS2X_GS_REPLAY_PACKET_TRACE"))
             t.IsTrue(result.packetTraceOk, "GB4 packet trace written");
