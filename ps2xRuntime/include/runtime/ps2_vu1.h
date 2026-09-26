@@ -22,8 +22,8 @@ using VuWide = double;
 
 // VR4 D1: the vector form of the exact FMAC core (ps2_vu1_fmac_simd.h) needs
 // clang/GCC vector extensions and VuWide == double. PS2X_VU1_FMAC_SIMD (CMake
-// option, default off) makes it the form execUpperImpl uses; the scalar form
-// stays as the reference either way.
+// option, default on) makes it the form execUpperImpl uses; the scalar form
+// stays as the reference either way. Builds outside CMake default to scalar.
 #ifndef PS2X_VU1_FMAC_SIMD
 #define PS2X_VU1_FMAC_SIMD 0
 #endif

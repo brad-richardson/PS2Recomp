@@ -516,9 +516,15 @@ else()
     target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DET_HASH_TAP=0)
 endif()
 
-# VR4 D1: vector form of the exact VU FMAC core (ps2_vu1_fmac_simd.h); the
-# scalar form stays as the reference. Needs clang/GCC vector extensions.
-option(PS2X_VU1_FMAC_SIMD "Use the vector form of the exact VU FMAC core" OFF)
+# VR4 D1: vector form of the exact VU FMAC core (ps2_vu1_fmac_simd.h), on by
+# default (VR4 gate: bit-exact vs the scalar form, det-identical). The scalar
+# form stays compiled as the reference and for -DPS2X_VU1_FMAC_SIMD=OFF.
+# Needs clang/GCC vector extensions.
+option(PS2X_VU1_FMAC_SIMD "Use the vector form of the exact VU FMAC core" ON)
+if(PS2X_VU1_FMAC_SIMD AND MSVC)
+    message(STATUS "PS2X: MSVC has no vector extensions; VU FMAC core stays scalar")
+    set(PS2X_VU1_FMAC_SIMD OFF)
+endif()
 if(PS2X_VU1_FMAC_SIMD)
     target_compile_definitions(ps2_runtime PUBLIC PS2X_VU1_FMAC_SIMD=1)
 else()

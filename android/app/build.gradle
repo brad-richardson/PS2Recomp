@@ -12,8 +12,8 @@ def ps2xJniLibsDir = project.findProperty('ps2xJniLibsDir') ?: ''
 def ps2xVu1RecompDir = project.findProperty('ps2xVu1RecompDir') ?: ''
 // VR3: generated VU0 images (vu0_<hash>.cpp); used only with PS2X_VU0_RECOMP=1 at run time.
 def ps2xVu0RecompDir = project.findProperty('ps2xVu0RecompDir') ?: ''
-// VR4 D1: vector FMAC core (CMake PS2X_VU1_FMAC_SIMD), ON/OFF.
-def ps2xVu1FmacSimd = project.findProperty('ps2xVu1FmacSimd') ?: 'OFF'
+// VR4 D1: vector FMAC core (CMake PS2X_VU1_FMAC_SIMD), ON/OFF (default ON).
+def ps2xVu1FmacSimd = project.findProperty('ps2xVu1FmacSimd') ?: 'ON'
 
 android {
     namespace 'com.ps2x.runner'
