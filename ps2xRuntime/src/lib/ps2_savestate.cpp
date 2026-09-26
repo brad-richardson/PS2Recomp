@@ -2,6 +2,7 @@
 // PS2Memory / PS2Runtime / VU / GS / SND sections. See ps2_savestate.h.
 
 #include "runtime/ps2_savestate.h"
+#include "ps2_mtvu.h"
 #include "ps2_savestate_internal.h"
 
 #include "ps2_runtime.h"
@@ -756,6 +757,7 @@ std::string PS2RuntimeSavestate::ready(const PS2Runtime &rt)
 
 void PS2RuntimeSavestate::saveMemory(const PS2Memory &m, Writer &w)
 {
+    ps2_mtvu::sync(ps2_mtvu::Reason::SaveState); // MT1: no unit job spans a state
     w.bytes(m.m_rdram, PS2_RAM_SIZE);
     w.bytes(m.m_scratchpad, PS2_SCRATCHPAD_SIZE);
     w.bytes(m.iop_ram, 2u * 1024u * 1024u);
@@ -813,6 +815,7 @@ void PS2RuntimeSavestate::saveMemory(const PS2Memory &m, Writer &w)
 
 bool PS2RuntimeSavestate::loadMemory(PS2Memory &m, Reader &r)
 {
+    ps2_mtvu::sync(ps2_mtvu::Reason::SaveState); // MT1: no unit job spans a state
     r.bytes(m.m_rdram, PS2_RAM_SIZE);
     r.bytes(m.m_scratchpad, PS2_SCRATCHPAD_SIZE);
     r.bytes(m.iop_ram, 2u * 1024u * 1024u);
@@ -1077,6 +1080,7 @@ std::string GSSavestate::ready(const GS &gs)
 
 void GSSavestate::save(GS &gs, Writer &w)
 {
+    ps2_mtvu::sync(ps2_mtvu::Reason::SaveState); // MT1: no unit job spans a state
     std::lock_guard<std::recursive_mutex> lock(gs.m_stateMutex);
     w.pod(gs.m_ctx);
     w.pod(gs.m_prim);
@@ -1116,6 +1120,7 @@ void GSSavestate::save(GS &gs, Writer &w)
 
 bool GSSavestate::load(GS &gs, Reader &r)
 {
+    ps2_mtvu::sync(ps2_mtvu::Reason::SaveState); // MT1: no unit job spans a state
     std::lock_guard<std::recursive_mutex> lock(gs.m_stateMutex);
     r.pod(gs.m_ctx);
     r.pod(gs.m_prim);

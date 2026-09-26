@@ -11,6 +11,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_stream_capture.h"
 #include "ps2_log.h"
+#include "ps2_mtvu.h"
 #include <atomic>
 #include <array>
 #include <cstring>
@@ -700,11 +701,16 @@ const uint8_t *PS2Memory::mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t
     {
         return ptr;
     }
+    // MT1: VU1 memory is unit-owned; the EE waits for queued unit work first.
     if (const uint8_t *ptr = mapRange(PS2_VU1_CODE_BASE, PS2_VU1_CODE_SIZE, m_vu1Code))
     {
+        ps2_mtvu::sync(ps2_mtvu::Reason::Vu1Mem);
         return ptr;
     }
-    return mapRange(PS2_VU1_DATA_BASE, PS2_VU1_DATA_SIZE, m_vu1Data);
+    const uint8_t *ptr = mapRange(PS2_VU1_DATA_BASE, PS2_VU1_DATA_SIZE, m_vu1Data);
+    if (ptr)
+        ps2_mtvu::sync(ps2_mtvu::Reason::Vu1Mem);
+    return ptr;
 }
 
 uint32_t PS2Memory::translateAddress(uint32_t virtualAddress)
@@ -886,6 +892,7 @@ uint32_t PS2Memory::read32(uint32_t address)
 
     if (isGsPrivReg(address))
     {
+        ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivRead); // MT1: CSR/SIGLBLID are unit-written
         uint32_t off = address & 7;
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
         if (regOff == kGsCsrRegOffset)
@@ -939,6 +946,7 @@ uint64_t PS2Memory::read64(uint32_t address)
 
     if (isGsPrivReg(address))
     {
+        ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivRead); // MT1: CSR/SIGLBLID are unit-written
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
         if (regOff == kGsCsrRegOffset)
         {
@@ -1016,6 +1024,7 @@ __m128i PS2Memory::read128(uint32_t address)
 
 void PS2Memory::gsPrivStore(std::function<void()> apply, uint32_t captureAddress)
 {
+    ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite); // MT1: in stream order after unit packets
     if (m_gsFrontend)
     {
         if (ps2x_gs_capture::enabled())
@@ -1085,6 +1094,7 @@ void PS2Memory::gsPrivStore(std::function<void()> apply, uint32_t captureAddress
 
 void PS2Memory::gsPrivSync()
 {
+    ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivSync);
     if (m_gsFrontend)
         m_gsFrontend->drainQueue();
 }
@@ -1339,7 +1349,14 @@ void PS2Memory::write128(uint32_t address, __m128i value)
             ps2_mpg_src_trace::setPayMap(
                 nullptr, 0u, nullptr, 0u, ps2_mpg_src_trace::PayFifo, 0u);
         }
-        processVIF1Data(packet, sizeof(packet));
+        {
+            // MT1: a FIFO quadword is a 16-byte unit job (D/T rule as for DMA).
+            const bool dt = ps2_mtvu::active() && ps2_mtvu::dtFallback();
+            if (dt)
+                ps2_mtvu::sync(ps2_mtvu::Reason::DtFallback);
+            ps2_mtvu::JobScope mtvuScope(!dt, 'f');
+            processVIF1Data(packet, sizeof(packet));
+        }
         if (e40Pay)
         {
             ps2_mpg_src_trace::clearPayMap();
@@ -1495,6 +1512,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
     if (address >= 0x10003C00u && address < 0x10003E00u)
     {
+        ps2_mtvu::sync(ps2_mtvu::Reason::Vif1Reg); // MT1: vif1_regs are unit-owned
         m_vifWriteCount.fetch_add(1, std::memory_order_relaxed);
 
         switch (address)
@@ -2070,6 +2088,21 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 void PS2Memory::processPendingTransfers()
 {
     const bool hadGif = !m_pendingGifTransfers.empty();
+    // MT1: the GIF + VIF1 work and the drain below are one unit job; VIF0 and
+    // the completion stay on the EE. Census only (PS2X_MTVU); off = no-op.
+    bool mtvuJob = false;
+    if (ps2_mtvu::active() && (hadGif || !m_pendingVif1Transfers.empty()))
+    {
+        if (!m_pendingVif1Transfers.empty() && ps2_mtvu::dtFallback())
+            ps2_mtvu::sync(ps2_mtvu::Reason::DtFallback);
+        else
+            mtvuJob = true;
+        for (const auto *list : {&m_pendingGifTransfers, &m_pendingVif1Transfers})
+            for (const auto &p : *list)
+                if (p.chainData.empty() && p.qwc > 0)
+                    ps2_mtvu::noteSnapshot(m_rdram, std::min<size_t>(static_cast<size_t>(p.qwc) * 16u, PS2_RAM_SIZE));
+    }
+    ps2_mtvu::JobScope mtvuScope(mtvuJob, 'd');
     for (size_t idx = 0; idx < m_pendingGifTransfers.size(); ++idx)
     {
         auto &p = m_pendingGifTransfers[idx];
@@ -2142,6 +2175,7 @@ void PS2Memory::processPendingTransfers()
     }
     m_pendingGifTransfers.clear();
 
+    mtvuScope.pause();
     const bool hadVif0 = !m_pendingVif0Transfers.empty();
     for (auto &p : m_pendingVif0Transfers)
     {
@@ -2200,6 +2234,7 @@ void PS2Memory::processPendingTransfers()
     }
     m_pendingVif0Transfers.clear();
 
+    mtvuScope.resume();
     const bool hadVif1 = !m_pendingVif1Transfers.empty();
     // E40 Part-3: install the payload source map around each delivery
     // (dev-only; one atomic check when off).
@@ -2307,6 +2342,7 @@ void PS2Memory::processPendingTransfers()
         const GifDrainBatch batch(m_gsFrontend);
         m_gifArbiter->drain();
     }
+    mtvuScope.pause();
 
     static constexpr uint32_t GIF_CHANNEL = 0x1000A000;
     static constexpr uint32_t VIF0_CHANNEL = 0x10008000;
@@ -2414,6 +2450,7 @@ std::vector<uint32_t> PS2Memory::splitGifPacketsAtEop(const uint8_t *data, uint3
 
 void PS2Memory::releaseOneMaskedPath3Packet()
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
     if (!path3EopGateEnabled())
     {
         flushMaskedPath3Packets();
@@ -2450,6 +2487,7 @@ void PS2Memory::drainPath3IfUnmasked()
 
 void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
     if (m_path3Masked || m_path3MaskedFifo.empty())
         return;
 
@@ -2484,6 +2522,7 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
 
 void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
     if (!data || sizeBytes < 16)
         return;
 

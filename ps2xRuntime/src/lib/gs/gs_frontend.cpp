@@ -3,6 +3,7 @@
 #include "runtime/gs/ps2_gs_shadow.h"
 #include "ps2_e7.h"
 #include "ps2_gfx_stats.h"
+#include "ps2_mtvu.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_stream_capture.h"
 #include "ps2_e4.h"
@@ -208,6 +209,7 @@ bool GS::setQueueEnabled(bool enabled)
 
 void GS::drainQueue()
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsDrain); // MT1: unit-owned
     if (!m_worker || t_inGsWorker)
         return;
     if (m_worker->isQuiescent())
@@ -450,6 +452,7 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 
 void GS::reset()
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsReset); // MT1: unit-owned
     if (m_worker && !t_inGsWorker)
     {
         GsCommand cmd;
@@ -1090,6 +1093,7 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsProcess); // MT1: unit-owned
     if (m_worker && !t_inGsWorker)
     {
         if (!data || sizeBytes < 16)
@@ -1212,6 +1216,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsNative); // MT1: unit-owned
     if (m_worker && !t_inGsWorker)
     {
         // The DMA-chain caller needs the verdict synchronously, but the
@@ -1277,6 +1282,7 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
                            const uint8_t *data,
                            uint32_t sizeBytes)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsNative); // MT1: unit-owned
     if (m_worker && !t_inGsWorker)
     {
         if (!data || sizeBytes == 0)
@@ -1575,6 +1581,7 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsWriteReg); // MT1: unit-owned
     if (m_worker && !t_inGsWorker)
     {
         GsCommand cmd;
@@ -1599,6 +1606,7 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
 
 void GS::privWrite(std::function<void()> apply)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsPriv); // MT1: unit-owned
     if (!apply)
         return;
     if (m_worker && !t_inGsWorker)
@@ -2222,6 +2230,7 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsClear); // MT1: unit-owned
     if (m_worker && !t_inGsWorker)
     {
         GsCommand cmd;
@@ -2242,6 +2251,7 @@ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 
 bool GS::clearActiveFramebuffer(uint32_t rgba)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsClear); // MT1: unit-owned
     if (m_worker && !t_inGsWorker)
     {
         GsCommand cmd;
@@ -2259,6 +2269,7 @@ bool GS::clearActiveFramebuffer(uint32_t rgba)
 
 uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsReadback); // MT1: unit-owned
     if (m_worker && !t_inGsWorker)
     {
         GsCommand cmd;

@@ -1,4 +1,5 @@
 #include "ps2_runtime.h"
+#include "ps2_mtvu.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e43_trace.h"
@@ -1286,6 +1287,16 @@ bool PS2Runtime::syncCoreSubsystems()
     m_gifArbiter.setShadowPacketFn([](GifPathId path, const uint8_t *data, uint32_t size)
                                    { ps2x_gs_shadow::onGifPacket(static_cast<uint32_t>(path), data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
+    // MT1 map #10: CFC2 VPU_STAT / CTC2 FBRST are inline in generated code, so
+    // VIF1 work runs inline (after a sync) when the kicking context has VU1
+    // D/T stops enabled or pending; otherwise every VU1 run leaves bits 9/10
+    // clear and the callbacks' VPU_STAT write is a no-op.
+    ps2_mtvu::setDtFallbackFn([this]()
+                              {
+                                  const R5900Context *c = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+                                  if (!c)
+                                      c = &m_cpuContext;
+                                  return (c->vu0_fbrst & 0x0C00u) != 0u || (c->vu0_vpu_stat & 0x0600u) != 0u; });
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
@@ -2979,6 +2990,7 @@ void PS2Runtime::vu1StartMicroProgramFromEe(R5900Context *ctx, uint32_t cmsar1)
     // PCSX2 vu1ExecMicro(addr): TPC = addr (instruction index), run from TPC*8
     // with the VIF1 TOP/ITOP the VU sees through XTOP/XITOP.
     const uint32_t startPC = (cmsar1 & 0x7FFu) << 3;
+    ps2_mtvu::sync(ps2_mtvu::Reason::Cmsar1); // MT1: runs inline on the EE
     VIFRegisters &vif1 = m_memory.vif1_regs;
     m_vu1.state().dBitEnabled = (ctx->vu0_fbrst & (1u << 10)) != 0u;
     m_vu1.state().tBitEnabled = (ctx->vu0_fbrst & (1u << 11)) != 0u;
@@ -3821,6 +3833,7 @@ void PS2Runtime::kickGifDmaChainFromMMIO(uint8_t *rdram,
     constexpr uint32_t D_STAT = 0x1000E010u;
     constexpr uint32_t GIF_TADR = 0x1000A030u;
     constexpr uint32_t GIF_CHCR = 0x1000A000u;
+    ps2_mtvu::sync(ps2_mtvu::Reason::NativeGif); // MT1: native GIF paths drive the GS directly
 
     ps2TraceGuestWrite(rdram, D_PCR, 4u, dPcrValue, 0u, "WRITE32", ctx);
     m_memory.writeIORegister(D_PCR, dPcrValue);

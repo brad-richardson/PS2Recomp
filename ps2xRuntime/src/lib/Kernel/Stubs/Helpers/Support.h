@@ -1,3 +1,4 @@
+#include "ps2_mtvu.h"
 #include <algorithm>
 #include <cctype>
 
@@ -1897,6 +1898,7 @@ namespace
     {
         if (!runtime || !pairs || !runtime->syncCoreSubsystems())
             return;
+        ps2_mtvu::sync(ps2_mtvu::Reason::GsHle); // MT1: HLE drives the GS directly
         for (size_t i = 0; i < pairCount; ++i)
         {
             runtime->gs().writeRegister(static_cast<uint8_t>(pairs[i].reg & 0xFFu), pairs[i].value);

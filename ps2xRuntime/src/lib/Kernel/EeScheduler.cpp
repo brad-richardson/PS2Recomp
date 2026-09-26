@@ -1,4 +1,5 @@
 #include "runtime/ee_scheduler.h"
+#include "ps2_mtvu.h"
 #include "runtime/ps2_savestate.h"
 #include "../ps2_savestate_internal.h"
 #include "runtime/ee_guest_unwind.h"
@@ -2928,6 +2929,9 @@ void EeScheduler::processEvent(const EeEvent &event)
             const int64_t paceSleepNs = m_vsyncPacer.onVsync(paceNowNs);
             ps2_vsync_pacer::sleepNsUntil(paceNowNs, paceSleepNs);
         }
+        // MT1: VBlankStart touches the GS, the det-hash and the vsync tick the
+        // unit reads, so queued unit work completes here (after the pacer).
+        ps2_mtvu::vblank(m_vsyncTick + 1u);
         ++m_vsyncTick;
         if (m_vsyncTick == coverageTick())
         {

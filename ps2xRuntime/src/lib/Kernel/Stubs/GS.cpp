@@ -3,6 +3,7 @@
 #include "ps2_e44_trace.h"
 #include "GS.h"
 #include "ps2_log.h"
+#include "ps2_mtvu.h"
 #include "runtime/gs/ps2_gs_common.h"
 #include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/ee_scheduler.h"
@@ -112,6 +113,7 @@ namespace ps2_stubs
 
         void applyGsClearPacket(PS2Runtime *runtime, const GsClearMem &clear)
         {
+            ps2_mtvu::sync(ps2_mtvu::Reason::GsHle); // MT1: HLE drives the GS directly
             if (!runtime->syncCoreSubsystems() || !hasSeededGsClearPacket(clear))
             {
                 return;
@@ -763,6 +765,7 @@ namespace ps2_stubs
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dstAddr,
                                           totalImageBytes, rdram, "gs-store-image",
                                           "gs-image", 0u);
+        ps2_mtvu::sync(ps2_mtvu::Reason::GsHle); // MT1: GS->host readback
         runtime->gs().consumeLocalToHostBytes(dst, totalImageBytes);
         runtime->guestFree(pktAddr);
 
@@ -1195,6 +1198,7 @@ namespace ps2_stubs
             if (hasSeededGsClearPacket(db.clear0))
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear0.prim.value >> 9) & 0x1u);
+                ps2_mtvu::sync(ps2_mtvu::Reason::GsHle);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear0.rgbaq.value));
             }
             applyGsClearPacket(runtime, db.clear0);
@@ -1206,6 +1210,7 @@ namespace ps2_stubs
             if (hasSeededGsClearPacket(db.clear1))
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear1.prim.value >> 9) & 0x1u);
+                ps2_mtvu::sync(ps2_mtvu::Reason::GsHle);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear1.rgbaq.value));
             }
             applyGsClearPacket(runtime, db.clear1);

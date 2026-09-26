@@ -1,4 +1,5 @@
 #include "runtime/gs/ps2_gif_arbiter.h"
+#include "ps2_mtvu.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -75,6 +76,7 @@ bool GifArbiter::isImagePacket(const uint8_t *data, uint32_t sizeBytes)
 
 void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::ArbSubmit); // MT1: unit-owned
     if (!data || sizeBytes < 16 || !m_processFn)
         return;
 
@@ -92,6 +94,8 @@ void GifArbiter::drain()
 {
     if (!m_processFn)
         return;
+    if (!m_queue.empty())
+        ps2_mtvu::touch(ps2_mtvu::Site::ArbDrain); // MT1: unit-owned
 
     std::stable_sort(m_queue.begin(), m_queue.end(),
                      [](const GifArbiterPacket &a, const GifArbiterPacket &b)
