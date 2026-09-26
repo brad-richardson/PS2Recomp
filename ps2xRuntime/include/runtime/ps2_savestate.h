@@ -308,6 +308,12 @@ namespace ps2_savestate
         map.rehash(static_cast<size_t>(buckets));
         if (map.bucket_count() != buckets)
             return r.fail("ordered-map bucket count not reproducible");
+        // Saved key order, copied before the moves below (entries with
+        // string keys are moved-from by the insert loop).
+        std::vector<typename Map::key_type> savedKeys;
+        savedKeys.reserve(entries.size());
+        for (const auto &e : entries)
+            savedKeys.push_back(orderedKey<Map>(e));
         for (auto it = entries.rbegin(); it != entries.rend(); ++it)
             map.insert(std::move(*it));
         if (map.bucket_count() != buckets || map.size() != n)
@@ -315,7 +321,7 @@ namespace ps2_savestate
         size_t i = 0;
         for (const auto &live : map)
         {
-            if (i >= entries.size() || orderedKey<Map>(live) != orderedKey<Map>(entries[i]))
+            if (i >= savedKeys.size() || orderedKey<Map>(live) != savedKeys[i])
                 return r.fail("ordered-map iteration order not reproducible");
             ++i;
         }

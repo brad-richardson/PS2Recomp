@@ -148,6 +148,36 @@ void register_ps2_savestate_tests()
             t.IsTrue(order(sa) == order(sb), "set iteration order identical");
         });
 
+        tc.Run("ordered-map round trip covers empty and string-keyed maps", [](TestCase &t)
+        {
+            std::unordered_map<int, uint32_t> empty;
+            Writer w;
+            ps2_savestate::writeOrderedPod(w, empty);
+            std::unordered_map<int, uint32_t> emptyBack;
+            emptyBack[1] = 2u; // restore replaces existing content
+            Reader r(w.buf.data(), w.buf.size());
+            t.IsTrue(ps2_savestate::readOrderedPod(r, emptyBack), "empty map reads back");
+            t.IsTrue(emptyBack.empty(), "restored map is empty");
+
+            std::unordered_map<std::string, int32_t> a;
+            for (int i = 0; i < 50; ++i)
+                a["mod/path_" + std::to_string(i * 7 % 50)] = i;
+            Writer ws;
+            ps2_savestate::writeOrdered(ws, a, [](Writer &ww, const auto &e) {
+                ww.str(e.first);
+                ww.pod(e.second);
+            });
+            std::unordered_map<std::string, int32_t> b;
+            Reader rs(ws.buf.data(), ws.buf.size());
+            t.IsTrue(ps2_savestate::readOrdered(rs, b, [](Reader &rr, auto &e) {
+                e.first = rr.str();
+                rr.pod(e.second);
+            }),
+                     "string-keyed map reads back");
+            t.IsTrue(order(a) == order(b), "string-keyed iteration order identical");
+            t.IsTrue(a == b, "string-keyed contents identical");
+        });
+
         tc.Run("sha256 and pad-script prefix", [](TestCase &t)
         {
             const std::string abc = "abc";
