@@ -905,5 +905,143 @@ void register_ps2_gs_queue_tests()
             t.Equals(off.seq, 0ull, "default-off snapshot should stay silent");
             t.Equals(off.commands, 0ull, "default-off count should stay silent");
         });
+
+        // GF1 H3: deferred wakes deliver every command, in order, with far
+        // fewer wakes than batches; job-end flushes leave nothing stale.
+        tc.Run("GF1 deferred wakes keep FIFO order and cut wakes", [](TestCase &t)
+        {
+            std::vector<uint32_t> seen;
+            GsWorker worker(0u, 0u, [&](GsCommand &cmd) { seen.push_back(cmd.u32b); });
+            worker.setDeferredWakes(64u, 256u * 1024u);
+            worker.start();
+            uint32_t next = 0;
+            uint64_t rng = 0x9E3779B97F4A7C15ull;
+            for (int job = 0; job < 200; ++job)
+            {
+                rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                const int drains = 1 + static_cast<int>(rng % 40u);
+                for (int d = 0; d < drains; ++d)
+                {
+                    worker.beginBatch();
+                    GsCommand c;
+                    c.kind = GsCmdKind::GifPacket;
+                    c.u32b = next++;
+                    c.bytes.resize(16u + (rng % 64u) * 16u, 0x5Au);
+                    worker.enqueue(std::move(c));
+                    worker.endBatch(true);
+                    if ((rng >> 20) % 7u == 0u)
+                        std::this_thread::sleep_for(std::chrono::microseconds(rng % 300u));
+                }
+                worker.flushWake(); // unit job end
+            }
+            worker.stop();
+            t.Equals(static_cast<uint64_t>(seen.size()), static_cast<uint64_t>(next), "every command should execute");
+            bool ordered = true;
+            for (size_t i = 0; i < seen.size(); ++i)
+                ordered = ordered && seen[i] == static_cast<uint32_t>(i);
+            t.IsTrue(ordered, "commands should execute in FIFO order");
+            t.Equals(worker.watchdogCount(), 0ull, "no deferred wake should go stale with job-end flushes");
+            t.IsTrue(worker.wakeCount() < static_cast<uint64_t>(next), "deferred wakes should notify less than once per drain");
+        });
+
+        // GF1 H3: a batch that fills the queue while the worker sleeps must
+        // not hang (the producer wakes the worker before it blocks).
+        tc.Run("GF1 a batch that fills the queue wakes the worker before blocking", [](TestCase &t)
+        {
+            std::atomic<int> executed{0};
+            GsWorker worker(8u, 0u, [&](GsCommand &) { executed.fetch_add(1, std::memory_order_relaxed); });
+            worker.setDeferredWakes(1024u, 64u * 1024u * 1024u);
+            worker.start();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20)); // worker asleep on an empty queue
+            worker.beginBatch();
+            for (int i = 0; i < 100; ++i)
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.bytes.resize(16u, 1u);
+                worker.enqueue(std::move(c));
+            }
+            worker.endBatch(true);
+            worker.flushWake();
+            worker.stop();
+            t.Equals(executed.load(std::memory_order_relaxed), 100, "all 100 commands should execute");
+        });
+
+        // GF1 H3: an RPC from another thread is never held back by an open
+        // unit batch (its caller waits on it).
+        tc.Run("GF1 an RPC enqueued during another thread's batch is delivered", [](TestCase &t)
+        {
+            GsWorker worker(0u, 0u, [](GsCommand &) {});
+            worker.setDeferredWakes(64u, 256u * 1024u);
+            worker.start();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            worker.beginBatch(); // the unit's batch stays open
+            std::atomic<bool> done{false};
+            std::thread other(
+                [&]
+                {
+                    GsCommand c;
+                    c.kind = GsCmdKind::Fence;
+                    c.rpc = std::make_shared<GsRpcBase>();
+                    std::shared_ptr<GsRpcBase> rpc = c.rpc;
+                    worker.enqueue(std::move(c));
+                    rpc->wait();
+                    done.store(true, std::memory_order_release);
+                });
+            for (int i = 0; i < 200 && !done.load(std::memory_order_acquire); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            t.IsTrue(done.load(std::memory_order_acquire), "RPC should complete while the batch is open");
+            worker.endBatch(true);
+            other.join();
+            worker.stop();
+        });
+
+        // GF1 H1/H2: one command carrying the path gives the same consumed
+        // sequence and VRAM as NoteGifPath + GifPacket.
+        tc.Run("GF1 processGIFPacketWithPath matches noteGifPath + processGIFPacket", [](TestCase &t)
+        {
+            auto run = [](bool folded, std::vector<uint8_t> &vramOut, uint64_t &seq, uint64_t &cmds)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GSRegisters regs{};
+                initQueueTestRegs(regs);
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+                gs.setQueueEnabled(true);
+                gs.setPktSeqEnabled(true);
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+                const std::vector<std::vector<uint8_t>> pkts = {
+                    makePackedTriangle(200u, 10u, 30u), makeReglistPoints(),
+                    makeImageUpload(0x100u, 0u, 0u, 8u, 8u, 3u), makePackedTriangle(5u, 250u, 60u)};
+                const GifPathId paths[] = {GifPathId::Path1, GifPathId::Path2, GifPathId::Path3, GifPathId::Path1};
+                for (size_t i = 0; i < pkts.size(); ++i)
+                {
+                    const bool note = i != 1u; // one packet without a note
+                    std::vector<uint8_t> bytes = pkts[i];
+                    if (folded)
+                    {
+                        gs.processGIFPacketWithPath(paths[i], note, bytes);
+                    }
+                    else
+                    {
+                        if (note)
+                            gs.noteGifPath(paths[i]);
+                        gs.processGIFPacket(bytes.data(), static_cast<uint32_t>(bytes.size()));
+                    }
+                }
+                gs.drainQueue();
+                seq = gs.pktSeqSnapshot();
+                cmds = gs.pktSeqSnapshotCommands();
+                vramOut = snapshotVramBytes(gs);
+            };
+            std::vector<uint8_t> vA, vB;
+            uint64_t sA = 0, sB = 0, cA = 0, cB = 0;
+            run(false, vA, sA, cA);
+            run(true, vB, sB, cB);
+            t.IsTrue(cA != 0u, "digest should count commands");
+            t.Equals(sB, sA, "folded path command should give the same consumed digest");
+            t.Equals(cB, cA, "folded path command should give the same consumed count");
+            t.IsTrue(vA == vB, "folded path command should give the same VRAM");
+        });
     });
 }
