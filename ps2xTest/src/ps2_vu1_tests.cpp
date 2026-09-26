@@ -2195,25 +2195,27 @@ void register_ps2_vu1_tests()
             {
                 VU1Interpreter vu(unit);
                 vu.setFloatModeForTest(true);
+                const bool simd = unit == VU1Interpreter::Unit::VU1;
                 auto &s = vu.state();
 
                 s.vf[1][0] = 1.0f;
                 s.vf[2][0] = -1.0f;
-                vu.execUpperForTest(makeVuUpper(0x28u, 0x8u, 2u, 1u, 3u), true, true);
+                vu.execUpperForTest(makeVuUpper(0x28u, 0x8u, 2u, 1u, 3u), simd, true);
                 t.Equals(bitsOf(s.vf[3][0]), 0u, "ADD cancellation yields positive zero");
                 t.Equals(s.mac, 0x8u, "native zero sets MAC X.Z");
                 t.Equals(s.status, 0x41u, "native zero sets current and sticky Z");
 
                 s.vf[1][0] = std::numeric_limits<float>::max();
                 s.vf[2][0] = std::numeric_limits<float>::max();
-                vu.execUpperForTest(makeVuUpper(0x28u, 0x8u, 2u, 1u, 3u), true, true);
-                t.Equals(bitsOf(s.vf[3][0]), 0x7F800000u, "level 1 ADD leaves its native infinite result");
+                vu.execUpperForTest(makeVuUpper(0x28u, 0x8u, 2u, 1u, 3u), simd, true);
+                t.Equals(bitsOf(s.vf[3][0]), 0x7F7FFFFFu,
+                         "Normal-mode ADD leaves its native Chop/Zero finite maximum");
                 t.Equals(s.mac, 0u, "default microVU leaves MAC overflow clear");
                 t.Equals(s.status & 0xFu, 0u, "default microVU leaves current overflow clear");
 
                 s.vf[1][0] = std::numeric_limits<float>::infinity();
                 s.vf[2][0] = 0.0f;
-                vu.execUpperForTest(makeVuUpper(0x2Au, 0x8u, 2u, 1u, 3u), true, true);
+                vu.execUpperForTest(makeVuUpper(0x2Au, 0x8u, 2u, 1u, 3u), simd, true);
                 t.Equals(bitsOf(s.vf[3][0]), 0u, "MUL's level 1 Fs clamp avoids infinity times zero");
                 t.Equals(s.mac, 0x8u, "MUL reports native zero only");
 
@@ -2221,7 +2223,7 @@ void register_ps2_vu1_tests()
                 s.vf[1][0] = std::numeric_limits<float>::min();
                 s.vf[2][0] = 0.5f;
                 s.status = 0u;
-                vu.execUpperForTest(makeVuUpper(0x29u, 0x8u, 2u, 1u, 3u), true, true);
+                vu.execUpperForTest(makeVuUpper(0x29u, 0x8u, 2u, 1u, 3u), simd, true);
                 t.Equals(bitsOf(s.vf[3][0]), bitsOf(1.0f), "MADD keeps native single result");
                 t.Equals(s.status, 0u, "microVU default has no product underflow sticky");
             }

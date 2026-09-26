@@ -67,6 +67,13 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::execUpperImpl(uint32_t instr)
         if (fmacSimdDispatch(instr))
             return;
     }
+    else if (m_pcsx2Float)
+    {
+        // The PCSX2 mode uses the same native-vector core when the exact
+        // reference is selected with PS2X_VU1_FMAC_SIMD=OFF (including tests).
+        if (fmacSimdDispatch(instr))
+            return;
+    }
 #else
     static_assert(!kSimd, "vector FMAC core unavailable in this build");
 #endif
