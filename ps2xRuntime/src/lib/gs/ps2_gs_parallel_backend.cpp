@@ -358,7 +358,7 @@ public:
             const uint64_t t1 = nowNanos();
             c.presentNanos.fetch_add(t1 - t0, std::memory_order_relaxed);
             if (n == 1u || n % 300u == 0u)
-                logStats(n == 1u ? "first-present" : "periodic");
+                logPeriodic(n);
             return out; // empty: the presenter reads ps2x_present_share instead
         }
 #endif
@@ -368,7 +368,7 @@ public:
             const uint64_t t1 = nowNanos();
             c.presentNanos.fetch_add(t1 - t0, std::memory_order_relaxed);
             if (n == 1u || n % 300u == 0u)
-                logStats(n == 1u ? "first-present" : "periodic");
+                logPeriodic(n);
             return out; // empty: the frame went to the SurfaceControl layer
         }
 #endif
@@ -462,7 +462,7 @@ public:
         c.copyNanos.fetch_add(t1 - r1, std::memory_order_relaxed);
         c.presentNanos.fetch_add(t1 - t0, std::memory_order_relaxed);
         if (n == 1u || n % 300u == 0u)
-            logStats(n == 1u ? "first-present" : "periodic");
+            logPeriodic(n);
         return out;
     }
 
@@ -717,7 +717,18 @@ private:
             std::cerr << "[gs:parallel] zero-copy present (IOSurface) requested" << std::endl;
         m_device = new Vulkan::Device();
         m_device->set_context(*m_ctx);
-        m_device->init_frame_contexts(4);
+        // VK1 Part 2A: PS2X_PGS_FRAME_CONTEXTS=N (2..16, default 4 = before). paraLLEl
+        // advances Granite's frame context on every flush_submit, and advancing
+        // waits for the fences of the context being recycled.
+        m_frameContexts = 4u;
+        if (const char *fc = std::getenv("PS2X_PGS_FRAME_CONTEXTS"))
+        {
+            const long v = std::strtol(fc, nullptr, 10);
+            if (v >= 2 && v <= 16)
+                m_frameContexts = static_cast<uint32_t>(v);
+        }
+        m_device->init_frame_contexts(m_frameContexts);
+        std::cerr << "[gs:parallel] frame_contexts=" << m_frameContexts << std::endl;
 #if defined(__ANDROID__)
         if (m_vkPresent)
         {
@@ -1121,6 +1132,30 @@ private:
     }
 #endif
 
+    // VK1 Part 2A: stats line + paraLLEl sync counters, per present since the last line.
+    void logPeriodic(uint64_t n)
+    {
+        logStats(n == 1u ? "first-present" : "periodic");
+        if (!m_iface)
+            return;
+        const auto &sc = m_iface->get_sync_counters();
+        const uint64_t v[5] = {sc.flush_submits.load(), sc.frame_context_advances.load(), sc.frame_context_ns.load(),
+                               sc.timeline_waits.load(), sc.timeline_wait_ns.load()};
+        const double dn = static_cast<double>(n - m_syncLastPresents);
+        if (dn > 0.0)
+        {
+            std::cerr << "[gs:parallel] sync presents=" << n << " frame_contexts=" << m_frameContexts
+                      << " flush_submits_per_present=" << (v[0] - m_syncLast[0]) / dn
+                      << " frame_ctx_advances_per_present=" << (v[1] - m_syncLast[1]) / dn
+                      << " frame_ctx_wait_ms_per_present=" << (v[2] - m_syncLast[2]) / 1e6 / dn
+                      << " timeline_waits_per_present=" << (v[3] - m_syncLast[3]) / dn
+                      << " timeline_wait_ms_per_present=" << (v[4] - m_syncLast[4]) / 1e6 / dn << std::endl;
+        }
+        for (int i = 0; i < 5; ++i)
+            m_syncLast[i] = v[i];
+        m_syncLastPresents = n;
+    }
+
     bool fail(const char *what)
     {
         std::cerr << "[gs:parallel] FATAL: " << what << " (frames will be empty)" << std::endl;
@@ -1269,6 +1304,9 @@ private:
     std::vector<uint64_t> m_vkDumpTicks;
     bool m_vkDumpParsed = false;
 #endif
+    uint32_t m_frameContexts = 4u;    // VK1 Part 2A: PS2X_PGS_FRAME_CONTEXTS
+    uint64_t m_syncLast[5] = {};       // sync counters at the last stats line
+    uint64_t m_syncLastPresents = 0u;
     uint32_t m_lastScanW = 0u, m_lastScanH = 0u; // HR1: log scanout size changes
     Vulkan::Context *m_ctx = nullptr;
     Vulkan::Device *m_device = nullptr;
