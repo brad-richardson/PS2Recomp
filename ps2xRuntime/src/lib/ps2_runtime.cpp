@@ -50,10 +50,10 @@ namespace
 // swipe reveals the bars, which then auto-hide); API 29 (our minSdk): the
 // legacy IMMERSIVE_STICKY systemUiVisibility flags. The system clears it on
 // window/focus changes, so it is re-applied on INIT_WINDOW and GAINED_FOCUS.
-void ap1HideSystemBars(struct android_app *app)
+bool ap1HideSystemBars(struct android_app *app)
 {
     if (!app || !app->activity || !app->activity->vm)
-        return;
+        return false;
     JNIEnv *env = nullptr;
     // Keep the thread's name: an unnamed attach renames it "Thread-N" (as in
     // the Vulkan sink's queryLayerSize).
@@ -61,7 +61,7 @@ void ap1HideSystemBars(struct android_app *app)
     pthread_getname_np(pthread_self(), name, sizeof(name));
     JavaVMAttachArgs args = {JNI_VERSION_1_6, name[0] ? name : nullptr, nullptr};
     if (app->activity->vm->AttachCurrentThread(&env, &args) != JNI_OK || !env)
-        return;
+        return false;
     bool applied = false;
     const char *mode = "";
     jobject act = app->activity->clazz;
@@ -91,16 +91,15 @@ void ap1HideSystemBars(struct android_app *app)
                     const jint types =
                         (typeCls && systemBars) ? env->CallStaticIntMethod(typeCls, systemBars) : 0;
                     jclass ctlCls = env->GetObjectClass(controller);
-                    jmethodID hide =
-                        ctlCls ? env->GetMethodID(ctlCls, "hide", "(I)Landroid/view/WindowInsetsController;") : nullptr;
+                    // AP1 Part 2: hide(int) returns void (the (I)L… lookup
+                    // never resolves, which is why Part 1 never applied).
+                    jmethodID hide = ctlCls ? env->GetMethodID(ctlCls, "hide", "(I)V") : nullptr;
                     jmethodID setBehavior =
                         ctlCls ? env->GetMethodID(ctlCls, "setSystemBarsBehavior", "(I)V") : nullptr;
                     if (!env->ExceptionCheck() && types != 0 && hide && setBehavior)
                     {
                         env->CallVoidMethod(controller, setBehavior, 2); // BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                        jobject hidden = env->CallObjectMethod(controller, hide, types);
-                        if (hidden)
-                            env->DeleteLocalRef(hidden);
+                        env->CallVoidMethod(controller, hide, types);
                         applied = !env->ExceptionCheck();
                         mode = "insets-transient";
                     }
@@ -136,8 +135,9 @@ void ap1HideSystemBars(struct android_app *app)
         env->ExceptionClear();
     if (actCls)
         env->DeleteLocalRef(actCls);
-    std::fprintf(stderr, "[immersive] %s%s%s\n", applied ? "bars hidden (" : "NOT applied",
+    std::fprintf(stderr, "[immersive] %s%s%s\n", applied ? "applied (" : "NOT applied",
                  applied ? mode : "", applied ? ")" : "");
+    return applied;
 }
 // VK1: raylib's app-command handler, wrapped so the SurfaceControl child is
 // detached before the window goes (TERM_WINDOW) and remade after it returns
@@ -4640,6 +4640,32 @@ void PS2Runtime::run()
         {
             g_vk1RaylibOnAppCmd = wrapApp->onAppCmd;
             wrapApp->onAppCmd = vk1OnAppCmd;
+        }
+        // AP1 Part 2: bounded retry until immersive applies (once a second
+        // for 10 s per window, e.g. while the DecorView attaches); window
+        // and focus changes re-apply through the wrapper above.
+        {
+            static uint32_t s_ap1Gen = 0u;
+            static int s_ap1Tries = 0;
+            static bool s_ap1Done = false;
+            static std::chrono::steady_clock::time_point s_ap1Last{};
+            const uint32_t gen = ps2x_present_vk::windowGeneration();
+            if (gen != s_ap1Gen)
+            {
+                s_ap1Gen = gen;
+                s_ap1Tries = 0;
+                s_ap1Done = false;
+            }
+            if (!s_ap1Done && s_ap1Tries < 10)
+            {
+                const auto now = std::chrono::steady_clock::now();
+                if (s_ap1Tries == 0 || now - s_ap1Last >= std::chrono::seconds(1))
+                {
+                    s_ap1Last = now;
+                    ++s_ap1Tries;
+                    s_ap1Done = ap1HideSystemBars(GetAndroidApp());
+                }
+            }
         }
         if (ps2x_present_vk::enabled())
         {
