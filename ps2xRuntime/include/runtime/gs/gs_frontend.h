@@ -112,7 +112,8 @@ public:
     // Disabled (default) the code path is identical to the direct calls.
     // Enable once, while no other thread uses this GS (the runtime enables
     // from syncCoreSubsystems during init, before the game thread spawns).
-    bool setQueueEnabled(bool enabled);
+    // GF1 H4: maxDescriptors 0 = GsWorker::kDefaultMaxDescriptors.
+    bool setQueueEnabled(bool enabled, size_t maxDescriptors = 0);
     bool queueEnabled() const { return m_worker != nullptr; }
     // NP1: coalesce worker wakeups to one per batch (direct mode: no-op).
     void beginWorkerBatch() { if (m_worker) m_worker->beginBatch(); }

@@ -228,11 +228,12 @@ GS::GS()
 
 GS::~GS() = default;
 
-bool GS::setQueueEnabled(bool enabled)
+bool GS::setQueueEnabled(bool enabled, size_t maxDescriptors)
 {
     if (enabled && !m_worker)
     {
-        auto worker = std::make_unique<GsWorker>(GsWorker::kDefaultMaxDescriptors,
+        auto worker = std::make_unique<GsWorker>(maxDescriptors != 0u ? maxDescriptors
+                                                                     : GsWorker::kDefaultMaxDescriptors,
                                                  GsWorker::kDefaultMaxPayloadBytes,
                                                  [this](GsCommand &cmd)
                                                  { executeQueuedCommand(cmd); });

@@ -287,6 +287,24 @@ namespace
         return env != nullptr && std::strcmp(env, "1") == 0;
     }
 
+    // GF1 H4: with the diet, the GS queue holds 8192 descriptors instead of
+    // 1024 (the 16 MiB byte cap stays), so the unit runs ahead through the GS
+    // worker's GPU waits instead of blocking. PS2X_GS_QUEUE_DESC overrides
+    // (e.g. 1024 to measure H1-H3 alone). Host bound only. 0 = default.
+    size_t gsQueueDescriptors()
+    {
+        if (!gsHandoffDietRequested())
+            return 0u;
+        size_t desc = 8192u;
+        if (const char *env = std::getenv("PS2X_GS_QUEUE_DESC"))
+        {
+            const long v = std::strtol(env, nullptr, 10);
+            if (v >= 16 && v <= 1048576)
+                desc = static_cast<size_t>(v);
+        }
+        return desc;
+    }
+
     // SLUS_207.72 stores its video choice in bits 20-21 of the first options
     // word. 0 is 4:3 and 2 is the menu's anamorphic choice. The game calls
     // 0x228C08 to apply that choice after defaults, menu edits, and profile
@@ -1369,7 +1387,7 @@ bool PS2Runtime::syncCoreSubsystems()
     {
         if (std::strcmp(queueEnv, "1") == 0 && !m_gs.queueEnabled())
         {
-            m_gs.setQueueEnabled(true);
+            m_gs.setQueueEnabled(true, gsQueueDescriptors());
             std::cerr << "[gs:queue] enabled (PS2X_GS_QUEUE=1): CPU backend on GS worker thread"
                       << std::endl;
         }
@@ -1390,7 +1408,7 @@ bool PS2Runtime::syncCoreSubsystems()
         {
             if (!m_gs.queueEnabled())
             {
-                m_gs.setQueueEnabled(true);
+                m_gs.setQueueEnabled(true, gsQueueDescriptors());
                 std::cerr << "[gs:queue] enabled (forced by PS2X_GS_BACKEND=parallel)" << std::endl;
             }
             m_gs.setRasterBackend(ps2x_gs_parallel::create(&m_memory.gs()));
@@ -1425,7 +1443,8 @@ bool PS2Runtime::syncCoreSubsystems()
         if (wakeCmds != 0u)
             ps2_mtvu::jobEndFn() = [this]() { m_gs.flushWorkerWake(); };
         std::cerr << "[gs:handoff] diet on (PS2X_GS_HANDOFF_DIET=1): H1 one command per packet, H2 moved bytes, "
-                  << "H3 deferred wakes cmds=" << wakeCmds << " bytes=" << wakeBytes << std::endl;
+                  << "H3 deferred wakes cmds=" << wakeCmds << " bytes=" << wakeBytes
+                  << ", H4 queue descriptors=" << gsQueueDescriptors() << std::endl;
     }
     // E33: per-path GIF census + GS draw attribution. The listener runs
     // before each packet's process call (same thread, synchronous drain),
