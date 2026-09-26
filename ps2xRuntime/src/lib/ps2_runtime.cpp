@@ -103,6 +103,12 @@ void rlEnableColorBlend(void);
 #include <unordered_map>
 #include <sstream>
 #include <vector>
+#include <map>
+#include <mutex>
+#define XXH_NO_XXH32
+#define XXH_NO_XXH3
+#define XXH_INLINE_ALL
+#include "runtime/third_party/xxhash.h"
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #endif
@@ -2981,6 +2987,142 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
                        exception == EXCEPTION_TLB_REFILL);
 }
 
+// VR3: dev-only VU0 census (PS2X_VR3_VU0_CENSUS=1, default off; one static
+// branch per VU0 start when off). Per (code image, startPC): starts, VU0
+// cycles, budget hits; VU0 code-generation changes seen at a start (each one
+// rebuilds the decode cache) and whether the image bytes changed; wall time
+// split into entry (reset + copy in), run and exit (copy out). Cumulative
+// tables on stderr every 600 vsync ticks (FR1-R1 race window = 1800..2400).
+// PS2X_VR3_VU0_IMAGE_DUMP=<dir> also writes each distinct 4 KiB code image as
+// vu0_<xxh64>.bin (derived from game data: keep it outside the repo).
+namespace vr3_vu0_census
+{
+    bool enabled()
+    {
+        static const bool on = []
+        {
+            const char *value = std::getenv("PS2X_VR3_VU0_CENSUS");
+            return value != nullptr && value[0] == '1';
+        }();
+        return on;
+    }
+
+    struct ProgRow
+    {
+        uint64_t calls = 0;
+        uint64_t cycles = 0;
+        uint64_t maxCycles = 0;
+        uint64_t budgetHits = 0;
+    };
+
+    struct State
+    {
+        std::mutex mutex;
+        std::map<std::pair<uint64_t, uint32_t>, ProgRow> progs;
+        std::map<uint32_t, uint64_t> callers;
+        std::map<uint64_t, uint64_t> imageFirstTick;
+        uint64_t lastGeneration = ~0ull;
+        uint64_t hash = 0;
+        uint64_t calls = 0;
+        uint64_t vcallmsr = 0;
+        uint64_t generationChanges = 0;
+        uint64_t imageChanges = 0;
+        uint64_t nsEntry = 0;
+        uint64_t nsRun = 0;
+        uint64_t nsExit = 0;
+        uint64_t nextDumpTick = 600;
+    };
+
+    State &state()
+    {
+        static State s;
+        return s;
+    }
+
+    std::atomic<uint64_t> pendingVcallmsr{0};
+
+    uint64_t nowNs()
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    }
+
+    void note(const uint8_t *vu0Code, uint64_t generation, uint64_t tick, uint32_t startPC,
+              uint32_t caller, uint64_t cycles, uint64_t nsEntry, uint64_t nsRun, uint64_t nsExit)
+    {
+        State &s = state();
+        std::lock_guard<std::mutex> lock(s.mutex);
+        if (generation != s.lastGeneration)
+        {
+            ++s.generationChanges;
+            const uint64_t hash = XXH64(vu0Code, PS2_VU0_CODE_SIZE, 0);
+            if (hash != s.hash || s.lastGeneration == ~0ull)
+                ++s.imageChanges;
+            s.hash = hash;
+            s.lastGeneration = generation;
+            if (s.imageFirstTick.emplace(hash, tick).second)
+            {
+                static const char *dir = std::getenv("PS2X_VR3_VU0_IMAGE_DUMP");
+                if (dir != nullptr && dir[0] != '\0')
+                {
+                    char name[64];
+                    std::snprintf(name, sizeof(name), "/vu0_%016llx.bin",
+                                  static_cast<unsigned long long>(hash));
+                    std::ofstream out(std::string(dir) + name, std::ios::binary);
+                    out.write(reinterpret_cast<const char *>(vu0Code), PS2_VU0_CODE_SIZE);
+                }
+            }
+        }
+        ++s.calls;
+        s.vcallmsr += pendingVcallmsr.exchange(0, std::memory_order_relaxed);
+        ProgRow &row = s.progs[{s.hash, startPC}];
+        ++row.calls;
+        row.cycles += cycles;
+        row.maxCycles = std::max(row.maxCycles, cycles);
+        row.budgetHits += cycles >= 4096u ? 1u : 0u;
+        ++s.callers[caller];
+        s.nsEntry += nsEntry;
+        s.nsRun += nsRun;
+        s.nsExit += nsExit;
+        if (tick < s.nextDumpTick)
+            return;
+        s.nextDumpTick = (tick / 600u + 1u) * 600u;
+        uint64_t cyclesTotal = 0, budgetTotal = 0;
+        for (const auto &entry : s.progs)
+        {
+            cyclesTotal += entry.second.cycles;
+            budgetTotal += entry.second.budgetHits;
+        }
+        std::fprintf(stderr, "[vr3-vu0] tick=%llu calls=%llu vcallmsr=%llu gen_changes=%llu image_changes=%llu images=%zu progs=%zu cycles=%llu budget_hits=%llu ns_entry=%llu ns_run=%llu ns_exit=%llu\n",
+                     static_cast<unsigned long long>(tick), static_cast<unsigned long long>(s.calls),
+                     static_cast<unsigned long long>(s.vcallmsr),
+                     static_cast<unsigned long long>(s.generationChanges),
+                     static_cast<unsigned long long>(s.imageChanges), s.imageFirstTick.size(),
+                     s.progs.size(), static_cast<unsigned long long>(cyclesTotal),
+                     static_cast<unsigned long long>(budgetTotal),
+                     static_cast<unsigned long long>(s.nsEntry), static_cast<unsigned long long>(s.nsRun),
+                     static_cast<unsigned long long>(s.nsExit));
+        for (const auto &entry : s.imageFirstTick)
+            std::fprintf(stderr, "[vr3-vu0-image] tick=%llu hash=%016llx first_tick=%llu\n",
+                         static_cast<unsigned long long>(tick),
+                         static_cast<unsigned long long>(entry.first),
+                         static_cast<unsigned long long>(entry.second));
+        for (const auto &entry : s.progs)
+            std::fprintf(stderr, "[vr3-vu0-prog] tick=%llu hash=%016llx start=0x%x calls=%llu cycles=%llu max=%llu budget_hits=%llu\n",
+                         static_cast<unsigned long long>(tick),
+                         static_cast<unsigned long long>(entry.first.first), entry.first.second,
+                         static_cast<unsigned long long>(entry.second.calls),
+                         static_cast<unsigned long long>(entry.second.cycles),
+                         static_cast<unsigned long long>(entry.second.maxCycles),
+                         static_cast<unsigned long long>(entry.second.budgetHits));
+        for (const auto &entry : s.callers)
+            std::fprintf(stderr, "[vr3-vu0-caller] tick=%llu ra=0x%x calls=%llu\n",
+                         static_cast<unsigned long long>(tick), entry.first,
+                         static_cast<unsigned long long>(entry.second));
+    }
+}
+
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
     (void)rdram;
@@ -2995,13 +3137,24 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         return;
     }
 
+    const bool census = vr3_vu0_census::enabled();
+    const uint64_t censusT0 = census ? vr3_vu0_census::nowNs() : 0u;
     m_vu0.reset();
     copyVu0ContextToState(ctx, m_vu0.state());
+    const uint64_t censusT1 = census ? vr3_vu0_census::nowNs() : 0u;
     m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
                   vu0Data, PS2_VU0_DATA_SIZE,
                   m_gs, &m_memory,
                   startPC, 0u, ctx->vu0_itop, 4096);
+    const uint64_t censusT2 = census ? vr3_vu0_census::nowNs() : 0u;
     copyVu0StateToContext(m_vu0.state(), ctx);
+    if (census)
+    {
+        const uint64_t censusT3 = vr3_vu0_census::nowNs();
+        vr3_vu0_census::note(vu0Code, m_memory.getVU0CodeGeneration(), m_memory.gs().vsyncTick.load(),
+                             startPC, getRegU32(ctx, 31), m_vu0.state().cycles,
+                             censusT1 - censusT0, censusT2 - censusT1, censusT3 - censusT2);
+    }
     // E53: dev-only VU0 start log (PS2X_E53_VU0_LOG=1, default off): caller
     // pc, start, cycles, and an FNV-1a of VU0 data memory after the run so an
     // upload that lands shows up as a changing hash. First 64 starts, then
@@ -3037,6 +3190,8 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
 void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
     // VCALLMS and VCALLMSR both route here.
+    if (vr3_vu0_census::enabled())
+        vr3_vu0_census::pendingVcallmsr.fetch_add(1, std::memory_order_relaxed);
     executeVU0Microprogram(rdram, ctx, address);
 }
 
