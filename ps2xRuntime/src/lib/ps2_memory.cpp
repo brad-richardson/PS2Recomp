@@ -12,6 +12,7 @@
 #include "runtime/gs/gs_stream_capture.h"
 #include "ps2_log.h"
 #include "ps2_mtvu.h"
+#include "ps2_vu1_engine.h"
 #include <atomic>
 #include <array>
 #include <cstring>
@@ -1032,6 +1033,7 @@ void PS2Memory::gsPrivStore(std::function<void()> apply, uint32_t captureAddress
     {
         ps2_mtvu::submit([this, apply = std::move(apply)]() mutable
                          {
+            const ps2_vu1_engine::JobTimer vp2Timer; // VP2 stats builds: unit time
             if (m_gsFrontend)
                 m_gsFrontend->privWrite(std::move(apply));
             else
@@ -1394,7 +1396,11 @@ void PS2Memory::write128(uint32_t address, __m128i value)
                 std::array<uint8_t, 16> copy{};
                 std::memcpy(copy.data(), packet, copy.size());
                 ps2_mtvu::submit([this, copy]()
-                                 { processVIF1Data(copy.data(), static_cast<uint32_t>(copy.size())); },
+                                 {
+                                     const ps2_vu1_engine::JobTimer vp2Timer; // VP2 stats builds: unit time
+                                     processVIF1Data(copy.data(), static_cast<uint32_t>(copy.size()));
+                                     ps2_vu1_engine::drainAll(); // VP2: a unit job ends with the engine idle
+                                 },
                                  copy.size(), ps2_mtvu::currentFbrst());
             }
             else
@@ -2501,6 +2507,7 @@ void PS2Memory::processPendingTransfers()
     {
         ps2_mtvu::submit([this, pieces = std::move(mtvuPieces)]()
                          {
+            const ps2_vu1_engine::JobTimer vp2Timer; // VP2 stats builds: unit time
             for (const MtvuPiece &piece : pieces)
             {
                 const uint32_t size = static_cast<uint32_t>(piece.bytes.size());
@@ -2509,6 +2516,9 @@ void PS2Memory::processPendingTransfers()
                 else
                     processVIF1Data(piece.bytes.data(), size);
             }
+            // VP2: commit the last VU1 run and everything behind it, so a unit
+            // job ends with the engine idle (the EE sync points stay MT1's).
+            ps2_vu1_engine::drainAll();
             if (m_gifArbiter)
             {
                 const GifDrainBatch batch(m_gsFrontend);
@@ -2707,6 +2717,14 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
     ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
     if (!data || sizeBytes < 16)
         return;
+    // VP2: behind an in-flight VU1 run (its PATH1 packets are not submitted
+    // yet) the packet waits, copied, in the engine's reorder buffer.
+    if (ps2_vu1_engine::deferring())
+    {
+        ps2_vu1_engine::defer([this, pathId, copy = std::vector<uint8_t>(data, data + sizeBytes), drainImmediately, path2DirectHl]()
+                              { submitGifPacket(pathId, copy.data(), static_cast<uint32_t>(copy.size()), drainImmediately, path2DirectHl); });
+        return;
+    }
 
     ps2_pk::setBases(m_rdram, PS2_RAM_SIZE, m_scratchpad, PS2_SCRATCHPAD_SIZE);
 
