@@ -902,6 +902,8 @@ if(PS2X_IS_IOS)
     set_target_properties(ps2EntryRunner PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist"
     )
+    # IP1: universal device family so iPadOS runs full screen (was: Xcode default 1, iPhone compat box).
+    set_target_properties(ps2EntryRunner PROPERTIES XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
 endif()
 
 if(APPLE)
