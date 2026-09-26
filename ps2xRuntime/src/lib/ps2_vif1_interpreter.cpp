@@ -559,11 +559,14 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             // E37: log the MSCAL line, then freeze VU memory + the packet
             // log when this is a targeted first MSCAL (one check when off).
             {
-                char addr[16];
-                std::snprintf(addr, sizeof(addr), "%u", imm);
-                const char *mname = (opcode == VIF_MSCALF) ? "MSCALF" : "MSCAL";
-                e37AppendVif(mname, num, addr, "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                             nullptr, nullptr, nullptr, 0u, false, 0u);
+                if (ps2_vu1_entry_trace::enabled())
+                {
+                    char addr[16];
+                    std::snprintf(addr, sizeof(addr), "%u", imm);
+                    const char *mname = (opcode == VIF_MSCALF) ? "MSCALF" : "MSCAL";
+                    e37AppendVif(mname, num, addr, "-", "-", vif1_regs.mask, vif1_regs.cycle,
+                                 nullptr, nullptr, nullptr, 0u, false, 0u);
+                }
                 ps2_vu1_entry_trace::noteMscalEntry(startPC, false, m_vu1Data,
                                                     PS2_VU1_DATA_SIZE);
             }
@@ -741,6 +744,7 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                     markVU1CodeModified();
                 }
             }
+            if (ps2_vu1_entry_trace::enabled())
             {
                 char addr[16];
                 std::snprintf(addr, sizeof(addr), "%u", imm);
@@ -1125,7 +1129,9 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                 }
             }
             // E37: log the UNPACK with its full source payload (pos still
-            // points at the first source word here).
+            // points at the first source word here). Formatting only when the
+            // trace is on: it ran for every UNPACK in release builds (HP1).
+            if (ps2_vu1_entry_trace::enabled())
             {
                 char addr[24];
                 std::snprintf(addr, sizeof(addr), "%u%s", imm & 0x3FFu,
