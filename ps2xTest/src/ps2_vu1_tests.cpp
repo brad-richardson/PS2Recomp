@@ -15,10 +15,115 @@
 #include <limits>
 #include <sstream>
 #include <vector>
+#include <algorithm>
+#include <cstdlib>
+#include <string>
 
 namespace
 {
     constexpr uint32_t kVuUpperNop = 0x000002FFu;
+
+#if PS2X_VU1_FIXTURE_TEST
+    // VR3: one VU0 differential case. The reference is the VU0 interpreter
+    // with every write queued; each other mode (generated pairs; VU0 direct
+    // commit in the interpreter and in generated pairs) must leave the same
+    // VU state and data memory after a budget cut, after resume() and after a
+    // fresh execute() (the runtime's only VU0 continuation).
+    struct Vu0DiffStats
+    {
+        uint64_t runs = 0, mismatches = 0, generatedCycles = 0;
+        uint32_t programs = 0;
+    };
+
+    struct Vu0Start
+    {
+        VU1State state{};
+        std::vector<uint8_t> data;
+    };
+
+    struct Vu0Snapshot
+    {
+        VU1State state{};
+        std::vector<uint8_t> data;
+        uint64_t generatedCycles = 0;
+    };
+
+    // mode: 0 interpreter queued (reference), 1 generated queued,
+    // 2 interpreter direct commit, 3 generated direct commit.
+    inline Vu0Snapshot runVu0Once(const VU1Interpreter::RecompProgram *generated, uint8_t *code,
+                                  const Vu0Start &start, uint32_t startPc, int mode, uint32_t budget,
+                                  uint32_t check, GS &gs)
+    {
+        VU1Interpreter vu(VU1Interpreter::Unit::VU0);
+        if (mode == 1 || mode == 3)
+            vu.setRecompProgramForTest(generated);
+        vu.setDirectCommitForTest(mode >= 2 ? 1 : 0);
+        std::memcpy(vu.state().vf, start.state.vf, sizeof(start.state.vf));
+        std::memcpy(vu.state().vi, start.state.vi, sizeof(start.state.vi));
+        std::memcpy(vu.state().acc, start.state.acc, sizeof(start.state.acc));
+        vu.state().mac = start.state.mac;
+        vu.state().status = start.state.status;
+        vu.state().clip = start.state.clip;
+        vu.state().q = start.state.q;
+        vu.state().i = start.state.i;
+        Vu0Snapshot snap;
+        snap.data = start.data;
+        vu.execute(code, PS2_VU0_CODE_SIZE, snap.data.data(), PS2_VU0_DATA_SIZE, gs, nullptr, startPc, 0u, 0u, budget);
+        if (check == 1u)
+            vu.resume(code, PS2_VU0_CODE_SIZE, snap.data.data(), PS2_VU0_DATA_SIZE, gs, nullptr, 0u, 0u, 4096u);
+        else if (check == 2u)
+            vu.execute(code, PS2_VU0_CODE_SIZE, snap.data.data(), PS2_VU0_DATA_SIZE, gs, nullptr, startPc, 0u, 0u, 4096u);
+        snap.generatedCycles = vu.recompCyclesForTest();
+        std::memcpy(&snap.state, &vu.state(), sizeof(VU1State));
+        return snap;
+    }
+
+    inline void diffVu0Program(const char *label, const VU1Interpreter::RecompProgram *generated, uint8_t *code,
+                               const Vu0Start &start, uint32_t startPc, uint32_t maxBudget,
+                               const std::vector<int> &modes, GS &gs, Vu0DiffStats &stats)
+    {
+        ++stats.programs;
+        const auto same = [](const Vu0Snapshot &a, const Vu0Snapshot &b)
+        {
+            return std::memcmp(&a.state, &b.state, sizeof(VU1State)) == 0 && a.data == b.data;
+        };
+        for (uint32_t budget = 1; budget <= maxBudget; ++budget)
+        {
+            for (uint32_t check = 0; check < 3u; ++check)
+            {
+                const Vu0Snapshot ref = runVu0Once(generated, code, start, startPc, 0, budget, check, gs);
+                for (const int mode : modes)
+                {
+                    ++stats.runs;
+                    const Vu0Snapshot got = runVu0Once(generated, code, start, startPc, mode, budget, check, gs);
+                    stats.generatedCycles += got.generatedCycles;
+                    if (same(ref, got))
+                        continue;
+                    if (++stats.mismatches > 3u)
+                        continue;
+                    std::fprintf(stderr, "VR3 VU0 mismatch (%s): program pc 0x%x mode %d budget %u check %u\n",
+                                 label, startPc, mode, budget, check);
+                    for (uint32_t reg = 0; reg < 32u; ++reg)
+                        if (std::memcmp(ref.state.vf[reg], got.state.vf[reg], 16) != 0)
+                            std::fprintf(stderr, "  vf%u ref %g %g %g %g got %g %g %g %g\n", reg,
+                                         ref.state.vf[reg][0], ref.state.vf[reg][1], ref.state.vf[reg][2], ref.state.vf[reg][3],
+                                         got.state.vf[reg][0], got.state.vf[reg][1], got.state.vf[reg][2], got.state.vf[reg][3]);
+                    for (uint32_t reg = 0; reg < 16u; ++reg)
+                        if (ref.state.vi[reg] != got.state.vi[reg])
+                            std::fprintf(stderr, "  vi%u ref %d got %d\n", reg, ref.state.vi[reg], got.state.vi[reg]);
+                    std::fprintf(stderr, "  mac %x/%x status %x/%x clip %x/%x q %g/%g cycles %llu/%llu pc %x/%x acc %d data %d\n",
+                                 ref.state.mac, got.state.mac, ref.state.status, got.state.status, ref.state.clip, got.state.clip,
+                                 ref.state.q, got.state.q, static_cast<unsigned long long>(ref.state.cycles),
+                                 static_cast<unsigned long long>(got.state.cycles), ref.state.pc, got.state.pc,
+                                 std::memcmp(ref.state.acc, got.state.acc, 16) != 0, ref.data != got.data);
+                }
+            }
+        }
+    }
+
+    // VR3 (c) adds 2 and 3 (VU0 direct commit).
+    inline std::vector<int> vu0DiffModes() { return {1}; }
+#endif
 
     struct Vu1Fixture
     {
@@ -2255,6 +2360,128 @@ void register_ps2_vu1_tests()
             t.IsTrue(generatedCycles > 100000u, "the generated pairs actually ran");
             t.IsTrue(blockEntries > 10000u, "the stage-4 block functions actually ran");
             t.IsTrue(gifPacketsSeen > 1000u, "image 2 kicked PATH1 packets");
+        });
+
+        // VR3: the same differential for VU0 images (4 KiB, Unit::VU0,
+        // vu1_fixture::buildVu0Image), every program cut at every budget.
+        tc.Run("VR3 generated VU0 pairs match the queued VU0 interpreter at every budget cut", [](TestCase &t)
+        {
+            std::vector<uint8_t> code(vu1_fixture::kVu0CodeSize, 0u);
+            GS gs;
+            Vu0DiffStats stats;
+            vu1_fixture::Rng rnd{0x3C6EF372FE94F82Aull};
+            for (uint32_t image = 0; image < vu1_fixture::kVu0ImageCount; ++image)
+            {
+                const VU1Interpreter::RecompProgram *generated =
+                    VU1Interpreter::findRecompProgram(vu1_fixture::kVu0ImageHash[image]);
+                t.IsTrue(generated != nullptr && generated->codeSize == vu1_fixture::kVu0CodeSize,
+                         "VU0 fixture image is compiled in");
+                if (generated == nullptr)
+                    return;
+                const std::vector<vu1_fixture::Program> programs = vu1_fixture::buildVu0Image(image, code.data());
+                for (const vu1_fixture::Program &program : programs)
+                {
+                    Vu0Start start;
+                    start.data.assign(PS2_VU0_DATA_SIZE, 0u);
+                    for (uint32_t i = 0; i < 64u * 16u; i += 4u)
+                    {
+                        const float value = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 64.0f;
+                        std::memcpy(start.data.data() + i, &value, sizeof(value));
+                    }
+                    for (uint32_t reg = 1; reg < 32u; ++reg)
+                        for (uint32_t lane = 0; lane < 4u; ++lane)
+                            start.state.vf[reg][lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                    for (uint32_t reg = 1; reg < 16u; ++reg)
+                        start.state.vi[reg] = static_cast<int32_t>(rnd(16u));
+                    start.state.mac = rnd(0x10000u);
+                    start.state.status = rnd(0x1000u);
+                    start.state.clip = rnd(0x1000000u);
+                    start.state.q = 1.0f;
+                    diffVu0Program("fixture", generated, code.data(), start, program.startPc,
+                                   4u * program.length + 64u, vu0DiffModes(), gs, stats);
+                }
+            }
+            std::fprintf(stderr, "[vr3-diff] vu0 images %u programs %u runs %llu generated_cycles %llu mismatches %llu\n",
+                         vu1_fixture::kVu0ImageCount, stats.programs, static_cast<unsigned long long>(stats.runs),
+                         static_cast<unsigned long long>(stats.generatedCycles),
+                         static_cast<unsigned long long>(stats.mismatches));
+            t.Equals(stats.mismatches, uint64_t{0}, "every VU0 mode matches the queued VU0 interpreter at every cut");
+            t.IsTrue(stats.programs > 150u, "all VU0 fixture images ran");
+            t.IsTrue(stats.runs > 20000u, "differential covered many cuts");
+            t.IsTrue(stats.generatedCycles > 50000u, "the generated VU0 pairs actually ran");
+        });
+
+        // VR3: local-only differential on a game VU0 image. Runs when the tests
+        // are built with PS2X_VU0_RECOMP_DIR and PS2X_VR3_VU0_IMAGE names its
+        // vu0_<hash>.bin (PS2X_VR3_VU0_IMAGE_DUMP) and PS2X_VR3_VU0_ENTRIES
+        // lists start pcs (hex, comma-separated); otherwise it only says so.
+        // Seeded random states; every cut up to 1,024 cycles past the full run.
+        tc.Run("VR3 generated VU0 game image matches the VU0 interpreter (local only)", [](TestCase &t)
+        {
+            const char *imagePath = std::getenv("PS2X_VR3_VU0_IMAGE");
+            const char *entryList = std::getenv("PS2X_VR3_VU0_ENTRIES");
+            if (imagePath == nullptr || entryList == nullptr)
+            {
+                std::fprintf(stderr, "[vr3-game-diff] skipped (PS2X_VR3_VU0_IMAGE / PS2X_VR3_VU0_ENTRIES unset)\n");
+                return;
+            }
+            std::vector<uint8_t> code(PS2_VU0_CODE_SIZE, 0u);
+            std::ifstream in(imagePath, std::ios::binary);
+            in.read(reinterpret_cast<char *>(code.data()), static_cast<std::streamsize>(code.size()));
+            t.IsTrue(in.gcount() == static_cast<std::streamsize>(code.size()), "game VU0 image read");
+            const std::string name = std::filesystem::path(imagePath).filename().string();
+            const uint64_t hash = std::strtoull(name.substr(4, 16).c_str(), nullptr, 16);
+            const VU1Interpreter::RecompProgram *generated = VU1Interpreter::findRecompProgram(hash);
+            t.IsTrue(generated != nullptr && generated->codeSize == PS2_VU0_CODE_SIZE,
+                     "game VU0 image is compiled in (PS2X_VU0_RECOMP_DIR)");
+            if (generated == nullptr)
+                return;
+            std::vector<uint32_t> entries;
+            for (std::stringstream list(entryList); list.good();)
+            {
+                std::string item;
+                std::getline(list, item, ',');
+                if (!item.empty())
+                    entries.push_back(static_cast<uint32_t>(std::strtoul(item.c_str(), nullptr, 16)));
+            }
+            GS gs;
+            Vu0DiffStats stats;
+            vu1_fixture::Rng rnd{0x510E527FADE682D1ull};
+            for (const uint32_t entry : entries)
+            {
+                for (uint32_t seed = 0; seed < 24u; ++seed)
+                {
+                    Vu0Start start;
+                    start.data.assign(PS2_VU0_DATA_SIZE, 0u);
+                    for (uint32_t i = 0; i < PS2_VU0_DATA_SIZE; i += 4u)
+                    {
+                        const float value = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 64.0f;
+                        std::memcpy(start.data.data() + i, &value, sizeof(value));
+                    }
+                    for (uint32_t reg = 1; reg < 32u; ++reg)
+                        for (uint32_t lane = 0; lane < 4u; ++lane)
+                            start.state.vf[reg][lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                    for (uint32_t lane = 0; lane < 4u; ++lane)
+                        start.state.acc[lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                    for (uint32_t reg = 1; reg < 16u; ++reg)
+                        start.state.vi[reg] = static_cast<int32_t>(rnd(256u));
+                    start.state.mac = rnd(0x10000u);
+                    start.state.status = rnd(0x1000u);
+                    start.state.clip = rnd(0x1000000u);
+                    start.state.q = 1.0f;
+                    start.state.i = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                    const Vu0Snapshot full = runVu0Once(generated, code.data(), start, entry, 0, 4096u, 0u, gs);
+                    const uint32_t maxBudget = static_cast<uint32_t>(std::min<uint64_t>(full.state.cycles + 8u, 1024u));
+                    diffVu0Program("game", generated, code.data(), start, entry, maxBudget, vu0DiffModes(), gs, stats);
+                }
+            }
+            std::fprintf(stderr, "[vr3-game-diff] hash %016llx entries %zu starts %u runs %llu generated_cycles %llu mismatches %llu\n",
+                         static_cast<unsigned long long>(hash), entries.size(), stats.programs,
+                         static_cast<unsigned long long>(stats.runs),
+                         static_cast<unsigned long long>(stats.generatedCycles),
+                         static_cast<unsigned long long>(stats.mismatches));
+            t.Equals(stats.mismatches, uint64_t{0}, "every VU0 mode matches the queued VU0 interpreter on the game image");
+            t.IsTrue(stats.generatedCycles > 0u, "the generated game image ran");
         });
 #endif
     });

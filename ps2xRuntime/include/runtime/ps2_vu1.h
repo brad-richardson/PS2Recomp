@@ -38,6 +38,9 @@ class PS2Memory;
 // emitted by PS2X_VU1_RECOMP_DUMP and compiled in from PS2X_VU1_RECOMP_DIR).
 template <uint64_t kImageHash>
 struct VU1RecompImage;
+// VR3: generated VU0 programs (PS2X_VU0_RECOMP_DUMP / PS2X_VU0_RECOMP_DIR).
+template <uint64_t kImageHash>
+struct VU0RecompImage;
 
 struct VU1State
 {
@@ -124,8 +127,11 @@ public:
     static void registerRecompProgram(const RecompProgram &program);
     // Writes the generated C++ for one code image (every pair that decodes
     // without a reserved instruction). Returns false on a write error.
+    // VR3: unit VU0 decodes with VU0's reserved ops and emits a 4 KiB image
+    // (VU0RecompImage, pair functions only: no blocks).
     static bool emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
-                                 uint64_t hash, const std::string &path);
+                                 uint64_t hash, const std::string &path,
+                                 Unit unit = Unit::VU1);
 
     VU1State &state() { return m_state; }
     // VB1: test hook for the direct-commit path: -1 follows PS2X_VU1_DIRECT
@@ -149,6 +155,8 @@ public:
 private:
     template <uint64_t>
     friend struct VU1RecompImage;
+    template <uint64_t>
+    friend struct VU0RecompImage;
 
     enum Pipeline : uint8_t
     {
@@ -403,8 +411,10 @@ private:
     // VR2 stage 4: kBlockMap >= 0 = the pair runs inside a guarded block
     // function (recompBlockReady): direct commit on with this constant
     // direct-map byte and no budget checks. kNoStall = the emitter proved the
-    // pair never stalls there (no scoreboard read).
-    template <bool kStatic, int kBlockMap = -1, bool kNoStall = false>
+    // pair never stalls there (no scoreboard read). VR3: kCodeSize = the
+    // generated image's code size (kRecompCodeSize for VU1,
+    // kRecompVu0CodeSize for VU0); only kStatic pairs use it.
+    template <bool kStatic, int kBlockMap = -1, bool kNoStall = false, uint32_t kCodeSize = 0x4000u>
     bool issuePair(const DecodedInstructionPair &decoded, RunContext &ctx);
     // VR1: the run() loop header between two generated pairs (VR2: the stop
     // request; see step_impl). True when the next pair may issue from
@@ -433,6 +443,9 @@ private:
     uint64_t m_blockIssuedPairs = 0, m_blockIssuedCycles = 0, m_genIssuedPairs = 0, m_genIssuedCycles = 0;
     // VR2: generated images are used only for whole-memory VU1 code.
     static constexpr uint32_t kRecompCodeSize = 0x4000u;
+    // VR3: ... and whole-memory VU0 code (PS2X_VU0_RECOMP=1; default off).
+    static constexpr uint32_t kRecompVu0CodeSize = 0x1000u;
+    static bool vu0RecompEnabled();
     const RecompProgram *lookupRecompProgram(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory);
     const RecompProgram *m_recompProgram = nullptr;
     const RecompProgram *m_recompTestProgram = nullptr;

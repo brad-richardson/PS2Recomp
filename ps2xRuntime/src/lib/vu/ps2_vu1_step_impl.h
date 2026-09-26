@@ -226,7 +226,7 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::advanceOneCycle()
         progressXgkick();
 }
 
-template <bool kStatic, int kBlockMap, bool kNoStall>
+template <bool kStatic, int kBlockMap, bool kNoStall, uint32_t kCodeSize>
 PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstructionPair &decoded, RunContext &ctx)
 {
     constexpr bool kBlock = kBlockMap >= 0;
@@ -459,8 +459,9 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     m_state.vi[0] = 0;
 
     // VR2: generated images always cover the whole VU1 micro memory
-    // (lookupRecompProgram), so their code size and address mask are constants.
-    const uint32_t codeSize = kStatic ? kRecompCodeSize : ctx.codeSize;
+    // (lookupRecompProgram), so their code size and address mask are constants
+    // (VR3: VU0 images the whole 4 KiB VU0 micro memory; kCodeSize).
+    const uint32_t codeSize = kStatic ? kCodeSize : ctx.codeSize;
     uint32_t nextPc = m_state.pc + 8u;
     if (nextPc >= codeSize)
         nextPc = 0u;
@@ -470,7 +471,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     {
         if (m_state.branchDelay == 0u)
         {
-            m_state.pc = m_state.branchTarget & (kStatic ? kRecompCodeSize - 1u : microAddressMask());
+            m_state.pc = m_state.branchTarget & (kStatic ? kCodeSize - 1u : microAddressMask());
             m_state.branchPending = false;
         }
         else

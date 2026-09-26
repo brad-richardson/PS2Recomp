@@ -747,6 +747,21 @@ if(PS2X_VU1_RECOMP_DIR)
         INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu;${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
 endif()
 
+# VR3: generated VU0 images (vu0_<hash>.cpp from PS2X_VU0_RECOMP_DUMP), used
+# only with PS2X_VU0_RECOMP=1 at run time. Game-derived like the VU1 images.
+set(PS2X_VU0_RECOMP_DIR "" CACHE PATH "Directory of generated VU0 images (VR3); empty = interpreter only")
+if(PS2X_VU0_RECOMP_DIR)
+    file(GLOB PS2X_VU0_RECOMP_SOURCES CONFIGURE_DEPENDS "${PS2X_VU0_RECOMP_DIR}/vu0_*.cpp")
+    list(FILTER PS2X_VU0_RECOMP_SOURCES EXCLUDE REGEX "/\\._")
+    list(LENGTH PS2X_VU0_RECOMP_SOURCES PS2X_VU0_RECOMP_SOURCE_COUNT)
+    message(STATUS "PS2X: VU0 recomp: ${PS2X_VU0_RECOMP_SOURCE_COUNT} images from ${PS2X_VU0_RECOMP_DIR}")
+    target_sources(ps2EntryRunner PRIVATE ${PS2X_VU0_RECOMP_SOURCES})
+    set_source_files_properties(${PS2X_VU0_RECOMP_SOURCES} PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON
+        SKIP_PRECOMPILE_HEADERS ON
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu;${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
+endif()
+
 if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_IOS)
     target_sources(ps2EntryRunner PRIVATE
         src/lib/ps2_debug_panel.cpp

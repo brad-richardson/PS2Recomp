@@ -12,7 +12,15 @@
 //   PS2X_VU1_RECOMP_DUMP=<dir> write <dir>/vu1_<hash>.cpp for each image that
 //                              has no generated code yet (derived from game
 //                              data: keep it outside the repo).
-//   PS2X_VU1_RECOMP_STATS=1    print cumulative generated/interpreted cycles.
+//   PS2X_VU1_RECOMP_STATS=1    print cumulative generated/interpreted cycles
+//                              (VR3: a [vu0-recomp] line for VU0 too).
+//
+// VR3: VU0 images (the whole 4 KiB VU0 micro memory, same keying on the VU0
+// code generation). Default off:
+//   PS2X_VU0_RECOMP=1          use generated VU0 code.
+//   PS2X_VU0_RECOMP_DUMP=<dir> write <dir>/vu0_<hash>.cpp for each VU0 image
+//                              without generated code (game-derived: keep it
+//                              outside the repo).
 
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_memory.h"
@@ -69,6 +77,16 @@ namespace
         return static_cast<uint8_t>(1u << (3u - component));
     }
 
+    const char *vu0RecompDumpDir()
+    {
+        static const char *dir = []() -> const char *
+        {
+            const char *value = std::getenv("PS2X_VU0_RECOMP_DUMP");
+            return value != nullptr && value[0] != '\0' ? value : nullptr;
+        }();
+        return dir;
+    }
+
     bool recompStatsEnabled()
     {
         static const bool enabled = []
@@ -78,6 +96,16 @@ namespace
         }();
         return enabled;
     }
+}
+
+bool VU1Interpreter::vu0RecompEnabled()
+{
+    static const bool enabled = []
+    {
+        const char *value = std::getenv("PS2X_VU0_RECOMP");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
 }
 
 void VU1Interpreter::registerRecompProgram(const RecompProgram &program)
@@ -96,14 +124,28 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
     const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory)
 {
     // VR2: generated pairs assume the whole 16 KiB micro memory (constant code
-    // size, every masked pc in range; see recompChainReady).
-    if (m_unit != Unit::VU1 || codeSize != kRecompCodeSize)
+    // size, every masked pc in range; see recompChainReady). VR3: VU0 images
+    // the whole 4 KiB VU0 micro memory.
+    const bool vu0 = m_unit == Unit::VU0;
+    if (codeSize != (vu0 ? kRecompVu0CodeSize : kRecompCodeSize))
         return nullptr;
     if (m_recompTestProgram != nullptr)
         return codeSize == m_recompTestProgram->codeSize ? m_recompTestProgram : nullptr;
-    if (memory == nullptr || vuCode != memory->getVU1Code())
+    // VU0: keyed only while generated code or its dump is on (default off).
+    if (vu0 && !vu0RecompEnabled() && vu0RecompDumpDir() == nullptr)
         return nullptr;
-    if (recompStatsEnabled() && (++m_recompRuns & 0x3FFFu) == 0u)
+    if (memory == nullptr || vuCode != (vu0 ? memory->getVU0Code() : memory->getVU1Code()))
+        return nullptr;
+    if (vu0 && recompStatsEnabled() && (++m_recompRuns & 0x3FFFu) == 0u)
+    {
+        const uint64_t total = m_recompCycles + m_interpCycles;
+        std::fprintf(stderr, "[vu0-recomp] runs=%llu generated_cycles=%llu interpreted_cycles=%llu generated_share=%.4f\n",
+                     static_cast<unsigned long long>(m_recompRuns),
+                     static_cast<unsigned long long>(m_recompCycles),
+                     static_cast<unsigned long long>(m_interpCycles),
+                     total != 0u ? static_cast<double>(m_recompCycles) / static_cast<double>(total) : 0.0);
+    }
+    if (!vu0 && recompStatsEnabled() && (++m_recompRuns & 0x3FFFu) == 0u)
     {
         const uint64_t total = m_recompCycles + m_interpCycles;
         std::fprintf(stderr, "[vu1-recomp] runs=%llu generated_cycles=%llu interpreted_cycles=%llu generated_share=%.4f\n",
@@ -147,7 +189,7 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
                      vfWrites != 0u ? static_cast<double>(m_vbDirectVfWrites) / static_cast<double>(vfWrites) : 0.0);
 #endif
     }
-    const uint64_t generation = memory->getVU1CodeGeneration();
+    const uint64_t generation = vu0 ? memory->getVU0CodeGeneration() : memory->getVU1CodeGeneration();
     if (m_recompValid && m_recompCode == vuCode && m_recompCodeSize == codeSize &&
         m_recompGeneration == generation)
         return m_recompProgram;
@@ -158,46 +200,51 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
     m_recompGeneration = generation;
     m_recompHash = XXH64(vuCode, codeSize, 0);
     m_recompProgram = nullptr;
-    if (recompEnabled())
+    if (vu0 ? vu0RecompEnabled() : recompEnabled())
     {
         const auto &registry = recompRegistry();
         const auto it = registry.find(m_recompHash);
         if (it != registry.end() && it->second.codeSize == codeSize)
             m_recompProgram = &it->second;
     }
-    if (m_recompProgram == nullptr && recompDumpDir() != nullptr)
+    const char *dumpDir = vu0 ? vu0RecompDumpDir() : recompDumpDir();
+    if (m_recompProgram == nullptr && dumpDir != nullptr)
     {
         static std::unordered_set<uint64_t> dumped;
-        if (dumped.insert(m_recompHash).second)
+        if (dumped.insert(m_recompHash ^ (static_cast<uint64_t>(codeSize) << 48)).second)
         {
             char name[64];
-            std::snprintf(name, sizeof(name), "/vu1_%016llx.cpp",
+            std::snprintf(name, sizeof(name), vu0 ? "/vu0_%016llx.cpp" : "/vu1_%016llx.cpp",
                           static_cast<unsigned long long>(m_recompHash));
-            const std::string path = std::string(recompDumpDir()) + name;
-            const bool ok = emitRecompSource(vuCode, codeSize, m_recompHash, path);
-            std::fprintf(stderr, "[vu1-recomp] dump %s %s generation=%llu\n", path.c_str(),
-                         ok ? "ok" : "FAILED", static_cast<unsigned long long>(generation));
+            const std::string path = std::string(dumpDir) + name;
+            const bool ok = emitRecompSource(vuCode, codeSize, m_recompHash, path, m_unit);
+            std::fprintf(stderr, "[%s] dump %s %s generation=%llu\n", vu0 ? "vu0-recomp" : "vu1-recomp",
+                         path.c_str(), ok ? "ok" : "FAILED", static_cast<unsigned long long>(generation));
         }
     }
     return m_recompProgram;
 }
 
 bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
-                                      uint64_t hash, const std::string &path)
+                                      uint64_t hash, const std::string &path, Unit unit)
 {
-    // The decoder is a pure function of the two instruction words (VU1 unit).
-    const auto decoder = std::make_unique<VU1Interpreter>(Unit::VU1);
+    // The decoder is a pure function of the two instruction words and the
+    // unit (VR3: VU0 reserves MFP, XGKICK, the EFU ops and WAITP).
+    const auto decoder = std::make_unique<VU1Interpreter>(unit);
+    const bool vu0 = unit == Unit::VU0;
+    const char *const image = vu0 ? "VU0RecompImage" : "VU1RecompImage";
     char hashText[32];
     std::snprintf(hashText, sizeof(hashText), "0x%016llxull", static_cast<unsigned long long>(hash));
     const uint32_t pairCount = codeSize / 8u;
 
     std::ostringstream out;
     out << std::boolalpha;
-    out << "// Generated by PS2X_VU1_RECOMP_DUMP (VR1 stage A). Derived from game data:\n"
-           "// keep outside the repo, never commit.\n"
+    out << (vu0 ? "// Generated by PS2X_VU0_RECOMP_DUMP (VR3). Derived from game data:\n"
+                : "// Generated by PS2X_VU1_RECOMP_DUMP (VR1 stage A). Derived from game data:\n")
+        << "// keep outside the repo, never commit.\n"
            "#include \"ps2_vu1_recomp_gen.h\"\n\n"
            "using VU1 = VU1Interpreter;\n\n"
-           "template <>\nstruct VU1RecompImage<" << hashText << ">\n{\n"
+           "template <>\nstruct " << image << "<" << hashText << ">\n{\n"
            "    using D = VU1::DecodedInstructionPair;\n"
            "    using U = VU1::InstructionUsage;\n"
            "    using P = VU1::Pipeline;\n"
@@ -210,10 +257,17 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
            "        if (fn == nullptr)\n            return false;\n"
            "        PS2X_VU1_MUSTTAIL return fn(vu, c);\n    }\n";
     std::vector<bool> emitted(pairCount, false);
+    // VR3: VU0 images get pair functions only (no stage-4 blocks).
     std::vector<RecompBlockPlan> blocks;
-    decoder->planRecompBlocks(vuCode, codeSize, blocks);
     std::vector<uint8_t> directMap;
-    decoder->buildDirectFlagMap(vuCode, codeSize, directMap);
+    if (!vu0)
+    {
+        decoder->planRecompBlocks(vuCode, codeSize, blocks);
+        decoder->buildDirectFlagMap(vuCode, codeSize, directMap);
+    }
+    char codeSizeArgs[48] = "";
+    if (vu0)
+        std::snprintf(codeSizeArgs, sizeof(codeSizeArgs), ", -1, false, 0x%xu", codeSize);
     for (uint32_t index = 0; index < pairCount; ++index)
     {
         const uint32_t pc = index * 8u;
@@ -246,7 +300,7 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
         // VR2 2D: pair functions are reached through the table or a tail call;
         // noinline keeps a leader's from being merged into its block trampoline.
         out << "    PS2X_VU1_NOINLINE static bool f" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n"
-            << "        if (vu.issuePair<true>(d" << label << ", c))\n            return true;\n"
+            << "        if (vu.issuePair<true" << codeSizeArgs << ">(d" << label << ", c))\n            return true;\n"
             // F4-2b: the handoff must be a *guaranteed* tail call (like next()'s
             // table call above). A plain return here nests one frame per pair
             // and overflows small stacks (Odin S1: 512 nested f-frames).
@@ -285,14 +339,14 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
     }
     out << "};\n\n// VR2 stage 4: " << blocks.size() << " blocks, " << blockPairs << " block pairs, "
         << noStallPairs << " without a scoreboard read\n";
-    out << "const VU1::RecompPairFn VU1RecompImage<" << hashText << ">::kPairs[" << pairCount << "] = {\n";
+    out << "const VU1::RecompPairFn " << image << "<" << hashText << ">::kPairs[" << pairCount << "] = {\n";
     for (uint32_t index = 0; index < pairCount; ++index)
     {
         char label[16];
         std::snprintf(label, sizeof(label), "%04x", index * 8u);
         out << "        "
             << (!emitted[index] ? std::string("nullptr")
-                : std::string("&VU1RecompImage<") + hashText + ">::" + (blockAt[index] ? "b" : "f") + label)
+                : std::string("&") + image + "<" + hashText + ">::" + (blockAt[index] ? "b" : "f") + label)
             << ",\n";
     }
     out << "};\n\nnamespace\n{\n    const bool kRegistered = []\n    {\n"
@@ -300,7 +354,7 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
            "        program.hash = " << hashText << ";\n"
            "        program.codeSize = " << codeSize << "u;\n"
            "        program.pairCount = " << pairCount << "u;\n"
-           "        program.pairs = VU1RecompImage<" << hashText << ">::kPairs;\n"
+           "        program.pairs = " << image << "<" << hashText << ">::kPairs;\n"
            "        VU1::registerRecompProgram(program);\n"
            "        return true;\n    }();\n}\n";
 

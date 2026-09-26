@@ -207,6 +207,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(VU1_FIXTURE_DIR ${CMAKE_CURRENT_BINARY_DIR}/vu1_fixture)
     set(VU1_FIXTURE_SOURCES ${VU1_FIXTURE_DIR}/vu1_fixture_0.cpp ${VU1_FIXTURE_DIR}/vu1_fixture_1.cpp
         ${VU1_FIXTURE_DIR}/vu1_fixture_2.cpp)
+    # VR3: VU0 variants (vu1_recomp_fixture.h kVu0ImageCount).
+    foreach(_vu0_fixture RANGE 7)
+        list(APPEND VU1_FIXTURE_SOURCES ${VU1_FIXTURE_DIR}/vu0_fixture_${_vu0_fixture}.cpp)
+    endforeach()
     add_custom_command(
         OUTPUT ${VU1_FIXTURE_SOURCES}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${VU1_FIXTURE_DIR}
@@ -220,6 +224,19 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         SKIP_PRECOMPILE_HEADERS ON
         INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib/vu;${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib")
     target_compile_definitions(ps2_test_lib PRIVATE PS2X_VU1_FIXTURE_TEST=1)
+    # VR3: with PS2X_VU0_RECOMP_DIR the game's generated VU0 images are compiled
+    # into the tests too, for the local-only game-image differential
+    # (PS2X_VR3_VU0_IMAGE=<vu0_<hash>.bin>, PS2X_VR3_VU0_ENTRIES=<pc,pc,...>).
+    # Game-derived: the binary never leaves the build dir.
+    if(PS2X_VU0_RECOMP_DIR)
+        file(GLOB PS2X_TEST_VU0_SOURCES CONFIGURE_DEPENDS "${PS2X_VU0_RECOMP_DIR}/vu0_*.cpp")
+        list(FILTER PS2X_TEST_VU0_SOURCES EXCLUDE REGEX "/\\._")
+        target_sources(ps2x_tests PRIVATE ${PS2X_TEST_VU0_SOURCES})
+        set_source_files_properties(${PS2X_TEST_VU0_SOURCES} TARGET_DIRECTORY ps2x_tests PROPERTIES
+            SKIP_UNITY_BUILD_INCLUSION ON
+            SKIP_PRECOMPILE_HEADERS ON
+            INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib/vu;${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib")
+    endif()
 endif()
 
 if(COMMAND ps2x_stage_ffmpeg_runtime_dlls)

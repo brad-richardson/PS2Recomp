@@ -262,15 +262,20 @@ namespace vu1_fixture
         return 2u;
     }
 
-    inline std::vector<Program> buildImage(uint32_t image, uint8_t *code)
+    // VR3: codeSize/vu0/salt/skip make the VU0 variants (vu0Image below);
+    // the VU1 images use the defaults and are unchanged. vu0: image 2 leaves
+    // out the ops VU0 reserves (EFU, WAITP, MFP, XGKICK); salt changes the
+    // RNG seed; skip (image 1) drops the first skip programs of the list.
+    inline std::vector<Program> buildImage(uint32_t image, uint8_t *code, uint32_t codeSize = kCodeSize,
+                                           bool vu0 = false, uint64_t salt = 0u, uint32_t skip = 0u)
     {
-        std::memset(code, 0, kCodeSize);
+        std::memset(code, 0, codeSize);
         std::vector<Program> programs;
-        const uint32_t maxPairs = kCodeSize / 8u;
+        const uint32_t maxPairs = codeSize / 8u;
         uint32_t next = 0u;
         if (image == 0u)
         {
-            Rng rnd{0x9E3779B97F4A7C15ull};
+            Rng rnd{0x9E3779B97F4A7C15ull ^ salt};
             for (;;)
             {
                 const uint32_t length = 12u + rnd(28u);
@@ -291,7 +296,7 @@ namespace vu1_fixture
 
         if (image == 2u)
         {
-            Rng rnd{0xA0761D6478BD642Full};
+            Rng rnd{0xA0761D6478BD642Full ^ salt};
             for (uint32_t count = 0; count < 40u; ++count)
             {
                 const uint32_t length = 14u + rnd(16u);
@@ -302,7 +307,10 @@ namespace vu1_fixture
                 for (uint32_t pair = 0; pair < length; ++pair)
                 {
                     const uint8_t vf = static_cast<uint8_t>(1u + rnd(8u));
-                    switch (rnd(12u))
+                    uint32_t kind = rnd(12u);
+                    if (vu0 && (kind <= 2u || kind == 5u))
+                        kind = 8u; // quietLower
+                    switch (kind)
                     {
                     case 0: // EFU op (all but the undefined 0x77 and WAITP 0x7B)
                     {
@@ -387,7 +395,8 @@ namespace vu1_fixture
         // Image 1: for every distance 0..5 and every reader kind, a few
         // variants. Reader kinds 0..10 are flagOpLower; 11 = the program ends
         // at that distance; 12 = a branch at that distance lands on a reader.
-        Rng rnd{0xD1B54A32D192ED03ull};
+        Rng rnd{0xD1B54A32D192ED03ull ^ salt};
+        uint32_t index = 0u;
         for (uint32_t variant = 0; variant < 2u; ++variant)
         {
             for (uint32_t distance = 0; distance <= 5u; ++distance)
@@ -423,12 +432,37 @@ namespace vu1_fixture
                         writePair(code, (start + pair) * 8u, lo, up);
                     }
                     const uint32_t total = length + writeEnd(code, (start + length) * 8u);
+                    if (index++ < skip)
+                    {
+                        std::memset(code + start * 8u, 0, total * 8u);
+                        continue;
+                    }
                     programs.push_back({start * 8u, total});
                     next = start + total;
                 }
             }
         }
         return programs;
+    }
+
+    // VR3: VU0 differential images (4 KiB, VU0-legal ops): 0-1 mix (two
+    // seeds), 2-3 pipes without the VU0-reserved ops (two seeds), 4..7 the
+    // flag-distance list of image 1 in consecutive windows (each starts where
+    // the previous one filled up).
+    constexpr uint32_t kVu0CodeSize = 0x1000u;
+    constexpr uint32_t kVu0ImageCount = 8u;
+    constexpr uint64_t kVu0ImageHash[kVu0ImageCount] = {
+        0x5652330000000000ull, 0x5652330000000001ull, 0x5652330000000002ull, 0x5652330000000003ull,
+        0x5652330000000004ull, 0x5652330000000005ull, 0x5652330000000006ull, 0x5652330000000007ull};
+
+    inline std::vector<Program> buildVu0Image(uint32_t image, uint8_t *code)
+    {
+        if (image < 4u)
+            return buildImage(image < 2u ? 0u : 2u, code, kVu0CodeSize, true, image & 1u);
+        uint32_t skip = 0u;
+        for (uint32_t part = 4u; part < image; ++part)
+            skip += static_cast<uint32_t>(buildImage(1u, code, kVu0CodeSize, true, 0u, skip).size());
+        return buildImage(1u, code, kVu0CodeSize, true, 0u, skip);
     }
 }
 
