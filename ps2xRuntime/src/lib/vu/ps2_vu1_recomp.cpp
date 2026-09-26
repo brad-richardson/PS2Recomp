@@ -131,8 +131,9 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
         return nullptr;
     if (m_recompTestProgram != nullptr)
         return codeSize == m_recompTestProgram->codeSize ? m_recompTestProgram : nullptr;
-    // VU0: keyed only while generated code or its dump is on (default off).
-    if (vu0 && !vu0RecompEnabled() && vu0RecompDumpDir() == nullptr)
+    // VU0: keyed only while generated code, its dump or VU0 direct commit
+    // (whose tracked flag map is keyed by m_recompHash) is on (default off).
+    if (vu0 && !vu0RecompEnabled() && !vu0DirectEnabled() && vu0RecompDumpDir() == nullptr)
         return nullptr;
     if (memory == nullptr || vuCode != (vu0 ? memory->getVU0Code() : memory->getVU1Code()))
         return nullptr;
@@ -391,7 +392,22 @@ bool VU1Interpreter::directCommitEnabled()
     return enabled;
 }
 
+// VR3: VU0 direct commit (VB1's rules, unchanged). PS2X_VU0_DIRECT=1 turns it
+// on; default off.
+bool VU1Interpreter::vu0DirectEnabled()
+{
+    static const bool enabled = []
+    {
+        const char *value = std::getenv("PS2X_VU0_DIRECT");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
 // VB1: per-pair direct-commit map, built from the code bytes.
+//
+// VR3: branch targets use the unit's pc mask (VU1 0x3FFF, VU0 0xFFF), as
+// execLower does.
 //
 // kDirectMapFlags: pair i may commit its FMAC/CLIP flag writes at issue: no
 // flag-reading or flag-setting lower op (0x10..0x1C: FCEQ..FCGET, FSSET,
@@ -459,7 +475,7 @@ void VU1Interpreter::buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize
         {
             kind[i] = uncond ? kUncond : kCond;
             const int32_t imm = static_cast<int32_t>(lower << 21) >> 21;
-            const uint32_t pc = (i * 8u + 8u + static_cast<uint32_t>(imm * 8)) & 0x3FFFu;
+            const uint32_t pc = (i * 8u + 8u + static_cast<uint32_t>(imm * 8)) & microAddressMask();
             target[i] = pc + 8u <= codeSize ? static_cast<int64_t>(pc / 8u) : kUnknown;
         }
     }
@@ -581,7 +597,7 @@ void VU1Interpreter::planRecompBlocks(const uint8_t *vuCode, uint32_t codeSize,
         if (uncond || cond)
         {
             const int32_t imm = static_cast<int32_t>(d[i].lower << 21) >> 21;
-            const uint32_t pc = (i * 8u + 8u + static_cast<uint32_t>(imm * 8)) & 0x3FFFu;
+            const uint32_t pc = (i * 8u + 8u + static_cast<uint32_t>(imm * 8)) & microAddressMask();
             if (pc + 8u <= codeSize)
                 leader[pc / 8u] = 1u;
         }

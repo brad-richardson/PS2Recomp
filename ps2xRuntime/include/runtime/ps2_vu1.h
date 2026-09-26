@@ -461,7 +461,7 @@ private:
     // orders (VF, VI, ACC, LSU stores) are applied at issue instead of being
     // queued and committed at readyCycle; FMAC/CLIP flag writes too where
     // m_directFlagMap says no flag reader can issue before they would land.
-    // Guards per pair: VU1, dev traces off, m_cycle + kDirectMaxLatency <=
+    // Guards per pair: VU1 (VR3: or VU0 with PS2X_VU0_DIRECT=1), dev traces off, m_cycle + kDirectMaxLatency <=
     // budgetEnd (every direct write lands before a budget cut), VF writes
     // only where the static map shows no newer write can retire them before
     // they land (the queue drops a superseded write, which a cut would show),
@@ -487,6 +487,7 @@ private:
             m_directPendingUntil = readyCycle;
     }
     static bool directCommitEnabled();
+    static bool vu0DirectEnabled();
     const uint8_t *directFlagMap(const uint8_t *vuCode, uint32_t codeSize, bool tracked);
     // Per-pair bits: kDirectMapFlags (flag writes may commit at issue),
     // kDirectMapUpperVf / kDirectMapLowerVf (that VF write cannot be

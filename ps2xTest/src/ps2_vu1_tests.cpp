@@ -121,8 +121,8 @@ namespace
         }
     }
 
-    // VR3 (c) adds 2 and 3 (VU0 direct commit).
-    inline std::vector<int> vu0DiffModes() { return {1}; }
+    // VR3 (c): VU0 direct commit in the interpreter and in generated pairs.
+    inline std::vector<int> vu0DiffModes() { return {1, 2, 3}; }
 #endif
 
     struct Vu1Fixture

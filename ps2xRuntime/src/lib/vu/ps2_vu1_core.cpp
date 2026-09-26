@@ -1462,13 +1462,17 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     if (m_traceArmed || m_entryArmed)
         recomp = nullptr;
     // VB1: direct commit (VU1 only, dev traces off).
-    m_directRunOk = m_unit == Unit::VU1 && !m_traceArmed && !m_entryArmed &&
-                    (m_directOverride < 0 ? directCommitEnabled() : m_directOverride != 0);
-    // VR2 stage 4: generated block functions (PS2X_VU1_BLOCKS=1; default off).
-    m_blocksOn = m_directRunOk && (m_blocksOverride < 0 ? blocksEnabled() : m_blocksOverride != 0);
+    // VR3: VU0 too, behind its own knob (PS2X_VU0_DIRECT=1; default off).
+    const bool vu1 = m_unit == Unit::VU1;
+    m_directRunOk = !m_traceArmed && !m_entryArmed &&
+                    (m_directOverride >= 0 ? m_directOverride != 0
+                                           : vu1 ? directCommitEnabled() : vu0DirectEnabled());
+    // VR2 stage 4: generated block functions (PS2X_VU1_BLOCKS=1; default off; VU1 only).
+    m_blocksOn = vu1 && m_directRunOk && (m_blocksOverride < 0 ? blocksEnabled() : m_blocksOverride != 0);
     m_directFlagSafe = m_directRunOk
                            ? directFlagMap(vuCode, codeSize,
-                                           memory != nullptr && vuCode == memory->getVU1Code())
+                                           memory != nullptr &&
+                                               vuCode == (vu1 ? memory->getVU1Code() : memory->getVU0Code()))
                            : nullptr;
     while (m_cycle < budgetEnd && !m_stopRequested)
     {
