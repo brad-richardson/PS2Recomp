@@ -117,6 +117,9 @@ void register_ps2_vu1_engine_tests()
             t.Equals(w5, 0xAA000005u, "an unmasked run write lands");
             t.Equals(w6, 0xCC000006u, "a later VIF lane write wins");
             t.Equals(w700, 0xBB0002BCu, "the one unmasked word of a masked block takes the run's value");
+            // The next snapshot, refreshed from the WAW words only, equals canonical.
+            ps2_vu1_engine::refreshSnapshot(result.data(), canonical.data(), waw.data());
+            t.IsTrue(result == canonical, "refreshed snapshot equals canonical memory");
         });
 
         tc.Run("VP2 engine W=1 gives the synchronous GIF stream, VU1 memory and code", [](TestCase &t)

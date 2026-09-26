@@ -12,8 +12,9 @@
 // the snapshot is written back except the words VIF wrote after the dispatch
 // (the WAW mask), the run's packets are submitted as PATH1, then the deferred
 // actions run. Every unit job ends with a full drain, so the EE-side MT1 sync
-// points are unchanged. W=1: a run waits for the previous run to commit before
-// its snapshot, so only VIF parse / commit overlap with VU compute.
+// points are unchanged. W=1: a run waits for the previous run to finish and be
+// written back before its snapshot; the previous run's packet commit and the
+// VIF parse up to the next MSCAL overlap with its compute.
 //
 // Unset/0 (default): off, every hook is one branch on a cached flag. Refused
 // (off) unless MT1 threaded mode is on (which dev traces already refuse).
@@ -97,6 +98,29 @@ namespace ps2_vu1_engine
                 continue;
             for (uint32_t b = 0; b < 64u; ++b)
                 if ((m & (1ull << b)) == 0u)
+                    std::memcpy(dst + b * 4u, src + b * 4u, 4u);
+        }
+    }
+
+    // After a write-back, canonical equals the run's result except the WAW
+    // words: copying just those into the result makes it the next snapshot
+    // (instead of a full 16 KiB copy back).
+    inline void refreshSnapshot(uint8_t *snapshot, const uint8_t *canonical, const uint64_t *waw)
+    {
+        for (uint32_t i = 0; i < kMaskWords; ++i)
+        {
+            const uint64_t m = waw[i];
+            if (m == 0u)
+                continue;
+            uint8_t *dst = snapshot + i * 256u;
+            const uint8_t *src = canonical + i * 256u;
+            if (m == ~0ull)
+            {
+                std::memcpy(dst, src, 256u);
+                continue;
+            }
+            for (uint32_t b = 0; b < 64u; ++b)
+                if ((m & (1ull << b)) != 0u)
                     std::memcpy(dst + b * 4u, src + b * 4u, 4u);
         }
     }
@@ -263,16 +287,26 @@ namespace ps2_vu1_engine
         // The engine is used only by the MT1 unit thread (the sequencer).
         bool sequencing() const { return on() && ps2_mtvu::onWorker(); }
 
-        // Sequencer: an MSCAL (resume=false) or MSCNT. Commits everything
-        // before it, snapshots VU1 data and posts the run.
+        // Sequencer: an MSCAL (resume=false) or MSCNT. W=1: the previous run
+        // must finish and be written back (its result is this run's input),
+        // then this run is posted, and only then does the previous run's
+        // commit (PATH1 packets into the GIF/GS frontend, deferred actions)
+        // run, overlapped with this run's compute.
         void dispatch(RunJob job)
         {
-            commitAll(Wait::Dispatch);
             ensureWorker();
-            std::memcpy(m_snapshot.data(), m_canonical, kDataBytes);
+            if (m_mergedId < m_posted)
+            {
+                waitFinished(m_posted, Wait::Dispatch);
+                writeBack();
+                refreshSnapshot(m_snapshot.data(), m_canonical, m_waw.data());
+            }
+            else
+                std::memcpy(m_snapshot.data(), m_canonical, kDataBytes);
             m_waw.fill(0u);
-            m_packets.clear();
             job.id = ++m_posted;
+            // This slot last held run id-2, which the previous dispatch retired.
+            m_packets[job.id & 1u].clear();
             job.fpControl = ps2_fpmode::readControl();
             m_job = job;
             m_tracking = true;
@@ -287,6 +321,7 @@ namespace ps2_vu1_engine
                 std::lock_guard<std::mutex> lock(m_m);
                 m_cvWork.notify_one();
             }
+            retire(); // the previous run's packets and the actions behind it
         }
 
         // Sequencer: true = a GIF-bound action must go behind the in-flight
@@ -411,21 +446,30 @@ namespace ps2_vu1_engine
 #endif
         }
 
-        void commitRun(uint64_t id)
+        // Write the in-flight (finished) run's result back to canonical memory.
+        void writeBack()
         {
-            (void)id;
             m_tracking = false;
             mergeWriteBack(m_canonical, m_snapshot.data(), m_waw.data());
+            m_mergedId = m_posted;
+        }
+
+        void commitRun(uint64_t id)
+        {
+            if (m_mergedId < id)
+                writeBack();
+            std::vector<uint8_t> &packets = m_packets[id & 1u];
             size_t pos = 0;
-            while (pos + 4u <= m_packets.size())
+            while (pos + 4u <= packets.size())
             {
                 uint32_t n = 0;
-                std::memcpy(&n, m_packets.data() + pos, 4u);
+                std::memcpy(&n, packets.data() + pos, 4u);
                 pos += 4u;
                 if (m_path1Fn)
-                    m_path1Fn(m_packets.data() + pos, n);
+                    m_path1Fn(packets.data() + pos, n);
                 pos += n;
             }
+            packets.clear();
             ++m_committed;
         }
 
@@ -528,7 +572,7 @@ namespace ps2_vu1_engine
                     std::this_thread::sleep_for(std::chrono::microseconds(rng % (m_jitterUs + 1u)));
                 }
                 ps2_fpmode::writeControl(job.fpControl);
-                detail::t_capture = &m_packets;
+                detail::t_capture = &m_packets[job.id & 1u];
                 m_runFn(job, m_snapshot.data());
                 detail::t_capture = nullptr;
                 done = job.id;
@@ -596,6 +640,7 @@ namespace ps2_vu1_engine
         ReorderBuffer m_rob;
         WawMask m_waw{};
         uint64_t m_posted = 0;
+        uint64_t m_mergedId = 0; // last run written back to canonical memory
         uint64_t m_committed = 0;
         bool m_tracking = false;
         bool m_committing = false;
@@ -604,7 +649,7 @@ namespace ps2_vu1_engine
         // Shared with the worker (W=1: one slot; the sequencer touches the
         // slot only while no run is in flight).
         alignas(64) std::array<uint8_t, kDataBytes> m_snapshot{};
-        std::vector<uint8_t> m_packets;
+        std::array<std::vector<uint8_t>, 2> m_packets; // by run id & 1: the worker fills one while the other commits
         RunJob m_job;
         alignas(64) std::atomic<uint64_t> m_postedAtomic{0};
         alignas(64) std::atomic<uint64_t> m_finished{0};
