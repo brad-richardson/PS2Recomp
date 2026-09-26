@@ -172,6 +172,7 @@ public:
     // flag commits direct (directFlags) or queued, and read back everything
     // an FMAC can change (registers, flags, flag pipeline, pending tails).
     void execUpperForTest(uint32_t instr, bool simd, bool directFlags);
+    void setFloatModeForTest(bool pcsx2) { m_pcsx2Float = pcsx2; }
     void queueFssetForTest(uint16_t immediate) { queueFsset(immediate); }
     std::vector<uint64_t> fmacStateForTest() const;
     const VU1State &state() const { return m_state; }
@@ -344,6 +345,8 @@ private:
     static constexpr uint32_t kMaxDecodedPairs = 0x4000u / 8u;
 
     Unit m_unit;
+    // VF1: runtime choice; fixed at construction for game runs.
+    bool m_pcsx2Float = false;
     VU1State m_state;
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t m_programStartCount = 0;
@@ -571,6 +574,8 @@ private:
     PS2X_VU1_ALWAYS_INLINE bool fmacSimdDispatch(uint32_t instr);
     template <int kArith, int kSrc, bool kAcc>
     PS2X_VU1_ALWAYS_INLINE void fmacSimd(uint32_t instr);
+    template <int kArith, int kSrc, bool kAcc>
+    PS2X_VU1_ALWAYS_INLINE void fmacPcsx2(uint32_t instr);
 #endif
     void execLowerImpl(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
 

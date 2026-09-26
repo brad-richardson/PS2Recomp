@@ -82,6 +82,23 @@ namespace ps2_vu1_fmac_simd
         return bits;
     }
 
+    // PCSX2's default microVU level-1 clamp operates on selected *inputs*.
+    // The host FP control already supplies DAZ/FZ and round-toward-zero in
+    // VU1Interpreter::run; these helpers also make crafted unit cases robust.
+    PS2X_VU1_ALWAYS_INLINE inline v4u daz4(v4u bits)
+    {
+        const v4u zero = (v4u)((bits & 0x7F800000u) == 0u);
+        return (bits & ~zero) | ((bits & 0x80000000u) & zero);
+    }
+
+    PS2X_VU1_ALWAYS_INLINE inline v4u clamp4(v4u bits)
+    {
+        const v4u special = (v4u)((bits & 0x7F800000u) == 0x7F800000u);
+        const v4u nan = (v4u)((bits & 0x007FFFFFu) != 0u) & special;
+        const v4u replacement = ((bits & 0x80000000u) & ~nan) | 0x7F7FFFFFu;
+        return (bits & ~special) | (replacement & special);
+    }
+
     PS2X_VU1_ALWAYS_INLINE inline v2d lo2(v4f v)
     {
         return __builtin_convertvector(__builtin_shufflevector(v, v, 0, 1), v2d);
@@ -151,6 +168,11 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::fmacSimd(uint32_t instr)
     // Scalar path with dest 0: no lane, no flag write, no store.
     if (dest == 0u)
         return;
+    if (m_pcsx2Float)
+    {
+        fmacPcsx2<kArith, kSrc, kAcc>(instr);
+        return;
+    }
     constexpr bool kCrossOp = kArith == kOpmsub || kArith == kOpmula;
     constexpr bool kUsesAcc = kArith == kMadd || kArith == kMsub || kArith == kOpmsub;
     // calculateFmacProductSticky's product-sum set: MADD/MSUB in every form
@@ -277,6 +299,102 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::fmacSimd(uint32_t instr)
     const uint32_t mac = orLanes(spread << shifts);
     const uint32_t status = orLanes(laneFlags);
     commitFmacFlags(mac, status, extraSticky);
+
+    float out[4];
+    std::memcpy(out, &bits, sizeof(out));
+    if constexpr (kAcc)
+        applyDestAcc(out, dest);
+    else
+        applyDest(m_state.vf[FD(instr)], out, dest);
+}
+
+// VF1: PCSX2 default microVU arithmetic. The few level-1 operand clamps are
+// compile-time choices for the upper op; result-wide clamping is *not* enabled
+// by default (microVU_Clamp.inl:61-77). This is intentionally distinct from
+// the exact result classification above.
+template <int kArith, int kSrc, bool kAcc>
+PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::fmacPcsx2(uint32_t instr)
+{
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+    using namespace ps2_vu1_fmac_simd;
+    const uint8_t dest = DEST(instr);
+    constexpr bool kCrossOp = kArith == kOpmsub || kArith == kOpmula;
+    constexpr bool kUsesAcc = kArith == kMadd || kArith == kMsub || kArith == kOpmsub;
+    const bool vectorDest = (dest & (dest - 1u)) != 0u;
+
+    v4u vsBits = daz4(load4(m_state.vf[FS(instr)]));
+    v4u bBits;
+    if constexpr (kSrc >= kBc0 && kSrc <= kBc3)
+    {
+        const v4u vt = daz4(load4(m_state.vf[FT(instr)]));
+        bBits = __builtin_shufflevector(vt, vt, kSrc, kSrc, kSrc, kSrc);
+    }
+    else if constexpr (kSrc == kQ || kSrc == kI)
+    {
+        const float s = kSrc == kQ ? m_state.q : m_state.i;
+        uint32_t word;
+        std::memcpy(&word, &s, sizeof(word));
+        bBits = v4u{word, word, word, word};
+        bBits = daz4(bBits);
+    }
+    else
+    {
+        bBits = daz4(load4(m_state.vf[FT(instr)]));
+        if constexpr (kSrc == kCross)
+        {
+            vsBits = __builtin_shufflevector(vsBits, vsBits, 1, 2, 0, 3);
+            bBits = __builtin_shufflevector(bBits, bBits, 2, 0, 1, 3);
+        }
+    }
+
+    // microVU_Upper.inl:596-637: the vector SUB and MUL forms clamp both
+    // inputs; scalar MUL and the broadcast multiply-accumulate forms clamp
+    // Fs. Other FMAC forms use the FPCR's native input treatment.
+    const bool clampSub = kArith == kSub && !kAcc && vectorDest;
+    const bool clampMul = kArith == kMul && !kAcc;
+    const bool clampAccMul = kArith == kMul && kAcc && kSrc <= kBc3;
+    const bool clampMaddBc = kArith == kMadd && kSrc <= kBc3;
+    if (clampSub || clampMul || clampAccMul || clampMaddBc)
+        vsBits = clamp4(vsBits);
+    if (clampSub || (clampMul && vectorDest))
+        bBits = clamp4(bBits);
+
+    const v4f vs = (v4f)vsBits;
+    const v4f b = (v4f)bBits;
+    v4f acc = {0.0f, 0.0f, 0.0f, 0.0f};
+    if constexpr (kUsesAcc)
+        acc = (v4f)daz4(load4(m_state.acc));
+    v4f result;
+    if constexpr (kArith == kAdd)
+        result = vs + b;
+    else if constexpr (kArith == kSub)
+        result = vs - b;
+    else if constexpr (kArith == kMul || kArith == kOpmula)
+        result = vs * b;
+    else
+    {
+        const v4f product = vs * b;
+        if constexpr (kArith == kMadd)
+            result = acc + product;
+        else
+            result = acc - product;
+    }
+    if constexpr (kCrossOp)
+        result[3] = 0.0f;
+
+    // microVU_Upper.inl:27-119: native-result S/Z only at default settings.
+    // Preserve the project's four-cycle flag pipeline for guest reads.
+    const v4u bits = daz4((v4u)result);
+    const v4i dm = destMask(dest);
+    const v4i sign = (v4i)((bits & 0x80000000u) != 0u) & dm;
+    const v4i zero = (v4i)((bits & 0x7FFFFFFFu) == 0u) & dm;
+    const v4i lanes = {8, 4, 2, 1};
+    const uint32_t mac = orLanes(((sign & 1) * 16 + (zero & 1)) * lanes);
+    const uint32_t status = ((orLanes(sign) != 0u) ? 2u : 0u) |
+                            ((orLanes(zero) != 0u) ? 1u : 0u);
+    commitFmacFlags(mac, status, 0u);
 
     float out[4];
     std::memcpy(out, &bits, sizeof(out));

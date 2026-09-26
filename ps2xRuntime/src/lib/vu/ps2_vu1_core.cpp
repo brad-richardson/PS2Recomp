@@ -66,6 +66,8 @@ uint8_t VU1Interpreter::vfReadLanes(const InstructionUsage &usage, uint8_t reg)
 VU1Interpreter::VU1Interpreter(Unit unit)
     : m_unit(unit)
 {
+    const char *floatMode = std::getenv("PS2X_VU_FLOAT");
+    m_pcsx2Float = floatMode != nullptr && std::strcmp(floatMode, "pcsx2") == 0;
     reset();
 }
 
