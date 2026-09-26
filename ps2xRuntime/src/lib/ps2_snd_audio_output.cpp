@@ -218,9 +218,9 @@ namespace
             g_output.stQueuePos = 0;
             if (g_output.floatOut.size() < 1024u * 2u)
                 g_output.floatOut.resize(1024u * 2u);
-            const soundtouch::uint got =
+            const uint got =
                 g_output.st->receiveSamples(g_output.floatOut.data(), 1024u);
-            for (soundtouch::uint i = 0; i < got; ++i)
+            for (uint i = 0; i < got; ++i)
             {
                 const int16_t l = floatToS16(g_output.floatOut[2u * i]);
                 const int16_t r = floatToS16(g_output.floatOut[2u * i + 1u]);
@@ -337,7 +337,7 @@ namespace
                         static_cast<float>(unpackRight(fed[i])) / 32768.0f;
                 }
                 g_output.st->putSamples(g_output.floatBuf.data(),
-                                        static_cast<soundtouch::uint>(fed.size()));
+                                        static_cast<uint>(fed.size()));
             }
             drainStretcher();
             g_output.stQueue.clear();
@@ -366,7 +366,7 @@ namespace
                         static_cast<float>(unpackRight(fed[i])) / 32768.0f;
                 }
                 g_output.st->putSamples(g_output.floatBuf.data(),
-                                        static_cast<soundtouch::uint>(fedCount));
+                                        static_cast<uint>(fedCount));
             }
             if (g_output.rate == kSourceRate)
             {
