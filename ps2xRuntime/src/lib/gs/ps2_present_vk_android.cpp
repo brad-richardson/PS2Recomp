@@ -8,6 +8,7 @@
 #include <android/native_activity.h>
 #include <android/native_window.h>
 #include <android/rect.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <jni.h>
@@ -151,6 +152,20 @@ Ledger &ledger()
     // Never destroyed: completions can arrive on a binder thread during exit.
     static Ledger *l = new Ledger(*new NdkPlatform());
     return *l;
+}
+
+// Open fds of this process (/proc/self/fd minus the directory's own fd): the
+// release APK is not debuggable, so adb cannot list /proc/<pid>/fd (VK2 ST1).
+int openFdCount()
+{
+    DIR *d = opendir("/proc/self/fd");
+    if (!d)
+        return -1;
+    int n = 0;
+    while (const dirent *e = readdir(d))
+        n += e->d_name[0] != '.';
+    closedir(d);
+    return n - 1;
 }
 
 // Main-thread logging state only (layer size from the DecorView).
@@ -312,7 +327,7 @@ void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect,
     // VK2: the ledger's counts at every window change (lifecycle stress receipts).
     char stats[1024];
     appendStats(stats, sizeof(stats));
-    std::fprintf(stderr, "[present-vk] window-change stats%s\n", stats);
+    std::fprintf(stderr, "[present-vk] window-change stats%s proc_fds=%d\n", stats, openFdCount());
 }
 
 uint64_t allocateBuffer(uint32_t w, uint32_t h, AHardwareBuffer **out)
