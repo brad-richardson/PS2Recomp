@@ -131,6 +131,9 @@ public:
     static const RecompProgram *findRecompProgram(uint64_t hash);
     void setRecompProgramForTest(const RecompProgram *program) { m_recompTestProgram = program; }
     uint64_t recompCyclesForTest() const { return m_recompCycles; }
+    // VR2 stage 4: -1 follows PS2X_VU1_BLOCKS (default off), 0 off, 1 on.
+    void setBlocksForTest(int mode) { m_blocksOverride = mode; }
+    uint64_t blockEntriesForTest() const { return m_blockEntries; }
     const VU1State &state() const { return m_state; }
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t programStartCount() const { return m_programStartCount; }
@@ -390,12 +393,33 @@ private:
              GS &gs, PS2Memory *memory, uint32_t maxCycles);
     // VR1: one pair issue (stall, execute, queue writes, advance one cycle);
     // defined in ps2_vu1_step_impl.h. Returns true when run() must stop.
-    template <bool kStatic>
+    // VR2 stage 4: kBlockMap >= 0 = the pair runs inside a guarded block
+    // function (recompBlockReady): direct commit on with this constant
+    // direct-map byte and no budget checks. kNoStall = the emitter proved the
+    // pair never stalls there (no scoreboard read).
+    template <bool kStatic, int kBlockMap = -1, bool kNoStall = false>
     bool issuePair(const DecodedInstructionPair &decoded, RunContext &ctx);
     // VR1: the run() loop header between two generated pairs (VR2: the stop
     // request; see step_impl). True when the next pair may issue from
     // generated code.
     bool recompChainReady(RunContext &ctx);
+    // VR2 stage 4: entry guard of a generated block of pairs pairs whose
+    // worst case (stalls and the last direct landing) is maxCycles.
+    bool recompBlockReady(const RunContext &ctx, uint32_t maxCycles, uint32_t pairs);
+    static bool blocksEnabled();
+    struct RecompBlockPlan
+    {
+        uint32_t start = 0;                // leader pair index
+        std::vector<uint32_t> pairs;       // pair indices, in issue order
+        std::vector<uint8_t> noStall;      // per pair: the scoreboard read is provably a no-op
+        uint32_t maxCycles = 0;            // guard bound: stalls + issues + last landing
+    };
+    void planRecompBlocks(const uint8_t *vuCode, uint32_t codeSize, std::vector<RecompBlockPlan> &blocks) const;
+    bool m_blocksOn = false;
+    int m_blocksOverride = -1;
+    uint64_t m_blockEntries = 0;
+    uint64_t m_blockPairs = 0;
+    uint64_t m_blockNoStallMisses = 0; // hash builds: the no-stall proof failed (must stay 0)
     // VR2: generated images are used only for whole-memory VU1 code.
     static constexpr uint32_t kRecompCodeSize = 0x4000u;
     const RecompProgram *lookupRecompProgram(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory);

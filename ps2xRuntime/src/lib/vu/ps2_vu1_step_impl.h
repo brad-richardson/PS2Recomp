@@ -226,9 +226,10 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::advanceOneCycle()
         progressXgkick();
 }
 
-template <bool kStatic>
+template <bool kStatic, int kBlockMap, bool kNoStall>
 PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstructionPair &decoded, RunContext &ctx)
 {
+    constexpr bool kBlock = kBlockMap >= 0;
 #if PS2X_ENABLE_DET_HASH_TAP
     const uint64_t vbStartCycle = m_cycle;
 #endif
@@ -249,27 +250,45 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     const bool traceWasBranchPending = m_state.branchPending;
     const uint32_t traceWasBranchTarget = m_state.branchTarget;
 
-    uint64_t readyCycle = calculatePairReadyCycle(decoded);
-    while (readyCycle > m_cycle)
+    // VR2 stage 4: inside a block the entry guard bounds every stall below
+    // budgetEnd, so the budget branches never fire there; a kNoStall pair's
+    // reads are all ready (the emitter's proof), so it skips the scoreboard.
+    if constexpr (!kNoStall)
     {
-        if (readyCycle >= ctx.budgetEnd)
+        uint64_t readyCycle = calculatePairReadyCycle(decoded);
+        while (readyCycle > m_cycle)
         {
-            advanceTo(ctx.budgetEnd);
-            break;
+            if (!kBlock && readyCycle >= ctx.budgetEnd)
+            {
+                advanceTo(ctx.budgetEnd);
+                break;
+            }
+            advanceTo(readyCycle);
+            readyCycle = calculatePairReadyCycle(decoded);
         }
-        advanceTo(readyCycle);
-        readyCycle = calculatePairReadyCycle(decoded);
     }
-    if (m_cycle >= ctx.budgetEnd)
-        return true;
+#if PS2X_ENABLE_DET_HASH_TAP
+    else if (calculatePairReadyCycle(decoded) > m_cycle)
+        ++m_blockNoStallMisses; // must stay 0: the emitter's no-stall proof failed
+#endif
+    if constexpr (!kBlock)
+    {
+        if (m_cycle >= ctx.budgetEnd)
+            return true;
+    }
 
     // VB1: commit this pair's writes at issue when they land inside the
     // budget (all within kDirectMaxLatency). VF writes also need the static
     // map's no-supersede bit, VI writes latency 1 (ILW/ILWR stay queued),
     // flag writes the map's no-reader bit and no queued FSSET
     // (directFlagsNow).
-    const bool direct = m_directRunOk && m_cycle + kDirectMaxLatency <= ctx.budgetEnd;
-    const uint8_t directMap = direct && m_directFlagSafe != nullptr ? m_directFlagSafe[m_state.pc >> 3] : 0u;
+    // VR2 stage 4: a block's guard implies both (m_blocksOn needs
+    // m_directRunOk; its cycle bound includes the last landing), and its map
+    // byte is the emitter's buildDirectFlagMap of the same code bytes.
+    const bool direct = kBlock || (m_directRunOk && m_cycle + kDirectMaxLatency <= ctx.budgetEnd);
+    const uint8_t directMap = kBlock ? static_cast<uint8_t>(kBlockMap)
+                              : direct && m_directFlagSafe != nullptr ? m_directFlagSafe[m_state.pc >> 3]
+                                                                     : 0u;
     const bool directUpperVf = (directMap & kDirectMapUpperVf) != 0u;
     const bool directLowerVf = (directMap & kDirectMapLowerVf) != 0u;
     const bool directVi = direct &&
@@ -511,6 +530,22 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
 PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::recompChainReady(RunContext &)
 {
     return !m_stopRequested;
+}
+
+// VR2 stage 4: a block function runs its pairs back to back with the per-pair
+// guards hoisted here. Entry state the emitter's analysis assumes: no branch
+// pending (the block starts a pc sequence; a leader reached as a delay slot
+// takes the pair function), no E-bit or halt pending, and every stall plus
+// the last direct landing inside the budget. m_blocksOn implies m_directRunOk.
+PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::recompBlockReady(const RunContext &ctx, uint32_t maxCycles,
+                                                                     uint32_t pairs)
+{
+    if (!m_blocksOn || m_state.branchPending || m_state.ebit || m_state.haltAfterDelaySlot ||
+        m_cycle + maxCycles > ctx.budgetEnd)
+        return false;
+    ++m_blockEntries;
+    m_blockPairs += pairs;
+    return true;
 }
 
 #endif

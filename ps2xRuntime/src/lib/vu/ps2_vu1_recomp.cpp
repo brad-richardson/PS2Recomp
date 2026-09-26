@@ -22,12 +22,14 @@
 #include "runtime/third_party/xxhash.h"
 
 #include <array>
+#include <bit>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 #include <mutex>
 #include <sstream>
@@ -60,6 +62,11 @@ namespace
             return value != nullptr && value[0] != '\0' ? value : nullptr;
         }();
         return dir;
+    }
+
+    constexpr uint8_t laneBit(uint32_t component)
+    {
+        return static_cast<uint8_t>(1u << (3u - component));
     }
 
     bool recompStatsEnabled()
@@ -104,6 +111,10 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
                      static_cast<unsigned long long>(m_recompCycles),
                      static_cast<unsigned long long>(m_interpCycles),
                      total != 0u ? static_cast<double>(m_recompCycles) / static_cast<double>(total) : 0.0);
+        std::fprintf(stderr, "[vu1-blocks] on=%d entries=%llu pairs=%llu nostall_misses=%llu\n",
+                     m_blocksOn ? 1 : 0, static_cast<unsigned long long>(m_blockEntries),
+                     static_cast<unsigned long long>(m_blockPairs),
+                     static_cast<unsigned long long>(m_blockNoStallMisses));
 #if PS2X_ENABLE_DET_HASH_TAP
         const uint64_t pairCycles = m_vbDirectCycles + m_vbQueuedCycles;
         const uint64_t flagWrites = m_vbDirectFlagWrites + m_vbQueuedFlagWrites;
@@ -184,6 +195,10 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
            "        if (fn == nullptr)\n            return false;\n"
            "        PS2X_VU1_MUSTTAIL return fn(vu, c);\n    }\n";
     std::vector<bool> emitted(pairCount, false);
+    std::vector<RecompBlockPlan> blocks;
+    decoder->planRecompBlocks(vuCode, codeSize, blocks);
+    std::vector<uint8_t> directMap;
+    decoder->buildDirectFlagMap(vuCode, codeSize, directMap);
     for (uint32_t index = 0; index < pairCount; ++index)
     {
         const uint32_t pc = index * 8u;
@@ -220,12 +235,42 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
             // and overflows small stacks (Odin S1: 512 nested f-frames).
             << "        PS2X_VU1_MUSTTAIL return next(vu, c);\n    }\n";
     }
-    out << "};\n\nconst VU1::RecompPairFn VU1RecompImage<" << hashText << ">::kPairs[" << pairCount << "] = {\n";
+    // VR2 stage 4: one function per block leader. Guard fails -> the leader's
+    // pair function; otherwise the pairs run back to back (a pair that ends
+    // the program returns true, a stop request returns to run()).
+    std::vector<bool> blockAt(pairCount, false);
+    uint32_t blockPairs = 0u, noStallPairs = 0u;
+    for (const RecompBlockPlan &block : blocks)
+    {
+        char label[16];
+        std::snprintf(label, sizeof(label), "%04x", block.start * 8u);
+        blockAt[block.start] = true;
+        out << "    static bool b" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n"
+            << "        if (!vu.recompBlockReady(c, " << block.maxCycles << "u, " << block.pairs.size() << "u))\n"
+            << "            PS2X_VU1_MUSTTAIL return f" << label << "(vu, c);\n";
+        for (size_t k = 0; k < block.pairs.size(); ++k)
+        {
+            char pairLabel[16];
+            std::snprintf(pairLabel, sizeof(pairLabel), "%04x", block.pairs[k] * 8u);
+            out << "        if (vu.issuePair<true, " << unsigned(directMap[block.pairs[k]]) << ", "
+                << (block.noStall[k] != 0u) << ">(d" << pairLabel << ", c))\n            return true;\n";
+            if (k + 1u < block.pairs.size())
+                out << "        if (vu.m_stopRequested)\n            return false;\n";
+            ++blockPairs;
+            noStallPairs += block.noStall[k] != 0u ? 1u : 0u;
+        }
+        out << "        PS2X_VU1_MUSTTAIL return next(vu, c);\n    }\n";
+    }
+    out << "};\n\n// VR2 stage 4: " << blocks.size() << " blocks, " << blockPairs << " block pairs, "
+        << noStallPairs << " without a scoreboard read\n";
+    out << "const VU1::RecompPairFn VU1RecompImage<" << hashText << ">::kPairs[" << pairCount << "] = {\n";
     for (uint32_t index = 0; index < pairCount; ++index)
     {
         char label[16];
         std::snprintf(label, sizeof(label), "%04x", index * 8u);
-        out << "        " << (emitted[index] ? std::string("&VU1RecompImage<") + hashText + ">::f" + label : std::string("nullptr"))
+        out << "        "
+            << (!emitted[index] ? std::string("nullptr")
+                : std::string("&VU1RecompImage<") + hashText + ">::" + (blockAt[index] ? "b" : "f") + label)
             << ",\n";
     }
     out << "};\n\nnamespace\n{\n    const bool kRegistered = []\n    {\n"
@@ -243,6 +288,19 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
     const std::string text = out.str();
     file.write(text.data(), static_cast<std::streamsize>(text.size()));
     return static_cast<bool>(file);
+}
+
+// VR2 stage 4: generated block functions. PS2X_VU1_BLOCKS=1 turns them on
+// (default off until proven); off, a block leader's entry takes its pair
+// function.
+bool VU1Interpreter::blocksEnabled()
+{
+    static const bool enabled = []
+    {
+        const char *value = std::getenv("PS2X_VU1_BLOCKS");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
 }
 
 // VB1: direct commit (stage B). PS2X_VU1_DIRECT=0 turns it off (queue every
@@ -399,6 +457,142 @@ void VU1Interpreter::buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize
                 bits |= isUpper ? kDirectMapUpperVf : kDirectMapLowerVf;
         }
         map[i] = bits;
+    }
+}
+
+// VR2 stage 4: block plans for the emitter. Leaders: static branch targets,
+// the pair after every branch's delay slot (fall-through, BAL/JALR returns)
+// and after every E-bit delay slot (packed program starts), and pair 0. A
+// block runs from its leader while pairs are plain: it stops before a
+// reserved, XGKICK (unbounded stall) or D/T-bit (runtime halt) pair, ends
+// after a branch or E-bit pair plus its delay slot (both left out when the
+// slot is not plain or is itself a branch), never wraps, and holds at most
+// kMaxBlockPairs. At least two pairs, else the leader keeps its pair function.
+//
+// noStall[k]: pair k's scoreboard read can be skipped. Every VF lane, VI and
+// ACC it reads is either last written inside the block by pair p with
+// k - p >= that write's latency (each pair takes at least one cycle), or not
+// written in the block and k >= 3: every write issued before the block lands
+// within kDirectMaxLatency (VF 4, VI <= 4, ACC 1), i.e. by entry + 3, and
+// pair k issues at entry + k or later. FDIV/EFU/WAITQ/WAITP pairs keep the
+// read (their Q/P pipelines are not tracked here). This mirrors
+// markPairWrites: lower VF write unless suppressed, upper VF write, VI writes,
+// ACC at kAccForwardLatency. A hash build counts violations
+// (m_blockNoStallMisses).
+//
+// maxCycles: sum over pairs of 1 + worst stall (0 when noStall; 13
+// FDIV/WAITQ; 54 EFU/WAITP; 4 otherwise) plus kDirectMaxLatency, so no stall
+// reaches budgetEnd and every direct write of the block lands inside it.
+void VU1Interpreter::planRecompBlocks(const uint8_t *vuCode, uint32_t codeSize,
+                                      std::vector<RecompBlockPlan> &blocks) const
+{
+    constexpr uint32_t kMaxBlockPairs = 16u;
+    const uint32_t pairs = codeSize / 8u;
+    std::vector<DecodedInstructionPair> d(pairs);
+    std::vector<uint8_t> branch(pairs, 0u), plain(pairs, 0u), leader(pairs, 0u);
+    for (uint32_t i = 0; i < pairs; ++i)
+    {
+        d[i] = decodeInstructionPair(vuCode, i * 8u);
+        plain[i] = !d[i].upperUsage.reserved && !d[i].lowerUsage.reserved &&
+                   d[i].lowerUsage.pipeline != PipelineXgkick && !d[i].dBit && !d[i].tBit;
+        if (d[i].iBit)
+            continue;
+        const uint8_t opHi = static_cast<uint8_t>((d[i].lower >> 25) & 0x7Fu);
+        const bool jump = opHi == 0x24u || opHi == 0x25u;
+        const bool uncond = opHi == 0x20u || opHi == 0x21u;
+        const bool cond = opHi == 0x28u || opHi == 0x29u || (opHi >= 0x2Cu && opHi <= 0x2Fu);
+        branch[i] = jump || uncond || cond;
+        if (uncond || cond)
+        {
+            const int32_t imm = static_cast<int32_t>(d[i].lower << 21) >> 21;
+            const uint32_t pc = (i * 8u + 8u + static_cast<uint32_t>(imm * 8)) & 0x3FFFu;
+            if (pc + 8u <= codeSize)
+                leader[pc / 8u] = 1u;
+        }
+    }
+    leader[0] = 1u;
+    for (uint32_t i = 0; i + 2u < pairs; ++i)
+        if (branch[i] != 0u || d[i].eBit)
+            leader[i + 2u] = 1u;
+
+    blocks.clear();
+    for (uint32_t s = 0; s < pairs; ++s)
+    {
+        if (leader[s] == 0u)
+            continue;
+        RecompBlockPlan block;
+        block.start = s;
+        for (uint32_t q = s; q < pairs && block.pairs.size() < kMaxBlockPairs && plain[q] != 0u; ++q)
+        {
+            if (branch[q] != 0u || d[q].eBit)
+            {
+                const uint32_t slot = q + 1u;
+                if (slot < pairs && plain[slot] != 0u && branch[slot] == 0u &&
+                    block.pairs.size() + 2u <= kMaxBlockPairs)
+                {
+                    block.pairs.push_back(q);
+                    block.pairs.push_back(slot);
+                }
+                break;
+            }
+            block.pairs.push_back(q);
+        }
+        if (block.pairs.size() < 2u)
+            continue;
+
+        // Latest in-block writer per VF lane / VI / ACC lane: (pair position + 1, latency).
+        std::array<std::array<std::pair<uint32_t, uint32_t>, 4>, 32> vfWriter{};
+        std::array<std::pair<uint32_t, uint32_t>, 16> viWriter{};
+        std::array<std::pair<uint32_t, uint32_t>, 4> accWriter{};
+        uint32_t cycles = kDirectMaxLatency;
+        for (uint32_t k = 0; k < block.pairs.size(); ++k)
+        {
+            const DecodedInstructionPair &p = d[block.pairs[k]];
+            const auto ready = [&](const std::pair<uint32_t, uint32_t> &w)
+            {
+                return w.first != 0u ? k - (w.first - 1u) >= w.second : k >= 3u;
+            };
+            bool quiet = p.lowerUsage.pipeline != PipelineFdiv && p.lowerUsage.pipeline != PipelineEfu &&
+                         !p.lowerUsage.waitQ && !p.lowerUsage.waitP;
+            for (const InstructionUsage *usage : {&p.upperUsage, &p.lowerUsage})
+            {
+                for (uint32_t r = 0; r < usage->vfReadCount; ++r)
+                    for (uint32_t c = 0; c < 4u; ++c)
+                        if ((usage->vfRead[r].lanes & laneBit(c)) != 0u)
+                            quiet = quiet && ready(vfWriter[usage->vfRead[r].reg][c]);
+                for (uint32_t v = usage->viRead & 0xFFFEu; v != 0u; v &= v - 1u)
+                    quiet = quiet && ready(viWriter[std::countr_zero(v)]);
+                for (uint32_t c = 0; c < 4u; ++c)
+                    if ((usage->accRead & laneBit(c)) != 0u)
+                        quiet = quiet && ready(accWriter[c]);
+            }
+            block.noStall.push_back(quiet ? 1u : 0u);
+            const uint32_t worst = quiet ? 0u
+                                   : (p.lowerUsage.pipeline == PipelineEfu || p.lowerUsage.waitP)    ? 54u
+                                   : (p.lowerUsage.pipeline == PipelineFdiv || p.lowerUsage.waitQ) ? 13u
+                                                                                                    : 4u;
+            cycles += 1u + worst;
+
+            const auto mark = [&](const VfAccess &w, uint32_t latency)
+            {
+                for (uint32_t c = 0; c < 4u; ++c)
+                    if ((w.lanes & laneBit(c)) != 0u)
+                        vfWriter[w.reg][c] = {k + 1u, latency};
+            };
+            const VfAccess lw = p.lowerUsage.vfWrite;
+            if (lw.reg != 0u && p.suppressedLowerVf != lw.reg)
+                mark(lw, p.lowerUsage.vfLatency != 0u ? p.lowerUsage.vfLatency : p.lowerUsage.latency);
+            if (p.upperUsage.vfWrite.reg != 0u)
+                mark(p.upperUsage.vfWrite, p.upperUsage.vfLatency != 0u ? p.upperUsage.vfLatency : p.upperUsage.latency);
+            for (uint32_t v = p.lowerUsage.viWrite & 0xFFFEu; v != 0u; v &= v - 1u)
+                viWriter[std::countr_zero(v)] = {k + 1u, p.lowerUsage.viLatency != 0u ? p.lowerUsage.viLatency
+                                                                                       : p.lowerUsage.latency};
+            for (uint32_t c = 0; c < 4u; ++c)
+                if ((p.upperUsage.accWrite & laneBit(c)) != 0u)
+                    accWriter[c] = {k + 1u, kAccForwardLatency};
+        }
+        block.maxCycles = cycles;
+        blocks.push_back(std::move(block));
     }
 }
 

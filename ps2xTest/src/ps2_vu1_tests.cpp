@@ -1854,8 +1854,24 @@ void register_ps2_vu1_tests()
                 ++must;
                 pos += 1;
             }
-            t.Equals(plain, static_cast<size_t>(2u), "both valid pairs should emit handoffs");
+            // VR2 stage 4: the two pairs also form a block (leader 0), whose
+            // exit is a third next() handoff and whose failed guard hands off
+            // to f0000; both must be guaranteed tail calls too.
+            t.Equals(plain, static_cast<size_t>(3u), "both valid pairs and the block should emit handoffs");
             t.Equals(must, plain, "every pair handoff must be a guaranteed tail call");
+            const auto count = [&s](const char *needle)
+            {
+                size_t n = 0, at = 0;
+                while ((at = s.find(needle, at)) != std::string::npos)
+                {
+                    ++n;
+                    at += 1;
+                }
+                return n;
+            };
+            t.Equals(count("return f0000(vu, c);"), static_cast<size_t>(1u), "the block falls back to its leader's pair");
+            t.Equals(count("PS2X_VU1_MUSTTAIL return f0000(vu, c);"), static_cast<size_t>(1u),
+                     "the block's fallback is a guaranteed tail call");
         });
 
         // VB1: the direct-commit path (writes applied at issue) against the
@@ -2069,7 +2085,7 @@ void register_ps2_vu1_tests()
             std::vector<uint8_t> initialData(PS2_VU1_DATA_SIZE, 0u);
             GS gs;
             uint32_t mismatches = 0u, runs = 0u, programsRun = 0u;
-            uint64_t generatedCycles = 0u;
+            uint64_t generatedCycles = 0u, blockEntries = 0u;
             vu1_fixture::Rng rnd{0x2545F4914F6CDD1Dull};
             for (uint32_t image = 0; image < vu1_fixture::kImageCount && mismatches == 0u; ++image)
             {
@@ -2100,11 +2116,17 @@ void register_ps2_vu1_tests()
                     start.clip = rnd(0x1000000u);
 
                     // check 0: cut; 1: cut + resume(); 2: cut + fresh execute().
-                    const auto runOnce = [&](bool useGenerated, uint32_t budget, uint32_t check) -> Snapshot
+                    // blocks: -1 interpreter (every write queued), 0 generated pairs,
+                    // 1 generated with VR2 stage-4 block functions.
+                    const auto runOnce = [&](int blocks, uint32_t budget, uint32_t check) -> Snapshot
                     {
+                        const bool useGenerated = blocks >= 0;
                         VU1Interpreter vu;
                         if (useGenerated)
+                        {
                             vu.setRecompProgramForTest(generated);
+                            vu.setBlocksForTest(blocks);
+                        }
                         else
                             vu.setDirectCommitForTest(0);
                         std::memcpy(vu.state().vf, start.vf, sizeof(start.vf));
@@ -2124,6 +2146,7 @@ void register_ps2_vu1_tests()
                                        nullptr, program.startPc, 0u, 0u, 4096u);
                         if (useGenerated)
                             generatedCycles += vu.recompCyclesForTest();
+                        blockEntries += vu.blockEntriesForTest();
                         std::memcpy(&snap.state, &vu.state(), sizeof(VU1State));
                         return snap;
                     };
@@ -2131,17 +2154,18 @@ void register_ps2_vu1_tests()
                     const uint32_t maxBudget = 4u * program.length + 64u;
                     for (uint32_t budget = 1; budget <= maxBudget && mismatches == 0u; ++budget)
                     {
-                        for (uint32_t check = 0; check < 3u; ++check)
+                        for (uint32_t check = 0; check < 6u; ++check)
                         {
                             ++runs;
-                            const Snapshot ref = runOnce(false, budget, check);
-                            const Snapshot gen = runOnce(true, budget, check);
+                            const int blocks = check < 3u ? 0 : 1;
+                            const Snapshot ref = runOnce(-1, budget, check % 3u);
+                            const Snapshot gen = runOnce(blocks, budget, check % 3u);
                             if (std::memcmp(&ref.state, &gen.state, sizeof(VU1State)) == 0 && ref.data == gen.data)
                                 continue;
                             ++mismatches;
-                            std::fprintf(stderr, "VR2 differential mismatch: image %u program pc 0x%x length %u budget %u check %s\n",
+                            std::fprintf(stderr, "VR2 differential mismatch: image %u program pc 0x%x length %u budget %u check %s blocks %d\n",
                                          image, program.startPc, program.length, budget,
-                                         check == 0u ? "cut" : check == 1u ? "resume" : "fresh-execute");
+                                         check % 3u == 0u ? "cut" : check % 3u == 1u ? "resume" : "fresh-execute", blocks);
                             for (uint32_t reg = 0; reg < 32u; ++reg)
                                 if (std::memcmp(ref.state.vf[reg], gen.state.vf[reg], 16) != 0)
                                     std::fprintf(stderr, "  vf%u ref %g %g %g %g gen %g %g %g %g\n", reg,
@@ -2167,13 +2191,15 @@ void register_ps2_vu1_tests()
                     }
                 }
             }
-            std::fprintf(stderr, "[vr2-diff] images %u programs %u runs %u generated_cycles %llu mismatches %u\n",
+            std::fprintf(stderr, "[vr2-diff] images %u programs %u runs %u generated_cycles %llu block_entries %llu mismatches %u\n",
                          vu1_fixture::kImageCount, programsRun, runs,
-                         static_cast<unsigned long long>(generatedCycles), mismatches);
+                         static_cast<unsigned long long>(generatedCycles),
+                         static_cast<unsigned long long>(blockEntries), mismatches);
             t.Equals(mismatches, 0u, "generated pairs and the queued interpreter agree at every cut");
             t.IsTrue(programsRun > 200u, "both fixture images ran");
             t.IsTrue(runs > 50000u, "differential covered many cuts");
             t.IsTrue(generatedCycles > 100000u, "the generated pairs actually ran");
+            t.IsTrue(blockEntries > 10000u, "the stage-4 block functions actually ran");
         });
 #endif
     });

@@ -1456,6 +1456,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     // VB1: direct commit (VU1 only, dev traces off).
     m_directRunOk = m_unit == Unit::VU1 && !m_traceArmed && !m_entryArmed &&
                     (m_directOverride < 0 ? directCommitEnabled() : m_directOverride != 0);
+    // VR2 stage 4: generated block functions (PS2X_VU1_BLOCKS=1; default off).
+    m_blocksOn = m_directRunOk && (m_blocksOverride < 0 ? blocksEnabled() : m_blocksOverride != 0);
     m_directFlagSafe = m_directRunOk
                            ? directFlagMap(vuCode, codeSize,
                                            memory != nullptr && vuCode == memory->getVU1Code())
