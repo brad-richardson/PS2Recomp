@@ -1,5 +1,9 @@
 #include "runtime/gs/gs_worker.h"
 #include "ThreadNaming.h"
+#include "ps2_thread_affinity.h"
+
+#include <cstdio>
+#include <cstdlib>
 
 #include <chrono>
 #include <cstdio>
@@ -190,6 +194,17 @@ bool GsWorker::isQuiescent() const
 void GsWorker::threadMain()
 {
     ThreadNaming::SetCurrentThreadName("GsWorker");
+    // TN1: PS2X_GS_WORKER_CPUS="4,5" pins this thread to itself (mirrors the
+    // N11 game-thread knob); unset/empty = no change. Unconditional stderr
+    // line (RUNTIME_LOG compiles out of release builds).
+    if (const char *workerCpus = std::getenv("PS2X_GS_WORKER_CPUS"))
+    {
+        if (workerCpus[0] != '\0')
+        {
+            const int rc = ps2x::pinCurrentThreadToCpus(ps2x::parseCpuList(workerCpus));
+            std::fprintf(stderr, "[affinity] gs worker cpus=%s rc=%d\n", workerCpus, rc);
+        }
+    }
     for (;;)
     {
         GsCommand cmd;
