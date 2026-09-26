@@ -15,7 +15,8 @@
 //   - with PS2X_MTVU_CENSUS_OUT=<file>, writes one event per line for the
 //     offline two-timeline model (tau = EE host ns with unit work removed):
 //       J <tau> <unit_ns> <d|f>   job (d = DMA kick, f = VIF1 FIFO write)
-//       S <tau> <reason>          first sync after a job
+//       S <tau> <reason> <detail> every sync hit (guest pc / address in hex;
+//                                 repeats with no job in between collapse)
 //       V <tau> <tick>            VBlankStart (always a sync)
 //     plus a summary line on stderr every 300 vsyncs.
 
@@ -35,6 +36,7 @@ namespace ps2_mtvu
         VBlank,
         Vu1Mem,
         GsPrivRead,
+        GsPrivReadMasked, // CSR load whose next insn masks away the unit's bits
         GsPrivWrite,
         GsPrivSync,
         Vif1Reg,
@@ -65,7 +67,7 @@ namespace ps2_mtvu
 
     inline const char *reasonName(Reason r)
     {
-        static const char *const names[] = {"vblank", "vu1mem", "gsprivread", "gsprivwrite", "gsprivsync",
+        static const char *const names[] = {"vblank", "vu1mem", "gsprivread", "gsprivread-masked", "gsprivwrite", "gsprivsync",
                                             "vif1reg", "cmsar1", "gshle", "nativegif", "savestate", "dtfallback"};
         return names[static_cast<unsigned>(r)];
     }
@@ -121,6 +123,8 @@ namespace ps2_mtvu
             std::array<uint64_t, static_cast<size_t>(Reason::Count)> first{};
             std::array<uint64_t, static_cast<size_t>(Site::Count)> violations{};
             uint64_t tick = 0;
+            Reason lastReason = Reason::Count;
+            uint32_t lastDetail = 0;
             FILE *out = nullptr;
             bool outTried = false;
             std::function<bool()> dtFallback;
@@ -154,16 +158,22 @@ namespace ps2_mtvu
             return c.out;
         }
 
-        inline void syncSlow(Reason r)
+        inline void syncSlow(Reason r, uint32_t detail)
         {
             Census &c = census();
             ++c.hits[static_cast<size_t>(r)];
-            if (!c.dirty)
+            if (c.dirty)
+            {
+                c.dirty = false;
+                ++c.first[static_cast<size_t>(r)];
+            }
+            // Spin loops re-hit the same site with no job between: log once.
+            if (r == c.lastReason && detail == c.lastDetail)
                 return;
-            c.dirty = false;
-            ++c.first[static_cast<size_t>(r)];
+            c.lastReason = r;
+            c.lastDetail = detail;
             if (FILE *f = out())
-                std::fprintf(f, "S %llu %s\n", static_cast<unsigned long long>(tau()), reasonName(r));
+                std::fprintf(f, "S %llu %s %x\n", static_cast<unsigned long long>(tau()), reasonName(r), detail);
         }
 
         inline void touchSlow(Site s)
@@ -204,11 +214,36 @@ namespace ps2_mtvu
     }
 
     // EE side, before touching unit-owned state.
-    inline void sync(Reason r)
+    inline void sync(Reason r, uint32_t detail = 0u)
     {
         if (!active() || detail::t_unitDepth != 0)
             return;
-        detail::syncSlow(r);
+        detail::syncSlow(r, detail);
+    }
+
+    // Census classification of a guest load from the GS priv range at pc.
+    // The unit writes only CSR bits 0-1 (SIGNAL/FINISH) and SIGLBLID
+    // (gs_frontend.cpp); CSR FIFO is HLE'd constant and VSINT/FIELD come from
+    // the EE's VBlank store. A CSR load whose next instruction is
+    // `andi rt, rt, imm` with imm clear of the unit bits leaves architectural
+    // state that cannot depend on the unit (-> GsPrivReadMasked).
+    inline Reason privReadReason(const uint8_t *rdram, uint32_t pc, uint32_t vaddr, uint32_t bytes)
+    {
+        const uint32_t phys = vaddr & 0x1FFFFFFFu;
+        if ((phys & ~7u) != 0x12001000u || !rdram)
+            return Reason::GsPrivRead;
+        const uint32_t pcPhys = pc & 0x01FFFFFCu; // 32 MB RDRAM
+        if (pcPhys + 8u > 0x02000000u)
+            return Reason::GsPrivRead;
+        uint32_t load = 0, next = 0;
+        std::memcpy(&load, rdram + pcPhys, 4);
+        std::memcpy(&next, rdram + pcPhys + 4u, 4);
+        const uint32_t rt = (load >> 16) & 31u;
+        uint64_t mask = bytes >= 8u ? ~0ull : ((1ull << (bytes * 8u)) - 1u);
+        if ((next >> 26) == 0x0Cu && ((next >> 21) & 31u) == rt && ((next >> 16) & 31u) == rt && rt != 0u)
+            mask &= static_cast<uint64_t>(next & 0xFFFFu);
+        mask <<= (phys & 7u) * 8u;
+        return (mask & 0x3ull) == 0u ? Reason::GsPrivReadMasked : Reason::GsPrivRead;
     }
 
     // Inside a unit-owned object: must be unit work or follow a sync.

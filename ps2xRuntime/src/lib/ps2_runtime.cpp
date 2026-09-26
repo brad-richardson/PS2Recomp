@@ -3600,7 +3600,8 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
         // there is no meaningful value to log).
         if (gb2IsGsPrivReg(vaddr))
         {
-            ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivRead); // MT1: before the CSR drain
+            ps2_mtvu::sync(ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 1u),
+                           ctx ? ctx->pc : 0u); // MT1: before the CSR drain
             if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                 m_gs.drainQueue();
             return m_memory.read8(vaddr);
@@ -3621,7 +3622,8 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
         // Part 7: drain-only (read16 doesn't serve the priv range).
         if (gb2IsGsPrivReg(vaddr))
         {
-            ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivRead); // MT1: before the CSR drain
+            ps2_mtvu::sync(ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 2u),
+                           ctx ? ctx->pc : 0u); // MT1: before the CSR drain
             if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                 m_gs.drainQueue();
             return m_memory.read16(vaddr);
@@ -3641,7 +3643,8 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
     {
         if (gb2IsGsPrivReg(vaddr))
         {
-            ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivRead); // MT1: before the CSR drain
+            ps2_mtvu::sync(ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 4u),
+                           ctx ? ctx->pc : 0u); // MT1: before the CSR drain
             if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                 m_gs.drainQueue();
             const uint32_t value = m_memory.read32(vaddr);
@@ -3664,7 +3667,8 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
     {
         if (gb2IsGsPrivReg(vaddr))
         {
-            ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivRead); // MT1: before the CSR drain
+            ps2_mtvu::sync(ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 8u),
+                           ctx ? ctx->pc : 0u); // MT1: before the CSR drain
             if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                 m_gs.drainQueue();
             const uint64_t value = m_memory.read64(vaddr);
@@ -3688,7 +3692,8 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
         // Part 7: drain-only (read128 returns zero outside RAM areas).
         if (gb2IsGsPrivReg(vaddr))
         {
-            ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivRead); // MT1: before the CSR drain
+            ps2_mtvu::sync(ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 16u),
+                           ctx ? ctx->pc : 0u); // MT1: before the CSR drain
             if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                 m_gs.drainQueue();
             return m_memory.read128(vaddr);

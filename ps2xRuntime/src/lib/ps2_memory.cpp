@@ -892,7 +892,7 @@ uint32_t PS2Memory::read32(uint32_t address)
 
     if (isGsPrivReg(address))
     {
-        ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivRead); // MT1: CSR/SIGLBLID are unit-written
+        ps2_mtvu::touch(ps2_mtvu::Site::GsPriv); // MT1: callers (PS2Runtime::Load*) sync
         uint32_t off = address & 7;
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
         if (regOff == kGsCsrRegOffset)
@@ -946,7 +946,7 @@ uint64_t PS2Memory::read64(uint32_t address)
 
     if (isGsPrivReg(address))
     {
-        ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivRead); // MT1: CSR/SIGLBLID are unit-written
+        ps2_mtvu::touch(ps2_mtvu::Site::GsPriv); // MT1: callers (PS2Runtime::Load*) sync
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
         if (regOff == kGsCsrRegOffset)
         {
@@ -1195,6 +1195,7 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
 
     if (isGsPrivReg(address))
     {
+        ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address); // MT1 (gsPrivStore syncs too)
         // GB3: in-stream when the GS queue is on (see gsPrivStore).
         gsPrivStore([this, address, value]()
                     {
@@ -1265,6 +1266,7 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
 
     if (isGsPrivReg(address))
     {
+        ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address); // MT1 (gsPrivStore syncs too)
         // GB3: in-stream when the GS queue is on (see gsPrivStore).
         gsPrivStore([this, address, value]()
                     {
