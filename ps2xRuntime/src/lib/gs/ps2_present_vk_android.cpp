@@ -1,29 +1,28 @@
 // VK1 prototype (PS2X_PRESENT_VULKAN=1, Android): SurfaceControl side of the
-// Vulkan present. See runtime/gs/ps2_present_vk.h.
+// Vulkan present. See runtime/gs/ps2_present_vk.h. VK2: the bookkeeping lives
+// in ps2x_present_vk::Ledger; this file is its NDK platform and the JNI/diag glue.
 #include "runtime/gs/ps2_present_vk.h"
-#include "ps2_present_geometry.h"
+#include "runtime/gs/ps2_present_vk_ledger.h"
 
 #include <android/hardware_buffer.h>
 #include <android/native_activity.h>
 #include <android/native_window.h>
 #include <android/rect.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <jni.h>
 #include <poll.h>
 #include <pthread.h>
 #include <unistd.h>
 
 #include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
 #include <type_traits>
-#include <unordered_map>
 #include <vector>
 
 namespace
@@ -90,96 +89,94 @@ const Api &api()
 constexpr int8_t kVisibilityShow = 1;   // ASURFACE_TRANSACTION_VISIBILITY_SHOW
 constexpr int8_t kTransparencyOpaque = 2; // ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE
 
-struct BufState
+using ps2x_present_vk::Ledger;
+using ps2x_present_vk::LayerGeometry;
+
+void onComplete(void *context, TS *stats);
+
+// The ledger's platform: one NDK transaction per call, completion token as the
+// callback context (a number, never a pointer to free).
+struct NdkPlatform final : ps2x_present_vk::Platform
 {
-    bool pending = false; // queued, release fence not delivered yet
-    int releaseFd = -1;
+    void *createLayer(void *window) override
+    {
+        return api().createFromWindow(static_cast<ANativeWindow *>(window), "ps2x-game");
+    }
+    void releaseLayer(void *layer) override { api().release(static_cast<SC *>(layer)); }
+    void applyBuffer(void *layer, void *buffer, const LayerGeometry *g, uint64_t token) override
+    {
+        const Api &a = api();
+        SC *sc = static_cast<SC *>(layer);
+        TX *tx = a.txCreate();
+        a.setBuffer(tx, sc, static_cast<AHardwareBuffer *>(buffer), -1); // the caller waited for the GPU fence
+        if (g)
+        {
+            const ARect src = {0, 0, g->srcW, g->srcH};
+            const ARect dst = {g->left, g->top, g->right, g->bottom};
+            a.setGeometry(tx, sc, src, dst, 0);
+            a.setZOrder(tx, sc, g->z);
+            a.setVisibility(tx, sc, kVisibilityShow);
+            a.setBufferTransparency(tx, sc, kTransparencyOpaque); // PS2 alpha is not display alpha
+        }
+        a.setOnComplete(tx, reinterpret_cast<void *>(static_cast<uintptr_t>(token)), onComplete);
+        a.txApply(tx);
+        a.txDelete(tx);
+    }
+    void applyDetach(void *layer, uint64_t token) override
+    {
+        const Api &a = api();
+        TX *tx = a.txCreate();
+        a.reparent(tx, static_cast<SC *>(layer), nullptr);
+        // Completion registered: removing the layer from the tree reports the
+        // release of the buffer it was showing (RV5 B2).
+        a.setOnComplete(tx, reinterpret_cast<void *>(static_cast<uintptr_t>(token)), onComplete);
+        a.txApply(tx);
+        a.txDelete(tx);
+    }
+    void releaseBuffer(void *buffer) override { AHardwareBuffer_release(static_cast<AHardwareBuffer *>(buffer)); }
+    int dupFd(int fd) override { return fcntl(fd, F_DUPFD_CLOEXEC, 0); }
+    void closeFd(int fd) override { close(fd); }
+    int pollFd(int fd, int timeoutMs, short &revents, int &err) override
+    {
+        pollfd p = {fd, POLLIN, 0};
+        const int r = poll(&p, 1, timeoutMs);
+        err = r < 0 ? errno : 0;
+        revents = p.revents;
+        return r;
+    }
 };
 
-struct Sink
+Ledger &ledger()
 {
-    std::mutex m;
-    std::condition_variable cv;
-    ANativeWindow *window = nullptr;
-    SC *sc = nullptr;
-    std::vector<SC *> graveyard; // detached layers (callbacks may still name them)
-    int layerW = 0, layerH = 0;
-    int bufW = 0, bufH = 0; // parent's buffer size: the child's coordinate space
-    int aspect = 0;
-    bool geometrySet = false;
-    uint32_t lastW = 0, lastH = 0;
-    ARect dstRect = {0, 0, 0, 0}; // last destination rect (parent buffer pixels)
-    AHardwareBuffer *lastQueued = nullptr;
-    bool under = false;          // child below the GL window (overlay drawn by GL on top)
-    bool liveOnWindow = false;   // a buffer has been queued on the current child
-    uint32_t dropsWithWindow = 0; // consecutive drops while a window exists
-    std::unordered_map<AHardwareBuffer *, BufState> bufs;
-    // counters
-    uint64_t queued = 0, dropped = 0, releaseTimeouts = 0, callbacks = 0;
-    uint64_t releaseWaitNs = 0, applyNs = 0;
-    int64_t lastLatch = 0;
-    uint64_t latchIntervals = 0;
-    int64_t latchIntervalSumNs = 0;
-};
-
-Sink &sink()
-{
-    static Sink s;
-    return s;
+    // Never destroyed: completions can arrive on a binder thread during exit.
+    static Ledger *l = new Ledger(*new NdkPlatform());
+    return *l;
 }
 
-std::atomic<bool> g_active{false};
-std::atomic<bool> g_broken{false};
-std::atomic<uint32_t> g_windowGen{0};
-
-struct TxContext
+// Main-thread logging state only (layer size from the DecorView).
+struct WindowLog
 {
-    SC *sc;
-    AHardwareBuffer *prev; // the buffer this transaction replaced
+    int layerW = 0, layerH = 0;
 };
+WindowLog g_winLog;
 
 void onComplete(void *context, TS *stats)
 {
-    auto *ctx = static_cast<TxContext *>(context);
+    const uint64_t token = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(context));
     const Api &a = api();
-    int fd = -1;
-    bool present = false;
+    Ledger &l = ledger();
+    // The ledger keeps the layer alive until this token completes.
+    SC *sc = static_cast<SC *>(l.tokenLayer(token));
+    bool inStats = false;
     SC **list = nullptr;
     size_t n = 0;
     a.getASurfaceControls(stats, &list, &n);
     for (size_t i = 0; i < n; ++i)
-        present = present || list[i] == ctx->sc;
+        inStats = inStats || (sc && list[i] == sc);
     if (list)
         a.releaseASurfaceControls(list);
-    if (present && ctx->prev)
-        fd = a.getPreviousReleaseFenceFd(stats, ctx->sc);
-    const int64_t latch = a.getLatchTime(stats);
-    Sink &s = sink();
-    {
-        std::lock_guard<std::mutex> lock(s.m);
-        ++s.callbacks;
-        if (latch > 0)
-        {
-            if (s.lastLatch > 0 && latch > s.lastLatch)
-            {
-                s.latchIntervalSumNs += latch - s.lastLatch;
-                ++s.latchIntervals;
-            }
-            s.lastLatch = latch;
-        }
-        if (ctx->prev)
-        {
-            BufState &b = s.bufs[ctx->prev];
-            if (b.releaseFd >= 0)
-                close(b.releaseFd);
-            b.releaseFd = fd;
-            b.pending = false;
-        }
-        else if (fd >= 0)
-            close(fd);
-    }
-    s.cv.notify_all();
-    delete ctx;
+    const int fd = inStats ? a.getPreviousReleaseFenceFd(stats, sc) : -1; // ours to close (the ledger does)
+    l.complete(token, inStats, fd, a.getLatchTime(stats));
 }
 
 // Window size in layer pixels: DecorView width/height through JNI (the
@@ -250,8 +247,6 @@ void writePpm(const std::string &path, const std::vector<uint8_t> &rgb, uint32_t
 
 namespace ps2x_present_vk
 {
-void detachLocked(Sink &s, const char *why);
-
 bool enabled()
 {
     static const bool on = [] {
@@ -266,166 +261,62 @@ bool enabled()
     return on;
 }
 
-bool active()
-{
-    return g_active.load(std::memory_order_acquire) && !g_broken.load(std::memory_order_acquire);
-}
-
-bool broken()
-{
-    return g_broken.load(std::memory_order_acquire);
-}
-
-void fallBack(const char *why)
-{
-    if (g_broken.exchange(true))
-        return;
-    std::fprintf(stderr, "[present-vk] FALLBACK to the GL present: %s\n", why ? why : "?");
-    Sink &s = sink();
-    std::lock_guard<std::mutex> lock(s.m);
-    detachLocked(s, "fallback");
-    s.liveOnWindow = false;
-}
-
-void setUnderlay(bool under)
-{
-    Sink &s = sink();
-    std::lock_guard<std::mutex> lock(s.m);
-    if (under != s.under)
-    {
-        s.under = under;
-        s.geometrySet = false;
-        std::fprintf(stderr, "[present-vk] child %s the GL window\n", under ? "UNDER (overlay on)" : "above");
-    }
-}
-
-bool underlay()
-{
-    Sink &s = sink();
-    std::lock_guard<std::mutex> lock(s.m);
-    return s.under;
-}
-
-bool gameRect(int &left, int &top, int &right, int &bottom)
-{
-    Sink &s = sink();
-    std::lock_guard<std::mutex> lock(s.m);
-    if (s.dstRect.right <= s.dstRect.left || s.dstRect.bottom <= s.dstRect.top)
-        return false;
-    left = s.dstRect.left;
-    top = s.dstRect.top;
-    right = s.dstRect.right;
-    bottom = s.dstRect.bottom;
-    return true;
-}
-
-uint32_t windowGeneration()
-{
-    return g_windowGen.load(std::memory_order_acquire);
-}
-
-bool layerLive()
-{
-    Sink &s = sink();
-    std::lock_guard<std::mutex> lock(s.m);
-    return s.sc && s.liveOnWindow && !g_broken.load(std::memory_order_acquire);
-}
-
-void detachLocked(Sink &s, const char *why)
-{
-    if (!s.sc)
-        return;
-    const Api &a = api();
-    TX *tx = a.txCreate();
-    a.reparent(tx, s.sc, nullptr);
-    a.txApply(tx);
-    a.txDelete(tx);
-    s.graveyard.push_back(s.sc);
-    s.sc = nullptr;
-    std::fprintf(stderr, "[present-vk] %s: child layer detached\n", why);
-}
+bool active() { return enabled() && ledger().active(); }
+bool broken() { return ledger().broken(); }
+void fallBack(const char *why) { ledger().fallBack(why); }
+void setUnderlay(bool under) { ledger().setUnderlay(under); }
+bool underlay() { return ledger().underlay(); }
+bool gameRect(int &left, int &top, int &right, int &bottom) { return ledger().gameRect(left, top, right, bottom); }
+uint32_t windowGeneration() { return ledger().windowGeneration(); }
+bool layerLive() { return ledger().layerLive(); }
 
 void windowLost()
 {
     if (!enabled())
         return;
-    Sink &s = sink();
-    std::lock_guard<std::mutex> lock(s.m);
-    detachLocked(s, "APP_CMD_TERM_WINDOW");
-    g_windowGen.fetch_add(1, std::memory_order_acq_rel);
-    s.window = nullptr;
-    s.liveOnWindow = false;
-    s.geometrySet = false;
+    ledger().windowLost();
 }
 
 void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect, int bufferW, int bufferH)
 {
     if (!enabled())
         return;
-    const Api &a = api();
-    Sink &s = sink();
-    std::lock_guard<std::mutex> lock(s.m);
-    if (aspect != s.aspect)
+    if (!ledger().setWindow(window, aspect, bufferW, bufferH))
     {
-        s.aspect = aspect;
-        s.geometrySet = false;
-    }
-    if (bufferW > 0 && bufferH > 0 && (bufferW != s.bufW || bufferH != s.bufH))
-    {
-        s.bufW = bufferW;
-        s.bufH = bufferH;
-        s.geometrySet = false;
-        std::fprintf(stderr, "[present-vk] parent buffer %dx%d\n", bufferW, bufferH);
-    }
-    if (window == s.window)
-    {
-        if (window && s.layerW <= 0)
+        if (window && g_winLog.layerW <= 0)
         {
             int w = 0, h = 0;
             if (queryLayerSize(activity, w, h))
             {
-                s.layerW = w;
-                s.layerH = h;
-                s.geometrySet = false;
+                g_winLog.layerW = w;
+                g_winLog.layerH = h;
                 std::fprintf(stderr, "[present-vk] layer size %dx%d (decor)\n", w, h);
             }
         }
         return;
     }
-    detachLocked(s, "window changed");
-    // Buffers on a detached layer are never released; don't wait for them.
-    for (auto &kv : s.bufs)
-    {
-        kv.second.pending = false;
-        if (kv.second.releaseFd >= 0)
-            close(kv.second.releaseFd);
-        kv.second.releaseFd = -1;
-    }
-    s.lastQueued = nullptr;
-    s.liveOnWindow = false;
-    s.dropsWithWindow = 0;
-    g_windowGen.fetch_add(1, std::memory_order_acq_rel);
-    s.window = window;
-    s.layerW = s.layerH = 0;
-    s.geometrySet = false;
+    g_winLog.layerW = g_winLog.layerH = 0;
     if (window)
     {
-        s.sc = g_broken.load() ? nullptr : a.createFromWindow(window, "ps2x-game");
         int w = 0, h = 0;
         if (queryLayerSize(activity, w, h))
         {
-            s.layerW = w;
-            s.layerH = h;
+            g_winLog.layerW = w;
+            g_winLog.layerH = h;
         }
-        std::fprintf(stderr, "[present-vk] child layer %p on window %p (%dx%d buffers), layer %dx%d\n",
-                     static_cast<void *>(s.sc), static_cast<void *>(window), ANativeWindow_getWidth(window),
-                     ANativeWindow_getHeight(window), s.layerW, s.layerH);
+        const Ledger::Counts c = ledger().counts();
+        std::fprintf(stderr,
+                     "[present-vk] child layer %s on window %p (%dx%d buffers), layer %dx%d, gen %u, layers live %u "
+                     "(detached awaiting completion %u)\n",
+                     ledger().broken() ? "NOT made (fallback)" : "made", static_cast<void *>(window),
+                     ANativeWindow_getWidth(window), ANativeWindow_getHeight(window), g_winLog.layerW, g_winLog.layerH,
+                     ledger().windowGeneration(), c.liveLayers, c.retiredLayers);
     }
-    s.cv.notify_all();
 }
 
-AHardwareBuffer *allocateBuffer(uint32_t w, uint32_t h)
+uint64_t allocateBuffer(uint32_t w, uint32_t h, AHardwareBuffer **out)
 {
+    *out = nullptr;
     AHardwareBuffer_Desc desc = {};
     desc.width = w;
     desc.height = h;
@@ -438,137 +329,38 @@ AHardwareBuffer *allocateBuffer(uint32_t w, uint32_t h)
     AHardwareBuffer_Desc got = {};
     if (rc == 0 && buf)
         AHardwareBuffer_describe(buf, &got);
-    std::fprintf(stderr, "[present-vk] AHB alloc %ux%u rc=%d stride=%u usage=0x%llx\n", w, h, rc, got.stride,
-                 static_cast<unsigned long long>(got.usage));
-    if (rc != 0)
-        return nullptr;
-    Sink &s = sink();
-    std::lock_guard<std::mutex> lock(s.m);
-    s.bufs[buf] = BufState{};
-    return buf;
+    if (rc != 0 || !buf)
+    {
+        std::fprintf(stderr, "[present-vk] AHB alloc %ux%u rc=%d\n", w, h, rc);
+        return 0;
+    }
+    const uint64_t id = ledger().registerBuffer(buf);
+    std::fprintf(stderr, "[present-vk] AHB alloc %ux%u rc=%d stride=%u usage=0x%llx id=%llu epoch=%u\n", w, h, rc,
+                 got.stride, static_cast<unsigned long long>(got.usage), static_cast<unsigned long long>(id),
+                 ledger().bufferEpoch(id));
+    *out = buf;
+    return id;
 }
 
-void releaseBuffer(AHardwareBuffer *buffer)
+void retireBuffer(uint64_t id)
 {
-    if (!buffer)
-        return;
-    Sink &s = sink();
-    {
-        std::lock_guard<std::mutex> lock(s.m);
-        auto it = s.bufs.find(buffer);
-        if (it != s.bufs.end())
-        {
-            if (it->second.releaseFd >= 0)
-                close(it->second.releaseFd);
-            s.bufs.erase(it);
-        }
-        if (s.lastQueued == buffer)
-            s.lastQueued = nullptr;
-    }
-    AHardwareBuffer_release(buffer); // SurfaceFlinger keeps its own reference while it shows it
+    if (id != 0u)
+        ledger().retireBuffer(id);
 }
 
-bool waitReusable(AHardwareBuffer *buffer, int timeoutMs)
+uint32_t poolEpoch() { return ledger().epoch(); }
+uint32_t bufferEpoch(uint64_t id) { return ledger().bufferEpoch(id); }
+
+Pick pickReusable(const uint64_t *ids, int n, int start, int timeoutMs)
 {
-    Sink &s = sink();
-    const auto t0 = std::chrono::steady_clock::now();
-    int fd = -1;
-    bool ok = true;
-    {
-        std::unique_lock<std::mutex> lock(s.m);
-        ok = s.cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return !s.bufs[buffer].pending; });
-        BufState &b = s.bufs[buffer];
-        fd = b.releaseFd;
-        b.releaseFd = -1;
-        if (!ok)
-        {
-            b.pending = false;
-            ++s.releaseTimeouts;
-        }
-    }
-    if (fd >= 0)
-    {
-        pollfd p = {fd, POLLIN, 0};
-        if (poll(&p, 1, timeoutMs) <= 0)
-            ok = false;
-        close(fd);
-    }
-    const auto t1 = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lock(s.m);
-    s.releaseWaitNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
-    return ok;
+    const Ledger::Pick p = ledger().pick(ids, n, -1, start, timeoutMs);
+    Pick out;
+    out.index = p.index;
+    out.giveUp = p.giveUp;
+    return out;
 }
 
-bool queue(AHardwareBuffer *buffer, uint32_t w, uint32_t h)
-{
-    const Api &a = api();
-    Sink &s = sink();
-    std::lock_guard<std::mutex> lock(s.m);
-    if (g_broken.load(std::memory_order_acquire))
-        return false;
-    if (!s.sc || s.bufW <= 0 || s.bufH <= 0)
-    {
-        ++s.dropped;
-        // A window that exists but never gets a usable child (createFromWindow
-        // failed, no EGL size) must not leave the screen black: give up.
-        if (s.window && ++s.dropsWithWindow > 240u)
-        {
-            std::fprintf(stderr, "[present-vk] FALLBACK to the GL present: %u drops with a window (sc=%p buf=%dx%d)\n",
-                         s.dropsWithWindow, static_cast<void *>(s.sc), s.bufW, s.bufH);
-            g_broken.store(true);
-            detachLocked(s, "fallback");
-        }
-        return false;
-    }
-    s.dropsWithWindow = 0;
-    const auto t0 = std::chrono::steady_clock::now();
-    TX *tx = a.txCreate();
-    a.setBuffer(tx, s.sc, buffer, -1); // the caller waited for the GPU fence
-    if (!s.geometrySet || w != s.lastW || h != s.lastH)
-    {
-        // Parent buffer space (V1: display pixels here were scaled again by
-        // the parent's 796x448 -> 1920x1080 buffer scaling: a zoomed picture).
-        const ps2x::present::Rect r = ps2x::present::presentRect(
-            static_cast<float>(s.bufW), static_cast<float>(s.bufH), static_cast<float>(w), static_cast<float>(h),
-            static_cast<ps2x::present::Aspect>(s.aspect));
-        const ARect src = {0, 0, static_cast<int32_t>(w), static_cast<int32_t>(h)};
-        // Round the size, then centre it: rounding the edges separately could
-        // add a pixel (4:3 in 796x448: 598 wide = 1442 panel px instead of
-        // 597 = exactly 1440). Bars are what the GL window shows (black).
-        const int32_t dw = std::min<int32_t>(s.bufW, static_cast<int32_t>(r.w + 0.5f));
-        const int32_t dh = std::min<int32_t>(s.bufH, static_cast<int32_t>(r.h + 0.5f));
-        const int32_t dl = (s.bufW - dw) / 2;
-        const int32_t dt = (s.bufH - dh) / 2;
-        const ARect dst = {dl, dt, dl + dw, dt + dh};
-        s.dstRect = dst;
-        a.setGeometry(tx, s.sc, src, dst, 0);
-        // Above raylib's GL window when nothing is drawn over the game (the Odin
-        // default); under it when GL draws an overlay (virtual pad) with the
-        // game rect cleared to transparent.
-        a.setZOrder(tx, s.sc, s.under ? -1 : 1);
-        a.setVisibility(tx, s.sc, kVisibilityShow);
-        a.setBufferTransparency(tx, s.sc, kTransparencyOpaque); // PS2 alpha is not display alpha
-        std::fprintf(stderr,
-                     "[present-vk] geometry src %ux%u -> dst [%d,%d %d,%d] in parent buffer %dx%d (window %dx%d) aspect=%d\n",
-                     w, h, dst.left, dst.top, dst.right, dst.bottom, s.bufW, s.bufH, s.layerW, s.layerH, s.aspect);
-        s.geometrySet = true;
-        s.lastW = w;
-        s.lastH = h;
-    }
-    a.setOnComplete(tx, new TxContext{s.sc, s.lastQueued}, onComplete);
-    a.txApply(tx);
-    a.txDelete(tx);
-    s.bufs[buffer].pending = true;
-    s.lastQueued = buffer;
-    s.liveOnWindow = true;
-    ++s.queued;
-    s.applyNs += static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
-    if (s.queued == 1u)
-        std::fprintf(stderr, "[present-vk] first buffer queued %ux%u\n", w, h);
-    g_active.store(true, std::memory_order_release);
-    return true;
-}
+bool queue(uint64_t id, uint32_t w, uint32_t h) { return ledger().queue(id, w, h); }
 
 long compareBuffer(AHardwareBuffer *buffer, const uint8_t *rgba, uint32_t w, uint32_t h, uint64_t tick,
                    const char *dumpDir)
@@ -615,16 +407,21 @@ long compareBuffer(AHardwareBuffer *buffer, const uint8_t *rgba, uint32_t w, uin
 
 void appendStats(char *out, unsigned size)
 {
-    Sink &s = sink();
-    std::lock_guard<std::mutex> lock(s.m);
-    const double waitMs = s.queued ? (static_cast<double>(s.releaseWaitNs) / 1e6) / s.queued : 0.0;
-    const double applyMs = s.queued ? (static_cast<double>(s.applyNs) / 1e6) / s.queued : 0.0;
-    const double latchMs = s.latchIntervals ? (static_cast<double>(s.latchIntervalSumNs) / 1e6) / s.latchIntervals : 0.0;
+    const Ledger::Counts c = ledger().counts();
+    const double waitMs = c.queued ? (static_cast<double>(c.waitNs) / 1e6) / c.queued : 0.0;
+    const double applyMs = c.queued ? (static_cast<double>(c.applyNs) / 1e6) / c.queued : 0.0;
+    const double latchMs = c.latchIntervals ? (static_cast<double>(c.latchIntervalSumNs) / 1e6) / c.latchIntervals : 0.0;
+    auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
     std::snprintf(out, size,
-                  " vk_queued=%llu vk_dropped=%llu vk_callbacks=%llu vk_release_timeouts=%llu vk_release_wait_ms_avg=%.3f "
-                  "vk_apply_ms_avg=%.3f vk_latch_interval_ms_avg=%.2f",
-                  static_cast<unsigned long long>(s.queued), static_cast<unsigned long long>(s.dropped),
-                  static_cast<unsigned long long>(s.callbacks), static_cast<unsigned long long>(s.releaseTimeouts),
-                  waitMs, applyMs, latchMs);
+                  " vk_queued=%llu vk_dropped=%llu vk_skipped=%llu vk_callbacks=%llu vk_release_timeouts=%llu"
+                  " vk_cb_timeouts=%llu vk_fence_timeouts=%llu vk_fence_errors=%llu vk_eintr=%llu vk_stale_cb=%llu"
+                  " vk_absent_cb=%llu vk_refused=%llu vk_layers=%u vk_layers_detached=%u vk_layers_made=%llu"
+                  " vk_layers_released=%llu vk_bufs=%u vk_bufs_released=%llu vk_fences_held=%u vk_tokens=%u"
+                  " vk_release_wait_ms_avg=%.3f vk_apply_ms_avg=%.3f vk_latch_interval_ms_avg=%.2f",
+                  u(c.queued), u(c.dropped), u(c.skipped), u(c.callbacks), u(c.cbTimeouts + c.fenceTimeouts),
+                  u(c.cbTimeouts), u(c.fenceTimeouts), u(c.fenceErrors), u(c.eintr), u(c.staleCallbacks),
+                  u(c.absentCallbacks), u(c.refusedQueues), c.liveLayers, c.retiredLayers, u(c.layersCreated),
+                  u(c.layersReleased), c.records, u(c.buffersReleased), c.openFences, c.tokens, waitMs, applyMs,
+                  latchMs);
 }
 } // namespace ps2x_present_vk

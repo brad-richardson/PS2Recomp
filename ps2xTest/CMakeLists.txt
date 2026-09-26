@@ -49,6 +49,7 @@ add_library(ps2_test_lib STATIC
     src/pad_input_tests.cpp
     src/ps2_pad_latch_tests.cpp
     src/ps2_present_fallback_tests.cpp
+    src/ps2_present_vk_ledger_tests.cpp
     src/ps2_virtual_pad_tests.cpp
     src/ps2_env_file_tests.cpp
     src/ps2_android_env_tests.cpp

@@ -117,7 +117,7 @@ void logStats(const char *why)
 #if defined(__ANDROID__)
     if (ps2x_present_vk::enabled())
     {
-        char vk[320];
+        char vk[1024];
         ps2x_present_vk::appendStats(vk, sizeof(vk));
         std::cerr << vk;
     }
@@ -908,7 +908,8 @@ private:
     // buffer is queued on the SurfaceControl layer (ps2_present_vk_android.cpp).
     struct VkSlot
     {
-        AHardwareBuffer *ahb = nullptr;
+        AHardwareBuffer *ahb = nullptr; // valid while id is live in the sink
+        uint64_t id = 0u;               // the sink's allocation id
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         Vulkan::ImageHandle wrapped;
@@ -923,10 +924,10 @@ private:
             return;
         bool any = false;
         for (auto &slot : m_vk)
-            any = any || slot.ahb;
+            any = any || slot.id != 0u;
         if (!any)
             return;
-        m_device->wait_idle();
+        m_device->wait_idle(); // our blits into these buffers are done
         const auto &t = m_device->get_device_table();
         for (auto &slot : m_vk)
         {
@@ -936,7 +937,9 @@ private:
                 t.vkDestroyImage(m_device->get_device(), slot.image, nullptr);
             if (slot.memory)
                 t.vkFreeMemory(m_device->get_device(), slot.memory, nullptr);
-            ps2x_present_vk::releaseBuffer(slot.ahb);
+            // VK2: the sink keeps its reference until the compositor released
+            // every queued use; the backend never writes this buffer again.
+            ps2x_present_vk::retireBuffer(slot.id);
             slot = VkSlot{};
         }
         m_vkPrev = -1;
@@ -952,8 +955,8 @@ private:
             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         for (auto &slot : m_vk)
         {
-            slot.ahb = ps2x_present_vk::allocateBuffer(w, h);
-            if (!slot.ahb)
+            slot.id = ps2x_present_vk::allocateBuffer(w, h, &slot.ahb);
+            if (slot.id == 0u)
                 return false;
             VkAndroidHardwareBufferFormatPropertiesANDROID fmt = {
                 VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID};
@@ -1004,7 +1007,9 @@ private:
         m_vkH = h;
         m_vkIndex = 0u;
         m_vkPrev = -1;
-        std::cerr << "[present-vk] " << kVkSlots << " slots " << w << "x" << h << " imported" << std::endl;
+        m_vkEpoch = ps2x_present_vk::bufferEpoch(m_vk[0].id);
+        std::cerr << "[present-vk] " << kVkSlots << " slots " << w << "x" << h << " imported, epoch " << m_vkEpoch
+                  << std::endl;
         return true;
     }
 
@@ -1043,6 +1048,13 @@ private:
 
     bool presentVk(Vulkan::Image &src, uint32_t w, uint32_t h, uint64_t tick)
     {
+        if (m_vkW != 0u && ps2x_present_vk::poolEpoch() != m_vkEpoch)
+        {
+            // VK2 (RV5 B2): the window changed. Its layer's buffers are never
+            // written again; they are released as their completions arrive.
+            std::cerr << "[present-vk] window changed: slot pool (epoch " << m_vkEpoch << ") retired" << std::endl;
+            destroyVkSlots();
+        }
         if ((w != m_vkW || h != m_vkH) && !createVkSlots(w, h))
         {
             std::cerr << "[present-vk] slot setup failed; falling back to readback" << std::endl;
@@ -1051,15 +1063,45 @@ private:
             m_vkPresent = false;
             return false;
         }
-        const uint32_t cur = m_vkIndex;
+        // Queue the previous (pipelined) frame first: its blit is normally long
+        // done, and once queued its slot counts as held.
+        if (m_vkPrev >= 0)
+        {
+            VkSlot &prev = m_vk[m_vkPrev];
+            if (prev.fence)
+            {
+                prev.fence->wait();
+                prev.fence.reset();
+            }
+            ps2x_present_vk::queue(prev.id, prev.w, prev.h);
+            m_vkPrev = -1;
+        }
+        // VK2 (RV5 B1): write only a slot the compositor has released. A
+        // timeout or poll error grants nothing: skip this frame (the screen
+        // keeps the last one); persistent failure falls back to readback.
+        uint64_t ids[kVkSlots];
+        for (uint32_t i = 0; i < kVkSlots; ++i)
+            ids[i] = m_vk[i].id;
+        const ps2x_present_vk::Pick pick =
+            ps2x_present_vk::pickReusable(ids, static_cast<int>(kVkSlots), static_cast<int>(m_vkIndex), 100);
+        if (pick.index < 0)
+        {
+            if (!pick.giveUp)
+                return true; // frame skipped (counted by the sink)
+            std::cerr << "[present-vk] no released slot for many frames; falling back to readback" << std::endl;
+            destroyVkSlots();
+            ps2x_present_vk::fallBack("compositor release waits failing");
+            m_vkPresent = false;
+            return false;
+        }
+        const uint32_t cur = static_cast<uint32_t>(pick.index);
         VkSlot &slot = m_vk[cur];
-        m_vkIndex = (m_vkIndex + 1u) % kVkSlots;
+        m_vkIndex = (cur + 1u) % kVkSlots;
         if (slot.fence)
         {
             slot.fence->wait();
             slot.fence.reset();
         }
-        ps2x_present_vk::waitReusable(slot.ahb, 100);
         const bool compare = vkCompareDue(tick);
         const uint32_t gfx = m_device->get_queue_info().family_indices[Vulkan::QUEUE_INDEX_GRAPHICS];
         auto cmd = m_device->request_command_buffer();
@@ -1107,31 +1149,9 @@ private:
         slot.h = h;
         if (m_pipeline && !compare)
         {
-            // Queue the previous frame (one frame of latency, as the readback
-            // pipeline); its blit is normally long done.
-            if (m_vkPrev >= 0)
-            {
-                VkSlot &prev = m_vk[m_vkPrev];
-                if (prev.fence)
-                {
-                    prev.fence->wait();
-                    prev.fence.reset();
-                }
-                ps2x_present_vk::queue(prev.ahb, prev.w, prev.h);
-            }
+            // Queued on the next present (one frame of latency, as the readback pipeline).
             m_vkPrev = static_cast<int>(cur);
             return true;
-        }
-        if (m_vkPrev >= 0) // leaving pipelined order for a compare frame: flush the pending one first
-        {
-            VkSlot &prev = m_vk[m_vkPrev];
-            if (prev.fence)
-            {
-                prev.fence->wait();
-                prev.fence.reset();
-            }
-            ps2x_present_vk::queue(prev.ahb, prev.w, prev.h);
-            m_vkPrev = -1;
         }
         slot.fence->wait();
         slot.fence.reset();
@@ -1141,7 +1161,7 @@ private:
             if (px)
                 ps2x_present_vk::compareBuffer(slot.ahb, px, w, h, tick, std::getenv("PS2X_PRESENT_VK_DUMP_DIR"));
         }
-        ps2x_present_vk::queue(slot.ahb, w, h);
+        ps2x_present_vk::queue(slot.id, w, h);
         return true;
     }
 #endif
@@ -1317,6 +1337,7 @@ private:
     VkSlot m_vk[kVkSlots];
     uint32_t m_vkIndex = 0u, m_vkW = 0u, m_vkH = 0u;
     int m_vkPrev = -1; // slot submitted by the previous present, queued on the next one
+    uint32_t m_vkEpoch = 0u; // sink pool epoch the slots were allocated under
     bool m_vkPresent = false;
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID m_getAhbProps = nullptr;
     std::vector<uint64_t> m_vkDumpTicks;

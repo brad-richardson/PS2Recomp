@@ -14,6 +14,12 @@
 // queueing, active() goes false and the presenter draws the GL quad again.
 // With the virtual pad on, the child sits UNDER the GL window (z = -1), which is
 // then RGBA and clears the game rect to transparent. Not included by generated code.
+//
+// VK2: buffer ownership, layer lifetime and window changes are kept by
+// ps2x_present_vk::Ledger (ps2_present_vk_ledger.h, unit-tested on the Mac): a
+// slot is written only after the compositor released every use of it, a
+// window change retires the slot pool, and detached layers are released once
+// no completion can name them.
 #include <cstdint>
 
 struct AHardwareBuffer;
@@ -56,14 +62,29 @@ void windowLost();
 
 // GsWorker: RGBA8 buffer for a w x h slot (GPU color output + sampled +
 // composer overlay + CPU_READ_RARELY, which keeps Qualcomm gralloc linear).
-AHardwareBuffer *allocateBuffer(uint32_t w, uint32_t h);
-void releaseBuffer(AHardwareBuffer *buffer);
-// GsWorker: block (bounded) until SurfaceFlinger released `buffer` from its
-// previous queue. False on timeout (counted; the caller reuses it anyway).
-bool waitReusable(AHardwareBuffer *buffer, int timeoutMs);
-// GsWorker: queue a finished buffer (w x h valid). False when no layer exists
-// (frame dropped, counted).
-bool queue(AHardwareBuffer *buffer, uint32_t w, uint32_t h);
+// Returns its allocation id (0 on failure); the sink owns the app's reference
+// from here on. *out is valid until retireBuffer(id).
+uint64_t allocateBuffer(uint32_t w, uint32_t h, AHardwareBuffer **out);
+// GsWorker: the backend stops using the buffer (pool retired). The reference
+// is released once the compositor has released every queued use.
+void retireBuffer(uint64_t id);
+// Buffers allocated under an older epoch belong to a detached window: the
+// backend retires that pool and allocates a new one.
+uint32_t poolEpoch();
+uint32_t bufferEpoch(uint64_t id);
+// GsWorker: pick a slot the compositor has released (callback delivered and
+// release fence signalled), starting at `start`, waiting at most timeoutMs.
+// index -1: every slot is still held -> skip the frame; giveUp: that has
+// persisted for many frames -> fall back to the readback path.
+struct Pick
+{
+    int index = -1;
+    bool giveUp = false;
+};
+Pick pickReusable(const uint64_t *ids, int n, int start, int timeoutMs);
+// GsWorker: queue a finished buffer (w x h valid) that pickReusable returned.
+// False when it was not shown (no layer, broken, old epoch; counted).
+bool queue(uint64_t id, uint32_t w, uint32_t h);
 // Diagnostic: lock the buffer through gralloc (CPU view) and hash/compare it
 // against RGBA pixels at `rgba` (w x h, tight rows). Returns differing pixels
 // (RGB only), or -1 if the lock failed. Writes PPMs when dumpDir is set.

@@ -540,6 +540,7 @@ set(PS2X_PARALLEL_GS_SOURCE_DIR "" CACHE PATH "Local parallel-gs source dir for 
 add_library(ps2_gs_shadow STATIC
     src/lib/gs/ps2_gs_shadow.cpp
     src/lib/gs/ps2_gs_parallel_backend.cpp # GB3 Part 2: live backend (same paraLLEl wiring)
+    src/lib/gs/ps2_present_vk_ledger.cpp # VK2: Android Vulkan present bookkeeping (pure, unit-tested)
 )
 # HR1 prototype: GL side of PS2X_PRESENT_ZERO_COPY (macOS desktop only).
 if(APPLE AND NOT PS2X_IS_IOS)
