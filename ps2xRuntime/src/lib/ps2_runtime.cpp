@@ -3139,7 +3139,9 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
 
     const bool census = vr3_vu0_census::enabled();
     const uint64_t censusT0 = census ? vr3_vu0_census::nowNs() : 0u;
-    m_vu0.reset();
+    // VR3: copyVu0ContextToState rewrites all of m_state and execute() resets
+    // the scheduler, so only reset()'s cycle/count part is live here.
+    m_vu0.resetForVu0Start();
     copyVu0ContextToState(ctx, m_vu0.state());
     const uint64_t censusT1 = census ? vr3_vu0_census::nowNs() : 0u;
     m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
@@ -3178,7 +3180,7 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         }
     }
     // E44 Part-2 VU0 call trace (dev-only, default off). m_cycle was
-    // reset by reset() above, so state().cycles is this call's usage.
+    // reset by resetForVu0Start() above, so state().cycles is this call's usage.
     if (ps2_e44_trace::enabled())
     {
         const uint64_t used = m_vu0.state().cycles;

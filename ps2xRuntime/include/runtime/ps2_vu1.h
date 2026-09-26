@@ -81,6 +81,11 @@ public:
     explicit VU1Interpreter(Unit unit = Unit::VU1);
 
     void reset();
+    // VR3: the part of reset() a VU0 start still needs (m_cycle, the program
+    // count). executeVU0Microprogram rewrites all of m_state itself and
+    // execute() resets the scheduler, so reset()'s m_state memset and
+    // resetScheduler() were dead there.
+    void resetForVu0Start();
 
     void execute(uint8_t *vuCode, uint32_t codeSize,
                  uint8_t *vuData, uint32_t dataSize,

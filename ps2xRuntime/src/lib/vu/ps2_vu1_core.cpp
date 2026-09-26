@@ -116,6 +116,14 @@ void VU1Interpreter::reset()
     resetScheduler();
 }
 
+void VU1Interpreter::resetForVu0Start()
+{
+#if PS2X_ENABLE_DET_HASH_TAP
+    m_programStartCount = 0;
+#endif
+    m_cycle = 0;
+}
+
 int32_t VU1Interpreter::readBranchVi(uint8_t reg) const
 {
     if (reg == 0u)
