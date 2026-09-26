@@ -103,6 +103,20 @@ else()
     )
     FetchContent_MakeAvailable(raylib)
 
+    if(PS2X_IS_ANDROID)
+        # VK1 Part 2: alpha in raylib's EGL config (translucent window over the
+        # Vulkan present layer when the virtual pad is on). Hash-pinned like iOS.
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}"
+                "-DPS2X_RAYLIB_SOURCE_DIR=${raylib_SOURCE_DIR}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_raylib_android_egl_alpha.cmake"
+            RESULT_VARIABLE PS2X_RAYLIB_EGL_ALPHA_PATCH_RESULT
+        )
+        if(NOT PS2X_RAYLIB_EGL_ALPHA_PATCH_RESULT EQUAL 0)
+            message(FATAL_ERROR "PS2X: could not apply the pinned raylib Android EGL alpha patch")
+        endif()
+    endif()
+
     if(PS2X_IS_IOS)
         # Keep the pinned raylib checkout reproducible: patch its SDL2 DPI path
         # during configure, before raylib sources are compiled. The patch script

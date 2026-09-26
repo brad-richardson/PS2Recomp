@@ -107,6 +107,9 @@ struct Sink
     bool geometrySet = false;
     uint32_t lastW = 0, lastH = 0;
     AHardwareBuffer *lastQueued = nullptr;
+    bool under = false;          // child below the GL window (overlay drawn by GL on top)
+    bool liveOnWindow = false;   // a buffer has been queued on the current child
+    uint32_t dropsWithWindow = 0; // consecutive drops while a window exists
     std::unordered_map<AHardwareBuffer *, BufState> bufs;
     // counters
     uint64_t queued = 0, dropped = 0, releaseTimeouts = 0, callbacks = 0;
@@ -123,6 +126,7 @@ Sink &sink()
 }
 
 std::atomic<bool> g_active{false};
+std::atomic<bool> g_broken{false};
 
 struct TxContext
 {
@@ -237,18 +241,67 @@ void writePpm(const std::string &path, const std::vector<uint8_t> &rgb, uint32_t
 
 namespace ps2x_present_vk
 {
+void detachLocked(Sink &s, const char *why);
+
 bool enabled()
 {
     static const bool on = [] {
         const char *v = std::getenv("PS2X_PRESENT_VULKAN");
-        return v && std::strcmp(v, "1") == 0 && api().ok;
+        if (v && std::strcmp(v, "0") == 0)
+        {
+            std::fprintf(stderr, "[present-vk] off (PS2X_PRESENT_VULKAN=0): GL present\n");
+            return false;
+        }
+        return api().ok; // default on; API < 29 keeps the GL path
     }();
     return on;
 }
 
 bool active()
 {
-    return g_active.load(std::memory_order_acquire);
+    return g_active.load(std::memory_order_acquire) && !g_broken.load(std::memory_order_acquire);
+}
+
+bool broken()
+{
+    return g_broken.load(std::memory_order_acquire);
+}
+
+void fallBack(const char *why)
+{
+    if (g_broken.exchange(true))
+        return;
+    std::fprintf(stderr, "[present-vk] FALLBACK to the GL present: %s\n", why ? why : "?");
+    Sink &s = sink();
+    std::lock_guard<std::mutex> lock(s.m);
+    detachLocked(s, "fallback");
+    s.liveOnWindow = false;
+}
+
+void setUnderlay(bool under)
+{
+    Sink &s = sink();
+    std::lock_guard<std::mutex> lock(s.m);
+    if (under != s.under)
+    {
+        s.under = under;
+        s.geometrySet = false;
+        std::fprintf(stderr, "[present-vk] child %s the GL window\n", under ? "UNDER (overlay on)" : "above");
+    }
+}
+
+bool underlay()
+{
+    Sink &s = sink();
+    std::lock_guard<std::mutex> lock(s.m);
+    return s.under;
+}
+
+bool layerLive()
+{
+    Sink &s = sink();
+    std::lock_guard<std::mutex> lock(s.m);
+    return s.sc && s.liveOnWindow && !g_broken.load(std::memory_order_acquire);
 }
 
 void detachLocked(Sink &s, const char *why)
@@ -273,6 +326,7 @@ void windowLost()
     std::lock_guard<std::mutex> lock(s.m);
     detachLocked(s, "APP_CMD_TERM_WINDOW");
     s.window = nullptr;
+    s.liveOnWindow = false;
     s.geometrySet = false;
 }
 
@@ -320,12 +374,14 @@ void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect,
         kv.second.releaseFd = -1;
     }
     s.lastQueued = nullptr;
+    s.liveOnWindow = false;
+    s.dropsWithWindow = 0;
     s.window = window;
     s.layerW = s.layerH = 0;
     s.geometrySet = false;
     if (window)
     {
-        s.sc = a.createFromWindow(window, "ps2x-game");
+        s.sc = g_broken.load() ? nullptr : a.createFromWindow(window, "ps2x-game");
         int w = 0, h = 0;
         if (queryLayerSize(activity, w, h))
         {
@@ -419,11 +475,23 @@ bool queue(AHardwareBuffer *buffer, uint32_t w, uint32_t h)
     const Api &a = api();
     Sink &s = sink();
     std::lock_guard<std::mutex> lock(s.m);
+    if (g_broken.load(std::memory_order_acquire))
+        return false;
     if (!s.sc || s.bufW <= 0 || s.bufH <= 0)
     {
         ++s.dropped;
+        // A window that exists but never gets a usable child (createFromWindow
+        // failed, no EGL size) must not leave the screen black: give up.
+        if (s.window && ++s.dropsWithWindow > 240u)
+        {
+            std::fprintf(stderr, "[present-vk] FALLBACK to the GL present: %u drops with a window (sc=%p buf=%dx%d)\n",
+                         s.dropsWithWindow, static_cast<void *>(s.sc), s.bufW, s.bufH);
+            g_broken.store(true);
+            detachLocked(s, "fallback");
+        }
         return false;
     }
+    s.dropsWithWindow = 0;
     const auto t0 = std::chrono::steady_clock::now();
     TX *tx = a.txCreate();
     a.setBuffer(tx, s.sc, buffer, -1); // the caller waited for the GPU fence
@@ -438,7 +506,10 @@ bool queue(AHardwareBuffer *buffer, uint32_t w, uint32_t h)
         const ARect dst = {static_cast<int32_t>(r.x + 0.5f), static_cast<int32_t>(r.y + 0.5f),
                            static_cast<int32_t>(r.x + r.w + 0.5f), static_cast<int32_t>(r.y + r.h + 0.5f)};
         a.setGeometry(tx, s.sc, src, dst, 0);
-        a.setZOrder(tx, s.sc, 1); // above raylib's GL window (nothing is drawn over the game on the Odin)
+        // Above raylib's GL window when nothing is drawn over the game (the Odin
+        // default); under it when GL draws an overlay (virtual pad) with the
+        // game rect cleared to transparent.
+        a.setZOrder(tx, s.sc, s.under ? -1 : 1);
         a.setVisibility(tx, s.sc, kVisibilityShow);
         a.setBufferTransparency(tx, s.sc, kTransparencyOpaque); // PS2 alpha is not display alpha
         std::fprintf(stderr,
@@ -453,6 +524,7 @@ bool queue(AHardwareBuffer *buffer, uint32_t w, uint32_t h)
     a.txDelete(tx);
     s.bufs[buffer].pending = true;
     s.lastQueued = buffer;
+    s.liveOnWindow = true;
     ++s.queued;
     s.applyNs += static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());

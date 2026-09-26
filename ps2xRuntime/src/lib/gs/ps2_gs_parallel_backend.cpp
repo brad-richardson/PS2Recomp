@@ -363,6 +363,13 @@ public:
         }
 #endif
 #if defined(__ANDROID__)
+        if (m_vkPresent && ps2x_present_vk::broken())
+        {
+            // The sink gave up (no usable layer): back to the readback path for this run.
+            std::cerr << "[present-vk] sink broken; backend back to readback" << std::endl;
+            destroyVkSlots();
+            m_vkPresent = false;
+        }
         if (m_vkPresent && presentVk(*shot.image, w, h, request.vsyncTick))
         {
             const uint64_t t1 = nowNanos();
@@ -701,6 +708,7 @@ private:
         if (m_vkPresent && !m_ctx->init_instance_and_device(nullptr, 0, kVkPresentExt, 2u, kFlags))
         {
             std::cerr << "[present-vk] device lacks AHardwareBuffer import; falling back to readback" << std::endl;
+            ps2x_present_vk::fallBack("no AHardwareBuffer import extensions");
             m_vkPresent = false;
             delete m_ctx;
             m_ctx = new Vulkan::Context();
@@ -737,6 +745,7 @@ private:
             if (!m_getAhbProps)
             {
                 std::cerr << "[present-vk] vkGetAndroidHardwareBufferPropertiesANDROID missing; readback" << std::endl;
+                ps2x_present_vk::fallBack("vkGetAndroidHardwareBufferPropertiesANDROID missing");
                 m_vkPresent = false;
             }
         }
@@ -1034,6 +1043,7 @@ private:
         {
             std::cerr << "[present-vk] slot setup failed; falling back to readback" << std::endl;
             destroyVkSlots();
+            ps2x_present_vk::fallBack("AHardwareBuffer slot setup failed");
             m_vkPresent = false;
             return false;
         }

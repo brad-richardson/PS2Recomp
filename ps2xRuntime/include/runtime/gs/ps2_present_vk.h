@@ -1,7 +1,8 @@
 #pragma once
 // VK1 prototype: present the paraLLEl scanout straight from Vulkan (Android).
 //
-// PS2X_PRESENT_VULKAN=1 (Android, paraLLEl backend only; default off): the
+// Android, paraLLEl backend only; default ON since VK1 Part 2 (PS2X_PRESENT_VULKAN=0
+// forces the GL path). The
 // backend blits each scanout into one of four AHardwareBuffer-backed VkImages
 // (imported into Turnip) and queues the buffer on a child SurfaceControl of
 // the NativeActivity window (ASurfaceTransaction_setBuffer, API 29+), which
@@ -9,7 +10,10 @@
 // upload; raylib's GL window stays underneath for input and lifecycle and
 // only clears to black. Turnip is loaded as a HAL (no platform loader), so it
 // has no Vulkan WSI swapchain; this is the swapchain. Any failure falls back
-// to the readback path. Not included by generated code.
+// to the readback path: the sink marks itself broken(), the backend stops
+// queueing, active() goes false and the presenter draws the GL quad again.
+// With the virtual pad on, the child sits UNDER the GL window (z = -1), which is
+// then RGBA and clears the game rect to transparent. Not included by generated code.
 #include <cstdint>
 
 struct AHardwareBuffer;
@@ -18,8 +22,17 @@ struct ANativeActivity;
 
 namespace ps2x_present_vk
 {
-bool enabled(); // PS2X_PRESENT_VULKAN=1 on Android; false elsewhere
-bool active();  // enabled and at least one buffer queued (the presenter skips its upload/draw)
+bool enabled(); // Android, API >= 29, PS2X_PRESENT_VULKAN != 0; false elsewhere
+bool active();  // enabled, not broken, at least one buffer queued (the presenter skips its upload/draw)
+bool broken();  // a setup/runtime failure switched this run to the GL path
+void fallBack(const char *why); // any thread: give up on the layer for this run
+// Main thread, before the first frame: put the child under the GL window (for an overlay
+// such as the virtual pad). The GL window must then be RGBA and clear the game rect to 0.
+void setUnderlay(bool under);
+bool underlay();
+// The current window's child has shown a buffer (the GL window is fully covered when
+// there is no underlay and the rect fills the window).
+bool layerLive();
 
 // Main thread, once per host frame: the current window (nullptr while it is
 // gone), the presenter's aspect (ps2x::present::Aspect as int) and the size of

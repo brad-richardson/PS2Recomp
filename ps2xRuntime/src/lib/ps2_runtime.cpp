@@ -23,6 +23,8 @@
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
 #include <EGL/egl.h>
+#include <android/native_activity.h>
+#include <android/native_window.h>
 #include <android_native_app_glue.h>
 extern "C" struct android_app *GetAndroidApp(void); // raylib rcore_android.c
 namespace
@@ -38,6 +40,12 @@ void vk1OnAppCmd(struct android_app *app, int32_t cmd)
     g_vk1RaylibOnAppCmd(app, cmd);
 }
 } // namespace
+#endif
+#if defined(__ANDROID__)
+// VK1 Part 2: premultiplied-correct blending for the overlay drawn over a
+// transparent GL window (raylib is built as C; rlgl.h is not included here).
+extern "C" void rlSetBlendFactorsSeparate(int glSrcRGB, int glDstRGB, int glSrcAlpha, int glDstAlpha, int glEqRGB,
+                                          int glEqAlpha);
 #endif
 #if defined(PS2X_IOS)
 // HR1 spike: blend off around the shared-texture quad. Declared here because
@@ -1353,6 +1361,18 @@ bool PS2Runtime::initialize(const char *title)
         SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI);
 #else
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+#endif
+#if defined(__ANDROID__)
+        // VK1 Part 2: with the Vulkan layer and an overlay (virtual pad), the
+        // layer goes UNDER the GL window, which must then be translucent: RGBA
+        // window format before raylib creates its surface (raylib's EGL config
+        // gets alpha from the configure-time patch).
+        if (ps2x_present_vk::enabled() && virtualPadWanted())
+        {
+            if (struct android_app *app = GetAndroidApp(); app && app->activity)
+                ANativeActivity_setWindowFormat(app->activity, WINDOW_FORMAT_RGBA_8888);
+            ps2x_present_vk::setUnderlay(true);
+        }
 #endif
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
 #if defined(PS2X_IOS)
@@ -4243,8 +4263,23 @@ void PS2Runtime::run()
         std::fprintf(stderr, "[ios-render] screen=%dx%d render=%dx%d\n",
                      GetScreenWidth(), GetScreenHeight(), GetRenderWidth(), GetRenderHeight());
 #endif
-        BeginDrawing();
-        ClearBackground(BLACK);
+#if defined(__ANDROID__)
+        // VK1 Part 2: once the Vulkan layer shows the game above the whole GL
+        // window and nothing is drawn over it, skip raylib's clear/swap (the
+        // window is invisible); input polling and the pad latch below still run.
+        const bool vkLive = ps2x_present_vk::active() && ps2x_present_vk::layerLive();
+        const bool vkUnder = vkLive && ps2x_present_vk::underlay();
+        const bool skipGl = vkLive && !vkUnder && !m_debugUiInitialized;
+#else
+        const bool vkUnder = false;
+        const bool skipGl = false;
+#endif
+        if (!skipGl)
+        {
+            BeginDrawing();
+            // Under-layer: the game shows through a transparent GL window.
+            ClearBackground(vkUnder ? BLANK : BLACK);
+        }
         const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
         const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));
         const float screenWidth = static_cast<float>(GetScreenWidth());
@@ -4330,7 +4365,21 @@ void PS2Runtime::run()
             uint8_t stickLX = 0x80u, stickLY = 0x80u;
             ps2x::vpad::stickBytes(stick, stickLX, stickLY);
             ps2x::vpad::liveStick().store(static_cast<uint16_t>(stickLX | (stickLY << 8)), std::memory_order_relaxed);
+#if defined(__ANDROID__)
+            if (vkUnder)
+            {
+                // Premultiplied over a transparent window: rgb = src*a + dst*(1-a),
+                // alpha = a + dst_a*(1-a) (plain BLEND_ALPHA would leave alpha = a^2).
+                rlSetBlendFactorsSeparate(0x0302 /*SRC_ALPHA*/, 0x0303 /*ONE_MINUS_SRC_ALPHA*/, 1 /*ONE*/,
+                                          0x0303, 0x8006 /*FUNC_ADD*/, 0x8006);
+                BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+            }
+#endif
             drawVirtualPad(layout, pressed, stick);
+#if defined(__ANDROID__)
+            if (vkUnder)
+                EndBlendMode();
+#endif
         }
         else if (vpadWanted)
         {
@@ -4349,7 +4398,21 @@ void PS2Runtime::run()
         {
             m_debugUiDrawCallback(*this, m_debugUiUserData);
         }
-        EndDrawing();
+        if (!skipGl)
+            EndDrawing();
+        else
+        {
+            // What EndDrawing would do minus the swap: poll input (blocks while
+            // the app is in the background) and pace the loop at 60 Hz.
+            PollInputEvents();
+            static auto s_nextFrame = std::chrono::steady_clock::now();
+            s_nextFrame += std::chrono::microseconds(16667);
+            const auto now = std::chrono::steady_clock::now();
+            if (s_nextFrame < now)
+                s_nextFrame = now;
+            else
+                std::this_thread::sleep_until(s_nextFrame);
+        }
 
         if (WindowShouldClose())
         {
