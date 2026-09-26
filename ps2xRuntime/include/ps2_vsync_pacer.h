@@ -85,6 +85,65 @@ inline bool unpacedFromEnv(const char *value)
     return value != nullptr && std::strcmp(value, "1") == 0;
 }
 
+// AT1: dev-only forced guest rates for audio experiments (fraction of full
+// speed, e.g. 0.8). PS2X_HOST_PACE_RATE applies from boot; PS2X_HOST_PACE_RATE2
+// from guest vsync tick PS2X_HOST_PACE_TICK2. Unset or invalid = FP1 behavior
+// (cap at 1.0x). A set rate implies pacing on (wins over PS2X_UNPACED).
+// Sleeps only; guest state and the det-hash are untouched.
+struct HostPaceConfig
+{
+    bool enabled = false;
+    double rate1 = 1.0;
+    double rate2 = 1.0;
+    uint64_t tick2 = 0;
+    bool havePhase2 = false;
+};
+
+inline bool parsePaceRate(const char *value, double &rate)
+{
+    if (value == nullptr || *value == '\0')
+        return false;
+    char *end = nullptr;
+    const double r = std::strtod(value, &end);
+    if (end == value || *end != '\0' || !(r > 0.0) || !(r <= 2.0))
+        return false;
+    rate = r;
+    return true;
+}
+
+inline HostPaceConfig hostPaceFromEnv(const char *rate1, const char *rate2, const char *tick2)
+{
+    HostPaceConfig config;
+    if (!parsePaceRate(rate1, config.rate1))
+        return config;
+    config.enabled = true;
+    double r2 = 1.0;
+    if (parsePaceRate(rate2, r2) && tick2 != nullptr && *tick2 != '\0')
+    {
+        char *end = nullptr;
+        const unsigned long long t2 = std::strtoull(tick2, &end, 10);
+        if (end != tick2 && *end == '\0')
+        {
+            config.rate2 = r2;
+            config.tick2 = static_cast<uint64_t>(t2);
+            config.havePhase2 = true;
+        }
+    }
+    return config;
+}
+
+inline HostPaceConfig hostPaceFromProcessEnv()
+{
+    return hostPaceFromEnv(
+        std::getenv("PS2X_HOST_PACE_RATE"), std::getenv("PS2X_HOST_PACE_RATE2"),
+        std::getenv("PS2X_HOST_PACE_TICK2"));
+}
+
+constexpr int64_t periodForRate(double rate)
+{
+    return static_cast<int64_t>(static_cast<double>(kPeriodNs) / rate);
+}
+
 inline bool unpacedFromProcessEnv()
 {
     return unpacedFromEnv(std::getenv("PS2X_UNPACED"));

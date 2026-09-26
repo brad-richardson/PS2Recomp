@@ -200,7 +200,8 @@ EeScheduler::EeScheduler(PS2Runtime &runtime)
           const char *flag = std::getenv("PS2X_DETERMINISTIC");
           return flag != nullptr && std::strcmp(flag, "1") == 0;
       }()),
-      m_vsyncPace(!ps2_vsync_pacer::unpacedFromProcessEnv())
+      m_hostPace(ps2_vsync_pacer::hostPaceFromProcessEnv()),
+      m_vsyncPace(!ps2_vsync_pacer::unpacedFromProcessEnv() || m_hostPace.enabled)
 {
 #if PS2X_ENABLE_DET_HASH_TAP
     bool invalid = false;
@@ -2959,6 +2960,20 @@ void EeScheduler::processEvent(const EeEvent &event)
     case EeEventType::VBlankStart:
         if (m_vsyncPace)
         {
+            // AT1: dev-only forced guest rate (sleep only, like the pacer).
+            if (m_hostPace.enabled)
+            {
+                const double wantRate = (m_hostPace.havePhase2 && m_vsyncTick + 1u >= m_hostPace.tick2)
+                                            ? m_hostPace.rate2
+                                            : m_hostPace.rate1;
+                const int64_t wantPeriod = ps2_vsync_pacer::periodForRate(wantRate);
+                if (m_vsyncPacer.periodNs() != wantPeriod)
+                {
+                    m_vsyncPacer = ps2_vsync_pacer::Pacer(wantPeriod);
+                    std::fprintf(stderr, "[host-pace] dev-only forced rate=%.3f from tick=%llu\n",
+                                 wantRate, (unsigned long long)(m_vsyncTick + 1u));
+                }
+            }
             // FP1: never outrun wall clock. Sleep only; no guest state changes.
             const int64_t paceNowNs = ps2_vsync_pacer::steadyNowNs();
             const int64_t paceSleepNs = m_vsyncPacer.onVsync(paceNowNs);

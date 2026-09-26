@@ -486,6 +486,7 @@ private:
     // FP1: wall-clock guest-vsync pacer (executor thread only). Default on;
     // PS2X_UNPACED=1 disables. Sleeps only; guest state untouched.
     ps2_vsync_pacer::Pacer m_vsyncPacer{};
+    ps2_vsync_pacer::HostPaceConfig m_hostPace{};
     bool m_vsyncPace = true;
     uint32_t m_vsyncFlagAddress = 0;
     uint32_t m_vsyncTickAddress = 0;

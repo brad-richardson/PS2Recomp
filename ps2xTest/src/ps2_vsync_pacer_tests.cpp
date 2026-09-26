@@ -87,5 +87,28 @@ void register_ps2_vsync_pacer_tests()
             t.IsFalse(ps2_vsync_pacer::unpacedFromEnv("0"), "0 means paced");
             t.IsFalse(ps2_vsync_pacer::unpacedFromEnv("true"), "only exact 1 disables");
         });
+
+        tc.Run("host pace rate parsing", [](TestCase &t)
+        {
+            const auto off = ps2_vsync_pacer::hostPaceFromEnv(nullptr, nullptr, nullptr);
+            t.IsFalse(off.enabled, "unset rate leaves FP1 pacing");
+            const auto bad = ps2_vsync_pacer::hostPaceFromEnv("0", nullptr, nullptr);
+            t.IsFalse(bad.enabled, "zero rate is ignored");
+            const auto bad2 = ps2_vsync_pacer::hostPaceFromEnv("slow", nullptr, nullptr);
+            t.IsFalse(bad2.enabled, "non-numeric rate is ignored");
+            const auto one = ps2_vsync_pacer::hostPaceFromEnv("0.8", nullptr, nullptr);
+            t.IsTrue(one.enabled, "0.8 enables the forced rate");
+            t.IsFalse(one.havePhase2, "no second phase without RATE2");
+            t.Equals(one.rate1, 0.8, "phase-1 rate parses");
+            const auto two =
+                ps2_vsync_pacer::hostPaceFromEnv("0.8", "0.6", "1800");
+            t.IsTrue(two.enabled && two.havePhase2, "RATE2+TICK2 arm phase 2");
+            t.Equals(two.rate2, 0.6, "phase-2 rate parses");
+            t.Equals(two.tick2, static_cast<uint64_t>(1800), "phase-2 tick parses");
+            const auto noTick = ps2_vsync_pacer::hostPaceFromEnv("0.8", "0.6", nullptr);
+            t.IsFalse(noTick.havePhase2, "RATE2 without TICK2 is ignored");
+            t.Equals(ps2_vsync_pacer::periodForRate(0.5), kPeriod * 2,
+                     "half rate doubles the period");
+        });
     });
 }
