@@ -1193,6 +1193,19 @@ void register_ps2_memory_tests()
                         mem.writeIORegister(kGif + 0x00u, 0x100u);
                         std::memset(rdram + kGifSrc, 0xEE, g.size());
                     }
+                    if (i % 2u == 1u)
+                    {
+                        // VIF0-only kick (EE side; its completion must not touch the unit).
+                        std::vector<uint8_t> v0;
+                        appendU32(v0, makeVifCmd(0x01u, 0u, 0x0404u));
+                        appendU32(v0, makeVifCmd(0x00u, 0u, 0u));
+                        appendU32(v0, makeVifCmd(0x00u, 0u, 0u));
+                        appendU32(v0, makeVifCmd(0x00u, 0u, 0u));
+                        std::memcpy(rdram + 0x00140000u, v0.data(), v0.size());
+                        mem.writeIORegister(0x10008010u, 0x00140000u);
+                        mem.writeIORegister(0x10008020u, 1u);
+                        mem.writeIORegister(0x10008000u, 0x101u);
+                    }
                     if (i % 3u == 0u)
                         mem.write32(0x1100C000u + ((i * 48u) & 0x3FF0u), 0xA5000000u | i); // VU1 data (sync)
                     if (i % 4u == 1u)
@@ -1229,6 +1242,7 @@ void register_ps2_memory_tests()
             t.Equals(base.mscals, static_cast<size_t>(60u), "every kick runs its MSCAL");
             t.Equals(base.offThread, static_cast<size_t>(0u), "synchronous MSCALs run on the EE thread");
             t.Equals(thr.offThread, static_cast<size_t>(60u), "threaded MSCALs run on the unit worker");
+            t.Equals(ps2_mtvu::detail::worker().violationsTotal, 0ull, "no unit state touched while jobs are queued");
             for (const Outcome *o : {&thr, &jit})
             {
                 t.IsTrue(o->packets == base.packets, "GIF packet sequence (path + bytes) is identical");

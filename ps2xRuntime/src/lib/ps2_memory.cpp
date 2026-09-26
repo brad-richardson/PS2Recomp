@@ -2513,7 +2513,11 @@ void PS2Memory::processPendingTransfers()
                 m_gifArbiter->drain();
             } }, mtvuBytes, ps2_mtvu::currentFbrst());
     }
-    else if (m_gifArbiter)
+    // Threaded, with no GIF/VIF1 work run inline here (e.g. a VIF0-only kick):
+    // the arbiter belongs to the unit, and inline this drain always finds its
+    // queue empty (every unit job ends with its own drain), so skip it.
+    else if (m_gifArbiter &&
+             !(ps2_mtvu::threaded() && !ps2_mtvu::onWorker() && !hadGif && !hadVif1))
     {
         const GifDrainBatch batch(m_gsFrontend);
         m_gifArbiter->drain();
