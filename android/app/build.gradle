@@ -14,6 +14,8 @@ def ps2xVu1RecompDir = project.findProperty('ps2xVu1RecompDir') ?: ''
 def ps2xVu0RecompDir = project.findProperty('ps2xVu0RecompDir') ?: ''
 // VR4 D1: vector FMAC core (CMake PS2X_VU1_FMAC_SIMD), ON/OFF (default ON).
 def ps2xVu1FmacSimd = project.findProperty('ps2xVu1FmacSimd') ?: 'ON'
+// VP2: VU1 engine hand-off/unit-time counters (CMake PS2X_VU1_ENGINE_STATS), diagnostic, default OFF.
+def ps2xVu1EngineStats = project.findProperty('ps2xVu1EngineStats') ?: 'OFF'
 
 android {
     namespace 'com.ps2x.runner'
@@ -48,6 +50,7 @@ android {
                         "-DPS2X_VU1_RECOMP_DIR=${ps2xVu1RecompDir}",
                         "-DPS2X_VU0_RECOMP_DIR=${ps2xVu0RecompDir}",
                         "-DPS2X_VU1_FMAC_SIMD=${ps2xVu1FmacSimd}",
+                        "-DPS2X_VU1_ENGINE_STATS=${ps2xVu1EngineStats}",
                         '-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG',
                         '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG'
                 targets 'ps2EntryRunner'
