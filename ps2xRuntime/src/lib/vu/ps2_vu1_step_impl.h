@@ -217,7 +217,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::demoteQueuedFlags(bool macSta
 PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::advanceOneCycle()
 {
     ++m_cycle;
-    m_state.cycles = m_cycle;
+    // VR4 D2: m_state.cycles is published once at the end of run() (every
+    // advance happens inside run(); nothing reads the field before it returns).
     // LSU commits become visible at the cycle boundary before PATH1 consumes
     // its next qword from VU memory.
     if (m_cycle >= m_nextCommitCycle)
@@ -226,10 +227,12 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::advanceOneCycle()
         progressXgkick();
 }
 
-template <bool kStatic, int kBlockMap, bool kNoStall, uint32_t kCodeSize>
-PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstructionPair &decoded, RunContext &ctx)
+template <bool kStatic, int kBlockMap, bool kNoStall, uint32_t kCodeSize, bool kPlainTail>
+PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstructionPair &decoded, RunContext &ctx,
+                                                             uint32_t plainNextPc)
 {
     constexpr bool kBlock = kBlockMap >= 0;
+    static_assert(!kPlainTail || kBlock, "a plain tail needs the block guard");
 #if PS2X_ENABLE_DET_HASH_TAP
     const uint64_t vbStartCycle = m_cycle;
 #endif
@@ -458,54 +461,69 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     m_state.vf[0][3] = 1.0f;
     m_state.vi[0] = 0;
 
-    // VR2: generated images always cover the whole VU1 micro memory
-    // (lookupRecompProgram), so their code size and address mask are constants
-    // (VR3: VU0 images the whole 4 KiB VU0 micro memory; kCodeSize).
-    const uint32_t codeSize = kStatic ? kCodeSize : ctx.codeSize;
-    uint32_t nextPc = m_state.pc + 8u;
-    if (nextPc >= codeSize)
-        nextPc = 0u;
-    m_state.pc = nextPc;
-
-    if (m_state.branchPending)
+    if constexpr (kPlainTail)
     {
-        if (m_state.branchDelay == 0u)
+        // VR4 D2: the emitter's proof (no branch or E-bit pair, not their
+        // delay slot, no D/T bit) plus the block guard (no branch, E-bit or
+        // halt pending at entry) make every step below a no-op except the pc.
+#if PS2X_ENABLE_DET_HASH_TAP
+        if (m_state.branchPending || m_state.ebit || m_state.haltAfterDelaySlot || decoded.eBit ||
+            decoded.dBit || decoded.tBit || ((m_state.pc + 8u) & (kCodeSize - 1u)) != plainNextPc)
+            ++m_blockPlainTailMisses; // must stay 0
+#endif
+        m_state.pc = plainNextPc;
+    }
+    else
+    {
+        // VR2: generated images always cover the whole VU1 micro memory
+        // (lookupRecompProgram), so their code size and address mask are constants
+        // (VR3: VU0 images the whole 4 KiB VU0 micro memory; kCodeSize).
+        const uint32_t codeSize = kStatic ? kCodeSize : ctx.codeSize;
+        uint32_t nextPc = m_state.pc + 8u;
+        if (nextPc >= codeSize)
+            nextPc = 0u;
+        m_state.pc = nextPc;
+
+        if (m_state.branchPending)
         {
-            m_state.pc = m_state.branchTarget & (kStatic ? kCodeSize - 1u : microAddressMask());
-            m_state.branchPending = false;
+            if (m_state.branchDelay == 0u)
+            {
+                m_state.pc = m_state.branchTarget & (kStatic ? kCodeSize - 1u : microAddressMask());
+                m_state.branchPending = false;
+            }
+            else
+            {
+                --m_state.branchDelay;
+            }
         }
-        else
+
+        const bool dHalt = decoded.dBit && m_state.dBitEnabled;
+        const bool tHalt = decoded.tBit && m_state.tBitEnabled;
+        const bool haltBit = dHalt || tHalt;
+        const bool haltBranch = haltBit && decoded.lowerUsage.pipeline == PipelineBranch;
+
+        if (m_state.haltAfterDelaySlot)
         {
-            --m_state.branchDelay;
+            m_state.stoppedByD = m_pendingHaltD;
+            m_state.stoppedByT = m_pendingHaltT;
+            ctx.programEnded = true;
         }
-    }
-
-    const bool dHalt = decoded.dBit && m_state.dBitEnabled;
-    const bool tHalt = decoded.tBit && m_state.tBitEnabled;
-    const bool haltBit = dHalt || tHalt;
-    const bool haltBranch = haltBit && decoded.lowerUsage.pipeline == PipelineBranch;
-
-    if (m_state.haltAfterDelaySlot)
-    {
-        m_state.stoppedByD = m_pendingHaltD;
-        m_state.stoppedByT = m_pendingHaltT;
-        ctx.programEnded = true;
-    }
-    else if (m_state.ebit)
-        ctx.programEnded = true;
-    else if (haltBit && !haltBranch)
-    {
-        m_state.stoppedByD = dHalt;
-        m_state.stoppedByT = tHalt;
-        ctx.programEnded = true;
-    }
-    else if (decoded.eBit)
-        m_state.ebit = true;
-    else if (haltBranch)
-    {
-        m_state.haltAfterDelaySlot = true;
-        m_pendingHaltD = dHalt;
-        m_pendingHaltT = tHalt;
+        else if (m_state.ebit)
+            ctx.programEnded = true;
+        else if (haltBit && !haltBranch)
+        {
+            m_state.stoppedByD = dHalt;
+            m_state.stoppedByT = tHalt;
+            ctx.programEnded = true;
+        }
+        else if (decoded.eBit)
+            m_state.ebit = true;
+        else if (haltBranch)
+        {
+            m_state.haltAfterDelaySlot = true;
+            m_pendingHaltD = dHalt;
+            m_pendingHaltT = tHalt;
+        }
     }
 
     advanceOneCycle();

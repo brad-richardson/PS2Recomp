@@ -436,9 +436,15 @@ private:
     // direct-map byte and no budget checks. kNoStall = the emitter proved the
     // pair never stalls there (no scoreboard read). VR3: kCodeSize = the
     // generated image's code size (kRecompCodeSize for VU1,
-    // kRecompVu0CodeSize for VU0); only kStatic pairs use it.
-    template <bool kStatic, int kBlockMap = -1, bool kNoStall = false, uint32_t kCodeSize = 0x4000u>
-    bool issuePair(const DecodedInstructionPair &decoded, RunContext &ctx);
+    // kRecompVu0CodeSize for VU0); only kStatic pairs use it. VR4 D2:
+    // kPlainTail = a block pair the emitter proved has a plain tail (no
+    // branch/E-bit pair or its delay slot, no D/T bit; the block guard clears
+    // branch/E-bit/halt state at entry), so the tail is just pc = plainNextPc
+    // (a constant argument, folded when inlined; a template argument would
+    // instantiate issuePair once per block pair).
+    template <bool kStatic, int kBlockMap = -1, bool kNoStall = false, uint32_t kCodeSize = 0x4000u,
+              bool kPlainTail = false>
+    bool issuePair(const DecodedInstructionPair &decoded, RunContext &ctx, uint32_t plainNextPc = 0u);
     // VR1: the run() loop header between two generated pairs (VR2: the stop
     // request; see step_impl). True when the next pair may issue from
     // generated code.
@@ -452,6 +458,7 @@ private:
         uint32_t start = 0;                // leader pair index
         std::vector<uint32_t> pairs;       // pair indices, in issue order
         std::vector<uint8_t> noStall;      // per pair: the scoreboard read is provably a no-op
+        std::vector<uint8_t> plainTail;    // VR4 D2: per pair: the pc/branch/halt tail is pc + 8
         uint32_t maxCycles = 0;            // guard bound: stalls + issues + last landing
     };
     void planRecompBlocks(const uint8_t *vuCode, uint32_t codeSize, std::vector<RecompBlockPlan> &blocks) const;
@@ -460,6 +467,7 @@ private:
     uint64_t m_blockEntries = 0;
     uint64_t m_blockPairs = 0;
     uint64_t m_blockNoStallMisses = 0; // hash builds: the no-stall proof failed (must stay 0)
+    uint64_t m_blockPlainTailMisses = 0; // VR4 D2, hash builds: the plain-tail proof failed (must stay 0)
     // Guard misses by reason (knob off / branch pending / E-bit or halt pending / budget).
     uint64_t m_blockMissOff = 0, m_blockMissBranch = 0, m_blockMissEnd = 0, m_blockMissBudget = 0;
     // Hash builds: generated pairs and their cycles, in blocks and in total.

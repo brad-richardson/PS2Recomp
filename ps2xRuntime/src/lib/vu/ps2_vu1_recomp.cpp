@@ -157,14 +157,15 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
 #if PS2X_ENABLE_DET_HASH_TAP
         // VR2 2D: block counters are kept in hash builds only (no per-entry
         // read-modify-write on the hot path).
-        std::fprintf(stderr, "[vu1-blocks] on=%d entries=%llu pairs=%llu nostall_misses=%llu miss_off=%llu miss_branch=%llu miss_end=%llu miss_budget=%llu\n",
+        std::fprintf(stderr, "[vu1-blocks] on=%d entries=%llu pairs=%llu nostall_misses=%llu miss_off=%llu miss_branch=%llu miss_end=%llu miss_budget=%llu plaintail_misses=%llu\n",
                      m_blocksOn ? 1 : 0, static_cast<unsigned long long>(m_blockEntries),
                      static_cast<unsigned long long>(m_blockPairs),
                      static_cast<unsigned long long>(m_blockNoStallMisses),
                      static_cast<unsigned long long>(m_blockMissOff),
                      static_cast<unsigned long long>(m_blockMissBranch),
                      static_cast<unsigned long long>(m_blockMissEnd),
-                     static_cast<unsigned long long>(m_blockMissBudget));
+                     static_cast<unsigned long long>(m_blockMissBudget),
+                     static_cast<unsigned long long>(m_blockPlainTailMisses));
         std::fprintf(stderr, "[vu1-blocks] gen_pairs=%llu block_pairs=%llu pair_share=%.4f gen_cycles=%llu block_cycles=%llu cycle_share=%.4f\n",
                      static_cast<unsigned long long>(m_genIssuedPairs),
                      static_cast<unsigned long long>(m_blockIssuedPairs),
@@ -311,7 +312,7 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
     // pair function; otherwise the pairs run back to back (a pair that ends
     // the program returns true, a stop request returns to run()).
     std::vector<bool> blockAt(pairCount, false);
-    uint32_t blockPairs = 0u, noStallPairs = 0u;
+    uint32_t blockPairs = 0u, noStallPairs = 0u, plainTailPairs = 0u;
     for (const RecompBlockPlan &block : blocks)
     {
         char label[16];
@@ -330,7 +331,13 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
             char pairLabel[16];
             std::snprintf(pairLabel, sizeof(pairLabel), "%04x", block.pairs[k] * 8u);
             out << "        if (vu.issuePair<true, " << unsigned(directMap[block.pairs[k]]) << ", "
-                << (block.noStall[k] != 0u) << ">(d" << pairLabel << ", c))\n            return true;\n";
+                << (block.noStall[k] != 0u);
+            if (block.plainTail[k] != 0u)
+                out << ", 0x4000u, true>(d" << pairLabel << ", c, 0x" << std::hex
+                    << ((block.pairs[k] * 8u + 8u) & (kRecompCodeSize - 1u)) << std::dec << "u))\n            return true;\n";
+            else
+                out << ">(d" << pairLabel << ", c))\n            return true;\n";
+            plainTailPairs += block.plainTail[k] != 0u ? 1u : 0u;
             if (k + 1u < block.pairs.size())
                 out << "        if (vu.m_stopRequested)\n            return false;\n";
             ++blockPairs;
@@ -339,7 +346,7 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
         out << "        PS2X_VU1_MUSTTAIL return next(vu, c);\n    }\n";
     }
     out << "};\n\n// VR2 stage 4: " << blocks.size() << " blocks, " << blockPairs << " block pairs, "
-        << noStallPairs << " without a scoreboard read\n";
+        << noStallPairs << " without a scoreboard read, " << plainTailPairs << " with a plain tail\n";
     out << "const VU1::RecompPairFn " << image << "<" << hashText << ">::kPairs[" << pairCount << "] = {\n";
     for (uint32_t index = 0; index < pairCount; ++index)
     {
@@ -659,6 +666,10 @@ void VU1Interpreter::planRecompBlocks(const uint8_t *vuCode, uint32_t codeSize,
                         quiet = quiet && ready(accWriter[c]);
             }
             block.noStall.push_back(quiet ? 1u : 0u);
+            // VR4 D2: plain tail = neither the branch/E-bit pair nor its delay slot.
+            const bool ender = branch[block.pairs[k]] != 0u || p.eBit;
+            const bool slot = k > 0u && (branch[block.pairs[k - 1u]] != 0u || d[block.pairs[k - 1u]].eBit);
+            block.plainTail.push_back(!ender && !slot ? 1u : 0u);
             const uint32_t worst = quiet ? 0u
                                    : (p.lowerUsage.pipeline == PipelineEfu || p.lowerUsage.waitP)    ? 54u
                                    : (p.lowerUsage.pipeline == PipelineFdiv || p.lowerUsage.waitQ) ? 13u
