@@ -516,6 +516,15 @@ else()
     target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DET_HASH_TAP=0)
 endif()
 
+# VR4 D1: vector form of the exact VU FMAC core (ps2_vu1_fmac_simd.h); the
+# scalar form stays as the reference. Needs clang/GCC vector extensions.
+option(PS2X_VU1_FMAC_SIMD "Use the vector form of the exact VU FMAC core" OFF)
+if(PS2X_VU1_FMAC_SIMD)
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_VU1_FMAC_SIMD=1)
+else()
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_VU1_FMAC_SIMD=0)
+endif()
+
 option(PS2X_ENABLE_SBR_TRIPWIRE "Route signed-branch predicates through the SB1 32/64-bit tripwire" OFF)
 if(PS2X_ENABLE_SBR_TRIPWIRE)
     target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_SBR_TRIPWIRE=1)

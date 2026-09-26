@@ -267,7 +267,12 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::updateFmacFlags(const uint8_t
             mac |= static_cast<uint32_t>(lane) << 12;
         status |= flags;
     }
+    commitFmacFlags(mac, status, extraSticky);
+}
 
+PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::commitFmacFlags(uint32_t mac, uint32_t status,
+                                                                    uint32_t extraSticky)
+{
     // VB1: the flag commit at issue (see issuePair's m_directFlags guard).
     const bool directFlags = directFlagsNow();
 #if PS2X_ENABLE_DET_HASH_TAP

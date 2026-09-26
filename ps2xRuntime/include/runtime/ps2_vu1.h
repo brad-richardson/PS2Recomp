@@ -20,6 +20,22 @@ using VuWide = long double;
 using VuWide = double;
 #endif
 
+// VR4 D1: the vector form of the exact FMAC core (ps2_vu1_fmac_simd.h) needs
+// clang/GCC vector extensions and VuWide == double. PS2X_VU1_FMAC_SIMD (CMake
+// option, default off) makes it the form execUpperImpl uses; the scalar form
+// stays as the reference either way.
+#ifndef PS2X_VU1_FMAC_SIMD
+#define PS2X_VU1_FMAC_SIMD 0
+#endif
+#if (defined(__clang__) || defined(__GNUC__)) && !(defined(PS2X_VU_WIDE_QUAD) && PS2X_VU_WIDE_QUAD)
+#define PS2X_VU1_FMAC_SIMD_AVAILABLE 1
+#else
+#define PS2X_VU1_FMAC_SIMD_AVAILABLE 0
+#endif
+#if PS2X_VU1_FMAC_SIMD && !PS2X_VU1_FMAC_SIMD_AVAILABLE
+#error "PS2X_VU1_FMAC_SIMD needs clang/GCC vector extensions and VuWide == double"
+#endif
+
 #if defined(__APPLE__)
 static_assert(sizeof(long double) == sizeof(double),
               "E45 assumes macOS long double is 64-bit (Mac VU1 math unchanged)");
@@ -147,6 +163,13 @@ public:
     uint64_t blockEntriesForTest() const { return m_blockEntries; }
     // VR2 2C: a reserved-instruction/error stop (reportReservedInstruction) is pending.
     bool stopRequestedForTest() const { return m_stopRequested; }
+    // VR4 D1: run one upper instruction through the scalar (simd=false) or
+    // vector (simd=true, needs PS2X_VU1_FMAC_SIMD_AVAILABLE) FMAC core, with
+    // flag commits direct (directFlags) or queued, and read back everything
+    // an FMAC can change (registers, flags, flag pipeline, pending tails).
+    void execUpperForTest(uint32_t instr, bool simd, bool directFlags);
+    void queueFssetForTest(uint16_t immediate) { queueFsset(immediate); }
+    std::vector<uint64_t> fmacStateForTest() const;
     const VU1State &state() const { return m_state; }
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t programStartCount() const { return m_programStartCount; }
@@ -525,7 +548,18 @@ private:
     void execUpper(uint32_t instr);
     void execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
     // VR1: the executor bodies (ps2_vu1_{upper,lower}_impl.h), always inlined.
-    void execUpperImpl(uint32_t instr);
+    // (The always-inline attribute sits on the member template declarations:
+    // on the out-of-class definition alone it does not reach instantiations.)
+    template <bool kSimd = (PS2X_VU1_FMAC_SIMD != 0)>
+    PS2X_VU1_ALWAYS_INLINE void execUpperImpl(uint32_t instr);
+#if PS2X_VU1_FMAC_SIMD_AVAILABLE
+    // VR4 D1: vector FMAC core (ps2_vu1_fmac_simd.h). fmacSimdDispatch runs
+    // the upper ops that end in applyFmacDest/applyFmacDestAcc and returns
+    // false for every other op (the scalar code handles those).
+    PS2X_VU1_ALWAYS_INLINE bool fmacSimdDispatch(uint32_t instr);
+    template <int kArith, int kSrc, bool kAcc>
+    PS2X_VU1_ALWAYS_INLINE void fmacSimd(uint32_t instr);
+#endif
     void execLowerImpl(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
 
     void applyDest(float *dst, const float *result, uint8_t dest);
@@ -538,6 +572,9 @@ private:
     uint8_t normalizeFmacExactResult(float &value, VuWide exactResult) const;
     uint32_t calculateFmacProductSticky(uint8_t dest) const;
     void updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest, uint32_t extraSticky);
+    // VR4 D1: the flag commit half of updateFmacFlags (direct or queued), shared
+    // by the scalar and vector FMAC cores.
+    void commitFmacFlags(uint32_t mac, uint32_t status, uint32_t extraSticky);
     void queueFsset(uint16_t immediate);
     void queueClip(uint32_t clip);
     void queueFcset(uint32_t clip);

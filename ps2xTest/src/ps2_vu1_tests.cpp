@@ -2177,6 +2177,181 @@ void register_ps2_vu1_tests()
             t.IsTrue(runs > 1000u, "differential covered many cuts");
         });
 
+#if PS2X_VU1_FMAC_SIMD_AVAILABLE
+        // VR4 D1: the vector FMAC core against the scalar reference, bit for
+        // bit, on every upper op (FMAC ops take the vector path; the rest must
+        // fall through unchanged), every dest mask, operands drawn from the
+        // classes the normalization and classification treat specially (±0,
+        // denormals, Inf/NaN bit patterns, FLT_MIN/FLT_MAX neighbourhoods,
+        // exponents whose products or sums straddle the U/O thresholds,
+        // cancellations), and flag commits direct, queued, behind queued
+        // entries and behind a queued FSSET. PS2X_VR4_FMAC_CASES overrides
+        // the case count.
+        tc.Run("VR4 vector FMAC core matches the scalar reference bit for bit", [](TestCase &t)
+        {
+            uint64_t cases = 2000000u;
+            if (const char *env = std::getenv("PS2X_VR4_FMAC_CASES"))
+                cases = std::strtoull(env, nullptr, 10);
+            std::vector<uint32_t> ops;      // upper words with dest/regs zero
+            std::vector<uint32_t> fmacOps;  // FMAC ops only (setup writes)
+            const auto isFmacOp = [](uint32_t code, bool special)
+            {
+                if (code <= 0x0Fu || (code >= 0x18u && code <= 0x1Cu) || code == 0x1Eu ||
+                    (code >= 0x20u && code <= 0x2Au) || code == 0x2Cu || code == 0x2Du || code == 0x2Eu)
+                    return true;
+                (void)special;
+                return false;
+            };
+            for (uint32_t op = 0; op <= 0x2Fu; ++op)
+            {
+                ops.push_back(op);
+                if (isFmacOp(op, false))
+                    fmacOps.push_back(op);
+            }
+            for (uint32_t code = 0; code <= 0x30u; ++code)
+            {
+                if (code == 0x2Bu)
+                    continue; // reserved (reportReservedInstruction)
+                const uint32_t word = 0x3Cu | (code & 3u) | ((code >> 2) << 6);
+                ops.push_back(word);
+                if (isFmacOp(code, true))
+                    fmacOps.push_back(word);
+            }
+            uint64_t rng = 0x9E3779B97F4A7C15ull;
+            const auto next = [&rng]()
+            {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                return rng;
+            };
+            const auto operand = [&next]() -> uint32_t
+            {
+                const uint64_t r = next();
+                const uint32_t sign = (r & 1u) != 0u ? 0x80000000u : 0u;
+                uint32_t mantissa = static_cast<uint32_t>(r >> 8) & 0x7FFFFFu;
+                switch ((r >> 1) & 3u)
+                {
+                case 0: mantissa = 0u; break;
+                case 1: mantissa = 0x7FFFFFu; break;
+                default: break;
+                }
+                uint32_t exponent = 0u;
+                switch ((r >> 3) % 14u)
+                {
+                case 0: return sign;                                     // ±0
+                case 1: return sign | ((static_cast<uint32_t>(r >> 32) & 0x7FFFFFu) | 1u); // denormal
+                case 2: return sign | 0x7F800000u;                       // Inf
+                case 3: return sign | 0x7F800000u | ((static_cast<uint32_t>(r >> 32) & 0x7FFFFFu) | 1u); // NaN
+                case 4: exponent = 0xFEu - static_cast<uint32_t>((r >> 40) & 1u); break;  // FLT_MAX side
+                case 5: exponent = 1u + static_cast<uint32_t>((r >> 40) & 1u); break;     // FLT_MIN side
+                case 6: case 7: exponent = 0x3Eu + static_cast<uint32_t>((r >> 40) % 5u); break;  // products near U
+                case 8: case 9: exponent = 0xBDu + static_cast<uint32_t>((r >> 40) % 5u); break;  // products near O
+                case 10: exponent = 0x7Eu + static_cast<uint32_t>((r >> 40) % 3u); break;
+                default: exponent = 1u + static_cast<uint32_t>((r >> 40) % 0xFEu); break;
+                }
+                return sign | (exponent << 23) | mantissa;
+            };
+            const auto asFloat = [](uint32_t bits)
+            {
+                float value = 0.0f;
+                std::memcpy(&value, &bits, sizeof(value));
+                return value;
+            };
+
+            VU1Interpreter scalar;
+            VU1Interpreter simd;
+            uint64_t mismatches = 0, overflow = 0, underflow = 0, zero = 0, queuedCases = 0, fssetCases = 0;
+            for (uint64_t n = 0; n < cases; ++n)
+            {
+                const uint32_t dest = 1u + static_cast<uint32_t>(next() % 15u);
+                const uint32_t regs = static_cast<uint32_t>(next());
+                const uint32_t ft = regs & 31u, fs = (regs >> 5) & 31u, fd = (regs >> 10) & 31u;
+                const uint32_t opWord = ops[next() % ops.size()];
+                const bool special = (opWord & 0x3Cu) == 0x3Cu;
+                const uint32_t instr = (dest << 21) | (ft << 16) | (fs << 11) | (special ? opWord : (opWord | (fd << 6)));
+                const uint64_t mode = next() % 5u;
+                const uint32_t prior = 1u + static_cast<uint32_t>(next() % 6u);
+                std::vector<uint32_t> setup;
+                if (mode >= 2u)
+                    for (uint32_t k = 0; k < prior; ++k)
+                    {
+                        const uint32_t r = static_cast<uint32_t>(next());
+                        const uint32_t w = fmacOps[r % fmacOps.size()];
+                        const bool sp = (w & 0x3Cu) == 0x3Cu;
+                        setup.push_back(((1u + (r >> 8) % 15u) << 21) | (((r >> 12) & 31u) << 16) |
+                                        (((r >> 17) & 31u) << 11) | (sp ? w : (w | (((r >> 22) & 31u) << 6))));
+                    }
+                const uint16_t fsset = static_cast<uint16_t>(next() & 0xFFFu);
+                VU1State start{};
+                for (auto &row : start.vf)
+                    for (float &value : row)
+                        value = asFloat(operand());
+                if (next() % 8u == 0u)
+                {
+                    // cancellations: vt = ±vs, acc = ±vs
+                    const uint32_t flip = (next() & 1u) != 0u ? 0x80000000u : 0u;
+                    for (uint32_t c = 0; c < 4u; ++c)
+                    {
+                        uint32_t bits = 0u;
+                        std::memcpy(&bits, &start.vf[fs][c], sizeof(bits));
+                        start.vf[ft][c] = asFloat(bits ^ flip);
+                        start.acc[c] = asFloat(bits ^ (flip ^ 0x80000000u));
+                    }
+                }
+                else
+                    for (float &value : start.acc)
+                        value = asFloat(operand());
+                start.q = asFloat(operand());
+                start.i = asFloat(operand());
+                start.mac = static_cast<uint32_t>(next()) & 0xFFFFu;
+                start.status = static_cast<uint32_t>(next()) & 0xFFFu;
+                start.clip = static_cast<uint32_t>(next()) & 0xFFFFFFu;
+
+                std::vector<uint64_t> snap[2];
+                for (int form = 0; form < 2; ++form)
+                {
+                    VU1Interpreter &vu = form == 0 ? scalar : simd;
+                    vu.reset();
+                    vu.state() = start;
+                    if (mode == 4u)
+                        vu.queueFssetForTest(fsset);
+                    for (uint32_t w : setup)
+                        vu.execUpperForTest(w, form == 1, false);
+                    vu.execUpperForTest(instr, form == 1, mode != 0u && mode != 3u);
+                    snap[form] = vu.fmacStateForTest();
+                }
+                if (mode >= 2u)
+                    ++queuedCases;
+                if (mode == 4u)
+                    ++fssetCases;
+                const uint32_t status = scalar.state().status;
+                overflow += (status & 8u) != 0u;
+                underflow += (status & 4u) != 0u;
+                zero += (status & 1u) != 0u;
+                if (snap[0] != snap[1])
+                {
+                    if (++mismatches <= 5u)
+                    {
+                        size_t field = 0;
+                        while (field < snap[0].size() && snap[0][field] == snap[1][field])
+                            ++field;
+                        std::fprintf(stderr,
+                                     "VR4 FMAC mismatch: case %llu instr 0x%08x mode %llu setup %zu field %zu scalar 0x%llx simd 0x%llx\n",
+                                     static_cast<unsigned long long>(n), instr, static_cast<unsigned long long>(mode),
+                                     setup.size(), field, static_cast<unsigned long long>(snap[0][field]),
+                                     static_cast<unsigned long long>(snap[1][field]));
+                    }
+                }
+            }
+            std::printf("VR4 FMAC coverage: cases=%llu ops=%zu queued-setup=%llu fsset=%llu status O=%llu U=%llu Z=%llu mismatches=%llu\n",
+                        static_cast<unsigned long long>(cases), ops.size(),
+                        static_cast<unsigned long long>(queuedCases), static_cast<unsigned long long>(fssetCases),
+                        static_cast<unsigned long long>(overflow), static_cast<unsigned long long>(underflow),
+                        static_cast<unsigned long long>(zero), static_cast<unsigned long long>(mismatches));
+            t.Equals(mismatches, uint64_t{0}, "vector FMAC core matches the scalar reference");
+        });
+#endif
 #if PS2X_VU1_FIXTURE_TEST
         // VR2: generated pairs (vu1_fixture_gen: the runtime's emitter over the
         // synthetic images in vu1_recomp_fixture.h) against the interpreter

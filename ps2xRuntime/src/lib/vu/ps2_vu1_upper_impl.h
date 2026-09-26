@@ -12,6 +12,7 @@
 #include <limits>
 #include "ps2_vu1_detail.h"
 #include "ps2_vu1_fmac_impl.h"
+#include "ps2_vu1_fmac_simd.h"
 
 namespace ps2_vu1_upper_detail
 {
@@ -46,6 +47,7 @@ using namespace ps2_vu1_upper_detail;
 // ============================================================================
 // Upper instructions (FMAC pipeline)
 // ============================================================================
+template <bool kSimd>
 PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::execUpperImpl(uint32_t instr)
 {
     m_currentUpperInstruction = instr;
@@ -57,6 +59,17 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::execUpperImpl(uint32_t instr)
         if (special == 0x2Fu || special == 0x30u)
             return;
     }
+#if PS2X_VU1_FMAC_SIMD_AVAILABLE
+    // VR4 D1: the vector FMAC core takes every op that ends in
+    // applyFmacDest/applyFmacDestAcc (same results, flags and commits).
+    if constexpr (kSimd)
+    {
+        if (fmacSimdDispatch(instr))
+            return;
+    }
+#else
+    static_assert(!kSimd, "vector FMAC core unavailable in this build");
+#endif
     uint8_t dest = DEST(instr);
     uint8_t ft = FT(instr);
     uint8_t fs = FS(instr);
