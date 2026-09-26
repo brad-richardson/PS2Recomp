@@ -19,6 +19,14 @@ void register_ps2_audio_stretch_tests()
 {
     MiniTest::Case("Ps2AudioStretch", [](TestCase &tc)
     {
+        tc.Run("stretch defaults on, =0 disables", [](TestCase &t)
+        {
+            t.IsTrue(ps2_audio_stretch::stretchEnabledFromEnv(nullptr), "unset means on");
+            t.IsTrue(ps2_audio_stretch::stretchEnabledFromEnv("1"), "1 means on");
+            t.IsTrue(ps2_audio_stretch::stretchEnabledFromEnv(""), "only the exact 0 disables");
+            t.IsFalse(ps2_audio_stretch::stretchEnabledFromEnv("0"), "0 means off");
+        });
+
         tc.Run("target fill stays in bypass at tempo 1", [](TestCase &t)
         {
             ps2_audio_stretch::StretchController c;

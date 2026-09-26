@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 namespace ps2_audio_stretch
 {
@@ -46,6 +47,13 @@ constexpr float kBypassLeave = 0.02f;  // engage outside +/-2 % of 1.0
 constexpr float kBypassRejoin = 0.01f; // release inside +/-1 % of 1.0
 constexpr double kTauDownS = 0.05;      // EMA time constant on drops
 constexpr double kTauUpS = 0.30;        // EMA time constant on rises
+
+// PS2X_AUDIO_STRETCH: default on (Brad 09-26, after the C1 listen);
+// the exact value "0" disables (legacy direct path, byte-identical output).
+inline bool stretchEnabledFromEnv(const char *value)
+{
+    return value == nullptr || std::strcmp(value, "0") != 0;
+}
 
 struct StepResult
 {

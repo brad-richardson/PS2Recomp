@@ -165,7 +165,7 @@ namespace
         minuteStats(std::chrono::steady_clock::now());
     }
 
-    // ---- AT1 stretch path (PS2X_AUDIO_STRETCH=1) ----
+    // ---- AT1 stretch path (default on; PS2X_AUDIO_STRETCH=0 disables) ----
 
     void s16ToFloat(const int16_t *s16, float *out, size_t frames)
     {
@@ -497,8 +497,10 @@ bool initialize()
             return false;
         std::cerr << "[snd-output] 48 kHz stream unavailable\n";
     }
-    const char *stretchEnv = std::getenv("PS2X_AUDIO_STRETCH");
-    g_output.stretch = stretchEnv && std::strcmp(stretchEnv, "1") == 0;
+    g_output.stretch =
+        ps2_audio_stretch::stretchEnabledFromEnv(std::getenv("PS2X_AUDIO_STRETCH"));
+    if (!g_output.stretch)
+        std::cerr << "[snd-output] stretch=off (PS2X_AUDIO_STRETCH=0)\n";
     if (g_output.stretch)
     {
         g_output.st = std::make_unique<soundtouch::SoundTouch>();
