@@ -6,7 +6,8 @@
 //     un-capturable is live (deferral reasons are logged).
 //   PS2X_SAVESTATE_EXIT_AFTER_SAVE=1 stops the runner after the save.
 //   PS2X_SAVESTATE_LOAD=<file> restores it in a fresh process after init.
-//   PS2X_SAVESTATE_STRICT=1 also refuses a runner-SHA mismatch (default: warn).
+//   PS2X_SAVESTATE_STRICT=1 also refuses a runner-SHA mismatch, and refuses
+//     when the runner identity is unknown on either side (default: warn).
 // Requires PS2X_DETERMINISTIC=1. The file holds game RAM: keep it in scratch.
 //
 // File: "PS2XSAVE" + u32 format version, then sections
@@ -444,4 +445,19 @@ namespace ps2_savestate
     std::string sha256Hex(const uint8_t *data, size_t size);
     bool sha256File(const std::string &path, std::string &hex);
     std::string padScriptPrefix(const char *script, uint64_t vsyncTick);
+    // Path of the loaded module holding the runtime (dladdr on a function in
+    // this library): the executable on desktop static builds,
+    // libps2EntryRunner.so on Android, "" when unobtainable.
+    std::string runtimeModulePath();
+    // Strict runner-identity verdict for a (saved, current) pair. Strict
+    // refuses mismatches and refuses when either side is "unknown" (the
+    // identity could not be obtained); non-strict warns on mismatches and
+    // keeps the legacy silent match on unknown-vs-unknown.
+    enum class RunnerShaVerdict
+    {
+        Accept,
+        Warn,
+        Refuse
+    };
+    RunnerShaVerdict checkRunnerSha(const std::string &saved, const std::string &current, bool strict);
 } // namespace ps2_savestate

@@ -28,6 +28,9 @@
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
+#if defined(__APPLE__) || defined(__linux__)
+#include <dlfcn.h>
+#endif
 
 void ps2_savestate_linkSyscallSection(); // Kernel/Syscalls/Savestate.cpp
 
@@ -225,7 +228,15 @@ namespace ps2_savestate
 
         std::string runnerPath()
         {
-#if defined(__APPLE__)
+            // S5: identify the loaded runtime module, not the host process.
+            // On Android /proc/self/exe is the app_process launcher, which is
+            // identical across APKs and would defeat the strict check.
+            const std::string module = runtimeModulePath();
+            if (!module.empty())
+                return module;
+#if defined(__ANDROID__)
+            return {}; // never the launcher; strict refuses, non-strict warns
+#elif defined(__APPLE__)
             char buf[4096];
             uint32_t size = sizeof(buf);
             if (_NSGetExecutablePath(buf, &size) == 0)
@@ -264,6 +275,25 @@ namespace ps2_savestate
         Sha256 sha;
         sha.update(data, size);
         return sha.hex();
+    }
+
+    std::string runtimeModulePath()
+    {
+#if defined(__APPLE__) || defined(__linux__)
+        Dl_info info{};
+        // An address in this library (the function itself): the executable on
+        // desktop static builds, libps2EntryRunner.so on Android.
+        if (dladdr(reinterpret_cast<const void *>(&runtimeModulePath), &info) && info.dli_fname)
+            return std::string(info.dli_fname);
+#endif
+        return {};
+    }
+
+    RunnerShaVerdict checkRunnerSha(const std::string &saved, const std::string &current, bool strict)
+    {
+        if (saved == current)
+            return (strict && saved == "unknown") ? RunnerShaVerdict::Refuse : RunnerShaVerdict::Accept;
+        return strict ? RunnerShaVerdict::Refuse : RunnerShaVerdict::Warn;
     }
 
     bool sha256File(const std::string &path, std::string &hex)
@@ -819,9 +849,26 @@ namespace ps2_savestate
         {
             auto it = saved.find(line.key);
             const std::string have = it == saved.end() ? std::string("<missing>") : it->second;
-            if (have == line.value)
+            if (line.key == "runner_sha")
+            {
+                // S5: strict refuses an unobtainable identity ("unknown" on
+                // either side), not just a mismatch.
+                switch (checkRunnerSha(have, line.value, config().strict))
+                {
+                case RunnerShaVerdict::Accept:
+                    continue;
+                case RunnerShaVerdict::Refuse:
+                    error = "header mismatch " + line.key + ": file=" + have + " this=" + line.value;
+                    return false;
+                case RunnerShaVerdict::Warn:
+                    break;
+                }
+            }
+            else if (have == line.value)
+            {
                 continue;
-            if (line.refuse)
+            }
+            else if (line.refuse)
             {
                 error = "header mismatch " + line.key + ": file=" + have + " this=" + line.value;
                 return false;

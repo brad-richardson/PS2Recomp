@@ -15,6 +15,12 @@
 #include <fstream>
 #include <memory>
 #include <random>
+#if defined(__APPLE__) || defined(__linux__)
+#include <dlfcn.h>
+#endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -945,6 +951,61 @@ void register_ps2_savestate_tests()
             t.IsTrue(ps2_savestate::readDirTree(r, (base / "restored").string()), "empty tree restores");
             t.IsTrue(fs::is_directory(base / "restored"), "restore creates the root");
             fs::remove_all(base);
+        });
+
+        tc.Run("ss3 s5: runner identity is the loaded runtime module", [](TestCase &t)
+        {
+            const std::string mod = ps2_savestate::runtimeModulePath();
+#if defined(__APPLE__) || defined(__linux__)
+            t.IsTrue(!mod.empty(), "module path obtained");
+            if (mod.empty())
+                return;
+            t.IsTrue(std::filesystem::exists(mod), "module path exists");
+            // The same module serves any function in this library ...
+            Dl_info info{};
+            const bool ok =
+                dladdr(reinterpret_cast<const void *>(&ps2_savestate::sha256Hex), &info) && info.dli_fname;
+            t.IsTrue(ok, "dladdr works on the runtime library");
+            if (ok)
+                t.Equals(mod, std::string(info.dli_fname), "helper names the runtime's own module");
+            // ... and on desktop static builds that is the executable itself,
+            // so the identity (and its hash) is unchanged from before S5.
+            std::string exe;
+#if defined(__APPLE__)
+            char buf[4096];
+            uint32_t size = sizeof(buf);
+            if (_NSGetExecutablePath(buf, &size) == 0)
+                exe = buf;
+#else
+            std::error_code ec;
+            exe = std::filesystem::read_symlink("/proc/self/exe", ec).string();
+#endif
+            t.IsTrue(!exe.empty(), "executable path obtained");
+            if (!exe.empty())
+                t.IsTrue(std::filesystem::equivalent(mod, exe), "module is the test executable");
+            std::string hex;
+            t.IsTrue(ps2_savestate::sha256File(mod, hex) && hex.size() == 64u, "module hashes");
+#else
+            t.Equals(mod, std::string(), "no module query off Apple/Linux");
+#endif
+        });
+
+        tc.Run("ss3 s5: strict refuses unknown runner identity", [](TestCase &t)
+        {
+            using ps2_savestate::RunnerShaVerdict;
+            using ps2_savestate::checkRunnerSha;
+            t.IsTrue(checkRunnerSha("aaa", "aaa", true) == RunnerShaVerdict::Accept, "strict match accepts");
+            t.IsTrue(checkRunnerSha("aaa", "bbb", true) == RunnerShaVerdict::Refuse, "strict mismatch refuses");
+            t.IsTrue(checkRunnerSha("unknown", "unknown", true) == RunnerShaVerdict::Refuse,
+                     "strict unknown-vs-unknown refuses (warned past it pre-S5)");
+            t.IsTrue(checkRunnerSha("unknown", "bbb", true) == RunnerShaVerdict::Refuse,
+                     "strict unknown-saved refuses");
+            t.IsTrue(checkRunnerSha("aaa", "unknown", true) == RunnerShaVerdict::Refuse,
+                     "strict unknown-current refuses");
+            t.IsTrue(checkRunnerSha("aaa", "aaa", false) == RunnerShaVerdict::Accept, "lax match accepts");
+            t.IsTrue(checkRunnerSha("aaa", "bbb", false) == RunnerShaVerdict::Warn, "lax mismatch warns");
+            t.IsTrue(checkRunnerSha("unknown", "unknown", false) == RunnerShaVerdict::Accept,
+                     "lax unknown-vs-unknown keeps the legacy silent match");
         });
     });
 }
