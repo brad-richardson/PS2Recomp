@@ -22,6 +22,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -420,9 +421,22 @@ namespace ps2_savestate
     bool trySave(PS2Runtime &runtime, uint64_t vsyncTick, std::string &why);
     bool load(PS2Runtime &runtime, const std::string &path, std::string &error);
 
-    // Directory tree as a section payload (memory-card roots). Restore writes
-    // into `root` and refuses when `root` already holds a file that is not
-    // byte-identical to the saved one (never overwrites a real card).
+    // Traversal/read failures while saving a directory tree. trySave turns
+    // it into a deferral reason; a partial tree is never written.
+    struct dir_tree_error : std::runtime_error
+    {
+        using std::runtime_error::runtime_error;
+    };
+
+    // Directory tree as a section payload (memory-card roots): every
+    // directory (including empty ones) and every file with its
+    // last_write_time (what sceMcGetDir reports to the guest), same-host
+    // only (raw file-clock counts). writeDirTree throws dir_tree_error on
+    // any traversal/read failure instead of saving a partial tree.
+    // readDirTree validates the whole destination tree (an extra file,
+    // directory or non-file, or different bytes, refuses the load — a real
+    // card is never overwritten), skips byte-and-time-identical files
+    // without rewriting them, and restores saved times onto the rest.
     void writeDirTree(Writer &w, const std::string &root);
     bool readDirTree(Reader &r, const std::string &root);
 

@@ -1624,5 +1624,5 @@ namespace
         return r.ok();
     }
     const bool kMcDirSavestateRegistered =
-        ps2_savestate::registerSection("stub:mcdir", {1u, &mcDirSavestateSave, &mcDirSavestateLoad, nullptr});
+        ps2_savestate::registerSection("stub:mcdir", {2u, &mcDirSavestateSave, &mcDirSavestateLoad, nullptr});
 }

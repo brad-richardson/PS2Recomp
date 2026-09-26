@@ -4,8 +4,10 @@
 #include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_savestate.h"
+#include "../../ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.h"
 #include "../../ps2xRuntime/src/lib/ps2_savestate_internal.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -161,6 +163,46 @@ namespace
     void ss3PutU32(std::vector<uint8_t> &blob, size_t off, uint32_t v)
     {
         std::memcpy(blob.data() + off, &v, sizeof(v));
+    }
+
+    // S4: point the card stubs at a scratch root, restored on scope exit.
+    struct Ss4IoPathsGuard
+    {
+        PS2Runtime::IoPaths saved;
+        explicit Ss4IoPathsGuard(const std::filesystem::path &mcRoot) : saved(PS2Runtime::getIoPaths())
+        {
+            PS2Runtime::IoPaths io;
+            io.mcRoot = mcRoot;
+            PS2Runtime::setIoPaths(io);
+        }
+        ~Ss4IoPathsGuard() { PS2Runtime::setIoPaths(saved); }
+    };
+
+    void ss4SetReg(R5900Context &ctx, int reg, uint32_t v)
+    {
+        std::memcpy(&ctx.r[reg], &v, sizeof(v)); // low word, as getRegU32 reads
+    }
+
+    // Runs the real sceMcGetDir and returns the raw dir table (maxEnt x 64B).
+    std::vector<uint8_t> ss4GetDir(PS2Runtime &rt, const std::string &guestPath, int maxEnt)
+    {
+        std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+        R5900Context ctx{};
+        constexpr uint32_t kPathAddr = 0x1000, kTableAddr = 0x2000;
+        std::memcpy(rdram.data() + kPathAddr, guestPath.c_str(), guestPath.size() + 1);
+        ss4SetReg(ctx, 4, 0); // port 0
+        ss4SetReg(ctx, 5, 0); // slot 0
+        ss4SetReg(ctx, 6, kPathAddr); // path
+        ss4SetReg(ctx, 8, static_cast<uint32_t>(maxEnt)); // max entries
+        ss4SetReg(ctx, 9, kTableAddr); // table
+        ps2_stubs::sceMcGetDir(rdram.data(), &ctx, &rt);
+        return std::vector<uint8_t>(rdram.begin() + kTableAddr, rdram.begin() + kTableAddr + maxEnt * 64);
+    }
+
+    std::filesystem::file_time_type ss4FileTime(int64_t sec, int64_t ns)
+    {
+        namespace fs = std::filesystem;
+        return fs::file_time_type{} + std::chrono::seconds(sec) + std::chrono::nanoseconds(ns);
     }
 
     // S3 tests touch the backend through registers (which init lazily)
@@ -720,6 +762,189 @@ void register_ps2_savestate_tests()
             t.IsTrue(s == 0.5f && q == 1.0f, "vertex ST/Q kept");
             t.IsTrue(fog == 90.0f, "vertex fog kept");
             t.IsTrue(u == 10u && v == 20u, "vertex UV kept");
+        });
+
+        tc.Run("ss3 s4: card dirs and timestamps round-trip; GetDir equal after load", [](TestCase &t)
+        {
+            namespace fs = std::filesystem;
+            const fs::path base = fs::temp_directory_path() / "ss3-mcdir-test";
+            fs::remove_all(base);
+            PS2Runtime rt;
+            // Card tree: a save dir with a file, an empty dir, a top-level file.
+            const fs::path card = base / "card";
+            fs::create_directories(card / "SAVE");
+            fs::create_directories(card / "EMPTY");
+            { std::ofstream(card / "SAVE" / "data", std::ios::binary) << "save-bytes"; }
+            { std::ofstream(card / "top.dat", std::ios::binary) << "top"; }
+            // Distinct mid-second times (file times first, then dirs: creating
+            // files bumps their parents).
+            fs::last_write_time(card / "SAVE" / "data", ss4FileTime(1700000100, 111111111));
+            fs::last_write_time(card / "top.dat", ss4FileTime(1700000200, 222222222));
+            fs::last_write_time(card / "SAVE", ss4FileTime(1700000300, 333333333));
+            fs::last_write_time(card / "EMPTY", ss4FileTime(1700000400, 444444444));
+            const fs::file_time_type dataT = fs::last_write_time(card / "SAVE" / "data");
+            const fs::file_time_type topT = fs::last_write_time(card / "top.dat");
+            const fs::file_time_type saveT = fs::last_write_time(card / "SAVE");
+            const fs::file_time_type emptyT = fs::last_write_time(card / "EMPTY");
+            {
+                Ss4IoPathsGuard g(card);
+                const std::vector<uint8_t> tabA1 = ss4GetDir(rt, "mc0:/", 16);
+                const std::vector<uint8_t> tabA2 = ss4GetDir(rt, "mc0:/", 16);
+                const auto hasName = [](const std::vector<uint8_t> &tab, const char *name) {
+                    const std::string s(tab.begin(), tab.end());
+                    return s.find(name) != std::string::npos;
+                };
+                t.IsTrue(hasName(tabA1, "SAVE") && hasName(tabA1, "top.dat"), "GetDir lists the card");
+                const auto tail = [](const std::vector<uint8_t> &tab) {
+                    return std::vector<uint8_t>(tab.begin() + 2 * 64, tab.end()); // past . and ..
+                };
+                t.IsTrue(tail(tabA1) == tail(tabA2), "GetDir table stable across calls");
+                Writer w;
+                ps2_savestate::writeDirTree(w, card.string());
+                fs::remove_all(card);
+                Reader r(w.buf.data(), w.buf.size());
+                t.IsTrue(ps2_savestate::readDirTree(r, card.string()), "restore into the wiped root");
+                const std::vector<uint8_t> tabB = ss4GetDir(rt, "mc0:/", 16);
+                t.IsTrue(tail(tabB) == tail(tabA1), "GetDir table (incl. timestamps) equal after load");
+            }
+            t.IsTrue(fs::last_write_time(card / "SAVE" / "data") == dataT, "file mtime restored");
+            t.IsTrue(fs::last_write_time(card / "top.dat") == topT, "top-level mtime restored");
+            t.IsTrue(fs::last_write_time(card / "SAVE") == saveT, "dir mtime restored");
+            t.IsTrue(fs::last_write_time(card / "EMPTY") == emptyT, "empty-dir mtime restored");
+            // The brief's mkdir case: an empty mkdir'd dir survives, and a file
+            // can be created in it afterwards.
+            const fs::path card2 = base / "card2";
+            fs::create_directories(card2 / "NEW");
+            Writer w2;
+            ps2_savestate::writeDirTree(w2, card2.string());
+            fs::remove_all(card2);
+            Reader r2(w2.buf.data(), w2.buf.size());
+            t.IsTrue(ps2_savestate::readDirTree(r2, card2.string()), "restore with the empty dir");
+            t.IsTrue(fs::is_directory(card2 / "NEW"), "empty mkdir'd dir survives");
+            { std::ofstream(card2 / "NEW" / "data", std::ios::binary) << "x"; }
+            t.IsTrue(fs::exists(card2 / "NEW" / "data"), "file created in the restored dir");
+            fs::remove_all(base);
+        });
+
+        tc.Run("ss3 s4: card restore validates the destination and never rewrites", [](TestCase &t)
+        {
+            namespace fs = std::filesystem;
+            const fs::path base = fs::temp_directory_path() / "ss3-mcdir-test2";
+            fs::remove_all(base);
+            const fs::path src = base / "src";
+            fs::create_directories(src / "D");
+            { std::ofstream(src / "D" / "f.dat", std::ios::binary) << "v"; }
+            { std::ofstream(src / "g.dat", std::ios::binary) << "w"; }
+            Writer w;
+            ps2_savestate::writeDirTree(w, src.string());
+            const auto tryLoad = [&w](const std::string &root) {
+                Reader r(w.buf.data(), w.buf.size());
+                return ps2_savestate::readDirTree(r, root);
+            };
+            const fs::path dst1 = base / "dst1"; // extra empty dir
+            fs::create_directories(dst1 / "D");
+            { std::ofstream(dst1 / "D" / "f.dat", std::ios::binary) << "v"; }
+            { std::ofstream(dst1 / "g.dat", std::ios::binary) << "w"; }
+            fs::create_directories(dst1 / "EXTRA");
+            t.IsTrue(!tryLoad(dst1.string()), "an extra empty dir refuses");
+            const fs::path dst2 = base / "dst2"; // extra file
+            fs::create_directories(dst2 / "D");
+            { std::ofstream(dst2 / "D" / "f.dat", std::ios::binary) << "v"; }
+            { std::ofstream(dst2 / "g.dat", std::ios::binary) << "w"; }
+            { std::ofstream(dst2 / "extra.dat", std::ios::binary) << "x"; }
+            t.IsTrue(!tryLoad(dst2.string()), "an extra file refuses");
+            const fs::path dst3 = base / "dst3"; // different bytes
+            fs::create_directories(dst3 / "D");
+            { std::ofstream(dst3 / "D" / "f.dat", std::ios::binary) << "someone else"; }
+            { std::ofstream(dst3 / "g.dat", std::ios::binary) << "w"; }
+            t.IsTrue(!tryLoad(dst3.string()), "different bytes refuse");
+            const fs::path dst4 = base / "dst4"; // file where a dir belongs
+            fs::create_directories(dst4);
+            { std::ofstream(dst4 / "D", std::ios::binary) << "x"; }
+            { std::ofstream(dst4 / "g.dat", std::ios::binary) << "w"; }
+            t.IsTrue(!tryLoad(dst4.string()), "a file where a dir belongs refuses");
+            const fs::path dst5 = base / "dst5"; // dir where a file belongs
+            fs::create_directories(dst5 / "D");
+            { std::ofstream(dst5 / "D" / "f.dat", std::ios::binary) << "v"; }
+            fs::create_directories(dst5 / "g.dat");
+            t.IsTrue(!tryLoad(dst5.string()), "a dir where a file belongs refuses");
+            // Identical read-only files with correct times load without any
+            // rewrite (a rewrite would fail on the read-only mode).
+            const fs::path dst6 = base / "dst6";
+            fs::copy(src, dst6, fs::copy_options::recursive);
+            t.IsTrue(tryLoad(dst6.string()), "first load normalizes times");
+            fs::permissions(dst6 / "D" / "f.dat", fs::perms::owner_read);
+            fs::permissions(dst6 / "g.dat", fs::perms::owner_read);
+            t.IsTrue(tryLoad(dst6.string()), "identical read-only files load (never rewritten)");
+            fs::permissions(dst6 / "D" / "f.dat", fs::perms::owner_read | fs::perms::owner_write);
+            fs::permissions(dst6 / "g.dat", fs::perms::owner_read | fs::perms::owner_write);
+            // Identical bytes with wrong times load and take the saved times.
+            const fs::path dst7 = base / "dst7";
+            fs::copy(src, dst7, fs::copy_options::recursive);
+            fs::last_write_time(dst7 / "D" / "f.dat", ss4FileTime(1500000000, 0));
+            t.IsTrue(tryLoad(dst7.string()), "wrong-time files load");
+            t.IsTrue(fs::last_write_time(dst7 / "D" / "f.dat") == fs::last_write_time(src / "D" / "f.dat"),
+                     "wrong-time files take the saved time");
+            fs::remove_all(base);
+        });
+
+        tc.Run("ss3 s4: card traversal errors abort the save", [](TestCase &t)
+        {
+            namespace fs = std::filesystem;
+            const fs::path base = fs::temp_directory_path() / "ss3-mcdir-test3";
+            fs::remove_all(base);
+            const fs::path src = base / "src";
+            fs::create_directories(src);
+            { std::ofstream(src / "ok.dat", std::ios::binary) << "ok"; }
+            { std::ofstream(src / "noperm.dat", std::ios::binary) << "shh"; }
+            fs::permissions(src / "noperm.dat", fs::perms::none);
+            bool threw = false;
+            try
+            {
+                Writer w;
+                ps2_savestate::writeDirTree(w, src.string());
+            }
+            catch (const ps2_savestate::dir_tree_error &)
+            {
+                threw = true;
+            }
+            t.IsTrue(threw, "an unreadable file throws instead of saving short");
+            fs::permissions(src / "noperm.dat", fs::perms::owner_read | fs::perms::owner_write);
+            const fs::path src2 = base / "src2";
+            fs::create_directories(src2);
+            fs::create_symlink("/nonexistent-ss3-target", src2 / "dangling");
+            threw = false;
+            try
+            {
+                Writer w;
+                ps2_savestate::writeDirTree(w, src2.string());
+            }
+            catch (const ps2_savestate::dir_tree_error &)
+            {
+                threw = true;
+            }
+            t.IsTrue(threw, "a dangling symlink throws");
+            const fs::path fileRoot = base / "fileRoot";
+            { std::ofstream(fileRoot, std::ios::binary) << "x"; }
+            threw = false;
+            try
+            {
+                Writer w;
+                ps2_savestate::writeDirTree(w, fileRoot.string());
+            }
+            catch (const ps2_savestate::dir_tree_error &)
+            {
+                threw = true;
+            }
+            t.IsTrue(threw, "a file where the root belongs throws");
+            // A missing root still saves an empty tree (existing behavior).
+            Writer w;
+            ps2_savestate::writeDirTree(w, (base / "missing").string());
+            t.Equals(w.buf.size(), size_t{16}, "missing root saves two empty counts");
+            Reader r(w.buf.data(), w.buf.size());
+            t.IsTrue(ps2_savestate::readDirTree(r, (base / "restored").string()), "empty tree restores");
+            t.IsTrue(fs::is_directory(base / "restored"), "restore creates the root");
+            fs::remove_all(base);
         });
     });
 }

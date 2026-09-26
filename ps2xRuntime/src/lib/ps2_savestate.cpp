@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <set>
 #include <sstream>
 
 #if defined(__APPLE__)
@@ -310,75 +311,278 @@ namespace ps2_savestate
     }
 
     // ---------------------------------------------------------------- dir tree
+    namespace
+    {
+        namespace fs = std::filesystem;
+        // Nanoseconds since the file-clock epoch (i64 covers +/-292 years;
+        // the rep itself is __int128 on Apple libc++, so it is narrowed
+        // through duration_cast; no filesystem offers sub-nanoseconds).
+        int64_t fileTimeToRep(fs::file_time_type t)
+        {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
+        }
+        fs::file_time_type repToFileTime(int64_t v)
+        {
+            return fs::file_time_type(
+                std::chrono::duration_cast<fs::file_time_type::duration>(std::chrono::nanoseconds(v)));
+        }
+
+        bool validTreeRel(const std::string &rel)
+        {
+            return !rel.empty() && rel[0] != '/' && rel.find("..") == std::string::npos;
+        }
+    } // namespace
     void writeDirTree(Writer &w, const std::string &root)
     {
         namespace fs = std::filesystem;
-        std::vector<std::pair<std::string, std::vector<uint8_t>>> files;
-        std::error_code ec;
-        if (fs::is_directory(root, ec))
+        std::vector<std::pair<std::string, int64_t>> dirs;
+        struct SavedFile
         {
-            for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator();
+            std::string rel;
+            int64_t mtime = 0;
+            std::vector<uint8_t> bytes;
+        };
+        std::vector<SavedFile> files;
+        std::error_code ec;
+        const bool exists = fs::exists(root, ec);
+        if (ec)
+            throw dir_tree_error("cannot stat " + root + ": " + ec.message());
+        if (exists)
+        {
+            if (fs::symlink_status(root, ec).type() != fs::file_type::directory)
+                throw dir_tree_error(root + " is not a directory" + (ec ? ": " + ec.message() : ""));
+            for (auto it = fs::recursive_directory_iterator(root, ec); it != fs::recursive_directory_iterator();
                  it.increment(ec))
             {
-                if (!it->is_regular_file(ec))
-                    continue;
-                std::ifstream in(it->path(), std::ios::binary);
-                std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-                files.emplace_back(fs::relative(it->path(), root, ec).generic_string(), std::move(bytes));
+                if (ec)
+                    throw dir_tree_error("cannot traverse " + root + ": " + ec.message());
+                const fs::file_type ft = it->symlink_status(ec).type();
+                if (ec)
+                    throw dir_tree_error("cannot stat " + it->path().string() + ": " + ec.message());
+                const std::string rel = fs::relative(it->path(), root, ec).generic_string();
+                if (ec || rel.empty())
+                    throw dir_tree_error("cannot relativize " + it->path().string());
+                const fs::file_time_type mtime = fs::last_write_time(it->path(), ec);
+                if (ec)
+                    throw dir_tree_error("cannot stat time of " + rel + ": " + ec.message());
+                if (ft == fs::file_type::directory)
+                {
+                    dirs.emplace_back(rel, fileTimeToRep(mtime));
+                }
+                else if (ft == fs::file_type::regular)
+                {
+                    std::ifstream in(it->path(), std::ios::binary);
+                    if (!in)
+                        throw dir_tree_error("cannot read " + rel);
+                    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                    if (in.bad())
+                        throw dir_tree_error("cannot read " + rel);
+                    files.push_back({rel, fileTimeToRep(mtime), std::move(bytes)});
+                }
+                else
+                {
+                    throw dir_tree_error("not a file or directory: " + rel);
+                }
             }
+            if (ec)
+                throw dir_tree_error("cannot traverse " + root + ": " + ec.message());
         }
-        std::sort(files.begin(), files.end());
-        w.u64(files.size());
-        for (const auto &[rel, bytes] : files)
+        std::sort(dirs.begin(), dirs.end());
+        std::sort(files.begin(), files.end(),
+                  [](const SavedFile &a, const SavedFile &b) { return a.rel < b.rel; });
+        w.u64(dirs.size());
+        for (const auto &[rel, mtime] : dirs)
         {
             w.str(rel);
-            w.blob(bytes);
+            w.pod(mtime);
+        }
+        w.u64(files.size());
+        for (const auto &f : files)
+        {
+            w.str(f.rel);
+            w.pod(f.mtime);
+            w.blob(f.bytes);
         }
     }
 
     bool readDirTree(Reader &r, const std::string &root)
     {
         namespace fs = std::filesystem;
-        const uint64_t n = r.count(1u << 16);
-        std::vector<std::pair<std::string, std::vector<uint8_t>>> files;
-        for (uint64_t i = 0; i < n && r.ok(); ++i)
+        const uint64_t nDirs = r.count(1u << 16);
+        std::vector<std::pair<std::string, int64_t>> dirs;
+        for (uint64_t i = 0; i < nDirs && r.ok(); ++i)
         {
             std::string rel = r.str();
-            std::vector<uint8_t> bytes = r.blob();
-            if (rel.empty() || rel.find("..") != std::string::npos || rel[0] == '/')
+            int64_t mtime = 0;
+            r.pod(mtime);
+            if (!validTreeRel(rel))
                 return r.fail("bad path in dir tree: " + rel);
-            files.emplace_back(std::move(rel), std::move(bytes));
+            dirs.emplace_back(std::move(rel), mtime);
+        }
+        const uint64_t nFiles = r.count(1u << 16);
+        struct WantFile
+        {
+            int64_t mtime = 0;
+            std::vector<uint8_t> bytes;
+        };
+        std::map<std::string, WantFile> want;
+        for (uint64_t i = 0; i < nFiles && r.ok(); ++i)
+        {
+            std::string rel = r.str();
+            int64_t mtime = 0;
+            r.pod(mtime);
+            std::vector<uint8_t> bytes = r.blob();
+            if (!validTreeRel(rel))
+                return r.fail("bad path in dir tree: " + rel);
+            want[std::move(rel)] = WantFile{mtime, std::move(bytes)};
         }
         if (!r.ok())
             return false;
         std::error_code ec;
-        std::map<std::string, const std::vector<uint8_t> *> want;
-        for (const auto &f : files)
-            want[f.first] = &f.second;
-        if (fs::is_directory(root, ec))
+        const bool rootExists = fs::exists(root, ec);
+        if (ec)
+            return r.fail("cannot stat " + root + ": " + ec.message());
+        if (rootExists && fs::symlink_status(root, ec).type() != fs::file_type::directory)
+            return r.fail(root + " is not a directory");
+        if (ec)
+            return r.fail("cannot stat " + root + ": " + ec.message());
+        // Directories the restore itself creates (wanted dirs plus every
+        // parent prefix of a wanted path) may already exist; anything else
+        // in the destination refuses the load.
+        std::set<std::string> okDirs;
+        for (const auto &[rel, mtime] : dirs)
         {
-            for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator();
+            (void)mtime;
+            okDirs.insert(rel);
+        }
+        const auto addParents = [&okDirs](const std::string &rel) {
+            std::string prefix;
+            for (size_t i = 0; i < rel.size(); ++i)
+            {
+                if (rel[i] == '/')
+                    okDirs.insert(prefix);
+                prefix.push_back(rel[i]);
+            }
+        };
+        for (const auto &[rel, mtime] : dirs)
+        {
+            (void)mtime;
+            addParents(rel);
+        }
+        for (const auto &[rel, f] : want)
+        {
+            (void)f;
+            addParents(rel);
+        }
+        if (rootExists)
+        {
+            for (auto it = fs::recursive_directory_iterator(root, ec); it != fs::recursive_directory_iterator();
                  it.increment(ec))
             {
-                if (!it->is_regular_file(ec))
-                    continue;
+                if (ec)
+                    return r.fail("cannot traverse " + root + ": " + ec.message());
+                const fs::file_type ft = it->symlink_status(ec).type();
+                if (ec)
+                    return r.fail("cannot stat " + it->path().string() + ": " + ec.message());
                 const std::string rel = fs::relative(it->path(), root, ec).generic_string();
-                std::ifstream in(it->path(), std::ios::binary);
-                std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-                auto found = want.find(rel);
-                if (found == want.end() || *found->second != bytes)
-                    return r.fail("memory-card dir " + root + " holds a different " + rel +
+                if (ec || rel.empty())
+                    return r.fail("cannot relativize " + it->path().string());
+                if (ft == fs::file_type::directory)
+                {
+                    if (!okDirs.count(rel))
+                        return r.fail("memory-card dir " + root + " holds an extra directory " + rel +
+                                      "; load into an empty card dir");
+                }
+                else if (ft == fs::file_type::regular)
+                {
+                    auto found = want.find(rel);
+                    if (found == want.end())
+                        return r.fail("memory-card dir " + root + " holds an extra file " + rel +
+                                      "; load into an empty card dir");
+                    std::ifstream in(it->path(), std::ios::binary);
+                    if (!in)
+                        return r.fail("cannot read " + rel);
+                    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                    if (in.bad())
+                        return r.fail("cannot read " + rel);
+                    if (found->second.bytes != bytes)
+                        return r.fail("memory-card dir " + root + " holds a different " + rel +
+                                      "; load into an empty card dir");
+                }
+                else
+                {
+                    return r.fail("memory-card dir " + root + " holds a non-file " + rel +
                                   "; load into an empty card dir");
+                }
             }
+            if (ec)
+                return r.fail("cannot traverse " + root + ": " + ec.message());
         }
-        for (const auto &[rel, bytes] : files)
+        // Restore: files first (identical bytes keep their data; times are
+        // restored), then directory times once nothing else is created.
+        fs::create_directories(root, ec);
+        if (ec)
+            return r.fail("cannot create " + root + ": " + ec.message());
+        for (const auto &[rel, f] : want)
         {
             const fs::path dst = fs::path(root) / rel;
             fs::create_directories(dst.parent_path(), ec);
-            std::ofstream out(dst, std::ios::binary | std::ios::trunc);
-            out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-            if (!out)
-                return r.fail("cannot write " + dst.string());
+            if (ec)
+                return r.fail("cannot create " + dst.parent_path().string() + ": " + ec.message());
+            const fs::file_time_type wantTime = repToFileTime(f.mtime);
+            // (is_regular_file reports missing files via ec, so existence is
+            // checked first.)
+            const bool dstExists = fs::exists(dst, ec);
+            if (ec)
+                return r.fail("cannot stat " + rel + ": " + ec.message());
+            if (dstExists)
+            {
+                if (!fs::is_regular_file(dst, ec) || ec)
+                    return r.fail("memory-card dir " + root + " holds a non-file " + rel +
+                                  "; load into an empty card dir");
+                // Validated byte-identical above: never rewritten.
+                const fs::file_time_type curTime = fs::last_write_time(dst, ec);
+                if (ec)
+                    return r.fail("cannot stat time of " + rel + ": " + ec.message());
+                if (curTime != wantTime)
+                {
+                    fs::last_write_time(dst, wantTime, ec);
+                    if (ec)
+                        return r.fail("cannot set time of " + rel + ": " + ec.message());
+                }
+            }
+            else
+            {
+                std::ofstream out(dst, std::ios::binary | std::ios::trunc);
+                out.write(reinterpret_cast<const char *>(f.bytes.data()), static_cast<std::streamsize>(f.bytes.size()));
+                out.close();
+                if (!out)
+                    return r.fail("cannot write " + dst.string());
+                fs::last_write_time(dst, wantTime, ec);
+                if (ec)
+                    return r.fail("cannot set time of " + rel + ": " + ec.message());
+            }
+        }
+        for (const auto &[rel, mtime] : dirs)
+        {
+            const fs::path dst = fs::path(root) / rel;
+            fs::create_directories(dst, ec);
+            if (ec)
+                return r.fail("cannot create " + dst.string() + ": " + ec.message());
+        }
+        for (const auto &[rel, mtime] : dirs)
+        {
+            const fs::path dst = fs::path(root) / rel;
+            const fs::file_time_type wantTime = repToFileTime(mtime);
+            const fs::file_time_type curTime = fs::last_write_time(dst, ec);
+            if (ec)
+                return r.fail("cannot stat time of " + rel + ": " + ec.message());
+            if (curTime != wantTime)
+            {
+                fs::last_write_time(dst, wantTime, ec);
+                if (ec)
+                    return r.fail("cannot set time of " + rel + ": " + ec.message());
+            }
         }
         return true;
     }
@@ -528,7 +732,19 @@ namespace ps2_savestate
         for (const auto &[key, hooks] : registeredSections())
         {
             mark = w.beginSection(key, hooks.version);
-            hooks.save(w);
+            try
+            {
+                hooks.save(w);
+            }
+            catch (const dir_tree_error &e)
+            {
+                // A card tree that cannot be traversed is never saved
+                // partially; the save waits for the next tick like any other
+                // deferral. (Only dir_tree_error is caught: anything else is
+                // a bug and must stay loud.)
+                why = key + ": " + e.what();
+                return false;
+            }
             w.endSection(mark);
         }
 
