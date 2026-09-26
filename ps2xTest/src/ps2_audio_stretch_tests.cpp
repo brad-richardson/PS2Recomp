@@ -30,12 +30,12 @@ void register_ps2_audio_stretch_tests()
             }
         });
 
-        tc.Run("empty ring stays in bypass until primed", [](TestCase &t)
+        tc.Run("empty ring engages at the floor (no prime trap)", [](TestCase &t)
         {
             ps2_audio_stretch::StretchController c;
             const auto s = c.update(0, 0.0);
-            t.IsTrue(s.bypass, "below the prime floor the callback pads like today");
-            t.IsTrue(near(c.smoothedTempo(), 0.5f, 1e-6f), "raw clamps at the tempo floor");
+            t.IsFalse(s.bypass, "a dry ring must engage immediately, not wait for a prime level");
+            t.IsTrue(near(s.tempo, 0.5f, 1e-6f), "tempo sits at the floor until production starts");
         });
 
         tc.Run("sustained 0.6x fill engages near 0.6", [](TestCase &t)
@@ -71,8 +71,7 @@ void register_ps2_audio_stretch_tests()
             for (int i = 0; i < 500; ++i)
             {
                 ++dropSteps;
-                // At the prime floor (not empty: empty stays in bypass).
-                if (down.update(ps2_audio_stretch::kPrimeFrames, kDt).tempo < 0.75f)
+                if (down.update(0, kDt).tempo < 0.75f)
                     break;
             }
             up.update(0, 0.0);

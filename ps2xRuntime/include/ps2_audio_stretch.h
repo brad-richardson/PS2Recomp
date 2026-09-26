@@ -19,6 +19,11 @@
 //   inside +/-1 %), so full speed sounds exactly as today: the callback
 //   then copies ring frames straight through and the stretcher output is
 //   discarded. The stretcher still ingests a copy so engaging is seamless.
+//   Engagement is fill-agnostic on purpose: gating it on a prime level
+//   traps the controller in bypass exactly when the ring runs dry (a guest
+//   deficit with an empty ring would stutter until a lucky burst crosses
+//   the gate). At startup the ring is empty either way, so engaging there
+//   pads identically to bypass and converges faster once production starts.
 //
 // No sqrt() dampening (PCSX2 has it): with the FP1 wall pacer the guest
 // rate is exactly <= 1.0, so linear control settles at fill = rate*target
@@ -39,7 +44,6 @@ constexpr float kTempoMin = 0.5f;
 constexpr float kTempoMax = 1.05f;
 constexpr float kBypassLeave = 0.02f;  // engage outside +/-2 % of 1.0
 constexpr float kBypassRejoin = 0.01f; // release inside +/-1 % of 1.0
-constexpr uint32_t kPrimeFrames = 1024u; // ~21 ms: stay in bypass below this fill
 constexpr double kTauDownS = 0.05;      // EMA time constant on drops
 constexpr double kTauUpS = 0.30;        // EMA time constant on rises
 
@@ -83,7 +87,7 @@ public:
         }
         if (m_bypass)
         {
-            if (std::fabs(m_smooth - 1.0f) > kBypassLeave && fillFrames >= kPrimeFrames)
+            if (std::fabs(m_smooth - 1.0f) > kBypassLeave)
                 m_bypass = false;
         }
         else if (std::fabs(m_smooth - 1.0f) < kBypassRejoin)
