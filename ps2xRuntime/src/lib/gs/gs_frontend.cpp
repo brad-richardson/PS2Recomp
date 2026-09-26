@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <sstream>
@@ -170,6 +171,45 @@ namespace
         GsWorkerScope() { t_inGsWorker = true; }
         ~GsWorkerScope() { t_inGsWorker = false; }
     };
+
+    // GF1: dev-only live comparator of what the GS worker consumes
+    // (PS2X_GS_CONSUMED_LOG=1): FNV-1a over (kind, path, bytes) of every GIF
+    // packet in execution order, printed every 65536 packets. Unlike the [pk]
+    // log (unit-side submits) it sees the queue's output, so a transport
+    // change must leave it identical. Worker thread only; off = one branch.
+    struct ConsumedLog
+    {
+        bool on = false;
+        uint64_t n = 0;
+        uint64_t h = 1469598103934665603ull;
+    };
+
+    ConsumedLog &consumedLog()
+    {
+        static ConsumedLog s{[]
+                             {
+                                 const char *e = std::getenv("PS2X_GS_CONSUMED_LOG");
+                                 return e != nullptr && e[0] == '1';
+                             }()};
+        return s;
+    }
+
+    void noteConsumedGif(uint8_t kind, uint8_t path, const uint8_t *data, size_t size)
+    {
+        ConsumedLog &s = consumedLog();
+        auto mix = [&](uint8_t b)
+        {
+            s.h ^= b;
+            s.h *= 1099511628211ull;
+        };
+        mix(kind);
+        mix(path);
+        for (size_t i = 0; i < size; ++i)
+            mix(data[i]);
+        if ((++s.n & 0xFFFFu) == 0u)
+            std::fprintf(stderr, "[gs:consumed] n=%llu h=%016llx\n", static_cast<unsigned long long>(s.n),
+                         static_cast<unsigned long long>(s.h));
+    }
 
     struct QueuedPreferredSource
     {
@@ -356,6 +396,9 @@ void GS::executeQueuedCommand(GsCommand &cmd)
     switch (cmd.kind)
     {
     case GsCmdKind::GifPacket:
+        if (consumedLog().on)
+            noteConsumedGif(static_cast<uint8_t>(cmd.kind), static_cast<uint8_t>(m_curGifPath), cmd.bytes.data(),
+                            cmd.bytes.size());
         processGIFPacket(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
         break;
     case GsCmdKind::NoteGifPath:
@@ -369,6 +412,9 @@ void GS::executeQueuedCommand(GsCommand &cmd)
                           cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
         break;
     case GsCmdKind::NativePacked:
+        if (consumedLog().on)
+            noteConsumedGif(static_cast<uint8_t>(cmd.kind), static_cast<uint8_t>(m_curGifPath), cmd.bytes.data(),
+                            cmd.bytes.size());
         processNativePackedGIFPacket(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
         break;
     case GsCmdKind::ClearCtx:
