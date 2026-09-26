@@ -324,8 +324,12 @@ public:
         // super-samples (paraLLEl needs SSAA >= 4 with both axes sampled;
         // it silently falls back to 1x scanout otherwise).
         vsync.high_resolution_scanout = m_hiresScanout;
+        const uint64_t tf0 = nowNanos();
         m_iface->flush();
+        const uint64_t tf1 = nowNanos();
         ParallelGS::ScanoutResult shot = m_iface->vsync(vsync);
+        m_flushNs += tf1 - tf0; // VK1 Part 2A: where the present's wall goes
+        m_vsyncNs += nowNanos() - tf1;
         Counters &c = counters();
         const uint64_t n = c.presents.fetch_add(1u, std::memory_order_relaxed) + 1u;
         if (!shot.image)
@@ -1149,8 +1153,9 @@ private:
         if (!m_iface)
             return;
         const auto &sc = m_iface->get_sync_counters();
-        const uint64_t v[5] = {sc.flush_submits.load(), sc.frame_context_advances.load(), sc.frame_context_ns.load(),
-                               sc.timeline_waits.load(), sc.timeline_wait_ns.load()};
+        const uint64_t v[8] = {sc.flush_submits.load(), sc.frame_context_advances.load(), sc.frame_context_ns.load(),
+                               sc.timeline_waits.load(), sc.timeline_wait_ns.load(), sc.flush_submit_ns.load(),
+                               m_flushNs, m_vsyncNs};
         const double dn = static_cast<double>(n - m_syncLastPresents);
         if (dn > 0.0)
         {
@@ -1159,9 +1164,12 @@ private:
                       << " frame_ctx_advances_per_present=" << (v[1] - m_syncLast[1]) / dn
                       << " frame_ctx_wait_ms_per_present=" << (v[2] - m_syncLast[2]) / 1e6 / dn
                       << " timeline_waits_per_present=" << (v[3] - m_syncLast[3]) / dn
-                      << " timeline_wait_ms_per_present=" << (v[4] - m_syncLast[4]) / 1e6 / dn << std::endl;
+                      << " timeline_wait_ms_per_present=" << (v[4] - m_syncLast[4]) / 1e6 / dn
+                      << " flush_submit_ms_per_present=" << (v[5] - m_syncLast[5]) / 1e6 / dn
+                      << " iface_flush_ms_per_present=" << (v[6] - m_syncLast[6]) / 1e6 / dn
+                      << " iface_vsync_ms_per_present=" << (v[7] - m_syncLast[7]) / 1e6 / dn << std::endl;
         }
-        for (int i = 0; i < 5; ++i)
+        for (int i = 0; i < 8; ++i)
             m_syncLast[i] = v[i];
         m_syncLastPresents = n;
     }
@@ -1315,7 +1323,8 @@ private:
     bool m_vkDumpParsed = false;
 #endif
     uint32_t m_frameContexts = 4u;    // VK1 Part 2A: PS2X_PGS_FRAME_CONTEXTS
-    uint64_t m_syncLast[5] = {};       // sync counters at the last stats line
+    uint64_t m_syncLast[8] = {};       // sync counters at the last stats line
+    uint64_t m_flushNs = 0u, m_vsyncNs = 0u; // wall in GSInterface::flush / vsync (Present)
     uint64_t m_syncLastPresents = 0u;
     uint32_t m_lastScanW = 0u, m_lastScanH = 0u; // HR1: log scanout size changes
     Vulkan::Context *m_ctx = nullptr;
