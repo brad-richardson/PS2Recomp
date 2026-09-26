@@ -41,7 +41,9 @@ android {
                         "-DPS2X_GAME_CODEGEN_DIR=${ps2xGameCodegenDir}",
                         "-DPS2X_GS_SHADOW_PARALLEL=${ps2xGsShadowParallel}",
                         "-DPS2X_PARALLEL_GS_SOURCE_DIR=${ps2xParallelGsSourceDir}",
-                        "-DPS2X_VU1_RECOMP_DIR=${ps2xVu1RecompDir}"
+                        "-DPS2X_VU1_RECOMP_DIR=${ps2xVu1RecompDir}",
+                        '-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG',
+                        '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG'
                 targets 'ps2EntryRunner'
             }
         }
