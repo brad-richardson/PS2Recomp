@@ -10,6 +10,8 @@ def ps2xParallelGsSourceDir = project.findProperty('ps2xParallelGsSourceDir') ?:
 def ps2xJniLibsDir = project.findProperty('ps2xJniLibsDir') ?: ''
 // VR1: generated VU1 images (vu1_<hash>.cpp); empty = interpreter only.
 def ps2xVu1RecompDir = project.findProperty('ps2xVu1RecompDir') ?: ''
+// VR3: generated VU0 images (vu0_<hash>.cpp); used only with PS2X_VU0_RECOMP=1 at run time.
+def ps2xVu0RecompDir = project.findProperty('ps2xVu0RecompDir') ?: ''
 
 android {
     namespace 'com.ps2x.runner'
@@ -42,6 +44,7 @@ android {
                         "-DPS2X_GS_SHADOW_PARALLEL=${ps2xGsShadowParallel}",
                         "-DPS2X_PARALLEL_GS_SOURCE_DIR=${ps2xParallelGsSourceDir}",
                         "-DPS2X_VU1_RECOMP_DIR=${ps2xVu1RecompDir}",
+                        "-DPS2X_VU0_RECOMP_DIR=${ps2xVu0RecompDir}",
                         '-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG',
                         '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG'
                 targets 'ps2EntryRunner'
