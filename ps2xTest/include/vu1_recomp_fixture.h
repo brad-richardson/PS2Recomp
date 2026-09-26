@@ -8,6 +8,12 @@
 //
 // Image 0 ("mix"): VB1's random mix of FMAC/ACC/CLIP uppers and LSU, VI,
 // flag, FSSET/FCSET, DIV/WAITQ and forward-branch lowers.
+// Image 2 ("pipes", VR2 stage 4): the ops the block fast path admits beyond
+// that mix, with pipelines active at block entries: EFU ops, WAITP, MFP, DIV,
+// WAITQ and Q/I-reading uppers, I-bit pairs, JR/JALR to forward targets, and
+// XGKICK of small GIF packets (with stores into them while PATH1 runs), all
+// between forward branches, so blocks start with P/Q/PATH1 in flight and are
+// sometimes reached as delay slots.
 // Image 1 ("flags"): an FMAC flag write followed, at every distance 0-5, by a
 // flag reader (MAC/status/clip compares, FCGET, FSSET/FCSET), a branch that
 // lands on a reader, or the program end, with overwriting FMACs, non-flag
@@ -20,8 +26,13 @@
 namespace vu1_fixture
 {
     constexpr uint32_t kCodeSize = 0x4000u;
-    constexpr uint32_t kImageCount = 2u;
-    constexpr uint64_t kImageHash[kImageCount] = {0x5652320000000000ull, 0x5652320000000001ull};
+    constexpr uint32_t kImageCount = 3u;
+    constexpr uint64_t kImageHash[kImageCount] = {0x5652320000000000ull, 0x5652320000000001ull,
+                                                  0x5652320000000002ull};
+    // Image 2: XGKICK sources. Qword kTagQword + 4k (k < kTagCount) holds a
+    // one- or two-qword IMAGE GIF packet (the test writes them into VU data).
+    constexpr uint32_t kTagQword = 128u;
+    constexpr uint32_t kTagCount = 8u;
     constexpr uint32_t kUpperNop = 0x000002FFu;
     constexpr uint32_t kLowerNop = 0x8000033Cu;
 
@@ -271,6 +282,101 @@ namespace vu1_fixture
                     const uint32_t up = randomUpper(rnd);
                     writePair(code, (start + pair) * 8u, randomLower(rnd, pair, length), up);
                 }
+                const uint32_t total = length + writeEnd(code, (start + length) * 8u);
+                programs.push_back({start * 8u, total});
+                next = start + total;
+            }
+            return programs;
+        }
+
+        if (image == 2u)
+        {
+            Rng rnd{0xA0761D6478BD642Full};
+            for (uint32_t count = 0; count < 40u; ++count)
+            {
+                const uint32_t length = 14u + rnd(16u);
+                if (next + length + 2u > maxPairs)
+                    break;
+                const uint32_t start = next;
+                std::vector<uint32_t> lo(length, kLowerNop), up(length, kUpperNop);
+                for (uint32_t pair = 0; pair < length; ++pair)
+                {
+                    const uint8_t vf = static_cast<uint8_t>(1u + rnd(8u));
+                    switch (rnd(12u))
+                    {
+                    case 0: // EFU op (all but the undefined 0x77 and WAITP 0x7B)
+                    {
+                        static const uint8_t kEfu[] = {0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x78, 0x79, 0x7A, 0x7C, 0x7D, 0x7E};
+                        lo[pair] = lowerSpecial(kEfu[rnd(sizeof(kEfu))], vf, 0u, 0u, static_cast<uint8_t>(rnd(16u)));
+                        break;
+                    }
+                    case 1: lo[pair] = lowerSpecial(0x7Bu, 0u); break;                                      // WAITP
+                    case 2: lo[pair] = lowerSpecial(0x64u, 0u, vf, 0u, static_cast<uint8_t>(1u + rnd(15u))); break; // MFP
+                    case 3: lo[pair] = div(vf, static_cast<uint8_t>(1u + rnd(8u)), static_cast<uint8_t>(rnd(4u)), static_cast<uint8_t>(rnd(4u))); break;
+                    case 4: lo[pair] = lowerSpecial(0x3Bu, 0u); break;                                      // WAITQ
+                    case 5: // XGKICK a tag (its VI set two pairs earlier), or a store into a tag's payload
+                        if (pair >= 2u && rnd(2u) != 0u)
+                        {
+                            lo[pair - 2u] = iaddiu(4u, 0u, static_cast<int16_t>(kTagQword + 4u * rnd(kTagCount)));
+                            lo[pair] = lowerSpecial(0x6Cu, 4u);
+                        }
+                        else
+                            lo[pair] = sq(static_cast<uint8_t>(1u + rnd(15u)), vf, 0u,
+                                          static_cast<int16_t>(kTagQword + 4u * rnd(kTagCount) + 1u));
+                        break;
+                    case 6: // JR/JALR forward (the jump reads VI set two pairs earlier)
+                        if (pair >= 2u && pair + 6u < length)
+                        {
+                            const uint32_t target = start + pair + 2u + rnd(3u);
+                            lo[pair - 2u] = iaddiu(5u, 0u, static_cast<int16_t>(target));
+                            lo[pair] = rnd(2u) != 0u ? (0x24u << 25) | (5u << 11)
+                                                     : (0x25u << 25) | (6u << 16) | (5u << 11); // JR vi5 / JALR vi6, vi5
+                        }
+                        break;
+                    case 7: // forward branch
+                        if (pair + 4u < length)
+                        {
+                            const int16_t forward = static_cast<int16_t>(1 + rnd(3u));
+                            lo[pair] = rnd(2u) != 0u ? ibne(static_cast<uint8_t>(1u + rnd(4u)), static_cast<uint8_t>(rnd(5u)), forward)
+                                                     : branch(forward);
+                        }
+                        break;
+                    default: lo[pair] = quietLower(rnd); break;
+                    }
+                    const uint8_t dest = static_cast<uint8_t>(1u + rnd(15u));
+                    switch (rnd(5u))
+                    {
+                    case 0: // I-bit: the lower word is the I immediate (ADDi/MADDi/MULi/SUBi)
+                    {
+                        static const uint8_t kIOps[] = {0x1E, 0x22, 0x23, 0x26};
+                        up[pair] = upper(kIOps[rnd(sizeof(kIOps))], dest, 1u + rnd(8u), 1u + rnd(8u), 1u + rnd(8u)) | 0x80000000u;
+                        const float imm = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 16.0f;
+                        std::memcpy(&lo[pair], &imm, sizeof(imm));
+                        break;
+                    }
+                    case 1: // Q-reading upper (ADDq/MULq/MADDq)
+                    {
+                        static const uint8_t kQOps[] = {0x1C, 0x20, 0x21};
+                        up[pair] = upper(kQOps[rnd(sizeof(kQOps))], dest, 1u + rnd(8u), 1u + rnd(8u), 1u + rnd(8u));
+                        break;
+                    }
+                    default: up[pair] = randomUpper(rnd); break;
+                    }
+                }
+                // A jump's delay slot and the pairs a branch skips stay whatever they are,
+                // but no branch or jump may sit in a delay slot.
+                for (uint32_t pair = 0; pair + 1u < length; ++pair)
+                {
+                    const uint8_t opHi = static_cast<uint8_t>((lo[pair] >> 25) & 0x7Fu);
+                    const bool isBranch = (up[pair] & 0x80000000u) == 0u &&
+                                          (opHi == 0x20u || opHi == 0x24u || opHi == 0x25u || opHi == 0x29u);
+                    const uint8_t nextHi = static_cast<uint8_t>((lo[pair + 1u] >> 25) & 0x7Fu);
+                    if (isBranch && (up[pair + 1u] & 0x80000000u) == 0u &&
+                        (nextHi == 0x20u || nextHi == 0x24u || nextHi == 0x25u || nextHi == 0x29u))
+                        lo[pair + 1u] = kLowerNop;
+                }
+                for (uint32_t pair = 0; pair < length; ++pair)
+                    writePair(code, (start + pair) * 8u, lo[pair], up[pair]);
                 const uint32_t total = length + writeEnd(code, (start + length) * 8u);
                 programs.push_back({start * 8u, total});
                 next = start + total;

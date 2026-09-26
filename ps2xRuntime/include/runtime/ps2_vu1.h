@@ -420,6 +420,10 @@ private:
     uint64_t m_blockEntries = 0;
     uint64_t m_blockPairs = 0;
     uint64_t m_blockNoStallMisses = 0; // hash builds: the no-stall proof failed (must stay 0)
+    // Guard misses by reason (knob off / branch pending / E-bit or halt pending / budget).
+    uint64_t m_blockMissOff = 0, m_blockMissBranch = 0, m_blockMissEnd = 0, m_blockMissBudget = 0;
+    // Hash builds: generated pairs and their cycles, in blocks and in total.
+    uint64_t m_blockIssuedPairs = 0, m_blockIssuedCycles = 0, m_genIssuedPairs = 0, m_genIssuedCycles = 0;
     // VR2: generated images are used only for whole-memory VU1 code.
     static constexpr uint32_t kRecompCodeSize = 0x4000u;
     const RecompProgram *lookupRecompProgram(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory);

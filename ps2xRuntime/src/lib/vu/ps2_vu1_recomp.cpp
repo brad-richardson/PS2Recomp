@@ -111,10 +111,23 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
                      static_cast<unsigned long long>(m_recompCycles),
                      static_cast<unsigned long long>(m_interpCycles),
                      total != 0u ? static_cast<double>(m_recompCycles) / static_cast<double>(total) : 0.0);
-        std::fprintf(stderr, "[vu1-blocks] on=%d entries=%llu pairs=%llu nostall_misses=%llu\n",
+        std::fprintf(stderr, "[vu1-blocks] on=%d entries=%llu pairs=%llu nostall_misses=%llu miss_off=%llu miss_branch=%llu miss_end=%llu miss_budget=%llu\n",
                      m_blocksOn ? 1 : 0, static_cast<unsigned long long>(m_blockEntries),
                      static_cast<unsigned long long>(m_blockPairs),
-                     static_cast<unsigned long long>(m_blockNoStallMisses));
+                     static_cast<unsigned long long>(m_blockNoStallMisses),
+                     static_cast<unsigned long long>(m_blockMissOff),
+                     static_cast<unsigned long long>(m_blockMissBranch),
+                     static_cast<unsigned long long>(m_blockMissEnd),
+                     static_cast<unsigned long long>(m_blockMissBudget));
+#if PS2X_ENABLE_DET_HASH_TAP
+        std::fprintf(stderr, "[vu1-blocks] gen_pairs=%llu block_pairs=%llu pair_share=%.4f gen_cycles=%llu block_cycles=%llu cycle_share=%.4f\n",
+                     static_cast<unsigned long long>(m_genIssuedPairs),
+                     static_cast<unsigned long long>(m_blockIssuedPairs),
+                     m_genIssuedPairs != 0u ? static_cast<double>(m_blockIssuedPairs) / static_cast<double>(m_genIssuedPairs) : 0.0,
+                     static_cast<unsigned long long>(m_genIssuedCycles),
+                     static_cast<unsigned long long>(m_blockIssuedCycles),
+                     m_genIssuedCycles != 0u ? static_cast<double>(m_blockIssuedCycles) / static_cast<double>(m_genIssuedCycles) : 0.0);
+#endif
 #if PS2X_ENABLE_DET_HASH_TAP
         const uint64_t pairCycles = m_vbDirectCycles + m_vbQueuedCycles;
         const uint64_t flagWrites = m_vbDirectFlagWrites + m_vbQueuedFlagWrites;

@@ -2080,14 +2080,28 @@ void register_ps2_vu1_tests()
             {
                 VU1State state;
                 std::vector<uint8_t> data;
+                std::vector<std::vector<uint8_t>> gif; // ordered PATH1 packets (image 2)
             };
             std::vector<uint8_t> code(vu1_fixture::kCodeSize, 0u);
             std::vector<uint8_t> initialData(PS2_VU1_DATA_SIZE, 0u);
             GS gs;
+            // Image 2 kicks GIF packets: a PS2Memory + GS to receive them, in order.
+            PS2Memory gifMem;
+            t.IsTrue(gifMem.initialize(), "PS2Memory for PATH1 capture");
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gifGs;
+            gifGs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            std::vector<std::vector<uint8_t>> gifPackets;
+            gifMem.setGifPacketCallback([&gifPackets](const uint8_t *packet, uint32_t sizeBytes)
+            {
+                gifPackets.emplace_back(packet, packet + sizeBytes);
+            });
+            uint64_t gifPacketsSeen = 0u;
+            uint32_t blockMismatches = 0u, directLayer = 0u, gapPrograms = 0u;
             uint32_t mismatches = 0u, runs = 0u, programsRun = 0u;
             uint64_t generatedCycles = 0u, blockEntries = 0u;
             vu1_fixture::Rng rnd{0x2545F4914F6CDD1Dull};
-            for (uint32_t image = 0; image < vu1_fixture::kImageCount && mismatches == 0u; ++image)
+            for (uint32_t image = 0; image < vu1_fixture::kImageCount; ++image)
             {
                 const VU1Interpreter::RecompProgram *generated =
                     VU1Interpreter::findRecompProgram(vu1_fixture::kImageHash[image]);
@@ -2097,14 +2111,21 @@ void register_ps2_vu1_tests()
                 const std::vector<vu1_fixture::Program> programs = vu1_fixture::buildImage(image, code.data());
                 for (const vu1_fixture::Program &program : programs)
                 {
-                    if (mismatches != 0u)
-                        break;
                     ++programsRun;
                     for (uint32_t i = 0; i < 64u * 16u; i += 4u)
                     {
                         const float value = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 64.0f;
                         std::memcpy(initialData.data() + i, &value, sizeof(value));
                     }
+                    for (uint32_t k = 0; k < vu1_fixture::kTagCount; ++k)
+                    {
+                        uint8_t *tag = initialData.data() + (vu1_fixture::kTagQword + 4u * k) * 16u;
+                        const uint64_t word = makeGifTag(static_cast<uint16_t>(1u + (k & 1u)), GIF_FMT_IMAGE, 0u, true);
+                        std::memset(tag, 0, 16u);
+                        std::memcpy(tag, &word, sizeof(word));
+                        std::memset(tag + 16u, static_cast<int>(0x10u + k), 32u);
+                    }
+                    const bool kicks = image == 2u;
                     VU1State start{};
                     for (uint32_t reg = 1; reg < 32u; ++reg)
                         for (uint32_t lane = 0; lane < 4u; ++lane)
@@ -2116,8 +2137,9 @@ void register_ps2_vu1_tests()
                     start.clip = rnd(0x1000000u);
 
                     // check 0: cut; 1: cut + resume(); 2: cut + fresh execute().
-                    // blocks: -1 interpreter (every write queued), 0 generated pairs,
-                    // 1 generated with VR2 stage-4 block functions.
+                    // blocks: -1 interpreter (every write queued), -2 interpreter with
+                    // direct commit (VB1), 0 generated pairs, 1 generated with VR2
+                    // stage-4 block functions.
                     const auto runOnce = [&](int blocks, uint32_t budget, uint32_t check) -> Snapshot
                     {
                         const bool useGenerated = blocks >= 0;
@@ -2128,7 +2150,7 @@ void register_ps2_vu1_tests()
                             vu.setBlocksForTest(blocks);
                         }
                         else
-                            vu.setDirectCommitForTest(0);
+                            vu.setDirectCommitForTest(blocks == -2 ? 1 : 0);
                         std::memcpy(vu.state().vf, start.vf, sizeof(start.vf));
                         std::memcpy(vu.state().vi, start.vi, sizeof(start.vi));
                         vu.state().mac = start.mac;
@@ -2136,14 +2158,19 @@ void register_ps2_vu1_tests()
                         vu.state().clip = start.clip;
                         Snapshot snap;
                         snap.data = initialData;
-                        vu.execute(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
-                                   nullptr, program.startPc, 0u, 0u, budget);
+                        GS &runGs = kicks ? gifGs : gs;
+                        PS2Memory *runMem = kicks ? &gifMem : nullptr;
+                        gifPackets.clear();
+                        vu.execute(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, runGs,
+                                   runMem, program.startPc, 0u, 0u, budget);
                         if (check == 1u)
-                            vu.resume(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
-                                      nullptr, 0u, 0u, 4096u);
+                            vu.resume(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, runGs,
+                                      runMem, 0u, 0u, 4096u);
                         else if (check == 2u)
-                            vu.execute(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
-                                       nullptr, program.startPc, 0u, 0u, 4096u);
+                            vu.execute(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, runGs,
+                                       runMem, program.startPc, 0u, 0u, 4096u);
+                        snap.gif.swap(gifPackets);
+                        gifPacketsSeen += snap.gif.size();
                         if (useGenerated)
                             generatedCycles += vu.recompCyclesForTest();
                         blockEntries += vu.blockEntriesForTest();
@@ -2151,21 +2178,42 @@ void register_ps2_vu1_tests()
                         return snap;
                     };
 
-                    const uint32_t maxBudget = 4u * program.length + 64u;
-                    for (uint32_t budget = 1; budget <= maxBudget && mismatches == 0u; ++budget)
+                    // Image 2's EFU (up to 54 cycles), FDIV and PATH1 transfers run longer.
+                    const uint32_t maxBudget = (kicks ? 8u : 4u) * program.length + (kicks ? 128u : 64u);
+                    const auto same = [](const Snapshot &a, const Snapshot &b)
                     {
-                        for (uint32_t check = 0; check < 6u; ++check)
+                        return std::memcmp(&a.state, &b.state, sizeof(VU1State)) == 0 && a.data == b.data && a.gif == b.gif;
+                    };
+                    bool programGap = false;
+                    for (uint32_t budget = 1; budget <= maxBudget; ++budget)
+                    {
+                        for (uint32_t check = 0; check < 3u; ++check)
                         {
-                            ++runs;
-                            const int blocks = check < 3u ? 0 : 1;
-                            const Snapshot ref = runOnce(-1, budget, check % 3u);
-                            const Snapshot gen = runOnce(blocks, budget, check % 3u);
-                            if (std::memcmp(&ref.state, &gen.state, sizeof(VU1State)) == 0 && ref.data == gen.data)
+                            runs += 2u;
+                            const Snapshot ref = runOnce(-1, budget, check);
+                            const Snapshot pairs = runOnce(0, budget, check);
+                            const Snapshot blocks = runOnce(1, budget, check);
+                            // VR2 stage 4 on its own: block functions against the pair path.
+                            if (!same(blocks, pairs))
+                            {
+                                if (++blockMismatches <= 3u)
+                                    std::fprintf(stderr, "VR2 stage-4 mismatch (blocks vs pairs): image %u program pc 0x%x budget %u check %u\n",
+                                                 image, program.startPc, budget, check);
+                            }
+                            if (same(ref, pairs) && same(ref, blocks))
                                 continue;
                             ++mismatches;
-                            std::fprintf(stderr, "VR2 differential mismatch: image %u program pc 0x%x length %u budget %u check %s blocks %d\n",
+                            programGap = true;
+                            const Snapshot &gen = same(ref, pairs) ? blocks : pairs;
+                            // Which layer: the interpreter with direct commit (VB1) on the same case.
+                            const Snapshot direct = runOnce(-2, budget, check);
+                            directLayer += same(direct, gen) && !same(direct, ref) ? 1u : 0u;
+                            if (mismatches > 3u)
+                                continue;
+                            std::fprintf(stderr, "VR2 differential mismatch: image %u program pc 0x%x length %u budget %u check %s pairs_ok %d blocks_ok %d\n",
                                          image, program.startPc, program.length, budget,
-                                         check % 3u == 0u ? "cut" : check % 3u == 1u ? "resume" : "fresh-execute", blocks);
+                                         check == 0u ? "cut" : check == 1u ? "resume" : "fresh-execute",
+                                         same(ref, pairs), same(ref, blocks));
                             for (uint32_t reg = 0; reg < 32u; ++reg)
                                 if (std::memcmp(ref.state.vf[reg], gen.state.vf[reg], 16) != 0)
                                     std::fprintf(stderr, "  vf%u ref %g %g %g %g gen %g %g %g %g\n", reg,
@@ -2174,32 +2222,32 @@ void register_ps2_vu1_tests()
                             for (uint32_t reg = 0; reg < 16u; ++reg)
                                 if (ref.state.vi[reg] != gen.state.vi[reg])
                                     std::fprintf(stderr, "  vi%u ref %d gen %d\n", reg, ref.state.vi[reg], gen.state.vi[reg]);
-                            std::fprintf(stderr, "  mac %x/%x status %x/%x clip %x/%x q %g/%g p %g/%g cycles %llu/%llu pc %x/%x acc %d data %d\n",
+                            std::fprintf(stderr, "  mac %x/%x status %x/%x clip %x/%x q %g/%g p %g/%g i %g/%g cycles %llu/%llu pc %x/%x acc %d data %d gif %zu/%zu equal %d\n",
                                          ref.state.mac, gen.state.mac, ref.state.status, gen.state.status, ref.state.clip, gen.state.clip,
-                                         ref.state.q, gen.state.q, ref.state.p, gen.state.p,
+                                         ref.state.q, gen.state.q, ref.state.p, gen.state.p, ref.state.i, gen.state.i,
                                          static_cast<unsigned long long>(ref.state.cycles), static_cast<unsigned long long>(gen.state.cycles),
-                                         ref.state.pc, gen.state.pc, std::memcmp(ref.state.acc, gen.state.acc, 16) != 0, ref.data != gen.data);
-                            for (uint32_t pair = 0; pair < program.length; ++pair)
-                            {
-                                uint32_t lo = 0, up = 0;
-                                std::memcpy(&lo, code.data() + program.startPc + pair * 8u, 4);
-                                std::memcpy(&up, code.data() + program.startPc + pair * 8u + 4u, 4);
-                                std::fprintf(stderr, "  pair %u lower %08x upper %08x\n", pair, lo, up);
-                            }
-                            break;
+                                         ref.state.pc, gen.state.pc, std::memcmp(ref.state.acc, gen.state.acc, 16) != 0, ref.data != gen.data,
+                                         ref.gif.size(), gen.gif.size(), ref.gif == gen.gif);
+                            std::fprintf(stderr, "  interpreter+direct: equals queued %d, equals generated %d\n",
+                                         same(direct, ref), same(direct, gen));
                         }
                     }
+                    gapPrograms += programGap ? 1u : 0u;
                 }
             }
-            std::fprintf(stderr, "[vr2-diff] images %u programs %u runs %u generated_cycles %llu block_entries %llu mismatches %u\n",
+            std::fprintf(stderr, "[vr2-diff] images %u programs %u runs %u generated_cycles %llu block_entries %llu gif_packets %llu mismatches %u (programs %u, interpreter+direct reproduces %u) block_vs_pairs_mismatches %u\n",
                          vu1_fixture::kImageCount, programsRun, runs,
                          static_cast<unsigned long long>(generatedCycles),
-                         static_cast<unsigned long long>(blockEntries), mismatches);
+                         static_cast<unsigned long long>(blockEntries),
+                         static_cast<unsigned long long>(gifPacketsSeen), mismatches, gapPrograms, directLayer,
+                         blockMismatches);
+            t.Equals(blockMismatches, 0u, "stage-4 block functions match the generated pair path at every cut");
             t.Equals(mismatches, 0u, "generated pairs and the queued interpreter agree at every cut");
             t.IsTrue(programsRun > 200u, "both fixture images ran");
             t.IsTrue(runs > 50000u, "differential covered many cuts");
             t.IsTrue(generatedCycles > 100000u, "the generated pairs actually ran");
             t.IsTrue(blockEntries > 10000u, "the stage-4 block functions actually ran");
+            t.IsTrue(gifPacketsSeen > 1000u, "image 2 kicked PATH1 packets");
         });
 #endif
     });

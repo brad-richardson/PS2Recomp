@@ -511,6 +511,16 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
 #if PS2X_ENABLE_DET_HASH_TAP
     if (m_unit == Unit::VU1)
         (direct ? m_vbDirectCycles : m_vbQueuedCycles) += m_cycle - vbStartCycle;
+    if constexpr (kStatic)
+    {
+        ++m_genIssuedPairs;
+        m_genIssuedCycles += m_cycle - vbStartCycle;
+        if constexpr (kBlock)
+        {
+            ++m_blockIssuedPairs;
+            m_blockIssuedCycles += m_cycle - vbStartCycle;
+        }
+    }
 #endif
     return ctx.programEnded;
 }
@@ -542,7 +552,13 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::recompBlockReady(const RunCon
 {
     if (!m_blocksOn || m_state.branchPending || m_state.ebit || m_state.haltAfterDelaySlot ||
         m_cycle + maxCycles > ctx.budgetEnd)
+    {
+        ++(!m_blocksOn                                          ? m_blockMissOff
+           : m_state.branchPending                              ? m_blockMissBranch
+           : m_state.ebit || m_state.haltAfterDelaySlot         ? m_blockMissEnd
+                                                                : m_blockMissBudget);
         return false;
+    }
     ++m_blockEntries;
     m_blockPairs += pairs;
     return true;

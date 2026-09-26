@@ -205,7 +205,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         ${CMAKE_SOURCE_DIR}/ps2xRuntime/include)
     target_link_libraries(vu1_fixture_gen PRIVATE ps2_runtime)
     set(VU1_FIXTURE_DIR ${CMAKE_CURRENT_BINARY_DIR}/vu1_fixture)
-    set(VU1_FIXTURE_SOURCES ${VU1_FIXTURE_DIR}/vu1_fixture_0.cpp ${VU1_FIXTURE_DIR}/vu1_fixture_1.cpp)
+    set(VU1_FIXTURE_SOURCES ${VU1_FIXTURE_DIR}/vu1_fixture_0.cpp ${VU1_FIXTURE_DIR}/vu1_fixture_1.cpp
+        ${VU1_FIXTURE_DIR}/vu1_fixture_2.cpp)
     add_custom_command(
         OUTPUT ${VU1_FIXTURE_SOURCES}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${VU1_FIXTURE_DIR}
