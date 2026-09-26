@@ -19,6 +19,12 @@
 #include <iostream>
 #include <sstream>
 
+// HP3: same default as ps2_runtime_macros.h (CMake option
+// PS2X_ENABLE_DIAG_TAPS defines it for every CMake build).
+#ifndef PS2X_ENABLE_DIAG_TAPS
+#define PS2X_ENABLE_DIAG_TAPS 0
+#endif
+
 namespace
 {
     static constexpr uint32_t kHostFrameWidth = 640u;
@@ -1194,7 +1200,13 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!data || sizeBytes < 16 || !m_backend)
         return;
 
+    // HP3 F15: the submit index feeds only the stream-capture trace and
+    // the [vq] line; skip the atomic RMW in speed builds (index reads 0).
+#if PS2X_ENABLE_DIAG_TAPS
     const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+#else
+    const uint64_t index = 0u;
+#endif
     const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
     const uint8_t path = static_cast<uint8_t>(m_curGifPath);
     GsPacketVramTrace trace{tick, index, path, m_localMemoryStorage, m_localMemorySize};
@@ -1208,7 +1220,12 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         return;
 
     // T1: true GIF-packet count (the [gs:gif] line below caps at 48).
-    ps2_park::tallyGsGif();
+    // HP3 F15: opt-in behind the cached park flag (snapshot reads it
+    // only when park is on).
+    if (ps2_park::parkEnabled())
+    {
+        ps2_park::tallyGsGif();
+    }
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t packetIndex = s_debugGifPacketCount.fetch_add(1, std::memory_order_relaxed);
         if (packetIndex < 48u)
@@ -1323,7 +1340,12 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!validatePackedGifPacket(data, sizeBytes))
         return false;
 
+    // HP3 F15: see above (capture/vq index only).
+#if PS2X_ENABLE_DIAG_TAPS
     const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+#else
+    const uint64_t index = 0u;
+#endif
     const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
     const uint8_t path = static_cast<uint8_t>(m_curGifPath);
     GsPacketVramTrace trace{tick, index, path, m_localMemoryStorage, m_localMemorySize};
@@ -1382,7 +1404,12 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    // HP3 F15: see above (capture/vq index only).
+#if PS2X_ENABLE_DIAG_TAPS
     const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+#else
+    const uint64_t index = 0u;
+#endif
     const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
     GsPacketVramTrace trace{tick, index, static_cast<uint8_t>(m_curGifPath),
                             m_localMemoryStorage, m_localMemorySize};
@@ -1763,7 +1790,8 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         regAddr == GS_REG_XYOFFSET_2 ||
         regAddr == GS_REG_SCISSOR_2;
     // T1: true copy-reg count (the [gs:copy-reg] line below caps at 64).
-    if (isCopyRelevantReg)
+    // HP3: same park opt-in as tallyGsGif (adjacent T1 tally).
+    if (isCopyRelevantReg && ps2_park::parkEnabled())
     {
         ps2_park::tallyGsCopyReg();
     }
@@ -2200,7 +2228,11 @@ void GS::vertexKick(bool drawing)
     ++m_vtxIndex;
 
     // T1: true kick count (the [gs:kick] line below caps at 96).
-    ps2_park::tallyGsKick(drawing);
+    // HP3: same park opt-in as tallyGsGif (adjacent T1 tally).
+    if (ps2_park::parkEnabled())
+    {
+        ps2_park::tallyGsKick(drawing);
+    }
 
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t debugIndex = s_debugGsVertexKickCount.fetch_add(1, std::memory_order_relaxed);

@@ -22,6 +22,12 @@
 #include <string>
 #include <vector>
 
+// HP3: same default as ps2_runtime_macros.h (CMake option
+// PS2X_ENABLE_DIAG_TAPS defines it for every CMake build).
+#ifndef PS2X_ENABLE_DIAG_TAPS
+#define PS2X_ENABLE_DIAG_TAPS 0
+#endif
+
 namespace
 {
     // NP1: one worker wakeup per GIF drain instead of one per packet
@@ -1125,7 +1131,11 @@ void PS2Memory::write8(uint32_t address, uint8_t value)
         m_scratchpad[physAddr] = value;
         // E44 scratchpad write watch (dev-only, default off;
         // silent while a Store* tap holds the guard).
+        // HP3 F12: the E44 gate (TLS + atomics) ran on every scratchpad
+        // write; call only in taps builds (tests call noteMemWrite directly).
+#if PS2X_ENABLE_DIAG_TAPS
         ps2_e44_trace::noteMemWrite(m_rdram, address, 1u, "write8");
+#endif
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1172,7 +1182,10 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
         storeScalar<uint16_t>(m_scratchpad, physAddr, PS2_SCRATCHPAD_SIZE, value, "write16 scratchpad", address);
         // E44 scratchpad write watch (dev-only, default off;
         // silent while a Store* tap holds the guard).
+        // HP3 F12: see write8 above.
+#if PS2X_ENABLE_DIAG_TAPS
         ps2_e44_trace::noteMemWrite(m_rdram, address, 2u, "write16");
+#endif
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1254,7 +1267,10 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
         storeScalar<uint32_t>(m_scratchpad, physAddr, PS2_SCRATCHPAD_SIZE, value, "write32 scratchpad", address);
         // E44 scratchpad write watch (dev-only, default off;
         // silent while a Store* tap holds the guard).
+        // HP3 F12: see write8 above.
+#if PS2X_ENABLE_DIAG_TAPS
         ps2_e44_trace::noteMemWrite(m_rdram, address, 4u, "write32");
+#endif
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1331,7 +1347,10 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
         storeScalar<uint64_t>(m_scratchpad, physAddr, PS2_SCRATCHPAD_SIZE, value, "write64 scratchpad", address);
         // E44 scratchpad write watch (dev-only, default off;
         // silent while a Store* tap holds the guard).
+        // HP3 F12: see write8 above.
+#if PS2X_ENABLE_DIAG_TAPS
         ps2_e44_trace::noteMemWrite(m_rdram, address, 8u, "write64");
+#endif
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1380,12 +1399,17 @@ void PS2Memory::write128(uint32_t address, __m128i value)
         alignas(16) uint8_t packet[16];
         _mm_storeu_si128(reinterpret_cast<__m128i *>(packet), value);
         // E40 Part-3: CPU FIFO writes carry no EE source address.
+        // HP3 F13: the two-atomic enabled() ran on every FIFO quadword;
+        // pay-map only in taps builds (the e7 fifo events below stay:
+        // cached-pointer checks, and E7 must work in speed builds).
+#if PS2X_ENABLE_DIAG_TAPS
         const bool e40Pay = ps2_mpg_src_trace::enabled();
         if (e40Pay)
         {
             ps2_mpg_src_trace::setPayMap(
                 nullptr, 0u, nullptr, 0u, ps2_mpg_src_trace::PayFifo, 0u);
         }
+#endif
         {
             // MT1: a FIFO quadword is a 16-byte unit job (D/T rule as for DMA).
             const bool dt = ps2_mtvu::active() && ps2_mtvu::dtFallback();
@@ -1409,10 +1433,12 @@ void PS2Memory::write128(uint32_t address, __m128i value)
                 processVIF1Data(packet, sizeof(packet));
             }
         }
+#if PS2X_ENABLE_DIAG_TAPS
         if (e40Pay)
         {
             ps2_mpg_src_trace::clearPayMap();
         }
+#endif
         if (ps2_e7::enabled())
             ps2_e7::event(gs_regs.vsyncTick.load(), "fifo-after", "mask=%u queued=%zu route=interpreter", m_path3Masked, m_path3MaskedFifo.size());
         return;
@@ -1424,7 +1450,10 @@ void PS2Memory::write128(uint32_t address, __m128i value)
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&m_scratchpad[physAddr]), value);
         // E44 scratchpad write watch (dev-only, default off;
         // silent while a Store* tap holds the guard).
+        // HP3 F12: see write8 above.
+#if PS2X_ENABLE_DIAG_TAPS
         ps2_e44_trace::noteMemWrite(m_rdram, address, 16u, "write128");
+#endif
     }
     else if (physAddr < PS2_RAM_SIZE)
     {

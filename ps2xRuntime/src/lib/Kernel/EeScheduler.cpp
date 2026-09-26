@@ -552,11 +552,14 @@ void EeScheduler::run()
     // T1 park snapshot: install the SIGTERM handler once when enabled.
     ps2_park::installParkTermHandler();
 
-    // P1c steady-state diagnostics state. When PS2X_DIAG_PERIOD_MS is unset
-    // the per-iteration cost below is one counter increment plus a check.
+    // P1c steady-state diagnostics state (PS2X_DIAG_PERIOD_MS). HP3 F7:
+    // compiled out of speed builds (was one increment + check per loop
+    // iteration even when the period was unset).
+#if PS2X_ENABLE_DIAG_TAPS
     static uint64_t s_diagTick = 0;
     static uint64_t s_diagLastMs = 0;
     static uint64_t s_diagBlock = 0;
+#endif
 
     // SS1 save states (default off: saveAt 0, no resume skip). A loaded run
     // skips its first event pass: the save was taken right after one.
@@ -604,6 +607,7 @@ void EeScheduler::run()
             }
         }
 
+#if PS2X_ENABLE_DIAG_TAPS
         ++s_diagTick;
         const uint64_t diagPeriod = diagPeriodMs();
         if (diagPeriod != 0u)
@@ -717,6 +721,7 @@ void EeScheduler::run()
                 diagCallsPeriodicFlush();
             }
         }
+#endif // PS2X_ENABLE_DIAG_TAPS (HP3 F7)
 
         if (m_currentThreadId == 0)
         {
@@ -754,10 +759,13 @@ void EeScheduler::run()
             {
                 makeRunning(*next);
                 ps2_park::tallySched(next->id);
-                if (diagPeriod != 0u)
+                // HP3 F7: per-schedule P1c bump; taps builds only.
+#if PS2X_ENABLE_DIAG_TAPS
+                if (diagPeriodMs() != 0u)
                 {
                     ++g_diagSchedCounts[next->id];
                 }
+#endif
             }
             else
             {
@@ -765,7 +773,9 @@ void EeScheduler::run()
                 GuestInvocation invocation = std::move(m_pendingInvocations.front());
                 m_pendingInvocations.pop_front();
                 ps2_park::tallySched(owner->id);
-                if (diagPeriod != 0u)
+                // HP3 F7: invocation-path P1c bump; taps builds only.
+#if PS2X_ENABLE_DIAG_TAPS
+                if (diagPeriodMs() != 0u)
                 {
                     ++g_diagSchedCounts[owner->id];
                     if (isCdCallbackDiagTag(invocation.tag))
@@ -774,6 +784,7 @@ void EeScheduler::run()
                                   << " cb=0x" << std::hex << invocation.context.pc << std::dec << std::endl;
                     }
                 }
+#endif
                 owner->status = EeThreadStatus::Running;
                 m_currentThreadId = owner->id;
                 renewTimeSlice();
@@ -838,7 +849,9 @@ void EeScheduler::run()
                 }
                 continue;
             }
-            if (diagPeriod != 0u)
+            // HP3 F7: dormant-thread P1c line; taps builds only.
+#if PS2X_ENABLE_DIAG_TAPS
+            if (diagPeriodMs() != 0u)
             {
                 uint64_t dormantScheduled = 0u;
                 if (auto it = g_diagSchedCounts.find(running->id); it != g_diagSchedCounts.end())
@@ -856,6 +869,7 @@ void EeScheduler::run()
                           << " scheduled=" << dormantScheduled
                           << " trace=" << m_runtime.formatDispatchHistory() << std::endl;
             }
+#endif
             makeDormant(*running);
             m_currentThreadId = 0;
             continue;
@@ -865,11 +879,14 @@ void EeScheduler::run()
         {
             GuestInvocation invocation = std::move(m_pendingInvocations.front());
             m_pendingInvocations.pop_front();
-            if (diagPeriod != 0u && isCdCallbackDiagTag(invocation.tag))
+            // HP3 F7: cd-callback P1c line; taps builds only.
+#if PS2X_ENABLE_DIAG_TAPS
+            if (diagPeriodMs() != 0u && isCdCallbackDiagTag(invocation.tag))
             {
                 std::cerr << "[cd:callback] start func=" << (invocation.tag & 0xFFFFFFFFu)
                           << " cb=0x" << std::hex << invocation.context.pc << std::dec << std::endl;
             }
+#endif
             if (getRegU32(&invocation.context, 29) == 0u)
             {
                 SET_GPR_U32(&invocation.context, 29, invocationStackTop());
@@ -898,7 +915,9 @@ void EeScheduler::run()
                                                 context.pc,
                                                 PS2Runtime::GuestBranchKind::DirectJump,
                                                 "EE scheduler");
-                if (diagPeriod != 0u)
+                // HP3 F7: dormant-thread P1c line; taps builds only.
+#if PS2X_ENABLE_DIAG_TAPS
+                if (diagPeriodMs() != 0u)
                 {
                     uint64_t dormantScheduled = 0u;
                     if (auto it = g_diagSchedCounts.find(running->id); it != g_diagSchedCounts.end())
@@ -916,6 +935,7 @@ void EeScheduler::run()
                               << " scheduled=" << dormantScheduled
                               << " trace=" << m_runtime.formatDispatchHistory() << std::endl;
                 }
+#endif
                 makeDormant(*running);
                 m_currentThreadId = 0;
             }

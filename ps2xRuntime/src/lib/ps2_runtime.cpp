@@ -402,6 +402,8 @@ namespace
         return true;
     }
 
+    // HP3 F1: only lookupFunction calls this, and only in taps builds.
+#if PS2X_ENABLE_DIAG_TAPS
     void pushDispatchPc(uint32_t pc)
     {
         DispatchHistory &h = g_dispatchHistory;
@@ -412,6 +414,7 @@ namespace
             h.wrapped = true;
         }
     }
+#endif
 
     std::string formatDispatchHistoryImpl()
     {
@@ -2317,7 +2320,11 @@ const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
 
 PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 {
+// HP3 F1: the dispatch history feeds only the missing-function error
+// trace; skip the thread_local push in speed builds (taps=0).
+#if PS2X_ENABLE_DIAG_TAPS
     pushDispatchPc(address);
+#endif
 
     uint32_t slot = 0u;
     if (generatedFunctionTableSlot(address, slot))
@@ -3065,14 +3072,18 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false;
     }
 
+    // HP3 F2: s_diagCallTick was incremented here but never read
+    // anywhere; removed (no observable change in any build).
+    // T1: cumulative hot-pc tally. HP3 F3: opt-in behind the cached
+    // park flag so speed builds pay one load+branch per dispatch; the
+    // snapshot (EeScheduler park fill) reads it only when park is on.
+    if (ps2_park::parkEnabled())
+    {
+        ps2_park::tallyDispatch(targetPc, (ctx != nullptr) ? getRegU32(ctx, 31) : 0u);
+    }
     // P1c HLE stub/call histogram at the register_functions.cpp binding
-    // lookup (lookupFunction below resolves the guest call target to the
-    // registered host function). Counts per call target with first/last $ra.
-    static uint64_t s_diagCallTick = 0;
-    ++s_diagCallTick;
-    // T1: cumulative hot-pc tally, always on (the P1c map above is
-    // per-period and cleared; the snapshot needs the whole boot).
-    ps2_park::tallyDispatch(targetPc, (ctx != nullptr) ? getRegU32(ctx, 31) : 0u);
+    // lookup, per-period and cleared (the T1 tally above is cumulative
+    // for the whole boot). Already gated on the diag period.
     if (diagPeriodMs() != 0u)
     {
         const uint32_t callerRa = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;
@@ -3138,6 +3149,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
+    // HP3 F4: the E11/E12 card observation + E15 MPEG trace run a Trace
+    // ctor/dtor (with a mutex round-trip in the off-state target check)
+    // on every dispatch; compile them out of speed builds.
+#if PS2X_ENABLE_DIAG_TAPS
     // E11: preserve entry a0 across the call for dynamic query-object joins.
     // Observation only, sharing the existing E7 window and byte budgets.
     const bool cardObservation = ps2_e7::enabled() && ps2_e7::cardTarget(targetPc, sourcePc);
@@ -3155,6 +3170,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     noteCardCall("mc-call");
     ps2_e15::Trace mpegTrace("branch",m_memory.gs().vsyncTick.load(),rdram,ctx,targetPc,sourcePc,
                             g_diagWatchThreadId.load(std::memory_order_relaxed));
+#endif // PS2X_ENABLE_DIAG_TAPS (HP3 F4)
     // E43 h394 hash-call tap (dev-only, default off): pre-capture args,
     // run the synchronous callee, then capture v0 + the store flag.
     const bool e43h394 = ps2_e43_trace::h394CallArmed(sourcePc, targetPc);
@@ -3174,8 +3190,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     {
         ps2_e43_trace::h394Post(ctx);
     }
+#if PS2X_ENABLE_DIAG_TAPS
     mpegTrace.finish(m_memory.gs().vsyncTick.load());
     noteCardCall("mc-return");
+#endif // PS2X_ENABLE_DIAG_TAPS (HP3 F4)
 
     if (isStopRequested() || ctx->pc == 0u)
     {
