@@ -134,6 +134,8 @@ public:
     // VR2 stage 4: -1 follows PS2X_VU1_BLOCKS (default off), 0 off, 1 on.
     void setBlocksForTest(int mode) { m_blocksOverride = mode; }
     uint64_t blockEntriesForTest() const { return m_blockEntries; }
+    // VR2 2C: a reserved-instruction/error stop (reportReservedInstruction) is pending.
+    bool stopRequestedForTest() const { return m_stopRequested; }
     const VU1State &state() const { return m_state; }
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t programStartCount() const { return m_programStartCount; }

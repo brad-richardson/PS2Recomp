@@ -2081,6 +2081,7 @@ void register_ps2_vu1_tests()
                 VU1State state;
                 std::vector<uint8_t> data;
                 std::vector<std::vector<uint8_t>> gif; // ordered PATH1 packets (image 2)
+                bool stopped = false;                  // an error stop ended the last run (not compared)
             };
             std::vector<uint8_t> code(vu1_fixture::kCodeSize, 0u);
             std::vector<uint8_t> initialData(PS2_VU1_DATA_SIZE, 0u);
@@ -2097,7 +2098,7 @@ void register_ps2_vu1_tests()
                 gifPackets.emplace_back(packet, packet + sizeBytes);
             });
             uint64_t gifPacketsSeen = 0u;
-            uint32_t blockMismatches = 0u, directLayer = 0u, gapPrograms = 0u;
+            uint32_t blockMismatches = 0u, directLayer = 0u, gapPrograms = 0u, stopPath = 0u;
             uint32_t mismatches = 0u, runs = 0u, programsRun = 0u;
             uint64_t generatedCycles = 0u, blockEntries = 0u;
             vu1_fixture::Rng rnd{0x2545F4914F6CDD1Dull};
@@ -2170,6 +2171,7 @@ void register_ps2_vu1_tests()
                             vu.execute(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, runGs,
                                        runMem, program.startPc, 0u, 0u, 4096u);
                         snap.gif.swap(gifPackets);
+                        snap.stopped = vu.stopRequestedForTest();
                         gifPacketsSeen += snap.gif.size();
                         if (useGenerated)
                             generatedCycles += vu.recompCyclesForTest();
@@ -2205,6 +2207,7 @@ void register_ps2_vu1_tests()
                             ++mismatches;
                             programGap = true;
                             const Snapshot &gen = same(ref, pairs) ? blocks : pairs;
+                            stopPath += ref.stopped || gen.stopped ? 1u : 0u;
                             // Which layer: the interpreter with direct commit (VB1) on the same case.
                             const Snapshot direct = runOnce(-2, budget, check);
                             directLayer += same(direct, gen) && !same(direct, ref) ? 1u : 0u;
@@ -2235,12 +2238,12 @@ void register_ps2_vu1_tests()
                     gapPrograms += programGap ? 1u : 0u;
                 }
             }
-            std::fprintf(stderr, "[vr2-diff] images %u programs %u runs %u generated_cycles %llu block_entries %llu gif_packets %llu mismatches %u (programs %u, interpreter+direct reproduces %u) block_vs_pairs_mismatches %u\n",
+            std::fprintf(stderr, "[vr2-diff] images %u programs %u runs %u generated_cycles %llu block_entries %llu gif_packets %llu mismatches %u (programs %u, interpreter+direct reproduces %u, on an error stop %u) block_vs_pairs_mismatches %u\n",
                          vu1_fixture::kImageCount, programsRun, runs,
                          static_cast<unsigned long long>(generatedCycles),
                          static_cast<unsigned long long>(blockEntries),
                          static_cast<unsigned long long>(gifPacketsSeen), mismatches, gapPrograms, directLayer,
-                         blockMismatches);
+                         stopPath, blockMismatches);
             t.Equals(blockMismatches, 0u, "stage-4 block functions match the generated pair path at every cut");
             t.Equals(mismatches, 0u, "generated pairs and the queued interpreter agree at every cut");
             t.IsTrue(programsRun > 200u, "both fixture images ran");
