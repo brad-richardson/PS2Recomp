@@ -534,11 +534,12 @@ public:
     }
 
     // SS1 save states: VRAM (host mirror after a flush), the raw register,
-    // priv and GIF-path state paraLLEl decodes itself. SS3 S2 (v3 tail): the
-    // CLUT ring + renderer cursors + the interface palette indices. Not
-    // captured: the private vertex queue / transfer state (S3) and SSAA
-    // planes (cleared by the VRAM upload). The footer lets tests and future
-    // tools find the tail without paraLLEl's struct sizes.
+    // priv and GIF-path state paraLLEl decodes itself. SS3 (v3 tail): the
+    // CLUT ring + renderer cursors + the interface palette indices (S2), and
+    // the retained strip/fan vertices (S3). Not captured: SSAA planes
+    // (cleared by the VRAM upload) and in-flight host->local transfers (the
+    // save defers while one is live). The footer lets tests and future tools
+    // find the tail without paraLLEl's struct sizes.
     static constexpr uint32_t kTailMagic = 0x33534750u; // "PGS3" LE
     static constexpr size_t kTailFooterSize = sizeof(uint64_t) + sizeof(uint32_t);
     void SavestateSave(std::vector<uint8_t> &out) override
@@ -565,9 +566,8 @@ public:
             put(&m_iface->get_gif_path(i), sizeof(ParallelGS::GIFPath));
         put(&m_l2hPending, sizeof(m_l2hPending));
 #if defined(PARALLEL_GS_HAS_SAVESTATE_V3)
-        // v3 tail: [u8 hasClut][clut?] then [u64 tailLen][u32 magic].
-        // tailLen covers hasClut..clut-end (S3 appends the vertex queue
-        // before the footer).
+        // v3 tail: [u8 hasClut][clut?][u32 vcount][vcount x 36B verts]
+        // then [u64 tailLen][u32 magic]. tailLen covers hasClut..verts.
         std::vector<uint8_t> tail;
         const auto tput = [&tail](const void *src, size_t n) {
             const auto *b = static_cast<const uint8_t *>(src);
@@ -589,6 +589,15 @@ public:
             tput(&clutIface, sizeof(clutIface));
             tput(&clutLatest, sizeof(clutLatest));
         }
+        // S3: a strip/fan may span the save point, so its retained vertices
+        // travel with the state (count 0 = empty queue).
+        std::vector<uint8_t> vtx;
+        if (!m_iface->read_vertex_queue_state(vtx))
+        {
+            out.clear(); // never a blob with a missing queue; the load refuses it
+            return;
+        }
+        tput(vtx.data(), vtx.size());
         const uint64_t tailLen = tail.size();
         tput(&tailLen, sizeof(tailLen));
         tput(&kTailMagic, sizeof(kTailMagic));
@@ -625,7 +634,22 @@ public:
         if (m_initOk && !m_iface->clut_state_idle())
             return false;
 #endif
+#if defined(PARALLEL_GS_HAS_SAVESTATE_V3)
+        // S3: an in-flight host->local transfer keeps its payload/cursors
+        // out of the state; the guest completes it, so the save waits.
+        if (m_initOk && !m_iface->gs_transfer_idle())
+            return false;
+#endif
         return true;
+    }
+
+    std::string SavestateBusyReason() const override
+    {
+#if defined(PARALLEL_GS_HAS_SAVESTATE_V3)
+        if (m_initOk && !m_iface->gs_transfer_idle())
+            return "gs-transfer";
+#endif
+        return {};
     }
 
     bool SavestateLoad(const uint8_t *data, size_t size) override
@@ -677,7 +701,7 @@ public:
             std::memcpy(&n, data + t, sizeof(n));
             t += sizeof(n);
             const size_t rest = tailEnd - t;
-            if (n > rest || rest - static_cast<size_t>(n) != 4u * sizeof(uint32_t))
+            if (n > rest || rest - static_cast<size_t>(n) < 4u * sizeof(uint32_t))
                 return false;
             std::vector<uint8_t> clut(data + t, data + t + static_cast<size_t>(n));
             uint32_t clutBase = 0u, clutNext = 0u, clutIface = 0u, clutLatest = 0u;
@@ -690,7 +714,11 @@ public:
                 return false;
             t += static_cast<size_t>(n) + 4u * sizeof(uint32_t);
         }
-        if (t != tailEnd) // S3 parses the vertex queue here
+        // S3: the vertex queue runs to the tail end; the accessor validates
+        // its count and exact size.
+        if (tailEnd - t < sizeof(uint32_t))
+            return false;
+        if (!m_iface->write_vertex_queue_state(std::vector<uint8_t>(data + t, data + tailEnd)))
             return false;
 #else
         const uint8_t hasClut = data[off++];

@@ -21,7 +21,7 @@ namespace ps2_savestate
     inline constexpr uint32_t kRuntimeVersion = 1u;
     inline constexpr uint32_t kSchedulerVersion = 1u;
     inline constexpr uint32_t kVuVersion = 1u;
-    inline constexpr uint32_t kGsVersion = 3u; // v3: CLUT tail + interface palette indices (S2), footer (S3 appends verts)
+    inline constexpr uint32_t kGsVersion = 3u; // v3: CLUT tail + palette indices (S2), vertex queue (S3), footer
     inline constexpr uint32_t kSndVersion = 1u;
 
     // Resume hand-off: a loaded run skips the first processPendingEvents()

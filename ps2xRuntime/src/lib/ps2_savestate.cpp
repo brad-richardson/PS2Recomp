@@ -1070,11 +1070,14 @@ bool VU1InterpreterSavestate::load(VU1Interpreter &vu, Reader &r)
 // ==================================================================== GS
 std::string GSSavestate::ready(const GS &gs)
 {
-    // The frontend vertex queue is saved (a strip may continue across
-    // packets); paraLLEl's private one is not, so a restored run relies on
-    // the guest's next PRIM write (gap noted in REPORT.md).
+    // The frontend vertex queue and (SS3) paraLLEl's retained strip/fan
+    // vertices are saved; an in-flight host->local transfer is not, so the
+    // save defers while one is live.
     if (gs.m_backend && !gs.m_backend->SavestateIdle())
-        return "GS backend transfer active";
+    {
+        const std::string reason = gs.m_backend->SavestateBusyReason();
+        return reason.empty() ? "GS backend transfer active" : reason;
+    }
     return {};
 }
 

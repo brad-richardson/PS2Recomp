@@ -3,6 +3,7 @@
 #include "runtime/gs/gs_types.h"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 class GSRasterBackend
@@ -52,11 +53,14 @@ public:
     // SS1 save states (on the GS thread, after a drain). Idle = no transfer
     // or local->host bytes in flight. Save/Load carry state that is not in
     // PS2Memory (the CPU backend's VRAM is PS2Memory's, so it has none).
+    // SS3: SavestateBusyReason names the deferral ("gs-transfer") when idle
+    // is false for a specific new cause; "" keeps the generic text.
     virtual bool SavestateIdle() const
     {
         const GSTransferSnapshot t = GetTransferSnapshot();
         return t.localToHostPendingBytes == 0u && t.copiedPixels >= t.totalPixels;
     }
+    virtual std::string SavestateBusyReason() const { return {}; }
     virtual void SavestateSave(std::vector<uint8_t> &out) { out.clear(); }
     virtual bool SavestateLoad(const uint8_t *data, size_t size)
     {

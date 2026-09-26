@@ -162,6 +162,80 @@ namespace
     {
         std::memcpy(blob.data() + off, &v, sizeof(v));
     }
+
+    // S3 tests touch the backend through registers (which init lazily)
+    // before their first save; confirm the init outcome for skip logic.
+    bool ss3BackendInitOk(TestCase &t)
+    {
+        const ps2x_gs_parallel::Stats st = ps2x_gs_parallel::stats();
+        if (st.initOk)
+            return true;
+        if (st.initFailed)
+        {
+            g_ss3GpuSkipped = true;
+            std::cout << "[skip: Vulkan init failed] ";
+            return false;
+        }
+        t.Fail("backend touched but init neither ok nor failed");
+        return false;
+    }
+
+    uint64_t ss3F32x2(float a, float b)
+    {
+        uint64_t v = 0u;
+        float f[2] = {a, b};
+        std::memcpy(&v, f, sizeof(v));
+        return v;
+    }
+
+    uint32_t ss3F32Bits(float f)
+    {
+        uint32_t v = 0u;
+        std::memcpy(&v, &f, sizeof(v));
+        return v;
+    }
+
+    // Triangle-strip setup + one ADC vertex kick (queued, never drawn, so no
+    // framebuffer setup is needed). Register addresses are paraLLEl's
+    // gs_register_addr.hpp.
+    void ss3StripSetup(GSRasterBackend &be)
+    {
+        be.RawWriteRegister(0x00, 4u); // PRIM: TriangleStrip (also resets the queue)
+        be.RawWriteRegister(0x02, ss3F32x2(0.5f, 0.25f)); // ST
+        be.RawWriteRegister(0x01, uint64_t{0x44332211} | (uint64_t{ss3F32Bits(1.0f)} << 32)); // RGBAQ
+        be.RawWriteRegister(0x03, 10u | (20u << 16)); // UV
+        be.RawWriteRegister(0x0a, uint64_t{0x5a} << 56); // FOG
+    }
+
+    void ss3Kick(GSRasterBackend &be, uint32_t x, uint32_t y, uint32_t z)
+    {
+        be.RawWriteRegister(0x0d, uint64_t{x} | (uint64_t{y} << 16) | (uint64_t{z} << 32)); // XYZ3
+    }
+
+    // The vertex part of a v3 tail ([u32 count][count x 36B entries]); fails
+    // the test and returns empty when the tail has no vertex part (pre-S3).
+    std::vector<uint8_t> ss3VertexPart(TestCase &t, const std::vector<uint8_t> &blob, uint32_t &vcount)
+    {
+        vcount = 0u;
+        const Ss3Tail tail = ss3ParseTail(blob);
+        if (!tail.ok)
+        {
+            t.Fail("v3 tail parses (S3 vertex part)");
+            return {};
+        }
+        if (tail.tailEnd - tail.clutEnd < sizeof(uint32_t))
+        {
+            t.Fail("tail has a vertex part (missing pre-S3)");
+            return {};
+        }
+        std::memcpy(&vcount, blob.data() + tail.clutEnd, sizeof(vcount));
+        if (vcount > 3u || tail.tailEnd - tail.clutEnd != sizeof(uint32_t) + size_t{vcount} * 36u)
+        {
+            t.Fail("vertex part has exact size for its count");
+            return {};
+        }
+        return std::vector<uint8_t>(blob.data() + tail.clutEnd, blob.data() + tail.tailEnd);
+    }
 } // namespace
 
 void register_ps2_savestate_tests()
@@ -512,6 +586,140 @@ void register_ps2_savestate_tests()
             t.IsTrue(std::memcmp(blob2.data() + tail2.ringOff, patched.data() + tail.ringOff,
                                  static_cast<size_t>(tail.ringN)) == 0,
                      "ring bytes round-trip exactly");
+        });
+
+        tc.Run("ss3 s3: a split IMAGE upload defers the save", [](TestCase &t)
+        {
+            if (!ss3WantParallelGpu())
+                return;
+            std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(be.get(), "backend created");
+            if (!be)
+                return;
+            t.IsTrue(be->SavestateIdle(), "fresh backend is idle");
+            t.Equals(be->SavestateBusyReason(), std::string(), "no busy reason when idle");
+            // 8x8 PSMCT32 host->local transfer: 32 qwords over 16 IMAGE words.
+            be->RawWriteRegister(0x50, uint64_t{1} << 48); // BITBLTBUF: DBP=0 DBW=1 DPSM=0
+            be->RawWriteRegister(0x51, 0u); // TRXPOS: 0
+            be->RawWriteRegister(0x52, uint64_t{8} | (uint64_t{8} << 32)); // TRXREG: 8x8
+            be->RawWriteRegister(0x53, 0u); // TRXDIR: host->local
+            if (!ss3BackendInitOk(t))
+                return;
+            t.IsTrue(!be->SavestateIdle(), "open transfer is not idle (idle pre-S3)");
+            t.Equals(be->SavestateBusyReason(), std::string("gs-transfer"), "transfer names its reason");
+            // First fragment: tag (NLOOP=64 IMAGE) + 4 of 16 words.
+            std::vector<uint8_t> frag(16 + 4 * 16, 0);
+            const uint64_t tagLo = 64u | (uint64_t{2} << 58); // NLOOP=64 FLG=IMAGE
+            std::memcpy(frag.data(), &tagLo, sizeof(tagLo));
+            be->RawGifPacket(1, frag.data(), static_cast<uint32_t>(frag.size()));
+            t.IsTrue(!be->SavestateIdle(), "partial upload is not idle");
+            t.Equals(be->SavestateBusyReason(), std::string("gs-transfer"), "partial upload keeps the reason");
+            // Continuation fragments (no tag) until the guest completes it.
+            const std::vector<uint8_t> chunk(4 * 16, 0);
+            int chunks = 0;
+            for (; chunks < 6 && !be->SavestateIdle(); ++chunks)
+                be->RawGifPacket(1, chunk.data(), static_cast<uint32_t>(chunk.size()));
+            t.IsTrue(be->SavestateIdle(), "completed upload is idle again");
+            t.Equals(be->SavestateBusyReason(), std::string(), "reason clears on completion");
+            t.Equals(chunks, 3, "8+8+8+8 qwords complete the 32-qword transfer");
+            // A save/load round trip across the completion is bit-exact.
+            std::vector<uint8_t> blob1, blob2;
+            be->SavestateSave(blob1);
+            if (!ss3HaveParallelBlob(t, blob1))
+                return;
+            t.IsTrue(be->SavestateLoad(blob1.data(), blob1.size()), "post-transfer blob loads");
+            be->SavestateSave(blob2);
+            t.IsTrue(blob1 == blob2, "save/load/save across a completed transfer is bit-exact");
+        });
+
+        tc.Run("ss3 s3: retained strip vertices survive save/load", [](TestCase &t)
+        {
+            if (!ss3WantParallelGpu())
+                return;
+            std::vector<uint8_t> vtx2;
+            {
+                std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
+                t.IsNotNull(be.get(), "backend A created");
+                if (!be)
+                    return;
+                ss3StripSetup(*be);
+                ss3Kick(*be, 100u, 200u, 300u);
+                ss3Kick(*be, 110u, 210u, 310u);
+                if (!ss3BackendInitOk(t))
+                    return;
+                std::vector<uint8_t> blob1;
+                be->SavestateSave(blob1);
+                if (!ss3HaveParallelBlob(t, blob1))
+                    return;
+                uint32_t vcount = 0u;
+                const std::vector<uint8_t> vtx1 = ss3VertexPart(t, blob1, vcount);
+                t.Equals(vcount, 2u, "two retained vertices saved");
+                if (vtx1.empty())
+                    return;
+                t.IsTrue(be->SavestateLoad(blob1.data(), blob1.size()), "strip blob loads");
+                std::vector<uint8_t> blob1b;
+                be->SavestateSave(blob1b);
+                uint32_t vcount1b = 0u;
+                const std::vector<uint8_t> vtx1b = ss3VertexPart(t, blob1b, vcount1b);
+                t.IsTrue(vtx1 == vtx1b, "retained vertices restore exactly");
+                // Continue the strip after the load and save again.
+                ss3Kick(*be, 120u, 220u, 320u);
+                std::vector<uint8_t> blob2;
+                be->SavestateSave(blob2);
+                uint32_t vcount2 = 0u;
+                vtx2 = ss3VertexPart(t, blob2, vcount2);
+                t.Equals(vcount2, 3u, "continued strip holds three vertices");
+                if (vtx2.empty())
+                    return;
+            }
+            // Uninterrupted: the same three kicks with no save in the middle.
+            std::unique_ptr<GSRasterBackend> beB = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(beB.get(), "backend B created");
+            if (!beB)
+                return;
+            ss3StripSetup(*beB);
+            ss3Kick(*beB, 100u, 200u, 300u);
+            ss3Kick(*beB, 110u, 210u, 310u);
+            ss3Kick(*beB, 120u, 220u, 320u);
+            if (!ss3BackendInitOk(t))
+                return;
+            std::vector<uint8_t> blob3;
+            beB->SavestateSave(blob3);
+            if (!ss3HaveParallelBlob(t, blob3))
+                return;
+            uint32_t vcount3 = 0u;
+            const std::vector<uint8_t> vtx3 = ss3VertexPart(t, blob3, vcount3);
+            t.IsTrue(vtx2 == vtx3, "post-load continuation matches the uninterrupted queue");
+            if (vtx3.size() != sizeof(uint32_t) + 3u * 36u)
+                return;
+            // Structural spot checks (entries are [x y z s t q rgba fog u v];
+            // X/Y carry an unknown render-pass offset, so only differences).
+            int32_t x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+            uint32_t z0 = 0, z1 = 0, rgba = 0;
+            float s = 0, q = 0, fog = 0;
+            uint16_t u = 0, v = 0;
+            const uint8_t *e0 = vtx3.data() + sizeof(uint32_t);
+            const uint8_t *e1 = e0 + 36u;
+            std::memcpy(&x0, e0, 4);
+            std::memcpy(&x1, e1, 4);
+            std::memcpy(&y0, e0 + 4, 4);
+            std::memcpy(&y1, e1 + 4, 4);
+            std::memcpy(&z0, e0 + 8, 4);
+            std::memcpy(&z1, e1 + 8, 4);
+            std::memcpy(&rgba, e0 + 24, 4);
+            std::memcpy(&s, e0 + 12, 4);
+            std::memcpy(&q, e0 + 20, 4);
+            std::memcpy(&fog, e0 + 28, 4);
+            std::memcpy(&u, e0 + 32, 2);
+            std::memcpy(&v, e0 + 34, 2);
+            t.Equals(x1 - x0, 10, "vertex X step");
+            t.Equals(y1 - y0, 10, "vertex Y step");
+            t.Equals(z0, 300u, "vertex Z kept");
+            t.Equals(z1, 310u, "vertex Z step");
+            t.Equals(rgba, 0x44332211u, "vertex RGBA kept");
+            t.IsTrue(s == 0.5f && q == 1.0f, "vertex ST/Q kept");
+            t.IsTrue(fog == 90.0f, "vertex fog kept");
+            t.IsTrue(u == 10u && v == 20u, "vertex UV kept");
         });
     });
 }
