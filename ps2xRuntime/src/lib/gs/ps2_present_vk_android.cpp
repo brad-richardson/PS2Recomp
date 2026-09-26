@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -107,6 +108,7 @@ struct Sink
     int aspect = 0;
     bool geometrySet = false;
     uint32_t lastW = 0, lastH = 0;
+    ARect dstRect = {0, 0, 0, 0}; // last destination rect (parent buffer pixels)
     AHardwareBuffer *lastQueued = nullptr;
     bool under = false;          // child below the GL window (overlay drawn by GL on top)
     bool liveOnWindow = false;   // a buffer has been queued on the current child
@@ -302,6 +304,19 @@ bool underlay()
     Sink &s = sink();
     std::lock_guard<std::mutex> lock(s.m);
     return s.under;
+}
+
+bool gameRect(int &left, int &top, int &right, int &bottom)
+{
+    Sink &s = sink();
+    std::lock_guard<std::mutex> lock(s.m);
+    if (s.dstRect.right <= s.dstRect.left || s.dstRect.bottom <= s.dstRect.top)
+        return false;
+    left = s.dstRect.left;
+    top = s.dstRect.top;
+    right = s.dstRect.right;
+    bottom = s.dstRect.bottom;
+    return true;
 }
 
 uint32_t windowGeneration()
@@ -517,8 +532,15 @@ bool queue(AHardwareBuffer *buffer, uint32_t w, uint32_t h)
             static_cast<float>(s.bufW), static_cast<float>(s.bufH), static_cast<float>(w), static_cast<float>(h),
             static_cast<ps2x::present::Aspect>(s.aspect));
         const ARect src = {0, 0, static_cast<int32_t>(w), static_cast<int32_t>(h)};
-        const ARect dst = {static_cast<int32_t>(r.x + 0.5f), static_cast<int32_t>(r.y + 0.5f),
-                           static_cast<int32_t>(r.x + r.w + 0.5f), static_cast<int32_t>(r.y + r.h + 0.5f)};
+        // Round the size, then centre it: rounding the edges separately could
+        // add a pixel (4:3 in 796x448: 598 wide = 1442 panel px instead of
+        // 597 = exactly 1440). Bars are what the GL window shows (black).
+        const int32_t dw = std::min<int32_t>(s.bufW, static_cast<int32_t>(r.w + 0.5f));
+        const int32_t dh = std::min<int32_t>(s.bufH, static_cast<int32_t>(r.h + 0.5f));
+        const int32_t dl = (s.bufW - dw) / 2;
+        const int32_t dt = (s.bufH - dh) / 2;
+        const ARect dst = {dl, dt, dl + dw, dt + dh};
+        s.dstRect = dst;
         a.setGeometry(tx, s.sc, src, dst, 0);
         // Above raylib's GL window when nothing is drawn over the game (the Odin
         // default); under it when GL draws an overlay (virtual pad) with the

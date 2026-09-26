@@ -23,6 +23,7 @@
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
 #include <EGL/egl.h>
+#include <GLES2/gl2.h>
 #include <android/native_activity.h>
 #include <android/native_window.h>
 #include <android_native_app_glue.h>
@@ -4285,8 +4286,25 @@ void PS2Runtime::run()
         if (!skipGl)
         {
             BeginDrawing();
-            // Under-layer: the game shows through a transparent GL window.
-            ClearBackground(vkUnder ? BLANK : BLACK);
+            ClearBackground(BLACK);
+#if defined(__ANDROID__)
+            // Under-layer: the game shows through a transparent hole in the GL
+            // window, exactly over the child's rect; the bars stay opaque black.
+            int gl = 0, gt = 0, gr = 0, gb = 0;
+            EGLint surfH = 0;
+            if (vkUnder && ps2x_present_vk::gameRect(gl, gt, gr, gb) &&
+                eglQuerySurface(eglGetCurrentDisplay(), eglGetCurrentSurface(EGL_DRAW), EGL_HEIGHT, &surfH) &&
+                surfH > 0)
+            {
+                // The rect is in the window's buffer pixels, top-left origin; GL's
+                // scissor is bottom-left. raylib has nothing batched yet here.
+                glEnable(GL_SCISSOR_TEST);
+                glScissor(gl, surfH - gb, gr - gl, gb - gt);
+                glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glDisable(GL_SCISSOR_TEST);
+            }
+#endif
         }
         const float srcWidth = static_cast<float>(std::max<uint32_t>(1u, presentWidth));
         const float srcHeight = static_cast<float>(std::max<uint32_t>(1u, presentHeight));

@@ -38,6 +38,10 @@ bool layerLive();
 // window layer without a buffer has no buffer-to-window scaling, and the child
 // would show at raw buffer size (VK1 Part 2 D2: 796x448 in a corner).
 uint32_t windowGeneration();
+// The child's destination rect in the parent's buffer pixels (top-left origin),
+// as last set: the presenter's aspect (PS2X_ASPECT, anamorphic 16:9 by default)
+// fitted as large as possible, never stretched. False before the first frame.
+bool gameRect(int &left, int &top, int &right, int &bottom);
 
 // Main thread, once per host frame: the current window (nullptr while it is
 // gone), the presenter's aspect (ps2x::present::Aspect as int) and the size of
