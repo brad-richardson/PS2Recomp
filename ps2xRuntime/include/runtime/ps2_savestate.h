@@ -223,11 +223,15 @@ namespace ps2_savestate
         std::string m_error;
     };
 
-    // unordered_map / unordered_set round trip that keeps libc++ iteration
-    // order (guest-visible through EeScheduler::acquireInvocationThread):
-    // same bucket count, then the saved order inserted in reverse. A new node
-    // goes to the head of its bucket's run, and a new bucket's run goes to
-    // the head of the list, so reverse insertion rebuilds the saved order.
+    // unordered_map / unordered_set round trip that keeps STL iteration
+    // order on the saving host (guest-visible through
+    // EeScheduler::acquireInvocationThread): same bucket count, then the
+    // saved order inserted in reverse. On both libc++ and libstdc++ a new
+    // node goes to the head of its bucket's run and a new bucket's run to
+    // the head of the list, so reverse insertion rebuilds the saved order;
+    // the restore verifies it key by key. Empty maps skip the bucket
+    // requirement (a fresh map's default count differs by STL and carries
+    // no state). A cross-STL load still refuses at the first non-empty map.
     template <typename Map, typename WriteEntry>
     void writeOrdered(Writer &w, const Map &map, WriteEntry writeEntry)
     {
@@ -249,6 +253,25 @@ namespace ps2_savestate
         using type = std::pair<typename Map::key_type, typename Map::mapped_type>;
     };
 
+    // Key accessor for the restore's order check (maps compare .first, sets
+    // compare the value itself).
+    template <typename Map, typename = void>
+    struct HasMappedType : std::false_type
+    {
+    };
+    template <typename Map>
+    struct HasMappedType<Map, std::void_t<typename Map::mapped_type>> : std::true_type
+    {
+    };
+    template <typename Map, typename Entry>
+    const typename Map::key_type &orderedKey(const Entry &e)
+    {
+        if constexpr (HasMappedType<Map>::value)
+            return e.first;
+        else
+            return e;
+    }
+
     template <typename Map, typename ReadEntry>
     bool readOrdered(Reader &r, Map &map, ReadEntry readEntry)
     {
@@ -268,6 +291,20 @@ namespace ps2_savestate
         if (!r.ok())
             return false;
         map.clear();
+        if (n == 0u)
+        {
+            // No entries: iteration order is trivial, so the bucket count is
+            // not required to reproduce. A fresh map's default differs by STL
+            // (libc++ 0, libstdc++ 1) and neither rehash(0) nor rehash(1)
+            // reproduces under libstdc++ (both yield 2), so requiring it
+            // refuses same-STL Linux states and all cross-STL states. Rehash
+            // toward the saved count on a best-effort basis (a used-then-
+            // emptied map keeps its count on the same STL); a corrupt huge
+            // count is not worth the allocation.
+            if (map.bucket_count() != buckets && buckets <= (1u << 20))
+                map.rehash(static_cast<size_t>(buckets));
+            return true;
+        }
         map.rehash(static_cast<size_t>(buckets));
         if (map.bucket_count() != buckets)
             return r.fail("ordered-map bucket count not reproducible");
@@ -275,6 +312,13 @@ namespace ps2_savestate
             map.insert(std::move(*it));
         if (map.bucket_count() != buckets || map.size() != n)
             return r.fail("ordered-map rebuild changed shape");
+        size_t i = 0;
+        for (const auto &live : map)
+        {
+            if (i >= entries.size() || orderedKey<Map>(live) != orderedKey<Map>(entries[i]))
+                return r.fail("ordered-map iteration order not reproducible");
+            ++i;
+        }
         return true;
     }
 
