@@ -228,6 +228,14 @@ public:
     void noteUnderrun() { m_underruns.fetch_add(1u, std::memory_order_relaxed); }
     uint64_t underruns() const { return m_underruns.load(std::memory_order_relaxed); }
     uint64_t overflows() const { return m_overflows.load(std::memory_order_relaxed); }
+    // AT1: frames currently buffered (producer pushes minus consumer pops).
+    // Relaxed: the stretch control loop tolerates a slightly stale depth.
+    uint64_t size() const
+    {
+        const uint64_t write = m_write.load(std::memory_order_relaxed);
+        const uint64_t read = m_read.load(std::memory_order_relaxed);
+        return write >= read ? write - read : 0u;
+    }
 
 private:
     std::array<std::atomic<uint32_t>, kPcmRingFrames> m_frames{};

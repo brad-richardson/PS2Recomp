@@ -1,31 +1,47 @@
 #include "ps2_snd_audio_output.h"
 
+#include "ps2_audio_stretch.h"
 #include "ps2_snd_spike.h"
 #include "raylib.h"
+#include "SoundTouch.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <vector>
 
 namespace
 {
-    constexpr uint32_t kSourceRate = 48000u; // SNDDRV output rate (AU9: tag-1 upsampled 3->4)
+    constexpr uint32_t kSourceRate = 36000u;
     constexpr size_t kWavLimitBytes = 200000000u;
+    // AT1: PCSX2 AudioStreamParameters defaults (AudioStreamTypes.h).
+    constexpr int kStSequenceMs = 30;
+    constexpr int kStSeekWindowMs = 20;
+    constexpr int kStOverlapMs = 10;
+
+    struct WavFile
+    {
+        std::string path;
+        std::fstream file;
+        size_t bytes = 0;
+    };
 
     struct Output
     {
         AudioStream stream{};
         bool ready = false;
         uint32_t rate = kSourceRate;
-        std::string wavPath;
-        std::fstream wavFile;
-        size_t wavBytes = 0;
+        WavFile wav;     // PS2X_SOUND_WAV: knob off = final output (as before);
+                         // knob on = pre-stretch source-rate frames.
+        WavFile postWav; // PS2X_SND_WAV_OUT: final output (post-stretch).
         double phase = 0.0;
         uint32_t previous = 0;
         uint32_t next = 0;
@@ -33,34 +49,48 @@ namespace
         std::chrono::steady_clock::time_point statsAt{};
         uint64_t lastUnderruns = 0;
         uint64_t lastOverflows = 0;
+        // AT1 stretch state (audio-callback thread only, except init).
+        bool stretch = false;
+        std::unique_ptr<soundtouch::SoundTouch> st;
+        ps2_audio_stretch::StretchController controller;
+        std::chrono::steady_clock::time_point lastCallback{};
+        std::chrono::steady_clock::time_point stretchStatsAt{};
+        std::vector<float> floatBuf;
+        std::vector<float> floatOut;
+        std::vector<float> drainBuf;
+        std::vector<int16_t> srcBuf;
+        std::vector<uint32_t> tapped;
+        // Active + resampled pull state.
+        std::vector<uint32_t> stQueue;
+        size_t stQueuePos = 0;
     } g_output;
 
     int16_t unpackLeft(uint32_t frame) { return static_cast<int16_t>(frame & 0xffffu); }
     int16_t unpackRight(uint32_t frame) { return static_cast<int16_t>(frame >> 16); }
 
-    void recordWav(const int16_t *samples, size_t count)
+    void recordWav(WavFile &wav, const int16_t *samples, size_t count)
     {
-        if (!g_output.wavFile.is_open())
+        if (!wav.file.is_open())
             return;
-        const size_t writable = std::min(count * sizeof(int16_t), kWavLimitBytes - g_output.wavBytes);
+        const size_t writable = std::min(count * sizeof(int16_t), kWavLimitBytes - wav.bytes);
         if (!writable)
             return;
-        g_output.wavFile.seekp(44 + static_cast<std::streamoff>(g_output.wavBytes));
-        g_output.wavFile.write(reinterpret_cast<const char *>(samples), writable);
-        g_output.wavBytes += writable;
+        wav.file.seekp(44 + static_cast<std::streamoff>(wav.bytes));
+        wav.file.write(reinterpret_cast<const char *>(samples), writable);
+        wav.bytes += writable;
         // The wall-capped boot harness terminates the runner with SIGTERM.
         // Keep the on-disk header valid after every callback for that path.
-        g_output.wavFile.seekp(4);
-        const uint32_t riffBytes = 36u + static_cast<uint32_t>(g_output.wavBytes);
+        wav.file.seekp(4);
+        const uint32_t riffBytes = 36u + static_cast<uint32_t>(wav.bytes);
         const char riff[4] = {static_cast<char>(riffBytes), static_cast<char>(riffBytes >> 8),
                               static_cast<char>(riffBytes >> 16), static_cast<char>(riffBytes >> 24)};
-        g_output.wavFile.write(riff, sizeof(riff));
-        g_output.wavFile.seekp(40);
-        const uint32_t dataBytes = static_cast<uint32_t>(g_output.wavBytes);
+        wav.file.write(riff, sizeof(riff));
+        wav.file.seekp(40);
+        const uint32_t dataBytes = static_cast<uint32_t>(wav.bytes);
         const char data[4] = {static_cast<char>(dataBytes), static_cast<char>(dataBytes >> 8),
                               static_cast<char>(dataBytes >> 16), static_cast<char>(dataBytes >> 24)};
-        g_output.wavFile.write(data, sizeof(data));
-        g_output.wavFile.flush();
+        wav.file.write(data, sizeof(data));
+        wav.file.flush();
     }
 
     bool nextInputFrame(uint32_t &frame)
@@ -72,7 +102,24 @@ namespace
         return false;
     }
 
-    void audioCallback(void *buffer, unsigned int frames)
+    void minuteStats(const std::chrono::steady_clock::time_point &now)
+    {
+        if (g_output.statsAt == std::chrono::steady_clock::time_point{})
+            g_output.statsAt = now;
+        if (now - g_output.statsAt >= std::chrono::minutes(1))
+        {
+            const uint64_t underruns = ps2_snd_spike::pcmRing().underruns();
+            const uint64_t overflows = ps2_snd_spike::pcmRing().overflows();
+            std::cerr << "[snd-output] wall-minute underruns=" << (underruns - g_output.lastUnderruns)
+                      << " overflows=" << (overflows - g_output.lastOverflows)
+                      << " total-underruns=" << underruns << " total-overflows=" << overflows << '\n';
+            g_output.lastUnderruns = underruns;
+            g_output.lastOverflows = overflows;
+            g_output.statsAt = now;
+        }
+    }
+
+    void audioCallbackDirect(void *buffer, unsigned int frames)
     {
         auto *output = static_cast<int16_t *>(buffer);
         const size_t samples = static_cast<size_t>(frames) * 2u;
@@ -113,22 +160,273 @@ namespace
                 }
             }
         }
-        recordWav(output, samples);
+        recordWav(g_output.wav, output, samples);
+        recordWav(g_output.postWav, output, samples);
+        minuteStats(std::chrono::steady_clock::now());
+    }
 
-        const auto now = std::chrono::steady_clock::now();
-        if (g_output.statsAt == std::chrono::steady_clock::time_point{})
-            g_output.statsAt = now;
-        if (now - g_output.statsAt >= std::chrono::minutes(1))
+    // ---- AT1 stretch path (PS2X_AUDIO_STRETCH=1) ----
+
+    void s16ToFloat(const int16_t *s16, float *out, size_t frames)
+    {
+        for (size_t i = 0; i < frames * 2u; ++i)
+            out[i] = static_cast<float>(s16[i]) / 32768.0f;
+    }
+
+    int16_t floatToS16(float v)
+    {
+        const long rounded = std::lround(static_cast<double>(v) * 32768.0);
+        return static_cast<int16_t>(std::clamp(rounded, -32768l, 32767l));
+    }
+
+    // Pop up to want frames from the ring (no zero-fill: the caller decides).
+    size_t popRing(uint32_t *frames, size_t want)
+    {
+        size_t got = 0;
+        while (got < want && ps2_snd_spike::pcmRing().pop(frames[got]))
+            ++got;
+        return got;
+    }
+
+    void unpackFrames(const uint32_t *frames, size_t count, int16_t *s16)
+    {
+        for (size_t i = 0; i < count; ++i)
         {
-            const uint64_t underruns = ps2_snd_spike::pcmRing().underruns();
-            const uint64_t overflows = ps2_snd_spike::pcmRing().overflows();
-            std::cerr << "[snd-output] wall-minute underruns=" << (underruns - g_output.lastUnderruns)
-                      << " overflows=" << (overflows - g_output.lastOverflows)
-                      << " total-underruns=" << underruns << " total-overflows=" << overflows << '\n';
-            g_output.lastUnderruns = underruns;
-            g_output.lastOverflows = overflows;
-            g_output.statsAt = now;
+            s16[2u * i] = unpackLeft(frames[i]);
+            s16[2u * i + 1u] = unpackRight(frames[i]);
         }
+    }
+
+    // Drain-and-discard stretcher output (bypass mode): keeps SoundTouch's
+    // internal latency bounded while the callback plays ring frames direct.
+    void drainStretcher()
+    {
+        if (g_output.drainBuf.size() < 1024u * 2u)
+            g_output.drainBuf.resize(1024u * 2u);
+        while (g_output.st->receiveSamples(g_output.drainBuf.data(), 1024u) != 0)
+        {
+        }
+    }
+
+    // Pull one source-rate frame from the stretcher's output (active mode).
+    // Returns false on shortfall (frame = 0 silence, counted as underrun).
+    bool pullStretched(uint32_t &frame)
+    {
+        if (g_output.stQueuePos >= g_output.stQueue.size())
+        {
+            g_output.stQueue.clear();
+            g_output.stQueuePos = 0;
+            if (g_output.floatOut.size() < 1024u * 2u)
+                g_output.floatOut.resize(1024u * 2u);
+            const soundtouch::uint got =
+                g_output.st->receiveSamples(g_output.floatOut.data(), 1024u);
+            for (soundtouch::uint i = 0; i < got; ++i)
+            {
+                const int16_t l = floatToS16(g_output.floatOut[2u * i]);
+                const int16_t r = floatToS16(g_output.floatOut[2u * i + 1u]);
+                g_output.stQueue.push_back(static_cast<uint32_t>(static_cast<uint16_t>(l)) |
+                                           (static_cast<uint32_t>(static_cast<uint16_t>(r)) << 16));
+            }
+        }
+        if (g_output.stQueuePos >= g_output.stQueue.size())
+        {
+            ps2_snd_spike::pcmRing().noteUnderrun();
+            frame = 0;
+            return false;
+        }
+        frame = g_output.stQueue[g_output.stQueuePos++];
+        return true;
+    }
+
+    void stretchStats(const std::chrono::steady_clock::time_point &now)
+    {
+        if (g_output.stretchStatsAt == std::chrono::steady_clock::time_point{})
+            g_output.stretchStatsAt = now;
+        if (now - g_output.stretchStatsAt < std::chrono::seconds(5))
+            return;
+        const auto &st = g_output.controller.stats();
+        const double mean = st.callbacks ? st.sumTempo / st.callbacks : 1.0;
+        const double bypassPct = st.callbacks ? 100.0 * st.bypassed / st.callbacks : 100.0;
+        std::cerr << "[snd-stretch] underruns=" << ps2_snd_spike::pcmRing().underruns()
+                  << " overflows=" << ps2_snd_spike::pcmRing().overflows()
+                  << " tempo min=" << st.minTempo << " mean=" << mean << " max=" << st.maxTempo
+                  << " bypass=" << bypassPct << "% callbacks=" << st.callbacks << '\n';
+        g_output.controller.resetStats();
+        g_output.stretchStatsAt = now;
+    }
+
+    void audioCallbackStretch(void *buffer, unsigned int frames)
+    {
+        auto *output = static_cast<int16_t *>(buffer);
+        const auto now = std::chrono::steady_clock::now();
+        double dt = -1.0;
+        if (g_output.lastCallback != std::chrono::steady_clock::time_point{})
+            dt = std::chrono::duration<double>(now - g_output.lastCallback).count();
+        g_output.lastCallback = now;
+
+        const uint64_t fill = ps2_snd_spike::pcmRing().size();
+        const ps2_audio_stretch::StepResult step = g_output.controller.update(fill, dt);
+        g_output.st->setTempo(static_cast<double>(g_output.controller.smoothedTempo()));
+
+        // Source-rate frames for this callback (pre-resample).
+        g_output.srcBuf.resize(static_cast<size_t>(frames) * 2u);
+        std::vector<uint32_t> fed;
+        fed.reserve(frames + 2u);
+
+        if (step.bypass)
+        {
+            if (g_output.rate == kSourceRate)
+            {
+                for (unsigned int i = 0; i < frames; ++i)
+                {
+                    uint32_t frame = 0;
+                    nextInputFrame(frame);
+                    fed.push_back(frame);
+                    output[2u * i] = unpackLeft(frame);
+                    output[2u * i + 1u] = unpackRight(frame);
+                }
+            }
+            else
+            {
+                // Byte-identical resample of ring frames (same pull order as
+                // the direct path); tapped frames feed the stretcher copy.
+                g_output.tapped.clear();
+                const auto tapNext = [](uint32_t &frame)
+                {
+                    const bool ok = nextInputFrame(frame);
+                    g_output.tapped.push_back(frame);
+                    return ok;
+                };
+                for (unsigned int i = 0; i < frames; ++i)
+                {
+                    if (!g_output.havePair)
+                    {
+                        tapNext(g_output.previous);
+                        tapNext(g_output.next);
+                        g_output.havePair = true;
+                    }
+                    const double t = g_output.phase;
+                    const auto interpolate = [t](int16_t a, int16_t b)
+                    {
+                        return static_cast<int16_t>(std::clamp(
+                            static_cast<int>(a + (b - a) * t), -32768, 32767));
+                    };
+                    output[2u * i] =
+                        interpolate(unpackLeft(g_output.previous), unpackLeft(g_output.next));
+                    output[2u * i + 1u] =
+                        interpolate(unpackRight(g_output.previous), unpackRight(g_output.next));
+                    g_output.phase += static_cast<double>(kSourceRate) / g_output.rate;
+                    while (g_output.phase >= 1.0)
+                    {
+                        g_output.previous = g_output.next;
+                        tapNext(g_output.next);
+                        g_output.phase -= 1.0;
+                    }
+                }
+                fed = g_output.tapped;
+            }
+            // Feed the stretcher a copy so engaging is seamless; discard its
+            // output (the callback plays ring frames direct).
+            if (!fed.empty())
+            {
+                g_output.floatBuf.resize(fed.size() * 2u);
+                for (size_t i = 0; i < fed.size(); ++i)
+                {
+                    g_output.floatBuf[2u * i] = static_cast<float>(unpackLeft(fed[i])) / 32768.0f;
+                    g_output.floatBuf[2u * i + 1u] =
+                        static_cast<float>(unpackRight(fed[i])) / 32768.0f;
+                }
+                g_output.st->putSamples(g_output.floatBuf.data(),
+                                        static_cast<soundtouch::uint>(fed.size()));
+            }
+            drainStretcher();
+            g_output.stQueue.clear();
+            g_output.stQueuePos = 0;
+        }
+        else
+        {
+            const size_t srcNeed = g_output.rate == kSourceRate
+                                       ? frames
+                                       : static_cast<size_t>(std::ceil(
+                                             frames * static_cast<double>(kSourceRate) /
+                                             g_output.rate)) +
+                                             2u;
+            const size_t feedWant =
+                static_cast<size_t>(std::ceil(srcNeed * static_cast<double>(step.tempo)));
+            fed.resize(feedWant);
+            const size_t fedCount = popRing(fed.data(), feedWant);
+            fed.resize(fedCount);
+            if (fedCount > 0)
+            {
+                g_output.floatBuf.resize(fedCount * 2u);
+                for (size_t i = 0; i < fedCount; ++i)
+                {
+                    g_output.floatBuf[2u * i] = static_cast<float>(unpackLeft(fed[i])) / 32768.0f;
+                    g_output.floatBuf[2u * i + 1u] =
+                        static_cast<float>(unpackRight(fed[i])) / 32768.0f;
+                }
+                g_output.st->putSamples(g_output.floatBuf.data(),
+                                        static_cast<soundtouch::uint>(fedCount));
+            }
+            if (g_output.rate == kSourceRate)
+            {
+                for (unsigned int i = 0; i < frames; ++i)
+                {
+                    uint32_t frame = 0;
+                    pullStretched(frame);
+                    output[2u * i] = unpackLeft(frame);
+                    output[2u * i + 1u] = unpackRight(frame);
+                }
+            }
+            else
+            {
+                for (unsigned int i = 0; i < frames; ++i)
+                {
+                    if (!g_output.havePair)
+                    {
+                        pullStretched(g_output.previous);
+                        pullStretched(g_output.next);
+                        g_output.havePair = true;
+                    }
+                    const double t = g_output.phase;
+                    const auto interpolate = [t](int16_t a, int16_t b)
+                    {
+                        return static_cast<int16_t>(std::clamp(
+                            static_cast<int>(a + (b - a) * t), -32768, 32767));
+                    };
+                    output[2u * i] =
+                        interpolate(unpackLeft(g_output.previous), unpackLeft(g_output.next));
+                    output[2u * i + 1u] =
+                        interpolate(unpackRight(g_output.previous), unpackRight(g_output.next));
+                    g_output.phase += static_cast<double>(kSourceRate) / g_output.rate;
+                    while (g_output.phase >= 1.0)
+                    {
+                        g_output.previous = g_output.next;
+                        pullStretched(g_output.next);
+                        g_output.phase -= 1.0;
+                    }
+                }
+            }
+        }
+
+        // Source WAV: the consumed ring frames at source rate (pre-stretch).
+        if (g_output.wav.file.is_open() && !fed.empty())
+        {
+            g_output.srcBuf.resize(fed.size() * 2u);
+            unpackFrames(fed.data(), fed.size(), g_output.srcBuf.data());
+            recordWav(g_output.wav, g_output.srcBuf.data(), fed.size() * 2u);
+        }
+        recordWav(g_output.postWav, output, static_cast<size_t>(frames) * 2u);
+        stretchStats(now);
+        minuteStats(now);
+    }
+
+    void audioCallback(void *buffer, unsigned int frames)
+    {
+        if (g_output.stretch)
+            audioCallbackStretch(buffer, frames);
+        else
+            audioCallbackDirect(buffer, frames);
     }
 
     void writeU16(std::ostream &file, uint16_t value)
@@ -144,17 +442,43 @@ namespace
         file.write(bytes, sizeof(bytes));
     }
 
-    void saveWav()
+    void openWav(WavFile &wav, const char *path, uint32_t rate)
     {
-        if (g_output.wavPath.empty())
+        if (!path || !*path)
             return;
-        if (g_output.wavFile.is_open())
-            g_output.wavFile.close();
-        if (g_output.wavFile.fail() || g_output.wavBytes == 0)
-            std::cerr << "[snd-output] failed writing WAV: " << g_output.wavPath << '\n';
+        wav.path = path;
+        wav.file.open(wav.path, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+        if (wav.file)
+        {
+            wav.file.write("RIFF", 4);
+            writeU32(wav.file, 36u);
+            wav.file.write("WAVEfmt ", 8);
+            writeU32(wav.file, 16u);
+            writeU16(wav.file, 1u);
+            writeU16(wav.file, 2u);
+            writeU32(wav.file, rate);
+            writeU32(wav.file, rate * 4u);
+            writeU16(wav.file, 4u);
+            writeU16(wav.file, 16u);
+            wav.file.write("data", 4);
+            writeU32(wav.file, 0u);
+            wav.file.flush();
+        }
         else
-            std::cerr << "[snd-output] WAV " << g_output.wavPath << " bytes=" << g_output.wavBytes
-                      << " rate=" << g_output.rate << '\n';
+            std::cerr << "[snd-output] failed opening WAV: " << wav.path << '\n';
+    }
+
+    void saveWav(WavFile &wav, uint32_t rate)
+    {
+        if (wav.path.empty())
+            return;
+        if (wav.file.is_open())
+            wav.file.close();
+        if (wav.file.fail() || wav.bytes == 0)
+            std::cerr << "[snd-output] failed writing WAV: " << wav.path << '\n';
+        else
+            std::cerr << "[snd-output] WAV " << wav.path << " bytes=" << wav.bytes
+                      << " rate=" << rate << '\n';
     }
 }
 
@@ -171,33 +495,30 @@ bool initialize()
         g_output.stream = LoadAudioStream(g_output.rate, 16, 2);
         if (!IsAudioStreamValid(g_output.stream))
             return false;
-        std::cerr << "[snd-output] 48 kHz stream unavailable\n";
+        std::cerr << "[snd-output] 36 kHz stream unavailable; host-side linear resampling to 48 kHz\n";
+    }
+    const char *stretchEnv = std::getenv("PS2X_AUDIO_STRETCH");
+    g_output.stretch = stretchEnv && std::strcmp(stretchEnv, "1") == 0;
+    if (g_output.stretch)
+    {
+        g_output.st = std::make_unique<soundtouch::SoundTouch>();
+        g_output.st->setSampleRate(kSourceRate);
+        g_output.st->setChannels(2);
+        g_output.st->setSetting(SETTING_SEQUENCE_MS, kStSequenceMs);
+        g_output.st->setSetting(SETTING_SEEKWINDOW_MS, kStSeekWindowMs);
+        g_output.st->setSetting(SETTING_OVERLAP_MS, kStOverlapMs);
+        g_output.st->setSetting(SETTING_USE_QUICKSEEK, 0);
+        g_output.st->setSetting(SETTING_USE_AA_FILTER, 0);
+        g_output.st->setTempo(1.0);
+        std::cerr << "[snd-output] stretch=on (SoundTouch " << soundtouch::SoundTouch::getVersionString()
+                  << ", target=" << ps2_audio_stretch::kTargetLatencyMs << "ms tempo=["
+                  << ps2_audio_stretch::kTempoMin << "," << ps2_audio_stretch::kTempoMax
+                  << "] passband=+/-2%)\n";
     }
     SetAudioStreamCallback(g_output.stream, audioCallback);
-    if (const char *wav = std::getenv("PS2X_SOUND_WAV"); wav && *wav)
-    {
-        g_output.wavPath = wav;
-        g_output.wavFile.open(g_output.wavPath,
-                              std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
-        if (g_output.wavFile)
-        {
-            g_output.wavFile.write("RIFF", 4);
-            writeU32(g_output.wavFile, 36u);
-            g_output.wavFile.write("WAVEfmt ", 8);
-            writeU32(g_output.wavFile, 16u);
-            writeU16(g_output.wavFile, 1u);
-            writeU16(g_output.wavFile, 2u);
-            writeU32(g_output.wavFile, g_output.rate);
-            writeU32(g_output.wavFile, g_output.rate * 4u);
-            writeU16(g_output.wavFile, 4u);
-            writeU16(g_output.wavFile, 16u);
-            g_output.wavFile.write("data", 4);
-            writeU32(g_output.wavFile, 0u);
-            g_output.wavFile.flush();
-        }
-        else
-            std::cerr << "[snd-output] failed opening WAV: " << g_output.wavPath << '\n';
-    }
+    openWav(g_output.wav, std::getenv("PS2X_SOUND_WAV"),
+            g_output.stretch ? kSourceRate : g_output.rate);
+    openWav(g_output.postWav, std::getenv("PS2X_SND_WAV_OUT"), g_output.rate);
     PlayAudioStream(g_output.stream);
     g_output.ready = true;
     std::cerr << "[snd-output] stream rate=" << g_output.rate << " channels=2 bits=16\n";
@@ -212,6 +533,8 @@ void shutdown()
         UnloadAudioStream(g_output.stream);
         g_output.ready = false;
     }
-    saveWav();
+    g_output.st.reset();
+    saveWav(g_output.wav, g_output.stretch ? kSourceRate : g_output.rate);
+    saveWav(g_output.postWav, g_output.rate);
 }
 }

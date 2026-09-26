@@ -723,7 +723,11 @@ if(PS2X_IS_ANDROID)
     target_include_directories(ps2_runtime PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
 endif()
 
-target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop)
+# AT1: vendored SoundTouch 2.4.1 for pitch-preserving time-stretch
+# (PS2X_AUDIO_STRETCH=1). Static, LGPL-2.1 applied as GPL per section 3.
+add_subdirectory(third_party/soundtouch)
+
+target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop ps2x_soundtouch)
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
