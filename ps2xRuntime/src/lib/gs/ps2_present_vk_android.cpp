@@ -10,6 +10,7 @@
 #include <dlfcn.h>
 #include <jni.h>
 #include <poll.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -187,7 +188,12 @@ bool queryLayerSize(ANativeActivity *activity, int &w, int &h)
     if (!activity || !activity->vm)
         return false;
     JNIEnv *env = nullptr;
-    if (activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env)
+    // Keep the thread's name: an unnamed attach renames it "Thread-N", which
+    // hides the main thread from per-thread profiles that key on the name.
+    char name[16] = {};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    JavaVMAttachArgs args = {JNI_VERSION_1_6, name[0] ? name : nullptr, nullptr};
+    if (activity->vm->AttachCurrentThread(&env, &args) != JNI_OK || !env)
         return false;
     bool ok = false;
     jobject act = activity->clazz;
