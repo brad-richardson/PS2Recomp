@@ -22,8 +22,22 @@
 #include "runtime/gs/ps2_present_share.h"
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
+#include <EGL/egl.h>
 #include <android_native_app_glue.h>
 extern "C" struct android_app *GetAndroidApp(void); // raylib rcore_android.c
+namespace
+{
+// VK1: raylib's app-command handler, wrapped so the SurfaceControl child is
+// detached before the window goes (TERM_WINDOW) and remade after it returns
+// (the ANativeWindow pointer can be reused across background/foreground).
+void (*g_vk1RaylibOnAppCmd)(struct android_app *, int32_t) = nullptr;
+void vk1OnAppCmd(struct android_app *app, int32_t cmd)
+{
+    if (cmd == APP_CMD_TERM_WINDOW)
+        ps2x_present_vk::windowLost();
+    g_vk1RaylibOnAppCmd(app, cmd);
+}
+} // namespace
 #endif
 #if defined(PS2X_IOS)
 // HR1 spike: blend off around the shared-texture quad. Declared here because
@@ -4205,8 +4219,21 @@ void PS2Runtime::run()
         if (ps2x_present_vk::enabled())
         {
             struct android_app *app = GetAndroidApp();
+            if (app && app->onAppCmd != vk1OnAppCmd)
+            {
+                g_vk1RaylibOnAppCmd = app->onAppCmd;
+                app->onAppCmd = vk1OnAppCmd;
+            }
+            EGLint bufW = 0, bufH = 0; // raylib's window buffers (e.g. 796x448 scaled to 1920x1080)
+            const EGLDisplay dpy = eglGetCurrentDisplay();
+            const EGLSurface surf = eglGetCurrentSurface(EGL_DRAW);
+            if (dpy != EGL_NO_DISPLAY && surf != EGL_NO_SURFACE)
+            {
+                eglQuerySurface(dpy, surf, EGL_WIDTH, &bufW);
+                eglQuerySurface(dpy, surf, EGL_HEIGHT, &bufH);
+            }
             ps2x_present_vk::setHostWindow(app ? app->window : nullptr, app ? app->activity : nullptr,
-                                           static_cast<int>(presentAspect));
+                                           static_cast<int>(presentAspect), bufW, bufH);
         }
 #endif
         UploadFrame(frameTex, this, presentWidth, presentHeight);

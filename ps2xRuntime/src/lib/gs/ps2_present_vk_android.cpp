@@ -102,6 +102,7 @@ struct Sink
     SC *sc = nullptr;
     std::vector<SC *> graveyard; // detached layers (callbacks may still name them)
     int layerW = 0, layerH = 0;
+    int bufW = 0, bufH = 0; // parent's buffer size: the child's coordinate space
     int aspect = 0;
     bool geometrySet = false;
     uint32_t lastW = 0, lastH = 0;
@@ -250,7 +251,32 @@ bool active()
     return g_active.load(std::memory_order_acquire);
 }
 
-void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect)
+void detachLocked(Sink &s, const char *why)
+{
+    if (!s.sc)
+        return;
+    const Api &a = api();
+    TX *tx = a.txCreate();
+    a.reparent(tx, s.sc, nullptr);
+    a.txApply(tx);
+    a.txDelete(tx);
+    s.graveyard.push_back(s.sc);
+    s.sc = nullptr;
+    std::fprintf(stderr, "[present-vk] %s: child layer detached\n", why);
+}
+
+void windowLost()
+{
+    if (!enabled())
+        return;
+    Sink &s = sink();
+    std::lock_guard<std::mutex> lock(s.m);
+    detachLocked(s, "APP_CMD_TERM_WINDOW");
+    s.window = nullptr;
+    s.geometrySet = false;
+}
+
+void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect, int bufferW, int bufferH)
 {
     if (!enabled())
         return;
@@ -261,6 +287,13 @@ void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect)
     {
         s.aspect = aspect;
         s.geometrySet = false;
+    }
+    if (bufferW > 0 && bufferH > 0 && (bufferW != s.bufW || bufferH != s.bufH))
+    {
+        s.bufW = bufferW;
+        s.bufH = bufferH;
+        s.geometrySet = false;
+        std::fprintf(stderr, "[present-vk] parent buffer %dx%d\n", bufferW, bufferH);
     }
     if (window == s.window)
     {
@@ -277,16 +310,7 @@ void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect)
         }
         return;
     }
-    if (s.sc)
-    {
-        TX *tx = a.txCreate();
-        a.reparent(tx, s.sc, nullptr);
-        a.txApply(tx);
-        a.txDelete(tx);
-        s.graveyard.push_back(s.sc);
-        s.sc = nullptr;
-        std::fprintf(stderr, "[present-vk] window gone: child layer detached\n");
-    }
+    detachLocked(s, "window changed");
     // Buffers on a detached layer are never released; don't wait for them.
     for (auto &kv : s.bufs)
     {
@@ -395,7 +419,7 @@ bool queue(AHardwareBuffer *buffer, uint32_t w, uint32_t h)
     const Api &a = api();
     Sink &s = sink();
     std::lock_guard<std::mutex> lock(s.m);
-    if (!s.sc || s.layerW <= 0 || s.layerH <= 0)
+    if (!s.sc || s.bufW <= 0 || s.bufH <= 0)
     {
         ++s.dropped;
         return false;
@@ -405,8 +429,10 @@ bool queue(AHardwareBuffer *buffer, uint32_t w, uint32_t h)
     a.setBuffer(tx, s.sc, buffer, -1); // the caller waited for the GPU fence
     if (!s.geometrySet || w != s.lastW || h != s.lastH)
     {
+        // Parent buffer space (V1: display pixels here were scaled again by
+        // the parent's 796x448 -> 1920x1080 buffer scaling: a zoomed picture).
         const ps2x::present::Rect r = ps2x::present::presentRect(
-            static_cast<float>(s.layerW), static_cast<float>(s.layerH), static_cast<float>(w), static_cast<float>(h),
+            static_cast<float>(s.bufW), static_cast<float>(s.bufH), static_cast<float>(w), static_cast<float>(h),
             static_cast<ps2x::present::Aspect>(s.aspect));
         const ARect src = {0, 0, static_cast<int32_t>(w), static_cast<int32_t>(h)};
         const ARect dst = {static_cast<int32_t>(r.x + 0.5f), static_cast<int32_t>(r.y + 0.5f),
@@ -415,8 +441,9 @@ bool queue(AHardwareBuffer *buffer, uint32_t w, uint32_t h)
         a.setZOrder(tx, s.sc, 1); // above raylib's GL window (nothing is drawn over the game on the Odin)
         a.setVisibility(tx, s.sc, kVisibilityShow);
         a.setBufferTransparency(tx, s.sc, kTransparencyOpaque); // PS2 alpha is not display alpha
-        std::fprintf(stderr, "[present-vk] geometry src %ux%u -> dst [%d,%d %d,%d] in layer %dx%d aspect=%d\n", w, h,
-                     dst.left, dst.top, dst.right, dst.bottom, s.layerW, s.layerH, s.aspect);
+        std::fprintf(stderr,
+                     "[present-vk] geometry src %ux%u -> dst [%d,%d %d,%d] in parent buffer %dx%d (window %dx%d) aspect=%d\n",
+                     w, h, dst.left, dst.top, dst.right, dst.bottom, s.bufW, s.bufH, s.layerW, s.layerH, s.aspect);
         s.geometrySet = true;
         s.lastW = w;
         s.lastH = h;

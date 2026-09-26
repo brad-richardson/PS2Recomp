@@ -22,9 +22,15 @@ bool enabled(); // PS2X_PRESENT_VULKAN=1 on Android; false elsewhere
 bool active();  // enabled and at least one buffer queued (the presenter skips its upload/draw)
 
 // Main thread, once per host frame: the current window (nullptr while it is
-// gone) and the presenter's aspect (ps2x::present::Aspect as int). Creates the
-// child layer for a new window and detaches it when the window goes away.
-void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect);
+// gone), the presenter's aspect (ps2x::present::Aspect as int) and the size of
+// the window's own buffers (raylib's EGL surface). A child layer inherits the
+// parent's buffer-to-window scaling, so its destination rect is placed in that
+// buffer space. Creates the child layer for a new window.
+void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect, int bufferW, int bufferH);
+// Main thread, from APP_CMD_TERM_WINDOW (before the window is destroyed):
+// detach the child; the next setHostWindow makes a new one even if the
+// ANativeWindow pointer is reused.
+void windowLost();
 
 // GsWorker: RGBA8 buffer for a w x h slot (GPU color output + sampled +
 // composer overlay + CPU_READ_RARELY, which keeps Qualcomm gralloc linear).
