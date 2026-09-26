@@ -1550,11 +1550,19 @@ bool PS2Runtime::initialize(const char *title)
             ps2x_present_vk::setUnderlay(true);
         }
 #endif
-        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
 #if defined(__ANDROID__)
+        // AP1: start raylib at the display size (0 takes the native window
+        // size): with 640x448 the GL fallback letterboxes into raylib's
+        // canvas and shows a bordered 1544x868 box, while at the window size
+        // the same presentRect fills 1920x1080 at 16:9. The vpad layout
+        // scales by window height and touch is in screen coordinates, so both
+        // follow; the Vulkan child rect is in buffer pixels either way.
+        InitWindow(0, 0, title);
         // AP1: the window exists now (raylib waits for INIT_WINDOW); later
         // windows re-apply through the app-command wrapper above.
         ap1HideSystemBars(GetAndroidApp());
+#else
+        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
 #endif
 #if defined(PS2X_IOS)
         ps2x::ios::syncWindowSize();
