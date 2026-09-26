@@ -94,6 +94,11 @@ struct GsRpc : public GsRpcBase
     T result{};
 };
 
+// GF1 H1 (PS2X_GS_HANDOFF_DIET): GifPacket.u32a flag. The command also
+// carries its GIF path in pathId; the worker applies it just before the
+// packet, exactly as a NoteGifPath command queued right ahead of it would.
+constexpr uint32_t kGsGifPacketHasPath = 1u;
+
 struct GsCommand
 {
     GsCmdKind kind = GsCmdKind::Fence;

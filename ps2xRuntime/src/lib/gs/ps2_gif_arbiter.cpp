@@ -127,7 +127,10 @@ void GifArbiter::drain()
             {
                 m_shadowFn(pkt.pathId, pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
             }
-            m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+            if (m_processPathFn)
+                m_processPathFn(pkt.pathId, pkt.data);
+            else
+                m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
         }
     }
     m_queue.clear();

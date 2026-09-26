@@ -391,6 +391,19 @@ void GS::executeQueuedCommand(GsCommand &cmd)
     // N8D7M12 Part 5F4P2: hash before the handler runs so a GifPacket
     // sees the prior-consumed m_curGifPath value. N8D7M12 Part 5F4P3:
     // noteConsumedCommand fast-returns while disabled without locking.
+    if (cmd.kind == GsCmdKind::GifPacket && (cmd.u32a & kGsGifPacketHasPath) != 0u)
+    {
+        // GF1 H1: the folded NoteGifPath runs first, digest included, so the
+        // consumed sequence is the one the two separate commands produce.
+        if (m_pktSeqEnabled.load(std::memory_order_relaxed))
+        {
+            GsCommand note;
+            note.kind = GsCmdKind::NoteGifPath;
+            note.pathId = cmd.pathId;
+            noteConsumedCommand(note);
+        }
+        m_curGifPath = static_cast<GifPathId>(cmd.pathId);
+    }
     noteConsumedCommand(cmd);
     const GsWorkerScope scope;
     switch (cmd.kind)
@@ -1135,6 +1148,28 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
         }
     }
     return true;
+}
+
+void GS::processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uint8_t> &bytes)
+{
+    const uint32_t sizeBytes = static_cast<uint32_t>(bytes.size());
+    if (!m_worker || t_inGsWorker || sizeBytes < 16u)
+    {
+        if (notePath)
+            noteGifPath(path);
+        processGIFPacket(bytes.data(), sizeBytes);
+        return;
+    }
+    ps2_mtvu::touch(ps2_mtvu::Site::GsProcess); // MT1: unit-owned
+    GsCommand cmd;
+    cmd.kind = GsCmdKind::GifPacket;
+    if (notePath)
+    {
+        cmd.u32a = kGsGifPacketHasPath;
+        cmd.pathId = static_cast<uint8_t>(path);
+    }
+    cmd.bytes.assign(bytes.begin(), bytes.end());
+    m_worker->enqueue(std::move(cmd));
 }
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)

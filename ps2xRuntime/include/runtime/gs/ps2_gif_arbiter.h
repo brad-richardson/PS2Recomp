@@ -31,6 +31,11 @@ public:
     // G44 shadow tap: observes each drained packet WITH its path, in the same
     // order the CPU backend sees it. Unset = zero behavior change.
     using ShadowPacketFn = std::function<void(GifPathId, const uint8_t *, uint32_t)>;
+    // GF1 (PS2X_GS_HANDOFF_DIET): when set, drain() hands each packet to this
+    // instead of the process function, with its path and its own byte vector
+    // (the callee may take the bytes). Called at the same point, after the
+    // listener and the shadow tap.
+    using ProcessPathPacketFn = std::function<void(GifPathId, std::vector<uint8_t> &)>;
 
     GifArbiter() = default;
     explicit GifArbiter(ProcessPacketFn processFn);
@@ -38,6 +43,7 @@ public:
     void setProcessPacketFn(ProcessPacketFn fn) { m_processFn = std::move(fn); }
     void setPacketListener(PacketListenerFn fn) { m_packetListener = std::move(fn); }
     void setShadowPacketFn(ShadowPacketFn fn) { m_shadowFn = std::move(fn); }
+    void setProcessPathPacketFn(ProcessPathPacketFn fn) { m_processPathFn = std::move(fn); }
 
     void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
 
@@ -48,6 +54,7 @@ private:
     ProcessPacketFn m_processFn;
     PacketListenerFn m_packetListener;
     ShadowPacketFn m_shadowFn;
+    ProcessPathPacketFn m_processPathFn;
     std::vector<GifArbiterPacket> m_queue;
 
     static bool isImagePacket(const uint8_t *data, uint32_t sizeBytes);

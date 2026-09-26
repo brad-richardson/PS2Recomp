@@ -279,6 +279,14 @@ struct ProgramHeader
 
 namespace
 {
+    // GF1: PS2X_GS_HANDOFF_DIET=1 turns on the cheaper unit -> GS worker
+    // handoff (default off). Read once, at GS setup.
+    bool gsHandoffDietRequested()
+    {
+        const char *env = std::getenv("PS2X_GS_HANDOFF_DIET");
+        return env != nullptr && std::strcmp(env, "1") == 0;
+    }
+
     // SLUS_207.72 stores its video choice in bits 20-21 of the first options
     // word. 0 is 4:3 and 2 is the menu's anamorphic choice. The game calls
     // 0x228C08 to apply that choice after defaults, menu edits, and profile
@@ -1390,11 +1398,24 @@ bool PS2Runtime::syncCoreSubsystems()
     }
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
+    // GF1 (PS2X_GS_HANDOFF_DIET=1, default off): a cheaper unit -> GS worker
+    // handoff. H1: the path note rides in the packet's own command. Host
+    // transport only: the worker executes the same commands in the same order.
+    const bool handoffDiet = gsHandoffDietRequested();
+    if (handoffDiet)
+    {
+        m_gifArbiter.setProcessPathPacketFn([this](GifPathId path, std::vector<uint8_t> &bytes)
+                                            {
+                                                const bool note = ps2_gfx_stats::enabled() || m_gs.rawGifBackendActive();
+                                                m_gs.processGIFPacketWithPath(path, note, bytes);
+                                            });
+        std::cerr << "[gs:handoff] diet on (PS2X_GS_HANDOFF_DIET=1): H1 one command per packet" << std::endl;
+    }
     // E33: per-path GIF census + GS draw attribution. The listener runs
     // before each packet's process call (same thread, synchronous drain),
     // so draws kicked while processing land on this packet's path. One
     // relaxed check per packet when stats are off.
-    m_gifArbiter.setPacketListener([this](GifPathId path, uint32_t size)
+    m_gifArbiter.setPacketListener([this, handoffDiet](GifPathId path, uint32_t size)
                                    {
                                        const bool stats = ps2_gfx_stats::enabled();
                                        if (stats)
@@ -1402,7 +1423,8 @@ bool PS2Runtime::syncCoreSubsystems()
                                            ps2_gfx_stats::noteGifPacket(path, size);
                                        }
                                        // GB3 Part 2: a raw-GIF backend needs every packet's path.
-                                       if (stats || m_gs.rawGifBackendActive())
+                                       // GF1 H1: with the diet the path rides in the packet command.
+                                       if (!handoffDiet && (stats || m_gs.rawGifBackendActive()))
                                        {
                                            m_gs.noteGifPath(path);
                                        }
