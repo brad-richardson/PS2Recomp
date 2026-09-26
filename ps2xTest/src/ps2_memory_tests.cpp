@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_e7.h"
+#include "ps2_mtvu.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 namespace
@@ -1090,6 +1092,151 @@ void register_ps2_memory_tests()
             t.Equals(captured.size(), static_cast<size_t>(3u), "an unmask left open drains the rest");
             t.Equals(captured[2].size(), static_cast<size_t>(64u), "a non-EOP tag stays with its packet");
             t.Equals(firstValue(captured[2]), uint64_t(0x33u), "last packet keeps the non-EOP tag first");
+        });
+
+        tc.Run("MT1 threaded unit gives the synchronous GIF stream, VU1 memory and EE reads", [](TestCase &t)
+        {
+            // MT1 stage 3: the same EE program run synchronously and with the
+            // unit on its worker thread (plus host jitter) must give the same
+            // GIF packet sequence (path + bytes), VU1 data memory, VIF1 state
+            // and every value the "EE" reads back. Covers DMA-from-RDRAM that
+            // the EE overwrites right after the kick, UNPACK -> MSCAL -> PATH1
+            // content, DIRECT (PATH2), masked PATH3 chains with MSKPATH3
+            // windows, VIF1 FIFO writes, EE VU1-memory writes/reads (sync), GS
+            // privileged writes (R2 jobs) and CSR stores (EE-applied).
+            struct Outcome
+            {
+                std::vector<std::pair<int, std::vector<uint8_t>>> packets;
+                std::vector<uint8_t> vu1Data;
+                std::vector<uint64_t> eeReads;
+                uint32_t row0 = 0;
+                bool masked = false;
+                size_t mscals = 0;
+                size_t offThread = 0;
+            };
+            auto run = [](ps2_mtvu::Mode mode, uint32_t jitterUs) -> Outcome
+            {
+                ps2_mtvu::setModeForTest(mode, false, jitterUs);
+                Outcome out;
+                PS2Memory mem;
+                if (!mem.initialize())
+                    return out;
+                int lastPath = -1;
+                GifArbiter arbiter([&](const uint8_t *data, uint32_t size)
+                                   { out.packets.emplace_back(lastPath, std::vector<uint8_t>(data, data + size)); });
+                arbiter.setPacketListener([&](GifPathId path, uint32_t) { lastPath = static_cast<int>(path); });
+                mem.setGifArbiter(&arbiter);
+                const std::thread::id eeThread = std::this_thread::get_id();
+                mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
+                {
+                    // Stand-in for a VU1 program with XGKICK: a PATH1 packet
+                    // whose content depends on VU1 data at TOP.
+                    ++out.mscals;
+                    if (std::this_thread::get_id() != eeThread)
+                        ++out.offThread;
+                    const uint8_t *vu = mem.getVU1Data();
+                    uint64_t sum = startPC ^ (static_cast<uint64_t>(itop) << 40);
+                    for (uint32_t q = 0; q < 4u; ++q)
+                    {
+                        uint64_t w = 0;
+                        std::memcpy(&w, vu + ((top + q) & 0x3FFu) * 16u, sizeof(w));
+                        sum = sum * 1000003ull + w;
+                    }
+                    const uint64_t pkt[4] = {1ull | (1ull << 15) | (1ull << 60), 0xEull, sum, 0x42ull};
+                    mem.submitGifPacket(GifPathId::Path1, reinterpret_cast<const uint8_t *>(pkt), sizeof(pkt));
+                });
+                auto appendU32 = [](std::vector<uint8_t> &v, uint32_t x)
+                {
+                    const uint8_t *b = reinterpret_cast<const uint8_t *>(&x);
+                    v.insert(v.end(), b, b + 4);
+                };
+                auto appendAd = [](std::vector<uint8_t> &v, bool eop, uint64_t value)
+                {
+                    const uint64_t q[4] = {1ull | (eop ? (1ull << 15) : 0ull) | (1ull << 60), 0xEull, value, 0x42ull};
+                    const uint8_t *b = reinterpret_cast<const uint8_t *>(q);
+                    v.insert(v.end(), b, b + sizeof(q));
+                };
+                uint8_t *rdram = mem.getRDRAM();
+                constexpr uint32_t kVif1 = 0x10009000u, kGif = 0x1000A000u;
+                constexpr uint32_t kSrc = 0x00100000u, kGifSrc = 0x00180000u;
+                for (uint32_t i = 0; i < 60u; ++i)
+                {
+                    std::vector<uint8_t> v;
+                    appendU32(v, makeVifCmd(0x01u, 0u, 0x0404u));              // STCYCL 4/4
+                    appendU32(v, makeVifCmd(0x03u, 0u, (i * 8u) & 0x3F0u));    // BASE
+                    appendU32(v, makeVifCmd(0x02u, 0u, 0x40u));                // OFFSET
+                    appendU32(v, makeVifCmd(0x6Cu, 4u, 0x8000u));              // UNPACK V4-32, 4 qw, +TOPS
+                    for (uint32_t w = 0; w < 16u; ++w)
+                        appendU32(v, i * 131u + w * 7u);
+                    appendU32(v, makeVifCmd(0x14u, 0u, (i & 7u) * 2u));        // MSCAL
+                    appendU32(v, makeVifCmd(0x06u, 0u, 0x0000u));              // MSKPATH3 0 (window)
+                    appendU32(v, makeVifCmd(0x06u, 0u, 0x8000u));              // MSKPATH3 1
+                    while (v.size() % 16u != 12u)
+                        appendU32(v, 0u);                                      // NOP pad
+                    appendU32(v, makeVifCmd(0x50u, 0u, 2u));                   // DIRECT 2 qw
+                    appendAd(v, true, 0x1000u + i);
+                    while (v.size() % 16u)
+                        appendU32(v, 0u);
+                    std::memcpy(rdram + kSrc, v.data(), v.size());
+                    mem.writeIORegister(kVif1 + 0x10u, kSrc);
+                    mem.writeIORegister(kVif1 + 0x20u, static_cast<uint32_t>(v.size() / 16u));
+                    mem.writeIORegister(kVif1 + 0x00u, 0x101u);
+                    std::memset(rdram + kSrc, 0xCD, v.size()); // EE reuses the buffer at once
+                    if (i % 5u == 0u)
+                    {
+                        std::vector<uint8_t> g;
+                        for (uint32_t k = 0; k < 3u; ++k)
+                            appendAd(g, true, (static_cast<uint64_t>(i) << 8) | k);
+                        std::memcpy(rdram + kGifSrc, g.data(), g.size());
+                        mem.writeIORegister(kGif + 0x10u, kGifSrc);
+                        mem.writeIORegister(kGif + 0x20u, static_cast<uint32_t>(g.size() / 16u));
+                        mem.writeIORegister(kGif + 0x00u, 0x100u);
+                        std::memset(rdram + kGifSrc, 0xEE, g.size());
+                    }
+                    if (i % 3u == 0u)
+                        mem.write32(0x1100C000u + ((i * 48u) & 0x3FF0u), 0xA5000000u | i); // VU1 data (sync)
+                    if (i % 4u == 1u)
+                        out.eeReads.push_back(mem.read32(0x1100C000u + ((i * 64u) & 0x3FF0u)));
+                    if (i % 6u == 2u)
+                    {
+                        const uint32_t fifo[4] = {makeVifCmd(0x06u, 0u, 0x0000u), makeVifCmd(0x06u, 0u, 0x8000u), 0u, 0u};
+                        __m128i q;
+                        std::memcpy(&q, fifo, sizeof(q));
+                        mem.write128(0x10005000u, q); // VIF1 FIFO: an unmask window
+                    }
+                    mem.write64(0x12000070u, 0x100000ull + i); // DISPFB1 (R2 job)
+                    mem.write64(0x12001000u, 0x8ull);          // CSR: clear VSINT (EE-applied)
+                    if (i % 7u == 6u)
+                    {
+                        // As PS2Runtime::Load* does before a GS priv read (unmasked).
+                        ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivRead);
+                        out.eeReads.push_back(mem.read64(0x12000070u) ^ (mem.read64(0x12001000u) << 32));
+                    }
+                }
+                ps2_mtvu::syncAll();
+                out.vu1Data.assign(mem.getVU1Data(), mem.getVU1Data() + PS2_VU1_DATA_SIZE);
+                out.row0 = mem.vif1_regs.row[0];
+                out.masked = mem.isPath3Masked();
+                out.eeReads.push_back(mem.gs().dispfb1);
+                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+                mem.setGifArbiter(nullptr);
+                return out;
+            };
+            const Outcome base = run(ps2_mtvu::Mode::Off, 0u);
+            const Outcome thr = run(ps2_mtvu::Mode::Threaded, 0u);
+            const Outcome jit = run(ps2_mtvu::Mode::Threaded, 300u);
+            t.IsTrue(base.packets.size() > 150u, "scenario should produce a long GIF stream");
+            t.Equals(base.mscals, static_cast<size_t>(60u), "every kick runs its MSCAL");
+            t.Equals(base.offThread, static_cast<size_t>(0u), "synchronous MSCALs run on the EE thread");
+            t.Equals(thr.offThread, static_cast<size_t>(60u), "threaded MSCALs run on the unit worker");
+            for (const Outcome *o : {&thr, &jit})
+            {
+                t.IsTrue(o->packets == base.packets, "GIF packet sequence (path + bytes) is identical");
+                t.IsTrue(o->vu1Data == base.vu1Data, "VU1 data memory is identical");
+                t.IsTrue(o->eeReads == base.eeReads, "every EE read-back is identical");
+                t.Equals(o->row0, base.row0, "VIF1 ROW is identical");
+                t.Equals(o->masked, base.masked, "PATH3 mask state is identical");
+            }
         });
 
         tc.Run("GIF arbiter prioritizes PATH1 then PATH2 then PATH3", [](TestCase &t)

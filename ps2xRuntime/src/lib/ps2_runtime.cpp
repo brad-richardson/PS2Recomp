@@ -1,5 +1,15 @@
 #include "ps2_runtime.h"
 #include "ps2_mtvu.h"
+#include "ps2_e4.h"
+#include "ps2_e7.h"
+#include "ps2_mpg_src_trace.h"
+#include "ps2_pk.h"
+#include "ps2_rr1_alpha_tap.h"
+#include "ps2_uv1_counters.h"
+#include "ps2_vif_mpg_log.h"
+#include "ps2_vq.h"
+#include "ps2_vu1_entry_trace.h"
+#include "ps2_vu1_trace.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e43_trace.h"
@@ -1297,8 +1307,36 @@ bool PS2Runtime::syncCoreSubsystems()
                                   if (!c)
                                       c = &m_cpuContext;
                                   return (c->vu0_fbrst & 0x0C00u) != 0u || (c->vu0_vpu_stat & 0x0600u) != 0u; });
+    ps2_mtvu::fbrstFn() = [this]()
+    {
+        const R5900Context *c = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
+        if (!c)
+            c = &m_cpuContext;
+        return c->vu0_fbrst;
+    };
+    // MT1: PS2X_MTVU=1 runs the unit on its own thread unless a dev trace
+    // that shares state with unit code is armed (those need the inline path).
+    ps2_mtvu::configure(ps2_vu1_trace::enabled() || ps2_vu1_entry_trace::enabled() || ps2_pk::enabled() ||
+                        ps2_e7::enabled() || ps2_rr1::alphaTapOn() || ps2_rr1::evOn() ||
+                        ps2_mpg_src_trace::enabled() || ps2_gfx_stats::enabled() || ps2x_gs_capture::enabled() ||
+                        ps2_vif_mpg_log::enabled() || ps2_e44_trace::enabled() || ps2_e43_trace::enabled() ||
+                        ps2_e41_trace::armed() || ps2_uv1_vif_fmt::enabled() || ps2_uv1_dma_stall::enabled() ||
+                        ps2_e4::enabled() || ps2_vq::enabled());
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
+                                     if (ps2_mtvu::onWorker())
+                                     {
+                                         // MT1: on the unit worker, D/T enables come from
+                                         // the kick's FBRST snapshot; the D/T rule keeps the
+                                         // stop bits 0, so VPU_STAT (EE-owned) is not written.
+                                         const uint32_t fbrst = ps2_mtvu::jobFbrst();
+                                         m_vu1.state().dBitEnabled = (fbrst & (1u << 10)) != 0u;
+                                         m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
+                                         m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                       m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                       m_gs, &m_memory, startPC, top, itop, 65536);
+                                         return;
+                                     }
                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
                                      if (!cpuContext)
                                      {
@@ -1317,6 +1355,16 @@ bool PS2Runtime::syncCoreSubsystems()
                                          (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
     m_memory.setVu1MscntCallback([this](uint32_t top, uint32_t itop)
                                  {
+                                     if (ps2_mtvu::onWorker())
+                                     {
+                                         const uint32_t fbrst = ps2_mtvu::jobFbrst(); // MT1: see MSCAL
+                                         m_vu1.state().dBitEnabled = (fbrst & (1u << 10)) != 0u;
+                                         m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
+                                         m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                      m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                      m_gs, &m_memory, top, itop, 65536);
+                                         return;
+                                     }
                                      R5900Context *cpuContext = m_eeScheduler ? m_eeScheduler->currentContext() : nullptr;
                                      if (!cpuContext)
                                      {
@@ -3600,10 +3648,19 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
         // there is no meaningful value to log).
         if (gb2IsGsPrivReg(vaddr))
         {
-            ps2_mtvu::sync(ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 1u),
-                           ctx ? ctx->pc : 0u); // MT1: before the CSR drain
-            if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
-                m_gs.drainQueue();
+            // MT1: sync before the CSR drain. R1 (threaded): a CSR load masked
+            // away from the unit's bits neither waits nor drains.
+            const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
+                ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 1u)
+                : ps2_mtvu::Reason::GsPrivRead;
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
+            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
+            if (!mtvuFree)
+            {
+                ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
+                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                    m_gs.drainQueue();
+            }
             return m_memory.read8(vaddr);
         }
         return m_memory.read8(vaddr);
@@ -3622,10 +3679,19 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
         // Part 7: drain-only (read16 doesn't serve the priv range).
         if (gb2IsGsPrivReg(vaddr))
         {
-            ps2_mtvu::sync(ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 2u),
-                           ctx ? ctx->pc : 0u); // MT1: before the CSR drain
-            if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
-                m_gs.drainQueue();
+            // MT1: sync before the CSR drain. R1 (threaded): a CSR load masked
+            // away from the unit's bits neither waits nor drains.
+            const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
+                ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 2u)
+                : ps2_mtvu::Reason::GsPrivRead;
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
+            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
+            if (!mtvuFree)
+            {
+                ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
+                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                    m_gs.drainQueue();
+            }
             return m_memory.read16(vaddr);
         }
         return m_memory.read16(vaddr);
@@ -3643,10 +3709,19 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
     {
         if (gb2IsGsPrivReg(vaddr))
         {
-            ps2_mtvu::sync(ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 4u),
-                           ctx ? ctx->pc : 0u); // MT1: before the CSR drain
-            if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
-                m_gs.drainQueue();
+            // MT1: sync before the CSR drain. R1 (threaded): a CSR load masked
+            // away from the unit's bits neither waits nor drains.
+            const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
+                ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 4u)
+                : ps2_mtvu::Reason::GsPrivRead;
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
+            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
+            if (!mtvuFree)
+            {
+                ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
+                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                    m_gs.drainQueue();
+            }
             const uint32_t value = m_memory.read32(vaddr);
             ps2_pk::notePrivRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
                                  ctx ? ctx->pc : 0u, vaddr);
@@ -3667,10 +3742,19 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
     {
         if (gb2IsGsPrivReg(vaddr))
         {
-            ps2_mtvu::sync(ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 8u),
-                           ctx ? ctx->pc : 0u); // MT1: before the CSR drain
-            if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
-                m_gs.drainQueue();
+            // MT1: sync before the CSR drain. R1 (threaded): a CSR load masked
+            // away from the unit's bits neither waits nor drains.
+            const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
+                ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 8u)
+                : ps2_mtvu::Reason::GsPrivRead;
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
+            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
+            if (!mtvuFree)
+            {
+                ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
+                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                    m_gs.drainQueue();
+            }
             const uint64_t value = m_memory.read64(vaddr);
             ps2_pk::notePrivRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
                                  ctx ? ctx->pc : 0u, vaddr);
@@ -3692,10 +3776,19 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
         // Part 7: drain-only (read128 returns zero outside RAM areas).
         if (gb2IsGsPrivReg(vaddr))
         {
-            ps2_mtvu::sync(ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 16u),
-                           ctx ? ctx->pc : 0u); // MT1: before the CSR drain
-            if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
-                m_gs.drainQueue();
+            // MT1: sync before the CSR drain. R1 (threaded): a CSR load masked
+            // away from the unit's bits neither waits nor drains.
+            const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
+                ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 16u)
+                : ps2_mtvu::Reason::GsPrivRead;
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
+            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
+            if (!mtvuFree)
+            {
+                ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
+                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                    m_gs.drainQueue();
+            }
             return m_memory.read128(vaddr);
         }
         return m_memory.read128(vaddr);

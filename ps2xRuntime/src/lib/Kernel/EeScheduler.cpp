@@ -2900,6 +2900,21 @@ void ps2xGsCsrVBlankStart(PS2Memory &memory, uint64_t tick)
 {
     GSRegisters &gsRegs = memory.gs();
     const bool odd = (tick & 1u) != 0u;
+    // MT1 R2 (threaded): VSINT/FIELD are EE-owned CSR bits; set them here,
+    // not behind queued unit work (commutes with the unit's bit 0/1 ORs).
+    if (ps2_mtvu::threaded())
+    {
+        if (odd)
+            gsRegs.csr.fetch_or(0x2008ull, std::memory_order_acq_rel);
+        else
+        {
+            uint64_t expected = gsRegs.csr.load();
+            while (!gsRegs.csr.compare_exchange_weak(
+                expected, (expected & ~0x2000ull) | 0x8ull,
+                std::memory_order_acq_rel));
+        }
+        return;
+    }
     memory.gsPrivStore([&gsRegs, odd]()
                        {
         // VSINT is raised on each VBlankStart; FIELD follows tick parity.
@@ -2931,7 +2946,15 @@ void EeScheduler::processEvent(const EeEvent &event)
         }
         // MT1: VBlankStart touches the GS, the det-hash and the vsync tick the
         // unit reads, so queued unit work completes here (after the pacer).
-        ps2_mtvu::vblank(m_vsyncTick + 1u);
+        {
+            bool hashTick = true;
+#if PS2X_ENABLE_DET_HASH_TAP
+            hashTick = m_detHashEvery != 0 && ((m_vsyncTick + 1u) % m_detHashEvery) == 0u;
+#else
+            hashTick = false;
+#endif
+            ps2_mtvu::vblank(m_vsyncTick + 1u, hashTick);
+        }
         ++m_vsyncTick;
         if (m_vsyncTick == coverageTick())
         {
