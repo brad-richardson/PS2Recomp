@@ -304,14 +304,15 @@ void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect,
             g_winLog.layerW = w;
             g_winLog.layerH = h;
         }
-        const Ledger::Counts c = ledger().counts();
-        std::fprintf(stderr,
-                     "[present-vk] child layer %s on window %p (%dx%d buffers), layer %dx%d, gen %u, layers live %u "
-                     "(detached awaiting completion %u)\n",
+        std::fprintf(stderr, "[present-vk] child layer %s on window %p (%dx%d buffers), layer %dx%d, gen %u\n",
                      ledger().broken() ? "NOT made (fallback)" : "made", static_cast<void *>(window),
                      ANativeWindow_getWidth(window), ANativeWindow_getHeight(window), g_winLog.layerW, g_winLog.layerH,
-                     ledger().windowGeneration(), c.liveLayers, c.retiredLayers);
+                     ledger().windowGeneration());
     }
+    // VK2: the ledger's counts at every window change (lifecycle stress receipts).
+    char stats[1024];
+    appendStats(stats, sizeof(stats));
+    std::fprintf(stderr, "[present-vk] window-change stats%s\n", stats);
 }
 
 uint64_t allocateBuffer(uint32_t w, uint32_t h, AHardwareBuffer **out)
