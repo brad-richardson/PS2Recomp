@@ -1147,6 +1147,11 @@ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
 
 PS2Runtime::~PS2Runtime()
 {
+    // MT1: queued unit work may reference this runtime; the process-wide
+    // hooks must not outlive it (tests create many runtimes).
+    ps2_mtvu::syncAll();
+    ps2_mtvu::setDtFallbackFn({});
+    ps2_mtvu::fbrstFn() = {};
     printMissingFunctionCounts();
     try
     {
