@@ -35,21 +35,124 @@
 #include "runtime/gs/ps2_present_vk.h"
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
+#include <android/api-level.h>
 #include <android/native_activity.h>
 #include <android/native_window.h>
 #include <android_native_app_glue.h>
+#include <jni.h>
+#include <pthread.h>
 extern "C" struct android_app *GetAndroidApp(void); // raylib rcore_android.c
 namespace
 {
+// AP1: immersive full-screen for the NativeActivity (raylib sets no system-UI
+// visibility, so the gesture-bar handle draws over the game). API 30+:
+// WindowInsetsController.hide(systemBars()) with transient-bars-by-swipe (a
+// swipe reveals the bars, which then auto-hide); API 29 (our minSdk): the
+// legacy IMMERSIVE_STICKY systemUiVisibility flags. The system clears it on
+// window/focus changes, so it is re-applied on INIT_WINDOW and GAINED_FOCUS.
+void ap1HideSystemBars(struct android_app *app)
+{
+    if (!app || !app->activity || !app->activity->vm)
+        return;
+    JNIEnv *env = nullptr;
+    // Keep the thread's name: an unnamed attach renames it "Thread-N" (as in
+    // the Vulkan sink's queryLayerSize).
+    char name[16] = {};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    JavaVMAttachArgs args = {JNI_VERSION_1_6, name[0] ? name : nullptr, nullptr};
+    if (app->activity->vm->AttachCurrentThread(&env, &args) != JNI_OK || !env)
+        return;
+    bool applied = false;
+    const char *mode = "";
+    jobject act = app->activity->clazz;
+    jclass actCls = env->GetObjectClass(act);
+    jmethodID getWindow = actCls ? env->GetMethodID(actCls, "getWindow", "()Landroid/view/Window;") : nullptr;
+    jobject win = getWindow ? env->CallObjectMethod(act, getWindow) : nullptr;
+    if (win && !env->ExceptionCheck())
+    {
+        jclass winCls = env->GetObjectClass(win);
+        jmethodID getDecor = winCls ? env->GetMethodID(winCls, "getDecorView", "()Landroid/view/View;") : nullptr;
+        jobject view = getDecor ? env->CallObjectMethod(win, getDecor) : nullptr;
+        if (view && !env->ExceptionCheck())
+        {
+            jclass viewCls = env->GetObjectClass(view);
+            if (android_get_device_api_level() >= 30)
+            {
+                jmethodID getController =
+                    viewCls ? env->GetMethodID(viewCls, "getWindowInsetsController",
+                                               "()Landroid/view/WindowInsetsController;")
+                            : nullptr;
+                jobject controller = getController ? env->CallObjectMethod(view, getController) : nullptr;
+                if (controller && !env->ExceptionCheck())
+                {
+                    jclass typeCls = env->FindClass("android/view/WindowInsets$Type");
+                    jmethodID systemBars =
+                        typeCls ? env->GetStaticMethodID(typeCls, "systemBars", "()I") : nullptr;
+                    const jint types =
+                        (typeCls && systemBars) ? env->CallStaticIntMethod(typeCls, systemBars) : 0;
+                    jclass ctlCls = env->GetObjectClass(controller);
+                    jmethodID hide =
+                        ctlCls ? env->GetMethodID(ctlCls, "hide", "(I)Landroid/view/WindowInsetsController;") : nullptr;
+                    jmethodID setBehavior =
+                        ctlCls ? env->GetMethodID(ctlCls, "setSystemBarsBehavior", "(I)V") : nullptr;
+                    if (!env->ExceptionCheck() && types != 0 && hide && setBehavior)
+                    {
+                        env->CallVoidMethod(controller, setBehavior, 2); // BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                        jobject hidden = env->CallObjectMethod(controller, hide, types);
+                        if (hidden)
+                            env->DeleteLocalRef(hidden);
+                        applied = !env->ExceptionCheck();
+                        mode = "insets-transient";
+                    }
+                    if (ctlCls)
+                        env->DeleteLocalRef(ctlCls);
+                    if (typeCls)
+                        env->DeleteLocalRef(typeCls);
+                    env->DeleteLocalRef(controller);
+                }
+            }
+            else
+            {
+                jmethodID setVis =
+                    viewCls ? env->GetMethodID(viewCls, "setSystemUiVisibility", "(I)V") : nullptr;
+                if (setVis && !env->ExceptionCheck())
+                {
+                    // IMMERSIVE_STICKY | LAYOUT_STABLE | LAYOUT_HIDE_NAVIGATION |
+                    // LAYOUT_FULLSCREEN | HIDE_NAVIGATION | FULLSCREEN.
+                    env->CallVoidMethod(view, setVis, 0x1706);
+                    applied = !env->ExceptionCheck();
+                    mode = "systemUiVisibility";
+                }
+            }
+            if (viewCls)
+                env->DeleteLocalRef(viewCls);
+            env->DeleteLocalRef(view);
+        }
+        if (winCls)
+            env->DeleteLocalRef(winCls);
+        env->DeleteLocalRef(win);
+    }
+    if (env->ExceptionCheck())
+        env->ExceptionClear();
+    if (actCls)
+        env->DeleteLocalRef(actCls);
+    std::fprintf(stderr, "[immersive] %s%s%s\n", applied ? "bars hidden (" : "NOT applied",
+                 applied ? mode : "", applied ? ")" : "");
+}
 // VK1: raylib's app-command handler, wrapped so the SurfaceControl child is
 // detached before the window goes (TERM_WINDOW) and remade after it returns
 // (the ANativeWindow pointer can be reused across background/foreground).
+// AP1: also re-applies immersive mode (the wrapper is installed on the GL
+// path too, where the TERM_WINDOW call is a no-op).
 void (*g_vk1RaylibOnAppCmd)(struct android_app *, int32_t) = nullptr;
 void vk1OnAppCmd(struct android_app *app, int32_t cmd)
 {
     if (cmd == APP_CMD_TERM_WINDOW)
         ps2x_present_vk::windowLost();
-    g_vk1RaylibOnAppCmd(app, cmd);
+    if (cmd == APP_CMD_INIT_WINDOW || cmd == APP_CMD_GAINED_FOCUS)
+        ap1HideSystemBars(app);
+    if (g_vk1RaylibOnAppCmd)
+        g_vk1RaylibOnAppCmd(app, cmd);
 }
 } // namespace
 #endif
@@ -1448,6 +1551,11 @@ bool PS2Runtime::initialize(const char *title)
         }
 #endif
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+#if defined(__ANDROID__)
+        // AP1: the window exists now (raylib waits for INIT_WINDOW); later
+        // windows re-apply through the app-command wrapper above.
+        ap1HideSystemBars(GetAndroidApp());
+#endif
 #if defined(PS2X_IOS)
         ps2x::ios::syncWindowSize();
         SetTraceLogLevel(LOG_ERROR);
@@ -4517,14 +4625,17 @@ void PS2Runtime::run()
         uint32_t presentWidth = FB_WIDTH;
         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
 #if defined(__ANDROID__)
+        // AP1: the app-command wrapper is installed on the GL path too (it
+        // re-applies immersive mode; the VK calls inside are no-ops there).
+        if (struct android_app *wrapApp = GetAndroidApp();
+            wrapApp && wrapApp->onAppCmd != vk1OnAppCmd)
+        {
+            g_vk1RaylibOnAppCmd = wrapApp->onAppCmd;
+            wrapApp->onAppCmd = vk1OnAppCmd;
+        }
         if (ps2x_present_vk::enabled())
         {
             struct android_app *app = GetAndroidApp();
-            if (app && app->onAppCmd != vk1OnAppCmd)
-            {
-                g_vk1RaylibOnAppCmd = app->onAppCmd;
-                app->onAppCmd = vk1OnAppCmd;
-            }
             EGLint bufW = 0, bufH = 0; // raylib's window buffers (e.g. 796x448 scaled to 1920x1080)
             const EGLDisplay dpy = eglGetCurrentDisplay();
             const EGLSurface surf = eglGetCurrentSurface(EGL_DRAW);
