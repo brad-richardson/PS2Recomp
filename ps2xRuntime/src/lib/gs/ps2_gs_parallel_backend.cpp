@@ -534,10 +534,13 @@ public:
     }
 
     // SS1 save states: VRAM (host mirror after a flush), the raw register,
-    // priv and GIF-path state paraLLEl decodes itself. Not captured: the
-    // CLUT buffer (GPU-only; cached_cbp is cleared so CLD 4/5 reload), the
-    // private vertex queue / transfer state (idle at a drained vsync), and
-    // SSAA planes (cleared by the VRAM upload).
+    // priv and GIF-path state paraLLEl decodes itself. SS3 S2 (v3 tail): the
+    // CLUT ring + renderer cursors + the interface palette indices. Not
+    // captured: the private vertex queue / transfer state (S3) and SSAA
+    // planes (cleared by the VRAM upload). The footer lets tests and future
+    // tools find the tail without paraLLEl's struct sizes.
+    static constexpr uint32_t kTailMagic = 0x33534750u; // "PGS3" LE
+    static constexpr size_t kTailFooterSize = sizeof(uint64_t) + sizeof(uint32_t);
     void SavestateSave(std::vector<uint8_t> &out) override
     {
         static_assert(std::is_trivially_copyable_v<ParallelGS::RegisterState>, "RegisterState");
@@ -561,6 +564,36 @@ public:
         for (uint32_t i = 0; i < 4u; ++i)
             put(&m_iface->get_gif_path(i), sizeof(ParallelGS::GIFPath));
         put(&m_l2hPending, sizeof(m_l2hPending));
+#if defined(PARALLEL_GS_HAS_SAVESTATE_V3)
+        // v3 tail: [u8 hasClut][clut?] then [u64 tailLen][u32 magic].
+        // tailLen covers hasClut..clut-end (S3 appends the vertex queue
+        // before the footer).
+        std::vector<uint8_t> tail;
+        const auto tput = [&tail](const void *src, size_t n) {
+            const auto *b = static_cast<const uint8_t *>(src);
+            tail.insert(tail.end(), b, b + n);
+        };
+        std::vector<uint8_t> clut;
+        uint32_t clutBase = 0u, clutNext = 0u, clutIface = 0u, clutLatest = 0u;
+        uint8_t hasClut = 0u;
+        if (m_iface->read_clut_state(clut, clutBase, clutNext, clutIface, clutLatest))
+            hasClut = 1u;
+        tput(&hasClut, 1u);
+        if (hasClut)
+        {
+            const uint64_t n = clut.size();
+            tput(&n, sizeof(n));
+            tput(clut.data(), clut.size());
+            tput(&clutBase, sizeof(clutBase));
+            tput(&clutNext, sizeof(clutNext));
+            tput(&clutIface, sizeof(clutIface));
+            tput(&clutLatest, sizeof(clutLatest));
+        }
+        const uint64_t tailLen = tail.size();
+        tput(&tailLen, sizeof(tailLen));
+        tput(&kTailMagic, sizeof(kTailMagic));
+        out.insert(out.end(), tail.begin(), tail.end());
+#else
         // Optional tail: the CLUT ring + cursors (paraLLEl ss1-clut accessor).
         uint8_t hasClut = 0u;
 #if defined(PARALLEL_GS_HAS_CLUT_STATE)
@@ -579,6 +612,7 @@ public:
         }
 #else
         put(&hasClut, 1u);
+#endif
 #endif
     }
 
@@ -620,8 +654,46 @@ public:
         }
         std::memcpy(&m_l2hPending, data + off, sizeof(m_l2hPending));
         off += sizeof(m_l2hPending);
-        const uint8_t hasClut = data[off++];
         bool clutRestored = false;
+#if defined(PARALLEL_GS_HAS_SAVESTATE_V3)
+        if (size < off + 1u + kTailFooterSize)
+            return false;
+        uint32_t tailMagic = 0u;
+        std::memcpy(&tailMagic, data + size - sizeof(tailMagic), sizeof(tailMagic));
+        if (tailMagic != kTailMagic)
+            return false;
+        uint64_t tailLen = 0u;
+        std::memcpy(&tailLen, data + size - kTailFooterSize, sizeof(tailLen));
+        if (tailLen < 1u || tailLen > size || off + tailLen + kTailFooterSize != size)
+            return false;
+        const size_t tailEnd = off + static_cast<size_t>(tailLen);
+        size_t t = off;
+        const uint8_t hasClut = data[t++];
+        if (hasClut)
+        {
+            uint64_t n = 0u;
+            if (tailEnd < t + sizeof(n))
+                return false;
+            std::memcpy(&n, data + t, sizeof(n));
+            t += sizeof(n);
+            const size_t rest = tailEnd - t;
+            if (n > rest || rest - static_cast<size_t>(n) != 4u * sizeof(uint32_t))
+                return false;
+            std::vector<uint8_t> clut(data + t, data + t + static_cast<size_t>(n));
+            uint32_t clutBase = 0u, clutNext = 0u, clutIface = 0u, clutLatest = 0u;
+            std::memcpy(&clutBase, data + t + n, sizeof(clutBase));
+            std::memcpy(&clutNext, data + t + n + sizeof(clutBase), sizeof(clutNext));
+            std::memcpy(&clutIface, data + t + n + 2u * sizeof(uint32_t), sizeof(clutIface));
+            std::memcpy(&clutLatest, data + t + n + 3u * sizeof(uint32_t), sizeof(clutLatest));
+            clutRestored = m_iface->write_clut_state(clut, clutBase, clutNext, clutIface, clutLatest);
+            if (!clutRestored)
+                return false;
+            t += static_cast<size_t>(n) + 4u * sizeof(uint32_t);
+        }
+        if (t != tailEnd) // S3 parses the vertex queue here
+            return false;
+#else
+        const uint8_t hasClut = data[off++];
         if (hasClut)
         {
             uint64_t n = 0u;
@@ -645,6 +717,7 @@ public:
         }
         else if (size != off)
             return false;
+#endif
         auto &regs = m_iface->get_register_state();
         if (!clutRestored)
             regs.cached_cbp[0] = regs.cached_cbp[1] = ~0u; // stale CLUT: force CLD 4/5 reloads

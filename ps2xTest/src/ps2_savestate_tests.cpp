@@ -1,14 +1,17 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_savestate.h"
 #include "../../ps2xRuntime/src/lib/ps2_savestate_internal.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -50,6 +53,114 @@ namespace
     {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+
+    // SS3 GPU tests: run against the live parallel backend on machines with
+    // Vulkan (the Mac), skip everywhere else. Vulkan init is slowish, so the
+    // first headless failure skips the rest.
+    bool g_ss3GpuSkipped = false;
+
+    bool ss3WantParallelGpu()
+    {
+        if (g_ss3GpuSkipped)
+        {
+            std::cout << "[skip: no GPU] ";
+            return false;
+        }
+        if (!ps2x_gs_parallel::available())
+        {
+            std::cout << "[skip: parallel backend not built] ";
+            return false;
+        }
+#if defined(__APPLE__)
+        if (!std::getenv("GRANITE_VULKAN_LIBRARY"))
+        {
+            // ssx3_boot.py's Mac recipe; harmless when absent (init fails,
+            // the test skips).
+            const char *mvk = "/opt/homebrew/lib/libvulkan.1.dylib";
+            std::error_code ec;
+            if (std::filesystem::exists(mvk, ec))
+                setenv("GRANITE_VULKAN_LIBRARY", mvk, 0);
+        }
+#endif
+        return true;
+    }
+
+    // An empty save with a failed (and never successful) init means headless.
+    bool ss3HaveParallelBlob(TestCase &t, const std::vector<uint8_t> &blob)
+    {
+        if (!blob.empty())
+            return true;
+        const ps2x_gs_parallel::Stats st = ps2x_gs_parallel::stats();
+        if (st.initFailed && !st.initOk)
+        {
+            g_ss3GpuSkipped = true;
+            std::cout << "[skip: Vulkan init failed] ";
+            return false;
+        }
+        t.Fail("parallel backend save came back empty without an init failure");
+        return false;
+    }
+
+    // v3 tail parser, anchored at the footer (no paraLLEl struct sizes).
+    // Pre-SS3 blobs have no footer and fail to parse, which is what the S2
+    // test asserts against.
+    struct Ss3Tail
+    {
+        bool ok = false;
+        size_t tailOff = 0, tailEnd = 0;
+        bool hasClut = false;
+        size_t ringOff = 0;
+        uint64_t ringN = 0;
+        uint32_t base = 0, next = 0, iface = 0, latest = 0;
+        size_t clutEnd = 0; // first byte after the CLUT part (S3: vertex part)
+    };
+
+    Ss3Tail ss3ParseTail(const std::vector<uint8_t> &blob)
+    {
+        Ss3Tail out;
+        constexpr uint32_t kMagic = 0x33534750u; // "PGS3" LE
+        constexpr size_t kFooter = sizeof(uint64_t) + sizeof(uint32_t);
+        if (blob.size() < kFooter)
+            return out;
+        uint32_t magic = 0u;
+        std::memcpy(&magic, blob.data() + blob.size() - sizeof(magic), sizeof(magic));
+        if (magic != kMagic)
+            return out;
+        uint64_t tailLen = 0u;
+        std::memcpy(&tailLen, blob.data() + blob.size() - kFooter, sizeof(tailLen));
+        if (tailLen < 1u || tailLen > blob.size() - kFooter)
+            return out;
+        out.tailOff = blob.size() - kFooter - static_cast<size_t>(tailLen);
+        out.tailEnd = blob.size() - kFooter;
+        size_t t = out.tailOff;
+        out.hasClut = blob[t++] != 0u;
+        if (out.hasClut)
+        {
+            if (out.tailEnd - t < sizeof(uint64_t))
+                return Ss3Tail{};
+            uint64_t n = 0u;
+            std::memcpy(&n, blob.data() + t, sizeof(n));
+            t += sizeof(n);
+            const size_t rest = out.tailEnd - t;
+            if (n > rest || rest - static_cast<size_t>(n) < 4u * sizeof(uint32_t))
+                return Ss3Tail{};
+            out.ringOff = t;
+            out.ringN = n;
+            std::memcpy(&out.base, blob.data() + t + n, sizeof(out.base));
+            std::memcpy(&out.next, blob.data() + t + n + 4u, sizeof(out.next));
+            std::memcpy(&out.iface, blob.data() + t + n + 8u, sizeof(out.iface));
+            std::memcpy(&out.latest, blob.data() + t + n + 12u, sizeof(out.latest));
+            t += static_cast<size_t>(n) + 4u * sizeof(uint32_t);
+        }
+        out.clutEnd = t;
+        out.ok = true;
+        return out;
+    }
+
+    void ss3PutU32(std::vector<uint8_t> &blob, size_t off, uint32_t v)
+    {
+        std::memcpy(blob.data() + off, &v, sizeof(v));
     }
 } // namespace
 
@@ -344,6 +455,63 @@ void register_ps2_savestate_tests()
             t.IsTrue(!ps2_savestate::load(rt, path, error), "ELF pin mismatch refused");
             t.IsTrue(error.find("header mismatch") != std::string::npos, "names the header field");
             std::filesystem::remove(path);
+        });
+
+        tc.Run("ss3 s2: CLUT tail carries the interface palette indices", [](TestCase &t)
+        {
+            if (!ss3WantParallelGpu())
+                return;
+            std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(be.get(), "backend created");
+            if (!be)
+                return;
+            std::vector<uint8_t> blob;
+            be->SavestateSave(blob);
+            if (!ss3HaveParallelBlob(t, blob))
+                return;
+            const Ss3Tail tail = ss3ParseTail(blob);
+            t.IsTrue(tail.ok, "v3 footer+tail present (a v2 blob fails here)");
+            if (!tail.ok)
+                return;
+            t.IsTrue(tail.hasClut, "fresh backend saves its CLUT ring");
+            t.Equals(tail.ringN, uint64_t{1u << 20}, "ring is CLUTInstances x CLUTSize");
+            t.Equals(tail.base, 0u, "fresh renderer base cursor");
+            t.Equals(tail.next, 0u, "fresh renderer next cursor");
+            t.Equals(tail.iface, 0u, "fresh interface palette index");
+            t.Equals(tail.latest, 0u, "fresh interface latest index");
+
+            // Patch a copy (ring bytes + all four cursors) and round-trip it:
+            // the load must restore the patched bytes and indices. The
+            // re-save flushes first, and a render-pass flush normalizes the
+            // indices (latest=iface, base=next=iface), so (1,2,3,4) reads
+            // back as (3,3,3,3) while the ring reads back exactly. Real
+            // saves are therefore always normalized; pre-S2 the load
+            // refuses the v3 shape and the re-save has no indices to read.
+            std::vector<uint8_t> patched = blob;
+            for (const size_t o : {size_t{0}, size_t{1000}, size_t{(1u << 20) - 1}})
+                patched[tail.ringOff + o] ^= 0xFFu;
+            ss3PutU32(patched, tail.ringOff + tail.ringN, 1u);
+            ss3PutU32(patched, tail.ringOff + tail.ringN + 4u, 2u);
+            ss3PutU32(patched, tail.ringOff + tail.ringN + 8u, 3u);
+            ss3PutU32(patched, tail.ringOff + tail.ringN + 12u, 4u);
+            t.IsTrue(be->SavestateLoad(patched.data(), patched.size()), "patched v3 blob loads");
+            std::vector<uint8_t> blob2;
+            be->SavestateSave(blob2);
+            if (!ss3HaveParallelBlob(t, blob2))
+                return;
+            const Ss3Tail tail2 = ss3ParseTail(blob2);
+            t.IsTrue(tail2.ok && tail2.hasClut, "re-saved blob parses");
+            if (!tail2.ok)
+                return;
+            t.Equals(tail2.ringN, tail.ringN, "ring size stable");
+            t.Equals(tail2.ringOff, tail.ringOff, "tail offset stable");
+            t.Equals(tail2.base, 3u, "renderer base cursor rewound to the restored bank");
+            t.Equals(tail2.next, 3u, "renderer next cursor rewound to the restored bank");
+            t.Equals(tail2.iface, 3u, "interface palette index round-trips");
+            t.Equals(tail2.latest, 3u, "interface latest index rewound to the restored bank");
+            t.IsTrue(std::memcmp(blob2.data() + tail2.ringOff, patched.data() + tail.ringOff,
+                                 static_cast<size_t>(tail.ringN)) == 0,
+                     "ring bytes round-trip exactly");
         });
     });
 }
