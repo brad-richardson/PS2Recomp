@@ -243,7 +243,9 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
         usage(d.upperUsage);
         out << ", " << d.iBit << "," << d.eBit << "," << d.mBit << "," << d.dBit << "," << d.tBit << ","
             << unsigned(d.upperVfShadowReg) << "," << unsigned(d.suppressedLowerVf) << "};\n";
-        out << "    static bool f" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n"
+        // VR2 2D: pair functions are reached through the table or a tail call;
+        // noinline keeps a leader's from being merged into its block trampoline.
+        out << "    PS2X_VU1_NOINLINE static bool f" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n"
             << "        if (vu.issuePair<true>(d" << label << ", c))\n            return true;\n"
             // F4-2b: the handoff must be a *guaranteed* tail call (like next()'s
             // table call above). A plain return here nests one frame per pair
