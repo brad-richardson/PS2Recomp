@@ -33,6 +33,11 @@ bool underlay();
 // The current window's child has shown a buffer (the GL window is fully covered when
 // there is no underlay and the rect fills the window).
 bool layerLive();
+// Bumped whenever the child is (re)made or detached for a window change. The GL
+// swap may only be skipped after GL has put buffers on the current window: a
+// window layer without a buffer has no buffer-to-window scaling, and the child
+// would show at raw buffer size (VK1 Part 2 D2: 796x448 in a corner).
+uint32_t windowGeneration();
 
 // Main thread, once per host frame: the current window (nullptr while it is
 // gone), the presenter's aspect (ps2x::present::Aspect as int) and the size of

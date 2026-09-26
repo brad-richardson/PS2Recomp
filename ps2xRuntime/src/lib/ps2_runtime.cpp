@@ -4269,7 +4269,15 @@ void PS2Runtime::run()
         // window is invisible); input polling and the pad latch below still run.
         const bool vkLive = ps2x_present_vk::active() && ps2x_present_vk::layerLive();
         const bool vkUnder = vkLive && ps2x_present_vk::underlay();
-        const bool skipGl = vkLive && !vkUnder && !m_debugUiInitialized;
+        static uint32_t s_glWindowGen = ~0u;
+        static uint32_t s_glSwapsOnWindow = 0u;
+        if (const uint32_t gen = ps2x_present_vk::windowGeneration(); gen != s_glWindowGen)
+        {
+            s_glWindowGen = gen;
+            s_glSwapsOnWindow = 0u;
+        }
+        // Keep swapping until the window has GL buffers (its scaling carries the child).
+        const bool skipGl = vkLive && !vkUnder && !m_debugUiInitialized && s_glSwapsOnWindow >= 3u;
 #else
         const bool vkUnder = false;
         const bool skipGl = false;
@@ -4399,7 +4407,12 @@ void PS2Runtime::run()
             m_debugUiDrawCallback(*this, m_debugUiUserData);
         }
         if (!skipGl)
+        {
             EndDrawing();
+#if defined(__ANDROID__)
+            ++s_glSwapsOnWindow;
+#endif
+        }
         else
         {
             // What EndDrawing would do minus the swap: poll input (blocks while

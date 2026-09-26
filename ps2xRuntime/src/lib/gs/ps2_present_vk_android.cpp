@@ -127,6 +127,7 @@ Sink &sink()
 
 std::atomic<bool> g_active{false};
 std::atomic<bool> g_broken{false};
+std::atomic<uint32_t> g_windowGen{0};
 
 struct TxContext
 {
@@ -297,6 +298,11 @@ bool underlay()
     return s.under;
 }
 
+uint32_t windowGeneration()
+{
+    return g_windowGen.load(std::memory_order_acquire);
+}
+
 bool layerLive()
 {
     Sink &s = sink();
@@ -325,6 +331,7 @@ void windowLost()
     Sink &s = sink();
     std::lock_guard<std::mutex> lock(s.m);
     detachLocked(s, "APP_CMD_TERM_WINDOW");
+    g_windowGen.fetch_add(1, std::memory_order_acq_rel);
     s.window = nullptr;
     s.liveOnWindow = false;
     s.geometrySet = false;
@@ -376,6 +383,7 @@ void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect,
     s.lastQueued = nullptr;
     s.liveOnWindow = false;
     s.dropsWithWindow = 0;
+    g_windowGen.fetch_add(1, std::memory_order_acq_rel);
     s.window = window;
     s.layerW = s.layerH = 0;
     s.geometrySet = false;
