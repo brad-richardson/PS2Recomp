@@ -1269,6 +1269,7 @@ PS2Runtime::~PS2Runtime()
     ps2_mtvu::syncAll();
     ps2_mtvu::setDtFallbackFn({});
     ps2_mtvu::fbrstFn() = {};
+    ps2_mtvu::jobEndFn() = {};
     printMissingFunctionCounts();
     try
     {
@@ -1409,7 +1410,22 @@ bool PS2Runtime::syncCoreSubsystems()
                                                 const bool note = ps2_gfx_stats::enabled() || m_gs.rawGifBackendActive();
                                                 m_gs.processGIFPacketWithPath(path, note, bytes);
                                             });
-        std::cerr << "[gs:handoff] diet on (PS2X_GS_HANDOFF_DIET=1): H1 one command per packet" << std::endl;
+        // H3: on the unit thread, wake the GS worker once per wakeCmds queued
+        // commands (or wakeBytes) and at every unit job end, instead of once
+        // per GIF drain (one futex wake per XGKICK). PS2X_GS_WAKE_CMDS tunes.
+        uint32_t wakeCmds = 64u;
+        if (const char *env = std::getenv("PS2X_GS_WAKE_CMDS"))
+        {
+            const long v = std::strtol(env, nullptr, 10);
+            if (v >= 0 && v <= 65536)
+                wakeCmds = static_cast<uint32_t>(v);
+        }
+        const size_t wakeBytes = 256u * 1024u;
+        m_gs.setWorkerDeferredWakes(wakeCmds, wakeBytes);
+        if (wakeCmds != 0u)
+            ps2_mtvu::jobEndFn() = [this]() { m_gs.flushWorkerWake(); };
+        std::cerr << "[gs:handoff] diet on (PS2X_GS_HANDOFF_DIET=1): H1 one command per packet, H2 moved bytes, "
+                  << "H3 deferred wakes cmds=" << wakeCmds << " bytes=" << wakeBytes << std::endl;
     }
     // E33: per-path GIF census + GS draw attribution. The listener runs
     // before each packet's process call (same thread, synchronous drain),

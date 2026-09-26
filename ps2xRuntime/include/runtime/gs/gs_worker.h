@@ -149,7 +149,15 @@ public:
     // backpressure are unchanged; the worker's wait predicate re-check makes
     // the deferred wakeup race-free. No batch may span a synchronous RPC wait.
     void beginBatch();
-    void endBatch();
+    // GF1 H3: `mayDefer` (the MTVU unit thread, with deferred wakes set)
+    // lets the outermost endBatch keep its wake pending while fewer than
+    // the set commands/bytes are queued; flushWake(), a later endBatch, any
+    // non-batched or RPC enqueue, or a producer about to block delivers it.
+    void endBatch(bool mayDefer = false);
+    // GF1 H3: deliver a pending deferred wake (the unit calls it at job end).
+    void flushWake();
+    // GF1 H3: 0 = off (NP1 behaviour). Set once, before producers run.
+    void setDeferredWakes(uint32_t wakeCommands, size_t wakeBytes);
 
     size_t pendingCount() const;
     size_t pendingBytes() const;
@@ -159,6 +167,9 @@ public:
     bool isQuiescent() const;
     uint64_t enqueuedCount() const { return m_enqueuedCount.load(std::memory_order_relaxed); }
     uint64_t executedCount() const { return m_executedCount.load(std::memory_order_relaxed); }
+    uint64_t wakeCount() const { return m_wakes.load(std::memory_order_relaxed); }
+    uint64_t deferredCount() const { return m_deferred.load(std::memory_order_relaxed); }
+    uint64_t watchdogCount() const { return m_watchdog.load(std::memory_order_relaxed); }
 
 private:
     void threadMain();
@@ -175,6 +186,10 @@ private:
     size_t m_queuedBytes = 0;
     uint32_t m_batchDepth = 0; // guarded by m_mutex
     bool m_batchDirty = false; // guarded by m_mutex
+    // GF1 H3 (guarded by m_mutex; wake thresholds fixed before producers run).
+    uint32_t m_wakeCommands = 0;
+    size_t m_wakeBytes = 0;
+    uint64_t m_deferredSinceNs = 0; // when the pending deferred wake began
     bool m_stopRequested = false;
     bool m_running = false;
     std::thread m_thread;
@@ -182,4 +197,7 @@ private:
     // Monotonic diagnostics, safe to read from any thread.
     std::atomic<uint64_t> m_enqueuedCount{0};
     std::atomic<uint64_t> m_executedCount{0};
+    std::atomic<uint64_t> m_wakes{0};    // notifies of m_hasWork by producers
+    std::atomic<uint64_t> m_deferred{0}; // endBatch wakes kept pending (H3)
+    std::atomic<uint64_t> m_watchdog{0}; // H3: pending wake found stale by the worker
 };

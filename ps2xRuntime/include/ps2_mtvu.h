@@ -113,6 +113,14 @@ namespace ps2_mtvu
         return names[static_cast<unsigned>(s)];
     }
 
+    // GF1 H3: PS2Runtime installs (PS2X_GS_HANDOFF_DIET): runs on the unit
+    // thread after every job, to deliver the GS worker's deferred wake.
+    inline std::function<void()> &jobEndFn()
+    {
+        static std::function<void()> fn;
+        return fn;
+    }
+
     namespace detail
     {
         // -1 = not resolved yet: census comes from the environment on first
@@ -250,6 +258,8 @@ namespace ps2_mtvu
                         std::fprintf(stderr, "[mtvu] FATAL: unit job threw\n");
                         std::abort();
                     }
+                    if (const auto &end = jobEndFn())
+                        end();
                     {
                         std::lock_guard<std::mutex> lock(m);
                         qBytes -= job->bytes;

@@ -35,8 +35,10 @@ namespace
         }
         ~GifDrainBatch()
         {
+            // GF1 H3: on the MTVU unit thread the wake may be deferred to the
+            // job end (only when PS2X_GS_HANDOFF_DIET set deferred wakes).
             if (m_gs)
-                m_gs->endWorkerBatch();
+                m_gs->endWorkerBatch(ps2_mtvu::onWorker());
         }
         GifDrainBatch(const GifDrainBatch &) = delete;
         GifDrainBatch &operator=(const GifDrainBatch &) = delete;
