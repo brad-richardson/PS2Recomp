@@ -7,7 +7,7 @@
 namespace
 {
 constexpr uint32_t kTarget = ps2_audio_stretch::kTargetFrames;
-constexpr double kDt = 0.014; // ~512 frames at 36 kHz per callback
+constexpr double kDt = 0.011; // ~512 frames at 48 kHz per callback
 
 bool near(float a, float b, float tol)
 {

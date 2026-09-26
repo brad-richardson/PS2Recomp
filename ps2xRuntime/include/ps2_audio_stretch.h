@@ -2,7 +2,7 @@
 
 // AT1: pitch-preserving time-stretch controller (host-side only).
 //
-// The guest produces 36 kHz stereo PCM into the PcmRing on guest time; the
+// The guest produces 48 kHz stereo PCM into the PcmRing on guest time; the
 // host audio callback drains it on wall time. Below full speed the ring
 // starves and the callback pads with silence (stutter). This controller
 // drives a SoundTouch instance (see ps2_snd_audio_output.cpp): its tempo
@@ -32,14 +32,14 @@
 namespace ps2_audio_stretch
 {
 
-constexpr uint32_t kSourceRate = 36000u;
+constexpr uint32_t kSourceRate = 48000u; // SNDDRV output rate (AU9)
 constexpr uint32_t kTargetLatencyMs = 80u; // in the brief's 60-100 ms band
 constexpr uint32_t kTargetFrames = kSourceRate * kTargetLatencyMs / 1000u;
 constexpr float kTempoMin = 0.5f;
 constexpr float kTempoMax = 1.05f;
 constexpr float kBypassLeave = 0.02f;  // engage outside +/-2 % of 1.0
 constexpr float kBypassRejoin = 0.01f; // release inside +/-1 % of 1.0
-constexpr uint32_t kPrimeFrames = 768u; // stay in bypass below this fill
+constexpr uint32_t kPrimeFrames = 1024u; // ~21 ms: stay in bypass below this fill
 constexpr double kTauDownS = 0.05;      // EMA time constant on drops
 constexpr double kTauUpS = 0.30;        // EMA time constant on rises
 

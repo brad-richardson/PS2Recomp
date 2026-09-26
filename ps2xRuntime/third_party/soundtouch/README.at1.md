@@ -25,6 +25,6 @@ library, not the SoundStretch app, tests, or build scripts):
 Build: `CMakeLists.txt` in this dir defines the static `ps2x_soundtouch`
 target (float samples, no exception handling, C++17), mirroring PCSX2's
 `3rdparty/soundtouch/CMakeLists.txt`. Sample rate is set at runtime
-(our source is 36 kHz); stretch parameters follow PCSX2's defaults
+(our source is 48 kHz); stretch parameters follow PCSX2's defaults
 (sequence 30 ms, seek-window 20 ms, overlap 10 ms, quickseek off,
 anti-alias filter off).
