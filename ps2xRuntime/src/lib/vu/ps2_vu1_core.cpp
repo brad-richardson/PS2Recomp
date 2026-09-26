@@ -1496,6 +1496,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     }
     const bool programEnded = ctx.programEnded;
 
+    // VR2 2C: an error stop (reportReservedInstruction: reserved op, a full
+    // queue, PATH1 overflow) drains the pipelines like a program end. Before,
+    // writes still in flight at the stop never landed (resume() does nothing
+    // until execute() resets the scheduler, which drops the queue), so the
+    // direct-commit path (VB1), which applies them at issue, was visible where
+    // the queued model was not. Draining lands them in every mode; the cycle
+    // count agrees because m_directPendingUntil tracks direct landings exactly.
+    if (m_stopRequested && !programEnded)
+        flushPipelines();
     if (programEnded)
     {
         flushPipelines();
