@@ -1609,4 +1609,20 @@ namespace
     }
     const bool kMcSavestateRegistered =
         ps2_savestate::registerSection("stub:mc", {1u, &mcSavestateSave, &mcSavestateLoad, &mcSavestateReady});
+
+    // Card contents on disk travel with the state (ports 0 and 1).
+    void mcDirSavestateSave(ps2_savestate::Writer &w)
+    {
+        for (int32_t port = 0; port < 2; ++port)
+            ps2_savestate::writeDirTree(w, ps2_stubs::getMcRootPath(port).string());
+    }
+    bool mcDirSavestateLoad(ps2_savestate::Reader &r)
+    {
+        for (int32_t port = 0; port < 2 && r.ok(); ++port)
+            if (!ps2_savestate::readDirTree(r, ps2_stubs::getMcRootPath(port).string()))
+                return false;
+        return r.ok();
+    }
+    const bool kMcDirSavestateRegistered =
+        ps2_savestate::registerSection("stub:mcdir", {1u, &mcDirSavestateSave, &mcDirSavestateLoad, nullptr});
 }

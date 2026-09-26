@@ -247,9 +247,37 @@ void register_ps2_savestate_tests()
             (void)ps2_savestate::config(); // pulls the syscall section's object in
             const auto &sections = ps2_savestate::registeredSections();
             for (const char *key : {"syscalls", "syscalls:k1", "syscalls:deci2", "stub:cd", "stub:sif", "stub:mc",
-                                    "stub:pad", "stub:audio", "stub:dma", "stub:mpeg", "snd", "padlatch",
+                                    "stub:pad", "stub:audio", "stub:dma", "stub:mpeg", "stub:mcdir", "snd", "padlatch",
                                     "support:Stubs/CD.cpp"})
                 t.IsTrue(sections.count(key) == 1u, std::string("section registered: ") + key);
+        });
+
+        tc.Run("memory-card dir tree round trip; refuses to overwrite a different card", [](TestCase &t)
+        {
+            namespace fs = std::filesystem;
+            const fs::path base = fs::temp_directory_path() / "ss1-mcdir-test";
+            fs::remove_all(base);
+            const fs::path src = base / "src", dst = base / "dst", other = base / "other";
+            fs::create_directories(src / "BASLUS-20772");
+            { std::ofstream(src / "BASLUS-20772" / "save.dat", std::ios::binary) << "profile-bytes"; }
+            { std::ofstream(src / "icon.sys", std::ios::binary) << "icon"; }
+            Writer w;
+            ps2_savestate::writeDirTree(w, src.string());
+            Reader r(w.buf.data(), w.buf.size());
+            t.IsTrue(ps2_savestate::readDirTree(r, dst.string()), "restore into a missing dir");
+            std::ifstream in(dst / "BASLUS-20772" / "save.dat", std::ios::binary);
+            std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            t.Equals(text, std::string("profile-bytes"), "file bytes restored");
+            Reader again(w.buf.data(), w.buf.size());
+            t.IsTrue(ps2_savestate::readDirTree(again, dst.string()), "restore over an identical dir");
+            fs::create_directories(other);
+            { std::ofstream(other / "icon.sys", std::ios::binary) << "someone else's card"; }
+            Reader clash(w.buf.data(), w.buf.size());
+            t.IsTrue(!ps2_savestate::readDirTree(clash, other.string()), "a different card is never overwritten");
+            std::ifstream kept(other / "icon.sys", std::ios::binary);
+            std::string keptText((std::istreambuf_iterator<char>(kept)), std::istreambuf_iterator<char>());
+            t.Equals(keptText, std::string("someone else's card"), "existing card untouched");
+            fs::remove_all(base);
         });
 
         tc.Run("load refuses bad files", [](TestCase &t)

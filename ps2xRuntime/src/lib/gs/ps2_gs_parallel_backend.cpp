@@ -524,14 +524,45 @@ public:
         for (uint32_t i = 0; i < 4u; ++i)
             put(&m_iface->get_gif_path(i), sizeof(ParallelGS::GIFPath));
         put(&m_l2hPending, sizeof(m_l2hPending));
+        // Optional tail: the CLUT ring + cursors (paraLLEl ss1-clut accessor).
+        uint8_t hasClut = 0u;
+#if defined(PARALLEL_GS_HAS_CLUT_STATE)
+        std::vector<uint8_t> clut;
+        uint32_t clutBase = 0u, clutNext = 0u;
+        if (m_iface->read_clut_state(clut, clutBase, clutNext))
+            hasClut = 1u;
+        put(&hasClut, 1u);
+        if (hasClut)
+        {
+            const uint64_t n = clut.size();
+            put(&n, sizeof(n));
+            put(clut.data(), clut.size());
+            put(&clutBase, sizeof(clutBase));
+            put(&clutNext, sizeof(clutNext));
+        }
+#else
+        put(&hasClut, 1u);
+#endif
+    }
+
+    bool SavestateIdle() const override
+    {
+        if (m_l2hPending != 0u)
+            return false;
+#if defined(PARALLEL_GS_HAS_CLUT_STATE)
+        // Palette uploads wait for the next render pass; save after it.
+        if (m_initOk && !m_iface->clut_state_idle())
+            return false;
+#endif
+        return true;
     }
 
     bool SavestateLoad(const uint8_t *data, size_t size) override
     {
         constexpr size_t kVram = 4u * 1024u * 1024u;
-        const size_t want = kVram + sizeof(ParallelGS::RegisterState) + sizeof(ParallelGS::PrivRegisterState) +
-                            4u * sizeof(ParallelGS::GIFPath) + sizeof(m_l2hPending);
-        if (size != want || !ensureInit())
+        const size_t fixed = kVram + sizeof(ParallelGS::RegisterState) + sizeof(ParallelGS::PrivRegisterState) +
+                             4u * sizeof(ParallelGS::GIFPath) + sizeof(m_l2hPending);
+        if (size < fixed + 1u || !ensureInit())
             return false;
         m_needHandoff = false;
         void *dst = m_iface->map_vram_write(0, kVram);
@@ -551,8 +582,35 @@ public:
             off += sizeof(ParallelGS::GIFPath);
         }
         std::memcpy(&m_l2hPending, data + off, sizeof(m_l2hPending));
+        off += sizeof(m_l2hPending);
+        const uint8_t hasClut = data[off++];
+        bool clutRestored = false;
+        if (hasClut)
+        {
+            uint64_t n = 0u;
+            if (size < off + sizeof(n))
+                return false;
+            std::memcpy(&n, data + off, sizeof(n));
+            off += sizeof(n);
+            if (size != off + n + 2u * sizeof(uint32_t))
+                return false;
+#if defined(PARALLEL_GS_HAS_CLUT_STATE)
+            std::vector<uint8_t> clut(data + off, data + off + n);
+            uint32_t clutBase = 0u, clutNext = 0u;
+            std::memcpy(&clutBase, data + off + n, sizeof(clutBase));
+            std::memcpy(&clutNext, data + off + n + sizeof(clutBase), sizeof(clutNext));
+            clutRestored = m_iface->write_clut_state(clut, clutBase, clutNext);
+            if (!clutRestored)
+                return false;
+#else
+            std::fprintf(stderr, "[savestate] warning: state has a paraLLEl CLUT but this build can't restore it\n");
+#endif
+        }
+        else if (size != off)
+            return false;
         auto &regs = m_iface->get_register_state();
-        regs.cached_cbp[0] = regs.cached_cbp[1] = ~0u;
+        if (!clutRestored)
+            regs.cached_cbp[0] = regs.cached_cbp[1] = ~0u; // stale CLUT: force CLD 4/5 reloads
         m_iface->clobber_register_state();
         return true;
     }

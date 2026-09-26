@@ -308,6 +308,80 @@ namespace ps2_savestate
         return out;
     }
 
+    // ---------------------------------------------------------------- dir tree
+    void writeDirTree(Writer &w, const std::string &root)
+    {
+        namespace fs = std::filesystem;
+        std::vector<std::pair<std::string, std::vector<uint8_t>>> files;
+        std::error_code ec;
+        if (fs::is_directory(root, ec))
+        {
+            for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator();
+                 it.increment(ec))
+            {
+                if (!it->is_regular_file(ec))
+                    continue;
+                std::ifstream in(it->path(), std::ios::binary);
+                std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                files.emplace_back(fs::relative(it->path(), root, ec).generic_string(), std::move(bytes));
+            }
+        }
+        std::sort(files.begin(), files.end());
+        w.u64(files.size());
+        for (const auto &[rel, bytes] : files)
+        {
+            w.str(rel);
+            w.blob(bytes);
+        }
+    }
+
+    bool readDirTree(Reader &r, const std::string &root)
+    {
+        namespace fs = std::filesystem;
+        const uint64_t n = r.count(1u << 16);
+        std::vector<std::pair<std::string, std::vector<uint8_t>>> files;
+        for (uint64_t i = 0; i < n && r.ok(); ++i)
+        {
+            std::string rel = r.str();
+            std::vector<uint8_t> bytes = r.blob();
+            if (rel.empty() || rel.find("..") != std::string::npos || rel[0] == '/')
+                return r.fail("bad path in dir tree: " + rel);
+            files.emplace_back(std::move(rel), std::move(bytes));
+        }
+        if (!r.ok())
+            return false;
+        std::error_code ec;
+        std::map<std::string, const std::vector<uint8_t> *> want;
+        for (const auto &f : files)
+            want[f.first] = &f.second;
+        if (fs::is_directory(root, ec))
+        {
+            for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator();
+                 it.increment(ec))
+            {
+                if (!it->is_regular_file(ec))
+                    continue;
+                const std::string rel = fs::relative(it->path(), root, ec).generic_string();
+                std::ifstream in(it->path(), std::ios::binary);
+                std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                auto found = want.find(rel);
+                if (found == want.end() || *found->second != bytes)
+                    return r.fail("memory-card dir " + root + " holds a different " + rel +
+                                  "; load into an empty card dir");
+            }
+        }
+        for (const auto &[rel, bytes] : files)
+        {
+            const fs::path dst = fs::path(root) / rel;
+            fs::create_directories(dst.parent_path(), ec);
+            std::ofstream out(dst, std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+            if (!out)
+                return r.fail("cannot write " + dst.string());
+        }
+        return true;
+    }
+
     // ---------------------------------------------------------------- header
     namespace
     {
@@ -341,6 +415,12 @@ namespace ps2_savestate
             h.push_back({"gs_backend", env ? env : "cpu", true});
             env = std::getenv("PS2X_SKIP_MOVIE");
             h.push_back({"skip_movie", env ? env : "", false});
+            // Host render settings: SSAA planes are not saved (a load starts
+            // them clean), so a different SSAA/hi-res only warns.
+            env = std::getenv("PS2X_PGS_SSAA");
+            h.push_back({"pgs_ssaa", env ? env : "", false});
+            env = std::getenv("PS2X_PGS_HIRES_SCANOUT");
+            h.push_back({"pgs_hires", env ? env : "", false});
             return h;
         }
 

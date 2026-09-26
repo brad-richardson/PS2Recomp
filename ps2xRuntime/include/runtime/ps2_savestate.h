@@ -370,6 +370,12 @@ namespace ps2_savestate
     bool trySave(PS2Runtime &runtime, uint64_t vsyncTick, std::string &why);
     bool load(PS2Runtime &runtime, const std::string &path, std::string &error);
 
+    // Directory tree as a section payload (memory-card roots). Restore writes
+    // into `root` and refuses when `root` already holds a file that is not
+    // byte-identical to the saved one (never overwrites a real card).
+    void writeDirTree(Writer &w, const std::string &root);
+    bool readDirTree(Reader &r, const std::string &root);
+
     // Header helpers (exposed for tests).
     std::string sha256Hex(const uint8_t *data, size_t size);
     bool sha256File(const std::string &path, std::string &hex);
