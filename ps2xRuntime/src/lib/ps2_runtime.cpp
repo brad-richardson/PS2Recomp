@@ -4792,8 +4792,28 @@ void PS2Runtime::run()
 
 #if defined(PS2X_IOS)
         ps2x::ios::syncWindowSize();
-        std::fprintf(stderr, "[ios-render] screen=%dx%d render=%dx%d\n",
-                     GetScreenWidth(), GetScreenHeight(), GetRenderWidth(), GetRenderHeight());
+        {
+            const int iosScreenW = GetScreenWidth();
+            const int iosScreenH = GetScreenHeight();
+            const int iosRenderW = GetRenderWidth();
+            const int iosRenderH = GetRenderHeight();
+            static bool s_iosRenderLogged = false;
+            static int s_lastIosScreenW = 0;
+            static int s_lastIosScreenH = 0;
+            static int s_lastIosRenderW = 0;
+            static int s_lastIosRenderH = 0;
+            if (!s_iosRenderLogged || iosScreenW != s_lastIosScreenW || iosScreenH != s_lastIosScreenH ||
+                iosRenderW != s_lastIosRenderW || iosRenderH != s_lastIosRenderH)
+            {
+                std::fprintf(stderr, "[ios-render] screen=%dx%d render=%dx%d\n",
+                             iosScreenW, iosScreenH, iosRenderW, iosRenderH);
+                s_iosRenderLogged = true;
+                s_lastIosScreenW = iosScreenW;
+                s_lastIosScreenH = iosScreenH;
+                s_lastIosRenderW = iosRenderW;
+                s_lastIosRenderH = iosRenderH;
+            }
+        }
 #endif
 #if defined(__ANDROID__)
         // VK1 Part 2: once the Vulkan layer shows the game above the whole GL
