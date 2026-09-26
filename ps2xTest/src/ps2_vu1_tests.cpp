@@ -1872,6 +1872,10 @@ void register_ps2_vu1_tests()
             t.Equals(count("return f0000(vu, c);"), static_cast<size_t>(1u), "the block falls back to its leader's pair");
             t.Equals(count("PS2X_VU1_MUSTTAIL return f0000(vu, c);"), static_cast<size_t>(1u),
                      "the block's fallback is a guaranteed tail call");
+            // VR2 2D: the block's frameless entry trampoline jumps into its body.
+            t.Equals(count("return B0000(vu, c);"), static_cast<size_t>(1u), "the block enters its body");
+            t.Equals(count("PS2X_VU1_MUSTTAIL return B0000(vu, c);"), static_cast<size_t>(1u),
+                     "the block's body entry is a guaranteed tail call");
         });
 
         // VB1: the direct-commit path (writes applied at issue) against the

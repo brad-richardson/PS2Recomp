@@ -111,6 +111,9 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
                      static_cast<unsigned long long>(m_recompCycles),
                      static_cast<unsigned long long>(m_interpCycles),
                      total != 0u ? static_cast<double>(m_recompCycles) / static_cast<double>(total) : 0.0);
+#if PS2X_ENABLE_DET_HASH_TAP
+        // VR2 2D: block counters are kept in hash builds only (no per-entry
+        // read-modify-write on the hot path).
         std::fprintf(stderr, "[vu1-blocks] on=%d entries=%llu pairs=%llu nostall_misses=%llu miss_off=%llu miss_branch=%llu miss_end=%llu miss_budget=%llu\n",
                      m_blocksOn ? 1 : 0, static_cast<unsigned long long>(m_blockEntries),
                      static_cast<unsigned long long>(m_blockPairs),
@@ -119,7 +122,6 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
                      static_cast<unsigned long long>(m_blockMissBranch),
                      static_cast<unsigned long long>(m_blockMissEnd),
                      static_cast<unsigned long long>(m_blockMissBudget));
-#if PS2X_ENABLE_DET_HASH_TAP
         std::fprintf(stderr, "[vu1-blocks] gen_pairs=%llu block_pairs=%llu pair_share=%.4f gen_cycles=%llu block_cycles=%llu cycle_share=%.4f\n",
                      static_cast<unsigned long long>(m_genIssuedPairs),
                      static_cast<unsigned long long>(m_blockIssuedPairs),
@@ -258,9 +260,14 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
         char label[16];
         std::snprintf(label, sizeof(label), "%04x", block.start * 8u);
         blockAt[block.start] = true;
+        // VR2 2D: b<pc> is a frameless trampoline (guard, then a tail call to
+        // the leader's pair function or to the out-of-line body B<pc>), so a
+        // failed guard (knob off) costs no frame setup.
         out << "    static bool b" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n"
             << "        if (!vu.recompBlockReady(c, " << block.maxCycles << "u, " << block.pairs.size() << "u))\n"
-            << "            PS2X_VU1_MUSTTAIL return f" << label << "(vu, c);\n";
+            << "            PS2X_VU1_MUSTTAIL return f" << label << "(vu, c);\n"
+            << "        PS2X_VU1_MUSTTAIL return B" << label << "(vu, c);\n    }\n"
+            << "    PS2X_VU1_NOINLINE static bool B" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n";
         for (size_t k = 0; k < block.pairs.size(); ++k)
         {
             char pairLabel[16];

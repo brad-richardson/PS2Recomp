@@ -18,6 +18,9 @@
 // than silently emit nesting chains (Odin S1 stack overflow).
 #if defined(__clang__)
 #define PS2X_VU1_MUSTTAIL [[clang::musttail]]
+// VR2 2D: a block's body stays out of line so its entry trampoline (the guard)
+// needs no stack frame when the guard fails.
+#define PS2X_VU1_NOINLINE [[clang::noinline]]
 #else
 #error "Generated VU1 images require [[clang::musttail]]; plain tail calls nest one frame per pair"
 #endif

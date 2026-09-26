@@ -553,14 +553,21 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::recompBlockReady(const RunCon
     if (!m_blocksOn || m_state.branchPending || m_state.ebit || m_state.haltAfterDelaySlot ||
         m_cycle + maxCycles > ctx.budgetEnd)
     {
+#if PS2X_ENABLE_DET_HASH_TAP
         ++(!m_blocksOn                                          ? m_blockMissOff
            : m_state.branchPending                              ? m_blockMissBranch
            : m_state.ebit || m_state.haltAfterDelaySlot         ? m_blockMissEnd
                                                                 : m_blockMissBudget);
+#endif
         return false;
     }
+    // Counted in every build: the tests read m_blockEntries (on path only).
     ++m_blockEntries;
+#if PS2X_ENABLE_DET_HASH_TAP
     m_blockPairs += pairs;
+#else
+    (void)pairs;
+#endif
     return true;
 }
 
