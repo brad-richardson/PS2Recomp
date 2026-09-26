@@ -72,6 +72,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_runtime_expansion_tests.cpp
     src/ps2_gfx_stats_tests.cpp
     src/ps2_vif_mpg_log_tests.cpp
+    src/ps2_vu1_engine_tests.cpp
     src/ps2_vu1_trace_tests.cpp
     src/ps2_vu1_entry_trace_tests.cpp
     src/ps2_fpu_semantics_tests.cpp
@@ -140,6 +141,11 @@ target_link_libraries(ps2_test_lib PRIVATE
     ps2_runtime
     ps2_iop
 )
+
+# VP2: tests share the engine header with ps2_runtime; keep its layout equal.
+if(PS2X_VU1_ENGINE_STATS)
+    target_compile_definitions(ps2_test_lib PRIVATE PS2X_VU1_ENGINE_STATS=1)
+endif()
 
 add_dependencies(ps2_test_lib e52_snippets)
 add_dependencies(ps2_test_lib e54d_lwu_snippets)

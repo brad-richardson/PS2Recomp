@@ -516,6 +516,15 @@ else()
     target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DET_HASH_TAP=0)
 endif()
 
+# VP2: hand-off / unit-time counters of the in-order-commit VU1 engine
+# (ps2_vu1_engine.h). Diagnostic: speed builds leave it OFF. Only runtime
+# sources include the engine header, so the define stays private (a stats
+# build recompiles no game code); the test target mirrors it.
+option(PS2X_VU1_ENGINE_STATS "Compile the VP2 VU1 engine hand-off timing counters" OFF)
+if(PS2X_VU1_ENGINE_STATS)
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_VU1_ENGINE_STATS=1)
+endif()
+
 # VR4 D1: vector form of the exact VU FMAC core (ps2_vu1_fmac_simd.h), on by
 # default (VR4 gate: bit-exact vs the scalar form, det-identical). The scalar
 # form stays compiled as the reference and for -DPS2X_VU1_FMAC_SIMD=OFF.
