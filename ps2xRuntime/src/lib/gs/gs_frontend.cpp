@@ -1168,7 +1168,9 @@ void GS::processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uin
         cmd.u32a = kGsGifPacketHasPath;
         cmd.pathId = static_cast<uint8_t>(path);
     }
-    cmd.bytes.assign(bytes.begin(), bytes.end());
+    // GF1 H2: take the arbiter's own copy instead of copying it again (the
+    // arbiter clears the packet after this call; listener and shadow ran first).
+    cmd.bytes = std::move(bytes);
     m_worker->enqueue(std::move(cmd));
 }
 

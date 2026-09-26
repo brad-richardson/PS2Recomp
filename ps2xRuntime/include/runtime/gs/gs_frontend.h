@@ -146,6 +146,7 @@ public:
     // GF1 H1 (PS2X_GS_HANDOFF_DIET): noteGifPath(path) when notePath, then
     // processGIFPacket, as one queued command (one enqueue instead of two).
     // Same effects and order as the two calls; direct mode makes the calls.
+    // H2: queued mode takes `bytes` (moved into the command; left empty).
     void processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uint8_t> &bytes);
     // E33: records which GIF path the packet currently being processed came
     // from, so draws kicked during processing attribute to that path. Only
