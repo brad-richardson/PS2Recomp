@@ -617,6 +617,7 @@ if(PS2X_GS_SHADOW_PARALLEL)
 endif()
 
 target_link_libraries(ps2_runtime PUBLIC ps2_gs_shadow)
+target_link_libraries(ps2_runtime PRIVATE ${CMAKE_DL_LIBS}) # GE1: load the swappable GS C API at runtime.
 
 if(PS2X_ENABLE_IOP_RPC_TRACE)
     target_compile_definitions(ps2_runtime PUBLIC

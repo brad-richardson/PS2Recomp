@@ -4,6 +4,7 @@
 // only stats()/lastPresent() take the mutex (cross-thread readers).
 
 #include "runtime/gs/ps2_gs_external_backend.h"
+#include "runtime/gs/ge1_gs_api.h"
 
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ps2_memory.h"
@@ -13,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <mutex>
 #include <string>
 
@@ -26,6 +28,51 @@ constexpr uint32_t kMirrorOffsets[19] = {
     0x0000u, 0x0010u, 0x0020u, 0x0030u, 0x0040u, 0x0050u, 0x0060u,
     0x0070u, 0x0080u, 0x0090u, 0x00A0u, 0x00B0u, 0x00C0u, 0x00D0u,
     0x00E0u, 0x1000u, 0x1010u, 0x1040u, 0x1080u};
+
+struct Ge1Api
+{
+    void *library = nullptr;
+    decltype(&ge1_gs_open) open = nullptr;
+    decltype(&ge1_gs_close) close = nullptr;
+    decltype(&ge1_gs_reset) reset = nullptr;
+    decltype(&ge1_gs_priv_write) privWrite = nullptr;
+    decltype(&ge1_gs_packet) packet = nullptr;
+    decltype(&ge1_gs_vsync) vsync = nullptr;
+    decltype(&ge1_gs_read_fifo) readFifo = nullptr;
+    decltype(&ge1_gs_snapshot) snapshot = nullptr;
+    decltype(&ge1_gs_gpu_ms) gpuMs = nullptr;
+
+    bool load(const char *path)
+    {
+        library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (!library)
+        {
+            std::fprintf(stderr, "[gs:external] GE1 dlopen(%s): %s\n", path, dlerror());
+            return false;
+        }
+#define GE1_SYMBOL(member, symbol) \
+        member = reinterpret_cast<decltype(member)>(dlsym(library, #symbol)); \
+        if (!member) return false
+        GE1_SYMBOL(open, ge1_gs_open);
+        GE1_SYMBOL(close, ge1_gs_close);
+        GE1_SYMBOL(reset, ge1_gs_reset);
+        GE1_SYMBOL(privWrite, ge1_gs_priv_write);
+        GE1_SYMBOL(packet, ge1_gs_packet);
+        GE1_SYMBOL(vsync, ge1_gs_vsync);
+        GE1_SYMBOL(readFifo, ge1_gs_read_fifo);
+        GE1_SYMBOL(snapshot, ge1_gs_snapshot);
+        GE1_SYMBOL(gpuMs, ge1_gs_gpu_ms);
+#undef GE1_SYMBOL
+        return true;
+    }
+
+    void unload()
+    {
+        if (library)
+            dlclose(library);
+        library = nullptr;
+    }
+};
 
 uint32_t fnv1a32(const uint8_t *data, size_t size, uint32_t hash = 2166136261u)
 {
@@ -76,6 +123,11 @@ public:
 
     ~ExternalGsBackend() override
     {
+        if (m_ge1Active)
+            m_ge1.close();
+        m_ge1.unload();
+        if (m_gpuCsv)
+            std::fclose(m_gpuCsv);
         {
             std::lock_guard<std::mutex> lock(s_apiMutex);
             if (s_live == this)
@@ -96,9 +148,9 @@ public:
             m_log = nullptr;
         }
         std::fprintf(stderr,
-                     "[gs:external] stub done gif=%llu (p1=%llu p2=%llu p3=%llu) npack=%llu reg=%llu priv=%llu "
+                     "[gs:external] %s done gif=%llu (p1=%llu p2=%llu p3=%llu) npack=%llu reg=%llu priv=%llu "
                      "vsync=%llu gaps=%llu xfer=%llu up=%llu con=%llu dl=%llu pres=%llu log=%s\n",
-                     (unsigned long long)m_stats.gifPackets,
+                     m_ge1Active ? "GE1 live" : "stub", (unsigned long long)m_stats.gifPackets,
                      (unsigned long long)m_stats.gifPacketsByPath[1],
                      (unsigned long long)m_stats.gifPacketsByPath[2],
                      (unsigned long long)m_stats.gifPacketsByPath[3],
@@ -112,8 +164,35 @@ public:
 
     void Initialize(uint8_t *vram, uint32_t vramSize) override
     {
-        m_inner = std::make_unique<GSCpuBackend>();
-        m_inner->Initialize(vram, vramSize);
+        m_vram = vram;
+        m_vramSize = vramSize;
+        if (const char *path = std::getenv("PS2X_GS_EXTERNAL_LIBRARY"); path && *path)
+        {
+            if (!m_ge1.load(path) || !m_ge1.open(4))
+            {
+                std::fprintf(stderr, "[gs:external] GE1 Full GS init failed\n");
+                std::exit(78);
+            }
+            m_ge1Active = true;
+            const std::array<uint64_t, 20> words = resetWords();
+            if (!m_ge1.reset(words.data(), vram, vramSize))
+            {
+                std::fprintf(stderr, "[gs:external] GE1 reset import failed (vram=%u)\n", vramSize);
+                std::exit(78);
+            }
+            std::fprintf(stderr, "[gs:external] GE1 Full live GS loaded: %s\n", path);
+            if (const char *csv = std::getenv("PS2X_GS_EXTERNAL_GPU_CSV"); csv && *csv)
+            {
+                m_gpuCsv = std::fopen(csv, "w");
+                if (m_gpuCsv)
+                    std::fputs("tick,gpu_ms\n", m_gpuCsv);
+            }
+        }
+        else
+        {
+            m_inner = std::make_unique<GSCpuBackend>();
+            m_inner->Initialize(vram, vramSize);
+        }
         {
             std::lock_guard<std::mutex> lock(s_apiMutex);
             s_live = this;
@@ -140,6 +219,17 @@ public:
         m_fifo.clear();
         m_fifoCursor = 0u;
         m_fifoValid = false;
+        m_ge1FifoBytes = 0u;
+        m_ge1FifoServed = false;
+        if (m_ge1Active)
+        {
+            const std::array<uint64_t, 20> words = resetWords();
+            if (!m_ge1.reset(words.data(), m_vram, m_vramSize))
+            {
+                std::fprintf(stderr, "[gs:external] GE1 reset failed\n");
+                std::exit(78);
+            }
+        }
         if (m_inner)
             m_inner->Reset();
         logLine("# reset\n");
@@ -181,7 +271,12 @@ public:
             m_fifo.clear();
             m_fifoCursor = 0u;
             m_fifoValid = false;
+            m_ge1FifoBytes = 3u * static_cast<uint32_t>(command.trxreg.rrw) *
+                             static_cast<uint32_t>(command.trxreg.rrh);
+            m_ge1FifoServed = false;
         }
+        else
+            m_ge1FifoBytes = 0u;
         if (m_inner)
             m_inner->BeginTransfer(command);
     }
@@ -217,7 +312,21 @@ public:
     PresentationFrame Present(const GSPresentationRequest &request) override
     {
         PresentationFrame frame;
-        if (m_inner)
+        if (m_ge1Active)
+        {
+            uint32_t width = 0u, height = 0u;
+            const uint32_t *rgba = nullptr;
+            if (m_ge1.snapshot(&width, &height, &rgba) && rgba && width && height)
+            {
+                frame.width = width;
+                frame.height = height;
+                frame.pixels.resize(static_cast<size_t>(width) * height * 4u);
+                std::memcpy(frame.pixels.data(), rgba, frame.pixels.size());
+                frame.displayFbp = static_cast<uint32_t>(request.dispfb1 & 0x1ffu);
+                frame.sourceFbp = frame.displayFbp;
+            }
+        }
+        else if (m_inner)
             frame = m_inner->Present(request);
         ++m_stats.presents;
         const uint32_t hash =
@@ -256,7 +365,19 @@ public:
         {
             m_fifo.clear();
             m_fifoCursor = 0u;
-            if (m_inner)
+            if (m_ge1Active && !m_ge1FifoServed && m_ge1FifoBytes)
+            {
+                const uint32_t qwords = (m_ge1FifoBytes + 15u) / 16u;
+                std::vector<uint8_t> readback(static_cast<size_t>(qwords) * 16u);
+                if (!m_ge1.readFifo(readback.data(), qwords))
+                {
+                    std::fprintf(stderr, "[gs:external] GE1 FIFO read failed, qwc=%u\n", qwords);
+                    std::exit(78);
+                }
+                m_fifo.assign(readback.begin(), readback.begin() + m_ge1FifoBytes);
+                m_ge1FifoServed = true;
+            }
+            else if (m_inner)
             {
                 uint8_t chunk[65536];
                 for (;;)
@@ -312,6 +433,8 @@ public:
         GSTransferSnapshot snap{};
         if (m_inner)
             snap = m_inner->GetTransferSnapshot();
+        if (m_ge1Active && !m_ge1FifoServed)
+            snap.localToHostPendingBytes = m_ge1FifoBytes;
         if (m_fifoValid)
             snap.localToHostPendingBytes =
                 m_fifoCursor < m_fifo.size() ? m_fifo.size() - m_fifoCursor : 0u;
@@ -322,6 +445,15 @@ public:
 
     void RawGifPacket(uint32_t path, const uint8_t *data, uint32_t sizeBytes) override
     {
+        if (m_ge1Active)
+        {
+            if (path < 1u || path > 3u || !m_ge1.packet(static_cast<uint8_t>(path), data, sizeBytes))
+            {
+                std::fprintf(stderr, "[gs:external] GE1 GIF rejected path=%u bytes=%u\n", path, sizeBytes);
+                std::exit(78);
+            }
+            m_ge1LastPath = static_cast<uint8_t>(path);
+        }
         ++m_stats.gifPackets;
         m_stats.gifBytes += sizeBytes;
         const size_t slot = path < 4u ? path : 0u;
@@ -335,6 +467,18 @@ public:
 
     void RawWriteRegister(uint8_t regAddr, uint64_t value) override
     {
+        if (m_ge1Active)
+        {
+            // HLE writes bypass GIF. Feed an ordinary one-loop A+D GIF tag
+            // through the same public packet entry point, in stream order.
+            alignas(16) const uint64_t ad[4] = {
+                1ull | (1ull << 15) | (1ull << 60), 0xEull, value, regAddr};
+            if (!m_ge1.packet(3u, reinterpret_cast<const uint8_t *>(ad), sizeof(ad)))
+            {
+                std::fprintf(stderr, "[gs:external] GE1 HLE register rejected addr=%u\n", regAddr);
+                std::exit(78);
+            }
+        }
         ++m_stats.regWrites;
         log("R addr=%02x val=%016llx tick=%llu\n", regAddr,
             (unsigned long long)value, tickNow());
@@ -342,6 +486,11 @@ public:
 
     void RawNativePackedPacket(const uint8_t *data, uint32_t sizeBytes) override
     {
+        if (m_ge1Active && !m_ge1.packet(m_ge1LastPath, data, sizeBytes))
+        {
+            std::fprintf(stderr, "[gs:external] GE1 native packet rejected bytes=%u\n", sizeBytes);
+            std::exit(78);
+        }
         ++m_stats.nativePacked;
         log("N size=%u crc=%08x tick=%llu\n", sizeBytes,
             data && sizeBytes ? fnv1a32(data, sizeBytes) : 0u, tickNow());
@@ -351,6 +500,18 @@ public:
 
     void GuestVsync(uint64_t tick, uint32_t field) override
     {
+        if (m_ge1Active)
+        {
+            // GE2 passes CSR FIELD; PCSX2 GSvsync uses the opposite field convention.
+            if (!m_ge1.vsync(field ? 0u : 1u, m_mirror[15], m_mirror[1], m_mirror[6]))
+            {
+                std::fprintf(stderr, "[gs:external] GE1 VSync failed tick=%llu\n",
+                             (unsigned long long)tick);
+                std::exit(78);
+            }
+            if (m_gpuCsv)
+                std::fprintf(m_gpuCsv, "%llu,%.6f\n", (unsigned long long)tick, m_ge1.gpuMs());
+        }
         ++m_stats.vsyncs;
         if (m_lastVsyncTick != 0u && tick != m_lastVsyncTick + 1u)
             ++m_stats.vsyncGaps;
@@ -362,6 +523,11 @@ public:
 
     void PrivMirrored(uint32_t registerOffset, uint64_t value) override
     {
+        if (m_ge1Active && !m_ge1.privWrite(registerOffset, value))
+        {
+            std::fprintf(stderr, "[gs:external] GE1 priv write rejected offset=%x\n", registerOffset);
+            std::exit(78);
+        }
         ++m_stats.privMirrored;
         for (size_t i = 0; i < 19u; ++i)
             if (kMirrorOffsets[i] == registerOffset)
@@ -372,6 +538,8 @@ public:
 
     bool SavestateIdle() const override
     {
+        if (m_ge1Active)
+            return false; // GE1 freeze/import is not yet wired; refuse an incomplete save.
         const bool innerIdle = m_inner ? m_inner->SavestateIdle() : true;
         const bool fifoDrained = !m_fifoValid || m_fifoCursor >= m_fifo.size();
         return innerIdle && fifoDrained;
@@ -379,6 +547,8 @@ public:
 
     std::string SavestateBusyReason() const override
     {
+        if (m_ge1Active)
+            return "gs-external-freeze-unimplemented";
         // Armed-but-undownloaded (inner holds the setup snapshot) and
         // downloaded-but-undrained (the adapter cursor) are both "bytes the
         // guest may still read": the snapshot already unifies the two.
@@ -497,6 +667,14 @@ public:
     }
 
 private:
+    std::array<uint64_t, 20> resetWords() const
+    {
+        std::array<uint64_t, 20> words{};
+        std::copy_n(m_mirror.begin(), 16u, words.begin());
+        std::copy_n(m_mirror.begin() + 16u, 3u, words.begin() + 17u);
+        return words;
+    }
+
     void logLine(const char *line)
     {
         if (!m_log || m_stats.logTruncated)
@@ -539,6 +717,14 @@ private:
     }
 
     const GSRegisters *m_priv = nullptr;
+    uint8_t *m_vram = nullptr;
+    uint32_t m_vramSize = 0u;
+    Ge1Api m_ge1;
+    bool m_ge1Active = false;
+    uint8_t m_ge1LastPath = 3u;
+    uint32_t m_ge1FifoBytes = 0u;
+    bool m_ge1FifoServed = false;
+    FILE *m_gpuCsv = nullptr;
     std::unique_ptr<GSCpuBackend> m_inner;
     FILE *m_log = nullptr;
     ps2x_gs_external::Stats m_stats;
