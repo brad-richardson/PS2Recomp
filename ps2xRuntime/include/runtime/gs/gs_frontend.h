@@ -344,6 +344,7 @@ private:
     std::atomic<uint64_t> m_regWriteCount{0};
     std::atomic<uint64_t> m_privWriteCount{0};
     std::atomic<bool> m_rawGifBackend{false};
+    std::atomic<bool> m_minimalGifDecode{false};
     std::atomic<bool> m_wantsGuestVsync{false}; // GE2: cached WantsGuestVsync()
     std::atomic<bool> m_wantsPrivMirror{false}; // GE2: cached WantsPrivMirror()
     // N8D7M12 Part 5F4P2: worker-consumption packet-sequence fingerprint.

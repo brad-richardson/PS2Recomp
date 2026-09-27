@@ -52,6 +52,30 @@ namespace
         return v;
     }
 
+    // External GS owns rendering state. Keep only writes whose effects can
+    // escape through guest registers, transfers, or the local-to-host FIFO.
+    static constexpr bool isGuestGsControlRegister(uint8_t reg)
+    {
+        switch (reg)
+        {
+        case GS_REG_BITBLTBUF:
+        case GS_REG_TRXPOS:
+        case GS_REG_TRXREG:
+        case GS_REG_TRXDIR:
+        case GS_REG_HWREG:
+        case GS_REG_SIGNAL:
+        case GS_REG_FINISH:
+        case GS_REG_LABEL:
+        case 0x5a: // DISPFB1 HLE alias
+        case 0x5b: // DISPFB2 HLE alias
+        case 0x5c: // DISPLAY2 HLE alias
+        case 0x5f: // BGCOLOR HLE alias
+            return true;
+        default:
+            return false;
+        }
+    }
+
     // N8D7M12 Part 5F4P2: 64-bit FNV-1a helpers with explicit LE field
     // encoding. Variable-length payloads are length-prefixed (u32 LE)
     // so concatenations cannot alias.
@@ -1228,6 +1252,61 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
         return;
 
+    if (m_minimalGifDecode.load(std::memory_order_relaxed))
+    {
+        uint32_t offset = 0u;
+        while (offset + 16u <= sizeBytes)
+        {
+            const uint64_t tagLo = loadLE64(data + offset);
+            const uint64_t tagHi = loadLE64(data + offset + 8u);
+            offset += 16u;
+            const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7fffu);
+            const uint32_t nregField = static_cast<uint32_t>((tagLo >> 60u) & 0xfu);
+            const uint32_t nreg = nregField ? nregField : 16u;
+            const uint32_t flg = static_cast<uint32_t>((tagLo >> 58u) & 0x3u);
+            const uint64_t items = static_cast<uint64_t>(nloop) * nreg;
+            if (flg == GIF_FMT_PACKED)
+            {
+                const uint64_t bytes = items * 16u;
+                if (bytes > sizeBytes - offset)
+                    return;
+                bool hasAd = false;
+                for (uint32_t r = 0; r < nreg; ++r)
+                    hasAd |= ((tagHi >> (r * 4u)) & 0xfu) == 0xeu;
+                if (hasAd)
+                {
+                    for (uint64_t i = 0; i < items; ++i, offset += 16u)
+                    {
+                        if (((tagHi >> ((i % nreg) * 4u)) & 0xfu) != 0xeu)
+                            continue;
+                        const uint8_t reg = static_cast<uint8_t>(loadLE64(data + offset + 8u));
+                        if (isGuestGsControlRegister(reg))
+                            writeRegisterUnlocked(reg, loadLE64(data + offset));
+                    }
+                }
+                else
+                    offset += static_cast<uint32_t>(bytes);
+            }
+            else if (flg == GIF_FMT_REGLIST)
+            {
+                const uint64_t bytes = (items + 1u) / 2u * 16u;
+                if (bytes > sizeBytes - offset)
+                    return;
+                offset += static_cast<uint32_t>(bytes);
+            }
+            else if (flg == GIF_FMT_IMAGE)
+            {
+                const uint32_t bytes = static_cast<uint32_t>(std::min<uint64_t>(
+                    static_cast<uint64_t>(nloop) * 16u, sizeBytes - offset));
+                processImageData(data + offset, bytes);
+                offset += bytes;
+            }
+            else
+                return;
+        }
+        return;
+    }
+
     // T1: true GIF-packet count (the [gs:gif] line below caps at 48).
     // HP3 F15: opt-in behind the cached park flag (snapshot reads it
     // only when park is on).
@@ -1363,8 +1442,22 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     // it); the default is a no-op so paraLLEl is unaffected.
     if (m_rawGifBackend.load(std::memory_order_relaxed))
         m_backend->RawNativePackedPacket(data, sizeBytes);
+    const bool minimal = m_minimalGifDecode.load(std::memory_order_relaxed);
     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
                                                 {
+        if (minimal)
+        {
+            uint32_t offset = tag.payloadOffset;
+            for (uint32_t loop = 0u; loop < tag.nloop; ++loop)
+                for (uint32_t r = 0u; r < tag.nreg; ++r, offset += 16u)
+                    if (tag.regs[r] == 0xeu)
+                    {
+                        const uint8_t reg = static_cast<uint8_t>(loadLE64(data + offset + 8u));
+                        if (isGuestGsControlRegister(reg))
+                            writeRegisterUnlocked(reg, loadLE64(data + offset));
+                    }
+            return true;
+        }
         m_curQ = 1.0f;
 
         recordGifTagDebugEventUnlocked(sizeBytes, tag.nloop, GIF_FMT_PACKED, tag.nreg);
@@ -2513,6 +2606,7 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
     m_backend = std::move(backend);
     m_backend->Initialize(m_localMemoryStorage, m_localMemorySize);
     m_rawGifBackend.store(m_backend->WantsRawGif(), std::memory_order_release);
+    m_minimalGifDecode.store(m_backend->WantsMinimalGifDecode(), std::memory_order_release);
     m_wantsGuestVsync.store(m_backend->WantsGuestVsync(), std::memory_order_release);
     m_wantsPrivMirror.store(m_backend->WantsPrivMirror(), std::memory_order_release);
 }

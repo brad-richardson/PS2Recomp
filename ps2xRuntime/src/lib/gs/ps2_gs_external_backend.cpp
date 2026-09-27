@@ -45,6 +45,7 @@ struct Ge1Api
     decltype(&ge1_gs_read_fifo) readFifo = nullptr;
     decltype(&ge1_gs_snapshot) snapshot = nullptr;
     decltype(&ge1_gs_export_ahb) exportAhb = nullptr;
+    decltype(&ge1_gs_wait_export) waitExport = nullptr;
     decltype(&ge1_gs_release_ahb) releaseAhb = nullptr;
     decltype(&ge1_gs_gpu_ms) gpuMs = nullptr;
 
@@ -69,6 +70,7 @@ struct Ge1Api
         GE1_SYMBOL(snapshot, ge1_gs_snapshot);
 #if defined(__ANDROID__)
         GE1_SYMBOL(exportAhb, ge1_gs_export_ahb);
+        GE1_SYMBOL(waitExport, ge1_gs_wait_export);
         GE1_SYMBOL(releaseAhb, ge1_gs_release_ahb);
 #endif
         GE1_SYMBOL(gpuMs, ge1_gs_gpu_ms);
@@ -298,8 +300,9 @@ public:
     {
         ++m_stats.uploads;
         m_stats.uploadBytes += sizeBytes;
-        log("U size=%u crc=%08x tick=%llu\n", sizeBytes,
-            data && sizeBytes ? fnv1a32(data, sizeBytes) : 0u, tickNow());
+        if (m_log)
+            log("U size=%u crc=%08x tick=%llu\n", sizeBytes,
+                data && sizeBytes ? fnv1a32(data, sizeBytes) : 0u, tickNow());
         if (m_inner)
             m_inner->UploadImage(data, sizeBytes);
     }
@@ -470,6 +473,7 @@ public:
     }
 
     bool WantsRawGif() const override { return true; }
+    bool WantsMinimalGifDecode() const override { return m_ge1Active; }
 
     void RawGifPacket(uint32_t path, const uint8_t *data, uint32_t sizeBytes) override
     {
@@ -487,10 +491,10 @@ public:
         const size_t slot = path < 4u ? path : 0u;
         ++m_stats.gifPacketsByPath[slot];
         m_stats.gifQwords[slot] += sizeBytes / 16u;
-        m_pathCrc[slot] = data && sizeBytes ? fnv1a32(data, sizeBytes, m_pathCrc[slot]) : m_pathCrc[slot];
-        log("G path=%u size=%u crc=%08x tick=%llu%s\n", path, sizeBytes,
-            data && sizeBytes ? fnv1a32(data, sizeBytes) : 0u, tickNow(),
-            (sizeBytes % 16u) ? " ODD" : "");
+        if (m_log)
+            log("G path=%u size=%u crc=%08x tick=%llu%s\n", path, sizeBytes,
+                data && sizeBytes ? fnv1a32(data, sizeBytes) : 0u, tickNow(),
+                (sizeBytes % 16u) ? " ODD" : "");
     }
 
     void RawWriteRegister(uint8_t regAddr, uint64_t value) override
@@ -520,8 +524,9 @@ public:
             std::exit(78);
         }
         ++m_stats.nativePacked;
-        log("N size=%u crc=%08x tick=%llu\n", sizeBytes,
-            data && sizeBytes ? fnv1a32(data, sizeBytes) : 0u, tickNow());
+        if (m_log)
+            log("N size=%u crc=%08x tick=%llu\n", sizeBytes,
+                data && sizeBytes ? fnv1a32(data, sizeBytes) : 0u, tickNow());
     }
 
     bool WantsGuestVsync() const override { return true; }
@@ -702,8 +707,26 @@ private:
         AHardwareBuffer *buffer = nullptr;
     };
 
+    bool queuePendingAhb()
+    {
+        if (m_pendingAhb < 0)
+            return true;
+        m_ge1.waitExport(m_pendingFence);
+        AhbSlot &slot = m_ahbSlots[static_cast<size_t>(m_pendingAhb)];
+        dumpAhb(slot.buffer, m_pendingTick);
+        const bool queued = ps2x_present_vk::queue(slot.id, 640u, 480u);
+        m_pendingAhb = -1;
+        m_pendingFence = 0u;
+        if (!queued)
+            ps2x_present_vk::fallBack("GE1 AHB queue failed");
+        return queued;
+    }
+
     void retireAhbSlots()
     {
+        if (m_pendingAhb >= 0 && m_ge1Active)
+            m_ge1.waitExport(m_pendingFence);
+        m_pendingAhb = -1;
         for (AhbSlot &slot : m_ahbSlots)
         {
             if (slot.id)
@@ -750,6 +773,8 @@ private:
     {
         if (m_ahbSlots[0].id && m_ahbEpoch != ps2x_present_vk::poolEpoch())
             retireAhbSlots();
+        if (!queuePendingAhb())
+            return false;
         if (!m_ahbSlots[0].id)
         {
             for (AhbSlot &slot : m_ahbSlots)
@@ -776,7 +801,8 @@ private:
         }
         AhbSlot &slot = m_ahbSlots[pick.index];
         m_ahbStart = (pick.index + 1) % 4;
-        const int exported = m_ge1.exportAhb(slot.buffer, 640u, 480u);
+        uint64_t fence = 0u;
+        const int exported = m_ge1.exportAhb(slot.buffer, 640u, 480u, &fence);
         if (exported == 0)
             return false; // the first host present may precede the first GS VSync
         if (exported < 0)
@@ -785,12 +811,12 @@ private:
             ps2x_present_vk::fallBack("GE1 GPU to AHB export failed");
             return false;
         }
-        dumpAhb(slot.buffer, tick);
-        if (!ps2x_present_vk::queue(slot.id, 640u, 480u))
-        {
-            ps2x_present_vk::fallBack("GE1 AHB queue failed");
-            return false;
-        }
+        m_pendingAhb = pick.index;
+        m_pendingFence = fence;
+        m_pendingTick = tick;
+        // Finish fixed-tick diagnostic exports before their stop boundary.
+        if (std::getenv("PS2X_GS_AHB_DUMP_DIR") && (tick == 2100u || tick == 3000u))
+            return queuePendingAhb();
         return true;
     }
 #endif
@@ -853,6 +879,9 @@ private:
     std::array<AhbSlot, 4> m_ahbSlots{};
     uint32_t m_ahbEpoch = 0u;
     int m_ahbStart = 0;
+    int m_pendingAhb = -1;
+    uint64_t m_pendingFence = 0u;
+    uint64_t m_pendingTick = 0u;
 #endif
     uint8_t m_ge1LastPath = 3u;
     uint32_t m_ge1FifoBytes = 0u;
@@ -861,7 +890,6 @@ private:
     std::unique_ptr<GSCpuBackend> m_inner;
     FILE *m_log = nullptr;
     ps2x_gs_external::Stats m_stats;
-    uint32_t m_pathCrc[4] = {2166136261u, 2166136261u, 2166136261u, 2166136261u};
     uint64_t m_lastVsyncTick = 0u;
     std::array<uint64_t, 19> m_mirror{};
     // Lazy local->host FIFO: downloaded from the inner backend at the first

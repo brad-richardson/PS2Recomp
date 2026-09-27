@@ -33,11 +33,13 @@ public:
     virtual GSTransferSnapshot GetTransferSnapshot() const = 0;
 
     // GB3 Part 2: backends that decode GIF themselves (paraLLEl-GS) take the
-    // raw stream instead of the frontend's primitive batches. The frontend
-    // still decodes every packet (CSR SIGNAL/FINISH/LABEL, transfer state,
-    // preferred display source) and still calls Submit/UploadImage, which
-    // such a backend ignores. Defaults: not wanted, no-ops.
+    // raw stream instead of the frontend's primitive batches. By default the
+    // frontend still decodes every packet for state and transfers; a backend
+    // can request the smaller guest-control path below. Defaults: no-ops.
     virtual bool WantsRawGif() const { return false; }
+    // A live external GS owns drawing state. The frontend only needs the
+    // guest-visible control registers and transfer/FIFO bookkeeping.
+    virtual bool WantsMinimalGifDecode() const { return false; }
     virtual void RawGifPacket(uint32_t path, const uint8_t *data, uint32_t sizeBytes)
     {
         (void)path;
