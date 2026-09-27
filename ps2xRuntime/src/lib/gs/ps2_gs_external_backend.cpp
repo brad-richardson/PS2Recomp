@@ -48,9 +48,33 @@ struct Ge1Api
     decltype(&ge1_gs_wait_export) waitExport = nullptr;
     decltype(&ge1_gs_release_ahb) releaseAhb = nullptr;
     decltype(&ge1_gs_gpu_ms) gpuMs = nullptr;
+#if defined(PS2X_GE1_STATIC_IOSURFACE)
+    decltype(&ge1_gs_export_iosurface) exportIOSurface = nullptr;
+#endif
 
     bool load(const char *path)
     {
+#if defined(PS2X_GE1_STATIC)
+        // GI1: the GE1 adapter is statically linked (iOS, no dlopen). The
+        // sentinel "builtin" binds the linked symbols behind the same C ABI.
+        if (std::strcmp(path, "builtin") == 0)
+        {
+            open = ::ge1_gs_open;
+            close = ::ge1_gs_close;
+            reset = ::ge1_gs_reset;
+            privWrite = ::ge1_gs_priv_write;
+            packet = ::ge1_gs_packet;
+            vsync = ::ge1_gs_vsync;
+            readFifo = ::ge1_gs_read_fifo;
+            snapshot = ::ge1_gs_snapshot;
+            gpuMs = ::ge1_gs_gpu_ms;
+#if defined(PS2X_GE1_STATIC_IOSURFACE)
+            exportIOSurface = ::ge1_gs_export_iosurface;
+#endif
+            std::fprintf(stderr, "[gs:external] GE1 builtin static GS bound\n");
+            return true;
+        }
+#endif
         library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
         if (!library)
         {

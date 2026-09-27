@@ -953,6 +953,54 @@ if(PS2X_IS_IOS)
     )
     # IP1: universal device family so iPadOS runs full screen (was: Xcode default 1, iPhone compat box).
     set_target_properties(ps2EntryRunner PROPERTIES XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
+    # GI1: statically-linked PCSX2 GS (Metal) for iOS. PS2X_GE1_IOS_BUILD is
+    # the ios-device or ios-sim build dir (matching this app's SDK) holding
+    # libge1_gs.a + libPCSX2.a + dep archives; PS2X_GE1_PCSX2_ROOT is the
+    # pcsx2 worktree (gi1 branch) for .metal sources and fonts. Unset =
+    # today's behavior (no GE1 symbols; PS2X_GS_EXTERNAL_LIBRARY=builtin
+    # refuses at runtime).
+    set(PS2X_GE1_IOS_BUILD "" CACHE PATH "GI1: ios-platform build dir for this SDK")
+    set(PS2X_GE1_PCSX2_ROOT "" CACHE PATH "GI1: pcsx2 worktree (gi1) for Metal shaders + fonts")
+    if(PS2X_GE1_IOS_BUILD AND PS2X_GE1_PCSX2_ROOT)
+        file(GLOB_RECURSE PS2X_GE1_ARCHIVES "${PS2X_GE1_IOS_BUILD}/*.a")
+        list(LENGTH PS2X_GE1_ARCHIVES PS2X_GE1_ARCHIVE_COUNT)
+        message(STATUS "PS2X: GI1 static GS: ${PS2X_GE1_ARCHIVE_COUNT} archives from ${PS2X_GE1_IOS_BUILD}")
+        target_link_libraries(ps2EntryRunner PRIVATE ${PS2X_GE1_ARCHIVES})
+        target_compile_definitions(ps2_runtime PRIVATE PS2X_GE1_STATIC=1)
+        # Frameworks the GS closure needs beyond what the app already links.
+        target_link_libraries(ps2EntryRunner PRIVATE
+            "-framework Metal"
+            "-framework MetalKit"
+            "-framework QuartzCore"
+            "-framework CoreVideo"
+            "-framework IOSurface"
+            "-framework CoreMedia"
+            "-framework AVFoundation"
+            "-framework AudioToolbox"
+            "-framework CoreAudio"
+            "-framework CoreMotion"
+            "-framework GameController"
+            "-framework CoreHaptics"
+            "-framework CoreBluetooth"
+            "-framework ImageIO"
+        )
+        # The 8 PCSX2 Metal shaders: Xcode compiles them into the app's
+        # default.metallib (ARMSX2 shape); PCSX2 falls back to
+        # newDefaultLibrary when no named metallib is bundled.
+        file(GLOB PS2X_GE1_METAL "${PS2X_GE1_PCSX2_ROOT}/pcsx2/GS/Renderers/Metal/*.metal")
+        target_sources(ps2EntryRunner PRIVATE ${PS2X_GE1_METAL})
+        set_source_files_properties(${PS2X_GE1_METAL} PROPERTIES
+            XCODE_EXPLICIT_FILE_TYPE "sourcecode.metal"
+        )
+        # Roboto-Regular: the GE1 adapter maps it for ImGui at open.
+        target_sources(ps2EntryRunner PRIVATE
+            "${PS2X_GE1_PCSX2_ROOT}/bin/resources/fonts/Roboto-Regular.ttf"
+        )
+        set_source_files_properties(
+            "${PS2X_GE1_PCSX2_ROOT}/bin/resources/fonts/Roboto-Regular.ttf" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources/fonts"
+        )
+    endif()
 endif()
 
 if(APPLE)
