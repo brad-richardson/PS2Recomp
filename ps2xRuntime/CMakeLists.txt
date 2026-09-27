@@ -985,13 +985,46 @@ if(PS2X_IS_IOS)
             "-framework ImageIO"
             "-lz"
         )
-        # The 8 PCSX2 Metal shaders: Xcode compiles them into the app's
-        # default.metallib (ARMSX2 shape); PCSX2 falls back to
-        # newDefaultLibrary when no named metallib is bundled.
+        # The 8 PCSX2 Metal shaders as an explicit default.metallib: CMake's
+        # Xcode generator does not attach .metal sources to the compile
+        # phase, so compile them with xcrun (same set the desktop
+        # generateMetallib() uses; iOS triple for this SDK, matching the
+        # 17.0 deployment floor). PCSX2's loadMainLibrary picks the bundled
+        # default.metallib up from the app resources.
+        find_program(PS2X_XCRUN xcrun REQUIRED)
         file(GLOB PS2X_GE1_METAL "${PS2X_GE1_PCSX2_ROOT}/pcsx2/GS/Renderers/Metal/*.metal")
-        target_sources(ps2EntryRunner PRIVATE ${PS2X_GE1_METAL})
-        set_source_files_properties(${PS2X_GE1_METAL} PROPERTIES
-            XCODE_EXPLICIT_FILE_TYPE "sourcecode.metal"
+        list(LENGTH PS2X_GE1_METAL PS2X_GE1_METAL_COUNT)
+        if(NOT PS2X_GE1_METAL_COUNT EQUAL 8)
+            message(FATAL_ERROR "PS2X: GI1 expected 8 .metal shaders, found ${PS2X_GE1_METAL_COUNT}")
+        endif()
+        set(PS2X_GE1_AIRDIR "${CMAKE_CURRENT_BINARY_DIR}/ge1-metallib")
+        set(PS2X_GE1_AIRFILES "")
+        foreach(PS2X_GE1_SHADER ${PS2X_GE1_METAL})
+            get_filename_component(PS2X_GE1_SHADER_NAME "${PS2X_GE1_SHADER}" NAME)
+            set(PS2X_GE1_AIR "${PS2X_GE1_AIRDIR}/${PS2X_GE1_SHADER_NAME}.air")
+            list(APPEND PS2X_GE1_AIRFILES "${PS2X_GE1_AIR}")
+            add_custom_command(OUTPUT "${PS2X_GE1_AIR}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "${PS2X_GE1_AIRDIR}"
+                COMMAND "${PS2X_XCRUN}" -sdk "${CMAKE_OSX_SYSROOT}" metal
+                    -ffast-math -std=ios-metal2.4 -c "${PS2X_GE1_SHADER}" -o "${PS2X_GE1_AIR}"
+                DEPENDS "${PS2X_GE1_SHADER}"
+                COMMENT "GI1 metal ${PS2X_GE1_SHADER_NAME}"
+                VERBATIM
+            )
+        endforeach()
+        set(PS2X_GE1_METALLIB "${PS2X_GE1_AIRDIR}/default.metallib")
+        add_custom_command(OUTPUT "${PS2X_GE1_METALLIB}"
+            COMMAND "${PS2X_XCRUN}" -sdk "${CMAKE_OSX_SYSROOT}" metallib
+                -o "${PS2X_GE1_METALLIB}" ${PS2X_GE1_AIRFILES}
+            DEPENDS ${PS2X_GE1_AIRFILES}
+            COMMENT "GI1 metallib default.metallib"
+            VERBATIM
+        )
+        add_custom_target(ps2x_ge1_metallib DEPENDS "${PS2X_GE1_METALLIB}")
+        add_dependencies(ps2EntryRunner ps2x_ge1_metallib)
+        target_sources(ps2EntryRunner PRIVATE "${PS2X_GE1_METALLIB}")
+        set_source_files_properties("${PS2X_GE1_METALLIB}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources"
         )
         # Roboto-Regular: the GE1 adapter maps it for ImGui at open.
         target_sources(ps2EntryRunner PRIVATE
