@@ -41,6 +41,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -148,17 +149,87 @@ namespace ps2_mtvu
                                              .count());
         }
 
-        // Unit depth > 0: this thread is doing unit work (hooks are no-ops).
-        inline thread_local int t_unitDepth = 0;
-        // Set on the thread that runs VBlankStart / submits jobs (the EE
-        // executor). touch() only checks there: the GS worker's own calls and
-        // host presentation are downstream consumers, as today.
-        inline thread_local bool t_isEe = false;
-        // The worker thread itself, and the FBRST snapshot of the job it runs.
-        inline thread_local bool t_onWorker = false;
+        // TT1/GT1(a): owner ids + EE-owned plain state replace four
+        // thread_locals (t_unitDepth/t_isEe/t_onWorker/t_exempt) that touch()
+        // read on every GS-priv 64-bit load (~0.41 ms/f of TLSDESC on the
+        // Odin, GT1 §6). Audit (TT1 report): the EE executor is the only
+        // thread that submits/vblanks (noteEeThread, first-wins); unit
+        // threads (the MTVU worker + the VU1W engine worker) note/forget
+        // themselves; JobScope/ExemptScope scopes run EE-side only.
+        // touch()/sync() do one get_id + relaxed loads, no TLS.
+        // t_jobFbrst stays thread-local: it is read on both threads with
+        // thread-specific values (EE reads 0, the worker its snapshot).
+        static_assert(std::is_trivially_copyable_v<std::thread::id>);
+        inline std::atomic<std::thread::id> g_eeTid{};
+        inline std::atomic<std::thread::id> g_mtvuTid{};
+        inline std::atomic<int> g_eeUnitDepth{0};
+        inline std::atomic<int> g_eeExempt{0};
+        // Live unit threads (MTVU worker + VU1W): at most 2, slots recycle
+        // via forgetUnitThread on thread stop. touch()/sync() skip there.
+        static constexpr int kMaxUnitThreads = 4;
+        inline std::atomic<std::thread::id> g_unitTids[kMaxUnitThreads]{};
         inline thread_local uint32_t t_jobFbrst = 0u;
-        // A masked CSR read (R1) touches the priv block without a sync.
-        inline thread_local int t_exempt = 0;
+        inline void noteEeThread() noexcept
+        {
+            std::thread::id empty;
+            g_eeTid.compare_exchange_strong(empty, std::this_thread::get_id(),
+                                            std::memory_order_relaxed);
+        }
+        inline bool isEeThread() noexcept
+        {
+            return std::this_thread::get_id() == g_eeTid.load(std::memory_order_relaxed);
+        }
+        inline void noteUnitThread() noexcept
+        {
+            const std::thread::id me = std::this_thread::get_id();
+            for (int i = 0; i < kMaxUnitThreads; ++i)
+            {
+                if (g_unitTids[i].load(std::memory_order_relaxed) == me)
+                    return;
+                std::thread::id empty;
+                if (g_unitTids[i].compare_exchange_strong(empty, me, std::memory_order_relaxed))
+                    return;
+            }
+        }
+        inline void forgetUnitThread() noexcept
+        {
+            const std::thread::id me = std::this_thread::get_id();
+            for (int i = 0; i < kMaxUnitThreads; ++i)
+            {
+                if (g_unitTids[i].load(std::memory_order_relaxed) == me)
+                    g_unitTids[i].store(std::thread::id{}, std::memory_order_relaxed);
+            }
+        }
+        inline bool isUnitThread() noexcept
+        {
+            const std::thread::id me = std::this_thread::get_id();
+            for (int i = 0; i < kMaxUnitThreads; ++i)
+            {
+                if (g_unitTids[i].load(std::memory_order_relaxed) == me)
+                    return true;
+            }
+            return false;
+        }
+        // RAII: the mark dies with the thread on every exit path, so a
+        // recycled OS id never reads back as live.
+        struct UnitThreadGuard
+        {
+            UnitThreadGuard() noexcept { noteUnitThread(); }
+            ~UnitThreadGuard() noexcept { forgetUnitThread(); }
+        };
+        struct MtvuThreadGuard
+        {
+            MtvuThreadGuard() noexcept
+            {
+                g_mtvuTid.store(std::this_thread::get_id(), std::memory_order_relaxed);
+                noteUnitThread();
+            }
+            ~MtvuThreadGuard() noexcept
+            {
+                g_mtvuTid.store(std::thread::id{}, std::memory_order_relaxed);
+                forgetUnitThread();
+            }
+        };
 
         struct Job
         {
@@ -214,8 +285,7 @@ namespace ps2_mtvu
 
             void loop()
             {
-                t_onWorker = true;
-                t_unitDepth = 1;
+                const MtvuThreadGuard mtvuGuard;
                 ThreadNaming::SetCurrentThreadName("MTVU");
                 if (const char *cpus = std::getenv("PS2X_MTVU_CPUS"))
                 {
@@ -504,7 +574,7 @@ namespace ps2_mtvu
 
     inline bool onWorker()
     {
-        return detail::t_onWorker;
+        return std::this_thread::get_id() == detail::g_mtvuTid.load(std::memory_order_relaxed);
     }
 
     inline uint32_t jobFbrst()
@@ -529,7 +599,10 @@ namespace ps2_mtvu
     // EE side, before touching unit-owned state.
     inline void sync(Reason r, uint32_t detail = 0u)
     {
-        if (!active() || detail::t_unitDepth != 0)
+        // (No EE check here, as before: non-EE callers proceed to the slow
+        // path. Only unit work skips.)
+        if (!active() || detail::isUnitThread() ||
+            detail::g_eeUnitDepth.load(std::memory_order_relaxed) != 0)
             return;
         if (threaded())
         {
@@ -548,7 +621,7 @@ namespace ps2_mtvu
         job.fpControl = ps2_fpmode::readControl();
         job.fbrst = fbrst;
         job.bytes = bytes;
-        detail::t_isEe = true;
+        detail::noteEeThread();
         detail::worker().submit(std::move(job));
     }
 
@@ -558,12 +631,12 @@ namespace ps2_mtvu
         explicit ExemptScope(bool on) : m_on(on)
         {
             if (m_on)
-                ++detail::t_exempt;
+                detail::g_eeExempt.fetch_add(1, std::memory_order_relaxed);
         }
         ~ExemptScope()
         {
             if (m_on)
-                --detail::t_exempt;
+                detail::g_eeExempt.fetch_sub(1, std::memory_order_relaxed);
         }
         bool m_on;
         ExemptScope(const ExemptScope &) = delete;
@@ -659,7 +732,16 @@ namespace ps2_mtvu
     // Inside a unit-owned object: must be unit work or follow a sync.
     inline void touch(Site s)
     {
-        if (!active() || detail::t_unitDepth != 0 || !detail::t_isEe || detail::t_exempt != 0)
+        if (!active())
+            return;
+        // One get_id (thread-register read) + relaxed loads; the GS
+        // worker's own calls and host presentation skip, as before.
+        if (detail::isUnitThread())
+            return;
+        if (!detail::isEeThread())
+            return;
+        if (detail::g_eeUnitDepth.load(std::memory_order_relaxed) != 0 ||
+            detail::g_eeExempt.load(std::memory_order_relaxed) != 0)
             return;
         if (threaded())
         {
@@ -722,11 +804,13 @@ namespace ps2_mtvu
     {
     public:
         JobScope(bool on, char kind)
-            : m_on(on && census() && detail::t_unitDepth == 0), m_kind(kind)
+            : m_on(on && census() && !detail::isUnitThread() &&
+                   detail::g_eeUnitDepth.load(std::memory_order_relaxed) == 0),
+              m_kind(kind)
         {
             if (!m_on)
                 return;
-            detail::t_isEe = true;
+            detail::noteEeThread();
             m_tau = detail::tau();
             resume();
         }
@@ -750,14 +834,14 @@ namespace ps2_mtvu
             if (!m_on || !m_running)
                 return;
             m_ns += detail::nowNs() - m_start;
-            --detail::t_unitDepth;
+            detail::g_eeUnitDepth.fetch_sub(1, std::memory_order_relaxed);
             m_running = false;
         }
         void resume()
         {
             if (!m_on || m_running)
                 return;
-            ++detail::t_unitDepth;
+            detail::g_eeUnitDepth.fetch_add(1, std::memory_order_relaxed);
             m_start = detail::nowNs();
             m_running = true;
         }
@@ -779,7 +863,7 @@ namespace ps2_mtvu
     {
         if (!active())
             return;
-        detail::t_isEe = true;
+        detail::noteEeThread();
         if (threaded())
         {
             detail::Worker &w = detail::worker();

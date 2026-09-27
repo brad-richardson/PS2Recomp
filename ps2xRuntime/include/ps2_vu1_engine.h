@@ -523,7 +523,8 @@ namespace ps2_vu1_engine
 
         void loop()
         {
-            ps2_mtvu::detail::t_unitDepth = 1; // unit work: MT1 hooks are no-ops here
+            // Unit work: MT1 hooks are no-ops here (mark dies with the thread).
+            const ps2_mtvu::detail::UnitThreadGuard unitGuard;
             ThreadNaming::SetCurrentThreadName("VU1W");
             if (const char *cpus = std::getenv("PS2X_VU1_WORKER_CPUS"))
             {

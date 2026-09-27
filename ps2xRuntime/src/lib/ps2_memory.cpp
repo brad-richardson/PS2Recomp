@@ -2113,6 +2113,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     // after the cut.
                     const int kMaxChainTags = 1 << 20;
                     std::vector<uint8_t> chainBuf;
+                    chainBuf.reserve(m_chainBufHint);
 
                     // E40 Part-3 DEV-ONLY: EE source spans for VIF1 chain
                     // bytes. Empty unless the SRC trace is enabled.
@@ -2369,6 +2370,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                     ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "chain end ch=0x%x tags=%d capped=%d bytes=%zu",
                                 channelBase, tagsProcessed, tagsProcessed >= kMaxChainTags ? 1 : 0, chainBuf.size());
+                    // Track the high-water mark (capped): the next kick
+                    // pre-reserves it, so steady-state chains never regrow.
+                    if (chainBuf.size() > m_chainBufHint)
+                        m_chainBufHint = std::min<size_t>(chainBuf.size(), 8u << 20);
                     if (tagsProcessed >= kMaxChainTags)
                     {
                         static std::atomic<bool> warned{false};

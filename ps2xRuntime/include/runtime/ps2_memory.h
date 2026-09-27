@@ -476,6 +476,10 @@ public:
     std::vector<PendingTransfer> m_pendingGifTransfers;
     std::vector<PendingTransfer> m_pendingVif0Transfers;
     std::vector<PendingTransfer> m_pendingVif1Transfers;
+    // TT1/GT1(c): high-water reserve hint for the DMA-chain staging buffer
+    // in writeIORegister (kicks run EE-side only). Kills the O(n^2) growth
+    // memcpy (~0.30 ms/f, GT1 §6); reserve-only, contents-identical.
+    size_t m_chainBufHint = 1u << 18;
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
 

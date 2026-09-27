@@ -140,13 +140,23 @@ inline bool enabled() noexcept
     return on;
 }
 
+// TT1/GT1(b): one plain load. The guarded function-local static cost an
+// ldarb + ~6 insns on EVERY guest load even with SIM off (GT1 §4). The flag
+// is filled by setThread()/begin() (EE thread; setThread precedes all guest
+// execution, and conversions need an active context from begin), so the
+// value is always correct where observed; see the fill points.
+inline bool g_halfModeFlag = false;
+inline bool g_halfModeDone = false;
+inline void initHalfMode() noexcept
+{
+    if (g_halfModeDone) return;
+    const char *mode = std::getenv("PS2X_SSX3_SIM_MODE");
+    g_halfModeFlag = mode && std::strcmp(mode, "split120_render60_v1") == 0;
+    g_halfModeDone = true;
+}
 inline bool halfMode() noexcept
 {
-    static const bool on = [] {
-        const char *mode = std::getenv("PS2X_SSX3_SIM_MODE");
-        return mode && std::strcmp(mode, "split120_render60_v1") == 0;
-    }();
-    return on;
+    return g_halfModeFlag;
 }
 
 // TS3: run unconverted selector cases (3/4/5) once per stock update at full
@@ -313,6 +323,9 @@ inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
 
 inline void setThread(uint32_t id, bool interrupt) noexcept
 {
+    // Fill first, unconditionally: the scheduler calls this before any guest
+    // code runs, so the halfMode flag is correct for every guarded load.
+    initHalfMode();
     if (enabled()) { g_state.guestThread = id; g_state.guestInterrupt = interrupt; }
 }
 
@@ -352,6 +365,9 @@ inline bool skipSecondHalfPrediction(const uint8_t *ram, R5900Context *ctx,
 
 inline void begin(const uint8_t *ram, R5900Context *ctx) noexcept
 {
+    // Belt-and-braces for non-scheduler flows: conversions need an active
+    // context, so the flag is filled before any converting load can run.
+    initHalfMode();
     if (!enabled() || !ctx) return;
     State &s = g_state;
     if (s.guestInterrupt) return;
