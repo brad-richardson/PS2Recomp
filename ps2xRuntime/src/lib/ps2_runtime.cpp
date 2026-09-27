@@ -2220,6 +2220,20 @@ void diagCallsPeriodicFlush()
 }
 
 // P1f watchpoint (PS2X_DIAG_WATCH). Cached parse; unset/empty = disabled.
+// EE1: only the thread-id cell and SetThread stay unconditional (E7 thread
+// attribution); the parse/emit/report machinery compiles out with
+// PS2X_ENABLE_DIAG_WATCH=0.
+namespace
+{
+    std::atomic<int> g_diagWatchThreadId{-999};
+}
+
+void ps2DiagWatchSetThread(int id)
+{
+    g_diagWatchThreadId.store(id, std::memory_order_relaxed);
+}
+
+#if PS2X_ENABLE_DIAG_WATCH
 namespace
 {
     const std::vector<uint32_t> &diagWatchAddrs()
@@ -2265,8 +2279,6 @@ namespace
         }();
         return addrs;
     }
-
-    std::atomic<int> g_diagWatchThreadId{-999};
 
     void diagWatchEmit(uint32_t writeAddr,
                        uint32_t width,
@@ -2314,11 +2326,6 @@ namespace
 bool ps2DiagWatchEnabled()
 {
     return !diagWatchAddrs().empty();
-}
-
-void ps2DiagWatchSetThread(int id)
-{
-    g_diagWatchThreadId.store(id, std::memory_order_relaxed);
 }
 
 void ps2DiagWatchReportDirect(uint32_t writeAddr,
@@ -2371,6 +2378,16 @@ void ps2DiagWatchReport(uint8_t *rdram,
 {
     diagWatchReportImpl(rdram, writeAddr, width, valueLo, valueHi, ctx, runtime, 0u);
 }
+#endif // PS2X_ENABLE_DIAG_WATCH (EE1)
+
+#if !PS2X_ENABLE_DIAG_WATCH
+// EE1: the Store helpers still name the impl inside folded `if (false)`
+// branches; keep a no-op so the TU parses in release builds.
+static void diagWatchReportImpl(uint8_t *, uint32_t, uint32_t, uint64_t, uint64_t, const R5900Context *,
+                                const PS2Runtime *, uint32_t)
+{
+}
+#endif
 
 bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
 {

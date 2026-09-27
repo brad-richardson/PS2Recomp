@@ -593,9 +593,50 @@ bool PS2Memory::initialize(size_t ramSize)
 void PS2Memory::resetEeTimers() noexcept
 {
     m_eeTimers = {};
+    m_eeTimerPending = 0u;
+    m_eeTimerEventIn = 0u;
 }
 
 uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
+{
+    if (eeCycles == 0u)
+    {
+        return 0u;
+    }
+    // EE1: defer the timer state machine while no flag/interrupt event can
+    // fire. The deferred window stays event-free (m_eeTimerPending <
+    // m_eeTimerEventIn), so servicing it later is identical to servicing it
+    // now; near events (within one horizon) and oversized deltas take the
+    // service path, which runs the old pending window (event-free) and then
+    // this delta separately, exactly as the eager per-checkpoint calls did.
+    // All comparisons subtract from the event distance so no addition can
+    // wrap when no event is scheduled (m_eeTimerEventIn == max).
+    const uint64_t toEvent = m_eeTimerEventIn - m_eeTimerPending;
+    if (eeCycles >= kEeTimerDeferralHorizon || eeCycles >= toEvent ||
+        toEvent - eeCycles <= kEeTimerDeferralHorizon)
+    {
+        uint32_t mask = advanceEeTimersImpl(m_eeTimerPending);
+        mask |= advanceEeTimersImpl(eeCycles);
+        m_eeTimerPending = 0u;
+        m_eeTimerEventIn = cyclesUntilNextEeTimerEvent();
+        return mask;
+    }
+    m_eeTimerPending += eeCycles;
+    return 0u;
+}
+
+void PS2Memory::flushEeTimers() noexcept
+{
+    if (m_eeTimerPending == 0u)
+    {
+        return;
+    }
+    advanceEeTimersImpl(m_eeTimerPending);
+    m_eeTimerPending = 0u;
+    m_eeTimerEventIn = cyclesUntilNextEeTimerEvent();
+}
+
+uint32_t PS2Memory::advanceEeTimersImpl(uint64_t eeCycles) noexcept
 {
     if (eeCycles == 0u)
     {
@@ -665,7 +706,15 @@ uint32_t PS2Memory::advanceEeTimers(uint64_t eeCycles) noexcept
     return interruptMask;
 }
 
-uint64_t PS2Memory::cyclesUntilNextEeTimerInterrupt() const noexcept
+uint64_t PS2Memory::cyclesUntilNextEeTimerInterrupt() noexcept
+{
+    // EE1: the idle deadline query observes timer state, so it flushes
+    // deferred cycles first; the distance below is then exact.
+    flushEeTimers();
+    return cyclesUntilNextEeTimerEvent();
+}
+
+uint64_t PS2Memory::cyclesUntilNextEeTimerEvent() const noexcept
 {
     uint64_t nearest = std::numeric_limits<uint64_t>::max();
     for (const EeTimer &timer : m_eeTimers)
@@ -1528,6 +1577,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
     uint32_t timerOffset = 0u;
     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
     {
+        // EE1: timer writes observe then mutate timer state: service
+        // deferred cycles first, then recompute the event distance.
+        flushEeTimers();
         EeTimer &timer = m_eeTimers[timerIndex];
         switch (timerOffset)
         {
@@ -1555,6 +1607,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
         default:
             return false;
         }
+        m_eeTimerEventIn = cyclesUntilNextEeTimerEvent();
         return true;
     }
 
@@ -3299,6 +3352,9 @@ uint32_t PS2Memory::readIORegister(uint32_t address)
     uint32_t timerOffset = 0u;
     if (decodeEeTimerRegister(address, timerIndex, timerOffset))
     {
+        // EE1: timer reads observe timer state: service deferred cycles
+        // first so the returned COUNT/MODE/COMP/HOLD is exact.
+        flushEeTimers();
         const EeTimer &timer = m_eeTimers[timerIndex];
         switch (timerOffset)
         {

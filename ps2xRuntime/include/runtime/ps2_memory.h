@@ -312,8 +312,13 @@ public:
 
     // EE timers advance from the scheduler's emulated EE-cycle clock. The
     // returned mask uses bits 0..3 for newly raised TIM0..TIM3 interrupts.
+    // EE1: advanceEeTimers defers the timer state machine while no
+    // flag/interrupt event can fire (m_eeTimerPending < m_eeTimerEventIn);
+    // every observer (IO register reads/writes, the idle deadline query,
+    // savestates) flushes first, so guest observations are identical.
     uint32_t advanceEeTimers(uint64_t eeCycles) noexcept;
-    [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
+    void flushEeTimers() noexcept;
+    [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() noexcept;
     void resetEeTimers() noexcept;
 
     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
@@ -469,6 +474,18 @@ public:
     };
 
     std::array<EeTimer, 4> m_eeTimers{};
+    // EE1 deferred timer service. m_eeTimerPending holds cycles advanced by
+    // the scheduler but not yet run through the timer state machine;
+    // m_eeTimerEventIn is EE cycles from the last serviced state until the
+    // next flag/interrupt event (0 = unknown, service immediately). The
+    // invariant m_eeTimerPending < m_eeTimerEventIn keeps every deferred
+    // window event-free; kEeTimerDeferralHorizon only sets how eagerly a
+    // near event is serviced, never correctness.
+    static constexpr uint64_t kEeTimerDeferralHorizon = 4096u;
+    uint64_t m_eeTimerPending = 0u;
+    uint64_t m_eeTimerEventIn = 0u;
+    uint32_t advanceEeTimersImpl(uint64_t eeCycles) noexcept;
+    [[nodiscard]] uint64_t cyclesUntilNextEeTimerEvent() const noexcept;
     void queueCompletedDmacCause(uint32_t cause);
 };
 

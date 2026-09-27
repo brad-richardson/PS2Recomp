@@ -41,6 +41,7 @@ android {
                         '-DPS2X_RUNNER_UNITY_BUILD_BATCH_SIZE=32',
                         '-DANDROID_CPP_FEATURES=rtti exceptions',
                         '-DPS2X_ENABLE_DIAG_TAPS=OFF',
+                        '-DPS2X_ENABLE_DIAG_WATCH=OFF',
                         '-DPS2X_ENABLE_RUNTIME_LOGS=OFF',
                         '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF',
                         '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',

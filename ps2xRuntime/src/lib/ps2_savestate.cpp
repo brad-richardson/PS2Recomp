@@ -758,6 +758,9 @@ namespace ps2_savestate
         w.endSection(mark);
 
         mark = w.beginSection("memory", kMemoryVersion);
+        // EE1: serialize serviced timer state (deferred cycles flushed), so
+        // the image matches the scheduler's EE-cycle clock exactly.
+        runtime.memory().flushEeTimers();
         PS2RuntimeSavestate::saveMemory(runtime.memory(), w);
         w.endSection(mark);
         mark = w.beginSection("kernel", kRuntimeVersion);
@@ -1146,6 +1149,9 @@ bool PS2RuntimeSavestate::loadMemory(PS2Memory &m, Reader &r)
         for (size_t i = 0; i < region.modified.size(); ++i)
             region.modified[i] = r.b();
     }
+    // EE1: drop any pre-load deferral window; the stream holds serviced
+    // state and the next advance recomputes the event distance.
+    m.resetEeTimers();
     for (auto &t : m.m_eeTimers)
     {
         t.count = r.u32();

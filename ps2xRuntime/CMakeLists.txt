@@ -512,6 +512,18 @@ else()
     target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DIAG_TAPS=0)
 endif()
 
+# EE1: P1f PS2X_DIAG_WATCH guest-RAM watchpoint in the WRITE macros and Store
+# helpers. The out-of-line ps2DiagWatchEnabled() call survives in release
+# builds (RV16 section 4: 0.23 ms/frame self on GameThread); keep it out of
+# every generated function by default on all platforms, diag/det builds opt
+# back in via the build scripts.
+option(PS2X_ENABLE_DIAG_WATCH "Compile the PS2X_DIAG_WATCH guest-RAM watchpoint into stores" OFF)
+if(PS2X_ENABLE_DIAG_WATCH)
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DIAG_WATCH=1)
+else()
+    target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DIAG_WATCH=0)
+endif()
+
 option(PS2X_ENABLE_DET_HASH_TAP "Compile the bounded deterministic VBlank XXH64 tap" OFF)
 if(PS2X_ENABLE_DET_HASH_TAP)
     target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DET_HASH_TAP=1)

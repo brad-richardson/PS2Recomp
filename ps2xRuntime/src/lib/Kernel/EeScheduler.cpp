@@ -969,10 +969,10 @@ void EeScheduler::run()
                 ps2_ts2_split60::finishIfContinuation(&context);
                 ps2_mpg_src_trace::noteSliceIrq(m_insideInterrupt);
                 m_guestExecuting.store(true, std::memory_order_release);
-                if (ps2DiagWatchEnabled())
-                {
-                    ps2DiagWatchSetThread(m_currentThreadId);
-                }
+                // EE1: unconditional (one relaxed store on a context switch);
+                // release builds compile the watch check out but E7 thread
+                // attribution still reads this cell.
+                ps2DiagWatchSetThread(m_currentThreadId);
                 if (ps2_e3::enabled())
                 {
                     ps2_e3::noteThread(m_currentThreadId);
@@ -2323,11 +2323,16 @@ void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
         if (m_rdram && physical <= PS2_RAM_SIZE - sizeof(uint64_t))
         {
             const uint64_t zero = 0u;
-            if (ps2DiagWatchEnabled())
+            // EE1: the E3 row no longer rides on the watch check (release
+            // builds compile it out); predicates are pure so hoisting the E3
+            // gate above the report changes no emitted row.
+            const bool watchOn = ps2DiagWatchEnabled();
+            const bool e3row = ps2_e3::armed() && ps2_e3::storeOverlaps(tickAddress, 8u);
+            uint32_t watchPc = 0u;
+            uint32_t watchRa = 0u;
+            uint32_t watchSp = 0u;
+            if (watchOn || e3row)
             {
-                uint32_t watchPc = 0u;
-                uint32_t watchRa = 0u;
-                uint32_t watchSp = 0u;
                 if (const GuestThread *owner = currentThread())
                 {
                     const R5900Context &actx = owner->activeContext();
@@ -2335,16 +2340,19 @@ void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
                     watchRa = getRegU32(&actx, 31);
                     watchSp = getRegU32(&actx, 29);
                 }
+            }
+            if (watchOn)
+            {
                 ps2DiagWatchReportDirect(tickAddress, 8u, 0u, 0u, watchPc, m_currentThreadId, watchRa, watchSp);
-                // E3b R2-direct row (pre-memcpy old value; legacy line above stays verbatim).
-                if (ps2_e3::armed() && ps2_e3::storeOverlaps(tickAddress, 8u))
-                {
-                    uint64_t e3oldLo = 0u;
-                    uint64_t e3oldHi = 0u;
-                    ps2_e3::readOld(m_rdram, tickAddress, 8u, e3oldLo, e3oldHi);
-                    ps2_e3::emitR2(2u, tickAddress, 8u, e3oldLo, e3oldHi, 0u, 0u, watchPc, m_currentThreadId,
-                                   watchRa, watchSp);
-                }
+            }
+            // E3b R2-direct row (pre-memcpy old value; legacy line above stays verbatim).
+            if (e3row)
+            {
+                uint64_t e3oldLo = 0u;
+                uint64_t e3oldHi = 0u;
+                ps2_e3::readOld(m_rdram, tickAddress, 8u, e3oldLo, e3oldHi);
+                ps2_e3::emitR2(2u, tickAddress, 8u, e3oldLo, e3oldHi, 0u, 0u, watchPc, m_currentThreadId,
+                               watchRa, watchSp);
             }
             std::memcpy(m_rdram + physical, &zero, sizeof(zero));
         }
@@ -3195,11 +3203,16 @@ void EeScheduler::writeGuestU32(uint32_t address, uint32_t value)
         ps2_log::emitDrop("sched/writeGuestU32", "addr-range", dropArgs);
         return;
     }
-    if (ps2DiagWatchEnabled())
+    // EE1: the E3 row no longer rides on the watch check (release builds
+    // compile it out); predicates are pure so hoisting the E3 gate above the
+    // report changes no emitted row.
+    const bool watchOn = ps2DiagWatchEnabled();
+    const bool e3row = ps2_e3::armed() && ps2_e3::storeOverlaps(address, 4u);
+    uint32_t watchPc = 0u;
+    uint32_t watchRa = 0u;
+    uint32_t watchSp = 0u;
+    if (watchOn || e3row)
     {
-        uint32_t watchPc = 0u;
-        uint32_t watchRa = 0u;
-        uint32_t watchSp = 0u;
         if (const GuestThread *owner = currentThread())
         {
             const R5900Context &actx = owner->activeContext();
@@ -3207,16 +3220,19 @@ void EeScheduler::writeGuestU32(uint32_t address, uint32_t value)
             watchRa = getRegU32(&actx, 31);
             watchSp = getRegU32(&actx, 29);
         }
+    }
+    if (watchOn)
+    {
         ps2DiagWatchReportDirect(address, 4u, value, 0u, watchPc, m_currentThreadId, watchRa, watchSp);
-        // E3b R2-direct row (pre-memcpy old value; legacy line above stays verbatim).
-        if (ps2_e3::armed() && ps2_e3::storeOverlaps(address, 4u))
-        {
-            uint64_t e3oldLo = 0u;
-            uint64_t e3oldHi = 0u;
-            ps2_e3::readOld(m_rdram, address, 4u, e3oldLo, e3oldHi);
-            ps2_e3::emitR2(2u, address, 4u, e3oldLo, e3oldHi, value, 0u, watchPc, m_currentThreadId, watchRa,
-                           watchSp);
-        }
+    }
+    // E3b R2-direct row (pre-memcpy old value; legacy line above stays verbatim).
+    if (e3row)
+    {
+        uint64_t e3oldLo = 0u;
+        uint64_t e3oldHi = 0u;
+        ps2_e3::readOld(m_rdram, address, 4u, e3oldLo, e3oldHi);
+        ps2_e3::emitR2(2u, address, 4u, e3oldLo, e3oldHi, value, 0u, watchPc, m_currentThreadId, watchRa,
+                       watchSp);
     }
     std::memcpy(m_rdram + physical, &value, sizeof(value));
 }

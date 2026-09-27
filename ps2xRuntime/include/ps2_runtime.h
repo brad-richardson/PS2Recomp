@@ -277,9 +277,17 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
 // (0x...) or decimal addresses; each names an 8-byte window
 // [addr, addr+8). Every guest write that overlaps a window prints one
 // [diag:watch] line. Unset/empty = disabled; callers pay one bool check.
+// EE1: PS2X_ENABLE_DIAG_WATCH=0 (release default) compiles the per-store
+// Enabled/Report calls away (RV16 §4: 0.23 ms/frame self on GameThread),
+// so PS2X_DIAG_WATCH and the E3-R2/E7 store rows that ride on the report
+// path need a diag/det build. SetThread stays live: it feeds E7 thread
+// attribution from a cold context-switch site.
 class PS2Runtime;
+#ifndef PS2X_ENABLE_DIAG_WATCH
+#define PS2X_ENABLE_DIAG_WATCH 0
+#endif
+#if PS2X_ENABLE_DIAG_WATCH
 bool ps2DiagWatchEnabled();
-void ps2DiagWatchSetThread(int id);
 void ps2DiagWatchReportDirect(uint32_t writeAddr,
                               uint32_t width,
                               uint64_t valueLo,
@@ -295,6 +303,21 @@ void ps2DiagWatchReport(uint8_t *rdram,
                         uint64_t valueHi,
                         const R5900Context *ctx,
                         const PS2Runtime *runtime);
+#else
+inline bool ps2DiagWatchEnabled() noexcept
+{
+    return false;
+}
+inline void ps2DiagWatchReportDirect(uint32_t, uint32_t, uint64_t, uint64_t, uint32_t, int, uint32_t,
+                                     uint32_t) noexcept
+{
+}
+inline void ps2DiagWatchReport(uint8_t *, uint32_t, uint32_t, uint64_t, uint64_t, const R5900Context *,
+                               const PS2Runtime *) noexcept
+{
+}
+#endif
+void ps2DiagWatchSetThread(int id);
 
 class PS2Runtime
 {

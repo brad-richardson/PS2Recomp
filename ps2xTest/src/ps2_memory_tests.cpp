@@ -319,6 +319,73 @@ void register_ps2_memory_tests()
             t.Equals(mem.readIORegister(kTimer0Count), 0u, "ZRET should clear COUNT when it equals COMP");
         });
 
+        tc.Run("EE1 deferred timers match eager service across checkpoint-size steps", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kTimer0Count = 0x10000000u;
+            constexpr uint32_t kTimer0Mode = 0x10000010u;
+            constexpr uint32_t kTimer0Compare = 0x10000020u;
+            constexpr uint32_t kZret = 1u << 6u;
+            constexpr uint32_t kCue = 1u << 7u;
+            constexpr uint32_t kCmpe = 1u << 8u;
+            constexpr uint32_t kOvfe = 1u << 9u;
+            constexpr uint32_t kEquf = 1u << 10u;
+            constexpr uint32_t kOvff = 1u << 11u;
+            constexpr uint32_t kBusClockDiv256 = 2u;
+
+            // Far event (COMP=100 at 512 cycles/tick): early 512-cycle steps
+            // must defer (pending grows, no mask), reads stay exact.
+            mem.writeIORegister(kTimer0Count, 0u);
+            mem.writeIORegister(kTimer0Compare, 100u);
+            mem.writeIORegister(kTimer0Mode, kBusClockDiv256 | kCue | kCmpe | kEquf | kOvff);
+            for (uint32_t step = 0u; step < 10u; ++step)
+            {
+                t.Equals(mem.advanceEeTimers(512u), 0u, "no interrupt while the event is far");
+            }
+            t.IsTrue(mem.m_eeTimerPending > 0u, "far-event windows should defer service");
+            t.Equals(mem.readIORegister(kTimer0Count), 10u, "reads flush deferred cycles exactly");
+            t.Equals(mem.m_eeTimerPending, 0u, "reads drain the pending window");
+            t.Equals(mem.cyclesUntilNextEeTimerInterrupt(), 90u * 512u,
+                     "the idle deadline accounts for flushed cycles");
+
+            // Run to the compare: the mask must fire on the exact step an
+            // eager implementation would fire (tick 100), with EQUF latched.
+            uint32_t firedStep = 0u;
+            for (uint32_t step = 0u; step < 95u; ++step)
+            {
+                const uint32_t mask = mem.advanceEeTimers(512u);
+                if (mask != 0u)
+                {
+                    firedStep = step + 1u;
+                    t.Equals(mask, 1u, "Timer0 compare should raise TIM0");
+                    break;
+                }
+            }
+            t.Equals(firedStep, 90u, "compare should fire after exactly 90 more ticks");
+            t.IsTrue((mem.readIORegister(kTimer0Mode) & kEquf) != 0u, "compare should latch EQUF");
+            t.Equals(mem.readIORegister(kTimer0Count), 100u, "COUNT should sit on COMP at the event");
+
+            // Overflow path under deferral: wrap, OVFF latch, TIM bit.
+            mem.writeIORegister(kTimer0Count, 0xFFFEu);
+            mem.writeIORegister(kTimer0Compare, 0xFFFFu);
+            mem.writeIORegister(kTimer0Mode, kBusClockDiv256 | kCue | kOvfe | kEquf | kOvff);
+            t.Equals(mem.advanceEeTimers(512u), 0u, "no overflow on the first tick");
+            t.Equals(mem.advanceEeTimers(512u), 1u, "Timer0 overflow should raise TIM0");
+            t.Equals(mem.readIORegister(kTimer0Count), 0u, "COUNT should wrap at 16 bits");
+            t.IsTrue((mem.readIORegister(kTimer0Mode) & kOvff) != 0u, "overflow should latch OVFF");
+
+            // ZRET reset firing mid-window must land on the same COUNT.
+            mem.writeIORegister(kTimer0Count, 0u);
+            mem.writeIORegister(kTimer0Compare, 3u);
+            mem.writeIORegister(kTimer0Mode, kZret | kCue | kCmpe | kEquf | kOvff);
+            t.Equals(mem.advanceEeTimers(512u), 0u, "first ZRET tick should not fire");
+            t.Equals(mem.advanceEeTimers(512u), 0u, "second ZRET tick should not fire");
+            t.Equals(mem.advanceEeTimers(512u), 1u, "ZRET compare should raise TIM0 on tick 3");
+            t.Equals(mem.readIORegister(kTimer0Count), 0u, "ZRET should clear COUNT when it equals COMP");
+        });
+
         tc.Run("scratchpad alias accesses the same bytes as base", [](TestCase &t)
         {
             PS2Memory mem;
