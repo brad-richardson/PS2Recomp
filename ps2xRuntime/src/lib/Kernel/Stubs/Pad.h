@@ -117,4 +117,14 @@ namespace ps2_stubs
     void setPadScriptVsyncClockForTest(bool vsyncClock);
     void setPadScriptVsyncTickForTest(uint64_t tick);
     void clearPadScriptForTest();
+
+    // IR1 DEV-ONLY pad recorder (PS2X_PAD_RECORD). Test hooks: arm the
+    // recorder on an explicit path, drive the tick explicitly (tests have
+    // no runtime), finalize the file (emits the tail like a clean exit)
+    // and disarm, or reset to the default-off state. Production code paths
+    // never call these.
+    bool setPadRecordForTest(const char *path);
+    void setPadRecordTickForTest(uint64_t tick);
+    void closePadRecordForTest();
+    void clearPadRecordForTest();
 }

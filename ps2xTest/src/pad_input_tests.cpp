@@ -5,6 +5,8 @@
 
 #include <vector>
 #include <cstdint>
+#include <cstdio>
+#include <filesystem>
 #include <string>
 
 
@@ -649,6 +651,100 @@ void register_pad_input_tests()
             t.Equals(data[6], static_cast<uint8_t>(0x80), "lx centered with no script");
 
             closePadPort(ctx, rdram);
+        });
+
+        tc.Run("pad recorder emits a replayable script", [](TestCase &t)
+               {
+            const std::string recPath =
+                (std::filesystem::temp_directory_path() / "ir1_padrec_test.txt").string();
+            std::remove(recPath.c_str());
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            t.IsTrue(ps2_stubs::setPadRecordForTest(recPath.c_str()), "recorder should arm on a temp path");
+
+            struct Step
+            {
+                uint64_t tick;
+                uint16_t buttons;
+                uint8_t lx, ly, rx, ry;
+            };
+            const uint16_t relaxed = 0xFFFFu;
+            const uint16_t cross = static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross);
+            const uint16_t crossDown =
+                static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross & ~kPadBtnDown);
+            // One read per tick; the recorder keys by tick.
+            const Step steps[] = {
+                {100, relaxed, 0x80, 0x80, 0x80, 0x80},
+                {110, cross, 0x00, 0x80, 0x80, 0x80},
+                {125, crossDown, 0x00, 0xC8, 0x80, 0x80},
+                {140, relaxed, 0x80, 0x80, 0x80, 0x80},
+            };
+            for (const Step &s : steps)
+            {
+                ps2_stubs::setPadOverrideState(s.buttons, s.lx, s.ly, s.rx, s.ry);
+                ps2_stubs::setPadRecordTickForTest(s.tick);
+                runPadRead(ctx, rdram);
+            }
+            ps2_stubs::clearPadOverrideState();
+            ps2_stubs::closePadRecordForTest();
+
+            // The recording must parse as a pad script.
+            std::FILE *f = std::fopen(recPath.c_str(), "rb");
+            t.IsTrue(f != nullptr, "recording file should exist");
+            std::string content;
+            if (f)
+            {
+                char buf[256];
+                size_t n = 0;
+                while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+                {
+                    content.append(buf, n);
+                }
+                std::fclose(f);
+            }
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries),
+                     "recording should parse as a pad script");
+            t.Equals(static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(4),
+                     "one entry per state span (incl. tail)");
+
+            // Replay the recording on the vsync clock: every recorded tick
+            // must reproduce the recorded buttons and exact analog bytes.
+            t.IsTrue(ps2_stubs::setPadScriptForTest(content.c_str()),
+                     "recording should install as a script");
+            ps2_stubs::setPadScriptVsyncClockForTest(true);
+            for (uint64_t tick = 100; tick <= 140; ++tick)
+            {
+                const Step *want = &steps[0];
+                for (const Step &s : steps)
+                {
+                    if (s.tick <= tick)
+                    {
+                        want = &s;
+                    }
+                }
+                ps2_stubs::setPadScriptVsyncTickForTest(tick);
+                runPadRead(ctx, rdram);
+                const uint8_t *data = rdram.data() + kPadDataAddr;
+                t.Equals(readButtons(rdram), want->buttons,
+                         "replay buttons at tick " + std::to_string(tick));
+                t.Equals(data[6], want->lx, "replay lx at tick " + std::to_string(tick));
+                t.Equals(data[7], want->ly, "replay ly at tick " + std::to_string(tick));
+                t.Equals(data[4], want->rx, "replay rx at tick " + std::to_string(tick));
+                t.Equals(data[5], want->ry, "replay ry at tick " + std::to_string(tick));
+            }
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            closePadPort(ctx, rdram);
+            std::remove(recPath.c_str());
         });
     });
 }

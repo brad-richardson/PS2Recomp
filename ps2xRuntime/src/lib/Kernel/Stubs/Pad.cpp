@@ -6,6 +6,7 @@
 #include "Pad.h"
 
 #include <chrono>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -645,6 +646,287 @@ namespace ps2_stubs
             }
         }
 
+        // IR1 DEV-ONLY pad recorder (PS2X_PAD_RECORD=<path>). Unset/empty
+        // (default) = one relaxed atomic check per pad read, zero behavior
+        // change. When armed, each port-0 pad read appends the effective
+        // guest-visible state (post stimulation/script, pre read-log) keyed
+        // by guest vsync tick, emitted directly as PS2X_PAD_SCRIPT
+        // (vsync-clock) entries: one entry per state change, contiguous and
+        // non-overlapping, each carrying the full button mask plus all four
+        // analog bytes, so replay reproduces every recorded tick exactly
+        // (tick ms are strictly increasing, so [ms(T0),ms(T1)) covers the
+        // recorded ticks [T0,T1) exactly). The open tail entry is split
+        // every 600 ticks and the file flushed, so a force-stop keeps all
+        // but ~10 s; a clean exit finalizes the tail via atexit.
+        struct PadRecord
+        {
+            std::mutex mutex;
+            bool initDone = false;
+            bool enabled = false;
+            bool capped = false;
+            bool finalized = false;
+            std::FILE *file = nullptr;
+            bool haveOpen = false;
+            uint64_t openTick = 0u;
+            PadInputState openState{};
+            uint64_t lastTick = 0u;
+            bool firstEntry = true;
+            uint64_t lastFlushTick = 0u;
+            uint64_t entriesSinceFlush = 0u;
+            uint64_t totalEntries = 0u;
+            bool testTickSet = false;
+            uint64_t testTick = 0u;
+        };
+        PadRecord g_padRecord;
+        std::atomic<bool> g_padRecordInitDone{false};
+        std::atomic<bool> g_padRecordArmed{false};
+
+        constexpr uint64_t kPadRecordSplitTicks = 600u;
+        constexpr uint64_t kPadRecordFlushEntries = 64u;
+        constexpr uint64_t kPadRecordMaxEntries = 1000000u;
+
+        struct PadRecordButtonName
+        {
+            uint16_t mask;
+            const char *name;
+        };
+        constexpr PadRecordButtonName kPadRecordButtons[] = {
+            {kPadBtnSelect, "select"}, {kPadBtnL3, "l3"},
+            {kPadBtnR3, "r3"}, {kPadBtnStart, "start"},
+            {kPadBtnUp, "up"}, {kPadBtnRight, "right"},
+            {kPadBtnDown, "down"}, {kPadBtnLeft, "left"},
+            {kPadBtnL2, "l2"}, {kPadBtnR2, "r2"},
+            {kPadBtnL1, "l1"}, {kPadBtnR1, "r1"},
+            {kPadBtnTriangle, "triangle"}, {kPadBtnCircle, "circle"},
+            {kPadBtnCross, "cross"}, {kPadBtnSquare, "square"},
+        };
+
+        bool padRecordSameState(const PadInputState &a, const PadInputState &b)
+        {
+            return a.buttons == b.buttons && a.lx == b.lx && a.ly == b.ly &&
+                   a.rx == b.rx && a.ry == b.ry;
+        }
+
+        void padRecordEmitLocked(uint64_t atTick, uint64_t endTick)
+        {
+            if (endTick <= atTick || !g_padRecord.file)
+            {
+                return;
+            }
+            const uint64_t atMs = padScriptVsyncTickToMs(atTick);
+            const uint64_t endMs = padScriptVsyncTickToMs(endTick);
+            if (endMs <= atMs)
+            {
+                return; // cannot happen: tick ms are strictly increasing
+            }
+            std::string spec;
+            const uint16_t pressed = static_cast<uint16_t>(~g_padRecord.openState.buttons);
+            for (const PadRecordButtonName &b : kPadRecordButtons)
+            {
+                if ((pressed & b.mask) != 0u)
+                {
+                    if (!spec.empty())
+                    {
+                        spec += '+';
+                    }
+                    spec += b.name;
+                }
+            }
+            // Full analog state every entry: replay sets exact bytes.
+            char axes[48];
+            std::snprintf(axes, sizeof(axes), "lx=%u+ly=%u+rx=%u+ry=%u",
+                          g_padRecord.openState.lx, g_padRecord.openState.ly,
+                          g_padRecord.openState.rx, g_padRecord.openState.ry);
+            if (!spec.empty())
+            {
+                spec += '+';
+            }
+            spec += axes;
+            std::fprintf(g_padRecord.file, "%s%llu:%s:%llu",
+                         g_padRecord.firstEntry ? "" : ",",
+                         static_cast<unsigned long long>(atMs), spec.c_str(),
+                         static_cast<unsigned long long>(endMs - atMs));
+            g_padRecord.firstEntry = false;
+            ++g_padRecord.totalEntries;
+            ++g_padRecord.entriesSinceFlush;
+        }
+
+        void padRecordFinalizeLocked()
+        {
+            if (g_padRecord.finalized)
+            {
+                return;
+            }
+            g_padRecord.finalized = true;
+            if (!g_padRecord.file)
+            {
+                return;
+            }
+            if (g_padRecord.haveOpen && !g_padRecord.capped)
+            {
+                // Tail: cover through the last observed read tick.
+                padRecordEmitLocked(g_padRecord.openTick, g_padRecord.lastTick + 1u);
+                g_padRecord.haveOpen = false;
+            }
+            std::fflush(g_padRecord.file);
+            std::fclose(g_padRecord.file);
+            g_padRecord.file = nullptr;
+            std::fprintf(stderr, "[padrecord] finalized entries=%llu lastTick=%llu\n",
+                         static_cast<unsigned long long>(g_padRecord.totalEntries),
+                         static_cast<unsigned long long>(g_padRecord.lastTick));
+        }
+
+        void padRecordExitFlush()
+        {
+            // Best-effort tail finalize on clean exit; a force-stop keeps
+            // everything flushed so far. try_to_lock: never block exit.
+            std::unique_lock<std::mutex> lock(g_padRecord.mutex, std::try_to_lock);
+            if (!lock.owns_lock())
+            {
+                return;
+            }
+            padRecordFinalizeLocked();
+        }
+
+        void padRecordArmLocked(const char *path, const char *source)
+        {
+            g_padRecord.file = std::fopen(path, "w");
+            if (!g_padRecord.file)
+            {
+                std::fprintf(stderr, "[padrecord] cannot open %s (%s); recording off\n",
+                             path, source);
+                return;
+            }
+            g_padRecord.enabled = true;
+            g_padRecordArmed.store(true, std::memory_order_relaxed);
+            std::fprintf(stderr, "[padrecord] armed path=%s source=%s\n", path, source);
+        }
+
+        void padRecordResetLocked()
+        {
+            if (g_padRecord.file)
+            {
+                std::fflush(g_padRecord.file);
+                std::fclose(g_padRecord.file);
+            }
+            // Field by field: the struct holds a mutex (not assignable).
+            g_padRecord.enabled = false;
+            g_padRecord.capped = false;
+            g_padRecord.finalized = false;
+            g_padRecord.file = nullptr;
+            g_padRecord.haveOpen = false;
+            g_padRecord.openTick = 0u;
+            g_padRecord.openState = PadInputState{};
+            g_padRecord.lastTick = 0u;
+            g_padRecord.firstEntry = true;
+            g_padRecord.lastFlushTick = 0u;
+            g_padRecord.entriesSinceFlush = 0u;
+            g_padRecord.totalEntries = 0u;
+            g_padRecordArmed.store(false, std::memory_order_relaxed);
+        }
+
+        void padRecordInitLocked()
+        {
+            if (g_padRecord.initDone)
+            {
+                return;
+            }
+            g_padRecord.initDone = true;
+            const char *path = std::getenv("PS2X_PAD_RECORD");
+            if (!path || path[0] == '\0')
+            {
+                return;
+            }
+            std::atexit(padRecordExitFlush);
+            padRecordArmLocked(path, "env");
+        }
+
+        void padRecordEnsureInit()
+        {
+            if (g_padRecordInitDone.load(std::memory_order_relaxed))
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(g_padRecord.mutex);
+            padRecordInitLocked();
+            g_padRecordInitDone.store(true, std::memory_order_relaxed);
+        }
+
+        void padRecordOnRead(const PadInputState &state, uint64_t guestVsyncTick, int port, int slot)
+        {
+            padRecordEnsureInit();
+            if (!g_padRecordArmed.load(std::memory_order_relaxed))
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(g_padRecord.mutex);
+            if (!g_padRecord.enabled || g_padRecord.capped)
+            {
+                return;
+            }
+            if (port != 0 || slot != 0)
+            {
+                return;
+            }
+            const uint64_t tick = g_padRecord.testTickSet ? g_padRecord.testTick : guestVsyncTick;
+            if (!g_padRecord.haveOpen)
+            {
+                g_padRecord.haveOpen = true;
+                g_padRecord.openTick = tick;
+                g_padRecord.openState = state;
+                g_padRecord.lastTick = tick;
+                g_padRecord.lastFlushTick = tick;
+                return;
+            }
+            if (tick > g_padRecord.lastTick)
+            {
+                g_padRecord.lastTick = tick;
+            }
+            if (padRecordSameState(state, g_padRecord.openState))
+            {
+                if (tick >= g_padRecord.openTick + kPadRecordSplitTicks)
+                {
+                    // Split the long tail so a force-stop keeps all but ~10 s.
+                    padRecordEmitLocked(g_padRecord.openTick, tick);
+                    g_padRecord.openTick = tick;
+                    std::fflush(g_padRecord.file);
+                    g_padRecord.lastFlushTick = tick;
+                    g_padRecord.entriesSinceFlush = 0u;
+                }
+                return;
+            }
+            if (tick == g_padRecord.openTick)
+            {
+                // Sub-tick change: unrepresentable on the tick clock; latest wins.
+                g_padRecord.openState = state;
+                return;
+            }
+            if (tick < g_padRecord.openTick)
+            {
+                return; // clock moved backwards; keep the open entry (cannot happen)
+            }
+            padRecordEmitLocked(g_padRecord.openTick, tick);
+            g_padRecord.openTick = tick;
+            g_padRecord.openState = state;
+            if (g_padRecord.totalEntries >= kPadRecordMaxEntries)
+            {
+                g_padRecord.capped = true;
+                std::fflush(g_padRecord.file);
+                std::fclose(g_padRecord.file);
+                g_padRecord.file = nullptr;
+                std::fprintf(stderr, "[padrecord] entry cap %llu hit; recording stopped (file valid)\n",
+                             static_cast<unsigned long long>(kPadRecordMaxEntries));
+                return;
+            }
+            if (g_padRecord.entriesSinceFlush >= kPadRecordFlushEntries ||
+                tick >= g_padRecord.lastFlushTick + kPadRecordSplitTicks)
+            {
+                std::fflush(g_padRecord.file);
+                g_padRecord.lastFlushTick = tick;
+                g_padRecord.entriesSinceFlush = 0u;
+            }
+        }
+
         uint8_t axisToByte(float axis)
         {
             axis = std::clamp(axis, -1.0f, 1.0f);
@@ -899,6 +1181,7 @@ namespace ps2_stubs
             const uint64_t guestVsyncTick =
                 runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
             padScriptOnRead(state, guestVsyncTick); // E31 DEV-ONLY: no-op unless PS2X_PAD_SCRIPT set
+            padRecordOnRead(state, guestVsyncTick, port, slot); // IR1 DEV-ONLY: no-op unless PS2X_PAD_RECORD set
 
             // IN2 DEV-ONLY PS2X_PAD_READ_LOG=1: every guest read (vsync
             // tick, final active-low buttons incl. latch + script, wall ms
@@ -1541,6 +1824,48 @@ namespace ps2_stubs
         g_padScript.testNowMs = 0u;
         g_padScriptArmed.store(false, std::memory_order_relaxed);
         g_padScriptInitDone.store(true, std::memory_order_relaxed);
+    }
+
+    bool setPadRecordForTest(const char *path)
+    {
+        if (!path || path[0] == '\0')
+        {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(g_padRecord.mutex);
+        padRecordResetLocked();
+        g_padRecord.initDone = true;
+        padRecordArmLocked(path, "test");
+        g_padRecordInitDone.store(true, std::memory_order_relaxed);
+        return g_padRecord.enabled;
+    }
+
+    void setPadRecordTickForTest(uint64_t tick)
+    {
+        std::lock_guard<std::mutex> lock(g_padRecord.mutex);
+        g_padRecord.testTickSet = true;
+        g_padRecord.testTick = tick;
+    }
+
+    void closePadRecordForTest()
+    {
+        std::lock_guard<std::mutex> lock(g_padRecord.mutex);
+        padRecordFinalizeLocked();
+        padRecordResetLocked();
+        g_padRecord.initDone = true;
+        g_padRecord.testTickSet = false;
+        g_padRecord.testTick = 0u;
+        g_padRecordInitDone.store(true, std::memory_order_relaxed);
+    }
+
+    void clearPadRecordForTest()
+    {
+        std::lock_guard<std::mutex> lock(g_padRecord.mutex);
+        padRecordResetLocked();
+        g_padRecord.initDone = true;
+        g_padRecord.testTickSet = false;
+        g_padRecord.testTick = 0u;
+        g_padRecordInitDone.store(true, std::memory_order_relaxed);
     }
 }
 
