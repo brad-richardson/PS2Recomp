@@ -1343,10 +1343,12 @@ bool VU1InterpreterSavestate::load(VU1Interpreter &vu, Reader &r)
 // ==================================================================== GS
 std::string GSSavestate::ready(const GS &gs)
 {
-    // The frontend vertex queue and (SS3) paraLLEl's retained strip/fan
-    // vertices are saved; an in-flight host->local transfer is not, so the
-    // save defers while one is live. (SQ1: a pending palette upload or tail
-    // pass reports busy here and the caller quiesces it, then re-checks.)
+    // The frontend vertex queue, (SS3) paraLLEl's retained strip/fan
+    // vertices and (SQ1) the in-flight transfer state (payload/cursors for
+    // host->local, fifo bytes/cursors for local->host) are saved, so the
+    // save lands mid-transfer. A pending palette upload or tail pass
+    // reports busy here and the caller quiesces it, then re-checks.
+    // Older paraLLEl (no transfer accessors) keeps the SS3 deferral.
     if (gs.m_backend && !gs.m_backend->SavestateIdle())
     {
         const std::string reason = gs.m_backend->SavestateBusyReason();

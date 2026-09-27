@@ -122,18 +122,22 @@ namespace
         uint64_t ringN = 0;
         uint32_t base = 0, next = 0, iface = 0, latest = 0;
         size_t clutEnd = 0; // first byte after the CLUT part (S3: vertex part)
+        bool isV4 = false; // SQ1: transfer state follows the verts
     };
 
     Ss3Tail ss3ParseTail(const std::vector<uint8_t> &blob)
     {
         Ss3Tail out;
         constexpr uint32_t kMagic = 0x33534750u; // "PGS3" LE
+        constexpr uint32_t kMagicV4 = 0x34534750u; // "PGS4" LE (SQ1: + transfer)
         constexpr size_t kFooter = sizeof(uint64_t) + sizeof(uint32_t);
         if (blob.size() < kFooter)
             return out;
         uint32_t magic = 0u;
         std::memcpy(&magic, blob.data() + blob.size() - sizeof(magic), sizeof(magic));
-        if (magic != kMagic)
+        if (magic == kMagicV4)
+            out.isV4 = true;
+        else if (magic != kMagic)
             return out;
         uint64_t tailLen = 0u;
         std::memcpy(&tailLen, blob.data() + blob.size() - kFooter, sizeof(tailLen));
@@ -277,12 +281,16 @@ namespace
             return {};
         }
         std::memcpy(&vcount, blob.data() + tail.clutEnd, sizeof(vcount));
-        if (vcount > 3u || tail.tailEnd - tail.clutEnd != sizeof(uint32_t) + size_t{vcount} * 36u)
+        // v3: the verts run to the tail end. v4 (SQ1): exact-size verts,
+        // then the transfer state.
+        const size_t vertBytes = sizeof(uint32_t) + size_t{vcount} * 36u;
+        if (vcount > 3u || tail.tailEnd - tail.clutEnd < vertBytes ||
+            (!tail.isV4 && tail.tailEnd - tail.clutEnd != vertBytes))
         {
             t.Fail("vertex part has exact size for its count");
             return {};
         }
-        return std::vector<uint8_t>(blob.data() + tail.clutEnd, blob.data() + tail.tailEnd);
+        return std::vector<uint8_t>(blob.data() + tail.clutEnd, blob.data() + tail.clutEnd + vertBytes);
     }
 } // namespace
 
