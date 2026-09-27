@@ -220,8 +220,8 @@ struct VulkanProcs
     PFN_vkDestroyBuffer destroyBuffer = nullptr;
     PFN_vkDestroyCommandPool destroyCmdPool = nullptr;
     PFN_vkDestroyFence destroyFence = nullptr;
-    PFN_vkDestroyDevice destroyDevice = nullptr;
-    PFN_vkDestroyInstance destroyInstance = nullptr;
+    // No destroyDevice/destroyInstance: teardown is process exit's (like the
+    // sink, which must outlive us); vkDestroyInstance is not device-loadable.
 };
 
 #define GE2_LOAD_INST(var, name)                                                                     \
@@ -379,7 +379,7 @@ int ps2x_foreign_present_test_run()
         uint32_t qCount = 0u;
         procs.getQueueProps(p, &qCount, nullptr);
         std::vector<VkQueueFamilyProperties> qps(qCount);
-        procs.getQueueProps(p, &qps, qps.data());
+        procs.getQueueProps(p, &qCount, qps.data());
         for (uint32_t i = 0; i < qCount; ++i)
             if (qps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
             {
@@ -460,8 +460,6 @@ int ps2x_foreign_present_test_run()
     GE2_LOAD_DEV(destroyBuffer, vkDestroyBuffer);
     GE2_LOAD_DEV(destroyCmdPool, vkDestroyCommandPool);
     GE2_LOAD_DEV(destroyFence, vkDestroyFence);
-    GE2_LOAD_DEV(destroyDevice, vkDestroyDevice);
-    GE2_LOAD_DEV(destroyInstance, vkDestroyInstance);
     auto getMemProps = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
         procs.getInstance(inst, "vkGetPhysicalDeviceMemoryProperties"));
     if (!getMemProps)
