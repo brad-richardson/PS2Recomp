@@ -7,6 +7,7 @@
 #include "ps2_vu1_entry_trace.h"
 #include "ps2_vu1_trace.h"
 #include "ps2_vu1_engine.h"
+#include "ps2_vu1cap.h"
 #include "ps2_vu1_step_impl.h"
 #include "ps2_vu1_fmac_impl.h"
 
@@ -782,6 +783,9 @@ void VU1Interpreter::finishXgkick()
     if (!m_xgkick.active)
         return;
 
+    // VRB1 DEV-ONLY capture (default off): record this run's XGKICK bytes.
+    if (m_unit == Unit::VU1 && ps2_vu1cap::recording())
+        ps2_vu1cap::Capture::instance().xgk(m_xgkick.packet.data(), m_xgkick.totalBytes);
     if (m_unit == Unit::VU1 && ps2_vu1_engine::captureXgkick(m_xgkick.packet.data(), m_xgkick.totalBytes))
     {
         // VP2: captured on a VU1 engine worker; submitted at the in-order commit.
@@ -1395,7 +1399,16 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,
         m_entryLines.clear();
         m_entryStoreValid = false;
     }
+    // VRB1 DEV-ONLY capture (default off; local branch, never pushed).
+    const bool vcap = m_unit == Unit::VU1 && ps2_vu1cap::on();
+    if (vcap)
+        ps2_vu1cap::Capture::instance().begin(
+            memory ? memory->gs().vsyncTick.load(std::memory_order_relaxed) : 0u,
+            startPC & microAddressMask(), m_state, m_cycle, top, itop,
+            vuCode, codeSize, vuData, dataSize, false);
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+    if (vcap)
+        ps2_vu1cap::Capture::instance().end(m_state, m_cycle, vuData);
 }
 
 void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
@@ -1415,7 +1428,17 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,
     // E37: pair streams always close inside the arming run(); a resume
     // never continues one.
     m_entryArmed = false;
+    // VRB1 DEV-ONLY capture: resumes are counted, never recorded (format v1
+    // holds MSCAL runs only; VP1 saw 0 resumes in t1714-3000).
+    const bool vcap = m_unit == Unit::VU1 && ps2_vu1cap::on();
+    if (vcap)
+        ps2_vu1cap::Capture::instance().begin(
+            memory ? memory->gs().vsyncTick.load(std::memory_order_relaxed) : 0u,
+            m_state.pc, m_state, m_cycle, top, itop,
+            vuCode, codeSize, vuData, dataSize, true);
     run(vuCode, codeSize, vuData, dataSize, gs, memory, maxCycles);
+    if (vcap)
+        ps2_vu1cap::Capture::instance().end(m_state, m_cycle, vuData);
 }
 
 void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,

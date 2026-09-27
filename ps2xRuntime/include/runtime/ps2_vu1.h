@@ -158,6 +158,10 @@ public:
     static const RecompProgram *findRecompProgram(uint64_t hash);
     void setRecompProgramForTest(const RecompProgram *program) { m_recompTestProgram = program; }
     uint64_t recompCyclesForTest() const { return m_recompCycles; }
+    uint64_t interpCyclesForTest() const { return m_interpCycles; }
+    // VRB1: capture/replay hooks (vu1bench only; no behavior change).
+    uint64_t cycleCounterForBench() const { return m_cycle; }
+    void setCycleCounterForBench(uint64_t c) { m_cycle = c; }
     // VR2 stage 4: -1 follows PS2X_VU1_BLOCKS (default off), 0 off, 1 on.
     void setBlocksForTest(int mode) { m_blocksOverride = mode; }
     uint64_t blockEntriesForTest() const { return m_blockEntries; }
