@@ -1,4 +1,5 @@
 #include "ps2_runtime.h"
+#include "ps2_ts2_observer.h"
 #include "ps2_mtvu.h"
 #include "ps2_vu1_engine.h"
 #include "ps2_microvu.h"
@@ -3099,6 +3100,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      GuestBranchKind kind,
                                      const char *debugName)
 {
+    ps2_ts2_observer::noteBranch(
+        rdram, ctx, sourcePc, targetPc,
+        kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall,
+        kind == GuestBranchKind::IndirectCall || kind == GuestBranchKind::IndirectJump);
     // E43 draw-record census (dev-only, default off; self-gated on the
     // target pc first so the common path pays one compare).
     if (targetPc == ps2_e43_trace::kWalkerTarget)

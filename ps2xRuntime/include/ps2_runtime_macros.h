@@ -13,6 +13,7 @@
 #endif
 
 #include "ps2_runtime.h"
+#include "ps2_ts2_observer.h"
 // N5: compile-time switch for the E40-E44 guest-memory watch taps below.
 // PS2X_ENABLE_DIAG_TAPS=0 swaps the trace namespaces for constexpr stubs, so
 // the taps (and their __func__/argument setup) compile to nothing in every
@@ -533,6 +534,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
         uint8_t _wv = (uint8_t)(val); \
+        ps2_ts2_observer::noteStore(ctx, _addr, 1u);                                  \
         const bool _e43 = ps2x_tap_e43::enabled();                                              \
         const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
         ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
@@ -571,6 +573,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                    \
         uint32_t _addr = (addr);                                                         \
         uint16_t _wv = (uint16_t)(val); \
+        ps2_ts2_observer::noteStore(ctx, _addr, 2u);                                    \
         const bool _e43 = ps2x_tap_e43::enabled();                                              \
         const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
         ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
@@ -609,6 +612,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                    \
         uint32_t _addr = (addr);                                                         \
         uint32_t _wv = (uint32_t)(val); \
+        ps2_ts2_observer::noteStore(ctx, _addr, 4u);                                    \
         const bool _e43 = ps2x_tap_e43::enabled();                                              \
         const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
         ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
@@ -657,6 +661,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
         uint64_t _wv = (uint64_t)(val); \
+        ps2_ts2_observer::noteStore(ctx, _addr, 8u);                                  \
         const bool _e43 = ps2x_tap_e43::enabled();                                              \
         const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
         ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
@@ -706,6 +711,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
         const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value));       \
         const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value));       \
+        ps2_ts2_observer::noteStore(ctx, _addr, 16u);                                 \
         const bool _e42plant = ps2x_tap_e41::plantArmed() &&                          \
             ps2x_tap_e41::isPlantWatched(_addr, 16u);                                 \
         ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);              \

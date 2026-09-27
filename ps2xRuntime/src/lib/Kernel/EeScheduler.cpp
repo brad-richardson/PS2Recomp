@@ -5,6 +5,7 @@
 #include "runtime/ee_guest_unwind.h"
 #include "ps2_fpmode.h"
 #include "ps2_e41_trace.h"
+#include "ps2_ts2_observer.h"
 #include "ps2_mpg_src_trace.h"
 #include "ps2_e3.h"
 #include "ps2_e4.h"
@@ -961,6 +962,8 @@ void EeScheduler::run()
             try
             {
                 m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
+                ps2_ts2_observer::setThread(static_cast<uint32_t>(m_currentThreadId), m_insideInterrupt);
+                ps2_ts2_observer::setTick(m_vsyncTick);
                 ps2_mpg_src_trace::noteSliceIrq(m_insideInterrupt);
                 m_guestExecuting.store(true, std::memory_order_release);
                 if (ps2DiagWatchEnabled())
