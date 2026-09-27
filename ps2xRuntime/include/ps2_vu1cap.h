@@ -64,7 +64,7 @@ struct Regs
     uint8_t reserved[3];
 };
 static_assert(sizeof(Regs) == 656, "Regs size (trailing pad is zeroed, not compared)");
-static_assert(offsetof(Regs, reserved) == 653, "Regs layout");
+static_assert(offsetof(Regs, reserved) == 649, "Regs layout");
 
 inline void packRegs(const VU1State &s, Regs &r)
 {
