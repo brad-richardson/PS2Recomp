@@ -78,6 +78,7 @@ namespace ps2_mtvu
         NativeGif,
         SaveState,
         DtFallback,
+        FinishPoll, // GE3 Part 6: FINISH-only read found FINISH clear; unit queue only
         Count
     };
 
@@ -101,7 +102,7 @@ namespace ps2_mtvu
     inline const char *reasonName(Reason r)
     {
         static const char *const names[] = {"vblank", "vu1mem", "gsprivread", "gsprivread-masked", "gsprivwrite", "gsprivsync",
-                                            "vif1reg", "cmsar1", "gshle", "nativegif", "savestate", "dtfallback"};
+                                            "vif1reg", "cmsar1", "gshle", "nativegif", "savestate", "dtfallback", "finishpoll"};
         return names[static_cast<unsigned>(r)];
     }
 
@@ -645,6 +646,15 @@ namespace ps2_mtvu
         mask <<= (phys & 7u) * 8u;
         return (mask & ~0x2ull) == 0u;
     }
+
+    // GE3 Part 6: per-probe-episode FINISH tracking (diag observers only, never
+    // guest state). An episode opens on a FINISH-only W1C clear and closes on
+    // the first exempt read that observes FINISH set. Setter kinds: 1 = EE
+    // submit thread, 2 = MTVU unit thread, 3 = GS worker (decode redundant).
+    // Defined once in ps2_runtime.cpp; callable from the GS/MTVU/memory TUs.
+    void ge3EpOnClear(uint32_t clearPc);
+    void ge3EpOnSet(uint32_t kind);
+    void ge3EpOnRead(bool finishSet);
 
     // Inside a unit-owned object: must be unit work or follow a sync.
     inline void touch(Site s)

@@ -1452,13 +1452,18 @@ void PS2Memory::write32(uint32_t address, uint32_t value, uint32_t guestPc)
             // GE3 Part 3: in EE-owned FINISH mode a FINISH-only W1C clear
             // (value's only 1-bit is bit 1) applies immediately with no drain;
             // the submit side already owns the bit. Anything else keeps today.
-            if ((address & 7u) == 0u && (value & 0x3u) != 0u &&
-                !(m_finishTimingPcsx2 && (value & ~0x2u) == 0u))
+            // GE3 Part 6: the exempt clear opens a probe episode (diag only).
+            if ((address & 7u) == 0u && (value & 0x3u) != 0u)
+            {
+                if (m_finishTimingPcsx2 && (value & ~0x2u) == 0u)
+                    ps2_mtvu::ge3EpOnClear(guestPc);
+                else
 #if PS2X_ENABLE_DIAG_TAPS
-                ge1_wait_census::syncCsr(guestPc, address, value, 4u);
+                    ge1_wait_census::syncCsr(guestPc, address, value, 4u);
 #else
-                ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address);
+                    ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address);
 #endif
+            }
             writeCsrHalf(gs_regs.csr, address & 7u, value);
             return;
         }
@@ -1544,14 +1549,19 @@ void PS2Memory::write64(uint32_t address, uint64_t value, uint32_t guestPc)
                 orderedGsCsrWrite(8u, value);
                 return;
             }
-            // MT1 R2: as in write32 (GE3 Part 3 FINISH-only exemption included).
-            if ((value & 0x3u) != 0u &&
-                !(m_finishTimingPcsx2 && (value & ~0x2ull) == 0u))
+            // MT1 R2: as in write32 (GE3 Part 3 FINISH-only exemption included;
+            // Part 6 opens the probe episode on the exempt clear).
+            if ((value & 0x3u) != 0u)
+            {
+                if (m_finishTimingPcsx2 && (value & ~0x2ull) == 0u)
+                    ps2_mtvu::ge3EpOnClear(guestPc);
+                else
 #if PS2X_ENABLE_DIAG_TAPS
-                ge1_wait_census::syncCsr(guestPc, address, value, 8u);
+                    ge1_wait_census::syncCsr(guestPc, address, value, 8u);
 #else
-                ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address);
+                    ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address);
 #endif
+            }
             writeCsrFull(gs_regs.csr, value);
             return;
         }

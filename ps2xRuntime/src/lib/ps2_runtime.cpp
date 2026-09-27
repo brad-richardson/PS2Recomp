@@ -4288,6 +4288,12 @@ namespace
         cache[idx].store((ukey << 1) | (decision ? 1u : 0u), std::memory_order_relaxed);
         return decision;
     }
+    // GE3 Part 6: episode state for the declarations in ps2_mtvu.h.
+    static std::atomic<uint32_t> s_epClearPc{0u};
+    static std::atomic<uint32_t> s_epSetter{0u};
+    static std::atomic<uint32_t> s_epStreak{0u};
+    static std::atomic<uint32_t> s_epLogged{0u};
+
     // GE3 Part 4: narrowed exemption — CSR read whose consuming mask provably
     // observes only FINISH. Logs the PC once, then frees the read.
     inline bool ge3FinishOnlyFree(const uint8_t *rdram, uint32_t pc, uint32_t vaddr, uint32_t bytes)
@@ -4298,6 +4304,42 @@ namespace
             return false;
         ge3NoteFinishOnlyExempt(pc);
         return true;
+    }
+}
+
+// GE3 Part 6: definitions for the declarations in ps2_mtvu.h. Observer only;
+// the capped log is the confirm counter for the diag legs. The episode state
+// above is TU-local; these qualified definitions see it (same TU).
+void ps2_mtvu::ge3EpOnClear(uint32_t clearPc)
+{
+    s_epClearPc.store(clearPc, std::memory_order_relaxed);
+    s_epSetter.store(0u, std::memory_order_relaxed);
+    s_epStreak.store(0u, std::memory_order_relaxed);
+}
+void ps2_mtvu::ge3EpOnSet(uint32_t kind)
+{
+    if (s_epClearPc.load(std::memory_order_relaxed) == 0u)
+        return;
+    uint32_t expected = 0u;
+    s_epSetter.compare_exchange_strong(expected, kind, std::memory_order_relaxed);
+}
+void ps2_mtvu::ge3EpOnRead(bool finishSet)
+{
+    if (s_epClearPc.load(std::memory_order_relaxed) == 0u)
+        return;
+    if (!finishSet)
+    {
+        s_epStreak.fetch_add(1u, std::memory_order_relaxed);
+        return;
+    }
+    const uint32_t pc = s_epClearPc.exchange(0u, std::memory_order_relaxed);
+    if (pc == 0u)
+        return;
+    if (s_epLogged.fetch_add(1u, std::memory_order_relaxed) < 16u)
+    {
+        std::fprintf(stderr, "[gs:finish-probe] clearpc=0x%08x setter=%u iters=%u\n", pc,
+                     s_epSetter.load(std::memory_order_relaxed),
+                     s_epStreak.load(std::memory_order_relaxed));
     }
 }
 
@@ -4328,7 +4370,20 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
-            return m_memory.read8(vaddr);
+            uint8_t value8 = m_memory.read8(vaddr);
+            // GE3 Part 6: a FINISH-only read that finds FINISH clear drains
+            // the MTVU unit queue only (never GS worker/backend), then
+            // re-reads; a set bit returns immediately.
+            if (csrFree && (vaddr & 7u) == 0u)
+            {
+                if ((value8 & 0x2u) == 0u)
+                {
+                    ps2_mtvu::sync(ps2_mtvu::Reason::FinishPoll, ctx ? ctx->pc : 0u);
+                    value8 = m_memory.read8(vaddr);
+                }
+                ps2_mtvu::ge3EpOnRead((value8 & 0x2u) != 0u);
+            }
+            return value8;
         }
         return m_memory.read8(vaddr);
     }
@@ -4365,7 +4420,18 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
-            return m_memory.read16(vaddr);
+            uint16_t value16 = m_memory.read16(vaddr);
+            // GE3 Part 6: FINISH-only clear → unit-queue drain + re-read (see Load8).
+            if (csrFree && (vaddr & 7u) == 0u)
+            {
+                if ((value16 & 0x2u) == 0u)
+                {
+                    ps2_mtvu::sync(ps2_mtvu::Reason::FinishPoll, ctx ? ctx->pc : 0u);
+                    value16 = m_memory.read16(vaddr);
+                }
+                ps2_mtvu::ge3EpOnRead((value16 & 0x2u) != 0u);
+            }
+            return value16;
         }
         return m_memory.read16(vaddr);
     }
@@ -4401,7 +4467,17 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
-            const uint32_t value = m_memory.read32(vaddr);
+            uint32_t value = m_memory.read32(vaddr);
+            // GE3 Part 6: FINISH-only clear → unit-queue drain + re-read (see Load8).
+            if (csrFree && (vaddr & 7u) == 0u)
+            {
+                if ((value & 0x2u) == 0u)
+                {
+                    ps2_mtvu::sync(ps2_mtvu::Reason::FinishPoll, ctx ? ctx->pc : 0u);
+                    value = m_memory.read32(vaddr);
+                }
+                ps2_mtvu::ge3EpOnRead((value & 0x2u) != 0u);
+            }
             ps2_pk::notePrivRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
                                  ctx ? ctx->pc : 0u, vaddr);
             return value;
@@ -4440,7 +4516,17 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
-            const uint64_t value = m_memory.read64(vaddr);
+            uint64_t value = m_memory.read64(vaddr);
+            // GE3 Part 6: FINISH-only clear → unit-queue drain + re-read (see Load8).
+            if (csrFree)
+            {
+                if ((value & 0x2u) == 0u)
+                {
+                    ps2_mtvu::sync(ps2_mtvu::Reason::FinishPoll, ctx ? ctx->pc : 0u);
+                    value = m_memory.read64(vaddr);
+                }
+                ps2_mtvu::ge3EpOnRead((value & 0x2u) != 0u);
+            }
             ps2_pk::notePrivRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
                                  ctx ? ctx->pc : 0u, vaddr);
             return value;

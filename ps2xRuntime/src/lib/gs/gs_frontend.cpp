@@ -1307,6 +1307,9 @@ void GS::noteFinishTimingPcsx2(const uint8_t *data, uint32_t sizeBytes)
     if (!packetHasFinishAD(data, sizeBytes))
         return;
     m_privRegs->csr.fetch_or(0x2u);
+    // GE3 Part 6: record the setter kind for the open probe episode (if any).
+    const uint32_t setterKind = t_inGsWorker ? 3u : (ps2_mtvu::onWorker() ? 2u : 1u);
+    ps2_mtvu::ge3EpOnSet(setterKind);
     if (t_inGsWorker)
     {
         if (s_finishWorkerSets.fetch_add(1u, std::memory_order_relaxed) == 0u)
