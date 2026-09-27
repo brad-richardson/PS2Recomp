@@ -19,6 +19,8 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <chrono> // RB2: serve-spin timeout
+#include <thread> // RB2: serve-spin yield
 
 // HP3: same default as ps2_runtime_macros.h (CMake option
 // PS2X_ENABLE_DIAG_TAPS defines it for every CMake build).
@@ -2394,6 +2396,12 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             command.trxreg = m_trxreg;
             command.direction = m_trxdir;
             m_backend->BeginTransfer(command);
+            // RB2: in lag1 mode snapshot this local->host transfer now,
+            // worker-ordered right after its setup (the backend overwrites
+            // its pending count per setup, so a later consume would not see
+            // this transfer's bytes). Off/sync modes skip: one relaxed load.
+            if (m_trxdir == 1u && ps2_rb1_reverseDmaMode() == 2)
+                snapshotLaggedReadback();
         }
         recordTransferDebugEventUnlocked();
         ps2x_gs_capture::transfer(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
@@ -2738,6 +2746,117 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
     const uint32_t n = m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
     ps2x_gs_capture::localToHost(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
                                  maxBytes, dst, n);
+    return n;
+}
+
+namespace
+{
+// RB2: cap on [rb2] log lines (snapshot + serve sides each read their own
+// copy). PS2X_RB2_LOG_MAX, default 8; the inventory boot raises it.
+uint32_t rb2LogMax()
+{
+    static const uint32_t max = [] {
+        const char *env = std::getenv("PS2X_RB2_LOG_MAX");
+        if (!env || env[0] == '\0')
+            return 8u;
+        return static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
+    }();
+    return max;
+}
+} // namespace
+
+void GS::snapshotLaggedReadback()
+{
+    // Runs worker-ordered (queued mode) or inline (no worker). Consume into
+    // a stack buffer first: the slot lock below stays a leaf (consume takes
+    // m_stateMutex, already held by our caller).
+    uint8_t buf[kRb2LagSlotBytes];
+    const uint32_t n = consumeLocalToHostBytes(buf, kRb2LagSlotBytes);
+    // Drain any remainder so the next transfer starts from an empty FIFO.
+    bool truncated = false;
+    uint8_t drain[1024];
+    for (;;)
+    {
+        const uint32_t m = consumeLocalToHostBytes(drain, sizeof(drain));
+        if (m == 0u)
+            break;
+        truncated = true;
+        if (m < sizeof(drain))
+            break;
+    }
+    uint64_t idx = 0u;
+    {
+        std::lock_guard<std::mutex> lock(m_rb2Mutex);
+        idx = m_rb2Snaps.load(std::memory_order_relaxed);
+        if (n != 0u)
+            std::memcpy(m_rb2Slot[idx & 1u], buf, n);
+        m_rb2SlotBytes[idx & 1u] = n;
+        m_rb2SlotTruncated[idx & 1u] = truncated;
+        m_rb2Snaps.store(idx + 1u, std::memory_order_release);
+    }
+    static std::atomic<uint32_t> rb2SnapLog{0};
+    if (rb2SnapLog.fetch_add(1u, std::memory_order_relaxed) < rb2LogMax())
+    {
+        std::cerr << "[rb2] snap j=" << idx << " bytes=" << n << " trunc=" << (truncated ? 1 : 0)
+                  << " head=";
+        const uint32_t headN = (n < 8u) ? n : 8u;
+        for (uint32_t i = 0u; i < headN; ++i)
+            std::cerr << std::hex << static_cast<uint32_t>(buf[i]) << (i + 1u < headN ? ":" : "");
+        std::cerr << std::dec << std::endl;
+    }
+}
+
+uint32_t GS::serveLaggedReadback(uint8_t *dst, uint32_t maxBytes, uint64_t &spinUs, bool &timedOut)
+{
+    spinUs = 0u;
+    timedOut = false;
+    uint64_t k = 0u;
+    {
+        std::lock_guard<std::mutex> lock(m_rb2Mutex);
+        k = m_rb2Serves++;
+    }
+    if (k == 0u)
+        return 0u; // No previous probe: defined empty serve (EE untouched).
+    // Wait for snapshot k-1. In practice it completed ~a probe period ago
+    // (the worker drains every present); the spin is ~0 and only its count
+    // is timing-dependent, never the bytes. The timeout is a hang-guard for
+    // a reverse DMA with no preceding TRXDIR, which the probe never issues.
+    static constexpr uint64_t kRb2ServeTimeoutUs = 500000u;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (uint64_t i = 0u;; ++i)
+    {
+        if (m_rb2Snaps.load(std::memory_order_acquire) >= k)
+            break;
+        if ((i & 1023u) == 1023u)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            spinUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count());
+            if (spinUs >= kRb2ServeTimeoutUs)
+            {
+                timedOut = true;
+                m_rb2Timeouts.fetch_add(1u, std::memory_order_relaxed);
+                std::cerr << "[rb2] serve k=" << k << " TIMEOUT waiting for snap " << (k - 1u)
+                          << " (snaps=" << m_rb2Snaps.load(std::memory_order_relaxed) << ")"
+                          << std::endl;
+                return 0u;
+            }
+            std::this_thread::yield();
+        }
+    }
+    {
+        const auto now = std::chrono::steady_clock::now();
+        spinUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count());
+    }
+    std::lock_guard<std::mutex> lock(m_rb2Mutex);
+    const uint64_t slot = (k - 1u) & 1u;
+    if (m_rb2SlotTruncated[slot])
+        return 0u;
+    const uint32_t have = m_rb2SlotBytes[slot];
+    const uint32_t n = (have < maxBytes) ? have : maxBytes;
+    if (dst && n != 0u)
+        std::memcpy(dst, m_rb2Slot[slot], n);
     return n;
 }
 

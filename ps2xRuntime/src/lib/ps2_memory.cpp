@@ -159,19 +159,32 @@ namespace
     // (MTGS::InitAndReadFIFO into MADR) with the transfer size from the
     // TRXDIR=1 setup (Gif_Unit.cpp GSLastDownloadSize).
     //
+    // RB2: mode 2 (`lag1`) serves each reverse DMA from the previous
+    // probe's snapshot (GS::serveLaggedReadback) with no worker/unit sync
+    // on the EE, so the probe no longer stalls. See the GS header.
+    //
     // Unit tests force the knob through ps2_rb1_setReverseDmaOverride
     // (production never calls it): the env is read once per process, so a
     // test binary could not cover both sides without the hook.
-    inline bool vif1ReverseDmaEnabled()
+    inline int vif1ReverseDmaModeLocal()
     {
         const int rb1Override = g_rb1ReverseDmaOverride.load(std::memory_order_relaxed);
         if (rb1Override >= 0)
-            return rb1Override != 0;
-        static const bool on = [] {
+            return rb1Override;
+        static const int mode = [] {
             const char *env = std::getenv("PS2X_VIF1_REVERSE_DMA");
-            return env && env[0] != '\0' && env[0] != '0';
+            if (!env || env[0] == '\0' || env[0] == '0')
+                return 0;
+            if (std::strcmp(env, "lag1") == 0)
+                return 2;
+            return 1;
         }();
-        return on;
+        return mode;
+    }
+
+    inline bool vif1ReverseDmaEnabled()
+    {
+        return vif1ReverseDmaModeLocal() != 0;
     }
 
     inline void inRange(uint32_t offset, size_t bytes, size_t regionSize, const char *op, uint32_t address)
@@ -512,6 +525,14 @@ namespace
 void ps2_rb1_setReverseDmaOverride(int mode)
 {
     g_rb1ReverseDmaOverride.store(mode, std::memory_order_relaxed);
+}
+
+// RB2: live knob value for the GS snapshot hook (declared in
+// runtime/ps2_memory.h). The mode reader above has internal linkage, so this
+// same-TU wrapper publishes it; gs_frontend.cpp calls this.
+int ps2_rb1_reverseDmaMode()
+{
+    return vif1ReverseDmaModeLocal();
 }
 
 // Helpers for GS VRAM addressing (PSMCT32 path).
@@ -1967,6 +1988,128 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 // the channel completion the way the forward path does.
                 const bool vif1Reverse = (channelBase == 0x10009000u) && (mode == 0u) &&
                                          ((chcr & 0x1u) == 0u) && (qwc > 0u);
+                // RB2: lag1 serves the previous probe's snapshot with no
+                // worker/unit sync on the EE (no stall). The snapshot was
+                // captured worker-ordered at the previous TRXDIR=1 setup, so
+                // serveLaggedReadback's spin is ~0; only its count is
+                // timing-dependent, never the bytes. Short/empty serves keep
+                // the RB1 remainder semantics (EE past the served bytes is
+                // untouched, the rest stays in QWC).
+                if (vif1Reverse && vif1ReverseDmaModeLocal() == 2)
+                {
+                    static const uint32_t rb2LogMax = [] {
+                        const char *env = std::getenv("PS2X_RB2_LOG_MAX");
+                        if (!env || env[0] == '\0')
+                            return 8u;
+                        return static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
+                    }();
+                    const uint64_t rb1Bytes64 = static_cast<uint64_t>(qwc) * 16ull;
+                    const uint32_t rb2Want = (rb1Bytes64 > 0xFFFFFFFFull)
+                                                 ? 0xFFFFFFFFu
+                                                 : static_cast<uint32_t>(rb1Bytes64);
+                    uint8_t rb2Buf[GS::kRb2LagSlotBytes];
+                    uint64_t rb2SpinUs = 0u;
+                    bool rb2Timeout = false;
+                    const uint32_t rb2Avail = m_gsFrontend
+                                                  ? m_gsFrontend->serveLaggedReadback(rb2Buf, sizeof(rb2Buf),
+                                                                                      rb2SpinUs, rb2Timeout)
+                                                  : 0u;
+                    const uint32_t rb2Give = (rb2Avail < rb2Want) ? rb2Avail : rb2Want;
+                    uint32_t rb2Done = 0u;
+                    while (rb2Done < rb2Give)
+                    {
+                        const uint32_t rb2Ee = madr + rb2Done;
+                        const bool rb2Scratch = isScratchpad(rb2Ee);
+                        uint8_t *rb2Base = rb2Scratch ? m_scratchpad : m_rdram;
+                        if (!rb2Base)
+                            break;
+                        uint32_t rb2Dst = 0u;
+                        uint32_t rb2Limit = 0u;
+                        if (rb2Scratch)
+                        {
+                            rb2Dst = rb2Ee - PS2_SCRATCHPAD_BASE;
+                            if (rb2Ee >= PS2_SCRATCHPAD_ALIAS_BASE &&
+                                rb2Ee < PS2_SCRATCHPAD_ALIAS_BASE + PS2_SCRATCHPAD_SIZE)
+                                rb2Dst = rb2Ee - PS2_SCRATCHPAD_ALIAS_BASE;
+                            rb2Dst &= (PS2_SCRATCHPAD_SIZE - 1u);
+                            rb2Limit = PS2_SCRATCHPAD_SIZE;
+                        }
+                        else
+                        {
+                            try
+                            {
+                                rb2Dst = translateAddress(rb2Ee);
+                            }
+                            catch (const std::exception &)
+                            {
+                                break;
+                            }
+                            rb2Limit = PS2_RAM_SIZE;
+                        }
+                        if (rb2Dst >= rb2Limit)
+                            rb2Dst = 0u;
+                        uint32_t rb2Chunk = rb2Give - rb2Done;
+                        if (rb2Dst + rb2Chunk > rb2Limit)
+                            rb2Chunk = rb2Limit - rb2Dst;
+                        if (rb2Chunk == 0u)
+                            break;
+                        std::memcpy(rb2Base + rb2Dst, rb2Buf + rb2Done, rb2Chunk);
+                        rb2Done += rb2Chunk;
+                    }
+                    {
+                        static std::atomic<uint32_t> rb2LogCount{0};
+                        const uint32_t rb2N = rb2LogCount.fetch_add(1, std::memory_order_relaxed);
+                        if (rb2N < rb2LogMax)
+                        {
+                            // Served-byte brightness as the guest sees it:
+                            // v1 = (B<<16)|(G<<8)|R per RGB triple.
+                            uint32_t rb2Min = 0xFFFFFFu, rb2Max = 0u;
+                            uint64_t rb2Sum = 0u, rb2Pix = 0u;
+                            for (uint32_t rb2I = 0u; rb2I + 2u < rb2Done; rb2I += 3u)
+                            {
+                                const uint32_t rb2V = (static_cast<uint32_t>(rb2Buf[rb2I + 2u]) << 16) |
+                                                     (static_cast<uint32_t>(rb2Buf[rb2I + 1u]) << 8) |
+                                                     static_cast<uint32_t>(rb2Buf[rb2I]);
+                                if (rb2V < rb2Min)
+                                    rb2Min = rb2V;
+                                if (rb2V > rb2Max)
+                                    rb2Max = rb2V;
+                                rb2Sum += rb2V;
+                                ++rb2Pix;
+                            }
+                            if (rb2Pix == 0u)
+                                rb2Min = 0u;
+                            std::cerr << "[rb2] serve madr=0x" << std::hex << madr << std::dec
+                                      << " qwc=" << qwc << " avail=" << rb2Avail << " served=" << rb2Done
+                                      << " spin_us=" << rb2SpinUs << " timeout=" << (rb2Timeout ? 1 : 0)
+                                      << " u24min=0x" << std::hex << rb2Min << " u24mean=0x"
+                                      << (rb2Pix ? (rb2Sum / rb2Pix) : 0u) << " u24max=0x" << rb2Max
+                                      << std::dec << " head=";
+                            const uint32_t rb2HeadN = (rb2Done < 8u) ? rb2Done : 8u;
+                            for (uint32_t rb2I = 0u; rb2I < rb2HeadN; ++rb2I)
+                                std::cerr << std::hex << static_cast<uint32_t>(rb2Buf[rb2I])
+                                          << (rb2I + 1u < rb2HeadN ? ":" : "");
+                            std::cerr << std::dec << std::endl;
+                        }
+                    }
+                    const uint32_t rb2QwGot = rb2Done / 16u;
+                    const uint32_t rb2Left = (rb2Done >= rb2Want) ? 0u : (qwc - rb2QwGot);
+                    m_ioRegisters[channelBase + 0x10u] = madr + rb2Done;
+                    m_ioRegisters[channelBase + 0x20u] = rb2Left;
+                    m_ioRegisters[channelBase + 0x00u] &= ~0x100u;
+                    static constexpr uint32_t kRb2DStat = 0x1000E010u;
+                    uint32_t rb2Dstat = m_ioRegisters.count(kRb2DStat) ? m_ioRegisters[kRb2DStat] : 0u;
+                    rb2Dstat |= (1u << 1u); // VIF1 channel
+                    const uint32_t rb2Status = rb2Dstat & 0x3FFu;
+                    const uint32_t rb2Mask = (rb2Dstat >> 16) & 0x3FFu;
+                    if ((rb2Status & rb2Mask) != 0u)
+                        rb2Dstat |= (1u << 31);
+                    else
+                        rb2Dstat &= ~(1u << 31);
+                    m_ioRegisters[kRb2DStat] = rb2Dstat;
+                    queueCompletedDmacCause(1u);
+                    return true;
+                }
                 if (vif1Reverse && vif1ReverseDmaEnabled())
                 {
                     const uint64_t rb1Bytes64 = static_cast<uint64_t>(qwc) * 16ull;

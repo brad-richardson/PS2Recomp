@@ -3057,6 +3057,153 @@ void register_ps2_memory_tests()
             ps2_rb1_setReverseDmaOverride(-1);
         });
 
+        // RB2: lag1 serves each reverse DMA from the previous TRXDIR=1
+        // snapshot (no drain on the EE). First serve is defined empty (EE
+        // untouched, QWC remainder); the second serve yields the first
+        // snapshot's bytes; the third yields the second's.
+        tc.Run("RB2 lag1 serves zeros first, then the previous snapshot", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(2);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00034000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadAndReadback = [&](uint8_t mul, uint8_t add) {
+                gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                gs.writeRegister(GS_REG_TRXPOS, 0ull);
+                gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                gs.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            auto reverseKick = [&]() {
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+            };
+            auto expectPattern = [&](uint8_t mul, uint8_t add, const char *what) {
+                bool ok = true;
+                for (uint32_t i = 0; i < 64u; ++i)
+                {
+                    if (mem.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * mul + add) & 0xFFu))
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                t.IsTrue(ok, what);
+            };
+
+            uploadAndReadback(3u, 1u); // snapshot 0
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(); // serve 0: no previous snapshot
+            bool untouched = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != 0xA5u)
+                {
+                    untouched = false;
+                    break;
+                }
+            }
+            t.IsTrue(untouched, "lag1 first serve must leave the EE destination untouched");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 4u, "lag1 first serve must keep QWC (short-transfer semantics)");
+            t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) == 0u, "lag1 first serve should still report STR clear");
+            t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 1)) != 0u, "lag1 first serve should set D_STAT CIS bit 1");
+
+            uploadAndReadback(5u, 2u); // snapshot 1
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(); // serve 1: yields snapshot 0
+            expectPattern(3u, 1u, "lag1 second serve must yield the first snapshot's bytes");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "lag1 second serve should clear QWC on a full transfer");
+
+            uploadAndReadback(7u, 3u); // snapshot 2
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(); // serve 2: yields snapshot 1
+            expectPattern(5u, 2u, "lag1 third serve must yield the second snapshot's bytes");
+            t.Equals(mem.readIORegister(kVif1 + 0x10u), kDst + 64u, "lag1 serve should advance MADR past the transfer");
+
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        tc.Run("RB2 lag1 through the queued GS worker stays one snapshot behind", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(2);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+            t.IsTrue(gs.setQueueEnabled(true), "GS queue enable should succeed");
+
+            // Setup + snapshot run on the worker; the serve spins only for
+            // the already-queued previous snapshot, then yields its bytes.
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00035000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadAndReadback = [&](uint8_t mul, uint8_t add) {
+                gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                gs.writeRegister(GS_REG_TRXPOS, 0ull);
+                gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                gs.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            uploadAndReadback(11u, 4u); // snapshot 0 (worker)
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+            bool untouched = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != 0xA5u)
+                {
+                    untouched = false;
+                    break;
+                }
+            }
+            t.IsTrue(untouched, "queued lag1 first serve must leave EE untouched");
+
+            uploadAndReadback(13u, 5u); // snapshot 1 (worker)
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * 11u + 4u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "queued lag1 second serve must yield the first worker snapshot");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "queued lag1 second serve should clear QWC");
+            t.IsTrue(gs.setQueueEnabled(false), "GS queue disable should succeed");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
         // UV1 Part 2: PCSX2 V2/V3 lane rules. V2 writes v1v0v1v0
         // (Vif_Unpack.cpp UNPACK_V2 :76-83), except V2-32 zeroes w when the
         // unpack data starts QW-aligned (x86/Vif_UnpackSSE.cpp xUPK_V2_32

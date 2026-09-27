@@ -238,6 +238,25 @@ public:
 
     uint32_t consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes);
 
+    // RB2: one-probe-lagged local->host serving (`PS2X_VIF1_REVERSE_DMA=lag1`).
+    // The sync path (RB1) drains the unit + worker at every probe readback;
+    // the lag path instead snapshots each TRXDIR=1 transfer worker-ordered at
+    // setup time (snapshotLaggedReadback, called from the TRXDIR=1 case) and
+    // serves each reverse DMA from the PREVIOUS snapshot, with no worker or
+    // unit sync on the EE. Deterministic given deterministic rendering: the
+    // k-th serve always yields snapshot k-1's bytes (it spins, briefly, for
+    // an already-complete snapshot; only the spin count is timing-dependent).
+    // First serve yields 0 bytes (EE untouched, QWC remainder, like a short
+    // sync transfer). Snapshots ride the GIF stream order, so the capture
+    // stays ordered after the probe's own packet on MTVU builds too (a
+    // worker-direct capture command would race it). Slot cap: transfers over
+    // kRb2LagSlotBytes are drained and served as 0 bytes (truncated; logged).
+    static constexpr uint32_t kRb2LagSlotBytes = 4096u;
+    // Serves the previous snapshot into dst (<= maxBytes). Returns bytes
+    // available (0 = none yet / truncated / no snapshot); spinUs is the
+    // snapshot wait, timedOut sets on the hang-guard timeout (serve zeros).
+    uint32_t serveLaggedReadback(uint8_t *dst, uint32_t maxBytes, uint64_t &spinUs, bool &timedOut);
+
     void refreshDisplaySnapshot();
 
     void WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
@@ -378,6 +397,23 @@ private:
     uint64_t m_pktSeqCommands = 0u;
     uint64_t m_pktSeqSnapshot = 0u;
     uint64_t m_pktSeqSnapshotCommands = 0u;
+
+    // RB2 (appended last): one-probe-lagged readback cache. Snapshots publish
+    // under m_rb2Mutex with a release store of m_rb2Snaps; serves spin on an
+    // acquire load, then copy under the mutex. Double-buffered: snapshot j
+    // writes slot j&1 while serve j+1 reads slot j&1 only after snapshot j
+    // completes, and snapshot j+1 (same slot) cannot execute before serve
+    // j+1's probe, which is what enqueues its TRXDIR. m_rb2Serves is
+    // EE-thread-only but stays mutex-guarded. Hang-guard, not behavior: the
+    // serve spin times out (serve zeros) if a snapshot never completes.
+    void snapshotLaggedReadback();
+    std::mutex m_rb2Mutex;
+    std::atomic<uint64_t> m_rb2Snaps{0};
+    uint8_t m_rb2Slot[2][kRb2LagSlotBytes]{};
+    uint32_t m_rb2SlotBytes[2] = {0u, 0u};
+    bool m_rb2SlotTruncated[2] = {false, false};
+    uint64_t m_rb2Serves = 0u;
+    std::atomic<uint64_t> m_rb2Timeouts{0};
 };
 
 #endif

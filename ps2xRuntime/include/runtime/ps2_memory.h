@@ -533,8 +533,12 @@ public:
 };
 
 // RB1 test hook: force the VIF1 reverse-DMA knob for unit tests.
-// mode: 1 = force on, 0 = force off, any other value = follow
-// PS2X_VIF1_REVERSE_DMA (production default). Production code never calls this.
+// mode: 1 = force sync on, 2 = force RB2 lag1 (RB2), 0 = force off,
+// any other value = follow PS2X_VIF1_REVERSE_DMA (production default).
+// Production code never calls this.
+// RB2: live knob value for the GS snapshot hook (0 = off, 1 = RB1 sync,
+// 2 = lag1). Reads the test override first, then the once-per-process env.
+int ps2_rb1_reverseDmaMode();
 void ps2_rb1_setReverseDmaOverride(int mode);
 
 #endif // PS2_MEMORY_H
