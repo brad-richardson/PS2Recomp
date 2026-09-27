@@ -157,6 +157,12 @@ public:
     // registered image whenever the code size matches (null = normal lookup).
     static const RecompProgram *findRecompProgram(uint64_t hash);
     void setRecompProgramForTest(const RecompProgram *program) { m_recompTestProgram = program; }
+    // F12-fix: test hook for the tracked flag-map cache: builds (or reuses)
+    // the map for this image through the same path run() uses.
+    const uint8_t *directFlagMapForTest(const uint8_t *vuCode, uint32_t codeSize, bool tracked)
+    {
+        return directFlagMap(vuCode, codeSize, tracked);
+    }
     uint64_t recompCyclesForTest() const { return m_recompCycles; }
     uint64_t interpCyclesForTest() const { return m_interpCycles; }
     // VRB1: capture/replay hooks (vu1bench only; no behavior change).

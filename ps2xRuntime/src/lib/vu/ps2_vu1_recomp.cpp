@@ -710,7 +710,13 @@ const uint8_t *VU1Interpreter::directFlagMap(const uint8_t *vuCode, uint32_t cod
     }
     // Tracked VU1 code: m_recompHash is the XXH64 of this image (updated by
     // lookupRecompProgram on every code generation change). One map per image.
-    static std::unordered_map<uint64_t, std::vector<uint8_t>> maps;
+    // F12-fix: per-thread cache. The map is a pure function of the code
+    // image, but the shared static was emplaced concurrently by the MTVU
+    // thread (VU1 runs) and GameThread (VU0 microprograms) with
+    // PS2X_MTVU=1 (F12 B2 SIGSEGV in directFlagMap): find racing a rehash
+    // is UB. Each thread builds its own identical copy; the pointer stays
+    // valid for the thread's synchronous use within run().
+    static thread_local std::unordered_map<uint64_t, std::vector<uint8_t>> maps;
     const uint64_t key = m_recompHash ^ (static_cast<uint64_t>(codeSize) << 48);
     auto it = maps.find(key);
     if (it == maps.end())
