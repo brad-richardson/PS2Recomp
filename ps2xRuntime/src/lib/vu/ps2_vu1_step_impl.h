@@ -227,7 +227,7 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::advanceOneCycle()
         progressXgkick();
 }
 
-template <bool kStatic, int kBlockMap, bool kNoStall, uint32_t kCodeSize, bool kPlainTail>
+template <bool kStatic, int kBlockMap, bool kNoStall, uint32_t kCodeSize, bool kPlainTail, int kFloatMode>
 PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstructionPair &decoded, RunContext &ctx,
                                                              uint32_t plainNextPc)
 {
@@ -343,7 +343,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
 
     if (decoded.iBit)
     {
-        if constexpr (kStatic) execUpperImpl(decoded.upper); else execUpper(decoded.upper);
+        if constexpr (kStatic) execUpperImpl<(PS2X_VU1_FMAC_SIMD != 0), kFloatMode>(decoded.upper); else execUpper(decoded.upper);
         float immediate = 0.0f;
         std::memcpy(&immediate, &decoded.lower, sizeof(immediate));
         m_state.i = normalizeOperand(immediate);
@@ -355,7 +355,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
         std::memcpy(oldVf,
                     m_state.vf[decoded.upperVfShadowReg],
                     sizeof(oldVf));
-        if constexpr (kStatic) execUpperImpl(decoded.upper); else execUpper(decoded.upper);
+        if constexpr (kStatic) execUpperImpl<(PS2X_VU1_FMAC_SIMD != 0), kFloatMode>(decoded.upper); else execUpper(decoded.upper);
         std::memcpy(upperVf,
                     m_state.vf[decoded.upperVfShadowReg],
                     sizeof(upperVf));
@@ -369,7 +369,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     }
     else
     {
-        if constexpr (kStatic) execUpperImpl(decoded.upper); else execUpper(decoded.upper);
+        if constexpr (kStatic) execUpperImpl<(PS2X_VU1_FMAC_SIMD != 0), kFloatMode>(decoded.upper); else execUpper(decoded.upper);
         if constexpr (kStatic) execLowerImpl(decoded.lower, ctx.vuData, ctx.dataSize, *ctx.gs, ctx.memory, decoded.upper); else execLower(decoded.lower, ctx.vuData, ctx.dataSize, *ctx.gs, ctx.memory, decoded.upper);
     }
 

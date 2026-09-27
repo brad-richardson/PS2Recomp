@@ -1512,6 +1512,11 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     // only) goes through the interpreter. m_entryArmed only turns off mid-run.
     if (m_traceArmed || m_entryArmed)
         recomp = nullptr;
+    // Bind the generated arithmetic mode once for this image/run. The
+    // interpreter fallback keeps its runtime choice for unknown images.
+    const RecompPairFn *recompPairs = recomp != nullptr && m_pcsx2Float && recomp->nativePairs != nullptr
+                                          ? recomp->nativePairs
+                                          : recomp != nullptr ? recomp->pairs : nullptr;
     // VB1: direct commit (VU1 only, dev traces off).
     // VR3: VU0 too, behind its own knob (PS2X_VU0_DIRECT=1; default off).
     const bool vu1 = m_unit == Unit::VU1;
@@ -1533,7 +1538,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
 
         if (recomp != nullptr && (m_state.pc & 7u) == 0u && (m_state.pc >> 3) < recomp->pairCount)
         {
-            if (const RecompPairFn fn = recomp->pairs[m_state.pc >> 3])
+            if (const RecompPairFn fn = recompPairs[m_state.pc >> 3])
             {
                 const uint64_t startCycle = m_cycle;
                 const bool stop = fn(*this, ctx);

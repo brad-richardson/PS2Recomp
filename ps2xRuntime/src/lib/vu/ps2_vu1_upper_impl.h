@@ -47,7 +47,7 @@ using namespace ps2_vu1_upper_detail;
 // ============================================================================
 // Upper instructions (FMAC pipeline)
 // ============================================================================
-template <bool kSimd>
+template <bool kSimd, int kFloatMode>
 PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::execUpperImpl(uint32_t instr)
 {
     m_currentUpperInstruction = instr;
@@ -62,16 +62,16 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::execUpperImpl(uint32_t instr)
 #if PS2X_VU1_FMAC_SIMD_AVAILABLE
     // VR4 D1: the vector FMAC core takes every op that ends in
     // applyFmacDest/applyFmacDestAcc (same results, flags and commits).
-    if constexpr (kSimd)
+    if constexpr (kSimd || kFloatMode == 1)
     {
-        if (fmacSimdDispatch(instr))
+        if (fmacSimdDispatch<kFloatMode>(instr))
             return;
     }
-    else if (m_pcsx2Float)
+    else if (kFloatMode == -1 && m_pcsx2Float)
     {
         // The PCSX2 mode uses the same native-vector core when the exact
         // reference is selected with PS2X_VU1_FMAC_SIMD=OFF (including tests).
-        if (fmacSimdDispatch(instr))
+        if (fmacSimdDispatch<kFloatMode>(instr))
             return;
     }
 #else

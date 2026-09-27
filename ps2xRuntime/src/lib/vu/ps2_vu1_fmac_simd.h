@@ -157,7 +157,7 @@ namespace ps2_vu1_fmac_simd
 }
 
 // VR4 D1: one vector FMAC. kAcc = the ACC is the destination (…A ops).
-template <int kArith, int kSrc, bool kAcc>
+template <int kArith, int kSrc, bool kAcc, int kFloatMode>
 PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::fmacSimd(uint32_t instr)
 {
 #if defined(__clang__)
@@ -168,7 +168,12 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::fmacSimd(uint32_t instr)
     // Scalar path with dest 0: no lane, no flag write, no store.
     if (dest == 0u)
         return;
-    if (m_pcsx2Float)
+    if constexpr (kFloatMode == 1)
+    {
+        fmacPcsx2<kArith, kSrc, kAcc>(instr);
+        return;
+    }
+    else if (kFloatMode == -1 && m_pcsx2Float)
     {
         fmacPcsx2<kArith, kSrc, kAcc>(instr);
         return;
@@ -408,6 +413,7 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::fmacPcsx2(uint32_t instr)
         applyDest(m_state.vf[FD(instr)], out, dest);
 }
 
+template <int kFloatMode>
 PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::fmacSimdDispatch(uint32_t instr)
 {
     using namespace ps2_vu1_fmac_simd;
@@ -416,84 +422,84 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::fmacSimdDispatch(uint32_t ins
     {
         switch (op)
         {
-        case 0x00: fmacSimd<kAdd, 0, false>(instr); return true; // ADDbc
-        case 0x01: fmacSimd<kAdd, 1, false>(instr); return true;
-        case 0x02: fmacSimd<kAdd, 2, false>(instr); return true;
-        case 0x03: fmacSimd<kAdd, 3, false>(instr); return true;
-        case 0x04: fmacSimd<kSub, 0, false>(instr); return true; // SUBbc
-        case 0x05: fmacSimd<kSub, 1, false>(instr); return true;
-        case 0x06: fmacSimd<kSub, 2, false>(instr); return true;
-        case 0x07: fmacSimd<kSub, 3, false>(instr); return true;
-        case 0x08: fmacSimd<kMadd, 0, false>(instr); return true; // MADDbc
-        case 0x09: fmacSimd<kMadd, 1, false>(instr); return true;
-        case 0x0A: fmacSimd<kMadd, 2, false>(instr); return true;
-        case 0x0B: fmacSimd<kMadd, 3, false>(instr); return true;
-        case 0x0C: fmacSimd<kMsub, 0, false>(instr); return true; // MSUBbc
-        case 0x0D: fmacSimd<kMsub, 1, false>(instr); return true;
-        case 0x0E: fmacSimd<kMsub, 2, false>(instr); return true;
-        case 0x0F: fmacSimd<kMsub, 3, false>(instr); return true;
-        case 0x18: fmacSimd<kMul, 0, false>(instr); return true; // MULbc
-        case 0x19: fmacSimd<kMul, 1, false>(instr); return true;
-        case 0x1A: fmacSimd<kMul, 2, false>(instr); return true;
-        case 0x1B: fmacSimd<kMul, 3, false>(instr); return true;
-        case 0x1C: fmacSimd<kMul, kQ, false>(instr); return true;  // MULq
-        case 0x1E: fmacSimd<kMul, kI, false>(instr); return true;  // MULi
-        case 0x20: fmacSimd<kAdd, kQ, false>(instr); return true;  // ADDq
-        case 0x21: fmacSimd<kMadd, kQ, false>(instr); return true; // MADDq
-        case 0x22: fmacSimd<kAdd, kI, false>(instr); return true;  // ADDi
-        case 0x23: fmacSimd<kMadd, kI, false>(instr); return true; // MADDi
-        case 0x24: fmacSimd<kSub, kQ, false>(instr); return true;  // SUBq
-        case 0x25: fmacSimd<kMsub, kQ, false>(instr); return true; // MSUBq
-        case 0x26: fmacSimd<kSub, kI, false>(instr); return true;  // SUBi
-        case 0x27: fmacSimd<kMsub, kI, false>(instr); return true; // MSUBi
-        case 0x28: fmacSimd<kAdd, kVec, false>(instr); return true;  // ADD
-        case 0x29: fmacSimd<kMadd, kVec, false>(instr); return true; // MADD
-        case 0x2A: fmacSimd<kMul, kVec, false>(instr); return true;  // MUL
-        case 0x2C: fmacSimd<kSub, kVec, false>(instr); return true;  // SUB
-        case 0x2D: fmacSimd<kMsub, kVec, false>(instr); return true; // MSUB
-        case 0x2E: fmacSimd<kOpmsub, kCross, false>(instr); return true; // OPMSUB
+        case 0x00: fmacSimd<kAdd, 0, false, kFloatMode>(instr); return true; // ADDbc
+        case 0x01: fmacSimd<kAdd, 1, false, kFloatMode>(instr); return true;
+        case 0x02: fmacSimd<kAdd, 2, false, kFloatMode>(instr); return true;
+        case 0x03: fmacSimd<kAdd, 3, false, kFloatMode>(instr); return true;
+        case 0x04: fmacSimd<kSub, 0, false, kFloatMode>(instr); return true; // SUBbc
+        case 0x05: fmacSimd<kSub, 1, false, kFloatMode>(instr); return true;
+        case 0x06: fmacSimd<kSub, 2, false, kFloatMode>(instr); return true;
+        case 0x07: fmacSimd<kSub, 3, false, kFloatMode>(instr); return true;
+        case 0x08: fmacSimd<kMadd, 0, false, kFloatMode>(instr); return true; // MADDbc
+        case 0x09: fmacSimd<kMadd, 1, false, kFloatMode>(instr); return true;
+        case 0x0A: fmacSimd<kMadd, 2, false, kFloatMode>(instr); return true;
+        case 0x0B: fmacSimd<kMadd, 3, false, kFloatMode>(instr); return true;
+        case 0x0C: fmacSimd<kMsub, 0, false, kFloatMode>(instr); return true; // MSUBbc
+        case 0x0D: fmacSimd<kMsub, 1, false, kFloatMode>(instr); return true;
+        case 0x0E: fmacSimd<kMsub, 2, false, kFloatMode>(instr); return true;
+        case 0x0F: fmacSimd<kMsub, 3, false, kFloatMode>(instr); return true;
+        case 0x18: fmacSimd<kMul, 0, false, kFloatMode>(instr); return true; // MULbc
+        case 0x19: fmacSimd<kMul, 1, false, kFloatMode>(instr); return true;
+        case 0x1A: fmacSimd<kMul, 2, false, kFloatMode>(instr); return true;
+        case 0x1B: fmacSimd<kMul, 3, false, kFloatMode>(instr); return true;
+        case 0x1C: fmacSimd<kMul, kQ, false, kFloatMode>(instr); return true;  // MULq
+        case 0x1E: fmacSimd<kMul, kI, false, kFloatMode>(instr); return true;  // MULi
+        case 0x20: fmacSimd<kAdd, kQ, false, kFloatMode>(instr); return true;  // ADDq
+        case 0x21: fmacSimd<kMadd, kQ, false, kFloatMode>(instr); return true; // MADDq
+        case 0x22: fmacSimd<kAdd, kI, false, kFloatMode>(instr); return true;  // ADDi
+        case 0x23: fmacSimd<kMadd, kI, false, kFloatMode>(instr); return true; // MADDi
+        case 0x24: fmacSimd<kSub, kQ, false, kFloatMode>(instr); return true;  // SUBq
+        case 0x25: fmacSimd<kMsub, kQ, false, kFloatMode>(instr); return true; // MSUBq
+        case 0x26: fmacSimd<kSub, kI, false, kFloatMode>(instr); return true;  // SUBi
+        case 0x27: fmacSimd<kMsub, kI, false, kFloatMode>(instr); return true; // MSUBi
+        case 0x28: fmacSimd<kAdd, kVec, false, kFloatMode>(instr); return true;  // ADD
+        case 0x29: fmacSimd<kMadd, kVec, false, kFloatMode>(instr); return true; // MADD
+        case 0x2A: fmacSimd<kMul, kVec, false, kFloatMode>(instr); return true;  // MUL
+        case 0x2C: fmacSimd<kSub, kVec, false, kFloatMode>(instr); return true;  // SUB
+        case 0x2D: fmacSimd<kMsub, kVec, false, kFloatMode>(instr); return true; // MSUB
+        case 0x2E: fmacSimd<kOpmsub, kCross, false, kFloatMode>(instr); return true; // OPMSUB
         default: return false;
         }
     }
     const uint32_t special = (instr & 0x3u) | ((instr >> 4) & 0x7Cu);
     switch (special)
     {
-    case 0x00: fmacSimd<kAdd, 0, true>(instr); return true; // ADDAbc
-    case 0x01: fmacSimd<kAdd, 1, true>(instr); return true;
-    case 0x02: fmacSimd<kAdd, 2, true>(instr); return true;
-    case 0x03: fmacSimd<kAdd, 3, true>(instr); return true;
-    case 0x04: fmacSimd<kSub, 0, true>(instr); return true; // SUBAbc
-    case 0x05: fmacSimd<kSub, 1, true>(instr); return true;
-    case 0x06: fmacSimd<kSub, 2, true>(instr); return true;
-    case 0x07: fmacSimd<kSub, 3, true>(instr); return true;
-    case 0x08: fmacSimd<kMadd, 0, true>(instr); return true; // MADDAbc
-    case 0x09: fmacSimd<kMadd, 1, true>(instr); return true;
-    case 0x0A: fmacSimd<kMadd, 2, true>(instr); return true;
-    case 0x0B: fmacSimd<kMadd, 3, true>(instr); return true;
-    case 0x0C: fmacSimd<kMsub, 0, true>(instr); return true; // MSUBAbc
-    case 0x0D: fmacSimd<kMsub, 1, true>(instr); return true;
-    case 0x0E: fmacSimd<kMsub, 2, true>(instr); return true;
-    case 0x0F: fmacSimd<kMsub, 3, true>(instr); return true;
-    case 0x18: fmacSimd<kMul, 0, true>(instr); return true; // MULAbc
-    case 0x19: fmacSimd<kMul, 1, true>(instr); return true;
-    case 0x1A: fmacSimd<kMul, 2, true>(instr); return true;
-    case 0x1B: fmacSimd<kMul, 3, true>(instr); return true;
-    case 0x1C: fmacSimd<kMul, kQ, true>(instr); return true;  // MULAq
-    case 0x1E: fmacSimd<kMul, kI, true>(instr); return true;  // MULAi
-    case 0x20: fmacSimd<kAdd, kQ, true>(instr); return true;  // ADDAq
-    case 0x21: fmacSimd<kMadd, kQ, true>(instr); return true; // MADDAq
-    case 0x22: fmacSimd<kAdd, kI, true>(instr); return true;  // ADDAi
-    case 0x23: fmacSimd<kMadd, kI, true>(instr); return true; // MADDAi
-    case 0x24: fmacSimd<kSub, kQ, true>(instr); return true;  // SUBAq
-    case 0x25: fmacSimd<kMsub, kQ, true>(instr); return true; // MSUBAq
-    case 0x26: fmacSimd<kSub, kI, true>(instr); return true;  // SUBAi
-    case 0x27: fmacSimd<kMsub, kI, true>(instr); return true; // MSUBAi
-    case 0x28: fmacSimd<kAdd, kVec, true>(instr); return true;  // ADDA
-    case 0x29: fmacSimd<kMadd, kVec, true>(instr); return true; // MADDA
-    case 0x2A: fmacSimd<kMul, kVec, true>(instr); return true;  // MULA
-    case 0x2C: fmacSimd<kSub, kVec, true>(instr); return true;  // SUBA
-    case 0x2D: fmacSimd<kMsub, kVec, true>(instr); return true; // MSUBA
-    case 0x2E: fmacSimd<kOpmula, kCross, true>(instr); return true; // OPMULA
+    case 0x00: fmacSimd<kAdd, 0, true, kFloatMode>(instr); return true; // ADDAbc
+    case 0x01: fmacSimd<kAdd, 1, true, kFloatMode>(instr); return true;
+    case 0x02: fmacSimd<kAdd, 2, true, kFloatMode>(instr); return true;
+    case 0x03: fmacSimd<kAdd, 3, true, kFloatMode>(instr); return true;
+    case 0x04: fmacSimd<kSub, 0, true, kFloatMode>(instr); return true; // SUBAbc
+    case 0x05: fmacSimd<kSub, 1, true, kFloatMode>(instr); return true;
+    case 0x06: fmacSimd<kSub, 2, true, kFloatMode>(instr); return true;
+    case 0x07: fmacSimd<kSub, 3, true, kFloatMode>(instr); return true;
+    case 0x08: fmacSimd<kMadd, 0, true, kFloatMode>(instr); return true; // MADDAbc
+    case 0x09: fmacSimd<kMadd, 1, true, kFloatMode>(instr); return true;
+    case 0x0A: fmacSimd<kMadd, 2, true, kFloatMode>(instr); return true;
+    case 0x0B: fmacSimd<kMadd, 3, true, kFloatMode>(instr); return true;
+    case 0x0C: fmacSimd<kMsub, 0, true, kFloatMode>(instr); return true; // MSUBAbc
+    case 0x0D: fmacSimd<kMsub, 1, true, kFloatMode>(instr); return true;
+    case 0x0E: fmacSimd<kMsub, 2, true, kFloatMode>(instr); return true;
+    case 0x0F: fmacSimd<kMsub, 3, true, kFloatMode>(instr); return true;
+    case 0x18: fmacSimd<kMul, 0, true, kFloatMode>(instr); return true; // MULAbc
+    case 0x19: fmacSimd<kMul, 1, true, kFloatMode>(instr); return true;
+    case 0x1A: fmacSimd<kMul, 2, true, kFloatMode>(instr); return true;
+    case 0x1B: fmacSimd<kMul, 3, true, kFloatMode>(instr); return true;
+    case 0x1C: fmacSimd<kMul, kQ, true, kFloatMode>(instr); return true;  // MULAq
+    case 0x1E: fmacSimd<kMul, kI, true, kFloatMode>(instr); return true;  // MULAi
+    case 0x20: fmacSimd<kAdd, kQ, true, kFloatMode>(instr); return true;  // ADDAq
+    case 0x21: fmacSimd<kMadd, kQ, true, kFloatMode>(instr); return true; // MADDAq
+    case 0x22: fmacSimd<kAdd, kI, true, kFloatMode>(instr); return true;  // ADDAi
+    case 0x23: fmacSimd<kMadd, kI, true, kFloatMode>(instr); return true; // MADDAi
+    case 0x24: fmacSimd<kSub, kQ, true, kFloatMode>(instr); return true;  // SUBAq
+    case 0x25: fmacSimd<kMsub, kQ, true, kFloatMode>(instr); return true; // MSUBAq
+    case 0x26: fmacSimd<kSub, kI, true, kFloatMode>(instr); return true;  // SUBAi
+    case 0x27: fmacSimd<kMsub, kI, true, kFloatMode>(instr); return true; // MSUBAi
+    case 0x28: fmacSimd<kAdd, kVec, true, kFloatMode>(instr); return true;  // ADDA
+    case 0x29: fmacSimd<kMadd, kVec, true, kFloatMode>(instr); return true; // MADDA
+    case 0x2A: fmacSimd<kMul, kVec, true, kFloatMode>(instr); return true;  // MULA
+    case 0x2C: fmacSimd<kSub, kVec, true, kFloatMode>(instr); return true;  // SUBA
+    case 0x2D: fmacSimd<kMsub, kVec, true, kFloatMode>(instr); return true; // MSUBA
+    case 0x2E: fmacSimd<kOpmula, kCross, true, kFloatMode>(instr); return true; // OPMULA
     default: return false;
     }
 }

@@ -250,12 +250,18 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
            "    using D = VU1::DecodedInstructionPair;\n"
            "    using U = VU1::InstructionUsage;\n"
            "    using P = VU1::Pipeline;\n"
-           "    static const VU1::RecompPairFn kPairs[" << pairCount << "];\n"
+           "    static const VU1::RecompPairFn kPairs[" << pairCount << "];\n";
+    if (!vu0)
+        out << "    static const VU1::RecompPairFn kPairsNative[" << pairCount << "];\n";
+    out <<
            "    // Chain to the next pair's function (tail call) while run()'s loop\n"
            "    // header would let it issue; otherwise return to run().\n"
-           "    static bool next(VU1 &vu, VU1::RunContext &c)\n    {\n"
+        << (vu0 ? "" : "    template <bool kNative>\n")
+        << "    static bool next(VU1 &vu, VU1::RunContext &c)\n    {\n"
            "        if (!vu.recompChainReady(c))\n            return false;\n"
-           "        const VU1::RecompPairFn fn = kPairs[vu.m_state.pc >> 3];\n"
+        << (vu0 ? "        const VU1::RecompPairFn fn = kPairs[vu.m_state.pc >> 3];\n"
+                : "        const VU1::RecompPairFn fn = (kNative ? kPairsNative : kPairs)[vu.m_state.pc >> 3];\n")
+        <<
            "        if (fn == nullptr)\n            return false;\n"
            "        PS2X_VU1_MUSTTAIL return fn(vu, c);\n    }\n";
     std::vector<bool> emitted(pairCount, false);
@@ -301,30 +307,36 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
             << unsigned(d.upperVfShadowReg) << "," << unsigned(d.suppressedLowerVf) << "};\n";
         // VR2 2D: pair functions are reached through the table or a tail call;
         // noinline keeps a leader's from being merged into its block trampoline.
+        if (!vu0)
+            out << "    template <bool kNative>\n";
         out << "    PS2X_VU1_NOINLINE static bool f" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n"
-            << "        if (vu.issuePair<true" << codeSizeArgs << ">(d" << label << ", c))\n            return true;\n"
+            << "        if (vu.issuePair<true" << (vu0 ? codeSizeArgs : ", -1, false, 0x4000u, false, (kNative ? 1 : 0)")
+            << ">(d" << label << ", c))\n            return true;\n"
             // F4-2b: the handoff must be a *guaranteed* tail call (like next()'s
             // table call above). A plain return here nests one frame per pair
             // and overflows small stacks (Odin S1: 512 nested f-frames).
-            << "        PS2X_VU1_MUSTTAIL return next(vu, c);\n    }\n";
+            << "        PS2X_VU1_MUSTTAIL return next" << (vu0 ? "" : "<kNative>") << "(vu, c);\n    }\n";
     }
     // VR2 stage 4: one function per block leader. Guard fails -> the leader's
     // pair function; otherwise the pairs run back to back (a pair that ends
     // the program returns true, a stop request returns to run()).
     std::vector<bool> blockAt(pairCount, false);
+    for (const RecompBlockPlan &block : blocks)
+        blockAt[block.start] = true;
     uint32_t blockPairs = 0u, noStallPairs = 0u, plainTailPairs = 0u;
     for (const RecompBlockPlan &block : blocks)
     {
         char label[16];
         std::snprintf(label, sizeof(label), "%04x", block.start * 8u);
-        blockAt[block.start] = true;
         // VR2 2D: b<pc> is a frameless trampoline (guard, then a tail call to
         // the leader's pair function or to the out-of-line body B<pc>), so a
         // failed guard (knob off) costs no frame setup.
-        out << "    static bool b" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n"
+        out << "    template <bool kNative>\n"
+            << "    static bool b" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n"
             << "        if (!vu.recompBlockReady(c, " << block.maxCycles << "u, " << block.pairs.size() << "u))\n"
-            << "            PS2X_VU1_MUSTTAIL return f" << label << "(vu, c);\n"
-            << "        PS2X_VU1_MUSTTAIL return B" << label << "(vu, c);\n    }\n"
+            << "            PS2X_VU1_MUSTTAIL return f" << label << "<kNative>(vu, c);\n"
+            << "        PS2X_VU1_MUSTTAIL return B" << label << "<kNative>(vu, c);\n    }\n"
+            << "    template <bool kNative>\n"
             << "    PS2X_VU1_NOINLINE static bool B" << label << "(VU1 &vu, VU1::RunContext &c)\n    {\n";
         for (size_t k = 0; k < block.pairs.size(); ++k)
         {
@@ -333,36 +345,55 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
             out << "        if (vu.issuePair<true, " << unsigned(directMap[block.pairs[k]]) << ", "
                 << (block.noStall[k] != 0u);
             if (block.plainTail[k] != 0u)
-                out << ", 0x4000u, true>(d" << pairLabel << ", c, 0x" << std::hex
+                out << ", 0x4000u, true, (kNative ? 1 : 0)>(d" << pairLabel << ", c, 0x" << std::hex
                     << ((block.pairs[k] * 8u + 8u) & (kRecompCodeSize - 1u)) << std::dec << "u))\n            return true;\n";
             else
-                out << ">(d" << pairLabel << ", c))\n            return true;\n";
+                out << ", 0x4000u, false, (kNative ? 1 : 0)>(d" << pairLabel << ", c))\n            return true;\n";
             plainTailPairs += block.plainTail[k] != 0u ? 1u : 0u;
             if (k + 1u < block.pairs.size())
                 out << "        if (vu.m_stopRequested)\n            return false;\n";
             ++blockPairs;
             noStallPairs += block.noStall[k] != 0u ? 1u : 0u;
         }
-        out << "        PS2X_VU1_MUSTTAIL return next(vu, c);\n    }\n";
+        const uint32_t nextIndex = (block.pairs.back() + 1u) & (pairCount - 1u);
+        if (block.plainTail.back() != 0u && emitted[nextIndex])
+        {
+            char nextLabel[16];
+            std::snprintf(nextLabel, sizeof(nextLabel), "%04x", nextIndex * 8u);
+            out << "        if (!vu.recompChainReady(c))\n            return false;\n"
+                << "        PS2X_VU1_MUSTTAIL return " << (blockAt[nextIndex] ? 'b' : 'f')
+                << nextLabel << "<kNative>(vu, c);\n    }\n";
+        }
+        else
+            out << "        PS2X_VU1_MUSTTAIL return next<kNative>(vu, c);\n    }\n";
     }
     out << "};\n\n// VR2 stage 4: " << blocks.size() << " blocks, " << blockPairs << " block pairs, "
         << noStallPairs << " without a scoreboard read, " << plainTailPairs << " with a plain tail\n";
-    out << "const VU1::RecompPairFn " << image << "<" << hashText << ">::kPairs[" << pairCount << "] = {\n";
-    for (uint32_t index = 0; index < pairCount; ++index)
+    for (unsigned mode = 0; mode < (vu0 ? 1u : 2u); ++mode)
     {
-        char label[16];
-        std::snprintf(label, sizeof(label), "%04x", index * 8u);
-        out << "        "
-            << (!emitted[index] ? std::string("nullptr")
-                : std::string("&") + image + "<" + hashText + ">::" + (blockAt[index] ? "b" : "f") + label)
-            << ",\n";
+        out << "const VU1::RecompPairFn " << image << "<" << hashText << ">::"
+            << (mode == 0u ? "kPairs" : "kPairsNative") << "[" << pairCount << "] = {\n";
+        for (uint32_t index = 0; index < pairCount; ++index)
+        {
+            char label[16];
+            std::snprintf(label, sizeof(label), "%04x", index * 8u);
+            out << "        "
+                << (!emitted[index] ? std::string("nullptr")
+                    : std::string("&") + image + "<" + hashText + ">::" + (blockAt[index] ? "b" : "f") + label
+                    + (vu0 ? "" : (mode == 0u ? "<false>" : "<true>")))
+                << ",\n";
+        }
+        out << "};\n\n";
     }
-    out << "};\n\nnamespace\n{\n    const bool kRegistered = []\n    {\n"
+    out << "namespace\n{\n    const bool kRegistered = []\n    {\n"
            "        VU1::RecompProgram program;\n"
            "        program.hash = " << hashText << ";\n"
            "        program.codeSize = " << codeSize << "u;\n"
            "        program.pairCount = " << pairCount << "u;\n"
-           "        program.pairs = " << image << "<" << hashText << ">::kPairs;\n"
+           "        program.pairs = " << image << "<" << hashText << ">::kPairs;\n";
+    if (!vu0)
+        out << "        program.nativePairs = " << image << "<" << hashText << ">::kPairsNative;\n";
+    out <<
            "        VU1::registerRecompProgram(program);\n"
            "        return true;\n    }();\n}\n";
 

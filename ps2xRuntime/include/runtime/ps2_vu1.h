@@ -139,6 +139,7 @@ public:
         uint32_t codeSize = 0;
         uint32_t pairCount = 0;
         const RecompPairFn *pairs = nullptr;
+        const RecompPairFn *nativePairs = nullptr; // VU1 only; exact remains the default
     };
     static void registerRecompProgram(const RecompProgram &program);
     // Writes the generated C++ for one code image (every pair that decodes
@@ -452,7 +453,7 @@ private:
     // (a constant argument, folded when inlined; a template argument would
     // instantiate issuePair once per block pair).
     template <bool kStatic, int kBlockMap = -1, bool kNoStall = false, uint32_t kCodeSize = 0x4000u,
-              bool kPlainTail = false>
+              bool kPlainTail = false, int kFloatMode = -1>
     bool issuePair(const DecodedInstructionPair &decoded, RunContext &ctx, uint32_t plainNextPc = 0u);
     // VR1: the run() loop header between two generated pairs (VR2: the stop
     // request; see step_impl). True when the next pair may issue from
@@ -567,14 +568,17 @@ private:
     // VR1: the executor bodies (ps2_vu1_{upper,lower}_impl.h), always inlined.
     // (The always-inline attribute sits on the member template declarations:
     // on the out-of-class definition alone it does not reach instantiations.)
-    template <bool kSimd = (PS2X_VU1_FMAC_SIMD != 0)>
+    // kFloatMode: -1 = runtime choice (interpreter/old images), 0 = exact,
+    // 1 = PCSX2 native math selected once when a generated VU1 image binds.
+    template <bool kSimd = (PS2X_VU1_FMAC_SIMD != 0), int kFloatMode = -1>
     PS2X_VU1_ALWAYS_INLINE void execUpperImpl(uint32_t instr);
 #if PS2X_VU1_FMAC_SIMD_AVAILABLE
     // VR4 D1: vector FMAC core (ps2_vu1_fmac_simd.h). fmacSimdDispatch runs
     // the upper ops that end in applyFmacDest/applyFmacDestAcc and returns
     // false for every other op (the scalar code handles those).
+    template <int kFloatMode = -1>
     PS2X_VU1_ALWAYS_INLINE bool fmacSimdDispatch(uint32_t instr);
-    template <int kArith, int kSrc, bool kAcc>
+    template <int kArith, int kSrc, bool kAcc, int kFloatMode = -1>
     PS2X_VU1_ALWAYS_INLINE void fmacSimd(uint32_t instr);
     template <int kArith, int kSrc, bool kAcc>
     PS2X_VU1_ALWAYS_INLINE void fmacPcsx2(uint32_t instr);
