@@ -1,7 +1,9 @@
 // Based on Blackline Interactive implementation
 #include "ps2_rr1_alpha_tap.h"
 #include "runtime/ps2_memory.h"
+#include <bit>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include "ps2_e7.h"
@@ -125,6 +127,37 @@ enum VIFCmd : uint8_t
 
 namespace
 {
+    // VS1: bulk UNPACK fast path, default on. PS2X_VIF_FAST_UNPACK=0 restores
+    // the generic per-vector loop for every UNPACK (bisection lever).
+    bool vifFastUnpackEnabled()
+    {
+        static const bool on = [] {
+            if (const char *env = std::getenv("PS2X_VIF_FAST_UNPACK"))
+                return env[0] == '1' && env[1] == '\0';
+            return true;
+        }();
+        return on;
+    }
+
+    // VS1: true when a masked UNPACK selects source data on every lane of
+    // every cycle position the WL window uses, i.e. the mask is a no-op and
+    // the generic loop would store the decompressed vector verbatim. Mirrors
+    // the generic maskSpec computation exactly (maskCycle caps at 3).
+    bool vifUnpackMaskAllData(uint32_t mask, uint32_t wl)
+    {
+        for (uint32_t c = 0u; c < wl; ++c)
+        {
+            const uint32_t maskCycle = (c > 3u) ? 3u : c;
+            for (uint32_t f = 0u; f < 4u; ++f)
+            {
+                const uint32_t shift = ((maskCycle * 4u) + f) * 2u;
+                if (((mask >> shift) & 0x3u) != 0u)
+                    return false;
+            }
+        }
+        return true;
+    }
+
     constexpr uint8_t kGifFmtImage = 2u;
 
     uint32_t pendingGifImageQwc(const uint8_t *data, uint32_t sizeBytes)
@@ -890,21 +923,60 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                                   (vif1_regs.cycle >> 8) & 0xFFu,
                                   (imm & 0x8000u) != 0u, num);
 
-            if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
+            // VS1: bulk fast path for the common V4_32 stream case (UV1: 31% of
+            // UNPACK commands; the per-vector loop below is ~0.6 ms/frame on
+            // the Odin MTVU thread). V4_32 writes all four lanes from source,
+            // mode 0 adds nothing, cl==wl makes source available every cycle
+            // with a contiguous destination, and an all-data mask selects
+            // source on every lane. Anything else (fills, skips, masked
+            // fills/protects, VP2 lane tracking) keeps the generic loop.
+            // VP2: lanes written while a VU1 run is in flight (its commit keeps them).
+            uint64_t *const unpackWaw = ps2_vu1_engine::wawMask();
+            const bool unpackBulk =
+                vifFastUnpackEnabled() && vl == 0u && vn == 3u &&
+                (vif1_regs.mode & 3u) == 0u && cl == wl && m_vu1Data != nullptr &&
+                totalBytes > 0u && pos + totalBytes <= sizeBytes &&
+                unpackWaw == nullptr &&
+                (!maskEnable || vifUnpackMaskAllData(vif1_regs.mask, wl));
+            if (unpackBulk)
+            {
+                const uint8_t *bulkSrc = data + pos;
+                const uint32_t firstRun = 0x400u - vuAddr;
+                const uint32_t bulkFirst =
+                    (writeVectorCount < firstRun) ? writeVectorCount : firstRun;
+                std::memcpy(m_vu1Data + static_cast<size_t>(vuAddr) * 16u, bulkSrc,
+                            static_cast<size_t>(bulkFirst) * 16u);
+                if (writeVectorCount > bulkFirst)
+                {
+                    std::memcpy(m_vu1Data, bulkSrc + static_cast<size_t>(bulkFirst) * 16u,
+                                static_cast<size_t>(writeVectorCount - bulkFirst) * 16u);
+                }
+            }
+            else if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;
                 uint32_t srcIndex = 0u;
-                // VP2: lanes written while a VU1 run is in flight (its commit keeps them).
-                uint64_t *waw = ps2_vu1_engine::wawMask();
+                uint64_t *waw = unpackWaw;
+                // VS1: strength-reduce the per-vector cycle division. Observed
+                // (cl,wl) pairs are 1x1/3x1/4x4 (UV1); every power-of-two WL
+                // reduces exactly, anything else keeps the generic division.
+                const bool wlPow2 = (wl & (wl - 1u)) == 0u;
+                const uint32_t wlShift =
+                    wlPow2 ? static_cast<uint32_t>(std::countr_zero(wl)) : 0u;
+                const uint32_t wlMask = wl - 1u;
+                const bool clGeWl = (cl >= wl);
                 for (uint32_t writeIndex = 0; writeIndex < writeVectorCount; ++writeIndex)
                 {
-                    const uint32_t cyclePos = writeIndex % wl;
-                    const bool sourceAvailable = (cl >= wl) || (cyclePos < cl);
+                    const uint32_t cyclePos =
+                        wlPow2 ? (writeIndex & wlMask) : (writeIndex % wl);
+                    const bool sourceAvailable = clGeWl || (cyclePos < cl);
 
                     uint32_t destVec = 0;
-                    if (cl >= wl)
+                    if (clGeWl)
                     {
-                        destVec = (vuAddr + (writeIndex / wl) * cl + cyclePos) & 0x3FFu;
+                        const uint32_t wlGroup =
+                            wlPow2 ? (writeIndex >> wlShift) : (writeIndex / wl);
+                        destVec = (vuAddr + wlGroup * cl + cyclePos) & 0x3FFu;
                     }
                     else
                     {

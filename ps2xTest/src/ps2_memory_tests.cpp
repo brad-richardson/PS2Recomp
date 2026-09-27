@@ -450,6 +450,173 @@ void register_ps2_memory_tests()
             t.IsTrue(matches, "UNPACK num=0 should copy 256 V4_32 vectors (4096 bytes)");
         });
 
+        tc.Run("VIF FAST_UNPACK V4_32 bulk wraps at VU end", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xCC, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V4-32, NUM=4, addr=0x3FE => vecs 0x3FE, 0x3FF, 0, 1.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Cu, 4u, 0x03FEu));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                appendU32(packet, 0x10000000u + i);
+            }
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            bool matches = true;
+            const uint32_t vecs[4] = {0x3FEu, 0x3FFu, 0u, 1u};
+            for (uint32_t v = 0; v < 4u && matches; ++v)
+            {
+                for (uint32_t c = 0; c < 4u; ++c)
+                {
+                    uint32_t got = 0u;
+                    std::memcpy(&got, vu + vecs[v] * 16u + c * 4u, 4u);
+                    if (got != 0x10000000u + v * 4u + c)
+                    {
+                        matches = false;
+                        break;
+                    }
+                }
+            }
+            t.IsTrue(matches, "bulk path should wrap the destination at vector 0x400");
+            uint32_t neighbor = 0u;
+            std::memcpy(&neighbor, vu + 2u * 16u, 4u);
+            t.Equals(neighbor, 0xCCCCCCCCu, "vector past the wrapped run stays untouched");
+        });
+
+        tc.Run("VIF FAST_UNPACK honors TOPS-relative destination", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            mem.vif1_regs.tops = 0x3FFu;
+
+            // UNPACK V4-32, NUM=2, addr=0 +TOPS => vecs 0x3FF, 0.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Cu, 2u, 0x8000u));
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                appendU32(packet, 0x20000000u + i);
+            }
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            uint32_t first = 0u, wrapped = 0u;
+            std::memcpy(&first, vu + 0x3FFu * 16u, 4u);
+            std::memcpy(&wrapped, vu + 0u, 4u);
+            t.Equals(first, 0x20000000u, "TOPS-relative first vector");
+            t.Equals(wrapped, 0x20000004u, "TOPS-relative run wraps to vector 0");
+        });
+
+        tc.Run("VIF FAST_UNPACK treats all-data mask as bulk", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x20u, 0u, 0u)); // STMASK
+            appendU32(packet, 0x00000000u);              // every selector = data
+            appendU32(packet, makeVifCmd(0x7Cu, 2u, 0u)); // UNPACK V4-32, mask enable
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                appendU32(packet, 0x30000000u + i);
+            }
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            bool matches = true;
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                uint32_t got = 0u;
+                std::memcpy(&got, vu + i * 4u, 4u);
+                if (got != 0x30000000u + i)
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            t.IsTrue(matches, "all-data mask should store source bytes verbatim");
+        });
+
+        tc.Run("VIF masked UNPACK row fill stays exact under cycle diet", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x20u, 0u, 0u)); // STMASK
+            appendU32(packet, 0x55555555u);              // every selector = row
+            appendU32(packet, makeVifCmd(0x30u, 0u, 0u)); // STROW
+            appendU32(packet, 0xAAAA0001u);
+            appendU32(packet, 0xAAAA0002u);
+            appendU32(packet, 0xAAAA0003u);
+            appendU32(packet, 0xAAAA0004u);
+            appendU32(packet, makeVifCmd(0x7Cu, 2u, 0u)); // UNPACK V4-32, mask enable
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                appendU32(packet, 0x40000000u + i);
+            }
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            bool matches = true;
+            for (uint32_t v = 0; v < 2u && matches; ++v)
+            {
+                for (uint32_t c = 0; c < 4u; ++c)
+                {
+                    uint32_t got = 0u;
+                    std::memcpy(&got, vu + v * 16u + c * 4u, 4u);
+                    if (got != 0xAAAA0001u + c)
+                    {
+                        matches = false;
+                        break;
+                    }
+                }
+            }
+            t.IsTrue(matches, "row-fill mask should ignore source on every lane");
+        });
+
+        tc.Run("VIF 4x4 UNPACK with full protect mask leaves memory untouched", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xCC, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x01u, 0u, 0x0404u)); // STCYCL 4x4
+            appendU32(packet, makeVifCmd(0x20u, 0u, 0u));      // STMASK
+            appendU32(packet, 0xFFFFFFFFu);                   // every selector = protect
+            appendU32(packet, makeVifCmd(0x7Cu, 4u, 0u));      // UNPACK V4-32, mask enable
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                appendU32(packet, 0x50000000u + i);
+            }
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            bool untouched = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (vu[i] != 0xCCu)
+                {
+                    untouched = false;
+                    break;
+                }
+            }
+            t.IsTrue(untouched, "protect mask on 4x4 should write nothing");
+        });
+
         tc.Run("VIF control commands update MARK MASK ROW and COL registers", [](TestCase &t)
         {
             PS2Memory mem;
