@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -63,7 +64,18 @@ namespace
         // Active + resampled pull state.
         std::vector<uint32_t> stQueue;
         size_t stQueuePos = 0;
+        // AU12 per-callback stretch trace (PS2X_STRETCH_TRACE, dev-only):
+        // t_ms,fill,smooth,bypass,tempo. Bounded; transitions also go to
+        // stderr while tracing (capped separately).
+        std::FILE *traceFile = nullptr;
+        uint64_t traceLines = 0;
+        bool traceTrCapped = false;
+        uint64_t traceTrLines = 0;
+        bool traceLastBypass = true;
+        std::chrono::steady_clock::time_point traceT0{};
     } g_output;
+    constexpr uint64_t kTraceLineCap = 131072u; // ~21 min at 100 callbacks/s
+    constexpr uint64_t kTraceTrCap = 8192u;
 
     int16_t unpackLeft(uint32_t frame) { return static_cast<int16_t>(frame & 0xffffu); }
     int16_t unpackRight(uint32_t frame) { return static_cast<int16_t>(frame >> 16); }
@@ -238,6 +250,46 @@ namespace
         return true;
     }
 
+    void traceStretch(const std::chrono::steady_clock::time_point &now, uint64_t fill,
+                      const ps2_audio_stretch::StepResult &step)
+    {
+        if (g_output.traceT0 == std::chrono::steady_clock::time_point{})
+        {
+            g_output.traceT0 = now;
+            g_output.traceLastBypass = true;
+        }
+        const double tMs =
+            std::chrono::duration<double, std::milli>(now - g_output.traceT0).count();
+        if (step.bypass != g_output.traceLastBypass)
+        {
+            g_output.traceLastBypass = step.bypass;
+            if (g_output.traceTrLines < kTraceTrCap)
+            {
+                std::cerr << "[snd-stretch-tr] t=" << tMs << "ms "
+                          << (step.bypass ? "rejoin" : "engage")
+                          << " smooth=" << g_output.controller.smoothedTempo() << " fill=" << fill
+                          << '\n';
+                g_output.traceTrLines += 1u;
+            }
+            else if (!g_output.traceTrCapped)
+            {
+                std::cerr << "[snd-stretch-tr] (capped)\n";
+                g_output.traceTrCapped = true;
+            }
+        }
+        if (g_output.traceLines < kTraceLineCap)
+        {
+            std::fprintf(g_output.traceFile, "%.3f,%llu,%.6f,%d,%.6f\n", tMs,
+                         static_cast<unsigned long long>(fill),
+                         static_cast<double>(g_output.controller.smoothedTempo()),
+                         step.bypass ? 1 : 0, static_cast<double>(step.tempo));
+            g_output.traceLines += 1u;
+            // The wall-capped boot harness terminates the runner with
+            // SIGTERM; keep the on-disk trace valid for that path.
+            std::fflush(g_output.traceFile);
+        }
+    }
+
     void stretchStats(const std::chrono::steady_clock::time_point &now)
     {
         if (g_output.stretchStatsAt == std::chrono::steady_clock::time_point{})
@@ -250,7 +302,8 @@ namespace
         std::cerr << "[snd-stretch] underruns=" << ps2_snd_spike::pcmRing().underruns()
                   << " overflows=" << ps2_snd_spike::pcmRing().overflows()
                   << " tempo min=" << st.minTempo << " mean=" << mean << " max=" << st.maxTempo
-                  << " bypass=" << bypassPct << "% callbacks=" << st.callbacks << '\n';
+                  << " bypass=" << bypassPct << "% engages=" << st.engages
+                  << " callbacks=" << st.callbacks << '\n';
         g_output.controller.resetStats();
         g_output.stretchStatsAt = now;
     }
@@ -267,6 +320,8 @@ namespace
         const uint64_t fill = ps2_snd_spike::pcmRing().size();
         const ps2_audio_stretch::StepResult step = g_output.controller.update(fill, dt);
         g_output.st->setTempo(static_cast<double>(g_output.controller.smoothedTempo()));
+        if (g_output.traceFile != nullptr)
+            traceStretch(now, fill, step);
 
         // Source-rate frames for this callback (pre-resample).
         g_output.srcBuf.resize(static_cast<size_t>(frames) * 2u);
@@ -503,6 +558,10 @@ bool initialize()
         std::cerr << "[snd-output] stretch=off (PS2X_AUDIO_STRETCH=0)\n";
     if (g_output.stretch)
     {
+        const ps2_audio_stretch::Params params = ps2_audio_stretch::paramsFromEnv(
+            std::getenv("PS2X_STRETCH_LEGACY"), std::getenv("PS2X_STRETCH_LEAVE"),
+            std::getenv("PS2X_STRETCH_SUSTAIN_MS"), std::getenv("PS2X_STRETCH_REJOIN_MS"));
+        g_output.controller = ps2_audio_stretch::StretchController(params);
         g_output.st = std::make_unique<soundtouch::SoundTouch>();
         g_output.st->setSampleRate(kSourceRate);
         g_output.st->setChannels(2);
@@ -514,8 +573,23 @@ bool initialize()
         g_output.st->setTempo(1.0);
         std::cerr << "[snd-output] stretch=on (SoundTouch " << soundtouch::SoundTouch::getVersionString()
                   << ", target=" << ps2_audio_stretch::kTargetLatencyMs << "ms tempo=["
-                  << ps2_audio_stretch::kTempoMin << "," << ps2_audio_stretch::kTempoMax
-                  << "] passband=+/-2%)\n";
+                  << ps2_audio_stretch::kTempoMin << "," << ps2_audio_stretch::kTempoMax << "] "
+                  << (params.legacy ? "legacy AT1" : "sustained-deficit") << " leave=+/-"
+                  << params.leave * 100.0 << "%/" << params.sustainS * 1000.0 << "ms rejoin=+/-"
+                  << params.rejoin * 100.0 << "%/" << params.rejoinS * 1000.0 << "ms)\n";
+        const char *tracePath = std::getenv("PS2X_STRETCH_TRACE");
+        if (tracePath != nullptr && *tracePath != '\0')
+        {
+            g_output.traceFile = std::fopen(tracePath, "w");
+            if (g_output.traceFile != nullptr)
+            {
+                std::fprintf(g_output.traceFile, "# t_ms,fill,smooth,bypass,tempo\n");
+                std::fflush(g_output.traceFile);
+                std::cerr << "[snd-output] stretch-trace=" << tracePath << '\n';
+            }
+            else
+                std::cerr << "[snd-output] failed opening stretch trace: " << tracePath << '\n';
+        }
     }
     SetAudioStreamCallback(g_output.stream, audioCallback);
     openWav(g_output.wav, std::getenv("PS2X_SOUND_WAV"),
@@ -536,6 +610,12 @@ void shutdown()
         g_output.ready = false;
     }
     g_output.st.reset();
+    if (g_output.traceFile != nullptr)
+    {
+        std::fclose(g_output.traceFile);
+        std::cerr << "[snd-output] stretch-trace lines=" << g_output.traceLines << '\n';
+        g_output.traceFile = nullptr;
+    }
     saveWav(g_output.wav, g_output.stretch ? kSourceRate : g_output.rate);
     saveWav(g_output.postWav, g_output.rate);
 }

@@ -15,15 +15,27 @@
 //   smooth = asymmetric EMA of raw over wall time (fast on drops, slow on
 //            rises: a draining ring threatens underrun, a filling one is
 //            absorbed by ring capacity)
-//   bypass while smooth is within +/-2 % of 1.0 (hysteresis: re-enter
-//   inside +/-1 %), so full speed sounds exactly as today: the callback
-//   then copies ring frames straight through and the stretcher output is
-//   discarded. The stretcher still ingests a copy so engaging is seamless.
+//   AU12: engage only on a SUSTAINED deficit: smooth must stay outside
+//   +/-3.5 % of 1.0 continuously for >= 300 ms (brief: the AT1 immediate
+//   +/-2 % engage cycled audibly — WSOLA overlap at ~10-30 ms lags sounds
+//   like a short echo — on the Odin's +/-3 % fill wander at full speed).
+//   Rejoin after >= 1 s continuously inside +/-1 %, so recovery doesn't
+//   flutter. A sustained 0.8x slowdown still engages within ~0.5 s (the
+//   80 ms target buffer covers the 300 ms sustain: it drains in 400 ms).
+//   Bypass plays ring frames straight through (bit-exact) while the
+//   stretcher ingests a copy so engaging is seamless; its output is
+//   discarded in bypass.
 //   Engagement is fill-agnostic on purpose: gating it on a prime level
 //   traps the controller in bypass exactly when the ring runs dry (a guest
 //   deficit with an empty ring would stutter until a lucky burst crosses
 //   the gate). At startup the ring is empty either way, so engaging there
 //   pads identically to bypass and converges faster once production starts.
+//
+// PS2X_STRETCH_LEGACY=1 restores the AT1 behavior (immediate engage outside
+// +/-2 %, immediate rejoin inside +/-1 %): it is the same code path with
+// sustain/rejoin dwells of 0. Dev-only escape hatch + the "today" reference
+// for A/B legs. PS2X_STRETCH_LEAVE / _SUSTAIN_MS / _REJOIN_MS override the
+// AU12 band and dwells (dev-only tuning; invalid values keep defaults).
 //
 // No sqrt() dampening (PCSX2 has it): with the FP1 wall pacer the guest
 // rate is exactly <= 1.0, so linear control settles at fill = rate*target
@@ -33,6 +45,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 namespace ps2_audio_stretch
@@ -43,16 +56,71 @@ constexpr uint32_t kTargetLatencyMs = 80u; // in the brief's 60-100 ms band
 constexpr uint32_t kTargetFrames = kSourceRate * kTargetLatencyMs / 1000u;
 constexpr float kTempoMin = 0.5f;
 constexpr float kTempoMax = 1.05f;
-constexpr float kBypassLeave = 0.02f;  // engage outside +/-2 % of 1.0
-constexpr float kBypassRejoin = 0.01f; // release inside +/-1 % of 1.0
-constexpr double kTauDownS = 0.05;      // EMA time constant on drops
-constexpr double kTauUpS = 0.30;        // EMA time constant on rises
+// AT1 legacy band (PS2X_STRETCH_LEGACY=1): immediate engage/rejoin.
+constexpr float kLegacyLeave = 0.02f;  // engage outside +/-2 % of 1.0
+constexpr float kLegacyRejoin = 0.01f; // release inside +/-1 % of 1.0
+// AU12 sustained-deficit band (default): engage/rejoin need dwells.
+constexpr float kLeaveDefault = 0.035f;   // engage outside +/-3.5 %
+constexpr float kRejoinDefault = 0.01f;   // rejoin inside +/-1 %
+constexpr double kSustainDefaultS = 0.30; // continuous outside-band time
+constexpr double kRejoinDefaultS = 1.0;   // continuous inside-band time
+constexpr double kTauDownS = 0.05;        // EMA time constant on drops
+constexpr double kTauUpS = 0.30;          // EMA time constant on rises
 
 // PS2X_AUDIO_STRETCH: default on (Brad 09-26, after the C1 listen);
 // the exact value "0" disables (legacy direct path, byte-identical output).
 inline bool stretchEnabledFromEnv(const char *value)
 {
     return value == nullptr || std::strcmp(value, "0") != 0;
+}
+
+struct Params
+{
+    bool legacy = false;
+    float leave = kLeaveDefault;
+    float rejoin = kRejoinDefault;
+    double sustainS = kSustainDefaultS;
+    double rejoinS = kRejoinDefaultS;
+};
+
+namespace detail
+{
+inline bool parseDouble(const char *text, double &out)
+{
+    if (text == nullptr || *text == '\0')
+        return false;
+    char *end = nullptr;
+    const double v = std::strtod(text, &end);
+    if (end == text || *end != '\0' || !std::isfinite(v))
+        return false;
+    out = v;
+    return true;
+}
+} // namespace detail
+
+// Pure env parsing (each arg is the getenv() result for the named knob;
+// nullptr = unset). Invalid values keep the compiled default.
+inline Params paramsFromEnv(const char *legacy, const char *leave, const char *sustainMs,
+                            const char *rejoinMs)
+{
+    Params p;
+    if (legacy != nullptr && std::strcmp(legacy, "1") == 0)
+    {
+        p.legacy = true;
+        p.leave = kLegacyLeave;
+        p.rejoin = kLegacyRejoin;
+        p.sustainS = 0.0;
+        p.rejoinS = 0.0;
+        return p;
+    }
+    double v = 0.0;
+    if (detail::parseDouble(leave, v))
+        p.leave = std::clamp(static_cast<float>(v), 0.005f, 0.15f);
+    if (detail::parseDouble(sustainMs, v))
+        p.sustainS = std::clamp(v / 1000.0, 0.0, 2.0);
+    if (detail::parseDouble(rejoinMs, v))
+        p.rejoinS = std::clamp(v / 1000.0, 0.0, 5.0);
+    return p;
 }
 
 struct StepResult
@@ -65,6 +133,7 @@ struct WindowStats
 {
     uint64_t callbacks = 0;
     uint64_t bypassed = 0;
+    uint64_t engages = 0; // bypass->engaged transitions (flutter counter)
     float minTempo = 1.0f;
     float maxTempo = 1.0f;
     double sumTempo = 0.0;
@@ -74,10 +143,11 @@ class StretchController
 {
 public:
     StretchController() = default;
+    explicit StretchController(const Params &params) : m_params(params) {}
 
     // One host-audio callback step. fillFrames is the ring depth BEFORE this
     // callback drains it; dtWallS is wall seconds since the previous step
-    // (<= 0 on the first step: adopt raw immediately).
+    // (<= 0 on the first step: adopt raw immediately, no dwell accrues).
     StepResult update(uint64_t fillFrames, double dtWallS)
     {
         const float raw = std::clamp(static_cast<float>(fillFrames) / kTargetFrames,
@@ -93,14 +163,39 @@ public:
             const float alpha = static_cast<float>(1.0 - std::exp(-dtWallS / tau));
             m_smooth += (raw - m_smooth) * alpha;
         }
+        const double dtPos = dtWallS > 0.0 ? dtWallS : 0.0;
+        const float dev = std::fabs(m_smooth - 1.0f);
         if (m_bypass)
         {
-            if (std::fabs(m_smooth - 1.0f) > kBypassLeave)
-                m_bypass = false;
+            // Legacy is the same path with sustainS == rejoinS == 0: the
+            // first step outside the band engages (AT1, bit for bit).
+            if (dev > m_params.leave)
+            {
+                m_outsideS += dtPos;
+                if (m_outsideS >= m_params.sustainS)
+                {
+                    m_bypass = false;
+                    m_insideS = 0.0;
+                    m_stats.engages += 1u;
+                }
+            }
+            else
+            {
+                m_outsideS = 0.0;
+            }
         }
-        else if (std::fabs(m_smooth - 1.0f) < kBypassRejoin)
+        else if (dev < m_params.rejoin)
         {
-            m_bypass = true;
+            m_insideS += dtPos;
+            if (m_insideS >= m_params.rejoinS)
+            {
+                m_bypass = true;
+                m_outsideS = 0.0;
+            }
+        }
+        else
+        {
+            m_insideS = 0.0;
         }
         StepResult out;
         out.tempo = m_bypass ? 1.0f : m_smooth;
@@ -121,13 +216,17 @@ public:
 
     float smoothedTempo() const { return m_smooth; }
     bool bypass() const { return m_bypass; }
+    const Params &params() const { return m_params; }
     const WindowStats &stats() const { return m_stats; }
     void resetStats() { m_stats = WindowStats{}; }
 
 private:
+    Params m_params;
     bool m_init = false;
     float m_smooth = 1.0f;
     bool m_bypass = true;
+    double m_outsideS = 0.0; // continuous wall-s with dev > leave (bypassed)
+    double m_insideS = 0.0;  // continuous wall-s with dev < rejoin (engaged)
     WindowStats m_stats{};
 };
 
