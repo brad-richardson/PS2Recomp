@@ -983,6 +983,7 @@ if(PS2X_IS_IOS)
             "-framework CoreHaptics"
             "-framework CoreBluetooth"
             "-framework ImageIO"
+            "-lz"
         )
         # The 8 PCSX2 Metal shaders: Xcode compiles them into the app's
         # default.metallib (ARMSX2 shape); PCSX2 falls back to
