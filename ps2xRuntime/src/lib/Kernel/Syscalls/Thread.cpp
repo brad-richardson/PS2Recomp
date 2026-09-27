@@ -74,23 +74,29 @@ namespace ps2_syscalls
                                                  bool deleteThread)
         {
             EeScheduler &ee = runtime->eeScheduler();
-            const auto handlers = runtime->takeEeExitHandlers(tid);
             std::vector<GuestInvocation> invocations;
-            invocations.reserve(handlers.size());
-            for (const PS2Runtime::EeExitHandlerRegistration &handler : handlers)
             {
-                if (handler.function == 0u || !runtime->hasFunction(handler.function))
+                // CL1: exitCurrent/invokeCurrentSequence below never return
+                // (longjmp when a transfer is armed), abandoning this frame.
+                // Drop the drained registrations first so no vector buffer
+                // leaks on an ExitThread-with-handlers.
+                const auto handlers = runtime->takeEeExitHandlers(tid);
+                invocations.reserve(handlers.size());
+                for (const PS2Runtime::EeExitHandlerRegistration &handler : handlers)
                 {
-                    continue;
+                    if (handler.function == 0u || !runtime->hasFunction(handler.function))
+                    {
+                        continue;
+                    }
+                    GuestInvocation invocation{};
+                    invocation.kind = GuestInvocationKind::ExitHandler;
+                    invocation.context = *ctx;
+                    invocation.context.pc = handler.function;
+                    SET_GPR_U32(&invocation.context, 4, handler.argument);
+                    SET_GPR_U32(&invocation.context, 29, ee.invocationStackTop());
+                    SET_GPR_U32(&invocation.context, 31, 0u);
+                    invocations.push_back(std::move(invocation));
                 }
-                GuestInvocation invocation{};
-                invocation.kind = GuestInvocationKind::ExitHandler;
-                invocation.context = *ctx;
-                invocation.context.pc = handler.function;
-                SET_GPR_U32(&invocation.context, 4, handler.argument);
-                SET_GPR_U32(&invocation.context, 29, ee.invocationStackTop());
-                SET_GPR_U32(&invocation.context, 31, 0u);
-                invocations.push_back(std::move(invocation));
             }
             if (invocations.empty())
             {

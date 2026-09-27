@@ -1882,10 +1882,10 @@ namespace ps2_stubs
 
         void dispatchGuestNonStreamCallback(uint8_t *rdram,
                                             R5900Context *callerCtx,
-                                            const std::shared_ptr<MpegNonStreamDelivery> &delivery)
+                                            std::shared_ptr<MpegNonStreamDelivery> delivery)
         {
             PS2Runtime *runtime = delivery->runtime;
-            while (!delivery->cancelled && delivery->nextCallback < delivery->callbacks.size())
+            while (delivery && !delivery->cancelled && delivery->nextCallback < delivery->callbacks.size())
             {
                 const MpegRegisteredCallback callback = delivery->callbacks[delivery->nextCallback++];
                 if (callback.func == 0u || !runtime->hasFunction(callback.func))
@@ -1933,6 +1933,14 @@ namespace ps2_stubs
                     dispatchGuestNonStreamCallback(rdram, &parent, delivery);
                     getMpegPicture(rdram, &parent, runtime, false);
                 };
+                // CL1: invokeCurrent never returns (longjmp when a transfer is
+                // armed, throw otherwise), so this frame is abandoned on the
+                // transfer path. The queued invocation's onComplete above owns
+                // the only ref the delivery needs across the transfer; release
+                // ours first so no abandoned shared_ptr leaks (SQ1 P3: one
+                // immortal ~100-200 B shell per input dispatch). No re-acquire
+                // is needed: nothing after this call runs with this frame alive.
+                delivery.reset();
                 runtime->eeScheduler().invokeCurrent(std::move(invocation));
             }
         }
@@ -2669,10 +2677,22 @@ namespace ps2_stubs
             // word0=1. No other non-stream type or trigger is synthesized.
             constexpr uint32_t inputRequestType = 1u;
             const uint64_t key = nonStreamDeliveryKey(mpegAddr, inputRequestType);
-            auto &pending = g_mpeg_stub_state.nonStreamDeliveries[key];
-            delivery = pending.lock();
+            // CL1: entry PRESENCE is the "input already requested" memory, not
+            // refcount survival. Completed deliveries now die once their last
+            // queued invocation finishes (no frame-owned ref survives the
+            // transfer below), but a present entry still suppresses
+            // re-dispatch exactly as the pre-CP4 leaked ref did: without this,
+            // every drought GetPicture would re-request input and change guest
+            // behavior. The erase sites (invalidate/reset/dtor/load) re-arm
+            // the request, as before.
+            const auto pendingIt = g_mpeg_stub_state.nonStreamDeliveries.find(key);
+            const bool alreadyRequested = pendingIt != g_mpeg_stub_state.nonStreamDeliveries.end();
+            if (alreadyRequested)
+            {
+                delivery = pendingIt->second.lock();
+            }
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-            if (requestInput && !delivery && playback.decodedFrames.empty() &&
+            if (requestInput && !alreadyRequested && playback.decodedFrames.empty() &&
                 !g_mpeg_stub_state.currentCdStreamEofSeen && !playback.streamEnded && !playback.decoderFailed)
             {
                 auto callbacks = matchingNonStreamCallbacks(mpegAddr, inputRequestType);
@@ -2683,13 +2703,9 @@ namespace ps2_stubs
                     delivery->mpegAddr = mpegAddr;
                     delivery->type = inputRequestType;
                     delivery->callbacks = std::move(callbacks);
-                    pending = delivery;
+                    g_mpeg_stub_state.nonStreamDeliveries[key] = delivery;
                     dispatchInput = true;
                 }
-            }
-            if (!delivery)
-            {
-                g_mpeg_stub_state.nonStreamDeliveries.erase(key);
             }
         }
         if (dispatchInput)
@@ -2698,7 +2714,10 @@ namespace ps2_stubs
             // under the lock, on the GetPicture caller rather than an RPC thread.
             runtime->eeScheduler().bindMainContextForSyscall(*ctx, rdram);
             delivery->ownerThread = runtime->eeScheduler().currentThreadId();
-            dispatchGuestNonStreamCallback(rdram, ctx, delivery);
+            // CL1: the dispatch transfers (invokeCurrent never returns), so
+            // this frame is abandoned with it. Move our ref in: the queued
+            // invocation owns the only ref across the transfer.
+            dispatchGuestNonStreamCallback(rdram, ctx, std::move(delivery));
         }
         {
             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
@@ -2751,7 +2770,10 @@ namespace ps2_stubs
                     EeWaitReason::Mpeg,
                     kMpegPictureWaitType,
                     mpegAddr,
-                    [rdram, runtime, delivery](R5900Context &resumeContext)
+                    // CL1: no delivery capture (the body never used it); the
+                    // wait abandons this frame on transfer, so nothing owned
+                    // may be held here.
+                    [rdram, runtime](R5900Context &resumeContext)
                     {
                         if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
                         {
@@ -2787,7 +2809,8 @@ namespace ps2_stubs
                     runtime->eeScheduler().waitVSync(
                         eligibleTick - 1u,
                         -1,
-                        [rdram, runtime, delivery](R5900Context &resumeContext)
+                        // CL1: no delivery capture (the body never used it); see above.
+                        [rdram, runtime](R5900Context &resumeContext)
                         {
                             if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
                             {
