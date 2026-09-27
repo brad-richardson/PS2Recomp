@@ -294,8 +294,9 @@ public:
             const uint64_t bits = static_cast<uint64_t>(command.trxreg.rrw) * command.trxreg.rrh *
                                   transferBitsPerPixel(command.bitbltbuf.spsm);
             m_l2hPending = static_cast<uint32_t>((bits + 7u) / 8u);
-            // SQ1: readbacks are rare (one mid-race in SSX 3); log the
-            // lifecycle so a stuck fifo is visible in boot logs.
+            // SQ1: log the readback lifecycle (SSX 3 issues small ones
+            // roughly every 9 ticks mid-race and never drains them, so a
+            // stuck fifo would otherwise be invisible).
             std::fprintf(stderr, "[gs: l2h] begin bytes=%u\n", m_l2hPending);
         }
     }
@@ -541,10 +542,12 @@ public:
     // SS1 save states: VRAM (host mirror after a flush), the raw register,
     // priv and GIF-path state paraLLEl decodes itself. SS3 (v3 tail): the
     // CLUT ring + renderer cursors + the interface palette indices (S2), and
-    // the retained strip/fan vertices (S3). Not captured: SSAA planes
-    // (cleared by the VRAM upload) and in-flight host->local transfers (the
-    // save defers while one is live). The footer lets tests and future tools
-    // find the tail without paraLLEl's struct sizes.
+    // the retained strip/fan vertices (S3). SQ1 (v4 tail): plus the
+    // in-flight transfer state (host->local payload/cursors, local->host
+    // fifo bytes/cursors), so saves land mid-transfer; v3 tails still
+    // load. Not captured: SSAA planes (cleared by the VRAM upload). The
+    // footer lets tests and future tools find the tail without paraLLEl's
+    // struct sizes.
     static constexpr uint32_t kTailMagic = 0x33534750u; // "PGS3" LE
     static constexpr uint32_t kTailMagicV4 = 0x34534750u; // "PGS4" LE (SQ1: + transfer state)
     static constexpr size_t kTailFooterSize = sizeof(uint64_t) + sizeof(uint32_t);
