@@ -4239,24 +4239,54 @@ namespace
     {
         return ((vaddr & 0x1FFFFFFFu) & ~7u) == (PS2_GS_PRIV_REG_BASE + 0x1000u);
     }
-    // GE3 Part 4: bounded one-shot log of guest PCs taking the narrowed
-    // FINISH-only exemption (≤32 unique PCs; observer only, never guest state).
+    // GE3 Part 5b (GT1): bounded one-shot log of guest PCs taking the
+    // narrowed FINISH-only exemption (≤32 unique PCs; observer only, never
+    // guest state). Lock-free fast path: relaxed scan of the recorded set;
+    // the mutex runs only when appending a genuinely new PC.
     inline void ge3NoteFinishOnlyExempt(uint32_t pc)
     {
+        static std::atomic<uint32_t> pcs[32]{};
+        static std::atomic<uint32_t> count{0u};
         static std::mutex mutex;
-        static uint32_t pcs[32]{};
-        static uint32_t count = 0u;
-        std::lock_guard<std::mutex> lock(mutex);
-        for (uint32_t i = 0u; i < count; ++i)
+        uint32_t n = count.load(std::memory_order_relaxed);
+        for (uint32_t i = 0u; i < n && i < 32u; ++i)
         {
-            if (pcs[i] == pc)
+            if (pcs[i].load(std::memory_order_relaxed) == pc)
                 return;
         }
-        if (count < 32u)
+        std::lock_guard<std::mutex> lock(mutex);
+        n = count.load(std::memory_order_relaxed);
+        for (uint32_t i = 0u; i < n && i < 32u; ++i)
         {
-            pcs[count++] = pc;
+            if (pcs[i].load(std::memory_order_relaxed) == pc)
+                return;
+        }
+        if (n < 32u)
+        {
+            pcs[n].store(pc, std::memory_order_relaxed);
+            count.store(n + 1u, std::memory_order_relaxed);
             std::fprintf(stderr, "[gs:finish-only] exempt pc=0x%08x\n", pc);
         }
+    }
+    // GE3 Part 5b (GT1): direct-mapped cache of the finish-only decision per
+    // (pc, vaddr, bytes), so the consumer decode isn't re-run per priv load.
+    // Single-word entries ((ukey << 1) | decision, 0 = invalid) make relaxed
+    // access tear-free; a miss or collision only costs a recompute, never
+    // correctness. Self-modifying the consumer is vanishingly rare and det
+    // validation below covers the shipped tree.
+    inline bool ge3FinishOnlyCached(const uint8_t *rdram, uint32_t pc, uint32_t vaddr, uint32_t bytes)
+    {
+        static constexpr uint32_t kBits = 6u;
+        static constexpr uint32_t kSize = 1u << kBits;
+        static std::atomic<uint64_t> cache[kSize]{};
+        const uint64_t ukey = (static_cast<uint64_t>(pc) << 32) | (vaddr ^ bytes);
+        const uint32_t idx = (pc ^ (vaddr >> 3) ^ bytes) & (kSize - 1u);
+        const uint64_t hit = cache[idx].load(std::memory_order_relaxed);
+        if (hit != 0u && (hit >> 1) == ukey)
+            return (hit & 1u) != 0u;
+        const bool decision = ps2_mtvu::privReadFinishOnly(rdram, pc, vaddr, bytes);
+        cache[idx].store((ukey << 1) | (decision ? 1u : 0u), std::memory_order_relaxed);
+        return decision;
     }
     // GE3 Part 4: narrowed exemption — CSR read whose consuming mask provably
     // observes only FINISH. Logs the PC once, then frees the read.
@@ -4264,7 +4294,7 @@ namespace
     {
         if (!ps2_mtvu::active() || !ge3IsCsrReg(vaddr))
             return false;
-        if (!ps2_mtvu::privReadFinishOnly(rdram, pc, vaddr, bytes))
+        if (!ge3FinishOnlyCached(rdram, pc, vaddr, bytes))
             return false;
         ge3NoteFinishOnlyExempt(pc);
         return true;
