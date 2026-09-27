@@ -3,6 +3,7 @@
 
 #include "runtime/ps2_savestate.h"
 #include "ps2_mtvu.h"
+#include "ps2_microvu.h"
 #include "ps2_savestate_internal.h"
 
 #include "ps2_runtime.h"
@@ -692,6 +693,11 @@ namespace ps2_savestate
 
     bool trySave(PS2Runtime &runtime, uint64_t vsyncTick, std::string &why)
     {
+        if (ps2_microvu::selected())
+        {
+            why = "microvu VU1 state cannot be saved yet";
+            return false;
+        }
         EeScheduler &sched = runtime.eeScheduler();
         why = EeSchedulerSavestate::ready(sched);
         if (why.empty())
@@ -816,6 +822,11 @@ namespace ps2_savestate
     // ---------------------------------------------------------------- load
     bool load(PS2Runtime &runtime, const std::string &path, std::string &error)
     {
+        if (ps2_microvu::selected())
+        {
+            error = "microvu VU1 state cannot be loaded yet";
+            return false;
+        }
         const auto t0 = std::chrono::steady_clock::now();
         std::vector<uint8_t> data;
         {

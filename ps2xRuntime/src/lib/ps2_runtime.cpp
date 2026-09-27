@@ -1,6 +1,7 @@
 #include "ps2_runtime.h"
 #include "ps2_mtvu.h"
 #include "ps2_vu1_engine.h"
+#include "ps2_microvu.h"
 #include "ps2_e4.h"
 #include "ps2_e7.h"
 #include "ps2_mpg_src_trace.h"
@@ -1302,6 +1303,7 @@ PS2Runtime::~PS2Runtime()
     ps2_vu1_engine::engine().setRunFn({});
     ps2_vu1_engine::engine().setPath1Fn({});
     ps2_vu1_engine::engine().setTickFn({});
+    ps2_microvu::shutdown();
     printMissingFunctionCounts();
     try
     {
@@ -1509,6 +1511,14 @@ bool PS2Runtime::syncCoreSubsystems()
                         ps2_vif_mpg_log::enabled() || ps2_e44_trace::enabled() || ps2_e43_trace::enabled() ||
                         ps2_e41_trace::armed() || ps2_uv1_vif_fmt::enabled() || ps2_uv1_dma_stall::enabled() ||
                         ps2_e4::enabled() || ps2_vq::enabled());
+    {
+        std::string microvuError;
+        if (!ps2_microvu::configure(ps2_mtvu::threaded(), microvuError))
+        {
+            std::cerr << "[microvu] " << microvuError << std::endl;
+            return false;
+        }
+    }
     // VP2: PS2X_VU1_WORKERS=1 (needs MT1 threaded): VU1 runs go to the
     // in-order-commit engine. The worker runs on the snapshot the engine
     // passes; D/T enables come from the kick's FBRST as on the MT1 worker.
@@ -1519,6 +1529,12 @@ bool PS2Runtime::syncCoreSubsystems()
                      {
                          m_vu1.state().dBitEnabled = (job.fbrst & (1u << 10)) != 0u;
                          m_vu1.state().tBitEnabled = (job.fbrst & (1u << 11)) != 0u;
+                         if (ps2_microvu::selected())
+                         {
+                             ps2_microvu::run(m_memory, data, m_vu1.state(), job.startPC,
+                                              job.resume, job.top, job.itop, job.fbrst, 65536);
+                             return;
+                         }
                          if (job.resume)
                              m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE, data, PS2_VU1_DATA_SIZE,
                                           m_gs, &m_memory, job.top, job.itop, 65536);
@@ -1551,6 +1567,12 @@ bool PS2Runtime::syncCoreSubsystems()
                                          const uint32_t fbrst = ps2_mtvu::jobFbrst();
                                          m_vu1.state().dBitEnabled = (fbrst & (1u << 10)) != 0u;
                                          m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
+                                         if (ps2_microvu::selected())
+                                         {
+                                             ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
+                                                              startPC, false, top, itop, fbrst, 65536);
+                                             return;
+                                         }
                                          m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                        m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                        m_gs, &m_memory, startPC, top, itop, 65536);
@@ -1590,6 +1612,12 @@ bool PS2Runtime::syncCoreSubsystems()
                                          const uint32_t fbrst = ps2_mtvu::jobFbrst(); // MT1: see MSCAL
                                          m_vu1.state().dBitEnabled = (fbrst & (1u << 10)) != 0u;
                                          m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
+                                         if (ps2_microvu::selected())
+                                         {
+                                             ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
+                                                              0, true, top, itop, fbrst, 65536);
+                                             return;
+                                         }
                                          m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                       m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                       m_gs, &m_memory, top, itop, 65536);
@@ -3449,6 +3477,20 @@ void PS2Runtime::vu1StartMicroProgramFromEe(R5900Context *ctx, uint32_t cmsar1)
     const uint32_t startPC = (cmsar1 & 0x7FFu) << 3;
     ps2_mtvu::sync(ps2_mtvu::Reason::Cmsar1); // MT1: runs inline on the EE
     VIFRegisters &vif1 = m_memory.vif1_regs;
+    if (ps2_microvu::selected())
+    {
+        const uint32_t top = vif1.top, itop = vif1.itop, fbrst = ctx->vu0_fbrst;
+        ps2_mtvu::submit([this, startPC, top, itop, fbrst]
+                         {
+                             ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
+                                              startPC, false, top, itop, fbrst, 65536);
+                         }, 0, fbrst);
+        ps2_mtvu::syncAll(ps2_mtvu::Reason::Cmsar1);
+        ctx->vu0_vpu_stat = (ctx->vu0_vpu_stat & ~0x0600u) |
+                            (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                            (m_vu1.state().stoppedByT ? 0x0400u : 0u);
+        return;
+    }
     m_vu1.state().dBitEnabled = (ctx->vu0_fbrst & (1u << 10)) != 0u;
     m_vu1.state().tBitEnabled = (ctx->vu0_fbrst & (1u << 11)) != 0u;
     m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
