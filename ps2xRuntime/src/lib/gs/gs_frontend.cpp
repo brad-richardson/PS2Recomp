@@ -165,6 +165,63 @@ namespace
                                     { return true; });
     }
 
+    // GE3 Part 2: read-only scan for an A+D FINISH (0x61) register write.
+    // PACKED: only slots whose tag nibble is A+D (0xE) can carry it.
+    // REGLIST: the register ids live in the tag. Anything malformed returns
+    // false and the normal decode path handles (or rejects) the packet.
+    bool packetHasFinishAD(const uint8_t *data, uint32_t sizeBytes)
+    {
+        uint32_t offset = 0u;
+        while (offset + 16u <= sizeBytes)
+        {
+            const uint64_t tagLo = loadLE64(data + offset);
+            const uint64_t tagHi = loadLE64(data + offset + 8u);
+            offset += 16u;
+            const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
+            const uint32_t flg = static_cast<uint32_t>((tagLo >> 58u) & 0x3u);
+            uint32_t nreg = static_cast<uint32_t>((tagLo >> 60u) & 0xFu);
+            if (nreg == 0u)
+                nreg = 16u;
+            if (flg == GIF_FMT_PACKED)
+            {
+                const uint64_t items = static_cast<uint64_t>(nloop) * nreg;
+                if (items > (sizeBytes - offset) / 16u)
+                    return false;
+                for (uint64_t i = 0u; i < items; ++i)
+                {
+                    const uint32_t slot = static_cast<uint32_t>(i % nreg);
+                    if (((tagHi >> (slot * 4u)) & 0xFu) == 0xEu)
+                    {
+                        if (static_cast<uint8_t>(loadLE64(data + offset + 8u)) ==
+                            static_cast<uint8_t>(GS_REG_FINISH))
+                            return true;
+                    }
+                    offset += 16u;
+                }
+            }
+            else if (flg == GIF_FMT_REGLIST)
+            {
+                for (uint32_t r = 0u; r < nreg; ++r)
+                {
+                    if (static_cast<uint8_t>((tagHi >> (r * 4u)) & 0xFu) ==
+                        static_cast<uint8_t>(GS_REG_FINISH))
+                        return true;
+                }
+                const uint64_t valueBytes = static_cast<uint64_t>(nloop) * nreg * 8ull;
+                if (valueBytes > sizeBytes - offset)
+                    return false;
+                offset += static_cast<uint32_t>(valueBytes);
+            }
+            else
+            {
+                // IMAGE modes consume the rest of the transfer; FINISH never
+                // hides in texel data.
+                return false;
+            }
+        }
+        return false;
+    }
+
     std::atomic<uint32_t> s_debugGifPacketCount{0};
     std::atomic<uint32_t> s_debugGsRegisterCount{0};
     std::atomic<uint32_t> s_debugGsPackedVertexCount{0};
@@ -254,6 +311,9 @@ namespace
 GS::GS()
     : m_backend(std::make_unique<GSCpuBackend>())
 {
+    // GE3 Part 2: default off; strict opt-in only.
+    if (const char *finishTiming = std::getenv("PS2X_GS_FINISH_TIMING"))
+        m_finishTimingPcsx2 = std::strcmp(finishTiming, "pcsx2") == 0;
     reset();
 }
 
@@ -1226,12 +1286,27 @@ void GS::processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uin
     // GF1 H2: take the arbiter's own copy instead of copying it again (the
     // arbiter clears the packet after this call; listener and shadow ran first).
     cmd.bytes = std::move(bytes);
+    // GE3 Part 2: PCSX2 sets CSR FINISH at GIF arbitration on the submitting
+    // thread. All prior packets are already enqueued (= GIF-drained), so set
+    // the bit now, in stream order. Decode still runs Flush+Sync+set later.
+    noteFinishTimingPcsx2(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
     m_worker->enqueue(std::move(cmd));
+}
+
+void GS::noteFinishTimingPcsx2(const uint8_t *data, uint32_t sizeBytes)
+{
+    if (!m_finishTimingPcsx2 || !m_privRegs || !data || sizeBytes < 16u)
+        return;
+    if (packetHasFinishAD(data, sizeBytes))
+        m_privRegs->csr.fetch_or(0x2u);
 }
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     ps2_mtvu::touch(ps2_mtvu::Site::GsProcess); // MT1: unit-owned
+    // GE3 Part 2: PCSX2-timed FINISH is set here on the submitting thread
+    // (EE or MTVU unit), in stream order, before the worker decodes.
+    noteFinishTimingPcsx2(data, sizeBytes);
     if (m_worker && !t_inGsWorker)
     {
         if (!data || sizeBytes < 16)

@@ -166,6 +166,10 @@ public:
     // Same effects and order as the two calls; direct mode makes the calls.
     // H2: queued mode takes `bytes` (moved into the command; left empty).
     void processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uint8_t> &bytes);
+    // GE3 Part 2: PCSX2-timed FINISH. With m_finishTimingPcsx2, sets CSR
+    // FINISH now (submitting thread, packet already stream-ordered) when the
+    // packet carries an A+D FINISH write. No-op unless the knob is on.
+    void noteFinishTimingPcsx2(const uint8_t *data, uint32_t sizeBytes);
     // E33: records which GIF path the packet currently being processed came
     // from, so draws kicked during processing attribute to that path. Only
     // called with stats armed; defaults to Path1 (the XGKICK-direct route).
@@ -351,6 +355,11 @@ private:
     std::atomic<uint64_t> m_privWriteCount{0};
     std::atomic<bool> m_rawGifBackend{false};
     std::atomic<bool> m_minimalGifDecode{false};
+    // GE3 Part 2: PS2X_GS_FINISH_TIMING=pcsx2 sets CSR FINISH on the
+    // submitting thread at GIF arbitration (PCSX2 Gif_Unit parity) instead of
+    // after GsWorker decode. Default off. Set once in the constructor before
+    // the game thread spawns; read on EE/MTVU submit threads.
+    bool m_finishTimingPcsx2 = false;
     std::atomic<bool> m_wantsGuestVsync{false}; // GE2: cached WantsGuestVsync()
     std::atomic<bool> m_wantsPrivMirror{false}; // GE2: cached WantsPrivMirror()
     // N8D7M12 Part 5F4P2: worker-consumption packet-sequence fingerprint.
