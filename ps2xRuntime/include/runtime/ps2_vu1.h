@@ -344,6 +344,8 @@ private:
     static constexpr uint32_t kMaxDecodedPairs = 0x4000u / 8u;
 
     Unit m_unit;
+    bool m_flagElideRequested = false;
+    bool m_elideFmacFlags = false; // recomputed from the VU1 image at each run
     VU1State m_state;
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t m_programStartCount = 0;

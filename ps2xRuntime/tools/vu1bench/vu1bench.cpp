@@ -1,7 +1,7 @@
 // VRB1 vu1bench: replay a PS2X_VU1_CAPTURE window through the runtime's VU1
 // core + compiled-in generated images (no game, no GS, no EE).
 //
-//   vu1bench <vu1cap.bin> [--cpu N] [--repeat N] [--skip-verify]
+//   vu1bench <vu1cap.bin> [--cpu N] [--repeat N] [--skip-verify] [--mask-status-mac]
 //
 // Links the same VU1 TUs as the runner (core/upper/lower/recomp + the vu1gen
 // images) with the same Release flags + PS2X_VU1_FMAC_SIMD=1, drives the same
@@ -117,6 +117,7 @@ int main(int argc, char **argv)
     int cpu = -1;
     int repeat = 1;
     bool verify = true;
+    bool maskStatusMac = false;
     for (int i = 1; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--cpu") == 0 && i + 1 < argc)
@@ -125,17 +126,19 @@ int main(int argc, char **argv)
             repeat = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--skip-verify") == 0)
             verify = false;
+        else if (std::strcmp(argv[i], "--mask-status-mac") == 0)
+            maskStatusMac = true;
         else if (argv[i][0] != '-')
             path = argv[i];
         else
         {
-            std::fprintf(stderr, "usage: vu1bench <vu1cap.bin> [--cpu N] [--repeat N] [--skip-verify]\n");
+            std::fprintf(stderr, "usage: vu1bench <vu1cap.bin> [--cpu N] [--repeat N] [--skip-verify] [--mask-status-mac]\n");
             return 2;
         }
     }
     if (!path || repeat < 1)
     {
-        std::fprintf(stderr, "usage: vu1bench <vu1cap.bin> [--cpu N] [--repeat N] [--skip-verify]\n");
+        std::fprintf(stderr, "usage: vu1bench <vu1cap.bin> [--cpu N] [--repeat N] [--skip-verify] [--mask-status-mac]\n");
         return 2;
     }
     if (cpu >= 0 && !pinCpu(cpu))
@@ -307,6 +310,13 @@ int main(int argc, char **argv)
                 {
                     ps2_vu1cap::Regs actual{};
                     ps2_vu1cap::packRegs(vu.state(), actual);
+                    if (maskStatusMac)
+                    {
+                        // Only the elided fields are ignored. Sticky status,
+                        // I/D current bits, CLIP and every other reg stay exact.
+                        actual.mac = job.regsOut.mac;
+                        actual.status = (actual.status & ~0xFu) | (job.regsOut.status & 0xFu);
+                    }
                     if (std::memcmp(&actual, &job.regsOut, sizeof(actual)) != 0)
                     {
                         what = "regs";
