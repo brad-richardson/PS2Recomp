@@ -460,6 +460,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     if (ps2x_tap_mpg::readArmed() &&                      \
         ps2x_tap_mpg::isReadWatched(_addr, 1u))           \
         ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 1u, ps2xE40Fn); \
+    ps2_ts2_observer::noteLoad(ctx, _addr, 1u);           \
     return PS2Runtime::isSpecialAddress(_addr)                \
         ? runtime->Load8(rdram, ctx, _addr)                   \
         : FAST_READ8(_addr); }())
@@ -469,6 +470,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     if (ps2x_tap_mpg::readArmed() &&                      \
         ps2x_tap_mpg::isReadWatched(_addr, 2u))           \
         ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 2u, ps2xE40Fn); \
+    ps2_ts2_observer::noteLoad(ctx, _addr, 2u);           \
     return PS2Runtime::isSpecialAddress(_addr)                \
         ? runtime->Load16(rdram, ctx, _addr)                  \
         : FAST_READ16(_addr); }())
@@ -478,6 +480,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     if (ps2x_tap_mpg::readArmed() &&                      \
         ps2x_tap_mpg::isReadWatched(_addr, 4u))           \
         ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 4u, ps2xE40Fn); \
+    ps2_ts2_observer::noteLoad(ctx, _addr, 4u);           \
     uint32_t _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load32(rdram, ctx, _addr)                  \
         : FAST_READ32(_addr);                                 \
@@ -493,6 +496,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     if (ps2x_tap_mpg::readArmed() &&                      \
         ps2x_tap_mpg::isReadWatched(_addr, 8u))           \
         ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 8u, ps2xE40Fn); \
+    ps2_ts2_observer::noteLoad(ctx, _addr, 8u);           \
     uint64_t _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load64(rdram, ctx, _addr)                  \
         : FAST_READ64(_addr);                                 \
@@ -509,6 +513,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     if (ps2x_tap_mpg::readArmed() &&                      \
         ps2x_tap_mpg::isReadWatched(_addr, 16u))          \
         ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 16u, ps2xE40Fn); \
+    ps2_ts2_observer::noteLoad(ctx, _addr, 16u);          \
     __m128i _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load128(rdram, ctx, _addr)                 \
         : FAST_READ128(_addr);                                \
@@ -534,7 +539,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
         uint8_t _wv = (uint8_t)(val); \
-        ps2_ts2_observer::noteStore(ctx, _addr, 1u);                                  \
+        ps2_ts2_observer::noteStore(rdram, ctx, _addr, 1u, _wv, 0u);                  \
         const bool _e43 = ps2x_tap_e43::enabled();                                              \
         const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
         ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
@@ -573,7 +578,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                    \
         uint32_t _addr = (addr);                                                         \
         uint16_t _wv = (uint16_t)(val); \
-        ps2_ts2_observer::noteStore(ctx, _addr, 2u);                                    \
+        ps2_ts2_observer::noteStore(rdram, ctx, _addr, 2u, _wv, 0u);                    \
         const bool _e43 = ps2x_tap_e43::enabled();                                              \
         const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
         ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
@@ -612,7 +617,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                    \
         uint32_t _addr = (addr);                                                         \
         uint32_t _wv = (uint32_t)(val); \
-        ps2_ts2_observer::noteStore(ctx, _addr, 4u);                                    \
+        ps2_ts2_observer::noteStore(rdram, ctx, _addr, 4u, _wv, 0u);                    \
         const bool _e43 = ps2x_tap_e43::enabled();                                              \
         const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
         ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
@@ -661,7 +666,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
         uint64_t _wv = (uint64_t)(val); \
-        ps2_ts2_observer::noteStore(ctx, _addr, 8u);                                  \
+        ps2_ts2_observer::noteStore(rdram, ctx, _addr, 8u, _wv, 0u);                  \
         const bool _e43 = ps2x_tap_e43::enabled();                                              \
         const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
         ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
@@ -711,7 +716,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
         const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value));       \
         const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value));       \
-        ps2_ts2_observer::noteStore(ctx, _addr, 16u);                                 \
+        ps2_ts2_observer::noteStore(rdram, ctx, _addr, 16u, _lo, _hi);                \
         const bool _e42plant = ps2x_tap_e41::plantArmed() &&                          \
             ps2x_tap_e41::isPlantWatched(_addr, 16u);                                 \
         ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);              \

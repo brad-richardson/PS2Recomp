@@ -41,12 +41,28 @@ struct Hash
     }
 };
 
+struct StoreStats
+{
+    uint64_t equal = 0, increment = 0, decrement = 0, pointer = 0, stamp = 0, laterRead = 0;
+    uint64_t firstOld = 0, firstNew = 0, lastStep = UINT64_MAX;
+    uint32_t writesThisStep = 0, maxWritesPerStep = 0;
+    bool hasSample = false;
+};
+struct LastWrite
+{
+    Key key;
+    uint64_t tick;
+};
+
 // Guest execution and the EE scheduler run on the same host thread. The guest
 // thread ID, not the host call stack, keeps the frame live across checkpoints.
 inline thread_local uint32_t guestThread = 0;
 inline thread_local bool guestInterrupt = false;
 inline thread_local std::unordered_map<uint32_t, Frame> frames;
 inline thread_local std::unordered_map<Key, uint64_t, Hash> counts;
+inline thread_local std::unordered_map<Key, StoreStats, Hash> storeStats;
+inline thread_local std::unordered_map<uint32_t, LastWrite> lastNamedWrite;
+inline thread_local uint64_t riderStep = 0;
 inline thread_local uint64_t dropped = 0;
 inline thread_local uint64_t stackStores = 0;
 inline thread_local uint64_t boundaryEntries = 0;
@@ -82,12 +98,13 @@ inline uint32_t read32(const uint8_t *ram, uint32_t address) noexcept
     return value;
 }
 
-inline void add(Key k) noexcept
+inline bool add(Key k) noexcept
 {
     auto it = counts.find(k);
-    if (it != counts.end()) { ++it->second; return; }
-    if (counts.size() >= kMaxKeys) { ++dropped; return; }
+    if (it != counts.end()) { ++it->second; return true; }
+    if (counts.size() >= kMaxKeys) { ++dropped; return false; }
     counts.emplace(k, 1);
+    return true;
 }
 
 inline void setThread(uint32_t id, bool interrupt) noexcept
@@ -116,6 +133,7 @@ inline void begin(const uint8_t *ram, R5900Context *ctx, uint32_t rider, bool so
 
 inline void beginRider(const uint8_t *ram, R5900Context *ctx) noexcept
 {
+    if (enabled() && !guestInterrupt && !dumped) ++riderStep;
     begin(ram, ctx, getRegU32(ctx, 4), false);
 }
 
@@ -168,10 +186,23 @@ inline void dump(uint64_t tick) noexcept
         return;
     }
     for (const auto &[key, n] : counts)
+    {
+        const auto si = storeStats.find(key);
+        const StoreStats empty{};
+        const StoreStats &s = si == storeStats.end() ? empty : si->second;
         std::fprintf(stderr,
-                     "ts2obs row pc=%08x region=%u off=%08x base=%08x target=%08x descriptor=%08x width=%u count=%llu\n",
+                     "ts2obs row pc=%08x region=%u off=%08x base=%08x target=%08x descriptor=%08x width=%u count=%llu eq=%llu inc=%llu dec=%llu ptr=%llu stamp=%llu later_read=%llu max_step=%u old=%016llx new=%016llx\n",
                      key.pc, key.region, key.offset, key.base, key.target,
-                     key.descriptor, key.width, static_cast<unsigned long long>(n));
+                     key.descriptor, key.width, static_cast<unsigned long long>(n),
+                     static_cast<unsigned long long>(s.equal),
+                     static_cast<unsigned long long>(s.increment),
+                     static_cast<unsigned long long>(s.decrement),
+                     static_cast<unsigned long long>(s.pointer),
+                     static_cast<unsigned long long>(s.stamp),
+                     static_cast<unsigned long long>(s.laterRead), s.maxWritesPerStep,
+                     static_cast<unsigned long long>(s.firstOld),
+                     static_cast<unsigned long long>(s.firstNew));
+    }
     std::fprintf(stderr, "ts2obs end tick=%llu\n", static_cast<unsigned long long>(tick));
     std::fflush(stderr);
 }
@@ -205,7 +236,28 @@ inline void setTick(uint64_t tick) noexcept
 // Region IDs: 1 R, 2 P, 3 C, 4 manager A, 5 global/data, 6 other
 // heap (256-byte address bucket, not a proved object base); 7 call,
 // 8 indirect call/jump, 9 post-pass trigger, 10 selector case.
-inline void noteStore(R5900Context *ctx, uint32_t address, uint32_t width) noexcept
+inline bool guestPointer(uint64_t value) noexcept
+{
+    return value >= 0x00100000u && value < 0x02000000u && (value & 3u) == 0u;
+}
+
+inline void noteLoad(R5900Context *ctx, uint32_t address, uint32_t width) noexcept
+{
+    if (!enabled() || !ctx || dumped || guestInterrupt) return;
+    const auto fi = frames.find(guestThread);
+    if (fi == frames.end() || fi->second.depth == 0) return;
+    address &= 0x1fffffffu;
+    for (uint32_t lane = 0; lane < width; lane += 4)
+    {
+        auto wi = lastNamedWrite.find((address + lane) & ~3u);
+        if (wi == lastNamedWrite.end() || currentTick <= wi->second.tick) continue;
+        auto si = storeStats.find(wi->second.key);
+        if (si != storeStats.end()) ++si->second.laterRead;
+    }
+}
+
+inline void noteStore(const uint8_t *ram, R5900Context *ctx, uint32_t address,
+                      uint32_t width, uint64_t newLo, uint64_t newHi) noexcept
 {
     if (!enabled() || !ctx || dumped || guestInterrupt) return;
     auto it = frames.find(guestThread);
@@ -231,7 +283,40 @@ inline void noteStore(R5900Context *ctx, uint32_t address, uint32_t width) noexc
         region = 5, base = 0, offset = address;
     // For named regions, aggregate across object instances; the first base is
     // still carried in the row as a concrete example address.
-    add({ctx->pc, region, offset, base, 0, 0, width});
+    const Key key{ctx->pc, region, offset, base, 0, 0, width};
+    if (!add(key)) return;
+    StoreStats &s = storeStats[key];
+    if (s.lastStep != riderStep)
+    {
+        s.lastStep = riderStep;
+        s.writesThisStep = 0;
+    }
+    if (++s.writesThisStep > s.maxWritesPerStep) s.maxWritesPerStep = s.writesThisStep;
+    if (width <= 8 && ram && address <= 0x02000000u - width)
+    {
+        uint64_t oldValue = 0;
+        std::memcpy(&oldValue, ram + address, width);
+        const uint64_t mask = width == 8 ? UINT64_MAX : ((1ull << (width * 8u)) - 1ull);
+        const uint64_t newValue = newLo & mask;
+        if (!s.hasSample)
+        {
+            s.firstOld = oldValue;
+            s.firstNew = newValue;
+            s.hasSample = true;
+        }
+        const uint64_t delta = (newValue - oldValue) & mask;
+        if (delta == 0) ++s.equal;
+        if (delta == 1) ++s.increment;
+        if (delta == mask) ++s.decrement;
+        if (width == 4 && guestPointer(newValue) && (oldValue == 0 || guestPointer(oldValue))) ++s.pointer;
+        if (newValue == currentTick || newValue == currentTick + 1u) ++s.stamp;
+    }
+    if (region >= 1u && region <= 3u)
+    {
+        for (uint32_t lane = 0; lane < width; lane += 4)
+            lastNamedWrite[(address + lane) & ~3u] = LastWrite{key, currentTick};
+    }
+    (void)newHi;
 }
 
 inline uint32_t descriptorFor(R5900Context *ctx, uint32_t source) noexcept

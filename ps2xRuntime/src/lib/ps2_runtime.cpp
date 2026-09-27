@@ -1,5 +1,6 @@
 #include "ps2_runtime.h"
 #include "ps2_ts2_observer.h"
+#include "ps2_ts2_split60.h"
 #include "ps2_mtvu.h"
 #include "ps2_vu1_engine.h"
 #include "ps2_microvu.h"
@@ -3100,6 +3101,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      GuestBranchKind kind,
                                      const char *debugName)
 {
+    const bool splitBoundary = ps2_ts2_split60::enabled() &&
+                               sourcePc == 0x128ddcu && targetPc == 0x1216e0u &&
+                               kind == GuestBranchKind::DirectCall;
+    if (splitBoundary) ps2_ts2_split60::begin(rdram, ctx);
     ps2_ts2_observer::noteBranch(
         rdram, ctx, sourcePc, targetPc,
         kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall,
@@ -3305,7 +3310,9 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         ctx->pc = fallthroughPc;
     }
 
-    return ctx->pc == fallthroughPc;
+    const bool returned = ctx->pc == fallthroughPc;
+    if (splitBoundary && returned) ps2_ts2_split60::finish();
+    return returned;
 }
 
 void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
