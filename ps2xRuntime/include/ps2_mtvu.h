@@ -613,6 +613,39 @@ namespace ps2_mtvu
         return (mask & 0x3ull) == 0u ? Reason::GsPrivReadMasked : Reason::GsPrivRead;
     }
 
+    // GE3 Part 4: narrowed FINISH-only variant of the analysis above. Returns
+    // true iff this CSR load's consuming mask provably observes no
+    // worker-owned bit other than FINISH (bit 1): the guest-visible value
+    // cannot depend on worker timing, so retirement can be skipped. Same
+    // delay-slot conservatism. SIGNAL/VSINT-touching masks return false.
+    inline bool privReadFinishOnly(const uint8_t *rdram, uint32_t pc, uint32_t vaddr, uint32_t bytes)
+    {
+        const uint32_t phys = vaddr & 0x1FFFFFFFu;
+        if ((phys & ~7u) != 0x12001000u || !rdram)
+            return false;
+        const uint32_t pcPhys = pc & 0x01FFFFFCu; // 32 MB RDRAM
+        if (pcPhys + 8u > 0x02000000u)
+            return false;
+        uint32_t prev = 0, load = 0, next = 0;
+        if (pcPhys >= 4u)
+            std::memcpy(&prev, rdram + pcPhys - 4u, 4);
+        std::memcpy(&load, rdram + pcPhys, 4);
+        std::memcpy(&next, rdram + pcPhys + 4u, 4);
+        const uint32_t pop = prev >> 26;
+        const bool prevBranch = (pop == 0u && ((prev & 0x3Fu) == 8u || (prev & 0x3Fu) == 9u)) ||
+                                pop == 1u || pop == 2u || pop == 3u || (pop >= 4u && pop <= 7u) ||
+                                (pop >= 0x14u && pop <= 0x17u) ||
+                                ((pop >= 0x10u && pop <= 0x12u) && ((prev >> 21) & 31u) == 8u);
+        if (prevBranch)
+            return false;
+        const uint32_t rt = (load >> 16) & 31u;
+        uint64_t mask = bytes >= 8u ? ~0ull : ((1ull << (bytes * 8u)) - 1u);
+        if ((next >> 26) == 0x0Cu && ((next >> 21) & 31u) == rt && ((next >> 16) & 31u) == rt && rt != 0u)
+            mask &= static_cast<uint64_t>(next & 0xFFFFu);
+        mask <<= (phys & 7u) * 8u;
+        return (mask & ~0x2ull) == 0u;
+    }
+
     // Inside a unit-owned object: must be unit work or follow a sync.
     inline void touch(Site s)
     {

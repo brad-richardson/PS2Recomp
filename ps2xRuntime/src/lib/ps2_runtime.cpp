@@ -4239,6 +4239,36 @@ namespace
     {
         return ((vaddr & 0x1FFFFFFFu) & ~7u) == (PS2_GS_PRIV_REG_BASE + 0x1000u);
     }
+    // GE3 Part 4: bounded one-shot log of guest PCs taking the narrowed
+    // FINISH-only exemption (≤32 unique PCs; observer only, never guest state).
+    inline void ge3NoteFinishOnlyExempt(uint32_t pc)
+    {
+        static std::mutex mutex;
+        static uint32_t pcs[32]{};
+        static uint32_t count = 0u;
+        std::lock_guard<std::mutex> lock(mutex);
+        for (uint32_t i = 0u; i < count; ++i)
+        {
+            if (pcs[i] == pc)
+                return;
+        }
+        if (count < 32u)
+        {
+            pcs[count++] = pc;
+            std::fprintf(stderr, "[gs:finish-only] exempt pc=0x%08x\n", pc);
+        }
+    }
+    // GE3 Part 4: narrowed exemption — CSR read whose consuming mask provably
+    // observes only FINISH. Logs the PC once, then frees the read.
+    inline bool ge3FinishOnlyFree(const uint8_t *rdram, uint32_t pc, uint32_t vaddr, uint32_t bytes)
+    {
+        if (!ps2_mtvu::active() || !ge3IsCsrReg(vaddr))
+            return false;
+        if (!ps2_mtvu::privReadFinishOnly(rdram, pc, vaddr, bytes))
+            return false;
+        ge3NoteFinishOnlyExempt(pc);
+        return true;
+    }
 }
 
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
@@ -4256,11 +4286,11 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 : ps2_mtvu::Reason::GsPrivRead;
             const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
             const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
-            // GE3 Part 3: in EE-owned FINISH mode CSR reads return the
-            // submit-side FINISH bit without retiring unit/GS queues.
-            // Never combined with the parked O path (its reads must retire).
+            // GE3 Part 4: narrowed to reads whose consuming mask provably
+            // observes only FINISH (probe polls qualify; SIGNAL-touching
+            // reads keep retiring). Never combined with parked O.
             const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
-                                 ge3IsCsrReg(vaddr);
+                                 ge3FinishOnlyFree(rdram, ctx ? ctx->pc : 0u, vaddr, 1u);
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
             if (!mtvuFree && !csrFree)
             {
@@ -4293,11 +4323,11 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 : ps2_mtvu::Reason::GsPrivRead;
             const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
             const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
-            // GE3 Part 3: in EE-owned FINISH mode CSR reads return the
-            // submit-side FINISH bit without retiring unit/GS queues.
-            // Never combined with the parked O path (its reads must retire).
+            // GE3 Part 4: narrowed to reads whose consuming mask provably
+            // observes only FINISH (probe polls qualify; SIGNAL-touching
+            // reads keep retiring). Never combined with parked O.
             const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
-                                 ge3IsCsrReg(vaddr);
+                                 ge3FinishOnlyFree(rdram, ctx ? ctx->pc : 0u, vaddr, 2u);
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
             if (!mtvuFree && !csrFree)
             {
@@ -4329,11 +4359,11 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 : ps2_mtvu::Reason::GsPrivRead;
             const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
             const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
-            // GE3 Part 3: in EE-owned FINISH mode CSR reads return the
-            // submit-side FINISH bit without retiring unit/GS queues.
-            // Never combined with the parked O path (its reads must retire).
+            // GE3 Part 4: narrowed to reads whose consuming mask provably
+            // observes only FINISH (probe polls qualify; SIGNAL-touching
+            // reads keep retiring). Never combined with parked O.
             const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
-                                 ge3IsCsrReg(vaddr);
+                                 ge3FinishOnlyFree(rdram, ctx ? ctx->pc : 0u, vaddr, 4u);
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
             if (!mtvuFree && !csrFree)
             {
@@ -4368,11 +4398,11 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 : ps2_mtvu::Reason::GsPrivRead;
             const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
             const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
-            // GE3 Part 3: in EE-owned FINISH mode CSR reads return the
-            // submit-side FINISH bit without retiring unit/GS queues.
-            // Never combined with the parked O path (its reads must retire).
+            // GE3 Part 4: narrowed to reads whose consuming mask provably
+            // observes only FINISH (probe polls qualify; SIGNAL-touching
+            // reads keep retiring). Never combined with parked O.
             const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
-                                 ge3IsCsrReg(vaddr);
+                                 ge3FinishOnlyFree(rdram, ctx ? ctx->pc : 0u, vaddr, 8u);
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
             if (!mtvuFree && !csrFree)
             {
@@ -4408,11 +4438,11 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 : ps2_mtvu::Reason::GsPrivRead;
             const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
             const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
-            // GE3 Part 3: in EE-owned FINISH mode CSR reads return the
-            // submit-side FINISH bit without retiring unit/GS queues.
-            // Never combined with the parked O path (its reads must retire).
+            // GE3 Part 4: narrowed to reads whose consuming mask provably
+            // observes only FINISH (probe polls qualify; SIGNAL-touching
+            // reads keep retiring). Never combined with parked O.
             const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
-                                 ge3IsCsrReg(vaddr);
+                                 ge3FinishOnlyFree(rdram, ctx ? ctx->pc : 0u, vaddr, 16u);
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
             if (!mtvuFree && !csrFree)
             {
