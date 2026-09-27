@@ -1614,9 +1614,10 @@ bool PS2Runtime::syncCoreSubsystems()
                          m_vu1.state().tBitEnabled = (job.fbrst & (1u << 11)) != 0u;
                          if (ps2_microvu::selected())
                          {
-                             ps2_microvu::run(m_memory, data, m_vu1.state(), job.startPC,
-                                              job.resume, job.top, job.itop, job.fbrst, 65536);
-                             return;
+                             // OM1: a MISS falls through to the static restart below.
+                             if (ps2_microvu::run(m_memory, data, m_vu1.state(), job.startPC,
+                                                 job.resume, job.top, job.itop, job.fbrst, 65536))
+                                 return;
                          }
                          if (job.resume)
                              m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE, data, PS2_VU1_DATA_SIZE,
@@ -1652,9 +1653,10 @@ bool PS2Runtime::syncCoreSubsystems()
                                          m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
                                          if (ps2_microvu::selected())
                                          {
-                                             ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
-                                                              startPC, false, top, itop, fbrst, 65536);
-                                             return;
+                                             // OM1: a MISS falls through to the static restart below.
+                                             if (ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
+                                                                 startPC, false, top, itop, fbrst, 65536))
+                                                 return;
                                          }
                                          m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                        m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
@@ -1675,9 +1677,14 @@ bool PS2Runtime::syncCoreSubsystems()
                                          const uint32_t fbrst = cpuContext->vu0_fbrst;
                                          ps2_mtvu::submit([this, startPC, top, itop, fbrst]
                                                           {
-                                                              ps2_microvu::run(m_memory, m_memory.getVU1Data(),
-                                                                               m_vu1.state(), startPC, false,
-                                                                               top, itop, fbrst, 65536);
+                                                              // OM1: a MISS restarts statically here; the
+                                                              // post-sync VPU_STAT update below is shared.
+                                                              if (!ps2_microvu::run(m_memory, m_memory.getVU1Data(),
+                                                                                    m_vu1.state(), startPC, false,
+                                                                                    top, itop, fbrst, 65536))
+                                                                  m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                                                m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                                                m_gs, &m_memory, startPC, top, itop, 65536);
                                                           }, 0, fbrst);
                                          ps2_mtvu::syncAll(ps2_mtvu::Reason::DtFallback);
                                          cpuContext->vu0_vpu_stat =
@@ -1713,9 +1720,10 @@ bool PS2Runtime::syncCoreSubsystems()
                                          m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
                                          if (ps2_microvu::selected())
                                          {
-                                             ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
-                                                              0, true, top, itop, fbrst, 65536);
-                                             return;
+                                             // OM1: a MISS falls through to the static restart below.
+                                             if (ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
+                                                                 0, true, top, itop, fbrst, 65536))
+                                                 return;
                                          }
                                          m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                       m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
@@ -1736,9 +1744,14 @@ bool PS2Runtime::syncCoreSubsystems()
                                          const uint32_t fbrst = cpuContext->vu0_fbrst;
                                          ps2_mtvu::submit([this, top, itop, fbrst]
                                                           {
-                                                              ps2_microvu::run(m_memory, m_memory.getVU1Data(),
-                                                                               m_vu1.state(), 0, true,
-                                                                               top, itop, fbrst, 65536);
+                                                              // OM1: a MISS restarts statically here; the
+                                                              // post-sync VPU_STAT update below is shared.
+                                                              if (!ps2_microvu::run(m_memory, m_memory.getVU1Data(),
+                                                                                    m_vu1.state(), 0, true,
+                                                                                    top, itop, fbrst, 65536))
+                                                                  m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                                                               m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                                                               m_gs, &m_memory, top, itop, 65536);
                                                           }, 0, fbrst);
                                          ps2_mtvu::syncAll(ps2_mtvu::Reason::DtFallback);
                                          cpuContext->vu0_vpu_stat =
@@ -3684,8 +3697,18 @@ void PS2Runtime::vu1StartMicroProgramFromEe(R5900Context *ctx, uint32_t cmsar1)
         const uint32_t top = vif1.top, itop = vif1.itop, fbrst = ctx->vu0_fbrst;
         ps2_mtvu::submit([this, startPC, top, itop, fbrst]
                          {
-                             ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
-                                              startPC, false, top, itop, fbrst, 65536);
+                             // OM1: a MISS restarts statically here (D/T enables
+                             // set as in the static branch below, which this
+                             // microvu branch skips); the post-sync VPU_STAT
+                             // update below is shared.
+                             if (!ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
+                                                   startPC, false, top, itop, fbrst, 65536)) {
+                                 m_vu1.state().dBitEnabled = (fbrst & (1u << 10)) != 0u;
+                                 m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
+                                 m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
+                                               m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
+                                               m_gs, &m_memory, startPC, top, itop, 65536);
+                             }
                          }, 0, fbrst);
         ps2_mtvu::syncAll(ps2_mtvu::Reason::Cmsar1);
         ctx->vu0_vpu_stat = (ctx->vu0_vpu_stat & ~0x0600u) |

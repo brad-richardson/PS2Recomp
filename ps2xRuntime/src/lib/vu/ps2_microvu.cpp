@@ -2,12 +2,14 @@
 // MV2: Android-only loader for the isolated ARMSX2 microVU shared library.
 // SS4: + Mac (dlopen of the OM1-built dylib) for savestate tests, and the
 // savestate save-gate/load-reset below.
+// OM1: + the offline engine (Mac first) with MISS->static restart.
 #include "ps2_microvu.h"
 #include "ps2_microvu_api.h"
 #include "ps2_mtvu.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,8 +28,11 @@ struct Api {
     decltype(&ps2x_microvu_init) init = nullptr;
     decltype(&ps2x_microvu_shutdown) close = nullptr;
     decltype(&ps2x_microvu_run) run = nullptr;
+    decltype(&ps2x_microvu_get_stats) getStats = nullptr; // optional (offline only)
 } s_api;
 bool s_selected = false;
+std::string s_engine;
+std::atomic<uint64_t> s_restarts{0};
 
 uint32_t bits(float value)
 {
@@ -104,39 +109,45 @@ bool configure(bool mtvu_threaded, std::string& error)
     const char* name = std::getenv("PS2X_VU1_ENGINE");
     if (!name || !*name || std::strcmp(name, "static") == 0)
         return true;
-    if (std::strcmp(name, "microvu") != 0) {
-        error = "PS2X_VU1_ENGINE must be static or microvu";
+    const bool offline = std::strcmp(name, "offline") == 0;
+    if (!offline && std::strcmp(name, "microvu") != 0) {
+        error = "PS2X_VU1_ENGINE must be static, microvu or offline";
         return false;
     }
     if (!mtvu_threaded) {
-        error = "microvu requires PS2X_MTVU=1 and no VU1 trace that disables MTVU";
+        error = std::string(name) + " requires PS2X_MTVU=1 and no VU1 trace that disables MTVU";
         return false;
     }
     if (std::getenv("PS2X_VU1_WORKERS")) {
-        error = "microvu requires PS2X_VU1_WORKERS unset";
+        error = std::string(name) + " requires PS2X_VU1_WORKERS unset";
         return false;
     }
     const char* lib = std::getenv("PS2X_MICROVU_LIB");
     std::string fallback;
     if (!lib || !*lib) {
 #if defined(__ANDROID__)
-        fallback = "libmv2_microvu.so";
+        fallback = offline ? "libom1_offline.so" : "libmv2_microvu.so";
 #else
-        fallback = "libmv2_microvu.dylib";
+        fallback = offline ? "libom1_offline.dylib" : "libmv2_microvu.dylib";
 #endif
         lib = fallback.c_str();
     }
-    s_api.handle = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
+    // RTLD_GLOBAL for offline: the recorded tables resolve their init slots
+    // via dlsym(RTLD_DEFAULT) at init.
+    const int mode = RTLD_NOW | (offline ? RTLD_GLOBAL : RTLD_LOCAL);
+    s_api.handle = dlopen(lib, mode);
     if (!s_api.handle) {
-        error = std::string("microvu dlopen failed: ") + dlerror();
+        error = std::string(name) + " dlopen failed: " + dlerror();
         return false;
     }
     auto abi = reinterpret_cast<decltype(&ps2x_microvu_abi)>(dlsym(s_api.handle, "ps2x_microvu_abi"));
     s_api.init = reinterpret_cast<decltype(s_api.init)>(dlsym(s_api.handle, "ps2x_microvu_init"));
     s_api.close = reinterpret_cast<decltype(s_api.close)>(dlsym(s_api.handle, "ps2x_microvu_shutdown"));
     s_api.run = reinterpret_cast<decltype(s_api.run)>(dlsym(s_api.handle, "ps2x_microvu_run"));
+    s_api.getStats =
+        reinterpret_cast<decltype(s_api.getStats)>(dlsym(s_api.handle, "ps2x_microvu_get_stats"));
     if (!abi || abi() != PS2X_MICROVU_ABI || !s_api.init || !s_api.close || !s_api.run) {
-        error = "microvu ABI/symbol mismatch";
+        error = std::string(name) + " ABI/symbol mismatch";
         shutdown();
         return false;
     }
@@ -147,7 +158,8 @@ bool configure(bool mtvu_threaded, std::string& error)
         return false;
     }
     s_selected = true;
-    std::fprintf(stderr, "[microvu] engine=microvu lib=%s\n", lib);
+    s_engine = name;
+    std::fprintf(stderr, "[microvu] engine=%s lib=%s\n", name, lib);
 #else
     (void)mtvu_threaded;
     (void)error;
@@ -167,9 +179,25 @@ bool selected()
 void shutdown()
 {
 #if defined(PS2X_MICROVU_LOADABLE)
+    if (s_selected) {
+        std::fprintf(stderr, "[microvu] engine=%s restarts=%llu\n", s_engine.c_str(),
+                     (unsigned long long)s_restarts.load(std::memory_order_relaxed));
+        if (s_api.getStats) {
+            ps2x_microvu_stats st{};
+            if (s_api.getStats(&st))
+                std::fprintf(stderr,
+                             "[microvu] lib served=%llu fallback=%llu miss=%llu parks=%llu "
+                             "jump=%llu fall=%llu\n",
+                             (unsigned long long)st.served, (unsigned long long)st.fallback,
+                             (unsigned long long)st.miss, (unsigned long long)st.parks,
+                             (unsigned long long)st.jump_misses,
+                             (unsigned long long)st.fall_misses);
+        }
+    }
     if (s_api.close && s_selected)
         s_api.close();
     s_selected = false;
+    s_engine.clear();
     if (s_api.handle)
         dlclose(s_api.handle);
     s_api = {};
@@ -208,7 +236,7 @@ bool resetForLoad(std::string& error)
 #endif
 }
 
-void run(PS2Memory& memory, uint8_t* data, VU1State& state,
+bool run(PS2Memory& memory, uint8_t* data, VU1State& state,
          uint32_t start_pc, bool resume, uint32_t top, uint32_t itop,
          uint32_t fbrst, uint32_t budget)
 {
@@ -218,9 +246,18 @@ void run(PS2Memory& memory, uint8_t* data, VU1State& state,
     ps2x_microvu_state shadow{};
     importState(shadow, state);
     const char* why = nullptr;
-    if (!s_api.run(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1CodeGeneration(),
-                   data, PS2_VU1_DATA_SIZE, start_pc, resume ? 1u : 0u,
-                   top, itop, fbrst, budget, &shadow, path1, &memory, &why))
+    const int rc = s_api.run(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1CodeGeneration(),
+                             data, PS2_VU1_DATA_SIZE, start_pc, resume ? 1u : 0u,
+                             top, itop, fbrst, budget, &shadow, path1, &memory, &why);
+    if (rc == PS2X_MICROVU_MISS) {
+        // The job was NOT run (data/state untouched): the caller restarts it
+        // in the static engine. Only the offline engine may miss.
+        if (s_engine != "offline")
+            throw std::runtime_error("unexpected MISS from the microvu engine");
+        s_restarts.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    if (!rc)
         throw std::runtime_error(why ? why : "microvu execution failed");
     // SS4: a cycle-budget break parks JIT-private resume state (lpState,
     // resumeEntry) that no re-seed can rebuild; fail loud instead of
@@ -228,6 +265,7 @@ void run(PS2Memory& memory, uint8_t* data, VU1State& state,
     if (shadow.budget_exhausted)
         throw std::runtime_error("microvu cycle-budget break: resume state cannot be saved");
     exportState(state, shadow);
+    return true;
 #else
     (void)memory; (void)data; (void)state; (void)start_pc; (void)resume;
     (void)top; (void)itop; (void)fbrst; (void)budget;

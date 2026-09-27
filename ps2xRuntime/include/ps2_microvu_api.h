@@ -31,6 +31,11 @@ typedef void (*ps2x_microvu_path1_fn)(void *opaque, const uint8_t *bytes, uint32
 // One caller owns the library, and all calls must run on the existing MTVU
 // worker. Error strings are static. The library never starts an EE, GIF or VU
 // scheduler thread.
+//
+// run() returns 1 (served: data/state exported), PS2X_MICROVU_MISS (the
+// offline engine only: the job was NOT run, data/state untouched, the caller
+// must restart the job in the static engine), or 0 (hard error, *error set).
+#define PS2X_MICROVU_MISS 2
 PS2X_MV2_EXPORT uint32_t ps2x_microvu_abi(void);
 PS2X_MV2_EXPORT int ps2x_microvu_init(const char **error);
 PS2X_MV2_EXPORT void ps2x_microvu_shutdown(void);
@@ -41,6 +46,13 @@ PS2X_MV2_EXPORT int ps2x_microvu_run(const uint8_t *code, uint32_t code_size, ui
                      ps2x_microvu_state *state,
                      ps2x_microvu_path1_fn path1, void *path1_opaque,
                      const char **error);
+
+// Optional (the loader dlsyms it; may be absent: MV2 does not provide it).
+// Cumulative process-wide dispatch counters for miss/restart reporting.
+typedef struct ps2x_microvu_stats {
+    uint64_t served, fallback, miss, parks, jump_misses, fall_misses;
+} ps2x_microvu_stats;
+PS2X_MV2_EXPORT int ps2x_microvu_get_stats(ps2x_microvu_stats *out);
 
 #ifdef __cplusplus
 }
