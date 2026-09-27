@@ -56,6 +56,10 @@ struct GSSavestate
 {
     // Worker thread (or inline without a worker), after a drain.
     static std::string ready(const GS &gs);
+    // SQ1: settle host-side-only pending work (render tail, palette
+    // uploads) so a requested save can land; true when it flushed
+    // anything. State still awaiting the guest keeps reporting busy.
+    static bool quiesce(GS &gs);
     static void save(GS &gs, ps2_savestate::Writer &w);
     static bool load(GS &gs, ps2_savestate::Reader &r);
 };

@@ -630,7 +630,8 @@ public:
         if (m_l2hPending != 0u)
             return false;
 #if defined(PARALLEL_GS_HAS_CLUT_STATE)
-        // Palette uploads wait for the next render pass; save after it.
+        // Palette uploads wait for the next render pass; the saver quiesces
+        // them (SQ1) instead of deferring.
         if (m_initOk && !m_iface->clut_state_idle())
             return false;
 #endif
@@ -645,11 +646,30 @@ public:
 
     std::string SavestateBusyReason() const override
     {
+        // SQ1: same order as SavestateIdle so the reason always names the
+        // check that failed.
+        if (m_l2hPending != 0u)
+            return "l2h-pending";
+#if defined(PARALLEL_GS_HAS_CLUT_STATE)
+        if (m_initOk && !m_iface->clut_state_idle())
+            return "clut-pending";
+#endif
 #if defined(PARALLEL_GS_HAS_SAVESTATE_V3)
         if (m_initOk && !m_iface->gs_transfer_idle())
             return "gs-transfer";
 #endif
         return {};
+    }
+
+    bool SavestateQuiesce() override
+    {
+#if defined(PARALLEL_GS_HAS_SAVESTATE_QUIESCE)
+        if (!ensureInit())
+            return false;
+        return m_iface->savestate_quiesce();
+#else
+        return false;
+#endif
     }
 
     bool SavestateLoad(const uint8_t *data, size_t size) override

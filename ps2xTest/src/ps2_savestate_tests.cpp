@@ -701,6 +701,48 @@ void register_ps2_savestate_tests()
                      "palette names its reason (generic pre-SQ1)");
         });
 
+        tc.Run("sq1: quiesce settles a pending palette upload", [](TestCase &t)
+        {
+            if (!ss3WantParallelGpu())
+                return;
+            std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(be.get(), "backend created");
+            if (!be)
+                return;
+            t.IsTrue(!be->SavestateQuiesce(), "quiesce is a no-op when idle");
+            const uint64_t tex0 = (uint64_t{0x14} << 20) | (uint64_t{1} << 55) | (uint64_t{1} << 61);
+            be->RawWriteRegister(0x06, tex0); // TEX0_1: PSMT4, CSM1, CLD=1
+            if (!ss3BackendInitOk(t))
+                return;
+            t.IsTrue(!be->SavestateIdle(), "pending palette upload is not idle");
+            t.IsTrue(be->SavestateQuiesce(), "quiesce settles the palette upload");
+            t.IsTrue(be->SavestateIdle(), "idle after quiesce");
+            t.Equals(be->SavestateBusyReason(), std::string(), "reason clears after quiesce");
+            t.IsTrue(!be->SavestateQuiesce(), "second quiesce is a no-op");
+        });
+
+        tc.Run("sq1: save/load/save is bit-exact across a quiesced palette upload", [](TestCase &t)
+        {
+            if (!ss3WantParallelGpu())
+                return;
+            std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(be.get(), "backend created");
+            if (!be)
+                return;
+            const uint64_t tex0 = (uint64_t{0x14} << 20) | (uint64_t{1} << 55) | (uint64_t{1} << 61);
+            be->RawWriteRegister(0x06, tex0); // TEX0_1: PSMT4, CSM1, CLD=1
+            if (!ss3BackendInitOk(t))
+                return;
+            t.IsTrue(be->SavestateQuiesce(), "quiesce settles the palette upload");
+            std::vector<uint8_t> blob1, blob2;
+            be->SavestateSave(blob1);
+            if (!ss3HaveParallelBlob(t, blob1))
+                return;
+            t.IsTrue(be->SavestateLoad(blob1.data(), blob1.size()), "quiesced blob loads");
+            be->SavestateSave(blob2);
+            t.IsTrue(blob1 == blob2, "save/load/save across a quiesce is bit-exact");
+        });
+
         tc.Run("ss3 s3: retained strip vertices survive save/load", [](TestCase &t)
         {
             if (!ss3WantParallelGpu())
