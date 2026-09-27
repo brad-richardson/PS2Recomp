@@ -40,7 +40,7 @@ void register_ps2_audio_stretch_tests()
             t.IsTrue(near(d.leave, 0.035f, 1e-6f), "default leave band is 3.5 %");
             t.IsTrue(near(d.rejoin, 0.01f, 1e-6f), "default rejoin band is 1 %");
             t.IsTrue(nearD(d.sustainS, 0.30, 1e-9), "default sustain is 300 ms");
-            t.IsTrue(nearD(d.rejoinS, 1.0, 1e-9), "default rejoin dwell is 1 s");
+            t.IsTrue(nearD(d.rejoinS, 0.0, 1e-12), "default rejoin is immediate");
 
             const ps2_audio_stretch::Params leg =
                 ps2_audio_stretch::paramsFromEnv("1", nullptr, nullptr, nullptr);
@@ -61,7 +61,7 @@ void register_ps2_audio_stretch_tests()
                 ps2_audio_stretch::paramsFromEnv(nullptr, "abc", "", "1x");
             t.IsTrue(near(bad.leave, 0.035f, 1e-6f), "bad leave keeps the default");
             t.IsTrue(nearD(bad.sustainS, 0.30, 1e-9), "empty sustain keeps the default");
-            t.IsTrue(nearD(bad.rejoinS, 1.0, 1e-9), "trailing junk keeps the default");
+            t.IsTrue(nearD(bad.rejoinS, 0.0, 1e-12), "trailing junk keeps the default");
 
             const ps2_audio_stretch::Params clamp =
                 ps2_audio_stretch::paramsFromEnv(nullptr, "9", "-5", "99999");
@@ -168,7 +168,7 @@ void register_ps2_audio_stretch_tests()
             t.IsFalse(s.bypass, "6 % slow is outside the band: engages");
         });
 
-        tc.Run("recovery rejoins after the dwell, not at once", [](TestCase &t)
+        tc.Run("recovery rejoins promptly inside the band", [](TestCase &t)
         {
             ps2_audio_stretch::StretchController c;
             c.update(kTarget, 0.0);
@@ -177,12 +177,30 @@ void register_ps2_audio_stretch_tests()
             t.IsFalse(c.bypass(), "precondition: engaged");
             for (int i = 0; i < 50; ++i)
                 c.update(kTarget, kDt);
-            t.IsFalse(c.bypass(), "0.55 s after recovery the dwell still holds");
+            t.IsFalse(c.bypass(), "smooth still below the band: holds");
             ps2_audio_stretch::StepResult s{};
-            for (int i = 0; i < 400; ++i)
+            for (int i = 0; i < 150; ++i)
                 s = c.update(kTarget, kDt);
-            t.IsTrue(s.bypass, "back at target fill the stretcher releases");
+            t.IsTrue(s.bypass, "once smooth crosses inside 1 % the release is immediate");
             t.IsTrue(near(s.tempo, 1.0f, 1e-6f), "released tempo is exactly 1");
+        });
+
+        tc.Run("explicit rejoin dwell holds through brief touches", [](TestCase &t)
+        {
+            ps2_audio_stretch::Params p;
+            p.rejoinS = 1.0;
+            ps2_audio_stretch::StretchController c(p);
+            c.update(kTarget, 0.0);
+            for (int i = 0; i < 100; ++i)
+                c.update(static_cast<uint64_t>(kTarget * 0.6), kDt);
+            t.IsFalse(c.bypass(), "precondition: engaged");
+            for (int i = 0; i < 150; ++i)
+                c.update(kTarget, kDt);
+            t.IsFalse(c.bypass(), "1 s dwell still holds 1.65 s after recovery starts");
+            ps2_audio_stretch::StepResult s{};
+            for (int i = 0; i < 200; ++i)
+                s = c.update(kTarget, kDt);
+            t.IsTrue(s.bypass, "sustained full fill releases even with the dwell");
         });
 
         tc.Run("legacy mode reproduces the AT1 edges", [](TestCase &t)

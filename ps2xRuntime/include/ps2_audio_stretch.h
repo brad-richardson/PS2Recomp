@@ -19,9 +19,12 @@
 //   +/-3.5 % of 1.0 continuously for >= 300 ms (brief: the AT1 immediate
 //   +/-2 % engage cycled audibly — WSOLA overlap at ~10-30 ms lags sounds
 //   like a short echo — on the Odin's +/-3 % fill wander at full speed).
-//   Rejoin after >= 1 s continuously inside +/-1 %, so recovery doesn't
-//   flutter. A sustained 0.8x slowdown still engages within ~0.5 s (the
-//   80 ms target buffer covers the 300 ms sustain: it drains in 400 ms).
+//   Rejoin is immediate inside +/-1 %: the engage side is the sole flutter
+//   guard (a 1 s rejoin dwell never releases under real wander — the mini
+//   and Odin traces never sit inside +/-1 % for 1 s — trapping the
+//   controller engaged; AU12). A sustained 0.8x slowdown still engages
+//   within ~0.5 s (the 80 ms target buffer covers the 300 ms sustain: it
+//   drains in 400 ms).
 //   Bypass plays ring frames straight through (bit-exact) while the
 //   stretcher ingests a copy so engaging is seamless; its output is
 //   discarded in bypass.
@@ -63,7 +66,8 @@ constexpr float kLegacyRejoin = 0.01f; // release inside +/-1 % of 1.0
 constexpr float kLeaveDefault = 0.035f;   // engage outside +/-3.5 %
 constexpr float kRejoinDefault = 0.01f;   // rejoin inside +/-1 %
 constexpr double kSustainDefaultS = 0.30; // continuous outside-band time
-constexpr double kRejoinDefaultS = 1.0;   // continuous inside-band time
+constexpr double kRejoinDefaultS = 0.0;   // rejoin dwell (0 = immediate; a
+                                          // dwell traps engaged under wander)
 constexpr double kTauDownS = 0.05;        // EMA time constant on drops
 constexpr double kTauUpS = 0.30;          // EMA time constant on rises
 
