@@ -63,10 +63,12 @@ struct Regs
     uint8_t flags; // bit0 ebit,1 haltAfterDelaySlot,2 dBit,3 tBit,4 stoppedByD,5 stoppedByT,6 branchPending
     uint8_t reserved[3];
 };
-static_assert(sizeof(Regs) == 652, "Regs must be packed");
+static_assert(sizeof(Regs) == 656, "Regs size (trailing pad is zeroed, not compared)");
+static_assert(offsetof(Regs, reserved) == 653, "Regs layout");
 
 inline void packRegs(const VU1State &s, Regs &r)
 {
+    std::memset(&r, 0, sizeof(r)); // zero padding: Regs is bit-compared
     std::memcpy(r.vf, s.vf, sizeof(r.vf));
     std::memcpy(r.vi, s.vi, sizeof(r.vi));
     std::memcpy(r.acc, s.acc, sizeof(r.acc));
