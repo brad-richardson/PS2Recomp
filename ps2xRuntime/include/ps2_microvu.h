@@ -12,6 +12,8 @@ namespace ps2_microvu {
 // SS4: saveReady reports "" at an E-bit job boundary (a save is exact) or a
 // deferral reason mid-chain; resetForLoad drops all live JIT state after a
 // state load so the next run re-seeds from the loaded VU1State + VU memories.
+// With PS2X_MICROVU_STATIC (iOS app) the offline core is linked in and only
+// it is available (no dlopen).
 // run() returns true when the library served the job; false (offline only)
 // means MISS: the job was NOT run and the caller must restart it statically.
 bool configure(bool mtvu_threaded, std::string& error);

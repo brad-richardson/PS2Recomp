@@ -3,6 +3,8 @@
 // SS4: + Mac (dlopen of the OM1-built dylib) for savestate tests, and the
 // savestate save-gate/load-reset below.
 // OM1: + the offline engine (Mac first) with MISS->static restart.
+// OM1 P5: + PS2X_MICROVU_STATIC (iOS app; the offline core is linked in,
+// no dlopen; the ARMSX2-derived sources stay outside this repo).
 #include "ps2_microvu.h"
 #include "ps2_microvu_api.h"
 #include "ps2_mtvu.h"
@@ -15,16 +17,20 @@
 #include <cstring>
 #include <stdexcept>
 
-#if defined(__ANDROID__) || defined(__APPLE__)
-#include <dlfcn.h>
+#if defined(PS2X_MICROVU_STATIC) || defined(__ANDROID__) || defined(__APPLE__)
 #define PS2X_MICROVU_LOADABLE 1
+#endif
+#if defined(PS2X_MICROVU_LOADABLE) && !defined(PS2X_MICROVU_STATIC)
+#include <dlfcn.h>
 #endif
 
 namespace ps2_microvu {
 namespace {
 #if defined(PS2X_MICROVU_LOADABLE)
 struct Api {
+#if !defined(PS2X_MICROVU_STATIC)
     void* handle = nullptr;
+#endif
     decltype(&ps2x_microvu_init) init = nullptr;
     decltype(&ps2x_microvu_shutdown) close = nullptr;
     decltype(&ps2x_microvu_run) run = nullptr;
@@ -122,6 +128,22 @@ bool configure(bool mtvu_threaded, std::string& error)
         error = std::string(name) + " requires PS2X_VU1_WORKERS unset";
         return false;
     }
+#if defined(PS2X_MICROVU_STATIC)
+    // Static (iOS app): the offline core is linked in; only it is available.
+    if (!offline) {
+        error = "this build links the offline core statically (microvu unavailable)";
+        return false;
+    }
+    s_api.init = &ps2x_microvu_init;
+    s_api.close = &ps2x_microvu_shutdown;
+    s_api.run = &ps2x_microvu_run;
+    s_api.getStats = &ps2x_microvu_get_stats;
+    if (ps2x_microvu_abi() != PS2X_MICROVU_ABI) {
+        error = "offline ABI mismatch (static)";
+        shutdown();
+        return false;
+    }
+#else
     const char* lib = std::getenv("PS2X_MICROVU_LIB");
     std::string fallback;
     if (!lib || !*lib) {
@@ -151,6 +173,7 @@ bool configure(bool mtvu_threaded, std::string& error)
         shutdown();
         return false;
     }
+#endif
     const char* why = nullptr;
     if (!s_api.init(&why)) {
         error = why ? why : "microvu init failed";
@@ -198,8 +221,10 @@ void shutdown()
         s_api.close();
     s_selected = false;
     s_engine.clear();
+#if !defined(PS2X_MICROVU_STATIC)
     if (s_api.handle)
         dlclose(s_api.handle);
+#endif
     s_api = {};
 #endif
 }

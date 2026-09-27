@@ -826,6 +826,50 @@ if(PS2X_VU0_RECOMP_DIR)
         INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu;${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
 endif()
 
+# OM1 P5: offline microVU core, statically linked (iOS app). PS2X_OM1_STAGE is
+# a private dir with OfflineCore.{h,cpp}, OfflineBridge.cpp, the recorded .s
+# + *_tables.c pairs, and an `armsx2` symlink to the ARMSX2 tree (headers).
+# PS2X_OM1_LIB is a private iOS PCSX2 build dir (*.a glob, GI1's shape).
+# Both or neither. Nothing ARMSX2-derived is committed here; the stage and
+# the prebuilt lib stay private, like the game codegen.
+set(PS2X_OM1_STAGE "" CACHE PATH "OM1 offline stage dir (core+tables+armsx2 symlink)")
+set(PS2X_OM1_LIB "" CACHE PATH "OM1 iOS PCSX2 prebuilt dir (*.a)")
+if((PS2X_OM1_STAGE AND NOT PS2X_OM1_LIB) OR (PS2X_OM1_LIB AND NOT PS2X_OM1_STAGE))
+    message(FATAL_ERROR "PS2X: PS2X_OM1_STAGE and PS2X_OM1_LIB go together")
+endif()
+if(PS2X_OM1_STAGE)
+    foreach(f OfflineCore.cpp OfflineBridge.cpp)
+        if(NOT EXISTS "${PS2X_OM1_STAGE}/${f}")
+            message(FATAL_ERROR "PS2X: OM1 stage missing ${f}")
+        endif()
+    endforeach()
+    if(NOT EXISTS "${PS2X_OM1_STAGE}/armsx2/pcsx2/Config.h")
+        message(FATAL_ERROR "PS2X: OM1 stage needs armsx2/ -> ARMSX2 tree (pcsx2/Config.h)")
+    endif()
+    enable_language(ASM)
+    file(GLOB PS2X_OM1_SOURCES CONFIGURE_DEPENDS
+        "${PS2X_OM1_STAGE}/OfflineCore.cpp"
+        "${PS2X_OM1_STAGE}/OfflineBridge.cpp"
+        "${PS2X_OM1_STAGE}/*.s"
+        "${PS2X_OM1_STAGE}/*_tables.c")
+    list(FILTER PS2X_OM1_SOURCES EXCLUDE REGEX "/\\._")
+    list(LENGTH PS2X_OM1_SOURCES PS2X_OM1_SOURCE_COUNT)
+    message(STATUS "PS2X: OM1 offline: ${PS2X_OM1_SOURCE_COUNT} sources from ${PS2X_OM1_STAGE}")
+    file(GLOB_RECURSE PS2X_OM1_ARCHIVES "${PS2X_OM1_LIB}/*.a")
+    list(FILTER PS2X_OM1_ARCHIVES EXCLUDE REGEX "/\\._")
+    list(FILTER PS2X_OM1_ARCHIVES EXCLUDE REGEX ".*/sdl3/.*\\.a$")
+    list(LENGTH PS2X_OM1_ARCHIVES PS2X_OM1_ARCHIVE_COUNT)
+    message(STATUS "PS2X: OM1 archives: ${PS2X_OM1_ARCHIVE_COUNT} from ${PS2X_OM1_LIB}")
+    target_link_libraries(ps2EntryRunner PRIVATE ${PS2X_OM1_ARCHIVES})
+    target_sources(ps2EntryRunner PRIVATE ${PS2X_OM1_SOURCES})
+    target_compile_definitions(ps2_runtime PRIVATE PS2X_MICROVU_STATIC=1)
+    set_source_files_properties(${PS2X_OM1_SOURCES} PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON
+        SKIP_PRECOMPILE_HEADERS ON
+        COMPILE_DEFINITIONS PCSX2_RECOMPILER_TESTS
+        INCLUDE_DIRECTORIES "${PS2X_OM1_STAGE};${PS2X_OM1_STAGE}/armsx2/pcsx2;${PS2X_OM1_LIB}/common/include")
+endif()
+
 if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_IOS)
     target_sources(ps2EntryRunner PRIVATE
         src/lib/ps2_debug_panel.cpp
