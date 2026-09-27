@@ -22,6 +22,7 @@ struct GuestContext
     uint32_t stockHNumerator = 1;
     uint32_t stockHDenominator = 60;
     bool active = false;
+    bool restartCheckpointPending = false;
 };
 struct PredictorIdentity
 {
@@ -196,6 +197,7 @@ inline void finishIfContinuation(R5900Context *ctx) noexcept
     if (half == 0u)
     {
         half = 1u;
+        it->second.restartCheckpointPending = true;
         uint64_t firstRider = 0;
         std::memcpy(&firstRider, &ctx->r[29], sizeof(firstRider));
         const uint64_t remainingRiders = total;
@@ -208,5 +210,17 @@ inline void finishIfContinuation(R5900Context *ctx) noexcept
     {
         half = 0u;
     }
+}
+
+// The generated loop charges a checkpoint on its backward edge. G2d's
+// second-half restart jumped directly to 128dd8, so skip only that extra
+// checkpoint; all ordinary rider-loop checkpoints remain intact.
+inline bool consumeRestartCheckpoint() noexcept
+{
+    if (!halfMode() || guestInterrupt) return false;
+    auto it = contexts.find(guestThread);
+    if (it == contexts.end() || !it->second.restartCheckpointPending) return false;
+    it->second.restartCheckpointPending = false;
+    return true;
 }
 } // namespace ps2_ts2_split60

@@ -4544,6 +4544,7 @@ void PS2Runtime::postEeEvent(EeEvent event)
 
 bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
+    if (ps2_ts2_split60::consumeRestartCheckpoint()) return false;
     if (!m_eeScheduler->checkpointDue(cycles))
     {
         return false;
