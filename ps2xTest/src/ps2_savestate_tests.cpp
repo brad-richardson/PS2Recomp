@@ -680,6 +680,27 @@ void register_ps2_savestate_tests()
             t.IsTrue(blob1 == blob2, "save/load/save across a completed transfer is bit-exact");
         });
 
+        tc.Run("sq1: a pending palette upload names its busy reason", [](TestCase &t)
+        {
+            if (!ss3WantParallelGpu())
+                return;
+            std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(be.get(), "backend created");
+            if (!be)
+                return;
+            t.IsTrue(be->SavestateIdle(), "fresh backend is idle");
+            t.Equals(be->SavestateBusyReason(), std::string(), "no busy reason when idle");
+            // Paletted TEX0_1 (PSMT4, CSM1, CLD=1): the memo misses, so a
+            // palette upload waits for the next render pass.
+            const uint64_t tex0 = (uint64_t{0x14} << 20) | (uint64_t{1} << 55) | (uint64_t{1} << 61);
+            be->RawWriteRegister(0x06, tex0);
+            if (!ss3BackendInitOk(t))
+                return;
+            t.IsTrue(!be->SavestateIdle(), "pending palette upload is not idle");
+            t.Equals(be->SavestateBusyReason(), std::string("clut-pending"),
+                     "palette names its reason (generic pre-SQ1)");
+        });
+
         tc.Run("ss3 s3: retained strip vertices survive save/load", [](TestCase &t)
         {
             if (!ss3WantParallelGpu())
