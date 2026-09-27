@@ -49,6 +49,7 @@ enum class GsCmdKind : uint8_t
     ClearDebugHistory,
     SetDebugPaused,
     PrivWrite, // GB3: guest/HLE priv-register store, applied in stream order
+    GuestVsync,  // GE2: guest VBlank boundary (tick in regValue, CSR FIELD in u32a)
     // RPCs (carry a fence; the caller waits for stream position).
     Consume,
     ReadVram,

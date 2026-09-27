@@ -50,6 +50,38 @@ public:
         (void)regAddr;
         (void)value;
     }
+    // GE2: HLE-decoded packed-GIF packets (GS::processNativePackedGIFPacket)
+    // never enter the raw GIF stream, but the capture records them as
+    // packets, so a recording/external backend must see them too to prove
+    // no dropped operation. Defaults: no-op (existing backends unaffected).
+    virtual void RawNativePackedPacket(const uint8_t *data, uint32_t sizeBytes)
+    {
+        (void)data;
+        (void)sizeBytes;
+    }
+    // GE2: guest VSync at every VBlank, independent of host presents. The
+    // frontend enqueues one fire-and-forget command per VBlankStart (after
+    // the CSR FIELD update) iff the backend opts in. `field` is the CSR
+    // FIELD bit (0/1); a PCSX2 adapter maps it to GSvsync's convention
+    // (FIELD ? 0 : 1) at its own boundary. Defaults: opted out, no-op.
+    virtual bool WantsGuestVsync() const { return false; }
+    virtual void GuestVsync(uint64_t tick, uint32_t field)
+    {
+        (void)tick;
+        (void)field;
+    }
+    // GE2: privileged-register mirroring in stream order. After every
+    // GS::privWrite apply, the frontend diffs the 19 small priv registers
+    // and forwards each changed (offset, value) iff the backend opts in.
+    // The frontend keeps owning CSR/SIGNAL/FINISH/LABEL semantics; this is
+    // a value mirror for an external GS (PCSX2 GSPrivRegSet/GSwriteCSR).
+    // Defaults: opted out, no-op.
+    virtual bool WantsPrivMirror() const { return false; }
+    virtual void PrivMirrored(uint32_t registerOffset, uint64_t value)
+    {
+        (void)registerOffset;
+        (void)value;
+    }
     // SS1 save states (on the GS thread, after a drain). Idle = no transfer
     // or local->host bytes in flight. Save/Load carry state that is not in
     // PS2Memory (the CPU backend's VRAM is PS2Memory's, so it has none).

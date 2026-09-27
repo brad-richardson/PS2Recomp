@@ -149,6 +149,14 @@ public:
     // (paraLLEl). The EE side then routes P6/P7 native fast paths through
     // the arbiter so the backend sees every packet with its path.
     bool rawGifBackendActive() const { return m_rawGifBackend.load(std::memory_order_acquire); }
+    // GE2: guest-VBlank delivery (GSvsync) and priv-register mirroring, both
+    // live only while an opted-in backend (external) is installed.
+    bool wantsGuestVsync() const { return m_wantsGuestVsync.load(std::memory_order_acquire); }
+    bool wantsPrivMirror() const { return m_wantsPrivMirror.load(std::memory_order_acquire); }
+    // GE2: one guest-VBlank boundary. Queued mode enqueues a GuestVsync
+    // command (stream-ordered after the CSR FIELD PrivWrite); direct mode
+    // calls the backend now. No-op unless the backend opted in.
+    void noteGuestVsync(uint64_t tick);
 
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     // GF1 H1 (PS2X_GS_HANDOFF_DIET): noteGifPath(path) when notePath, then
@@ -336,6 +344,8 @@ private:
     std::atomic<uint64_t> m_regWriteCount{0};
     std::atomic<uint64_t> m_privWriteCount{0};
     std::atomic<bool> m_rawGifBackend{false};
+    std::atomic<bool> m_wantsGuestVsync{false}; // GE2: cached WantsGuestVsync()
+    std::atomic<bool> m_wantsPrivMirror{false}; // GE2: cached WantsPrivMirror()
     // N8D7M12 Part 5F4P2: worker-consumption packet-sequence fingerprint.
     // Running digest starts at the FNV-64 offset; snapshot is 0
     // while disabled. N8D7M12 Part 5F4P3: m_pktSeqEnabled is atomic so

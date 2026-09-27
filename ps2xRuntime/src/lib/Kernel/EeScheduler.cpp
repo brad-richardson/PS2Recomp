@@ -3029,6 +3029,10 @@ void EeScheduler::processEvent(const EeEvent &event)
         ps2_vq::noteVBlank(m_vsyncTick, m_runtime.gs(), m_runtime.memory().gs()); // GB2 Part 2 quiescent gate
         ps2x_gs_capture::vblank(m_vsyncTick); // same stream position as the live VQ sample
         ps2xGsCsrVBlankStart(m_runtime.memory(), m_vsyncTick);
+        // GE2: guest-VSync command at every VBlank, after the CSR FIELD
+        // update (queued behind its PrivWrite when the queue is on). No-op
+        // unless an opted-in (external) backend is installed.
+        m_runtime.gs().noteGuestVsync(m_vsyncTick);
         writeGuestU32(m_vsyncFlagAddress, 1u);
         if (m_vsyncTickAddress != 0u)
         {

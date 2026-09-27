@@ -33,6 +33,7 @@
 #include "runtime/gs/gs_stream_capture.h"
 #include "runtime/gs/ps2_gs_shadow.h"
 #include "runtime/gs/ps2_gs_parallel_backend.h"
+#include "runtime/gs/ps2_gs_external_backend.h"
 #include "runtime/gs/ps2_present_share.h"
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
@@ -1429,6 +1430,28 @@ bool PS2Runtime::syncCoreSubsystems()
             }
             m_gs.setRasterBackend(ps2x_gs_parallel::create(&m_memory.gs()));
             std::cerr << "[gs:parallel] live backend selected (PS2X_GS_BACKEND=parallel)" << std::endl;
+        }
+    }
+    // GE2: PS2X_GS_BACKEND=external = the external-GS shell (recording stub
+    // at this stage), fed by the queue like parallel. Default off; unset or
+    // any other value keeps the existing backend untouched.
+    if (ps2x_gs_external::requested() && !m_gs.wantsGuestVsync())
+    {
+        if (!ps2x_gs_external::available())
+        {
+            std::cerr << "[gs:external] PS2X_GS_BACKEND=external requested, but this build has no "
+                         "external backend; staying on the current backend"
+                      << std::endl;
+        }
+        else
+        {
+            if (!m_gs.queueEnabled())
+            {
+                m_gs.setQueueEnabled(true, gsQueueDescriptors());
+                std::cerr << "[gs:queue] enabled (forced by PS2X_GS_BACKEND=external)" << std::endl;
+            }
+            m_gs.setRasterBackend(ps2x_gs_external::create(&m_memory.gs()));
+            std::cerr << "[gs:external] live backend selected (PS2X_GS_BACKEND=external)" << std::endl;
         }
     }
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)

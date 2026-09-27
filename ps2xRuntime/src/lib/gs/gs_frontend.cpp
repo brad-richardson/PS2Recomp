@@ -10,6 +10,7 @@
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
 #include "runtime/ps2_memory.h"
+#include <array>
 #include <atomic>
 #include <algorithm>
 #include <cmath>
@@ -384,6 +385,10 @@ void GS::noteConsumedCommand(const GsCommand &cmd)
     case GsCmdKind::PrivWrite:
         // Opaque callable: kind tag only (content gap, declared).
         break;
+    case GsCmdKind::GuestVsync:
+        pktSeqMixU64(d, cmd.regValue);
+        pktSeqMixU32(d, cmd.u32a);
+        break;
     default:
         // Side RPCs (Consume/ReadVram/RefreshSnapshot/DiagPresent/…)
         // carry no packet bytes: kind tag only, still counted so the
@@ -456,6 +461,10 @@ void GS::executeQueuedCommand(GsCommand &cmd)
         break;
     case GsCmdKind::PrivWrite:
         privWrite(std::move(cmd.apply));
+        break;
+    case GsCmdKind::GuestVsync:
+        if (m_backend)
+            m_backend->GuestVsync(cmd.regValue, cmd.u32a);
         break;
     case GsCmdKind::Consume:
     {
@@ -1350,6 +1359,10 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     const uint8_t path = static_cast<uint8_t>(m_curGifPath);
     GsPacketVramTrace trace{tick, index, path, m_localMemoryStorage, m_localMemorySize};
     ps2x_gs_capture::packet(tick, path, data, sizeBytes);
+    // GE2: raw-stream backends must see this packet too (the capture counts
+    // it); the default is a no-op so paraLLEl is unaffected.
+    if (m_rawGifBackend.load(std::memory_order_relaxed))
+        m_backend->RawNativePackedPacket(data, sizeBytes);
     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
                                                 {
         m_curQ = 1.0f;
@@ -1715,6 +1728,26 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     ps2x_gs_shadow::onWriteRegister(regAddr, value);
 }
 
+namespace
+{
+// GE2: the 19 small priv registers the capture (ps2_memory.cpp) and the
+// external-backend mirror both track, as MMIO offsets. vsyncTick is a
+// host-side tick, not a guest register, and is excluded by both.
+constexpr uint32_t kGe2MirrorOffsets[19] = {
+    0x0000u, 0x0010u, 0x0020u, 0x0030u, 0x0040u, 0x0050u, 0x0060u,
+    0x0070u, 0x0080u, 0x0090u, 0x00A0u, 0x00B0u, 0x00C0u, 0x00D0u,
+    0x00E0u, 0x1000u, 0x1010u, 0x1040u, 0x1080u};
+
+std::array<uint64_t, 19> ge2SnapshotPrivRegs(const GSRegisters &r)
+{
+    return std::array<uint64_t, 19>{r.pmode, r.smode1, r.smode2, r.srfsh,
+        r.synch1, r.synch2, r.syncv, r.dispfb1, r.display1, r.dispfb2,
+        r.display2, r.extbuf, r.extdata, r.extwrite, r.bgcolor,
+        r.csr.load(std::memory_order_acquire), r.imr, r.busdir,
+        r.siglblid.load(std::memory_order_acquire)};
+}
+} // namespace
+
 void GS::privWrite(std::function<void()> apply)
 {
     ps2_mtvu::touch(ps2_mtvu::Site::GsPriv); // MT1: unit-owned
@@ -1729,7 +1762,40 @@ void GS::privWrite(std::function<void()> apply)
         return;
     }
     m_privWriteCount.fetch_add(1u, std::memory_order_relaxed);
+    // GE2: mirror changed priv values to an opted-in backend in stream
+    // order. One relaxed flag check when off; the diff runs at apply time
+    // in both direct and worker modes (this is the single apply funnel).
+    const bool mirror = m_wantsPrivMirror.load(std::memory_order_relaxed) && m_privRegs && m_backend;
+    const auto before = mirror ? ge2SnapshotPrivRegs(*m_privRegs) : std::array<uint64_t, 19>{};
     apply();
+    if (mirror)
+    {
+        const auto after = ge2SnapshotPrivRegs(*m_privRegs);
+        for (size_t i = 0; i < before.size(); ++i)
+            if (before[i] != after[i])
+                m_backend->PrivMirrored(kGe2MirrorOffsets[i], after[i]);
+    }
+}
+
+void GS::noteGuestVsync(uint64_t tick)
+{
+    if (!m_wantsGuestVsync.load(std::memory_order_acquire) || !m_backend)
+        return;
+    // FIELD at the boundary is tick parity by construction
+    // (ps2xGsCsrVBlankStart sets FIELD = tick & 1); deriving it here keeps
+    // the queued mode exact, where the CSR PrivWrite has not executed yet.
+    const uint32_t field = static_cast<uint32_t>(tick & 1u);
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GuestVsync;
+        cmd.regValue = tick;
+        cmd.u32a = field;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    m_backend->GuestVsync(tick, field);
 }
 
 void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
@@ -2447,6 +2513,8 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
     m_backend = std::move(backend);
     m_backend->Initialize(m_localMemoryStorage, m_localMemorySize);
     m_rawGifBackend.store(m_backend->WantsRawGif(), std::memory_order_release);
+    m_wantsGuestVsync.store(m_backend->WantsGuestVsync(), std::memory_order_release);
+    m_wantsPrivMirror.store(m_backend->WantsPrivMirror(), std::memory_order_release);
 }
 
 uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
