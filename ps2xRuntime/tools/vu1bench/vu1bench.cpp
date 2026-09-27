@@ -58,6 +58,9 @@ PS2Memory::~PS2Memory()
 GS::GS() = default;
 GS::~GS() = default;
 
+// The bench never creates a GsWorker; this satisfies unique_ptr<GsWorker>.
+GsWorker::~GsWorker() {}
+
 void PS2Memory::submitGifPacket(GifPathId, const uint8_t *, uint32_t, bool, bool)
 {
     std::fprintf(stderr, "[vu1bench] fatal: submitGifPacket reached (capture off?)\n");
@@ -199,6 +202,7 @@ int main(int argc, char **argv)
         reader.rewindJobs();
         bool first = true;
         uint64_t repJobs = 0;
+        uint64_t repNs = 0;
         for (;;)
         {
             err.clear();
@@ -365,13 +369,15 @@ int main(int argc, char **argv)
             std::memcpy(prevOut.data(), expBuf.data(), prevOut.size());
             ++jobsDone;
             ++repJobs;
+            repNs += dt;
         }
         if (!err.empty())
         {
             std::fprintf(stderr, "[vu1bench] read: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "[vu1bench] pass %d: %llu jobs\n", rep, (unsigned long long)repJobs);
+        std::fprintf(stderr, "[vu1bench] pass %d: %llu jobs ms=%.3f\n", rep,
+                     (unsigned long long)repJobs, repNs / 1e6);
     }
 
     std::sort(allNs.begin(), allNs.end());
@@ -406,8 +412,8 @@ int main(int argc, char **argv)
               [](const auto &a, const auto &b) { return a.second.ns > b.second.ns; });
     std::printf("--- top entries by VU ms ---\n");
     for (size_t i = 0; i < entries.size() && i < 20; ++i)
-        std::printf("%08llx:%04x jobs=%llu ms=%.2f pct=%.1f us_per_run=%.2f cycles_per_run=%.0f\n",
-                    (unsigned long long)(entries[i].first.first & 0xFFFFFFFFull),
+        std::printf("%06llx:%04x jobs=%llu ms=%.2f pct=%.1f us_per_run=%.2f cycles_per_run=%.0f\n",
+                    (unsigned long long)(entries[i].first.first >> 40),
                     entries[i].first.second, (unsigned long long)(entries[i].second.jobs / repeat),
                     entries[i].second.ns / 1e6 / repeat, 100.0 * entries[i].second.ns / totalNs,
                     (entries[i].second.ns / (double)entries[i].second.jobs) / 1000.0,
