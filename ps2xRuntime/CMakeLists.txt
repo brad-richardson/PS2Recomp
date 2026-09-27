@@ -997,6 +997,11 @@ if(PS2X_IS_IOS)
         if(NOT PS2X_GE1_METAL_COUNT EQUAL 8)
             message(FATAL_ERROR "PS2X: GI1 expected 8 .metal shaders, found ${PS2X_GE1_METAL_COUNT}")
         endif()
+        if(CMAKE_OSX_SYSROOT MATCHES "iphonesimulator")
+            set(PS2X_GE1_METAL_TARGET "air64-apple-ios17.0-simulator")
+        else()
+            set(PS2X_GE1_METAL_TARGET "air64-apple-ios17.0")
+        endif()
         set(PS2X_GE1_AIRDIR "${CMAKE_CURRENT_BINARY_DIR}/ge1-metallib")
         set(PS2X_GE1_AIRFILES "")
         foreach(PS2X_GE1_SHADER ${PS2X_GE1_METAL})
@@ -1006,7 +1011,8 @@ if(PS2X_IS_IOS)
             add_custom_command(OUTPUT "${PS2X_GE1_AIR}"
                 COMMAND "${CMAKE_COMMAND}" -E make_directory "${PS2X_GE1_AIRDIR}"
                 COMMAND "${PS2X_XCRUN}" -sdk "${CMAKE_OSX_SYSROOT}" metal
-                    -ffast-math -std=ios-metal2.4 -c "${PS2X_GE1_SHADER}" -o "${PS2X_GE1_AIR}"
+                    -ffast-math -std=ios-metal2.4 -target "${PS2X_GE1_METAL_TARGET}"
+                    -c "${PS2X_GE1_SHADER}" -o "${PS2X_GE1_AIR}"
                 DEPENDS "${PS2X_GE1_SHADER}"
                 COMMENT "GI1 metal ${PS2X_GE1_SHADER_NAME}"
                 VERBATIM
