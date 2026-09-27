@@ -9,6 +9,12 @@
 #include "runtime/gs/ps2_present_vk.h"
 #include <android/hardware_buffer.h>
 #endif
+#if defined(PS2X_GE1_STATIC_IOSURFACE)
+#include "runtime/gs/ps2_present_share.h"
+#include <IOSurface/IOSurfaceRef.h>
+#include <atomic>
+#include <mach/kern_return.h>
+#endif
 
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ps2_memory.h"
@@ -19,8 +25,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -120,6 +128,99 @@ uint32_t fnv1a32(const uint8_t *data, size_t size, uint32_t hash = 2166136261u)
     return hash;
 }
 
+#if defined(PS2X_GE1_STATIC_IOSURFACE)
+// GI1: IOSurface slot pool for the async Metal export. Process-global: the
+// surfaces are retained for the process (like createSurface's pool) and the
+// completion handler may fire after the backend is destroyed, so the epoch
+// stales in-flight exports instead of freeing anything.
+constexpr int kIOSurfaceSlotCount = 3;
+constexpr uint32_t kIOSurfaceWidth = 640u;
+constexpr uint32_t kIOSurfaceHeight = 480u;
+
+struct IOSurfacePool
+{
+    std::mutex mutex;
+    uint64_t epoch = 1u;
+    void *surfaces[kIOSurfaceSlotCount] = {};
+    std::atomic<bool> busy[kIOSurfaceSlotCount];
+    std::atomic<uint64_t> seq{0u};
+};
+
+IOSurfacePool &ioPool()
+{
+    static IOSurfacePool pool;
+    return pool;
+}
+
+struct IOSurfaceExportCtx
+{
+    uint64_t epoch;
+    int slot;
+    uint64_t tick;
+};
+
+void dumpIOSurface(void *surface, uint64_t tick)
+{
+    if (tick != 2100u && tick != 3000u)
+        return;
+    const char *dir = std::getenv("PS2X_GS_IOSURFACE_DUMP_DIR");
+    if (!dir || !*dir)
+        return;
+    IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
+    if (IOSurfaceGetWidth(ref) != kIOSurfaceWidth || IOSurfaceGetHeight(ref) != kIOSurfaceHeight)
+        return;
+    if (IOSurfaceLock(ref, kIOSurfaceLockReadOnly, nullptr) != KERN_SUCCESS)
+        return;
+    const uint8_t *base = static_cast<const uint8_t *>(IOSurfaceGetBaseAddress(ref));
+    const size_t rowBytes = IOSurfaceGetBytesPerRow(ref);
+    char path[1024];
+    std::snprintf(path, sizeof(path), "%s/ge1-iosurface-t%llu.ppm", dir, (unsigned long long)tick);
+    if (FILE *f = std::fopen(path, "wb"))
+    {
+        std::fprintf(f, "P6\n%u %u\n255\n", kIOSurfaceWidth, kIOSurfaceHeight);
+        std::vector<uint8_t> row(static_cast<size_t>(kIOSurfaceWidth) * 3u);
+        for (uint32_t y = 0; y < kIOSurfaceHeight; ++y)
+        {
+            const uint8_t *src = base + static_cast<size_t>(y) * rowBytes;
+            for (uint32_t x = 0; x < kIOSurfaceWidth; ++x)
+            {
+                row[static_cast<size_t>(x) * 3u + 0u] = src[static_cast<size_t>(x) * 4u + 2u];
+                row[static_cast<size_t>(x) * 3u + 1u] = src[static_cast<size_t>(x) * 4u + 1u];
+                row[static_cast<size_t>(x) * 3u + 2u] = src[static_cast<size_t>(x) * 4u + 0u];
+            }
+            std::fwrite(row.data(), 1u, row.size(), f);
+        }
+        std::fclose(f);
+        std::fprintf(stderr, "[gs:external] GE1 IOSurface dump tick=%llu -> %s\n",
+                     (unsigned long long)tick, path);
+    }
+    IOSurfaceUnlock(ref, kIOSurfaceLockReadOnly, nullptr);
+}
+
+// Command-buffer completion thread: publish only here (GE2 contract), then
+// free the slot. Never touches backend state; the epoch drops stale exports.
+void ioExportDone(void *rawCtx, int ok)
+{
+    std::unique_ptr<IOSurfaceExportCtx> ctx(static_cast<IOSurfaceExportCtx *>(rawCtx));
+    IOSurfacePool &pool = ioPool();
+    {
+        std::lock_guard<std::mutex> lock(pool.mutex);
+        if (ok && ctx->epoch == pool.epoch)
+        {
+            void *surface = pool.surfaces[ctx->slot];
+            dumpIOSurface(surface, ctx->tick);
+            ps2x_present_share::publish({surface, kIOSurfaceWidth, kIOSurfaceHeight, ++pool.seq});
+            static std::once_flag once;
+            std::call_once(once, [tick = ctx->tick] {
+                std::fprintf(stderr, "[gs:external] GE1 IOSurface first publish tick=%llu\n",
+                             (unsigned long long)tick);
+            });
+        }
+    }
+    pool.busy[ctx->slot].store(false);
+}
+#endif
+
 void putU32(std::vector<uint8_t> &out, uint32_t v)
 {
     const size_t at = out.size();
@@ -161,6 +262,14 @@ public:
     {
 #if defined(__ANDROID__)
         retireAhbSlots();
+#endif
+#if defined(PS2X_GE1_STATIC_IOSURFACE)
+        // GI1: stale in-flight completion handlers (they still free their
+        // slots, but must not publish after the backend is gone).
+        {
+            std::lock_guard<std::mutex> lock(ioPool().mutex);
+            ++ioPool().epoch;
+        }
 #endif
         if (m_ge1Active)
             m_ge1.close();
@@ -349,6 +458,21 @@ public:
             m_inner->Sync(reason);
     }
 
+    void snapshotToFrame(const GSPresentationRequest &request, PresentationFrame &frame)
+    {
+        uint32_t width = 0u, height = 0u;
+        const uint32_t *rgba = nullptr;
+        if (m_ge1.snapshot(&width, &height, &rgba) && rgba && width && height)
+        {
+            frame.width = width;
+            frame.height = height;
+            frame.pixels.resize(static_cast<size_t>(width) * height * 4u);
+            std::memcpy(frame.pixels.data(), rgba, frame.pixels.size());
+            frame.displayFbp = static_cast<uint32_t>(request.dispfb1 & 0x1ffu);
+            frame.sourceFbp = frame.displayFbp;
+        }
+    }
+
     PresentationFrame Present(const GSPresentationRequest &request) override
     {
         PresentationFrame frame;
@@ -366,20 +490,29 @@ public:
                 }
             }
             else
-#endif
             {
-            uint32_t width = 0u, height = 0u;
-            const uint32_t *rgba = nullptr;
-            if (m_ge1.snapshot(&width, &height, &rgba) && rgba && width && height)
+                snapshotToFrame(request, frame);
+            }
+#elif defined(PS2X_GE1_STATIC_IOSURFACE)
+            // GI1: async GPU export publishes through the shared mailbox; the
+            // pixels stay empty either way (AHB shape). Zero-copy off, or a
+            // busy/failed export, falls back to the CPU snapshot.
+            if (presentIOSurface(request.vsyncTick))
             {
-                frame.width = width;
-                frame.height = height;
-                frame.pixels.resize(static_cast<size_t>(width) * height * 4u);
-                std::memcpy(frame.pixels.data(), rgba, frame.pixels.size());
+                frame.width = 640u;
+                frame.height = 480u;
                 frame.displayFbp = static_cast<uint32_t>(request.dispfb1 & 0x1ffu);
                 frame.sourceFbp = frame.displayFbp;
             }
+            else
+            {
+                snapshotToFrame(request, frame);
             }
+#else
+            {
+                snapshotToFrame(request, frame);
+            }
+#endif
         }
         else if (m_inner)
             frame = m_inner->Present(request);
@@ -874,6 +1007,55 @@ private:
         // Finish fixed-tick diagnostic exports before their stop boundary.
         if (std::getenv("PS2X_GS_AHB_DUMP_DIR") && (tick == 2100u || tick == 3000u))
             return queuePendingAhb();
+        return true;
+    }
+#endif
+
+#if defined(PS2X_GE1_STATIC_IOSURFACE)
+    // GI1: queue an async GPU export into a free IOSurface slot. The publish
+    // happens later, from the command buffer's completion handler (ioExportDone).
+    // False = fall back to the CPU snapshot for this frame (all slots busy,
+    // no composed frame yet, or the export failed).
+    bool presentIOSurface(uint64_t tick)
+    {
+        if (!ps2x_present_share::enabled() || !m_ge1.exportIOSurface)
+            return false;
+        IOSurfacePool &pool = ioPool();
+        int slot = -1;
+        for (int i = 0; i < kIOSurfaceSlotCount; ++i)
+        {
+            bool expected = false;
+            if (pool.busy[i].compare_exchange_strong(expected, true))
+            {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+            return false;
+        void *surface = nullptr;
+        uint64_t epoch = 0u;
+        {
+            std::lock_guard<std::mutex> lock(pool.mutex);
+            if (!pool.surfaces[slot])
+                pool.surfaces[slot] = ps2x_present_share::createSurface(kIOSurfaceWidth, kIOSurfaceHeight);
+            surface = pool.surfaces[slot];
+            epoch = pool.epoch;
+        }
+        if (!surface)
+        {
+            pool.busy[slot].store(false);
+            return false;
+        }
+        std::unique_ptr<IOSurfaceExportCtx> ctx(new IOSurfaceExportCtx{epoch, slot, tick});
+        const int rc =
+            m_ge1.exportIOSurface(surface, kIOSurfaceWidth, kIOSurfaceHeight, &ioExportDone, ctx.get());
+        if (rc != 1)
+        {
+            pool.busy[slot].store(false);
+            return false;
+        }
+        ctx.release(); // ioExportDone owns it from here (fires exactly once)
         return true;
     }
 #endif

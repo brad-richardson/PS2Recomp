@@ -966,7 +966,7 @@ if(PS2X_IS_IOS)
         list(LENGTH PS2X_GE1_ARCHIVES PS2X_GE1_ARCHIVE_COUNT)
         message(STATUS "PS2X: GI1 static GS: ${PS2X_GE1_ARCHIVE_COUNT} archives from ${PS2X_GE1_IOS_BUILD}")
         target_link_libraries(ps2EntryRunner PRIVATE ${PS2X_GE1_ARCHIVES})
-        target_compile_definitions(ps2_runtime PRIVATE PS2X_GE1_STATIC=1)
+        target_compile_definitions(ps2_runtime PRIVATE PS2X_GE1_STATIC=1 PS2X_GE1_STATIC_IOSURFACE=1)
         # Frameworks the GS closure needs beyond what the app already links.
         target_link_libraries(ps2EntryRunner PRIVATE
             "-framework Metal"
