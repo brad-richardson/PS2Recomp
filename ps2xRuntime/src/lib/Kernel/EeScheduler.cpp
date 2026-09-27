@@ -966,7 +966,7 @@ void EeScheduler::run()
                 ps2_ts2_observer::setThread(static_cast<uint32_t>(m_currentThreadId), m_insideInterrupt);
                 ps2_ts2_observer::setTick(m_vsyncTick);
                 ps2_ts2_split60::setThread(static_cast<uint32_t>(m_currentThreadId), m_insideInterrupt);
-                ps2_ts2_split60::finishIfContinuation(context.pc);
+                ps2_ts2_split60::finishIfContinuation(&context);
                 ps2_mpg_src_trace::noteSliceIrq(m_insideInterrupt);
                 m_guestExecuting.store(true, std::memory_order_release);
                 if (ps2DiagWatchEnabled())

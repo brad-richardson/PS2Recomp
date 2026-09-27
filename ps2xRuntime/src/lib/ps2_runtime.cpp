@@ -3346,7 +3346,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     }
 
     const bool returned = ctx->pc == fallthroughPc;
-    if (splitBoundary && returned) ps2_ts2_split60::finish();
+    if (splitBoundary && returned) ps2_ts2_split60::finishIfContinuation(ctx);
     return returned;
 }
 

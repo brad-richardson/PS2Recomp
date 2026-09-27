@@ -179,10 +179,34 @@ inline void finish() noexcept
     it->second.active = false;
 }
 
-inline void finishIfContinuation(uint32_t pc) noexcept
+// The canonical generated 128af0 loop resumes at 128de4 after each rider.
+// On the last rider of half 0, re-arm its existing backward branch with the
+// original rider list. This uses the generated continuation, including when
+// the callee yielded and the scheduler later resumes it.
+inline void finishIfContinuation(R5900Context *ctx) noexcept
 {
-    if (!enabled() || pc != 0x128de4u) return;
+    if (!enabled() || !ctx || ctx->pc != 0x128de4u || guestInterrupt) return;
     const auto it = contexts.find(guestThread);
-    if (it != contexts.end() && it->second.active) finish();
+    if (it == contexts.end() || !it->second.active) return;
+    const uint32_t remaining = getRegU32(ctx, 16);
+    const uint32_t total = getRegU32(ctx, 18);
+    finish();
+    if (!halfMode() || remaining != 0u || total == 0u) return;
+    uint32_t &half = macroHalves[guestThread];
+    if (half == 0u)
+    {
+        half = 1u;
+        uint64_t firstRider = 0;
+        std::memcpy(&firstRider, &ctx->r[29], sizeof(firstRider));
+        const uint64_t remainingRiders = total;
+        // Match SET_GPR_U64's low-half write while keeping this header usable
+        // before ps2_runtime_macros.h defines the generated-code macros.
+        std::memcpy(&ctx->r[16], &remainingRiders, sizeof(remainingRiders));
+        std::memcpy(&ctx->r[17], &firstRider, sizeof(firstRider));
+    }
+    else
+    {
+        half = 0u;
+    }
 }
 } // namespace ps2_ts2_split60
