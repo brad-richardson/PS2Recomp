@@ -25,9 +25,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace
@@ -173,6 +175,10 @@ void dumpIOSurface(void *surface, uint64_t tick)
     const char *dir = std::getenv("PS2X_GS_IOSURFACE_DUMP_DIR");
     if (!dir || !*dir)
         return;
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+    }
     IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
     if (IOSurfaceGetWidth(ref) != kIOSurfaceWidth || IOSurfaceGetHeight(ref) != kIOSurfaceHeight)
         return;
