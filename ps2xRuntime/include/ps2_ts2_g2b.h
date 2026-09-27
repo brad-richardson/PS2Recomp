@@ -37,6 +37,7 @@ inline uint32_t fb(float f) noexcept
 }
 
 inline constexpr uint32_t kPlayerP = 0x01464e30u;
+inline constexpr uint32_t kPlayerR = 0x01465c40u;
 inline constexpr uint32_t kBins = 100u;
 inline std::array<std::atomic<uint32_t>, kBins> rng0{};
 inline std::array<std::atomic<uint32_t>, kBins> rng1{};
@@ -65,10 +66,11 @@ inline void noteState(const uint8_t *ram, R5900Context *ctx, uint64_t tick,
                       uint32_t source, uint32_t target) noexcept
 {
     if (!enabled() || source != 0x128e54u || target != 0x121750u ||
-        !ctx || getRegU32(ctx, 4) != kPlayerP || tick < 1744u || tick > 4000u)
+        !ctx || getRegU32(ctx, 4) != kPlayerR || tick < 1744u || tick > 4000u)
         return;
     if ((tick % 30u) != 0u && (tick < 2200u || tick > 2290u)) return;
-    const uint32_t r = rd(ram, kPlayerP + 0x77cu) & 0x1fffffffu;
+    const uint32_t r = kPlayerR;
+    if ((rd(ram, r + 0x77cu) & 0x1fffffffu) != kPlayerP) return;
     const uint32_t c = r ? (rd(ram, r + 0x788u) & 0x1fffffffu) : 0u;
     std::fprintf(stderr,
         "ts2-g2b-state tick=%llu p=%08x r=%08x c=%08x mode=%08x pos=%08x,%08x,%08x vel=%08x,%08x,%08x scale=%08x ta0=%08x ta4=%08x\n",
@@ -92,7 +94,7 @@ inline void notePredicate(const uint8_t *ram, R5900Context *ctx,
                           uint64_t tick, uint32_t pc) noexcept
 {
     if (!enabled() || !ctx || tick < 2200u || tick > 2290u) return;
-    const uint32_t r = rd(ram, kPlayerP + 0x77cu) & 0x1fffffffu;
+    const uint32_t r = rd(ram, kPlayerP + 0x24u) & 0x1fffffffu;
     // sub_00139C88 receives player P+0x20 as its s0 argument.
     if (getRegU32(ctx, 16) != kPlayerP + 0x20u) return;
     std::fprintf(stderr,
