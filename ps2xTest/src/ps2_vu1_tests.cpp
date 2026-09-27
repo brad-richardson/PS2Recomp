@@ -1924,10 +1924,10 @@ void register_ps2_vu1_tests()
 
         tc.Run("emitted VU1 pairs hand off with a guaranteed tail call (F4-2b)", [](TestCase &t)
         {
-            // Regression test for the Odin S1 stack overflow: every generated
-            // pair function must end in PS2X_VU1_MUSTTAIL, or deep chains nest
-            // one ordinary-call frame per pair (512+ frames blew the 1 MB
-            // GameThread stack). next() itself is musttail into the table.
+            // Regression test for the Odin S1 stack overflow: all generated
+            // handoffs must be guaranteed tail calls. Constant plain block
+            // tails may call their target directly after the chain guard;
+            // branch/E-bit exits must still dispatch through next().
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
@@ -1943,28 +1943,7 @@ void register_ps2_vu1_tests()
             in.close();
             std::filesystem::remove(tmp);
 
-            // "return next(vu, c);" also matches inside the musttail line, so
-            // must == plain means every handoff is a guaranteed tail call.
             const std::string &s = text.str();
-            size_t plain = 0, must = 0, pos = 0;
-            const char *kPlain = "return next(vu, c);";
-            const char *kMust = "PS2X_VU1_MUSTTAIL return next(vu, c);";
-            while ((pos = s.find(kPlain, pos)) != std::string::npos)
-            {
-                ++plain;
-                pos += 1;
-            }
-            pos = 0;
-            while ((pos = s.find(kMust, pos)) != std::string::npos)
-            {
-                ++must;
-                pos += 1;
-            }
-            // VR2 stage 4: the two pairs also form a block (leader 0), whose
-            // exit is a third next() handoff and whose failed guard hands off
-            // to f0000; both must be guaranteed tail calls too.
-            t.Equals(plain, static_cast<size_t>(3u), "both valid pairs and the block should emit handoffs");
-            t.Equals(must, plain, "every pair handoff must be a guaranteed tail call");
             const auto count = [&s](const char *needle)
             {
                 size_t n = 0, at = 0;
@@ -1975,13 +1954,54 @@ void register_ps2_vu1_tests()
                 }
                 return n;
             };
-            t.Equals(count("return f0000(vu, c);"), static_cast<size_t>(1u), "the block falls back to its leader's pair");
-            t.Equals(count("PS2X_VU1_MUSTTAIL return f0000(vu, c);"), static_cast<size_t>(1u),
-                     "the block's fallback is a guaranteed tail call");
-            // VR2 2D: the block's frameless entry trampoline jumps into its body.
-            t.Equals(count("return B0000(vu, c);"), static_cast<size_t>(1u), "the block enters its body");
-            t.Equals(count("PS2X_VU1_MUSTTAIL return B0000(vu, c);"), static_cast<size_t>(1u),
-                     "the block's body entry is a guaranteed tail call");
+            const auto body = [](const std::string &source, const char *name)
+            {
+                const size_t begin = source.find(name);
+                if (begin == std::string::npos)
+                    return std::string{};
+                const size_t end = source.find("\n    }", begin);
+                return source.substr(begin, end == std::string::npos ? end : end - begin);
+            };
+            const std::string plainBody = body(s, "static bool B0000(");
+            t.Equals(count("return next<kNative>(vu, c);"), static_cast<size_t>(2u),
+                     "both pair functions dispatch through next<kNative>");
+            t.Equals(count("PS2X_VU1_MUSTTAIL return next<kNative>(vu, c);"), static_cast<size_t>(2u),
+                     "both pair handoffs are guaranteed tail calls");
+            t.IsTrue(plainBody.find("if (!vu.recompChainReady(c))\n            return false;\n"
+                                    "        PS2X_VU1_MUSTTAIL return b0000<kNative>(vu, c);") != std::string::npos,
+                     "constant plain block tail calls its target only behind the chain guard");
+            t.IsTrue(s.find("PS2X_VU1_MUSTTAIL return f0000<kNative>(vu, c);") != std::string::npos,
+                     "failed block guard tail-calls its leader pair");
+            t.IsTrue(s.find("PS2X_VU1_MUSTTAIL return B0000<kNative>(vu, c);") != std::string::npos,
+                     "block trampoline tail-calls its body");
+            t.IsTrue(s.find("::kPairs[2] = {") != std::string::npos &&
+                     s.find("::kPairsNative[2] = {") != std::string::npos &&
+                     s.find("program.pairs = ") != std::string::npos &&
+                     s.find("program.nativePairs = ") != std::string::npos,
+                     "exact and native pair tables are both emitted and registered");
+
+            // A branch and an E-bit each form a two-pair block with a delay
+            // slot. Neither block has a constant plain tail to call directly.
+            writeVuInstructionPair(fx.code, 0u, makeVuBranch(2), kVuUpperNop);
+            writeVuInstructionPair(fx.code, 8u, makeVuIaddiu(1u, 0u, 1), kVuUpperNop);
+            writeVuInstructionPair(fx.code, 16u, makeVuIaddiu(2u, 0u, 2), kVuUpperNop | 0x40000000u);
+            writeVuInstructionPair(fx.code, 24u, makeVuIaddiu(3u, 0u, 3), kVuUpperNop);
+            t.IsTrue(VU1Interpreter::emitRecompSource(fx.code, 32u, 0x12345678ull, tmp.string()),
+                     "branch/E-bit emitter should succeed");
+            std::ifstream branchIn(tmp, std::ios::binary);
+            std::ostringstream branchText;
+            branchText << branchIn.rdbuf();
+            branchIn.close();
+            std::filesystem::remove(tmp);
+            for (const char *name : {"static bool B0000(", "static bool B0010("})
+            {
+                const std::string exitBody = body(branchText.str(), name);
+                t.IsTrue(exitBody.find("PS2X_VU1_MUSTTAIL return next<kNative>(vu, c);") != std::string::npos,
+                         "branch and E-bit block exits use a guaranteed dynamic handoff");
+                t.IsTrue(exitBody.find("PS2X_VU1_MUSTTAIL return b") == std::string::npos &&
+                         exitBody.find("PS2X_VU1_MUSTTAIL return f") == std::string::npos,
+                         "branch and E-bit block exits never use a direct tail");
+            }
         });
 
         // VB1: the direct-commit path (writes applied at issue) against the
