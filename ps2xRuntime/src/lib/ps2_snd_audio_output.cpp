@@ -601,6 +601,20 @@ bool initialize()
     return true;
 }
 
+void pausePlayback()
+{
+    // The ring keeps its pause-time fill (the guest is frozen too), so the
+    // resume callback drains real frames while the guest refills: no gap.
+    if (g_output.ready && IsAudioStreamPlaying(g_output.stream))
+        PauseAudioStream(g_output.stream);
+}
+
+void resumePlayback()
+{
+    if (g_output.ready && !IsAudioStreamPlaying(g_output.stream))
+        ResumeAudioStream(g_output.stream);
+}
+
 void shutdown()
 {
     if (g_output.ready)

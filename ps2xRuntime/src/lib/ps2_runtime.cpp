@@ -20,6 +20,7 @@
 #include "ps2_e44_trace.h"
 #include "ps2_gfx_stats.h"
 #include "ps2_log.h"
+#include "ps2_android_pause.h"
 #include "ps2_park_snapshot.h"
 #include "ps2_present_fallback.h"
 #include "ps2_present_geometry.h"
@@ -151,12 +152,23 @@ bool ap1HideSystemBars(struct android_app *app)
 // AP1: also re-applies immersive mode (the wrapper is installed on the GL
 // path too, where the TERM_WINDOW call is a no-op).
 void (*g_vk1RaylibOnAppCmd)(struct android_app *, int32_t) = nullptr;
+// BG1: pause-on-background transitions (defined below; they need the runtime).
+void bg1OnPause();
+void bg1OnResume();
 void vk1OnAppCmd(struct android_app *app, int32_t cmd)
 {
     if (cmd == APP_CMD_TERM_WINDOW)
         ps2x_present_vk::windowLost();
     if (cmd == APP_CMD_INIT_WINDOW || cmd == APP_CMD_GAINED_FOCUS)
         ap1HideSystemBars(app);
+    // BG1: APP_CMD_PAUSE is the first background signal (before LOST_FOCUS /
+    // STOP / TERM_WINDOW); APP_CMD_RESUME precedes GAINED_FOCUS on return.
+    // Both run on the main thread inside raylib's PollInputEvents. The pause
+    // waits for the game thread's gate ack (bounded) and flushes GS caches.
+    if (cmd == APP_CMD_PAUSE)
+        bg1OnPause();
+    else if (cmd == APP_CMD_RESUME)
+        bg1OnResume();
     if (g_vk1RaylibOnAppCmd)
         g_vk1RaylibOnAppCmd(app, cmd);
 }
@@ -961,6 +973,42 @@ static void logThreadCpu(uint64_t tick)
                   static_cast<unsigned long long>(g_hr1Uploads.load()));
     std::fprintf(stderr, "%s%s\n", line.c_str(), tail);
 }
+#endif
+
+#if defined(__ANDROID__)
+namespace
+{
+// BG1: the live runtime for the pause hook (set in initialize(), before the
+// game thread starts; the hook runs on the main thread).
+PS2Runtime *g_bg1Runtime = nullptr;
+
+void bg1OnPause()
+{
+    if (!ps2x::androidPause::requestPause())
+        return;
+    const uint64_t tick =
+        g_bg1Runtime ? g_bg1Runtime->eeScheduler().currentVSyncTick() : 0u;
+    ps2_snd_audio_output::pausePlayback();
+    // Bounded: a game thread stuck mid-frame must not hang the app-cmd pump.
+    const bool acked = ps2x::androidPause::waitGateAck(2000);
+    if (g_bg1Runtime)
+        g_bg1Runtime->gs().flushExternalCaches();
+    std::fprintf(stderr, "[bg1] paused at tick=%llu gate_acked=%d\n",
+                 static_cast<unsigned long long>(tick), acked ? 1 : 0);
+}
+
+void bg1OnResume()
+{
+    if (!ps2x::androidPause::requestResume())
+        return;
+    // The gate wakes the game thread first; the ring still holds its
+    // pause-time fill, so the resumed stream drains real frames, no gap.
+    ps2_snd_audio_output::resumePlayback();
+    const uint64_t tick =
+        g_bg1Runtime ? g_bg1Runtime->eeScheduler().currentVSyncTick() : 0u;
+    std::fprintf(stderr, "[bg1] resumed at tick=%llu\n", static_cast<unsigned long long>(tick));
+}
+} // namespace
 #endif
 
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
@@ -1770,6 +1818,16 @@ bool PS2Runtime::initialize(const char *title)
         // AP1: the window exists now (raylib waits for INIT_WINDOW); later
         // windows re-apply through the app-command wrapper above.
         ap1HideSystemBars(GetAndroidApp());
+        // BG1: register the runtime for the pause hook and install the
+        // app-command wrapper now (not on the first present iteration), so a
+        // backgrounding during boot still pauses.
+        g_bg1Runtime = this;
+        if (struct android_app *initApp = GetAndroidApp();
+            initApp && initApp->onAppCmd != vk1OnAppCmd)
+        {
+            g_vk1RaylibOnAppCmd = initApp->onAppCmd;
+            initApp->onAppCmd = vk1OnAppCmd;
+        }
 #else
         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
 #endif
@@ -5086,6 +5144,23 @@ void PS2Runtime::run()
     uint64_t vsyncRateTick = m_memory.gs().vsyncTick.load();
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
+#if defined(__ANDROID__)
+        // BG1: backgrounded (or pre-focus pause): no guest, no presents, no
+        // swapping. PollInputEvents blocks in the looper once raylib is
+        // disabled (backgrounded); while still enabled, sleep so a pause
+        // without focus loss doesn't spin on an unchanged frame.
+        if (ps2x::androidPause::paused())
+        {
+            PollInputEvents(); // delivers APP_CMD_RESUME / DESTROY
+            if (WindowShouldClose())
+            {
+                requestStop();
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+#endif
         if (vsyncRateLog)
         {
             const auto now = std::chrono::steady_clock::now();

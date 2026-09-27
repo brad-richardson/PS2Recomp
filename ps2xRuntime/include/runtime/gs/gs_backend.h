@@ -106,4 +106,9 @@ public:
         (void)data;
         return size == 0u;
     }
+
+    // BG1: persist host-side caches (external GS: the Vulkan pipeline cache
+    // plus newly recorded TFX selectors). Default no-op; only the external
+    // backend implements it. Runs on the GS worker at stream position.
+    virtual void FlushCaches() {}
 };

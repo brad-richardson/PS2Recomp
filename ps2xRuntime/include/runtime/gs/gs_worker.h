@@ -64,6 +64,7 @@ enum class GsCmdKind : uint8_t
     Fence,
     DiagPresent, // GB3: present into a caller-owned frame (no latch side effects)
     OrderedCsrWrite, // O: typed SIGNAL/FINISH W1C after prior GIF packets
+    FlushCaches, // BG1: persist host-side caches on the worker at stream position (RPC)
 };
 
 // Base fence for RPC commands. The worker signals it after executing the

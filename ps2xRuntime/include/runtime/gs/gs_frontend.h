@@ -128,6 +128,10 @@ public:
     }
     // Blocks until all previously enqueued commands have executed.
     void drainQueue();
+    // BG1: persist the backend's host-side caches (external GS only; a no-op
+    // elsewhere). Queued mode runs it on the worker at stream position (an
+    // RPC this call waits on); direct mode runs it now.
+    void flushExternalCaches();
     // N8D7M12 Part 5F4P2: dev-only default-off fingerprint of commands in
     // the order the GS worker actually consumes them. Fence is excluded
     // from the digest/count (its presence is timing-dependent: drainQueue

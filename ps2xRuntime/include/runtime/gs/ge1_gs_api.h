@@ -33,6 +33,9 @@ typedef void (*ge1_gs_export_done_fn)(void* ctx, int ok);
 GE1_API int ge1_gs_export_iosurface(void* iosurface, uint32_t width, uint32_t height,
                                     ge1_gs_export_done_fn done, void* ctx);
 #endif
+// PW1: flush the Vulkan pipeline cache and persist newly recorded TFX selectors now.
+// For the app pause/stop hook (BG1); the periodic ge1_gs_vsync path covers force-stop.
+GE1_API int ge1_gs_flush_caches(void);
 #ifdef __cplusplus
 }
 #endif

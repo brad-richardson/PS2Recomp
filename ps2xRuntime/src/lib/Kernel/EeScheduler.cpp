@@ -27,6 +27,7 @@
 #include "ps2_log.h"
 #include "ps2_park_snapshot.h"
 #include "ps2_runtime_macros.h"
+#include "ps2_android_pause.h"
 
 #include <algorithm>
 #include <cassert>
@@ -1046,6 +1047,7 @@ void EeScheduler::requestStop()
     m_stopRequested.store(true, std::memory_order_release);
     m_checkpointPending.store(true, std::memory_order_release);
     m_eventCv.notify_all();
+    ps2x::androidPause::notifyStop(); // BG1: wake the game thread out of the pause gate
 }
 
 void EeScheduler::postEvent(EeEvent event)
@@ -3032,6 +3034,11 @@ void EeScheduler::processEvent(const EeEvent &event)
         requestStop();
         break;
     case EeEventType::VBlankStart:
+        // BG1: Android pause-on-background gate. Between guest vsyncs, before
+        // the pacer: while paused the thread sleeps here (no spin), freezing
+        // guest time; on resume the pacer resyncs, so no catch-up burst. Only
+        // the Android shell ever sets the flag; elsewhere one relaxed load.
+        ps2x::androidPause::gate(m_stopRequested);
         if (m_vsyncPace)
         {
             // AT1: dev-only forced guest rate (sleep only, like the pacer).

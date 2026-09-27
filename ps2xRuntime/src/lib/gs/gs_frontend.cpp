@@ -387,6 +387,26 @@ void GS::drainQueue()
     rpc->wait();
 }
 
+// BG1: run the backend's host-side cache persist on the GS worker at stream
+// position (an RPC the caller waits on), so it never races queued GS work.
+// Direct mode (or a call from the worker itself) runs it now.
+void GS::flushExternalCaches()
+{
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::FlushCaches;
+        cmd.rpc = std::make_shared<GsRpcBase>();
+        std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return;
+    }
+    std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+    if (m_backend)
+        m_backend->FlushCaches();
+}
+
 void GS::setPktSeqEnabled(bool enabled)
 {
     // N8D7M12 Part 5F4P3: locked for race-safety; the relaxed store
@@ -628,6 +648,10 @@ void GS::executeQueuedCommand(GsCommand &cmd)
         break;
     case GsCmdKind::DiagPresent:
         std::static_pointer_cast<GsRpc<PresentationFrame>>(cmd.rpc)->result = presentForDiagnostics();
+        break;
+    case GsCmdKind::FlushCaches:
+        if (m_backend)
+            m_backend->FlushCaches();
         break;
     }
 }

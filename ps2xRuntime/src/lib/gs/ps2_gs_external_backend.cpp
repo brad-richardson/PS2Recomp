@@ -61,6 +61,8 @@ struct Ge1Api
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
     decltype(&ge1_gs_export_iosurface) exportIOSurface = nullptr;
 #endif
+    // BG1: optional (pre-PW1 libraries lack it; a missing symbol only skips the pause flush).
+    decltype(&ge1_gs_flush_caches) flushCaches = nullptr;
 
     bool load(const char *path)
     {
@@ -78,6 +80,7 @@ struct Ge1Api
             readFifo = ::ge1_gs_read_fifo;
             snapshot = ::ge1_gs_snapshot;
             gpuMs = ::ge1_gs_gpu_ms;
+            flushCaches = ::ge1_gs_flush_caches; // BG1 fold: static bind (same ABI)
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
             exportIOSurface = ::ge1_gs_export_iosurface;
 #endif
@@ -109,6 +112,11 @@ struct Ge1Api
 #endif
         GE1_SYMBOL(gpuMs, ge1_gs_gpu_ms);
 #undef GE1_SYMBOL
+        // BG1: optional symbol (see above); never fails the load.
+        flushCaches =
+            reinterpret_cast<decltype(flushCaches)>(dlsym(library, "ge1_gs_flush_caches"));
+        if (!flushCaches)
+            std::fprintf(stderr, "[gs:external] GE1 library predates ge1_gs_flush_caches; pause flush off\n");
         return true;
     }
 
@@ -704,6 +712,18 @@ public:
     }
 
     bool WantsGuestVsync() const override { return true; }
+
+    // BG1: pause-hook persist (pipeline cache + TFX selectors). Runs on the GS
+    // worker at stream position via GS::flushExternalCaches, under the same
+    // single-threaded backend contract as GuestVsync.
+    void FlushCaches() override
+    {
+        int rc = -1;
+        if (m_ge1Active && m_ge1.flushCaches)
+            rc = m_ge1.flushCaches();
+        std::fprintf(stderr, "[gs:external] BG1 pause flush rc=%d tick=%llu\n", rc, tickNow());
+        log("# bg1-flush rc=%d tick=%llu\n", rc, tickNow());
+    }
 
     void GuestVsync(uint64_t tick, uint32_t field) override
     {
