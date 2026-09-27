@@ -955,7 +955,7 @@ void EeScheduler::run()
         // the unwind exactly as before (E15 dev trace only).
         ps2_e15::Trace mpegTrace("scheduler",m_vsyncTick,m_rdram,&context,context.pc,0u,m_currentThreadId);
         ps2_guest_unwind::clear();
-        if (std::setjmp(m_transferJmp) == 0)
+        if (setjmp(m_transferJmp) == 0)
         {
             m_transferArmed = true;
             try
@@ -1545,7 +1545,7 @@ void EeScheduler::raiseTransfer()
     if (m_transferArmed)
     {
         m_transferArmed = false;
-        std::longjmp(m_transferJmp, 1);
+        longjmp(m_transferJmp, 1);
     }
     throw EeDispatcherTransfer{};
 }
