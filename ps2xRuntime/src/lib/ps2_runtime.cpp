@@ -690,26 +690,35 @@ void dumpPresentationFrame(const uint8_t *rgba,
     {
         return;
     }
-    // Gate captures can request three bounded snapshots without encoding a
+    // Gate captures can request up to 24 bounded snapshots without encoding a
     // PNG on every present. Each target accepts the first frame within the
     // following two guest seconds, since present and vsync can be out of phase.
-    static const std::array<uint64_t, 3> selectedTicks = [] {
-        std::array<uint64_t, 3> ticks{};
+    static const std::array<uint64_t, 24> selectedTicks = [] {
+        std::array<uint64_t, 24> ticks{};
         if (const char *env = std::getenv("PS2X_FRAME_DUMP_ONCE_TICKS"))
         {
-            unsigned long long a = 0, b = 0, c = 0;
-            if (std::sscanf(env, "%llu,%llu,%llu", &a, &b, &c) == 3)
-                ticks = {static_cast<uint64_t>(a), static_cast<uint64_t>(b), static_cast<uint64_t>(c)};
+            const char *next = env;
+            size_t count = 0;
+            while (*next && count < ticks.size())
+            {
+                char *end = nullptr;
+                const unsigned long long value = std::strtoull(next, &end, 10);
+                if (end == next || value == 0u) break;
+                ticks[count++] = static_cast<uint64_t>(value);
+                if (*end != ',') break;
+                next = end + 1;
+            }
         }
         return ticks;
     }();
     if (selectedTicks[0] != 0u)
     {
-        static std::array<bool, 3> captured{};
+        static std::array<bool, 24> captured{};
         bool selected = false;
         for (size_t i = 0; i < selectedTicks.size(); ++i)
         {
-            if (!captured[i] && tick >= selectedTicks[i] && tick < selectedTicks[i] + 120u)
+            if (selectedTicks[i] != 0u && !captured[i] &&
+                tick >= selectedTicks[i] && tick < selectedTicks[i] + 120u)
             {
                 captured[i] = true;
                 selected = true;
@@ -740,6 +749,7 @@ void dumpPresentationFrame(const uint8_t *rgba,
     static uint64_t s_successKeep = 0u;
     static uint64_t s_fallbackKeep = 0u;
     bool keep = fallback ? (s_fallbackKeep++ < 2u) : (s_successKeep++ < 2u);
+    if (selectedTicks[0] != 0u) keep = true;
     // E15: preserve actual host uploads in the same dynamically armed interval.
     // Four additional image/metadata pairs maximum; observation only.
     static uint32_t s_alignedKeep = 0u;

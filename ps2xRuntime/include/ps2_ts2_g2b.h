@@ -38,7 +38,8 @@ inline uint32_t fb(float f) noexcept
 
 inline constexpr uint32_t kPlayerP = 0x01464e30u;
 inline constexpr uint32_t kPlayerR = 0x01465c40u;
-inline constexpr uint32_t kBins = 100u;
+inline constexpr uint32_t kBins = 360u; // 6 minutes at one bin per guest second.
+inline constexpr uint64_t kLastTick = 20100u;
 inline std::array<std::atomic<uint32_t>, kBins> rng0{};
 inline std::array<std::atomic<uint32_t>, kBins> rng1{};
 inline std::array<std::atomic<uint32_t>, kBins> triggerCountdown{};
@@ -47,7 +48,7 @@ inline std::array<std::atomic<uint32_t>, kBins> triggerOther{};
 inline void noteBranch(uint64_t tick, uint32_t source, uint32_t target,
                        R5900Context *ctx) noexcept
 {
-    if (!enabled() || tick < 1744u || tick > 4000u || !ctx) return;
+    if (!enabled() || tick < 1744u || tick > kLastTick || !ctx) return;
     const uint32_t bin = static_cast<uint32_t>(tick / 60u);
     if (bin >= kBins) return;
     if (target == 0x317a08u)
@@ -66,8 +67,21 @@ inline void noteState(const uint8_t *ram, R5900Context *ctx, uint64_t tick,
                       uint32_t source, uint32_t target) noexcept
 {
     if (!enabled() || source != 0x128e54u || target != 0x121750u ||
-        !ctx || getRegU32(ctx, 4) != kPlayerR || tick < 1744u || tick > 4000u)
+        !ctx || getRegU32(ctx, 4) != kPlayerR || tick < 1744u || tick > kLastTick)
         return;
+    const uint32_t mode = rd(ram, kPlayerP + 0xde0u);
+    static thread_local uint32_t lastMode = 0xffffffffu;
+    static std::atomic<uint32_t> modeRows{0};
+    if (mode != lastMode)
+    {
+        const uint32_t row = modeRows.fetch_add(1u, std::memory_order_relaxed);
+        if (row < 1024u)
+            std::fprintf(stderr, "ts2-g2b-mode tick=%llu from=%08x to=%08x\n",
+                         static_cast<unsigned long long>(tick), lastMode, mode);
+        else if (row == 1024u)
+            std::fputs("ts2-g2b-mode cap=1024 drops_begin\n", stderr);
+        lastMode = mode;
+    }
     if ((tick % 30u) != 0u && (tick < 2200u || tick > 2290u)) return;
     const uint32_t r = kPlayerR;
     if ((rd(ram, r + 0x77cu) & 0x1fffffffu) != kPlayerP) return;
@@ -75,7 +89,7 @@ inline void noteState(const uint8_t *ram, R5900Context *ctx, uint64_t tick,
     std::fprintf(stderr,
         "ts2-g2b-state tick=%llu p=%08x r=%08x c=%08x mode=%08x pos=%08x,%08x,%08x vel=%08x,%08x,%08x scale=%08x ta0=%08x ta4=%08x\n",
         static_cast<unsigned long long>(tick), kPlayerP, r, c,
-        rd(ram, kPlayerP + 0xde0u),
+        mode,
         rd(ram, r + 0x110u), rd(ram, r + 0x114u), rd(ram, r + 0x118u),
         rd(ram, r + 0x1e0u), rd(ram, r + 0x1e4u), rd(ram, r + 0x1e8u),
         rd(ram, r + 0x300u), rd(ram, c + 0xa0u), rd(ram, c + 0xa4u));
