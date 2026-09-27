@@ -317,6 +317,26 @@ public:
     // every observer (IO register reads/writes, the idle deadline query,
     // savestates) flushes first, so guest observations are identical.
     uint32_t advanceEeTimers(uint64_t eeCycles) noexcept;
+    // EX1: inline fast-path split of advanceEeTimers for the scheduler
+    // checkpoint. eeTimersFastWouldFire is pure (no state change);
+    // eeTimersFastApply performs exactly advanceEeTimers' deferred update
+    // and runs only when WouldFire returned false. Conditions mirror
+    // advanceEeTimers bit-for-bit; the slow path calls advanceEeTimers
+    // with untouched state, so service is identical.
+    [[nodiscard]] bool eeTimersFastWouldFire(uint64_t eeCycles) const noexcept
+    {
+        if (eeCycles == 0u)
+        {
+            return false;
+        }
+        const uint64_t toEvent = m_eeTimerEventIn - m_eeTimerPending;
+        return eeCycles >= kEeTimerDeferralHorizon || eeCycles >= toEvent ||
+               toEvent - eeCycles <= kEeTimerDeferralHorizon;
+    }
+    void eeTimersFastApply(uint64_t eeCycles) noexcept
+    {
+        m_eeTimerPending += eeCycles;
+    }
     void flushEeTimers() noexcept;
     [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() noexcept;
     void resetEeTimers() noexcept;

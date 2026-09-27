@@ -491,6 +491,9 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_rdram = rdram;
     m_readyQueues = {};
     m_threads.clear();
+    noteThreadContainerMutated();
+    m_runningThread = nullptr;
+    m_runningThreadId = -1;
     m_semaphores.clear();
     m_eventFlags.clear();
     m_alarms.clear();
@@ -555,6 +558,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     main.currentPriority = 0;
     main.status = EeThreadStatus::Ready;
     m_threads.emplace(main.id, std::move(main));
+    noteThreadContainerMutated();
     m_readyQueues[0].push_back(kMainThreadId);
     scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
                   std::chrono::steady_clock::now() + kVBlankPeriod,
@@ -1060,9 +1064,15 @@ void EeScheduler::postEvent(EeEvent event)
     m_eventCv.notify_one();
 }
 
-bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+// EX1: the legacy checkpointDue sequence, kept verbatim as the fast
+// path's fallback (plus running-thread cache refresh). Runs only on
+// cache miss, timer service, pending/stop/deadline/slice-expiry work.
+bool EeScheduler::checkpointDueFull(uint32_t cycles) noexcept
 {
     accountCycles(cycles);
+    m_runningThread = currentThread();
+    m_runningThreadId = m_currentThreadId;
+    m_runningThreadGen = m_threadContainerGen;
 
     if (m_checkpointPending.load(std::memory_order_acquire) ||
         m_stopRequested.load(std::memory_order_acquire))
@@ -1082,7 +1092,11 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         return false;
     }
 
-    const GuestThread *running = currentThread();
+    return checkpointSliceExpired(m_runningThread);
+}
+
+bool EeScheduler::checkpointSliceExpired(GuestThread *running)
+{
     if (running != nullptr && hasReadyAtOrAbovePriority(running->currentPriority))
     {
         m_rescheduleRequested = true;
@@ -1176,6 +1190,7 @@ int EeScheduler::createThread(const EeThreadCreateParams &params)
     thread.currentPriority = params.priority;
     thread.status = EeThreadStatus::Dormant;
     m_threads.emplace(id, std::move(thread));
+    noteThreadContainerMutated();
     publishSnapshot();
     return id;
 }
@@ -1205,6 +1220,7 @@ int EeScheduler::deleteThread(int id, uint32_t &ownedStack)
         ownedStack = it->second.stack;
     }
     m_threads.erase(it);
+    noteThreadContainerMutated();
     publishSnapshot();
     return KE_OK;
 }
@@ -1266,6 +1282,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
     if (deleteThreadRecord && id != kMainThreadId)
     {
         m_threads.erase(id);
+        noteThreadContainerMutated();
     }
     if (ownedStack != 0u)
     {
@@ -2673,7 +2690,10 @@ GuestThread &EeScheduler::acquireInvocationThread()
     dispatcher.initialPriority = 0;
     dispatcher.currentPriority = 0;
     dispatcher.status = EeThreadStatus::Dormant;
-    return m_threads.emplace(dispatcher.id, std::move(dispatcher)).first->second;
+    GuestThread &inserted =
+        m_threads.emplace(dispatcher.id, std::move(dispatcher)).first->second;
+    noteThreadContainerMutated();
+    return inserted;
 }
 
 void EeScheduler::enqueueReady(GuestThread &item, bool front)

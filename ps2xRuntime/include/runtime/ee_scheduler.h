@@ -3,6 +3,7 @@
 #include "ps2_runtime.h"
 #include "ps2_vsync_pacer.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -289,7 +290,53 @@ public:
     void run();
     void requestStop();
     void postEvent(EeEvent event);
-    [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
+    // EX1: exact checkpoint fast path (RV17 Stage E). The no-event path
+    // charges, publishes Count through the cached running thread, applies
+    // the EE1 timer deferral and polls pending/stop/deadline/slice —
+    // identical decisions and mutations to the legacy outline path. Any
+    // slow condition (uncached thread, timer service due, slice expiry)
+    // delegates to outline helpers; the first two bail with pristine
+    // state so checkpointDueFull is bit-for-bit the legacy sequence.
+    [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept
+    {
+        const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
+        // A cached nullptr is a valid "no current thread" entry; only the
+        // id+generation decide validity, so a threadless stretch stays on
+        // the fast path after one Full refresh.
+        if (m_runningThreadId != m_currentThreadId ||
+            m_runningThreadGen != m_threadContainerGen)
+        {
+            return checkpointDueFull(cycles);
+        }
+        GuestThread *running = m_runningThread;
+        if (m_runtime.memory().eeTimersFastWouldFire(elapsed))
+        {
+            return checkpointDueFull(cycles);
+        }
+        m_eeCycle += elapsed;
+        if (running != nullptr)
+        {
+            running->activeContext().cop0_count =
+                m_count + static_cast<uint32_t>(m_eeCycle - m_countCycle);
+        }
+        m_runtime.memory().eeTimersFastApply(elapsed);
+        if (m_checkpointPending.load(std::memory_order_acquire) ||
+            m_stopRequested.load(std::memory_order_acquire))
+        {
+            return true;
+        }
+        const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+        if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
+        {
+            m_checkpointPending.store(true, std::memory_order_release);
+            return true;
+        }
+        if (m_eeCycle < m_sliceEndCycle)
+        {
+            return false;
+        }
+        return checkpointSliceExpired(running);
+    }
     void accountCycles(uint32_t cycles) noexcept;
     // Executor-only shared COP0 Count clock. A read charges at least one tick.
     uint32_t readCount(R5900Context *ctx) noexcept;
@@ -432,6 +479,12 @@ private:
     void updateNextDeadline();
     [[nodiscard]] bool hasReadyAtOrAbovePriority(int priority) const;
     void renewTimeSlice();
+    // EX1: outline checkpoint tails. checkpointDueFull is the legacy
+    // checkpointDue sequence verbatim (plus running-thread cache refresh);
+    // checkpointSliceExpired is its slice-expiry arm. Both run cold.
+    bool checkpointDueFull(uint32_t cycles) noexcept;
+    bool checkpointSliceExpired(GuestThread *running);
+    void noteThreadContainerMutated() noexcept { ++m_threadContainerGen; }
     void copyMainContextToRuntime();
 
     PS2Runtime &m_runtime;
@@ -475,6 +528,16 @@ private:
     uint32_t m_enabledIntcMask = 0xFFFFFFFFu;
     uint32_t m_enabledDmacMask = 0xFFFFFFFFu;
     int m_currentThreadId = 0;
+    // EX1: cached running thread for the checkpoint fast path. (ptr, id)
+    // are valid only when id == m_currentThreadId and gen ==
+    // m_threadContainerGen; ids are ring-reused, so the generation (bumped
+    // on every m_threads mutation — clear/emplace/erase — plus savestate
+    // load) guards against ABA. Transient: never serialized; reset and
+    // load invalidate it. Executor thread only, like the container.
+    GuestThread *m_runningThread = nullptr;
+    int m_runningThreadId = -1;
+    uint64_t m_runningThreadGen = 0;
+    uint64_t m_threadContainerGen = 0;
     bool m_rescheduleRequested = false;
     bool m_timeSliceExpired = false;
     bool m_insideInterrupt = false;

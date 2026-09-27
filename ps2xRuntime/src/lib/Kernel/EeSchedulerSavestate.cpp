@@ -277,6 +277,11 @@ bool EeSchedulerSavestate::load(EeScheduler &s, Reader &r, PS2Runtime &runtime)
         for (GuestInvocation &inv : t.invocations)
             readInvocation(rr, inv);
     });
+    // EX1: the container was rebuilt; drop any cached running-thread
+    // pointer (it dangles) before execution resumes.
+    s.noteThreadContainerMutated();
+    s.m_runningThread = nullptr;
+    s.m_runningThreadId = -1;
     readOrdered(r, s.m_semaphores, [](Reader &rr, auto &entry) {
         EeSemaphore &v = entry.second;
         rr.pod(entry.first);
