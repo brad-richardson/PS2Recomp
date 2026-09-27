@@ -792,10 +792,17 @@ private:
         }
         uint64_t ids[4];
         for (int i = 0; i < 4; ++i) ids[i] = m_ahbSlots[i].id;
-        const ps2x_present_vk::Pick pick = ps2x_present_vk::pickReusable(ids, 4, m_ahbStart, 1000);
+        // Benchmark-only: let guest GS work continue when the display still
+        // owns every buffer. A later VSync will present the newest frame.
+        static const bool unpacedPresent = [] {
+            const char *v = std::getenv("PS2X_PRESENT_UNPACED");
+            return v && std::strcmp(v, "1") == 0;
+        }();
+        const ps2x_present_vk::Pick pick =
+            ps2x_present_vk::pickReusable(ids, 4, m_ahbStart, unpacedPresent ? 0 : 1000);
         if (pick.index < 0)
         {
-            if (pick.giveUp)
+            if (!unpacedPresent && pick.giveUp)
                 ps2x_present_vk::fallBack("GE1 AHB compositor release timeout");
             return false;
         }

@@ -5204,15 +5204,29 @@ void PS2Runtime::run()
         else
         {
             // What EndDrawing would do minus the swap: poll input (blocks while
-            // the app is in the background) and pace the loop at 60 Hz.
+            // the app is in the background). For throughput measurement, the
+            // AHB sink may drop presents; poll faster than the display rate.
             PollInputEvents();
-            static auto s_nextFrame = std::chrono::steady_clock::now();
-            s_nextFrame += std::chrono::microseconds(16667);
-            const auto now = std::chrono::steady_clock::now();
-            if (s_nextFrame < now)
-                s_nextFrame = now;
+#if defined(__ANDROID__)
+            static const bool s_unpacedPresent = [] {
+                const char *v = std::getenv("PS2X_PRESENT_UNPACED");
+                return v && std::strcmp(v, "1") == 0;
+            }();
+            if (vkLive && s_unpacedPresent)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
             else
-                std::this_thread::sleep_until(s_nextFrame);
+#endif
+            {
+                static auto s_nextFrame = std::chrono::steady_clock::now();
+                s_nextFrame += std::chrono::microseconds(16667);
+                const auto now = std::chrono::steady_clock::now();
+                if (s_nextFrame < now)
+                    s_nextFrame = now;
+                else
+                    std::this_thread::sleep_until(s_nextFrame);
+            }
         }
 
         if (WindowShouldClose())
