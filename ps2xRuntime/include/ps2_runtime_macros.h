@@ -322,6 +322,44 @@ static inline __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
     return value;
 }
 
+// EX1: canonical-RAM reads. Valid only when addr + width <= PS2_RAM_SIZE
+// (mask no-op, access contiguous), in which case these are bit-identical
+// to the Ps2FastRead* result with no range decode. Pure: no taps.
+static inline uint8_t Ps2CanonicalRead8(const uint8_t *rdram, uint32_t addr)
+{
+    uint8_t value;
+    std::memcpy(&value, rdram + addr, sizeof(value));
+    return value;
+}
+
+static inline uint16_t Ps2CanonicalRead16(const uint8_t *rdram, uint32_t addr)
+{
+    uint16_t value;
+    std::memcpy(&value, rdram + addr, sizeof(value));
+    return value;
+}
+
+static inline uint32_t Ps2CanonicalRead32(const uint8_t *rdram, uint32_t addr)
+{
+    uint32_t value;
+    std::memcpy(&value, rdram + addr, sizeof(value));
+    return value;
+}
+
+static inline uint64_t Ps2CanonicalRead64(const uint8_t *rdram, uint32_t addr)
+{
+    uint64_t value;
+    std::memcpy(&value, rdram + addr, sizeof(value));
+    return value;
+}
+
+static inline __m128i Ps2CanonicalRead128(const uint8_t *rdram, uint32_t addr)
+{
+    __m128i value;
+    std::memcpy(&value, rdram + addr, sizeof(value));
+    return value;
+}
+
 static inline void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t value)
 {
     rdram[addr & PS2_RAM_MASK] = value;
@@ -463,9 +501,11 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         ps2x_tap_mpg::isReadWatched(_addr, 1u))           \
         ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 1u, ps2xE40Fn); \
     ps2_ts2_observer::noteLoad(ctx, _addr, 1u);           \
-    return PS2Runtime::isSpecialAddress(_addr)                \
-        ? runtime->Load8(rdram, ctx, _addr)                   \
-        : FAST_READ8(_addr); }())
+    return _addr <= PS2_RAM_SIZE - sizeof(uint8_t) /* EX1 */ \
+        ? Ps2CanonicalRead8(rdram, _addr)                    \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load8(rdram, ctx, _addr)               \
+            : FAST_READ8(_addr)); }())
 
 #define READ16(addr) ([&, ps2xE40Fn = __func__]() -> uint16_t {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
@@ -473,9 +513,11 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         ps2x_tap_mpg::isReadWatched(_addr, 2u))           \
         ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 2u, ps2xE40Fn); \
     ps2_ts2_observer::noteLoad(ctx, _addr, 2u);           \
-    return PS2Runtime::isSpecialAddress(_addr)                \
-        ? runtime->Load16(rdram, ctx, _addr)                  \
-        : FAST_READ16(_addr); }())
+    return _addr <= PS2_RAM_SIZE - sizeof(uint16_t) /* EX1 */ \
+        ? Ps2CanonicalRead16(rdram, _addr)                   \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load16(rdram, ctx, _addr)              \
+            : FAST_READ16(_addr)); }())
 
 #define READ32(addr) ([&, ps2xE40Fn = __func__]() -> uint32_t {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
@@ -483,9 +525,11 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         ps2x_tap_mpg::isReadWatched(_addr, 4u))           \
         ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 4u, ps2xE40Fn); \
     ps2_ts2_observer::noteLoad(ctx, _addr, 4u);           \
-    uint32_t _rv = PS2Runtime::isSpecialAddress(_addr)        \
-        ? runtime->Load32(rdram, ctx, _addr)                  \
-        : FAST_READ32(_addr);                                 \
+    uint32_t _rv = _addr <= PS2_RAM_SIZE - sizeof(uint32_t) /* EX1 */ \
+        ? Ps2CanonicalRead32(rdram, _addr)                   \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load32(rdram, ctx, _addr)              \
+            : FAST_READ32(_addr));                           \
     if (ps2_ts2_split60::halfMode()) /* EE1P2: one product gate per 32-bit load */ \
         _rv = ps2_ts2_split60::halfLoad(ctx->pc, _addr, _rv);  \
     if (ps2x_tap_mpg::uploadloadArmed() &&                \
@@ -501,9 +545,11 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         ps2x_tap_mpg::isReadWatched(_addr, 8u))           \
         ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 8u, ps2xE40Fn); \
     ps2_ts2_observer::noteLoad(ctx, _addr, 8u);           \
-    uint64_t _rv = PS2Runtime::isSpecialAddress(_addr)        \
-        ? runtime->Load64(rdram, ctx, _addr)                  \
-        : FAST_READ64(_addr);                                 \
+    uint64_t _rv = _addr <= PS2_RAM_SIZE - sizeof(uint64_t) /* EX1 */ \
+        ? Ps2CanonicalRead64(rdram, _addr)                   \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load64(rdram, ctx, _addr)              \
+            : FAST_READ64(_addr));                           \
     if (ps2x_tap_mpg::uploadloadArmed() &&                \
         (ps2x_tap_mpg::isUploaderValue((uint32_t)_rv) ||  \
          ps2x_tap_mpg::isUploaderValue((uint32_t)(_rv >> 32u)))) \
@@ -518,9 +564,11 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         ps2x_tap_mpg::isReadWatched(_addr, 16u))          \
         ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 16u, ps2xE40Fn); \
     ps2_ts2_observer::noteLoad(ctx, _addr, 16u);          \
-    __m128i _rv = PS2Runtime::isSpecialAddress(_addr)        \
-        ? runtime->Load128(rdram, ctx, _addr)                 \
-        : FAST_READ128(_addr);                                \
+    __m128i _rv = _addr <= PS2_RAM_SIZE - sizeof(__m128i) /* EX1 */ \
+        ? Ps2CanonicalRead128(rdram, _addr)                  \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load128(rdram, ctx, _addr)             \
+            : FAST_READ128(_addr));                          \
     uint64_t _lo = 0u, _hi = 0u;                              \
     const bool _ulArmed = ps2x_tap_mpg::uploadloadArmed(); \
     const bool _tagArmed = ps2x_tap_mpg::tagaddrArmed();   \
@@ -556,13 +604,14 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2DiagWatchReport(rdram, _addr, 1u, (uint64_t)_wv, 0u, ctx, runtime);    \
         if (ps2x_tap_mpg::writeArmed())                                           \
             ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 1u, (uint64_t)_wv, 0u, __func__); \
-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
-            runtime->Store8(rdram, ctx, _addr, _wv);                                   \
-        else                                                                           \
+        if (_addr <= PS2_RAM_SIZE - sizeof(uint8_t) || /* EX1: canonical RAM */        \
+            !PS2Runtime::isSpecialAddress(_addr))                                      \
         {                                                                              \
             ps2TraceGuestWrite(rdram, _addr, 1u, _wv, 0u, "WRITE8", ctx);              \
             FAST_WRITE8(_addr, _wv);                                                   \
         }                                                                              \
+        else                                                                           \
+            runtime->Store8(rdram, ctx, _addr, _wv);                                   \
         if (_e42plant)                                                                 \
             ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 1u, __func__); \
         if (_e43)                                                                             \
@@ -595,13 +644,14 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2DiagWatchReport(rdram, _addr, 2u, (uint64_t)_wv, 0u, ctx, runtime);      \
         if (ps2x_tap_mpg::writeArmed())                                             \
             ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 2u, (uint64_t)_wv, 0u, __func__); \
-        if (PS2Runtime::isSpecialAddress(_addr))                                         \
-            runtime->Store16(rdram, ctx, _addr, _wv);                                    \
-        else                                                                             \
+        if (_addr <= PS2_RAM_SIZE - sizeof(uint16_t) || /* EX1: canonical RAM */       \
+            !PS2Runtime::isSpecialAddress(_addr))                                      \
         {                                                                                \
             ps2TraceGuestWrite(rdram, _addr, 2u, _wv, 0u, "WRITE16", ctx);               \
             FAST_WRITE16(_addr, _wv);                                                    \
         }                                                                                \
+        else                                                                           \
+            runtime->Store16(rdram, ctx, _addr, _wv);                                  \
         if (_e42plant)                                                                   \
             ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 2u, __func__); \
         if (_e43)                                                                             \
@@ -640,13 +690,14 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2DiagWatchReport(rdram, _addr, 4u, (uint64_t)_wv, 0u, ctx, runtime);      \
         if (ps2x_tap_mpg::writeArmed())                                             \
             ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
-        if (PS2Runtime::isSpecialAddress(_addr))                                         \
-            runtime->Store32(rdram, ctx, _addr, _wv);                                    \
-        else                                                                             \
+        if (_addr <= PS2_RAM_SIZE - sizeof(uint32_t) || /* EX1: canonical RAM */       \
+            !PS2Runtime::isSpecialAddress(_addr))                                      \
         {                                                                                \
             ps2TraceGuestWrite(rdram, _addr, 4u, _wv, 0u, "WRITE32", ctx);               \
             FAST_WRITE32(_addr, _wv);                                                    \
         }                                                                                \
+        else                                                                           \
+            runtime->Store32(rdram, ctx, _addr, _wv);                                  \
         if (_e42plant)                                                                   \
             ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 4u, __func__); \
         if (_e43)                                                                             \
@@ -689,13 +740,14 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2DiagWatchReport(rdram, _addr, 8u, _wv, 0u, ctx, runtime);              \
         if (ps2x_tap_mpg::writeArmed())                                           \
             ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
-            runtime->Store64(rdram, ctx, _addr, _wv);                                  \
-        else                                                                           \
+        if (_addr <= PS2_RAM_SIZE - sizeof(uint64_t) || /* EX1: canonical RAM */       \
+            !PS2Runtime::isSpecialAddress(_addr))                                      \
         {                                                                              \
             ps2TraceGuestWrite(rdram, _addr, 8u, _wv, 0u, "WRITE64", ctx);             \
             FAST_WRITE64(_addr, _wv);                                                  \
         }                                                                              \
+        else                                                                           \
+            runtime->Store64(rdram, ctx, _addr, _wv);                                  \
         if (_e42plant)                                                                 \
             ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 8u, __func__); \
         if (_e43)                                                                             \
@@ -734,13 +786,14 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
             ps2DiagWatchReport(rdram, _addr, 16u, _lo, _hi, ctx, runtime);            \
         if (ps2x_tap_mpg::writeArmed())                                           \
             ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
-            runtime->Store128(rdram, ctx, _addr, _value);                              \
-        else                                                                           \
+        if (_addr <= PS2_RAM_SIZE - sizeof(__m128i) || /* EX1: canonical RAM */        \
+            !PS2Runtime::isSpecialAddress(_addr))                                      \
         {                                                                              \
             ps2TraceGuestWrite(rdram, _addr, 16u, _lo, _hi, "WRITE128", ctx);          \
             FAST_WRITE128(_addr, _value);                                              \
         }                                                                              \
+        else                                                                           \
+            runtime->Store128(rdram, ctx, _addr, _value);                              \
         if (_e42plant)                                                                 \
             ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 16u, __func__); \
         if (_e43)                                                                              \
