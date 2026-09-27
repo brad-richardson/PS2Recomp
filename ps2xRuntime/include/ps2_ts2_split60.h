@@ -42,15 +42,93 @@ struct PredictorIdentity
     uint32_t epoch = 0;
 };
 
-inline thread_local uint32_t guestThread = 0;
-inline thread_local bool guestInterrupt = false;
-inline thread_local std::unordered_map<uint32_t, GuestContext> contexts;
-inline thread_local std::unordered_map<uint32_t, PredictorIdentity> predictors;
-inline thread_local uint64_t scopeErrors = 0;
-inline thread_local std::unordered_map<uint32_t, uint32_t> macroHalves;
-inline thread_local std::unordered_map<uint32_t, bool> predictionHelper;
-inline thread_local uint64_t predictionSkips = 0;
-inline thread_local uint64_t predictionFallbacks = 0;
+// TT1: one plain static instead of nine `inline thread_local`s. The old
+// thread_locals cost 1.64 ms/frame of tlsdesc_resolver_dynamic + __tls_init
+// on the Odin GameThread (MV3 Part 2), plus an unordered_map hash lookup on
+// every intercepted guest load. Audit (TT1 REPORT): every entry point below
+// runs on the EE executor thread only — halfLoad via READ32 from EE
+// recompiled code and EE-thread syscall stubs, the rest via EeScheduler /
+// dispatchGuestBranch / eeCheckpointDue. The MTVU worker, GS worker, audio
+// and IOP threads touch none of this state (the mtvu::sync TLS samples in
+// the MV3 profile are ps2_mtvu.h's own t_* vars, untouched here).
+struct ThreadData
+{
+    GuestContext ctx;
+    uint32_t half = 0;
+    bool helper = false;
+};
+struct State
+{
+    uint32_t guestThread = 0;
+    bool guestInterrupt = false;
+    uint64_t scopeErrors = 0;
+    uint64_t predictionSkips = 0;
+    uint64_t predictionFallbacks = 0;
+    // Guest-thread-keyed records. Occupancy in practice is 1 (the main guest
+    // thread runs the rider pass); the linear scan hits slot 0. Overflow
+    // keeps exact map semantics past the flat slots; it is cold-only.
+    static constexpr uint32_t kThreadSlots = 8;
+    struct ThreadSlot
+    {
+        bool used = false;
+        uint32_t key = 0;
+        ThreadData data;
+    };
+    ThreadSlot threads[kThreadSlots];
+    std::unordered_map<uint32_t, ThreadData> threadOverflow;
+    // Rider-address-keyed predictor identities (<= ~6 riders per event).
+    static constexpr uint32_t kRiderSlots = 16;
+    struct RiderSlot
+    {
+        bool used = false;
+        uint32_t key = 0;
+        PredictorIdentity id;
+    };
+    RiderSlot riders[kRiderSlots];
+    std::unordered_map<uint32_t, PredictorIdentity> riderOverflow;
+#if PS2X_ENABLE_TS2_DIAG
+    uint64_t ts3CaseCounts[7] = {};
+    uint64_t ts3CbCounts[5] = {};
+    uint64_t ts3CaseFirstTick[7] = {};
+    uint64_t ts3LastPrintBin = 0;
+    bool ts3PrintArmed = false;
+#endif
+    ThreadData *findThread(uint32_t key) noexcept
+    {
+        for (uint32_t i = 0; i < kThreadSlots; ++i)
+            if (threads[i].used && threads[i].key == key) return &threads[i].data;
+        const auto it = threadOverflow.find(key);
+        return it == threadOverflow.end() ? nullptr : &it->second;
+    }
+    ThreadData &getThread(uint32_t key) noexcept
+    {
+        if (ThreadData *d = findThread(key)) return *d;
+        for (uint32_t i = 0; i < kThreadSlots; ++i)
+        {
+            if (threads[i].used) continue;
+            threads[i].used = true;
+            threads[i].key = key;
+            return threads[i].data;
+        }
+        return threadOverflow[key];
+    }
+    PredictorIdentity &getRider(uint32_t key) noexcept
+    {
+        for (uint32_t i = 0; i < kRiderSlots; ++i)
+            if (riders[i].used && riders[i].key == key) return riders[i].id;
+        const auto it = riderOverflow.find(key);
+        if (it != riderOverflow.end()) return it->second;
+        for (uint32_t i = 0; i < kRiderSlots; ++i)
+        {
+            if (riders[i].used) continue;
+            riders[i].used = true;
+            riders[i].key = key;
+            return riders[i].id;
+        }
+        return riderOverflow[key];
+    }
+};
+inline State g_state;
 
 inline bool enabled() noexcept
 {
@@ -105,29 +183,26 @@ inline bool caseCountEnabled() noexcept
     }();
     return on;
 }
-inline thread_local uint64_t ts3CaseCounts[7] = {};
-inline thread_local uint64_t ts3CbCounts[5] = {};
-inline thread_local uint64_t ts3CaseFirstTick[7] = {};
-inline thread_local uint64_t ts3LastPrintBin = 0;
-inline thread_local bool ts3PrintArmed = false;
+// TT1: census arrays live in State above (same EE-thread-only owner).
 
 inline void ts3PrintCounts(uint64_t tick) noexcept
 {
+    State &s = g_state;
     std::fprintf(stderr,
         "ts2-case-count tick=%llu c0=%llu c1=%llu c2=%llu c3=%llu c4=%llu c5=%llu cOther=%llu cb13ebec=%llu cb13858c=%llu cb13b038=%llu cb13b094=%llu cb13b534=%llu\n",
         static_cast<unsigned long long>(tick),
-        static_cast<unsigned long long>(ts3CaseCounts[0]),
-        static_cast<unsigned long long>(ts3CaseCounts[1]),
-        static_cast<unsigned long long>(ts3CaseCounts[2]),
-        static_cast<unsigned long long>(ts3CaseCounts[3]),
-        static_cast<unsigned long long>(ts3CaseCounts[4]),
-        static_cast<unsigned long long>(ts3CaseCounts[5]),
-        static_cast<unsigned long long>(ts3CaseCounts[6]),
-        static_cast<unsigned long long>(ts3CbCounts[0]),
-        static_cast<unsigned long long>(ts3CbCounts[1]),
-        static_cast<unsigned long long>(ts3CbCounts[2]),
-        static_cast<unsigned long long>(ts3CbCounts[3]),
-        static_cast<unsigned long long>(ts3CbCounts[4]));
+        static_cast<unsigned long long>(s.ts3CaseCounts[0]),
+        static_cast<unsigned long long>(s.ts3CaseCounts[1]),
+        static_cast<unsigned long long>(s.ts3CaseCounts[2]),
+        static_cast<unsigned long long>(s.ts3CaseCounts[3]),
+        static_cast<unsigned long long>(s.ts3CaseCounts[4]),
+        static_cast<unsigned long long>(s.ts3CaseCounts[5]),
+        static_cast<unsigned long long>(s.ts3CaseCounts[6]),
+        static_cast<unsigned long long>(s.ts3CbCounts[0]),
+        static_cast<unsigned long long>(s.ts3CbCounts[1]),
+        static_cast<unsigned long long>(s.ts3CbCounts[2]),
+        static_cast<unsigned long long>(s.ts3CbCounts[3]),
+        static_cast<unsigned long long>(s.ts3CbCounts[4]));
 }
 
 inline void noteTs3Counts(const uint8_t *ram, R5900Context *ctx,
@@ -135,16 +210,17 @@ inline void noteTs3Counts(const uint8_t *ram, R5900Context *ctx,
                           bool isCall, bool isIndirect, uint64_t tick) noexcept
 {
     if (!ctx) return;
+    State &s = g_state;
     if (isCall && !isIndirect && source == 0x128ddcu && target == 0x1216e0u)
     {
         const uint32_t r = getRegU32(ctx, 4) & 0x1fffffffu;
         const uint32_t p = read32(ram, r + 0x77cu) & 0x1fffffffu;
         const uint32_t c = read32(ram, p + 0xde0u);
         const uint32_t slot = (c <= 5u) ? c : 6u;
-        ++ts3CaseCounts[slot];
-        if (c >= 3u && ts3CaseFirstTick[slot] == 0u)
+        ++s.ts3CaseCounts[slot];
+        if (c >= 3u && s.ts3CaseFirstTick[slot] == 0u)
         {
-            ts3CaseFirstTick[slot] = tick ? tick : 1u;
+            s.ts3CaseFirstTick[slot] = tick ? tick : 1u;
             std::fprintf(stderr, "ts2-case-first case=%u tick=%llu\n",
                          c, static_cast<unsigned long long>(tick));
         }
@@ -153,19 +229,19 @@ inline void noteTs3Counts(const uint8_t *ram, R5900Context *ctx,
     {
         switch (source)
         {
-        case 0x13ebecu: ++ts3CbCounts[0]; break;
-        case 0x13858cu: ++ts3CbCounts[1]; break;
-        case 0x13b038u: ++ts3CbCounts[2]; break;
-        case 0x13b094u: ++ts3CbCounts[3]; break;
-        case 0x13b534u: ++ts3CbCounts[4]; break;
+        case 0x13ebecu: ++s.ts3CbCounts[0]; break;
+        case 0x13858cu: ++s.ts3CbCounts[1]; break;
+        case 0x13b038u: ++s.ts3CbCounts[2]; break;
+        case 0x13b094u: ++s.ts3CbCounts[3]; break;
+        case 0x13b534u: ++s.ts3CbCounts[4]; break;
         default: break;
         }
     }
     const uint64_t bin = tick / 600u;
-    if (!ts3PrintArmed || bin != ts3LastPrintBin)
+    if (!s.ts3PrintArmed || bin != s.ts3LastPrintBin)
     {
-        ts3PrintArmed = true;
-        ts3LastPrintBin = bin;
+        s.ts3PrintArmed = true;
+        s.ts3LastPrintBin = bin;
         ts3PrintCounts(tick);
     }
 }
@@ -184,8 +260,9 @@ inline void noteTs3Counts(const uint8_t *, R5900Context *,
 // Called only after the first rider pass has fully returned to 128dec.
 inline bool beginSecondHalf() noexcept
 {
-    if (!halfMode() || guestInterrupt) return false;
-    uint32_t &half = macroHalves[guestThread];
+    State &s = g_state;
+    if (!halfMode() || s.guestInterrupt) return false;
+    uint32_t &half = s.getThread(s.guestThread).half;
     if (half == 0) { half = 1; return true; }
     half = 0;
     return false;
@@ -194,31 +271,36 @@ inline bool beginSecondHalf() noexcept
 inline void noteHelperCall(uint32_t source, uint32_t target) noexcept
 {
     if (!halfMode() || target != 0x1139a0u) return;
-    if (source == 0x1132e0u) predictionHelper[guestThread] = true;
+    State &s = g_state;
+    if (source == 0x1132e0u) s.getThread(s.guestThread).helper = true;
     if (source == 0x113844u || source == 0x113880u)
-        predictionHelper[guestThread] = false;
+        s.getThread(s.guestThread).helper = false;
 }
 
 inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
 {
-    if (!halfMode() || guestInterrupt) return bits;
-    auto it = contexts.find(guestThread);
-    if (it == contexts.end() || !it->second.active) return bits;
+    if (!halfMode()) return bits;
+    State &s = g_state;
+    if (s.guestInterrupt) return bits;
+    const ThreadData *td = s.findThread(s.guestThread);
+    if (td == nullptr || !td->ctx.active) return bits;
     // TS3: cases 4/5 reach converted sites through the shared 121aa0/113648
     // helpers. They run once at full H, so their loads keep stock values.
-    if (fixUnconverted() && it->second.selectorCase >= 3u) return bits;
+    if (fixUnconverted() && td->ctx.selectorCase >= 3u) return bits;
     address &= 0x1fffffffu;
     // Only reviewed, twice-executed instruction sites are converted. The
     // predictor's call to the shared 1139a0 helper retains stock values.
+    // (A missing helper record reads false, as the old map's operator[] did.)
+    const bool helper = td->helper;
     switch (pc)
     {
     case 0x113808u: if (address == 0x49b494u) return 0x3c088889u; break;
     case 0x113860u: if (address == 0x49b498u) return 0x3ba3d70au; break;
     case 0x113888u: if (address == 0x49b49cu) return 0x42efffffu; break;
-    case 0x1139a4u: if (address == 0x49b4a0u && !predictionHelper[guestThread]) return 0x3c088889u; break;
-    case 0x1139c4u: if (address == 0x49b4a4u && !predictionHelper[guestThread]) return 0xbadaa2bdu; break;
-    case 0x1139dcu: if (address == 0x49b4a8u && !predictionHelper[guestThread]) return 0xc17d5556u; break;
-    case 0x113a0cu: if (address == 0x49b4acu && !predictionHelper[guestThread]) return 0xc0e2aaabu; break;
+    case 0x1139a4u: if (address == 0x49b4a0u && !helper) return 0x3c088889u; break;
+    case 0x1139c4u: if (address == 0x49b4a4u && !helper) return 0xbadaa2bdu; break;
+    case 0x1139dcu: if (address == 0x49b4a8u && !helper) return 0xc17d5556u; break;
+    case 0x113a0cu: if (address == 0x49b4acu && !helper) return 0xc0e2aaabu; break;
     case 0x121e64u: if (address == 0x49b828u) return 0x3c088889u; break;
     case 0x137d68u: if (address == 0x49be9cu) return 0x3c088889u; break;
     case 0x139a48u: if (address == 0x49bf1cu) return 0x3c088889u; break;
@@ -231,7 +313,7 @@ inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
 
 inline void setThread(uint32_t id, bool interrupt) noexcept
 {
-    if (enabled()) { guestThread = id; guestInterrupt = interrupt; }
+    if (enabled()) { g_state.guestThread = id; g_state.guestInterrupt = interrupt; }
 }
 
 // The catch-up scanner belongs to the stock-rate predictor. The first half
@@ -240,11 +322,13 @@ inline void setThread(uint32_t id, bool interrupt) noexcept
 inline bool skipSecondHalfPrediction(const uint8_t *ram, R5900Context *ctx,
                                     uint32_t source, uint32_t target) noexcept
 {
-    if (!halfMode() || guestInterrupt || target != 0x113200u || !ctx ||
+    if (!halfMode()) return false;
+    State &s = g_state;
+    if (s.guestInterrupt || target != 0x113200u || !ctx ||
         (source != 0x113744u && source != 0x113770u &&
          source != 0x1137a8u && source != 0x1137d8u)) return false;
-    const auto it = contexts.find(guestThread);
-    if (it == contexts.end() || !it->second.active || it->second.halfIndex != 1)
+    const ThreadData *td = s.findThread(s.guestThread);
+    if (td == nullptr || !td->ctx.active || td->ctx.halfIndex != 1)
         return false;
     const uint32_t c = getRegU32(ctx, 4) & 0x1fffffffu;
     if (!ram || c > 0x02000000u - 0xa4u) return false;
@@ -256,40 +340,43 @@ inline bool skipSecondHalfPrediction(const uint8_t *ram, R5900Context *ctx,
     if (front < base + ctx->f[22])
     {
 #if PS2X_ENABLE_TS2_DIAG
-        ++predictionFallbacks;
+        ++s.predictionFallbacks;
 #endif
         return false;
     }
 #if PS2X_ENABLE_TS2_DIAG
-    ++predictionSkips;
+    ++s.predictionSkips;
 #endif
     return true;
 }
 
 inline void begin(const uint8_t *ram, R5900Context *ctx) noexcept
 {
-    if (!enabled() || !ctx || guestInterrupt) return;
-    GuestContext &current = contexts[guestThread];
-    if (current.active) { ++scopeErrors; return; }
+    if (!enabled() || !ctx) return;
+    State &s = g_state;
+    if (s.guestInterrupt) return;
+    ThreadData &td = s.getThread(s.guestThread);
+    GuestContext &current = td.ctx;
+    if (current.active) { ++s.scopeErrors; return; }
     const uint32_t remaining = getRegU32(ctx, 16);
     const uint32_t total = getRegU32(ctx, 18);
     if (remaining + 1u == total)
     {
-        if (macroHalves[guestThread] == 0) ++current.macroOrdinal;
+        if (td.half == 0) ++current.macroOrdinal;
         current.riderIndex = 0;
     }
     else
     {
         ++current.riderIndex;
     }
-    current.halfIndex = macroHalves[guestThread];
+    current.halfIndex = td.half;
     current.rider = getRegU32(ctx, 4) & 0x1fffffffu;
     // TS3: record the 111408 selector fresh every half, so a rider entering
     // or leaving a converted case mid-macro is decided per half, not per macro.
     current.selectorCase =
         read32(ram, (read32(ram, current.rider + 0x77cu) & 0x1fffffffu) + 0xde0u);
     const uint32_t predictorContext = read32(ram, current.rider + 0x788u) & 0x1fffffffu;
-    PredictorIdentity &identity = predictors[current.rider];
+    PredictorIdentity &identity = s.getRider(current.rider);
     if (identity.context != predictorContext)
     {
         identity.context = predictorContext;
@@ -302,10 +389,14 @@ inline void begin(const uint8_t *ram, R5900Context *ctx) noexcept
 
 inline void finish() noexcept
 {
-    if (!enabled() || guestInterrupt) return;
-    auto it = contexts.find(guestThread);
-    if (it == contexts.end() || !it->second.active) { ++scopeErrors; return; }
-    it->second.active = false;
+    if (!enabled()) return;
+    State &s = g_state;
+    if (s.guestInterrupt) return;
+    ThreadData *td = s.findThread(s.guestThread);
+    // A helper-only record (no begin) reads inactive, as the old map's
+    // missing key did; either way this is a scope error.
+    if (td == nullptr || !td->ctx.active) { ++s.scopeErrors; return; }
+    td->ctx.active = false;
 }
 
 // TS3: unconverted cases run once per stock update. In half 1 the dispatch
@@ -318,11 +409,13 @@ inline void finish() noexcept
 // mid-macro runs or skips each half correctly.
 inline bool skipSecondHalfUnconverted() noexcept
 {
-    if (!halfMode() || guestInterrupt || !fixUnconverted()) return false;
-    const auto it = contexts.find(guestThread);
-    if (it == contexts.end() || !it->second.active || it->second.halfIndex != 1)
+    if (!halfMode() || !fixUnconverted()) return false;
+    State &s = g_state;
+    if (s.guestInterrupt) return false;
+    const ThreadData *td = s.findThread(s.guestThread);
+    if (td == nullptr || !td->ctx.active || td->ctx.halfIndex != 1)
         return false;
-    return it->second.selectorCase >= 3u;
+    return td->ctx.selectorCase >= 3u;
 }
 
 // The canonical generated 128af0 loop resumes at 128de4 after each rider.
@@ -331,18 +424,22 @@ inline bool skipSecondHalfUnconverted() noexcept
 // the callee yielded and the scheduler later resumes it.
 inline void finishIfContinuation(R5900Context *ctx) noexcept
 {
-    if (!enabled() || !ctx || ctx->pc != 0x128de4u || guestInterrupt) return;
-    const auto it = contexts.find(guestThread);
-    if (it == contexts.end() || !it->second.active) return;
+    if (!enabled() || !ctx || ctx->pc != 0x128de4u) return;
+    State &s = g_state;
+    if (s.guestInterrupt) return;
+    ThreadData *td = s.findThread(s.guestThread);
+    if (td == nullptr || !td->ctx.active) return;
     const uint32_t remaining = getRegU32(ctx, 16);
     const uint32_t total = getRegU32(ctx, 18);
     finish();
     if (!halfMode() || remaining != 0u || total == 0u) return;
-    uint32_t &half = macroHalves[guestThread];
+    // The record exists: active required begin(), which always creates it.
+    // finish() above only clears active, so td stays valid.
+    uint32_t &half = td->half;
     if (half == 0u)
     {
         half = 1u;
-        it->second.restartCheckpointPending = true;
+        td->ctx.restartCheckpointPending = true;
         uint64_t firstRider = 0;
         std::memcpy(&firstRider, &ctx->r[29], sizeof(firstRider));
         const uint64_t remainingRiders = total;
@@ -364,10 +461,11 @@ inline bool consumeRestartCheckpoint() noexcept
 {
     // EE1P2: the sole caller gates on halfMode(), so only the interrupt
     // check remains here; behaviour is identical in all modes.
-    if (guestInterrupt) return false;
-    auto it = contexts.find(guestThread);
-    if (it == contexts.end() || !it->second.restartCheckpointPending) return false;
-    it->second.restartCheckpointPending = false;
+    State &s = g_state;
+    if (s.guestInterrupt) return false;
+    ThreadData *td = s.findThread(s.guestThread);
+    if (td == nullptr || !td->ctx.restartCheckpointPending) return false;
+    td->ctx.restartCheckpointPending = false;
     return true;
 }
 } // namespace ps2_ts2_split60

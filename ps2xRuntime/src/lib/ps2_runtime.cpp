@@ -3178,8 +3178,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                 "ts2-g2-action tick=%llu src=%08x a1=%08x skips=%llu fallback=%llu\n",
                 static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()),
                 sourcePc, getRegU32(ctx, 5),
-                static_cast<unsigned long long>(ps2_ts2_split60::predictionSkips),
-                static_cast<unsigned long long>(ps2_ts2_split60::predictionFallbacks));
+                static_cast<unsigned long long>(ps2_ts2_split60::g_state.predictionSkips),
+                static_cast<unsigned long long>(ps2_ts2_split60::g_state.predictionFallbacks));
     }
 #endif // PS2X_ENABLE_TS2_DIAG (EE1P2)
     ps2_ts2_observer::noteBranch(
