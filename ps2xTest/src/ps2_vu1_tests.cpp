@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <string>
+#include <thread>
 
 namespace
 {
@@ -2730,5 +2731,65 @@ void register_ps2_vu1_tests()
             t.IsTrue(stats.generatedCycles > 0u, "the generated game image ran");
         });
 #endif
+        // F12-fix: the tracked flag-map cache is shared by all VU1Interpreter
+        // instances; with PS2X_MTVU=1 the MTVU thread (VU1) and GameThread
+        // (VU0 microprograms) emplaced concurrently (F12 B2 SIGSEGV). Two
+        // threads hammer the same images here; every map must match the
+        // single-threaded reference (MiniTest is not thread-safe, so workers
+        // only set flags and the assertions run after join).
+        tc.Run("F12-fix tracked flag maps build identically from two threads", [](TestCase &t)
+               {
+            constexpr int kImages = 8;
+            constexpr int kIters = 50;
+            std::vector<std::vector<uint8_t>> images;
+            for (int i = 0; i < kImages; ++i)
+            {
+                // Distinct sizes => distinct cache keys (keyed by size when
+                // no recomp hash is looked up).
+                const uint32_t size = 64u * static_cast<uint32_t>(i + 1);
+                std::vector<uint8_t> img(size, 0u);
+                for (uint32_t p = 0; p < size / 8u; ++p)
+                {
+                    const uint32_t lower = 0x40000000u | (static_cast<uint32_t>(i * 16 + p) * 0x01010101u);
+                    std::memcpy(img.data() + p * 8u, &lower, 4u);
+                    std::memcpy(img.data() + p * 8u + 4u, &kVuUpperNop, 4u);
+                }
+                images.push_back(std::move(img));
+            }
+            VU1Interpreter ref(VU1Interpreter::Unit::VU1);
+            std::vector<std::vector<uint8_t>> want;
+            for (const auto &img : images)
+            {
+                const uint32_t size = static_cast<uint32_t>(img.size());
+                const uint8_t *first = ref.directFlagMapForTest(img.data(), size, true);
+                const uint8_t *second = ref.directFlagMapForTest(img.data(), size, true);
+                t.IsTrue(first != nullptr && first == second, "cache hit returns the same map");
+                if (first == nullptr)
+                    return;
+                want.emplace_back(first, first + size / 8u);
+            }
+            auto hammer = [&](VU1Interpreter::Unit unit) {
+                bool ok = true;
+                VU1Interpreter vu(unit);
+                for (int it = 0; it < kIters && ok; ++it)
+                {
+                    for (size_t i = 0; i < images.size() && ok; ++i)
+                    {
+                        const auto &img = images[i];
+                        const uint8_t *map =
+                            vu.directFlagMapForTest(img.data(), static_cast<uint32_t>(img.size()), true);
+                        ok = map != nullptr &&
+                             std::memcmp(map, want[i].data(), img.size() / 8u) == 0;
+                    }
+                }
+                return ok;
+            };
+            bool vu1Ok = false, vu0Ok = false;
+            std::thread w0([&] { vu1Ok = hammer(VU1Interpreter::Unit::VU1); });
+            std::thread w1([&] { vu0Ok = hammer(VU1Interpreter::Unit::VU0); });
+            w0.join();
+            w1.join();
+            t.IsTrue(vu1Ok, "VU1-unit thread maps match the reference");
+            t.IsTrue(vu0Ok, "VU0-unit thread maps match the reference"); });
     });
 }
