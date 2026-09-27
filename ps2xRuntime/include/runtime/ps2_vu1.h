@@ -457,9 +457,20 @@ private:
     // branch/E-bit pair or its delay slot, no D/T bit; the block guard clears
     // branch/E-bit/halt state at entry), so the tail is just pc = plainNextPc
     // (a constant argument, folded when inlined; a template argument would
-    // instantiate issuePair once per block pair).
+    // instantiate issuePair once per block pair). GV2: kInPlace = an emitter
+    // bitmask (kInPlace* below) of this block pair's writes that commit
+    // in place: the executors' m_state results are already the committed
+    // values, so the snapshot/revert/recopy around them is skipped and only
+    // the write sequence + noteDirect bookkeeping runs. Same end state as
+    // the snapshot path; the emitter sets a bit only where its proof holds
+    // (direct-map bit, no shadow/suppressed same-reg interference, single
+    // VI at latency <= 1).
+    static constexpr int kInPlaceUpperVf = 1;
+    static constexpr int kInPlaceLowerVf = 2;
+    static constexpr int kInPlaceAcc = 4;
+    static constexpr int kInPlaceVi = 8;
     template <bool kStatic, int kBlockMap = -1, bool kNoStall = false, uint32_t kCodeSize = 0x4000u,
-              bool kPlainTail = false, int kFloatMode = -1>
+              bool kPlainTail = false, int kFloatMode = -1, int kInPlace = 0>
     bool issuePair(const DecodedInstructionPair &decoded, RunContext &ctx, uint32_t plainNextPc = 0u);
     // VR1: the run() loop header between two generated pairs (VR2: the stop
     // request; see step_impl). True when the next pair may issue from
@@ -546,6 +557,11 @@ private:
     void directVfWrite(uint8_t reg, uint8_t laneMask, const float value[4], uint32_t latency);
     void directViWrite(uint8_t reg, int32_t value, uint32_t latency);
     void directAccWrite(uint8_t laneMask, const float value[4], uint32_t latency);
+    // GV2: in-place forms (kInPlace): the value is already in m_state, so only
+    // the latest-write sequence and noteDirect run. Same end state as above.
+    void directVfWriteInPlace(uint8_t reg, uint8_t laneMask, uint32_t latency);
+    void directViWriteInPlace(uint8_t reg, uint32_t latency);
+    void directAccWriteInPlace(uint8_t laneMask, uint32_t latency);
     bool flagQueueAllowsDirect() const;
     bool directFlagsNow() const;
     void demoteQueuedFlags(bool macStatus, bool clip);

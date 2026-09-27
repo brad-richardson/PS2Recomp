@@ -166,6 +166,44 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directAccWrite(uint8_t laneMa
     noteDirect(m_cycle + latency);
 }
 
+// GV2: in-place direct commits. The executors wrote m_state already, so these
+// only retire older queued writes (the latest-write sequence) and extend the
+// direct landing horizon. Same end state as the direct*Write above.
+PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directVfWriteInPlace(uint8_t reg, uint8_t laneMask,
+                                                                        uint32_t latency)
+{
+    if (reg == 0u || laneMask == 0u)
+        return;
+    const uint64_t sequence = ++m_nextWriteSequence;
+    for (uint32_t component = 0; component < 4u; ++component)
+    {
+        if ((laneMask & laneForComponent(component)) != 0u)
+            m_vfLatestWrite[reg][component] = sequence;
+    }
+    noteDirect(m_cycle + latency);
+}
+
+PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directViWriteInPlace(uint8_t reg, uint32_t latency)
+{
+    if (reg == 0u)
+        return;
+    m_viLatestWrite[reg] = ++m_nextWriteSequence;
+    noteDirect(m_cycle + latency);
+}
+
+PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directAccWriteInPlace(uint8_t laneMask, uint32_t latency)
+{
+    if (laneMask == 0u)
+        return;
+    const uint64_t sequence = ++m_nextWriteSequence;
+    for (uint32_t component = 0; component < 4u; ++component)
+    {
+        if ((laneMask & laneForComponent(component)) != 0u)
+            m_accLatestWrite[component] = sequence;
+    }
+    noteDirect(m_cycle + latency);
+}
+
 // VB1 d3: older queued flag entries may still be in flight when a flag write
 // is applied at issue. In queue order they land first and the newer write then
 // overwrites MAC, status bits 0-3 and CLIP, while sticky bits (6-11) OR in and
@@ -227,7 +265,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::advanceOneCycle()
         progressXgkick();
 }
 
-template <bool kStatic, int kBlockMap, bool kNoStall, uint32_t kCodeSize, bool kPlainTail, int kFloatMode>
+template <bool kStatic, int kBlockMap, bool kNoStall, uint32_t kCodeSize, bool kPlainTail, int kFloatMode,
+          int kInPlace>
 PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstructionPair &decoded, RunContext &ctx,
                                                              uint32_t plainNextPc)
 {
@@ -334,12 +373,23 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     float newLowerVf[4]{};
     float oldAcc[4]{};
     float newAcc[4]{};
-    if (hasUpperWrite)
-        std::memcpy(oldUpperVf, m_state.vf[upperWrite.reg], sizeof(oldUpperVf));
-    if (hasDistinctLowerWrite)
-        std::memcpy(oldLowerVf, m_state.vf[lowerWrite.reg], sizeof(oldLowerVf));
-    if (decoded.upperUsage.accWrite != 0u)
-        std::memcpy(oldAcc, m_state.acc, sizeof(oldAcc));
+    // GV2: an in-place write skips its snapshot; the executors' m_state
+    // result below is already the committed value.
+    if constexpr ((kInPlace & kInPlaceUpperVf) == 0)
+    {
+        if (hasUpperWrite)
+            std::memcpy(oldUpperVf, m_state.vf[upperWrite.reg], sizeof(oldUpperVf));
+    }
+    if constexpr ((kInPlace & kInPlaceLowerVf) == 0)
+    {
+        if (hasDistinctLowerWrite)
+            std::memcpy(oldLowerVf, m_state.vf[lowerWrite.reg], sizeof(oldLowerVf));
+    }
+    if constexpr ((kInPlace & kInPlaceAcc) == 0)
+    {
+        if (decoded.upperUsage.accWrite != 0u)
+            std::memcpy(oldAcc, m_state.acc, sizeof(oldAcc));
+    }
 
     if (decoded.iBit)
     {
@@ -348,7 +398,9 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
         std::memcpy(&immediate, &decoded.lower, sizeof(immediate));
         m_state.i = normalizeOperand(immediate);
     }
-    else if (decoded.upperVfShadowReg != 0u)
+    // GV2: the emitter sets the upper bit only with no shadow register, so an
+    // in-place upper write never takes the shadow path.
+    else if ((kInPlace & kInPlaceUpperVf) == 0 && decoded.upperVfShadowReg != 0u)
     {
         float oldVf[4]{};
         float upperVf[4]{};
@@ -394,8 +446,6 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
 
     if (hasUpperWrite)
     {
-        std::memcpy(newUpperVf, m_state.vf[upperWrite.reg], sizeof(newUpperVf));
-        std::memcpy(m_state.vf[upperWrite.reg], oldUpperVf, sizeof(oldUpperVf));
         const uint32_t latency =
             decoded.upperUsage.vfLatency != 0u
                 ? decoded.upperUsage.vfLatency
@@ -404,15 +454,20 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
         if (m_unit == Unit::VU1)
             ++(directUpperVf ? m_vbDirectVfWrites : m_vbQueuedVfWrites);
 #endif
-        if (directUpperVf)
-            directVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
+        if constexpr ((kInPlace & kInPlaceUpperVf) != 0)
+            directVfWriteInPlace(upperWrite.reg, upperWrite.lanes, latency);
         else
-            queueVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
+        {
+            std::memcpy(newUpperVf, m_state.vf[upperWrite.reg], sizeof(newUpperVf));
+            std::memcpy(m_state.vf[upperWrite.reg], oldUpperVf, sizeof(oldUpperVf));
+            if (directUpperVf)
+                directVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
+            else
+                queueVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
+        }
     }
     if (hasDistinctLowerWrite)
     {
-        std::memcpy(newLowerVf, m_state.vf[lowerWrite.reg], sizeof(newLowerVf));
-        std::memcpy(m_state.vf[lowerWrite.reg], oldLowerVf, sizeof(oldLowerVf));
         const uint32_t latency = decoded.lowerUsage.vfLatency != 0u
                                      ? decoded.lowerUsage.vfLatency
                                      : decoded.lowerUsage.latency;
@@ -420,35 +475,52 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
         if (m_unit == Unit::VU1)
             ++(directLowerVf ? m_vbDirectVfWrites : m_vbQueuedVfWrites);
 #endif
-        if (directLowerVf)
-            directVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
+        if constexpr ((kInPlace & kInPlaceLowerVf) != 0)
+            directVfWriteInPlace(lowerWrite.reg, lowerWrite.lanes, latency);
         else
-            queueVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
+        {
+            std::memcpy(newLowerVf, m_state.vf[lowerWrite.reg], sizeof(newLowerVf));
+            std::memcpy(m_state.vf[lowerWrite.reg], oldLowerVf, sizeof(oldLowerVf));
+            if (directLowerVf)
+                directVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
+            else
+                queueVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
+        }
     }
     if (decoded.upperUsage.accWrite != 0u)
     {
-        std::memcpy(newAcc, m_state.acc, sizeof(newAcc));
-        std::memcpy(m_state.acc, oldAcc, sizeof(oldAcc));
         // ACC is forwarded to the next upper instruction. Its arithmetic
         // flags still use the normal four-cycle FMAC timeline.
-        if (direct)
-            directAccWrite(decoded.upperUsage.accWrite, newAcc, kAccForwardLatency);
+        if constexpr ((kInPlace & kInPlaceAcc) != 0)
+            directAccWriteInPlace(decoded.upperUsage.accWrite, kAccForwardLatency);
         else
-            queueAccWrite(decoded.upperUsage.accWrite, newAcc,
-                          kAccForwardLatency);
+        {
+            std::memcpy(newAcc, m_state.acc, sizeof(newAcc));
+            std::memcpy(m_state.acc, oldAcc, sizeof(oldAcc));
+            if (direct)
+                directAccWrite(decoded.upperUsage.accWrite, newAcc, kAccForwardLatency);
+            else
+                queueAccWrite(decoded.upperUsage.accWrite, newAcc,
+                              kAccForwardLatency);
+        }
     }
     if (writtenVi != 0u)
     {
-        const int32_t newVi = m_state.vi[writtenVi];
-        m_state.vi[writtenVi] = oldVi;
         const uint32_t latency =
             decoded.lowerUsage.viLatency != 0u
                 ? decoded.lowerUsage.viLatency
                 : decoded.lowerUsage.latency;
-        if (directVi)
-            directViWrite(writtenVi, newVi, latency);
+        if constexpr ((kInPlace & kInPlaceVi) != 0)
+            directViWriteInPlace(writtenVi, latency);
         else
-            queueViWrite(writtenVi, newVi, latency);
+        {
+            const int32_t newVi = m_state.vi[writtenVi];
+            m_state.vi[writtenVi] = oldVi;
+            if (directVi)
+                directViWrite(writtenVi, newVi, latency);
+            else
+                queueViWrite(writtenVi, newVi, latency);
+        }
     }
 
     markPairWrites(decoded);

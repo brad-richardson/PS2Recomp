@@ -342,13 +342,37 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
         {
             char pairLabel[16];
             std::snprintf(pairLabel, sizeof(pairLabel), "%04x", block.pairs[k] * 8u);
-            out << "        if (vu.issuePair<true, " << unsigned(directMap[block.pairs[k]]) << ", "
+            // GV2: in-place mask. A bit is set only where the snapshot path's
+            // own proof already commits directly: the direct-map bit, no
+            // shadowed/suppressed same-register interference, and (VI) one
+            // written register at latency <= 1. ACC is always direct in a
+            // block (kBlock implies direct).
+            const DecodedInstructionPair pd = decoder->decodeInstructionPair(vuCode, block.pairs[k] * 8u);
+            const uint8_t map = directMap[block.pairs[k]];
+            const bool hasUpper = pd.upperUsage.vfWrite.reg != 0u;
+            const bool hasLower = pd.lowerUsage.vfWrite.reg != 0u &&
+                                  pd.suppressedLowerVf != pd.lowerUsage.vfWrite.reg;
+            int inPlace = 0;
+            if (hasUpper && (map & kDirectMapUpperVf) != 0u && pd.upperVfShadowReg == 0u &&
+                pd.suppressedLowerVf != pd.upperUsage.vfWrite.reg)
+                inPlace |= kInPlaceUpperVf;
+            if (hasLower && (map & kDirectMapLowerVf) != 0u &&
+                (!hasUpper || pd.lowerUsage.vfWrite.reg != pd.upperUsage.vfWrite.reg))
+                inPlace |= kInPlaceLowerVf;
+            if (pd.upperUsage.accWrite != 0u)
+                inPlace |= kInPlaceAcc;
+            const uint32_t viWrites = pd.lowerUsage.viWrite & 0xFFFEu;
+            const uint32_t viLatency = pd.lowerUsage.viLatency != 0u ? pd.lowerUsage.viLatency
+                                                                     : pd.lowerUsage.latency;
+            if (viWrites != 0u && (viWrites & (viWrites - 1u)) == 0u && viLatency <= 1u)
+                inPlace |= kInPlaceVi;
+            out << "        if (vu.issuePair<true, " << unsigned(map) << ", "
                 << (block.noStall[k] != 0u);
             if (block.plainTail[k] != 0u)
-                out << ", 0x4000u, true, (kNative ? 1 : 0)>(d" << pairLabel << ", c, 0x" << std::hex
+                out << ", 0x4000u, true, (kNative ? 1 : 0), " << inPlace << ">(d" << pairLabel << ", c, 0x" << std::hex
                     << ((block.pairs[k] * 8u + 8u) & (kRecompCodeSize - 1u)) << std::dec << "u))\n            return true;\n";
             else
-                out << ", 0x4000u, false, (kNative ? 1 : 0)>(d" << pairLabel << ", c))\n            return true;\n";
+                out << ", 0x4000u, false, (kNative ? 1 : 0), " << inPlace << ">(d" << pairLabel << ", c))\n            return true;\n";
             plainTailPairs += block.plainTail[k] != 0u ? 1u : 0u;
             if (k + 1u < block.pairs.size())
                 out << "        if (vu.m_stopRequested)\n            return false;\n";
@@ -616,7 +640,8 @@ void VU1Interpreter::buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize
 void VU1Interpreter::planRecompBlocks(const uint8_t *vuCode, uint32_t codeSize,
                                       std::vector<RecompBlockPlan> &blocks) const
 {
-    constexpr uint32_t kMaxBlockPairs = 16u;
+    // GV2: 32 covers the full a56458 31-pair loop (0x0628-0x0718) in one block.
+    constexpr uint32_t kMaxBlockPairs = 32u;
     const uint32_t pairs = codeSize / 8u;
     std::vector<DecodedInstructionPair> d(pairs);
     std::vector<uint8_t> branch(pairs, 0u), plain(pairs, 0u), leader(pairs, 0u);
