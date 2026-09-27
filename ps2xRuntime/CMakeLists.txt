@@ -583,6 +583,8 @@ elseif(PS2X_IS_ANDROID)
     # Needs the parallel wiring's Vulkan headers; OFF builds get the header stub.
     if(PS2X_GS_SHADOW_PARALLEL)
         target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_foreign_present_test.cpp)
+        # The test reads raylib's android_app (window, activity) like ps2_runtime.cpp.
+        target_include_directories(ps2_gs_shadow PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
     endif()
     target_link_libraries(ps2_gs_shadow PRIVATE android log)
 endif()
