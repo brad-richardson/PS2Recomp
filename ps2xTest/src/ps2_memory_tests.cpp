@@ -8,6 +8,7 @@
 #include "ps2_runtime_macros.h"
 #include "Stubs/DMA.h"
 #include "Stubs/GS.h"
+#include "Stubs/LibC.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -3304,6 +3305,44 @@ void register_ps2_memory_tests()
             t.Equals(vu1LaneU32(mem, 1u, 3u), 0x00000030u, "row1 w reads vec2[0]");
             t.Equals(vu1LaneU32(mem, 2u, 3u), 0x00000040u, "row2 w reads vec3[0]");
             t.Equals(vu1LaneU32(mem, 3u, 3u), 0x00000000u, "row3 w is zero past buffer end");
+        });
+
+        tc.Run("libc memcpy with overlapping ranges has memmove semantics", [](TestCase &t)
+        {
+            // CL1: the game issues overlapping copies through ps2_stubs::memcpy
+            // (CP4 ASan memcpy-param-overlap from generated sub_003D1BA8), so
+            // the stub implements memmove semantics. Note: Apple libc's memcpy
+            // happens to be overlap-safe, so on the Mac this pins the contract
+            // rather than catching the old code's UB; the ASan suite run is
+            // the UB net (the old code reports memcpy-param-overlap there).
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+
+            auto runCase = [&](uint32_t dest, uint32_t src, uint32_t size, const char *what)
+            {
+                std::vector<uint8_t> expect(0x400u);
+                for (size_t i = 0u; i < expect.size(); ++i)
+                {
+                    const uint8_t v = static_cast<uint8_t>((i * 2654435761u) >> 24);
+                    rdram[0x1000u + i] = v;
+                    expect[i] = v;
+                }
+                R5900Context ctx{};
+                setRegU32(ctx, 4, dest);
+                setRegU32(ctx, 5, src);
+                setRegU32(ctx, 6, size);
+                ps2_stubs::memcpy(rdram, &ctx, nullptr);
+                ::memmove(expect.data() + ((dest & 0x1FFFFFFFu) - 0x1000u),
+                          expect.data() + ((src & 0x1FFFFFFFu) - 0x1000u), size);
+                t.Equals(::memcmp(rdram + 0x1000u, expect.data(), expect.size()), 0, what);
+                t.Equals(::getRegU32(&ctx, 2), dest, "memcpy returns dest");
+            };
+
+            runCase(0x1008u, 0x1000u, 64u, "backward overlap (dest > src) matches memmove");
+            runCase(0x1000u, 0x1008u, 64u, "forward overlap (dest < src) matches memmove");
+            runCase(0x1200u, 0x1000u, 64u, "disjoint copy matches memmove");
+            runCase(0x801000C0u, 0x00100080u, 128u, "overlap across KSEG0/base aliases matches memmove");
         });
     });
 }

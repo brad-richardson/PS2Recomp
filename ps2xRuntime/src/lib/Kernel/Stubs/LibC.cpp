@@ -100,29 +100,74 @@ namespace ps2_stubs
 
         ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destAddr, size); // E3b R3h
         uint32_t copied = 0u;
-        uint32_t curDst = destAddr;
-        uint32_t curSrc = srcAddr;
-        while (copied < size)
+        // CL1: the game issues overlapping copies through this stub (CP4
+        // ASan: memcpy-param-overlap from generated sub_003D1BA8). Host
+        // ::memcpy on overlapping ranges is UB, so overlapping copies take
+        // the memmove path (same tmp-buffer shape as the memmove stub
+        // below, which also keeps chunk-at-a-time forward order from
+        // corrupting dest>src overlaps). Overlap is tested in resolved
+        // guest offsets so address aliases compare equal; ranges in
+        // different segments cannot overlap.
+        uint32_t dstOff = 0u, srcOff = 0u;
+        bool dstScratch = false, srcScratch = false;
+        const bool overlap =
+            size != 0u &&
+            ps2ResolveGuestPointer(destAddr, dstOff, dstScratch) &&
+            ps2ResolveGuestPointer(srcAddr, srcOff, srcScratch) &&
+            dstScratch == srcScratch &&
+            static_cast<uint64_t>(dstOff) < static_cast<uint64_t>(srcOff) + size &&
+            static_cast<uint64_t>(srcOff) < static_cast<uint64_t>(dstOff) + size;
+        if (overlap)
         {
-            uint8_t *hostDest = getMemPtr(rdram, curDst);
-            const uint8_t *hostSrc = getConstMemPtr(rdram, curSrc);
-            if (!hostDest || !hostSrc)
+            std::vector<uint8_t> tmp;
+            tmp.reserve(size);
+            for (uint32_t i = 0u; i < size; ++i)
             {
-                break;
+                const uint8_t *src = getConstMemPtr(rdram, srcAddr + i);
+                if (!src)
+                {
+                    break;
+                }
+                tmp.push_back(*src);
             }
 
-            uint32_t chunk = size - copied;
-            chunk = std::min(chunk, guestContiguousBytes(curDst));
-            chunk = std::min(chunk, guestContiguousBytes(curSrc));
-            if (chunk == 0u)
+            for (uint32_t i = 0u; i < static_cast<uint32_t>(tmp.size()); ++i)
             {
-                break;
+                uint8_t *dst = getMemPtr(rdram, destAddr + i);
+                if (!dst)
+                {
+                    break;
+                }
+                *dst = tmp[i];
+                ++copied;
             }
+        }
+        else
+        {
+            uint32_t curDst = destAddr;
+            uint32_t curSrc = srcAddr;
+            while (copied < size)
+            {
+                uint8_t *hostDest = getMemPtr(rdram, curDst);
+                const uint8_t *hostSrc = getConstMemPtr(rdram, curSrc);
+                if (!hostDest || !hostSrc)
+                {
+                    break;
+                }
 
-            ::memcpy(hostDest, hostSrc, chunk);
-            copied += chunk;
-            curDst += chunk;
-            curSrc += chunk;
+                uint32_t chunk = size - copied;
+                chunk = std::min(chunk, guestContiguousBytes(curDst));
+                chunk = std::min(chunk, guestContiguousBytes(curSrc));
+                if (chunk == 0u)
+                {
+                    break;
+                }
+
+                ::memcpy(hostDest, hostSrc, chunk);
+                copied += chunk;
+                curDst += chunk;
+                curSrc += chunk;
+            }
         }
 
         if (copied != 0u)
