@@ -5,6 +5,10 @@
 
 #include "runtime/gs/ps2_gs_external_backend.h"
 #include "runtime/gs/ge1_gs_api.h"
+#if defined(__ANDROID__)
+#include "runtime/gs/ps2_present_vk.h"
+#include <android/hardware_buffer.h>
+#endif
 
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ps2_memory.h"
@@ -40,6 +44,8 @@ struct Ge1Api
     decltype(&ge1_gs_vsync) vsync = nullptr;
     decltype(&ge1_gs_read_fifo) readFifo = nullptr;
     decltype(&ge1_gs_snapshot) snapshot = nullptr;
+    decltype(&ge1_gs_export_ahb) exportAhb = nullptr;
+    decltype(&ge1_gs_release_ahb) releaseAhb = nullptr;
     decltype(&ge1_gs_gpu_ms) gpuMs = nullptr;
 
     bool load(const char *path)
@@ -61,6 +67,10 @@ struct Ge1Api
         GE1_SYMBOL(vsync, ge1_gs_vsync);
         GE1_SYMBOL(readFifo, ge1_gs_read_fifo);
         GE1_SYMBOL(snapshot, ge1_gs_snapshot);
+#if defined(__ANDROID__)
+        GE1_SYMBOL(exportAhb, ge1_gs_export_ahb);
+        GE1_SYMBOL(releaseAhb, ge1_gs_release_ahb);
+#endif
         GE1_SYMBOL(gpuMs, ge1_gs_gpu_ms);
 #undef GE1_SYMBOL
         return true;
@@ -123,6 +133,9 @@ public:
 
     ~ExternalGsBackend() override
     {
+#if defined(__ANDROID__)
+        retireAhbSlots();
+#endif
         if (m_ge1Active)
             m_ge1.close();
         m_ge1.unload();
@@ -314,6 +327,20 @@ public:
         PresentationFrame frame;
         if (m_ge1Active)
         {
+#if defined(__ANDROID__)
+            if (ps2x_present_vk::enabled() && !ps2x_present_vk::broken())
+            {
+                if (presentAhb(request.vsyncTick))
+                {
+                    frame.width = 640u;
+                    frame.height = 480u;
+                    frame.displayFbp = static_cast<uint32_t>(request.dispfb1 & 0x1ffu);
+                    frame.sourceFbp = frame.displayFbp;
+                }
+            }
+            else
+#endif
+            {
             uint32_t width = 0u, height = 0u;
             const uint32_t *rgba = nullptr;
             if (m_ge1.snapshot(&width, &height, &rgba) && rgba && width && height)
@@ -324,6 +351,7 @@ public:
                 std::memcpy(frame.pixels.data(), rgba, frame.pixels.size());
                 frame.displayFbp = static_cast<uint32_t>(request.dispfb1 & 0x1ffu);
                 frame.sourceFbp = frame.displayFbp;
+            }
             }
         }
         else if (m_inner)
@@ -667,6 +695,106 @@ public:
     }
 
 private:
+#if defined(__ANDROID__)
+    struct AhbSlot
+    {
+        uint64_t id = 0u;
+        AHardwareBuffer *buffer = nullptr;
+    };
+
+    void retireAhbSlots()
+    {
+        for (AhbSlot &slot : m_ahbSlots)
+        {
+            if (slot.id)
+            {
+                if (m_ge1Active && m_ge1.releaseAhb)
+                    m_ge1.releaseAhb(slot.buffer);
+                ps2x_present_vk::retireBuffer(slot.id);
+                slot = {};
+            }
+        }
+    }
+
+    void dumpAhb(AHardwareBuffer *buffer, uint64_t tick)
+    {
+        if (tick != 2100u && tick != 3000u)
+            return;
+        const char *dir = std::getenv("PS2X_GS_AHB_DUMP_DIR");
+        if (!dir || !*dir)
+            return;
+        AHardwareBuffer_Desc desc = {};
+        AHardwareBuffer_describe(buffer, &desc);
+        void *mapped = nullptr;
+        if (AHardwareBuffer_lock(buffer, AHARDWAREBUFFER_USAGE_CPU_READ_RARELY, -1, nullptr, &mapped) != 0 || !mapped)
+        {
+            std::fprintf(stderr, "[gs:external] AHB dump lock failed tick=%llu\n", (unsigned long long)tick);
+            return;
+        }
+        const std::string path = std::string(dir) + "/ge1-ahb-t" + std::to_string(tick) + ".ppm";
+        FILE *file = std::fopen(path.c_str(), "wb");
+        if (file)
+        {
+            std::fprintf(file, "P6\n%u %u\n255\n", desc.width, desc.height);
+            const auto *src = static_cast<const uint8_t *>(mapped);
+            for (uint32_t y = 0; y < desc.height; ++y)
+                for (uint32_t x = 0; x < desc.width; ++x)
+                    std::fwrite(src + (static_cast<size_t>(y) * desc.stride + x) * 4u, 1, 3, file);
+            std::fclose(file);
+            std::fprintf(stderr, "[gs:external] AHB dump tick=%llu path=%s\n", (unsigned long long)tick, path.c_str());
+        }
+        AHardwareBuffer_unlock(buffer, nullptr);
+    }
+
+    bool presentAhb(uint64_t tick)
+    {
+        if (m_ahbSlots[0].id && m_ahbEpoch != ps2x_present_vk::poolEpoch())
+            retireAhbSlots();
+        if (!m_ahbSlots[0].id)
+        {
+            for (AhbSlot &slot : m_ahbSlots)
+            {
+                slot.id = ps2x_present_vk::allocateBuffer(640u, 480u, &slot.buffer);
+                if (!slot.id || !slot.buffer)
+                {
+                    retireAhbSlots();
+                    ps2x_present_vk::fallBack("GE1 AHB pool allocation failed");
+                    return false;
+                }
+            }
+            m_ahbEpoch = ps2x_present_vk::bufferEpoch(m_ahbSlots[0].id);
+            std::fprintf(stderr, "[gs:external] GE1 AHB pool ready epoch=%u\n", m_ahbEpoch);
+        }
+        uint64_t ids[4];
+        for (int i = 0; i < 4; ++i) ids[i] = m_ahbSlots[i].id;
+        const ps2x_present_vk::Pick pick = ps2x_present_vk::pickReusable(ids, 4, m_ahbStart, 1000);
+        if (pick.index < 0)
+        {
+            if (pick.giveUp)
+                ps2x_present_vk::fallBack("GE1 AHB compositor release timeout");
+            return false;
+        }
+        AhbSlot &slot = m_ahbSlots[pick.index];
+        m_ahbStart = (pick.index + 1) % 4;
+        const int exported = m_ge1.exportAhb(slot.buffer, 640u, 480u);
+        if (exported == 0)
+            return false; // the first host present may precede the first GS VSync
+        if (exported < 0)
+        {
+            std::fprintf(stderr, "[gs:external] AHB export failed at tick=%llu\n", (unsigned long long)tick);
+            ps2x_present_vk::fallBack("GE1 GPU to AHB export failed");
+            return false;
+        }
+        dumpAhb(slot.buffer, tick);
+        if (!ps2x_present_vk::queue(slot.id, 640u, 480u))
+        {
+            ps2x_present_vk::fallBack("GE1 AHB queue failed");
+            return false;
+        }
+        return true;
+    }
+#endif
+
     std::array<uint64_t, 20> resetWords() const
     {
         std::array<uint64_t, 20> words{};
@@ -721,6 +849,11 @@ private:
     uint32_t m_vramSize = 0u;
     Ge1Api m_ge1;
     bool m_ge1Active = false;
+#if defined(__ANDROID__)
+    std::array<AhbSlot, 4> m_ahbSlots{};
+    uint32_t m_ahbEpoch = 0u;
+    int m_ahbStart = 0;
+#endif
     uint8_t m_ge1LastPath = 3u;
     uint32_t m_ge1FifoBytes = 0u;
     bool m_ge1FifoServed = false;
