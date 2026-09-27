@@ -1,21 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // MV2: Android-only loader for the isolated ARMSX2 microVU shared library.
+// SS4: + Mac (dlopen of the OM1-built dylib) for savestate tests, and the
+// savestate save-gate/load-reset below.
 #include "ps2_microvu.h"
 #include "ps2_microvu_api.h"
+#include "ps2_mtvu.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__APPLE__)
 #include <dlfcn.h>
+#define PS2X_MICROVU_LOADABLE 1
 #endif
 
 namespace ps2_microvu {
 namespace {
-#if defined(__ANDROID__)
+#if defined(PS2X_MICROVU_LOADABLE)
 struct Api {
     void* handle = nullptr;
     decltype(&ps2x_microvu_init) init = nullptr;
@@ -95,7 +100,7 @@ void exportState(VU1State& out, const ps2x_microvu_state& in)
 
 bool configure(bool mtvu_threaded, std::string& error)
 {
-#if defined(__ANDROID__)
+#if defined(PS2X_MICROVU_LOADABLE)
     const char* name = std::getenv("PS2X_VU1_ENGINE");
     if (!name || !*name || std::strcmp(name, "static") == 0)
         return true;
@@ -111,7 +116,17 @@ bool configure(bool mtvu_threaded, std::string& error)
         error = "microvu requires PS2X_VU1_WORKERS unset";
         return false;
     }
-    s_api.handle = dlopen("libmv2_microvu.so", RTLD_NOW | RTLD_LOCAL);
+    const char* lib = std::getenv("PS2X_MICROVU_LIB");
+    std::string fallback;
+    if (!lib || !*lib) {
+#if defined(__ANDROID__)
+        fallback = "libmv2_microvu.so";
+#else
+        fallback = "libmv2_microvu.dylib";
+#endif
+        lib = fallback.c_str();
+    }
+    s_api.handle = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
     if (!s_api.handle) {
         error = std::string("microvu dlopen failed: ") + dlerror();
         return false;
@@ -132,6 +147,7 @@ bool configure(bool mtvu_threaded, std::string& error)
         return false;
     }
     s_selected = true;
+    std::fprintf(stderr, "[microvu] engine=microvu lib=%s\n", lib);
 #else
     (void)mtvu_threaded;
     (void)error;
@@ -141,7 +157,7 @@ bool configure(bool mtvu_threaded, std::string& error)
 
 bool selected()
 {
-#if defined(__ANDROID__)
+#if defined(PS2X_MICROVU_LOADABLE)
     return s_selected;
 #else
     return false;
@@ -150,7 +166,7 @@ bool selected()
 
 void shutdown()
 {
-#if defined(__ANDROID__)
+#if defined(PS2X_MICROVU_LOADABLE)
     if (s_api.close && s_selected)
         s_api.close();
     s_selected = false;
@@ -160,11 +176,43 @@ void shutdown()
 #endif
 }
 
+std::string saveReady(const VU1State& state)
+{
+    // SS4: at an E-bit job boundary the bridge holds no guest state outside
+    // VU1State + VU memories (compiled code recompiles deterministically), so
+    // a save is exact. A D/T stop awaiting an MSCNT resume keeps JIT-private
+    // state (rings, pending Q/P, TPC chain) that no re-seed can rebuild.
+    if (state.stoppedByD || state.stoppedByT)
+        return "microvu VU1 D/T stop awaiting MSCNT resume (not a job boundary)";
+    return {};
+}
+
+bool resetForLoad(std::string& error)
+{
+#if defined(PS2X_MICROVU_LOADABLE)
+    // SS4: drop all live JIT state (compiled code, VURegs, PATH1 sink, the
+    // seed latch) so the next run re-seeds from the freshly loaded VU1State
+    // + VU memories. A shutdown/configure cycle, no ABI change.
+    shutdown();
+    if (!configure(ps2_mtvu::threaded(), error))
+        return false;
+    if (!selected()) {
+        error = "microvu engine lost during load reset";
+        return false;
+    }
+    std::fprintf(stderr, "[microvu] library reset for state load\n");
+    return true;
+#else
+    (void)error;
+    return false;
+#endif
+}
+
 void run(PS2Memory& memory, uint8_t* data, VU1State& state,
          uint32_t start_pc, bool resume, uint32_t top, uint32_t itop,
          uint32_t fbrst, uint32_t budget)
 {
-#if defined(__ANDROID__)
+#if defined(PS2X_MICROVU_LOADABLE)
     if (!s_selected)
         throw std::runtime_error("microvu run called without selection");
     ps2x_microvu_state shadow{};
@@ -174,11 +222,16 @@ void run(PS2Memory& memory, uint8_t* data, VU1State& state,
                    data, PS2_VU1_DATA_SIZE, start_pc, resume ? 1u : 0u,
                    top, itop, fbrst, budget, &shadow, path1, &memory, &why))
         throw std::runtime_error(why ? why : "microvu execution failed");
+    // SS4: a cycle-budget break parks JIT-private resume state (lpState,
+    // resumeEntry) that no re-seed can rebuild; fail loud instead of
+    // continuing silently. Never observed (budget 65536, OM1 parks=0).
+    if (shadow.budget_exhausted)
+        throw std::runtime_error("microvu cycle-budget break: resume state cannot be saved");
     exportState(state, shadow);
 #else
     (void)memory; (void)data; (void)state; (void)start_pc; (void)resume;
     (void)top; (void)itop; (void)fbrst; (void)budget;
-    throw std::runtime_error("microvu is Android-only");
+    throw std::runtime_error("microvu needs Android or Mac");
 #endif
 }
 } // namespace ps2_microvu

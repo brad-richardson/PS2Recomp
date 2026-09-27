@@ -1,4 +1,5 @@
 #include "MiniTest.h"
+#include "ps2_microvu.h"
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/ps2_gs_parallel_backend.h"
@@ -1207,6 +1208,18 @@ void register_ps2_savestate_tests()
             t.IsTrue(checkRunnerSha("aaa", "bbb", false) == RunnerShaVerdict::Warn, "lax mismatch warns");
             t.IsTrue(checkRunnerSha("unknown", "unknown", false) == RunnerShaVerdict::Accept,
                      "lax unknown-vs-unknown keeps the legacy silent match");
+        });
+
+        tc.Run("ss4: microvu saveReady gates on D/T stops", [](TestCase &t)
+        {
+            VU1State clean{};
+            t.IsTrue(ps2_microvu::saveReady(clean).empty(), "E-bit-idle state is saveable");
+            VU1State dStop{};
+            dStop.stoppedByD = true;
+            t.IsTrue(!ps2_microvu::saveReady(dStop).empty(), "D stop awaiting MSCNT defers");
+            VU1State tStop{};
+            tStop.stoppedByT = true;
+            t.IsTrue(!ps2_microvu::saveReady(tStop).empty(), "T stop awaiting MSCNT defers");
         });
     });
 }
