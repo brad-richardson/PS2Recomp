@@ -3137,6 +3137,14 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         splitBoundary = sourcePc == 0x128ddcu && targetPc == 0x1216e0u &&
                         kind == GuestBranchKind::DirectCall;
         if (splitBoundary) ps2_ts2_split60::begin(rdram, ctx);
+        // TS3: an unconverted case in half 1 runs nothing for this rider;
+        // finishIfContinuation keeps the half 1->0 flip on the last rider.
+        if (splitBoundary && ps2_ts2_split60::skipSecondHalfUnconverted())
+        {
+            ctx->pc = fallthroughPc;
+            ps2_ts2_split60::finishIfContinuation(ctx);
+            return true;
+        }
         ps2_ts2_split60::noteHelperCall(sourcePc, targetPc);
         if (ps2_ts2_split60::skipSecondHalfPrediction(rdram, ctx, sourcePc, targetPc))
         {
@@ -3149,6 +3157,15 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         const uint64_t tick = m_memory.gs().vsyncTick.load();
         ps2_ts2_g2b::noteBranch(tick, sourcePc, targetPc, ctx);
         ps2_ts2_g2b::noteState(rdram, ctx, tick, sourcePc, targetPc);
+    }
+    // TS3: opt-in case/callback census, observation only, stock and split
+    // modes. In release builds the gate is a constant false and folds away.
+    if (ps2_ts2_split60::caseCountEnabled())
+    {
+        ps2_ts2_split60::noteTs3Counts(rdram, ctx, sourcePc, targetPc,
+            kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall,
+            kind == GuestBranchKind::IndirectCall || kind == GuestBranchKind::IndirectJump,
+            m_memory.gs().vsyncTick.load());
     }
 #if PS2X_ENABLE_TS2_DIAG
     if (targetPc == 0x10eb30u &&

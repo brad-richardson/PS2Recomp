@@ -5,6 +5,7 @@
 #include "ps2_runtime.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
@@ -28,6 +29,10 @@ struct GuestContext
     uint32_t continuation = 0;
     uint32_t stockHNumerator = 1;
     uint32_t stockHDenominator = 60;
+    // TS3: the 111408 selector (P+0xde0) read at begin(). Only cases 0/1/2
+    // were ever observed and converted to H/2; 3/4/5 run once at full H.
+    // Unreadable addresses read as 0 (converted), preserving old behavior.
+    uint32_t selectorCase = 0;
     bool active = false;
     bool restartCheckpointPending = false;
 };
@@ -66,6 +71,116 @@ inline bool halfMode() noexcept
     return on;
 }
 
+// TS3: run unconverted selector cases (3/4/5) once per stock update at full
+// H. This is the product default in split mode; PS2X_TS3_NOFIX=1 restores the
+// pre-fix behavior (every case twice, every reviewed site at H/2) for A/B.
+inline bool fixUnconverted() noexcept
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_TS3_NOFIX");
+        return !(v && v[0] == '1' && v[1] == '\0');
+    }();
+    return on;
+}
+
+inline uint32_t read32(const uint8_t *ram, uint32_t address) noexcept
+{
+    uint32_t value = 0;
+    address &= 0x1fffffffu;
+    if (ram && address <= 0x02000000u - 4u)
+        std::memcpy(&value, ram + address, 4);
+    return value;
+}
+
+#if PS2X_ENABLE_TS2_DIAG
+// TS3: opt-in per-case/callback census. Observation only (guest untouched),
+// works in stock and split modes. Counts are cumulative per guest thread;
+// the print fires every 600 vsync ticks plus one line per first sighting of
+// an unconverted case, so a full race stays under ~40 lines.
+inline bool caseCountEnabled() noexcept
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_TS2_CASE_COUNT");
+        return v && v[0] == '1' && v[1] == '\0';
+    }();
+    return on;
+}
+inline thread_local uint64_t ts3CaseCounts[7] = {};
+inline thread_local uint64_t ts3CbCounts[5] = {};
+inline thread_local uint64_t ts3CaseFirstTick[7] = {};
+inline thread_local uint64_t ts3LastPrintBin = 0;
+inline thread_local bool ts3PrintArmed = false;
+
+inline void ts3PrintCounts(uint64_t tick) noexcept
+{
+    std::fprintf(stderr,
+        "ts2-case-count tick=%llu c0=%llu c1=%llu c2=%llu c3=%llu c4=%llu c5=%llu cOther=%llu cb13ebec=%llu cb13858c=%llu cb13b038=%llu cb13b094=%llu cb13b534=%llu\n",
+        static_cast<unsigned long long>(tick),
+        static_cast<unsigned long long>(ts3CaseCounts[0]),
+        static_cast<unsigned long long>(ts3CaseCounts[1]),
+        static_cast<unsigned long long>(ts3CaseCounts[2]),
+        static_cast<unsigned long long>(ts3CaseCounts[3]),
+        static_cast<unsigned long long>(ts3CaseCounts[4]),
+        static_cast<unsigned long long>(ts3CaseCounts[5]),
+        static_cast<unsigned long long>(ts3CaseCounts[6]),
+        static_cast<unsigned long long>(ts3CbCounts[0]),
+        static_cast<unsigned long long>(ts3CbCounts[1]),
+        static_cast<unsigned long long>(ts3CbCounts[2]),
+        static_cast<unsigned long long>(ts3CbCounts[3]),
+        static_cast<unsigned long long>(ts3CbCounts[4]));
+}
+
+inline void noteTs3Counts(const uint8_t *ram, R5900Context *ctx,
+                          uint32_t source, uint32_t target,
+                          bool isCall, bool isIndirect, uint64_t tick) noexcept
+{
+    if (!ctx) return;
+    if (isCall && !isIndirect && source == 0x128ddcu && target == 0x1216e0u)
+    {
+        const uint32_t r = getRegU32(ctx, 4) & 0x1fffffffu;
+        const uint32_t p = read32(ram, r + 0x77cu) & 0x1fffffffu;
+        const uint32_t c = read32(ram, p + 0xde0u);
+        const uint32_t slot = (c <= 5u) ? c : 6u;
+        ++ts3CaseCounts[slot];
+        if (c >= 3u && ts3CaseFirstTick[slot] == 0u)
+        {
+            ts3CaseFirstTick[slot] = tick ? tick : 1u;
+            std::fprintf(stderr, "ts2-case-first case=%u tick=%llu\n",
+                         c, static_cast<unsigned long long>(tick));
+        }
+    }
+    if (isCall && isIndirect)
+    {
+        switch (source)
+        {
+        case 0x13ebecu: ++ts3CbCounts[0]; break;
+        case 0x13858cu: ++ts3CbCounts[1]; break;
+        case 0x13b038u: ++ts3CbCounts[2]; break;
+        case 0x13b094u: ++ts3CbCounts[3]; break;
+        case 0x13b534u: ++ts3CbCounts[4]; break;
+        default: break;
+        }
+    }
+    const uint64_t bin = tick / 600u;
+    if (!ts3PrintArmed || bin != ts3LastPrintBin)
+    {
+        ts3PrintArmed = true;
+        ts3LastPrintBin = bin;
+        ts3PrintCounts(tick);
+    }
+}
+#else
+inline bool caseCountEnabled() noexcept
+{
+    return false;
+}
+inline void noteTs3Counts(const uint8_t *, R5900Context *,
+                          uint32_t, uint32_t,
+                          bool, bool, uint64_t) noexcept
+{
+}
+#endif // PS2X_ENABLE_TS2_DIAG
+
 // Called only after the first rider pass has fully returned to 128dec.
 inline bool beginSecondHalf() noexcept
 {
@@ -89,6 +204,9 @@ inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
     if (!halfMode() || guestInterrupt) return bits;
     auto it = contexts.find(guestThread);
     if (it == contexts.end() || !it->second.active) return bits;
+    // TS3: cases 4/5 reach converted sites through the shared 121aa0/113648
+    // helpers. They run once at full H, so their loads keep stock values.
+    if (fixUnconverted() && it->second.selectorCase >= 3u) return bits;
     address &= 0x1fffffffu;
     // Only reviewed, twice-executed instruction sites are converted. The
     // predictor's call to the shared 1139a0 helper retains stock values.
@@ -114,15 +232,6 @@ inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
 inline void setThread(uint32_t id, bool interrupt) noexcept
 {
     if (enabled()) { guestThread = id; guestInterrupt = interrupt; }
-}
-
-inline uint32_t read32(const uint8_t *ram, uint32_t address) noexcept
-{
-    uint32_t value = 0;
-    address &= 0x1fffffffu;
-    if (ram && address <= 0x02000000u - 4u)
-        std::memcpy(&value, ram + address, 4);
-    return value;
 }
 
 // The catch-up scanner belongs to the stock-rate predictor. The first half
@@ -175,6 +284,10 @@ inline void begin(const uint8_t *ram, R5900Context *ctx) noexcept
     }
     current.halfIndex = macroHalves[guestThread];
     current.rider = getRegU32(ctx, 4) & 0x1fffffffu;
+    // TS3: record the 111408 selector fresh every half, so a rider entering
+    // or leaving a converted case mid-macro is decided per half, not per macro.
+    current.selectorCase =
+        read32(ram, (read32(ram, current.rider + 0x77cu) & 0x1fffffffu) + 0xde0u);
     const uint32_t predictorContext = read32(ram, current.rider + 0x788u) & 0x1fffffffu;
     PredictorIdentity &identity = predictors[current.rider];
     if (identity.context != predictorContext)
@@ -193,6 +306,23 @@ inline void finish() noexcept
     auto it = contexts.find(guestThread);
     if (it == contexts.end() || !it->second.active) { ++scopeErrors; return; }
     it->second.active = false;
+}
+
+// TS3: unconverted cases run once per stock update. In half 1 the dispatch
+// skips the 128ddc->1216e0 call for that rider (1216e0 is a pure wrapper
+// around the 111408 dispatch, and the 128de4 continuation ignores its return
+// value), then still runs finishIfContinuation so the half 1->0 flip on the
+// last rider is preserved. Half 0 runs the handler at full H (halfLoad above
+// keeps stock values for these cases). Transitions are per half: the case
+// recorded at this half's begin() decides, so a rider that changes case
+// mid-macro runs or skips each half correctly.
+inline bool skipSecondHalfUnconverted() noexcept
+{
+    if (!halfMode() || guestInterrupt || !fixUnconverted()) return false;
+    const auto it = contexts.find(guestThread);
+    if (it == contexts.end() || !it->second.active || it->second.halfIndex != 1)
+        return false;
+    return it->second.selectorCase >= 3u;
 }
 
 // The canonical generated 128af0 loop resumes at 128de4 after each rider.
