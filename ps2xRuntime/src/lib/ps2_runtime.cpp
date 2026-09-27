@@ -3106,6 +3106,12 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                kind == GuestBranchKind::DirectCall;
     if (splitBoundary) ps2_ts2_split60::begin(rdram, ctx);
     ps2_ts2_split60::noteHelperCall(sourcePc, targetPc);
+    if (ps2_ts2_g2b::enabled())
+    {
+        const uint64_t tick = m_memory.gs().vsyncTick.load();
+        ps2_ts2_g2b::noteBranch(tick, sourcePc, targetPc, ctx);
+        ps2_ts2_g2b::noteState(rdram, ctx, tick, sourcePc, targetPc);
+    }
     if (ps2_ts2_split60::skipSecondHalfPrediction(rdram, ctx, sourcePc, targetPc))
     {
         ctx->pc = fallthroughPc;

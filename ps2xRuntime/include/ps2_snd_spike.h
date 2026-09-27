@@ -437,6 +437,10 @@ inline void onSoundTick(uint8_t *rdram, uint64_t guestCycle, Queue &&queue)
                   (unsigned long long)s.cid0, (unsigned long long)s.dmq, (unsigned long long)s.done,
                   (unsigned long long)s.setdma, (unsigned long long)s.tagbufs,
                   (unsigned long long)pcmRing().underruns(), (unsigned long long)pcmRing().overflows());
+    if (ps2_ts2_g2b::enabled() && (s.ticks % 94u) == 0u)
+        logLocked(s, "ts2-g2b-sound ticks=%llu keyons=%llu",
+                  (unsigned long long)s.ticks,
+                  (unsigned long long)s.driver.keyOns());
 }
 
 // One sound tick: tag-3 voice updates, 512 frames of SPU voices, the tag-1

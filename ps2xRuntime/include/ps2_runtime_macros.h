@@ -15,6 +15,7 @@
 #include "ps2_runtime.h"
 #include "ps2_ts2_observer.h"
 #include "ps2_ts2_split60.h"
+#include "ps2_ts2_g2b.h"
 // N5: compile-time switch for the E40-E44 guest-memory watch taps below.
 // PS2X_ENABLE_DIAG_TAPS=0 swaps the trace namespaces for constexpr stubs, so
 // the taps (and their __func__/argument setup) compile to nothing in every
