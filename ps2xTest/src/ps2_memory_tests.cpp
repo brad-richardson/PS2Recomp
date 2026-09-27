@@ -2796,6 +2796,199 @@ void register_ps2_memory_tests()
             t.IsTrue((mem.readIORegister(kDStat) & (1u << 9)) != 0u, "SPR_TO completion should set D_STAT CIS bit 9");
         });
 
+        // RB1: VIF1 normal-mode reverse DMA (CHCR.DIR=0, device->EE). SSX3
+        // sub_002EC478 samples rendered pixels this way (GS TRXDIR=1 + VIF1
+        // MADR/QWC/CHCR=0x100); the old path enqueued MADR as an EE->VIF
+        // source regardless of DIR, so the game read stale memory. PCSX2:
+        // Vif1_Dma.cpp vif1TransferToMemory + Gif_Unit.cpp GSLastDownloadSize.
+        tc.Run("RB1 VIF1 reverse DMA moves GS local->host bytes to EE and completes", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(1);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            // 4x4 PSMCT32 upload at SBP 0, then a TRXDIR=1 readback setup.
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true)); // 4 qwords = 64 bytes
+            appendU64(packet, 0ull);
+            for (uint32_t i = 0; i < 64u; ++i)
+                packet.push_back(static_cast<uint8_t>((i * 3u + 1u) & 0xFFu));
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00030000u;
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * 3u + 1u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "reverse DMA should copy the 4x4 PSMCT32 readback into EE at MADR");
+            t.Equals(mem.readIORegister(kVif1 + 0x10u), kDst + 64u, "reverse DMA should advance MADR past the transfer");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "reverse DMA should clear QWC on a full transfer");
+            t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) == 0u, "reverse DMA should report STR clear once done");
+            t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 1)) != 0u, "reverse DMA completion should set D_STAT CIS bit 1");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        tc.Run("RB1 VIF1 reverse DMA with short FIFO keeps head bytes and leaves QWC", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(1);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            // Same 64-byte FIFO as above (PCSX2: GSLastDownloadSize < QWC warns
+            // "QWC left on VIF FIFO Reverse" and keeps the remainder in QWC).
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+            appendU64(packet, 0ull);
+            for (uint32_t i = 0; i < 64u; ++i)
+                packet.push_back(static_cast<uint8_t>((i * 5u + 2u) & 0xFFu));
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00031000u;
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 128u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 8u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * 5u + 2u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "partial reverse DMA should keep the FIFO head bytes in order");
+            bool tailStale = true;
+            for (uint32_t i = 64u; i < 128u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != 0xA5u)
+                {
+                    tailStale = false;
+                    break;
+                }
+            }
+            t.IsTrue(tailStale, "partial reverse DMA should not touch EE past the FIFO bytes");
+            t.Equals(mem.readIORegister(kVif1 + 0x10u), kDst + 64u, "partial reverse DMA should advance MADR by the consumed bytes");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 4u, "partial reverse DMA should leave the remainder in QWC");
+            t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) == 0u, "partial reverse DMA should still report STR clear");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        tc.Run("RB1 VIF1 reverse DMA sees GS work queued ahead of the kick", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(1);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+            t.IsTrue(gs.setQueueEnabled(true), "GS queue enable should succeed");
+
+            // Upload + TRXDIR=1 setup go through the worker queue; the
+            // reverse kick must drain them first (queue order) before the
+            // download, or it would read an empty FIFO.
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+            appendU64(packet, 0ull);
+            for (uint32_t i = 0; i < 64u; ++i)
+                packet.push_back(static_cast<uint8_t>((i * 7u + 3u) & 0xFFu));
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00032000u;
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * 7u + 3u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "queued-mode reverse DMA should still land the readback bytes in order");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "queued-mode reverse DMA should clear QWC");
+            t.IsTrue(gs.setQueueEnabled(false), "GS queue disable should succeed");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        tc.Run("RB1 knob off keeps the old forward (stale-destination) behavior", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(0);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            // No GS frontend: the old path treats MADR as an EE->VIF source.
+            // Zeros decode as VIF NOPs, so the forward drain is harmless.
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00033000u;
+            std::memset(mem.getRDRAM() + kDst, 0x00u, 32u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 2u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+
+            bool stillZero = true;
+            for (uint32_t i = 0; i < 32u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != 0x00u)
+                {
+                    stillZero = false;
+                    break;
+                }
+            }
+            t.IsTrue(stillZero, "knob off must not write FIFO bytes to the EE destination (stale, as before)");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "knob off should still clear QWC via the forward drain");
+            t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) == 0u, "knob off should still report STR clear");
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
         // UV1 Part 2: PCSX2 V2/V3 lane rules. V2 writes v1v0v1v0
         // (Vif_Unpack.cpp UNPACK_V2 :76-83), except V2-32 zeroes w when the
         // unpack data starts QW-aligned (x86/Vif_UnpackSSE.cpp xUPK_V2_32

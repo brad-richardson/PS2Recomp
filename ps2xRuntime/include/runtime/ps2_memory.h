@@ -472,4 +472,9 @@ public:
     void queueCompletedDmacCause(uint32_t cause);
 };
 
+// RB1 test hook: force the VIF1 reverse-DMA knob for unit tests.
+// mode: 1 = force on, 0 = force off, any other value = follow
+// PS2X_VIF1_REVERSE_DMA (production default). Production code never calls this.
+void ps2_rb1_setReverseDmaOverride(int mode);
+
 #endif // PS2_MEMORY_H

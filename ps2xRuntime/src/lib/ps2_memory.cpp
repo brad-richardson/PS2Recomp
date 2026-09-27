@@ -28,6 +28,11 @@
 #define PS2X_ENABLE_DIAG_TAPS 0
 #endif
 
+// RB1: test override for the VIF1 reverse-DMA knob (see runtime/ps2_memory.h).
+// File scope (not in the anonymous namespace below) so the test hook
+// definition after it can see it.
+std::atomic<int> g_rb1ReverseDmaOverride{-1};
+
 namespace
 {
     // NP1: one worker wakeup per GIF drain instead of one per packet
@@ -51,6 +56,28 @@ namespace
         GifDrainBatch &operator=(const GifDrainBatch &) = delete;
         GS *m_gs;
     };
+
+    // RB1: reverse VIF1 DMA (GS local->host FIFO into EE) behind
+    // PS2X_VIF1_REVERSE_DMA. Ships OFF for the first det pair (knob-off
+    // boots stay bug-compatible); the play default ON needs validation +
+    // Brad's sign-off. PCSX2 reference: Vif1_Dma.cpp vif1TransferToMemory
+    // (MTGS::InitAndReadFIFO into MADR) with the transfer size from the
+    // TRXDIR=1 setup (Gif_Unit.cpp GSLastDownloadSize).
+    //
+    // Unit tests force the knob through ps2_rb1_setReverseDmaOverride
+    // (production never calls it): the env is read once per process, so a
+    // test binary could not cover both sides without the hook.
+    inline bool vif1ReverseDmaEnabled()
+    {
+        const int rb1Override = g_rb1ReverseDmaOverride.load(std::memory_order_relaxed);
+        if (rb1Override >= 0)
+            return rb1Override != 0;
+        static const bool on = [] {
+            const char *env = std::getenv("PS2X_VIF1_REVERSE_DMA");
+            return env && env[0] != '\0' && env[0] != '0';
+        }();
+        return on;
+    }
 
     inline void inRange(uint32_t offset, size_t bytes, size_t regionSize, const char *op, uint32_t address)
     {
@@ -384,6 +411,12 @@ namespace
         return nreg == 0u ? 16u : nreg;
     }
 
+}
+
+// RB1 test hook (declared in runtime/ps2_memory.h).
+void ps2_rb1_setReverseDmaOverride(int mode)
+{
+    g_rb1ReverseDmaOverride.store(mode, std::memory_order_relaxed);
 }
 
 // Helpers for GS VRAM addressing (PSMCT32 path).
@@ -1700,6 +1733,135 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                 uint32_t chcr = value;
                 uint32_t mode = (chcr >> 2) & 0x3;
+
+                // RB1: VIF1 normal-mode reverse DMA (CHCR.DIR=0, device->EE).
+                // SSX3 sub_002EC478 samples rendered pixels this way (GS
+                // TRXDIR=1 readback, then VIF1 MADR=s1+0x6510, QWC, CHCR=0x100,
+                // poll to 0x2ec84c, RGB reads at 0x2ec8fc-908). The old path
+                // below enqueued MADR as an EE->VIF source regardless of DIR,
+                // so the game always read stale memory. When the knob is on,
+                // source QWC qwords from the GS local->host FIFO into EE at
+                // MADR (PCSX2 vif1TransferToMemory), synchronously on the EE
+                // like SPR normal mode: prior GS work drains first (queue
+                // order), then consume, advance MADR, clear QWC/STR and raise
+                // the channel completion the way the forward path does.
+                const bool vif1Reverse = (channelBase == 0x10009000u) && (mode == 0u) &&
+                                         ((chcr & 0x1u) == 0u) && (qwc > 0u);
+                if (vif1Reverse && vif1ReverseDmaEnabled())
+                {
+                    const uint64_t rb1Bytes64 = static_cast<uint64_t>(qwc) * 16ull;
+                    const uint32_t rb1Total = (rb1Bytes64 > 0xFFFFFFFFull)
+                                                  ? 0xFFFFFFFFu
+                                                  : static_cast<uint32_t>(rb1Bytes64);
+                    // Order after the GS work that produced the rectangle:
+                    // any still-queued forward work runs first, then the unit
+                    // idles (the HLE readback does the same sync), then the
+                    // worker queue drains so the TRXDIR setup has executed.
+                    if (!m_pendingGifTransfers.empty() || !m_pendingVif1Transfers.empty())
+                        processPendingTransfers();
+                    ps2_mtvu::sync(ps2_mtvu::Reason::GsHle); // MT1: GS->host readback
+                    if (m_gsFrontend)
+                        m_gsFrontend->drainQueue();
+                    uint32_t rb1Done = 0u;
+                    while (rb1Done < rb1Total)
+                    {
+                        const uint32_t rb1Ee = madr + rb1Done;
+                        const bool rb1Scratch = isScratchpad(rb1Ee);
+                        uint8_t *rb1Base = rb1Scratch ? m_scratchpad : m_rdram;
+                        if (!rb1Base)
+                            break;
+                        uint32_t rb1Dst = 0u;
+                        uint32_t rb1Limit = 0u;
+                        if (rb1Scratch)
+                        {
+                            rb1Dst = rb1Ee - PS2_SCRATCHPAD_BASE;
+                            if (rb1Ee >= PS2_SCRATCHPAD_ALIAS_BASE &&
+                                rb1Ee < PS2_SCRATCHPAD_ALIAS_BASE + PS2_SCRATCHPAD_SIZE)
+                                rb1Dst = rb1Ee - PS2_SCRATCHPAD_ALIAS_BASE;
+                            rb1Dst &= (PS2_SCRATCHPAD_SIZE - 1u);
+                            rb1Limit = PS2_SCRATCHPAD_SIZE;
+                        }
+                        else
+                        {
+                            try
+                            {
+                                rb1Dst = translateAddress(rb1Ee);
+                            }
+                            catch (const std::exception &)
+                            {
+                                break;
+                            }
+                            rb1Limit = PS2_RAM_SIZE;
+                        }
+                        if (rb1Dst >= rb1Limit)
+                            rb1Dst = 0u;
+                        uint32_t rb1Chunk = rb1Total - rb1Done;
+                        if (rb1Dst + rb1Chunk > rb1Limit)
+                            rb1Chunk = rb1Limit - rb1Dst;
+                        if (rb1Chunk == 0u)
+                            break;
+                        const uint32_t rb1N = m_gsFrontend
+                                                  ? m_gsFrontend->consumeLocalToHostBytes(rb1Base + rb1Dst, rb1Chunk)
+                                                  : 0u;
+                        if (rb1N == 0u)
+                            break; // FIFO exhausted: PCSX2 warns "QWC left on VIF FIFO Reverse"
+                        rb1Done += rb1N;
+                    }
+                    {
+                        static std::atomic<uint32_t> rb1LogCount{0};
+                        const uint32_t rb1N = rb1LogCount.fetch_add(1, std::memory_order_relaxed);
+                        if (rb1N < 5u)
+                        {
+                            uint8_t rb1Head[8] = {};
+                            uint32_t rb1HeadN = (rb1Done < sizeof(rb1Head)) ? rb1Done : sizeof(rb1Head);
+                            for (uint32_t rb1I = 0u; rb1I < rb1HeadN; ++rb1I)
+                            {
+                                const uint32_t rb1Ee = madr + rb1I;
+                                if (isScratchpad(rb1Ee))
+                                {
+                                    if (m_scratchpad)
+                                        rb1Head[rb1I] = m_scratchpad[(rb1Ee - PS2_SCRATCHPAD_BASE) &
+                                                                     (PS2_SCRATCHPAD_SIZE - 1u)];
+                                }
+                                else
+                                {
+                                    try
+                                    {
+                                        rb1Head[rb1I] = m_rdram[translateAddress(rb1Ee)];
+                                    }
+                                    catch (const std::exception &)
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                            std::cerr << "[rb1] vif1-reverse madr=0x" << std::hex << madr << std::dec
+                                      << " qwc=" << qwc << " consumed=" << rb1Done
+                                      << " left-qw=" << ((rb1Done >= rb1Total) ? 0u : (qwc - rb1Done / 16u))
+                                      << " head=";
+                            for (uint32_t rb1I = 0u; rb1I < rb1HeadN; ++rb1I)
+                                std::cerr << std::hex << static_cast<uint32_t>(rb1Head[rb1I]) << (rb1I + 1u < rb1HeadN ? ":" : "");
+                            std::cerr << std::dec << std::endl;
+                        }
+                    }
+                    const uint32_t rb1QwGot = rb1Done / 16u;
+                    const uint32_t rb1Left = (rb1Done >= rb1Total) ? 0u : (qwc - rb1QwGot);
+                    m_ioRegisters[channelBase + 0x10u] = madr + rb1Done;
+                    m_ioRegisters[channelBase + 0x20u] = rb1Left;
+                    m_ioRegisters[channelBase + 0x00u] &= ~0x100u;
+                    static constexpr uint32_t kRb1DStat = 0x1000E010u;
+                    uint32_t rb1Dstat = m_ioRegisters.count(kRb1DStat) ? m_ioRegisters[kRb1DStat] : 0u;
+                    rb1Dstat |= (1u << 1u); // VIF1 channel
+                    const uint32_t rb1Status = rb1Dstat & 0x3FFu;
+                    const uint32_t rb1Mask = (rb1Dstat >> 16) & 0x3FFu;
+                    if ((rb1Status & rb1Mask) != 0u)
+                        rb1Dstat |= (1u << 31);
+                    else
+                        rb1Dstat &= ~(1u << 31);
+                    m_ioRegisters[kRb1DStat] = rb1Dstat;
+                    queueCompletedDmacCause(1u);
+                    return true;
+                }
 
                 if (mode == 0 && qwc > 0)
                 {
