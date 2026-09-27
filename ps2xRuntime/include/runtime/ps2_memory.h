@@ -430,9 +430,6 @@ public:
     GifPacketCallback m_gifPacketCallback;
     GifArbiter *m_gifArbiter = nullptr;
     GS *m_gsFrontend = nullptr;
-    bool m_orderedGsStatus = false;
-    std::atomic<uint64_t> m_orderedCsrSubmitted{0u};
-    std::atomic<uint64_t> m_orderedCsrCompleted{0u};
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
 
@@ -499,6 +496,12 @@ public:
     uint32_t advanceEeTimersImpl(uint64_t eeCycles) noexcept;
     [[nodiscard]] uint64_t cyclesUntilNextEeTimerEvent() const noexcept;
     void queueCompletedDmacCause(uint32_t cause);
+
+    // Keep new O state after the existing members: generated EE/VU objects
+    // and independently built native libraries must retain prior offsets.
+    bool m_orderedGsStatus = false;
+    std::atomic<uint64_t> m_orderedCsrSubmitted{0u};
+    std::atomic<uint64_t> m_orderedCsrCompleted{0u};
 };
 
 // RB1 test hook: force the VIF1 reverse-DMA knob for unit tests.
