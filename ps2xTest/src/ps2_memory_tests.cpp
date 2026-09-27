@@ -379,7 +379,7 @@ void register_ps2_memory_tests()
             // ZRET reset firing mid-window must land on the same COUNT.
             mem.writeIORegister(kTimer0Count, 0u);
             mem.writeIORegister(kTimer0Compare, 3u);
-            mem.writeIORegister(kTimer0Mode, kZret | kCue | kCmpe | kEquf | kOvff);
+            mem.writeIORegister(kTimer0Mode, kBusClockDiv256 | kZret | kCue | kCmpe | kEquf | kOvff);
             t.Equals(mem.advanceEeTimers(512u), 0u, "first ZRET tick should not fire");
             t.Equals(mem.advanceEeTimers(512u), 0u, "second ZRET tick should not fire");
             t.Equals(mem.advanceEeTimers(512u), 1u, "ZRET compare should raise TIM0 on tick 3");
