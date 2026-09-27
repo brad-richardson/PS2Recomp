@@ -2462,7 +2462,10 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             m_backend->Flush();
             m_backend->Sync(GSSyncReason::Finish);
         }
-        if (m_privRegs)
+        // GE3 Part 3: in EE-owned FINISH mode the submit side owns CSR FINISH
+        // (set at GIF arbitration, cleared by the guest W1C); the worker
+        // decode keeps backend ordering only and must not re-raise the bit.
+        if (m_privRegs && !m_finishTimingPcsx2)
             m_privRegs->csr.fetch_or(0x2);
         break;
     }

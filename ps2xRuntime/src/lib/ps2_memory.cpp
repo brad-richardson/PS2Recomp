@@ -527,6 +527,9 @@ PS2Memory::PS2Memory()
 {
     const char *ordered = std::getenv("PS2X_GS_ORDERED_STATUS");
     m_orderedGsStatus = ordered && std::strcmp(ordered, "1") == 0;
+    // GE3 Part 3: EE-owned FINISH (default off; same opt-in as the GS side).
+    if (const char *finishTiming = std::getenv("PS2X_GS_FINISH_TIMING"))
+        m_finishTimingPcsx2 = std::strcmp(finishTiming, "pcsx2") == 0;
     ps2SetScratchpadHostPtr(nullptr);
 }
 
@@ -1446,7 +1449,11 @@ void PS2Memory::write32(uint32_t address, uint32_t value, uint32_t guestPc)
             }
             // MT1 R2: CSR stores apply here. They leave the unit's bits 0-1
             // alone unless they W1C-clear them, which waits for the unit first.
-            if ((address & 7u) == 0u && (value & 0x3u) != 0u)
+            // GE3 Part 3: in EE-owned FINISH mode a FINISH-only W1C clear
+            // (value's only 1-bit is bit 1) applies immediately with no drain;
+            // the submit side already owns the bit. Anything else keeps today.
+            if ((address & 7u) == 0u && (value & 0x3u) != 0u &&
+                !(m_finishTimingPcsx2 && (value & ~0x2u) == 0u))
 #if PS2X_ENABLE_DIAG_TAPS
                 ge1_wait_census::syncCsr(guestPc, address, value, 4u);
 #else
@@ -1537,8 +1544,9 @@ void PS2Memory::write64(uint32_t address, uint64_t value, uint32_t guestPc)
                 orderedGsCsrWrite(8u, value);
                 return;
             }
-            // MT1 R2: as in write32.
-            if ((value & 0x3u) != 0u)
+            // MT1 R2: as in write32 (GE3 Part 3 FINISH-only exemption included).
+            if ((value & 0x3u) != 0u &&
+                !(m_finishTimingPcsx2 && (value & ~0x2ull) == 0u))
 #if PS2X_ENABLE_DIAG_TAPS
                 ge1_wait_census::syncCsr(guestPc, address, value, 8u);
 #else

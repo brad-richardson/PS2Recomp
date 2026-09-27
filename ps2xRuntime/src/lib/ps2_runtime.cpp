@@ -4233,6 +4233,12 @@ namespace
     {
         return (vaddr - PS2_GS_PRIV_REG_BASE) < PS2_GS_PRIV_REG_SIZE;
     }
+    // GE3 Part 3: guest CSR address (same physical-mask form as
+    // privReadReason). In EE-owned FINISH mode these loads never retire.
+    inline bool ge3IsCsrReg(uint32_t vaddr)
+    {
+        return ((vaddr & 0x1FFFFFFFu) & ~7u) == (PS2_GS_PRIV_REG_BASE + 0x1000u);
+    }
 }
 
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
@@ -4250,8 +4256,13 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 : ps2_mtvu::Reason::GsPrivRead;
             const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
             const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
-            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
-            if (!mtvuFree)
+            // GE3 Part 3: in EE-owned FINISH mode CSR reads return the
+            // submit-side FINISH bit without retiring unit/GS queues.
+            // Never combined with the parked O path (its reads must retire).
+            const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
+                                 ge3IsCsrReg(vaddr);
+            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
+            if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
                 if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
@@ -4282,8 +4293,13 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 : ps2_mtvu::Reason::GsPrivRead;
             const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
             const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
-            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
-            if (!mtvuFree)
+            // GE3 Part 3: in EE-owned FINISH mode CSR reads return the
+            // submit-side FINISH bit without retiring unit/GS queues.
+            // Never combined with the parked O path (its reads must retire).
+            const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
+                                 ge3IsCsrReg(vaddr);
+            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
+            if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
                 if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
@@ -4313,8 +4329,13 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 : ps2_mtvu::Reason::GsPrivRead;
             const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
             const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
-            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
-            if (!mtvuFree)
+            // GE3 Part 3: in EE-owned FINISH mode CSR reads return the
+            // submit-side FINISH bit without retiring unit/GS queues.
+            // Never combined with the parked O path (its reads must retire).
+            const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
+                                 ge3IsCsrReg(vaddr);
+            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
+            if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
                 if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
@@ -4347,8 +4368,13 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 : ps2_mtvu::Reason::GsPrivRead;
             const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
             const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
-            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
-            if (!mtvuFree)
+            // GE3 Part 3: in EE-owned FINISH mode CSR reads return the
+            // submit-side FINISH bit without retiring unit/GS queues.
+            // Never combined with the parked O path (its reads must retire).
+            const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
+                                 ge3IsCsrReg(vaddr);
+            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
+            if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
                 if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
@@ -4382,8 +4408,13 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 : ps2_mtvu::Reason::GsPrivRead;
             const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
             const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
-            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
-            if (!mtvuFree)
+            // GE3 Part 3: in EE-owned FINISH mode CSR reads return the
+            // submit-side FINISH bit without retiring unit/GS queues.
+            // Never combined with the parked O path (its reads must retire).
+            const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
+                                 ge3IsCsrReg(vaddr);
+            const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
+            if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
                 if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
