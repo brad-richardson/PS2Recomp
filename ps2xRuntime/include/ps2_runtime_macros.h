@@ -14,6 +14,7 @@
 
 #include "ps2_runtime.h"
 #include "ps2_ts2_observer.h"
+#include "ps2_ts2_split60.h"
 // N5: compile-time switch for the E40-E44 guest-memory watch taps below.
 // PS2X_ENABLE_DIAG_TAPS=0 swaps the trace namespaces for constexpr stubs, so
 // the taps (and their __func__/argument setup) compile to nothing in every
@@ -484,6 +485,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     uint32_t _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load32(rdram, ctx, _addr)                  \
         : FAST_READ32(_addr);                                 \
+    _rv = ps2_ts2_split60::halfLoad(ctx->pc, _addr, _rv);      \
     if (ps2x_tap_mpg::uploadloadArmed() &&                \
         ps2x_tap_mpg::isUploaderValue(_rv))               \
         ps2x_tap_mpg::noteUploadloadCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u, ps2xE40Fn); \

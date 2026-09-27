@@ -3105,6 +3105,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                sourcePc == 0x128ddcu && targetPc == 0x1216e0u &&
                                kind == GuestBranchKind::DirectCall;
     if (splitBoundary) ps2_ts2_split60::begin(rdram, ctx);
+    ps2_ts2_split60::noteHelperCall(sourcePc, targetPc);
     ps2_ts2_observer::noteBranch(
         rdram, ctx, sourcePc, targetPc,
         kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall,
