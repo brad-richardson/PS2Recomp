@@ -63,6 +63,7 @@ enum class GsCmdKind : uint8_t
     SetBackend,
     Fence,
     DiagPresent, // GB3: present into a caller-owned frame (no latch side effects)
+    OrderedCsrWrite, // O: typed SIGNAL/FINISH W1C after prior GIF packets
 };
 
 // Base fence for RPC commands. The worker signals it after executing the
@@ -118,7 +119,7 @@ struct GsCommand
     std::vector<uint8_t> bytes;              // GifPacket / UploadImageNative / NativePacked payload
     std::shared_ptr<GsRpcBase> rpc;          // non-null for RPC kinds
     std::unique_ptr<GSRasterBackend> backend; // SetBackend only
-    std::function<void()> apply;              // PrivWrite only
+    std::function<void()> apply;              // PrivWrite / OrderedCsrWrite
 
     size_t payloadBytes() const { return bytes.size(); }
 };

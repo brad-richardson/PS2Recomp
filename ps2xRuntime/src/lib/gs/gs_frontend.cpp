@@ -409,6 +409,10 @@ void GS::noteConsumedCommand(const GsCommand &cmd)
     case GsCmdKind::PrivWrite:
         // Opaque callable: kind tag only (content gap, declared).
         break;
+    case GsCmdKind::OrderedCsrWrite:
+        pktSeqMixU32(d, cmd.u32a); // guest write width
+        pktSeqMixU64(d, cmd.regValue);
+        break;
     case GsCmdKind::GuestVsync:
         pktSeqMixU64(d, cmd.regValue);
         pktSeqMixU32(d, cmd.u32a);
@@ -486,9 +490,20 @@ void GS::executeQueuedCommand(GsCommand &cmd)
     case GsCmdKind::PrivWrite:
         privWrite(std::move(cmd.apply));
         break;
+    case GsCmdKind::OrderedCsrWrite:
+        privWrite(std::move(cmd.apply));
+        break;
     case GsCmdKind::GuestVsync:
         if (m_backend)
             m_backend->GuestVsync(cmd.regValue, cmd.u32a);
+        if (cmd.u32b != 0u)
+        {
+            {
+                std::lock_guard<std::mutex> lock(m_orderedFrameMutex);
+                --m_orderedFramesInFlight;
+            }
+            m_orderedFrameCv.notify_one();
+        }
         break;
     case GsCmdKind::Consume:
     {
@@ -1868,6 +1883,46 @@ void GS::privWrite(std::function<void()> apply)
             if (before[i] != after[i])
                 m_backend->PrivMirrored(kGe2MirrorOffsets[i], after[i]);
     }
+}
+
+void GS::orderedCsrWrite(uint32_t width, uint64_t value, std::function<void()> apply)
+{
+    if (!apply)
+        return;
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::OrderedCsrWrite;
+        cmd.u32a = width;
+        cmd.regValue = value;
+        cmd.apply = std::move(apply);
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
+    privWrite(std::move(apply));
+}
+
+void GS::orderedFrameEnd(uint64_t tick)
+{
+    if (!m_wantsGuestVsync.load(std::memory_order_acquire) || !m_backend)
+        return;
+    if (m_worker && !t_inGsWorker)
+    {
+        // Two queued boundaries plus the unit's previous-frame fence bound
+        // latency without draining every packet at a VBlank.
+        std::unique_lock<std::mutex> lock(m_orderedFrameMutex);
+        m_orderedFrameCv.wait(lock, [&] { return m_orderedFramesInFlight < 2u; });
+        ++m_orderedFramesInFlight;
+        lock.unlock();
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GuestVsync;
+        cmd.regValue = tick;
+        cmd.u32a = static_cast<uint32_t>(tick & 1u);
+        cmd.u32b = 1u;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
+    noteGuestVsync(tick);
 }
 
 void GS::noteGuestVsync(uint64_t tick)

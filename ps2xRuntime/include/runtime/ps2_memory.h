@@ -331,6 +331,15 @@ public:
     void setGsFrontend(GS *gs) { m_gsFrontend = gs; }
     void gsPrivStore(std::function<void()> apply, uint32_t captureAddress = UINT32_MAX);
     void gsPrivSync();
+    // O: opt-in GS stream ordering for SIGNAL/FINISH W1C and frame boundaries.
+    bool orderedGsStatus() const { return m_orderedGsStatus; }
+    bool orderedGsStatusPending() const
+    {
+        return m_orderedCsrCompleted.load(std::memory_order_acquire) !=
+               m_orderedCsrSubmitted.load(std::memory_order_acquire);
+    }
+    void orderedGsFrameEnd(uint64_t tick);
+    void orderedGsCsrWrite(uint32_t width, uint64_t value);
 
     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
@@ -421,6 +430,9 @@ public:
     GifPacketCallback m_gifPacketCallback;
     GifArbiter *m_gifArbiter = nullptr;
     GS *m_gsFrontend = nullptr;
+    bool m_orderedGsStatus = false;
+    std::atomic<uint64_t> m_orderedCsrSubmitted{0u};
+    std::atomic<uint64_t> m_orderedCsrCompleted{0u};
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
 

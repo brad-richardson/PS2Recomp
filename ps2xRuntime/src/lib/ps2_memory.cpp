@@ -16,6 +16,7 @@
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -524,6 +525,8 @@ static inline uint32_t gs_vram_offset(uint32_t basePage, uint32_t x, uint32_t y,
 PS2Memory::PS2Memory()
     : m_rdram(nullptr), m_scratchpad(nullptr), iop_ram(nullptr), m_seenGifCopy(false), m_gsVRAM(nullptr)
 {
+    const char *ordered = std::getenv("PS2X_GS_ORDERED_STATUS");
+    m_orderedGsStatus = ordered && std::strcmp(ordered, "1") == 0;
     ps2SetScratchpadHostPtr(nullptr);
 }
 
@@ -1297,6 +1300,40 @@ void PS2Memory::gsPrivSync()
         m_gsFrontend->drainQueue();
 }
 
+void PS2Memory::orderedGsCsrWrite(uint32_t width, uint64_t value)
+{
+    // The typed command joins the unit stream after every prior GIF packet.
+    // Its GS application publishes completion only after the CSR RMW. EE
+    // reads with a pending clear retire both queues before returning a value.
+    m_orderedCsrSubmitted.fetch_add(1u, std::memory_order_release);
+    ps2_mtvu::submit([this, width, value]()
+    {
+        auto apply = [this, width, value]()
+        {
+            if (width == 4u)
+                writeCsrHalf(gs_regs.csr, 0u, static_cast<uint32_t>(value));
+            else
+                writeCsrFull(gs_regs.csr, value);
+            m_orderedCsrCompleted.fetch_add(1u, std::memory_order_release);
+        };
+        if (m_gsFrontend)
+            m_gsFrontend->orderedCsrWrite(width, value, std::move(apply));
+        else
+            apply();
+    }, 64u, ps2_mtvu::currentFbrst());
+}
+
+void PS2Memory::orderedGsFrameEnd(uint64_t tick)
+{
+    // VBlank's existing LAG=1 fence bounds unit frame age. This marker stays
+    // behind frame N's unit jobs and ahead of N+1's in the same queue.
+    ps2_mtvu::submit([this, tick]()
+    {
+        if (m_gsFrontend)
+            m_gsFrontend->orderedFrameEnd(tick);
+    }, 32u, ps2_mtvu::currentFbrst());
+}
+
 void PS2Memory::write8(uint32_t address, uint8_t value)
 {
     const bool scratch = isScratchpad(address);
@@ -1402,6 +1439,11 @@ void PS2Memory::write32(uint32_t address, uint32_t value, uint32_t guestPc)
     {
         if (ps2_mtvu::threaded() && ((address - PS2_GS_PRIV_REG_BASE) & ~0x7u) == kGsCsrRegOffset)
         {
+            if (m_orderedGsStatus && (address & 7u) == 0u && value != 0u && (value & ~0x3u) == 0u)
+            {
+                orderedGsCsrWrite(4u, value);
+                return;
+            }
             // MT1 R2: CSR stores apply here. They leave the unit's bits 0-1
             // alone unless they W1C-clear them, which waits for the unit first.
             if ((address & 7u) == 0u && (value & 0x3u) != 0u)
@@ -1490,6 +1532,11 @@ void PS2Memory::write64(uint32_t address, uint64_t value, uint32_t guestPc)
     {
         if (ps2_mtvu::threaded() && ((address - PS2_GS_PRIV_REG_BASE) & ~0x7u) == kGsCsrRegOffset)
         {
+            if (m_orderedGsStatus && value != 0u && (value & ~0x3ull) == 0u)
+            {
+                orderedGsCsrWrite(8u, value);
+                return;
+            }
             // MT1 R2: as in write32.
             if ((value & 0x3u) != 0u)
 #if PS2X_ENABLE_DIAG_TAPS

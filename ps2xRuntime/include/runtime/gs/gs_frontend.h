@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -157,6 +158,7 @@ public:
     // command (stream-ordered after the CSR FIELD PrivWrite); direct mode
     // calls the backend now. No-op unless the backend opted in.
     void noteGuestVsync(uint64_t tick);
+    void orderedFrameEnd(uint64_t tick);
 
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     // GF1 H1 (PS2X_GS_HANDOFF_DIET): noteGifPath(path) when notePath, then
@@ -197,6 +199,7 @@ public:
     // SIGNAL/FINISH/LABEL and the HLE display regs also land there);
     // direct mode, or a call from the worker itself, runs it now.
     void privWrite(std::function<void()> apply);
+    void orderedCsrWrite(uint32_t width, uint64_t value, std::function<void()> apply);
     uint64_t privWriteCount() const { return m_privWriteCount.load(std::memory_order_relaxed); }
 
     const uint8_t *lockDisplaySnapshot(uint32_t &outSize);
@@ -338,6 +341,9 @@ private:
     // thread touches this GS; cleared only by setQueueEnabled(false) or
     // the destructor, after producer threads are joined.
     std::unique_ptr<GsWorker> m_worker;
+    std::mutex m_orderedFrameMutex;
+    std::condition_variable m_orderedFrameCv;
+    uint32_t m_orderedFramesInFlight = 0u; // O: at most two GS frame boundaries
     // GB2 Part 2: monotonic submit counters (atomic: incremented on the
     // worker when queued, read on the game thread after a drain).
     std::atomic<uint64_t> m_submitCount{0};

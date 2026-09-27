@@ -4248,12 +4248,13 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
                 ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 1u)
                 : ps2_mtvu::Reason::GsPrivRead;
-            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
+            const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
             if (!mtvuFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             return m_memory.read8(vaddr);
@@ -4279,12 +4280,13 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
                 ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 2u)
                 : ps2_mtvu::Reason::GsPrivRead;
-            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
+            const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
             if (!mtvuFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             return m_memory.read16(vaddr);
@@ -4309,12 +4311,13 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
                 ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 4u)
                 : ps2_mtvu::Reason::GsPrivRead;
-            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
+            const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
             if (!mtvuFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             const uint32_t value = m_memory.read32(vaddr);
@@ -4342,12 +4345,13 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
                 ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 8u)
                 : ps2_mtvu::Reason::GsPrivRead;
-            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
+            const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
             if (!mtvuFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             const uint64_t value = m_memory.read64(vaddr);
@@ -4376,12 +4380,13 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
                 ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 16u)
                 : ps2_mtvu::Reason::GsPrivRead;
-            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
+            const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree);
             if (!mtvuFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             return m_memory.read128(vaddr);

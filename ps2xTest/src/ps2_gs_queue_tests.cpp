@@ -2,9 +2,12 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_worker.h"
+#include "runtime/gs/ps2_gs_external_backend.h"
 #include "runtime/ps2_memory.h"
+#include "ps2_mtvu.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -23,6 +26,28 @@
 
 namespace
 {
+    struct OrderedStatusEnv
+    {
+        OrderedStatusEnv()
+        {
+            if (const char *v = std::getenv("PS2X_GS_ORDERED_STATUS"))
+            {
+                old = v;
+                hadOld = true;
+            }
+            ::setenv("PS2X_GS_ORDERED_STATUS", "1", 1);
+        }
+        ~OrderedStatusEnv()
+        {
+            if (hadOld)
+                ::setenv("PS2X_GS_ORDERED_STATUS", old.c_str(), 1);
+            else
+                ::unsetenv("PS2X_GS_ORDERED_STATUS");
+        }
+        std::string old;
+        bool hadOld = false;
+    };
+
     constexpr uint8_t kFlgPacked = 0u;
     constexpr uint8_t kFlgReglist = 1u;
     constexpr uint8_t kFlgImage = 2u;
@@ -779,6 +804,161 @@ void register_ps2_gs_queue_tests()
             t.Equals(q.imr, d.imr, "queued IMR == direct");
             t.Equals(d.privWrites, 5ull, "direct counts 5 priv stores");
             t.Equals(q.privWrites, 6ull, "queued counts 5 priv stores + the gate");
+        });
+
+        tc.Run("O: typed CSR clears preserve clear-set order and a following read", [](TestCase &t)
+        {
+            OrderedStatusEnv env;
+            auto run = [](bool clearFirst, uint32_t width, uint32_t jitterUs)
+            {
+                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Threaded, true, jitterUs);
+                PS2Memory mem;
+                mem.initialize();
+                GS gs;
+                gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+                gs.setQueueEnabled(true);
+                mem.setGsFrontend(&gs);
+                std::atomic<bool> gate{false};
+                gs.privWrite([&gate]()
+                {
+                    while (!gate.load(std::memory_order_acquire))
+                        std::this_thread::yield();
+                });
+                std::vector<uint8_t> finish;
+                appendGifTag(finish, 1u, kFlgPacked, 1u, 0xEull);
+                appendGifAd(finish, 0u, GS_REG_FINISH);
+                auto submitFinish = [&]()
+                {
+                    ps2_mtvu::submit([&gs, finish]()
+                    {
+                        gs.processGIFPacket(finish.data(), static_cast<uint32_t>(finish.size()));
+                    }, finish.size(), 0u);
+                };
+                auto clear = [&]()
+                {
+                    if (width == 4u)
+                        mem.write32(0x12001000u, 2u);
+                    else
+                        mem.write64(0x12001000u, 2u);
+                };
+                if (clearFirst)
+                {
+                    clear();
+                    submitFinish();
+                }
+                else
+                {
+                    submitFinish();
+                    clear();
+                }
+                const bool pendingBeforeRead = mem.orderedGsStatusPending();
+                gate.store(true, std::memory_order_release);
+                mem.gsPrivSync(); // same unit + GS retirement used by a non-masked EE read
+                const uint64_t csrAtRead = mem.read64(0x12001000u);
+                const bool pendingAfterRead = mem.orderedGsStatusPending();
+                gs.setQueueEnabled(false);
+                mem.setGsFrontend(nullptr);
+                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+                return std::array<uint64_t, 3>{csrAtRead, pendingBeforeRead, pendingAfterRead};
+            };
+            for (uint32_t jitterUs : {0u, 300u})
+            {
+                const auto setThenClear = run(false, 8u, jitterUs);
+                const auto clearThenSet = run(true, 4u, jitterUs);
+                t.Equals(setThenClear[0] & 2ull, 0ull, "FINISH then typed 64-bit clear retires clear last");
+                t.Equals(clearThenSet[0] & 2ull, 2ull, "typed 32-bit clear then FINISH retires set last");
+                t.Equals(setThenClear[1], 1ull, "clear is pending before the read fence");
+                t.Equals(setThenClear[2], 0ull, "read fence retires the pending clear");
+            }
+        });
+
+        tc.Run("O: unit frame marker cannot overtake frame packets", [](TestCase &t)
+        {
+            OrderedStatusEnv env;
+            auto run = [](bool throughUnit)
+            {
+                ps2_mtvu::setModeForTest(throughUnit ? ps2_mtvu::Mode::Threaded : ps2_mtvu::Mode::Off,
+                                         true, throughUnit ? 300u : 0u);
+                PS2Memory mem;
+                mem.initialize();
+                GS gs;
+                gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+                gs.setRasterBackend(ps2x_gs_external::create(&mem.gs()));
+                gs.setQueueEnabled(true);
+                gs.setPktSeqEnabled(true);
+                mem.setGsFrontend(&gs);
+                std::vector<uint8_t> first, second;
+                appendGifTag(first, 1u, kFlgPacked, 1u, 0xEull);
+                appendGifAd(first, 0x11ull, GS_REG_LABEL);
+                appendGifTag(second, 1u, kFlgPacked, 1u, 0xEull);
+                appendGifAd(second, 0x22ull, GS_REG_LABEL);
+                auto packet = [&gs, throughUnit](std::vector<uint8_t> bytes)
+                {
+                    if (throughUnit)
+                        ps2_mtvu::submit([&gs, bytes]()
+                        {
+                            gs.processGIFPacket(bytes.data(), static_cast<uint32_t>(bytes.size()));
+                        }, bytes.size(), 0u);
+                    else
+                        gs.processGIFPacket(bytes.data(), static_cast<uint32_t>(bytes.size()));
+                };
+                packet(first);
+                if (throughUnit)
+                    mem.orderedGsFrameEnd(1u);
+                else
+                    gs.noteGuestVsync(1u);
+                packet(second);
+                ps2_mtvu::syncAll();
+                gs.drainQueue();
+                const std::array<uint64_t, 2> out{gs.pktSeqSnapshot(), gs.pktSeqSnapshotCommands()};
+                gs.setQueueEnabled(false);
+                mem.setGsFrontend(nullptr);
+                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+                return out;
+            };
+            const auto direct = run(false);
+            const auto ordered = run(true);
+            t.IsTrue(direct[1] >= 3u, "digest includes both packets and frame marker");
+            t.Equals(ordered[0], direct[0], "unit-delivered FrameEnd keeps packet order under jitter");
+            t.Equals(ordered[1], direct[1], "unit-delivered FrameEnd has the same command count");
+        });
+
+        tc.Run("O: two queued frame markers bound backlog across reset", [](TestCase &t)
+        {
+            PS2Memory mem;
+            mem.initialize();
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            gs.setRasterBackend(ps2x_gs_external::create(&mem.gs()));
+            gs.setQueueEnabled(true);
+            std::atomic<bool> gate{false};
+            gs.privWrite([&gate]()
+            {
+                while (!gate.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+            });
+            gs.orderedFrameEnd(1u);
+            gs.orderedFrameEnd(2u);
+            std::atomic<bool> entered{false}, thirdDone{false};
+            std::thread third([&]()
+            {
+                entered.store(true, std::memory_order_release);
+                gs.orderedFrameEnd(3u);
+                thirdDone.store(true, std::memory_order_release);
+            });
+            while (!entered.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            const bool blockedAtTwo = !thirdDone.load(std::memory_order_acquire);
+            gate.store(true, std::memory_order_release);
+            third.join();
+            gs.drainQueue();
+            gs.reset();
+            gs.orderedFrameEnd(4u);
+            gs.drainQueue();
+            gs.setQueueEnabled(false);
+            t.IsTrue(blockedAtTwo, "third frame waits while two boundaries are outstanding");
+            t.IsTrue(thirdDone.load(), "GS retirement admits third frame without deadlock");
         });
 
         tc.Run("queue backpressure: a full ring blocks producers until drained", [](TestCase &t)

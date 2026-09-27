@@ -3079,7 +3079,10 @@ void EeScheduler::processEvent(const EeEvent &event)
         // GE2: guest-VSync command at every VBlank, after the CSR FIELD
         // update (queued behind its PrivWrite when the queue is on). No-op
         // unless an opted-in (external) backend is installed.
-        m_runtime.gs().noteGuestVsync(m_vsyncTick);
+        if (m_runtime.memory().orderedGsStatus() && ps2_mtvu::threaded())
+            m_runtime.memory().orderedGsFrameEnd(m_vsyncTick);
+        else
+            m_runtime.gs().noteGuestVsync(m_vsyncTick);
         writeGuestU32(m_vsyncFlagAddress, 1u);
         if (m_vsyncTickAddress != 0u)
         {
