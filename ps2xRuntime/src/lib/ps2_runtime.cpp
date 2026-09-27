@@ -3128,22 +3128,29 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      GuestBranchKind kind,
                                      const char *debugName)
 {
-    const bool splitBoundary = ps2_ts2_split60::enabled() &&
-                               sourcePc == 0x128ddcu && targetPc == 0x1216e0u &&
-                               kind == GuestBranchKind::DirectCall;
-    if (splitBoundary) ps2_ts2_split60::begin(rdram, ctx);
-    ps2_ts2_split60::noteHelperCall(sourcePc, targetPc);
+    // EE1P2: one product gate per dispatch; rider-pass detail (boundary
+    // begin, helper tracking, prediction skip) runs only when a split mode
+    // is armed. The g2b/observer calls below fold away in release builds.
+    bool splitBoundary = false;
+    if (ps2_ts2_split60::enabled())
+    {
+        splitBoundary = sourcePc == 0x128ddcu && targetPc == 0x1216e0u &&
+                        kind == GuestBranchKind::DirectCall;
+        if (splitBoundary) ps2_ts2_split60::begin(rdram, ctx);
+        ps2_ts2_split60::noteHelperCall(sourcePc, targetPc);
+        if (ps2_ts2_split60::skipSecondHalfPrediction(rdram, ctx, sourcePc, targetPc))
+        {
+            ctx->pc = fallthroughPc;
+            return true;
+        }
+    }
     if (ps2_ts2_g2b::enabled())
     {
         const uint64_t tick = m_memory.gs().vsyncTick.load();
         ps2_ts2_g2b::noteBranch(tick, sourcePc, targetPc, ctx);
         ps2_ts2_g2b::noteState(rdram, ctx, tick, sourcePc, targetPc);
     }
-    if (ps2_ts2_split60::skipSecondHalfPrediction(rdram, ctx, sourcePc, targetPc))
-    {
-        ctx->pc = fallthroughPc;
-        return true;
-    }
+#if PS2X_ENABLE_TS2_DIAG
     if (targetPc == 0x10eb30u &&
         (sourcePc == 0x13a530u || sourcePc == 0x1064e4u) &&
         std::getenv("PS2X_TS2_GATE"))
@@ -3157,6 +3164,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                 static_cast<unsigned long long>(ps2_ts2_split60::predictionSkips),
                 static_cast<unsigned long long>(ps2_ts2_split60::predictionFallbacks));
     }
+#endif // PS2X_ENABLE_TS2_DIAG (EE1P2)
     ps2_ts2_observer::noteBranch(
         rdram, ctx, sourcePc, targetPc,
         kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall,
@@ -4561,7 +4569,9 @@ void PS2Runtime::postEeEvent(EeEvent event)
 
 bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
-    if (ps2_ts2_split60::consumeRestartCheckpoint()) return false;
+    // EE1P2: one product gate per checkpoint; the restart suppressor runs
+    // only in split120 halves.
+    if (ps2_ts2_split60::halfMode() && ps2_ts2_split60::consumeRestartCheckpoint()) return false;
     if (!m_eeScheduler->checkpointDue(cycles))
     {
         return false;

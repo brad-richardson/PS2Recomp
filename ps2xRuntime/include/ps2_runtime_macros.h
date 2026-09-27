@@ -486,7 +486,8 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     uint32_t _rv = PS2Runtime::isSpecialAddress(_addr)        \
         ? runtime->Load32(rdram, ctx, _addr)                  \
         : FAST_READ32(_addr);                                 \
-    _rv = ps2_ts2_split60::halfLoad(ctx->pc, _addr, _rv);      \
+    if (ps2_ts2_split60::halfMode()) /* EE1P2: one product gate per 32-bit load */ \
+        _rv = ps2_ts2_split60::halfLoad(ctx->pc, _addr, _rv);  \
     if (ps2x_tap_mpg::uploadloadArmed() &&                \
         ps2x_tap_mpg::isUploaderValue(_rv))               \
         ps2x_tap_mpg::noteUploadloadCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u, ps2xE40Fn); \

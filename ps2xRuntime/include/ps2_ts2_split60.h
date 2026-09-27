@@ -9,6 +9,13 @@
 #include <cstring>
 #include <unordered_map>
 
+// EE1P2: this header is the split120 product path and stays compiled in
+// release builds. Only the prediction skip/fallback counters are diagnostic
+// (read solely by the PS2X_TS2_GATE print); PS2X_ENABLE_TS2_DIAG gates them.
+#ifndef PS2X_ENABLE_TS2_DIAG
+#define PS2X_ENABLE_TS2_DIAG 0
+#endif
+
 namespace ps2_ts2_split60
 {
 struct GuestContext
@@ -137,8 +144,16 @@ inline bool skipSecondHalfPrediction(const uint8_t *ram, R5900Context *ctx,
     float front = 0.0f, base = 0.0f;
     std::memcpy(&front, &frontBits, 4);
     std::memcpy(&base, &baseBits, 4);
-    if (front < base + ctx->f[22]) { ++predictionFallbacks; return false; }
+    if (front < base + ctx->f[22])
+    {
+#if PS2X_ENABLE_TS2_DIAG
+        ++predictionFallbacks;
+#endif
+        return false;
+    }
+#if PS2X_ENABLE_TS2_DIAG
     ++predictionSkips;
+#endif
     return true;
 }
 
@@ -217,7 +232,9 @@ inline void finishIfContinuation(R5900Context *ctx) noexcept
 // checkpoint; all ordinary rider-loop checkpoints remain intact.
 inline bool consumeRestartCheckpoint() noexcept
 {
-    if (!halfMode() || guestInterrupt) return false;
+    // EE1P2: the sole caller gates on halfMode(), so only the interrupt
+    // check remains here; behaviour is identical in all modes.
+    if (guestInterrupt) return false;
     auto it = contexts.find(guestThread);
     if (it == contexts.end() || !it->second.restartCheckpointPending) return false;
     it->second.restartCheckpointPending = false;

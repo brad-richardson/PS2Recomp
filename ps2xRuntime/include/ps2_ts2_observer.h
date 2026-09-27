@@ -11,6 +11,14 @@
 #include <initializer_list>
 #include <unordered_map>
 
+// EE1P2: PS2X_ENABLE_TS2_DIAG=0 (release default) compiles the observer
+// away; the stubs below fold every note*/set* call out of dispatch and the
+// READ/WRITE macros. Det/diag builds keep today's behaviour.
+#ifndef PS2X_ENABLE_TS2_DIAG
+#define PS2X_ENABLE_TS2_DIAG 0
+#endif
+#if PS2X_ENABLE_TS2_DIAG
+
 namespace ps2_ts2_observer
 {
 struct Frame
@@ -347,3 +355,51 @@ inline void noteBranch(const uint8_t *ram, R5900Context *ctx, uint32_t source,
         add({source, 9u, 0, f.depth ? f.p : 0u, target, descriptorFor(ctx, source), 0});
 }
 } // namespace ps2_ts2_observer
+
+#else
+
+namespace ps2_ts2_observer
+{
+inline bool enabled() noexcept
+{
+    return false;
+}
+inline void setThread(uint32_t, bool) noexcept
+{
+}
+inline void setTick(uint64_t) noexcept
+{
+}
+inline void begin(const uint8_t *, R5900Context *, uint32_t, bool) noexcept
+{
+}
+inline void beginRider(const uint8_t *, R5900Context *) noexcept
+{
+}
+inline void beginSolver(const uint8_t *, R5900Context *) noexcept
+{
+}
+inline void end(bool) noexcept
+{
+}
+inline void endRider() noexcept
+{
+}
+inline void endSolver() noexcept
+{
+}
+inline void dump(uint64_t) noexcept
+{
+}
+inline void noteLoad(R5900Context *, uint32_t, uint32_t) noexcept
+{
+}
+inline void noteStore(const uint8_t *, R5900Context *, uint32_t, uint32_t, uint64_t, uint64_t) noexcept
+{
+}
+inline void noteBranch(const uint8_t *, R5900Context *, uint32_t, uint32_t, bool, bool) noexcept
+{
+}
+} // namespace ps2_ts2_observer
+
+#endif // PS2X_ENABLE_TS2_DIAG

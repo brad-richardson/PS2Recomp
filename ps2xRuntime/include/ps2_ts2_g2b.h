@@ -10,6 +10,14 @@
 #include <cstdlib>
 #include <cstring>
 
+// EE1P2: PS2X_ENABLE_TS2_DIAG=0 (release default) compiles the G2b tracer
+// away; the stubs below fold every call out of dispatch and the sound tick.
+// Det/diag builds keep today's behaviour.
+#ifndef PS2X_ENABLE_TS2_DIAG
+#define PS2X_ENABLE_TS2_DIAG 0
+#endif
+#if PS2X_ENABLE_TS2_DIAG
+
 namespace ps2_ts2_g2b
 {
 inline bool enabled() noexcept
@@ -119,3 +127,24 @@ inline void notePredicate(const uint8_t *ram, R5900Context *ctx,
         rd(ram, getRegU32(ctx, 19) + 0x30u));
 }
 } // namespace ps2_ts2_g2b
+
+#else
+
+namespace ps2_ts2_g2b
+{
+inline bool enabled() noexcept
+{
+    return false;
+}
+inline void noteBranch(uint64_t, uint32_t, uint32_t, R5900Context *) noexcept
+{
+}
+inline void noteState(const uint8_t *, R5900Context *, uint64_t, uint32_t, uint32_t) noexcept
+{
+}
+inline void notePredicate(const uint8_t *, R5900Context *, uint64_t, uint32_t) noexcept
+{
+}
+} // namespace ps2_ts2_g2b
+
+#endif // PS2X_ENABLE_TS2_DIAG
