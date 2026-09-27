@@ -963,6 +963,10 @@ if(PS2X_IS_IOS)
     set(PS2X_GE1_PCSX2_ROOT "" CACHE PATH "GI1: pcsx2 worktree (gi1) for Metal shaders + fonts")
     if(PS2X_GE1_IOS_BUILD AND PS2X_GE1_PCSX2_ROOT)
         file(GLOB_RECURSE PS2X_GE1_ARCHIVES "${PS2X_GE1_IOS_BUILD}/*.a")
+        # Drop PCSX2's own SDL3: the app links SDL2-for-iOS via raylib, and a
+        # second SDL's UIKit ObjC classes crash at launch (duplicate
+        # SDL_LifecycleObserver). The GS closure never references SDL3.
+        list(FILTER PS2X_GE1_ARCHIVES EXCLUDE REGEX ".*/sdl3/.*\\.a$")
         list(LENGTH PS2X_GE1_ARCHIVES PS2X_GE1_ARCHIVE_COUNT)
         message(STATUS "PS2X: GI1 static GS: ${PS2X_GE1_ARCHIVE_COUNT} archives from ${PS2X_GE1_IOS_BUILD}")
         target_link_libraries(ps2EntryRunner PRIVATE ${PS2X_GE1_ARCHIVES})
@@ -1032,12 +1036,25 @@ if(PS2X_IS_IOS)
         set_source_files_properties("${PS2X_GE1_METALLIB}" PROPERTIES
             MACOSX_PACKAGE_LOCATION "Resources"
         )
-        # Roboto-Regular: the GE1 adapter maps it for ImGui at open.
-        target_sources(ps2EntryRunner PRIVATE
-            "${PS2X_GE1_PCSX2_ROOT}/bin/resources/fonts/Roboto-Regular.ttf"
-        )
-        set_source_files_properties(
-            "${PS2X_GE1_PCSX2_ROOT}/bin/resources/fonts/Roboto-Regular.ttf" PROPERTIES
+        # SDL3 C-API stubs (gi1_sdl3_stubs.cpp): PCSX2's own libSDL3.a is
+        # excluded from PS2X_GE1_ARCHIVES (its UIKit classes collide with the
+        # app's SDL2), so these definitions satisfy the SDL input/audio/FF
+        # objects libPCSX2.a pulls in. Never called on the GS path.
+        add_library(ps2x_gi1_sdl3_stubs STATIC src/lib/gi1_sdl3_stubs.cpp)
+        target_link_libraries(ps2EntryRunner PRIVATE ps2x_gi1_sdl3_stubs)
+        # PCSX2 fonts at the bundle top level (flat iOS layout, found via
+        # GetOverridableResourcePath("fonts/...")): Roboto-Regular (mapped by
+        # the GE1 adapter), RobotoMono-Medium + fa-solid-900 + promptfont
+        # (ImGuiManager::LoadFontData; missing fonts abort GS open).
+        file(GLOB PS2X_GE1_FONTS
+            "${PS2X_GE1_PCSX2_ROOT}/bin/resources/fonts/*.ttf"
+            "${PS2X_GE1_PCSX2_ROOT}/bin/resources/fonts/*.otf")
+        list(LENGTH PS2X_GE1_FONTS PS2X_GE1_FONT_COUNT)
+        if(NOT PS2X_GE1_FONT_COUNT EQUAL 5)
+            message(FATAL_ERROR "PS2X: GI1 expected 5 PCSX2 fonts, found ${PS2X_GE1_FONT_COUNT}")
+        endif()
+        target_sources(ps2EntryRunner PRIVATE ${PS2X_GE1_FONTS})
+        set_source_files_properties(${PS2X_GE1_FONTS} PROPERTIES
             MACOSX_PACKAGE_LOCATION "Resources/fonts"
         )
     endif()

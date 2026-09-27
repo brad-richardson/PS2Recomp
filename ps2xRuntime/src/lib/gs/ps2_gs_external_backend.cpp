@@ -161,7 +161,14 @@ struct IOSurfaceExportCtx
 
 void dumpIOSurface(void *surface, uint64_t tick)
 {
-    if (tick != 2100u && tick != 3000u)
+    // Dump the first export at/after each target tick (exact-tick equality is
+    // unreliable: ticks whose export finds all pool slots busy are skipped).
+    // Called only from ioExportDone under the pool mutex; the statics below
+    // are safe. The filename records the actual tick dumped.
+    static bool dumped2100 = false, dumped3000 = false;
+    // Earliest pending target only; one file per call, filename = actual tick.
+    const bool want = (!dumped2100 && tick >= 2100u) || (!dumped3000 && tick >= 3000u);
+    if (!want)
         return;
     const char *dir = std::getenv("PS2X_GS_IOSURFACE_DUMP_DIR");
     if (!dir || !*dir)
@@ -171,6 +178,10 @@ void dumpIOSurface(void *surface, uint64_t tick)
         return;
     if (IOSurfaceLock(ref, kIOSurfaceLockReadOnly, nullptr) != KERN_SUCCESS)
         return;
+    if (!dumped2100 && tick >= 2100u)
+        dumped2100 = true;
+    else
+        dumped3000 = true;
     const uint8_t *base = static_cast<const uint8_t *>(IOSurfaceGetBaseAddress(ref));
     const size_t rowBytes = IOSurfaceGetBytesPerRow(ref);
     char path[1024];
