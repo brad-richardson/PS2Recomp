@@ -21,6 +21,7 @@
 #include "ps2_present_fallback.h"
 #include "ps2_present_geometry.h"
 #include "ps2_pad_latch.h"
+#include "ps2_perf_log.h"
 #include "ps2_virtual_pad.h"
 #include "runtime/ps2_pad.h"
 #include "ps2_stubs.h"
@@ -4677,6 +4678,9 @@ void PS2Runtime::run()
         const char *env = std::getenv("PS2X_VSYNC_RATE_LOG");
         return env && env[0] == '1';
     }();
+    // IP3: PS2X_PERF_LOG=1 appends one line per wall second to the perf log
+    // (off = one bool check per frame, zero cost).
+    const bool perfLog = ps2x::perflog::enabled();
     const bool vpadWanted = virtualPadWanted();
     bool vpadLastPadConnected = true; // forces the first [vpad] line when the overlay shows
     const std::vector<ps2x::vpad::TestTouch> vpadTestTouches =
@@ -4727,6 +4731,8 @@ void PS2Runtime::run()
                 vsyncRateTick = vt;
             }
         }
+        if (perfLog)
+            ps2x::perflog::poll(m_memory.gs().vsyncTick.load());
         PS2_IF_AGRESSIVE_LOGS({
             tick++;
             if ((tick % 120) == 0)
@@ -5000,6 +5006,8 @@ void PS2Runtime::run()
         if (!skipGl)
         {
             EndDrawing();
+            if (perfLog)
+                ps2x::perflog::notePresent();
 #if defined(__ANDROID__)
             ++s_glSwapsOnWindow;
 #endif

@@ -2,6 +2,8 @@
 // I25: iOS-only startup and window helpers (implemented in
 // src/lib/ps2_ios_runtime.mm, compiled only when PS2X_IS_IOS).
 
+#include <string>
+
 namespace ps2x::ios
 {
 // Apply <bundle>/ps2x.env then <Documents>/ps2x.env (later wins; keys the
@@ -19,4 +21,8 @@ void syncWindowSize();
 // I26: current touches from SDL's finger state, normalised 0..1 to the
 // window (x right, y down). Returns how many were written (<= max).
 int touchPoints(float *xs, float *ys, int max);
+// IP3: one-line device state for the perf log ("thermal=<0-3> lpm=<0/1>
+// batt=<0-100|-1> chg=<0/1>"; batt=-1 when the level is unknown). Main
+// thread only; cheap (no I/O).
+std::string perfDeviceState();
 } // namespace ps2x::ios

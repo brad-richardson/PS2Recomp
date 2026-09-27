@@ -185,6 +185,24 @@ void syncWindowSize()
     SDL_PushEvent(&event);
 }
 
+std::string perfDeviceState()
+{
+    char buf[96];
+    const NSInteger thermal = static_cast<NSInteger>(NSProcessInfo.processInfo.thermalState);
+    const int lpm = NSProcessInfo.processInfo.lowPowerModeEnabled ? 1 : 0;
+    UIDevice *device = UIDevice.currentDevice;
+    if (!device.batteryMonitoringEnabled)
+    {
+        device.batteryMonitoringEnabled = YES;
+    }
+    const float level = device.batteryLevel; // -1 when unknown
+    const int batt = level < 0.0f ? -1 : static_cast<int>(level * 100.0f + 0.5f);
+    const UIDeviceBatteryState state = device.batteryState;
+    const int chg = (state == UIDeviceBatteryStateCharging || state == UIDeviceBatteryStateFull) ? 1 : 0;
+    std::snprintf(buf, sizeof(buf), "thermal=%ld lpm=%d batt=%d chg=%d", static_cast<long>(thermal), lpm, batt, chg);
+    return buf;
+}
+
 int touchPoints(float *xs, float *ys, int max)
 {
     int n = 0;
