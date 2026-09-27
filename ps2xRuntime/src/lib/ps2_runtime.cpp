@@ -4455,7 +4455,7 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
         // E44 scratchpad write watch (dev-only, default off).
         const bool e44 = ps2_e44_trace::storeArmed(vaddr, 4u);
         ps2_e44_trace::detail::ScopedMemSuppress e44Suppress(e44);
-        m_memory.write32(vaddr, value);
+        m_memory.write32(vaddr, value, ctx ? ctx->pc : 0u);
         if (e44)
         {
             ps2_e44_trace::noteStore(rdram, ctx, vaddr, 4u, __func__);
@@ -4480,7 +4480,7 @@ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
         // E44 scratchpad write watch (dev-only, default off).
         const bool e44 = ps2_e44_trace::storeArmed(vaddr, 8u);
         ps2_e44_trace::detail::ScopedMemSuppress e44Suppress(e44);
-        m_memory.write64(vaddr, value);
+        m_memory.write64(vaddr, value, ctx ? ctx->pc : 0u);
         if (e44)
         {
             ps2_e44_trace::noteStore(rdram, ctx, vaddr, 8u, __func__);
@@ -4867,6 +4867,12 @@ void PS2Runtime::run()
         const char *env = std::getenv("PS2X_VSYNC_RATE_LOG");
         return env && env[0] == '1';
     }();
+    // GE1 M: a one-second receipt cadence reaches the screen validity gate
+    // at t3000 even when guest time advances at 120 vsyncs/s.
+    const double vsyncRatePeriod = [] {
+        const char *env = std::getenv("PS2X_VSYNC_RATE_INTERVAL_S");
+        return env && std::strcmp(env, "1") == 0 ? 1.0 : 5.0;
+    }();
     // IP3: PS2X_PERF_LOG=1 appends one line per wall second to the perf log
     // (off = one bool check per frame, zero cost).
     const bool perfLog = ps2x::perflog::enabled();
@@ -4902,7 +4908,7 @@ void PS2Runtime::run()
         {
             const auto now = std::chrono::steady_clock::now();
             const double secs = std::chrono::duration<double>(now - vsyncRateWall).count();
-            if (secs >= 5.0)
+            if (secs >= vsyncRatePeriod)
             {
                 const uint64_t vt = m_memory.gs().vsyncTick.load();
                 const double rate = static_cast<double>(vt - vsyncRateTick) / secs;

@@ -295,8 +295,8 @@ public:
 
     void write8(uint32_t address, uint8_t value);
     void write16(uint32_t address, uint16_t value);
-    void write32(uint32_t address, uint32_t value);
-    void write64(uint32_t address, uint64_t value);
+    void write32(uint32_t address, uint32_t value, uint32_t guestPc = 0u);
+    void write64(uint32_t address, uint64_t value, uint32_t guestPc = 0u);
     void write128(uint32_t address, __m128i value);
 
     // TLB handling

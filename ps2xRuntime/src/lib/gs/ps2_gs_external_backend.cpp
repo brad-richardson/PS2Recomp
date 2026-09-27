@@ -546,6 +546,16 @@ public:
                 std::fprintf(m_gpuCsv, "%llu,%.6f\n", (unsigned long long)tick, m_ge1.gpuMs());
         }
         ++m_stats.vsyncs;
+#if PS2X_ENABLE_DIAG_TAPS && defined(__ANDROID__)
+        if (m_ge1Active && m_frameCensus && (tick % 300u) == 0u)
+            std::fprintf(stderr, "[gs:frame-counts] tick=%llu processed=%llu "
+                                 "present_attempt=%llu export_started=%llu export_complete=%llu "
+                                 "queued=%llu no_slot=%llu\n",
+                         (unsigned long long)tick, (unsigned long long)m_stats.vsyncs,
+                         (unsigned long long)m_ahbAttempts, (unsigned long long)m_ahbExportStarted,
+                         (unsigned long long)m_ahbExportCompleted, (unsigned long long)m_ahbQueued,
+                         (unsigned long long)m_ahbNoSlot);
+#endif
         if (m_lastVsyncTick != 0u && tick != m_lastVsyncTick + 1u)
             ++m_stats.vsyncGaps;
         m_lastVsyncTick = tick;
@@ -712,6 +722,9 @@ private:
         if (m_pendingAhb < 0)
             return true;
         m_ge1.waitExport(m_pendingFence);
+#if PS2X_ENABLE_DIAG_TAPS
+        ++m_ahbExportCompleted;
+#endif
         AhbSlot &slot = m_ahbSlots[static_cast<size_t>(m_pendingAhb)];
         dumpAhb(slot.buffer, m_pendingTick);
         const bool queued = ps2x_present_vk::queue(slot.id, 640u, 480u);
@@ -719,6 +732,10 @@ private:
         m_pendingFence = 0u;
         if (!queued)
             ps2x_present_vk::fallBack("GE1 AHB queue failed");
+#if PS2X_ENABLE_DIAG_TAPS
+        if (queued)
+            ++m_ahbQueued;
+#endif
         return queued;
     }
 
@@ -771,6 +788,9 @@ private:
 
     bool presentAhb(uint64_t tick)
     {
+#if PS2X_ENABLE_DIAG_TAPS
+        ++m_ahbAttempts;
+#endif
         if (m_ahbSlots[0].id && m_ahbEpoch != ps2x_present_vk::poolEpoch())
             retireAhbSlots();
         if (!queuePendingAhb())
@@ -802,6 +822,9 @@ private:
             ps2x_present_vk::pickReusable(ids, 4, m_ahbStart, unpacedPresent ? 0 : 1000);
         if (pick.index < 0)
         {
+#if PS2X_ENABLE_DIAG_TAPS
+            ++m_ahbNoSlot;
+#endif
             if (!unpacedPresent && pick.giveUp)
                 ps2x_present_vk::fallBack("GE1 AHB compositor release timeout");
             return false;
@@ -818,6 +841,9 @@ private:
             ps2x_present_vk::fallBack("GE1 GPU to AHB export failed");
             return false;
         }
+#if PS2X_ENABLE_DIAG_TAPS
+        ++m_ahbExportStarted;
+#endif
         m_pendingAhb = pick.index;
         m_pendingFence = fence;
         m_pendingTick = tick;
@@ -889,6 +915,14 @@ private:
     int m_pendingAhb = -1;
     uint64_t m_pendingFence = 0u;
     uint64_t m_pendingTick = 0u;
+#if PS2X_ENABLE_DIAG_TAPS
+    const bool m_frameCensus = [] {
+        const char *flag = std::getenv("PS2X_GS_FRAME_CENSUS");
+        return flag != nullptr && std::strcmp(flag, "1") == 0;
+    }();
+    uint64_t m_ahbAttempts = 0, m_ahbExportStarted = 0;
+    uint64_t m_ahbExportCompleted = 0, m_ahbQueued = 0, m_ahbNoSlot = 0;
+#endif
 #endif
     uint8_t m_ge1LastPath = 3u;
     uint32_t m_ge1FifoBytes = 0u;

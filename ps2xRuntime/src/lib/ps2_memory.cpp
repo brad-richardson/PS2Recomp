@@ -15,6 +15,7 @@
 #include "ps2_vu1_engine.h"
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -32,6 +33,99 @@
 // File scope (not in the anonymous namespace below) so the test hook
 // definition after it can see it.
 std::atomic<int> g_rb1ReverseDmaOverride{-1};
+
+#if PS2X_ENABLE_DIAG_TAPS
+namespace ge1_wait_census
+{
+    struct Row
+    {
+        uint32_t pc = 0, address = 0, width = 0;
+        uint64_t value = 0, count = 0, pending = 0, waitNs = 0;
+        uint64_t firstTarget = 0, lastTarget = 0, firstDone = 0, lastDone = 0;
+    };
+    static std::array<Row, 64> rows{};
+    static size_t used = 0;
+    static uint64_t overflow = 0;
+
+    bool enabled()
+    {
+        static const bool on = [] {
+            const char *flag = std::getenv("PS2X_UNIT_WAIT_CENSUS");
+            return flag != nullptr && std::strcmp(flag, "1") == 0;
+        }();
+        return on;
+    }
+
+    void clear(uint64_t tick)
+    {
+        if (!enabled())
+            return;
+        for (size_t i = 0; i < used; ++i)
+        {
+            const Row &r = rows[i];
+            std::fprintf(stderr, "[unit-wait] tick=%llu reason=gsprivwrite pc=%08x addr=%08x "
+                                 "width=%u value=%016llx n=%llu pending=%llu sync_ms=%.3f "
+                                 "target=%llu..%llu done_before=%llu..%llu\n",
+                         (unsigned long long)tick, r.pc, r.address, r.width,
+                         (unsigned long long)r.value, (unsigned long long)r.count,
+                         (unsigned long long)r.pending, r.waitNs / 1e6,
+                         (unsigned long long)r.firstTarget, (unsigned long long)r.lastTarget,
+                         (unsigned long long)r.firstDone, (unsigned long long)r.lastDone);
+        }
+        if (overflow)
+            std::fprintf(stderr, "[unit-wait] tick=%llu overflow=%llu distinct-cap=64\n",
+                         (unsigned long long)tick, (unsigned long long)overflow);
+        used = 0;
+        overflow = 0;
+    }
+
+    void syncCsr(uint32_t pc, uint32_t address, uint64_t value, uint32_t width)
+    {
+        if (!enabled() || ps2_mtvu::onWorker())
+        {
+            ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address);
+            return;
+        }
+        auto &w = ps2_mtvu::detail::worker();
+        const uint64_t target = w.submitted.load(std::memory_order_relaxed);
+        const uint64_t done = w.completed.load(std::memory_order_acquire);
+        const auto before = std::chrono::steady_clock::now();
+        ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address);
+        const uint64_t elapsed = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - before).count());
+        Row *row = nullptr;
+        for (size_t i = 0; i < used; ++i)
+            if (rows[i].pc == pc && rows[i].address == address &&
+                rows[i].width == width && rows[i].value == value)
+            {
+                row = &rows[i];
+                break;
+            }
+        if (!row)
+        {
+            if (used == rows.size())
+            {
+                ++overflow;
+                return;
+            }
+            row = &rows[used++];
+            *row = Row{};
+            row->pc = pc;
+            row->address = address;
+            row->width = width;
+            row->value = value;
+            row->firstTarget = target;
+            row->firstDone = done;
+        }
+        ++row->count;
+        row->pending += target > done ? 1u : 0u;
+        row->waitNs += elapsed;
+        row->lastTarget = target;
+        row->lastDone = done;
+    }
+}
+#endif
 
 namespace
 {
@@ -1297,7 +1391,7 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
     }
 }
 
-void PS2Memory::write32(uint32_t address, uint32_t value)
+void PS2Memory::write32(uint32_t address, uint32_t value, uint32_t guestPc)
 {
     if (address & 3)
     {
@@ -1311,7 +1405,11 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
             // MT1 R2: CSR stores apply here. They leave the unit's bits 0-1
             // alone unless they W1C-clear them, which waits for the unit first.
             if ((address & 7u) == 0u && (value & 0x3u) != 0u)
+#if PS2X_ENABLE_DIAG_TAPS
+                ge1_wait_census::syncCsr(guestPc, address, value, 4u);
+#else
                 ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address);
+#endif
             writeCsrHalf(gs_regs.csr, address & 7u, value);
             return;
         }
@@ -1381,7 +1479,7 @@ void PS2Memory::write32(uint32_t address, uint32_t value)
     }
 }
 
-void PS2Memory::write64(uint32_t address, uint64_t value)
+void PS2Memory::write64(uint32_t address, uint64_t value, uint32_t guestPc)
 {
     if (address & 7)
     {
@@ -1394,7 +1492,11 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
         {
             // MT1 R2: as in write32.
             if ((value & 0x3u) != 0u)
+#if PS2X_ENABLE_DIAG_TAPS
+                ge1_wait_census::syncCsr(guestPc, address, value, 8u);
+#else
                 ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address);
+#endif
             writeCsrFull(gs_regs.csr, value);
             return;
         }

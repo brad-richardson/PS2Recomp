@@ -18,6 +18,8 @@ def ps2xVu1FmacSimd = project.findProperty('ps2xVu1FmacSimd') ?: 'ON'
 def ps2xVu1EngineStats = project.findProperty('ps2xVu1EngineStats') ?: 'OFF'
 // MV2: diagnostic Android guest hash tap; speed APKs leave it OFF.
 def ps2xDetHashTap = project.findProperty('ps2xDetHashTap') ?: 'OFF'
+// GE1 M: bounded event-clock/unit-wait census, diagnostic APK only.
+def ps2xDiagTaps = project.findProperty('ps2xDiagTaps') ?: 'OFF'
 
 android {
     namespace 'com.ps2x.runner'

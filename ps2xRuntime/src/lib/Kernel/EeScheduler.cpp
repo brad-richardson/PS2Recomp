@@ -39,6 +39,10 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#if PS2X_ENABLE_DIAG_TAPS
+namespace ge1_wait_census { void clear(uint64_t tick); }
+#endif
+
 // P1c histogram flushers owned by other translation units (defined in
 // Kernel/Syscalls/Dispatcher.cpp and ps2_runtime.cpp). Called from the
 // periodic tick below so quiet periods still emit blocks.
@@ -198,10 +202,20 @@ namespace
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
     : m_runtime(runtime),
+      m_eventClockCycles([] {
+          const char *flag = std::getenv("PS2X_EVENT_CLOCK");
+          return flag != nullptr && std::strcmp(flag, "cycles") == 0;
+      }()),
       m_cycleOnlyEvents([] {
           const char *flag = std::getenv("PS2X_DETERMINISTIC");
           return flag != nullptr && std::strcmp(flag, "1") == 0;
+      }() || m_eventClockCycles),
+#if PS2X_ENABLE_DIAG_TAPS
+      m_eventClockCensus([] {
+          const char *flag = std::getenv("PS2X_EVENT_CLOCK_CENSUS");
+          return flag != nullptr && std::strcmp(flag, "1") == 0;
       }()),
+#endif
       m_hostPace(ps2_vsync_pacer::hostPaceFromProcessEnv()),
       m_vsyncPace(!ps2_vsync_pacer::unpacedFromProcessEnv() || m_hostPace.enabled)
 {
@@ -525,6 +539,9 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_gsVSyncCallbackSp = 0;
     m_runtime.memory().gs().vsyncTick.store(0u, std::memory_order_release);
     m_runtime.memory().resetEeTimers();
+#if PS2X_ENABLE_DIAG_TAPS
+    m_eventClockCounts = {};
+#endif
 
     GuestThread main{};
     main.id = kMainThreadId;
@@ -3028,6 +3045,22 @@ void EeScheduler::processEvent(const EeEvent &event)
             ps2_mtvu::vblank(m_vsyncTick + 1u, hashTick);
         }
         ++m_vsyncTick;
+#if PS2X_ENABLE_DIAG_TAPS
+        if ((m_vsyncTick % 300u) == 0u)
+            ge1_wait_census::clear(m_vsyncTick);
+        if (m_eventClockCensus && (m_vsyncTick % 300u) == 0u)
+        {
+            const auto &c = m_eventClockCounts;
+            std::fprintf(stderr, "[event-clock] tick=%llu cycles=%d advance=%llu/%llu "
+                                 "selected=event:%llu,timer:%llu hostwait=%llu/%.3fms "
+                                 "externalwait=%llu/%.3fms\n",
+                         (unsigned long long)m_vsyncTick, m_eventClockCycles ? 1 : 0,
+                         (unsigned long long)c.advances, (unsigned long long)c.advancedCycles,
+                         (unsigned long long)c.eventSelections, (unsigned long long)c.timerSelections,
+                         (unsigned long long)c.hostWaits, c.hostWaitNs / 1e6,
+                         (unsigned long long)c.externalWaits, c.externalWaitNs / 1e6);
+        }
+#endif
         if (m_vsyncTick == coverageTick())
         {
             std::cerr << "[coverage:tick] vsync=" << m_vsyncTick << std::endl;
@@ -3248,8 +3281,21 @@ void EeScheduler::waitForEvent()
     const bool hasTimerDeadline = timerCycles != std::numeric_limits<uint64_t>::max();
     if (m_deadlines.empty() && !hasTimerDeadline)
     {
+#if PS2X_ENABLE_DIAG_TAPS
+        const auto waitStart = m_eventClockCensus ? std::chrono::steady_clock::now()
+                                                 : std::chrono::steady_clock::time_point{};
+#endif
         m_eventCv.wait(lock, [this]()
                        { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+#if PS2X_ENABLE_DIAG_TAPS
+        if (m_eventClockCensus)
+        {
+            ++m_eventClockCounts.externalWaits;
+            m_eventClockCounts.externalWaitNs += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - waitStart).count());
+        }
+#endif
         return;
     }
 
@@ -3268,6 +3314,10 @@ void EeScheduler::waitForEvent()
                                            });
         deadlineCycle = next->deadlineCycle;
         hostDeadline = next->hostDeadline;
+#if PS2X_ENABLE_DIAG_TAPS
+        if (m_eventClockCensus)
+            ++m_eventClockCounts.eventSelections;
+#endif
     }
     if (hasTimerDeadline)
     {
@@ -3278,12 +3328,59 @@ void EeScheduler::waitForEvent()
         {
             deadlineCycle = timerCycle;
             hostDeadline = timerHostDeadline;
+#if PS2X_ENABLE_DIAG_TAPS
+            if (m_eventClockCensus)
+            {
+                ++m_eventClockCounts.timerSelections;
+                if (!m_deadlines.empty())
+                    --m_eventClockCounts.eventSelections;
+            }
+#endif
         }
     }
 
+    if (m_eventClockCycles)
+    {
+        // The queue was empty while holding m_eventMutex. Advance to the
+        // earliest guest event/timer, then let the ordinary event pass deliver
+        // it before any further idle advancement. A host completion posted
+        // after this selection is consumed by that next pass.
+        const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;
+#if PS2X_ENABLE_DIAG_TAPS
+        if (m_eventClockCensus)
+        {
+            ++m_eventClockCounts.advances;
+            m_eventClockCounts.advancedCycles += elapsed;
+        }
+#endif
+        lock.unlock();
+        uint64_t remaining = elapsed;
+        while (remaining > 0u)
+        {
+            const uint32_t step = static_cast<uint32_t>(std::min<uint64_t>(remaining, std::numeric_limits<uint32_t>::max()));
+            accountCycles(step);
+            remaining -= step;
+        }
+        m_checkpointPending.store(true, std::memory_order_release);
+        return;
+    }
+
+#if PS2X_ENABLE_DIAG_TAPS
+    const auto waitStart = m_eventClockCensus ? std::chrono::steady_clock::now()
+                                             : std::chrono::steady_clock::time_point{};
+#endif
     const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
                                                { return !m_events.empty() ||
                                                         m_stopRequested.load(std::memory_order_acquire); });
+#if PS2X_ENABLE_DIAG_TAPS
+    if (m_eventClockCensus)
+    {
+        ++m_eventClockCounts.hostWaits;
+        m_eventClockCounts.hostWaitNs += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - waitStart).count());
+    }
+#endif
     if (!signaled)
     {
         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;
