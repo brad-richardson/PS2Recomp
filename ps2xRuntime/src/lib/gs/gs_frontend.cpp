@@ -187,17 +187,34 @@ namespace
                 const uint64_t items = static_cast<uint64_t>(nloop) * nreg;
                 if (items > (sizeBytes - offset) / 16u)
                     return false;
-                for (uint64_t i = 0u; i < items; ++i)
+                // GP2: cheap reject — collect the A+D (0xE) slot mask from the
+                // tag once. Tags without A+D skip the payload with no
+                // per-item work; tags with A+D check only those slots
+                // (strided, no modulo). Same slots as the old item loop, so
+                // the result is identical.
+                uint32_t adMask = 0u;
+                for (uint32_t r = 0u; r < nreg; ++r)
                 {
-                    const uint32_t slot = static_cast<uint32_t>(i % nreg);
-                    if (((tagHi >> (slot * 4u)) & 0xFu) == 0xEu)
-                    {
-                        if (static_cast<uint8_t>(loadLE64(data + offset + 8u)) ==
-                            static_cast<uint8_t>(GS_REG_FINISH))
-                            return true;
-                    }
-                    offset += 16u;
+                    if (((tagHi >> (r * 4u)) & 0xFu) == 0xEu)
+                        adMask |= (1u << r);
                 }
+                if (adMask != 0u)
+                {
+                    for (uint32_t s = 0u; s < nreg; ++s)
+                    {
+                        if ((adMask & (1u << s)) == 0u)
+                            continue;
+                        for (uint32_t k = 0u; k < nloop; ++k)
+                        {
+                            const uint64_t at = offset +
+                                (static_cast<uint64_t>(k) * nreg + s) * 16u;
+                            if (static_cast<uint8_t>(loadLE64(data + at + 8u)) ==
+                                static_cast<uint8_t>(GS_REG_FINISH))
+                                return true;
+                        }
+                    }
+                }
+                offset += static_cast<uint32_t>(items * 16u);
             }
             else if (flg == GIF_FMT_REGLIST)
             {
