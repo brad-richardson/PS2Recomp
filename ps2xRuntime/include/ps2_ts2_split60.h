@@ -36,6 +36,8 @@ inline thread_local std::unordered_map<uint32_t, PredictorIdentity> predictors;
 inline thread_local uint64_t scopeErrors = 0;
 inline thread_local std::unordered_map<uint32_t, uint32_t> macroHalves;
 inline thread_local std::unordered_map<uint32_t, bool> predictionHelper;
+inline thread_local uint64_t predictionSkips = 0;
+inline thread_local uint64_t predictionFallbacks = 0;
 
 inline bool enabled() noexcept
 {
@@ -113,6 +115,30 @@ inline uint32_t read32(const uint8_t *ram, uint32_t address) noexcept
     if (ram && address <= 0x02000000u - 4u)
         std::memcpy(&value, ram + address, 4);
     return value;
+}
+
+// The catch-up scanner belongs to the stock-rate predictor. The first half
+// services it; the second reuses the result if the front already covers the
+// caller's requested threshold. An uncovered front must still catch up.
+inline bool skipSecondHalfPrediction(const uint8_t *ram, R5900Context *ctx,
+                                    uint32_t source, uint32_t target) noexcept
+{
+    if (!halfMode() || guestInterrupt || target != 0x113200u || !ctx ||
+        (source != 0x113744u && source != 0x113770u &&
+         source != 0x1137a8u && source != 0x1137d8u)) return false;
+    const auto it = contexts.find(guestThread);
+    if (it == contexts.end() || !it->second.active || it->second.halfIndex != 1)
+        return false;
+    const uint32_t c = getRegU32(ctx, 4) & 0x1fffffffu;
+    if (!ram || c > 0x02000000u - 0xa4u) return false;
+    const uint32_t frontBits = read32(ram, c + 0x98u);
+    const uint32_t baseBits = read32(ram, c + 0xa0u);
+    float front = 0.0f, base = 0.0f;
+    std::memcpy(&front, &frontBits, 4);
+    std::memcpy(&base, &baseBits, 4);
+    if (front < base + ctx->f[22]) { ++predictionFallbacks; return false; }
+    ++predictionSkips;
+    return true;
 }
 
 inline void begin(const uint8_t *ram, R5900Context *ctx) noexcept

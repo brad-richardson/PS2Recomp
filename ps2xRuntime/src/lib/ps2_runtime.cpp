@@ -3106,6 +3106,24 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                kind == GuestBranchKind::DirectCall;
     if (splitBoundary) ps2_ts2_split60::begin(rdram, ctx);
     ps2_ts2_split60::noteHelperCall(sourcePc, targetPc);
+    if (ps2_ts2_split60::skipSecondHalfPrediction(rdram, ctx, sourcePc, targetPc))
+    {
+        ctx->pc = fallthroughPc;
+        return true;
+    }
+    if (targetPc == 0x10eb30u &&
+        (sourcePc == 0x13a530u || sourcePc == 0x1064e4u) &&
+        std::getenv("PS2X_TS2_GATE"))
+    {
+        static std::atomic<uint32_t> actionLines{0};
+        if (actionLines.fetch_add(1, std::memory_order_relaxed) < 16u)
+            std::fprintf(stderr,
+                "ts2-g2-action tick=%llu src=%08x a1=%08x skips=%llu fallback=%llu\n",
+                static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()),
+                sourcePc, getRegU32(ctx, 5),
+                static_cast<unsigned long long>(ps2_ts2_split60::predictionSkips),
+                static_cast<unsigned long long>(ps2_ts2_split60::predictionFallbacks));
+    }
     ps2_ts2_observer::noteBranch(
         rdram, ctx, sourcePc, targetPc,
         kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall,
