@@ -1587,6 +1587,22 @@ bool PS2Runtime::syncCoreSubsystems()
                                          (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
                                      m_vu1.state().tBitEnabled =
                                          (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
+                                     if (ps2_microvu::selected())
+                                     {
+                                         const uint32_t fbrst = cpuContext->vu0_fbrst;
+                                         ps2_mtvu::submit([this, startPC, top, itop, fbrst]
+                                                          {
+                                                              ps2_microvu::run(m_memory, m_memory.getVU1Data(),
+                                                                               m_vu1.state(), startPC, false,
+                                                                               top, itop, fbrst, 65536);
+                                                          }, 0, fbrst);
+                                         ps2_mtvu::syncAll(ps2_mtvu::Reason::DtFallback);
+                                         cpuContext->vu0_vpu_stat =
+                                             (cpuContext->vu0_vpu_stat & ~0x0600u) |
+                                             (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                                             (m_vu1.state().stoppedByT ? 0x0400u : 0u);
+                                         return;
+                                     }
                                      m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                    m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                    m_gs, &m_memory, startPC, top, itop, 65536);
@@ -1632,6 +1648,22 @@ bool PS2Runtime::syncCoreSubsystems()
                                          (cpuContext->vu0_fbrst & (1u << 10)) != 0u;
                                      m_vu1.state().tBitEnabled =
                                          (cpuContext->vu0_fbrst & (1u << 11)) != 0u;
+                                     if (ps2_microvu::selected())
+                                     {
+                                         const uint32_t fbrst = cpuContext->vu0_fbrst;
+                                         ps2_mtvu::submit([this, top, itop, fbrst]
+                                                          {
+                                                              ps2_microvu::run(m_memory, m_memory.getVU1Data(),
+                                                                               m_vu1.state(), 0, true,
+                                                                               top, itop, fbrst, 65536);
+                                                          }, 0, fbrst);
+                                         ps2_mtvu::syncAll(ps2_mtvu::Reason::DtFallback);
+                                         cpuContext->vu0_vpu_stat =
+                                             (cpuContext->vu0_vpu_stat & ~0x0600u) |
+                                             (m_vu1.state().stoppedByD ? 0x0200u : 0u) |
+                                             (m_vu1.state().stoppedByT ? 0x0400u : 0u);
+                                         return;
+                                     }
                                      m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                   m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                   m_gs, &m_memory, top, itop, 65536);
