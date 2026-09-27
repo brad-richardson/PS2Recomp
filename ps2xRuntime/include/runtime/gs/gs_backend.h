@@ -55,12 +55,17 @@ public:
     // PS2Memory (the CPU backend's VRAM is PS2Memory's, so it has none).
     // SS3: SavestateBusyReason names the deferral ("gs-transfer") when idle
     // is false for a specific new cause; "" keeps the generic text.
+    // SQ1: SavestateQuiesce settles host-side-only pending work (a render
+    // tail, palette uploads) so a requested save can land; true when it
+    // flushed anything. It never invents guest data: state that still
+    // awaits the guest keeps reporting busy. Runs only on the save path.
     virtual bool SavestateIdle() const
     {
         const GSTransferSnapshot t = GetTransferSnapshot();
         return t.localToHostPendingBytes == 0u && t.copiedPixels >= t.totalPixels;
     }
     virtual std::string SavestateBusyReason() const { return {}; }
+    virtual bool SavestateQuiesce() { return false; }
     virtual void SavestateSave(std::vector<uint8_t> &out) { out.clear(); }
     virtual bool SavestateLoad(const uint8_t *data, size_t size)
     {

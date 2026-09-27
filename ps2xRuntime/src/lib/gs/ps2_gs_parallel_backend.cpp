@@ -294,6 +294,10 @@ public:
             const uint64_t bits = static_cast<uint64_t>(command.trxreg.rrw) * command.trxreg.rrh *
                                   transferBitsPerPixel(command.bitbltbuf.spsm);
             m_l2hPending = static_cast<uint32_t>((bits + 7u) / 8u);
+            // SQ1: log the readback lifecycle (SSX 3 issues small ones
+            // roughly every 9 ticks mid-race and never drains them, so a
+            // stuck fifo would otherwise be invisible).
+            std::fprintf(stderr, "[gs: l2h] begin bytes=%u\n", m_l2hPending);
         }
     }
 
@@ -490,6 +494,8 @@ public:
         const uint32_t bytes = std::min<uint32_t>(maxBytes, (m_l2hPending + 15u) & ~15u) & ~15u;
         m_iface->read_transfer_fifo(dst, bytes / 16u);
         m_l2hPending = (bytes >= m_l2hPending) ? 0u : (m_l2hPending - bytes);
+        if (m_l2hPending == 0u)
+            std::fprintf(stderr, "[gs: l2h] drained\n");
         counters().localToHostBytes.fetch_add(bytes, std::memory_order_relaxed);
         return bytes;
     }
@@ -536,11 +542,14 @@ public:
     // SS1 save states: VRAM (host mirror after a flush), the raw register,
     // priv and GIF-path state paraLLEl decodes itself. SS3 (v3 tail): the
     // CLUT ring + renderer cursors + the interface palette indices (S2), and
-    // the retained strip/fan vertices (S3). Not captured: SSAA planes
-    // (cleared by the VRAM upload) and in-flight host->local transfers (the
-    // save defers while one is live). The footer lets tests and future tools
-    // find the tail without paraLLEl's struct sizes.
+    // the retained strip/fan vertices (S3). SQ1 (v4 tail): plus the
+    // in-flight transfer state (host->local payload/cursors, local->host
+    // fifo bytes/cursors), so saves land mid-transfer; v3 tails still
+    // load. Not captured: SSAA planes (cleared by the VRAM upload). The
+    // footer lets tests and future tools find the tail without paraLLEl's
+    // struct sizes.
     static constexpr uint32_t kTailMagic = 0x33534750u; // "PGS3" LE
+    static constexpr uint32_t kTailMagicV4 = 0x34534750u; // "PGS4" LE (SQ1: + transfer state)
     static constexpr size_t kTailFooterSize = sizeof(uint64_t) + sizeof(uint32_t);
     void SavestateSave(std::vector<uint8_t> &out) override
     {
@@ -565,9 +574,11 @@ public:
         for (uint32_t i = 0; i < 4u; ++i)
             put(&m_iface->get_gif_path(i), sizeof(ParallelGS::GIFPath));
         put(&m_l2hPending, sizeof(m_l2hPending));
-#if defined(PARALLEL_GS_HAS_SAVESTATE_V3)
+#if defined(PARALLEL_GS_HAS_SAVESTATE_V3) || defined(PARALLEL_GS_HAS_TRANSFER_STATE)
         // v3 tail: [u8 hasClut][clut?][u32 vcount][vcount x 36B verts]
         // then [u64 tailLen][u32 magic]. tailLen covers hasClut..verts.
+        // v4 (SQ1): the same, plus the in-flight transfer state after the
+        // verts (tailLen covers hasClut..transfer) and the PGS4 magic.
         std::vector<uint8_t> tail;
         const auto tput = [&tail](const void *src, size_t n) {
             const auto *b = static_cast<const uint8_t *>(src);
@@ -598,9 +609,24 @@ public:
             return;
         }
         tput(vtx.data(), vtx.size());
+#if defined(PARALLEL_GS_HAS_TRANSFER_STATE)
+        // SQ1: the host->local payload/cursors and local->host fifo bytes
+        // travel with the state, so the save lands mid-transfer.
+        std::vector<uint8_t> xfer;
+        if (!m_iface->read_transfer_state(xfer))
+        {
+            out.clear(); // never a blob with a missing transfer; the load refuses it
+            return;
+        }
+        tput(xfer.data(), xfer.size());
+        const uint64_t tailLen = tail.size();
+        tput(&tailLen, sizeof(tailLen));
+        tput(&kTailMagicV4, sizeof(kTailMagicV4));
+#else
         const uint64_t tailLen = tail.size();
         tput(&tailLen, sizeof(tailLen));
         tput(&kTailMagic, sizeof(kTailMagic));
+#endif
         out.insert(out.end(), tail.begin(), tail.end());
 #else
         // Optional tail: the CLUT ring + cursors (paraLLEl ss1-clut accessor).
@@ -627,14 +653,20 @@ public:
 
     bool SavestateIdle() const override
     {
+        // SQ1: with the transfer state serialized, an open transfer or a
+        // pending readback fifo no longer defers the save; older paraLLEl
+        // keeps the S3 deferral.
+#if !defined(PARALLEL_GS_HAS_TRANSFER_STATE)
         if (m_l2hPending != 0u)
             return false;
+#endif
 #if defined(PARALLEL_GS_HAS_CLUT_STATE)
-        // Palette uploads wait for the next render pass; save after it.
+        // Palette uploads wait for the next render pass; the saver quiesces
+        // them (SQ1) instead of deferring.
         if (m_initOk && !m_iface->clut_state_idle())
             return false;
 #endif
-#if defined(PARALLEL_GS_HAS_SAVESTATE_V3)
+#if defined(PARALLEL_GS_HAS_SAVESTATE_V3) && !defined(PARALLEL_GS_HAS_TRANSFER_STATE)
         // S3: an in-flight host->local transfer keeps its payload/cursors
         // out of the state; the guest completes it, so the save waits.
         if (m_initOk && !m_iface->gs_transfer_idle())
@@ -645,11 +677,32 @@ public:
 
     std::string SavestateBusyReason() const override
     {
-#if defined(PARALLEL_GS_HAS_SAVESTATE_V3)
+        // SQ1: same order and conditions as SavestateIdle so the reason
+        // always names the check that failed.
+#if !defined(PARALLEL_GS_HAS_TRANSFER_STATE)
+        if (m_l2hPending != 0u)
+            return "l2h-pending";
+#endif
+#if defined(PARALLEL_GS_HAS_CLUT_STATE)
+        if (m_initOk && !m_iface->clut_state_idle())
+            return "clut-pending";
+#endif
+#if defined(PARALLEL_GS_HAS_SAVESTATE_V3) && !defined(PARALLEL_GS_HAS_TRANSFER_STATE)
         if (m_initOk && !m_iface->gs_transfer_idle())
             return "gs-transfer";
 #endif
         return {};
+    }
+
+    bool SavestateQuiesce() override
+    {
+#if defined(PARALLEL_GS_HAS_SAVESTATE_QUIESCE)
+        if (!ensureInit())
+            return false;
+        return m_iface->savestate_quiesce();
+#else
+        return false;
+#endif
     }
 
     bool SavestateLoad(const uint8_t *data, size_t size) override
@@ -679,13 +732,21 @@ public:
         std::memcpy(&m_l2hPending, data + off, sizeof(m_l2hPending));
         off += sizeof(m_l2hPending);
         bool clutRestored = false;
-#if defined(PARALLEL_GS_HAS_SAVESTATE_V3)
+#if defined(PARALLEL_GS_HAS_SAVESTATE_V3) || defined(PARALLEL_GS_HAS_TRANSFER_STATE)
         if (size < off + 1u + kTailFooterSize)
             return false;
         uint32_t tailMagic = 0u;
         std::memcpy(&tailMagic, data + size - sizeof(tailMagic), sizeof(tailMagic));
+#if defined(PARALLEL_GS_HAS_TRANSFER_STATE)
+        // SQ1: v4 tails carry the transfer state after the verts; v3 tails
+        // (SS3 and older saves, always taken while idle) still load.
+        const bool isV4 = (tailMagic == kTailMagicV4);
+        if (!isV4 && tailMagic != kTailMagic)
+            return false;
+#else
         if (tailMagic != kTailMagic)
             return false;
+#endif
         uint64_t tailLen = 0u;
         std::memcpy(&tailLen, data + size - kTailFooterSize, sizeof(tailLen));
         if (tailLen < 1u || tailLen > size || off + tailLen + kTailFooterSize != size)
@@ -714,12 +775,32 @@ public:
                 return false;
             t += static_cast<size_t>(n) + 4u * sizeof(uint32_t);
         }
-        // S3: the vertex queue runs to the tail end; the accessor validates
-        // its count and exact size.
+        // S3: the vertex queue runs to the tail end (v3); the accessor
+        // validates its count and exact size. v4: the verts have an exact
+        // size and the transfer state runs to the tail end.
+#if defined(PARALLEL_GS_HAS_TRANSFER_STATE)
+        if (tailEnd - t < sizeof(uint32_t))
+            return false;
+        if (isV4)
+        {
+            uint32_t vcount = 0u;
+            std::memcpy(&vcount, data + t, sizeof(vcount));
+            if (vcount > 3u || tailEnd - t < sizeof(uint32_t) + size_t{vcount} * 36u)
+                return false;
+            const size_t vertEnd = t + sizeof(uint32_t) + size_t{vcount} * 36u;
+            if (!m_iface->write_vertex_queue_state(std::vector<uint8_t>(data + t, data + vertEnd)))
+                return false;
+            if (!m_iface->write_transfer_state(std::vector<uint8_t>(data + vertEnd, data + tailEnd)))
+                return false;
+        }
+        else if (!m_iface->write_vertex_queue_state(std::vector<uint8_t>(data + t, data + tailEnd)))
+            return false;
+#else
         if (tailEnd - t < sizeof(uint32_t))
             return false;
         if (!m_iface->write_vertex_queue_state(std::vector<uint8_t>(data + t, data + tailEnd)))
             return false;
+#endif
 #else
         const uint8_t hasClut = data[off++];
         if (hasClut)

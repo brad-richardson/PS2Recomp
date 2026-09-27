@@ -68,6 +68,8 @@ VU1Interpreter::VU1Interpreter(Unit unit)
 {
     const char *floatMode = std::getenv("PS2X_VU_FLOAT");
     m_pcsx2Float = floatMode != nullptr && std::strcmp(floatMode, "pcsx2") == 0;
+    const char *flagElide = std::getenv("PS2X_VU1_FLAG_ELIDE");
+    m_flagElideRequested = flagElide != nullptr && std::strcmp(flagElide, "1") == 0;
     reset();
 }
 
@@ -1487,6 +1489,25 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
     ctx.programEnded = false;
     // VR1: generated code for this code image, if one was compiled in.
     const RecompProgram *recomp = lookupRecompProgram(vuCode, codeSize, memory);
+    // VF1 Part 3: the six pinned images with no in-image FS*/FM* readers.
+    // Require a compiled-in match; unknown/new images retain exact flags.
+    m_elideFmacFlags = false;
+    if (m_unit == Unit::VU1 && m_flagElideRequested && recomp != nullptr)
+    {
+        switch (recomp->hash)
+        {
+        case 0x00df9699b042f1b9ull:
+        case 0x77b7173b0915df5full:
+        case 0xa56458ed3544b351ull:
+        case 0xad77d08a166608edull:
+        case 0xb3bdaeaef374c80bull:
+        case 0xf587398bb6fc4651ull:
+            m_elideFmacFlags = true;
+            break;
+        default: // a214cc509116aaa4 has 13 MAC-reader sites.
+            break;
+        }
+    }
     // VR2: generated pairs carry no E36/E37 trace hooks; an armed run (dev
     // only) goes through the interpreter. m_entryArmed only turns off mid-run.
     if (m_traceArmed || m_entryArmed)

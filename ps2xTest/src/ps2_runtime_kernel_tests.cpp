@@ -399,8 +399,15 @@ namespace
 
     void schedulerMainExit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        GuestExecutionProbe probe(runtime);
-        gSchedulerTrace->push_back(1);
+        // CP4-fix: the probe must be destroyed before ExitThread transfers.
+        // The transfer longjmps (no unwinding), so a probe left alive across
+        // it never decrements and the next guest entry over-counts. ExitThread
+        // dispatches no nested guest code, so ending the probe here loses no
+        // re-entrancy coverage; all entry checks stay in the constructor.
+        {
+            GuestExecutionProbe probe(runtime);
+            gSchedulerTrace->push_back(1);
+        }
         ExitThread(rdram, ctx, runtime);
     }
 

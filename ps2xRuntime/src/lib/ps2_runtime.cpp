@@ -1286,6 +1286,10 @@ void PS2Runtime::setDebugUiCallbacks(DebugUiCallback initCallback,
 
 PS2Runtime::~PS2Runtime()
 {
+    // CP4-fix: same class as MT1 below; a runtime's MPEG non-stream index
+    // entries must not outlive it (see
+    // invalidateMpegNonStreamDeliveriesForRuntime).
+    ps2_stubs::invalidateMpegNonStreamDeliveriesForRuntime(this);
     // MT1: queued unit work may reference this runtime; the process-wide
     // hooks must not outlive it (tests create many runtimes).
     ps2_mtvu::syncAll();

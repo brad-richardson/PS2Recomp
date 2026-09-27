@@ -721,8 +721,18 @@ namespace ps2_savestate
         gs.drainQueue();
         Writer gsw;
         std::string gsWhy;
-        gs.privWrite([&gs, &gsw, &gsWhy]() {
+        gs.privWrite([&gs, &gsw, &gsWhy, vsyncTick]() {
             gsWhy = GSSavestate::ready(gs);
+            // SQ1: host-side-only pending work (a render tail, palette
+            // uploads) settles through the normal flush path so a requested
+            // save lands on this vsync instead of deferring; state still
+            // awaiting the guest (an open transfer) keeps deferring.
+            if (!gsWhy.empty() && GSSavestate::quiesce(gs))
+            {
+                std::fprintf(stderr, "[savestate] quiesced tick=%llu was=%s\n",
+                             static_cast<unsigned long long>(vsyncTick), gsWhy.c_str());
+                gsWhy = GSSavestate::ready(gs);
+            }
             if (gsWhy.empty())
                 GSSavestate::save(gs, gsw);
         });
@@ -1333,15 +1343,25 @@ bool VU1InterpreterSavestate::load(VU1Interpreter &vu, Reader &r)
 // ==================================================================== GS
 std::string GSSavestate::ready(const GS &gs)
 {
-    // The frontend vertex queue and (SS3) paraLLEl's retained strip/fan
-    // vertices are saved; an in-flight host->local transfer is not, so the
-    // save defers while one is live.
+    // The frontend vertex queue, (SS3) paraLLEl's retained strip/fan
+    // vertices and (SQ1) the in-flight transfer state (payload/cursors for
+    // host->local, fifo bytes/cursors for local->host) are saved, so the
+    // save lands mid-transfer. A pending palette upload or tail pass
+    // reports busy here and the caller quiesces it, then re-checks.
+    // Older paraLLEl (no transfer accessors) keeps the SS3 deferral.
     if (gs.m_backend && !gs.m_backend->SavestateIdle())
     {
         const std::string reason = gs.m_backend->SavestateBusyReason();
         return reason.empty() ? "GS backend transfer active" : reason;
     }
     return {};
+}
+
+bool GSSavestate::quiesce(GS &gs)
+{
+    if (!gs.m_backend)
+        return false;
+    return gs.m_backend->SavestateQuiesce();
 }
 
 void GSSavestate::save(GS &gs, Writer &w)

@@ -347,6 +347,8 @@ private:
     Unit m_unit;
     // VF1: runtime choice; fixed at construction for game runs.
     bool m_pcsx2Float = false;
+    bool m_flagElideRequested = false;
+    bool m_elideFmacFlags = false; // recomputed from the VU1 image at each run
     VU1State m_state;
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t m_programStartCount = 0;

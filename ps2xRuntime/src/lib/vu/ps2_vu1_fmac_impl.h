@@ -257,14 +257,17 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::updateFmacFlags(const uint8_t
             continue;
 
         const uint32_t flags = laneFlags[component];
-        if ((flags & 0x1u) != 0u)
-            mac |= lane;
-        if ((flags & 0x2u) != 0u)
-            mac |= static_cast<uint32_t>(lane) << 4;
-        if ((flags & 0x4u) != 0u)
-            mac |= static_cast<uint32_t>(lane) << 8;
-        if ((flags & 0x8u) != 0u)
-            mac |= static_cast<uint32_t>(lane) << 12;
+        if (!m_elideFmacFlags)
+        {
+            if ((flags & 0x1u) != 0u)
+                mac |= lane;
+            if ((flags & 0x2u) != 0u)
+                mac |= static_cast<uint32_t>(lane) << 4;
+            if ((flags & 0x4u) != 0u)
+                mac |= static_cast<uint32_t>(lane) << 8;
+            if ((flags & 0x8u) != 0u)
+                mac |= static_cast<uint32_t>(lane) << 12;
+        }
         status |= flags;
     }
     commitFmacFlags(mac, status, extraSticky);
@@ -283,9 +286,14 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::commitFmacFlags(uint32_t mac,
     {
         if (m_flagValidMask != 0u)
             demoteQueuedFlags(true, false);
-        m_state.mac = mac;
         const uint32_t current = status & 0xFu;
-        m_state.status = (m_state.status & 0xFF0u) | current | ((current | extraSticky) << 6);
+        if (m_elideFmacFlags)
+            m_state.status |= ((current | extraSticky) << 6) & 0x3C0u;
+        else
+        {
+            m_state.mac = mac;
+            m_state.status = (m_state.status & 0xFF0u) | current | ((current | extraSticky) << 6);
+        }
         noteDirect(m_cycle + kFmacLatency);
         return;
     }
@@ -307,8 +315,9 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::commitFmacFlags(uint32_t mac,
     entry->mac = mac;
     entry->status = status;
     entry->extraSticky = extraSticky;
-    entry->writesMac = true;
-    entry->writesStatus = true;
+    entry->writesMac = !m_elideFmacFlags;
+    entry->writesStatus = !m_elideFmacFlags;
+    entry->writesStickyOr = m_elideFmacFlags;
 }
 
 PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::issueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask)

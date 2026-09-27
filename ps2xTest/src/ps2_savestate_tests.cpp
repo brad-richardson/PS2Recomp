@@ -122,18 +122,22 @@ namespace
         uint64_t ringN = 0;
         uint32_t base = 0, next = 0, iface = 0, latest = 0;
         size_t clutEnd = 0; // first byte after the CLUT part (S3: vertex part)
+        bool isV4 = false; // SQ1: transfer state follows the verts
     };
 
     Ss3Tail ss3ParseTail(const std::vector<uint8_t> &blob)
     {
         Ss3Tail out;
         constexpr uint32_t kMagic = 0x33534750u; // "PGS3" LE
+        constexpr uint32_t kMagicV4 = 0x34534750u; // "PGS4" LE (SQ1: + transfer)
         constexpr size_t kFooter = sizeof(uint64_t) + sizeof(uint32_t);
         if (blob.size() < kFooter)
             return out;
         uint32_t magic = 0u;
         std::memcpy(&magic, blob.data() + blob.size() - sizeof(magic), sizeof(magic));
-        if (magic != kMagic)
+        if (magic == kMagicV4)
+            out.isV4 = true;
+        else if (magic != kMagic)
             return out;
         uint64_t tailLen = 0u;
         std::memcpy(&tailLen, blob.data() + blob.size() - kFooter, sizeof(tailLen));
@@ -277,12 +281,16 @@ namespace
             return {};
         }
         std::memcpy(&vcount, blob.data() + tail.clutEnd, sizeof(vcount));
-        if (vcount > 3u || tail.tailEnd - tail.clutEnd != sizeof(uint32_t) + size_t{vcount} * 36u)
+        // v3: the verts run to the tail end. v4 (SQ1): exact-size verts,
+        // then the transfer state.
+        const size_t vertBytes = sizeof(uint32_t) + size_t{vcount} * 36u;
+        if (vcount > 3u || tail.tailEnd - tail.clutEnd < vertBytes ||
+            (!tail.isV4 && tail.tailEnd - tail.clutEnd != vertBytes))
         {
             t.Fail("vertex part has exact size for its count");
             return {};
         }
-        return std::vector<uint8_t>(blob.data() + tail.clutEnd, blob.data() + tail.tailEnd);
+        return std::vector<uint8_t>(blob.data() + tail.clutEnd, blob.data() + tail.clutEnd + vertBytes);
     }
 } // namespace
 
@@ -636,8 +644,11 @@ void register_ps2_savestate_tests()
                      "ring bytes round-trip exactly");
         });
 
-        tc.Run("ss3 s3: a split IMAGE upload defers the save", [](TestCase &t)
+        tc.Run("ss3 s3: a split IMAGE upload saves mid-transfer and resumes exactly", [](TestCase &t)
         {
+            // SQ1 rewrites the SS3 expectation per the SQ1 brief (a save can
+            // be taken at any requested tick; the in-flight payload/cursors
+            // travel with the state), so an open transfer no longer defers.
             if (!ss3WantParallelGpu())
                 return;
             std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
@@ -653,31 +664,221 @@ void register_ps2_savestate_tests()
             be->RawWriteRegister(0x53, 0u); // TRXDIR: host->local
             if (!ss3BackendInitOk(t))
                 return;
-            t.IsTrue(!be->SavestateIdle(), "open transfer is not idle (idle pre-S3)");
-            t.Equals(be->SavestateBusyReason(), std::string("gs-transfer"), "transfer names its reason");
+            t.IsTrue(be->SavestateIdle(), "open transfer is idle (serialized, SQ1)");
             // First fragment: tag (NLOOP=64 IMAGE) + 4 of 16 words.
             std::vector<uint8_t> frag(16 + 4 * 16, 0);
             const uint64_t tagLo = 64u | (uint64_t{2} << 58); // NLOOP=64 FLG=IMAGE
             std::memcpy(frag.data(), &tagLo, sizeof(tagLo));
             be->RawGifPacket(1, frag.data(), static_cast<uint32_t>(frag.size()));
-            t.IsTrue(!be->SavestateIdle(), "partial upload is not idle");
-            t.Equals(be->SavestateBusyReason(), std::string("gs-transfer"), "partial upload keeps the reason");
-            // Continuation fragments (no tag) until the guest completes it.
+            t.IsTrue(be->SavestateIdle(), "partial upload is idle");
+            // Save mid-transfer, resume on a second backend, complete both.
+            std::vector<uint8_t> blob;
+            be->SavestateSave(blob);
+            if (!ss3HaveParallelBlob(t, blob))
+                return;
+            std::unique_ptr<GSRasterBackend> beB = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(beB.get(), "backend B created");
+            if (!beB)
+                return;
+            if (!beB->SavestateLoad(blob.data(), blob.size()))
+            {
+                const ps2x_gs_parallel::Stats st = ps2x_gs_parallel::stats();
+                if (st.initFailed && !st.initOk)
+                {
+                    g_ss3GpuSkipped = true;
+                    std::cout << "[skip: Vulkan init failed] ";
+                    return;
+                }
+                t.Fail("mid-transfer blob loads");
+                return;
+            }
             const std::vector<uint8_t> chunk(4 * 16, 0);
-            int chunks = 0;
-            for (; chunks < 6 && !be->SavestateIdle(); ++chunks)
+            for (int i = 0; i < 3; ++i)
+            {
                 be->RawGifPacket(1, chunk.data(), static_cast<uint32_t>(chunk.size()));
-            t.IsTrue(be->SavestateIdle(), "completed upload is idle again");
-            t.Equals(be->SavestateBusyReason(), std::string(), "reason clears on completion");
-            t.Equals(chunks, 3, "8+8+8+8 qwords complete the 32-qword transfer");
-            // A save/load round trip across the completion is bit-exact.
+                beB->RawGifPacket(1, chunk.data(), static_cast<uint32_t>(chunk.size()));
+            }
+            t.IsTrue(be->SavestateIdle() && beB->SavestateIdle(), "completed upload is idle");
+            std::vector<uint8_t> vramA, vramB;
+            be->SnapshotVram(vramA);
+            beB->SnapshotVram(vramB);
+            t.IsTrue(!vramA.empty() && vramA == vramB, "resumed upload lands the same VRAM bytes");
+        });
+
+        tc.Run("sq1: a pending palette upload names its busy reason", [](TestCase &t)
+        {
+            if (!ss3WantParallelGpu())
+                return;
+            std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(be.get(), "backend created");
+            if (!be)
+                return;
+            t.IsTrue(be->SavestateIdle(), "fresh backend is idle");
+            t.Equals(be->SavestateBusyReason(), std::string(), "no busy reason when idle");
+            // Paletted TEX0_1 (PSMT4, CSM1, CLD=1): the memo misses, so a
+            // palette upload waits for the next render pass.
+            const uint64_t tex0 = (uint64_t{0x14} << 20) | (uint64_t{1} << 55) | (uint64_t{1} << 61);
+            be->RawWriteRegister(0x06, tex0);
+            if (!ss3BackendInitOk(t))
+                return;
+            t.IsTrue(!be->SavestateIdle(), "pending palette upload is not idle");
+            t.Equals(be->SavestateBusyReason(), std::string("clut-pending"),
+                     "palette names its reason (generic pre-SQ1)");
+        });
+
+        tc.Run("sq1: quiesce settles a pending palette upload", [](TestCase &t)
+        {
+            if (!ss3WantParallelGpu())
+                return;
+            std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(be.get(), "backend created");
+            if (!be)
+                return;
+            t.IsTrue(!be->SavestateQuiesce(), "quiesce is a no-op when idle");
+            const uint64_t tex0 = (uint64_t{0x14} << 20) | (uint64_t{1} << 55) | (uint64_t{1} << 61);
+            be->RawWriteRegister(0x06, tex0); // TEX0_1: PSMT4, CSM1, CLD=1
+            if (!ss3BackendInitOk(t))
+                return;
+            t.IsTrue(!be->SavestateIdle(), "pending palette upload is not idle");
+            t.IsTrue(be->SavestateQuiesce(), "quiesce settles the palette upload");
+            t.IsTrue(be->SavestateIdle(), "idle after quiesce");
+            t.Equals(be->SavestateBusyReason(), std::string(), "reason clears after quiesce");
+            t.IsTrue(!be->SavestateQuiesce(), "second quiesce is a no-op");
+        });
+
+        tc.Run("sq1: save/load/save is bit-exact across a quiesced palette upload", [](TestCase &t)
+        {
+            if (!ss3WantParallelGpu())
+                return;
+            std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(be.get(), "backend created");
+            if (!be)
+                return;
+            const uint64_t tex0 = (uint64_t{0x14} << 20) | (uint64_t{1} << 55) | (uint64_t{1} << 61);
+            be->RawWriteRegister(0x06, tex0); // TEX0_1: PSMT4, CSM1, CLD=1
+            if (!ss3BackendInitOk(t))
+                return;
+            t.IsTrue(be->SavestateQuiesce(), "quiesce settles the palette upload");
             std::vector<uint8_t> blob1, blob2;
             be->SavestateSave(blob1);
             if (!ss3HaveParallelBlob(t, blob1))
                 return;
-            t.IsTrue(be->SavestateLoad(blob1.data(), blob1.size()), "post-transfer blob loads");
+            t.IsTrue(be->SavestateLoad(blob1.data(), blob1.size()), "quiesced blob loads");
             be->SavestateSave(blob2);
-            t.IsTrue(blob1 == blob2, "save/load/save across a completed transfer is bit-exact");
+            t.IsTrue(blob1 == blob2, "save/load/save across a quiesce is bit-exact");
+        });
+
+        tc.Run("sq1: a pending local->host fifo saves and resumes exactly", [](TestCase &t)
+        {
+            if (!ss3WantParallelGpu())
+                return;
+            std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(be.get(), "backend created");
+            if (!be)
+                return;
+            // 8x8 PSMCT32 local->host readback: 256 bytes into the fifo.
+            be->RawWriteRegister(0x50, uint64_t{1} << 16); // BITBLTBUF: SBP=0 SBW=1 SPSM=0
+            be->RawWriteRegister(0x51, 0u); // TRXPOS: 0
+            be->RawWriteRegister(0x52, uint64_t{8} | (uint64_t{8} << 32)); // TRXREG: 8x8
+            GSTransferCommand cmd;
+            cmd.direction = 1u;
+            cmd.trxreg.rrw = 8;
+            cmd.trxreg.rrh = 8;
+            cmd.bitbltbuf.spsm = 0;
+            be->BeginTransfer(cmd);
+            be->RawWriteRegister(0x53, 1u); // TRXDIR: local->host (fills the fifo)
+            if (!ss3BackendInitOk(t))
+                return;
+            t.IsTrue(be->SavestateIdle(), "pending readback fifo is idle (serialized, SQ1)");
+            // Consume half, save, resume on a second backend.
+            std::vector<uint8_t> halfA(128);
+            t.Equals(be->ConsumeLocalToHostBytes(halfA.data(), 128u), 128u, "half consumed");
+            std::vector<uint8_t> blob1, blob2;
+            be->SavestateSave(blob1);
+            if (!ss3HaveParallelBlob(t, blob1))
+                return;
+            std::unique_ptr<GSRasterBackend> beB = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(beB.get(), "backend B created");
+            if (!beB)
+                return;
+            if (!beB->SavestateLoad(blob1.data(), blob1.size()))
+            {
+                const ps2x_gs_parallel::Stats st = ps2x_gs_parallel::stats();
+                if (st.initFailed && !st.initOk)
+                {
+                    g_ss3GpuSkipped = true;
+                    std::cout << "[skip: Vulkan init failed] ";
+                    return;
+                }
+                t.Fail("mid-readback blob loads");
+                return;
+            }
+            beB->SavestateSave(blob2);
+            t.IsTrue(blob1 == blob2, "save/load/save across a pending fifo is bit-exact");
+            // The resumed fifo yields the same bytes as an uninterrupted one.
+            std::unique_ptr<GSRasterBackend> beC = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(beC.get(), "backend C created");
+            if (!beC)
+                return;
+            beC->RawWriteRegister(0x50, uint64_t{1} << 16);
+            beC->RawWriteRegister(0x51, 0u);
+            beC->RawWriteRegister(0x52, uint64_t{8} | (uint64_t{8} << 32));
+            beC->BeginTransfer(cmd);
+            beC->RawWriteRegister(0x53, 1u);
+            if (!ss3BackendInitOk(t))
+                return;
+            std::vector<uint8_t> halfC(128), restC(128), restB(128);
+            t.Equals(beC->ConsumeLocalToHostBytes(halfC.data(), 128u), 128u, "reference half");
+            t.Equals(beC->ConsumeLocalToHostBytes(restC.data(), 128u), 128u, "reference rest");
+            t.Equals(beB->ConsumeLocalToHostBytes(restB.data(), 128u), 128u, "resumed rest");
+            t.IsTrue(halfA == halfC, "pre-save fifo bytes match the reference");
+            t.IsTrue(restB == restC, "resumed fifo bytes match the reference");
+            t.IsTrue(beB->SavestateIdle(), "drained fifo is idle");
+        });
+
+        tc.Run("sq1: v3-shaped tails still load (SS3 states keep working)", [](TestCase &t)
+        {
+            if (!ss3WantParallelGpu())
+                return;
+            std::unique_ptr<GSRasterBackend> be = ps2x_gs_parallel::create(nullptr);
+            t.IsNotNull(be.get(), "backend created");
+            if (!be)
+                return;
+            std::vector<uint8_t> blob;
+            be->SavestateSave(blob);
+            if (!ss3HaveParallelBlob(t, blob))
+                return;
+            // A fresh save's transfer block is the 66-byte idle form at the
+            // tail end; strip it and rewrite the footer as v3.
+            constexpr uint32_t kPgs3 = 0x33534750u; // "PGS3" LE
+            constexpr uint32_t kPgs4 = 0x34534750u; // "PGS4" LE
+            constexpr size_t kFooter = sizeof(uint64_t) + sizeof(uint32_t);
+            constexpr size_t kIdleTransfer = 66u;
+            uint32_t magic = 0u;
+            std::memcpy(&magic, blob.data() + blob.size() - sizeof(magic), sizeof(magic));
+            std::vector<uint8_t> v3 = blob;
+            if (magic == kPgs4)
+            {
+                uint64_t tailLen = 0u;
+                std::memcpy(&tailLen, blob.data() + blob.size() - kFooter, sizeof(tailLen));
+                t.IsTrue(tailLen > kIdleTransfer, "v4 tail holds a transfer block");
+                if (tailLen <= kIdleTransfer)
+                    return;
+                const size_t tailEnd = blob.size() - kFooter;
+                t.Equals(blob[tailEnd - kIdleTransfer], uint8_t{0}, "stripped block is idle");
+                v3.erase(v3.begin() + static_cast<ptrdiff_t>(tailEnd - kIdleTransfer), v3.begin() + static_cast<ptrdiff_t>(tailEnd));
+                const uint64_t tailLen3 = tailLen - kIdleTransfer;
+                std::memcpy(v3.data() + v3.size() - kFooter, &tailLen3, sizeof(tailLen3));
+                std::memcpy(v3.data() + v3.size() - sizeof(magic), &kPgs3, sizeof(kPgs3));
+            }
+            else
+            {
+                t.Equals(magic, kPgs3, "pre-transfer tail is v3 (trivially compatible)");
+                if (magic != kPgs3)
+                    return;
+            }
+            t.IsTrue(be->SavestateLoad(v3.data(), v3.size()), "v3-shaped blob loads");
+            t.IsTrue(be->SavestateIdle(), "transfer idle after a v3 load");
         });
 
         tc.Run("ss3 s3: retained strip vertices survive save/load", [](TestCase &t)
