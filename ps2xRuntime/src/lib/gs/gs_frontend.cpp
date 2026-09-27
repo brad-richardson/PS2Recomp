@@ -1286,19 +1286,41 @@ void GS::processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uin
     // GF1 H2: take the arbiter's own copy instead of copying it again (the
     // arbiter clears the packet after this call; listener and shadow ran first).
     cmd.bytes = std::move(bytes);
-    // GE3 Part 2: PCSX2 sets CSR FINISH at GIF arbitration on the submitting
-    // thread. All prior packets are already enqueued (= GIF-drained), so set
-    // the bit now, in stream order. Decode still runs Flush+Sync+set later.
+    // GE3 Part 2/3: PCSX2 sets CSR FINISH at GIF arbitration on the
+    // submitting thread. All prior packets are already enqueued (=
+    // GIF-drained), so set the bit now, in stream order. Decode keeps
+    // Flush+Sync for backend ordering but no longer sets CSR.
     noteFinishTimingPcsx2(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
     m_worker->enqueue(std::move(cmd));
 }
+
+    // GE3 Part 5: thread attribution for submit-side FINISH sets (observer
+    // only). EE-thread sets are the common case and stay silent; the
+    // [gs:finish-only] exempt-PC log covers EE demand.
+    std::atomic<uint64_t> s_finishWorkerSets{0u};
+    std::atomic<uint64_t> s_finishMtvuSets{0u};
 
 void GS::noteFinishTimingPcsx2(const uint8_t *data, uint32_t sizeBytes)
 {
     if (!m_finishTimingPcsx2 || !m_privRegs || !data || sizeBytes < 16u)
         return;
-    if (packetHasFinishAD(data, sizeBytes))
-        m_privRegs->csr.fetch_or(0x2u);
+    if (!packetHasFinishAD(data, sizeBytes))
+        return;
+    m_privRegs->csr.fetch_or(0x2u);
+    if (t_inGsWorker)
+    {
+        if (s_finishWorkerSets.fetch_add(1u, std::memory_order_relaxed) == 0u)
+            std::fprintf(stderr, "[gs:finish-thread] first set from gs-worker (decode-time redundant)\n");
+    }
+    else if (ps2_mtvu::onWorker())
+    {
+        const uint64_t n = s_finishMtvuSets.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 8u)
+        {
+            std::fprintf(stderr, "[gs:finish-thread] mtvu-thread set n=%llu\n",
+                         static_cast<unsigned long long>(n + 1u));
+        }
+    }
 }
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
