@@ -2095,6 +2095,33 @@ namespace ps2_stubs
         resetMpegStubStateUnlocked();
     }
 
+    // CP4-fix: CP4's scheduler transfer longjmps out of guest code, so the
+    // C++ frames between the transfer site and run() never unwind. In
+    // particular getMpegPicture's `delivery` shared_ptr is abandoned, which
+    // keeps the delivery (and its scheduler/runtime pointers) reachable via
+    // the weak index after the runtime dies; a later reset then touches the
+    // dead scheduler (suite segfault). Drop this runtime's index entries at
+    // destruction so no later reset can reach them. This never touches the
+    // dying scheduler, and the game runtime is never destroyed mid-game, so
+    // the fast path is unchanged.
+    void invalidateMpegNonStreamDeliveriesForRuntime(PS2Runtime *runtime)
+    {
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        for (auto it = g_mpeg_stub_state.nonStreamDeliveries.begin();
+             it != g_mpeg_stub_state.nonStreamDeliveries.end();)
+        {
+            const auto delivery = it->second.lock();
+            if (delivery && delivery->runtime == runtime)
+            {
+                it = g_mpeg_stub_state.nonStreamDeliveries.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
     void enqueueMpegDecodedFrameForTesting(uint32_t mpegAddr)
     {
         constexpr int kTestFrameWidth = 16;
