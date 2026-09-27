@@ -949,39 +949,51 @@ void EeScheduler::run()
             continue;
         }
 
-        try
+        // CP4: transfers out of guest code longjmp instead of throwing (each
+        // throw scanned unwind tables; the loading wait loop yields ~7k/s).
+        // mpegTrace stays outside the jump so its destructor still records
+        // the unwind exactly as before (E15 dev trace only).
+        ps2_e15::Trace mpegTrace("scheduler",m_vsyncTick,m_rdram,&context,context.pc,0u,m_currentThreadId);
+        ps2_guest_unwind::clear();
+        if (std::setjmp(m_transferJmp) == 0)
         {
-            m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
-            ps2_mpg_src_trace::noteSliceIrq(m_insideInterrupt);
-            m_guestExecuting.store(true, std::memory_order_release);
-            if (ps2DiagWatchEnabled())
+            m_transferArmed = true;
+            try
             {
-                ps2DiagWatchSetThread(m_currentThreadId);
+                m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
+                ps2_mpg_src_trace::noteSliceIrq(m_insideInterrupt);
+                m_guestExecuting.store(true, std::memory_order_release);
+                if (ps2DiagWatchEnabled())
+                {
+                    ps2DiagWatchSetThread(m_currentThreadId);
+                }
+                if (ps2_e3::enabled())
+                {
+                    ps2_e3::noteThread(m_currentThreadId);
+                }
+                function(m_rdram, &context, &m_runtime);
             }
-            if (ps2_e3::enabled())
+            catch (...)
             {
-                ps2_e3::noteThread(m_currentThreadId);
+                m_transferArmed = false;
+                m_guestExecuting.store(false, std::memory_order_release);
+                m_running.store(false, std::memory_order_release);
+                publishSnapshot();
+                throw;
             }
-            ps2_e15::Trace mpegTrace("scheduler",m_vsyncTick,m_rdram,&context,context.pc,0u,m_currentThreadId);
-            ps2_guest_unwind::clear();
-            function(m_rdram, &context, &m_runtime);
+            m_transferArmed = false;
             mpegTrace.finish(m_vsyncTick);
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
             ps2_mpg_src_trace::noteSliceIrq(false);
         }
-        catch (const EeDispatcherTransfer &)
+        else
         {
+            // Longjmp landing: the epilogue the EeDispatcherTransfer catch
+            // ran; falls through to processPendingEvents below unchanged.
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
             ps2_mpg_src_trace::noteSliceIrq(false);
-        }
-        catch (...)
-        {
-            m_guestExecuting.store(false, std::memory_order_release);
-            m_running.store(false, std::memory_order_release);
-            publishSnapshot();
-            throw;
         }
 
         processPendingEvents();
@@ -1237,7 +1249,7 @@ int EeScheduler::startThread(int id, uint32_t arg, const R5900Context &caller, b
         m_runtime.guestFree(ownedStack);
     }
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    raiseTransfer();
 }
 
 int EeScheduler::terminateThread(int id, uint32_t &ownedStack, bool interruptSafe)
@@ -1527,6 +1539,17 @@ int EeScheduler::releaseWait(int id, bool interruptSafe)
     return KE_OK;
 }
 
+void EeScheduler::raiseTransfer()
+{
+    assertExecutor();
+    if (m_transferArmed)
+    {
+        m_transferArmed = false;
+        std::longjmp(m_transferJmp, 1);
+    }
+    throw EeDispatcherTransfer{};
+}
+
 void EeScheduler::transferIfRequested(bool interruptSafe)
 {
     assertExecutor();
@@ -1544,7 +1567,7 @@ void EeScheduler::transferIfRequested(bool interruptSafe)
     m_rescheduleRequested = false;
     m_timeSliceExpired = false;
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    raiseTransfer();
 }
 
 int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uint32_t option)
@@ -2001,7 +2024,7 @@ void EeScheduler::startSoundClock()
     invocation.sequence = ++m_invocationSequence;
     owner->invocations.push_back(std::move(invocation));
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    raiseTransfer();
 }
 
 [[noreturn]] void EeScheduler::invokeCurrentSequence(std::vector<GuestInvocation> invocations)
@@ -2021,7 +2044,7 @@ void EeScheduler::startSoundClock()
         owner->invocations.push_back(std::move(*it));
     }
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    raiseTransfer();
 }
 
 bool EeScheduler::hasInvocation(GuestInvocationKind kind, uint64_t tag) const
@@ -2726,7 +2749,7 @@ void EeScheduler::blockCurrent(EeWaitState wait)
     self->status = self->suspendCount == 0 ? EeThreadStatus::Waiting : EeThreadStatus::WaitingSuspended;
     m_currentThreadId = 0;
     publishSnapshot();
-    throw EeDispatcherTransfer{};
+    raiseTransfer();
 }
 
 void EeScheduler::makeReady(GuestThread &item, int result, bool interruptSafe)

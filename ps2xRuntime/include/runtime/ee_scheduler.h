@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <csetjmp>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -400,6 +401,9 @@ private:
     void makeRunning(GuestThread &thread);
     void makeDormant(GuestThread &thread);
     void removeFromWaitObject(GuestThread &thread);
+    // CP4: transfer out of guest code. Longjmps to run() when a guest call
+    // is armed, else throws EeDispatcherTransfer (host-side callers, tests).
+    [[noreturn]] void raiseTransfer();
     [[noreturn]] void blockCurrent(EeWaitState wait);
     void makeReady(GuestThread &thread, int result, bool interruptSafe);
     void requestPreemptionIfHigher(const GuestThread &readyThread, bool interruptSafe);
@@ -471,6 +475,10 @@ private:
     std::thread::id m_executorThread{};
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_guestExecuting{false};
+    // CP4: non-exceptional transfer out of guest code (executor thread only,
+    // set by run() around each guest call; run() is non-reentrant).
+    std::jmp_buf m_transferJmp{};
+    bool m_transferArmed = false;
     std::atomic<bool> m_stopRequested{false};
     std::atomic<bool> m_checkpointPending{false};
     uint32_t m_debugPublishCountdown = 0u;
