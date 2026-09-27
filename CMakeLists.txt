@@ -81,13 +81,15 @@ if(PS2X_IS_ARM_TARGET)
     elseif(PS2X_IS_AARCH64_TARGET)
         # Linux ARM64 - add NEON flags
         message(STATUS "Non-Apple ARM64 - adding NEON compiler flags")
-        add_compile_options(-march=armv8-a+fp+simd)
 
-        # Try to enable crypto and CRC extensions if supported
+        # Try to enable crypto and CRC extensions if supported. Exactly one
+        # -march per command line: add_compile_options lands after
+        # CMAKE_CXX_FLAGS, so the old unconditional plain flag defeated the
+        # crypto flag on every C++ TU (last wins) and C TUs never got it.
         include(CheckCXXCompilerFlag)
         check_cxx_compiler_flag("-march=armv8-a+fp+simd+crypto+crc" COMPILER_SUPPORTS_CRYPTO_CRC)
         if(COMPILER_SUPPORTS_CRYPTO_CRC)
-            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8-a+fp+simd+crypto+crc")
+            add_compile_options(-march=armv8-a+fp+simd+crypto+crc)
             message(STATUS "Crypto and CRC extensions enabled")
         else()
             add_compile_options(-march=armv8-a+fp+simd)
