@@ -2,7 +2,9 @@
 #include "ps2_e7.h"
 #include "ps2_mtvu.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_savestate.h"
 #include "runtime/gs/gs_frontend.h"
+#include "../../ps2xRuntime/src/lib/ps2_savestate_internal.h" // SQ2: GSSavestate round trip
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -3201,6 +3203,93 @@ void register_ps2_memory_tests()
             t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "queued lag1 second serve should clear QWC");
             t.IsTrue(gs.setQueueEnabled(false), "GS queue disable should succeed");
             mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        // SQ2: the lag1 slots and counters ride the GS savestate section
+        // (magic tail, present only once a snapshot exists) and resume
+        // exactly: the first post-load serve yields the pre-save snapshot's
+        // bytes, and a new post-load snapshot keeps the one-probe lag.
+        tc.Run("SQ2 lag1 slots resume exactly across a GS save/load", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(2);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00036000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadAndReadback = [&](GS &g, uint8_t mul, uint8_t add) {
+                g.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                g.writeRegister(GS_REG_TRXPOS, 0ull);
+                g.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                g.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0u; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                g.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                g.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            auto reverseKick = [&](PS2Memory &m) {
+                t.IsTrue(m.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                t.IsTrue(m.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                t.IsTrue(m.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+            };
+            auto expectPattern = [&](PS2Memory &m, uint8_t mul, uint8_t add, const char *what) {
+                bool ok = true;
+                for (uint32_t i = 0u; i < 64u; ++i)
+                {
+                    if (m.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * mul + add) & 0xFFu))
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                t.IsTrue(ok, what);
+            };
+
+            uploadAndReadback(gs, 3u, 1u); // snapshot 0
+            uploadAndReadback(gs, 5u, 2u); // snapshot 1
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(mem); // serve 0: defined empty
+
+            ps2_savestate::Writer w;
+            const size_t mark = w.beginSection("gs", ps2_savestate::kGsVersion);
+            GSSavestate::save(gs, w);
+            w.endSection(mark);
+
+            PS2Memory memB;
+            t.IsTrue(memB.initialize(), "PS2Memory B initialize should succeed");
+            GS gsB;
+            gsB.init(memB.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &memB.gs());
+            memB.setGsFrontend(&gsB);
+            ps2_savestate::Reader r(w.buf.data(), w.buf.size());
+            std::string key;
+            uint32_t version = 0u;
+            t.IsTrue(r.beginSection(key, version), "gs section frame parses");
+            t.IsTrue(key == "gs" && version == ps2_savestate::kGsVersion, "gs section key/version round-trip");
+            t.IsTrue(GSSavestate::load(gsB, r), "GS state loads");
+            t.IsTrue(r.endSection("gs"), "gs section fully consumed");
+
+            // Serve 1 on the restored machine yields snapshot 0's bytes
+            // (slots + serves counter restored), not an empty serve.
+            std::memset(memB.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(memB);
+            expectPattern(memB, 3u, 1u, "post-load serve yields the pre-save snapshot 0 bytes");
+            // A new snapshot keeps the lag: serve 2 yields snapshot 1.
+            uploadAndReadback(gsB, 7u, 3u); // snapshot 2
+            std::memset(memB.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(memB);
+            expectPattern(memB, 5u, 2u, "post-load lag continues with snapshot 1 bytes");
+
+            mem.setGsFrontend(nullptr);
+            memB.setGsFrontend(nullptr);
             ps2_rb1_setReverseDmaOverride(-1);
         });
 

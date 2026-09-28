@@ -1403,6 +1403,12 @@ bool GSSavestate::quiesce(GS &gs)
     return gs.m_backend->SavestateQuiesce();
 }
 
+namespace
+{
+    // SQ2: magic heading the lag1 tail at the end of the gs section.
+    constexpr uint32_t kRb2TailMagic = 0x32425253u; // "SRB2" LE
+} // namespace
+
 void GSSavestate::save(GS &gs, Writer &w)
 {
     ps2_mtvu::sync(ps2_mtvu::Reason::SaveState); // MT1: no unit job spans a state
@@ -1441,6 +1447,29 @@ void GSSavestate::save(GS &gs, Writer &w)
     if (gs.m_backend)
         gs.m_backend->SavestateSave(backendState);
     w.blob(backendState);
+    // SQ2: lag1 tail. In lag1 mode the snapshot drained the backend fifo,
+    // so the pending local->host bytes live in the frontend lag slots; they
+    // resume exactly only if they travel with the state (mechanism (b): the
+    // transfer is steady-state open, never drained by the guest). Written
+    // only once a snapshot exists, so knob-off states keep the v3 layout
+    // byte-for-byte and old builds still load them. No section bump: the
+    // tail is magic-gated like SQ1's PGS4 tail (old files simply end here).
+    {
+        std::lock_guard<std::mutex> lagLock(gs.m_rb2Mutex);
+        const uint64_t snaps = gs.m_rb2Snaps.load(std::memory_order_relaxed);
+        if (snaps != 0u)
+        {
+            w.u32(kRb2TailMagic);
+            w.u64(snaps);
+            w.u64(gs.m_rb2Serves);
+            w.u32(gs.m_rb2SlotBytes[0]);
+            w.u32(gs.m_rb2SlotBytes[1]);
+            w.b(gs.m_rb2SlotTruncated[0]);
+            w.b(gs.m_rb2SlotTruncated[1]);
+            w.bytes(gs.m_rb2Slot[0], sizeof(gs.m_rb2Slot[0]));
+            w.bytes(gs.m_rb2Slot[1], sizeof(gs.m_rb2Slot[1]));
+        }
+    }
 }
 
 bool GSSavestate::load(GS &gs, Reader &r)
@@ -1482,6 +1511,38 @@ bool GSSavestate::load(GS &gs, Reader &r)
         return false;
     if (gs.m_backend && !gs.m_backend->SavestateLoad(backendState.data(), backendState.size()))
         return r.fail("GS backend refused its state");
+    // SQ2: lag1 tail (absent in older states, which simply end here).
+    {
+        std::lock_guard<std::mutex> lagLock(gs.m_rb2Mutex);
+        gs.m_rb2Snaps.store(0u, std::memory_order_relaxed);
+        gs.m_rb2Serves = 0u;
+        gs.m_rb2SlotBytes[0] = gs.m_rb2SlotBytes[1] = 0u;
+        gs.m_rb2SlotTruncated[0] = gs.m_rb2SlotTruncated[1] = false;
+        std::memset(gs.m_rb2Slot[0], 0, sizeof(gs.m_rb2Slot[0]));
+        std::memset(gs.m_rb2Slot[1], 0, sizeof(gs.m_rb2Slot[1]));
+        if (!r.atEnd())
+        {
+            if (r.u32() != kRb2TailMagic)
+                return r.fail("GS lag1 tail magic mismatch");
+            const uint64_t snaps = r.u64();
+            const uint64_t serves = r.u64();
+            const uint32_t bytes0 = r.u32();
+            const uint32_t bytes1 = r.u32();
+            const bool trunc0 = r.b();
+            const bool trunc1 = r.b();
+            if (snaps == 0u || bytes0 > sizeof(gs.m_rb2Slot[0]) || bytes1 > sizeof(gs.m_rb2Slot[1]))
+                return r.fail("GS lag1 tail out of range");
+            if (!r.bytes(gs.m_rb2Slot[0], sizeof(gs.m_rb2Slot[0])) ||
+                !r.bytes(gs.m_rb2Slot[1], sizeof(gs.m_rb2Slot[1])))
+                return false;
+            gs.m_rb2Snaps.store(snaps, std::memory_order_relaxed);
+            gs.m_rb2Serves = serves;
+            gs.m_rb2SlotBytes[0] = bytes0;
+            gs.m_rb2SlotBytes[1] = bytes1;
+            gs.m_rb2SlotTruncated[0] = trunc0;
+            gs.m_rb2SlotTruncated[1] = trunc1;
+        }
+    }
     return true;
 }
 
