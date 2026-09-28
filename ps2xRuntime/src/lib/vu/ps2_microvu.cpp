@@ -139,6 +139,8 @@ bool configure(bool mtvu_threaded, std::string& error)
     }
 #if defined(PS2X_MICROVU_STATIC)
     // Static (iOS app): the offline core is linked in; only it is available.
+    // IB2: the engine summary below prints lib= in both branches.
+    const char* lib = "static";
     if (!offline) {
         error = "this build links the offline core statically (microvu unavailable)";
         return false;
