@@ -646,15 +646,25 @@ void register_pad_input_tests()
 
             const char *bad[] = {
                 nullptr, "", "65000:start", "65000:start:0", "abc:start:500",
-                "65000:nosuchbutton:500", "65000:start:500,", "65000::500",
+                "65000:nosuchbutton:500", "65000::500",
                 "65000:start::500", "65000:lx=256:500", "65000:lz=1:500",
                 "65000:start+:500", "65000:start:500x",
+                // RP2/GQ1: a trailing comma is tolerated (tested below), but
+                // a non-trailing empty item is still malformed.
+                "65000:start:500,,70000:cross:100", ",",
             };
             for (const char *spec : bad)
             {
                 std::vector<ps2_stubs::PadScriptEntry> rejected;
                 t.IsTrue(!ps2_stubs::parsePadScript(spec, rejected), "malformed script should be rejected");
             }
+
+            // RP2/GQ1: an empty trailing item (one trailing comma) parses.
+            std::vector<ps2_stubs::PadScriptEntry> trailed;
+            t.IsTrue(ps2_stubs::parsePadScript("65000:start:500,", trailed),
+                     "trailing comma should be tolerated");
+            t.Equals(static_cast<uint32_t>(trailed.size()), static_cast<uint32_t>(1),
+                     "trailed script yields one entry");
         });
 
         tc.Run("pad script presses and releases on schedule", [](TestCase &t)

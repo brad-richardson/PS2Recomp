@@ -515,6 +515,13 @@ namespace ps2_stubs
             {
                 const size_t end = text.find(',', begin);
                 const std::string item = text.substr(begin, end == std::string::npos ? end : end - begin);
+                // RP2/GQ1: a trailing comma leaves an empty tail item; skip
+                // it instead of rejecting the whole script (a non-trailing
+                // empty item still falls through to the malformed return).
+                if (item.empty() && end == std::string::npos)
+                {
+                    break;
+                }
                 const size_t c1 = item.find(':');
                 const size_t c2 = (c1 == std::string::npos) ? std::string::npos : item.find(':', c1 + 1u);
                 if (c1 == std::string::npos || c2 == std::string::npos || item.find(':', c2 + 1u) != std::string::npos)
