@@ -3,6 +3,7 @@
 #include "ps2_mtvu.h"
 #include "ps2_pad_latch.h"
 #include "ps2_perf_log.h"
+#include "runtime/gs/gs_worker.h"
 #include "runtime/ps2_savestate.h"
 #include "Stubs/Pad.h"
 #include "../ps2_savestate_internal.h"
@@ -580,6 +581,14 @@ void EeScheduler::run()
     m_running.store(true, std::memory_order_release);
     // PT2: cache the perf-log knob once (env is fixed before run()).
     m_perfTail = ps2x::perflog::enabled();
+    // PT2 Part 2: attribute this thread's GS-queue backpressure waits to the
+    // ee.wait accumulator (cleared on every exit; the sink would dangle).
+    struct EnqueueSinkGuard
+    {
+        ~EnqueueSinkGuard() { GsWorker::setEnqueueWaitSink(nullptr); }
+    };
+    const EnqueueSinkGuard enqueueSinkGuard{};
+    GsWorker::setEnqueueWaitSink(m_perfTail ? &m_perfEventNs : nullptr);
     // T1 park snapshot: install the SIGTERM handler once when enabled.
     ps2_park::installParkTermHandler();
 
@@ -3115,10 +3124,10 @@ void ps2xGsCsrVBlankStart(PS2Memory &memory, uint64_t tick)
 void EeScheduler::perfTailCutFrame(uint64_t tick)
 {
     // End of tick `tick`'s frame on the executor: wall/CPU since the last cut
-    // minus the measured waits (pause gate, pacer, event waits, MTVU syncs).
-    // The first VBlank only arms the stamps. GS queue-full backpressure on the
-    // EE is NOT measured (it lands in busy); MTVU-off builds push no mtvu
-    // entries, and threadCpuNs() may read kCpuUnsupported (no ee.cpu entry).
+    // minus the measured waits (pause gate, pacer, event + enqueue waits,
+    // MTVU syncs). The first VBlank only arms the stamps. MTVU-off builds
+    // push no mtvu entries, and threadCpuNs() may read kCpuUnsupported
+    // (no ee.cpu entry).
     const uint64_t wall = ps2x::perflog::steadyNs();
     const uint64_t cpu = ps2x::perflog::threadCpuNs();
     const uint64_t mtvuSum = ps2_mtvu::threadedWaitNsTotal();

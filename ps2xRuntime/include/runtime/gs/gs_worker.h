@@ -240,6 +240,12 @@ public:
     // Enqueue a command; blocks while the queue is full. Safe from any
     // producer thread (game thread submits, main thread presents).
     void enqueue(GsCommand cmd);
+    // PT2 Part 2: caller-side backpressure accounting. The calling thread's
+    // enqueue waits (queue-full blocks) accumulate ns into *sink while set;
+    // null (default) measures nothing. Thread-local: the EE sets it to its
+    // wait accumulator around run() so backpressure files under ee.wait.
+    // Knob-off cost is one thread-local read per enqueue.
+    static void setEnqueueWaitSink(uint64_t *sink);
 
     // NP1: coalesce handoff wakeups across a drain. Between beginBatch and
     // endBatch, enqueue() queues without notifying; endBatch notifies once

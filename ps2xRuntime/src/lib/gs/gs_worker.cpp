@@ -9,6 +9,17 @@
 #include <chrono>
 #include <cstdio>
 
+namespace
+{
+// PT2 Part 2: per-thread enqueue-wait sink (see setEnqueueWaitSink).
+thread_local uint64_t *t_enqueueWaitSink = nullptr;
+} // namespace
+
+void GsWorker::setEnqueueWaitSink(uint64_t *sink)
+{
+    t_enqueueWaitSink = sink;
+}
+
 GsWorker::GsWorker(size_t maxDescriptors, size_t maxPayloadBytes, Handler handler)
     : m_handler(std::move(handler))
     , m_maxDescriptors(maxDescriptors != 0u ? maxDescriptors : kDefaultMaxDescriptors)
@@ -79,7 +90,12 @@ void GsWorker::enqueue(GsCommand cmd)
         }
         m_wakes.fetch_add(1u, std::memory_order_relaxed);
         m_hasWork.notify_one();
+        // PT2 Part 2: time the backpressure wait into the caller's sink.
+        uint64_t *const sink = t_enqueueWaitSink;
+        const uint64_t waitT0 = sink ? ps2x::perflog::steadyNs() : 0u;
         m_hasSpace.wait(lock, hasSpace);
+        if (sink)
+            *sink += ps2x::perflog::steadyNs() - waitT0;
     }
     if (m_stopRequested)
     {

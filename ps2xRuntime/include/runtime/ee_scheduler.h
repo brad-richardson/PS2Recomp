@@ -575,7 +575,7 @@ private:
     bool m_perfHaveFrame = false;
     uint64_t m_perfFrameStartWall = 0;
     uint64_t m_perfFrameStartCpu = 0;
-    uint64_t m_perfEventNs = 0; // waitForEvent sleeps since the last cut
+    uint64_t m_perfEventNs = 0; // waitForEvent + enqueue-queue-full waits since the last cut
     uint64_t m_perfMtvuNs = 0;  // threadedWaitNsTotal() at the last cut
     uint64_t m_perfGateNs = 0;  // this VBlank's pause-gate sleep
     uint64_t m_perfPaceNs = 0;  // this VBlank's pacer sleep

@@ -1020,6 +1020,64 @@ void register_ps2_gs_queue_tests()
                      "all four commands should execute");
         });
 
+        tc.Run("PT2 enqueue backpressure wait accumulates into the caller sink", [](TestCase &t)
+        {
+            // Same 2-deep gated ring as above; the blocked producer sets its
+            // own thread-local sink (as the EE does around run()).
+            std::atomic<bool> gate{false};
+            std::atomic<bool> entered{false};
+            GsWorker worker(2u, 64u,
+                            [&](GsCommand &)
+                            {
+                                entered.store(true, std::memory_order_release);
+                                while (!gate.load(std::memory_order_acquire))
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                            });
+            worker.start();
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.bytes.resize(16u, 1u);
+                worker.enqueue(std::move(c));
+            }
+            for (int i = 0; i < 200 && !entered.load(std::memory_order_acquire); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            t.IsTrue(entered.load(std::memory_order_acquire), "worker should park in the gated handler");
+            uint64_t sink = 0;
+            GsWorker::setEnqueueWaitSink(&sink);
+            for (uint8_t i = 2; i <= 3; ++i)
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.bytes.resize(16u, i);
+                worker.enqueue(std::move(c));
+            }
+            t.Equals(sink, static_cast<uint64_t>(0), "unblocked enqueues should not touch the sink");
+            GsWorker::setEnqueueWaitSink(nullptr);
+            std::atomic<bool> fourthDone{false};
+            uint64_t blockedSink = 0;
+            std::thread fourth(
+                [&]
+                {
+                    GsWorker::setEnqueueWaitSink(&blockedSink);
+                    GsCommand c;
+                    c.kind = GsCmdKind::GifPacket;
+                    c.bytes.resize(16u, 4u);
+                    worker.enqueue(std::move(c));
+                    GsWorker::setEnqueueWaitSink(nullptr);
+                    fourthDone.store(true, std::memory_order_release);
+                });
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            t.IsFalse(fourthDone.load(std::memory_order_acquire), "fourth enqueue should still block");
+            t.Equals(blockedSink, static_cast<uint64_t>(0),
+                     "sink should stay zero until the wait completes");
+            gate.store(true, std::memory_order_release);
+            fourth.join();
+            worker.stop();
+            t.IsTrue(fourthDone.load(std::memory_order_acquire), "blocked producer should proceed");
+            t.IsTrue(blockedSink > 0u, "queue-full wait should accumulate into the sink");
+        });
+
         // N8D7M12 Part 5F4P2: worker-consumption fingerprint properties.
         // Property-only: compares digests across instances, never
         // reimplements the hash.
