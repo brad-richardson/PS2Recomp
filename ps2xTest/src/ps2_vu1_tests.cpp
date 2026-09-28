@@ -334,6 +334,7 @@ namespace
         std::string prevEngine;
         bool hadEngine = false;
         bool configured = false;
+        uint64_t prevFpControl = 0;
 
         bool begin()
         {
@@ -348,6 +349,11 @@ namespace
                 prevEngine = e;
                 hadEngine = true;
             }
+            // The library installs ChopZero/FTZ FP control at init and every
+            // run and never restores it (production resets per MTVU job); the
+            // session restores the host mode so later tests' strtod/printf
+            // rounding is unaffected.
+            prevFpControl = ps2_fpmode::readControl();
             setenv("PS2X_VU1_ENGINE", "microvu", 1);
             std::string error;
             if (!ps2_microvu::configure(true, error) || !ps2_microvu::selected())
@@ -367,6 +373,7 @@ namespace
                 ps2_microvu::shutdown();
                 configured = false;
             }
+            ps2_fpmode::writeControl(prevFpControl);
             if (hadEngine)
                 setenv("PS2X_VU1_ENGINE", prevEngine.c_str(), 1);
             else
