@@ -1076,6 +1076,12 @@ void bg1OnPause()
     const bool acked = ps2x::androidPause::waitGateAck(2000);
     if (g_bg1Runtime)
         g_bg1Runtime->gs().flushExternalCaches();
+    // PT2 Part 2a: kill-proof the stage rings (a swipe from the switcher is a
+    // SIGKILL; the shutdown dump never runs). Once per pause (requestPause
+    // above is the guard), main thread, lock-free ring reads — the gated game
+    // thread never stalls on it. Bounded: entries since the last flush (the
+    // 60 s timer bounds it) into a fresh tail-pause file.
+    ps2x::perflog::flushTail("pause");
     std::fprintf(stderr, "[bg1] paused at tick=%llu gate_acked=%d\n",
                  static_cast<unsigned long long>(tick), acked ? 1 : 0);
 }

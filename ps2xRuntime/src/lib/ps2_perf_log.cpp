@@ -481,6 +481,15 @@ struct Logger
 #endif
     // PT2: per-stage drain cursors (heads consumed by the last poll()).
     uint64_t stageConsumed[kStageCount] = {};
+    // PT2 Part 2a: kill-proof tail flush cursors + cadence + current file.
+    uint64_t tailConsumed[kStageCount] = {};
+    std::chrono::steady_clock::time_point lastTailFlush{};
+    std::string tailCurrent;
+    // PT2 Part 2b: in-app kgsl sampling (Android only; main thread).
+    uint64_t kgslPrevBusy = 0;
+    uint64_t kgslPrevTotal = 0;
+    bool kgslHavePrev = false;
+    bool kgslDeniedNote = false;
 
     ~Logger()
     {
@@ -556,6 +565,7 @@ struct Logger
         t0 = now;
         windowStart = now;
         windowTick = tick;
+        lastTailFlush = now; // PT2 Part 2a: first rolling flush at t+60 s
 #if defined(__APPLE__)
         lastCpu = snapshotThreadCpu();
         haveCpu = true;
@@ -585,8 +595,7 @@ void drainStage(Stage s, uint64_t &consumed, std::FILE *file)
 {
     StageRing &r = stageRing(s);
     const uint64_t head = r.head();
-    if (head - consumed > StageRing::kCap)
-        consumed = head - StageRing::kCap;
+    consumed = clampDrainStart(consumed, head, StageRing::kCap);
     std::vector<StageEntry> v;
     v.reserve(static_cast<size_t>(head - consumed));
     for (uint64_t i = consumed; i != head; ++i)
@@ -595,6 +604,72 @@ void drainStage(Stage s, uint64_t &consumed, std::FILE *file)
     const std::string line = formatStageLine(stageName(s), summarizeStage(v));
     std::fprintf(file, "%s\n", line.c_str());
 }
+
+// PT2 Part 2a: tail-file family ("tail-*.log" + "tail-pause-*.log"), pruned
+// separately from the per-second ring (which the per-tick volume would wash
+// out). ~1.1 MB/min at 60 ticks/s x 7 stages: 3 files x 8 MB hold ~20 min of
+// per-tick history; a kill loses only the unflushed remainder (< 60 s).
+constexpr uint64_t kTailFileMaxBytes = 8u * 1024u * 1024u;
+constexpr uint64_t kTailDirMaxBytes = 3u * kTailFileMaxBytes;
+constexpr size_t kTailMaxFiles = 3;
+
+bool isTailFile(const std::string &name)
+{
+    if (name.size() < 10 || name.compare(0, 5, "tail-") != 0)
+        return false;
+    return name.compare(name.size() - 4, 4, ".log") == 0;
+}
+
+std::string tailStamp(bool pause)
+{
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
+    char buf[48];
+    std::strftime(buf, sizeof(buf), pause ? "tail-pause-%Y%m%d-%H%M%S" : "tail-%Y%m%d-%H%M%S", &tm);
+    return buf;
+}
+
+void pruneTailFiles(const std::string &dir)
+{
+    std::error_code ec;
+    std::vector<FileEntry> entries;
+    for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
+    {
+        if (ec)
+            break;
+        const std::string name = entry.path().filename().string();
+        if (!isTailFile(name))
+            continue;
+        uint64_t size = 0;
+        if (entry.is_regular_file(ec) && !ec)
+            size = entry.file_size(ec);
+        entries.push_back({name, size});
+    }
+    for (const std::string &dead : planPrune(std::move(entries), kTailDirMaxBytes, kTailMaxFiles))
+    {
+        std::filesystem::remove(std::filesystem::path(dir) / dead, ec);
+        ec.clear();
+    }
+}
+
+#if defined(__ANDROID__)
+// PT2 Part 2b: read a small sysfs value (kgsl). No locks, main thread only.
+bool readSysfs(const char *path, char *buf, size_t cap)
+{
+    std::FILE *f = std::fopen(path, "r");
+    if (!f)
+        return false;
+    const size_t n = std::fread(buf, 1, cap - 1, f);
+    std::fclose(f);
+    buf[n] = '\0';
+    return n > 0;
+}
+#endif
 } // namespace
 
 void poll(uint64_t vsyncTick)
@@ -605,6 +680,13 @@ void poll(uint64_t vsyncTick)
     if (!log.active.load(std::memory_order_relaxed) || !log.file)
         return;
     const auto now = std::chrono::steady_clock::now();
+    // PT2 Part 2a: rolling ring flush (kill-proof tail). Ahead of the 1 s
+    // gate: poll() runs every main-loop iteration, the flush every 60 s.
+    if (std::chrono::duration<double>(now - log.lastTailFlush).count() >= 60.0)
+    {
+        flushTail("timer");
+        log.lastTailFlush = now;
+    }
     const double windowS = std::chrono::duration<double>(now - log.windowStart).count();
     if (windowS < 1.0)
         return;
@@ -671,6 +753,45 @@ void poll(uint64_t vsyncTick)
 #else
     s.device = "na";
 #endif
+#if defined(__ANDROID__)
+    // PT2 Part 2b: in-app kgsl GPU sample (1 Hz, main thread, no locks).
+    // Unreadable (SELinux) or unparseable reads na; see the header for the
+    // delta/instantaneous semantics.
+    {
+        char busyBuf[64] = {};
+        char clkBuf[64] = {};
+        const bool okBusy = readSysfs("/sys/class/kgsl/kgsl-3d0/gpubusy", busyBuf, sizeof(busyBuf));
+        const bool okClk = readSysfs("/sys/class/kgsl/kgsl-3d0/gpuclk", clkBuf, sizeof(clkBuf));
+        if ((!okBusy || !okClk) && !log.kgslDeniedNote)
+        {
+            log.kgslDeniedNote = true;
+            std::fprintf(stderr, "[perf] kgsl sysfs unreadable (busy=%d clk=%d); gpubusy reads na\n",
+                         okBusy ? 1 : 0, okClk ? 1 : 0);
+        }
+        uint64_t busy = 0, total = 0, hz = 0;
+        double pct = 0.0;
+        bool havePct = false;
+        if (okBusy && parseKgslBusy(busyBuf, busy, total))
+        {
+            if (log.kgslHavePrev && kgslDeltaPct(log.kgslPrevBusy, log.kgslPrevTotal, busy, total, pct))
+                havePct = true;
+            else if (log.kgslHavePrev && (busy < log.kgslPrevBusy || total < log.kgslPrevTotal) &&
+                     kgslInstantPct(busy, total, pct))
+                havePct = true; // counters reset (read-reset kernels): instantaneous
+            log.kgslPrevBusy = busy;
+            log.kgslPrevTotal = total;
+            log.kgslHavePrev = true;
+        }
+        if (havePct)
+        {
+            char cell[32];
+            std::snprintf(cell, sizeof(cell), "%.1f", pct);
+            s.kgslBusy = cell;
+        }
+        if (okClk && parseKgslClk(clkBuf, hz))
+            s.kgslClk = std::to_string(hz);
+    }
+#endif
     const std::string line = formatLine(s);
     std::fprintf(log.file, "%s\n", line.c_str());
     for (size_t i = 0; i < kStageCount; ++i)
@@ -699,6 +820,91 @@ void notePresent()
         {
         }
     }
+}
+
+void flushTail(const char *reason)
+{
+    Logger &log = logger();
+    if (!log.active.load(std::memory_order_relaxed) || !log.file)
+        return;
+    const std::string dir = defaultDir();
+    if (dir.empty())
+        return;
+    const bool pause = reason && std::strcmp(reason, "pause") == 0;
+    // Drain ranges first (marker needs the max tick + entry count).
+    struct Range
+    {
+        Stage stage;
+        uint64_t start;
+        uint64_t head;
+    };
+    std::vector<Range> ranges;
+    uint64_t entries = 0;
+    uint64_t maxTick = 0;
+    for (size_t i = 0; i < kStageCount; ++i)
+    {
+        const Stage s = static_cast<Stage>(i);
+        StageRing &r = stageRing(s);
+        const uint64_t head = r.head();
+        const uint64_t start = clampDrainStart(log.tailConsumed[i], head, StageRing::kCap);
+        ranges.push_back({s, start, head});
+        for (uint64_t k = start; k != head; ++k)
+        {
+            const uint64_t tick = StageRing::decode(r.slotAt(k)).tick;
+            if (tick > maxTick)
+                maxTick = tick;
+        }
+        entries += head - start;
+    }
+    // Timer flushes append the current tail file (rotating past the cap);
+    // pause flushes mint a fresh tail-pause file so the evidence is obvious.
+    std::string path;
+    std::error_code ec;
+    if (pause)
+    {
+        path = dir + "/" + tailStamp(true) + ".log";
+    }
+    else
+    {
+        if (!log.tailCurrent.empty())
+        {
+            const uint64_t size =
+                std::filesystem::is_regular_file(log.tailCurrent, ec) && !ec
+                    ? std::filesystem::file_size(log.tailCurrent, ec)
+                    : 0u;
+            if (!ec && size <= kTailFileMaxBytes)
+                path = log.tailCurrent;
+        }
+        if (path.empty())
+        {
+            path = dir + "/" + tailStamp(false) + ".log";
+            log.tailCurrent = path;
+        }
+    }
+    std::FILE *out = std::fopen(path.c_str(), "a");
+    if (!out)
+    {
+        std::fprintf(stderr, "[perf] cannot open %s; tail flush skipped\n", path.c_str());
+        return;
+    }
+    std::fprintf(out, "[perf-tail-flush] reason=%s tick=%llu entries=%llu\n", pause ? "pause" : "timer",
+                 static_cast<unsigned long long>(maxTick), static_cast<unsigned long long>(entries));
+    for (const Range &rg : ranges)
+    {
+        StageRing &r = stageRing(rg.stage);
+        for (uint64_t k = rg.start; k != rg.head; ++k)
+        {
+            const StageEntry e = StageRing::decode(r.slotAt(k));
+            std::fprintf(out, "[perf-tail] tick=%llu stage=%s ms=%.3f\n",
+                         static_cast<unsigned long long>(e.tick), stageName(rg.stage),
+                         static_cast<double>(e.ms));
+        }
+    }
+    std::fflush(out);
+    std::fclose(out);
+    for (size_t i = 0; i < kStageCount; ++i)
+        log.tailConsumed[i] = ranges[i].head;
+    pruneTailFiles(dir);
 }
 
 void dumpTail()

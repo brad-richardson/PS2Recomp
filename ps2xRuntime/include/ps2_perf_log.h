@@ -63,7 +63,9 @@ struct Sample
     double maxGapMs = -1.0; // -1 when fewer than 2 presents in the window
     bool threadsAvailable = false;
     std::vector<ThreadDelta> threads;
-    std::string device; // preformatted kv pairs, or "na"
+    std::string device;    // preformatted kv pairs, or "na"
+    std::string kgslBusy;  // "43.2" (pct) or "na" (PT2 Part 2b: in-app kgsl)
+    std::string kgslClk;   // raw Hz or "na"
 };
 
 inline std::string sanitizeThreadName(const std::string &name)
@@ -107,8 +109,96 @@ inline std::string formatLine(const Sample &s)
     }
     line += "\" device=\"";
     line += s.device.empty() ? "na" : s.device;
-    line += '"';
+    line += "\" gpubusy_pct=";
+    line += s.kgslBusy.empty() ? "na" : s.kgslBusy;
+    line += " gpuclk=";
+    line += s.kgslClk.empty() ? "na" : s.kgslClk;
     return line;
+}
+
+// PT2 Part 2b: in-app kgsl GPU sampling (Android only; the .cpp reads
+// /sys/class/kgsl/kgsl-3d0/{gpubusy,gpuclk} at 1 Hz on the main thread).
+// gpubusy holds "busy total" counters; pct comes from per-second deltas,
+// falling back to the instantaneous ratio when the counters reset (some
+// kernels reset on read, which would poison a delta). Unparseable input
+// and frozen counters read na.
+inline bool parseKgslBusy(std::string_view text, uint64_t &busy, uint64_t &total)
+{
+    size_t i = 0;
+    const auto skipWs = [&]
+    {
+        while (i < text.size() && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' || text[i] == '\r'))
+            ++i;
+    };
+    const auto takeNum = [&](uint64_t &out) -> bool
+    {
+        skipWs();
+        if (i >= text.size() || text[i] < '0' || text[i] > '9')
+            return false;
+        uint64_t v = 0;
+        while (i < text.size() && text[i] >= '0' && text[i] <= '9')
+        {
+            const uint64_t d = static_cast<uint64_t>(text[i] - '0');
+            if (v > (~0ull - d) / 10u)
+                return false; // overflow
+            v = v * 10u + d;
+            ++i;
+        }
+        out = v;
+        return true;
+    };
+    uint64_t b = 0, t = 0;
+    if (!takeNum(b) || !takeNum(t))
+        return false;
+    skipWs();
+    if (i != text.size())
+        return false;
+    busy = b;
+    total = t;
+    return true;
+}
+
+inline bool parseKgslClk(std::string_view text, uint64_t &hz)
+{
+    size_t i = 0;
+    while (i < text.size() && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' || text[i] == '\r'))
+        ++i;
+    if (i >= text.size() || text[i] < '0' || text[i] > '9')
+        return false;
+    uint64_t v = 0;
+    while (i < text.size() && text[i] >= '0' && text[i] <= '9')
+    {
+        const uint64_t d = static_cast<uint64_t>(text[i] - '0');
+        if (v > (~0ull - d) / 10u)
+            return false;
+        v = v * 10u + d;
+        ++i;
+    }
+    while (i < text.size() && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' || text[i] == '\r'))
+        ++i;
+    if (i != text.size())
+        return false;
+    hz = v;
+    return true;
+}
+
+// Delta pct from two (busy, total) samples. False when total didn't advance
+// (frozen counters: caller prints na) or moved backward (reset/wrap: caller
+// falls back to kgslInstantPct).
+inline bool kgslDeltaPct(uint64_t prevBusy, uint64_t prevTotal, uint64_t busy, uint64_t total, double &pct)
+{
+    if (total <= prevTotal || busy < prevBusy)
+        return false;
+    pct = 100.0 * static_cast<double>(busy - prevBusy) / static_cast<double>(total - prevTotal);
+    return true;
+}
+
+inline bool kgslInstantPct(uint64_t busy, uint64_t total, double &pct)
+{
+    if (total == 0u)
+        return false;
+    pct = 100.0 * static_cast<double>(busy) / static_cast<double>(total);
+    return true;
 }
 
 struct FileEntry
@@ -416,6 +506,13 @@ private:
     std::atomic<uint64_t> m_head{0};
 };
 
+// PT2 Part 2a: clamp a drain cursor to the newest lap (shared by poll's
+// per-second drain and the kill-proof tail flush): the first index to read.
+inline uint64_t clampDrainStart(uint64_t consumed, uint64_t head, uint64_t cap)
+{
+    return (head - consumed > cap) ? head - cap : consumed;
+}
+
 struct StageStats
 {
     uint64_t n = 0;
@@ -518,6 +615,14 @@ void poll(uint64_t vsyncTick);
 void notePresent();
 // Full-ring [perf-tail] dump (graceful shutdown only; no-op unless active).
 void dumpTail();
+// PT2 Part 2a: kill-proof ring flush. Drains entries accumulated since the
+// last flush into a timestamped tail file (reason "timer": appends the
+// current tail-*.log, rotating past the size cap; reason "pause": a fresh
+// tail-pause-*.log), with a [perf-tail-flush] marker first. A swipe-kill
+// loses at most the unflushed remainder. No-op unless active. Main thread
+// only (poll's 60 s cadence + the BG1 pause path); lock-free ring reads,
+// so the GameThread never stalls on it.
+void flushTail(const char *reason);
 // Calling thread's CPU ns, or kCpuUnsupported where no cheap query exists.
 constexpr uint64_t kCpuUnsupported = ~0ull;
 uint64_t threadCpuNs();

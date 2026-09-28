@@ -71,7 +71,7 @@ void register_ps2_perf_log_tests()
             t.Equals(ps2x::perflog::formatLine(s),
                      std::string("[perf] wall=2026-09-27T16:03:01Z t=12.0s tick=12345 vsyncs_per_s=59.91 "
                                  "presents=60 maxgap_ms=18.2 threads=\"t#0=812.4 Game=733.0 my_thread=5.0\" "
-                                 "device=\"thermal=1 lpm=0 batt=80 chg=1\""),
+                                 "device=\"thermal=1 lpm=0 batt=80 chg=1\" gpubusy_pct=na gpuclk=na"),
                      "golden line"); });
 
         tc.Run("formatLine unavailable channels read na", [](TestCase &t)
@@ -87,7 +87,8 @@ void register_ps2_perf_log_tests()
             s.device = "na";
             t.Equals(ps2x::perflog::formatLine(s),
                      std::string("[perf] wall=2026-09-27T16:03:01Z t=1.0s tick=60 vsyncs_per_s=0.00 "
-                                 "presents=0 maxgap_ms=-1.0 threads=\"na\" device=\"na\""),
+                                 "presents=0 maxgap_ms=-1.0 threads=\"na\" device=\"na\" "
+                                 "gpubusy_pct=na gpuclk=na"),
                      "na line"); });
 
         tc.Run("planPrune keeps the newest 5 by name", [](TestCase &t)
@@ -220,7 +221,7 @@ void register_ps2_perf_log_tests()
                      std::string("[perf] wall=2026-09-28T10:00:01Z t=61.0s tick=3660 vsyncs_per_s=59.94 "
                                  "presents=60 maxgap_ms=17.1 "
                                  "threads=\"GameThread#1234=980.5 MTVU#1235=120.0 Audio#1240=8.2\" "
-                                 "device=\"thermal=0 prime=38.4 batt=87 ac=1\""),
+                                 "device=\"thermal=0 prime=38.4 batt=87 ac=1\" gpubusy_pct=na gpuclk=na"),
                      "android golden line"); });
 
         tc.Run("thermalStatusWith passes the manager status through", [](TestCase &t)
@@ -390,5 +391,68 @@ void register_ps2_perf_log_tests()
                      std::string("[perf-stage] tick0=0 tick1=0 stage=gs.busy n=0 mean=-1.000 "
                                  "p50=-1.000 p95=-1.000 p99=-1.000 max=-1.000 hist=\"\""),
                      "empty stage line"); });
+
+        // PT2 Part 2a/b: drain clamp, kgsl parsers, gpu line fields.
+        tc.Run("clampDrainStart keeps the newest lap", [](TestCase &t)
+               {
+            t.Equals(ps2x::perflog::clampDrainStart(100, 160, 16384), static_cast<uint64_t>(100), "in-lap");
+            t.Equals(ps2x::perflog::clampDrainStart(0, 0, 16384), static_cast<uint64_t>(0), "empty");
+            t.Equals(ps2x::perflog::clampDrainStart(0, 20000, 16384), static_cast<uint64_t>(20000 - 16384),
+                     "lapped drops the oldest");
+            t.Equals(ps2x::perflog::clampDrainStart(5, 5 + 16384, 16384), static_cast<uint64_t>(5),
+                     "exactly one lap keeps all"); });
+
+        tc.Run("parseKgslBusy accepts counter pairs, rejects the rest", [](TestCase &t)
+               {
+            uint64_t b = 0, tot = 0;
+            t.IsTrue(ps2x::perflog::parseKgslBusy("12345 33406\n", b, tot), "newline pair");
+            t.Equals(b, static_cast<uint64_t>(12345), "busy");
+            t.Equals(tot, static_cast<uint64_t>(33406), "total");
+            t.IsTrue(ps2x::perflog::parseKgslBusy("  7\t9  ", b, tot), "whitespace pair");
+            t.Equals(b, static_cast<uint64_t>(7), "busy ws");
+            t.IsFalse(ps2x::perflog::parseKgslBusy("", b, tot), "empty");
+            t.IsFalse(ps2x::perflog::parseKgslBusy("12345", b, tot), "single");
+            t.IsFalse(ps2x::perflog::parseKgslBusy("a b", b, tot), "non-numeric");
+            t.IsFalse(ps2x::perflog::parseKgslBusy("1 2 3", b, tot), "triple");
+            t.IsFalse(ps2x::perflog::parseKgslBusy("1 -2", b, tot), "negative");
+            t.IsFalse(ps2x::perflog::parseKgslBusy("18446744073709551616 0", b, tot), "overflow"); });
+
+        tc.Run("parseKgslClk accepts a bare frequency", [](TestCase &t)
+               {
+            uint64_t hz = 0;
+            t.IsTrue(ps2x::perflog::parseKgslClk("800000000\n", hz), "newline clk");
+            t.Equals(hz, static_cast<uint64_t>(800000000), "hz");
+            t.IsFalse(ps2x::perflog::parseKgslClk("", hz), "empty");
+            t.IsFalse(ps2x::perflog::parseKgslClk("8x", hz), "trailing junk"); });
+
+        tc.Run("kgsl pct prefers deltas, falls back on reset", [](TestCase &t)
+               {
+            double pct = 0.0;
+            t.IsTrue(ps2x::perflog::kgslDeltaPct(100, 1000, 150, 1100, pct), "delta usable");
+            t.Equals(pct, 50.0, "delta pct");
+            t.IsFalse(ps2x::perflog::kgslDeltaPct(100, 1000, 100, 1000, pct), "frozen total");
+            t.IsFalse(ps2x::perflog::kgslDeltaPct(100, 1000, 10, 100, pct), "reset backward");
+            t.IsTrue(ps2x::perflog::kgslInstantPct(10, 100, pct), "instant usable");
+            t.Equals(pct, 10.0, "instant pct");
+            t.IsFalse(ps2x::perflog::kgslInstantPct(0, 0, pct), "zero total"); });
+
+        tc.Run("formatLine carries gpu values when sampled", [](TestCase &t)
+               {
+            ps2x::perflog::Sample s;
+            s.wall = "2026-09-28T12:00:01Z";
+            s.elapsedS = 61.0;
+            s.tick = 3660;
+            s.vsyncsPerS = 59.94;
+            s.presents = 60;
+            s.maxGapMs = 17.1;
+            s.threadsAvailable = false;
+            s.device = "na";
+            s.kgslBusy = "43.2";
+            s.kgslClk = "800000000";
+            t.Equals(ps2x::perflog::formatLine(s),
+                     std::string("[perf] wall=2026-09-28T12:00:01Z t=61.0s tick=3660 vsyncs_per_s=59.94 "
+                                 "presents=60 maxgap_ms=17.1 threads=\"na\" device=\"na\" "
+                                 "gpubusy_pct=43.2 gpuclk=800000000"),
+                     "gpu line"); });
     });
 }
