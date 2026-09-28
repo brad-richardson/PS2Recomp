@@ -1,4 +1,5 @@
 #include "MiniTest.h"
+#include "ps2_microvu.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -322,6 +323,74 @@ namespace
     void readVuQword(const uint8_t *data, uint32_t qwordIndex, float values[4])
     {
         std::memcpy(values, data + qwordIndex * 16u, sizeof(float) * 4u);
+    }
+
+    // SS5: real-library microVU tests. Gated on PS2X_MICROVU_LIB (the MV2
+    // dylib; the test binary must carry the JIT entitlement, as SS4's runner
+    // did): without it the tests skip. run() is thread-agnostic, so the tests
+    // configure directly instead of starting the MTVU worker.
+    struct Ss5MicrovuSession
+    {
+        std::string prevEngine;
+        bool hadEngine = false;
+        bool configured = false;
+
+        bool begin()
+        {
+            const char *lib = std::getenv("PS2X_MICROVU_LIB");
+            if (!lib || !*lib)
+            {
+                std::cout << "[skip: PS2X_MICROVU_LIB unset] ";
+                return false;
+            }
+            if (const char *e = std::getenv("PS2X_VU1_ENGINE"))
+            {
+                prevEngine = e;
+                hadEngine = true;
+            }
+            setenv("PS2X_VU1_ENGINE", "microvu", 1);
+            std::string error;
+            if (!ps2_microvu::configure(true, error) || !ps2_microvu::selected())
+            {
+                std::cout << "[skip: microvu unavailable: " << error << "] ";
+                end();
+                return false;
+            }
+            configured = true;
+            return true;
+        }
+
+        void end()
+        {
+            if (configured)
+            {
+                ps2_microvu::shutdown();
+                configured = false;
+            }
+            if (hadEngine)
+                setenv("PS2X_VU1_ENGINE", prevEngine.c_str(), 1);
+            else
+                unsetenv("PS2X_VU1_ENGINE");
+        }
+    };
+
+    // A 500-iteration integer loop (~1000+ VU cycles): ends at E-bit, no data
+    // memory traffic, no XGKICK. budget=64 breaks and completes; budget=1
+    // exceeds the 64-resume continue cap and parks; budget=1M never breaks.
+    void uploadSs5Loop(Vu1Fixture &fx)
+    {
+        writeTrackedVuInstructionPair(fx, 0u, makeVuIaddiu(1u, 0u, 500), kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 8u, makeVuIaddiu(1u, 1u, -1), kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 16u, makeVuIbne(1u, 0u, -2), kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 24u, 0u, kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 32u, 0u, kVuUpperNop | 0x40000000u);
+    }
+
+    bool runSs5Loop(Vu1Fixture &fx, uint32_t budget, VU1State &outState, std::vector<uint8_t> &outData)
+    {
+        outState = VU1State{};
+        outData.assign(PS2_VU1_DATA_SIZE, 0u);
+        return ps2_microvu::run(fx.mem, outData.data(), outState, 0u, false, 0u, 0u, 0u, budget);
     }
 }
 
@@ -2791,5 +2860,98 @@ void register_ps2_vu1_tests()
             w1.join();
             t.IsTrue(vu1Ok, "VU1-unit thread maps match the reference");
             t.IsTrue(vu0Ok, "VU0-unit thread maps match the reference"); });
+
+        tc.Run("ss5: microvu small-budget run matches unbounded", [](TestCase &t)
+        {
+            Ss5MicrovuSession lib;
+            if (!lib.begin())
+                return;
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            uploadSs5Loop(fx);
+
+            VU1State small{};
+            std::vector<uint8_t> smallData;
+            const uint64_t breaksBefore = ps2_microvu::budgetBreaks();
+            bool served = false;
+            try
+            {
+                served = runSs5Loop(fx, 64u, small, smallData);
+            }
+            catch (const std::exception &e)
+            {
+                t.Fail(std::string("budget=64 run should continue, not throw: ") + e.what());
+            }
+            t.IsTrue(served, "budget=64 run serves the job");
+            const uint64_t smallBreaks = ps2_microvu::budgetBreaks() - breaksBefore;
+            t.IsTrue(smallBreaks > 0, "budget=64 breaks on a ~1000-cycle loop");
+            t.IsTrue(ps2_microvu::saveReady(small).empty(), "a completed-continued job leaves no park");
+
+            // A shutdown/configure cycle drops all JIT state so the unbounded
+            // run re-seeds from identical inputs (the library seeds once).
+            lib.end();
+            if (!lib.begin())
+            {
+                t.Fail("microvu should re-configure for the unbounded run");
+                return;
+            }
+            VU1State wide{};
+            std::vector<uint8_t> wideData;
+            const uint64_t wideBefore = ps2_microvu::budgetBreaks();
+            bool servedWide = false;
+            try
+            {
+                servedWide = runSs5Loop(fx, 1u << 20, wide, wideData);
+            }
+            catch (const std::exception &e)
+            {
+                t.Fail(std::string("unbounded run should not throw: ") + e.what());
+            }
+            t.IsTrue(servedWide, "unbounded run serves the job");
+            t.IsTrue(ps2_microvu::budgetBreaks() - wideBefore == 0, "unbounded run never breaks");
+            t.IsTrue(std::memcmp(&small, &wide, sizeof(VU1State)) == 0,
+                     "small-budget final VU state matches unbounded");
+            t.IsTrue(smallData == wideData, "small-budget data memory matches unbounded");
+            lib.end();
+        });
+
+        tc.Run("ss5: microvu continue-cap parks and save defers", [](TestCase &t)
+        {
+            Ss5MicrovuSession lib;
+            if (!lib.begin())
+                return;
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            uploadSs5Loop(fx);
+
+            VU1State state{};
+            std::vector<uint8_t> data;
+            bool served = false;
+            try
+            {
+                served = runSs5Loop(fx, 1u, state, data);
+            }
+            catch (const std::exception &e)
+            {
+                t.Fail(std::string("budget=1 run should continue, not throw: ") + e.what());
+            }
+            t.IsTrue(served, "cap-hit run still serves (truncated)");
+            t.IsTrue(ps2_microvu::saveReady(state) == ps2_microvu::kBudgetParkedReason,
+                     "a save during a park defers with vu1: budget-parked");
+
+            // The next library run supersedes the park: a fresh unbounded job
+            // clears it and the save gate re-opens.
+            lib.end();
+            if (!lib.begin())
+            {
+                t.Fail("microvu should re-configure after the park");
+                return;
+            }
+            VU1State state2{};
+            std::vector<uint8_t> data2;
+            t.IsTrue(runSs5Loop(fx, 1u << 20, state2, data2), "unbounded run serves after the park");
+            t.IsTrue(ps2_microvu::saveReady(state2).empty(), "the park clears after the next job finishes");
+            lib.end();
+        });
     });
 }

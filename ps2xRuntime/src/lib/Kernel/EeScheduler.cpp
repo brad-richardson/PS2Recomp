@@ -1,4 +1,5 @@
 #include "runtime/ee_scheduler.h"
+#include "ps2_microvu.h"
 #include "ps2_mtvu.h"
 #include "runtime/ps2_savestate.h"
 #include "../ps2_savestate_internal.h"
@@ -593,6 +594,13 @@ void EeScheduler::run()
     bool ssSkipEvents = ps2_savestate::takeResumeSkip();
     uint64_t ssLastDeferTick = ~0ull;
     uint32_t ssDeferLines = 0u;
+    // SS5: the vu1 budget-parked defer cannot be permanent. A park clears on
+    // the next microVU run, so a still-parked save after this many ticks means
+    // the guest stopped kicking VU1; abandon loudly instead of deferring
+    // forever (which would also hang exit-after-save boots).
+    static constexpr uint32_t kBudgetParkedDeferCapTicks = 600u;
+    uint32_t ssBudgetParkedDefers = 0u;
+    uint64_t ssLastParkedTick = ~0ull;
 
     while (!m_stopRequested.load(std::memory_order_acquire))
     {
@@ -616,6 +624,7 @@ void EeScheduler::run()
             if (ps2_savestate::trySave(m_runtime, m_vsyncTick, why))
             {
                 ssSaveAt = 0u;
+                ssBudgetParkedDefers = 0u;
                 if (ssConfig.exitAfterSave)
                 {
                     std::fprintf(stderr, "[savestate] exit after save\n");
@@ -623,12 +632,35 @@ void EeScheduler::run()
                     break;
                 }
             }
-            else if (m_vsyncTick != ssLastDeferTick && ssDeferLines < 64u)
+            else
             {
-                ssLastDeferTick = m_vsyncTick;
-                ++ssDeferLines;
-                std::fprintf(stderr, "[savestate] deferred tick=%llu reason=%s\n",
-                             static_cast<unsigned long long>(m_vsyncTick), why.c_str());
+                if (why == ps2_microvu::kBudgetParkedReason)
+                {
+                    // Count ticks, not trySave calls (several can fire per tick).
+                    if (m_vsyncTick != ssLastParkedTick)
+                    {
+                        ssLastParkedTick = m_vsyncTick;
+                        if (++ssBudgetParkedDefers > kBudgetParkedDeferCapTicks)
+                        {
+                            std::fprintf(stderr,
+                                         "[savestate] BUDGET-PARKED cap: still parked after %u ticks, abandoning "
+                                         "save (tick=%llu)\n",
+                                         ssBudgetParkedDefers,
+                                         static_cast<unsigned long long>(m_vsyncTick));
+                            ssSaveAt = 0u;
+                            ssBudgetParkedDefers = 0u;
+                        }
+                    }
+                }
+                else
+                    ssBudgetParkedDefers = 0u;
+                if (m_vsyncTick != ssLastDeferTick && ssDeferLines < 64u)
+                {
+                    ssLastDeferTick = m_vsyncTick;
+                    ++ssDeferLines;
+                    std::fprintf(stderr, "[savestate] deferred tick=%llu reason=%s\n",
+                                 static_cast<unsigned long long>(m_vsyncTick), why.c_str());
+                }
             }
         }
 

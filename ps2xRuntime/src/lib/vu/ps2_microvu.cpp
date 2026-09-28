@@ -39,6 +39,19 @@ struct Api {
 bool s_selected = false;
 std::string s_engine;
 std::atomic<uint64_t> s_restarts{0};
+// SS5: a cycle-budget break parks JIT-private resume state (lpState,
+// resumeEntry) in the library. run() continues the job in place, so
+// s_parked[unit] is set only when the continue cap hits and the job returns
+// truncated; a set flag defers save states until the next library run
+// supersedes the park (resume=0 discards it, resume=1 consumes it). Only VU1
+// uses the library today ([1]); VU0's slot ([0]) stays clear.
+std::atomic<bool> s_parked[2] = {false, false};
+std::atomic<uint64_t> s_budgetBreaks{0};
+// Max in-place resume iterations per run(): 64 x 65536 cycles of headroom for
+// real jobs (refined H1: grouping variance pushes ordinary jobs over one
+// budget), still a hang guard. Past it the job truncates (pre-SS4 behavior)
+// with the park flag set.
+constexpr uint32_t kMaxContinueIters = 64;
 
 uint32_t bits(float value)
 {
@@ -199,8 +212,9 @@ void shutdown()
 {
 #if defined(PS2X_MICROVU_LOADABLE)
     if (s_selected) {
-        std::fprintf(stderr, "[microvu] engine=%s restarts=%llu\n", s_engine.c_str(),
-                     (unsigned long long)s_restarts.load(std::memory_order_relaxed));
+        std::fprintf(stderr, "[microvu] engine=%s restarts=%llu breaks=%llu\n", s_engine.c_str(),
+                     (unsigned long long)s_restarts.load(std::memory_order_relaxed),
+                     (unsigned long long)s_budgetBreaks.load(std::memory_order_relaxed));
         if (s_api.getStats) {
             ps2x_microvu_stats st{};
             if (s_api.getStats(&st))
@@ -217,6 +231,9 @@ void shutdown()
         s_api.close();
     s_selected = false;
     s_engine.clear();
+    // A fresh library holds no park (the break counter stays cumulative).
+    s_parked[0].store(false, std::memory_order_relaxed);
+    s_parked[1].store(false, std::memory_order_relaxed);
 #if !defined(PS2X_MICROVU_STATIC)
     if (s_api.handle)
         dlclose(s_api.handle);
@@ -233,7 +250,23 @@ std::string saveReady(const VU1State& state)
     // state (rings, pending Q/P, TPC chain) that no re-seed can rebuild.
     if (state.stoppedByD || state.stoppedByT)
         return "microvu VU1 D/T stop awaiting MSCNT resume (not a job boundary)";
+    // SS5: a budget break parked by the continue cap keeps the same class of
+    // JIT-private resume state; the next library run supersedes the park, so
+    // the save lands on a later tick like any other deferral.
+#if defined(PS2X_MICROVU_LOADABLE)
+    if (s_parked[1].load(std::memory_order_relaxed))
+        return kBudgetParkedReason;
+#endif
     return {};
+}
+
+uint64_t budgetBreaks()
+{
+#if defined(PS2X_MICROVU_LOADABLE)
+    return s_budgetBreaks.load(std::memory_order_relaxed);
+#else
+    return 0;
+#endif
 }
 
 bool resetForLoad(std::string& error)
@@ -272,19 +305,52 @@ bool run(PS2Memory& memory, uint8_t* data, VU1State& state,
                              top, itop, fbrst, budget, &shadow, path1, &memory, &why);
     if (rc == PS2X_MICROVU_MISS) {
         // The job was NOT run (data/state untouched): the caller restarts it
-        // in the static engine. Only the offline engine may miss.
+        // in the static engine. Only the offline engine may miss. The library
+        // is untouched, so a previous park (if any) is preserved as-is.
         if (s_engine != "offline")
             throw std::runtime_error("unexpected MISS from the microvu engine");
         s_restarts.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    // This run supersedes any previous park: resume=0 discards it in the
+    // library (SetStartPC), resume=1 consumes it.
+    s_parked[1].store(false, std::memory_order_relaxed);
     if (!rc)
         throw std::runtime_error(why ? why : "microvu execution failed");
-    // SS4: a cycle-budget break parks JIT-private resume state (lpState,
-    // resumeEntry) that no re-seed can rebuild; fail loud instead of
-    // continuing silently. Never observed (budget 65536, OM1 parks=0).
-    if (shadow.budget_exhausted)
-        throw std::runtime_error("microvu cycle-budget break: resume state cannot be saved");
+    // SS5: a cycle-budget break continues in place (resume iterations until
+    // the job ends at E-bit/D/T) so the guest result does not depend on the
+    // budget. Past the continue cap the job returns truncated (pre-SS4
+    // behavior) with the park flag set, and saves defer until the next run
+    // supersedes the park.
+    uint32_t continued = 0;
+    while (shadow.budget_exhausted) {
+        const uint64_t n = s_budgetBreaks.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 8 || (n % 1024) == 0)
+            std::fprintf(stderr,
+                         "[microvu] budget break #%llu unit=vu1 iter=%u start_pc=0x%x resume=%d gen=%llu "
+                         "cycles=%llu budget=%u\n",
+                         (unsigned long long)n, continued, start_pc, resume ? 1 : 0,
+                         (unsigned long long)memory.getVU1CodeGeneration(),
+                         (unsigned long long)shadow.cycles, budget);
+        if (continued >= kMaxContinueIters) {
+            s_parked[1].store(true, std::memory_order_relaxed);
+            std::fprintf(stderr,
+                         "[microvu] CONTINUE-CAP: unit=vu1 start_pc=0x%x resumes=%u breaks=%llu cycles=%llu; "
+                         "job truncated, saves defer while parked\n",
+                         start_pc, continued, (unsigned long long)n,
+                         (unsigned long long)shadow.cycles);
+            break;
+        }
+        ++continued;
+        why = nullptr;
+        const int rc2 = s_api.run(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1CodeGeneration(),
+                                  data, PS2_VU1_DATA_SIZE, start_pc, 1u,
+                                  top, itop, fbrst, budget, &shadow, path1, &memory, &why);
+        if (rc2 == PS2X_MICROVU_MISS)
+            throw std::runtime_error("microvu MISS on a budget-break resume (cannot restart mid-program)");
+        if (!rc2)
+            throw std::runtime_error(why ? why : "microvu execution failed");
+    }
     exportState(state, shadow);
     return true;
 #else
