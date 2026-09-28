@@ -5,6 +5,8 @@
 #include <functional>
 #include <vector>
 
+class GsPacketPool; // gs_worker.h (pointer only here)
+
 enum class GifPathId : uint8_t
 {
     Path1 = 1,
@@ -44,6 +46,8 @@ public:
     void setPacketListener(PacketListenerFn fn) { m_packetListener = std::move(fn); }
     void setShadowPacketFn(ShadowPacketFn fn) { m_shadowFn = std::move(fn); }
     void setProcessPathPacketFn(ProcessPathPacketFn fn) { m_processPathFn = std::move(fn); }
+    // GP4 H5: borrow the GS packet pool (null = direct alloc, the default).
+    void setPacketPool(GsPacketPool *pool) { m_pool = pool; }
 
     void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
 
@@ -55,6 +59,7 @@ private:
     PacketListenerFn m_packetListener;
     ShadowPacketFn m_shadowFn;
     ProcessPathPacketFn m_processPathFn;
+    GsPacketPool *m_pool = nullptr; // GP4 H5: borrowed, null unless the diet block sets it
     std::vector<GifArbiterPacket> m_queue;
 
     static bool isImagePacket(const uint8_t *data, uint32_t sizeBytes);

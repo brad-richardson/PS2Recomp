@@ -126,6 +126,17 @@ public:
         if (m_worker)
             m_worker->setDeferredWakes(wakeCommands, wakeBytes);
     }
+    // GP4 H5: pool of reusable packet buffers (the diet block enables it;
+    // the arbiter borrows it). Disabled = direct alloc/free.
+    void setPacketPoolEnabled(bool on) { m_packetPool.setEnabled(on); }
+    bool packetPoolEnabled() const { return m_packetPool.enabled(); }
+    GsPacketPool &packetPool() { return m_packetPool; }
+    // GP4 H6: worker pop batch size (the diet block sets kPopBatch).
+    void setWorkerPopBatch(size_t n)
+    {
+        if (m_worker)
+            m_worker->setPopBatch(n);
+    }
     // Blocks until all previously enqueued commands have executed.
     void drainQueue();
     // BG1: persist the backend's host-side caches (external GS only; a no-op
@@ -368,6 +379,9 @@ private:
     // thread touches this GS; cleared only by setQueueEnabled(false) or
     // the destructor, after producer threads are joined.
     std::unique_ptr<GsWorker> m_worker;
+    // GP4 H5: reusable packet buffers (producers acquire, the worker
+    // releases after execute). Thread-safe; inert unless enabled.
+    GsPacketPool m_packetPool;
     std::mutex m_orderedFrameMutex;
     std::condition_variable m_orderedFrameCv;
     uint32_t m_orderedFramesInFlight = 0u; // O: at most two GS frame boundaries

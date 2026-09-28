@@ -173,6 +173,15 @@ void GsWorker::setDeferredWakes(uint32_t wakeCommands, size_t wakeBytes)
     m_wakeBytes = wakeBytes;
 }
 
+void GsWorker::setPopBatch(size_t n)
+{
+    if (n < 1u)
+        n = 1u;
+    if (n > kPopBatch)
+        n = kPopBatch;
+    m_popBatch = n;
+}
+
 size_t GsWorker::pendingCount() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -207,7 +216,12 @@ void GsWorker::threadMain()
     }
     for (;;)
     {
-        GsCommand cmd;
+        // GP4 H6: pop up to kPopBatch commands per mutex acquisition and run
+        // them back-to-back. Same FIFO order as one-by-one; the space wake,
+        // the executed count and m_executing bookkeeping move to per-batch.
+        // Each RPC still signals right after its own command executes.
+        GsCommand batch[kPopBatch];
+        size_t batchSize = 0;
         bool deferOn = false;
         {
             std::unique_lock<std::mutex> lock(m_mutex);
@@ -245,9 +259,14 @@ void GsWorker::threadMain()
                     return;
                 continue;
             }
-            cmd = std::move(m_queue.front());
-            m_queue.pop_front();
-            m_queuedBytes -= cmd.payloadBytes();
+            const size_t popBatch = m_popBatch;
+            while (batchSize < popBatch && !m_queue.empty())
+            {
+                batch[batchSize] = std::move(m_queue.front());
+                m_queue.pop_front();
+                m_queuedBytes -= batch[batchSize].payloadBytes();
+                ++batchSize;
+            }
             m_executing = true;
             if (m_batchDepth == 0 && m_batchDirty)
             {
@@ -258,9 +277,14 @@ void GsWorker::threadMain()
             }
         }
         m_hasSpace.notify_all();
-        m_handler(cmd);
-        const uint64_t executed = m_executedCount.fetch_add(1u, std::memory_order_relaxed) + 1u;
-        if (deferOn && (executed & 0x3FFFFu) == 0u)
+        for (size_t i = 0; i < batchSize; ++i)
+        {
+            m_handler(batch[i]);
+            if (batch[i].rpc)
+                batch[i].rpc->signal();
+        }
+        const uint64_t executed = m_executedCount.fetch_add(batchSize, std::memory_order_relaxed) + batchSize;
+        if (deferOn && (executed >> 18) != ((executed - batchSize) >> 18))
             std::fprintf(stderr, "[gs:handoff] executed=%llu wakes=%llu deferred=%llu watchdog=%llu\n",
                          static_cast<unsigned long long>(executed),
                          static_cast<unsigned long long>(m_wakes.load(std::memory_order_relaxed)),
@@ -270,7 +294,5 @@ void GsWorker::threadMain()
             std::lock_guard<std::mutex> lock(m_mutex);
             m_executing = false;
         }
-        if (cmd.rpc)
-            cmd.rpc->signal();
     }
 }

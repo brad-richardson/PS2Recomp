@@ -1,4 +1,5 @@
 #include "runtime/gs/ps2_gif_arbiter.h"
+#include "runtime/gs/gs_worker.h"
 #include "ps2_mtvu.h"
 #include <algorithm>
 #include <atomic>
@@ -84,6 +85,8 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
     pkt.pathId = pathId;
     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
     pkt.path3Image = (pathId == GifPathId::Path3) && isImagePacket(data, sizeBytes);
+    if (m_pool) // GP4 H5: pooled buffer when one fits, else a fresh vector
+        pkt.data = m_pool->acquire(sizeBytes);
     pkt.data.resize(sizeBytes);
     std::memcpy(pkt.data.data(), data, sizeBytes);
     capturePacket(pathId, data, sizeBytes);

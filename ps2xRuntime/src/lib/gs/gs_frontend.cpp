@@ -669,6 +669,10 @@ void GS::executeQueuedCommand(GsCommand &cmd)
             m_backend->FlushCaches();
         break;
     }
+    // GP4 H5: the payload bytes are dead after execute; return the buffer to
+    // the pool instead of freeing it (no-op unless the pool is enabled).
+    if (!cmd.bytes.empty())
+        m_packetPool.release(std::move(cmd.bytes));
 }
 
 void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
@@ -1396,6 +1400,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             return;
         GsCommand cmd;
         cmd.kind = GsCmdKind::GifPacket;
+        cmd.bytes = m_packetPool.acquire(sizeBytes); // GP4 H5: empty unless enabled
         cmd.bytes.assign(data, data + sizeBytes);
         m_worker->enqueue(std::move(cmd));
         return;
@@ -1588,6 +1593,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
             return false;
         GsCommand cmd;
         cmd.kind = GsCmdKind::NativePacked;
+        cmd.bytes = m_packetPool.acquire(sizeBytes); // GP4 H5: empty unless enabled
         cmd.bytes.assign(data, data + sizeBytes);
         m_worker->enqueue(std::move(cmd));
         return true;
@@ -1678,6 +1684,7 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
         cmd.setupRegs[1] = trxpos;
         cmd.setupRegs[2] = trxreg;
         cmd.setupRegs[3] = trxdir;
+        cmd.bytes = m_packetPool.acquire(sizeBytes); // GP4 H5: empty unless enabled
         cmd.bytes.assign(data, data + sizeBytes);
         m_worker->enqueue(std::move(cmd));
         return;

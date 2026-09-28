@@ -964,19 +964,32 @@ void register_ps2_gs_queue_tests()
         tc.Run("queue backpressure: a full ring blocks producers until drained", [](TestCase &t)
         {
             std::atomic<bool> gate{false};
+            std::atomic<bool> entered{false};
             std::atomic<int> executed{0};
             GsWorker worker(2u, 64u,
                             [&](GsCommand &)
                             {
+                                entered.store(true, std::memory_order_release);
                                 while (!gate.load(std::memory_order_acquire))
                                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                                 executed.fetch_add(1, std::memory_order_relaxed);
                             });
             worker.start();
-            // The worker immediately pops one command and parks in the
-            // gated handler, so three enqueues fill a 2-deep ring (one
-            // executing + two queued) and the fourth must block.
-            for (uint8_t i = 1; i <= 3; ++i)
+            // The worker pops the first command and parks in the gated
+            // handler; two more enqueues then fill the 2-deep ring and the
+            // fourth must block. (GP4 H6: pops are batched, so the first
+            // enqueue is fenced on handler entry — otherwise the maiden
+            // batch could take several and the ring would not be full.)
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.bytes.resize(16u, 1u);
+                worker.enqueue(std::move(c));
+            }
+            for (int i = 0; i < 200 && !entered.load(std::memory_order_acquire); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            t.IsTrue(entered.load(std::memory_order_acquire), "worker should park in the gated handler");
+            for (uint8_t i = 2; i <= 3; ++i)
             {
                 GsCommand c;
                 c.kind = GsCmdKind::GifPacket;
@@ -1222,6 +1235,138 @@ void register_ps2_gs_queue_tests()
             t.Equals(sB, sA, "folded path command should give the same consumed digest");
             t.Equals(cB, cA, "folded path command should give the same consumed count");
             t.IsTrue(vA == vB, "folded path command should give the same VRAM");
+        });
+
+        // GP4 H5: the packet pool reuses buffers, honors its caps, and stays
+        // out of the way when disabled.
+        tc.Run("GP4 H5 pool acquire/release roundtrip and caps", [](TestCase &t)
+        {
+            GsPacketPool pool;
+            t.IsTrue(pool.acquire(64u).empty(), "disabled acquire should return empty");
+            std::vector<uint8_t> fresh(64u, 0xABu);
+            pool.release(std::move(fresh));
+            t.Equals(pool.pooledCount(), 0u, "disabled release should not pool");
+            pool.setEnabled(true);
+            std::vector<uint8_t> buf(128u);
+            for (size_t i = 0; i < buf.size(); ++i)
+                buf[i] = static_cast<uint8_t>(i);
+            pool.release(std::move(buf));
+            t.Equals(pool.pooledCount(), 1u, "enabled release should pool");
+            std::vector<uint8_t> got = pool.acquire(64u);
+            t.IsTrue(got.capacity() >= 128u, "acquire should reuse a pooled buffer with room");
+            t.Equals(pool.pooledCount(), 0u, "acquire should pop the buffer");
+            got.resize(64u); // acquired buffers are empty; callers size them
+            for (size_t i = 0; i < 64u; ++i)
+                got[i] = static_cast<uint8_t>(0xFFu - i);
+            pool.release(std::move(got));
+            std::vector<uint8_t> got2 = pool.acquire(64u);
+            got2.resize(64u);
+            for (size_t i = 0; i < 64u; ++i)
+                got2[i] = static_cast<uint8_t>(i + 1u);
+            bool exact = got2.size() == 64u;
+            for (size_t i = 0; i < 64u && exact; ++i)
+                exact = got2[i] == static_cast<uint8_t>(i + 1u);
+            t.IsTrue(exact, "reused buffer should carry exactly the overwritten bytes");
+            // Caps: over-count and oversize releases are dropped (freed).
+            for (size_t i = 0; i < GsPacketPool::kMaxBuffers + 8u; ++i)
+            {
+                std::vector<uint8_t> b(1024u, 0x5Au);
+                pool.release(std::move(b));
+            }
+            t.IsTrue(pool.pooledCount() <= GsPacketPool::kMaxBuffers, "pool should honor the buffer cap");
+            t.IsTrue(pool.acquire(GsPacketPool::kMaxBufferBytes + 1u).empty(),
+                     "oversize acquire should bypass the pool");
+            std::vector<uint8_t> big(GsPacketPool::kMaxBufferBytes + 1u, 0x11u);
+            const size_t before = pool.pooledCount();
+            pool.release(std::move(big));
+            t.Equals(pool.pooledCount(), before, "oversize release should bypass the pool");
+        });
+
+        // GP4 H5: pooled handoff gives the same consumed stream and VRAM as
+        // the direct handoff (pool on vs off, identical submits).
+        tc.Run("GP4 H5 pooled queue matches direct queue", [](TestCase &t)
+        {
+            auto run = [](bool pooled, std::vector<uint8_t> &vramOut, uint64_t &seq, uint64_t &cmds,
+                          size_t &pooledOut)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GSRegisters regs{};
+                initQueueTestRegs(regs);
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+                gs.setQueueEnabled(true);
+                gs.setPktSeqEnabled(true);
+                gs.setPacketPoolEnabled(pooled);
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+                const std::vector<std::vector<uint8_t>> pkts = {
+                    makePackedTriangle(200u, 10u, 30u), makeReglistPoints(),
+                    makeImageUpload(0x100u, 0u, 0u, 8u, 8u, 3u), makePackedTriangle(5u, 250u, 60u)};
+                for (size_t r = 0; r < 3u; ++r)
+                {
+                    for (const auto &pkt : pkts)
+                        gs.processGIFPacket(pkt.data(), static_cast<uint32_t>(pkt.size()));
+                }
+                gs.drainQueue();
+                seq = gs.pktSeqSnapshot();
+                cmds = gs.pktSeqSnapshotCommands();
+                pooledOut = gs.packetPool().pooledCount();
+                vramOut = snapshotVramBytes(gs);
+            };
+            std::vector<uint8_t> vA, vB;
+            uint64_t sA = 0, sB = 0, cA = 0, cB = 0;
+            size_t pA = 0, pB = 0;
+            run(false, vA, sA, cA, pA);
+            run(true, vB, sB, cB, pB);
+            t.IsTrue(cA != 0u, "digest should count commands");
+            t.Equals(sB, sA, "pooled queue should give the same consumed digest");
+            t.Equals(cB, cA, "pooled queue should give the same consumed count");
+            t.IsTrue(vA == vB, "pooled queue should give the same VRAM");
+            t.Equals(pA, 0u, "pool should stay empty when disabled");
+            t.IsTrue(pB != 0u, "pool should retain buffers when enabled");
+        });
+
+        // GP4 H6: batched pops keep FIFO order, byte counts and per-command
+        // RPC signaling across batch boundaries.
+        tc.Run("GP4 H6 batched pops keep order and RPC signaling", [](TestCase &t)
+        {
+            std::vector<uint32_t> seen;
+            std::mutex seenMutex;
+            GsWorker worker(0u, 0u, [&](GsCommand &cmd)
+                            {
+                                std::lock_guard<std::mutex> lock(seenMutex);
+                                seen.push_back(cmd.u32b);
+                            });
+            worker.setPopBatch(GsWorker::kPopBatch);
+            worker.start();
+            const size_t n = 3u * GsWorker::kPopBatch + 3u;
+            std::vector<std::shared_ptr<GsRpc<uint32_t>>> rpcs;
+            for (size_t i = 0; i < n; ++i)
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.u32b = static_cast<uint32_t>(i);
+                c.bytes.resize(64u, static_cast<uint8_t>(i));
+                if (i % 5u == 4u)
+                {
+                    auto rpc = std::make_shared<GsRpc<uint32_t>>();
+                    c.rpc = rpc;
+                    rpcs.push_back(rpc);
+                }
+                worker.enqueue(std::move(c));
+            }
+            for (auto &rpc : rpcs)
+                rpc->wait();
+            worker.stop();
+            t.Equals(static_cast<uint64_t>(seen.size()), static_cast<uint64_t>(n),
+                     "every command should execute");
+            bool ordered = seen.size() == n;
+            for (size_t i = 0; i < seen.size() && ordered; ++i)
+                ordered = seen[i] == static_cast<uint32_t>(i);
+            t.IsTrue(ordered, "commands should execute in FIFO order across batches");
+            t.Equals(worker.enqueuedCount(), static_cast<uint64_t>(n), "enqueued count should match");
+            t.Equals(worker.executedCount(), static_cast<uint64_t>(n), "executed count should match");
+            t.Equals(worker.pendingCount(), 0u, "queue should drain");
+            t.Equals(worker.pendingBytes(), 0u, "byte accounting should drain");
         });
     });
 }

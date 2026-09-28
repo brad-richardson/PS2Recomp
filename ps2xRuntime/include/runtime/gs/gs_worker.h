@@ -125,11 +125,106 @@ struct GsCommand
     size_t payloadBytes() const { return bytes.size(); }
 };
 
+// GP4 H5 (PS2X_GS_HANDOFF_DIET): pool of reusable packet byte-buffers.
+//
+// Every GIF packet mallocs on the producer (arbiter submit, or the direct
+// assign path) and frees on the GS worker when its command retires. That
+// per-packet cycle is scudo + 16-byte-CAS + allocator-mutex time on the
+// worker. The pool turns the steady state into pointer moves under a brief
+// spinlock: producers acquire a buffer with room, the worker releases the
+// consumed one. Bytes are copied identically either way, so the GS stream
+// (and det) is unchanged; queue order, bounds and backpressure are
+// untouched. Null/disabled = today's direct alloc/free (the knob-off path).
+class GsPacketPool
+{
+public:
+    static constexpr size_t kMaxBuffers = 32;
+    static constexpr size_t kMaxBytes = 8u * 1024u * 1024u;
+    // Larger single buffers bypass the pool (rare multi-hundred-KB image
+    // transfers must not evict the working set).
+    static constexpr size_t kMaxBufferBytes = 256u * 1024u;
+
+    void setEnabled(bool on) { m_enabled.store(on, std::memory_order_relaxed); }
+    bool enabled() const { return m_enabled.load(std::memory_order_relaxed); }
+
+    // Take a buffer with capacity >= size when one is pooled, else a fresh
+    // empty vector. The caller sizes/copies into it. Empty when disabled.
+    std::vector<uint8_t> acquire(size_t size)
+    {
+        if (!enabled() || size == 0u || size > kMaxBufferBytes)
+            return {};
+        Lock lock(m_lock);
+        for (size_t i = m_free.size(); i-- > 0u;)
+        {
+            if (m_free[i].capacity() >= size)
+            {
+                std::vector<uint8_t> out = std::move(m_free[i]);
+                m_free[i] = std::move(m_free.back());
+                m_free.pop_back();
+                m_bytes -= out.capacity();
+                return out;
+            }
+        }
+        return {};
+    }
+
+    // Return a consumed buffer (moved-from after). Dropped (freed) when
+    // disabled, empty, oversize, or over the caps.
+    void release(std::vector<uint8_t> &&bytes)
+    {
+        const size_t cap = bytes.capacity();
+        if (!enabled() || cap == 0u || cap > kMaxBufferBytes)
+            return;
+        bytes.clear();
+        Lock lock(m_lock);
+        if (m_free.size() >= kMaxBuffers || m_bytes + cap > kMaxBytes)
+            return;
+        m_bytes += cap;
+        m_free.push_back(std::move(bytes));
+    }
+
+    size_t pooledCount() const
+    {
+        Lock lock(m_lock);
+        return m_free.size();
+    }
+    size_t pooledBytes() const
+    {
+        Lock lock(m_lock);
+        return m_bytes;
+    }
+
+private:
+    struct Lock
+    {
+        explicit Lock(std::atomic_flag &flag) : m_flag(flag)
+        {
+            while (m_flag.test_and_set(std::memory_order_acquire))
+            {
+                // Brief critical sections, 2-3 threads; spin, don't sleep.
+            }
+        }
+        ~Lock() { m_flag.clear(std::memory_order_release); }
+        Lock(const Lock &) = delete;
+        Lock &operator=(const Lock &) = delete;
+        std::atomic_flag &m_flag;
+    };
+
+    std::atomic<bool> m_enabled{false};
+    mutable std::atomic_flag m_lock; // C++20: default-constructs clear
+    std::vector<std::vector<uint8_t>> m_free; // guarded by m_lock
+    size_t m_bytes = 0;                       // guarded by m_lock
+};
+
 class GsWorker
 {
 public:
     static constexpr size_t kDefaultMaxDescriptors = 1024;
     static constexpr size_t kDefaultMaxPayloadBytes = 16u * 1024u * 1024u;
+    // GP4 H6: the worker pops up to this many commands per mutex acquisition
+    // (FIFO order preserved). The queue mutex + its futex wakes cost ~0.5 ms
+    // per frame on the GS worker at one lock round per packet.
+    static constexpr size_t kPopBatch = 8;
 
     using Handler = std::function<void(GsCommand &)>;
 
@@ -161,6 +256,9 @@ public:
     void flushWake();
     // GF1 H3: 0 = off (NP1 behaviour). Set once, before producers run.
     void setDeferredWakes(uint32_t wakeCommands, size_t wakeBytes);
+    // GP4 H6: worker pop batch size, 1 (default, one-by-one) to kPopBatch.
+    // Set once, before producers run.
+    void setPopBatch(size_t n);
 
     size_t pendingCount() const;
     size_t pendingBytes() const;
@@ -192,6 +290,9 @@ private:
     // GF1 H3 (guarded by m_mutex; wake thresholds fixed before producers run).
     uint32_t m_wakeCommands = 0;
     size_t m_wakeBytes = 0;
+    // GP4 H6: pop batch size (fixed before producers run; read on the worker
+    // without the mutex, like m_maxDescriptors).
+    size_t m_popBatch = 1;
     uint64_t m_deferredSinceNs = 0; // when the pending deferred wake began
     bool m_stopRequested = false;
     bool m_running = false;
