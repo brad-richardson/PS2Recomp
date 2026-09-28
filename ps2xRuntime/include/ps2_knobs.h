@@ -34,9 +34,14 @@
 #include <string>
 #include <vector>
 
-#if !defined(_WIN32)
+// The environ scan + sysconf need POSIX; Vita and Windows skip them (diag
+// extras omitted from the dump there, nproc reads unknown → pins allowed).
+#if !defined(_WIN32) && !defined(PLATFORM_VITA) && !defined(__vita__)
+#define CF2_HAS_POSIX_ENV 1
 #include <unistd.h>
 extern char **environ;
+#else
+#define CF2_HAS_POSIX_ENV 0
 #endif
 
 namespace ps2x
@@ -118,11 +123,10 @@ inline bool cf2CpuPinAllowed(long nproc)
 
 inline long cf2HostNproc()
 {
-#if defined(_WIN32)
-    return -1;
+#if CF2_HAS_POSIX_ENV
+    return ::sysconf(_SC_NPROCESSORS_ONLN);
 #else
-    const long n = ::sysconf(_SC_NPROCESSORS_ONLN);
-    return n;
+    return -1;
 #endif
 }
 
@@ -370,7 +374,7 @@ inline std::string cf2BuildKnobsLine()
         line += '=';
         line += (value != nullptr) ? cf2SanitizeKnobValue(value) : "unset";
     }
-#if !defined(_WIN32)
+#if CF2_HAS_POSIX_ENV
     // Set diag (or future) knobs not in the curated list, sorted.
     std::vector<std::string> extras;
     for (char **e = environ; e != nullptr && *e != nullptr; ++e)
