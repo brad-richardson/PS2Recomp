@@ -827,6 +827,16 @@ if(PS2X_VU1_RECOMP_DIR)
         if(MSVC)
             target_compile_options(ps2_vu1gen PRIVATE /FS)
         endif()
+        if(NOT MSVC)
+            # IR1-Part2b: line tables instead of full -g for these giant TUs
+            # on configs that carry -g. Same codegen (-O3 kept; the Odin plays
+            # with microVU and profiling needs only line tables), far less
+            # clang RSS and smaller objects. Sorts after the config -g flag,
+            # which it overrides (last -g* option wins on clang and GCC).
+            target_compile_options(ps2_vu1gen PRIVATE
+                $<$<OR:$<CONFIG:RelWithDebInfo>,$<CONFIG:Debug>>:-gline-tables-only>
+            )
+        endif()
         if(PS2X_IS_ANDROID)
             # ps2EntryRunner is SHARED on Android, so these objects need PIC
             # (CMake only defaults it on for SHARED members, not OBJECT libs).
