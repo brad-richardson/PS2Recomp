@@ -425,16 +425,18 @@ void register_ps2_perf_log_tests()
             t.IsFalse(ps2x::perflog::parseKgslClk("", hz), "empty");
             t.IsFalse(ps2x::perflog::parseKgslClk("8x", hz), "trailing junk"); });
 
-        tc.Run("kgsl pct prefers deltas, falls back on reset", [](TestCase &t)
+        tc.Run("kgsl pct is always instantaneous (read-reset windows)", [](TestCase &t)
                {
             double pct = 0.0;
-            t.IsTrue(ps2x::perflog::kgslDeltaPct(100, 1000, 150, 1100, pct), "delta usable");
-            t.Equals(pct, 50.0, "delta pct");
-            t.IsFalse(ps2x::perflog::kgslDeltaPct(100, 1000, 100, 1000, pct), "frozen total");
-            t.IsFalse(ps2x::perflog::kgslDeltaPct(100, 1000, 10, 100, pct), "reset backward");
-            t.IsTrue(ps2x::perflog::kgslInstantPct(10, 100, pct), "instant usable");
-            t.Equals(pct, 10.0, "instant pct");
-            t.IsFalse(ps2x::perflog::kgslInstantPct(0, 0, pct), "zero total"); });
+            t.IsTrue(ps2x::perflog::kgslSamplePct(10, 100, pct), "usable");
+            t.Equals(pct, 10.0, "pct");
+            t.IsFalse(ps2x::perflog::kgslSamplePct(0, 0, pct), "zero total (idle)");
+            // PT2-grav2 spike repro: consecutive read-reset windows where total
+            // barely moves while busy jumps. A delta reads 7500%; the sample
+            // reads the window's own 34.9%.
+            t.IsTrue(ps2x::perflog::kgslSamplePct(350000, 1002000, pct), "spike window usable");
+            t.IsTrue(pct <= 100.0, "spike window bounded");
+            t.Equals(pct, 100.0 * 350000.0 / 1002000.0, "spike window instant"); });
 
         tc.Run("formatLine carries gpu values when sampled", [](TestCase &t)
                {

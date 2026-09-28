@@ -118,10 +118,13 @@ inline std::string formatLine(const Sample &s)
 
 // PT2 Part 2b: in-app kgsl GPU sampling (Android only; the .cpp reads
 // /sys/class/kgsl/kgsl-3d0/{gpubusy,gpuclk} at 1 Hz on the main thread).
-// gpubusy holds "busy total" counters; pct comes from per-second deltas,
-// falling back to the instantaneous ratio when the counters reset (some
-// kernels reset on read, which would poison a delta). Unparseable input
-// and frozen counters read na.
+// gpubusy is read-reset in us: each read returns the window since the last
+// read by ANYONE, then clears (proven on the Odin: 5 s-spaced adb reads see
+// ~1.0 s totals because our 1 Hz reads clear them; idle reads "0 0"). Two
+// consecutive reads are therefore INDEPENDENT windows, so pct is ALWAYS the
+// instantaneous ratio (a delta divides window noise and spikes to 100x+;
+// PT2-grav2). On a hypothetical cumulative kernel this degrades to a bounded
+// boot-average, never a spike. Unparseable input and zero totals read na.
 inline bool parseKgslBusy(std::string_view text, uint64_t &busy, uint64_t &total)
 {
     size_t i = 0;
@@ -182,18 +185,10 @@ inline bool parseKgslClk(std::string_view text, uint64_t &hz)
     return true;
 }
 
-// Delta pct from two (busy, total) samples. False when total didn't advance
-// (frozen counters: caller prints na) or moved backward (reset/wrap: caller
-// falls back to kgslInstantPct).
-inline bool kgslDeltaPct(uint64_t prevBusy, uint64_t prevTotal, uint64_t busy, uint64_t total, double &pct)
-{
-    if (total <= prevTotal || busy < prevBusy)
-        return false;
-    pct = 100.0 * static_cast<double>(busy - prevBusy) / static_cast<double>(total - prevTotal);
-    return true;
-}
-
-inline bool kgslInstantPct(uint64_t busy, uint64_t total, double &pct)
+// Pct from one (busy, total) read-reset window. Always the instantaneous
+// ratio (see the block comment above); false on a zero total (idle window:
+// caller prints na).
+inline bool kgslSamplePct(uint64_t busy, uint64_t total, double &pct)
 {
     if (total == 0u)
         return false;

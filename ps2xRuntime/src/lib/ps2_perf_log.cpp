@@ -486,9 +486,6 @@ struct Logger
     std::chrono::steady_clock::time_point lastTailFlush{};
     std::string tailCurrent;
     // PT2 Part 2b: in-app kgsl sampling (Android only; main thread).
-    uint64_t kgslPrevBusy = 0;
-    uint64_t kgslPrevTotal = 0;
-    bool kgslHavePrev = false;
     bool kgslDeniedNote = false;
 
     ~Logger()
@@ -755,8 +752,7 @@ void poll(uint64_t vsyncTick)
 #endif
 #if defined(__ANDROID__)
     // PT2 Part 2b: in-app kgsl GPU sample (1 Hz, main thread, no locks).
-    // Unreadable (SELinux) or unparseable reads na; see the header for the
-    // delta/instantaneous semantics.
+    // Unreadable (SELinux), unparseable, or idle-zero reads na.
     {
         char busyBuf[64] = {};
         char clkBuf[64] = {};
@@ -771,17 +767,8 @@ void poll(uint64_t vsyncTick)
         uint64_t busy = 0, total = 0, hz = 0;
         double pct = 0.0;
         bool havePct = false;
-        if (okBusy && parseKgslBusy(busyBuf, busy, total))
-        {
-            if (log.kgslHavePrev && kgslDeltaPct(log.kgslPrevBusy, log.kgslPrevTotal, busy, total, pct))
-                havePct = true;
-            else if (log.kgslHavePrev && (busy < log.kgslPrevBusy || total < log.kgslPrevTotal) &&
-                     kgslInstantPct(busy, total, pct))
-                havePct = true; // counters reset (read-reset kernels): instantaneous
-            log.kgslPrevBusy = busy;
-            log.kgslPrevTotal = total;
-            log.kgslHavePrev = true;
-        }
+        if (okBusy && parseKgslBusy(busyBuf, busy, total) && kgslSamplePct(busy, total, pct))
+            havePct = true; // read-reset window: always instantaneous, no prev needed
         if (havePct)
         {
             char cell[32];
