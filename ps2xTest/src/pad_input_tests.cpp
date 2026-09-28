@@ -3,6 +3,7 @@
 #include "ps2_record_env.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
+#include "runtime/ps2_pad.h"
 #include "Stubs/Pad.h"
 
 #include <vector>
@@ -1248,6 +1249,163 @@ void register_pad_input_tests()
             closePadPort(ctx, rdram);
             fs::remove_all(dir);
             fs::remove_all(card);
+        });
+
+        tc.Run("ds1: a mid-session load starts a new recording segment (file mode)", [](TestCase &t)
+               {
+            const std::string recPath =
+                (std::filesystem::temp_directory_path() / "ds1_padrec_load_test.txt").string();
+            std::remove(recPath.c_str());
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            t.IsTrue(ps2_stubs::setPadRecordForTest(recPath.c_str()), "recorder arms");
+
+            const uint16_t relaxed = 0xFFFFu;
+            const uint16_t cross = static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross);
+            ps2_stubs::setPadOverrideState(relaxed, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(100);
+            runPadRead(ctx, rdram);
+            ps2_stubs::setPadOverrideState(cross, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(110);
+            runPadRead(ctx, rdram);
+            // Rewind to tick 105, then keep playing.
+            ps2_stubs::padRecordNoteLoad(105);
+            ps2_stubs::setPadOverrideState(relaxed, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(106);
+            runPadRead(ctx, rdram);
+            ps2_stubs::setPadOverrideState(cross, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(115);
+            runPadRead(ctx, rdram);
+            ps2_stubs::clearPadOverrideState();
+            ps2_stubs::closePadRecordForTest();
+
+            std::FILE *f = std::fopen(recPath.c_str(), "rb");
+            std::string content;
+            if (f)
+            {
+                char buf[256];
+                size_t n = 0;
+                while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+                    content.append(buf, n);
+                std::fclose(f);
+            }
+            t.IsTrue(content.find("# --- new segment: state loaded (tick 105)") != std::string::npos,
+                     "marker notes the load tick");
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries), "file still parses");
+            // Two pre-load spans + two post-load spans. Without the segment
+            // split the rewound reads would be dropped and the tail would
+            // carry the stale pre-load state ([110,116) cross: 2 entries).
+            t.Equals(static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(4), "two segments, 4 spans");
+            bool rewound = false;
+            for (const auto &e : entries)
+            {
+                if (e.atMs == 106u)
+                    rewound = true;
+            }
+            t.IsTrue(rewound, "post-load span starts at the rewound tick");
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            closePadPort(ctx, rdram);
+            std::remove(recPath.c_str());
+        });
+
+        tc.Run("ds1: a mid-session load opens a new session file (dir mode)", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const fs::path dir = fs::temp_directory_path() / "ds1_padrec_load_dir_test";
+            fs::remove_all(dir);
+            fs::create_directories(dir);
+            // PL1: hermetic card env + count .txt sessions only (a .mc
+            // snapshot sibling is not a session).
+            Pl1EnvGuard mcRootGuard("PS2X_MC_ROOT");
+            ::unsetenv("PS2X_MC_ROOT");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            t.IsTrue(ps2_stubs::setPadRecordDirForTest(dir.string().c_str(), 30), "dir mode arms");
+
+            const uint16_t relaxed = 0xFFFFu;
+            const uint16_t cross = static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross);
+            ps2_stubs::setPadOverrideState(relaxed, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(100);
+            runPadRead(ctx, rdram);
+            ps2_stubs::setPadOverrideState(cross, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(110);
+            runPadRead(ctx, rdram);
+            ps2_stubs::padRecordNoteLoad(105);
+            ps2_stubs::setPadOverrideState(relaxed, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(106);
+            runPadRead(ctx, rdram);
+            ps2_stubs::setPadOverrideState(cross, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(115);
+            runPadRead(ctx, rdram);
+            ps2_stubs::clearPadOverrideState();
+            ps2_stubs::closePadRecordForTest();
+
+            std::vector<fs::path> sessions;
+            for (const auto &de : fs::directory_iterator(dir))
+            {
+                const std::string n = de.path().filename().string();
+                if (n.compare(0, 7, "padrec-") == 0 && n.size() > 4 &&
+                    n.compare(n.size() - 4, 4, ".txt") == 0)
+                    sessions.push_back(de.path());
+            }
+            t.Equals(static_cast<uint32_t>(sessions.size()), static_cast<uint32_t>(2), "two session files");
+            uint32_t noted = 0u;
+            for (const fs::path &p : sessions)
+            {
+                std::FILE *f = std::fopen(p.string().c_str(), "rb");
+                std::string content;
+                if (f)
+                {
+                    char buf[256];
+                    size_t n = 0;
+                    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+                        content.append(buf, n);
+                    std::fclose(f);
+                }
+                std::vector<ps2_stubs::PadScriptEntry> entries;
+                t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries), "session parses");
+                t.Equals(static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(2), "one change + tail");
+                if (content.find("# load_tick=105") != std::string::npos)
+                    ++noted;
+            }
+            t.Equals(noted, 1u, "exactly the new session header notes the load");
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            closePadPort(ctx, rdram);
+            fs::remove_all(dir);
+        });
+
+        tc.Run("ds1: quick-save/load chord edges on the thumb while SELECT is held", [](TestCase &t)
+        {
+            PSChordState st;
+            bool save = false, load = false;
+            psChordStep(st, false, false, false, save, load);
+            t.IsTrue(!save && !load, "idle: no edges");
+            psChordStep(st, true, false, false, save, load);
+            t.IsTrue(!save && !load, "SELECT alone: no edges");
+            psChordStep(st, true, true, false, save, load);
+            t.IsTrue(save && !load, "SELECT+L3: save edge");
+            psChordStep(st, true, true, false, save, load);
+            t.IsTrue(!save && !load, "held chord: no repeat");
+            psChordStep(st, true, false, true, save, load);
+            t.IsTrue(!save && load, "SELECT+R3: load edge");
+            psChordStep(st, false, true, true, save, load);
+            t.IsTrue(!save && !load, "SELECT released: no edges");
+            psChordStep(st, false, false, false, save, load);
+            psChordStep(st, true, true, true, save, load);
+            t.IsTrue(save && load, "fresh SELECT+L3+R3: both edges");
         });
     });
 }

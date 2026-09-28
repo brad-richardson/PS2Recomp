@@ -3483,6 +3483,99 @@ void register_ps2_memory_tests()
             ps2_rb1_setReverseDmaOverride(-1);
         });
 
+        // DS1: the lag slots are a 25-deep ring (RB2 Part 3, lagV serves 24
+        // back), so the whole ring rides the GS section (SRB3 tail). Saving
+        // past the ring wrap and loading resumes every serve exactly —
+        // including slots past index 1, which SQ2's 2-slot tail dropped.
+        tc.Run("DS1 lag ring slots resume exactly across a GS save/load", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(3); // lagV
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00036000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadSnapshot = [&](GS &g, uint32_t j) {
+                const uint8_t mul = static_cast<uint8_t>(5u + j);
+                const uint8_t add = static_cast<uint8_t>(2u + 3u * j);
+                g.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                g.writeRegister(GS_REG_TRXPOS, 0ull);
+                g.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                g.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0u; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                g.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                g.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            auto serveOnce = [&](PS2Memory &m) {
+                t.IsTrue(m.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                t.IsTrue(m.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                t.IsTrue(m.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+            };
+            auto expectSnapshot = [&](PS2Memory &m, uint32_t j, const char *what) {
+                const uint8_t mul = static_cast<uint8_t>(5u + j);
+                const uint8_t add = static_cast<uint8_t>(2u + 3u * j);
+                bool ok = true;
+                for (uint32_t i = 0u; i < 64u; ++i)
+                {
+                    if (m.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * mul + add) & 0xFFu))
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                t.IsTrue(ok, what);
+            };
+
+            for (uint32_t j = 0u; j < 30u; ++j)
+                uploadSnapshot(gs, j); // snapshots 0..29 (wraps the 25-ring)
+            for (uint32_t k = 0u; k < 26u; ++k)
+            {
+                std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+                serveOnce(mem); // serves 0..25 (serve 24 -> snap 0, 25 -> snap 1)
+            }
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+
+            ps2_savestate::Writer w;
+            const size_t mark = w.beginSection("gs", ps2_savestate::kGsVersion);
+            GSSavestate::save(gs, w);
+            w.endSection(mark);
+
+            PS2Memory memB;
+            t.IsTrue(memB.initialize(), "PS2Memory B initialize should succeed");
+            GS gsB;
+            gsB.init(memB.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &memB.gs());
+            memB.setGsFrontend(&gsB);
+            ps2_savestate::Reader r(w.buf.data(), w.buf.size());
+            std::string key;
+            uint32_t version = 0u;
+            t.IsTrue(r.beginSection(key, version), "gs section frame parses");
+            t.IsTrue(GSSavestate::load(gsB, r), "GS state loads");
+            t.IsTrue(r.endSection("gs"), "gs section fully consumed");
+
+            // Serves 26..35 yield snapshots 2..11: slots 2..11, which the
+            // pre-ring 2-slot tail never carried (the discriminating check).
+            for (uint32_t k = 26u; k < 36u; ++k)
+            {
+                std::memset(memB.getRDRAM() + kDst, 0xA5u, 64u);
+                serveOnce(memB);
+                expectSnapshot(memB, k - 24u,
+                               ("post-load lagV serve yields snapshot " + std::to_string(k - 24u)).c_str());
+            }
+
+            mem.setGsFrontend(nullptr);
+            memB.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
         // UV1 Part 2: PCSX2 V2/V3 lane rules. V2 writes v1v0v1v0
         // (Vif_Unpack.cpp UNPACK_V2 :76-83), except V2-32 zeroes w when the
         // unpack data starts QW-aligned (x86/Vif_UnpackSSE.cpp xUPK_V2_32

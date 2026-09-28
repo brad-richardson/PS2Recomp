@@ -1221,5 +1221,124 @@ void register_ps2_savestate_tests()
             tStop.stoppedByT = true;
             t.IsTrue(!ps2_microvu::saveReady(tStop).empty(), "T stop awaiting MSCNT defers");
         });
+
+        tc.Run("ds1: one quick-save slot per memory-card root", [](TestCase &t)
+        {
+            namespace fs = std::filesystem;
+            t.Equals(ps2_savestate::quickSlotPath("/app/files", "/app/files/mc0"),
+                     (fs::path("/app/files") / "states" / "quicksave-mc0.state").string(), "play mc0 slot");
+            t.Equals(ps2_savestate::quickSlotPath("/app/files", "/app/files/mc0-allpeak"),
+                     (fs::path("/app/files") / "states" / "quicksave-mc0-allpeak.state").string(),
+                     "P3R root keeps a separate slot");
+            t.Equals(ps2_savestate::quickSlotPath("/app/files", ""),
+                     (fs::path("/app/files") / "states" / "quicksave-mc0.state").string(), "empty root is mc0");
+            const std::string weird = ps2_savestate::quickSlotPath("/app/files", "/x/weird/root*name?");
+            t.IsTrue(weird.find("quicksave-root_name_.state") != std::string::npos, "leaf sanitized: " + weird);
+            t.IsTrue(weird.size() >= 6u && weird.compare(weird.size() - 6u, 6u, ".state") == 0,
+                     "slot keeps the .state suffix");
+        });
+
+        tc.Run("ds1: quick requests are single-flight with peek/take semantics", [](TestCase &t)
+        {
+            using ps2_savestate::clearPendingQuickSave;
+            using ps2_savestate::pendingQuickSavePath;
+            using ps2_savestate::quickSavePending;
+            using ps2_savestate::requestQuickLoad;
+            using ps2_savestate::requestQuickSave;
+            using ps2_savestate::takePendingQuickLoad;
+            namespace fs = std::filesystem;
+            const fs::path base = fs::temp_directory_path() / "ds1-pending-test";
+            fs::remove_all(base);
+            const std::string slot = (base / "states" / "quicksave-mc0.state").string();
+            clearPendingQuickSave();
+            std::string drop;
+            takePendingQuickLoad(drop);
+            t.IsTrue(!quickSavePending(), "nothing pending at start");
+            t.IsTrue(requestQuickSave(slot), "save request accepted");
+            t.IsTrue(fs::exists(base / "states"), "save request creates the slot dir");
+            t.IsTrue(quickSavePending(), "save shows pending");
+            t.IsTrue(!requestQuickSave(slot), "second save rejected while one waits");
+            t.IsTrue(!requestQuickLoad(slot), "load rejected while a save waits");
+            std::string peek;
+            t.IsTrue(pendingQuickSavePath(peek) && peek == slot, "save peek returns the path");
+            t.IsTrue(quickSavePending(), "save peek does not consume (deferrals retry)");
+            clearPendingQuickSave();
+            t.IsTrue(!quickSavePending(), "clear drops the save");
+            t.IsTrue(requestQuickLoad(slot), "load request accepted");
+            t.IsTrue(!requestQuickSave(slot), "save rejected while a load waits");
+            std::string took;
+            t.IsTrue(takePendingQuickLoad(took) && took == slot, "load take returns the path");
+            t.IsTrue(!takePendingQuickLoad(took), "load take is one-shot");
+            fs::remove_all(base);
+        });
+
+        tc.Run("ds1: quick status carries the last result with an age", [](TestCase &t)
+        {
+            ps2_savestate::noteQuickStatus("saved at tick 1714");
+            std::string message;
+            uint64_t ageMs = 0u;
+            t.IsTrue(ps2_savestate::quickStatus(message, ageMs), "status present");
+            t.Equals(message, std::string("saved at tick 1714"), "message");
+            t.IsTrue(ageMs < 60000u, "age is fresh");
+        });
+
+        tc.Run("ds1: lenient card restore keeps the disk on any difference", [](TestCase &t)
+        {
+            namespace fs = std::filesystem;
+            const fs::path base = fs::temp_directory_path() / "ds1-mcdir-test";
+            fs::remove_all(base);
+            const fs::path src = base / "src", same = base / "same", changed = base / "changed",
+                           extra = base / "extra", missing = base / "missing";
+            fs::create_directories(src / "BASLUS-20772");
+            { std::ofstream(src / "BASLUS-20772" / "save.dat", std::ios::binary) << "profile-bytes"; }
+            { std::ofstream(src / "icon.sys", std::ios::binary) << "icon"; }
+            Writer w;
+            ps2_savestate::writeDirTree(w, src.string());
+            std::string note;
+            { // identical trees: true, clean note, times restored
+                fs::create_directories(same / "BASLUS-20772");
+                { std::ofstream(same / "BASLUS-20772" / "save.dat", std::ios::binary) << "profile-bytes"; }
+                { std::ofstream(same / "icon.sys", std::ios::binary) << "icon"; }
+                Reader r(w.buf.data(), w.buf.size());
+                t.IsTrue(ps2_savestate::readDirTreeLenient(r, same.string(), note), "identical restores");
+                t.IsTrue(note.empty(), "identical note is clean");
+            }
+            { // different bytes: true, loud note, disk untouched
+                fs::create_directories(changed / "BASLUS-20772");
+                { std::ofstream(changed / "BASLUS-20772" / "save.dat", std::ios::binary) << "newer-progress"; }
+                { std::ofstream(changed / "icon.sys", std::ios::binary) << "icon"; }
+                Reader r(w.buf.data(), w.buf.size());
+                t.IsTrue(ps2_savestate::readDirTreeLenient(r, changed.string(), note), "different keeps disk");
+                t.IsTrue(note.find("different") != std::string::npos, "note names it: " + note);
+                std::ifstream kept(changed / "BASLUS-20772" / "save.dat", std::ios::binary);
+                std::string keptText((std::istreambuf_iterator<char>(kept)), std::istreambuf_iterator<char>());
+                t.Equals(keptText, std::string("newer-progress"), "newer bytes survive");
+            }
+            { // extra file on disk (the game's own later save): true, disk untouched
+                fs::create_directories(extra / "BASLUS-20772");
+                { std::ofstream(extra / "BASLUS-20772" / "save.dat", std::ios::binary) << "profile-bytes"; }
+                { std::ofstream(extra / "icon.sys", std::ios::binary) << "icon"; }
+                { std::ofstream(extra / "BASLUS-20772" / "later.dat", std::ios::binary) << "later"; }
+                Reader r(w.buf.data(), w.buf.size());
+                t.IsTrue(ps2_savestate::readDirTreeLenient(r, extra.string(), note), "extra keeps disk");
+                t.IsTrue(note.find("extra") != std::string::npos, "note names it: " + note);
+                t.IsTrue(fs::exists(extra / "BASLUS-20772" / "later.dat"), "later file survives");
+            }
+            { // file deleted on disk: true, never recreated
+                fs::create_directories(missing / "BASLUS-20772");
+                { std::ofstream(missing / "BASLUS-20772" / "save.dat", std::ios::binary) << "profile-bytes"; }
+                Reader r(w.buf.data(), w.buf.size());
+                t.IsTrue(ps2_savestate::readDirTreeLenient(r, missing.string(), note), "missing keeps disk");
+                t.IsTrue(note.find("deleted on disk") != std::string::npos, "note names it: " + note);
+                t.IsTrue(!fs::exists(missing / "icon.sys"), "deleted file stays deleted");
+            }
+            { // corrupt payload still fails (validation is not lenient)
+                std::vector<uint8_t> bad = w.buf;
+                bad.resize(12u);
+                Reader r(bad.data(), bad.size());
+                t.IsTrue(!ps2_savestate::readDirTreeLenient(r, same.string(), note), "truncation refused");
+            }
+            fs::remove_all(base);
+        });
     });
 }
