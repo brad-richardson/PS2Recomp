@@ -873,6 +873,10 @@ if(PS2X_OM1_STAGE)
         SKIP_UNITY_BUILD_INCLUSION ON
         SKIP_PRECOMPILE_HEADERS ON
         COMPILE_DEFINITIONS PCSX2_RECOMPILER_TESTS
+        # Quoted PCSX2 includes ("Config.h", ...) must win over same-spelled
+        # runner headers on case-insensitive APFS (raylib's config.h shadows
+        # "Config.h" via the target -I dirs, which precede per-source -I).
+        COMPILE_OPTIONS "-iquote${PS2X_OM1_STAGE}/armsx2/pcsx2"
         INCLUDE_DIRECTORIES "${PS2X_OM1_STAGE};${PS2X_OM1_STAGE}/armsx2;${PS2X_OM1_STAGE}/armsx2/pcsx2;${PS2X_OM1_STAGE}/armsx2/3rdparty/imgui/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/fmt/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/fast_float/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/rapidjson/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/vixl/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/include;${PS2X_OM1_LIB}/common/include")
     # SDL3 C-API stubs (gi1_sdl3_stubs.cpp, verbatim from the gi1 branch: the
     # offline closure pulls the same SDL input/audio/FF objects the GS closure
