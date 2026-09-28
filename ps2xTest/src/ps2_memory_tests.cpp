@@ -3206,6 +3206,160 @@ void register_ps2_memory_tests()
             ps2_rb1_setReverseDmaOverride(-1);
         });
 
+        // RB2 Part 3: lagV serves the snapshot 24 back (depth 24 > max
+        // observed burst 17/vsync). First 24 serves are defined empty; serve
+        // 24 yields snapshot 0, serve 25 snapshot 1 (26 snapshots also
+        // exercise the 25-slot ring wraparound).
+        tc.Run("RB2 lagV serves empty x24, then the snapshot 24 back", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(3);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00036000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadAndReadback = [&](uint32_t j) {
+                const uint8_t mul = static_cast<uint8_t>(3u + j);
+                const uint8_t add = static_cast<uint8_t>(1u + 2u * j);
+                gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                gs.writeRegister(GS_REG_TRXPOS, 0ull);
+                gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                gs.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            auto patternByte = [&](uint32_t j, uint32_t i) {
+                const uint8_t mul = static_cast<uint8_t>(3u + j);
+                const uint8_t add = static_cast<uint8_t>(1u + 2u * j);
+                return static_cast<uint8_t>((i * mul + add) & 0xFFu);
+            };
+            for (uint32_t k = 0u; k < 26u; ++k)
+            {
+                uploadAndReadback(k); // snapshot k
+                std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+                if (k < 24u)
+                {
+                    bool untouched = true;
+                    for (uint32_t i = 0; i < 64u; ++i)
+                    {
+                        if (mem.getRDRAM()[kDst + i] != 0xA5u)
+                        {
+                            untouched = false;
+                            break;
+                        }
+                    }
+                    t.IsTrue(untouched, "lagV early serves must leave EE untouched");
+                    t.Equals(mem.readIORegister(kVif1 + 0x20u), 4u, "lagV early serves must keep QWC");
+                }
+                else
+                {
+                    const uint32_t want = k - 24u;
+                    bool ok = true;
+                    for (uint32_t i = 0; i < 64u; ++i)
+                    {
+                        if (mem.getRDRAM()[kDst + i] != patternByte(want, i))
+                        {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    t.IsTrue(ok, "lagV serve k must yield snapshot k-24");
+                    t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "lagV full serve should clear QWC");
+                }
+            }
+            t.Equals(mem.readIORegister(kVif1 + 0x10u), kDst + 64u, "lagV serve should advance MADR");
+            t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 1)) != 0u, "lagV serve should set D_STAT CIS bit 1");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        tc.Run("RB2 lagV through the queued GS worker serves 24 back", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(3);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+            t.IsTrue(gs.setQueueEnabled(true), "GS queue enable should succeed");
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00037000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadAndReadback = [&](uint32_t j) {
+                const uint8_t mul = static_cast<uint8_t>(5u + j);
+                const uint8_t add = static_cast<uint8_t>(2u + 3u * j);
+                gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                gs.writeRegister(GS_REG_TRXPOS, 0ull);
+                gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                gs.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            auto patternByte = [&](uint32_t j, uint32_t i) {
+                const uint8_t mul = static_cast<uint8_t>(5u + j);
+                const uint8_t add = static_cast<uint8_t>(2u + 3u * j);
+                return static_cast<uint8_t>((i * mul + add) & 0xFFu);
+            };
+            for (uint32_t k = 0u; k < 26u; ++k)
+            {
+                uploadAndReadback(k); // snapshot k (worker)
+                std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+                if (k < 24u)
+                {
+                    bool untouched = true;
+                    for (uint32_t i = 0; i < 64u; ++i)
+                    {
+                        if (mem.getRDRAM()[kDst + i] != 0xA5u)
+                        {
+                            untouched = false;
+                            break;
+                        }
+                    }
+                    t.IsTrue(untouched, "queued lagV early serves must leave EE untouched");
+                }
+                else
+                {
+                    const uint32_t want = k - 24u;
+                    bool ok = true;
+                    for (uint32_t i = 0; i < 64u; ++i)
+                    {
+                        if (mem.getRDRAM()[kDst + i] != patternByte(want, i))
+                        {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    t.IsTrue(ok, "queued lagV serve k must yield snapshot k-24");
+                }
+            }
+            t.IsTrue(gs.setQueueEnabled(false), "GS queue disable should succeed");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
         // SQ2: the lag1 slots and counters ride the GS savestate section
         // (magic tail, present only once a snapshot exists) and resume
         // exactly: the first post-load serve yields the pre-save snapshot's

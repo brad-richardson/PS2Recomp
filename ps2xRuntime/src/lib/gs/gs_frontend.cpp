@@ -2452,11 +2452,11 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
                           << " set rrw=" << m_trxreg.rrw << " rrh=" << m_trxreg.rrh
                           << " spsm=" << m_bitbltbuf.spsm << " pending=" << pend << std::endl;
             }
-            // RB2: in lag1 mode snapshot this local->host transfer now,
+            // RB2: in lag1/lagV mode snapshot this local->host transfer now,
             // worker-ordered right after its setup (the backend overwrites
             // its pending count per setup, so a later consume would not see
             // this transfer's bytes). Off/sync modes skip: one relaxed load.
-            if (m_trxdir == 1u && ps2_rb1_reverseDmaMode() == 2)
+            if (m_trxdir == 1u && ps2_rb1_reverseDmaMode() >= 2)
                 snapshotLaggedReadback();
         }
         recordTransferDebugEventUnlocked();
@@ -2856,10 +2856,11 @@ void GS::snapshotLaggedReadback()
     {
         std::lock_guard<std::mutex> lock(m_rb2Mutex);
         idx = m_rb2Snaps.load(std::memory_order_relaxed);
+        const uint64_t slot = idx % kRb2LagRing;
         if (n != 0u)
-            std::memcpy(m_rb2Slot[idx & 1u], buf, n);
-        m_rb2SlotBytes[idx & 1u] = n;
-        m_rb2SlotTruncated[idx & 1u] = truncated;
+            std::memcpy(m_rb2Slot[slot], buf, n);
+        m_rb2SlotBytes[slot] = n;
+        m_rb2SlotTruncated[slot] = truncated;
         m_rb2Snaps.store(idx + 1u, std::memory_order_release);
     }
     static std::atomic<uint32_t> rb2SnapLog{0};
@@ -2878,22 +2879,25 @@ uint32_t GS::serveLaggedReadback(uint8_t *dst, uint32_t maxBytes, uint64_t &spin
 {
     spinUs = 0u;
     timedOut = false;
+    // Lag depth from the live knob: lag1 serves k-1, lagV serves k-24.
+    const uint64_t depth = (ps2_rb1_reverseDmaMode() == 3) ? kRb2LagVDepth : 1u;
     uint64_t k = 0u;
     {
         std::lock_guard<std::mutex> lock(m_rb2Mutex);
         k = m_rb2Serves++;
     }
-    if (k == 0u)
-        return 0u; // No previous probe: defined empty serve (EE untouched).
-    // Wait for snapshot k-1. In practice it completed ~a probe period ago
-    // (the worker drains every present); the spin is ~0 and only its count
-    // is timing-dependent, never the bytes. The timeout is a hang-guard for
-    // a reverse DMA with no preceding TRXDIR, which the probe never issues.
+    if (k < depth)
+        return 0u; // No snapshot D back yet: defined empty serve (EE untouched).
+    // Wait for snapshot k-D. With depth >= the max probes/vsync the worker
+    // completed it >1 frame ago, so the spin is ~0; only its count is
+    // timing-dependent, never the bytes. The timeout is a hang-guard for a
+    // reverse DMA with no preceding TRXDIR, which the probe never issues.
     static constexpr uint64_t kRb2ServeTimeoutUs = 500000u;
+    const uint64_t want = k - depth;
     const auto t0 = std::chrono::steady_clock::now();
     for (uint64_t i = 0u;; ++i)
     {
-        if (m_rb2Snaps.load(std::memory_order_acquire) >= k)
+        if (m_rb2Snaps.load(std::memory_order_acquire) > want)
             break;
         if ((i & 1023u) == 1023u)
         {
@@ -2904,7 +2908,7 @@ uint32_t GS::serveLaggedReadback(uint8_t *dst, uint32_t maxBytes, uint64_t &spin
             {
                 timedOut = true;
                 m_rb2Timeouts.fetch_add(1u, std::memory_order_relaxed);
-                std::cerr << "[rb2] serve k=" << k << " TIMEOUT waiting for snap " << (k - 1u)
+                std::cerr << "[rb2] serve k=" << k << " TIMEOUT waiting for snap " << want
                           << " (snaps=" << m_rb2Snaps.load(std::memory_order_relaxed) << ")"
                           << std::endl;
                 return 0u;
@@ -2918,7 +2922,7 @@ uint32_t GS::serveLaggedReadback(uint8_t *dst, uint32_t maxBytes, uint64_t &spin
             std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count());
     }
     std::lock_guard<std::mutex> lock(m_rb2Mutex);
-    const uint64_t slot = (k - 1u) & 1u;
+    const uint64_t slot = want % kRb2LagRing;
     if (m_rb2SlotTruncated[slot])
         return 0u;
     const uint32_t have = m_rb2SlotBytes[slot];

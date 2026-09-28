@@ -159,8 +159,11 @@ namespace
     // TRXDIR=1 setup (Gif_Unit.cpp GSLastDownloadSize).
     //
     // RB2: mode 2 (`lag1`) serves each reverse DMA from the previous
-    // probe's snapshot (GS::serveLaggedReadback) with no worker/unit sync
-    // on the EE, so the probe no longer stalls. See the GS header.
+    // probe's snapshot, mode 3 (`lagV`) from the snapshot 24 back
+    // (GS::serveLaggedReadback), both with no worker/unit sync on the EE.
+    // Part 2 showed depth 1 leaves too little worker slack under the probe
+    // bursts on the Adreno worker; lagV's depth restores >1 frame. See the
+    // GS header.
     //
     // Unit tests force the knob through ps2_rb1_setReverseDmaOverride
     // (production never calls it): the env is read once per process, so a
@@ -176,6 +179,8 @@ namespace
                 return 0;
             if (std::strcmp(env, "lag1") == 0)
                 return 2;
+            if (std::strcmp(env, "lagV") == 0)
+                return 3;
             return 1;
         }();
         return mode;
@@ -1995,14 +2000,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 // the channel completion the way the forward path does.
                 const bool vif1Reverse = (channelBase == 0x10009000u) && (mode == 0u) &&
                                          ((chcr & 0x1u) == 0u) && (qwc > 0u);
-                // RB2: lag1 serves the previous probe's snapshot with no
+                // RB2: lag1/lagV serves an older probe's snapshot with no
                 // worker/unit sync on the EE (no stall). The snapshot was
-                // captured worker-ordered at the previous TRXDIR=1 setup, so
+                // captured worker-ordered at its TRXDIR=1 setup, so
                 // serveLaggedReadback's spin is ~0; only its count is
                 // timing-dependent, never the bytes. Short/empty serves keep
                 // the RB1 remainder semantics (EE past the served bytes is
                 // untouched, the rest stays in QWC).
-                if (vif1Reverse && vif1ReverseDmaModeLocal() == 2)
+                if (vif1Reverse && vif1ReverseDmaModeLocal() >= 2)
                 {
                     static const uint32_t rb2LogMax = [] {
                         const char *env = std::getenv("PS2X_RB2_LOG_MAX");
@@ -2088,6 +2093,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 rb2Min = 0u;
                             std::cerr << "[rb2] serve madr=0x" << std::hex << madr << std::dec
                                       << " qwc=" << qwc << " avail=" << rb2Avail << " served=" << rb2Done
+                                      << " depth=" << ((vif1ReverseDmaModeLocal() == 3) ? GS::kRb2LagVDepth : 1u)
                                       << " spin_us=" << rb2SpinUs << " timeout=" << (rb2Timeout ? 1 : 0)
                                       << " u24min=0x" << std::hex << rb2Min << " u24mean=0x"
                                       << (rb2Pix ? (rb2Sum / rb2Pix) : 0u) << " u24max=0x" << rb2Max

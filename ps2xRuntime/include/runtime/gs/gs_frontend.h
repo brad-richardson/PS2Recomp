@@ -253,21 +253,27 @@ public:
 
     uint32_t consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes);
 
-    // RB2: one-probe-lagged local->host serving (`PS2X_VIF1_REVERSE_DMA=lag1`).
+    // RB2: lagged local->host serving (`PS2X_VIF1_REVERSE_DMA=lag1` or `lagV`).
     // The sync path (RB1) drains the unit + worker at every probe readback;
-    // the lag path instead snapshots each TRXDIR=1 transfer worker-ordered at
+    // the lag paths instead snapshot each TRXDIR=1 transfer worker-ordered at
     // setup time (snapshotLaggedReadback, called from the TRXDIR=1 case) and
-    // serves each reverse DMA from the PREVIOUS snapshot, with no worker or
-    // unit sync on the EE. Deterministic given deterministic rendering: the
-    // k-th serve always yields snapshot k-1's bytes (it spins, briefly, for
-    // an already-complete snapshot; only the spin count is timing-dependent).
-    // First serve yields 0 bytes (EE untouched, QWC remainder, like a short
-    // sync transfer). Snapshots ride the GIF stream order, so the capture
+    // serve each reverse DMA from an OLDER snapshot, with no worker or unit
+    // sync on the EE. Deterministic given deterministic rendering: the k-th
+    // serve always yields snapshot k-D's bytes (D = lag depth; it spins for an
+    // already-complete snapshot, and only the spin count is timing-dependent).
+    // The first D serves yield 0 bytes (EE untouched, QWC remainder, like a
+    // short sync transfer). Snapshots ride the GIF stream order, so the capture
     // stays ordered after the probe's own packet on MTVU builds too (a
     // worker-direct capture command would race it). Slot cap: transfers over
     // kRb2LagSlotBytes are drained and served as 0 bytes (truncated; logged).
+    // Depth: lag1 serves k-1 (D=1); lagV serves k-kRb2LagVDepth. Part 2 showed
+    // D=1 leaves only ~200 us of worker slack under the ~6-probe/frame bursts
+    // (max 17 probes/vsync observed on Odin SP1), so the EE spin-waits on the
+    // Adreno worker; lagV's depth (24 > 17) restores >1 frame of slack.
     static constexpr uint32_t kRb2LagSlotBytes = 4096u;
-    // Serves the previous snapshot into dst (<= maxBytes). Returns bytes
+    static constexpr uint64_t kRb2LagVDepth = 24u;
+    static constexpr uint64_t kRb2LagRing = kRb2LagVDepth + 1u;
+    // Serves the snapshot D back into dst (<= maxBytes). Returns bytes
     // available (0 = none yet / truncated / no snapshot); spinUs is the
     // snapshot wait, timedOut sets on the hang-guard timeout (serve zeros).
     uint32_t serveLaggedReadback(uint8_t *dst, uint32_t maxBytes, uint64_t &spinUs, bool &timedOut);
@@ -416,20 +422,21 @@ private:
     uint64_t m_pktSeqSnapshot = 0u;
     uint64_t m_pktSeqSnapshotCommands = 0u;
 
-    // RB2 (appended last): one-probe-lagged readback cache. Snapshots publish
-    // under m_rb2Mutex with a release store of m_rb2Snaps; serves spin on an
-    // acquire load, then copy under the mutex. Double-buffered: snapshot j
-    // writes slot j&1 while serve j+1 reads slot j&1 only after snapshot j
-    // completes, and snapshot j+1 (same slot) cannot execute before serve
-    // j+1's probe, which is what enqueues its TRXDIR. m_rb2Serves is
-    // EE-thread-only but stays mutex-guarded. Hang-guard, not behavior: the
-    // serve spin times out (serve zeros) if a snapshot never completes.
+    // RB2 (appended last): lagged readback cache (ring of kRb2LagRing slots;
+    // snapshot j writes slot j%R). Snapshots publish under m_rb2Mutex with a
+    // release store of m_rb2Snaps; serves spin on an acquire load, then copy
+    // under the mutex. No aliasing: serve k reads snapshot k-D's slot, and the
+    // next writer of that slot (snapshot k-D+R) cannot execute before probe
+    // k-D+R enqueues its TRXDIR, which the guest orders after serve k (R>D).
+    // m_rb2Serves is EE-thread-only but stays mutex-guarded. Hang-guard, not
+    // behavior: the serve spin times out (serve zeros) if a snapshot never
+    // completes. Depth is read live from the knob; don't flip modes mid-run.
     void snapshotLaggedReadback();
     std::mutex m_rb2Mutex;
     std::atomic<uint64_t> m_rb2Snaps{0};
-    uint8_t m_rb2Slot[2][kRb2LagSlotBytes]{};
-    uint32_t m_rb2SlotBytes[2] = {0u, 0u};
-    bool m_rb2SlotTruncated[2] = {false, false};
+    uint8_t m_rb2Slot[kRb2LagRing][kRb2LagSlotBytes]{};
+    uint32_t m_rb2SlotBytes[kRb2LagRing] = {0u};
+    bool m_rb2SlotTruncated[kRb2LagRing] = {false};
     uint64_t m_rb2Serves = 0u;
     std::atomic<uint64_t> m_rb2Timeouts{0};
 };
