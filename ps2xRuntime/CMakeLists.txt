@@ -948,8 +948,6 @@ if(PS2X_OM1_STAGE)
     list(FILTER PS2X_OM1_ARCHIVES EXCLUDE REGEX ".*/sdl3/.*\\.a$")
     list(LENGTH PS2X_OM1_ARCHIVES PS2X_OM1_ARCHIVE_COUNT)
     message(STATUS "PS2X: OM1 archives: ${PS2X_OM1_ARCHIVE_COUNT} from ${PS2X_OM1_LIB}")
-    target_link_libraries(ps2EntryRunner PRIVATE ${PS2X_OM1_ARCHIVES})
-    target_sources(ps2EntryRunner PRIVATE ${PS2X_OM1_SOURCES})
     target_compile_definitions(ps2_runtime PRIVATE PS2X_MICROVU_STATIC=1)
     set_source_files_properties(${PS2X_OM1_SOURCES} PROPERTIES
         SKIP_UNITY_BUILD_INCLUSION ON
@@ -960,6 +958,67 @@ if(PS2X_OM1_STAGE)
         # "Config.h" via the target -I dirs, which precede per-source -I).
         COMPILE_OPTIONS "-iquote${PS2X_OM1_STAGE}/armsx2/pcsx2"
         INCLUDE_DIRECTORIES "${PS2X_OM1_STAGE};${PS2X_OM1_STAGE}/armsx2;${PS2X_OM1_STAGE}/armsx2/pcsx2;${PS2X_OM1_STAGE}/armsx2/3rdparty/imgui/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/fmt/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/fast_float/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/rapidjson/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/vixl/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/include;${PS2X_OM1_LIB}/common/include")
+    if(APPLE)
+        # IB3: close the OM1 island behind `ld -r` (ps2x_om1_close.sh) instead
+        # of linking the stage + OM1 archives raw. The OM1 and GE1 archive
+        # sets are two full PCSX2 cores (~20k duplicate defined globals:
+        # EmuFolders, CocoaTools, ...); raw linking lets OM1's copies win
+        # (ARMSX2 DataRoot, upstream resources path) and crash-loops GE1 init
+        # on device. The closed object keeps global only the 5 ps2x_microvu_*
+        # C functions and the _om1* dlsym slots; everything else (ARMSX2 VU
+        # state, EmuConfig, StringUtil, ...) resolves inside the island. The
+        # script fails the build on any duplicate vs the GE1 archives, any
+        # lost export, or any dlsym slot that stops resolving. Non-Apple
+        # keeps the direct link (different linker, no GE1 consumer there).
+        add_library(ps2x_om1_stage OBJECT ${PS2X_OM1_SOURCES})
+        set_target_properties(ps2x_om1_stage PROPERTIES
+            CXX_STANDARD 20
+            CXX_STANDARD_REQUIRED ON
+            UNITY_BUILD OFF)
+        target_include_directories(ps2x_om1_stage PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+        find_program(PS2X_OM1_NM nm)
+        if(NOT PS2X_OM1_NM)
+            message(FATAL_ERROR "PS2X: OM1 close needs nm on PATH")
+        endif()
+        if(CMAKE_OSX_SYSROOT)
+            set(PS2X_OM1_XCRUN_SDK -sdk ${CMAKE_OSX_SYSROOT})
+        else()
+            set(PS2X_OM1_XCRUN_SDK "")
+        endif()
+        execute_process(COMMAND xcrun ${PS2X_OM1_XCRUN_SDK} -find ld
+            OUTPUT_VARIABLE PS2X_OM1_LD OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE PS2X_OM1_LD_RES)
+        if(NOT PS2X_OM1_LD_RES EQUAL 0)
+            message(FATAL_ERROR "PS2X: OM1 close needs xcrun ld (sysroot '${CMAKE_OSX_SYSROOT}')")
+        endif()
+        # The GE1 link set for the duplicate check (same shape as the GI1
+        # block below; empty in OM1-only builds, and the check skips itself).
+        set(PS2X_OM1_GE1_CHECK "")
+        if(PS2X_GE1_IOS_BUILD)
+            file(GLOB_RECURSE PS2X_OM1_GE1_CHECK "${PS2X_GE1_IOS_BUILD}/*.a")
+            list(FILTER PS2X_OM1_GE1_CHECK EXCLUDE REGEX "/\\._")
+            list(FILTER PS2X_OM1_GE1_CHECK EXCLUDE REGEX ".*/sdl3/.*\\.a$")
+        endif()
+        set(PS2X_OM1_STAGE_CLOSED "${CMAKE_CURRENT_BINARY_DIR}/om1-close/stage_closed.o")
+        set(PS2X_OM1_CLOSED "${CMAKE_CURRENT_BINARY_DIR}/om1-close/om1_closed.o")
+        add_custom_command(
+            OUTPUT "${PS2X_OM1_STAGE_CLOSED}" "${PS2X_OM1_CLOSED}"
+            COMMAND /bin/bash "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ps2x_om1_close.sh"
+                "${PS2X_OM1_LD}" "${PS2X_OM1_NM}"
+                "${PS2X_OM1_STAGE_CLOSED}" "${PS2X_OM1_CLOSED}" "${PS2X_OM1_STAGE}"
+                $<TARGET_OBJECTS:ps2x_om1_stage> -- ${PS2X_OM1_ARCHIVES} -- ${PS2X_OM1_GE1_CHECK}
+            DEPENDS ps2x_om1_stage ${PS2X_OM1_ARCHIVES}
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ps2x_om1_close.sh"
+            COMMENT "PS2X: closing OM1 island (ld -r + duplicate check)"
+            VERBATIM)
+        add_custom_target(ps2x_om1_closed DEPENDS "${PS2X_OM1_CLOSED}")
+        add_dependencies(ps2EntryRunner ps2x_om1_closed)
+        target_link_libraries(ps2EntryRunner PRIVATE "${PS2X_OM1_CLOSED}")
+    else()
+        target_link_libraries(ps2EntryRunner PRIVATE ${PS2X_OM1_ARCHIVES})
+        target_sources(ps2EntryRunner PRIVATE ${PS2X_OM1_SOURCES})
+    endif()
     # SDL3 C-API stubs (gi1_sdl3_stubs.cpp, folded from GI1: the offline closure
     # pulls the same SDL input/audio/FF objects the GS closure does, and PCSX2's
     # own libSDL3.a stays excluded — its UIKit classes collide with the app's
