@@ -253,9 +253,6 @@ Ps2xGsReplayResult ps2x_gs_replay_run()
         packetTrace << "index,tick,path,vram\n";
     }
 
-    // TL1 Part 1b: the N8D7M5 word-watch (PS2X_GS_REPLAY_WORDS reader and
-    // per-packet before/after logging) is removed; the folded core has no
-    // probe-code dependency.
     uint64_t packets = 0u, priv = 0u, transfers = 0u, markers = 0u, roundedPackets = 0u;
     uint64_t readbacks = 0u, clears = 0u;
     bool parseOk = true;

@@ -494,9 +494,6 @@ add_library(ps2_runtime STATIC
     src/lib/games_database.cpp
 )
 
-# TL1 Part 1b: the N8D7M5 word-watch formerly compiled into
-# gs_replay_core.cpp behind PS2X_GS_REPLAY_WORD_WATCH is removed; the
-# replay core has no probe-code dependency.
 if(PS2X_ENABLE_RUNTIME_LOGS)
     target_compile_definitions(ps2_runtime PUBLIC
         PS2_RUNTIME_LOGS=1
