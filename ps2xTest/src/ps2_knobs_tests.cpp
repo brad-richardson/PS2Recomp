@@ -225,6 +225,11 @@ void register_ps2_knobs_tests()
             g.track("PS2X_UNPACED");
             g.track("PS2X_DETERMINISTIC");
             g.track("PS2X_DET_HASH_EVERY");
+            g.track("PS2X_GS_TURNIP");
+            g.track("PGS_SKIP_COMPILATION_TASKS");
+            g.track("PGS_PRECOMPILE_LIST");
+            g.track("PGS_PRECOMPILE_THREADS");
+            g.track("PGS_PIPELINE_CACHE");
             clearDefaults();
             ps2x::cf2ApplyAndroidDefaults("/storage/emulated/0/Android/data/com.ps2x.runner/files/SLUS_207.72");
             ::setenv("PS2X_CD_IMAGE",
@@ -234,9 +239,18 @@ void register_ps2_knobs_tests()
             ::setenv("PS2X_UNPACED", "1", 1);
             ::setenv("PS2X_DETERMINISTIC", "1", 1);
             ::setenv("PS2X_DET_HASH_EVERY", "5", 1);
+            // The 5 inert P3 lines (present in the real P3 leg, absent in empty).
+            ::setenv("PS2X_GS_TURNIP", "0", 1);
+            ::setenv("PGS_SKIP_COMPILATION_TASKS", "1", 1);
+            ::setenv("PGS_PRECOMPILE_LIST",
+                     "/storage/emulated/0/Android/data/com.ps2x.runner/files/variants-odin.txt", 1);
+            ::setenv("PGS_PRECOMPILE_THREADS", "2", 1);
+            ::setenv("PGS_PIPELINE_CACHE",
+                     "/storage/emulated/0/Android/data/com.ps2x.runner/files/pcache-sc1.bin", 1);
             const std::string line = ps2x::cf2BuildKnobsLine();
-            // logd truncates past ~4 KB; keep margin for longer odin paths.
-            t.IsTrue(line.size() < 3900, "dump under 3900 bytes");
+            // logd truncates past ~4 KB (LOGGER_ENTRY_MAX_PAYLOAD 4076); the
+            // real P3 leg prints 3939 bytes. Trip here before growth truncates.
+            t.IsTrue(line.size() < 4000, "dump under 4000 bytes");
             t.IsTrue(line.find(" PS2X_GS_BACKEND=external") != std::string::npos, "default visible");
         });
     });
