@@ -8,7 +8,6 @@
 // with constant instruction words; the interpreter passes its decode-cache entry.
 
 #include "runtime/ps2_vu1.h"
-#include "runtime/ps2_memory.h"
 #include "ps2_vu1_entry_trace.h"
 #include "ps2_vu1_trace.h"
 

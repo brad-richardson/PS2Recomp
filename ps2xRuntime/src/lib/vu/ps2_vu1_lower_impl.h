@@ -7,9 +7,6 @@
 // execLower() wrapper in ps2_vu1_lower.cpp.
 
 #include "runtime/ps2_vu1.h"
-#include "runtime/gs/ps2_gif_arbiter.h"
-#include "runtime/gs/gs_frontend.h"
-#include "runtime/ps2_memory.h"
 #include <cmath>
 #include <cstring>
 #include <limits>
