@@ -6,6 +6,8 @@
 // lost it while the archive kept it).
 #include "ps2_build_id.h"
 
+#include <cstddef>
+
 namespace
 {
 #if defined(PS2X_BUILD_ID)
@@ -13,7 +15,7 @@ const char kPs2xBuildIdMarker[] = "PS2X-BUILD-ID:" PS2X_BUILD_ID;
 #else
 const char kPs2xBuildIdMarker[] = "PS2X-BUILD-ID:";
 #endif
-constexpr size_t kMarkerPrefixLen = 14; // strlen("PS2X-BUILD-ID:")
+constexpr std::size_t kMarkerPrefixLen = 14; // strlen("PS2X-BUILD-ID:")
 } // namespace
 
 namespace ps2x
