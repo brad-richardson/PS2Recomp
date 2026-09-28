@@ -13,6 +13,7 @@ void register_ps2_present_vk_ledger_tests();
 void register_ps2_virtual_pad_tests();
 void register_ps2_env_file_tests();
 void register_ps2_android_env_tests();
+void register_ps2_knobs_tests();
 void register_ps2_perf_log_tests();
 void register_ps2_thread_affinity_tests();
 void register_ps2_runtime_io_tests();
@@ -69,6 +70,7 @@ int main()
     register_ps2_virtual_pad_tests();
     register_ps2_env_file_tests();
     register_ps2_android_env_tests();
+    register_ps2_knobs_tests();
     register_ps2_perf_log_tests();
     register_ps2_thread_affinity_tests();
     register_ps2_runtime_io_tests();

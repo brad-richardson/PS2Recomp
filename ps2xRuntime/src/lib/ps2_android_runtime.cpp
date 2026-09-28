@@ -2,9 +2,11 @@
 #if defined(__ANDROID__)
 
 #include "ps2_android_env.h"
+#include "ps2_knobs.h"
 #include "ps2_record_env.h"
 
 #include <android/log.h>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -45,7 +47,28 @@ void loadPs2xEnvFile()
 
 struct Ps2xEnvLoader
 {
-    Ps2xEnvLoader() { loadPs2xEnvFile(); }
+    Ps2xEnvLoader()
+    {
+        loadPs2xEnvFile();
+        // CF2 S1: compiled P3 play defaults for keys the file did not set
+        // (runs even when the file is missing: a missing/empty env must
+        // reproduce P3). PS2X_PROFILE=reference disables them all, restoring
+        // the exact knob-off path.
+        if (ps2x::cf2ProfileIsReference())
+        {
+            __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, "ps2x.env: profile=reference, no compiled defaults");
+            return;
+        }
+#if defined(PS2X_DEFAULT_BOOT_ELF)
+        const size_t applied = ps2x::cf2ApplyAndroidDefaults(PS2X_DEFAULT_BOOT_ELF);
+#else
+        const size_t applied = ps2x::cf2ApplyAndroidDefaults(nullptr);
+#endif
+        char summary[64];
+        std::snprintf(summary, sizeof(summary), "ps2x.env: %u compiled defaults applied",
+                      static_cast<unsigned>(applied));
+        __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, summary);
+    }
 };
 
 static Ps2xEnvLoader g_ps2xEnvLoader;

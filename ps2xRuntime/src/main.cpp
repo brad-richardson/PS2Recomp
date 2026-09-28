@@ -1,5 +1,6 @@
 #include "ps2_runtime.h"
 #include "games_database.h"
+#include "ps2_knobs.h"
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
 #include "ps2_debug_panel.h"
 #endif
@@ -86,7 +87,11 @@ namespace
                                          {
                                              return;
                                          }
-                                         char line[1024];
+                                         // CF2 S0: 8 KB so the ~3.7 KB [knobs] startup line lands as one
+                                         // logcat entry (logd truncates past ~4 KB; the suite asserts the
+                                         // bound). Chunked reads split multi-KB lines into unmarked
+                                         // continuations that exact log compares can't rejoin safely.
+                                         char line[8192];
                                          while (fgets(line, sizeof(line), reader))
                                          {
                                              size_t len = std::strlen(line);
@@ -203,6 +208,11 @@ int main(int argc, char *argv[])
     ps2x::ios::prepareEnvironment(argc > 0 ? argv[0] : nullptr);
 #endif
     setupTerminateLogger();
+
+    // CF2 S0: always-on resolved-knob line. After the env loaders (Android
+    // static init, iOS prepareEnvironment above), before every boot path
+    // (replay/test/game) so all modes carry it.
+    ps2x::cf2DumpKnobs();
 
     try
     {
