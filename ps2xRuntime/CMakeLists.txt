@@ -783,6 +783,13 @@ if(PS2X_GAME_CODEGEN_DIR)
     endif()
     target_include_directories(ps2_game_objects PRIVATE "${PS2X_GAME_CODEGEN_DIR}")
     target_link_libraries(ps2_game_objects PUBLIC ps2_runtime)
+    if(PS2X_IS_ANDROID AND NOT MSVC)
+        # IR1-Part2b: same line-tables treatment for the generated EE/game
+        # TUs (same Android -g flag path; same no-codegen-change argument).
+        target_compile_options(ps2_game_objects PRIVATE
+            $<$<OR:$<CONFIG:RelWithDebInfo>,$<CONFIG:Debug>>:-gline-tables-only>
+        )
+    endif()
     target_link_libraries(ps2EntryRunner PRIVATE ps2_game_objects)
 endif()
 
@@ -827,12 +834,13 @@ if(PS2X_VU1_RECOMP_DIR)
         if(MSVC)
             target_compile_options(ps2_vu1gen PRIVATE /FS)
         endif()
-        if(NOT MSVC)
+        if(PS2X_IS_ANDROID AND NOT MSVC)
             # IR1-Part2b: line tables instead of full -g for these giant TUs
-            # on configs that carry -g. Same codegen (-O3 kept; the Odin plays
-            # with microVU and profiling needs only line tables), far less
-            # clang RSS and smaller objects. Sorts after the config -g flag,
-            # which it overrides (last -g* option wins on clang and GCC).
+            # on Android (RelWithDebInfo carries -g). Same codegen (-O3 kept;
+            # the Odin plays with microVU and profiling needs only line
+            # tables), far less clang RSS and smaller objects. Sorts after
+            # the config -g flag, which it overrides (last -g* option wins
+            # on clang and GCC).
             target_compile_options(ps2_vu1gen PRIVATE
                 $<$<OR:$<CONFIG:RelWithDebInfo>,$<CONFIG:Debug>>:-gline-tables-only>
             )
