@@ -878,11 +878,14 @@ if(PS2X_OM1_STAGE)
         # "Config.h" via the target -I dirs, which precede per-source -I).
         COMPILE_OPTIONS "-iquote${PS2X_OM1_STAGE}/armsx2/pcsx2"
         INCLUDE_DIRECTORIES "${PS2X_OM1_STAGE};${PS2X_OM1_STAGE}/armsx2;${PS2X_OM1_STAGE}/armsx2/pcsx2;${PS2X_OM1_STAGE}/armsx2/3rdparty/imgui/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/fmt/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/fast_float/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/rapidjson/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/vixl/include;${PS2X_OM1_STAGE}/armsx2/3rdparty/include;${PS2X_OM1_LIB}/common/include")
-    # SDL3 C-API stubs (gi1_sdl3_stubs.cpp, verbatim from the gi1 branch: the
-    # offline closure pulls the same SDL input/audio/FF objects the GS closure
-    # does, and PCSX2's own libSDL3.a stays excluded — its UIKit classes
-    # collide with the app's SDL2 at launch. Never called on the OM1 path.)
-    add_library(ps2x_gi1_sdl3_stubs STATIC src/lib/gi1_sdl3_stubs.cpp)
+    # SDL3 C-API stubs (gi1_sdl3_stubs.cpp, folded from GI1: the offline closure
+    # pulls the same SDL input/audio/FF objects the GS closure does, and PCSX2's
+    # own libSDL3.a stays excluded — its UIKit classes collide with the app's
+    # SDL2 at launch. Never called on the OM1 path. The NOT TARGET guard keeps
+    # combined GE1+OM1 app builds configuring (both blocks link the same lib).)
+    if(NOT TARGET ps2x_gi1_sdl3_stubs)
+        add_library(ps2x_gi1_sdl3_stubs STATIC src/lib/gi1_sdl3_stubs.cpp)
+    endif()
     target_link_libraries(ps2EntryRunner PRIVATE ps2x_gi1_sdl3_stubs)
 endif()
 if(PS2X_OM1_STAGE AND PS2X_IS_IOS)
