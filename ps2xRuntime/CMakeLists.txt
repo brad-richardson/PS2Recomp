@@ -970,7 +970,7 @@ if(PS2X_OM1_STAGE)
         # script fails the build on any duplicate vs the GE1 archives, any
         # lost export, or any dlsym slot that stops resolving. Non-Apple
         # keeps the direct link (different linker, no GE1 consumer there).
-        add_library(ps2x_om1_stage OBJECT ${PS2X_OM1_SOURCES})
+        add_library(ps2x_om1_stage STATIC ${PS2X_OM1_SOURCES})
         set_target_properties(ps2x_om1_stage PROPERTIES
             CXX_STANDARD 20
             CXX_STANDARD_REQUIRED ON
@@ -1005,9 +1005,9 @@ if(PS2X_OM1_STAGE)
         add_custom_command(
             OUTPUT "${PS2X_OM1_STAGE_CLOSED}" "${PS2X_OM1_CLOSED}"
             COMMAND /bin/bash "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ps2x_om1_close.sh"
-                "${PS2X_OM1_LD}" "${PS2X_OM1_NM}"
+                "${PS2X_OM1_LD}" "${PS2X_OM1_NM}" "${CMAKE_AR}"
                 "${PS2X_OM1_STAGE_CLOSED}" "${PS2X_OM1_CLOSED}" "${PS2X_OM1_STAGE}"
-                $<TARGET_OBJECTS:ps2x_om1_stage> -- ${PS2X_OM1_ARCHIVES} -- ${PS2X_OM1_GE1_CHECK}
+                $<TARGET_FILE:ps2x_om1_stage> -- ${PS2X_OM1_ARCHIVES} -- ${PS2X_OM1_GE1_CHECK}
             DEPENDS ps2x_om1_stage ${PS2X_OM1_ARCHIVES}
                 "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ps2x_om1_close.sh"
             COMMENT "PS2X: closing OM1 island (ld -r + duplicate check)"

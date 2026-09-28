@@ -22,16 +22,19 @@
 #      the GE1 archives (when given: combined GE1+OM1 app builds).
 #
 # Usage:
-#   ps2x_om1_close.sh LD NM STAGE_CLOSED CLOSED TABLES_DIR OBJ... -- ARC... -- GE1ARC...
-# (the GE1 section may be empty, for OM1-only builds; the trailing -- stays).
+#   ps2x_om1_close.sh LD NM AR STAGE_CLOSED CLOSED TABLES_DIR STAGE_LIB -- ARC... -- GE1ARC...
+# The stage arrives as one static lib (extracted below: object-first `ld -r`
+# infers arch+platform, and $<TARGET_FILE> is the one spelling the Xcode
+# generator gets right). The GE1 section may be empty, for OM1-only builds
+# (the trailing -- stays).
 set -euo pipefail
 export LC_ALL=C
 
-if [ $# -lt 7 ]; then
-  echo "usage: $0 LD NM STAGE_CLOSED CLOSED TABLES_DIR OBJ... -- ARC... -- GE1ARC..." >&2
+if [ $# -lt 8 ]; then
+  echo "usage: $0 LD NM AR STAGE_CLOSED CLOSED TABLES_DIR STAGE_LIB -- ARC... -- GE1ARC..." >&2
   exit 2
 fi
-LD=$1; NM=$2; STAGE_CLOSED=$3; CLOSED=$4; TABLES_DIR=$5; shift 5
+LD=$1; NM=$2; AR=$3; STAGE_CLOSED=$4; CLOSED=$5; TABLES_DIR=$6; shift 6
 
 OBJS=(); ARCS=(); GE1=(); SEEN=0
 for a in "$@"; do
@@ -52,10 +55,15 @@ rm -rf "$TMP"; mkdir -p "$TMP"
 # two nm output shapes — `addr TYPE name` and `addr (seg,sect) state name` —
 # both carry the symbol last; awk NF>=2 prints $NF.)
 NOBJ=${#OBJS[@]}; NARC=${#ARCS[@]}; NGE1=${#GE1[@]}
-echo "IB3 close: $NOBJ stage objects, $NARC OM1 archives, $NGE1 GE1 archives"
-if [ "$NOBJ" = 0 ] || [ "$NARC" = 0 ]; then echo "$0: empty objects or archives" >&2; exit 2; fi
+echo "IB3 close: $NOBJ stage libs, $NARC OM1 archives, $NGE1 GE1 archives"
+if [ "$NOBJ" != 1 ] || [ "$NARC" = 0 ]; then echo "$0: want 1 stage lib + OM1 archives" >&2; exit 2; fi
+STAGE_LIB=${OBJS[0]}
+case $STAGE_LIB in
+  /*) ;;
+  *) STAGE_LIB=$PWD/$STAGE_LIB;;
+esac
 
-"$NM" -g --defined-only "${OBJS[@]}" 2>/dev/null | awk 'NF>=2{print $NF}' | sort -u > "$TMP/stage-defs.txt"
+"$NM" -g --defined-only "$STAGE_LIB" 2>/dev/null | awk 'NF>=2{print $NF}' | sort -u > "$TMP/stage-defs.txt"
 "$NM" -g --defined-only "${ARCS[@]}" 2>/dev/null | awk 'NF>=2{print $NF}' | sort -u > "$TMP/member-defs.txt"
 comm -12 "$TMP/stage-defs.txt" "$TMP/member-defs.txt" > "$TMP/dups.txt"
 comm -23 "$TMP/stage-defs.txt" "$TMP/member-defs.txt" > "$TMP/keep1.txt"
@@ -64,7 +72,10 @@ echo "IB3 close: $(wc -l < "$TMP/stage-defs.txt" | tr -d ' ') stage defs, $NDUP 
 
 # Step 1: close the stage, demoting the shared definitions (the archive side
 # satisfies those references itself; the code is header-identical).
-"$LD" -r -o "$STAGE_CLOSED" "${OBJS[@]}" -exported_symbols_list "$TMP/keep1.txt"
+mkdir -p "$TMP/stage-obj"
+(cd "$TMP/stage-obj" && "$AR" x "$STAGE_LIB")
+STAGE_OBJS=("$TMP"/stage-obj/*.o)
+"$LD" -r -o "$STAGE_CLOSED" "${STAGE_OBJS[@]}" -exported_symbols_list "$TMP/keep1.txt"
 
 # Step 2: the API surface. The runtime calls exactly the 5 ps2x_microvu_* C
 # functions; the tables dlsym their _om1* slot names at init. Both sets are
