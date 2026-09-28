@@ -2,6 +2,7 @@
 // for iOS (PS2X_IS_IOS in ps2xRuntime/CMakeLists.txt).
 #include "ps2_ios_runtime.h"
 #include "ps2_env_file.h"
+#include "ps2_record_env.h"
 
 // SDL_MAIN_HANDLED: no main->SDL_main rename here (only main.cpp owns main).
 #define SDL_MAIN_HANDLED
