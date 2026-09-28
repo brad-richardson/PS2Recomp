@@ -1201,7 +1201,12 @@ if(PS2X_IS_IOS)
         # excluded from PS2X_GE1_ARCHIVES (its UIKit classes collide with the
         # app's SDL2), so these definitions satisfy the SDL input/audio/FF
         # objects libPCSX2.a pulls in. Never called on the GS path.
-        add_library(ps2x_gi1_sdl3_stubs STATIC src/lib/gi1_sdl3_stubs.cpp)
+        # IB2: NOT TARGET guard (mirrors the OM1 block above) — IB2 is the
+        # first combined GE1+OM1 configure, and the OM1 block defines this
+        # same lib first.
+        if(NOT TARGET ps2x_gi1_sdl3_stubs)
+            add_library(ps2x_gi1_sdl3_stubs STATIC src/lib/gi1_sdl3_stubs.cpp)
+        endif()
         target_link_libraries(ps2EntryRunner PRIVATE ps2x_gi1_sdl3_stubs)
         # PCSX2 fonts at the bundle top level (flat iOS layout, found via
         # GetOverridableResourcePath("fonts/...")): Roboto-Regular (mapped by
