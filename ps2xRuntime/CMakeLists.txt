@@ -890,6 +890,7 @@ if(PS2X_OM1_STAGE AND PS2X_IS_IOS)
     # (same pulled universe as the GS closure: Metal GS, cubeb audio, USB).
     target_link_libraries(ps2EntryRunner PRIVATE
         "-framework Metal"
+        "-framework MetalFX"
         "-framework MetalKit"
         "-framework QuartzCore"
         "-framework CoreVideo"
