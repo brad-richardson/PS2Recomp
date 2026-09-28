@@ -62,6 +62,7 @@ case $STAGE_LIB in
   /*) ;;
   *) STAGE_LIB=$PWD/$STAGE_LIB;;
 esac
+if [ ! -f "$STAGE_LIB" ]; then echo "$0: stage lib missing: $STAGE_LIB" >&2; exit 2; fi
 
 "$NM" -g --defined-only "$STAGE_LIB" 2>/dev/null | awk 'NF>=2{print $NF}' | sort -u > "$TMP/stage-defs.txt"
 "$NM" -g --defined-only "${ARCS[@]}" 2>/dev/null | awk 'NF>=2{print $NF}' | sort -u > "$TMP/member-defs.txt"

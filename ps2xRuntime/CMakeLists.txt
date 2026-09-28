@@ -1002,12 +1002,25 @@ if(PS2X_OM1_STAGE)
         endif()
         set(PS2X_OM1_STAGE_CLOSED "${CMAKE_CURRENT_BINARY_DIR}/om1-close/stage_closed.o")
         set(PS2X_OM1_CLOSED "${CMAKE_CURRENT_BINARY_DIR}/om1-close/om1_closed.o")
+        # $<TARGET_FILE:> under the Xcode generator spells the product with
+        # an unexpanded $(EFFECTIVE_PLATFORM_NAME) that VERBATIM then
+        # shell-escapes into a nonexistent path, so spell the product out:
+        # single-config Release + the SDK we configured for pins it.
+        if(CMAKE_OSX_SYSROOT MATCHES "iphonesimulator")
+            set(PS2X_OM1_EPN "-iphonesimulator")
+        elseif(CMAKE_OSX_SYSROOT MATCHES "iphoneos")
+            set(PS2X_OM1_EPN "-iphoneos")
+        else()
+            set(PS2X_OM1_EPN "")
+        endif()
+        set(PS2X_OM1_STAGE_LIB
+            "${CMAKE_CURRENT_BINARY_DIR}/Release${PS2X_OM1_EPN}/libps2x_om1_stage.a")
         add_custom_command(
             OUTPUT "${PS2X_OM1_STAGE_CLOSED}" "${PS2X_OM1_CLOSED}"
             COMMAND /bin/bash "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ps2x_om1_close.sh"
                 "${PS2X_OM1_LD}" "${PS2X_OM1_NM}" "${CMAKE_AR}"
                 "${PS2X_OM1_STAGE_CLOSED}" "${PS2X_OM1_CLOSED}" "${PS2X_OM1_STAGE}"
-                $<TARGET_FILE:ps2x_om1_stage> -- ${PS2X_OM1_ARCHIVES} -- ${PS2X_OM1_GE1_CHECK}
+                "${PS2X_OM1_STAGE_LIB}" -- ${PS2X_OM1_ARCHIVES} -- ${PS2X_OM1_GE1_CHECK}
             DEPENDS ps2x_om1_stage ${PS2X_OM1_ARCHIVES}
                 "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ps2x_om1_close.sh"
             COMMENT "PS2X: closing OM1 island (ld -r + duplicate check)"
@@ -1189,6 +1202,9 @@ if(PS2X_IS_IOS)
     )
     # IP1: universal device family so iPadOS runs full screen (was: Xcode default 1, iPhone compat box).
     set_target_properties(ps2EntryRunner PROPERTIES XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
+    # IB3 (AirPods): AVAudioSession lives here; the OM1/GI1 blocks link it
+    # too when they are on (duplicate -framework flags are harmless).
+    target_link_libraries(ps2EntryRunner PRIVATE "-framework AVFoundation")
     # GI1: statically-linked PCSX2 GS (Metal) for iOS. PS2X_GE1_IOS_BUILD is
     # the ios-device or ios-sim build dir (matching this app's SDK) holding
     # libge1_gs.a + libPCSX2.a + dep archives; PS2X_GE1_PCSX2_ROOT is the
