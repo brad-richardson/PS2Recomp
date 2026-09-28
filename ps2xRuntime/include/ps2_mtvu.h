@@ -423,12 +423,30 @@ namespace ps2_mtvu
             return w;
         }
 
+        // MU2 counter: VIF1 input bytes + UNPACK commands per summary window
+        // (logged only, never hashed: det-neutral). The unit thread (or the
+        // EE, on the inline path) accumulates; the summary exchanges.
+        inline std::atomic<uint64_t> &vif1Bytes()
+        {
+            static std::atomic<uint64_t> v{0};
+            return v;
+        }
+        inline std::atomic<uint64_t> &vif1Unpacks()
+        {
+            static std::atomic<uint64_t> v{0};
+            return v;
+        }
+
         inline void threadedSummary(uint64_t tick)
         {
             Worker &w = worker();
-            std::fprintf(stderr, "[mtvu] threaded tick=%llu lag=%d jobs=%llu violations=%llu waits:",
+            const uint64_t vif1b = vif1Bytes().exchange(0u, std::memory_order_relaxed);
+            const uint64_t unpacks = vif1Unpacks().exchange(0u, std::memory_order_relaxed);
+            std::fprintf(stderr, "[mtvu] threaded tick=%llu lag=%d jobs=%llu vif1b=%llu unpacks=%llu violations=%llu waits:",
                          static_cast<unsigned long long>(tick), g_lag.load(std::memory_order_relaxed) ? 1 : 0,
-                         static_cast<unsigned long long>(w.jobs), static_cast<unsigned long long>(w.violationsTotal));
+                         static_cast<unsigned long long>(w.jobs),
+                         static_cast<unsigned long long>(vif1b), static_cast<unsigned long long>(unpacks),
+                         static_cast<unsigned long long>(w.violationsTotal));
             for (size_t i = 0; i < w.waits.size(); ++i)
                 if (w.waits[i] != 0u)
                     std::fprintf(stderr, " %s=%llu/%.1fms", reasonName(static_cast<Reason>(i)),
@@ -520,8 +538,11 @@ namespace ps2_mtvu
         inline void summary()
         {
             Census &c = census();
-            std::fprintf(stderr, "[mtvu] census tick=%llu jobs=%llu fifo=%llu unit_ms=%.1f snap_bytes=%llu snap_ms=%.2f violations=%llu hits:",
+            const uint64_t vif1b = vif1Bytes().exchange(0u, std::memory_order_relaxed);
+            const uint64_t unpacks = vif1Unpacks().exchange(0u, std::memory_order_relaxed);
+            std::fprintf(stderr, "[mtvu] census tick=%llu jobs=%llu vif1b=%llu unpacks=%llu fifo=%llu unit_ms=%.1f snap_bytes=%llu snap_ms=%.2f violations=%llu hits:",
                          static_cast<unsigned long long>(c.tick), static_cast<unsigned long long>(c.jobs),
+                         static_cast<unsigned long long>(vif1b), static_cast<unsigned long long>(unpacks),
                          static_cast<unsigned long long>(c.fifoJobs), c.unitNs / 1e6,
                          static_cast<unsigned long long>(c.snapshotBytes), c.snapshotNs / 1e6,
                          static_cast<unsigned long long>(c.violationsTotal));
@@ -646,6 +667,17 @@ namespace ps2_mtvu
         job.bytes = bytes;
         detail::noteEeThread();
         detail::worker().submit(std::move(job));
+    }
+
+    // MU2 counter: VIF1 input bytes (per Impl call) + UNPACK commands. Two
+    // relaxed adds; the [mtvu] summary exchanges per window. Logged, not hashed.
+    inline void noteVif1Bytes(uint32_t n)
+    {
+        detail::vif1Bytes().fetch_add(n, std::memory_order_relaxed);
+    }
+    inline void noteVif1Unpack()
+    {
+        detail::vif1Unpacks().fetch_add(1u, std::memory_order_relaxed);
     }
 
     // R1: a masked CSR read touches the priv block without a sync.

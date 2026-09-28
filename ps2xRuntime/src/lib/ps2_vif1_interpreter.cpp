@@ -1,5 +1,6 @@
 // Based on Blackline Interactive implementation
 #include "ps2_rr1_alpha_tap.h"
+#include "ps2_mtvu.h"
 #include "runtime/ps2_memory.h"
 #include <bit>
 #include <cstdio>
@@ -442,6 +443,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 
 void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
 {
+    ps2_mtvu::noteVif1Bytes(sizeBytes); // MU2 counter: det-neutral, logged only
 
     uint32_t pos = 0;
 
@@ -840,6 +842,7 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
         }
         else if ((opcode & 0x60) == 0x60)
         {
+            ps2_mtvu::noteVif1Unpack(); // MU2 counter: det-neutral, logged only
             uint8_t vn = (opcode >> 2) & 0x3;
             uint8_t vl = opcode & 0x3;
             const bool maskEnable = (opcode & 0x10u) != 0u;
