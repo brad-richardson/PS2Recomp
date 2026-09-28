@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <string>
@@ -304,11 +305,16 @@ std::string sampleLinuxDevice()
         d.hasThermal = true;
         d.thermal = thermal;
     }
-    // Prime-zone temperature: the sysfs zone typed cpu-1-1-1 (Odin 3 prime
-    // core, same source as odin_run.py's pre-launch check), millidegrees C.
+    // Prime-zone temperature: the best-ranked sysfs thermal zone
+    // (primeZoneRank; cpu-1-1-1 first, the Odin 3 prime core, same source
+    // as odin_run.py's pre-launch check), millidegrees C. thermal_zone*
+    // only (cooling_device* entries share the dir and wasted scan slots),
+    // 256 cap (the Odin carries 116 entries; 64 never reached zone 28).
     if (DIR *dir = ::opendir("/sys/class/thermal"))
     {
         int zones = 0;
+        int bestRank = -1;
+        char bestZone[64] = {};
         for (;;)
         {
             const dirent *de = ::readdir(dir);
@@ -316,7 +322,9 @@ std::string sampleLinuxDevice()
                 break;
             if (de->d_name[0] == '.')
                 continue;
-            if (++zones > 64)
+            if (std::strncmp(de->d_name, "thermal_zone", 12) != 0)
+                continue;
+            if (++zones > 256)
                 break;
             char typePath[160];
             if (std::snprintf(typePath, sizeof(typePath), "/sys/class/thermal/%s/type", de->d_name) >=
@@ -324,25 +332,42 @@ std::string sampleLinuxDevice()
                 continue;
             char type[64];
             size_t typeLen = 0;
-            if (!perfReadSmallFile(typePath, type, sizeof(type), typeLen) ||
-                !perfTrimEquals(type, typeLen, "cpu-1-1-1"))
+            if (!perfReadSmallFile(typePath, type, sizeof(type), typeLen))
                 continue;
-            char tempPath[160];
-            if (std::snprintf(tempPath, sizeof(tempPath), "/sys/class/thermal/%s/temp", de->d_name) >=
-                static_cast<int>(sizeof(tempPath)))
+            size_t begin = 0;
+            while (begin < typeLen && (type[begin] == ' ' || type[begin] == '\t' || type[begin] == '\n' ||
+                                       type[begin] == '\r'))
+                ++begin;
+            size_t end = typeLen;
+            while (end > begin && (type[end - 1] == ' ' || type[end - 1] == '\t' || type[end - 1] == '\n' ||
+                                   type[end - 1] == '\r'))
+                --end;
+            const int rank = primeZoneRank(std::string_view(type + begin, end - begin));
+            if (rank < 0 || (bestRank >= 0 && rank >= bestRank))
+                continue;
+            bestRank = rank;
+            std::snprintf(bestZone, sizeof(bestZone), "%s", de->d_name);
+            if (bestRank == 0)
                 break;
-            char temp[32];
-            size_t tempLen = 0;
-            long milli = 0;
-            if (perfReadSmallFile(tempPath, temp, sizeof(temp), tempLen) &&
-                parseSysfsLong(std::string_view(temp, tempLen), milli))
-            {
-                d.hasPrimeC = true;
-                d.primeC = static_cast<double>(milli) / 1000.0;
-            }
-            break;
         }
         ::closedir(dir);
+        if (bestRank >= 0)
+        {
+            char tempPath[160];
+            if (std::snprintf(tempPath, sizeof(tempPath), "/sys/class/thermal/%s/temp", bestZone) <
+                static_cast<int>(sizeof(tempPath)))
+            {
+                char temp[32];
+                size_t tempLen = 0;
+                long milli = 0;
+                if (perfReadSmallFile(tempPath, temp, sizeof(temp), tempLen) &&
+                    parseSysfsLong(std::string_view(temp, tempLen), milli))
+                {
+                    d.hasPrimeC = true;
+                    d.primeC = static_cast<double>(milli) / 1000.0;
+                }
+            }
+        }
     }
     {
         char cap[32];

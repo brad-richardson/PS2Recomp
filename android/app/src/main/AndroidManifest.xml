@@ -3,7 +3,7 @@
 
     <application
         android:label="PS2 Recomp"
-        android:hasCode="false"
+        android:hasCode="true"
         android:isGame="true">
 
         <!-- N11: allow simpleperf from the shell on release builds (stays non-debuggable) -->

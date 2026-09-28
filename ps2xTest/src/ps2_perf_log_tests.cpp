@@ -283,5 +283,23 @@ void register_ps2_perf_log_tests()
             // (This host-suite binary never runs on Android.)
             t.Equals(ps2x::perflog::perfThermalStatusForTest(), -1, "desktop thermal na"); });
 #endif
+
+        tc.Run("primeZoneRank prefers cpu-1-1-1, then siblings", [](TestCase &t)
+               {
+            t.Equals(ps2x::perflog::primeZoneRank("cpu-1-1-1"), 0, "prime first");
+            t.Equals(ps2x::perflog::primeZoneRank("cpu-1-1-0"), 1, "sibling 1");
+            t.Equals(ps2x::perflog::primeZoneRank("cpu-1-0-1"), 2, "sibling 2");
+            t.Equals(ps2x::perflog::primeZoneRank("cpu-1-0-0"), 3, "sibling 3");
+            t.Equals(ps2x::perflog::primeZoneRank("cpuss-1-0"), 4, "cluster agg 0");
+            t.Equals(ps2x::perflog::primeZoneRank("cpuss-1-1"), 5, "cluster agg 1"); });
+
+        tc.Run("primeZoneRank rejects non-prime zones", [](TestCase &t)
+               {
+            t.Equals(ps2x::perflog::primeZoneRank("cpu-0-0-0"), -1, "little cluster");
+            t.Equals(ps2x::perflog::primeZoneRank("gpuss-0"), -1, "gpu");
+            t.Equals(ps2x::perflog::primeZoneRank("aoss-0"), -1, "aoss");
+            t.Equals(ps2x::perflog::primeZoneRank("vbat"), -1, "battery");
+            t.Equals(ps2x::perflog::primeZoneRank(""), -1, "empty");
+            t.Equals(ps2x::perflog::primeZoneRank("cpu-1-1-1 "), -1, "untrimmed (caller trims)"); });
     });
 }

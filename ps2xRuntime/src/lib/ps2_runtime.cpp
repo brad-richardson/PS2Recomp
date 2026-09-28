@@ -796,9 +796,13 @@ void dumpPresentationFrame(const uint8_t *rgba,
                            << " preferred=" << (preferred ? 1 : 0) << " fallback=" << (fallback ? 1 : 0)
                            << " fnv1a=" << std::hex << hash << std::dec << " smode2=0x" << std::hex << smode2
                            << " pmode=0x" << pmode << " display1=0x" << display1 << " display2=0x" << display2 << " dispfb1=0x" << dispfb1 << " dispfb2=0x" << dispfb2 << std::dec << "\n";
-    std::cerr << "[frame:dump] seq=" << seq << " tick=" << tick << " size=" << width << "x" << height
-              << " fbp=" << displayFbp << "/" << sourceFbp << " fallback=" << (fallback ? 1 : 0) << " fnv1a="
-              << std::hex << hash << std::dec << std::endl;
+    // UX1: build then emit once (was a std::cerr chain; spliced against
+    // [rb2] in burst legs). Bytes identical.
+    std::ostringstream dumpLine;
+    dumpLine << "[frame:dump] seq=" << seq << " tick=" << tick << " size=" << width << "x" << height
+             << " fbp=" << displayFbp << "/" << sourceFbp << " fallback=" << (fallback ? 1 : 0) << " fnv1a="
+             << std::hex << hash;
+    ps2_log::emitLine(dumpLine.str());
 }
 } // namespace
 

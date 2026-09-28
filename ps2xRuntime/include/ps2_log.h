@@ -2,6 +2,7 @@
 #define PS2_LOG_H
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
@@ -117,6 +118,31 @@ inline void clear_runtime_log_entries()
     runtime_log_entries().clear();
 }
 
+// UX1: the one line-buffered diagnostic writer. Multi-fragment lines
+// (std::cerr << a << b << ... chains from several threads) interleave
+// mid-line on the way to logcat: 59 % of [rb2] lines spliced on the Odin
+// (RB2 Part 2). emitLine takes one complete line (no trailing newline),
+// and emits it under a process-wide mutex as a single fwrite + fflush:
+// exactly one write() per line on unbuffered stderr (Android), one
+// buffer-append + flush on buffered stderr (hosts; complete lines stay
+// whole in order). Same stdio channel as every other stderr writer, so
+// log order is preserved (a raw write(2) would jump ahead of buffered
+// content). Diagnostic-gated call sites only: one small allocation per
+// emitted line, zero cost when the knob is off.
+inline std::mutex &diagLineMutex()
+{
+    static std::mutex m;
+    return m;
+}
+
+inline void emitLine(const std::string &line)
+{
+    std::lock_guard<std::mutex> lock(diagLineMutex());
+    const std::string out = line + '\n';
+    std::fwrite(out.data(), 1, out.size(), stderr);
+    std::fflush(stderr);
+}
+
 // P1w no-silent-drops census. Every rejected or unhandled path emits one
 // "[drop] <site> <reason> <args>" line on stderr, ON by default in every
 // build including the runner; a non-empty PS2X_DROP_SILENCE mutes. The env
@@ -190,7 +216,12 @@ inline void emitDropTo(std::ostream &out,
 
 inline void emitDrop(const std::string &site, const std::string &reason, const std::string &args = "")
 {
-    emitDropTo(std::cerr, site, reason, args);
+    if (dropsMuted())
+    {
+        return;
+    }
+    emitLine(formatDropLine(site, reason, args));
+    recordDropCensus(site, reason);
 }
 }
 

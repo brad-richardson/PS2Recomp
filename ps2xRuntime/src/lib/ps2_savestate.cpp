@@ -2,6 +2,7 @@
 // PS2Memory / PS2Runtime / VU / GS / SND sections. See ps2_savestate.h.
 
 #include "runtime/ps2_savestate.h"
+#include "ps2_android_toast.h"
 #include "ps2_mtvu.h"
 #include "ps2_microvu.h"
 #include "ps2_savestate_internal.h"
@@ -1235,10 +1236,17 @@ namespace ps2_savestate
 
     void noteQuickStatus(const std::string &message)
     {
-        std::lock_guard<std::mutex> lock(quickStatusStore().mutex);
-        quickStatusStore().message = message;
-        quickStatusStore().setNs = steadyNowNs();
-        quickStatusStore().have = true;
+        {
+            std::lock_guard<std::mutex> lock(quickStatusStore().mutex);
+            quickStatusStore().message = message;
+            quickStatusStore().setNs = steadyNowNs();
+            quickStatusStore().have = true;
+        }
+        // UX1: mirror every result on an Android Toast (the GL status line
+        // is skipped in the play present mode). Post-and-return outside the
+        // lock: the Toast worker attaches its own thread; the caller never
+        // blocks. Compiled out everywhere else (ps2_android_toast.h).
+        ps2x::postQuickStatusToast(message);
     }
 
     bool quickStatus(std::string &message, uint64_t &ageMs)

@@ -54,6 +54,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_env_file_tests.cpp
     src/ps2_android_env_tests.cpp
     src/ps2_knobs_tests.cpp
+    src/ps2_log_tests.cpp
     src/ps2_perf_log_tests.cpp
     src/ps2_thread_affinity_tests.cpp
     src/ps2_runtime_io_tests.cpp

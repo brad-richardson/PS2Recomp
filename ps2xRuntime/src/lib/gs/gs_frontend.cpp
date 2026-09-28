@@ -2866,12 +2866,16 @@ void GS::snapshotLaggedReadback()
     static std::atomic<uint32_t> rb2SnapLog{0};
     if (rb2SnapLog.fetch_add(1u, std::memory_order_relaxed) < rb2LogMax())
     {
-        std::cerr << "[rb2] snap j=" << idx << " bytes=" << n << " trunc=" << (truncated ? 1 : 0)
-                  << " head=";
+        // UX1: build then emit once (was a std::cerr chain: the GS worker
+        // and EE threads spliced 59 % of [rb2] lines on the Odin). Bytes
+        // identical: same insertions, newline via emitLine.
+        std::ostringstream rb2Line;
+        rb2Line << "[rb2] snap j=" << idx << " bytes=" << n << " trunc=" << (truncated ? 1 : 0)
+                << " head=";
         const uint32_t headN = (n < 8u) ? n : 8u;
         for (uint32_t i = 0u; i < headN; ++i)
-            std::cerr << std::hex << static_cast<uint32_t>(buf[i]) << (i + 1u < headN ? ":" : "");
-        std::cerr << std::dec << std::endl;
+            rb2Line << std::hex << static_cast<uint32_t>(buf[i]) << (i + 1u < headN ? ":" : "");
+        ps2_log::emitLine(rb2Line.str());
     }
 }
 
@@ -2908,9 +2912,10 @@ uint32_t GS::serveLaggedReadback(uint8_t *dst, uint32_t maxBytes, uint64_t &spin
             {
                 timedOut = true;
                 m_rb2Timeouts.fetch_add(1u, std::memory_order_relaxed);
-                std::cerr << "[rb2] serve k=" << k << " TIMEOUT waiting for snap " << want
-                          << " (snaps=" << m_rb2Snaps.load(std::memory_order_relaxed) << ")"
-                          << std::endl;
+                std::ostringstream rb2Line;
+                rb2Line << "[rb2] serve k=" << k << " TIMEOUT waiting for snap " << want
+                        << " (snaps=" << m_rb2Snaps.load(std::memory_order_relaxed) << ")";
+                ps2_log::emitLine(rb2Line.str());
                 return 0u;
             }
             std::this_thread::yield();

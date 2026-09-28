@@ -14,8 +14,8 @@
 // UIDevice/ProcessInfo state (thermal=<0-3> lpm=<0/1> batt=<0-100> chg=<0/1>)
 // or Android state (thermal=<0-6 AThermal> prime=<C> batt=<0-100> ac=<0/1>,
 // each "na" when unreadable); "na" elsewhere. The Android prime zone is the
-// sysfs thermal zone of type cpu-1-1-1 (the Odin 3 prime core, same source
-// as odin_run.py's pre-launch check).
+// best-ranked sysfs thermal zone by primeZoneRank (cpu-1-1-1 first: the Odin
+// 3 prime core, same source as odin_run.py's pre-launch check).
 //
 // This header holds the pure parts (tested by ps2_perf_log_tests.cpp); the
 // file I/O and platform snapshots live in src/lib/ps2_perf_log.cpp. poll()
@@ -214,12 +214,32 @@ inline bool parseSysfsLong(std::string_view text, long &out)
     return true;
 }
 
+// UX1: prime-zone fallback rank over a trimmed sysfs type name. 0 is best
+// (cpu-1-1-1, the Odin 3 prime core), higher is worse, -1 is no match. The
+// Odin carries 116 /sys/class/thermal entries and cpu-1-1-1 sits at
+// readdir position 109, past PL1's 64-entry cap (cooling_device* entries
+// included) — the sampler never reached it, so prime read "na" on every
+// line. The sampler now scans thermal_zone* only with a 256 cap and takes
+// the best rank here; siblings cover a renamed/revved sensor.
+inline int primeZoneRank(std::string_view trimmedType)
+{
+    static constexpr const char *kOrder[] = {
+        "cpu-1-1-1", "cpu-1-1-0", "cpu-1-0-1", "cpu-1-0-0", "cpuss-1-0", "cpuss-1-1",
+    };
+    for (size_t i = 0; i < sizeof(kOrder) / sizeof(kOrder[0]); ++i)
+    {
+        if (trimmedType == kOrder[i])
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
 struct AndroidDevice
 {
     bool hasThermal = false;
     int thermal = 0; // AThermal 0-6 (NONE..SHUTDOWN)
     bool hasPrimeC = false;
-    double primeC = 0.0; // cpu-1-1-1 zone, degrees C
+    double primeC = 0.0; // best-ranked prime zone (primeZoneRank), degrees C
     bool hasBatt = false;
     int batt = 0; // 0-100 %
     bool hasAc = false;

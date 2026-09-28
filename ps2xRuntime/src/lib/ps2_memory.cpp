@@ -2091,18 +2091,22 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             }
                             if (rb2Pix == 0u)
                                 rb2Min = 0u;
-                            std::cerr << "[rb2] serve madr=0x" << std::hex << madr << std::dec
-                                      << " qwc=" << qwc << " avail=" << rb2Avail << " served=" << rb2Done
-                                      << " depth=" << ((vif1ReverseDmaModeLocal() == 3) ? GS::kRb2LagVDepth : 1u)
-                                      << " spin_us=" << rb2SpinUs << " timeout=" << (rb2Timeout ? 1 : 0)
-                                      << " u24min=0x" << std::hex << rb2Min << " u24mean=0x"
-                                      << (rb2Pix ? (rb2Sum / rb2Pix) : 0u) << " u24max=0x" << rb2Max
-                                      << std::dec << " head=";
+                            // UX1: build then emit once (was a std::cerr chain;
+                            // see the snap side). Bytes identical.
+                            std::ostringstream rb2Line;
+                            rb2Line << "[rb2] serve madr=0x" << std::hex << madr << std::dec
+                                    << " qwc=" << qwc << " avail=" << rb2Avail << " served=" << rb2Done
+                                    << " depth="
+                                    << ((vif1ReverseDmaModeLocal() == 3) ? GS::kRb2LagVDepth : 1u)
+                                    << " spin_us=" << rb2SpinUs << " timeout=" << (rb2Timeout ? 1 : 0)
+                                    << " u24min=0x" << std::hex << rb2Min << " u24mean=0x"
+                                    << (rb2Pix ? (rb2Sum / rb2Pix) : 0u) << " u24max=0x" << rb2Max
+                                    << std::dec << " head=";
                             const uint32_t rb2HeadN = (rb2Done < 8u) ? rb2Done : 8u;
                             for (uint32_t rb2I = 0u; rb2I < rb2HeadN; ++rb2I)
-                                std::cerr << std::hex << static_cast<uint32_t>(rb2Buf[rb2I])
-                                          << (rb2I + 1u < rb2HeadN ? ":" : "");
-                            std::cerr << std::dec << std::endl;
+                                rb2Line << std::hex << static_cast<uint32_t>(rb2Buf[rb2I])
+                                        << (rb2I + 1u < rb2HeadN ? ":" : "");
+                            ps2_log::emitLine(rb2Line.str());
                         }
                     }
                     const uint32_t rb2QwGot = rb2Done / 16u;

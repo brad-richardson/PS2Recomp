@@ -1083,7 +1083,9 @@ if(PS2X_IS_VITA)
 endif()
 
 if(PS2X_IS_ANDROID)
-    target_sources(ps2EntryRunner PRIVATE src/lib/ps2_android_runtime.cpp)
+    target_sources(ps2EntryRunner PRIVATE src/lib/ps2_android_runtime.cpp src/lib/ps2_android_toast.cpp)
+    # UX1: the toast TU reads raylib's android_app like ps2_runtime.cpp (VK1).
+    target_include_directories(ps2EntryRunner PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
 endif()
 
 if(PS2X_IS_IOS)
