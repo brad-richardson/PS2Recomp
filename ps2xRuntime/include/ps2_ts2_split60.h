@@ -86,6 +86,23 @@ struct State
     };
     RiderSlot riders[kRiderSlots];
     std::unordered_map<uint32_t, PredictorIdentity> riderOverflow;
+    // HL1: halfLoad runs on every guest 32-bit load, so its findThread scan
+    // per load is the #1 GameThread cost. This cache holds the current guest
+    // thread's record and refreshes only when the scheduler switches guest
+    // threads (observed via the key check) or getThread() inserts. Slot
+    // addresses are fixed, and unordered_map never invalidates pointers on
+    // insert/rehash (nothing erases), so the cached pointer is exact.
+    uint32_t cachedKey = 0;
+    ThreadData *cachedData = nullptr;
+    bool cachedValid = false;
+    // HL1: diagnostic counters (PS2X_TS2_HALFLOAD_COUNT=1, default off). A
+    // plain env knob, not TS2_DIAG, so instrumented builds work where diag
+    // taps compile out. Same EE-thread-only owner as the rest of State.
+    uint64_t halfLoadCalls = 0;
+    uint64_t halfLoadActive = 0;
+    uint64_t halfLoadConverted = 0;
+    uint64_t halfLoadRefreshes = 0;
+    uint64_t halfLoadLastBin = 0;
 #if PS2X_ENABLE_TS2_DIAG
     uint64_t ts3CaseCounts[7] = {};
     uint64_t ts3CbCounts[5] = {};
@@ -103,6 +120,7 @@ struct State
     ThreadData &getThread(uint32_t key) noexcept
     {
         if (ThreadData *d = findThread(key)) return *d;
+        cachedValid = false; // the insert below may create the cached key
         for (uint32_t i = 0; i < kThreadSlots; ++i)
         {
             if (threads[i].used) continue;
@@ -169,6 +187,26 @@ inline bool fixUnconverted() noexcept
         return !(v && v[0] == '1' && v[1] == '\0');
     }();
     return on;
+}
+
+inline bool countEnabled() noexcept
+{
+    static const bool on = [] {
+        const char *s = std::getenv("PS2X_TS2_HALFLOAD_COUNT");
+        return s && s[0] == '1' && s[1] == '\0';
+    }();
+    return on;
+}
+
+// HL1: PS2X_TS2_HL1_CACHE=0 restores the legacy per-load findThread scan
+// (default on). Exact either way; the knob exists for A/B and fallback.
+inline bool cacheDisabled() noexcept
+{
+    static const bool off = [] {
+        const char *s = std::getenv("PS2X_TS2_HL1_CACHE");
+        return s && s[0] == '0' && s[1] == '\0';
+    }();
+    return off;
 }
 
 inline uint32_t read32(const uint8_t *ram, uint32_t address) noexcept
@@ -292,8 +330,25 @@ inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
     if (!halfMode()) return bits;
     State &s = g_state;
     if (s.guestInterrupt) return bits;
-    const ThreadData *td = s.findThread(s.guestThread);
+    if (countEnabled()) ++s.halfLoadCalls;
+    const ThreadData *td;
+    if (cacheDisabled())
+    {
+        td = s.findThread(s.guestThread);
+    }
+    else
+    {
+        if (!s.cachedValid || s.cachedKey != s.guestThread)
+        {
+            s.cachedData = s.findThread(s.guestThread);
+            s.cachedKey = s.guestThread;
+            s.cachedValid = true;
+            if (countEnabled()) ++s.halfLoadRefreshes;
+        }
+        td = s.cachedData;
+    }
     if (td == nullptr || !td->ctx.active) return bits;
+    if (countEnabled()) ++s.halfLoadActive;
     // TS3: cases 4/5 reach converted sites through the shared 121aa0/113648
     // helpers. They run once at full H, so their loads keep stock values.
     if (fixUnconverted() && td->ctx.selectorCase >= 3u) return bits;
@@ -302,23 +357,45 @@ inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
     // predictor's call to the shared 1139a0 helper retains stock values.
     // (A missing helper record reads false, as the old map's operator[] did.)
     const bool helper = td->helper;
+    uint32_t out = bits;
     switch (pc)
     {
-    case 0x113808u: if (address == 0x49b494u) return 0x3c088889u; break;
-    case 0x113860u: if (address == 0x49b498u) return 0x3ba3d70au; break;
-    case 0x113888u: if (address == 0x49b49cu) return 0x42efffffu; break;
-    case 0x1139a4u: if (address == 0x49b4a0u && !helper) return 0x3c088889u; break;
-    case 0x1139c4u: if (address == 0x49b4a4u && !helper) return 0xbadaa2bdu; break;
-    case 0x1139dcu: if (address == 0x49b4a8u && !helper) return 0xc17d5556u; break;
-    case 0x113a0cu: if (address == 0x49b4acu && !helper) return 0xc0e2aaabu; break;
-    case 0x121e64u: if (address == 0x49b828u) return 0x3c088889u; break;
-    case 0x137d68u: if (address == 0x49be9cu) return 0x3c088889u; break;
-    case 0x139a48u: if (address == 0x49bf1cu) return 0x3c088889u; break;
-    case 0x13d8e4u: if (address == 0x49c08cu) return 0x3c088889u; break;
-    case 0x13ee80u: if (address == 0x49c12cu) return 0x3c088889u; break;
+    case 0x113808u: if (address == 0x49b494u) out = 0x3c088889u; break;
+    case 0x113860u: if (address == 0x49b498u) out = 0x3ba3d70au; break;
+    case 0x113888u: if (address == 0x49b49cu) out = 0x42efffffu; break;
+    case 0x1139a4u: if (address == 0x49b4a0u && !helper) out = 0x3c088889u; break;
+    case 0x1139c4u: if (address == 0x49b4a4u && !helper) out = 0xbadaa2bdu; break;
+    case 0x1139dcu: if (address == 0x49b4a8u && !helper) out = 0xc17d5556u; break;
+    case 0x113a0cu: if (address == 0x49b4acu && !helper) out = 0xc0e2aaabu; break;
+    case 0x121e64u: if (address == 0x49b828u) out = 0x3c088889u; break;
+    case 0x137d68u: if (address == 0x49be9cu) out = 0x3c088889u; break;
+    case 0x139a48u: if (address == 0x49bf1cu) out = 0x3c088889u; break;
+    case 0x13d8e4u: if (address == 0x49c08cu) out = 0x3c088889u; break;
+    case 0x13ee80u: if (address == 0x49c12cu) out = 0x3c088889u; break;
     default: break;
     }
-    return bits;
+    if (out != bits && countEnabled()) ++s.halfLoadConverted;
+    return out;
+}
+
+// Called per dispatch with the current vsync tick; prints cumulative
+// counters every 300 ticks (~10 lines per boot).
+inline void countTick(uint64_t tick) noexcept
+{
+    if (!countEnabled()) return;
+    State &s = g_state;
+    const uint64_t bin = tick / 300u;
+    if (bin == s.halfLoadLastBin) return;
+    s.halfLoadLastBin = bin;
+    std::fprintf(stderr,
+                 "ts2-halfload tick=%llu calls=%llu active=%llu converted=%llu refreshes=%llu cache=%s\n",
+                 static_cast<unsigned long long>(tick),
+                 static_cast<unsigned long long>(s.halfLoadCalls),
+                 static_cast<unsigned long long>(s.halfLoadActive),
+                 static_cast<unsigned long long>(s.halfLoadConverted),
+                 static_cast<unsigned long long>(s.halfLoadRefreshes),
+                 cacheDisabled() ? "off" : "on");
+    std::fflush(stderr);
 }
 
 inline void setThread(uint32_t id, bool interrupt) noexcept

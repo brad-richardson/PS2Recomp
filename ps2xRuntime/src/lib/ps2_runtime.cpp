@@ -3190,6 +3190,12 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             kind == GuestBranchKind::IndirectCall || kind == GuestBranchKind::IndirectJump,
             m_memory.gs().vsyncTick.load());
     }
+    // HL1: halfLoad call census. Env-gated (unlike the TS3 census it stays
+    // live where TS2_DIAG compiles out).
+    if (ps2_ts2_split60::countEnabled())
+    {
+        ps2_ts2_split60::countTick(m_memory.gs().vsyncTick.load(std::memory_order_relaxed));
+    }
 #if PS2X_ENABLE_TS2_DIAG
     if (targetPc == 0x10eb30u &&
         (sourcePc == 0x13a530u || sourcePc == 0x1064e4u) &&
