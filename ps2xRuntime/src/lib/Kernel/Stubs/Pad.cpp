@@ -309,7 +309,10 @@ namespace ps2_stubs
         // E31 DEV-ONLY scripted pad input (PS2X_PAD_SCRIPT). Unset/empty
         // (default) = one relaxed atomic check per pad read, zero behavior
         // change. Format: "t_ms:spec:hold_ms,..." (see parsePadScript).
-        // Each entry presses its buttons and/or drives its analog axes while
+        // RP2: a spec starting with '@' loads the script from that path
+        // instead (same grammar); a missing/unreadable/malformed file is
+        // FATAL, never idle. Each entry presses its buttons and/or drives
+        // its analog axes while
         // atMs <= nowMs < atMs + holdMs, where nowMs is milliseconds since
         // the first pad call. Overlapping button entries accumulate;
         // overlapping analog entries resolve last-active-wins per axis.
@@ -570,6 +573,40 @@ namespace ps2_stubs
                          g_padScript.vsyncClock ? "vsync" : "wall");
         }
 
+        // RP2: reads a '@'-file script into `out`. False on any failure
+        // (missing, unreadable, short read); the caller reports loudly.
+        bool padScriptReadFile(const char *path, std::string &out)
+        {
+            if (!path || path[0] == '\0')
+            {
+                return false;
+            }
+            std::FILE *f = std::fopen(path, "rb");
+            if (!f)
+            {
+                return false;
+            }
+            std::string content;
+            char buf[65536];
+            size_t n = 0;
+            bool ok = true;
+            while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+            {
+                content.append(buf, n);
+            }
+            if (std::ferror(f))
+            {
+                ok = false;
+            }
+            std::fclose(f);
+            if (!ok)
+            {
+                return false;
+            }
+            out = content;
+            return true;
+        }
+
         void padScriptInitLocked()
         {
             if (g_padScript.initDone)
@@ -585,6 +622,32 @@ namespace ps2_stubs
             const char *spec = std::getenv("PS2X_PAD_SCRIPT");
             if (!spec || spec[0] == '\0')
             {
+                return;
+            }
+            // RP2: '@/path' loads the script from a file, parsed with the
+            // same grammar as inline specs. A file that cannot be read, or
+            // whose content does not parse, is FATAL: silently idling here
+            // replayed PG3's brad leg as no input at all.
+            if (spec[0] == '@')
+            {
+                const char *path = spec + 1;
+                std::string content;
+                if (!padScriptReadFile(path, content))
+                {
+                    std::fprintf(stderr,
+                                 "FATAL: [padscript] cannot read PS2X_PAD_SCRIPT file '%s'\n",
+                                 path);
+                    std::abort();
+                }
+                std::vector<PadScriptEntry> parsed;
+                if (!padScriptParse(content.c_str(), parsed))
+                {
+                    std::fprintf(stderr,
+                                 "FATAL: [padscript] malformed PS2X_PAD_SCRIPT file '%s'\n",
+                                 path);
+                    std::abort();
+                }
+                padScriptInstallLocked(parsed, "file");
                 return;
             }
             std::vector<PadScriptEntry> parsed;
@@ -2364,10 +2427,34 @@ namespace ps2_stubs
         return padScriptParse(spec, entries);
     }
 
+    bool parsePadScriptFile(const char *path, std::vector<PadScriptEntry> &entries)
+    {
+        std::string content;
+        if (!padScriptReadFile(path, content))
+        {
+            return false;
+        }
+        return padScriptParse(content.c_str(), entries);
+    }
+
     bool setPadScriptForTest(const char *spec)
     {
         std::vector<PadScriptEntry> parsed;
         if (!padScriptParse(spec, parsed))
+        {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(g_padScript.mutex);
+        g_padScript.initDone = true;
+        padScriptInstallLocked(parsed, "test");
+        g_padScriptInitDone.store(true, std::memory_order_relaxed);
+        return true;
+    }
+
+    bool setPadScriptFromFileForTest(const char *path)
+    {
+        std::vector<PadScriptEntry> parsed;
+        if (!parsePadScriptFile(path, parsed))
         {
             return false;
         }

@@ -886,6 +886,119 @@ void register_pad_input_tests()
                      "header-only spec has no entries");
         });
 
+        tc.Run("pad script file loads the same entries as inline", [](TestCase &t)
+               {
+            const std::string filePath =
+                (std::filesystem::temp_directory_path() / "rp2_padscript_test.txt").string();
+            std::remove(filePath.c_str());
+            {
+                std::FILE *f = std::fopen(filePath.c_str(), "w");
+                t.IsTrue(f != nullptr, "script file should be writable");
+                if (f)
+                {
+                    std::fputs("1000:start+cross:500,1200:lx=0:800\n", f);
+                    std::fclose(f);
+                }
+            }
+
+            std::vector<ps2_stubs::PadScriptEntry> fromFile;
+            t.IsTrue(ps2_stubs::parsePadScriptFile(filePath.c_str(), fromFile),
+                     "script file should parse");
+            std::vector<ps2_stubs::PadScriptEntry> fromInline;
+            t.IsTrue(ps2_stubs::parsePadScript("1000:start+cross:500,1200:lx=0:800", fromInline),
+                     "inline spec should parse");
+            t.Equals(static_cast<uint32_t>(fromFile.size()), static_cast<uint32_t>(2),
+                     "file holds two entries");
+            t.Equals(static_cast<uint32_t>(fromFile.size()),
+                     static_cast<uint32_t>(fromInline.size()),
+                     "file and inline parse to the same count");
+            if (fromFile.size() == 2 && fromInline.size() == 2)
+            {
+                t.Equals(static_cast<uint32_t>(fromFile[0].pressMask),
+                         static_cast<uint32_t>(fromInline[0].pressMask),
+                         "entry 0 press mask matches inline");
+                t.Equals(static_cast<uint32_t>(fromFile[1].lx),
+                         static_cast<uint32_t>(fromInline[1].lx),
+                         "entry 1 lx matches inline");
+            }
+
+            // The file form also arms pad reads.
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            t.IsTrue(ps2_stubs::setPadScriptFromFileForTest(filePath.c_str()),
+                     "script file should install");
+            ps2_stubs::setPadScriptNowMsForTest(1000);
+            runPadRead(ctx, rdram);
+            t.Equals(readButtons(rdram),
+                     static_cast<uint16_t>(0xFFFFu & ~kPadBtnStart & ~kPadBtnCross),
+                     "file script presses inside the window");
+            ps2_stubs::clearPadScriptForTest();
+            closePadPort(ctx, rdram);
+            std::remove(filePath.c_str());
+        });
+
+        tc.Run("pad script file skips header and blank lines", [](TestCase &t)
+               {
+            const std::string filePath =
+                (std::filesystem::temp_directory_path() / "rp2_padscript_hdr_test.txt").string();
+            std::remove(filePath.c_str());
+            {
+                std::FILE *f = std::fopen(filePath.c_str(), "w");
+                t.IsTrue(f != nullptr, "script file should be writable");
+                if (f)
+                {
+                    std::fputs("# padrec v1\n# start_utc=2026-09-28T01:00:00Z\n"
+                               "# knobs SIM_MODE=split120_render60_v1\n\n"
+                               "1000:start:500\n",
+                               f);
+                    std::fclose(f);
+                }
+            }
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScriptFile(filePath.c_str(), entries),
+                     "header + entries should parse from a file");
+            t.Equals(static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(1),
+                     "one entry under the header");
+            if (!entries.empty())
+            {
+                t.Equals(static_cast<uint32_t>(entries[0].pressMask),
+                         static_cast<uint32_t>(kPadBtnStart), "entry presses start");
+            }
+            std::remove(filePath.c_str());
+        });
+
+        tc.Run("pad script file missing is a clean failure", [](TestCase &t)
+               {
+            const std::string missing =
+                (std::filesystem::temp_directory_path() / "rp2_padscript_nope_test.txt").string();
+            std::remove(missing.c_str());
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(!ps2_stubs::parsePadScriptFile(missing.c_str(), entries),
+                     "missing file should not parse");
+            t.IsTrue(!ps2_stubs::parsePadScriptFile("", entries),
+                     "empty path should not parse");
+            t.IsTrue(!ps2_stubs::parsePadScriptFile(nullptr, entries),
+                     "null path should not parse");
+            t.IsTrue(!ps2_stubs::setPadScriptFromFileForTest(missing.c_str()),
+                     "missing file should not install");
+
+            // The failed install arms nothing.
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            ps2_stubs::setPadScriptFromFileForTest(missing.c_str());
+            runPadRead(ctx, rdram);
+            t.Equals(readButtons(rdram), static_cast<uint16_t>(0xFFFFu),
+                     "reads are unmodified after a failed file install");
+            ps2_stubs::clearPadScriptForTest();
+            closePadPort(ctx, rdram);
+        });
+
         tc.Run("pad recorder dir mode writes one session file and prunes", [](TestCase &t)
                {
             namespace fs = std::filesystem;

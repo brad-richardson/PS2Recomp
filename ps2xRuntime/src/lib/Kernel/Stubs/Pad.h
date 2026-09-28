@@ -107,10 +107,19 @@ namespace ps2_stubs
     // Returns false (entries untouched) on any malformed entry.
     bool parsePadScript(const char *spec, std::vector<PadScriptEntry> &entries);
 
+    // RP2: reads `path` and parses it with parsePadScript (the '@/path'
+    // form of PS2X_PAD_SCRIPT). Returns false (entries untouched) when
+    // the file cannot be read or its content is malformed; never aborts
+    // (the abort-on-failure lives in the env-var init path only).
+    bool parsePadScriptFile(const char *path, std::vector<PadScriptEntry> &entries);
+
     // Test hooks. Install a script without the env var, drive its clock
     // explicitly, and restore the default-off state. Production code paths
     // never call these.
     bool setPadScriptForTest(const char *spec);
+    // RP2: install a script from a file (same grammar); false when the
+    // file cannot be read or parsed. Production never calls this.
+    bool setPadScriptFromFileForTest(const char *path);
     void setPadScriptNowMsForTest(uint64_t nowMs);
     // E33: select the guest-vsync clock (vsyncTick * 1000/59.94 ms) instead
     // of the wall clock, and drive the tick explicitly.
