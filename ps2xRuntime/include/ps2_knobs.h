@@ -12,14 +12,15 @@
 // and GE1_AUTO-style inputs (e.g. GE1_ADRENO_DSTREAD unset = AUTO) resolve
 // inside the adapter, which exports no knob query over its C ABI.
 //
-// S1: cf2ApplyAndroidDefaults() compiles the CF1 §Q2 Android column into the
-// runtime: on Android the env-file loader calls it after loading ps2x.env,
-// and every S1 knob absent from the environment gets its P3 play value via
+// S1+S3: cf2ApplyAndroidDefaults() compiles the CF1 §Q2 Android column into
+// the runtime: on Android the env-file loader calls it after loading ps2x.env,
+// and every defaulted knob absent from the environment gets its play value via
 // setenv (explicit env, including an explicit empty value, still wins).
 // Paths derive from the boot-ELF dir; no absolute paths in code.
 // PS2X_PROFILE=reference disables every compiled default, restoring the
-// exact knob-off path. The guest-affecting *new* default lagV is NOT here
-// (S3); only knobs already at their play value in P3.
+// exact knob-off path. S3 (CF3) adds the guest-affecting lagV default, so an
+// empty env reproduces the PB7 play env (modulo the output-only VERTEX_KICK,
+// the dev PAD_RECORD_DIR, and the inert PGS lines the play env still carries).
 //
 // Platform-neutral on purpose so the host unit test compiles this header
 // (same shape as ps2_android_env.h / ps2_env_file.h). Only the Android
@@ -68,8 +69,9 @@ struct Cf2AndroidDefault
     bool needs_big_cpu;
 };
 
-// CF1 §Q2 Android column minus lagV (S3) minus GE1_ADRENO_DSTREAD (already
-// AUTO in the adapter). Every value is today's P3 play value.
+// CF1 §Q2 Android column minus GE1_ADRENO_DSTREAD (already AUTO in the
+// adapter). Every value is the signed-off play value (S1 = the P3 set,
+// S3 = lagV).
 inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
 {
     static const Cf2AndroidDefault kDefaults[] = {
@@ -91,6 +93,7 @@ inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
         {"PS2X_GS_HANDOFF_DIET", "1", false, false, false},
         {"PS2X_GS_FINISH_TIMING", "pcsx2", false, false, false},
         {"PS2X_SSX3_SIM_MODE", "split120_render60_v1", false, false, false},
+        {"PS2X_VIF1_REVERSE_DMA", "lagV", false, false, false},
         {"PS2X_SKIP_MOVIE", "1", false, false, false},
         {"PS2X_SOUND", "1", false, false, false},
         {"PS2X_PERF_LOG", "1", false, false, false},
@@ -136,7 +139,7 @@ inline bool cf2FileExists(const std::string &path)
     return file.is_open();
 }
 
-// Set every S1 default absent from the environment. Returns the number of
+// Set every S1+S3 default absent from the environment. Returns the number of
 // keys set. Under PS2X_PROFILE=reference sets nothing (exact knob-off path).
 inline size_t cf2ApplyAndroidDefaults(const char *bootElf)
 {

@@ -59,19 +59,19 @@ void register_ps2_knobs_tests()
 {
     MiniTest::Case("Ps2Knobs", [](TestCase &tc)
                    {
-        tc.Run("android defaults table is exactly the 24 S1 P3 keys", [](TestCase &t)
+        tc.Run("android defaults table is exactly the 25 S1+S3 play keys", [](TestCase &t)
                {
             size_t n = 0;
             const ps2x::Cf2AndroidDefault *defs = ps2x::cf2AndroidDefaults(&n);
-            t.Equals(n, static_cast<size_t>(24), "24 defaults");
+            t.Equals(n, static_cast<size_t>(25), "25 defaults");
             const char *want[] = {
                 "PS2X_GS_BACKEND", "PS2X_GS_EXTERNAL_LIBRARY", "GE1_GS_RESOURCES_DIR",
                 "GE1_GS_DATA_DIR", "GE1_GS_AHB_EXPORT", "GE1_ADRENO_BLEND_MIX",
                 "GE1_TFX_PREWARM", "GE1_PIPE_FLUSH_VSYNCS", "PS2X_VU1_ENGINE",
                 "PS2X_MTVU", "PS2X_MTVU_LAG", "PS2X_VU1_BLOCKS", "PS2X_VU0_RECOMP",
                 "PS2X_VU0_DIRECT", "PS2X_VU1_FLAG_ELIDE", "PS2X_GS_HANDOFF_DIET",
-                "PS2X_GS_FINISH_TIMING", "PS2X_SSX3_SIM_MODE", "PS2X_SKIP_MOVIE",
-                "PS2X_SOUND", "PS2X_PERF_LOG", "PS2X_PERF_LOG_DIR",
+                "PS2X_GS_FINISH_TIMING", "PS2X_SSX3_SIM_MODE", "PS2X_VIF1_REVERSE_DMA",
+                "PS2X_SKIP_MOVIE", "PS2X_SOUND", "PS2X_PERF_LOG", "PS2X_PERF_LOG_DIR",
                 "PS2X_GAME_THREAD_CPUS", "PS2X_MTVU_CPUS",
             };
             for (const char *key : want)
@@ -81,9 +81,12 @@ void register_ps2_knobs_tests()
                     found = found || std::strcmp(defs[i].key, key) == 0;
                 t.IsTrue(found, std::string("table holds ") + key);
             }
-            // lagV is S3, not S1.
+            // S3: lagV is a compiled default with value lagV.
+            bool lagV = false;
             for (size_t i = 0; i < n; ++i)
-                t.IsFalse(std::strcmp(defs[i].key, "PS2X_VIF1_REVERSE_DMA") == 0, "no lagV in S1");
+                if (std::strcmp(defs[i].key, "PS2X_VIF1_REVERSE_DMA") == 0)
+                    lagV = std::strcmp(defs[i].value, "lagV") == 0 && !defs[i].bootdir_relative;
+            t.IsTrue(lagV, "lagV defaulted to lagV");
         });
 
         tc.Run("apply sets absent keys and keeps explicit env", [](TestCase &t)
@@ -101,6 +104,7 @@ void register_ps2_knobs_tests()
             t.Equals(std::string(::getenv("PS2X_MTVU_LAG")), std::string("1"), "absent PS2X_MTVU_LAG defaulted");
             t.Equals(std::string(::getenv("PS2X_GS_BACKEND")), std::string("external"), "backend defaulted");
             t.Equals(std::string(::getenv("PS2X_VU1_ENGINE")), std::string("microvu"), "vu1 engine defaulted");
+            t.Equals(std::string(::getenv("PS2X_VIF1_REVERSE_DMA")), std::string("lagV"), "lagV defaulted");
         });
 
         tc.Run("reference profile disables every default", [](TestCase &t)
@@ -214,7 +218,7 @@ void register_ps2_knobs_tests()
             t.IsTrue(clean.find(" PS2X_CD_IMAGE=a_b_c") != std::string::npos, "newlines sanitized");
         });
 
-        tc.Run("P3-like dump stays under the logcat cap", [](TestCase &t)
+        tc.Run("PB7-play-env dump stays under the logcat cap", [](TestCase &t)
                {
             EnvSet g;
             g.trackDefaults();
@@ -230,6 +234,8 @@ void register_ps2_knobs_tests()
             g.track("PGS_PRECOMPILE_LIST");
             g.track("PGS_PRECOMPILE_THREADS");
             g.track("PGS_PIPELINE_CACHE");
+            g.track("GE1_VERTEX_KICK");
+            g.track("PS2X_PAD_RECORD_DIR");
             clearDefaults();
             ps2x::cf2ApplyAndroidDefaults("/storage/emulated/0/Android/data/com.ps2x.runner/files/SLUS_207.72");
             ::setenv("PS2X_CD_IMAGE",
@@ -239,7 +245,7 @@ void register_ps2_knobs_tests()
             ::setenv("PS2X_UNPACED", "1", 1);
             ::setenv("PS2X_DETERMINISTIC", "1", 1);
             ::setenv("PS2X_DET_HASH_EVERY", "5", 1);
-            // The 5 inert P3 lines (present in the real P3 leg, absent in empty).
+            // The 5 inert P3 lines (present in the real play leg, absent in empty).
             ::setenv("PS2X_GS_TURNIP", "0", 1);
             ::setenv("PGS_SKIP_COMPILATION_TASKS", "1", 1);
             ::setenv("PGS_PRECOMPILE_LIST",
@@ -247,11 +253,17 @@ void register_ps2_knobs_tests()
             ::setenv("PGS_PRECOMPILE_THREADS", "2", 1);
             ::setenv("PGS_PIPELINE_CACHE",
                      "/storage/emulated/0/Android/data/com.ps2x.runner/files/pcache-sc1.bin", 1);
+            // PB5/6 play-env lines past P3 (explicit: not compiled defaults).
+            ::setenv("GE1_VERTEX_KICK", "2", 1);
+            ::setenv("PS2X_PAD_RECORD_DIR",
+                     "/storage/emulated/0/Android/data/com.ps2x.runner/files/padrec", 1);
             const std::string line = ps2x::cf2BuildKnobsLine();
             // logd truncates past ~4 KB (LOGGER_ENTRY_MAX_PAYLOAD 4076); the
-            // real P3 leg prints 3939 bytes. Trip here before growth truncates.
+            // real PB7-shape leg prints ~3987 bytes. Trip here before growth
+            // truncates.
             t.IsTrue(line.size() < 4000, "dump under 4000 bytes");
             t.IsTrue(line.find(" PS2X_GS_BACKEND=external") != std::string::npos, "default visible");
+            t.IsTrue(line.find(" PS2X_VIF1_REVERSE_DMA=lagV") != std::string::npos, "lagV default visible");
         });
     });
 }
