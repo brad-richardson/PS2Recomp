@@ -273,6 +273,21 @@ namespace
 {
     thread_local bool t_inGsWorker = false;
 
+    // SQ2: per-tick local->host lifecycle trace (PS2X_GS_L2H_TRACE=1). Set
+    // and consume sites are tagged so the trace shows who set pending and
+    // who should clear it. The guest PC is not visible on the GS worker, so
+    // EE sync serves log their madr instead (see ps2_memory.cpp).
+    thread_local const char *t_l2hSite = "rpc";
+
+    bool l2hTraceOn()
+    {
+        static const bool on = [] {
+            const char *env = std::getenv("PS2X_GS_L2H_TRACE");
+            return env && env[0] != '\0' && env[0] != '0';
+        }();
+        return on;
+    }
+
     struct GsWorkerScope
     {
         GsWorkerScope() { t_inGsWorker = true; }
@@ -2420,6 +2435,16 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             command.trxreg = m_trxreg;
             command.direction = m_trxdir;
             m_backend->BeginTransfer(command);
+            // SQ2: trace the local->host set (before the lag1 snapshot
+            // drains it, so pending shows the fresh transfer).
+            if (m_trxdir == 1u && l2hTraceOn())
+            {
+                const uint32_t pend = m_backend->GetTransferSnapshot().localToHostPendingBytes;
+                std::cerr << "[l2h-trace] tick="
+                          << (m_privRegs ? m_privRegs->vsyncTick.load(std::memory_order_acquire) : 0u)
+                          << " set rrw=" << m_trxreg.rrw << " rrh=" << m_trxreg.rrh
+                          << " spsm=" << m_bitbltbuf.spsm << " pending=" << pend << std::endl;
+            }
             // RB2: in lag1 mode snapshot this local->host transfer now,
             // worker-ordered right after its setup (the backend overwrites
             // its pending count per setup, so a later consume would not see
@@ -2768,6 +2793,14 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     const uint32_t n = m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
+    if (l2hTraceOn())
+    {
+        const uint32_t pend = m_backend ? m_backend->GetTransferSnapshot().localToHostPendingBytes : 0u;
+        std::cerr << "[l2h-trace] tick="
+                  << (m_privRegs ? m_privRegs->vsyncTick.load(std::memory_order_acquire) : 0u)
+                  << " consume site=" << t_l2hSite << " max=" << maxBytes << " got=" << n
+                  << " pending=" << pend << std::endl;
+    }
     ps2x_gs_capture::localToHost(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
                                  maxBytes, dst, n);
     return n;
@@ -2795,10 +2828,13 @@ void GS::snapshotLaggedReadback()
     // a stack buffer first: the slot lock below stays a leaf (consume takes
     // m_stateMutex, already held by our caller).
     uint8_t buf[kRb2LagSlotBytes];
+    t_l2hSite = "snap"; // SQ2: tag the snapshot consume for the l2h trace
     const uint32_t n = consumeLocalToHostBytes(buf, kRb2LagSlotBytes);
+    t_l2hSite = "rpc";
     // Drain any remainder so the next transfer starts from an empty FIFO.
     bool truncated = false;
     uint8_t drain[1024];
+    t_l2hSite = "drain"; // SQ2: tag the remainder drain for the l2h trace
     for (;;)
     {
         const uint32_t m = consumeLocalToHostBytes(drain, sizeof(drain));
@@ -2808,6 +2844,7 @@ void GS::snapshotLaggedReadback()
         if (m < sizeof(drain))
             break;
     }
+    t_l2hSite = "rpc";
     uint64_t idx = 0u;
     {
         std::lock_guard<std::mutex> lock(m_rb2Mutex);

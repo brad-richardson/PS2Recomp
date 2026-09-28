@@ -187,6 +187,17 @@ namespace
         return vif1ReverseDmaModeLocal() != 0;
     }
 
+    // SQ2: shares the GS local->host lifecycle trace (PS2X_GS_L2H_TRACE=1)
+    // for the EE-side sync serve; the GS worker tags its own consumes.
+    inline bool l2hTraceOn()
+    {
+        static const bool on = [] {
+            const char *env = std::getenv("PS2X_GS_L2H_TRACE");
+            return env && env[0] != '\0' && env[0] != '0';
+        }();
+        return on;
+    }
+
     inline void inRange(uint32_t offset, size_t bytes, size_t regionSize, const char *op, uint32_t address)
     {
         if (static_cast<uint64_t>(offset) + static_cast<uint64_t>(bytes) > static_cast<uint64_t>(regionSize))
@@ -2169,6 +2180,14 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (rb1N == 0u)
                             break; // FIFO exhausted: PCSX2 warns "QWC left on VIF FIFO Reverse"
                         rb1Done += rb1N;
+                    }
+                    // SQ2: EE-side clear site for the l2h trace (no vsync
+                    // tick on the EE; the guest PC is sub_002EC478's DMA
+                    // kick, statically known — see the RB1 comment above).
+                    if (l2hTraceOn())
+                    {
+                        std::cerr << "[l2h-trace] site=sync madr=0x" << std::hex << madr << std::dec
+                                  << " qwc=" << qwc << " got=" << rb1Done << std::endl;
                     }
                     {
                         static std::atomic<uint32_t> rb1LogCount{0};

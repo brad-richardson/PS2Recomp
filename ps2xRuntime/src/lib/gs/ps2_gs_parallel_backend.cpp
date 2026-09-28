@@ -574,6 +574,15 @@ public:
         for (uint32_t i = 0; i < 4u; ++i)
             put(&m_iface->get_gif_path(i), sizeof(ParallelGS::GIFPath));
         put(&m_l2hPending, sizeof(m_l2hPending));
+        // SQ2: pending bytes riding into the state (shares PS2X_GS_L2H_TRACE).
+        {
+            static const bool trace = [] {
+                const char *env = std::getenv("PS2X_GS_L2H_TRACE");
+                return env && env[0] != '\0' && env[0] != '0';
+            }();
+            if (trace)
+                std::fprintf(stderr, "[l2h-trace] save l2h_pending=%u\n", m_l2hPending);
+        }
 #if defined(PARALLEL_GS_HAS_SAVESTATE_V3) || defined(PARALLEL_GS_HAS_TRANSFER_STATE)
         // v3 tail: [u8 hasClut][clut?][u32 vcount][vcount x 36B verts]
         // then [u64 tailLen][u32 magic]. tailLen covers hasClut..verts.
