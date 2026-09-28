@@ -5672,4 +5672,8 @@ void PS2Runtime::run()
     // retains its safe fallback (shutdown closes the shared sink once).
     ps2_e15::closure(m_memory.gs().vsyncTick.load());
     ps2_e7::shutdown(m_memory.gs().vsyncTick.load());
+    // PT2: full-ring [perf-tail] dump (no-op unless the log is active; a
+    // force-stop SIGKILLs past here, so the Odin reads the per-second lines).
+    if (perfLog)
+        ps2x::perflog::dumpTail();
 }

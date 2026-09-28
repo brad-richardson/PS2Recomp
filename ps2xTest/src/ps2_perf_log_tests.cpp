@@ -301,5 +301,93 @@ void register_ps2_perf_log_tests()
             t.Equals(ps2x::perflog::primeZoneRank("vbat"), -1, "battery");
             t.Equals(ps2x::perflog::primeZoneRank(""), -1, "empty");
             t.Equals(ps2x::perflog::primeZoneRank("cpu-1-1-1 "), -1, "untrimmed (caller trims)"); });
+
+        // PT2: per-stage tail rings, nearest-rank stats, hist buckets, lines.
+        tc.Run("stageName covers all six stages", [](TestCase &t)
+               {
+            t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::EeBusy)) == "ee.busy", "ee.busy");
+            t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::EeCpu)) == "ee.cpu", "ee.cpu");
+            t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::EeWait)) == "ee.wait", "ee.wait");
+            t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::GsBusy)) == "gs.busy", "gs.busy");
+            t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::MtvuBusy)) == "mtvu.busy", "mtvu.busy");
+            t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::GpuBusy)) == "gpu.busy", "gpu.busy");
+            t.Equals(ps2x::perflog::kStageCount, static_cast<size_t>(6), "six stages"); });
+
+        tc.Run("StageRing packs tick+usec and wraps to the newest lap", [](TestCase &t)
+               {
+            ps2x::perflog::StageRing r;
+            t.Equals(r.head(), static_cast<uint64_t>(0), "head starts 0");
+            r.push(1234u, 8.125f);
+            r.push(1235u, 0.0f);
+            r.push(1236u, -1.0f);
+            t.Equals(r.head(), static_cast<uint64_t>(3), "head counts pushes");
+            const auto a = ps2x::perflog::StageRing::decode(r.slotAt(0));
+            t.Equals(a.tick, static_cast<uint64_t>(1234), "tick survives");
+            t.Equals(static_cast<double>(a.ms), 8.125, "ms exact to 1 us");
+            t.Equals(static_cast<double>(ps2x::perflog::StageRing::decode(r.slotAt(1)).ms), 0.0, "zero stays zero");
+            t.Equals(static_cast<double>(ps2x::perflog::StageRing::decode(r.slotAt(2)).ms), 0.0, "negative clamps to 0");
+            for (uint64_t i = 3; i < ps2x::perflog::StageRing::kCap + 3; ++i)
+                r.push(static_cast<uint32_t>(10000 + i), 1.0f);
+            t.Equals(r.head(), static_cast<uint64_t>(ps2x::perflog::StageRing::kCap + 3), "head past the lap");
+            const auto oldest =
+                ps2x::perflog::StageRing::decode(r.slotAt(ps2x::perflog::StageRing::kCap + 3 - ps2x::perflog::StageRing::kCap));
+            t.Equals(oldest.tick, static_cast<uint64_t>(10003), "oldest slot is the newest lap");
+            const auto newest = ps2x::perflog::StageRing::decode(r.slotAt(ps2x::perflog::StageRing::kCap + 2));
+            t.Equals(newest.tick, static_cast<uint64_t>(10000 + ps2x::perflog::StageRing::kCap + 2), "newest slot decodes"); });
+
+        tc.Run("summarizeStage nearest-rank stats over 1..60", [](TestCase &t)
+               {
+            std::vector<ps2x::perflog::StageEntry> v;
+            for (uint64_t i = 1; i <= 60; ++i)
+                v.push_back({1000 + i, static_cast<float>(i)});
+            const auto st = ps2x::perflog::summarizeStage(v);
+            t.Equals(st.n, static_cast<uint64_t>(60), "n");
+            t.Equals(st.tick0, static_cast<uint64_t>(1001), "tick0");
+            t.Equals(st.tick1, static_cast<uint64_t>(1060), "tick1");
+            t.Equals(st.mean, 30.5, "mean");
+            t.Equals(st.p50, 30.0, "p50 rank ceil(30)-1");
+            t.Equals(st.p95, 57.0, "p95 rank ceil(57)-1");
+            t.Equals(st.p99, 60.0, "p99 rank ceil(59.4)-1");
+            t.Equals(st.max, 60.0, "max");
+            uint64_t histSum = 0;
+            for (uint64_t c : st.hist)
+                histSum += c;
+            t.Equals(histSum, static_cast<uint64_t>(60), "hist counts all"); });
+
+        tc.Run("summarizeStage of no entries reads -1", [](TestCase &t)
+               {
+            const auto st = ps2x::perflog::summarizeStage({});
+            t.Equals(st.n, static_cast<uint64_t>(0), "n 0");
+            t.Equals(st.mean, -1.0, "mean -1");
+            t.Equals(st.p99, -1.0, "p99 -1");
+            t.Equals(st.max, -1.0, "max -1"); });
+
+        tc.Run("histBucket edges and overflow", [](TestCase &t)
+               {
+            t.Equals(ps2x::perflog::histBucket(0.0), static_cast<size_t>(0), "0 -> 0");
+            t.Equals(ps2x::perflog::histBucket(0.249), static_cast<size_t>(0), "0.249 -> 0");
+            t.Equals(ps2x::perflog::histBucket(0.25), static_cast<size_t>(1), "0.25 -> 1");
+            t.Equals(ps2x::perflog::histBucket(19.999), static_cast<size_t>(79), "19.999 -> 79");
+            t.Equals(ps2x::perflog::histBucket(20.0), static_cast<size_t>(80), "20.0 overflows");
+            t.Equals(ps2x::perflog::histBucket(123.0), static_cast<size_t>(80), "123 overflows");
+            t.Equals(ps2x::perflog::histBucket(-2.0), static_cast<size_t>(0), "negative -> 0"); });
+
+        tc.Run("formatStageLine golden with hist", [](TestCase &t)
+               {
+            const std::vector<ps2x::perflog::StageEntry> v{
+                {100, 1.0f}, {101, 2.0f}, {102, 3.0f}, {103, 20.5f}};
+            const auto st = ps2x::perflog::summarizeStage(v);
+            t.Equals(ps2x::perflog::formatStageLine("ee.busy", st),
+                     std::string("[perf-stage] tick0=100 tick1=103 stage=ee.busy n=4 mean=6.625 "
+                                 "p50=2.000 p95=20.500 p99=20.500 max=20.500 hist=\"1.00:1 2.00:1 3.00:1 ovf:1\""),
+                     "golden stage line"); });
+
+        tc.Run("formatStageLine n=0 reads -1 with an empty hist", [](TestCase &t)
+               {
+            const auto st = ps2x::perflog::summarizeStage({});
+            t.Equals(ps2x::perflog::formatStageLine("gs.busy", st),
+                     std::string("[perf-stage] tick0=0 tick1=0 stage=gs.busy n=0 mean=-1.000 "
+                                 "p50=-1.000 p95=-1.000 p99=-1.000 max=-1.000 hist=\"\""),
+                     "empty stage line"); });
     });
 }

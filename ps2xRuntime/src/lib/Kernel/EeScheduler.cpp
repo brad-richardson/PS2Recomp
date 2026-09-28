@@ -2,6 +2,7 @@
 #include "ps2_microvu.h"
 #include "ps2_mtvu.h"
 #include "ps2_pad_latch.h"
+#include "ps2_perf_log.h"
 #include "runtime/ps2_savestate.h"
 #include "Stubs/Pad.h"
 #include "../ps2_savestate_internal.h"
@@ -577,6 +578,8 @@ void EeScheduler::run()
     // unless PS2X_EE_FPMODE=ieee; restored when run() returns.
     ps2_fpmode::ScopedEeMode eeFpMode;
     m_running.store(true, std::memory_order_release);
+    // PT2: cache the perf-log knob once (env is fixed before run()).
+    m_perfTail = ps2x::perflog::enabled();
     // T1 park snapshot: install the SIGTERM handler once when enabled.
     ps2_park::installParkTermHandler();
 
@@ -3109,6 +3112,38 @@ void ps2xGsCsrVBlankStart(PS2Memory &memory, uint64_t tick)
         } });
 }
 
+void EeScheduler::perfTailCutFrame(uint64_t tick)
+{
+    // End of tick `tick`'s frame on the executor: wall/CPU since the last cut
+    // minus the measured waits (pause gate, pacer, event waits, MTVU syncs).
+    // The first VBlank only arms the stamps. GS queue-full backpressure on the
+    // EE is NOT measured (it lands in busy); MTVU-off builds push no mtvu
+    // entries, and threadCpuNs() may read kCpuUnsupported (no ee.cpu entry).
+    const uint64_t wall = ps2x::perflog::steadyNs();
+    const uint64_t cpu = ps2x::perflog::threadCpuNs();
+    const uint64_t mtvuSum = ps2_mtvu::threadedWaitNsTotal();
+    if (m_perfHaveFrame)
+    {
+        const uint64_t wallNs = wall - m_perfFrameStartWall;
+        const uint64_t waitNs = m_perfGateNs + m_perfPaceNs + m_perfEventNs + (mtvuSum - m_perfMtvuNs);
+        const uint64_t busyNs = wallNs > waitNs ? wallNs - waitNs : 0u;
+        ps2x::perflog::stageRing(ps2x::perflog::Stage::EeBusy)
+            .push(static_cast<uint32_t>(tick), static_cast<float>(busyNs / 1e6));
+        ps2x::perflog::stageRing(ps2x::perflog::Stage::EeWait)
+            .push(static_cast<uint32_t>(tick), static_cast<float>(waitNs / 1e6));
+        if (cpu != ps2x::perflog::kCpuUnsupported && m_perfFrameStartCpu != ps2x::perflog::kCpuUnsupported)
+            ps2x::perflog::stageRing(ps2x::perflog::Stage::EeCpu)
+                .push(static_cast<uint32_t>(tick), static_cast<float>((cpu - m_perfFrameStartCpu) / 1e6));
+    }
+    m_perfFrameStartWall = wall;
+    m_perfFrameStartCpu = cpu;
+    m_perfMtvuNs = mtvuSum;
+    m_perfEventNs = 0;
+    m_perfGateNs = 0;
+    m_perfPaceNs = 0;
+    m_perfHaveFrame = true;
+}
+
 void EeScheduler::processEvent(const EeEvent &event)
 {
     switch (event.type)
@@ -3121,7 +3156,12 @@ void EeScheduler::processEvent(const EeEvent &event)
         // the pacer: while paused the thread sleeps here (no spin), freezing
         // guest time; on resume the pacer resyncs, so no catch-up burst. Only
         // the Android shell ever sets the flag; elsewhere one relaxed load.
-        ps2x::androidPause::gate(m_stopRequested);
+        { // PT2: the gate sleep belongs to no frame; measure it so the cut
+          // files it under waits instead of busy.
+            const uint64_t gateT0 = m_perfTail ? ps2x::perflog::steadyNs() : 0u;
+            ps2x::androidPause::gate(m_stopRequested);
+            m_perfGateNs = m_perfTail ? ps2x::perflog::steadyNs() - gateT0 : 0u;
+        }
         if (m_vsyncPace)
         {
             // AT1: dev-only forced guest rate (sleep only, like the pacer).
@@ -3141,7 +3181,12 @@ void EeScheduler::processEvent(const EeEvent &event)
             // FP1: never outrun wall clock. Sleep only; no guest state changes.
             const int64_t paceNowNs = ps2_vsync_pacer::steadyNowNs();
             const int64_t paceSleepNs = m_vsyncPacer.onVsync(paceNowNs);
-            ps2_vsync_pacer::sleepNsUntil(paceNowNs, paceSleepNs);
+            { // PT2: the pacer sleep is idle after this frame's work; file it
+              // under waits at the cut.
+                const uint64_t paceT0 = m_perfTail ? ps2x::perflog::steadyNs() : 0u;
+                ps2_vsync_pacer::sleepNsUntil(paceNowNs, paceSleepNs);
+                m_perfPaceNs = m_perfTail ? ps2x::perflog::steadyNs() - paceT0 : 0u;
+            }
         }
         // MT1: VBlankStart touches the GS, the det-hash and the vsync tick the
         // unit reads, so queued unit work completes here (after the pacer).
@@ -3154,6 +3199,8 @@ void EeScheduler::processEvent(const EeEvent &event)
 #endif
             ps2_mtvu::vblank(m_vsyncTick + 1u, hashTick);
         }
+        if (m_perfTail)
+            perfTailCutFrame(m_vsyncTick + 1u);
         ++m_vsyncTick;
 #if PS2X_ENABLE_DIAG_TAPS
         if ((m_vsyncTick % 300u) == 0u)
@@ -3398,8 +3445,11 @@ void EeScheduler::waitForEvent()
         const auto waitStart = m_eventClockCensus ? std::chrono::steady_clock::now()
                                                  : std::chrono::steady_clock::time_point{};
 #endif
+        const uint64_t perfT0 = m_perfTail ? ps2x::perflog::steadyNs() : 0u;
         m_eventCv.wait(lock, [this]()
                        { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
+        if (m_perfTail)
+            m_perfEventNs += ps2x::perflog::steadyNs() - perfT0;
 #if PS2X_ENABLE_DIAG_TAPS
         if (m_eventClockCensus)
         {
@@ -3482,9 +3532,12 @@ void EeScheduler::waitForEvent()
     const auto waitStart = m_eventClockCensus ? std::chrono::steady_clock::now()
                                              : std::chrono::steady_clock::time_point{};
 #endif
+    const uint64_t perfT0 = m_perfTail ? ps2x::perflog::steadyNs() : 0u;
     const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
                                                { return !m_events.empty() ||
                                                         m_stopRequested.load(std::memory_order_acquire); });
+    if (m_perfTail)
+        m_perfEventNs += ps2x::perflog::steadyNs() - perfT0;
 #if PS2X_ENABLE_DIAG_TAPS
     if (m_eventClockCensus)
     {

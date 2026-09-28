@@ -1,7 +1,8 @@
 // IP3: PS2X_PERF_LOG=1 file backend. Main-thread only (called from the
 // render loop in PS2Runtime::run); with the knob off the call sites never
-// reach here. One line per wall second, flushed per line so a crash keeps
-// the tail. Failures disable the log with one stderr note.
+// reach here. One [perf] line plus one [perf-stage] line per stage (PT2) per
+// wall second, flushed per poll so a crash keeps the tail. Failures disable
+// the log with one stderr note.
 #include "ps2_perf_log.h"
 #if defined(PS2X_IOS)
 #include "ps2_ios_runtime.h"
@@ -15,6 +16,10 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+
+#if defined(__linux__)
+#include <time.h> // clock_gettime(CLOCK_THREAD_CPUTIME_ID)
+#endif
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -35,6 +40,32 @@ namespace ps2x::perflog
 bool enabled()
 {
     return enabledFromEnv(std::getenv("PS2X_PERF_LOG"));
+}
+
+StageRing &stageRing(Stage s)
+{
+    static StageRing rings[kStageCount];
+    return rings[static_cast<size_t>(s)];
+}
+
+uint64_t threadCpuNs()
+{
+#if defined(__linux__)
+    struct timespec ts{};
+    if (::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0)
+        return static_cast<uint64_t>(ts.tv_sec) * 1000000000u + static_cast<uint64_t>(ts.tv_nsec);
+    return kCpuUnsupported;
+#elif defined(__APPLE__)
+    thread_basic_info_data_t info{};
+    mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
+    if (::thread_info(::mach_thread_self(), THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info), &n) ==
+        KERN_SUCCESS)
+        return static_cast<uint64_t>(info.user_time.seconds + info.system_time.seconds) * 1000000000u +
+               static_cast<uint64_t>(info.user_time.microseconds + info.system_time.microseconds) * 1000u;
+    return kCpuUnsupported;
+#else
+    return kCpuUnsupported;
+#endif
 }
 
 namespace
@@ -445,6 +476,8 @@ struct Logger
     bool haveCpuLinux = false;
     long clkTck = 0;
 #endif
+    // PT2: per-stage drain cursors (heads consumed by the last poll()).
+    uint64_t stageConsumed[kStageCount] = {};
 
     ~Logger()
     {
@@ -541,6 +574,24 @@ Logger &logger()
     static Logger s;
     return s;
 }
+
+// PT2: drain one stage's new entries into a [perf-stage] line. A cursor more
+// than a lap behind (a poll stall longer than the ring) drops the overwritten
+// oldest entries and keeps the newest lap.
+void drainStage(Stage s, uint64_t &consumed, std::FILE *file)
+{
+    StageRing &r = stageRing(s);
+    const uint64_t head = r.head();
+    if (head - consumed > StageRing::kCap)
+        consumed = head - StageRing::kCap;
+    std::vector<StageEntry> v;
+    v.reserve(static_cast<size_t>(head - consumed));
+    for (uint64_t i = consumed; i != head; ++i)
+        v.push_back(StageRing::decode(r.slotAt(i)));
+    consumed = head;
+    const std::string line = formatStageLine(stageName(s), summarizeStage(v));
+    std::fprintf(file, "%s\n", line.c_str());
+}
 } // namespace
 
 void poll(uint64_t vsyncTick)
@@ -618,6 +669,8 @@ void poll(uint64_t vsyncTick)
 #endif
     const std::string line = formatLine(s);
     std::fprintf(log.file, "%s\n", line.c_str());
+    for (size_t i = 0; i < kStageCount; ++i)
+        drainStage(static_cast<Stage>(i), log.stageConsumed[i], log.file);
     std::fflush(log.file);
     log.windowStart = now;
     log.windowTick = vsyncTick;
@@ -640,6 +693,27 @@ void notePresent()
     log.haveLastPresent = true;
     log.lastPresent = now;
     ++log.windowPresents;
+}
+
+void dumpTail()
+{
+    Logger &log = logger();
+    if (!log.active || !log.file)
+        return;
+    for (size_t i = 0; i < kStageCount; ++i)
+    {
+        const Stage s = static_cast<Stage>(i);
+        StageRing &r = stageRing(s);
+        const uint64_t head = r.head();
+        const uint64_t start = head > StageRing::kCap ? head - StageRing::kCap : 0u;
+        for (uint64_t k = start; k != head; ++k)
+        {
+            const StageEntry e = StageRing::decode(r.slotAt(k));
+            std::fprintf(log.file, "[perf-tail] tick=%llu stage=%s ms=%.3f\n",
+                         static_cast<unsigned long long>(e.tick), stageName(s), static_cast<double>(e.ms));
+        }
+    }
+    std::fflush(log.file);
 }
 
 #if defined(__linux__) || defined(__APPLE__)

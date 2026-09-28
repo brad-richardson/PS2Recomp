@@ -51,6 +51,7 @@
 
 #include "ThreadNaming.h"
 #include "ps2_fpmode.h"
+#include "ps2_perf_log.h"
 #include "ps2_thread_affinity.h"
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
@@ -267,6 +268,11 @@ namespace ps2_mtvu
             std::array<uint64_t, static_cast<size_t>(Site::Count)> violations{};
             uint64_t violationsTotal = 0;
             uint64_t jobs = 0;
+            // PT2: stage tail. tailOn caches PS2X_PERF_LOG (set in start());
+            // tailBusyNs accumulates worker job ns since the last vblank
+            // (worker fetch_adds, the EE exchanges at vblank).
+            std::atomic<bool> tailOn{false};
+            std::atomic<uint64_t> tailBusyNs{0};
 
             ~Worker()
             {
@@ -315,6 +321,8 @@ namespace ps2_mtvu
                     }
                     ps2_fpmode::writeControl(job->fpControl);
                     t_jobFbrst = job->fbrst;
+                    const bool tail = tailOn.load(std::memory_order_relaxed);
+                    const uint64_t jobT0 = tail ? nowNs() : 0u;
                     try
                     {
                         job->fn();
@@ -329,6 +337,8 @@ namespace ps2_mtvu
                         std::fprintf(stderr, "[mtvu] FATAL: unit job threw\n");
                         std::abort();
                     }
+                    if (tail)
+                        tailBusyNs.fetch_add(nowNs() - jobT0, std::memory_order_relaxed);
                     if (const auto &end = jobEndFn())
                         end();
                     {
@@ -345,6 +355,7 @@ namespace ps2_mtvu
             void start()
             {
                 started = true;
+                tailOn.store(ps2x::perflog::enabled(), std::memory_order_relaxed);
                 long stackKb = 0;
                 if (const char *env = std::getenv("PS2X_GAME_THREAD_STACK_KB"))
                     stackKb = std::strtol(env, nullptr, 10);
@@ -580,6 +591,18 @@ namespace ps2_mtvu
     inline uint32_t jobFbrst()
     {
         return detail::t_jobFbrst;
+    }
+
+    // PT2: total threaded-mode sync-wait ns so far (EE side; the GameThread
+    // wait stage deltas it per tick). 0 unless threaded.
+    inline uint64_t threadedWaitNsTotal()
+    {
+        if (!threaded())
+            return 0u;
+        uint64_t sum = 0u;
+        for (uint64_t v : detail::worker().waitNs)
+            sum += v;
+        return sum;
     }
 
     // Threaded: wait for every submitted job.
@@ -881,6 +904,12 @@ namespace ps2_mtvu
             else
                 syncAll(Reason::VBlank);
             w.seqAtPrevVBlank = now;
+            if (w.tailOn.load(std::memory_order_relaxed))
+            {
+                const uint64_t busyNs = w.tailBusyNs.exchange(0u, std::memory_order_relaxed);
+                ps2x::perflog::stageRing(ps2x::perflog::Stage::MtvuBusy)
+                    .push(static_cast<uint32_t>(tick), static_cast<float>(busyNs / 1e6));
+            }
             if ((tick % 300u) == 0u)
                 detail::threadedSummary(tick);
             return;

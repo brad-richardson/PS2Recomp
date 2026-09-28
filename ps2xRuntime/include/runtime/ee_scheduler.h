@@ -475,6 +475,9 @@ private:
     static int waitObjectId(const EeWaitState &wait);
     void writeGuestU32(uint32_t address, uint32_t value);
     void waitForEvent();
+    // PT2: cut the per-tick GameThread tail entries (ee.busy/ee.cpu/ee.wait)
+    // at a VBlank. Consumes m_perfGateNs/m_perfPaceNs/m_perfEventNs.
+    void perfTailCutFrame(uint64_t tick);
     void scheduleEvent(uint64_t deadlineCycle, std::chrono::steady_clock::time_point hostDeadline, EeEvent event);
     void updateNextDeadline();
     [[nodiscard]] bool hasReadyAtOrAbovePriority(int priority) const;
@@ -566,6 +569,16 @@ private:
     uint64_t m_eventSequence = 0;
     uint64_t m_invocationSequence = 0;
     uint64_t m_vsyncTick = 0;
+    // PT2: per-tick GameThread tail (PS2X_PERF_LOG=1; knob off is one bool
+    // check per VBlank plus one per waitForEvent wait). Executor only.
+    bool m_perfTail = false;
+    bool m_perfHaveFrame = false;
+    uint64_t m_perfFrameStartWall = 0;
+    uint64_t m_perfFrameStartCpu = 0;
+    uint64_t m_perfEventNs = 0; // waitForEvent sleeps since the last cut
+    uint64_t m_perfMtvuNs = 0;  // threadedWaitNsTotal() at the last cut
+    uint64_t m_perfGateNs = 0;  // this VBlank's pause-gate sleep
+    uint64_t m_perfPaceNs = 0;  // this VBlank's pacer sleep
     // FP1: wall-clock guest-vsync pacer (executor thread only). Default on;
     // PS2X_UNPACED=1 disables. Sleeps only; guest state untouched.
     ps2_vsync_pacer::Pacer m_vsyncPacer{};

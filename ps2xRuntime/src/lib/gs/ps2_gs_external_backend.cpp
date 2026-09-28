@@ -4,6 +4,7 @@
 // only stats()/lastPresent() take the mutex (cross-thread readers).
 
 #include "runtime/gs/ps2_gs_external_backend.h"
+#include "ps2_perf_log.h"
 #include "runtime/gs/ge1_gs_api.h"
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
@@ -371,6 +372,7 @@ public:
                 std::exit(78);
             }
             std::fprintf(stderr, "[gs:external] GE1 Full live GS loaded: %s\n", path);
+            m_perfTail = ps2x::perflog::enabled();
             if (const char *csv = std::getenv("PS2X_GS_EXTERNAL_GPU_CSV"); csv && *csv)
             {
                 m_gpuCsv = std::fopen(csv, "w");
@@ -753,8 +755,19 @@ public:
                              (unsigned long long)tick);
                 std::exit(78);
             }
-            if (m_gpuCsv)
-                std::fprintf(m_gpuCsv, "%llu,%.6f\n", (unsigned long long)tick, m_ge1.gpuMs());
+            // PT2: gpuMs() is reset-on-read, so sample once and share between
+            // the CSV and the gpu.busy ring. With both off the call is
+            // skipped exactly as before; <0 (closed/unsupported) pushes
+            // nothing (the stage line reads n=0).
+            if (m_gpuCsv || m_perfTail)
+            {
+                const float gpuMs = m_ge1.gpuMs();
+                if (m_gpuCsv)
+                    std::fprintf(m_gpuCsv, "%llu,%.6f\n", (unsigned long long)tick, gpuMs);
+                if (m_perfTail && gpuMs >= 0.0f)
+                    ps2x::perflog::stageRing(ps2x::perflog::Stage::GpuBusy)
+                        .push(static_cast<uint32_t>(tick), gpuMs);
+            }
         }
         ++m_stats.vsyncs;
 #if PS2X_ENABLE_DIAG_TAPS && defined(__ANDROID__)
@@ -1237,6 +1250,8 @@ private:
     uint32_t m_ge1FifoBytes = 0u;
     bool m_ge1FifoServed = false;
     FILE *m_gpuCsv = nullptr;
+    // PT2: cached PS2X_PERF_LOG (set in Initialize); feeds the gpu.busy ring.
+    bool m_perfTail = false;
     std::unique_ptr<GSCpuBackend> m_inner;
     FILE *m_log = nullptr;
     ps2x_gs_external::Stats m_stats;

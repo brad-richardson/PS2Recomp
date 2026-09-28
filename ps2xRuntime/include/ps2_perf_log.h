@@ -24,6 +24,10 @@
 // check each (zero cost).
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -307,11 +311,214 @@ inline std::vector<std::string> planPrune(std::vector<FileEntry> entries, uint64
     return dead;
 }
 
+// PT2: per-stage per-tick tail rings. Each stage's owning thread pushes one
+// (tick, ms) entry per guest vsync tick; the main thread drains the rings in
+// poll() into per-second [perf-stage] lines, and dumpTail() writes the full
+// rings as [perf-tail] lines on graceful shutdown (a force-stop SIGKILLs, so
+// the Odin summary reads the flushed per-second lines, never the dump).
+//
+//   [perf-stage] tick0=<u> tick1=<u> stage=<name> n=<u> mean=<f> p50=<f>
+//     p95=<f> p99=<f> max=<f> hist="<lo>:<count> ..."
+//   [perf-tail] tick=<u> stage=<name> ms=<f>
+//
+// Stats are nearest-rank over the drained entries (rank ceil(q*n)-1); hist
+// buckets are 0.25 ms wide over 0..20 ms plus an "ovf" overflow bucket, so
+// odin_run.py can merge whole windows into exact-ish tails. A line with n=0
+// prints -1 stats and an empty hist (the stage never fired: e.g. gpu on a
+// non-GE1 backend, or mtvu with MTVU off).
+enum class Stage : uint8_t
+{
+    EeBusy = 0, // GameThread guest-work wall per tick (frame wall minus waits)
+    EeCpu,      // GameThread thread-CPU per tick (spins included, sleeps not)
+    EeWait,     // GameThread measured waits per tick (pace + event + mtvu sync)
+    GsBusy,     // GS worker handler time between GuestVsyncs (idle excluded)
+    MtvuBusy,   // MTVU unit-job time between vblanks
+    GpuBusy,    // ge1_gs_gpu_ms() per GuestVsync (Vulkan timestamps; GE1 only)
+    Count
+};
+
+inline const char *stageName(Stage s)
+{
+    switch (s)
+    {
+    case Stage::EeBusy:
+        return "ee.busy";
+    case Stage::EeCpu:
+        return "ee.cpu";
+    case Stage::EeWait:
+        return "ee.wait";
+    case Stage::GsBusy:
+        return "gs.busy";
+    case Stage::MtvuBusy:
+        return "mtvu.busy";
+    case Stage::GpuBusy:
+        return "gpu.busy";
+    default:
+        return "?";
+    }
+}
+
+constexpr size_t kStageCount = static_cast<size_t>(Stage::Count);
+constexpr double kHistBucketMs = 0.25;
+constexpr size_t kHistBuckets = 80; // edges 0..20 ms; bucket [80] is overflow
+
+struct StageEntry
+{
+    uint64_t tick = 0;
+    float ms = 0.0f;
+};
+
+// Fixed-size ring, one writer thread + the main-thread reader, no locks. A
+// slot packs (tick32 << 32) | usec32 in one word: the writer stores the slot
+// then release-bumps the head, the reader acquire-loads the head. One writer
+// per ring per run by construction (EE: ee.*, MTVU vblank: mtvu.*, GS worker:
+// gs.* + gpu.*); a reader that fell more than a lap behind clamps to the
+// newest lap (see poll()).
+class StageRing
+{
+public:
+    static constexpr size_t kCap = 16384; // ~2.3 min at 120 ticks/s; a full leg fits
+    static constexpr size_t kMask = kCap - 1;
+    static_assert((kCap & kMask) == 0, "power of two");
+
+    void push(uint32_t tick, float ms)
+    {
+        uint32_t us = 0;
+        if (ms > 0.0f)
+        {
+            const double scaled = static_cast<double>(ms) * 1000.0 + 0.5;
+            us = scaled >= 4294967295.0 ? 0xFFFFFFFFu : static_cast<uint32_t>(scaled);
+        }
+        const uint64_t slot = (static_cast<uint64_t>(tick) << 32) | us;
+        const uint64_t i = m_head.load(std::memory_order_relaxed);
+        m_slots[i & kMask] = slot;
+        // Publish: the release pairs with the reader's acquire-load, so every
+        // slot below an observed head is fully written.
+        m_head.store(i + 1u, std::memory_order_release);
+    }
+
+    uint64_t head() const { return m_head.load(std::memory_order_acquire); }
+    uint64_t slotAt(uint64_t i) const { return m_slots[i & kMask]; }
+    static StageEntry decode(uint64_t slot)
+    {
+        StageEntry e;
+        e.tick = slot >> 32;
+        e.ms = static_cast<float>(slot & 0xFFFFFFFFu) / 1000.0f;
+        return e;
+    }
+
+private:
+    uint64_t m_slots[kCap] = {};
+    std::atomic<uint64_t> m_head{0};
+};
+
+struct StageStats
+{
+    uint64_t n = 0;
+    uint64_t tick0 = 0;
+    uint64_t tick1 = 0;
+    double mean = -1.0;
+    double p50 = -1.0;
+    double p95 = -1.0;
+    double p99 = -1.0;
+    double max = -1.0;
+    std::array<uint64_t, kHistBuckets + 1> hist{};
+};
+
+inline size_t histBucket(double ms)
+{
+    if (!(ms >= 0.0))
+        return 0;
+    const size_t b = static_cast<size_t>(ms / kHistBucketMs);
+    return b > kHistBuckets ? kHistBuckets : b;
+}
+
+// Nearest-rank stats over a copy of the entries (the input order is kept).
+inline StageStats summarizeStage(const std::vector<StageEntry> &entries)
+{
+    StageStats st;
+    st.n = entries.size();
+    if (entries.empty())
+        return st;
+    st.tick0 = entries[0].tick;
+    st.tick1 = entries[0].tick;
+    double sum = 0.0;
+    std::vector<float> ms;
+    ms.reserve(entries.size());
+    for (const auto &e : entries)
+    {
+        if (e.tick < st.tick0)
+            st.tick0 = e.tick;
+        if (e.tick > st.tick1)
+            st.tick1 = e.tick;
+        sum += e.ms;
+        ms.push_back(e.ms);
+        ++st.hist[histBucket(e.ms)];
+    }
+    st.mean = sum / static_cast<double>(entries.size());
+    std::sort(ms.begin(), ms.end());
+    const auto rank = [&](double q) -> double {
+        const double exact = std::ceil(q * static_cast<double>(ms.size()));
+        size_t i = exact < 1.0 ? 0 : static_cast<size_t>(exact) - 1; // ceil(q*n)-1
+        if (i >= ms.size())
+            i = ms.size() - 1;
+        return ms[i];
+    };
+    st.p50 = rank(0.50);
+    st.p95 = rank(0.95);
+    st.p99 = rank(0.99);
+    st.max = ms.back();
+    return st;
+}
+
+inline std::string formatStageLine(const char *name, const StageStats &st)
+{
+    char head[256];
+    std::snprintf(head, sizeof(head), "[perf-stage] tick0=%llu tick1=%llu stage=%s n=%llu mean=%.3f "
+                                      "p50=%.3f p95=%.3f p99=%.3f max=%.3f hist=\"",
+                  static_cast<unsigned long long>(st.tick0), static_cast<unsigned long long>(st.tick1), name,
+                  static_cast<unsigned long long>(st.n), st.mean, st.p50, st.p95, st.p99, st.max);
+    std::string line = head;
+    bool first = true;
+    for (size_t b = 0; b <= kHistBuckets; ++b)
+    {
+        if (st.hist[b] == 0u)
+            continue;
+        if (!first)
+            line += ' ';
+        first = false;
+        char cell[48];
+        if (b < kHistBuckets)
+            std::snprintf(cell, sizeof(cell), "%.2f:%llu", b * kHistBucketMs,
+                          static_cast<unsigned long long>(st.hist[b]));
+        else
+            std::snprintf(cell, sizeof(cell), "ovf:%llu", static_cast<unsigned long long>(st.hist[b]));
+        line += cell;
+    }
+    line += '"';
+    return line;
+}
+
+// Monotonic wall ns for the stage call sites (two stamps per unit of work).
+inline uint64_t steadyNs()
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+
 // Runtime API (src/lib/ps2_perf_log.cpp). enabled() reads the knob; call it
 // once and cache the result at the call site.
 bool enabled();
 void poll(uint64_t vsyncTick);
 void notePresent();
+// Full-ring [perf-tail] dump (graceful shutdown only; no-op unless active).
+void dumpTail();
+// Calling thread's CPU ns, or kCpuUnsupported where no cheap query exists.
+constexpr uint64_t kCpuUnsupported = ~0ull;
+uint64_t threadCpuNs();
+// The ring for a stage (function-static singletons in the .cpp).
+StageRing &stageRing(Stage s);
 #if defined(__linux__) || defined(__APPLE__)
 // PL2 test seam: the cached dlsym sampler behind thermalStatusWith
 // (main-thread only, like poll()). Desktop libandroid.so is absent, so this

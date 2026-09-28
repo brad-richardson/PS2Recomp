@@ -1,5 +1,6 @@
 #include "runtime/gs/gs_worker.h"
 #include "ThreadNaming.h"
+#include "ps2_perf_log.h"
 #include "ps2_thread_affinity.h"
 
 #include <cstdio>
@@ -214,6 +215,11 @@ void GsWorker::threadMain()
             std::fprintf(stderr, "[affinity] gs worker cpus=%s rc=%d\n", workerCpus, rc);
         }
     }
+    // PT2: per-tick busy time (handler only; queue-idle excluded). The frame
+    // cuts at each in-stream GuestVsync (tick in regValue); knob off is one
+    // predictable branch per command.
+    const bool tail = ps2x::perflog::enabled();
+    uint64_t tailAccNs = 0;
     for (;;)
     {
         // GP4 H6: pop up to kPopBatch commands per mutex acquisition and run
@@ -279,7 +285,19 @@ void GsWorker::threadMain()
         m_hasSpace.notify_all();
         for (size_t i = 0; i < batchSize; ++i)
         {
+            const uint64_t t0 = tail ? ps2x::perflog::steadyNs() : 0u;
             m_handler(batch[i]);
+            if (tail)
+            {
+                tailAccNs += ps2x::perflog::steadyNs() - t0;
+                if (batch[i].kind == GsCmdKind::GuestVsync)
+                {
+                    ps2x::perflog::stageRing(ps2x::perflog::Stage::GsBusy)
+                        .push(static_cast<uint32_t>(batch[i].regValue),
+                              static_cast<float>(tailAccNs / 1e6));
+                    tailAccNs = 0;
+                }
+            }
             if (batch[i].rpc)
                 batch[i].rpc->signal();
         }
