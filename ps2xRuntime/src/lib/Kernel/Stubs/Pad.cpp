@@ -1,7 +1,9 @@
 #include "Common.h"
+#include "ps2_build_id.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e44_trace.h"
+#include "ps2_env_file.h"
 #include "ps2_pad_latch.h"
 #include "Pad.h"
 
@@ -699,6 +701,18 @@ namespace ps2_stubs
         // recording starts with a '#' header block (start UTC, knobs, save
         // hash); the script parser skips full-line comments, so recordings
         // replay directly.
+        // PL1: dir mode also snapshots the effective port-0 card root into
+        // a sibling padrec-<UTC>.mc/ dir at arm time (<= 16 MiB, else a
+        // header note), pruned together with its recording; the header
+        // carries build/env_sha plus the snapshot's name and hash, so any
+        // session replays standalone via padrec_replay_env.py.
+        enum class PadRecordSnap
+        {
+            None, // file mode, or no card root resolved
+            Ok,
+            TooLarge, // over the 16 MiB bound (no partial dir kept)
+            Unreadable, // not a dir, or an I/O error mid-copy
+        };
         struct PadRecord
         {
             std::mutex mutex;
@@ -718,6 +732,11 @@ namespace ps2_stubs
             uint64_t totalEntries = 0u;
             bool testTickSet = false;
             uint64_t testTick = 0u;
+            std::string snapRoot; // effective port-0 card root ("" = none)
+            std::string snapDirName; // sibling dir leaf ("padrec-<UTC>.mc")
+            uint64_t snapHash = 0u; // FNV-1a 64 over relpaths + copied bytes
+            uint64_t snapFiles = 0u;
+            PadRecordSnap snapStatus = PadRecordSnap::None;
         };
         PadRecord g_padRecord;
         std::atomic<bool> g_padRecordInitDone{false};
@@ -870,25 +889,22 @@ namespace ps2_stubs
             return hash;
         }
 
-        // FNV-1a 64 over the sorted relative paths + bytes of the regular
-        // files under mcRoot. Bounded (4096 files / 64 MiB); best-effort:
-        // unreadable roots yield false, never an exception.
-        bool padRecordHashSaveSet(const char *mcRoot, uint64_t &hashOut, uint64_t &filesOut)
+        // Sorted relative paths of the regular files under a card root.
+        // Best-effort: unreadable roots yield false, never an exception.
+        bool padRecordListSaveFiles(const char *root, std::vector<std::string> &relsOut)
         {
             namespace fs = std::filesystem;
-            hashOut = 14695981039346656037ull;
-            filesOut = 0u;
-            if (!mcRoot || mcRoot[0] == '\0')
+            relsOut.clear();
+            if (!root || root[0] == '\0')
             {
                 return false;
             }
             std::error_code ec;
-            if (!fs::is_directory(mcRoot, ec) || ec)
+            if (!fs::is_directory(root, ec) || ec)
             {
                 return false;
             }
-            std::vector<std::string> rels;
-            fs::recursive_directory_iterator it(mcRoot, ec);
+            fs::recursive_directory_iterator it(root, ec);
             const fs::recursive_directory_iterator end;
             while (!ec && it != end)
             {
@@ -896,10 +912,10 @@ namespace ps2_stubs
                 if (it->is_regular_file(ec2) && !ec2)
                 {
                     std::error_code ec3;
-                    std::string rel = fs::relative(it->path(), mcRoot, ec3).string();
+                    std::string rel = fs::relative(it->path(), root, ec3).string();
                     if (!ec3)
                     {
-                        rels.push_back(rel);
+                        relsOut.push_back(rel);
                     }
                 }
                 it.increment(ec);
@@ -908,7 +924,22 @@ namespace ps2_stubs
             {
                 return false;
             }
-            std::sort(rels.begin(), rels.end());
+            std::sort(relsOut.begin(), relsOut.end());
+            return true;
+        }
+
+        // FNV-1a 64 over the sorted relative paths + bytes of the regular
+        // files under mcRoot. Bounded (4096 files / 64 MiB); best-effort:
+        // unreadable roots yield false, never an exception.
+        bool padRecordHashSaveSet(const char *mcRoot, uint64_t &hashOut, uint64_t &filesOut)
+        {
+            hashOut = 14695981039346656037ull;
+            filesOut = 0u;
+            std::vector<std::string> rels;
+            if (!padRecordListSaveFiles(mcRoot, rels))
+            {
+                return false;
+            }
             uint64_t hash = 14695981039346656037ull;
             uint64_t bytes = 0u;
             constexpr uint64_t kMaxFiles = 4096u;
@@ -938,6 +969,114 @@ namespace ps2_stubs
             }
             hashOut = hash;
             return true;
+        }
+
+        // The card root the guest actually uses for port 0: the PS2X_MC_ROOT
+        // override when set, else the IoPaths root main configured (the ELF
+        // dir's mc0 by default). "" when neither resolves.
+        std::string padRecordEffectiveMcRoot()
+        {
+            if (const char *env = std::getenv("PS2X_MC_ROOT"))
+            {
+                if (env[0] != '\0')
+                {
+                    return env;
+                }
+            }
+            return PS2Runtime::getIoPaths().mcRoot.string();
+        }
+
+        // Copy a card root's files into destDir (created here; the caller
+        // picked a name that doesn't exist), hashing relpaths + copied bytes
+        // with the same scheme as padRecordHashSaveSet, so a later mcsave
+        // over the snapshot reproduces snapHash. Bounded (4096 files /
+        // 16 MiB); over the byte bound, or on any I/O error, the partial dir
+        // is removed and the outcome is a header note, never a half copy.
+        PadRecordSnap padRecordSnapshotMc(const std::string &root, const std::string &destDir,
+                                          uint64_t &hashOut, uint64_t &filesOut)
+        {
+            namespace fs = std::filesystem;
+            hashOut = 14695981039346656037ull;
+            filesOut = 0u;
+            constexpr uint64_t kMaxFiles = 4096u;
+            constexpr uint64_t kMaxBytes = 16u << 20;
+            std::vector<std::string> rels;
+            if (!padRecordListSaveFiles(root.c_str(), rels))
+            {
+                return PadRecordSnap::Unreadable;
+            }
+            std::error_code ec;
+            fs::create_directories(destDir, ec);
+            if (ec)
+            {
+                return PadRecordSnap::Unreadable;
+            }
+            uint64_t hash = 14695981039346656037ull;
+            uint64_t bytes = 0u;
+            for (const std::string &rel : rels)
+            {
+                if (filesOut >= kMaxFiles)
+                {
+                    break;
+                }
+                hash = padRecordFnv1a(rel.data(), rel.size(), hash);
+                hash = padRecordFnv1a("\0", 1, hash);
+                const std::string src = root + "/" + rel;
+                const std::string dst = destDir + "/" + rel;
+                std::FILE *in = std::fopen(src.c_str(), "rb");
+                if (!in)
+                {
+                    fs::remove_all(destDir, ec);
+                    return PadRecordSnap::Unreadable;
+                }
+                fs::create_directories(fs::path(dst).parent_path(), ec);
+                if (ec)
+                {
+                    std::fclose(in);
+                    fs::remove_all(destDir, ec);
+                    return PadRecordSnap::Unreadable;
+                }
+                std::FILE *out = std::fopen(dst.c_str(), "wb");
+                if (!out)
+                {
+                    std::fclose(in);
+                    fs::remove_all(destDir, ec);
+                    return PadRecordSnap::Unreadable;
+                }
+                char buf[8192];
+                size_t n = 0;
+                bool tooLarge = false;
+                bool ioError = false;
+                while ((n = std::fread(buf, 1, sizeof(buf), in)) > 0)
+                {
+                    if (bytes + n > kMaxBytes)
+                    {
+                        tooLarge = true;
+                        break;
+                    }
+                    if (std::fwrite(buf, 1, n, out) != n)
+                    {
+                        ioError = true;
+                        break;
+                    }
+                    hash = padRecordFnv1a(buf, n, hash);
+                    bytes += n;
+                }
+                if (std::ferror(in))
+                {
+                    ioError = true; // short read: the copy would lie
+                }
+                std::fclose(in);
+                std::fclose(out);
+                if (tooLarge || ioError)
+                {
+                    fs::remove_all(destDir, ec);
+                    return tooLarge ? PadRecordSnap::TooLarge : PadRecordSnap::Unreadable;
+                }
+                ++filesOut;
+            }
+            hashOut = hash;
+            return PadRecordSnap::Ok;
         }
 
         void padRecordWriteHeaderLocked(std::time_t when)
@@ -972,10 +1111,12 @@ namespace ps2_stubs
             std::fprintf(f,
                          "# padrec v1\n"
                          "# start_utc=%s\n"
-                         "# build=unavailable\n"
+                         "# build=%s\n"
+                         "# env_sha=%s\n"
                          "# knobs SIM_MODE=%s VU1_ENGINE=%s MTVU=%s FINISH_TIMING=%s "
                          "DETERMINISTIC=%s VU_FLOAT=%s VIF1_REVERSE_DMA=%s\n",
-                         startUtc, sim, vu1, mtvu, finish, det, vfloat, revdma);
+                         startUtc, ps2x::buildId(), ps2x::recordedEnvFileHash(), sim, vu1, mtvu,
+                         finish, det, vfloat, revdma);
             if (saveOk)
             {
                 std::fprintf(f, "# mcroot=%s mcsave=%016llx mcfiles=%llu\n", mcroot,
@@ -986,12 +1127,42 @@ namespace ps2_stubs
             {
                 std::fprintf(f, "# mcroot=%s mcsave=unreadable mcfiles=0\n", mcroot);
             }
+            {
+                const char *snapName = "none";
+                if (g_padRecord.snapStatus == PadRecordSnap::Ok)
+                    snapName = g_padRecord.snapDirName.c_str();
+                else if (g_padRecord.snapStatus == PadRecordSnap::TooLarge)
+                    snapName = "too-large";
+                else if (g_padRecord.snapStatus == PadRecordSnap::Unreadable)
+                    snapName = "unreadable";
+                std::string snapSrc =
+                    g_padRecord.snapRoot.empty() ? std::string("none") : g_padRecord.snapRoot;
+                for (char &c : snapSrc)
+                {
+                    if (c == '\n' || c == '\r')
+                        c = '_';
+                }
+                if (g_padRecord.snapStatus == PadRecordSnap::Ok)
+                {
+                    std::fprintf(f, "# mcsnap=%s mcsrc=%s mcsnap_sha=%016llx mcsnap_files=%llu\n",
+                                 snapName, snapSrc.c_str(),
+                                 static_cast<unsigned long long>(g_padRecord.snapHash),
+                                 static_cast<unsigned long long>(g_padRecord.snapFiles));
+                }
+                else
+                {
+                    std::fprintf(f, "# mcsnap=%s mcsrc=%s mcsnap_sha=none mcsnap_files=0\n", snapName,
+                                 snapSrc.c_str());
+                }
+            }
             std::fflush(f);
         }
 
         void padRecordFinishArmLocked(const char *source, std::time_t when)
         {
-            // g_padRecord.file and .path must be set by the caller.
+            // g_padRecord.file and .path must be set by the caller; dir mode
+            // also sets the snapshot outcome before this runs.
+            g_padRecord.snapRoot = padRecordEffectiveMcRoot();
             padRecordWriteHeaderLocked(when);
             g_padRecord.enabled = true;
             g_padRecordArmed.store(true, std::memory_order_relaxed);
@@ -1056,7 +1227,7 @@ namespace ps2_stubs
                 return;
             }
             std::sort(names.begin(), names.end());
-            uint64_t pruned = 0u, survivors = 0u;
+            uint64_t pruned = 0u, survivors = 0u, snapsPruned = 0u;
             for (auto it = names.rbegin(); it != names.rend(); ++it)
             {
                 if (survivors < keep)
@@ -1073,11 +1244,27 @@ namespace ps2_stubs
                 if (!ec3)
                 {
                     ++pruned;
+                    // The snapshot goes with its recording (same stamp,
+                    // ".mc" sibling); directories only, never the live one
+                    // (it survives above as a survivor or currentName).
+                    const std::string snap = it->substr(0, it->size() - 4) + ".mc";
+                    const fs::path snapPath = fs::path(dir) / snap;
+                    std::error_code ec4;
+                    if (fs::is_directory(snapPath, ec4) && !ec4)
+                    {
+                        std::error_code ec5;
+                        fs::remove_all(snapPath, ec5);
+                        if (!ec5)
+                        {
+                            ++snapsPruned;
+                        }
+                    }
                 }
             }
-            std::fprintf(stderr, "[padrecord] prune dir=%s keep=%llu pruned=%llu files=%llu\n",
+            std::fprintf(stderr, "[padrecord] prune dir=%s keep=%llu pruned=%llu snaps=%llu files=%llu\n",
                          dir, static_cast<unsigned long long>(keep),
                          static_cast<unsigned long long>(pruned),
+                         static_cast<unsigned long long>(snapsPruned),
                          static_cast<unsigned long long>(names.size() - pruned));
         }
 
@@ -1108,8 +1295,18 @@ namespace ps2_stubs
                     std::snprintf(name, sizeof(name), "padrec-%s-%d.txt", stamp, n + 1);
                 }
                 const std::string full = std::string(dir) + "/" + name;
+                // The card snapshot is a sibling dir sharing the stamp; both
+                // names must be free (a stale .mc from a killed session
+                // collides like a stale .txt).
+                const std::string leaf(name); // always ends in ".txt"
+                const std::string snapLeaf = leaf.substr(0, leaf.size() - 4) + ".mc";
+                const std::string snapFull = std::string(dir) + "/" + snapLeaf;
                 std::error_code ec2;
                 if (fs::exists(full, ec2) || ec2)
+                {
+                    continue;
+                }
+                if (fs::exists(snapFull, ec2) || ec2)
                 {
                     continue;
                 }
@@ -1121,6 +1318,28 @@ namespace ps2_stubs
                     return;
                 }
                 g_padRecord.path = full;
+                // Snapshot the card before the header goes out (the header
+                // carries the outcome). Best-effort: any failure is a
+                // header note, and recording continues regardless.
+                {
+                    const std::string root = padRecordEffectiveMcRoot();
+                    if (!root.empty())
+                    {
+                        uint64_t snapHash = 0u, snapFiles = 0u;
+                        g_padRecord.snapStatus =
+                            padRecordSnapshotMc(root, snapFull, snapHash, snapFiles);
+                        if (g_padRecord.snapStatus == PadRecordSnap::Ok)
+                        {
+                            g_padRecord.snapDirName = snapLeaf;
+                            g_padRecord.snapHash = snapHash;
+                            g_padRecord.snapFiles = snapFiles;
+                        }
+                        std::fprintf(stderr,
+                                     "[padrecord] snapshot root=%s status=%d files=%llu\n",
+                                     root.c_str(), static_cast<int>(g_padRecord.snapStatus),
+                                     static_cast<unsigned long long>(snapFiles));
+                    }
+                }
                 padRecordFinishArmLocked(source, when);
                 padRecordPruneDirLocked(dir, keep, name);
                 return;
@@ -1150,6 +1369,11 @@ namespace ps2_stubs
             g_padRecord.lastFlushTick = 0u;
             g_padRecord.entriesSinceFlush = 0u;
             g_padRecord.totalEntries = 0u;
+            g_padRecord.snapRoot.clear();
+            g_padRecord.snapDirName.clear();
+            g_padRecord.snapHash = 0u;
+            g_padRecord.snapFiles = 0u;
+            g_padRecord.snapStatus = PadRecordSnap::None;
             g_padRecordArmed.store(false, std::memory_order_relaxed);
         }
 

@@ -20,7 +20,8 @@ extern char **environ;
 
 namespace
 {
-std::vector<std::pair<std::string, std::string>> readEnvFile(const std::filesystem::path &path)
+std::vector<std::pair<std::string, std::string>> readEnvFile(const std::filesystem::path &path,
+                                                             std::string *rawOut = nullptr)
 {
     std::ifstream file(path);
     if (!file.is_open())
@@ -31,6 +32,8 @@ std::vector<std::pair<std::string, std::string>> readEnvFile(const std::filesyst
     std::ostringstream content;
     content << file.rdbuf();
     std::fprintf(stderr, "[ios-env] read %s\n", path.c_str());
+    if (rawOut)
+        *rawOut = content.str();
     return ps2x::parseEnvFileContent(content.str());
 }
 
@@ -81,8 +84,17 @@ void prepareEnvironment(const char *argv0)
         {"DOCUMENTS", documents.string()},
     };
 
+    std::string bundleRaw, documentsRaw;
     const auto merged = ps2x::mergeEnvLayers(
-        {readEnvFile(bundle / "ps2x.env"), readEnvFile(documents / "ps2x.env")}, launcherKeys, vars);
+        {readEnvFile(bundle / "ps2x.env", &bundleRaw), readEnvFile(documents / "ps2x.env", &documentsRaw)},
+        launcherKeys, vars);
+    // PL1: stash the raw bytes' hash for the padrec header's env_sha (both
+    // layers, NUL-separated; empty when neither file exists).
+    if (!bundleRaw.empty() || !documentsRaw.empty())
+    {
+        const std::string both = bundleRaw + '\0' + documentsRaw;
+        ps2x::setRecordedEnvFileHash(ps2x::fnv1a64Hex(both));
+    }
     for (const auto &[key, value] : merged)
     {
         setenv(key.c_str(), value.c_str(), 1);

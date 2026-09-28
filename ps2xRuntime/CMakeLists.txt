@@ -60,6 +60,35 @@ set(PS2X_VITA_APP_NAME "PS2 Retro X" CACHE STRING "Display name for the Vita bub
 set(PS2X_VITA_TITLEID "RANJ00001" CACHE STRING "9-character Vita title id")
 set(PS2X_VITA_VERSION "01.00" CACHE STRING "Vita app version")
 set(PS2X_DEFAULT_BOOT_ELF "" CACHE STRING "Guest ELF path passed directly to main() when argv is unavailable")
+# PL1: build id for the pad-recording header (fork SHA + dirty flag). Empty =
+# auto-detect from git at configure time (worktree builds); archive exports
+# (no .git) and explicit -DPS2X_BUILD_ID=<sha12> (bradflix drivers) skip it.
+set(PS2X_BUILD_ID "" CACHE STRING "Build id baked into the binary (padrec header + PS2X-BUILD-ID marker)")
+set(PS2X_BUILD_ID_RESOLVED "${PS2X_BUILD_ID}")
+if(NOT PS2X_BUILD_ID_RESOLVED)
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --short=12 HEAD
+            OUTPUT_VARIABLE PS2X_GIT_SHA OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(PS2X_GIT_SHA MATCHES "^[0-9a-f]+$")
+            execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}" diff --quiet HEAD --
+                RESULT_VARIABLE PS2X_GIT_DIRTY_RC ERROR_QUIET)
+            set(PS2X_BUILD_ID_RESOLVED "${PS2X_GIT_SHA}")
+            if(NOT PS2X_GIT_DIRTY_RC EQUAL 0)
+                set(PS2X_BUILD_ID_RESOLVED "${PS2X_GIT_SHA}-dirty")
+            endif()
+        endif()
+    endif()
+endif()
+if(NOT PS2X_BUILD_ID_RESOLVED MATCHES "^[A-Za-z0-9_.,:+-]*$")
+    message(STATUS "PS2X build id: rejected (bad charset), treating as unavailable")
+    set(PS2X_BUILD_ID_RESOLVED "")
+endif()
+if(PS2X_BUILD_ID_RESOLVED)
+    message(STATUS "PS2X build id: ${PS2X_BUILD_ID_RESOLVED}")
+else()
+    message(STATUS "PS2X build id: unavailable (no -DPS2X_BUILD_ID, no git)")
+endif()
 
 if(PS2X_IS_VITA)
     if(NOT DEFINED ENV{VITASDK})
@@ -467,6 +496,7 @@ function(ps2x_stage_ffmpeg_runtime_dlls target_name)
 endfunction()
 
 add_library(ps2_runtime STATIC
+    src/lib/ps2_build_id.cpp
     src/lib/game_overrides.cpp
     src/lib/gs/ps2_gif_arbiter.cpp
     src/lib/gs/gs_stream_capture.cpp
@@ -499,6 +529,10 @@ if(PS2X_ENABLE_RUNTIME_LOGS)
         PS2_RUNTIME_LOGS=1
     )
 endif()
+
+# PL1: PUBLIC so the pad recorder and the APK marker TU (and the suite, which
+# links ps2_runtime) all see the same id. Always defined, possibly empty.
+target_compile_definitions(ps2_runtime PUBLIC PS2X_BUILD_ID="${PS2X_BUILD_ID_RESOLVED}")
 
 # E40-E44 guest-memory watch taps in ps2_runtime_macros.h. Keep them out of
 # every generated function by default on all platforms; dev lanes opt in.

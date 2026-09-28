@@ -7,10 +7,15 @@
 // Line format (v1):
 //   [perf] wall=<UTC ISO> t=<s>s tick=<vsync> vsyncs_per_s=<f> presents=<n>
 //     maxgap_ms=<f> threads="<name>=<ms> ..." device="<kv ...>"
-// threads holds per-window user+system CPU ms deltas (Apple only; "na"
-// elsewhere), keyed by thread index like [thread-cpu] (t#N; the runtime does
-// not name its threads). device holds iOS UIDevice/ProcessInfo state
-// (thermal=<0-3> lpm=<0/1> batt=<0-100> chg=<0/1>); "na" elsewhere.
+// threads holds per-window user+system CPU ms deltas, keyed by thread index
+// like [thread-cpu] on Apple (t#N when unnamed) and by kernel tid on Linux
+// (<comm>#<tid>; readdir order is unstable so the tid is the match key).
+// "na" where the platform sampler is unavailable. device holds iOS
+// UIDevice/ProcessInfo state (thermal=<0-3> lpm=<0/1> batt=<0-100> chg=<0/1>)
+// or Android state (thermal=<0-6 AThermal> prime=<C> batt=<0-100> ac=<0/1>,
+// each "na" when unreadable); "na" elsewhere. The Android prime zone is the
+// sysfs thermal zone of type cpu-1-1-1 (the Odin 3 prime core, same source
+// as odin_run.py's pre-launch check).
 //
 // This header holds the pure parts (tested by ps2_perf_log_tests.cpp); the
 // file I/O and platform snapshots live in src/lib/ps2_perf_log.cpp. poll()
@@ -23,6 +28,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -105,6 +111,134 @@ struct FileEntry
     std::string name;
     uint64_t size = 0;
 };
+
+// PL1: Linux /proc sampler pure parts (the /proc walk itself lives in
+// ps2_perf_log.cpp; these parse its inputs so the host suite can test them
+// on canned text).
+struct ProcTaskCpu
+{
+    long tid = 0;
+    std::string comm; // thread name (comm), sanitized at format time
+    uint64_t utime = 0; // field 14, clock ticks
+    uint64_t stime = 0; // field 15, clock ticks
+};
+
+// Parse one /proc/self/task/<tid>/stat line. comm sits between the first
+// '(' and the LAST ')' (names may hold spaces and parens); utime/stime are
+// the 12th/13th whitespace fields after the ')'. False on any malformed
+// input (out untouched).
+inline bool parseProcTaskStat(long tid, std::string_view text, ProcTaskCpu &out)
+{
+    if (tid <= 0)
+        return false;
+    const size_t open = text.find('(');
+    const size_t close = text.find_last_of(')');
+    if (open == std::string_view::npos || close == std::string_view::npos || close <= open + 1)
+        return false;
+    size_t pos = close + 1;
+    auto nextField = [&]() -> std::string_view {
+        while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t' || text[pos] == '\n'))
+            ++pos;
+        const size_t begin = pos;
+        while (pos < text.size() && text[pos] != ' ' && text[pos] != '\t' && text[pos] != '\n')
+            ++pos;
+        return text.substr(begin, pos - begin);
+    };
+    auto parseU64 = [](std::string_view field, uint64_t &value) -> bool {
+        if (field.empty())
+            return false;
+        uint64_t v = 0;
+        for (char c : field)
+        {
+            if (c < '0' || c > '9')
+                return false;
+            v = v * 10u + static_cast<uint64_t>(c - '0');
+        }
+        value = v;
+        return true;
+    };
+    // Fields after comm start at field 3 (state); utime/stime are 14/15.
+    for (int i = 3; i < 14; ++i)
+    {
+        if (nextField().empty())
+            return false;
+    }
+    uint64_t utime = 0, stime = 0;
+    if (!parseU64(nextField(), utime) || !parseU64(nextField(), stime))
+        return false;
+    out.tid = tid;
+    out.comm = std::string(text.substr(open + 1, close - open - 1));
+    out.utime = utime;
+    out.stime = stime;
+    return true;
+}
+
+inline double procTicksToMs(uint64_t ticks, long clkTck)
+{
+    if (clkTck <= 0)
+        return 0.0;
+    return static_cast<double>(ticks) * 1000.0 / static_cast<double>(clkTck);
+}
+
+// Parse a small sysfs integer file ("41800\n" -> 41800). Leading/trailing
+// ASCII whitespace tolerated; anything else is malformed (out untouched).
+inline bool parseSysfsLong(std::string_view text, long &out)
+{
+    size_t begin = 0;
+    while (begin < text.size() &&
+           (text[begin] == ' ' || text[begin] == '\t' || text[begin] == '\n' || text[begin] == '\r'))
+        ++begin;
+    size_t end = text.size();
+    while (end > begin &&
+           (text[end - 1] == ' ' || text[end - 1] == '\t' || text[end - 1] == '\n' || text[end - 1] == '\r'))
+        --end;
+    if (begin == end)
+        return false;
+    bool negative = false;
+    if (text[begin] == '+' || text[begin] == '-')
+    {
+        negative = text[begin] == '-';
+        ++begin;
+    }
+    if (begin == end)
+        return false;
+    long value = 0;
+    for (size_t i = begin; i < end; ++i)
+    {
+        const char c = text[i];
+        if (c < '0' || c > '9')
+            return false;
+        value = value * 10 + (c - '0');
+    }
+    out = negative ? -value : value;
+    return true;
+}
+
+struct AndroidDevice
+{
+    bool hasThermal = false;
+    int thermal = 0; // AThermal 0-6 (NONE..SHUTDOWN)
+    bool hasPrimeC = false;
+    double primeC = 0.0; // cpu-1-1-1 zone, degrees C
+    bool hasBatt = false;
+    int batt = 0; // 0-100 %
+    bool hasAc = false;
+    int ac = 0; // 0/1
+};
+
+// device="..." payload for Android; missing channels read "na" (v1 shape,
+// same keys every line).
+inline std::string formatAndroidDevice(const AndroidDevice &d)
+{
+    char thermal[16], prime[32], batt[16], ac[16];
+    std::snprintf(thermal, sizeof(thermal), d.hasThermal ? "%d" : "na", d.thermal);
+    std::snprintf(prime, sizeof(prime), d.hasPrimeC ? "%.1f" : "na", d.primeC);
+    std::snprintf(batt, sizeof(batt), d.hasBatt ? "%d" : "na", d.batt);
+    std::snprintf(ac, sizeof(ac), d.hasAc ? "%d" : "na", d.ac);
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "thermal=%s prime=%s batt=%s ac=%s", thermal, prime, batt, ac);
+    return buf;
+}
 
 // Ring-cap plan over the perf-*.log files in the log dir (the current file
 // included: it sorts newest, so it is never picked). Returns the names to

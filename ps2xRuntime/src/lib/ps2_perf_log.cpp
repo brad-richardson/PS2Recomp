@@ -20,6 +20,13 @@
 #include <pthread.h>
 #endif
 
+#if defined(__linux__)
+#include <dirent.h>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace ps2x::perflog
 {
 bool enabled()
@@ -118,6 +125,240 @@ std::vector<std::pair<std::string, double>> snapshotThreadCpu()
 }
 #endif
 
+#if defined(__linux__)
+// PL1: /proc + sysfs samplers. Main thread, once per wall second, bounded:
+// fixed caps on entries, stack buffers, open/read/close (no FILE, no
+// allocation in the reads themselves). threadsAvailable=false when
+// /proc/self/task won't open; every device channel degrades to "na".
+struct LinuxCpuSample
+{
+    long tid = 0;
+    std::string label; // "<comm>#<tid>"
+    double cumMs = 0.0; // user+system, cumulative
+};
+
+bool perfReadSmallFile(const char *path, char *buf, size_t bufSize, size_t &lenOut)
+{
+    lenOut = 0;
+    if (bufSize < 2)
+        return false;
+    const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    size_t total = 0;
+    for (;;)
+    {
+        const ssize_t n = ::read(fd, buf + total, bufSize - 1 - total);
+        if (n < 0)
+        {
+            ::close(fd);
+            return false;
+        }
+        if (n == 0)
+            break;
+        total += static_cast<size_t>(n);
+        if (total >= bufSize - 1)
+        {
+            // Full without EOF: not a small status file; refuse truncation.
+            char probe = 0;
+            const ssize_t m = ::read(fd, &probe, 1);
+            ::close(fd);
+            if (m != 0)
+                return false;
+            break;
+        }
+    }
+    ::close(fd);
+    buf[total] = '\0';
+    lenOut = total;
+    return true;
+}
+
+bool perfTrimEquals(const char *text, size_t len, const char *want)
+{
+    size_t begin = 0;
+    while (begin < len && (text[begin] == ' ' || text[begin] == '\t' || text[begin] == '\n' || text[begin] == '\r'))
+        ++begin;
+    size_t end = len;
+    while (end > begin &&
+           (text[end - 1] == ' ' || text[end - 1] == '\t' || text[end - 1] == '\n' || text[end - 1] == '\r'))
+        --end;
+    for (size_t i = 0;; ++i)
+    {
+        const bool textEnd = begin + i >= end;
+        const bool wantEnd = want[i] == '\0';
+        if (textEnd || wantEnd)
+            return textEnd && wantEnd;
+        if (text[begin + i] != want[i])
+            return false;
+    }
+}
+
+// Per-thread cumulative user+system CPU ms from /proc/self/task/*/stat,
+// keyed by tid (readdir order is unstable). Labels carry the tid so
+// duplicate comms (unnamed threads share the process name) stay distinct.
+bool snapshotLinuxThreadCpu(long clkTck, std::vector<LinuxCpuSample> &out)
+{
+    out.clear();
+    DIR *dir = ::opendir("/proc/self/task");
+    if (!dir)
+        return false;
+    int scanned = 0;
+    for (;;)
+    {
+        const dirent *de = ::readdir(dir);
+        if (!de)
+            break;
+        char *end = nullptr;
+        const long tid = std::strtol(de->d_name, &end, 10);
+        if (end == de->d_name || *end != '\0' || tid <= 0)
+            continue;
+        if (++scanned > 256)
+            break;
+        char path[64];
+        std::snprintf(path, sizeof(path), "/proc/self/task/%ld/stat", tid);
+        char text[1024]; // stat lines are < 512 bytes (comm <= 16)
+        size_t len = 0;
+        if (!perfReadSmallFile(path, text, sizeof(text), len))
+            continue;
+        ProcTaskCpu cpu;
+        if (!parseProcTaskStat(tid, std::string_view(text, len), cpu))
+            continue;
+        char label[64];
+        std::snprintf(label, sizeof(label), "%s#%ld", cpu.comm.c_str(), tid);
+        LinuxCpuSample sample;
+        sample.tid = tid;
+        sample.label = label;
+        sample.cumMs = procTicksToMs(cpu.utime + cpu.stime, clkTck);
+        out.push_back(std::move(sample));
+    }
+    ::closedir(dir);
+    return true;
+}
+
+int32_t perfThermalStatus()
+{
+    // AThermal_getCurrentThermalStatus is API 30+ and minSdk is 29, so
+    // resolve it at run time (cached; desktop Linux fails once, then na).
+    using GetThermalFn = int32_t (*)();
+    static bool lookedUp = false;
+    static GetThermalFn fn = nullptr;
+    if (!lookedUp)
+    {
+        lookedUp = true;
+        if (void *handle = ::dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL))
+            fn = reinterpret_cast<GetThermalFn>(::dlsym(handle, "AThermal_getCurrentThermalStatus"));
+    }
+    if (!fn)
+        return -1;
+    const int32_t status = fn();
+    return (status >= 0 && status <= 6) ? status : -1;
+}
+
+std::string sampleLinuxDevice()
+{
+    AndroidDevice d;
+    const int32_t thermal = perfThermalStatus();
+    if (thermal >= 0)
+    {
+        d.hasThermal = true;
+        d.thermal = thermal;
+    }
+    // Prime-zone temperature: the sysfs zone typed cpu-1-1-1 (Odin 3 prime
+    // core, same source as odin_run.py's pre-launch check), millidegrees C.
+    if (DIR *dir = ::opendir("/sys/class/thermal"))
+    {
+        int zones = 0;
+        for (;;)
+        {
+            const dirent *de = ::readdir(dir);
+            if (!de)
+                break;
+            if (de->d_name[0] == '.')
+                continue;
+            if (++zones > 64)
+                break;
+            char typePath[160];
+            if (std::snprintf(typePath, sizeof(typePath), "/sys/class/thermal/%s/type", de->d_name) >=
+                static_cast<int>(sizeof(typePath)))
+                continue;
+            char type[64];
+            size_t typeLen = 0;
+            if (!perfReadSmallFile(typePath, type, sizeof(type), typeLen) ||
+                !perfTrimEquals(type, typeLen, "cpu-1-1-1"))
+                continue;
+            char tempPath[160];
+            if (std::snprintf(tempPath, sizeof(tempPath), "/sys/class/thermal/%s/temp", de->d_name) >=
+                static_cast<int>(sizeof(tempPath)))
+                break;
+            char temp[32];
+            size_t tempLen = 0;
+            long milli = 0;
+            if (perfReadSmallFile(tempPath, temp, sizeof(temp), tempLen) &&
+                parseSysfsLong(std::string_view(temp, tempLen), milli))
+            {
+                d.hasPrimeC = true;
+                d.primeC = static_cast<double>(milli) / 1000.0;
+            }
+            break;
+        }
+        ::closedir(dir);
+    }
+    {
+        char cap[32];
+        size_t capLen = 0;
+        long pct = 0;
+        if (perfReadSmallFile("/sys/class/power_supply/battery/capacity", cap, sizeof(cap), capLen) &&
+            parseSysfsLong(std::string_view(cap, capLen), pct) && pct >= 0 && pct <= 100)
+        {
+            d.hasBatt = true;
+            d.batt = static_cast<int>(pct);
+        }
+    }
+    // AC: any non-battery supply (USB/Mains/Wireless/...) reporting online.
+    if (DIR *dir = ::opendir("/sys/class/power_supply"))
+    {
+        int supplies = 0;
+        for (;;)
+        {
+            const dirent *de = ::readdir(dir);
+            if (!de)
+                break;
+            if (de->d_name[0] == '.')
+                continue;
+            if (++supplies > 32)
+                break;
+            char typePath[192];
+            if (std::snprintf(typePath, sizeof(typePath), "/sys/class/power_supply/%s/type", de->d_name) >=
+                static_cast<int>(sizeof(typePath)))
+                continue;
+            char type[32];
+            size_t typeLen = 0;
+            if (!perfReadSmallFile(typePath, type, sizeof(type), typeLen) ||
+                perfTrimEquals(type, typeLen, "Battery"))
+                continue;
+            char onlinePath[192];
+            if (std::snprintf(onlinePath, sizeof(onlinePath), "/sys/class/power_supply/%s/online", de->d_name) >=
+                static_cast<int>(sizeof(onlinePath)))
+                continue;
+            char online[32];
+            size_t onlineLen = 0;
+            long flag = 0;
+            if (perfReadSmallFile(onlinePath, online, sizeof(online), onlineLen) &&
+                parseSysfsLong(std::string_view(online, onlineLen), flag))
+            {
+                d.hasAc = true;
+                d.ac = flag != 0 ? 1 : 0;
+                if (d.ac == 1)
+                    break;
+            }
+        }
+        ::closedir(dir);
+    }
+    return formatAndroidDevice(d);
+}
+#endif
+
 struct Logger
 {
     bool tried = false;
@@ -133,6 +374,11 @@ struct Logger
 #if defined(__APPLE__)
     std::vector<std::pair<std::string, double>> lastCpu;
     bool haveCpu = false;
+#endif
+#if defined(__linux__)
+    std::vector<LinuxCpuSample> lastCpuLinux;
+    bool haveCpuLinux = false;
+    long clkTck = 0;
 #endif
 
     ~Logger()
@@ -210,6 +456,13 @@ struct Logger
         lastCpu = snapshotThreadCpu();
         haveCpu = true;
 #endif
+#if defined(__linux__)
+        clkTck = ::sysconf(_SC_CLK_TCK);
+        if (clkTck <= 0)
+            clkTck = 100; // Linux default USER_HZ
+        snapshotLinuxThreadCpu(clkTck, lastCpuLinux);
+        haveCpuLinux = true;
+#endif
         active = true;
         std::fprintf(stderr, "[perf] logging to %s\n", path.c_str());
     }
@@ -254,11 +507,44 @@ void poll(uint64_t vsyncTick)
         log.lastCpu = snap;
         log.haveCpu = true;
     }
+#elif defined(__linux__)
+    {
+        std::vector<LinuxCpuSample> snap;
+        if (snapshotLinuxThreadCpu(log.clkTck > 0 ? log.clkTck : 100, snap))
+        {
+            s.threadsAvailable = true;
+            for (const LinuxCpuSample &cur : snap)
+            {
+                double base = -1.0;
+                if (log.haveCpuLinux)
+                {
+                    for (const LinuxCpuSample &prev : log.lastCpuLinux)
+                    {
+                        if (prev.tid == cur.tid)
+                        {
+                            base = prev.cumMs;
+                            break;
+                        }
+                    }
+                }
+                const double delta = base >= 0.0 ? cur.cumMs - base : 0.0;
+                s.threads.push_back({cur.label, delta >= 0.0 ? delta : 0.0});
+            }
+            log.lastCpuLinux = snap;
+            log.haveCpuLinux = true;
+        }
+        else
+        {
+            s.threadsAvailable = false;
+        }
+    }
 #else
     s.threadsAvailable = false;
 #endif
 #if defined(PS2X_IOS)
     s.device = ps2x::ios::perfDeviceState();
+#elif defined(__linux__)
+    s.device = sampleLinuxDevice();
 #else
     s.device = "na";
 #endif

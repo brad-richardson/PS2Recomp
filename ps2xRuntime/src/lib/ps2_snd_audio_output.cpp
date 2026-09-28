@@ -1,5 +1,6 @@
 #include "ps2_snd_audio_output.h"
 
+#include "ThreadNaming.h"
 #include "ps2_audio_stretch.h"
 #include "ps2_snd_spike.h"
 #include "raylib.h"
@@ -7,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -478,6 +480,11 @@ namespace
 
     void audioCallback(void *buffer, unsigned int frames)
     {
+        // PL1: raylib owns this mixer thread (we only own the callback), so
+        // name it from inside, once, for the perf log's per-thread CPU.
+        static std::atomic<bool> s_named{false};
+        if (!s_named.exchange(true, std::memory_order_relaxed))
+            ThreadNaming::SetCurrentThreadName("Audio");
         if (g_output.stretch)
             audioCallbackStretch(buffer, frames);
         else

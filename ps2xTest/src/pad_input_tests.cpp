@@ -1,4 +1,6 @@
 #include "MiniTest.h"
+#include "ps2_build_id.h"
+#include "ps2_env_file.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "Stubs/Pad.h"
@@ -64,6 +66,97 @@ namespace
     {
         const uint8_t *data = rdram.data() + kPadDataAddr;
         return static_cast<uint16_t>(data[2] | (data[3] << 8));
+    }
+
+    // PL1: save/restore one env var across a snapshot test (mirrors the
+    // EnvGuard in ps2_gs_external_tests.cpp).
+    struct Pl1EnvGuard
+    {
+        explicit Pl1EnvGuard(const char *name) : m_name(name)
+        {
+            if (const char *v = std::getenv(name))
+            {
+                m_old = v;
+                m_had = true;
+            }
+        }
+        ~Pl1EnvGuard()
+        {
+            if (m_had)
+            {
+                ::setenv(m_name, m_old.c_str(), 1);
+            }
+            else
+            {
+                ::unsetenv(m_name);
+            }
+        }
+        const char *m_name;
+        std::string m_old;
+        bool m_had = false;
+    };
+
+    std::string readFileBytes(const std::filesystem::path &path)
+    {
+        std::string content;
+        if (std::FILE *f = std::fopen(path.string().c_str(), "rb"))
+        {
+            char buf[4096];
+            size_t n = 0;
+            while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+            {
+                content.append(buf, n);
+            }
+            std::fclose(f);
+        }
+        return content;
+    }
+
+    uint64_t pl1Fnv1a(const void *data, size_t size, uint64_t hash)
+    {
+        const uint8_t *bytes = static_cast<const uint8_t *>(data);
+        for (size_t i = 0; i < size; ++i)
+        {
+            hash ^= bytes[i];
+            hash *= 1099511628211ull;
+        }
+        return hash;
+    }
+
+    // The header's snapshot-hash scheme, recomputed independently: FNV-1a 64
+    // over sorted relpaths (+ NUL) and file bytes.
+    uint64_t pl1SaveSetHash(const std::filesystem::path &root)
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        if (!fs::is_directory(root, ec) || ec)
+        {
+            return 0u; // missing input reads 0; the existence assert fires
+        }
+        std::vector<std::string> rels;
+        for (fs::recursive_directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec))
+        {
+            std::error_code ec2;
+            if (it->is_regular_file(ec2) && !ec2)
+            {
+                std::error_code ec3;
+                std::string rel = fs::relative(it->path(), root, ec3).string();
+                if (!ec3)
+                {
+                    rels.push_back(rel);
+                }
+            }
+        }
+        std::sort(rels.begin(), rels.end());
+        uint64_t hash = 14695981039346656037ull;
+        for (const std::string &rel : rels)
+        {
+            hash = pl1Fnv1a(rel.data(), rel.size(), hash);
+            hash = pl1Fnv1a("\0", 1, hash);
+            const std::string bytes = readFileBytes(root / rel);
+            hash = pl1Fnv1a(bytes.data(), bytes.size(), hash);
+        }
+        return hash;
     }
 }
 
@@ -795,6 +888,10 @@ void register_pad_input_tests()
         tc.Run("pad recorder dir mode writes one session file and prunes", [](TestCase &t)
                {
             namespace fs = std::filesystem;
+            // PL1: hermetic card env (an ambient PS2X_MC_ROOT would snapshot
+            // into this dir; the snapshot path has its own tests below).
+            Pl1EnvGuard mcRootGuard("PS2X_MC_ROOT");
+            ::unsetenv("PS2X_MC_ROOT");
             const fs::path dir = fs::temp_directory_path() / "ir1_padrec_dir_test";
             fs::remove_all(dir);
             fs::create_directories(dir);
@@ -843,7 +940,10 @@ void register_pad_input_tests()
             for (const auto &de : fs::directory_iterator(dir))
             {
                 const std::string n = de.path().filename().string();
+                // PL1: the session file is the .txt; a .mc sibling (when a
+                // card root resolves) is not a session.
                 if (n.size() > 11 && n.compare(0, 7, "padrec-") == 0 &&
+                    n.compare(n.size() - 4, 4, ".txt") == 0 &&
                     n.find("20200101") == std::string::npos)
                 {
                     fresh.push_back(de.path());
@@ -877,6 +977,277 @@ void register_pad_input_tests()
             ps2_stubs::clearPadRecordForTest();
             closePadPort(ctx, rdram);
             fs::remove_all(dir);
+        });
+
+        tc.Run("pad recorder header carries build and env_sha", [](TestCase &t)
+               {
+            const std::string recPath =
+                (std::filesystem::temp_directory_path() / "pl1_padrec_hdr_test.txt").string();
+            std::remove(recPath.c_str());
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            ps2x::setRecordedEnvFileHash("0123456789abcdef");
+            t.IsTrue(ps2_stubs::setPadRecordForTest(recPath.c_str()), "file mode should arm");
+            ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(100);
+            runPadRead(ctx, rdram);
+            ps2_stubs::clearPadOverrideState();
+            ps2_stubs::closePadRecordForTest();
+            ps2x::setRecordedEnvFileHash("");
+
+            const std::string content = readFileBytes(recPath);
+            t.IsTrue(content.find("# build=" + std::string(ps2x::buildId()) + "\n") != std::string::npos,
+                     "header carries the build id");
+            t.IsTrue(content.find("# env_sha=0123456789abcdef\n") != std::string::npos,
+                     "header carries the stashed env hash");
+            t.IsTrue(content.find("# mcsnap=none ") != std::string::npos,
+                     "file mode takes no snapshot");
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries),
+                     "recording still parses as a script");
+            t.Equals(static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(1),
+                     "single span + tail");
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            closePadPort(ctx, rdram);
+            std::remove(recPath.c_str());
+        });
+
+        tc.Run("pad recorder dir mode snapshots the memory card", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            Pl1EnvGuard mcRootGuard("PS2X_MC_ROOT");
+            const fs::path card = fs::temp_directory_path() / "pl1_padrec_card_test";
+            fs::remove_all(card);
+            fs::create_directories(card / "BASLUS-20772");
+            {
+                std::FILE *f = std::fopen((card / "BASLUS-20772" / "save.bin").string().c_str(), "wb");
+                std::fputs("card-bytes-1", f);
+                std::fclose(f);
+                f = std::fopen((card / "top.dat").string().c_str(), "wb");
+                std::fputs("top-bytes", f);
+                std::fclose(f);
+            }
+            ::setenv("PS2X_MC_ROOT", card.string().c_str(), 1);
+            const fs::path dir = fs::temp_directory_path() / "pl1_padrec_snap_test";
+            fs::remove_all(dir);
+            fs::create_directories(dir);
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            t.IsTrue(ps2_stubs::setPadRecordDirForTest(dir.string().c_str(), 30),
+                     "dir mode should arm");
+            ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(100);
+            runPadRead(ctx, rdram);
+            ps2_stubs::clearPadOverrideState();
+            ps2_stubs::closePadRecordForTest();
+
+            std::vector<fs::path> snaps, sessions;
+            for (const auto &de : fs::directory_iterator(dir))
+            {
+                const std::string n = de.path().filename().string();
+                if (n.size() > 7 && n.compare(0, 7, "padrec-") == 0)
+                {
+                    if (n.compare(n.size() - 4, 4, ".txt") == 0)
+                        sessions.push_back(de.path());
+                    else if (n.compare(n.size() - 3, 3, ".mc") == 0 && de.is_directory())
+                        snaps.push_back(de.path());
+                }
+            }
+            t.Equals(static_cast<uint32_t>(sessions.size()), static_cast<uint32_t>(1),
+                     "one session file");
+            t.Equals(static_cast<uint32_t>(snaps.size()), static_cast<uint32_t>(1),
+                     "one snapshot sibling");
+            if (!snaps.empty())
+            {
+                t.IsTrue(readFileBytes(snaps[0] / "BASLUS-20772" / "save.bin") == "card-bytes-1",
+                         "snapshot copies nested saves");
+                t.IsTrue(readFileBytes(snaps[0] / "top.dat") == "top-bytes",
+                         "snapshot copies top-level files");
+            }
+            if (!sessions.empty() && !snaps.empty())
+            {
+                const std::string content = readFileBytes(sessions[0]);
+                const std::string leaf = snaps[0].filename().string();
+                t.IsTrue(content.find("# mcsnap=" + leaf + " ") != std::string::npos,
+                         "header names the snapshot dir");
+                t.IsTrue(content.find(" mcsrc=" + card.string() + " ") != std::string::npos,
+                         "header names the card root");
+                char wantSha[32];
+                std::snprintf(wantSha, sizeof(wantSha), "%016llx",
+                              static_cast<unsigned long long>(pl1SaveSetHash(card)));
+                t.IsTrue(content.find(" mcsnap_sha=" + std::string(wantSha) + " ") != std::string::npos,
+                         "header hash matches the card bytes");
+                t.IsTrue(content.find(" mcsnap_files=2\n") != std::string::npos,
+                         "header counts the snapshot files");
+                t.Equals(pl1SaveSetHash(snaps[0]), pl1SaveSetHash(card),
+                         "snapshot re-hashes to the same value (standalone)");
+            }
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            closePadPort(ctx, rdram);
+            fs::remove_all(dir);
+            fs::remove_all(card);
+        });
+
+        tc.Run("pad recorder dir mode prunes snapshots with recordings", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            Pl1EnvGuard mcRootGuard("PS2X_MC_ROOT");
+            const fs::path card = fs::temp_directory_path() / "pl1_padrec_emptycard_test";
+            fs::remove_all(card);
+            fs::create_directories(card); // empty: the live session snapshots 0 files
+            ::setenv("PS2X_MC_ROOT", card.string().c_str(), 1);
+            const fs::path dir = fs::temp_directory_path() / "pl1_padrec_prune_test";
+            fs::remove_all(dir);
+            fs::create_directories(dir);
+            const char *stale[] = {
+                "padrec-20200101-000000.txt", "padrec-20200101-000001.txt", "padrec-20200101-000002.txt"};
+            for (const char *name : stale)
+            {
+                std::FILE *f = std::fopen((dir / name).string().c_str(), "w");
+                std::fputs("stale", f);
+                std::fclose(f);
+            }
+            // Sibling snapshots for the two oldest; the newest stale has
+            // none (missing siblings prune cleanly).
+            for (int i = 0; i < 2; ++i)
+            {
+                const fs::path snap =
+                    dir / (std::string(stale[i]).substr(0, std::string(stale[i]).size() - 4) + ".mc");
+                fs::create_directories(snap);
+                std::FILE *f = std::fopen((snap / "save.bin").string().c_str(), "w");
+                std::fputs("snap", f);
+                std::fclose(f);
+            }
+            // An orphan snapshot (no recording) and a non-matching file.
+            fs::create_directories(dir / "padrec-19990101-000000.mc");
+            {
+                std::FILE *f = std::fopen((dir / "keep.txt").string().c_str(), "w");
+                std::fputs("x", f);
+                std::fclose(f);
+            }
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            // 3 stale + 1 live, keep 2: the two oldest go with their snaps.
+            t.IsTrue(ps2_stubs::setPadRecordDirForTest(dir.string().c_str(), 2),
+                     "dir mode should arm");
+            ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(100);
+            runPadRead(ctx, rdram);
+            ps2_stubs::clearPadOverrideState();
+            ps2_stubs::closePadRecordForTest();
+
+            t.IsTrue(!fs::exists(dir / "padrec-20200101-000000.txt"), "oldest recording pruned");
+            t.IsTrue(!fs::exists(dir / "padrec-20200101-000000.mc"), "oldest snapshot pruned");
+            t.IsTrue(!fs::exists(dir / "padrec-20200101-000001.txt"), "second recording pruned");
+            t.IsTrue(!fs::exists(dir / "padrec-20200101-000001.mc"), "second snapshot pruned");
+            t.IsTrue(fs::exists(dir / "padrec-20200101-000002.txt"), "newest stale kept");
+            t.IsTrue(fs::exists(dir / "padrec-19990101-000000.mc"), "orphan snapshot kept");
+            t.IsTrue(fs::exists(dir / "keep.txt"), "non-matching file kept");
+            uint32_t liveTxt = 0u, liveMc = 0u;
+            for (const auto &de : fs::directory_iterator(dir))
+            {
+                const std::string n = de.path().filename().string();
+                if (n.size() > 11 && n.compare(0, 7, "padrec-") == 0 &&
+                    n.find("20200101") == std::string::npos && n.find("19990101") == std::string::npos)
+                {
+                    if (n.compare(n.size() - 4, 4, ".txt") == 0)
+                        ++liveTxt;
+                    else if (n.compare(n.size() - 3, 3, ".mc") == 0)
+                        ++liveMc;
+                }
+            }
+            t.Equals(liveTxt, 1u, "live session file kept");
+            t.Equals(liveMc, 1u, "live snapshot kept");
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            closePadPort(ctx, rdram);
+            fs::remove_all(dir);
+            fs::remove_all(card);
+        });
+
+        tc.Run("pad recorder skips oversize snapshots with a header note", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            Pl1EnvGuard mcRootGuard("PS2X_MC_ROOT");
+            const fs::path card = fs::temp_directory_path() / "pl1_padrec_bigcard_test";
+            fs::remove_all(card);
+            fs::create_directories(card);
+            {
+                // 17 MiB over the 16 MiB bound.
+                std::FILE *f = std::fopen((card / "big.bin").string().c_str(), "wb");
+                const std::string zeros(1u << 20, '\0');
+                for (int i = 0; i < 17; ++i)
+                {
+                    std::fwrite(zeros.data(), 1, zeros.size(), f);
+                }
+                std::fclose(f);
+            }
+            ::setenv("PS2X_MC_ROOT", card.string().c_str(), 1);
+            const fs::path dir = fs::temp_directory_path() / "pl1_padrec_big_test";
+            fs::remove_all(dir);
+            fs::create_directories(dir);
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            t.IsTrue(ps2_stubs::setPadRecordDirForTest(dir.string().c_str(), 30),
+                     "dir mode should arm");
+            ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(100);
+            runPadRead(ctx, rdram);
+            ps2_stubs::clearPadOverrideState();
+            ps2_stubs::closePadRecordForTest();
+
+            std::string content;
+            uint32_t mcDirs = 0u;
+            for (const auto &de : fs::directory_iterator(dir))
+            {
+                const std::string n = de.path().filename().string();
+                if (n.size() > 4 && n.compare(n.size() - 4, 4, ".txt") == 0)
+                {
+                    content = readFileBytes(de.path());
+                }
+                else if (n.size() > 3 && n.compare(n.size() - 3, 3, ".mc") == 0)
+                {
+                    ++mcDirs;
+                }
+            }
+            t.IsTrue(content.find("# mcsnap=too-large ") != std::string::npos,
+                     "header notes the skipped snapshot");
+            t.Equals(mcDirs, 0u, "no partial snapshot dir kept");
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            closePadPort(ctx, rdram);
+            fs::remove_all(dir);
+            fs::remove_all(card);
         });
     });
 }

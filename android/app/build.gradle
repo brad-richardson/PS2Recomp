@@ -18,6 +18,9 @@ def ps2xVu1FmacSimd = project.findProperty('ps2xVu1FmacSimd') ?: 'ON'
 def ps2xDetHashTap = project.findProperty('ps2xDetHashTap') ?: 'OFF'
 // GE1 M: bounded event-clock/unit-wait census, diagnostic APK only.
 def ps2xDiagTaps = project.findProperty('ps2xDiagTaps') ?: 'OFF'
+// PL1: fork SHA baked into the binary (padrec header + PS2X-BUILD-ID marker);
+// empty = CMake auto-detects from git (worktree builds).
+def ps2xBuildId = project.findProperty('ps2xBuildId') ?: ''
 
 android {
     namespace 'com.ps2x.runner'
@@ -47,6 +50,7 @@ android {
                         '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF',
                         '-DPS2X_ENABLE_IOP_RPC_TRACE=OFF',
                         '-DPS2X_ENABLE_DEBUG_UI=OFF',
+                        "-DPS2X_BUILD_ID=\"${ps2xBuildId}\"",
                         "-DPS2X_DEFAULT_BOOT_ELF=${ps2xBootElf}",
                         "-DPS2X_GAME_CODEGEN_DIR=${ps2xGameCodegenDir}",
                         "-DPS2X_GS_SHADOW_PARALLEL=${ps2xGsShadowParallel}",

@@ -2,6 +2,7 @@
 #if defined(__ANDROID__)
 
 #include "ps2_android_env.h"
+#include "ps2_env_file.h"
 
 #include <android/log.h>
 #include <cstdlib>
@@ -30,6 +31,8 @@ void loadPs2xEnvFile()
     }
     std::ostringstream content;
     content << file.rdbuf();
+    // PL1: stash the raw bytes' hash for the padrec header's env_sha.
+    ps2x::setRecordedEnvFileHash(ps2x::fnv1a64Hex(content.str()));
     for (const auto &entry : ps2x::parseEnvFileContent(content.str()))
     {
         setenv(entry.first.c_str(), entry.second.c_str(), 1);

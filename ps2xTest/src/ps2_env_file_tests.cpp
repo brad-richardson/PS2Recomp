@@ -41,5 +41,21 @@ void register_ps2_env_file_tests()
             t.Equals(m.size(), static_cast<size_t>(2), "launcher key dropped");
             t.Equals(m.at("PS2X_CD_IMAGE"), std::string("/b/SSX3.iso"), "expanded");
             t.Equals(m.at("PS2X_PAD_SCRIPT"), std::string(), "Documents layer clears the script");
-            t.IsTrue(m.count("PS2X_SKIP_MOVIE") == 0, "launcher value untouched"); }); });
+            t.IsTrue(m.count("PS2X_SKIP_MOVIE") == 0, "launcher value untouched"); });
+
+        tc.Run("fnv1a64Hex matches the FNV-1a 64 vectors", [](TestCase &t)
+               {
+            t.Equals(ps2x::fnv1a64Hex(""), std::string("cbf29ce484222325"), "offset basis");
+            t.Equals(ps2x::fnv1a64Hex("a"), std::string("af63dc4c8601ec8c"), "single byte");
+            t.Equals(ps2x::fnv1a64Hex("PS2X_DETERMINISTIC=1\n"), ps2x::fnv1a64Hex("PS2X_DETERMINISTIC=1\n"),
+                     "deterministic");
+            t.IsTrue(ps2x::fnv1a64Hex("x") != ps2x::fnv1a64Hex("y"), "distinct inputs differ"); });
+
+        tc.Run("recorded env hash defaults to none, round-trips", [](TestCase &t)
+               {
+            t.IsTrue(std::string(ps2x::recordedEnvFileHash()) == "none", "nothing loaded reads none");
+            ps2x::setRecordedEnvFileHash("0123456789abcdef");
+            t.IsTrue(std::string(ps2x::recordedEnvFileHash()) == "0123456789abcdef", "stash reads back");
+            ps2x::setRecordedEnvFileHash("");
+            t.IsTrue(std::string(ps2x::recordedEnvFileHash()) == "none", "reset reads none"); }); });
 }
