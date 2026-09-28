@@ -6,6 +6,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 
@@ -659,6 +660,13 @@ void register_pad_input_tests()
                 (std::filesystem::temp_directory_path() / "ir1_padrec_test.txt").string();
             std::remove(recPath.c_str());
 
+            // RB2: the header must record the reverse-DMA knob so lagV
+            // recordings replay with lagV. Save/restore the ambient value.
+            const char *savedRevdma = std::getenv("PS2X_VIF1_REVERSE_DMA");
+            const std::string savedRevdmaCopy = savedRevdma ? savedRevdma : "";
+            const bool hadRevdma = savedRevdma != nullptr;
+            ::setenv("PS2X_VIF1_REVERSE_DMA", "lagV", 1);
+
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
             R5900Context ctx;
 
@@ -713,6 +721,8 @@ void register_pad_input_tests()
                      "recording starts with a header block");
             t.IsTrue(content.find("\n# knobs ") != std::string::npos,
                      "recording header carries knobs");
+            t.IsTrue(content.find("VIF1_REVERSE_DMA=lagV") != std::string::npos,
+                     "recording header carries the reverse-DMA knob");
             t.IsTrue(content.find("\n# mcroot=") != std::string::npos,
                      "recording header carries save hash");
             std::vector<ps2_stubs::PadScriptEntry> entries;
@@ -751,6 +761,14 @@ void register_pad_input_tests()
             ps2_stubs::clearPadRecordForTest();
             closePadPort(ctx, rdram);
             std::remove(recPath.c_str());
+            if (hadRevdma)
+            {
+                ::setenv("PS2X_VIF1_REVERSE_DMA", savedRevdmaCopy.c_str(), 1);
+            }
+            else
+            {
+                ::unsetenv("PS2X_VIF1_REVERSE_DMA");
+            }
         });
 
         tc.Run("pad script parser ignores comment and blank lines", [](TestCase &t)

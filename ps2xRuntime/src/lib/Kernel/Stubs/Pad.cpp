@@ -949,13 +949,14 @@ namespace ps2_stubs
             }
             char startUtc[32] = {0};
             padRecordUtc(startUtc, sizeof(startUtc), when, "%Y-%m-%dT%H:%M:%SZ");
-            char sim[64], vu1[64], mtvu[64], finish[64], det[64], vfloat[64], mcroot[512];
+            char sim[64], vu1[64], mtvu[64], finish[64], det[64], vfloat[64], revdma[64], mcroot[512];
             std::snprintf(sim, sizeof(sim), "%s", padRecordKnob("PS2X_SSX3_SIM_MODE"));
             std::snprintf(vu1, sizeof(vu1), "%s", padRecordKnob("PS2X_VU1_ENGINE"));
             std::snprintf(mtvu, sizeof(mtvu), "%s", padRecordKnob("PS2X_MTVU"));
             std::snprintf(finish, sizeof(finish), "%s", padRecordKnob("PS2X_GS_FINISH_TIMING"));
             std::snprintf(det, sizeof(det), "%s", padRecordKnob("PS2X_DETERMINISTIC"));
             std::snprintf(vfloat, sizeof(vfloat), "%s", padRecordKnob("PS2X_VU_FLOAT"));
+            std::snprintf(revdma, sizeof(revdma), "%s", padRecordKnob("PS2X_VIF1_REVERSE_DMA"));
             std::snprintf(mcroot, sizeof(mcroot), "%s", padRecordKnob("PS2X_MC_ROOT"));
             padRecordSanitize(sim);
             padRecordSanitize(vu1);
@@ -963,6 +964,7 @@ namespace ps2_stubs
             padRecordSanitize(finish);
             padRecordSanitize(det);
             padRecordSanitize(vfloat);
+            padRecordSanitize(revdma);
             padRecordSanitize(mcroot);
             const char *mcRaw = std::getenv("PS2X_MC_ROOT");
             uint64_t saveHash = 0u, saveFiles = 0u;
@@ -972,8 +974,8 @@ namespace ps2_stubs
                          "# start_utc=%s\n"
                          "# build=unavailable\n"
                          "# knobs SIM_MODE=%s VU1_ENGINE=%s MTVU=%s FINISH_TIMING=%s "
-                         "DETERMINISTIC=%s VU_FLOAT=%s\n",
-                         startUtc, sim, vu1, mtvu, finish, det, vfloat);
+                         "DETERMINISTIC=%s VU_FLOAT=%s VIF1_REVERSE_DMA=%s\n",
+                         startUtc, sim, vu1, mtvu, finish, det, vfloat, revdma);
             if (saveOk)
             {
                 std::fprintf(f, "# mcroot=%s mcsave=%016llx mcfiles=%llu\n", mcroot,
