@@ -2020,6 +2020,11 @@ bool PS2Runtime::initialize(const char *title)
         SetTraceLogLevel(LOG_ERROR);
 #endif
         InitAudioDevice();
+#if defined(PS2X_IOS)
+        // IB3 (AirPods): miniaudio's iOS default category drops Bluetooth
+        // A2DP; Playback restores it (ps2x::ios::setAudioSessionPlayback).
+        ps2x::ios::setAudioSessionPlayback();
+#endif
         m_audioBackend.setAudioReady(IsAudioDeviceReady());
         if (const char *sound = std::getenv("PS2X_SOUND"); sound && std::strcmp(sound, "1") == 0 &&
             !ps2_snd_audio_output::initialize())

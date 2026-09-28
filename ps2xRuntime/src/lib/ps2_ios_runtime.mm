@@ -9,6 +9,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 #include <CoreFoundation/CoreFoundation.h>
 
 #include <cstdio>
@@ -236,5 +237,23 @@ int touchPoints(int64_t *ids, float *xs, float *ys, int max)
         }
     }
     return n;
+}
+
+void setAudioSessionPlayback()
+{
+    // IB3 (AirPods): miniaudio's iOS context init tries PlayAndRecord +
+    // DefaultToSpeaker with no Bluetooth options (miniaudio.h
+    // ma_context_init__coreaudio, the ma_ios_session_category_default
+    // branch), so game audio routes to the speaker and AirPods drop. Those
+    // are the only setCategory calls in miniaudio.h, so overriding once,
+    // after InitAudioDevice, sticks. No options: plain game playback.
+    AVAudioSession *session = AVAudioSession.sharedInstance;
+    NSError *error = nil;
+    if (![session setCategory:AVAudioSessionCategoryPlayback error:&error])
+    {
+        std::fprintf(stderr, "[audio] AVAudioSession Playback FAILED: %s\n", error.localizedDescription.UTF8String);
+        return;
+    }
+    std::fprintf(stderr, "[audio] AVAudioSession category=%s\n", session.category.UTF8String);
 }
 } // namespace ps2x::ios

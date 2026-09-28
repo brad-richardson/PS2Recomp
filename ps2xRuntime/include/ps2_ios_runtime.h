@@ -27,4 +27,10 @@ int touchPoints(int64_t *ids, float *xs, float *ys, int max);
 // batt=<0-100|-1> chg=<0/1>"; batt=-1 when the level is unknown). Main
 // thread only; cheap (no I/O).
 std::string perfDeviceState();
+// IB3 (AirPods): set AVAudioSessionCategoryPlayback after InitAudioDevice.
+// raylib's miniaudio inits its iOS context with the default category, which
+// tries PlayAndRecord + DefaultToSpeaker without Bluetooth options, so iOS
+// routes game audio to the speaker and AirPods lose A2DP. miniaudio sets the
+// category only at context init, so this override sticks. Main thread.
+void setAudioSessionPlayback();
 } // namespace ps2x::ios
