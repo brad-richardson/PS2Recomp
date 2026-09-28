@@ -61,6 +61,9 @@ struct Ge1Api
     decltype(&ge1_gs_wait_export) waitExport = nullptr;
     decltype(&ge1_gs_release_ahb) releaseAhb = nullptr;
     decltype(&ge1_gs_gpu_ms) gpuMs = nullptr;
+    // PT2 Part 2: optional (pre-query libraries lack it; without it the
+    // gsback.busy stage reads n=0).
+    decltype(&ge1_gs_back_ms) backMs = nullptr;
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
     decltype(&ge1_gs_export_iosurface) exportIOSurface = nullptr;
 #endif
@@ -89,6 +92,7 @@ struct Ge1Api
             readFifo = ::ge1_gs_read_fifo;
             snapshot = ::ge1_gs_snapshot;
             gpuMs = ::ge1_gs_gpu_ms;
+            backMs = ::ge1_gs_back_ms; // PT2 Part 2: static bind (same ABI)
             flushCaches = ::ge1_gs_flush_caches; // BG1 fold: static bind (same ABI)
             freezeSize = ::ge1_gs_freeze_size; // DS1: static bind (same ABI)
             freezeSave = ::ge1_gs_freeze_save;
@@ -135,6 +139,10 @@ struct Ge1Api
         freezeLoad = reinterpret_cast<decltype(freezeLoad)>(dlsym(library, "ge1_gs_freeze_load"));
         if (!freezeBound())
             std::fprintf(stderr, "[gs:external] GE1 library predates ge1_gs_freeze_*; live saves refuse\n");
+        // PT2 Part 2: optional back-thread query (see above); never fails the load.
+        backMs = reinterpret_cast<decltype(backMs)>(dlsym(library, "ge1_gs_back_ms"));
+        if (!backMs)
+            std::fprintf(stderr, "[gs:external] GE1 library predates ge1_gs_back_ms; gsback.busy reads n=0\n");
         return true;
     }
 
@@ -767,6 +775,16 @@ public:
                 if (m_perfTail && gpuMs >= 0.0f)
                     ps2x::perflog::stageRing(ps2x::perflog::Stage::GpuBusy)
                         .push(static_cast<uint32_t>(tick), gpuMs);
+            }
+            // PT2 Part 2: back-thread busy per tick (reset-on-read like
+            // gpuMs; null on pre-query libraries, <0 with the back thread
+            // off — both push nothing and the stage reads n=0).
+            if (m_perfTail && m_ge1.backMs)
+            {
+                const float backMs = m_ge1.backMs();
+                if (backMs >= 0.0f)
+                    ps2x::perflog::stageRing(ps2x::perflog::Stage::GsBackBusy)
+                        .push(static_cast<uint32_t>(tick), backMs);
             }
         }
         ++m_stats.vsyncs;

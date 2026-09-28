@@ -24,6 +24,11 @@ GE1_API int ge1_gs_export_ahb(void* buffer, uint32_t width, uint32_t height, uin
 GE1_API void ge1_gs_wait_export(uint64_t fence_counter);
 GE1_API void ge1_gs_release_ahb(void* buffer);
 GE1_API float ge1_gs_gpu_ms(void);
+// PT2 Part 2: accumulated GS back-thread busy ms since the last call (reset
+// on read, like gpu_ms); sampled once per GuestVsync into the gsback.busy
+// stage. <0 when the back thread is off (GE1_BACKTHREAD=off) or unsupported.
+// Optional symbol (pre-query libraries lack it; the stage then reads n=0).
+GE1_API float ge1_gs_back_ms(void);
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
 // GI1: async GPU blit of the merged snapshot into an IOSurface-backed sink.
 // 1=queued (done(ctx, ok) then fires exactly once from the command buffer's

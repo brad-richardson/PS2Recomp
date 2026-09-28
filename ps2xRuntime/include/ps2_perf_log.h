@@ -331,10 +331,11 @@ enum class Stage : uint8_t
 {
     EeBusy = 0, // GameThread guest-work wall per tick (frame wall minus waits)
     EeCpu,      // GameThread thread-CPU per tick (spins included, sleeps not)
-    EeWait,     // GameThread measured waits per tick (pace + event + mtvu sync)
+    EeWait,     // GameThread measured waits per tick (pace + event + enqueue + mtvu sync)
     GsBusy,     // GS worker handler time between GuestVsyncs (idle excluded)
     MtvuBusy,   // MTVU unit-job time between vblanks
     GpuBusy,    // ge1_gs_gpu_ms() per GuestVsync (Vulkan timestamps; GE1 only)
+    GsBackBusy, // ge1_gs_back_ms() per GuestVsync (back thread; GE1 pipelined only)
     Count
 };
 
@@ -354,6 +355,8 @@ inline const char *stageName(Stage s)
         return "mtvu.busy";
     case Stage::GpuBusy:
         return "gpu.busy";
+    case Stage::GsBackBusy:
+        return "gsback.busy";
     default:
         return "?";
     }
@@ -373,8 +376,8 @@ struct StageEntry
 // slot packs (tick32 << 32) | usec32 in one word: the writer stores the slot
 // then release-bumps the head, the reader acquire-loads the head. One writer
 // per ring per run by construction (EE: ee.*, MTVU vblank: mtvu.*, GS worker:
-// gs.* + gpu.*); a reader that fell more than a lap behind clamps to the
-// newest lap (see poll()).
+// gs.* + gpu.* + gsback.*); a reader that fell more than a lap behind clamps
+// to the newest lap (see poll()).
 class StageRing
 {
 public:
