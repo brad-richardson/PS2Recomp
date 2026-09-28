@@ -942,7 +942,12 @@ void ds1FireQuickSave()
 {
     const std::string slot = ds1QuickSlotPath();
     if (!ps2_savestate::requestQuickSave(slot))
-        ps2_savestate::noteQuickStatus("busy (save/load already pending)");
+    {
+        if (ps2_savestate::quickRequestPending())
+            ps2_savestate::noteQuickStatus("busy (save/load already pending)");
+        else
+            ps2_savestate::noteQuickStatus("quick-save failed (see log)");
+    }
 }
 
 void ds1FireQuickLoad()
@@ -956,7 +961,12 @@ void ds1FireQuickLoad()
         return;
     }
     if (!ps2_savestate::requestQuickLoad(slot))
-        ps2_savestate::noteQuickStatus("busy (save/load already pending)");
+    {
+        if (ps2_savestate::quickRequestPending())
+            ps2_savestate::noteQuickStatus("busy (save/load already pending)");
+        else
+            ps2_savestate::noteQuickStatus("quick-load failed (see log)");
+    }
 }
 
 // DS1 DEV-ONLY scheduled chord (host testing without a gamepad):
@@ -5171,6 +5181,10 @@ void PS2Runtime::run()
     PSChordState ds1Chord; // SELECT+L3 save / SELECT+R3 load, carried across frames
     std::vector<Ds1Hotkey> ds1Hotkeys =
         parseDs1Hotkeys(std::getenv("PS2X_SAVESTATE_HOTKEY_AT")); // DS1 DEV-ONLY scheduled chord
+    // DS1: hash the runner for save/load identity on a background thread
+    // while the game boots (a ~200 MB pass; the first quick-save would
+    // otherwise hitch on it). The cache mutex guards the result.
+    std::thread([] { ps2_savestate::warmRunnerSha(); }).detach();
     bool vpadLastPadConnected = true; // forces the first [vpad] line when the overlay shows
     const std::vector<ps2x::vpad::TestTouch> vpadTestTouches =
         ps2x::vpad::parseTestTouches(std::getenv("PS2X_VPAD_TEST_TOUCHES")); // DEV-ONLY

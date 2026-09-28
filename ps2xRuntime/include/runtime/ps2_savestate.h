@@ -499,6 +499,11 @@ namespace ps2_savestate
     // the time since the message was set (the UI expires old lines).
     void noteQuickStatus(const std::string &message);
     bool quickStatus(std::string &message, uint64_t &ageMs);
+    bool quickRequestPending(); // a save or load waits (either kind)
+    // Hash the runner now, off the save path: the identity hash is a ~200 MB
+    // pass, pre-warmed on a background thread at boot so the first
+    // quick-save doesn't hitch on it.
+    void warmRunnerSha();
     // Lenient card restore: the destination tree is validated but never
     // written when it differs (disk wins); `note` names what differed.
     bool readDirTreeLenient(Reader &r, const std::string &root, std::string &note);

@@ -233,7 +233,14 @@ namespace ps2_savestate
             // S5: identify the loaded runtime module, not the host process.
             // On Android /proc/self/exe is the app_process launcher, which is
             // identical across APKs and would defeat the strict check.
-            const std::string module = runtimeModulePath();
+            std::string module = runtimeModulePath();
+            // DS1: the module loads straight from the APK
+            // (extractNativeLibs=false), so dladdr names a virtual
+            // ".../base.apk!/lib/.../libps2EntryRunner.so" path that is not
+            // a real file: hash the APK itself (same APK = same build).
+            const size_t bang = module.find("!/");
+            if (bang != std::string::npos)
+                module = module.substr(0u, bang);
             if (!module.empty())
                 return module;
 #if defined(__ANDROID__)
@@ -1188,6 +1195,17 @@ namespace ps2_savestate
     {
         std::lock_guard<std::mutex> lock(quickRequests().mutex);
         return !quickRequests().savePath.empty();
+    }
+
+    bool quickRequestPending()
+    {
+        std::lock_guard<std::mutex> lock(quickRequests().mutex);
+        return !quickRequests().savePath.empty() || !quickRequests().loadPath.empty();
+    }
+
+    void warmRunnerSha()
+    {
+        (void)runnerShaCached();
     }
 
     bool takePendingQuickLoad(std::string &path)
