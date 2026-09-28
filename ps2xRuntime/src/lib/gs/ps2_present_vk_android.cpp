@@ -2,6 +2,7 @@
 // Vulkan present. See runtime/gs/ps2_present_vk.h. VK2: the bookkeeping lives
 // in ps2x_present_vk::Ledger; this file is its NDK platform and the JNI/diag glue.
 #include "runtime/gs/ps2_present_vk.h"
+#include "ps2_perf_log.h"
 #include "runtime/gs/ps2_present_vk_ledger.h"
 
 #include <android/hardware_buffer.h>
@@ -376,7 +377,17 @@ Pick pickReusable(const uint64_t *ids, int n, int start, int timeoutMs)
     return out;
 }
 
-bool queue(uint64_t id, uint32_t w, uint32_t h) { return ledger().queue(id, w, h); }
+bool queue(uint64_t id, uint32_t w, uint32_t h)
+{
+    // PT2: a shown buffer is the present event on this path (the main loop
+    // skips GL swaps once the layer is live, so EndDrawing never fires).
+    // notePresent is thread-safe (GS worker calls it); the GL-path call is
+    // skipped while active(), so each frame counts exactly once.
+    const bool shown = ledger().queue(id, w, h);
+    if (shown)
+        ps2x::perflog::notePresent();
+    return shown;
+}
 
 long compareBuffer(AHardwareBuffer *buffer, const uint8_t *rgba, uint32_t w, uint32_t h, uint64_t tick,
                    const char *dumpDir)

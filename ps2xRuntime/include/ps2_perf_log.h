@@ -19,9 +19,10 @@
 //
 // This header holds the pure parts (tested by ps2_perf_log_tests.cpp); the
 // file I/O and platform snapshots live in src/lib/ps2_perf_log.cpp. poll()
-// and notePresent() are main-thread only and no-ops until the first poll()
-// with the knob on; with the knob off the call sites compile to one bool
-// check each (zero cost).
+// and dumpTail() are main-thread only; notePresent() is thread-safe (the VK
+// path calls it from the GS worker) and all three are no-ops until the first
+// poll() with the knob on; with the knob off the call sites compile to one
+// bool check each (zero cost).
 
 #include <algorithm>
 #include <array>

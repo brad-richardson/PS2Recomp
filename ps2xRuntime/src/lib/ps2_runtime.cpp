@@ -5604,7 +5604,17 @@ void PS2Runtime::run()
         {
             EndDrawing();
             if (perfLog)
-                ps2x::perflog::notePresent();
+            {
+                // PT2: the GL swap shows a new game frame only when the VK
+                // child is not the presenter (its queue() counts presents, on
+                // the GS worker). Counting both would double-count underlay.
+                bool vkShows = false;
+#if defined(__ANDROID__)
+                vkShows = ps2x_present_vk::active();
+#endif
+                if (!vkShows)
+                    ps2x::perflog::notePresent();
+            }
 #if defined(__ANDROID__)
             ++s_glSwapsOnWindow;
 #endif

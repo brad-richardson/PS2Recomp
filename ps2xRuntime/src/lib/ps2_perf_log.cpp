@@ -457,16 +457,19 @@ std::string sampleLinuxDevice()
 
 struct Logger
 {
-    bool tried = false;
-    bool active = false;
+    bool tried = false; // main thread only (poll/dumpTail/tryOpen)
+    std::atomic<bool> active{false}; // read by notePresent from any thread
     std::FILE *file = nullptr;
     std::chrono::steady_clock::time_point t0{};
     std::chrono::steady_clock::time_point windowStart{};
     uint64_t windowTick = 0;
-    uint64_t windowPresents = 0;
-    double windowMaxGapMs = -1.0;
-    bool haveLastPresent = false;
-    std::chrono::steady_clock::time_point lastPresent{};
+    // PT2: present counting is lock-free: notePresent() runs on the GS worker
+    // on the VK/AHB path (queue()) and on the main thread on the GL path.
+    // poll() exchanges the counters out once per second.
+    std::atomic<uint64_t> presentCount{0};
+    std::atomic<uint64_t> presentLastNs{0};
+    std::atomic<uint64_t> presentMaxGapNs{0};
+    std::atomic<bool> havePresent{false};
 #if defined(__APPLE__)
     std::vector<std::pair<std::string, double>> lastCpu;
     bool haveCpu = false;
@@ -564,7 +567,7 @@ struct Logger
         snapshotLinuxThreadCpu(clkTck, lastCpuLinux);
         haveCpuLinux = true;
 #endif
-        active = true;
+        active.store(true, std::memory_order_relaxed);
         std::fprintf(stderr, "[perf] logging to %s\n", path.c_str());
     }
 };
@@ -599,7 +602,7 @@ void poll(uint64_t vsyncTick)
     Logger &log = logger();
     if (!log.tried)
         log.tryOpen(vsyncTick);
-    if (!log.active || !log.file)
+    if (!log.active.load(std::memory_order_relaxed) || !log.file)
         return;
     const auto now = std::chrono::steady_clock::now();
     const double windowS = std::chrono::duration<double>(now - log.windowStart).count();
@@ -610,8 +613,9 @@ void poll(uint64_t vsyncTick)
     s.elapsedS = std::chrono::duration<double>(now - log.t0).count();
     s.tick = vsyncTick;
     s.vsyncsPerS = static_cast<double>(vsyncTick - log.windowTick) / windowS;
-    s.presents = log.windowPresents;
-    s.maxGapMs = log.windowPresents >= 2 ? log.windowMaxGapMs : -1.0;
+    s.presents = log.presentCount.exchange(0u, std::memory_order_relaxed);
+    const uint64_t maxGapNs = log.presentMaxGapNs.exchange(0u, std::memory_order_relaxed);
+    s.maxGapMs = s.presents >= 2 ? static_cast<double>(maxGapNs) / 1e6 : -1.0;
 #if defined(__APPLE__)
     {
         const auto snap = snapshotThreadCpu();
@@ -674,31 +678,33 @@ void poll(uint64_t vsyncTick)
     std::fflush(log.file);
     log.windowStart = now;
     log.windowTick = vsyncTick;
-    log.windowPresents = 0;
-    log.windowMaxGapMs = -1.0;
 }
 
 void notePresent()
 {
     Logger &log = logger();
-    if (!log.active)
+    if (!log.active.load(std::memory_order_relaxed))
         return;
-    const auto now = std::chrono::steady_clock::now();
-    if (log.haveLastPresent)
+    const uint64_t now = steadyNs();
+    log.presentCount.fetch_add(1u, std::memory_order_relaxed);
+    const uint64_t prev = log.presentLastNs.exchange(now, std::memory_order_relaxed);
+    const bool had = log.havePresent.exchange(true, std::memory_order_relaxed);
+    // now > prev guards a cross-thread inversion (two paths racing across the
+    // GL/VK transition); the gap reads 0 then instead of underflowing.
+    if (had && prev != 0u && now > prev)
     {
-        const double gapMs = std::chrono::duration<double, std::milli>(now - log.lastPresent).count();
-        if (gapMs > log.windowMaxGapMs)
-            log.windowMaxGapMs = gapMs;
+        const uint64_t gap = now - prev;
+        uint64_t m = log.presentMaxGapNs.load(std::memory_order_relaxed);
+        while (gap > m && !log.presentMaxGapNs.compare_exchange_weak(m, gap, std::memory_order_relaxed))
+        {
+        }
     }
-    log.haveLastPresent = true;
-    log.lastPresent = now;
-    ++log.windowPresents;
 }
 
 void dumpTail()
 {
     Logger &log = logger();
-    if (!log.active || !log.file)
+    if (!log.active.load(std::memory_order_relaxed) || !log.file)
         return;
     for (size_t i = 0; i < kStageCount; ++i)
     {
