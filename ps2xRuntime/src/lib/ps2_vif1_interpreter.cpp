@@ -14,7 +14,6 @@
 #include "ps2_vif_mpg_log.h"
 #include "ps2_vu1_entry_trace.h"
 #include "ps2_vu1_trace.h"
-#include "ps2_vu1_engine.h"
 
 namespace
 {
@@ -438,11 +437,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
         return;
     processVIF1DataImpl(data, sizeBytes);
     // RR1: PATH3 left unmasked at the end of a VIF1 delivery runs to completion.
-    // VP2: behind an in-flight VU1 run it waits in the engine's reorder buffer.
-    if (ps2_vu1_engine::deferring())
-        ps2_vu1_engine::defer([this]() { drainPath3IfUnmasked(); });
-    else
-        drainPath3IfUnmasked();
+    drainPath3IfUnmasked();
 }
 
 void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
@@ -548,23 +543,15 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
         else if (opcode == VIF_MSKPATH3)
         {
             // VIF command docs: MSKPATH3 uses IMMEDIATE bit 15.
-            // VP2: the mask belongs to the GIF side; behind an in-flight VU1
-            // run the whole toggle waits in the engine's reorder buffer.
-            auto mskpath3 = [this, imm, cmd, offset = pos - 4u]()
-            {
-                const bool wasMasked = m_path3Masked;
-                m_path3Masked = (imm & 0x8000u) != 0u;
-                ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 MSKPATH3 was=%u now=%u queued=%zu",
-                            wasMasked, m_path3Masked, m_path3MaskedFifo.size());
-                if (ps2_e7::enabled())
-                    ps2_e7::event(gs_regs.vsyncTick.load(), "vif-mask", "cmd=0x%x offset=%u was=%u now=%u queued=%zu", cmd, offset, wasMasked, m_path3Masked, m_path3MaskedFifo.size());
-                if (wasMasked && !m_path3Masked)
-                    releaseOneMaskedPath3Packet();
-            };
-            if (ps2_vu1_engine::deferring())
-                ps2_vu1_engine::defer(mskpath3);
-            else
-                mskpath3();
+            const uint32_t offset = pos - 4u;
+            const bool wasMasked = m_path3Masked;
+            m_path3Masked = (imm & 0x8000u) != 0u;
+            ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 MSKPATH3 was=%u now=%u queued=%zu",
+                        wasMasked, m_path3Masked, m_path3MaskedFifo.size());
+            if (ps2_e7::enabled())
+                ps2_e7::event(gs_regs.vsyncTick.load(), "vif-mask", "cmd=0x%x offset=%u was=%u now=%u queued=%zu", cmd, offset, wasMasked, m_path3Masked, m_path3MaskedFifo.size());
+            if (wasMasked && !m_path3Masked)
+                releaseOneMaskedPath3Packet();
             continue;
         }
         else if (opcode == VIF_MARK)
@@ -787,7 +774,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                     copyBytes = PS2_VU1_CODE_SIZE - destAddr;
                 if (pos + copyBytes <= sizeBytes)
                 {
-                    ps2_vu1_engine::beforeCodeWrite(); // VP2: an in-flight run reads code memory
                     std::memcpy(m_vu1Code + destAddr, data + pos, copyBytes);
                     markVU1CodeModified();
                 }
@@ -929,14 +915,11 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             // mode 0 adds nothing, cl==wl makes source available every cycle
             // with a contiguous destination, and an all-data mask selects
             // source on every lane. Anything else (fills, skips, masked
-            // fills/protects, VP2 lane tracking) keeps the generic loop.
-            // VP2: lanes written while a VU1 run is in flight (its commit keeps them).
-            uint64_t *const unpackWaw = ps2_vu1_engine::wawMask();
+            // fills/protects) keeps the generic loop.
             const bool unpackBulk =
                 vifFastUnpackEnabled() && vl == 0u && vn == 3u &&
                 (vif1_regs.mode & 3u) == 0u && cl == wl && m_vu1Data != nullptr &&
                 totalBytes > 0u && pos + totalBytes <= sizeBytes &&
-                unpackWaw == nullptr &&
                 (!maskEnable || vifUnpackMaskAllData(vif1_regs.mask, wl));
             if (unpackBulk)
             {
@@ -956,7 +939,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;
                 uint32_t srcIndex = 0u;
-                uint64_t *waw = unpackWaw;
                 // VS1: strength-reduce the per-vector cycle division. Observed
                 // (cl,wl) pairs are 1x1/3x1/4x4 (UV1); every power-of-two WL
                 // reduces exactly, anything else keeps the generic division.
@@ -1162,12 +1144,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                     if (!handledFormat && decoded && !maskEnable && (vif1_regs.mode == 0u || vif1_regs.mode == 3u))
                     {
                         uint32_t copyBytes = (bytesPerVector < 16u) ? bytesPerVector : 16u;
-                        if (waw)
-                        {
-                            // VP2: a part-word write has no word mask: commit the run first.
-                            ps2_vu1_engine::drainAll();
-                            waw = nullptr;
-                        }
                         std::memcpy(m_vu1Data + destOff, srcVec, copyBytes);
                         continue;
                     }
@@ -1177,7 +1153,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                     const uint32_t colIdx = (cyclePos > 3u) ? 3u : cyclePos;
                     const uint32_t maskCycle = (cyclePos > 3u) ? 3u : cyclePos;
 
-                    uint32_t writtenLanes = 0u;
                     for (uint32_t field = 0u; field < 4u; ++field)
                     {
                         uint32_t maskSpec = 0u;
@@ -1219,14 +1194,9 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                         }
 
                         lanes[field] = writeVal;
-                        // VP2: an unhandled format rewrites the old value: not a write.
-                        if (maskSpec != 0u || handledFormat)
-                            writtenLanes |= 1u << field;
                     }
 
                     std::memcpy(m_vu1Data + destOff, lanes, sizeof(lanes));
-                    if (waw)
-                        ps2_vu1_engine::markQwordLanes(waw, destVec, writtenLanes);
                 }
             }
             // E37: log the UNPACK with its full source payload (pos still

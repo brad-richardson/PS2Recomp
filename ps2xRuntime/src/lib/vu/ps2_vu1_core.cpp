@@ -6,7 +6,6 @@
 #include "ps2_vu1_detail.h"
 #include "ps2_vu1_entry_trace.h"
 #include "ps2_vu1_trace.h"
-#include "ps2_vu1_engine.h"
 #include "ps2_vu1cap.h"
 #include "ps2_vu1_step_impl.h"
 #include "ps2_vu1_fmac_impl.h"
@@ -790,11 +789,7 @@ void VU1Interpreter::finishXgkick()
     // VRB1 DEV-ONLY capture (default off): record this run's XGKICK bytes.
     if (m_unit == Unit::VU1 && ps2_vu1cap::recording())
         ps2_vu1cap::Capture::instance().xgk(m_xgkick.packet.data(), m_xgkick.totalBytes);
-    if (m_unit == Unit::VU1 && ps2_vu1_engine::captureXgkick(m_xgkick.packet.data(), m_xgkick.totalBytes))
-    {
-        // VP2: captured on a VU1 engine worker; submitted at the in-order commit.
-    }
-    else if (m_activeMemory)
+    if (m_activeMemory)
         m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
     else if (m_activeGs)
         m_activeGs->processGIFPacket(m_xgkick.packet.data(), m_xgkick.totalBytes);

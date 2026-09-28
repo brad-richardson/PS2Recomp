@@ -2,7 +2,6 @@
 #include "ps2_ts2_observer.h"
 #include "ps2_ts2_split60.h"
 #include "ps2_mtvu.h"
-#include "ps2_vu1_engine.h"
 #include "ps2_microvu.h"
 #include "ps2_e4.h"
 #include "ps2_e7.h"
@@ -1359,11 +1358,6 @@ PS2Runtime::~PS2Runtime()
     ps2_mtvu::setDtFallbackFn({});
     ps2_mtvu::fbrstFn() = {};
     ps2_mtvu::jobEndFn() = {};
-    // VP2: every unit job drains the engine, so it is idle after the sync.
-    ps2_vu1_engine::engine().setWorkersForTest(0);
-    ps2_vu1_engine::engine().setRunFn({});
-    ps2_vu1_engine::engine().setPath1Fn({});
-    ps2_vu1_engine::engine().setTickFn({});
     ps2_microvu::shutdown();
     printMissingFunctionCounts();
     try
@@ -1602,47 +1596,8 @@ bool PS2Runtime::syncCoreSubsystems()
             return false;
         }
     }
-    // VP2: PS2X_VU1_WORKERS=1 (needs MT1 threaded): VU1 runs go to the
-    // in-order-commit engine. The worker runs on the snapshot the engine
-    // passes; D/T enables come from the kick's FBRST as on the MT1 worker.
-    {
-        ps2_vu1_engine::Engine &eng = ps2_vu1_engine::engine();
-        eng.setCanonical(m_memory.getVU1Data());
-        eng.setRunFn([this](const ps2_vu1_engine::RunJob &job, uint8_t *data)
-                     {
-                         m_vu1.state().dBitEnabled = (job.fbrst & (1u << 10)) != 0u;
-                         m_vu1.state().tBitEnabled = (job.fbrst & (1u << 11)) != 0u;
-                         if (ps2_microvu::selected())
-                         {
-                             // OM1: a MISS falls through to the static restart below.
-                             if (ps2_microvu::run(m_memory, data, m_vu1.state(), job.startPC,
-                                                 job.resume, job.top, job.itop, job.fbrst, 65536))
-                                 return;
-                         }
-                         if (job.resume)
-                             m_vu1.resume(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE, data, PS2_VU1_DATA_SIZE,
-                                          m_gs, &m_memory, job.top, job.itop, 65536);
-                         else
-                             m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE, data, PS2_VU1_DATA_SIZE,
-                                           m_gs, &m_memory, job.startPC, job.top, job.itop, 65536); });
-        eng.setPath1Fn([this](const uint8_t *data, uint32_t size)
-                       { m_memory.submitGifPacket(GifPathId::Path1, data, size); });
-        eng.setTickFn([this]() { return static_cast<uint64_t>(m_memory.gs().vsyncTick.load(std::memory_order_relaxed)); });
-        eng.configure(ps2_mtvu::threaded());
-    }
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {
-                                     if (ps2_vu1_engine::engine().sequencing())
-                                     {
-                                         ps2_vu1_engine::RunJob job;
-                                         job.startPC = startPC;
-                                         job.top = top;
-                                         job.itop = itop;
-                                         job.fbrst = ps2_mtvu::jobFbrst();
-                                         ps2_vu1_engine::engine().setCanonical(m_memory.getVU1Data());
-                                         ps2_vu1_engine::engine().dispatch(job);
-                                         return;
-                                     }
                                      if (ps2_mtvu::onWorker())
                                      {
                                          // MT1: on the unit worker, D/T enables come from
@@ -1702,17 +1657,6 @@ bool PS2Runtime::syncCoreSubsystems()
                                          (m_vu1.state().stoppedByT ? 0x0400u : 0u); });
     m_memory.setVu1MscntCallback([this](uint32_t top, uint32_t itop)
                                  {
-                                     if (ps2_vu1_engine::engine().sequencing())
-                                     {
-                                         ps2_vu1_engine::RunJob job; // VP2: see MSCAL
-                                         job.resume = true;
-                                         job.top = top;
-                                         job.itop = itop;
-                                         job.fbrst = ps2_mtvu::jobFbrst();
-                                         ps2_vu1_engine::engine().setCanonical(m_memory.getVU1Data());
-                                         ps2_vu1_engine::engine().dispatch(job);
-                                         return;
-                                     }
                                      if (ps2_mtvu::onWorker())
                                      {
                                          const uint32_t fbrst = ps2_mtvu::jobFbrst(); // MT1: see MSCAL

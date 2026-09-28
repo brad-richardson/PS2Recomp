@@ -14,8 +14,9 @@
 // PS2X_VU_FLOAT=<mode> when VF1 lands (bench just inherits it).
 //
 // Boundary stubs: PS2Memory/GS ctor+dtor only (bench touches m_vu1Code,
-// m_vu1CodeGeneration and binds a GS& that XGKICK capture intercepts); the
-// GIF submit paths abort if ever reached.
+// m_vu1CodeGeneration); the GIF submit paths capture each XGKICK packet into
+// the current run's vector (same [u32 size][bytes] layout the verify step
+// parses below).
 
 #include <algorithm>
 #include <cinttypes>
@@ -32,7 +33,6 @@
 #endif
 
 #include "ps2_vu1cap.h"
-#include "ps2_vu1_engine.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu1.h"
@@ -61,16 +61,28 @@ GS::~GS() = default;
 // The bench never creates a GsWorker; this satisfies unique_ptr<GsWorker>.
 GsWorker::~GsWorker() {}
 
-void PS2Memory::submitGifPacket(GifPathId, const uint8_t *, uint32_t, bool, bool)
+// CU2: XGKICK capture lives here now: the stubs append each packet to the
+// current run's vector (null outside a run).
+static std::vector<uint8_t> *g_xgk = nullptr;
+
+static void xgkAppend(const uint8_t *data, uint32_t size)
 {
-    std::fprintf(stderr, "[vu1bench] fatal: submitGifPacket reached (capture off?)\n");
-    std::abort();
+    if (!g_xgk || !data)
+        return;
+    const size_t at = g_xgk->size();
+    g_xgk->resize(at + 4u + size);
+    std::memcpy(g_xgk->data() + at, &size, 4u);
+    std::memcpy(g_xgk->data() + at + 4u, data, size);
 }
 
-void GS::processGIFPacket(const uint8_t *, uint32_t)
+void PS2Memory::submitGifPacket(GifPathId, const uint8_t *data, uint32_t size, bool, bool)
 {
-    std::fprintf(stderr, "[vu1bench] fatal: processGIFPacket reached (capture off?)\n");
-    std::abort();
+    xgkAppend(data, size);
+}
+
+void GS::processGIFPacket(const uint8_t *data, uint32_t size)
+{
+    xgkAppend(data, size);
 }
 
 // ---- helpers ----------------------------------------------------------------
@@ -259,12 +271,12 @@ int main(int argc, char **argv)
             ps2_vu1cap::unpackRegs(job.regsIn, vu.state());
             vu.setCycleCounterForBench(job.cycleStart);
             xgkVec.clear();
-            ps2_vu1_engine::detail::t_capture = &xgkVec;
+            g_xgk = &xgkVec;
             const uint64_t t0 = nowNs();
             vu.execute(mem.getVU1Code(), ps2_vu1cap::kCodeSize, inBuf.data(),
                        ps2_vu1cap::kDataSize, gs, &mem, job.startPC, job.top, job.itop, 65536);
             const uint64_t t1 = nowNs();
-            ps2_vu1_engine::detail::t_capture = nullptr;
+            g_xgk = nullptr;
 
             const uint64_t dt = t1 - t0;
             allNs.push_back(dt);
@@ -333,7 +345,7 @@ int main(int argc, char **argv)
                         what = "cycles";
                     else
                     {
-                        // engine capture layout: [u32 size][bytes] per kick, in order.
+                        // bench capture layout: [u32 size][bytes] per kick, in order.
                         size_t off = 0;
                         bool xok = true;
                         size_t expOff = 0;

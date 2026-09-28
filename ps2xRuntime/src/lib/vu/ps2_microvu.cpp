@@ -124,10 +124,6 @@ bool configure(bool mtvu_threaded, std::string& error)
         error = std::string(name) + " requires PS2X_MTVU=1 and no VU1 trace that disables MTVU";
         return false;
     }
-    if (std::getenv("PS2X_VU1_WORKERS")) {
-        error = std::string(name) + " requires PS2X_VU1_WORKERS unset";
-        return false;
-    }
 #if defined(PS2X_MICROVU_STATIC)
     // Static (iOS app): the offline core is linked in; only it is available.
     if (!offline) {
