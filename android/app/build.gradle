@@ -14,6 +14,9 @@ def ps2xVu1RecompDir = project.findProperty('ps2xVu1RecompDir') ?: ''
 def ps2xVu0RecompDir = project.findProperty('ps2xVu0RecompDir') ?: ''
 // VR4 D1: vector FMAC core (CMake PS2X_VU1_FMAC_SIMD), ON/OFF (default ON).
 def ps2xVu1FmacSimd = project.findProperty('ps2xVu1FmacSimd') ?: 'ON'
+// OF1 (PG1 USE lineage): PGO use build (absolute path to the merged
+// .profdata on the build host; empty = off).
+def ps2xPgoData = project.findProperty('ps2xPgoData') ?: ''
 // MV2: diagnostic Android guest hash tap; speed APKs leave it OFF.
 def ps2xDetHashTap = project.findProperty('ps2xDetHashTap') ?: 'OFF'
 // GE1 M: bounded event-clock/unit-wait census, diagnostic APK only.
@@ -58,6 +61,7 @@ android {
                         "-DPS2X_VU1_RECOMP_DIR=${ps2xVu1RecompDir}",
                         "-DPS2X_VU0_RECOMP_DIR=${ps2xVu0RecompDir}",
                         "-DPS2X_VU1_FMAC_SIMD=${ps2xVu1FmacSimd}",
+                        "-DPS2X_PGO_DATA=${ps2xPgoData}",
                         "-DPS2X_ENABLE_DET_HASH_TAP=${ps2xDetHashTap}",
                         '-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG',
                         '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG'

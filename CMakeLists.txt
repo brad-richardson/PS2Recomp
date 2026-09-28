@@ -113,6 +113,16 @@ if(NOT MSVC)
     add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>)
 endif()
 
+# OF1 (PG1 USE lineage): PGO use build (Android; -Pps2xPgoData=/path/to/profile.profdata):
+# optimize with the merged profile. Merge it on the build host with the NDK's
+# own llvm-profdata (the same clang must generate, merge and use — a profile
+# from a different clang, e.g. Mac Homebrew clang 23, is version-rejected).
+if(ANDROID AND PS2X_PGO_DATA)
+    add_compile_options(-fprofile-use=${PS2X_PGO_DATA})
+    add_link_options(-fprofile-use=${PS2X_PGO_DATA})
+    message(STATUS "OF1: -fprofile-use=${PS2X_PGO_DATA}")
+endif()
+
 if(PS2X_BUILD_RECOMP)
     add_subdirectory("ps2xRecomp")
 endif()
