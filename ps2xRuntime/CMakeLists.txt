@@ -967,9 +967,14 @@ endif()
 if(PS2X_OM1_STAGE AND PS2X_IS_IOS)
     # Frameworks the offline closure needs beyond what the app already links
     # (same pulled universe as the GS closure: Metal GS, cubeb audio, USB).
+    # IB2: MetalFX ships only in the iphoneos SDK (no MetalFX.framework in
+    # the sim SDK), so it links device-only; a33116c added it for the
+    # on-device spatial scaler. Simulator restores OM1's proven pre-MetalFX link.
+    if(NOT CMAKE_OSX_SYSROOT MATCHES "iphonesimulator")
+        target_link_libraries(ps2EntryRunner PRIVATE "-framework MetalFX")
+    endif()
     target_link_libraries(ps2EntryRunner PRIVATE
         "-framework Metal"
-        "-framework MetalFX"
         "-framework MetalKit"
         "-framework QuartzCore"
         "-framework CoreVideo"
