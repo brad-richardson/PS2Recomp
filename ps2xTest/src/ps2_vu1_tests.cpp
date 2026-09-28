@@ -374,23 +374,52 @@ namespace
         }
     };
 
-    // A 500-iteration integer loop (~1000+ VU cycles): ends at E-bit, no data
-    // memory traffic, no XGKICK. budget=64 breaks and completes; budget=1
+    // A 500-iteration integer loop (~1500 VU cycles): counts vi01 up to the
+    // vi02 limit, stores a seeded VF to data memory every iteration, ends at
+    // E-bit, no XGKICK. All-positive immediates (0x08 is IADDIU, whose
+    // immediate is zero-extended). budget=64 breaks and completes; budget=1
     // exceeds the 64-resume continue cap and parks; budget=1M never breaks.
     void uploadSs5Loop(Vu1Fixture &fx)
     {
-        writeTrackedVuInstructionPair(fx, 0u, makeVuIaddiu(1u, 0u, 500), kVuUpperNop);
-        writeTrackedVuInstructionPair(fx, 8u, makeVuIaddiu(1u, 1u, -1), kVuUpperNop);
-        writeTrackedVuInstructionPair(fx, 16u, makeVuIbne(1u, 0u, -2), kVuUpperNop);
-        writeTrackedVuInstructionPair(fx, 24u, 0u, kVuUpperNop);
-        writeTrackedVuInstructionPair(fx, 32u, 0u, kVuUpperNop | 0x40000000u);
+        writeTrackedVuInstructionPair(fx, 0u, makeVuIaddiu(2u, 0u, 500), kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 8u, makeVuIaddiu(1u, 1u, 1), kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 16u, makeVuSq(0xFu, 3u, 1u, 0), kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 24u, makeVuIbne(1u, 2u, -3), kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 32u, 0u, kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 40u, 0u, kVuUpperNop | 0x40000000u);
     }
 
     bool runSs5Loop(Vu1Fixture &fx, uint32_t budget, VU1State &outState, std::vector<uint8_t> &outData)
     {
         outState = VU1State{};
+        // A nonzero VF seed (carried in by the seed-once path) so the loop's
+        // stores write detectably nonzero data.
+        outState.vf[3][0] = 1.0f;
+        outState.vf[3][1] = 2.0f;
+        outState.vf[3][2] = 3.0f;
+        outState.vf[3][3] = 4.0f;
         outData.assign(PS2_VU1_DATA_SIZE, 0u);
         return ps2_microvu::run(fx.mem, outData.data(), outState, 0u, false, 0u, 0u, 0u, budget);
+    }
+
+    // VU state identity across budgets, excluding the cycle counter: each
+    // budget-exhausted call charges exactly `budget` cycles and drops the
+    // final atomic block's overrun, so continued runs count fewer cycles than
+    // one unbounded run for identical registers and memories.
+    bool sameSs5State(const VU1State &a, const VU1State &b)
+    {
+        VU1State x = a, y = b;
+        x.cycles = 0;
+        y.cycles = 0;
+        return std::memcmp(&x, &y, sizeof(VU1State)) == 0;
+    }
+
+    bool anyNonzeroByte(const std::vector<uint8_t> &v)
+    {
+        for (uint8_t b : v)
+            if (b != 0u)
+                return true;
+        return false;
     }
 }
 
@@ -2884,7 +2913,9 @@ void register_ps2_vu1_tests()
             }
             t.IsTrue(served, "budget=64 run serves the job");
             const uint64_t smallBreaks = ps2_microvu::budgetBreaks() - breaksBefore;
-            t.IsTrue(smallBreaks > 0, "budget=64 breaks on a ~1000-cycle loop");
+            t.IsTrue(smallBreaks > 0, "budget=64 breaks on a ~1500-cycle loop");
+            t.IsTrue(small.cycles > 1000, "the continued run executes the whole loop");
+            t.IsTrue(small.vi[1] >= 500 && small.vi[2] == 500, "the continued run counts to the limit");
             t.IsTrue(ps2_microvu::saveReady(small).empty(), "a completed-continued job leaves no park");
 
             // A shutdown/configure cycle drops all JIT state so the unbounded
@@ -2909,9 +2940,9 @@ void register_ps2_vu1_tests()
             }
             t.IsTrue(servedWide, "unbounded run serves the job");
             t.IsTrue(ps2_microvu::budgetBreaks() - wideBefore == 0, "unbounded run never breaks");
-            t.IsTrue(std::memcmp(&small, &wide, sizeof(VU1State)) == 0,
-                     "small-budget final VU state matches unbounded");
+            t.IsTrue(sameSs5State(small, wide), "small-budget final VU state matches unbounded");
             t.IsTrue(smallData == wideData, "small-budget data memory matches unbounded");
+            t.IsTrue(anyNonzeroByte(smallData), "the loop's stores reach data memory");
             lib.end();
         });
 
