@@ -827,8 +827,9 @@ if(PS2X_VU0_RECOMP_DIR)
 endif()
 
 # OM1 P5: offline microVU core, statically linked (iOS app). PS2X_OM1_STAGE is
-# a private dir with OfflineCore.{h,cpp}, OfflineBridge.cpp, the recorded .s
-# + *_tables.c pairs, and an `armsx2` symlink to the ARMSX2 tree (headers).
+# a private dir with OfflineCore.{h,cpp}, OfflineBridge.cpp, OM1StubHost.cpp
+# (hwIntcIrq abort stub), the recorded .s + *_tables.c pairs, and an `armsx2`
+# symlink to the ARMSX2 tree (headers + tests/ctest StubHost).
 # PS2X_OM1_LIB is a private iOS PCSX2 build dir (*.a glob, GI1's shape).
 # Both or neither. Nothing ARMSX2-derived is committed here; the stage and
 # the prebuilt lib stay private, like the game codegen.
@@ -838,7 +839,7 @@ if((PS2X_OM1_STAGE AND NOT PS2X_OM1_LIB) OR (PS2X_OM1_LIB AND NOT PS2X_OM1_STAGE
     message(FATAL_ERROR "PS2X: PS2X_OM1_STAGE and PS2X_OM1_LIB go together")
 endif()
 if(PS2X_OM1_STAGE)
-    foreach(f OfflineCore.cpp OfflineBridge.cpp)
+    foreach(f OfflineCore.cpp OfflineBridge.cpp OM1StubHost.cpp)
         if(NOT EXISTS "${PS2X_OM1_STAGE}/${f}")
             message(FATAL_ERROR "PS2X: OM1 stage missing ${f}")
         endif()
@@ -846,10 +847,15 @@ if(PS2X_OM1_STAGE)
     if(NOT EXISTS "${PS2X_OM1_STAGE}/armsx2/pcsx2/Config.h")
         message(FATAL_ERROR "PS2X: OM1 stage needs armsx2/ -> ARMSX2 tree (pcsx2/Config.h)")
     endif()
+    if(NOT EXISTS "${PS2X_OM1_STAGE}/armsx2/tests/ctest/core/StubHost.cpp")
+        message(FATAL_ERROR "PS2X: OM1 stage armsx2/ lacks tests/ctest/core/StubHost.cpp")
+    endif()
     enable_language(ASM)
     file(GLOB PS2X_OM1_SOURCES CONFIGURE_DEPENDS
         "${PS2X_OM1_STAGE}/OfflineCore.cpp"
         "${PS2X_OM1_STAGE}/OfflineBridge.cpp"
+        "${PS2X_OM1_STAGE}/OM1StubHost.cpp"
+        "${PS2X_OM1_STAGE}/armsx2/tests/ctest/core/StubHost.cpp"
         "${PS2X_OM1_STAGE}/*.s"
         "${PS2X_OM1_STAGE}/*_tables.c")
     list(FILTER PS2X_OM1_SOURCES EXCLUDE REGEX "/\\._")
@@ -867,7 +873,34 @@ if(PS2X_OM1_STAGE)
         SKIP_UNITY_BUILD_INCLUSION ON
         SKIP_PRECOMPILE_HEADERS ON
         COMPILE_DEFINITIONS PCSX2_RECOMPILER_TESTS
-        INCLUDE_DIRECTORIES "${PS2X_OM1_STAGE};${PS2X_OM1_STAGE}/armsx2/pcsx2;${PS2X_OM1_LIB}/common/include")
+        INCLUDE_DIRECTORIES "${PS2X_OM1_STAGE};${PS2X_OM1_STAGE}/armsx2;${PS2X_OM1_STAGE}/armsx2/pcsx2;${PS2X_OM1_STAGE}/armsx2/3rdparty/imgui;${PS2X_OM1_STAGE}/armsx2/3rdparty/fmt/include;${PS2X_OM1_LIB}/common/include")
+    # SDL3 C-API stubs (gi1_sdl3_stubs.cpp, verbatim from the gi1 branch: the
+    # offline closure pulls the same SDL input/audio/FF objects the GS closure
+    # does, and PCSX2's own libSDL3.a stays excluded — its UIKit classes
+    # collide with the app's SDL2 at launch. Never called on the OM1 path.)
+    add_library(ps2x_gi1_sdl3_stubs STATIC src/lib/gi1_sdl3_stubs.cpp)
+    target_link_libraries(ps2EntryRunner PRIVATE ps2x_gi1_sdl3_stubs)
+endif()
+if(PS2X_OM1_STAGE AND PS2X_IS_IOS)
+    # Frameworks the offline closure needs beyond what the app already links
+    # (same pulled universe as the GS closure: Metal GS, cubeb audio, USB).
+    target_link_libraries(ps2EntryRunner PRIVATE
+        "-framework Metal"
+        "-framework MetalKit"
+        "-framework QuartzCore"
+        "-framework CoreVideo"
+        "-framework IOSurface"
+        "-framework CoreMedia"
+        "-framework AVFoundation"
+        "-framework AudioToolbox"
+        "-framework CoreAudio"
+        "-framework CoreMotion"
+        "-framework GameController"
+        "-framework CoreHaptics"
+        "-framework CoreBluetooth"
+        "-framework ImageIO"
+        "-lz"
+    )
 endif()
 
 if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_IOS)
