@@ -3288,8 +3288,44 @@ void register_ps2_memory_tests()
             reverseKick(memB);
             expectPattern(memB, 5u, 2u, "post-load lag continues with snapshot 1 bytes");
 
+            // A save taken before any snapshot (knob-off shape: no tail)
+            // still loads, with fresh lag semantics.
+            PS2Memory memC;
+            t.IsTrue(memC.initialize(), "PS2Memory C initialize should succeed");
+            GS gsC;
+            gsC.init(memC.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &memC.gs());
+            memC.setGsFrontend(&gsC);
+            ps2_savestate::Writer wC;
+            const size_t markC = wC.beginSection("gs", ps2_savestate::kGsVersion);
+            GSSavestate::save(gsC, wC);
+            wC.endSection(markC);
+            t.IsTrue(wC.buf.size() < w.buf.size(), "pre-snapshot save is smaller (no lag tail)");
+            PS2Memory memD;
+            t.IsTrue(memD.initialize(), "PS2Memory D initialize should succeed");
+            GS gsD;
+            gsD.init(memD.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &memD.gs());
+            memD.setGsFrontend(&gsD);
+            ps2_savestate::Reader rC(wC.buf.data(), wC.buf.size());
+            t.IsTrue(rC.beginSection(key, version), "tail-less section frame parses");
+            t.IsTrue(GSSavestate::load(gsD, rC), "tail-less GS state loads");
+            t.IsTrue(rC.endSection("gs"), "tail-less section fully consumed");
+            std::memset(memD.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(memD);
+            bool untouched = true;
+            for (uint32_t i = 0u; i < 64u; ++i)
+            {
+                if (memD.getRDRAM()[kDst + i] != 0xA5u)
+                {
+                    untouched = false;
+                    break;
+                }
+            }
+            t.IsTrue(untouched, "tail-less load serves empty first (fresh lag1 start)");
+
             mem.setGsFrontend(nullptr);
             memB.setGsFrontend(nullptr);
+            memC.setGsFrontend(nullptr);
+            memD.setGsFrontend(nullptr);
             ps2_rb1_setReverseDmaOverride(-1);
         });
 
