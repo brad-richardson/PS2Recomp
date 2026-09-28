@@ -795,20 +795,51 @@ if(PS2X_VU1_RECOMP_DIR)
     list(FILTER PS2X_VU1_RECOMP_SOURCES EXCLUDE REGEX "/\\._")
     list(LENGTH PS2X_VU1_RECOMP_SOURCES PS2X_VU1_RECOMP_SOURCE_COUNT)
     message(STATUS "PS2X: VU1 recomp: ${PS2X_VU1_RECOMP_SOURCE_COUNT} images from ${PS2X_VU1_RECOMP_DIR}")
-    # F4: each image is a giant TU (2,048 chained pair functions); cap how many
-    # compile at once so small build boxes don't OOM. Only Ninja honors pools.
-    # Belt and suspenders: the per-source form is dropped by Android's CMake
-    # 3.22.1 (pool defined, 0 edges use it) while desktop CMake honors it, so
-    # the owning target carries the pool too. That constrains the whole (small)
-    # runner target on generators that honor it; compiled output is unchanged.
-    set_property(GLOBAL APPEND PROPERTY JOB_POOLS ps2x_vu1_gen=2)
-    set_target_properties(ps2EntryRunner PROPERTIES JOB_POOL_COMPILE ps2x_vu1_gen)
-    target_sources(ps2EntryRunner PRIVATE ${PS2X_VU1_RECOMP_SOURCES})
-    set_source_files_properties(${PS2X_VU1_RECOMP_SOURCES} PROPERTIES
-        SKIP_UNITY_BUILD_INCLUSION ON
-        SKIP_PRECOMPILE_HEADERS ON
-        JOB_POOL_COMPILE ps2x_vu1_gen
-        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu;${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
+    # IR1-Part2: each image is a giant TU (~1.8 MB source, ~9 GB clang RSS
+    # at -O3); two compiling at once OOM-killed the 18 GB APK container next
+    # to the 4 GB Gradle JVM, and the old F4 whole-target pool of depth 2
+    # allowed exactly that. The images now compile in their own OBJECT
+    # library (same objects on the runner link line, so the static
+    # registrations still link) under a depth-1 Ninja pool: at most one heavy
+    # TU is ever in flight, and the small runner TUs are no longer pooled.
+    # Only Ninja honors pools; other generators ignore the properties.
+    # Compiled output is unchanged: the OBJECT library replicates
+    # ps2EntryRunner's PRIVATE compile interface (keep in sync if that grows;
+    # verified by compile_commands.json diff on desktop + Android).
+    if(PS2X_VU1_RECOMP_SOURCE_COUNT GREATER 0)
+        add_library(ps2_vu1gen OBJECT ${PS2X_VU1_RECOMP_SOURCES})
+        set_property(GLOBAL APPEND PROPERTY JOB_POOLS ps2x_vu1_heavy=1)
+        set_target_properties(ps2_vu1gen PROPERTIES JOB_POOL_COMPILE ps2x_vu1_heavy)
+        target_include_directories(ps2_vu1gen PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/lib"
+        )
+        target_link_libraries(ps2_vu1gen PUBLIC ps2_runtime)
+        if(PS2X_DEFAULT_BOOT_ELF_DEFINE)
+            target_compile_definitions(ps2_vu1gen PRIVATE
+                PS2X_DEFAULT_BOOT_ELF="${PS2X_DEFAULT_BOOT_ELF_DEFINE}"
+            )
+        endif()
+        if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_IOS)
+            target_compile_definitions(ps2_vu1gen PRIVATE PS2X_ENABLE_DEBUG_UI=1)
+            target_link_libraries(ps2_vu1gen PUBLIC rlImGui imgui)
+        endif()
+        if(MSVC)
+            target_compile_options(ps2_vu1gen PRIVATE /FS)
+        endif()
+        if(PS2X_IS_ANDROID)
+            # ps2EntryRunner is SHARED on Android, so these objects need PIC
+            # (CMake only defaults it on for SHARED members, not OBJECT libs).
+            set_target_properties(ps2_vu1gen PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        endif()
+        if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+            EnableFastReleaseMode(ps2_vu1gen)
+            if(PS2X_DEV_NO_THINLTO)
+                set_property(TARGET ps2_vu1gen PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+            endif()
+        endif()
+        target_link_libraries(ps2EntryRunner PRIVATE ps2_vu1gen)
+    endif()
 endif()
 
 # VR3: generated VU0 images (vu0_<hash>.cpp from PS2X_VU0_RECOMP_DUMP), used
