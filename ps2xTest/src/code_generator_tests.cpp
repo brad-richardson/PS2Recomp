@@ -3,6 +3,7 @@
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/types.h"
+#include "ps2_codegen_abi.h"
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -644,6 +645,23 @@ void register_code_generator_tests()
                  "resume entry pc should register to the owner wrapper");
         t.IsTrue(registration.find("g_ps2RecompiledFunctionTable[3] = resume_owner_0x7000; // 0x700c") != std::string::npos,
                  "multiple resume pcs should register to the same owner wrapper");
+    });
+
+    tc.Run("registration stamps the codegen ABI marker", [](TestCase &t) {
+        Function func;
+        func.name = "abi_owner";
+        func.start = 0x8000;
+        func.end = 0x8010;
+        func.isRecompiled = true;
+        func.isStub = false;
+
+        CodeGenerator gen({}, {});
+        std::string registration = gen.generateFunctionRegistration({func}, {});
+
+        const std::string want = "extern const uint32_t g_ps2xCodegenAbiVersion = " +
+                                 std::to_string(ps2_codegen_abi::kVersion) + "u;";
+        t.IsTrue(registration.find(want) != std::string::npos,
+                 "registration should define the codegen ABI marker (HL3 guard)");
     });
 
     tc.Run("external mid-function entry can register to the owner wrapper", [](TestCase &t) {

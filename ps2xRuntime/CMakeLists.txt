@@ -818,6 +818,12 @@ if(PS2X_GAME_CODEGEN_DIR)
         )
     endif()
     target_link_libraries(ps2EntryRunner PRIVATE ps2_game_objects)
+    # HL3: fail-loud codegen ABI guard — references the marker the generator
+    # stamps into register_functions.cpp, so a stale generated tree fails to
+    # link. Runner-target only (game-object builds): the in-tree stub table,
+    # stub-mode runners and ps2x_tests never see this TU.
+    target_sources(ps2EntryRunner PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/ps2_codegen_abi_guard.cpp")
 endif()
 
 # VR1: generated VU1 images (vu1_<hash>.cpp from PS2X_VU1_RECOMP_DUMP). They are
