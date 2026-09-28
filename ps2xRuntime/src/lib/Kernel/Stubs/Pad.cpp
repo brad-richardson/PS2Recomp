@@ -737,6 +737,14 @@ namespace ps2_stubs
             uint64_t snapHash = 0u; // FNV-1a 64 over relpaths + copied bytes
             uint64_t snapFiles = 0u;
             PadRecordSnap snapStatus = PadRecordSnap::None;
+            // DS1: dir-mode re-arm state (a mid-session load opens a new
+            // session file in the same dir) + the one-shot load note the
+            // next header carries.
+            bool dirMode = false;
+            std::string dir;
+            uint64_t keep = 30u;
+            bool haveLoadNote = false;
+            uint64_t loadTickNote = 0u;
         };
         PadRecord g_padRecord;
         std::atomic<bool> g_padRecordInitDone{false};
@@ -1155,6 +1163,11 @@ namespace ps2_stubs
                                  snapSrc.c_str());
                 }
             }
+            if (g_padRecord.haveLoadNote)
+            {
+                std::fprintf(f, "# load_tick=%llu (new segment after a mid-session state load)\n",
+                             static_cast<unsigned long long>(g_padRecord.loadTickNote));
+            }
             std::fflush(f);
         }
 
@@ -1172,6 +1185,7 @@ namespace ps2_stubs
 
         void padRecordArmLocked(const char *path, const char *source)
         {
+            g_padRecord.dirMode = false;
             g_padRecord.file = std::fopen(path, "w");
             if (!g_padRecord.file)
             {
@@ -1271,6 +1285,9 @@ namespace ps2_stubs
         void padRecordArmDirLocked(const char *dir, uint64_t keep, const char *source)
         {
             namespace fs = std::filesystem;
+            g_padRecord.dirMode = true;
+            g_padRecord.dir = dir ? dir : "";
+            g_padRecord.keep = keep;
             std::error_code ec;
             fs::create_directories(dir, ec);
             if (ec)
@@ -1374,6 +1391,11 @@ namespace ps2_stubs
             g_padRecord.snapHash = 0u;
             g_padRecord.snapFiles = 0u;
             g_padRecord.snapStatus = PadRecordSnap::None;
+            g_padRecord.dirMode = false;
+            g_padRecord.dir.clear();
+            g_padRecord.keep = 30u;
+            g_padRecord.haveLoadNote = false;
+            g_padRecord.loadTickNote = 0u;
             g_padRecordArmed.store(false, std::memory_order_relaxed);
         }
 
@@ -2445,6 +2467,69 @@ namespace ps2_stubs
         padRecordArmDirLocked(dir, keep, "test");
         g_padRecordInitDone.store(true, std::memory_order_relaxed);
         return g_padRecord.enabled;
+    }
+
+    void padRecordNoteLoad(uint64_t loadedTick)
+    {
+        padRecordEnsureInit();
+        std::lock_guard<std::mutex> lock(g_padRecord.mutex);
+        if (!g_padRecord.enabled || g_padRecord.capped)
+        {
+            return;
+        }
+        // Close the pre-load segment: emit the open span through the last
+        // observed tick so the file stays contiguous.
+        if (g_padRecord.haveOpen && g_padRecord.file)
+        {
+            padRecordEmitLocked(g_padRecord.openTick, g_padRecord.lastTick + 1u);
+            g_padRecord.haveOpen = false;
+        }
+        if (g_padRecord.dirMode)
+        {
+            if (g_padRecord.file)
+            {
+                std::fflush(g_padRecord.file);
+                std::fclose(g_padRecord.file);
+                g_padRecord.file = nullptr;
+            }
+            // A new session file in the same dir; its header notes the load
+            // (same keep; the prune counts the just-closed segment).
+            g_padRecord.haveLoadNote = true;
+            g_padRecord.loadTickNote = loadedTick;
+            g_padRecord.firstEntry = true;
+            padRecordArmDirLocked(g_padRecord.dir.c_str(), g_padRecord.keep, "load");
+            g_padRecord.haveLoadNote = false;
+            if (!g_padRecord.file)
+            {
+                // Arm failed loudly; switch off (a null file with enabled
+                // set would crash the next flush).
+                g_padRecord.enabled = false;
+                g_padRecordArmed.store(false, std::memory_order_relaxed);
+                return;
+            }
+        }
+        else if (g_padRecord.file)
+        {
+            // One file: a comment marker (the script parser skips full-line
+            // '#' comments) plus a fresh segment. Replay tools split at it:
+            // the post-load entries rewind past the pre-load ones.
+            char stamp[32] = {0};
+            padRecordUtc(stamp, sizeof(stamp), std::time(nullptr), "%Y-%m-%dT%H:%M:%SZ");
+            std::fprintf(g_padRecord.file, "\n# --- new segment: state loaded (tick %llu) at %s ---\n",
+                         static_cast<unsigned long long>(loadedTick), stamp);
+            std::fflush(g_padRecord.file);
+        }
+        // Fresh open state at the rewound clock. Without this OnRead drops
+        // every post-load read as "clock moved backwards" until the tick
+        // catches up, then emits a span with the stale pre-load state.
+        g_padRecord.haveOpen = false;
+        g_padRecord.openTick = 0u;
+        g_padRecord.openState = PadInputState{};
+        g_padRecord.lastTick = 0u;
+        g_padRecord.lastFlushTick = 0u;
+        g_padRecord.entriesSinceFlush = 0u;
+        std::fprintf(stderr, "[padrecord] new segment after state load (tick %llu) path=%s\n",
+                     static_cast<unsigned long long>(loadedTick), g_padRecord.path.c_str());
     }
 }
 

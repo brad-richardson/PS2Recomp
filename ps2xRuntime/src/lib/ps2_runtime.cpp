@@ -927,6 +927,76 @@ void drawVirtualPad(const ps2x::vpad::Layout &layout, uint16_t pressed, const ps
         }
     }
 }
+
+// DS1: quick-save slot for the live card root (mirrors getMcRootPath port 0:
+// PS2X_MC_ROOT, else <elf dir>/mc0).
+std::string ds1QuickSlotPath()
+{
+    const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+    const std::string mcRoot =
+        paths.mcRoot.empty() ? (paths.elfDirectory / "mc0").string() : paths.mcRoot.string();
+    return ps2_savestate::quickSlotPath(paths.elfDirectory.string(), mcRoot);
+}
+
+void ds1FireQuickSave()
+{
+    const std::string slot = ds1QuickSlotPath();
+    if (!ps2_savestate::requestQuickSave(slot))
+        ps2_savestate::noteQuickStatus("busy (save/load already pending)");
+}
+
+void ds1FireQuickLoad()
+{
+    const std::string slot = ds1QuickSlotPath();
+    std::error_code ec;
+    if (!std::filesystem::exists(slot, ec) || ec)
+    {
+        std::fprintf(stderr, "[savestate] quick-load: no quicksave in slot %s\n", slot.c_str());
+        ps2_savestate::noteQuickStatus("no quicksave in this slot yet");
+        return;
+    }
+    if (!ps2_savestate::requestQuickLoad(slot))
+        ps2_savestate::noteQuickStatus("busy (save/load already pending)");
+}
+
+// DS1 DEV-ONLY scheduled chord (host testing without a gamepad):
+// PS2X_SAVESTATE_HOTKEY_AT="2000:save,2600:load" fires each op once at the
+// first present with vsyncTick >= tick. Malformed entries are ignored.
+struct Ds1Hotkey
+{
+    uint64_t tick = 0u;
+    bool save = true;
+    bool fired = false;
+};
+std::vector<Ds1Hotkey> parseDs1Hotkeys(const char *env)
+{
+    std::vector<Ds1Hotkey> out;
+    if (!env || !env[0])
+        return out;
+    std::string text(env);
+    size_t begin = 0u;
+    while (begin <= text.size())
+    {
+        const size_t end = text.find(',', begin);
+        const std::string item = text.substr(begin, end == std::string::npos ? end : end - begin);
+        const size_t colon = item.find(':');
+        if (colon != std::string::npos)
+        {
+            const uint64_t tick = std::strtoull(item.substr(0, colon).c_str(), nullptr, 10);
+            const std::string op = item.substr(colon + 1u);
+            if (tick != 0u && (op == "save" || op == "load"))
+                out.push_back(Ds1Hotkey{tick, op == "save", false});
+            else
+                std::fprintf(stderr, "[savestate] ignoring malformed HOTKEY_AT entry '%s'\n", item.c_str());
+        }
+        else if (!item.empty())
+            std::fprintf(stderr, "[savestate] ignoring malformed HOTKEY_AT entry '%s'\n", item.c_str());
+        if (end == std::string::npos)
+            break;
+        begin = end + 1u;
+    }
+    return out;
+}
 } // namespace
 
 // HR1: main-thread present cost split, reported by PS2X_THREAD_CPU_LOG=1.
@@ -5098,6 +5168,9 @@ void PS2Runtime::run()
     // (off = one bool check per frame, zero cost).
     const bool perfLog = ps2x::perflog::enabled();
     const bool vpadWanted = virtualPadWanted();
+    PSChordState ds1Chord; // SELECT+L3 save / SELECT+R3 load, carried across frames
+    std::vector<Ds1Hotkey> ds1Hotkeys =
+        parseDs1Hotkeys(std::getenv("PS2X_SAVESTATE_HOTKEY_AT")); // DS1 DEV-ONLY scheduled chord
     bool vpadLastPadConnected = true; // forces the first [vpad] line when the overlay shows
     const std::vector<ps2x::vpad::TestTouch> vpadTestTouches =
         ps2x::vpad::parseTestTouches(std::getenv("PS2X_VPAD_TEST_TOUCHES")); // DEV-ONLY
@@ -5376,7 +5449,38 @@ void PS2Runtime::run()
         // guest speed); readState consumes one presented mask per guest
         // read. PS2X_PAD_LATCH=0 keeps the pre-IN2 liveMask publish.
         const bool padLatchOn = ps2x::padlatch::latchEnabled();
-        const uint16_t raylibPressed = padLatchOn ? ps2xSampleRaylibPad().pressed : 0u;
+        const uint16_t ds1RawPressed = ps2xSampleRaylibPad().pressed;
+        uint16_t raylibPressed = padLatchOn ? ds1RawPressed : 0u;
+        // DS1: quick-save/load chord, edge-triggered (the shell action runs
+        // even when the latch is off). The chord is stripped from the guest
+        // mask while engaged, so the game never sees it. Inert without a
+        // physical gamepad (det boots unaffected: no buttons, no edges).
+        {
+            bool ds1SaveEdge = false, ds1LoadEdge = false;
+            psChordStep(ds1Chord, (ds1RawPressed & ps2x::vpad::kSelect) != 0u,
+                        (ds1RawPressed & ps2x::vpad::kL3) != 0u,
+                        (ds1RawPressed & ps2x::vpad::kR3) != 0u, ds1SaveEdge, ds1LoadEdge);
+            if (ds1SaveEdge)
+                ds1FireQuickSave();
+            if (ds1LoadEdge)
+                ds1FireQuickLoad();
+            if ((ds1RawPressed & ps2x::vpad::kSelect) != 0u &&
+                (ds1RawPressed & (ps2x::vpad::kL3 | ps2x::vpad::kR3)) != 0u)
+                raylibPressed = static_cast<uint16_t>(
+                    raylibPressed & ~(ps2x::vpad::kSelect | ps2x::vpad::kL3 | ps2x::vpad::kR3));
+        }
+        // DS1 DEV-ONLY scheduled chord (same shell path as the gamepad).
+        for (Ds1Hotkey &ds1Hk : ds1Hotkeys)
+        {
+            if (!ds1Hk.fired && m_memory.gs().vsyncTick.load() >= ds1Hk.tick)
+            {
+                ds1Hk.fired = true;
+                if (ds1Hk.save)
+                    ds1FireQuickSave();
+                else
+                    ds1FireQuickLoad();
+            }
+        }
         if (vpadWanted && !vpadPadConnected)
         {
             const ps2x::vpad::Layout layout = ps2x::vpad::makeLayout(screenWidth, screenHeight);
@@ -5431,6 +5535,48 @@ void PS2Runtime::run()
         {
             // Overlay off (desktop default): raylib buttons still feed the latch.
             ps2x::padlatch::sharedLatch().publish(raylibPressed);
+        }
+        // DS1: quick-save/load status line, drawn by the host over the
+        // presented frame (never into the guest frame): "saving..." while a
+        // save waits, else the last result for 4 s. Skipped with the rest of
+        // GL when the VK layer presents above (the play config); there the
+        // logcat lines and the slot sidecar are the record.
+        if (!skipGl)
+        {
+            std::string ds1Msg;
+            if (ps2_savestate::quickSavePending())
+            {
+                ds1Msg = "saving...";
+            }
+            else
+            {
+                uint64_t ds1AgeMs = 0u;
+                if (!ps2_savestate::quickStatus(ds1Msg, ds1AgeMs) || ds1AgeMs >= 4000u)
+                    ds1Msg.clear();
+            }
+            if (!ds1Msg.empty())
+            {
+                if (ds1Msg.size() > 100u)
+                    ds1Msg.resize(100u);
+                const int ds1Font = std::max(16, static_cast<int>(screenHeight / 36.0f));
+                const int ds1Tw = MeasureText(ds1Msg.c_str(), ds1Font);
+                const int ds1X = static_cast<int>(screenWidth / 2.0f) - ds1Tw / 2;
+                const int ds1Y = static_cast<int>(screenHeight * 0.06f);
+#if defined(__ANDROID__)
+                if (vkUnder)
+                {
+                    rlSetBlendFactorsSeparate(0x0302 /*SRC_ALPHA*/, 0x0303 /*ONE_MINUS_SRC_ALPHA*/,
+                                              1 /*ONE*/, 0x0303, 0x8006 /*FUNC_ADD*/, 0x8006);
+                    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+                }
+#endif
+                DrawRectangle(ds1X - 12, ds1Y - 8, ds1Tw + 24, ds1Font + 16, Color{0, 0, 0, 160});
+                DrawText(ds1Msg.c_str(), ds1X, ds1Y, ds1Font, Color{255, 255, 255, 230});
+#if defined(__ANDROID__)
+                if (vkUnder)
+                    EndBlendMode();
+#endif
+            }
         }
         if (m_debugUiInitialized && m_debugUiDrawCallback)
         {

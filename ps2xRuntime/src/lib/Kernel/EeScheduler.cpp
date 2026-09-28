@@ -1,7 +1,9 @@
 #include "runtime/ee_scheduler.h"
 #include "ps2_microvu.h"
 #include "ps2_mtvu.h"
+#include "ps2_pad_latch.h"
 #include "runtime/ps2_savestate.h"
+#include "Stubs/Pad.h"
 #include "../ps2_savestate_internal.h"
 #include "runtime/ee_guest_unwind.h"
 #include "ps2_fpmode.h"
@@ -618,14 +620,57 @@ void EeScheduler::run()
         {
             break;
         }
-        if (ssSaveAt != 0u && m_vsyncTick >= ssSaveAt)
+        // DS1: chord/hotkey quick-load (one-shot: applies now or refuses
+        // loudly; a refused file leaves the live machine untouched).
+        std::string ds1LoadPath;
+        if (ps2_savestate::takePendingQuickLoad(ds1LoadPath))
+        {
+            std::string note, error;
+            if (ps2_savestate::loadQuick(m_runtime, ds1LoadPath, note, error))
+            {
+                // As after a boot-time load: the save was taken right after
+                // an event pass, so the next iteration must not run one.
+                ssSkipEvents = true;
+                // Fresh input + audio state for the rewound machine: the
+                // saved latch edges and PCM belonged to the pre-load
+                // timeline (SS1 §Dropping det: clear, don't refuse).
+                ps2x::padlatch::sharedLatch().savestateSet(ps2x::padlatch::Latch{});
+                ps2_snd_spike::pcmRing().dropAll();
+                ps2_stubs::padRecordNoteLoad(m_vsyncTick);
+                std::fprintf(stderr, "[savestate] quick-load ok: %s\n", note.c_str());
+                ps2_savestate::noteQuickStatus(note);
+            }
+            else
+            {
+                std::fprintf(stderr, "[savestate] quick-load refused: %s\n", error.c_str());
+                ps2_savestate::noteQuickStatus("load refused: " + error);
+            }
+        }
+        std::string ds1SavePath;
+        const bool ds1SaveArmed = ps2_savestate::pendingQuickSavePath(ds1SavePath);
+        const bool ssEnvDue = ssSaveAt != 0u && m_vsyncTick >= ssSaveAt;
+        // The env knob wins a tie (existing behavior); the chord save stays
+        // armed for the next tick.
+        const bool ds1SaveDue = ds1SaveArmed && !ssEnvDue;
+        if (ssEnvDue || ds1SaveDue)
         {
             std::string why;
-            if (ps2_savestate::trySave(m_runtime, m_vsyncTick, why))
+            const bool saved =
+                ds1SaveDue ? ps2_savestate::trySaveAtPath(m_runtime, m_vsyncTick, ds1SavePath,
+                                                         true, why)
+                           : ps2_savestate::trySave(m_runtime, m_vsyncTick, why);
+            if (saved)
             {
-                ssSaveAt = 0u;
+                if (ds1SaveDue)
+                {
+                    ps2_savestate::clearPendingQuickSave();
+                    ps2_savestate::writeQuickInfo(ds1SavePath, m_vsyncTick, currentEeCycle());
+                    ps2_savestate::noteQuickStatus("saved at tick " + std::to_string(m_vsyncTick));
+                }
+                else
+                    ssSaveAt = 0u;
                 ssBudgetParkedDefers = 0u;
-                if (ssConfig.exitAfterSave)
+                if (ssConfig.exitAfterSave && !ds1SaveDue)
                 {
                     std::fprintf(stderr, "[savestate] exit after save\n");
                     requestStop();
@@ -647,7 +692,13 @@ void EeScheduler::run()
                                          "save (tick=%llu)\n",
                                          ssBudgetParkedDefers,
                                          static_cast<unsigned long long>(m_vsyncTick));
-                            ssSaveAt = 0u;
+                            if (ds1SaveDue)
+                            {
+                                ps2_savestate::clearPendingQuickSave();
+                                ps2_savestate::noteQuickStatus("save abandoned (VU1 budget-parked)");
+                            }
+                            else
+                                ssSaveAt = 0u;
                             ssBudgetParkedDefers = 0u;
                         }
                     }

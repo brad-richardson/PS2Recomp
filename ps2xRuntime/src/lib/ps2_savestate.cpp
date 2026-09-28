@@ -20,6 +20,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -248,6 +249,39 @@ namespace ps2_savestate
             auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
             return ec ? std::string() : p.string();
 #endif
+        }
+
+        // DS1: the runner is hashed on every save, load and info write (a
+        // ~170 MB pass each); the binary cannot change under a running
+        // process, so cache by (path, size, mtime) and rehash only when the
+        // stat changes. "unknown" when unhashable, as before.
+        std::string runnerShaCached()
+        {
+            namespace fs = std::filesystem;
+            static std::mutex mutex;
+            static std::string cachedPath, cachedSha;
+            static uint64_t cachedSize = 0u;
+            static fs::file_time_type cachedTime{};
+            static bool haveCache = false;
+            const std::string path = runnerPath();
+            std::error_code ec;
+            const uint64_t size = path.empty() ? 0u : static_cast<uint64_t>(fs::file_size(path, ec));
+            if (ec)
+                return "unknown";
+            const fs::file_time_type mtime = fs::last_write_time(path, ec);
+            if (ec)
+                return "unknown";
+            std::lock_guard<std::mutex> lock(mutex);
+            if (haveCache && cachedPath == path && cachedSize == size && cachedTime == mtime)
+                return cachedSha;
+            std::string sha = "unknown";
+            sha256File(path, sha);
+            cachedPath = path;
+            cachedSha = sha;
+            cachedSize = size;
+            cachedTime = mtime;
+            haveCache = true;
+            return sha;
         }
 
         // Cheap ISO identity: size + SHA-256 of the first and last MiB.
@@ -635,7 +669,7 @@ namespace ps2_savestate
             h.push_back({"format", std::to_string(kFormatVersion), true});
             std::string runnerSha = "unknown";
             if (withRunnerSha)
-                sha256File(runnerPath(), runnerSha);
+                runnerSha = runnerShaCached();
             h.push_back({"runner_sha", runnerSha, config().strict});
             std::string elfSha = "unknown";
             sha256File(g_elfPath, elfSha);
@@ -693,6 +727,12 @@ namespace ps2_savestate
 
     bool trySave(PS2Runtime &runtime, uint64_t vsyncTick, std::string &why)
     {
+        return trySaveAtPath(runtime, vsyncTick, config().savePath, false, why);
+    }
+
+    bool trySaveAtPath(PS2Runtime &runtime, uint64_t vsyncTick, const std::string &savePath,
+                       bool skipPadLatchReady, std::string &why)
+    {
         if (ps2_microvu::selected())
         {
             // SS4: the JIT holds no guest state outside VU1State + VU memories
@@ -716,6 +756,10 @@ namespace ps2_savestate
             {
                 if (hooks.ready)
                 {
+                    // DS1: play saves capture live input (best-effort); the
+                    // env-knob path keeps deferring on a live pad.
+                    if (skipPadLatchReady && key == "padlatch")
+                        continue;
                     why = hooks.ready();
                     if (!why.empty())
                     {
@@ -803,7 +847,7 @@ namespace ps2_savestate
             w.endSection(mark);
         }
 
-        const std::string &path = config().savePath;
+        const std::string &path = savePath;
         const std::string tmp = path + ".tmp";
         {
             std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
@@ -829,7 +873,32 @@ namespace ps2_savestate
     }
 
     // ---------------------------------------------------------------- load
+    bool loadImpl(PS2Runtime &runtime, const std::string &path, std::string &error, bool strict,
+                  uint64_t *savedTickOut);
     bool load(PS2Runtime &runtime, const std::string &path, std::string &error)
+    {
+        return loadImpl(runtime, path, error, config().strict, nullptr);
+    }
+
+    bool loadQuick(PS2Runtime &runtime, const std::string &path, std::string &note, std::string &error)
+    {
+        // The stub:mcdir loader reads this around the apply pass (below):
+        // the on-disk card wins over the saved one.
+        std::string cardNote;
+        setQuickLoadCardMode(true, &cardNote);
+        uint64_t savedTick = 0u;
+        const bool ok = loadImpl(runtime, path, error, true, &savedTick);
+        setQuickLoadCardMode(false, nullptr);
+        if (!ok)
+            return false;
+        note = "loaded tick=" + std::to_string(savedTick);
+        if (!cardNote.empty())
+            note += " (card kept: " + cardNote + ")";
+        return true;
+    }
+
+    bool loadImpl(PS2Runtime &runtime, const std::string &path, std::string &error, bool strict,
+                  uint64_t *savedTickOut)
     {
         const auto t0 = std::chrono::steady_clock::now();
         std::vector<uint8_t> data;
@@ -878,7 +947,7 @@ namespace ps2_savestate
             {
                 // S5: strict refuses an unobtainable identity ("unknown" on
                 // either side), not just a mismatch.
-                switch (checkRunnerSha(have, line.value, config().strict))
+                switch (checkRunnerSha(have, line.value, strict))
                 {
                 case RunnerShaVerdict::Accept:
                     continue;
@@ -953,6 +1022,11 @@ namespace ps2_savestate
                 }
             }
         }
+
+        // DS1: a mid-session load must not overwrite VU memories under an
+        // in-flight unit job (MT1's save-side sync has no load-side twin).
+        // No-op when MTVU is off or idle, so boot-time loads are unaffected.
+        ps2_mtvu::sync(ps2_mtvu::Reason::SaveState);
 
         // Pass 2: apply.
         std::map<std::string, bool> loaded;
@@ -1039,10 +1113,347 @@ namespace ps2_savestate
             }
         }
         setResumeSkip();
+        if (savedTickOut)
+            *savedTickOut = savedTick;
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         std::fprintf(stderr, "[savestate] loaded tick=%" PRIu64 " eeCycle=%s bytes=%zu sections=%zu ms=%.1f path=%s\n",
                      savedTick, saved.count("ee_cycle") ? saved.at("ee_cycle").c_str() : "?", data.size(), loaded.size(), ms,
                      path.c_str());
+        return true;
+    }
+
+    // ------------------------------------------------------- DS1 quick slots
+    namespace
+    {
+        struct QuickRequest
+        {
+            std::mutex mutex;
+            std::string savePath; // live while a chord save waits to land
+            std::string loadPath; // one-shot, consumed at the next save point
+        };
+        QuickRequest &quickRequests()
+        {
+            static QuickRequest q;
+            return q;
+        }
+        struct QuickStatus
+        {
+            std::mutex mutex;
+            std::string message;
+            int64_t setNs = 0;
+            bool have = false;
+        };
+        QuickStatus &quickStatusStore()
+        {
+            static QuickStatus s;
+            return s;
+        }
+    } // namespace
+
+    bool requestQuickSave(const std::string &path)
+    {
+        if (path.empty())
+            return false;
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+            if (ec)
+            {
+                std::fprintf(stderr, "[savestate] quick-save: cannot create %s: %s\n",
+                             std::filesystem::path(path).parent_path().string().c_str(), ec.message().c_str());
+                return false;
+            }
+        }
+        std::lock_guard<std::mutex> lock(quickRequests().mutex);
+        if (!quickRequests().savePath.empty() || !quickRequests().loadPath.empty())
+            return false;
+        quickRequests().savePath = path;
+        std::fprintf(stderr, "[savestate] quick-save requested path=%s\n", path.c_str());
+        return true;
+    }
+
+    bool requestQuickLoad(const std::string &path)
+    {
+        if (path.empty())
+            return false;
+        std::lock_guard<std::mutex> lock(quickRequests().mutex);
+        if (!quickRequests().savePath.empty() || !quickRequests().loadPath.empty())
+            return false;
+        quickRequests().loadPath = path;
+        std::fprintf(stderr, "[savestate] quick-load requested path=%s\n", path.c_str());
+        return true;
+    }
+
+    bool quickSavePending()
+    {
+        std::lock_guard<std::mutex> lock(quickRequests().mutex);
+        return !quickRequests().savePath.empty();
+    }
+
+    bool takePendingQuickLoad(std::string &path)
+    {
+        std::lock_guard<std::mutex> lock(quickRequests().mutex);
+        if (quickRequests().loadPath.empty())
+            return false;
+        path = quickRequests().loadPath;
+        quickRequests().loadPath.clear();
+        return true;
+    }
+
+    bool pendingQuickSavePath(std::string &path)
+    {
+        std::lock_guard<std::mutex> lock(quickRequests().mutex);
+        if (quickRequests().savePath.empty())
+            return false;
+        path = quickRequests().savePath;
+        return true;
+    }
+
+    void clearPendingQuickSave()
+    {
+        std::lock_guard<std::mutex> lock(quickRequests().mutex);
+        quickRequests().savePath.clear();
+    }
+
+    void noteQuickStatus(const std::string &message)
+    {
+        std::lock_guard<std::mutex> lock(quickStatusStore().mutex);
+        quickStatusStore().message = message;
+        quickStatusStore().setNs = steadyNowNs();
+        quickStatusStore().have = true;
+    }
+
+    bool quickStatus(std::string &message, uint64_t &ageMs)
+    {
+        std::lock_guard<std::mutex> lock(quickStatusStore().mutex);
+        if (!quickStatusStore().have)
+            return false;
+        message = quickStatusStore().message;
+        const int64_t ageNs = steadyNowNs() - quickStatusStore().setNs;
+        ageMs = ageNs > 0 ? static_cast<uint64_t>(ageNs / 1000000) : 0u;
+        return true;
+    }
+
+    std::string quickSlotPath(const std::string &elfDir, const std::string &mcRoot)
+    {
+        namespace fs = std::filesystem;
+        std::string leaf;
+        if (!mcRoot.empty())
+            leaf = fs::path(mcRoot).filename().string();
+        if (leaf.empty() || leaf == "." || leaf == "/")
+            leaf = "mc0";
+        for (char &c : leaf)
+        {
+            const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                            c == '-' || c == '_' || c == '.';
+            if (!ok)
+                c = '_';
+        }
+        fs::path dir = elfDir.empty() ? fs::path("states") : fs::path(elfDir) / "states";
+        return (dir / ("quicksave-" + leaf + ".state")).string();
+    }
+
+    void writeQuickInfo(const std::string &statePath, uint64_t tick, uint64_t eeCycle)
+    {
+        namespace fs = std::filesystem;
+        std::string infoPath = statePath;
+        const std::string suffix = ".state";
+        if (infoPath.size() > suffix.size() &&
+            infoPath.compare(infoPath.size() - suffix.size(), suffix.size(), suffix) == 0)
+            infoPath.replace(infoPath.size() - suffix.size(), suffix.size(), ".info");
+        else
+            infoPath += ".info";
+        const std::string runnerSha = runnerShaCached();
+        char utc[32] = {0};
+        const std::time_t now = std::time(nullptr);
+#if defined(_WIN32)
+        std::tm tm{};
+        gmtime_s(&tm, &now);
+        std::strftime(utc, sizeof(utc), "%Y-%m-%dT%H:%M:%SZ", &tm);
+#else
+        std::tm tm{};
+        if (gmtime_r(&now, &tm))
+            std::strftime(utc, sizeof(utc), "%Y-%m-%dT%H:%M:%SZ", &tm);
+#endif
+        std::ofstream out(infoPath, std::ios::binary | std::ios::trunc);
+        if (!out)
+        {
+            std::fprintf(stderr, "[savestate] quick-save: cannot write %s\n", infoPath.c_str());
+            return;
+        }
+        out << "# ds1 quicksave slot info\n"
+            << "save_tick=" << tick << "\n"
+            << "save_utc=" << utc << "\n"
+            << "ee_cycle=" << eeCycle << "\n"
+            << "deterministic=" << (config().deterministic ? "1" : "0") << "\n"
+            << "runner_sha=" << runnerSha << "\n";
+        out.close();
+        if (!out)
+            std::fprintf(stderr, "[savestate] quick-save: cannot write %s\n", infoPath.c_str());
+    }
+
+    namespace
+    {
+        bool g_quickCardWinsDisk = false;
+        std::string *g_quickCardNote = nullptr;
+    } // namespace
+
+    void setQuickLoadCardMode(bool winsDisk, std::string *noteSink)
+    {
+        g_quickCardWinsDisk = winsDisk;
+        g_quickCardNote = noteSink;
+    }
+
+    bool quickLoadCardMode(std::string *&noteSink)
+    {
+        noteSink = g_quickCardNote;
+        return g_quickCardWinsDisk;
+    }
+
+    // Parsed card tree shared by the strict and lenient restores.
+    struct ParsedDirTree
+    {
+        std::vector<std::pair<std::string, int64_t>> dirs;
+        struct WantFile
+        {
+            int64_t mtime = 0;
+            std::vector<uint8_t> bytes;
+        };
+        std::map<std::string, WantFile> files;
+    };
+
+    static bool parseDirTreePayload(Reader &r, ParsedDirTree &out)
+    {
+        const uint64_t nDirs = r.count(1u << 16);
+        for (uint64_t i = 0; i < nDirs && r.ok(); ++i)
+        {
+            std::string rel = r.str();
+            int64_t mtime = 0;
+            r.pod(mtime);
+            if (!validTreeRel(rel))
+                return r.fail("bad path in dir tree: " + rel);
+            out.dirs.emplace_back(std::move(rel), mtime);
+        }
+        const uint64_t nFiles = r.count(1u << 16);
+        for (uint64_t i = 0; i < nFiles && r.ok(); ++i)
+        {
+            std::string rel = r.str();
+            int64_t mtime = 0;
+            r.pod(mtime);
+            std::vector<uint8_t> bytes = r.blob();
+            if (!validTreeRel(rel))
+                return r.fail("bad path in dir tree: " + rel);
+            out.files[std::move(rel)] = ParsedDirTree::WantFile{mtime, std::move(bytes)};
+        }
+        return r.ok();
+    }
+
+    bool readDirTreeLenient(Reader &r, const std::string &root, std::string &note)
+    {
+        namespace fs = std::filesystem;
+        ParsedDirTree want;
+        if (!parseDirTreePayload(r, want))
+            return false;
+        note.clear();
+        // Diff the destination against the saved tree. Anything unexpected —
+        // extra files/dirs, different bytes — keeps the disk: the load
+        // continues with the on-disk card untouched.
+        std::error_code ec;
+        const bool rootExists = fs::exists(root, ec);
+        if (ec)
+            return r.fail("cannot stat " + root + ": " + ec.message());
+        uint64_t extra = 0u, different = 0u, missing = 0u;
+        std::string firstDiff;
+        std::set<std::string> seen;
+        if (rootExists)
+        {
+            if (fs::symlink_status(root, ec).type() != fs::file_type::directory)
+                return r.fail(root + " is not a directory");
+            if (ec)
+                return r.fail("cannot stat " + root + ": " + ec.message());
+            for (auto it = fs::recursive_directory_iterator(root, ec); it != fs::recursive_directory_iterator();
+                 it.increment(ec))
+            {
+                if (ec)
+                    return r.fail("cannot traverse " + root + ": " + ec.message());
+                const fs::file_type ft = it->symlink_status(ec).type();
+                if (ec)
+                    return r.fail("cannot stat " + it->path().string() + ": " + ec.message());
+                const std::string rel = fs::relative(it->path(), root, ec).generic_string();
+                if (ec || rel.empty())
+                    return r.fail("cannot relativize " + it->path().string());
+                if (ft == fs::file_type::directory)
+                    continue; // empty leftovers are harmless; files decide
+                if (ft != fs::file_type::regular)
+                {
+                    ++extra;
+                    if (firstDiff.empty())
+                        firstDiff = rel + " (non-file)";
+                    continue;
+                }
+                seen.insert(rel);
+                auto found = want.files.find(rel);
+                if (found == want.files.end())
+                {
+                    ++extra;
+                    if (firstDiff.empty())
+                        firstDiff = rel + " (extra)";
+                    continue;
+                }
+                std::ifstream in(it->path(), std::ios::binary);
+                if (!in)
+                    return r.fail("cannot read " + rel);
+                std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
+                                           std::istreambuf_iterator<char>());
+                if (in.bad())
+                    return r.fail("cannot read " + rel);
+                if (found->second.bytes != bytes)
+                {
+                    ++different;
+                    if (firstDiff.empty())
+                        firstDiff = rel + " (different)";
+                }
+            }
+            if (ec)
+                return r.fail("cannot traverse " + root + ": " + ec.message());
+        }
+        for (const auto &[rel, f] : want.files)
+        {
+            (void)f;
+            if (!seen.count(rel))
+            {
+                ++missing;
+                if (firstDiff.empty())
+                    firstDiff = rel + " (deleted on disk)";
+            }
+        }
+        if (extra == 0u && different == 0u && missing == 0u)
+        {
+            // Identical trees: restore times like the strict path (mtimes
+            // are guest-visible via sceMcGetDir), then report clean.
+            for (const auto &[rel, f] : want.files)
+            {
+                const fs::path dst = fs::path(root) / rel;
+                const fs::file_time_type wantTime = repToFileTime(f.mtime);
+                const fs::file_time_type curTime = fs::last_write_time(dst, ec);
+                if (ec)
+                    return r.fail("cannot stat time of " + rel + ": " + ec.message());
+                if (curTime != wantTime)
+                {
+                    fs::last_write_time(dst, wantTime, ec);
+                    if (ec)
+                        return r.fail("cannot set time of " + rel + ": " + ec.message());
+                }
+            }
+            return true;
+        }
+        char summary[256];
+        std::snprintf(summary, sizeof(summary), "%s: disk wins (%llu extra, %llu different, %llu missing; e.g. %s)",
+                      root.c_str(), static_cast<unsigned long long>(extra),
+                      static_cast<unsigned long long>(different), static_cast<unsigned long long>(missing),
+                      firstDiff.empty() ? "?" : firstDiff.c_str());
+        note = summary;
+        std::fprintf(stderr, "[savestate] warning: %s; card untouched\n", summary);
         return true;
     }
 } // namespace ps2_savestate
@@ -1407,6 +1818,8 @@ namespace
 {
     // SQ2: magic heading the lag1 tail at the end of the gs section.
     constexpr uint32_t kRb2TailMagic = 0x32425253u; // "SRB2" LE
+    // DS1: magic heading the lag ring tail (RB2 Part 3 ring, lagV depth).
+    constexpr uint32_t kRb2RingTailMagic = 0x33425253u; // "SRB3" LE
 } // namespace
 
 void GSSavestate::save(GS &gs, Writer &w)
@@ -1447,27 +1860,27 @@ void GSSavestate::save(GS &gs, Writer &w)
     if (gs.m_backend)
         gs.m_backend->SavestateSave(backendState);
     w.blob(backendState);
-    // SQ2: lag1 tail. In lag1 mode the snapshot drained the backend fifo,
-    // so the pending local->host bytes live in the frontend lag slots; they
-    // resume exactly only if they travel with the state (mechanism (b): the
-    // transfer is steady-state open, never drained by the guest). Written
-    // only once a snapshot exists, so knob-off states keep the v3 layout
-    // byte-for-byte and old builds still load them. No section bump: the
-    // tail is magic-gated like SQ1's PGS4 tail (old files simply end here).
+    // DS1: lag ring tail. RB2 Part 3 made the slots a ring (lagV serves 24
+    // back), so SQ2's 2-slot tail no longer covers the serves: the whole
+    // ring travels. Same gating as SQ2's tail (written only once a snapshot
+    // exists, so knob-off states keep the v3 layout byte-for-byte; no
+    // section bump). New magic, so pre-ring builds refuse these files
+    // cleanly at the section-end check.
     {
         std::lock_guard<std::mutex> lagLock(gs.m_rb2Mutex);
         const uint64_t snaps = gs.m_rb2Snaps.load(std::memory_order_relaxed);
         if (snaps != 0u)
         {
-            w.u32(kRb2TailMagic);
+            w.u32(kRb2RingTailMagic);
             w.u64(snaps);
             w.u64(gs.m_rb2Serves);
-            w.u32(gs.m_rb2SlotBytes[0]);
-            w.u32(gs.m_rb2SlotBytes[1]);
-            w.b(gs.m_rb2SlotTruncated[0]);
-            w.b(gs.m_rb2SlotTruncated[1]);
-            w.bytes(gs.m_rb2Slot[0], sizeof(gs.m_rb2Slot[0]));
-            w.bytes(gs.m_rb2Slot[1], sizeof(gs.m_rb2Slot[1]));
+            w.u64(GS::kRb2LagRing);
+            for (uint64_t i = 0; i < GS::kRb2LagRing; ++i)
+            {
+                w.u32(gs.m_rb2SlotBytes[i]);
+                w.b(gs.m_rb2SlotTruncated[i]);
+                w.bytes(gs.m_rb2Slot[i], sizeof(gs.m_rb2Slot[i]));
+            }
         }
     }
 }
@@ -1511,36 +1924,68 @@ bool GSSavestate::load(GS &gs, Reader &r)
         return false;
     if (gs.m_backend && !gs.m_backend->SavestateLoad(backendState.data(), backendState.size()))
         return r.fail("GS backend refused its state");
-    // SQ2: lag1 tail (absent in older states, which simply end here).
+    // DS1: lag ring tail (absent in knob-off states, which simply end here;
+    // SQ2's 2-slot SRB2 tail still loads for pre-ring files).
     {
         std::lock_guard<std::mutex> lagLock(gs.m_rb2Mutex);
         gs.m_rb2Snaps.store(0u, std::memory_order_relaxed);
         gs.m_rb2Serves = 0u;
-        gs.m_rb2SlotBytes[0] = gs.m_rb2SlotBytes[1] = 0u;
-        gs.m_rb2SlotTruncated[0] = gs.m_rb2SlotTruncated[1] = false;
-        std::memset(gs.m_rb2Slot[0], 0, sizeof(gs.m_rb2Slot[0]));
-        std::memset(gs.m_rb2Slot[1], 0, sizeof(gs.m_rb2Slot[1]));
+        for (uint64_t i = 0; i < GS::kRb2LagRing; ++i)
+        {
+            gs.m_rb2SlotBytes[i] = 0u;
+            gs.m_rb2SlotTruncated[i] = false;
+            std::memset(gs.m_rb2Slot[i], 0, sizeof(gs.m_rb2Slot[i]));
+        }
         if (!r.atEnd())
         {
-            if (r.u32() != kRb2TailMagic)
-                return r.fail("GS lag1 tail magic mismatch");
-            const uint64_t snaps = r.u64();
-            const uint64_t serves = r.u64();
-            const uint32_t bytes0 = r.u32();
-            const uint32_t bytes1 = r.u32();
-            const bool trunc0 = r.b();
-            const bool trunc1 = r.b();
-            if (snaps == 0u || bytes0 > sizeof(gs.m_rb2Slot[0]) || bytes1 > sizeof(gs.m_rb2Slot[1]))
-                return r.fail("GS lag1 tail out of range");
-            if (!r.bytes(gs.m_rb2Slot[0], sizeof(gs.m_rb2Slot[0])) ||
-                !r.bytes(gs.m_rb2Slot[1], sizeof(gs.m_rb2Slot[1])))
-                return false;
-            gs.m_rb2Snaps.store(snaps, std::memory_order_relaxed);
-            gs.m_rb2Serves = serves;
-            gs.m_rb2SlotBytes[0] = bytes0;
-            gs.m_rb2SlotBytes[1] = bytes1;
-            gs.m_rb2SlotTruncated[0] = trunc0;
-            gs.m_rb2SlotTruncated[1] = trunc1;
+            const uint32_t magic = r.u32();
+            if (magic == kRb2TailMagic)
+            {
+                const uint64_t snaps = r.u64();
+                const uint64_t serves = r.u64();
+                const uint32_t bytes0 = r.u32();
+                const uint32_t bytes1 = r.u32();
+                const bool trunc0 = r.b();
+                const bool trunc1 = r.b();
+                if (snaps == 0u || bytes0 > sizeof(gs.m_rb2Slot[0]) || bytes1 > sizeof(gs.m_rb2Slot[1]))
+                    return r.fail("GS lag1 tail out of range");
+                if (!r.bytes(gs.m_rb2Slot[0], sizeof(gs.m_rb2Slot[0])) ||
+                    !r.bytes(gs.m_rb2Slot[1], sizeof(gs.m_rb2Slot[1])))
+                    return false;
+                gs.m_rb2Snaps.store(snaps, std::memory_order_relaxed);
+                gs.m_rb2Serves = serves;
+                gs.m_rb2SlotBytes[0] = bytes0;
+                gs.m_rb2SlotBytes[1] = bytes1;
+                gs.m_rb2SlotTruncated[0] = trunc0;
+                gs.m_rb2SlotTruncated[1] = trunc1;
+            }
+            else if (magic == kRb2RingTailMagic)
+            {
+                const uint64_t snaps = r.u64();
+                const uint64_t serves = r.u64();
+                const uint64_t ring = r.u64();
+                if (snaps == 0u || ring != GS::kRb2LagRing)
+                    return r.fail("GS lag ring tail out of range");
+                for (uint64_t i = 0; i < GS::kRb2LagRing && r.ok(); ++i)
+                {
+                    const uint32_t bytes = r.u32();
+                    const bool trunc = r.b();
+                    if (bytes > sizeof(gs.m_rb2Slot[i]))
+                        return r.fail("GS lag ring tail out of range");
+                    if (!r.bytes(gs.m_rb2Slot[i], sizeof(gs.m_rb2Slot[i])))
+                        return false;
+                    gs.m_rb2SlotBytes[i] = bytes;
+                    gs.m_rb2SlotTruncated[i] = trunc;
+                }
+                if (!r.ok())
+                    return false;
+                gs.m_rb2Snaps.store(snaps, std::memory_order_relaxed);
+                gs.m_rb2Serves = serves;
+            }
+            else
+            {
+                return r.fail("GS lag tail magic mismatch");
+            }
         }
     }
     return true;

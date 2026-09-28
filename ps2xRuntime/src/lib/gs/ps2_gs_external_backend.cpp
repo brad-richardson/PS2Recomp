@@ -36,7 +36,9 @@ namespace
 {
 constexpr uint64_t kLogCapBytes = 1ull * 1024ull * 1024ull * 1024ull;
 constexpr char kSaveMagic[8] = {'P', 'S', '2', 'X', 'E', 'G', 'S', '1'};
-constexpr uint32_t kSaveVersion = 1u;
+// DS1: v2 appends the GE1 freeze blob (v1 never completed a GE1-live save;
+// v1 files refuse cleanly on the version check).
+constexpr uint32_t kSaveVersion = 2u;
 // GE2 mirror set: same 19 offsets the frontend diffs (gs_frontend.cpp).
 constexpr uint32_t kMirrorOffsets[19] = {
     0x0000u, 0x0010u, 0x0020u, 0x0030u, 0x0040u, 0x0050u, 0x0060u,
@@ -63,6 +65,12 @@ struct Ge1Api
 #endif
     // BG1: optional (pre-PW1 libraries lack it; a missing symbol only skips the pause flush).
     decltype(&ge1_gs_flush_caches) flushCaches = nullptr;
+    // DS1: optional (pre-DS1 libraries lack them; without them a GE1-live
+    // save keeps refusing, as before).
+    decltype(&ge1_gs_freeze_size) freezeSize = nullptr;
+    decltype(&ge1_gs_freeze_save) freezeSave = nullptr;
+    decltype(&ge1_gs_freeze_load) freezeLoad = nullptr;
+    bool freezeBound() const { return freezeSize && freezeSave && freezeLoad; }
 
     bool load(const char *path)
     {
@@ -81,6 +89,9 @@ struct Ge1Api
             snapshot = ::ge1_gs_snapshot;
             gpuMs = ::ge1_gs_gpu_ms;
             flushCaches = ::ge1_gs_flush_caches; // BG1 fold: static bind (same ABI)
+            freezeSize = ::ge1_gs_freeze_size; // DS1: static bind (same ABI)
+            freezeSave = ::ge1_gs_freeze_save;
+            freezeLoad = ::ge1_gs_freeze_load;
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
             exportIOSurface = ::ge1_gs_export_iosurface;
 #endif
@@ -117,6 +128,12 @@ struct Ge1Api
             reinterpret_cast<decltype(flushCaches)>(dlsym(library, "ge1_gs_flush_caches"));
         if (!flushCaches)
             std::fprintf(stderr, "[gs:external] GE1 library predates ge1_gs_flush_caches; pause flush off\n");
+        // DS1: optional freeze trio (see above); never fails the load.
+        freezeSize = reinterpret_cast<decltype(freezeSize)>(dlsym(library, "ge1_gs_freeze_size"));
+        freezeSave = reinterpret_cast<decltype(freezeSave)>(dlsym(library, "ge1_gs_freeze_save"));
+        freezeLoad = reinterpret_cast<decltype(freezeLoad)>(dlsym(library, "ge1_gs_freeze_load"));
+        if (!freezeBound())
+            std::fprintf(stderr, "[gs:external] GE1 library predates ge1_gs_freeze_*; live saves refuse\n");
         return true;
     }
 
@@ -775,8 +792,10 @@ public:
 
     bool SavestateIdle() const override
     {
-        if (m_ge1Active)
-            return false; // GE1 freeze/import is not yet wired; refuse an incomplete save.
+        // DS1: GE1-live saves ride the freeze trio; without it (or an old
+        // library) keep refusing the incomplete save, as before.
+        if (m_ge1Active && !m_ge1.freezeBound())
+            return false;
         const bool innerIdle = m_inner ? m_inner->SavestateIdle() : true;
         const bool fifoDrained = !m_fifoValid || m_fifoCursor >= m_fifo.size();
         return innerIdle && fifoDrained;
@@ -784,7 +803,7 @@ public:
 
     std::string SavestateBusyReason() const override
     {
-        if (m_ge1Active)
+        if (m_ge1Active && !m_ge1.freezeBound())
             return "gs-external-freeze-unimplemented";
         // Armed-but-undownloaded (inner holds the setup snapshot) and
         // downloaded-but-undrained (the adapter cursor) are both "bytes the
@@ -816,8 +835,32 @@ public:
             m_inner->SavestateSave(innerBlob);
         putU64(out, innerBlob.size());
         out.insert(out.end(), innerBlob.begin(), innerBlob.end());
+        // DS1: the GE1 lib's own state (VRAM, regs, paths) via GSfreeze.
+        // Runs on the GS worker, the same thread as every other ge1 call. A
+        // failed freeze writes an empty blob (loudly); the load refuses it,
+        // so a failed save can never load silently.
+        std::vector<uint8_t> freezeBlob;
+        if (m_ge1Active && m_ge1.freezeBound())
+        {
+            const int need = m_ge1.freezeSize();
+            if (need > 0 && static_cast<uint64_t>(need) <= (64u << 20))
+            {
+                freezeBlob.resize(static_cast<size_t>(need));
+                if (!m_ge1.freezeSave(freezeBlob.data(), static_cast<uint32_t>(need)))
+                {
+                    std::fprintf(stderr, "[gs:external] GE1 freeze save failed\n");
+                    freezeBlob.clear();
+                }
+            }
+            else
+            {
+                std::fprintf(stderr, "[gs:external] GE1 freeze size failed (%d)\n", need);
+            }
+        }
+        putU64(out, freezeBlob.size());
+        out.insert(out.end(), freezeBlob.begin(), freezeBlob.end());
         ++m_stats.saves;
-        log("# save bytes=%zu\n", out.size());
+        log("# save bytes=%zu freeze=%zu\n", out.size(), freezeBlob.size());
     }
 
     bool SavestateLoad(const uint8_t *data, size_t size) override
@@ -849,15 +892,38 @@ public:
                 fifo.assign(p, p + static_cast<size_t>(fifoSize));
                 p += static_cast<size_t>(fifoSize);
                 ok = takeU64(p, end, innerSize) &&
-                     static_cast<uint64_t>(end - p) == innerSize;
+                     static_cast<uint64_t>(end - p) >= innerSize + 8u;
             }
+            const uint8_t *innerData = p;
+            if (ok)
+                p += static_cast<size_t>(innerSize);
+            uint64_t freezeSize = 0u;
+            if (ok)
+            {
+                ok = takeU64(p, end, freezeSize) &&
+                     static_cast<uint64_t>(end - p) == freezeSize && freezeSize <= (64u << 20);
+            }
+            // DS1: an empty freeze blob under a live GE1 refuses (a failed
+            // save must never load); a blob without the trio refuses too.
+            if (ok && freezeSize == 0u && m_ge1Active)
+                ok = false;
+            if (ok && freezeSize != 0u && !m_ge1.freezeBound())
+                ok = false;
             bool innerOk = false;
             if (ok)
             {
                 if (!m_inner)
                     m_inner = std::make_unique<GSCpuBackend>();
-                innerOk = m_inner->SavestateLoad(p, static_cast<size_t>(innerSize));
+                innerOk = m_inner->SavestateLoad(innerData, static_cast<size_t>(innerSize));
                 ok = innerOk;
+            }
+            if (ok && freezeSize != 0u)
+            {
+                if (!m_ge1.freezeLoad(p, static_cast<uint32_t>(freezeSize)))
+                {
+                    std::fprintf(stderr, "[gs:external] GE1 freeze load failed\n");
+                    ok = false;
+                }
             }
             if (ok)
             {

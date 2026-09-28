@@ -1618,9 +1618,29 @@ namespace
     }
     bool mcDirSavestateLoad(ps2_savestate::Reader &r)
     {
+        // DS1: quick loads keep the on-disk card on any difference (disk
+        // wins, never overwritten); the env-knob path keeps refusing.
+        std::string *noteSink = nullptr;
+        const bool lenient = ps2_savestate::quickLoadCardMode(noteSink);
         for (int32_t port = 0; port < 2 && r.ok(); ++port)
-            if (!ps2_savestate::readDirTree(r, ps2_stubs::getMcRootPath(port).string()))
+        {
+            const std::string root = ps2_stubs::getMcRootPath(port).string();
+            if (!lenient)
+            {
+                if (!ps2_savestate::readDirTree(r, root))
+                    return false;
+                continue;
+            }
+            std::string note;
+            if (!ps2_savestate::readDirTreeLenient(r, root, note))
                 return false;
+            if (noteSink && !note.empty())
+            {
+                if (!noteSink->empty())
+                    *noteSink += "; ";
+                *noteSink += "port" + std::to_string(port) + " " + note;
+            }
+        }
         return r.ok();
     }
     const bool kMcDirSavestateRegistered =

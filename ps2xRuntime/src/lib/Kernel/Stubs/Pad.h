@@ -130,4 +130,11 @@ namespace ps2_stubs
     // IR1b dir mode: arm one session file under `dir`, pruning to the
     // newest `keep` files at arm time. Production never calls this.
     bool setPadRecordDirForTest(const char *dir, uint64_t keep);
+
+    // DS1: a mid-session state load rewinds the guest clock; the open
+    // recording segment ends here and a new one begins (dir mode: a new
+    // session file whose header notes the load tick; file mode: a comment
+    // marker plus a fresh segment), so no file holds overlapping ticks.
+    // No-op when the recorder is off or capped.
+    void padRecordNoteLoad(uint64_t loadedTick);
 }

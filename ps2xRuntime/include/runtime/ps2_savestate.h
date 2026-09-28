@@ -460,4 +460,50 @@ namespace ps2_savestate
         Refuse
     };
     RunnerShaVerdict checkRunnerSha(const std::string &saved, const std::string &current, bool strict);
+
+    // DS1: chord/hotkey quick-save + quick-load (play builds). requestSave /
+    // requestLoad arm a one-shot consumed by the scheduler at the next vsync
+    // save point (the same point the SAVE_AT knob uses, with the same
+    // deferral machinery). Only one request is live at a time; a second
+    // request while one is pending is rejected (false). Unlike the env knobs
+    // these need no PS2X_DETERMINISTIC (best-effort play saves; the header
+    // records deterministic=0). Called from any thread; consumed on the game
+    // thread. requestSave creates the path's parent dirs.
+    bool requestQuickSave(const std::string &path);
+    bool requestQuickLoad(const std::string &path);
+    bool quickSavePending(); // a save waits (UI: "saving…")
+    // Consumed by the scheduler on the game thread. takePendingQuickLoad is
+    // one-shot (the load applies now or refuses); pendingQuickSavePath peeks
+    // (the request stays live across deferrals until it lands or is cleared).
+    bool takePendingQuickLoad(std::string &path);
+    bool pendingQuickSavePath(std::string &path);
+    void clearPendingQuickSave();
+    // Quick-load entry: the strict runner-identity check applies, and the
+    // on-disk card wins over the saved card (never overwritten; differences
+    // are warned). `note` carries a short UI line ("loaded tick=N ...").
+    bool loadQuick(PS2Runtime &runtime, const std::string &path, std::string &note, std::string &error);
+    // Save entry with an explicit path (trySave uses config().savePath).
+    // skipPadLatchReady: play saves capture live input instead of deferring
+    // while the pad is held (the continuation is best-effort, not det).
+    bool trySaveAtPath(PS2Runtime &runtime, uint64_t vsyncTick, const std::string &path,
+                       bool skipPadLatchReady, std::string &why);
+    // One quick-save slot per memory-card root: "<elfDir>/states/
+    // quicksave-<leaf>.state" (the leaf sanitized; "<slot>.info" sits next
+    // to it). Two roots with the same leaf share a slot (play's mc0 and
+    // mc0-allpeak don't collide).
+    std::string quickSlotPath(const std::string &elfDir, const std::string &mcRoot);
+    // Small "<slot>.info" sidecar written after a quick save lands (tick,
+    // utc, build identity): pullable proof without opening the state.
+    void writeQuickInfo(const std::string &statePath, uint64_t tick, uint64_t eeCycle);
+    // One-line UI status (game thread sets, present thread polls). ageMs is
+    // the time since the message was set (the UI expires old lines).
+    void noteQuickStatus(const std::string &message);
+    bool quickStatus(std::string &message, uint64_t &ageMs);
+    // Lenient card restore: the destination tree is validated but never
+    // written when it differs (disk wins); `note` names what differed.
+    bool readDirTreeLenient(Reader &r, const std::string &root, std::string &note);
+    // (internal) scoped lenient-card flag for quick loads; loadQuick sets it
+    // around its apply pass, the stub:mcdir loader reads it. Game thread only.
+    void setQuickLoadCardMode(bool winsDisk, std::string *noteSink);
+    bool quickLoadCardMode(std::string *&noteSink);
 } // namespace ps2_savestate

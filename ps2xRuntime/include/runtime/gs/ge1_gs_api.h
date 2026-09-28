@@ -36,6 +36,12 @@ GE1_API int ge1_gs_export_iosurface(void* iosurface, uint32_t width, uint32_t he
 // PW1: flush the Vulkan pipeline cache and persist newly recorded TFX selectors now.
 // For the app pause/stop hook (BG1); the periodic ge1_gs_vsync path covers force-stop.
 GE1_API int ge1_gs_flush_caches(void);
+// DS1: quick-save support over GSfreeze. freeze_size returns the blob bytes
+// (>0) or 0 when closed/failed; freeze_save writes exactly that many bytes
+// (1 ok, 0 fail); freeze_load restores (1 ok, 0 fail).
+GE1_API int ge1_gs_freeze_size(void);
+GE1_API int ge1_gs_freeze_save(uint8_t* out, uint32_t size);
+GE1_API int ge1_gs_freeze_load(const uint8_t* data, uint32_t size);
 #ifdef __cplusplus
 }
 #endif

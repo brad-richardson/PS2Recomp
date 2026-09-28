@@ -24,4 +24,21 @@ struct PSRaylibPadSample
 };
 PSRaylibPadSample ps2xSampleRaylibPad();
 
+// DS1: quick-save/load chord (SELECT+L3 save, SELECT+R3 load), edge-triggered
+// on the thumb press while SELECT is held. Pure step function (unit-tested);
+// the shell strips the chord bits from the guest mask while engaged.
+struct PSChordState
+{
+    bool l3Was = false;
+    bool r3Was = false;
+};
+inline void psChordStep(PSChordState &st, bool selectDown, bool l3Down, bool r3Down, bool &saveEdge,
+                        bool &loadEdge)
+{
+    saveEdge = selectDown && l3Down && !st.l3Was;
+    loadEdge = selectDown && r3Down && !st.r3Was;
+    st.l3Was = l3Down;
+    st.r3Was = r3Down;
+}
+
 #endif

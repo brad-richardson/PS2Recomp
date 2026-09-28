@@ -228,6 +228,10 @@ public:
     void noteUnderrun() { m_underruns.fetch_add(1u, std::memory_order_relaxed); }
     uint64_t underruns() const { return m_underruns.load(std::memory_order_relaxed); }
     uint64_t overflows() const { return m_overflows.load(std::memory_order_relaxed); }
+    // DS1: drop buffered frames (a mid-session state load: the buffered PCM
+    // belonged to the pre-load timeline). The consumer then underruns once
+    // and resumes on fresh post-load audio.
+    void dropAll() { m_read.store(m_write.load(std::memory_order_acquire), std::memory_order_release); }
     // AT1: frames currently buffered (producer pushes minus consumer pops).
     // Relaxed: the stretch control loop tolerates a slightly stale depth.
     uint64_t size() const
