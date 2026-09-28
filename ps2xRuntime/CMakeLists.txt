@@ -80,6 +80,11 @@ if(NOT PS2X_BUILD_ID_RESOLVED)
         endif()
     endif()
 endif()
+# Quoteless transports (AGP passes arguments with no shell) can wrap the
+# value in literal quotes; strip one pair before the charset check.
+if(PS2X_BUILD_ID_RESOLVED MATCHES "^\".*\"$")
+    string(REGEX REPLACE "^\"(.*)\"$" "\\1" PS2X_BUILD_ID_RESOLVED "${PS2X_BUILD_ID_RESOLVED}")
+endif()
 if(NOT PS2X_BUILD_ID_RESOLVED MATCHES "^[A-Za-z0-9_.,:+-]*$")
     message(STATUS "PS2X build id: rejected (bad charset), treating as unavailable")
     set(PS2X_BUILD_ID_RESOLVED "")
