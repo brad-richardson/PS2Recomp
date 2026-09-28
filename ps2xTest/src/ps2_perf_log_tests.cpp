@@ -1,8 +1,46 @@
 #include "MiniTest.h"
 #include "ps2_perf_log.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
+
+namespace
+{
+// PL2: AThermal stubs. Never dereference the manager (the fakes below are
+// non-null but invalid); each getter returns a fixed status.
+void *stubThermalAcquire()
+{
+    return reinterpret_cast<void *>(static_cast<uintptr_t>(0xA7));
+}
+void stubThermalRelease(void *)
+{
+}
+int32_t stubThermalTwo(void *)
+{
+    return 2;
+}
+int32_t stubThermalZero(void *)
+{
+    return 0;
+}
+int32_t stubThermalSix(void *)
+{
+    return 6;
+}
+int32_t stubThermalHigh(void *)
+{
+    return 7;
+}
+int32_t stubThermalNeg(void *)
+{
+    return -1;
+}
+void *fakeThermalManager()
+{
+    return reinterpret_cast<void *>(static_cast<uintptr_t>(0x1CE));
+}
+} // namespace
 
 // IP3: PS2X_PERF_LOG pure parts — knob parse, v1 line format, ring-cap plan.
 void register_ps2_perf_log_tests()
@@ -183,5 +221,67 @@ void register_ps2_perf_log_tests()
                                  "presents=60 maxgap_ms=17.1 "
                                  "threads=\"GameThread#1234=980.5 MTVU#1235=120.0 Audio#1240=8.2\" "
                                  "device=\"thermal=0 prime=38.4 batt=87 ac=1\""),
-                     "android golden line"); }); });
+                     "android golden line"); });
+
+        tc.Run("thermalStatusWith passes the manager status through", [](TestCase &t)
+               {
+            ps2x::perflog::ThermalFns full;
+            full.acquireManager = stubThermalAcquire;
+            full.releaseManager = stubThermalRelease;
+            full.getStatus = stubThermalTwo;
+            t.Equals(ps2x::perflog::thermalStatusWith(full, fakeThermalManager()), 2, "mid-range passes");
+            full.getStatus = stubThermalZero;
+            t.Equals(ps2x::perflog::thermalStatusWith(full, fakeThermalManager()), 0, "NONE passes");
+            full.getStatus = stubThermalSix;
+            t.Equals(ps2x::perflog::thermalStatusWith(full, fakeThermalManager()), 6, "SHUTDOWN passes"); });
+
+        tc.Run("thermalStatusWith reads -1 on any missing symbol", [](TestCase &t)
+               {
+            // The stub getter would return 2 (valid), so -1 proves it never ran.
+            ps2x::perflog::ThermalFns full;
+            full.acquireManager = stubThermalAcquire;
+            full.getStatus = stubThermalTwo;
+            full.releaseManager = stubThermalRelease;
+            const ps2x::perflog::ThermalFns none;
+            t.Equals(ps2x::perflog::thermalStatusWith(none, fakeThermalManager()), -1, "all missing");
+            t.Equals(ps2x::perflog::thermalStatusWith(none, nullptr), -1, "all missing, null manager");
+            ps2x::perflog::ThermalFns noAcquire = full;
+            noAcquire.acquireManager = nullptr;
+            t.Equals(ps2x::perflog::thermalStatusWith(noAcquire, fakeThermalManager()), -1,
+                     "acquire missing, getter never called");
+            ps2x::perflog::ThermalFns noGet = full;
+            noGet.getStatus = nullptr;
+            t.Equals(ps2x::perflog::thermalStatusWith(noGet, fakeThermalManager()), -1, "getter missing");
+            ps2x::perflog::ThermalFns noRelease = full;
+            noRelease.releaseManager = nullptr;
+            t.Equals(ps2x::perflog::thermalStatusWith(noRelease, fakeThermalManager()), -1,
+                     "release missing, getter never called"); });
+
+        tc.Run("thermalStatusWith reads -1 on a null manager", [](TestCase &t)
+               {
+            ps2x::perflog::ThermalFns full;
+            full.acquireManager = stubThermalAcquire;
+            full.getStatus = stubThermalTwo;
+            full.releaseManager = stubThermalRelease;
+            t.Equals(ps2x::perflog::thermalStatusWith(full, nullptr), -1,
+                     "null manager, getter never called"); });
+
+        tc.Run("thermalStatusWith clamps outside 0..6 to -1", [](TestCase &t)
+               {
+            ps2x::perflog::ThermalFns full;
+            full.acquireManager = stubThermalAcquire;
+            full.releaseManager = stubThermalRelease;
+            full.getStatus = stubThermalHigh;
+            t.Equals(ps2x::perflog::thermalStatusWith(full, fakeThermalManager()), -1, "7 reads na");
+            full.getStatus = stubThermalNeg;
+            t.Equals(ps2x::perflog::thermalStatusWith(full, fakeThermalManager()), -1, "-1 reads na"); });
+
+#if defined(__linux__) || defined(__APPLE__)
+        tc.Run("perfThermalStatusForTest reads -1 where libandroid is absent", [](TestCase &t)
+               {
+            // Desktop: no libandroid.so, so the cached sampler degrades to na.
+            // (This host-suite binary never runs on Android.)
+            t.Equals(ps2x::perflog::perfThermalStatusForTest(), -1, "desktop thermal na"); });
+#endif
+    });
 }

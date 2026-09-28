@@ -22,9 +22,11 @@
 
 #if defined(__linux__)
 #include <dirent.h>
-#include <dlfcn.h>
 #include <fcntl.h>
 #include <unistd.h>
+#endif
+#if defined(__linux__) || defined(__APPLE__)
+#include <dlfcn.h> // PL2: AThermal dlsym (the Mac leg feeds the test seam only)
 #endif
 
 namespace ps2x::perflog
@@ -235,26 +237,64 @@ bool snapshotLinuxThreadCpu(long clkTck, std::vector<LinuxCpuSample> &out)
     ::closedir(dir);
     return true;
 }
+#endif
+
+#if defined(__linux__) || defined(__APPLE__)
+// PL2: AThermal is API 30+ and minSdk is 29, so resolve at run time. The NDK
+// getter takes a manager: acquire once (main thread, lazily, cached) and
+// pass it. PL1 called the getter with no argument and SIGABRTed on device.
+// Any missing symbol or a null manager reads -1 (na); the getter is never
+// called then. Desktop libandroid.so is absent, so desktop always reads -1
+// (the host suite asserts that). Namespace scope, so it outlives the Logger
+// and the shutdown release below is strictly safe. The Mac leg exists only
+// for that test; production sampling (sampleLinuxDevice) stays Linux-only.
+struct ThermalState
+{
+    bool lookedUp = false;
+    ThermalFns fns;
+    void *libHandle = nullptr; // never dlclosed (process lifetime)
+    void *manager = nullptr;   // owned; released at shutdown
+    bool acquired = false;
+};
+ThermalState gThermal;
+
+void lookupThermalFns()
+{
+    gThermal.lookedUp = true;
+    void *handle = ::dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    if (!handle)
+        return;
+    gThermal.libHandle = handle;
+    gThermal.fns.acquireManager = reinterpret_cast<void *(*)()>(::dlsym(handle, "AThermal_acquireManager"));
+    gThermal.fns.getStatus =
+        reinterpret_cast<int32_t (*)(void *)>(::dlsym(handle, "AThermal_getCurrentThermalStatus"));
+    gThermal.fns.releaseManager = reinterpret_cast<void (*)(void *)>(::dlsym(handle, "AThermal_releaseManager"));
+}
 
 int32_t perfThermalStatus()
 {
-    // AThermal_getCurrentThermalStatus is API 30+ and minSdk is 29, so
-    // resolve it at run time (cached; desktop Linux fails once, then na).
-    using GetThermalFn = int32_t (*)();
-    static bool lookedUp = false;
-    static GetThermalFn fn = nullptr;
-    if (!lookedUp)
-    {
-        lookedUp = true;
-        if (void *handle = ::dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL))
-            fn = reinterpret_cast<GetThermalFn>(::dlsym(handle, "AThermal_getCurrentThermalStatus"));
-    }
-    if (!fn)
+    if (!gThermal.lookedUp)
+        lookupThermalFns();
+    if (!gThermal.fns.acquireManager || !gThermal.fns.getStatus || !gThermal.fns.releaseManager)
         return -1;
-    const int32_t status = fn();
-    return (status >= 0 && status <= 6) ? status : -1;
+    if (!gThermal.acquired)
+    {
+        gThermal.acquired = true;
+        gThermal.manager = gThermal.fns.acquireManager();
+    }
+    return thermalStatusWith(gThermal.fns, gThermal.manager);
 }
 
+void releaseThermalManager()
+{
+    // Shutdown only (Logger dtor): never triggers a lookup.
+    if (gThermal.manager && gThermal.fns.releaseManager)
+        gThermal.fns.releaseManager(gThermal.manager);
+    gThermal.manager = nullptr;
+}
+#endif
+
+#if defined(__linux__)
 std::string sampleLinuxDevice()
 {
     AndroidDevice d;
@@ -385,6 +425,9 @@ struct Logger
     {
         if (file)
             std::fclose(file);
+#if defined(__linux__) || defined(__APPLE__)
+        releaseThermalManager();
+#endif
     }
 
     void tryOpen(uint64_t tick)
@@ -573,4 +616,11 @@ void notePresent()
     log.lastPresent = now;
     ++log.windowPresents;
 }
+
+#if defined(__linux__) || defined(__APPLE__)
+int32_t perfThermalStatusForTest()
+{
+    return perfThermalStatus();
+}
+#endif
 } // namespace ps2x::perflog

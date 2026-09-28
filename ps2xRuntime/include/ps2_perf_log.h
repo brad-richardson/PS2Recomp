@@ -240,6 +240,30 @@ inline std::string formatAndroidDevice(const AndroidDevice &d)
     return buf;
 }
 
+// PL2: AThermal call-shape seam. The NDK getter takes a manager
+// (AThermal_acquireManager / _getCurrentThermalStatus(manager) /
+// _releaseManager); PL1 called the getter with no argument and SIGABRTed on
+// device. The .cpp resolves all three via dlsym (API 30+, minSdk 29); these
+// types mirror <android/thermal.h> without including it.
+struct ThermalFns
+{
+    void *(*acquireManager)() = nullptr;
+    int32_t (*getStatus)(void *) = nullptr;
+    void (*releaseManager)(void *) = nullptr;
+};
+
+// Status through an acquired manager: -1 when any fn or the manager is
+// missing, or the status falls outside 0..6 (NONE..SHUTDOWN). Never calls
+// through a null pointer. Pure: the host suite covers every null combination
+// plus the clamp.
+inline int32_t thermalStatusWith(const ThermalFns &fns, void *manager)
+{
+    if (!fns.acquireManager || !fns.getStatus || !fns.releaseManager || !manager)
+        return -1;
+    const int32_t status = fns.getStatus(manager);
+    return (status >= 0 && status <= 6) ? status : -1;
+}
+
 // Ring-cap plan over the perf-*.log files in the log dir (the current file
 // included: it sorts newest, so it is never picked). Returns the names to
 // delete, oldest first. Names sort chronologically (perf-YYYYMMDD-HHMMSS.log,
@@ -268,4 +292,10 @@ inline std::vector<std::string> planPrune(std::vector<FileEntry> entries, uint64
 bool enabled();
 void poll(uint64_t vsyncTick);
 void notePresent();
+#if defined(__linux__) || defined(__APPLE__)
+// PL2 test seam: the cached dlsym sampler behind thermalStatusWith
+// (main-thread only, like poll()). Desktop libandroid.so is absent, so this
+// reads -1 there; the host suite asserts that.
+int32_t perfThermalStatusForTest();
+#endif
 } // namespace ps2x::perflog
