@@ -4,20 +4,26 @@
 #
 # Why: the OM1 stage objects + OM1 archives and the GE1 archives are two full
 # PCSX2 cores (~20k duplicate defined globals: EmuFolders, CocoaTools,
-# StringUtil, ...). The stage genuinely shares 172 definitions with OM1's
+# StringUtil, ...). The stage also shares some definitions with OM1's own
 # archives (header-defined microVU helpers), so a single `ld -r` errors out;
-# the sandwich below demotes the stage side of exactly those 172 first.
-# (`ld -r` demotes private-externals, so the archive side can't be fixed by a
-# pre-pass; the stage side can, because the final export list restores it.)
+# the sandwich below demotes the stage side of exactly the reported ones and
+# retries to a fixpoint. Only reported conflicts are demoted: demoting more
+# would pull new archive members for them and drag in references (e.g. SDL
+# haptics) that nothing in the island satisfies. (`ld -r` demotes
+# private-externals, so the archive side can't be fixed by a pre-pass; the
+# stage side can, because it starts visible and the export lists shape it.)
 #
 # Steps:
-#   1. keep1 = stage-defined globals minus (stage-defined ∩ archive-defined).
-#   2. ld -r stage objects -> stage_closed.o, exporting keep1 only.
-#   3. exports = stage-defined _om1* and _ps2x_microvu_* (the dlsym slot names
-#      the tables resolve via dlsym(RTLD_DEFAULT) at init + the 5 C ABI funcs
-#      the runtime calls; nothing else crosses the boundary).
-#   4. ld -r stage_closed.o + OM1 archives -> closed.o, exporting `exports`.
-#   5. Checks (fail the build): the 5 ABI funcs are global; every dlsym slot
+#   1. keep = all stage-defined globals; exports = stage-defined _om1* and
+#      _ps2x_microvu_* (the dlsym slot names the tables resolve via
+#      dlsym(RTLD_DEFAULT) at init + the 5 C ABI funcs the runtime calls;
+#      nothing else crosses the boundary).
+#   2. ld -r stage objects -> stage_closed.o, exporting keep only.
+#   3. ld -r stage_closed.o + OM1 archives -> closed.o, exporting `exports`;
+#      on duplicate-symbol errors, subtract exactly the reported symbols from
+#      keep and retry (a reported conflict proves its member was already
+#      pulled, so demoting it pulls nothing new; the set only shrinks).
+#   4. Checks (fail the build): the 5 ABI funcs are global; every dlsym slot
 #      name from *_tables.c is global; no closed global is also defined by
 #      the GE1 archives (when given: combined GE1+OM1 app builds).
 #
@@ -65,29 +71,45 @@ esac
 if [ ! -f "$STAGE_LIB" ]; then echo "$0: stage lib missing: $STAGE_LIB" >&2; exit 2; fi
 
 "$NM" -g --defined-only "$STAGE_LIB" 2>/dev/null | awk 'NF>=2{print $NF}' | sort -u > "$TMP/stage-defs.txt"
-"$NM" -g --defined-only "${ARCS[@]}" 2>/dev/null | awk 'NF>=2{print $NF}' | sort -u > "$TMP/member-defs.txt"
-comm -12 "$TMP/stage-defs.txt" "$TMP/member-defs.txt" > "$TMP/dups.txt"
-comm -23 "$TMP/stage-defs.txt" "$TMP/member-defs.txt" > "$TMP/keep1.txt"
-NDUP=$(wc -l < "$TMP/dups.txt" | tr -d ' ')
-echo "IB3 close: $(wc -l < "$TMP/stage-defs.txt" | tr -d ' ') stage defs, $NDUP shared with OM1 archives"
-
-# Step 1: close the stage, demoting the shared definitions (the archive side
-# satisfies those references itself; the code is header-identical).
+echo "IB3 close: $(wc -l < "$TMP/stage-defs.txt" | tr -d ' ') stage defs"
 mkdir -p "$TMP/stage-obj"
 (cd "$TMP/stage-obj" && "$AR" x "$STAGE_LIB")
 STAGE_OBJS=("$TMP"/stage-obj/*.o)
-"$LD" -r -o "$STAGE_CLOSED" "${STAGE_OBJS[@]}" -exported_symbols_list "$TMP/keep1.txt"
 
-# Step 2: the API surface. The runtime calls exactly the 5 ps2x_microvu_* C
-# functions; the tables dlsym their _om1* slot names at init. Both sets are
-# stage-defined, so generate the list from the stage (no hardcoded names
-# except the 5, which are asserted below).
+# The API surface. The runtime calls exactly the 5 ps2x_microvu_* C functions;
+# the tables dlsym their _om1* slot names at init. Both sets are stage-defined,
+# so generate the list from the stage (no hardcoded names except the 5, which
+# are asserted below).
 grep -E '^_(om1|ps2x_microvu)' "$TMP/stage-defs.txt" > "$TMP/exports.txt" || true
 for f in _ps2x_microvu_abi _ps2x_microvu_init _ps2x_microvu_shutdown _ps2x_microvu_run _ps2x_microvu_get_stats; do
   if ! grep -qxF "$f" "$TMP/exports.txt"; then echo "$0: bridge API $f not stage-defined" >&2; exit 2; fi
 done
 echo "IB3 close: $(wc -l < "$TMP/exports.txt" | tr -d ' ') exported (API + om1 slots)"
-"$LD" -r -o "$CLOSED" "$STAGE_CLOSED" "${ARCS[@]}" -exported_symbols_list "$TMP/exports.txt"
+
+# The sandwich to a fixpoint (see header). Step 1 always succeeds (the stage
+# has no internal duplicates); step 2 names its conflicts, if any.
+cp "$TMP/stage-defs.txt" "$TMP/keep.txt"
+ITER=0
+while [ "$ITER" -lt 10 ]; do
+  ITER=$((ITER + 1))
+  "$LD" -r -o "$STAGE_CLOSED" "${STAGE_OBJS[@]}" -exported_symbols_list "$TMP/keep.txt" 2>"$TMP/step1.log" || {
+    echo "$0: stage close failed (internal duplicates?)" >&2; cat "$TMP/step1.log" >&2; exit 2; }
+  if "$LD" -r -o "$CLOSED" "$STAGE_CLOSED" "${ARCS[@]}" -exported_symbols_list "$TMP/exports.txt" 2>"$TMP/step2.log"; then
+    echo "IB3 close: sandwich green after $ITER iteration(s)"
+    break
+  fi
+  grep -oE "duplicate symbol '[^']+'" "$TMP/step2.log" | sed "s/duplicate symbol '//; s/'//" | sort -u > "$TMP/newdups.txt" || true
+  if [ ! -s "$TMP/newdups.txt" ]; then echo "$0: close failed for other reasons:" >&2; cat "$TMP/step2.log" >&2; exit 2; fi
+  # A conflict the stage doesn't define is member-vs-member: undemotable here.
+  comm -23 "$TMP/newdups.txt" "$TMP/keep.txt" > "$TMP/unowned.txt"
+  if [ -s "$TMP/unowned.txt" ]; then
+    echo "$0: conflicts outside the stage (member-vs-member? first 10):" >&2; head "$TMP/unowned.txt" >&2; exit 2
+  fi
+  comm -23 "$TMP/keep.txt" "$TMP/newdups.txt" > "$TMP/keep2.txt"
+  mv "$TMP/keep2.txt" "$TMP/keep.txt"
+  echo "IB3 close: iter $ITER demoted $(wc -l < "$TMP/newdups.txt" | tr -d ' ') reported conflicts, retrying"
+  if [ "$ITER" = 10 ]; then echo "$0: demotion did not converge" >&2; exit 2; fi
+done
 
 "$NM" -g --defined-only "$CLOSED" 2>/dev/null | awk 'NF>=2{print $NF}' | sort -u > "$TMP/closed-defs.txt"
 

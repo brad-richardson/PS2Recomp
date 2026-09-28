@@ -19,6 +19,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 
 extern "C" {
 
@@ -246,6 +248,32 @@ bool SDL_UpdateHapticEffect(SDL_Haptic* haptic, SDL_HapticEffectID effect,
   (void)effect;
   (void)data;
   return false;
+}
+
+// IB3: the OM1 island's link pulls usb-pad-sdl-ff.cpp.o (USB force-feedback),
+// which references three more haptic functions than the GS closure does.
+// Force-feedback is unreachable on the offline path (the island never creates
+// USB devices or pads), so these abort if hit: a call would prove the no-USB
+// subset wrong, the way OM1StubHost's hwIntcIrq does.
+void SDL_DestroyHapticEffect(SDL_Haptic* haptic, SDL_HapticEffectID effect)
+{
+  (void)haptic;
+  (void)effect;
+  std::fprintf(stderr, "[om1] fatal: SDL_DestroyHapticEffect in no-USB subset\n");
+  std::abort();
+}
+uint32_t SDL_GetHapticFeatures(SDL_Haptic* haptic)
+{
+  (void)haptic;
+  std::fprintf(stderr, "[om1] fatal: SDL_GetHapticFeatures in no-USB subset\n");
+  std::abort();
+}
+bool SDL_SetHapticAutocenter(SDL_Haptic* haptic, int autocenter)
+{
+  (void)haptic;
+  (void)autocenter;
+  std::fprintf(stderr, "[om1] fatal: SDL_SetHapticAutocenter in no-USB subset\n");
+  std::abort();
 }
 
 } // extern "C"
