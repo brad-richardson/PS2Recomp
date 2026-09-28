@@ -3,6 +3,7 @@
 #pragma once
 
 #include "ps2_runtime.h"
+#include "ps2_ts2_splitsites.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -360,18 +361,18 @@ inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
     uint32_t out = bits;
     switch (pc)
     {
-    case 0x113808u: if (address == 0x49b494u) out = 0x3c088889u; break;
-    case 0x113860u: if (address == 0x49b498u) out = 0x3ba3d70au; break;
-    case 0x113888u: if (address == 0x49b49cu) out = 0x42efffffu; break;
-    case 0x1139a4u: if (address == 0x49b4a0u && !helper) out = 0x3c088889u; break;
-    case 0x1139c4u: if (address == 0x49b4a4u && !helper) out = 0xbadaa2bdu; break;
-    case 0x1139dcu: if (address == 0x49b4a8u && !helper) out = 0xc17d5556u; break;
-    case 0x113a0cu: if (address == 0x49b4acu && !helper) out = 0xc0e2aaabu; break;
-    case 0x121e64u: if (address == 0x49b828u) out = 0x3c088889u; break;
-    case 0x137d68u: if (address == 0x49be9cu) out = 0x3c088889u; break;
-    case 0x139a48u: if (address == 0x49bf1cu) out = 0x3c088889u; break;
-    case 0x13d8e4u: if (address == 0x49c08cu) out = 0x3c088889u; break;
-    case 0x13ee80u: if (address == 0x49c12cu) out = 0x3c088889u; break;
+    case ps2_ts2_splitsites::kSite113808: if (address == 0x49b494u) out = 0x3c088889u; break;
+    case ps2_ts2_splitsites::kSite113860: if (address == 0x49b498u) out = 0x3ba3d70au; break;
+    case ps2_ts2_splitsites::kSite113888: if (address == 0x49b49cu) out = 0x42efffffu; break;
+    case ps2_ts2_splitsites::kSite1139a4: if (address == 0x49b4a0u && !helper) out = 0x3c088889u; break;
+    case ps2_ts2_splitsites::kSite1139c4: if (address == 0x49b4a4u && !helper) out = 0xbadaa2bdu; break;
+    case ps2_ts2_splitsites::kSite1139dc: if (address == 0x49b4a8u && !helper) out = 0xc17d5556u; break;
+    case ps2_ts2_splitsites::kSite113a0c: if (address == 0x49b4acu && !helper) out = 0xc0e2aaabu; break;
+    case ps2_ts2_splitsites::kSite121e64: if (address == 0x49b828u) out = 0x3c088889u; break;
+    case ps2_ts2_splitsites::kSite137d68: if (address == 0x49be9cu) out = 0x3c088889u; break;
+    case ps2_ts2_splitsites::kSite139a48: if (address == 0x49bf1cu) out = 0x3c088889u; break;
+    case ps2_ts2_splitsites::kSite13d8e4: if (address == 0x49c08cu) out = 0x3c088889u; break;
+    case ps2_ts2_splitsites::kSite13ee80: if (address == 0x49c12cu) out = 0x3c088889u; break;
     default: break;
     }
     if (out != bits && countEnabled()) ++s.halfLoadConverted;

@@ -530,6 +530,29 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         : (PS2Runtime::isSpecialAddress(_addr)               \
             ? runtime->Load32(rdram, ctx, _addr)              \
             : FAST_READ32(_addr));                           \
+    /* HL2: no split120 hook here. The generator emits READ32_SPLIT only at */ \
+    /* the 12 conversion PCs (ps2_ts2_splitsites.h); every other load kept */ \
+    /* stock values through halfLoad's default case, so skipping the call is */ \
+    /* exact. (The ts2-halfload counters now tally SPLIT-site executions.) */ \
+    if (ps2x_tap_mpg::uploadloadArmed() &&                \
+        ps2x_tap_mpg::isUploaderValue(_rv))               \
+        ps2x_tap_mpg::noteUploadloadCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u, ps2xE40Fn); \
+    if (ps2x_tap_mpg::tagaddrArmed())                     \
+        ps2x_tap_mpg::noteLoadForSrcCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u); \
+    return _rv; }())
+
+/* HL2: the pre-split READ32 body, emitted only at the 12 conversion PCs. */
+#define READ32_SPLIT(addr) ([&, ps2xE40Fn = __func__]() -> uint32_t {                     \
+    uint32_t _addr = (uint32_t)(addr);                        \
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 4u))           \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 4u, ps2xE40Fn); \
+    ps2_ts2_observer::noteLoad(ctx, _addr, 4u);           \
+    uint32_t _rv = _addr <= PS2_RAM_SIZE - sizeof(uint32_t) /* EX1 */ \
+        ? Ps2CanonicalRead32(rdram, _addr)                   \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load32(rdram, ctx, _addr)              \
+            : FAST_READ32(_addr));                           \
     if (ps2_ts2_split60::halfMode()) /* EE1P2: one product gate per 32-bit load */ \
         _rv = ps2_ts2_split60::halfLoad(ctx->pc, _addr, _rv);  \
     if (ps2x_tap_mpg::uploadloadArmed() &&                \

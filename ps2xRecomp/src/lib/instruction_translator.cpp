@@ -5,6 +5,7 @@
 #include "ps2recomp/types.h"
 #include "ps2recomp/control_flow_utils.h"
 #include "runtime/ps2_address.h"
+#include "ps2_ts2_splitsites.h"
 
 #include <fmt/format.h>
 
@@ -98,6 +99,11 @@ namespace ps2recomp
         if (inst.isMmio)
         {
             return fmt::format("runtime->Load{}(rdram, ctx, {})", width, addr);
+        }
+        if (width == 32 && ps2_ts2_splitsites::isSite(inst.address))
+        {
+            // HL2: the split120 hook survives only at the conversion PCs.
+            return fmt::format("READ32_SPLIT({})", addr);
         }
         return fmt::format("READ{}({})", width, addr);
     }
@@ -349,11 +355,13 @@ namespace ps2recomp
         case OPCODE_PREF:
             return "// PREF instruction (ignored)";
         case OPCODE_LL:
+            // HL2: site-aware like translateMemoryRead (no site is LL today).
             return fmt::format(
                 "{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                "SET_GPR_S32(ctx, {}, (int32_t)READ32(addr)); "
+                "SET_GPR_S32(ctx, {}, (int32_t){}(addr)); "
                 "ctx->llbit = 1; ctx->lladdr = addr; }}",
-                inst.rs, inst.simmediate, inst.rt);
+                inst.rs, inst.simmediate, inst.rt,
+                ps2_ts2_splitsites::isSite(inst.address) ? "READ32_SPLIT" : "READ32");
         case OPCODE_SC:
             return fmt::format(
                 "{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
