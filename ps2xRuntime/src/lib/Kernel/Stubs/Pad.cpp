@@ -5,8 +5,12 @@
 #include "ps2_pad_latch.h"
 #include "Pad.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -469,7 +473,38 @@ namespace ps2_stubs
             {
                 return false;
             }
-            const std::string text(spec);
+            // IR1b: full-line '#' comments and blank lines are ignored, so
+            // recordings (which carry a header block) parse as scripts.
+            // Entry text itself is unchanged: no '#' or newline may appear
+            // inside an entry. A trailing '\r' per line is tolerated.
+            std::string text;
+            {
+                const std::string raw(spec);
+                size_t lineBegin = 0u;
+                while (lineBegin <= raw.size())
+                {
+                    const size_t lineEnd = raw.find('\n', lineBegin);
+                    std::string line = raw.substr(
+                        lineBegin, lineEnd == std::string::npos ? lineEnd : lineEnd - lineBegin);
+                    if (!line.empty() && line.back() == '\r')
+                    {
+                        line.pop_back();
+                    }
+                    if (!line.empty() && line[0] != '#')
+                    {
+                        text += line;
+                    }
+                    if (lineEnd == std::string::npos)
+                    {
+                        break;
+                    }
+                    lineBegin = lineEnd + 1u;
+                }
+            }
+            if (text.empty())
+            {
+                return false;
+            }
             size_t begin = 0u;
             while (begin <= text.size())
             {
@@ -658,6 +693,12 @@ namespace ps2_stubs
         // recorded ticks [T0,T1) exactly). The open tail entry is split
         // every 600 ticks and the file flushed, so a force-stop keeps all
         // but ~10 s; a clean exit finalizes the tail via atexit.
+        // IR1b: PS2X_PAD_RECORD_DIR=<dir> (when PAD_RECORD is unset) writes
+        // one file per session (padrec-<UTC>.txt) and prunes to the newest
+        // PS2X_PAD_RECORD_KEEP files (default 30) at arm time. Every
+        // recording starts with a '#' header block (start UTC, knobs, save
+        // hash); the script parser skips full-line comments, so recordings
+        // replay directly.
         struct PadRecord
         {
             std::mutex mutex;
@@ -666,6 +707,7 @@ namespace ps2_stubs
             bool capped = false;
             bool finalized = false;
             std::FILE *file = nullptr;
+            std::string path;
             bool haveOpen = false;
             uint64_t openTick = 0u;
             PadInputState openState{};
@@ -788,6 +830,173 @@ namespace ps2_stubs
             padRecordFinalizeLocked();
         }
 
+        const char *padRecordKnob(const char *name)
+        {
+            const char *value = std::getenv(name);
+            return (value && value[0] != '\0') ? value : "unset";
+        }
+
+        void padRecordSanitize(char *text)
+        {
+            // Keep header lines single-line: no newlines or returns.
+            for (char *p = text; *p; ++p)
+            {
+                if (*p == '\n' || *p == '\r')
+                {
+                    *p = '_';
+                }
+            }
+        }
+
+        void padRecordUtc(char *out, size_t outSize, std::time_t when, const char *fmt)
+        {
+            std::tm tm{};
+#if defined(_WIN32)
+            gmtime_s(&tm, &when);
+#else
+            gmtime_r(&when, &tm);
+#endif
+            std::strftime(out, outSize, fmt, &tm);
+        }
+
+        uint64_t padRecordFnv1a(const void *data, size_t size, uint64_t hash)
+        {
+            const uint8_t *bytes = static_cast<const uint8_t *>(data);
+            for (size_t i = 0; i < size; ++i)
+            {
+                hash ^= bytes[i];
+                hash *= 1099511628211ull;
+            }
+            return hash;
+        }
+
+        // FNV-1a 64 over the sorted relative paths + bytes of the regular
+        // files under mcRoot. Bounded (4096 files / 64 MiB); best-effort:
+        // unreadable roots yield false, never an exception.
+        bool padRecordHashSaveSet(const char *mcRoot, uint64_t &hashOut, uint64_t &filesOut)
+        {
+            namespace fs = std::filesystem;
+            hashOut = 14695981039346656037ull;
+            filesOut = 0u;
+            if (!mcRoot || mcRoot[0] == '\0')
+            {
+                return false;
+            }
+            std::error_code ec;
+            if (!fs::is_directory(mcRoot, ec) || ec)
+            {
+                return false;
+            }
+            std::vector<std::string> rels;
+            fs::recursive_directory_iterator it(mcRoot, ec);
+            const fs::recursive_directory_iterator end;
+            while (!ec && it != end)
+            {
+                std::error_code ec2;
+                if (it->is_regular_file(ec2) && !ec2)
+                {
+                    std::error_code ec3;
+                    std::string rel = fs::relative(it->path(), mcRoot, ec3).string();
+                    if (!ec3)
+                    {
+                        rels.push_back(rel);
+                    }
+                }
+                it.increment(ec);
+            }
+            if (ec)
+            {
+                return false;
+            }
+            std::sort(rels.begin(), rels.end());
+            uint64_t hash = 14695981039346656037ull;
+            uint64_t bytes = 0u;
+            constexpr uint64_t kMaxFiles = 4096u;
+            constexpr uint64_t kMaxBytes = 64u << 20;
+            for (const std::string &rel : rels)
+            {
+                if (filesOut >= kMaxFiles || bytes >= kMaxBytes)
+                {
+                    break;
+                }
+                hash = padRecordFnv1a(rel.data(), rel.size(), hash);
+                hash = padRecordFnv1a("\0", 1, hash);
+                std::FILE *f = std::fopen((std::string(mcRoot) + "/" + rel).c_str(), "rb");
+                if (!f)
+                {
+                    return false;
+                }
+                char buf[8192];
+                size_t n = 0;
+                while (bytes < kMaxBytes && (n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+                {
+                    hash = padRecordFnv1a(buf, n, hash);
+                    bytes += n;
+                }
+                std::fclose(f);
+                ++filesOut;
+            }
+            hashOut = hash;
+            return true;
+        }
+
+        void padRecordWriteHeaderLocked(std::time_t when)
+        {
+            std::FILE *f = g_padRecord.file;
+            if (!f)
+            {
+                return;
+            }
+            char startUtc[32] = {0};
+            padRecordUtc(startUtc, sizeof(startUtc), when, "%Y-%m-%dT%H:%M:%SZ");
+            char sim[64], vu1[64], mtvu[64], finish[64], det[64], vfloat[64], mcroot[512];
+            std::snprintf(sim, sizeof(sim), "%s", padRecordKnob("PS2X_SSX3_SIM_MODE"));
+            std::snprintf(vu1, sizeof(vu1), "%s", padRecordKnob("PS2X_VU1_ENGINE"));
+            std::snprintf(mtvu, sizeof(mtvu), "%s", padRecordKnob("PS2X_MTVU"));
+            std::snprintf(finish, sizeof(finish), "%s", padRecordKnob("PS2X_GS_FINISH_TIMING"));
+            std::snprintf(det, sizeof(det), "%s", padRecordKnob("PS2X_DETERMINISTIC"));
+            std::snprintf(vfloat, sizeof(vfloat), "%s", padRecordKnob("PS2X_VU_FLOAT"));
+            std::snprintf(mcroot, sizeof(mcroot), "%s", padRecordKnob("PS2X_MC_ROOT"));
+            padRecordSanitize(sim);
+            padRecordSanitize(vu1);
+            padRecordSanitize(mtvu);
+            padRecordSanitize(finish);
+            padRecordSanitize(det);
+            padRecordSanitize(vfloat);
+            padRecordSanitize(mcroot);
+            const char *mcRaw = std::getenv("PS2X_MC_ROOT");
+            uint64_t saveHash = 0u, saveFiles = 0u;
+            const bool saveOk = padRecordHashSaveSet(mcRaw, saveHash, saveFiles);
+            std::fprintf(f,
+                         "# padrec v1\n"
+                         "# start_utc=%s\n"
+                         "# build=unavailable\n"
+                         "# knobs SIM_MODE=%s VU1_ENGINE=%s MTVU=%s FINISH_TIMING=%s "
+                         "DETERMINISTIC=%s VU_FLOAT=%s\n",
+                         startUtc, sim, vu1, mtvu, finish, det, vfloat);
+            if (saveOk)
+            {
+                std::fprintf(f, "# mcroot=%s mcsave=%016llx mcfiles=%llu\n", mcroot,
+                             static_cast<unsigned long long>(saveHash),
+                             static_cast<unsigned long long>(saveFiles));
+            }
+            else
+            {
+                std::fprintf(f, "# mcroot=%s mcsave=unreadable mcfiles=0\n", mcroot);
+            }
+            std::fflush(f);
+        }
+
+        void padRecordFinishArmLocked(const char *source, std::time_t when)
+        {
+            // g_padRecord.file and .path must be set by the caller.
+            padRecordWriteHeaderLocked(when);
+            g_padRecord.enabled = true;
+            g_padRecordArmed.store(true, std::memory_order_relaxed);
+            std::fprintf(stderr, "[padrecord] armed path=%s source=%s\n",
+                         g_padRecord.path.c_str(), source);
+        }
+
         void padRecordArmLocked(const char *path, const char *source)
         {
             g_padRecord.file = std::fopen(path, "w");
@@ -797,9 +1006,125 @@ namespace ps2_stubs
                              path, source);
                 return;
             }
-            g_padRecord.enabled = true;
-            g_padRecordArmed.store(true, std::memory_order_relaxed);
-            std::fprintf(stderr, "[padrecord] armed path=%s source=%s\n", path, source);
+            g_padRecord.path = path;
+            padRecordFinishArmLocked(source, std::time(nullptr));
+        }
+
+        uint64_t padRecordParseKeep(const char *value)
+        {
+            constexpr uint64_t kDefaultKeep = 30u;
+            if (!value || value[0] == '\0')
+            {
+                return kDefaultKeep;
+            }
+            uint64_t keep = 0u;
+            for (const char *p = value; *p; ++p)
+            {
+                if (*p < '0' || *p > '9')
+                {
+                    return kDefaultKeep;
+                }
+                keep = keep * 10u + static_cast<uint64_t>(*p - '0');
+            }
+            return keep;
+        }
+
+        void padRecordPruneDirLocked(const char *dir, uint64_t keep, const char *currentName)
+        {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            std::vector<std::string> names;
+            for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+            {
+                std::error_code ec2;
+                if (!it->is_regular_file(ec2) || ec2)
+                {
+                    continue;
+                }
+                const std::string name = it->path().filename().string();
+                if (name.size() > 11u && name.compare(0, 7u, "padrec-") == 0 &&
+                    name.compare(name.size() - 4u, 4u, ".txt") == 0)
+                {
+                    names.push_back(name);
+                }
+            }
+            if (ec)
+            {
+                std::fprintf(stderr, "[padrecord] prune: cannot list %s; keeping all\n", dir);
+                return;
+            }
+            std::sort(names.begin(), names.end());
+            uint64_t pruned = 0u, survivors = 0u;
+            for (auto it = names.rbegin(); it != names.rend(); ++it)
+            {
+                if (survivors < keep)
+                {
+                    ++survivors;
+                    continue;
+                }
+                if (currentName && *it == currentName)
+                {
+                    continue; // never delete the live file (clock skew)
+                }
+                std::error_code ec3;
+                fs::remove(fs::path(dir) / *it, ec3);
+                if (!ec3)
+                {
+                    ++pruned;
+                }
+            }
+            std::fprintf(stderr, "[padrecord] prune dir=%s keep=%llu pruned=%llu files=%llu\n",
+                         dir, static_cast<unsigned long long>(keep),
+                         static_cast<unsigned long long>(pruned),
+                         static_cast<unsigned long long>(names.size() - pruned));
+        }
+
+        void padRecordArmDirLocked(const char *dir, uint64_t keep, const char *source)
+        {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            fs::create_directories(dir, ec);
+            if (ec)
+            {
+                std::fprintf(stderr, "[padrecord] cannot create %s (%s); recording off\n",
+                             dir, source);
+                return;
+            }
+            const std::time_t when = std::time(nullptr);
+            char stamp[32] = {0};
+            padRecordUtc(stamp, sizeof(stamp), when, "%Y%m%d-%H%M%S");
+            // One file per session; -N on same-second collision.
+            for (int n = 0; n <= 100; ++n)
+            {
+                char name[64];
+                if (n == 0)
+                {
+                    std::snprintf(name, sizeof(name), "padrec-%s.txt", stamp);
+                }
+                else
+                {
+                    std::snprintf(name, sizeof(name), "padrec-%s-%d.txt", stamp, n + 1);
+                }
+                const std::string full = std::string(dir) + "/" + name;
+                std::error_code ec2;
+                if (fs::exists(full, ec2) || ec2)
+                {
+                    continue;
+                }
+                g_padRecord.file = std::fopen(full.c_str(), "w");
+                if (!g_padRecord.file)
+                {
+                    std::fprintf(stderr, "[padrecord] cannot open %s (%s); recording off\n",
+                                 full.c_str(), source);
+                    return;
+                }
+                g_padRecord.path = full;
+                padRecordFinishArmLocked(source, when);
+                padRecordPruneDirLocked(dir, keep, name);
+                return;
+            }
+            std::fprintf(stderr, "[padrecord] no free session name in %s (%s); recording off\n",
+                         dir, source);
         }
 
         void padRecordResetLocked()
@@ -814,6 +1139,7 @@ namespace ps2_stubs
             g_padRecord.capped = false;
             g_padRecord.finalized = false;
             g_padRecord.file = nullptr;
+            g_padRecord.path.clear();
             g_padRecord.haveOpen = false;
             g_padRecord.openTick = 0u;
             g_padRecord.openState = PadInputState{};
@@ -832,13 +1158,26 @@ namespace ps2_stubs
                 return;
             }
             g_padRecord.initDone = true;
-            const char *path = std::getenv("PS2X_PAD_RECORD");
-            if (!path || path[0] == '\0')
+            // File mode wins; dir mode (one file per session + prune) next.
+            if (const char *path = std::getenv("PS2X_PAD_RECORD"))
             {
-                return;
+                if (path[0] != '\0')
+                {
+                    std::atexit(padRecordExitFlush);
+                    padRecordArmLocked(path, "env");
+                    return;
+                }
             }
-            std::atexit(padRecordExitFlush);
-            padRecordArmLocked(path, "env");
+            if (const char *dir = std::getenv("PS2X_PAD_RECORD_DIR"))
+            {
+                if (dir[0] != '\0')
+                {
+                    std::atexit(padRecordExitFlush);
+                    padRecordArmDirLocked(
+                        dir, padRecordParseKeep(std::getenv("PS2X_PAD_RECORD_KEEP")), "env");
+                    return;
+                }
+            }
         }
 
         void padRecordEnsureInit()
@@ -1866,6 +2205,20 @@ namespace ps2_stubs
         g_padRecord.testTickSet = false;
         g_padRecord.testTick = 0u;
         g_padRecordInitDone.store(true, std::memory_order_relaxed);
+    }
+
+    bool setPadRecordDirForTest(const char *dir, uint64_t keep)
+    {
+        if (!dir || dir[0] == '\0')
+        {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(g_padRecord.mutex);
+        padRecordResetLocked();
+        g_padRecord.initDone = true;
+        padRecordArmDirLocked(dir, keep, "test");
+        g_padRecordInitDone.store(true, std::memory_order_relaxed);
+        return g_padRecord.enabled;
     }
 }
 

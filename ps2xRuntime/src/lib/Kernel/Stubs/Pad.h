@@ -127,4 +127,7 @@ namespace ps2_stubs
     void setPadRecordTickForTest(uint64_t tick);
     void closePadRecordForTest();
     void clearPadRecordForTest();
+    // IR1b dir mode: arm one session file under `dir`, pruning to the
+    // newest `keep` files at arm time. Production never calls this.
+    bool setPadRecordDirForTest(const char *dir, uint64_t keep);
 }

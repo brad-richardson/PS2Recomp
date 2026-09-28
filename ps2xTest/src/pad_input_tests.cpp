@@ -709,6 +709,12 @@ void register_pad_input_tests()
                 }
                 std::fclose(f);
             }
+            t.IsTrue(content.rfind("# padrec v1\n", 0) == 0,
+                     "recording starts with a header block");
+            t.IsTrue(content.find("\n# knobs ") != std::string::npos,
+                     "recording header carries knobs");
+            t.IsTrue(content.find("\n# mcroot=") != std::string::npos,
+                     "recording header carries save hash");
             std::vector<ps2_stubs::PadScriptEntry> entries;
             t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries),
                      "recording should parse as a pad script");
@@ -745,6 +751,114 @@ void register_pad_input_tests()
             ps2_stubs::clearPadRecordForTest();
             closePadPort(ctx, rdram);
             std::remove(recPath.c_str());
+        });
+
+        tc.Run("pad script parser ignores comment and blank lines", [](TestCase &t)
+               {
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScript(
+                         "# padrec v1\n# start_utc=2026-09-28T01:00:00Z\n\n1000:start:500\n",
+                         entries),
+                     "header + entries should parse");
+            t.Equals(static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(1),
+                     "one entry under the header");
+            t.Equals(static_cast<uint32_t>(entries[0].pressMask),
+                     static_cast<uint32_t>(kPadBtnStart), "entry presses start");
+            t.IsTrue(ps2_stubs::parsePadScript("# h\r\n1000:start:500\r\n", entries),
+                     "CRLF line endings should parse");
+
+            std::vector<ps2_stubs::PadScriptEntry> rejected;
+            t.IsTrue(!ps2_stubs::parsePadScript("1000:st#art:500", rejected),
+                     "mid-entry # is still malformed");
+            t.IsTrue(!ps2_stubs::parsePadScript("# only a comment\n", rejected),
+                     "header-only spec has no entries");
+        });
+
+        tc.Run("pad recorder dir mode writes one session file and prunes", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const fs::path dir = fs::temp_directory_path() / "ir1_padrec_dir_test";
+            fs::remove_all(dir);
+            fs::create_directories(dir);
+            // Five stale session files + one non-matching file (must survive).
+            for (int i = 0; i < 5; ++i)
+            {
+                char name[64];
+                std::snprintf(name, sizeof(name), "padrec-20200101-00000%d.txt", i);
+                std::FILE *f = std::fopen((dir / name).string().c_str(), "w");
+                std::fputs("stale", f);
+                std::fclose(f);
+            }
+            {
+                std::FILE *f = std::fopen((dir / "keep.txt").string().c_str(), "w");
+                std::fputs("x", f);
+                std::fclose(f);
+            }
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            t.IsTrue(ps2_stubs::setPadRecordDirForTest(dir.string().c_str(), 3),
+                     "dir mode should arm");
+            ps2_stubs::setPadOverrideState(0xFFFFu, 0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(100);
+            runPadRead(ctx, rdram);
+            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross),
+                                           0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(110);
+            runPadRead(ctx, rdram);
+            ps2_stubs::clearPadOverrideState();
+            ps2_stubs::closePadRecordForTest();
+
+            // Prune ran at arm (6 files, keep 3): 3 oldest stale gone.
+            t.IsTrue(!fs::exists(dir / "padrec-20200101-000000.txt"), "oldest pruned");
+            t.IsTrue(!fs::exists(dir / "padrec-20200101-000001.txt"), "second-oldest pruned");
+            t.IsTrue(!fs::exists(dir / "padrec-20200101-000002.txt"), "third-oldest pruned");
+            t.IsTrue(fs::exists(dir / "padrec-20200101-000003.txt"), "newer stale kept");
+            t.IsTrue(fs::exists(dir / "padrec-20200101-000004.txt"), "newest stale kept");
+            t.IsTrue(fs::exists(dir / "keep.txt"), "non-matching file kept");
+            std::vector<fs::path> fresh;
+            for (const auto &de : fs::directory_iterator(dir))
+            {
+                const std::string n = de.path().filename().string();
+                if (n.size() > 11 && n.compare(0, 7, "padrec-") == 0 &&
+                    n.find("20200101") == std::string::npos)
+                {
+                    fresh.push_back(de.path());
+                }
+            }
+            t.Equals(static_cast<uint32_t>(fresh.size()), static_cast<uint32_t>(1),
+                     "one session file");
+            if (!fresh.empty())
+            {
+                std::FILE *f = std::fopen(fresh[0].string().c_str(), "rb");
+                std::string content;
+                if (f)
+                {
+                    char buf[256];
+                    size_t n = 0;
+                    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+                    {
+                        content.append(buf, n);
+                    }
+                    std::fclose(f);
+                }
+                t.IsTrue(content.rfind("# padrec v1\n", 0) == 0, "session file has header");
+                std::vector<ps2_stubs::PadScriptEntry> entries;
+                t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries),
+                         "session file parses as a script");
+                t.Equals(static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(2),
+                         "one change + tail");
+            }
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            closePadPort(ctx, rdram);
+            fs::remove_all(dir);
         });
     });
 }
