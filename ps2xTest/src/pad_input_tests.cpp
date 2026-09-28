@@ -1301,10 +1301,12 @@ void register_pad_input_tests()
             // split the rewound reads would be dropped and the tail would
             // carry the stale pre-load state ([110,116) cross: 2 entries).
             t.Equals(static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(4), "two segments, 4 spans");
+            // Entries store ms (tick * 100000 / 5994); the rewound span is at tick 106.
+            const uint64_t rewoundMs = (106u * 100000ull) / 5994ull;
             bool rewound = false;
             for (const auto &e : entries)
             {
-                if (e.atMs == 106u)
+                if (e.atMs == rewoundMs)
                     rewound = true;
             }
             t.IsTrue(rewound, "post-load span starts at the rewound tick");

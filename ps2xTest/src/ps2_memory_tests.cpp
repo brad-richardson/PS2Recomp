@@ -3535,14 +3535,16 @@ void register_ps2_memory_tests()
                 t.IsTrue(ok, what);
             };
 
-            for (uint32_t j = 0u; j < 30u; ++j)
-                uploadSnapshot(gs, j); // snapshots 0..29 (wraps the 25-ring)
-            for (uint32_t k = 0u; k < 26u; ++k)
+            // Lockstep probes (the real access pattern: each probe snapshots
+            // then serves, so serves stay within the ring depth of snaps).
+            for (uint32_t p = 0u; p < 30u; ++p)
             {
+                uploadSnapshot(gs, p);
                 std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
-                serveOnce(mem); // serves 0..25 (serve 24 -> snap 0, 25 -> snap 1)
+                serveOnce(mem);
+                if (p >= 24u)
+                    expectSnapshot(mem, p - 24u, "pre-save lagV serve is exact");
             }
-            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
 
             ps2_savestate::Writer w;
             const size_t mark = w.beginSection("gs", ps2_savestate::kGsVersion);
@@ -3561,14 +3563,15 @@ void register_ps2_memory_tests()
             t.IsTrue(GSSavestate::load(gsB, r), "GS state loads");
             t.IsTrue(r.endSection("gs"), "gs section fully consumed");
 
-            // Serves 26..35 yield snapshots 2..11: slots 2..11, which the
+            // Probes 30..39 yield snapshots 6..15: slots 6..15, which the
             // pre-ring 2-slot tail never carried (the discriminating check).
-            for (uint32_t k = 26u; k < 36u; ++k)
+            for (uint32_t p = 30u; p < 40u; ++p)
             {
+                uploadSnapshot(gsB, p);
                 std::memset(memB.getRDRAM() + kDst, 0xA5u, 64u);
                 serveOnce(memB);
-                expectSnapshot(memB, k - 24u,
-                               ("post-load lagV serve yields snapshot " + std::to_string(k - 24u)).c_str());
+                expectSnapshot(memB, p - 24u,
+                               ("post-load lagV serve yields snapshot " + std::to_string(p - 24u)).c_str());
             }
 
             mem.setGsFrontend(nullptr);
