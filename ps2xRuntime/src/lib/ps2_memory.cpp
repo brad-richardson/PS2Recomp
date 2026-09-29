@@ -605,11 +605,14 @@ PS2Memory::~PS2Memory()
         delete[] m_vu1Code;
         m_vu1Code = nullptr;
     }
-    if (m_vu1Data)
+    // MP1 L1: only the owned buffer is ours (an adopted one belongs to the
+    // microVU library).
+    if (m_vu1DataOwned)
     {
-        delete[] m_vu1Data;
-        m_vu1Data = nullptr;
+        delete[] m_vu1DataOwned;
+        m_vu1DataOwned = nullptr;
     }
+    m_vu1Data = nullptr;
     if (m_vu0Code)
     {
         delete[] m_vu0Code;
@@ -639,7 +642,7 @@ bool PS2Memory::initialize(size_t ramSize)
         delete[] m_vu0Code;
         delete[] m_vu0Data;
         delete[] m_vu1Code;
-        delete[] m_vu1Data;
+        delete[] m_vu1DataOwned;
         m_rdram = nullptr;
         m_scratchpad = nullptr;
         ps2SetScratchpadHostPtr(nullptr);
@@ -648,6 +651,7 @@ bool PS2Memory::initialize(size_t ramSize)
         m_vu0Code = nullptr;
         m_vu0Data = nullptr;
         m_vu1Code = nullptr;
+        m_vu1DataOwned = nullptr;
         m_vu1Data = nullptr;
     };
 
@@ -713,7 +717,8 @@ bool PS2Memory::initialize(size_t ramSize)
         std::memset(m_vu0Data, 0, PS2_VU0_DATA_SIZE);
 
         m_vu1Code = new uint8_t[PS2_VU1_CODE_SIZE];
-        m_vu1Data = new uint8_t[PS2_VU1_DATA_SIZE];
+        m_vu1DataOwned = new uint8_t[PS2_VU1_DATA_SIZE];
+        m_vu1Data = m_vu1DataOwned;
         std::memset(m_vu1Code, 0, PS2_VU1_CODE_SIZE);
         std::memset(m_vu1Data, 0, PS2_VU1_DATA_SIZE);
         markVU0CodeModified();
@@ -905,6 +910,17 @@ uint64_t PS2Memory::cyclesUntilNextEeTimerEvent() const noexcept
 bool PS2Memory::isScratchpad(uint32_t address) const
 {
     return ps2IsScratchpadAddress(address);
+}
+
+void PS2Memory::adoptExternalVU1Data(uint8_t *external)
+{
+    if (!m_vu1DataOwned || !m_vu1Data)
+        return;
+    uint8_t *const target = external ? external : m_vu1DataOwned;
+    if (target == m_vu1Data)
+        return;
+    std::memcpy(target, m_vu1Data, PS2_VU1_DATA_SIZE);
+    m_vu1Data = target;
 }
 
 uint8_t *PS2Memory::mapVuMemory(uint32_t physAddr, uint32_t size, uint32_t &offset, uint32_t &limit)

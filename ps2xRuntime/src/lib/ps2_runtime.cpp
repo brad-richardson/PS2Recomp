@@ -1708,6 +1708,7 @@ bool PS2Runtime::syncCoreSubsystems()
             std::cerr << "[microvu] " << microvuError << std::endl;
             return false;
         }
+        ps2_microvu::adoptData(m_memory); // MP1 L1 (no-op unless the library offers it)
     }
     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
                                  {

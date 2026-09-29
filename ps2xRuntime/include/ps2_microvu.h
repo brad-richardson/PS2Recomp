@@ -23,6 +23,10 @@ namespace ps2_microvu {
 // cumulative break count (a rate-limited stderr line per break).
 inline constexpr const char* kBudgetParkedReason = "vu1: budget-parked";
 bool configure(bool mtvu_threaded, std::string& error);
+// MP1 L1: after configure, keep memory's VU1 data in the library's own
+// memory when the library offers it (no staging copies per run). Returns
+// whether it did; shutdown() moves the data back.
+bool adoptData(PS2Memory& memory);
 bool selected();
 void shutdown();
 bool run(PS2Memory& memory, uint8_t* data, VU1State& state,

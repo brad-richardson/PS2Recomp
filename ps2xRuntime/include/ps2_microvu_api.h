@@ -54,6 +54,12 @@ typedef struct ps2x_microvu_stats {
 } ps2x_microvu_stats;
 PS2X_MV2_EXPORT int ps2x_microvu_get_stats(ps2x_microvu_stats *out);
 
+// MP1 L1 (optional; the loader dlsyms it, older libraries lack it): the
+// library's own VU1 data memory (16 KiB), valid from init until shutdown. A
+// caller that keeps VU1 data there passes this pointer as run()'s `data`,
+// and run() then skips both staging copies. Null before init.
+PS2X_MV2_EXPORT uint8_t *ps2x_microvu_vu1_data(void);
+
 #ifdef __cplusplus
 }
 #endif

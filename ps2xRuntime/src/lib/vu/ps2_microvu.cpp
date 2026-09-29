@@ -35,7 +35,10 @@ struct Api {
     decltype(&ps2x_microvu_shutdown) close = nullptr;
     decltype(&ps2x_microvu_run) run = nullptr;
     decltype(&ps2x_microvu_get_stats) getStats = nullptr; // optional (offline only)
+    decltype(&ps2x_microvu_vu1_data) vu1Data = nullptr;   // optional (MP1 L1)
 } s_api;
+// MP1 L1: the memory whose VU1 data lives in the library (adoptData).
+PS2Memory* s_dataHost = nullptr;
 bool s_selected = false;
 std::string s_engine;
 std::atomic<uint64_t> s_restarts{0};
@@ -179,6 +182,8 @@ bool configure(bool mtvu_threaded, std::string& error)
     s_api.run = reinterpret_cast<decltype(s_api.run)>(dlsym(s_api.handle, "ps2x_microvu_run"));
     s_api.getStats =
         reinterpret_cast<decltype(s_api.getStats)>(dlsym(s_api.handle, "ps2x_microvu_get_stats"));
+    s_api.vu1Data =
+        reinterpret_cast<decltype(s_api.vu1Data)>(dlsym(s_api.handle, "ps2x_microvu_vu1_data"));
     if (!abi || abi() != PS2X_MICROVU_ABI || !s_api.init || !s_api.close || !s_api.run) {
         error = std::string(name) + " ABI/symbol mismatch";
         shutdown();
@@ -199,6 +204,32 @@ bool configure(bool mtvu_threaded, std::string& error)
     (void)error;
 #endif
     return true;
+}
+
+bool adoptData(PS2Memory& memory)
+{
+#if defined(PS2X_MICROVU_LOADABLE)
+    // MP1 L1: the microvu engine's library exports its VU1 data memory;
+    // keeping the runtime's VU1 data there removes run()'s two 16 KiB
+    // staging copies. Same bytes at every point the runtime can observe
+    // (EE access and det-hash ticks sync the unit first). The offline engine
+    // keeps its own copies (it may MISS and restart statically).
+    // PS2X_MICROVU_BRIDGE_LEAN=0 keeps the copies (the library reads the
+    // same knob for its code diff).
+    const char* lean = std::getenv("PS2X_MICROVU_BRIDGE_LEAN");
+    if (!s_selected || s_engine != "microvu" || !s_api.vu1Data || (lean && lean[0] == '0'))
+        return false;
+    uint8_t* const lib = s_api.vu1Data();
+    if (!lib)
+        return false;
+    memory.adoptExternalVU1Data(lib);
+    s_dataHost = &memory;
+    std::fprintf(stderr, "[microvu] vu1 data shared with the library (MP1 L1)\n");
+    return true;
+#else
+    (void)memory;
+    return false;
+#endif
 }
 
 bool selected()
@@ -228,6 +259,12 @@ void shutdown()
                              (unsigned long long)st.jump_misses,
                              (unsigned long long)st.fall_misses);
         }
+    }
+    // MP1 L1: move VU1 data back into the runtime before the library (and
+    // its memory) goes away.
+    if (s_dataHost) {
+        s_dataHost->adoptExternalVU1Data(nullptr);
+        s_dataHost = nullptr;
     }
     if (s_api.close && s_selected)
         s_api.close();
@@ -277,6 +314,7 @@ bool resetForLoad(std::string& error)
     // SS4: drop all live JIT state (compiled code, VURegs, PATH1 sink, the
     // seed latch) so the next run re-seeds from the freshly loaded VU1State
     // + VU memories. A shutdown/configure cycle, no ABI change.
+    PS2Memory* const host = s_dataHost; // MP1 L1: re-share after the reload
     shutdown();
     if (!configure(ps2_mtvu::threaded(), error))
         return false;
@@ -284,6 +322,8 @@ bool resetForLoad(std::string& error)
         error = "microvu engine lost during load reset";
         return false;
     }
+    if (host)
+        adoptData(*host);
     std::fprintf(stderr, "[microvu] library reset for state load\n");
     return true;
 #else

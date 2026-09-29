@@ -371,6 +371,13 @@ public:
     const uint8_t *getVU1Code() const { return m_vu1Code; }
     uint8_t *getVU1Data() { return m_vu1Data; }
     const uint8_t *getVU1Data() const { return m_vu1Data; }
+    // MP1 L1: keep VU1 data in an external 16 KiB buffer (the microVU
+    // library's own memory, so its runs need no staging copies): the current
+    // bytes move there and getVU1Data() returns it. Null moves the bytes back
+    // into the owned buffer (before the library unloads). Call only while
+    // the unit is idle (runtime init, state load).
+    void adoptExternalVU1Data(uint8_t *external);
+    bool vu1DataExternal() const { return m_vu1Data != nullptr && m_vu1Data != m_vu1DataOwned; }
     uint8_t *getVU0Code() { return m_vu0Code; }
     const uint8_t *getVU0Code() const { return m_vu0Code; }
     uint8_t *getVU0Data() { return m_vu0Data; }
@@ -457,7 +464,8 @@ public:
     uint8_t *m_vu0Code = nullptr;
     uint8_t *m_vu0Data = nullptr;
     uint8_t *m_vu1Code = nullptr;
-    uint8_t *m_vu1Data = nullptr;
+    uint8_t *m_vu1Data = nullptr;      // == m_vu1DataOwned unless adopted (MP1 L1)
+    uint8_t *m_vu1DataOwned = nullptr;
     bool m_path3Masked = false;
     uint32_t m_vif1PendingPath2ImageQwc = 0u;
     bool m_vif1PendingPath2DirectHl = false;

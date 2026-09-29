@@ -192,6 +192,33 @@ void register_ps2_memory_tests()
             t.Equals(mem.read32(0x00103000u), 0x2468ACE0u, "writes through 0x3010 alias should land in base RDRAM");
         });
 
+        // MP1 L1: VU1 data can live in an external buffer (the microVU
+        // library's memory); bytes move there and back, EE access follows.
+        tc.Run("MP1 VU1 data adopts an external buffer and moves back", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *owned = mem.getVU1Data();
+            for (uint32_t i = 0; i < PS2_VU1_DATA_SIZE; ++i)
+                owned[i] = static_cast<uint8_t>(i * 7u + 3u);
+            std::vector<uint8_t> ext(PS2_VU1_DATA_SIZE, 0u);
+            mem.adoptExternalVU1Data(ext.data());
+            t.IsTrue(mem.getVU1Data() == ext.data(), "getVU1Data should return the adopted buffer");
+            t.IsTrue(mem.vu1DataExternal(), "adopted buffer should report external");
+            bool same = true;
+            for (uint32_t i = 0; i < PS2_VU1_DATA_SIZE; ++i)
+                same = same && ext[i] == static_cast<uint8_t>(i * 7u + 3u);
+            t.IsTrue(same, "adopt should move the current bytes");
+            mem.write32(PS2_VU1_DATA_BASE + 0x100u, 0xCAFEF00Du);
+            uint32_t v = 0;
+            std::memcpy(&v, ext.data() + 0x100u, sizeof(v));
+            t.Equals(v, 0xCAFEF00Du, "EE writes should land in the adopted buffer");
+            mem.adoptExternalVU1Data(nullptr);
+            t.IsTrue(mem.getVU1Data() == owned, "release should return to the owned buffer");
+            t.IsTrue(!mem.vu1DataExternal(), "owned buffer should not report external");
+            t.Equals(mem.read32(PS2_VU1_DATA_BASE + 0x100u), 0xCAFEF00Du, "release should move the bytes back");
+        });
+
         tc.Run("translateAddress handles kseg and uncached aliases", [](TestCase &t)
         {
             PS2Memory mem;
