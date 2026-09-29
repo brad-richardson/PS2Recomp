@@ -397,7 +397,7 @@ public:
     // arbiter take the vector; the no-arbiter callback borrows it). Same
     // taps, same order, same drains as submitGifPacket.
     void submitGifPacketOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately = true, bool path2DirectHl = false);
-    // MP2 zero-copy (PS2X_GS_ZERO_COPY, default on). Set once, before DMAs run.
+    // MP2 zero-copy (PS2X_GS_ZERO_COPY=1, default off). Set once, before DMAs run.
     void setGsZeroCopy(bool on) { m_gsZeroCopy = on; }
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);

@@ -53,7 +53,7 @@ public:
     // allocates a temporary buffer per call for this element type). Off =
     // stable_sort every drain.
     void setSortSkip(bool on) { m_sortSkip = on; }
-    // MP2 zero-copy (PS2X_GS_ZERO_COPY, default on): submit() fills the
+    // MP2 zero-copy (PS2X_GS_ZERO_COPY=1, default off): submit() fills the
     // pooled buffer with one copy and no zero-fill (insert, not
     // resize+memcpy). Off = the pre-MP2 resize+memcpy. Same bytes, same order.
     void setZeroCopy(bool on) { m_zeroCopy = on; }
