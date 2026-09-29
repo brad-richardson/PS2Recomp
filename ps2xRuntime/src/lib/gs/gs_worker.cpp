@@ -94,6 +94,8 @@ void GsWorker::enqueue(GsCommand cmd)
     // it in stream order (every earlier op runs first) and count it.
     if (ps2_mtvu::gifStageOn() && ps2_mtvu::onWorker())
         ps2_mtvu::gifStageEscape();
+    else if (ps2_mtvu::vifStageDefer()) // VPL2: counted (must read 0)
+        ps2_mtvu::vifStageNoteEscape();
     const size_t bytes = cmd.payloadBytes();
     const bool hasRpc = cmd.rpc != nullptr;
     const bool lean = m_lean.load(std::memory_order_relaxed);

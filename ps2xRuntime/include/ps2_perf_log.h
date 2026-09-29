@@ -422,6 +422,7 @@ enum class Stage : uint8_t
     GpuBusy,    // ge1_gs_gpu_ms() per GuestVsync (Vulkan timestamps; GE1 only)
     GsBackBusy, // ge1_gs_back_ms() per GuestVsync (back thread; GE1 pipelined only)
     MtvuGifBusy, // VPL1: MTVU-GIF thread busy between vblanks (PS2X_MTVU_GIF_STAGE=1 only)
+    MtvuVifBusy, // VPL2: MTVU-VIF thread job time between vblanks (PS2X_MTVU_VIF_STAGE=1 only)
     Count
 };
 
@@ -445,6 +446,8 @@ inline const char *stageName(Stage s)
         return "gsback.busy";
     case Stage::MtvuGifBusy:
         return "mtvugif.busy";
+    case Stage::MtvuVifBusy:
+        return "mtvuvif.busy";
     default:
         return "?";
     }

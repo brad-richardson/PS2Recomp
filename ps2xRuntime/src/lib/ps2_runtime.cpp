@@ -1502,6 +1502,7 @@ PS2Runtime::~PS2Runtime()
     // MT1: queued unit work may reference this runtime; the process-wide
     // hooks must not outlive it (tests create many runtimes).
     ps2_mtvu::syncAll();
+    ps2_mtvu::stopVifStage(); // VPL2: join the VIF thread (feeds the GIF stage)
     ps2_mtvu::stopGifStage(); // VPL1: join the GIF thread before its hooks go
     ps2_mtvu::setDtFallbackFn({});
     ps2_mtvu::fbrstFn() = {};
@@ -1794,6 +1795,22 @@ bool PS2Runtime::syncCoreSubsystems()
                 ps2_mtvu::startGifStage([this](ps2_mtvu::GifOp &op) { m_memory.execGifStageOp(op); });
             std::cerr << "[mtvu] gif-stage " << (ok ? "on" : "refused")
                       << " (PS2X_MTVU_GIF_STAGE=1" << (ok ? "" : "; needs PS2X_MTVU=1 threaded and the GS worker queue")
+                      << ")" << std::endl;
+        }
+    }
+    // VPL2: PS2X_MTVU_VIF_STAGE=1 (default off) parses the unit's VIF1
+    // streams on their own thread ahead of VU1 execution; UNPACK/MPG writes,
+    // MSCAL/MSCNT, GIF submits and MSKPATH3 reach the MTVU thread as an
+    // ordered record log. Needs the VPL1 GIF stage. local/research/VPL2/REPORT.md.
+    if (const char *env = std::getenv("PS2X_MTVU_VIF_STAGE"))
+    {
+        if (std::strcmp(env, "1") == 0)
+        {
+            const bool ok = ps2_mtvu::gifStageOn() && !ps2_mtvu::vifLog().running;
+            if (ok)
+                ps2_mtvu::startVifStage(&PS2Memory::execVifStageRec, &m_memory);
+            std::cerr << "[mtvu] vif-stage " << (ok ? "on" : "refused")
+                      << " (PS2X_MTVU_VIF_STAGE=1" << (ok ? "" : "; needs PS2X_MTVU_GIF_STAGE=1 on")
                       << ")" << std::endl;
         }
     }

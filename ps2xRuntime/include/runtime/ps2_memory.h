@@ -16,6 +16,7 @@
 namespace ps2_mtvu
 {
     struct GifOp; // ps2_mtvu.h (VPL1 GIF stage)
+    struct VifRec; // ps2_mtvu.h (VPL2 VIF stage)
 }
 #include "../ps2_vif_src_span.h"
 #if defined(_MSC_VER)
@@ -406,6 +407,8 @@ public:
     void setGsZeroCopy(bool on) { m_gsZeroCopy = on; }
     // VPL1 GIF stage: run one Submit/Drain op on the MTVU-GIF thread.
     void execGifStageOp(ps2_mtvu::GifOp &op);
+    // VPL2 VIF stage: run one record on the MTVU thread (opaque = PS2Memory*).
+    static void execVifStageRec(void *opaque, const ps2_mtvu::VifRec &rec);
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     bool tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint32_t chcr);
@@ -478,6 +481,18 @@ public:
     void arbDrain();
     // VPL1: a unit job's GS-frontend call (G1-G3); `marker` feeds the digest.
     void unitGsCall(uint8_t marker, uint64_t value, std::function<void()> fn);
+    // VPL2: the VIF1 command loop on the MTVU-VIF thread. Same parse and
+    // VIF-register effects as processVIF1DataImpl; every VU-side effect
+    // (VU1 data/code writes, MSCAL/MSCNT, GIF submits, MSKPATH3) becomes a
+    // record the MTVU thread applies in order (REPORT.md §1.3).
+    void processVIF1DataStaged(const uint8_t *data, uint32_t sizeBytes);
+    // VPL2: a submitGifPacket(Owned) call from the VIF thread, as a record.
+    void vifStageGif(bool owned, GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately,
+                     bool path2DirectHl);
+    void vifStageMsk3(uint16_t imm);
+#if PS2X_ENABLE_DET_HASH_TAP || PS2X_ENABLE_DIAG_TAPS
+    void vpl2CaptureNote(const uint8_t *data, uint32_t sizeBytes); // VPL2 dev capture
+#endif
     GS *m_gsFrontend = nullptr;
     bool m_gsZeroCopy = false; // MP2 (set before DMAs run)
     Vu1MscalCallback m_vu1MscalCallback;

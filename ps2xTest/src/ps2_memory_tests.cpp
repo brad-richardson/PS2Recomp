@@ -14,7 +14,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -38,6 +41,307 @@ namespace
         dst.resize(pos + sizeof(uint32_t));
         std::memcpy(dst.data() + pos, &value, sizeof(uint32_t));
     }
+
+    // VPL2: one VIF1 input stream (buffers in processVIF1Data order) plus the
+    // VIF1 / VU1 state it starts from (synthetic, or a PS2X_VPL2_VIFCAP file).
+    struct Vpl2Stream
+    {
+        VIFRegisters regs{};
+        uint32_t pendingQwc = 0;
+        bool pendingHl = false;
+        bool path3Masked = false;
+        std::vector<uint8_t> vu1Data;
+        std::vector<uint8_t> vu1Code;
+        std::vector<std::vector<uint8_t>> bufs;
+    };
+
+    struct Vpl2Outcome
+    {
+        std::vector<uint64_t> atMscal; // per MSCAL/MSCNT: VU1 data + code digest, args
+        std::vector<std::pair<int, std::vector<uint8_t>>> packets;
+        std::vector<uint8_t> vu1Data;
+        std::vector<uint8_t> vu1Code;
+        VIFRegisters regs{};
+        bool masked = false;
+        size_t firstMismatch = 0;
+    };
+
+    uint64_t vpl2Digest(const uint8_t *p, size_t n)
+    {
+        uint64_t h = 0x9E3779B97F4A7C15ull ^ n;
+        for (size_t i = 0; i + 8u <= n; i += 8u)
+        {
+            uint64_t w = 0;
+            std::memcpy(&w, p + i, 8u);
+            h ^= w + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+            h *= 0xBF58476D1CE4E5B9ull;
+        }
+        return h ^ (h >> 31);
+    }
+
+    // Serial (MTVU off, inline VIF1 loop) or staged (threaded MTVU + GIF
+    // stage + VIF stage, each buffer a VIF job). The MSCAL/MSCNT stand-in
+    // records a digest of VU1 data + code, then acts like a program: it
+    // writes VU1 data around TOP and a constant block (so later masked
+    // UNPACKs merge over program output, PV1's RO/RMW classes) and XGKICKs
+    // a digest-bearing PATH1 packet.
+    Vpl2Outcome vpl2Run(const Vpl2Stream &in, bool staged, uint32_t jitterUs)
+    {
+        Vpl2Outcome out;
+        ps2_mtvu::setModeForTest(staged ? ps2_mtvu::Mode::Threaded : ps2_mtvu::Mode::Off, false, jitterUs);
+        PS2Memory mem;
+        if (!mem.initialize())
+            return out;
+        mem.vif1_regs = in.regs;
+        std::memcpy(mem.getVU1Data(), in.vu1Data.data(), PS2_VU1_DATA_SIZE);
+        std::memcpy(mem.getVU1Code(), in.vu1Code.data(), PS2_VU1_CODE_SIZE);
+        if (in.path3Masked)
+        {
+            // PATH3 masked at stream start (captures). A pending PATH2 image
+            // at capture start is not restored: both paths start without it.
+            const uint32_t msk = makeVifCmd(0x06u, 0u, 0x8000u);
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&msk), sizeof(msk));
+        }
+        int lastPath = -1;
+        GifArbiter arbiter([&](const uint8_t *data, uint32_t size)
+                           { out.packets.emplace_back(lastPath, std::vector<uint8_t>(data, data + size)); });
+        arbiter.setPacketListener([&](GifPathId path, uint32_t) { lastPath = static_cast<int>(path); });
+        mem.setGifArbiter(&arbiter);
+        auto program = [&](uint32_t startPC, uint32_t top, uint32_t itop, bool cnt)
+        {
+            uint8_t *vu = mem.getVU1Data();
+            const uint64_t d = vpl2Digest(vu, PS2_VU1_DATA_SIZE) ^
+                               (vpl2Digest(mem.getVU1Code(), PS2_VU1_CODE_SIZE) * 3ull);
+            out.atMscal.push_back(d ^ (static_cast<uint64_t>(startPC) << 1) ^ (static_cast<uint64_t>(top) << 20) ^
+                                  (static_cast<uint64_t>(itop) << 40) ^ (cnt ? 1ull : 0ull));
+            for (uint32_t k = 0; k < 3u; ++k)
+            {
+                const uint32_t q = (top + 7u + k * 5u + (itop & 3u)) & 0x3FFu;
+                const uint64_t v[2] = {d + k, d ^ (static_cast<uint64_t>(q) << 17)};
+                std::memcpy(vu + q * 16u, v, 16u); // program output near TOP
+            }
+            const uint32_t c = (static_cast<uint32_t>(d) % 40u);
+            uint32_t w = static_cast<uint32_t>(d >> 32);
+            std::memcpy(vu + c * 16u + 4u * (d & 3u), &w, 4u); // one lane of state (RMW class)
+            const uint64_t pkt[4] = {1ull | (1ull << 15) | (1ull << 60), 0xEull, d, 0x42ull};
+            mem.submitGifPacket(GifPathId::Path1, reinterpret_cast<const uint8_t *>(pkt), sizeof(pkt));
+        };
+        mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
+                                { program(startPC, top, itop, false); });
+        mem.setVu1MscntCallback([&](uint32_t top, uint32_t itop) { program(0u, top, itop, true); });
+        if (staged)
+        {
+            ps2_mtvu::startGifStage([&mem](ps2_mtvu::GifOp &op) { mem.execGifStageOp(op); });
+            ps2_mtvu::startVifStage(&PS2Memory::execVifStageRec, &mem);
+        }
+        mem.vif1_regs = in.regs;
+        for (const std::vector<uint8_t> &b : in.bufs)
+        {
+            if (staged)
+                ps2_mtvu::submit([&mem, &b]() { mem.processVIF1Data(b.data(), static_cast<uint32_t>(b.size())); },
+                                 b.size(), 0u, true);
+            else
+                mem.processVIF1Data(b.data(), static_cast<uint32_t>(b.size()));
+        }
+        ps2_mtvu::syncAll();
+        if (staged)
+        {
+            ps2_mtvu::stopVifStage();
+            ps2_mtvu::stopGifStage();
+        }
+        out.vu1Data.assign(mem.getVU1Data(), mem.getVU1Data() + PS2_VU1_DATA_SIZE);
+        out.vu1Code.assign(mem.getVU1Code(), mem.getVU1Code() + PS2_VU1_CODE_SIZE);
+        out.regs = mem.vif1_regs;
+        out.masked = mem.isPath3Masked();
+        ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+        mem.setGifArbiter(nullptr);
+        return out;
+    }
+
+    // Index of the first differing MSCAL digest (size of the shorter if none).
+    size_t vpl2FirstMismatch(const Vpl2Outcome &a, const Vpl2Outcome &b)
+    {
+        const size_t n = std::min(a.atMscal.size(), b.atMscal.size());
+        for (size_t i = 0; i < n; ++i)
+            if (a.atMscal[i] != b.atMscal[i])
+                return i;
+        return n;
+    }
+
+    // Random VIF1 streams over every command the loop decodes.
+    Vpl2Stream vpl2Synthetic(uint32_t seed, size_t buffers)
+    {
+        Vpl2Stream s;
+        uint64_t x = 0x243F6A8885A308D3ull ^ seed;
+        auto rnd = [&]() -> uint32_t
+        {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            return static_cast<uint32_t>(x >> 11);
+        };
+        s.vu1Data.resize(PS2_VU1_DATA_SIZE);
+        s.vu1Code.resize(PS2_VU1_CODE_SIZE);
+        for (auto &b : s.vu1Data)
+            b = static_cast<uint8_t>(rnd());
+        for (auto &b : s.vu1Code)
+            b = static_cast<uint8_t>(rnd());
+        uint32_t cycle = 0x0404u; // generator's view of CYCLE (for UNPACK sizes)
+        uint32_t pendingImage = 0u;
+        for (size_t bi = 0; bi < buffers; ++bi)
+        {
+            std::vector<uint8_t> v;
+            if (pendingImage != 0u)
+            {
+                // Image data continuing a DIRECT from an earlier buffer.
+                const uint32_t qw = std::min<uint32_t>(pendingImage, 1u + rnd() % 3u);
+                for (uint32_t i = 0; i < qw * 4u; ++i)
+                    appendU32(v, rnd());
+                pendingImage -= qw;
+            }
+            const uint32_t cmds = 1u + rnd() % 24u;
+            for (uint32_t c = 0; c < cmds; ++c)
+            {
+                const uint32_t pick = rnd() % 100u;
+                if (pick < 40u)
+                {
+                    // UNPACK: every vn/vl, mask bit, TOPS / zero-extend flags.
+                    const uint32_t vn = rnd() % 4u, vl = rnd() % 4u;
+                    const bool m = (rnd() % 3u) == 0u;
+                    const uint8_t opcode = static_cast<uint8_t>(0x60u | (m ? 0x10u : 0u) | (vn << 2) | vl);
+                    uint32_t num = 1u + rnd() % 48u;
+                    if (rnd() % 40u == 0u)
+                        num = 0u; // 256 vectors
+                    uint16_t imm = static_cast<uint16_t>(rnd() & 0x3FFu);
+                    if (rnd() & 1u)
+                        imm |= 0x8000u;
+                    if (rnd() & 1u)
+                        imm |= 0x4000u;
+                    appendU32(v, makeVifCmd(opcode, static_cast<uint8_t>(num), imm));
+                    const int comps = static_cast<int>(vn) + 1;
+                    const int bpc = vl == 0u ? 32 : vl == 1u ? 16 : vl == 2u ? 8 : (vn == 3u ? 4 : 16);
+                    const uint32_t bpv = static_cast<uint32_t>(((vl == 3u && vn == 3u) ? 16 : comps * bpc) + 7) / 8u;
+                    const uint32_t writes = num == 0u ? 256u : num;
+                    uint32_t cl = cycle & 0xFFu, wl = (cycle >> 8) & 0xFFu;
+                    cl = cl ? cl : 1u;
+                    wl = wl ? wl : 1u;
+                    uint32_t srcN = writes;
+                    if (cl < wl)
+                        srcN = (writes / wl) * cl + std::min(writes % wl, cl);
+                    uint32_t bytes = (srcN * bpv + 3u) & ~3u;
+                    if (c + 1u == cmds && rnd() % 25u == 0u && bytes > 8u)
+                        bytes -= 8u; // truncated payload at the buffer end
+                    for (uint32_t i = 0; i < bytes / 4u; ++i)
+                        appendU32(v, rnd());
+                }
+                else if (pick < 46u)
+                {
+                    static const uint16_t cycles[] = {0x0101, 0x0404, 0x0103, 0x0301, 0x0302, 0x0203, 0x0204,
+                                                      0x0402, 0x0000, 0x0100, 0x0001, 0x0305};
+                    cycle = cycles[rnd() % (sizeof(cycles) / sizeof(cycles[0]))];
+                    appendU32(v, makeVifCmd(0x01u, 0u, static_cast<uint16_t>(cycle)));
+                }
+                else if (pick < 51u)
+                {
+                    appendU32(v, makeVifCmd(0x20u, 0u, 0u));
+                    appendU32(v, (rnd() % 4u == 0u) ? 0u : rnd());
+                }
+                else if (pick < 55u)
+                    appendU32(v, makeVifCmd(0x05u, 0u, static_cast<uint16_t>(rnd() % 4u)));
+                else if (pick < 58u)
+                {
+                    appendU32(v, makeVifCmd((rnd() & 1u) ? 0x30u : 0x31u, 0u, 0u));
+                    for (int i = 0; i < 4; ++i)
+                        appendU32(v, rnd());
+                }
+                else if (pick < 62u)
+                    appendU32(v, makeVifCmd((rnd() & 1u) ? 0x02u : 0x03u, 0u, static_cast<uint16_t>(rnd() & 0x3FFu)));
+                else if (pick < 64u)
+                    appendU32(v, makeVifCmd(0x04u, 0u, static_cast<uint16_t>(rnd() & 0x3FFu)));
+                else if (pick < 75u)
+                {
+                    static const uint8_t ms[] = {0x14u, 0x15u, 0x17u};
+                    appendU32(v, makeVifCmd(ms[rnd() % 3u], 0u, static_cast<uint16_t>(rnd() & 0x7FFu)));
+                }
+                else if (pick < 78u)
+                {
+                    const uint32_t n = 1u + rnd() % 8u;
+                    appendU32(v, makeVifCmd(0x4Au, static_cast<uint8_t>(n), static_cast<uint16_t>(rnd() % 2100u)));
+                    for (uint32_t i = 0; i < n * 2u; ++i)
+                        appendU32(v, rnd());
+                }
+                else if (pick < 83u)
+                    appendU32(v, makeVifCmd(0x06u, 0u, (rnd() & 1u) ? 0x8000u : 0u));
+                else if (pick < 88u && pendingImage == 0u)
+                {
+                    // DIRECT/DIRECTHL: an A+D packet, or an IMAGE tag whose data
+                    // runs past this buffer (pending continuation).
+                    const bool image = (rnd() % 3u) == 0u;
+                    appendU32(v, makeVifCmd((rnd() & 1u) ? 0x50u : 0x51u, 0u, 2u));
+                    uint64_t tag[2] = {1ull | (1ull << 15) | (1ull << 60), 0xEull};
+                    if (image)
+                    {
+                        const uint32_t nloop = 2u + rnd() % 6u; // 1 qw here, the rest pending
+                        tag[0] = static_cast<uint64_t>(nloop) | (1ull << 15) | (2ull << 58);
+                        tag[1] = 0u;
+                        pendingImage = nloop - 1u;
+                    }
+                    for (int i = 0; i < 2; ++i)
+                    {
+                        appendU32(v, static_cast<uint32_t>(tag[i]));
+                        appendU32(v, static_cast<uint32_t>(tag[i] >> 32));
+                    }
+                    for (int i = 0; i < 4; ++i)
+                        appendU32(v, rnd());
+                    if (image)
+                        break; // an IMAGE tag ends its buffer; the data continues in the next
+                }
+                else if (pick < 92u)
+                    appendU32(v, makeVifCmd(0x07u, 0u, static_cast<uint16_t>(rnd())));
+                else if (pick < 95u)
+                    appendU32(v, makeVifCmd((rnd() & 1u) ? 0x10u : 0x13u, 0u, 0u));
+                else if (pick < 97u)
+                    appendU32(v, makeVifCmd(0x09u, 0u, 0u)); // unknown opcode
+                else
+                    appendU32(v, 0x80000000u | makeVifCmd(0x00u, 0u, 0u)); // NOP with IRQ
+            }
+            s.bufs.push_back(std::move(v));
+        }
+        s.regs.cycle = 0x0404u;
+        return s;
+    }
+
+    // A PS2X_VPL2_VIFCAP capture (see ps2_vif1_interpreter.cpp); false if unreadable.
+    bool vpl2LoadCapture(const char *path, Vpl2Stream &s)
+    {
+        FILE *f = std::fopen(path, "rb");
+        if (!f)
+            return false;
+        char magic[8] = {};
+        uint32_t regBytes = 0;
+        uint8_t flags[4] = {};
+        bool ok = std::fread(magic, 1, 8, f) == 8 && std::memcmp(magic, "VPL2CAP1", 8) == 0 &&
+                  std::fread(&regBytes, 4, 1, f) == 1 && regBytes == sizeof(VIFRegisters) &&
+                  std::fread(&s.regs, sizeof(VIFRegisters), 1, f) == 1 &&
+                  std::fread(&s.pendingQwc, 4, 1, f) == 1 && std::fread(flags, 1, 4, f) == 4;
+        s.pendingHl = flags[0] != 0u;
+        s.path3Masked = flags[1] != 0u;
+        s.vu1Data.resize(PS2_VU1_DATA_SIZE);
+        s.vu1Code.resize(PS2_VU1_CODE_SIZE);
+        ok = ok && std::fread(s.vu1Data.data(), 1, PS2_VU1_DATA_SIZE, f) == PS2_VU1_DATA_SIZE &&
+             std::fread(s.vu1Code.data(), 1, PS2_VU1_CODE_SIZE, f) == PS2_VU1_CODE_SIZE;
+        uint32_t size = 0;
+        while (ok && std::fread(&size, 4, 1, f) == 1)
+        {
+            std::vector<uint8_t> b(size);
+            if (std::fread(b.data(), 1, size, f) != size)
+                break;
+            s.bufs.push_back(std::move(b));
+        }
+        std::fclose(f);
+        return ok;
+    }
+
 
     void appendU64(std::vector<uint8_t> &dst, uint64_t value)
     {
@@ -1421,7 +1725,7 @@ void register_ps2_memory_tests()
                 size_t mscals = 0;
                 size_t offThread = 0;
             };
-            auto run = [](ps2_mtvu::Mode mode, uint32_t jitterUs, bool gifStage = false) -> Outcome
+            auto run = [](ps2_mtvu::Mode mode, uint32_t jitterUs, bool gifStage = false, bool vifStage = false) -> Outcome
             {
                 ps2_mtvu::setModeForTest(mode, false, jitterUs);
                 Outcome out;
@@ -1431,6 +1735,9 @@ void register_ps2_memory_tests()
                 // VPL1: the unit's GIF submit on its own thread behind the op ring.
                 if (gifStage)
                     ps2_mtvu::startGifStage([&mem](ps2_mtvu::GifOp &op) { mem.execGifStageOp(op); });
+                // VPL2: VIF1 parsing on its own thread ahead of the VU side.
+                if (vifStage)
+                    ps2_mtvu::startVifStage(&PS2Memory::execVifStageRec, &mem);
                 int lastPath = -1;
                 GifArbiter arbiter([&](const uint8_t *data, uint32_t size)
                                    { out.packets.emplace_back(lastPath, std::vector<uint8_t>(data, data + size)); });
@@ -1541,6 +1848,8 @@ void register_ps2_memory_tests()
                 out.row0 = mem.vif1_regs.row[0];
                 out.masked = mem.isPath3Masked();
                 out.eeReads.push_back(mem.gs().dispfb1);
+                if (vifStage)
+                    ps2_mtvu::stopVifStage();
                 if (gifStage)
                     ps2_mtvu::stopGifStage();
                 ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
@@ -1552,6 +1861,9 @@ void register_ps2_memory_tests()
             const Outcome jit = run(ps2_mtvu::Mode::Threaded, 300u);
             const Outcome gif = run(ps2_mtvu::Mode::Threaded, 0u, true);
             const Outcome gifJit = run(ps2_mtvu::Mode::Threaded, 300u, true);
+            const uint64_t vifEscapes0 = ps2_mtvu::vifLog().nEscapes.load();
+            const Outcome vif = run(ps2_mtvu::Mode::Threaded, 0u, true, true);
+            const Outcome vifJit = run(ps2_mtvu::Mode::Threaded, 300u, true, true);
             t.IsTrue(base.packets.size() > 150u, "scenario should produce a long GIF stream");
             t.Equals(base.mscals, static_cast<size_t>(60u), "every kick runs its MSCAL");
             t.Equals(base.offThread, static_cast<size_t>(0u), "synchronous MSCALs run on the EE thread");
@@ -1559,13 +1871,98 @@ void register_ps2_memory_tests()
             t.Equals(ps2_mtvu::detail::worker().violationsTotal, 0ull, "no unit state touched while jobs are queued");
             t.Equals(gif.offThread, static_cast<size_t>(60u), "GIF-stage MSCALs still run on the unit worker");
             t.Equals(ps2_mtvu::detail::gifStage().nEscapes.load(), 0ull, "no GS enqueue bypassed the GIF stage");
-            for (const Outcome *o : {&thr, &jit, &gif, &gifJit})
+            t.Equals(vif.offThread, static_cast<size_t>(60u), "VIF-stage MSCALs run on the unit worker");
+            t.Equals(ps2_mtvu::vifLog().nEscapes.load(), vifEscapes0, "no VU-side call escaped the VIF stage");
+            for (const Outcome *o : {&thr, &jit, &gif, &gifJit, &vif, &vifJit})
             {
                 t.IsTrue(o->packets == base.packets, "GIF packet sequence (path + bytes) is identical");
                 t.IsTrue(o->vu1Data == base.vu1Data, "VU1 data memory is identical");
                 t.IsTrue(o->eeReads == base.eeReads, "every EE read-back is identical");
                 t.Equals(o->row0, base.row0, "VIF1 ROW is identical");
                 t.Equals(o->masked, base.masked, "PATH3 mask state is identical");
+            }
+        });
+
+        tc.Run("VPL2 VIF stage: staged VU1 writes equal the inline VIF1 loop at every MSCAL", [](TestCase &t)
+        {
+            // Random VIF1 streams over every UNPACK format (masks, modes 0-3,
+            // CYCLE fill/skip, TOPS, zero-extend, wrap at 0x400, 256-vector
+            // and truncated payloads, unhandled formats), MPG (incl. dropped
+            // and clipped), MSCAL/MSCALF/MSCNT, DIRECT/DIRECTHL with IMAGE
+            // continuations across buffers, MSKPATH3, MARK, FLUSH*, unknown
+            // opcodes. Inline vs VIF stage (with and without jitter): VU1
+            // data + code at every MSCAL, the GIF stream (path + bytes), the
+            // final VIF1 registers and PATH3 mask must all match.
+            const uint64_t escapes0 = ps2_mtvu::vifLog().nEscapes.load();
+            size_t mscals = 0, packets = 0;
+            for (uint32_t seed : {1u, 2u, 3u})
+            {
+                const Vpl2Stream in = vpl2Synthetic(seed, 300u);
+                const Vpl2Outcome serial = vpl2Run(in, false, 0u);
+                mscals += serial.atMscal.size();
+                packets += serial.packets.size();
+                for (uint32_t jitterUs : {0u, 150u})
+                {
+                    const Vpl2Outcome staged = vpl2Run(in, true, jitterUs);
+                    t.Equals(staged.atMscal.size(), serial.atMscal.size(), "same MSCAL count");
+                    t.Equals(vpl2FirstMismatch(staged, serial), serial.atMscal.size(),
+                             "VU1 data + code equal at every MSCAL");
+                    t.IsTrue(staged.vu1Data == serial.vu1Data, "final VU1 data equal");
+                    t.IsTrue(staged.vu1Code == serial.vu1Code, "final VU1 code equal");
+                    t.IsTrue(staged.packets == serial.packets, "GIF stream (path + bytes) equal");
+                    t.IsTrue(std::memcmp(&staged.regs, &serial.regs, sizeof(VIFRegisters)) == 0,
+                             "final VIF1 registers equal");
+                    t.Equals(staged.masked, serial.masked, "PATH3 mask equal");
+                }
+            }
+            t.IsTrue(mscals > 500u, "the streams run many programs");
+            t.IsTrue(packets > 500u, "the streams make a long GIF stream");
+            t.Equals(ps2_mtvu::vifLog().nEscapes.load(), escapes0, "no VU-side call escaped the VIF stage");
+            t.IsTrue(ps2_mtvu::vifLog().nRecs.load() > 10000u, "the staged runs went through the record log");
+        });
+
+        tc.Run("VPL2 VIF stage: captured VIF1 streams replay equal (PS2X_VPL2_REPLAY)", [](TestCase &t)
+        {
+            // Dev gate: PS2X_VPL2_REPLAY=<capture>[:<capture>...] from a
+            // PS2X_VPL2_VIFCAP boot (game data: never committed). Skipped
+            // (passes) when unset.
+            const char *env = std::getenv("PS2X_VPL2_REPLAY");
+            if (!env || !env[0])
+            {
+                t.IsTrue(true, "no capture given");
+                return;
+            }
+            std::string list(env);
+            size_t start = 0;
+            while (start <= list.size())
+            {
+                const size_t end = std::min(list.find(':', start), list.size());
+                const std::string path = list.substr(start, end - start);
+                start = end + 1u;
+                if (path.empty())
+                    continue;
+                Vpl2Stream in;
+                t.IsTrue(vpl2LoadCapture(path.c_str(), in), "capture loads");
+                const uint64_t escapes0 = ps2_mtvu::vifLog().nEscapes.load();
+                const Vpl2Outcome serial = vpl2Run(in, false, 0u);
+                const Vpl2Outcome staged = vpl2Run(in, true, 0u);
+                const size_t mismatch = vpl2FirstMismatch(staged, serial);
+                std::fprintf(stderr, "[vpl2-replay] %s bufs=%zu mscal=%zu/%zu packets=%zu/%zu first_mismatch=%zu "
+                                     "vu1data=%s vu1code=%s gif=%s regs=%s escapes=%llu\n",
+                             path.c_str(), in.bufs.size(), serial.atMscal.size(), staged.atMscal.size(),
+                             serial.packets.size(), staged.packets.size(), mismatch,
+                             staged.vu1Data == serial.vu1Data ? "equal" : "DIFF",
+                             staged.vu1Code == serial.vu1Code ? "equal" : "DIFF",
+                             staged.packets == serial.packets ? "equal" : "DIFF",
+                             std::memcmp(&staged.regs, &serial.regs, sizeof(VIFRegisters)) == 0 ? "equal" : "DIFF",
+                             static_cast<unsigned long long>(ps2_mtvu::vifLog().nEscapes.load() - escapes0));
+                t.IsTrue(serial.atMscal.size() > 0u, "the capture runs programs");
+                t.Equals(staged.atMscal.size(), serial.atMscal.size(), "same MSCAL count");
+                t.Equals(mismatch, serial.atMscal.size(), "VU1 data + code equal at every MSCAL");
+                t.IsTrue(staged.vu1Data == serial.vu1Data, "final VU1 data equal");
+                t.IsTrue(staged.packets == serial.packets, "GIF stream equal");
+                t.IsTrue(std::memcmp(&staged.regs, &serial.regs, sizeof(VIFRegisters)) == 0, "final VIF1 registers equal");
+                t.Equals(ps2_mtvu::vifLog().nEscapes.load(), escapes0, "no escapes");
             }
         });
 

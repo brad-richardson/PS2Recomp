@@ -1736,7 +1736,7 @@ void PS2Memory::write128(uint32_t address, __m128i value)
                                  {
                                      processVIF1Data(copy.data(), static_cast<uint32_t>(copy.size()));
                                  },
-                                 copy.size(), ps2_mtvu::currentFbrst());
+                                 copy.size(), ps2_mtvu::currentFbrst(), true);
             }
             else
             {
@@ -3136,7 +3136,7 @@ void PS2Memory::processPendingTransfers()
                     processVIF1Data(piece.bytes.data(), size);
             }
             if (m_gifArbiter)
-                arbDrain(); }, mtvuBytes, ps2_mtvu::currentFbrst());
+                arbDrain(); }, mtvuBytes, ps2_mtvu::currentFbrst(), true);
     }
     // Threaded, with no GIF/VIF1 work run inline here (e.g. a VIF0-only kick):
     // the arbiter belongs to the unit, and inline this drain always finds its
@@ -3254,6 +3254,11 @@ std::vector<uint32_t> PS2Memory::splitGifPacketsAtEop(const uint8_t *data, uint3
 
 void PS2Memory::releaseOneMaskedPath3Packet()
 {
+    if (ps2_mtvu::vifStageDefer()) // VPL2 net: VU-side state, never on the VIF thread
+    {
+        ps2_mtvu::vifStageEscape([this] { releaseOneMaskedPath3Packet(); });
+        return;
+    }
     ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
     if (!path3EopGateEnabled())
     {
@@ -3288,12 +3293,22 @@ void PS2Memory::releaseOneMaskedPath3Packet()
 
 void PS2Memory::drainPath3IfUnmasked()
 {
+    if (ps2_mtvu::vifStageDefer()) // VPL2: runs on the MTVU thread, in order
+    {
+        ps2_mtvu::vifStagePush(ps2_mtvu::VifRecKind::P3Drain, 0u, 0u, 0u, false);
+        return;
+    }
     if (!m_path3Masked && !m_path3MaskedFifo.empty())
         flushMaskedPath3Packets();
 }
 
 void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
 {
+    if (ps2_mtvu::vifStageDefer()) // VPL2 net
+    {
+        ps2_mtvu::vifStageEscape([this, drainImmediately] { flushMaskedPath3Packets(drainImmediately); });
+        return;
+    }
     ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
     if (m_path3Masked || m_path3MaskedFifo.empty())
         return;
@@ -3332,6 +3347,14 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
 
 void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl)
 {
+    if (ps2_mtvu::vifStageDefer())
+    {
+        // VPL2: the bytes are copied here (the source may be the job's
+        // stream); the MTVU thread makes this same call, in order.
+        if (data && sizeBytes >= 16u)
+            vifStageGif(false, pathId, std::vector<uint8_t>(data, data + sizeBytes), drainImmediately, path2DirectHl);
+        return;
+    }
     ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
     if (!data || sizeBytes < 16)
         return;
@@ -3375,6 +3398,13 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
 
 void PS2Memory::submitGifPacketOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately, bool path2DirectHl)
 {
+    if (ps2_mtvu::vifStageDefer())
+    {
+        // VPL2: the vector moves into the record; the MTVU thread makes this call.
+        if (bytes.size() >= 16u)
+            vifStageGif(true, pathId, std::move(bytes), drainImmediately, path2DirectHl);
+        return;
+    }
     ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
     if (bytes.size() < 16)
         return;
@@ -3419,6 +3449,11 @@ void PS2Memory::submitGifPacketOwned(GifPathId pathId, std::vector<uint8_t> &&by
 
 void PS2Memory::arbSubmit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
 {
+    if (ps2_mtvu::vifStageDefer()) // VPL2 net
+    {
+        ps2_mtvu::vifStageEscape([&] { arbSubmit(pathId, data, sizeBytes, path2DirectHl); });
+        return;
+    }
     if (ps2_mtvu::gifStageDefer())
     {
         // VPL1: the copy stays on the VU thread (the bytes may be VU memory
@@ -3434,6 +3469,11 @@ void PS2Memory::arbSubmit(GifPathId pathId, const uint8_t *data, uint32_t sizeBy
 
 void PS2Memory::arbSubmitOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl)
 {
+    if (ps2_mtvu::vifStageDefer()) // VPL2 net
+    {
+        ps2_mtvu::vifStageEscape([&] { arbSubmitOwned(pathId, std::move(bytes), path2DirectHl); });
+        return;
+    }
     if (ps2_mtvu::gifStageDefer())
     {
         ps2_mtvu::gifStageSubmit(static_cast<uint8_t>(pathId), path2DirectHl, true, std::move(bytes));
@@ -3444,6 +3484,11 @@ void PS2Memory::arbSubmitOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, b
 
 void PS2Memory::arbDrain()
 {
+    if (ps2_mtvu::vifStageDefer()) // VPL2: the DMA job's closing drain, in order
+    {
+        ps2_mtvu::vifStagePush(ps2_mtvu::VifRecKind::ArbDrain, 0u, 0u, 0u, false);
+        return;
+    }
     if (ps2_mtvu::gifStageDefer())
     {
         ps2_mtvu::gifStageDrain();
@@ -3455,6 +3500,11 @@ void PS2Memory::arbDrain()
 
 void PS2Memory::unitGsCall(uint8_t marker, uint64_t value, std::function<void()> fn)
 {
+    if (ps2_mtvu::vifStageDefer()) // VPL2 net
+    {
+        ps2_mtvu::vifStageEscape([&] { unitGsCall(marker, value, std::move(fn)); });
+        return;
+    }
     if (ps2_mtvu::gifStageDefer())
     {
         ps2_mtvu::gifStageCall([marker, value, fn = std::move(fn)]()
@@ -3480,6 +3530,122 @@ void PS2Memory::execGifStageOp(ps2_mtvu::GifOp &op)
     }
     const GifDrainBatch batch(m_gsFrontend);
     m_gifArbiter->drain();
+}
+
+void PS2Memory::vifStageGif(bool owned, GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately,
+                            bool path2DirectHl)
+{
+    auto *heap = new std::vector<uint8_t>(std::move(bytes));
+    uint8_t payload[16] = {};
+    std::memcpy(payload, &heap, sizeof(heap));
+    const uint8_t f = static_cast<uint8_t>((static_cast<uint32_t>(pathId) & 3u) | (drainImmediately ? 4u : 0u) |
+                                           (path2DirectHl ? 8u : 0u));
+    ps2_mtvu::vifStagePush(owned ? ps2_mtvu::VifRecKind::GifOwned : ps2_mtvu::VifRecKind::GifCopy, f, 0u, 0u, false,
+                           payload);
+}
+
+void PS2Memory::vifStageMsk3(uint16_t imm)
+{
+    ps2_mtvu::vifStagePush(ps2_mtvu::VifRecKind::Msk3, 0u, imm, 0u, false);
+}
+
+void PS2Memory::execVifStageRec(void *opaque, const ps2_mtvu::VifRec &rec)
+{
+    using K = ps2_mtvu::VifRecKind;
+    PS2Memory &m = *static_cast<PS2Memory *>(opaque);
+    const uint8_t *payload = reinterpret_cast<const uint8_t *>(&rec) + sizeof(ps2_mtvu::VifRec);
+    switch (rec.kind)
+    {
+    case K::Block:
+    {
+        // UNPACK bulk: n qwords from qword a, wrapping at 0x400 (<= 2 runs).
+        uint8_t *vu = m.m_vu1Data;
+        const uint32_t first = std::min<uint32_t>(rec.n, 0x400u - rec.a);
+        std::memcpy(vu + static_cast<size_t>(rec.a) * 16u, payload, static_cast<size_t>(first) * 16u);
+        if (rec.n > first)
+            std::memcpy(vu, payload + static_cast<size_t>(first) * 16u, static_cast<size_t>(rec.n - first) * 16u);
+        break;
+    }
+    case K::Masked:
+    {
+        // UNPACK generic: per vector, the bytes the read-modify-write stored.
+        uint8_t *vu = m.m_vu1Data;
+        const uint8_t *e = payload;
+        for (uint32_t i = 0; i < rec.n; ++i, e += 20u)
+        {
+            uint16_t qw = 0, mask = 0;
+            std::memcpy(&qw, e, 2u);
+            std::memcpy(&mask, e + 2u, 2u);
+            uint8_t *dst = vu + static_cast<size_t>(qw) * 16u;
+            if (mask == 0xFFFFu)
+            {
+                std::memcpy(dst, e + 4u, 16u);
+                continue;
+            }
+            for (uint32_t lane = 0; lane < 4u; ++lane)
+            {
+                const uint32_t lm = (mask >> (lane * 4u)) & 0xFu;
+                if (lm == 0xFu)
+                    std::memcpy(dst + lane * 4u, e + 4u + lane * 4u, 4u);
+                else if (lm != 0u)
+                {
+                    for (uint32_t b = 0; b < 4u; ++b)
+                        if (lm & (1u << b))
+                            dst[lane * 4u + b] = e[4u + lane * 4u + b];
+                }
+            }
+        }
+        break;
+    }
+    case K::Mpg:
+        std::memcpy(m.m_vu1Code + rec.a, payload, rec.b);
+        m.markVU1CodeModified();
+        break;
+    case K::Mscal:
+        if (rec.f == 0u)
+        {
+            if (m.m_vu1MscalCallback)
+                m.m_vu1MscalCallback(rec.a, rec.b & 0xFFFFu, rec.b >> 16);
+        }
+        else if (m.m_vu1MscntCallback)
+            m.m_vu1MscntCallback(rec.b & 0xFFFFu, rec.b >> 16);
+        break;
+    case K::GifCopy:
+    case K::GifOwned:
+    {
+        std::vector<uint8_t> *bytes = nullptr;
+        std::memcpy(&bytes, payload, sizeof(bytes));
+        const GifPathId path = static_cast<GifPathId>(rec.f & 3u);
+        const bool drain = (rec.f & 4u) != 0u;
+        const bool hl = (rec.f & 8u) != 0u;
+        if (rec.kind == K::GifOwned)
+            m.submitGifPacketOwned(path, std::move(*bytes), drain, hl);
+        else
+            m.submitGifPacket(path, bytes->data(), static_cast<uint32_t>(bytes->size()), drain, hl);
+        delete bytes;
+        break;
+    }
+    case K::Msk3:
+    {
+        // The MSKPATH3 body (ps2_vif1_interpreter.cpp); its dev taps force
+        // MTVU off, so only rr1's relaxed check remains.
+        const bool wasMasked = m.m_path3Masked;
+        m.m_path3Masked = (rec.a & 0x8000u) != 0u;
+        ps2_rr1::ev(m.gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 MSKPATH3 was=%u now=%u queued=%zu",
+                    wasMasked, m.m_path3Masked, m.m_path3MaskedFifo.size());
+        if (wasMasked && !m.m_path3Masked)
+            m.releaseOneMaskedPath3Packet();
+        break;
+    }
+    case K::P3Drain:
+        m.drainPath3IfUnmasked();
+        break;
+    case K::ArbDrain:
+        m.arbDrain();
+        break;
+    default:
+        break;
+    }
 }
 
 void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)

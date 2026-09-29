@@ -83,6 +83,39 @@ namespace ps2_mtvu
         std::function<void()> fn;
     };
 
+    // VPL2: one record of the VIF-stage log (PS2X_MTVU_VIF_STAGE=1). The
+    // MTVU-VIF thread parses a unit job's VIF1 stream and turns every
+    // VU-side action into a record, in program order; the MTVU thread runs
+    // them in the same order (local/research/VPL2/REPORT.md §1.3). 16-byte
+    // header, payload right after it, `size` covers both (16-aligned).
+    enum class VifRecKind : uint8_t
+    {
+        Wrap,     // rest of the ring is unused; continue at offset 0
+        JobBegin, // a = fbrst, payload u64 fpControl
+        JobEnd,   // VPL1 GIF JobEnd
+        Call,     // payload: std::function<void()>*, std::atomic<bool>* done (f = 1)
+        Block,    // UNPACK bulk: qwords (a + i) & 0x3FF, i < n, = payload
+        Masked,   // UNPACK generic: n x {u16 qword, u16 byte mask, 16 bytes}
+        Mpg,      // VU1 code at byte a, b bytes = payload
+        Mscal,    // f = 0 MSCAL / 1 MSCNT, a = startPC, b = top | itop << 16
+        GifCopy,  // submitGifPacket(f & 3, bytes...), payload std::vector<uint8_t>*
+        GifOwned, // submitGifPacketOwned(f & 3, move(bytes)...)
+        Msk3,     // MSKPATH3, a = imm
+        P3Drain,  // drainPath3IfUnmasked()
+        ArbDrain  // arbDrain()
+    };
+    struct VifRec
+    {
+        uint32_t size;
+        VifRecKind kind;
+        uint8_t f;
+        uint16_t n;
+        uint32_t a;
+        uint32_t b;
+    };
+    static_assert(sizeof(VifRec) == 16u, "VifRec header is 16 bytes");
+    using VifExecFn = void (*)(void *opaque, const VifRec &rec);
+
     enum class Mode : int
     {
         Off = 0,
@@ -262,6 +295,7 @@ namespace ps2_mtvu
             uint64_t fpControl = 0;
             uint32_t fbrst = 0;
             size_t bytes = 0;
+            bool vif = false; // VPL2: VIF1 work (runs on the VIF stage when it is on)
         };
 
         // VPL1 GIF stage. g_gifStage: routing on (set before the game thread
@@ -572,6 +606,244 @@ namespace ps2_mtvu
             }
         };
 
+        // VPL2 VIF stage. g_vifStage: unit jobs run on the MTVU-VIF thread
+        // and their VU-side actions on the MTVU thread from the record log
+        // (set under the worker mutex, before the game thread runs; cleared
+        // after a full sync). g_vifTid: the MTVU-VIF thread.
+        inline std::atomic<bool> g_vifStage{false};
+        inline std::atomic<std::thread::id> g_vifTid{};
+
+        // Ordered SPSC byte log of VifRecs: producer = the MTVU-VIF thread,
+        // consumer = the MTVU thread. Same publish/wake protocol as GifStage
+        // (batched publishes, a wake only when the other side sleeps).
+        struct VifLog
+        {
+            static constexpr uint64_t kBytes = 4ull << 20;
+            static constexpr uint64_t kMask = kBytes - 1u;
+            static constexpr uint32_t kPublishEvery = 32u;
+            static constexpr uint64_t kSpinNs = 50000u;
+
+            std::unique_ptr<uint8_t[]> storage;
+            uint8_t *buf = nullptr; // 64-aligned inside storage
+            VifExecFn exec = nullptr;
+            void *opaque = nullptr;
+            // Producer-private (MTVU-VIF thread).
+            alignas(64) uint64_t pTail = 0;
+            uint64_t pPub = 0;
+            uint64_t pHeadCache = 0;
+            uint32_t pRecs = 0;
+            // Published by the producer.
+            alignas(64) std::atomic<uint64_t> tail{0};
+            // Published by the consumer.
+            alignas(64) std::atomic<uint64_t> head{0};
+            alignas(64) std::atomic<bool> sleeping{false};
+            std::atomic<bool> producerWaiting{false};
+            std::atomic<bool> stop{false};
+            // Consumer-private (MTVU thread).
+            alignas(64) uint64_t cHead = 0;
+            uint64_t cTailCache = 0;
+            uint32_t cRecs = 0;
+            std::mutex m;
+            std::condition_variable cvConsumer;
+            std::condition_variable cvProducer;
+            std::thread th;       // the MTVU-VIF thread
+            bool running = false; // EE / init only
+            std::atomic<bool> vuIn{false}; // the MTVU thread is inside vuLoop
+            // Receipts (logged only).
+            std::atomic<uint64_t> nPub{0};
+            std::atomic<uint64_t> nRecs{0};
+            std::atomic<uint64_t> nBytes{0};
+            std::atomic<uint64_t> nJobs{0};
+            std::atomic<uint64_t> nSleeps{0};
+            std::atomic<uint64_t> nFullWaits{0};
+            std::atomic<uint64_t> nEscapes{0};
+            std::atomic<uint64_t> vifBusyNs{0};    // since the last vblank (perf stage)
+            std::atomic<uint64_t> vifBusyNsWin{0}; // since the last summary
+
+            // --- producer (MTVU-VIF thread) ---
+            bool room(uint64_t need) const { return pTail + need - pHeadCache <= kBytes; }
+            void refresh() { pHeadCache = head.load(std::memory_order_acquire); }
+            void publish()
+            {
+                if (pPub == pTail)
+                    return;
+                pPub = pTail;
+                pRecs = 0u;
+                tail.store(pTail, std::memory_order_release);
+                nPub.fetch_add(1u, std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                if (sleeping.load(std::memory_order_relaxed))
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(m);
+                    }
+                    cvConsumer.notify_one();
+                }
+            }
+            template <typename Pred>
+            void producerWait(Pred done)
+            {
+                publish();
+                for (int spin = 0; spin < 256; ++spin)
+                {
+                    refresh();
+                    if (done() || stop.load(std::memory_order_relaxed))
+                        return;
+                    std::this_thread::yield();
+                }
+                producerWaiting.store(true, std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                {
+                    std::unique_lock<std::mutex> lock(m);
+                    for (;;)
+                    {
+                        refresh();
+                        if (done() || stop.load(std::memory_order_relaxed))
+                            break;
+                        cvProducer.wait_for(lock, std::chrono::milliseconds(1));
+                    }
+                }
+                producerWaiting.store(false, std::memory_order_relaxed);
+            }
+            // `bytes` (16-aligned) contiguous bytes for one record; null once
+            // the stage is stopping. A record never straddles the ring end:
+            // the tail is covered by a Wrap record first.
+            uint8_t *reserve(uint32_t bytes)
+            {
+                const uint64_t off = pTail & kMask;
+                const uint64_t wrap = (off + bytes > kBytes) ? kBytes - off : 0u;
+                const uint64_t need = wrap + bytes;
+                if (!room(need))
+                {
+                    refresh();
+                    if (!room(need))
+                    {
+                        nFullWaits.fetch_add(1u, std::memory_order_relaxed);
+                        producerWait([&] { return room(need); });
+                    }
+                }
+                if (stop.load(std::memory_order_relaxed))
+                    return nullptr;
+                if (wrap != 0u)
+                {
+                    VifRec w{};
+                    w.size = static_cast<uint32_t>(wrap);
+                    w.kind = VifRecKind::Wrap;
+                    std::memcpy(buf + off, &w, sizeof(w));
+                    pTail += wrap;
+                }
+                return buf + (pTail & kMask);
+            }
+            void commit(uint32_t bytes, bool publishNow)
+            {
+                pTail += bytes;
+                nRecs.fetch_add(1u, std::memory_order_relaxed);
+                nBytes.fetch_add(bytes, std::memory_order_relaxed);
+                if (publishNow || ++pRecs >= kPublishEvery)
+                    publish();
+            }
+            // A header-only record (+ an optional 16-byte payload).
+            void push(VifRecKind kind, uint8_t f, uint16_t n, uint32_t a, uint32_t b, bool publishNow,
+                      const void *payload16 = nullptr)
+            {
+                const uint32_t size = payload16 ? 32u : 16u;
+                uint8_t *p = reserve(size);
+                if (!p)
+                    return;
+                VifRec r{size, kind, f, n, a, b};
+                std::memcpy(p, &r, sizeof(r));
+                if (payload16)
+                    std::memcpy(p + 16, payload16, 16u);
+                commit(size, publishNow);
+            }
+            // Run fn on the MTVU thread after every earlier record, and wait.
+            void runSync(std::function<void()> fn)
+            {
+                std::atomic<bool> done{false};
+                auto *heap = new std::function<void()>(std::move(fn));
+                std::atomic<bool> *donePtr = &done;
+                uint8_t payload[16] = {};
+                std::memcpy(payload, &heap, sizeof(heap));
+                std::memcpy(payload + 8, &donePtr, sizeof(donePtr));
+                push(VifRecKind::Call, 1u, 0u, 0u, 0u, true, payload);
+                producerWait([&] { return done.load(std::memory_order_acquire); });
+            }
+
+            // --- consumer (MTVU thread) ---
+            void publishHead()
+            {
+                cRecs = 0u;
+                head.store(cHead, std::memory_order_release);
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                if (producerWaiting.load(std::memory_order_relaxed))
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(m);
+                    }
+                    cvProducer.notify_one();
+                }
+            }
+            // Spin briefly, then sleep until the producer publishes. False on stop.
+            bool waitWork()
+            {
+                const uint64_t t0 = nowNs();
+                for (;;)
+                {
+                    if (stop.load(std::memory_order_relaxed))
+                        return false;
+                    cTailCache = tail.load(std::memory_order_acquire);
+                    if (cTailCache != cHead)
+                        return true;
+                    if (nowNs() - t0 >= kSpinNs)
+                        break;
+                    std::this_thread::yield();
+                }
+                sleeping.store(true, std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                if (tail.load(std::memory_order_relaxed) == cHead && !stop.load(std::memory_order_relaxed))
+                {
+                    nSleeps.fetch_add(1u, std::memory_order_relaxed);
+                    std::unique_lock<std::mutex> lock(m);
+                    cvConsumer.wait_for(lock, std::chrono::milliseconds(100), [&] {
+                        return tail.load(std::memory_order_acquire) != cHead || stop.load(std::memory_order_relaxed);
+                    });
+                }
+                sleeping.store(false, std::memory_order_relaxed);
+                cTailCache = tail.load(std::memory_order_acquire);
+                return cTailCache != cHead || !stop.load(std::memory_order_relaxed);
+            }
+
+            // --- lifecycle (EE / init; the log must be empty) ---
+            void reset(VifExecFn fn, void *op)
+            {
+                if (!storage)
+                {
+                    storage.reset(new uint8_t[kBytes + 64u]);
+                    const uintptr_t raw = reinterpret_cast<uintptr_t>(storage.get());
+                    buf = storage.get() + ((64u - (raw & 63u)) & 63u);
+                }
+                exec = fn;
+                opaque = op;
+                pTail = pPub = pHeadCache = 0u;
+                pRecs = 0u;
+                cHead = cTailCache = 0u;
+                cRecs = 0u;
+                tail.store(0u, std::memory_order_relaxed);
+                head.store(0u, std::memory_order_relaxed);
+                sleeping.store(false, std::memory_order_relaxed);
+                producerWaiting.store(false, std::memory_order_relaxed);
+                stop.store(false, std::memory_order_relaxed);
+            }
+            void wakeAll()
+            {
+                {
+                    std::lock_guard<std::mutex> lock(m);
+                }
+                cvConsumer.notify_all();
+                cvProducer.notify_all();
+            }
+        };
+
         struct Worker
         {
             static constexpr size_t kMaxJobs = 64u;
@@ -607,6 +879,8 @@ namespace ps2_mtvu
             std::atomic<uint64_t> tailBusyNs{0};
             // VPL1: the GIF stage this unit feeds (idle unless started).
             GifStage gif;
+            // VPL2: the VIF-stage log (idle unless started).
+            VifLog vif;
 
             ~Worker()
             {
@@ -615,6 +889,11 @@ namespace ps2_mtvu
                     stop = true;
                 }
                 cvWork.notify_all();
+                // VPL2: stop the VIF thread and the MTVU thread's log loop.
+                vif.stop.store(true, std::memory_order_relaxed);
+                vif.wakeAll();
+                if (vif.th.joinable())
+                    vif.th.join();
                 gif.shutdown(); // VPL1: unblocks a producer waiting for ring room
 #if defined(__unix__) || defined(__APPLE__)
                 if (usePthread)
@@ -644,10 +923,21 @@ namespace ps2_mtvu
                     Job *job = nullptr;
                     {
                         std::unique_lock<std::mutex> lock(m);
-                        cvWork.wait(lock, [&] { return stop || !q.empty(); });
+                        cvWork.wait(lock, [&] {
+                            return stop || !q.empty() || g_vifStage.load(std::memory_order_relaxed);
+                        });
                         if (stop)
                             return;
-                        job = &q.front(); // stays queued (deque front is stable) until done
+                        if (g_vifStage.load(std::memory_order_relaxed))
+                            vif.vuIn.store(true, std::memory_order_relaxed); // VPL2: the VIF thread pops
+                        else
+                            job = &q.front(); // stays queued (deque front is stable) until done
+                    }
+                    if (!job)
+                    {
+                        vuLoop(rng);
+                        vif.vuIn.store(false, std::memory_order_release);
+                        continue;
                     }
                     if (jitterUs != 0u)
                     {
@@ -706,6 +996,192 @@ namespace ps2_mtvu
                     cvDone.notify_all();
                     cvSpace.notify_all();
                 }
+            }
+
+            // VPL2: the MTVU thread as the VU stage. Runs the VIF-stage log in
+            // order until the stage stops (the log is empty by then).
+            void vuLoop(uint64_t &rng)
+            {
+                VifLog &L = vif;
+                const bool tail = tailOn.load(std::memory_order_relaxed);
+                bool busy = false;
+                uint64_t busyT0 = 0;
+                for (;;)
+                {
+                    if (L.cHead == L.cTailCache)
+                    {
+                        L.cTailCache = L.tail.load(std::memory_order_acquire);
+                        if (L.cHead == L.cTailCache)
+                        {
+                            if (busy)
+                            {
+                                if (tail)
+                                    tailBusyNs.fetch_add(nowNs() - busyT0, std::memory_order_relaxed);
+                                busy = false;
+                            }
+                            L.publishHead();
+                            if (L.stop.load(std::memory_order_relaxed))
+                                return;
+                            if (!L.waitWork())
+                                return;
+                            continue;
+                        }
+                    }
+                    if (!busy)
+                    {
+                        busy = true;
+                        busyT0 = tail ? nowNs() : 0u;
+                    }
+                    const uint8_t *p = L.buf + (L.cHead & VifLog::kMask);
+                    VifRec r;
+                    std::memcpy(&r, p, sizeof(r));
+                    switch (r.kind)
+                    {
+                    case VifRecKind::Wrap:
+                        break;
+                    case VifRecKind::JobBegin:
+                    {
+                        if (jitterUs != 0u)
+                        {
+                            rng ^= rng << 13;
+                            rng ^= rng >> 7;
+                            rng ^= rng << 17;
+                            std::this_thread::sleep_for(std::chrono::microseconds(rng % (jitterUs + 1u)));
+                        }
+                        uint64_t fp = 0;
+                        std::memcpy(&fp, p + 16, sizeof(fp));
+                        ps2_fpmode::writeControl(fp);
+                        t_jobFbrst = r.a;
+                        break;
+                    }
+                    case VifRecKind::JobEnd:
+                        // The job completes on the GIF thread, after its GIF
+                        // ops (VPL1 JobEnd bumps `completed`).
+                        if (GifOp *op = gif.claim(0u))
+                        {
+                            op->kind = GifOp::Kind::JobEnd;
+                            op->acct = 0u;
+                            gif.commit(*op, true);
+                        }
+                        break;
+                    case VifRecKind::Call:
+                    {
+                        std::function<void()> *fn = nullptr;
+                        std::memcpy(&fn, p + 16, sizeof(fn));
+                        try
+                        {
+                            (*fn)();
+                        }
+                        catch (const std::exception &e)
+                        {
+                            std::fprintf(stderr, "[mtvu] FATAL: unit job threw: %s\n", e.what());
+                            std::abort();
+                        }
+                        catch (...)
+                        {
+                            std::fprintf(stderr, "[mtvu] FATAL: unit job threw\n");
+                            std::abort();
+                        }
+                        delete fn;
+                        if (r.f & 1u)
+                        {
+                            std::atomic<bool> *done = nullptr;
+                            std::memcpy(&done, p + 24, sizeof(done));
+                            L.cHead += r.size;
+                            done->store(true, std::memory_order_release);
+                            L.publishHead(); // wakes the waiting VIF thread
+                            continue;
+                        }
+                        break;
+                    }
+                    default:
+                        L.exec(L.opaque, *reinterpret_cast<const VifRec *>(p));
+                        break;
+                    }
+                    L.cHead += r.size;
+                    if (r.kind == VifRecKind::JobEnd || ++L.cRecs >= VifLog::kPublishEvery)
+                        L.publishHead();
+                }
+            }
+
+            // VPL2: the MTVU-VIF thread. Pops unit jobs in submit order; VIF
+            // work runs here (its VU-side actions become records), any other
+            // job is forwarded whole as one Call record.
+            void vifLoop()
+            {
+                const UnitThreadGuard unitGuard;
+                g_vifTid.store(std::this_thread::get_id(), std::memory_order_relaxed);
+                ThreadNaming::SetCurrentThreadName("MTVU-VIF");
+                if (const char *cpus = std::getenv("PS2X_MTVU_VIF_CPUS"))
+                {
+                    if (cpus[0] != '\0')
+                    {
+                        const int rc = ps2x::pinCurrentThreadToCpus(ps2x::parseCpuList(cpus));
+                        std::fprintf(stderr, "[affinity] mtvu-vif thread cpus=%s rc=%d\n", cpus, rc);
+                    }
+                }
+                VifLog &L = vif;
+                uint64_t rng = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) | 3u;
+                for (;;)
+                {
+                    Job *job = nullptr;
+                    {
+                        std::unique_lock<std::mutex> lock(m);
+                        cvWork.wait(lock, [&] {
+                            return stop || L.stop.load(std::memory_order_relaxed) || !q.empty();
+                        });
+                        if (stop || L.stop.load(std::memory_order_relaxed))
+                            break;
+                        job = &q.front();
+                    }
+                    if (jitterUs != 0u)
+                    {
+                        rng ^= rng << 13;
+                        rng ^= rng >> 7;
+                        rng ^= rng << 17;
+                        std::this_thread::sleep_for(std::chrono::microseconds(rng % (jitterUs + 1u)));
+                    }
+                    const uint64_t jobT0 = nowNs();
+                    ps2_fpmode::writeControl(job->fpControl);
+                    t_jobFbrst = job->fbrst;
+                    L.push(VifRecKind::JobBegin, 0u, 0u, job->fbrst, 0u, false, &job->fpControl);
+                    if (job->vif)
+                    {
+                        try
+                        {
+                            job->fn();
+                        }
+                        catch (const std::exception &e)
+                        {
+                            std::fprintf(stderr, "[mtvu] FATAL: unit job threw: %s\n", e.what());
+                            std::abort();
+                        }
+                        catch (...)
+                        {
+                            std::fprintf(stderr, "[mtvu] FATAL: unit job threw\n");
+                            std::abort();
+                        }
+                    }
+                    else
+                    {
+                        auto *heap = new std::function<void()>(std::move(job->fn));
+                        uint8_t payload[16] = {};
+                        std::memcpy(payload, &heap, sizeof(heap));
+                        L.push(VifRecKind::Call, 0u, 0u, 0u, 0u, false, payload);
+                    }
+                    L.push(VifRecKind::JobEnd, 0u, 0u, 0u, 0u, true);
+                    L.nJobs.fetch_add(1u, std::memory_order_relaxed);
+                    const uint64_t ns = nowNs() - jobT0;
+                    L.vifBusyNs.fetch_add(ns, std::memory_order_relaxed);
+                    L.vifBusyNsWin.fetch_add(ns, std::memory_order_relaxed);
+                    {
+                        std::lock_guard<std::mutex> lock(m);
+                        qBytes -= job->bytes;
+                        q.pop_front();
+                    }
+                    cvSpace.notify_all();
+                }
+                g_vifTid.store(std::thread::id{}, std::memory_order_relaxed);
             }
 
             void start()
@@ -939,6 +1415,20 @@ namespace ps2_mtvu
                              static_cast<unsigned long long>(g.nFullWaits.exchange(0u, std::memory_order_relaxed)),
                              static_cast<unsigned long long>(g.nEscapes.load(std::memory_order_relaxed)),
                              g.busyNsWin.exchange(0u, std::memory_order_relaxed) / 1e6);
+            }
+            if (g_vifStage.load(std::memory_order_relaxed))
+            {
+                VifLog &L = w.vif;
+                std::fprintf(stderr, "[mtvu] vif-stage tick=%llu jobs=%llu recs=%llu kb=%llu pub=%llu vusleeps=%llu fullwaits=%llu escapes=%llu vifbusy_ms=%.1f\n",
+                             static_cast<unsigned long long>(tick),
+                             static_cast<unsigned long long>(L.nJobs.exchange(0u, std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(L.nRecs.exchange(0u, std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(L.nBytes.exchange(0u, std::memory_order_relaxed) >> 10),
+                             static_cast<unsigned long long>(L.nPub.exchange(0u, std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(L.nSleeps.exchange(0u, std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(L.nFullWaits.exchange(0u, std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(L.nEscapes.load(std::memory_order_relaxed)),
+                             L.vifBusyNsWin.exchange(0u, std::memory_order_relaxed) / 1e6);
             }
             mp2Summary(tick); // MP2 census (no-op unless PS2X_MP2_CENSUS=1)
         }
@@ -1194,6 +1684,107 @@ namespace ps2_mtvu
         detail::gifStage().shutdown();
     }
 
+    // VPL2 VIF stage (PS2X_MTVU_VIF_STAGE=1; report local/research/VPL2).
+    inline bool vifStageOn()
+    {
+        return detail::g_vifStage.load(std::memory_order_relaxed);
+    }
+
+    inline bool onVifStage()
+    {
+        return std::this_thread::get_id() == detail::g_vifTid.load(std::memory_order_relaxed);
+    }
+
+    // True on the MTVU-VIF thread: a VU-side action becomes a record.
+    inline bool vifStageDefer()
+    {
+        return vifStageOn() && onVifStage();
+    }
+
+    inline detail::VifLog &vifLog()
+    {
+        return detail::worker().vif;
+    }
+
+    // MTVU-VIF thread only: record builders (null / no-op once stopping).
+    inline uint8_t *vifStageReserve(uint32_t bytes)
+    {
+        return vifLog().reserve(bytes);
+    }
+    inline void vifStageCommit(uint32_t bytes, bool publishNow)
+    {
+        vifLog().commit(bytes, publishNow);
+    }
+    inline void vifStagePush(VifRecKind kind, uint8_t f, uint32_t a, uint32_t b, bool publishNow,
+                             const void *payload16 = nullptr)
+    {
+        vifLog().push(kind, f, 0u, a, b, publishNow, payload16);
+    }
+
+    // Safety net: VIF-thread code reached a VU-side entry point that is not
+    // staged. Run it on the MTVU thread after every earlier record and wait
+    // (ordered, just slower); the [mtvu] vif-stage line must show escapes=0.
+    inline void vifStageEscape(std::function<void()> fn)
+    {
+        detail::VifLog &L = vifLog();
+        const uint64_t n = L.nEscapes.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 8u)
+            std::fprintf(stderr, "[mtvu] vif-stage ESCAPE n=%llu (VU-side call on the VIF thread; run on MTVU)\n",
+                         static_cast<unsigned long long>(n + 1u));
+        L.runSync(std::move(fn));
+    }
+    // A GS-worker enqueue on the VIF thread (can't be rerouted there): count.
+    inline void vifStageNoteEscape()
+    {
+        const uint64_t n = vifLog().nEscapes.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 8u)
+            std::fprintf(stderr, "[mtvu] vif-stage ESCAPE n=%llu (GS enqueue on the VIF thread)\n",
+                         static_cast<unsigned long long>(n + 1u));
+    }
+
+    // Runtime init, after startGifStage() and before the game thread runs
+    // (no jobs queued). exec runs the PS2Memory records on the MTVU thread.
+    inline void startVifStage(VifExecFn exec, void *opaque)
+    {
+        detail::Worker &w = detail::worker();
+        detail::VifLog &L = w.vif;
+        L.reset(exec, opaque);
+        if (!w.started)
+            w.start();
+        {
+            std::lock_guard<std::mutex> lock(w.m);
+            detail::g_vifStage.store(true, std::memory_order_release);
+        }
+        L.running = true;
+        L.th = std::thread([&w] { w.vifLoop(); });
+        w.cvWork.notify_all(); // the MTVU thread enters its log loop
+    }
+
+    // After a full sync (log and GIF ring empty): join the VIF thread and
+    // take the MTVU thread back to popping jobs.
+    inline void stopVifStage()
+    {
+        detail::Worker &w = detail::worker();
+        detail::VifLog &L = w.vif;
+        if (!L.running)
+            return;
+        {
+            std::lock_guard<std::mutex> lock(w.m);
+            detail::g_vifStage.store(false, std::memory_order_release);
+        }
+        L.stop.store(true, std::memory_order_relaxed);
+        w.cvWork.notify_all();
+        L.wakeAll();
+        if (L.th.joinable())
+            L.th.join();
+        while (L.vuIn.load(std::memory_order_acquire))
+        {
+            L.wakeAll();
+            std::this_thread::yield();
+        }
+        L.running = false;
+    }
+
     // PT2: total threaded-mode sync-wait ns so far (EE side; the GameThread
     // wait stage deltas it per tick). 0 unless threaded.
     inline uint64_t threadedWaitNsTotal()
@@ -1238,13 +1829,17 @@ namespace ps2_mtvu
 
     // Threaded: queue unit work. fbrst = the kicking context's VU0 FBRST
     // (VU1 D/T enables) as the synchronous MSCAL callback would read it.
-    inline void submit(std::function<void()> fn, size_t bytes, uint32_t fbrst)
+    // vif = VIF1 work (a DMA kick or a VIF1 FIFO write): with the VPL2 VIF
+    // stage on it runs on the MTVU-VIF thread; any other job runs whole on
+    // the MTVU thread, as before.
+    inline void submit(std::function<void()> fn, size_t bytes, uint32_t fbrst, bool vif = false)
     {
         detail::Job job;
         job.fn = std::move(fn);
         job.fpControl = ps2_fpmode::readControl();
         job.fbrst = fbrst;
         job.bytes = bytes;
+        job.vif = vif;
         detail::noteEeThread();
         detail::worker().submit(std::move(job));
     }
@@ -1575,6 +2170,13 @@ namespace ps2_mtvu
                     const uint64_t gifNs = w.gif.busyNs.exchange(0u, std::memory_order_relaxed);
                     ps2x::perflog::stageRing(ps2x::perflog::Stage::MtvuGifBusy)
                         .push(static_cast<uint32_t>(tick), static_cast<float>(gifNs / 1e6));
+                }
+                if (detail::g_vifStage.load(std::memory_order_relaxed))
+                {
+                    // VPL2: the VIF thread's job time, next to mtvu.busy.
+                    const uint64_t vifNs = w.vif.vifBusyNs.exchange(0u, std::memory_order_relaxed);
+                    ps2x::perflog::stageRing(ps2x::perflog::Stage::MtvuVifBusy)
+                        .push(static_cast<uint32_t>(tick), static_cast<float>(vifNs / 1e6));
                 }
                 // AD1: the session is bound to the MTVU TID; the report itself
                 // may come from any thread, so vblank (GameThread) sends it.
