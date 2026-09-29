@@ -25,6 +25,7 @@
 #include "ps2_runtime.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/gs/gs_frontend.h"
+#include "ps2_runtime_macros.h"
 
 #include <algorithm>
 #include <array>
@@ -154,6 +155,10 @@ enum Fix : uint32_t
     kFixCamera = 1u << 9,    // system 7: CM2 §4 pool words (sqrt retentions, 1/120 clocks, halved steps)
     kFixLaunch = 1u << 10,   // system 6: 0x114298 transition wall response only for riders moving into the wall (class f)
     kFixStick = 1u << 11,    // system 6: 0x133308 stick-angle tracker slews and hold timers (class b/h, FH5 trick input)
+    kFixSpeedcap = 1u << 12, // system 6: 0x11b3f8 speed-cap blend retentions d -> sqrt(d) (class a, FA1 3.2)
+    kFixRng = 1u << 13,      // RNG cadence: per-update draw sites at stock cadence (class d/g, FA1 2)
+    kFixTrick = 1u << 15,    // system 6: 0x117638 combo/style accrual (from 0x11a3f0) at stock cadence (class d, FH7)
+    kFixRamp = 1u << 14,     // internal: 0x115d98 ramp word at 1/120, only while 0x115d48 runs per update (timers without rng)
 };
 
 inline uint32_t fixMask() noexcept
@@ -165,7 +170,7 @@ inline uint32_t fixMask() noexcept
         const std::string s(v);
         if (s == "all")
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
-                   kFixTimers | kFixCamera | kFixLaunch | kFixStick;
+                   kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -184,6 +189,9 @@ inline uint32_t fixMask() noexcept
             else if (item == "camera") m |= kFixCamera;
             else if (item == "launch") m |= kFixLaunch;
             else if (item == "stick") m |= kFixStick;
+            else if (item == "speedcap") m |= kFixSpeedcap;
+            else if (item == "rng") m |= kFixRng;
+            else if (item == "trick") m |= kFixTrick;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -263,7 +271,7 @@ inline std::vector<Word> labWords();
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
-    const std::array<Word, 67> words = {{
+    const std::array<Word, 70> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -291,7 +299,9 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         // HUD object +0x190 += [gp-0x5758] at 0x1eb034/44 (0x1e9a30 race HUD),
         {kFixTimers, 0x49d998u, kSixtieth, kHundredTwentieth, "hud_clock_1eb02c"},
         // rider object +0x35c += [gp-0x7b54] up to 1.0 at 0x115d98-db4,
-        {kFixTimers, 0x49b59cu, kSixtieth, kHundredTwentieth, "rider_ramp_115d98"},
+        // FH7: with FIX=rng, 0x115d48 (which holds this ramp) runs at stock
+        // cadence, so the ramp word stays 1/60 (kFixRamp = timers && !rng).
+        {kFixRamp, 0x49b59cu, kSixtieth, kHundredTwentieth, "rider_ramp_115d98"},
         // per-rider timer list [e+4] -= [gp-0x7f94] at 0x101538 (0x1013a8, RV13 row).
         {kFixTimers, 0x49b15cu, kSixtieth, kHundredTwentieth, "rider_timers_101538"},
         // FH4: rider trick/air state 0x117c28 (from 0x1218ac): air timer +0x30
@@ -310,6 +320,20 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFixStick, 0x49bbfcu, kSixtieth, kHundredTwentieth, "stick_hold1_1339a0"},
         {kFixStick, 0x49bc98u, kSixtieth, kHundredTwentieth, "stick_slew0_134138"},
         {kFixStick, 0x49bca4u, kSixtieth, kHundredTwentieth, "stick_slew1_1342b4"},
+        // FH7 (FA1 3.2): 0x11b3f8 per rider per update R+0x2e4 = d*cap +
+        // (1-d)*target with no dt: at 120 the post-air/post-boost cap relaxes
+        // 2x as fast in real time. Retentions d -> sqrt(d), each word a single
+        // reader (0x11b60c easing down 0.97, 0x11b5cc easing up 0.9). FA1 lab
+        // f3: FR1-R1 rival +7.4 % -> +2.3 %, stock line again.
+        {kFixSpeedcap, 0x49b730u, 0x3f7851ecu, 0x3f7c217au, "speedcap_down_11b60c"},
+        {kFixSpeedcap, 0x49b728u, 0x3f666666u, 0x3f72dce8u, "speedcap_up_11b5cc"},
+        // FH7 trick: style accumulator +0x1c of the rider trick state
+        // (0x117fe0 at 0x1188b8-cc) += tweak * [gp-0x7a74] once per update;
+        // the HUD style bonus is round10(+0x1c * 10000 + 5) (0x117908, shown
+        // via 0x1171a8 from 0x118ebc). 0.05/60 per update -> 0.05/120 (class
+        // b, single reader, not a timestep value so the census missed it).
+        // Lab fh7-n6: All-Peak first-cliff style bonus +300 -> +150 (stock +160).
+        {kFixTrick, 0x49b67cu, 0x3a5a740eu, 0x39da740eu, "style_rate_1188b8"},
         // CM2 §4 / convert.txt (GameCamera 0x1580e10 chase chain, pool words
         // reloaded every tick): class a retentions r -> sqrt(r) ...
         {kFixCamera, 0x49cfe4u, 0x3f59999au, 0x3f6c0535u, "cam_C1_kA0"},
@@ -352,7 +376,9 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFixCamera, 0x49c824u, kSixtieth, kHundredTwentieth, "cam_shake_clk"},
         {kFixCamera, 0x49c820u, kSixtieth, kHundredTwentieth, "cam_shake_dur"},
     }};
-    const uint32_t mask = fixMask();
+    uint32_t mask = fixMask();
+    if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
+        mask |= kFixRamp;
     std::vector<Word> all;
     for (const Word &w : words)
         if (w.fix == 0u || (mask & w.fix) != 0u)
@@ -761,6 +787,9 @@ inline void launchPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 // entry only at a case-0 update). Pause, results, loading and menus request
 // stock.
 inline constexpr uint32_t kAppUpdateSite = 0x3171b4u;
+// FH7 RNG cadence state (FIX=rng, see rngHook); reset at an events entry flip.
+inline uint32_t g_rngUpdates = 0u, g_lcgSaved = 0u;
+inline bool g_rngOdd = false, g_lcgHeld = false;
 inline constexpr uint32_t kSelectorDispatch = 0x111408u;
 inline bool g_passRan = false, g_anyAir = false, g_finished = false, g_clockRan = false;
 
@@ -813,6 +842,9 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
         wr32(ram, kBandLo, kBandLoStock);
     }
     g_producerCalls = g_raceTickCalls = g_raceTick2Calls = g_sessionCalls = 0u;
+    g_rngUpdates = 0u;
+    g_rngOdd = false;
+    g_lcgHeld = false;
     g_guestActive = toActive;
     static uint32_t lines = 0u;
     if (lines++ < 64u)
@@ -863,6 +895,125 @@ inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
 }
 
 // Returns true when the call must be skipped (session fix).
+// ---- RNG cadence, PS2X_SSX3_FULL120_FIX=rng (FH7; FA1 2) --------------------
+// Update parity counts app-update dispatches (0x3171b4; reset at an events
+// entry flip, so the first 120 Hz update is even). On odd updates:
+// - class d, owners at stock cadence (their return value is unused):
+//   0x3710d0 trail/ribbon ring push (stream 0 at 0x3711c8; the ring keeps
+//   its stock time span) and 0x115d48 rider look-at-rival (stream-1 pair
+//   0x115e4c/0x115fa4, 99 % of stream 1 in the race; the AI freestyle roll
+//   0x10c1dc reads stream 1 after them, so its outcome follows stock order);
+// - class g, per-update Bernoulli rolls on even updates only: the draw at
+//   0x2f3be0 (lens-drop split) and 0x390c98 (light-flash start) is skipped
+//   and returns 0x7fffff (u = 1 - 2^-23: a miss for both tests, u*n/24 < 0.01
+//   and u < k^2 with k < 1), and the flash countdown [gp+0x15c4] holds;
+// - the inline float LCG 0x4a3afc (gp+0xa0c; 18 effect functions) is saved
+//   at the start of an odd update and restored at the start of the next,
+//   so the odd update's draws replay and the sequence advances once per
+//   stock frame.
+inline constexpr uint32_t kRngDraw0 = 0x3177f0u;
+inline constexpr uint32_t kTrailPush = 0x3710d0u, kLookAt = 0x115d48u;
+inline constexpr uint32_t kLensRollSite = 0x2f3be0u, kFlashRollSite = 0x390c98u, kFlashSched = 0x390c60u;
+inline constexpr uint32_t kFlashCountdown = 0x4a30f0u + 0x15c4u, kInlineLcg = 0x4a30f0u + 0xa0cu;
+
+inline bool rngFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixRng) != 0u;
+    return on;
+}
+
+// FH7 trick group: 0x117638 (single caller 0x11a3f0 in 0x11a228) adds a
+// point award times a multiplier clamp((count+10)*k, 0.5, 2) where count
+// (+0x9c) is bumped per call; it runs once per update while a combo accrues,
+// so at 120 the count ramps and the points add up twice as fast. Serviced on
+// even updates (class d); lab fh7-n3 (env SKIP): All-Peak first-cliff combo
+// +420 = stock (was +1330 in FH4).
+inline constexpr uint32_t kComboSite = 0x11a3f0u, kComboAccrue = 0x117638u;
+
+inline bool trickFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixTrick) != 0u;
+    return on;
+}
+
+inline bool rngFix() noexcept;
+
+// Update parity for the stock-cadence groups (rng, trick): counted at the
+// app-update dispatch, reset at an events entry flip.
+inline void parityHook(uint8_t *ram, uint32_t sourcePc)
+{
+    if (sourcePc != kAppUpdateSite)
+        return;
+    g_rngOdd = (g_rngUpdates++ & 1u) != 0u;
+    if (!rngFix())
+        return;
+    if (g_rngOdd)
+        g_lcgHeld = rd32(ram, kInlineLcg, g_lcgSaved);
+    else if (g_lcgHeld)
+    {
+        wr32(ram, kInlineLcg, g_lcgSaved);
+        g_lcgHeld = false;
+    }
+}
+
+inline bool rngHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    if (!g_rngOdd)
+        return false;
+    if (targetPc == kTrailPush || targetPc == kLookAt)
+        return true;
+    if (targetPc == kRngDraw0 && (sourcePc == kLensRollSite || sourcePc == kFlashRollSite))
+    {
+        if (ctx)
+            SET_GPR_U32(ctx, 2, 0x007fffffu);
+        return ctx != nullptr;
+    }
+    if (targetPc == kFlashSched)
+    {
+        uint32_t n = 0u;
+        if (rd32(ram, kFlashCountdown, n) && static_cast<int32_t>(n) > 0)
+            wr32(ram, kFlashCountdown, n + 1u);
+    }
+    return false;
+}
+
+// PS2X_FH1_SRC=tgt[:a0][,...] (hex; diagnostic, any mode): print the source
+// pc and a0-a3 of calls to tgt (optionally only with that a0), 2000 lines max.
+inline void srcTap(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    struct Want { uint32_t tgt, a0; bool anyA0; };
+    static const std::vector<Want> wants = [] {
+        std::vector<Want> v;
+        const char *p = std::getenv("PS2X_FH1_SRC");
+        while (p && *p)
+        {
+            char *end = nullptr;
+            Want w{static_cast<uint32_t>(std::strtoul(p, &end, 16)), 0u, true};
+            if (*end == ':')
+            {
+                w.a0 = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+                w.anyA0 = false;
+            }
+            v.push_back(w);
+            if (*end != ',') break;
+            p = end + 1;
+        }
+        return v;
+    }();
+    if (wants.empty() || !ctx)
+        return;
+    static uint32_t lines = 0u;
+    for (const Want &w : wants)
+        if (w.tgt == targetPc && (w.anyA0 || getRegU32(ctx, 4) == w.a0) && lines < 2000u)
+        {
+            ++lines;
+            std::fprintf(stderr, "fh1-src tick=%llu src=%08x tgt=%08x a0=%08x a1=%08x a2=%08x a3=%08x odd=%d\n",
+                         static_cast<unsigned long long>(g_lastTick), sourcePc, targetPc, getRegU32(ctx, 4),
+                         getRegU32(ctx, 5), getRegU32(ctx, 6), getRegU32(ctx, 7), g_rngOdd ? 1 : 0);
+        }
+    (void)ram;
+}
+
 inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
     if (mode() == Mode::Always && sourcePc == kHookSite && !g_patched)
@@ -880,6 +1031,13 @@ inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_
     if (on && launchFix())
         launchPreHook(ram, ctx, targetPc);
     bool skip = on && sessionFix() && sessionSkip(sourcePc, targetPc);
+    if (on && (rngFix() || trickFix()))
+        parityHook(ram, sourcePc);
+    if (on && rngFix())
+        skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
+    if (on && trickFix() && g_rngOdd && sourcePc == kComboSite && targetPc == kComboAccrue)
+        skip = true;
+    srcTap(ram, ctx, sourcePc, targetPc);
     if (on)
         skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
     Tap &t = tap();
@@ -1212,9 +1370,9 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
 {
     maybeCapture(gs, tick);
     scanVBlank(ram, tick);
+    g_lastTick = tick;
     if (mode() == Mode::Events)
     {
-        g_lastTick = tick;
         g_divThis = g_divNext;
         if (!g_stockInit)
         {
