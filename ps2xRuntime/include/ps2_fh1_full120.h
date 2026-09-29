@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -39,19 +40,75 @@
 
 namespace ps2_fh1
 {
-inline bool enabled() noexcept
+// PS2X_SSX3_FULL120: "1" = always (from the manager init hook on), "events"
+// = full120 only while a race event runs (FH5): stock 60 in boot, menus,
+// loading, pause and results.
+enum class Mode { Off, Always, Events };
+
+inline Mode mode() noexcept
 {
-    static const bool on = [] {
+    static const Mode m = [] {
         const char *v = std::getenv("PS2X_SSX3_FULL120");
-        return v && v[0] == '1' && v[1] == '\0';
+        if (!v || !*v || std::strcmp(v, "0") == 0)
+            return Mode::Off;
+        if (std::strcmp(v, "1") == 0)
+            return Mode::Always;
+        if (std::strcmp(v, "events") == 0)
+            return Mode::Events;
+        std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120=%s (want 1|events)\n", v);
+        std::abort();
     }();
-    return on;
+    return m;
 }
 
-// Guest VBlanks per stock VBlank period.
+inline bool enabled() noexcept
+{
+    return mode() != Mode::Off;
+}
+
+inline bool eventsMode() noexcept
+{
+    return mode() == Mode::Events;
+}
+
+// ---- Event switching state (EE thread only; FH5) ---------------------------
+// Request: decided at each app-update start from the previous update's facts.
+// Commit: at the next VBlankStart (the next interval was scheduled from the
+// request just before; EE shift, pacer, stock-time accumulator follow).
+// Guest flip: at the next app-update dispatch (0x3171b4), where words and
+// hooks switch, parities reset and the 0x1e1458 stamp is restamped.
+inline bool g_schedActive = false;  // requested; read when a VBlank is scheduled
+inline bool g_commitActive = false; // committed at the last VBlankStart
+inline bool g_guestActive = false;  // guest words/hooks active
+inline bool g_flipPending = false;
+inline uint32_t g_divNext = 1u;     // divisor of the interval scheduled last
+inline uint32_t g_divThis = 1u;     // divisor of the interval that just ended
+inline std::atomic<uint64_t> g_stockHalf{0}; // elapsed stock half-periods (events)
+inline bool g_stockInit = false;
+
+// Guest VBlanks per stock VBlank period (static view: 2 in always mode).
 inline uint32_t vblankDivisor() noexcept
 {
-    return enabled() ? 2u : 1u;
+    if (mode() == Mode::Always)
+        return 2u;
+    if (mode() == Mode::Events)
+        return g_schedActive ? 2u : 1u;
+    return 1u;
+}
+
+// Scheduler: the divisor for the VBlank interval being scheduled now.
+inline uint32_t schedDivisor() noexcept
+{
+    const uint32_t d = vblankDivisor();
+    g_divNext = d;
+    return d;
+}
+
+// Hooks and word conversions apply: always mode as before (static), events
+// mode only while the guest flip is active.
+inline bool hooksOn() noexcept
+{
+    return mode() == Mode::Always || (mode() == Mode::Events && g_guestActive);
 }
 
 // log2 of the EE clock multiplier (charged cycles = cycles >> shift).
@@ -73,6 +130,14 @@ inline uint32_t eeClockShift() noexcept
         std::abort();
     }();
     return shift;
+}
+
+// Current EE shift (events: only while committed active).
+inline uint32_t eeClockShiftNow() noexcept
+{
+    if (mode() == Mode::Events)
+        return g_commitActive ? eeClockShift() : 0u;
+    return eeClockShift();
 }
 
 enum Fix : uint32_t
@@ -165,6 +230,8 @@ struct Word
     const char *label;
 };
 
+inline void applyWords(uint8_t *ram, uint32_t a, bool toActive);
+
 // Manager rate/dt plus TS1's single-coherent word table (TS1 REPORT G0,
 // ps2_ts1_mode.h @ ts1 420c34a), minus TS1's multiplier: here the doubled
 // VBlank supplies the second update. Every word is verified before any write.
@@ -182,6 +249,18 @@ inline void patchAtManagerInit(uint8_t *ram)
         std::fprintf(stderr, "fh1-full120-refused manager ptr=%08x\n", a);
         std::abort();
     }
+    applyWords(ram, a, true);
+    std::fprintf(stderr, "fh1-full120-armed manager=%08x rate=120 dt=%08x vblank_div=%u ee_x=%u fix=0x%x\n",
+                 a, kHundredTwentieth, vblankDivisor(), 1u << eeClockShift(), fixMask());
+}
+
+inline std::vector<Word> labWords();
+
+// The word table, applied in either direction (FH5): toActive expects the
+// stock value and writes the replacement; the reverse expects the
+// replacement. Every word is verified before any write; a mismatch refuses.
+inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
+{
     const std::array<Word, 62> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
@@ -260,61 +339,48 @@ inline void patchAtManagerInit(uint8_t *ram)
         {kFixCamera, 0x49c820u, kSixtieth, kHundredTwentieth, "cam_shake_dur"},
     }};
     const uint32_t mask = fixMask();
-    size_t written = 0u;
+    std::vector<Word> all;
     for (const Word &w : words)
+        if (w.fix == 0u || (mask & w.fix) != 0u)
+            all.push_back(w);
+    for (const Word &w : labWords())
+        all.push_back(w);
+    for (const Word &w : all)
     {
-        if (w.fix != 0u && (mask & w.fix) == 0u)
-            continue;
+        const uint32_t want = toActive ? w.expected : w.replacement;
         uint32_t got = 0u;
-        if (!rd32(ram, w.address, got) || got != w.expected)
+        if (!rd32(ram, w.address, got) || got != want)
         {
-            std::fprintf(stderr, "fh1-full120-refused word=%s addr=%08x got=%08x expected=%08x\n",
-                         w.label, w.address, got, w.expected);
+            std::fprintf(stderr, "fh1-full120-refused word=%s addr=%08x got=%08x expected=%08x (%s)\n",
+                         w.label, w.address, got, want, toActive ? "enter" : "exit");
             std::abort();
         }
     }
-    for (const Word &w : words)
+    for (const Word &w : all)
+        wr32(ram, w.address, toActive ? w.replacement : w.expected);
+    std::fprintf(stderr, "fh1-full120 words=%zu %s\n", all.size(), toActive ? "active" : "stock");
+}
+
+// Lab words (PS2X_FH1_WORDS=addr:expected:replacement,...; hex): try a
+// pool-word conversion without a rebuild. Same verify-then-write rule.
+inline std::vector<Word> labWords()
+{
+    std::vector<Word> lab;
+    const char *p = std::getenv("PS2X_FH1_WORDS");
+    while (p && *p)
     {
-        if (w.fix != 0u && (mask & w.fix) == 0u)
-            continue;
-        wr32(ram, w.address, w.replacement);
-        ++written;
+        char *end = nullptr;
+        Word w{0u, 0u, 0u, 0u, "lab"};
+        w.address = static_cast<uint32_t>(std::strtoul(p, &end, 16));
+        if (*end != ':') break;
+        w.expected = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+        if (*end != ':') break;
+        w.replacement = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+        lab.push_back(w);
+        if (*end != ',') break;
+        p = end + 1;
     }
-    // Lab words (PS2X_FH1_WORDS=addr:expected:replacement,...; hex): try a
-    // pool-word conversion without a rebuild. Same verify-then-write rule.
-    if (const char *lw = std::getenv("PS2X_FH1_WORDS"))
-    {
-        std::vector<Word> lab;
-        const char *p = lw;
-        while (*p)
-        {
-            char *end = nullptr;
-            Word w{0u, 0u, 0u, 0u, "lab"};
-            w.address = static_cast<uint32_t>(std::strtoul(p, &end, 16));
-            if (*end != ':') break;
-            w.expected = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
-            if (*end != ':') break;
-            w.replacement = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
-            lab.push_back(w);
-            if (*end != ',') break;
-            p = end + 1;
-        }
-        for (const Word &w : lab)
-        {
-            uint32_t got = 0u;
-            if (!rd32(ram, w.address, got) || got != w.expected)
-            {
-                std::fprintf(stderr, "fh1-full120-refused lab word addr=%08x got=%08x expected=%08x\n",
-                             w.address, got, w.expected);
-                std::abort();
-            }
-        }
-        for (const Word &w : lab)
-            wr32(ram, w.address, w.replacement);
-        std::fprintf(stderr, "fh1-full120 lab words=%zu\n", lab.size());
-    }
-    std::fprintf(stderr, "fh1-full120-armed manager=%08x rate=120 dt=%08x vblank_div=%u ee_x=%u fix=0x%x words=%zu\n",
-                 a, kHundredTwentieth, vblankDivisor(), 1u << eeClockShift(), mask, written);
+    return lab;
 }
 
 // ---- Observation tap (PS2X_FH1_TAP=1; env-only, any build) ----------------
@@ -547,7 +613,7 @@ inline bool sessionSkip(uint32_t sourcePc, uint32_t targetPc) noexcept
 // dispatchGuestBranch, after a call returned to its fall-through.
 inline void clockPostHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 {
-    if (targetPc != kInterval)
+    if (targetPc != kInterval || !hooksOn())
         return;
     const uint32_t obj = getRegU32(ctx, 4);
     uint32_t bits = 0u;
@@ -667,22 +733,140 @@ inline void launchPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
                      v[0], v[1], v[2]);
 }
 
+// ---- Event switching (PS2X_SSX3_FULL120=events; FH5) -----------------------
+// Facts per update (EE thread, from dispatches):
+//   rider pass ran: `jal 0x1013a8` at 0x12912c (then the race tick bump);
+//   any rider airborne: 0x111408 entered with selector [a0+0xde0] != 0;
+//   race time ran: the race clock bump [race+0xc] (`jal 0x12a250` at
+//   0x113dcc, the HUD race time; FH2 raceclock). It starts at race start and
+//   stops at the finish, while the rider pass keeps running under the
+//   Rival-card intro and the results fly-by (FH5 e1: entry blip at 1606-1611,
+//   re-entry on results at 34178 with a pass-only rule).
+// At each app-update dispatch (0x3171b4): active is requested iff the pass
+// and the race time ran, and (already active, or every rider was grounded:
+// entry only at a case-0 update). Pause, results, loading and menus request
+// stock.
+inline constexpr uint32_t kAppUpdateSite = 0x3171b4u;
+inline constexpr uint32_t kSelectorDispatch = 0x111408u;
+inline bool g_passRan = false, g_anyAir = false, g_finished = false, g_clockRan = false;
+
+inline void restamp10s(uint8_t *ram, uint32_t a, bool toActive)
+{
+    uint32_t stamp = 0u, upd = 0u;
+    if (!rd32(ram, kPeriod10sStamp, stamp) || !rd32(ram, a + 0x1cu, upd))
+        return;
+    int32_t e = static_cast<int32_t>(upd - stamp);
+    if (e < 0) e = 0;
+    uint32_t next = 0u;
+    if (toActive)
+    {
+        // Elapsed stock updates E of 601 -> 2E of 1202; the game still fires at
+        // (A1c - stamp) >= 601, so stamp' = A1c + 601 - 2E (no further shift).
+        if (e > 601) e = 601;
+        next = upd + 601u - 2u * static_cast<uint32_t>(e);
+        g_lastStamp10s = next;
+    }
+    else
+    {
+        // Remaining 120 Hz updates R = 601 - (A1c - stamp) -> R/2 stock.
+        int32_t r = 601 - e;
+        if (r < 0) r = 0;
+        next = upd - 601u + static_cast<uint32_t>(r / 2);
+    }
+    wr32(ram, kPeriod10sStamp, next);
+}
+
+inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
+{
+    uint32_t a = 0u;
+    if (!rd32(ram, kMgrPtr, a) || !a || (a & 3u))
+    {
+        std::fprintf(stderr, "fh1-full120-refused events flip: manager ptr=%08x\n", a);
+        std::abort();
+    }
+    const char *sim = std::getenv("PS2X_SSX3_SIM_MODE");
+    if (sim && std::strncmp(sim, "split", 5) == 0)
+    {
+        std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_SIM_MODE=%s (full120 replaces split120)\n", sim);
+        std::abort();
+    }
+    applyWords(ram, a, toActive);
+    if (clockFix())
+        restamp10s(ram, a, toActive);
+    if (!toActive)
+    {
+        wr32(ram, kBandHi, kBandHiStock);
+        wr32(ram, kBandLo, kBandLoStock);
+    }
+    g_producerCalls = g_raceTickCalls = g_raceTick2Calls = g_sessionCalls = 0u;
+    g_guestActive = toActive;
+    static uint32_t lines = 0u;
+    if (lines++ < 64u)
+        std::fprintf(stderr, "fh1-events flip %s tick=%llu\n", toActive ? "enter" : "exit",
+                     static_cast<unsigned long long>(tick));
+}
+
+inline uint64_t g_lastTick = 0u;
+
+inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    if (targetPc == kSelectorDispatch && ctx)
+    {
+        uint32_t sel = 0u;
+        if (rd32(ram, getRegU32(ctx, 4) + 0xde0u, sel) && sel != 0u)
+            g_anyAir = true;
+    }
+    else if (sourcePc == kRaceTickCallSite && targetPc == kRaceTickCallee)
+        g_passRan = true;
+    else if (sourcePc == kRaceTick2CallSite && targetPc == kRaceTick2Callee)
+        g_clockRan = true;
+    else if (targetPc == kSession && ctx)
+    {
+        uint32_t fin = 0u;
+        if (rd32(ram, getRegU32(ctx, 4) + 0x610u, fin))
+            g_finished = fin != 0u;
+    }
+    else if (sourcePc == kAppUpdateSite)
+    {
+        if (g_flipPending)
+        {
+            g_flipPending = false;
+            if (g_commitActive != g_guestActive)
+                guestFlip(ram, g_lastTick, g_commitActive);
+        }
+        const bool want = g_passRan && g_clockRan && (g_guestActive || !g_anyAir);
+        if (want != g_schedActive)
+        {
+            g_schedActive = want;
+            static uint32_t lines = 0u;
+            if (lines++ < 64u)
+                std::fprintf(stderr, "fh1-events request %s tick=%llu pass=%d clock=%d air=%d fin=%d\n",
+                             want ? "enter" : "exit", static_cast<unsigned long long>(g_lastTick), g_passRan ? 1 : 0,
+                             g_clockRan ? 1 : 0, g_anyAir ? 1 : 0, g_finished ? 1 : 0);
+        }
+        g_passRan = g_anyAir = g_clockRan = false;
+    }
+}
+
 // Returns true when the call must be skipped (session fix).
 inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
-    if (enabled() && sourcePc == kHookSite && !g_patched)
+    if (mode() == Mode::Always && sourcePc == kHookSite && !g_patched)
     {
         g_patched = true;
         patchAtManagerInit(ram);
     }
-    if (clockFix())
+    if (mode() == Mode::Events)
+        eventsOnBranch(ram, ctx, sourcePc, targetPc);
+    const bool on = hooksOn();
+    if (on && clockFix())
         clockPreHook(ram, targetPc);
-    if (raceClockFix())
+    if (on && raceClockFix())
         raceClockPreHook(ram, ctx, sourcePc, targetPc);
-    if (launchFix())
+    if (on && launchFix())
         launchPreHook(ram, ctx, targetPc);
-    bool skip = sessionFix() && sessionSkip(sourcePc, targetPc);
-    if (enabled())
+    bool skip = on && sessionFix() && sessionSkip(sourcePc, targetPc);
+    if (on)
         skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
     Tap &t = tap();
     if (!t.on)
@@ -957,7 +1141,29 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
 {
     maybeCapture(gs, tick);
     scanVBlank(ram, tick);
-    if (enabled() && !g_patched)
+    if (mode() == Mode::Events)
+    {
+        g_lastTick = tick;
+        g_divThis = g_divNext;
+        if (!g_stockInit)
+        {
+            // A fresh boot starts at tick 1; a state loaded from a stock run
+            // carries stock history up to tick-1.
+            g_stockInit = true;
+            g_stockHalf.store(2u * (tick - 1u), std::memory_order_relaxed);
+        }
+        g_stockHalf.fetch_add(g_divThis == 2u ? 1u : 2u, std::memory_order_relaxed);
+        if (g_commitActive != g_schedActive)
+        {
+            g_commitActive = g_schedActive;
+            g_flipPending = true;
+            static uint32_t lines = 0u;
+            if (lines++ < 64u)
+                std::fprintf(stderr, "fh1-events commit %s tick=%llu\n", g_commitActive ? "enter" : "exit",
+                             static_cast<unsigned long long>(tick));
+        }
+    }
+    if (mode() == Mode::Always && !g_patched)
     {
         uint32_t a = 0u, rate = 0u, dt = 0u;
         if (rd32(ram, kMgrPtr, a) && a && !(a & 3u) && rd32(ram, a + 0x10u, rate) &&
@@ -993,6 +1199,9 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
                        "fh1-tap tick=%llu upd=%u rend=%u A18=%u A1c=%u rate=%u dt=%08x pos=%.3f,%.3f,%.3f",
                        static_cast<unsigned long long>(tick), t.updates, t.renders, wake, upd, rate, dt,
                        pos[0], pos[1], pos[2]);
+    if (mode() == Mode::Events)
+        n += std::snprintf(line + n, sizeof(line) - n, " act=%d%d%d", g_schedActive ? 1 : 0,
+                           g_commitActive ? 1 : 0, g_guestActive ? 1 : 0);
     t.updates = t.renders = 0u;
     for (size_t i = 0; i < t.nCount && n < static_cast<int>(sizeof(line)) - 32; ++i)
     {
@@ -1025,5 +1234,12 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
         }
     }
     std::fprintf(stderr, "%s\n", line);
+}
+// Stock-time views for host-side clocks (pad-script vsync clock, CD field
+// clock, [vsync-rate]): events mode reads the accumulator; the other modes
+// keep tick / vblankDivisor().
+inline uint64_t stockHalfTicks() noexcept
+{
+    return g_stockHalf.load(std::memory_order_relaxed);
 }
 } // namespace ps2_fh1

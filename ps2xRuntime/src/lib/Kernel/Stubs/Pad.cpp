@@ -562,6 +562,9 @@ namespace ps2_stubs
         uint64_t padScriptVsyncTickToMs(uint64_t tick)
         {
             // FH1: full120 guest VBlanks are half-periods; keep stock ms.
+            // FH5 events mode: the stock-time accumulator (half-periods).
+            if (ps2_fh1::eventsMode())
+                return (ps2_fh1::stockHalfTicks() * 100000ull) / (5994ull * 2ull);
             return (tick * 100000ull) / (5994ull * ps2_fh1::vblankDivisor());
         }
 

@@ -5318,10 +5318,17 @@ void PS2Runtime::run()
                 const uint64_t vt = m_memory.gs().vsyncTick.load();
                 const double rate = static_cast<double>(vt - vsyncRateTick) / secs;
                 // FH1: full120 VBlanks are half-periods; report stock-equivalent vs/s.
-                const double stockRate = rate / ps2_fh1::vblankDivisor();
+                // FH5 events: stock-time accumulator delta (half-periods / 2).
+                static uint64_t s_lastHalf = ps2_fh1::stockHalfTicks();
+                const uint64_t half = ps2_fh1::stockHalfTicks();
+                const double stockRate = ps2_fh1::eventsMode()
+                                             ? static_cast<double>(half - s_lastHalf) / 2.0 / secs
+                                             : rate / ps2_fh1::vblankDivisor();
+                s_lastHalf = half;
                 std::fprintf(stderr, "[vsync-rate] tick=%llu rate=%.2f/s (%.3fx of 59.94)%s\n",
                              static_cast<unsigned long long>(vt), stockRate, stockRate / 59.94,
-                             ps2_fh1::enabled() ? " full120" : "");
+                             ps2_fh1::eventsMode() ? (ps2_fh1::g_commitActive ? " full120-events:on" : " full120-events:off")
+                                                     : ps2_fh1::enabled() ? " full120" : "");
 #if defined(__APPLE__)
                 static const bool s_threadCpuLog = [] {
                     const char *v = std::getenv("PS2X_THREAD_CPU_LOG");

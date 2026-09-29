@@ -227,7 +227,7 @@ EeScheduler::EeScheduler(PS2Runtime &runtime)
       m_hostPace(ps2_vsync_pacer::hostPaceFromProcessEnv()),
       m_vsyncPace(!ps2_vsync_pacer::unpacedFromProcessEnv() || m_hostPace.enabled)
 {
-    m_eeClockShift = ps2_fh1::eeClockShift();
+    m_eeClockShift = ps2_fh1::eeClockShiftNow();
 #if PS2X_ENABLE_DET_HASH_TAP
     bool invalid = false;
     m_detHashEvery = parseDetHashEvery(std::getenv("PS2X_DET_HASH_EVERY"), invalid);
@@ -570,8 +570,9 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_threads.emplace(main.id, std::move(main));
     noteThreadContainerMutated();
     m_readyQueues[0].push_back(kMainThreadId);
-    scheduleEvent(m_eeCycle + kVBlankPeriodCycles / ps2_fh1::vblankDivisor(),
-                  std::chrono::steady_clock::now() + kVBlankPeriod / ps2_fh1::vblankDivisor(),
+    const uint32_t firstDiv = ps2_fh1::schedDivisor();
+    scheduleEvent(m_eeCycle + kVBlankPeriodCycles / firstDiv,
+                  std::chrono::steady_clock::now() + kVBlankPeriod / firstDiv,
                   EeEvent{EeEventType::VBlankStart, 0, 0});
     publishSnapshot();
 }
@@ -3083,8 +3084,9 @@ void EeScheduler::processDueDeadlines()
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
                               scheduled.hostDeadline + kVBlankDuration,
                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
-                scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles / ps2_fh1::vblankDivisor(),
-                              scheduled.hostDeadline + kVBlankPeriod / ps2_fh1::vblankDivisor(),
+                const uint32_t div = ps2_fh1::schedDivisor();
+                scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles / div,
+                              scheduled.hostDeadline + kVBlankPeriod / div,
                               EeEvent{EeEventType::VBlankStart, 0, 0});
             }
             processEvent(scheduled.event);
@@ -3241,6 +3243,15 @@ void EeScheduler::processEvent(const EeEvent &event)
             m_runtime.printMissingFunctionCounts();
         }
         ps2_fh1::onVBlank(m_rdram, m_vsyncTick, m_runtime.gs()); // FH1 tap/seq (env-only)
+        if (ps2_fh1::eventsMode())
+        {
+            // FH5: the committed event state sets the EE budget and the pacer
+            // for the interval that starts now (scheduled from the same state).
+            m_eeClockShift = ps2_fh1::eeClockShiftNow();
+            const int64_t wantPeriod = ps2_vsync_pacer::kPeriodNs / (ps2_fh1::g_commitActive ? 2 : 1);
+            if (m_vsyncPace && !m_hostPace.enabled && m_vsyncPacer.periodNs() != wantPeriod)
+                m_vsyncPacer = ps2_vsync_pacer::Pacer(wantPeriod);
+        }
         ps2_e3::noteVBlank(m_vsyncTick); // E3b frame stamp
         ps2_gfx_stats::noteVsync(m_vsyncTick); // E33 per-vsync census cut
         ps2_vu1_trace::noteVsync(m_vsyncTick); // E36 per-program trace window

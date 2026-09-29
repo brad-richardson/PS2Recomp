@@ -95,6 +95,8 @@ namespace ps2_stubs
         uint64_t currentCdStreamTick(PS2Runtime *runtime)
         {
             // FH1: the field clock stays 59.94 Hz under full120's 2x VBlank.
+            if (ps2_fh1::eventsMode())
+                return ps2_fh1::stockHalfTicks() / 2u; // FH5: stock-time accumulator
             return runtime != nullptr ? runtime->eeScheduler().currentVSyncTick() / ps2_fh1::vblankDivisor() : 0u;
         }
 
