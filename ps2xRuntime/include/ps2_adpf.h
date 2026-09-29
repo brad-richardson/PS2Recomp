@@ -52,6 +52,14 @@ inline bool enabledFromEnv(const char *value)
 
 constexpr int64_t kDefaultTargetNs = 10'000'000; // PS2X_ADPF_TARGET_MS default
 
+// PB9: reportActualWorkDuration rejects 0 ns (AD1 §5d: exact-40 mtvu errors
+// across legs, plus one racy gsb). Zero-busy ticks carry no boost signal, so
+// skip them instead of reporting. The suite covers the predicate.
+inline bool shouldReport(uint64_t busyNs)
+{
+    return busyNs != 0;
+}
+
 // Parse PS2X_ADPF_TARGET_MS (decimal ms) into ns. Missing, unparseable or
 // non-positive input reads the default; the suite covers the edges.
 inline int64_t parseTargetNs(const char *value)

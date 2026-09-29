@@ -37,6 +37,12 @@ void register_ps2_adpf_tests()
             t.Equals(std::string(ps2x::adpf::threadName(ps2x::adpf::Thread::GsBack)), std::string("gsb"), "gsb");
             t.Equals(ps2x::adpf::kThreadCount, static_cast<size_t>(4), "four sessions"); });
 
+        tc.Run("shouldReport skips zero-duration reports", [](TestCase &t)
+                {
+            t.IsTrue(!ps2x::adpf::shouldReport(0u), "zero skipped");
+            t.IsTrue(ps2x::adpf::shouldReport(1u), "1ns reported");
+            t.IsTrue(ps2x::adpf::shouldReport(6000000u), "6ms reported"); });
+
 #if !defined(__ANDROID__)
         tc.Run("header compiles out off Android", [](TestCase &t)
                {

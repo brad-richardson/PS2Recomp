@@ -257,7 +257,7 @@ void report(Thread t, uint64_t busyNs)
         ensureSessionLocked(t, monotonicNs());
         session = g_sessions[i].load(std::memory_order_acquire);
     }
-    if (session)
+    if (session && shouldReport(busyNs))
     {
         const int rc = g_fns.reportActualWorkDuration(session, static_cast<int64_t>(busyNs));
         if (rc != 0)
