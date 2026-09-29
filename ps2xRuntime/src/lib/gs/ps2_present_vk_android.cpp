@@ -194,139 +194,12 @@ struct WindowLog
 };
 WindowLog g_winLog;
 
-// DP1: force the 120 Hz display mode for this window through
-// WindowManager.LayoutParams.preferredDisplayModeId (API 23+, so no dlsym
-// needed). Picks the first supported mode at 119-121 Hz. Returns the chosen
-// mode id, or 0 when no mode fits or any JNI step failed.
-int applyPreferredDisplayMode120(ANativeActivity *activity)
-{
-    if (!activity || !activity->vm)
-        return 0;
-    JNIEnv *env = nullptr;
-    char name[16] = {};
-    pthread_getname_np(pthread_self(), name, sizeof(name));
-    JavaVMAttachArgs args = {JNI_VERSION_1_6, name[0] ? name : nullptr, nullptr};
-    if (activity->vm->AttachCurrentThread(&env, &args) != JNI_OK || !env)
-        return 0;
-    int chosenId = 0;
-    float chosenRate = 0.0f;
-    jobject act = activity->clazz;
-    if (jclass actCls = env->GetObjectClass(act))
-    {
-        // Display.Mode[] modes = getWindowManager().getDefaultDisplay().getSupportedModes();
-        const jmethodID getWM = env->GetMethodID(actCls, "getWindowManager", "()Landroid/view/WindowManager;");
-        jobject wm = (getWM && !env->ExceptionCheck()) ? env->CallObjectMethod(act, getWM) : nullptr;
-        if (wm && !env->ExceptionCheck())
-        {
-            jclass wmCls = env->GetObjectClass(wm);
-            const jmethodID getDisplay =
-                wmCls ? env->GetMethodID(wmCls, "getDefaultDisplay", "()Landroid/view/Display;") : nullptr;
-            jobject display = (getDisplay && !env->ExceptionCheck()) ? env->CallObjectMethod(wm, getDisplay) : nullptr;
-            if (display && !env->ExceptionCheck())
-            {
-                jclass dispCls = env->GetObjectClass(display);
-                const jmethodID getModes = dispCls ? env->GetMethodID(dispCls, "getSupportedModes",
-                                                                     "()[Landroid/view/Display$Mode;")
-                                                   : nullptr;
-                auto modes = (getModes && !env->ExceptionCheck())
-                                 ? static_cast<jobjectArray>(env->CallObjectMethod(display, getModes))
-                                 : nullptr;
-                if (modes && !env->ExceptionCheck())
-                {
-                    const jsize n = env->GetArrayLength(modes);
-                    for (jsize i = 0; i < n && !env->ExceptionCheck(); ++i)
-                    {
-                        jobject mode = env->GetObjectArrayElement(modes, i);
-                        if (!mode || env->ExceptionCheck())
-                            break;
-                        jclass modeCls = env->GetObjectClass(mode);
-                        const jmethodID getRate = modeCls ? env->GetMethodID(modeCls, "getRefreshRate", "()F") : nullptr;
-                        const jmethodID getId = modeCls ? env->GetMethodID(modeCls, "getModeId", "()I") : nullptr;
-                        if (getRate && getId)
-                        {
-                            const float rate = env->CallFloatMethod(mode, getRate);
-                            const int id = env->CallIntMethod(mode, getId);
-                            if (!env->ExceptionCheck())
-                            {
-                                std::fprintf(stderr, "[present-vk] DP1 display mode id=%d %.2f Hz\n", id, rate);
-                                if (chosenId == 0 && rate >= 119.0f && rate <= 121.0f)
-                                {
-                                    chosenId = id;
-                                    chosenRate = rate;
-                                }
-                            }
-                        }
-                        if (modeCls)
-                            env->DeleteLocalRef(modeCls);
-                        env->DeleteLocalRef(mode);
-                    }
-                    env->DeleteLocalRef(modes);
-                }
-                if (dispCls)
-                    env->DeleteLocalRef(dispCls);
-                env->DeleteLocalRef(display);
-            }
-            if (wmCls)
-                env->DeleteLocalRef(wmCls);
-            env->DeleteLocalRef(wm);
-        }
-        // getWindow().getAttributes().preferredDisplayModeId = id; getWindow().setAttributes(lp);
-        if (chosenId != 0 && !env->ExceptionCheck())
-        {
-            const jmethodID getWindow = env->GetMethodID(actCls, "getWindow", "()Landroid/view/Window;");
-            jobject win = (getWindow && !env->ExceptionCheck()) ? env->CallObjectMethod(act, getWindow) : nullptr;
-            if (win && !env->ExceptionCheck())
-            {
-                jclass winCls = env->GetObjectClass(win);
-                const jmethodID getAttrs = winCls ? env->GetMethodID(winCls, "getAttributes",
-                                                                    "()Landroid/view/WindowManager$LayoutParams;")
-                                                  : nullptr;
-                jobject lp = (getAttrs && !env->ExceptionCheck()) ? env->CallObjectMethod(win, getAttrs) : nullptr;
-                if (lp && !env->ExceptionCheck())
-                {
-                    jclass lpCls = env->GetObjectClass(lp);
-                    const jfieldID modeIdField =
-                        lpCls ? env->GetFieldID(lpCls, "preferredDisplayModeId", "I") : nullptr;
-                    const jmethodID setAttrs =
-                        (winCls && modeIdField && !env->ExceptionCheck())
-                            ? env->GetMethodID(winCls, "setAttributes", "(Landroid/view/WindowManager$LayoutParams;)V")
-                            : nullptr;
-                    if (modeIdField && setAttrs && !env->ExceptionCheck())
-                    {
-                        env->SetIntField(lp, modeIdField, chosenId);
-                        env->CallVoidMethod(win, setAttrs, lp);
-                    }
-                    if (env->ExceptionCheck())
-                        chosenId = 0;
-                    if (lpCls)
-                        env->DeleteLocalRef(lpCls);
-                    env->DeleteLocalRef(lp);
-                }
-                else
-                    chosenId = 0;
-                if (winCls)
-                    env->DeleteLocalRef(winCls);
-                env->DeleteLocalRef(win);
-            }
-            else
-                chosenId = 0;
-        }
-        env->DeleteLocalRef(actCls);
-    }
-    if (env->ExceptionCheck())
-    {
-        env->ExceptionClear();
-        chosenId = 0;
-    }
-    std::fprintf(stderr, "[present-vk] DP1 preferredDisplayModeId=%d (%.2f Hz)%s\n", chosenId, chosenRate,
-                 chosenId ? "" : " FAILED");
-    return chosenId;
-}
-
 // DP1: request the 120 Hz panel on a new parent window: a fixed-source 120
-// vote on the window itself plus the forced 120 display mode. Called only when
-// PS2X_DISPLAY_HZ=120; the 60 path deliberately touches nothing.
-void requestDisplay120(ANativeWindow *window, ANativeActivity *activity)
+// vote on the window itself (the child layer gets its own vote in applyBuffer).
+// Called only when PS2X_DISPLAY_HZ=120; the 60 path deliberately touches nothing.
+// (A preferredDisplayModeId force was tried and dropped: Window.setAttributes
+// must run on the UI thread, and the Odin holds 120 on the votes alone.)
+void requestDisplay120(ANativeWindow *window)
 {
     const Api &a = api();
     if (a.setFrameRateWin)
@@ -338,7 +211,6 @@ void requestDisplay120(ANativeWindow *window, ANativeActivity *activity)
     {
         std::fprintf(stderr, "[present-vk] DP1 window frame rate NOT set (API < 30?)\n");
     }
-    applyPreferredDisplayMode120(activity);
 }
 
 void onComplete(void *context, TS *stats)
@@ -491,7 +363,7 @@ void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect,
                      ledger().windowGeneration());
         // DP1: one 120 Hz request per new window (nothing at all on the 60 path).
         if (ps2x_present_vk::displayHz() == 120)
-            requestDisplay120(window, activity);
+            requestDisplay120(window);
     }
     // VK2: the ledger's counts at every window change (lifecycle stress receipts).
     char stats[1024];
