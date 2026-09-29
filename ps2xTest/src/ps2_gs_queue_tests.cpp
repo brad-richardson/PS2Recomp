@@ -1556,6 +1556,78 @@ void register_ps2_gs_queue_tests()
             }
         });
 
+        // MP2 zero-copy: submitOwned, the zero-copy submit fill, and the
+        // pooled submit all drain the same order and bytes as submit, over
+        // random path/flag mixes (1..5 packets per drain, IMAGE + DIRECTHL).
+        tc.Run("MP2 zero-copy arbiter paths match submit", [](TestCase &t)
+        {
+            auto run = [](int mode, uint64_t seed, std::vector<uint32_t> &order,
+                          std::vector<uint8_t> &stream)
+            {
+                // mode: 0 submit, 1 submit+zeroCopy, 2 submit+zeroCopy+pool,
+                // 3 submitOwned, 4 submitOwned+pool set (must not use it).
+                GsPacketPool pool;
+                pool.setEnabled(mode == 2 || mode == 4);
+                if (mode == 2 || mode == 4)
+                {
+                    for (int i = 0; i < 8; ++i)
+                    {
+                        std::vector<uint8_t> b(64u, 0xAAu);
+                        pool.release(std::move(b));
+                    }
+                }
+                GifArbiter arb([&](const uint8_t *data, uint32_t size)
+                               {
+                                   uint32_t id = 0;
+                                   std::memcpy(&id, data + 16, sizeof(id));
+                                   order.push_back(id);
+                                   stream.insert(stream.end(), data, data + size);
+                               });
+                arb.setSortSkip(true);
+                arb.setZeroCopy(mode == 1 || mode == 2);
+                if (mode == 2 || mode == 4)
+                    arb.setPacketPool(&pool);
+                uint64_t rng = seed;
+                uint32_t id = 0;
+                for (int round = 0; round < 200; ++round)
+                {
+                    rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                    const int n = 1 + static_cast<int>(rng % 5u);
+                    for (int k = 0; k < n; ++k)
+                    {
+                        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                        std::vector<uint8_t> pkt(32u, 0u);
+                        const GifPathId path = static_cast<GifPathId>(1u + rng % 3u);
+                        if (path == GifPathId::Path3 && (rng >> 8) % 2u == 0u)
+                            pkt[7] = 0x08u; // tag FLG=2 (IMAGE)
+                        std::memcpy(pkt.data() + 16, &id, sizeof(id));
+                        ++id;
+                        const bool hl = (rng >> 12) % 2u == 0u;
+                        if (mode >= 3)
+                            arb.submitOwned(path, std::move(pkt), hl);
+                        else
+                            arb.submit(path, pkt.data(), static_cast<uint32_t>(pkt.size()), hl);
+                    }
+                    arb.drain();
+                }
+            };
+            for (uint64_t seed : {0x9E3779B97F4A7C15ull, 0x1234567ull})
+            {
+                std::vector<uint32_t> base;
+                std::vector<uint8_t> baseStream;
+                run(0, seed, base, baseStream);
+                t.IsTrue(!base.empty(), "baseline drain should deliver packets");
+                for (int mode = 1; mode <= 4; ++mode)
+                {
+                    std::vector<uint32_t> order;
+                    std::vector<uint8_t> stream;
+                    run(mode, seed, order, stream);
+                    t.IsTrue(order == base, "zero-copy mode should drain the same order as submit");
+                    t.IsTrue(stream == baseStream, "zero-copy mode should drain the same bytes as submit");
+                }
+            }
+        });
+
         // GP4 H5: pooled handoff gives the same consumed stream and VRAM as
         // the direct handoff (pool on vs off, identical submits).
         tc.Run("GP4 H5 pooled queue matches direct queue", [](TestCase &t)

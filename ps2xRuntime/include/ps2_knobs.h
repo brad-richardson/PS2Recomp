@@ -244,6 +244,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_GS_TURNIP",
         "PS2X_GS_WAKE_CMDS",
         "PS2X_GS_WORKER_CPUS",
+        "PS2X_GS_ZERO_COPY",
         "PS2X_HOST_PACE_RATE",
         "PS2X_HOST_PACE_RATE2",
         "PS2X_HOST_PACE_TICK2",

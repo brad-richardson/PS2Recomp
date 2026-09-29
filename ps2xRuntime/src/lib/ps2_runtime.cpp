@@ -1721,6 +1721,17 @@ bool PS2Runtime::syncCoreSubsystems()
         if (on)
             std::cerr << "[mtvu] mp2 census on (PS2X_MP2_CENSUS=1)" << std::endl;
     }
+    // MP2 zero-copy GIF (PS2X_GS_ZERO_COPY, default on): vector-owned
+    // packets (MTVU pieces, masked-Path3 fifo) move into the arbiter, and
+    // raw submits fill the pooled buffer with one copy and no zero-fill.
+    // Same bytes, same order; =0 keeps the pre-MP2 copy path.
+    bool gsZeroCopy = true;
+    if (const char *env = std::getenv("PS2X_GS_ZERO_COPY"))
+        gsZeroCopy = env[0] != '0';
+    m_gifArbiter.setZeroCopy(gsZeroCopy);
+    m_memory.setGsZeroCopy(gsZeroCopy);
+    std::cerr << "[gs:handoff] zero-copy GIF " << (gsZeroCopy ? "on" : "off")
+              << " (PS2X_GS_ZERO_COPY=" << (gsZeroCopy ? 1 : 0) << ")" << std::endl;
     // E33: per-path GIF census + GS draw attribution. The listener runs
     // before each packet's process call (same thread, synchronous drain),
     // so draws kicked while processing land on this packet's path. One

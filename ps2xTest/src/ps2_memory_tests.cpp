@@ -1295,6 +1295,49 @@ void register_ps2_memory_tests()
             t.IsTrue(secondOk, "second queued PATH3 packet should flush in-order");
         });
 
+        tc.Run("MP2 zero-copy masked PATH3 moves match the copy path", [](TestCase &t)
+        {
+            auto run = [](bool owned, std::vector<std::vector<uint8_t>> &out)
+            {
+                PS2Memory mem;
+                if (!mem.initialize())
+                    return false;
+                GifArbiter arbiter([&](const uint8_t *data, uint32_t sizeBytes)
+                                   { out.emplace_back(data, data + sizeBytes); });
+                arbiter.setZeroCopy(owned);
+                mem.setGifArbiter(&arbiter);
+                mem.setGsZeroCopy(owned);
+                const uint32_t setMask = makeVifCmd(0x06u, 0u, 0x8000u);
+                mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&setMask), sizeof(setMask));
+                std::vector<uint8_t> packetA(48u), packetB(64u);
+                for (uint32_t i = 0; i < 48u; ++i)
+                    packetA[i] = static_cast<uint8_t>(0x10u + i);
+                for (uint32_t i = 0; i < 64u; ++i)
+                    packetB[i] = static_cast<uint8_t>(0x80u + i);
+                if (owned)
+                {
+                    mem.submitGifPacketOwned(GifPathId::Path3, std::move(packetA));
+                    mem.submitGifPacketOwned(GifPathId::Path3, std::move(packetB));
+                }
+                else
+                {
+                    mem.submitGifPacket(GifPathId::Path3, packetA.data(), static_cast<uint32_t>(packetA.size()));
+                    mem.submitGifPacket(GifPathId::Path3, packetB.data(), static_cast<uint32_t>(packetB.size()));
+                }
+                if (!out.empty())
+                    return false; // masked submits must queue, not emit
+                const uint32_t clearMask = makeVifCmd(0x06u, 0u, 0x0000u);
+                mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&clearMask), sizeof(clearMask));
+                mem.setGifArbiter(nullptr);
+                return true;
+            };
+            std::vector<std::vector<uint8_t>> copyOut, ownedOut;
+            t.IsTrue(run(false, copyOut), "copy-path masked submits should queue then flush");
+            t.IsTrue(run(true, ownedOut), "owned masked submits should queue then flush");
+            t.Equals(copyOut.size(), static_cast<size_t>(2u), "copy path should flush both queued packets");
+            t.IsTrue(ownedOut == copyOut, "owned masked flush should match the copy path byte-for-byte");
+        });
+
         tc.Run("PATH3 mask releases one EOP packet per MSKPATH3 unmask window", [](TestCase &t)
         {
             // RR1: SSX 3 masks PATH3, kicks one GIF chain holding many EOP

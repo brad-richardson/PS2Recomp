@@ -89,9 +89,37 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
     pkt.path3Image = (pathId == GifPathId::Path3) && isImagePacket(data, sizeBytes);
     if (m_pool) // GP4 H5: pooled buffer when one fits, else a fresh vector
         pkt.data = m_pool->acquire(sizeBytes);
-    pkt.data.resize(sizeBytes);
-    std::memcpy(pkt.data.data(), data, sizeBytes);
+    if (m_zeroCopy)
+    {
+        // MP2: one copy into spare capacity, no zero-fill (a pooled hit
+        // arrives size 0 with room; a miss allocates here). Same bytes as
+        // resize+memcpy.
+        pkt.data.insert(pkt.data.end(), data, data + sizeBytes);
+    }
+    else
+    {
+        pkt.data.resize(sizeBytes);
+        std::memcpy(pkt.data.data(), data, sizeBytes);
+    }
     capturePacket(pathId, data, sizeBytes);
+    m_queue.push_back(std::move(pkt));
+}
+
+void GifArbiter::submitOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl)
+{
+    ps2_mtvu::touch(ps2_mtvu::Site::ArbSubmit); // MT1: unit-owned
+    const uint32_t sizeBytes = static_cast<uint32_t>(bytes.size());
+    if (bytes.empty() || sizeBytes < 16 || !m_processFn)
+        return;
+
+    if (ps2_mtvu::mp2Census()) // MP2: per-path GIF bytes (logged, not hashed)
+        ps2_mtvu::noteMp2GifSubmit(static_cast<int>(pathId), sizeBytes, true);
+    GifArbiterPacket pkt;
+    pkt.pathId = pathId;
+    pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
+    pkt.path3Image = (pathId == GifPathId::Path3) && isImagePacket(bytes.data(), sizeBytes);
+    capturePacket(pathId, bytes.data(), sizeBytes);
+    pkt.data = std::move(bytes);
     m_queue.push_back(std::move(pkt));
 }
 

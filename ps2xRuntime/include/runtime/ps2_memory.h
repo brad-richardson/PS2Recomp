@@ -393,6 +393,12 @@ public:
     static std::vector<uint32_t> splitGifPacketsAtEop(const uint8_t *data, uint32_t sizeBytes);
 
     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
+    // MP2 zero-copy: submitGifPacket by ownership (masked-Path3 fifo and the
+    // arbiter take the vector; the no-arbiter callback borrows it). Same
+    // taps, same order, same drains as submitGifPacket.
+    void submitGifPacketOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately = true, bool path2DirectHl = false);
+    // MP2 zero-copy (PS2X_GS_ZERO_COPY, default on). Set once, before DMAs run.
+    void setGsZeroCopy(bool on) { m_gsZeroCopy = on; }
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     bool tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint32_t chcr);
@@ -458,6 +464,7 @@ public:
     GifPacketCallback m_gifPacketCallback;
     GifArbiter *m_gifArbiter = nullptr;
     GS *m_gsFrontend = nullptr;
+    bool m_gsZeroCopy = false; // MP2 (set before DMAs run)
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
 

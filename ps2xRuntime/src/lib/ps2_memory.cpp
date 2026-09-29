@@ -3115,13 +3115,20 @@ void PS2Memory::processPendingTransfers()
 
     if (mtvuSubmit)
     {
-        ps2_mtvu::submit([this, pieces = std::move(mtvuPieces)]()
+        ps2_mtvu::submit([this, pieces = std::move(mtvuPieces)]() mutable
                          {
-            for (const MtvuPiece &piece : pieces)
+            for (MtvuPiece &piece : pieces)
             {
                 const uint32_t size = static_cast<uint32_t>(piece.bytes.size());
                 if (piece.gif)
-                    submitGifPacket(GifPathId::Path3, piece.bytes.data(), size, false);
+                {
+                    // MP2: the piece vector becomes the arbiter packet (no
+                    // copy); knob-off copies as before.
+                    if (m_gsZeroCopy)
+                        submitGifPacketOwned(GifPathId::Path3, std::move(piece.bytes), false);
+                    else
+                        submitGifPacket(GifPathId::Path3, piece.bytes.data(), size, false);
+                }
                 else
                     processVIF1Data(piece.bytes.data(), size);
             }
@@ -3267,7 +3274,11 @@ void PS2Memory::releaseOneMaskedPath3Packet()
                        gs_regs.vsyncTick.load(std::memory_order_relaxed));
     if (m_gifArbiter)
     {
-        m_gifArbiter->submit(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()), false);
+        // MP2: the fifo vector becomes the arbiter packet (no copy).
+        if (m_gsZeroCopy)
+            m_gifArbiter->submitOwned(GifPathId::Path3, std::move(packet), false);
+        else
+            m_gifArbiter->submit(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()), false);
         const GifDrainBatch batch(m_gsFrontend);
         m_gifArbiter->drain();
     }
@@ -3290,6 +3301,9 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
         return;
 
     ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "p3 flush packets=%zu", m_path3MaskedFifo.size());
+    // MP2: with an arbiter, each fifo vector becomes the arbiter packet (no
+    // copy); the no-arbiter callback and knob-off keep the copy path.
+    const bool owned = m_gsZeroCopy && m_gifArbiter != nullptr;
     auto emit = [&](const uint8_t *packetData, uint32_t packetSize)
     {
         if (m_gifArbiter)
@@ -3298,7 +3312,7 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
             m_gifPacketCallback(packetData, packetSize);
     };
 
-    for (const auto &packet : m_path3MaskedFifo)
+    for (auto &packet : m_path3MaskedFifo)
     {
         if (packet.size() >= 16u)
         {
@@ -3306,7 +3320,10 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
             ps2_pk::setBases(m_rdram, PS2_RAM_SIZE, m_scratchpad, PS2_SCRATCHPAD_SIZE);
             ps2_pk::noteSubmit("3", packet.data(), static_cast<uint32_t>(packet.size()),
                                gs_regs.vsyncTick.load(std::memory_order_relaxed));
-            emit(packet.data(), static_cast<uint32_t>(packet.size()));
+            if (owned)
+                m_gifArbiter->submitOwned(GifPathId::Path3, std::move(packet), false);
+            else
+                emit(packet.data(), static_cast<uint32_t>(packet.size()));
         }
     }
     m_path3MaskedFifo.clear();
@@ -3356,6 +3373,53 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
         m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl);
     else if (m_gifPacketCallback)
         m_gifPacketCallback(data, sizeBytes);
+
+    if (m_gifArbiter && drainImmediately)
+    {
+        const GifDrainBatch batch(m_gsFrontend);
+        m_gifArbiter->drain();
+    }
+}
+
+void PS2Memory::submitGifPacketOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately, bool path2DirectHl)
+{
+    ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
+    if (bytes.size() < 16)
+        return;
+
+    ps2_pk::setBases(m_rdram, PS2_RAM_SIZE, m_scratchpad, PS2_SCRATCHPAD_SIZE);
+
+    const uint32_t sizeBytes = static_cast<uint32_t>(bytes.size());
+    if (pathId == GifPathId::Path3)
+    {
+        ps2_e7::packet(gs_regs.vsyncTick.load(), m_path3Masked ? "path3-queue" : "path3-send", bytes.data(), sizeBytes, m_path3Masked, m_path3MaskedFifo.size());
+        ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "p3 %s bytes=%u queued=%zu", m_path3Masked ? "queue" : "send", sizeBytes, m_path3MaskedFifo.size());
+        if (m_path3Masked)
+        {
+            if (path3EopGateEnabled())
+            {
+                uint32_t start = 0u;
+                for (const uint32_t end : splitGifPacketsAtEop(bytes.data(), sizeBytes))
+                {
+                    m_path3MaskedFifo.emplace_back(bytes.data() + start, bytes.data() + end);
+                    start = end;
+                }
+            }
+            else
+            {
+                m_path3MaskedFifo.push_back(std::move(bytes));
+            }
+            return;
+        }
+        flushMaskedPath3Packets(false);
+    }
+
+    ps2_pk::noteSubmit(pathId == GifPathId::Path1 ? "1" : (pathId == GifPathId::Path2 ? "2" : "3"),
+                       bytes.data(), sizeBytes, gs_regs.vsyncTick.load(std::memory_order_relaxed));
+    if (m_gifArbiter)
+        m_gifArbiter->submitOwned(pathId, std::move(bytes), path2DirectHl);
+    else if (m_gifPacketCallback)
+        m_gifPacketCallback(bytes.data(), sizeBytes);
 
     if (m_gifArbiter && drainImmediately)
     {
