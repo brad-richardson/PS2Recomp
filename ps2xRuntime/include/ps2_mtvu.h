@@ -441,6 +441,102 @@ namespace ps2_mtvu
             return v;
         }
 
+        // MP2 census: UNPACK fast-path vs fallback per format + GIF bytes per
+        // path (PS2X_MP2_CENSUS=1, default off). Logged only, never hashed:
+        // det-neutral. The unit thread (or the EE, on the inline path)
+        // accumulates; the summaries below exchange per window.
+        inline std::atomic<bool> &mp2CensusFlag()
+        {
+            static std::atomic<bool> v{false};
+            return v;
+        }
+        struct Mp2Unpack
+        {
+            // Format slot = vl | vn << 2 (vl minor, vn major; 16 combos).
+            std::atomic<uint64_t> bulkN[16];
+            std::atomic<uint64_t> bulkB[16];
+            std::atomic<uint64_t> genN[16];
+            std::atomic<uint64_t> genB[16];
+            std::atomic<uint64_t> noopN[16];
+            std::atomic<uint64_t> noopB[16];
+            // Generic-path reject reason (first failing bulk clause): 0 knob,
+            // 1 format (!V4_32), 2 mode, 3 cl!=wl, 4 mask.
+            std::atomic<uint64_t> rejN[5];
+            std::atomic<uint64_t> rejB[5];
+        };
+        inline Mp2Unpack &mp2Unpack()
+        {
+            static Mp2Unpack v{};
+            return v;
+        }
+        struct Mp2Gif
+        {
+            std::atomic<uint64_t> n[4];     // by path id 1..3
+            std::atomic<uint64_t> bytes[4]; // by path id 1..3
+            std::atomic<uint64_t> owned[4]; // submitOwned share (MP2 zero-copy)
+        };
+        inline Mp2Gif &mp2Gif()
+        {
+            static Mp2Gif v{};
+            return v;
+        }
+        inline void mp2Summary(uint64_t tick)
+        {
+            if (!mp2CensusFlag().load(std::memory_order_relaxed))
+                return;
+            // Slot = vl | vn << 2 (vl minor: 0=32, 1=16, 2=8, 3=5-or-16).
+            static const char *fmtName[16] = {
+                "S-32", "S-16", "S-8", "S-16v",      // vn=0 (S)
+                "V2-32", "V2-16", "V2-8", "V2-16v",  // vn=1 (V2)
+                "V3-32", "V3-16", "V3-8", "V3-16v",  // vn=2 (V3)
+                "V4-32", "V4-16", "V4-8", "V4-5"};   // vn=3 (V4)
+            Mp2Unpack &u = mp2Unpack();
+            uint64_t bulkN = 0, bulkB = 0, genN = 0, genB = 0, noopN = 0, noopB = 0;
+            std::fprintf(stderr, "[mtvu] mp2-unpack tick=%llu",
+                         static_cast<unsigned long long>(tick));
+            for (int f = 0; f < 16; ++f)
+            {
+                const uint64_t bn = u.bulkN[f].exchange(0u, std::memory_order_relaxed);
+                const uint64_t bb = u.bulkB[f].exchange(0u, std::memory_order_relaxed);
+                const uint64_t gn = u.genN[f].exchange(0u, std::memory_order_relaxed);
+                const uint64_t gb = u.genB[f].exchange(0u, std::memory_order_relaxed);
+                const uint64_t nn = u.noopN[f].exchange(0u, std::memory_order_relaxed);
+                const uint64_t nb = u.noopB[f].exchange(0u, std::memory_order_relaxed);
+                bulkN += bn; bulkB += bb; genN += gn; genB += gb; noopN += nn; noopB += nb;
+                if (bn + gn + nn > 0u)
+                    std::fprintf(stderr, " %s=b%llu/%llu,g%llu/%llu,n%llu/%llu", fmtName[f],
+                                 static_cast<unsigned long long>(bn), static_cast<unsigned long long>(bb),
+                                 static_cast<unsigned long long>(gn), static_cast<unsigned long long>(gb),
+                                 static_cast<unsigned long long>(nn), static_cast<unsigned long long>(nb));
+            }
+            static const char *rejName[5] = {"knob", "format", "mode", "clwl", "mask"};
+            std::fprintf(stderr, "\n[mtvu] mp2-unpack-sum tick=%llu bulk=%llu/%llu generic=%llu/%llu noop=%llu/%llu",
+                         static_cast<unsigned long long>(tick),
+                         static_cast<unsigned long long>(bulkN), static_cast<unsigned long long>(bulkB),
+                         static_cast<unsigned long long>(genN), static_cast<unsigned long long>(genB),
+                         static_cast<unsigned long long>(noopN), static_cast<unsigned long long>(noopB));
+            for (int r = 0; r < 5; ++r)
+            {
+                const uint64_t rn = u.rejN[r].exchange(0u, std::memory_order_relaxed);
+                const uint64_t rb = u.rejB[r].exchange(0u, std::memory_order_relaxed);
+                if (rn > 0u)
+                    std::fprintf(stderr, " rej-%s=%llu/%llu", rejName[r],
+                                 static_cast<unsigned long long>(rn), static_cast<unsigned long long>(rb));
+            }
+            Mp2Gif &g = mp2Gif();
+            std::fprintf(stderr, "\n[mtvu] mp2-gif tick=%llu", static_cast<unsigned long long>(tick));
+            for (int p = 1; p <= 3; ++p)
+            {
+                const uint64_t pn = g.n[p].exchange(0u, std::memory_order_relaxed);
+                const uint64_t pb = g.bytes[p].exchange(0u, std::memory_order_relaxed);
+                const uint64_t po = g.owned[p].exchange(0u, std::memory_order_relaxed);
+                std::fprintf(stderr, " p%d=%llu/%llu/owned%llu", p,
+                             static_cast<unsigned long long>(pn), static_cast<unsigned long long>(pb),
+                             static_cast<unsigned long long>(po));
+            }
+            std::fprintf(stderr, "\n");
+        }
+
         inline void threadedSummary(uint64_t tick)
         {
             Worker &w = worker();
@@ -460,6 +556,7 @@ namespace ps2_mtvu
                     std::fprintf(stderr, " V:%s=%llu", siteName(static_cast<Site>(i)),
                                  static_cast<unsigned long long>(w.violations[i]));
             std::fprintf(stderr, "\n");
+            mp2Summary(tick); // MP2 census (no-op unless PS2X_MP2_CENSUS=1)
         }
 
         struct Census
@@ -560,6 +657,7 @@ namespace ps2_mtvu
                     std::fprintf(stderr, " V:%s=%llu", siteName(static_cast<Site>(i)),
                                  static_cast<unsigned long long>(c.violations[i]));
             std::fprintf(stderr, "\n");
+            mp2Summary(c.tick); // MP2 census (no-op unless PS2X_MP2_CENSUS=1)
         }
     }
 
@@ -682,6 +780,54 @@ namespace ps2_mtvu
     inline void noteVif1Unpack()
     {
         detail::vif1Unpacks().fetch_add(1u, std::memory_order_relaxed);
+    }
+
+    // MP2 census (PS2X_MP2_CENSUS=1): UNPACK outcome per format + GIF bytes
+    // per path. Callers check mp2Census() first (one relaxed load); the note
+    // calls are 2-3 relaxed adds. Logged, never hashed.
+    inline bool mp2Census()
+    {
+        return detail::mp2CensusFlag().load(std::memory_order_relaxed);
+    }
+    inline void setMP2Census(bool on)
+    {
+        detail::mp2CensusFlag().store(on, std::memory_order_relaxed);
+    }
+    // outcome: 0 bulk, 1 generic, 2 noop; reject: first failing bulk clause
+    // (0 knob, 1 format, 2 mode, 3 cl!=wl, 4 mask), -1 when bulk/noop.
+    inline void noteMp2Unpack(int fmt, int outcome, int reject, uint32_t bytes)
+    {
+        detail::Mp2Unpack &u = detail::mp2Unpack();
+        if (outcome == 0)
+        {
+            u.bulkN[fmt].fetch_add(1u, std::memory_order_relaxed);
+            u.bulkB[fmt].fetch_add(bytes, std::memory_order_relaxed);
+        }
+        else if (outcome == 1)
+        {
+            u.genN[fmt].fetch_add(1u, std::memory_order_relaxed);
+            u.genB[fmt].fetch_add(bytes, std::memory_order_relaxed);
+            if (reject >= 0 && reject < 5)
+            {
+                u.rejN[reject].fetch_add(1u, std::memory_order_relaxed);
+                u.rejB[reject].fetch_add(bytes, std::memory_order_relaxed);
+            }
+        }
+        else
+        {
+            u.noopN[fmt].fetch_add(1u, std::memory_order_relaxed);
+            u.noopB[fmt].fetch_add(bytes, std::memory_order_relaxed);
+        }
+    }
+    inline void noteMp2GifSubmit(int path, uint32_t bytes, bool owned)
+    {
+        if (path < 1 || path > 3)
+            return;
+        detail::Mp2Gif &g = detail::mp2Gif();
+        g.n[path].fetch_add(1u, std::memory_order_relaxed);
+        g.bytes[path].fetch_add(bytes, std::memory_order_relaxed);
+        if (owned)
+            g.owned[path].fetch_add(1u, std::memory_order_relaxed);
     }
 
     // R1: a masked CSR read touches the priv block without a sync.

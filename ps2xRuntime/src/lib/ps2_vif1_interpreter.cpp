@@ -924,6 +924,31 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                 (vif1_regs.mode & 3u) == 0u && cl == wl && m_vu1Data != nullptr &&
                 totalBytes > 0u && pos + totalBytes <= sizeBytes &&
                 (!maskEnable || vifUnpackMaskAllData(vif1_regs.mask, wl));
+            // MP2 census: outcome per format + first failing bulk clause
+            // (mirrors the gate above; logged, never hashed).
+            if (ps2_mtvu::mp2Census())
+            {
+                const int mp2Fmt = (vl & 3u) | ((vn & 3u) << 2);
+                const bool mp2Bounds =
+                    m_vu1Data != nullptr && totalBytes > 0u && pos + totalBytes <= sizeBytes;
+                if (!mp2Bounds)
+                    ps2_mtvu::noteMp2Unpack(mp2Fmt, 2, -1, totalBytes);
+                else if (unpackBulk)
+                    ps2_mtvu::noteMp2Unpack(mp2Fmt, 0, -1, totalBytes);
+                else
+                {
+                    int rej = 4;
+                    if (!vifFastUnpackEnabled())
+                        rej = 0;
+                    else if (!(vl == 0u && vn == 3u))
+                        rej = 1;
+                    else if ((vif1_regs.mode & 3u) != 0u)
+                        rej = 2;
+                    else if (cl != wl)
+                        rej = 3;
+                    ps2_mtvu::noteMp2Unpack(mp2Fmt, 1, rej, totalBytes);
+                }
+            }
             if (unpackBulk)
             {
                 const uint8_t *bulkSrc = data + pos;

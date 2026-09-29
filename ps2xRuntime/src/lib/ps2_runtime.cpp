@@ -1711,6 +1711,16 @@ bool PS2Runtime::syncCoreSubsystems()
                   << ", H5 pooled packet buffers, H6 pop batch=" << GsWorker::kPopBatch
                   << ", MP1 lean=" << (lean ? 1 : 0) << " alloc-lean=" << (allocLean ? 1 : 0) << std::endl;
     }
+    // MP2 census: UNPACK fast-path vs fallback per format + GIF bytes per
+    // path (PS2X_MP2_CENSUS=1, default off). Logged, never hashed; MTVU
+    // stays threaded (this flag is not in configure()'s diag list).
+    if (const char *env = std::getenv("PS2X_MP2_CENSUS"))
+    {
+        const bool on = env[0] == '1' && env[1] == '\0';
+        ps2_mtvu::setMP2Census(on);
+        if (on)
+            std::cerr << "[mtvu] mp2 census on (PS2X_MP2_CENSUS=1)" << std::endl;
+    }
     // E33: per-path GIF census + GS draw attribution. The listener runs
     // before each packet's process call (same thread, synchronous drain),
     // so draws kicked while processing land on this packet's path. One
