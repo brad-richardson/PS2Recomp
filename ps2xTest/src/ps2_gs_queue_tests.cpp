@@ -1247,6 +1247,143 @@ void register_ps2_gs_queue_tests()
             worker.stop();
         });
 
+        // MP1 L2: lean handoff + thread-local unit batches deliver every
+        // command in FIFO order with fewer wakes than the GF1 path, and
+        // leave nothing stale at job-end flushes.
+        tc.Run("MP1 lean local batches keep FIFO order and cut wakes", [](TestCase &t)
+        {
+            auto run = [](bool lean, std::vector<uint32_t> &seen, uint64_t &wakes, uint64_t &watchdog, bool &quiet)
+            {
+                GsWorker worker(0u, 0u, [&](GsCommand &cmd) { seen.push_back(cmd.u32b); });
+                worker.setDeferredWakes(64u, 256u * 1024u);
+                worker.setLeanHandoff(lean);
+                worker.start();
+                uint32_t next = 0;
+                uint64_t rng = 0x9E3779B97F4A7C15ull;
+                std::thread unit(
+                    [&]
+                    {
+                        for (int job = 0; job < 200; ++job)
+                        {
+                            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                            const int drains = 1 + static_cast<int>(rng % 40u);
+                            for (int d = 0; d < drains; ++d)
+                            {
+                                if (lean)
+                                    GsWorker::beginLocalBatch();
+                                else
+                                    worker.beginBatch();
+                                GsCommand c;
+                                c.kind = GsCmdKind::GifPacket;
+                                c.u32b = next++;
+                                c.bytes.resize(16u + (rng % 64u) * 16u, 0x5Au);
+                                worker.enqueue(std::move(c));
+                                if (lean)
+                                    GsWorker::endLocalBatch();
+                                else
+                                    worker.endBatch(true);
+                                if ((rng >> 20) % 7u == 0u)
+                                    std::this_thread::sleep_for(std::chrono::microseconds(rng % 300u));
+                            }
+                            worker.flushWake(); // unit job end
+                        }
+                    });
+                unit.join();
+                for (int i = 0; i < 400 && !worker.isQuiescent(); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                quiet = worker.isQuiescent();
+                worker.stop();
+                wakes = worker.wakeCount();
+                watchdog = worker.watchdogCount();
+                return next;
+            };
+            std::vector<uint32_t> seenLean, seenGf1;
+            uint64_t wakesLean = 0, wakesGf1 = 0, wdLean = 0, wdGf1 = 0;
+            bool quietLean = false, quietGf1 = false;
+            const uint32_t nLean = run(true, seenLean, wakesLean, wdLean, quietLean);
+            const uint32_t nGf1 = run(false, seenGf1, wakesGf1, wdGf1, quietGf1);
+            t.Equals(static_cast<uint64_t>(seenLean.size()), static_cast<uint64_t>(nLean), "every command should execute");
+            bool ordered = true;
+            for (size_t i = 0; i < seenLean.size(); ++i)
+                ordered = ordered && seenLean[i] == static_cast<uint32_t>(i);
+            t.IsTrue(ordered, "lean commands should execute in FIFO order");
+            t.IsTrue(seenLean == seenGf1, "lean and GF1 paths should execute the same sequence");
+            t.Equals(wdLean, 0ull, "no deferred wake should go stale with job-end flushes");
+            t.IsTrue(quietLean, "the worker should reach quiescence after the last flush");
+            t.IsTrue(wakesLean <= wakesGf1, "lean handoff should not notify more than the GF1 path");
+            (void)nGf1;
+            (void)wdGf1;
+            (void)quietGf1;
+        });
+
+        // MP1 L2: a local batch that fills the queue while the worker sleeps
+        // wakes it before blocking (lean notifies a sleeping worker only).
+        tc.Run("MP1 lean local batch that fills the queue wakes the worker", [](TestCase &t)
+        {
+            std::atomic<int> executed{0};
+            GsWorker worker(8u, 0u, [&](GsCommand &) { executed.fetch_add(1, std::memory_order_relaxed); });
+            worker.setDeferredWakes(1024u, 64u * 1024u * 1024u);
+            worker.setLeanHandoff(true);
+            worker.start();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20)); // worker asleep on an empty queue
+            GsWorker::beginLocalBatch();
+            for (int i = 0; i < 100; ++i)
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.bytes.resize(16u, 1u);
+                worker.enqueue(std::move(c));
+            }
+            GsWorker::endLocalBatch();
+            worker.flushWake();
+            worker.stop();
+            t.Equals(executed.load(std::memory_order_relaxed), 100, "all 100 commands should execute");
+        });
+
+        // MP1 L2: an RPC enqueued inside a local batch (same thread) and one
+        // from another thread both complete while the batch is open.
+        tc.Run("MP1 lean RPCs complete during a local batch", [](TestCase &t)
+        {
+            GsWorker worker(0u, 0u, [](GsCommand &) {});
+            worker.setDeferredWakes(64u, 256u * 1024u);
+            worker.setLeanHandoff(true);
+            worker.start();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            GsWorker::beginLocalBatch();
+            {
+                GsCommand pkt;
+                pkt.kind = GsCmdKind::GifPacket;
+                pkt.bytes.resize(16u, 1u);
+                worker.enqueue(std::move(pkt)); // stays deferred
+                GsCommand c;
+                c.kind = GsCmdKind::Fence;
+                c.rpc = std::make_shared<GsRpcBase>();
+                std::shared_ptr<GsRpcBase> rpc = c.rpc;
+                worker.enqueue(std::move(c));
+                rpc->wait();
+            }
+            std::atomic<bool> done{false};
+            std::thread other(
+                [&]
+                {
+                    GsCommand c;
+                    c.kind = GsCmdKind::Fence;
+                    c.rpc = std::make_shared<GsRpcBase>();
+                    std::shared_ptr<GsRpcBase> rpc = c.rpc;
+                    worker.enqueue(std::move(c));
+                    rpc->wait();
+                    done.store(true, std::memory_order_release);
+                });
+            for (int i = 0; i < 200 && !done.load(std::memory_order_acquire); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            t.IsTrue(done.load(std::memory_order_acquire), "another thread's RPC should complete during the local batch");
+            GsWorker::endLocalBatch();
+            other.join();
+            worker.flushWake();
+            worker.stop();
+            t.Equals(worker.enqueuedCount(), worker.executedCount(), "every command should execute");
+        });
+
         // GF1 H1/H2: one command carrying the path gives the same consumed
         // sequence and VRAM as NoteGifPath + GifPacket.
         tc.Run("GF1 processGIFPacketWithPath matches noteGifPath + processGIFPacket", [](TestCase &t)

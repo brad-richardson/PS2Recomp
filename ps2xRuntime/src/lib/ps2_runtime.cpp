@@ -1631,6 +1631,14 @@ bool PS2Runtime::syncCoreSubsystems()
         m_gs.setWorkerDeferredWakes(wakeCmds, wakeBytes);
         if (wakeCmds != 0u)
             ps2_mtvu::jobEndFn() = [this]() { m_gs.flushWorkerWake(); };
+        // MP1 L2: lean handoff (sleep-aware notifies, one worker lock per pop,
+        // lock-free unit drain batches). Wake timing only: same commands, same
+        // order. Needs the deferred wakes (the job-end flush above); on by
+        // default with them, PS2X_GS_LEAN_HANDOFF=0 keeps the pre-MP1 path.
+        bool lean = wakeCmds != 0u;
+        if (const char *env = std::getenv("PS2X_GS_LEAN_HANDOFF"))
+            lean = lean && env[0] != '0';
+        m_gs.setWorkerLeanHandoff(lean);
         // GP4 H5: pooled packet buffers (producers acquire, the worker
         // releases after execute). Same bytes, same order; alloc-free only.
         m_gs.setPacketPoolEnabled(true);
@@ -1641,7 +1649,8 @@ bool PS2Runtime::syncCoreSubsystems()
         std::cerr << "[gs:handoff] diet on (PS2X_GS_HANDOFF_DIET=1): H1 one command per packet, H2 moved bytes, "
                   << "H3 deferred wakes cmds=" << wakeCmds << " bytes=" << wakeBytes
                   << ", H4 queue descriptors=" << gsQueueDescriptors()
-                  << ", H5 pooled packet buffers, H6 pop batch=" << GsWorker::kPopBatch << std::endl;
+                  << ", H5 pooled packet buffers, H6 pop batch=" << GsWorker::kPopBatch
+                  << ", MP1 lean=" << (lean ? 1 : 0) << std::endl;
     }
     // E33: per-path GIF census + GS draw attribution. The listener runs
     // before each packet's process call (same thread, synchronous drain),

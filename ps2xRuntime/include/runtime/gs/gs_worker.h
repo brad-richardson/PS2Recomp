@@ -265,6 +265,22 @@ public:
     // GP4 H6: worker pop batch size, 1 (default, one-by-one) to kPopBatch.
     // Set once, before producers run.
     void setPopBatch(size_t n);
+    // MP1 L2 (PS2X_GS_LEAN_HANDOFF, on with the diet): fewer mutex rounds and
+    // futex calls per handoff. (a) Producers notify m_hasWork only while the
+    // worker sleeps, and the worker notifies m_hasSpace only while a producer
+    // waits for space; (b) the worker clears m_executing inside its next pop
+    // lock instead of a second lock per pop; (c) local batches (below). Same
+    // commands, same order, same bounds: wake timing only. Set once, before
+    // producers run, and only together with deferred wakes.
+    void setLeanHandoff(bool on);
+    bool leanHandoff() const { return m_lean.load(std::memory_order_relaxed); }
+    // MP1 L2 (c): a thread-local batch for the MTVU unit thread (lean + deferred
+    // wakes on). No mutex round: enqueues inside it defer their wake like an
+    // endBatch(mayDefer) would (wake now once the deferred-wake thresholds are
+    // reached, else leave it pending for flushWake at job end). Nest-safe;
+    // the thread must call flushWake() before it waits on anything but an RPC.
+    static void beginLocalBatch();
+    static void endLocalBatch();
 
     size_t pendingCount() const;
     size_t pendingBytes() const;
@@ -303,6 +319,11 @@ private:
     bool m_stopRequested = false;
     bool m_running = false;
     std::thread m_thread;
+    // MP1 L2 (guarded by m_mutex): the worker is (about to be) blocked on
+    // m_hasWork / producers blocked on m_hasSpace. Lean mode notifies only then.
+    bool m_workerIdle = false;
+    uint32_t m_spaceWaiters = 0;
+    std::atomic<bool> m_lean{false}; // fixed before producers run
 
     // Monotonic diagnostics, safe to read from any thread.
     std::atomic<uint64_t> m_enqueuedCount{0};

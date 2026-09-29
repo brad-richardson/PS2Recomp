@@ -14,7 +14,32 @@ namespace
 {
 // PT2 Part 2: per-thread enqueue-wait sink (see setEnqueueWaitSink).
 thread_local uint64_t *t_enqueueWaitSink = nullptr;
+// MP1 L2: this thread's local batch depth (see beginLocalBatch).
+thread_local uint32_t t_localBatchDepth = 0;
+
+uint64_t steadyNowNs()
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
 } // namespace
+
+void GsWorker::beginLocalBatch()
+{
+    ++t_localBatchDepth;
+}
+
+void GsWorker::endLocalBatch()
+{
+    if (t_localBatchDepth != 0u)
+        --t_localBatchDepth;
+}
+
+void GsWorker::setLeanHandoff(bool on)
+{
+    m_lean.store(on, std::memory_order_relaxed);
+}
 
 void GsWorker::setEnqueueWaitSink(uint64_t *sink)
 {
@@ -65,6 +90,7 @@ void GsWorker::enqueue(GsCommand cmd)
 {
     const size_t bytes = cmd.payloadBytes();
     const bool hasRpc = cmd.rpc != nullptr;
+    const bool lean = m_lean.load(std::memory_order_relaxed);
     std::unique_lock<std::mutex> lock(m_mutex);
     // Backpressure: a full ring blocks the producer (GIF FIFO-full stall).
     // An oversize single command bypasses the byte cap so it can always
@@ -89,12 +115,22 @@ void GsWorker::enqueue(GsCommand cmd)
             m_batchDirty = false;
             m_deferredSinceNs = 0;
         }
-        m_wakes.fetch_add(1u, std::memory_order_relaxed);
-        m_hasWork.notify_one();
+        // MP1 L2: lean mode wakes a sleeping worker only (a running one will
+        // pop and see this producer in m_spaceWaiters).
+        const bool wake = !lean || m_workerIdle;
+        if (lean && wake)
+            m_workerIdle = false;
+        if (wake)
+        {
+            m_wakes.fetch_add(1u, std::memory_order_relaxed);
+            m_hasWork.notify_one();
+        }
         // PT2 Part 2: time the backpressure wait into the caller's sink.
         uint64_t *const sink = t_enqueueWaitSink;
         const uint64_t waitT0 = sink ? ps2x::perflog::steadyNs() : 0u;
+        ++m_spaceWaiters;
         m_hasSpace.wait(lock, hasSpace);
+        --m_spaceWaiters;
         if (sink)
             *sink += ps2x::perflog::steadyNs() - waitT0;
     }
@@ -111,13 +147,26 @@ void GsWorker::enqueue(GsCommand cmd)
     m_queuedBytes += bytes;
     m_queue.push_back(std::move(cmd));
     m_enqueuedCount.fetch_add(1u, std::memory_order_relaxed);
+    // MP1 L2 (c): a local (unit-thread) batch behaves like an open batch
+    // whose endBatch(mayDefer) runs after every enqueue: wake once the
+    // deferred-wake thresholds are reached, else keep the wake pending.
+    const bool local = lean && t_localBatchDepth != 0u && m_wakeCommands != 0u;
     // GF1 H3: with deferred wakes on, an RPC never rides a batch silently:
     // its caller waits for it (e.g. the main thread's present latch must
     // not wait for the unit's next flush).
-    const bool silent = m_batchDepth > 0 && !(m_wakeCommands != 0u && hasRpc);
+    bool silent = (m_batchDepth > 0 || local) && !(m_wakeCommands != 0u && hasRpc);
+    if (silent && local && m_batchDepth == 0 &&
+        (m_queue.size() >= m_wakeCommands || m_queuedBytes >= m_wakeBytes))
+        silent = false;
     if (silent)
     {
         m_batchDirty = true;
+        if (local && m_batchDepth == 0)
+        {
+            if (m_deferredSinceNs == 0u)
+                m_deferredSinceNs = steadyNowNs();
+            m_deferred.fetch_add(1u, std::memory_order_relaxed);
+        }
     }
     else if (m_batchDepth == 0)
     {
@@ -125,8 +174,15 @@ void GsWorker::enqueue(GsCommand cmd)
         m_batchDirty = false;
         m_deferredSinceNs = 0;
     }
+    // MP1 L2 (a): lean mode notifies a sleeping worker only.
+    bool wake = !silent;
+    if (wake && lean)
+    {
+        wake = m_workerIdle;
+        m_workerIdle = false;
+    }
     lock.unlock();
-    if (!silent)
+    if (wake)
     {
         m_wakes.fetch_add(1u, std::memory_order_relaxed);
         m_hasWork.notify_one();
@@ -164,6 +220,12 @@ void GsWorker::endBatch(bool mayDefer)
             m_deferredSinceNs = 0;
         }
     }
+    // MP1 L2 (a): lean mode notifies a sleeping worker only.
+    if (notify && m_lean.load(std::memory_order_relaxed))
+    {
+        notify = m_workerIdle;
+        m_workerIdle = false;
+    }
     lock.unlock();
     if (notify)
     {
@@ -179,7 +241,17 @@ void GsWorker::flushWake()
         return;
     m_batchDirty = false;
     m_deferredSinceNs = 0;
+    // MP1 L2 (a): lean mode notifies a sleeping worker only (a running one
+    // drains to empty before it sleeps again).
+    bool notify = true;
+    if (m_lean.load(std::memory_order_relaxed))
+    {
+        notify = m_workerIdle;
+        m_workerIdle = false;
+    }
     lock.unlock();
+    if (!notify)
+        return;
     m_wakes.fetch_add(1u, std::memory_order_relaxed);
     m_hasWork.notify_one();
 }
@@ -240,6 +312,8 @@ void GsWorker::threadMain()
     // AD1: ADPF reuses this accounting, so it turns it on too.
     const bool tail = ps2x::perflog::enabled() || ps2x::adpf::enabled();
     uint64_t tailAccNs = 0;
+    // MP1 L2 (b): lean mode clears m_executing inside the next pop lock.
+    const bool lean = m_lean.load(std::memory_order_relaxed);
     for (;;)
     {
         // GP4 H6: pop up to kPopBatch commands per mutex acquisition and run
@@ -249,13 +323,22 @@ void GsWorker::threadMain()
         GsCommand batch[kPopBatch];
         size_t batchSize = 0;
         bool deferOn = false;
+        bool notifySpace = true;
         {
             std::unique_lock<std::mutex> lock(m_mutex);
+            if (lean)
+                m_executing = false;
             deferOn = m_wakeCommands != 0u;
             const auto ready = [&] { return m_stopRequested || !m_queue.empty(); };
             if (m_wakeCommands == 0u)
             {
-                m_hasWork.wait(lock, ready);
+                // MP1 L2 (a): m_workerIdle tells lean producers to notify.
+                while (!ready())
+                {
+                    m_workerIdle = true;
+                    m_hasWork.wait(lock);
+                }
+                m_workerIdle = false;
             }
             else
             {
@@ -264,6 +347,7 @@ void GsWorker::threadMain()
                 // print) and run anyway, so a miss costs time, never output.
                 while (!ready())
                 {
+                    m_workerIdle = true;
                     if (m_hasWork.wait_for(lock, std::chrono::milliseconds(100)) != std::cv_status::timeout ||
                         m_queue.empty() || m_batchDepth != 0 || !m_batchDirty || m_deferredSinceNs == 0u)
                         continue;
@@ -278,6 +362,7 @@ void GsWorker::threadMain()
                         std::fprintf(stderr, "[gs:handoff] WATCHDOG: deferred wake pending %.1f ms, %zu commands queued\n",
                                      static_cast<double>(now - m_deferredSinceNs) / 1e6, m_queue.size());
                 }
+                m_workerIdle = false;
             }
             if (m_queue.empty())
             {
@@ -301,8 +386,11 @@ void GsWorker::threadMain()
                 m_batchDirty = false;
                 m_deferredSinceNs = 0;
             }
+            // MP1 L2 (a): lean mode wakes space waiters only when there are some.
+            notifySpace = !lean || m_spaceWaiters != 0u;
         }
-        m_hasSpace.notify_all();
+        if (notifySpace)
+            m_hasSpace.notify_all();
         for (size_t i = 0; i < batchSize; ++i)
         {
             const uint64_t t0 = tail ? ps2x::perflog::steadyNs() : 0u;
@@ -330,6 +418,7 @@ void GsWorker::threadMain()
                          static_cast<unsigned long long>(m_wakes.load(std::memory_order_relaxed)),
                          static_cast<unsigned long long>(m_deferred.load(std::memory_order_relaxed)),
                          static_cast<unsigned long long>(m_watchdog.load(std::memory_order_relaxed)));
+        if (!lean)
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_executing = false;

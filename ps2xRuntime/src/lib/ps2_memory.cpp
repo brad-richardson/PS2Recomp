@@ -134,21 +134,31 @@ namespace
     // Null-GS and direct-mode safe; nest-safe; never spans an RPC wait.
     struct GifDrainBatch
     {
-        explicit GifDrainBatch(GS *gs) : m_gs(gs)
+        // MP1 L2: on the MTVU unit thread with the lean handoff on, the batch
+        // is thread-local (no GS worker mutex round per drain); its wakes
+        // defer exactly like endWorkerBatch(true) and the unit's job end
+        // (jobEndFn -> flushWorkerWake) delivers any pending one.
+        explicit GifDrainBatch(GS *gs)
+            : m_gs(gs), m_local(gs && gs->workerLocalBatchesOk() && ps2_mtvu::onWorker())
         {
-            if (m_gs)
+            if (m_local)
+                GsWorker::beginLocalBatch();
+            else if (m_gs)
                 m_gs->beginWorkerBatch();
         }
         ~GifDrainBatch()
         {
             // GF1 H3: on the MTVU unit thread the wake may be deferred to the
             // job end (only when PS2X_GS_HANDOFF_DIET set deferred wakes).
-            if (m_gs)
+            if (m_local)
+                GsWorker::endLocalBatch();
+            else if (m_gs)
                 m_gs->endWorkerBatch(ps2_mtvu::onWorker());
         }
         GifDrainBatch(const GifDrainBatch &) = delete;
         GifDrainBatch &operator=(const GifDrainBatch &) = delete;
         GS *m_gs;
+        bool m_local;
     };
 
     // RB1: reverse VIF1 DMA (GS local->host FIFO into EE) behind

@@ -228,6 +228,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_GS_FOREIGN_PRESENT_TEST",
         "PS2X_GS_FOREIGN_SIZE",
         "PS2X_GS_HANDOFF_DIET",
+        "PS2X_GS_LEAN_HANDOFF",
         "PS2X_GS_QUEUE",
         "PS2X_GS_QUEUE_DESC",
         "PS2X_GS_REPLAY_BACKEND",
