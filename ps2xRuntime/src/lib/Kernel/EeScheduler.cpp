@@ -13,6 +13,7 @@
 #include "ps2_e41_trace.h"
 #include "ps2_ts2_observer.h"
 #include "ps2_ts2_split60.h"
+#include "ps2_fh1_full120.h"
 #include "ps2_mpg_src_trace.h"
 #include "ps2_e3.h"
 #include "ps2_e4.h"
@@ -226,6 +227,7 @@ EeScheduler::EeScheduler(PS2Runtime &runtime)
       m_hostPace(ps2_vsync_pacer::hostPaceFromProcessEnv()),
       m_vsyncPace(!ps2_vsync_pacer::unpacedFromProcessEnv() || m_hostPace.enabled)
 {
+    m_eeClockShift = ps2_fh1::eeClockShift();
 #if PS2X_ENABLE_DET_HASH_TAP
     bool invalid = false;
     m_detHashEvery = parseDetHashEvery(std::getenv("PS2X_DET_HASH_EVERY"), invalid);
@@ -541,7 +543,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_eventSequence = 0;
     m_invocationSequence = 0;
     m_vsyncTick = 0;
-    m_vsyncPacer = ps2_vsync_pacer::Pacer{};
+    // FH1: full120 paces 2 x 59.94 guest VBlanks per second.
+    m_vsyncPacer = ps2_vsync_pacer::Pacer(ps2_vsync_pacer::kPeriodNs / ps2_fh1::vblankDivisor());
     m_vsyncFlagAddress = 0;
     m_vsyncTickAddress = 0;
     m_gsVSyncCallback = 0;
@@ -567,8 +570,8 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_threads.emplace(main.id, std::move(main));
     noteThreadContainerMutated();
     m_readyQueues[0].push_back(kMainThreadId);
-    scheduleEvent(m_eeCycle + kVBlankPeriodCycles,
-                  std::chrono::steady_clock::now() + kVBlankPeriod,
+    scheduleEvent(m_eeCycle + kVBlankPeriodCycles / ps2_fh1::vblankDivisor(),
+                  std::chrono::steady_clock::now() + kVBlankPeriod / ps2_fh1::vblankDivisor(),
                   EeEvent{EeEventType::VBlankStart, 0, 0});
     publishSnapshot();
 }
@@ -3080,8 +3083,8 @@ void EeScheduler::processDueDeadlines()
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
                               scheduled.hostDeadline + kVBlankDuration,
                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
-                scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles,
-                              scheduled.hostDeadline + kVBlankPeriod,
+                scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles / ps2_fh1::vblankDivisor(),
+                              scheduled.hostDeadline + kVBlankPeriod / ps2_fh1::vblankDivisor(),
                               EeEvent{EeEventType::VBlankStart, 0, 0});
             }
             processEvent(scheduled.event);
@@ -3237,6 +3240,7 @@ void EeScheduler::processEvent(const EeEvent &event)
             std::cerr << "[coverage:tick] vsync=" << m_vsyncTick << std::endl;
             m_runtime.printMissingFunctionCounts();
         }
+        ps2_fh1::onVBlank(m_rdram, m_vsyncTick); // FH1 tap (env-only)
         ps2_e3::noteVBlank(m_vsyncTick); // E3b frame stamp
         ps2_gfx_stats::noteVsync(m_vsyncTick); // E33 per-vsync census cut
         ps2_vu1_trace::noteVsync(m_vsyncTick); // E36 per-program trace window

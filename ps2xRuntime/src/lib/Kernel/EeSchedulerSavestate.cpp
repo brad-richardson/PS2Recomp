@@ -4,6 +4,7 @@
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_savestate.h"
 #include "../ps2_savestate_internal.h"
+#include "ps2_fh1_full120.h"
 
 #include <string>
 #include <typeinfo>
@@ -355,7 +356,7 @@ bool EeSchedulerSavestate::load(EeScheduler &s, Reader &r, PS2Runtime &runtime)
         *v = r.u32();
     readOrderedPod(r, s.m_invocationStackTops);
     s.m_nextDeadlineCycle.store(r.u64());
-    s.m_vsyncPacer = ps2_vsync_pacer::Pacer{}; // host time: re-anchors on the next vsync
+    s.m_vsyncPacer = ps2_vsync_pacer::Pacer(ps2_vsync_pacer::kPeriodNs / ps2_fh1::vblankDivisor()); // host time: re-anchors on the next vsync
     if (!r.ok())
         return false;
     s.publishSnapshot();

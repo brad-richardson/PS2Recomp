@@ -18,6 +18,7 @@
 #include "ps2_e43_trace.h"
 #include "ps2_e44_trace.h"
 #include "ps2_gfx_stats.h"
+#include "ps2_fh1_full120.h"
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
 #include "ps2_park_snapshot.h"
@@ -3325,6 +3326,9 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                 static_cast<unsigned long long>(ps2_ts2_split60::g_state.predictionFallbacks));
     }
 #endif // PS2X_ENABLE_TS2_DIAG (EE1P2)
+    // FH1: full120 manager patch at the init hook + env-only tap counts.
+    if (ps2_fh1::enabled() || ps2_fh1::tapOn())
+        ps2_fh1::onBranch(rdram, sourcePc, targetPc);
     ps2_ts2_observer::noteBranch(
         rdram, ctx, sourcePc, targetPc,
         kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall,
@@ -5274,8 +5278,11 @@ void PS2Runtime::run()
             {
                 const uint64_t vt = m_memory.gs().vsyncTick.load();
                 const double rate = static_cast<double>(vt - vsyncRateTick) / secs;
-                std::fprintf(stderr, "[vsync-rate] tick=%llu rate=%.2f/s (%.3fx of 59.94)\n",
-                             static_cast<unsigned long long>(vt), rate, rate / 59.94);
+                // FH1: full120 VBlanks are half-periods; report stock-equivalent vs/s.
+                const double stockRate = rate / ps2_fh1::vblankDivisor();
+                std::fprintf(stderr, "[vsync-rate] tick=%llu rate=%.2f/s (%.3fx of 59.94)%s\n",
+                             static_cast<unsigned long long>(vt), stockRate, stockRate / 59.94,
+                             ps2_fh1::enabled() ? " full120" : "");
 #if defined(__APPLE__)
                 static const bool s_threadCpuLog = [] {
                     const char *v = std::getenv("PS2X_THREAD_CPU_LOG");

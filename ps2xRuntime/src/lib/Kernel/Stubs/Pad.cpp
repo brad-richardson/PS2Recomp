@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "ps2_build_id.h"
 #include "ps2_e3.h"
+#include "ps2_fh1_full120.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e44_trace.h"
 #include "ps2_pad_latch.h"
@@ -560,7 +561,8 @@ namespace ps2_stubs
         // 1000 ms per 59.94 vsyncs: ms = tick * 100000 / 5994.
         uint64_t padScriptVsyncTickToMs(uint64_t tick)
         {
-            return (tick * 100000ull) / 5994ull;
+            // FH1: full120 guest VBlanks are half-periods; keep stock ms.
+            return (tick * 100000ull) / (5994ull * ps2_fh1::vblankDivisor());
         }
 
         void padScriptInstallLocked(const std::vector<PadScriptEntry> &parsed, const char *source)

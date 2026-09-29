@@ -1,6 +1,7 @@
 #include "runtime/ps2_savestate.h"
 #include "Common.h"
 #include "ps2_e3.h"
+#include "ps2_fh1_full120.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e44_trace.h"
 #include "CD.h"
@@ -93,7 +94,8 @@ namespace ps2_stubs
 
         uint64_t currentCdStreamTick(PS2Runtime *runtime)
         {
-            return runtime != nullptr ? runtime->eeScheduler().currentVSyncTick() : 0u;
+            // FH1: the field clock stays 59.94 Hz under full120's 2x VBlank.
+            return runtime != nullptr ? runtime->eeScheduler().currentVSyncTick() / ps2_fh1::vblankDivisor() : 0u;
         }
 
         uint32_t dvdStreamSectorsPerSecond(uint8_t spindleControl)

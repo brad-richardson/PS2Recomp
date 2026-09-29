@@ -299,6 +299,9 @@ public:
     // state so checkpointDueFull is bit-for-bit the legacy sequence.
     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept
     {
+        // FH1: full120's EE clock multiplier charges executed code 1/EE_X
+        // (shift 0 when the knob is off). Idle advances stay exact.
+        cycles >>= m_eeClockShift;
         const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
         // A cached nullptr is a valid "no current thread" entry; only the
         // id+generation decide validity, so a threadless stretch stays on
@@ -547,6 +550,7 @@ private:
     bool m_soundClockStarted = false;
     uint32_t m_pendingEeTimerInterrupts = 0;
     uint64_t m_eeCycle = 0;
+    uint32_t m_eeClockShift = 0; // FH1 (ps2_fh1::eeClockShift)
     uint64_t m_countCycle = 0;
     uint32_t m_count = 0;
     uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
