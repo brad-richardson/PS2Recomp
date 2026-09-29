@@ -608,6 +608,12 @@ inline uint64_t steadyNs()
 bool enabled();
 void poll(uint64_t vsyncTick);
 void notePresent();
+// FH6 (PS2X_PERF_PRESENT_DETAIL=1): present-path counts per window, printed as
+// one [perf-present] line after each [perf] line. noteGsVsync: guest VSyncs
+// the GS backend processed (worker); noteLatch: one host-loop latch RPC and
+// its duration. Lock-free; no-ops unless the log and the knob are on.
+void noteGsVsync();
+void noteLatch(uint64_t ns);
 // Full-ring [perf-tail] dump (graceful shutdown only; no-op unless active).
 void dumpTail();
 // PT2 Part 2a: kill-proof ring flush. Drains entries accumulated since the

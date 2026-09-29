@@ -1177,10 +1177,24 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
             ++g_hr1Uploads;
         }
     } hr1Timer{hr1T0, hr1T0};
+#if defined(__ANDROID__)
+    // FH6 (PS2X_PRESENT_PER_VSYNC=1): the GS worker queues every guest frame
+    // itself once the layer is live, so the per-iteration latch RPC (queued
+    // behind the worker's backlog and the previous export's GPU fence) is
+    // skipped; the first latch still runs so the layer path starts as before.
+    static const bool s_perVsyncPresent = [] {
+        const char *v = std::getenv("PS2X_PRESENT_PER_VSYNC");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    if (s_perVsyncPresent && s_hasUploadedFrame && ps2x_present_vk::active() && ps2x_present_vk::layerLive())
+        return;
+#endif
     if (needsLatch)
     {
         rt->gs().latchHostPresentationFrame();
         hr1Timer.t1 = std::chrono::steady_clock::now();
+        ps2x::perflog::noteLatch(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(hr1Timer.t1 - hr1T0).count()));
         hr1Timer.latched = true;
         s_lastPresentationTick = currentTick;
         s_hasLatchedInitialFrame = true;

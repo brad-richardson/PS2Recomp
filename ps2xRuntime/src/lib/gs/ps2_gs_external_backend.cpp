@@ -535,7 +535,10 @@ public:
 #if defined(__ANDROID__)
             if (ps2x_present_vk::enabled() && !ps2x_present_vk::broken())
             {
-                if (presentAhb(request.vsyncTick))
+                // FH6: in per-VSync mode GuestVsync already queued this frame
+                // while the layer is live. A new window's layer only goes live
+                // on its first queue, so until then the latch still exports.
+                if ((m_perVsyncLive && ps2x_present_vk::layerLive()) || presentAhb(request.vsyncTick))
                 {
                     frame.width = 640u;
                     frame.height = 480u;
@@ -797,6 +800,20 @@ public:
             }
         }
         ++m_stats.vsyncs;
+        ps2x::perflog::noteGsVsync();
+#if defined(__ANDROID__)
+        // FH6 (PS2X_PRESENT_PER_VSYNC=1, output-only): export and queue every
+        // guest frame here, on the worker, right after GE1's VSync, instead of
+        // once per host-loop latch RPC (which, behind a saturated GPU, samples
+        // ~48 of ~100 guest frames/s). Only once the layer is live; before
+        // that the latch path runs as before.
+        if (m_ge1Active && presentPerVsync() && ps2x_present_vk::active() && ps2x_present_vk::layerLive() &&
+            !ps2x_present_vk::broken())
+        {
+            m_perVsyncLive = true;
+            presentAhb(tick);
+        }
+#endif
 #if PS2X_ENABLE_DIAG_TAPS && defined(__ANDROID__)
         if (m_ge1Active && m_frameCensus && (tick % 300u) == 0u)
             std::fprintf(stderr, "[gs:frame-counts] tick=%llu processed=%llu "
@@ -1016,6 +1033,15 @@ private:
         uint64_t id = 0u;
         AHardwareBuffer *buffer = nullptr;
     };
+
+    static bool presentPerVsync()
+    {
+        static const bool on = [] {
+            const char *v = std::getenv("PS2X_PRESENT_PER_VSYNC");
+            return v && std::strcmp(v, "1") == 0;
+        }();
+        return on;
+    }
 
     bool queuePendingAhb()
     {
@@ -1262,6 +1288,7 @@ private:
     uint32_t m_ahbEpoch = 0u;
     int m_ahbStart = 0;
     int m_pendingAhb = -1;
+    bool m_perVsyncLive = false; // FH6: GuestVsync presents (latch no longer exports)
     uint64_t m_pendingFence = 0u;
     uint64_t m_pendingTick = 0u;
 #if PS2X_ENABLE_DIAG_TAPS

@@ -470,6 +470,9 @@ struct Logger
     std::atomic<uint64_t> presentLastNs{0};
     std::atomic<uint64_t> presentMaxGapNs{0};
     std::atomic<bool> havePresent{false};
+    // FH6: present-path detail (PS2X_PERF_PRESENT_DETAIL=1).
+    bool presentDetail = false;
+    std::atomic<uint64_t> gsVsyncs{0}, latches{0}, latchNs{0}, latchMaxNs{0};
 #if defined(__APPLE__)
     std::vector<std::pair<std::string, double>> lastCpu;
     bool haveCpu = false;
@@ -574,7 +577,11 @@ struct Logger
         snapshotLinuxThreadCpu(clkTck, lastCpuLinux);
         haveCpuLinux = true;
 #endif
-        active.store(true, std::memory_order_relaxed);
+        {
+            const char *d = std::getenv("PS2X_PERF_PRESENT_DETAIL");
+            presentDetail = d && std::strcmp(d, "1") == 0; // before active: readers gate on active
+        }
+        active.store(true, std::memory_order_release);
         std::fprintf(stderr, "[perf] logging to %s\n", path.c_str());
     }
 };
@@ -781,11 +788,44 @@ void poll(uint64_t vsyncTick)
 #endif
     const std::string line = formatLine(s);
     std::fprintf(log.file, "%s\n", line.c_str());
+    if (log.presentDetail)
+    {
+        const uint64_t gv = log.gsVsyncs.exchange(0u, std::memory_order_relaxed);
+        const uint64_t la = log.latches.exchange(0u, std::memory_order_relaxed);
+        const uint64_t lns = log.latchNs.exchange(0u, std::memory_order_relaxed);
+        const uint64_t lmax = log.latchMaxNs.exchange(0u, std::memory_order_relaxed);
+        std::fprintf(log.file,
+                     "[perf-present] tick=%llu vblanks=%llu gs_vsyncs=%llu latches=%llu latch_ms_avg=%.2f "
+                     "latch_ms_max=%.2f presents=%llu\n",
+                     (unsigned long long)vsyncTick, (unsigned long long)(vsyncTick - log.windowTick),
+                     (unsigned long long)gv, (unsigned long long)la, la ? (static_cast<double>(lns) / 1e6) / la : 0.0,
+                     static_cast<double>(lmax) / 1e6, (unsigned long long)s.presents);
+    }
     for (size_t i = 0; i < kStageCount; ++i)
         drainStage(static_cast<Stage>(i), log.stageConsumed[i], log.file);
     std::fflush(log.file);
     log.windowStart = now;
     log.windowTick = vsyncTick;
+}
+
+void noteGsVsync()
+{
+    Logger &log = logger();
+    if (log.presentDetail && log.active.load(std::memory_order_relaxed))
+        log.gsVsyncs.fetch_add(1u, std::memory_order_relaxed);
+}
+
+void noteLatch(uint64_t ns)
+{
+    Logger &log = logger();
+    if (!log.presentDetail || !log.active.load(std::memory_order_relaxed))
+        return;
+    log.latches.fetch_add(1u, std::memory_order_relaxed);
+    log.latchNs.fetch_add(ns, std::memory_order_relaxed);
+    uint64_t prev = log.latchMaxNs.load(std::memory_order_relaxed);
+    while (ns > prev && !log.latchMaxNs.compare_exchange_weak(prev, ns, std::memory_order_relaxed))
+    {
+    }
 }
 
 void notePresent()
