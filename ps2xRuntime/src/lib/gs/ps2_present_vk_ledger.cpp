@@ -9,6 +9,8 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace ps2x_present_vk
 {
@@ -562,5 +564,16 @@ Ledger::Counts Ledger::counts()
         c.openFences += static_cast<uint32_t>(kv.second.fences.size());
     c.tokens = static_cast<uint32_t>(m_tokens.size());
     return c;
+}
+
+int displayHzFromEnv(const char *v)
+{
+    return (v && std::strcmp(v, "120") == 0) ? 120 : 60;
+}
+
+int displayHz()
+{
+    static const int hz = displayHzFromEnv(std::getenv("PS2X_DISPLAY_HZ"));
+    return hz;
 }
 } // namespace ps2x_present_vk

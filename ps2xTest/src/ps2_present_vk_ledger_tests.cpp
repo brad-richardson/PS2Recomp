@@ -628,5 +628,16 @@ void register_ps2_present_vk_ledger_tests()
                 t.Equals(sf.releasedWithPending + sf.useAfterRelease + sf.badTokenLayer + sf.badClose +
                              sf.doubleRelease,
                          0, "no layer/fd misuse" + s);
-            } }); });
+            } });
+
+        tc.Run("DP1: PS2X_DISPLAY_HZ is 60 unless exactly 120", [](TestCase &t)
+               {
+            t.Equals(ps2x_present_vk::displayHzFromEnv(nullptr), 60, "unset is 60");
+            t.Equals(ps2x_present_vk::displayHzFromEnv("60"), 60, "60 is 60");
+            t.Equals(ps2x_present_vk::displayHzFromEnv("120"), 120, "120 is 120");
+            t.Equals(ps2x_present_vk::displayHzFromEnv(""), 60, "empty is 60");
+            t.Equals(ps2x_present_vk::displayHzFromEnv("144"), 60, "other rates are 60");
+            t.Equals(ps2x_present_vk::displayHzFromEnv("120 "), 60, "trailing space is 60");
+            t.Equals(ps2x_present_vk::displayHzFromEnv("0120"), 60, "leading zero is 60"); });
+    });
 }

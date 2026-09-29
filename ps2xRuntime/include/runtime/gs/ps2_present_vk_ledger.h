@@ -187,4 +187,10 @@ private:
     Counts m_c;
     int64_t m_lastLatch = 0;
 };
+
+// DP1: the panel refresh the Android present path requests (PS2X_DISPLAY_HZ).
+// displayHzFromEnv parses one env value (120 iff it is exactly "120", else
+// 60); displayHz() reads the environment once. Pure, so the Mac suite tests it.
+int displayHzFromEnv(const char *v);
+int displayHz();
 } // namespace ps2x_present_vk

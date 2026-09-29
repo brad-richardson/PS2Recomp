@@ -38,6 +38,7 @@
 #include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "runtime/gs/ps2_gs_external_backend.h"
 #include "runtime/gs/ps2_present_share.h"
+#include "runtime/gs/ps2_present_vk_ledger.h" // DP1: displayHz() (pure; same value on every platform)
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
 #include <EGL/egl.h>
@@ -5652,7 +5653,11 @@ void PS2Runtime::run()
 #endif
             {
                 static auto s_nextFrame = std::chrono::steady_clock::now();
-                s_nextFrame += std::chrono::microseconds(16667);
+                // DP1: the skip-GL loop latches one guest frame per iteration, so it must run at the
+                // panel rate (120 presents/s need a 120 Hz loop); 60 keeps the old period exactly.
+                // The branch only runs with the VK layer live (Android); elsewhere skipGl is false.
+                static const int s_framePeriodUs = ps2x_present_vk::displayHz() == 120 ? 8333 : 16667;
+                s_nextFrame += std::chrono::microseconds(s_framePeriodUs);
                 const auto now = std::chrono::steady_clock::now();
                 if (s_nextFrame < now)
                     s_nextFrame = now;

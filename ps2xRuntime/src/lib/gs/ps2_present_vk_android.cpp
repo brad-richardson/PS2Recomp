@@ -54,6 +54,11 @@ struct Api
     void (*getASurfaceControls)(TS *, SC ***outList, size_t *outSize) = nullptr;
     void (*releaseASurfaceControls)(SC **list) = nullptr;
     int64_t (*getLatchTime)(TS *) = nullptr;
+    // DP1: optional frame-rate votes (API 30/31+), dlsym'd like the rest so
+    // minSdk 29 still loads. Never part of `ok`: 60 Hz needs none of them.
+    void (*setFrameRateWin)(ANativeWindow *window, float frameRate, int8_t compatibility) = nullptr; // API 30+
+    void (*setFrameRateTx)(TX *tx, SC *sc, float frameRate, int8_t compatibility,
+                           int8_t changeFrameRateStrategy) = nullptr; // API 31+
     bool ok = false;
 };
 
@@ -82,7 +87,11 @@ const Api &api()
                get(a.getASurfaceControls, "ASurfaceTransactionStats_getASurfaceControls") &&
                get(a.releaseASurfaceControls, "ASurfaceTransactionStats_releaseASurfaceControls") &&
                get(a.getLatchTime, "ASurfaceTransactionStats_getLatchTime");
+        get(a.setFrameRateWin, "ANativeWindow_setFrameRate"); // optional (DP1)
+        get(a.setFrameRateTx, "ASurfaceTransaction_setFrameRate"); // optional (DP1)
         std::fprintf(stderr, "[present-vk] SurfaceControl API %s\n", a.ok ? "ok" : "MISSING (API < 29?)");
+        std::fprintf(stderr, "[present-vk] frame-rate API: window=%s tx=%s\n",
+                     a.setFrameRateWin ? "ok" : "MISSING", a.setFrameRateTx ? "ok" : "MISSING");
         return a;
     }();
     return s;
@@ -90,6 +99,11 @@ const Api &api()
 
 constexpr int8_t kVisibilityShow = 1;   // ASURFACE_TRANSACTION_VISIBILITY_SHOW
 constexpr int8_t kTransparencyOpaque = 2; // ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE
+// DP1: ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE and
+// ASURFACE_TRANSACTION_CHANGE_FRAME_RATE_ALWAYS (declared here, not from the
+// NDK headers, so minSdk 29 still compiles; both calls are dlsym'd).
+constexpr int8_t kFrameRateFixedSource = 1;
+constexpr int8_t kFrameRateAlways = 1;
 
 using ps2x_present_vk::Ledger;
 using ps2x_present_vk::LayerGeometry;
@@ -119,6 +133,10 @@ struct NdkPlatform final : ps2x_present_vk::Platform
             a.setZOrder(tx, sc, g->z);
             a.setVisibility(tx, sc, kVisibilityShow);
             a.setBufferTransparency(tx, sc, kTransparencyOpaque); // PS2 alpha is not display alpha
+            // DP1: vote 120 on the game layer itself (geometry is applied on
+            // the first queue of a window, then only on size changes).
+            if (ps2x_present_vk::displayHz() == 120 && a.setFrameRateTx)
+                a.setFrameRateTx(tx, sc, 120.0f, kFrameRateFixedSource, kFrameRateAlways);
         }
         a.setOnComplete(tx, reinterpret_cast<void *>(static_cast<uintptr_t>(token)), onComplete);
         a.txApply(tx);
@@ -175,6 +193,153 @@ struct WindowLog
     int layerW = 0, layerH = 0;
 };
 WindowLog g_winLog;
+
+// DP1: force the 120 Hz display mode for this window through
+// WindowManager.LayoutParams.preferredDisplayModeId (API 23+, so no dlsym
+// needed). Picks the first supported mode at 119-121 Hz. Returns the chosen
+// mode id, or 0 when no mode fits or any JNI step failed.
+int applyPreferredDisplayMode120(ANativeActivity *activity)
+{
+    if (!activity || !activity->vm)
+        return 0;
+    JNIEnv *env = nullptr;
+    char name[16] = {};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    JavaVMAttachArgs args = {JNI_VERSION_1_6, name[0] ? name : nullptr, nullptr};
+    if (activity->vm->AttachCurrentThread(&env, &args) != JNI_OK || !env)
+        return 0;
+    int chosenId = 0;
+    float chosenRate = 0.0f;
+    jobject act = activity->clazz;
+    if (jclass actCls = env->GetObjectClass(act))
+    {
+        // Display.Mode[] modes = getWindowManager().getDefaultDisplay().getSupportedModes();
+        const jmethodID getWM = env->GetMethodID(actCls, "getWindowManager", "()Landroid/view/WindowManager;");
+        jobject wm = (getWM && !env->ExceptionCheck()) ? env->CallObjectMethod(act, getWM) : nullptr;
+        if (wm && !env->ExceptionCheck())
+        {
+            jclass wmCls = env->GetObjectClass(wm);
+            const jmethodID getDisplay =
+                wmCls ? env->GetMethodID(wmCls, "getDefaultDisplay", "()Landroid/view/Display;") : nullptr;
+            jobject display = (getDisplay && !env->ExceptionCheck()) ? env->CallObjectMethod(wm, getDisplay) : nullptr;
+            if (display && !env->ExceptionCheck())
+            {
+                jclass dispCls = env->GetObjectClass(display);
+                const jmethodID getModes = dispCls ? env->GetMethodID(dispCls, "getSupportedModes",
+                                                                     "()[Landroid/view/Display$Mode;")
+                                                   : nullptr;
+                auto modes = (getModes && !env->ExceptionCheck())
+                                 ? static_cast<jobjectArray>(env->CallObjectMethod(display, getModes))
+                                 : nullptr;
+                if (modes && !env->ExceptionCheck())
+                {
+                    const jsize n = env->GetArrayLength(modes);
+                    for (jsize i = 0; i < n && !env->ExceptionCheck(); ++i)
+                    {
+                        jobject mode = env->GetObjectArrayElement(modes, i);
+                        if (!mode || env->ExceptionCheck())
+                            break;
+                        jclass modeCls = env->GetObjectClass(mode);
+                        const jmethodID getRate = modeCls ? env->GetMethodID(modeCls, "getRefreshRate", "()F") : nullptr;
+                        const jmethodID getId = modeCls ? env->GetMethodID(modeCls, "getModeId", "()I") : nullptr;
+                        if (getRate && getId)
+                        {
+                            const float rate = env->CallFloatMethod(mode, getRate);
+                            const int id = env->CallIntMethod(mode, getId);
+                            if (!env->ExceptionCheck())
+                            {
+                                std::fprintf(stderr, "[present-vk] DP1 display mode id=%d %.2f Hz\n", id, rate);
+                                if (chosenId == 0 && rate >= 119.0f && rate <= 121.0f)
+                                {
+                                    chosenId = id;
+                                    chosenRate = rate;
+                                }
+                            }
+                        }
+                        if (modeCls)
+                            env->DeleteLocalRef(modeCls);
+                        env->DeleteLocalRef(mode);
+                    }
+                    env->DeleteLocalRef(modes);
+                }
+                if (dispCls)
+                    env->DeleteLocalRef(dispCls);
+                env->DeleteLocalRef(display);
+            }
+            if (wmCls)
+                env->DeleteLocalRef(wmCls);
+            env->DeleteLocalRef(wm);
+        }
+        // getWindow().getAttributes().preferredDisplayModeId = id; getWindow().setAttributes(lp);
+        if (chosenId != 0 && !env->ExceptionCheck())
+        {
+            const jmethodID getWindow = env->GetMethodID(actCls, "getWindow", "()Landroid/view/Window;");
+            jobject win = (getWindow && !env->ExceptionCheck()) ? env->CallObjectMethod(act, getWindow) : nullptr;
+            if (win && !env->ExceptionCheck())
+            {
+                jclass winCls = env->GetObjectClass(win);
+                const jmethodID getAttrs = winCls ? env->GetMethodID(winCls, "getAttributes",
+                                                                    "()Landroid/view/WindowManager$LayoutParams;")
+                                                  : nullptr;
+                jobject lp = (getAttrs && !env->ExceptionCheck()) ? env->CallObjectMethod(win, getAttrs) : nullptr;
+                if (lp && !env->ExceptionCheck())
+                {
+                    jclass lpCls = env->GetObjectClass(lp);
+                    const jfieldID modeIdField =
+                        lpCls ? env->GetFieldID(lpCls, "preferredDisplayModeId", "I") : nullptr;
+                    const jmethodID setAttrs =
+                        (winCls && modeIdField && !env->ExceptionCheck())
+                            ? env->GetMethodID(winCls, "setAttributes", "(Landroid/view/WindowManager$LayoutParams;)V")
+                            : nullptr;
+                    if (modeIdField && setAttrs && !env->ExceptionCheck())
+                    {
+                        env->SetIntField(lp, modeIdField, chosenId);
+                        env->CallVoidMethod(win, setAttrs, lp);
+                    }
+                    if (env->ExceptionCheck())
+                        chosenId = 0;
+                    if (lpCls)
+                        env->DeleteLocalRef(lpCls);
+                    env->DeleteLocalRef(lp);
+                }
+                else
+                    chosenId = 0;
+                if (winCls)
+                    env->DeleteLocalRef(winCls);
+                env->DeleteLocalRef(win);
+            }
+            else
+                chosenId = 0;
+        }
+        env->DeleteLocalRef(actCls);
+    }
+    if (env->ExceptionCheck())
+    {
+        env->ExceptionClear();
+        chosenId = 0;
+    }
+    std::fprintf(stderr, "[present-vk] DP1 preferredDisplayModeId=%d (%.2f Hz)%s\n", chosenId, chosenRate,
+                 chosenId ? "" : " FAILED");
+    return chosenId;
+}
+
+// DP1: request the 120 Hz panel on a new parent window: a fixed-source 120
+// vote on the window itself plus the forced 120 display mode. Called only when
+// PS2X_DISPLAY_HZ=120; the 60 path deliberately touches nothing.
+void requestDisplay120(ANativeWindow *window, ANativeActivity *activity)
+{
+    const Api &a = api();
+    if (a.setFrameRateWin)
+    {
+        a.setFrameRateWin(window, 120.0f, kFrameRateFixedSource);
+        std::fprintf(stderr, "[present-vk] DP1 window frame rate 120 (fixed source)\n");
+    }
+    else
+    {
+        std::fprintf(stderr, "[present-vk] DP1 window frame rate NOT set (API < 30?)\n");
+    }
+    applyPreferredDisplayMode120(activity);
+}
 
 void onComplete(void *context, TS *stats)
 {
@@ -324,6 +489,9 @@ void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect,
                      ledger().broken() ? "NOT made (fallback)" : "made", static_cast<void *>(window),
                      ANativeWindow_getWidth(window), ANativeWindow_getHeight(window), g_winLog.layerW, g_winLog.layerH,
                      ledger().windowGeneration());
+        // DP1: one 120 Hz request per new window (nothing at all on the 60 path).
+        if (ps2x_present_vk::displayHz() == 120)
+            requestDisplay120(window, activity);
     }
     // VK2: the ledger's counts at every window change (lifecycle stress receipts).
     char stats[1024];
