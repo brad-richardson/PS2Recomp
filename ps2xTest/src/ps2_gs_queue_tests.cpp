@@ -2,6 +2,7 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_worker.h"
+#include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/ps2_gs_external_backend.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_mtvu.h"
@@ -1475,6 +1476,84 @@ void register_ps2_gs_queue_tests()
             const size_t before = pool.pooledCount();
             pool.release(std::move(big));
             t.Equals(pool.pooledCount(), before, "oversize release should bypass the pool");
+        });
+
+        // MP1 L3: a lean pool keeps the larger buffer when full, honors its
+        // caps, and then serves every size from the pool.
+        tc.Run("MP1 L3 lean pool keeps larger buffers under its caps", [](TestCase &t)
+        {
+            GsPacketPool pool;
+            pool.setEnabled(true);
+            pool.setLean(true);
+            for (size_t i = 0; i < GsPacketPool::kLeanMaxBuffers; ++i)
+            {
+                std::vector<uint8_t> b(64u, 0x5Au);
+                pool.release(std::move(b));
+            }
+            t.Equals(pool.pooledCount(), GsPacketPool::kLeanMaxBuffers, "lean pool should fill to its buffer cap");
+            for (size_t i = 0; i < GsPacketPool::kLeanMaxBuffers; ++i)
+            {
+                std::vector<uint8_t> b(64u * 1024u, 0x33u);
+                pool.release(std::move(b));
+                t.IsTrue(b.capacity() == 0u || b.capacity() < 64u * 1024u,
+                         "a swapped release should hand back the smaller buffer");
+            }
+            t.IsTrue(pool.pooledCount() <= GsPacketPool::kLeanMaxBuffers, "lean pool should honor the buffer cap");
+            t.IsTrue(pool.pooledBytes() <= GsPacketPool::kLeanMaxBytes, "lean pool should honor the byte cap");
+            std::vector<uint8_t> got = pool.acquire(48u * 1024u);
+            t.IsTrue(got.capacity() >= 48u * 1024u, "a large request should now hit the pool");
+            GsPacketPool strict;
+            strict.setEnabled(true);
+            for (size_t i = 0; i < GsPacketPool::kMaxBuffers + 8u; ++i)
+            {
+                std::vector<uint8_t> b(64u, 0x5Au);
+                strict.release(std::move(b));
+            }
+            std::vector<uint8_t> big(64u * 1024u, 0x33u);
+            strict.release(std::move(big));
+            t.IsTrue(strict.acquire(48u * 1024u).empty(), "the pre-MP1 pool should keep dropping larger buffers");
+        });
+
+        // MP1 L3: drain with the sort skip delivers exactly the stable-sorted
+        // order on random path/flag mixes (1..5 packets per drain).
+        tc.Run("MP1 L3 arbiter sort skip keeps the drain order", [](TestCase &t)
+        {
+            auto run = [](bool skip, uint64_t seed, std::vector<uint32_t> &order)
+            {
+                GifArbiter arb([&](const uint8_t *data, uint32_t)
+                               {
+                                   uint32_t id = 0;
+                                   std::memcpy(&id, data + 16, sizeof(id));
+                                   order.push_back(id);
+                               });
+                arb.setSortSkip(skip);
+                uint64_t rng = seed;
+                uint32_t id = 0;
+                for (int round = 0; round < 300; ++round)
+                {
+                    rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                    const int n = 1 + static_cast<int>(rng % 5u);
+                    for (int k = 0; k < n; ++k)
+                    {
+                        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                        std::vector<uint8_t> pkt(32u, 0u);
+                        const GifPathId path = static_cast<GifPathId>(1u + rng % 3u);
+                        if (path == GifPathId::Path3 && (rng >> 8) % 2u == 0u)
+                            pkt[7] = 0x08u; // tag FLG=2 (IMAGE)
+                        std::memcpy(pkt.data() + 16, &id, sizeof(id));
+                        ++id;
+                        arb.submit(path, pkt.data(), static_cast<uint32_t>(pkt.size()), (rng >> 12) % 2u == 0u);
+                    }
+                    arb.drain();
+                }
+            };
+            for (uint64_t seed : {0x9E3779B97F4A7C15ull, 0x1234567ull, 0xDEADBEEFCAFEull})
+            {
+                std::vector<uint32_t> a, b;
+                run(false, seed, a);
+                run(true, seed, b);
+                t.IsTrue(!a.empty() && a == b, "sort skip should drain in the same order as the stable sort");
+            }
         });
 
         // GP4 H5: pooled handoff gives the same consumed stream and VRAM as

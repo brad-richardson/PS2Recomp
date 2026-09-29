@@ -219,6 +219,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_FALLBACK_MAGENTA",
         "PS2X_GAME_THREAD_CPUS",
         "PS2X_GAME_THREAD_STACK_KB",
+        "PS2X_GS_ALLOC_LEAN",
         "PS2X_GS_BACKEND",
         "PS2X_GS_CSR_DRAIN",
         "PS2X_GS_EXTERNAL_GPU_CSV",

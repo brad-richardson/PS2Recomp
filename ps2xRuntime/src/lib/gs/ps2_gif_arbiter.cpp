@@ -100,19 +100,21 @@ void GifArbiter::drain()
     if (!m_queue.empty())
         ps2_mtvu::touch(ps2_mtvu::Site::ArbDrain); // MT1: unit-owned
 
-    std::stable_sort(m_queue.begin(), m_queue.end(),
-                     [](const GifArbiterPacket &a, const GifArbiterPacket &b)
-                     {
-                         // DIRECTHL cannot preempt PATH3 IMAGE transfers.
-                         if (a.path2DirectHl != b.path2DirectHl || a.path3Image != b.path3Image)
-                         {
-                             if (a.path3Image && b.path2DirectHl)
-                                 return true;
-                             if (a.path2DirectHl && b.path3Image)
-                                 return false;
-                         }
-                         return pathPriority(a.pathId) < pathPriority(b.pathId);
-                     });
+    // MP1 L3: libc++ stable_sort takes a temporary buffer on every call for
+    // this element type (one alloc/free per drain; most drains hold one
+    // packet). Up to two packets the result is fixed by one compare in both
+    // libc++ and libstdc++, so do that without the call. drainsBefore is not
+    // a strict weak ordering (the DIRECTHL/IMAGE rule), so three or more
+    // packets always go through stable_sort itself.
+    if (m_sortSkip && m_queue.size() <= 2u)
+    {
+        if (m_queue.size() == 2u && drainsBefore(m_queue[1], m_queue[0]))
+            std::swap(m_queue[0], m_queue[1]);
+    }
+    else
+    {
+        std::stable_sort(m_queue.begin(), m_queue.end(), drainsBefore);
+    }
 
     for (size_t i = 0; i < m_queue.size(); ++i)
     {
@@ -142,4 +144,17 @@ void GifArbiter::drain()
 uint8_t GifArbiter::pathPriority(GifPathId id)
 {
     return static_cast<uint8_t>(id);
+}
+
+bool GifArbiter::drainsBefore(const GifArbiterPacket &a, const GifArbiterPacket &b)
+{
+    // DIRECTHL cannot preempt PATH3 IMAGE transfers.
+    if (a.path2DirectHl != b.path2DirectHl || a.path3Image != b.path3Image)
+    {
+        if (a.path3Image && b.path2DirectHl)
+            return true;
+        if (a.path2DirectHl && b.path3Image)
+            return false;
+    }
+    return pathPriority(a.pathId) < pathPriority(b.pathId);
 }

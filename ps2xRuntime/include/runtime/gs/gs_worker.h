@@ -140,12 +140,22 @@ class GsPacketPool
 public:
     static constexpr size_t kMaxBuffers = 32;
     static constexpr size_t kMaxBytes = 8u * 1024u * 1024u;
+    // MP1 L3 (setLean): caps sized for the in-flight depth (deferred wakes
+    // queue 64 commands before a wake; the worker may lag further), and a
+    // full pool keeps the larger buffer. Without it, a pool full of small
+    // buffers misses every larger packet: the unit allocates and the GS
+    // worker frees it (~0.5 ms/f of scudo on the Odin worker, MP1 pre-check).
+    static constexpr size_t kLeanMaxBuffers = 128;
+    static constexpr size_t kLeanMaxBytes = 16u * 1024u * 1024u;
     // Larger single buffers bypass the pool (rare multi-hundred-KB image
     // transfers must not evict the working set).
     static constexpr size_t kMaxBufferBytes = 256u * 1024u;
 
     void setEnabled(bool on) { m_enabled.store(on, std::memory_order_relaxed); }
     bool enabled() const { return m_enabled.load(std::memory_order_relaxed); }
+    // MP1 L3: set once, before producers run.
+    void setLean(bool on) { m_lean.store(on, std::memory_order_relaxed); }
+    bool lean() const { return m_lean.load(std::memory_order_relaxed); }
 
     // Take a buffer with capacity >= size when one is pooled, else a fresh
     // empty vector. The caller sizes/copies into it. Empty when disabled.
@@ -176,9 +186,29 @@ public:
         if (!enabled() || cap == 0u || cap > kMaxBufferBytes)
             return;
         bytes.clear();
+        const bool lean = m_lean.load(std::memory_order_relaxed);
+        const size_t maxBuffers = lean ? kLeanMaxBuffers : kMaxBuffers;
+        const size_t maxBytes = lean ? kLeanMaxBytes : kMaxBytes;
         Lock lock(m_lock);
-        if (m_free.size() >= kMaxBuffers || m_bytes + cap > kMaxBytes)
+        if (m_free.size() >= maxBuffers || m_bytes + cap > maxBytes)
+        {
+            if (!lean)
+                return;
+            // MP1 L3: swap out the smallest pooled buffer when this one is
+            // larger and fits the byte cap in its place.
+            size_t smallest = m_free.size();
+            for (size_t i = 0; i < m_free.size(); ++i)
+                if (smallest == m_free.size() || m_free[i].capacity() < m_free[smallest].capacity())
+                    smallest = i;
+            if (smallest == m_free.size() || m_free[smallest].capacity() >= cap ||
+                m_bytes - m_free[smallest].capacity() + cap > maxBytes)
+                return;
+            m_bytes -= m_free[smallest].capacity();
+            m_bytes += cap;
+            // The smaller buffer leaves through `bytes`; its owner frees it.
+            std::swap(m_free[smallest], bytes);
             return;
+        }
         m_bytes += cap;
         m_free.push_back(std::move(bytes));
     }
@@ -211,6 +241,7 @@ private:
     };
 
     std::atomic<bool> m_enabled{false};
+    std::atomic<bool> m_lean{false}; // MP1 L3
     mutable std::atomic_flag m_lock; // C++20: default-constructs clear
     std::vector<std::vector<uint8_t>> m_free; // guarded by m_lock
     size_t m_bytes = 0;                       // guarded by m_lock

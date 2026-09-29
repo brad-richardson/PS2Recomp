@@ -1643,6 +1643,14 @@ bool PS2Runtime::syncCoreSubsystems()
         // releases after execute). Same bytes, same order; alloc-free only.
         m_gs.setPacketPoolEnabled(true);
         m_gifArbiter.setPacketPool(&m_gs.packetPool());
+        // MP1 L3: allocation-lean handoff (pool keeps larger buffers with
+        // caps for the in-flight depth; drain skips the identity sort).
+        // Same bytes, same order; PS2X_GS_ALLOC_LEAN=0 keeps the pre-MP1 path.
+        bool allocLean = true;
+        if (const char *env = std::getenv("PS2X_GS_ALLOC_LEAN"))
+            allocLean = env[0] != '0';
+        m_gs.packetPool().setLean(allocLean);
+        m_gifArbiter.setSortSkip(allocLean);
         // GP4 H6: worker pops up to kPopBatch commands per mutex round
         // (FIFO order preserved; knob-off pops one-by-one as before).
         m_gs.setWorkerPopBatch(GsWorker::kPopBatch);
@@ -1650,7 +1658,7 @@ bool PS2Runtime::syncCoreSubsystems()
                   << "H3 deferred wakes cmds=" << wakeCmds << " bytes=" << wakeBytes
                   << ", H4 queue descriptors=" << gsQueueDescriptors()
                   << ", H5 pooled packet buffers, H6 pop batch=" << GsWorker::kPopBatch
-                  << ", MP1 lean=" << (lean ? 1 : 0) << std::endl;
+                  << ", MP1 lean=" << (lean ? 1 : 0) << " alloc-lean=" << (allocLean ? 1 : 0) << std::endl;
     }
     // E33: per-path GIF census + GS draw attribution. The listener runs
     // before each packet's process call (same thread, synchronous drain),
