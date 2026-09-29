@@ -84,6 +84,7 @@ enum Fix : uint32_t
     kFixSlew = 1u << 4,      // 114124 mode-0 return slew (a/j)
     kFixClock = 1u << 5,     // system 1: wake ordinal in the stock domain + update-count periods
     kFixRaceClock = 1u << 6, // system 12: race tick [race+8] counts stock ticks
+    kFixSession = 1u << 7,   // system 12/8: race-session machine 0x26f4a8 at stock cadence (class d)
 };
 
 inline uint32_t fixMask() noexcept
@@ -94,7 +95,7 @@ inline uint32_t fixMask() noexcept
             return 0u;
         const std::string s(v);
         if (s == "all")
-            return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock;
+            return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -108,6 +109,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "slew") m |= kFixSlew;
             else if (item == "clock") m |= kFixClock;
             else if (item == "raceclock") m |= kFixRaceClock;
+            else if (item == "session") m |= kFixSession;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -457,6 +459,32 @@ inline void raceClockPreHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc,
         wr32(ram, race + 0x8u, tick - 1u);
 }
 
+// ---- Race session at stock cadence, PS2X_SSX3_FULL120_FIX=session ---------
+// 0x26f4a8 (called once per update from the app update at 0x230bb8, a0 =
+// session object, return unused) is the race-session state machine. Its
+// object counts frames: +0x3cc race time (stops when +0x610 is set; the HUD
+// race clock: 2x under full120, FH2 scan 0x146370c), +0x3c8 state age,
+// +0x614 countdown. Servicing the whole machine on every other update (class
+// d) keeps all of them in stock frames, and records/finish times in stock
+// units on the memory card.
+inline constexpr uint32_t kSessionCallSite = 0x230bb8u;
+inline constexpr uint32_t kSession = 0x26f4a8u;
+inline uint32_t g_sessionCalls = 0u;
+
+inline bool sessionFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixSession) != 0u;
+    return on;
+}
+
+// true = skip this call (the caller continues at its fall-through).
+inline bool sessionSkip(uint32_t sourcePc, uint32_t targetPc) noexcept
+{
+    if (sourcePc != kSessionCallSite || targetPc != kSession)
+        return false;
+    return (g_sessionCalls++ & 1u) != 0u;
+}
+
 // dispatchGuestBranch, after a call returned to its fall-through.
 inline void clockPostHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 {
@@ -546,7 +574,7 @@ inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_
         clockPreHook(ram, targetPc);
     if (raceClockFix())
         raceClockPreHook(ram, ctx, sourcePc, targetPc);
-    bool skip = false;
+    bool skip = sessionFix() && sessionSkip(sourcePc, targetPc);
     if (enabled())
         skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
     Tap &t = tap();
