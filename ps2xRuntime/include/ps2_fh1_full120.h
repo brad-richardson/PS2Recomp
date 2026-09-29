@@ -182,7 +182,7 @@ inline void patchAtManagerInit(uint8_t *ram)
         std::fprintf(stderr, "fh1-full120-refused manager ptr=%08x\n", a);
         std::abort();
     }
-    const std::array<Word, 61> words = {{
+    const std::array<Word, 62> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -213,6 +213,10 @@ inline void patchAtManagerInit(uint8_t *ram)
         {kFixTimers, 0x49b59cu, kSixtieth, kHundredTwentieth, "rider_ramp_115d98"},
         // per-rider timer list [e+4] -= [gp-0x7f94] at 0x101538 (0x1013a8, RV13 row).
         {kFixTimers, 0x49b15cu, kSixtieth, kHundredTwentieth, "rider_timers_101538"},
+        // FH4: rider trick/air state 0x117c28 (from 0x1218ac): air timer +0x30
+        // += tscale*[gp-0x7b00] at 0x117cf8/0x117d14, fed to 0x119210 (trick
+        // curve; points accrue into +0x84 at 0x117d18); +0xa4 -= the same.
+        {kFixTimers, 0x49b5f0u, kSixtieth, kHundredTwentieth, "air_trick_clock_117c28"},
         // CM2 §4 / convert.txt (GameCamera 0x1580e10 chase chain, pool words
         // reloaded every tick): class a retentions r -> sqrt(r) ...
         {kFixCamera, 0x49cfe4u, 0x3f59999au, 0x3f6c0535u, "cam_C1_kA0"},
