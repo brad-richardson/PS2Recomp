@@ -59,6 +59,76 @@ namespace
     }
 }
 
+namespace ps2_gif_digest
+{
+    namespace
+    {
+        constexpr uint64_t kPrime = 1099511628211ull;
+        constexpr uint64_t kEvery = 16384u;
+        std::mutex g_mutex;
+        uint64_t g_fnv = 14695981039346656037ull;
+        uint64_t g_packets = 0;
+        uint64_t g_bytes = 0;
+        uint64_t g_markers = 0;
+
+        void mixByte(uint8_t b)
+        {
+            g_fnv ^= b;
+            g_fnv *= kPrime;
+        }
+        void mixU64(uint64_t v)
+        {
+            for (int i = 0; i < 8; ++i)
+                mixByte(static_cast<uint8_t>(v >> (i * 8)));
+        }
+        void printLine(const char *tag)
+        {
+            std::fprintf(stderr, "[gif-digest] n=%llu fnv=%016llx bytes=%llu markers=%llu%s\n",
+                         static_cast<unsigned long long>(g_packets), static_cast<unsigned long long>(g_fnv),
+                         static_cast<unsigned long long>(g_bytes), static_cast<unsigned long long>(g_markers), tag);
+        }
+        void atExit()
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            printLine(" final");
+        }
+    }
+
+    bool enabled()
+    {
+        static const bool on = [] {
+            const char *env = std::getenv("PS2X_GIF_DIGEST");
+            const bool v = env && std::strcmp(env, "1") == 0;
+            if (v)
+                std::atexit(atExit);
+            return v;
+        }();
+        return on;
+    }
+
+    void mixPacket(uint8_t path, const uint8_t *data, uint32_t sizeBytes)
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        mixByte(0xA0u);
+        mixByte(path);
+        mixU64(sizeBytes);
+        for (uint32_t i = 0; i < sizeBytes; ++i)
+            mixByte(data[i]);
+        g_bytes += sizeBytes;
+        if (++g_packets % kEvery == 0u)
+            printLine("");
+    }
+
+    void mixMarker(uint8_t kind, uint64_t value)
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        mixByte(0xB0u);
+        mixByte(kind);
+        mixU64(value);
+        ++g_markers;
+    }
+}
+
 GifArbiter::GifArbiter(ProcessPacketFn processFn)
     : m_processFn(std::move(processFn))
 {
@@ -123,6 +193,43 @@ void GifArbiter::submitOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, boo
     m_queue.push_back(std::move(pkt));
 }
 
+std::vector<uint8_t> GifArbiter::copyForSubmit(const uint8_t *data, uint32_t sizeBytes) const
+{
+    // Same bytes as submit(): pooled buffer when one fits, then the MP2
+    // insert (zero-copy knob) or the pre-MP2 resize+memcpy.
+    std::vector<uint8_t> out;
+    if (m_pool)
+        out = m_pool->acquire(sizeBytes);
+    if (m_zeroCopy)
+    {
+        out.insert(out.end(), data, data + sizeBytes);
+    }
+    else
+    {
+        out.resize(sizeBytes);
+        std::memcpy(out.data(), data, sizeBytes);
+    }
+    return out;
+}
+
+void GifArbiter::submitStaged(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl, bool owned)
+{
+    ps2_mtvu::touch(ps2_mtvu::Site::ArbSubmit); // MT1: unit-owned
+    const uint32_t sizeBytes = static_cast<uint32_t>(bytes.size());
+    if (bytes.empty() || sizeBytes < 16 || !m_processFn)
+        return;
+
+    if (ps2_mtvu::mp2Census()) // MP2: per-path GIF bytes (logged, not hashed)
+        ps2_mtvu::noteMp2GifSubmit(static_cast<int>(pathId), sizeBytes, owned);
+    GifArbiterPacket pkt;
+    pkt.pathId = pathId;
+    pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
+    pkt.path3Image = (pathId == GifPathId::Path3) && isImagePacket(bytes.data(), sizeBytes);
+    capturePacket(pathId, bytes.data(), sizeBytes);
+    pkt.data = std::move(bytes);
+    m_queue.push_back(std::move(pkt));
+}
+
 void GifArbiter::drain()
 {
     if (!m_processFn)
@@ -151,6 +258,9 @@ void GifArbiter::drain()
         auto &pkt = m_queue[i];
         if (!pkt.data.empty())
         {
+            if (ps2_gif_digest::enabled()) // VPL1 (logged only)
+                ps2_gif_digest::mixPacket(static_cast<uint8_t>(pkt.pathId), pkt.data.data(),
+                                          static_cast<uint32_t>(pkt.data.size()));
             // E33: the listener runs first so GS draw attribution lands on
             // this packet's path before the process function draws with it.
             if (m_packetListener)

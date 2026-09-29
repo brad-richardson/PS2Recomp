@@ -139,7 +139,7 @@ namespace
         // defer exactly like endWorkerBatch(true) and the unit's job end
         // (jobEndFn -> flushWorkerWake) delivers any pending one.
         explicit GifDrainBatch(GS *gs)
-            : m_gs(gs), m_local(gs && gs->workerLocalBatchesOk() && ps2_mtvu::onWorker())
+            : m_gs(gs), m_local(gs && gs->workerLocalBatchesOk() && ps2_mtvu::onUnitGsProducer())
         {
             if (m_local)
                 GsWorker::beginLocalBatch();
@@ -153,7 +153,7 @@ namespace
             if (m_local)
                 GsWorker::endLocalBatch();
             else if (m_gs)
-                m_gs->endWorkerBatch(ps2_mtvu::onWorker());
+                m_gs->endWorkerBatch(ps2_mtvu::onUnitGsProducer());
         }
         GifDrainBatch(const GifDrainBatch &) = delete;
         GifDrainBatch &operator=(const GifDrainBatch &) = delete;
@@ -1282,11 +1282,12 @@ void PS2Memory::gsPrivStore(std::function<void()> apply, uint32_t captureAddress
     if (ps2_mtvu::threaded() && !ps2_mtvu::onWorker())
     {
         ps2_mtvu::submit([this, apply = std::move(apply)]() mutable
-                         {
+                         { unitGsCall(1u, 0u, [this, apply = std::move(apply)]() mutable
+                                      {
             if (m_gsFrontend)
                 m_gsFrontend->privWrite(std::move(apply));
             else
-                apply(); }, 64u, ps2_mtvu::currentFbrst());
+                apply(); }); }, 64u, ps2_mtvu::currentFbrst());
         return;
     }
     ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite); // MT1: in stream order after unit packets
@@ -1371,6 +1372,7 @@ void PS2Memory::orderedGsCsrWrite(uint32_t width, uint64_t value)
     // reads with a pending clear retire both queues before returning a value.
     m_orderedCsrSubmitted.fetch_add(1u, std::memory_order_release);
     ps2_mtvu::submit([this, width, value]()
+    { unitGsCall(2u, value, [this, width, value]()
     {
         auto apply = [this, width, value]()
         {
@@ -1384,7 +1386,7 @@ void PS2Memory::orderedGsCsrWrite(uint32_t width, uint64_t value)
             m_gsFrontend->orderedCsrWrite(width, value, std::move(apply));
         else
             apply();
-    }, 64u, ps2_mtvu::currentFbrst());
+    }); }, 64u, ps2_mtvu::currentFbrst());
 }
 
 void PS2Memory::orderedGsFrameEnd(uint64_t tick)
@@ -1392,10 +1394,11 @@ void PS2Memory::orderedGsFrameEnd(uint64_t tick)
     // VBlank's existing LAG=1 fence bounds unit frame age. This marker stays
     // behind frame N's unit jobs and ahead of N+1's in the same queue.
     ps2_mtvu::submit([this, tick]()
+    { unitGsCall(3u, tick, [this, tick]()
     {
         if (m_gsFrontend)
             m_gsFrontend->orderedFrameEnd(tick);
-    }, 32u, ps2_mtvu::currentFbrst());
+    }); }, 32u, ps2_mtvu::currentFbrst());
 }
 
 void PS2Memory::write8(uint32_t address, uint8_t value)
@@ -3133,10 +3136,7 @@ void PS2Memory::processPendingTransfers()
                     processVIF1Data(piece.bytes.data(), size);
             }
             if (m_gifArbiter)
-            {
-                const GifDrainBatch batch(m_gsFrontend);
-                m_gifArbiter->drain();
-            } }, mtvuBytes, ps2_mtvu::currentFbrst());
+                arbDrain(); }, mtvuBytes, ps2_mtvu::currentFbrst());
     }
     // Threaded, with no GIF/VIF1 work run inline here (e.g. a VIF0-only kick):
     // the arbiter belongs to the unit, and inline this drain always finds its
@@ -3144,8 +3144,7 @@ void PS2Memory::processPendingTransfers()
     else if (m_gifArbiter &&
              !(ps2_mtvu::threaded() && !ps2_mtvu::onWorker() && !hadGif && !hadVif1))
     {
-        const GifDrainBatch batch(m_gsFrontend);
-        m_gifArbiter->drain();
+        arbDrain();
     }
     mtvuScope.pause();
 
@@ -3276,11 +3275,10 @@ void PS2Memory::releaseOneMaskedPath3Packet()
     {
         // MP2: the fifo vector becomes the arbiter packet (no copy).
         if (m_gsZeroCopy)
-            m_gifArbiter->submitOwned(GifPathId::Path3, std::move(packet), false);
+            arbSubmitOwned(GifPathId::Path3, std::move(packet), false);
         else
-            m_gifArbiter->submit(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()), false);
-        const GifDrainBatch batch(m_gsFrontend);
-        m_gifArbiter->drain();
+            arbSubmit(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()), false);
+        arbDrain();
     }
     else if (m_gifPacketCallback)
     {
@@ -3307,7 +3305,7 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
     auto emit = [&](const uint8_t *packetData, uint32_t packetSize)
     {
         if (m_gifArbiter)
-            m_gifArbiter->submit(GifPathId::Path3, packetData, packetSize, false);
+            arbSubmit(GifPathId::Path3, packetData, packetSize, false);
         else if (m_gifPacketCallback)
             m_gifPacketCallback(packetData, packetSize);
     };
@@ -3321,7 +3319,7 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
             ps2_pk::noteSubmit("3", packet.data(), static_cast<uint32_t>(packet.size()),
                                gs_regs.vsyncTick.load(std::memory_order_relaxed));
             if (owned)
-                m_gifArbiter->submitOwned(GifPathId::Path3, std::move(packet), false);
+                arbSubmitOwned(GifPathId::Path3, std::move(packet), false);
             else
                 emit(packet.data(), static_cast<uint32_t>(packet.size()));
         }
@@ -3329,10 +3327,7 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
     m_path3MaskedFifo.clear();
 
     if (m_gifArbiter && drainImmediately)
-    {
-        const GifDrainBatch batch(m_gsFrontend);
-        m_gifArbiter->drain();
-    }
+        arbDrain();
 }
 
 void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately, bool path2DirectHl)
@@ -3370,15 +3365,12 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
     ps2_pk::noteSubmit(pathId == GifPathId::Path1 ? "1" : (pathId == GifPathId::Path2 ? "2" : "3"),
                        data, sizeBytes, gs_regs.vsyncTick.load(std::memory_order_relaxed));
     if (m_gifArbiter)
-        m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl);
+        arbSubmit(pathId, data, sizeBytes, path2DirectHl);
     else if (m_gifPacketCallback)
         m_gifPacketCallback(data, sizeBytes);
 
     if (m_gifArbiter && drainImmediately)
-    {
-        const GifDrainBatch batch(m_gsFrontend);
-        m_gifArbiter->drain();
-    }
+        arbDrain();
 }
 
 void PS2Memory::submitGifPacketOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately, bool path2DirectHl)
@@ -3417,15 +3409,77 @@ void PS2Memory::submitGifPacketOwned(GifPathId pathId, std::vector<uint8_t> &&by
     ps2_pk::noteSubmit(pathId == GifPathId::Path1 ? "1" : (pathId == GifPathId::Path2 ? "2" : "3"),
                        bytes.data(), sizeBytes, gs_regs.vsyncTick.load(std::memory_order_relaxed));
     if (m_gifArbiter)
-        m_gifArbiter->submitOwned(pathId, std::move(bytes), path2DirectHl);
+        arbSubmitOwned(pathId, std::move(bytes), path2DirectHl);
     else if (m_gifPacketCallback)
         m_gifPacketCallback(bytes.data(), sizeBytes);
 
     if (m_gifArbiter && drainImmediately)
+        arbDrain();
+}
+
+void PS2Memory::arbSubmit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
+{
+    if (ps2_mtvu::gifStageDefer())
     {
-        const GifDrainBatch batch(m_gsFrontend);
-        m_gifArbiter->drain();
+        // VPL1: the copy stays on the VU thread (the bytes may be VU memory
+        // the next job rewrites); the arbiter work moves.
+        if (!data || sizeBytes < 16u)
+            return;
+        ps2_mtvu::gifStageSubmit(static_cast<uint8_t>(pathId), path2DirectHl, false,
+                                 m_gifArbiter->copyForSubmit(data, sizeBytes));
+        return;
     }
+    m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl);
+}
+
+void PS2Memory::arbSubmitOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl)
+{
+    if (ps2_mtvu::gifStageDefer())
+    {
+        ps2_mtvu::gifStageSubmit(static_cast<uint8_t>(pathId), path2DirectHl, true, std::move(bytes));
+        return;
+    }
+    m_gifArbiter->submitOwned(pathId, std::move(bytes), path2DirectHl);
+}
+
+void PS2Memory::arbDrain()
+{
+    if (ps2_mtvu::gifStageDefer())
+    {
+        ps2_mtvu::gifStageDrain();
+        return;
+    }
+    const GifDrainBatch batch(m_gsFrontend);
+    m_gifArbiter->drain();
+}
+
+void PS2Memory::unitGsCall(uint8_t marker, uint64_t value, std::function<void()> fn)
+{
+    if (ps2_mtvu::gifStageDefer())
+    {
+        ps2_mtvu::gifStageCall([marker, value, fn = std::move(fn)]()
+                               {
+                                   if (ps2_gif_digest::enabled())
+                                       ps2_gif_digest::mixMarker(marker, value);
+                                   fn(); });
+        return;
+    }
+    if (ps2_gif_digest::enabled())
+        ps2_gif_digest::mixMarker(marker, value);
+    fn();
+}
+
+void PS2Memory::execGifStageOp(ps2_mtvu::GifOp &op)
+{
+    if (!m_gifArbiter)
+        return;
+    if (op.kind == ps2_mtvu::GifOp::Kind::Submit)
+    {
+        m_gifArbiter->submitStaged(static_cast<GifPathId>(op.path), std::move(op.bytes), op.directHl, op.owned);
+        return;
+    }
+    const GifDrainBatch batch(m_gsFrontend);
+    m_gifArbiter->drain();
 }
 
 void PS2Memory::processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount)

@@ -1502,6 +1502,7 @@ PS2Runtime::~PS2Runtime()
     // MT1: queued unit work may reference this runtime; the process-wide
     // hooks must not outlive it (tests create many runtimes).
     ps2_mtvu::syncAll();
+    ps2_mtvu::stopGifStage(); // VPL1: join the GIF thread before its hooks go
     ps2_mtvu::setDtFallbackFn({});
     ps2_mtvu::fbrstFn() = {};
     ps2_mtvu::jobEndFn() = {};
@@ -1780,6 +1781,22 @@ bool PS2Runtime::syncCoreSubsystems()
                         ps2_vif_mpg_log::enabled() || ps2_e44_trace::enabled() || ps2_e43_trace::enabled() ||
                         ps2_e41_trace::armed() || ps2_uv1_vif_fmt::enabled() || ps2_uv1_dma_stall::enabled() ||
                         ps2_e4::enabled() || ps2_vq::enabled());
+    // VPL1: PS2X_MTVU_GIF_STAGE=1 (default off) moves the unit's GIF submit
+    // (arbiter + GS-worker handoff) onto its own thread behind an ordered op
+    // ring; the unit keeps VIF1/VU1 and the byte copies. Needs threaded MTVU
+    // and the GS worker queue. local/research/VPL1/REPORT.md.
+    if (const char *env = std::getenv("PS2X_MTVU_GIF_STAGE"))
+    {
+        if (std::strcmp(env, "1") == 0)
+        {
+            const bool ok = ps2_mtvu::threaded() && m_gs.queueEnabled();
+            if (ok)
+                ps2_mtvu::startGifStage([this](ps2_mtvu::GifOp &op) { m_memory.execGifStageOp(op); });
+            std::cerr << "[mtvu] gif-stage " << (ok ? "on" : "refused")
+                      << " (PS2X_MTVU_GIF_STAGE=1" << (ok ? "" : "; needs PS2X_MTVU=1 threaded and the GS worker queue")
+                      << ")" << std::endl;
+        }
+    }
     {
         std::string microvuError;
         if (!ps2_microvu::configure(ps2_mtvu::threaded(), microvuError))

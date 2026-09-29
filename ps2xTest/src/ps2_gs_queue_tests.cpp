@@ -924,6 +924,87 @@ void register_ps2_gs_queue_tests()
             t.Equals(ordered[1], direct[1], "unit-delivered FrameEnd has the same command count");
         });
 
+        tc.Run("VPL1 GIF stage keeps the unit's GS stream order", [](TestCase &t)
+        {
+            // The unit's arbiter work (PATH1/2/3 submits, per-XGKICK drains,
+            // the PATH1-before-PATH3 sort), R2 priv stores and ordered frame
+            // markers must reach the GS worker in the same order with the
+            // GIF stage on as with the serial unit (pktSeq digest), with and
+            // without host jitter, and nothing may bypass the stage.
+            OrderedStatusEnv env;
+            auto run = [](bool gifStage, uint32_t jitterUs)
+            {
+                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Threaded, true, jitterUs);
+                PS2Memory mem;
+                mem.initialize();
+                GS gs;
+                gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+                gs.setRasterBackend(ps2x_gs_external::create(&mem.gs()));
+                gs.setQueueEnabled(true);
+                gs.setPktSeqEnabled(true);
+                mem.setGsFrontend(&gs);
+                GifArbiter arbiter([&gs](const uint8_t *data, uint32_t size) { gs.processGIFPacket(data, size); });
+                mem.setGifArbiter(&arbiter);
+                if (gifStage)
+                    ps2_mtvu::startGifStage([&mem](ps2_mtvu::GifOp &op) { mem.execGifStageOp(op); });
+                auto label = [](uint64_t v)
+                {
+                    std::vector<uint8_t> b;
+                    appendGifTag(b, 1u, kFlgPacked, 1u, 0xEull);
+                    appendGifAd(b, v, GS_REG_LABEL);
+                    return b;
+                };
+                for (uint32_t i = 0; i < 200u; ++i)
+                {
+                    ps2_mtvu::submit([&mem, i, label]()
+                    {
+                        const std::vector<uint8_t> p1 = label(0x100000ull + i);
+                        mem.submitGifPacket(GifPathId::Path1, p1.data(), static_cast<uint32_t>(p1.size()));
+                        if (i % 3u == 0u)
+                        {
+                            const std::vector<uint8_t> p2 = label(0x200000ull + i);
+                            mem.submitGifPacket(GifPathId::Path2, p2.data(), static_cast<uint32_t>(p2.size()), true,
+                                                (i & 1u) != 0u);
+                        }
+                        if (i % 5u == 0u)
+                        {
+                            // Undrained PATH3 then PATH1: the drain sorts PATH1 first.
+                            const std::vector<uint8_t> p3 = label(0x300000ull + i);
+                            mem.submitGifPacket(GifPathId::Path3, p3.data(), static_cast<uint32_t>(p3.size()), false);
+                            std::vector<uint8_t> p1b = label(0x400000ull + i);
+                            mem.submitGifPacketOwned(GifPathId::Path1, std::move(p1b), true);
+                        }
+                    }, 64u, 0u);
+                    if (i % 7u == 0u)
+                        mem.write64(0x12000070u, 0x1000ull + i); // DISPFB1: an R2 priv-store job
+                    if (i % 10u == 9u)
+                        mem.orderedGsFrameEnd(i);
+                }
+                ps2_mtvu::syncAll();
+                gs.drainQueue();
+                const std::array<uint64_t, 3> out{gs.pktSeqSnapshot(), gs.pktSeqSnapshotCommands(),
+                                                  mem.gs().dispfb1};
+                if (gifStage)
+                    ps2_mtvu::stopGifStage();
+                mem.setGifArbiter(nullptr);
+                gs.setQueueEnabled(false);
+                mem.setGsFrontend(nullptr);
+                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+                return out;
+            };
+            const uint64_t escapes0 = ps2_mtvu::detail::gifStage().nEscapes.load();
+            const auto serial = run(false, 0u);
+            t.IsTrue(serial[1] >= 390u, "digest covers the packet stream, priv stores and frame markers");
+            for (uint32_t jitterUs : {0u, 200u})
+            {
+                const auto staged = run(true, jitterUs);
+                t.Equals(staged[0], serial[0], "GIF-stage GS stream digest == serial unit");
+                t.Equals(staged[1], serial[1], "GIF-stage GS command count == serial unit");
+                t.Equals(staged[2], serial[2], "GIF-stage final DISPFB1 == serial unit");
+            }
+            t.Equals(ps2_mtvu::detail::gifStage().nEscapes.load(), escapes0, "no GS enqueue bypassed the stage");
+        });
+
         tc.Run("O: two queued frame markers bound backlog across reset", [](TestCase &t)
         {
             PS2Memory mem;

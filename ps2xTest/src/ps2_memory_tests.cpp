@@ -1421,13 +1421,16 @@ void register_ps2_memory_tests()
                 size_t mscals = 0;
                 size_t offThread = 0;
             };
-            auto run = [](ps2_mtvu::Mode mode, uint32_t jitterUs) -> Outcome
+            auto run = [](ps2_mtvu::Mode mode, uint32_t jitterUs, bool gifStage = false) -> Outcome
             {
                 ps2_mtvu::setModeForTest(mode, false, jitterUs);
                 Outcome out;
                 PS2Memory mem;
                 if (!mem.initialize())
                     return out;
+                // VPL1: the unit's GIF submit on its own thread behind the op ring.
+                if (gifStage)
+                    ps2_mtvu::startGifStage([&mem](ps2_mtvu::GifOp &op) { mem.execGifStageOp(op); });
                 int lastPath = -1;
                 GifArbiter arbiter([&](const uint8_t *data, uint32_t size)
                                    { out.packets.emplace_back(lastPath, std::vector<uint8_t>(data, data + size)); });
@@ -1538,6 +1541,8 @@ void register_ps2_memory_tests()
                 out.row0 = mem.vif1_regs.row[0];
                 out.masked = mem.isPath3Masked();
                 out.eeReads.push_back(mem.gs().dispfb1);
+                if (gifStage)
+                    ps2_mtvu::stopGifStage();
                 ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
                 mem.setGifArbiter(nullptr);
                 return out;
@@ -1545,12 +1550,16 @@ void register_ps2_memory_tests()
             const Outcome base = run(ps2_mtvu::Mode::Off, 0u);
             const Outcome thr = run(ps2_mtvu::Mode::Threaded, 0u);
             const Outcome jit = run(ps2_mtvu::Mode::Threaded, 300u);
+            const Outcome gif = run(ps2_mtvu::Mode::Threaded, 0u, true);
+            const Outcome gifJit = run(ps2_mtvu::Mode::Threaded, 300u, true);
             t.IsTrue(base.packets.size() > 150u, "scenario should produce a long GIF stream");
             t.Equals(base.mscals, static_cast<size_t>(60u), "every kick runs its MSCAL");
             t.Equals(base.offThread, static_cast<size_t>(0u), "synchronous MSCALs run on the EE thread");
             t.Equals(thr.offThread, static_cast<size_t>(60u), "threaded MSCALs run on the unit worker");
             t.Equals(ps2_mtvu::detail::worker().violationsTotal, 0ull, "no unit state touched while jobs are queued");
-            for (const Outcome *o : {&thr, &jit})
+            t.Equals(gif.offThread, static_cast<size_t>(60u), "GIF-stage MSCALs still run on the unit worker");
+            t.Equals(ps2_mtvu::detail::gifStage().nEscapes.load(), 0ull, "no GS enqueue bypassed the GIF stage");
+            for (const Outcome *o : {&thr, &jit, &gif, &gifJit})
             {
                 t.IsTrue(o->packets == base.packets, "GIF packet sequence (path + bytes) is identical");
                 t.IsTrue(o->vu1Data == base.vu1Data, "VU1 data memory is identical");

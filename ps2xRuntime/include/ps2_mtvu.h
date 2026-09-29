@@ -47,6 +47,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "ThreadNaming.h"
@@ -60,6 +61,28 @@
 
 namespace ps2_mtvu
 {
+    // VPL1: one GIF-stage op (PS2X_MTVU_GIF_STAGE=1). The MTVU thread turns
+    // each unit action on the GIF arbiter / GS frontend into an op, in
+    // program order; the MTVU-GIF thread runs them in the same order
+    // (local/research/VPL1/REPORT.md §1).
+    struct GifOp
+    {
+        enum class Kind : uint8_t
+        {
+            Submit, // GifArbiter::submitStaged(path, bytes, directHl, owned)
+            Drain,  // GifDrainBatch + GifArbiter::drain()
+            Call,   // a GS-frontend call from a unit job (priv write, ordered CSR, frame end)
+            JobEnd  // the unit job is complete once this op has run
+        };
+        Kind kind = Kind::Drain;
+        uint8_t path = 0;
+        bool directHl = false;
+        bool owned = false; // MP2 census flag: submitOwned vs submit
+        uint32_t acct = 0;  // bytes counted against the in-flight cap
+        std::vector<uint8_t> bytes;
+        std::function<void()> fn;
+    };
+
     enum class Mode : int
     {
         Off = 0,
@@ -241,6 +264,314 @@ namespace ps2_mtvu
             size_t bytes = 0;
         };
 
+        // VPL1 GIF stage. g_gifStage: routing on (set before the game thread
+        // runs, cleared after a full sync). g_gifTid: the MTVU-GIF thread.
+        inline std::atomic<bool> g_gifStage{false};
+        inline std::atomic<std::thread::id> g_gifTid{};
+        inline void workerJobDoneFromGif(); // after Worker
+
+        // Ordered SPSC ring of GifOps: producer = the MTVU thread, consumer =
+        // the MTVU-GIF thread. Batched publishes (every kPublishEvery ops and
+        // at JobEnd), no shared atomic per op, and a wake only when the other
+        // side has announced it sleeps (MP1: futex round trips were the cost).
+        struct GifStage
+        {
+            static constexpr size_t kSlots = 4096u;
+            static constexpr size_t kMask = kSlots - 1u;
+            static constexpr uint64_t kMaxBytes = 16ull << 20;
+            static constexpr uint64_t kPublishEvery = 32u;
+            static constexpr uint64_t kSpinNs = 50000u;
+
+            std::unique_ptr<GifOp[]> slots;
+            std::function<void(GifOp &)> exec; // Submit/Drain (PS2Memory)
+            // Producer-private (MTVU thread).
+            alignas(64) uint64_t pTail = 0;
+            uint64_t pPub = 0;
+            uint64_t pBytes = 0;
+            uint64_t pHeadCache = 0;
+            uint64_t pDoneBytesCache = 0;
+            // Published by the producer.
+            alignas(64) std::atomic<uint64_t> tail{0};
+            // Published by the consumer.
+            alignas(64) std::atomic<uint64_t> head{0};
+            std::atomic<uint64_t> doneBytes{0};
+            alignas(64) std::atomic<bool> sleeping{false};
+            std::atomic<bool> producerWaiting{false};
+            std::atomic<bool> stop{false};
+            // Consumer-private (MTVU-GIF thread).
+            alignas(64) uint64_t cHead = 0;
+            uint64_t cTailCache = 0;
+            uint64_t cBytes = 0;
+            uint64_t cPub = 0;
+            bool cDirty = false; // GS work since the last wake flush
+            std::mutex m;
+            std::condition_variable cvConsumer;
+            std::condition_variable cvProducer;
+            std::thread th;
+            bool running = false; // EE / init only
+            // Receipts (logged only).
+            std::atomic<uint64_t> nPub{0};
+            std::atomic<uint64_t> nSleeps{0};
+            std::atomic<uint64_t> nFullWaits{0};
+            std::atomic<uint64_t> nEscapes{0};
+            std::atomic<uint64_t> busyNs{0};    // since the last vblank (perf stage)
+            std::atomic<uint64_t> busyNsWin{0}; // since the last summary
+            uint64_t summaryTail = 0;           // EE only
+
+            // --- producer (MTVU thread) ---
+            bool roomFor(uint32_t acct)
+            {
+                if (pTail - pHeadCache >= kSlots)
+                    return false;
+                // An empty ring always takes one op (an oversize packet must
+                // still make progress, as the GS worker's byte cap does).
+                return pTail == pHeadCache || pBytes - pDoneBytesCache + acct <= kMaxBytes;
+            }
+            void refreshCaches()
+            {
+                pHeadCache = head.load(std::memory_order_acquire);
+                pDoneBytesCache = doneBytes.load(std::memory_order_acquire);
+            }
+            void publish()
+            {
+                if (pPub == pTail)
+                    return;
+                pPub = pTail;
+                tail.store(pTail, std::memory_order_release);
+                nPub.fetch_add(1u, std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                if (sleeping.load(std::memory_order_relaxed))
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(m);
+                    }
+                    cvConsumer.notify_one();
+                }
+            }
+            // Wait until `done()` holds (the consumer made room / ran
+            // everything). The consumer notifies only while producerWaiting.
+            template <typename Pred>
+            void producerWait(Pred done)
+            {
+                publish();
+                for (int spin = 0; spin < 256; ++spin)
+                {
+                    refreshCaches();
+                    if (done() || stop.load(std::memory_order_relaxed))
+                        return;
+                    std::this_thread::yield();
+                }
+                producerWaiting.store(true, std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                {
+                    std::unique_lock<std::mutex> lock(m);
+                    for (;;)
+                    {
+                        refreshCaches();
+                        if (done() || stop.load(std::memory_order_relaxed))
+                            break;
+                        cvProducer.wait_for(lock, std::chrono::milliseconds(1));
+                    }
+                }
+                producerWaiting.store(false, std::memory_order_relaxed);
+            }
+            // A free slot (null once the stage is stopping: the op is dropped).
+            GifOp *claim(uint32_t acct)
+            {
+                if (!roomFor(acct))
+                {
+                    refreshCaches();
+                    if (!roomFor(acct))
+                    {
+                        nFullWaits.fetch_add(1u, std::memory_order_relaxed);
+                        producerWait([&] { return roomFor(acct); });
+                    }
+                }
+                if (stop.load(std::memory_order_relaxed))
+                    return nullptr;
+                return &slots[pTail & kMask];
+            }
+            void commit(const GifOp &op, bool publishNow)
+            {
+                ++pTail;
+                pBytes += op.acct;
+                if (publishNow || pTail - pPub >= kPublishEvery)
+                    publish();
+            }
+            // Wait until the consumer has run every op pushed so far.
+            void fence()
+            {
+                refreshCaches();
+                if (pHeadCache == pTail)
+                    return;
+                producerWait([&] { return pHeadCache == pTail; });
+            }
+
+            // --- consumer (MTVU-GIF thread) ---
+            void publishHead()
+            {
+                cPub = cHead;
+                head.store(cHead, std::memory_order_release);
+                doneBytes.store(cBytes, std::memory_order_release);
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                if (producerWaiting.load(std::memory_order_relaxed))
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(m);
+                    }
+                    cvProducer.notify_one();
+                }
+            }
+            void flushGsWake()
+            {
+                // GsWorker rule: deliver a deferred wake before waiting on
+                // anything but an RPC; also per job end, as the unit did.
+                cDirty = false;
+                if (const auto &end = jobEndFn())
+                    end();
+            }
+            // Spin briefly, then sleep until the producer publishes. False on stop.
+            bool waitWork()
+            {
+                const uint64_t t0 = nowNs();
+                for (;;)
+                {
+                    if (stop.load(std::memory_order_relaxed))
+                        return false;
+                    cTailCache = tail.load(std::memory_order_acquire);
+                    if (cTailCache != cHead)
+                        return true;
+                    if (nowNs() - t0 >= kSpinNs)
+                        break;
+                    std::this_thread::yield();
+                }
+                sleeping.store(true, std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                if (tail.load(std::memory_order_relaxed) == cHead && !stop.load(std::memory_order_relaxed))
+                {
+                    nSleeps.fetch_add(1u, std::memory_order_relaxed);
+                    std::unique_lock<std::mutex> lock(m);
+                    cvConsumer.wait_for(lock, std::chrono::milliseconds(100), [&] {
+                        return tail.load(std::memory_order_acquire) != cHead || stop.load(std::memory_order_relaxed);
+                    });
+                }
+                sleeping.store(false, std::memory_order_relaxed);
+                cTailCache = tail.load(std::memory_order_acquire);
+                return !stop.load(std::memory_order_relaxed);
+            }
+            void run(GifOp &op)
+            {
+                switch (op.kind)
+                {
+                case GifOp::Kind::Submit:
+                case GifOp::Kind::Drain:
+                    exec(op);
+                    cDirty = true;
+                    break;
+                case GifOp::Kind::Call:
+                    flushGsWake();
+                    if (op.fn)
+                        op.fn();
+                    cDirty = true;
+                    break;
+                case GifOp::Kind::JobEnd:
+                    flushGsWake();
+                    workerJobDoneFromGif();
+                    break;
+                }
+            }
+            void loop()
+            {
+                const UnitThreadGuard unitGuard;
+                g_gifTid.store(std::this_thread::get_id(), std::memory_order_relaxed);
+                ThreadNaming::SetCurrentThreadName("MTVU-GIF");
+                if (const char *cpus = std::getenv("PS2X_MTVU_GIF_CPUS"))
+                {
+                    if (cpus[0] != '\0')
+                    {
+                        const int rc = ps2x::pinCurrentThreadToCpus(ps2x::parseCpuList(cpus));
+                        std::fprintf(stderr, "[affinity] mtvu-gif thread cpus=%s rc=%d\n", cpus, rc);
+                    }
+                }
+                bool busy = false;
+                uint64_t busyT0 = 0;
+                for (;;)
+                {
+                    if (cHead == cTailCache)
+                    {
+                        cTailCache = tail.load(std::memory_order_acquire);
+                        if (cHead == cTailCache)
+                        {
+                            if (busy)
+                            {
+                                const uint64_t ns = nowNs() - busyT0;
+                                busyNs.fetch_add(ns, std::memory_order_relaxed);
+                                busyNsWin.fetch_add(ns, std::memory_order_relaxed);
+                                busy = false;
+                            }
+                            publishHead();
+                            if (cDirty)
+                                flushGsWake();
+                            if (!waitWork())
+                                break;
+                            continue;
+                        }
+                    }
+                    if (stop.load(std::memory_order_relaxed))
+                        break;
+                    if (!busy)
+                    {
+                        busy = true;
+                        busyT0 = nowNs();
+                    }
+                    GifOp &op = slots[cHead & kMask];
+                    const GifOp::Kind kind = op.kind;
+                    run(op);
+                    cBytes += op.acct;
+                    std::vector<uint8_t>().swap(op.bytes); // no-op once moved from
+                    op.fn = nullptr;
+                    ++cHead;
+                    if (kind == GifOp::Kind::JobEnd || cHead - cPub >= kPublishEvery)
+                        publishHead();
+                }
+                g_gifTid.store(std::thread::id{}, std::memory_order_relaxed);
+            }
+
+            // --- lifecycle (EE / init; the ring must be empty) ---
+            void start(std::function<void(GifOp &)> fn)
+            {
+                shutdown();
+                exec = std::move(fn);
+                slots.reset(new GifOp[kSlots]);
+                pTail = pPub = pBytes = pHeadCache = pDoneBytesCache = 0u;
+                cHead = cTailCache = cBytes = cPub = 0u;
+                cDirty = false;
+                summaryTail = 0u;
+                tail.store(0u, std::memory_order_relaxed);
+                head.store(0u, std::memory_order_relaxed);
+                doneBytes.store(0u, std::memory_order_relaxed);
+                stop.store(false, std::memory_order_relaxed);
+                running = true;
+                th = std::thread([this] { loop(); });
+            }
+            void shutdown()
+            {
+                if (!running)
+                    return;
+                stop.store(true, std::memory_order_relaxed);
+                {
+                    std::lock_guard<std::mutex> lock(m);
+                }
+                cvConsumer.notify_all();
+                cvProducer.notify_all();
+                if (th.joinable())
+                    th.join();
+                running = false;
+                exec = nullptr;
+                slots.reset();
+            }
+        };
+
         struct Worker
         {
             static constexpr size_t kMaxJobs = 64u;
@@ -274,6 +605,8 @@ namespace ps2_mtvu
             // (worker fetch_adds, the EE exchanges at vblank).
             std::atomic<bool> tailOn{false};
             std::atomic<uint64_t> tailBusyNs{0};
+            // VPL1: the GIF stage this unit feeds (idle unless started).
+            GifStage gif;
 
             ~Worker()
             {
@@ -282,6 +615,7 @@ namespace ps2_mtvu
                     stop = true;
                 }
                 cvWork.notify_all();
+                gif.shutdown(); // VPL1: unblocks a producer waiting for ring room
 #if defined(__unix__) || defined(__APPLE__)
                 if (usePthread)
                     pthread_join(pth, nullptr);
@@ -342,6 +676,25 @@ namespace ps2_mtvu
                     }
                     if (tail)
                         tailBusyNs.fetch_add(nowNs() - jobT0, std::memory_order_relaxed);
+                    if (g_gifStage.load(std::memory_order_relaxed))
+                    {
+                        // VPL1: the job completes on the GIF thread, after its
+                        // GIF ops (JobEnd bumps `completed`); only the queue
+                        // slot is freed here.
+                        if (GifOp *op = gif.claim(0u))
+                        {
+                            op->kind = GifOp::Kind::JobEnd;
+                            op->acct = 0u;
+                            gif.commit(*op, true);
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(m);
+                            qBytes -= job->bytes;
+                            q.pop_front();
+                        }
+                        cvSpace.notify_all();
+                        continue;
+                    }
                     if (const auto &end = jobEndFn())
                         end();
                     {
@@ -425,6 +778,23 @@ namespace ps2_mtvu
         {
             static Worker w;
             return w;
+        }
+
+        inline GifStage &gifStage()
+        {
+            return worker().gif;
+        }
+
+        // VPL1: JobEnd on the GIF thread completes the unit job (what every
+        // sync waits for), as the MTVU loop does with the stage off.
+        inline void workerJobDoneFromGif()
+        {
+            Worker &w = worker();
+            {
+                std::lock_guard<std::mutex> lock(w.m);
+                w.completed.store(w.completed.load(std::memory_order_relaxed) + 1u, std::memory_order_release);
+            }
+            w.cvDone.notify_all();
         }
 
         // MU2 counter: VIF1 input bytes + UNPACK commands per summary window
@@ -556,6 +926,20 @@ namespace ps2_mtvu
                     std::fprintf(stderr, " V:%s=%llu", siteName(static_cast<Site>(i)),
                                  static_cast<unsigned long long>(w.violations[i]));
             std::fprintf(stderr, "\n");
+            if (g_gifStage.load(std::memory_order_relaxed))
+            {
+                GifStage &g = w.gif;
+                const uint64_t tailNow = g.tail.load(std::memory_order_acquire);
+                const uint64_t ops = tailNow - g.summaryTail;
+                g.summaryTail = tailNow;
+                std::fprintf(stderr, "[mtvu] gif-stage tick=%llu ops=%llu pub=%llu sleeps=%llu fullwaits=%llu escapes=%llu busy_ms=%.1f\n",
+                             static_cast<unsigned long long>(tick), static_cast<unsigned long long>(ops),
+                             static_cast<unsigned long long>(g.nPub.exchange(0u, std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(g.nSleeps.exchange(0u, std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(g.nFullWaits.exchange(0u, std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(g.nEscapes.load(std::memory_order_relaxed)),
+                             g.busyNsWin.exchange(0u, std::memory_order_relaxed) / 1e6);
+            }
             mp2Summary(tick); // MP2 census (no-op unless PS2X_MP2_CENSUS=1)
         }
 
@@ -714,6 +1098,100 @@ namespace ps2_mtvu
     inline uint32_t jobFbrst()
     {
         return detail::t_jobFbrst;
+    }
+
+    // VPL1 GIF stage (PS2X_MTVU_GIF_STAGE=1; report local/research/VPL1).
+    inline bool gifStageOn()
+    {
+        return detail::g_gifStage.load(std::memory_order_relaxed);
+    }
+
+    // The unit's GIF actions become ops only on the MTVU thread; any other
+    // caller (the EE after a sync, the GIF thread itself) runs them inline.
+    inline bool gifStageDefer()
+    {
+        return gifStageOn() && onWorker();
+    }
+
+    inline bool onGifStage()
+    {
+        return std::this_thread::get_id() == detail::g_gifTid.load(std::memory_order_relaxed);
+    }
+
+    // A unit thread that feeds the GS worker (lean local batches, deferred
+    // wakes): the MTVU thread, or the GIF thread that took its submits over.
+    inline bool onUnitGsProducer()
+    {
+        return onWorker() || onGifStage();
+    }
+
+    // MTVU thread only (gifStageDefer()). Dropped only while shutting down.
+    inline void gifStageSubmit(uint8_t path, bool directHl, bool owned, std::vector<uint8_t> &&bytes)
+    {
+        detail::GifStage &g = detail::gifStage();
+        const uint32_t acct = static_cast<uint32_t>(bytes.size());
+        if (GifOp *op = g.claim(acct))
+        {
+            op->kind = GifOp::Kind::Submit;
+            op->path = path;
+            op->directHl = directHl;
+            op->owned = owned;
+            op->acct = acct;
+            op->bytes = std::move(bytes);
+            g.commit(*op, false);
+        }
+    }
+
+    inline void gifStageDrain()
+    {
+        detail::GifStage &g = detail::gifStage();
+        if (GifOp *op = g.claim(0u))
+        {
+            op->kind = GifOp::Kind::Drain;
+            op->acct = 0u;
+            g.commit(*op, false);
+        }
+    }
+
+    inline void gifStageCall(std::function<void()> fn)
+    {
+        detail::GifStage &g = detail::gifStage();
+        if (GifOp *op = g.claim(0u))
+        {
+            op->kind = GifOp::Kind::Call;
+            op->acct = 0u;
+            op->fn = std::move(fn);
+            g.commit(*op, true);
+        }
+    }
+
+    // Safety net: a GS-worker enqueue on the MTVU thread with the stage on
+    // bypassed the ops. Keep it ordered (run every earlier op first) and
+    // count it; the [mtvu] gif-stage line must show escapes=0.
+    inline void gifStageEscape()
+    {
+        detail::GifStage &g = detail::gifStage();
+        const uint64_t n = g.nEscapes.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 8u)
+            std::fprintf(stderr, "[mtvu] gif-stage ESCAPE n=%llu (GS enqueue on the MTVU thread; ring fenced)\n",
+                         static_cast<unsigned long long>(n + 1u));
+        g.fence();
+    }
+
+    // Runtime init, after configure() and before the game thread runs.
+    // exec runs Submit/Drain ops on the GIF thread.
+    inline void startGifStage(std::function<void(GifOp &)> exec)
+    {
+        detail::gifStage().start(std::move(exec));
+        detail::g_gifStage.store(true, std::memory_order_release);
+    }
+
+    // After a full sync (the ring is empty): route inline again and join the
+    // GIF thread, so no hook it reads is torn down under it.
+    inline void stopGifStage()
+    {
+        detail::g_gifStage.store(false, std::memory_order_release);
+        detail::gifStage().shutdown();
     }
 
     // PT2: total threaded-mode sync-wait ns so far (EE side; the GameThread
@@ -1091,6 +1569,13 @@ namespace ps2_mtvu
                 const uint64_t busyNs = w.tailBusyNs.exchange(0u, std::memory_order_relaxed);
                 ps2x::perflog::stageRing(ps2x::perflog::Stage::MtvuBusy)
                     .push(static_cast<uint32_t>(tick), static_cast<float>(busyNs / 1e6));
+                if (detail::g_gifStage.load(std::memory_order_relaxed))
+                {
+                    // VPL1: the GIF thread's busy time, next to mtvu.busy.
+                    const uint64_t gifNs = w.gif.busyNs.exchange(0u, std::memory_order_relaxed);
+                    ps2x::perflog::stageRing(ps2x::perflog::Stage::MtvuGifBusy)
+                        .push(static_cast<uint32_t>(tick), static_cast<float>(gifNs / 1e6));
+                }
                 // AD1: the session is bound to the MTVU TID; the report itself
                 // may come from any thread, so vblank (GameThread) sends it.
                 ps2x::adpf::report(ps2x::adpf::Thread::Mtvu, busyNs);

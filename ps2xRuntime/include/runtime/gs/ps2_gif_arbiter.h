@@ -64,6 +64,14 @@ public:
     // submit() exactly; drops (null process fn, short packet) match too.
     void submitOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl = false);
 
+    // VPL1 GIF stage: submit() split at the copy. copyForSubmit makes the
+    // packet bytes exactly as submit() would (pooled buffer, same copy) and
+    // touches no queue state, so the MTVU thread can call it; submitStaged
+    // then does the rest of submit()/submitOwned() (flags, path3Image test,
+    // census with `owned`, capture tap, queue position) on the GIF thread.
+    std::vector<uint8_t> copyForSubmit(const uint8_t *data, uint32_t sizeBytes) const;
+    void submitStaged(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl, bool owned);
+
     void drain();
     bool empty() const { return m_queue.empty(); }
 
@@ -81,5 +89,16 @@ private:
     static uint8_t pathPriority(GifPathId id);
     static bool drainsBefore(const GifArbiterPacket &a, const GifArbiterPacket &b);
 };
+
+// VPL1 GIF-stream digest (PS2X_GIF_DIGEST=1; logged only, never hashed):
+// FNV-1a over every drained arbiter packet (path + bytes) and a marker per
+// unit GS-frontend call, in execution order. Prints "[gif-digest] n=… fnv=…"
+// every 16384 packets and at exit; equal line sequences = equal GIF stream.
+namespace ps2_gif_digest
+{
+    bool enabled();
+    void mixPacket(uint8_t path, const uint8_t *data, uint32_t sizeBytes);
+    void mixMarker(uint8_t kind, uint64_t value);
+}
 
 #endif

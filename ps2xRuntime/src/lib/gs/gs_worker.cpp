@@ -1,6 +1,7 @@
 #include "runtime/gs/gs_worker.h"
 #include "ThreadNaming.h"
 #include "ps2_adpf.h"
+#include "ps2_mtvu.h"
 #include "ps2_perf_log.h"
 #include "ps2_thread_affinity.h"
 
@@ -88,6 +89,11 @@ void GsWorker::stop()
 
 void GsWorker::enqueue(GsCommand cmd)
 {
+    // VPL1: with the GIF stage on, the unit's GS traffic leaves from the
+    // MTVU-GIF thread; an enqueue on the MTVU thread bypassed the ops. Keep
+    // it in stream order (every earlier op runs first) and count it.
+    if (ps2_mtvu::gifStageOn() && ps2_mtvu::onWorker())
+        ps2_mtvu::gifStageEscape();
     const size_t bytes = cmd.payloadBytes();
     const bool hasRpc = cmd.rpc != nullptr;
     const bool lean = m_lean.load(std::memory_order_relaxed);

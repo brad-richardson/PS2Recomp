@@ -12,6 +12,11 @@
 #include <mutex>
 
 #include "gs/ps2_gif_arbiter.h"
+
+namespace ps2_mtvu
+{
+    struct GifOp; // ps2_mtvu.h (VPL1 GIF stage)
+}
 #include "../ps2_vif_src_span.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -399,6 +404,8 @@ public:
     void submitGifPacketOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately = true, bool path2DirectHl = false);
     // MP2 zero-copy (PS2X_GS_ZERO_COPY=1, default off). Set once, before DMAs run.
     void setGsZeroCopy(bool on) { m_gsZeroCopy = on; }
+    // VPL1 GIF stage: run one Submit/Drain op on the MTVU-GIF thread.
+    void execGifStageOp(ps2_mtvu::GifOp &op);
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     bool tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint32_t chcr);
@@ -463,6 +470,14 @@ public:
 
     GifPacketCallback m_gifPacketCallback;
     GifArbiter *m_gifArbiter = nullptr;
+    // VPL1: every unit-side arbiter action goes through these. On the MTVU
+    // thread with PS2X_MTVU_GIF_STAGE=1 they become GIF-stage ops (bytes
+    // copied here); otherwise they run the arbiter call inline, as before.
+    void arbSubmit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl);
+    void arbSubmitOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl);
+    void arbDrain();
+    // VPL1: a unit job's GS-frontend call (G1-G3); `marker` feeds the digest.
+    void unitGsCall(uint8_t marker, uint64_t value, std::function<void()> fn);
     GS *m_gsFrontend = nullptr;
     bool m_gsZeroCopy = false; // MP2 (set before DMAs run)
     Vu1MscalCallback m_vu1MscalCallback;
