@@ -153,6 +153,7 @@ enum Fix : uint32_t
     kFixTimers = 1u << 8,    // 1/60 float clocks live in race (FH2 scanf): HUD 0x49d998, ramp 0x49b59c, timers 0x49b15c
     kFixCamera = 1u << 9,    // system 7: CM2 §4 pool words (sqrt retentions, 1/120 clocks, halved steps)
     kFixLaunch = 1u << 10,   // system 6: 0x114298 transition wall response only for riders moving into the wall (class f)
+    kFixStick = 1u << 11,    // system 6: 0x133308 stick-angle tracker slews and hold timers (class b/h, FH5 trick input)
 };
 
 inline uint32_t fixMask() noexcept
@@ -164,7 +165,7 @@ inline uint32_t fixMask() noexcept
         const std::string s(v);
         if (s == "all")
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
-                   kFixTimers | kFixCamera | kFixLaunch;
+                   kFixTimers | kFixCamera | kFixLaunch | kFixStick;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -182,6 +183,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "timers") m |= kFixTimers;
             else if (item == "camera") m |= kFixCamera;
             else if (item == "launch") m |= kFixLaunch;
+            else if (item == "stick") m |= kFixStick;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -261,7 +263,7 @@ inline std::vector<Word> labWords();
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
-    const std::array<Word, 62> words = {{
+    const std::array<Word, 67> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -296,6 +298,18 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         // += tscale*[gp-0x7b00] at 0x117cf8/0x117d14, fed to 0x119210 (trick
         // curve; points accrue into +0x84 at 0x117d18); +0xa4 -= the same.
         {kFixTimers, 0x49b5f0u, kSixtieth, kHundredTwentieth, "air_trick_clock_117c28"},
+        // FH5: stick-angle tracker 0x133308 (P+0x3f0, from 0x111728), each word a
+        // single reader: +0x54 += [gp-0x7508] (0x133878, steady-angle timer),
+        // hold timers +0x48/+0x4c += [gp-0x74f8]/[gp-0x74f4] (0x133974/0x1339a0),
+        // angle slews +0x14->+0x1c and +0x10->+0x18 at owner rate*[gp-0x7458]/
+        // [gp-0x744c] (0x134138/0x1342b4). Stock 1/60 per update ran 2x in the
+        // air (fh5-k1/k2 SCANL); the lab (fh5-k4) moved the first-cliff score
+        // 3930 -> 3530 (stock 3200).
+        {kFixStick, 0x49bbe8u, kSixtieth, kHundredTwentieth, "stick_steady_133878"},
+        {kFixStick, 0x49bbf8u, kSixtieth, kHundredTwentieth, "stick_hold0_133974"},
+        {kFixStick, 0x49bbfcu, kSixtieth, kHundredTwentieth, "stick_hold1_1339a0"},
+        {kFixStick, 0x49bc98u, kSixtieth, kHundredTwentieth, "stick_slew0_134138"},
+        {kFixStick, 0x49bca4u, kSixtieth, kHundredTwentieth, "stick_slew1_1342b4"},
         // CM2 §4 / convert.txt (GameCamera 0x1580e10 chase chain, pool words
         // reloaded every tick): class a retentions r -> sqrt(r) ...
         {kFixCamera, 0x49cfe4u, 0x3f59999au, 0x3f6c0535u, "cam_C1_kA0"},
