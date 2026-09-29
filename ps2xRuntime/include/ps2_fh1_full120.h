@@ -87,6 +87,7 @@ enum Fix : uint32_t
     kFixSession = 1u << 7,   // system 12/8: race-session machine 0x26f4a8 at stock cadence (class d)
     kFixTimers = 1u << 8,    // 1/60 float clocks live in race (FH2 scanf): HUD 0x49d998, ramp 0x49b59c, timers 0x49b15c
     kFixCamera = 1u << 9,    // system 7: CM2 §4 pool words (sqrt retentions, 1/120 clocks, halved steps)
+    kFixLaunch = 1u << 10,   // system 6: 0x114298 transition wall response only for riders moving into the wall (class f)
 };
 
 inline uint32_t fixMask() noexcept
@@ -98,7 +99,7 @@ inline uint32_t fixMask() noexcept
         const std::string s(v);
         if (s == "all")
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
-                   kFixTimers | kFixCamera;
+                   kFixTimers | kFixCamera | kFixLaunch;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -115,6 +116,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "session") m |= kFixSession;
             else if (item == "timers") m |= kFixTimers;
             else if (item == "camera") m |= kFixCamera;
+            else if (item == "launch") m |= kFixLaunch;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -615,6 +617,52 @@ inline bool labHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t
     return skip;
 }
 
+// ---- Launch wall response, PS2X_SSX3_FULL120_FIX=launch (class f) ----------
+// 0x114298 (launch/landing transition helper; callers 0x12eafc, 0x130890,
+// 0x13bfe8, 0x13f19c) projects the rider velocity R+0x1e0 off the contact
+// normal n = R+0x380 and pushes R+0x110 by 4n when n.z is in the wall band
+// ([0x49b53c] -0.05 < n.z < [0x49b538] 0.05; 0x1149a0-0x114a58; the band words
+// are read only here). FH3 (All-Peak first cliff, same save state): full120
+// samples the lip's vertical face on three half steps (stock: one), and the
+// launch fires while that face normal (0.10, 0.99, 0.04) is still current;
+// the rider is moving away from it (v.n > 0), yet the projection turns the
+// launch velocity (455, 1942, -670) into (275, -25, -670). Stock never takes
+// this branch at the lip. Rule: keep the wall response for riders moving
+// into the wall (v.n <= 0) and skip it for riders leaving it: per call, the
+// band words are set to an empty band (lo 1, hi -1) or to stock.
+inline constexpr uint32_t kLaunchHelper = 0x114298u;
+inline constexpr uint32_t kBandHi = 0x49b538u, kBandLo = 0x49b53cu;
+inline constexpr uint32_t kBandHiStock = 0x3d4ccccdu, kBandLoStock = 0xbd4ccccdu;
+
+inline bool launchFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixLaunch) != 0u;
+    return on;
+}
+
+inline void launchPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
+{
+    if (targetPc != kLaunchHelper || !ctx)
+        return;
+    const uint32_t r = getRegU32(ctx, 4);
+    float n[3] = {}, v[3] = {};
+    bool ok = true;
+    for (int i = 0; i < 3; ++i)
+    {
+        uint32_t a = 0u, b = 0u;
+        ok = ok && rd32(ram, r + 0x380u + 4u * i, a) && rd32(ram, r + 0x1e0u + 4u * i, b);
+        std::memcpy(&n[i], &a, 4);
+        std::memcpy(&v[i], &b, 4);
+    }
+    const bool leaving = ok && n[2] > -0.05f && n[2] < 0.05f && (v[0] * n[0] + v[1] * n[1] + v[2] * n[2]) > 0.0f;
+    wr32(ram, kBandHi, leaving ? 0xbf800000u : kBandHiStock); // -1.0 : 0.05
+    wr32(ram, kBandLo, leaving ? 0x3f800000u : kBandLoStock); //  1.0 : -0.05
+    static uint32_t lines = 0u;
+    if (leaving && lines++ < 16u)
+        std::fprintf(stderr, "fh1-launch-skip-wall r=%08x n=%.3f,%.3f,%.3f v=%.1f,%.1f,%.1f\n", r, n[0], n[1], n[2],
+                     v[0], v[1], v[2]);
+}
+
 // Returns true when the call must be skipped (session fix).
 inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
@@ -627,6 +675,8 @@ inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_
         clockPreHook(ram, targetPc);
     if (raceClockFix())
         raceClockPreHook(ram, ctx, sourcePc, targetPc);
+    if (launchFix())
+        launchPreHook(ram, ctx, targetPc);
     bool skip = sessionFix() && sessionSkip(sourcePc, targetPc);
     if (enabled())
         skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
