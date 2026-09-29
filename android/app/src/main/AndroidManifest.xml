@@ -4,10 +4,18 @@
     <application
         android:label="PS2 Recomp"
         android:hasCode="true"
-        android:isGame="true">
+        android:isGame="true"
+        android:appCategory="game">
 
         <!-- N11: allow simpleperf from the shell on release builds (stays non-debuggable) -->
         <profileable android:shell="true" />
+
+        <!-- GPU2: opt in to Android Game Mode (performance + battery); no
+             downscaling or fps override, so the OS can't change our render
+             size or frame rate. -->
+        <meta-data
+            android:name="android.game_mode_config"
+            android:resource="@xml/game_mode_config" />
 
         <activity
             android:name="android.app.NativeActivity"
