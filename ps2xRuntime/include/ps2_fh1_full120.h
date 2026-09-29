@@ -1099,6 +1099,63 @@ inline void scanVBlank(const uint8_t *ram, uint64_t tick)
             qf.snap[1].clear();
         }
     }
+    // PS2X_FH1_SCANL=T1,T2,T3[:lo-hi] (FH5): float words in [lo,hi) that
+    // change linearly (same rate per tick on both intervals, within 1%) and
+    // not trivially: prints addr and rate per tick. Run it at equal guest
+    // times in two modes from one save state (same heap) and compare rates.
+    static Scan ql = [] {
+        Scan r;
+        const char *v = std::getenv("PS2X_FH1_SCANL");
+        if (!v || !*v)
+            return r;
+        char *end = nullptr;
+        r.t[0] = std::strtoull(v, &end, 10);
+        if (*end == ',') r.t[1] = std::strtoull(end + 1, &end, 10);
+        if (*end == ',') r.t[2] = std::strtoull(end + 1, &end, 10);
+        r.lo = 0;
+        r.hi = PS2_RAM_SIZE;
+        if (*end == ':')
+        {
+            r.lo = static_cast<int64_t>(std::strtoull(end + 1, &end, 16));
+            if (*end == '-') r.hi = static_cast<int64_t>(std::strtoull(end + 1, &end, 16));
+        }
+        r.on = r.t[0] && r.t[1] > r.t[0] && r.t[2] > r.t[1];
+        return r;
+    }();
+    if (ql.on && (tick == ql.t[0] || tick == ql.t[1] || tick == ql.t[2]))
+    {
+        const size_t n = PS2_RAM_SIZE / 4u;
+        if (tick != ql.t[2])
+        {
+            std::vector<uint32_t> &v = ql.snap[tick == ql.t[0] ? 0 : 1];
+            v.resize(n);
+            std::memcpy(v.data(), ram, n * 4u);
+        }
+        else if (ql.snap[0].size() == n && ql.snap[1].size() == n)
+        {
+            const double d1 = static_cast<double>(ql.t[1] - ql.t[0]);
+            const double d2 = static_cast<double>(ql.t[2] - ql.t[1]);
+            uint32_t hits = 0u;
+            for (size_t i = static_cast<size_t>(ql.lo) / 4u; i < static_cast<size_t>(ql.hi) / 4u && i < n; ++i)
+            {
+                float a = 0, b = 0, c = 0;
+                std::memcpy(&a, &ql.snap[0][i], 4);
+                std::memcpy(&b, &ql.snap[1][i], 4);
+                std::memcpy(&c, ram + i * 4u, 4);
+                if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c))
+                    continue;
+                const double r1 = (static_cast<double>(b) - a) / d1, r2 = (static_cast<double>(c) - b) / d2;
+                const double mag = std::fabs(r1);
+                if (mag < 1e-6 || mag > 1e6 || std::fabs(a) > 1e7)
+                    continue;
+                if (std::fabs(r1 - r2) <= 0.01 * mag && hits++ < 2048u)
+                    std::fprintf(stderr, "fh1-scanl addr=%08zx rate=%.6g v=%.5g,%.5g,%.5g\n", i * 4u, r1, a, b, c);
+            }
+            std::fprintf(stderr, "fh1-scanl done hits=%u\n", hits);
+            ql.snap[0].clear();
+            ql.snap[1].clear();
+        }
+    }
     static const char *find = std::getenv("PS2X_FH1_FIND");
     if (!find || !*find)
         return;
