@@ -4,6 +4,7 @@
 // only stats()/lastPresent() take the mutex (cross-thread readers).
 
 #include "runtime/gs/ps2_gs_external_backend.h"
+#include "ps2_adpf.h"
 #include "ps2_perf_log.h"
 #include "runtime/gs/ge1_gs_api.h"
 #if defined(__ANDROID__)
@@ -380,7 +381,8 @@ public:
                 std::exit(78);
             }
             std::fprintf(stderr, "[gs:external] GE1 Full live GS loaded: %s\n", path);
-            m_perfTail = ps2x::perflog::enabled();
+            // AD1: ADPF reuses this accounting, so it turns it on too.
+            m_perfTail = ps2x::perflog::enabled() || ps2x::adpf::enabled();
             if (const char *csv = std::getenv("PS2X_GS_EXTERNAL_GPU_CSV"); csv && *csv)
             {
                 m_gpuCsv = std::fopen(csv, "w");
@@ -783,8 +785,15 @@ public:
             {
                 const float backMs = m_ge1.backMs();
                 if (backMs >= 0.0f)
+                {
                     ps2x::perflog::stageRing(ps2x::perflog::Stage::GsBackBusy)
                         .push(static_cast<uint32_t>(tick), backMs);
+                    // AD1: the back thread's busy feeds its ADPF session (its
+                    // TID is discovered via /proc; the report may come from
+                    // this thread).
+                    ps2x::adpf::report(ps2x::adpf::Thread::GsBack,
+                                       static_cast<uint64_t>(static_cast<double>(backMs) * 1e6));
+                }
             }
         }
         ++m_stats.vsyncs;

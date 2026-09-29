@@ -1,5 +1,6 @@
 #include "runtime/gs/gs_worker.h"
 #include "ThreadNaming.h"
+#include "ps2_adpf.h"
 #include "ps2_perf_log.h"
 #include "ps2_thread_affinity.h"
 
@@ -220,6 +221,8 @@ bool GsWorker::isQuiescent() const
 void GsWorker::threadMain()
 {
     ThreadNaming::SetCurrentThreadName("GsWorker");
+    // AD1: bind this thread's TID to its ADPF hint session.
+    ps2x::adpf::noteThread(ps2x::adpf::Thread::GsWorker);
     // TN1: PS2X_GS_WORKER_CPUS="4,5" pins this thread to itself (mirrors the
     // N11 game-thread knob); unset/empty = no change. Unconditional stderr
     // line (RUNTIME_LOG compiles out of release builds).
@@ -234,7 +237,8 @@ void GsWorker::threadMain()
     // PT2: per-tick busy time (handler only; queue-idle excluded). The frame
     // cuts at each in-stream GuestVsync (tick in regValue); knob off is one
     // predictable branch per command.
-    const bool tail = ps2x::perflog::enabled();
+    // AD1: ADPF reuses this accounting, so it turns it on too.
+    const bool tail = ps2x::perflog::enabled() || ps2x::adpf::enabled();
     uint64_t tailAccNs = 0;
     for (;;)
     {
@@ -311,6 +315,8 @@ void GsWorker::threadMain()
                     ps2x::perflog::stageRing(ps2x::perflog::Stage::GsBusy)
                         .push(static_cast<uint32_t>(batch[i].regValue),
                               static_cast<float>(tailAccNs / 1e6));
+                    // AD1: same busy figure feeds this thread's ADPF session.
+                    ps2x::adpf::report(ps2x::adpf::Thread::GsWorker, tailAccNs);
                     tailAccNs = 0;
                 }
             }

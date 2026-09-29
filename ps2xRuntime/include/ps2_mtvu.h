@@ -50,6 +50,7 @@
 #include <vector>
 
 #include "ThreadNaming.h"
+#include "ps2_adpf.h"
 #include "ps2_fpmode.h"
 #include "ps2_perf_log.h"
 #include "ps2_thread_affinity.h"
@@ -293,6 +294,8 @@ namespace ps2_mtvu
             {
                 const MtvuThreadGuard mtvuGuard;
                 ThreadNaming::SetCurrentThreadName("MTVU");
+                // AD1: bind this thread's TID to its ADPF hint session.
+                ps2x::adpf::noteThread(ps2x::adpf::Thread::Mtvu);
                 if (const char *cpus = std::getenv("PS2X_MTVU_CPUS"))
                 {
                     if (cpus[0] != '\0')
@@ -355,7 +358,8 @@ namespace ps2_mtvu
             void start()
             {
                 started = true;
-                tailOn.store(ps2x::perflog::enabled(), std::memory_order_relaxed);
+                // AD1: ADPF reuses this accounting, so it turns it on too.
+                tailOn.store(ps2x::perflog::enabled() || ps2x::adpf::enabled(), std::memory_order_relaxed);
                 long stackKb = 0;
                 if (const char *env = std::getenv("PS2X_GAME_THREAD_STACK_KB"))
                     stackKb = std::strtol(env, nullptr, 10);
@@ -941,6 +945,9 @@ namespace ps2_mtvu
                 const uint64_t busyNs = w.tailBusyNs.exchange(0u, std::memory_order_relaxed);
                 ps2x::perflog::stageRing(ps2x::perflog::Stage::MtvuBusy)
                     .push(static_cast<uint32_t>(tick), static_cast<float>(busyNs / 1e6));
+                // AD1: the session is bound to the MTVU TID; the report itself
+                // may come from any thread, so vblank (GameThread) sends it.
+                ps2x::adpf::report(ps2x::adpf::Thread::Mtvu, busyNs);
             }
             if ((tick % 300u) == 0u)
                 detail::threadedSummary(tick);

@@ -24,6 +24,7 @@
 #include "ps2_present_fallback.h"
 #include "ps2_present_geometry.h"
 #include "ps2_pad_latch.h"
+#include "ps2_adpf.h"
 #include "ps2_perf_log.h"
 #include "ps2_virtual_pad.h"
 #include "runtime/ps2_pad.h"
@@ -5094,6 +5095,9 @@ void PS2Runtime::run()
     std::function<void()> gameMain = [&]()
     {
         ThreadNaming::SetCurrentThreadName("GameThread");
+        // AD1: bind this thread's TID to its ADPF hint session (no-op unless
+        // PS2X_ADPF=1; Android only).
+        ps2x::adpf::noteThread(ps2x::adpf::Thread::Game);
         // N11: PS2X_GAME_THREAD_CPUS="6,7" pins this thread to itself (no
         // privilege needed); unset/empty = no change. Unconditional stderr
         // line (RUNTIME_LOG compiles out of release builds).

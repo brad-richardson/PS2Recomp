@@ -2,6 +2,7 @@
 #include "ps2_microvu.h"
 #include "ps2_mtvu.h"
 #include "ps2_pad_latch.h"
+#include "ps2_adpf.h"
 #include "ps2_perf_log.h"
 #include "runtime/gs/gs_worker.h"
 #include "runtime/ps2_savestate.h"
@@ -580,7 +581,9 @@ void EeScheduler::run()
     ps2_fpmode::ScopedEeMode eeFpMode;
     m_running.store(true, std::memory_order_release);
     // PT2: cache the perf-log knob once (env is fixed before run()).
-    m_perfTail = ps2x::perflog::enabled();
+    // AD1: ADPF reuses this same accounting (no re-measure), so it turns the
+    // accounting on too; knob-off is identical to before.
+    m_perfTail = ps2x::perflog::enabled() || ps2x::adpf::enabled();
     // PT2 Part 2: attribute this thread's GS-queue backpressure waits to the
     // ee.wait accumulator (cleared on every exit; the sink would dangle).
     struct EnqueueSinkGuard
@@ -3138,6 +3141,8 @@ void EeScheduler::perfTailCutFrame(uint64_t tick)
         const uint64_t busyNs = wallNs > waitNs ? wallNs - waitNs : 0u;
         ps2x::perflog::stageRing(ps2x::perflog::Stage::EeBusy)
             .push(static_cast<uint32_t>(tick), static_cast<float>(busyNs / 1e6));
+        // AD1: same busy figure feeds this thread's ADPF hint session.
+        ps2x::adpf::report(ps2x::adpf::Thread::Game, busyNs);
         ps2x::perflog::stageRing(ps2x::perflog::Stage::EeWait)
             .push(static_cast<uint32_t>(tick), static_cast<float>(waitNs / 1e6));
         if (cpu != ps2x::perflog::kCpuUnsupported && m_perfFrameStartCpu != ps2x::perflog::kCpuUnsupported)
