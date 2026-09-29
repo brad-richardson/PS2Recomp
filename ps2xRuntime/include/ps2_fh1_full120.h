@@ -85,6 +85,7 @@ enum Fix : uint32_t
     kFixClock = 1u << 5,     // system 1: wake ordinal in the stock domain + update-count periods
     kFixRaceClock = 1u << 6, // system 12: race tick [race+8] counts stock ticks
     kFixSession = 1u << 7,   // system 12/8: race-session machine 0x26f4a8 at stock cadence (class d)
+    kFixTimers = 1u << 8,    // 1/60 float clocks live in race (FH2 scanf): HUD 0x49d998, ramp 0x49b59c, timers 0x49b15c
 };
 
 inline uint32_t fixMask() noexcept
@@ -95,7 +96,7 @@ inline uint32_t fixMask() noexcept
             return 0u;
         const std::string s(v);
         if (s == "all")
-            return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession;
+            return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession | kFixTimers;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -110,6 +111,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "clock") m |= kFixClock;
             else if (item == "raceclock") m |= kFixRaceClock;
             else if (item == "session") m |= kFixSession;
+            else if (item == "timers") m |= kFixTimers;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -175,7 +177,7 @@ inline void patchAtManagerInit(uint8_t *ram)
         std::fprintf(stderr, "fh1-full120-refused manager ptr=%08x\n", a);
         std::abort();
     }
-    const std::array<Word, 21> words = {{
+    const std::array<Word, 24> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -199,6 +201,13 @@ inline void patchAtManagerInit(uint8_t *ram)
         // 0x114124 applies this fraction of the remaining R+0x214 gap once per
         // update: alpha_half = 1-sqrt(1-alpha_stock).
         {kFixSlew, 0x49b4f0u, 0x3d2aa635u, 0x3cac76f5u, "mode0_slew_114124"},
+        // FH2 live 1/60 clocks (PS2X_FH1_SCANF, stock t1900..2000; writers by DIAG_WATCH):
+        // HUD object +0x190 += [gp-0x5758] at 0x1eb034/44 (0x1e9a30 race HUD),
+        {kFixTimers, 0x49d998u, kSixtieth, kHundredTwentieth, "hud_clock_1eb02c"},
+        // rider object +0x35c += [gp-0x7b54] up to 1.0 at 0x115d98-db4,
+        {kFixTimers, 0x49b59cu, kSixtieth, kHundredTwentieth, "rider_ramp_115d98"},
+        // per-rider timer list [e+4] -= [gp-0x7f94] at 0x101538 (0x1013a8, RV13 row).
+        {kFixTimers, 0x49b15cu, kSixtieth, kHundredTwentieth, "rider_timers_101538"},
     }};
     const uint32_t mask = fixMask();
     size_t written = 0u;
