@@ -216,7 +216,7 @@ std::string perfDeviceState()
     return buf;
 }
 
-int touchPoints(float *xs, float *ys, int max)
+int touchPoints(int64_t *ids, float *xs, float *ys, int max)
 {
     int n = 0;
     const int devices = SDL_GetNumTouchDevices();
@@ -228,6 +228,7 @@ int touchPoints(float *xs, float *ys, int max)
         {
             if (const SDL_Finger *finger = SDL_GetTouchFinger(id, f))
             {
+                ids[n] = static_cast<int64_t>(finger->id);
                 xs[n] = finger->x;
                 ys[n] = finger->y;
                 ++n;

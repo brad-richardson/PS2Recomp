@@ -850,14 +850,17 @@ bool gamepadInUse()
     return any && s_used;
 }
 
-int virtualPadTouches(float *xs, float *ys, int max, float screenWidth, float screenHeight)
+int virtualPadTouches(ps2x::vpad::TouchPoint *ts, int max, float screenWidth, float screenHeight)
 {
 #if defined(PS2X_IOS)
-    const int n = ps2x::ios::touchPoints(xs, ys, max);
+    int64_t ids[8];
+    float xs[8], ys[8];
+    const int n = ps2x::ios::touchPoints(ids, xs, ys, max < 8 ? max : 8);
     for (int i = 0; i < n; ++i)
     {
-        xs[i] *= screenWidth;
-        ys[i] *= screenHeight;
+        ts[i].id = ids[i];
+        ts[i].x = xs[i] * screenWidth;
+        ts[i].y = ys[i] * screenHeight;
     }
     return n;
 #else
@@ -867,8 +870,9 @@ int virtualPadTouches(float *xs, float *ys, int max, float screenWidth, float sc
     {
         return 0;
     }
-    xs[0] = static_cast<float>(GetMouseX());
-    ys[0] = static_cast<float>(GetMouseY());
+    ts[0].id = 0;
+    ts[0].x = static_cast<float>(GetMouseX());
+    ts[0].y = static_cast<float>(GetMouseY());
     return 1;
 #endif
 }
@@ -5204,7 +5208,7 @@ void PS2Runtime::run()
         ps2x::vpad::parseTestTouches(std::getenv("PS2X_VPAD_TEST_TOUCHES")); // DEV-ONLY
     const std::vector<ps2x::vpad::TestTap> vpadTestTaps =
         ps2x::vpad::parseTestTap(std::getenv("PS2X_VPAD_TEST_TAP")); // DEV-ONLY
-    ps2x::vpad::StickState vpadStick;                                       // I32: floating-stick anchor, carried across frames
+    ps2x::vpad::PadState vpadPad; // VT1: touch ownership + stick anchor, carried across frames
     float vpadTestStickX = 0.0f, vpadTestStickY = 0.0f;
     const bool vpadTestStick =
         ps2x::vpad::parseTestStick(std::getenv("PS2X_VPAD_TEST_STICK"), vpadTestStickX, vpadTestStickY); // DEV-ONLY
@@ -5512,18 +5516,18 @@ void PS2Runtime::run()
         if (vpadWanted && !vpadPadConnected)
         {
             const ps2x::vpad::Layout layout = ps2x::vpad::makeLayout(screenWidth, screenHeight);
-            float touchX[8];
-            float touchY[8];
-            int touches = virtualPadTouches(touchX, touchY, 8, screenWidth, screenHeight);
-            touches = ps2x::vpad::activeTestTouches(vpadTestTouches, m_memory.gs().vsyncTick.load(), screenWidth,
-                                                    screenHeight, touchX, touchY, touches, 8);
-            uint16_t pressed = ps2x::vpad::pressedMask(layout, touchX, touchY, touches);
+            ps2x::vpad::TouchPoint vpadTouches[8];
+            int touches = virtualPadTouches(vpadTouches, 8, screenWidth, screenHeight);
+            touches = ps2x::vpad::activeTestTouchesWithIds(vpadTestTouches, m_memory.gs().vsyncTick.load(), screenWidth,
+                                                           screenHeight, vpadTouches, touches, 8);
+            ps2x::vpad::PadFrame vpadFrame = ps2x::vpad::updatePad(vpadPad, layout, vpadTouches, touches);
+            uint16_t pressed = vpadFrame.pressed;
             pressed = static_cast<uint16_t>(pressed | ps2x::vpad::activeTestTap(vpadTestTaps, ps2x::padlatch::wallMs()));
             if (padLatchOn)
                 ps2x::padlatch::sharedLatch().publish(static_cast<uint16_t>(pressed | raylibPressed));
             else
                 ps2x::vpad::liveMask().store(pressed, std::memory_order_relaxed);
-            ps2x::vpad::StickVec stick = ps2x::vpad::updateStick(vpadStick, layout, touchX, touchY, touches);
+            ps2x::vpad::StickVec stick = vpadFrame.stick;
             if (vpadTestStick)
             {
                 stick.active = true; // drawn deflected at the rest position
