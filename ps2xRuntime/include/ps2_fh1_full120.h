@@ -86,6 +86,7 @@ enum Fix : uint32_t
     kFixRaceClock = 1u << 6, // system 12: race tick [race+8] counts stock ticks
     kFixSession = 1u << 7,   // system 12/8: race-session machine 0x26f4a8 at stock cadence (class d)
     kFixTimers = 1u << 8,    // 1/60 float clocks live in race (FH2 scanf): HUD 0x49d998, ramp 0x49b59c, timers 0x49b15c
+    kFixCamera = 1u << 9,    // system 7: CM2 §4 pool words (sqrt retentions, 1/120 clocks, halved steps)
 };
 
 inline uint32_t fixMask() noexcept
@@ -96,7 +97,8 @@ inline uint32_t fixMask() noexcept
             return 0u;
         const std::string s(v);
         if (s == "all")
-            return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession | kFixTimers;
+            return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
+                   kFixTimers | kFixCamera;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -112,6 +114,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "raceclock") m |= kFixRaceClock;
             else if (item == "session") m |= kFixSession;
             else if (item == "timers") m |= kFixTimers;
+            else if (item == "camera") m |= kFixCamera;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -177,7 +180,7 @@ inline void patchAtManagerInit(uint8_t *ram)
         std::fprintf(stderr, "fh1-full120-refused manager ptr=%08x\n", a);
         std::abort();
     }
-    const std::array<Word, 24> words = {{
+    const std::array<Word, 61> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -208,6 +211,47 @@ inline void patchAtManagerInit(uint8_t *ram)
         {kFixTimers, 0x49b59cu, kSixtieth, kHundredTwentieth, "rider_ramp_115d98"},
         // per-rider timer list [e+4] -= [gp-0x7f94] at 0x101538 (0x1013a8, RV13 row).
         {kFixTimers, 0x49b15cu, kSixtieth, kHundredTwentieth, "rider_timers_101538"},
+        // CM2 §4 / convert.txt (GameCamera 0x1580e10 chase chain, pool words
+        // reloaded every tick): class a retentions r -> sqrt(r) ...
+        {kFixCamera, 0x49cfe4u, 0x3f59999au, 0x3f6c0535u, "cam_C1_kA0"},
+        {kFixCamera, 0x49cfe8u, 0x3f7851ecu, 0x3f7c217au, "cam_C1_kA1"},
+        {kFixCamera, 0x49cfd4u, 0x3e8aefe0u, 0x3f055b3fu, "cam_C1_kB0"},
+        {kFixCamera, 0x49cfd8u, 0x3f666666u, 0x3f72dce8u, "cam_C1_kB1"},
+        {kFixCamera, 0x49d044u, 0x3f6c97c5u, 0x3f761aeeu, "cam_height"},
+        {kFixCamera, 0x49cff4u, 0x3f6c89d3u, 0x3f7613aeu, "cam_dist_grow"},
+        {kFixCamera, 0x49cff8u, 0x3f684c59u, 0x3f73dc80u, "cam_dist_shrink"},
+        {kFixCamera, 0x49d010u, 0x3f7a77e2u, 0x3f7d3813u, "cam_height2"},
+        {kFixCamera, 0x49d028u, 0x3f733333u, 0x3f798497u, "cam_fov0"},
+        {kFixCamera, 0x49c644u, 0x3f7fbe77u, 0x3f7fdf39u, "cam_fov"},
+        {kFixCamera, 0x49d02cu, 0x3f75c28fu, 0x3f7ad3e7u, "cam_lookat_kick"},
+        {kFixCamera, 0x49cff0u, 0x3f7ae148u, 0x3f7d6d55u, "cam_side_kick5"},
+        {kFixCamera, 0x49d070u, 0x3f787fadu, 0x3f7c38b3u, "cam_lateral"},
+        {kFixCamera, 0x49c628u, 0x3f749d64u, 0x3f7a3e1fu, "cam_heading_base"},
+        {kFixCamera, 0x49c624u, 0x3d21a510u, 0x3ca3b0d2u, "cam_heading_span"}, // sqrt(base+span)-sqrt(base)
+        {kFixCamera, 0x49c49cu, 0x3f7851ecu, 0x3f7c217au, "cam_lift_decay"},
+        {kFixCamera, 0x49c7d8u, 0x3f4ccccdu, 0x3f64f92eu, "cam_air_r"},
+        {kFixCamera, 0x49c7dcu, 0x3e4ccccdu, 0x3dd8368fu, "cam_air_1mr"},
+        // ... class b per-tick decrements halved ...
+        {kFixCamera, 0x49d00cu, 0x3fe227ceu, 0x3f6227ceu, "cam_dist_impulse_decay"},
+        {kFixCamera, 0x49c5fcu, 0x3abb3ee7u, 0x3a3b3ee7u, "cam_C2_ramp"},
+        {kFixCamera, 0x49c5dcu, 0x3bda740fu, 0x3b5a740fu, "cam_ctl_blend2"},
+        {kFixCamera, 0x49c5e0u, 0x3c899268u, 0x3c099268u, "cam_ctl_blend3"},
+        // ... class e/h 1/60 clocks -> 1/120 (cap 4-1/60 -> 4-1/120).
+        {kFixCamera, 0x49c64cu, kSixtieth, kHundredTwentieth, "cam_lookat_timer"},
+        {kFixCamera, 0x49c654u, kSixtieth, kHundredTwentieth, "cam_jump_init"},
+        {kFixCamera, 0x49c7a0u, kSixtieth, kHundredTwentieth, "cam_jump_clk_a"},
+        {kFixCamera, 0x49c7a4u, kSixtieth, kHundredTwentieth, "cam_jump_clk_b"},
+        {kFixCamera, 0x49c79cu, 0x407eeeefu, 0x407f7777u, "cam_jump_cap"},
+        {kFixCamera, 0x49c7d0u, kSixtieth, kHundredTwentieth, "cam_air_clk"},
+        {kFixCamera, 0x49c808u, kSixtieth, kHundredTwentieth, "cam_air_clk2"},
+        {kFixCamera, 0x49c810u, kSixtieth, kHundredTwentieth, "cam_air_clk3"},
+        {kFixCamera, 0x49c814u, kSixtieth, kHundredTwentieth, "cam_air_clk4"},
+        {kFixCamera, 0x49c7c8u, kSixtieth, kHundredTwentieth, "cam_ramp_a"},
+        {kFixCamera, 0x49c7ccu, kSixtieth, kHundredTwentieth, "cam_ramp_b"},
+        {kFixCamera, 0x49c5d8u, kSixtieth, kHundredTwentieth, "cam_ctl_blend"},
+        {kFixCamera, 0x49c5ccu, kSixtieth, kHundredTwentieth, "cam_mode_timer"},
+        {kFixCamera, 0x49c824u, kSixtieth, kHundredTwentieth, "cam_shake_clk"},
+        {kFixCamera, 0x49c820u, kSixtieth, kHundredTwentieth, "cam_shake_dur"},
     }};
     const uint32_t mask = fixMask();
     size_t written = 0u;
