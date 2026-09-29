@@ -83,6 +83,7 @@ enum Fix : uint32_t
     kFixEvent = 1u << 3,     // 10496c event-node step (e/h)
     kFixSlew = 1u << 4,      // 114124 mode-0 return slew (a/j)
     kFixClock = 1u << 5,     // system 1: wake ordinal in the stock domain + update-count periods
+    kFixRaceClock = 1u << 6, // system 12: race tick [race+8] counts stock ticks
 };
 
 inline uint32_t fixMask() noexcept
@@ -93,7 +94,7 @@ inline uint32_t fixMask() noexcept
             return 0u;
         const std::string s(v);
         if (s == "all")
-            return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock;
+            return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -106,6 +107,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "event") m |= kFixEvent;
             else if (item == "slew") m |= kFixSlew;
             else if (item == "clock") m |= kFixClock;
+            else if (item == "raceclock") m |= kFixRaceClock;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -407,6 +409,54 @@ inline void clockPreHook(uint8_t *ram, uint32_t targetPc)
     }
 }
 
+// ---- System 12 race clock, PS2X_SSX3_FULL120_FIX=raceclock ---------------
+// The race tick [race+0x8] (race object in $s3 of the all-riders pass
+// 0x128af0; 0x5bc708 on FR1-R1) is incremented once per update at
+// 0x12913c-0x129144, right after `jal 0x1013a8` at 0x12912c. FH2 scan: it is
+// the only race-wide per-update counter (0x5bc708 = t-1710 at t1900..2000).
+// Pre-decrementing it on every other such call keeps it at 60/s, so every
+// reader that counts race ticks as 1/60 s keeps stock units (class e).
+inline constexpr uint32_t kRaceTickCallSite = 0x12912cu;
+inline constexpr uint32_t kRaceTickCallee = 0x1013a8u;
+inline uint32_t g_raceTickCalls = 0u;
+
+// The race object's second frame counter [race+0xc] (0x5bc70c) is bumped at
+// 0x113dc4-dd0 in 0x113db0 (vtable 0x458544), in the delay slot of
+// `jal 0x12a250` at 0x113dcc; $s0 = race object. FH2 scan: the only int
+// counter still 2x after raceclock/session (fh2-f2). Same parity rule.
+inline constexpr uint32_t kRaceTick2CallSite = 0x113dccu;
+inline constexpr uint32_t kRaceTick2Callee = 0x12a250u;
+inline uint32_t g_raceTick2Calls = 0u;
+
+inline bool raceClockFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixRaceClock) != 0u;
+    return on;
+}
+
+inline void raceClockPreHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    if (ctx && sourcePc == kRaceTick2CallSite && targetPc == kRaceTick2Callee)
+    {
+        if ((g_raceTick2Calls++ & 1u) != 0u)
+        {
+            const uint32_t race = getRegU32(ctx, 16); // $s0
+            uint32_t tick = 0u;
+            if (rd32(ram, race + 0xcu, tick))
+                wr32(ram, race + 0xcu, tick - 1u);
+        }
+        return;
+    }
+    if (sourcePc != kRaceTickCallSite || targetPc != kRaceTickCallee || !ctx)
+        return;
+    if ((g_raceTickCalls++ & 1u) == 0u)
+        return;
+    const uint32_t race = getRegU32(ctx, 19); // $s3
+    uint32_t tick = 0u;
+    if (rd32(ram, race + 0x8u, tick))
+        wr32(ram, race + 0x8u, tick - 1u);
+}
+
 // dispatchGuestBranch, after a call returned to its fall-through.
 inline void clockPostHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 {
@@ -494,6 +544,8 @@ inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_
     }
     if (clockFix())
         clockPreHook(ram, targetPc);
+    if (raceClockFix())
+        raceClockPreHook(ram, ctx, sourcePc, targetPc);
     bool skip = false;
     if (enabled())
         skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
