@@ -3363,8 +3363,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     }
 #endif // PS2X_ENABLE_TS2_DIAG (EE1P2)
     // FH1: full120 manager patch at the init hook + env-only tap counts.
-    if (ps2_fh1::enabled() || ps2_fh1::tapOn())
-        ps2_fh1::onBranch(rdram, sourcePc, targetPc);
+    if ((ps2_fh1::enabled() || ps2_fh1::tapOn()) && ps2_fh1::onBranch(rdram, ctx, sourcePc, targetPc))
+    {
+        ctx->pc = fallthroughPc;
+        return true;
+    }
     ps2_ts2_observer::noteBranch(
         rdram, ctx, sourcePc, targetPc,
         kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall,

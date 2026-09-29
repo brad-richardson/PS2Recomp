@@ -28,6 +28,8 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -215,6 +217,39 @@ inline void patchAtManagerInit(uint8_t *ram)
         wr32(ram, w.address, w.replacement);
         ++written;
     }
+    // Lab words (PS2X_FH1_WORDS=addr:expected:replacement,...; hex): try a
+    // pool-word conversion without a rebuild. Same verify-then-write rule.
+    if (const char *lw = std::getenv("PS2X_FH1_WORDS"))
+    {
+        std::vector<Word> lab;
+        const char *p = lw;
+        while (*p)
+        {
+            char *end = nullptr;
+            Word w{0u, 0u, 0u, 0u, "lab"};
+            w.address = static_cast<uint32_t>(std::strtoul(p, &end, 16));
+            if (*end != ':') break;
+            w.expected = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+            if (*end != ':') break;
+            w.replacement = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+            lab.push_back(w);
+            if (*end != ',') break;
+            p = end + 1;
+        }
+        for (const Word &w : lab)
+        {
+            uint32_t got = 0u;
+            if (!rd32(ram, w.address, got) || got != w.expected)
+            {
+                std::fprintf(stderr, "fh1-full120-refused lab word addr=%08x got=%08x expected=%08x\n",
+                             w.address, got, w.expected);
+                std::abort();
+            }
+        }
+        for (const Word &w : lab)
+            wr32(ram, w.address, w.replacement);
+        std::fprintf(stderr, "fh1-full120 lab words=%zu\n", lab.size());
+    }
     std::fprintf(stderr, "fh1-full120-armed manager=%08x rate=120 dt=%08x vblank_div=%u ee_x=%u fix=0x%x words=%zu\n",
                  a, kHundredTwentieth, vblankDivisor(), 1u << eeClockShift(), mask, written);
 }
@@ -233,6 +268,8 @@ struct Tap
     uint32_t renders = 0u;
     std::array<uint32_t, 16> countPcs{};
     std::array<uint32_t, 16> counts{};
+    std::array<std::array<uint32_t, 4>, 16> args{};
+    bool logArgs = false;
     size_t nCount = 0u;
     struct Peek
     {
@@ -256,6 +293,8 @@ inline Tap &tap()
             return r;
         if (const char *e = std::getenv("PS2X_FH1_TAP_EVERY"))
             r.every = std::max<uint32_t>(1u, static_cast<uint32_t>(std::strtoul(e, nullptr, 0)));
+        if (const char *la = std::getenv("PS2X_FH1_COUNT_ARGS"))
+            r.logArgs = la[0] == '1';
         if (const char *c = std::getenv("PS2X_FH1_COUNT"))
         {
             const char *p = c;
@@ -385,7 +424,68 @@ inline void clockPostHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 }
 
 // EE thread, every guest dispatch while enabled() or the tap is on.
-inline void onBranch(uint8_t *ram, uint32_t sourcePc, uint32_t targetPc)
+// ---- Lab hooks (env only, full120 only; for trying a conversion without a
+// rebuild). PS2X_FH1_HALF=src:tgt:reg:off[,...] (hex): on every other
+// dispatch src->tgt, [reg+off] -= 1 (a per-update counter bumped just before
+// that call keeps stock cadence). PS2X_FH1_SKIP=src:tgt[,...]: skip every
+// other src->tgt call (service at stock cadence, class d).
+struct LabHook
+{
+    uint32_t src = 0, tgt = 0, reg = 0, off = 0, calls = 0;
+};
+
+inline std::vector<LabHook> &labHooks(const char *env, bool withTarget)
+{
+    static std::vector<LabHook> half, skip;
+    std::vector<LabHook> &v = withTarget ? half : skip;
+    static bool parsedHalf = false, parsedSkip = false;
+    bool &parsed = withTarget ? parsedHalf : parsedSkip;
+    if (parsed)
+        return v;
+    parsed = true;
+    const char *p = std::getenv(env);
+    while (p && *p)
+    {
+        LabHook h;
+        char *end = nullptr;
+        h.src = static_cast<uint32_t>(std::strtoul(p, &end, 16));
+        if (*end != ':') break;
+        h.tgt = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+        if (withTarget)
+        {
+            if (*end != ':') break;
+            h.reg = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+            if (*end != ':') break;
+            h.off = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+        }
+        v.push_back(h);
+        if (*end != ',') break;
+        p = end + 1;
+    }
+    if (!v.empty())
+        std::fprintf(stderr, "fh1-full120 lab %s hooks=%zu\n", env, v.size());
+    return v;
+}
+
+inline bool labHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    for (LabHook &h : labHooks("PS2X_FH1_HALF", true))
+        if (h.src == sourcePc && h.tgt == targetPc && ctx && (h.calls++ & 1u) != 0u)
+        {
+            const uint32_t addr = getRegU32(ctx, static_cast<int>(h.reg)) + h.off;
+            uint32_t v = 0u;
+            if (rd32(ram, addr, v))
+                wr32(ram, addr, v - 1u);
+        }
+    bool skip = false;
+    for (LabHook &h : labHooks("PS2X_FH1_SKIP", false))
+        if (h.src == sourcePc && h.tgt == targetPc)
+            skip = skip || (h.calls++ & 1u) != 0u;
+    return skip;
+}
+
+// Returns true when the call must be skipped (session fix).
+inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
     if (enabled() && sourcePc == kHookSite && !g_patched)
     {
@@ -394,16 +494,25 @@ inline void onBranch(uint8_t *ram, uint32_t sourcePc, uint32_t targetPc)
     }
     if (clockFix())
         clockPreHook(ram, targetPc);
+    bool skip = false;
+    if (enabled())
+        skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
     Tap &t = tap();
     if (!t.on)
-        return;
+        return skip;
     if (targetPc == kUpdateTarget)
         ++t.updates;
     else if (targetPc == kRenderTarget)
         ++t.renders;
     for (size_t i = 0; i < t.nCount; ++i)
         if (t.countPcs[i] == targetPc)
+        {
             ++t.counts[i];
+            if (t.logArgs && ctx)
+                for (int r = 0; r < 4; ++r)
+                    t.args[i][r] = getRegU32(ctx, 4 + r);
+        }
+    return skip;
 }
 
 // ---- Per-VBlank frame capture (PS2X_FH1_SEQ=dir, PS2X_FH1_SEQ_TICKS=a-b[,c-d]) --
@@ -488,12 +597,179 @@ inline void maybeCapture(GS &gs, uint64_t tick)
     std::fclose(f);
 }
 
+// ---- RAM counter search (PS2X_FH1_SCAN=T1,T2,T3[:lo-hi]) -----------------
+// Snapshots RDRAM words at guest ticks T1<T2<T3 and prints every aligned
+// 32-bit word whose value rises by exactly (T2-T1)/D then (T3-T2)/D, D =
+// PS2X_FH1_SCAN_DIV (default 1 = per-VBlank counters; 2 = per-stock-tick
+// counters under full120), and whose T3 value lies in [lo, hi] (optional).
+// Finds per-update frame counters (race clocks) without a known address.
+// PS2X_FH1_FIND=T:v[,T:v] prints words equal to int v or float v at tick T.
+// Diagnostic only; host memory, no guest effect.
+struct Scan
+{
+    uint64_t t[3] = {0, 0, 0};
+    int64_t lo = INT64_MIN, hi = INT64_MAX;
+    uint32_t div = 1u;
+    bool on = false;
+    std::vector<uint32_t> snap[2];
+};
+
+inline Scan &scan()
+{
+    static Scan q = [] {
+        Scan r;
+        const char *v = std::getenv("PS2X_FH1_SCAN");
+        if (!v || !*v)
+            return r;
+        char *end = nullptr;
+        r.t[0] = std::strtoull(v, &end, 10);
+        if (*end == ',') r.t[1] = std::strtoull(end + 1, &end, 10);
+        if (*end == ',') r.t[2] = std::strtoull(end + 1, &end, 10);
+        if (*end == ':')
+        {
+            r.lo = std::strtoll(end + 1, &end, 10);
+            if (*end == '-') r.hi = std::strtoll(end + 1, &end, 10);
+        }
+        if (const char *d = std::getenv("PS2X_FH1_SCAN_DIV"))
+            r.div = std::max<uint32_t>(1u, static_cast<uint32_t>(std::strtoul(d, nullptr, 10)));
+        r.on = r.t[0] && r.t[1] > r.t[0] && r.t[2] > r.t[1];
+        return r;
+    }();
+    return q;
+}
+
+inline void scanVBlank(const uint8_t *ram, uint64_t tick)
+{
+    Scan &q = scan();
+    if (q.on)
+    {
+        const size_t n = PS2_RAM_SIZE / 4u;
+        if (tick == q.t[0] || tick == q.t[1])
+        {
+            std::vector<uint32_t> &v = q.snap[tick == q.t[0] ? 0 : 1];
+            v.resize(n);
+            std::memcpy(v.data(), ram, n * 4u);
+        }
+        else if (tick == q.t[2] && q.snap[0].size() == n && q.snap[1].size() == n)
+        {
+            const int64_t d1 = static_cast<int64_t>((q.t[1] - q.t[0]) / q.div);
+            const int64_t d2 = static_cast<int64_t>((q.t[2] - q.t[1]) / q.div);
+            uint32_t hits = 0u;
+            for (size_t i = 0; i < n; ++i)
+            {
+                uint32_t w = 0u;
+                std::memcpy(&w, ram + i * 4u, 4);
+                const int64_t a = static_cast<int32_t>(q.snap[0][i]);
+                const int64_t b = static_cast<int32_t>(q.snap[1][i]);
+                const int64_t c = static_cast<int32_t>(w);
+                if (b - a == d1 && c - b == d2 && c >= q.lo && c <= q.hi && hits++ < 256u)
+                    std::fprintf(stderr, "fh1-scan addr=%08zx v=%lld,%lld,%lld\n", i * 4u,
+                                 static_cast<long long>(a), static_cast<long long>(b), static_cast<long long>(c));
+            }
+            std::fprintf(stderr, "fh1-scan done hits=%u ticks=%llu,%llu,%llu div=%u\n", hits,
+                         static_cast<unsigned long long>(q.t[0]), static_cast<unsigned long long>(q.t[1]),
+                         static_cast<unsigned long long>(q.t[2]), q.div);
+            q.snap[0].clear();
+            q.snap[1].clear();
+        }
+    }
+    // PS2X_FH1_SCANF=T1,T2,T3: float words rising by (dT/D)*step on both
+    // intervals, step = PS2X_FH1_SCANF_STEP (default 1/60), D = SCAN_DIV:
+    // the live per-update 1/60 clocks.
+    static Scan qf = [] {
+        Scan r;
+        const char *v = std::getenv("PS2X_FH1_SCANF");
+        if (!v || !*v)
+            return r;
+        char *end = nullptr;
+        r.t[0] = std::strtoull(v, &end, 10);
+        if (*end == ',') r.t[1] = std::strtoull(end + 1, &end, 10);
+        if (*end == ',') r.t[2] = std::strtoull(end + 1, &end, 10);
+        if (const char *d = std::getenv("PS2X_FH1_SCAN_DIV"))
+            r.div = std::max<uint32_t>(1u, static_cast<uint32_t>(std::strtoul(d, nullptr, 10)));
+        r.on = r.t[0] && r.t[1] > r.t[0] && r.t[2] > r.t[1];
+        return r;
+    }();
+    if (qf.on && (tick == qf.t[0] || tick == qf.t[1] || tick == qf.t[2]))
+    {
+        const size_t n = PS2_RAM_SIZE / 4u;
+        if (tick != qf.t[2])
+        {
+            std::vector<uint32_t> &v = qf.snap[tick == qf.t[0] ? 0 : 1];
+            v.resize(n);
+            std::memcpy(v.data(), ram, n * 4u);
+        }
+        else if (qf.snap[0].size() == n && qf.snap[1].size() == n)
+        {
+            static const double step = [] {
+                const char *e = std::getenv("PS2X_FH1_SCANF_STEP");
+                return (e && *e) ? std::strtod(e, nullptr) : 1.0 / 60.0;
+            }();
+            const double d1 = step * static_cast<double>((qf.t[1] - qf.t[0]) / qf.div);
+            const double d2 = step * static_cast<double>((qf.t[2] - qf.t[1]) / qf.div);
+            uint32_t hits = 0u;
+            for (size_t i = 0; i < n; ++i)
+            {
+                float a = 0, b = 0, c = 0;
+                std::memcpy(&a, &qf.snap[0][i], 4);
+                std::memcpy(&b, &qf.snap[1][i], 4);
+                std::memcpy(&c, ram + i * 4u, 4);
+                if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c))
+                    continue;
+                const double e1 = std::fabs((b - a) - d1), e2 = std::fabs((c - b) - d2);
+                if (e1 <= d1 * 2e-3 + 1e-5 && e2 <= d2 * 2e-3 + 1e-5 && hits++ < 512u)
+                    std::fprintf(stderr, "fh1-scanf addr=%08zx v=%.5f,%.5f,%.5f\n", i * 4u, a, b, c);
+                const double n1 = std::fabs((b - a) + d1), n2 = std::fabs((c - b) + d2);
+                if (n1 <= d1 * 2e-3 + 1e-5 && n2 <= d2 * 2e-3 + 1e-5 && hits++ < 512u)
+                    std::fprintf(stderr, "fh1-scanf addr=%08zx v=%.5f,%.5f,%.5f down\n", i * 4u, a, b, c);
+            }
+            std::fprintf(stderr, "fh1-scanf done hits=%u\n", hits);
+            qf.snap[0].clear();
+            qf.snap[1].clear();
+        }
+    }
+    static const char *find = std::getenv("PS2X_FH1_FIND");
+    if (!find || !*find)
+        return;
+    const char *p = find;
+    while (*p)
+    {
+        char *end = nullptr;
+        const uint64_t t = std::strtoull(p, &end, 10);
+        if (*end != ':')
+            break;
+        const double val = std::strtod(end + 1, &end);
+        if (t == tick)
+        {
+            const uint32_t iv = static_cast<uint32_t>(static_cast<int64_t>(val));
+            const float fv = static_cast<float>(val);
+            uint32_t hits = 0u;
+            for (size_t i = 0; i < PS2_RAM_SIZE / 4u; ++i)
+            {
+                uint32_t w = 0u;
+                std::memcpy(&w, ram + i * 4u, 4);
+                float f = 0.0f;
+                std::memcpy(&f, &w, 4);
+                const bool fm = f == fv || (fv != 0.0f && std::fabs(f - fv) <= std::fabs(fv) * 1e-4f);
+                if ((w == iv || fm) && hits++ < 256u)
+                    std::fprintf(stderr, "fh1-find tick=%llu addr=%08zx %s=%g\n", static_cast<unsigned long long>(tick),
+                                 i * 4u, w == iv ? "int" : "float", w == iv ? static_cast<double>(iv) : static_cast<double>(f));
+            }
+            std::fprintf(stderr, "fh1-find done tick=%llu value=%g hits=%u\n", static_cast<unsigned long long>(tick), val, hits);
+        }
+        if (*end != ',')
+            break;
+        p = end + 1;
+    }
+}
+
 // EE thread, at VBlankStart after the tick advanced. A state loaded from a
 // stock run (SS1) skips the init hook: convert at the first VBlank that finds
 // the manager at stock rate/dt instead.
 inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
 {
     maybeCapture(gs, tick);
+    scanVBlank(ram, tick);
     if (enabled() && !g_patched)
     {
         uint32_t a = 0u, rate = 0u, dt = 0u;
@@ -508,7 +784,7 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
     Tap &t = tap();
     if (!t.on || (tick % t.every) != 0u)
         return;
-    char line[1536];
+    char line[4096];
     int n = 0;
     uint32_t a = 0u, wake = 0u, upd = 0u, rate = 0u, dt = 0u;
     rd32(ram, kMgrPtr, a);
@@ -534,6 +810,9 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
     for (size_t i = 0; i < t.nCount && n < static_cast<int>(sizeof(line)) - 32; ++i)
     {
         n += std::snprintf(line + n, sizeof(line) - n, " c%x=%u", t.countPcs[i], t.counts[i]);
+        if (t.logArgs && t.counts[i])
+            n += std::snprintf(line + n, sizeof(line) - n, "[%x,%x,%x,%x]", t.args[i][0], t.args[i][1],
+                               t.args[i][2], t.args[i][3]);
         t.counts[i] = 0u;
     }
     for (size_t i = 0; i < t.nPeek && n < static_cast<int>(sizeof(line)) - 64; ++i)
