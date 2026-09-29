@@ -652,6 +652,42 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-widescreen-default",
                            0u,
                            applySsx3Widescreen);
 
+// FH1: full120 clock fix (PS2X_SSX3_FULL120_FIX=clock) wraps the leaf
+// 0x3a7058 so its interval is in stock wakes (ps2_fh1::clockPostHook). A
+// table wrapper covers direct dispatches and checkpoint resumes alike; the
+// leaf has no checkpoint, so it always returns to ra.
+namespace
+{
+    PS2Runtime::RecompiledFunction g_fh1Interval = nullptr;
+
+    void fh1IntervalWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t ra = getRegU32(ctx, 31);
+        g_fh1Interval(rdram, ctx, runtime);
+        if (ctx->pc == ra && !ps2_guest_unwind::pending())
+            ps2_fh1::clockPostHook(rdram, ctx, ps2_fh1::kInterval);
+    }
+
+    void applyFh1Full120(PS2Runtime &runtime)
+    {
+        if (!ps2_fh1::clockFix())
+            return;
+        g_fh1Interval = runtime.lookupFunction(ps2_fh1::kInterval);
+        if (!g_fh1Interval || !runtime.replaceFunction(ps2_fh1::kInterval, &fh1IntervalWrapper))
+        {
+            std::fprintf(stderr, "fh1-full120-refused cannot wrap 0x%x\n", ps2_fh1::kInterval);
+            std::abort();
+        }
+        std::fprintf(stderr, "fh1-full120 clock: 0x%x wrapped (interval in stock wakes)\n", ps2_fh1::kInterval);
+    }
+}
+
+PS2_REGISTER_GAME_OVERRIDE("ssx3-full120-clock",
+                           "SLUS_207.72",
+                           0x00100008u,
+                           0u,
+                           applyFh1Full120);
+
 // K1 P0: env-gated presentation-frame capture (PS2X_FRAME_DUMP_DIR).
 // Unset/empty = disabled (zero behavior change). When set, saves the
 // first two success uploads AND first two fallbacks (E3b per-path keeps)

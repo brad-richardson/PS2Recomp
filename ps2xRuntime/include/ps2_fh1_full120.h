@@ -78,6 +78,7 @@ enum Fix : uint32_t
     kFixDrag = 1u << 2,      // 1139a0 per-call drag (a) and z increments (b)
     kFixEvent = 1u << 3,     // 10496c event-node step (e/h)
     kFixSlew = 1u << 4,      // 114124 mode-0 return slew (a/j)
+    kFixClock = 1u << 5,     // system 1: wake ordinal in the stock domain + update-count periods
 };
 
 inline uint32_t fixMask() noexcept
@@ -88,7 +89,7 @@ inline uint32_t fixMask() noexcept
             return 0u;
         const std::string s(v);
         if (s == "all")
-            return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew;
+            return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -100,6 +101,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "drag") m |= kFixDrag;
             else if (item == "event") m |= kFixEvent;
             else if (item == "slew") m |= kFixSlew;
+            else if (item == "clock") m |= kFixClock;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -312,6 +314,74 @@ inline bool tapOn() noexcept
 // Set once the manager words are converted (EE thread only).
 inline bool g_patched = false;
 
+inline bool clockFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixClock) != 0u;
+    return on;
+}
+
+// ---- System 1 (clock domains), PS2X_SSX3_FULL120_FIX=clock ----------------
+// Wake ordinal A+0x18: the producer 0x317348 increments it once per wake
+// (0x317374-80). Full120 wakes 120/s; RV13 §2 lists nine external readers
+// that count it in stock wakes (once-per-60 throttles 0x1a3ff8/0x1aabac, the
+// /60 seconds at 0x1aa9dc, mod-N blinks 0x1b2340/0x1e79e0, stamps 0x1fae98,
+// 0x2f5490, 0x3a9da4) plus the 0x3a7098 interval countdown. Pre-decrementing
+// it on every other producer entry keeps A+0x18 at 60/s (class e: keep the
+// ordinal's stock domain), so those readers keep stock periods.
+inline constexpr uint32_t kProducer = 0x317348u;
+// 0x3a7058 stores +0xdc = rate / (max(a1,0x8000) * 2^-15): an interval in
+// wakes that 0x3a7098 decrements by the A+0x18 delta. With A+0x18 in stock
+// wakes it needs the stock rate: halve +0xdc after return (exact: 120/x =
+// 2*(60/x) in binary float).
+inline constexpr uint32_t kInterval = 0x3a7058u;
+// 0x1e1458 (called once per update from 0x230e68): if A+0x1c - [gp-0x1034]
+// >= 601 (0x1e1494 slti 0x259) it calls 0x1e14c0(1) and restamps with the
+// update count (0x1e14a8): a 10 s period in stock updates. Shift each new
+// stamp forward by 601 so the period is 1202 updates = 10 s at 120/s.
+inline constexpr uint32_t kPeriod10s = 0x1e1458u;
+inline constexpr uint32_t kPeriod10sStamp = 0x4a30f0u - 0x1034u; // gp-0x1034
+inline uint32_t g_producerCalls = 0u;
+inline uint32_t g_lastStamp10s = 0xffffffffu;
+
+inline void clockPreHook(uint8_t *ram, uint32_t targetPc)
+{
+    if (targetPc == kProducer)
+    {
+        if ((g_producerCalls++ & 1u) != 0u)
+        {
+            uint32_t a = 0u, wake = 0u;
+            if (rd32(ram, kMgrPtr, a) && a && rd32(ram, a + 0x18u, wake))
+                wr32(ram, a + 0x18u, wake - 1u);
+        }
+    }
+    else if (targetPc == kPeriod10s)
+    {
+        uint32_t stamp = 0u;
+        if (rd32(ram, kPeriod10sStamp, stamp) && stamp != g_lastStamp10s)
+        {
+            stamp += 601u;
+            wr32(ram, kPeriod10sStamp, stamp);
+            g_lastStamp10s = stamp;
+        }
+    }
+}
+
+// dispatchGuestBranch, after a call returned to its fall-through.
+inline void clockPostHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
+{
+    if (targetPc != kInterval)
+        return;
+    const uint32_t obj = getRegU32(ctx, 4);
+    uint32_t bits = 0u;
+    if (!rd32(ram, obj + 0xdcu, bits))
+        return;
+    float f = 0.0f;
+    std::memcpy(&f, &bits, 4);
+    f *= 0.5f;
+    std::memcpy(&bits, &f, 4);
+    wr32(ram, obj + 0xdcu, bits);
+}
+
 // EE thread, every guest dispatch while enabled() or the tap is on.
 inline void onBranch(uint8_t *ram, uint32_t sourcePc, uint32_t targetPc)
 {
@@ -320,6 +390,8 @@ inline void onBranch(uint8_t *ram, uint32_t sourcePc, uint32_t targetPc)
         g_patched = true;
         patchAtManagerInit(ram);
     }
+    if (clockFix())
+        clockPreHook(ram, targetPc);
     Tap &t = tap();
     if (!t.on)
         return;
