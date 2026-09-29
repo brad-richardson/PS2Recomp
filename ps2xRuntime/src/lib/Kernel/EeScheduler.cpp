@@ -3240,7 +3240,7 @@ void EeScheduler::processEvent(const EeEvent &event)
             std::cerr << "[coverage:tick] vsync=" << m_vsyncTick << std::endl;
             m_runtime.printMissingFunctionCounts();
         }
-        ps2_fh1::onVBlank(m_rdram, m_vsyncTick); // FH1 tap (env-only)
+        ps2_fh1::onVBlank(m_rdram, m_vsyncTick, m_runtime.gs()); // FH1 tap/seq (env-only)
         ps2_e3::noteVBlank(m_vsyncTick); // E3b frame stamp
         ps2_gfx_stats::noteVsync(m_vsyncTick); // E33 per-vsync census cut
         ps2_vu1_trace::noteVsync(m_vsyncTick); // E36 per-program trace window

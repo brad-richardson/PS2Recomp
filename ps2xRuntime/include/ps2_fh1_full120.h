@@ -24,6 +24,7 @@
 
 #include "ps2_runtime.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/gs/gs_frontend.h"
 
 #include <algorithm>
 #include <array>
@@ -32,6 +33,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace ps2_fh1
 {
@@ -404,11 +406,94 @@ inline void onBranch(uint8_t *ram, uint32_t sourcePc, uint32_t targetPc)
             ++t.counts[i];
 }
 
+// ---- Per-VBlank frame capture (PS2X_FH1_SEQ=dir, PS2X_FH1_SEQ_TICKS=a-b[,c-d]) --
+// At VBlankStart after the MTVU drain (EeScheduler order), the backend's
+// Present at this stream position (GS::presentForDiagnostics, no host-latch
+// side effects) is written as seq-<tick>.ppm. Output only; unlike PS2X_VQ it
+// is not a dev trace, so MTVU/microVU stay on.
+struct Seq
+{
+    const char *dir = nullptr;
+    std::array<uint64_t, 16> from{};
+    std::array<uint64_t, 16> to{};
+    size_t n = 0u;
+};
+
+inline const Seq &seq()
+{
+    static const Seq q = [] {
+        Seq r;
+        const char *d = std::getenv("PS2X_FH1_SEQ");
+        const char *t = std::getenv("PS2X_FH1_SEQ_TICKS");
+        if (!d || !*d || !t || !*t)
+            return r;
+        r.dir = d;
+        const char *p = t;
+        while (*p && r.n < r.from.size())
+        {
+            char *end = nullptr;
+            const uint64_t a = std::strtoull(p, &end, 10);
+            uint64_t b = a;
+            if (*end == '-')
+                b = std::strtoull(end + 1, &end, 10);
+            r.from[r.n] = a;
+            r.to[r.n] = b;
+            ++r.n;
+            if (*end != ',')
+                break;
+            p = end + 1;
+        }
+        return r;
+    }();
+    return q;
+}
+
+inline void maybeCapture(GS &gs, uint64_t tick)
+{
+    const Seq &q = seq();
+    if (!q.dir)
+        return;
+    bool hit = false;
+    for (size_t i = 0; i < q.n && !hit; ++i)
+        hit = tick >= q.from[i] && tick <= q.to[i];
+    if (!hit)
+        return;
+    const PresentationFrame frame = gs.presentForDiagnostics();
+    if (!frame)
+        return;
+    const size_t legacyStride = 640u * 4u;
+    const size_t stride = (frame.width <= 640u && frame.pixels.size() >= legacyStride * frame.height)
+                              ? legacyStride
+                              : static_cast<size_t>(frame.width) * 4u;
+    char path[1024];
+    std::snprintf(path, sizeof(path), "%s/seq-%06llu.ppm", q.dir, static_cast<unsigned long long>(tick));
+    FILE *f = std::fopen(path, "wb");
+    if (!f)
+        return;
+    std::fprintf(f, "P6\n%u %u\n255\n", frame.width, frame.height);
+    std::vector<uint8_t> row(static_cast<size_t>(frame.width) * 3u);
+    for (uint32_t y = 0; y < frame.height; ++y)
+    {
+        const size_t off = static_cast<size_t>(y) * stride;
+        if (off + static_cast<size_t>(frame.width) * 4u > frame.pixels.size())
+            break;
+        for (uint32_t x = 0; x < frame.width; ++x)
+        {
+            row[x * 3u + 0u] = frame.pixels[off + x * 4u + 0u];
+            row[x * 3u + 1u] = frame.pixels[off + x * 4u + 1u];
+            row[x * 3u + 2u] = frame.pixels[off + x * 4u + 2u];
+        }
+        std::fwrite(row.data(), 1, row.size(), f);
+    }
+    std::fclose(f);
+}
+
 // EE thread, at VBlankStart after the tick advanced. A state loaded from a
 // stock run (SS1) skips the init hook: convert at the first VBlank that finds
 // the manager at stock rate/dt instead.
-inline void onVBlank(uint8_t *ram, uint64_t tick)
+inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
 {
+    maybeCapture(gs, tick);
     if (enabled() && !g_patched)
     {
         uint32_t a = 0u, rate = 0u, dt = 0u;
