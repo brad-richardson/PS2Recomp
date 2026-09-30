@@ -69,15 +69,14 @@ namespace ps2_mtvu
     {
         enum class Kind : uint8_t
         {
-            Submit, // GifArbiter::submitStaged(path, bytes, directHl, owned)
+            Submit, // GifArbiter::submitStaged(path, bytes, directHl)
             Drain,  // GifDrainBatch + GifArbiter::drain()
-            Call,   // a GS-frontend call from a unit job (priv write, ordered CSR, frame end)
+            Call,   // a GS-frontend call from a unit job (unitGsCall)
             JobEnd  // the unit job is complete once this op has run
         };
         Kind kind = Kind::Drain;
         uint8_t path = 0;
         bool directHl = false;
-        bool owned = false; // MP2 census flag: submitOwned vs submit
         uint32_t acct = 0;  // bytes counted against the in-flight cap
         std::vector<uint8_t> bytes;
         std::function<void()> fn;
@@ -99,7 +98,6 @@ namespace ps2_mtvu
         Mpg,      // VU1 code at byte a, b bytes = payload
         Mscal,    // f = 0 MSCAL / 1 MSCNT, a = startPC, b = top | itop << 16
         GifCopy,  // submitGifPacket(f & 3, bytes...), payload std::vector<uint8_t>*
-        GifOwned, // submitGifPacketOwned(f & 3, move(bytes)...)
         Msk3,     // MSKPATH3, a = imm
         P3Drain,  // drainPath3IfUnmasked()
         ArbDrain  // arbDrain()
@@ -1342,7 +1340,6 @@ namespace ps2_mtvu
         {
             std::atomic<uint64_t> n[4];     // by path id 1..3
             std::atomic<uint64_t> bytes[4]; // by path id 1..3
-            std::atomic<uint64_t> owned[4]; // submitOwned share (MP2 zero-copy)
         };
         inline Mp2Gif &mp2Gif()
         {
@@ -1398,10 +1395,8 @@ namespace ps2_mtvu
             {
                 const uint64_t pn = g.n[p].exchange(0u, std::memory_order_relaxed);
                 const uint64_t pb = g.bytes[p].exchange(0u, std::memory_order_relaxed);
-                const uint64_t po = g.owned[p].exchange(0u, std::memory_order_relaxed);
-                std::fprintf(stderr, " p%d=%llu/%llu/owned%llu", p,
-                             static_cast<unsigned long long>(pn), static_cast<unsigned long long>(pb),
-                             static_cast<unsigned long long>(po));
+                std::fprintf(stderr, " p%d=%llu/%llu", p,
+                             static_cast<unsigned long long>(pn), static_cast<unsigned long long>(pb));
             }
             std::fprintf(stderr, "\n");
         }
@@ -1639,7 +1634,7 @@ namespace ps2_mtvu
     }
 
     // MTVU thread only (gifStageDefer()). Dropped only while shutting down.
-    inline void gifStageSubmit(uint8_t path, bool directHl, bool owned, std::vector<uint8_t> &&bytes)
+    inline void gifStageSubmit(uint8_t path, bool directHl, std::vector<uint8_t> &&bytes)
     {
         detail::GifStage &g = detail::gifStage();
         const uint32_t acct = static_cast<uint32_t>(bytes.size());
@@ -1648,7 +1643,6 @@ namespace ps2_mtvu
             op->kind = GifOp::Kind::Submit;
             op->path = path;
             op->directHl = directHl;
-            op->owned = owned;
             op->acct = acct;
             op->bytes = std::move(bytes);
             g.commit(*op, false);
@@ -1915,15 +1909,13 @@ namespace ps2_mtvu
             u.noopB[fmt].fetch_add(bytes, std::memory_order_relaxed);
         }
     }
-    inline void noteMp2GifSubmit(int path, uint32_t bytes, bool owned)
+    inline void noteMp2GifSubmit(int path, uint32_t bytes)
     {
         if (path < 1 || path > 3)
             return;
         detail::Mp2Gif &g = detail::mp2Gif();
         g.n[path].fetch_add(1u, std::memory_order_relaxed);
         g.bytes[path].fetch_add(bytes, std::memory_order_relaxed);
-        if (owned)
-            g.owned[path].fetch_add(1u, std::memory_order_relaxed);
     }
 
     // R1: a masked CSR read touches the priv block without a sync.

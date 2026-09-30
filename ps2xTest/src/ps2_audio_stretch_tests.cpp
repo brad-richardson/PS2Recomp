@@ -108,36 +108,26 @@ void register_ps2_audio_stretch_tests()
         tc.Run("hysteresis params default + parse + clamp", [](TestCase &t)
         {
             const ps2_audio_stretch::Params d =
-                ps2_audio_stretch::paramsFromEnv(nullptr, nullptr, nullptr, nullptr);
-            t.IsFalse(d.legacy, "default is the sustained-deficit controller");
+                ps2_audio_stretch::paramsFromEnv(nullptr, nullptr, nullptr);
             t.IsTrue(near(d.leave, 0.035f, 1e-6f), "default leave band is 3.5 %");
             t.IsTrue(near(d.rejoin, 0.01f, 1e-6f), "default rejoin band is 1 %");
             t.IsTrue(nearD(d.sustainS, 0.30, 1e-9), "default sustain is 300 ms");
             t.IsTrue(nearD(d.rejoinS, 0.0, 1e-12), "default rejoin is immediate");
 
-            const ps2_audio_stretch::Params leg =
-                ps2_audio_stretch::paramsFromEnv("1", nullptr, nullptr, nullptr);
-            t.IsTrue(leg.legacy, "STRETCH_LEGACY=1 selects AT1");
-            t.IsTrue(near(leg.leave, 0.02f, 1e-6f), "legacy leave band is 2 %");
-            t.IsTrue(nearD(leg.sustainS, 0.0, 1e-12), "legacy engages with no dwell");
-            t.IsTrue(nearD(leg.rejoinS, 0.0, 1e-12), "legacy rejoins with no dwell");
-            t.IsFalse(ps2_audio_stretch::paramsFromEnv("0", nullptr, nullptr, nullptr).legacy,
-                      "only the exact 1 enables legacy");
-
             const ps2_audio_stretch::Params tuned =
-                ps2_audio_stretch::paramsFromEnv(nullptr, "0.05", "100", "500");
+                ps2_audio_stretch::paramsFromEnv("0.05", "100", "500");
             t.IsTrue(near(tuned.leave, 0.05f, 1e-6f), "leave override parses");
             t.IsTrue(nearD(tuned.sustainS, 0.10, 1e-9), "sustain override parses (ms)");
             t.IsTrue(nearD(tuned.rejoinS, 0.50, 1e-9), "rejoin override parses (ms)");
 
             const ps2_audio_stretch::Params bad =
-                ps2_audio_stretch::paramsFromEnv(nullptr, "abc", "", "1x");
+                ps2_audio_stretch::paramsFromEnv("abc", "", "1x");
             t.IsTrue(near(bad.leave, 0.035f, 1e-6f), "bad leave keeps the default");
             t.IsTrue(nearD(bad.sustainS, 0.30, 1e-9), "empty sustain keeps the default");
             t.IsTrue(nearD(bad.rejoinS, 0.0, 1e-12), "trailing junk keeps the default");
 
             const ps2_audio_stretch::Params clamp =
-                ps2_audio_stretch::paramsFromEnv(nullptr, "9", "-5", "99999");
+                ps2_audio_stretch::paramsFromEnv("9", "-5", "99999");
             t.IsTrue(near(clamp.leave, 0.15f, 1e-6f), "leave clamps at 15 %");
             t.IsTrue(nearD(clamp.sustainS, 0.0, 1e-12), "negative sustain clamps at 0");
             t.IsTrue(nearD(clamp.rejoinS, 5.0, 1e-9), "rejoin clamps at 5 s");
@@ -274,28 +264,6 @@ void register_ps2_audio_stretch_tests()
             for (int i = 0; i < 200; ++i)
                 s = c.update(kTarget, kDt);
             t.IsTrue(s.bypass, "sustained full fill releases even with the dwell");
-        });
-
-        tc.Run("legacy mode reproduces the AT1 edges", [](TestCase &t)
-        {
-            const ps2_audio_stretch::Params legacy =
-                ps2_audio_stretch::paramsFromEnv("1", nullptr, nullptr, nullptr);
-            ps2_audio_stretch::StretchController c(legacy);
-            const auto dry = c.update(0, 0.0);
-            t.IsFalse(dry.bypass, "legacy: a dry ring engages immediately");
-            t.IsTrue(near(dry.tempo, 0.5f, 1e-6f), "legacy: tempo at the floor");
-
-            ps2_audio_stretch::StretchController c2(legacy);
-            c2.update(kTarget, 0.0);
-            for (int i = 0; i < 200; ++i)
-                c2.update(static_cast<uint64_t>(kTarget * 0.99), kDt);
-            t.IsTrue(c2.bypass(), "legacy: 1 % slow stays in bypass");
-            for (int i = 0; i < 200; ++i)
-                c2.update(static_cast<uint64_t>(kTarget * 0.97), kDt);
-            t.IsFalse(c2.bypass(), "legacy: 3 % slow engages");
-            for (int i = 0; i < 200; ++i)
-                c2.update(static_cast<uint64_t>(kTarget * 0.985), kDt);
-            t.IsFalse(c2.bypass(), "legacy: hysteresis holds until back inside 1 %");
         });
 
         tc.Run("drops react faster than rises", [](TestCase &t)

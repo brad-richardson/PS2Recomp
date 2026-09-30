@@ -53,24 +53,16 @@ public:
     // allocates a temporary buffer per call for this element type). Off =
     // stable_sort every drain.
     void setSortSkip(bool on) { m_sortSkip = on; }
-    // MP2 zero-copy (PS2X_GS_ZERO_COPY=1, default off): submit() fills the
-    // pooled buffer with one copy and no zero-fill (insert, not
-    // resize+memcpy). Off = the pre-MP2 resize+memcpy. Same bytes, same order.
-    void setZeroCopy(bool on) { m_zeroCopy = on; }
 
     void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
-    // MP2 zero-copy: queue a caller-filled packet by ownership (no copy, no
-    // zero-fill). Flags, queue position, capture tap and census match
-    // submit() exactly; drops (null process fn, short packet) match too.
-    void submitOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl = false);
 
     // VPL1 GIF stage: submit() split at the copy. copyForSubmit makes the
     // packet bytes exactly as submit() would (pooled buffer, same copy) and
     // touches no queue state, so the MTVU thread can call it; submitStaged
-    // then does the rest of submit()/submitOwned() (flags, path3Image test,
-    // census with `owned`, capture tap, queue position) on the GIF thread.
+    // then does the rest of submit() (flags, path3Image test, census, capture
+    // tap, queue position) on the GIF thread.
     std::vector<uint8_t> copyForSubmit(const uint8_t *data, uint32_t sizeBytes) const;
-    void submitStaged(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl, bool owned);
+    void submitStaged(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl);
 
     void drain();
     bool empty() const { return m_queue.empty(); }
@@ -82,7 +74,6 @@ private:
     ProcessPathPacketFn m_processPathFn;
     GsPacketPool *m_pool = nullptr; // GP4 H5: borrowed, null unless the diet block sets it
     bool m_sortSkip = false;        // MP1 L3 (set before producers run)
-    bool m_zeroCopy = false;        // MP2 (set before producers run)
     std::vector<GifArbiterPacket> m_queue;
 
     static bool isImagePacket(const uint8_t *data, uint32_t sizeBytes);

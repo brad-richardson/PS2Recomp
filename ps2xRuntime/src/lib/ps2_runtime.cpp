@@ -1,5 +1,4 @@
 #include "ps2_runtime.h"
-#include "ps2_ts2_observer.h"
 #include "ps2_ts2_split60.h"
 #include "ps2_mtvu.h"
 #include "ps2_microvu.h"
@@ -1984,12 +1983,6 @@ bool PS2Runtime::syncCoreSubsystems()
         if (const char *env = std::getenv("PS2X_GS_LEAN_HANDOFF"))
             lean = lean && env[0] != '0';
         m_gs.setWorkerLeanHandoff(lean);
-        // GW4: lean worker loop (batched drain, hysteresis space wakes). Wake
-        // and lock timing only; default off. Needs the lean handoff.
-        bool workerLean = false;
-        if (const char *env = std::getenv("PS2X_GS_WORKER_LEAN"))
-            workerLean = lean && env[0] != '\0' && env[0] != '0';
-        m_gs.setWorkerLeanLoop(workerLean);
         // GP4 H5: pooled packet buffers (producers acquire, the worker
         // releases after execute). Same bytes, same order; alloc-free only.
         m_gs.setPacketPoolEnabled(true);
@@ -2001,12 +1994,6 @@ bool PS2Runtime::syncCoreSubsystems()
         if (const char *env = std::getenv("PS2X_GS_ALLOC_LEAN"))
             allocLean = env[0] != '0';
         m_gs.packetPool().setLean(allocLean);
-        // VG2 lever 2: size-class free lists (O(1) release at the cap).
-        // Same bytes, same order; default off.
-        bool poolO1 = false;
-        if (const char *env = std::getenv("PS2X_GS_POOL_O1"))
-            poolO1 = env[0] != '\0' && env[0] != '0';
-        m_gs.packetPool().setO1(poolO1);
         m_gifArbiter.setSortSkip(allocLean);
         // GP4 H6: worker pops up to kPopBatch commands per mutex round
         // (FIFO order preserved; knob-off pops one-by-one as before).
@@ -2015,8 +2002,7 @@ bool PS2Runtime::syncCoreSubsystems()
                   << "H3 deferred wakes cmds=" << wakeCmds << " bytes=" << wakeBytes
                   << ", H4 queue descriptors=" << gsQueueDescriptors()
                   << ", H5 pooled packet buffers, H6 pop batch=" << GsWorker::kPopBatch
-                  << ", MP1 lean=" << (lean ? 1 : 0) << " GW4 worker-lean=" << (workerLean ? 1 : 0) << " alloc-lean=" << (allocLean ? 1 : 0)
-                  << " pool-o1=" << (poolO1 ? 1 : 0) << std::endl;
+                  << ", MP1 lean=" << (lean ? 1 : 0) << " alloc-lean=" << (allocLean ? 1 : 0) << std::endl;
     }
     // MP2 census: UNPACK fast-path vs fallback per format + GIF bytes per
     // path (PS2X_MP2_CENSUS=1, default off). Logged, never hashed; MTVU
@@ -2028,27 +2014,6 @@ bool PS2Runtime::syncCoreSubsystems()
         if (on)
             std::cerr << "[mtvu] mp2 census on (PS2X_MP2_CENSUS=1)" << std::endl;
     }
-    // MP2 zero-copy GIF (PS2X_GS_ZERO_COPY=1, default off until the Odin
-    // bench): vector-owned packets (MTVU pieces, masked-Path3 fifo) move into
-    // the arbiter, and raw submits fill the pooled buffer with one copy and
-    // no zero-fill. Same bytes, same order; off keeps the pre-MP2 copy path.
-    const char *zeroCopyEnv = std::getenv("PS2X_GS_ZERO_COPY");
-    const bool gsZeroCopy = zeroCopyEnv != nullptr && std::strcmp(zeroCopyEnv, "1") == 0;
-    m_gifArbiter.setZeroCopy(gsZeroCopy);
-    m_memory.setGsZeroCopy(gsZeroCopy);
-    std::cerr << "[gs:handoff] zero-copy GIF " << (gsZeroCopy ? "on" : "off")
-              << " (PS2X_GS_ZERO_COPY=" << (gsZeroCopy ? 1 : 0) << ")" << std::endl;
-    // HLE1 lean DMA chain walk (PS2X_DMA_CHAIN_LEAN=1, default off): the
-    // source-chain kick skips the per-tag diag-tap checks (hoisted; any tap on
-    // falls back to the full walk), translates plain-RDRAM tag/payload
-    // addresses without the generic decode, and appends a TTE tag's upper
-    // half and its contiguous payload with one insert. Same bytes, same
-    // registers; off keeps the original walk.
-    const char *chainLeanEnv = std::getenv("PS2X_DMA_CHAIN_LEAN");
-    const bool dmaChainLean = chainLeanEnv != nullptr && std::strcmp(chainLeanEnv, "1") == 0;
-    m_memory.setDmaChainLean(dmaChainLean);
-    std::cerr << "[dma] chain walk " << (dmaChainLean ? "lean" : "full")
-              << " (PS2X_DMA_CHAIN_LEAN=" << (dmaChainLean ? 1 : 0) << ")" << std::endl;
     // E33: per-path GIF census + GS draw attribution. The listener runs
     // before each packet's process call (same thread, synchronous drain),
     // so draws kicked while processing land on this packet's path. One
@@ -3739,12 +3704,6 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
             return true;
         }
     }
-    if (ps2_ts2_g2b::enabled())
-    {
-        const uint64_t tick = m_memory.gs().vsyncTick.load();
-        ps2_ts2_g2b::noteBranch(tick, sourcePc, targetPc, ctx);
-        ps2_ts2_g2b::noteState(rdram, ctx, tick, sourcePc, targetPc);
-    }
     // TS3: opt-in case/callback census, observation only, stock and split
     // modes. In release builds the gate is a constant false and folds away.
     if (ps2_ts2_split60::caseCountEnabled())
@@ -3760,31 +3719,12 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     {
         ps2_ts2_split60::countTick(m_memory.gs().vsyncTick.load(std::memory_order_relaxed));
     }
-#if PS2X_ENABLE_TS2_DIAG
-    if (targetPc == 0x10eb30u &&
-        (sourcePc == 0x13a530u || sourcePc == 0x1064e4u) &&
-        std::getenv("PS2X_TS2_GATE"))
-    {
-        static std::atomic<uint32_t> actionLines{0};
-        if (actionLines.fetch_add(1, std::memory_order_relaxed) < 16u)
-            std::fprintf(stderr,
-                "ts2-g2-action tick=%llu src=%08x a1=%08x skips=%llu fallback=%llu\n",
-                static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()),
-                sourcePc, getRegU32(ctx, 5),
-                static_cast<unsigned long long>(ps2_ts2_split60::g_state.predictionSkips),
-                static_cast<unsigned long long>(ps2_ts2_split60::g_state.predictionFallbacks));
-    }
-#endif // PS2X_ENABLE_TS2_DIAG (EE1P2)
     // FH1: full120 manager patch at the init hook + env-only tap counts.
     if ((ps2_fh1::enabled() || ps2_fh1::tapOn()) && ps2_fh1::onBranch(rdram, ctx, sourcePc, targetPc))
     {
         ctx->pc = fallthroughPc;
         return true;
     }
-    ps2_ts2_observer::noteBranch(
-        rdram, ctx, sourcePc, targetPc,
-        kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall,
-        kind == GuestBranchKind::IndirectCall || kind == GuestBranchKind::IndirectJump);
     // E43 draw-record census (dev-only, default off; self-gated on the
     // target pc first so the common path pays one compare).
     if (targetPc == ps2_e43_trace::kWalkerTarget)
@@ -4970,18 +4910,17 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
                 ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 1u)
                 : ps2_mtvu::Reason::GsPrivRead;
-            const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
-            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
             // GE3 Part 4: narrowed to reads whose consuming mask provably
             // observes only FINISH (probe polls qualify; SIGNAL-touching
-            // reads keep retiring). Never combined with parked O.
-            const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
+            // reads keep retiring).
+            const bool csrFree = m_memory.finishTimingPcsx2() &&
                                  ge3FinishOnlyFree(rdram, ctx ? ctx->pc : 0u, vaddr, 1u);
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
             if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
+                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             uint8_t value8 = m_memory.read8(vaddr);
@@ -5020,18 +4959,17 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
                 ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 2u)
                 : ps2_mtvu::Reason::GsPrivRead;
-            const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
-            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
             // GE3 Part 4: narrowed to reads whose consuming mask provably
             // observes only FINISH (probe polls qualify; SIGNAL-touching
-            // reads keep retiring). Never combined with parked O.
-            const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
+            // reads keep retiring).
+            const bool csrFree = m_memory.finishTimingPcsx2() &&
                                  ge3FinishOnlyFree(rdram, ctx ? ctx->pc : 0u, vaddr, 2u);
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
             if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
+                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             uint16_t value16 = m_memory.read16(vaddr);
@@ -5067,18 +5005,17 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
                 ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 4u)
                 : ps2_mtvu::Reason::GsPrivRead;
-            const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
-            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
             // GE3 Part 4: narrowed to reads whose consuming mask provably
             // observes only FINISH (probe polls qualify; SIGNAL-touching
-            // reads keep retiring). Never combined with parked O.
-            const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
+            // reads keep retiring).
+            const bool csrFree = m_memory.finishTimingPcsx2() &&
                                  ge3FinishOnlyFree(rdram, ctx ? ctx->pc : 0u, vaddr, 4u);
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
             if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
+                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             uint32_t value = m_memory.read32(vaddr);
@@ -5116,18 +5053,17 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
                 ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 8u)
                 : ps2_mtvu::Reason::GsPrivRead;
-            const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
-            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
             // GE3 Part 4: narrowed to reads whose consuming mask provably
             // observes only FINISH (probe polls qualify; SIGNAL-touching
-            // reads keep retiring). Never combined with parked O.
-            const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
+            // reads keep retiring).
+            const bool csrFree = m_memory.finishTimingPcsx2() &&
                                  ge3FinishOnlyFree(rdram, ctx ? ctx->pc : 0u, vaddr, 8u);
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
             if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
+                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             uint64_t value = m_memory.read64(vaddr);
@@ -5166,18 +5102,17 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             const ps2_mtvu::Reason mtvuReason = ps2_mtvu::active()
                 ? ps2_mtvu::privReadReason(rdram, ctx ? ctx->pc : 0u, vaddr, 16u)
                 : ps2_mtvu::Reason::GsPrivRead;
-            const bool orderedPending = m_memory.orderedGsStatus() && m_memory.orderedGsStatusPending();
-            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded() && !orderedPending;
+            const bool mtvuFree = mtvuReason == ps2_mtvu::Reason::GsPrivReadMasked && ps2_mtvu::threaded();
             // GE3 Part 4: narrowed to reads whose consuming mask provably
             // observes only FINISH (probe polls qualify; SIGNAL-touching
-            // reads keep retiring). Never combined with parked O.
-            const bool csrFree = m_memory.finishTimingPcsx2() && !m_memory.orderedGsStatus() &&
+            // reads keep retiring).
+            const bool csrFree = m_memory.finishTimingPcsx2() &&
                                  ge3FinishOnlyFree(rdram, ctx ? ctx->pc : 0u, vaddr, 16u);
             const ps2_mtvu::ExemptScope mtvuExempt(mtvuFree || csrFree);
             if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if ((orderedPending || ps2_pk::privDrainEnabled()) && m_gs.queueEnabled())
+                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             return m_memory.read128(vaddr);

@@ -567,12 +567,8 @@ private:
     std::atomic<bool> m_guestExecuting{false};
     // CP4: non-exceptional transfer out of guest code (executor thread only,
     // set by run() around each guest call; run() is non-reentrant).
-    // GT3: sigsetjmp with a run()-time mask-save flag. Plain setjmp saves the
-    // signal mask with a syscall on bionic and Apple libc, once per arm
-    // (~1,075 arms per update in the full-120 All-Peak race);
-    // PS2X_EE_JMP_NOMASK=1 skips it. Knob off keeps each platform's setjmp
-    // semantics (bionic/Apple save the mask, glibc doesn't). Nothing on the
-    // executor changes the signal mask between an arm and its jump.
+    // GT3: sigsetjmp with a run()-time mask-save flag that keeps each
+    // platform's setjmp semantics (bionic/Apple save the mask, glibc doesn't).
 #if PS2X_EE_SIGJMP
     sigjmp_buf m_transferJmp{};
 #else

@@ -1387,7 +1387,7 @@ void PS2Memory::processVIF1DataStaged(const uint8_t *data, uint32_t sizeBytes)
                 (static_cast<uint64_t>(kGifFmtImage) << 58);
             std::memcpy(imagePacket.data(), &imageTag, sizeof(imageTag));
             std::memcpy(imagePacket.data() + 16u, data + pos, static_cast<size_t>(chunkQw) * 16u);
-            vifStageGif(false, GifPathId::Path2, std::move(imagePacket), true, m_vif1PendingPath2DirectHl);
+            vifStageGif(GifPathId::Path2, std::move(imagePacket), true, m_vif1PendingPath2DirectHl);
 
             pos += chunkQw * 16u;
             m_vif1PendingPath2ImageQwc -= chunkQw;
@@ -1545,7 +1545,7 @@ void PS2Memory::processVIF1DataStaged(const uint8_t *data, uint32_t sizeBytes)
             if (qwCount > 0)
             {
                 const bool directHl = (opcode == VIF_DIRECTHL);
-                vifStageGif(false, GifPathId::Path2,
+                vifStageGif(GifPathId::Path2,
                             std::vector<uint8_t>(data + pos, data + pos + static_cast<size_t>(qwCount) * 16u),
                             true, directHl);
 

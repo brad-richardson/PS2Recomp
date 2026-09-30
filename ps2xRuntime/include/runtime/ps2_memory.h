@@ -357,14 +357,6 @@ public:
     void setGsFrontend(GS *gs) { m_gsFrontend = gs; }
     void gsPrivStore(std::function<void()> apply, uint32_t captureAddress = UINT32_MAX);
     void gsPrivSync();
-    // O: opt-in GS stream ordering for SIGNAL/FINISH W1C and frame boundaries.
-    bool orderedGsStatus() const { return m_orderedGsStatus; }    bool orderedGsStatusPending() const
-    {
-        return m_orderedCsrCompleted.load(std::memory_order_acquire) !=
-               m_orderedCsrSubmitted.load(std::memory_order_acquire);
-    }
-    void orderedGsFrameEnd(uint64_t tick);
-    void orderedGsCsrWrite(uint32_t width, uint64_t value);
     // GE3 Part 3: EE-owned FINISH mode (PS2X_GS_FINISH_TIMING=pcsx2).
     bool finishTimingPcsx2() const { return m_finishTimingPcsx2; }
 
@@ -399,14 +391,6 @@ public:
     static std::vector<uint32_t> splitGifPacketsAtEop(const uint8_t *data, uint32_t sizeBytes);
 
     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
-    // MP2 zero-copy: submitGifPacket by ownership (masked-Path3 fifo and the
-    // arbiter take the vector; the no-arbiter callback borrows it). Same
-    // taps, same order, same drains as submitGifPacket.
-    void submitGifPacketOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately = true, bool path2DirectHl = false);
-    // MP2 zero-copy (PS2X_GS_ZERO_COPY=1, default off). Set once, before DMAs run.
-    void setGsZeroCopy(bool on) { m_gsZeroCopy = on; }
-    // HLE1 lean DMA chain walk (PS2X_DMA_CHAIN_LEAN=1, default off). Set once, before DMAs run.
-    void setDmaChainLean(bool on) { m_dmaChainLean = on; }
     // VPL1 GIF stage: run one Submit/Drain op on the MTVU-GIF thread.
     void execGifStageOp(ps2_mtvu::GifOp &op);
     // VPL2 VIF stage: run one record on the MTVU thread (opaque = PS2Memory*).
@@ -479,7 +463,6 @@ public:
     // thread with PS2X_MTVU_GIF_STAGE=1 they become GIF-stage ops (bytes
     // copied here); otherwise they run the arbiter call inline, as before.
     void arbSubmit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl);
-    void arbSubmitOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl);
     void arbDrain();
     // VPL1: a unit job's GS-frontend call (G1-G3); `marker` feeds the digest.
     void unitGsCall(uint8_t marker, uint64_t value, std::function<void()> fn);
@@ -488,15 +471,13 @@ public:
     // (VU1 data/code writes, MSCAL/MSCNT, GIF submits, MSKPATH3) becomes a
     // record the MTVU thread applies in order (REPORT.md §1.3).
     void processVIF1DataStaged(const uint8_t *data, uint32_t sizeBytes);
-    // VPL2: a submitGifPacket(Owned) call from the VIF thread, as a record.
-    void vifStageGif(bool owned, GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately,
-                     bool path2DirectHl);
+    // VPL2: a submitGifPacket call from the VIF thread, as a record.
+    void vifStageGif(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately, bool path2DirectHl);
     void vifStageMsk3(uint16_t imm);
 #if PS2X_ENABLE_DET_HASH_TAP || PS2X_ENABLE_DIAG_TAPS
     void vpl2CaptureNote(const uint8_t *data, uint32_t sizeBytes); // VPL2 dev capture
 #endif
     GS *m_gsFrontend = nullptr;
-    bool m_gsZeroCopy = false; // MP2 (set before DMAs run)
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
 
@@ -527,7 +508,6 @@ public:
     // in writeIORegister (kicks run EE-side only). Kills the O(n^2) growth
     // memcpy (~0.30 ms/f, GT1 §6); reserve-only, contents-identical.
     size_t m_chainBufHint = 1u << 18;
-    bool m_dmaChainLean = false; // HLE1 (set before DMAs run)
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
 
@@ -572,9 +552,6 @@ public:
 
     // Keep new O state after the existing members: generated EE/VU objects
     // and independently built native libraries must retain prior offsets.
-    bool m_orderedGsStatus = false;
-    std::atomic<uint64_t> m_orderedCsrSubmitted{0u};
-    std::atomic<uint64_t> m_orderedCsrCompleted{0u};
     // GE3 Part 3: PS2X_GS_FINISH_TIMING=pcsx2 (EE-owned FINISH). Same
     // placement rule: appended last so prior offsets never move.
     bool m_finishTimingPcsx2 = false;

@@ -128,12 +128,6 @@ public:
         if (m_worker)
             m_worker->setLeanHandoff(on);
     }
-    // GW4: lean worker loop (see GsWorker::setWorkerLean); before the worker starts.
-    void setWorkerLeanLoop(bool on)
-    {
-        if (m_worker)
-            m_worker->setWorkerLean(on);
-    }
     bool workerLocalBatchesOk() const { return m_worker && m_worker->leanHandoff(); }
     void setWorkerDeferredWakes(uint32_t wakeCommands, size_t wakeBytes)
     {
@@ -187,7 +181,6 @@ public:
     // command (stream-ordered after the CSR FIELD PrivWrite); direct mode
     // calls the backend now. No-op unless the backend opted in.
     void noteGuestVsync(uint64_t tick);
-    void orderedFrameEnd(uint64_t tick);
 
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     // GF1 H1 (PS2X_GS_HANDOFF_DIET): noteGifPath(path) when notePath, then
@@ -232,7 +225,6 @@ public:
     // SIGNAL/FINISH/LABEL and the HLE display regs also land there);
     // direct mode, or a call from the worker itself, runs it now.
     void privWrite(std::function<void()> apply);
-    void orderedCsrWrite(uint32_t width, uint64_t value, std::function<void()> apply);
     uint64_t privWriteCount() const { return m_privWriteCount.load(std::memory_order_relaxed); }
 
     const uint8_t *lockDisplaySnapshot(uint32_t &outSize);
@@ -402,9 +394,6 @@ private:
     // GP4 H5: reusable packet buffers (producers acquire, the worker
     // releases after execute). Thread-safe; inert unless enabled.
     GsPacketPool m_packetPool;
-    std::mutex m_orderedFrameMutex;
-    std::condition_variable m_orderedFrameCv;
-    uint32_t m_orderedFramesInFlight = 0u; // O: at most two GS frame boundaries
     // GB2 Part 2: monotonic submit counters (atomic: incremented on the
     // worker when queued, read on the game thread after a drain).
     std::atomic<uint64_t> m_submitCount{0};
@@ -417,7 +406,6 @@ private:
     // after GsWorker decode. Default off. Set once in the constructor before
     // the game thread spawns; read on EE/MTVU submit threads.
     bool m_finishTimingPcsx2 = false;
-    bool m_workerNoFinishRescan = false; // VG2 lever 3 (PS2X_GS_WORKER_NO_FINISH_RESCAN)
     std::atomic<bool> m_wantsGuestVsync{false}; // GE2: cached WantsGuestVsync()
     std::atomic<bool> m_wantsPrivMirror{false}; // GE2: cached WantsPrivMirror()
     // N8D7M12 Part 5F4P2: worker-consumption packet-sequence fingerprint.

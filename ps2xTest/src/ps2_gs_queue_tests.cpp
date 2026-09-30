@@ -27,28 +27,6 @@
 
 namespace
 {
-    struct OrderedStatusEnv
-    {
-        OrderedStatusEnv()
-        {
-            if (const char *v = std::getenv("PS2X_GS_ORDERED_STATUS"))
-            {
-                old = v;
-                hadOld = true;
-            }
-            ::setenv("PS2X_GS_ORDERED_STATUS", "1", 1);
-        }
-        ~OrderedStatusEnv()
-        {
-            if (hadOld)
-                ::setenv("PS2X_GS_ORDERED_STATUS", old.c_str(), 1);
-            else
-                ::unsetenv("PS2X_GS_ORDERED_STATUS");
-        }
-        std::string old;
-        bool hadOld = false;
-    };
-
     constexpr uint8_t kFlgPacked = 0u;
     constexpr uint8_t kFlgReglist = 1u;
     constexpr uint8_t kFlgImage = 2u;
@@ -807,131 +785,13 @@ void register_ps2_gs_queue_tests()
             t.Equals(q.privWrites, 6ull, "queued counts 5 priv stores + the gate");
         });
 
-        tc.Run("O: typed CSR clears preserve clear-set order and a following read", [](TestCase &t)
-        {
-            OrderedStatusEnv env;
-            auto run = [](bool clearFirst, uint32_t width, uint32_t jitterUs)
-            {
-                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Threaded, true, jitterUs);
-                PS2Memory mem;
-                mem.initialize();
-                GS gs;
-                gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
-                gs.setQueueEnabled(true);
-                mem.setGsFrontend(&gs);
-                std::atomic<bool> gate{false};
-                gs.privWrite([&gate]()
-                {
-                    while (!gate.load(std::memory_order_acquire))
-                        std::this_thread::yield();
-                });
-                std::vector<uint8_t> finish;
-                appendGifTag(finish, 1u, kFlgPacked, 1u, 0xEull);
-                appendGifAd(finish, 0u, GS_REG_FINISH);
-                auto submitFinish = [&]()
-                {
-                    ps2_mtvu::submit([&gs, finish]()
-                    {
-                        gs.processGIFPacket(finish.data(), static_cast<uint32_t>(finish.size()));
-                    }, finish.size(), 0u);
-                };
-                auto clear = [&]()
-                {
-                    if (width == 4u)
-                        mem.write32(0x12001000u, 2u);
-                    else
-                        mem.write64(0x12001000u, 2u);
-                };
-                if (clearFirst)
-                {
-                    clear();
-                    submitFinish();
-                }
-                else
-                {
-                    submitFinish();
-                    clear();
-                }
-                const bool pendingBeforeRead = mem.orderedGsStatusPending();
-                gate.store(true, std::memory_order_release);
-                mem.gsPrivSync(); // same unit + GS retirement used by a non-masked EE read
-                const uint64_t csrAtRead = mem.read64(0x12001000u);
-                const bool pendingAfterRead = mem.orderedGsStatusPending();
-                gs.setQueueEnabled(false);
-                mem.setGsFrontend(nullptr);
-                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
-                return std::array<uint64_t, 3>{csrAtRead, pendingBeforeRead, pendingAfterRead};
-            };
-            for (uint32_t jitterUs : {0u, 300u})
-            {
-                const auto setThenClear = run(false, 8u, jitterUs);
-                const auto clearThenSet = run(true, 4u, jitterUs);
-                t.Equals(setThenClear[0] & 2ull, 0ull, "FINISH then typed 64-bit clear retires clear last");
-                t.Equals(clearThenSet[0] & 2ull, 2ull, "typed 32-bit clear then FINISH retires set last");
-                t.Equals(setThenClear[1], 1ull, "clear is pending before the read fence");
-                t.Equals(setThenClear[2], 0ull, "read fence retires the pending clear");
-            }
-        });
-
-        tc.Run("O: unit frame marker cannot overtake frame packets", [](TestCase &t)
-        {
-            OrderedStatusEnv env;
-            auto run = [](bool throughUnit)
-            {
-                ps2_mtvu::setModeForTest(throughUnit ? ps2_mtvu::Mode::Threaded : ps2_mtvu::Mode::Off,
-                                         true, throughUnit ? 300u : 0u);
-                PS2Memory mem;
-                mem.initialize();
-                GS gs;
-                gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
-                gs.setRasterBackend(ps2x_gs_external::create(&mem.gs()));
-                gs.setQueueEnabled(true);
-                gs.setPktSeqEnabled(true);
-                mem.setGsFrontend(&gs);
-                std::vector<uint8_t> first, second;
-                appendGifTag(first, 1u, kFlgPacked, 1u, 0xEull);
-                appendGifAd(first, 0x11ull, GS_REG_LABEL);
-                appendGifTag(second, 1u, kFlgPacked, 1u, 0xEull);
-                appendGifAd(second, 0x22ull, GS_REG_LABEL);
-                auto packet = [&gs, throughUnit](std::vector<uint8_t> bytes)
-                {
-                    if (throughUnit)
-                        ps2_mtvu::submit([&gs, bytes]()
-                        {
-                            gs.processGIFPacket(bytes.data(), static_cast<uint32_t>(bytes.size()));
-                        }, bytes.size(), 0u);
-                    else
-                        gs.processGIFPacket(bytes.data(), static_cast<uint32_t>(bytes.size()));
-                };
-                packet(first);
-                if (throughUnit)
-                    mem.orderedGsFrameEnd(1u);
-                else
-                    gs.noteGuestVsync(1u);
-                packet(second);
-                ps2_mtvu::syncAll();
-                gs.drainQueue();
-                const std::array<uint64_t, 2> out{gs.pktSeqSnapshot(), gs.pktSeqSnapshotCommands()};
-                gs.setQueueEnabled(false);
-                mem.setGsFrontend(nullptr);
-                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
-                return out;
-            };
-            const auto direct = run(false);
-            const auto ordered = run(true);
-            t.IsTrue(direct[1] >= 3u, "digest includes both packets and frame marker");
-            t.Equals(ordered[0], direct[0], "unit-delivered FrameEnd keeps packet order under jitter");
-            t.Equals(ordered[1], direct[1], "unit-delivered FrameEnd has the same command count");
-        });
-
         tc.Run("VPL1 GIF stage keeps the unit's GS stream order", [](TestCase &t)
         {
             // The unit's arbiter work (PATH1/2/3 submits, per-XGKICK drains,
-            // the PATH1-before-PATH3 sort), R2 priv stores and ordered frame
-            // markers must reach the GS worker in the same order with the
-            // GIF stage on as with the serial unit (pktSeq digest), with and
-            // without host jitter, and nothing may bypass the stage.
-            OrderedStatusEnv env;
+            // the PATH1-before-PATH3 sort) and R2 priv stores must reach the
+            // GS worker in the same order with the GIF stage on as with the
+            // serial unit (pktSeq digest), with and without host jitter, and
+            // nothing may bypass the stage.
             auto run = [](bool gifStage, uint32_t jitterUs)
             {
                 ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Threaded, true, jitterUs);
@@ -971,14 +831,12 @@ void register_ps2_gs_queue_tests()
                             // Undrained PATH3 then PATH1: the drain sorts PATH1 first.
                             const std::vector<uint8_t> p3 = label(0x300000ull + i);
                             mem.submitGifPacket(GifPathId::Path3, p3.data(), static_cast<uint32_t>(p3.size()), false);
-                            std::vector<uint8_t> p1b = label(0x400000ull + i);
-                            mem.submitGifPacketOwned(GifPathId::Path1, std::move(p1b), true);
+                            const std::vector<uint8_t> p1b = label(0x400000ull + i);
+                            mem.submitGifPacket(GifPathId::Path1, p1b.data(), static_cast<uint32_t>(p1b.size()), true);
                         }
                     }, 64u, 0u);
                     if (i % 7u == 0u)
                         mem.write64(0x12000070u, 0x1000ull + i); // DISPFB1: an R2 priv-store job
-                    if (i % 10u == 9u)
-                        mem.orderedGsFrameEnd(i);
                 }
                 ps2_mtvu::syncAll();
                 gs.drainQueue();
@@ -994,7 +852,7 @@ void register_ps2_gs_queue_tests()
             };
             const uint64_t escapes0 = ps2_mtvu::detail::gifStage().nEscapes.load();
             const auto serial = run(false, 0u);
-            t.IsTrue(serial[1] >= 390u, "digest covers the packet stream, priv stores and frame markers");
+            t.IsTrue(serial[1] >= 370u, "digest covers the packet stream and priv stores");
             for (uint32_t jitterUs : {0u, 200u})
             {
                 const auto staged = run(true, jitterUs);
@@ -1003,44 +861,6 @@ void register_ps2_gs_queue_tests()
                 t.Equals(staged[2], serial[2], "GIF-stage final DISPFB1 == serial unit");
             }
             t.Equals(ps2_mtvu::detail::gifStage().nEscapes.load(), escapes0, "no GS enqueue bypassed the stage");
-        });
-
-        tc.Run("O: two queued frame markers bound backlog across reset", [](TestCase &t)
-        {
-            PS2Memory mem;
-            mem.initialize();
-            GS gs;
-            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
-            gs.setRasterBackend(ps2x_gs_external::create(&mem.gs()));
-            gs.setQueueEnabled(true);
-            std::atomic<bool> gate{false};
-            gs.privWrite([&gate]()
-            {
-                while (!gate.load(std::memory_order_acquire))
-                    std::this_thread::yield();
-            });
-            gs.orderedFrameEnd(1u);
-            gs.orderedFrameEnd(2u);
-            std::atomic<bool> entered{false}, thirdDone{false};
-            std::thread third([&]()
-            {
-                entered.store(true, std::memory_order_release);
-                gs.orderedFrameEnd(3u);
-                thirdDone.store(true, std::memory_order_release);
-            });
-            while (!entered.load(std::memory_order_acquire))
-                std::this_thread::yield();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            const bool blockedAtTwo = !thirdDone.load(std::memory_order_acquire);
-            gate.store(true, std::memory_order_release);
-            third.join();
-            gs.drainQueue();
-            gs.reset();
-            gs.orderedFrameEnd(4u);
-            gs.drainQueue();
-            gs.setQueueEnabled(false);
-            t.IsTrue(blockedAtTwo, "third frame waits while two boundaries are outstanding");
-            t.IsTrue(thirdDone.load(), "GS retirement admits third frame without deadlock");
         });
 
         tc.Run("queue backpressure: a full ring blocks producers until drained", [](TestCase &t)
@@ -1398,130 +1218,6 @@ void register_ps2_gs_queue_tests()
             (void)quietGf1;
         });
 
-        // GW4: the lean worker loop under stress. 200 iterations: two
-        // producers (per-producer FIFO checked) with randomized payload sizes
-        // and pauses against small caps (constant backpressure, space waiters),
-        // a slow consumer now and then, a unit-style local batch with job-end
-        // flushes, and RPC fences (each must return). A lost wakeup hangs: a watchdog aborts at 120 s.
-        tc.Run("GW4 lean worker loop stress: FIFO per producer, no lost wakeups", [](TestCase &t)
-        {
-            std::atomic<bool> finished{false};
-            std::thread dog(
-                [&]
-                {
-                    for (int i = 0; i < 1200 && !finished.load(std::memory_order_acquire); ++i)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    if (!finished.load(std::memory_order_acquire))
-                    {
-                        std::fprintf(stderr, "GW4 stress: watchdog abort (lost wakeup or deadlock)\n");
-                        std::abort();
-                    }
-                });
-            uint64_t totalExec = 0, totalSent = 0;
-            bool ordered = true, quietOk = true;
-            uint64_t seedBase = 0x2545F4914F6CDD1Dull;
-            for (int iter = 0; iter < 200; ++iter)
-            {
-                const bool lean = (iter & 1) != 0;
-                uint64_t rng = seedBase + static_cast<uint64_t>(iter) * 0x9E3779B97F4A7C15ull;
-                const auto rnd = [&rng]
-                {
-                    rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-                    return rng;
-                };
-                const size_t descCap = 4u + rnd() % 60u;
-                const size_t byteCap = 2048u + (rnd() % 32u) * 512u;
-                // u32a = producer id, u32b = per-producer sequence.
-                std::vector<uint32_t> last(2, 0xFFFFFFFFu);
-                uint64_t executed = 0;
-                std::atomic<uint32_t> sentA{0}, sentB{0};
-                const bool slow = (rnd() % 4u) == 0u;
-                GsWorker worker(descCap, byteCap,
-                                [&](GsCommand &cmd)
-                                {
-                                    if (cmd.kind == GsCmdKind::GifPacket)
-                                    {
-                                        const uint32_t p = cmd.u32a;
-                                        if (last[p] + 1u != cmd.u32b && !(last[p] == 0xFFFFFFFFu && cmd.u32b == 0u))
-                                            ordered = false;
-                                        last[p] = cmd.u32b;
-                                        if (slow && (cmd.u32b % 97u) == 0u)
-                                            std::this_thread::sleep_for(std::chrono::microseconds(200));
-                                    }
-                                    ++executed;
-                                });
-                worker.setDeferredWakes(16u, 32u * 1024u);
-                worker.setLeanHandoff(lean);
-                worker.setWorkerLean(lean);
-                worker.start();
-                const uint32_t perProducer = 300u + static_cast<uint32_t>(rnd() % 500u);
-                const auto produce = [&](uint32_t id, uint64_t seed, bool unitStyle)
-                {
-                    uint64_t r = seed | 1u;
-                    for (uint32_t n = 0; n < perProducer; ++n)
-                    {
-                        r ^= r << 13; r ^= r >> 7; r ^= r << 17;
-                        if (unitStyle)
-                            GsWorker::beginLocalBatch();
-                        GsCommand c;
-                        c.kind = GsCmdKind::GifPacket;
-                        c.u32a = id;
-                        c.u32b = n;
-                        const size_t sz = 16u * (1u + r % 40u);
-                        c.bytes.resize(std::min<size_t>(sz, byteCap), 0x33u);
-                        worker.enqueue(std::move(c));
-                        if (unitStyle)
-                        {
-                            GsWorker::endLocalBatch();
-                            if ((r >> 9) % 23u == 0u)
-                                worker.flushWake(); // job end
-                        }
-                        (id == 0u ? sentA : sentB).store(n + 1u, std::memory_order_release);
-                        if ((r >> 13) % 61u == 0u)
-                        {
-                            // RPC fence: everything this producer sent must have run.
-                            GsCommand f;
-                            f.kind = GsCmdKind::Fence;
-                            f.rpc = std::make_shared<GsRpcBase>();
-                            std::shared_ptr<GsRpcBase> rpc = f.rpc;
-                            worker.enqueue(std::move(f));
-                            rpc->wait();
-                        }
-                        if ((r >> 21) % 11u == 0u)
-                            std::this_thread::sleep_for(std::chrono::microseconds(r % 150u));
-                    }
-                    if (unitStyle)
-                        worker.flushWake();
-                };
-                std::thread pa(produce, 0u, rnd(), lean); // unit-style on the lean runs
-                std::thread pb(produce, 1u, rnd(), false);
-                pa.join();
-                pb.join();
-                // Drain: a final fence must come back, then quiescence.
-                {
-                    GsCommand f;
-                    f.kind = GsCmdKind::Fence;
-                    f.rpc = std::make_shared<GsRpcBase>();
-                    std::shared_ptr<GsRpcBase> rpc = f.rpc;
-                    worker.enqueue(std::move(f));
-                    rpc->wait();
-                }
-                for (int i = 0; i < 400 && !worker.isQuiescent(); ++i)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                quietOk = quietOk && worker.isQuiescent();
-                worker.stop();
-                totalExec += static_cast<uint64_t>(last[0] + 1u) + static_cast<uint64_t>(last[1] + 1u);
-                totalSent += 2u * perProducer;
-                ordered = ordered && last[0] == perProducer - 1u && last[1] == perProducer - 1u;
-                (void)executed;
-            }
-            finished.store(true, std::memory_order_release);
-            dog.join();
-            t.IsTrue(ordered, "each producer's commands should run in FIFO order, none dropped");
-            t.Equals(totalExec, totalSent, "every packet should execute");
-            t.IsTrue(quietOk, "the worker should reach quiescence after each run");
-        });
-
         // MP1 L2: a local batch that fills the queue while the worker sleeps
         // wakes it before blocking (lean notifies a sleeping worker only).
         tc.Run("MP1 lean local batch that fills the queue wakes the worker", [](TestCase &t)
@@ -1719,83 +1415,6 @@ void register_ps2_gs_queue_tests()
             t.IsTrue(strict.acquire(48u * 1024u).empty(), "the pre-MP1 pool should keep dropping larger buffers");
         });
 
-        // VG2 lever 2: the O(1) size-class pool keeps the lean pool's
-        // contract (caps, larger buffers win when full, fits on acquire)
-        // and hands back exactly the bytes the caller writes.
-        tc.Run("VG2 O(1) pool keeps the lean contract", [](TestCase &t)
-        {
-            GsPacketPool pool;
-            pool.setEnabled(true);
-            pool.setLean(true);
-            pool.setO1(true);
-            t.IsTrue(pool.acquire(64u).empty(), "an empty pool should miss");
-            for (size_t i = 0; i < GsPacketPool::kLeanMaxBuffers; ++i)
-            {
-                std::vector<uint8_t> b(64u, 0x5Au);
-                pool.release(std::move(b));
-            }
-            t.Equals(pool.pooledCount(), GsPacketPool::kLeanMaxBuffers, "O(1) pool should fill to its buffer cap");
-            for (size_t i = 0; i < GsPacketPool::kLeanMaxBuffers; ++i)
-            {
-                std::vector<uint8_t> b(64u * 1024u, 0x33u);
-                pool.release(std::move(b));
-                t.IsTrue(b.capacity() == 0u || b.capacity() < 64u * 1024u,
-                         "a swapped release should hand back the smaller buffer");
-            }
-            t.IsTrue(pool.pooledCount() <= GsPacketPool::kLeanMaxBuffers, "O(1) pool should honor the buffer cap");
-            t.IsTrue(pool.pooledBytes() <= GsPacketPool::kLeanMaxBytes, "O(1) pool should honor the byte cap");
-            std::vector<uint8_t> got = pool.acquire(48u * 1024u);
-            t.IsTrue(got.capacity() >= 48u * 1024u, "a large request should now hit the pool");
-            // Fits: every acquire returns room >= size, across class edges.
-            GsPacketPool mix;
-            mix.setEnabled(true);
-            mix.setLean(true);
-            mix.setO1(true);
-            const size_t sizes[] = {16u, 100u, 128u, 129u, 1000u, 4096u, 4097u, 60000u, 65536u, 200000u};
-            for (size_t n : sizes)
-            {
-                std::vector<uint8_t> b(n, 0x11u);
-                mix.release(std::move(b));
-            }
-            size_t bytesBefore = mix.pooledBytes();
-            bool fits = true;
-            size_t hits = 0;
-            for (size_t n : {100u, 129u, 4097u, 16u, 65536u, 1000u, 300000u})
-            {
-                std::vector<uint8_t> b = mix.acquire(n);
-                if (!b.empty() || b.capacity() != 0u)
-                {
-                    ++hits;
-                    fits = fits && b.capacity() >= n;
-                    bytesBefore -= b.capacity();
-                }
-            }
-            t.IsTrue(fits, "every O(1) hit should have room for the request");
-            t.Equals(hits, static_cast<size_t>(6), "six of seven requests fit a pooled buffer (300000 is oversize)");
-            t.Equals(mix.pooledBytes(), bytesBefore, "pooled bytes should track acquires");
-            std::vector<uint8_t> w = mix.acquire(1u);
-            w.resize(8u);
-            for (size_t i = 0; i < 8u; ++i)
-                w[i] = static_cast<uint8_t>(i * 3u);
-            bool exact = true;
-            for (size_t i = 0; i < 8u; ++i)
-                exact = exact && w[i] == static_cast<uint8_t>(i * 3u);
-            t.IsTrue(exact, "a reused buffer should carry exactly the written bytes");
-            // Not lean: a full pool drops, as before.
-            GsPacketPool strict;
-            strict.setEnabled(true);
-            strict.setO1(true);
-            for (size_t i = 0; i < GsPacketPool::kMaxBuffers + 8u; ++i)
-            {
-                std::vector<uint8_t> b(64u, 0x5Au);
-                strict.release(std::move(b));
-            }
-            t.Equals(strict.pooledCount(), GsPacketPool::kMaxBuffers, "strict O(1) pool should stop at its cap");
-            std::vector<uint8_t> big(64u * 1024u, 0x33u);
-            strict.release(std::move(big));
-            t.IsTrue(strict.acquire(48u * 1024u).empty(), "strict O(1) pool should drop larger buffers when full");
-        });
-
         // MP1 L3: drain with the sort skip delivers exactly the stable-sorted
         // order on random path/flag mixes (1..5 packets per drain).
         tc.Run("MP1 L3 arbiter sort skip keeps the drain order", [](TestCase &t)
@@ -1835,78 +1454,6 @@ void register_ps2_gs_queue_tests()
                 run(false, seed, a);
                 run(true, seed, b);
                 t.IsTrue(!a.empty() && a == b, "sort skip should drain in the same order as the stable sort");
-            }
-        });
-
-        // MP2 zero-copy: submitOwned, the zero-copy submit fill, and the
-        // pooled submit all drain the same order and bytes as submit, over
-        // random path/flag mixes (1..5 packets per drain, IMAGE + DIRECTHL).
-        tc.Run("MP2 zero-copy arbiter paths match submit", [](TestCase &t)
-        {
-            auto run = [](int mode, uint64_t seed, std::vector<uint32_t> &order,
-                          std::vector<uint8_t> &stream)
-            {
-                // mode: 0 submit, 1 submit+zeroCopy, 2 submit+zeroCopy+pool,
-                // 3 submitOwned, 4 submitOwned+pool set (must not use it).
-                GsPacketPool pool;
-                pool.setEnabled(mode == 2 || mode == 4);
-                if (mode == 2 || mode == 4)
-                {
-                    for (int i = 0; i < 8; ++i)
-                    {
-                        std::vector<uint8_t> b(64u, 0xAAu);
-                        pool.release(std::move(b));
-                    }
-                }
-                GifArbiter arb([&](const uint8_t *data, uint32_t size)
-                               {
-                                   uint32_t id = 0;
-                                   std::memcpy(&id, data + 16, sizeof(id));
-                                   order.push_back(id);
-                                   stream.insert(stream.end(), data, data + size);
-                               });
-                arb.setSortSkip(true);
-                arb.setZeroCopy(mode == 1 || mode == 2);
-                if (mode == 2 || mode == 4)
-                    arb.setPacketPool(&pool);
-                uint64_t rng = seed;
-                uint32_t id = 0;
-                for (int round = 0; round < 200; ++round)
-                {
-                    rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-                    const int n = 1 + static_cast<int>(rng % 5u);
-                    for (int k = 0; k < n; ++k)
-                    {
-                        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-                        std::vector<uint8_t> pkt(32u, 0u);
-                        const GifPathId path = static_cast<GifPathId>(1u + rng % 3u);
-                        if (path == GifPathId::Path3 && (rng >> 8) % 2u == 0u)
-                            pkt[7] = 0x08u; // tag FLG=2 (IMAGE)
-                        std::memcpy(pkt.data() + 16, &id, sizeof(id));
-                        ++id;
-                        const bool hl = (rng >> 12) % 2u == 0u;
-                        if (mode >= 3)
-                            arb.submitOwned(path, std::move(pkt), hl);
-                        else
-                            arb.submit(path, pkt.data(), static_cast<uint32_t>(pkt.size()), hl);
-                    }
-                    arb.drain();
-                }
-            };
-            for (uint64_t seed : {0x9E3779B97F4A7C15ull, 0x1234567ull})
-            {
-                std::vector<uint32_t> base;
-                std::vector<uint8_t> baseStream;
-                run(0, seed, base, baseStream);
-                t.IsTrue(!base.empty(), "baseline drain should deliver packets");
-                for (int mode = 1; mode <= 4; ++mode)
-                {
-                    std::vector<uint32_t> order;
-                    std::vector<uint8_t> stream;
-                    run(mode, seed, order, stream);
-                    t.IsTrue(order == base, "zero-copy mode should drain the same order as submit");
-                    t.IsTrue(stream == baseStream, "zero-copy mode should drain the same bytes as submit");
-                }
             }
         });
 

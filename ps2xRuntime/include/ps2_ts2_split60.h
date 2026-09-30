@@ -12,8 +12,8 @@
 #include <unordered_map>
 
 // EE1P2: this header is the split120 product path and stays compiled in
-// release builds. Only the prediction skip/fallback counters are diagnostic
-// (read solely by the PS2X_TS2_GATE print); PS2X_ENABLE_TS2_DIAG gates them.
+// release builds. Only the TS3 case census is diagnostic; PS2X_ENABLE_TS2_DIAG
+// gates it.
 #ifndef PS2X_ENABLE_TS2_DIAG
 #define PS2X_ENABLE_TS2_DIAG 0
 #endif
@@ -63,8 +63,6 @@ struct State
     uint32_t guestThread = 0;
     bool guestInterrupt = false;
     uint64_t scopeErrors = 0;
-    uint64_t predictionSkips = 0;
-    uint64_t predictionFallbacks = 0;
     // Guest-thread-keyed records. Occupancy in practice is 1 (the main guest
     // thread runs the rider pass); the linear scan hits slot 0. Overflow
     // keeps exact map semantics past the flat slots; it is cold-only.
@@ -429,15 +427,7 @@ inline bool skipSecondHalfPrediction(const uint8_t *ram, R5900Context *ctx,
     std::memcpy(&front, &frontBits, 4);
     std::memcpy(&base, &baseBits, 4);
     if (front < base + ctx->f[22])
-    {
-#if PS2X_ENABLE_TS2_DIAG
-        ++s.predictionFallbacks;
-#endif
         return false;
-    }
-#if PS2X_ENABLE_TS2_DIAG
-    ++s.predictionSkips;
-#endif
     return true;
 }
 

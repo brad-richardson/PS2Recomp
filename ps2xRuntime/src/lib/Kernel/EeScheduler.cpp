@@ -11,7 +11,7 @@
 #include "runtime/ee_guest_unwind.h"
 #include "ps2_fpmode.h"
 #include "ps2_e41_trace.h"
-#include "ps2_ts2_observer.h"
+#include "ps2_ts2_split60.h"
 #include "ps2_ts2_split60.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_vsync_lock.h"
@@ -586,18 +586,12 @@ void EeScheduler::run()
     ps2_fpmode::ScopedEeMode eeFpMode;
     m_running.store(true, std::memory_order_release);
 #if PS2X_EE_SIGJMP
-    // GT3: mask save as plain setjmp does it on this libc, unless
-    // PS2X_EE_JMP_NOMASK=1 (default off) drops the per-arm syscall.
-    {
-        const char *noMask = std::getenv("PS2X_EE_JMP_NOMASK");
+    // GT3: mask save as plain setjmp does it on this libc.
 #if defined(__GLIBC__)
-        m_transferSaveMask = 0;
+    m_transferSaveMask = 0;
 #else
-        m_transferSaveMask = 1;
+    m_transferSaveMask = 1;
 #endif
-        if (noMask && std::strcmp(noMask, "1") == 0)
-            m_transferSaveMask = 0;
-    }
 #endif
     // PT2: cache the perf-log knob once (env is fixed before run()).
     // AD1: ADPF reuses this same accounting (no re-measure), so it turns the
@@ -1106,8 +1100,6 @@ void EeScheduler::run()
             try
             {
                 m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
-                ps2_ts2_observer::setThread(static_cast<uint32_t>(m_currentThreadId), m_insideInterrupt);
-                ps2_ts2_observer::setTick(m_vsyncTick);
                 ps2_ts2_split60::setThread(static_cast<uint32_t>(m_currentThreadId), m_insideInterrupt);
                 ps2_ts2_split60::finishIfContinuation(&context);
                 ps2_mpg_src_trace::noteSliceIrq(m_insideInterrupt);
@@ -3314,10 +3306,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         // GE2: guest-VSync command at every VBlank, after the CSR FIELD
         // update (queued behind its PrivWrite when the queue is on). No-op
         // unless an opted-in (external) backend is installed.
-        if (m_runtime.memory().orderedGsStatus() && ps2_mtvu::threaded())
-            m_runtime.memory().orderedGsFrameEnd(m_vsyncTick);
-        else
-            m_runtime.gs().noteGuestVsync(m_vsyncTick);
+        m_runtime.gs().noteGuestVsync(m_vsyncTick);
         writeGuestU32(m_vsyncFlagAddress, 1u);
         if (m_vsyncTickAddress != 0u)
         {

@@ -565,7 +565,7 @@ endif()
 # platforms, diag/det builds opt back in via the build scripts. The split120
 # product path (ps2_ts2_split60 rider-pass continuation) stays always-on
 # behind one runtime gate per hot path.
-option(PS2X_ENABLE_TS2_DIAG "Compile the TS2 observer/G2b diagnostic tracers" OFF)
+option(PS2X_ENABLE_TS2_DIAG "Compile the TS3 case census (PS2X_TS2_CASE_COUNT)" OFF)
 if(PS2X_ENABLE_TS2_DIAG)
     target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_TS2_DIAG=1)
 else()
@@ -630,13 +630,6 @@ elseif(PS2X_IS_IOS)
 elseif(PS2X_IS_ANDROID)
     # VK1 prototype: PS2X_PRESENT_VULKAN=1 (AHardwareBuffer + SurfaceControl).
     target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_present_vk_android.cpp)
-    # GE2: dev-only foreign-VkDevice present test (raw Vulkan, no Granite).
-    # Needs the parallel wiring's Vulkan headers; OFF builds get the header stub.
-    if(PS2X_GS_SHADOW_PARALLEL)
-        target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_foreign_present_test.cpp)
-        # The test reads raylib's android_app (window, activity) like ps2_runtime.cpp.
-        target_include_directories(ps2_gs_shadow PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
-    endif()
     target_link_libraries(ps2_gs_shadow PRIVATE android log)
 endif()
 target_include_directories(ps2_gs_shadow PUBLIC

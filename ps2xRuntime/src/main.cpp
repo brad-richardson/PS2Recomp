@@ -25,7 +25,6 @@
 #include <cstring>
 #include "runtime/gs/gs_replay_core.h" // N8D7M12 Part 2: dev-only on-device replay core
 #if defined(__ANDROID__)
-#include "runtime/gs/ps2_foreign_present_test.h" // GE2: dev-only foreign-VkDevice present test
 #endif
 #endif
 
@@ -359,22 +358,6 @@ int main(int argc, char *argv[])
             std::cerr << "Failed to initialize PS2 runtime" << std::endl;
             return 1;
         }
-
-#if defined(__ANDROID__)
-        // GE2: dev-only foreign-VkDevice present test (default off). After
-        // window init (the sink needs the real window) but before loadELF,
-        // so no game thread ever starts in test mode. Env arrives via the
-        // ps2x.env app-files shim, like the replay path above.
-        if (const char *foreignPresent = std::getenv("PS2X_GS_FOREIGN_PRESENT_TEST");
-            foreignPresent && std::strcmp(foreignPresent, "1") == 0)
-        {
-            const int foreignRc = ps2x_foreign_present_test_run();
-            std::cout.flush();
-            std::cerr.flush();
-            stopLogcatRedirect();
-            std::_Exit(foreignRc);
-        }
-#endif
 
         if (!runtime.loadELF(filePathStr))
         {

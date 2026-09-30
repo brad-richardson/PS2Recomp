@@ -571,8 +571,6 @@ static inline uint32_t gs_vram_offset(uint32_t basePage, uint32_t x, uint32_t y,
 PS2Memory::PS2Memory()
     : m_rdram(nullptr), m_scratchpad(nullptr), iop_ram(nullptr), m_seenGifCopy(false), m_gsVRAM(nullptr)
 {
-    const char *ordered = std::getenv("PS2X_GS_ORDERED_STATUS");
-    m_orderedGsStatus = ordered && std::strcmp(ordered, "1") == 0;
     // GE3 Part 3: EE-owned FINISH (default off; same opt-in as the GS side).
     if (const char *finishTiming = std::getenv("PS2X_GS_FINISH_TIMING"))
         m_finishTimingPcsx2 = std::strcmp(finishTiming, "pcsx2") == 0;
@@ -1365,42 +1363,6 @@ void PS2Memory::gsPrivSync()
         m_gsFrontend->drainQueue();
 }
 
-void PS2Memory::orderedGsCsrWrite(uint32_t width, uint64_t value)
-{
-    // The typed command joins the unit stream after every prior GIF packet.
-    // Its GS application publishes completion only after the CSR RMW. EE
-    // reads with a pending clear retire both queues before returning a value.
-    m_orderedCsrSubmitted.fetch_add(1u, std::memory_order_release);
-    ps2_mtvu::submit([this, width, value]()
-    { unitGsCall(2u, value, [this, width, value]()
-    {
-        auto apply = [this, width, value]()
-        {
-            if (width == 4u)
-                writeCsrHalf(gs_regs.csr, 0u, static_cast<uint32_t>(value));
-            else
-                writeCsrFull(gs_regs.csr, value);
-            m_orderedCsrCompleted.fetch_add(1u, std::memory_order_release);
-        };
-        if (m_gsFrontend)
-            m_gsFrontend->orderedCsrWrite(width, value, std::move(apply));
-        else
-            apply();
-    }); }, 64u, ps2_mtvu::currentFbrst());
-}
-
-void PS2Memory::orderedGsFrameEnd(uint64_t tick)
-{
-    // VBlank's existing LAG=1 fence bounds unit frame age. This marker stays
-    // behind frame N's unit jobs and ahead of N+1's in the same queue.
-    ps2_mtvu::submit([this, tick]()
-    { unitGsCall(3u, tick, [this, tick]()
-    {
-        if (m_gsFrontend)
-            m_gsFrontend->orderedFrameEnd(tick);
-    }); }, 32u, ps2_mtvu::currentFbrst());
-}
-
 void PS2Memory::write8(uint32_t address, uint8_t value)
 {
     const bool scratch = isScratchpad(address);
@@ -1506,11 +1468,6 @@ void PS2Memory::write32(uint32_t address, uint32_t value, uint32_t guestPc)
     {
         if (ps2_mtvu::threaded() && ((address - PS2_GS_PRIV_REG_BASE) & ~0x7u) == kGsCsrRegOffset)
         {
-            if (m_orderedGsStatus && (address & 7u) == 0u && value != 0u && (value & ~0x3u) == 0u)
-            {
-                orderedGsCsrWrite(4u, value);
-                return;
-            }
             // MT1 R2: CSR stores apply here. They leave the unit's bits 0-1
             // alone unless they W1C-clear them, which waits for the unit first.
             // GE3 Part 3: in EE-owned FINISH mode a FINISH-only W1C clear
@@ -1608,11 +1565,6 @@ void PS2Memory::write64(uint32_t address, uint64_t value, uint32_t guestPc)
     {
         if (ps2_mtvu::threaded() && ((address - PS2_GS_PRIV_REG_BASE) & ~0x7u) == kGsCsrRegOffset)
         {
-            if (m_orderedGsStatus && value != 0u && (value & ~0x3ull) == 0u)
-            {
-                orderedGsCsrWrite(8u, value);
-                return;
-            }
             // MT1 R2: as in write32 (GE3 Part 3 FINISH-only exemption included;
             // Part 6 opens the probe episode on the exempt clear).
             if ((value & 0x3u) != 0u)
@@ -2321,30 +2273,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                            ps2_rr1::alphaTapOn();
                     int32_t e40TagId = -1;
                     uint32_t e40TagAt = 0u;
-                    // HLE1 (PS2X_DMA_CHAIN_LEAN=1): with every per-tag tap
-                    // off (checked once here), plain-RDRAM tags and payloads
-                    // skip the generic address decode, and a TTE tag's upper
-                    // half joins its contiguous payload in one insert. The
-                    // appended bytes, their order and the registers written
-                    // back are the same; any tap on takes the full walk.
-                    const bool chainLean = m_dmaChainLean && !e40Record && !e40Ctag &&
-                                           !ps2_uv1_dma_stall::enabled() && !ps2_rr1::evOn() &&
-                                           !ps2_mpg_src_trace::enabled();
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
                     {
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
                         uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
                         const uint32_t total = bytes;
-                        // HLE1: below PS2_RAM_SIZE translateAddress is the
-                        // identity and nothing is scratchpad; a span that fits
-                        // is the loop's single chunk.
-                        if (chainLean && srcAddr < PS2_RAM_SIZE && bytes <= PS2_RAM_SIZE - srcAddr)
-                        {
-                            if (bytes > 0)
-                                chainBuf.insert(chainBuf.end(), m_rdram + srcAddr, m_rdram + srcAddr + bytes);
-                            return;
-                        }
                         const bool scratch = isScratchpad(srcAddr);
                         uint32_t src = 0;
                         src = translateAddress(srcAddr);
@@ -2393,19 +2327,15 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                     while (tagsProcessed < kMaxChainTags)
                     {
-                        const bool tagInRam = chainLean && tagAddr < PS2_RAM_SIZE; // HLE1: identity translate
-                        const bool tagInSPR = !tagInRam && isScratchpad(tagAddr);
-                        uint32_t physTag = tagAddr;
-                        if (!tagInRam)
+                        const bool tagInSPR = isScratchpad(tagAddr);
+                        uint32_t physTag = 0;
+                        try
                         {
-                            try
-                            {
-                                physTag = translateAddress(tagAddr);
-                            }
-                            catch (...)
-                            {
-                                break;
-                            }
+                            physTag = translateAddress(tagAddr);
+                        }
+                        catch (...)
+                        {
+                            break;
                         }
                         const uint8_t *tagBase;
                         uint32_t tagMax;
@@ -2434,9 +2364,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
                         // UV1: default-off REFS tag census.
-                        if (!chainLean)
-                            ps2_uv1_dma_stall::noteTag(e40Vsync, channelBase, id);
-                        if (!chainLean && channelBase == 0x1000A000u)
+                        ps2_uv1_dma_stall::noteTag(e40Vsync, channelBase, id);
+                        if (channelBase == 0x1000A000u)
                             ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "gif tag at=0x%x id=%u qwc=%u addr=0x%x irq=%d", curTagEE, id, tagQwc, addr, irq ? 1 : 0);
                         // E40 Part-4: tag dump for the first in-window kicks.
                         if (e40Ctag)
@@ -2519,7 +2448,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         // tags, log the tag site + REF addr and arm a write
                         // watch on the addr word when the tag qualifies
                         // (in-range addr, or an MPG found by bounded scan).
-                        if (!chainLean && channelBase == 0x10009000u &&
+                        if (channelBase == 0x10009000u &&
                             (id == 0u || id == 3u || id == 4u) &&
                             ps2_mpg_src_trace::enabled())
                         {
@@ -2577,18 +2506,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 span.tagAt = e40TagAt;
                                 e40Spans.push_back(span);
                             }
-                            // HLE1: data right behind an RDRAM tag (CNT/NEXT/
-                            // CALL/RET/END) is contiguous with the tag's upper
-                            // half: one insert covers both.
-                            const uint32_t payBytes = static_cast<uint32_t>(tagQwc) * 16u;
-                            if (tagInRam && hasPayload && dataAddr == curTagEE + 16u &&
-                                dataAddr < PS2_RAM_SIZE && payBytes <= PS2_RAM_SIZE - dataAddr)
-                            {
-                                chainBuf.insert(chainBuf.end(), tp + 8u, tp + 16u + payBytes);
-                                hasPayload = false;
-                            }
-                            else
-                                chainBuf.insert(chainBuf.end(), tp + 8u, tp + 16u);
+                            chainBuf.insert(chainBuf.end(), tp + 8u, tp + 16u);
                         }
 
                         if (hasPayload)
@@ -3159,12 +3077,7 @@ void PS2Memory::processPendingTransfers()
                 const uint32_t size = static_cast<uint32_t>(piece.bytes.size());
                 if (piece.gif)
                 {
-                    // MP2: the piece vector becomes the arbiter packet (no
-                    // copy); knob-off copies as before.
-                    if (m_gsZeroCopy)
-                        submitGifPacketOwned(GifPathId::Path3, std::move(piece.bytes), false);
-                    else
-                        submitGifPacket(GifPathId::Path3, piece.bytes.data(), size, false);
+                    submitGifPacket(GifPathId::Path3, piece.bytes.data(), size, false);
                 }
                 else
                     processVIF1Data(piece.bytes.data(), size);
@@ -3312,11 +3225,7 @@ void PS2Memory::releaseOneMaskedPath3Packet()
                        gs_regs.vsyncTick.load(std::memory_order_relaxed));
     if (m_gifArbiter)
     {
-        // MP2: the fifo vector becomes the arbiter packet (no copy).
-        if (m_gsZeroCopy)
-            arbSubmitOwned(GifPathId::Path3, std::move(packet), false);
-        else
-            arbSubmit(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()), false);
+        arbSubmit(GifPathId::Path3, packet.data(), static_cast<uint32_t>(packet.size()), false);
         arbDrain();
     }
     else if (m_gifPacketCallback)
@@ -3348,9 +3257,6 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
         return;
 
     ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "p3 flush packets=%zu", m_path3MaskedFifo.size());
-    // MP2: with an arbiter, each fifo vector becomes the arbiter packet (no
-    // copy); the no-arbiter callback and knob-off keep the copy path.
-    const bool owned = m_gsZeroCopy && m_gifArbiter != nullptr;
     auto emit = [&](const uint8_t *packetData, uint32_t packetSize)
     {
         if (m_gifArbiter)
@@ -3367,10 +3273,7 @@ void PS2Memory::flushMaskedPath3Packets(bool drainImmediately)
             ps2_pk::setBases(m_rdram, PS2_RAM_SIZE, m_scratchpad, PS2_SCRATCHPAD_SIZE);
             ps2_pk::noteSubmit("3", packet.data(), static_cast<uint32_t>(packet.size()),
                                gs_regs.vsyncTick.load(std::memory_order_relaxed));
-            if (owned)
-                arbSubmitOwned(GifPathId::Path3, std::move(packet), false);
-            else
-                emit(packet.data(), static_cast<uint32_t>(packet.size()));
+            emit(packet.data(), static_cast<uint32_t>(packet.size()));
         }
     }
     m_path3MaskedFifo.clear();
@@ -3386,7 +3289,7 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
         // VPL2: the bytes are copied here (the source may be the job's
         // stream); the MTVU thread makes this same call, in order.
         if (data && sizeBytes >= 16u)
-            vifStageGif(false, pathId, std::vector<uint8_t>(data, data + sizeBytes), drainImmediately, path2DirectHl);
+            vifStageGif(pathId, std::vector<uint8_t>(data, data + sizeBytes), drainImmediately, path2DirectHl);
         return;
     }
     ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
@@ -3430,57 +3333,6 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
         arbDrain();
 }
 
-void PS2Memory::submitGifPacketOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately, bool path2DirectHl)
-{
-    if (ps2_mtvu::vifStageDefer())
-    {
-        // VPL2: the vector moves into the record; the MTVU thread makes this call.
-        if (bytes.size() >= 16u)
-            vifStageGif(true, pathId, std::move(bytes), drainImmediately, path2DirectHl);
-        return;
-    }
-    ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
-    if (bytes.size() < 16)
-        return;
-
-    ps2_pk::setBases(m_rdram, PS2_RAM_SIZE, m_scratchpad, PS2_SCRATCHPAD_SIZE);
-
-    const uint32_t sizeBytes = static_cast<uint32_t>(bytes.size());
-    if (pathId == GifPathId::Path3)
-    {
-        ps2_e7::packet(gs_regs.vsyncTick.load(), m_path3Masked ? "path3-queue" : "path3-send", bytes.data(), sizeBytes, m_path3Masked, m_path3MaskedFifo.size());
-        ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "p3 %s bytes=%u queued=%zu", m_path3Masked ? "queue" : "send", sizeBytes, m_path3MaskedFifo.size());
-        if (m_path3Masked)
-        {
-            if (path3EopGateEnabled())
-            {
-                uint32_t start = 0u;
-                for (const uint32_t end : splitGifPacketsAtEop(bytes.data(), sizeBytes))
-                {
-                    m_path3MaskedFifo.emplace_back(bytes.data() + start, bytes.data() + end);
-                    start = end;
-                }
-            }
-            else
-            {
-                m_path3MaskedFifo.push_back(std::move(bytes));
-            }
-            return;
-        }
-        flushMaskedPath3Packets(false);
-    }
-
-    ps2_pk::noteSubmit(pathId == GifPathId::Path1 ? "1" : (pathId == GifPathId::Path2 ? "2" : "3"),
-                       bytes.data(), sizeBytes, gs_regs.vsyncTick.load(std::memory_order_relaxed));
-    if (m_gifArbiter)
-        arbSubmitOwned(pathId, std::move(bytes), path2DirectHl);
-    else if (m_gifPacketCallback)
-        m_gifPacketCallback(bytes.data(), sizeBytes);
-
-    if (m_gifArbiter && drainImmediately)
-        arbDrain();
-}
-
 void PS2Memory::arbSubmit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl)
 {
     if (ps2_mtvu::vifStageDefer()) // VPL2 net
@@ -3494,26 +3346,11 @@ void PS2Memory::arbSubmit(GifPathId pathId, const uint8_t *data, uint32_t sizeBy
         // the next job rewrites); the arbiter work moves.
         if (!data || sizeBytes < 16u)
             return;
-        ps2_mtvu::gifStageSubmit(static_cast<uint8_t>(pathId), path2DirectHl, false,
+        ps2_mtvu::gifStageSubmit(static_cast<uint8_t>(pathId), path2DirectHl,
                                  m_gifArbiter->copyForSubmit(data, sizeBytes));
         return;
     }
     m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl);
-}
-
-void PS2Memory::arbSubmitOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl)
-{
-    if (ps2_mtvu::vifStageDefer()) // VPL2 net
-    {
-        ps2_mtvu::vifStageEscape([&] { arbSubmitOwned(pathId, std::move(bytes), path2DirectHl); });
-        return;
-    }
-    if (ps2_mtvu::gifStageDefer())
-    {
-        ps2_mtvu::gifStageSubmit(static_cast<uint8_t>(pathId), path2DirectHl, true, std::move(bytes));
-        return;
-    }
-    m_gifArbiter->submitOwned(pathId, std::move(bytes), path2DirectHl);
 }
 
 void PS2Memory::arbDrain()
@@ -3559,14 +3396,14 @@ void PS2Memory::execGifStageOp(ps2_mtvu::GifOp &op)
         return;
     if (op.kind == ps2_mtvu::GifOp::Kind::Submit)
     {
-        m_gifArbiter->submitStaged(static_cast<GifPathId>(op.path), std::move(op.bytes), op.directHl, op.owned);
+        m_gifArbiter->submitStaged(static_cast<GifPathId>(op.path), std::move(op.bytes), op.directHl);
         return;
     }
     const GifDrainBatch batch(m_gsFrontend);
     m_gifArbiter->drain();
 }
 
-void PS2Memory::vifStageGif(bool owned, GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately,
+void PS2Memory::vifStageGif(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately,
                             bool path2DirectHl)
 {
     auto *heap = new std::vector<uint8_t>(std::move(bytes));
@@ -3574,7 +3411,7 @@ void PS2Memory::vifStageGif(bool owned, GifPathId pathId, std::vector<uint8_t> &
     std::memcpy(payload, &heap, sizeof(heap));
     const uint8_t f = static_cast<uint8_t>((static_cast<uint32_t>(pathId) & 3u) | (drainImmediately ? 4u : 0u) |
                                            (path2DirectHl ? 8u : 0u));
-    ps2_mtvu::vifStagePush(owned ? ps2_mtvu::VifRecKind::GifOwned : ps2_mtvu::VifRecKind::GifCopy, f, 0u, 0u, false,
+    ps2_mtvu::vifStagePush(ps2_mtvu::VifRecKind::GifCopy, f, 0u, 0u, false,
                            payload);
 }
 
@@ -3645,17 +3482,13 @@ void PS2Memory::execVifStageRec(void *opaque, const ps2_mtvu::VifRec &rec)
             m.m_vu1MscntCallback(rec.b & 0xFFFFu, rec.b >> 16);
         break;
     case K::GifCopy:
-    case K::GifOwned:
     {
         std::vector<uint8_t> *bytes = nullptr;
         std::memcpy(&bytes, payload, sizeof(bytes));
         const GifPathId path = static_cast<GifPathId>(rec.f & 3u);
         const bool drain = (rec.f & 4u) != 0u;
         const bool hl = (rec.f & 8u) != 0u;
-        if (rec.kind == K::GifOwned)
-            m.submitGifPacketOwned(path, std::move(*bytes), drain, hl);
-        else
-            m.submitGifPacket(path, bytes->data(), static_cast<uint32_t>(bytes->size()), drain, hl);
+        m.submitGifPacket(path, bytes->data(), static_cast<uint32_t>(bytes->size()), drain, hl);
         delete bytes;
         break;
     }

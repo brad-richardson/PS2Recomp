@@ -632,8 +632,8 @@ bool initialize()
     if (g_output.stretch)
     {
         const ps2_audio_stretch::Params params = ps2_audio_stretch::paramsFromEnv(
-            std::getenv("PS2X_STRETCH_LEGACY"), std::getenv("PS2X_STRETCH_LEAVE"),
-            std::getenv("PS2X_STRETCH_SUSTAIN_MS"), std::getenv("PS2X_STRETCH_REJOIN_MS"));
+            std::getenv("PS2X_STRETCH_LEAVE"), std::getenv("PS2X_STRETCH_SUSTAIN_MS"),
+            std::getenv("PS2X_STRETCH_REJOIN_MS"));
         g_output.controller = ps2_audio_stretch::StretchController(params);
         g_output.st = std::make_unique<soundtouch::SoundTouch>();
         g_output.st->setSampleRate(kSourceRate);
@@ -647,7 +647,7 @@ bool initialize()
         std::cerr << "[snd-output] stretch=on (SoundTouch " << soundtouch::SoundTouch::getVersionString()
                   << ", target=" << ps2_audio_stretch::kTargetLatencyMs << "ms tempo=["
                   << ps2_audio_stretch::kTempoMin << "," << ps2_audio_stretch::kTempoMax << "] "
-                  << (params.legacy ? "legacy AT1" : "sustained-deficit") << " leave=+/-"
+                  << "sustained-deficit leave=+/-"
                   << params.leave * 100.0 << "%/" << params.sustainS * 1000.0 << "ms rejoin=+/-"
                   << params.rejoin * 100.0 << "%/" << params.rejoinS * 1000.0 << "ms)\n";
         g_output.lockTempo = ps2_vsync_lock::enabled() &&

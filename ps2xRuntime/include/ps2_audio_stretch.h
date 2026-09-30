@@ -34,11 +34,8 @@
 //   the gate). At startup the ring is empty either way, so engaging there
 //   pads identically to bypass and converges faster once production starts.
 //
-// PS2X_STRETCH_LEGACY=1 restores the AT1 behavior (immediate engage outside
-// +/-2 %, immediate rejoin inside +/-1 %): it is the same code path with
-// sustain/rejoin dwells of 0. Dev-only escape hatch + the "today" reference
-// for A/B legs. PS2X_STRETCH_LEAVE / _SUSTAIN_MS / _REJOIN_MS override the
-// AU12 band and dwells (dev-only tuning; invalid values keep defaults).
+// PS2X_STRETCH_LEAVE / _SUSTAIN_MS / _REJOIN_MS override the AU12 band and
+// dwells (dev-only tuning; invalid values keep defaults).
 //
 // AU15: PS2X_VSYNC_LOCK_AUDIO=tempo (only with PS2X_VSYNC_LOCK=1). The lock
 // runs the guest at display refresh / guest rate (Odin: 121.7 / 119.88 =
@@ -84,9 +81,6 @@ constexpr uint32_t kTargetLatencyMs = 80u; // in the brief's 60-100 ms band
 constexpr uint32_t kTargetFrames = kSourceRate * kTargetLatencyMs / 1000u;
 constexpr float kTempoMin = 0.5f;
 constexpr float kTempoMax = 1.05f;
-// AT1 legacy band (PS2X_STRETCH_LEGACY=1): immediate engage/rejoin.
-constexpr float kLegacyLeave = 0.02f;  // engage outside +/-2 % of 1.0
-constexpr float kLegacyRejoin = 0.01f; // release inside +/-1 % of 1.0
 // AU12 sustained-deficit band (default): engage/rejoin need dwells.
 constexpr float kLeaveDefault = 0.035f;   // engage outside +/-3.5 %
 constexpr float kRejoinDefault = 0.01f;   // rejoin inside +/-1 %
@@ -148,7 +142,6 @@ size_t feedOnDemand(Stretcher &st, size_t queuedFrames, size_t needFrames, float
 
 struct Params
 {
-    bool legacy = false;
     float leave = kLeaveDefault;
     float rejoin = kRejoinDefault;
     double sustainS = kSustainDefaultS;
@@ -172,19 +165,9 @@ inline bool parseDouble(const char *text, double &out)
 
 // Pure env parsing (each arg is the getenv() result for the named knob;
 // nullptr = unset). Invalid values keep the compiled default.
-inline Params paramsFromEnv(const char *legacy, const char *leave, const char *sustainMs,
-                            const char *rejoinMs)
+inline Params paramsFromEnv(const char *leave, const char *sustainMs, const char *rejoinMs)
 {
     Params p;
-    if (legacy != nullptr && std::strcmp(legacy, "1") == 0)
-    {
-        p.legacy = true;
-        p.leave = kLegacyLeave;
-        p.rejoin = kLegacyRejoin;
-        p.sustainS = 0.0;
-        p.rejoinS = 0.0;
-        return p;
-    }
     double v = 0.0;
     if (detail::parseDouble(leave, v))
         p.leave = std::clamp(static_cast<float>(v), 0.005f, 0.15f);
@@ -260,8 +243,7 @@ public:
         m_base = 0.0f;
         if (m_bypass)
         {
-            // Legacy is the same path with sustainS == rejoinS == 0: the
-            // first step outside the band engages (AT1, bit for bit).
+            // With sustainS == 0 the first step outside the band engages.
             if (dev > m_params.leave)
             {
                 m_outsideS += dtPos;
