@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -156,6 +157,57 @@ struct Adsr
     }
 };
 
+// AU13: voice-layer interpolation between hist[1] and hist[2] (PS2X_SPU_INTERP).
+// gauss = the SPU2 hardware table (default, PCSX2's default); cubic = 4-point
+// Lagrange, hermite = Catmull-Rom, linear. Output-only: nothing the guest reads
+// depends on the sample values.
+enum class Interp { Gauss, Cubic, Hermite, Linear };
+
+inline const char *interpName(Interp i)
+{
+    switch (i)
+    {
+    case Interp::Cubic: return "cubic";
+    case Interp::Hermite: return "hermite";
+    case Interp::Linear: return "linear";
+    default: return "gauss";
+    }
+}
+
+inline Interp parseInterp(const char *p)
+{
+    if (p)
+    {
+        if (!std::strcmp(p, "cubic")) return Interp::Cubic;
+        if (!std::strcmp(p, "hermite")) return Interp::Hermite;
+        if (!std::strcmp(p, "linear")) return Interp::Linear;
+    }
+    return Interp::Gauss;
+}
+
+inline int32_t interpolate(Interp mode, const int16_t *h, uint32_t counter)
+{
+    if (mode == Interp::Gauss)
+    {
+        const auto &g = interpTable[(counter & 0x0ff0u) >> 4];
+        int32_t s = 0;
+        for (int k = 0; k < 4; ++k)
+            s += (g[k] * h[k]) >> 15;
+        return s;
+    }
+    const float t = static_cast<float>(counter & 0xfffu) * (1.0f / 4096.0f);
+    const float a = h[0], b = h[1], c = h[2], d = h[3];
+    float y;
+    if (mode == Interp::Linear)
+        y = b + (c - b) * t;
+    else if (mode == Interp::Hermite) // Catmull-Rom
+        y = b + 0.5f * t * (c - a + t * (2.0f * a - 5.0f * b + 4.0f * c - d + t * (3.0f * (b - c) + d - a)));
+    else // cubic: Lagrange through the four samples
+        y = a * (-t * (t - 1.0f) * (t - 2.0f) * (1.0f / 6.0f)) + b * ((t + 1.0f) * (t - 1.0f) * (t - 2.0f) * 0.5f) +
+            c * (-(t + 1.0f) * t * (t - 2.0f) * 0.5f) + d * ((t + 1.0f) * t * (t - 1.0f) * (1.0f / 6.0f));
+    return static_cast<int32_t>(std::lrintf(std::max(-32768.0f, std::min(32767.0f, y))));
+}
+
 struct Voice
 {
     uint32_t ssa = 0, lsa = 0, nax = 0; // byte addresses
@@ -272,6 +324,8 @@ public:
 
     // Mix `frames` 48 kHz frames of the dry voice outputs: core 0 = voices
     // 0-23, core 1 = voices 24-47 (SNDDRV's voice numbering).
+    Interp interp = Interp::Gauss; // AU13 PS2X_SPU_INTERP (not part of the save state)
+
     void render(int32_t *dry0, int32_t *dry1, uint32_t frames)
     {
         for (uint32_t i = 0; i < frames; ++i)
@@ -356,10 +410,7 @@ private:
                 vc.volR = vc.targetR;
             }
         }
-        const auto &g = interpTable[(vc.counter & 0x0ff0u) >> 4];
-        int32_t s = 0;
-        for (int k = 0; k < 4; ++k)
-            s += (g[k] * vc.hist[k]) >> 15;
+        const int32_t s = interpolate(interp, vc.hist, vc.counter);
         if (!vc.env.step())
         {
             stop(vc);
@@ -489,6 +540,74 @@ public:
 
 private:
     int32_t m_history = 0;
+};
+
+// AU13 PS2X_AUDIO_RESAMPLE=sinc: the same 384 -> 512 conversion (output j at
+// input position 0.75 j - 0.5) with a Kaiser-windowed sinc instead of the
+// driver's linear 3->4 model. Causal: the output is delayed by kHalf input
+// samples (0.44 ms at 36 kHz) so no lookahead into the next tick is needed.
+// The cutoff sits at 96.7 % of the source's 18 kHz Nyquist.
+class SincUpsampler34
+{
+    friend struct ::SndSavestate;
+
+public:
+    static constexpr int kHalf = 16;
+    SincUpsampler34()
+    {
+        const double pi = 3.14159265358979323846;
+        for (int phase = 0; phase < 4; ++phase)
+        {
+            double sum = 0.0;
+            double w[2 * kHalf];
+            for (int k = 0; k < 2 * kHalf; ++k)
+            {
+                const double x = (k - kHalf + 1) - phase / 4.0; // tap k: offset from floor(position)
+                const double fc = 0.9666;
+                const double sinc = x == 0.0 ? fc : std::sin(pi * x * fc) / (pi * x);
+                const double r = x / kHalf;
+                const double win = std::fabs(r) >= 1.0 ? 0.0 : bessel0(8.0 * std::sqrt(1.0 - r * r)) / bessel0(8.0);
+                w[k] = sinc * win;
+                sum += w[k];
+            }
+            for (int k = 0; k < 2 * kHalf; ++k)
+                m_kernel[phase][k] = static_cast<float>(w[k] / sum); // unity DC gain
+        }
+    }
+
+    void run(const int16_t *in, int32_t *out, size_t outStride)
+    {
+        int32_t buf[kHalf * 2 + kTag1Frames];
+        std::memcpy(buf, m_hist, sizeof(m_hist));
+        for (uint32_t i = 0; i < kTag1Frames; ++i)
+            buf[2 * kHalf + i] = in[i]; // current sample i sits at 2*kHalf + i
+        for (uint32_t j = 0; j < kTickFrames; ++j)
+        {
+            const int32_t q = 3 * static_cast<int32_t>(j) - 2 - 4 * kHalf; // quarter samples, delayed by kHalf
+            const int32_t i = q >= 0 ? q / 4 : -((-q + 3) / 4);            // floor
+            const float *kern = m_kernel[q - 4 * i];
+            float acc = 0.0f;
+            for (int k = 0; k < 2 * kHalf; ++k)
+                acc += kern[k] * static_cast<float>(buf[i + k - kHalf + 1 + 2 * kHalf]);
+            out[j * outStride] = static_cast<int32_t>(std::lrintf(std::max(-32768.0f, std::min(32767.0f, acc))));
+        }
+        std::memcpy(m_hist, buf + kTag1Frames, sizeof(m_hist));
+    }
+
+private:
+    static double bessel0(double x)
+    {
+        double sum = 1.0, term = 1.0;
+        for (int k = 1; k < 30; ++k)
+        {
+            term *= (x / (2.0 * k)) * (x / (2.0 * k));
+            sum += term;
+        }
+        return sum;
+    }
+
+    float m_kernel[4][2 * kHalf] = {};
+    int32_t m_hist[kHalf * 2] = {};
 };
 
 } // namespace ps2_snd_spu

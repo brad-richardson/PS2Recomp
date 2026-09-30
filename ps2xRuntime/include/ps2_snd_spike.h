@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdarg>
 
 #include <cstdint>
@@ -45,6 +46,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -93,6 +95,26 @@ struct State
     ps2_snd_spu::Spu spu;
     ps2_snd_spu::Driver driver;
     ps2_snd_spu::Upsampler34 upLeft, upRight;
+    // AU13: PS2X_AUDIO_RESAMPLE=sinc swaps the music upsampler (PS2X_SPU_INTERP sets spu.interp).
+    bool sinc = false;
+    ps2_snd_spu::SincUpsampler34 sincLeft, sincRight;
+    // AU13 dev-only PS2X_SND_VARIANTS_DIR: every interp x resample combination rendered
+    // side by side from the same guest inputs (48 kHz stereo s16 files + per-variant cost).
+    struct Variant
+    {
+        ps2_snd_spu::Interp interp = ps2_snd_spu::Interp::Gauss;
+        bool sinc = false;
+        ps2_snd_spu::Spu spu;
+        ps2_snd_spu::Driver driver;
+        ps2_snd_spu::Upsampler34 upL, upR;
+        ps2_snd_spu::SincUpsampler34 sL, sR;
+        FILE *out = nullptr;
+        FILE *musicOut = nullptr; // music path only (interp-independent)
+        FILE *voiceOut = nullptr; // voice layer only (resample-independent)
+        uint64_t musicNs = 0, voiceNs = 0, ticks = 0;
+    };
+    std::vector<std::unique_ptr<Variant>> variants;
+    std::string variantsDir;
 };
 
 struct Tag1PcmView
@@ -298,6 +320,28 @@ inline void initLocked(State &s)
         s.voices = false;
     if (const char *p = std::getenv("PS2X_SND_MIX_RAW"); p && *p)
         s.mixRaw = std::fopen(p, "wb");
+    s.spu.interp = ps2_snd_spu::parseInterp(std::getenv("PS2X_SPU_INTERP"));
+    if (const char *p = std::getenv("PS2X_AUDIO_RESAMPLE"); p && std::strcmp(p, "sinc") == 0)
+        s.sinc = true;
+    if (const char *d = std::getenv("PS2X_SND_VARIANTS_DIR"); d && *d)
+    {
+        s.variantsDir = d;
+        for (auto interp : {ps2_snd_spu::Interp::Gauss, ps2_snd_spu::Interp::Cubic, ps2_snd_spu::Interp::Hermite,
+                            ps2_snd_spu::Interp::Linear})
+            for (bool sinc : {false, true})
+            {
+                auto v = std::make_unique<State::Variant>();
+                v->interp = interp;
+                v->sinc = sinc;
+                v->spu.interp = interp;
+                const std::string base = s.variantsDir + "/" + ps2_snd_spu::interpName(interp) + "-" +
+                                         (sinc ? "sinc" : "snddrv");
+                v->out = std::fopen((base + ".s16").c_str(), "wb");
+                v->musicOut = std::fopen((base + ".music.s16").c_str(), "wb");
+                v->voiceOut = std::fopen((base + ".voice.s16").c_str(), "wb");
+                s.variants.push_back(std::move(v));
+            }
+    }
     s.enabled = true;
 }
 
@@ -447,6 +491,58 @@ inline void onSoundTick(uint8_t *rdram, uint64_t guestCycle, Queue &&queue)
                   (unsigned long long)s.driver.keyOns());
 }
 
+// AU13 dev-only: render every variant from the same inputs and time its two stages.
+inline void mixVariantsLocked(State &s, const int16_t *left, const int16_t *right, const uint8_t *tag3)
+{
+    using namespace ps2_snd_spu;
+    using Clock = std::chrono::steady_clock;
+    for (auto &vp : s.variants)
+    {
+        State::Variant &v = *vp;
+        int32_t music[2 * kTickFrames], dry0[2 * kTickFrames] = {}, dry1[2 * kTickFrames] = {};
+        const auto t0 = Clock::now();
+        if (v.sinc)
+        {
+            v.sL.run(left, music, 2);
+            v.sR.run(right, music + 1, 2);
+        }
+        else
+        {
+            v.upL.run(left, music, 2);
+            v.upR.run(right, music + 1, 2);
+        }
+        const auto t1 = Clock::now();
+        if (s.voices && tag3)
+        {
+            v.driver.update(tag3, v.spu);
+            v.spu.render(dry0, dry1, kTickFrames);
+        }
+        const auto t2 = Clock::now();
+        v.musicNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        v.voiceNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count());
+        ++v.ticks;
+        int16_t mix[2 * kTickFrames], mus[2 * kTickFrames], voc[2 * kTickFrames];
+        for (uint32_t i = 0; i < 2 * kTickFrames; ++i)
+        {
+            mus[i] = clamp16(music[i]);
+            voc[i] = clamp16(dry0[i] + dry1[i]);
+            mix[i] = clamp16(clamp16(music[i] + dry0[i]) + dry1[i]);
+        }
+        if (v.out) std::fwrite(mix, sizeof(mix), 1, v.out);
+        if (v.musicOut) std::fwrite(mus, sizeof(mus), 1, v.musicOut);
+        if (v.voiceOut) std::fwrite(voc, sizeof(voc), 1, v.voiceOut);
+        if ((v.ticks % 512u) == 0u)
+        {
+            if (v.out) std::fflush(v.out);
+            if (v.musicOut) std::fflush(v.musicOut);
+            if (v.voiceOut) std::fflush(v.voiceOut);
+            logLocked(s, "au13-variant %s-%s ticks=%llu music_us_per_tick=%.2f voice_us_per_tick=%.2f",
+                      interpName(v.interp), v.sinc ? "sinc" : "snddrv", (unsigned long long)v.ticks,
+                      v.musicNs / 1000.0 / v.ticks, v.voiceNs / 1000.0 / v.ticks);
+        }
+    }
+}
+
 // One sound tick: tag-3 voice updates, 512 frames of SPU voices, the tag-1
 // music upsampled 3->4 (block 1 = left, block 0 = right; AU8), mixed like the
 // SPU2 core chain (music into core 0 with its voices, core 1 voices added).
@@ -457,8 +553,18 @@ inline void mixTickLocked(State &s, const uint8_t *pcm, const uint8_t *tag3)
     std::memcpy(right, pcm, sizeof(right));
     std::memcpy(left, pcm + sizeof(right), sizeof(left));
     int32_t music[2 * kTickFrames], dry0[2 * kTickFrames] = {}, dry1[2 * kTickFrames] = {};
-    s.upLeft.run(left, music, 2);
-    s.upRight.run(right, music + 1, 2);
+    if (s.sinc)
+    {
+        s.sincLeft.run(left, music, 2);
+        s.sincRight.run(right, music + 1, 2);
+    }
+    else
+    {
+        s.upLeft.run(left, music, 2);
+        s.upRight.run(right, music + 1, 2);
+    }
+    if (!s.variants.empty())
+        mixVariantsLocked(s, left, right, tag3);
     if (s.voices && tag3)
     {
         s.driver.update(tag3, s.spu);
@@ -565,6 +671,8 @@ inline void onSendCmd(uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t cid,
                           (unsigned long long)vsync, spuDst, size);
             dumpLocked(s, name, it->second.data() + off, n);
             s.spu.writeRam(spuDst, it->second.data() + off, n);
+            for (auto &v : s.variants)
+                v->spu.writeRam(spuDst, it->second.data() + off, n);
         }
     }
     if (id != 0u && s.handler != 0u)
