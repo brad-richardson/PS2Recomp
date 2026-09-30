@@ -37,6 +37,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ps2_fh1
@@ -178,6 +179,53 @@ enum Fix : uint32_t
     // Bits 0-31 are all used (FH13): the next group needs a 64-bit mask.
 };
 
+// FH12 groups live in their own mask (the main mask's bits are taken). Same
+// PS2X_SSX3_FULL120_FIX string; "all" includes them; fixMask() accepts the names.
+enum : uint32_t
+{
+    kFix12Spin = 1u << 0,    // rotating objects (vtable 0x491220, update 0x346258): int degrees per update (class b, pickups)
+    kFix12Texanim = 1u << 1, // texture anims 0x352c70: UV scroll/rotation 0x35f7d0 + flipbook 0x35f410 per-update steps (class b)
+    kFix12Loops = 1u << 2,   // loop-timer controllers 0x341d48 (modes 0x341e48/0x341ec0/0x341f38): step baked at A.rate 60 (class b)
+    kFix12Recover = 1u << 3, // wipeout recovery bar decay 0x12cb68: +-1/240 per update (class b)
+    kFix12Pulse = 1u << 4,   // rider colour pulse 0x2e39d8: 2pi/60 per update (class b)
+    kFix12Crash = 1u << 5,   // wipeout body: motion solver 0x113648 fed a private 1/60 dt by 0x137750/0x1391a8 (class h)
+};
+
+inline uint32_t fh12Item(const std::string &item) noexcept
+{
+    if (item == "spin") return kFix12Spin;
+    if (item == "texanim") return kFix12Texanim;
+    if (item == "loops") return kFix12Loops;
+    if (item == "recover") return kFix12Recover;
+    if (item == "pulse") return kFix12Pulse;
+    if (item == "crash") return kFix12Crash;
+    return 0u;
+}
+
+inline uint32_t fixMask12() noexcept
+{
+    static const uint32_t mask = [] {
+        const char *v = std::getenv("PS2X_SSX3_FULL120_FIX");
+        if (!enabled() || !v || !*v)
+            return 0u;
+        const std::string s(v);
+        if (s == "all")
+            return kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse | kFix12Crash;
+        uint32_t m = 0u;
+        size_t at = 0u;
+        while (at <= s.size())
+        {
+            const size_t comma = s.find(',', at);
+            m |= fh12Item(s.substr(at, comma == std::string::npos ? std::string::npos : comma - at));
+            if (comma == std::string::npos)
+                break;
+            at = comma + 1u;
+        }
+        return m;
+    }();
+    return mask;
+}
+
 inline uint32_t fixMask() noexcept
 {
     static const uint32_t mask = [] {
@@ -228,6 +276,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "rclock") m |= kFixRclock;
             else if (item == "emitter") m |= kFixEmitter;
             else if (item == "fx") m |= kFixFx;
+            else if (fh12Item(item) != 0u) {} // FH12 mask (fixMask12)
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -520,6 +569,28 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
     for (const Word &w : words)
         if (w.fix == 0u || (mask & w.fix) != 0u)
             all.push_back(w);
+    // FH12 words (own mask). recover: the wipeout state 0x12cb68 decays the recovery bar P+0x2c0+0x70 by
+    // [0x49b914]/[0x49b918] (+-1/240, single readers 0x12cbc4/0x12cbdc) per update; a circle press adds
+    // 17*[0x49b928] once per press (edge: held 818 ms adds once, fh12-R1), so only the decay is halved.
+    // pulse: 0x2e39d8 advances the rider colour pulse angle P+0xb04 by 2pi*[0x49f6c0] (1/60, single
+    // reader 0x2e3a10) per update: 2 Hz at 120 (0x144acc4 +0.10472 -> +0.20944 rad per stock tick, fh12-L1/L2).
+    // crash: in a wipeout the rider body is advanced by the fixed-step motion solver 0x113648 (quantum and
+    // z_up already converted), but its callers pass the time to advance as a private 1/60: 0x137750
+    // (R+0x300 * [0x49be78], the case run in the Kick Doubt heat-1 wipeout) and 0x1391a8 ([0x49bef4],
+    // [0x49befc], same class, not seen live). Each is a single reader. At 120 the solver ran two quanta
+    // per update and the crashed rider fell and slid 2x (vz -31.67 per update; stock -31.67 per stock
+    // tick); with 1/120: -15.83 per update, position within stock per stock tick (fh12-C5/C6/C7).
+    const std::array<std::pair<uint32_t, Word>, 6> words12 = {{
+        {kFix12Crash, {0u, 0x49be78u, kSixtieth, kHundredTwentieth, "crash_dt_137754"}},
+        {kFix12Crash, {0u, 0x49bef4u, kSixtieth, kHundredTwentieth, "crash_dt_13940c"}},
+        {kFix12Crash, {0u, 0x49befcu, kSixtieth, kHundredTwentieth, "crash_dt_1394f4"}},
+        {kFix12Recover, {0u, 0x49b914u, 0x3b88a358u, 0x3b08a358u, "recover_decay_12cbc4"}},
+        {kFix12Recover, {0u, 0x49b918u, 0xbb88a358u, 0xbb08a358u, "recover_decay_12cbdc"}},
+        {kFix12Pulse, {0u, 0x49f6c0u, kSixtieth, kHundredTwentieth, "pulse_step_2e3a10"}},
+    }};
+    for (const auto &w : words12)
+        if ((fixMask12() & w.first) != 0u)
+            all.push_back(w.second);
     for (const Word &w : labWords())
         all.push_back(w);
     for (const Word &w : all)
@@ -1684,6 +1755,7 @@ inline bool flagsFix() noexcept
 struct PostCall
 {
     uint32_t target = 0u, sp = 0u, obj = 0u;
+    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step
     uint32_t saved[6] = {};
 };
 inline PostCall g_post;
@@ -1696,11 +1768,14 @@ inline void flagsPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
     g_post.target = targetPc;
     g_post.sp = getRegU32(ctx, 29);
     g_post.obj = getRegU32(ctx, 4);
+    g_post.kind = 0u;
     for (int i = 0; i < 6; ++i)
         if (!rd32(ram, g_post.obj + kFlagPhaseOffs[i], g_post.saved[i]))
             return;
     g_postArmed = true;
 }
+
+inline void fh12OnReturn(uint8_t *ram);
 
 inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned)
 {
@@ -1709,6 +1784,11 @@ inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool re
     g_postArmed = false;
     if (!returned)
         return;
+    if (g_post.kind != 0u)
+    {
+        fh12OnReturn(ram);
+        return;
+    }
     for (int i = 0; i < 6; ++i)
     {
         const uint32_t a = g_post.obj + kFlagPhaseOffs[i];
@@ -1729,6 +1809,175 @@ inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool re
         std::memcpy(&bits, &v, 4);
         wr32(ram, a, bits);
     }
+}
+
+// ---- FH12 hooks (own mask fixMask12; events only, like every hook) ---------
+// spin: the rotating-object class (ctor 0x3461c0, vtable 0x491220 at +8) updates through slot 0x49124c ->
+// 0x346258: angle +0x30 (degrees) += (float)(int)+0x2c per update, reset to 0 at +-360; the render
+// 0x3462a0 builds its matrix from +0x30. Kick Doubt has four live instances (steps +6, +5, -9, -9), each
+// 2.00x per stock second in events (Brad PB10/PB11: sky pickups spin too fast; fh12-P1/P2). Pre-hook:
+// +0x30 -= step/2, so the update advances half a step (integer steps keep the 360 reset exact).
+// texanim: the engine texture anim 0x352c70 calls 0x35f7d0 (time +0x4 += 1/rate is per time; rotation
+// +0x10 += +0x14 and, outside mode 6, UV scroll +0x30/+0x34 += +0x38/+0x3c wrapped at +-1, both per
+// update) and the flipbook 0x35f410 (phase +0x4 += +0x8, frame on wrap; mode 2 at entry means +0x8 =
+// 10/rate, per time; modes 0/1 are per update, mode 1 with the RNG flicker step). Post-call: the
+// 0x35f7d0 advances are halved (wrap undone first); pre-hook: the flipbook phase gives back half a step
+// unless mode 2. Kick Doubt: ~50 UV words 2.000x (fh12-L1/L2, writers 0x35fa70/74 in w1).
+// loops: loop-timer controllers (ctor 0x341aa0 bakes step +0x10 = r/30/A.rate at level load, A.rate 60;
+// update 0x341d48 -> mode steps 0x341e48 loop, 0x341ec0 ping-pong, 0x341f38 clamp on +0x1c in
+// [+0x14, +0x18], output +0x28). Post-call: the step is recomputed from the saved value with half the
+// saved step, same float order as the guest (ping-pong writes back +-step). 2.000x on Kick Doubt
+// (writers 0x341e6c/0x341e10, fh12-w1).
+inline constexpr uint32_t kSpinUpdate = 0x346258u;
+inline constexpr uint32_t kTexUv = 0x35f7d0u;
+inline constexpr uint32_t kTexFlip = 0x35f410u;
+inline constexpr uint32_t kLoopMode1 = 0x341e48u;
+inline constexpr uint32_t kLoopMode2 = 0x341ec0u;
+inline constexpr uint32_t kLoopMode3 = 0x341f38u;
+
+inline float rdf(const uint8_t *ram, uint32_t a) noexcept
+{
+    uint32_t b = 0u;
+    rd32(ram, a, b);
+    float f = 0.0f;
+    std::memcpy(&f, &b, 4);
+    return f;
+}
+
+inline void wrf(uint8_t *ram, uint32_t a, float f) noexcept
+{
+    uint32_t b = 0u;
+    std::memcpy(&b, &f, 4);
+    wr32(ram, a, b);
+}
+
+inline bool fh12Hooks() noexcept
+{
+    static const bool on = enabled() && (fixMask12() & (kFix12Spin | kFix12Texanim | kFix12Loops)) != 0u;
+    return on;
+}
+
+inline void fh12PreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
+{
+    if (!ctx || (targetPc != kSpinUpdate && targetPc != kTexUv && targetPc != kTexFlip &&
+                 targetPc != kLoopMode1 && targetPc != kLoopMode2 && targetPc != kLoopMode3))
+        return;
+    const uint32_t m = fixMask12();
+    const uint32_t o = getRegU32(ctx, 4);
+    uint32_t w = 0u;
+    if (targetPc == kSpinUpdate)
+    {
+        if ((m & kFix12Spin) == 0u || !rd32(ram, o + 0x2cu, w) || w == 0u)
+            return;
+        wrf(ram, o + 0x30u, rdf(ram, o + 0x30u) - static_cast<float>(static_cast<int32_t>(w)) * 0.5f);
+        return;
+    }
+    if (targetPc == kTexFlip)
+    {
+        const float step = rdf(ram, o + 0x8u);
+        if ((m & kFix12Texanim) == 0u || !rd32(ram, o, w) || w == 2u || !(step > 0.0f))
+            return;
+        wrf(ram, o + 0x4u, rdf(ram, o + 0x4u) - step * 0.5f);
+        return;
+    }
+    if (targetPc == kTexUv)
+    {
+        if ((m & kFix12Texanim) == 0u || !rd32(ram, o, w) || w == 6u)
+            return;
+        g_post.kind = 1u;
+        rd32(ram, o + 0x10u, g_post.saved[0]);
+        rd32(ram, o + 0x30u, g_post.saved[1]);
+        rd32(ram, o + 0x34u, g_post.saved[2]);
+    }
+    else
+    {
+        if ((m & kFix12Loops) == 0u)
+            return;
+        g_post.kind = 2u;
+        rd32(ram, o + 0x1cu, g_post.saved[0]);
+        rd32(ram, o + 0x10u, g_post.saved[1]);
+        g_post.saved[2] = targetPc;
+    }
+    g_post.target = targetPc;
+    g_post.sp = getRegU32(ctx, 29);
+    g_post.obj = o;
+    g_postArmed = true;
+}
+
+inline void fh12OnReturn(uint8_t *ram)
+{
+    const uint32_t o = g_post.obj;
+    auto bitsToF = [](uint32_t b) { float f = 0.0f; std::memcpy(&f, &b, 4); return f; };
+    if (g_post.kind == 1u)
+    {
+        const float r0 = bitsToF(g_post.saved[0]), r1 = rdf(ram, o + 0x10u);
+        if (r1 != r0)
+            wrf(ram, o + 0x10u, r0 + (r1 - r0) * 0.5f);
+        for (int i = 1; i <= 2; ++i)
+        {
+            const uint32_t a = o + (i == 1 ? 0x30u : 0x34u);
+            const float u0 = bitsToF(g_post.saved[i]), u1 = rdf(ram, a);
+            if (u1 == u0)
+                continue;
+            float d = u1 - u0;
+            if (d > 0.5f)
+                d -= 1.0f;
+            else if (d < -0.5f)
+                d += 1.0f;
+            float v = u0 + d * 0.5f;
+            if (v > 1.0f)
+                v -= 1.0f;
+            else if (v < -1.0f)
+                v += 1.0f;
+            wrf(ram, a, v);
+        }
+        return;
+    }
+    // kind 2: recompute the loop controller step with half the saved step.
+    const float v0 = bitsToF(g_post.saved[0]), s = bitsToF(g_post.saved[1]);
+    const float lo = rdf(ram, o + 0x14u), hi = rdf(ram, o + 0x18u);
+    const float h = s * 0.5f;
+    const float v = v0 + h;
+    float out = v, step = s;
+    if (g_post.saved[2] == kLoopMode1)
+    {
+        if (0.0f <= s)
+        {
+            if (hi < v)
+                out = lo + (v - hi);
+        }
+        else if (v < lo)
+            out = hi - (lo - v);
+    }
+    else if (g_post.saved[2] == kLoopMode2)
+    {
+        if (0.0f <= s)
+        {
+            if (hi < v)
+            {
+                step = -s;
+                out = hi - (v - hi);
+            }
+        }
+        else if (v < lo)
+        {
+            step = -s;
+            out = lo + (lo - v);
+        }
+        wrf(ram, o + 0x10u, step);
+    }
+    else
+    {
+        if (0.0f <= s)
+        {
+            if (hi < v)
+                out = hi;
+        }
+        else if (v < lo)
+            out = lo;
+    }
+    wrf(ram, o + 0x1cu, out);
+    wrf(ram, o + 0x28u, v);
 }
 
 // ---- FH10 lab tools (env-only, diagnostic) ----------------------------------
@@ -1973,7 +2222,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 // same order, same results (every flag below is fixed after its first read).
 struct BranchFlags
 {
-    bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock;
+    bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12;
     bool src, fh9, lab, draw, tap;
 };
 
@@ -1995,6 +2244,7 @@ inline const BranchFlags &branchFlags() noexcept
         r.lift = liftFix();
         r.flags = flagsFix();
         r.rclock = rclockFix();
+        r.fh12 = fh12Hooks();
         r.src = !srcWants().empty();
         r.fh9 = fh9Tap().r != 0u;
         r.lab = !labHooks("PS2X_FH1_HALF", true).empty() || !labHooks("PS2X_FH1_SKIP", false).empty();
@@ -2052,6 +2302,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         flagsPreHook(ram, ctx, targetPc);
     if (flag(&BranchFlags::rclock, rclockFix)) // also after exit: S keeps its frozen offset
         skip = rclockHook(ram, ctx, targetPc) || skip;
+    if (on && flag(&BranchFlags::fh12, fh12Hooks))
+        fh12PreHook(ram, ctx, targetPc);
     if (!Fast || bf->src)
         srcTap(ram, ctx, sourcePc, targetPc);
     if (!Fast || bf->fh9)
