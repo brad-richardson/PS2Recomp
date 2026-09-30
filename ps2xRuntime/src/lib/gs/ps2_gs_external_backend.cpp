@@ -14,6 +14,8 @@
 #endif
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
 #include "runtime/gs/ps2_present_share.h"
+#include "ps2_ios_runtime.h"
+#include "ps2_present_geometry.h"
 #include <IOSurface/IOSurfaceRef.h>
 #include <atomic>
 #include <mach/kern_return.h>
@@ -170,10 +172,9 @@ uint32_t fnv1a32(const uint8_t *data, size_t size, uint32_t hash = 2166136261u)
 // GI1: IOSurface slot pool for the async Metal export. Process-global: the
 // surfaces are retained for the process (like createSurface's pool) and the
 // completion handler may fire after the backend is destroyed, so the epoch
-// stales in-flight exports instead of freeing anything.
+// stales in-flight exports instead of freeing anything. IX1: the slots take
+// the backend's export size (640x480 unless PS2X_GE1_EXPORT_SIZE is set).
 constexpr int kIOSurfaceSlotCount = 3;
-constexpr uint32_t kIOSurfaceWidth = 640u;
-constexpr uint32_t kIOSurfaceHeight = 480u;
 
 struct IOSurfacePool
 {
@@ -216,8 +217,8 @@ void dumpIOSurface(void *surface, uint64_t tick)
         std::filesystem::create_directories(dir, ec);
     }
     IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
-    if (IOSurfaceGetWidth(ref) != kIOSurfaceWidth || IOSurfaceGetHeight(ref) != kIOSurfaceHeight)
-        return;
+    const uint32_t width = static_cast<uint32_t>(IOSurfaceGetWidth(ref));
+    const uint32_t height = static_cast<uint32_t>(IOSurfaceGetHeight(ref));
     if (IOSurfaceLock(ref, kIOSurfaceLockReadOnly, nullptr) != KERN_SUCCESS)
         return;
     if (!dumped2100 && tick >= 2100u)
@@ -230,12 +231,12 @@ void dumpIOSurface(void *surface, uint64_t tick)
     std::snprintf(path, sizeof(path), "%s/ge1-iosurface-t%llu.ppm", dir, (unsigned long long)tick);
     if (FILE *f = std::fopen(path, "wb"))
     {
-        std::fprintf(f, "P6\n%u %u\n255\n", kIOSurfaceWidth, kIOSurfaceHeight);
-        std::vector<uint8_t> row(static_cast<size_t>(kIOSurfaceWidth) * 3u);
-        for (uint32_t y = 0; y < kIOSurfaceHeight; ++y)
+        std::fprintf(f, "P6\n%u %u\n255\n", width, height);
+        std::vector<uint8_t> row(static_cast<size_t>(width) * 3u);
+        for (uint32_t y = 0; y < height; ++y)
         {
             const uint8_t *src = base + static_cast<size_t>(y) * rowBytes;
-            for (uint32_t x = 0; x < kIOSurfaceWidth; ++x)
+            for (uint32_t x = 0; x < width; ++x)
             {
                 row[static_cast<size_t>(x) * 3u + 0u] = src[static_cast<size_t>(x) * 4u + 2u];
                 row[static_cast<size_t>(x) * 3u + 1u] = src[static_cast<size_t>(x) * 4u + 1u];
@@ -262,7 +263,9 @@ void ioExportDone(void *rawCtx, int ok)
         {
             void *surface = pool.surfaces[ctx->slot];
             dumpIOSurface(surface, ctx->tick);
-            ps2x_present_share::publish({surface, kIOSurfaceWidth, kIOSurfaceHeight, ++pool.seq});
+            IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
+            ps2x_present_share::publish({surface, static_cast<uint32_t>(IOSurfaceGetWidth(ref)),
+                                         static_cast<uint32_t>(IOSurfaceGetHeight(ref)), ++pool.seq});
             static std::once_flag once;
             std::call_once(once, [tick = ctx->tick] {
                 std::fprintf(stderr, "[gs:external] GE1 IOSurface first publish tick=%llu\n",
@@ -369,7 +372,7 @@ public:
         m_vramSize = vramSize;
         if (const char *path = std::getenv("PS2X_GS_EXTERNAL_LIBRARY"); path && *path)
         {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(PS2X_GE1_STATIC_IOSURFACE)
             configureOutputSize();
 #endif
             if (!m_ge1.load(path) || !m_ge1.open(4))
@@ -1058,20 +1061,41 @@ private:
     }
 
     // UR1: the GE1 output size. The GS opens before raylib's window, so the
-    // panel size comes from the display itself (ps2x_present_vk::panelSize:
-    // Display.getRealSize, landscape). It is exported as GE1_DISPLAY_SIZE
-    // (unless set) so GE1_UPSCALE=native|halfnative resolves to panel height /
-    // 448. PS2X_GE1_EXPORT_SIZE=WxH|display sizes the AHBs GE1 draws into:
-    // display = the game rect on the panel (panel height x the present aspect),
-    // so GE1 does the one final scale (with PS2X_PRESENT_FILTER=sharp if set)
-    // and SurfaceFlinger composites 1:1. Unset = 640x480, SurfaceFlinger scales.
+    // panel size comes from the display itself (Android:
+    // ps2x_present_vk::panelSize, Display.getRealSize; IX1 iOS:
+    // ps2x::ios::panelSize, UIScreen.nativeBounds; both landscape). It is
+    // exported as GE1_DISPLAY_SIZE (unless set) so GE1_UPSCALE=native|halfnative
+    // resolves to its height / 448: the panel on Android (the Odin's 16:9 panel
+    // is the game rect), the game rect on iOS (the iPad's 1640 px panel height
+    // is not the 16:9 rect's 1328). PS2X_GE1_EXPORT_SIZE=WxH|display sizes the
+    // buffers GE1 draws into (Android AHBs, iOS IOSurfaces): display = the game
+    // rect on the panel (panel height x the present aspect), so GE1 does the
+    // one final scale (with PS2X_PRESENT_FILTER=sharp if set) and the
+    // compositor (SurfaceFlinger; iOS: the host draw) shows it 1:1. Unset =
+    // 640x480, the compositor scales.
     void configureOutputSize()
     {
         int pw = 0, ph = 0;
+#if defined(__ANDROID__)
         const bool panel = ps2x_present_vk::panelSize(pw, ph);
+#else
+        const bool panel = ps2x::ios::panelSize(pw, ph);
+#endif
+        ps2x::present::Rect game{0.0f, 0.0f, 0.0f, 0.0f};
+        if (panel)
+        {
+            const ps2x::present::Aspect aspect = ps2x::present::aspectFromEnv(
+                std::getenv("PS2X_ASPECT"), ps2x::present::ssx3WidescreenModeFromEnv(std::getenv("PS2X_WIDESCREEN")) != 0u);
+            game = ps2x::present::presentRect(static_cast<float>(pw), static_cast<float>(ph), 640.0f, 448.0f, aspect);
+        }
+        const unsigned gameW = static_cast<unsigned>(game.w + 0.5f), gameH = static_cast<unsigned>(game.h + 0.5f);
         if (panel && !std::getenv("GE1_DISPLAY_SIZE"))
         {
+#if defined(__ANDROID__)
             const std::string v = std::to_string(pw) + "x" + std::to_string(ph);
+#else
+            const std::string v = std::to_string(gameW) + "x" + std::to_string(gameH);
+#endif
             setenv("GE1_DISPLAY_SIZE", v.c_str(), 0);
         }
         const char *size = std::getenv("PS2X_GE1_EXPORT_SIZE");
@@ -1080,15 +1104,8 @@ private:
         unsigned w = 0, h = 0;
         if (std::strcmp(size, "display") == 0)
         {
-            if (panel)
-            {
-                const ps2x::present::Aspect aspect = ps2x::present::aspectFromEnv(
-                    std::getenv("PS2X_ASPECT"), ps2x::present::ssx3WidescreenModeFromEnv(std::getenv("PS2X_WIDESCREEN")) != 0u);
-                const ps2x::present::Rect r = ps2x::present::presentRect(static_cast<float>(pw), static_cast<float>(ph),
-                                                                        640.0f, 448.0f, aspect);
-                w = static_cast<unsigned>(r.w + 0.5f);
-                h = static_cast<unsigned>(r.h + 0.5f);
-            }
+            w = gameW;
+            h = gameH;
         }
         else if (std::sscanf(size, "%ux%u", &w, &h) != 2)
         {
@@ -1099,6 +1116,12 @@ private:
             m_exportW = w;
             m_exportH = h;
         }
+        // IX1: GE1 keeps PCSX2's auto 4:3 unless a UR1 knob is set, and would
+        // pillarbox a 4:3 picture inside a 16:9 export. Any UR1 knob switches it
+        // to Stretch (the runtime owns the aspect); GE1_SNAPSHOT_SIZE=640x480
+        // is the one that changes nothing else (the snapshot default size).
+        if ((m_exportW != 640u || m_exportH != 480u) && !std::getenv("GE1_SNAPSHOT_SIZE"))
+            setenv("GE1_SNAPSHOT_SIZE", "640x480", 0);
         std::fprintf(stderr, "[gs:external] UR1 panel=%dx%d GE1_DISPLAY_SIZE=%s export=%ux%u (PS2X_GE1_EXPORT_SIZE=%s)\n",
                      pw, ph, std::getenv("GE1_DISPLAY_SIZE") ? std::getenv("GE1_DISPLAY_SIZE") : "unset", m_exportW,
                      m_exportH, size);
@@ -1285,8 +1308,12 @@ private:
         uint64_t epoch = 0u;
         {
             std::lock_guard<std::mutex> lock(pool.mutex);
-            if (!pool.surfaces[slot])
-                pool.surfaces[slot] = ps2x_present_share::createSurface(kIOSurfaceWidth, kIOSurfaceHeight);
+            // IX1: a slot made at another size (an earlier backend) is replaced;
+            // createSurface keeps the old one alive for the process.
+            if (!pool.surfaces[slot] ||
+                IOSurfaceGetWidth(static_cast<IOSurfaceRef>(pool.surfaces[slot])) != m_exportW ||
+                IOSurfaceGetHeight(static_cast<IOSurfaceRef>(pool.surfaces[slot])) != m_exportH)
+                pool.surfaces[slot] = ps2x_present_share::createSurface(m_exportW, m_exportH);
             surface = pool.surfaces[slot];
             epoch = pool.epoch;
         }
@@ -1297,7 +1324,7 @@ private:
         }
         std::unique_ptr<IOSurfaceExportCtx> ctx(new IOSurfaceExportCtx{epoch, slot, tick});
         const int rc =
-            m_ge1.exportIOSurface(surface, kIOSurfaceWidth, kIOSurfaceHeight, &ioExportDone, ctx.get());
+            m_ge1.exportIOSurface(surface, m_exportW, m_exportH, &ioExportDone, ctx.get());
         if (rc != 1)
         {
             pool.busy[slot].store(false);
@@ -1362,11 +1389,12 @@ private:
     uint32_t m_vramSize = 0u;
     Ge1Api m_ge1;
     bool m_ge1Active = false;
+    // UR1/IX1: GE1 export size (Android AHBs, iOS IOSurfaces), PS2X_GE1_EXPORT_SIZE
+    // (default 640x480 = today).
+    uint32_t m_exportW = 640u, m_exportH = 480u;
 #if defined(__ANDROID__)
     std::array<AhbSlot, 4> m_ahbSlots{};
     uint32_t m_ahbEpoch = 0u;
-    // UR1: GE1 export (AHB) size, PS2X_GE1_EXPORT_SIZE (default 640x480 = today).
-    uint32_t m_exportW = 640u, m_exportH = 480u;
     int m_ahbStart = 0;
     int m_pendingAhb = -1;
     bool m_perVsyncLive = false; // FH6: GuestVsync presents (latch no longer exports)

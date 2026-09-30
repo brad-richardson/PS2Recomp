@@ -5880,7 +5880,19 @@ void PS2Runtime::run()
             // halve it, DK1); GLES2 has no swizzle, so blend off for this quad.
             rlDrawRenderBatchActive();
             rlDisableColorBlend();
-            DrawTexturePro(g_hr1ShareTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            // IX1: a display-sized export (PS2X_GE1_EXPORT_SIZE=display) is the
+            // game rect in drawable pixels, give or take rounding; draw it 1:1
+            // on whole pixels (no resample) instead of rescaling by a fraction.
+            Rectangle shareDst = dstRect;
+            if (dpiScale > 0.0f && std::fabs(pr.w * dpiScale - srcWidth) <= 2.0f &&
+                std::fabs(pr.h * dpiScale - srcHeight) <= 2.0f)
+            {
+                const float renderW = screenWidth * dpiScale, renderH = screenHeight * dpiScale;
+                shareDst = Rectangle{std::floor((renderW - srcWidth) * 0.5f) / dpiScale,
+                                     std::floor((renderH - srcHeight) * 0.5f) / dpiScale, srcWidth / dpiScale,
+                                     srcHeight / dpiScale};
+            }
+            DrawTexturePro(g_hr1ShareTex, srcRect, shareDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
             rlDrawRenderBatchActive();
             rlEnableColorBlend();
         }

@@ -25,6 +25,10 @@ void syncWindowSize();
 // CADisableMinimumFrameDurationOnPhone), logs UIScreen.maximumFramesPerSecond.
 // Inert on a 60 Hz panel. Call once on the main thread after InitWindow.
 void requestDisplayRate(int hz);
+// IX1: the panel's size in physical pixels, landscape (width >= height), from
+// UIScreen.nativeBounds. Cached by prepareEnvironment (main thread), so it is
+// callable from any thread before the window exists. False if never cached.
+bool panelSize(int &w, int &h);
 // I26: current touches from SDL's finger state, normalised 0..1 to the
 // window (x right, y down). Returns how many were written (<= max).
 // VT1: IDs are SDL finger IDs (stable per touch until lift-off).

@@ -13,6 +13,7 @@
 #import <QuartzCore/QuartzCore.h>
 #include <CoreFoundation/CoreFoundation.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -166,6 +167,31 @@ void prepareEnvironment(const char *argv0)
 
     SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    int pw = 0, ph = 0;
+    panelSize(pw, ph); // IX1: cache it on the main thread (the GS opens on its worker)
+}
+
+bool panelSize(int &w, int &h)
+{
+    // IX1: UIScreen.nativeBounds is the panel in physical pixels, portrait-up
+    // whatever the orientation; the app is landscape-only, so the long side
+    // is the width. Read once on the main thread (prepareEnvironment) and
+    // cached, so the GS worker can ask before the window exists.
+    static int s_w = 0, s_h = 0;
+    if (s_w <= 0 && [NSThread isMainThread])
+    {
+        const CGRect native = UIScreen.mainScreen.nativeBounds;
+        const int a = static_cast<int>(native.size.width + 0.5), b = static_cast<int>(native.size.height + 0.5);
+        s_w = std::max(a, b);
+        s_h = std::min(a, b);
+        std::fprintf(stderr, "[ios-display] panel %dx%d (nativeScale %.2f)\n", s_w, s_h,
+                     static_cast<double>(UIScreen.mainScreen.nativeScale));
+    }
+    if (s_w <= 0 || s_h <= 0)
+        return false;
+    w = s_w;
+    h = s_h;
+    return true;
 }
 
 void syncWindowSize()
