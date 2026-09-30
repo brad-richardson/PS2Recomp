@@ -1284,10 +1284,12 @@ inline bool rclockHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 {
     if (targetPc != kRenderFrameGet || !ctx)
         return false;
+    const bool on = hooksOn();
+    if (!on && !g_rcActive && g_rcOffset == 0)
+        return false; // before the first entry the getter runs as in stock
     uint32_t c = 0u;
     if (!rd32(ram, getRegU32(ctx, 4) + kRenderFrameOff, c))
         return false;
-    const bool on = hooksOn();
     const uint64_t h = rcHalfNow();
     if (on && !g_rcActive)
     {
