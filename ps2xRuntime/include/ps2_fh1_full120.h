@@ -1182,9 +1182,11 @@ inline bool drawHook(R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 // PS2X_FH1_SRC=tgt[:a0][,...] (hex; diagnostic, any mode): print the source
 // pc, a0-a3 and f0/f1/f12/f20/f21 of calls to tgt (optionally only with that
 // a0), 2000 lines max.
-inline void srcTap(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+struct SrcWant { uint32_t tgt, a0; bool anyA0; };
+
+inline const std::vector<SrcWant> &srcWants()
 {
-    struct Want { uint32_t tgt, a0; bool anyA0; };
+    using Want = SrcWant;
     static const std::vector<Want> wants = [] {
         std::vector<Want> v;
         const char *p = std::getenv("PS2X_FH1_SRC");
@@ -1203,10 +1205,16 @@ inline void srcTap(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t 
         }
         return v;
     }();
+    return wants;
+}
+
+inline void srcTap(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    const std::vector<SrcWant> &wants = srcWants();
     if (wants.empty() || !ctx)
         return;
     static uint32_t lines = 0u;
-    for (const Want &w : wants)
+    for (const SrcWant &w : wants)
         if (w.tgt == targetPc && (w.anyA0 || getRegU32(ctx, 4) == w.a0) && lines < 2000u)
         {
             ++lines;
@@ -1453,41 +1461,97 @@ inline void fh9OnVBlank(uint64_t tick)
     t.lines = lines;
 }
 
-inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+// GT3: onBranch runs on every dispatched guest branch. Its predicates are
+// function-local statics, each an out-of-line guarded call (Odin All-Peak
+// full-120: onBranch ~10 % of GameThread cycles, nearly all predicate calls).
+// PS2X_SSX3_FULL120_FASTHOOKS=1 (default off) reads them from one struct
+// computed at the first branch; off keeps the original calls. Same hooks,
+// same order, same results (every flag below is fixed after its first read).
+struct BranchFlags
 {
-    if (mode() == Mode::Always && sourcePc == kHookSite && !g_patched)
+    bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift;
+    bool src, fh9, lab, draw, tap;
+};
+
+inline const BranchFlags &branchFlags() noexcept
+{
+    static const BranchFlags f = [] {
+        BranchFlags r{};
+        r.always = mode() == Mode::Always;
+        r.events = mode() == Mode::Events;
+        r.clock = clockFix();
+        r.raceClock = raceClockFix();
+        r.launch = launchFix();
+        r.session = sessionFix();
+        r.rng = rngFix();
+        r.trick = trickFix();
+        r.aiGate = aiGateFix();
+        r.parity = r.rng || r.trick || r.aiGate;
+        r.bonus = bonusFix();
+        r.lift = liftFix();
+        r.src = !srcWants().empty();
+        r.fh9 = fh9Tap().r != 0u;
+        r.lab = !labHooks("PS2X_FH1_HALF", true).empty() || !labHooks("PS2X_FH1_SKIP", false).empty();
+        r.draw = drawLimit();
+        r.tap = tap().on;
+        return r;
+    }();
+    return f;
+}
+
+inline bool fastHooks() noexcept
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_SSX3_FULL120_FASTHOOKS");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    return on;
+}
+
+template <bool Fast>
+inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    // GT3: Fast reads the once-computed flags; !Fast makes the original calls
+    // in the original order. Every flag is fixed after its first read.
+    const BranchFlags *const bf = Fast ? &branchFlags() : nullptr;
+    const auto flag = [bf](bool BranchFlags::*m, bool (*fn)()) { return Fast ? bf->*m : fn(); };
+    if ((Fast ? bf->always : mode() == Mode::Always) && sourcePc == kHookSite && !g_patched)
     {
         g_patched = true;
         patchAtManagerInit(ram);
     }
-    if (mode() == Mode::Events)
+    if (Fast ? bf->events : mode() == Mode::Events)
         eventsOnBranch(ram, ctx, sourcePc, targetPc);
-    const bool on = hooksOn();
-    if (on && clockFix())
+    const bool on = Fast ? (bf->always || (bf->events && g_guestActive)) : hooksOn();
+    if (on && flag(&BranchFlags::clock, clockFix))
         clockPreHook(ram, targetPc);
-    if (on && raceClockFix())
+    if (on && flag(&BranchFlags::raceClock, raceClockFix))
         raceClockPreHook(ram, ctx, sourcePc, targetPc);
-    if (on && launchFix())
+    if (on && flag(&BranchFlags::launch, launchFix))
         launchPreHook(ram, ctx, targetPc);
-    bool skip = on && sessionFix() && sessionSkip(sourcePc, targetPc);
-    if (on && (rngFix() || trickFix() || aiGateFix()))
+    bool skip = on && flag(&BranchFlags::session, sessionFix) && sessionSkip(sourcePc, targetPc);
+    if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix())))
         parityHook(ram, sourcePc);
-    if (on && rngFix())
+    if (on && flag(&BranchFlags::rng, rngFix))
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
-    if (on && trickFix() && g_rngOdd && sourcePc == kComboSite && targetPc == kComboAccrue)
+    if (on && flag(&BranchFlags::trick, trickFix) && g_rngOdd && sourcePc == kComboSite && targetPc == kComboAccrue)
         skip = true;
-    if (on && aiGateFix())
+    if (on && flag(&BranchFlags::aiGate, aiGateFix))
         skip = aiGateHook(ctx, sourcePc, targetPc) || skip;
-    if (on && bonusFix())
+    if (on && flag(&BranchFlags::bonus, bonusFix))
         bonusHook(ram, ctx, sourcePc, targetPc);
-    if (on && liftFix())
+    if (on && flag(&BranchFlags::lift, liftFix))
         liftHook(ctx, sourcePc, targetPc);
-    srcTap(ram, ctx, sourcePc, targetPc);
-    fh9OnBranch(ram, ctx, sourcePc, targetPc, skip);
-    if (on)
+    if (!Fast || bf->src)
+        srcTap(ram, ctx, sourcePc, targetPc);
+    if (!Fast || bf->fh9)
+        fh9OnBranch(ram, ctx, sourcePc, targetPc, skip);
+    if (on && (!Fast || bf->lab))
         skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
-    const bool drawSkip = on && drawLimit() && !skip && drawHook(ctx, sourcePc, targetPc);
+    const bool drawSkip = on && flag(&BranchFlags::draw, drawLimit) && !skip && drawHook(ctx, sourcePc, targetPc);
     skip = skip || drawSkip;
+    if (Fast && !bf->tap)
+        return skip;
     Tap &t = tap();
     if (!t.on)
         return skip;
@@ -1504,6 +1568,13 @@ inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_
                     t.args[i][r] = getRegU32(ctx, 4 + r);
         }
     return skip;
+}
+
+// Out of line as before, so dispatchGuestBranch keeps its shape (and its PGO
+// profile match).
+__attribute__((noinline)) inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    return fastHooks() ? onBranchT<true>(ram, ctx, sourcePc, targetPc) : onBranchT<false>(ram, ctx, sourcePc, targetPc);
 }
 
 // ---- Per-VBlank frame capture (PS2X_FH1_SEQ=dir, PS2X_FH1_SEQ_TICKS=a-b[,c-d]) --
