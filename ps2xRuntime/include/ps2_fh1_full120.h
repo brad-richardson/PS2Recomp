@@ -170,6 +170,7 @@ enum Fix : uint32_t
     kFixReset = 1u << 24,    // course-reset fade state 9 (0x12f398): ramp step 1/40 per update -> 1/80 (class b, FH10)
     kFixMeter = 1u << 25,    // HUD boost meter fill (0x117fe0 messages 5/6): display step 1/60 -> 1/120 per update (class b, FH10)
     kFixBoost = 1u << 26,    // boost/uber machine 0x1200d0: private dt + one-step thresholds 1/60 -> 1/120 (class h, FH10)
+    kFixGround = 1u << 27,   // ground adhesion 0x13c878: per-update pull toward the snow while above it, halved (class b, FV1)
 };
 
 inline uint32_t fixMask() noexcept
@@ -183,7 +184,7 @@ inline uint32_t fixMask() noexcept
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
                    kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim |
                    kFixBonus | kFixAiGate | kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset |
-                   kFixMeter | kFixBoost; // kFixLift is opt-in (FH8: no window where it binds)
+                   kFixMeter | kFixBoost | kFixGround; // kFixLift is opt-in (FH8: no window where it binds)
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -216,6 +217,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "reset") m |= kFixReset;
             else if (item == "meter") m |= kFixMeter;
             else if (item == "boost") m |= kFixBoost;
+            else if (item == "ground") m |= kFixGround;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -295,7 +297,7 @@ inline std::vector<Word> labWords();
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
-    const std::array<Word, 98> words = {{
+    const std::array<Word, 99> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -467,6 +469,14 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFixBoost, 0x49b798u, kSixtieth, kHundredTwentieth, "boost_dt_1200d4"},
         {kFixBoost, 0x49b79cu, kSixtieth, kHundredTwentieth, "boost_step_120124"},
         {kFixBoost, 0x49b7a0u, kSixtieth, kHundredTwentieth, "uber_step_1201d8"},
+        // FV1 ground: the ground handler 0x13d818 gets its normal force from 0x13c878(h = R+0x454, the
+        // rider's height above the snow). While above it (h > 0) the pull back down is h * [0x49c008]
+        // (-0.033333, single reader 0x13c88c) scaled by the rider table, applied once per update: at 120
+        // the rider was pulled down twice per stock frame and stayed on the slope over crests (All-Peak
+        // straight run, crest at 7.6 s: stock airborne at 4824, events at 4860 with |v| held at the
+        // ground cap 2083, 0.14 s lost). Halved: airborne at 4823, lag <= 0.03 s and distance within
+        // 0.6 % through 10.5 s (fv1-s2/s3, lab word fv1-w1).
+        {kFixGround, 0x49c008u, 0xbd08882fu, 0xbc88882fu, "ground_pull_13c88c"},
     }};
     uint32_t mask = fixMask();
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
