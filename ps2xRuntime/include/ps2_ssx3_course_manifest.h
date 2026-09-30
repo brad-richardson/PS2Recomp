@@ -7,9 +7,6 @@
 //              +52 SDB location code[16], +68 world archive[16] ("BAM")
 //   topology   0x442488, 23 x 40 B: +0 index, +8 sky, +12 TRANSP, +16 location-table id
 //   discipline 0x442820, 23 x 8 B:  +0 index, +4 discipline
-//   nav nodes  (.rodata, 108 B): race 0x4781D0 [3][4], freestyle 0x4786E0 [3][5],
-//              freeride 0x478D38 [3][8]; +0 event, +4 type (7 = DONOTUSE padding),
-//              +0x14 label[30]
 // Applied once after the ELF is in RAM and before the EE runs. It first
 // checks all 69 row-index words (row i starts with i in each table) and
 // refuses the whole manifest on any mismatch, so another executable is never
@@ -21,12 +18,15 @@
 //   name (<= 31 printable ASCII), short/code/archive (<= 15), location
 //   (0-49), discipline (1 station/debug, 2 race, 3 slopestyle, 4 big air,
 //   5 halfpipe, 6 backcountry), sky / transp (-1 none, 0-49: topology +8 /
-//   +12), node = <race|freestyle|freeride>:<peak>:<slot>:<template slot>
-//   (TK6: turns one DONOTUSE padding node into a menu entry for this event:
-//   the node becomes a copy of the same peak's template node with +0 = this
-//   event). Strings are NUL-padded to the field width. A node target that is
-//   not DONOTUSE (event 23, type 7), or a template that is, refuses the whole
-//   manifest before anything is written.
+//   +12). Strings are NUL-padded to the field width.
+//   picker = <location 0-49>:<name> (TK7, repeatable, <= 7 per block, one
+//   block per manifest): extra courses for this event's slot. See the picker
+//   section below; inert unless PS2X_SSX3_COURSE_PICKER=1.
+// `node` (TK6's DONOTUSE nav-node writer) is refused: the padding slots have
+// no menu widget, so the menu aborts at Select Peak (TK6 p1/p2). The nav
+// tables for a later menu-row lane: race 0x4781D0 [3][4], freestyle 0x4786E0
+// [3][5], freeride 0x478D38 [3][8] (108 B nodes: +0 event, +4 type, 7 =
+// DONOTUSE padding, +0x14 label[30]).
 // The world archive's BIGF members must be named data/worlds/<archive>.*
 // (the path builder 0x22F6B0 derives member names from the archive field).
 //
@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -53,16 +54,7 @@ inline constexpr uint32_t kDiscBase = 0x442820u;
 inline constexpr uint32_t kDiscStride = 8u;
 inline constexpr uint32_t kRows = 23u;
 inline constexpr uint32_t kRamSize = 32u * 1024u * 1024u;
-inline constexpr uint32_t kNodeSize = 0x6Cu;
-
-struct NodeTable
-{
-    const char *key;
-    uint32_t base, peakStride, slots;
-};
-inline constexpr NodeTable kNodeTables[] = {
-    {"race", 0x4781D0u, 0x1B0u, 4u}, {"freestyle", 0x4786E0u, 0x21Cu, 5u}, {"freeride", 0x478D38u, 0x360u, 8u}};
-inline constexpr uint32_t kPeaks = 3u;
+inline constexpr size_t kPickerMax = 7u;
 
 struct StringField
 {
@@ -72,6 +64,12 @@ struct StringField
 };
 inline constexpr StringField kStringFields[] = {
     {"name", 4u, 32u}, {"short", 36u, 16u}, {"code", 52u, 16u}, {"archive", 68u, 16u}};
+
+struct PickerEntry
+{
+    int32_t location = 0;
+    std::string name;
+};
 
 struct Block
 {
@@ -86,52 +84,8 @@ struct Block
     int32_t sky = 0;
     bool hasTransp = false;
     int32_t transp = 0;
-    bool hasNode = false;
-    uint32_t nodeTable = 0, nodePeak = 0, nodeSlot = 0, nodeTemplate = 0;
+    std::vector<PickerEntry> picker;
 };
-
-inline bool parseInt(const std::string &v, int lo, int hi, int32_t &out);
-
-inline uint32_t nodeAddr(uint32_t table, uint32_t peak, uint32_t slot)
-{
-    const NodeTable &t = kNodeTables[table];
-    return t.base + peak * t.peakStride + slot * kNodeSize;
-}
-
-// "<table>:<peak>:<slot>:<template slot>", peak 0-2, slots within the table.
-inline bool parseNode(const std::string &v, Block &b)
-{
-    const size_t c1 = v.find(':');
-    if (c1 == std::string::npos)
-        return false;
-    const std::string name = v.substr(0, c1);
-    uint32_t table = 0;
-    for (; table < 3u; ++table)
-        if (name == kNodeTables[table].key)
-            break;
-    if (table == 3u)
-        return false;
-    int32_t nums[3] = {0, 0, 0};
-    size_t pos = c1 + 1;
-    for (int i = 0; i < 3; ++i)
-    {
-        const size_t c = v.find(':', pos);
-        if ((i < 2) != (c != std::string::npos))
-            return false;
-        const std::string part = v.substr(pos, c == std::string::npos ? std::string::npos : c - pos);
-        const int hi = i == 0 ? static_cast<int>(kPeaks) - 1 : static_cast<int>(kNodeTables[table].slots) - 1;
-        if (!parseInt(part, 0, hi, nums[i]))
-            return false;
-        pos = c + 1;
-    }
-    if (nums[1] == nums[2])
-        return false;
-    b.nodeTable = table;
-    b.nodePeak = static_cast<uint32_t>(nums[0]);
-    b.nodeSlot = static_cast<uint32_t>(nums[1]);
-    b.nodeTemplate = static_cast<uint32_t>(nums[2]);
-    return true;
-}
 
 inline std::string trim(const std::string &s)
 {
@@ -155,6 +109,16 @@ inline bool parseInt(const std::string &v, int lo, int hi, int32_t &out)
     return true;
 }
 
+inline bool printableName(const std::string &v, size_t maxLen)
+{
+    if (v.empty() || v.size() > maxLen)
+        return false;
+    for (char c : v)
+        if (c < 0x20 || c > 0x7E)
+            return false;
+    return true;
+}
+
 // Returns false with `err` set (line number + reason) on any malformed input.
 inline bool parse(const std::string &text, std::vector<Block> &out, std::string &err)
 {
@@ -170,7 +134,7 @@ inline bool parse(const std::string &text, std::vector<Block> &out, std::string 
     auto blockEmpty = [](const Block &b)
     {
         return !(b.has[0] || b.has[1] || b.has[2] || b.has[3] || b.hasLocation || b.hasDiscipline || b.hasSky ||
-                 b.hasTransp || b.hasNode);
+                 b.hasTransp || !b.picker.empty());
     };
     while (std::getline(in, raw))
     {
@@ -210,11 +174,9 @@ inline bool parse(const std::string &text, std::vector<Block> &out, std::string 
             known = true;
             if (b.has[i])
                 return fail("'" + key + "' twice in one block");
-            if (val.empty() || val.size() > kStringFields[i].width - 1u)
-                return fail("'" + key + "' must be 1-" + std::to_string(kStringFields[i].width - 1u) + " bytes");
-            for (char c : val)
-                if (c < 0x20 || c > 0x7E)
-                    return fail("'" + key + "' must be printable ASCII");
+            if (!printableName(val, kStringFields[i].width - 1u))
+                return fail("'" + key + "' must be 1-" + std::to_string(kStringFields[i].width - 1u) +
+                            " printable ASCII bytes");
             b.has[i] = true;
             b.str[i] = val;
         }
@@ -246,17 +208,28 @@ inline bool parse(const std::string &text, std::vector<Block> &out, std::string 
                 return fail("'" + key + "' must be -1-49");
             has = true;
         }
+        else if (key == "picker")
+        {
+            for (const Block &o : out)
+                if (&o != &b && !o.picker.empty())
+                    return fail("picker entries in two event blocks (one picker slot per manifest)");
+            if (b.picker.size() >= kPickerMax)
+                return fail("at most " + std::to_string(kPickerMax) + " picker entries");
+            const size_t colon = val.find(':');
+            PickerEntry e;
+            if (colon == std::string::npos || !parseInt(trim(val.substr(0, colon)), 0, 49, e.location))
+                return fail("picker must be <location 0-49>:<name>");
+            e.name = trim(val.substr(colon + 1));
+            if (!printableName(e.name, kStringFields[0].width - 1u))
+                return fail("picker name must be 1-31 printable ASCII bytes");
+            for (const PickerEntry &o : b.picker)
+                if (o.location == e.location)
+                    return fail("picker location " + std::to_string(e.location) + " listed twice");
+            b.picker.push_back(e);
+        }
         else if (key == "node")
         {
-            if (b.hasNode)
-                return fail("'node' twice in one block");
-            if (!parseNode(val, b))
-                return fail("node must be <race|freestyle|freeride>:<peak 0-2>:<slot>:<template slot>, slots differ");
-            for (const Block &o : out)
-                if (&o != &b && o.hasNode && o.nodeTable == b.nodeTable && o.nodePeak == b.nodePeak &&
-                    o.nodeSlot == b.nodeSlot)
-                    return fail("node " + val + " targeted twice");
-            b.hasNode = true;
+            return fail("'node' is not supported (TK6: DONOTUSE nav slots have no menu widget; the menu aborts)");
         }
         else
         {
@@ -291,6 +264,12 @@ inline std::string rdStr(const uint8_t *ram, uint32_t addr, uint32_t width)
     return s;
 }
 
+inline void wrStr(uint8_t *ram, uint32_t addr, uint32_t width, const std::string &v)
+{
+    std::memset(ram + addr, 0, width);
+    std::memcpy(ram + addr, v.data(), v.size());
+}
+
 // Checks the 69 row-index words. Returns the number of mismatches; the first
 // one goes to `err`.
 inline uint32_t verifyTables(const uint8_t *ram, std::string &err)
@@ -322,38 +301,9 @@ inline uint32_t verifyTables(const uint8_t *ram, std::string &err)
     return bad;
 }
 
-// Checks every node target (DONOTUSE: event 23, type 7) and template (a real
-// node). Returns false with `err` set on the first failure.
-inline bool verifyNodes(const uint8_t *ram, const std::vector<Block> &blocks, std::string &err)
-{
-    char buf[160];
-    for (const Block &b : blocks)
-    {
-        if (!b.hasNode)
-            continue;
-        const uint32_t dst = nodeAddr(b.nodeTable, b.nodePeak, b.nodeSlot);
-        const uint32_t tpl = nodeAddr(b.nodeTable, b.nodePeak, b.nodeTemplate);
-        if (rd32(ram, dst) != 23u || rd32(ram, dst + 4u) != 7u)
-        {
-            std::snprintf(buf, sizeof(buf), "node target 0x%06x is not DONOTUSE (event %u, type %u)", dst,
-                          rd32(ram, dst), rd32(ram, dst + 4u));
-            err = buf;
-            return false;
-        }
-        if (rd32(ram, tpl) >= kRows || rd32(ram, tpl + 4u) == 7u)
-        {
-            std::snprintf(buf, sizeof(buf), "node template 0x%06x is not a real node (event %u, type %u)", tpl,
-                          rd32(ram, tpl), rd32(ram, tpl + 4u));
-            err = buf;
-            return false;
-        }
-    }
-    return true;
-}
-
 // Applies verified blocks. `log` receives one line per write. Returns the
-// number of writes, or -1 when the tables or node targets fail verification
-// (nothing written).
+// number of writes, or -1 when the tables fail verification (nothing
+// written). Picker entries write nothing here (see armPicker).
 template <typename Log>
 inline int apply(uint8_t *ram, const std::vector<Block> &blocks, Log &&log)
 {
@@ -362,11 +312,6 @@ inline int apply(uint8_t *ram, const std::vector<Block> &blocks, Log &&log)
     if (bad != 0u)
     {
         log("refused: " + std::to_string(bad) + " of 69 row-index words differ (" + err + "); nothing written");
-        return -1;
-    }
-    if (!verifyNodes(ram, blocks, err))
-    {
-        log("refused: " + err + "; nothing written");
         return -1;
     }
     int writes = 0;
@@ -381,8 +326,7 @@ inline int apply(uint8_t *ram, const std::vector<Block> &blocks, Log &&log)
             const StringField &f = kStringFields[i];
             const uint32_t addr = rec + f.offset;
             const std::string old = rdStr(ram, addr, f.width);
-            std::memset(ram + addr, 0, f.width);
-            std::memcpy(ram + addr, b.str[i].data(), b.str[i].size());
+            wrStr(ram, addr, f.width, b.str[i]);
             std::snprintf(buf, sizeof(buf), "event %d %s at 0x%06x: \"%s\" -> \"%s\"", b.event, f.key, addr,
                           old.c_str(), b.str[i].c_str());
             log(buf);
@@ -420,23 +364,202 @@ inline int apply(uint8_t *ram, const std::vector<Block> &blocks, Log &&log)
             log(buf);
             ++writes;
         }
-        if (b.hasNode)
-        {
-            const uint32_t dst = nodeAddr(b.nodeTable, b.nodePeak, b.nodeSlot);
-            const uint32_t tpl = nodeAddr(b.nodeTable, b.nodePeak, b.nodeTemplate);
-            const std::string oldLabel = rdStr(ram, dst + 0x14u, 30u);
-            const uint32_t tplEvent = rd32(ram, tpl);
-            std::memmove(ram + dst, ram + tpl, kNodeSize);
-            const uint32_t ev = static_cast<uint32_t>(b.event);
-            std::memcpy(ram + dst, &ev, 4);
-            std::snprintf(buf, sizeof(buf), "event %d node %s peak %u slot %u at 0x%06x: \"%s\" -> copy of slot %u (event %u) with event %d",
-                          b.event, kNodeTables[b.nodeTable].key, b.nodePeak, b.nodeSlot, dst, oldLabel.c_str(),
-                          b.nodeTemplate, tplEvent, b.event);
-            log(buf);
-            ++writes;
-        }
     }
     return writes;
+}
+
+// ---- Course picker (TK7; PS2X_SSX3_COURSE_PICKER=1, default off) ----------
+// One event's slot cycles through a list of courses from the menus: entry 0
+// is the row as the manifest left it (e.g. Snow Jam, ARA1), then the
+// manifest's `picker` entries (e.g. 49:Garibaldi, the added `dbg` location).
+// Each switch rewrites two RAM fields of that event: the name (event +4)
+// and the topology location (+16, read by event_load_locations 0x22D088
+// when the event loads; the launch maps the menu's event id +0x5C to the row
+// at 0x302398). Sky/TRANSP and the connector list stay the event's own.
+// Where the name shows (TK7 proof1/proof2): the event intro card
+// ("Garibaldi - Race") reads the row live; the Select Event list copies the
+// names when the frontend is built (boot, or after Quit to title), so the
+// list shows a pick only from the next frontend build. The status line /
+// Android toast (the caller) shows it at once.
+//
+// Input: L3+R3 pressed together (edge) with SELECT up, read from the pad
+// buffer the guest gets from scePadRead (port 0), so a pad script drives it
+// deterministically. DS1 owns SELECT+L3/R3; the stock game ignores L3+R3 at
+// Select Event (TK7 e1). While the chord is held the picker hides L3+R3
+// from the guest.
+//
+// Safe point: no event is live and nothing is loading.
+//   - Live event: the app-update dispatch (0x3171B4, `jalr` through
+//     [[[0x4A5B64]] + 0x34]; 0x4A5B64 = gp+0x2A74 -> the app manager A,
+//     [A] = the current app object) targets the game update 0x2306B8 in an
+//     event, pause included, and never in the frontend or after "Quit to
+//     title" (FH1 tap upd counts, TK7 e5). The rider pointer [0x53FF4C] is
+//     no signal: it stays set after a quit (TK7 e5).
+//   - Loading: no ELF location slot (0x442168, 50 x 16 B, +8 state) is in
+//     state 8 (load requested; TK5 d1).
+// Outside that the chord is refused and logged, so a running or loading
+// event never sees its row change.
+//
+// The current entry is derived from RAM (the event's topology location) on
+// every press, so a savestate load keeps the picker consistent.
+inline constexpr uint32_t kAppMgrPtr = 0x4A5B64u;
+inline constexpr uint32_t kAppUpdateSlot = 0x34u; // app vtable: update function
+inline constexpr uint32_t kGameUpdate = 0x2306B8u;
+inline constexpr uint32_t kSlotBase = 0x442168u;
+inline constexpr uint32_t kSlotStride = 16u;
+inline constexpr uint32_t kSlots = 50u;
+inline constexpr uint32_t kSlotRequested = 8u;
+inline constexpr uint16_t kBtnSelect = 1u << 0; // active-low pad word (data[2] | data[3] << 8)
+inline constexpr uint16_t kBtnL3 = 1u << 1;
+inline constexpr uint16_t kBtnR3 = 1u << 2;
+
+struct Picker
+{
+    bool armed = false;
+    int event = -1;
+    std::vector<PickerEntry> entries; // [0] = the event's row after apply
+    bool chordWas = false;
+};
+
+inline Picker &picker()
+{
+    static Picker p;
+    return p;
+}
+
+inline bool pickerKnob()
+{
+    const char *v = std::getenv("PS2X_SSX3_COURSE_PICKER");
+    return v && std::strcmp(v, "1") == 0;
+}
+
+// Arms `p` from applied blocks: entry 0 is read back from RAM. Returns false
+// (and leaves `p` disarmed) when no block has picker entries.
+template <typename Log>
+inline bool armPicker(Picker &p, const uint8_t *ram, const std::vector<Block> &blocks, Log &&log)
+{
+    p = Picker{};
+    for (const Block &b : blocks)
+    {
+        if (b.picker.empty())
+            continue;
+        PickerEntry stock;
+        stock.location =
+            static_cast<int32_t>(rd32(ram, kTopoBase + static_cast<uint32_t>(b.event) * kTopoStride + 16u));
+        stock.name = rdStr(ram, kEventBase + static_cast<uint32_t>(b.event) * kEventStride + 4u, 32u);
+        p.entries.push_back(stock);
+        for (const PickerEntry &e : b.picker)
+        {
+            if (e.location == stock.location)
+            {
+                log("picker: entry " + std::to_string(e.location) + ":" + e.name +
+                    " repeats the row's own location; skipped");
+                continue;
+            }
+            p.entries.push_back(e);
+        }
+        if (p.entries.size() < 2u)
+        {
+            p = Picker{};
+            return false;
+        }
+        p.event = b.event;
+        p.armed = true;
+        std::string list;
+        for (const PickerEntry &e : p.entries)
+            list += (list.empty() ? "" : ", ") + std::to_string(e.location) + ":" + e.name;
+        log("picker: armed on event " + std::to_string(b.event) + " [" + list + "], chord L3+R3 in the menus");
+        return true;
+    }
+    return false;
+}
+
+// Guest pointer -> RAM offset (KSEG bits dropped); 0 when null, unaligned
+// or out of RAM.
+inline uint32_t guestPtr(const uint8_t *ram, uint32_t addr)
+{
+    const uint32_t v = rd32(ram, addr) & 0x1FFFFFFFu;
+    return (v == 0u || (v & 3u) || v > kRamSize - 4u) ? 0u : v;
+}
+
+// The current app's update function (0 when the chain is not set up yet).
+inline uint32_t appUpdateFn(const uint8_t *ram)
+{
+    const uint32_t mgr = guestPtr(ram, kAppMgrPtr);
+    const uint32_t app = mgr ? guestPtr(ram, mgr) : 0u;
+    const uint32_t vt = app ? guestPtr(ram, app) : 0u;
+    return vt && vt + kAppUpdateSlot <= kRamSize - 4u ? rd32(ram, vt + kAppUpdateSlot) : 0u;
+}
+
+// Why a switch is unsafe right now, or empty when it is safe.
+inline std::string pickerBlocked(const uint8_t *ram)
+{
+    char buf[96];
+    if (appUpdateFn(ram) == kGameUpdate)
+        return "an event is live";
+    for (uint32_t i = 0; i < kSlots; ++i)
+        if (rd32(ram, kSlotBase + i * kSlotStride + 8u) == kSlotRequested)
+        {
+            std::snprintf(buf, sizeof(buf), "location %u is loading", i);
+            return buf;
+        }
+    return {};
+}
+
+// Moves the event's slot to the next entry. Returns the entry index now in
+// RAM, or -1 (nothing written) when blocked; `msg` gets the status line.
+inline int pickerNext(Picker &p, uint8_t *ram, std::string &msg)
+{
+    const uint32_t topo = kTopoBase + static_cast<uint32_t>(p.event) * kTopoStride + 16u;
+    const uint32_t name = kEventBase + static_cast<uint32_t>(p.event) * kEventStride + 4u;
+    const std::string why = pickerBlocked(ram);
+    if (!why.empty())
+    {
+        msg = "course picker: not now, " + why;
+        return -1;
+    }
+    const int32_t cur = static_cast<int32_t>(rd32(ram, topo));
+    size_t idx = 0;
+    for (size_t i = 0; i < p.entries.size(); ++i)
+        if (p.entries[i].location == cur)
+            idx = i;
+    const size_t next = (idx + 1u) % p.entries.size();
+    const PickerEntry &e = p.entries[next];
+    std::memcpy(ram + topo, &e.location, 4);
+    wrStr(ram, name, 32u, e.name);
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "course picker: event %d -> %s (location %d -> %d)", p.event, e.name.c_str(), cur,
+                  e.location);
+    msg = buf;
+    return static_cast<int>(next);
+}
+
+// Called for every guest scePadRead (port 0) with the 32-byte pad buffer
+// the guest receives. `vsyncTick` only labels the log line. Returns true
+// with `status` set when the chord fired (the caller shows it: status line
+// + Android toast via ps2_savestate::noteQuickStatus).
+inline bool pickerOnPadRead(uint8_t *ram, uint8_t *pad, uint64_t vsyncTick, std::string &status)
+{
+    Picker &p = picker();
+    if (!p.armed || !ram || !pad) // armed is set once in loadELF, before the EE runs
+        return false;
+    static std::mutex mu; // pad reads come from the EE thread; the lock only guards chordWas
+    std::lock_guard<std::mutex> lock(mu);
+    const uint16_t buttons = static_cast<uint16_t>(pad[2] | (pad[3] << 8));
+    const bool chord = (buttons & (kBtnL3 | kBtnR3)) == 0u && (buttons & kBtnSelect) != 0u;
+    const bool fired = chord && !p.chordWas;
+    if (fired)
+    {
+        std::string msg;
+        const int idx = pickerNext(p, ram, msg);
+        std::fprintf(stderr, "[ssx3-course] tick=%llu %s\n", static_cast<unsigned long long>(vsyncTick),
+                     msg.c_str());
+        status = idx >= 0 ? "Course: " + p.entries[static_cast<size_t>(idx)].name : msg;
+    }
+    p.chordWas = chord;
+    if (chord)
+        pad[2] = static_cast<uint8_t>(pad[2] | kBtnL3 | kBtnR3);
+    return fired;
 }
 
 // Runtime entry: called once from loadELF. Unset or empty knob = no-op.
@@ -463,8 +586,20 @@ inline void applyFromEnv(uint8_t *ram)
     }
     log(std::string("applying ") + path);
     const int n = apply(ram, blocks, log);
-    if (n >= 0)
-        log("applied " + std::to_string(n) + " writes in " + std::to_string(blocks.size()) + " event blocks");
+    if (n < 0)
+        return;
+    log("applied " + std::to_string(n) + " writes in " + std::to_string(blocks.size()) + " event blocks");
+    bool hasPicker = false;
+    for (const Block &b : blocks)
+        hasPicker = hasPicker || !b.picker.empty();
+    if (!hasPicker)
+        return;
+    if (!pickerKnob())
+    {
+        log("picker: entries ignored (PS2X_SSX3_COURSE_PICKER is not 1)");
+        return;
+    }
+    armPicker(picker(), ram, blocks, log);
 }
 
 } // namespace ps2_ssx3_course

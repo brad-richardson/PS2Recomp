@@ -6,6 +6,8 @@
 #include "ps2_e44_trace.h"
 #include "ps2_pad_latch.h"
 #include "ps2_record_env.h"
+#include "ps2_ssx3_course_manifest.h"
+#include "runtime/ps2_savestate.h"
 #include "Pad.h"
 
 #include <algorithm>
@@ -2208,6 +2210,15 @@ namespace ps2_stubs
         {
             setReturnS32(ctx, 0);
             return;
+        }
+        // TK7: course picker chord (no-op unless PS2X_SSX3_COURSE_PICKER=1 armed it).
+        if (port == 0)
+        {
+            std::string pickerStatus;
+            if (ps2_ssx3_course::pickerOnPadRead(
+                    rdram, data, runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u,
+                    pickerStatus))
+                ps2_savestate::noteQuickStatus(pickerStatus); // status line + Android toast (UX1)
         }
 
         PS2_IF_AGRESSIVE_LOGS({

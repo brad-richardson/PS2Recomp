@@ -24,20 +24,30 @@ std::vector<uint8_t> stockTables()
     return ram;
 }
 
-// TK6: free-ride peak 3 (index 2) as on the disc: slot 2 ERA5 (event 4, type 4), slots 6/7 DONOTUSE.
-void freerideNodes(std::vector<uint8_t> &ram)
+// TK7: event 0's topology location = 0 (ARA1) as on the disc.
+void stockTopology(std::vector<uint8_t> &ram)
 {
-    auto node = [&](uint32_t slot, uint32_t ev, uint32_t type, const char *label, const char *path)
-    {
-        const uint32_t a = 0x478D38u + 2u * 0x360u + slot * 0x6Cu;
-        std::memcpy(&ram[a], &ev, 4);
-        std::memcpy(&ram[a + 4], &type, 4);
-        std::memcpy(&ram[a + 0x14], label, std::strlen(label));
-        std::memcpy(&ram[a + 0x55], path, std::strlen(path));
-    };
-    node(2, 4, 4, "", "era5path");
-    node(6, 23, 7, "DONOTUSE", "");
-    node(7, 23, 7, "DONOTUSE", "");
+    const int32_t sky = 44, transp = 43, loc = 0;
+    std::memcpy(&ram[0x442488 + 8], &sky, 4);
+    std::memcpy(&ram[0x442488 + 12], &transp, 4);
+    std::memcpy(&ram[0x442488 + 16], &loc, 4);
+}
+
+// Pad buffer as scePadRead fills it: data[2..3] active-low buttons.
+std::vector<uint8_t> padBuffer(uint16_t pressed)
+{
+    std::vector<uint8_t> pad(32, 0xFF);
+    const uint16_t w = static_cast<uint16_t>(~pressed);
+    pad[2] = static_cast<uint8_t>(w & 0xFF);
+    pad[3] = static_cast<uint8_t>(w >> 8);
+    return pad;
+}
+
+int32_t topoLocation(const std::vector<uint8_t> &ram, uint32_t event)
+{
+    int32_t v = 0;
+    std::memcpy(&v, &ram[0x442488 + event * 40 + 16], 4);
+    return v;
 }
 } // namespace
 
@@ -78,57 +88,123 @@ void register_ps2_ssx3_course_manifest_tests()
             t.IsFalse(ps2_ssx3_course::parse("event = 0\nname\n", b, err), "no equals");
             t.IsFalse(ps2_ssx3_course::parse("event = 0\nsky = -2\n", b, err), "sky range");
             t.IsFalse(ps2_ssx3_course::parse("event = 0\ntransp = 50\n", b, err), "transp range");
-            t.IsFalse(ps2_ssx3_course::parse("event = 0\nnode = freeride:3:6:2\n", b, err), "node peak range");
-            t.IsFalse(ps2_ssx3_course::parse("event = 0\nnode = freeride:2:8:2\n", b, err), "node slot range");
-            t.IsFalse(ps2_ssx3_course::parse("event = 0\nnode = race:2:4:1\n", b, err), "race has 4 slots");
-            t.IsFalse(ps2_ssx3_course::parse("event = 0\nnode = freeride:2:6:6\n", b, err), "template is target");
-            t.IsFalse(ps2_ssx3_course::parse("event = 0\nnode = station:2:6:2\n", b, err), "table name");
-            t.IsFalse(ps2_ssx3_course::parse("event = 0\nnode = freeride:2:6\n", b, err), "missing template");
-            t.IsFalse(ps2_ssx3_course::parse("event = 0\nnode = freeride:2:6:2\nevent = 1\nnode = freeride:2:6:2\n", b, err),
-                      "same node twice"); });
+            t.IsFalse(ps2_ssx3_course::parse("event = 0\nnode = freeride:2:6:2\n", b, err), "node refused (TK7)");
+            t.IsTrue(err.find("not supported") != std::string::npos, err.c_str());
+            t.IsFalse(ps2_ssx3_course::parse("event = 0\npicker = 49\n", b, err), "picker needs a name");
+            t.IsFalse(ps2_ssx3_course::parse("event = 0\npicker = 50:X\n", b, err), "picker location range");
+            t.IsFalse(ps2_ssx3_course::parse("event = 0\npicker = 49:\n", b, err), "picker empty name");
+            t.IsFalse(ps2_ssx3_course::parse("event = 0\npicker = 49:X\npicker = 49:Y\n", b, err), "picker location twice");
+            t.IsFalse(ps2_ssx3_course::parse("event = 0\npicker = 49:X\nevent = 1\npicker = 48:Y\n", b, err),
+                      "picker in two blocks");
+            t.IsFalse(ps2_ssx3_course::parse("event = 0\npicker = 1:A\npicker = 2:B\npicker = 3:C\npicker = 4:D\n"
+                                             "picker = 5:E\npicker = 6:F\npicker = 7:G\npicker = 8:H\n", b, err),
+                      "at most 7 picker entries"); });
 
-        tc.Run("sky, transp and a DONOTUSE node become a menu entry", [](TestCase &t)
+        tc.Run("sky and transp write topology +8 / +12", [](TestCase &t)
                {
             auto ram = stockTables();
-            freerideNodes(ram);
             std::vector<ps2_ssx3_course::Block> b;
             std::string err;
-            t.IsTrue(ps2_ssx3_course::parse("event = 22\nname = Garibaldi\nsky = 44\ntransp = 43\nnode = freeride:2:6:2\n", b, err),
-                     err.c_str());
+            t.IsTrue(ps2_ssx3_course::parse("event = 22\nname = Garibaldi\nsky = 44\ntransp = 43\n", b, err), err.c_str());
             std::vector<std::string> lines;
             const int n = ps2_ssx3_course::apply(ram.data(), b, [&](const std::string &s) { lines.push_back(s); });
-            t.Equals(n, 4, "four writes");
+            t.Equals(n, 3, "three writes");
             int32_t sky = 0, transp = 0;
             std::memcpy(&sky, &ram[0x442488 + 22 * 40 + 8], 4);
             std::memcpy(&transp, &ram[0x442488 + 22 * 40 + 12], 4);
             t.Equals(sky, 44, "sky");
             t.Equals(transp, 43, "transp");
-            const uint32_t dst = 0x478D38u + 2u * 0x360u + 6u * 0x6Cu;
-            uint32_t ev = 0, type = 0;
-            std::memcpy(&ev, &ram[dst], 4);
-            std::memcpy(&type, &ram[dst + 4], 4);
-            t.Equals(ev, 22u, "node event");
-            t.Equals(type, 4u, "node type from the template");
-            t.Equals(std::string(reinterpret_cast<const char *>(&ram[dst + 0x14])), std::string(""), "label from the template");
-            t.Equals(std::string(reinterpret_cast<const char *>(&ram[dst + 0x55])), std::string("era5path"), "path from the template");
-            uint32_t next = 0;
-            std::memcpy(&next, &ram[dst + 0x6C], 4);
-            t.Equals(next, 23u, "slot 7 stays the terminator");
-            t.IsTrue(lines.back().find("\"DONOTUSE\" -> copy of slot 2 (event 4) with event 22") != std::string::npos,
-                     lines.back().c_str()); });
+            t.IsTrue(lines.back().find("transp at 0x442804: 0 -> 43") != std::string::npos, lines.back().c_str()); });
 
-        tc.Run("refuses a node target that is not DONOTUSE", [](TestCase &t)
+        tc.Run("picker entries write nothing at apply and arm with the row as entry 0", [](TestCase &t)
                {
+            using namespace ps2_ssx3_course;
             auto ram = stockTables();
-            freerideNodes(ram);
-            std::vector<ps2_ssx3_course::Block> b;
+            stockTopology(ram);
+            std::vector<Block> b;
             std::string err;
-            t.IsTrue(ps2_ssx3_course::parse("event = 22\narchive = GARI\nnode = freeride:2:2:6\n", b, err), err.c_str());
+            t.IsTrue(parse("event = 0\narchive = GARI\npicker = 49:Garibaldi\npicker = 0:Dup\n", b, err), err.c_str());
             std::vector<std::string> lines;
-            const int n = ps2_ssx3_course::apply(ram.data(), b, [&](const std::string &s) { lines.push_back(s); });
-            t.Equals(n, -1, "refused");
-            t.IsTrue(ram[0x43D950 + 22 * 100 + 68] == 0, "archive untouched");
-            t.IsTrue(lines.size() == 1 && lines[0].find("not DONOTUSE") != std::string::npos, lines[0].c_str()); });
+            t.Equals(apply(ram.data(), b, [&](const std::string &s) { lines.push_back(s); }), 1, "archive only");
+            t.Equals(topoLocation(ram, 0), 0, "location untouched at apply");
+            Picker p;
+            t.IsTrue(armPicker(p, ram.data(), b, [&](const std::string &s) { lines.push_back(s); }), "armed");
+            t.Equals(p.entries.size(), static_cast<size_t>(2), "stock + Garibaldi (the duplicate of 0 is skipped)");
+            t.Equals(p.entries[0].name, std::string("Snow Jam"), "entry 0 name from RAM");
+            t.Equals(p.entries[0].location, 0, "entry 0 location from RAM");
+            t.Equals(p.event, 0, "event");
+            Picker none;
+            std::vector<Block> nb;
+            t.IsTrue(parse("event = 0\narchive = GARI\n", nb, err), err.c_str());
+            t.IsFalse(armPicker(none, ram.data(), nb, [](const std::string &) {}), "no entries, not armed"); });
+
+        tc.Run("picker cycles on the L3+R3 edge, hides the chord, and refuses during an event", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            auto ram = stockTables();
+            stockTopology(ram);
+            std::vector<Block> b;
+            std::string err;
+            t.IsTrue(parse("event = 0\npicker = 49:Garibaldi\n", b, err), err.c_str());
+            Picker &p = picker();
+            t.IsTrue(armPicker(p, ram.data(), b, [](const std::string &) {}), "armed");
+            std::string status;
+            auto name0 = [&] { return std::string(reinterpret_cast<const char *>(&ram[0x43D950 + 4])); };
+
+            auto idle = padBuffer(0);
+            pickerOnPadRead(ram.data(), idle.data(), 1, status);
+            t.Equals(topoLocation(ram, 0), 0, "no chord, no switch");
+
+            auto l3 = padBuffer(kBtnL3);
+            pickerOnPadRead(ram.data(), l3.data(), 2, status);
+            t.Equals(topoLocation(ram, 0), 0, "L3 alone does nothing");
+            t.Equals(l3[2], padBuffer(kBtnL3)[2], "L3 alone reaches the guest");
+
+            auto chord = padBuffer(kBtnL3 | kBtnR3);
+            pickerOnPadRead(ram.data(), chord.data(), 3, status);
+            t.Equals(topoLocation(ram, 0), 49, "switched to Garibaldi");
+            t.Equals(name0(), std::string("Garibaldi"), "name follows");
+            t.Equals(status, std::string("Course: Garibaldi"), "status line");
+            t.Equals(chord[2], static_cast<uint8_t>(0xFF), "chord hidden from the guest");
+            auto held = padBuffer(kBtnL3 | kBtnR3);
+            pickerOnPadRead(ram.data(), held.data(), 4, status);
+            t.Equals(topoLocation(ram, 0), 49, "held chord does not repeat");
+
+            auto withSelect = padBuffer(kBtnSelect | kBtnL3 | kBtnR3);
+            pickerOnPadRead(ram.data(), idle.data(), 5, status);
+            pickerOnPadRead(ram.data(), withSelect.data(), 6, status);
+            t.Equals(topoLocation(ram, 0), 49, "SELECT held = DS1's chord, not ours");
+            t.Equals(withSelect[2], padBuffer(kBtnSelect | kBtnL3 | kBtnR3)[2], "DS1 chord untouched");
+
+            pickerOnPadRead(ram.data(), idle.data(), 7, status);
+            auto again = padBuffer(kBtnL3 | kBtnR3);
+            pickerOnPadRead(ram.data(), again.data(), 8, status);
+            t.Equals(topoLocation(ram, 0), 0, "cycles back to stock");
+            t.Equals(name0(), std::string("Snow Jam"), "stock name back");
+            t.IsTrue(ram[0x43D950 + 4 + 8] == 0, "name NUL-padded");
+
+            // In an event: 0x4A5B64 -> A, [A] = app, [app] = vtable, +0x34 = 0x2306B8 (KSEG0 pointers).
+            const uint32_t mgr = 0x80C00000u, app = 0x00C00100u, vt = 0x00C00200u, fn = kGameUpdate;
+            std::memcpy(&ram[kAppMgrPtr], &mgr, 4);
+            std::memcpy(&ram[0xC00000], &app, 4);
+            std::memcpy(&ram[0xC00100], &vt, 4);
+            std::memcpy(&ram[0xC00200 + kAppUpdateSlot], &fn, 4);
+            t.Equals(appUpdateFn(ram.data()), kGameUpdate, "pointer chain");
+            pickerOnPadRead(ram.data(), idle.data(), 9, status);
+            auto live = padBuffer(kBtnL3 | kBtnR3);
+            pickerOnPadRead(ram.data(), live.data(), 10, status);
+            t.Equals(topoLocation(ram, 0), 0, "refused while an event is live");
+            t.IsTrue(status.find("an event is live") != std::string::npos, status.c_str());
+            const uint32_t frontend = 0x2F0000u, zero = 0u, requested = 8u;
+            std::memcpy(&ram[0xC00200 + kAppUpdateSlot], &frontend, 4);
+            std::memcpy(&ram[kSlotBase + 49u * kSlotStride + 8u], &requested, 4);
+            std::string msg;
+            t.Equals(pickerNext(p, ram.data(), msg), -1, "refused while a location loads");
+            t.IsTrue(msg.find("location 49 is loading") != std::string::npos, msg.c_str());
+            std::memcpy(&ram[kSlotBase + 49u * kSlotStride + 8u], &zero, 4);
+            t.Equals(pickerNext(p, ram.data(), msg), 1, "allowed again");
+            p = Picker{}; // leave the process-wide picker disarmed
+        });
 
         tc.Run("applies NUL-padded writes and logs old values", [](TestCase &t)
                {
