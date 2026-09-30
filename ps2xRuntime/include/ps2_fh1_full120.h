@@ -171,6 +171,7 @@ enum Fix : uint32_t
     kFixMeter = 1u << 25,    // HUD boost meter fill (0x117fe0 messages 5/6): display step 1/60 -> 1/120 per update (class b, FH10)
     kFixBoost = 1u << 26,    // boost/uber machine 0x1200d0: private dt + one-step thresholds 1/60 -> 1/120 (class h, FH10)
     kFixGround = 1u << 27,   // ground adhesion 0x13c878: per-update pull toward the snow while above it, halved (class b, FV1)
+    kFixEntry = 1u << 28,    // events mode: enter at the race start (gate drop-in) even while riders are airborne (FH14)
 };
 
 inline uint32_t fixMask() noexcept
@@ -184,7 +185,7 @@ inline uint32_t fixMask() noexcept
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
                    kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim |
                    kFixBonus | kFixAiGate | kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset |
-                   kFixMeter | kFixBoost | kFixGround; // kFixLift is opt-in (FH8: no window where it binds)
+                   kFixMeter | kFixBoost | kFixGround | kFixEntry; // kFixLift is opt-in (FH8: no window where it binds)
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -218,6 +219,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "meter") m |= kFixMeter;
             else if (item == "boost") m |= kFixBoost;
             else if (item == "ground") m |= kFixGround;
+            else if (item == "entry") m |= kFixEntry;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -888,6 +890,14 @@ inline void launchPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 // and the race time ran, and (already active, or every rider was grounded:
 // entry only at a case-0 update). Pause, results, loading and menus request
 // stock.
+// FH14 (FIX=entry): the race start is an exception to the grounded rule. The
+// race time [race+0xc] restarts at the gate drop-in, and the rider pass, the
+// selector dispatch and the race time all first run in that same update, with
+// every rider already dropping (selector 1): All-Peak drop 4380, landing 4408,
+// so entry waited ~0.47 s (FV1). When the race time bump leaves it at <= 1
+// (the first race update; a resume after pause continues from its old value),
+// entry is requested right there, mid-update: commit at the next VBlankStart
+// and flip at the next dispatch, so only the drop's first update runs at 60.
 inline constexpr uint32_t kAppUpdateSite = 0x3171b4u;
 // FH7 RNG cadence state (FIX=rng, see rngHook); reset at an events entry flip.
 inline uint32_t g_rngUpdates = 0u, g_lcgSaved = 0u;
@@ -897,6 +907,13 @@ inline uint32_t g_drawK = 0u;
 inline uint64_t g_drawn = 0u, g_drawSkipped = 0u;
 inline constexpr uint32_t kSelectorDispatch = 0x111408u;
 inline bool g_passRan = false, g_anyAir = false, g_finished = false, g_clockRan = false;
+inline bool g_startEdge = false;
+
+inline bool entryFix() noexcept
+{
+    static const bool on = eventsMode() && (fixMask() & kFixEntry) != 0u;
+    return on;
+}
 
 inline void restamp10s(uint8_t *ram, uint32_t a, bool toActive)
 {
@@ -971,7 +988,21 @@ inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
     else if (sourcePc == kRaceTickCallSite && targetPc == kRaceTickCallee)
         g_passRan = true;
     else if (sourcePc == kRaceTick2CallSite && targetPc == kRaceTick2Callee)
+    {
         g_clockRan = true;
+        uint32_t raceTime = 0u;
+        // The bump's store sits in the call's delay slot, so +0xc is already the new value.
+        if (entryFix() && ctx && !g_schedActive && rd32(ram, getRegU32(ctx, 16) + 0xcu, raceTime) && raceTime <= 1u)
+        {
+            g_schedActive = true;
+            g_startEdge = true;
+            static uint32_t lines = 0u;
+            if (lines++ < 64u)
+                std::fprintf(stderr, "fh1-events request enter tick=%llu start race_time=%u pass=%d air=%d\n",
+                             static_cast<unsigned long long>(g_lastTick), raceTime, g_passRan ? 1 : 0,
+                             g_anyAir ? 1 : 0);
+        }
+    }
     else if (targetPc == kSession && ctx)
     {
         uint32_t fin = 0u;
@@ -986,7 +1017,10 @@ inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
             if (g_commitActive != g_guestActive)
                 guestFlip(ram, g_lastTick, g_commitActive);
         }
-        const bool want = g_passRan && g_clockRan && (g_guestActive || !g_anyAir);
+        // A start-edge request stands until its flip (the drop is airborne; the flip precedes this test).
+        const bool want = g_passRan && g_clockRan && (g_guestActive || g_startEdge || !g_anyAir);
+        if (g_guestActive || !want)
+            g_startEdge = false;
         if (want != g_schedActive)
         {
             g_schedActive = want;
