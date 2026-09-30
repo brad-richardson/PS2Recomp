@@ -630,6 +630,10 @@ elseif(PS2X_IS_IOS)
 elseif(PS2X_IS_ANDROID)
     # VK1 prototype: PS2X_PRESENT_VULKAN=1 (AHardwareBuffer + SurfaceControl).
     target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_present_vk_android.cpp)
+    if(PS2X_GS_SHADOW_PARALLEL)
+        # The present path reads raylib's android_app (window, activity) like ps2_runtime.cpp.
+        target_include_directories(ps2_gs_shadow PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
+    endif()
     target_link_libraries(ps2_gs_shadow PRIVATE android log)
 endif()
 target_include_directories(ps2_gs_shadow PUBLIC
