@@ -38,9 +38,12 @@ int touchPoints(int64_t *ids, float *xs, float *ys, int max);
 // thread only; cheap (no I/O).
 std::string perfDeviceState();
 // IB3 (AirPods): set AVAudioSessionCategoryPlayback after InitAudioDevice.
+// PS2X_IOS_AUDIO_SESSION=playback|ambient|off picks the mode (IA1).
 // raylib's miniaudio inits its iOS context with the default category, which
 // tries PlayAndRecord + DefaultToSpeaker without Bluetooth options, so iOS
 // routes game audio to the speaker and AirPods lose A2DP. miniaudio sets the
 // category only at context init, so this override sticks. Main thread.
-void setAudioSessionPlayback();
+// IA1: ambient=true sets AVAudioSessionCategoryAmbient instead (mixes with
+// other apps, honours the silent switch, non-primary so no route grab).
+void setAudioSession(bool ambient);
 } // namespace ps2x::ios

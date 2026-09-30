@@ -318,7 +318,7 @@ int touchPoints(int64_t *ids, float *xs, float *ys, int max)
     return n;
 }
 
-void setAudioSessionPlayback()
+void setAudioSession(bool ambient)
 {
     // IB3 (AirPods): miniaudio's iOS context init tries PlayAndRecord +
     // DefaultToSpeaker with no Bluetooth options (miniaudio.h
@@ -328,9 +328,13 @@ void setAudioSessionPlayback()
     // after InitAudioDevice, sticks. No options: plain game playback.
     AVAudioSession *session = AVAudioSession.sharedInstance;
     NSError *error = nil;
-    if (![session setCategory:AVAudioSessionCategoryPlayback error:&error])
+    // IA1: Ambient mixes with other apps' audio and does not interrupt them
+    // or claim the route (so no AirPods auto-switch); Playback is primary.
+    AVAudioSessionCategory category = ambient ? AVAudioSessionCategoryAmbient : AVAudioSessionCategoryPlayback;
+    if (![session setCategory:category error:&error])
     {
-        std::fprintf(stderr, "[audio] AVAudioSession Playback FAILED: %s\n", error.localizedDescription.UTF8String);
+        std::fprintf(stderr, "[audio] AVAudioSession %s FAILED: %s\n", ambient ? "Ambient" : "Playback",
+                     error.localizedDescription.UTF8String);
         return;
     }
     std::fprintf(stderr, "[audio] AVAudioSession category=%s\n", session.category.UTF8String);
