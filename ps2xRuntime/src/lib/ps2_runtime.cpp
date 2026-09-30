@@ -20,6 +20,7 @@
 #include "ps2_gfx_stats.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_ssx3_course_manifest.h"
+#include "ps2_ssx3_lod.h"
 #include "ps2_ssx3_tricky_menu.h"
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
@@ -920,6 +921,49 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-menu",
                            0x00100008u,
                            0u,
                            applyTrickyMenu);
+
+// LOD1: draw distance (PS2X_SSX3_LOD_SCALE=<f>, default off;
+// ps2_ssx3_lod.h). The wrapper scales the far argument ($f14) at the entry
+// of the renderer's projection setter and calls the original, so an EE
+// checkpoint inside the setter resumes as usual. Knob off: nothing is wrapped.
+namespace
+{
+    PS2Runtime::RecompiledFunction g_lodSetPerspective = nullptr;
+
+    void lodSetPerspectiveWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ctx->f[14] *= ps2_ssx3_lod::scale();
+        g_lodSetPerspective(rdram, ctx, runtime);
+    }
+
+    void applyLodScale(PS2Runtime &runtime)
+    {
+        const float s = ps2_ssx3_lod::scale();
+        if (s == 0.0f)
+            return;
+        if (s < 0.0f)
+        {
+            std::fprintf(stderr, "[ssx3-lod] refused PS2X_SSX3_LOD_SCALE=%s (want %g..%g)\n",
+                         std::getenv("PS2X_SSX3_LOD_SCALE"), static_cast<double>(ps2_ssx3_lod::kMinScale),
+                         static_cast<double>(ps2_ssx3_lod::kMaxScale));
+            std::abort();
+        }
+        g_lodSetPerspective = runtime.lookupFunction(ps2_ssx3_lod::kSetPerspective);
+        if (!g_lodSetPerspective || !runtime.replaceFunction(ps2_ssx3_lod::kSetPerspective, &lodSetPerspectiveWrapper))
+        {
+            std::fprintf(stderr, "[ssx3-lod] cannot wrap 0x%x\n", ps2_ssx3_lod::kSetPerspective);
+            std::abort();
+        }
+        std::fprintf(stderr, "[ssx3-lod] armed: far plane x%g at 0x%x (streaming and fog stock)\n",
+                     static_cast<double>(s), ps2_ssx3_lod::kSetPerspective);
+    }
+}
+
+PS2_REGISTER_GAME_OVERRIDE("ssx3-lod-scale",
+                           "SLUS_207.72",
+                           0x00100008u,
+                           0u,
+                           applyLodScale);
 
 // K1 P0: env-gated presentation-frame capture (PS2X_FRAME_DUMP_DIR).
 // Unset/empty = disabled (zero behavior change). When set, saves the
