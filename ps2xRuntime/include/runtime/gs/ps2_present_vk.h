@@ -65,6 +65,9 @@ void windowLost();
 // Returns its allocation id (0 on failure); the sink owns the app's reference
 // from here on. *out is valid until retireBuffer(id).
 uint64_t allocateBuffer(uint32_t w, uint32_t h, AHardwareBuffer **out);
+// UR1: the panel's real size in pixels, landscape (width >= height), from
+// Display.getRealSize via raylib's activity. Callable before the window exists.
+bool panelSize(int &w, int &h);
 // GsWorker: the backend stops using the buffer (pool retired). The reference
 // is released once the compositor has released every queued use.
 void retireBuffer(uint64_t id);

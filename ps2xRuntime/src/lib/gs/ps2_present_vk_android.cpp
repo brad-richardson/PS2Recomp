@@ -6,6 +6,7 @@
 #include "runtime/gs/ps2_present_vk_ledger.h"
 
 #include <android/hardware_buffer.h>
+#include <android_native_app_glue.h>
 #include <android/native_activity.h>
 #include <android/native_window.h>
 #include <android/rect.h>
@@ -26,6 +27,8 @@
 #include <string>
 #include <type_traits>
 #include <vector>
+
+extern "C" struct android_app *GetAndroidApp(void); // raylib rcore_android.c
 
 namespace
 {
@@ -369,6 +372,68 @@ void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect,
     char stats[1024];
     appendStats(stats, sizeof(stats));
     std::fprintf(stderr, "[present-vk] window-change stats%s proc_fds=%d\n", stats, openFdCount());
+}
+
+bool panelSize(int &w, int &h)
+{
+    // UR1: activity.getWindowManager().getDefaultDisplay().getRealSize(Point):
+    // the whole panel (system bars included; the Odin hides them), in pixels.
+    struct android_app *app = GetAndroidApp();
+    ANativeActivity *activity = app ? app->activity : nullptr;
+    if (!activity || !activity->vm)
+        return false;
+    JNIEnv *env = nullptr;
+    char name[16] = {};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    JavaVMAttachArgs args = {JNI_VERSION_1_6, name[0] ? name : nullptr, nullptr};
+    if (activity->vm->AttachCurrentThread(&env, &args) != JNI_OK || !env)
+        return false;
+    bool ok = false;
+    jobject act = activity->clazz;
+    jclass actCls = env->GetObjectClass(act);
+    jmethodID getWm = env->GetMethodID(actCls, "getWindowManager", "()Landroid/view/WindowManager;");
+    jobject wm = getWm ? env->CallObjectMethod(act, getWm) : nullptr;
+    if (wm && !env->ExceptionCheck())
+    {
+        jclass wmCls = env->GetObjectClass(wm);
+        jmethodID getDisplay = env->GetMethodID(wmCls, "getDefaultDisplay", "()Landroid/view/Display;");
+        jobject display = getDisplay ? env->CallObjectMethod(wm, getDisplay) : nullptr;
+        jclass pointCls = env->FindClass("android/graphics/Point");
+        if (display && pointCls && !env->ExceptionCheck())
+        {
+            jmethodID ctor = env->GetMethodID(pointCls, "<init>", "()V");
+            jobject point = ctor ? env->NewObject(pointCls, ctor) : nullptr;
+            jclass displayCls = env->GetObjectClass(display);
+            jmethodID getRealSize = env->GetMethodID(displayCls, "getRealSize", "(Landroid/graphics/Point;)V");
+            if (point && getRealSize)
+            {
+                env->CallVoidMethod(display, getRealSize, point);
+                const int x = env->GetIntField(point, env->GetFieldID(pointCls, "x", "I"));
+                const int y = env->GetIntField(point, env->GetFieldID(pointCls, "y", "I"));
+                ok = !env->ExceptionCheck() && x > 0 && y > 0;
+                if (ok)
+                {
+                    w = std::max(x, y);
+                    h = std::min(x, y);
+                }
+            }
+            if (point)
+                env->DeleteLocalRef(point);
+            env->DeleteLocalRef(displayCls);
+        }
+        if (pointCls)
+            env->DeleteLocalRef(pointCls);
+        if (display)
+            env->DeleteLocalRef(display);
+        env->DeleteLocalRef(wmCls);
+        env->DeleteLocalRef(wm);
+    }
+    if (env->ExceptionCheck())
+        env->ExceptionClear();
+    env->DeleteLocalRef(actCls);
+    std::fprintf(stderr, "[present-vk] UR1 panel %s %dx%d\n", ok ? "real size" : "size unavailable", ok ? w : 0,
+                 ok ? h : 0);
+    return ok;
 }
 
 uint64_t allocateBuffer(uint32_t w, uint32_t h, AHardwareBuffer **out)

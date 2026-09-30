@@ -9,6 +9,7 @@
 #include "runtime/gs/ge1_gs_api.h"
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
+#include "ps2_present_geometry.h"
 #include <android/hardware_buffer.h>
 #endif
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
@@ -368,6 +369,9 @@ public:
         m_vramSize = vramSize;
         if (const char *path = std::getenv("PS2X_GS_EXTERNAL_LIBRARY"); path && *path)
         {
+#if defined(__ANDROID__)
+            configureOutputSize();
+#endif
             if (!m_ge1.load(path) || !m_ge1.open(4))
             {
                 std::fprintf(stderr, "[gs:external] GE1 Full GS init failed\n");
@@ -1053,6 +1057,53 @@ private:
         return on;
     }
 
+    // UR1: the GE1 output size. The GS opens before raylib's window, so the
+    // panel size comes from the display itself (ps2x_present_vk::panelSize:
+    // Display.getRealSize, landscape). It is exported as GE1_DISPLAY_SIZE
+    // (unless set) so GE1_UPSCALE=native|halfnative resolves to panel height /
+    // 448. PS2X_GE1_EXPORT_SIZE=WxH|display sizes the AHBs GE1 draws into:
+    // display = the game rect on the panel (panel height x the present aspect),
+    // so GE1 does the one final scale (with PS2X_PRESENT_FILTER=sharp if set)
+    // and SurfaceFlinger composites 1:1. Unset = 640x480, SurfaceFlinger scales.
+    void configureOutputSize()
+    {
+        int pw = 0, ph = 0;
+        const bool panel = ps2x_present_vk::panelSize(pw, ph);
+        if (panel && !std::getenv("GE1_DISPLAY_SIZE"))
+        {
+            const std::string v = std::to_string(pw) + "x" + std::to_string(ph);
+            setenv("GE1_DISPLAY_SIZE", v.c_str(), 0);
+        }
+        const char *size = std::getenv("PS2X_GE1_EXPORT_SIZE");
+        if (!size || !*size)
+            return;
+        unsigned w = 0, h = 0;
+        if (std::strcmp(size, "display") == 0)
+        {
+            if (panel)
+            {
+                const ps2x::present::Aspect aspect = ps2x::present::aspectFromEnv(
+                    std::getenv("PS2X_ASPECT"), ps2x::present::ssx3WidescreenModeFromEnv(std::getenv("PS2X_WIDESCREEN")) != 0u);
+                const ps2x::present::Rect r = ps2x::present::presentRect(static_cast<float>(pw), static_cast<float>(ph),
+                                                                        640.0f, 448.0f, aspect);
+                w = static_cast<unsigned>(r.w + 0.5f);
+                h = static_cast<unsigned>(r.h + 0.5f);
+            }
+        }
+        else if (std::sscanf(size, "%ux%u", &w, &h) != 2)
+        {
+            w = h = 0;
+        }
+        if (w >= 64u && h >= 64u && w <= 4096u && h <= 4096u)
+        {
+            m_exportW = w;
+            m_exportH = h;
+        }
+        std::fprintf(stderr, "[gs:external] UR1 panel=%dx%d GE1_DISPLAY_SIZE=%s export=%ux%u (PS2X_GE1_EXPORT_SIZE=%s)\n",
+                     pw, ph, std::getenv("GE1_DISPLAY_SIZE") ? std::getenv("GE1_DISPLAY_SIZE") : "unset", m_exportW,
+                     m_exportH, size);
+    }
+
     bool queuePendingAhb()
     {
         if (m_pendingAhb < 0)
@@ -1063,7 +1114,7 @@ private:
 #endif
         AhbSlot &slot = m_ahbSlots[static_cast<size_t>(m_pendingAhb)];
         dumpAhb(slot.buffer, m_pendingTick);
-        const bool queued = ps2x_present_vk::queue(slot.id, 640u, 480u);
+        const bool queued = ps2x_present_vk::queue(slot.id, m_exportW, m_exportH);
         m_pendingAhb = -1;
         m_pendingFence = 0u;
         if (!queued)
@@ -1135,7 +1186,7 @@ private:
         {
             for (AhbSlot &slot : m_ahbSlots)
             {
-                slot.id = ps2x_present_vk::allocateBuffer(640u, 480u, &slot.buffer);
+                slot.id = ps2x_present_vk::allocateBuffer(m_exportW, m_exportH, &slot.buffer);
                 if (!slot.id || !slot.buffer)
                 {
                     retireAhbSlots();
@@ -1168,7 +1219,7 @@ private:
         AhbSlot &slot = m_ahbSlots[pick.index];
         m_ahbStart = (pick.index + 1) % 4;
         uint64_t fence = 0u;
-        const int exported = m_ge1.exportAhb(slot.buffer, 640u, 480u, &fence);
+        const int exported = m_ge1.exportAhb(slot.buffer, m_exportW, m_exportH, &fence);
         if (exported == 0)
             return false; // the first host present may precede the first GS VSync
         if (exported < 0)
@@ -1314,6 +1365,8 @@ private:
 #if defined(__ANDROID__)
     std::array<AhbSlot, 4> m_ahbSlots{};
     uint32_t m_ahbEpoch = 0u;
+    // UR1: GE1 export (AHB) size, PS2X_GE1_EXPORT_SIZE (default 640x480 = today).
+    uint32_t m_exportW = 640u, m_exportH = 480u;
     int m_ahbStart = 0;
     int m_pendingAhb = -1;
     bool m_perVsyncLive = false; // FH6: GuestVsync presents (latch no longer exports)
