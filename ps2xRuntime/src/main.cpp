@@ -6,6 +6,7 @@
 #endif
 
 #include "ps2_log.h"
+#include "raylib.h"
 
 #include <iostream>
 #include <string>
