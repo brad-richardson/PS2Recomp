@@ -59,6 +59,13 @@ namespace
         std::unique_ptr<soundtouch::SoundTouch> st;
         ps2_audio_stretch::StretchController controller;
         bool lockTempo = false; // AU15: PS2X_VSYNC_LOCK_AUDIO=tempo with PS2X_VSYNC_LOCK=1
+        bool feedDemand = false; // AU16: PS2X_STRETCH_FEED=demand
+        // AU16 path depth per 5 s window: ring fill + (engaged) frames the
+        // stretcher holds ahead of it = push->callback-output latency.
+        uint64_t pathSteps = 0;
+        double pathSum = 0.0;
+        uint64_t pathMax = 0;
+        double heldSum = 0.0;
         std::chrono::steady_clock::time_point lastCallback{};
         std::chrono::steady_clock::time_point stretchStatsAt{};
         std::vector<float> floatBuf;
@@ -312,7 +319,19 @@ namespace
         if (g_output.lockTempo)
             std::cerr << " locked=" << (st.callbacks ? 100.0 * st.locked / st.callbacks : 0.0)
                       << "% base=" << (st.locked ? st.sumBase / st.locked : 0.0);
+        if (g_output.pathSteps)
+        {
+            const double msPerFrame = 1000.0 / kSourceRate;
+            std::fprintf(stderr, " path_ms=%.1f/%.1f held_ms=%.1f",
+                         g_output.pathSum / g_output.pathSteps * msPerFrame,
+                         static_cast<double>(g_output.pathMax) * msPerFrame,
+                         g_output.heldSum / g_output.pathSteps * msPerFrame);
+        }
         std::cerr << '\n';
+        g_output.pathSteps = 0;
+        g_output.pathSum = 0.0;
+        g_output.pathMax = 0;
+        g_output.heldSum = 0.0;
         g_output.controller.resetStats();
         g_output.stretchStatsAt = now;
     }
@@ -337,6 +356,17 @@ namespace
             step.bypass ? g_output.controller.smoothedTempo() : step.tempo));
         if (g_output.traceFile != nullptr)
             traceStretch(now, fill, step);
+        {
+            const uint64_t held = step.bypass
+                                      ? 0u
+                                      : static_cast<uint64_t>(g_output.st->numUnprocessedSamples()) +
+                                            g_output.st->numSamples() +
+                                            (g_output.stQueue.size() - g_output.stQueuePos);
+            g_output.pathSteps += 1u;
+            g_output.pathSum += static_cast<double>(fill + held);
+            g_output.pathMax = std::max(g_output.pathMax, fill + held);
+            g_output.heldSum += static_cast<double>(held);
+        }
 
         // Source-rate frames for this callback (pre-resample).
         g_output.srcBuf.resize(static_cast<size_t>(frames) * 2u);
@@ -421,11 +451,34 @@ namespace
                                              frames * static_cast<double>(kSourceRate) /
                                              g_output.rate)) +
                                              2u;
-            const size_t feedWant =
-                static_cast<size_t>(std::ceil(srcNeed * static_cast<double>(step.tempo)));
-            fed.resize(feedWant);
-            const size_t fedCount = popRing(fed.data(), feedWant);
-            fed.resize(fedCount);
+            if (g_output.feedDemand)
+            {
+                g_output.floatBuf.resize(ps2_audio_stretch::kDemandChunkFrames * 2u);
+                std::array<uint32_t, ps2_audio_stretch::kDemandChunkFrames> chunk{};
+                ps2_audio_stretch::feedOnDemand(
+                    *g_output.st, g_output.stQueue.size() - g_output.stQueuePos, srcNeed,
+                    g_output.floatBuf.data(),
+                    [&fed, &chunk](float *out, size_t max)
+                    {
+                        const size_t got = popRing(chunk.data(), std::min(max, chunk.size()));
+                        for (size_t i = 0; i < got; ++i)
+                        {
+                            out[2u * i] = static_cast<float>(unpackLeft(chunk[i])) / 32768.0f;
+                            out[2u * i + 1u] = static_cast<float>(unpackRight(chunk[i])) / 32768.0f;
+                        }
+                        fed.insert(fed.end(), chunk.begin(), chunk.begin() + got);
+                        return got;
+                    });
+            }
+            size_t fedCount = 0;
+            if (!g_output.feedDemand)
+            {
+                const size_t feedWant =
+                    static_cast<size_t>(std::ceil(srcNeed * static_cast<double>(step.tempo)));
+                fed.resize(feedWant);
+                fedCount = popRing(fed.data(), feedWant);
+                fed.resize(fedCount);
+            }
             if (fedCount > 0)
             {
                 g_output.floatBuf.resize(fedCount * 2u);
@@ -602,6 +655,9 @@ bool initialize()
                                  ps2_audio_stretch::LockAudioMode::Tempo;
         if (g_output.lockTempo)
             std::cerr << "[snd-output] vsync-lock audio=tempo (AU15: constant tempo at the locked ratio)\n";
+        g_output.feedDemand = ps2_audio_stretch::feedDemandFromEnv(std::getenv("PS2X_STRETCH_FEED"));
+        if (g_output.feedDemand)
+            std::cerr << "[snd-output] stretch feed=demand (AU16)\n";
         const char *tracePath = std::getenv("PS2X_STRETCH_TRACE");
         if (tracePath != nullptr && *tracePath != '\0')
         {

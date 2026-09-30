@@ -54,6 +54,16 @@
 // No lock (ratio 0: menus before the first present, pause, knob off): the band
 // logic resumes from the engaged state. Unset/other values = today.
 //
+// AU16: PS2X_STRETCH_FEED=demand. Engaged, today's callback feeds the
+// stretcher ceil(tempo * need) ring frames every callback whatever it holds,
+// so frames fed while SoundTouch was still priming (startup, a ring that ran
+// dry) stay inside it for good: in AU15's locked mode (never bypassed) that
+// backlog sits on top of the 80 ms ring and delays every sound (host model
+// local/research/AU16: 190 ms push->output vs 73 ms bypassed). Demand feed
+// tops the stretcher up in small chunks only until it holds this callback's
+// output, so it keeps just its WSOLA window (~35 ms at 30/20/10 ms) and the
+// ring (tempo control unchanged) holds the rest. Unset/other = today.
+//
 // No sqrt() dampening (PCSX2 has it): with the FP1 wall pacer the guest
 // rate is exactly <= 1.0, so linear control settles at fill = rate*target
 // with more low-rate margin (0.6*target at 0.6x, not 0.36*target).
@@ -61,6 +71,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -105,6 +116,34 @@ inline LockAudioMode lockAudioModeFromEnv(const char *value)
 {
     return value != nullptr && std::strcmp(value, "tempo") == 0 ? LockAudioMode::Tempo
                                                                 : LockAudioMode::Stretch;
+}
+
+// AU16: PS2X_STRETCH_FEED. Exactly "demand" = demand feed (see top).
+inline bool feedDemandFromEnv(const char *value)
+{
+    return value != nullptr && std::strcmp(value, "demand") == 0;
+}
+
+constexpr size_t kDemandChunkFrames = 64u;
+
+// AU16 demand feed: while the stretcher's ready output plus the caller's
+// already-queued frames fall short of needFrames, move up to
+// kDemandChunkFrames frames from the ring (pop(float *interleaved, max) ->
+// frames popped, 0 = ring empty) into it. Returns frames fed. Stretcher is
+// SoundTouch (numSamples/putSamples) or a test double.
+template <class Stretcher, class Pop>
+size_t feedOnDemand(Stretcher &st, size_t queuedFrames, size_t needFrames, float *scratch, Pop pop)
+{
+    size_t fed = 0;
+    while (static_cast<size_t>(st.numSamples()) + queuedFrames < needFrames)
+    {
+        const size_t got = pop(scratch, kDemandChunkFrames);
+        if (got == 0)
+            break;
+        st.putSamples(scratch, static_cast<unsigned>(got));
+        fed += got;
+    }
+    return fed;
 }
 
 struct Params

@@ -1,9 +1,12 @@
 #include "MiniTest.h"
 #include "ps2_audio_stretch.h"
+#include "SoundTouch.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <deque>
+#include <vector>
 #include <string>
 
 namespace
@@ -387,6 +390,140 @@ void register_ps2_audio_stretch_tests()
             t.IsTrue(s.bypass, "unlocked at the target fill: rejoins at once");
             t.IsTrue(c.lockedBase() == 0.0f, "base cleared");
             t.Equals(c.stats().locked, static_cast<uint64_t>(101), "101 locked steps counted");
+        });
+
+        tc.Run("AU16: stretch-feed knob is exactly demand", [](TestCase &t)
+        {
+            t.IsFalse(ps2_audio_stretch::feedDemandFromEnv(nullptr), "unset = today");
+            t.IsTrue(ps2_audio_stretch::feedDemandFromEnv("demand"), "demand");
+            t.IsFalse(ps2_audio_stretch::feedDemandFromEnv("1"), "1 = today");
+            t.IsFalse(ps2_audio_stretch::feedDemandFromEnv("Demand"), "case-exact");
+        });
+
+        tc.Run("AU16: demand feed stops once the output is covered", [](TestCase &t)
+        {
+            // Fake stretcher: holds 100 input frames, then passes 1:1.
+            struct Fake
+            {
+                size_t in = 0, out = 0;
+                unsigned numSamples() const { return static_cast<unsigned>(out); }
+                void putSamples(const float *, unsigned n)
+                {
+                    in += n;
+                    if (in > 100u)
+                    {
+                        out += in - 100u;
+                        in = 100u;
+                    }
+                }
+            } st;
+            size_t ring = 1000;
+            float scratch[ps2_audio_stretch::kDemandChunkFrames * 2u];
+            const auto pop = [&ring](float *, size_t max)
+            {
+                const size_t got = std::min(ring, max);
+                ring -= got;
+                return got;
+            };
+            size_t fed = ps2_audio_stretch::feedOnDemand(st, 0u, 480u, scratch, pop);
+            t.IsTrue(st.out >= 480u && st.out < 480u + ps2_audio_stretch::kDemandChunkFrames,
+                     "covers the need within one chunk: " + std::to_string(st.out));
+            t.Equals(fed, 1000u - ring, "fed = popped");
+            fed = ps2_audio_stretch::feedOnDemand(st, 0u, 480u, scratch, pop);
+            t.Equals(fed, static_cast<size_t>(0), "already covered: feeds nothing");
+            st.out = 0;
+            fed = ps2_audio_stretch::feedOnDemand(st, 470u, 480u, scratch, pop);
+            t.IsTrue(fed > 0u && fed <= ps2_audio_stretch::kDemandChunkFrames, "queued frames count toward the need");
+            ring = 0;
+            st.out = 0;
+            t.Equals(ps2_audio_stretch::feedOnDemand(st, 0u, 480u, scratch, pop), static_cast<size_t>(0),
+                     "empty ring: stops");
+        });
+
+        tc.Run("AU16: locked tempo + SoundTouch: demand feed drops the stretcher backlog", [](TestCase &t)
+        {
+            // The callback's engaged path (48 kHz, 480-frame callbacks) with
+            // the output settings, the guest at +1.52 % from an empty ring.
+            const auto run = [](bool demand)
+            {
+                soundtouch::SoundTouch st;
+                st.setSampleRate(48000);
+                st.setChannels(2);
+                st.setSetting(SETTING_SEQUENCE_MS, 30);
+                st.setSetting(SETTING_SEEKWINDOW_MS, 20);
+                st.setSetting(SETTING_OVERLAP_MS, 10);
+                st.setSetting(SETTING_USE_QUICKSEEK, 0);
+                st.setSetting(SETTING_USE_AA_FILTER, 0);
+                ps2_audio_stretch::StretchController c;
+                std::deque<float> ring, q;
+                std::vector<float> in, out(2048u * 2u);
+                float scratch[ps2_audio_stretch::kDemandChunkFrames * 2u];
+                double produced = 0.0, heldSum = 0.0, pathSum = 0.0;
+                uint64_t pushed = 0, lateUnder = 0;
+                int n = 0;
+                for (int cb = 0; cb < 3000; ++cb)
+                {
+                    produced += 480.0 * 1.0152;
+                    for (; pushed + 384u <= produced; pushed += 384u)
+                        for (int i = 0; i < 384; ++i)
+                            ring.push_back(0.25f * static_cast<float>(std::sin((pushed + i) * 0.05)));
+                    const ps2_audio_stretch::StepResult s =
+                        c.update(ring.size(), cb ? 0.01 : -1.0, 1.0152f);
+                    st.setTempo(s.tempo);
+                    const auto popTo = [&ring](float *o, size_t max)
+                    {
+                        size_t got = 0;
+                        for (; got < max && !ring.empty(); ++got)
+                        {
+                            o[2u * got] = o[2u * got + 1u] = ring.front();
+                            ring.pop_front();
+                        }
+                        return got;
+                    };
+                    if (demand)
+                        ps2_audio_stretch::feedOnDemand(st, q.size(), 480u, scratch, popTo);
+                    else
+                    {
+                        in.resize(static_cast<size_t>(std::ceil(480.0 * s.tempo)) * 2u);
+                        const size_t got = popTo(in.data(), in.size() / 2u);
+                        if (got)
+                            st.putSamples(in.data(), static_cast<unsigned>(got));
+                    }
+                    for (int i = 0; i < 480; ++i)
+                    {
+                        if (q.empty())
+                        {
+                            const unsigned got = st.receiveSamples(out.data(), 1024u);
+                            for (unsigned k = 0; k < got; ++k)
+                                q.push_back(out[2u * k]);
+                        }
+                        if (q.empty())
+                        {
+                            if (cb >= 1000)
+                                ++lateUnder;
+                            continue;
+                        }
+                        q.pop_front();
+                    }
+                    if (cb >= 1000)
+                    {
+                        const double held = st.numUnprocessedSamples() + st.numSamples() + q.size();
+                        heldSum += held;
+                        pathSum += held + ring.size();
+                        ++n;
+                    }
+                }
+                struct R { double heldMs, pathMs; uint64_t under; };
+                return R{heldSum / n / 48.0, pathSum / n / 48.0, lateUnder};
+            };
+            const auto today = run(false);
+            const auto au16 = run(true);
+            t.IsTrue(today.heldMs > 60.0, "control: today's feed keeps a backlog: " + std::to_string(today.heldMs) + " ms");
+            t.IsTrue(au16.heldMs < 45.0, "demand: only the WSOLA window: " + std::to_string(au16.heldMs) + " ms");
+            t.IsTrue(au16.pathMs < today.pathMs - 30.0,
+                     "path " + std::to_string(au16.pathMs) + " vs " + std::to_string(today.pathMs) + " ms");
+            t.Equals(au16.under, static_cast<uint64_t>(0), "no underruns after startup");
+            t.Equals(today.under, static_cast<uint64_t>(0), "control: none either");
         });
 
         tc.Run("window stats track applied tempo and engagements", [](TestCase &t)
