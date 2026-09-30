@@ -165,6 +165,11 @@ enum Fix : uint32_t
     kFixAiGate = 1u << 19,   // AI race_tick % N gates on even updates only + 0x10da10 hold timer at 1/120 (class e/g, FH9)
     kFixTakeoff = 1u << 20,  // takeoff state 4 (0x12f730): control-triple slew rate 0.05/update -> 0.025 (class b, FH9)
     kFixFlags = 1u << 21,    // cFlagManager 0x34b818: per-flag wave/scroll phases advance by a per-update step (class b, FH11)
+    kFixSteer = 1u << 22,    // steering/crouch control triples 0x113e80/0x113f38/0x113f88: private 1/60 steps and per-update rates (class h/b, FH10)
+    kFixRail = 1u << 23,     // rail slide handler 0x13af28 (selector 4): private dt 1/60 -> 1/120 (class h, FH10)
+    kFixReset = 1u << 24,    // course-reset fade state 9 (0x12f398): ramp step 1/40 per update -> 1/80 (class b, FH10)
+    kFixMeter = 1u << 25,    // HUD boost meter fill (0x117fe0 messages 5/6): display step 1/60 -> 1/120 per update (class b, FH10)
+    kFixBoost = 1u << 26,    // boost/uber machine 0x1200d0: private dt + one-step thresholds 1/60 -> 1/120 (class h, FH10)
 };
 
 inline uint32_t fixMask() noexcept
@@ -177,7 +182,8 @@ inline uint32_t fixMask() noexcept
         if (s == "all")
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
                    kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim |
-                   kFixBonus | kFixAiGate | kFixTakeoff | kFixFlags; // kFixLift is opt-in (FH8: no window where it binds)
+                   kFixBonus | kFixAiGate | kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset |
+                   kFixMeter | kFixBoost; // kFixLift is opt-in (FH8: no window where it binds)
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -205,6 +211,11 @@ inline uint32_t fixMask() noexcept
             else if (item == "aigate") m |= kFixAiGate;
             else if (item == "takeoff") m |= kFixTakeoff;
             else if (item == "flags") m |= kFixFlags;
+            else if (item == "steer") m |= kFixSteer;
+            else if (item == "rail") m |= kFixRail;
+            else if (item == "reset") m |= kFixReset;
+            else if (item == "meter") m |= kFixMeter;
+            else if (item == "boost") m |= kFixBoost;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -284,7 +295,7 @@ inline std::vector<Word> labWords();
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
-    const std::array<Word, 85> words = {{
+    const std::array<Word, 98> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -418,6 +429,44 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         // FR1-R1 race 7.77 s: 0.18 s vs stock 0.35 s). Single reader 0x12f9f4. With it the
         // rival finishes 03:16 vs stock 03:15 with 0 AI wipeouts (fh9-p1; before: 03:23, 2).
         {kFixTakeoff, 0x49ba0cu, 0x3d4cccceu, 0x3cccccceu, "takeoff_slew"},
+        // FH10 steer: 0x113e80 (steering triple R+0x1f0, every rider in ground/air/pre-jump states) sets
+        // target = stick and rate = clamp(12|gap|, 0.1, 14) * [0x49b4c4] per update, 0x113f38 (triple
+        // +0x22c) the same with [0x49b4cc]: a per-second rate times a private 1/60 step (class h).
+        // 0x113f88 (lean +0x214 / crouch +0x220 triples) uses per-update rates: fixed returns
+        // [0x49b4d0]/[0x49b4d4] and the floor [0x49b4e0] halve (class b); the gap gain [0x49b4dc] 0.1
+        // -> 1-sqrt(0.9) (class a, like TS1's 0x49b4f0). All single readers. Brad's full-right carve on
+        // the All-Peak state (stock 4432-4461): events turned in ~1.5-2x faster (heading lead to 1.46 deg,
+        // RMS 0.92); with these words the onset tracks stock within 0.05 deg, RMS 0.49 (fh10-l2).
+        {kFixSteer, 0x49b4c4u, kSixtieth, kHundredTwentieth, "steer_dt_113e80"},
+        {kFixSteer, 0x49b4ccu, kSixtieth, kHundredTwentieth, "steer_dt_113f38"},
+        {kFixSteer, 0x49b4d0u, 0x3d2aa635u, 0x3caaa635u, "lean_return_113fa8"},
+        {kFixSteer, 0x49b4d4u, 0x3dcccdc2u, 0x3d4ccdc2u, "crouch_return_113fd4"},
+        {kFixSteer, 0x49b4dcu, 0x3dcccdc2u, 0x3d523279u, "crouch_gain_114024"},
+        {kFixSteer, 0x49b4e0u, 0x3c23d7cfu, 0x3ba3d7cfu, "crouch_floor_114030"},
+        // FH10 rail: the rail slide handler 0x13af28 (selector P+0xde0 = 4) steps with f23 = R+0x300 *
+        // [0x49bf84] (single reader 0x13afc8), a private 1/60 dt: at 120 the rider slid along the rail
+        // at 2.2x speed (3455 vs 1558 u/s, same velocity vector). With 1/120: 1779/2159 vs 1558/2354 u/s,
+        // rail left at stock 6012 vs 6015 (common state s2-5700, fh10-r1/r2/r3).
+        {kFixRail, 0x49bf84u, kSixtieth, kHundredTwentieth, "rail_dt_13afc8"},
+        // FH10 reset: rider state 9 (0x12f398, the white-fade course reset) ramps +4 to 1 by R+0x300 *
+        // [0x49b9d4] (1/40, single reader 0x12f39c) per update: 41 updates in either mode, so 20.5 stock
+        // ticks at 120. Halved: 40.5 stock ticks vs stock 41 (fh10-r1/r2/r3).
+        {kFixReset, 0x49b9d4u, 0x3cccccceu, 0x3c4cccceu, "reset_fade_12f39c"},
+        // FH10 meter: 0x117fe0 posts the HUD boost meter (messages 5/6, 0x118950/0x1189b4); the shown
+        // fill moves toward the boost R+0x2f8 by [0x49b680]/[0x49b684] (1/60, single readers) per update,
+        // and the HUD (0x29ab40) clicks once per coil floor(10*fill). Stock fills 1/60 per stock tick;
+        // events filled 2x (coils every 3 vs 6 stock ticks, fh10-m1/m2).
+        {kFixMeter, 0x49b680u, kSixtieth, kHundredTwentieth, "meter_fill5_118950"},
+        {kFixMeter, 0x49b684u, kSixtieth, kHundredTwentieth, "meter_fill6_1189b4"},
+        // FH10 boost: the boost/uber machine 0x1200d0 (per rider, per update) steps its timers R+0x2e8,
+        // R+0x2ec, the uber timer R+0x2f0 (20 s / 60 s, set by 0x10e098/0x10e9e8) and the boost drains
+        // (0.005/s, 0.024/s in mode 2) by f20 = R+0x300 * [0x49b798] (1/60); [0x49b79c]/[0x49b7a0] are
+        // one-step thresholds on +0x2ec/+0x2f0. All single readers. Uber lab (boost poked to 0.99 before
+        // the first All-Peak landing): stock uber timer -1.00/s, drain -0.005/s; events -2.00/s (uber
+        // over in 10 s), -0.010/s; with these words -1.00/s, -0.005/s (fh10-u1/u2/u3).
+        {kFixBoost, 0x49b798u, kSixtieth, kHundredTwentieth, "boost_dt_1200d4"},
+        {kFixBoost, 0x49b79cu, kSixtieth, kHundredTwentieth, "boost_step_120124"},
+        {kFixBoost, 0x49b7a0u, kSixtieth, kHundredTwentieth, "uber_step_1201d8"},
     }};
     uint32_t mask = fixMask();
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
@@ -1538,6 +1587,236 @@ inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool re
     }
 }
 
+// ---- FH10 lab tools (env-only, diagnostic) ----------------------------------
+// PS2X_FH10_HIST=a-b[,c-d] (VBlank ticks, needs PS2X_FH1_TAP=1): counts every
+// dispatched call target inside each range and prints the counts when the
+// range ends, "fh10-hist range=a-b tgt=... n=...", largest first (1500 lines
+// per range). Comparing a crash, rail or meter window with a plain riding
+// window (or stock with events per stock second) names the functions that
+// run only there, or once per update.
+// PS2X_FH10_POKE=tick:addr:value[,...] (tick decimal, addr/value hex): writes
+// the 32-bit word at that VBlank (lab input, e.g. a full meter). It changes
+// the guest: lab boots only.
+struct Fh10Hist
+{
+    std::vector<std::pair<uint64_t, uint64_t>> ranges;
+    std::vector<uint32_t> keys, vals; // open addressing, tgt -> n
+};
+
+inline Fh10Hist &fh10Hist()
+{
+    static Fh10Hist h = [] {
+        Fh10Hist r;
+        const char *p = std::getenv("PS2X_FH10_HIST");
+        while (p && *p)
+        {
+            char *end = nullptr;
+            const uint64_t a = std::strtoull(p, &end, 10);
+            if (*end != '-') break;
+            const uint64_t b = std::strtoull(end + 1, &end, 10);
+            r.ranges.emplace_back(a, b);
+            if (*end != ',') break;
+            p = end + 1;
+        }
+        if (!r.ranges.empty())
+        {
+            r.keys.assign(1u << 16, 0u);
+            r.vals.assign(1u << 16, 0u);
+        }
+        return r;
+    }();
+    return h;
+}
+
+inline void fh10HistBranch(uint32_t targetPc)
+{
+    Fh10Hist &h = fh10Hist();
+    if (h.ranges.empty() || targetPc == 0u)
+        return;
+    bool in = false;
+    for (const auto &r : h.ranges)
+        in = in || (g_lastTick >= r.first && g_lastTick <= r.second);
+    if (!in)
+        return;
+    const uint32_t mask = (1u << 16) - 1u;
+    for (uint32_t i = (targetPc >> 2) & mask, n = 0; n <= mask; i = (i + 1u) & mask, ++n)
+    {
+        if (h.keys[i] == targetPc || h.keys[i] == 0u)
+        {
+            h.keys[i] = targetPc;
+            ++h.vals[i];
+            return;
+        }
+    }
+}
+
+inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
+{
+    static const std::vector<std::array<uint64_t, 3>> pokes = [] {
+        std::vector<std::array<uint64_t, 3>> v;
+        const char *p = std::getenv("PS2X_FH10_POKE");
+        while (p && *p)
+        {
+            char *end = nullptr;
+            const uint64_t t = std::strtoull(p, &end, 10);
+            if (*end != ':') break;
+            const uint64_t a = std::strtoull(end + 1, &end, 16);
+            if (*end != ':') break;
+            const uint64_t val = std::strtoull(end + 1, &end, 16);
+            v.push_back({t, a, val});
+            if (*end != ',') break;
+            p = end + 1;
+        }
+        return v;
+    }();
+    for (const auto &k : pokes)
+        if (k[0] == tick)
+        {
+            uint32_t old = 0u;
+            rd32(ram, static_cast<uint32_t>(k[1]), old);
+            wr32(ram, static_cast<uint32_t>(k[1]), static_cast<uint32_t>(k[2]));
+            std::fprintf(stderr, "fh10-poke tick=%llu addr=%08llx old=%08x new=%08llx\n",
+                         static_cast<unsigned long long>(tick), static_cast<unsigned long long>(k[1]), old,
+                         static_cast<unsigned long long>(k[2]));
+        }
+    // PS2X_FH10_MONO=T1,...,Tk[:lo-hi] (k 3..8, ticks decimal, range hex): at Tk
+    // prints every word in [lo,hi) that changed strictly monotonically across
+    // the k snapshots, as a float (finite, |v| < 1e7) or as an int (|step| <=
+    // 4096): "fh10-mono addr=... f|i=v1,...,vk" (4000 lines). Finds ramps that
+    // aren't linear (meter fills, eased counters); compare two modes offline.
+    static struct Mono
+    {
+        std::vector<uint64_t> t;
+        uint32_t lo = 0u, hi = PS2_RAM_SIZE;
+        std::vector<std::vector<uint32_t>> snap;
+    } mono = [] {
+        Mono m;
+        const char *p = std::getenv("PS2X_FH10_MONO");
+        while (p && *p && m.t.size() < 8u)
+        {
+            char *end = nullptr;
+            m.t.push_back(std::strtoull(p, &end, 10));
+            if (*end == ':')
+            {
+                m.lo = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+                if (*end == '-') m.hi = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+                break;
+            }
+            if (*end != ',') break;
+            p = end + 1;
+        }
+        if (m.t.size() < 3u)
+            m.t.clear();
+        m.hi = std::min<uint32_t>(m.hi, PS2_RAM_SIZE);
+        return m;
+    }();
+    for (size_t k = 0; k < mono.t.size(); ++k)
+    {
+        if (mono.t[k] != tick)
+            continue;
+        mono.snap.emplace_back((mono.hi - mono.lo) / 4u);
+        std::memcpy(mono.snap.back().data(), ram + mono.lo, mono.snap.back().size() * 4u);
+        if (k + 1u != mono.t.size() || mono.snap.size() != mono.t.size())
+            continue;
+        uint32_t hits = 0u;
+        const size_t n = mono.snap[0].size(), K = mono.snap.size();
+        for (size_t i = 0; i < n && hits < 4000u; ++i)
+        {
+            bool fUp = true, fDn = true, iUp = true, iDn = true, fin = true;
+            for (size_t j = 0; j < K; ++j)
+            {
+                float f = 0.0f;
+                std::memcpy(&f, &mono.snap[j][i], 4);
+                fin = fin && std::isfinite(f) && std::fabs(f) < 1e7f;
+            }
+            for (size_t j = 1; j < K; ++j)
+            {
+                float a = 0.0f, b = 0.0f;
+                std::memcpy(&a, &mono.snap[j - 1][i], 4);
+                std::memcpy(&b, &mono.snap[j][i], 4);
+                fUp = fUp && b > a;
+                fDn = fDn && b < a;
+                const int64_t d = static_cast<int64_t>(static_cast<int32_t>(mono.snap[j][i])) -
+                                  static_cast<int32_t>(mono.snap[j - 1][i]);
+                iUp = iUp && d > 0 && d <= 4096;
+                iDn = iDn && d < 0 && d >= -4096;
+            }
+            const bool asFloat = fin && (fUp || fDn), asInt = iUp || iDn;
+            if (!asFloat && !asInt)
+                continue;
+            ++hits;
+            char line[512];
+            int w = std::snprintf(line, sizeof(line), "fh10-mono addr=%08zx %s=", mono.lo + i * 4u, asFloat ? "f" : "i");
+            for (size_t j = 0; j < K; ++j)
+            {
+                float f = 0.0f;
+                std::memcpy(&f, &mono.snap[j][i], 4);
+                w += asFloat ? std::snprintf(line + w, sizeof(line) - w, "%s%.6g", j ? "," : "", f)
+                             : std::snprintf(line + w, sizeof(line) - w, "%s%d", j ? "," : "",
+                                             static_cast<int32_t>(mono.snap[j][i]));
+            }
+            std::fprintf(stderr, "%s\n", line);
+        }
+        std::fprintf(stderr, "fh10-mono done hits=%u\n", hits);
+        mono.snap.clear();
+    }
+    // PS2X_FH10_DUMP=dir:T1,T2,... (ticks decimal, up to 64): writes RDRAM as
+    // <dir>/ram-<tick>.bin at those VBlanks, for offline scans (32 MiB each).
+    static const std::pair<std::string, std::vector<uint64_t>> dump = [] {
+        std::pair<std::string, std::vector<uint64_t>> d;
+        const char *p = std::getenv("PS2X_FH10_DUMP");
+        const char *colon = p ? std::strchr(p, ':') : nullptr;
+        if (!colon)
+            return d;
+        d.first.assign(p, colon);
+        p = colon + 1;
+        while (*p && d.second.size() < 64u)
+        {
+            char *end = nullptr;
+            d.second.push_back(std::strtoull(p, &end, 10));
+            if (*end != ',') break;
+            p = end + 1;
+        }
+        return d;
+    }();
+    for (const uint64_t t : dump.second)
+        if (t == tick)
+        {
+            const std::string path = dump.first + "/ram-" + std::to_string(tick) + ".bin";
+            if (FILE *f = std::fopen(path.c_str(), "wb"))
+            {
+                std::fwrite(ram, 1, PS2_RAM_SIZE, f);
+                std::fclose(f);
+                std::fprintf(stderr, "fh10-dump tick=%llu path=%s\n", static_cast<unsigned long long>(tick), path.c_str());
+            }
+        }
+    Fh10Hist &h = fh10Hist();
+    for (const auto &r : h.ranges)
+    {
+        if (tick != r.second + 1u)
+            continue;
+        std::vector<std::pair<uint32_t, uint32_t>> out;
+        for (size_t i = 0; i < h.keys.size(); ++i)
+            if (h.keys[i])
+                out.emplace_back(h.vals[i], h.keys[i]);
+        std::sort(out.begin(), out.end(), [](const auto &x, const auto &y) {
+            return x.first != y.first ? x.first > y.first : x.second < y.second;
+        });
+        size_t lines = 0u;
+        for (const auto &e : out)
+        {
+            if (lines++ >= 1500u)
+                break;
+            std::fprintf(stderr, "fh10-hist range=%llu-%llu tgt=%06x n=%u\n", static_cast<unsigned long long>(r.first),
+                         static_cast<unsigned long long>(r.second), e.second, e.first);
+        }
+        std::fprintf(stderr, "fh10-hist done range=%llu-%llu targets=%zu\n", static_cast<unsigned long long>(r.first),
+                     static_cast<unsigned long long>(r.second), out.size());
+        std::fill(h.keys.begin(), h.keys.end(), 0u);
+        std::fill(h.vals.begin(), h.vals.end(), 0u);
+    }
+}
+
 // GT3: onBranch runs on every dispatched guest branch. Its predicates are
 // function-local statics, each an out-of-line guarded call (Odin All-Peak
 // full-120: onBranch ~10 % of GameThread cycles, nearly all predicate calls).
@@ -1635,6 +1914,7 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     Tap &t = tap();
     if (!t.on)
         return skip;
+    fh10HistBranch(targetPc);
     if (targetPc == kUpdateTarget)
         ++t.updates;
     else if (targetPc == kRenderTarget && !drawSkip)
@@ -1969,6 +2249,7 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
 {
     maybeCapture(gs, tick);
     scanVBlank(ram, tick);
+    fh10OnVBlank(ram, tick);
     g_lastTick = tick;
     if (mode() == Mode::Events)
     {
