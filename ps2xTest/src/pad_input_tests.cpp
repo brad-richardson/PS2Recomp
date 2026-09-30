@@ -996,16 +996,16 @@ void register_pad_input_tests()
             // Stamps at odd stock half-ticks (h*100000/11988 ms, h odd) come
             // only from 120 Hz reads: 8 = h 1, 25 = h 3, 41 = h 5, ...
             const std::string oddRows =
-                "8:cross:8,25:cross:8,41:cross:8,58:cross:8,75:cross:8,91:cross:8,108:cross:8,125:cross:8\n";
-            const std::string evenRows = "16:cross:16,33:cross:16,50:cross:16,66:cross:16,83:cross:16\n";
+                "8:cross:8,25:cross:8,41:cross:8,58:cross:8,75:cross:8,91:cross:8,108:cross:8,125:cross:8";
+            const std::string evenRows = "150:cross:16,166:cross:16,183:cross:16,200:cross:16,216:cross:16";
             const std::string v1 = "# padrec v1\n# start_utc=2026-09-30T18:29:55Z\n";
-            const std::string c1 = v1 + oddRows + evenRows;
-            const std::string c2 = "# padrec v1\r\n" + oddRows;
-            const std::string c3 = v1 + evenRows + evenRows;
-            const std::string c4 = "# padrec v2\n" + oddRows;
-            const std::string c5 = oddRows;
-            const std::string c6 = "# note\n# padrec v1\n" + oddRows;
-            const std::string c7 = v1 + "8:cross:8,25:cross:8,41:cross:8\n" + evenRows;
+            const std::string c1 = v1 + oddRows + "," + evenRows + "\n";
+            const std::string c2 = "# padrec v1\r\n" + oddRows + "\r\n";
+            const std::string c3 = v1 + evenRows + "\n";
+            const std::string c4 = "# padrec v2\n" + oddRows + "\n";
+            const std::string c5 = oddRows + "\n";
+            const std::string c6 = "# note\n# padrec v1\n" + oddRows + "\n";
+            const std::string c7 = v1 + "8:cross:8,25:cross:8,41:cross:8," + evenRows + "\n";
             const Case cases[] = {
                 {c1.c_str(), true, "v1 events recording (odd half-tick rows) keeps the FH5 clock"},
                 {c2.c_str(), true, "v1 events recording with CRLF keeps the FH5 clock"},
