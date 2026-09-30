@@ -577,10 +577,14 @@ namespace ps2_stubs
             return (tick * 100000ull) / (5994ull * ps2_fh1::vblankDivisor());
         }
 
-        // FH17: a recording stamped on the FH5 events clock ('# padrec v1'
-        // header) keeps that clock on replay. PS2X_PAD_SCRIPT_EVENTS_CLOCK=
-        // fh5|exact overrides the header for any script.
-        bool padScriptWantsLegacyEventsClock(const std::string &text)
+        // FH17: a recording stamped on the FH5 events clock keeps that clock
+        // on replay. Such a file is a '# padrec v1' recording made in events
+        // mode; v1 carries no full120 knob, so the stamps tell: only a 120 Hz
+        // read lands on an odd stock half-tick, and FH5 events recordings put
+        // about half their rows there (PB11: 2472 of 4990), stock and split120
+        // ones none (FV1/FH1 cuts: 0-1). PS2X_PAD_SCRIPT_EVENTS_CLOCK=
+        // fh5|exact overrides this for any script.
+        bool padScriptWantsLegacyEventsClock(const std::string &text, const std::vector<PadScriptEntry> &parsed)
         {
             if (const char *v = std::getenv("PS2X_PAD_SCRIPT_EVENTS_CLOCK"))
             {
@@ -589,7 +593,17 @@ namespace ps2_stubs
                 if (std::strcmp(v, "exact") == 0)
                     return false;
             }
-            return text.rfind("# padrec v1\n", 0) == 0 || text.rfind("# padrec v1\r\n", 0) == 0;
+            if (text.rfind("# padrec v1\n", 0) != 0 && text.rfind("# padrec v1\r\n", 0) != 0)
+                return false;
+            size_t odd = 0u;
+            for (const PadScriptEntry &e : parsed)
+            {
+                // Smallest half-tick h with floor(h * 100000 / 11988) >= atMs.
+                const uint64_t h = (e.atMs * 11988ull + 99999ull) / 100000ull;
+                if ((h * 100000ull) / 11988ull == e.atMs && (h & 1u) != 0u)
+                    ++odd;
+            }
+            return odd >= 8u && odd * 10u >= parsed.size();
         }
 
         void padScriptInstallLocked(const std::vector<PadScriptEntry> &parsed, const char *source)
@@ -684,7 +698,7 @@ namespace ps2_stubs
                                  path);
                     std::abort();
                 }
-                g_padScript.legacyEventsClock = padScriptWantsLegacyEventsClock(content);
+                g_padScript.legacyEventsClock = padScriptWantsLegacyEventsClock(content, parsed);
                 padScriptInstallLocked(parsed, "file");
                 return;
             }
@@ -694,7 +708,7 @@ namespace ps2_stubs
                 std::fprintf(stderr, "[padscript] ignoring malformed PS2X_PAD_SCRIPT\n");
                 return;
             }
-            g_padScript.legacyEventsClock = padScriptWantsLegacyEventsClock(spec);
+            g_padScript.legacyEventsClock = padScriptWantsLegacyEventsClock(spec, parsed);
             padScriptInstallLocked(parsed, "env");
         }
 
@@ -1240,8 +1254,8 @@ namespace ps2_stubs
             uint64_t saveHash = 0u, saveFiles = 0u;
             const bool saveOk = padRecordHashSaveSet(mcRaw, saveHash, saveFiles);
             // FH17: v2 = stamps are guest time in stock ms in every mode;
-            // v1 = events-mode spans stamped on the FH5 clock (half a tick
-            // early), which replays keep (padScriptWantsLegacyEventsClock).
+            // v1 = events-mode spans may be stamped on the FH5 clock (half a
+            // tick early), which replays keep (padScriptWantsLegacyEventsClock).
             const bool fh5Stamps = ps2_fh1::eventsMode() && !ps2_fh1::exactStockClock();
             std::fprintf(f,
                          "# padrec %s\n"
@@ -2555,7 +2569,7 @@ namespace ps2_stubs
         padScriptReadFile(path, content);
         std::lock_guard<std::mutex> lock(g_padScript.mutex);
         g_padScript.initDone = true;
-        g_padScript.legacyEventsClock = padScriptWantsLegacyEventsClock(content);
+        g_padScript.legacyEventsClock = padScriptWantsLegacyEventsClock(content, parsed);
         padScriptInstallLocked(parsed, "test");
         g_padScriptInitDone.store(true, std::memory_order_relaxed);
         return true;

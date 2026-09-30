@@ -993,12 +993,27 @@ void register_pad_input_tests()
                 bool legacy;
                 const char *what;
             };
+            // Stamps at odd stock half-ticks (h*100000/11988 ms, h odd) come
+            // only from 120 Hz reads: 8 = h 1, 25 = h 3, 41 = h 5, ...
+            const std::string oddRows =
+                "8:cross:8,25:cross:8,41:cross:8,58:cross:8,75:cross:8,91:cross:8,108:cross:8,125:cross:8\n";
+            const std::string evenRows = "16:cross:16,33:cross:16,50:cross:16,66:cross:16,83:cross:16\n";
+            const std::string v1 = "# padrec v1\n# start_utc=2026-09-30T18:29:55Z\n";
+            const std::string c1 = v1 + oddRows + evenRows;
+            const std::string c2 = "# padrec v1\r\n" + oddRows;
+            const std::string c3 = v1 + evenRows + evenRows;
+            const std::string c4 = "# padrec v2\n" + oddRows;
+            const std::string c5 = oddRows;
+            const std::string c6 = "# note\n# padrec v1\n" + oddRows;
+            const std::string c7 = v1 + "8:cross:8,25:cross:8,41:cross:8\n" + evenRows;
             const Case cases[] = {
-                {"# padrec v1\n# start_utc=2026-09-30T18:29:55Z\n1000:start:500\n", true, "v1 recording keeps the FH5 clock"},
-                {"# padrec v1\r\n1000:start:500\r\n", true, "v1 recording with CRLF keeps the FH5 clock"},
-                {"# padrec v2\n# start_utc=2026-10-01T00:00:00Z\n1000:start:500\n", false, "v2 recording reads the exact clock"},
-                {"1000:start:500\n", false, "a hand script reads the exact clock"},
-                {"# note\n# padrec v1\n1000:start:500\n", false, "only a first-line v1 header selects the FH5 clock"},
+                {c1.c_str(), true, "v1 events recording (odd half-tick rows) keeps the FH5 clock"},
+                {c2.c_str(), true, "v1 events recording with CRLF keeps the FH5 clock"},
+                {c3.c_str(), false, "v1 stock recording (even half-ticks only) reads the exact clock"},
+                {c4.c_str(), false, "v2 recording reads the exact clock"},
+                {c5.c_str(), false, "a hand script reads the exact clock"},
+                {c6.c_str(), false, "only a first-line v1 header selects the FH5 clock"},
+                {c7.c_str(), false, "fewer than 8 odd rows reads the exact clock"},
             };
             for (const Case &c : cases)
             {
