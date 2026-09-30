@@ -584,6 +584,20 @@ void EeScheduler::run()
     // unless PS2X_EE_FPMODE=ieee; restored when run() returns.
     ps2_fpmode::ScopedEeMode eeFpMode;
     m_running.store(true, std::memory_order_release);
+#if PS2X_EE_SIGJMP
+    // GT3: mask save as plain setjmp does it on this libc, unless
+    // PS2X_EE_JMP_NOMASK=1 (default off) drops the per-arm syscall.
+    {
+        const char *noMask = std::getenv("PS2X_EE_JMP_NOMASK");
+#if defined(__GLIBC__)
+        m_transferSaveMask = 0;
+#else
+        m_transferSaveMask = 1;
+#endif
+        if (noMask && std::strcmp(noMask, "1") == 0)
+            m_transferSaveMask = 0;
+    }
+#endif
     // PT2: cache the perf-log knob once (env is fixed before run()).
     // AD1: ADPF reuses this same accounting (no re-measure), so it turns the
     // accounting on too; knob-off is identical to before.
@@ -1081,7 +1095,11 @@ void EeScheduler::run()
         // the unwind exactly as before (E15 dev trace only).
         ps2_e15::Trace mpegTrace("scheduler",m_vsyncTick,m_rdram,&context,context.pc,0u,m_currentThreadId);
         ps2_guest_unwind::clear();
+#if PS2X_EE_SIGJMP
+        if (sigsetjmp(m_transferJmp, m_transferSaveMask) == 0)
+#else
         if (setjmp(m_transferJmp) == 0)
+#endif
         {
             m_transferArmed = true;
             try
@@ -1689,7 +1707,11 @@ void EeScheduler::raiseTransfer()
     if (m_transferArmed)
     {
         m_transferArmed = false;
+#if PS2X_EE_SIGJMP
+        siglongjmp(m_transferJmp, 1);
+#else
         longjmp(m_transferJmp, 1);
+#endif
     }
     throw EeDispatcherTransfer{};
 }

@@ -9,6 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <csetjmp>
+#include <setjmp.h>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -18,6 +19,13 @@
 #include <unordered_map>
 #include <variant>
 #include <vector>
+
+// GT3: POSIX hosts arm the transfer jump with sigsetjmp (see m_transferJmp).
+#if defined(__APPLE__) || defined(__ANDROID__) || defined(__linux__)
+#define PS2X_EE_SIGJMP 1
+#else
+#define PS2X_EE_SIGJMP 0
+#endif
 
 // This exception is the EE equivalent of a longjmp to the dispatcher.  It is
 // not an error and must only be caught at EeScheduler::run().
@@ -559,7 +567,18 @@ private:
     std::atomic<bool> m_guestExecuting{false};
     // CP4: non-exceptional transfer out of guest code (executor thread only,
     // set by run() around each guest call; run() is non-reentrant).
+    // GT3: sigsetjmp with a run()-time mask-save flag. Plain setjmp saves the
+    // signal mask with a syscall on bionic and Apple libc, once per arm
+    // (~1,075 arms per update in the full-120 All-Peak race);
+    // PS2X_EE_JMP_NOMASK=1 skips it. Knob off keeps each platform's setjmp
+    // semantics (bionic/Apple save the mask, glibc doesn't). Nothing on the
+    // executor changes the signal mask between an arm and its jump.
+#if PS2X_EE_SIGJMP
+    sigjmp_buf m_transferJmp{};
+#else
     std::jmp_buf m_transferJmp{};
+#endif
+    int m_transferSaveMask = 1;
     bool m_transferArmed = false;
     std::atomic<bool> m_stopRequested{false};
     std::atomic<bool> m_checkpointPending{false};

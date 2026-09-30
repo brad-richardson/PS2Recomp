@@ -221,6 +221,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_DEINTERLACE",
         "PS2X_DETERMINISTIC",
         "PS2X_EE_FPMODE",
+        "PS2X_EE_JMP_NOMASK",
         "PS2X_EVENT_CLOCK",
         "PS2X_FALLBACK_MAGENTA",
         "PS2X_GAME_THREAD_CPUS",
