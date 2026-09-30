@@ -120,6 +120,9 @@ namespace ps2_stubs
     // RP2: install a script from a file (same grammar); false when the
     // file cannot be read or parsed. Production never calls this.
     bool setPadScriptFromFileForTest(const char *path);
+    // FH17: true when the installed script replays on the FH5 events clock
+    // ('# padrec v1' header or PS2X_PAD_SCRIPT_EVENTS_CLOCK=fh5).
+    bool padScriptLegacyEventsClockForTest();
     void setPadScriptNowMsForTest(uint64_t nowMs);
     // E33: select the guest-vsync clock (vsyncTick * 1000/59.94 ms) instead
     // of the wall clock, and drive the tick explicitly.

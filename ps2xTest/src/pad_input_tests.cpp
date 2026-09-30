@@ -821,8 +821,11 @@ void register_pad_input_tests()
                 }
                 std::fclose(f);
             }
-            t.IsTrue(content.rfind("# padrec v1\n", 0) == 0,
-                     "recording starts with a header block");
+            t.IsTrue(content.rfind("# padrec v2\n", 0) == 0,
+                     "recording starts with a header block (v2: exact stock-time stamps)");
+            t.IsTrue(content.find("\n# full120 FULL120=") != std::string::npos &&
+                         content.find("events_clock=exact") != std::string::npos,
+                     "recording header carries the full120 knobs and its stamp clock");
             t.IsTrue(content.find("\n# knobs ") != std::string::npos,
                      "recording header carries knobs");
             t.IsTrue(content.find("VIF1_REVERSE_DMA=lagV") != std::string::npos,
@@ -980,6 +983,40 @@ void register_pad_input_tests()
             std::remove(filePath.c_str());
         });
 
+        tc.Run("pad script events clock follows the recording header (FH17)", [](TestCase &t)
+               {
+            const std::string filePath =
+                (std::filesystem::temp_directory_path() / "fh17_padscript_clock_test.txt").string();
+            struct Case
+            {
+                const char *text;
+                bool legacy;
+                const char *what;
+            };
+            const Case cases[] = {
+                {"# padrec v1\n# start_utc=2026-09-30T18:29:55Z\n1000:start:500\n", true, "v1 recording keeps the FH5 clock"},
+                {"# padrec v1\r\n1000:start:500\r\n", true, "v1 recording with CRLF keeps the FH5 clock"},
+                {"# padrec v2\n# start_utc=2026-10-01T00:00:00Z\n1000:start:500\n", false, "v2 recording reads the exact clock"},
+                {"1000:start:500\n", false, "a hand script reads the exact clock"},
+                {"# note\n# padrec v1\n1000:start:500\n", false, "only a first-line v1 header selects the FH5 clock"},
+            };
+            for (const Case &c : cases)
+            {
+                std::remove(filePath.c_str());
+                std::FILE *f = std::fopen(filePath.c_str(), "wb");
+                t.IsTrue(f != nullptr, "script file should be writable");
+                if (!f)
+                    continue;
+                std::fputs(c.text, f);
+                std::fclose(f);
+                t.IsTrue(ps2_stubs::setPadScriptFromFileForTest(filePath.c_str()), "script installs");
+                t.Equals(ps2_stubs::padScriptLegacyEventsClockForTest(), c.legacy, c.what);
+                ps2_stubs::clearPadScriptForTest();
+            }
+            t.IsTrue(!ps2_stubs::padScriptLegacyEventsClockForTest(), "clear resets the clock choice");
+            std::remove(filePath.c_str());
+        });
+
         tc.Run("pad script file missing is a clean failure", [](TestCase &t)
                {
             const std::string missing =
@@ -1089,7 +1126,7 @@ void register_pad_input_tests()
                     }
                     std::fclose(f);
                 }
-                t.IsTrue(content.rfind("# padrec v1\n", 0) == 0, "session file has header");
+                t.IsTrue(content.rfind("# padrec v2\n", 0) == 0, "session file has header");
                 std::vector<ps2_stubs::PadScriptEntry> entries;
                 t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries),
                          "session file parses as a script");

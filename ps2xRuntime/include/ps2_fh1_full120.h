@@ -84,8 +84,10 @@ inline bool g_commitActive = false; // committed at the last VBlankStart
 inline bool g_guestActive = false;  // guest words/hooks active
 inline bool g_flipPending = false;
 inline uint32_t g_divNext = 1u;     // divisor of the interval scheduled last
-inline uint32_t g_divThis = 1u;     // divisor of the interval that just ended
-inline std::atomic<uint64_t> g_stockHalf{0}; // elapsed stock half-periods (events)
+inline uint32_t g_divThis = 1u;     // FH5 (legacy): set to g_divNext at VBlankStart, i.e. the interval starting
+inline uint32_t g_divEnded = 1u;    // FH17: divisor of the interval that just ended
+inline std::atomic<uint64_t> g_stockHalf{0};       // FH5 accumulator (half a tick late while events is active)
+inline std::atomic<uint64_t> g_stockHalfExact{0};  // FH17: elapsed stock half-periods = guest time
 inline bool g_stockInit = false;
 
 // Guest VBlanks per stock VBlank period (static view: 2 in always mode).
@@ -102,6 +104,7 @@ inline uint32_t vblankDivisor() noexcept
 inline uint32_t schedDivisor() noexcept
 {
     const uint32_t d = vblankDivisor();
+    g_divEnded = g_divNext;
     g_divNext = d;
     return d;
 }
@@ -142,7 +145,7 @@ inline uint32_t eeClockShiftNow() noexcept
     return eeClockShift();
 }
 
-enum Fix : uint32_t
+enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
 {
     kFixRider = 1u << 0,     // K1-K4: rider integrators' private dt (class h)
     kFixCountdown = 1u << 1, // C1-C4 + solver quantum/epsilon/residual/gap (class c)
@@ -176,7 +179,7 @@ enum Fix : uint32_t
     kFixRclock = 1u << 29,   // render-frame clock (getter 0x395510, device +0x5a74) read at stock cadence: plant sway, frame deadlines (class e, FH13)
     kFixEmitter = 1u << 30,  // particle emitter frame step 0x370788 (callers 0x3459a8/0x345d80/0x345ef8): private 1/60 -> 1/120 (class h, FH13)
     kFixFx = 1u << 31,       // rider effects controller P+0xb40 (0x2e1120 glint timers, 0x2e1f70 fader) + board-wake scroll 0x2ef6d0: per-update steps halved (class b/h, FH13)
-    // Bits 0-31 are all used (FH13): the next group needs a 64-bit mask.
+    kFixClock2 = 1ull << 32, // events mode: stock-time accumulator counts the interval that ended, not the one scheduled (FH17)
 };
 
 // FH12 groups live in their own mask (the main mask's bits are taken). Same
@@ -226,9 +229,9 @@ inline uint32_t fixMask12() noexcept
     return mask;
 }
 
-inline uint32_t fixMask() noexcept
+inline uint64_t fixMask() noexcept
 {
-    static const uint32_t mask = [] {
+    static const uint64_t mask = []() -> uint64_t {
         const char *v = std::getenv("PS2X_SSX3_FULL120_FIX");
         if (!enabled() || !v || !*v)
             return 0u;
@@ -238,8 +241,8 @@ inline uint32_t fixMask() noexcept
                    kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim |
                    kFixBonus | kFixAiGate | kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset |
                    kFixMeter | kFixBoost | kFixGround | kFixEntry | kFixRclock |
-                   kFixEmitter | kFixFx; // kFixLift is opt-in (FH8: no window where it binds)
-        uint32_t m = 0u;
+                   kFixEmitter | kFixFx | kFixClock2; // kFixLift is opt-in (FH8: no window where it binds)
+        uint64_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
         {
@@ -276,6 +279,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "rclock") m |= kFixRclock;
             else if (item == "emitter") m |= kFixEmitter;
             else if (item == "fx") m |= kFixFx;
+            else if (item == "clock2") m |= kFixClock2;
             else if (fh12Item(item) != 0u) {} // FH12 mask (fixMask12)
             else if (!item.empty())
             {
@@ -289,6 +293,28 @@ inline uint32_t fixMask() noexcept
         return m;
     }();
     return mask;
+}
+
+// Stock-time views for host-side clocks (pad-script vsync clock, pad
+// recorder, CD field clock, [vsync-rate]): events mode reads the accumulator;
+// the other modes keep tick / vblankDivisor(). FIX clock2 (FH17) selects the
+// exact accumulator; without it the FH5 one (half a tick late while active).
+inline bool exactStockClock() noexcept
+{
+    return (fixMask() & kFixClock2) != 0u;
+}
+inline uint64_t stockHalfTicksLegacy() noexcept
+{
+    return g_stockHalf.load(std::memory_order_relaxed);
+}
+inline uint64_t stockHalfTicks() noexcept
+{
+    return exactStockClock() ? g_stockHalfExact.load(std::memory_order_relaxed) : stockHalfTicksLegacy();
+}
+// Half-periods the accumulator adds at the next VBlankStart.
+inline uint32_t stockHalfStepNext() noexcept
+{
+    return (exactStockClock() ? g_divNext : g_divThis) == 2u ? 1u : 2u;
 }
 
 inline constexpr uint32_t kMgrPtr = 0x4a5b64u;   // gp+0x2a74 -> A
@@ -318,7 +344,7 @@ inline bool wr32(uint8_t *ram, uint32_t addr, uint32_t val) noexcept
 
 struct Word
 {
-    uint32_t fix; // 0 = always (manager)
+    uint64_t fix; // 0 = always (manager)
     uint32_t address;
     uint32_t expected;
     uint32_t replacement;
@@ -345,8 +371,9 @@ inline void patchAtManagerInit(uint8_t *ram)
         std::abort();
     }
     applyWords(ram, a, true);
-    std::fprintf(stderr, "fh1-full120-armed manager=%08x rate=120 dt=%08x vblank_div=%u ee_x=%u fix=0x%x\n",
-                 a, kHundredTwentieth, vblankDivisor(), 1u << eeClockShift(), fixMask());
+    std::fprintf(stderr, "fh1-full120-armed manager=%08x rate=120 dt=%08x vblank_div=%u ee_x=%u fix=0x%llx\n",
+                 a, kHundredTwentieth, vblankDivisor(), 1u << eeClockShift(),
+                 static_cast<unsigned long long>(fixMask()));
 }
 
 inline std::vector<Word> labWords();
@@ -562,7 +589,7 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFixFx, 0x49f68cu, 0x3c23d70bu, 0x3ba3d70bu, "fx_fader_up_2e1fe0"},
         {kFixFx, 0x49f7b4u, 0x392ec33eu, 0x38aec33eu, "wake_scroll_2ef8bc"},
     }};
-    uint32_t mask = fixMask();
+    uint64_t mask = fixMask();
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
         mask |= kFixRamp;
     std::vector<Word> all;
@@ -1611,7 +1638,7 @@ inline void fh9OnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint
         if (t.lines++ < 6000u)
             std::fprintf(stderr, "fh9-st tick=%llu sh=%llu src=%06x %u->%u de0=%u\n",
                          static_cast<unsigned long long>(g_lastTick),
-                         static_cast<unsigned long long>(g_stockHalf.load(std::memory_order_relaxed)), src, de4, a1,
+                         static_cast<unsigned long long>(stockHalfTicks()), src, de4, a1,
                          de0);
         return;
     }
@@ -1630,7 +1657,7 @@ inline void fh9OnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint
             if (t.lines++ < 6000u)
                 std::fprintf(stderr, "fh9-g7 tick=%llu sh=%llu de4=%u de0=%u\n",
                              static_cast<unsigned long long>(g_lastTick),
-                             static_cast<unsigned long long>(g_stockHalf.load(std::memory_order_relaxed)), de4, de0);
+                             static_cast<unsigned long long>(stockHalfTicks()), de4, de0);
         }
         return;
     }
@@ -1656,7 +1683,7 @@ inline void fh9OnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint
         if (ch == 2 && t.lines++ < 6000u)
             std::fprintf(stderr, "fh9-end tick=%llu sh=%llu ch=%d de4=%u de0=%u time=%g len=%g\n",
                          static_cast<unsigned long long>(g_lastTick),
-                         static_cast<unsigned long long>(g_stockHalf.load(std::memory_order_relaxed)), ch, de4, de0,
+                         static_cast<unsigned long long>(stockHalfTicks()), ch, de4, de0,
                          fh9F(ram, a0 + 8u), fh9F(ram, a0 + 0x10u));
     }
     const float f12 = ctx->f[12], f13 = ctx->f[13];
@@ -1697,7 +1724,7 @@ inline void fh9OnVBlank(uint64_t tick)
     char line[4096];
     int n = std::snprintf(line, sizeof(line), "fh9-tap tick=%llu sh=%llu g7=%u/%u/%u",
                           static_cast<unsigned long long>(tick),
-                          static_cast<unsigned long long>(g_stockHalf.load(std::memory_order_relaxed)), t.g12e8,
+                          static_cast<unsigned long long>(stockHalfTicks()), t.g12e8,
                           t.g12e8Flag, t.g12e8Flag4);
     for (int k = 0; k < 16; ++k)
         if (t.st[k])
@@ -2663,16 +2690,24 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
             // carries stock history up to tick-1.
             g_stockInit = true;
             g_stockHalf.store(2u * (tick - 1u), std::memory_order_relaxed);
+            g_stockHalfExact.store(2u * (tick - 1u), std::memory_order_relaxed);
         }
+        // FH5 counted by the interval scheduled at this VBlank (schedDivisor
+        // runs before processEvent): the full interval before the entry VBlank
+        // counts as a half, and the half before the exit VBlank as a full.
         g_stockHalf.fetch_add(g_divThis == 2u ? 1u : 2u, std::memory_order_relaxed);
+        // FH17: count the interval that just ended.
+        g_stockHalfExact.fetch_add(g_divEnded == 2u ? 1u : 2u, std::memory_order_relaxed);
         if (g_commitActive != g_schedActive)
         {
             g_commitActive = g_schedActive;
             g_flipPending = true;
             static uint32_t lines = 0u;
             if (lines++ < 64u)
-                std::fprintf(stderr, "fh1-events commit %s tick=%llu\n", g_commitActive ? "enter" : "exit",
-                             static_cast<unsigned long long>(tick));
+                std::fprintf(stderr, "fh1-events commit %s tick=%llu half=%llu legacy=%llu\n",
+                             g_commitActive ? "enter" : "exit", static_cast<unsigned long long>(tick),
+                             static_cast<unsigned long long>(g_stockHalfExact.load(std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(stockHalfTicksLegacy()));
         }
     }
     if (mode() == Mode::Always && !g_patched)
@@ -2750,12 +2785,5 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
         }
     }
     std::fprintf(stderr, "%s\n", line);
-}
-// Stock-time views for host-side clocks (pad-script vsync clock, CD field
-// clock, [vsync-rate]): events mode reads the accumulator; the other modes
-// keep tick / vblankDivisor().
-inline uint64_t stockHalfTicks() noexcept
-{
-    return g_stockHalf.load(std::memory_order_relaxed);
 }
 } // namespace ps2_fh1

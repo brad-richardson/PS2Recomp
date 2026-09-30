@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <string>
@@ -335,6 +336,10 @@ namespace ps2_stubs
             // E33: vsync clock. When true, entry atMs/holdMs count guest
             // time (vsyncTick * 1000/59.94 ms) instead of host wall ms.
             bool vsyncClock = false;
+            // FH17: events mode reads the FH5 stock-time accumulator (half a
+            // tick late while active) for '# padrec v1' recordings, so they
+            // replay as recorded; everything else reads the exact one.
+            bool legacyEventsClock = false;
             bool testVsyncSet = false;
             uint64_t testVsyncTick = 0u;
             std::chrono::steady_clock::time_point startWall{};
@@ -562,13 +567,29 @@ namespace ps2_stubs
 
         // E33: guest-vsync clock maps a vsync tick to guest milliseconds.
         // 1000 ms per 59.94 vsyncs: ms = tick * 100000 / 5994.
-        uint64_t padScriptVsyncTickToMs(uint64_t tick)
+        uint64_t padScriptVsyncTickToMs(uint64_t tick, bool legacyEventsClock = false)
         {
             // FH1: full120 guest VBlanks are half-periods; keep stock ms.
             // FH5 events mode: the stock-time accumulator (half-periods).
             if (ps2_fh1::eventsMode())
-                return (ps2_fh1::stockHalfTicks() * 100000ull) / (5994ull * 2ull);
+                return ((legacyEventsClock ? ps2_fh1::stockHalfTicksLegacy() : ps2_fh1::stockHalfTicks()) *
+                        100000ull) / (5994ull * 2ull);
             return (tick * 100000ull) / (5994ull * ps2_fh1::vblankDivisor());
+        }
+
+        // FH17: a recording stamped on the FH5 events clock ('# padrec v1'
+        // header) keeps that clock on replay. PS2X_PAD_SCRIPT_EVENTS_CLOCK=
+        // fh5|exact overrides the header for any script.
+        bool padScriptWantsLegacyEventsClock(const std::string &text)
+        {
+            if (const char *v = std::getenv("PS2X_PAD_SCRIPT_EVENTS_CLOCK"))
+            {
+                if (std::strcmp(v, "fh5") == 0)
+                    return true;
+                if (std::strcmp(v, "exact") == 0)
+                    return false;
+            }
+            return text.rfind("# padrec v1\n", 0) == 0 || text.rfind("# padrec v1\r\n", 0) == 0;
         }
 
         void padScriptInstallLocked(const std::vector<PadScriptEntry> &parsed, const char *source)
@@ -583,9 +604,10 @@ namespace ps2_stubs
             g_padScript.startWall = std::chrono::steady_clock::now();
             g_padScript.enabled = true;
             g_padScriptArmed.store(true, std::memory_order_relaxed);
-            std::fprintf(stderr, "[padscript] armed n=%llu source=%s clock=%s\n",
+            std::fprintf(stderr, "[padscript] armed n=%llu source=%s clock=%s events_clock=%s\n",
                          static_cast<unsigned long long>(g_padScript.entries.size()), source,
-                         g_padScript.vsyncClock ? "vsync" : "wall");
+                         g_padScript.vsyncClock ? "vsync" : "wall",
+                         g_padScript.legacyEventsClock ? "fh5" : "exact");
         }
 
         // RP2: reads a '@'-file script into `out`. False on any failure
@@ -662,6 +684,7 @@ namespace ps2_stubs
                                  path);
                     std::abort();
                 }
+                g_padScript.legacyEventsClock = padScriptWantsLegacyEventsClock(content);
                 padScriptInstallLocked(parsed, "file");
                 return;
             }
@@ -671,6 +694,7 @@ namespace ps2_stubs
                 std::fprintf(stderr, "[padscript] ignoring malformed PS2X_PAD_SCRIPT\n");
                 return;
             }
+            g_padScript.legacyEventsClock = padScriptWantsLegacyEventsClock(spec);
             padScriptInstallLocked(parsed, "env");
         }
 
@@ -694,7 +718,7 @@ namespace ps2_stubs
             if (g_padScript.vsyncClock)
             {
                 const uint64_t tick = g_padScript.testVsyncSet ? g_padScript.testVsyncTick : guestVsyncTick;
-                return padScriptVsyncTickToMs(tick);
+                return padScriptVsyncTickToMs(tick, g_padScript.legacyEventsClock);
             }
             const auto now = std::chrono::steady_clock::now();
             return static_cast<uint64_t>(
@@ -864,8 +888,7 @@ namespace ps2_stubs
         {
             if (ps2_fh1::eventsMode() && !g_padRecord.testTickSet)
             {
-                const uint64_t half = ps2_fh1::stockHalfTicks() +
-                                      (next ? (ps2_fh1::g_divThis == 2u ? 1u : 2u) : 0u);
+                const uint64_t half = ps2_fh1::stockHalfTicks() + (next ? ps2_fh1::stockHalfStepNext() : 0u);
                 return (half * 100000ull) / (5994ull * 2ull);
             }
             return padScriptVsyncTickToMs(next ? tick + 1u : tick);
@@ -1216,15 +1239,28 @@ namespace ps2_stubs
             const char *mcRaw = std::getenv("PS2X_MC_ROOT");
             uint64_t saveHash = 0u, saveFiles = 0u;
             const bool saveOk = padRecordHashSaveSet(mcRaw, saveHash, saveFiles);
+            // FH17: v2 = stamps are guest time in stock ms in every mode;
+            // v1 = events-mode spans stamped on the FH5 clock (half a tick
+            // early), which replays keep (padScriptWantsLegacyEventsClock).
+            const bool fh5Stamps = ps2_fh1::eventsMode() && !ps2_fh1::exactStockClock();
             std::fprintf(f,
-                         "# padrec v1\n"
+                         "# padrec %s\n"
                          "# start_utc=%s\n"
                          "# build=%s\n"
                          "# env_sha=%s\n"
                          "# knobs SIM_MODE=%s VU1_ENGINE=%s MTVU=%s FINISH_TIMING=%s "
                          "DETERMINISTIC=%s VU_FLOAT=%s VIF1_REVERSE_DMA=%s\n",
-                         startUtc, ps2x::buildId(), ps2x::recordedEnvFileHash(), sim, vu1, mtvu,
-                         finish, det, vfloat, revdma);
+                         fh5Stamps ? "v1" : "v2", startUtc, ps2x::buildId(), ps2x::recordedEnvFileHash(), sim,
+                         vu1, mtvu, finish, det, vfloat, revdma);
+            {
+                char f120[64], fix[256];
+                std::snprintf(f120, sizeof(f120), "%s", padRecordKnob("PS2X_SSX3_FULL120"));
+                std::snprintf(fix, sizeof(fix), "%s", padRecordKnob("PS2X_SSX3_FULL120_FIX"));
+                padRecordSanitize(f120);
+                padRecordSanitize(fix);
+                std::fprintf(f, "# full120 FULL120=%s FULL120_FIX=%s events_clock=%s\n", f120, fix,
+                             fh5Stamps ? "fh5" : "exact");
+            }
             if (saveOk)
             {
                 std::fprintf(f, "# mcroot=%s mcsave=%016llx mcfiles=%llu\n", mcroot,
@@ -2515,11 +2551,20 @@ namespace ps2_stubs
         {
             return false;
         }
+        std::string content;
+        padScriptReadFile(path, content);
         std::lock_guard<std::mutex> lock(g_padScript.mutex);
         g_padScript.initDone = true;
+        g_padScript.legacyEventsClock = padScriptWantsLegacyEventsClock(content);
         padScriptInstallLocked(parsed, "test");
         g_padScriptInitDone.store(true, std::memory_order_relaxed);
         return true;
+    }
+
+    bool padScriptLegacyEventsClockForTest()
+    {
+        std::lock_guard<std::mutex> lock(g_padScript.mutex);
+        return g_padScript.legacyEventsClock;
     }
 
     void setPadScriptNowMsForTest(uint64_t nowMs)
@@ -2548,6 +2593,7 @@ namespace ps2_stubs
         g_padScript.initDone = true;
         g_padScript.enabled = false;
         g_padScript.vsyncClock = false;
+        g_padScript.legacyEventsClock = false;
         g_padScript.testVsyncSet = false;
         g_padScript.testVsyncTick = 0u;
         g_padScript.entries.clear();
