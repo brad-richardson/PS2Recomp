@@ -13,6 +13,7 @@ void register_ps2_present_vk_ledger_tests();
 void register_ps2_virtual_pad_tests();
 void register_ps2_env_file_tests();
 void register_ps2_ssx3_course_manifest_tests();
+void register_ps2_ssx3_tricky_menu_tests();
 void register_ps2_cd_overlay_tests();
 void register_ps2_android_env_tests();
 void register_ps2_knobs_tests();
@@ -74,6 +75,7 @@ int main()
     register_ps2_virtual_pad_tests();
     register_ps2_env_file_tests();
     register_ps2_ssx3_course_manifest_tests();
+    register_ps2_ssx3_tricky_menu_tests();
     register_ps2_cd_overlay_tests();
     register_ps2_android_env_tests();
     register_ps2_knobs_tests();

@@ -53,6 +53,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_virtual_pad_tests.cpp
     src/ps2_env_file_tests.cpp
     src/ps2_ssx3_course_manifest_tests.cpp
+    src/ps2_ssx3_tricky_menu_tests.cpp
     src/ps2_cd_overlay_tests.cpp
     src/ps2_android_env_tests.cpp
     src/ps2_knobs_tests.cpp

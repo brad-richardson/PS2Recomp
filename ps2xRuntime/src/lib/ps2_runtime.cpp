@@ -20,6 +20,7 @@
 #include "ps2_gfx_stats.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_ssx3_course_manifest.h"
+#include "ps2_ssx3_tricky_menu.h"
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
 #include "ps2_park_snapshot.h"
@@ -688,6 +689,236 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-full120-clock",
                            0x00100008u,
                            0u,
                            applyFh1Full120);
+
+// TK11: Tricky mode frontend entry (PS2X_SSX3_TRICKY_MENU=1, default off;
+// ps2_ssx3_tricky_menu.h). Every wrapper acts at its function's entry (or,
+// for the scePadRead glue, after a stub that never calls guest code), so an
+// EE checkpoint unwind never skips hook work. Knob off: nothing is wrapped.
+namespace
+{
+    PS2Runtime::RecompiledFunction g_tkMenuBuild = nullptr;
+    PS2Runtime::RecompiledFunction g_tkMenuEvent = nullptr;
+    PS2Runtime::RecompiledFunction g_tkMapFill = nullptr;
+    PS2Runtime::RecompiledFunction g_tkPadGlue = nullptr;
+    PS2Runtime::RecompiledFunction g_tkLuiLoad = nullptr;
+    PS2Runtime::RecompiledFunction g_tkTrampoline = nullptr;
+    __m128i g_tkV0{}; // scePadRead's return registers across a list refresh
+    __m128i g_tkV1{};
+
+    void tkLog(PS2Runtime *runtime, const std::string &msg)
+    {
+        if (msg.empty())
+            return;
+        const unsigned long long tick =
+            runtime ? static_cast<unsigned long long>(runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed))
+                    : 0ull;
+        std::fprintf(stderr, "[ssx3-tricky] tick=%llu %s\n", tick, msg.c_str());
+    }
+
+    void tkSetGpr(R5900Context *ctx, int reg, uint32_t value)
+    {
+        ctx->r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(value)));
+    }
+
+    // Patches every CMNAMER copy in RAM (the game reads it once at boot).
+    void tkPatchLabel(uint8_t *rdram, PS2Runtime *runtime)
+    {
+        using namespace ps2_ssx3_tricky;
+        State &s = state();
+        for (uint32_t a = findLoc(rdram, PS2_RAM_SIZE, kCmnAmer); a; a = findLoc(rdram, PS2_RAM_SIZE, kCmnAmer, a + 4u))
+        {
+            std::string msg;
+            const int r = patchLabel(rdram, PS2_RAM_SIZE, a, msg);
+            if (r < 0)
+                s.labelRefused = true;
+            else
+                s.labelDone = true;
+            tkLog(runtime, msg);
+        }
+    }
+
+    // Main-menu build (0x194D18 runs once per row as the menu appears):
+    // leaving Single Event or quitting to the title lands here, so Tricky
+    // mode ends and the Map controller is forgotten.
+    void tkMenuBuildWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        using namespace ps2_ssx3_tricky;
+        State &s = state();
+        s.mapController = 0u;
+        if (s.tricky)
+        {
+            std::string msg;
+            modeSet(rdram, false, msg);
+            s.tricky = false;
+            tkLog(runtime, msg.empty() ? "mode: Tricky off (main menu)" : msg);
+        }
+        // The build calls this once per row: scan FEAMER (reloaded at each
+        // frontend entry) once per tick.
+        static uint64_t helpTick = ~0ull;
+        const uint64_t tick = runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
+        for (uint32_t a = tick == helpTick ? 0u : findLoc(rdram, PS2_RAM_SIZE, kFeAmer); a;
+             a = findLoc(rdram, PS2_RAM_SIZE, kFeAmer, a + 4u))
+        {
+            std::string msg;
+            patchHelp(rdram, PS2_RAM_SIZE, a, msg);
+            tkLog(runtime, msg);
+        }
+        helpTick = tick;
+        g_tkMenuBuild(rdram, ctx, runtime);
+    }
+
+    // Main-menu event handler (this, item, event): on X, Online takes the
+    // Single Event state and turns Tricky mode on; any other row turns it off.
+    void tkMenuEventWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        using namespace ps2_ssx3_tricky;
+        State &s = state();
+        const uint32_t item = getRegU32(ctx, 5) & 0x1FFFFFFFu;
+        if (getRegU32(ctx, 6) == kEventAccept && item && item + 0x40u < PS2_RAM_SIZE)
+        {
+            const uint32_t st = ps2_ssx3_tricky::rd32(rdram, item + kItemState);
+            bool online = false;
+            const uint32_t next = onMainMenuAccept(ps2_ssx3_tricky::rd32(rdram, item + kItemWidgetHash), st, online);
+            std::string msg;
+            if (online)
+            {
+                ps2_ssx3_tricky::wr32(rdram, item + kItemState, next);
+                s.tricky = true;
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "main menu: Tricky Courses -> Single Event (item 0x%06x state 0x%x -> 0x%x)",
+                              item, st, next);
+                tkLog(runtime, buf);
+                modeSet(rdram, true, msg);
+                ps2_savestate::noteQuickStatus("Tricky Courses");
+            }
+            else if (s.tricky)
+            {
+                modeSet(rdram, false, msg);
+                s.tricky = false;
+            }
+            tkLog(runtime, msg);
+        }
+        g_tkMenuEvent(rdram, ctx, runtime);
+    }
+
+    void tkMapFillWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        ps2_ssx3_tricky::state().mapController = getRegU32(ctx, 4);
+        g_tkMapFill(rdram, ctx, runtime);
+    }
+
+    // scePadRead glue: the stub (TK7/TK9 chord inside) sets pc = ra and never
+    // calls guest code. After a chord changed the rows while the Map screen is known,
+    // return into 0x200DE8(controller) with ra = the trampoline instead.
+    void tkPadGlueWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        using namespace ps2_ssx3_tricky;
+        static uint8_t rows[kRowsBytes + kTopoBytes];
+        const bool armed = rowsArmed();
+        if (armed)
+        {
+            std::memcpy(rows, rdram + ps2_ssx3_course::kEventBase, kRowsBytes);
+            std::memcpy(rows + kRowsBytes, rdram + ps2_ssx3_course::kTopoBase, kTopoBytes);
+        }
+        g_tkPadGlue(rdram, ctx, runtime);
+        State &s = state();
+        if (!s.labelDone && !s.labelRefused)
+            tkPatchLabel(rdram, runtime);
+        if (ps2_ssx3_course::appUpdateFn(rdram) == ps2_ssx3_course::kGameUpdate)
+        {
+            s.mapController = 0u;
+            return;
+        }
+        if (!armed || s.redirect || !s.mapController ||
+            (std::memcmp(rows, rdram + ps2_ssx3_course::kEventBase, kRowsBytes) == 0 &&
+             std::memcmp(rows + kRowsBytes, rdram + ps2_ssx3_course::kTopoBase, kTopoBytes) == 0))
+            return;
+        s.redirect = true;
+        s.returnPc = ctx->pc;
+        s.sp = getRegU32(ctx, 29);
+        g_tkV0 = ctx->r[2];
+        g_tkV1 = ctx->r[3];
+        tkSetGpr(ctx, 31, kTrampoline);
+        tkSetGpr(ctx, 4, s.mapController);
+        ctx->pc = kMapFill;
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "list refresh: 0x%x(0x%x), then back to 0x%x", kMapFill, s.mapController,
+                      s.returnPc);
+        tkLog(runtime, buf);
+    }
+
+    void tkTrampolineWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        using namespace ps2_ssx3_tricky;
+        State &s = state();
+        if (s.redirect && getRegU32(ctx, 29) == s.sp)
+        {
+            ctx->r[2] = g_tkV0;
+            ctx->r[3] = g_tkV1;
+            tkSetGpr(ctx, 31, s.returnPc);
+            ctx->pc = s.returnPc;
+            s.redirect = false;
+            ++s.refreshes;
+            tkLog(runtime, "list refreshed #" + std::to_string(s.refreshes));
+            return;
+        }
+        tkLog(runtime, "trampoline reached without a pending refresh (sp mismatch or no redirect)");
+        g_tkTrampoline(rdram, ctx, runtime);
+    }
+
+    void tkLuiLoadWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        tkPatchLabel(rdram, runtime);
+        g_tkLuiLoad(rdram, ctx, runtime);
+    }
+
+    void applyTrickyMenu(PS2Runtime &runtime)
+    {
+        using namespace ps2_ssx3_tricky;
+        if (!knob())
+            return;
+        const uint8_t *ram = runtime.memory().getRDRAM();
+        for (const EntryWord &w : kEntryWords)
+            if (!ram || ps2_ssx3_tricky::rd32(ram, w.pc) != w.word)
+            {
+                std::fprintf(stderr, "[ssx3-tricky] refused: 0x%x reads 0x%08x, expected 0x%08x; nothing wrapped\n",
+                             w.pc, ram ? ps2_ssx3_tricky::rd32(ram, w.pc) : 0u, w.word);
+                return;
+            }
+        struct Hook
+        {
+            uint32_t pc;
+            PS2Runtime::RecompiledFunction *orig;
+            PS2Runtime::RecompiledFunction wrap;
+        };
+        const Hook hooks[] = {{kMainMenuItemState, &g_tkMenuBuild, &tkMenuBuildWrapper},
+                              {kMainMenuEvent, &g_tkMenuEvent, &tkMenuEventWrapper},
+                              {kMapFill, &g_tkMapFill, &tkMapFillWrapper},
+                              {kPadReadGlue, &g_tkPadGlue, &tkPadGlueWrapper},
+                              {kLuiLoad, &g_tkLuiLoad, &tkLuiLoadWrapper},
+                              {kTrampoline, &g_tkTrampoline, &tkTrampolineWrapper}};
+        for (const Hook &h : hooks)
+            if (!(*h.orig = runtime.lookupFunction(h.pc)))
+            {
+                std::fprintf(stderr, "[ssx3-tricky] refused: no function at 0x%x; nothing wrapped\n", h.pc);
+                return;
+            }
+        for (const Hook &h : hooks)
+            if (!runtime.replaceFunction(h.pc, h.wrap))
+            {
+                std::fprintf(stderr, "[ssx3-tricky] cannot wrap 0x%x\n", h.pc);
+                std::abort();
+            }
+        state().on = true;
+        std::fprintf(stderr, "[ssx3-tricky] armed: Online -> Tricky Courses, Select Event refresh after picker switches\n");
+    }
+}
+
+PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-menu",
+                           "SLUS_207.72",
+                           0x00100008u,
+                           0u,
+                           applyTrickyMenu);
 
 // K1 P0: env-gated presentation-frame capture (PS2X_FRAME_DUMP_DIR).
 // Unset/empty = disabled (zero behavior change). When set, saves the
