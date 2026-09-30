@@ -13,6 +13,8 @@
      I25: landscape only, UILaunchScreen (without it iOS runs the app in
      legacy screen-size mode), status bar hidden, full screen, and
      Documents visible in the Files app (for an overriding ps2x.env).
+     IQ1: CADisableMinimumFrameDurationOnPhone lets an iPhone ProMotion panel
+     run above 60 Hz; inert unless something asks for more (PS2X_DISPLAY_HZ=120).
      Referenced from the PS2X_IS_IOS block via MACOSX_BUNDLE_INFO_PLIST. -->
 <plist version="1.0">
 <dict>
@@ -61,6 +63,8 @@
 	<key>UIRequiresFullScreen</key>
 	<true/>
 	<key>UIStatusBarHidden</key>
+	<true/>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>
 	<true/>

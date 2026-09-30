@@ -10,6 +10,7 @@
 #include <SDL2/SDL_syswm.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <QuartzCore/QuartzCore.h>
 #include <CoreFoundation/CoreFoundation.h>
 
 #include <cstdio>
@@ -51,7 +52,28 @@ bool autoRouteEnabled()
 {
     return settingEnabled(CFSTR("autoRoute"));
 }
+
+// IQ1: Settings.bundle "Target 120 fps" switch. Unset = off (unlike the
+// switches above), so a fresh install keeps today's 60 behaviour.
+bool target120Enabled()
+{
+    Boolean valid = false;
+    const Boolean value = CFPreferencesGetAppBooleanValue(CFSTR("target120"), kCFPreferencesCurrentApplication, &valid);
+    return valid && value;
+}
 } // namespace
+
+// IQ1: the display link only carries the 120 Hz frame-rate request; its
+// callback does nothing (raylib's loop presents through EAGL).
+@interface PS2XDisplayRateTarget : NSObject
+- (void)tick:(CADisplayLink *)link;
+@end
+@implementation PS2XDisplayRateTarget
+- (void)tick:(CADisplayLink *)link
+{
+    (void)link;
+}
+@end
 
 namespace ps2x::ios
 {
@@ -86,15 +108,27 @@ void prepareEnvironment(const char *argv0)
         {"DOCUMENTS", documents.string()},
     };
 
-    std::string bundleRaw, documentsRaw;
+    std::string bundleRaw, presetRaw, documentsRaw;
+    // IQ1: Settings > Target 120 fps layers the bundled full-120 preset over
+    // the bundled env; Documents/ps2x.env still wins over both.
+    const bool target120 = target120Enabled();
+    std::vector<std::pair<std::string, std::string>> preset;
+    if (target120)
+    {
+        preset = readEnvFile(bundle / "full120.env", &presetRaw);
+        std::fprintf(stderr, "[ios-env] Settings: Target 120 on -> full120.env layer keys=%zu\n", preset.size());
+    }
     const auto merged = ps2x::mergeEnvLayers(
-        {readEnvFile(bundle / "ps2x.env", &bundleRaw), readEnvFile(documents / "ps2x.env", &documentsRaw)},
+        {readEnvFile(bundle / "ps2x.env", &bundleRaw), preset, readEnvFile(documents / "ps2x.env", &documentsRaw)},
         launcherKeys, vars);
     // PL1: stash the raw bytes' hash for the padrec header's env_sha (both
-    // layers, NUL-separated; empty when neither file exists).
-    if (!bundleRaw.empty() || !documentsRaw.empty())
+    // layers, NUL-separated; empty when neither file exists). IQ1: the preset
+    // joins as a third field only when the switch is on (off keeps the hash).
+    if (!bundleRaw.empty() || !documentsRaw.empty() || !presetRaw.empty())
     {
-        const std::string both = bundleRaw + '\0' + documentsRaw;
+        std::string both = bundleRaw + '\0' + documentsRaw;
+        if (target120)
+            both += '\0' + presetRaw;
         ps2x::setRecordedEnvFileHash(ps2x::fnv1a64Hex(both));
     }
     for (const auto &[key, value] : merged)
@@ -197,6 +231,25 @@ void syncWindowSize()
     event.window.data1 = w;
     event.window.data2 = h;
     SDL_PushEvent(&event);
+}
+
+void requestDisplayRate(int hz)
+{
+    static CADisplayLink *s_link = nil;
+    static PS2XDisplayRateTarget *s_target = nil;
+    const NSInteger maxFps = UIScreen.mainScreen.maximumFramesPerSecond;
+    if (hz <= 60 || s_link != nil)
+    {
+        std::fprintf(stderr, "[ios-display] hz=%d max_fps=%ld (no request)\n", hz, static_cast<long>(maxFps));
+        return;
+    }
+    s_target = [[PS2XDisplayRateTarget alloc] init];
+    s_link = [CADisplayLink displayLinkWithTarget:s_target selector:@selector(tick:)];
+    const float want = static_cast<float>(hz);
+    s_link.preferredFrameRateRange = CAFrameRateRangeMake(want, want, want);
+    [s_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    std::fprintf(stderr, "[ios-display] hz=%d max_fps=%ld display-link range=%.0f requested\n", hz,
+                 static_cast<long>(maxFps), want);
 }
 
 std::string perfDeviceState()

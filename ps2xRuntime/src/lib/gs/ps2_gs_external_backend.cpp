@@ -561,10 +561,13 @@ public:
                 frame.displayFbp = static_cast<uint32_t>(request.dispfb1 & 0x1ffu);
                 frame.sourceFbp = frame.displayFbp;
             }
-            else
+            else if (!(iosPresentUnpaced() && ps2x_present_share::enabled()))
             {
                 snapshotToFrame(request, frame);
             }
+            // IQ1 (PS2X_PRESENT_UNPACED=1, benchmark-only): a busy pool never
+            // falls back to the synchronous CPU snapshot; the host keeps
+            // showing the newest published surface.
 #else
             {
                 snapshotToFrame(request, frame);
@@ -813,6 +816,13 @@ public:
             m_perVsyncLive = true;
             presentAhb(tick);
         }
+#elif defined(PS2X_GE1_STATIC_IOSURFACE)
+        // IQ1 (FH6 on iOS, PS2X_PRESENT_PER_VSYNC=1, output-only): export every
+        // guest frame into the IOSurface mailbox right after GE1's VSync; the
+        // host loop stops latching once it shows a shared frame. A busy pool
+        // drops this frame (the next VSync publishes a newer one).
+        if (m_ge1Active && iosPresentPerVsync())
+            presentIOSurface(tick);
 #endif
 #if PS2X_ENABLE_DIAG_TAPS && defined(__ANDROID__)
         if (m_ge1Active && m_frameCensus && (tick % 300u) == 0u)
@@ -1181,6 +1191,24 @@ private:
 #endif
 
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
+    static bool iosPresentPerVsync()
+    {
+        static const bool on = [] {
+            const char *v = std::getenv("PS2X_PRESENT_PER_VSYNC");
+            return v && std::strcmp(v, "1") == 0;
+        }();
+        return on;
+    }
+
+    static bool iosPresentUnpaced()
+    {
+        static const bool on = [] {
+            const char *v = std::getenv("PS2X_PRESENT_UNPACED");
+            return v && std::strcmp(v, "1") == 0;
+        }();
+        return on;
+    }
+
     // GI1: queue an async GPU export into a free IOSurface slot. The publish
     // happens later, from the command buffer's completion handler (ioExportDone).
     // False = fall back to the CPU snapshot for this frame (all slots busy,

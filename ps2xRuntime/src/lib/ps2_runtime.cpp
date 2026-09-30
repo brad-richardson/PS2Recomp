@@ -1189,7 +1189,20 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     if (s_perVsyncPresent && s_hasUploadedFrame && ps2x_present_vk::active() && ps2x_present_vk::layerLive())
         return;
 #endif
-    if (needsLatch)
+#if defined(PS2X_IOS)
+    // IQ1 (FH6 on iOS): with PS2X_PRESENT_PER_VSYNC=1 the GS worker exports
+    // every guest frame into the IOSurface mailbox itself, so once a shared
+    // frame has been shown the latch RPC is skipped; the share block below
+    // still picks up the newest published frame every iteration.
+    static const bool s_iosPerVsyncPresent = [] {
+        const char *v = std::getenv("PS2X_PRESENT_PER_VSYNC");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    const bool iosSkipLatch = s_iosPerVsyncPresent && s_hasUploadedFrame && g_hr1ShareTex.id != 0u;
+#else
+    const bool iosSkipLatch = false;
+#endif
+    if (needsLatch && !iosSkipLatch)
     {
         rt->gs().latchHostPresentationFrame();
         hr1Timer.t1 = std::chrono::steady_clock::now();
@@ -1199,7 +1212,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         s_lastPresentationTick = currentTick;
         s_hasLatchedInitialFrame = true;
     }
-    else if (s_hasUploadedFrame)
+    else if (s_hasUploadedFrame && !iosSkipLatch)
     {
         outWidth = (s_lastWidth != 0u) ? s_lastWidth : FB_WIDTH;
         outHeight = (s_lastHeight != 0u) ? s_lastHeight : DEFAULT_DISPLAY_HEIGHT;
@@ -2036,7 +2049,14 @@ bool PS2Runtime::initialize(const char *title)
             !ps2_snd_audio_output::initialize())
             std::cerr << "[snd-output] unable to initialize host AudioStream\n";
 #endif
+#if defined(PS2X_IOS)
+        // IQ1: PS2X_DISPLAY_HZ=120 asks for ProMotion and lets raylib's loop
+        // run at 120 (EAGL present still paces it to the panel); 60 = as before.
+        ps2x::ios::requestDisplayRate(ps2x_present_vk::displayHz());
+        SetTargetFPS(ps2x_present_vk::displayHz() == 120 ? 120 : 60);
+#else
         SetTargetFPS(60);
+#endif
         if (m_debugUiInitCallback)
         {
             m_debugUiInitCallback(*this, m_debugUiUserData);

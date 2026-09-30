@@ -7,8 +7,9 @@
 
 namespace ps2x::ios
 {
-// Apply <bundle>/ps2x.env then <Documents>/ps2x.env (later wins; keys the
-// launcher already set win over both), expand ${BUNDLE} / ${DOCUMENTS},
+// Apply <bundle>/ps2x.env, then <bundle>/full120.env when the Settings.bundle
+// "Target 120 fps" switch is on (IQ1), then <Documents>/ps2x.env (later wins;
+// keys the launcher already set win over all), expand ${BUNDLE} / ${DOCUMENTS},
 // honour the Settings.bundle "Auto-route" switch, create the memory-card
 // dirs, and set SDL hints (landscape, no accelerometer joystick). Call first
 // thing in main(), before anything reads the environment or starts SDL.
@@ -19,6 +20,11 @@ void prepareEnvironment(const char *argv0);
 // viewport and GetScreenWidth/Height match. Call after InitWindow and once
 // per presented frame (main thread); cheap when nothing changed.
 void syncWindowSize();
+// IQ1: PS2X_DISPLAY_HZ=120 on iOS. Adds a main-run-loop CADisplayLink whose
+// preferredFrameRateRange asks for 120 Hz (ProMotion; the Info.plist carries
+// CADisableMinimumFrameDurationOnPhone), logs UIScreen.maximumFramesPerSecond.
+// Inert on a 60 Hz panel. Call once on the main thread after InitWindow.
+void requestDisplayRate(int hz);
 // I26: current touches from SDL's finger state, normalised 0..1 to the
 // window (x right, y down). Returns how many were written (<= max).
 // VT1: IDs are SDL finger IDs (stable per touch until lift-off).

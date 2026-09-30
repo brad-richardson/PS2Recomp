@@ -4,7 +4,9 @@
      src/lib/ps2_ios_runtime.mm (CFPreferences); unset = on. Off clears
      PS2X_PAD_SCRIPT so a controller drives the game. I26: "virtualControls"
      (unset = on); off sets PS2X_VIRTUAL_PAD=0. Copied into the .app
-     at staging (local/research/I25/build-install.sh). -->
+     at staging (local/research/I25/build-install.sh). IQ1: "target120"
+     (unset = off) layers the bundled full120.env over ps2x.env at launch;
+     Documents/ps2x.env still wins over both. -->
 <plist version="1.0">
 <dict>
 	<key>PreferenceSpecifiers</key>
@@ -44,6 +46,24 @@
 			<string>virtualControls</string>
 			<key>DefaultValue</key>
 			<true/>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>Title</key>
+			<string>Frame rate</string>
+			<key>FooterText</key>
+			<string>On: races run the whole game at 120 updates a second with a 120 Hz display where the screen supports it (menus stay at 60). If the device can't keep up, the race slows down. Off: the normal 60. Takes effect the next time the app starts.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Target 120 fps (full-120 events)</string>
+			<key>Key</key>
+			<string>target120</string>
+			<key>DefaultValue</key>
+			<false/>
 		</dict>
 	</array>
 </dict>
