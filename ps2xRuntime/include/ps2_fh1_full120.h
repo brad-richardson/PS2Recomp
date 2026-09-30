@@ -162,6 +162,7 @@ enum Fix : uint32_t
     kFixAnim = 1u << 16,     // animation node steps 0x103c80..0x1049c4: 13 per-type 1/60 words (class h, FH8)
     kFixBonus = 1u << 17,    // 0x119708 trick bonus: per-update points rate +0x3c at stock rate per second (class b, FH8)
     kFixLift = 1u << 18,     // camera terrain lift 0x15ee00: per-update step bounds halved (class j, CM2 4, FH8)
+    kFixAiGate = 1u << 19,   // AI race_tick % N gates on even updates only + 0x10da10 hold timer at 1/120 (class e/g, FH9)
 };
 
 inline uint32_t fixMask() noexcept
@@ -174,7 +175,7 @@ inline uint32_t fixMask() noexcept
         if (s == "all")
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
                    kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim |
-                   kFixBonus; // kFixLift is opt-in (FH8: no window where it binds)
+                   kFixBonus; // kFixLift (FH8) and kFixAiGate (FH9: gates at stock rate, race outcome unchanged) are opt-in
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -199,6 +200,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "anim") m |= kFixAnim;
             else if (item == "bonus") m |= kFixBonus;
             else if (item == "lift") m |= kFixLift;
+            else if (item == "aigate") m |= kFixAiGate;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -278,7 +280,7 @@ inline std::vector<Word> labWords();
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
-    const std::array<Word, 83> words = {{
+    const std::array<Word, 84> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -404,6 +406,7 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFixCamera, 0x49c5ccu, kSixtieth, kHundredTwentieth, "cam_mode_timer"},
         {kFixCamera, 0x49c824u, kSixtieth, kHundredTwentieth, "cam_shake_clk"},
         {kFixCamera, 0x49c820u, kSixtieth, kHundredTwentieth, "cam_shake_dur"},
+        {kFixAiGate, 0x49b40cu, kSixtieth, kHundredTwentieth, "ai_react_hold"},
     }};
     uint32_t mask = fixMask();
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
@@ -1023,6 +1026,42 @@ inline void bonusHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     wr32(ram, rate, bits);
 }
 
+// FH9 aigate group: the AI ground handlers gate decisions on the race tick,
+// which runs at stock cadence (FH2 raceclock) while the handlers run per
+// update, so at 120 each gate passed on both updates of a race tick (FH9 tap:
+// 1.92x passes per stock second):
+//   0x10bdcc  race_tick % 12  0x10bd10 target rescan (6 candidates -> E70)
+//   0x10da6c  race_tick % 6   0x10da10 react roll: a rider within 200 in anim
+//                             0xd -> stream-1 draw 0x10db3c (rand%100 < 25 ->
+//                             F34), hold F30 = 2 s
+//   0x10dc30  race_tick % 6   0x10dbf0 rider scan (sets +0xf4 = race tick)
+//   0x10b8ac  race_tick % 20  0x10b790 steer-bias refresh (2 stream-1 draws)
+// On odd updates the race-tick read at those four sites is skipped and returns
+// 1 (1 % N != 0; v0 is used only by the modulo), so each gate passes once per
+// race tick, as at 60 (class g). The F30 hold countdown in 0x10da10 (the gate
+// is skipped while F30 > 0) steps by 1/60 per update from the single-reader
+// pool word 0x49b40c; it goes to 1/120 (class e).
+// Not in `all`: on FR1-R1 (fh9-v1) it brought the passes to 0.96x of stock per
+// stock second, but every AI roll, wipeout and the result (Mac 03:23) stayed
+// identical to fh9-t1, and the 0x10db3c draw never fired. Opt in with FIX=...,aigate.
+inline constexpr uint32_t kRaceTickGet = 0x1298c8u;
+
+inline bool aiGateFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixAiGate) != 0u;
+    return on;
+}
+
+inline bool aiGateHook(R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    if (!g_rngOdd || targetPc != kRaceTickGet || !ctx)
+        return false;
+    if (sourcePc != 0x10bdccu && sourcePc != 0x10da6cu && sourcePc != 0x10dc30u && sourcePc != 0x10b8acu)
+        return false;
+    SET_GPR_U32(ctx, 2, 1u);
+    return true;
+}
+
 inline bool trickFix() noexcept
 {
     static const bool on = enabled() && (fixMask() & kFixTrick) != 0u;
@@ -1172,6 +1211,239 @@ inline void srcTap(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t 
     (void)ram;
 }
 
+// ---- FH9 AI animation/gate tap (PS2X_FH9_AI=<rider R, hex>; diagnostic, observation-only) ----
+// Needs PS2X_FH1_TAP=1 (window = PS2X_FH1_TAP_EVERY). For the rider R (P = [R+0x77c], anim controller
+// ctrl = [R+0x784], channel ch's tracks = [[ctrl+0x50]+8ch+4] chained by +0xc8) it counts, per window:
+// control-state (P+0xde4) entries via 0x111538 (logged with the caller), the sub-state-7 gate 0x12e8e8
+// (0x312ae8(ctrl, 2) = track+0xc0 "reached the end this advance"; logged with P+0xde0 when set),
+// per-channel advances 0x3135b0 (a1 = 0; summed step rate*speed*f12), end hits 0x3139a8, event bits the
+// three setters (0x313868 crossing, 0x313938 exact, 0x3139a8 end) set on those tracks (replicated from
+// the node list [track+0xac]: +0 bit, +4 end flag, +8 time, +0xc next), and the AI race_tick % N gates
+// (0x10b8ac %20 in 0x10b790, 0x10bdcc %12, 0x10da6c %6, 0x10dc30 %6): evaluations and passes.
+struct Fh9Tap
+{
+    uint32_t r = 0u;
+    uint32_t st[16]{};
+    uint32_t g12e8 = 0u, g12e8Flag = 0u, g12e8Flag4 = 0u;
+    uint32_t adv[8]{};
+    float step[8]{};
+    uint32_t endc[8]{};
+    uint32_t bits[8][64]{};
+    uint32_t gateCall[4]{}, gatePass[4]{};
+    uint32_t rng1[8]{};
+    uint32_t wrapSrc = 0u;
+    uint32_t lines = 0u;
+};
+
+inline Fh9Tap &fh9Tap()
+{
+    static Fh9Tap t = [] {
+        Fh9Tap x;
+        if (const char *v = std::getenv("PS2X_FH9_AI"))
+            x.r = static_cast<uint32_t>(std::strtoul(v, nullptr, 16));
+        return x;
+    }();
+    return t;
+}
+
+inline int fh9Channel(const uint8_t *ram, uint32_t ctrl, uint32_t track) noexcept
+{
+    uint32_t base = 0u;
+    if (!rd32(ram, ctrl + 0x50u, base) || !base)
+        return -1;
+    for (int ch = 0; ch < 8; ++ch)
+    {
+        uint32_t t = 0u;
+        if (!rd32(ram, base + 8u * static_cast<uint32_t>(ch) + 4u, t))
+            return -1;
+        for (int d = 0; d < 4 && t; ++d)
+        {
+            if (t == track)
+                return ch;
+            if (!rd32(ram, t + 0xc8u, t))
+                break;
+        }
+    }
+    return -1;
+}
+
+inline float fh9F(const uint8_t *ram, uint32_t a) noexcept
+{
+    uint32_t w = 0u;
+    rd32(ram, a, w);
+    float f = 0.0f;
+    std::memcpy(&f, &w, 4);
+    return f;
+}
+
+inline void fh9OnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc, bool skipped)
+{
+    Fh9Tap &t = fh9Tap();
+    if (!t.r || !ctx)
+        return;
+    static const uint32_t gateSite[4] = {0x10b8acu, 0x10bdccu, 0x10da6cu, 0x10dc30u};
+    static const uint32_t gateMod[4] = {20u, 12u, 6u, 6u};
+    static const uint32_t rngSite[8] = {0x10db3cu, 0x10b8d0u, 0x10b910u, 0x10c1dcu, 0x115e4cu, 0x115fa4u, 0x10b468u, 0u};
+    if (targetPc == 0x317810u)
+    {
+        for (int i = 0; i < 8; ++i)
+            if (sourcePc == rngSite[i])
+                ++t.rng1[i];
+        return;
+    }
+    if (targetPc == 0x1298c8u)
+    {
+        for (int i = 0; i < 4; ++i)
+            if (sourcePc == gateSite[i])
+            {
+                uint32_t a = 0u, b = 0u, c = 0u, tick = 0u;
+                if (rd32(ram, 0x4a28a8u, a) && rd32(ram, a + 0x84u, b) && rd32(ram, b + 0xcu, c) &&
+                    rd32(ram, c + 8u, tick))
+                {
+                    ++t.gateCall[i];
+                    if (!skipped && static_cast<int32_t>(tick) % static_cast<int32_t>(gateMod[i]) == 0)
+                        ++t.gatePass[i];
+                }
+            }
+        return;
+    }
+    uint32_t p = 0u, ctrl = 0u;
+    if (!rd32(ram, t.r + 0x77cu, p) || !rd32(ram, t.r + 0x784u, ctrl))
+        return;
+    const uint32_t a0 = getRegU32(ctx, 4), a1 = getRegU32(ctx, 5);
+    uint32_t de0 = 0u, de4 = 0u;
+    rd32(ram, p + 0xde0u, de0);
+    rd32(ram, p + 0xde4u, de4);
+    if (targetPc == 0x11fec8u && a0 == t.r)
+    {
+        t.wrapSrc = sourcePc;
+        return;
+    }
+    if (targetPc == 0x111538u && a0 == p)
+    {
+        const uint32_t src = sourcePc == 0x11fed0u ? t.wrapSrc : sourcePc;
+        t.wrapSrc = 0u;
+        if (a1 < 16u)
+            ++t.st[a1];
+        if (t.lines++ < 6000u)
+            std::fprintf(stderr, "fh9-st tick=%llu sh=%llu src=%06x %u->%u de0=%u\n",
+                         static_cast<unsigned long long>(g_lastTick),
+                         static_cast<unsigned long long>(g_stockHalf.load(std::memory_order_relaxed)), src, de4, a1,
+                         de0);
+        return;
+    }
+    if (targetPc == 0x312ae8u && sourcePc == 0x12e8e8u && a0 == ctrl)
+    {
+        uint32_t base = 0u, track = 0u, flag = 0u;
+        rd32(ram, ctrl + 0x50u, base);
+        rd32(ram, base + 8u * a1 + 4u, track);
+        rd32(ram, track + 0xc0u, flag);
+        ++t.g12e8;
+        if (flag)
+        {
+            ++t.g12e8Flag;
+            if (de0 == 4u)
+                ++t.g12e8Flag4;
+            if (t.lines++ < 6000u)
+                std::fprintf(stderr, "fh9-g7 tick=%llu sh=%llu de4=%u de0=%u\n",
+                             static_cast<unsigned long long>(g_lastTick),
+                             static_cast<unsigned long long>(g_stockHalf.load(std::memory_order_relaxed)), de4, de0);
+        }
+        return;
+    }
+    const bool cross = targetPc == 0x313868u, exact = targetPc == 0x313938u, end = targetPc == 0x3139a8u;
+    const bool adv = targetPc == 0x3135b0u;
+    if (!cross && !exact && !end && !adv)
+        return;
+    const int ch = fh9Channel(ram, ctrl, a0);
+    if (ch < 0)
+        return;
+    if (adv)
+    {
+        if (a1 == 0u)
+        {
+            ++t.adv[ch];
+            t.step[ch] += fh9F(ram, a0 + 0xcu) * fh9F(ram, a0 + 0x90u) * ctx->f[12];
+        }
+        return;
+    }
+    if (end)
+    {
+        ++t.endc[ch];
+        if (ch == 2 && t.lines++ < 6000u)
+            std::fprintf(stderr, "fh9-end tick=%llu sh=%llu ch=%d de4=%u de0=%u time=%g len=%g\n",
+                         static_cast<unsigned long long>(g_lastTick),
+                         static_cast<unsigned long long>(g_stockHalf.load(std::memory_order_relaxed)), ch, de4, de0,
+                         fh9F(ram, a0 + 8u), fh9F(ram, a0 + 0x10u));
+    }
+    const float f12 = ctx->f[12], f13 = ctx->f[13];
+    if (cross && f12 == f13)
+        return;
+    uint32_t node = 0u;
+    rd32(ram, a0 + 0xacu, node);
+    for (int guard = 0; node && guard < 64; ++guard)
+    {
+        uint32_t bit = 0u, isEnd = 0u, next = 0u;
+        rd32(ram, node, bit);
+        rd32(ram, node + 4u, isEnd);
+        rd32(ram, node + 0xcu, next);
+        const float tm = fh9F(ram, node + 8u);
+        bool hit = false;
+        if (end)
+            hit = isEnd != 0u;
+        else if (isEnd == 0u)
+        {
+            if (exact)
+                hit = tm == f12;
+            else if (f12 <= f13)
+                hit = f12 < tm && tm <= f13;
+            else
+                hit = f13 <= tm && tm < f12;
+        }
+        if (hit && bit < 64u)
+            ++t.bits[ch][bit];
+        node = next;
+    }
+}
+
+inline void fh9OnVBlank(uint64_t tick)
+{
+    Fh9Tap &t = fh9Tap();
+    if (!t.r)
+        return;
+    char line[4096];
+    int n = std::snprintf(line, sizeof(line), "fh9-tap tick=%llu sh=%llu g7=%u/%u/%u",
+                          static_cast<unsigned long long>(tick),
+                          static_cast<unsigned long long>(g_stockHalf.load(std::memory_order_relaxed)), t.g12e8,
+                          t.g12e8Flag, t.g12e8Flag4);
+    for (int k = 0; k < 16; ++k)
+        if (t.st[k])
+            n += std::snprintf(line + n, sizeof(line) - n, " st%d=%u", k, t.st[k]);
+    for (int c = 0; c < 8; ++c)
+    {
+        if (t.adv[c])
+            n += std::snprintf(line + n, sizeof(line) - n, " adv%d=%u:%.4f", c, t.adv[c], t.step[c]);
+        if (t.endc[c])
+            n += std::snprintf(line + n, sizeof(line) - n, " end%d=%u", c, t.endc[c]);
+        for (int b = 0; b < 64 && n < static_cast<int>(sizeof(line)) - 40; ++b)
+            if (t.bits[c][b])
+                n += std::snprintf(line + n, sizeof(line) - n, " b%d.%d=%u", c, b, t.bits[c][b]);
+    }
+    static const uint32_t rngSite[7] = {0x10db3cu, 0x10b8d0u, 0x10b910u, 0x10c1dcu, 0x115e4cu, 0x115fa4u, 0x10b468u};
+    for (int i = 0; i < 7; ++i)
+        if (t.rng1[i])
+            n += std::snprintf(line + n, sizeof(line) - n, " r%x=%u", rngSite[i], t.rng1[i]);
+    for (int i = 0; i < 4; ++i)
+        if (t.gateCall[i])
+            n += std::snprintf(line + n, sizeof(line) - n, " gate%d=%u/%u", i, t.gatePass[i], t.gateCall[i]);
+    std::fprintf(stderr, "%s\n", line);
+    const uint32_t r = t.r, wrap = t.wrapSrc, lines = t.lines;
+    t = Fh9Tap{};
+    t.r = r;
+    t.wrapSrc = wrap;
+    t.lines = lines;
+}
+
 inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
     if (mode() == Mode::Always && sourcePc == kHookSite && !g_patched)
@@ -1189,17 +1461,20 @@ inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_
     if (on && launchFix())
         launchPreHook(ram, ctx, targetPc);
     bool skip = on && sessionFix() && sessionSkip(sourcePc, targetPc);
-    if (on && (rngFix() || trickFix()))
+    if (on && (rngFix() || trickFix() || aiGateFix()))
         parityHook(ram, sourcePc);
     if (on && rngFix())
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
     if (on && trickFix() && g_rngOdd && sourcePc == kComboSite && targetPc == kComboAccrue)
         skip = true;
+    if (on && aiGateFix())
+        skip = aiGateHook(ctx, sourcePc, targetPc) || skip;
     if (on && bonusFix())
         bonusHook(ram, ctx, sourcePc, targetPc);
     if (on && liftFix())
         liftHook(ctx, sourcePc, targetPc);
     srcTap(ram, ctx, sourcePc, targetPc);
+    fh9OnBranch(ram, ctx, sourcePc, targetPc, skip);
     if (on)
         skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
     const bool drawSkip = on && drawLimit() && !skip && drawHook(ctx, sourcePc, targetPc);
@@ -1570,6 +1845,7 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
     Tap &t = tap();
     if (!t.on || (tick % t.every) != 0u)
         return;
+    fh9OnVBlank(tick);
     char line[4096];
     int n = 0;
     uint32_t a = 0u, wake = 0u, upd = 0u, rate = 0u, dt = 0u;
