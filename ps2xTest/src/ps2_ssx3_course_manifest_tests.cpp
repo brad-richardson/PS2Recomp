@@ -84,7 +84,8 @@ void register_ps2_ssx3_course_manifest_tests()
             t.IsFalse(ps2_ssx3_course::parse("event = 0\narchive = 0123456789abcdef\n", b, err), "archive too long");
             t.IsFalse(ps2_ssx3_course::parse("event = 0\nlocation = 50\n", b, err), "location range");
             t.IsFalse(ps2_ssx3_course::parse("event = 0\ndiscipline = 0\n", b, err), "discipline range");
-            t.IsFalse(ps2_ssx3_course::parse("event = 0\nmode = 2\n", b, err), "unknown key");
+            t.IsFalse(ps2_ssx3_course::parse("event = 0\nlap = 2\n", b, err), "unknown key");
+            t.IsFalse(ps2_ssx3_course::parse("mode = T\nrow = 0:GARI:G\n", b, err), "mode needs the modes out-param");
             t.IsFalse(ps2_ssx3_course::parse("event = 0\nname\n", b, err), "no equals");
             t.IsFalse(ps2_ssx3_course::parse("event = 0\nsky = -2\n", b, err), "sky range");
             t.IsFalse(ps2_ssx3_course::parse("event = 0\ntransp = 50\n", b, err), "transp range");
@@ -204,6 +205,137 @@ void register_ps2_ssx3_course_manifest_tests()
             std::memcpy(&ram[kSlotBase + 49u * kSlotStride + 8u], &zero, 4);
             t.Equals(pickerNext(p, ram.data(), msg), 1, "allowed again");
             p = Picker{}; // leave the process-wide picker disarmed
+        });
+
+        tc.Run("TK9 mode blocks: parse and errors", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            std::vector<Block> b;
+            std::vector<Mode> m;
+            std::string err;
+            t.IsTrue(parse("# Tricky\nmode = Tricky\nrow = 0:GARI:Garibaldi\nrow = 1:-:Snowdream\n"
+                           "poke = 0x47BDB0:data/ui/courspic.big:data/ui/courspit.big\n"
+                           "event = 2\nname = X\nmode = Other\nrow = 3:SNOW:-\n",
+                           b, err, &m),
+                     err.c_str());
+            t.Equals(m.size(), static_cast<size_t>(2), "two modes");
+            t.Equals(b.size(), static_cast<size_t>(1), "one event block between them");
+            t.Equals(m[0].name, std::string("Tricky"), "name");
+            t.Equals(m[0].rows.size(), static_cast<size_t>(2), "rows");
+            t.Equals(m[0].rows[0].archive, std::string("GARI"), "archive");
+            t.Equals(m[0].rows[1].archive, std::string(), "'-' keeps archive");
+            t.Equals(m[0].rows[1].name, std::string("Snowdream"), "row name");
+            t.Equals(m[0].pokes.size(), static_cast<size_t>(1), "poke");
+            t.Equals(m[0].pokes[0].addr, 0x47BDB0u, "poke address");
+            t.Equals(m[1].rows[0].name, std::string(), "'-' keeps name");
+            t.IsTrue(parse("mode = T\nrow = 0:GARI:G\n", b, err, &m), "modes only (no event block)");
+            const char *bad[] = {
+                "mode = T\n",                                       // empty mode
+                "mode = T\nmode = U\nrow = 0:A:B\n",                // empty first mode
+                "mode = T\nrow = 0:A:B\nmode = T\nrow = 1:A:B\n",   // duplicate name
+                "mode = T\nrow = 23:A:B\n",                         // event range
+                "mode = T\nrow = 0:A\n",                            // two fields
+                "mode = T\nrow = 0:-:-\n",                          // sets nothing
+                "mode = T\nrow = 0:0123456789abcdef:-\n",           // archive too long
+                "mode = T\nrow = 0:A:B\nrow = 0:C:D\n",             // event twice
+                "mode = T\nname = X\n",                             // event key in a mode
+                "mode = T\npoke = 47BDB0:abc:abd\n",                // no 0x
+                "mode = T\npoke = 0x100:abc:abcd\n",                // length differs
+                "mode = T\npoke = 0x100:abc:abc\n",                 // no change
+                "mode = T\npoke = 0x100:a:b:c\n",                   // colon inside
+                "mode = T\npoke = 0x1FFFFFE:abc:abd\n",             // outside RAM
+                "mode = T\npoke = 0x43D960:abc:abd\n",              // over the event rows
+                "mode = T\npoke = 0x100:abc:abd\npoke = 0x100:abc:abe\n", // address twice
+                "mode = T\npoke = 0x100:abc:abd\nmode = U\npoke = 0x101:bc:xx\n", // overlap, other site
+                "mode = T\npoke = 0x100:abc:abd\nmode = U\npoke = 0x100:abz:abd\n", // same site, other old
+                "event = 0\npicker = 49:G\nmode = T\nrow = 0:A:B\n", // picker and modes
+                "mode = A\nrow=0:A:-\nmode = B\nrow=0:A:-\nmode = C\nrow=0:A:-\nmode = D\nrow=0:A:-\n"
+                "mode = E\nrow=0:A:-\nmode = F\nrow=0:A:-\nmode = G\nrow=0:A:-\nmode = H\nrow=0:A:-\n", // > 7
+            };
+            for (const char *txt : bad)
+                t.IsFalse(parse(txt, b, err, &m), txt);
+            t.IsTrue(parse("mode = T\npoke = 0x100:abc:abd\nmode = U\npoke = 0x100:abc:xyz\n", b, err, &m),
+                     "same site in two modes"); });
+
+        tc.Run("TK9 modes cycle Stock -> mode -> Stock, poke and undo, derive from RAM, refuse unsafe", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            auto ram = stockTables();
+            stockTopology(ram);
+            std::memcpy(&ram[0x47BDB0], "data/ui/courspic.big", 21);
+            std::vector<Block> b;
+            std::vector<Mode> m;
+            std::string err;
+            t.IsTrue(parse("mode = Tricky\nrow = 0:GARI:Garibaldi\n"
+                           "poke = 0x47BDB0:data/ui/courspic.big:data/ui/courspit.big\n"
+                           "mode = Two\nrow = 0:-:Other\n",
+                           b, err, &m),
+                     err.c_str());
+            std::vector<std::string> lines;
+            auto log = [&](const std::string &s) { lines.push_back(s); };
+            t.Equals(apply(ram.data(), b, log), 0, "no event blocks, no writes");
+            Modes &ms = courseModes();
+            t.IsTrue(armModes(ms, ram.data(), m, log), "armed");
+            t.Equals(ms.fields.size(), static_cast<size_t>(2), "archive + name of event 0");
+            t.Equals(modeCurrent(ms, ram.data()), static_cast<size_t>(0), "starts at Stock");
+            auto str = [&](uint32_t a) { return std::string(reinterpret_cast<const char *>(&ram[a])); };
+
+            std::string status;
+            auto idle = padBuffer(0);
+            auto chord = padBuffer(kBtnL3 | kBtnR3);
+            pickerOnPadRead(ram.data(), idle.data(), 1, status);
+            pickerOnPadRead(ram.data(), chord.data(), 2, status);
+            t.Equals(status, std::string("Mode: Tricky"), "status");
+            t.Equals(str(0x43D950 + 68), std::string("GARI"), "archive on");
+            t.Equals(str(0x43D950 + 4), std::string("Garibaldi"), "name on");
+            t.Equals(str(0x47BDB0), std::string("data/ui/courspit.big"), "poke on");
+            t.Equals(chord[2], static_cast<uint8_t>(0xFF), "chord hidden");
+            t.Equals(modeCurrent(ms, ram.data()), static_cast<size_t>(1), "derived: Tricky");
+
+            pickerOnPadRead(ram.data(), idle.data(), 3, status);
+            chord = padBuffer(kBtnL3 | kBtnR3);
+            pickerOnPadRead(ram.data(), chord.data(), 4, status);
+            t.Equals(status, std::string("Mode: Two"), "second mode");
+            t.Equals(str(0x43D950 + 68), std::string("BAM"), "Two keeps the stock archive");
+            t.Equals(str(0x43D950 + 4), std::string("Other"), "Two's name");
+            t.Equals(str(0x47BDB0), std::string("data/ui/courspic.big"), "Two has no poke: undone");
+
+            std::string msg;
+            std::vector<std::string> w;
+            t.Equals(modeNext(ms, ram.data(), msg, &w), 0, "back to Stock");
+            t.Equals(str(0x43D950 + 4), std::string("Snow Jam"), "stock name");
+            t.IsTrue(ram[0x43D950 + 4 + 8] == 0 && ram[0x43D950 + 4 + 9] == 0, "NUL-padded");
+            t.Equals(w.size(), static_cast<size_t>(1), "one field changed (name)");
+
+            // A foreign string at the poke site refuses the switch, nothing written.
+            std::memcpy(&ram[0x47BDB0], "data/ui/coursXXX.big", 20);
+            t.Equals(modeNext(ms, ram.data(), msg), -1, "refused");
+            t.IsTrue(msg.find("neither") != std::string::npos, msg.c_str());
+            t.Equals(str(0x43D950 + 68), std::string("BAM"), "nothing written");
+            std::memcpy(&ram[0x47BDB0], "data/ui/courspic.big", 20);
+
+            // Savestate-style: RAM already in Tricky -> the next press goes to Two.
+            std::memcpy(&ram[0x43D950 + 68], "GARI", 5);
+            std::memset(&ram[0x43D950 + 4], 0, 32);
+            std::memcpy(&ram[0x43D950 + 4], "Garibaldi", 9);
+            std::memcpy(&ram[0x47BDB0], "data/ui/courspit.big", 20);
+            t.Equals(modeNext(ms, ram.data(), msg), 2, "derived from RAM");
+
+            // Live event: refused.
+            const uint32_t mgr = 0x80C00000u, app = 0x00C00100u, vt = 0x00C00200u, fn = kGameUpdate;
+            std::memcpy(&ram[kAppMgrPtr], &mgr, 4);
+            std::memcpy(&ram[0xC00000], &app, 4);
+            std::memcpy(&ram[0xC00100], &vt, 4);
+            std::memcpy(&ram[0xC00200 + kAppUpdateSlot], &fn, 4);
+            t.Equals(modeNext(ms, ram.data(), msg), -1, "refused in an event");
+            t.IsTrue(msg.find("an event is live") != std::string::npos, msg.c_str());
+
+            // Arming refuses a mode whose poke's old bytes are not in RAM.
+            Modes other;
+            auto ram2 = stockTables();
+            t.IsFalse(armModes(other, ram2.data(), std::vector<Mode>{m[0]}, log), "old bytes missing: refused");
+            t.IsTrue(lines.back().find("refused") != std::string::npos, lines.back().c_str());
+            ms = Modes{}; // leave the process-wide modes disarmed
         });
 
         tc.Run("applies NUL-padded writes and logs old values", [](TestCase &t)
