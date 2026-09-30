@@ -167,6 +167,45 @@ void register_ps2_snd_tests()
         t.Equals(out[0], int32_t((4 * 383) / 2), "the next tick starts from the saved last sample");
         });
 
+        tc.Run("AU13 sinc upsampler has unity DC gain and a 16-sample ramp delay", [](TestCase &t)
+        {
+        using namespace ps2_snd_spu;
+        SincUpsampler34 up;
+        int16_t dc[kTag1Frames], ramp[kTag1Frames];
+        for (uint32_t i = 0; i < kTag1Frames; ++i)
+        {
+            dc[i] = 10000;
+            ramp[i] = static_cast<int16_t>(20 * i);
+        }
+        int32_t out[kTickFrames];
+        up.run(dc, out, 1);
+        up.run(dc, out, 1);
+        for (uint32_t j = 0; j < kTickFrames; ++j)
+            t.IsTrue(std::abs(out[j] - 10000) <= 2, "constant input stays constant once the history is filled");
+        SincUpsampler34 up2;
+        up2.run(ramp, out, 1);
+        up2.run(ramp, out, 1);
+        // output j sits at input position 0.75 j - 0.5 - 16 (a linear ramp is reproduced exactly)
+        t.IsTrue(std::abs(out[100] - static_cast<int32_t>(20.0 * (0.75 * 100 - 0.5 - 16.0))) <= 3, "ramp delayed by 16 samples");
+        });
+
+        tc.Run("AU13 voice interpolators: gauss is the default, others hit the sample points", [](TestCase &t)
+        {
+        using namespace ps2_snd_spu;
+        Spu spu;
+        t.IsTrue(spu.interp == Interp::Gauss, "default interpolation is gauss");
+        t.IsTrue(parseInterp(nullptr) == Interp::Gauss && parseInterp("bogus") == Interp::Gauss, "unknown text selects gauss");
+        t.IsTrue(parseInterp("cubic") == Interp::Cubic && parseInterp("hermite") == Interp::Hermite &&
+                     parseInterp("linear") == Interp::Linear, "names parse");
+        const int16_t h[4] = {1000, 2000, 5000, 3000};
+        for (Interp m : {Interp::Cubic, Interp::Hermite, Interp::Linear})
+        {
+            t.Equals(interpolate(m, h, 0x000u), int32_t(2000), "phase 0 is hist[1]");
+            t.IsTrue(std::abs(interpolate(m, h, 0x800u) - 3500) < 900, "phase 0.5 lies between hist[1] and hist[2]");
+        }
+        t.Equals(interpolate(Interp::Linear, h, 0x800u), int32_t(3500), "linear midpoint");
+        });
+
         tc.Run("driver keys a one-shot voice on and reports it ended through NAX", [](TestCase &t)
         {
         using namespace ps2_snd_spu;
