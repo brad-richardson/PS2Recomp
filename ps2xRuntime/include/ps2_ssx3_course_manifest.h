@@ -5,8 +5,11 @@
 // SLUS_207.72 keeps the frontend's course rows as plain .data in guest RAM:
 //   events     0x43D950, 23 x 100 B: +0 index, +4 name[32], +36 short[16],
 //              +52 SDB location code[16], +68 world archive[16] ("BAM")
-//   topology   0x442488, 23 x 40 B: +0 index, +16 location-table id
+//   topology   0x442488, 23 x 40 B: +0 index, +8 sky, +12 TRANSP, +16 location-table id
 //   discipline 0x442820, 23 x 8 B:  +0 index, +4 discipline
+//   nav nodes  (.rodata, 108 B): race 0x4781D0 [3][4], freestyle 0x4786E0 [3][5],
+//              freeride 0x478D38 [3][8]; +0 event, +4 type (7 = DONOTUSE padding),
+//              +0x14 label[30]
 // Applied once after the ELF is in RAM and before the EE runs. It first
 // checks all 69 row-index words (row i starts with i in each table) and
 // refuses the whole manifest on any mismatch, so another executable is never
@@ -17,7 +20,13 @@
 // next `event`. Each key at most once per block; a block sets >= 1 field.
 //   name (<= 31 printable ASCII), short/code/archive (<= 15), location
 //   (0-49), discipline (1 station/debug, 2 race, 3 slopestyle, 4 big air,
-//   5 halfpipe, 6 backcountry). Strings are NUL-padded to the field width.
+//   5 halfpipe, 6 backcountry), sky / transp (-1 none, 0-49: topology +8 /
+//   +12), node = <race|freestyle|freeride>:<peak>:<slot>:<template slot>
+//   (TK6: turns one DONOTUSE padding node into a menu entry for this event:
+//   the node becomes a copy of the same peak's template node with +0 = this
+//   event). Strings are NUL-padded to the field width. A node target that is
+//   not DONOTUSE (event 23, type 7), or a template that is, refuses the whole
+//   manifest before anything is written.
 // The world archive's BIGF members must be named data/worlds/<archive>.*
 // (the path builder 0x22F6B0 derives member names from the archive field).
 //
@@ -44,6 +53,16 @@ inline constexpr uint32_t kDiscBase = 0x442820u;
 inline constexpr uint32_t kDiscStride = 8u;
 inline constexpr uint32_t kRows = 23u;
 inline constexpr uint32_t kRamSize = 32u * 1024u * 1024u;
+inline constexpr uint32_t kNodeSize = 0x6Cu;
+
+struct NodeTable
+{
+    const char *key;
+    uint32_t base, peakStride, slots;
+};
+inline constexpr NodeTable kNodeTables[] = {
+    {"race", 0x4781D0u, 0x1B0u, 4u}, {"freestyle", 0x4786E0u, 0x21Cu, 5u}, {"freeride", 0x478D38u, 0x360u, 8u}};
+inline constexpr uint32_t kPeaks = 3u;
 
 struct StringField
 {
@@ -63,7 +82,56 @@ struct Block
     int32_t location = 0;
     bool hasDiscipline = false;
     int32_t discipline = 0;
+    bool hasSky = false;
+    int32_t sky = 0;
+    bool hasTransp = false;
+    int32_t transp = 0;
+    bool hasNode = false;
+    uint32_t nodeTable = 0, nodePeak = 0, nodeSlot = 0, nodeTemplate = 0;
 };
+
+inline bool parseInt(const std::string &v, int lo, int hi, int32_t &out);
+
+inline uint32_t nodeAddr(uint32_t table, uint32_t peak, uint32_t slot)
+{
+    const NodeTable &t = kNodeTables[table];
+    return t.base + peak * t.peakStride + slot * kNodeSize;
+}
+
+// "<table>:<peak>:<slot>:<template slot>", peak 0-2, slots within the table.
+inline bool parseNode(const std::string &v, Block &b)
+{
+    const size_t c1 = v.find(':');
+    if (c1 == std::string::npos)
+        return false;
+    const std::string name = v.substr(0, c1);
+    uint32_t table = 0;
+    for (; table < 3u; ++table)
+        if (name == kNodeTables[table].key)
+            break;
+    if (table == 3u)
+        return false;
+    int32_t nums[3] = {0, 0, 0};
+    size_t pos = c1 + 1;
+    for (int i = 0; i < 3; ++i)
+    {
+        const size_t c = v.find(':', pos);
+        if ((i < 2) != (c != std::string::npos))
+            return false;
+        const std::string part = v.substr(pos, c == std::string::npos ? std::string::npos : c - pos);
+        const int hi = i == 0 ? static_cast<int>(kPeaks) - 1 : static_cast<int>(kNodeTables[table].slots) - 1;
+        if (!parseInt(part, 0, hi, nums[i]))
+            return false;
+        pos = c + 1;
+    }
+    if (nums[1] == nums[2])
+        return false;
+    b.nodeTable = table;
+    b.nodePeak = static_cast<uint32_t>(nums[0]);
+    b.nodeSlot = static_cast<uint32_t>(nums[1]);
+    b.nodeTemplate = static_cast<uint32_t>(nums[2]);
+    return true;
+}
 
 inline std::string trim(const std::string &s)
 {
@@ -100,7 +168,10 @@ inline bool parse(const std::string &text, std::vector<Block> &out, std::string 
         return false;
     };
     auto blockEmpty = [](const Block &b)
-    { return !(b.has[0] || b.has[1] || b.has[2] || b.has[3] || b.hasLocation || b.hasDiscipline); };
+    {
+        return !(b.has[0] || b.has[1] || b.has[2] || b.has[3] || b.hasLocation || b.hasDiscipline || b.hasSky ||
+                 b.hasTransp || b.hasNode);
+    };
     while (std::getline(in, raw))
     {
         ++lineNo;
@@ -164,6 +235,28 @@ inline bool parse(const std::string &text, std::vector<Block> &out, std::string 
             if (!parseInt(val, 1, 6, b.discipline))
                 return fail("discipline must be 1-6");
             b.hasDiscipline = true;
+        }
+        else if (key == "sky" || key == "transp")
+        {
+            const bool sky = key == "sky";
+            bool &has = sky ? b.hasSky : b.hasTransp;
+            if (has)
+                return fail("'" + key + "' twice in one block");
+            if (!parseInt(val, -1, 49, sky ? b.sky : b.transp))
+                return fail("'" + key + "' must be -1-49");
+            has = true;
+        }
+        else if (key == "node")
+        {
+            if (b.hasNode)
+                return fail("'node' twice in one block");
+            if (!parseNode(val, b))
+                return fail("node must be <race|freestyle|freeride>:<peak 0-2>:<slot>:<template slot>, slots differ");
+            for (const Block &o : out)
+                if (&o != &b && o.hasNode && o.nodeTable == b.nodeTable && o.nodePeak == b.nodePeak &&
+                    o.nodeSlot == b.nodeSlot)
+                    return fail("node " + val + " targeted twice");
+            b.hasNode = true;
         }
         else
         {
@@ -229,8 +322,38 @@ inline uint32_t verifyTables(const uint8_t *ram, std::string &err)
     return bad;
 }
 
+// Checks every node target (DONOTUSE: event 23, type 7) and template (a real
+// node). Returns false with `err` set on the first failure.
+inline bool verifyNodes(const uint8_t *ram, const std::vector<Block> &blocks, std::string &err)
+{
+    char buf[160];
+    for (const Block &b : blocks)
+    {
+        if (!b.hasNode)
+            continue;
+        const uint32_t dst = nodeAddr(b.nodeTable, b.nodePeak, b.nodeSlot);
+        const uint32_t tpl = nodeAddr(b.nodeTable, b.nodePeak, b.nodeTemplate);
+        if (rd32(ram, dst) != 23u || rd32(ram, dst + 4u) != 7u)
+        {
+            std::snprintf(buf, sizeof(buf), "node target 0x%06x is not DONOTUSE (event %u, type %u)", dst,
+                          rd32(ram, dst), rd32(ram, dst + 4u));
+            err = buf;
+            return false;
+        }
+        if (rd32(ram, tpl) >= kRows || rd32(ram, tpl + 4u) == 7u)
+        {
+            std::snprintf(buf, sizeof(buf), "node template 0x%06x is not a real node (event %u, type %u)", tpl,
+                          rd32(ram, tpl), rd32(ram, tpl + 4u));
+            err = buf;
+            return false;
+        }
+    }
+    return true;
+}
+
 // Applies verified blocks. `log` receives one line per write. Returns the
-// number of writes, or -1 when the tables fail verification (nothing written).
+// number of writes, or -1 when the tables or node targets fail verification
+// (nothing written).
 template <typename Log>
 inline int apply(uint8_t *ram, const std::vector<Block> &blocks, Log &&log)
 {
@@ -239,6 +362,11 @@ inline int apply(uint8_t *ram, const std::vector<Block> &blocks, Log &&log)
     if (bad != 0u)
     {
         log("refused: " + std::to_string(bad) + " of 69 row-index words differ (" + err + "); nothing written");
+        return -1;
+    }
+    if (!verifyNodes(ram, blocks, err))
+    {
+        log("refused: " + err + "; nothing written");
         return -1;
     }
     int writes = 0;
@@ -276,6 +404,34 @@ inline int apply(uint8_t *ram, const std::vector<Block> &blocks, Log &&log)
             std::memcpy(ram + addr, &b.discipline, 4);
             std::snprintf(buf, sizeof(buf), "event %d discipline at 0x%06x: %d -> %d", b.event, addr, old,
                           b.discipline);
+            log(buf);
+            ++writes;
+        }
+        for (int k = 0; k < 2; ++k)
+        {
+            if (!(k == 0 ? b.hasSky : b.hasTransp))
+                continue;
+            const uint32_t addr = kTopoBase + static_cast<uint32_t>(b.event) * kTopoStride + (k == 0 ? 8u : 12u);
+            const int32_t old = static_cast<int32_t>(rd32(ram, addr));
+            const int32_t v = k == 0 ? b.sky : b.transp;
+            std::memcpy(ram + addr, &v, 4);
+            std::snprintf(buf, sizeof(buf), "event %d %s at 0x%06x: %d -> %d", b.event, k == 0 ? "sky" : "transp",
+                          addr, old, v);
+            log(buf);
+            ++writes;
+        }
+        if (b.hasNode)
+        {
+            const uint32_t dst = nodeAddr(b.nodeTable, b.nodePeak, b.nodeSlot);
+            const uint32_t tpl = nodeAddr(b.nodeTable, b.nodePeak, b.nodeTemplate);
+            const std::string oldLabel = rdStr(ram, dst + 0x14u, 30u);
+            const uint32_t tplEvent = rd32(ram, tpl);
+            std::memmove(ram + dst, ram + tpl, kNodeSize);
+            const uint32_t ev = static_cast<uint32_t>(b.event);
+            std::memcpy(ram + dst, &ev, 4);
+            std::snprintf(buf, sizeof(buf), "event %d node %s peak %u slot %u at 0x%06x: \"%s\" -> copy of slot %u (event %u) with event %d",
+                          b.event, kNodeTables[b.nodeTable].key, b.nodePeak, b.nodeSlot, dst, oldLabel.c_str(),
+                          b.nodeTemplate, tplEvent, b.event);
             log(buf);
             ++writes;
         }
