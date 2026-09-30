@@ -257,7 +257,6 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_HOST_PACE_RATE",
         "PS2X_HOST_PACE_RATE2",
         "PS2X_HOST_PACE_TICK2",
-        "PS2X_IOS_AUDIO_SESSION",
         "PS2X_MC_ROOT",
         "PS2X_MICROVU_BRIDGE_LEAN",
         "PS2X_MICROVU_LIB",
