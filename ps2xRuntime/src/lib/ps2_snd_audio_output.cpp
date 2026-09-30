@@ -3,6 +3,8 @@
 #include "ThreadNaming.h"
 #include "ps2_audio_stretch.h"
 #include "ps2_snd_spike.h"
+#include "ps2_vsync_lock.h"
+#include "ps2_vsync_pacer.h"
 #include "raylib.h"
 #include "SoundTouch.h"
 
@@ -56,6 +58,7 @@ namespace
         bool stretch = false;
         std::unique_ptr<soundtouch::SoundTouch> st;
         ps2_audio_stretch::StretchController controller;
+        bool lockTempo = false; // AU15: PS2X_VSYNC_LOCK_AUDIO=tempo with PS2X_VSYNC_LOCK=1
         std::chrono::steady_clock::time_point lastCallback{};
         std::chrono::steady_clock::time_point stretchStatsAt{};
         std::vector<float> floatBuf;
@@ -305,7 +308,11 @@ namespace
                   << " overflows=" << ps2_snd_spike::pcmRing().overflows()
                   << " tempo min=" << st.minTempo << " mean=" << mean << " max=" << st.maxTempo
                   << " bypass=" << bypassPct << "% engages=" << st.engages
-                  << " callbacks=" << st.callbacks << '\n';
+                  << " callbacks=" << st.callbacks;
+        if (g_output.lockTempo)
+            std::cerr << " locked=" << (st.callbacks ? 100.0 * st.locked / st.callbacks : 0.0)
+                      << "% base=" << (st.locked ? st.sumBase / st.locked : 0.0);
+        std::cerr << '\n';
         g_output.controller.resetStats();
         g_output.stretchStatsAt = now;
     }
@@ -320,8 +327,14 @@ namespace
         g_output.lastCallback = now;
 
         const uint64_t fill = ps2_snd_spike::pcmRing().size();
-        const ps2_audio_stretch::StepResult step = g_output.controller.update(fill, dt);
-        g_output.st->setTempo(static_cast<double>(g_output.controller.smoothedTempo()));
+        const float lockRatio =
+            g_output.lockTempo ? ps2_vsync_lock::audioRatio(ps2_vsync_pacer::steadyNowNs()) : 0.0f;
+        const ps2_audio_stretch::StepResult step = g_output.controller.update(fill, dt, lockRatio);
+        // Bypass keeps the stretcher primed at the fill tempo (seamless
+        // engage); engaged, the applied tempo (== smoothed outside AU15's
+        // locked mode, which scales it by the locked ratio).
+        g_output.st->setTempo(static_cast<double>(
+            step.bypass ? g_output.controller.smoothedTempo() : step.tempo));
         if (g_output.traceFile != nullptr)
             traceStretch(now, fill, step);
 
@@ -584,6 +597,11 @@ bool initialize()
                   << (params.legacy ? "legacy AT1" : "sustained-deficit") << " leave=+/-"
                   << params.leave * 100.0 << "%/" << params.sustainS * 1000.0 << "ms rejoin=+/-"
                   << params.rejoin * 100.0 << "%/" << params.rejoinS * 1000.0 << "ms)\n";
+        g_output.lockTempo = ps2_vsync_lock::enabled() &&
+                             ps2_audio_stretch::lockAudioModeFromEnv(std::getenv("PS2X_VSYNC_LOCK_AUDIO")) ==
+                                 ps2_audio_stretch::LockAudioMode::Tempo;
+        if (g_output.lockTempo)
+            std::cerr << "[snd-output] vsync-lock audio=tempo (AU15: constant tempo at the locked ratio)\n";
         const char *tracePath = std::getenv("PS2X_STRETCH_TRACE");
         if (tracePath != nullptr && *tracePath != '\0')
         {

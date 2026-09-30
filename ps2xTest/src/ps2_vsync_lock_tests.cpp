@@ -169,5 +169,35 @@ void register_ps2_vsync_lock_tests()
             t.IsTrue(std::fabs(slack - kPanel / 2) < 1500000.0,
                      "posts land mid-period, slack mean " + std::to_string(slack));
         });
+
+        tc.Run("AU15: audio sees 0 before any pace, when unlocked or stale", [](TestCase &t)
+        {
+            ps2_vsync_lock::Shared s; // local: the process-wide one is untouched
+            t.IsTrue(ps2_vsync_lock::audioRatioFrom(s, wake(0)) == 0.0f, "no pace yet");
+            s.ratio.store(1.0152f);
+            s.ratioAtNs.store(wake(0));
+            t.IsTrue(ps2_vsync_lock::audioRatioFrom(s, wake(0) + 400000000) == 1.0152f, "fresh");
+            t.IsTrue(ps2_vsync_lock::audioRatioFrom(s, wake(0) + 600000000) == 0.0f, "stale after 500 ms");
+            s.ratio.store(0.0f);
+            t.IsTrue(ps2_vsync_lock::audioRatioFrom(s, wake(0) + 1000000) == 0.0f, "unlocked");
+        });
+
+        tc.Run("AU15: pace() stores guest period / (n * panel period)", [](TestCase &t)
+        {
+            // The process-wide instance (only this test touches it).
+            ps2_vsync_lock::Shared &s = ps2_vsync_lock::shared();
+            for (int i = 0; i < 200; ++i)
+                s.tracker.onLatch(0, wake(i) + jitter(i));
+            int64_t sleep = 0;
+            const int64_t now = wake(199) + 1000000;
+            t.IsTrue(ps2_vsync_lock::pace(kGuest120, now, sleep), "locked at 119.88");
+            const float r120 = s.ratio.load();
+            t.IsTrue(std::fabs(r120 - 1.0152f) < 0.001f, "full-120 ratio " + std::to_string(r120));
+            t.IsTrue(ps2_vsync_lock::audioRatioFrom(s, now) == r120, "published with its time");
+            t.IsTrue(ps2_vsync_lock::pace(ps2_vsync_pacer::kPeriodNs, now + 20000000, sleep), "locked at 59.94");
+            t.IsTrue(std::fabs(s.ratio.load() - r120) < 1e-3f, "stock-60 ratio matches (n = 2)");
+            t.IsFalse(ps2_vsync_lock::pace(kGuest120, now + 900000000, sleep), "stale grid unlocks");
+            t.IsTrue(s.ratio.load() == 0.0f, "unlock publishes 0");
+        });
     });
 }

@@ -30,6 +30,7 @@
 // and det-hash output are unchanged (the det mode never reads host time).
 // Pure logic below is fake-clock testable (ps2_vsync_lock_tests.cpp).
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -220,6 +221,11 @@ struct Shared
     int64_t prevNs = -1; // EE thread's last slot
     uint64_t locked = 0, late = 0, unlocked = 0;
     uint64_t latches = 0;
+    // AU15: the locked speed ratio guest period / (n * panel period) (Odin
+    // 1.0152), 0 = unlocked, and when it was last set. Read by the audio
+    // callback (PS2X_VSYNC_LOCK_AUDIO=tempo), so atomics outside the mutex.
+    std::atomic<float> ratio{0.0f};
+    std::atomic<int64_t> ratioAtNs{0};
 };
 
 inline Shared &shared()
@@ -253,17 +259,39 @@ inline bool pace(int64_t guestPeriodNs, int64_t nowNs, int64_t &sleepNs)
 {
     Shared &s = shared();
     std::lock_guard<std::mutex> lock(s.m);
-    const bool ok = pickSlot(s.tracker.grid(), guestPeriodNs, nowNs, s.prevNs, sleepNs);
+    const Grid g = s.tracker.grid();
+    const bool ok = pickSlot(g, guestPeriodNs, nowNs, s.prevNs, sleepNs);
+    s.ratioAtNs.store(nowNs, std::memory_order_relaxed);
     if (!ok)
     {
+        s.ratio.store(0.0f, std::memory_order_relaxed);
         s.prevNs = -1;
         ++s.unlocked;
         return false;
     }
+    const double n = std::round(static_cast<double>(guestPeriodNs) / g.periodNs);
+    s.ratio.store(static_cast<float>(static_cast<double>(guestPeriodNs) / (n * g.periodNs)),
+                  std::memory_order_relaxed);
     ++s.locked;
     if (sleepNs == 0)
         ++s.late;
     return true;
+}
+
+// AU15: the audio callback's view of the lock. The locked ratio, or 0 when
+// the knob is off, the pacer is unlocked, or it has not paced for staleNs
+// (paused/backgrounded: no guest audio is produced either).
+inline float audioRatioFrom(const Shared &s, int64_t nowNs, int64_t staleNs = 500000000ll)
+{
+    const int64_t at = s.ratioAtNs.load(std::memory_order_relaxed);
+    if (at == 0 || nowNs - at > staleNs)
+        return 0.0f;
+    return s.ratio.load(std::memory_order_relaxed);
+}
+
+inline float audioRatio(int64_t nowNs)
+{
+    return enabled() ? audioRatioFrom(shared(), nowNs) : 0.0f;
 }
 
 } // namespace ps2_vsync_lock

@@ -1,8 +1,10 @@
 #include "MiniTest.h"
 #include "ps2_audio_stretch.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <string>
 
 namespace
 {
@@ -17,6 +19,74 @@ bool near(float a, float b, float tol)
 bool nearD(double a, double b, double tol)
 {
     return std::fabs(a - b) <= tol;
+}
+
+// AU15: closed-loop ring model. The guest pushes 512-frame sound ticks at
+// speed(t) x 93.75 Hz (+/-20 % tick jitter); the host callback every
+// 10 +/- 3 ms drains 48 kHz x dt output frames, i.e. tempo x that many
+// source frames (bypass: 1x). lockRatio > 0 is passed to the controller
+// every step (PS2X_VSYNC_LOCK_AUDIO=tempo, locked). Stats cover t >= 10 s.
+struct SimResult
+{
+    uint64_t engages = 0; // after 10 s
+    uint64_t steps = 0, bypassed = 0;
+    double tempoSum = 0.0;
+    float tempoMin = 9.0f, tempoMax = 0.0f;
+    double fillMin = 1e18, fillMax = 0.0;
+    uint64_t underrunFrames = 0;
+};
+
+template <typename SpeedFn>
+SimResult simulate(double seconds, float lockRatio, SpeedFn speed)
+{
+    ps2_audio_stretch::StretchController c;
+    uint32_t rng = 12345u;
+    const auto uni = [&rng]() // [0, 1)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        return static_cast<double>(rng >> 8) / 16777216.0;
+    };
+    SimResult r;
+    double fill = kTarget, t = 0.0, nextTick = 0.0, dt = -1.0;
+    uint64_t engagesAt10 = 0;
+    bool marked = false;
+    while (t < seconds)
+    {
+        const auto s = c.update(static_cast<uint64_t>(fill), dt, lockRatio);
+        if (t >= 10.0)
+        {
+            if (!marked)
+            {
+                engagesAt10 = c.stats().engages;
+                marked = true;
+            }
+            ++r.steps;
+            r.bypassed += s.bypass ? 1u : 0u;
+            r.tempoSum += s.tempo;
+            r.tempoMin = std::min(r.tempoMin, s.tempo);
+            r.tempoMax = std::max(r.tempoMax, s.tempo);
+            r.fillMin = std::min(r.fillMin, fill);
+            r.fillMax = std::max(r.fillMax, fill);
+        }
+        dt = 0.010 + (uni() - 0.5) * 0.006;
+        const double drain = 48000.0 * dt * (s.bypass ? 1.0 : s.tempo);
+        if (drain > fill)
+        {
+            if (t >= 10.0)
+                r.underrunFrames += static_cast<uint64_t>(drain - fill);
+            fill = 0.0;
+        }
+        else
+            fill -= drain;
+        t += dt;
+        while (nextTick <= t)
+        {
+            fill += 512.0;
+            nextTick += 512.0 / 48000.0 / speed(nextTick) * (0.8 + 0.4 * uni());
+        }
+    }
+    r.engages = c.stats().engages - engagesAt10;
+    return r;
 }
 } // namespace
 
@@ -259,6 +329,64 @@ void register_ps2_audio_stretch_tests()
                 s = c.update(kTarget * 4u, kDt);
             t.IsFalse(s.bypass, "overfull must engage to drain");
             t.IsTrue(near(s.tempo, 1.05f, 0.02f), "tempo clamps at the ceiling");
+        });
+
+        tc.Run("AU15: lock-audio knob is exactly tempo", [](TestCase &t)
+        {
+            using ps2_audio_stretch::LockAudioMode;
+            t.IsTrue(ps2_audio_stretch::lockAudioModeFromEnv(nullptr) == LockAudioMode::Stretch, "unset = today");
+            t.IsTrue(ps2_audio_stretch::lockAudioModeFromEnv("tempo") == LockAudioMode::Tempo, "tempo");
+            t.IsTrue(ps2_audio_stretch::lockAudioModeFromEnv("1") == LockAudioMode::Stretch, "1 = today");
+            t.IsTrue(ps2_audio_stretch::lockAudioModeFromEnv("Tempo") == LockAudioMode::Stretch, "case-exact");
+        });
+
+        tc.Run("AU15: guest at +1.52 %, band logic cycles; locked tempo holds one engagement", [](TestCase &t)
+        {
+            const auto locked = [](double) { return 1.0152; };
+            const SimResult today = simulate(70.0, 0.0f, locked);
+            const SimResult au15 = simulate(70.0, 1.0152f, locked);
+            // Control: today's controller toggles under the lock (PX1 saw
+            // ~0.7 engages/s on the Odin). The model must reproduce that or
+            // the second half proves nothing.
+            t.IsTrue(today.engages >= 10, "today cycles: " + std::to_string(today.engages) + " engages in 60 s");
+            t.IsTrue(today.bypassed > 0 && today.bypassed < today.steps, "today mixes bypass and stretch");
+            t.Equals(au15.engages, static_cast<uint64_t>(0), "locked: no engagement after the first");
+            t.Equals(au15.bypassed, static_cast<uint64_t>(0), "locked: never bypassed");
+            const double mean = au15.tempoSum / au15.steps;
+            t.IsTrue(nearD(mean, 1.0152, 0.002), "locked mean tempo " + std::to_string(mean));
+            t.IsTrue(au15.fillMin > 0.5 * kTarget && au15.fillMax < 1.6 * kTarget,
+                     "fill stays near the target: " + std::to_string(au15.fillMin) + ".." +
+                         std::to_string(au15.fillMax));
+            t.Equals(au15.underrunFrames, static_cast<uint64_t>(0), "locked: no underruns");
+        });
+
+        tc.Run("AU15: locked tempo follows a real guest dip and comes back", [](TestCase &t)
+        {
+            // 3 s at 0.8x inside the locked window (a heavy scene the device
+            // can't keep up with while the pacer stays locked, sleep 0).
+            const SimResult r = simulate(40.0, 1.0152f, [](double tt)
+                                         { return tt >= 20.0 && tt < 23.0 ? 0.8 : 1.0152; });
+            t.IsTrue(r.tempoMin < 0.85f, "tempo drops with the guest: min " + std::to_string(r.tempoMin));
+            t.IsTrue(r.tempoMax > 1.0f, "and returns above 1");
+            t.Equals(r.bypassed, static_cast<uint64_t>(0), "never bypassed");
+            t.IsTrue(r.underrunFrames < 48000u / 10u, "under 100 ms of pads across the dip: " +
+                                                          std::to_string(r.underrunFrames));
+        });
+
+        tc.Run("AU15: unlock hands back to the band logic", [](TestCase &t)
+        {
+            ps2_audio_stretch::StretchController c;
+            c.update(kTarget, 0.0, 1.0152f);
+            ps2_audio_stretch::StepResult s{};
+            for (int i = 0; i < 100; ++i)
+                s = c.update(kTarget, kDt, 1.0152f);
+            t.IsFalse(s.bypass, "locked: engaged");
+            t.IsTrue(near(s.tempo, 1.0152f, 1e-4f), "locked tempo = ratio at the target fill");
+            t.IsTrue(near(c.lockedBase(), 1.0152f, 1e-4f), "base tracks the ratio");
+            s = c.update(kTarget, kDt, 0.0f);
+            t.IsTrue(s.bypass, "unlocked at the target fill: rejoins at once");
+            t.IsTrue(c.lockedBase() == 0.0f, "base cleared");
+            t.Equals(c.stats().locked, static_cast<uint64_t>(101), "101 locked steps counted");
         });
 
         tc.Run("window stats track applied tempo and engagements", [](TestCase &t)

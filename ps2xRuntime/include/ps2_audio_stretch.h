@@ -40,6 +40,20 @@
 // for A/B legs. PS2X_STRETCH_LEAVE / _SUSTAIN_MS / _REJOIN_MS override the
 // AU12 band and dwells (dev-only tuning; invalid values keep defaults).
 //
+// AU15: PS2X_VSYNC_LOCK_AUDIO=tempo (only with PS2X_VSYNC_LOCK=1). The lock
+// runs the guest at display refresh / guest rate (Odin: 121.7 / 119.88 =
+// 1.0152), so the ring gains ~1.5 % a second and the band logic above cycles
+// engage/rejoin (~0.7 per second, PX1). Locked-tempo mode follows PCSX2 under
+// Sync to Host Refresh: SPU2::GetNominalRate() returns the host/guest ratio,
+// AudioStream::SetNominalRate() makes it the stretcher's tempo when it would
+// otherwise idle ("inactive" = tempo m_nominal_rate) and scales its target
+// buffer by it. Here, while the pacer reports a locked ratio R: never bypass;
+// tempo = base * smooth, base = R through a slow EMA (tau 2 s: the grid's
+// period estimate wanders +/-0.3 %, PX1), smooth = the fill ratio above (so
+// fill settles at the target, and a real guest dip still slows the tempo).
+// No lock (ratio 0: menus before the first present, pause, knob off): the band
+// logic resumes from the engaged state. Unset/other values = today.
+//
 // No sqrt() dampening (PCSX2 has it): with the FP1 wall pacer the guest
 // rate is exactly <= 1.0, so linear control settles at fill = rate*target
 // with more low-rate margin (0.6*target at 0.6x, not 0.36*target).
@@ -70,12 +84,27 @@ constexpr double kRejoinDefaultS = 0.0;   // rejoin dwell (0 = immediate; a
                                           // dwell traps engaged under wander)
 constexpr double kTauDownS = 0.05;        // EMA time constant on drops
 constexpr double kTauUpS = 0.30;          // EMA time constant on rises
+constexpr double kTauBaseS = 2.0;         // AU15: locked-ratio EMA
 
 // PS2X_AUDIO_STRETCH: default on (Brad 09-26, after the C1 listen);
 // the exact value "0" disables (legacy direct path, byte-identical output).
 inline bool stretchEnabledFromEnv(const char *value)
 {
     return value == nullptr || std::strcmp(value, "0") != 0;
+}
+
+// AU15: PS2X_VSYNC_LOCK_AUDIO. "tempo" = locked-tempo mode (see top);
+// anything else (unset included) = today's band logic.
+enum class LockAudioMode
+{
+    Stretch,
+    Tempo,
+};
+
+inline LockAudioMode lockAudioModeFromEnv(const char *value)
+{
+    return value != nullptr && std::strcmp(value, "tempo") == 0 ? LockAudioMode::Tempo
+                                                                : LockAudioMode::Stretch;
 }
 
 struct Params
@@ -138,6 +167,8 @@ struct WindowStats
     uint64_t callbacks = 0;
     uint64_t bypassed = 0;
     uint64_t engages = 0; // bypass->engaged transitions (flutter counter)
+    uint64_t locked = 0;  // AU15: steps in locked-tempo mode
+    double sumBase = 0.0; // AU15: sum of the locked base over those steps
     float minTempo = 1.0f;
     float maxTempo = 1.0f;
     double sumTempo = 0.0;
@@ -152,7 +183,10 @@ public:
     // One host-audio callback step. fillFrames is the ring depth BEFORE this
     // callback drains it; dtWallS is wall seconds since the previous step
     // (<= 0 on the first step: adopt raw immediately, no dwell accrues).
-    StepResult update(uint64_t fillFrames, double dtWallS)
+    // lockedRatio > 0 = AU15 locked-tempo mode for this step (the caller
+    // passes it only under PS2X_VSYNC_LOCK_AUDIO=tempo while the pacer is
+    // locked); 0 = today's band logic.
+    StepResult update(uint64_t fillFrames, double dtWallS, float lockedRatio = 0.0f)
     {
         const float raw = std::clamp(static_cast<float>(fillFrames) / kTargetFrames,
                                      kTempoMin, kTempoMax);
@@ -169,6 +203,22 @@ public:
         }
         const double dtPos = dtWallS > 0.0 ? dtWallS : 0.0;
         const float dev = std::fabs(m_smooth - 1.0f);
+        if (lockedRatio > 0.0f)
+        {
+            if (m_base <= 0.0f)
+                m_base = lockedRatio;
+            else if (dtPos > 0.0)
+                m_base += (lockedRatio - m_base) *
+                          static_cast<float>(1.0 - std::exp(-dtPos / kTauBaseS));
+            if (m_bypass)
+                m_stats.engages += 1u;
+            m_bypass = false;
+            m_outsideS = 0.0;
+            m_insideS = 0.0;
+            return record(std::clamp(m_base * m_smooth, kTempoMin, kTempoMax * m_base), false,
+                          true);
+        }
+        m_base = 0.0f;
         if (m_bypass)
         {
             // Legacy is the same path with sustainS == rejoinS == 0: the
@@ -201,10 +251,28 @@ public:
         {
             m_insideS = 0.0;
         }
+        return record(m_bypass ? 1.0f : m_smooth, m_bypass, false);
+    }
+
+    float smoothedTempo() const { return m_smooth; }
+    float lockedBase() const { return m_base; }
+    bool bypass() const { return m_bypass; }
+    const Params &params() const { return m_params; }
+    const WindowStats &stats() const { return m_stats; }
+    void resetStats() { m_stats = WindowStats{}; }
+
+private:
+    StepResult record(float tempo, bool bypass, bool locked)
+    {
         StepResult out;
-        out.tempo = m_bypass ? 1.0f : m_smooth;
-        out.bypass = m_bypass;
+        out.tempo = tempo;
+        out.bypass = bypass;
         m_stats.callbacks += 1u;
+        if (locked)
+        {
+            m_stats.locked += 1u;
+            m_stats.sumBase += m_base;
+        }
         if (m_bypass)
             m_stats.bypassed += 1u;
         if (m_stats.callbacks == 1u)
@@ -218,16 +286,10 @@ public:
         return out;
     }
 
-    float smoothedTempo() const { return m_smooth; }
-    bool bypass() const { return m_bypass; }
-    const Params &params() const { return m_params; }
-    const WindowStats &stats() const { return m_stats; }
-    void resetStats() { m_stats = WindowStats{}; }
-
-private:
     Params m_params;
     bool m_init = false;
     float m_smooth = 1.0f;
+    float m_base = 0.0f; // AU15 locked-ratio EMA (0 = not locked)
     bool m_bypass = true;
     double m_outsideS = 0.0; // continuous wall-s with dev > leave (bypassed)
     double m_insideS = 0.0;  // continuous wall-s with dev < rejoin (engaged)
