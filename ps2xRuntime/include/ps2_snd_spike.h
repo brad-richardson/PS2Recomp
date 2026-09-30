@@ -10,6 +10,9 @@
 //   PS2X_SND_VOICES=0      music only: skip the SPU voice layer (AU9).
 //   PS2X_SND_MIX_RAW=<f>   guest-time 48 kHz mix, per frame s16 music L/R then
 //                          voices L/R (bounded).
+//   PS2X_SND_KEYON_LOG=<f> one line per new tag-3 voice word (a game-side
+//                          sound trigger: keyon serial << 23 | SPU address),
+//                          by sound tick (guest time; FH13, bounded).
 //
 // SNDDRV protocol (AU2 Part A, local/research/AU2/REPORT.md):
 //   IOP->EE cid 1, +0x10 type: 0 = tick (opt = IOP address the EE DMAs its
@@ -92,6 +95,9 @@ struct State
     bool voices = true;
     FILE *mixRaw = nullptr;
     uint64_t mixRawBytes = 0;
+    FILE *keyonLog = nullptr;
+    uint64_t keyonLines = 0;
+    std::array<uint32_t, ps2_snd_spu::kVoices> keyonWord{};
     ps2_snd_spu::Spu spu;
     ps2_snd_spu::Driver driver;
     ps2_snd_spu::Upsampler34 upLeft, upRight;
@@ -320,6 +326,8 @@ inline void initLocked(State &s)
         s.voices = false;
     if (const char *p = std::getenv("PS2X_SND_MIX_RAW"); p && *p)
         s.mixRaw = std::fopen(p, "wb");
+    if (const char *p = std::getenv("PS2X_SND_KEYON_LOG"); p && *p)
+        s.keyonLog = std::fopen(p, "w");
     s.spu.interp = ps2_snd_spu::parseInterp(std::getenv("PS2X_SPU_INTERP"));
     if (const char *p = std::getenv("PS2X_AUDIO_RESAMPLE"); p && std::strcmp(p, "sinc") == 0)
         s.sinc = true;
@@ -565,6 +573,30 @@ inline void mixTickLocked(State &s, const uint8_t *pcm, const uint8_t *tag3)
     }
     if (!s.variants.empty())
         mixVariantsLocked(s, left, right, tag3);
+    if (s.keyonLog && tag3)
+    {
+        // FH13: log each new non-zero voice word once (a retrigger that waits a
+        // tick for the release is one line, not two). Observation only.
+        for (uint32_t v = 0; v < kVoices && s.keyonLines < 400000u; ++v)
+        {
+            const uint8_t *e = tag3 + kTag3VoiceBase + v * 8u;
+            uint32_t word = 0;
+            uint16_t pitch = 0;
+            std::memcpy(&word, e, 4);
+            std::memcpy(&pitch, e + 4, 2);
+            if (word == s.keyonWord[v])
+                continue;
+            s.keyonWord[v] = word;
+            if ((word & 0x7fffffu) == 0u)
+                continue;
+            ++s.keyonLines;
+            std::fprintf(s.keyonLog, "keyon t=%llu v=%u addr=%06x serial=%u pitch=%u vol=%d,%d\n",
+                         (unsigned long long)s.ticks, v, word & 0x7fffffu, word >> 23, pitch,
+                         static_cast<int8_t>(e[6]), static_cast<int8_t>(e[7]));
+        }
+        if ((s.ticks % 94u) == 0u)
+            std::fflush(s.keyonLog);
+    }
     if (s.voices && tag3)
     {
         s.driver.update(tag3, s.spu);

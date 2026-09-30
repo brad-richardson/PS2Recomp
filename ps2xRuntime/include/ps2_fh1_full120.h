@@ -172,6 +172,10 @@ enum Fix : uint32_t
     kFixBoost = 1u << 26,    // boost/uber machine 0x1200d0: private dt + one-step thresholds 1/60 -> 1/120 (class h, FH10)
     kFixGround = 1u << 27,   // ground adhesion 0x13c878: per-update pull toward the snow while above it, halved (class b, FV1)
     kFixEntry = 1u << 28,    // events mode: enter at the race start (gate drop-in) even while riders are airborne (FH14)
+    kFixRclock = 1u << 29,   // render-frame clock (getter 0x395510, device +0x5a74) read at stock cadence: plant sway, frame deadlines (class e, FH13)
+    kFixEmitter = 1u << 30,  // particle emitter frame step 0x370788 (callers 0x3459a8/0x345d80/0x345ef8): private 1/60 -> 1/120 (class h, FH13)
+    kFixFx = 1u << 31,       // rider effects controller P+0xb40 (0x2e1120 glint timers, 0x2e1f70 fader) + board-wake scroll 0x2ef6d0: per-update steps halved (class b/h, FH13)
+    // Bits 0-31 are all used (FH13): the next group needs a 64-bit mask.
 };
 
 inline uint32_t fixMask() noexcept
@@ -185,7 +189,8 @@ inline uint32_t fixMask() noexcept
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
                    kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim |
                    kFixBonus | kFixAiGate | kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset |
-                   kFixMeter | kFixBoost | kFixGround | kFixEntry; // kFixLift is opt-in (FH8: no window where it binds)
+                   kFixMeter | kFixBoost | kFixGround | kFixEntry | kFixRclock |
+                   kFixEmitter | kFixFx; // kFixLift is opt-in (FH8: no window where it binds)
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -220,6 +225,9 @@ inline uint32_t fixMask() noexcept
             else if (item == "boost") m |= kFixBoost;
             else if (item == "ground") m |= kFixGround;
             else if (item == "entry") m |= kFixEntry;
+            else if (item == "rclock") m |= kFixRclock;
+            else if (item == "emitter") m |= kFixEmitter;
+            else if (item == "fx") m |= kFixFx;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -299,7 +307,7 @@ inline std::vector<Word> labWords();
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
-    const std::array<Word, 99> words = {{
+    const std::array<Word, 111> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -479,6 +487,31 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         // ground cap 2083, 0.14 s lost). Halved: airborne at 4823, lag <= 0.03 s and distance within
         // 0.6 % through 10.5 s (fv1-s2/s3, lab word fv1-w1).
         {kFixGround, 0x49c008u, 0xbd08882fu, 0xbc88882fu, "ground_pull_13c88c"},
+        // FH13 emitter: the particle emitter step 0x370788 ages the emitter by 1/A.rate (per time) but
+        // advances its frame phase +0x184 by +0x188 * f12 per update, f12 = a private 1/60 passed by
+        // the three emitter classes (0x3459a8 at 0x345b78/0x345b8c; 0x345d80 at 0x345e3c; 0x345ef8 at
+        // 0x345fd0/0x346000/0x34601c), each word a single reader (codegen grep). The frame index wraps at
+        // the int +0x180, so emitter animations (spray/snow puffs) played 2x at 120 (class h).
+        {kFixEmitter, 0x4a059cu, kSixtieth, kHundredTwentieth, "emitter_dt_345b78"},
+        {kFixEmitter, 0x4a05a0u, kSixtieth, kHundredTwentieth, "emitter_dt_345b8c"},
+        {kFixEmitter, 0x4a05a4u, kSixtieth, kHundredTwentieth, "emitter_dt_345e3c"},
+        {kFixEmitter, 0x4a05a8u, kSixtieth, kHundredTwentieth, "emitter_dt_345fd0"},
+        {kFixEmitter, 0x4a05acu, kSixtieth, kHundredTwentieth, "emitter_dt_346000"},
+        {kFixEmitter, 0x4a05b0u, kSixtieth, kHundredTwentieth, "emitter_dt_34601c"},
+        // FH13 fx: the rider effects controller (P+0xb40, 0x2e1120 from the rider pass, per rider per
+        // update): +0x1c -= [0x49f60c] (1/600, floored), timer +0x20 += [0x49f610] (1/60) against a period
+        // in seconds (+0x24, 0.4..1.0), and +0x14 += rate * [0x49f628] (1/60); its fader 0x2e1f70 moves
+        // +0x10 (P+0xb50) up by [0x49f68c] 0.01 or down by [0x49f688] 1/60 per update. All single readers,
+        // all measured 2x per stock second at 120 (FR1-R1 P+0xb50/b5c/b60, FH13 r1s/r1e dumps). The
+        // controller's trail-push dt words (0x49f62c/30/9c/a0 -> 0x3717c0 -> 0x3710d0) stay 1/60: FH7 rng
+        // already pushes trails at stock cadence. The board-wake scroll 0x2ef6d0 (per rider, from the rider
+        // pass) moves its phase +0x10 by |v| * [0x49f7b4] (1/6000) per update (AI Mac 0x16d1ef0: 2x).
+        {kFixFx, 0x49f60cu, 0x3ada740fu, 0x3a5a740fu, "fx_glint_decay_2e1230"},
+        {kFixFx, 0x49f610u, kSixtieth, kHundredTwentieth, "fx_glint_timer_2e1240"},
+        {kFixFx, 0x49f628u, kSixtieth, kHundredTwentieth, "fx_glint_dt_2e1384"},
+        {kFixFx, 0x49f688u, kSixtieth, kHundredTwentieth, "fx_fader_down_2e1fc8"},
+        {kFixFx, 0x49f68cu, 0x3c23d70bu, 0x3ba3d70bu, "fx_fader_up_2e1fe0"},
+        {kFixFx, 0x49f7b4u, 0x392ec33eu, 0x38aec33eu, "wake_scroll_2ef8bc"},
     }};
     uint32_t mask = fixMask();
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
@@ -1213,6 +1246,71 @@ inline bool rngHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t
     return false;
 }
 
+// ---- FH13 rclock: the render-frame clock at stock cadence -------------------
+// The render device ([gp+0x2a90], vtable [+0x10d8]) counts rendered frames at
+// +0x5a74 (++ at 0x382b30, once per render) and hands it out only through the
+// vtable getter 0x395510 (slot +0x394, `jr ra; lw v0, 0x5a74(a0)`); 17 game
+// functions call it as a clock: the plant sway 0x38ec40 (phase = frames *
+// freq / 600), frame deadlines (0x1a38c0 stores frames + 14, 0x1a39f0 tests
+// them), the World request queue 0x3a8668 (waits 5 frames), rider/race code.
+// At 120 it counts 120 (or DRAW_HZ) per stock second, so every one of them ran
+// fast. Group rclock answers the getter with a stock-cadence count S instead
+// (the call is skipped, v0 = S): while the hooks are on, S = S_entry + elapsed
+// stock ticks; outside, S = frames - offset, the offset frozen at exit, so S
+// is continuous across flips and deadlines stored in S units stay valid.
+// Render-internal code never reads +0x5a74 (codegen grep: 0x37be38 clears it,
+// 0x382b20/30 bump it, 0x395514 is the getter), so rendering is unaffected.
+inline constexpr uint32_t kRenderFrameGet = 0x395510u;
+inline constexpr uint32_t kRenderFrameOff = 0x5a74u;
+inline bool g_rcActive = false;
+inline int64_t g_rcOffset = 0, g_rcEntryS = 0;
+inline uint64_t g_rcEntryHalf = 0u;
+
+inline bool rclockFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixRclock) != 0u;
+    return on;
+}
+
+// Stock half-periods elapsed: the events accumulator, or the 120 Hz VBlank
+// count in always mode.
+inline uint64_t rcHalfNow() noexcept
+{
+    return mode() == Mode::Events ? g_stockHalf.load(std::memory_order_relaxed) : g_lastTick;
+}
+
+// Returns true when the getter call is answered here (v0 = S, call skipped).
+inline bool rclockHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
+{
+    if (targetPc != kRenderFrameGet || !ctx)
+        return false;
+    uint32_t c = 0u;
+    if (!rd32(ram, getRegU32(ctx, 4) + kRenderFrameOff, c))
+        return false;
+    const bool on = hooksOn();
+    const uint64_t h = rcHalfNow();
+    if (on && !g_rcActive)
+    {
+        g_rcEntryS = static_cast<int64_t>(c) - g_rcOffset;
+        g_rcEntryHalf = h;
+        g_rcActive = true;
+    }
+    int64_t sv = 0;
+    if (g_rcActive)
+    {
+        sv = g_rcEntryS + static_cast<int64_t>((h - g_rcEntryHalf) / 2u);
+        if (!on)
+        {
+            g_rcOffset = static_cast<int64_t>(c) - sv;
+            g_rcActive = false;
+        }
+    }
+    else
+        sv = static_cast<int64_t>(c) - g_rcOffset;
+    SET_GPR_U32(ctx, 2, static_cast<uint32_t>(sv));
+    return true;
+}
+
 // ---- Draw limiter, PS2X_SSX3_DRAW_HZ=60|90|120 (DL1; default 120 = off) ----
 // While full120 runs (always mode, or events mode with the guest flip
 // active), the sim still updates 120 times per guest second but only
@@ -1635,7 +1733,7 @@ inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool re
 // PS2X_FH10_HIST=a-b[,c-d] (VBlank ticks, needs PS2X_FH1_TAP=1): counts every
 // dispatched call target inside each range and prints the counts when the
 // range ends, "fh10-hist range=a-b tgt=... n=...", largest first (1500 lines
-// per range). Comparing a crash, rail or meter window with a plain riding
+// per range; PS2X_FH10_HIST_MAX=n raises the cap). Comparing a crash, rail or meter window with a plain riding
 // window (or stock with events per stock second) names the functions that
 // run only there, or once per update.
 // PS2X_FH10_POKE=tick:addr:value[,...] (tick decimal, addr/value hex): writes
@@ -1846,10 +1944,14 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
         std::sort(out.begin(), out.end(), [](const auto &x, const auto &y) {
             return x.first != y.first ? x.first > y.first : x.second < y.second;
         });
+        static const size_t maxLines = [] {
+            const char *m = std::getenv("PS2X_FH10_HIST_MAX"); // FH13: full list when set
+            return (m && *m) ? static_cast<size_t>(std::strtoul(m, nullptr, 10)) : size_t{1500u};
+        }();
         size_t lines = 0u;
         for (const auto &e : out)
         {
-            if (lines++ >= 1500u)
+            if (lines++ >= maxLines)
                 break;
             std::fprintf(stderr, "fh10-hist range=%llu-%llu tgt=%06x n=%u\n", static_cast<unsigned long long>(r.first),
                          static_cast<unsigned long long>(r.second), e.second, e.first);
@@ -1869,7 +1971,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 // same order, same results (every flag below is fixed after its first read).
 struct BranchFlags
 {
-    bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags;
+    bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock;
     bool src, fh9, lab, draw, tap;
 };
 
@@ -1890,6 +1992,7 @@ inline const BranchFlags &branchFlags() noexcept
         r.bonus = bonusFix();
         r.lift = liftFix();
         r.flags = flagsFix();
+        r.rclock = rclockFix();
         r.src = !srcWants().empty();
         r.fh9 = fh9Tap().r != 0u;
         r.lab = !labHooks("PS2X_FH1_HALF", true).empty() || !labHooks("PS2X_FH1_SKIP", false).empty();
@@ -1945,6 +2048,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         liftHook(ctx, sourcePc, targetPc);
     if (on && flag(&BranchFlags::flags, flagsFix))
         flagsPreHook(ram, ctx, targetPc);
+    if (flag(&BranchFlags::rclock, rclockFix)) // also after exit: S keeps its frozen offset
+        skip = rclockHook(ram, ctx, targetPc) || skip;
     if (!Fast || bf->src)
         srcTap(ram, ctx, sourcePc, targetPc);
     if (!Fast || bf->fh9)
