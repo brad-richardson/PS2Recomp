@@ -479,7 +479,7 @@ private:
     void writeGuestU32(uint32_t address, uint32_t value);
     void waitForEvent();
     // PT2: cut the per-tick GameThread tail entries (ee.busy/ee.cpu/ee.wait)
-    // at a VBlank. Consumes m_perfGateNs/m_perfPaceNs/m_perfEventNs.
+    // at a VBlank. Consumes m_perfGateNs/m_perfPaceNs/m_perfEventNs/m_perfEnqueueNs.
     void perfTailCutFrame(uint64_t tick);
     void scheduleEvent(uint64_t deadlineCycle, std::chrono::steady_clock::time_point hostDeadline, EeEvent event);
     void updateNextDeadline();
@@ -579,7 +579,8 @@ private:
     bool m_perfHaveFrame = false;
     uint64_t m_perfFrameStartWall = 0;
     uint64_t m_perfFrameStartCpu = 0;
-    uint64_t m_perfEventNs = 0; // waitForEvent + enqueue-queue-full waits since the last cut
+    uint64_t m_perfEventNs = 0;   // waitForEvent waits since the last cut
+    uint64_t m_perfEnqueueNs = 0; // GS enqueue-queue-full waits since the last cut (PW2: split out)
     uint64_t m_perfMtvuNs = 0;  // threadedWaitNsTotal() at the last cut
     uint64_t m_perfGateNs = 0;  // this VBlank's pause-gate sleep
     uint64_t m_perfPaceNs = 0;  // this VBlank's pacer sleep

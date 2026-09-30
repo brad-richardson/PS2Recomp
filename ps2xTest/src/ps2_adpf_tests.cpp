@@ -29,6 +29,17 @@ void register_ps2_adpf_tests()
             t.Equals(ps2x::adpf::parseTargetNs("fast"), ps2x::adpf::kDefaultTargetNs, "junk default");
             t.Equals(ps2x::adpf::parseTargetNs("10ms"), ps2x::adpf::kDefaultTargetNs, "trailing junk default"); });
 
+        tc.Run("parseReportMode: only \"critical\" selects Critical", [](TestCase &t)
+               {
+            using ps2x::adpf::ReportMode;
+            t.IsTrue(ps2x::adpf::parseReportMode(nullptr) == ReportMode::Busy, "null busy");
+            t.IsTrue(ps2x::adpf::parseReportMode("") == ReportMode::Busy, "empty busy");
+            t.IsTrue(ps2x::adpf::parseReportMode("busy") == ReportMode::Busy, "busy");
+            t.IsTrue(ps2x::adpf::parseReportMode("critical") == ReportMode::Critical, "critical");
+            t.IsTrue(ps2x::adpf::parseReportMode("Critical") == ReportMode::Busy, "case-sensitive");
+            t.IsTrue(ps2x::adpf::parseReportMode("critical ") == ReportMode::Busy, "trailing junk busy");
+            t.IsTrue(ps2x::adpf::reportMode() == ReportMode::Busy, "off Android: always busy"); });
+
         tc.Run("threadName covers all four sessions", [](TestCase &t)
                {
             t.Equals(std::string(ps2x::adpf::threadName(ps2x::adpf::Thread::Game)), std::string("game"), "game");

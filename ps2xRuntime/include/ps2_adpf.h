@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 namespace ps2x::adpf
 {
@@ -76,6 +77,25 @@ inline int64_t parseTargetNs(const char *value)
     return static_cast<int64_t>(ns);
 }
 
+// PW2: what the sessions report. Busy (default, AD1): each thread's own
+// busy time. Critical (PS2X_ADPF_REPORT=critical): every session reports the
+// GameThread frame's critical path = ee.busy + MTVU syncs + GS enqueue waits
+// (the frame's wall minus pacer, pause-gate and guest-idle event waits), so
+// the governor lowers clocks while frames finish early and boosts all four
+// threads when a frame nears the target. Busy time alone misses the late
+// frames: at full-120 heavy they are busy ~5 ms + ~4 ms waiting on MTVU/GS.
+enum class ReportMode : uint8_t
+{
+    Busy = 0,
+    Critical,
+};
+
+// Parse PS2X_ADPF_REPORT: "critical" selects Critical; anything else Busy.
+inline ReportMode parseReportMode(const char *value)
+{
+    return (value != nullptr && std::strcmp(value, "critical") == 0) ? ReportMode::Critical : ReportMode::Busy;
+}
+
 #if defined(__ANDROID__)
 // Cached knob reads (env is fixed before main; parsed once each).
 bool enabled();
@@ -87,12 +107,21 @@ void noteThread(Thread t);
 // No-op unless enabled; safe from any thread (each session is reported from
 // exactly one thread: Game+Mtvu from GameThread at vblank, GsWorker+GsBack
 // from the GS worker at GuestVsync). Throttled [adpf] line once a second.
+// In Critical mode Game/Mtvu reports are dropped (reportFrame sends them)
+// and GsWorker/GsBack report the latest frame critical time instead of busy.
 void report(Thread t, uint64_t busyNs);
+ReportMode reportMode();
+// PW2: this tick's GameThread critical path (GameThread only, at the cut).
+// Critical mode: reports it to the Game and Mtvu sessions and publishes it
+// for the GS sessions. Busy mode: no-op.
+void reportFrame(uint64_t criticalNs);
 #else
 inline bool enabled() { return false; }
 inline int64_t targetNs() { return kDefaultTargetNs; }
 inline void noteThread(Thread) {}
 inline void report(Thread, uint64_t) {}
+inline ReportMode reportMode() { return ReportMode::Busy; }
+inline void reportFrame(uint64_t) {}
 #endif
 
 } // namespace ps2x::adpf

@@ -13,6 +13,7 @@
 #include <ctime>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <initializer_list>
 #include <mutex>
 #include <unistd.h>
 
@@ -51,6 +52,7 @@ bool g_sessionLogged[kThreadCount] = {}; // under g_mutex
 uint64_t g_nextCreateNs[kThreadCount] = {}; // under g_mutex: 1/s create retry
 uint64_t g_lastGsBackScanNs = 0;             // under g_mutex: 1/s /proc scan
 std::atomic<uint64_t> g_lastLogNs{0};
+std::atomic<uint64_t> g_lastCriticalNs{0}; // PW2: latest frame critical path (Critical mode)
 
 uint64_t monotonicNs()
 {
@@ -133,9 +135,10 @@ void initOnce()
     }
     g_supported = (missing == nullptr);
     std::fprintf(stderr,
-                 "[adpf] init enabled=1 target_ns=%" PRId64 " manager=%s preferred_update_rate_ns=%" PRId64 "%s%s\n",
-                 targetNs(), g_manager ? "ok" : "null", g_rateNs, missing ? " missing=" : "",
-                 missing ? missing : "");
+                 "[adpf] init enabled=1 target_ns=%" PRId64 " report=%s manager=%s preferred_update_rate_ns=%" PRId64
+                 "%s%s\n",
+                 targetNs(), reportMode() == ReportMode::Critical ? "critical" : "busy", g_manager ? "ok" : "null",
+                 g_rateNs, missing ? " missing=" : "", missing ? missing : "");
 }
 
 void ensureInit()
@@ -212,8 +215,10 @@ void maybeLog(uint64_t now)
             std::strncat(errs, cell, sizeof(errs) - std::strlen(errs) - 1);
         }
     }
-    std::fprintf(stderr, "[adpf] alive=%s last_us=%s target_ns=%" PRId64 " rate_ns=%" PRId64 "%s%s\n", alive,
-                 lastUs, targetNs(), g_rateNs, errs[0] ? " report_err=" : "", errs[0] ? errs : "");
+    std::fprintf(stderr,
+                 "[adpf] alive=%s last_us=%s crit_us=%llu target_ns=%" PRId64 " rate_ns=%" PRId64 "%s%s\n", alive,
+                 lastUs, static_cast<unsigned long long>(g_lastCriticalNs.load(std::memory_order_relaxed) / 1000u),
+                 targetNs(), g_rateNs, errs[0] ? " report_err=" : "", errs[0] ? errs : "");
 }
 
 } // namespace
@@ -250,6 +255,18 @@ void report(Thread t, uint64_t busyNs)
         return;
     ensureInit();
     g_lastBusyNs[i].store(busyNs, std::memory_order_relaxed);
+    uint64_t reportNs = busyNs;
+    if (reportMode() == ReportMode::Critical)
+    {
+        // PW2: Game/Mtvu get the frame figure from reportFrame (GameThread);
+        // the GS sessions report the latest frame critical path.
+        if (t == Thread::Game || t == Thread::Mtvu)
+        {
+            maybeLog(monotonicNs());
+            return;
+        }
+        reportNs = g_lastCriticalNs.load(std::memory_order_relaxed);
+    }
     void *session = g_sessions[i].load(std::memory_order_acquire);
     if (!session)
     {
@@ -257,11 +274,43 @@ void report(Thread t, uint64_t busyNs)
         ensureSessionLocked(t, monotonicNs());
         session = g_sessions[i].load(std::memory_order_acquire);
     }
-    if (session && shouldReport(busyNs))
+    if (session && shouldReport(reportNs))
     {
-        const int rc = g_fns.reportActualWorkDuration(session, static_cast<int64_t>(busyNs));
+        const int rc = g_fns.reportActualWorkDuration(session, static_cast<int64_t>(reportNs));
         if (rc != 0)
             g_reportErr[i].fetch_add(1u, std::memory_order_relaxed);
+    }
+    maybeLog(monotonicNs());
+}
+
+ReportMode reportMode()
+{
+    static const ReportMode mode = parseReportMode(std::getenv("PS2X_ADPF_REPORT"));
+    return mode;
+}
+
+void reportFrame(uint64_t criticalNs)
+{
+    if (!enabled() || reportMode() != ReportMode::Critical)
+        return;
+    ensureInit();
+    g_lastCriticalNs.store(criticalNs, std::memory_order_relaxed);
+    for (const Thread t : {Thread::Game, Thread::Mtvu})
+    {
+        const size_t i = static_cast<size_t>(t);
+        void *session = g_sessions[i].load(std::memory_order_acquire);
+        if (!session)
+        {
+            const std::lock_guard<std::mutex> lock(g_mutex);
+            ensureSessionLocked(t, monotonicNs());
+            session = g_sessions[i].load(std::memory_order_acquire);
+        }
+        if (session && shouldReport(criticalNs))
+        {
+            const int rc = g_fns.reportActualWorkDuration(session, static_cast<int64_t>(criticalNs));
+            if (rc != 0)
+                g_reportErr[i].fetch_add(1u, std::memory_order_relaxed);
+        }
     }
     maybeLog(monotonicNs());
 }

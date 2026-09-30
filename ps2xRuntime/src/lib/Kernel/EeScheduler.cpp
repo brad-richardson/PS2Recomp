@@ -595,7 +595,7 @@ void EeScheduler::run()
         ~EnqueueSinkGuard() { GsWorker::setEnqueueWaitSink(nullptr); }
     };
     const EnqueueSinkGuard enqueueSinkGuard{};
-    GsWorker::setEnqueueWaitSink(m_perfTail ? &m_perfEventNs : nullptr);
+    GsWorker::setEnqueueWaitSink(m_perfTail ? &m_perfEnqueueNs : nullptr);
     // T1 park snapshot: install the SIGTERM handler once when enabled.
     ps2_park::installParkTermHandler();
 
@@ -3142,12 +3142,16 @@ void EeScheduler::perfTailCutFrame(uint64_t tick)
     if (m_perfHaveFrame)
     {
         const uint64_t wallNs = wall - m_perfFrameStartWall;
-        const uint64_t waitNs = m_perfGateNs + m_perfPaceNs + m_perfEventNs + (mtvuSum - m_perfMtvuNs);
+        const uint64_t syncNs = m_perfEnqueueNs + (mtvuSum - m_perfMtvuNs);
+        const uint64_t waitNs = m_perfGateNs + m_perfPaceNs + m_perfEventNs + syncNs;
         const uint64_t busyNs = wallNs > waitNs ? wallNs - waitNs : 0u;
         ps2x::perflog::stageRing(ps2x::perflog::Stage::EeBusy)
             .push(static_cast<uint32_t>(tick), static_cast<float>(busyNs / 1e6));
         // AD1: same busy figure feeds this thread's ADPF hint session.
         ps2x::adpf::report(ps2x::adpf::Thread::Game, busyNs);
+        // PW2: the frame's critical path (busy + MTVU syncs + GS enqueue
+        // waits; no pacer/gate/guest-idle) for PS2X_ADPF_REPORT=critical.
+        ps2x::adpf::reportFrame(busyNs + syncNs);
         ps2x::perflog::stageRing(ps2x::perflog::Stage::EeWait)
             .push(static_cast<uint32_t>(tick), static_cast<float>(waitNs / 1e6));
         if (cpu != ps2x::perflog::kCpuUnsupported && m_perfFrameStartCpu != ps2x::perflog::kCpuUnsupported)
@@ -3158,6 +3162,7 @@ void EeScheduler::perfTailCutFrame(uint64_t tick)
     m_perfFrameStartCpu = cpu;
     m_perfMtvuNs = mtvuSum;
     m_perfEventNs = 0;
+    m_perfEnqueueNs = 0;
     m_perfGateNs = 0;
     m_perfPaceNs = 0;
     m_perfHaveFrame = true;
