@@ -146,4 +146,8 @@ namespace ps2_stubs
     // marker plus a fresh segment), so no file holds overlapping ticks.
     // No-op when the recorder is off or capped.
     void padRecordNoteLoad(uint64_t loadedTick);
+
+    // PR3: emit the open span and fflush now (BG1 pause, so a force-stop
+    // after backgrounding keeps every row). No-op when the recorder is off.
+    void padRecordFlushNow(const char *reason);
 }

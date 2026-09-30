@@ -202,6 +202,7 @@ void rlEnableColorBlend(void);
 #include "Kernel/Stubs/Audio.h"
 #include "Kernel/Stubs/GS.h"
 #include "Kernel/Stubs/MPEG.h"
+#include "Kernel/Stubs/Pad.h"
 #include "ps2_snd_audio_output.h"
 #include "ps2_thread_affinity.h"
 #include "ps2_host_backend.h"
@@ -1357,6 +1358,8 @@ void bg1OnPause()
     // thread never stalls on it. Bounded: entries since the last flush (the
     // 60 s timer bounds it) into a fresh tail-pause file.
     ps2x::perflog::flushTail("pause");
+    // PR3: the pad recorder's open span + stdio buffer (same kill-proofing).
+    ps2_stubs::padRecordFlushNow("pause");
     std::fprintf(stderr, "[bg1] paused at tick=%llu gate_acked=%d\n",
                  static_cast<unsigned long long>(tick), acked ? 1 : 0);
 }

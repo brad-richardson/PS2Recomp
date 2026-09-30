@@ -801,8 +801,10 @@ namespace ps2_stubs
             std::string path;
             bool haveOpen = false;
             uint64_t openTick = 0u;
+            uint64_t openMs = 0u; // script-clock ms of openTick (PR3)
             PadInputState openState{};
             uint64_t lastTick = 0u;
+            uint64_t lastNextMs = 0u; // script-clock ms of lastTick + 1 (PR3)
             bool firstEntry = true;
             uint64_t lastFlushTick = 0u;
             uint64_t entriesSinceFlush = 0u;
@@ -853,17 +855,37 @@ namespace ps2_stubs
                    a.rx == b.rx && a.ry == b.ry;
         }
 
-        void padRecordEmitLocked(uint64_t atTick, uint64_t endTick)
+        // PR3: the script-clock ms of a read at `tick` (next: of tick + 1),
+        // sampled at read time. FH5 events mode keeps the script clock on the
+        // stock-time accumulator, which only knows "now": converting ticks
+        // later (at emit) gave every span at == end and dropped every row.
+        uint64_t padRecordReadMs(uint64_t tick, bool next)
         {
-            if (endTick <= atTick || !g_padRecord.file)
+            if (ps2_fh1::eventsMode() && !g_padRecord.testTickSet)
+            {
+                const uint64_t half = ps2_fh1::stockHalfTicks() +
+                                      (next ? (ps2_fh1::g_divThis == 2u ? 1u : 2u) : 0u);
+                return (half * 100000ull) / (5994ull * 2ull);
+            }
+            return padScriptVsyncTickToMs(next ? tick + 1u : tick);
+        }
+
+        void padRecordEmitLocked(uint64_t atMs, uint64_t endMs)
+        {
+            if (!g_padRecord.file)
             {
                 return;
             }
-            const uint64_t atMs = padScriptVsyncTickToMs(atTick);
-            const uint64_t endMs = padScriptVsyncTickToMs(endTick);
             if (endMs <= atMs)
             {
-                return; // cannot happen: tick ms are strictly increasing
+                // Cannot happen (stock ms strictly increase per tick); loud
+                // so an empty recording never goes unnoticed again (PR3).
+                static uint32_t lines = 0u;
+                if (lines++ < 8u)
+                    std::fprintf(stderr, "[padrecord] dropped empty span at=%llums end=%llums\n",
+                                 static_cast<unsigned long long>(atMs),
+                                 static_cast<unsigned long long>(endMs));
+                return;
             }
             std::string spec;
             const uint16_t pressed = static_cast<uint16_t>(~g_padRecord.openState.buttons);
@@ -911,7 +933,7 @@ namespace ps2_stubs
             if (g_padRecord.haveOpen && !g_padRecord.capped)
             {
                 // Tail: cover through the last observed read tick.
-                padRecordEmitLocked(g_padRecord.openTick, g_padRecord.lastTick + 1u);
+                padRecordEmitLocked(g_padRecord.openMs, g_padRecord.lastNextMs);
                 g_padRecord.haveOpen = false;
             }
             std::fflush(g_padRecord.file);
@@ -1457,8 +1479,10 @@ namespace ps2_stubs
             g_padRecord.path.clear();
             g_padRecord.haveOpen = false;
             g_padRecord.openTick = 0u;
+            g_padRecord.openMs = 0u;
             g_padRecord.openState = PadInputState{};
             g_padRecord.lastTick = 0u;
+            g_padRecord.lastNextMs = 0u;
             g_padRecord.firstEntry = true;
             g_padRecord.lastFlushTick = 0u;
             g_padRecord.entriesSinceFlush = 0u;
@@ -1533,26 +1557,31 @@ namespace ps2_stubs
                 return;
             }
             const uint64_t tick = g_padRecord.testTickSet ? g_padRecord.testTick : guestVsyncTick;
+            const uint64_t nowMs = padRecordReadMs(tick, false);
             if (!g_padRecord.haveOpen)
             {
                 g_padRecord.haveOpen = true;
                 g_padRecord.openTick = tick;
+                g_padRecord.openMs = nowMs;
                 g_padRecord.openState = state;
                 g_padRecord.lastTick = tick;
+                g_padRecord.lastNextMs = padRecordReadMs(tick, true);
                 g_padRecord.lastFlushTick = tick;
                 return;
             }
             if (tick > g_padRecord.lastTick)
             {
                 g_padRecord.lastTick = tick;
+                g_padRecord.lastNextMs = padRecordReadMs(tick, true);
             }
             if (padRecordSameState(state, g_padRecord.openState))
             {
                 if (tick >= g_padRecord.openTick + kPadRecordSplitTicks)
                 {
                     // Split the long tail so a force-stop keeps all but ~10 s.
-                    padRecordEmitLocked(g_padRecord.openTick, tick);
+                    padRecordEmitLocked(g_padRecord.openMs, nowMs);
                     g_padRecord.openTick = tick;
+                    g_padRecord.openMs = nowMs;
                     std::fflush(g_padRecord.file);
                     g_padRecord.lastFlushTick = tick;
                     g_padRecord.entriesSinceFlush = 0u;
@@ -1569,8 +1598,9 @@ namespace ps2_stubs
             {
                 return; // clock moved backwards; keep the open entry (cannot happen)
             }
-            padRecordEmitLocked(g_padRecord.openTick, tick);
+            padRecordEmitLocked(g_padRecord.openMs, nowMs);
             g_padRecord.openTick = tick;
+            g_padRecord.openMs = nowMs;
             g_padRecord.openState = state;
             if (g_padRecord.totalEntries >= kPadRecordMaxEntries)
             {
@@ -2579,6 +2609,34 @@ namespace ps2_stubs
         return g_padRecord.enabled;
     }
 
+    void padRecordFlushNow(const char *reason)
+    {
+        // PR3: emit the open span through the last observed read and keep
+        // recording from the next tick with the same state (the file stays
+        // contiguous), then flush, so a kill after this point loses nothing.
+        if (!g_padRecordArmed.load(std::memory_order_relaxed))
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(g_padRecord.mutex);
+        if (!g_padRecord.enabled || g_padRecord.capped || !g_padRecord.file)
+        {
+            return;
+        }
+        if (g_padRecord.haveOpen)
+        {
+            padRecordEmitLocked(g_padRecord.openMs, g_padRecord.lastNextMs);
+            g_padRecord.openTick = g_padRecord.lastTick + 1u;
+            g_padRecord.openMs = g_padRecord.lastNextMs;
+        }
+        std::fflush(g_padRecord.file);
+        g_padRecord.lastFlushTick = g_padRecord.lastTick;
+        g_padRecord.entriesSinceFlush = 0u;
+        std::fprintf(stderr, "[padrecord] flushed reason=%s entries=%llu lastTick=%llu\n",
+                     reason ? reason : "?", static_cast<unsigned long long>(g_padRecord.totalEntries),
+                     static_cast<unsigned long long>(g_padRecord.lastTick));
+    }
+
     void padRecordNoteLoad(uint64_t loadedTick)
     {
         padRecordEnsureInit();
@@ -2591,7 +2649,7 @@ namespace ps2_stubs
         // observed tick so the file stays contiguous.
         if (g_padRecord.haveOpen && g_padRecord.file)
         {
-            padRecordEmitLocked(g_padRecord.openTick, g_padRecord.lastTick + 1u);
+            padRecordEmitLocked(g_padRecord.openMs, g_padRecord.lastNextMs);
             g_padRecord.haveOpen = false;
         }
         if (g_padRecord.dirMode)
@@ -2634,8 +2692,10 @@ namespace ps2_stubs
         // catches up, then emits a span with the stale pre-load state.
         g_padRecord.haveOpen = false;
         g_padRecord.openTick = 0u;
+        g_padRecord.openMs = 0u;
         g_padRecord.openState = PadInputState{};
         g_padRecord.lastTick = 0u;
+        g_padRecord.lastNextMs = 0u;
         g_padRecord.lastFlushTick = 0u;
         g_padRecord.entriesSinceFlush = 0u;
         std::fprintf(stderr, "[padrecord] new segment after state load (tick %llu) path=%s\n",
