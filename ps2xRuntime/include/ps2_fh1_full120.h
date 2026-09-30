@@ -163,6 +163,7 @@ enum Fix : uint32_t
     kFixBonus = 1u << 17,    // 0x119708 trick bonus: per-update points rate +0x3c at stock rate per second (class b, FH8)
     kFixLift = 1u << 18,     // camera terrain lift 0x15ee00: per-update step bounds halved (class j, CM2 4, FH8)
     kFixAiGate = 1u << 19,   // AI race_tick % N gates on even updates only + 0x10da10 hold timer at 1/120 (class e/g, FH9)
+    kFixTakeoff = 1u << 20,  // takeoff state 4 (0x12f730): control-triple slew rate 0.05/update -> 0.025 (class b, FH9)
 };
 
 inline uint32_t fixMask() noexcept
@@ -175,7 +176,7 @@ inline uint32_t fixMask() noexcept
         if (s == "all")
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
                    kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim |
-                   kFixBonus; // kFixLift (FH8) and kFixAiGate (FH9: gates at stock rate, race outcome unchanged) are opt-in
+                   kFixBonus | kFixAiGate | kFixTakeoff; // kFixLift is opt-in (FH8: no window where it binds)
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -201,6 +202,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "bonus") m |= kFixBonus;
             else if (item == "lift") m |= kFixLift;
             else if (item == "aigate") m |= kFixAiGate;
+            else if (item == "takeoff") m |= kFixTakeoff;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -280,7 +282,7 @@ inline std::vector<Word> labWords();
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
-    const std::array<Word, 84> words = {{
+    const std::array<Word, 85> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -407,6 +409,13 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFixCamera, 0x49c824u, kSixtieth, kHundredTwentieth, "cam_shake_clk"},
         {kFixCamera, 0x49c820u, kSixtieth, kHundredTwentieth, "cam_shake_dur"},
         {kFixAiGate, 0x49b40cu, kSixtieth, kHundredTwentieth, "ai_react_hold"},
+        // FH9 takeoff: 0x12f730 (rider control state 4, every rider) sets the slew rate of the
+        // control triples +0x1f4/+0x200/+0x218/+0x224 to this word each update; the slewer
+        // 0x1211f8 steps value toward target by <= rate per update (no dt), and state 4 exits
+        // once +0x1f0/+0x214/+0x220 reach 0, so at 120 takeoff ended in half the time (AI Mac,
+        // FR1-R1 race 7.77 s: 0.18 s vs stock 0.35 s). Single reader 0x12f9f4. With it the
+        // rival finishes 03:16 vs stock 03:15 with 0 AI wipeouts (fh9-p1; before: 03:23, 2).
+        {kFixTakeoff, 0x49ba0cu, 0x3d4cccceu, 0x3cccccceu, "takeoff_slew"},
     }};
     uint32_t mask = fixMask();
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
@@ -1041,9 +1050,9 @@ inline void bonusHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
 // race tick, as at 60 (class g). The F30 hold countdown in 0x10da10 (the gate
 // is skipped while F30 > 0) steps by 1/60 per update from the single-reader
 // pool word 0x49b40c; it goes to 1/120 (class e).
-// Not in `all`: on FR1-R1 (fh9-v1) it brought the passes to 0.96x of stock per
-// stock second, but every AI roll, wipeout and the result (Mac 03:23) stayed
-// identical to fh9-t1, and the 0x10db3c draw never fired. Opt in with FIX=...,aigate.
+// Alone (fh9-v1) it brought the passes to 0.96x of stock per stock second with
+// the race outcome unchanged; with takeoff (fh9-p2 vs p1) the AI state sequence
+// matches within 3 stock frames. In `all` as the stock-cadence form of the gates.
 inline constexpr uint32_t kRaceTickGet = 0x1298c8u;
 
 inline bool aiGateFix() noexcept
