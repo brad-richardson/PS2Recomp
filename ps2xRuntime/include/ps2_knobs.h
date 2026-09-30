@@ -18,9 +18,12 @@
 // setenv (explicit env, including an explicit empty value, still wins).
 // Paths derive from the boot-ELF dir; no absolute paths in code.
 // PS2X_PROFILE=reference disables every compiled default, restoring the
-// exact knob-off path. S3 (CF3) adds the guest-affecting lagV default, so an
-// empty env reproduces the PB7 play env (modulo the output-only VERTEX_KICK,
+// exact knob-off path. S3 (CF3) added the guest-affecting lagV default, so an
+// empty env reproduced the PB7 play env (modulo the output-only VERTEX_KICK,
 // the dev PAD_RECORD_DIR, and the inert PGS lines the play env still carries).
+// CF4 turns the readback default off again (Brad 09-28 "let's turn readback
+// off"): the compiled default is the literal "0", matching the Odin play env,
+// so an empty env is the play state.
 //
 // Platform-neutral on purpose so the host unit test compiles this header
 // (same shape as ps2_android_env.h / ps2_env_file.h). Only the Android
@@ -71,7 +74,9 @@ struct Cf2AndroidDefault
 
 // CF1 §Q2 Android column minus GE1_ADRENO_DSTREAD (already AUTO in the
 // adapter). Every value is the signed-off play value (S1 = the P3 set,
-// S3 = lagV).
+// S3 = lagV, CF4 = readback off: the VIF1_REVERSE_DMA default is "0").
+// The value must be the literal "0" (unset is also off in the code default,
+// but the applier always sets the key, so only "0" keeps it off).
 inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
 {
     static const Cf2AndroidDefault kDefaults[] = {
@@ -93,7 +98,7 @@ inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
         {"PS2X_GS_HANDOFF_DIET", "1", false, false, false},
         {"PS2X_GS_FINISH_TIMING", "pcsx2", false, false, false},
         {"PS2X_SSX3_SIM_MODE", "split120_render60_v1", false, false, false},
-        {"PS2X_VIF1_REVERSE_DMA", "lagV", false, false, false},
+        {"PS2X_VIF1_REVERSE_DMA", "0", false, false, false},
         {"PS2X_SKIP_MOVIE", "1", false, false, false},
         {"PS2X_SOUND", "1", false, false, false},
         {"PS2X_PERF_LOG", "1", false, false, false},

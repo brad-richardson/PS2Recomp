@@ -59,7 +59,7 @@ void register_ps2_knobs_tests()
 {
     MiniTest::Case("Ps2Knobs", [](TestCase &tc)
                    {
-        tc.Run("android defaults table is exactly the 25 S1+S3 play keys", [](TestCase &t)
+        tc.Run("android defaults table is exactly the 25 S1+S3+CF4 play keys", [](TestCase &t)
                {
             size_t n = 0;
             const ps2x::Cf2AndroidDefault *defs = ps2x::cf2AndroidDefaults(&n);
@@ -81,12 +81,12 @@ void register_ps2_knobs_tests()
                     found = found || std::strcmp(defs[i].key, key) == 0;
                 t.IsTrue(found, std::string("table holds ") + key);
             }
-            // S3: lagV is a compiled default with value lagV.
-            bool lagV = false;
+            // CF4: readback is off by default (literal "0", matching the play env).
+            bool readbackOff = false;
             for (size_t i = 0; i < n; ++i)
                 if (std::strcmp(defs[i].key, "PS2X_VIF1_REVERSE_DMA") == 0)
-                    lagV = std::strcmp(defs[i].value, "lagV") == 0 && !defs[i].bootdir_relative;
-            t.IsTrue(lagV, "lagV defaulted to lagV");
+                    readbackOff = std::strcmp(defs[i].value, "0") == 0 && !defs[i].bootdir_relative;
+            t.IsTrue(readbackOff, "readback defaulted to 0");
         });
 
         tc.Run("apply sets absent keys and keeps explicit env", [](TestCase &t)
@@ -104,7 +104,7 @@ void register_ps2_knobs_tests()
             t.Equals(std::string(::getenv("PS2X_MTVU_LAG")), std::string("1"), "absent PS2X_MTVU_LAG defaulted");
             t.Equals(std::string(::getenv("PS2X_GS_BACKEND")), std::string("external"), "backend defaulted");
             t.Equals(std::string(::getenv("PS2X_VU1_ENGINE")), std::string("microvu"), "vu1 engine defaulted");
-            t.Equals(std::string(::getenv("PS2X_VIF1_REVERSE_DMA")), std::string("lagV"), "lagV defaulted");
+            t.Equals(std::string(::getenv("PS2X_VIF1_REVERSE_DMA")), std::string("0"), "readback defaulted off");
         });
 
         tc.Run("reference profile disables every default", [](TestCase &t)
@@ -263,7 +263,7 @@ void register_ps2_knobs_tests()
             // truncates.
             t.IsTrue(line.size() < 4000, "dump under 4000 bytes");
             t.IsTrue(line.find(" PS2X_GS_BACKEND=external") != std::string::npos, "default visible");
-            t.IsTrue(line.find(" PS2X_VIF1_REVERSE_DMA=lagV") != std::string::npos, "lagV default visible");
+            t.IsTrue(line.find(" PS2X_VIF1_REVERSE_DMA=0") != std::string::npos, "readback-off default visible");
         });
     });
 }
