@@ -2321,12 +2321,30 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                            ps2_rr1::alphaTapOn();
                     int32_t e40TagId = -1;
                     uint32_t e40TagAt = 0u;
+                    // HLE1 (PS2X_DMA_CHAIN_LEAN=1): with every per-tag tap
+                    // off (checked once here), plain-RDRAM tags and payloads
+                    // skip the generic address decode, and a TTE tag's upper
+                    // half joins its contiguous payload in one insert. The
+                    // appended bytes, their order and the registers written
+                    // back are the same; any tap on takes the full walk.
+                    const bool chainLean = m_dmaChainLean && !e40Record && !e40Ctag &&
+                                           !ps2_uv1_dma_stall::enabled() && !ps2_rr1::evOn() &&
+                                           !ps2_mpg_src_trace::enabled();
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
                     {
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
                         uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
                         const uint32_t total = bytes;
+                        // HLE1: below PS2_RAM_SIZE translateAddress is the
+                        // identity and nothing is scratchpad; a span that fits
+                        // is the loop's single chunk.
+                        if (chainLean && srcAddr < PS2_RAM_SIZE && bytes <= PS2_RAM_SIZE - srcAddr)
+                        {
+                            if (bytes > 0)
+                                chainBuf.insert(chainBuf.end(), m_rdram + srcAddr, m_rdram + srcAddr + bytes);
+                            return;
+                        }
                         const bool scratch = isScratchpad(srcAddr);
                         uint32_t src = 0;
                         src = translateAddress(srcAddr);
@@ -2375,15 +2393,19 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
                     while (tagsProcessed < kMaxChainTags)
                     {
-                        const bool tagInSPR = isScratchpad(tagAddr);
-                        uint32_t physTag = 0;
-                        try
+                        const bool tagInRam = chainLean && tagAddr < PS2_RAM_SIZE; // HLE1: identity translate
+                        const bool tagInSPR = !tagInRam && isScratchpad(tagAddr);
+                        uint32_t physTag = tagAddr;
+                        if (!tagInRam)
                         {
-                            physTag = translateAddress(tagAddr);
-                        }
-                        catch (...)
-                        {
-                            break;
+                            try
+                            {
+                                physTag = translateAddress(tagAddr);
+                            }
+                            catch (...)
+                            {
+                                break;
+                            }
                         }
                         const uint8_t *tagBase;
                         uint32_t tagMax;
@@ -2412,8 +2434,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
                         // UV1: default-off REFS tag census.
-                        ps2_uv1_dma_stall::noteTag(e40Vsync, channelBase, id);
-                        if (channelBase == 0x1000A000u)
+                        if (!chainLean)
+                            ps2_uv1_dma_stall::noteTag(e40Vsync, channelBase, id);
+                        if (!chainLean && channelBase == 0x1000A000u)
                             ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "gif tag at=0x%x id=%u qwc=%u addr=0x%x irq=%d", curTagEE, id, tagQwc, addr, irq ? 1 : 0);
                         // E40 Part-4: tag dump for the first in-window kicks.
                         if (e40Ctag)
@@ -2496,7 +2519,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         // tags, log the tag site + REF addr and arm a write
                         // watch on the addr word when the tag qualifies
                         // (in-range addr, or an MPG found by bounded scan).
-                        if (channelBase == 0x10009000u &&
+                        if (!chainLean && channelBase == 0x10009000u &&
                             (id == 0u || id == 3u || id == 4u) &&
                             ps2_mpg_src_trace::enabled())
                         {
@@ -2554,7 +2577,18 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 span.tagAt = e40TagAt;
                                 e40Spans.push_back(span);
                             }
-                            chainBuf.insert(chainBuf.end(), tp + 8u, tp + 16u);
+                            // HLE1: data right behind an RDRAM tag (CNT/NEXT/
+                            // CALL/RET/END) is contiguous with the tag's upper
+                            // half: one insert covers both.
+                            const uint32_t payBytes = static_cast<uint32_t>(tagQwc) * 16u;
+                            if (tagInRam && hasPayload && dataAddr == curTagEE + 16u &&
+                                dataAddr < PS2_RAM_SIZE && payBytes <= PS2_RAM_SIZE - dataAddr)
+                            {
+                                chainBuf.insert(chainBuf.end(), tp + 8u, tp + 16u + payBytes);
+                                hasPayload = false;
+                            }
+                            else
+                                chainBuf.insert(chainBuf.end(), tp + 8u, tp + 16u);
                         }
 
                         if (hasPayload)

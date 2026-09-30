@@ -1760,6 +1760,17 @@ bool PS2Runtime::syncCoreSubsystems()
     m_memory.setGsZeroCopy(gsZeroCopy);
     std::cerr << "[gs:handoff] zero-copy GIF " << (gsZeroCopy ? "on" : "off")
               << " (PS2X_GS_ZERO_COPY=" << (gsZeroCopy ? 1 : 0) << ")" << std::endl;
+    // HLE1 lean DMA chain walk (PS2X_DMA_CHAIN_LEAN=1, default off): the
+    // source-chain kick skips the per-tag diag-tap checks (hoisted; any tap on
+    // falls back to the full walk), translates plain-RDRAM tag/payload
+    // addresses without the generic decode, and appends a TTE tag's upper
+    // half and its contiguous payload with one insert. Same bytes, same
+    // registers; off keeps the original walk.
+    const char *chainLeanEnv = std::getenv("PS2X_DMA_CHAIN_LEAN");
+    const bool dmaChainLean = chainLeanEnv != nullptr && std::strcmp(chainLeanEnv, "1") == 0;
+    m_memory.setDmaChainLean(dmaChainLean);
+    std::cerr << "[dma] chain walk " << (dmaChainLean ? "lean" : "full")
+              << " (PS2X_DMA_CHAIN_LEAN=" << (dmaChainLean ? 1 : 0) << ")" << std::endl;
     // E33: per-path GIF census + GS draw attribution. The listener runs
     // before each packet's process call (same thread, synchronous drain),
     // so draws kicked while processing land on this packet's path. One

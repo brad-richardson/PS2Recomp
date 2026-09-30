@@ -405,6 +405,8 @@ public:
     void submitGifPacketOwned(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately = true, bool path2DirectHl = false);
     // MP2 zero-copy (PS2X_GS_ZERO_COPY=1, default off). Set once, before DMAs run.
     void setGsZeroCopy(bool on) { m_gsZeroCopy = on; }
+    // HLE1 lean DMA chain walk (PS2X_DMA_CHAIN_LEAN=1, default off). Set once, before DMAs run.
+    void setDmaChainLean(bool on) { m_dmaChainLean = on; }
     // VPL1 GIF stage: run one Submit/Drain op on the MTVU-GIF thread.
     void execGifStageOp(ps2_mtvu::GifOp &op);
     // VPL2 VIF stage: run one record on the MTVU thread (opaque = PS2Memory*).
@@ -525,6 +527,7 @@ public:
     // in writeIORegister (kicks run EE-side only). Kills the O(n^2) growth
     // memcpy (~0.30 ms/f, GT1 §6); reserve-only, contents-identical.
     size_t m_chainBufHint = 1u << 18;
+    bool m_dmaChainLean = false; // HLE1 (set before DMAs run)
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
 

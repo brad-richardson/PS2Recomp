@@ -220,6 +220,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_CD_OVERLAY",
         "PS2X_DEINTERLACE",
         "PS2X_DETERMINISTIC",
+        "PS2X_DMA_CHAIN_LEAN",
         "PS2X_EE_FPMODE",
         "PS2X_EE_JMP_NOMASK",
         "PS2X_EVENT_CLOCK",

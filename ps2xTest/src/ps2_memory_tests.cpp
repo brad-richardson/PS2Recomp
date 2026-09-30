@@ -2748,6 +2748,77 @@ void register_ps2_memory_tests()
                      "CNT/NEXT/END chain should clear the STR bit after drain");
         });
 
+        tc.Run("VIF1 DMA chain lean walk (HLE1) matches the full walk", [](TestCase &t)
+        {
+            // CNT, REF (RDRAM), REF (uncached mirror), CALL into a scratchpad
+            // RET, NEXT, an empty CNT and END, all with TTE: the lean walk's
+            // RDRAM fast paths and its generic fallbacks must stage the same
+            // bytes and write back the same registers as the full walk.
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kT0 = 0x00030000u;
+            constexpr uint32_t kSprTag = 0x100u;
+            auto run = [&](bool lean, std::vector<uint8_t> &vu1, uint32_t regs[3])
+            {
+                PS2Memory mem;
+                t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+                mem.setDmaChainLean(lean);
+                uint8_t *rdram = mem.getRDRAM();
+                uint8_t *spr = mem.getScratchpad();
+                std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+                const uint32_t nop = makeVifCmd(0x00u, 0u, 0u);
+                const uint32_t stcycl = makeVifCmd(0x01u, 0u, 0x0101u);
+                auto tag = [&](uint8_t *base, uint32_t at, uint16_t qwc, uint8_t id, uint32_t addr,
+                               uint32_t vif0, uint32_t vif1)
+                {
+                    writeDmaTag(base, at, makeDmaTag(qwc, id, addr));
+                    std::memcpy(base + at + 8u, &vif0, 4u);
+                    std::memcpy(base + at + 12u, &vif1, 4u);
+                };
+                auto qw = [&](uint8_t *base, uint32_t at, uint8_t seed)
+                {
+                    for (uint32_t i = 0; i < 16u; ++i)
+                        base[at + i] = static_cast<uint8_t>(seed + i);
+                };
+                auto unpack = [&](uint8_t num, uint16_t addr) { return makeVifCmd(0x6Cu, num, addr); };
+                tag(rdram, kT0, 2u, 1u, 0u, stcycl, unpack(2u, 0u)); // CNT, 2 qw
+                qw(rdram, kT0 + 16u, 0x10u);
+                qw(rdram, kT0 + 32u, 0x20u);
+                tag(rdram, kT0 + 0x30u, 1u, 3u, 0x00031000u, nop, unpack(1u, 2u)); // REF
+                qw(rdram, 0x00031000u, 0x30u);
+                tag(rdram, kT0 + 0x40u, 1u, 3u, 0x20031100u, nop, unpack(1u, 3u)); // REF, mirror
+                qw(rdram, 0x00031100u, 0x40u);
+                tag(rdram, kT0 + 0x50u, 1u, 5u, 0x70000000u + kSprTag, nop, unpack(1u, 4u)); // CALL
+                qw(rdram, kT0 + 0x60u, 0x50u);
+                tag(spr, kSprTag, 1u, 6u, 0u, nop, unpack(1u, 5u)); // RET (scratchpad)
+                qw(spr, kSprTag + 16u, 0x60u);
+                tag(rdram, kT0 + 0x70u, 1u, 2u, kT0 + 0x100u, nop, unpack(1u, 6u)); // NEXT
+                qw(rdram, kT0 + 0x80u, 0x70u);
+                tag(rdram, kT0 + 0x100u, 0u, 1u, 0u, nop, nop); // empty CNT
+                tag(rdram, kT0 + 0x110u, 1u, 7u, 0u, nop, unpack(1u, 7u)); // END
+                qw(rdram, kT0 + 0x120u, 0x80u);
+                t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kT0), "write VIF1 TADR should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+                mem.processPendingTransfers();
+                vu1.assign(mem.getVU1Data(), mem.getVU1Data() + 8u * 16u);
+                regs[0] = mem.readIORegister(kVif1Ch + 0x00u);
+                regs[1] = mem.readIORegister(kVif1Ch + 0x30u);
+                regs[2] = mem.readIORegister(kVif1Ch + 0x40u);
+            };
+            std::vector<uint8_t> full, lean;
+            uint32_t fullRegs[3] = {}, leanRegs[3] = {};
+            run(false, full, fullRegs);
+            run(true, lean, leanRegs);
+            bool expected = true;
+            for (uint32_t q = 0; q < 8u; ++q)
+                for (uint32_t i = 0; i < 16u; ++i)
+                    if (full[q * 16u + i] != static_cast<uint8_t>(0x10u * (q + 1u) + i))
+                        expected = false;
+            t.IsTrue(expected, "full walk should unpack all eight payload qwords in order");
+            t.IsTrue(full == lean, "lean walk should unpack the same bytes as the full walk");
+            t.IsTrue(std::memcmp(fullRegs, leanRegs, sizeof(fullRegs)) == 0,
+                     "lean walk should write back the same CHCR/TADR/ASR0");
+        });
+
         tc.Run("GIF DMA chain CALL sources payload from TADR+16", [](TestCase &t)
         {
             PS2Memory mem;
