@@ -1059,7 +1059,9 @@ private:
         }();
         return on;
     }
+#endif
 
+#if defined(__ANDROID__) || defined(PS2X_GE1_STATIC_IOSURFACE)
     // UR1: the GE1 output size. The GS opens before raylib's window, so the
     // panel size comes from the display itself (Android:
     // ps2x_present_vk::panelSize, Display.getRealSize; IX1 iOS:
@@ -1126,7 +1128,9 @@ private:
                      pw, ph, std::getenv("GE1_DISPLAY_SIZE") ? std::getenv("GE1_DISPLAY_SIZE") : "unset", m_exportW,
                      m_exportH, size);
     }
+#endif
 
+#if defined(__ANDROID__)
     bool queuePendingAhb()
     {
         if (m_pendingAhb < 0)
