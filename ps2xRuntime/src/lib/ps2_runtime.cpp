@@ -19,6 +19,7 @@
 #include "ps2_e44_trace.h"
 #include "ps2_gfx_stats.h"
 #include "ps2_fh1_full120.h"
+#include "ps2_ssx3_course_manifest.h"
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
 #include "ps2_park_snapshot.h"
@@ -2334,6 +2335,9 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
                                       m_cpuContext.pc,
                                       elfCrc32,
                                       elfCrc32Valid);
+
+    // TK2: host course manifest (PS2X_SSX3_COURSE_MANIFEST, default off).
+    ps2_ssx3_course::applyFromEnv(m_memory.getRDRAM());
 
     RUNTIME_LOG("ELF file loaded successfully. Entry point: 0x" << std::hex << m_cpuContext.pc << std::dec);
     return true;
