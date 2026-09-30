@@ -295,6 +295,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_SKIP_MOVIE",
         "PS2X_SND_VOICES",
         "PS2X_SOUND",
+        "PS2X_SSX3_DRAW_HZ",
         "PS2X_SSX3_FULL120",
         "PS2X_SSX3_FULL120_EE_X",
         "PS2X_SSX3_FULL120_FIX",

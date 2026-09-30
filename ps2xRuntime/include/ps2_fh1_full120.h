@@ -819,6 +819,9 @@ inline constexpr uint32_t kAppUpdateSite = 0x3171b4u;
 // FH7 RNG cadence state (FIX=rng, see rngHook); reset at an events entry flip.
 inline uint32_t g_rngUpdates = 0u, g_lcgSaved = 0u;
 inline bool g_rngOdd = false, g_lcgHeld = false;
+// DL1 draw-limiter pattern counter (see drawHook); reset at an events entry flip.
+inline uint32_t g_drawK = 0u;
+inline uint64_t g_drawn = 0u, g_drawSkipped = 0u;
 inline constexpr uint32_t kSelectorDispatch = 0x111408u;
 inline bool g_passRan = false, g_anyAir = false, g_finished = false, g_clockRan = false;
 
@@ -872,6 +875,7 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
     }
     g_producerCalls = g_raceTickCalls = g_raceTick2Calls = g_sessionCalls = 0u;
     g_rngUpdates = 0u;
+    g_drawK = 0u;
     g_rngOdd = false;
     g_lcgHeld = false;
     g_guestActive = toActive;
@@ -1066,6 +1070,67 @@ inline bool rngHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t
     return false;
 }
 
+// ---- Draw limiter, PS2X_SSX3_DRAW_HZ=60|90|120 (DL1; default 120 = off) ----
+// While full120 runs (always mode, or events mode with the guest flip
+// active), the sim still updates 120 times per guest second but only
+// DRAW_HZ of those updates render: on a skipped update the main loop's call
+// to the app-render slot 0x22b008 (0x317208 mode-1 gate, 0x31723c mode-0
+// gate) is not made and returns 1, so cAppMan_mainLoop takes its "rendered"
+// path exactly as at 120 (checkHalt 0x317328, the A+0x2c rate EMA with
+// $s1 = 1, $s1 cleared). Nothing is built or kicked for that update (no
+// VU1 lists, GS or GPU work); the display keeps the last drawn frame and
+// the per-VBlank present shows it again. Pattern over 120 updates: draw
+// update k iff floor((k+1)*HZ/120) > floor(k*HZ/120) (60: every 2nd;
+// 90: 3 of 4, i.e. holds of 2,1,1 vsyncs on a 120 Hz panel). The counter
+// resets at an events entry flip. Stock 60 (outside events) is untouched.
+inline constexpr uint32_t kRenderGateMode1 = 0x317208u, kRenderGateMode0 = 0x31723cu;
+
+inline uint32_t drawHz() noexcept
+{
+    static const uint32_t hz = [] {
+        const char *v = std::getenv("PS2X_SSX3_DRAW_HZ");
+        if (!v || !*v || std::strcmp(v, "120") == 0)
+            return 120u;
+        if (std::strcmp(v, "60") == 0)
+            return 60u;
+        if (std::strcmp(v, "90") == 0)
+            return 90u;
+        std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_DRAW_HZ=%s (want 60|90|120)\n", v);
+        std::abort();
+    }();
+    return hz;
+}
+
+inline bool drawLimit() noexcept
+{
+    static const bool on = [] {
+        const bool r = enabled() && drawHz() != 120u;
+        if (r)
+            std::fprintf(stderr, "fh1-draw-limit hz=%u (full120 renders %u of 120 updates)\n", drawHz(), drawHz());
+        return r;
+    }();
+    return on;
+}
+
+
+// Returns true when this render call is skipped (v0 = 1 set).
+inline bool drawHook(R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    if (targetPc != kRenderTarget || (sourcePc != kRenderGateMode0 && sourcePc != kRenderGateMode1) || !ctx)
+        return false;
+    const uint32_t hz = drawHz();
+    const uint32_t k = g_drawK;
+    g_drawK = (k + 1u) % 120u;
+    if ((k + 1u) * hz / 120u > k * hz / 120u)
+    {
+        ++g_drawn;
+        return false;
+    }
+    ++g_drawSkipped;
+    SET_GPR_U32(ctx, 2, 1u);
+    return true;
+}
+
 // PS2X_FH1_SRC=tgt[:a0][,...] (hex; diagnostic, any mode): print the source
 // pc, a0-a3 and f0/f1/f12/f20/f21 of calls to tgt (optionally only with that
 // a0), 2000 lines max.
@@ -1137,12 +1202,14 @@ inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_
     srcTap(ram, ctx, sourcePc, targetPc);
     if (on)
         skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
+    const bool drawSkip = on && drawLimit() && !skip && drawHook(ctx, sourcePc, targetPc);
+    skip = skip || drawSkip;
     Tap &t = tap();
     if (!t.on)
         return skip;
     if (targetPc == kUpdateTarget)
         ++t.updates;
-    else if (targetPc == kRenderTarget)
+    else if (targetPc == kRenderTarget && !drawSkip)
         ++t.renders;
     for (size_t i = 0; i < t.nCount; ++i)
         if (t.countPcs[i] == targetPc)
@@ -1528,6 +1595,9 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
     if (mode() == Mode::Events)
         n += std::snprintf(line + n, sizeof(line) - n, " act=%d%d%d", g_schedActive ? 1 : 0,
                            g_commitActive ? 1 : 0, g_guestActive ? 1 : 0);
+    if (drawLimit())
+        n += std::snprintf(line + n, sizeof(line) - n, " drawn=%llu dskip=%llu",
+                           static_cast<unsigned long long>(g_drawn), static_cast<unsigned long long>(g_drawSkipped));
     t.updates = t.renders = 0u;
     for (size_t i = 0; i < t.nCount && n < static_cast<int>(sizeof(line)) - 32; ++i)
     {
