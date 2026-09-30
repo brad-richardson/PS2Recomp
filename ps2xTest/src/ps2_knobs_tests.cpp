@@ -59,11 +59,11 @@ void register_ps2_knobs_tests()
 {
     MiniTest::Case("Ps2Knobs", [](TestCase &tc)
                    {
-        tc.Run("android defaults table is exactly the 25 S1+S3+CF4 play keys", [](TestCase &t)
+        tc.Run("android defaults table is exactly the 32 S1+S3+CF4+CU3 play keys", [](TestCase &t)
                {
             size_t n = 0;
             const ps2x::Cf2AndroidDefault *defs = ps2x::cf2AndroidDefaults(&n);
-            t.Equals(n, static_cast<size_t>(25), "25 defaults");
+            t.Equals(n, static_cast<size_t>(32), "32 defaults");
             const char *want[] = {
                 "PS2X_GS_BACKEND", "PS2X_GS_EXTERNAL_LIBRARY", "GE1_GS_RESOURCES_DIR",
                 "GE1_GS_DATA_DIR", "GE1_GS_AHB_EXPORT", "GE1_ADRENO_BLEND_MIX",
@@ -72,7 +72,9 @@ void register_ps2_knobs_tests()
                 "PS2X_VU0_DIRECT", "PS2X_VU1_FLAG_ELIDE", "PS2X_GS_HANDOFF_DIET",
                 "PS2X_GS_FINISH_TIMING", "PS2X_SSX3_SIM_MODE", "PS2X_VIF1_REVERSE_DMA",
                 "PS2X_SKIP_MOVIE", "PS2X_SOUND", "PS2X_PERF_LOG", "PS2X_PERF_LOG_DIR",
-                "PS2X_GAME_THREAD_CPUS", "PS2X_MTVU_CPUS",
+                "PS2X_GAME_THREAD_CPUS", "PS2X_MTVU_CPUS", "GE1_VK_TURNIP",
+                "GE1_DRAW_BUFFERING", "GE1_VERTEX_KICK", "GE1_UPSCALE", "PS2X_GE1_EXPORT_SIZE",
+                "PS2X_MTVU_GIF_STAGE", "PS2X_MTVU_VIF_STAGE",
             };
             for (const char *key : want)
             {
@@ -105,6 +107,10 @@ void register_ps2_knobs_tests()
             t.Equals(std::string(::getenv("PS2X_GS_BACKEND")), std::string("external"), "backend defaulted");
             t.Equals(std::string(::getenv("PS2X_VU1_ENGINE")), std::string("microvu"), "vu1 engine defaulted");
             t.Equals(std::string(::getenv("PS2X_VIF1_REVERSE_DMA")), std::string("0"), "readback defaulted off");
+            t.Equals(std::string(::getenv("GE1_VK_TURNIP")), std::string("1"), "CU3: our Turnip defaulted");
+            t.Equals(std::string(::getenv("GE1_UPSCALE")), std::string("2"), "CU3: 2x defaulted");
+            t.Equals(std::string(::getenv("PS2X_GE1_EXPORT_SIZE")), std::string("display"), "CU3: display export");
+            t.Equals(std::string(::getenv("PS2X_MTVU_VIF_STAGE")), std::string("1"), "CU3: VIF stage defaulted");
         });
 
         tc.Run("reference profile disables every default", [](TestCase &t)

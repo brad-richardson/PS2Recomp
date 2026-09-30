@@ -24,6 +24,12 @@
 // CF4 turns the readback default off again (Brad 09-28 "let's turn readback
 // off"): the compiled default is the literal "0", matching the Odin play env,
 // so an empty env is the play state.
+// CU3 adds the Odin default set (Brad 09-30, "2 sounds good"): our Turnip,
+// the VU1 GIF/VIF stages, draw buffering and 2x internal resolution (export
+// sized to the display), plus the fused vertex kick the play env has carried
+// since PB5. The full-120 layer (FULL120, FIX, FASTHOOKS, DISPLAY_HZ, ...)
+// stays in full120.env. GE1_VK_TURNIP=1 needs the Turnip HAL in the APK's
+// jniLibs (play-current carries it); set GE1_VK_TURNIP=0 without it.
 //
 // Platform-neutral on purpose so the host unit test compiles this header
 // (same shape as ps2_android_env.h / ps2_env_file.h). Only the Android
@@ -74,7 +80,8 @@ struct Cf2AndroidDefault
 
 // CF1 §Q2 Android column minus GE1_ADRENO_DSTREAD (already AUTO in the
 // adapter). Every value is the signed-off play value (S1 = the P3 set,
-// S3 = lagV, CF4 = readback off: the VIF1_REVERSE_DMA default is "0").
+// S3 = lagV, CF4 = readback off: the VIF1_REVERSE_DMA default is "0";
+// CU3 = the Odin default set).
 // The value must be the literal "0" (unset is also off in the code default,
 // but the applier always sets the key, so only "0" keeps it off).
 inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
@@ -105,6 +112,13 @@ inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
         {"PS2X_PERF_LOG_DIR", "/perf", true, false, false},
         {"PS2X_GAME_THREAD_CPUS", "6", false, false, true},
         {"PS2X_MTVU_CPUS", "7", false, false, true},
+        {"GE1_VK_TURNIP", "1", false, false, false},
+        {"GE1_DRAW_BUFFERING", "1", false, false, false},
+        {"GE1_VERTEX_KICK", "2", false, false, false},
+        {"GE1_UPSCALE", "2", false, false, false},
+        {"PS2X_GE1_EXPORT_SIZE", "display", false, false, false},
+        {"PS2X_MTVU_GIF_STAGE", "1", false, false, false},
+        {"PS2X_MTVU_VIF_STAGE", "1", false, false, false},
     };
     if (countOut)
         *countOut = sizeof(kDefaults) / sizeof(kDefaults[0]);
@@ -195,12 +209,14 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "GE1_ADRENO_DSTREAD",
         "GE1_BACKTHREAD",
         "GE1_DISABLE_FETCH",
+        "GE1_DRAW_BUFFERING",
         "GE1_GS_AHB_EXPORT",
         "GE1_GS_DATA_DIR",
         "GE1_GS_RESOURCES_DIR",
         "GE1_PIPE_FLUSH_VSYNCS",
         "GE1_RENDERER",
         "GE1_TFX_PREWARM",
+        "GE1_UPSCALE",
         "GE1_VERTEX_KICK",
         "GE1_VK_TURNIP",
         "GRANITE_VULKAN_LIBRARY",
@@ -223,6 +239,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_FALLBACK_MAGENTA",
         "PS2X_GAME_THREAD_CPUS",
         "PS2X_GAME_THREAD_STACK_KB",
+        "PS2X_GE1_EXPORT_SIZE",
         "PS2X_GS_ALLOC_LEAN",
         "PS2X_GS_BACKEND",
         "PS2X_GS_CSR_DRAIN",
