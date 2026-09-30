@@ -3903,6 +3903,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     {
         ps2_e43_trace::h394Post(ctx);
     }
+    // FH11: full-120 post-call fixes (armed only by a pre-hook in onBranch).
+    if (ps2_fh1::g_postArmed)
+    {
+        ps2_fh1::onReturn(rdram, ctx, targetPc, !isStopRequested() && ctx->pc != 0u && !ps2_guest_unwind::pending());
+    }
 #if PS2X_ENABLE_DIAG_TAPS
     mpegTrace.finish(m_memory.gs().vsyncTick.load());
     noteCardCall("mc-return");

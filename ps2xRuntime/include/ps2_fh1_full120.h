@@ -164,6 +164,7 @@ enum Fix : uint32_t
     kFixLift = 1u << 18,     // camera terrain lift 0x15ee00: per-update step bounds halved (class j, CM2 4, FH8)
     kFixAiGate = 1u << 19,   // AI race_tick % N gates on even updates only + 0x10da10 hold timer at 1/120 (class e/g, FH9)
     kFixTakeoff = 1u << 20,  // takeoff state 4 (0x12f730): control-triple slew rate 0.05/update -> 0.025 (class b, FH9)
+    kFixFlags = 1u << 21,    // cFlagManager 0x34b818: per-flag wave/scroll phases advance by a per-update step (class b, FH11)
 };
 
 inline uint32_t fixMask() noexcept
@@ -176,7 +177,7 @@ inline uint32_t fixMask() noexcept
         if (s == "all")
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
                    kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim |
-                   kFixBonus | kFixAiGate | kFixTakeoff; // kFixLift is opt-in (FH8: no window where it binds)
+                   kFixBonus | kFixAiGate | kFixTakeoff | kFixFlags; // kFixLift is opt-in (FH8: no window where it binds)
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -203,6 +204,7 @@ inline uint32_t fixMask() noexcept
             else if (item == "lift") m |= kFixLift;
             else if (item == "aigate") m |= kFixAiGate;
             else if (item == "takeoff") m |= kFixTakeoff;
+            else if (item == "flags") m |= kFixFlags;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -1461,6 +1463,81 @@ inline void fh9OnVBlank(uint64_t tick)
     t.lines = lines;
 }
 
+// FH11 flags group: cFlagManager (alloc "cFlagManager" at 0x22f368, update
+// 0x34c668) runs 0x34b818 once per update for each of its 15 flag slots
+// (stride 0x188). Its wind clock +0x1c steps by 1/rate (already per time), but
+// each flag adds a per-update step with no dt to its phases, each wrapped
+// into [0, 1): the four wave phases +0x78..+0x84 (speed +0x4..+0x10 times the
+// wind mix) and the scroll phases +0x88/+0x8c (steps +0x50/+0x54). At 120 the
+// flags flapped twice per stock second (Brad PB10). Class b: the advance of
+// each phase over the call is halved after it returns (post-call hook; the
+// in-call wrap is undone first, a step is < 1 per update). The mesh rebuild
+// inside the call (0x34bca0, every other update by frame parity) sees the
+// full step for that one update: a half-step phase lead, not a rate change.
+inline constexpr uint32_t kFlagUpdate = 0x34b818u;
+inline constexpr uint32_t kFlagPhaseOffs[6] = {0x78u, 0x7cu, 0x80u, 0x84u, 0x88u, 0x8cu};
+
+inline bool flagsFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixFlags) != 0u;
+    return on;
+}
+
+// One pending post-call record (the hooked callee isn't reentrant): armed by
+// a pre-hook in onBranch, consumed by onReturn from dispatchGuestBranch right
+// after the callee returns (matched by target and sp, so calls nested inside
+// it don't consume it). A callee suspended at a checkpoint disarms it and
+// that update keeps its unscaled step (deterministic).
+struct PostCall
+{
+    uint32_t target = 0u, sp = 0u, obj = 0u;
+    uint32_t saved[6] = {};
+};
+inline PostCall g_post;
+inline bool g_postArmed = false;
+
+inline void flagsPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
+{
+    if (targetPc != kFlagUpdate || !ctx)
+        return;
+    g_post.target = targetPc;
+    g_post.sp = getRegU32(ctx, 29);
+    g_post.obj = getRegU32(ctx, 4);
+    for (int i = 0; i < 6; ++i)
+        if (!rd32(ram, g_post.obj + kFlagPhaseOffs[i], g_post.saved[i]))
+            return;
+    g_postArmed = true;
+}
+
+inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned)
+{
+    if (targetPc != g_post.target || !ctx || getRegU32(ctx, 29) != g_post.sp)
+        return;
+    g_postArmed = false;
+    if (!returned)
+        return;
+    for (int i = 0; i < 6; ++i)
+    {
+        const uint32_t a = g_post.obj + kFlagPhaseOffs[i];
+        uint32_t bits = 0u;
+        if (!rd32(ram, a, bits) || bits == g_post.saved[i])
+            continue;
+        float o = 0.0f, n = 0.0f;
+        std::memcpy(&o, &g_post.saved[i], 4);
+        std::memcpy(&n, &bits, 4);
+        float d = n - o;
+        if (d < 0.0f)
+            d += 1.0f;
+        if (!(d >= 0.0f && d < 1.0f))
+            continue;
+        float v = o + d * 0.5f;
+        if (v >= 1.0f)
+            v -= 1.0f;
+        std::memcpy(&bits, &v, 4);
+        wr32(ram, a, bits);
+    }
+}
+
 // GT3: onBranch runs on every dispatched guest branch. Its predicates are
 // function-local statics, each an out-of-line guarded call (Odin All-Peak
 // full-120: onBranch ~10 % of GameThread cycles, nearly all predicate calls).
@@ -1469,7 +1546,7 @@ inline void fh9OnVBlank(uint64_t tick)
 // same order, same results (every flag below is fixed after its first read).
 struct BranchFlags
 {
-    bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift;
+    bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags;
     bool src, fh9, lab, draw, tap;
 };
 
@@ -1489,6 +1566,7 @@ inline const BranchFlags &branchFlags() noexcept
         r.parity = r.rng || r.trick || r.aiGate;
         r.bonus = bonusFix();
         r.lift = liftFix();
+        r.flags = flagsFix();
         r.src = !srcWants().empty();
         r.fh9 = fh9Tap().r != 0u;
         r.lab = !labHooks("PS2X_FH1_HALF", true).empty() || !labHooks("PS2X_FH1_SKIP", false).empty();
@@ -1542,6 +1620,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         bonusHook(ram, ctx, sourcePc, targetPc);
     if (on && flag(&BranchFlags::lift, liftFix))
         liftHook(ctx, sourcePc, targetPc);
+    if (on && flag(&BranchFlags::flags, flagsFix))
+        flagsPreHook(ram, ctx, targetPc);
     if (!Fast || bf->src)
         srcTap(ram, ctx, sourcePc, targetPc);
     if (!Fast || bf->fh9)
