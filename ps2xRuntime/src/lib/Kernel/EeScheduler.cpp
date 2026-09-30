@@ -14,6 +14,7 @@
 #include "ps2_ts2_observer.h"
 #include "ps2_ts2_split60.h"
 #include "ps2_fh1_full120.h"
+#include "ps2_vsync_lock.h"
 #include "ps2_mpg_src_trace.h"
 #include "ps2_e3.h"
 #include "ps2_e4.h"
@@ -3107,8 +3108,13 @@ void EeScheduler::processDueDeadlines()
                               scheduled.hostDeadline + kVBlankDuration,
                               EeEvent{EeEventType::VBlankEnd, 0, m_vsyncTick + 1u});
                 const uint32_t div = ps2_fh1::schedDivisor();
+                // PX1: with the vsync lock the pacer may run up to 5 % fast
+                // (panel above 119.88/59.94), so the host-deadline chain runs
+                // 5 % short and never binds; the pacer paces. Cycles unchanged.
+                const auto hostStep = ps2_vsync_lock::enabled() ? (kVBlankPeriod / div) * 95 / 100
+                                                                : kVBlankPeriod / div;
                 scheduleEvent(scheduled.deadlineCycle + kVBlankPeriodCycles / div,
-                              scheduled.hostDeadline + kVBlankPeriod / div,
+                              scheduled.hostDeadline + hostStep,
                               EeEvent{EeEventType::VBlankStart, 0, 0});
             }
             processEvent(scheduled.event);
@@ -3226,7 +3232,23 @@ void EeScheduler::processEvent(const EeEvent &event)
             }
             // FP1: never outrun wall clock. Sleep only; no guest state changes.
             const int64_t paceNowNs = ps2_vsync_pacer::steadyNowNs();
-            const int64_t paceSleepNs = m_vsyncPacer.onVsync(paceNowNs);
+            int64_t paceSleepNs = 0;
+            // PX1 (PS2X_VSYNC_LOCK=1): slots on the display's latch grid
+            // instead (host sleeps only). No fresh grid: FP1, re-anchored.
+            if (ps2_vsync_lock::enabled() && !m_hostPace.enabled &&
+                ps2_vsync_lock::pace(m_vsyncPacer.periodNs(), paceNowNs, paceSleepNs))
+            {
+                m_vsyncLocked = true;
+            }
+            else
+            {
+                if (m_vsyncLocked)
+                {
+                    m_vsyncPacer = ps2_vsync_pacer::Pacer(m_vsyncPacer.periodNs());
+                    m_vsyncLocked = false;
+                }
+                paceSleepNs = m_vsyncPacer.onVsync(paceNowNs);
+            }
             { // PT2: the pacer sleep is idle after this frame's work; file it
               // under waits at the cut.
                 const uint64_t paceT0 = m_perfTail ? ps2x::perflog::steadyNs() : 0u;

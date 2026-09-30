@@ -2,6 +2,8 @@
 // runtime/gs/ps2_present_vk_ledger.h for the ownership rules.
 #include "runtime/gs/ps2_present_vk_ledger.h"
 #include "ps2_present_geometry.h"
+#include "ps2_vsync_lock.h"
+#include "ps2_vsync_pacer.h"
 
 #include <poll.h>
 
@@ -410,7 +412,8 @@ bool Ledger::queue(uint64_t id, uint32_t w, uint32_t h)
         m_lastH = h;
     }
     const uint64_t token = m_nextId++;
-    m_tokens[token] = Token{m_current, l.shown};
+    m_tokens[token] = Token{m_current, l.shown,
+                            ps2_vsync_lock::enabled() ? ps2_vsync_pacer::steadyNowNs() : 0};
     ++l.outstanding;
     l.shown = id;
     ++b.refs;
@@ -458,6 +461,9 @@ void Ledger::complete(uint64_t token, bool layerInStats, int fd, int64_t latchNs
     }
     const Token tok = t->second;
     m_tokens.erase(t);
+    // PX1: SurfaceFlinger's latch grid + our post phase (no-op unless PS2X_VSYNC_LOCK=1).
+    if (tok.postNs > 0 && latchNs > 0)
+        ps2_vsync_lock::noteLatch(tok.postNs, latchNs);
     if (tok.releases != 0u)
     {
         const auto b = m_bufs.find(tok.releases);

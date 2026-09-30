@@ -152,6 +152,7 @@ private:
     {
         uint64_t layer = 0;
         uint64_t releases = 0; // buffer submission this transaction resolves (0: none)
+        int64_t postNs = 0;    // PX1: steady-clock time of the apply (vsync lock phase)
     };
 
     void detachLocked(const char *why);
