@@ -502,7 +502,33 @@ namespace
                 return true;
             }
             const uint64_t offset = static_cast<uint64_t>(lbn - file->lbn) * kCdSectorSize;
-            return readHostRange(file->host, offset, dst, byteCount);
+            if (file->segments.empty())
+            {
+                return readHostRange(file->host, offset, dst, byteCount);
+            }
+            // TK10 composite: stock disc ranges + pieces of the host file.
+            if (!dst)
+            {
+                g_lastCdError = -1;
+                return false;
+            }
+            uint8_t *out = dst;
+            for (const ps2_cd_overlay::Piece &piece : ps2_cd_overlay::resolve(*file, offset, byteCount))
+            {
+                const size_t n = static_cast<size_t>(piece.bytes);
+                if (piece.kind == ps2_cd_overlay::Piece::Zero)
+                {
+                    std::memset(out, 0, n);
+                }
+                else if (!readHostRange(piece.kind == ps2_cd_overlay::Piece::Image ? getCdImagePath() : file->host,
+                                        piece.offset, out, n))
+                {
+                    return false;
+                }
+                out += n;
+            }
+            g_lastCdError = 0;
+            return true;
         }
 
         for (const auto &[key, entry] : g_cdFilesByKey)

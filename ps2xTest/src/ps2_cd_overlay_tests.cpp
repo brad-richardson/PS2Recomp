@@ -87,6 +87,20 @@ std::vector<std::string> names(const std::vector<uint8_t> &sector)
         out.emplace_back(reinterpret_cast<const char *>(&sector[o + 33]), sector[o + 32]);
     return out;
 }
+
+// TK10: a composite descriptor sector followed by its own pieces.
+fs::path makeComposite(const std::string &tag, const std::string &header, size_t pieceSectors)
+{
+    const fs::path root = fs::temp_directory_path() / ("ps2x-tk10-" + tag);
+    fs::remove_all(root);
+    fs::create_directories(root / "DATA/WORLDS");
+    std::string bytes = header;
+    bytes.resize(kSec, '\0');
+    for (size_t i = 0; i < pieceSectors; ++i)
+        bytes += std::string(kSec, static_cast<char>('a' + i));
+    std::ofstream(root / "DATA/WORLDS/GARI.BIG", std::ios::binary) << bytes;
+    return root;
+}
 } // namespace
 
 void register_ps2_cd_overlay_tests()
@@ -147,5 +161,59 @@ void register_ps2_cd_overlay_tests()
             t.IsTrue(err.find("would need 2 sectors") != std::string::npos, err.c_str());
             fs::remove_all(dir);
             t.IsFalse(ps2_cd_overlay::build("/nonexistent-tk3", kImageSectors, reader(img), ov, err), "missing dir"); });
+        tc.Run("composite: stock image ranges plus host pieces (TK10)", [](TestCase &t)
+               {
+            const auto img = makeImage();
+            // 4 sectors seen: host piece 'a', BAM.BIG's 2 sectors (lbn 30-31), host piece 'b' (100 B used).
+            const std::string head = "PS2XCMP1\nsize " + std::to_string(3 * kSec + 100) + "\nimage 40\n"
+                                     "self 2048 1\niso 30 2\nself 4096 1\nend\n";
+            const fs::path dir = makeComposite("ok", head, 2);
+            ps2_cd_overlay::Overlay ov;
+            std::string err;
+            t.IsTrue(ps2_cd_overlay::build(dir, kImageSectors, reader(img), ov, err), err.c_str());
+            const auto &f = ov.files.at(0);
+            t.Equals(f.sizeBytes, static_cast<uint64_t>(3 * kSec + 100), "size from the descriptor");
+            t.Equals(f.sectors, 4u, "sectors");
+            t.Equals(f.segments.size(), static_cast<size_t>(3), "segments");
+            const auto &sec = ov.dirSectors.at(22);
+            uint32_t o = 0;
+            for (int i = 0; i < 3; ++i)
+                o += sec[o];
+            t.Equals(le32(&sec[o + 10]), static_cast<uint32_t>(3 * kSec + 100), "record size is the composite size");
+            t.IsTrue(ov.log.back().find("composite 3 segments, 2 sectors from the image") != std::string::npos, ov.log.back().c_str());
+
+            using P = ps2_cd_overlay::Piece;
+            const auto all = ps2_cd_overlay::resolve(f, 0, 4 * kSec);
+            t.Equals(all.size(), static_cast<size_t>(3), "three pieces");
+            t.IsTrue(all[0].kind == P::Host && all[0].offset == kSec && all[0].bytes == kSec, "piece a");
+            t.IsTrue(all[1].kind == P::Image && all[1].offset == 30 * kSec && all[1].bytes == 2 * kSec, "stock range");
+            t.IsTrue(all[2].kind == P::Host && all[2].offset == 2 * kSec && all[2].bytes == kSec, "piece b");
+            const auto mid = ps2_cd_overlay::resolve(f, kSec + 10, kSec);
+            t.Equals(mid.size(), static_cast<size_t>(1), "inside one segment");
+            t.IsTrue(mid[0].kind == P::Image && mid[0].offset == 30 * kSec + 10, "offset within the image range");
+            const auto cross = ps2_cd_overlay::resolve(f, 2 * kSec + 2000, 100);
+            t.Equals(cross.size(), static_cast<size_t>(2), "crosses into piece b");
+            t.IsTrue(cross[0].bytes == 48 && cross[1].kind == P::Host && cross[1].offset == 2 * kSec && cross[1].bytes == 52, "split");
+            const auto past = ps2_cd_overlay::resolve(f, 3 * kSec, 2 * kSec);
+            t.IsTrue(past.size() == 2 && past[1].kind == P::Zero && past[1].bytes == kSec, "past the segments reads zeros");
+            ps2_cd_overlay::OverlayFile plain;
+            const auto p = ps2_cd_overlay::resolve(plain, 7, 9);
+            t.IsTrue(p.size() == 1 && p[0].kind == P::Host && p[0].offset == 7 && p[0].bytes == 9, "plain file is one host range");
+            fs::remove_all(dir);
+
+            struct Bad { const char *tag; std::string head; };
+            for (const Bad &b : {Bad{"image", "PS2XCMP1\nsize 2048\nimage 41\niso 30 1\nend\n"},
+                                 Bad{"cover", "PS2XCMP1\nsize 4096\nimage 40\niso 30 1\nend\n"},
+                                 Bad{"isoend", "PS2XCMP1\nsize 4096\nimage 40\niso 39 2\nend\n"},
+                                 Bad{"selfend", "PS2XCMP1\nsize 4096\nimage 40\nself 2048 3\nend\n"},
+                                 Bad{"selfhead", "PS2XCMP1\nsize 2048\nimage 40\nself 0 1\nend\n"},
+                                 Bad{"noend", "PS2XCMP1\nsize 2048\nimage 40\niso 30 1\n"},
+                                 Bad{"junk", "PS2XCMP1\nsize 2048\nimage 40\ncopy 30 1\nend\n"}})
+            {
+                const fs::path d = makeComposite(b.tag, b.head, 2);
+                t.IsFalse(ps2_cd_overlay::build(d, kImageSectors, reader(img), ov, err), b.tag);
+                t.IsTrue(ov.files.empty() && err.find("GARI.BIG") != std::string::npos, err.c_str());
+                fs::remove_all(d);
+            } });
     });
 }

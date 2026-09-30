@@ -19,6 +19,20 @@
 // Guest-affecting when set (the game sees new directory records); unset =
 // one getenv, no reads, no writes. Platform-neutral so the host unit test
 // compiles it: sector reads come through a callback.
+//
+// TK10: composite files. A host file whose first bytes are "PS2XCMP1\n" is
+// a descriptor, not data. Its first sector is text:
+//
+//   PS2XCMP1
+//   size <bytes>             size of the file the game sees
+//   image <sectors>          the disc it was made for (refused otherwise)
+//   iso <lbn> <sectors>      served from the disc image
+//   self <offset> <sectors>  served from this host file (offset >= 2048)
+//   end
+//
+// The segments, in order, cover the file's sectors exactly. A replace-world
+// is then its changed pieces (BIG directory, SDB, the rebuilt group) plus
+// ranges of the stock BAM.BIG on the disc, a few MB instead of ~113 MB.
 
 #include <algorithm>
 #include <cctype>
@@ -26,6 +40,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <string>
@@ -37,6 +52,15 @@ namespace ps2_cd_overlay
 inline constexpr uint32_t kSectorSize = 2048u;
 inline constexpr uint32_t kPvdLbn = 16u;
 inline constexpr uint32_t kLbnAlign = 16u;
+inline constexpr char kCompositeMagic[] = "PS2XCMP1\n";
+
+struct Segment
+{
+    bool image = false;  // true: disc LBN range; false: bytes of the host file
+    uint64_t source = 0; // image: first LBN; host: byte offset
+    uint32_t first = 0;  // first sector of this segment within the file
+    uint32_t sectors = 0;
+};
 
 struct OverlayFile
 {
@@ -45,7 +69,57 @@ struct OverlayFile
     uint32_t lbn = 0;
     uint32_t sectors = 0;
     uint64_t sizeBytes = 0;
+    std::vector<Segment> segments; // TK10 composite; empty = plain host file
 };
+
+// One contiguous source range of a read (TK10 composite files).
+struct Piece
+{
+    enum Kind { Image, Host, Zero } kind = Zero;
+    uint64_t offset = 0; // byte offset in the image or the host file
+    uint64_t bytes = 0;
+};
+
+// Splits bytes [offset, offset + count) of f into source ranges, in order.
+// A plain file is one Host range; bytes past the segments read as zeros.
+inline std::vector<Piece> resolve(const OverlayFile &f, uint64_t offset, uint64_t count)
+{
+    std::vector<Piece> out;
+    if (f.segments.empty())
+    {
+        out.push_back({Piece::Host, offset, count});
+        return out;
+    }
+    while (count > 0)
+    {
+        const uint64_t sector = offset / kSectorSize;
+        const Segment *seg = nullptr;
+        for (const Segment &s : f.segments)
+        {
+            if (sector >= s.first && sector < uint64_t(s.first) + s.sectors)
+            {
+                seg = &s;
+                break;
+            }
+        }
+        if (!seg)
+        {
+            out.push_back({Piece::Zero, 0, count});
+            break;
+        }
+        const uint64_t within = offset - uint64_t(seg->first) * kSectorSize;
+        const uint64_t n = std::min<uint64_t>(count, uint64_t(seg->sectors) * kSectorSize - within);
+        const uint64_t base = seg->image ? seg->source * kSectorSize : seg->source;
+        if (!out.empty() && out.back().kind == (seg->image ? Piece::Image : Piece::Host) &&
+            out.back().offset + out.back().bytes == base + within)
+            out.back().bytes += n;
+        else
+            out.push_back({seg->image ? Piece::Image : Piece::Host, base + within, n});
+        offset += n;
+        count -= n;
+    }
+    return out;
+}
 
 struct Overlay
 {
@@ -165,6 +239,70 @@ inline bool readDir(const SectorReader &read, uint32_t lbn, uint32_t sizeBytes, 
             o += len;
         }
     }
+    return true;
+}
+
+// Parses a composite descriptor (the text of its first sector) into f.
+inline bool parseComposite(const std::string &text, uint64_t hostBytes, uint64_t imageSectors, OverlayFile &f, std::string &err)
+{
+    uint64_t size = 0, image = 0;
+    bool haveSize = false, haveImage = false, ended = false;
+    uint32_t next = 0;
+    size_t pos = 0;
+    while (pos < text.size() && !ended)
+    {
+        size_t eol = text.find('\n', pos);
+        if (eol == std::string::npos)
+            eol = text.size();
+        const std::string line = text.substr(pos, eol - pos);
+        pos = eol + 1;
+        char word[16] = {};
+        unsigned long long a = 0, b = 0;
+        const int n = std::sscanf(line.c_str(), "%15s %llu %llu", word, &a, &b);
+        const std::string w = n >= 1 ? word : "";
+        if (w.empty() || w == "PS2XCMP1")
+            continue;
+        if (w == "end")
+            ended = true;
+        else if (w == "size" && n == 2)
+            size = a, haveSize = true;
+        else if (w == "image" && n == 2)
+            image = a, haveImage = true;
+        else if ((w == "iso" || w == "self") && n == 3 && b > 0 && b <= 0xFFFFFFFFull - next)
+        {
+            const bool isImage = w == "iso";
+            if (isImage ? a + b > imageSectors : (a < kSectorSize || a + (b - 1) * kSectorSize >= hostBytes))
+            {
+                err = "composite segment outside the " + std::string(isImage ? "image" : "host file") + ": " + line;
+                return false;
+            }
+            f.segments.push_back({isImage, a, next, static_cast<uint32_t>(b)});
+            next += static_cast<uint32_t>(b);
+        }
+        else
+        {
+            err = "bad composite line: " + line;
+            return false;
+        }
+    }
+    if (!ended || !haveSize || !haveImage || size == 0 || size > 0xFFFFFFFFull)
+    {
+        err = "composite needs size, image and end";
+        return false;
+    }
+    if (image != imageSectors)
+    {
+        err = "composite made for a " + std::to_string(image) + "-sector image, this one has " + std::to_string(imageSectors);
+        return false;
+    }
+    const uint64_t need = (size + kSectorSize - 1) / kSectorSize;
+    if (next != need)
+    {
+        err = "composite segments cover " + std::to_string(next) + " sectors, size needs " + std::to_string(need);
+        return false;
+    }
+    f.sizeBytes = size;
+    f.sectors = static_cast<uint32_t>(need);
     return true;
 }
 
@@ -305,8 +443,23 @@ inline bool build(const std::filesystem::path &dir, uint64_t imageSectors, const
         f.lbn = next;
         f.sectors = std::max<uint32_t>(1u, static_cast<uint32_t>((bytes + kSectorSize - 1) / kSectorSize));
         f.sizeBytes = bytes;
+        {
+            std::string head(kSectorSize, '\0');
+            std::ifstream in(host, std::ios::binary);
+            in.read(head.data(), kSectorSize);
+            head.resize(static_cast<size_t>(std::max<std::streamsize>(0, in.gcount())));
+            if (head.compare(0, sizeof kCompositeMagic - 1, kCompositeMagic) == 0)
+            {
+                head.resize(std::min(head.find('\0'), head.size()));
+                if (!parseComposite(head, bytes, imageSectors, f, err))
+                {
+                    err = rel.string() + ": " + err;
+                    return false;
+                }
+            }
+        }
         next = (f.lbn + f.sectors + kLbnAlign - 1) / kLbnAlign * kLbnAlign;
-        dit->second.records.push_back(makeRecord(leaf + ";1", f.lbn, static_cast<uint32_t>(bytes), dit->second.records[0]));
+        dit->second.records.push_back(makeRecord(leaf + ";1", f.lbn, static_cast<uint32_t>(f.sizeBytes), dit->second.records[0]));
         out.files.push_back(f);
     }
     out.endLbn = next;
@@ -350,7 +503,16 @@ inline bool build(const std::filesystem::path &dir, uint64_t imageSectors, const
         char b[160];
         std::snprintf(b, sizeof b, "%s -> lbn 0x%x sectors %u size %llu", f.isoPath.c_str(), f.lbn, f.sectors,
                       static_cast<unsigned long long>(f.sizeBytes));
-        out.log.push_back(std::string(b) + " host " + f.host.string());
+        std::string line = std::string(b) + " host " + f.host.string();
+        if (!f.segments.empty())
+        {
+            uint64_t fromImage = 0;
+            for (const Segment &s : f.segments)
+                fromImage += s.image ? s.sectors : 0;
+            line += " composite " + std::to_string(f.segments.size()) + " segments, " + std::to_string(fromImage) +
+                    " sectors from the image";
+        }
+        out.log.push_back(line);
     }
     return true;
 }
