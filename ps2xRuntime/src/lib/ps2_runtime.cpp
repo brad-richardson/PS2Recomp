@@ -347,6 +347,48 @@ namespace
                      mode, env ? env : "default");
     }
 
+    // TK15: SSX 3 terrain patch cache guard (PS2X_SSX3_PATCH_CACHE_GUARD=1,
+    // default off; guest-affecting, only when the cache is full). 0x3747A0
+    // (cache a0, patch a1, type a2) pops a tessellation slot from the type's
+    // free stack (count [a0+0x3C+4*type], capacities 900/220/140). With the
+    // stack empty it takes slot -1 and still writes the slot's grids and
+    // slot record before their buffers, which corrupts the neighbouring free
+    // stacks and then patch link words (TK15: imported Tricky terrain puts
+    // 900+ far patches in view). The four callers (0x38BEE0, 0x38BF68,
+    // 0x38BFE0, 0x38C098) already treat a negative slot as "not drawn this
+    // frame" and retry next frame, so return -1 without running the body.
+    constexpr uint32_t kSsx3PatchCacheAlloc = 0x003747A0u;
+    std::atomic<uint64_t> g_ssx3PatchCacheSkips{0u};
+
+    bool ssx3PatchCacheGuard(uint8_t *rdram, R5900Context *ctx)
+    {
+        static const bool on = [] {
+            const char *e = std::getenv("PS2X_SSX3_PATCH_CACHE_GUARD");
+            const bool v = e && e[0] == '1';
+            if (v)
+                std::fprintf(stderr, "[ssx3-patch-guard] armed (0x3747A0 returns -1 when the slot stack is empty)\n");
+            return v;
+        }();
+        if (!on || !rdram || !ctx)
+            return false;
+        const uint32_t type = getRegU32(ctx, 6);
+        if (type > 2u)
+            return false;
+        const uint32_t countAddr = (getRegU32(ctx, 4) + 0x3Cu + 4u * type) & PS2_RAM_MASK;
+        if (countAddr > PS2_RAM_SIZE - 4u)
+            return false;
+        int32_t count = 0;
+        std::memcpy(&count, rdram + countAddr, 4u);
+        if (count > 0)
+            return false;
+        SET_GPR_S32(ctx, 2, -1);
+        const uint64_t n = g_ssx3PatchCacheSkips.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        if (n <= 4u || (n & (n - 1u)) == 0u)
+            std::fprintf(stderr, "[ssx3-patch-guard] skip #%llu type=%u count=%d patch=0x%x\n",
+                         static_cast<unsigned long long>(n), type, count, getRegU32(ctx, 5));
+        return true;
+    }
+
     void enforceSsx3Widescreen(uint8_t *rdram, uint32_t sourcePc)
     {
         if (!rdram || !g_ssx3WidescreenActive.load(std::memory_order_acquire)) return;
@@ -3721,6 +3763,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     }
     // FH1: full120 manager patch at the init hook + env-only tap counts.
     if ((ps2_fh1::enabled() || ps2_fh1::tapOn()) && ps2_fh1::onBranch(rdram, ctx, sourcePc, targetPc))
+    {
+        ctx->pc = fallthroughPc;
+        return true;
+    }
+    if (targetPc == kSsx3PatchCacheAlloc &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) &&
+        ssx3PatchCacheGuard(rdram, ctx))
     {
         ctx->pc = fallthroughPc;
         return true;
