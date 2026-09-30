@@ -159,6 +159,9 @@ enum Fix : uint32_t
     kFixRng = 1u << 13,      // RNG cadence: per-update draw sites at stock cadence (class d/g, FA1 2)
     kFixTrick = 1u << 15,    // system 6: 0x117638 combo/style accrual (from 0x11a3f0) at stock cadence (class d, FH7)
     kFixRamp = 1u << 14,     // internal: 0x115d98 ramp word at 1/120, only while 0x115d48 runs per update (timers without rng)
+    kFixAnim = 1u << 16,     // animation node steps 0x103c80..0x1049c4: 13 per-type 1/60 words (class h, FH8)
+    kFixBonus = 1u << 17,    // 0x119708 trick bonus: per-update points rate +0x3c at stock rate per second (class b, FH8)
+    kFixLift = 1u << 18,     // camera terrain lift 0x15ee00: per-update step bounds halved (class j, CM2 4, FH8)
 };
 
 inline uint32_t fixMask() noexcept
@@ -170,7 +173,8 @@ inline uint32_t fixMask() noexcept
         const std::string s(v);
         if (s == "all")
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
-                   kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick;
+                   kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim |
+                   kFixBonus; // kFixLift is opt-in (FH8: no window where it binds)
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -192,6 +196,9 @@ inline uint32_t fixMask() noexcept
             else if (item == "speedcap") m |= kFixSpeedcap;
             else if (item == "rng") m |= kFixRng;
             else if (item == "trick") m |= kFixTrick;
+            else if (item == "anim") m |= kFixAnim;
+            else if (item == "bonus") m |= kFixBonus;
+            else if (item == "lift") m |= kFixLift;
             else if (!item.empty())
             {
                 std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_FIX item=%s\n", item.c_str());
@@ -271,7 +278,7 @@ inline std::vector<Word> labWords();
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
-    const std::array<Word, 70> words = {{
+    const std::array<Word, 83> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -292,6 +299,28 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFixDrag, 0x49b4a8u, 0xc1fd5556u, 0xc17d5556u, "z_up"},
         {kFixDrag, 0x49b4acu, 0xc162aaabu, 0xc0e2aaabu, "z_down"},
         {kFixEvent, 0x49b1b0u, kSixtieth, kHundredTwentieth, "event_step_10496c"},
+        // FH8: 0x10496c is one of 14 animation-node step functions (dispatch
+        // 0x103578 by node type). Each advances its track by f12*[own 1/60
+        // word] through 0x3135b0 (time += rate*speed*step; anim events fire as
+        // the time crosses them, 0x313868 -> track +0xb0 bits). The other 13
+        // words (single readers) stayed 1/60, so rider animations played 2x per
+        // second at 120: All-Peak first-cliff trick track (0x1048ec/0x1049ec)
+        // +0.0217 per 120 Hz update, trick-bonus event (0x135460 -> 0x119708)
+        // 10 stock frames early (fh8-d3/d4); lab fh8-d6: bonus at stock 4509.5
+        // vs 4509, in-air 3230 -> 3080 (stock 3040).
+        {kFixAnim, 0x49b180u, kSixtieth, kHundredTwentieth, "anim_step_103c80"},
+        {kFixAnim, 0x49b184u, kSixtieth, kHundredTwentieth, "anim_step_103da4"},
+        {kFixAnim, 0x49b188u, kSixtieth, kHundredTwentieth, "anim_step_103f74"},
+        {kFixAnim, 0x49b18cu, kSixtieth, kHundredTwentieth, "anim_step_104048"},
+        {kFixAnim, 0x49b190u, kSixtieth, kHundredTwentieth, "anim_step_1040b4"},
+        {kFixAnim, 0x49b194u, kSixtieth, kHundredTwentieth, "anim_step_1040c8"},
+        {kFixAnim, 0x49b198u, kSixtieth, kHundredTwentieth, "anim_step_1043b4"},
+        {kFixAnim, 0x49b19cu, kSixtieth, kHundredTwentieth, "anim_step_104554"},
+        {kFixAnim, 0x49b1a0u, kSixtieth, kHundredTwentieth, "anim_step_104618"},
+        {kFixAnim, 0x49b1a4u, kSixtieth, kHundredTwentieth, "anim_step_1047ac"},
+        {kFixAnim, 0x49b1a8u, kSixtieth, kHundredTwentieth, "anim_step_10487c"},
+        {kFixAnim, 0x49b1acu, kSixtieth, kHundredTwentieth, "anim_step_1048c4"},
+        {kFixAnim, 0x49b1b4u, kSixtieth, kHundredTwentieth, "anim_step_1049c4"},
         // 0x114124 applies this fraction of the remaining R+0x214 gap once per
         // update: alpha_half = 1-sqrt(1-alpha_stock).
         {kFixSlew, 0x49b4f0u, 0x3d2aa635u, 0x3cac76f5u, "mode0_slew_114124"},
@@ -930,6 +959,66 @@ inline bool rngFix() noexcept
 // +420 = stock (was +1330 in FH4).
 inline constexpr uint32_t kComboSite = 0x11a3f0u, kComboAccrue = 0x117638u;
 
+// FH8 bonus group: 0x119708 (trick bonus, from the trick animation machine
+// 0x1352a8 on an anim event) adds a lump to the in-air points float +0x14 of
+// the rider trick state and stores a points rate in +0x3c; 0x117c28 then adds
+// +0x3c to +0x14 once per update while the +0x40 timer runs (0x117d38-64), so
+// at 120 the post-bonus accrual ran 2x per second. The only reader of +0x3c as
+// a rate is 0x117d40 (0x117838 zeroes it), so the stored rate is halved right
+// after the store, at 0x119708's own `jal 0x1176f8` (0x1197ac; s1 = state):
+// exact (a power-of-two scale), class b.
+inline constexpr uint32_t kBonusSite = 0x1197acu, kBonusNext = 0x1176f8u;
+
+// FH8 lift group: GameCamera::TerrainLift 0x15ee00 (once per update) moves the
+// lift cam+0x460 toward the terrain-clear height by a bounded step per update:
+// f21 = 300/x and f20 = 50/x (x = max(ratio, 0.05), 0x15efa8/0x15efc0), used
+// only in the step at 0x15f138-0x15f1cc after the probe calls. At 120 the lift
+// rose up to 42.5 per stock frame vs stock's 22.1 (fh8-s4/s5, slopestyle).
+// Class j (CM2 4 "halve the per-step caps"): f20/f21 are halved at the probe's
+// `jal 0x32e100` (0x15f0ec; both are callee-saved and read only by the step).
+// The step's "> 150 -> no step" rule stays at 150 per update, i.e. 300 per stock
+// frame; a stock step never came near it (max 22.1 in fh8-s4).
+// Not in `all`: on the slopestyle lab (fh8-s5 vs fh8-s6, same state) the only
+// fast lift ramp (events stock-time 4494-4502, a line stock never rode) peaked
+// at 319 with it vs 348 without; no window showed the bounds binding. Opt in
+// with FIX=...,lift.
+inline constexpr uint32_t kLiftProbeSite = 0x15f0ecu, kLiftProbe = 0x32e100u;
+
+inline bool liftFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixLift) != 0u;
+    return on;
+}
+
+inline void liftHook(R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    if (sourcePc != kLiftProbeSite || targetPc != kLiftProbe || !ctx)
+        return;
+    ctx->f[20] *= 0.5f;
+    ctx->f[21] *= 0.5f;
+}
+
+inline bool bonusFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixBonus) != 0u;
+    return on;
+}
+
+inline void bonusHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    if (sourcePc != kBonusSite || targetPc != kBonusNext || !ctx)
+        return;
+    const uint32_t rate = getRegU32(ctx, 17) + 0x3cu;
+    uint32_t bits = 0u;
+    if (!rd32(ram, rate, bits))
+        return;
+    float v = 0.0f;
+    std::memcpy(&v, &bits, 4);
+    v *= 0.5f;
+    std::memcpy(&bits, &v, 4);
+    wr32(ram, rate, bits);
+}
+
 inline bool trickFix() noexcept
 {
     static const bool on = enabled() && (fixMask() & kFixTrick) != 0u;
@@ -978,7 +1067,8 @@ inline bool rngHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t
 }
 
 // PS2X_FH1_SRC=tgt[:a0][,...] (hex; diagnostic, any mode): print the source
-// pc and a0-a3 of calls to tgt (optionally only with that a0), 2000 lines max.
+// pc, a0-a3 and f0/f1/f12/f20/f21 of calls to tgt (optionally only with that
+// a0), 2000 lines max.
 inline void srcTap(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
     struct Want { uint32_t tgt, a0; bool anyA0; };
@@ -1007,9 +1097,12 @@ inline void srcTap(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t 
         if (w.tgt == targetPc && (w.anyA0 || getRegU32(ctx, 4) == w.a0) && lines < 2000u)
         {
             ++lines;
-            std::fprintf(stderr, "fh1-src tick=%llu src=%08x tgt=%08x a0=%08x a1=%08x a2=%08x a3=%08x odd=%d\n",
+            std::fprintf(stderr,
+                         "fh1-src tick=%llu src=%08x tgt=%08x a0=%08x a1=%08x a2=%08x a3=%08x odd=%d f0=%g f1=%g f12=%g "
+                         "f20=%g f21=%g\n",
                          static_cast<unsigned long long>(g_lastTick), sourcePc, targetPc, getRegU32(ctx, 4),
-                         getRegU32(ctx, 5), getRegU32(ctx, 6), getRegU32(ctx, 7), g_rngOdd ? 1 : 0);
+                         getRegU32(ctx, 5), getRegU32(ctx, 6), getRegU32(ctx, 7), g_rngOdd ? 1 : 0, ctx->f[0], ctx->f[1],
+                         ctx->f[12], ctx->f[20], ctx->f[21]);
         }
     (void)ram;
 }
@@ -1037,6 +1130,10 @@ inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
     if (on && trickFix() && g_rngOdd && sourcePc == kComboSite && targetPc == kComboAccrue)
         skip = true;
+    if (on && bonusFix())
+        bonusHook(ram, ctx, sourcePc, targetPc);
+    if (on && liftFix())
+        liftHook(ctx, sourcePc, targetPc);
     srcTap(ram, ctx, sourcePc, targetPc);
     if (on)
         skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
