@@ -128,6 +128,12 @@ public:
         if (m_worker)
             m_worker->setLeanHandoff(on);
     }
+    // GW4: lean worker loop (see GsWorker::setWorkerLean); before the worker starts.
+    void setWorkerLeanLoop(bool on)
+    {
+        if (m_worker)
+            m_worker->setWorkerLean(on);
+    }
     bool workerLocalBatchesOk() const { return m_worker && m_worker->leanHandoff(); }
     void setWorkerDeferredWakes(uint32_t wakeCommands, size_t wakeBytes)
     {

@@ -256,6 +256,10 @@ public:
     // (FIFO order preserved). The queue mutex + its futex wakes cost ~0.5 ms
     // per frame on the GS worker at one lock round per packet.
     static constexpr size_t kPopBatch = 8;
+    // GW4 (setWorkerLean): the lean worker pops up to this many commands (or
+    // kWorkerLeanBatchBytes of payload, whichever first) per mutex round.
+    static constexpr size_t kWorkerLeanBatch = 64;
+    static constexpr size_t kWorkerLeanBatchBytes = 1u * 1024u * 1024u;
 
     using Handler = std::function<void(GsCommand &)>;
 
@@ -312,6 +316,16 @@ public:
     // the thread must call flushWake() before it waits on anything but an RPC.
     static void beginLocalBatch();
     static void endLocalBatch();
+    // GW4 (PS2X_GS_WORKER_LEAN=1, default off; needs setLeanHandoff): the
+    // worker drains up to kWorkerLeanBatch commands per lock round into a
+    // reused batch (no per-pop command array construction), and wakes space
+    // waiters only once the queue has drained below 3/4 of its caps (or is
+    // empty) instead of after every pop, which turned a full queue into a
+    // producer wake/sleep ping-pong. Same commands, same order, same
+    // fences/RPCs; lock and wake timing only. Set once, before producers run
+    // (the thread picks the loop at its next round boundary).
+    void setWorkerLean(bool on) { m_workerLean.store(on, std::memory_order_relaxed); }
+    bool workerLean() const { return m_workerLean.load(std::memory_order_relaxed); }
 
     size_t pendingCount() const;
     size_t pendingBytes() const;
@@ -327,6 +341,7 @@ public:
 
 private:
     void threadMain();
+    void threadMainLean(); // GW4
 
     Handler m_handler;
     const size_t m_maxDescriptors;
@@ -355,6 +370,7 @@ private:
     bool m_workerIdle = false;
     uint32_t m_spaceWaiters = 0;
     std::atomic<bool> m_lean{false}; // fixed before producers run
+    std::atomic<bool> m_workerLean{false}; // GW4: set before producers run
 
     // Monotonic diagnostics, safe to read from any thread.
     std::atomic<uint64_t> m_enqueuedCount{0};

@@ -1692,6 +1692,12 @@ bool PS2Runtime::syncCoreSubsystems()
         if (const char *env = std::getenv("PS2X_GS_LEAN_HANDOFF"))
             lean = lean && env[0] != '0';
         m_gs.setWorkerLeanHandoff(lean);
+        // GW4: lean worker loop (batched drain, hysteresis space wakes). Wake
+        // and lock timing only; default off. Needs the lean handoff.
+        bool workerLean = false;
+        if (const char *env = std::getenv("PS2X_GS_WORKER_LEAN"))
+            workerLean = lean && env[0] != '\0' && env[0] != '0';
+        m_gs.setWorkerLeanLoop(workerLean);
         // GP4 H5: pooled packet buffers (producers acquire, the worker
         // releases after execute). Same bytes, same order; alloc-free only.
         m_gs.setPacketPoolEnabled(true);
@@ -1711,7 +1717,7 @@ bool PS2Runtime::syncCoreSubsystems()
                   << "H3 deferred wakes cmds=" << wakeCmds << " bytes=" << wakeBytes
                   << ", H4 queue descriptors=" << gsQueueDescriptors()
                   << ", H5 pooled packet buffers, H6 pop batch=" << GsWorker::kPopBatch
-                  << ", MP1 lean=" << (lean ? 1 : 0) << " alloc-lean=" << (allocLean ? 1 : 0) << std::endl;
+                  << ", MP1 lean=" << (lean ? 1 : 0) << " GW4 worker-lean=" << (workerLean ? 1 : 0) << " alloc-lean=" << (allocLean ? 1 : 0) << std::endl;
     }
     // MP2 census: UNPACK fast-path vs fallback per format + GIF bytes per
     // path (PS2X_MP2_CENSUS=1, default off). Logged, never hashed; MTVU

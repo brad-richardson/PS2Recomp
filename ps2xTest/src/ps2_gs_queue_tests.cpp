@@ -1398,6 +1398,130 @@ void register_ps2_gs_queue_tests()
             (void)quietGf1;
         });
 
+        // GW4: the lean worker loop under stress. 200 iterations: two
+        // producers (per-producer FIFO checked) with randomized payload sizes
+        // and pauses against small caps (constant backpressure, space waiters),
+        // a slow consumer now and then, a unit-style local batch with job-end
+        // flushes, and RPC fences (each must return). A lost wakeup hangs: a watchdog aborts at 120 s.
+        tc.Run("GW4 lean worker loop stress: FIFO per producer, no lost wakeups", [](TestCase &t)
+        {
+            std::atomic<bool> finished{false};
+            std::thread dog(
+                [&]
+                {
+                    for (int i = 0; i < 1200 && !finished.load(std::memory_order_acquire); ++i)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    if (!finished.load(std::memory_order_acquire))
+                    {
+                        std::fprintf(stderr, "GW4 stress: watchdog abort (lost wakeup or deadlock)\n");
+                        std::abort();
+                    }
+                });
+            uint64_t totalExec = 0, totalSent = 0;
+            bool ordered = true, quietOk = true;
+            uint64_t seedBase = 0x2545F4914F6CDD1Dull;
+            for (int iter = 0; iter < 200; ++iter)
+            {
+                const bool lean = (iter & 1) != 0;
+                uint64_t rng = seedBase + static_cast<uint64_t>(iter) * 0x9E3779B97F4A7C15ull;
+                const auto rnd = [&rng]
+                {
+                    rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                    return rng;
+                };
+                const size_t descCap = 4u + rnd() % 60u;
+                const size_t byteCap = 2048u + (rnd() % 32u) * 512u;
+                // u32a = producer id, u32b = per-producer sequence.
+                std::vector<uint32_t> last(2, 0xFFFFFFFFu);
+                uint64_t executed = 0;
+                std::atomic<uint32_t> sentA{0}, sentB{0};
+                const bool slow = (rnd() % 4u) == 0u;
+                GsWorker worker(descCap, byteCap,
+                                [&](GsCommand &cmd)
+                                {
+                                    if (cmd.kind == GsCmdKind::GifPacket)
+                                    {
+                                        const uint32_t p = cmd.u32a;
+                                        if (last[p] + 1u != cmd.u32b && !(last[p] == 0xFFFFFFFFu && cmd.u32b == 0u))
+                                            ordered = false;
+                                        last[p] = cmd.u32b;
+                                        if (slow && (cmd.u32b % 97u) == 0u)
+                                            std::this_thread::sleep_for(std::chrono::microseconds(200));
+                                    }
+                                    ++executed;
+                                });
+                worker.setDeferredWakes(16u, 32u * 1024u);
+                worker.setLeanHandoff(lean);
+                worker.setWorkerLean(lean);
+                worker.start();
+                const uint32_t perProducer = 300u + static_cast<uint32_t>(rnd() % 500u);
+                const auto produce = [&](uint32_t id, uint64_t seed, bool unitStyle)
+                {
+                    uint64_t r = seed | 1u;
+                    for (uint32_t n = 0; n < perProducer; ++n)
+                    {
+                        r ^= r << 13; r ^= r >> 7; r ^= r << 17;
+                        if (unitStyle)
+                            GsWorker::beginLocalBatch();
+                        GsCommand c;
+                        c.kind = GsCmdKind::GifPacket;
+                        c.u32a = id;
+                        c.u32b = n;
+                        const size_t sz = 16u * (1u + r % 40u);
+                        c.bytes.resize(std::min<size_t>(sz, byteCap), 0x33u);
+                        worker.enqueue(std::move(c));
+                        if (unitStyle)
+                        {
+                            GsWorker::endLocalBatch();
+                            if ((r >> 9) % 23u == 0u)
+                                worker.flushWake(); // job end
+                        }
+                        (id == 0u ? sentA : sentB).store(n + 1u, std::memory_order_release);
+                        if ((r >> 13) % 61u == 0u)
+                        {
+                            // RPC fence: everything this producer sent must have run.
+                            GsCommand f;
+                            f.kind = GsCmdKind::Fence;
+                            f.rpc = std::make_shared<GsRpcBase>();
+                            std::shared_ptr<GsRpcBase> rpc = f.rpc;
+                            worker.enqueue(std::move(f));
+                            rpc->wait();
+                        }
+                        if ((r >> 21) % 11u == 0u)
+                            std::this_thread::sleep_for(std::chrono::microseconds(r % 150u));
+                    }
+                    if (unitStyle)
+                        worker.flushWake();
+                };
+                std::thread pa(produce, 0u, rnd(), lean); // unit-style on the lean runs
+                std::thread pb(produce, 1u, rnd(), false);
+                pa.join();
+                pb.join();
+                // Drain: a final fence must come back, then quiescence.
+                {
+                    GsCommand f;
+                    f.kind = GsCmdKind::Fence;
+                    f.rpc = std::make_shared<GsRpcBase>();
+                    std::shared_ptr<GsRpcBase> rpc = f.rpc;
+                    worker.enqueue(std::move(f));
+                    rpc->wait();
+                }
+                for (int i = 0; i < 400 && !worker.isQuiescent(); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                quietOk = quietOk && worker.isQuiescent();
+                worker.stop();
+                totalExec += static_cast<uint64_t>(last[0] + 1u) + static_cast<uint64_t>(last[1] + 1u);
+                totalSent += 2u * perProducer;
+                ordered = ordered && last[0] == perProducer - 1u && last[1] == perProducer - 1u;
+                (void)executed;
+            }
+            finished.store(true, std::memory_order_release);
+            dog.join();
+            t.IsTrue(ordered, "each producer's commands should run in FIFO order, none dropped");
+            t.Equals(totalExec, totalSent, "every packet should execute");
+            t.IsTrue(quietOk, "the worker should reach quiescence after each run");
+        });
+
         // MP1 L2: a local batch that fills the queue while the worker sleeps
         // wakes it before blocking (lean notifies a sleeping worker only).
         tc.Run("MP1 lean local batch that fills the queue wakes the worker", [](TestCase &t)
