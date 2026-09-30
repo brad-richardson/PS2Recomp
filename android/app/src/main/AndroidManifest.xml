@@ -48,7 +48,9 @@
 
         <activity-alias
             android:name=".Launch60"
-            android:label="SSX 3"
+            android:label="SSX 3 · 60"
+            android:icon="@mipmap/ic_ssx_60"
+            android:roundIcon="@mipmap/ic_ssx_60"
             android:targetActivity=".LaunchActivity"
             android:exported="true">
             <intent-filter>
@@ -60,6 +62,8 @@
         <activity-alias
             android:name=".Launch120"
             android:label="SSX 3 · 120"
+            android:icon="@mipmap/ic_ssx_120"
+            android:roundIcon="@mipmap/ic_ssx_120"
             android:targetActivity=".LaunchActivity"
             android:exported="true">
             <intent-filter>
