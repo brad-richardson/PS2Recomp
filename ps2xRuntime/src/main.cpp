@@ -5,9 +5,7 @@
 #include "ps2_debug_panel.h"
 #endif
 
-#ifdef _DEBUG
 #include "ps2_log.h"
-#endif
 
 #include <iostream>
 #include <string>
@@ -15,6 +13,8 @@
 #include <exception>
 #include <algorithm>
 #include <cstdlib>
+#include <cstdarg>
+#include <cstdio>
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -118,6 +118,33 @@ namespace
     }
 #endif
 
+    // LG1: raylib's default TraceLog writes "INFO: ..." to stdout (desktop) or
+    // logcat under its own tag (Android), interleaving with runtime lines. This
+    // callback formats the same text ("LEVEL: message", levels below the
+    // current threshold never reach a callback) and sends the finished line
+    // through the shared line-atomic writer.
+    void raylibTraceToLineWriter(int logLevel, const char *text, va_list args)
+    {
+        const char *prefix = "";
+        switch (logLevel)
+        {
+        case LOG_TRACE: prefix = "TRACE: "; break;
+        case LOG_DEBUG: prefix = "DEBUG: "; break;
+        case LOG_INFO: prefix = "INFO: "; break;
+        case LOG_WARNING: prefix = "WARNING: "; break;
+        case LOG_ERROR: prefix = "ERROR: "; break;
+        case LOG_FATAL: prefix = "FATAL: "; break;
+        default: break;
+        }
+        char body[1024];
+        std::vsnprintf(body, sizeof(body), text, args);
+        ps2_log::emitLine(std::string(prefix) + body);
+        if (logLevel == LOG_FATAL)
+        {
+            std::exit(EXIT_FAILURE);
+        }
+    }
+
     void setupTerminateLogger() // to help on release build crashs
     {
         std::set_terminate([]()
@@ -204,6 +231,9 @@ int main(int argc, char *argv[])
 #if defined(__ANDROID__)
     redirectStdioToLogcat();
 #endif
+    // LG1: line-atomic cerr/cout + raylib TraceLog, before any thread starts.
+    ps2_log::installLineAtomicLogging();
+    SetTraceLogCallback(raylibTraceToLineWriter);
 #if defined(PS2X_IOS)
     ps2x::ios::prepareEnvironment(argc > 0 ? argv[0] : nullptr);
 #endif

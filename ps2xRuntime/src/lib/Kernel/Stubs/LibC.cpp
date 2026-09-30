@@ -878,8 +878,11 @@ namespace ps2_stubs
 
         if (hostStr)
         {
-            result = std::puts(hostStr); // std::puts adds a newline
-            std::fflush(stdout);         // Ensure output appears
+            // LG1: one line-atomic stdout write (std::puts adds the newline)
+            std::string putsLine(hostStr);
+            putsLine += '\n';
+            ps2_log::writeLineAtomic(stdout, putsLine.data(), putsLine.size());
+            result = 1;
         }
         else
         {

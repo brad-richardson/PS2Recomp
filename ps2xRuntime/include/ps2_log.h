@@ -11,6 +11,7 @@
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <streambuf>
 #include <string>
 #include <vector>
 
@@ -135,12 +136,145 @@ inline std::mutex &diagLineMutex()
     return m;
 }
 
+// LG1: every line leaves through writeLineAtomic: one fwrite + fflush of a
+// complete, newline-terminated buffer under diagLineMutex. emitLine (complete
+// lines), the cerr/cout line-atomic buffers below and the raylib TraceLog
+// callback (main.cpp) all funnel here, so concurrent writers can no longer
+// splice into each other mid-line. Content is unchanged.
+inline void writeLineAtomic(std::FILE *dest, const char *data, size_t size)
+{
+    if (size == 0)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(diagLineMutex());
+    std::fwrite(data, 1, size, dest);
+    std::fflush(dest);
+}
+
 inline void emitLine(const std::string &line)
 {
-    std::lock_guard<std::mutex> lock(diagLineMutex());
     const std::string out = line + '\n';
-    std::fwrite(out.data(), 1, out.size(), stderr);
-    std::fflush(stderr);
+    writeLineAtomic(stderr, out.data(), out.size());
+}
+
+// LG1: std::streambuf that collects each thread's fragments (the
+// `std::cerr << a << b << std::endl` chains; cerr is unitbuf, so every `<<`
+// used to be its own write()) and hands complete lines to writeLineAtomic.
+// A partial line stays in the writing thread's buffer until its newline
+// arrives (or the thread exits / the atexit flush runs), capped at 64 KiB so
+// a newline-less writer cannot grow it forever.
+class LineAtomicBuf : public std::streambuf
+{
+public:
+    explicit LineAtomicBuf(std::FILE *dest) : m_dest(dest) {}
+
+    // Calling thread's partial line (exit path).
+    void flushPartial() { flushThread(true); }
+
+protected:
+    int_type overflow(int_type ch) override
+    {
+        if (traits_type::eq_int_type(ch, traits_type::eof()))
+        {
+            return traits_type::not_eof(ch);
+        }
+        const char c = traits_type::to_char_type(ch);
+        append(&c, 1);
+        return ch;
+    }
+
+    std::streamsize xsputn(const char *s, std::streamsize n) override
+    {
+        append(s, static_cast<size_t>(n));
+        return n;
+    }
+
+    int sync() override { return 0; } // unitbuf must not cut partial lines
+
+private:
+    struct Pending
+    {
+        std::string text;
+        LineAtomicBuf *owner = nullptr;
+        ~Pending()
+        {
+            if (owner && !text.empty())
+            {
+                writeLineAtomic(owner->m_dest, text.data(), text.size());
+            }
+        }
+    };
+
+    Pending &pending()
+    {
+        // One Pending per (thread, buffer): cerr and cout each own one.
+        thread_local std::map<const LineAtomicBuf *, Pending> tl;
+        Pending &p = tl[this];
+        p.owner = this;
+        return p;
+    }
+
+    void append(const char *s, size_t n)
+    {
+        pending().text.append(s, n);
+        flushThread(false);
+    }
+
+    void flushThread(bool all)
+    {
+        Pending &p = pending();
+        if (p.text.empty())
+        {
+            return;
+        }
+        size_t cut = p.text.rfind('\n');
+        if (all || p.text.size() > 65536)
+        {
+            cut = p.text.size() - 1;
+        }
+        if (cut == std::string::npos)
+        {
+            return;
+        }
+        writeLineAtomic(m_dest, p.text.data(), cut + 1);
+        p.text.erase(0, cut + 1);
+    }
+
+    std::FILE *m_dest;
+};
+
+inline LineAtomicBuf &lineAtomicErrBuf()
+{
+    static LineAtomicBuf b(stderr);
+    return b;
+}
+
+inline LineAtomicBuf &lineAtomicOutBuf()
+{
+    static LineAtomicBuf b(stdout);
+    return b;
+}
+
+// LG1: route std::cerr / std::clog / std::cout through LineAtomicBuf and make
+// stdout line-buffered so stdio writers (printf) also flush whole lines.
+// Called once at the top of main(). Idempotent.
+inline void installLineAtomicLogging()
+{
+    static bool installed = false;
+    if (installed)
+    {
+        return;
+    }
+    installed = true;
+    std::cerr.rdbuf(&lineAtomicErrBuf());
+    std::clog.rdbuf(&lineAtomicErrBuf());
+    std::cout.rdbuf(&lineAtomicOutBuf());
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    std::atexit([]() {
+        lineAtomicErrBuf().flushPartial();
+        lineAtomicOutBuf().flushPartial();
+    });
 }
 
 // P1w no-silent-drops census. Every rejected or unhandled path emits one
