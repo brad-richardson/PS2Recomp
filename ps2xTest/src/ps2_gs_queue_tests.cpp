@@ -1719,6 +1719,83 @@ void register_ps2_gs_queue_tests()
             t.IsTrue(strict.acquire(48u * 1024u).empty(), "the pre-MP1 pool should keep dropping larger buffers");
         });
 
+        // VG2 lever 2: the O(1) size-class pool keeps the lean pool's
+        // contract (caps, larger buffers win when full, fits on acquire)
+        // and hands back exactly the bytes the caller writes.
+        tc.Run("VG2 O(1) pool keeps the lean contract", [](TestCase &t)
+        {
+            GsPacketPool pool;
+            pool.setEnabled(true);
+            pool.setLean(true);
+            pool.setO1(true);
+            t.IsTrue(pool.acquire(64u).empty(), "an empty pool should miss");
+            for (size_t i = 0; i < GsPacketPool::kLeanMaxBuffers; ++i)
+            {
+                std::vector<uint8_t> b(64u, 0x5Au);
+                pool.release(std::move(b));
+            }
+            t.Equals(pool.pooledCount(), GsPacketPool::kLeanMaxBuffers, "O(1) pool should fill to its buffer cap");
+            for (size_t i = 0; i < GsPacketPool::kLeanMaxBuffers; ++i)
+            {
+                std::vector<uint8_t> b(64u * 1024u, 0x33u);
+                pool.release(std::move(b));
+                t.IsTrue(b.capacity() == 0u || b.capacity() < 64u * 1024u,
+                         "a swapped release should hand back the smaller buffer");
+            }
+            t.IsTrue(pool.pooledCount() <= GsPacketPool::kLeanMaxBuffers, "O(1) pool should honor the buffer cap");
+            t.IsTrue(pool.pooledBytes() <= GsPacketPool::kLeanMaxBytes, "O(1) pool should honor the byte cap");
+            std::vector<uint8_t> got = pool.acquire(48u * 1024u);
+            t.IsTrue(got.capacity() >= 48u * 1024u, "a large request should now hit the pool");
+            // Fits: every acquire returns room >= size, across class edges.
+            GsPacketPool mix;
+            mix.setEnabled(true);
+            mix.setLean(true);
+            mix.setO1(true);
+            const size_t sizes[] = {16u, 100u, 128u, 129u, 1000u, 4096u, 4097u, 60000u, 65536u, 200000u};
+            for (size_t n : sizes)
+            {
+                std::vector<uint8_t> b(n, 0x11u);
+                mix.release(std::move(b));
+            }
+            size_t bytesBefore = mix.pooledBytes();
+            bool fits = true;
+            size_t hits = 0;
+            for (size_t n : {100u, 129u, 4097u, 16u, 65536u, 1000u, 300000u})
+            {
+                std::vector<uint8_t> b = mix.acquire(n);
+                if (!b.empty() || b.capacity() != 0u)
+                {
+                    ++hits;
+                    fits = fits && b.capacity() >= n;
+                    bytesBefore -= b.capacity();
+                }
+            }
+            t.IsTrue(fits, "every O(1) hit should have room for the request");
+            t.Equals(hits, static_cast<size_t>(6), "six of seven requests fit a pooled buffer (300000 is oversize)");
+            t.Equals(mix.pooledBytes(), bytesBefore, "pooled bytes should track acquires");
+            std::vector<uint8_t> w = mix.acquire(1u);
+            w.resize(8u);
+            for (size_t i = 0; i < 8u; ++i)
+                w[i] = static_cast<uint8_t>(i * 3u);
+            bool exact = true;
+            for (size_t i = 0; i < 8u; ++i)
+                exact = exact && w[i] == static_cast<uint8_t>(i * 3u);
+            t.IsTrue(exact, "a reused buffer should carry exactly the written bytes");
+            // Not lean: a full pool drops, as before.
+            GsPacketPool strict;
+            strict.setEnabled(true);
+            strict.setO1(true);
+            for (size_t i = 0; i < GsPacketPool::kMaxBuffers + 8u; ++i)
+            {
+                std::vector<uint8_t> b(64u, 0x5Au);
+                strict.release(std::move(b));
+            }
+            t.Equals(strict.pooledCount(), GsPacketPool::kMaxBuffers, "strict O(1) pool should stop at its cap");
+            std::vector<uint8_t> big(64u * 1024u, 0x33u);
+            strict.release(std::move(big));
+            t.IsTrue(strict.acquire(48u * 1024u).empty(), "strict O(1) pool should drop larger buffers when full");
+        });
+
         // MP1 L3: drain with the sort skip delivers exactly the stable-sorted
         // order on random path/flag mixes (1..5 packets per drain).
         tc.Run("MP1 L3 arbiter sort skip keeps the drain order", [](TestCase &t)

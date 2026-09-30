@@ -22,7 +22,9 @@
 // cap only) so oversize input cannot deadlock the producer; the largest
 // real input is a 1 MiB DMA transfer (16-bit QWC).
 
+#include <array>
 #include <atomic>
+#include <bit>
 #include "runtime/gs/gs_backend.h"
 
 #include <condition_variable>
@@ -156,6 +158,18 @@ public:
     // MP1 L3: set once, before producers run.
     void setLean(bool on) { m_lean.store(on, std::memory_order_relaxed); }
     bool lean() const { return m_lean.load(std::memory_order_relaxed); }
+    // VG2 lever 2 (PS2X_GS_POOL_O1=1): size-class free lists, so a release
+    // at the cap no longer scans every pooled buffer for the smallest (VG1:
+    // ~0.36 ms/f of the Odin GS worker). Set once, before producers run.
+    // Same bytes, same order; only which pooled buffer is reused changes.
+    void setO1(bool on)
+    {
+        if (on)
+            for (auto &c : m_cls)
+                c.reserve(kLeanMaxBuffers);
+        m_o1.store(on, std::memory_order_relaxed);
+    }
+    bool o1() const { return m_o1.load(std::memory_order_relaxed); }
 
     // Take a buffer with capacity >= size when one is pooled, else a fresh
     // empty vector. The caller sizes/copies into it. Empty when disabled.
@@ -163,6 +177,8 @@ public:
     {
         if (!enabled() || size == 0u || size > kMaxBufferBytes)
             return {};
+        if (o1())
+            return acquireO1(size);
         Lock lock(m_lock);
         for (size_t i = m_free.size(); i-- > 0u;)
         {
@@ -189,6 +205,11 @@ public:
         const bool lean = m_lean.load(std::memory_order_relaxed);
         const size_t maxBuffers = lean ? kLeanMaxBuffers : kMaxBuffers;
         const size_t maxBytes = lean ? kLeanMaxBytes : kMaxBytes;
+        if (o1())
+        {
+            releaseO1(std::move(bytes), cap, lean, maxBuffers, maxBytes);
+            return;
+        }
         Lock lock(m_lock);
         if (m_free.size() >= maxBuffers || m_bytes + cap > maxBytes)
         {
@@ -216,7 +237,7 @@ public:
     size_t pooledCount() const
     {
         Lock lock(m_lock);
-        return m_free.size();
+        return o1() ? m_count : m_free.size();
     }
     size_t pooledBytes() const
     {
@@ -225,6 +246,78 @@ public:
     }
 
 private:
+    // VG2: class c holds capacities in [2^c, 2^(c+1)); kMaxBufferBytes = 2^18.
+    static constexpr unsigned kClasses = 19;
+    static unsigned sizeClass(size_t n) // n >= 1
+    {
+        const unsigned c = static_cast<unsigned>(std::bit_width(n)) - 1u;
+        return c < kClasses ? c : kClasses - 1u;
+    }
+    static unsigned lowestBit(uint32_t m) { return static_cast<unsigned>(std::countr_zero(m)); } // m != 0
+    std::vector<uint8_t> popClass(unsigned c) // m_lock held, class non-empty
+    {
+        auto &v = m_cls[c];
+        std::vector<uint8_t> out = std::move(v.back());
+        v.pop_back();
+        if (v.empty())
+            m_mask &= ~(1u << c);
+        --m_count;
+        m_bytes -= out.capacity();
+        return out;
+    }
+    void pushClass(std::vector<uint8_t> &&b, size_t cap) // m_lock held
+    {
+        const unsigned c = sizeClass(cap);
+        m_cls[c].push_back(std::move(b));
+        m_mask |= (1u << c);
+        ++m_count;
+        m_bytes += cap;
+    }
+    std::vector<uint8_t> acquireO1(size_t size)
+    {
+        const unsigned k = sizeClass(size);
+        Lock lock(m_lock);
+        auto &own = m_cls[k];
+        // Own class: its last buffer when it fits (a best fit).
+        if (!own.empty() && own.back().capacity() >= size)
+            return popClass(k);
+        // Any larger class fits by construction: take the smallest one.
+        const uint32_t higher = (k + 1u < kClasses) ? (m_mask & ~((2u << k) - 1u)) : 0u;
+        if (higher != 0u)
+            return popClass(lowestBit(higher));
+        // Last resort: the rest of the own class (bounded by its size).
+        for (size_t i = own.size(); i-- > 0u;)
+        {
+            if (own[i].capacity() >= size)
+            {
+                std::swap(own[i], own.back());
+                return popClass(k);
+            }
+        }
+        return {};
+    }
+    void releaseO1(std::vector<uint8_t> &&bytes, size_t cap, bool lean, size_t maxBuffers, size_t maxBytes)
+    {
+        Lock lock(m_lock);
+        if (m_count >= maxBuffers || m_bytes + cap > maxBytes)
+        {
+            if (!lean || m_mask == 0u)
+                return;
+            // MP1 L3 in O(1): swap out a buffer of the smallest class when
+            // this one is larger and fits the byte cap in its place.
+            auto &v = m_cls[lowestBit(m_mask)];
+            const size_t victimCap = v.back().capacity();
+            if (victimCap >= cap || m_bytes - victimCap + cap > maxBytes)
+                return;
+            std::vector<uint8_t> victim = popClass(lowestBit(m_mask));
+            pushClass(std::move(bytes), cap);
+            // The smaller buffer leaves through `bytes`; its owner frees it.
+            bytes = std::move(victim);
+            return;
+        }
+        pushClass(std::move(bytes), cap);
+    }
+
     struct Lock
     {
         explicit Lock(std::atomic_flag &flag) : m_flag(flag)
@@ -245,6 +338,11 @@ private:
     mutable std::atomic_flag m_lock; // C++20: default-constructs clear
     std::vector<std::vector<uint8_t>> m_free; // guarded by m_lock
     size_t m_bytes = 0;                       // guarded by m_lock
+    // VG2 lever 2 (o1 mode only; guarded by m_lock).
+    std::atomic<bool> m_o1{false};
+    std::array<std::vector<std::vector<uint8_t>>, kClasses> m_cls;
+    uint32_t m_mask = 0; // bit c set iff m_cls[c] is non-empty
+    size_t m_count = 0;
 };
 
 class GsWorker

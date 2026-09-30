@@ -348,6 +348,9 @@ GS::GS()
     // GE3 Part 2: default off; strict opt-in only.
     if (const char *finishTiming = std::getenv("PS2X_GS_FINISH_TIMING"))
         m_finishTimingPcsx2 = std::strcmp(finishTiming, "pcsx2") == 0;
+    // VG2 lever 3: the worker skips its FINISH rescan (default off).
+    if (const char *env = std::getenv("PS2X_GS_WORKER_NO_FINISH_RESCAN"))
+        m_workerNoFinishRescan = env[0] != '\0' && env[0] != '0';
     reset();
 }
 
@@ -1393,7 +1396,11 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     ps2_mtvu::touch(ps2_mtvu::Site::GsProcess); // MT1: unit-owned
     // GE3 Part 2: PCSX2-timed FINISH is set here on the submitting thread
     // (EE or MTVU unit), in stream order, before the worker decodes.
-    noteFinishTimingPcsx2(data, sizeBytes);
+    // VG2 lever 3: every GifPacket command was scanned by its submitter
+    // (processGIFPacketWithPath / the enqueue below), so with the knob the
+    // worker skips the second scan and its CSR set.
+    if (!(t_inGsWorker && m_workerNoFinishRescan))
+        noteFinishTimingPcsx2(data, sizeBytes);
     if (m_worker && !t_inGsWorker)
     {
         if (!data || sizeBytes < 16)

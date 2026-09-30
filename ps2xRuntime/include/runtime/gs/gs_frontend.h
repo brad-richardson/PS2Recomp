@@ -417,6 +417,7 @@ private:
     // after GsWorker decode. Default off. Set once in the constructor before
     // the game thread spawns; read on EE/MTVU submit threads.
     bool m_finishTimingPcsx2 = false;
+    bool m_workerNoFinishRescan = false; // VG2 lever 3 (PS2X_GS_WORKER_NO_FINISH_RESCAN)
     std::atomic<bool> m_wantsGuestVsync{false}; // GE2: cached WantsGuestVsync()
     std::atomic<bool> m_wantsPrivMirror{false}; // GE2: cached WantsPrivMirror()
     // N8D7M12 Part 5F4P2: worker-consumption packet-sequence fingerprint.

@@ -877,6 +877,13 @@ namespace ps2_mtvu
             // (worker fetch_adds, the EE exchanges at vblank).
             std::atomic<bool> tailOn{false};
             std::atomic<uint64_t> tailBusyNs{0};
+            // VG2 lever 1 (PS2X_MTVU_BUSY_PER_VBLANK=1, needs tailOn): vuLoop
+            // publishes the start of its open busy span here (0 = idle); the
+            // EE's vblank moves it to its own timestamp and credits the part
+            // before, so a span that crosses vblanks lands on each tick it
+            // covers instead of all on the tick where it ends. Host timing only.
+            bool busyPerVblank = false;
+            std::atomic<uint64_t> busySinceNs{0};
             // VPL1: the GIF stage this unit feeds (idle unless started).
             GifStage gif;
             // VPL2: the VIF-stage log (idle unless started).
@@ -1015,7 +1022,15 @@ namespace ps2_mtvu
                         {
                             if (busy)
                             {
-                                if (tail)
+                                if (tail && busyPerVblank)
+                                {
+                                    // VG2: the vblank may have moved the span start.
+                                    const uint64_t since = busySinceNs.exchange(0u, std::memory_order_acq_rel);
+                                    const uint64_t now = nowNs();
+                                    if (since != 0u && now > since)
+                                        tailBusyNs.fetch_add(now - since, std::memory_order_relaxed);
+                                }
+                                else if (tail)
                                     tailBusyNs.fetch_add(nowNs() - busyT0, std::memory_order_relaxed);
                                 busy = false;
                             }
@@ -1031,6 +1046,8 @@ namespace ps2_mtvu
                     {
                         busy = true;
                         busyT0 = tail ? nowNs() : 0u;
+                        if (tail && busyPerVblank)
+                            busySinceNs.store(busyT0 | 1u, std::memory_order_release); // never 0 while busy
                     }
                     const uint8_t *p = L.buf + (L.cHead & VifLog::kMask);
                     VifRec r;
@@ -1189,6 +1206,12 @@ namespace ps2_mtvu
                 started = true;
                 // AD1: ADPF reuses this accounting, so it turns it on too.
                 tailOn.store(ps2x::perflog::enabled() || ps2x::adpf::enabled(), std::memory_order_relaxed);
+                // VG2 lever 1: per-vblank split of vuLoop busy spans (default off).
+                if (const char *env = std::getenv("PS2X_MTVU_BUSY_PER_VBLANK"))
+                    busyPerVblank = env[0] != '\0' && env[0] != '0';
+                if (busyPerVblank)
+                    std::fprintf(stderr, "[mtvu] VG2 busy per vblank on (PS2X_MTVU_BUSY_PER_VBLANK=1, tail=%d)\n",
+                                 tailOn.load(std::memory_order_relaxed) ? 1 : 0);
                 long stackKb = 0;
                 if (const char *env = std::getenv("PS2X_GAME_THREAD_STACK_KB"))
                     stackKb = std::strtol(env, nullptr, 10);
@@ -2161,7 +2184,19 @@ namespace ps2_mtvu
             w.seqAtPrevVBlank = now;
             if (w.tailOn.load(std::memory_order_relaxed))
             {
-                const uint64_t busyNs = w.tailBusyNs.exchange(0u, std::memory_order_relaxed);
+                uint64_t openNs = 0u;
+                if (w.busyPerVblank)
+                {
+                    // VG2 lever 1: credit the open vuLoop span up to now and
+                    // restart it here. If the worker closed it meanwhile (CAS
+                    // fails), its own fetch_add carries the span.
+                    uint64_t since = w.busySinceNs.load(std::memory_order_acquire);
+                    const uint64_t t = detail::nowNs() | 1u;
+                    if (since != 0u && t > since &&
+                        w.busySinceNs.compare_exchange_strong(since, t, std::memory_order_acq_rel))
+                        openNs = t - since;
+                }
+                const uint64_t busyNs = w.tailBusyNs.exchange(0u, std::memory_order_relaxed) + openNs;
                 ps2x::perflog::stageRing(ps2x::perflog::Stage::MtvuBusy)
                     .push(static_cast<uint32_t>(tick), static_cast<float>(busyNs / 1e6));
                 if (detail::g_gifStage.load(std::memory_order_relaxed))

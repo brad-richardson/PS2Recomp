@@ -1723,6 +1723,12 @@ bool PS2Runtime::syncCoreSubsystems()
         if (const char *env = std::getenv("PS2X_GS_ALLOC_LEAN"))
             allocLean = env[0] != '0';
         m_gs.packetPool().setLean(allocLean);
+        // VG2 lever 2: size-class free lists (O(1) release at the cap).
+        // Same bytes, same order; default off.
+        bool poolO1 = false;
+        if (const char *env = std::getenv("PS2X_GS_POOL_O1"))
+            poolO1 = env[0] != '\0' && env[0] != '0';
+        m_gs.packetPool().setO1(poolO1);
         m_gifArbiter.setSortSkip(allocLean);
         // GP4 H6: worker pops up to kPopBatch commands per mutex round
         // (FIFO order preserved; knob-off pops one-by-one as before).
@@ -1731,7 +1737,8 @@ bool PS2Runtime::syncCoreSubsystems()
                   << "H3 deferred wakes cmds=" << wakeCmds << " bytes=" << wakeBytes
                   << ", H4 queue descriptors=" << gsQueueDescriptors()
                   << ", H5 pooled packet buffers, H6 pop batch=" << GsWorker::kPopBatch
-                  << ", MP1 lean=" << (lean ? 1 : 0) << " GW4 worker-lean=" << (workerLean ? 1 : 0) << " alloc-lean=" << (allocLean ? 1 : 0) << std::endl;
+                  << ", MP1 lean=" << (lean ? 1 : 0) << " GW4 worker-lean=" << (workerLean ? 1 : 0) << " alloc-lean=" << (allocLean ? 1 : 0)
+                  << " pool-o1=" << (poolO1 ? 1 : 0) << std::endl;
     }
     // MP2 census: UNPACK fast-path vs fallback per format + GIF bytes per
     // path (PS2X_MP2_CENSUS=1, default off). Logged, never hashed; MTVU
