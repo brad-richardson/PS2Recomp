@@ -1,4 +1,5 @@
 #include "ps2_mtvu.h"
+#include "ps2_cd_overlay.h"
 #include <algorithm>
 #include <cctype>
 
@@ -438,8 +439,72 @@ namespace
         return true;
     }
 
+    // TK3: PS2X_CD_OVERLAY=<dir> (default off). Built once, on the first CD
+    // read, from the configured image; a refusal logs and serves the disc as is.
+    const ps2_cd_overlay::Overlay *cdOverlay()
+    {
+        static const ps2_cd_overlay::Overlay *const overlay = []() -> const ps2_cd_overlay::Overlay *
+        {
+            const char *env = std::getenv("PS2X_CD_OVERLAY");
+            if (!env || !*env)
+            {
+                return nullptr;
+            }
+            const std::filesystem::path image = getCdImagePath();
+            uint64_t imageSectors = 0;
+            if (image.empty() || !tryGetCdImageTotalSectors(imageSectors))
+            {
+                std::cerr << "[cd-overlay] REFUSED: PS2X_CD_OVERLAY needs PS2X_CD_IMAGE" << std::endl;
+                return nullptr;
+            }
+            std::ifstream file(image, std::ios::binary);
+            const ps2_cd_overlay::SectorReader read = [&file, imageSectors](uint32_t lbn, uint8_t *dst)
+            {
+                if (lbn >= imageSectors)
+                {
+                    return false;
+                }
+                file.clear();
+                file.seekg(static_cast<std::streamoff>(lbn) * kCdSectorSize, std::ios::beg);
+                file.read(reinterpret_cast<char *>(dst), kCdSectorSize);
+                return file.gcount() == static_cast<std::streamsize>(kCdSectorSize);
+            };
+            auto *built = new ps2_cd_overlay::Overlay();
+            std::string err;
+            if (!file.is_open() || !ps2_cd_overlay::build(env, imageSectors, read, *built, err))
+            {
+                std::cerr << "[cd-overlay] REFUSED: " << (file.is_open() ? err : "cannot open the CD image") << std::endl;
+                delete built;
+                return nullptr;
+            }
+            for (const std::string &line : built->log)
+            {
+                std::cerr << "[cd-overlay] " << line << std::endl;
+            }
+            return built;
+        }();
+        return overlay;
+    }
+
     bool readCdSectors(uint32_t lbn, uint32_t sectors, uint8_t *dst, size_t byteCount)
     {
+        const ps2_cd_overlay::Overlay *overlay = cdOverlay();
+        if (overlay && overlay->contains(lbn))
+        {
+            const ps2_cd_overlay::OverlayFile *file = overlay->fileFor(lbn);
+            if (!file)
+            {
+                if (dst)
+                {
+                    std::memset(dst, 0, byteCount);
+                }
+                g_lastCdError = 0;
+                return true;
+            }
+            const uint64_t offset = static_cast<uint64_t>(lbn - file->lbn) * kCdSectorSize;
+            return readHostRange(file->host, offset, dst, byteCount);
+        }
+
         for (const auto &[key, entry] : g_cdFilesByKey)
         {
             const uint32_t endLbn = entry.baseLbn + entry.sectors;
@@ -469,7 +534,12 @@ namespace
             }
 
             const uint64_t offset = static_cast<uint64_t>(lbn) * kCdSectorSize;
-            return readHostRange(cdImage, offset, dst, byteCount);
+            const bool ok = readHostRange(cdImage, offset, dst, byteCount);
+            if (ok && overlay)
+            {
+                overlay->patchDirSectors(lbn, sectors, dst, byteCount);
+            }
+            return ok;
         }
 
         std::cerr << "sceCdRead unresolved LBN 0x" << std::hex << lbn
@@ -481,6 +551,10 @@ namespace
 
     bool isResolvableCdLbn(uint32_t lbn)
     {
+        if (const ps2_cd_overlay::Overlay *overlay = cdOverlay(); overlay && overlay->contains(lbn))
+        {
+            return true;
+        }
         for (const auto &[key, entry] : g_cdFilesByKey)
         {
             const uint32_t endLbn = entry.baseLbn + entry.sectors;
@@ -515,6 +589,11 @@ namespace
 
     uint32_t cdStreamingEndLbnForStart(uint32_t lbn)
     {
+        if (const ps2_cd_overlay::Overlay *overlay = cdOverlay(); overlay && overlay->contains(lbn))
+        {
+            const ps2_cd_overlay::OverlayFile *file = overlay->fileFor(lbn);
+            return file ? file->lbn + file->sectors : lbn;
+        }
         CdFileEntry entry{};
         if (findRegisteredCdFileForLbn(lbn, entry))
         {

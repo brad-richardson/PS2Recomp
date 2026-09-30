@@ -217,6 +217,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_AUDIO_STRETCH",
         "PS2X_BOOT_ELF",
         "PS2X_CD_IMAGE",
+        "PS2X_CD_OVERLAY",
         "PS2X_DEINTERLACE",
         "PS2X_DETERMINISTIC",
         "PS2X_EE_FPMODE",
