@@ -1370,11 +1370,12 @@ inline bool rclockFix() noexcept
     return on;
 }
 
-// Stock half-periods elapsed: the events accumulator, or the 120 Hz VBlank
-// count in always mode.
+// Stock half-periods elapsed: the events accumulator (FH17: the exact one
+// under clock2; the FH5 one counts the exit VBlank's half interval as full),
+// or the 120 Hz VBlank count in always mode.
 inline uint64_t rcHalfNow() noexcept
 {
-    return mode() == Mode::Events ? g_stockHalf.load(std::memory_order_relaxed) : g_lastTick;
+    return mode() == Mode::Events ? stockHalfTicks() : g_lastTick;
 }
 
 // Returns true when the getter call is answered here (v0 = S, call skipped).
