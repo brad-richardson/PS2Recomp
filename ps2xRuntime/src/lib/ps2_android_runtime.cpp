@@ -21,25 +21,73 @@ namespace
 {
 constexpr const char *kPs2xLogTag = "ps2x";
 
+bool readWholeFile(const std::string &path, std::string *out)
+{
+    std::ifstream file(path.c_str());
+    if (!file.is_open())
+    {
+        return false;
+    }
+    std::ostringstream content;
+    content << file.rdbuf();
+    *out = content.str();
+    return true;
+}
+
+void setEnvEntries(const std::string &content, const char *layer)
+{
+    for (const auto &entry : ps2x::parseEnvFileContent(content))
+    {
+        setenv(entry.first.c_str(), entry.second.c_str(), 1);
+        __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, (std::string(layer) + ": set " + entry.first).c_str());
+    }
+}
+
 void loadPs2xEnvFile()
 {
 #if defined(PS2X_DEFAULT_BOOT_ELF)
     const std::string path = ps2x::envFilePathForBootElf(PS2X_DEFAULT_BOOT_ELF);
-    std::ifstream file(path.c_str());
-    if (!file.is_open())
+    std::string base;
+    const bool haveBase = readWholeFile(path, &base);
+    if (!haveBase)
     {
         __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, ("ps2x.env: not found at " + path).c_str());
+    }
+    else
+    {
+        setEnvEntries(base, "ps2x.env");
+    }
+    // TG1: the "SSX 3 · 120" launcher entry (LaunchActivity) sets
+    // PS2X_LAUNCH_HZ=120 before this library loads; full120.env then layers
+    // over ps2x.env (base < full120 < nothing else). The 60 entry sets
+    // nothing, so the 60 launch reads exactly today's env.
+    if (!ps2x::launchHzSelectsFull120(std::getenv("PS2X_LAUNCH_HZ")))
+    {
+        __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, "ps2x.env: launch 60 (base env only)");
+        // PL1: stash the raw bytes' hash for the padrec header's env_sha.
+        if (haveBase)
+        {
+            ps2x::setRecordedEnvFileHash(ps2x::fnv1a64Hex(base));
+        }
         return;
     }
-    std::ostringstream content;
-    content << file.rdbuf();
-    // PL1: stash the raw bytes' hash for the padrec header's env_sha.
-    ps2x::setRecordedEnvFileHash(ps2x::fnv1a64Hex(content.str()));
-    for (const auto &entry : ps2x::parseEnvFileContent(content.str()))
+    const std::string presetPath = ps2x::full120EnvFilePathForBootElf(PS2X_DEFAULT_BOOT_ELF);
+    std::string preset;
+    if (!readWholeFile(presetPath, &preset))
     {
-        setenv(entry.first.c_str(), entry.second.c_str(), 1);
-        __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, ("ps2x.env: set " + entry.first).c_str());
+        __android_log_write(ANDROID_LOG_WARN, kPs2xLogTag,
+                            ("ps2x.env: launch 120 but full120.env not found at " + presetPath).c_str());
+        if (haveBase)
+        {
+            ps2x::setRecordedEnvFileHash(ps2x::fnv1a64Hex(base));
+        }
+        return;
     }
+    __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, ("ps2x.env: launch 120 -> layering " + presetPath).c_str());
+    setEnvEntries(preset, "full120.env");
+    // PL1 + TG1: both layers, NUL-separated (as iOS IQ1), so a padrec
+    // header tells a 120 launch from a 60 one.
+    ps2x::setRecordedEnvFileHash(ps2x::fnv1a64Hex(base + '\0' + preset));
 #else
     __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, "ps2x.env: no PS2X_DEFAULT_BOOT_ELF; skipped");
 #endif

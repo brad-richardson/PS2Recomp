@@ -68,5 +68,20 @@ void register_ps2_android_env_tests()
             t.Equals(ps2x::envFilePathForBootElf(nullptr), std::string(""), "null yields empty");
             t.Equals(ps2x::envFilePathForBootElf(""), std::string(""), "empty yields empty");
         });
+
+        tc.Run("TG1 full120 layer path and launch selector", [](TestCase &t)
+               {
+            t.Equals(ps2x::full120EnvFilePathForBootElf("/storage/emulated/0/Android/data/com.ps2x.runner/files/SLUS_207.72"),
+                     std::string("/storage/emulated/0/Android/data/com.ps2x.runner/files/full120.env"),
+                     "files dir plus full120.env");
+            t.Equals(ps2x::full120EnvFilePathForBootElf("SLUS_207.72"), std::string("full120.env"),
+                     "bare name falls back to full120.env");
+            t.Equals(ps2x::full120EnvFilePathForBootElf(nullptr), std::string(""), "null yields empty");
+            t.IsTrue(ps2x::launchHzSelectsFull120("120"), "120 selects the layer");
+            t.IsTrue(!ps2x::launchHzSelectsFull120(nullptr), "unset is the 60 launch");
+            t.IsTrue(!ps2x::launchHzSelectsFull120(""), "empty is the 60 launch");
+            t.IsTrue(!ps2x::launchHzSelectsFull120("60"), "60 is the 60 launch");
+            t.IsTrue(!ps2x::launchHzSelectsFull120("120 "), "only the exact text selects");
+        });
     });
 }

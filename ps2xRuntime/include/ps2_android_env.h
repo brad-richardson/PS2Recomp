@@ -73,9 +73,9 @@ inline std::vector<std::pair<std::string, std::string>> parseEnvFileContent(cons
     return out;
 }
 
-// <bootElfDir>/ps2x.env — the shim reads the env file from the same
-// directory PS2X_DEFAULT_BOOT_ELF points into.
-inline std::string envFilePathForBootElf(const char *bootElf)
+// <bootElfDir>/<name> — env files live in the directory
+// PS2X_DEFAULT_BOOT_ELF points into (the app's files dir).
+inline std::string siblingFilePathForBootElf(const char *bootElf, const char *name)
 {
     if (bootElf == nullptr || bootElf[0] == '\0')
     {
@@ -85,9 +85,31 @@ inline std::string envFilePathForBootElf(const char *bootElf)
     const size_t slash = path.find_last_of('/');
     if (slash == std::string::npos)
     {
-        return std::string("ps2x.env");
+        return std::string(name);
     }
-    return path.substr(0, slash) + "/ps2x.env";
+    return path.substr(0, slash) + "/" + name;
+}
+
+// <bootElfDir>/ps2x.env — the shim reads the env file from the same
+// directory PS2X_DEFAULT_BOOT_ELF points into.
+inline std::string envFilePathForBootElf(const char *bootElf)
+{
+    return siblingFilePathForBootElf(bootElf, "ps2x.env");
+}
+
+// TG1: <bootElfDir>/full120.env — the full-120 layer, staged by the
+// orchestrator (the app never writes it).
+inline std::string full120EnvFilePathForBootElf(const char *bootElf)
+{
+    return siblingFilePathForBootElf(bootElf, "full120.env");
+}
+
+// TG1: the "SSX 3 · 120" launcher entry sets PS2X_LAUNCH_HZ=120 in the
+// process env (Java, before the runner library loads). Only the exact text
+// "120" selects the full-120 layer; unset or anything else is the 60 launch.
+inline bool launchHzSelectsFull120(const char *launchHz)
+{
+    return launchHz != nullptr && std::string(launchHz) == "120";
 }
 
 } // namespace ps2x
