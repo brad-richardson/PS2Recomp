@@ -59,6 +59,9 @@ function(ps2x_bf2_android_march_target TGT)
         target_compile_options(${TGT} PRIVATE -march=${PS2X_ANDROID_MARCH})
     endif()
 endfunction()
+# BF2b: echo the effective release-flag values at configure time (visible in
+# the bradflix APK build log; Mac default is OFF/empty).
+message(STATUS "BF2: PS2X_GAME_IPO=${PS2X_GAME_IPO} PS2X_ANDROID_MARCH=${PS2X_ANDROID_MARCH}")
 
 set(PS2X_IS_IOS OFF)
 

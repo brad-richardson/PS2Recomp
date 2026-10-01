@@ -20,10 +20,10 @@ def ps2xDiagTaps = project.findProperty('ps2xDiagTaps') ?: 'OFF'
 // PL1: fork SHA baked into the binary (padrec header + PS2X-BUILD-ID marker);
 // empty = CMake auto-detects from git (worktree builds).
 def ps2xBuildId = project.findProperty('ps2xBuildId') ?: ''
-// BF2: release flag candidates (CMake PS2X_GAME_IPO / PS2X_ANDROID_MARCH),
-// both default off/empty. Reach CMake via --gradle-prop.
-def ps2xGameIpo = project.findProperty('ps2xGameIpo') ?: 'OFF'
-def ps2xAndroidMarch = project.findProperty('ps2xAndroidMarch') ?: ''
+// BF2b: release flags are Android defaults now (Mac CMake default stays
+// OFF). Override with --gradle-prop (e.g. ps2xGameIpo=OFF for a control).
+def ps2xGameIpo = project.findProperty('ps2xGameIpo') ?: 'ON'
+def ps2xAndroidMarch = project.findProperty('ps2xAndroidMarch') ?: 'armv8.2-a+fp16+dotprod'
 
 android {
     namespace 'com.ps2x.runner'
