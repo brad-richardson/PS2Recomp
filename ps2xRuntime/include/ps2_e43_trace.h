@@ -423,7 +423,8 @@ inline bool readRecWords(const uint8_t *rdram, uint32_t addr, uint32_t out[4])
     return true;
 }
 
-// Walker census tap: call from dispatchGuestBranch when
+// Walker census tap (EB3 Part 2: its dispatchGuestBranch call sites, and
+// the h394 ones below, were removed; the API stays for tests). Call from dispatchGuestBranch when
 // targetPc == 0x364CD0 (any source; the src field separates the walker
 // @0x363CF4 from sub_00364360 @0x364460). Reads call args off the shared
 // guest register file (a1 = mode, s3 = record ptr).

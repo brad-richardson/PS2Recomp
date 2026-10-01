@@ -32,7 +32,8 @@
 //     word was copied from.
 //
 // Tap call sites (all default-off, all post-store so read-back is live):
-//   PS2Runtime::Store8/16/32/64/128 (ps2_runtime.cpp) — full regs.
+//   PS2Runtime::Store8/16/32/64/128 — removed (EB3 Part 2: dead since CU4
+//     B6, and every store paid a call); noteStore stays for tests.
 //   Ps2FastWrite8/16/32/64/128 (ps2_runtime_macros.h) — value from args.
 //   PS2Memory::write8/16/32/64/128 scratchpad branches (ps2_memory.cpp)
 //     — ctx-less fallback, suppressed under the Store* guard.
