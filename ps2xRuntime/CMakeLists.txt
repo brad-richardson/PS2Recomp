@@ -11,6 +11,9 @@ option(PS2X_ENABLE_RUNNER_PCH "Precompile the heavy runtime headers for ps2Entry
 set(PS2X_GAME_CODEGEN_DIR "" CACHE PATH "ps2_recomp output dir for one game (register_functions.cpp + function .cpps + ps2_recompiled_*.h); when set, builds them as ps2_game_objects and drops the in-tree stub table")
 option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
 option(PS2X_DEV_NO_THINLTO "Dev builds only: skip ThinLTO IPO on the runner link chain (ps2_runtime, ps2EntryRunner) for faster incremental links; Release untouched" OFF)
+# BF2: release flag candidates, all default-off (unset = byte-identical flags).
+option(PS2X_GAME_IPO "BF2: ThinLTO IPO on ps2_game_objects in Release (Android + Mac)" OFF)
+set(PS2X_ANDROID_MARCH "" CACHE STRING "BF2: Android-only -march value for the first-party runtime targets (empty = toolchain default)")
 
 option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" OFF)
 option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
@@ -48,6 +51,14 @@ set(PS2X_IS_ANDROID OFF)
 if(ANDROID)
     set(PS2X_IS_ANDROID ON)
 endif()
+
+# BF2: apply PS2X_ANDROID_MARCH to one first-party target (Android only).
+# Empty PS2X_ANDROID_MARCH (the default) is a no-op.
+function(ps2x_bf2_android_march_target TGT)
+    if(PS2X_IS_ANDROID AND PS2X_ANDROID_MARCH AND TARGET ${TGT})
+        target_compile_options(${TGT} PRIVATE -march=${PS2X_ANDROID_MARCH})
+    endif()
+endfunction()
 
 set(PS2X_IS_IOS OFF)
 
@@ -785,12 +796,17 @@ if(PS2X_GAME_CODEGEN_DIR)
     endif()
     target_include_directories(ps2_game_objects PRIVATE "${PS2X_GAME_CODEGEN_DIR}")
     target_link_libraries(ps2_game_objects PUBLIC ps2_runtime)
+    # BF2: optional ThinLTO on the generated game objects (Android + Mac).
+    # Default OFF: unset = no property, Release flags byte-identical.
+    if(PS2X_GAME_IPO AND IPO_SUPPORTED)
+        set_property(TARGET ps2_game_objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
+    ps2x_bf2_android_march_target(ps2_game_objects)
     if(PS2X_IS_ANDROID AND NOT MSVC)
-        # IR1-Part2b: same line-tables treatment for the generated EE/game
-        # TUs (same Android -g flag path; same no-codegen-change argument).
-        target_compile_options(ps2_game_objects PRIVATE
-            $<$<OR:$<CONFIG:RelWithDebInfo>,$<CONFIG:Debug>>:-gline-tables-only>
-        )
+        # BF2 (extends IR1-Part2b): line tables on every Android config
+        # (Release ships zero debuginfo today; RelWithDebInfo sorts this
+        # after -g so it wins there). Debug info only, no codegen change.
+        target_compile_options(ps2_game_objects PRIVATE -gline-tables-only)
     endif()
     target_link_libraries(ps2EntryRunner PRIVATE ps2_game_objects)
     # HL3: fail-loud codegen ABI guard — references the marker the generator
@@ -800,6 +816,19 @@ if(PS2X_GAME_CODEGEN_DIR)
     target_sources(ps2EntryRunner PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/ps2_codegen_abi_guard.cpp")
 endif()
+
+# BF2: Android release line tables (always on; debug info only) and the
+# optional -march (empty = no-op) on the first-party runtime targets. The
+# VU0 images compile as ps2EntryRunner sources, so they ride its flags.
+# Mac/iOS builds are untouched (PS2X_IS_ANDROID guard).
+if(PS2X_IS_ANDROID AND NOT MSVC)
+    foreach(_bf2_tgt ps2_runtime ps2_gs_shadow ps2EntryRunner)
+        target_compile_options(${_bf2_tgt} PRIVATE -gline-tables-only)
+    endforeach()
+endif()
+foreach(_bf2_tgt ps2_runtime ps2_gs_shadow ps2EntryRunner)
+    ps2x_bf2_android_march_target(${_bf2_tgt})
+endforeach()
 
 # VR3: generated VU0 images (vu0_<hash>.cpp from PS2X_VU0_RECOMP_DUMP), used
 # only with PS2X_VU0_RECOMP=1 at run time. Derived from game data, so they

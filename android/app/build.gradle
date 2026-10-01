@@ -20,6 +20,10 @@ def ps2xDiagTaps = project.findProperty('ps2xDiagTaps') ?: 'OFF'
 // PL1: fork SHA baked into the binary (padrec header + PS2X-BUILD-ID marker);
 // empty = CMake auto-detects from git (worktree builds).
 def ps2xBuildId = project.findProperty('ps2xBuildId') ?: ''
+// BF2: release flag candidates (CMake PS2X_GAME_IPO / PS2X_ANDROID_MARCH),
+// both default off/empty. Reach CMake via --gradle-prop.
+def ps2xGameIpo = project.findProperty('ps2xGameIpo') ?: 'OFF'
+def ps2xAndroidMarch = project.findProperty('ps2xAndroidMarch') ?: ''
 
 android {
     namespace 'com.ps2x.runner'
@@ -56,6 +60,8 @@ android {
                         "-DPS2X_VU1_FMAC_SIMD=${ps2xVu1FmacSimd}",
                         "-DPS2X_PGO_DATA=${ps2xPgoData}",
                         "-DPS2X_ENABLE_DET_HASH_TAP=${ps2xDetHashTap}",
+                        "-DPS2X_GAME_IPO=${ps2xGameIpo}",
+                        "-DPS2X_ANDROID_MARCH=${ps2xAndroidMarch}",
                         '-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG',
                         '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG'
                 targets 'ps2EntryRunner'
