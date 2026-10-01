@@ -72,6 +72,10 @@ struct VuSavestate;
 // has (XGKICK/PATH1) lives in VU1Interpreter and is reached from the shared
 // code only under `if constexpr (isVu1())`, so VU0 compiles none of it.
 // VX2: generated images are VU0-only; VU1 always interprets.
+// VI1: every PS2X_VU1_ALWAYS_INLINE member carries the attribute on its
+// declaration here. On a class template the out-of-class definition's
+// attribute never reaches the instantiation, so without it the generated VU0
+// pairs called issuePair and the FMAC/flag helpers out of line (EB1).
 template <class Derived>
 class VuCore
 {
@@ -384,11 +388,11 @@ protected:
     static constexpr int kInPlaceVi = 8;
     template <bool kStatic, int kBlockMap = -1, bool kNoStall = false, uint32_t kCodeSize = 0x4000u,
               bool kPlainTail = false, int kFloatMode = -1, int kInPlace = 0>
-    bool issuePair(const DecodedInstructionPair &decoded, RunContext &ctx, uint32_t plainNextPc = 0u);
+    PS2X_VU1_ALWAYS_INLINE bool issuePair(const DecodedInstructionPair &decoded, RunContext &ctx, uint32_t plainNextPc = 0u);
     // VR1: the run() loop header between two generated pairs (VR2: the stop
     // request; see step_impl). True when the next pair may issue from
     // generated code.
-    bool recompChainReady(RunContext &ctx);
+    PS2X_VU1_ALWAYS_INLINE bool recompChainReady(RunContext &ctx);
     // Hash builds: generated pairs and their cycles.
     uint64_t m_genIssuedPairs = 0, m_genIssuedCycles = 0;
     // VR2: whole-memory VU1 code is keyed for its direct-commit map (VX2: no
@@ -446,17 +450,17 @@ protected:
     static constexpr uint8_t kDirectMapUpperVf = 2u;
     static constexpr uint8_t kDirectMapLowerVf = 4u;
     void buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize, std::vector<uint8_t> &map) const;
-    void directVfWrite(uint8_t reg, uint8_t laneMask, const float value[4], uint32_t latency);
-    void directViWrite(uint8_t reg, int32_t value, uint32_t latency);
-    void directAccWrite(uint8_t laneMask, const float value[4], uint32_t latency);
+    PS2X_VU1_ALWAYS_INLINE void directVfWrite(uint8_t reg, uint8_t laneMask, const float value[4], uint32_t latency);
+    PS2X_VU1_ALWAYS_INLINE void directViWrite(uint8_t reg, int32_t value, uint32_t latency);
+    PS2X_VU1_ALWAYS_INLINE void directAccWrite(uint8_t laneMask, const float value[4], uint32_t latency);
     // GV2: in-place forms (kInPlace): the value is already in m_state, so only
     // the latest-write sequence and noteDirect run. Same end state as above.
-    void directVfWriteInPlace(uint8_t reg, uint8_t laneMask, uint32_t latency);
-    void directViWriteInPlace(uint8_t reg, uint32_t latency);
-    void directAccWriteInPlace(uint8_t laneMask, uint32_t latency);
-    bool flagQueueAllowsDirect() const;
-    bool directFlagsNow() const;
-    void demoteQueuedFlags(bool macStatus, bool clip);
+    PS2X_VU1_ALWAYS_INLINE void directVfWriteInPlace(uint8_t reg, uint8_t laneMask, uint32_t latency);
+    PS2X_VU1_ALWAYS_INLINE void directViWriteInPlace(uint8_t reg, uint32_t latency);
+    PS2X_VU1_ALWAYS_INLINE void directAccWriteInPlace(uint8_t laneMask, uint32_t latency);
+    PS2X_VU1_ALWAYS_INLINE bool flagQueueAllowsDirect() const;
+    PS2X_VU1_ALWAYS_INLINE bool directFlagsNow() const;
+    PS2X_VU1_ALWAYS_INLINE void demoteQueuedFlags(bool macStatus, bool clip);
 
     InstructionUsage decodeUpperUsage(uint32_t upper) const;
     InstructionUsage decodeLowerUsage(uint32_t lower) const;
@@ -490,21 +494,21 @@ protected:
     template <int kArith, int kSrc, bool kAcc>
     PS2X_VU1_ALWAYS_INLINE void fmacPcsx2(uint32_t instr);
 #endif
-    void execLowerImpl(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
+    PS2X_VU1_ALWAYS_INLINE void execLowerImpl(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr);
 
-    void applyDest(float *dst, const float *result, uint8_t dest);
-    void applyDestAcc(const float *result, uint8_t dest);
-    void applyFmacDest(float *dst, float *result, uint8_t dest);
-    void applyFmacDestAcc(float *result, uint8_t dest);
-    void normalizeFmacResult(float *result, uint8_t dest, uint8_t laneFlags[4]);
+    PS2X_VU1_ALWAYS_INLINE void applyDest(float *dst, const float *result, uint8_t dest);
+    PS2X_VU1_ALWAYS_INLINE void applyDestAcc(const float *result, uint8_t dest);
+    PS2X_VU1_ALWAYS_INLINE void applyFmacDest(float *dst, float *result, uint8_t dest);
+    PS2X_VU1_ALWAYS_INLINE void applyFmacDestAcc(float *result, uint8_t dest);
+    PS2X_VU1_ALWAYS_INLINE void normalizeFmacResult(float *result, uint8_t dest, uint8_t laneFlags[4]);
     bool calculateFmacExactResult(uint32_t component, VuWide &result) const;
-    bool calculateFmacExactResults(uint8_t dest, VuWide results[4]) const;
-    uint8_t normalizeFmacExactResult(float &value, VuWide exactResult) const;
-    uint32_t calculateFmacProductSticky(uint8_t dest) const;
-    void updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest, uint32_t extraSticky);
+    PS2X_VU1_ALWAYS_INLINE bool calculateFmacExactResults(uint8_t dest, VuWide results[4]) const;
+    PS2X_VU1_ALWAYS_INLINE uint8_t normalizeFmacExactResult(float &value, VuWide exactResult) const;
+    PS2X_VU1_ALWAYS_INLINE uint32_t calculateFmacProductSticky(uint8_t dest) const;
+    PS2X_VU1_ALWAYS_INLINE void updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest, uint32_t extraSticky);
     // VR4 D1: the flag commit half of updateFmacFlags (direct or queued), shared
     // by the scalar and vector FMAC cores.
-    void commitFmacFlags(uint32_t mac, uint32_t status, uint32_t extraSticky);
+    PS2X_VU1_ALWAYS_INLINE void commitFmacFlags(uint32_t mac, uint32_t status, uint32_t extraSticky);
     void queueFsset(uint16_t immediate);
     void queueClip(uint32_t clip);
     void queueFcset(uint32_t clip);
@@ -516,7 +520,7 @@ protected:
     // pointer to the caller's local, so a generated pair function keeps no
     // escaping stack array (a stack protector there would turn the chained
     // musttail hand-off into a real call).
-    void issueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask);
+    PS2X_VU1_ALWAYS_INLINE void issueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask);
     uint32_t m_storeScratch[4]{};
     void queueVfWrite(uint8_t reg, uint8_t laneMask, const float value[4], uint32_t latency);
     void queueViWrite(uint8_t reg, int32_t value, uint32_t latency);
@@ -524,11 +528,11 @@ protected:
 
     void resetScheduler();
     void commitReadyPipelines();
-    void advanceOneCycle();
+    PS2X_VU1_ALWAYS_INLINE void advanceOneCycle();
     void advanceTo(uint64_t targetCycle);
     void flushPipelines();
-    uint64_t calculatePairReadyCycle(const DecodedInstructionPair &decoded) const;
-    void markPairWrites(const DecodedInstructionPair &decoded);
+    PS2X_VU1_ALWAYS_INLINE uint64_t calculatePairReadyCycle(const DecodedInstructionPair &decoded) const;
+    PS2X_VU1_ALWAYS_INLINE void markPairWrites(const DecodedInstructionPair &decoded);
     bool pipelinesPending() const;
 
     // E57: defined inline (were out-of-line in ps2_vu1_core.cpp; the N5 Odin
@@ -584,7 +588,7 @@ protected:
     int32_t readBranchVi(uint8_t reg) const;
     void recordViWriteForBranch(uint8_t reg, int32_t oldValue);
     void reportReservedInstruction(bool upper, uint32_t instruction);
-    float broadcast(const float *vf, uint8_t bc);
+    PS2X_VU1_ALWAYS_INLINE float broadcast(const float *vf, uint8_t bc);
 };
 
 #endif
