@@ -1030,6 +1030,16 @@ public:
                     m_fifoCursor = m_fifo.size();
                 m_ge1FifoBytes = ge1FifoBytes;
                 m_ge1FifoServed = ge1FifoServed != 0u;
+                // GL1: GSfreeze carries VRAM and GIF state, not the privileged
+                // registers (PCSX2 saves PS2MEM_GS on the EE side). The guest
+                // writes PMODE/DISPFB/DISPLAY once at boot, so the mirror never
+                // re-sends them after a load: push the restored image into the
+                // lib, or it keeps its pre-load values (PMODE=0 at startup:
+                // every frame black).
+                if (m_ge1Active)
+                    for (size_t i = 0; i < m_mirror.size(); ++i)
+                        if (!m_ge1.privWrite(kMirrorOffsets[i], m_mirror[i]))
+                            ok = false;
             }
         }
         log("# load bytes=%zu ok=%u\n", size, ok ? 1u : 0u);
