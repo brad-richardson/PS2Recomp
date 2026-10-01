@@ -180,6 +180,7 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixEmitter = 1u << 30,  // particle emitter frame step 0x370788 (callers 0x3459a8/0x345d80/0x345ef8): private 1/60 -> 1/120 (class h, FH13)
     kFixFx = 1u << 31,       // rider effects controller P+0xb40 (0x2e1120 glint timers, 0x2e1f70 fader) + board-wake scroll 0x2ef6d0: per-update steps halved (class b/h, FH13)
     kFixClock2 = 1ull << 32, // events mode: stock-time accumulator counts the interval that ended, not the one scheduled (FH17)
+    kFixHudfill = 1ull << 33, // race-HUD trick-combo fill (HUD object +0x70, 0x1ebf70/0x1ebf98 in 0x1e9a30): per-update step 1/48 -> 1/96 (class b, FH20)
 };
 
 // FH12 groups live in their own mask (the main mask's bits are taken). Same
@@ -240,8 +241,8 @@ inline uint64_t fixMask() noexcept
             return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
                    kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim |
                    kFixBonus | kFixAiGate | kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset |
-                   kFixMeter | kFixBoost | kFixGround | kFixEntry | kFixRclock |
-                   kFixEmitter | kFixFx | kFixClock2; // kFixLift is opt-in (FH8: no window where it binds)
+                    kFixMeter | kFixBoost | kFixGround | kFixEntry | kFixRclock |
+                    kFixEmitter | kFixFx | kFixClock2 | kFixHudfill; // kFixLift is opt-in (FH8: no window where it binds)
         uint64_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -280,6 +281,7 @@ inline uint64_t fixMask() noexcept
             else if (item == "emitter") m |= kFixEmitter;
             else if (item == "fx") m |= kFixFx;
             else if (item == "clock2") m |= kFixClock2;
+            else if (item == "hudfill") m |= kFixHudfill;
             else if (fh12Item(item) != 0u) {} // FH12 mask (fixMask12)
             else if (!item.empty())
             {
@@ -383,7 +385,7 @@ inline std::vector<Word> labWords();
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
-    const std::array<Word, 111> words = {{
+    const std::array<Word, 112> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -588,6 +590,12 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFixFx, 0x49f688u, kSixtieth, kHundredTwentieth, "fx_fader_down_2e1fc8"},
         {kFixFx, 0x49f68cu, 0x3c23d70bu, 0x3ba3d70bu, "fx_fader_up_2e1fe0"},
         {kFixFx, 0x49f7b4u, 0x392ec33eu, 0x38aec33eu, "wake_scroll_2ef8bc"},
+        // FH20 hudfill: the race-HUD trick-combo readout (HUD object +0x70 of 0x16bf728, gated by +0x6c)
+        // fills by [gp-0x570C] = [0x49d9e4] (1/48) per update at 0x1ebf70 (store 0x1ebf98), clamped at 1.0,
+        // inside the race-HUD update sub_0x1e9a30 (writer 0x1ebf98, ra 0x1ebb6c). The pool word's only
+        // reader in the whole codegen is 0x1ebf70 (class b, single reader -> halve). KD lab: stock
+        // +0.0208333/stock-tick, events +0.0416666 (ratio 2.000); halved: 1.000x (fh20-E21).
+        {kFixHudfill, 0x49d9e4u, 0x3caaaaabu, 0x3c2aaaabu, "hudfill_1ebf70"},
     }};
     uint64_t mask = fixMask();
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
