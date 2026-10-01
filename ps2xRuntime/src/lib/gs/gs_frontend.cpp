@@ -1,6 +1,5 @@
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_fpmode.h"
-#include "runtime/gs/ps2_gs_shadow.h"
 #include "ps2_e7.h"
 #include "ps2_gfx_stats.h"
 #include "ps2_mtvu.h"
@@ -685,7 +684,6 @@ void GS::reset()
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    ps2x_gs_shadow::onReset(); // G44: backend re-inits on next feed
     std::memset(m_ctx, 0, sizeof(m_ctx));
     m_prim = {};
     m_primRegister = {};
@@ -1980,10 +1978,6 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
     writeRegisterUnlocked(regAddr, value);
     if (m_rawGifBackend.load(std::memory_order_relaxed))
         m_backend->RawWriteRegister(regAddr, value); // GB3: HLE W1/W2 bypass the GIF stream
-    // G44: HLE direct writes (W1/W2) only; GIF-decode-internal writes use
-    // writeRegisterUnlocked and must NOT double-feed (paraLLEl decodes the
-    // same GIF stream itself).
-    ps2x_gs_shadow::onWriteRegister(regAddr, value);
 }
 
 namespace

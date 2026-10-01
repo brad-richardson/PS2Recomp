@@ -23,7 +23,6 @@
 #include <thread>
 #include <cstdio>
 #include <cstring>
-#include "runtime/gs/gs_replay_core.h" // N8D7M12 Part 2: dev-only on-device replay core
 #if defined(__ANDROID__)
 #endif
 #endif
@@ -246,72 +245,6 @@ int main(int argc, char *argv[])
 
     try
     {
-#if defined(__ANDROID__)
-        // N8D7M12 Part 2: dev-only on-device GS replay (default off). Only
-        // PS2X_GS_REPLAY_ONDEVICE=1 enters here; unset, empty, "0" or any
-        // other value falls through to the existing game boot path below.
-        // Placed after redirectStdioToLogcat()/setupTerminateLogger() and
-        // before getExecutablePath/PS2Runtime/initialize/loadELF/run, so no
-        // live EE/game thread starts in replay mode. Key and capture path
-        // arrive via the ps2x.env app-files shim (static init before main);
-        // no manifest/Gradle permission, new binary or test harness.
-        if (const char *replayOnDevice = std::getenv("PS2X_GS_REPLAY_ONDEVICE");
-            replayOnDevice && std::strcmp(replayOnDevice, "1") == 0)
-        {
-            const char *capture = std::getenv("PS2X_GS_REPLAY_CAPTURE");
-            const char *backend = std::getenv("PS2X_GS_REPLAY_BACKEND");
-            const char *turnip = std::getenv("PS2X_GS_TURNIP");
-            if (!capture || capture[0] == '\0' || !backend ||
-                std::strcmp(backend, "parallel") != 0 || !turnip ||
-                std::strcmp(turnip, "1") != 0)
-            {
-                std::cerr << "[n8d7m12] replay rejected: need nonempty "
-                             "PS2X_GS_REPLAY_CAPTURE, "
-                             "PS2X_GS_REPLAY_BACKEND=parallel, PS2X_GS_TURNIP=1"
-                          << std::endl;
-                std::cout.flush();
-                std::cerr.flush();
-                // Drain the logcat pipe (tick/census lines may still be held
-                // by the reader thread) before _Exit, which bypasses the
-                // atexit(stopLogcatRedirect) registration. Safe on failed
-                // init too: closes are ignored on bad fds, the pipe/thread
-                // guards skip, and this process _Exits immediately after.
-                stopLogcatRedirect();
-                std::_Exit(1);
-            }
-            const Ps2xGsReplayResult replayResult = ps2x_gs_replay_run();
-            const bool replayOk =
-                !replayResult.skipped && replayResult.openOk &&
-                replayResult.headerOk && replayResult.rtzOk &&
-                replayResult.pathFileOk && replayResult.wordsOk &&
-                replayResult.backendOk && replayResult.parseOk &&
-                replayResult.packetTraceOk && replayResult.outOk &&
-                replayResult.expectOk && replayResult.hasStream &&
-                replayResult.hasSamples;
-            if (replayOk)
-            {
-                std::cerr << "[n8d7m12] replay ok: packets=" << replayResult.packets
-                          << " markers=" << replayResult.markers << std::endl;
-            }
-            else
-            {
-                std::cerr << "[n8d7m12] replay failed: open=" << replayResult.openOk
-                          << " header=" << replayResult.headerOk
-                          << " backend=" << replayResult.backendOk
-                          << " parse=" << replayResult.parseOk
-                          << " stream=" << replayResult.hasStream
-                          << " samples=" << replayResult.hasSamples << std::endl;
-            }
-            // Drain the logcat pipe before _Exit (which bypasses
-            // atexit/stopLogcatRedirect): the tick2050 census/end marker is a
-            // required device receipt and the reader thread may still hold
-            // those lines. Default-off game boot path below is unchanged.
-            std::cout.flush();
-            std::cerr.flush();
-            stopLogcatRedirect();
-            std::_Exit(replayOk ? 0 : 1);
-        }
-#endif
         std::filesystem::path pathObj = getExecutablePath(argc, argv);
 
         std::string filePathStr = pathObj.string();

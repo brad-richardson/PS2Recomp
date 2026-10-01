@@ -7,7 +7,6 @@
 #include "runtime/gs/gs_replay_core.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_cpu_backend.h"
-#include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_vq.h"
 
@@ -234,13 +233,10 @@ Ps2xGsReplayResult ps2x_gs_replay_run()
         gs.setQueueEnabled(true);
     if (parallelBackend)
     {
-        if (!ps2x_gs_parallel::available())
-        {
-            std::fclose(f);
-            result.backendOk = false;
-            return result;
-        }
-        gs.setRasterBackend(ps2x_gs_parallel::create(&regs));
+        // CN2b: paraLLEl-GS was removed; a parallel replay request fails cleanly.
+        std::fclose(f);
+        result.backendOk = false;
+        return result;
     }
 
     uint64_t bisectTo = 0u;
@@ -533,16 +529,6 @@ Ps2xGsReplayResult ps2x_gs_replay_run()
               << " clears=" << clears << " samples=" << rows.size()
               << " rtz=" << (rtzAll ? "all" : (rtzPath1 ? "path1" : "off"))
               << " rounded_packets=" << roundedPackets << '\n';
-    if (parallelBackend)
-    {
-        const auto stats = ps2x_gs_parallel::stats();
-        std::cout << "GB4_PARALLEL_STATS packets=" << stats.gifPackets
-                  << " presents=" << stats.presents
-                  << " null_scanouts=" << stats.nullScanouts
-                  << " unsupported_clears=" << stats.unsupportedClears
-                  << " unsupported_vram_io=" << stats.unsupportedVramIo
-                  << " init_ok=" << stats.initOk << " init_failed=" << stats.initFailed << '\n';
-    }
     for (const auto &row : rows)
         std::cout << row << '\n';
 

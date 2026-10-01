@@ -44,7 +44,7 @@ struct Ps2xGsReplayResult
     bool rtzOk = true; // PS2X_GS_REPLAY_RTZ empty/path1/all
     bool pathFileOk = true; // PS2X_GS_REPLAY_PATH_FILE (when set) parses
     bool wordsOk = true; // TL1 Part 1b: word-watch removed; always true
-    bool backendOk = true; // parallel backend available when requested
+    bool backendOk = true; // false when PS2X_GS_REPLAY_BACKEND=parallel (CN2b: paraLLEl-GS removed)
     bool parseOk = false; // every record decoded cleanly to EOF marker
     bool packetTraceOk = true; // PS2X_GS_REPLAY_PACKET_TRACE written (when set)
     bool outOk = true; // PS2X_GS_REPLAY_OUT written (when set)

@@ -38,8 +38,6 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_stream_capture.h"
-#include "runtime/gs/ps2_gs_shadow.h"
-#include "runtime/gs/ps2_gs_parallel_backend.h"
 #include "runtime/gs/ps2_gs_external_backend.h"
 #include "runtime/gs/ps2_present_share.h"
 #include "runtime/gs/ps2_present_vk_ledger.h" // DP1: displayHz() (pure; same value on every platform)
@@ -1688,8 +1686,6 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                               usedPreferredDisplaySource, false, rt->memory().gs().smode2,
                               rt->memory().gs().pmode, rt->memory().gs().display1, rt->memory().gs().display2,
                               rt->memory().gs().dispfb1, rt->memory().gs().dispfb2);
-        // G44: per-vsync shadow compare against these CPU pixels.
-        ps2x_gs_shadow::onPresentFrame(currentTick, s_scratch.data(), width, height, &rt->memory().gs());
     }
 
     const bool large = static_cast<int>(width) > FB_WIDTH || static_cast<int>(height) > FB_HEIGHT;
@@ -1946,32 +1942,10 @@ bool PS2Runtime::syncCoreSubsystems()
                       << std::endl;
         }
     }
-    // GB3 Part 2: PS2X_GS_BACKEND=parallel = paraLLEl-GS as the live backend,
-    // fed by the queue (forced on: every backend call must run on the one GS
-    // worker thread). The swap is a SetBackend RPC, so paraLLEl initializes
-    // lazily on the worker.
-    if (ps2x_gs_parallel::requested() && !m_gs.rawGifBackendActive())
-    {
-        if (!ps2x_gs_parallel::available())
-        {
-            std::cerr << "[gs:parallel] PS2X_GS_BACKEND=parallel requested, but this build has no "
-                         "paraLLEl backend (PS2X_GS_SHADOW_PARALLEL=OFF); staying on the CPU backend"
-                      << std::endl;
-        }
-        else
-        {
-            if (!m_gs.queueEnabled())
-            {
-                m_gs.setQueueEnabled(true, gsQueueDescriptors());
-                std::cerr << "[gs:queue] enabled (forced by PS2X_GS_BACKEND=parallel)" << std::endl;
-            }
-            m_gs.setRasterBackend(ps2x_gs_parallel::create(&m_memory.gs()));
-            std::cerr << "[gs:parallel] live backend selected (PS2X_GS_BACKEND=parallel)" << std::endl;
-        }
-    }
-    // GE2: PS2X_GS_BACKEND=external = the external-GS shell (recording stub
-    // at this stage), fed by the queue like parallel. Default off; unset or
-    // any other value keeps the existing backend untouched.
+    // GE2: PS2X_GS_BACKEND=external = the external-GS backend (GE1 when
+    // PS2X_GS_EXTERNAL_LIBRARY names it), fed by the queue (forced on: every
+    // backend call runs on the one GS worker thread). Unset or any other value
+    // keeps the CPU backend. CN2b: the paraLLEl-GS value (parallel) is gone.
     if (ps2x_gs_external::requested() && !m_gs.wantsGuestVsync())
     {
         if (!ps2x_gs_external::available())
@@ -2067,9 +2041,6 @@ bool PS2Runtime::syncCoreSubsystems()
                                            m_gs.noteGifPath(path);
                                        }
                                    });
-    // G44: shadow observes the same drained packets with path preserved.
-    m_gifArbiter.setShadowPacketFn([](GifPathId path, const uint8_t *data, uint32_t size)
-                                   { ps2x_gs_shadow::onGifPacket(static_cast<uint32_t>(path), data, size); });
     m_memory.setGifArbiter(&m_gifArbiter);
     // MT1 map #10: CFC2 VPU_STAT / CTC2 FBRST are inline in generated code, so
     // VIF1 work runs inline (after a sync) when the kicking context has VU1

@@ -1,5 +1,4 @@
 #include "runtime/ps2_memory.h"
-#include "runtime/gs/ps2_gs_shadow.h"
 #include "ps2_e3.h"
 #include "ps2_e44_trace.h"
 #include "ps2_e7.h"
@@ -3527,12 +3526,8 @@ void PS2Memory::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint32_t chcr)
 {
     // GB3 Part 2: a raw-GIF backend must see these packets (with their path)
-    // through the arbiter, like the G44 shadow below.
+    // through the arbiter.
     if (gs.rawGifBackendActive())
-        return false;
-    // G44: when the shadow feeds, route via the arbiter so both backends see
-    // identical traffic in identical order (P6).
-    if (ps2x_gs_shadow::routeGifViaArbiter())
         return false;
     static constexpr uint32_t GIF_CHANNEL = 0x1000A000u;
     static constexpr uint32_t D_STAT = 0x1000E010u;
@@ -3733,12 +3728,8 @@ bool PS2Memory::tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint3
 bool PS2Memory::tryProcessNativeGifPackedChain(GS &gs, uint32_t tadr, uint32_t chcr)
 {
     // GB3 Part 2: a raw-GIF backend must see these packets (with their path)
-    // through the arbiter, like the G44 shadow below.
+    // through the arbiter.
     if (gs.rawGifBackendActive())
-        return false;
-    // G44: when the shadow feeds, route via the arbiter so both backends see
-    // identical traffic in identical order (P7).
-    if (ps2x_gs_shadow::routeGifViaArbiter())
         return false;
     static constexpr uint32_t GIF_CHANNEL = 0x1000A000u;
     static constexpr uint32_t D_STAT = 0x1000E010u;

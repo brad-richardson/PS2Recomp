@@ -695,12 +695,8 @@ namespace ps2_savestate
             h.push_back({"gs_backend", env ? env : "cpu", true});
             env = std::getenv("PS2X_SKIP_MOVIE");
             h.push_back({"skip_movie", env ? env : "", false});
-            // Host render settings: SSAA planes are not saved (a load starts
-            // them clean), so a different SSAA/hi-res only warns.
-            env = std::getenv("PS2X_PGS_SSAA");
-            h.push_back({"pgs_ssaa", env ? env : "", false});
-            env = std::getenv("PS2X_PGS_HIRES_SCANOUT");
-            h.push_back({"pgs_hires", env ? env : "", false});
+            // CN2b: the paraLLEl-GS pgs_ssaa/pgs_hires lines are gone; older
+            // files still carry them and load (only this side's keys are checked).
             return h;
         }
 

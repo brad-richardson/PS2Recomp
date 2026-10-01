@@ -235,11 +235,6 @@ void register_ps2_knobs_tests()
             g.track("PS2X_UNPACED");
             g.track("PS2X_DETERMINISTIC");
             g.track("PS2X_DET_HASH_EVERY");
-            g.track("PS2X_GS_TURNIP");
-            g.track("PGS_SKIP_COMPILATION_TASKS");
-            g.track("PGS_PRECOMPILE_LIST");
-            g.track("PGS_PRECOMPILE_THREADS");
-            g.track("PGS_PIPELINE_CACHE");
             g.track("GE1_VERTEX_KICK");
             g.track("PS2X_PAD_RECORD_DIR");
             clearDefaults();
@@ -251,14 +246,6 @@ void register_ps2_knobs_tests()
             ::setenv("PS2X_UNPACED", "1", 1);
             ::setenv("PS2X_DETERMINISTIC", "1", 1);
             ::setenv("PS2X_DET_HASH_EVERY", "5", 1);
-            // The 5 inert P3 lines (present in the real play leg, absent in empty).
-            ::setenv("PS2X_GS_TURNIP", "0", 1);
-            ::setenv("PGS_SKIP_COMPILATION_TASKS", "1", 1);
-            ::setenv("PGS_PRECOMPILE_LIST",
-                     "/storage/emulated/0/Android/data/com.ps2x.runner/files/variants-odin.txt", 1);
-            ::setenv("PGS_PRECOMPILE_THREADS", "2", 1);
-            ::setenv("PGS_PIPELINE_CACHE",
-                     "/storage/emulated/0/Android/data/com.ps2x.runner/files/pcache-sc1.bin", 1);
             // PB5/6 play-env lines past P3 (explicit: not compiled defaults).
             ::setenv("GE1_VERTEX_KICK", "2", 1);
             ::setenv("PS2X_PAD_RECORD_DIR",

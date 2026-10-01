@@ -71,7 +71,6 @@ add_library(ps2_test_lib STATIC
     src/ps2_gs_tests.cpp
     src/ps2_gs_queue_tests.cpp
     src/ps2_gs_replay_tests.cpp
-    src/ps2_gs_shadow_tests.cpp
     src/ps2_gs_external_tests.cpp
     src/ps2_iop_tests.cpp
     src/ps2_sif_rpc_tests.cpp
