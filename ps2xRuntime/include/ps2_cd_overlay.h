@@ -42,7 +42,9 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -514,6 +516,285 @@ inline bool build(const std::filesystem::path &dir, uint64_t imageSectors, const
         }
         out.log.push_back(line);
     }
+    return true;
+}
+
+// ---- TK25c: mode-scoped CD alias ------------------------------------------
+// A manifest mode block may carry `alias = /DATA/AUDIO/SPEECH.BIG:<host composite>`.
+// While that mode is on, readCdSectors serves that disc file's LBN range from
+// the host file (a TK10 PS2XCMP1 composite: `iso` segments for unchanged
+// ranges, `self` for the replaced members). Same size is required: a size
+// mismatch is refused at load and the disc is served unchanged. No alias
+// (mode off or Stock) = byte-identical reads to today; the knob is the
+// manifest (default off everywhere).
+//
+// The alias is set by the course-mode switch (L3+R3 chord) and consumed
+// lazily by the CD layer, which owns the image reader: setModeAlias stores
+// the strings, and resolveActiveAlias loads + validates on the next read
+// (once per mode activation; failures are logged once and serve the disc).
+
+inline constexpr size_t kAliasDiscMaxLen = 127u;
+inline constexpr size_t kAliasHostMaxLen = 511u;
+
+struct DiscAlias
+{
+    std::string discPath;      // as in the manifest, e.g. /DATA/AUDIO/SPEECH.BIG
+    std::filesystem::path host; // the composite host file
+    uint32_t discLbn = 0;      // the file's extent on the disc
+    uint32_t discSectors = 0;
+    uint64_t discSize = 0; // bytes (== composite.sizeBytes)
+    OverlayFile composite; // the parsed composite (host = the composite file)
+    bool loaded = false;
+    std::string err;
+};
+
+// Walks the image's ISO9660 tree for an absolute disc path (case-insensitive,
+// like the game's own walker). Returns the file's extent LBN and byte size.
+inline bool findDiscFile(uint64_t imageSectors, const SectorReader &read, const std::string &discPath,
+                         uint32_t &lbnOut, uint64_t &sizeOut, std::string &err)
+{
+    using namespace detail;
+    if (discPath.empty() || discPath.front() != '/')
+    {
+        err = "disc path must start with '/': " + discPath;
+        return false;
+    }
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char c : discPath)
+    {
+        if (c == '/')
+        {
+            if (!cur.empty())
+            {
+                parts.push_back(upper(cur));
+                cur.clear();
+            }
+        }
+        else
+        {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty())
+        parts.push_back(upper(cur));
+    if (parts.empty())
+    {
+        err = "disc path names no file: " + discPath;
+        return false;
+    }
+    // Tolerate an ISO9660 version suffix on the query (SPEECH.BIG;1):
+    // record stems never carry one (detail::stem strips it).
+    for (std::string &part : parts)
+    {
+        const size_t semi = part.find(';');
+        if (semi != std::string::npos)
+            part.erase(semi);
+    }
+    std::vector<uint8_t> pvd(kSectorSize);
+    if (!read(kPvdLbn, pvd.data()) || pvd[0] != 1 || std::memcmp(&pvd[1], "CD001", 5) != 0)
+    {
+        err = "no ISO9660 primary volume descriptor at lbn 16";
+        return false;
+    }
+    uint32_t lbn = le32(&pvd[156 + 2]);
+    uint32_t size = le32(&pvd[156 + 10]);
+    for (size_t i = 0; i < parts.size(); ++i)
+    {
+        const bool last = i + 1 == parts.size();
+        Dir d;
+        if (!readDir(read, lbn, size, d, err))
+        {
+            err = discPath + ": " + err;
+            return false;
+        }
+        bool found = false;
+        for (size_t r = 2; r < d.records.size(); ++r)
+        {
+            const auto &rec = d.records[r];
+            const bool isDir = (rec[25] & 2) != 0;
+            if (isDir != !last)
+                continue;
+            if (upper(stem(rec)) != parts[i])
+                continue;
+            lbn = le32(&rec[2]);
+            size = le32(&rec[10]);
+            found = true;
+            break;
+        }
+        if (!found)
+        {
+            err = discPath + ": '" + parts[i] + "' not on the disc";
+            return false;
+        }
+    }
+    if (uint64_t(lbn) + (size + kSectorSize - 1) / kSectorSize > imageSectors)
+    {
+        err = discPath + ": extent past the image end";
+        return false;
+    }
+    lbnOut = lbn;
+    sizeOut = size;
+    return true;
+}
+
+// Loads + validates the alias: the disc file must exist, the host file must
+// be a PS2XCMP1 composite for this image, and its size must equal the disc
+// file's size (so the guest's directory and the boot-loaded .hdr tables stay
+// valid). Every `iso` segment must lie inside the aliased file's own range.
+inline bool loadDiscAlias(const std::string &discPath, const std::filesystem::path &host, uint64_t imageSectors,
+                          const SectorReader &read, DiscAlias &out, std::string &err)
+{
+    using namespace detail;
+    out = DiscAlias{};
+    uint32_t discLbn = 0;
+    uint64_t discSize = 0;
+    if (!findDiscFile(imageSectors, read, discPath, discLbn, discSize, err))
+    {
+        err = "alias " + discPath + ": " + err;
+        return false;
+    }
+    std::error_code ec;
+    const uint64_t hostBytes = std::filesystem::file_size(host, ec);
+    if (ec)
+    {
+        err = "alias " + discPath + ": cannot size " + host.string();
+        return false;
+    }
+    std::string head(kSectorSize, '\0');
+    std::ifstream in(host, std::ios::binary);
+    if (!in)
+    {
+        err = "alias " + discPath + ": cannot open " + host.string();
+        return false;
+    }
+    in.read(head.data(), kSectorSize);
+    head.resize(static_cast<size_t>(std::max<std::streamsize>(0, in.gcount())));
+    if (head.compare(0, sizeof kCompositeMagic - 1, kCompositeMagic) != 0)
+    {
+        err = "alias " + discPath + ": " + host.string() + " is not a PS2XCMP1 composite";
+        return false;
+    }
+    head.resize(std::min(head.find('\0'), head.size()));
+    OverlayFile f;
+    f.host = host;
+    if (!parseComposite(head, hostBytes, imageSectors, f, err))
+    {
+        err = "alias " + discPath + ": " + host.string() + ": " + err;
+        return false;
+    }
+    if (f.sizeBytes != discSize)
+    {
+        char b[192];
+        std::snprintf(b, sizeof b, "alias %s: size mismatch (composite %llu, disc %llu); refused",
+                      discPath.c_str(), static_cast<unsigned long long>(f.sizeBytes),
+                      static_cast<unsigned long long>(discSize));
+        err = b;
+        return false;
+    }
+    const uint32_t discSectors = static_cast<uint32_t>((discSize + kSectorSize - 1) / kSectorSize);
+    for (const Segment &s : f.segments)
+    {
+        if (s.image && (s.source < discLbn || s.source + s.sectors > uint64_t(discLbn) + discSectors))
+        {
+            char b[192];
+            std::snprintf(b, sizeof b, "alias %s: iso segment lbn %llu + %u outside the file's range",
+                          discPath.c_str(), static_cast<unsigned long long>(s.source), s.sectors);
+            err = b;
+            return false;
+        }
+    }
+    out.discPath = discPath;
+    out.host = host;
+    out.discLbn = discLbn;
+    out.discSectors = discSectors;
+    out.discSize = discSize;
+    out.composite = f;
+    out.loaded = true;
+    return true;
+}
+
+namespace alias_detail
+{
+struct State
+{
+    std::mutex mu;
+    std::string disc; // pending strings from the last mode switch (empty = off)
+    std::string host;
+    uint64_t generation = 0;
+    DiscAlias loaded; // valid when loadedGen == generation
+    uint64_t loadedGen = 0;
+    bool loadFailed = false; // failed this generation (logged once)
+};
+
+inline State &state()
+{
+    static State s;
+    return s;
+}
+} // namespace alias_detail
+
+// Called by the course-mode switch. Empty strings = off.
+inline void setModeAlias(const std::string &disc, const std::string &host)
+{
+    alias_detail::State &s = alias_detail::state();
+    std::lock_guard<std::mutex> lock(s.mu);
+    if (s.disc == disc && s.host == host)
+        return;
+    s.disc = disc;
+    s.host = host;
+    ++s.generation;
+    s.loadFailed = false;
+}
+
+inline void clearModeAlias() { setModeAlias(std::string{}, std::string{}); }
+
+// Test/observer hook: the pending strings (empty = off).
+inline std::pair<std::string, std::string> pendingAlias()
+{
+    alias_detail::State &s = alias_detail::state();
+    std::lock_guard<std::mutex> lock(s.mu);
+    return {s.disc, s.host};
+}
+
+// The loaded alias serving `lbn`, loading + validating on the first read of
+// a mode activation. Returns false (serve the disc as today) when off, when
+// `lbn` is outside the aliased range, or when the load was refused.
+inline bool resolveActiveAlias(uint64_t imageSectors, const SectorReader &read, uint32_t lbn, DiscAlias &out)
+{
+    alias_detail::State &s = alias_detail::state();
+    std::lock_guard<std::mutex> lock(s.mu);
+    if (s.disc.empty() || s.host.empty())
+        return false;
+    if (s.loadedGen != s.generation && !s.loadFailed)
+    {
+        DiscAlias a;
+        std::string err;
+        if (loadDiscAlias(s.disc, std::filesystem::path(s.host), imageSectors, read, a, err))
+        {
+            uint64_t fromImage = 0;
+            for (const Segment &seg : a.composite.segments)
+                fromImage += seg.image ? seg.sectors : 0;
+            char b[256];
+            std::snprintf(b, sizeof b, "[cd-alias] %s -> %s (%u sectors, %llu from the image)",
+                          a.discPath.c_str(), a.host.string().c_str(), a.discSectors,
+                          static_cast<unsigned long long>(fromImage));
+            std::cerr << b << std::endl;
+            s.loaded = a;
+        }
+        else
+        {
+            std::cerr << "[cd-alias] REFUSED: " << err << " (serving the disc unchanged)" << std::endl;
+            s.loadFailed = true;
+        }
+        s.loadedGen = s.generation;
+    }
+    if (s.loadFailed || !s.loaded.loaded)
+        return false;
+    const DiscAlias &a = s.loaded;
+    if (lbn < a.discLbn || lbn >= a.discLbn + a.discSectors)
+        return false;
+    out = a;
     return true;
 }
 

@@ -439,6 +439,36 @@ namespace
         return true;
     }
 
+    // Serves `f`'s bytes [offset, offset + byteCount) through its TK10
+    // composite segments (Image = the disc image, Host = a host file). Shared
+    // by the TK3 overlay branch and the TK25c mode alias below.
+    bool serveComposite(const ps2_cd_overlay::OverlayFile &f, const std::filesystem::path &imagePath,
+                        uint64_t offset, uint8_t *dst, size_t byteCount)
+    {
+        if (!dst)
+        {
+            g_lastCdError = -1;
+            return false;
+        }
+        uint8_t *out = dst;
+        for (const ps2_cd_overlay::Piece &piece : ps2_cd_overlay::resolve(f, offset, byteCount))
+        {
+            const size_t n = static_cast<size_t>(piece.bytes);
+            if (piece.kind == ps2_cd_overlay::Piece::Zero)
+            {
+                std::memset(out, 0, n);
+            }
+            else if (!readHostRange(piece.kind == ps2_cd_overlay::Piece::Image ? imagePath : f.host, piece.offset,
+                                    out, n))
+            {
+                return false;
+            }
+            out += n;
+        }
+        g_lastCdError = 0;
+        return true;
+    }
+
     // TK3: PS2X_CD_OVERLAY=<dir> (default off). Built once, on the first CD
     // read, from the configured image; a refusal logs and serves the disc as is.
     const ps2_cd_overlay::Overlay *cdOverlay()
@@ -488,6 +518,44 @@ namespace
 
     bool readCdSectors(uint32_t lbn, uint32_t sectors, uint8_t *dst, size_t byteCount)
     {
+        // TK25c: mode-scoped CD alias (default off). While a manifest mode
+        // with `alias = ...` is on, the aliased disc file's LBN range is
+        // served from its host composite; mode off (or any other LBN) reads
+        // exactly as before. Reads past the file's end fall through to the
+        // disc below.
+        {
+            const auto pending = ps2_cd_overlay::pendingAlias();
+            if (!pending.first.empty() && !pending.second.empty())
+            {
+                const std::filesystem::path imagePath = getCdImagePath();
+                uint64_t imageSectors = 0;
+                if (!imagePath.empty() && tryGetCdImageTotalSectors(imageSectors))
+                {
+                    std::ifstream imageFile(imagePath, std::ios::binary);
+                    const ps2_cd_overlay::SectorReader read =
+                        [&imageFile, imageSectors](uint32_t rlbn, uint8_t *sectorDst)
+                    {
+                        if (rlbn >= imageSectors)
+                        {
+                            return false;
+                        }
+                        imageFile.clear();
+                        imageFile.seekg(static_cast<std::streamoff>(rlbn) * kCdSectorSize, std::ios::beg);
+                        imageFile.read(reinterpret_cast<char *>(sectorDst), kCdSectorSize);
+                        return imageFile.gcount() == static_cast<std::streamsize>(kCdSectorSize);
+                    };
+                    ps2_cd_overlay::DiscAlias alias;
+                    if (ps2_cd_overlay::resolveActiveAlias(imageSectors, read, lbn, alias))
+                    {
+                        const uint64_t offset = static_cast<uint64_t>(lbn - alias.discLbn) * kCdSectorSize;
+                        if (offset + byteCount <= alias.discSize)
+                        {
+                            return serveComposite(alias.composite, imagePath, offset, dst, byteCount);
+                        }
+                    }
+                }
+            }
+        }
         const ps2_cd_overlay::Overlay *overlay = cdOverlay();
         if (overlay && overlay->contains(lbn))
         {
@@ -507,28 +575,7 @@ namespace
                 return readHostRange(file->host, offset, dst, byteCount);
             }
             // TK10 composite: stock disc ranges + pieces of the host file.
-            if (!dst)
-            {
-                g_lastCdError = -1;
-                return false;
-            }
-            uint8_t *out = dst;
-            for (const ps2_cd_overlay::Piece &piece : ps2_cd_overlay::resolve(*file, offset, byteCount))
-            {
-                const size_t n = static_cast<size_t>(piece.bytes);
-                if (piece.kind == ps2_cd_overlay::Piece::Zero)
-                {
-                    std::memset(out, 0, n);
-                }
-                else if (!readHostRange(piece.kind == ps2_cd_overlay::Piece::Image ? getCdImagePath() : file->host,
-                                        piece.offset, out, n))
-                {
-                    return false;
-                }
-                out += n;
-            }
-            g_lastCdError = 0;
-            return true;
+            return serveComposite(*file, getCdImagePath(), offset, dst, byteCount);
         }
 
         for (const auto &[key, entry] : g_cdFilesByKey)

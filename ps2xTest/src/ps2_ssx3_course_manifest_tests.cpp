@@ -370,5 +370,65 @@ void register_ps2_ssx3_course_manifest_tests()
             const int n = ps2_ssx3_course::apply(ram.data(), b, [&](const std::string &s) { lines.push_back(s); });
             t.Equals(n, -1, "refused");
             t.Equals(std::string(reinterpret_cast<const char *>(&ram[0x43D950 + 68])), std::string("BAM"), "untouched");
-            t.IsTrue(lines.size() == 1 && lines[0].find("1 of 69") != std::string::npos, lines[0].c_str()); }); });
+            t.IsTrue(lines.size() == 1 && lines[0].find("1 of 69") != std::string::npos, lines[0].c_str()); });
+
+        tc.Run("TK25c alias: parse, errors, and the switch follows the mode", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            std::vector<Block> b;
+            std::vector<Mode> m;
+            std::string err;
+            t.IsTrue(parse("mode = Tricky\nrow = 0:GARI:Garibaldi\n"
+                           "alias = /DATA/AUDIO/SPEECH.BIG:/host/speech-big\n",
+                           b, err, &m),
+                      err.c_str());
+            t.Equals(m.size(), static_cast<size_t>(1), "one mode");
+            t.IsTrue(m[0].hasAlias, "has alias");
+            t.Equals(m[0].aliasDisc, std::string("/DATA/AUDIO/SPEECH.BIG"), "disc");
+            t.Equals(m[0].aliasHost, std::string("/host/speech-big"), "host");
+            const char *bad[] = {
+                "alias = /D/S.BIG:/h\n",                        // before any mode
+                "event = 0\nname = X\nalias = /D/S.BIG:/h\n",    // event key, not mode key
+                "mode = T\nrow = 0:A:B\nalias = /D/S.BIG:/h\nalias = /D/S.BIG:/h\n", // twice
+                "mode = T\nrow = 0:A:B\nalias = /D/S.BIG\n",     // no host
+                "mode = T\nrow = 0:A:B\nalias = :/h\n",          // no disc
+                "mode = T\nrow = 0:A:B\nalias = DATA/S.BIG:/h\n", // no leading slash
+                "mode = T\nrow = 0:A:B\nalias = /D/S.BIG:/h:x\n", // colon in host
+                "mode = T\nalias = /DATA/AUDIO/SPEECH.BIG:/h\n", // alias alone is no row or poke
+            };
+            for (const char *txt : bad)
+                t.IsFalse(parse(txt, b, err, &m), txt);
+
+            // The switch sets the pending alias on entry and clears it on exit.
+            auto ram = stockTables();
+            stockTopology(ram);
+            std::vector<std::string> lines;
+            auto log = [&](const std::string &s) { lines.push_back(s); };
+            t.IsTrue(parse("mode = Tricky\nrow = 0:GARI:Garibaldi\n"
+                           "alias = /DATA/AUDIO/SPEECH.BIG:/host/speech-big\n"
+                           "mode = Two\nrow = 0:-:Other\n",
+                           b, err, &m),
+                      err.c_str());
+            Modes &ms = courseModes();
+            t.IsTrue(armModes(ms, ram.data(), m, log), "armed");
+            auto pending = ps2_cd_overlay::pendingAlias();
+            t.IsTrue(pending.first.empty(), "arming starts with the alias off");
+            std::string status;
+            auto idle = padBuffer(0);
+            auto chord = padBuffer(kBtnL3 | kBtnR3);
+            pickerOnPadRead(ram.data(), idle.data(), 1, status);
+            pickerOnPadRead(ram.data(), chord.data(), 2, status);
+            t.Equals(status, std::string("Mode: Tricky"), "status");
+            pending = ps2_cd_overlay::pendingAlias();
+            t.Equals(pending.first, std::string("/DATA/AUDIO/SPEECH.BIG"), "alias on in Tricky");
+            t.Equals(pending.second, std::string("/host/speech-big"), "host on in Tricky");
+            pickerOnPadRead(ram.data(), idle.data(), 3, status);
+            chord = padBuffer(kBtnL3 | kBtnR3);
+            pickerOnPadRead(ram.data(), chord.data(), 4, status);
+            t.Equals(status, std::string("Mode: Two"), "second mode");
+            pending = ps2_cd_overlay::pendingAlias();
+            t.IsTrue(pending.first.empty(), "Two has no alias: off");
+            ms = Modes{}; // leave the process-wide modes disarmed
+            ps2_cd_overlay::clearModeAlias();
+        }); });
 }

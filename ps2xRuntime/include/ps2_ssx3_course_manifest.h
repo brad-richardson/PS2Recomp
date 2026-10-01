@@ -28,6 +28,12 @@
 //     and/or name +4 while the mode is on; `-` keeps the field; one per event)
 //   poke = 0x<va>:<old>:<new>  (same-length printable string swap, no ':'
 //     inside; e.g. 0x47BDB0:data/ui/courspic.big:data/ui/courspit.big)
+//   alias = <disc>:<host>  (TK25c, at most one per mode: while the mode is
+//     on, CD reads of the disc file <disc> (e.g. /DATA/AUDIO/SPEECH.BIG) are
+//     served from the host composite <host> (a TK10 PS2XCMP1 file of the same
+//     size); mode off serves the disc unchanged. The mode still needs >= 1
+//     row or poke: the current mode is derived from RAM, where an alias
+//     leaves no trace.)
 // Modes are inert unless PS2X_SSX3_COURSE_PICKER=1; see the mode section.
 // `node` (TK6's DONOTUSE nav-node writer) is refused: the padding slots have
 // no menu widget, so the menu aborts at Select Peak (TK6 p1/p2). The nav
@@ -49,6 +55,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include "ps2_cd_overlay.h"
 
 namespace ps2_ssx3_course
 {
@@ -117,6 +125,9 @@ struct Mode
     std::string name;
     std::vector<ModeRow> rows;
     std::vector<Poke> pokes;
+    bool hasAlias = false; // TK25c: mode-scoped CD alias (one per mode)
+    std::string aliasDisc; // disc file, e.g. /DATA/AUDIO/SPEECH.BIG
+    std::string aliasHost; // host composite file
 };
 
 inline std::string trim(const std::string &s)
@@ -303,6 +314,28 @@ inline bool parse(const std::string &text, std::vector<Block> &out, std::string 
                             return fail("poke address twice in mode " + m.name);
                     }
                 m.pokes.push_back(k);
+            }
+            else if (key == "alias")
+            {
+                // TK25c: alias = <disc>:<host>, at most one per mode.
+                if (m.hasAlias)
+                    return fail("alias twice in mode " + m.name);
+                const size_t c = val.find(':');
+                const std::string disc = c == std::string::npos ? std::string{} : trim(val.substr(0, c));
+                const std::string host = c == std::string::npos ? std::string{} : trim(val.substr(c + 1));
+                if (c == std::string::npos || disc.empty() || host.empty())
+                    return fail("alias must be <disc>:<host>");
+                if (disc.front() != '/' || !printableName(disc, ps2_cd_overlay::kAliasDiscMaxLen))
+                    return fail("alias disc must start with '/' and be 1-" +
+                                std::to_string(ps2_cd_overlay::kAliasDiscMaxLen) + " printable ASCII bytes");
+                if (!printableName(host, ps2_cd_overlay::kAliasHostMaxLen) ||
+                    host.find(':') != std::string::npos)
+                    return fail("alias host must be 1-" +
+                                std::to_string(ps2_cd_overlay::kAliasHostMaxLen) +
+                                " printable ASCII bytes without ':'");
+                m.hasAlias = true;
+                m.aliasDisc = disc;
+                m.aliasHost = host;
             }
             else if (key == "event")
             {
@@ -791,6 +824,7 @@ template <typename Log>
 inline bool armModes(Modes &ms, const uint8_t *ram, const std::vector<Mode> &modes, Log &&log)
 {
     ms = Modes{};
+    ps2_cd_overlay::clearModeAlias(); // arming starts at Stock (TK25c)
     for (const Mode &m : modes)
     {
         bool ok = true;
@@ -842,7 +876,7 @@ inline bool armModes(Modes &ms, const uint8_t *ram, const std::vector<Mode> &mod
     std::string list = "Stock";
     for (const Mode &m : ms.modes)
         list += ", " + m.name + " (" + std::to_string(m.rows.size()) + " rows, " + std::to_string(m.pokes.size()) +
-                " pokes)";
+                " pokes" + (m.hasAlias ? ", alias" : "") + ")";
     log("modes: armed [" + list + "], chord L3+R3 in the menus");
     return true;
 }
@@ -895,6 +929,16 @@ inline int modeNext(Modes &ms, uint8_t *ram, std::string &msg, std::vector<std::
     const size_t cur = modeCurrent(ms, ram);
     const size_t next = (cur + 1u) % (ms.modes.size() + 1u);
     const Mode *target = next ? &ms.modes[next - 1u] : nullptr;
+    // TK25c: the alias follows the mode (off on Stock and on modes without
+    // one). Set after the refusal checks above, with the RAM writes.
+    if (target && target->hasAlias)
+    {
+        ps2_cd_overlay::setModeAlias(target->aliasDisc, target->aliasHost);
+        if (writes)
+            writes->push_back("alias " + target->aliasDisc + " -> " + target->aliasHost);
+    }
+    else
+        ps2_cd_overlay::clearModeAlias();
     char buf[192];
     for (const ModeField &f : ms.fields)
     {
