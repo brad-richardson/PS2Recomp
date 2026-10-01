@@ -7,6 +7,10 @@ include(CheckIPOSupported)
 # Clang directly. Everywhere else keeps the probe.
 if(ANDROID AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(IPO_SUPPORTED TRUE)
+    # BF2d: CMake 3.22 appends -fuse-ld=gold for IPO links behind a stale
+    # NDK<22 guard that misfires here (CMAKE_ANDROID_NDK_VERSION unset);
+    # NDK r28 removed gold. lld consumes ThinLTO natively (GE1 precedent).
+    set(CMAKE_CXX_LINK_OPTIONS_IPO "-fuse-ld=lld")
 else()
     check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
 endif()
