@@ -10,6 +10,14 @@ def ps2xJniLibsDir = project.findProperty('ps2xJniLibsDir') ?: ''
 def ps2xVu0RecompDir = project.findProperty('ps2xVu0RecompDir') ?: ''
 // VR4 D1: vector FMAC core (CMake PS2X_VU1_FMAC_SIMD), ON/OFF (default ON).
 def ps2xVu1FmacSimd = project.findProperty('ps2xVu1FmacSimd') ?: 'ON'
+// PG5 (PG2 GEN lineage): PGO instrumented build, ON/OFF (default OFF; never
+// passed by main_apk.sh). ON = -fprofile-generate + wrap.sh (profile path) +
+// debuggable (wrap.sh and the run-as profile pull need it) + versionName
+// suffix "-pgogen", so an instrumented APK names itself. Never ships.
+def ps2xPgoGenerate = project.findProperty('ps2xPgoGenerate') ?: 'OFF'
+def ps2xPgoGen = ps2xPgoGenerate == 'ON'
+// PG5: build-host dir holding the external pgo_flush.c (empty = no helper).
+def ps2xPgoHelperDir = project.findProperty('ps2xPgoHelperDir') ?: ''
 // OF1 (PG1 USE lineage): PGO use build (absolute path to the merged
 // .profdata on the build host; empty = off).
 def ps2xPgoData = project.findProperty('ps2xPgoData') ?: ''
@@ -36,6 +44,9 @@ android {
         targetSdk 34
         versionCode 1
         versionName '0.1.0'
+        if (ps2xPgoGen) {
+            versionNameSuffix '-pgogen'
+        }
 
         externalNativeBuild {
             cmake {
@@ -58,6 +69,8 @@ android {
                         "-DPS2X_GAME_CODEGEN_DIR=${ps2xGameCodegenDir}",
                         "-DPS2X_VU0_RECOMP_DIR=${ps2xVu0RecompDir}",
                         "-DPS2X_VU1_FMAC_SIMD=${ps2xVu1FmacSimd}",
+                        "-DPS2X_PGO_GENERATE=${ps2xPgoGen ? 'ON' : 'OFF'}",
+                        "-DPS2X_PGO_HELPER_DIR=${ps2xPgoHelperDir}",
                         "-DPS2X_PGO_DATA=${ps2xPgoData}",
                         "-DPS2X_ENABLE_DET_HASH_TAP=${ps2xDetHashTap}",
                         "-DPS2X_GAME_IPO=${ps2xGameIpo}",
@@ -71,6 +84,10 @@ android {
         ndk {
             abiFilters 'arm64-v8a'
         }
+    }
+
+    if (ps2xPgoGen) {
+        sourceSets.main.resources.srcDirs += ['src/pgogen/resources']
     }
 
     if (ps2xJniLibsDir) {
@@ -95,6 +112,8 @@ android {
         release {
             minifyEnabled false
             signingConfig signingConfigs.debug
+            // PG5 GEN only (see ps2xPgoGenerate): wrap.sh + run-as profile pull.
+            debuggable ps2xPgoGen
         }
     }
 }

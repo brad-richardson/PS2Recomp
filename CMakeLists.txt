@@ -113,6 +113,24 @@ if(NOT MSVC)
     add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>)
 endif()
 
+# PG5 (PG2 GEN lineage): PGO instrumented build (Android only;
+# -Pps2xPgoGenerate=ON, default OFF; an instrumented APK never ships).
+# Plain -fprofile-generate: the profile path is not baked in, it comes from
+# wrap.sh's LLVM_PROFILE_FILE (gradle adds wrap.sh only for GEN builds; NDK
+# r28's %c continuous mode produced unmergeable files, PG1). The host ends
+# Odin runs with force-stop (SIGKILL, no atexit flush), so a helper thread
+# flushes periodically: pgo_flush.c lives outside the fork, staged on the
+# build host (-Pps2xPgoHelperDir=/path/to/dir). Whole-archive, since nothing
+# references the helper and the linker would drop its constructor.
+if(ANDROID AND PS2X_PGO_GENERATE)
+    if(PS2X_PGO_DATA)
+        message(FATAL_ERROR "PG5: PS2X_PGO_GENERATE and PS2X_PGO_DATA are exclusive")
+    endif()
+    add_compile_options(-fprofile-generate)
+    add_link_options(-fprofile-generate)
+    message(STATUS "PG5: -fprofile-generate (instrumented APK)")
+endif()
+
 # OF1 (PG1 USE lineage): PGO use build (Android; -Pps2xPgoData=/path/to/profile.profdata):
 # optimize with the merged profile. Merge it on the build host with the NDK's
 # own llvm-profdata (the same clang must generate, merge and use — a profile
@@ -142,4 +160,12 @@ endif()
 
 if(PS2X_BUILD_STUDIO)
     add_subdirectory("ps2xStudio")
+endif()
+
+# PG5: periodic-flush helper for the instrumented APK (see the GEN block above).
+if(ANDROID AND PS2X_PGO_GENERATE AND PS2X_PGO_HELPER_DIR)
+    add_library(pg2_pgo_flush STATIC ${PS2X_PGO_HELPER_DIR}/pgo_flush.c)
+    target_link_libraries(ps2EntryRunner PRIVATE
+        -Wl,--whole-archive pg2_pgo_flush -Wl,--no-whole-archive)
+    message(STATUS "PG5: pgo_flush helper from ${PS2X_PGO_HELPER_DIR}")
 endif()
