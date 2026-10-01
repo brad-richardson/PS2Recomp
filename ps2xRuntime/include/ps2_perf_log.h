@@ -423,6 +423,12 @@ enum class Stage : uint8_t
     GsBackBusy, // ge1_gs_back_ms() per GuestVsync (back thread; GE1 pipelined only)
     MtvuGifBusy, // VPL1: MTVU-GIF thread busy between vblanks (PS2X_MTVU_GIF_STAGE=1 only)
     MtvuVifBusy, // VPL2: MTVU-VIF thread job time between vblanks (PS2X_MTVU_VIF_STAGE=1 only)
+    // IP7: ee.wait split by source (each per tick; ee.wait minus their sum = pause gate).
+    EePace,   // pacer sleep (FP1 or the PX1/IP6 vsync lock)
+    EeEvent,  // waitForEvent waits (guest idle until an event/host deadline)
+    EeEnq,    // GS enqueue waits (queue full)
+    EeMtvu,   // MTVU sync waits, every reason
+    EeMtvuVb, // the VBlank-reason part of ee.mtvu (MTVU_LAG=0: the whole frame's VU1 jobs)
     Count
 };
 
@@ -448,6 +454,16 @@ inline const char *stageName(Stage s)
         return "mtvugif.busy";
     case Stage::MtvuVifBusy:
         return "mtvuvif.busy";
+    case Stage::EePace:
+        return "ee.pace";
+    case Stage::EeEvent:
+        return "ee.event";
+    case Stage::EeEnq:
+        return "ee.enq";
+    case Stage::EeMtvu:
+        return "ee.mtvu";
+    case Stage::EeMtvuVb:
+        return "ee.mtvuvb";
     default:
         return "?";
     }

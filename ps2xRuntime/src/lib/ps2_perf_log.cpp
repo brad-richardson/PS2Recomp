@@ -5,6 +5,7 @@
 // the log with one stderr note.
 #include "ps2_perf_log.h"
 #include "ps2_snd_audio_output.h"
+#include "ps2_vsync_lock.h"
 #if defined(PS2X_IOS)
 #include "ps2_ios_runtime.h"
 #endif
@@ -825,6 +826,33 @@ void poll(uint64_t vsyncTick)
                                      : 0.0,
                          a.tempoMean, a.tempoMin, a.tempoMax, session.c_str());
         }
+    }
+    if (ps2_vsync_lock::enabled())
+    {
+        // IP7: vsync-lock health per window (deltas): grid feeds, pacer
+        // slots taken / missed (late) / FP1 fallbacks, and the fitted grid.
+        static uint64_t pLatches = 0, pLocked = 0, pLate = 0, pUnlocked = 0;
+        uint64_t latches, locked, late, unlocked;
+        ps2_vsync_lock::Grid g;
+        {
+            ps2_vsync_lock::Shared &vl = ps2_vsync_lock::shared();
+            std::lock_guard<std::mutex> lock(vl.m);
+            latches = vl.latches;
+            locked = vl.locked;
+            late = vl.late;
+            unlocked = vl.unlocked;
+            g = vl.tracker.grid();
+        }
+        std::fprintf(log.file,
+                     "[perf-lock] tick=%llu latches=%llu locked=%llu late=%llu unlocked=%llu valid=%d hz=%.3f\n",
+                     (unsigned long long)vsyncTick, (unsigned long long)(latches - pLatches),
+                     (unsigned long long)(locked - pLocked), (unsigned long long)(late - pLate),
+                     (unsigned long long)(unlocked - pUnlocked), g.valid ? 1 : 0,
+                     g.periodNs > 0.0 ? 1e9 / g.periodNs : 0.0);
+        pLatches = latches;
+        pLocked = locked;
+        pLate = late;
+        pUnlocked = unlocked;
     }
     for (size_t i = 0; i < kStageCount; ++i)
         drainStage(static_cast<Stage>(i), log.stageConsumed[i], log.file);

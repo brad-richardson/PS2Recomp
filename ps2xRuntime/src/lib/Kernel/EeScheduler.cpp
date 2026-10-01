@@ -3180,6 +3180,7 @@ void EeScheduler::perfTailCutFrame(uint64_t tick)
     const uint64_t wall = ps2x::perflog::steadyNs();
     const uint64_t cpu = ps2x::perflog::threadCpuNs();
     const uint64_t mtvuSum = ps2_mtvu::threadedWaitNsTotal();
+    const uint64_t mtvuVb = ps2_mtvu::threadedWaitNsFor(ps2_mtvu::Reason::VBlank);
     if (m_perfHaveFrame)
     {
         const uint64_t wallNs = wall - m_perfFrameStartWall;
@@ -3198,10 +3199,19 @@ void EeScheduler::perfTailCutFrame(uint64_t tick)
         if (cpu != ps2x::perflog::kCpuUnsupported && m_perfFrameStartCpu != ps2x::perflog::kCpuUnsupported)
             ps2x::perflog::stageRing(ps2x::perflog::Stage::EeCpu)
                 .push(static_cast<uint32_t>(tick), static_cast<float>((cpu - m_perfFrameStartCpu) / 1e6));
+        // IP7: ee.wait by source (gate = ee.wait minus these).
+        const auto pushMs = [tick](ps2x::perflog::Stage st, uint64_t ns)
+        { ps2x::perflog::stageRing(st).push(static_cast<uint32_t>(tick), static_cast<float>(ns / 1e6)); };
+        pushMs(ps2x::perflog::Stage::EePace, m_perfPaceNs);
+        pushMs(ps2x::perflog::Stage::EeEvent, m_perfEventNs);
+        pushMs(ps2x::perflog::Stage::EeEnq, m_perfEnqueueNs);
+        pushMs(ps2x::perflog::Stage::EeMtvu, mtvuSum - m_perfMtvuNs);
+        pushMs(ps2x::perflog::Stage::EeMtvuVb, mtvuVb - m_perfMtvuVbNs);
     }
     m_perfFrameStartWall = wall;
     m_perfFrameStartCpu = cpu;
     m_perfMtvuNs = mtvuSum;
+    m_perfMtvuVbNs = mtvuVb;
     m_perfEventNs = 0;
     m_perfEnqueueNs = 0;
     m_perfGateNs = 0;

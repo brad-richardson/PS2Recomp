@@ -1864,6 +1864,14 @@ namespace ps2_mtvu
         return sum;
     }
 
+    // IP7: the same total for one sync reason (e.g. VBlank).
+    inline uint64_t threadedWaitNsFor(Reason r)
+    {
+        if (!threaded())
+            return 0u;
+        return detail::worker().waitNs[static_cast<size_t>(r)];
+    }
+
     // Threaded: wait for every submitted job.
     inline void syncAll(Reason r = Reason::Count)
     {

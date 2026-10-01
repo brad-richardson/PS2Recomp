@@ -603,6 +603,7 @@ private:
     uint64_t m_perfEventNs = 0;   // waitForEvent waits since the last cut
     uint64_t m_perfEnqueueNs = 0; // GS enqueue-queue-full waits since the last cut (PW2: split out)
     uint64_t m_perfMtvuNs = 0;  // threadedWaitNsTotal() at the last cut
+    uint64_t m_perfMtvuVbNs = 0; // IP7: VBlank-reason part of it at the last cut
     uint64_t m_perfGateNs = 0;  // this VBlank's pause-gate sleep
     uint64_t m_perfPaceNs = 0;  // this VBlank's pacer sleep
     // FP1: wall-clock guest-vsync pacer (executor thread only). Default on;
