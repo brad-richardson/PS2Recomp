@@ -51,9 +51,15 @@ bool settingEnabled(CFStringRef key)
     return !valid || value;
 }
 
+// IG1: unset = off (Settings.bundle DefaultValue is display-only; iOS never
+// registers it), so a fresh install waits at the title for real input. Test
+// launches pass PS2X_PAD_SCRIPT in the launch env (kept over this switch) or
+// set the pref.
 bool autoRouteEnabled()
 {
-    return settingEnabled(CFSTR("autoRoute"));
+    Boolean valid = false;
+    const Boolean value = CFPreferencesGetAppBooleanValue(CFSTR("autoRoute"), kCFPreferencesCurrentApplication, &valid);
+    return valid && value;
 }
 
 // IQ1: Settings.bundle "Target 120 fps" switch. Unset = off (unlike the

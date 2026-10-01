@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- I25: iOS Settings -> SSX3 PS2X. "autoRoute" is read by
-     src/lib/ps2_ios_runtime.mm (CFPreferences); unset = on. Off clears
+     src/lib/ps2_ios_runtime.mm (CFPreferences); unset = off (IG1: a fresh
+     install waits at the title for real input; test legs pass the script). Off clears
      PS2X_PAD_SCRIPT so a controller drives the game. I26: "virtualControls"
      (unset = on); off sets PS2X_VIRTUAL_PAD=0. Copied into the .app
      at staging (local/research/I25/build-install.sh). IQ1: "target120"
@@ -27,7 +28,7 @@
 			<key>Key</key>
 			<string>autoRoute</string>
 			<key>DefaultValue</key>
-			<true/>
+			<false/>
 		</dict>
 		<dict>
 			<key>Type</key>
