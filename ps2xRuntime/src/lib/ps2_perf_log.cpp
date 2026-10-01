@@ -4,6 +4,7 @@
 // wall second, flushed per poll so a crash keeps the tail. Failures disable
 // the log with one stderr note.
 #include "ps2_perf_log.h"
+#include "ps2_snd_audio_output.h"
 #if defined(PS2X_IOS)
 #include "ps2_ios_runtime.h"
 #endif
@@ -800,6 +801,30 @@ void poll(uint64_t vsyncTick)
                      (unsigned long long)vsyncTick, (unsigned long long)(vsyncTick - log.windowTick),
                      (unsigned long long)gv, (unsigned long long)la, la ? (static_cast<double>(lns) / 1e6) / la : 0.0,
                      static_cast<double>(lmax) / 1e6, (unsigned long long)s.presents);
+    }
+    {
+        // IP6: host audio rates per wall second (device callback demand,
+        // guest PCM pushed/consumed, stretch tempo), plus the iOS session's
+        // hardware rate and route: the "audio too fast" observables.
+        const ps2_snd_audio_output::WindowCounters a = ps2_snd_audio_output::takeWindowCounters();
+        if (a.ready)
+        {
+            std::string session = "na";
+#if defined(PS2X_IOS)
+            session = ps2x::ios::audioSessionState();
+#endif
+            std::fprintf(log.file,
+                         "[perf-audio] tick=%llu stream_rate=%u stretch=%d cb_fps=%.0f push_fps=%.0f pop_fps=%.0f "
+                         "callbacks=%llu fill=%llu underruns=%llu overflows=%llu bypass_pct=%.1f tempo_mean=%.4f "
+                         "tempo_min=%.4f tempo_max=%.4f session=\"%s\"\n",
+                         (unsigned long long)vsyncTick, a.streamRate, a.stretch ? 1 : 0, a.cbFrames / windowS,
+                         a.pushed / windowS, a.consumed / windowS, (unsigned long long)a.callbacks,
+                         (unsigned long long)a.fill, (unsigned long long)a.underruns,
+                         (unsigned long long)a.overflows,
+                         a.callbacks ? 100.0 * static_cast<double>(a.bypassed) / static_cast<double>(a.callbacks)
+                                     : 0.0,
+                         a.tempoMean, a.tempoMin, a.tempoMax, session.c_str());
+        }
     }
     for (size_t i = 0; i < kStageCount; ++i)
         drainStage(static_cast<Stage>(i), log.stageConsumed[i], log.file);

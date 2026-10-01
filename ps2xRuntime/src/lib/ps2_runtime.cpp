@@ -29,6 +29,7 @@
 #include "ps2_pad_latch.h"
 #include "ps2_adpf.h"
 #include "ps2_perf_log.h"
+#include "ps2_vsync_lock.h"
 #include "ps2_virtual_pad.h"
 #include "runtime/ps2_pad.h"
 #include "ps2_stubs.h"
@@ -2371,7 +2372,14 @@ bool PS2Runtime::initialize(const char *title)
         // IQ1: PS2X_DISPLAY_HZ=120 asks for ProMotion and lets raylib's loop
         // run at 120 (EAGL present still paces it to the panel); 60 = as before.
         ps2x::ios::requestDisplayRate(ps2x_present_vk::displayHz());
-        SetTargetFPS(ps2x_present_vk::displayHz() == 120 ? 120 : 60);
+        // IP6 (PS2X_VSYNC_LOCK=1): raylib's timer limiter and the vsync-
+        // throttled swap both pace the loop and beat (iPhone 120: 112
+        // presents/s; iPad 60: 59). Under the lock the cap sits 5 % above the
+        // panel so the swap alone paces; the cap only binds if it never blocks.
+        {
+            const int loopHz = ps2x_present_vk::displayHz() == 120 ? 120 : 60;
+            SetTargetFPS(ps2_vsync_lock::enabled() ? loopHz * 105 / 100 : loopHz);
+        }
 #else
         SetTargetFPS(60);
 #endif

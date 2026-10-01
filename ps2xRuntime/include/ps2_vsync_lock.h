@@ -254,6 +254,19 @@ inline void noteLatch(int64_t postNs, int64_t latchNs)
     }
 }
 
+// IP6 (iOS): seed the tracker with the display's own refresh period (the
+// CADisplayLink duration) before its first latch, so a 60 Hz panel is not
+// fitted as every other tick of the 120 Hz default. No-op once fed.
+inline void setNominalPeriod(double periodNs)
+{
+    if (!enabled() || periodNs <= 0.0)
+        return;
+    Shared &s = shared();
+    std::lock_guard<std::mutex> lock(s.m);
+    if (s.latches == 0u)
+        s.tracker = Tracker(periodNs);
+}
+
 // EE thread, once per VBlankStart. True = locked (sleepNs set).
 inline bool pace(int64_t guestPeriodNs, int64_t nowNs, int64_t &sleepNs)
 {

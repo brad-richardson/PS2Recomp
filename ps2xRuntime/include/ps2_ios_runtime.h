@@ -46,4 +46,7 @@ std::string perfDeviceState();
 // IA1: ambient=true sets AVAudioSessionCategoryAmbient instead (mixes with
 // other apps, honours the silent switch, non-primary so no route grab).
 void setAudioSession(bool ambient);
+// IP6: "hw_rate=<Hz> io_ms=<ms> out_ms=<ms> route=<port types>" from
+// AVAudioSession (the perf log's [perf-audio] session field). Main thread.
+std::string audioSessionState();
 } // namespace ps2x::ios

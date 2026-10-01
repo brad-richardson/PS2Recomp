@@ -253,6 +253,11 @@ public:
         return m_read.compare_exchange_strong(read, read + 1u, std::memory_order_acq_rel);
     }
 
+    // IP6: lifetime cursors for the perf log's [perf-audio] rates (frames
+    // pushed = writeTotal delta; frames consumed = readTotal delta minus
+    // overflow drops).
+    uint64_t writeTotal() const { return m_write.load(std::memory_order_relaxed); }
+    uint64_t readTotal() const { return m_read.load(std::memory_order_relaxed); }
     void noteUnderrun() { m_underruns.fetch_add(1u, std::memory_order_relaxed); }
     uint64_t underruns() const { return m_underruns.load(std::memory_order_relaxed); }
     uint64_t overflows() const { return m_overflows.load(std::memory_order_relaxed); }

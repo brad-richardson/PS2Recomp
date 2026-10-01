@@ -86,6 +86,38 @@ namespace
         bool traceLastBypass = true;
         std::chrono::steady_clock::time_point traceT0{};
     } g_output;
+    // IP6: [perf-audio] window counters. The device callback is the only
+    // writer of the cb* / tempo fields; takeWindowCounters (main thread)
+    // exchanges them out.
+    struct AudioWindow
+    {
+        std::atomic<uint64_t> callbacks{0};
+        std::atomic<uint64_t> cbFrames{0};
+        std::atomic<uint64_t> bypassed{0};
+        std::atomic<uint64_t> tempoSumMicro{0};
+        std::atomic<uint32_t> tempoMinMicro{UINT32_MAX};
+        std::atomic<uint32_t> tempoMaxMicro{0};
+        // Main-thread cursors.
+        uint64_t lastWrite = 0;
+        uint64_t lastRead = 0;
+        uint64_t lastUnderruns = 0;
+        uint64_t lastOverflows = 0;
+    } g_window;
+
+    void noteWindowCallback(unsigned int frames, bool bypass, float tempo)
+    {
+        g_window.callbacks.fetch_add(1u, std::memory_order_relaxed);
+        g_window.cbFrames.fetch_add(frames, std::memory_order_relaxed);
+        if (bypass)
+            g_window.bypassed.fetch_add(1u, std::memory_order_relaxed);
+        const uint32_t micro = static_cast<uint32_t>(std::lround(static_cast<double>(tempo) * 1e6));
+        g_window.tempoSumMicro.fetch_add(micro, std::memory_order_relaxed);
+        if (micro < g_window.tempoMinMicro.load(std::memory_order_relaxed))
+            g_window.tempoMinMicro.store(micro, std::memory_order_relaxed);
+        if (micro > g_window.tempoMaxMicro.load(std::memory_order_relaxed))
+            g_window.tempoMaxMicro.store(micro, std::memory_order_relaxed);
+    }
+
     constexpr uint64_t kTraceLineCap = 131072u; // ~21 min at 100 callbacks/s
     constexpr uint64_t kTraceTrCap = 8192u;
 
@@ -184,6 +216,7 @@ namespace
                 }
             }
         }
+        noteWindowCallback(frames, true, 1.0f);
         recordWav(g_output.wav, output, samples);
         recordWav(g_output.postWav, output, samples);
         minuteStats(std::chrono::steady_clock::now());
@@ -540,6 +573,7 @@ namespace
             recordWav(g_output.wav, g_output.srcBuf.data(), fed.size() * 2u);
         }
         recordWav(g_output.postWav, output, static_cast<size_t>(frames) * 2u);
+        noteWindowCallback(frames, step.bypass, step.bypass ? 1.0f : step.tempo);
         stretchStats(now);
         minuteStats(now);
     }
@@ -694,6 +728,42 @@ void resumePlayback()
 {
     if (g_output.ready && !IsAudioStreamPlaying(g_output.stream))
         ResumeAudioStream(g_output.stream);
+}
+
+WindowCounters takeWindowCounters()
+{
+    WindowCounters w;
+    w.ready = g_output.ready;
+    w.stretch = g_output.stretch;
+    w.streamRate = g_output.rate;
+    auto &ring = ps2_snd_spike::pcmRing();
+    const uint64_t write = ring.writeTotal();
+    const uint64_t read = ring.readTotal();
+    const uint64_t underruns = ring.underruns();
+    const uint64_t overflows = ring.overflows();
+    w.pushed = write - g_window.lastWrite;
+    w.underruns = underruns - g_window.lastUnderruns;
+    w.overflows = overflows - g_window.lastOverflows;
+    const uint64_t readDelta = read - g_window.lastRead;
+    w.consumed = readDelta >= w.overflows ? readDelta - w.overflows : 0u;
+    w.fill = ring.size();
+    g_window.lastWrite = write;
+    g_window.lastRead = read;
+    g_window.lastUnderruns = underruns;
+    g_window.lastOverflows = overflows;
+    w.callbacks = g_window.callbacks.exchange(0u, std::memory_order_relaxed);
+    w.cbFrames = g_window.cbFrames.exchange(0u, std::memory_order_relaxed);
+    w.bypassed = g_window.bypassed.exchange(0u, std::memory_order_relaxed);
+    const uint64_t sum = g_window.tempoSumMicro.exchange(0u, std::memory_order_relaxed);
+    const uint32_t mn = g_window.tempoMinMicro.exchange(UINT32_MAX, std::memory_order_relaxed);
+    const uint32_t mx = g_window.tempoMaxMicro.exchange(0u, std::memory_order_relaxed);
+    if (w.callbacks)
+    {
+        w.tempoMean = static_cast<double>(sum) / 1e6 / static_cast<double>(w.callbacks);
+        w.tempoMin = mn / 1e6;
+        w.tempoMax = mx / 1e6;
+    }
+    return w;
 }
 
 void shutdown()

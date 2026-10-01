@@ -3,6 +3,8 @@
 #include "ps2_ios_runtime.h"
 #include "ps2_env_file.h"
 #include "ps2_record_env.h"
+#include "ps2_vsync_lock.h"
+#include "ps2_vsync_pacer.h"
 
 // SDL_MAIN_HANDLED: no main->SDL_main rename here (only main.cpp owns main).
 #define SDL_MAIN_HANDLED
@@ -64,15 +66,23 @@ bool target120Enabled()
 }
 } // namespace
 
-// IQ1: the display link only carries the 120 Hz frame-rate request; its
-// callback does nothing (raylib's loop presents through EAGL).
+// IQ1: the display link carries the 120 Hz frame-rate request.
+// IP6 (PS2X_VSYNC_LOCK=1): its callback also feeds PX1's grid tracker with the
+// panel's vsync instants (link.timestamp, mapped from CACurrentMediaTime to
+// the pacer's steady clock), the iOS stand-in for SurfaceFlinger latch times.
+// No post time is passed, so the slot phase stays at mid-period. The callback
+// runs when SDL pumps the main run loop; late delivery is harmless because
+// every timestamp lies on the vsync grid.
 @interface PS2XDisplayRateTarget : NSObject
 - (void)tick:(CADisplayLink *)link;
 @end
 @implementation PS2XDisplayRateTarget
 - (void)tick:(CADisplayLink *)link
 {
-    (void)link;
+    if (!ps2_vsync_lock::enabled())
+        return;
+    const int64_t ageNs = static_cast<int64_t>(std::llround((CACurrentMediaTime() - link.timestamp) * 1e9));
+    ps2_vsync_lock::noteLatch(0, ps2_vsync_pacer::steadyNowNs() - ageNs);
 }
 @end
 
@@ -264,14 +274,23 @@ void requestDisplayRate(int hz)
     static CADisplayLink *s_link = nil;
     static PS2XDisplayRateTarget *s_target = nil;
     const NSInteger maxFps = UIScreen.mainScreen.maximumFramesPerSecond;
-    if (hz <= 60 || s_link != nil)
+    // IP6: the vsync lock needs the link at any rate (a 60 Hz panel included).
+    const bool lock = ps2_vsync_lock::enabled();
+    if ((hz <= 60 && !lock) || s_link != nil)
     {
         std::fprintf(stderr, "[ios-display] hz=%d max_fps=%ld (no request)\n", hz, static_cast<long>(maxFps));
         return;
     }
+    if (lock)
+    {
+        const int panelHz = static_cast<int>(std::min<NSInteger>(maxFps, hz > 60 ? hz : 60));
+        ps2_vsync_lock::setNominalPeriod(1e9 / std::max(panelHz, 1));
+        std::fprintf(stderr, "[ios-display] vsync-lock on: display-link grid feeds the pacer (nominal %d Hz)\n",
+                     panelHz);
+    }
     s_target = [[PS2XDisplayRateTarget alloc] init];
     s_link = [CADisplayLink displayLinkWithTarget:s_target selector:@selector(tick:)];
-    const float want = static_cast<float>(hz);
+    const float want = static_cast<float>(hz > 60 ? hz : 60);
     s_link.preferredFrameRateRange = CAFrameRateRangeMake(want, want, want);
     [s_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     std::fprintf(stderr, "[ios-display] hz=%d max_fps=%ld display-link range=%.0f requested\n", hz,
@@ -327,6 +346,10 @@ void setAudioSession(bool ambient)
     // are the only setCategory calls in miniaudio.h, so overriding once,
     // after InitAudioDevice, sticks. No options: plain game playback.
     AVAudioSession *session = AVAudioSession.sharedInstance;
+    // IP6: what miniaudio's device init saw (it fixes its device rate from
+    // session.sampleRate at init and never re-reads it).
+    std::fprintf(stderr, "[audio] at device init: category=%s %s\n", session.category.UTF8String,
+                 audioSessionState().c_str());
     NSError *error = nil;
     // IA1: Ambient mixes with other apps' audio and does not interrupt them
     // or claim the route (so no AirPods auto-switch); Playback is primary.
@@ -337,6 +360,24 @@ void setAudioSession(bool ambient)
                      error.localizedDescription.UTF8String);
         return;
     }
-    std::fprintf(stderr, "[audio] AVAudioSession category=%s\n", session.category.UTF8String);
+    std::fprintf(stderr, "[audio] AVAudioSession category=%s %s\n", session.category.UTF8String,
+                 audioSessionState().c_str());
+}
+
+std::string audioSessionState()
+{
+    AVAudioSession *session = AVAudioSession.sharedInstance;
+    std::string route;
+    for (AVAudioSessionPortDescription *port in session.currentRoute.outputs)
+    {
+        if (!route.empty())
+            route += '+';
+        route += port.portType.UTF8String;
+    }
+    char buf[192];
+    std::snprintf(buf, sizeof(buf), "hw_rate=%.0f io_ms=%.2f out_ms=%.2f route=%s", session.sampleRate,
+                  session.IOBufferDuration * 1000.0, session.outputLatency * 1000.0,
+                  route.empty() ? "none" : route.c_str());
+    return buf;
 }
 } // namespace ps2x::ios
