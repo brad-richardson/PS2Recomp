@@ -430,38 +430,245 @@ namespace
     // reuses slot 1023 for a genuine {key, head} pair and the count returns
     // to the cap. Extra buckets are dropped by eviction for the frame, the
     // table never exceeds 1024, and every stored entry is genuine.
+    // TK22: PS2X_SSX3_DRAWTABLE_GUARD=2 refuses the append at all five
+    // append sites (=1 stays TK15c above). The table is not the only writer
+    // set: per frame (base b = the a0 of the reset sub_00362CC8) the game
+    // keeps items at b+0x80 (count [b], bounded by the game at 0xA28),
+    // texture records at b+0x51484 (0x18 B, count [b+0x51480], cap 1024,
+    // hash heads b+0x674A0 chained via +0x14, sub_00394ED0), bucket records
+    // at b+0x57498 (0x20 B, count [b+0x57494], 2048 fit before the hash
+    // heads; heads b+0x678A0 chained via +0x1C, lookup sub_00395000) and the
+    // {key, head} table at b+0x67CA8 (count [b+0x67CA4], 1024). A new bucket
+    // takes a record, then func_364240 (the key), then the hash insert and
+    // the table append, at five sites: sub_00362DE8 loops 1/2, sub_0037E120
+    // (base s2) and sub_0038B0F8 twice (base [sp+0x234]; s6 = b+0x60000 at
+    // the second). TK15c covered only the first two. At the cap, =2 lets the
+    // append land on slot 1023 (count written back to 1023) after saving
+    // that entry, and puts the saved entry and count 1024 back at the next
+    // guest dispatch outside func_364240. That dispatch always comes before
+    // any table reader: every reader is in sub_00363490/sub_00364050, which
+    // run after a call. The refused record stays in the bucket hash, so
+    // later items of that bucket find it, chain onto it and are not drawn
+    // this frame. The first 1024 buckets are drawn, the table never
+    // exceeds 1024, and every stored entry is genuine.
+    // PS2X_SSX3_DRAWTABLE_STATS=1 (observation only) logs the end-of-frame
+    // counts at the reset call.
     constexpr uint32_t kSsx3DrawKeyCall = 0x00364240u;
+    constexpr uint32_t kSsx3DrawKeyEnd = 0x00364360u;
     constexpr uint32_t kSsx3DrawAppendLoop1Call = 0x0036307Cu;
     constexpr uint32_t kSsx3DrawAppendLoop2Call = 0x00363350u;
+    constexpr uint32_t kSsx3DrawAppendModelCall = 0x0037FED8u;
+    constexpr uint32_t kSsx3DrawAppendPatch1Call = 0x0038C218u;
+    constexpr uint32_t kSsx3DrawAppendPatch2Call = 0x0038C3E8u;
+    constexpr uint32_t kSsx3DrawReset = 0x00362CC8u;
     constexpr int32_t kSsx3DrawTableCap = 1024;
+    constexpr int32_t kSsx3DrawPoolCap = 2048;
+    constexpr int32_t kSsx3DrawTexCap = 1024;
     std::atomic<uint64_t> g_ssx3DrawTableClamps{0u};
+
+    struct Ssx3DrawTableState
+    {
+        bool pending = false;
+        uint32_t pendingTable = 0u;
+        uint32_t savedKey = 0u;
+        uint32_t savedHead = 0u;
+        uint64_t refusals = 0u;
+        uint64_t restoreOdd = 0u;
+        uint64_t poolOver = 0u;
+        // Stats, per frame (cleared at the reset call).
+        uint32_t siteAppends[5] = {};
+        uint32_t frameRefusals = 0u;
+        uint64_t frames = 0u;
+        uint64_t loggedFrames = 0u;
+        uint64_t windowTick = 0u;
+        int32_t winMax[5] = {};
+        uint32_t winAppends = 0u;
+    };
+    Ssx3DrawTableState g_ssx3Draw;
+    std::atomic<bool> g_ssx3DrawPending{false};
+
+    int ssx3DrawTableMode()
+    {
+        static const int mode = [] {
+            const char *e = std::getenv("PS2X_SSX3_DRAWTABLE_GUARD");
+            const int m = (e && e[0] == '1') ? 1 : (e && e[0] == '2') ? 2 : 0;
+            if (m == 1)
+                std::fprintf(stderr, "[ssx3-drawtable-guard] armed (draw table in 0x362DE8 clamps at 1024 entries)\n");
+            else if (m == 2)
+                std::fprintf(stderr, "[ssx3-drawtable-guard] armed mode 2 (all five append sites refuse at 1024 entries)\n");
+            return m;
+        }();
+        return mode;
+    }
+
+    bool ssx3DrawTableStatsOn()
+    {
+        static const bool on = [] {
+            const char *e = std::getenv("PS2X_SSX3_DRAWTABLE_STATS");
+            const bool v = e && e[0] == '1';
+            if (v)
+                std::fprintf(stderr, "[ssx3-drawtable-stats] armed (end-of-frame counts at the 0x362CC8 reset)\n");
+            return v;
+        }();
+        return on;
+    }
+
+    int32_t ssx3ReadS32(const uint8_t *rdram, uint32_t addr)
+    {
+        addr &= PS2_RAM_MASK;
+        if (addr > PS2_RAM_SIZE - 4u)
+            return 0;
+        int32_t v = 0;
+        std::memcpy(&v, rdram + addr, 4u);
+        return v;
+    }
+
+    void ssx3WriteU32(uint8_t *rdram, uint32_t addr, uint32_t v)
+    {
+        addr &= PS2_RAM_MASK;
+        if (addr > PS2_RAM_SIZE - 4u)
+            return;
+        std::memcpy(rdram + addr, &v, 4u);
+    }
+
+    // Table base (b + 0x60000) at each append site's func_364240 call, or 0.
+    uint32_t ssx3DrawTableBase(const uint8_t *rdram, const R5900Context *ctx, uint32_t sourcePc, int &site)
+    {
+        switch (sourcePc)
+        {
+        case kSsx3DrawAppendLoop1Call: site = 0; return getRegU32(ctx, 20);
+        case kSsx3DrawAppendLoop2Call: site = 1; return getRegU32(ctx, 20);
+        case kSsx3DrawAppendModelCall: site = 2; return getRegU32(ctx, 18) + 0x60000u;
+        case kSsx3DrawAppendPatch1Call:
+            site = 3;
+            return static_cast<uint32_t>(ssx3ReadS32(rdram, getRegU32(ctx, 29) + 0x234u)) + 0x60000u;
+        case kSsx3DrawAppendPatch2Call: site = 4; return getRegU32(ctx, 22);
+        default: site = -1; return 0u;
+        }
+    }
+
+    void ssx3DrawTableRestore(uint8_t *rdram)
+    {
+        Ssx3DrawTableState &st = g_ssx3Draw;
+        const uint32_t tb = st.pendingTable;
+        const int32_t count = ssx3ReadS32(rdram, tb + 0x7CA4u);
+        if (count != kSsx3DrawTableCap && ++st.restoreOdd <= 8u)
+            std::fprintf(stderr, "[ssx3-drawtable-guard] restore saw count=%d (expected %d)\n", count, kSsx3DrawTableCap);
+        const uint32_t slot = tb + 0x7CA8u + 8u * static_cast<uint32_t>(kSsx3DrawTableCap - 1);
+        ssx3WriteU32(rdram, slot, st.savedKey);
+        ssx3WriteU32(rdram, slot + 4u, st.savedHead);
+        ssx3WriteU32(rdram, tb + 0x7CA4u, static_cast<uint32_t>(kSsx3DrawTableCap));
+        st.pending = false;
+        g_ssx3DrawPending.store(false, std::memory_order_relaxed);
+    }
 
     void ssx3DrawTableGuard(uint8_t *rdram, R5900Context *ctx, uint32_t sourcePc)
     {
-        static const bool on = [] {
-            const char *e = std::getenv("PS2X_SSX3_DRAWTABLE_GUARD");
-            const bool v = e && e[0] == '1';
-            if (v)
-                std::fprintf(stderr, "[ssx3-drawtable-guard] armed (draw table in 0x362DE8 clamps at 1024 entries)\n");
-            return v;
-        }();
-        if (!on || !rdram || !ctx)
+        const int mode = ssx3DrawTableMode();
+        const bool stats = ssx3DrawTableStatsOn();
+        if ((mode == 0 && !stats) || !rdram || !ctx)
             return;
-        if (sourcePc != kSsx3DrawAppendLoop1Call && sourcePc != kSsx3DrawAppendLoop2Call)
+        int site = -1;
+        const uint32_t tb = ssx3DrawTableBase(rdram, ctx, sourcePc, site);
+        if (site < 0)
             return;
-        const uint32_t countAddr = (getRegU32(ctx, 20) + 0x7CA4u) & PS2_RAM_MASK;
-        if (countAddr > PS2_RAM_SIZE - 4u)
+        if (stats)
+            ++g_ssx3Draw.siteAppends[site];
+        if (mode == 1)
+        {
+            if (site > 1)
+                return;
+            const uint32_t countAddr = (tb + 0x7CA4u) & PS2_RAM_MASK;
+            if (countAddr > PS2_RAM_SIZE - 4u)
+                return;
+            int32_t count = 0;
+            std::memcpy(&count, rdram + countAddr, 4u);
+            if (count < kSsx3DrawTableCap)
+                return;
+            const int32_t clamped = kSsx3DrawTableCap - 1;
+            std::memcpy(rdram + countAddr, &clamped, 4u);
+            const uint64_t n = g_ssx3DrawTableClamps.fetch_add(1u, std::memory_order_relaxed) + 1u;
+            if (n <= 4u || (n & (n - 1u)) == 0u)
+                std::fprintf(stderr, "[ssx3-drawtable-guard] clamp #%llu loop=%c count=%d\n",
+                             static_cast<unsigned long long>(n), (sourcePc == kSsx3DrawAppendLoop1Call) ? '1' : '2', count);
             return;
-        int32_t count = 0;
-        std::memcpy(&count, rdram + countAddr, 4u);
+        }
+        if (mode != 2)
+            return;
+        const int32_t count = ssx3ReadS32(rdram, tb + 0x7CA4u);
         if (count < kSsx3DrawTableCap)
             return;
-        const int32_t clamped = kSsx3DrawTableCap - 1;
-        std::memcpy(rdram + countAddr, &clamped, 4u);
-        const uint64_t n = g_ssx3DrawTableClamps.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        Ssx3DrawTableState &st = g_ssx3Draw;
+        const uint32_t slot = tb + 0x7CA8u + 8u * static_cast<uint32_t>(kSsx3DrawTableCap - 1);
+        st.pendingTable = tb;
+        st.savedKey = static_cast<uint32_t>(ssx3ReadS32(rdram, slot));
+        st.savedHead = static_cast<uint32_t>(ssx3ReadS32(rdram, slot + 4u));
+        st.pending = true;
+        g_ssx3DrawPending.store(true, std::memory_order_relaxed);
+        ssx3WriteU32(rdram, tb + 0x7CA4u, static_cast<uint32_t>(kSsx3DrawTableCap - 1));
+        ++st.frameRefusals;
+        const uint64_t n = ++st.refusals;
         if (n <= 4u || (n & (n - 1u)) == 0u)
-            std::fprintf(stderr, "[ssx3-drawtable-guard] clamp #%llu loop=%c count=%d\n",
-                         static_cast<unsigned long long>(n), (sourcePc == kSsx3DrawAppendLoop1Call) ? '1' : '2', count);
+            std::fprintf(stderr, "[ssx3-drawtable-guard] refuse #%llu site=%d count=%d\n",
+                         static_cast<unsigned long long>(n), site, count);
+    }
+
+    // At the reset call (a0 = b): the previous frame's final counts.
+    void ssx3DrawTableFrame(const uint8_t *rdram, const R5900Context *ctx, uint64_t tick)
+    {
+        const int mode = ssx3DrawTableMode();
+        const bool stats = ssx3DrawTableStatsOn();
+        if ((mode != 2 && !stats) || !rdram || !ctx)
+            return;
+        Ssx3DrawTableState &st = g_ssx3Draw;
+        const uint32_t b = getRegU32(ctx, 4);
+        const int32_t items = ssx3ReadS32(rdram, b);
+        const int32_t tex = ssx3ReadS32(rdram, b + 0x51480u);
+        const int32_t texStatic = ssx3ReadS32(rdram, b + 0x57484u);
+        const int32_t pool = ssx3ReadS32(rdram, b + 0x57494u);
+        const int32_t table = ssx3ReadS32(rdram, b + 0x67CA4u);
+        if (mode == 2 && (pool > kSsx3DrawPoolCap || tex > kSsx3DrawTexCap))
+        {
+            const uint64_t n = ++st.poolOver;
+            if (n <= 4u || (n & (n - 1u)) == 0u)
+                std::fprintf(stderr, "[ssx3-drawtable-guard] pool over cap #%llu t=%llu bucket=%d/%d tex=%d/%d\n",
+                             static_cast<unsigned long long>(n), static_cast<unsigned long long>(tick),
+                             pool, kSsx3DrawPoolCap, tex, kSsx3DrawTexCap);
+        }
+        if (!stats)
+            return;
+        uint32_t appends = 0u;
+        for (uint32_t a : st.siteAppends)
+            appends += a;
+        ++st.frames;
+        const bool over = appends > static_cast<uint32_t>(kSsx3DrawTableCap) || pool > kSsx3DrawPoolCap ||
+                          tex > kSsx3DrawTexCap || table > kSsx3DrawTableCap;
+        if (over)
+        {
+            const uint64_t n = ++st.loggedFrames;
+            if (n <= 64u || (n & 63u) == 0u)
+                std::fprintf(stderr,
+                             "[ssx3-drawtable-stats] over #%llu t=%llu b=0x%x items=%d tex=%d(static %d) pool=%d table=%d "
+                             "appends=%u (%u/%u/%u/%u/%u) refused=%u\n",
+                             static_cast<unsigned long long>(n), static_cast<unsigned long long>(tick), b, items, tex,
+                             texStatic, pool, table, appends, st.siteAppends[0], st.siteAppends[1], st.siteAppends[2],
+                             st.siteAppends[3], st.siteAppends[4], st.frameRefusals);
+        }
+        const int32_t vals[5] = {items, tex, pool, table, static_cast<int32_t>(appends)};
+        for (int i = 0; i < 5; ++i)
+            st.winMax[i] = std::max(st.winMax[i], vals[i]);
+        if (tick >= st.windowTick + 300u)
+        {
+            std::fprintf(stderr, "[ssx3-drawtable-stats] window t=%llu frames=%llu max items=%d tex=%d pool=%d table=%d appends=%d\n",
+                         static_cast<unsigned long long>(tick), static_cast<unsigned long long>(st.frames),
+                         st.winMax[0], st.winMax[1], st.winMax[2], st.winMax[3], st.winMax[4]);
+            st.windowTick = tick;
+            for (int32_t &m : st.winMax)
+                m = 0;
+        }
+        for (uint32_t &a : st.siteAppends)
+            a = 0u;
+        st.frameRefusals = 0u;
     }
 
     void enforceSsx3Widescreen(uint8_t *rdram, uint32_t sourcePc)
@@ -3616,6 +3823,12 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      GuestBranchKind kind,
                                      const char *debugName)
 {
+    // TK22: put back the draw-table slot a refused append borrowed.
+    if (g_ssx3DrawPending.load(std::memory_order_relaxed) &&
+        (sourcePc < kSsx3DrawKeyCall || sourcePc >= kSsx3DrawKeyEnd))
+    {
+        ssx3DrawTableRestore(rdram);
+    }
     // EE1P2: one product gate per dispatch; rider-pass detail (boundary
     // begin, helper tracking, prediction skip) runs only when a split mode
     // is armed. The g2b/observer calls below fold away in release builds.
@@ -3672,6 +3885,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
     {
         ssx3DrawTableGuard(rdram, ctx, sourcePc);
+    }
+    if (targetPc == kSsx3DrawReset &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
+    {
+        ssx3DrawTableFrame(rdram, ctx, m_memory.gs().vsyncTick.load(std::memory_order_relaxed));
     }
     ctx->pc = targetPc;
     const bool isCall = (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall);
