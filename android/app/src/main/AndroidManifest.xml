@@ -71,6 +71,21 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity-alias>
+
+        <!-- TKO1: Tricky courses at 60; layers files/tricky.env over the
+             base env (see LaunchActivity.java). -->
+        <activity-alias
+            android:name=".LaunchTricky"
+            android:label="SSX 3 · Tricky"
+            android:icon="@mipmap/ic_ssx_tricky"
+            android:roundIcon="@mipmap/ic_ssx_tricky"
+            android:targetActivity=".LaunchActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
     </application>
 
 </manifest>

@@ -83,5 +83,19 @@ void register_ps2_android_env_tests()
             t.IsTrue(!ps2x::launchHzSelectsFull120("60"), "60 is the 60 launch");
             t.IsTrue(!ps2x::launchHzSelectsFull120("120 "), "only the exact text selects");
         });
+
+        tc.Run("TKO1 tricky layer path and launch selector", [](TestCase &t)
+               {
+            t.Equals(ps2x::trickyEnvFilePathForBootElf("/storage/emulated/0/Android/data/com.ps2x.runner/files/SLUS_207.72"),
+                     std::string("/storage/emulated/0/Android/data/com.ps2x.runner/files/tricky.env"),
+                     "files dir plus tricky.env");
+            t.Equals(ps2x::trickyEnvFilePathForBootElf("SLUS_207.72"), std::string("tricky.env"),
+                     "bare name falls back to tricky.env");
+            t.Equals(ps2x::trickyEnvFilePathForBootElf(nullptr), std::string(""), "null yields empty");
+            t.IsTrue(ps2x::launchLayerSelectsTricky("tricky"), "tricky selects the layer");
+            t.IsTrue(!ps2x::launchLayerSelectsTricky(nullptr), "unset is the base launch");
+            t.IsTrue(!ps2x::launchLayerSelectsTricky(""), "empty is the base launch");
+            t.IsTrue(!ps2x::launchLayerSelectsTricky("Tricky"), "only the exact text selects");
+        });
     });
 }

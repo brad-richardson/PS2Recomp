@@ -112,4 +112,19 @@ inline bool launchHzSelectsFull120(const char *launchHz)
     return launchHz != nullptr && std::string(launchHz) == "120";
 }
 
+// TKO1: <bootElfDir>/tricky.env — the Tricky courses layer, staged by the
+// orchestrator (the app never writes it).
+inline std::string trickyEnvFilePathForBootElf(const char *bootElf)
+{
+    return siblingFilePathForBootElf(bootElf, "tricky.env");
+}
+
+// TKO1: the "SSX 3 · Tricky" launcher entry sets PS2X_LAUNCH_LAYER=tricky
+// (Java, before the runner library loads). Only the exact text "tricky"
+// selects the layer; a 120 launch wins if both are set.
+inline bool launchLayerSelectsTricky(const char *launchLayer)
+{
+    return launchLayer != nullptr && std::string(launchLayer) == "tricky";
+}
+
 } // namespace ps2x
