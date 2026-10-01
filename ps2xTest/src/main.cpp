@@ -48,8 +48,6 @@ void register_ps2_e41_trace_tests();
 void register_ps2_e43_trace_tests();
 void register_ps2_e44_trace_tests();
 #endif
-void register_ps2_vu1_trace_tests();
-void register_ps2_vu1_entry_trace_tests();
 void register_ps2_fpu_semantics_tests();
 void register_ps2_fpu_cop2_audit_tests();
 void register_ps2_mmi_interleave_tests();
@@ -111,8 +109,6 @@ int main()
     register_ps2_e43_trace_tests();
     register_ps2_e44_trace_tests();
 #endif
-    register_ps2_vu1_trace_tests();
-    register_ps2_vu1_entry_trace_tests();
     register_ps2_fpu_semantics_tests();
     register_ps2_fpu_cop2_audit_tests();
     register_ps2_mmi_interleave_tests();

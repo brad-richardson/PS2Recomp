@@ -801,75 +801,9 @@ if(PS2X_GAME_CODEGEN_DIR)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/ps2_codegen_abi_guard.cpp")
 endif()
 
-# VR1: generated VU1 images (vu1_<hash>.cpp from PS2X_VU1_RECOMP_DUMP). They are
-# derived from game data, so they live outside the repo like the game codegen.
-# Compiled straight into the runner so their static registrations are linked.
-set(PS2X_VU1_RECOMP_DIR "" CACHE PATH "Directory of generated VU1 images (VR1); empty = interpreter only")
-if(PS2X_VU1_RECOMP_DIR)
-    file(GLOB PS2X_VU1_RECOMP_SOURCES CONFIGURE_DEPENDS "${PS2X_VU1_RECOMP_DIR}/vu1_*.cpp")
-    list(FILTER PS2X_VU1_RECOMP_SOURCES EXCLUDE REGEX "/\\._")
-    list(LENGTH PS2X_VU1_RECOMP_SOURCES PS2X_VU1_RECOMP_SOURCE_COUNT)
-    message(STATUS "PS2X: VU1 recomp: ${PS2X_VU1_RECOMP_SOURCE_COUNT} images from ${PS2X_VU1_RECOMP_DIR}")
-    # IR1-Part2: each image is a giant TU (~1.8 MB source, ~9 GB clang RSS
-    # at -O3); two compiling at once OOM-killed the 18 GB APK container next
-    # to the 4 GB Gradle JVM, and the old F4 whole-target pool of depth 2
-    # allowed exactly that. The images now compile in their own OBJECT
-    # library (same objects on the runner link line, so the static
-    # registrations still link) under a depth-1 Ninja pool: at most one heavy
-    # TU is ever in flight, and the small runner TUs are no longer pooled.
-    # Only Ninja honors pools; other generators ignore the properties.
-    # Compiled output is unchanged: the OBJECT library replicates
-    # ps2EntryRunner's PRIVATE compile interface (keep in sync if that grows;
-    # verified by compile_commands.json diff on desktop + Android).
-    if(PS2X_VU1_RECOMP_SOURCE_COUNT GREATER 0)
-        add_library(ps2_vu1gen OBJECT ${PS2X_VU1_RECOMP_SOURCES})
-        set_property(GLOBAL APPEND PROPERTY JOB_POOLS ps2x_vu1_heavy=1)
-        set_target_properties(ps2_vu1gen PROPERTIES JOB_POOL_COMPILE ps2x_vu1_heavy)
-        target_include_directories(ps2_vu1gen PRIVATE
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/vu"
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/lib"
-        )
-        target_link_libraries(ps2_vu1gen PUBLIC ps2_runtime)
-        if(PS2X_DEFAULT_BOOT_ELF_DEFINE)
-            target_compile_definitions(ps2_vu1gen PRIVATE
-                PS2X_DEFAULT_BOOT_ELF="${PS2X_DEFAULT_BOOT_ELF_DEFINE}"
-            )
-        endif()
-        if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID AND NOT PS2X_IS_IOS)
-            target_compile_definitions(ps2_vu1gen PRIVATE PS2X_ENABLE_DEBUG_UI=1)
-            target_link_libraries(ps2_vu1gen PUBLIC rlImGui imgui)
-        endif()
-        if(MSVC)
-            target_compile_options(ps2_vu1gen PRIVATE /FS)
-        endif()
-        if(PS2X_IS_ANDROID AND NOT MSVC)
-            # IR1-Part2b: line tables instead of full -g for these giant TUs
-            # on Android (RelWithDebInfo carries -g). Same codegen (-O3 kept;
-            # the Odin plays with microVU and profiling needs only line
-            # tables), far less clang RSS and smaller objects. Sorts after
-            # the config -g flag, which it overrides (last -g* option wins
-            # on clang and GCC).
-            target_compile_options(ps2_vu1gen PRIVATE
-                $<$<OR:$<CONFIG:RelWithDebInfo>,$<CONFIG:Debug>>:-gline-tables-only>
-            )
-        endif()
-        if(PS2X_IS_ANDROID)
-            # ps2EntryRunner is SHARED on Android, so these objects need PIC
-            # (CMake only defaults it on for SHARED members, not OBJECT libs).
-            set_target_properties(ps2_vu1gen PROPERTIES POSITION_INDEPENDENT_CODE ON)
-        endif()
-        if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-            EnableFastReleaseMode(ps2_vu1gen)
-            if(PS2X_DEV_NO_THINLTO)
-                set_property(TARGET ps2_vu1gen PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
-            endif()
-        endif()
-        target_link_libraries(ps2EntryRunner PRIVATE ps2_vu1gen)
-    endif()
-endif()
-
 # VR3: generated VU0 images (vu0_<hash>.cpp from PS2X_VU0_RECOMP_DUMP), used
-# only with PS2X_VU0_RECOMP=1 at run time. Game-derived like the VU1 images.
+# only with PS2X_VU0_RECOMP=1 at run time. Derived from game data, so they
+# live outside the repo like the game codegen. (VX2: the VU1 images are gone.)
 set(PS2X_VU0_RECOMP_DIR "" CACHE PATH "Directory of generated VU0 images (VR3); empty = interpreter only")
 if(PS2X_VU0_RECOMP_DIR)
     # VX1: images for VU0Interpreter are vu0e_<hash>.cpp. Pre-VX1 vu0_<hash>.cpp
@@ -912,6 +846,9 @@ if(PS2X_VU0_RECOMP_DIR)
         message(STATUS "PS2X: VU0 recomp: converted pre-VX1 ${_vu0_old} -> ${_vu0_out}")
     endforeach()
     list(LENGTH PS2X_VU0_RECOMP_SOURCES PS2X_VU0_RECOMP_SOURCE_COUNT)
+    # VX2: ps2xTest compiles the same list (vu0e_ + converted) for its
+    # local-only game-image differential.
+    set_property(GLOBAL PROPERTY PS2X_VU0_RECOMP_SOURCES_ALL ${PS2X_VU0_RECOMP_SOURCES})
     target_sources(ps2EntryRunner PRIVATE ${PS2X_VU0_RECOMP_SOURCES})
     set_source_files_properties(${PS2X_VU0_RECOMP_SOURCES} PROPERTIES
         SKIP_UNITY_BUILD_INCLUSION ON

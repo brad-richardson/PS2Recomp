@@ -1,10 +1,10 @@
 #ifndef VU1_RECOMP_FIXTURE_H
 #define VU1_RECOMP_FIXTURE_H
 
-// VR2: synthetic VU1 code images for the generated-vs-interpreter differential
-// test. vu1_fixture_gen emits their generated C++ at build time (random
-// programs, not game data); ps2x_tests compiles it in and runs every program
-// through the generated pairs and through the interpreter.
+// VR2: synthetic VU1 code images (random programs, not game data). VX2: the
+// generated VU1 pairs are gone; ps2x_tests runs every program through the VU1
+// interpreter with direct commit and with every write queued. VR3's VU0
+// variants (buildVu0Image) still go through vu1_fixture_gen's emitter.
 //
 // Image 0 ("mix"): VB1's random mix of FMAC/ACC/CLIP uppers and LSU, VI,
 // flag, FSSET/FCSET, DIV/WAITQ and forward-branch lowers.

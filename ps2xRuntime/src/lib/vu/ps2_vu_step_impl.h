@@ -2,7 +2,7 @@
 #define PS2_VU1_STEP_IMPL_H
 
 // VR1: the per-pair issue step of VuCore::run() (was VU1Interpreter::run()), moved verbatim into an
-// always-inline template so the generated VU1 programs (PS2X_VU1_RECOMP_DIR) and
+// always-inline template so the generated programs (VX2: VU0 only, PS2X_VU0_RECOMP_DIR) and
 // the interpreter share one copy of the scoreboard and cycle accounting. With
 // kStatic the pair comes from a constexpr table and the executors are inlined
 // with constant instruction words; the interpreter passes its decode-cache entry.
@@ -291,23 +291,6 @@ PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::issuePair(const DecodedInstruction
 #if PS2X_ENABLE_DET_HASH_TAP
     const uint64_t vbStartCycle = m_cycle;
 #endif
-    // VR2: the dev-only E36/E37 traces run in the interpreter only (run()
-    // sends an armed run there), so generated pairs skip their checks.
-    const uint32_t traceIssuePc = m_state.pc;
-    const uint32_t traceIssueIdx = traceIssuePc / 8u;
-    if constexpr (!kStatic && isVu1())
-    {
-        if (derived().m_traceArmed && traceIssueIdx < derived().m_traceHist.size())
-        {
-            ++derived().m_traceHist[traceIssueIdx];
-        }
-    }
-    // A branch "takes" when this pair newly raises branchPending (or
-    // retargets it). A delay-slot branch to the identical target is
-    // indistinguishable here; noted, negligible for hot-loop readout.
-    const bool traceWasBranchPending = m_state.branchPending;
-    const uint32_t traceWasBranchTarget = m_state.branchTarget;
-
     // VR2 stage 4: inside a block the entry guard bounds every stall below
     // budgetEnd, so the budget branches never fire there; a kNoStall pair's
     // reads are all ready (the emitter's proof), so it skips the scoreboard.
@@ -325,10 +308,6 @@ PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::issuePair(const DecodedInstruction
             readyCycle = calculatePairReadyCycle(decoded);
         }
     }
-#if PS2X_ENABLE_DET_HASH_TAP
-    else if (calculatePairReadyCycle(decoded) > m_cycle)
-        ++derived().m_blockNoStallMisses; // must stay 0: the emitter's no-stall proof failed
-#endif
     if constexpr (!kBlock)
     {
         if (m_cycle >= ctx.budgetEnd)
@@ -354,23 +333,6 @@ PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::issuePair(const DecodedInstruction
                                                               : decoded.lowerUsage.latency) <= 1u;
     m_directStores = direct;
     m_directFlags = (directMap & kDirectMapFlags) != 0u;
-
-    // E37: pre-exec snapshot for the pair line (post-stall state). VR1: the
-    // snapshot lives in members, written and read only while m_entryArmed
-    // (was two zero-initialized stack arrays, 576 B cleared on every pair).
-    uint32_t entryPc = 0u, entryLo = 0u, entryUp = 0u;
-    if constexpr (!kStatic && isVu1())
-    {
-        if (derived().m_entryArmed)
-        {
-            entryPc = m_state.pc;
-            std::memcpy(derived().m_entryOldVi, m_state.vi, sizeof(derived().m_entryOldVi));
-            std::memcpy(derived().m_entryOldVf, m_state.vf, sizeof(derived().m_entryOldVf));
-            std::memcpy(&entryLo, ctx.vuCode + m_state.pc, sizeof(entryLo));
-            std::memcpy(&entryUp, ctx.vuCode + m_state.pc + sizeof(entryLo), sizeof(entryUp));
-            derived().m_entryStoreValid = false;
-        }
-    }
 
     uint8_t writtenVi = 0u;
     int32_t oldVi = 0;
@@ -448,35 +410,12 @@ PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::issuePair(const DecodedInstruction
     m_directFlags = false;
     m_viBranchBackupValid = false;
 
-    if constexpr (!kStatic && isVu1())
-    {
-        if (derived().m_traceArmed && m_state.branchPending &&
-            (!traceWasBranchPending || m_state.branchTarget != traceWasBranchTarget) &&
-            traceIssueIdx < derived().m_traceTaken.size())
-        {
-            ++derived().m_traceTaken[traceIssueIdx];
-        }
-    }
-
-    // E37: post-exec register state, before the revert/queue block
-    // below restores the pipelined values.
-    if constexpr (!kStatic && isVu1())
-    {
-        if (derived().m_entryArmed)
-            derived().recordEntryPair(entryPc, entryLo, entryUp, ctx.vuData, ctx.dataSize,
-                                      derived().m_entryOldVi, derived().m_entryOldVf);
-    }
-
     if (hasUpperWrite)
     {
         const uint32_t latency =
             decoded.upperUsage.vfLatency != 0u
                 ? decoded.upperUsage.vfLatency
                 : decoded.upperUsage.latency;
-#if PS2X_ENABLE_DET_HASH_TAP
-        if constexpr (isVu1())
-            ++(directUpperVf ? derived().m_vbDirectVfWrites : derived().m_vbQueuedVfWrites);
-#endif
         if constexpr ((kInPlace & kInPlaceUpperVf) != 0)
             directVfWriteInPlace(upperWrite.reg, upperWrite.lanes, latency);
         else
@@ -494,10 +433,6 @@ PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::issuePair(const DecodedInstruction
         const uint32_t latency = decoded.lowerUsage.vfLatency != 0u
                                      ? decoded.lowerUsage.vfLatency
                                      : decoded.lowerUsage.latency;
-#if PS2X_ENABLE_DET_HASH_TAP
-        if constexpr (isVu1())
-            ++(directLowerVf ? derived().m_vbDirectVfWrites : derived().m_vbQueuedVfWrites);
-#endif
         if constexpr ((kInPlace & kInPlaceLowerVf) != 0)
             directVfWriteInPlace(lowerWrite.reg, lowerWrite.lanes, latency);
         else
@@ -561,11 +496,6 @@ PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::issuePair(const DecodedInstruction
         // VR4 D2: the emitter's proof (no branch or E-bit pair, not their
         // delay slot, no D/T bit) plus the block guard (no branch, E-bit or
         // halt pending at entry) make every step below a no-op except the pc.
-#if PS2X_ENABLE_DET_HASH_TAP
-        if (m_state.branchPending || m_state.ebit || m_state.haltAfterDelaySlot || decoded.eBit ||
-            decoded.dBit || decoded.tBit || ((m_state.pc + 8u) & (kCodeSize - 1u)) != plainNextPc)
-            ++derived().m_blockPlainTailMisses; // must stay 0
-#endif
         m_state.pc = plainNextPc;
     }
     else
@@ -623,17 +553,10 @@ PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::issuePair(const DecodedInstruction
 
     advanceOneCycle();
 #if PS2X_ENABLE_DET_HASH_TAP
-    if constexpr (isVu1())
-        (direct ? derived().m_vbDirectCycles : derived().m_vbQueuedCycles) += m_cycle - vbStartCycle;
     if constexpr (kStatic)
     {
         ++m_genIssuedPairs;
         m_genIssuedCycles += m_cycle - vbStartCycle;
-        if constexpr (kBlock)
-        {
-            ++derived().m_blockIssuedPairs;
-            derived().m_blockIssuedCycles += m_cycle - vbStartCycle;
-        }
     }
 #endif
     return ctx.programEnded;

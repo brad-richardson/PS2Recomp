@@ -1,10 +1,10 @@
 #!/bin/bash
-# VRB1: build the Mac vu1bench (standalone, no cmake).
-# Usage: build-mac.sh <fork-worktree> <vu1gen-dir> <out-binary>
-# Same Release recipe as the runner for the VU1 TUs: -O3 -DNDEBUG + SIMD FMAC.
+# VX2: build the Mac vu0dump (standalone, no cmake; was GV2 vu1dump).
+# Usage: build-mac.sh <fork-worktree> <out-binary>
+# Same Release recipe as the runner for the VU TUs: -O3 -DNDEBUG + SIMD FMAC.
 set -euo pipefail
-[ $# -eq 3 ] || { echo "usage: $0 <fork-worktree> <vu1gen-dir> <out>" >&2; exit 2; }
-WT=$1; VU1=$2; OUT=$3
+[ $# -eq 2 ] || { echo "usage: $0 <fork-worktree> <out>" >&2; exit 2; }
+WT=$1; OUT=$2
 CXX=${CXX:-/opt/homebrew/opt/llvm/bin/clang++}
 [ -x "$CXX" ] || CXX=clang++
 NEON=${SSE2NEON:-$HOME/dev/ssx3-work/VRB1/sse2neon}
@@ -18,7 +18,6 @@ NEON=${SSE2NEON:-$HOME/dev/ssx3-work/VRB1/sse2neon}
   "$WT/ps2xRuntime/src/lib/vu/ps2_vu_upper.cpp" \
   "$WT/ps2xRuntime/src/lib/vu/ps2_vu_lower.cpp" \
   "$WT/ps2xRuntime/src/lib/vu/ps2_vu_recomp.cpp" \
-  "$VU1"/vu1_*.cpp \
-  "$WT/ps2xRuntime/tools/vu1bench/vu1bench.cpp" \
+  "$WT/ps2xRuntime/tools/vu0dump/vu0dump.cpp" \
   -o "$OUT"
 ls -l "$OUT"

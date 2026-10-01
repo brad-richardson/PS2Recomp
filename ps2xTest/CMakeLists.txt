@@ -81,8 +81,6 @@ add_library(ps2_test_lib STATIC
     src/ps2_runtime_expansion_tests.cpp
     src/ps2_gfx_stats_tests.cpp
     src/ps2_vif_mpg_log_tests.cpp
-    src/ps2_vu1_trace_tests.cpp
-    src/ps2_vu1_entry_trace_tests.cpp
     src/ps2_fpu_semantics_tests.cpp
     src/ps2_fpu_cop2_audit_tests.cpp
     src/ps2_tz_offset_tests.cpp
@@ -204,10 +202,11 @@ elseif(MINGW)
     target_link_options(ps2x_tests PRIVATE "--stack,8388608")
 endif()
 
-# VR2: generated-vs-interpreter VU1 differential test. vu1_fixture_gen runs the
+# VR3: generated-vs-interpreter VU0 differential test. vu1_fixture_gen runs the
 # runtime's emitter over synthetic code images (random programs, not game data)
 # and the generated pairs are compiled into ps2x_tests. Generated pairs need
-# [[clang::musttail]], so other compilers skip the test.
+# [[clang::musttail]], so other compilers skip the test. (VX2: the VU1 images
+# are gone; the VU1 fixture programs still drive the VU1 interpreter tests.)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_executable(vu1_fixture_gen tools/vu1_fixture_gen.cpp $<TARGET_OBJECTS:ps2_test_function_table>)
     target_include_directories(vu1_fixture_gen PRIVATE
@@ -215,8 +214,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         ${CMAKE_SOURCE_DIR}/ps2xRuntime/include)
     target_link_libraries(vu1_fixture_gen PRIVATE ps2_runtime)
     set(VU1_FIXTURE_DIR ${CMAKE_CURRENT_BINARY_DIR}/vu1_fixture)
-    set(VU1_FIXTURE_SOURCES ${VU1_FIXTURE_DIR}/vu1_fixture_0.cpp ${VU1_FIXTURE_DIR}/vu1_fixture_1.cpp
-        ${VU1_FIXTURE_DIR}/vu1_fixture_2.cpp)
+    set(VU1_FIXTURE_SOURCES)
     # VR3: VU0 variants (vu1_recomp_fixture.h kVu0ImageCount).
     foreach(_vu0_fixture RANGE 7)
         list(APPEND VU1_FIXTURE_SOURCES ${VU1_FIXTURE_DIR}/vu0_fixture_${_vu0_fixture}.cpp)
@@ -238,9 +236,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # into the tests too, for the local-only game-image differential
     # (PS2X_VR3_VU0_IMAGE=<vu0_<hash>.bin>, PS2X_VR3_VU0_ENTRIES=<pc,pc,...>).
     # Game-derived: the binary never leaves the build dir.
-    if(PS2X_VU0_RECOMP_DIR)
-        file(GLOB PS2X_TEST_VU0_SOURCES CONFIGURE_DEPENDS "${PS2X_VU0_RECOMP_DIR}/vu0_*.cpp")
-        list(FILTER PS2X_TEST_VU0_SOURCES EXCLUDE REGEX "/\\._")
+    # VX2: the runtime's VU0Interpreter list (vu0e_ images + pre-VX1 vu0_
+    # images converted at configure time); the raw vu0_ files name the
+    # removed VU1 image header.
+    get_property(PS2X_TEST_VU0_SOURCES GLOBAL PROPERTY PS2X_VU0_RECOMP_SOURCES_ALL)
+    if(PS2X_VU0_RECOMP_DIR AND PS2X_TEST_VU0_SOURCES)
         target_sources(ps2x_tests PRIVATE ${PS2X_TEST_VU0_SOURCES})
         set_source_files_properties(${PS2X_TEST_VU0_SOURCES} TARGET_DIRECTORY ps2x_tests PROPERTIES
             SKIP_UNITY_BUILD_INCLUSION ON

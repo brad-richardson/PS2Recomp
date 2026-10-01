@@ -59,17 +59,17 @@ void register_ps2_knobs_tests()
 {
     MiniTest::Case("Ps2Knobs", [](TestCase &tc)
                    {
-        tc.Run("android defaults table is exactly the 32 S1+S3+CF4+CU3 play keys", [](TestCase &t)
+        tc.Run("android defaults table is exactly the 30 S1+S3+CF4+CU3 play keys (VX2: minus VU1_BLOCKS/FLAG_ELIDE)", [](TestCase &t)
                {
             size_t n = 0;
             const ps2x::Cf2AndroidDefault *defs = ps2x::cf2AndroidDefaults(&n);
-            t.Equals(n, static_cast<size_t>(32), "32 defaults");
+            t.Equals(n, static_cast<size_t>(30), "30 defaults");
             const char *want[] = {
                 "PS2X_GS_BACKEND", "PS2X_GS_EXTERNAL_LIBRARY", "GE1_GS_RESOURCES_DIR",
                 "GE1_GS_DATA_DIR", "GE1_GS_AHB_EXPORT", "GE1_ADRENO_BLEND_MIX",
                 "GE1_TFX_PREWARM", "GE1_PIPE_FLUSH_VSYNCS", "PS2X_VU1_ENGINE",
-                "PS2X_MTVU", "PS2X_MTVU_LAG", "PS2X_VU1_BLOCKS", "PS2X_VU0_RECOMP",
-                "PS2X_VU0_DIRECT", "PS2X_VU1_FLAG_ELIDE", "PS2X_GS_HANDOFF_DIET",
+                "PS2X_MTVU", "PS2X_MTVU_LAG", "PS2X_VU0_RECOMP",
+                "PS2X_VU0_DIRECT", "PS2X_GS_HANDOFF_DIET",
                 "PS2X_GS_FINISH_TIMING", "PS2X_SSX3_SIM_MODE", "PS2X_VIF1_REVERSE_DMA",
                 "PS2X_SKIP_MOVIE", "PS2X_SOUND", "PS2X_PERF_LOG", "PS2X_PERF_LOG_DIR",
                 "PS2X_GAME_THREAD_CPUS", "PS2X_MTVU_CPUS", "GE1_VK_TURNIP",
@@ -197,7 +197,7 @@ void register_ps2_knobs_tests()
                {
             size_t n = 0;
             const char *const *knobs = ps2x::cf2DumpKnobs(&n);
-            t.IsTrue(n > 100, "over a hundred curated knobs");
+            t.IsTrue(n >= 100, "at least a hundred curated knobs (VX2 dropped four dead VU1 knobs)");
             for (size_t i = 1; i < n; ++i)
                 t.IsTrue(std::strcmp(knobs[i - 1], knobs[i]) < 0, "sorted and unique");
             t.IsTrue(ps2x::cf2KnobIsCurated("PS2X_SOUND"), "curated hit");

@@ -2030,12 +2030,11 @@ void register_ps2_vu1_tests()
                      "instruction following a reserved opcode must not execute");
         });
 
-        tc.Run("emitted VU1 pairs hand off with a guaranteed tail call (F4-2b)", [](TestCase &t)
+        tc.Run("emitted VU0 pairs hand off with a guaranteed tail call (F4-2b)", [](TestCase &t)
         {
-            // Regression test for the Odin S1 stack overflow: all generated
-            // handoffs must be guaranteed tail calls. Constant plain block
-            // tails may call their target directly after the chain guard;
-            // branch/E-bit exits must still dispatch through next().
+            // Regression test for the Odin S1 stack overflow: every generated
+            // handoff must be a guaranteed tail call. VX2: the emitter writes
+            // VU0 images only (pair functions, one exact table, no blocks).
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
@@ -2043,7 +2042,7 @@ void register_ps2_vu1_tests()
             writeVuInstructionPair(fx.code, 8u, makeVuIaddiu(2u, 0u, 3), kVuUpperNop);
             const std::filesystem::path tmp =
                 std::filesystem::temp_directory_path() / "ps2_f4_2b_emit_test.cpp";
-            t.IsTrue(VU1Interpreter::emitRecompSource(fx.code, 16u, 0x12345678ull, tmp.string()),
+            t.IsTrue(VU0Interpreter::emitRecompSource(fx.code, 16u, 0x12345678ull, tmp.string()),
                      "emitter should succeed");
             std::ifstream in(tmp, std::ios::binary);
             std::ostringstream text;
@@ -2062,54 +2061,17 @@ void register_ps2_vu1_tests()
                 }
                 return n;
             };
-            const auto body = [](const std::string &source, const char *name)
-            {
-                const size_t begin = source.find(name);
-                if (begin == std::string::npos)
-                    return std::string{};
-                const size_t end = source.find("\n    }", begin);
-                return source.substr(begin, end == std::string::npos ? end : end - begin);
-            };
-            const std::string plainBody = body(s, "static bool B0000(");
-            t.Equals(count("return next<kNative>(vu, c);"), static_cast<size_t>(2u),
-                     "both pair functions dispatch through next<kNative>");
-            t.Equals(count("PS2X_VU1_MUSTTAIL return next<kNative>(vu, c);"), static_cast<size_t>(2u),
-                     "both pair handoffs are guaranteed tail calls");
-            t.IsTrue(plainBody.find("if (!vu.recompChainReady(c))\n            return false;\n"
-                                    "        PS2X_VU1_MUSTTAIL return b0000<kNative>(vu, c);") != std::string::npos,
-                     "constant plain block tail calls its target only behind the chain guard");
-            t.IsTrue(s.find("PS2X_VU1_MUSTTAIL return f0000<kNative>(vu, c);") != std::string::npos,
-                     "failed block guard tail-calls its leader pair");
-            t.IsTrue(s.find("PS2X_VU1_MUSTTAIL return B0000<kNative>(vu, c);") != std::string::npos,
-                     "block trampoline tail-calls its body");
-            t.IsTrue(s.find("::kPairs[2] = {") != std::string::npos &&
-                     s.find("::kPairsNative[2] = {") != std::string::npos &&
-                     s.find("program.pairs = ") != std::string::npos &&
-                     s.find("program.nativePairs = ") != std::string::npos,
-                     "exact and native pair tables are both emitted and registered");
-
-            // A branch and an E-bit each form a two-pair block with a delay
-            // slot. Neither block has a constant plain tail to call directly.
-            writeVuInstructionPair(fx.code, 0u, makeVuBranch(2), kVuUpperNop);
-            writeVuInstructionPair(fx.code, 8u, makeVuIaddiu(1u, 0u, 1), kVuUpperNop);
-            writeVuInstructionPair(fx.code, 16u, makeVuIaddiu(2u, 0u, 2), kVuUpperNop | 0x40000000u);
-            writeVuInstructionPair(fx.code, 24u, makeVuIaddiu(3u, 0u, 3), kVuUpperNop);
-            t.IsTrue(VU1Interpreter::emitRecompSource(fx.code, 32u, 0x12345678ull, tmp.string()),
-                     "branch/E-bit emitter should succeed");
-            std::ifstream branchIn(tmp, std::ios::binary);
-            std::ostringstream branchText;
-            branchText << branchIn.rdbuf();
-            branchIn.close();
-            std::filesystem::remove(tmp);
-            for (const char *name : {"static bool B0000(", "static bool B0010("})
-            {
-                const std::string exitBody = body(branchText.str(), name);
-                t.IsTrue(exitBody.find("PS2X_VU1_MUSTTAIL return next<kNative>(vu, c);") != std::string::npos,
-                         "branch and E-bit block exits use a guaranteed dynamic handoff");
-                t.IsTrue(exitBody.find("PS2X_VU1_MUSTTAIL return b") == std::string::npos &&
-                         exitBody.find("PS2X_VU1_MUSTTAIL return f") == std::string::npos,
-                         "branch and E-bit block exits never use a direct tail");
-            }
+            t.Equals(count("PS2X_VU_MUSTTAIL return next(vu, c);"), static_cast<size_t>(2u),
+                     "both pair handoffs are guaranteed tail calls through next()");
+            t.Equals(count("PS2X_VU_MUSTTAIL return fn(vu, c);"), static_cast<size_t>(1u),
+                     "next() dispatches with a guaranteed tail call");
+            t.IsTrue(s.find("#include \"ps2_vu0_recomp_gen.h\"") != std::string::npos &&
+                     s.find("VU0RecompImage<0x0000000012345678ull>::kPairs[2] = {") != std::string::npos &&
+                     s.find("program.pairs = ") != std::string::npos,
+                     "a VU0 image with one exact pair table is emitted and registered");
+            t.IsTrue(s.find("VU1") == std::string::npos && s.find("kPairsNative") == std::string::npos &&
+                     s.find("static bool b") == std::string::npos && s.find("static bool B") == std::string::npos,
+                     "no VU1 names, native table or block functions");
         });
 
         // VB1: the direct-commit path (writes applied at issue) against the
@@ -2536,12 +2498,14 @@ void register_ps2_vu1_tests()
         });
 #endif
 #if PS2X_VU1_FIXTURE_TEST
-        // VR2: generated pairs (vu1_fixture_gen: the runtime's emitter over the
-        // synthetic images in vu1_recomp_fixture.h) against the interpreter
-        // with every write queued (the reference timing model). Every program
-        // is cut at every budget; VU state (flags included) and data memory
-        // must match at the cut, after resume() and after a fresh execute().
-        tc.Run("VR2 generated pairs match the queued interpreter at every budget cut", [](TestCase &t)
+        // VR2 (VX2): the VU1 interpreter with direct commit (VB1, the VU1
+        // default) against every write queued (the reference timing model),
+        // on the synthetic VU1 images of vu1_recomp_fixture.h (the generated
+        // VU1 pairs these images once fed are gone). Every program is cut at
+        // every budget; VU state (flags included), data memory and PATH1
+        // packets must match at the cut, after resume() and after a fresh
+        // execute().
+        tc.Run("VR2 fixture images: VU1 direct commit matches the queued interpreter at every budget cut", [](TestCase &t)
         {
             struct Snapshot
             {
@@ -2565,17 +2529,11 @@ void register_ps2_vu1_tests()
                 gifPackets.emplace_back(packet, packet + sizeBytes);
             });
             uint64_t gifPacketsSeen = 0u;
-            uint32_t blockMismatches = 0u, directLayer = 0u, gapPrograms = 0u, stopPath = 0u;
+            uint32_t gapPrograms = 0u, stopPath = 0u;
             uint32_t mismatches = 0u, runs = 0u, programsRun = 0u;
-            uint64_t generatedCycles = 0u, blockEntries = 0u;
             vu1_fixture::Rng rnd{0x2545F4914F6CDD1Dull};
             for (uint32_t image = 0; image < vu1_fixture::kImageCount; ++image)
             {
-                const VU1Interpreter::RecompProgram *generated =
-                    VU1Interpreter::findRecompProgram(vu1_fixture::kImageHash[image]);
-                t.IsTrue(generated != nullptr, "fixture image is compiled in");
-                if (generated == nullptr)
-                    return;
                 const std::vector<vu1_fixture::Program> programs = vu1_fixture::buildImage(image, code.data());
                 for (const vu1_fixture::Program &program : programs)
                 {
@@ -2605,20 +2563,11 @@ void register_ps2_vu1_tests()
                     start.clip = rnd(0x1000000u);
 
                     // check 0: cut; 1: cut + resume(); 2: cut + fresh execute().
-                    // blocks: -1 interpreter (every write queued), -2 interpreter with
-                    // direct commit (VB1), 0 generated pairs, 1 generated with VR2
-                    // stage-4 block functions.
-                    const auto runOnce = [&](int blocks, uint32_t budget, uint32_t check) -> Snapshot
+                    // direct: false = every write queued, true = direct commit (VB1).
+                    const auto runOnce = [&](bool direct, uint32_t budget, uint32_t check) -> Snapshot
                     {
-                        const bool useGenerated = blocks >= 0;
                         VU1Interpreter vu;
-                        if (useGenerated)
-                        {
-                            vu.setRecompProgramForTest(generated);
-                            vu.setBlocksForTest(blocks);
-                        }
-                        else
-                            vu.setDirectCommitForTest(blocks == -2 ? 1 : 0);
+                        vu.setDirectCommitForTest(direct ? 1 : 0);
                         std::memcpy(vu.state().vf, start.vf, sizeof(start.vf));
                         std::memcpy(vu.state().vi, start.vi, sizeof(start.vi));
                         vu.state().mac = start.mac;
@@ -2640,9 +2589,6 @@ void register_ps2_vu1_tests()
                         snap.gif.swap(gifPackets);
                         snap.stopped = vu.stopRequestedForTest();
                         gifPacketsSeen += snap.gif.size();
-                        if (useGenerated)
-                            generatedCycles += vu.recompCyclesForTest();
-                        blockEntries += vu.blockEntriesForTest();
                         std::memcpy(&snap.state, &vu.state(), sizeof(VuState));
                         return snap;
                     };
@@ -2659,64 +2605,43 @@ void register_ps2_vu1_tests()
                         for (uint32_t check = 0; check < 3u; ++check)
                         {
                             runs += 2u;
-                            const Snapshot ref = runOnce(-1, budget, check);
-                            const Snapshot pairs = runOnce(0, budget, check);
-                            const Snapshot blocks = runOnce(1, budget, check);
-                            // VR2 stage 4 on its own: block functions against the pair path.
-                            if (!same(blocks, pairs))
-                            {
-                                if (++blockMismatches <= 3u)
-                                    std::fprintf(stderr, "VR2 stage-4 mismatch (blocks vs pairs): image %u program pc 0x%x budget %u check %u\n",
-                                                 image, program.startPc, budget, check);
-                            }
-                            if (same(ref, pairs) && same(ref, blocks))
+                            const Snapshot ref = runOnce(false, budget, check);
+                            const Snapshot direct = runOnce(true, budget, check);
+                            if (same(ref, direct))
                                 continue;
                             ++mismatches;
                             programGap = true;
-                            const Snapshot &gen = same(ref, pairs) ? blocks : pairs;
-                            stopPath += ref.stopped || gen.stopped ? 1u : 0u;
-                            // Which layer: the interpreter with direct commit (VB1) on the same case.
-                            const Snapshot direct = runOnce(-2, budget, check);
-                            directLayer += same(direct, gen) && !same(direct, ref) ? 1u : 0u;
+                            stopPath += ref.stopped || direct.stopped ? 1u : 0u;
                             if (mismatches > 3u)
                                 continue;
-                            std::fprintf(stderr, "VR2 differential mismatch: image %u program pc 0x%x length %u budget %u check %s pairs_ok %d blocks_ok %d\n",
+                            std::fprintf(stderr, "VR2 differential mismatch: image %u program pc 0x%x length %u budget %u check %s\n",
                                          image, program.startPc, program.length, budget,
-                                         check == 0u ? "cut" : check == 1u ? "resume" : "fresh-execute",
-                                         same(ref, pairs), same(ref, blocks));
+                                         check == 0u ? "cut" : check == 1u ? "resume" : "fresh-execute");
                             for (uint32_t reg = 0; reg < 32u; ++reg)
-                                if (std::memcmp(ref.state.vf[reg], gen.state.vf[reg], 16) != 0)
-                                    std::fprintf(stderr, "  vf%u ref %g %g %g %g gen %g %g %g %g\n", reg,
+                                if (std::memcmp(ref.state.vf[reg], direct.state.vf[reg], 16) != 0)
+                                    std::fprintf(stderr, "  vf%u ref %g %g %g %g direct %g %g %g %g\n", reg,
                                                  ref.state.vf[reg][0], ref.state.vf[reg][1], ref.state.vf[reg][2], ref.state.vf[reg][3],
-                                                 gen.state.vf[reg][0], gen.state.vf[reg][1], gen.state.vf[reg][2], gen.state.vf[reg][3]);
+                                                 direct.state.vf[reg][0], direct.state.vf[reg][1], direct.state.vf[reg][2], direct.state.vf[reg][3]);
                             for (uint32_t reg = 0; reg < 16u; ++reg)
-                                if (ref.state.vi[reg] != gen.state.vi[reg])
-                                    std::fprintf(stderr, "  vi%u ref %d gen %d\n", reg, ref.state.vi[reg], gen.state.vi[reg]);
+                                if (ref.state.vi[reg] != direct.state.vi[reg])
+                                    std::fprintf(stderr, "  vi%u ref %d direct %d\n", reg, ref.state.vi[reg], direct.state.vi[reg]);
                             std::fprintf(stderr, "  mac %x/%x status %x/%x clip %x/%x q %g/%g p %g/%g i %g/%g cycles %llu/%llu pc %x/%x acc %d data %d gif %zu/%zu equal %d\n",
-                                         ref.state.mac, gen.state.mac, ref.state.status, gen.state.status, ref.state.clip, gen.state.clip,
-                                         ref.state.q, gen.state.q, ref.state.p, gen.state.p, ref.state.i, gen.state.i,
-                                         static_cast<unsigned long long>(ref.state.cycles), static_cast<unsigned long long>(gen.state.cycles),
-                                         ref.state.pc, gen.state.pc, std::memcmp(ref.state.acc, gen.state.acc, 16) != 0, ref.data != gen.data,
-                                         ref.gif.size(), gen.gif.size(), ref.gif == gen.gif);
-                            std::fprintf(stderr, "  interpreter+direct: equals queued %d, equals generated %d\n",
-                                         same(direct, ref), same(direct, gen));
+                                         ref.state.mac, direct.state.mac, ref.state.status, direct.state.status, ref.state.clip, direct.state.clip,
+                                         ref.state.q, direct.state.q, ref.state.p, direct.state.p, ref.state.i, direct.state.i,
+                                         static_cast<unsigned long long>(ref.state.cycles), static_cast<unsigned long long>(direct.state.cycles),
+                                         ref.state.pc, direct.state.pc, std::memcmp(ref.state.acc, direct.state.acc, 16) != 0, ref.data != direct.data,
+                                         ref.gif.size(), direct.gif.size(), ref.gif == direct.gif);
                         }
                     }
                     gapPrograms += programGap ? 1u : 0u;
                 }
             }
-            std::fprintf(stderr, "[vr2-diff] images %u programs %u runs %u generated_cycles %llu block_entries %llu gif_packets %llu mismatches %u (programs %u, interpreter+direct reproduces %u, on an error stop %u) block_vs_pairs_mismatches %u\n",
+            std::fprintf(stderr, "[vr2-diff] images %u programs %u runs %u gif_packets %llu mismatches %u (programs %u, on an error stop %u)\n",
                          vu1_fixture::kImageCount, programsRun, runs,
-                         static_cast<unsigned long long>(generatedCycles),
-                         static_cast<unsigned long long>(blockEntries),
-                         static_cast<unsigned long long>(gifPacketsSeen), mismatches, gapPrograms, directLayer,
-                         stopPath, blockMismatches);
-            t.Equals(blockMismatches, 0u, "stage-4 block functions match the generated pair path at every cut");
-            t.Equals(mismatches, 0u, "generated pairs and the queued interpreter agree at every cut");
-            t.IsTrue(programsRun > 200u, "both fixture images ran");
+                         static_cast<unsigned long long>(gifPacketsSeen), mismatches, gapPrograms, stopPath);
+            t.Equals(mismatches, 0u, "direct commit and the queued interpreter agree at every cut");
+            t.IsTrue(programsRun > 200u, "every fixture image ran");
             t.IsTrue(runs > 50000u, "differential covered many cuts");
-            t.IsTrue(generatedCycles > 100000u, "the generated pairs actually ran");
-            t.IsTrue(blockEntries > 10000u, "the stage-4 block functions actually ran");
             t.IsTrue(gifPacketsSeen > 1000u, "image 2 kicked PATH1 packets");
         });
 

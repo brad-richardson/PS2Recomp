@@ -392,10 +392,6 @@ void VuCore<D>::queueClip(uint32_t clip)
 {
     m_workingClip = ((m_workingClip << 6) | (clip & 0x3Fu)) & 0xFFFFFFu;
     const bool directFlags = directFlagsNow();
-#if PS2X_ENABLE_DET_HASH_TAP
-    if constexpr (isVu1())
-        ++(directFlags ? derived().m_vbDirectFlagWrites : derived().m_vbQueuedFlagWrites);
-#endif
     if (directFlags)
     {
         if (m_flagValidMask != 0u)
@@ -483,16 +479,6 @@ void VuCore<D>::queueP(float value, uint32_t latency)
 template <class D>
 void VuCore<D>::queueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask)
 {
-    // E37: stash the exact store payload for the pair line.
-    if constexpr (isVu1())
-    {
-        if (derived().m_entryArmed)
-        {
-            derived().m_entryStoreValid = true;
-            derived().m_entryStoreAddr = address;
-            std::copy(words, words + 4, derived().m_entryStoreWords);
-        }
-    }
     const int slot = firstFreeEntry(m_storeValidMask, kMaxPendingStores);
     if (slot >= 0)
     {
@@ -1308,9 +1294,6 @@ void VuCore<D>::run(uint8_t *vuCode, uint32_t codeSize,
     ps2_fpmode::writeControl(ps2_fpmode::ps2Control(previousControl));
     const uint64_t budgetEnd = m_cycle + maxCycles;
     const uint64_t entryCycle = m_cycle;
-    // E36: arm the dev-only per-program trace (VU1 only).
-    if constexpr (isVu1())
-        derived().beginRunTrace(codeSize, vuData, dataSize);
     RunContext ctx;
     ctx.vuCode = vuCode;
     ctx.codeSize = codeSize;
@@ -1320,35 +1303,15 @@ void VuCore<D>::run(uint8_t *vuCode, uint32_t codeSize,
     ctx.memory = memory;
     ctx.budgetEnd = budgetEnd;
     ctx.programEnded = false;
-    // VR1: generated code for this code image, if one was compiled in.
+    // VR1: generated code for this code image, if one was compiled in (VX2:
+    // VU0 only; for VU1 the lookup only keys the tracked direct-commit map).
     const RecompProgram *recomp = lookupRecompProgram(vuCode, codeSize, memory);
-    // VF1 Part 3 (VU1 only): exact flags unless the image is a pinned one.
-    m_elideFmacFlags = false;
-    // VR2: generated pairs carry no E36/E37 trace hooks; an armed run (dev
-    // only) goes through the interpreter. m_entryArmed only turns off mid-run.
-    bool traceActive = false;
-    if constexpr (isVu1())
-    {
-        derived().selectFlagElision(recomp);
-        traceActive = derived().traceActive();
-    }
-    if (traceActive)
-        recomp = nullptr;
-    // Bind the generated arithmetic mode once for this image/run. The
-    // interpreter fallback keeps its runtime choice for unknown images.
-    const RecompPairFn *recompPairs = recomp != nullptr && m_pcsx2Float && recomp->nativePairs != nullptr
-                                          ? recomp->nativePairs
-                                          : recomp != nullptr ? recomp->pairs : nullptr;
-    // VB1: direct commit (VU1 only, dev traces off).
-    // VR3: VU0 too, behind its own knob (PS2X_VU0_DIRECT=1; default off).
+    const RecompPairFn *recompPairs = recomp != nullptr ? recomp->pairs : nullptr;
+    // VB1: direct commit (VU1 always; VX2 dropped PS2X_VU1_DIRECT, whose
+    // default was on). VR3: VU0 behind its own knob (PS2X_VU0_DIRECT=1;
+    // default off).
     constexpr bool vu1 = isVu1();
-    m_directRunOk = !traceActive &&
-                    (m_directOverride >= 0 ? m_directOverride != 0
-                                           : vu1 ? directCommitEnabled() : vu0DirectEnabled());
-    // VR2 stage 4: generated block functions (PS2X_VU1_BLOCKS=1; default off; VU1 only).
-    if constexpr (vu1)
-        derived().m_blocksOn = m_directRunOk && (derived().m_blocksOverride < 0 ? D::blocksEnabled()
-                                                                                : derived().m_blocksOverride != 0);
+    m_directRunOk = m_directOverride >= 0 ? m_directOverride != 0 : vu1 || vu0DirectEnabled();
     m_directFlagSafe = m_directRunOk
                            ? directFlagMap(vuCode, codeSize,
                                            memory != nullptr &&
@@ -1412,9 +1375,6 @@ void VuCore<D>::run(uint8_t *vuCode, uint32_t codeSize,
     const uint64_t cyclesUsed = m_cycle - entryCycle;
     const bool budgetExhausted = !programEnded && !m_stopRequested && m_cycle >= budgetEnd;
     ps2_gfx_stats::noteVuRun(cyclesUsed, budgetExhausted);
-    // E36/E37: dev-only trace census/detail and pair-stream close (VU1 only).
-    if constexpr (isVu1())
-        derived().endRunTrace(vuCode, codeSize, memory, cyclesUsed, budgetExhausted);
     m_state.cycles = m_cycle;
     ps2_fpmode::writeControl(previousControl);
 }

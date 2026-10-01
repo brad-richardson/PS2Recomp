@@ -13,93 +13,6 @@
 #include "ps2_mpg_src_trace.h"
 #include "ps2_uv1_counters.h"
 #include "ps2_vif_mpg_log.h"
-#include "ps2_vu1_entry_trace.h"
-#include "ps2_vu1_trace.h"
-
-namespace
-{
-// E37 DEV-ONLY entry trace: one `vif ...` line per decoded VIF1 command.
-// Shape: vif <name> num=<n> addr=<a> fmt=<f> usn=<u> mask=<8hex>
-// cl=<cl> wl=<wl> [row=<4w>|col=<4w>] data=<words|-> [+more=<n>] [suffix].
-// addr is the destination VU row for UNPACK (with +TOPS when the imm
-// TOPS-relative bit is set), the micro-program slot for MPG, the
-// startPC/8 for MSCAL/F, and "-" where no address applies. data holds
-// the command's source words (UNPACK: all of them, up to 1024;
-// DIRECT/MPG: first 8 with +more). One relaxed check per command when off.
-void e37AppendVif(const char *name, uint8_t num, const char *addr, const char *fmt,
-                  const char *usn, uint32_t mask, uint32_t cycle,
-                  const char *extraTag, const uint32_t *extraWords,
-                  const uint8_t *data, uint32_t dataWords, bool dataTruncated,
-                  uint32_t dataTotal, const char *suffix = nullptr)
-{
-    if (!ps2_vu1_entry_trace::enabled())
-    {
-        return;
-    }
-    uint32_t cl = cycle & 0xFFu;
-    uint32_t wl = (cycle >> 8) & 0xFFu;
-    if (cl == 0u)
-    {
-        cl = 1u;
-    }
-    if (wl == 0u)
-    {
-        wl = 1u;
-    }
-    char head[192];
-    std::snprintf(head, sizeof(head), "vif %s num=%u addr=%s fmt=%s usn=%s mask=%08x cl=%u wl=%u",
-                  name, num, addr, fmt, usn, mask, cl, wl);
-    std::string line(head);
-    if (extraTag != nullptr && extraWords != nullptr)
-    {
-        line += ' ';
-        line += extraTag;
-        line += '=';
-        char w[16];
-        for (int i = 0; i < 4; ++i)
-        {
-            if (i != 0)
-            {
-                line += ' ';
-            }
-            std::snprintf(w, sizeof(w), "%08x", extraWords[i]);
-            line += w;
-        }
-    }
-    line += " data=";
-    if (data == nullptr || dataWords == 0u)
-    {
-        line += '-';
-    }
-    else
-    {
-        char w[16];
-        for (uint32_t i = 0u; i < dataWords; ++i)
-        {
-            if (i != 0u)
-            {
-                line += ' ';
-            }
-            uint32_t word = 0u;
-            std::memcpy(&word, data + i * 4u, sizeof(word));
-            std::snprintf(w, sizeof(w), "%08x", word);
-            line += w;
-        }
-        if (dataTruncated)
-        {
-            char more[32];
-            std::snprintf(more, sizeof(more), " +more=%u", dataTotal - dataWords);
-            line += more;
-        }
-    }
-    if (suffix != nullptr && suffix[0] != '\0')
-    {
-        line += ' ';
-        line += suffix;
-    }
-    ps2_vu1_entry_trace::appendVif(line);
-}
-}
 
 enum VIFCmd : uint8_t
 {
@@ -569,15 +482,11 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
 
         if (opcode == VIF_NOP)
         {
-            e37AppendVif("NOP", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         nullptr, nullptr, nullptr, 0u, false, 0u);
             continue;
         }
         else if (opcode == VIF_STCYCL)
         {
             vif1_regs.cycle = imm;
-            e37AppendVif("STCYCL", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         nullptr, nullptr, nullptr, 0u, false, 0u);
             continue;
         }
         else if (opcode == VIF_OFFSET)
@@ -587,31 +496,23 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.ofst = imm & 0x3FFu;
             vif1_regs.tops = vif1_regs.base & 0x3FFu;
             vif1_regs.stat &= ~(1u << 7); // clear DBF
-            e37AppendVif("OFFSET", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         nullptr, nullptr, nullptr, 0u, false, 0u);
             continue;
         }
         else if (opcode == VIF_BASE)
         {
             // BASE only updates the base register. TOPS changes on OFFSET/MSCAL.
             vif1_regs.base = imm & 0x3FFu;
-            e37AppendVif("BASE", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         nullptr, nullptr, nullptr, 0u, false, 0u);
             continue;
         }
         else if (opcode == VIF_ITOP)
         {
             // ITOP VIFcode writes pending ITOPS; VU XITOP observes it after MSCAL/MSCNT.
             vif1_regs.itops = imm & 0x3FFu;
-            e37AppendVif("ITOP", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         nullptr, nullptr, nullptr, 0u, false, 0u);
             continue;
         }
         else if (opcode == VIF_STMOD)
         {
             vif1_regs.mode = imm & 3u;
-            e37AppendVif("STMOD", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         nullptr, nullptr, nullptr, 0u, false, 0u);
             continue;
         }
         else if (opcode == VIF_MSKPATH3)
@@ -632,15 +533,11 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
         {
             vif1_regs.mark = imm;
             vif1_regs.stat |= (1u << 6); // MRK
-            e37AppendVif("MARK", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         nullptr, nullptr, nullptr, 0u, false, 0u);
             continue;
         }
         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
         {
             const char *flushName = (opcode == VIF_FLUSHE) ? "FLUSHE" : ((opcode == VIF_FLUSH) ? "FLUSH" : "FLUSHA");
-            e37AppendVif(flushName, num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         nullptr, nullptr, nullptr, 0u, false, 0u);
             ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 %s masked=%u queued=%zu", flushName, m_path3Masked, m_path3MaskedFifo.size());
             continue;
         }
@@ -656,28 +553,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             const uint32_t runItop = vif1_regs.itops & 0x3FFu;
             vif1_regs.top = runTop;
             vif1_regs.itop = runItop;
-
-            // E36: stash the pre-update VIF1 snapshot this MSCAL acts on
-            // for the dev-only VU1 trace (one relaxed check when off).
-            ps2_vu1_trace::noteMscal(false, startPC, runTop, runItop,
-                                     vif1_regs.base, vif1_regs.ofst,
-                                     vif1_regs.tops, vif1_regs.itops,
-                                     (vif1_regs.stat & (1u << 7)) != 0u);
-
-            // E37: log the MSCAL line, then freeze VU memory + the packet
-            // log when this is a targeted first MSCAL (one check when off).
-            {
-                if (ps2_vu1_entry_trace::enabled())
-                {
-                    char addr[16];
-                    std::snprintf(addr, sizeof(addr), "%u", imm);
-                    const char *mname = (opcode == VIF_MSCALF) ? "MSCALF" : "MSCAL";
-                    e37AppendVif(mname, num, addr, "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                                 nullptr, nullptr, nullptr, 0u, false, 0u);
-                }
-                ps2_vu1_entry_trace::noteMscalEntry(startPC, false, m_vu1Data,
-                                                    PS2_VU1_DATA_SIZE);
-            }
 
             const bool dbf = (vif1_regs.stat & (1u << 7)) != 0u;
             if (dbf)
@@ -699,18 +574,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             vif1_regs.top = runTop;
             vif1_regs.itop = runItop;
 
-            // E36: MSCNT continues the program; no startPC of its own.
-            ps2_vu1_trace::noteMscal(true, 0u, runTop, runItop,
-                                     vif1_regs.base, vif1_regs.ofst,
-                                     vif1_regs.tops, vif1_regs.itops,
-                                     (vif1_regs.stat & (1u << 7)) != 0u);
-
-            // E37: a program boundary like MSCAL (never arms: no startPC).
-            e37AppendVif("MSCNT", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         nullptr, nullptr, nullptr, 0u, false, 0u);
-            ps2_vu1_entry_trace::noteMscalEntry(0u, true, m_vu1Data,
-                                                PS2_VU1_DATA_SIZE);
-
             const bool dbf = (vif1_regs.stat & (1u << 7)) != 0u;
             if (dbf)
                 vif1_regs.tops = vif1_regs.base & 0x3FFu;
@@ -731,8 +594,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             uint32_t maskValue = 0;
             std::memcpy(&maskValue, data + pos, sizeof(maskValue));
             vif1_regs.mask = maskValue;
-            e37AppendVif("STMASK", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         nullptr, nullptr, data + pos, 1u, false, 1u);
             pos += 4;
             continue;
         }
@@ -741,10 +602,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             if (pos + 16 > sizeBytes)
                 break;
             std::memcpy(vif1_regs.row, data + pos, 16);
-            uint32_t rowWords[4]{};
-            std::memcpy(rowWords, data + pos, sizeof(rowWords));
-            e37AppendVif("STROW", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         "row", rowWords, nullptr, 0u, false, 0u);
             pos += 16;
             continue;
         }
@@ -753,10 +610,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             if (pos + 16 > sizeBytes)
                 break;
             std::memcpy(vif1_regs.col, data + pos, 16);
-            uint32_t colWords[4]{};
-            std::memcpy(colWords, data + pos, sizeof(colWords));
-            e37AppendVif("STCOL", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         "col", colWords, nullptr, 0u, false, 0u);
             pos += 16;
             continue;
         }
@@ -852,17 +705,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                     markVU1CodeModified();
                 }
             }
-            if (ps2_vu1_entry_trace::enabled())
-            {
-                char addr[16];
-                std::snprintf(addr, sizeof(addr), "%u", imm);
-                const uint32_t mpgWords = mpgBytes / 4u;
-                const uint32_t mpgAvail = (pos < sizeBytes) ? (sizeBytes - pos) / 4u : 0u;
-                const uint32_t mpgKeep = (mpgWords > 8u) ? 8u : mpgWords;
-                const uint32_t keep = (mpgKeep > mpgAvail) ? mpgAvail : mpgKeep;
-                e37AppendVif("MPG", num, addr, "MPG", "-", vif1_regs.mask, vif1_regs.cycle,
-                             nullptr, nullptr, data + pos, keep, mpgWords > keep, mpgWords);
-            }
             pos += mpgBytes;
             if (pos > sizeBytes)
                 break;
@@ -882,18 +724,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             {
                 const bool directHl = (opcode == VIF_DIRECTHL);
                 ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 DIRECT qw=%u masked=%u", qwCount, m_path3Masked);
-                {
-                    const uint32_t totalWords = qwCount * 4u;
-                    const uint32_t availWords = (pos < sizeBytes) ? (sizeBytes - pos) / 4u : 0u;
-                    uint32_t keep = (totalWords > 8u) ? 8u : totalWords;
-                    if (keep > availWords)
-                    {
-                        keep = availWords;
-                    }
-                    e37AppendVif(directHl ? "DIRECTHL" : "DIRECT", num, "-", "GIF", "-",
-                                 vif1_regs.mask, vif1_regs.cycle, nullptr, nullptr,
-                                 data + pos, keep, totalWords > keep, totalWords);
-                }
                 submitGifPacket(GifPathId::Path2, data + pos, qwCount * 16, true, directHl);
 
                 const uint32_t pendingImageQw = pendingGifImageQwc(data + pos, qwCount * 16u);
@@ -1297,34 +1127,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                     std::memcpy(m_vu1Data + destOff, lanes, sizeof(lanes));
                 }
             }
-            // E37: log the UNPACK with its full source payload (pos still
-            // points at the first source word here). Formatting only when the
-            // trace is on: it ran for every UNPACK in release builds (HP1).
-            if (ps2_vu1_entry_trace::enabled())
-            {
-                char addr[24];
-                std::snprintf(addr, sizeof(addr), "%u%s", imm & 0x3FFu,
-                              (imm & 0x8000u) != 0u ? "+TOPS" : "");
-                char fmt[16];
-                if (vl == 3u && vn == 3u)
-                {
-                    std::snprintf(fmt, sizeof(fmt), "V4_5");
-                }
-                else
-                {
-                    const int bits = (vl == 0u) ? 32 : ((vl == 1u) ? 16 : ((vl == 2u) ? 8 : 16));
-                    std::snprintf(fmt, sizeof(fmt), "V%u_%d", vn + 1u, bits);
-                }
-                char suffix[32];
-                std::snprintf(suffix, sizeof(suffix), "mode=%u men=%u",
-                              vif1_regs.mode & 3u, maskEnable ? 1u : 0u);
-                const uint32_t unpackTotal = totalBytes / 4u;
-                const uint32_t unpackAvail = (pos < sizeBytes) ? (sizeBytes - pos) / 4u : 0u;
-                const uint32_t unpackKeep = (unpackTotal > unpackAvail) ? unpackAvail : unpackTotal;
-                e37AppendVif("UNPACK", num, addr, fmt, (imm & 0x4000u) != 0u ? "1" : "0",
-                             vif1_regs.mask, vif1_regs.cycle, nullptr, nullptr,
-                             data + pos, unpackKeep, unpackKeep < unpackTotal, unpackTotal, suffix);
-            }
             pos += totalBytes;
 
             if (pos > sizeBytes)
@@ -1333,8 +1135,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
         }
         else
         {
-            e37AppendVif("UNK", num, "-", "-", "-", vif1_regs.mask, vif1_regs.cycle,
-                         nullptr, nullptr, nullptr, 0u, false, 0u);
             continue;
         }
     }

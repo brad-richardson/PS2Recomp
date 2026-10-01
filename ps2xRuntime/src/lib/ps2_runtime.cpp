@@ -10,8 +10,6 @@
 #include "ps2_uv1_counters.h"
 #include "ps2_vif_mpg_log.h"
 #include "ps2_vq.h"
-#include "ps2_vu1_entry_trace.h"
-#include "ps2_vu1_trace.h"
 #include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e43_trace.h"
@@ -2063,8 +2061,7 @@ bool PS2Runtime::syncCoreSubsystems()
     // that shares state with unit code is armed (those need the inline path).
     // PS2X_PKLOG stays allowed: its packet log is atomic-indexed and locked,
     // so the [pk] sequence (idx, fnv, len, src) is a GS-stream comparator.
-    ps2_mtvu::configure(ps2_vu1_trace::enabled() || ps2_vu1_entry_trace::enabled() ||
-                        ps2_e7::enabled() || ps2_rr1::alphaTapOn() || ps2_rr1::evOn() ||
+    ps2_mtvu::configure(ps2_e7::enabled() || ps2_rr1::alphaTapOn() || ps2_rr1::evOn() ||
                         ps2_mpg_src_trace::enabled() || ps2_gfx_stats::enabled() || ps2x_gs_capture::enabled() ||
                         ps2_vif_mpg_log::enabled() || ps2_e44_trace::enabled() || ps2_e43_trace::enabled() ||
                         ps2_e41_trace::armed() || ps2_uv1_vif_fmt::enabled() || ps2_uv1_dma_stall::enabled() ||

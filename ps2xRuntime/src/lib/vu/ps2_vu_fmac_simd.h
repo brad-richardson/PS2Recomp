@@ -299,14 +299,10 @@ PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::fmacSimd(uint32_t instr)
 
     // updateFmacFlags: MAC bit (lane) per Z, << 4 per S, << 8 per U, << 12
     // per O, with lane x = 8 .. w = 1; status = OR of the lane flags.
-    uint32_t mac = 0u;
-    if (!m_elideFmacFlags)
-    {
-        const v4i spread = (laneFlags & 1) | ((laneFlags & 2) << 3) | ((laneFlags & 4) << 6) |
-                           ((laneFlags & 8) << 9);
-        const v4i shifts = {3, 2, 1, 0};
-        mac = orLanes(spread << shifts);
-    }
+    const v4i spread = (laneFlags & 1) | ((laneFlags & 2) << 3) | ((laneFlags & 4) << 6) |
+                       ((laneFlags & 8) << 9);
+    const v4i shifts = {3, 2, 1, 0};
+    const uint32_t mac = orLanes(spread << shifts);
     const uint32_t status = orLanes(laneFlags);
     commitFmacFlags(mac, status, extraSticky);
 

@@ -51,10 +51,6 @@ class PS2Memory;
 #define PS2X_VU1_ALWAYS_INLINE __attribute__((always_inline))
 #endif
 
-// VR1: generated VU1 programs (one explicit specialization per code image,
-// emitted by PS2X_VU1_RECOMP_DUMP and compiled in from PS2X_VU1_RECOMP_DIR).
-template <uint64_t kImageHash>
-struct VU1RecompImage;
 // VR3: generated VU0 programs (PS2X_VU0_RECOMP_DUMP / PS2X_VU0_RECOMP_DIR).
 template <uint64_t kImageHash>
 struct VU0RecompImage;
@@ -73,10 +69,9 @@ struct VuSavestate;
 // of VU1Interpreter (one class for both units, picked by a Unit member).
 //
 // CRTP: Derived supplies `static constexpr VuUnit kUnit`. Everything only VU1
-// has (XGKICK/PATH1, the E36/E37 dev traces, VRB1 capture, VR2 stage-4 blocks,
-// VF1 flag elision, the VB1 stats) lives in VU1Interpreter and is reached
-// from the shared code only under `if constexpr (isVu1())`, so VU0 compiles
-// none of it and deleting VU1Interpreter leaves this core intact.
+// has (XGKICK/PATH1) lives in VU1Interpreter and is reached from the shared
+// code only under `if constexpr (isVu1())`, so VU0 compiles none of it.
+// VX2: generated images are VU0-only; VU1 always interprets.
 template <class Derived>
 class VuCore
 {
@@ -110,21 +105,20 @@ public:
         uint32_t codeSize = 0;
         uint32_t pairCount = 0;
         const RecompPairFn *pairs = nullptr;
-        const RecompPairFn *nativePairs = nullptr; // VU1 only; exact remains the default
     };
     // One registry per unit (VX1; was one shared registry keyed by hash).
     static void registerRecompProgram(const RecompProgram &program);
     // Writes the generated C++ for one code image (every pair that decodes
     // without a reserved instruction). Returns false on a write error.
     // VR3: VU0 decodes with VU0's reserved ops and emits a 4 KiB image
-    // (VU0RecompImage, pair functions only: no blocks).
+    // (VU0RecompImage, pair functions only). VX2: VU0Interpreter only.
     static bool emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
                                  uint64_t hash, const std::string &path);
 
     VuState &state() { return m_state; }
     const VuState &state() const { return m_state; }
-    // VB1: test hook for the direct-commit path: -1 follows PS2X_VU1_DIRECT
-    // (default on), 0 queues every write, 1 forces direct commits on.
+    // VB1: test hook for the direct-commit path: -1 follows the unit default
+    // (VU1 on; VU0 PS2X_VU0_DIRECT), 0 queues every write, 1 forces it on.
     void setDirectCommitForTest(int mode) { m_directOverride = mode; }
     // VR2: test hook for generated code without a tracked PS2Memory: run this
     // registered image whenever the code size matches (null = normal lookup).
@@ -138,9 +132,6 @@ public:
     }
     uint64_t recompCyclesForTest() const { return m_recompCycles; }
     uint64_t interpCyclesForTest() const { return m_interpCycles; }
-    // VRB1: capture/replay hooks (vu1bench only; no behavior change).
-    uint64_t cycleCounterForBench() const { return m_cycle; }
-    void setCycleCounterForBench(uint64_t c) { m_cycle = c; }
     // VR2 2C: a reserved-instruction/error stop (reportReservedInstruction) is pending.
     bool stopRequestedForTest() const { return m_stopRequested; }
     // VR4 D1: run one upper instruction through the scalar (simd=false) or
@@ -164,8 +155,6 @@ protected:
     Derived &derived() { return static_cast<Derived &>(*this); }
     const Derived &derived() const { return static_cast<const Derived &>(*this); }
 
-    template <uint64_t>
-    friend struct VU1RecompImage;
     template <uint64_t>
     friend struct VU0RecompImage;
 
@@ -298,12 +287,9 @@ protected:
 
     // VF1: runtime choice; fixed at construction for game runs.
     bool m_pcsx2Float = false;
-    // VF1 Part 3 (VU1 only, VU1Interpreter picks it per image at each run);
-    // stays false on VU0. Read by the shared FMAC flag commit.
-    bool m_elideFmacFlags = false;
     VuState m_state;
 #if PS2X_ENABLE_DET_HASH_TAP
-    uint64_t m_programStartCount = 0; // VU1 starts only (VU1Interpreter::execute)
+    uint64_t m_programStartCount = 0; // VU1 starts only (VU1Interpreter::execute; the det-hash count)
 #endif
     std::array<DecodedInstructionPair, kMaxDecodedPairs> m_decodedCodeCache{};
     DecodedInstructionPair m_decodeScratch{};
@@ -388,7 +374,10 @@ protected:
     // the snapshot path; the emitter sets a bit only where its proof holds
     // (direct-map bit, no shadow/suppressed same-reg interference, single
     // VI at latency <= 1).
-    // VX1: blocks (kBlockMap >= 0, kNoStall, kPlainTail, kInPlace) are VU1-only.
+    // VX1: blocks (kBlockMap >= 0, kNoStall, kPlainTail, kInPlace) were VU1-only.
+    // VX2: no emitter writes them any more (generated images are VU0 pair
+    // functions, which pass only the leading parameters); kept so the issue
+    // step and existing VU0 images stay unchanged.
     static constexpr int kInPlaceUpperVf = 1;
     static constexpr int kInPlaceLowerVf = 2;
     static constexpr int kInPlaceAcc = 4;
@@ -400,19 +389,10 @@ protected:
     // request; see step_impl). True when the next pair may issue from
     // generated code.
     bool recompChainReady(RunContext &ctx);
-    // VR2 stage 4 block plan (VU1Interpreter::planRecompBlocks; the emitter
-    // writes block functions for VU1 images only).
-    struct RecompBlockPlan
-    {
-        uint32_t start = 0;                // leader pair index
-        std::vector<uint32_t> pairs;       // pair indices, in issue order
-        std::vector<uint8_t> noStall;      // per pair: the scoreboard read is provably a no-op
-        std::vector<uint8_t> plainTail;    // VR4 D2: per pair: the pc/branch/halt tail is pc + 8
-        uint32_t maxCycles = 0;            // guard bound: stalls + issues + last landing
-    };
-    // Hash builds: generated pairs and their cycles (blocks' share: VU1Interpreter).
+    // Hash builds: generated pairs and their cycles.
     uint64_t m_genIssuedPairs = 0, m_genIssuedCycles = 0;
-    // VR2: generated images are used only for whole-memory VU1 code.
+    // VR2: whole-memory VU1 code is keyed for its direct-commit map (VX2: no
+    // generated VU1 images).
     static constexpr uint32_t kRecompCodeSize = 0x4000u;
     // VR3: ... and whole-memory VU0 code (PS2X_VU0_RECOMP=1; default off).
     static constexpr uint32_t kRecompVu0CodeSize = 0x1000u;
@@ -432,7 +412,7 @@ protected:
     // orders (VF, VI, ACC, LSU stores) are applied at issue instead of being
     // queued and committed at readyCycle; FMAC/CLIP flag writes too where
     // m_directFlagMap says no flag reader can issue before they would land.
-    // Guards per pair: VU1 (VR3: or VU0 with PS2X_VU0_DIRECT=1), dev traces off, m_cycle + kDirectMaxLatency <=
+    // Guards per pair: VU1 (VR3: or VU0 with PS2X_VU0_DIRECT=1), m_cycle + kDirectMaxLatency <=
     // budgetEnd (every direct write lands before a budget cut), VF writes
     // only where the static map shows no newer write can retire them before
     // they land (the queue drops a superseded write, which a cut would show),
@@ -457,7 +437,6 @@ protected:
         if (readyCycle == m_cycle + kDirectMaxLatency || readyCycle > m_directPendingUntil)
             m_directPendingUntil = readyCycle;
     }
-    static bool directCommitEnabled();
     static bool vu0DirectEnabled();
     const uint8_t *directFlagMap(const uint8_t *vuCode, uint32_t codeSize, bool tracked);
     // Per-pair bits: kDirectMapFlags (flag writes may commit at issue),
