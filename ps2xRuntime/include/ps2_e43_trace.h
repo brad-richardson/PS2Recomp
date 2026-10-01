@@ -1,16 +1,7 @@
 // E43 DEV-ONLY draw-record census + mode-6 producer watch + h394 hash-call
-// log behind PS2X_E43_TRACE=<file>.
-//
-// Master gate: PS2X_E43_TRACE names the text file receiving every line
-// kind below. Unset/empty (default) = one relaxed atomic check per tap;
-// zero guest-visible behavior change, no I/O.
-// Optional binds: PS2X_E43_TRACE_FROM / PS2X_E43_TRACE_TO (inclusive
-// guest-vsync window for the census + producer watch; default 0..2^64-1,
-// vsync = the shared E41 VBlank mirror via noteVsync()),
-// PS2X_E43_H394_FROM / PS2X_E43_H394_TO (window for the h394 hash-call
-// log; default 1270..1400 — wide on purpose: run-to-run tick reach
-// varies, e42a died at ~1300; the analyzer buckets settled vsyncs),
-// PS2X_E43_PROD_MODE (0-15 or "any"; default 6).
+// log. CU4 B5 deleted the PS2X_E43_TRACE/FROM/TO/H394_FROM/H394_TO/PROD_MODE
+// tunables (stale CU1 S3 taps): the tap never arms (one relaxed atomic
+// check per tap); zero guest-visible behavior change, no I/O.
 // Hard caps: 40000 lines total, then quiet; dprod 4096; h394 16384;
 // first-8-records-per-(vsync,mode,source) rule bounds drecs; learned
 // producer pages stop at 64 (matching continues).
@@ -202,66 +193,9 @@ namespace detail
 
     inline void initLocked(State &s)
     {
+        // CU4 B5: the PS2X_E43_TRACE/FROM/TO/H394_FROM/H394_TO/PROD_MODE
+        // tunables are deleted (stale CU1 S3 taps). The tap never arms.
         s.initDone = true;
-        const char *file = std::getenv("PS2X_E43_TRACE");
-        if (!file || file[0] == '\0')
-        {
-            return;
-        }
-        s.path = file;
-        uint64_t from = 0u, to = ~0ull, hfrom = 1270u, hto = 1400u;
-        if (const char *env = std::getenv("PS2X_E43_TRACE_FROM"))
-        {
-            if (!parseU64(env, from))
-            {
-                return;
-            }
-        }
-        if (const char *env = std::getenv("PS2X_E43_TRACE_TO"))
-        {
-            if (!parseU64(env, to))
-            {
-                return;
-            }
-        }
-        if (const char *env = std::getenv("PS2X_E43_H394_FROM"))
-        {
-            if (!parseU64(env, hfrom))
-            {
-                return;
-            }
-        }
-        if (const char *env = std::getenv("PS2X_E43_H394_TO"))
-        {
-            if (!parseU64(env, hto))
-            {
-                return;
-            }
-        }
-        uint32_t prodMode = 6u;
-        if (const char *env = std::getenv("PS2X_E43_PROD_MODE"))
-        {
-            if (std::strcmp(env, "any") == 0)
-            {
-                prodMode = 16u;
-            }
-            else
-            {
-                uint64_t m = 0u;
-                if (!parseU64(env, m) || m > 15u)
-                {
-                    return;
-                }
-                prodMode = static_cast<uint32_t>(m);
-            }
-        }
-        s.from = from;
-        s.to = to;
-        s.h394From = hfrom;
-        s.h394To = hto;
-        s.prodMode = prodMode;
-        s.enabled = true;
-        enabledFlag().store(true, std::memory_order_relaxed);
     }
 
     inline void ensureInit()
