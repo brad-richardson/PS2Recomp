@@ -50,9 +50,8 @@ public:
     void setPacketPool(GsPacketPool *pool) { m_pool = pool; }
     // MP1 L3: drain() orders queues of up to two packets with the one
     // compare stable_sort would make, without the call (libc++ stable_sort
-    // allocates a temporary buffer per call for this element type). Off =
-    // stable_sort every drain.
-    void setSortSkip(bool on) { m_sortSkip = on; }
+    // allocates a temporary buffer per call for this element type). CU4 B1:
+    // unconditional (the stable_sort-every-drain path is deleted).
 
     void submit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl = false);
 
@@ -73,7 +72,6 @@ private:
     ShadowPacketFn m_shadowFn;
     ProcessPathPacketFn m_processPathFn;
     GsPacketPool *m_pool = nullptr; // GP4 H5: borrowed, null unless the diet block sets it
-    bool m_sortSkip = false;        // MP1 L3 (set before producers run)
     std::vector<GifArbiterPacket> m_queue;
 
     static bool isImagePacket(const uint8_t *data, uint32_t sizeBytes);

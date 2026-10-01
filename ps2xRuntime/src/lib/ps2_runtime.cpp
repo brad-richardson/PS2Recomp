@@ -2020,32 +2020,24 @@ bool PS2Runtime::syncCoreSubsystems()
             ps2_mtvu::jobEndFn() = [this]() { m_gs.flushWorkerWake(); };
         // MP1 L2: lean handoff (sleep-aware notifies, one worker lock per pop,
         // lock-free unit drain batches). Wake timing only: same commands, same
-        // order. Needs the deferred wakes (the job-end flush above); on by
-        // default with them, PS2X_GS_LEAN_HANDOFF=0 keeps the pre-MP1 path.
-        bool lean = wakeCmds != 0u;
-        if (const char *env = std::getenv("PS2X_GS_LEAN_HANDOFF"))
-            lean = lean && env[0] != '0';
-        m_gs.setWorkerLeanHandoff(lean);
+        // order. Needs the deferred wakes (the job-end flush above); always on
+        // with them (CU4 B1: the PS2X_GS_LEAN_HANDOFF=0 pre-MP1 path is deleted).
         // GP4 H5: pooled packet buffers (producers acquire, the worker
         // releases after execute). Same bytes, same order; alloc-free only.
         m_gs.setPacketPoolEnabled(true);
         m_gifArbiter.setPacketPool(&m_gs.packetPool());
         // MP1 L3: allocation-lean handoff (pool keeps larger buffers with
         // caps for the in-flight depth; drain skips the identity sort).
-        // Same bytes, same order; PS2X_GS_ALLOC_LEAN=0 keeps the pre-MP1 path.
-        bool allocLean = true;
-        if (const char *env = std::getenv("PS2X_GS_ALLOC_LEAN"))
-            allocLean = env[0] != '0';
-        m_gs.packetPool().setLean(allocLean);
-        m_gifArbiter.setSortSkip(allocLean);
+        // Same bytes, same order (CU4 B1: the PS2X_GS_ALLOC_LEAN=0 pre-MP1
+        // path is deleted).
         // GP4 H6: worker pops up to kPopBatch commands per mutex round
         // (FIFO order preserved; knob-off pops one-by-one as before).
         m_gs.setWorkerPopBatch(GsWorker::kPopBatch);
         std::cerr << "[gs:handoff] diet on (PS2X_GS_HANDOFF_DIET=1): H1 one command per packet, H2 moved bytes, "
                   << "H3 deferred wakes cmds=" << wakeCmds << " bytes=" << wakeBytes
                   << ", H4 queue descriptors=" << gsQueueDescriptors()
-                  << ", H5 pooled packet buffers, H6 pop batch=" << GsWorker::kPopBatch
-                  << ", MP1 lean=" << (lean ? 1 : 0) << " alloc-lean=" << (allocLean ? 1 : 0) << std::endl;
+                   << ", H5 pooled packet buffers, H6 pop batch=" << GsWorker::kPopBatch
+                   << ", MP1 lean=1 alloc-lean=1" << std::endl;
     }
     // MP2 census: UNPACK fast-path vs fallback per format + GIF bytes per
     // path (PS2X_MP2_CENSUS=1, default off). Logged, never hashed; MTVU

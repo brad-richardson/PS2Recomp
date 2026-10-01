@@ -207,7 +207,7 @@ void GifArbiter::drain()
     // libc++ and libstdc++, so do that without the call. drainsBefore is not
     // a strict weak ordering (the DIRECTHL/IMAGE rule), so three or more
     // packets always go through stable_sort itself.
-    if (m_sortSkip && m_queue.size() <= 2u)
+    if (m_queue.size() <= 2u)
     {
         if (m_queue.size() == 2u && drainsBefore(m_queue[1], m_queue[0]))
             std::swap(m_queue[0], m_queue[1]);

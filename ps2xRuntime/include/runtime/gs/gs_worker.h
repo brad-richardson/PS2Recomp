@@ -138,24 +138,18 @@ struct GsCommand
 class GsPacketPool
 {
 public:
-    static constexpr size_t kMaxBuffers = 32;
-    static constexpr size_t kMaxBytes = 8u * 1024u * 1024u;
-    // MP1 L3 (setLean): caps sized for the in-flight depth (deferred wakes
-    // queue 64 commands before a wake; the worker may lag further), and a
-    // full pool keeps the larger buffer. Without it, a pool full of small
-    // buffers misses every larger packet: the unit allocates and the GS
-    // worker frees it (~0.5 ms/f of scudo on the Odin worker, MP1 pre-check).
-    static constexpr size_t kLeanMaxBuffers = 128;
-    static constexpr size_t kLeanMaxBytes = 16u * 1024u * 1024u;
+    // MP1 L3: caps sized for the in-flight depth (deferred wakes queue 64
+    // commands before a wake; the worker may lag further), and a full pool
+    // keeps the larger buffer. (CU4 B1: the pre-MP1 caps are deleted; these
+    // are the only caps.)
+    static constexpr size_t kMaxBuffers = 128;
+    static constexpr size_t kMaxBytes = 16u * 1024u * 1024u;
     // Larger single buffers bypass the pool (rare multi-hundred-KB image
     // transfers must not evict the working set).
     static constexpr size_t kMaxBufferBytes = 256u * 1024u;
 
     void setEnabled(bool on) { m_enabled.store(on, std::memory_order_relaxed); }
     bool enabled() const { return m_enabled.load(std::memory_order_relaxed); }
-    // MP1 L3: set once, before producers run.
-    void setLean(bool on) { m_lean.store(on, std::memory_order_relaxed); }
-    bool lean() const { return m_lean.load(std::memory_order_relaxed); }
 
     // Take a buffer with capacity >= size when one is pooled, else a fresh
     // empty vector. The caller sizes/copies into it. Empty when disabled.
@@ -186,22 +180,19 @@ public:
         if (!enabled() || cap == 0u || cap > kMaxBufferBytes)
             return;
         bytes.clear();
-        const bool lean = m_lean.load(std::memory_order_relaxed);
-        const size_t maxBuffers = lean ? kLeanMaxBuffers : kMaxBuffers;
-        const size_t maxBytes = lean ? kLeanMaxBytes : kMaxBytes;
+        // MP1 L3: swap out the smallest pooled buffer when this one is
+        // larger and fits the byte cap in its place (a pool full of small
+        // buffers would otherwise miss every larger packet: the unit
+        // allocates and the GS worker frees it).
         Lock lock(m_lock);
-        if (m_free.size() >= maxBuffers || m_bytes + cap > maxBytes)
+        if (m_free.size() >= kMaxBuffers || m_bytes + cap > kMaxBytes)
         {
-            if (!lean)
-                return;
-            // MP1 L3: swap out the smallest pooled buffer when this one is
-            // larger and fits the byte cap in its place.
             size_t smallest = m_free.size();
             for (size_t i = 0; i < m_free.size(); ++i)
                 if (smallest == m_free.size() || m_free[i].capacity() < m_free[smallest].capacity())
                     smallest = i;
             if (smallest == m_free.size() || m_free[smallest].capacity() >= cap ||
-                m_bytes - m_free[smallest].capacity() + cap > maxBytes)
+                m_bytes - m_free[smallest].capacity() + cap > kMaxBytes)
                 return;
             m_bytes -= m_free[smallest].capacity();
             m_bytes += cap;
@@ -241,7 +232,6 @@ private:
     };
 
     std::atomic<bool> m_enabled{false};
-    std::atomic<bool> m_lean{false}; // MP1 L3
     mutable std::atomic_flag m_lock; // C++20: default-constructs clear
     std::vector<std::vector<uint8_t>> m_free; // guarded by m_lock
     size_t m_bytes = 0;                       // guarded by m_lock
@@ -296,16 +286,14 @@ public:
     // GP4 H6: worker pop batch size, 1 (default, one-by-one) to kPopBatch.
     // Set once, before producers run.
     void setPopBatch(size_t n);
-    // MP1 L2 (PS2X_GS_LEAN_HANDOFF, on with the diet): fewer mutex rounds and
+    // MP1 L2: lean handoff is unconditional (CU4 B1): fewer mutex rounds and
     // futex calls per handoff. (a) Producers notify m_hasWork only while the
     // worker sleeps, and the worker notifies m_hasSpace only while a producer
     // waits for space; (b) the worker clears m_executing inside its next pop
     // lock instead of a second lock per pop; (c) local batches (below). Same
-    // commands, same order, same bounds: wake timing only. Set once, before
-    // producers run, and only together with deferred wakes.
-    void setLeanHandoff(bool on);
-    bool leanHandoff() const { return m_lean.load(std::memory_order_relaxed); }
-    // MP1 L2 (c): a thread-local batch for the MTVU unit thread (lean + deferred
+    // commands, same order, same bounds: wake timing only. Requires the
+    // deferred wakes.
+    // MP1 L2 (c): a thread-local batch for the MTVU unit thread (deferred
     // wakes on). No mutex round: enqueues inside it defer their wake like an
     // endBatch(mayDefer) would (wake now once the deferred-wake thresholds are
     // reached, else leave it pending for flushWake at job end). Nest-safe;
@@ -354,7 +342,6 @@ private:
     // m_hasWork / producers blocked on m_hasSpace. Lean mode notifies only then.
     bool m_workerIdle = false;
     uint32_t m_spaceWaiters = 0;
-    std::atomic<bool> m_lean{false}; // fixed before producers run
 
     // Monotonic diagnostics, safe to read from any thread.
     std::atomic<uint64_t> m_enqueuedCount{0};

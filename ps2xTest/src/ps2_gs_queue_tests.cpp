@@ -1150,15 +1150,15 @@ void register_ps2_gs_queue_tests()
         });
 
         // MP1 L2: lean handoff + thread-local unit batches deliver every
-        // command in FIFO order with fewer wakes than the GF1 path, and
-        // leave nothing stale at job-end flushes.
+        // command in FIFO order with fewer wakes, and leave nothing stale
+        // at job-end flushes. (CU4 B1: lean is unconditional; the GF1
+        // non-lean leg is deleted.)
         tc.Run("MP1 lean local batches keep FIFO order and cut wakes", [](TestCase &t)
         {
-            auto run = [](bool lean, std::vector<uint32_t> &seen, uint64_t &wakes, uint64_t &watchdog, bool &quiet)
+            auto run = [](std::vector<uint32_t> &seen, uint64_t &wakes, uint64_t &watchdog, bool &quiet)
             {
                 GsWorker worker(0u, 0u, [&](GsCommand &cmd) { seen.push_back(cmd.u32b); });
                 worker.setDeferredWakes(64u, 256u * 1024u);
-                worker.setLeanHandoff(lean);
                 worker.start();
                 uint32_t next = 0;
                 uint64_t rng = 0x9E3779B97F4A7C15ull;
@@ -1171,19 +1171,13 @@ void register_ps2_gs_queue_tests()
                             const int drains = 1 + static_cast<int>(rng % 40u);
                             for (int d = 0; d < drains; ++d)
                             {
-                                if (lean)
-                                    GsWorker::beginLocalBatch();
-                                else
-                                    worker.beginBatch();
+                                GsWorker::beginLocalBatch();
                                 GsCommand c;
                                 c.kind = GsCmdKind::GifPacket;
                                 c.u32b = next++;
                                 c.bytes.resize(16u + (rng % 64u) * 16u, 0x5Au);
                                 worker.enqueue(std::move(c));
-                                if (lean)
-                                    GsWorker::endLocalBatch();
-                                else
-                                    worker.endBatch(true);
+                                GsWorker::endLocalBatch();
                                 if ((rng >> 20) % 7u == 0u)
                                     std::this_thread::sleep_for(std::chrono::microseconds(rng % 300u));
                             }
@@ -1199,23 +1193,17 @@ void register_ps2_gs_queue_tests()
                 watchdog = worker.watchdogCount();
                 return next;
             };
-            std::vector<uint32_t> seenLean, seenGf1;
-            uint64_t wakesLean = 0, wakesGf1 = 0, wdLean = 0, wdGf1 = 0;
-            bool quietLean = false, quietGf1 = false;
-            const uint32_t nLean = run(true, seenLean, wakesLean, wdLean, quietLean);
-            const uint32_t nGf1 = run(false, seenGf1, wakesGf1, wdGf1, quietGf1);
+            std::vector<uint32_t> seenLean;
+            uint64_t wakesLean = 0, wdLean = 0;
+            bool quietLean = false;
+            const uint32_t nLean = run(seenLean, wakesLean, wdLean, quietLean);
             t.Equals(static_cast<uint64_t>(seenLean.size()), static_cast<uint64_t>(nLean), "every command should execute");
             bool ordered = true;
             for (size_t i = 0; i < seenLean.size(); ++i)
                 ordered = ordered && seenLean[i] == static_cast<uint32_t>(i);
             t.IsTrue(ordered, "lean commands should execute in FIFO order");
-            t.IsTrue(seenLean == seenGf1, "lean and GF1 paths should execute the same sequence");
             t.Equals(wdLean, 0ull, "no deferred wake should go stale with job-end flushes");
             t.IsTrue(quietLean, "the worker should reach quiescence after the last flush");
-            t.IsTrue(wakesLean <= wakesGf1, "lean handoff should not notify more than the GF1 path");
-            (void)nGf1;
-            (void)wdGf1;
-            (void)quietGf1;
         });
 
         // MP1 L2: a local batch that fills the queue while the worker sleeps
@@ -1225,7 +1213,6 @@ void register_ps2_gs_queue_tests()
             std::atomic<int> executed{0};
             GsWorker worker(8u, 0u, [&](GsCommand &) { executed.fetch_add(1, std::memory_order_relaxed); });
             worker.setDeferredWakes(1024u, 64u * 1024u * 1024u);
-            worker.setLeanHandoff(true);
             worker.start();
             std::this_thread::sleep_for(std::chrono::milliseconds(20)); // worker asleep on an empty queue
             GsWorker::beginLocalBatch();
@@ -1248,7 +1235,6 @@ void register_ps2_gs_queue_tests()
         {
             GsWorker worker(0u, 0u, [](GsCommand &) {});
             worker.setDeferredWakes(64u, 256u * 1024u);
-            worker.setLeanHandoff(true);
             worker.start();
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             GsWorker::beginLocalBatch();
@@ -1379,81 +1365,136 @@ void register_ps2_gs_queue_tests()
             t.Equals(pool.pooledCount(), before, "oversize release should bypass the pool");
         });
 
-        // MP1 L3: a lean pool keeps the larger buffer when full, honors its
-        // caps, and then serves every size from the pool.
-        tc.Run("MP1 L3 lean pool keeps larger buffers under its caps", [](TestCase &t)
+        // MP1 L3: the pool keeps the larger buffer when full, honors its
+        // caps, and then serves every size from the pool. (CU4 B1: the only
+        // caps; the pre-MP1 leg is deleted.)
+        tc.Run("MP1 L3 pool keeps larger buffers under its caps", [](TestCase &t)
         {
             GsPacketPool pool;
             pool.setEnabled(true);
-            pool.setLean(true);
-            for (size_t i = 0; i < GsPacketPool::kLeanMaxBuffers; ++i)
+            for (size_t i = 0; i < GsPacketPool::kMaxBuffers; ++i)
             {
                 std::vector<uint8_t> b(64u, 0x5Au);
                 pool.release(std::move(b));
             }
-            t.Equals(pool.pooledCount(), GsPacketPool::kLeanMaxBuffers, "lean pool should fill to its buffer cap");
-            for (size_t i = 0; i < GsPacketPool::kLeanMaxBuffers; ++i)
+            t.Equals(pool.pooledCount(), GsPacketPool::kMaxBuffers, "pool should fill to its buffer cap");
+            for (size_t i = 0; i < GsPacketPool::kMaxBuffers; ++i)
             {
                 std::vector<uint8_t> b(64u * 1024u, 0x33u);
                 pool.release(std::move(b));
                 t.IsTrue(b.capacity() == 0u || b.capacity() < 64u * 1024u,
                          "a swapped release should hand back the smaller buffer");
             }
-            t.IsTrue(pool.pooledCount() <= GsPacketPool::kLeanMaxBuffers, "lean pool should honor the buffer cap");
-            t.IsTrue(pool.pooledBytes() <= GsPacketPool::kLeanMaxBytes, "lean pool should honor the byte cap");
+            t.IsTrue(pool.pooledCount() <= GsPacketPool::kMaxBuffers, "pool should honor the buffer cap");
+            t.IsTrue(pool.pooledBytes() <= GsPacketPool::kMaxBytes, "pool should honor the byte cap");
             std::vector<uint8_t> got = pool.acquire(48u * 1024u);
             t.IsTrue(got.capacity() >= 48u * 1024u, "a large request should now hit the pool");
-            GsPacketPool strict;
-            strict.setEnabled(true);
-            for (size_t i = 0; i < GsPacketPool::kMaxBuffers + 8u; ++i)
-            {
-                std::vector<uint8_t> b(64u, 0x5Au);
-                strict.release(std::move(b));
-            }
-            std::vector<uint8_t> big(64u * 1024u, 0x33u);
-            strict.release(std::move(big));
-            t.IsTrue(strict.acquire(48u * 1024u).empty(), "the pre-MP1 pool should keep dropping larger buffers");
         });
 
-        // MP1 L3: drain with the sort skip delivers exactly the stable-sorted
-        // order on random path/flag mixes (1..5 packets per drain).
-        tc.Run("MP1 L3 arbiter sort skip keeps the drain order", [](TestCase &t)
+        // MP1 L3: drain orders queues of up to two packets with the one
+        // compare stable_sort would make (CU4 B1: unconditional; the
+        // stable_sort-every-drain path is deleted). Three or more packets
+        // go through stable_sort itself.
+        tc.Run("MP1 L3 arbiter drain order", [](TestCase &t)
         {
-            auto run = [](bool skip, uint64_t seed, std::vector<uint32_t> &order)
+            auto drainIds = [](const std::vector<std::pair<GifPathId, bool>> &paths)
             {
+                std::vector<uint32_t> order;
                 GifArbiter arb([&](const uint8_t *data, uint32_t)
                                {
                                    uint32_t id = 0;
                                    std::memcpy(&id, data + 16, sizeof(id));
                                    order.push_back(id);
                                });
-                arb.setSortSkip(skip);
-                uint64_t rng = seed;
                 uint32_t id = 0;
-                for (int round = 0; round < 300; ++round)
+                for (const auto &[path, directHl] : paths)
                 {
-                    rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-                    const int n = 1 + static_cast<int>(rng % 5u);
-                    for (int k = 0; k < n; ++k)
-                    {
-                        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
-                        std::vector<uint8_t> pkt(32u, 0u);
-                        const GifPathId path = static_cast<GifPathId>(1u + rng % 3u);
-                        if (path == GifPathId::Path3 && (rng >> 8) % 2u == 0u)
-                            pkt[7] = 0x08u; // tag FLG=2 (IMAGE)
-                        std::memcpy(pkt.data() + 16, &id, sizeof(id));
-                        ++id;
-                        arb.submit(path, pkt.data(), static_cast<uint32_t>(pkt.size()), (rng >> 12) % 2u == 0u);
-                    }
-                    arb.drain();
+                    std::vector<uint8_t> pkt(32u, 0u);
+                    std::memcpy(pkt.data() + 16, &id, sizeof(id));
+                    ++id;
+                    arb.submit(path, pkt.data(), static_cast<uint32_t>(pkt.size()), directHl);
                 }
+                arb.drain();
+                return order;
             };
+            // Path priority: Path1 drains before Path3 either way round.
+            t.IsTrue((drainIds({{GifPathId::Path3, false}, {GifPathId::Path1, false}}) ==
+                       std::vector<uint32_t>{1u, 0u}),
+                      "Path1 should drain before Path3");
+            t.IsTrue((drainIds({{GifPathId::Path1, false}, {GifPathId::Path3, false}}) ==
+                       std::vector<uint32_t>{0u, 1u}),
+                      "already-ordered pair should keep its order");
+            // DIRECTHL cannot preempt a PATH3 IMAGE transfer.
+            auto imagePkt = [](GifPathId path, bool image, uint32_t id)
+            {
+                std::vector<uint8_t> pkt(32u, 0u);
+                if (image)
+                    pkt[7] = 0x08u; // tag FLG=2 (IMAGE)
+                std::memcpy(pkt.data() + 16, &id, sizeof(id));
+                return pkt;
+            };
+            {
+                std::vector<uint32_t> order;
+                GifArbiter arb([&](const uint8_t *data, uint32_t)
+                               {
+                                   uint32_t id = 0;
+                                   std::memcpy(&id, data + 16, sizeof(id));
+                                   order.push_back(id);
+                               });
+                std::vector<uint8_t> image = imagePkt(GifPathId::Path3, true, 0u);
+                std::vector<uint8_t> hl = imagePkt(GifPathId::Path2, false, 1u);
+                arb.submit(GifPathId::Path2, hl.data(), static_cast<uint32_t>(hl.size()), true);
+                arb.submit(GifPathId::Path3, image.data(), static_cast<uint32_t>(image.size()), false);
+                arb.drain();
+                t.IsTrue(order == std::vector<uint32_t>{0u, 1u},
+                         "PATH3 IMAGE should drain before DIRECTHL");
+            }
+            // Random mixes drain deterministically and preserve every packet.
             for (uint64_t seed : {0x9E3779B97F4A7C15ull, 0x1234567ull, 0xDEADBEEFCAFEull})
             {
                 std::vector<uint32_t> a, b;
-                run(false, seed, a);
-                run(true, seed, b);
-                t.IsTrue(!a.empty() && a == b, "sort skip should drain in the same order as the stable sort");
+                uint32_t submitted = 0;
+                auto run = [](uint64_t s, std::vector<uint32_t> &order, uint32_t &out)
+                {
+                    GifArbiter arb([&](const uint8_t *data, uint32_t)
+                                   {
+                                       uint32_t id = 0;
+                                       std::memcpy(&id, data + 16, sizeof(id));
+                                       order.push_back(id);
+                                   });
+                    uint64_t rng = s;
+                    uint32_t id = 0;
+                    for (int round = 0; round < 300; ++round)
+                    {
+                        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                        const int n = 1 + static_cast<int>(rng % 5u);
+                        for (int k = 0; k < n; ++k)
+                        {
+                            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                            std::vector<uint8_t> pkt(32u, 0u);
+                            const GifPathId path = static_cast<GifPathId>(1u + rng % 3u);
+                            if (path == GifPathId::Path3 && (rng >> 8) % 2u == 0u)
+                                pkt[7] = 0x08u; // tag FLG=2 (IMAGE)
+                            std::memcpy(pkt.data() + 16, &id, sizeof(id));
+                            ++id;
+                            arb.submit(path, pkt.data(), static_cast<uint32_t>(pkt.size()), (rng >> 12) % 2u == 0u);
+                        }
+                        arb.drain();
+                    }
+                    out = id;
+                };
+                uint32_t nA = 0, nB = 0;
+                run(seed, a, nA);
+                run(seed, b, nB);
+                t.IsTrue(!a.empty() && a == b, "same seed should drain in the same order");
+                t.Equals(static_cast<uint64_t>(a.size()), static_cast<uint64_t>(nA),
+                         "every submitted packet should drain exactly once");
+                std::vector<uint32_t> sorted = a;
+                std::sort(sorted.begin(), sorted.end());
+                bool ids = sorted.size() == static_cast<size_t>(nA);
+                for (size_t i = 0; i < sorted.size() && ids; ++i)
+                    ids = sorted[i] == static_cast<uint32_t>(i);
+                t.IsTrue(ids, "drained ids should be exactly the submitted set");
             }
         });
 

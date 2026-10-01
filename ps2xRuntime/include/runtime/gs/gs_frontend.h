@@ -121,14 +121,9 @@ public:
     // GF1 H3: mayDefer = the caller is the MTVU unit thread (see GsWorker).
     void endWorkerBatch(bool mayDefer = false) { if (m_worker) m_worker->endBatch(mayDefer); }
     void flushWorkerWake() { if (m_worker) m_worker->flushWake(); }
-    // MP1 L2: lean handoff (see GsWorker::setLeanHandoff); set by the diet
-    // block after the deferred wakes. Local batches need both.
-    void setWorkerLeanHandoff(bool on)
-    {
-        if (m_worker)
-            m_worker->setLeanHandoff(on);
-    }
-    bool workerLocalBatchesOk() const { return m_worker && m_worker->leanHandoff(); }
+    // MP1 L2: lean handoff is unconditional (CU4 B1); local batches need the
+    // worker only.
+    bool workerLocalBatchesOk() const { return m_worker != nullptr; }
     void setWorkerDeferredWakes(uint32_t wakeCommands, size_t wakeBytes)
     {
         if (m_worker)
