@@ -211,13 +211,11 @@ bool adoptData(PS2Memory& memory)
 #if defined(PS2X_MICROVU_LOADABLE)
     // MP1 L1: the microvu engine's library exports its VU1 data memory;
     // keeping the runtime's VU1 data there removes run()'s two 16 KiB
-    // staging copies. Same bytes at every point the runtime can observe
+    // staging copies (CU4 B3: the PS2X_MICROVU_BRIDGE_LEAN=0 copy-keeping
+    // path is deleted). Same bytes at every point the runtime can observe
     // (EE access and det-hash ticks sync the unit first). The offline engine
     // keeps its own copies (it may MISS and restart statically).
-    // PS2X_MICROVU_BRIDGE_LEAN=0 keeps the copies (the library reads the
-    // same knob for its code diff).
-    const char* lean = std::getenv("PS2X_MICROVU_BRIDGE_LEAN");
-    if (!s_selected || s_engine != "microvu" || !s_api.vu1Data || (lean && lean[0] == '0'))
+    if (!s_selected || s_engine != "microvu" || !s_api.vu1Data)
         return false;
     uint8_t* const lib = s_api.vu1Data();
     if (!lib)

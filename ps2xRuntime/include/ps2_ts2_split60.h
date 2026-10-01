@@ -197,16 +197,8 @@ inline bool countEnabled() noexcept
     return on;
 }
 
-// HL1: PS2X_TS2_HL1_CACHE=0 restores the legacy per-load findThread scan
-// (default on). Exact either way; the knob exists for A/B and fallback.
-inline bool cacheDisabled() noexcept
-{
-    static const bool off = [] {
-        const char *s = std::getenv("PS2X_TS2_HL1_CACHE");
-        return s && s[0] == '0' && s[1] == '\0';
-    }();
-    return off;
-}
+// HL1: guest-thread record cache, unconditional (CU4 B3: the
+// PS2X_TS2_HL1_CACHE=0 legacy per-load scan is deleted). Exact either way.
 
 inline uint32_t read32(const uint8_t *ram, uint32_t address) noexcept
 {
@@ -331,11 +323,6 @@ inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
     if (s.guestInterrupt) return bits;
     if (countEnabled()) ++s.halfLoadCalls;
     const ThreadData *td;
-    if (cacheDisabled())
-    {
-        td = s.findThread(s.guestThread);
-    }
-    else
     {
         if (!s.cachedValid || s.cachedKey != s.guestThread)
         {
@@ -392,8 +379,8 @@ inline void countTick(uint64_t tick) noexcept
                  static_cast<unsigned long long>(s.halfLoadCalls),
                  static_cast<unsigned long long>(s.halfLoadActive),
                  static_cast<unsigned long long>(s.halfLoadConverted),
-                 static_cast<unsigned long long>(s.halfLoadRefreshes),
-                 cacheDisabled() ? "off" : "on");
+                  static_cast<unsigned long long>(s.halfLoadRefreshes),
+                  "on");
     std::fflush(stderr);
 }
 
