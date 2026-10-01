@@ -1253,20 +1253,70 @@ namespace ps2_mtvu
                 return completed.load(std::memory_order_acquire) != submitted.load(std::memory_order_relaxed);
             }
 
+            // MW1: PS2X_MTVU_WAIT. park (default): spin kParkSpinNs with a CPU
+            // pause, then sleep on cvDone. spin: the old path, 256 yields
+            // (swtch_pri on Darwin, ~6 % of GameThread busy at the full-120
+            // VBlank) and then cvDone. Same condition and ordering either way:
+            // every `completed` bump happens under `m` and is followed by
+            // cvDone.notify_all(), and the sleep re-checks under `m`, so a
+            // completion that lands between the spin and the sleep is seen
+            // by the predicate and no wake is lost.
+            static constexpr uint64_t kParkSpinNs = 4000u;
+            static bool parseWaitPark(const char *e)
+            {
+                return !(e && std::strcmp(e, "spin") == 0);
+            }
+            int waitPark = -1;                   // -1 unresolved; EE only
+            uint64_t waitParks = 0;              // EE only: waits that slept
+            std::function<void()> testBeforePark; // suite hook: runs before the sleep
+            static inline void cpuPause()
+            {
+#if defined(__aarch64__) || defined(_M_ARM64)
+                __asm__ __volatile__("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+                __builtin_ia32_pause();
+#endif
+            }
+
             // Wait until `target` jobs have completed; returns ns waited.
             uint64_t waitFor(uint64_t target)
             {
                 if (completed.load(std::memory_order_acquire) >= target)
                     return 0u;
                 const uint64_t t0 = nowNs();
-                for (int spin = 0; spin < 256; ++spin)
+                if (waitPark < 0)
                 {
-                    if (completed.load(std::memory_order_acquire) >= target)
-                        return nowNs() - t0;
-                    std::this_thread::yield();
+                    waitPark = parseWaitPark(std::getenv("PS2X_MTVU_WAIT")) ? 1 : 0;
+                    std::fprintf(stderr, "[mtvu] wait=%s\n", waitPark ? "park" : "spin");
                 }
+                if (waitPark)
+                {
+                    for (unsigned i = 0;; ++i)
+                    {
+                        if (completed.load(std::memory_order_acquire) >= target)
+                            return nowNs() - t0;
+                        if ((i & 15u) == 15u && nowNs() - t0 >= kParkSpinNs)
+                            break;
+                        cpuPause();
+                    }
+                }
+                else
+                {
+                    for (int spin = 0; spin < 256; ++spin)
+                    {
+                        if (completed.load(std::memory_order_acquire) >= target)
+                            return nowNs() - t0;
+                        std::this_thread::yield();
+                    }
+                }
+                if (testBeforePark)
+                    testBeforePark();
                 std::unique_lock<std::mutex> lock(m);
-                cvDone.wait(lock, [&] { return completed.load(std::memory_order_acquire) >= target; });
+                if (completed.load(std::memory_order_acquire) < target)
+                {
+                    ++waitParks;
+                    cvDone.wait(lock, [&] { return completed.load(std::memory_order_acquire) >= target; });
+                }
                 return nowNs() - t0;
             }
         };

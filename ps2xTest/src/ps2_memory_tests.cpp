@@ -13,6 +13,10 @@
 #include "Stubs/LibC.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <thread>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -476,6 +480,76 @@ void register_ps2_memory_tests()
 {
     MiniTest::Case("PS2Memory", [](TestCase &tc)
     {
+        tc.Run("MW1 MTVU waitFor park: no lost wake when the job completes around the sleep", [](TestCase &t)
+        {
+            using W = ps2_mtvu::detail::Worker;
+            t.IsTrue(W::parseWaitPark(nullptr), "unset = park");
+            t.IsTrue(W::parseWaitPark("park"), "park = park");
+            t.IsFalse(W::parseWaitPark("spin"), "spin = spin");
+            t.IsTrue(W::parseWaitPark("bogus"), "unknown = park");
+
+            ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Threaded);
+            W &w = ps2_mtvu::detail::worker();
+            const int mode0 = w.waitPark;
+            for (int park : {1, 0})
+            {
+                w.waitPark = park;
+                const char *arm = park ? "park" : "spin";
+                // Case A: the job finishes after the spin gives up and before
+                // waitFor takes the lock (the hook forces that order).
+                {
+                    std::atomic<bool> gate{false};
+                    ps2_mtvu::submit([&gate] {
+                        while (!gate.load(std::memory_order_acquire))
+                            std::this_thread::yield();
+                    }, 0u, 0u);
+                    const uint64_t target = w.submitted.load(std::memory_order_relaxed);
+                    bool hookRan = false;
+                    w.testBeforePark = [&] {
+                        hookRan = true;
+                        gate.store(true, std::memory_order_release);
+                        while (w.completed.load(std::memory_order_acquire) < target)
+                            std::this_thread::yield();
+                    };
+                    const uint64_t parks0 = w.waitParks;
+                    auto f = std::async(std::launch::async, [&w, target] { return w.waitFor(target); });
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    if (!done)
+                    {
+                        gate.store(true);
+                        f.wait();
+                    }
+                    w.testBeforePark = nullptr;
+                    t.IsTrue(done, std::string(arm) + ": completion between spin and sleep is not lost");
+                    t.IsTrue(hookRan, std::string(arm) + ": the wait reached the sleep path");
+                    t.Equals(w.waitParks, parks0, std::string(arm) + ": already complete under the lock, no sleep");
+                }
+                // Case B: the job finishes while the waiter sleeps.
+                {
+                    std::atomic<bool> gate{false};
+                    ps2_mtvu::submit([&gate] {
+                        while (!gate.load(std::memory_order_acquire))
+                            std::this_thread::yield();
+                    }, 0u, 0u);
+                    const uint64_t target = w.submitted.load(std::memory_order_relaxed);
+                    const uint64_t parks0 = w.waitParks;
+                    auto f = std::async(std::launch::async, [&w, target] { return w.waitFor(target); });
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    gate.store(true, std::memory_order_release);
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    if (done)
+                        t.IsTrue(f.get() > 0u, std::string(arm) + ": waited ns reported");
+                    else
+                        f.wait();
+                    t.IsTrue(done, std::string(arm) + ": a sleeping waiter is woken by the completion");
+                    t.Equals(w.waitParks, parks0 + 1u, std::string(arm) + ": the waiter slept once");
+                    t.IsTrue(w.completed.load() >= target, std::string(arm) + ": completed reached target");
+                }
+            }
+            w.waitPark = mode0;
+            ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+        });
+
         tc.Run("uncached aliases map to same RDRAM bytes", [](TestCase &t)
         {
             PS2Memory mem;
