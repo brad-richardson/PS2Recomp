@@ -386,6 +386,60 @@ namespace
         return true;
     }
 
+    // TK15c: SSX 3 draw-bucket table guard (PS2X_SSX3_DRAWTABLE_GUARD=1,
+    // default off; guest-affecting, only when the table is full). Sibling of
+    // the patch-cache guard above (different function, same budget class).
+    // sub_00362DE8 appends {key, head} entries to the per-frame draw table
+    // at [s4+count*8+0x7CA8] (count at [s4+0x7CA4], s4 = frame+0x60000) with
+    // no bound check; the table holds 1024 entries. Imported Tricky terrain
+    // (Elysium Alps) puts 1024+ buckets in view: entry 1024 lands on the
+    // per-item struct that sub_00363C20 rewrites per item, producing GIF-like
+    // garbage items (0x8804018C) and a fatal GS VRAM alloc (TK15b: count
+    // 0x400 at t2473, up to 0x40C). Stock courses never exceed 1024.
+    // Every append iteration calls func_364240 (which returns the bucket key
+    // in v0) immediately before the hash/append sequence, from 0x36307C
+    // (loop 1) and 0x363350 (loop 2); the fallthrough runs the append
+    // unconditionally, so the hook observes but never skips the call
+    // (generated code continues inline at the fallthrough after a handled
+    // dispatch; a pc redirect would be clobbered). When the count has
+    // reached the cap, write back cap-1: the iteration's own append then
+    // reuses slot 1023 for a genuine {key, head} pair and the count returns
+    // to the cap. Extra buckets are dropped by eviction for the frame, the
+    // table never exceeds 1024, and every stored entry is genuine.
+    constexpr uint32_t kSsx3DrawKeyCall = 0x00364240u;
+    constexpr uint32_t kSsx3DrawAppendLoop1Call = 0x0036307Cu;
+    constexpr uint32_t kSsx3DrawAppendLoop2Call = 0x00363350u;
+    constexpr int32_t kSsx3DrawTableCap = 1024;
+    std::atomic<uint64_t> g_ssx3DrawTableClamps{0u};
+
+    void ssx3DrawTableGuard(uint8_t *rdram, R5900Context *ctx, uint32_t sourcePc)
+    {
+        static const bool on = [] {
+            const char *e = std::getenv("PS2X_SSX3_DRAWTABLE_GUARD");
+            const bool v = e && e[0] == '1';
+            if (v)
+                std::fprintf(stderr, "[ssx3-drawtable-guard] armed (draw table in 0x362DE8 clamps at 1024 entries)\n");
+            return v;
+        }();
+        if (!on || !rdram || !ctx)
+            return;
+        if (sourcePc != kSsx3DrawAppendLoop1Call && sourcePc != kSsx3DrawAppendLoop2Call)
+            return;
+        const uint32_t countAddr = (getRegU32(ctx, 20) + 0x7CA4u) & PS2_RAM_MASK;
+        if (countAddr > PS2_RAM_SIZE - 4u)
+            return;
+        int32_t count = 0;
+        std::memcpy(&count, rdram + countAddr, 4u);
+        if (count < kSsx3DrawTableCap)
+            return;
+        const int32_t clamped = kSsx3DrawTableCap - 1;
+        std::memcpy(rdram + countAddr, &clamped, 4u);
+        const uint64_t n = g_ssx3DrawTableClamps.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        if (n <= 4u || (n & (n - 1u)) == 0u)
+            std::fprintf(stderr, "[ssx3-drawtable-guard] clamp #%llu loop=%c count=%d\n",
+                         static_cast<unsigned long long>(n), (sourcePc == kSsx3DrawAppendLoop1Call) ? '1' : '2', count);
+    }
+
     void enforceSsx3Widescreen(uint8_t *rdram, uint32_t sourcePc)
     {
         if (!rdram || !g_ssx3WidescreenActive.load(std::memory_order_acquire)) return;
@@ -3589,6 +3643,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     {
         ctx->pc = fallthroughPc;
         return true;
+    }
+    if (targetPc == kSsx3DrawKeyCall &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
+    {
+        ssx3DrawTableGuard(rdram, ctx, sourcePc);
     }
     // E43 draw-record census (dev-only, default off; self-gated on the
     // target pc first so the common path pays one compare).
