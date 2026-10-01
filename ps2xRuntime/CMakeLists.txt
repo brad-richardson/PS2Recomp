@@ -1060,7 +1060,12 @@ if(PS2X_IS_VITA)
     endif()
 endif()
 
-if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+# IG1: multi-config generators (Xcode, the iOS build) leave CMAKE_BUILD_TYPE
+# empty, so key on the generator too. Everything below is per-config already
+# (INTERPROCEDURAL_OPTIMIZATION_RELEASE, $<CONFIG:...>), so single-config
+# builds are unchanged.
+get_property(PS2X_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo" OR PS2X_MULTI_CONFIG)
     EnableFastReleaseMode(ps2_runtime)
     EnableFastReleaseMode(ps2EntryRunner)
 
