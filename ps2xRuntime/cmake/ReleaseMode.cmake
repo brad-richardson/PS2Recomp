@@ -35,8 +35,11 @@ function(EnableFastReleaseMode TargetName)
     endif()
 
     if(IPO_SUPPORTED)
+        # BF2c: AGP builds the RelWithDebInfo cmake config (not Release), so
+        # the IPO property must cover both configs to have any effect there.
         set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
     else()
-        message(WARNING "Interprocedural optimization not supported: ${ipo_error}")
+        message(WARNING "Interprocedural optimization not supported: ${IPO_ERROR}")
     endif()
 endfunction()

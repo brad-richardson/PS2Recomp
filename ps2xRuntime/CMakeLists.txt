@@ -802,7 +802,9 @@ if(PS2X_GAME_CODEGEN_DIR)
     # BF2: optional ThinLTO on the generated game objects (Android + Mac).
     # Default OFF: unset = no property, Release flags byte-identical.
     if(PS2X_GAME_IPO AND IPO_SUPPORTED)
+        # BF2c: alongside _RELEASE for the AGP RelWithDebInfo config (see ReleaseMode.cmake).
         set_property(TARGET ps2_game_objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET ps2_game_objects PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
     endif()
     ps2x_bf2_android_march_target(ps2_game_objects)
     if(PS2X_IS_ANDROID AND NOT MSVC)
