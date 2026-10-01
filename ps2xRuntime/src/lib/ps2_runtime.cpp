@@ -354,8 +354,16 @@ namespace
     // 900+ far patches in view). The four callers (0x38BEE0, 0x38BF68,
     // 0x38BFE0, 0x38C098) already treat a negative slot as "not drawn this
     // frame" and retry next frame, so return -1 without running the body.
+    // TK17: with t0 != 0 (types 1/2, patch [+0xC] flag) the body also pops a
+    // second buffer from another free stack (count [a0+0x1D8+4*type], stack
+    // [a0+0x1CC+4*type], buffers [a0+0x1B4+4*type] + index*0xC0/0x1B0/0x300)
+    // with no empty check at all: at count 0 it reads stack[-1] as the index
+    // (type 1: 0x251) and func_374518 writes that buffer, which lands on the
+    // patch packet blocks (TK17: Elysium t4368 overwrote type-0 slot 474's
+    // DMA tag, and VU1 ran away on the garbage). Same skip for that case.
     constexpr uint32_t kSsx3PatchCacheAlloc = 0x003747A0u;
     std::atomic<uint64_t> g_ssx3PatchCacheSkips{0u};
+    std::atomic<uint64_t> g_ssx3PatchCacheSkips2{0u};
 
     bool ssx3PatchCacheGuard(uint8_t *rdram, R5900Context *ctx)
     {
@@ -363,7 +371,7 @@ namespace
             const char *e = std::getenv("PS2X_SSX3_PATCH_CACHE_GUARD");
             const bool v = e && e[0] == '1';
             if (v)
-                std::fprintf(stderr, "[ssx3-patch-guard] armed (0x3747A0 returns -1 when the slot stack is empty)\n");
+                std::fprintf(stderr, "[ssx3-patch-guard] armed (0x3747A0 returns -1 when a slot/buffer stack it pops is empty)\n");
             return v;
         }();
         if (!on || !rdram || !ctx)
@@ -377,7 +385,23 @@ namespace
         int32_t count = 0;
         std::memcpy(&count, rdram + countAddr, 4u);
         if (count > 0)
-            return false;
+        {
+            if (getRegU32(ctx, 8) == 0u)
+                return false;
+            const uint32_t count2Addr = (getRegU32(ctx, 4) + 0x1D8u + 4u * type) & PS2_RAM_MASK;
+            if (count2Addr > PS2_RAM_SIZE - 4u)
+                return false;
+            int32_t count2 = 0;
+            std::memcpy(&count2, rdram + count2Addr, 4u);
+            if (count2 > 0)
+                return false;
+            SET_GPR_S32(ctx, 2, -1);
+            const uint64_t n2 = g_ssx3PatchCacheSkips2.fetch_add(1u, std::memory_order_relaxed) + 1u;
+            if (n2 <= 4u || (n2 & (n2 - 1u)) == 0u)
+                std::fprintf(stderr, "[ssx3-patch-guard] skip2 #%llu type=%u count2=%d patch=0x%x\n",
+                             static_cast<unsigned long long>(n2), type, count2, getRegU32(ctx, 5));
+            return true;
+        }
         SET_GPR_S32(ctx, 2, -1);
         const uint64_t n = g_ssx3PatchCacheSkips.fetch_add(1u, std::memory_order_relaxed) + 1u;
         if (n <= 4u || (n & (n - 1u)) == 0u)
