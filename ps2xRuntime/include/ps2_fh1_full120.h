@@ -193,6 +193,7 @@ enum : uint32_t
     kFix12Recover = 1u << 3, // wipeout recovery bar decay 0x12cb68: +-1/240 per update (class b)
     kFix12Pulse = 1u << 4,   // rider colour pulse 0x2e39d8: 2pi/60 per update (class b)
     kFix12Crash = 1u << 5,   // wipeout body: motion solver 0x113648 fed a private 1/60 dt by 0x137750/0x1391a8 (class h)
+    kFix12FxTimer = 1u << 6, // rider-FX timer P+0xb44 (0x2e2388 in 0x2e2260): per-update 1/60 step shared with the trail-push dt (post-call add-back, FH21)
 };
 
 inline uint32_t fh12Item(const std::string &item) noexcept
@@ -203,6 +204,7 @@ inline uint32_t fh12Item(const std::string &item) noexcept
     if (item == "recover") return kFix12Recover;
     if (item == "pulse") return kFix12Pulse;
     if (item == "crash") return kFix12Crash;
+    if (item == "fxtimer") return kFix12FxTimer;
     return 0u;
 }
 
@@ -214,7 +216,7 @@ inline uint32_t fixMask12() noexcept
             return 0u;
         const std::string s(v);
         if (s == "all")
-            return kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse | kFix12Crash;
+            return kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse | kFix12Crash | kFix12FxTimer;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -1791,7 +1793,7 @@ inline bool flagsFix() noexcept
 struct PostCall
 {
     uint32_t target = 0u, sp = 0u, obj = 0u;
-    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step
+    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back
     uint32_t saved[6] = {};
 };
 inline PostCall g_post;
@@ -1870,6 +1872,13 @@ inline constexpr uint32_t kTexFlip = 0x35f410u;
 inline constexpr uint32_t kLoopMode1 = 0x341e48u;
 inline constexpr uint32_t kLoopMode2 = 0x341ec0u;
 inline constexpr uint32_t kLoopMode3 = 0x341f38u;
+// FH21 fxtimer: rider-FX timer updater sub_0x2e2260 (P+0xb44 word at +0x4,
+// stored at 0x2e2388, writer pc/ra 0x2e2388/0x2e2350 in the Happiness
+// mid-race lab). Its step f21 = [0x49f6a8] (1/60) is also the trail-push dt
+// (mov.s f12,f21 -> jal 0x3717c0), so the word must not be halved: the
+// pre-hook stashes obj/P+0xb44 and fh12OnReturn (kind 3) adds back half the
+// taken step, leaving trails at full rate.
+inline constexpr uint32_t kFxTimerUpdate = 0x2e2260u;
 
 inline float rdf(const uint8_t *ram, uint32_t a) noexcept
 {
@@ -1889,18 +1898,30 @@ inline void wrf(uint8_t *ram, uint32_t a, float f) noexcept
 
 inline bool fh12Hooks() noexcept
 {
-    static const bool on = enabled() && (fixMask12() & (kFix12Spin | kFix12Texanim | kFix12Loops)) != 0u;
+    static const bool on = enabled() && (fixMask12() & (kFix12Spin | kFix12Texanim | kFix12Loops | kFix12FxTimer)) != 0u;
     return on;
 }
 
 inline void fh12PreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 {
     if (!ctx || (targetPc != kSpinUpdate && targetPc != kTexUv && targetPc != kTexFlip &&
-                 targetPc != kLoopMode1 && targetPc != kLoopMode2 && targetPc != kLoopMode3))
+                 targetPc != kLoopMode1 && targetPc != kLoopMode2 && targetPc != kLoopMode3 &&
+                 targetPc != kFxTimerUpdate))
         return;
     const uint32_t m = fixMask12();
     const uint32_t o = getRegU32(ctx, 4);
     uint32_t w = 0u;
+    if (targetPc == kFxTimerUpdate)
+    {
+        if ((m & kFix12FxTimer) == 0u || !rd32(ram, o + 0x4u, g_post.saved[0]))
+            return;
+        g_post.kind = 3u;
+        g_post.target = targetPc;
+        g_post.sp = getRegU32(ctx, 29);
+        g_post.obj = o;
+        g_postArmed = true;
+        return;
+    }
     if (targetPc == kSpinUpdate)
     {
         if ((m & kFix12Spin) == 0u || !rd32(ram, o + 0x2cu, w) || w == 0u)
@@ -1944,6 +1965,18 @@ inline void fh12OnReturn(uint8_t *ram)
 {
     const uint32_t o = g_post.obj;
     auto bitsToF = [](uint32_t b) { float f = 0.0f; std::memcpy(&f, &b, 4); return f; };
+    if (g_post.kind == 3u)
+    {
+        // FH21 fxtimer: P+0xb44 was decremented by its full 1/60 step inside
+        // 0x2e2260 after the trail push consumed the same dt. Add back half
+        // the taken step so the timer runs at stock cadence per stock tick
+        // while trails keep the full dt. Untouched (early-out) words and the
+        // 0.0 clamp floor (stock clamps there too) are left alone.
+        const float t0 = bitsToF(g_post.saved[0]), t1 = rdf(ram, o + 0x4u);
+        if (t1 != t0 && t1 != 0.0f)
+            wrf(ram, o + 0x4u, t0 + (t1 - t0) * 0.5f);
+        return;
+    }
     if (g_post.kind == 1u)
     {
         const float r0 = bitsToF(g_post.saved[0]), r1 = rdf(ram, o + 0x10u);
