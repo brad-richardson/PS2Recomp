@@ -3154,19 +3154,6 @@ std::vector<uint32_t> PS2Memory::consumeCompletedDmacCauses()
     return causes;
 }
 
-namespace
-{
-    // PS2X_PATH3_EOP_GATE=0 restores the pre-RR1 flush-all-on-unmask model (dev A/B only).
-    bool path3EopGateEnabled()
-    {
-        static const bool on = [] {
-            const char *env = std::getenv("PS2X_PATH3_EOP_GATE");
-            return !(env && env[0] == '0');
-        }();
-        return on;
-    }
-}
-
 std::vector<uint32_t> PS2Memory::splitGifPacketsAtEop(const uint8_t *data, uint32_t sizeBytes)
 {
     // End offsets of each EOP-terminated GIF packet; a tail without EOP (or a
@@ -3207,11 +3194,6 @@ void PS2Memory::releaseOneMaskedPath3Packet()
         return;
     }
     ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
-    if (!path3EopGateEnabled())
-    {
-        flushMaskedPath3Packets();
-        return;
-    }
     if (m_path3Masked || m_path3MaskedFifo.empty())
         return;
     std::vector<uint8_t> packet = std::move(m_path3MaskedFifo.front());
@@ -3304,18 +3286,11 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
         ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "p3 %s bytes=%u queued=%zu", m_path3Masked ? "queue" : "send", sizeBytes, m_path3MaskedFifo.size());
         if (m_path3Masked)
         {
-            if (path3EopGateEnabled())
+            uint32_t start = 0u;
+            for (const uint32_t end : splitGifPacketsAtEop(data, sizeBytes))
             {
-                uint32_t start = 0u;
-                for (const uint32_t end : splitGifPacketsAtEop(data, sizeBytes))
-                {
-                    m_path3MaskedFifo.emplace_back(data + start, data + end);
-                    start = end;
-                }
-            }
-            else
-            {
-                m_path3MaskedFifo.emplace_back(data, data + sizeBytes);
+                m_path3MaskedFifo.emplace_back(data + start, data + end);
+                start = end;
             }
             return;
         }

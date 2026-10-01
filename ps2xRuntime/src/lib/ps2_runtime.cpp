@@ -4969,7 +4969,7 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                if (m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             uint8_t value8 = m_memory.read8(vaddr);
@@ -5018,7 +5018,7 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                if (m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             uint16_t value16 = m_memory.read16(vaddr);
@@ -5064,7 +5064,7 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                if (m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             uint32_t value = m_memory.read32(vaddr);
@@ -5112,7 +5112,7 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                if (m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             uint64_t value = m_memory.read64(vaddr);
@@ -5161,7 +5161,7 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
             if (!mtvuFree && !csrFree)
             {
                 ps2_mtvu::sync(mtvuReason, ctx ? ctx->pc : 0u);
-                if (ps2_pk::privDrainEnabled() && m_gs.queueEnabled())
+                if (m_gs.queueEnabled())
                     m_gs.drainQueue();
             }
             return m_memory.read128(vaddr);

@@ -127,17 +127,9 @@ enum VIFCmd : uint8_t
 
 namespace
 {
-    // VS1: bulk UNPACK fast path, default on. PS2X_VIF_FAST_UNPACK=0 restores
-    // the generic per-vector loop for every UNPACK (bisection lever).
-    bool vifFastUnpackEnabled()
-    {
-        static const bool on = [] {
-            if (const char *env = std::getenv("PS2X_VIF_FAST_UNPACK"))
-                return env[0] == '1' && env[1] == '\0';
-            return true;
-        }();
-        return on;
-    }
+    // VS1: bulk UNPACK fast path, unconditional (CU4 B2: the
+    // PS2X_VIF_FAST_UNPACK=0 bisection lever is deleted; the generic
+    // per-vector loop below stays as the fallback for non-bulk cases).
 
     // VS1: true when a masked UNPACK selects source data on every lane of
     // every cycle position the WL window uses, i.e. the mask is a no-op and
@@ -1000,7 +992,7 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             // source on every lane. Anything else (fills, skips, masked
             // fills/protects) keeps the generic loop.
             const bool unpackBulk =
-                vifFastUnpackEnabled() && vl == 0u && vn == 3u &&
+                vl == 0u && vn == 3u &&
                 (vif1_regs.mode & 3u) == 0u && cl == wl && m_vu1Data != nullptr &&
                 totalBytes > 0u && pos + totalBytes <= sizeBytes &&
                 (!maskEnable || vifUnpackMaskAllData(vif1_regs.mask, wl));
@@ -1018,9 +1010,7 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                 else
                 {
                     int rej = 4;
-                    if (!vifFastUnpackEnabled())
-                        rej = 0;
-                    else if (!(vl == 0u && vn == 3u))
+                    if (!(vl == 0u && vn == 3u))
                         rej = 1;
                     else if ((vif1_regs.mode & 3u) != 0u)
                         rej = 2;
@@ -1623,7 +1613,7 @@ void PS2Memory::processVIF1DataStaged(const uint8_t *data, uint32_t sizeBytes)
             const bool uv1UnpackQwAligned = ((uv1DataStartPos & 15u) == 0u);
 
             const bool unpackBulk =
-                vifFastUnpackEnabled() && vl == 0u && vn == 3u &&
+                vl == 0u && vn == 3u &&
                 (vif1_regs.mode & 3u) == 0u && cl == wl && m_vu1Data != nullptr &&
                 totalBytes > 0u && pos + totalBytes <= sizeBytes &&
                 (!maskEnable || vifUnpackMaskAllData(vif1_regs.mask, wl));
@@ -1639,9 +1629,7 @@ void PS2Memory::processVIF1DataStaged(const uint8_t *data, uint32_t sizeBytes)
                 else
                 {
                     int rej = 4;
-                    if (!vifFastUnpackEnabled())
-                        rej = 0;
-                    else if (!(vl == 0u && vn == 3u))
+                    if (!(vl == 0u && vn == 3u))
                         rej = 1;
                     else if ((vif1_regs.mode & 3u) != 0u)
                         rej = 2;

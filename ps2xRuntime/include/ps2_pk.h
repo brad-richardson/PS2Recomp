@@ -24,10 +24,10 @@
 // (base=rdram+0xPHYS | spad+0xOFF | other) so a differing word maps back
 // to the VIF1 DMA source address for the PS2X_DIAG_WATCH one-word watch.
 //
-// Part 7: PS2X_GS_CSR_DRAIN=1 (kept name; now full-priv) drains the GS
-// queue before EVERY guest load in the GS priv range when the queue is
-// on (Part 5's CSR/SIGLBLID-only drain fenced the wrong set: K's CSR
-// log proved the trigger read is a non-CSR priv addr). noteCsrRead is
+// Part 7 (CU4 B2: unconditional; the PS2X_GS_CSR_DRAIN kill-switch is
+// deleted): drains the GS queue before EVERY guest load in the GS priv
+// range when the queue is on (Part 5's CSR/SIGLBLID-only drain fenced the
+// wrong set: K's CSR log proved the trigger read is a non-CSR priv addr). noteCsrRead is
 // renamed notePrivRead and now logs every served priv-range load (8/16/
 // 128-bit priv loads are NOT served by read8/16/128 — pre-existing,
 // path-independent — so those widths drain but don't log).
@@ -58,18 +58,10 @@ namespace ps2_pk
     // load in the GS priv range (not just CSR/SIGLBLID) when the queue
     // is on. Renamed to match (call sites updated).
     //
-    // GB3: default ON (callers also require the queue to be on). Guest priv
-    // stores now ride the GS stream, so a load that skipped the fence could
-    // miss the guest's own earlier store. PS2X_GS_CSR_DRAIN=0 is the
-    // validation kill-switch; any other value (or unset) keeps the fence.
-    inline bool privDrainEnabled()
-    {
-        static const bool on = [] {
-            const char *env = std::getenv("PS2X_GS_CSR_DRAIN");
-            return !(env && std::strcmp(env, "0") == 0);
-        }();
-        return on;
-    }
+    // GB3: always on when the queue is on (CU4 B2: the PS2X_GS_CSR_DRAIN=0
+    // validation kill-switch is deleted). Guest priv stores now ride the GS
+    // stream, so a load that skipped the fence could miss the guest's own
+    // earlier store.
 
     inline uint32_t fnv1a32(const uint8_t *data, size_t size, uint32_t seed = 2166136261u)
     {
