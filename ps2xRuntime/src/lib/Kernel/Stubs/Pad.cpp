@@ -90,9 +90,9 @@ namespace ps2_stubs
         std::atomic<uint32_t> g_padFrameCount{0};
         int g_padReadLogCount = 0;
 
-        // E2a stimulus hook: env-armed pad-state flip + 326EB0 dormant-arm
-        // tripwires. Unset PS2X_PAD_STIM_AFTER (default) = one relaxed atomic
-        // check per pad call, zero behavior change.
+        // E2a stimulus hook: CU4 B7 deleted the PS2X_PAD_STIM_AFTER/WALLMIN
+        // tunables (stale CU1 S3 taps). The stimulus never arms: one
+        // relaxed atomic check per pad call, zero behavior change.
         struct PadStimulus
         {
             std::mutex mutex;
@@ -136,22 +136,8 @@ namespace ps2_stubs
             }
             g_padStim.initDone = true;
             g_padStim.startWall = std::chrono::steady_clock::now();
-            const char *after = std::getenv("PS2X_PAD_STIM_AFTER");
-            const char *wallMin = std::getenv("PS2X_PAD_STIM_WALLMIN");
-            const unsigned long long afterN = after ? std::strtoull(after, nullptr, 10) : 0ull;
-            const unsigned long long wallN = wallMin ? std::strtoull(wallMin, nullptr, 10) : 0ull;
-            if (afterN > 0ull)
-            {
-                g_padStim.enabled = true;
-                g_padStim.afterReads = static_cast<uint64_t>(afterN);
-                g_padStim.wallMinSec = static_cast<uint64_t>(wallN);
-                g_padStimArmed.store(true, std::memory_order_relaxed);
-                std::fprintf(stderr,
-                             "[padstim] armed after=%llu wallmin=%llus "
-                             "flip=buttons:0xFFFF->0x0000,lx:0x80->0x00,ly:0x80->0x00,"
-                             "rx:0x80->0xFF,ry:0x80->0xFF\n",
-                             afterN, wallN);
-            }
+            // CU4 B7: the PS2X_PAD_STIM_AFTER/WALLMIN tunables are deleted
+            // (stale CU1 S3 taps). The stimulus never arms.
         }
 
         void padStimEnsureInit()
@@ -1920,7 +1906,7 @@ namespace ps2_stubs
                 }
             }
 
-            padStimOnRead(state); // E2a: no-op unless PS2X_PAD_STIM_AFTER set
+            padStimOnRead(state); // E2a: no-op (CU4 B7 deleted the stim knobs)
             // E33: vsync-clock scripts read guest time from the GS vsync
             // tick; wall-clock scripts ignore it. Null runtime (tests) = 0.
             const uint64_t guestVsyncTick =

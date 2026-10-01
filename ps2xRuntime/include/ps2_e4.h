@@ -1,9 +1,9 @@
 // E4 first-missing-visible-result locator: one bounded steady-frame capture.
 //
-// Header-only diag module. Master gate: PS2X_E4_ARM_TICK=<vsync tick N> AND
-// PS2X_E4_DIR=<output dir>. Unset/invalid = every tap compiles to cached-bool
-// checks; zero guest-visible behavior change. Optional bind:
-// PS2X_E4_FREEZE_TICK=<tick M> (default N+1).
+// Header-only diag module. CU4 B7 deleted the
+// PS2X_E4_ARM_TICK/DIR/FREEZE_TICK tunables (stale CU1 S3 taps): the
+// master gate is statically disabled, so every tap compiles to a dead
+// check; zero guest-visible behavior change.
 //
 // At VBlankStart tick==N (exact boundary, same site as E3b noteVBlank):
 // clear + unpause the GS debug history. At tick==M: pause + dump the frozen
@@ -62,44 +62,22 @@ inline bool parseU64(const char *text, uint64_t &out)
     return true;
 }
 
-// ---- cached env binds ----
+// ---- cached binds (CU4 B7: the PS2X_E4_ARM_TICK/DIR/FREEZE_TICK env
+// tunables are deleted; defaults below, so enabled() is statically false) ----
 
 inline uint64_t armTickRaw()
 {
-    if (ps2_e7::aligned()) return ps2_e7::alignedArm().load();
-    static const uint64_t tick = [] {
-        uint64_t parsed = kNoTick;
-        if (!parseU64(std::getenv("PS2X_E4_ARM_TICK"), parsed))
-        {
-            return kNoTick;
-        }
-        return parsed;
-    }();
-    return tick;
+    return kNoTick;
 }
 
 inline const char *outDirRaw()
 {
-    static const char *dir = [] {
-        const char *env = std::getenv("PS2X_E4_DIR");
-        return (env && env[0] != '\0') ? env : nullptr;
-    }();
-    return dir;
+    return nullptr;
 }
 
 inline uint64_t freezeTickRaw()
 {
-    if (ps2_e7::aligned()) { const auto a=armTickRaw(); return a==kNoTick ? kNoTick : a+1u; }
-    static const uint64_t tick = [] {
-        uint64_t parsed = kNoTick;
-        if (parseU64(std::getenv("PS2X_E4_FREEZE_TICK"), parsed))
-        {
-            return parsed;
-        }
-        const uint64_t arm = armTickRaw();
-        return (arm == kNoTick) ? kNoTick : arm + 1u;
-    }();
-    return tick;
+    return kNoTick;
 }
 
 inline bool enabled()

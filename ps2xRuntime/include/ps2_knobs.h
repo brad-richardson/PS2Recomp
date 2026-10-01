@@ -278,8 +278,6 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_PAD_RECORD_KEEP",
         "PS2X_PAD_SCRIPT",
         "PS2X_PAD_SCRIPT_CLOCK",
-        "PS2X_PAD_STIM_AFTER",
-        "PS2X_PAD_STIM_WALLMIN",
         "PS2X_PERF_LOG",
         "PS2X_PERF_LOG_DIR",
         "PS2X_PGS_FRAME_CONTEXTS",
