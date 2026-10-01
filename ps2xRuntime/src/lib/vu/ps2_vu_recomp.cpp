@@ -22,6 +22,7 @@
 //                              without generated code (game-derived: keep it
 //                              outside the repo).
 
+#include "runtime/ps2_vu0.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_memory.h"
 #define XXH_NO_XXH32
@@ -46,10 +47,18 @@
 
 namespace
 {
-    std::unordered_map<uint64_t, VU1Interpreter::RecompProgram> &recompRegistry()
+    // VX1: one registry per unit (VU0/VU1 images have different pair types).
+    template <class D>
+    std::unordered_map<uint64_t, typename VuCore<D>::RecompProgram> &recompRegistry()
     {
-        static std::unordered_map<uint64_t, VU1Interpreter::RecompProgram> registry;
+        static std::unordered_map<uint64_t, typename VuCore<D>::RecompProgram> registry;
         return registry;
+    }
+
+    void replaceAll(std::string &text, const std::string &from, const std::string &to)
+    {
+        for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size()))
+            text.replace(at, from.size(), to);
     }
 
     bool recompEnabled()
@@ -98,7 +107,8 @@ namespace
     }
 }
 
-bool VU1Interpreter::vu0RecompEnabled()
+template <class D>
+bool VuCore<D>::vu0RecompEnabled()
 {
     static const bool enabled = []
     {
@@ -108,25 +118,28 @@ bool VU1Interpreter::vu0RecompEnabled()
     return enabled;
 }
 
-void VU1Interpreter::registerRecompProgram(const RecompProgram &program)
+template <class D>
+void VuCore<D>::registerRecompProgram(const RecompProgram &program)
 {
-    recompRegistry()[program.hash] = program;
+    recompRegistry<D>()[program.hash] = program;
 }
 
-const VU1Interpreter::RecompProgram *VU1Interpreter::findRecompProgram(uint64_t hash)
+template <class D>
+const typename VuCore<D>::RecompProgram *VuCore<D>::findRecompProgram(uint64_t hash)
 {
-    const auto &registry = recompRegistry();
+    const auto &registry = recompRegistry<D>();
     const auto it = registry.find(hash);
     return it != registry.end() ? &it->second : nullptr;
 }
 
-const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
+template <class D>
+const typename VuCore<D>::RecompProgram *VuCore<D>::lookupRecompProgram(
     const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory)
 {
     // VR2: generated pairs assume the whole 16 KiB micro memory (constant code
     // size, every masked pc in range; see recompChainReady). VR3: VU0 images
     // the whole 4 KiB VU0 micro memory.
-    const bool vu0 = m_unit == Unit::VU0;
+    constexpr bool vu0 = !isVu1();
     if (codeSize != (vu0 ? kRecompVu0CodeSize : kRecompCodeSize))
         return nullptr;
     if (m_recompTestProgram != nullptr)
@@ -154,42 +167,9 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
                      static_cast<unsigned long long>(m_recompCycles),
                      static_cast<unsigned long long>(m_interpCycles),
                      total != 0u ? static_cast<double>(m_recompCycles) / static_cast<double>(total) : 0.0);
-#if PS2X_ENABLE_DET_HASH_TAP
-        // VR2 2D: block counters are kept in hash builds only (no per-entry
-        // read-modify-write on the hot path).
-        std::fprintf(stderr, "[vu1-blocks] on=%d entries=%llu pairs=%llu nostall_misses=%llu miss_off=%llu miss_branch=%llu miss_end=%llu miss_budget=%llu plaintail_misses=%llu\n",
-                     m_blocksOn ? 1 : 0, static_cast<unsigned long long>(m_blockEntries),
-                     static_cast<unsigned long long>(m_blockPairs),
-                     static_cast<unsigned long long>(m_blockNoStallMisses),
-                     static_cast<unsigned long long>(m_blockMissOff),
-                     static_cast<unsigned long long>(m_blockMissBranch),
-                     static_cast<unsigned long long>(m_blockMissEnd),
-                     static_cast<unsigned long long>(m_blockMissBudget),
-                     static_cast<unsigned long long>(m_blockPlainTailMisses));
-        std::fprintf(stderr, "[vu1-blocks] gen_pairs=%llu block_pairs=%llu pair_share=%.4f gen_cycles=%llu block_cycles=%llu cycle_share=%.4f\n",
-                     static_cast<unsigned long long>(m_genIssuedPairs),
-                     static_cast<unsigned long long>(m_blockIssuedPairs),
-                     m_genIssuedPairs != 0u ? static_cast<double>(m_blockIssuedPairs) / static_cast<double>(m_genIssuedPairs) : 0.0,
-                     static_cast<unsigned long long>(m_genIssuedCycles),
-                     static_cast<unsigned long long>(m_blockIssuedCycles),
-                     m_genIssuedCycles != 0u ? static_cast<double>(m_blockIssuedCycles) / static_cast<double>(m_genIssuedCycles) : 0.0);
-#endif
-#if PS2X_ENABLE_DET_HASH_TAP
-        const uint64_t pairCycles = m_vbDirectCycles + m_vbQueuedCycles;
-        const uint64_t flagWrites = m_vbDirectFlagWrites + m_vbQueuedFlagWrites;
-        std::fprintf(stderr, "[vu1-direct] direct_cycles=%llu queued_cycles=%llu direct_share=%.4f flag_direct=%llu flag_queued=%llu flag_direct_share=%.4f\n",
-                     static_cast<unsigned long long>(m_vbDirectCycles),
-                     static_cast<unsigned long long>(m_vbQueuedCycles),
-                     pairCycles != 0u ? static_cast<double>(m_vbDirectCycles) / static_cast<double>(pairCycles) : 0.0,
-                     static_cast<unsigned long long>(m_vbDirectFlagWrites),
-                     static_cast<unsigned long long>(m_vbQueuedFlagWrites),
-                     flagWrites != 0u ? static_cast<double>(m_vbDirectFlagWrites) / static_cast<double>(flagWrites) : 0.0);
-        const uint64_t vfWrites = m_vbDirectVfWrites + m_vbQueuedVfWrites;
-        std::fprintf(stderr, "[vu1-direct] vf_direct=%llu vf_queued=%llu vf_direct_share=%.4f\n",
-                     static_cast<unsigned long long>(m_vbDirectVfWrites),
-                     static_cast<unsigned long long>(m_vbQueuedVfWrites),
-                     vfWrites != 0u ? static_cast<double>(m_vbDirectVfWrites) / static_cast<double>(vfWrites) : 0.0);
-#endif
+        // VX1: the VU1-only block/direct counters (hash builds).
+        if constexpr (!vu0)
+            derived().printRecompStats();
     }
     const uint64_t generation = vu0 ? memory->getVU0CodeGeneration() : memory->getVU1CodeGeneration();
     if (m_recompValid && m_recompCode == vuCode && m_recompCodeSize == codeSize &&
@@ -204,7 +184,7 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
     m_recompProgram = nullptr;
     if (vu0 ? vu0RecompEnabled() : recompEnabled())
     {
-        const auto &registry = recompRegistry();
+        const auto &registry = recompRegistry<D>();
         const auto it = registry.find(m_recompHash);
         if (it != registry.end() && it->second.codeSize == codeSize)
             m_recompProgram = &it->second;
@@ -216,10 +196,12 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
         if (dumped.insert(m_recompHash ^ (static_cast<uint64_t>(codeSize) << 48)).second)
         {
             char name[64];
-            std::snprintf(name, sizeof(name), vu0 ? "/vu0_%016llx.cpp" : "/vu1_%016llx.cpp",
+            // VX1: VU0 images target VU0Interpreter; "vu0e_" keeps them apart
+            // from pre-VX1 vu0_ images (VU1Interpreter-based) in a shared dir.
+            std::snprintf(name, sizeof(name), vu0 ? "/vu0e_%016llx.cpp" : "/vu1_%016llx.cpp",
                           static_cast<unsigned long long>(m_recompHash));
             const std::string path = std::string(dumpDir) + name;
-            const bool ok = emitRecompSource(vuCode, codeSize, m_recompHash, path, m_unit);
+            const bool ok = emitRecompSource(vuCode, codeSize, m_recompHash, path);
             std::fprintf(stderr, "[%s] dump %s %s generation=%llu\n", vu0 ? "vu0-recomp" : "vu1-recomp",
                          path.c_str(), ok ? "ok" : "FAILED", static_cast<unsigned long long>(generation));
         }
@@ -227,13 +209,14 @@ const VU1Interpreter::RecompProgram *VU1Interpreter::lookupRecompProgram(
     return m_recompProgram;
 }
 
-bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
-                                      uint64_t hash, const std::string &path, Unit unit)
+template <class D>
+bool VuCore<D>::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
+                                      uint64_t hash, const std::string &path)
 {
     // The decoder is a pure function of the two instruction words and the
     // unit (VR3: VU0 reserves MFP, XGKICK, the EFU ops and WAITP).
-    const auto decoder = std::make_unique<VU1Interpreter>(unit);
-    const bool vu0 = unit == Unit::VU0;
+    const auto decoder = std::make_unique<D>();
+    constexpr bool vu0 = !isVu1();
     const char *const image = vu0 ? "VU0RecompImage" : "VU1RecompImage";
     char hashText[32];
     std::snprintf(hashText, sizeof(hashText), "0x%016llxull", static_cast<unsigned long long>(hash));
@@ -268,7 +251,7 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
     // VR3: VU0 images get pair functions only (no stage-4 blocks).
     std::vector<RecompBlockPlan> blocks;
     std::vector<uint8_t> directMap;
-    if (!vu0)
+    if constexpr (!vu0)
     {
         decoder->planRecompBlocks(vuCode, codeSize, blocks);
         decoder->buildDirectFlagMap(vuCode, codeSize, directMap);
@@ -424,27 +407,26 @@ bool VU1Interpreter::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     if (!file)
         return false;
-    const std::string text = out.str();
+    std::string text = out.str();
+    if constexpr (vu0)
+    {
+        // VX1: VU0 images target VU0Interpreter (the text above is VU1's
+        // layout; VU1 images stay byte-identical to pre-VX1 output).
+        replaceAll(text, "#include \"ps2_vu1_recomp_gen.h\"", "#include \"ps2_vu0_recomp_gen.h\"");
+        replaceAll(text, "using VU1 = VU1Interpreter;", "using VU0 = VU0Interpreter;");
+        replaceAll(text, "VU1::", "VU0::");
+        replaceAll(text, "(VU1 &vu,", "(VU0 &vu,");
+        replaceAll(text, "PS2X_VU1_MUSTTAIL", "PS2X_VU_MUSTTAIL");
+        replaceAll(text, "PS2X_VU1_NOINLINE", "PS2X_VU_NOINLINE");
+    }
     file.write(text.data(), static_cast<std::streamsize>(text.size()));
     return static_cast<bool>(file);
 }
 
-// VR2 stage 4: generated block functions. PS2X_VU1_BLOCKS=1 turns them on
-// (default off until proven); off, a block leader's entry takes its pair
-// function.
-bool VU1Interpreter::blocksEnabled()
-{
-    static const bool enabled = []
-    {
-        const char *value = std::getenv("PS2X_VU1_BLOCKS");
-        return value != nullptr && value[0] == '1';
-    }();
-    return enabled;
-}
-
 // VB1: direct commit (stage B). PS2X_VU1_DIRECT=0 turns it off (queue every
 // write, as stage A did).
-bool VU1Interpreter::directCommitEnabled()
+template <class D>
+bool VuCore<D>::directCommitEnabled()
 {
     static const bool enabled = []
     {
@@ -456,7 +438,8 @@ bool VU1Interpreter::directCommitEnabled()
 
 // VR3: VU0 direct commit (VB1's rules, unchanged). PS2X_VU0_DIRECT=1 turns it
 // on; default off.
-bool VU1Interpreter::vu0DirectEnabled()
+template <class D>
+bool VuCore<D>::vu0DirectEnabled()
 {
     static const bool enabled = []
     {
@@ -492,7 +475,8 @@ bool VU1Interpreter::vu0DirectEnabled()
 // out-of-range target, a branch in a delay slot or a reserved pair counts
 // as a hit (queue). E/D/T bits are ignored (following past them only adds
 // hits). Pair i may also run as the delay slot of a branch at i - 1.
-void VU1Interpreter::buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize,
+template <class D>
+void VuCore<D>::buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize,
                                         std::vector<uint8_t> &map) const
 {
     enum : uint8_t { kNone, kUncond, kCond, kDynamic };
@@ -614,148 +598,8 @@ void VU1Interpreter::buildDirectFlagMap(const uint8_t *vuCode, uint32_t codeSize
     }
 }
 
-// VR2 stage 4: block plans for the emitter. Leaders: static branch targets,
-// the pair after every branch's delay slot (fall-through, BAL/JALR returns)
-// and after every E-bit delay slot (packed program starts), and pair 0. A
-// block runs from its leader while pairs are plain: it stops before a
-// reserved, XGKICK (unbounded stall) or D/T-bit (runtime halt) pair, ends
-// after a branch or E-bit pair plus its delay slot (both left out when the
-// slot is not plain or is itself a branch), never wraps, and holds at most
-// kMaxBlockPairs. At least two pairs, else the leader keeps its pair function.
-//
-// noStall[k]: pair k's scoreboard read can be skipped. Every VF lane, VI and
-// ACC it reads is either last written inside the block by pair p with
-// k - p >= that write's latency (each pair takes at least one cycle), or not
-// written in the block and k >= 3: every write issued before the block lands
-// within kDirectMaxLatency (VF 4, VI <= 4, ACC 1), i.e. by entry + 3, and
-// pair k issues at entry + k or later. FDIV/EFU/WAITQ/WAITP pairs keep the
-// read (their Q/P pipelines are not tracked here). This mirrors
-// markPairWrites: lower VF write unless suppressed, upper VF write, VI writes,
-// ACC at kAccForwardLatency. A hash build counts violations
-// (m_blockNoStallMisses).
-//
-// maxCycles: sum over pairs of 1 + worst stall (0 when noStall; 13
-// FDIV/WAITQ; 54 EFU/WAITP; 4 otherwise) plus kDirectMaxLatency, so no stall
-// reaches budgetEnd and every direct write of the block lands inside it.
-void VU1Interpreter::planRecompBlocks(const uint8_t *vuCode, uint32_t codeSize,
-                                      std::vector<RecompBlockPlan> &blocks) const
-{
-    // GV2: 32 covers the full a56458 31-pair loop (0x0628-0x0718) in one block.
-    constexpr uint32_t kMaxBlockPairs = 32u;
-    const uint32_t pairs = codeSize / 8u;
-    std::vector<DecodedInstructionPair> d(pairs);
-    std::vector<uint8_t> branch(pairs, 0u), plain(pairs, 0u), leader(pairs, 0u);
-    for (uint32_t i = 0; i < pairs; ++i)
-    {
-        d[i] = decodeInstructionPair(vuCode, i * 8u);
-        plain[i] = !d[i].upperUsage.reserved && !d[i].lowerUsage.reserved &&
-                   d[i].lowerUsage.pipeline != PipelineXgkick && !d[i].dBit && !d[i].tBit;
-        if (d[i].iBit)
-            continue;
-        const uint8_t opHi = static_cast<uint8_t>((d[i].lower >> 25) & 0x7Fu);
-        const bool jump = opHi == 0x24u || opHi == 0x25u;
-        const bool uncond = opHi == 0x20u || opHi == 0x21u;
-        const bool cond = opHi == 0x28u || opHi == 0x29u || (opHi >= 0x2Cu && opHi <= 0x2Fu);
-        branch[i] = jump || uncond || cond;
-        if (uncond || cond)
-        {
-            const int32_t imm = static_cast<int32_t>(d[i].lower << 21) >> 21;
-            const uint32_t pc = (i * 8u + 8u + static_cast<uint32_t>(imm * 8)) & microAddressMask();
-            if (pc + 8u <= codeSize)
-                leader[pc / 8u] = 1u;
-        }
-    }
-    leader[0] = 1u;
-    for (uint32_t i = 0; i + 2u < pairs; ++i)
-        if (branch[i] != 0u || d[i].eBit)
-            leader[i + 2u] = 1u;
-
-    blocks.clear();
-    for (uint32_t s = 0; s < pairs; ++s)
-    {
-        if (leader[s] == 0u)
-            continue;
-        RecompBlockPlan block;
-        block.start = s;
-        for (uint32_t q = s; q < pairs && block.pairs.size() < kMaxBlockPairs && plain[q] != 0u; ++q)
-        {
-            if (branch[q] != 0u || d[q].eBit)
-            {
-                const uint32_t slot = q + 1u;
-                if (slot < pairs && plain[slot] != 0u && branch[slot] == 0u &&
-                    block.pairs.size() + 2u <= kMaxBlockPairs)
-                {
-                    block.pairs.push_back(q);
-                    block.pairs.push_back(slot);
-                }
-                break;
-            }
-            block.pairs.push_back(q);
-        }
-        if (block.pairs.size() < 2u)
-            continue;
-
-        // Latest in-block writer per VF lane / VI / ACC lane: (pair position + 1, latency).
-        std::array<std::array<std::pair<uint32_t, uint32_t>, 4>, 32> vfWriter{};
-        std::array<std::pair<uint32_t, uint32_t>, 16> viWriter{};
-        std::array<std::pair<uint32_t, uint32_t>, 4> accWriter{};
-        uint32_t cycles = kDirectMaxLatency;
-        for (uint32_t k = 0; k < block.pairs.size(); ++k)
-        {
-            const DecodedInstructionPair &p = d[block.pairs[k]];
-            const auto ready = [&](const std::pair<uint32_t, uint32_t> &w)
-            {
-                return w.first != 0u ? k - (w.first - 1u) >= w.second : k >= 3u;
-            };
-            bool quiet = p.lowerUsage.pipeline != PipelineFdiv && p.lowerUsage.pipeline != PipelineEfu &&
-                         !p.lowerUsage.waitQ && !p.lowerUsage.waitP;
-            for (const InstructionUsage *usage : {&p.upperUsage, &p.lowerUsage})
-            {
-                for (uint32_t r = 0; r < usage->vfReadCount; ++r)
-                    for (uint32_t c = 0; c < 4u; ++c)
-                        if ((usage->vfRead[r].lanes & laneBit(c)) != 0u)
-                            quiet = quiet && ready(vfWriter[usage->vfRead[r].reg][c]);
-                for (uint32_t v = usage->viRead & 0xFFFEu; v != 0u; v &= v - 1u)
-                    quiet = quiet && ready(viWriter[std::countr_zero(v)]);
-                for (uint32_t c = 0; c < 4u; ++c)
-                    if ((usage->accRead & laneBit(c)) != 0u)
-                        quiet = quiet && ready(accWriter[c]);
-            }
-            block.noStall.push_back(quiet ? 1u : 0u);
-            // VR4 D2: plain tail = neither the branch/E-bit pair nor its delay slot.
-            const bool ender = branch[block.pairs[k]] != 0u || p.eBit;
-            const bool slot = k > 0u && (branch[block.pairs[k - 1u]] != 0u || d[block.pairs[k - 1u]].eBit);
-            block.plainTail.push_back(!ender && !slot ? 1u : 0u);
-            const uint32_t worst = quiet ? 0u
-                                   : (p.lowerUsage.pipeline == PipelineEfu || p.lowerUsage.waitP)    ? 54u
-                                   : (p.lowerUsage.pipeline == PipelineFdiv || p.lowerUsage.waitQ) ? 13u
-                                                                                                    : 4u;
-            cycles += 1u + worst;
-
-            const auto mark = [&](const VfAccess &w, uint32_t latency)
-            {
-                for (uint32_t c = 0; c < 4u; ++c)
-                    if ((w.lanes & laneBit(c)) != 0u)
-                        vfWriter[w.reg][c] = {k + 1u, latency};
-            };
-            const VfAccess lw = p.lowerUsage.vfWrite;
-            if (lw.reg != 0u && p.suppressedLowerVf != lw.reg)
-                mark(lw, p.lowerUsage.vfLatency != 0u ? p.lowerUsage.vfLatency : p.lowerUsage.latency);
-            if (p.upperUsage.vfWrite.reg != 0u)
-                mark(p.upperUsage.vfWrite, p.upperUsage.vfLatency != 0u ? p.upperUsage.vfLatency : p.upperUsage.latency);
-            for (uint32_t v = p.lowerUsage.viWrite & 0xFFFEu; v != 0u; v &= v - 1u)
-                viWriter[std::countr_zero(v)] = {k + 1u, p.lowerUsage.viLatency != 0u ? p.lowerUsage.viLatency
-                                                                                       : p.lowerUsage.latency};
-            for (uint32_t c = 0; c < 4u; ++c)
-                if ((p.upperUsage.accWrite & laneBit(c)) != 0u)
-                    accWriter[c] = {k + 1u, kAccForwardLatency};
-        }
-        block.maxCycles = cycles;
-        blocks.push_back(std::move(block));
-    }
-}
-
-const uint8_t *VU1Interpreter::directFlagMap(const uint8_t *vuCode, uint32_t codeSize, bool tracked)
+template <class D>
+const uint8_t *VuCore<D>::directFlagMap(const uint8_t *vuCode, uint32_t codeSize, bool tracked)
 {
     if (codeSize < 8u || codeSize > 0x4000u || (codeSize & 7u) != 0u)
         return nullptr;
@@ -782,3 +626,18 @@ const uint8_t *VU1Interpreter::directFlagMap(const uint8_t *vuCode, uint32_t cod
     }
     return it->second.data();
 }
+
+#define PS2X_VU_RECOMP_INSTANTIATE(U)                                                              \
+    template bool VuCore<U>::vu0RecompEnabled();                                                   \
+    template void VuCore<U>::registerRecompProgram(const RecompProgram &);                         \
+    template const VuCore<U>::RecompProgram *VuCore<U>::findRecompProgram(uint64_t);               \
+    template const VuCore<U>::RecompProgram *VuCore<U>::lookupRecompProgram(const uint8_t *, uint32_t, \
+                                                                            PS2Memory *);          \
+    template bool VuCore<U>::emitRecompSource(const uint8_t *, uint32_t, uint64_t, const std::string &); \
+    template bool VuCore<U>::directCommitEnabled();                                                \
+    template bool VuCore<U>::vu0DirectEnabled();                                                   \
+    template void VuCore<U>::buildDirectFlagMap(const uint8_t *, uint32_t, std::vector<uint8_t> &) const; \
+    template const uint8_t *VuCore<U>::directFlagMap(const uint8_t *, uint32_t, bool);
+PS2X_VU_RECOMP_INSTANTIATE(VU0Interpreter)
+PS2X_VU_RECOMP_INSTANTIATE(VU1Interpreter)
+#undef PS2X_VU_RECOMP_INSTANTIATE

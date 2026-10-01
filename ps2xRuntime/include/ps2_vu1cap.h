@@ -4,7 +4,7 @@
 //   PS2X_VU1_CAPTURE=<dir>   write <dir>/vu1cap.bin (uncompressed; gzip after)
 //   PS2X_VU1_CAP_FROM=2400   first vsync tick recorded (default 2400)
 //   PS2X_VU1_CAP_TO=2500     last vsync tick recorded, inclusive (default 2500)
-// The hook lives in VU1Interpreter::execute/resume/finishXgkick (ps2_vu1_core.cpp),
+// The hook lives in VU1Interpreter::execute/resume/finishXgkick (ps2_vu1.cpp),
 // the same boundary as VP1's census and RV11's proposed matched timers. It only
 // reads guest state, so a det boot with capture on must stay det-IDENTICAL.
 // Runs are recorded in execute() order (true at W=0 and at W=1, which also

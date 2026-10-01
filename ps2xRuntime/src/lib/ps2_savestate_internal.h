@@ -5,13 +5,14 @@
 // bump one when its layout changes and old files refuse cleanly.
 
 #include "runtime/ps2_savestate.h"
+#include "runtime/ps2_vu1.h"
 
 #include <string>
 
 class EeScheduler;
 class PS2Runtime;
 class PS2Memory;
-class VU1Interpreter;
+class VU0Interpreter;
 class GS;
 
 namespace ps2_savestate
@@ -46,10 +47,22 @@ struct PS2RuntimeSavestate
     static bool loadKernel(PS2Runtime &rt, ps2_savestate::Reader &r);
 };
 
-struct VU1InterpreterSavestate
+// VX1: one serializer for both engines (VuCore friend). The vu0 and vu1
+// sections keep the pre-VX1 byte layout: VU0 writes zeros where VU1 writes
+// its XGKICK pipeline (VU0 never had a live one).
+struct VuSavestate
 {
+    static void save(const VU0Interpreter &vu, ps2_savestate::Writer &w);
     static void save(const VU1Interpreter &vu, ps2_savestate::Writer &w);
+    static bool load(VU0Interpreter &vu, ps2_savestate::Reader &r);
     static bool load(VU1Interpreter &vu, ps2_savestate::Reader &r);
+
+private:
+    static void saveXgkick(const VU1Interpreter::XgkickPipeline &x, ps2_savestate::Writer &w);
+    template <class D>
+    static void saveCore(const D &vu, ps2_savestate::Writer &w);
+    template <class D>
+    static bool loadCore(D &vu, ps2_savestate::Reader &r);
 };
 
 struct GSSavestate

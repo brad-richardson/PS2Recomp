@@ -6,12 +6,12 @@
 // opcode switch folds away). The interpreter calls it through the out-of-line
 // execLower() wrapper in ps2_vu1_lower.cpp.
 
-#include "runtime/ps2_vu1.h"
+#include "runtime/ps2_vu_core.h"
 #include <cmath>
 #include <cstring>
 #include <limits>
-#include "ps2_vu1_detail.h"
-#include "ps2_vu1_fmac_impl.h"
+#include "ps2_vu_detail.h"
+#include "ps2_vu_fmac_impl.h"
 
 namespace ps2_vu1_lower_detail
 {
@@ -76,7 +76,8 @@ using namespace ps2_vu1_lower_detail;
 // ============================================================================
 // Lower instructions
 // ============================================================================
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::execLowerImpl(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::execLowerImpl(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr)
 {
     (void)upperInstr;
     if (instr == 0x00000000 || instr == 0x8000033C) // NOP
@@ -671,8 +672,9 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::execLowerImpl(uint32_t instr,
                     m_state.vi[viT] = (int32_t)(m_state.itop & 0x3FFu);
                 return;
             }
-            case 0x6C: // XGKICK - send GIF packet from VU1 data memory
-                startXgkick(static_cast<uint32_t>(static_cast<uint16_t>(m_state.vi[viS])));
+            case 0x6C: // XGKICK - send GIF packet from VU1 data memory (VU0: reserved, never issues)
+                if constexpr (isVu1())
+                    derived().startXgkick(static_cast<uint32_t>(static_cast<uint16_t>(m_state.vi[viS])));
                 return;
             case 0x70: // ESADD
             {

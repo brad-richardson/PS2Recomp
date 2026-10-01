@@ -6,13 +6,13 @@
 // opcode switch folds away). The interpreter calls it through the out-of-line
 // execUpper() wrapper in ps2_vu1_upper.cpp.
 
-#include "runtime/ps2_vu1.h"
+#include "runtime/ps2_vu_core.h"
 #include <cmath>
 #include <cstring>
 #include <limits>
-#include "ps2_vu1_detail.h"
-#include "ps2_vu1_fmac_impl.h"
-#include "ps2_vu1_fmac_simd.h"
+#include "ps2_vu_detail.h"
+#include "ps2_vu_fmac_impl.h"
+#include "ps2_vu_fmac_simd.h"
 
 namespace ps2_vu1_upper_detail
 {
@@ -47,8 +47,9 @@ using namespace ps2_vu1_upper_detail;
 // ============================================================================
 // Upper instructions (FMAC pipeline)
 // ============================================================================
+template <class D>
 template <bool kSimd, int kFloatMode>
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::execUpperImpl(uint32_t instr)
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::execUpperImpl(uint32_t instr)
 {
     m_currentUpperInstruction = instr;
     // E57: upper NOP (special 0x2F/0x30) returns before the operand

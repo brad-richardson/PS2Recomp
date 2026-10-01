@@ -21,9 +21,9 @@
 // The scalar code stays as the reference (PS2X_VU1_FMAC_SIMD off, and the
 // bit-for-bit unit test "VR4 vector FMAC core matches the scalar reference").
 
-#include "runtime/ps2_vu1.h"
-#include "ps2_vu1_detail.h"
-#include "ps2_vu1_fmac_impl.h"
+#include "runtime/ps2_vu_core.h"
+#include "ps2_vu_detail.h"
+#include "ps2_vu_fmac_impl.h"
 
 #include <cstring>
 #include <limits>
@@ -157,8 +157,9 @@ namespace ps2_vu1_fmac_simd
 }
 
 // VR4 D1: one vector FMAC. kAcc = the ACC is the destination (…A ops).
+template <class D>
 template <int kArith, int kSrc, bool kAcc, int kFloatMode>
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::fmacSimd(uint32_t instr)
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::fmacSimd(uint32_t instr)
 {
 #if defined(__clang__)
 #pragma clang fp contract(off)
@@ -321,8 +322,9 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::fmacSimd(uint32_t instr)
 // compile-time choices for the upper op; result-wide clamping is *not* enabled
 // by default (microVU_Clamp.inl:61-77). This is intentionally distinct from
 // the exact result classification above.
+template <class D>
 template <int kArith, int kSrc, bool kAcc>
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::fmacPcsx2(uint32_t instr)
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::fmacPcsx2(uint32_t instr)
 {
 #if defined(__clang__)
 #pragma clang fp contract(off)
@@ -413,8 +415,9 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::fmacPcsx2(uint32_t instr)
         applyDest(m_state.vf[FD(instr)], out, dest);
 }
 
+template <class D>
 template <int kFloatMode>
-PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::fmacSimdDispatch(uint32_t instr)
+PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::fmacSimdDispatch(uint32_t instr)
 {
     using namespace ps2_vu1_fmac_simd;
     const uint32_t op = instr & 0x3Fu;

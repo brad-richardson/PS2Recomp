@@ -170,7 +170,7 @@ int main(int argc, char **argv)
 
     PS2Memory mem;
     GS gs;
-    VU1Interpreter vu(VU1Interpreter::Unit::VU1);
+    VU1Interpreter vu;
 
     // Key each image by XXH64 (the recomp lookup key) and require a compiled-in
     // image: replay must run the same generated code as the game.

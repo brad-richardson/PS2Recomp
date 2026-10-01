@@ -1,11 +1,15 @@
-#include "ps2_vu1_upper_impl.h"
+#include "runtime/ps2_vu0.h"
+#include "runtime/ps2_vu1.h"
+#include "ps2_vu_upper_impl.h"
 
-void VU1Interpreter::execUpper(uint32_t instr)
+template <class D>
+void VuCore<D>::execUpper(uint32_t instr)
 {
     execUpperImpl(instr);
 }
 
-void VU1Interpreter::execUpperForTest(uint32_t instr, bool simd, bool directFlags)
+template <class D>
+void VuCore<D>::execUpperForTest(uint32_t instr, bool simd, bool directFlags)
 {
     m_directFlags = directFlags;
 #if PS2X_VU1_FMAC_SIMD_AVAILABLE
@@ -20,7 +24,8 @@ void VU1Interpreter::execUpperForTest(uint32_t instr, bool simd, bool directFlag
     m_directFlags = false;
 }
 
-std::vector<uint64_t> VU1Interpreter::fmacStateForTest() const
+template <class D>
+std::vector<uint64_t> VuCore<D>::fmacStateForTest() const
 {
     std::vector<uint64_t> out;
     const auto bits = [&out](float value)
@@ -60,3 +65,11 @@ std::vector<uint64_t> VU1Interpreter::fmacStateForTest() const
     out.push_back(m_currentUpperInstruction);
     return out;
 }
+
+#define PS2X_VU_UPPER_INSTANTIATE(U)                                                  \
+    template void VuCore<U>::execUpper(uint32_t);                                     \
+    template void VuCore<U>::execUpperForTest(uint32_t, bool, bool);                  \
+    template std::vector<uint64_t> VuCore<U>::fmacStateForTest() const;
+PS2X_VU_UPPER_INSTANTIATE(VU0Interpreter)
+PS2X_VU_UPPER_INSTANTIATE(VU1Interpreter)
+#undef PS2X_VU_UPPER_INSTANTIATE

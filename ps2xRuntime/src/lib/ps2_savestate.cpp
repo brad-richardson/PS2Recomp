@@ -15,6 +15,8 @@
 #include "runtime/gs/gs_backend.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
+#include <cstddef>
+#include "runtime/ps2_vu0.h"
 #include "runtime/ps2_vu1.h"
 
 #include <chrono>
@@ -828,10 +830,10 @@ namespace ps2_savestate
         EeSchedulerSavestate::save(sched, w);
         w.endSection(mark);
         mark = w.beginSection("vu0", kVuVersion);
-        VU1InterpreterSavestate::save(runtime.vu0(), w);
+        VuSavestate::save(runtime.vu0(), w);
         w.endSection(mark);
         mark = w.beginSection("vu1", kVuVersion);
-        VU1InterpreterSavestate::save(runtime.vu1(), w);
+        VuSavestate::save(runtime.vu1(), w);
         w.endSection(mark);
         mark = w.beginSection("gs", kGsVersion);
         w.bytes(gsw.buf.data(), gsw.buf.size());
@@ -1066,9 +1068,9 @@ namespace ps2_savestate
             else if (key == "scheduler")
                 ok = EeSchedulerSavestate::load(runtime.eeScheduler(), r, runtime);
             else if (key == "vu0")
-                ok = VU1InterpreterSavestate::load(runtime.vu0(), r);
+                ok = VuSavestate::load(runtime.vu0(), r);
             else if (key == "vu1")
-                ok = VU1InterpreterSavestate::load(runtime.vu1(), r);
+                ok = VuSavestate::load(runtime.vu1(), r);
             else if (key == "gs")
             {
                 GS &gs = runtime.gs();
@@ -1721,7 +1723,39 @@ bool PS2RuntimeSavestate::loadKernel(PS2Runtime &rt, Reader &r)
 }
 
 // ==================================================================== VU
-void VU1InterpreterSavestate::save(const VU1Interpreter &vu, Writer &w)
+// The pre-VX1 layout field by field. The xgkick blob sits between the ACC
+// write pipeline and the ready tables; VU0 writes it as zeros (its
+// VU1Interpreter instance never started an XGKICK) and skips it on load.
+namespace
+{
+    template <class D>
+    constexpr bool kVuHasXgkick = D::kUnit == VuUnit::VU1;
+}
+
+// VX1: the XGKICK pipeline field by field into a zeroed blob, so its tail
+// padding (6 bytes after currentTagEop) is always written as zero. A raw pod
+// copied whatever the last store left there (VX1's first save showed 3 junk
+// padding bytes); the old builds' bytes there were zero.
+void VuSavestate::saveXgkick(const VU1Interpreter::XgkickPipeline &x, Writer &w)
+{
+    using X = VU1Interpreter::XgkickPipeline;
+    std::vector<uint8_t> blob(sizeof(X), 0u);
+    const auto put = [&blob](size_t offset, const void *data, size_t size)
+    { std::memcpy(blob.data() + offset, data, size); };
+    put(offsetof(X, packet), x.packet.data(), x.packet.size());
+    put(offsetof(X, sourceAddress), &x.sourceAddress, sizeof(x.sourceAddress));
+    put(offsetof(X, totalBytes), &x.totalBytes, sizeof(x.totalBytes));
+    put(offsetof(X, copiedBytes), &x.copiedBytes, sizeof(x.copiedBytes));
+    put(offsetof(X, currentTagEnd), &x.currentTagEnd, sizeof(x.currentTagEnd));
+    put(offsetof(X, cycleCredit), &x.cycleCredit, sizeof(x.cycleCredit));
+    put(offsetof(X, issueCycle), &x.issueCycle, sizeof(x.issueCycle));
+    put(offsetof(X, active), &x.active, sizeof(x.active));
+    put(offsetof(X, currentTagEop), &x.currentTagEop, sizeof(x.currentTagEop));
+    w.bytes(blob.data(), blob.size());
+}
+
+template <class D>
+void VuSavestate::saveCore(const D &vu, Writer &w)
 {
     w.pod(vu.m_state);
 #if PS2X_ENABLE_DET_HASH_TAP
@@ -1736,7 +1770,13 @@ void VU1InterpreterSavestate::save(const VU1Interpreter &vu, Writer &w)
     w.pod(vu.m_vfWritePipeline);
     w.pod(vu.m_viWritePipeline);
     w.pod(vu.m_accWritePipeline);
-    w.pod(vu.m_xgkick);
+    if constexpr (kVuHasXgkick<D>)
+        saveXgkick(vu.m_xgkick, w);
+    else
+    {
+        static const std::array<uint8_t, VU1Interpreter::kXgkickSavestateBytes> kZeroXgkick{};
+        w.pod(kZeroXgkick);
+    }
     w.pod(vu.m_vfReady);
     w.pod(vu.m_viReady);
     w.pod(vu.m_accReady);
@@ -1764,7 +1804,8 @@ void VU1InterpreterSavestate::save(const VU1Interpreter &vu, Writer &w)
     w.pod(vu.m_storeScratch);
 }
 
-bool VU1InterpreterSavestate::load(VU1Interpreter &vu, Reader &r)
+template <class D>
+bool VuSavestate::loadCore(D &vu, Reader &r)
 {
     r.pod(vu.m_state);
 #if PS2X_ENABLE_DET_HASH_TAP
@@ -1779,7 +1820,13 @@ bool VU1InterpreterSavestate::load(VU1Interpreter &vu, Reader &r)
     r.pod(vu.m_vfWritePipeline);
     r.pod(vu.m_viWritePipeline);
     r.pod(vu.m_accWritePipeline);
-    r.pod(vu.m_xgkick);
+    if constexpr (kVuHasXgkick<D>)
+        r.pod(vu.m_xgkick);
+    else
+    {
+        std::array<uint8_t, VU1Interpreter::kXgkickSavestateBytes> xgkick{};
+        r.pod(xgkick);
+    }
     r.pod(vu.m_vfReady);
     r.pod(vu.m_viReady);
     r.pod(vu.m_accReady);
@@ -1815,6 +1862,11 @@ bool VU1InterpreterSavestate::load(VU1Interpreter &vu, Reader &r)
     vu.m_recompCode = nullptr;
     return r.ok();
 }
+
+void VuSavestate::save(const VU0Interpreter &vu, Writer &w) { saveCore(vu, w); }
+void VuSavestate::save(const VU1Interpreter &vu, Writer &w) { saveCore(vu, w); }
+bool VuSavestate::load(VU0Interpreter &vu, Reader &r) { return loadCore(vu, r); }
+bool VuSavestate::load(VU1Interpreter &vu, Reader &r) { return loadCore(vu, r); }
 
 // ==================================================================== GS
 std::string GSSavestate::ready(const GS &gs)

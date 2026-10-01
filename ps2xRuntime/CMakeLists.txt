@@ -521,10 +521,12 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_runtime.cpp
     src/lib/ps2_savestate.cpp
     src/lib/ps2_vif1_interpreter.cpp
-    src/lib/vu/ps2_vu1_core.cpp
-    src/lib/vu/ps2_vu1_upper.cpp
-    src/lib/vu/ps2_vu1_recomp.cpp
-    src/lib/vu/ps2_vu1_lower.cpp
+    src/lib/vu/ps2_vu_core.cpp
+    src/lib/vu/ps2_vu_upper.cpp
+    src/lib/vu/ps2_vu_recomp.cpp
+    src/lib/vu/ps2_vu_lower.cpp
+    src/lib/vu/ps2_vu0.cpp
+    src/lib/vu/ps2_vu1.cpp
     src/lib/vu/ps2_microvu.cpp
     src/lib/games_database.cpp
 )
@@ -579,7 +581,7 @@ else()
     target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DET_HASH_TAP=0)
 endif()
 
-# VR4 D1: vector form of the exact VU FMAC core (ps2_vu1_fmac_simd.h), on by
+# VR4 D1: vector form of the exact VU FMAC core (ps2_vu_fmac_simd.h), on by
 # default (VR4 gate: bit-exact vs the scalar form, det-identical). The scalar
 # form stays compiled as the reference and for -DPS2X_VU1_FMAC_SIMD=OFF.
 # Needs clang/GCC vector extensions.
@@ -894,10 +896,46 @@ endif()
 # only with PS2X_VU0_RECOMP=1 at run time. Game-derived like the VU1 images.
 set(PS2X_VU0_RECOMP_DIR "" CACHE PATH "Directory of generated VU0 images (VR3); empty = interpreter only")
 if(PS2X_VU0_RECOMP_DIR)
-    file(GLOB PS2X_VU0_RECOMP_SOURCES CONFIGURE_DEPENDS "${PS2X_VU0_RECOMP_DIR}/vu0_*.cpp")
+    # VX1: images for VU0Interpreter are vu0e_<hash>.cpp. Pre-VX1 vu0_<hash>.cpp
+    # images name VU1Interpreter and are skipped (they may share the dir with
+    # the new ones while older branches still build from it).
+    file(GLOB PS2X_VU0_RECOMP_SOURCES CONFIGURE_DEPENDS "${PS2X_VU0_RECOMP_DIR}/vu0e_*.cpp")
     list(FILTER PS2X_VU0_RECOMP_SOURCES EXCLUDE REGEX "/\\._")
     list(LENGTH PS2X_VU0_RECOMP_SOURCES PS2X_VU0_RECOMP_SOURCE_COUNT)
     message(STATUS "PS2X: VU0 recomp: ${PS2X_VU0_RECOMP_SOURCE_COUNT} images from ${PS2X_VU0_RECOMP_DIR}")
+    # VX1 transition: a pre-VX1 image (vu0_<hash>.cpp) with no vu0e_ twin is
+    # converted at configure time into the build dir. The conversion is the
+    # emitter's own VU0 rename (VuCore::emitRecompSource): only the class,
+    # include and macro names change, so the generated code is the same.
+    # Drop this once the shared VU0 image dirs hold vu0e_ files.
+    file(GLOB PS2X_VU0_RECOMP_OLD_SOURCES CONFIGURE_DEPENDS "${PS2X_VU0_RECOMP_DIR}/vu0_*.cpp")
+    list(FILTER PS2X_VU0_RECOMP_OLD_SOURCES EXCLUDE REGEX "/\\._")
+    foreach(_vu0_old ${PS2X_VU0_RECOMP_OLD_SOURCES})
+        get_filename_component(_vu0_name "${_vu0_old}" NAME)
+        string(REGEX REPLACE "^vu0_" "vu0e_" _vu0_name "${_vu0_name}")
+        if(EXISTS "${PS2X_VU0_RECOMP_DIR}/${_vu0_name}")
+            continue()
+        endif()
+        file(READ "${_vu0_old}" _vu0_text)
+        string(REPLACE "#include \"ps2_vu1_recomp_gen.h\"" "#include \"ps2_vu0_recomp_gen.h\"" _vu0_text "${_vu0_text}")
+        string(REPLACE "using VU1 = VU1Interpreter;" "using VU0 = VU0Interpreter;" _vu0_text "${_vu0_text}")
+        string(REPLACE "VU1::" "VU0::" _vu0_text "${_vu0_text}")
+        string(REPLACE "(VU1 &vu," "(VU0 &vu," _vu0_text "${_vu0_text}")
+        string(REPLACE "PS2X_VU1_MUSTTAIL" "PS2X_VU_MUSTTAIL" _vu0_text "${_vu0_text}")
+        string(REPLACE "PS2X_VU1_NOINLINE" "PS2X_VU_NOINLINE" _vu0_text "${_vu0_text}")
+        set(_vu0_out "${CMAKE_CURRENT_BINARY_DIR}/vu0e_compat/${_vu0_name}")
+        set(_vu0_prev "")
+        if(EXISTS "${_vu0_out}")
+            file(READ "${_vu0_out}" _vu0_prev)
+        endif()
+        if(NOT _vu0_prev STREQUAL _vu0_text)
+            file(WRITE "${_vu0_out}" "${_vu0_text}")
+        endif()
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_vu0_old}")
+        list(APPEND PS2X_VU0_RECOMP_SOURCES "${_vu0_out}")
+        message(STATUS "PS2X: VU0 recomp: converted pre-VX1 ${_vu0_old} -> ${_vu0_out}")
+    endforeach()
+    list(LENGTH PS2X_VU0_RECOMP_SOURCES PS2X_VU0_RECOMP_SOURCE_COUNT)
     target_sources(ps2EntryRunner PRIVATE ${PS2X_VU0_RECOMP_SOURCES})
     set_source_files_properties(${PS2X_VU0_RECOMP_SOURCES} PROPERTIES
         SKIP_UNITY_BUILD_INCLUSION ON

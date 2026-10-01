@@ -1,15 +1,13 @@
 #ifndef PS2_VU1_STEP_IMPL_H
 #define PS2_VU1_STEP_IMPL_H
 
-// VR1: the per-pair issue step of VU1Interpreter::run(), moved verbatim into an
+// VR1: the per-pair issue step of VuCore::run() (was VU1Interpreter::run()), moved verbatim into an
 // always-inline template so the generated VU1 programs (PS2X_VU1_RECOMP_DIR) and
 // the interpreter share one copy of the scoreboard and cycle accounting. With
 // kStatic the pair comes from a constexpr table and the executors are inlined
 // with constant instruction words; the interpreter passes its decode-cache entry.
 
-#include "runtime/ps2_vu1.h"
-#include "ps2_vu1_entry_trace.h"
-#include "ps2_vu1_trace.h"
+#include "runtime/ps2_vu_core.h"
 
 #include <algorithm>
 #include <bit>
@@ -34,7 +32,8 @@ namespace ps2_vu1_step_detail
 using ps2_vu1_step_detail::firstFreeEntry;
 using ps2_vu1_step_detail::laneForComponent;
 
-PS2X_VU1_ALWAYS_INLINE inline uint64_t VU1Interpreter::calculatePairReadyCycle(const DecodedInstructionPair &decoded) const
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline uint64_t VuCore<D>::calculatePairReadyCycle(const DecodedInstructionPair &decoded) const
 {
     // E57: lane tests as selects (no per-lane branches); the maximum over
     // the same set of ready cycles as the per-lane loop.
@@ -77,12 +76,16 @@ PS2X_VU1_ALWAYS_INLINE inline uint64_t VU1Interpreter::calculatePairReadyCycle(c
             if (entry.valid)
                 ready = std::max(ready, entry.readyCycle);
     }
-    if (decoded.lowerUsage.pipeline == PipelineXgkick && m_xgkick.active)
-        ready = std::max(ready, m_cycle + 1u);
+    if constexpr (isVu1())
+    {
+        if (decoded.lowerUsage.pipeline == PipelineXgkick && derived().m_xgkick.active)
+            ready = std::max(ready, m_cycle + 1u);
+    }
     return ready;
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::markPairWrites(const DecodedInstructionPair &decoded)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::markPairWrites(const DecodedInstructionPair &decoded)
 {
     const VfAccess lowerWrite = decoded.lowerUsage.vfWrite;
     if (lowerWrite.reg != 0u &&
@@ -123,7 +126,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::markPairWrites(const DecodedI
 // VB1: the commit of a queued write, applied at issue. A fresh sequence number
 // retires any older queued write to the same lanes (commit skips entries that
 // are not the latest), exactly as a newer queued write would.
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directVfWrite(uint8_t reg, uint8_t laneMask,
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::directVfWrite(uint8_t reg, uint8_t laneMask,
                                                                   const float value[4], uint32_t latency)
 {
     if (reg == 0u || laneMask == 0u)
@@ -140,7 +144,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directVfWrite(uint8_t reg, ui
     noteDirect(m_cycle + latency);
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directViWrite(uint8_t reg, int32_t value, uint32_t latency)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::directViWrite(uint8_t reg, int32_t value, uint32_t latency)
 {
     if (reg == 0u)
         return;
@@ -149,7 +154,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directViWrite(uint8_t reg, in
     noteDirect(m_cycle + latency);
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directAccWrite(uint8_t laneMask, const float value[4], uint32_t latency)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::directAccWrite(uint8_t laneMask, const float value[4], uint32_t latency)
 {
     if (laneMask == 0u)
         return;
@@ -168,7 +174,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directAccWrite(uint8_t laneMa
 // GV2: in-place direct commits. The executors wrote m_state already, so these
 // only retire older queued writes (the latest-write sequence) and extend the
 // direct landing horizon. Same end state as the direct*Write above.
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directVfWriteInPlace(uint8_t reg, uint8_t laneMask,
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::directVfWriteInPlace(uint8_t reg, uint8_t laneMask,
                                                                         uint32_t latency)
 {
     if (reg == 0u || laneMask == 0u)
@@ -182,7 +189,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directVfWriteInPlace(uint8_t 
     noteDirect(m_cycle + latency);
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directViWriteInPlace(uint8_t reg, uint32_t latency)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::directViWriteInPlace(uint8_t reg, uint32_t latency)
 {
     if (reg == 0u)
         return;
@@ -190,7 +198,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directViWriteInPlace(uint8_t 
     noteDirect(m_cycle + latency);
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directAccWriteInPlace(uint8_t laneMask, uint32_t latency)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::directAccWriteInPlace(uint8_t laneMask, uint32_t latency)
 {
     if (laneMask == 0u)
         return;
@@ -210,7 +219,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::directAccWriteInPlace(uint8_t
 // sticky OR. The static map guarantees no flag reader issues before the newer
 // entry would land, so nobody sees the order change. A queued FSSET (replaces
 // the sticky bits, which does not commute) keeps the whole pair queued.
-PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::flagQueueAllowsDirect() const
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::flagQueueAllowsDirect() const
 {
     for (uint32_t pending = m_flagValidMask; pending != 0u; pending &= pending - 1u)
     {
@@ -224,12 +234,14 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::flagQueueAllowsDirect() const
 // pair, before any lower op of the pair queues a flag entry), so pairs without
 // a flag write never load m_flagValidMask. Same value as at pair start: only
 // the stall's commits change the flag queue before the upper executes.
-PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::directFlagsNow() const
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::directFlagsNow() const
 {
     return m_directFlags && (m_flagValidMask == 0u || flagQueueAllowsDirect());
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::demoteQueuedFlags(bool macStatus, bool clip)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::demoteQueuedFlags(bool macStatus, bool clip)
 {
     for (uint32_t pending = m_flagValidMask; pending != 0u; pending &= pending - 1u)
     {
@@ -251,7 +263,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::demoteQueuedFlags(bool macSta
 // VR1 g5: moved from ps2_vu1_core.cpp and inlined, with commitReadyPipelines()'
 // own early-return gate checked at the call site (same condition, so the same
 // calls do work).
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::advanceOneCycle()
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::advanceOneCycle()
 {
     ++m_cycle;
     // VR4 D2: m_state.cycles is published once at the end of run() (every
@@ -260,13 +273,17 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::advanceOneCycle()
     // its next qword from VU memory.
     if (m_cycle >= m_nextCommitCycle)
         commitReadyPipelines();
-    if (m_xgkick.active)
-        progressXgkick();
+    if constexpr (isVu1())
+    {
+        if (derived().m_xgkick.active)
+            derived().progressXgkick();
+    }
 }
 
+template <class D>
 template <bool kStatic, int kBlockMap, bool kNoStall, uint32_t kCodeSize, bool kPlainTail, int kFloatMode,
           int kInPlace>
-PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstructionPair &decoded, RunContext &ctx,
+PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::issuePair(const DecodedInstructionPair &decoded, RunContext &ctx,
                                                              uint32_t plainNextPc)
 {
     constexpr bool kBlock = kBlockMap >= 0;
@@ -278,11 +295,11 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     // sends an armed run there), so generated pairs skip their checks.
     const uint32_t traceIssuePc = m_state.pc;
     const uint32_t traceIssueIdx = traceIssuePc / 8u;
-    if constexpr (!kStatic)
+    if constexpr (!kStatic && isVu1())
     {
-        if (m_traceArmed && traceIssueIdx < m_traceHist.size())
+        if (derived().m_traceArmed && traceIssueIdx < derived().m_traceHist.size())
         {
-            ++m_traceHist[traceIssueIdx];
+            ++derived().m_traceHist[traceIssueIdx];
         }
     }
     // A branch "takes" when this pair newly raises branchPending (or
@@ -310,7 +327,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     }
 #if PS2X_ENABLE_DET_HASH_TAP
     else if (calculatePairReadyCycle(decoded) > m_cycle)
-        ++m_blockNoStallMisses; // must stay 0: the emitter's no-stall proof failed
+        ++derived().m_blockNoStallMisses; // must stay 0: the emitter's no-stall proof failed
 #endif
     if constexpr (!kBlock)
     {
@@ -342,14 +359,17 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     // snapshot lives in members, written and read only while m_entryArmed
     // (was two zero-initialized stack arrays, 576 B cleared on every pair).
     uint32_t entryPc = 0u, entryLo = 0u, entryUp = 0u;
-    if (!kStatic && m_entryArmed)
+    if constexpr (!kStatic && isVu1())
     {
-        entryPc = m_state.pc;
-        std::memcpy(m_entryOldVi, m_state.vi, sizeof(m_entryOldVi));
-        std::memcpy(m_entryOldVf, m_state.vf, sizeof(m_entryOldVf));
-        std::memcpy(&entryLo, ctx.vuCode + m_state.pc, sizeof(entryLo));
-        std::memcpy(&entryUp, ctx.vuCode + m_state.pc + sizeof(entryLo), sizeof(entryUp));
-        m_entryStoreValid = false;
+        if (derived().m_entryArmed)
+        {
+            entryPc = m_state.pc;
+            std::memcpy(derived().m_entryOldVi, m_state.vi, sizeof(derived().m_entryOldVi));
+            std::memcpy(derived().m_entryOldVf, m_state.vf, sizeof(derived().m_entryOldVf));
+            std::memcpy(&entryLo, ctx.vuCode + m_state.pc, sizeof(entryLo));
+            std::memcpy(&entryUp, ctx.vuCode + m_state.pc + sizeof(entryLo), sizeof(entryUp));
+            derived().m_entryStoreValid = false;
+        }
     }
 
     uint8_t writtenVi = 0u;
@@ -428,19 +448,23 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
     m_directFlags = false;
     m_viBranchBackupValid = false;
 
-    if (!kStatic && m_traceArmed && m_state.branchPending &&
-        (!traceWasBranchPending || m_state.branchTarget != traceWasBranchTarget) &&
-        traceIssueIdx < m_traceTaken.size())
+    if constexpr (!kStatic && isVu1())
     {
-        ++m_traceTaken[traceIssueIdx];
+        if (derived().m_traceArmed && m_state.branchPending &&
+            (!traceWasBranchPending || m_state.branchTarget != traceWasBranchTarget) &&
+            traceIssueIdx < derived().m_traceTaken.size())
+        {
+            ++derived().m_traceTaken[traceIssueIdx];
+        }
     }
 
     // E37: post-exec register state, before the revert/queue block
     // below restores the pipelined values.
-    if (!kStatic && m_entryArmed)
+    if constexpr (!kStatic && isVu1())
     {
-        recordEntryPair(entryPc, entryLo, entryUp, ctx.vuData, ctx.dataSize,
-                        m_entryOldVi, m_entryOldVf);
+        if (derived().m_entryArmed)
+            derived().recordEntryPair(entryPc, entryLo, entryUp, ctx.vuData, ctx.dataSize,
+                                      derived().m_entryOldVi, derived().m_entryOldVf);
     }
 
     if (hasUpperWrite)
@@ -450,8 +474,8 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
                 ? decoded.upperUsage.vfLatency
                 : decoded.upperUsage.latency;
 #if PS2X_ENABLE_DET_HASH_TAP
-        if (m_unit == Unit::VU1)
-            ++(directUpperVf ? m_vbDirectVfWrites : m_vbQueuedVfWrites);
+        if constexpr (isVu1())
+            ++(directUpperVf ? derived().m_vbDirectVfWrites : derived().m_vbQueuedVfWrites);
 #endif
         if constexpr ((kInPlace & kInPlaceUpperVf) != 0)
             directVfWriteInPlace(upperWrite.reg, upperWrite.lanes, latency);
@@ -471,8 +495,8 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
                                      ? decoded.lowerUsage.vfLatency
                                      : decoded.lowerUsage.latency;
 #if PS2X_ENABLE_DET_HASH_TAP
-        if (m_unit == Unit::VU1)
-            ++(directLowerVf ? m_vbDirectVfWrites : m_vbQueuedVfWrites);
+        if constexpr (isVu1())
+            ++(directLowerVf ? derived().m_vbDirectVfWrites : derived().m_vbQueuedVfWrites);
 #endif
         if constexpr ((kInPlace & kInPlaceLowerVf) != 0)
             directVfWriteInPlace(lowerWrite.reg, lowerWrite.lanes, latency);
@@ -540,7 +564,7 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
 #if PS2X_ENABLE_DET_HASH_TAP
         if (m_state.branchPending || m_state.ebit || m_state.haltAfterDelaySlot || decoded.eBit ||
             decoded.dBit || decoded.tBit || ((m_state.pc + 8u) & (kCodeSize - 1u)) != plainNextPc)
-            ++m_blockPlainTailMisses; // must stay 0
+            ++derived().m_blockPlainTailMisses; // must stay 0
 #endif
         m_state.pc = plainNextPc;
     }
@@ -599,16 +623,16 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
 
     advanceOneCycle();
 #if PS2X_ENABLE_DET_HASH_TAP
-    if (m_unit == Unit::VU1)
-        (direct ? m_vbDirectCycles : m_vbQueuedCycles) += m_cycle - vbStartCycle;
+    if constexpr (isVu1())
+        (direct ? derived().m_vbDirectCycles : derived().m_vbQueuedCycles) += m_cycle - vbStartCycle;
     if constexpr (kStatic)
     {
         ++m_genIssuedPairs;
         m_genIssuedCycles += m_cycle - vbStartCycle;
         if constexpr (kBlock)
         {
-            ++m_blockIssuedPairs;
-            m_blockIssuedCycles += m_cycle - vbStartCycle;
+            ++derived().m_blockIssuedPairs;
+            derived().m_blockIssuedCycles += m_cycle - vbStartCycle;
         }
     }
 #endif
@@ -627,38 +651,10 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::issuePair(const DecodedInstru
 // whole 16 KiB micro memory and every pc issuePair produces (pc + 8 wrapped
 // at the code size, or a branch target masked to it) is an in-range multiple
 // of 8.
-PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::recompChainReady(RunContext &)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::recompChainReady(RunContext &)
 {
     return !m_stopRequested;
-}
-
-// VR2 stage 4: a block function runs its pairs back to back with the per-pair
-// guards hoisted here. Entry state the emitter's analysis assumes: no branch
-// pending (the block starts a pc sequence; a leader reached as a delay slot
-// takes the pair function), no E-bit or halt pending, and every stall plus
-// the last direct landing inside the budget. m_blocksOn implies m_directRunOk.
-PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::recompBlockReady(const RunContext &ctx, uint32_t maxCycles,
-                                                                     uint32_t pairs)
-{
-    if (!m_blocksOn || m_state.branchPending || m_state.ebit || m_state.haltAfterDelaySlot ||
-        m_cycle + maxCycles > ctx.budgetEnd)
-    {
-#if PS2X_ENABLE_DET_HASH_TAP
-        ++(!m_blocksOn                                          ? m_blockMissOff
-           : m_state.branchPending                              ? m_blockMissBranch
-           : m_state.ebit || m_state.haltAfterDelaySlot         ? m_blockMissEnd
-                                                                : m_blockMissBudget);
-#endif
-        return false;
-    }
-    // Counted in every build: the tests read m_blockEntries (on path only).
-    ++m_blockEntries;
-#if PS2X_ENABLE_DET_HASH_TAP
-    m_blockPairs += pairs;
-#else
-    (void)pairs;
-#endif
-    return true;
 }
 
 #endif

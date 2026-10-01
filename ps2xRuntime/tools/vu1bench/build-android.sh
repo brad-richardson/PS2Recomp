@@ -13,10 +13,12 @@ NEON=${SSE2NEON:-$HOME/dev/ssx3-work/VRB1/sse2neon}
   -march=armv8-a+fp+simd+crypto+crc -static-libstdc++ \
   -I "$NEON" \
   -I "$WT/ps2xRuntime/include" -I "$WT/ps2xRuntime/src/lib/vu" -I "$WT/ps2xRuntime/src/lib/Kernel" \
-  "$WT/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp" \
-  "$WT/ps2xRuntime/src/lib/vu/ps2_vu1_upper.cpp" \
-  "$WT/ps2xRuntime/src/lib/vu/ps2_vu1_lower.cpp" \
-  "$WT/ps2xRuntime/src/lib/vu/ps2_vu1_recomp.cpp" \
+  "$WT/ps2xRuntime/src/lib/vu/ps2_vu_core.cpp" \
+  "$WT/ps2xRuntime/src/lib/vu/ps2_vu0.cpp" \
+  "$WT/ps2xRuntime/src/lib/vu/ps2_vu1.cpp" \
+  "$WT/ps2xRuntime/src/lib/vu/ps2_vu_upper.cpp" \
+  "$WT/ps2xRuntime/src/lib/vu/ps2_vu_lower.cpp" \
+  "$WT/ps2xRuntime/src/lib/vu/ps2_vu_recomp.cpp" \
   "$VU1"/vu1_*.cpp \
   "$WT/ps2xRuntime/tools/vu1bench/vu1bench.cpp" \
   -o "$OUT"

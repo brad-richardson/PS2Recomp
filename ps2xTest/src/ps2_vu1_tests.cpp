@@ -4,6 +4,8 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/ps2_memory.h"
+#include <type_traits>
+#include "runtime/ps2_vu0.h"
 #include "runtime/ps2_vu1.h"
 #include "ps2_fpmode.h"
 #include "vu1_recomp_fixture.h"
@@ -53,11 +55,11 @@ namespace
 
     // mode: 0 interpreter queued (reference), 1 generated queued,
     // 2 interpreter direct commit, 3 generated direct commit.
-    inline Vu0Snapshot runVu0Once(const VU1Interpreter::RecompProgram *generated, uint8_t *code,
+    inline Vu0Snapshot runVu0Once(const VU0Interpreter::RecompProgram *generated, uint8_t *code,
                                   const Vu0Start &start, uint32_t startPc, int mode, uint32_t budget,
                                   uint32_t check, GS &gs)
     {
-        VU1Interpreter vu(VU1Interpreter::Unit::VU0);
+        VU0Interpreter vu;
         if (mode == 1 || mode == 3)
             vu.setRecompProgramForTest(generated);
         vu.setDirectCommitForTest(mode >= 2 ? 1 : 0);
@@ -81,7 +83,7 @@ namespace
         return snap;
     }
 
-    inline void diffVu0Program(const char *label, const VU1Interpreter::RecompProgram *generated, uint8_t *code,
+    inline void diffVu0Program(const char *label, const VU0Interpreter::RecompProgram *generated, uint8_t *code,
                                const Vu0Start &start, uint32_t startPc, uint32_t maxBudget,
                                const std::vector<int> &modes, GS &gs, Vu0DiffStats &stats)
     {
@@ -440,7 +442,7 @@ void register_ps2_vu1_tests()
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU fixture initialized");
             VU1Interpreter vu1;
-            VU1Interpreter vu0(VU1Interpreter::Unit::VU0);
+            VU0Interpreter vu0;
             t.Equals(vu1.programStartCount(), uint64_t{0}, "initial count");
             vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
                         fx.gs, &fx.mem, 0, 0, 0, 1);
@@ -2317,11 +2319,13 @@ void register_ps2_vu1_tests()
                 std::memcpy(&bits, &v, sizeof(bits));
                 return bits;
             };
-            for (VU1Interpreter::Unit unit : {VU1Interpreter::Unit::VU0, VU1Interpreter::Unit::VU1})
+            // VX1: the same checks on both engines (VU0: scalar FMAC core).
+            const auto check = [&](auto unitTag)
             {
-                VU1Interpreter vu(unit);
+                using Vu = typename decltype(unitTag)::type;
+                Vu vu;
                 vu.setFloatModeForTest(true);
-                const bool simd = unit == VU1Interpreter::Unit::VU1;
+                const bool simd = Vu::kUnit == VuUnit::VU1;
                 auto &s = vu.state();
 
                 s.vf[1][0] = 1.0f;
@@ -2352,7 +2356,9 @@ void register_ps2_vu1_tests()
                 vu.execUpperForTest(makeVuUpper(0x29u, 0x8u, 2u, 1u, 3u), simd, true);
                 t.Equals(bitsOf(s.vf[3][0]), bitsOf(1.0f), "MADD keeps native single result");
                 t.Equals(s.status, 0u, "microVU default has no product underflow sticky");
-            }
+            };
+            check(std::type_identity<VU0Interpreter>{});
+            check(std::type_identity<VU1Interpreter>{});
         });
 
         // VR4 D1: the vector FMAC core against the scalar reference, bit for
@@ -2714,7 +2720,7 @@ void register_ps2_vu1_tests()
             t.IsTrue(gifPacketsSeen > 1000u, "image 2 kicked PATH1 packets");
         });
 
-        // VR3: the same differential for VU0 images (4 KiB, Unit::VU0,
+        // VR3: the same differential for VU0 images (4 KiB, VU0Interpreter,
         // vu1_fixture::buildVu0Image), every program cut at every budget.
         tc.Run("VR3 generated VU0 pairs match the queued VU0 interpreter at every budget cut", [](TestCase &t)
         {
@@ -2724,8 +2730,8 @@ void register_ps2_vu1_tests()
             vu1_fixture::Rng rnd{0x3C6EF372FE94F82Aull};
             for (uint32_t image = 0; image < vu1_fixture::kVu0ImageCount; ++image)
             {
-                const VU1Interpreter::RecompProgram *generated =
-                    VU1Interpreter::findRecompProgram(vu1_fixture::kVu0ImageHash[image]);
+                const VU0Interpreter::RecompProgram *generated =
+                    VU0Interpreter::findRecompProgram(vu1_fixture::kVu0ImageHash[image]);
                 t.IsTrue(generated != nullptr && generated->codeSize == vu1_fixture::kVu0CodeSize,
                          "VU0 fixture image is compiled in");
                 if (generated == nullptr)
@@ -2783,7 +2789,7 @@ void register_ps2_vu1_tests()
             t.IsTrue(in.gcount() == static_cast<std::streamsize>(code.size()), "game VU0 image read");
             const std::string name = std::filesystem::path(imagePath).filename().string();
             const uint64_t hash = std::strtoull(name.substr(4, 16).c_str(), nullptr, 16);
-            const VU1Interpreter::RecompProgram *generated = VU1Interpreter::findRecompProgram(hash);
+            const VU0Interpreter::RecompProgram *generated = VU0Interpreter::findRecompProgram(hash);
             t.IsTrue(generated != nullptr && generated->codeSize == PS2_VU0_CODE_SIZE,
                      "game VU0 image is compiled in (PS2X_VU0_RECOMP_DIR)");
             if (generated == nullptr)
@@ -2836,7 +2842,7 @@ void register_ps2_vu1_tests()
             t.IsTrue(stats.generatedCycles > 0u, "the generated game image ran");
         });
 #endif
-        // F12-fix: the tracked flag-map cache is shared by all VU1Interpreter
+        // F12-fix: the tracked flag-map cache is shared by all instances of a unit
         // instances; with PS2X_MTVU=1 the MTVU thread (VU1) and GameThread
         // (VU0 microprograms) emplaced concurrently (F12 B2 SIGSEGV). Two
         // threads hammer the same images here; every map must match the
@@ -2861,7 +2867,7 @@ void register_ps2_vu1_tests()
                 }
                 images.push_back(std::move(img));
             }
-            VU1Interpreter ref(VU1Interpreter::Unit::VU1);
+            VU1Interpreter ref;
             std::vector<std::vector<uint8_t>> want;
             for (const auto &img : images)
             {
@@ -2873,9 +2879,9 @@ void register_ps2_vu1_tests()
                     return;
                 want.emplace_back(first, first + size / 8u);
             }
-            auto hammer = [&](VU1Interpreter::Unit unit) {
+            auto hammer = [&](auto unitTag) {
                 bool ok = true;
-                VU1Interpreter vu(unit);
+                typename decltype(unitTag)::type vu;
                 for (int it = 0; it < kIters && ok; ++it)
                 {
                     for (size_t i = 0; i < images.size() && ok; ++i)
@@ -2890,8 +2896,8 @@ void register_ps2_vu1_tests()
                 return ok;
             };
             bool vu1Ok = false, vu0Ok = false;
-            std::thread w0([&] { vu1Ok = hammer(VU1Interpreter::Unit::VU1); });
-            std::thread w1([&] { vu0Ok = hammer(VU1Interpreter::Unit::VU0); });
+            std::thread w0([&] { vu1Ok = hammer(std::type_identity<VU1Interpreter>{}); });
+            std::thread w1([&] { vu0Ok = hammer(std::type_identity<VU0Interpreter>{}); });
             w0.join();
             w1.join();
             t.IsTrue(vu1Ok, "VU1-unit thread maps match the reference");

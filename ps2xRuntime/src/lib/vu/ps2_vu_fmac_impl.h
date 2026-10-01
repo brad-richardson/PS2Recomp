@@ -6,20 +6,22 @@
 // inlined, so a generated pair's constant upper word (m_currentUpperInstruction,
 // stored by execUpperImpl) and dest mask fold the op decode and lane loops.
 
-#include "runtime/ps2_vu1.h"
-#include "ps2_vu1_detail.h"
-#include "ps2_vu1_step_impl.h"
+#include "runtime/ps2_vu_core.h"
+#include "ps2_vu_detail.h"
+#include "ps2_vu_step_impl.h"
 
 #include <cmath>
 #include <cstring>
 #include <limits>
 
-PS2X_VU1_ALWAYS_INLINE inline float VU1Interpreter::broadcast(const float *vf, uint8_t bc)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline float VuCore<D>::broadcast(const float *vf, uint8_t bc)
 {
     return normalizeOperand(vf[bc & 3u]);
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::applyDest(float *dst, const float *result, uint8_t dest)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::applyDest(float *dst, const float *result, uint8_t dest)
 {
     if (dest & 0x8u)
         dst[0] = result[0];
@@ -31,12 +33,14 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::applyDest(float *dst, const f
         dst[3] = result[3];
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::applyDestAcc(const float *result, uint8_t dest)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::applyDestAcc(const float *result, uint8_t dest)
 {
     applyDest(m_state.acc, result, dest);
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::normalizeFmacResult(float *result, uint8_t dest,
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::normalizeFmacResult(float *result, uint8_t dest,
                                          uint8_t laneFlags[4])
 {
     // E57: the exact results for all dest lanes come from one decode of the
@@ -62,7 +66,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::normalizeFmacResult(float *re
     }
 }
 
-PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::calculateFmacExactResults(uint8_t dest, VuWide results[4]) const
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::calculateFmacExactResults(uint8_t dest, VuWide results[4]) const
 {
     // E57: same per-lane expressions as calculateFmacExactResult(), with the
     // op decode hoisted out of the lane loop. Only dest lanes are computed.
@@ -153,7 +158,8 @@ PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::calculateFmacExactResults(uin
     return true;
 }
 
-PS2X_VU1_ALWAYS_INLINE inline uint8_t VU1Interpreter::normalizeFmacExactResult(float &value,
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline uint8_t VuCore<D>::normalizeFmacExactResult(float &value,
                                                   VuWide exactResult) const
 {
     const bool negative = std::signbit(exactResult);
@@ -183,7 +189,8 @@ PS2X_VU1_ALWAYS_INLINE inline uint8_t VU1Interpreter::normalizeFmacExactResult(f
     return flags;
 }
 
-PS2X_VU1_ALWAYS_INLINE inline uint32_t VU1Interpreter::calculateFmacProductSticky(uint8_t dest) const
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline uint32_t VuCore<D>::calculateFmacProductSticky(uint8_t dest) const
 {
     uint32_t extraSticky = 0u;
     const uint32_t upper = m_currentUpperInstruction;
@@ -242,7 +249,8 @@ PS2X_VU1_ALWAYS_INLINE inline uint32_t VU1Interpreter::calculateFmacProductStick
     return extraSticky;
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
                                      uint32_t extraSticky)
 {
     if (dest == 0u)
@@ -273,14 +281,15 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::updateFmacFlags(const uint8_t
     commitFmacFlags(mac, status, extraSticky);
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::commitFmacFlags(uint32_t mac, uint32_t status,
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::commitFmacFlags(uint32_t mac, uint32_t status,
                                                                     uint32_t extraSticky)
 {
     // VB1: the flag commit at issue (see issuePair's m_directFlags guard).
     const bool directFlags = directFlagsNow();
 #if PS2X_ENABLE_DET_HASH_TAP
-    if (m_unit == Unit::VU1)
-        ++(directFlags ? m_vbDirectFlagWrites : m_vbQueuedFlagWrites);
+    if constexpr (isVu1())
+        ++(directFlags ? derived().m_vbDirectFlagWrites : derived().m_vbQueuedFlagWrites);
 #endif
     if (directFlags)
     {
@@ -320,7 +329,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::commitFmacFlags(uint32_t mac,
     entry->writesStickyOr = m_elideFmacFlags;
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::issueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::issueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask)
 {
     if (m_directStores)
     {
@@ -346,7 +356,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::issueStore(uint32_t address, 
     queueStore(address, m_storeScratch, laneMask);
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::applyFmacDest(float *dst, float *result, uint8_t dest)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::applyFmacDest(float *dst, float *result, uint8_t dest)
 {
     uint8_t laneFlags[4]{};
     normalizeFmacResult(result, dest, laneFlags);
@@ -354,7 +365,8 @@ PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::applyFmacDest(float *dst, flo
     applyDest(dst, result, dest);
 }
 
-PS2X_VU1_ALWAYS_INLINE inline void VU1Interpreter::applyFmacDestAcc(float *result, uint8_t dest)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::applyFmacDestAcc(float *result, uint8_t dest)
 {
     uint8_t laneFlags[4]{};
     normalizeFmacResult(result, dest, laneFlags);

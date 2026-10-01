@@ -1,28 +1,45 @@
 #ifndef PS2_VU1_RECOMP_GEN_H
 #define PS2_VU1_RECOMP_GEN_H
 
-// VR1: everything a generated VU1 image (vu1_<hash>.cpp) needs: the
-// always-inline pair step and the upper/lower executors.
-// BT1: GS/memory full types stay out on purpose (forward decls in
-// ps2_vu1.h suffice; nothing here calls them), so GS churn doesn't
-// invalidate the generated images in ccache.
+// VR1: everything a generated VU1 image (vu1_<hash>.cpp) needs. VX1: the
+// shared part is ps2_vu_recomp_gen_common.h; this adds the VU1 class and
+// the stage-4 block guard (VU1 images only). The image text is unchanged
+// by VX1 (it names VU1Interpreter and the PS2X_VU1_* macros below).
 
 #include "runtime/ps2_vu1.h"
-#include "ps2_vu1_step_impl.h"
-#include "ps2_vu1_upper_impl.h"
-#include "ps2_vu1_lower_impl.h"
+#include "ps2_vu_recomp_gen_common.h"
 
-// A generated pair hands off to the next one with a guaranteed tail call, so
-// a chain of pairs never grows the stack. This header is included only by
-// generated images, so a compiler without musttail must fail here rather
-// than silently emit nesting chains (Odin S1 stack overflow).
-#if defined(__clang__)
-#define PS2X_VU1_MUSTTAIL [[clang::musttail]]
-// VR2 2D: a block's body stays out of line so its entry trampoline (the guard)
-// needs no stack frame when the guard fails.
-#define PS2X_VU1_NOINLINE [[clang::noinline]]
-#else
-#error "Generated VU1 images require [[clang::musttail]]; plain tail calls nest one frame per pair"
+#define PS2X_VU1_MUSTTAIL PS2X_VU_MUSTTAIL
+#define PS2X_VU1_NOINLINE PS2X_VU_NOINLINE
+
+// VR2 stage 4: a block function runs its pairs back to back with the per-pair
+// guards hoisted here. Entry state the emitter's analysis assumes: no branch
+// pending (the block starts a pc sequence; a leader reached as a delay slot
+// takes the pair function), no E-bit or halt pending, and every stall plus
+// the last direct landing inside the budget. m_blocksOn implies m_directRunOk.
+PS2X_VU1_ALWAYS_INLINE inline bool VU1Interpreter::recompBlockReady(const RunContext &ctx, uint32_t maxCycles,
+                                                                     uint32_t pairs)
+{
+    if (!m_blocksOn || m_state.branchPending || m_state.ebit || m_state.haltAfterDelaySlot ||
+        m_cycle + maxCycles > ctx.budgetEnd)
+    {
+#if PS2X_ENABLE_DET_HASH_TAP
+        ++(!m_blocksOn                                          ? m_blockMissOff
+           : m_state.branchPending                              ? m_blockMissBranch
+           : m_state.ebit || m_state.haltAfterDelaySlot         ? m_blockMissEnd
+                                                                : m_blockMissBudget);
 #endif
+        return false;
+    }
+    // Counted in every build: the tests read m_blockEntries (on path only).
+    ++m_blockEntries;
+#if PS2X_ENABLE_DET_HASH_TAP
+    m_blockPairs += pairs;
+#else
+    (void)pairs;
+#endif
+    return true;
+}
+
 
 #endif
