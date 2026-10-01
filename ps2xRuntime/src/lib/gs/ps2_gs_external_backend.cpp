@@ -42,8 +42,10 @@ namespace
 constexpr uint64_t kLogCapBytes = 1ull * 1024ull * 1024ull * 1024ull;
 constexpr char kSaveMagic[8] = {'P', 'S', '2', 'X', 'E', 'G', 'S', '1'};
 // DS1: v2 appends the GE1 freeze blob (v1 never completed a GE1-live save;
-// v1 files refuse cleanly on the version check).
-constexpr uint32_t kSaveVersion = 2u;
+// v1 files refuse cleanly on the version check). CN2b: v3 adds the GE1
+// local->host arm (byte count + served flag) after the adapter FIFO; v2
+// files still load as "nothing armed".
+constexpr uint32_t kSaveVersion = 3u;
 // GE2 mirror set: same 19 offsets the frontend diffs (gs_frontend.cpp).
 constexpr uint32_t kMirrorOffsets[19] = {
     0x0000u, 0x0010u, 0x0020u, 0x0030u, 0x0040u, 0x0050u, 0x0060u,
@@ -904,6 +906,11 @@ public:
         putU64(out, m_fifoCursor);
         putU64(out, m_fifo.size());
         out.insert(out.end(), m_fifo.begin(), m_fifo.end());
+        // CN2b: an armed, not yet downloaded GE1 FIFO (SQ3: readback off
+        // leaves 768 bytes armed every ~9 ticks mid-race). The freeze blob
+        // restores the TRX regs, so a post-load consume reads the same bytes.
+        putU32(out, m_ge1FifoBytes);
+        out.push_back(m_ge1FifoServed ? 1u : 0u);
         std::vector<uint8_t> innerBlob;
         if (m_inner)
             m_inner->SavestateSave(innerBlob);
@@ -948,7 +955,7 @@ public:
             uint32_t version = 0u;
             uint64_t gif = 0u, vsync = 0u, priv = 0u, con = 0u, pres = 0u, lastV = 0u;
             std::array<uint64_t, 19> mirror{};
-            ok = takeU32(p, end, version) && version == kSaveVersion &&
+            ok = takeU32(p, end, version) && (version == 2u || version == kSaveVersion) &&
                  takeU64(p, end, gif) && takeU64(p, end, vsync) && takeU64(p, end, priv) &&
                  takeU64(p, end, con) && takeU64(p, end, pres) && takeU64(p, end, lastV);
             for (size_t i = 0; ok && i < mirror.size(); ++i)
@@ -961,10 +968,18 @@ public:
                 ok = false;
             std::vector<uint8_t> fifo;
             uint64_t innerSize = 0u;
+            uint32_t ge1FifoBytes = 0u;
+            uint8_t ge1FifoServed = 0u;
             if (ok)
             {
                 fifo.assign(p, p + static_cast<size_t>(fifoSize));
                 p += static_cast<size_t>(fifoSize);
+                if (version >= 3u)
+                    ok = takeU32(p, end, ge1FifoBytes) && end - p >= 1 &&
+                         (ge1FifoServed = *p++, ge1FifoServed <= 1u);
+            }
+            if (ok)
+            {
                 ok = takeU64(p, end, innerSize) &&
                      static_cast<uint64_t>(end - p) >= innerSize + 8u;
             }
@@ -1013,6 +1028,8 @@ public:
                 m_fifoCursor = static_cast<size_t>(cursor);
                 if (m_fifoCursor > m_fifo.size())
                     m_fifoCursor = m_fifo.size();
+                m_ge1FifoBytes = ge1FifoBytes;
+                m_ge1FifoServed = ge1FifoServed != 0u;
             }
         }
         log("# load bytes=%zu ok=%u\n", size, ok ? 1u : 0u);

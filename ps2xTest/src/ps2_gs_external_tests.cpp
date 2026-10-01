@@ -242,6 +242,21 @@ void register_ps2_gs_external_tests()
             t.IsFalse(be2->SavestateLoad(bad.data(), bad.size()), "bad version rejected");
             t.IsFalse(be2->SavestateLoad(blob.data(), blob.size() - 1u), "truncation rejected");
             t.IsFalse(be2->SavestateLoad(nullptr, 0u), "empty rejected");
+
+            // CN2b: a v2 blob (no GE1 l2h arm after the adapter FIFO) still loads.
+            const size_t fifoSizeAt = 8u + 4u + 6u * 8u + 19u * 8u + 1u + 8u;
+            uint64_t fifoSize = 0u;
+            std::memcpy(&fifoSize, blob.data() + fifoSizeAt, 8u);
+            const size_t armAt = fifoSizeAt + 8u + static_cast<size_t>(fifoSize);
+            std::vector<uint8_t> v2 = blob;
+            v2.erase(v2.begin() + static_cast<std::ptrdiff_t>(armAt),
+                     v2.begin() + static_cast<std::ptrdiff_t>(armAt + 5u));
+            v2[8] = 2u;
+            v2[9] = v2[10] = v2[11] = 0u;
+            auto be3 = ps2x_gs_external::create(nullptr);
+            be3->Initialize(vram.data(), kVramSize);
+            t.IsTrue(be3->SavestateLoad(v2.data(), v2.size()), "v2 blob loads");
+            t.IsTrue(drain(*be3) == rest, "v2 blob continues the same bytes");
         });
 
         tc.Run("delegation: host->local upload matches the cpu backend", [](TestCase &t)
