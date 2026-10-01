@@ -288,6 +288,11 @@ public:
     static constexpr uint32_t kGuestDispatchCycles = 8u;
     static constexpr uint64_t kDefaultTimeSliceCycles = 65536ull;
 
+    // CTX1: sigsetjmp mask-save flag for PS2X_EE_SWITCH (run() reads it once).
+    // fast (default, also unset/unknown) = 0: no signal-mask save. sigmask =
+    // GT3's platform setjmp semantics (1 on Apple/bionic, 0 on glibc).
+    static int transferSaveMaskFor(const char *mode);
+
     explicit EeScheduler(PS2Runtime &runtime);
     ~EeScheduler();
 
@@ -569,6 +574,7 @@ private:
     // set by run() around each guest call; run() is non-reentrant).
     // GT3: sigsetjmp with a run()-time mask-save flag that keeps each
     // platform's setjmp semantics (bionic/Apple save the mask, glibc doesn't).
+    // CTX1: PS2X_EE_SWITCH=fast (default) clears it (transferSaveMaskFor).
 #if PS2X_EE_SIGJMP
     sigjmp_buf m_transferJmp{};
 #else

@@ -576,6 +576,25 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     publishSnapshot();
 }
 
+// CTX1: Apple's setjmp/longjmp make sigprocmask + sigaltstack syscalls on
+// every arm and every jump (bionic: one sigprocmask each). Nothing on the
+// GameThread changes its signal mask between an arm and its transfer, and no
+// transfer leaves a signal handler or an alternate stack, so the save is pure
+// cost (sigprocmask + __sigaltstack were 7.8 % of the Mac GameThread's busy
+// time in IP6's profile). sigmask keeps the GT3 path for A/B.
+int EeScheduler::transferSaveMaskFor(const char *mode)
+{
+    if (mode != nullptr && std::strcmp(mode, "sigmask") == 0)
+    {
+#if defined(__GLIBC__)
+        return 0; // GT3: mask save as plain setjmp does it on this libc.
+#else
+        return 1;
+#endif
+    }
+    return 0;
+}
+
 void EeScheduler::run()
 {
     assertExecutor();
@@ -584,12 +603,16 @@ void EeScheduler::run()
     ps2_fpmode::ScopedEeMode eeFpMode;
     m_running.store(true, std::memory_order_release);
 #if PS2X_EE_SIGJMP
-    // GT3: mask save as plain setjmp does it on this libc.
-#if defined(__GLIBC__)
-    m_transferSaveMask = 0;
-#else
-    m_transferSaveMask = 1;
-#endif
+    m_transferSaveMask = transferSaveMaskFor(std::getenv("PS2X_EE_SWITCH"));
+    {
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            std::fprintf(stderr, "[ee-switch] mode=%s savemask=%d\n",
+                         m_transferSaveMask != 0 ? "sigmask" : "fast", m_transferSaveMask);
+        }
+    }
 #endif
     // PT2: cache the perf-log knob once (env is fixed before run()).
     // AD1: ADPF reuses this same accounting (no re-measure), so it turns the

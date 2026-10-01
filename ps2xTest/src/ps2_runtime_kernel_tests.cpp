@@ -18,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -29,6 +30,8 @@
 #include <tuple>
 #include <vector>
 #if !defined(_WIN32)
+#include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 #endif
 
@@ -1568,6 +1571,71 @@ void register_ps2_runtime_kernel_tests()
             t.IsFalse(gGuestExecutingFlagMissing.load(std::memory_order_acquire),
                       "the scheduler must publish guest execution only around the active guest call");
         });
+
+#if !defined(_WIN32)
+        tc.Run("CTX1: PS2X_EE_SWITCH fast and sigmask transfers run the same trace; mask and SIGSEGV handler intact", [](TestCase &t)
+        {
+            t.Equals(EeScheduler::transferSaveMaskFor(nullptr), 0, "unset is fast (no mask save)");
+            t.Equals(EeScheduler::transferSaveMaskFor("fast"), 0, "fast saves no mask");
+            t.Equals(EeScheduler::transferSaveMaskFor("bogus"), 0, "unknown values fall back to fast");
+#if defined(__GLIBC__)
+            t.Equals(EeScheduler::transferSaveMaskFor("sigmask"), 0, "sigmask keeps glibc setjmp semantics");
+#else
+            t.Equals(EeScheduler::transferSaveMaskFor("sigmask"), 1, "sigmask keeps Apple/bionic setjmp semantics");
+#endif
+            const char *prior = std::getenv("PS2X_EE_SWITCH");
+            const std::string priorValue = prior != nullptr ? prior : "";
+            const auto runTrace = [](const char *mode) {
+                setenv("PS2X_EE_SWITCH", mode, 1);
+                TestEnv env;
+                std::vector<int> trace;
+                gSchedulerTrace = &trace;
+                env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
+                env.runtime.registerFunction(K_SCHED_A, schedulerTraceA);
+                env.runtime.registerFunction(K_SCHED_B, schedulerTraceB);
+                env.ctx.pc = K_SCHED_MAIN;
+                EeScheduler &ee = env.runtime.eeScheduler();
+                ee.reset(env.rdram.data(), env.ctx);
+                const int lowA = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x20000u, 0x800u, 0, 20, 0});
+                const int highA = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x21000u, 0x800u, 0, 5, 0});
+                const int highB = ee.createThread(EeThreadCreateParams{0, K_SCHED_B, 0x22000u, 0x800u, 0, 5, 0});
+                ee.startThread(lowA, 0, env.ctx, false);
+                ee.startThread(highA, 0, env.ctx, false);
+                ee.startThread(highB, 0, env.ctx, false);
+                ee.run();
+                gSchedulerTrace = nullptr;
+                return trace;
+            };
+            sigset_t before{};
+            pthread_sigmask(SIG_SETMASK, nullptr, &before);
+            const std::vector<int> fastTrace = runTrace("fast");
+            const std::vector<int> maskTrace = runTrace("sigmask");
+            if (prior != nullptr)
+                setenv("PS2X_EE_SWITCH", priorValue.c_str(), 1);
+            else
+                unsetenv("PS2X_EE_SWITCH");
+            t.IsTrue(!fastTrace.empty(), "fast mode runs guest threads across a transfer");
+            t.IsTrue(fastTrace == maskTrace, "fast and sigmask transfers produce the same trace");
+            sigset_t after{};
+            pthread_sigmask(SIG_SETMASK, nullptr, &after);
+            bool sameMask = true;
+            for (int sig = 1; sig < 32; ++sig)
+                sameMask = sameMask && sigismember(&before, sig) == sigismember(&after, sig);
+            t.IsTrue(sameMask, "the executor thread's signal mask is unchanged after fast transfers");
+
+            static volatile sig_atomic_t segvSeen = 0;
+            struct sigaction action{};
+            struct sigaction old{};
+            action.sa_handler = [](int) { segvSeen = 1; };
+            sigemptyset(&action.sa_mask);
+            t.Equals(sigaction(SIGSEGV, &action, &old), 0, "install a SIGSEGV handler");
+            segvSeen = 0;
+            raise(SIGSEGV);
+            sigaction(SIGSEGV, &old, nullptr);
+            t.IsTrue(segvSeen == 1, "a SIGSEGV handler still fires on the executor thread after fast transfers");
+            t.Equals(fastTrace.size(), size_t{4}, "fast mode runs the four-entry FIFO trace");
+        });
+#endif
 
         tc.Run("RD1: every EE context, incl. StartThread's, has VU0 vf0 = (0,0,0,1)", [](TestCase &t)
         {
