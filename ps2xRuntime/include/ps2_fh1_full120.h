@@ -196,6 +196,8 @@ enum : uint32_t
     kFix12FxTimer = 1u << 6, // rider-FX timer P+0xb44 (0x2e2388 in 0x2e2260): per-update 1/60 step shared with the trail-push dt (post-call add-back, FH21)
     kFix12Bounce = 1u << 7,  // rider bounce oscillator phase (0x13f0d4 in 0x13d818 -> R+0x31c): per-update step 2.65 -> 1.325 (class b, FH22)
     kFix12Particles = 1u << 8, // rider particle pass 0x2dd0b8 (calls 0x128f20/0x11198c): private 1/60 dt + per-update gravity -> stock cadence (class d, FH22)
+    kFix12CrashBody = 1u << 9, // wipeout body/board integrator 0x136f30: private 1/60 step (pos, gravity, drag, spin) (class h, FH23)
+    kFix12Uber = 1u << 10,     // HUD uber meter (0x117fe0 message 9): display slew 1/60 per update (class b, FH23)
 };
 
 inline uint32_t fh12Item(const std::string &item) noexcept
@@ -209,6 +211,8 @@ inline uint32_t fh12Item(const std::string &item) noexcept
     if (item == "fxtimer") return kFix12FxTimer;
     if (item == "bounce") return kFix12Bounce;
     if (item == "particles") return kFix12Particles;
+    if (item == "crashbody") return kFix12CrashBody;
+    if (item == "uber") return kFix12Uber;
     return 0u;
 }
 
@@ -221,7 +225,7 @@ inline uint32_t fixMask12() noexcept
         const std::string s(v);
         if (s == "all")
             return kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse | kFix12Crash | kFix12FxTimer |
-                   kFix12Bounce | kFix12Particles;
+                   kFix12Bounce | kFix12Particles | kFix12CrashBody | kFix12Uber;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -626,7 +630,16 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
     // f20 * [0x49c13c] (2.65, single reader 0x13f0d4) per update, wraps at 2pi, and stores
     // 7.5 * f20 * sin(phase) to R+0x31c, which sub_0x11eb98 adds (when > 0) along R+0x370 to the rider
     // pose. At 120 the phase ran 2x per stock tick (+0.148 -> +0.295); 1.325 restores stock frequency.
-    const std::array<std::pair<uint32_t, Word>, 7> words12 = {{
+    // crashbody (FH23): the wipeout body B (0x144a1f0 on Kick Doubt, R = [B+0x40]) is stepped by 0x136f30
+    // with f4 = R+0x300 * [0x49be38] (1/60, single reader 0x136f48): R+0x130 += v*f4 (store 0x136f8c),
+    // v += (-0.2vx, -0.2vy, -1800)*f4, spin *= 1 - 0.5*f4, quaternion R+0x140 integrated by f4. The board
+    // bone (23, 0x152de50) and the 8 board-spray objects (0x1456a60, stride 0x210) follow R+0x130. At 120
+    // the body moved a full stock step per update (16 -> 2x per stock tick, fh23-W4/W5); 1/120: 1.00x (E2).
+    // uber (FH23): 0x117fe0 slews HUD message 9 (the uber meter, slot +0x57c) toward 1 - R+0x2f0*[0x49b698]
+    // by [0x49b69c] (1/60, single reader 0x118cfc) per update; in a wipeout it falls to -1 and the slot is
+    // dropped (the meter greys). Events greyed ~20 stock ticks early (s6321 vs 6341, fh23-S1/E1), like
+    // FH10's meter messages 5/6.
+    const std::array<std::pair<uint32_t, Word>, 9> words12 = {{
         {kFix12Crash, {0u, 0x49be78u, kSixtieth, kHundredTwentieth, "crash_dt_137754"}},
         {kFix12Crash, {0u, 0x49bef4u, kSixtieth, kHundredTwentieth, "crash_dt_13940c"}},
         {kFix12Crash, {0u, 0x49befcu, kSixtieth, kHundredTwentieth, "crash_dt_1394f4"}},
@@ -634,6 +647,8 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFix12Recover, {0u, 0x49b918u, 0xbb88a358u, 0xbb08a358u, "recover_decay_12cbdc"}},
         {kFix12Pulse, {0u, 0x49f6c0u, kSixtieth, kHundredTwentieth, "pulse_step_2e3a10"}},
         {kFix12Bounce, {0u, 0x49c13cu, 0x4029999au, 0x3fa9999au, "bounce_phase_13f0d4"}},
+        {kFix12CrashBody, {0u, 0x49be38u, kSixtieth, kHundredTwentieth, "crashbody_dt_136f48"}},
+        {kFix12Uber, {0u, 0x49b69cu, kSixtieth, kHundredTwentieth, "uber_slew_118cfc"}},
     }};
     for (const auto &w : words12)
         if ((fixMask12() & w.first) != 0u)
