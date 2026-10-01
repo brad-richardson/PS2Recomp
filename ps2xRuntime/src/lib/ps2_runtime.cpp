@@ -4789,6 +4789,14 @@ namespace
         ge3NoteFinishOnlyExempt(pc);
         return true;
     }
+
+    // EB3: E44's armed check (mutex, EXTRA flush, ofstream/snprintf line
+    // emit) kept out of line so Store32/Store64 inline only the enabled()
+    // gate. Same result as ps2_e44_trace::storeArmed.
+    [[gnu::noinline, gnu::cold]] bool e44StoreArmedSlow(uint32_t vaddr, uint32_t size)
+    {
+        return ps2_e44_trace::storeArmed(vaddr, size);
+    }
 }
 
 // GE3 Part 6: definitions for the declarations in ps2_mtvu.h. Observer only;
@@ -5114,7 +5122,7 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     try
     {
         // E44 scratchpad write watch (dev-only, default off).
-        const bool e44 = ps2_e44_trace::storeArmed(vaddr, 4u);
+        const bool e44 = ps2_e44_trace::enabled() && e44StoreArmedSlow(vaddr, 4u);
         ps2_e44_trace::detail::ScopedMemSuppress e44Suppress(e44);
         m_memory.write32(vaddr, value, ctx ? ctx->pc : 0u);
         if (e44)
@@ -5139,7 +5147,7 @@ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
     try
     {
         // E44 scratchpad write watch (dev-only, default off).
-        const bool e44 = ps2_e44_trace::storeArmed(vaddr, 8u);
+        const bool e44 = ps2_e44_trace::enabled() && e44StoreArmedSlow(vaddr, 8u);
         ps2_e44_trace::detail::ScopedMemSuppress e44Suppress(e44);
         m_memory.write64(vaddr, value, ctx ? ctx->pc : 0u);
         if (e44)
