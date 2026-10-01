@@ -1,31 +1,12 @@
-// E44 DEV-ONLY scratchpad write watch behind PS2X_E44_TRACE=<file>.
+// E44 DEV-ONLY scratchpad write watch. CU4 B6 deleted the
+// PS2X_E44_TRACE/FROM/TO/EXTRA/APPEND tunables (stale CU1 S3 taps):
+// the tap never arms.
 //
 // Watches the 8 words at 0x70000000..0x7000000c and 0x70000500..0x7000050c
-// (the w0..w3 inputs of the two mode-6 items on PCSX2), plus up to 8
-// env-configured extra EE words (PS2X_E44_EXTRA="0x<addr>[,...]", for the
-// Boot-B follow-up on a DMA source word).
+// (the w0..w3 inputs of the two mode-6 items on PCSX2).
 //
-// Part 4 (PS2X_E44_APPEND=1): render-list append watch for
-// sub_00376938. (a) At the count-increment store (pc 0x3797E8, same
-// basic block as the 0x3797EC append copy, post-store) logs the T60
-// app line (count, t0, tw0..tw4, s4, t1, raw ra). (b) Write-watches
-// the template words, logging T60 tpl lines for tw0/tw1 changes.
-// Amendment: tplm value filter (amendment 2: exact mode 6), cap 200;
-// per-vsync appsum aggregation (ungated counters, cap 3000 lines);
-// the apc appender-pc census over the EE item region (ungated,
-// uncapped). app/tpl/tplrearm grammars match T60 exactly for
-// diffing; tplm/appsum/apc are E44-only.
-// Amendment 2 (T61/T62 parity): appx filtered log at the three copy
-// sites (tick >= 1270, count<=1 or mode 6, cap 300) and the v1b0
-// value watch ((lane & 0x3FF) == 0x1B0, cap 200, ungated).
-// Amendment 3 (T62/T63 parity): tw change-only watch over the four
-// 0x14 templates (whole boot, no per-word cap, 2000 lines).
-// EE canonicalization folds every RAM segment (0x00/0x20/0x30/0x80/
-// 0xA0) via PS2_RAM_MASK, so UCAB (0x30) stores match extras.
-//
-// Master gate: PS2X_E44_TRACE names the text file receiving every line.
-// Unset/empty (default) = one relaxed atomic check per tap; zero
-// guest-visible behavior change, no I/O.
+// The Part 4 render-list append watch, amendments and master gate below
+// describe the deleted tunables' history; the tap never arms.
 // Optional binds: PS2X_E44_FROM / PS2X_E44_TO (inclusive guest-vsync
 // window; default 1270..1280 — the settled window from E43), vsync = the
 // shared E41 VBlank mirror via lastVsyncTick().
@@ -349,43 +330,9 @@ namespace detail
 
     inline void initLocked(State &s)
     {
+        // CU4 B6: the PS2X_E44_TRACE/FROM/TO/EXTRA/APPEND tunables are
+        // deleted (stale CU1 S3 taps). The tap never arms.
         s.initDone = true;
-        const char *file = std::getenv("PS2X_E44_TRACE");
-        if (!file || file[0] == '\0')
-        {
-            return;
-        }
-        s.path = file;
-        uint64_t from = 1270u, to = 1280u;
-        if (const char *env = std::getenv("PS2X_E44_FROM"))
-        {
-            if (!parseU64(env, from))
-            {
-                return;
-            }
-        }
-        if (const char *env = std::getenv("PS2X_E44_TO"))
-        {
-            if (!parseU64(env, to))
-            {
-                return;
-            }
-        }
-        s.from = from;
-        s.to = to;
-        parseExtraLocked(s, std::getenv("PS2X_E44_EXTRA"));
-        // Part 4: PS2X_E44_APPEND=1 arms the render-list append watch
-        // (same trace file and FROM/TO window as the spw watch).
-        if (const char *append = std::getenv("PS2X_E44_APPEND"))
-        {
-            if (append[0] == '1' && append[1] == '\0')
-            {
-                s.appendOn = true;
-                appendOnFlag().store(true, std::memory_order_relaxed);
-            }
-        }
-        s.enabled = true;
-        enabledFlag().store(true, std::memory_order_relaxed);
     }
 
     inline void ensureInit()
