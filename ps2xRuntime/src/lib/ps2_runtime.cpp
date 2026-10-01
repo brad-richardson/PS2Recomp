@@ -451,6 +451,20 @@ namespace
     // later items of that bucket find it, chain onto it and are not drawn
     // this frame. The first 1024 buckets are drawn, the table never
     // exceeds 1024, and every stored entry is genuine.
+    // The bucket pool needs its own bound (TK22 s1: Elysium with scenery
+    // reaches 2127 records; record 2048 on lands on the texture and bucket
+    // hash heads, so sub_00395000 walks a cycle, and record 2112 zeroes the
+    // table count). Under =2 the pool stops at 2046 real records; records
+    // 2046 (dummy) and 2047 (sink) are reserved. With the pool full, the five
+    // bucket lookups are answered on the host (the same read-only walk,
+    // without the move-to-front): a hit returns the bucket, a miss returns
+    // the sink, so the caller takes its found path and allocates nothing.
+    // The sink is never in the hash or the table, so items chained onto it
+    // are dropped for the frame. A continuation item ([item+0x1E] != 0) in
+    // sub_00362DE8 allocates without a lookup; at its sub_00394ED0 call the
+    // pool count is pinned to 2047 (the allocation lands on the sink) and
+    // prev to the dummy (so the sink is never linked into a drawn chain and
+    // never takes the top-level append path).
     // PS2X_SSX3_DRAWTABLE_STATS=1 (observation only) logs the end-of-frame
     // counts at the reset call.
     constexpr uint32_t kSsx3DrawKeyCall = 0x00364240u;
@@ -463,6 +477,11 @@ namespace
     constexpr uint32_t kSsx3DrawReset = 0x00362CC8u;
     constexpr int32_t kSsx3DrawTableCap = 1024;
     constexpr int32_t kSsx3DrawPoolCap = 2048;
+    constexpr int32_t kSsx3DrawPoolReal = 2046; // records 2046 (dummy) and 2047 (sink) reserved under =2
+    constexpr uint32_t kSsx3DrawLookup = 0x00395000u;
+    constexpr uint32_t kSsx3DrawTexLookup = 0x00394ED0u;
+    constexpr uint32_t kSsx3DrawTexLoop1Call = 0x00362F68u;
+    constexpr uint32_t kSsx3DrawTexLoop2Call = 0x00363238u;
     constexpr int32_t kSsx3DrawTexCap = 1024;
     std::atomic<uint64_t> g_ssx3DrawTableClamps{0u};
 
@@ -478,6 +497,9 @@ namespace
         // Stats, per frame (cleared at the reset call).
         uint32_t siteAppends[5] = {};
         uint32_t frameRefusals = 0u;
+        uint32_t frameSunk = 0u;
+        uint64_t sunk = 0u;
+        uint64_t walkCut = 0u;
         uint64_t frames = 0u;
         uint64_t loggedFrames = 0u;
         uint64_t windowTick = 0u;
@@ -613,6 +635,92 @@ namespace
                          static_cast<unsigned long long>(n), site, count);
     }
 
+    uint32_t ssx3DrawPoolRecord(uint32_t b, int32_t index)
+    {
+        return b + 0x57498u + 0x20u * static_cast<uint32_t>(index);
+    }
+
+    bool ssx3DrawLookupSite(uint32_t sourcePc)
+    {
+        return sourcePc == 0x00363008u || sourcePc == 0x003632DCu || sourcePc == 0x0037FE7Cu ||
+               sourcePc == 0x0038C1ACu || sourcePc == 0x0038C380u;
+    }
+
+    // =2, a call to sub_00395000 (a0 = b, a1 = tex record, a2 = packed,
+    // a3 = hash, t0 = [item+0x1C]). Returns true when the call is answered
+    // on the host (pool full): v0 = the matching bucket or the sink.
+    bool ssx3DrawPoolLookup(uint8_t *rdram, R5900Context *ctx, uint32_t sourcePc)
+    {
+        if (ssx3DrawTableMode() != 2 || !rdram || !ctx || !ssx3DrawLookupSite(sourcePc))
+            return false;
+        const uint32_t b = getRegU32(ctx, 4);
+        const int32_t pool = ssx3ReadS32(rdram, b + 0x57494u);
+        if (pool < kSsx3DrawPoolReal)
+            return false;
+        Ssx3DrawTableState &st = g_ssx3Draw;
+        const uint32_t key0 = getRegU32(ctx, 5);
+        const uint32_t key1 = getRegU32(ctx, 6);
+        const uint32_t key2 = getRegU32(ctx, 8);
+        uint32_t rec = static_cast<uint32_t>(ssx3ReadS32(rdram, b + 0x678A0u + 4u * (getRegU32(ctx, 7) & 0xFFu)));
+        uint32_t found = 0u;
+        for (uint32_t steps = 0u; rec != 0u; ++steps)
+        {
+            if (steps >= 4096u)
+            {
+                if (++st.walkCut <= 8u)
+                    std::fprintf(stderr, "[ssx3-drawtable-guard] lookup walk cut at 4096 steps (hash 0x%x)\n",
+                                 getRegU32(ctx, 7) & 0xFFu);
+                break;
+            }
+            if (ssx3ReadS32(rdram, rec + 0x14u) == 0 &&
+                static_cast<uint32_t>(ssx3ReadS32(rdram, rec + 4u)) == key1 &&
+                static_cast<uint32_t>(ssx3ReadS32(rdram, rec + 8u)) == key2 &&
+                static_cast<uint32_t>(ssx3ReadS32(rdram, rec)) == key0)
+            {
+                found = rec;
+                break;
+            }
+            rec = static_cast<uint32_t>(ssx3ReadS32(rdram, rec + 0x1Cu));
+        }
+        if (found == 0u)
+        {
+            found = ssx3DrawPoolRecord(b, kSsx3DrawPoolCap - 1);
+            ssx3WriteU32(rdram, found + 0x0Cu, 0u);
+            ssx3WriteU32(rdram, found + 0x10u, 0u);
+            ssx3WriteU32(rdram, found + 0x18u, 0u);
+            ++st.frameSunk;
+            const uint64_t n = ++st.sunk;
+            if (n <= 4u || (n & (n - 1u)) == 0u)
+                std::fprintf(stderr, "[ssx3-drawtable-guard] pool full: sink #%llu site=0x%x pool=%d\n",
+                             static_cast<unsigned long long>(n), sourcePc, pool);
+        }
+        SET_GPR_U32(ctx, 2, found);
+        return true;
+    }
+
+    // =2, a call to sub_00394ED0 from sub_00362DE8 (s1 = item, s4 = b + 0x60000).
+    void ssx3DrawPoolPin(uint8_t *rdram, R5900Context *ctx, uint32_t sourcePc)
+    {
+        if (sourcePc != kSsx3DrawTexLoop1Call && sourcePc != kSsx3DrawTexLoop2Call)
+            return;
+        if (ssx3DrawTableMode() != 2 || !rdram || !ctx)
+            return;
+        const uint32_t b = getRegU32(ctx, 4);
+        const int32_t pool = ssx3ReadS32(rdram, b + 0x57494u);
+        if (pool < kSsx3DrawPoolReal)
+            return;
+        ssx3WriteU32(rdram, b + 0x57494u, static_cast<uint32_t>(kSsx3DrawPoolCap - 1));
+        const uint32_t item = getRegU32(ctx, 17) & PS2_RAM_MASK;
+        if (item > PS2_RAM_SIZE - 0x20u)
+            return;
+        int16_t cont = 0;
+        std::memcpy(&cont, rdram + item + 0x1Eu, 2u);
+        if (cont == 0)
+            return;
+        ssx3WriteU32(rdram, getRegU32(ctx, 20) + 0x7CA0u, ssx3DrawPoolRecord(b, kSsx3DrawPoolReal));
+        ++g_ssx3Draw.frameSunk;
+    }
+
     // At the reset call (a0 = b): the previous frame's final counts.
     void ssx3DrawTableFrame(const uint8_t *rdram, const R5900Context *ctx, uint64_t tick)
     {
@@ -649,10 +757,10 @@ namespace
             if (n <= 64u || (n & 63u) == 0u)
                 std::fprintf(stderr,
                              "[ssx3-drawtable-stats] over #%llu t=%llu b=0x%x items=%d tex=%d(static %d) pool=%d table=%d "
-                             "appends=%u (%u/%u/%u/%u/%u) refused=%u\n",
+                             "appends=%u (%u/%u/%u/%u/%u) refused=%u sunk=%u\n",
                              static_cast<unsigned long long>(n), static_cast<unsigned long long>(tick), b, items, tex,
                              texStatic, pool, table, appends, st.siteAppends[0], st.siteAppends[1], st.siteAppends[2],
-                             st.siteAppends[3], st.siteAppends[4], st.frameRefusals);
+                             st.siteAppends[3], st.siteAppends[4], st.frameRefusals, st.frameSunk);
         }
         const int32_t vals[5] = {items, tex, pool, table, static_cast<int32_t>(appends)};
         for (int i = 0; i < 5; ++i)
@@ -669,6 +777,7 @@ namespace
         for (uint32_t &a : st.siteAppends)
             a = 0u;
         st.frameRefusals = 0u;
+        st.frameSunk = 0u;
     }
 
     void enforceSsx3Widescreen(uint8_t *rdram, uint32_t sourcePc)
@@ -3885,6 +3994,18 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
     {
         ssx3DrawTableGuard(rdram, ctx, sourcePc);
+    }
+    if (targetPc == kSsx3DrawLookup &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) &&
+        ssx3DrawPoolLookup(rdram, ctx, sourcePc))
+    {
+        ctx->pc = fallthroughPc;
+        return true;
+    }
+    if (targetPc == kSsx3DrawTexLookup &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
+    {
+        ssx3DrawPoolPin(rdram, ctx, sourcePc);
     }
     if (targetPc == kSsx3DrawReset &&
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
