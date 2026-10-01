@@ -1,13 +1,7 @@
-// E40 DEV-ONLY VIF1 MPG source-address trace behind PS2X_MPG_SRC_TRACE=<file>.
-//
-// Master gate: PS2X_MPG_SRC_TRACE names the text file receiving `mpgsrc`
-// lines (one per qualifying VIF1 REF/REFS/REFE tag seen by the DMA chain
-// walker), `tagwrite` lines (guest stores to an armed tag's addr word)
-// and `srcread` lines (guest loads overlapping the two fixed microcode
-// source regions, first 64 hits each). Unset/empty (default) = one
-// relaxed atomic check per tap; zero guest-visible behavior change, no I/O.
-// Optional binds: PS2X_MPG_SRC_TRACE_FROM / PS2X_MPG_SRC_TRACE_TO
-// (inclusive guest-vsync window; default 0..2^64-1, vsync from GS vsyncTick).
+// E40 DEV-ONLY VIF1 MPG source-address trace. CU4 B8 deleted the
+// PS2X_MPG_SRC_TRACE/FROM/TO/ARENAS/TAGADDRS tunables (stale CU1 S3 taps):
+// the tap never arms (one relaxed atomic check per tap); zero
+// guest-visible behavior change, no I/O.
 // Hard cap: 2,000 lines total (both kinds), then the file goes quiet.
 //
 // A tag qualifies when it is a VIF1 (0x10009000) chain tag with id 0/3/4
@@ -450,35 +444,9 @@ namespace detail
 
     inline void initLocked(State &s)
     {
+        // CU4 B8: the PS2X_MPG_SRC_ARENAS/TAGADDRS/TRACE/FROM/TO tunables
+        // are deleted (stale CU1 S3 taps). The tap never arms.
         s.initDone = true;
-        installArenasLocked(s, std::getenv("PS2X_MPG_SRC_ARENAS"));
-        installTagAddrsLocked(s, std::getenv("PS2X_MPG_SRC_TAGADDRS"));
-        const char *file = std::getenv("PS2X_MPG_SRC_TRACE");
-        if (!file || file[0] == '\0')
-        {
-            return;
-        }
-        s.path = file;
-        uint64_t from = 0u;
-        uint64_t to = ~0ull;
-        if (const char *env = std::getenv("PS2X_MPG_SRC_TRACE_FROM"))
-        {
-            if (!parseU64(env, from))
-            {
-                return;
-            }
-        }
-        if (const char *env = std::getenv("PS2X_MPG_SRC_TRACE_TO"))
-        {
-            if (!parseU64(env, to))
-            {
-                return;
-            }
-        }
-        s.from = from;
-        s.to = to;
-        s.enabled = true;
-        enabledFlag().store(true, std::memory_order_relaxed);
     }
 
     inline void ensureInit()

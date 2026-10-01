@@ -1,10 +1,7 @@
-// E39 DEV-ONLY VIF1 MPG upload log behind PS2X_VIF_MPG_LOG=<file>.
-//
-// Master gate: PS2X_VIF_MPG_LOG names the text file receiving one line per
-// decoded VIF1 MPG command. Unset/empty (default) = one relaxed atomic
-// check per MPG; zero guest-visible behavior change, no I/O.
-// Optional binds: PS2X_VIF_MPG_LOG_FROM / PS2X_VIF_MPG_LOG_TO (inclusive
-// guest-vsync window; default 0..2^64-1, vsync from GS vsyncTick).
+// E39 DEV-ONLY VIF1 MPG upload log. CU4 B8 deleted the
+// PS2X_VIF_MPG_LOG/FROM/TO tunables (stale CU1 S3 taps): the tap never
+// arms (one relaxed atomic check per MPG); zero guest-visible behavior
+// change, no I/O.
 // Hard cap: 20,000 lines, then the file goes quiet.
 //
 // One line per MPG carries: guest vsync, full 16-bit imm, num, linear dest
@@ -118,33 +115,9 @@ namespace detail
 
     inline void initLocked(State &s)
     {
+        // CU4 B8: the PS2X_VIF_MPG_LOG/FROM/TO tunables are deleted (stale
+        // CU1 S3 taps). The tap never arms.
         s.initDone = true;
-        const char *file = std::getenv("PS2X_VIF_MPG_LOG");
-        if (!file || file[0] == '\0')
-        {
-            return;
-        }
-        s.path = file;
-        uint64_t from = 0u;
-        uint64_t to = ~0ull;
-        if (const char *env = std::getenv("PS2X_VIF_MPG_LOG_FROM"))
-        {
-            if (!parseU64(env, from))
-            {
-                return;
-            }
-        }
-        if (const char *env = std::getenv("PS2X_VIF_MPG_LOG_TO"))
-        {
-            if (!parseU64(env, to))
-            {
-                return;
-            }
-        }
-        s.from = from;
-        s.to = to;
-        s.enabled = true;
-        enabledFlag().store(true, std::memory_order_relaxed);
     }
 
     inline void ensureInit()
