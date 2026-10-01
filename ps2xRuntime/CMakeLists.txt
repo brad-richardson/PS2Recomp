@@ -613,6 +613,7 @@ endif()
 # Host present helpers for the GS backends (the target kept its G44 name;
 # CN2b removed the paraLLEl-GS shadow/live backend and PS2X_GS_SHADOW_PARALLEL).
 add_library(ps2_gs_shadow STATIC
+    src/lib/gs/ps2_present_share.cpp # HR1 shared-frame mailbox (PS2X_PRESENT_ZERO_COPY; iOS GE1 export)
     src/lib/gs/ps2_present_vk_ledger.cpp # VK2: Android Vulkan present bookkeeping (pure, unit-tested)
 )
 # HR1 prototype: GL side of PS2X_PRESENT_ZERO_COPY (macOS desktop only).
