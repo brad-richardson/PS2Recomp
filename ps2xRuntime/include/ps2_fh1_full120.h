@@ -198,6 +198,9 @@ enum : uint32_t
     kFix12Particles = 1u << 8, // rider particle pass 0x2dd0b8 (calls 0x128f20/0x11198c): private 1/60 dt + per-update gravity -> stock cadence (class d, FH22)
     kFix12CrashBody = 1u << 9, // wipeout body/board integrator 0x136f30: private 1/60 step (pos, gravity, drag, spin) (class h, FH23)
     kFix12Uber = 1u << 10,     // HUD uber meter (0x117fe0 message 9): display slew 1/60 per update (class b, FH23)
+    kFix12Popups = 1u << 11,   // HUD timed slots (0x116fb8, crash score popups): elapsed += 1/60 per update (class b, FH24)
+    kFix12SndDt = 1u << 12,    // race sound-tree update 0x285bf8 (from 0x22c014): private dt vblanks * 1/60 (class h, FH24)
+    kFix12HudProg = 1u << 13,  // race-HUD progress table 0x4c8bc8 (0x210618/0x20eda0): per-update slew limits (class b, FH24)
 };
 
 inline uint32_t fh12Item(const std::string &item) noexcept
@@ -213,6 +216,9 @@ inline uint32_t fh12Item(const std::string &item) noexcept
     if (item == "particles") return kFix12Particles;
     if (item == "crashbody") return kFix12CrashBody;
     if (item == "uber") return kFix12Uber;
+    if (item == "popups") return kFix12Popups;
+    if (item == "snddt") return kFix12SndDt;
+    if (item == "hudprog") return kFix12HudProg;
     return 0u;
 }
 
@@ -225,7 +231,8 @@ inline uint32_t fixMask12() noexcept
         const std::string s(v);
         if (s == "all")
             return kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse | kFix12Crash | kFix12FxTimer |
-                   kFix12Bounce | kFix12Particles | kFix12CrashBody | kFix12Uber;
+                   kFix12Bounce | kFix12Particles | kFix12CrashBody | kFix12Uber | kFix12Popups | kFix12SndDt |
+                   kFix12HudProg;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -639,7 +646,18 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
     // by [0x49b69c] (1/60, single reader 0x118cfc) per update; in a wipeout it falls to -1 and the slot is
     // dropped (the meter greys). Events greyed ~20 stock ticks early (s6321 vs 6341, fh23-S1/E1), like
     // FH10's meter messages 5/6.
-    const std::array<std::pair<uint32_t, Word>, 9> words12 = {{
+    // popups (FH24): the HUD timed-slot step 0x116fb8 (only caller 0x117f70) adds [0x49b5d8] (1/60, single
+    // reader 0x116fe4) to slot +8 per update and drops the slot at +4 (1.5 s): the crash score popups
+    // (slots 35/36) left in half the time at 120 (fh24-S1b/E1b +1/60 vs +1/30 per stock tick).
+    // snddt (FH24): the race calls the sound-tree update 0x285bf8 at 0x22c014 with dt = int(S+0xac) *
+    // [0x49df10] (1/60, single reader 0x22c008; S+0xac = 1 per update), passed through 0x2ab958/0x2ab7a0/
+    // 0x2ab6b0 to the tree's timers: e.g. the 5.0 s fade started at the wipeout (0x5c5c10+0x188, 0x2a68b0).
+    // hudprog (FH24): the race-HUD progress table 0x4c8bc8 (stride 0x18, per rider; read by 0x20fb40 from
+    // the race-HUD update 0x1e9a30) follows its targets with per-update slew limits: progress +8 by
+    // +-[0x49dc44] (138.9, single reader 0x210694, negated in place) in 0x210618, the gap +0x10 by
+    // [0x49dc08] / [0x49dc04] (+-46.3, single readers 0x20eef8 / 0x20ee78) in 0x20eda0. After the wipeout
+    // the readout caught up at 2x (fh24-E1b); all three halved: 1.000x (fh24-V2).
+    const std::array<std::pair<uint32_t, Word>, 14> words12 = {{
         {kFix12Crash, {0u, 0x49be78u, kSixtieth, kHundredTwentieth, "crash_dt_137754"}},
         {kFix12Crash, {0u, 0x49bef4u, kSixtieth, kHundredTwentieth, "crash_dt_13940c"}},
         {kFix12Crash, {0u, 0x49befcu, kSixtieth, kHundredTwentieth, "crash_dt_1394f4"}},
@@ -649,6 +667,11 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFix12Bounce, {0u, 0x49c13cu, 0x4029999au, 0x3fa9999au, "bounce_phase_13f0d4"}},
         {kFix12CrashBody, {0u, 0x49be38u, kSixtieth, kHundredTwentieth, "crashbody_dt_136f48"}},
         {kFix12Uber, {0u, 0x49b69cu, kSixtieth, kHundredTwentieth, "uber_slew_118cfc"}},
+        {kFix12Popups, {0u, 0x49b5d8u, kSixtieth, kHundredTwentieth, "popups_step_116fe4"}},
+        {kFix12SndDt, {0u, 0x49df10u, kSixtieth, kHundredTwentieth, "snddt_22c008"}},
+        {kFix12HudProg, {0u, 0x49dc44u, 0x430ae38fu, 0x428ae38fu, "hudprog_slew_210694"}},
+        {kFix12HudProg, {0u, 0x49dc08u, 0x42392f69u, 0x41b92f69u, "hudprog_gap_up_20eef8"}},
+        {kFix12HudProg, {0u, 0x49dc04u, 0xc2392f69u, 0xc1b92f69u, "hudprog_gap_down_20ee78"}},
     }};
     for (const auto &w : words12)
         if ((fixMask12() & w.first) != 0u)
