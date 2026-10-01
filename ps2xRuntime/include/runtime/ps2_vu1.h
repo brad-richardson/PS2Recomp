@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "ps2_vu1_trace.h"
+#include "runtime/ps2_vu_state.h"
 
 // E45: VU1 FMAC exact math runs in `VuWide`. On macOS arm64 `long double`
 // is already 64-bit (static_assert below), so the default `double` is a
@@ -58,33 +59,6 @@ struct VU1RecompImage;
 template <uint64_t kImageHash>
 struct VU0RecompImage;
 
-struct VU1State
-{
-    float vf[32][4];
-    int32_t vi[16];
-    float acc[4];
-    float q;
-    float p;
-    float i;
-    uint32_t r;
-    uint32_t pc;
-    uint32_t mac;
-    uint32_t clip;
-    uint32_t status;
-    uint64_t cycles;
-    bool ebit;
-    bool haltAfterDelaySlot;
-    bool dBitEnabled;
-    bool tBitEnabled;
-    bool stoppedByD;
-    bool stoppedByT;
-    uint32_t top;  // VIF TOP visible to XTOP
-    uint32_t itop; // VIF ITOP visible to XITOP
-
-    bool branchPending;
-    uint32_t branchTarget;
-    uint32_t branchDelay;
-};
 
 class VU1Interpreter
 {
@@ -150,7 +124,7 @@ public:
                                  uint64_t hash, const std::string &path,
                                  Unit unit = Unit::VU1);
 
-    VU1State &state() { return m_state; }
+    VuState &state() { return m_state; }
     // VB1: test hook for the direct-commit path: -1 follows PS2X_VU1_DIRECT
     // (default on), 0 queues every write, 1 forces direct commits on.
     void setDirectCommitForTest(int mode) { m_directOverride = mode; }
@@ -182,7 +156,7 @@ public:
     void setFloatModeForTest(bool pcsx2) { m_pcsx2Float = pcsx2; }
     void queueFssetForTest(uint16_t immediate) { queueFsset(immediate); }
     std::vector<uint64_t> fmacStateForTest() const;
-    const VU1State &state() const { return m_state; }
+    const VuState &state() const { return m_state; }
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t programStartCount() const { return m_programStartCount; }
 #endif
@@ -356,7 +330,7 @@ private:
     bool m_pcsx2Float = false;
     bool m_flagElideRequested = false;
     bool m_elideFmacFlags = false; // recomputed from the VU1 image at each run
-    VU1State m_state;
+    VuState m_state;
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t m_programStartCount = 0;
 #endif

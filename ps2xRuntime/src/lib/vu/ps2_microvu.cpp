@@ -9,7 +9,7 @@
 #include "ps2_microvu_api.h"
 #include "ps2_mtvu.h"
 #include "runtime/ps2_memory.h"
-#include "runtime/ps2_vu1.h"
+#include "runtime/ps2_vu_state.h"
 
 #include <atomic>
 #include <cstdio>
@@ -73,7 +73,7 @@ void path1(void* opaque, const uint8_t* bytes, uint32_t size)
     static_cast<PS2Memory*>(opaque)->submitGifPacket(GifPathId::Path1, bytes, size);
 }
 
-void importState(ps2x_microvu_state& out, const VU1State& in)
+void importState(ps2x_microvu_state& out, const VuState& in)
 {
     for (unsigned r = 0; r < 32; ++r)
         for (unsigned lane = 0; lane < 4; ++lane)
@@ -94,7 +94,7 @@ void importState(ps2x_microvu_state& out, const VU1State& in)
     out.top = in.top;
     out.itop = in.itop;
 }
-void exportState(VU1State& out, const ps2x_microvu_state& in)
+void exportState(VuState& out, const ps2x_microvu_state& in)
 {
     for (unsigned r = 0; r < 32; ++r)
         for (unsigned lane = 0; lane < 4; ++lane)
@@ -279,10 +279,10 @@ void shutdown()
 #endif
 }
 
-std::string saveReady(const VU1State& state)
+std::string saveReady(const VuState& state)
 {
     // SS4: at an E-bit job boundary the bridge holds no guest state outside
-    // VU1State + VU memories (compiled code recompiles deterministically), so
+    // VuState + VU memories (compiled code recompiles deterministically), so
     // a save is exact. A D/T stop awaiting an MSCNT resume keeps JIT-private
     // state (rings, pending Q/P, TPC chain) that no re-seed can rebuild.
     if (state.stoppedByD || state.stoppedByT)
@@ -310,7 +310,7 @@ bool resetForLoad(std::string& error)
 {
 #if defined(PS2X_MICROVU_LOADABLE)
     // SS4: drop all live JIT state (compiled code, VURegs, PATH1 sink, the
-    // seed latch) so the next run re-seeds from the freshly loaded VU1State
+    // seed latch) so the next run re-seeds from the freshly loaded VuState
     // + VU memories. A shutdown/configure cycle, no ABI change.
     PS2Memory* const host = s_dataHost; // MP1 L1: re-share after the reload
     shutdown();
@@ -330,7 +330,7 @@ bool resetForLoad(std::string& error)
 #endif
 }
 
-bool run(PS2Memory& memory, uint8_t* data, VU1State& state,
+bool run(PS2Memory& memory, uint8_t* data, VuState& state,
          uint32_t start_pc, bool resume, uint32_t top, uint32_t itop,
          uint32_t fbrst, uint32_t budget)
 {

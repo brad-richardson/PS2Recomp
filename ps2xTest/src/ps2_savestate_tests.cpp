@@ -1212,12 +1212,12 @@ void register_ps2_savestate_tests()
 
         tc.Run("ss4: microvu saveReady gates on D/T stops", [](TestCase &t)
         {
-            VU1State clean{};
+            VuState clean{};
             t.IsTrue(ps2_microvu::saveReady(clean).empty(), "E-bit-idle state is saveable");
-            VU1State dStop{};
+            VuState dStop{};
             dStop.stoppedByD = true;
             t.IsTrue(!ps2_microvu::saveReady(dStop).empty(), "D stop awaiting MSCNT defers");
-            VU1State tStop{};
+            VuState tStop{};
             tStop.stoppedByT = true;
             t.IsTrue(!ps2_microvu::saveReady(tStop).empty(), "T stop awaiting MSCNT defers");
         });

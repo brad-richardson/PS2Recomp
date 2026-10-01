@@ -40,13 +40,13 @@ namespace
 
     struct Vu0Start
     {
-        VU1State state{};
+        VuState state{};
         std::vector<uint8_t> data;
     };
 
     struct Vu0Snapshot
     {
-        VU1State state{};
+        VuState state{};
         std::vector<uint8_t> data;
         uint64_t generatedCycles = 0;
     };
@@ -77,7 +77,7 @@ namespace
         else if (check == 2u)
             vu.execute(code, PS2_VU0_CODE_SIZE, snap.data.data(), PS2_VU0_DATA_SIZE, gs, nullptr, startPc, 0u, 0u, 4096u);
         snap.generatedCycles = vu.recompCyclesForTest();
-        std::memcpy(&snap.state, &vu.state(), sizeof(VU1State));
+        std::memcpy(&snap.state, &vu.state(), sizeof(VuState));
         return snap;
     }
 
@@ -88,7 +88,7 @@ namespace
         ++stats.programs;
         const auto same = [](const Vu0Snapshot &a, const Vu0Snapshot &b)
         {
-            return std::memcmp(&a.state, &b.state, sizeof(VU1State)) == 0 && a.data == b.data;
+            return std::memcmp(&a.state, &b.state, sizeof(VuState)) == 0 && a.data == b.data;
         };
         for (uint32_t budget = 1; budget <= maxBudget; ++budget)
         {
@@ -396,9 +396,9 @@ namespace
         writeTrackedVuInstructionPair(fx, 40u, 0u, kVuUpperNop | 0x40000000u);
     }
 
-    bool runSs5Loop(Vu1Fixture &fx, uint32_t budget, VU1State &outState, std::vector<uint8_t> &outData)
+    bool runSs5Loop(Vu1Fixture &fx, uint32_t budget, VuState &outState, std::vector<uint8_t> &outData)
     {
-        outState = VU1State{};
+        outState = VuState{};
         // A nonzero VF seed (carried in by the seed-once path) so the loop's
         // stores write detectably nonzero data.
         outState.vf[3][0] = 1.0f;
@@ -413,12 +413,12 @@ namespace
     // budget-exhausted call charges exactly `budget` cycles and drops the
     // final atomic block's overrun, so continued runs count fewer cycles than
     // one unbounded run for identical registers and memories.
-    bool sameSs5State(const VU1State &a, const VU1State &b)
+    bool sameSs5State(const VuState &a, const VuState &b)
     {
-        VU1State x = a, y = b;
+        VuState x = a, y = b;
         x.cycles = 0;
         y.cycles = 0;
-        return std::memcmp(&x, &y, sizeof(VU1State)) == 0;
+        return std::memcmp(&x, &y, sizeof(VuState)) == 0;
     }
 
     bool anyNonzeroByte(const std::vector<uint8_t> &v)
@@ -2191,12 +2191,12 @@ void register_ps2_vu1_tests()
 
             struct Snapshot
             {
-                VU1State state;
+                VuState state;
                 std::vector<uint8_t> data;
             };
             const auto sameSnapshot = [](const Snapshot &a, const Snapshot &b)
             {
-                return std::memcmp(&a.state, &b.state, sizeof(VU1State)) == 0 && a.data == b.data;
+                return std::memcmp(&a.state, &b.state, sizeof(VuState)) == 0 && a.data == b.data;
             };
 
             std::vector<uint8_t> code(PS2_VU1_CODE_SIZE, 0u);
@@ -2219,7 +2219,7 @@ void register_ps2_vu1_tests()
                     const float value = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 64.0f;
                     std::memcpy(initialData.data() + i, &value, sizeof(value));
                 }
-                VU1State start{};
+                VuState start{};
                 for (uint32_t reg = 1; reg < 32u; ++reg)
                     for (uint32_t lane = 0; lane < 4u; ++lane)
                         start.vf[reg][lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
@@ -2242,7 +2242,7 @@ void register_ps2_vu1_tests()
                     else
                         vu.resume(code.data(), PS2_VU1_CODE_SIZE, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
                                   nullptr, 0u, 0u, 4096u);
-                    std::memcpy(&snap.state, &vu.state(), sizeof(VU1State));
+                    std::memcpy(&snap.state, &vu.state(), sizeof(VuState));
                     return snap;
                 };
                 const auto cutMode = [&](int mode, uint32_t budget) -> Snapshot
@@ -2255,7 +2255,7 @@ void register_ps2_vu1_tests()
                     snap.data = initialData;
                     vu.execute(code.data(), PS2_VU1_CODE_SIZE, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
                                nullptr, 0u, 0u, 0u, budget);
-                    std::memcpy(&snap.state, &vu.state(), sizeof(VU1State));
+                    std::memcpy(&snap.state, &vu.state(), sizeof(VuState));
                     return snap;
                 };
 
@@ -2460,7 +2460,7 @@ void register_ps2_vu1_tests()
                                         (((r >> 17) & 31u) << 11) | (sp ? w : (w | (((r >> 22) & 31u) << 6))));
                     }
                 const uint16_t fsset = static_cast<uint16_t>(next() & 0xFFFu);
-                VU1State start{};
+                VuState start{};
                 for (auto &row : start.vf)
                     for (float &value : row)
                         value = asFloat(operand());
@@ -2539,7 +2539,7 @@ void register_ps2_vu1_tests()
         {
             struct Snapshot
             {
-                VU1State state;
+                VuState state;
                 std::vector<uint8_t> data;
                 std::vector<std::vector<uint8_t>> gif; // ordered PATH1 packets (image 2)
                 bool stopped = false;                  // an error stop ended the last run (not compared)
@@ -2588,7 +2588,7 @@ void register_ps2_vu1_tests()
                         std::memset(tag + 16u, static_cast<int>(0x10u + k), 32u);
                     }
                     const bool kicks = image == 2u;
-                    VU1State start{};
+                    VuState start{};
                     for (uint32_t reg = 1; reg < 32u; ++reg)
                         for (uint32_t lane = 0; lane < 4u; ++lane)
                             start.vf[reg][lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
@@ -2637,7 +2637,7 @@ void register_ps2_vu1_tests()
                         if (useGenerated)
                             generatedCycles += vu.recompCyclesForTest();
                         blockEntries += vu.blockEntriesForTest();
-                        std::memcpy(&snap.state, &vu.state(), sizeof(VU1State));
+                        std::memcpy(&snap.state, &vu.state(), sizeof(VuState));
                         return snap;
                     };
 
@@ -2645,7 +2645,7 @@ void register_ps2_vu1_tests()
                     const uint32_t maxBudget = (kicks ? 8u : 4u) * program.length + (kicks ? 128u : 64u);
                     const auto same = [](const Snapshot &a, const Snapshot &b)
                     {
-                        return std::memcmp(&a.state, &b.state, sizeof(VU1State)) == 0 && a.data == b.data && a.gif == b.gif;
+                        return std::memcmp(&a.state, &b.state, sizeof(VuState)) == 0 && a.data == b.data && a.gif == b.gif;
                     };
                     bool programGap = false;
                     for (uint32_t budget = 1; budget <= maxBudget; ++budget)
@@ -2906,7 +2906,7 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
             uploadSs5Loop(fx);
 
-            VU1State small{};
+            VuState small{};
             std::vector<uint8_t> smallData;
             const uint64_t breaksBefore = ps2_microvu::budgetBreaks();
             bool served = false;
@@ -2933,7 +2933,7 @@ void register_ps2_vu1_tests()
                 t.Fail("microvu should re-configure for the unbounded run");
                 return;
             }
-            VU1State wide{};
+            VuState wide{};
             std::vector<uint8_t> wideData;
             const uint64_t wideBefore = ps2_microvu::budgetBreaks();
             bool servedWide = false;
@@ -2962,7 +2962,7 @@ void register_ps2_vu1_tests()
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
             uploadSs5Loop(fx);
 
-            VU1State state{};
+            VuState state{};
             std::vector<uint8_t> data;
             bool served = false;
             try
@@ -2985,7 +2985,7 @@ void register_ps2_vu1_tests()
                 t.Fail("microvu should re-configure after the park");
                 return;
             }
-            VU1State state2{};
+            VuState state2{};
             std::vector<uint8_t> data2;
             t.IsTrue(runSs5Loop(fx, 1u << 20, state2, data2), "unbounded run serves after the park");
             t.IsTrue(ps2_microvu::saveReady(state2).empty(), "the park clears after the next job finishes");

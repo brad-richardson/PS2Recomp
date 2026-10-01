@@ -35,7 +35,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "runtime/ps2_vu1.h"
+#include "runtime/ps2_vu_state.h"
 
 namespace ps2_vu1cap
 {
@@ -66,7 +66,7 @@ struct Regs
 static_assert(sizeof(Regs) == 656, "Regs size (trailing pad is zeroed, not compared)");
 static_assert(offsetof(Regs, reserved) == 649, "Regs layout");
 
-inline void packRegs(const VU1State &s, Regs &r)
+inline void packRegs(const VuState &s, Regs &r)
 {
     std::memset(&r, 0, sizeof(r)); // zero padding: Regs is bit-compared
     std::memcpy(r.vf, s.vf, sizeof(r.vf));
@@ -92,7 +92,7 @@ inline void packRegs(const VU1State &s, Regs &r)
     r.reserved[0] = r.reserved[1] = r.reserved[2] = 0;
 }
 
-inline void unpackRegs(const Regs &r, VU1State &s)
+inline void unpackRegs(const Regs &r, VuState &s)
 {
     std::memcpy(s.vf, r.vf, sizeof(s.vf));
     std::memcpy(s.vi, r.vi, sizeof(s.vi));
@@ -255,7 +255,7 @@ struct Capture
             writeBytes(&c[idx[k]], 4);
     }
 
-    void begin(uint64_t tick, uint32_t startPC, const VU1State &st, uint64_t cycle,
+    void begin(uint64_t tick, uint32_t startPC, const VuState &st, uint64_t cycle,
                uint32_t top, uint32_t itop, const uint8_t *vuCode, uint32_t codeSize,
                const uint8_t *vuData, uint32_t dataSize, bool resume)
     {
@@ -308,7 +308,7 @@ struct Capture
         curXgk.emplace_back(n, std::vector<uint8_t>(p, p + n));
     }
 
-    void end(const VU1State &st, uint64_t cycleEnd, const uint8_t *vuData)
+    void end(const VuState &st, uint64_t cycleEnd, const uint8_t *vuData)
     {
         if (!runOpen)
             return;

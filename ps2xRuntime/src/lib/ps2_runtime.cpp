@@ -531,7 +531,7 @@ namespace
         ctx->vu0_vpu_stat2 = 0;
     }
 
-    void copyVu0ContextToState(const R5900Context *ctx, VU1State &state)
+    void copyVu0ContextToState(const R5900Context *ctx, VuState &state)
     {
         std::memset(&state, 0, sizeof(state));
 
@@ -566,7 +566,7 @@ namespace
         state.vi[0] = 0;
     }
 
-    void copyVu0StateToContext(const VU1State &state, R5900Context *ctx)
+    void copyVu0StateToContext(const VuState &state, R5900Context *ctx)
     {
         for (uint32_t i = 0; i < 32u; ++i)
         {

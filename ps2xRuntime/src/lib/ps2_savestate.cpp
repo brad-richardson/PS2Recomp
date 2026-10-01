@@ -743,7 +743,7 @@ namespace ps2_savestate
     {
         if (ps2_microvu::selected())
         {
-            // SS4: the JIT holds no guest state outside VU1State + VU memories
+            // SS4: the JIT holds no guest state outside VuState + VU memories
             // at an E-bit job boundary, so the normal sections below carry the
             // save; mid-chain (a D/T stop awaiting MSCNT) the save waits for
             // the next tick like any other deferral.
@@ -1105,9 +1105,9 @@ namespace ps2_savestate
             // only a static-saved file can hold one, microVU saves refuse it)
             // keeps JIT-private resume state no re-seed can rebuild: refuse
             // loudly instead of seeding a wrong machine. Otherwise drop all
-            // live JIT state so the next run re-seeds from the loaded VU1State
+            // live JIT state so the next run re-seeds from the loaded VuState
             // + VU memories.
-            const VU1State &st = runtime.vu1().state();
+            const VuState &st = runtime.vu1().state();
             if (st.stoppedByD || st.stoppedByT)
             {
                 error = "microvu: state saved mid-VU1-chain (D/T stop); cannot seed";
