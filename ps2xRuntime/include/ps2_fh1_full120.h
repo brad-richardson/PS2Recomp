@@ -194,6 +194,8 @@ enum : uint32_t
     kFix12Pulse = 1u << 4,   // rider colour pulse 0x2e39d8: 2pi/60 per update (class b)
     kFix12Crash = 1u << 5,   // wipeout body: motion solver 0x113648 fed a private 1/60 dt by 0x137750/0x1391a8 (class h)
     kFix12FxTimer = 1u << 6, // rider-FX timer P+0xb44 (0x2e2388 in 0x2e2260): per-update 1/60 step shared with the trail-push dt (post-call add-back, FH21)
+    kFix12Bounce = 1u << 7,  // rider bounce oscillator phase (0x13f0d4 in 0x13d818 -> R+0x31c): per-update step 2.65 -> 1.325 (class b, FH22)
+    kFix12Particles = 1u << 8, // rider particle pass 0x2dd0b8 (calls 0x128f20/0x11198c): private 1/60 dt + per-update gravity -> stock cadence (class d, FH22)
 };
 
 inline uint32_t fh12Item(const std::string &item) noexcept
@@ -205,6 +207,8 @@ inline uint32_t fh12Item(const std::string &item) noexcept
     if (item == "pulse") return kFix12Pulse;
     if (item == "crash") return kFix12Crash;
     if (item == "fxtimer") return kFix12FxTimer;
+    if (item == "bounce") return kFix12Bounce;
+    if (item == "particles") return kFix12Particles;
     return 0u;
 }
 
@@ -216,7 +220,8 @@ inline uint32_t fixMask12() noexcept
             return 0u;
         const std::string s(v);
         if (s == "all")
-            return kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse | kFix12Crash | kFix12FxTimer;
+            return kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse | kFix12Crash | kFix12FxTimer |
+                   kFix12Bounce | kFix12Particles;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
@@ -617,13 +622,18 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
     // [0x49befc], same class, not seen live). Each is a single reader. At 120 the solver ran two quanta
     // per update and the crashed rider fell and slid 2x (vz -31.67 per update; stock -31.67 per stock
     // tick); with 1/120: -15.83 per update, position within stock per stock tick (fh12-C5/C6/C7).
-    const std::array<std::pair<uint32_t, Word>, 6> words12 = {{
+    // bounce (FH22): sub_0x13d818 advances the rider bounce phase S+0 (MN1 0x1464e30) by
+    // f20 * [0x49c13c] (2.65, single reader 0x13f0d4) per update, wraps at 2pi, and stores
+    // 7.5 * f20 * sin(phase) to R+0x31c, which sub_0x11eb98 adds (when > 0) along R+0x370 to the rider
+    // pose. At 120 the phase ran 2x per stock tick (+0.148 -> +0.295); 1.325 restores stock frequency.
+    const std::array<std::pair<uint32_t, Word>, 7> words12 = {{
         {kFix12Crash, {0u, 0x49be78u, kSixtieth, kHundredTwentieth, "crash_dt_137754"}},
         {kFix12Crash, {0u, 0x49bef4u, kSixtieth, kHundredTwentieth, "crash_dt_13940c"}},
         {kFix12Crash, {0u, 0x49befcu, kSixtieth, kHundredTwentieth, "crash_dt_1394f4"}},
         {kFix12Recover, {0u, 0x49b914u, 0x3b88a358u, 0x3b08a358u, "recover_decay_12cbc4"}},
         {kFix12Recover, {0u, 0x49b918u, 0xbb88a358u, 0xbb08a358u, "recover_decay_12cbdc"}},
         {kFix12Pulse, {0u, 0x49f6c0u, kSixtieth, kHundredTwentieth, "pulse_step_2e3a10"}},
+        {kFix12Bounce, {0u, 0x49c13cu, 0x4029999au, 0x3fa9999au, "bounce_phase_13f0d4"}},
     }};
     for (const auto &w : words12)
         if ((fixMask12() & w.first) != 0u)
@@ -1896,6 +1906,19 @@ inline void wrf(uint8_t *ram, uint32_t a, float f) noexcept
     wr32(ram, a, b);
 }
 
+// FH22 particles: the rider particle pass 0x2dd0b8 (per rider from the all-riders loop 0x128f20 and
+// from 0x11198c; object R+0x3b0) ages each particle by [0x49f4bc] (1/60, single reader 0x2dd10c),
+// moves it by vel * dt and adds a per-update constant (emitter table +0x28) to each segment's z
+// velocity. Halving dt alone would leave that add at 2x (gravity doubled), so on odd updates the call
+// is skipped: the pass runs at stock cadence with stock arithmetic (class d, like trick/rng).
+inline constexpr uint32_t kParticlePass = 0x2dd0b8u, kParticleSiteAll = 0x128f20u, kParticleSiteOne = 0x11198cu;
+
+inline bool particlesFix() noexcept
+{
+    static const bool on = enabled() && (fixMask12() & kFix12Particles) != 0u;
+    return on;
+}
+
 inline bool fh12Hooks() noexcept
 {
     static const bool on = enabled() && (fixMask12() & (kFix12Spin | kFix12Texanim | kFix12Loops | kFix12FxTimer)) != 0u;
@@ -2291,7 +2314,8 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 // same order, same results (every flag below is fixed after its first read).
 struct BranchFlags
 {
-    bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12;
+    bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
+        particles;
     bool src, fh9, lab, draw, tap;
 };
 
@@ -2308,7 +2332,8 @@ inline const BranchFlags &branchFlags() noexcept
         r.rng = rngFix();
         r.trick = trickFix();
         r.aiGate = aiGateFix();
-        r.parity = r.rng || r.trick || r.aiGate;
+        r.particles = particlesFix();
+        r.parity = r.rng || r.trick || r.aiGate || r.particles;
         r.bonus = bonusFix();
         r.lift = liftFix();
         r.flags = flagsFix();
@@ -2355,7 +2380,7 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     if (on && flag(&BranchFlags::launch, launchFix))
         launchPreHook(ram, ctx, targetPc);
     bool skip = on && flag(&BranchFlags::session, sessionFix) && sessionSkip(sourcePc, targetPc);
-    if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix())))
+    if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix() || particlesFix())))
         parityHook(ram, sourcePc);
     if (on && flag(&BranchFlags::rng, rngFix))
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
@@ -2363,6 +2388,9 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = true;
     if (on && flag(&BranchFlags::aiGate, aiGateFix))
         skip = aiGateHook(ctx, sourcePc, targetPc) || skip;
+    if (on && flag(&BranchFlags::particles, particlesFix) && g_rngOdd && targetPc == kParticlePass &&
+        (sourcePc == kParticleSiteAll || sourcePc == kParticleSiteOne))
+        skip = true;
     if (on && flag(&BranchFlags::bonus, bonusFix))
         bonusHook(ram, ctx, sourcePc, targetPc);
     if (on && flag(&BranchFlags::lift, liftFix))
