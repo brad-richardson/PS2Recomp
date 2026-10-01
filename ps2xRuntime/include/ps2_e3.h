@@ -1,10 +1,8 @@
 // E3b one-or-two-frame order capture (frontier §E3 recipe, E3-3 rows R1-R4).
 //
-// Header-only diag module. Master gate: PS2X_E3_INV=<invocation ordinal>
-// (0-based count of 0x362DE8 dispatches). Unset/invalid = every tap compiles
-// to a single cached-bool check; zero guest-visible behavior change.
-// Optional binds: PS2X_E3_S1BASE (expected steady s1 base, checked not
-// assumed), PS2X_E3_BYTES (E3 emitted-byte cap, default 4 MiB).
+// Header-only diag module. CU4 B4 deleted the PS2X_E3_INV/S1BASE/BYTES
+// tunables (stale CU1 S3 taps): the master gate is statically disabled,
+// so every tap compiles to a dead check; zero guest-visible behavior change.
 //
 // One shared u64 seq domain (e3SeqNext) stamps every R1-R4 row. Frame =
 // last VBLANK tick noted from EeScheduler::processEvent. Thread = last id
@@ -54,22 +52,12 @@ inline bool parseU64(const char *text, uint64_t &out)
     return true;
 }
 
-// ---- cached env binds ----
+// ---- cached binds (CU4 B4: the PS2X_E3_INV/S1BASE/BYTES env tunables are
+// deleted; defaults below) ----
 
 inline uint64_t targetInvRaw()
 {
-    static const uint64_t target = [] {
-        uint64_t parsed = 0u;
-        if (const char *env = std::getenv("PS2X_E3_INV"))
-        {
-            if (parseU64(env, parsed))
-            {
-                return parsed;
-            }
-        }
-        return static_cast<uint64_t>(~0ull); // sentinel: disabled
-    }();
-    return target;
+    return static_cast<uint64_t>(~0ull); // sentinel: disabled
 }
 
 inline bool enabled()
@@ -84,34 +72,12 @@ inline uint64_t targetInv()
 
 inline uint32_t expectedS1Base()
 {
-    static const uint32_t base = [] {
-        uint64_t parsed = 0u;
-        if (const char *env = std::getenv("PS2X_E3_S1BASE"))
-        {
-            if (parseU64(env, parsed))
-            {
-                return static_cast<uint32_t>(parsed);
-            }
-        }
-        return 0u;
-    }();
-    return base;
+    return 0u;
 }
 
 inline uint64_t byteCap()
 {
-    static const uint64_t cap = [] {
-        uint64_t parsed = 0u;
-        if (const char *env = std::getenv("PS2X_E3_BYTES"))
-        {
-            if (parseU64(env, parsed) && parsed > 0u)
-            {
-                return parsed;
-            }
-        }
-        return kDefaultByteCap;
-    }();
-    return cap;
+    return kDefaultByteCap;
 }
 
 // ---- shared state (relaxed atomics; emits serialized by e3EmitMutex) ----

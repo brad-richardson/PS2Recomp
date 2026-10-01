@@ -16,7 +16,8 @@ inline constexpr uint64_t kBootBytes = 4u * 1024u * 1024u;
 inline constexpr uint64_t kWindowBytes = 1u * 1024u * 1024u;
 inline constexpr uint64_t kPacketBytes = 512u * 1024u;
 // E15 opt-in alignment uses only diagnostic atomics; no guest writes.
-inline bool aligned() { static const bool yes = [] { const char *p=std::getenv("PS2X_E15_ALIGN"); return p && std::strcmp(p,"1")==0; }(); return yes; }
+// CU4 B4: the PS2X_E15_ALIGN tunable is deleted (stale CU1 S3 tap).
+inline bool aligned() { return false; }
 inline std::atomic<uint64_t> &alignedArm() { static std::atomic<uint64_t> value{UINT64_MAX}; return value; }
 inline bool window(uint64_t tick) {
     const uint64_t a=alignedArm().load();
@@ -24,8 +25,8 @@ inline bool window(uint64_t tick) {
 }
 inline const char *directory()
 {
-    static const char *dir = [] { const char *p = std::getenv("PS2X_E7_DIR"); return p && *p ? p : nullptr; }();
-    return dir;
+    // CU4 B4: the PS2X_E7_DIR tunable is deleted (stale CU1 S3 tap).
+    return nullptr;
 }
 inline bool enabled() { return directory() != nullptr; }
 struct Budget

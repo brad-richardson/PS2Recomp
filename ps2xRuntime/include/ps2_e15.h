@@ -6,9 +6,9 @@
 #include <array>
 
 namespace ps2_e15 {
+// CU4 B4: the PS2X_E15_TRACE tunable is deleted (stale CU1 S3 tap).
 inline bool enabled() {
-    static const bool yes=[] { const char *p=std::getenv("PS2X_E15_TRACE"); return p && std::strcmp(p,"1")==0; }();
-    return yes && ps2_e7::enabled();
+    return false;
 }
 struct Registration { uint32_t mpeg=0,type=0,func=0,data=0,handle=0; };
 struct State {

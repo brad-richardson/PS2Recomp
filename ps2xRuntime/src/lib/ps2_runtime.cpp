@@ -3875,7 +3875,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         diag394Ed0Emit(rdram, ctx, sourcePc);
     }
 
-    // E3b R1/R4 taps (read-only; self-gated on PS2X_E3_INV). No isCall gate:
+    // E3b R1/R4 taps (read-only; CU4 B4 deleted the PS2X_E3_INV tunable so
+    // ps2_e3::enabled() is statically false). No isCall gate:
     // the 394ED0 probe above counts every dispatch and matches the ps2_log
     // enter census exactly, so the E3 invocation counter uses the same rule.
     if (ps2_e3::enabled())
