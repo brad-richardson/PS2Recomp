@@ -1,4 +1,5 @@
 #include "ps2_runtime.h"
+#include "ps2_hle_pools.h"
 #include "ps2_ts2_split60.h"
 #include "ps2_mtvu.h"
 #include "ps2_microvu.h"
@@ -1254,7 +1255,8 @@ namespace
     constexpr uint32_t kGuestHeapDefaultBase = 0x00100000u;
     constexpr uint32_t kGuestHeapDefaultAlignment = 16u;
     constexpr uint32_t kGuestHeapSafetyPad = 0x1000u;
-    constexpr uint32_t kGuestHeapHardLimit = 0x01F00000u;
+    // TK39: 0x01F00000, or 0x01F31000 under PS2X_HLE_POOLS_LOW=1.
+    inline uint32_t guestHeapHardLimit() { return ps2_hle_pools::heapCeiling(); }
 
     constexpr uint32_t COP0_CAUSE_EXCCODE_MASK = 0x0000007Cu;
     constexpr uint32_t COP0_CAUSE_BD = 0x80000000u;
@@ -2661,13 +2663,13 @@ PS2Runtime::PS2Runtime()
     m_guestHeapBlocks.clear();
     m_guestHeapBase = kGuestHeapDefaultBase;
     m_guestHeapEnd = kGuestHeapDefaultBase;
-    m_guestHeapLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    m_guestHeapLimit = std::min(guestHeapHardLimit(), PS2_RAM_SIZE);
     m_guestHeapSuggestedBase = kGuestHeapDefaultBase;
     m_guestHeapConfigured = false;
     // P1f: keep invocation stacks in kernel-reserved low RAM ([0x80000,
     // 0x100000)), below the ELF image and guest heap and far from every
     // guest thread stack (which grows down from the RAM top).
-    m_asyncCallbackStackFloor = 0x00080000u;
+    m_asyncCallbackStackFloor = ps2_hle_pools::callbackStackFloor();
     m_asyncCallbackStackTop = 0x00100000u;
 }
 
@@ -3441,7 +3443,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         std::lock_guard<std::mutex> lock(m_guestHeapMutex);
         if (!m_guestHeapConfigured)
         {
-            const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+            const uint32_t hardLimit = std::min(guestHeapHardLimit(), PS2_RAM_SIZE);
             m_guestHeapSuggestedBase = std::min(suggestedHeapBase, hardLimit);
             m_guestHeapBase = m_guestHeapSuggestedBase;
             m_guestHeapEnd = m_guestHeapSuggestedBase;
@@ -3453,7 +3455,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         // 0x100000)); the ELF image, guest heap, and guest thread stacks all
         // live at or above 0x100000, so this region cannot collide with them.
         std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
-        m_asyncCallbackStackFloor = 0x00080000u;
+        m_asyncCallbackStackFloor = ps2_hle_pools::callbackStackFloor();
         m_asyncCallbackStackTop = 0x00100000u;
     }
 
@@ -5112,13 +5114,13 @@ uint32_t PS2Runtime::clampGuestHeapBase(uint32_t guestBase) const
     {
         normalized &= PS2_RAM_MASK;
     }
-    const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    const uint32_t hardLimit = std::min(guestHeapHardLimit(), PS2_RAM_SIZE);
     return std::min(normalized, hardLimit);
 }
 
 uint32_t PS2Runtime::clampGuestHeapLimit(uint32_t guestLimit) const
 {
-    const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+    const uint32_t hardLimit = std::min(guestHeapHardLimit(), PS2_RAM_SIZE);
     if (guestLimit == 0u || guestLimit > hardLimit)
     {
         return hardLimit;
