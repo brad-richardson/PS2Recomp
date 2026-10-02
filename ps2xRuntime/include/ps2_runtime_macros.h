@@ -13,6 +13,84 @@
 #endif
 
 #include "ps2_runtime.h"
+#include "ps2_ts2_split60.h"
+// N5: compile-time switch for the E40-E44 guest-memory watch taps below.
+// PS2X_ENABLE_DIAG_TAPS=0 swaps the trace namespaces for constexpr stubs, so
+// the taps (and their __func__/argument setup) compile to nothing in every
+// generated function. CMake option of the same name; default OFF on all platforms.
+#ifndef PS2X_ENABLE_DIAG_TAPS
+#define PS2X_ENABLE_DIAG_TAPS 0
+#endif
+#if PS2X_ENABLE_DIAG_TAPS
+#include "ps2_mpg_src_trace.h"
+#include "ps2_e41_trace.h"
+#include "ps2_e43_trace.h"
+#include "ps2_e44_trace.h"
+namespace ps2x_tap_mpg = ::ps2_mpg_src_trace;
+namespace ps2x_tap_e41 = ::ps2_e41_trace;
+namespace ps2x_tap_e43 = ::ps2_e43_trace;
+namespace ps2x_tap_e44 = ::ps2_e44_trace;
+#else
+namespace ps2x_tap_mpg
+{
+template <class... A> constexpr bool arenastoreArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool dmaregArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isArenaWatched(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isDmareg(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isReadWatched(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isStWatched(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isTagWatched(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isUploaderValue(A &&...) noexcept { return false; }
+template <class... A> constexpr bool readArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool stArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool tagaddrArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool uploadloadArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool writeArmed(A &&...) noexcept { return false; }
+template <class... A> inline void noteArenastoreCtx(A &&...) noexcept {}
+template <class... A> inline void noteDmaregCtx(A &&...) noexcept {}
+template <class... A> inline void noteLoadForSrcCtx(A &&...) noexcept {}
+template <class... A> inline void noteReadCtx(A &&...) noexcept {}
+template <class... A> inline void noteStCtx(A &&...) noexcept {}
+template <class... A> inline void noteStoreCtx(A &&...) noexcept {}
+template <class... A> inline void noteTagaddrwriteCtx(A &&...) noexcept {}
+template <class... A> inline void noteUploadloadCtx(A &&...) noexcept {}
+} // namespace ps2x_tap_mpg
+namespace ps2x_tap_e41
+{
+template <class... A> constexpr bool isPlantWatched(A &&...) noexcept { return false; }
+template <class... A> constexpr bool plantArmed(A &&...) noexcept { return false; }
+template <class... A> inline void noteFastWriteSite(A &&...) noexcept {}
+template <class... A> inline void notePlantCtx(A &&...) noexcept {}
+namespace detail
+{
+struct ScopedFastSuppress { constexpr explicit ScopedFastSuppress(bool) noexcept {} };
+} // namespace detail
+} // namespace ps2x_tap_e41
+namespace ps2x_tap_e43
+{
+template <class... A> constexpr bool enabled(A &&...) noexcept { return false; }
+template <class... A> constexpr bool isProdPage(A &&...) noexcept { return false; }
+template <class... A> inline void noteProdSite(A &&...) noexcept {}
+template <class... A> inline void noteWriteCtx(A &&...) noexcept {}
+namespace detail
+{
+struct ScopedProdSuppress { constexpr explicit ScopedProdSuppress(bool) noexcept {} };
+} // namespace detail
+} // namespace ps2x_tap_e43
+namespace ps2x_tap_e44
+{
+template <class... A> constexpr bool appendArmed(A &&...) noexcept { return false; }
+template <class... A> constexpr bool enabled(A &&...) noexcept { return false; }
+template <class... A> constexpr bool tplArmed(A &&...) noexcept { return false; }
+template <class... A> inline void noteApcMaybe(A &&...) noexcept {}
+template <class... A> inline void noteAppend(A &&...) noexcept {}
+template <class... A> inline void noteAppxMaybe(A &&...) noexcept {}
+template <class... A> inline void noteFast(A &&...) noexcept {}
+template <class... A> inline void noteTplMaybe(A &&...) noexcept {}
+template <class... A> inline void noteTwMaybe(A &&...) noexcept {}
+template <class... A> inline void noteV1b0Maybe(A &&...) noexcept {}
+} // namespace ps2x_tap_e44
+#endif // PS2X_ENABLE_DIAG_TAPS
 
 static inline int32_t Ps2ExtractEpi32(__m128i v, int index)
 {
@@ -242,9 +320,53 @@ static inline __m128i Ps2FastRead128(const uint8_t *rdram, uint32_t addr)
     return value;
 }
 
+// EX1: canonical-RAM reads. Valid only when addr + width <= PS2_RAM_SIZE
+// (mask no-op, access contiguous), in which case these are bit-identical
+// to the Ps2FastRead* result with no range decode. Pure: no taps.
+static inline uint8_t Ps2CanonicalRead8(const uint8_t *rdram, uint32_t addr)
+{
+    uint8_t value;
+    std::memcpy(&value, rdram + addr, sizeof(value));
+    return value;
+}
+
+static inline uint16_t Ps2CanonicalRead16(const uint8_t *rdram, uint32_t addr)
+{
+    uint16_t value;
+    std::memcpy(&value, rdram + addr, sizeof(value));
+    return value;
+}
+
+static inline uint32_t Ps2CanonicalRead32(const uint8_t *rdram, uint32_t addr)
+{
+    uint32_t value;
+    std::memcpy(&value, rdram + addr, sizeof(value));
+    return value;
+}
+
+static inline uint64_t Ps2CanonicalRead64(const uint8_t *rdram, uint32_t addr)
+{
+    uint64_t value;
+    std::memcpy(&value, rdram + addr, sizeof(value));
+    return value;
+}
+
+static inline __m128i Ps2CanonicalRead128(const uint8_t *rdram, uint32_t addr)
+{
+    __m128i value;
+    std::memcpy(&value, rdram + addr, sizeof(value));
+    return value;
+}
+
 static inline void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_t value)
 {
     rdram[addr & PS2_RAM_MASK] = value;
+    if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+        ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
@@ -258,9 +380,21 @@ static inline void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
+        if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+            ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
+    if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+        ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
@@ -274,9 +408,21 @@ static inline void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
+        if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+            ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
+    if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+        ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
@@ -290,9 +436,21 @@ static inline void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
+        if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+            ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
+    if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+        ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), (uint32_t)value, __func__);
 }
 
 static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
@@ -306,9 +464,21 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         {
             rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
         }
+        if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+            ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), static_cast<uint32_t>(PS2_EXTRACT_EPI64_0(value)), __func__);
         return;
     }
     std::memcpy(rdram + offset, &value, sizeof(value));
+    if (ps2x_tap_e41::plantArmed()) // E41 plant watch (default off)
+        ps2x_tap_e41::noteFastWriteSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e43::enabled()) // E43 producer watch (default off)
+        ps2x_tap_e43::noteProdSite(rdram, addr, sizeof(value));
+    if (ps2x_tap_e44::enabled()) // E44 scratchpad watch (default off)
+        ps2x_tap_e44::noteFast(rdram, nullptr, addr, sizeof(value), static_cast<uint32_t>(PS2_EXTRACT_EPI64_0(value)), __func__);
 }
 
 #define FAST_READ8(addr) Ps2FastRead8(rdram, (uint32_t)(addr))
@@ -323,102 +493,329 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
 #define FAST_WRITE64(addr, val) Ps2FastWrite64(rdram, (uint32_t)(addr), (uint64_t)(val))
 #define FAST_WRITE128(addr, val) Ps2FastWrite128(rdram, (uint32_t)(addr), (val))
 
-#define READ8(addr) ([&]() -> uint8_t {                       \
+#define READ8(addr) ([&, ps2xE40Fn = __func__]() -> uint8_t {                       \
     uint32_t _addr = (uint32_t)(addr);                        \
-    return PS2Runtime::isSpecialAddress(_addr)                \
-        ? runtime->Load8(rdram, ctx, _addr)                   \
-        : FAST_READ8(_addr); }())
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 1u))           \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 1u, ps2xE40Fn); \
+    return _addr <= PS2_RAM_SIZE - sizeof(uint8_t) /* EX1 */ \
+        ? Ps2CanonicalRead8(rdram, _addr)                    \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load8(rdram, ctx, _addr)               \
+            : FAST_READ8(_addr)); }())
 
-#define READ16(addr) ([&]() -> uint16_t {                     \
+#define READ16(addr) ([&, ps2xE40Fn = __func__]() -> uint16_t {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
-    return PS2Runtime::isSpecialAddress(_addr)                \
-        ? runtime->Load16(rdram, ctx, _addr)                  \
-        : FAST_READ16(_addr); }())
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 2u))           \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 2u, ps2xE40Fn); \
+    return _addr <= PS2_RAM_SIZE - sizeof(uint16_t) /* EX1 */ \
+        ? Ps2CanonicalRead16(rdram, _addr)                   \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load16(rdram, ctx, _addr)              \
+            : FAST_READ16(_addr)); }())
 
-#define READ32(addr) ([&]() -> uint32_t {                     \
+#define READ32(addr) ([&, ps2xE40Fn = __func__]() -> uint32_t {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
-    return PS2Runtime::isSpecialAddress(_addr)                \
-        ? runtime->Load32(rdram, ctx, _addr)                  \
-        : FAST_READ32(_addr); }())
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 4u))           \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 4u, ps2xE40Fn); \
+    uint32_t _rv = _addr <= PS2_RAM_SIZE - sizeof(uint32_t) /* EX1 */ \
+        ? Ps2CanonicalRead32(rdram, _addr)                   \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load32(rdram, ctx, _addr)              \
+            : FAST_READ32(_addr));                           \
+    /* HL2: no split120 hook here. The generator emits READ32_SPLIT only at */ \
+    /* the 12 conversion PCs (ps2_ts2_splitsites.h); every other load kept */ \
+    /* stock values through halfLoad's default case, so skipping the call is */ \
+    /* exact. (The ts2-halfload counters now tally SPLIT-site executions.) */ \
+    if (ps2x_tap_mpg::uploadloadArmed() &&                \
+        ps2x_tap_mpg::isUploaderValue(_rv))               \
+        ps2x_tap_mpg::noteUploadloadCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u, ps2xE40Fn); \
+    if (ps2x_tap_mpg::tagaddrArmed())                     \
+        ps2x_tap_mpg::noteLoadForSrcCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u); \
+    return _rv; }())
 
-#define READ64(addr) ([&]() -> uint64_t {                     \
+/* HL2: the pre-split READ32 body, emitted only at the 12 conversion PCs. */
+#define READ32_SPLIT(addr) ([&, ps2xE40Fn = __func__]() -> uint32_t {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
-    return PS2Runtime::isSpecialAddress(_addr)                \
-        ? runtime->Load64(rdram, ctx, _addr)                  \
-        : FAST_READ64(_addr); }())
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 4u))           \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 4u, ps2xE40Fn); \
+    uint32_t _rv = _addr <= PS2_RAM_SIZE - sizeof(uint32_t) /* EX1 */ \
+        ? Ps2CanonicalRead32(rdram, _addr)                   \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load32(rdram, ctx, _addr)              \
+            : FAST_READ32(_addr));                           \
+    if (ps2_ts2_split60::halfMode()) /* EE1P2: one product gate per 32-bit load */ \
+        _rv = ps2_ts2_split60::halfLoad(ctx->pc, _addr, _rv);  \
+    if (ps2x_tap_mpg::uploadloadArmed() &&                \
+        ps2x_tap_mpg::isUploaderValue(_rv))               \
+        ps2x_tap_mpg::noteUploadloadCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u, ps2xE40Fn); \
+    if (ps2x_tap_mpg::tagaddrArmed())                     \
+        ps2x_tap_mpg::noteLoadForSrcCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u); \
+    return _rv; }())
 
-#define READ128(addr) ([&]() -> __m128i {                     \
+#define READ64(addr) ([&, ps2xE40Fn = __func__]() -> uint64_t {                     \
     uint32_t _addr = (uint32_t)(addr);                        \
-    return PS2Runtime::isSpecialAddress(_addr)                \
-        ? runtime->Load128(rdram, ctx, _addr)                 \
-        : FAST_READ128(_addr); }())
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 8u))           \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 8u, ps2xE40Fn); \
+    uint64_t _rv = _addr <= PS2_RAM_SIZE - sizeof(uint64_t) /* EX1 */ \
+        ? Ps2CanonicalRead64(rdram, _addr)                   \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load64(rdram, ctx, _addr)              \
+            : FAST_READ64(_addr));                           \
+    if (ps2x_tap_mpg::uploadloadArmed() &&                \
+        (ps2x_tap_mpg::isUploaderValue((uint32_t)_rv) ||  \
+         ps2x_tap_mpg::isUploaderValue((uint32_t)(_rv >> 32u)))) \
+        ps2x_tap_mpg::noteUploadloadCtx(runtime, ctx, _addr, 8u, _rv, 0u, ps2xE40Fn); \
+    if (ps2x_tap_mpg::tagaddrArmed())                     \
+        ps2x_tap_mpg::noteLoadForSrcCtx(runtime, ctx, _addr, 8u, _rv, 0u); \
+    return _rv; }())
 
-#define WRITE8(addr, val)                                                            \
-    do                                                                               \
-    {                                                                                \
-        uint32_t _addr = (addr);                                                     \
-        if (PS2Runtime::isSpecialAddress(_addr))                                     \
-            runtime->Store8(rdram, ctx, _addr, (val));                               \
-        else                                                                         \
-        {                                                                            \
-            ps2TraceGuestWrite(rdram, _addr, 1u, (uint8_t)(val), 0u, "WRITE8", ctx); \
-            FAST_WRITE8(_addr, (val));                                               \
-        }                                                                            \
-    } while (0)
+#define READ128(addr) ([&, ps2xE40Fn = __func__]() -> __m128i {                     \
+    uint32_t _addr = (uint32_t)(addr);                        \
+    if (ps2x_tap_mpg::readArmed() &&                      \
+        ps2x_tap_mpg::isReadWatched(_addr, 16u))          \
+        ps2x_tap_mpg::noteReadCtx(runtime, ctx, _addr, 16u, ps2xE40Fn); \
+    __m128i _rv = _addr <= PS2_RAM_SIZE - sizeof(__m128i) /* EX1 */ \
+        ? Ps2CanonicalRead128(rdram, _addr)                  \
+        : (PS2Runtime::isSpecialAddress(_addr)               \
+            ? runtime->Load128(rdram, ctx, _addr)             \
+            : FAST_READ128(_addr));                          \
+    uint64_t _lo = 0u, _hi = 0u;                              \
+    const bool _ulArmed = ps2x_tap_mpg::uploadloadArmed(); \
+    const bool _tagArmed = ps2x_tap_mpg::tagaddrArmed();   \
+    if (_ulArmed || _tagArmed)                                 \
+    {                                                         \
+        _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_rv)); \
+        _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_rv)); \
+        if (_ulArmed && (ps2x_tap_mpg::isUploaderValue((uint32_t)_lo) || \
+            ps2x_tap_mpg::isUploaderValue((uint32_t)(_lo >> 32u)) || \
+            ps2x_tap_mpg::isUploaderValue((uint32_t)_hi) || \
+            ps2x_tap_mpg::isUploaderValue((uint32_t)(_hi >> 32u)))) \
+            ps2x_tap_mpg::noteUploadloadCtx(runtime, ctx, _addr, 16u, _lo, _hi, ps2xE40Fn); \
+    }                                                         \
+    if (_tagArmed)                                             \
+        ps2x_tap_mpg::noteLoadForSrcCtx(runtime, ctx, _addr, 16u, _lo, _hi); \
+    return _rv; }())
 
-#define WRITE16(addr, val)                                                             \
+#define WRITE8(addr, val)                                                              \
     do                                                                                 \
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
-            runtime->Store16(rdram, ctx, _addr, (val));                                \
-        else                                                                           \
+        uint8_t _wv = (uint8_t)(val); \
+        const bool _e43 = ps2x_tap_e43::enabled();                                              \
+        const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
+        ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
+        const bool _e42plant = ps2x_tap_e41::plantArmed() &&                          \
+            ps2x_tap_e41::isPlantWatched(_addr, 1u);                                  \
+        ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);              \
+        if (ps2x_tap_mpg::dmaregArmed() && ps2x_tap_mpg::isDmareg(_addr)) \
+            ps2x_tap_mpg::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
+        if (ps2DiagWatchEnabled())                                                     \
+            ps2DiagWatchReport(rdram, _addr, 1u, (uint64_t)_wv, 0u, ctx, runtime);    \
+        if (ps2x_tap_mpg::writeArmed())                                           \
+            ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 1u, (uint64_t)_wv, 0u, __func__); \
+        if (_addr <= PS2_RAM_SIZE - sizeof(uint8_t) || /* EX1: canonical RAM */        \
+            !PS2Runtime::isSpecialAddress(_addr))                                      \
         {                                                                              \
-            ps2TraceGuestWrite(rdram, _addr, 2u, (uint16_t)(val), 0u, "WRITE16", ctx); \
-            FAST_WRITE16(_addr, (val));                                                \
+            ps2TraceGuestWrite(rdram, _addr, 1u, _wv, 0u, "WRITE8", ctx);              \
+            FAST_WRITE8(_addr, _wv);                                                   \
         }                                                                              \
+        else                                                                           \
+            runtime->Store8(rdram, ctx, _addr, _wv);                                   \
+        if (_e42plant)                                                                 \
+            ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 1u, __func__); \
+        if (_e43)                                                                             \
+            ps2x_tap_e43::noteWriteCtx(ctx, rdram, _addr, 1u, __func__, _e43p);              \
+        if (ps2x_tap_e44::tplArmed())                                                     \
+            ps2x_tap_e44::noteTplMaybe(rdram, ctx, _addr, 1u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteApcMaybe(ctx, _addr); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteV1b0Maybe(ctx, _addr, 1u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteTwMaybe(rdram, ctx, _addr, 1u, __func__); \
     } while (0)
 
-#define WRITE32(addr, val)                                                             \
-    do                                                                                 \
-    {                                                                                  \
-        uint32_t _addr = (addr);                                                       \
-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
-            runtime->Store32(rdram, ctx, _addr, (val));                                \
+#define WRITE16(addr, val)                                                               \
+    do                                                                                   \
+    {                                                                                    \
+        uint32_t _addr = (addr);                                                         \
+        uint16_t _wv = (uint16_t)(val); \
+        const bool _e43 = ps2x_tap_e43::enabled();                                              \
+        const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
+        ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
+        const bool _e42plant = ps2x_tap_e41::plantArmed() &&                            \
+            ps2x_tap_e41::isPlantWatched(_addr, 2u);                                    \
+        ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);                \
+        if (ps2x_tap_mpg::dmaregArmed() && ps2x_tap_mpg::isDmareg(_addr)) \
+            ps2x_tap_mpg::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
+        if (ps2DiagWatchEnabled())                                                       \
+            ps2DiagWatchReport(rdram, _addr, 2u, (uint64_t)_wv, 0u, ctx, runtime);      \
+        if (ps2x_tap_mpg::writeArmed())                                             \
+            ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 2u, (uint64_t)_wv, 0u, __func__); \
+        if (_addr <= PS2_RAM_SIZE - sizeof(uint16_t) || /* EX1: canonical RAM */       \
+            !PS2Runtime::isSpecialAddress(_addr))                                      \
+        {                                                                                \
+            ps2TraceGuestWrite(rdram, _addr, 2u, _wv, 0u, "WRITE16", ctx);               \
+            FAST_WRITE16(_addr, _wv);                                                    \
+        }                                                                                \
         else                                                                           \
-        {                                                                              \
-            ps2TraceGuestWrite(rdram, _addr, 4u, (uint32_t)(val), 0u, "WRITE32", ctx); \
-            FAST_WRITE32(_addr, (val));                                                \
-        }                                                                              \
+            runtime->Store16(rdram, ctx, _addr, _wv);                                  \
+        if (_e42plant)                                                                   \
+            ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 2u, __func__); \
+        if (_e43)                                                                             \
+            ps2x_tap_e43::noteWriteCtx(ctx, rdram, _addr, 2u, __func__, _e43p);              \
+        if (ps2x_tap_e44::tplArmed())                                                     \
+            ps2x_tap_e44::noteTplMaybe(rdram, ctx, _addr, 2u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteApcMaybe(ctx, _addr); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteV1b0Maybe(ctx, _addr, 2u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteTwMaybe(rdram, ctx, _addr, 2u, __func__); \
+    } while (0)
+
+#define WRITE32(addr, val)                                                               \
+    do                                                                                   \
+    {                                                                                    \
+        uint32_t _addr = (addr);                                                         \
+        uint32_t _wv = (uint32_t)(val); \
+        const bool _e43 = ps2x_tap_e43::enabled();                                              \
+        const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
+        ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
+        const bool _e42plant = ps2x_tap_e41::plantArmed() &&                            \
+            ps2x_tap_e41::isPlantWatched(_addr, 4u);                                    \
+        ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);                \
+        if (ps2x_tap_mpg::arenastoreArmed() && ps2x_tap_mpg::isArenaWatched(_addr, 4u)) \
+            ps2x_tap_mpg::noteArenastoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_mpg::stArmed() && ps2x_tap_mpg::isStWatched(_addr, 4u)) \
+            ps2x_tap_mpg::noteStCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_mpg::tagaddrArmed() && ps2x_tap_mpg::isTagWatched(_addr, 4u)) \
+            ps2x_tap_mpg::noteTagaddrwriteCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_mpg::dmaregArmed() && ps2x_tap_mpg::isDmareg(_addr)) \
+            ps2x_tap_mpg::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
+        if (ps2DiagWatchEnabled())                                                       \
+            ps2DiagWatchReport(rdram, _addr, 4u, (uint64_t)_wv, 0u, ctx, runtime);      \
+        if (ps2x_tap_mpg::writeArmed())                                             \
+            ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (_addr <= PS2_RAM_SIZE - sizeof(uint32_t) || /* EX1: canonical RAM */       \
+            !PS2Runtime::isSpecialAddress(_addr))                                      \
+        {                                                                                \
+            ps2TraceGuestWrite(rdram, _addr, 4u, _wv, 0u, "WRITE32", ctx);               \
+            FAST_WRITE32(_addr, _wv);                                                    \
+        }                                                                                \
+        else                                                                           \
+            runtime->Store32(rdram, ctx, _addr, _wv);                                  \
+        if (_e42plant)                                                                   \
+            ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 4u, __func__); \
+        if (_e43)                                                                             \
+            ps2x_tap_e43::noteWriteCtx(ctx, rdram, _addr, 4u, __func__, _e43p);              \
+        if (ps2x_tap_e44::appendArmed() && ctx != nullptr && ctx->pc == 0x3797E8u) \
+            ps2x_tap_e44::noteAppend(rdram, ctx); \
+        if (ps2x_tap_e44::appendArmed() && ctx != nullptr) \
+            ps2x_tap_e44::noteAppxMaybe(rdram, ctx); \
+        if (ps2x_tap_e44::tplArmed())                                                     \
+            ps2x_tap_e44::noteTplMaybe(rdram, ctx, _addr, 4u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteApcMaybe(ctx, _addr); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteV1b0Maybe(ctx, _addr, 4u, (uint64_t)_wv, 0u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteTwMaybe(rdram, ctx, _addr, 4u, __func__); \
     } while (0)
 
 #define WRITE64(addr, val)                                                             \
     do                                                                                 \
     {                                                                                  \
         uint32_t _addr = (addr);                                                       \
-        if (PS2Runtime::isSpecialAddress(_addr))                                       \
-            runtime->Store64(rdram, ctx, _addr, (val));                                \
-        else                                                                           \
+        uint64_t _wv = (uint64_t)(val); \
+        const bool _e43 = ps2x_tap_e43::enabled();                                              \
+        const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
+        ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
+        const bool _e42plant = ps2x_tap_e41::plantArmed() &&                          \
+            ps2x_tap_e41::isPlantWatched(_addr, 8u);                                  \
+        ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);              \
+        if (ps2x_tap_mpg::arenastoreArmed() && ps2x_tap_mpg::isArenaWatched(_addr, 8u)) \
+            ps2x_tap_mpg::noteArenastoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (ps2x_tap_mpg::stArmed() && ps2x_tap_mpg::isStWatched(_addr, 8u)) \
+            ps2x_tap_mpg::noteStCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (ps2x_tap_mpg::tagaddrArmed() && ps2x_tap_mpg::isTagWatched(_addr, 8u)) \
+            ps2x_tap_mpg::noteTagaddrwriteCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (ps2x_tap_mpg::dmaregArmed() && ps2x_tap_mpg::isDmareg(_addr)) \
+            ps2x_tap_mpg::noteDmaregCtx(runtime, ctx, _addr, (uint64_t)_wv, __func__); \
+        if (ps2DiagWatchEnabled())                                                     \
+            ps2DiagWatchReport(rdram, _addr, 8u, _wv, 0u, ctx, runtime);              \
+        if (ps2x_tap_mpg::writeArmed())                                           \
+            ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (_addr <= PS2_RAM_SIZE - sizeof(uint64_t) || /* EX1: canonical RAM */       \
+            !PS2Runtime::isSpecialAddress(_addr))                                      \
         {                                                                              \
-            ps2TraceGuestWrite(rdram, _addr, 8u, (uint64_t)(val), 0u, "WRITE64", ctx); \
-            FAST_WRITE64(_addr, (val));                                                \
+            ps2TraceGuestWrite(rdram, _addr, 8u, _wv, 0u, "WRITE64", ctx);             \
+            FAST_WRITE64(_addr, _wv);                                                  \
         }                                                                              \
+        else                                                                           \
+            runtime->Store64(rdram, ctx, _addr, _wv);                                  \
+        if (_e42plant)                                                                 \
+            ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 8u, __func__); \
+        if (_e43)                                                                             \
+            ps2x_tap_e43::noteWriteCtx(ctx, rdram, _addr, 8u, __func__, _e43p);              \
+        if (ps2x_tap_e44::tplArmed())                                                     \
+            ps2x_tap_e44::noteTplMaybe(rdram, ctx, _addr, 8u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteApcMaybe(ctx, _addr); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteV1b0Maybe(ctx, _addr, 8u, _wv, 0u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteTwMaybe(rdram, ctx, _addr, 8u, __func__); \
     } while (0)
 
-#define WRITE128(addr, val)                                                          \
-    do                                                                               \
-    {                                                                                \
-        uint32_t _addr = (addr);                                                     \
-        __m128i _value = (val);                                                      \
-        if (PS2Runtime::isSpecialAddress(_addr))                                     \
-            runtime->Store128(rdram, ctx, _addr, _value);                            \
-        else                                                                         \
-        {                                                                            \
-            const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value)); \
-            const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value)); \
-            ps2TraceGuestWrite(rdram, _addr, 16u, _lo, _hi, "WRITE128", ctx);        \
-            FAST_WRITE128(_addr, _value);                                            \
-        }                                                                            \
+#define WRITE128(addr, val)                                                            \
+    do                                                                                 \
+    {                                                                                  \
+        uint32_t _addr = (addr);                                                       \
+        __m128i _value = (val); \
+        const bool _e43 = ps2x_tap_e43::enabled();                                              \
+        const bool _e43p = _e43 && ps2x_tap_e43::isProdPage(_addr);                             \
+        ps2x_tap_e43::detail::ScopedProdSuppress _e43psup(_e43p);                                \
+        const uint64_t _lo = static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(_value));       \
+        const uint64_t _hi = static_cast<uint64_t>(PS2_EXTRACT_EPI64_1(_value));       \
+        const bool _e42plant = ps2x_tap_e41::plantArmed() &&                          \
+            ps2x_tap_e41::isPlantWatched(_addr, 16u);                                 \
+        ps2x_tap_e41::detail::ScopedFastSuppress _e42suppress(_e42plant);              \
+        if (ps2x_tap_mpg::arenastoreArmed() && ps2x_tap_mpg::isArenaWatched(_addr, 16u)) \
+            ps2x_tap_mpg::noteArenastoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
+        if (ps2x_tap_mpg::stArmed() && ps2x_tap_mpg::isStWatched(_addr, 16u)) \
+            ps2x_tap_mpg::noteStCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
+        if (ps2x_tap_mpg::tagaddrArmed() && ps2x_tap_mpg::isTagWatched(_addr, 16u)) \
+            ps2x_tap_mpg::noteTagaddrwriteCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
+        if (ps2DiagWatchEnabled())                                                     \
+            ps2DiagWatchReport(rdram, _addr, 16u, _lo, _hi, ctx, runtime);            \
+        if (ps2x_tap_mpg::writeArmed())                                           \
+            ps2x_tap_mpg::noteStoreCtx(runtime, ctx, _addr, 16u, _lo, _hi, __func__); \
+        if (_addr <= PS2_RAM_SIZE - sizeof(__m128i) || /* EX1: canonical RAM */        \
+            !PS2Runtime::isSpecialAddress(_addr))                                      \
+        {                                                                              \
+            ps2TraceGuestWrite(rdram, _addr, 16u, _lo, _hi, "WRITE128", ctx);          \
+            FAST_WRITE128(_addr, _value);                                              \
+        }                                                                              \
+        else                                                                           \
+            runtime->Store128(rdram, ctx, _addr, _value);                              \
+        if (_e42plant)                                                                 \
+            ps2x_tap_e41::notePlantCtx(ctx, rdram, _addr, 16u, __func__); \
+        if (_e43)                                                                              \
+            ps2x_tap_e43::noteWriteCtx(ctx, rdram, _addr, 16u, __func__, _e43p);                \
+        if (ps2x_tap_e44::tplArmed())                                                     \
+            ps2x_tap_e44::noteTplMaybe(rdram, ctx, _addr, 16u, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteApcMaybe(ctx, _addr); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteV1b0Maybe(ctx, _addr, 16u, _lo, _hi, __func__); \
+        if (ps2x_tap_e44::appendArmed())                                                  \
+            ps2x_tap_e44::noteTwMaybe(rdram, ctx, _addr, 16u, __func__); \
     } while (0)
 
 // Packed Compare Greater Than (PCGT)
@@ -537,8 +934,10 @@ inline __m128i ps2_ppacb(__m128i rs, __m128i rt)
 #define PS2_PPACB(a, b) ps2_ppacb((__m128i)(a), (__m128i)(b))
 
 // Packed Interleave (PINT)
-#define PS2_PINTH(a, b) _mm_unpacklo_epi16(_mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3, 2, 1, 0)), _mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3, 2, 1, 0)))
-#define PS2_PINTEH(a, b) _mm_unpackhi_epi16(_mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3, 2, 1, 0)), _mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3, 2, 1, 0)))
+#define PS2_PINTH(a, b) _mm_unpacklo_epi16((__m128i)(b), _mm_srli_si128((__m128i)(a), 8))
+#define PS2_PINTEH(a, b) _mm_unpacklo_epi16( \
+    _mm_shuffle_epi8((__m128i)(b), _mm_setr_epi8(0, 1, 4, 5, 8, 9, 12, 13, 0, 0, 0, 0, 0, 0, 0, 0)), \
+    _mm_shuffle_epi8((__m128i)(a), _mm_setr_epi8(0, 1, 4, 5, 8, 9, 12, 13, 0, 0, 0, 0, 0, 0, 0, 0)))
 
 // Packed Multiply-Add (PMADD)
 #define PS2_PMADDW(a, b) _mm_add_epi32(_mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(1, 0, 3, 2)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(1, 0, 3, 2))), _mm_mullo_epi32(_mm_shuffle_epi32((__m128i)(a), _MM_SHUFFLE(3, 2, 1, 0)), _mm_shuffle_epi32((__m128i)(b), _MM_SHUFFLE(3, 2, 1, 0))))
@@ -608,8 +1007,243 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define FPU_ADD_S(a, b) ((float)(a) + (float)(b))
 #define FPU_SUB_S(a, b) ((float)(a) - (float)(b))
 #define FPU_MUL_S(a, b) ((float)(a) * (float)(b))
-#define FPU_DIV_S(a, b) ((float)(a) / (float)(b))
-#define FPU_SQRT_S(a) sqrtf((float)(a))
+// R5900 FPU semantics (PCSX2 pcsx2/FPU.cpp SQRT_S, RSQRT_S, CVT_W).
+// SQRT.S: sqrt(|ft|); +/-0 (and denormals, which the EE treats as zero)
+// give a signed zero.
+static inline float Ps2FpuSqrtS(float t)
+{
+    uint32_t u;
+    std::memcpy(&u, &t, sizeof(u));
+    if ((u & 0x7F800000u) == 0u)
+    {
+        u &= 0x80000000u;
+        float r;
+        std::memcpy(&r, &u, sizeof(r));
+        return r;
+    }
+    return sqrtf(fabsf(t));
+}
+// RSQRT.S: fs / sqrt(|ft|); ft = +/-0 gives +/-FMAX (sign of ft).
+static inline float Ps2FpuRsqrtS(float s, float t)
+{
+    uint32_t u;
+    std::memcpy(&u, &t, sizeof(u));
+    if ((u & 0x7F800000u) == 0u)
+    {
+        u = (u & 0x80000000u) | 0x7F7FFFFFu;
+        float r;
+        std::memcpy(&r, &u, sizeof(r));
+        return r;
+    }
+    return s / sqrtf(fabsf(t));
+}
+// CVT.W.S: truncate toward zero; |x| >= 2^31 (and NaN/Inf) saturate by sign.
+static inline int32_t Ps2FpuCvtWS(float s)
+{
+    uint32_t u;
+    std::memcpy(&u, &s, sizeof(u));
+    if ((u & 0x7F800000u) <= 0x4E800000u)
+        return static_cast<int32_t>(s);
+    return (u & 0x80000000u) ? static_cast<int32_t>(0x80000000u) : 0x7FFFFFFF;
+}
+// E53: PCSX2 FPU.cpp fpuDouble: an operand with exponent 0 reads as a signed
+// zero, and exponent 0xFF (Inf/NaN on the host) as +/-FMAX.
+static inline float Ps2FpuDouble(float x)
+{
+    uint32_t u;
+    std::memcpy(&u, &x, sizeof(u));
+    switch (u & 0x7F800000u)
+    {
+    case 0u:
+        u &= 0x80000000u;
+        break;
+    case 0x7F800000u:
+        u = (u & 0x80000000u) | 0x7F7FFFFFu;
+        break;
+    default:
+        return x;
+    }
+    float r;
+    std::memcpy(&r, &u, sizeof(r));
+    return r;
+}
+// E53: DIV.S (PCSX2 checkDivideByZero + DIV_S): a divisor with exponent 0
+// (+/-0 or denormal) gives +/-FMAX with sign fs^ft; otherwise
+// fpuDouble(fs) / fpuDouble(ft) in the thread's rounding mode.
+static inline float Ps2FpuDivS(float s, float t)
+{
+    uint32_t us, ut;
+    std::memcpy(&us, &s, sizeof(us));
+    std::memcpy(&ut, &t, sizeof(ut));
+    if ((ut & 0x7F800000u) == 0u)
+    {
+        const uint32_t u = ((us ^ ut) & 0x80000000u) | 0x7F7FFFFFu;
+        float r;
+        std::memcpy(&r, &u, sizeof(r));
+        return r;
+    }
+    return Ps2FpuDouble(s) / Ps2FpuDouble(t);
+}
+// E53: MAX.S / MIN.S compare the raw words as sign-magnitude integers
+// (PCSX2 fp_max / fp_min).
+static inline uint32_t Ps2FpMaxBits(uint32_t a, uint32_t b)
+{
+    const int32_t sa = static_cast<int32_t>(a), sb = static_cast<int32_t>(b);
+    return static_cast<uint32_t>((sa < 0 && sb < 0) ? std::min(sa, sb) : std::max(sa, sb));
+}
+static inline uint32_t Ps2FpMinBits(uint32_t a, uint32_t b)
+{
+    const int32_t sa = static_cast<int32_t>(a), sb = static_cast<int32_t>(b);
+    return static_cast<uint32_t>((sa < 0 && sb < 0) ? std::max(sa, sb) : std::min(sa, sb));
+}
+static inline float Ps2FpuMaxS(float a, float b)
+{
+    uint32_t ua, ub;
+    std::memcpy(&ua, &a, sizeof(ua));
+    std::memcpy(&ub, &b, sizeof(ub));
+    const uint32_t u = Ps2FpMaxBits(ua, ub);
+    float r;
+    std::memcpy(&r, &u, sizeof(r));
+    return r;
+}
+static inline float Ps2FpuMinS(float a, float b)
+{
+    uint32_t ua, ub;
+    std::memcpy(&ua, &a, sizeof(ua));
+    std::memcpy(&ub, &b, sizeof(ub));
+    const uint32_t u = Ps2FpMinBits(ua, ub);
+    float r;
+    std::memcpy(&r, &u, sizeof(r));
+    return r;
+}
+#define FPU_DIV_S(a, b) Ps2FpuDivS((float)(a), (float)(b))
+#define FPU_MAX_S(a, b) Ps2FpuMaxS((float)(a), (float)(b))
+#define FPU_MIN_S(a, b) Ps2FpuMinS((float)(a), (float)(b))
+
+// ---- E53: VU0 macro-mode helpers (PCSX2 VUops.cpp / VU0.cpp semantics) ----
+
+static inline float Ps2BitsToFloat(uint32_t u)
+{
+    float f;
+    std::memcpy(&f, &u, sizeof(f));
+    return f;
+}
+static inline uint32_t Ps2FloatToBits(float f)
+{
+    uint32_t u;
+    std::memcpy(&u, &f, sizeof(u));
+    return u;
+}
+static inline uint32_t Ps2VuLane(__m128 v, int lane)
+{
+    alignas(16) uint32_t w[4];
+    _mm_store_si128(reinterpret_cast<__m128i *>(w), _mm_castps_si128(v));
+    return w[lane & 3];
+}
+// vuDouble: same operand rule as the FPU's (VU overflow checks are on in
+// PCSX2's defaults).
+static inline float Ps2VuDouble(uint32_t u) { return Ps2FpuDouble(Ps2BitsToFloat(u)); }
+
+// VDIV: Q = fs.fsf / ft.ftf (_vuDIV).
+static inline float Ps2VuDiv(uint32_t fsBits, uint32_t ftBits)
+{
+    const float ft = Ps2VuDouble(ftBits);
+    const float fs = Ps2VuDouble(fsBits);
+    if (ft == 0.0f)
+        return Ps2BitsToFloat(((ftBits ^ fsBits) & 0x80000000u) | 0x7F7FFFFFu);
+    return Ps2VuDouble(Ps2FloatToBits(fs / ft));
+}
+// VSQRT: Q = sqrt(|ft.ftf|) (_vuSQRT).
+static inline float Ps2VuSqrt(uint32_t ftBits)
+{
+    const float ft = Ps2VuDouble(ftBits);
+    return Ps2VuDouble(Ps2FloatToBits(sqrtf(fabsf(ft))));
+}
+// VRSQRT: Q = fs.fsf / sqrt(|ft.ftf|); ft = 0 gives +/-FMAX (fs != 0) or
+// +/-0 (fs = 0), signed by fs^ft (_vuRSQRT).
+static inline float Ps2VuRsqrt(uint32_t fsBits, uint32_t ftBits)
+{
+    const float ft = Ps2VuDouble(ftBits);
+    const float fs = Ps2VuDouble(fsBits);
+    const uint32_t sign = (ftBits ^ fsBits) & 0x80000000u;
+    if (ft == 0.0f)
+        return Ps2BitsToFloat(fs != 0.0f ? (sign | 0x7F7FFFFFu) : sign);
+    return Ps2VuDouble(Ps2FloatToBits(fs / sqrtf(fabsf(ft))));
+}
+// VFTOIn: scale by 2^n, then truncate; exponent >= 2^31 saturates by sign
+// (floatToInt<n>).
+static inline __m128 Ps2VuFtoi(__m128 src, int shift)
+{
+    alignas(16) uint32_t w[4];
+    _mm_store_si128(reinterpret_cast<__m128i *>(w), _mm_castps_si128(src));
+    const float scale = Ps2BitsToFloat(0x3F800000u + (static_cast<uint32_t>(shift) << 23));
+    for (int i = 0; i < 4; ++i)
+    {
+        float f = Ps2BitsToFloat(w[i]);
+        if (shift)
+            f *= scale;
+        const uint32_t u = Ps2FloatToBits(f);
+        if ((u & 0x7F800000u) >= 0x4F000000u)
+            w[i] = (u & 0x80000000u) ? 0x80000000u : 0x7FFFFFFFu;
+        else
+            w[i] = static_cast<uint32_t>(static_cast<int32_t>(f));
+    }
+    return _mm_castsi128_ps(_mm_load_si128(reinterpret_cast<const __m128i *>(w)));
+}
+// VMAX / VMINI: sign-magnitude integer compare per lane (fp_max / fp_min).
+static inline __m128 Ps2VuMax(__m128 a, __m128 b)
+{
+    const __m128i ia = _mm_castps_si128(a), ib = _mm_castps_si128(b);
+    const __m128i bothNeg = _mm_srai_epi32(_mm_and_si128(ia, ib), 31);
+    const __m128i hi = _mm_max_epi32(ia, ib), lo = _mm_min_epi32(ia, ib);
+    return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(bothNeg, lo), _mm_andnot_si128(bothNeg, hi)));
+}
+static inline __m128 Ps2VuMin(__m128 a, __m128 b)
+{
+    const __m128i ia = _mm_castps_si128(a), ib = _mm_castps_si128(b);
+    const __m128i bothNeg = _mm_srai_epi32(_mm_and_si128(ia, ib), 31);
+    const __m128i hi = _mm_max_epi32(ia, ib), lo = _mm_min_epi32(ia, ib);
+    return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(bothNeg, hi), _mm_andnot_si128(bothNeg, lo)));
+}
+// VCLIPw: shift the 24-bit clip history by 6 and set +x,-x,+y,-y,+z,-z
+// against |ft.w| with PCSX2's integer compare (_vuCLIP).
+static inline uint32_t Ps2VuClip(uint32_t clipFlags, __m128 fs, uint32_t ftwBits)
+{
+    int32_t value = static_cast<int32_t>(ftwBits);
+    value = (value & 0x7F800000) ? (value & 0x7FFFFFFF) : 0x007FFFFF;
+    const uint32_t x = Ps2VuLane(fs, 0), y = Ps2VuLane(fs, 1), z = Ps2VuLane(fs, 2);
+    uint32_t f = clipFlags << 6;
+    if (static_cast<int32_t>(x) > value) f |= 0x01u;
+    if (static_cast<int32_t>(x ^ 0x80000000u) > value) f |= 0x02u;
+    if (static_cast<int32_t>(y) > value) f |= 0x04u;
+    if (static_cast<int32_t>(y ^ 0x80000000u) > value) f |= 0x08u;
+    if (static_cast<int32_t>(z) > value) f |= 0x10u;
+    if (static_cast<int32_t>(z ^ 0x80000000u) > value) f |= 0x20u;
+    return f & 0xFFFFFFu;
+}
+// R register: 23-bit LFSR value with the exponent of 1.0, kept in every lane
+// of ctx->vu0_r (AdvanceLFSR / _vuRINIT / _vuRXOR).
+static inline uint32_t Ps2VuR(const R5900Context *ctx) { return Ps2VuLane(ctx->vu0_r, 0); }
+static inline void Ps2VuSetR(R5900Context *ctx, uint32_t r)
+{
+    ctx->vu0_r = _mm_castsi128_ps(_mm_set1_epi32(static_cast<int32_t>((r & 0x007FFFFFu) | 0x3F800000u)));
+}
+static inline uint32_t Ps2VuAdvanceR(R5900Context *ctx)
+{
+    uint32_t r = Ps2VuR(ctx);
+    const uint32_t x = (r >> 4) & 1u;
+    const uint32_t y = (r >> 22) & 1u;
+    r = (r << 1) ^ x ^ y;
+    Ps2VuSetR(ctx, r);
+    return Ps2VuR(ctx);
+}
+// VU0 data memory (4 KiB, wraps) for VLQI/VSQI/VLQD/VSQD/VILWR/VISWR.
+static inline uint8_t *Ps2Vu0DataAt(PS2Runtime *runtime, uint32_t byteAddr)
+{
+    return runtime->memory().getVU0Data() + (byteAddr & 0xFF0u);
+}
+#define FPU_SQRT_S(a) Ps2FpuSqrtS((float)(a))
+#define FPU_RSQRT_S(s, t) Ps2FpuRsqrtS((float)(s), (float)(t))
 #define FPU_ABS_S(a) fabsf((float)(a))
 #define FPU_MOV_S(a) ((float)(a))
 #define FPU_NEG_S(a) (-(float)(a))
@@ -623,23 +1257,23 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)
 #define FPU_FLOOR_W_S(a) ((int32_t)floorf((float)(a)))
 #define FPU_CVT_S_W(a) ((float)(int32_t)(a))
 #define FPU_CVT_S_L(a) ((float)(int64_t)(a))
-#define FPU_CVT_W_S(a) ((int32_t)nearbyintf((float)(a)))
+#define FPU_CVT_W_S(a) Ps2FpuCvtWS((float)(a))
 #define FPU_CVT_L_S(a) ((int64_t)(float)(a))
 #define FPU_C_F_S(a, b) (0)
 #define FPU_C_UN_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_EQ_S(a, b) ((float)(a) == (float)(b))
+#define FPU_C_EQ_S(a, b) (Ps2FpuDouble((float)(a)) == Ps2FpuDouble((float)(b)))
 #define FPU_C_UEQ_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_OLT_S(a, b) ((float)(a) < (float)(b))
+#define FPU_C_OLT_S(a, b) (Ps2FpuDouble((float)(a)) < Ps2FpuDouble((float)(b))) // EE C.LT (funct 0x34)
 #define FPU_C_ULT_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_OLE_S(a, b) ((float)(a) <= (float)(b))
+#define FPU_C_OLE_S(a, b) (Ps2FpuDouble((float)(a)) <= Ps2FpuDouble((float)(b))) // EE C.LE (funct 0x36)
 #define FPU_C_ULE_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))
 #define FPU_C_SF_S(a, b) (0)
 #define FPU_C_NGLE_S(a, b) (isnan((float)(a)) || isnan((float)(b)))
 #define FPU_C_SEQ_S(a, b) ((float)(a) == (float)(b))
 #define FPU_C_NGL_S(a, b) ((float)(a) == (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_LT_S(a, b) ((float)(a) < (float)(b))
+#define FPU_C_LT_S(a, b) (Ps2FpuDouble((float)(a)) < Ps2FpuDouble((float)(b)))
 #define FPU_C_NGE_S(a, b) ((float)(a) < (float)(b) || isnan((float)(a)) || isnan((float)(b)))
-#define FPU_C_LE_S(a, b) ((float)(a) <= (float)(b))
+#define FPU_C_LE_S(a, b) (Ps2FpuDouble((float)(a)) <= Ps2FpuDouble((float)(b)))
 #define FPU_C_NGT_S(a, b) ((float)(a) <= (float)(b) || isnan((float)(a)) || isnan((float)(b)))
 
 // QFSRV: Quadword Funnel Shift Right Variable
@@ -730,14 +1364,27 @@ inline __m128i ps2_qfsrv(__m128i rs, __m128i rt, uint32_t sa)
 #define PS2_PROT3W(rs) _mm_shuffle_epi32(rs, _MM_SHUFFLE(0, 3, 2, 1))
 
 // Additional VU0 operations
-#define PS2_VSQRT(x) sqrtf(x)
-#define PS2_VRSQRT(x) (1.0f / sqrtf(x))
 
 #define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : static_cast<uint32_t>(PS2_EXTRACT_EPI32_0(ctx_ptr->r[reg_idx])))
 #define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : PS2_EXTRACT_EPI32_0(ctx_ptr->r[reg_idx]))
 #define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(ctx_ptr->r[reg_idx])))
 #define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : PS2_EXTRACT_EPI64_0(ctx_ptr->r[reg_idx]))
 #define GPR_VEC(ctx_ptr, reg_idx) ((reg_idx == 0) ? _mm_setzero_si128() : ctx_ptr->r[reg_idx])
+
+// SB1 signed-branch predicates (BLTZ/BGEZ/BLEZ/BGTZ families). Release builds
+// evaluate the 64-bit predicate directly (zero tripwire cost); tripwire builds
+// route through PS2Runtime::sbrTripwire, which logs 32/64-bit disagreements.
+#if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
+#define PS2X_SBR_LT(ctx_ptr, rt_ptr, rs_idx, pc_val) ((rt_ptr)->sbrTripwire(0, (ctx_ptr), (rs_idx), (pc_val)))
+#define PS2X_SBR_GE(ctx_ptr, rt_ptr, rs_idx, pc_val) ((rt_ptr)->sbrTripwire(1, (ctx_ptr), (rs_idx), (pc_val)))
+#define PS2X_SBR_LE(ctx_ptr, rt_ptr, rs_idx, pc_val) ((rt_ptr)->sbrTripwire(2, (ctx_ptr), (rs_idx), (pc_val)))
+#define PS2X_SBR_GT(ctx_ptr, rt_ptr, rs_idx, pc_val) ((rt_ptr)->sbrTripwire(3, (ctx_ptr), (rs_idx), (pc_val)))
+#else
+#define PS2X_SBR_LT(ctx_ptr, rt_ptr, rs_idx, pc_val) (GPR_S64((ctx_ptr), (rs_idx)) < 0)
+#define PS2X_SBR_GE(ctx_ptr, rt_ptr, rs_idx, pc_val) (GPR_S64((ctx_ptr), (rs_idx)) >= 0)
+#define PS2X_SBR_LE(ctx_ptr, rt_ptr, rs_idx, pc_val) (GPR_S64((ctx_ptr), (rs_idx)) <= 0)
+#define PS2X_SBR_GT(ctx_ptr, rt_ptr, rs_idx, pc_val) (GPR_S64((ctx_ptr), (rs_idx)) > 0)
+#endif
 
 static inline void Ps2SetGprLow64(R5900Context *ctx, int reg, __m128i new_low)
 {

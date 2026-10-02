@@ -28,6 +28,7 @@
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/ps2_vu0.h"
 #include "runtime/ps2_vu1.h"
 #include "runtime/ps2_audio.h"
 #include "runtime/ps2_pad.h"
@@ -149,7 +150,14 @@ struct alignas(16) R5900Context
         std::memset(this, 0, sizeof(*this));
 
         // Initialize VU0 registers
+        // vf0 is hardwired to (0,0,0,1) on VU0. Every context needs it, not only
+        // the main one: guest threads start from R5900Context{} (EeScheduler::
+        // startThread) and COP2 macro code reads vf0w as 1.0 (RD1).
+        vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
         vu0_q = 1.0f; // Q register usually initialized to 1.0
+        // R holds 1.0 in every lane (main sets the same bits in ps2_runtime.cpp;
+        // guest threads start from R5900Context{}, so every context needs them).
+        vu0_r = _mm_castsi128_ps(_mm_set1_epi32(0x3F800000));
 
         // Reset COP0 registers
         cop0_random = 47; // Start at maximum value
@@ -269,6 +277,52 @@ inline void ps2TraceGuestRangeWrite(uint8_t *rdram,
     // TODO we dont need this anymore so on next release it will be deleted
 }
 
+// P1f watchpoint on guest RAM. PS2X_DIAG_WATCH is a comma list of hex
+// (0x...) or decimal addresses; each names an 8-byte window
+// [addr, addr+8). Every guest write that overlaps a window prints one
+// [diag:watch] line. Unset/empty = disabled; callers pay one bool check.
+// EE1: PS2X_ENABLE_DIAG_WATCH=0 (release default) compiles the per-store
+// Enabled/Report calls away (RV16 §4: 0.23 ms/frame self on GameThread),
+// so PS2X_DIAG_WATCH and the E3-R2/E7 store rows that ride on the report
+// path need a diag/det build. SetThread stays live: it feeds E7 thread
+// attribution from a cold context-switch site.
+class PS2Runtime;
+#ifndef PS2X_ENABLE_DIAG_WATCH
+#define PS2X_ENABLE_DIAG_WATCH 0
+#endif
+#if PS2X_ENABLE_DIAG_WATCH
+bool ps2DiagWatchEnabled();
+void ps2DiagWatchReportDirect(uint32_t writeAddr,
+                              uint32_t width,
+                              uint64_t valueLo,
+                              uint64_t valueHi,
+                              uint32_t pc,
+                              int threadId,
+                              uint32_t ra,
+                              uint32_t sp);
+void ps2DiagWatchReport(uint8_t *rdram,
+                        uint32_t writeAddr,
+                        uint32_t width,
+                        uint64_t valueLo,
+                        uint64_t valueHi,
+                        const R5900Context *ctx,
+                        const PS2Runtime *runtime);
+#else
+inline bool ps2DiagWatchEnabled() noexcept
+{
+    return false;
+}
+inline void ps2DiagWatchReportDirect(uint32_t, uint32_t, uint64_t, uint64_t, uint32_t, int, uint32_t,
+                                     uint32_t) noexcept
+{
+}
+inline void ps2DiagWatchReport(uint8_t *, uint32_t, uint32_t, uint64_t, uint64_t, const R5900Context *,
+                               const PS2Runtime *) noexcept
+{
+}
+#endif
+void ps2DiagWatchSetThread(int id);
+
 class PS2Runtime
 {
 public:
@@ -294,6 +348,12 @@ public:
     [[nodiscard]] ps2x::iop::ModuleLoadResult loadIopModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);
     [[nodiscard]] bool stopIopModule(int32_t moduleId, int32_t *result = nullptr);
     [[nodiscard]] ps2x::iop::DebugSnapshot iopDebugSnapshot() const;
+    // UPR1: HLE IOP mode keeps a game on the fork's SIF/RPC paths (SIF heap at
+    // 0x04000000, SIF DMA into EE RAM, tracked-only module loads, no IOP
+    // emulator). The SSX 3 game override turns it on; PS2X_IOP_MODE=hle|emulator
+    // overrides after the ELF loads.
+    void setHleIopMode(bool enabled) noexcept { m_hleIopMode = enabled; }
+    [[nodiscard]] bool hleIopMode() const noexcept { return m_hleIopMode; }
     uint32_t allocateIopMemory(uint32_t size, uint32_t alignment = 16u);
     bool freeIopMemory(uint32_t address);
     bool readIopMemory(uint32_t address, void *destination, size_t size) const;
@@ -354,6 +414,16 @@ public:
     void setMissingFunctionPolicy(MissingFunctionPolicy policy);
     MissingFunctionPolicy missingFunctionPolicy() const;
     void resetMissingFunctionReportOnce();
+    std::string formatDispatchHistory() const;
+    void noteUnknownSyscall(uint32_t id);
+    void noteUnhandledRpc(uint32_t sid, uint32_t function);
+    void printMissingFunctionCounts() const;
+#if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
+    // SB1 tripwire: kind 0=LT 1=GE 2=LE 3=GT. Evaluates the 32-bit and 64-bit
+    // predicates, notes disagreements, returns the PS2X_SBR_MODE selection.
+    bool sbrTripwire(int kind, R5900Context *ctx, uint32_t rs, uint32_t pc);
+    void noteSignedBranchMismatch(uint32_t pc, uint32_t rs, uint64_t value, uint64_t tick, uint64_t eeCycle);
+#endif
 
     static const IoPaths &getIoPaths();
     static void setIoPaths(const IoPaths &paths);
@@ -363,6 +433,8 @@ public:
 
     void executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
     void vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
+    // E53: CTC2 to CMSAR1 starts a VU1 micro subroutine (PCSX2 VU0.cpp CTC2 -> vu1ExecMicro).
+    void vu1StartMicroProgramFromEe(R5900Context *ctx, uint32_t cmsar1);
 
 public:
     void handleSyscall(uint8_t *rdram, R5900Context *ctx);
@@ -394,6 +466,8 @@ public:
     const EeScheduler &eeScheduler() const;
     void postEeEvent(EeEvent event);
     bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
+    uint32_t readEeCount(R5900Context *ctx) noexcept;
+    void writeEeCount(R5900Context *ctx, uint32_t value) noexcept;
     [[noreturn]] void eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc);
 
     struct EeExitHandlerRegistration
@@ -442,8 +516,8 @@ public:
     inline const GS &gs() const { return m_gs; }
     inline GifArbiter &gifArbiter() { return m_gifArbiter; }
     inline const GifArbiter &gifArbiter() const { return m_gifArbiter; }
-    inline VU1Interpreter &vu0() { return m_vu0; }
-    inline const VU1Interpreter &vu0() const { return m_vu0; }
+    inline VU0Interpreter &vu0() { return m_vu0; }
+    inline const VU0Interpreter &vu0() const { return m_vu0; }
     inline VU1Interpreter &vu1() { return m_vu1; }
     inline const VU1Interpreter &vu1() const { return m_vu1; }
 
@@ -486,6 +560,7 @@ private:
 
     friend class PS2IopTransport;
     friend class EeScheduler;
+    friend struct PS2RuntimeSavestate;
 
 private:
     PS2Memory m_memory;
@@ -493,12 +568,13 @@ private:
     GS m_gs;
     std::unique_ptr<PS2IopHostAdapter> m_iopHost;
     std::unique_ptr<ps2x::iop::IopSubsystem> m_iopSubsystem;
+    bool m_hleIopMode = false;
     PS2AudioBackend m_audioBackend;
     PSPadBackend m_padBackend;
     PS2RomDevice m_romDevice;
     PS2Vfs m_vfs;
-    VU1Interpreter m_vu0{VU1Interpreter::Unit::VU0};
-    VU1Interpreter m_vu1{VU1Interpreter::Unit::VU1};
+    VU0Interpreter m_vu0;
+    VU1Interpreter m_vu1;
     R5900Context m_cpuContext;
     std::unique_ptr<EeScheduler> m_eeScheduler;
     mutable std::mutex m_eeKernelStateMutex;
@@ -513,11 +589,24 @@ private:
     uint32_t m_guestHeapLimit = PS2_RAM_SIZE;
     uint32_t m_guestHeapSuggestedBase = 0x00100000u;
     bool m_guestHeapConfigured = false;
-    uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
-    uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
+    // P1f: async-callback (invocation) stacks live in the EE kernel-reserved
+    // low RAM below the ELF image and guest heap, never at the RAM top where
+    // guest thread stacks live. See reserveAsyncCallbackStack.
+    uint32_t m_asyncCallbackStackFloor = 0x00080000u;
+    uint32_t m_asyncCallbackStackTop = 0x00100000u;
 
     std::atomic<uint32_t> m_missingFunctionPolicy{static_cast<uint32_t>(MissingFunctionPolicy::ContinueToTarget)};
+    bool m_abortOnMissingFunction = false;
     std::atomic<bool> m_missingFunctionReported{false};
+    mutable std::mutex m_coverageMutex;
+    std::unordered_map<uint32_t, uint64_t> m_missingFunctionCounts;
+    std::unordered_map<uint32_t, uint64_t> m_unknownSyscallCounts;
+    std::unordered_map<uint64_t, uint64_t> m_unhandledRpcCounts;
+#if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
+    bool m_sbrUseS64 = false;
+    std::unordered_map<uint32_t, uint64_t> m_sbrMismatchCounts;
+    uint32_t m_sbrLoggedPcs = 0;
+#endif
     std::atomic<bool> m_stopRequested{false};
     DebugUiCallback m_debugUiInitCallback = nullptr;
     DebugUiCallback m_debugUiDrawCallback = nullptr;
