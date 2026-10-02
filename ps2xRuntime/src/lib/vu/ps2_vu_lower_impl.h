@@ -1,16 +1,21 @@
-#include "runtime/ps2_vu1.h"
-#include "runtime/gs/ps2_gif_arbiter.h"
-#include "runtime/gs/gs_frontend.h"
-#include "runtime/ps2_memory.h"
-#include "ps2_vu1_detail.h"
+#ifndef PS2_VU1_LOWER_IMPL_H
+#define PS2_VU1_LOWER_IMPL_H
 
+// VR1: the lower-instruction executor, moved verbatim from ps2_vu1_lower.cpp so the
+// generated VU1 programs can inline it with a constant instruction word (the
+// opcode switch folds away). The interpreter calls it through the out-of-line
+// execLower() wrapper in ps2_vu1_lower.cpp.
+
+#include "runtime/ps2_vu_core.h"
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include "ps2_vu_detail.h"
+#include "ps2_vu_fmac_impl.h"
 
-namespace
+namespace ps2_vu1_lower_detail
 {
-    float vuEatan(float value)
+    inline float vuEatan(float value)
     {
         constexpr float coefficients[] = {
             0.999999344348907f,
@@ -30,7 +35,7 @@ namespace
         return quarterPi + value * polynomial;
     }
 
-    float vuEsin(float value)
+    inline float vuEsin(float value)
     {
         constexpr float coefficients[] = {
             1.0f,
@@ -46,7 +51,7 @@ namespace
         return value * polynomial;
     }
 
-    float vuEexp(float value)
+    inline float vuEexp(float value)
     {
         constexpr float coefficients[] = {
             0.249998688697815f,
@@ -66,10 +71,13 @@ namespace
     }
 }
 
+using namespace ps2_vu1_lower_detail;
+
 // ============================================================================
 // Lower instructions
 // ============================================================================
-void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr)
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::execLowerImpl(uint32_t instr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint32_t upperInstr)
 {
     (void)upperInstr;
     if (instr == 0x00000000 || instr == 0x8000033C) // NOP
@@ -109,7 +117,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         {
             uint32_t words[4]{};
             std::memcpy(words, m_state.vf[is], sizeof(words));
-            queueStore(addr, words, dest);
+            issueStore(addr, words, dest);
         }
         return;
     }
@@ -151,7 +159,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         {
             const uint32_t val = static_cast<uint32_t>(static_cast<uint16_t>(m_state.vi[it] & 0xFFFF));
             const uint32_t words[4] = {val, val, val, val};
-            queueStore(addr, words, dest);
+            issueStore(addr, words, dest);
         }
         return;
     }
@@ -462,7 +470,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 {
                     uint32_t words[4]{};
                     std::memcpy(words, m_state.vf[vfS], sizeof(words));
-                    queueStore(addr, words, dest);
+                    issueStore(addr, words, dest);
                 }
                 if (viT != 0)
                     m_state.vi[viT] = (int16_t)(m_state.vi[viT] + 1);
@@ -492,7 +500,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 {
                     uint32_t words[4]{};
                     std::memcpy(words, m_state.vf[vfS], sizeof(words));
-                    queueStore(addr, words, dest);
+                    issueStore(addr, words, dest);
                 }
                 return;
             }
@@ -606,7 +614,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                     const uint32_t val =
                         static_cast<uint32_t>(static_cast<uint16_t>(m_state.vi[viT] & 0xFFFF));
                     const uint32_t words[4] = {val, val, val, val};
-                    queueStore(addr, words, dest);
+                    issueStore(addr, words, dest);
                 }
                 return;
             }
@@ -664,8 +672,9 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                     m_state.vi[viT] = (int32_t)(m_state.itop & 0x3FFu);
                 return;
             }
-            case 0x6C: // XGKICK - send GIF packet from VU1 data memory
-                startXgkick(static_cast<uint32_t>(static_cast<uint16_t>(m_state.vi[viS])));
+            case 0x6C: // XGKICK - send GIF packet from VU1 data memory (VU0: reserved, never issues)
+                if constexpr (isVu1())
+                    derived().startXgkick(static_cast<uint32_t>(static_cast<uint16_t>(m_state.vi[viS])));
                 return;
             case 0x70: // ESADD
             {
@@ -723,7 +732,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 queueP(sum, 12u);
                 return;
             }
-            case 0x77: // ERSQRT
+            case 0x79: // ERSQRT (PCSX2 LowerOP_T3_01[0x1E]; 0x77 is undefined)
             {
                 const uint32_t component = (instr >> 21) & 3u;
                 const float value = normalizeOperand(m_state.vf[vfS][component]);
@@ -737,36 +746,36 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
                 queueP(result, 18u);
                 return;
             }
-            case 0x78: // ESQRT
+            case 0x78: // ESQRT (PCSX2 LowerOP_T3_00[0x1E])
             {
                 const uint32_t component = (instr >> 21) & 3u;
                 const float value = normalizeOperand(m_state.vf[vfS][component]);
                 queueP(value >= 0.0f ? std::sqrt(value) : value, 12u);
                 return;
             }
-            case 0x79: // ESIN
+            case 0x7C: // ESIN (PCSX2 LowerOP_T3_00[0x1F])
             {
                 const uint32_t component = (instr >> 21) & 3u;
                 const float value = normalizeOperand(m_state.vf[vfS][component]);
                 queueP(vuEsin(value), 29u);
                 return;
             }
-            case 0x7A: // ERCPR
+            case 0x7A: // ERCPR (PCSX2 LowerOP_T3_10[0x1E])
             {
                 const uint32_t component = (instr >> 21) & 3u;
                 const float value = normalizeOperand(m_state.vf[vfS][component]);
                 queueP(value != 0.0f ? 1.0f / value : value, 12u);
                 return;
             }
-            case 0x7B: // WAITP
+            case 0x7B: // WAITP (PCSX2 LowerOP_T3_11[0x1E])
                 return;
-            case 0x7C: // EATAN
+            case 0x7D: // EATAN (PCSX2 LowerOP_T3_01[0x1F])
             {
                 const uint32_t component = (instr >> 21) & 3u;
                 queueP(vuEatan(normalizeOperand(m_state.vf[vfS][component])), 54u);
                 return;
             }
-            case 0x7D: // EEXP
+            case 0x7E: // EEXP (PCSX2 LowerOP_T3_10[0x1F])
             {
                 const uint32_t component = (instr >> 21) & 3u;
                 queueP(vuEexp(normalizeOperand(m_state.vf[vfS][component])), 44u);
@@ -787,3 +796,4 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz
         break;
     }
 }
+#endif
