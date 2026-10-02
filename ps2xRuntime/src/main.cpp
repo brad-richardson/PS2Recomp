@@ -236,6 +236,11 @@ int main(int argc, char *argv[])
 #if defined(PS2X_IOS)
     ps2x::ios::prepareEnvironment(argc > 0 ? argv[0] : nullptr);
 #endif
+#if defined(__APPLE__) && !defined(PS2X_IOS) && !defined(__ANDROID__)
+    // CFG1 Part 2: compiled Mac play defaults (D1/D4/D5) for keys the launch
+    // env did not set. PS2X_PROFILE=reference disables them all.
+    ps2x::cf2ApplyMacDefaults();
+#endif
     setupTerminateLogger();
 
     // CF2 S0: always-on resolved-knob line. After the env loaders (Android

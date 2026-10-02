@@ -42,6 +42,12 @@ struct EnvSet
         const ps2x::Cf2AndroidDefault *defs = ps2x::cf2AndroidDefaults(&n);
         for (size_t i = 0; i < n; ++i)
             track(defs[i].key);
+        defs = ps2x::cf2IosDefaults(&n);
+        for (size_t i = 0; i < n; ++i)
+            track(defs[i].key);
+        defs = ps2x::cf2MacDefaults(&n);
+        for (size_t i = 0; i < n; ++i)
+            track(defs[i].key);
     }
 };
 
@@ -49,6 +55,12 @@ void clearDefaults()
 {
     size_t n = 0;
     const ps2x::Cf2AndroidDefault *defs = ps2x::cf2AndroidDefaults(&n);
+    for (size_t i = 0; i < n; ++i)
+        ::unsetenv(defs[i].key);
+    defs = ps2x::cf2IosDefaults(&n);
+    for (size_t i = 0; i < n; ++i)
+        ::unsetenv(defs[i].key);
+    defs = ps2x::cf2MacDefaults(&n);
     for (size_t i = 0; i < n; ++i)
         ::unsetenv(defs[i].key);
     ::unsetenv("PS2X_PROFILE");
@@ -59,11 +71,11 @@ void register_ps2_knobs_tests()
 {
     MiniTest::Case("Ps2Knobs", [](TestCase &tc)
                    {
-        tc.Run("android defaults table is exactly the 30 S1+S3+CF4+CU3 play keys (VX2: minus VU1_BLOCKS/FLAG_ELIDE)", [](TestCase &t)
+        tc.Run("android defaults table is exactly the 32 S1+S3+CF4+CU3+CFG1 play keys (VX2: minus VU1_BLOCKS/FLAG_ELIDE; CFG1: minus VERTEX_KICK)", [](TestCase &t)
                {
             size_t n = 0;
             const ps2x::Cf2AndroidDefault *defs = ps2x::cf2AndroidDefaults(&n);
-            t.Equals(n, static_cast<size_t>(30), "30 defaults");
+            t.Equals(n, static_cast<size_t>(32), "32 defaults");
             const char *want[] = {
                 "PS2X_GS_BACKEND", "PS2X_GS_EXTERNAL_LIBRARY", "GE1_GS_RESOURCES_DIR",
                 "GE1_GS_DATA_DIR", "GE1_GS_AHB_EXPORT", "GE1_ADRENO_BLEND_MIX",
@@ -73,8 +85,10 @@ void register_ps2_knobs_tests()
                 "PS2X_GS_FINISH_TIMING", "PS2X_SSX3_SIM_MODE", "PS2X_VIF1_REVERSE_DMA",
                 "PS2X_SKIP_MOVIE", "PS2X_SOUND", "PS2X_PERF_LOG", "PS2X_PERF_LOG_DIR",
                 "PS2X_GAME_THREAD_CPUS", "PS2X_MTVU_CPUS", "GE1_VK_TURNIP",
-                "GE1_DRAW_BUFFERING", "GE1_VERTEX_KICK", "GE1_UPSCALE", "PS2X_GE1_EXPORT_SIZE",
+                "GE1_DRAW_BUFFERING", "GE1_UPSCALE", "PS2X_GE1_EXPORT_SIZE",
                 "PS2X_MTVU_GIF_STAGE", "PS2X_MTVU_VIF_STAGE",
+                // CFG1 Part 2 (D1/D4).
+                "PS2X_MICROVU_FLAG_HACK", "PS2X_MTVU_FINISH_EE", "PS2X_MTVU_VIF1_STAT_FREE",
             };
             for (const char *key : want)
             {
@@ -111,6 +125,10 @@ void register_ps2_knobs_tests()
             t.Equals(std::string(::getenv("GE1_UPSCALE")), std::string("2"), "CU3: 2x defaulted");
             t.Equals(std::string(::getenv("PS2X_GE1_EXPORT_SIZE")), std::string("display"), "CU3: display export");
             t.Equals(std::string(::getenv("PS2X_MTVU_VIF_STAGE")), std::string("1"), "CU3: VIF stage defaulted");
+            t.Equals(std::string(::getenv("PS2X_MICROVU_FLAG_HACK")), std::string("1"), "CFG1 D1: flag hack defaulted");
+            t.Equals(std::string(::getenv("PS2X_MTVU_FINISH_EE")), std::string("1"), "CFG1 D4: probe-drain EE defaulted");
+            t.Equals(std::string(::getenv("PS2X_MTVU_VIF1_STAT_FREE")), std::string("1"), "CFG1 D4: probe-drain STAT defaulted");
+            t.IsTrue(::getenv("GE1_VERTEX_KICK") == nullptr, "CFG1: dead VERTEX_KICK no longer defaulted");
         });
 
         tc.Run("reference profile disables every default", [](TestCase &t)
@@ -128,6 +146,62 @@ void register_ps2_knobs_tests()
             ::setenv("PS2X_PROFILE", "play", 1);
             t.IsFalse(ps2x::cf2ProfileIsReference(), "unknown profile ignored");
             t.IsTrue(ps2x::cf2ApplyAndroidDefaults("/fake/files/SLUS_207.72") > 0, "defaults apply again");
+        });
+
+        tc.Run("CFG1 per-platform tables hold the folded play keys", [](TestCase &t)
+               {
+            size_t ni = 0, nm = 0;
+            const ps2x::Cf2AndroidDefault *ios = ps2x::cf2IosDefaults(&ni);
+            const ps2x::Cf2AndroidDefault *mac = ps2x::cf2MacDefaults(&nm);
+            t.Equals(ni, static_cast<size_t>(5), "5 iOS defaults");
+            t.Equals(nm, static_cast<size_t>(4), "4 Mac defaults");
+            const char *wantIos[] = {
+                "PS2X_MICROVU_FLAG_HACK", "PS2X_MTVU_FINISH_EE", "PS2X_MTVU_VIF1_STAT_FREE",
+                "PS2X_AUDIO_RESAMPLE", "PS2X_VIF1_REVERSE_DMA",
+            };
+            const char *wantMac[] = {
+                "PS2X_MICROVU_FLAG_HACK", "PS2X_MTVU_FINISH_EE", "PS2X_MTVU_VIF1_STAT_FREE",
+                "PS2X_SKIP_MOVIE",
+            };
+            for (const char *key : wantIos)
+            {
+                bool found = false;
+                for (size_t i = 0; i < ni; ++i)
+                    found = found || std::strcmp(ios[i].key, key) == 0;
+                t.IsTrue(found, std::string("iOS table holds ") + key);
+            }
+            for (const char *key : wantMac)
+            {
+                bool found = false;
+                for (size_t i = 0; i < nm; ++i)
+                    found = found || std::strcmp(mac[i].key, key) == 0;
+                t.IsTrue(found, std::string("Mac table holds ") + key);
+            }
+            for (size_t i = 0; i < ni; ++i)
+                t.IsTrue(!ios[i].bootdir_relative && !ios[i].only_if_exists && !ios[i].needs_big_cpu,
+                         "iOS literals only");
+            for (size_t i = 0; i < nm; ++i)
+                t.IsTrue(!mac[i].bootdir_relative && !mac[i].only_if_exists && !mac[i].needs_big_cpu,
+                         "Mac literals only");
+        });
+
+        tc.Run("CFG1 platform appliers set absent keys, keep explicit env, honor reference", [](TestCase &t)
+               {
+            EnvSet g;
+            g.trackDefaults();
+            g.track("PS2X_PROFILE");
+            clearDefaults();
+            ::setenv("PS2X_AUDIO_RESAMPLE", "off", 1); // explicit wins over sinc
+            t.Equals(ps2x::cf2ApplyIosDefaults(), static_cast<size_t>(4), "4 iOS keys applied");
+            t.Equals(std::string(::getenv("PS2X_AUDIO_RESAMPLE")), std::string("off"), "explicit resample kept");
+            t.Equals(std::string(::getenv("PS2X_MICROVU_FLAG_HACK")), std::string("1"), "iOS flag hack defaulted");
+            t.Equals(std::string(::getenv("PS2X_VIF1_REVERSE_DMA")), std::string("0"), "iOS readback explicit 0");
+            t.Equals(ps2x::cf2ApplyMacDefaults(), static_cast<size_t>(1), "1 Mac key applied (only SKIP_MOVIE still absent)");
+            t.Equals(std::string(::getenv("PS2X_SKIP_MOVIE")), std::string("1"), "Mac movie skip defaulted");
+            clearDefaults();
+            ::setenv("PS2X_PROFILE", "reference", 1);
+            t.Equals(ps2x::cf2ApplyIosDefaults(), static_cast<size_t>(0), "iOS nothing under reference");
+            t.Equals(ps2x::cf2ApplyMacDefaults(), static_cast<size_t>(0), "Mac nothing under reference");
         });
 
         tc.Run("bootdir-relative paths derive from the boot ELF dir", [](TestCase &t)
@@ -248,7 +322,8 @@ void register_ps2_knobs_tests()
             ::setenv("PS2X_UNPACED", "1", 1);
             ::setenv("PS2X_DETERMINISTIC", "1", 1);
             ::setenv("PS2X_DET_HASH_EVERY", "5", 1);
-            // PB5/6 play-env lines past P3 (explicit: not compiled defaults).
+            // PB5/6 play-env lines past P3 (explicit: not compiled defaults;
+            // CFG1: VERTEX_KICK is compiled nowhere, kept here as a stale-env line).
             ::setenv("GE1_VERTEX_KICK", "2", 1);
             ::setenv("PS2X_PAD_RECORD_DIR",
                      "/storage/emulated/0/Android/data/com.ps2x.runner/files/padrec", 1);

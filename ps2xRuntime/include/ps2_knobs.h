@@ -26,15 +26,21 @@
 // so an empty env is the play state.
 // CU3 adds the Odin default set (Brad 09-30, "2 sounds good"): our Turnip,
 // the VU1 GIF/VIF stages, draw buffering and 2x internal resolution (export
-// sized to the display), plus the fused vertex kick the play env has carried
-// since PB5. The full-120 layer (FULL120, FIX, FASTHOOKS, DISPLAY_HZ, ...)
-// stays in full120.env. GE1_VK_TURNIP=1 needs the Turnip HAL in the APK's
-// jniLibs (play-current carries it); set GE1_VK_TURNIP=0 without it.
+// sized to the display). The full-120 layer (FULL120, FIX, FASTHOOKS,
+// DISPLAY_HZ, ...) stays in full120.env. GE1_VK_TURNIP=1 needs the Turnip HAL
+// in the APK's jniLibs (play-current carries it); set GE1_VK_TURNIP=0
+// without it.
+// CFG1 Part 2 folds the remaining signed-off play settings into kDefaults
+// (D1 microVU flag hack, D4 the MQ2+MQ3 probe-drain pair, all det IDENTICAL)
+// and deletes the dead GE1_VERTEX_KICK row (knob gone on the ARMSX2 base;
+// the Odin env line is inert). New per-platform literal tables below do the
+// same for iOS (D1/D4, AU13 sinc, CF4-explicit readback off) and Mac
+// (D1/D4, D5 movie skip); PS2X_PROFILE=reference disables every table.
 //
 // Platform-neutral on purpose so the host unit test compiles this header
-// (same shape as ps2_android_env.h / ps2_env_file.h). Only the Android
-// loader calls cf2ApplyAndroidDefaults; every platform calls cf2DumpKnobs
-// from main().
+// (same shape as ps2_android_env.h / ps2_env_file.h). The Android loader,
+// the iOS prepareEnvironment and Mac main() call their appliers after the
+// env layers; every platform calls cf2DumpKnobs from main().
 
 #include <algorithm>
 #include <cstdio>
@@ -81,7 +87,8 @@ struct Cf2AndroidDefault
 // CF1 §Q2 Android column minus GE1_ADRENO_DSTREAD (already AUTO in the
 // adapter). Every value is the signed-off play value (S1 = the P3 set,
 // S3 = lagV, CF4 = readback off: the VIF1_REVERSE_DMA default is "0";
-// CU3 = the Odin default set).
+// CU3 = the Odin default set; CFG1 Part 2 = D1 flag hack + D4 probe-drain
+// pair, minus the dead GE1_VERTEX_KICK row).
 // The value must be the literal "0" (unset is also off in the code default,
 // but the applier always sets the key, so only "0" keeps it off).
 inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
@@ -112,11 +119,17 @@ inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
         {"PS2X_MTVU_CPUS", "7", false, false, true},
         {"GE1_VK_TURNIP", "1", false, false, false},
         {"GE1_DRAW_BUFFERING", "1", false, false, false},
-        {"GE1_VERTEX_KICK", "2", false, false, false},
         {"GE1_UPSCALE", "2", false, false, false},
         {"PS2X_GE1_EXPORT_SIZE", "display", false, false, false},
         {"PS2X_MTVU_GIF_STAGE", "1", false, false, false},
         {"PS2X_MTVU_VIF_STAGE", "1", false, false, false},
+        // CFG1 Part 2 (D1/D4): the microVU flag hack (Brad 09-30 default) and
+        // the MQ2+MQ3 probe-drain pair (Brad 10-02, always together). Both
+        // det IDENTICAL (no new key); presence-gated readers keep the exact
+        // path under PS2X_PROFILE=reference.
+        {"PS2X_MICROVU_FLAG_HACK", "1", false, false, false},
+        {"PS2X_MTVU_FINISH_EE", "1", false, false, false},
+        {"PS2X_MTVU_VIF1_STAT_FREE", "1", false, false, false},
     };
     if (countOut)
         *countOut = sizeof(kDefaults) / sizeof(kDefaults[0]);
@@ -195,6 +208,83 @@ inline size_t cf2ApplyAndroidDefaults(const char *bootElf)
         ++count;
     }
     return count;
+}
+
+// CFG1 Part 2: per-platform compiled play defaults for iOS and Mac. Same
+// Cf2AndroidDefault shape with literal values only (no bootdir-relative,
+// file-gated or topology-gated entries on these platforms). The iOS loader
+// (prepareEnvironment) and Mac main() call their applier after the env
+// layers; explicit env (bundle, Documents, launcher, boot script) wins and
+// PS2X_PROFILE=reference disables the table, exactly like Android.
+
+// iOS bundled-play equivalent (D1 flag hack, D4 probe-drain pair, AU13 sinc
+// resample, CF4-explicit readback off). Device-specific values (upscale,
+// SSAA, scanout, zero-copy, paths) and the 120-layer user toggle stay in the
+// bundled env + Settings layers; D2 (iOS-60 SIM_MODE) and D8 (AF16) wait on
+// Brad and stay unset.
+inline const Cf2AndroidDefault *cf2IosDefaults(size_t *countOut)
+{
+    static const Cf2AndroidDefault kIosDefaults[] = {
+        {"PS2X_MICROVU_FLAG_HACK", "1", false, false, false},
+        {"PS2X_MTVU_FINISH_EE", "1", false, false, false},
+        {"PS2X_MTVU_VIF1_STAT_FREE", "1", false, false, false},
+        {"PS2X_AUDIO_RESAMPLE", "sinc", false, false, false},
+        {"PS2X_VIF1_REVERSE_DMA", "0", false, false, false},
+    };
+    if (countOut)
+        *countOut = sizeof(kIosDefaults) / sizeof(kIosDefaults[0]);
+    return kIosDefaults;
+}
+
+// Mac play-profile equivalent (D1 flag hack, D4 probe-drain pair, D5 movie
+// skip). SOUND stays harness-set (D6); the rest of PLAY_ENV (engines,
+// stages, sim mode, readback, timing) stays explicit in ssx3_boot.py.
+inline const Cf2AndroidDefault *cf2MacDefaults(size_t *countOut)
+{
+    static const Cf2AndroidDefault kMacDefaults[] = {
+        {"PS2X_MICROVU_FLAG_HACK", "1", false, false, false},
+        {"PS2X_MTVU_FINISH_EE", "1", false, false, false},
+        {"PS2X_MTVU_VIF1_STAT_FREE", "1", false, false, false},
+        {"PS2X_SKIP_MOVIE", "1", false, false, false},
+    };
+    if (countOut)
+        *countOut = sizeof(kMacDefaults) / sizeof(kMacDefaults[0]);
+    return kMacDefaults;
+}
+
+// Set every absent key from a literal per-platform table. Returns the number
+// of keys set. Under PS2X_PROFILE=reference sets nothing.
+inline size_t cf2ApplyLiteralDefaults(const Cf2AndroidDefault *defs, size_t n)
+{
+    if (cf2ProfileIsReference())
+        return 0;
+    size_t count = 0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        if (std::getenv(defs[i].key) != nullptr)
+            continue; // explicit env (even empty) wins
+#if defined(_WIN32)
+        _putenv_s(defs[i].key, defs[i].value);
+#else
+        ::setenv(defs[i].key, defs[i].value, 0);
+#endif
+        ++count;
+    }
+    return count;
+}
+
+inline size_t cf2ApplyIosDefaults()
+{
+    size_t n = 0;
+    const Cf2AndroidDefault *defs = cf2IosDefaults(&n);
+    return cf2ApplyLiteralDefaults(defs, n);
+}
+
+inline size_t cf2ApplyMacDefaults()
+{
+    size_t n = 0;
+    const Cf2AndroidDefault *defs = cf2MacDefaults(&n);
+    return cf2ApplyLiteralDefaults(defs, n);
 }
 
 // Curated S0 list: every CF1 §1.1 behavioural knob + PS2X_PROFILE. Sorted;

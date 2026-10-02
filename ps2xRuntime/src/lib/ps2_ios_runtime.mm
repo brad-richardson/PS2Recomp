@@ -2,6 +2,7 @@
 // for iOS (PS2X_IS_IOS in ps2xRuntime/CMakeLists.txt).
 #include "ps2_ios_runtime.h"
 #include "ps2_env_file.h"
+#include "ps2_knobs.h"
 #include "ps2_record_env.h"
 #include "ps2_vsync_lock.h"
 #include "ps2_vsync_pacer.h"
@@ -156,6 +157,13 @@ void prepareEnvironment(const char *argv0)
     for (const auto &key : launcherKeys)
     {
         std::fprintf(stderr, "[ios-env] launcher kept %s\n", key.c_str());
+    }
+    // CFG1 Part 2: compiled iOS play defaults (D1/D4, AU13 sinc, CF4-explicit
+    // readback off) for keys neither the env layers nor the launcher set.
+    // PS2X_PROFILE=reference disables them (exact knob-off path).
+    {
+        const size_t applied = ps2x::cf2ApplyIosDefaults();
+        std::fprintf(stderr, "[ios-env] compiled defaults applied: %u\n", static_cast<unsigned>(applied));
     }
 
     if (launcherKeys.count("PS2X_PAD_SCRIPT") == 0 && !autoRouteEnabled())
