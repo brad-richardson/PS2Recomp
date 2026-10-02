@@ -304,7 +304,7 @@ void register_ps2_perf_log_tests()
             t.Equals(ps2x::perflog::primeZoneRank("cpu-1-1-1 "), -1, "untrimmed (caller trims)"); });
 
         // PT2: per-stage tail rings, nearest-rank stats, hist buckets, lines.
-        tc.Run("stageName covers all nine stages", [](TestCase &t)
+        tc.Run("stageName covers all fourteen stages", [](TestCase &t)
                {
             t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::EeBusy)) == "ee.busy", "ee.busy");
             t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::EeCpu)) == "ee.cpu", "ee.cpu");
@@ -315,7 +315,12 @@ void register_ps2_perf_log_tests()
             t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::GsBackBusy)) == "gsback.busy", "gsback.busy");
             t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::MtvuGifBusy)) == "mtvugif.busy", "mtvugif.busy");
             t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::MtvuVifBusy)) == "mtvuvif.busy", "mtvuvif.busy");
-            t.Equals(ps2x::perflog::kStageCount, static_cast<size_t>(9), "nine stages"); });
+            t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::EePace)) == "ee.pace", "ee.pace");
+            t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::EeEvent)) == "ee.event", "ee.event");
+            t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::EeEnq)) == "ee.enq", "ee.enq");
+            t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::EeMtvu)) == "ee.mtvu", "ee.mtvu");
+            t.IsTrue(std::string(ps2x::perflog::stageName(ps2x::perflog::Stage::EeMtvuVb)) == "ee.mtvuvb", "ee.mtvuvb");
+            t.Equals(ps2x::perflog::kStageCount, static_cast<size_t>(14), "fourteen stages"); });
 
         tc.Run("StageRing packs tick+usec and wraps to the newest lap", [](TestCase &t)
                {
