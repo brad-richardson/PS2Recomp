@@ -58,6 +58,7 @@ case "$PLAT" in
     ln -s "$ARMSX2" "$ASM/vendor-pcsx2"
     ln -s "$HERE/ge1" "$ASM/adapter"
     ln -s "$HERE/om1/rt" "$ASM/om1rt-adapter"
+    ln -s "$HERE/om1/record" "$ASM/om1-adapter"
     ln -s "$ARMSX2/pcsx2" "$ASM/pcsx2"
     ln -s "$ARMSX2/tests" "$ASM/tests"
     ln -s "$ARMSX2/3rdparty" "$ASM/3rdparty"
