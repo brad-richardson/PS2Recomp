@@ -12,6 +12,13 @@
 #include <mutex>
 
 #include "gs/ps2_gif_arbiter.h"
+
+namespace ps2_mtvu
+{
+    struct GifOp; // ps2_mtvu.h (VPL1 GIF stage)
+    struct VifRec; // ps2_mtvu.h (VPL2 VIF stage)
+}
+#include "../ps2_vif_src_span.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
 #elif defined(USE_SSE2NEON)
@@ -209,7 +216,9 @@ struct GSRegisters
     std::atomic<uint64_t> vsyncTick;
     uint64_t imr;      // Interrupt mask
     uint64_t busdir;   // Bus direction
-    uint64_t siglblid; // Signal label ID
+    // GB2 Part 7: atomic — worker SIGNAL/LABEL masked-RMW races
+    // game-thread guest stores/loads (same reason as csr above).
+    std::atomic<uint64_t> siglblid; // Signal label ID
 };
 static_assert(sizeof(GSRegisters) == (20u * sizeof(uint64_t)), "GSRegisters layout changed unexpectedly");
 static_assert(alignof(GSRegisters) == alignof(uint64_t), "GSRegisters alignment must remain 64-bit");
@@ -292,8 +301,8 @@ public:
 
     void write8(uint32_t address, uint8_t value);
     void write16(uint32_t address, uint16_t value);
-    void write32(uint32_t address, uint32_t value);
-    void write64(uint32_t address, uint64_t value);
+    void write32(uint32_t address, uint32_t value, uint32_t guestPc = 0u);
+    void write64(uint32_t address, uint64_t value, uint32_t guestPc = 0u);
     void write128(uint32_t address, __m128i value);
 
     // TLB handling
@@ -309,13 +318,47 @@ public:
 
     // EE timers advance from the scheduler's emulated EE-cycle clock. The
     // returned mask uses bits 0..3 for newly raised TIM0..TIM3 interrupts.
+    // EE1: advanceEeTimers defers the timer state machine while no
+    // flag/interrupt event can fire (m_eeTimerPending < m_eeTimerEventIn);
+    // every observer (IO register reads/writes, the idle deadline query,
+    // savestates) flushes first, so guest observations are identical.
     uint32_t advanceEeTimers(uint64_t eeCycles) noexcept;
-    [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() const noexcept;
+    // EX1: inline fast-path split of advanceEeTimers for the scheduler
+    // checkpoint. eeTimersFastWouldFire is pure (no state change);
+    // eeTimersFastApply performs exactly advanceEeTimers' deferred update
+    // and runs only when WouldFire returned false. Conditions mirror
+    // advanceEeTimers bit-for-bit; the slow path calls advanceEeTimers
+    // with untouched state, so service is identical.
+    [[nodiscard]] bool eeTimersFastWouldFire(uint64_t eeCycles) const noexcept
+    {
+        if (eeCycles == 0u)
+        {
+            return false;
+        }
+        const uint64_t toEvent = m_eeTimerEventIn - m_eeTimerPending;
+        return eeCycles >= kEeTimerDeferralHorizon || eeCycles >= toEvent ||
+               toEvent - eeCycles <= kEeTimerDeferralHorizon;
+    }
+    void eeTimersFastApply(uint64_t eeCycles) noexcept
+    {
+        m_eeTimerPending += eeCycles;
+    }
+    void flushEeTimers() noexcept;
+    [[nodiscard]] uint64_t cyclesUntilNextEeTimerInterrupt() noexcept;
     void resetEeTimers() noexcept;
 
     using GifPacketCallback = std::function<void(const uint8_t *, uint32_t)>;
     void setGifPacketCallback(GifPacketCallback cb) { m_gifPacketCallback = std::move(cb); }
     void setGifArbiter(GifArbiter *arbiter) { m_gifArbiter = arbiter; }
+    // GB3: the GS frontend that owns the priv-register timeline. Every
+    // store to gs_regs goes through gsPrivStore: with the GS queue on it
+    // runs on the GS worker in stream order (GS::privWrite), otherwise now.
+    // Readers on the game thread use gsPrivSync() (a queue fence) first.
+    void setGsFrontend(GS *gs) { m_gsFrontend = gs; }
+    void gsPrivStore(std::function<void()> apply, uint32_t captureAddress = UINT32_MAX);
+    void gsPrivSync();
+    // GE3 Part 3: EE-owned FINISH mode (PS2X_GS_FINISH_TIMING=pcsx2).
+    bool finishTimingPcsx2() const { return m_finishTimingPcsx2; }
 
     using Vu1MscalCallback = std::function<void(uint32_t startPC, uint32_t top, uint32_t itop)>;
     void setVu1MscalCallback(Vu1MscalCallback cb) { m_vu1MscalCallback = std::move(cb); }
@@ -326,6 +369,13 @@ public:
     const uint8_t *getVU1Code() const { return m_vu1Code; }
     uint8_t *getVU1Data() { return m_vu1Data; }
     const uint8_t *getVU1Data() const { return m_vu1Data; }
+    // MP1 L1: keep VU1 data in an external 16 KiB buffer (the microVU
+    // library's own memory, so its runs need no staging copies): the current
+    // bytes move there and getVU1Data() returns it. Null moves the bytes back
+    // into the owned buffer (before the library unloads). Call only while
+    // the unit is idle (runtime init, state load).
+    void adoptExternalVU1Data(uint8_t *external);
+    bool vu1DataExternal() const { return m_vu1Data != nullptr && m_vu1Data != m_vu1DataOwned; }
     uint8_t *getVU0Code() { return m_vu0Code; }
     const uint8_t *getVU0Code() const { return m_vu0Code; }
     uint8_t *getVU0Data() { return m_vu0Data; }
@@ -333,8 +383,18 @@ public:
 
     bool isPath3Masked() const { return m_path3Masked; }
     void flushMaskedPath3Packets(bool drainImmediately = true);
+    // RR1: MSKPATH3 releases PATH3 one GIF packet (EOP) per unmask; the rest
+    // drains once VIF1 delivery ends with PATH3 still unmasked.
+    void releaseOneMaskedPath3Packet();
+    void drainPath3IfUnmasked();
+    void processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes);
+    static std::vector<uint32_t> splitGifPacketsAtEop(const uint8_t *data, uint32_t sizeBytes);
 
     void submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool drainImmediately = true, bool path2DirectHl = false);
+    // VPL1 GIF stage: run one Submit/Drain op on the MTVU-GIF thread.
+    void execGifStageOp(ps2_mtvu::GifOp &op);
+    // VPL2 VIF stage: run one record on the MTVU thread (opaque = PS2Memory*).
+    static void execVifStageRec(void *opaque, const ps2_mtvu::VifRec &rec);
     void processGIFPacket(uint32_t srcPhysAddr, uint32_t qwCount);
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     bool tryProcessNativeGifImageUploadChain(GS &gs, uint32_t tadr, uint32_t chcr);
@@ -399,13 +459,33 @@ public:
 
     GifPacketCallback m_gifPacketCallback;
     GifArbiter *m_gifArbiter = nullptr;
+    // VPL1: every unit-side arbiter action goes through these. On the MTVU
+    // thread with PS2X_MTVU_GIF_STAGE=1 they become GIF-stage ops (bytes
+    // copied here); otherwise they run the arbiter call inline, as before.
+    void arbSubmit(GifPathId pathId, const uint8_t *data, uint32_t sizeBytes, bool path2DirectHl);
+    void arbDrain();
+    // VPL1: a unit job's GS-frontend call (G1-G3); `marker` feeds the digest.
+    void unitGsCall(uint8_t marker, uint64_t value, std::function<void()> fn);
+    // VPL2: the VIF1 command loop on the MTVU-VIF thread. Same parse and
+    // VIF-register effects as processVIF1DataImpl; every VU-side effect
+    // (VU1 data/code writes, MSCAL/MSCNT, GIF submits, MSKPATH3) becomes a
+    // record the MTVU thread applies in order (REPORT.md §1.3).
+    void processVIF1DataStaged(const uint8_t *data, uint32_t sizeBytes);
+    // VPL2: a submitGifPacket call from the VIF thread, as a record.
+    void vifStageGif(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately, bool path2DirectHl);
+    void vifStageMsk3(uint16_t imm);
+#if PS2X_ENABLE_DET_HASH_TAP || PS2X_ENABLE_DIAG_TAPS
+    void vpl2CaptureNote(const uint8_t *data, uint32_t sizeBytes); // VPL2 dev capture
+#endif
+    GS *m_gsFrontend = nullptr;
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
 
     uint8_t *m_vu0Code = nullptr;
     uint8_t *m_vu0Data = nullptr;
     uint8_t *m_vu1Code = nullptr;
-    uint8_t *m_vu1Data = nullptr;
+    uint8_t *m_vu1Data = nullptr;      // == m_vu1DataOwned unless adopted (MP1 L1)
+    uint8_t *m_vu1DataOwned = nullptr;
     bool m_path3Masked = false;
     uint32_t m_vif1PendingPath2ImageQwc = 0u;
     bool m_vif1PendingPath2DirectHl = false;
@@ -417,10 +497,17 @@ public:
         uint32_t srcAddr = 0;
         uint32_t qwc = 0;
         std::vector<uint8_t> chainData;
+        // E40 Part-3: EE source spans for chainData bytes (VIF1 chain
+        // mode only; empty unless the SRC trace was enabled at walk time).
+        std::vector<Ps2VifSrcSpan> srcSpans;
     };
     std::vector<PendingTransfer> m_pendingGifTransfers;
     std::vector<PendingTransfer> m_pendingVif0Transfers;
     std::vector<PendingTransfer> m_pendingVif1Transfers;
+    // TT1/GT1(c): high-water reserve hint for the DMA-chain staging buffer
+    // in writeIORegister (kicks run EE-side only). Kills the O(n^2) growth
+    // memcpy (~0.30 ms/f, GT1 §6); reserve-only, contents-identical.
+    size_t m_chainBufHint = 1u << 18;
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
 
@@ -449,9 +536,37 @@ public:
     };
 
     std::array<EeTimer, 4> m_eeTimers{};
-    bool tryProcessScratchpadDma(uint32_t channelBase, uint32_t chcr);
-    void completeDmacChannel(uint32_t channelBase, uint32_t cause);
+    // EE1 deferred timer service. m_eeTimerPending holds cycles advanced by
+    // the scheduler but not yet run through the timer state machine;
+    // m_eeTimerEventIn is EE cycles from the last serviced state until the
+    // next flag/interrupt event (0 = unknown, service immediately). The
+    // invariant m_eeTimerPending < m_eeTimerEventIn keeps every deferred
+    // window event-free; kEeTimerDeferralHorizon only sets how eagerly a
+    // near event is serviced, never correctness.
+    static constexpr uint64_t kEeTimerDeferralHorizon = 4096u;
+    uint64_t m_eeTimerPending = 0u;
+    uint64_t m_eeTimerEventIn = 0u;
+    uint32_t advanceEeTimersImpl(uint64_t eeCycles) noexcept;
+    [[nodiscard]] uint64_t cyclesUntilNextEeTimerEvent() const noexcept;
     void queueCompletedDmacCause(uint32_t cause);
+
+    // Keep new O state after the existing members: generated EE/VU objects
+    // and independently built native libraries must retain prior offsets.
+    // GE3 Part 3: PS2X_GS_FINISH_TIMING=pcsx2 (EE-owned FINISH). Same
+    // placement rule: appended last so prior offsets never move.
+    bool m_finishTimingPcsx2 = false;
 };
+
+// RB1 test hook: force the VIF1 reverse-DMA knob for unit tests.
+// mode: 1 = force sync on, 2 = force RB2 lag1, 3 = force RB2 lagV (Part 3),
+// 0 = force off, any other value = follow PS2X_VIF1_REVERSE_DMA
+// (production default). Production code never calls this.
+// RB2: live knob value for the GS snapshot hook (0 = off, 1 = RB1 sync,
+// 2 = lag1, 3 = lagV). Reads the test override first, then the
+// once-per-process env.
+int ps2_rb1_reverseDmaMode();
+// LT1b: lagF lag in guest frames (PS2X_RB_LAGF_FRAMES, 2..4, default 4).
+uint32_t ps2_rb1_lagfFrames();
+void ps2_rb1_setReverseDmaOverride(int mode);
 
 #endif // PS2_MEMORY_H
