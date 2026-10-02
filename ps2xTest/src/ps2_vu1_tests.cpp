@@ -2922,5 +2922,57 @@ void register_ps2_vu1_tests()
             t.IsTrue(ps2_microvu::saveReady(state2).empty(), "the park clears after the next job finishes");
             lib.end();
         });
+
+        tc.Run("iv1b: adoptData refuses offline when vu1Data is null (knob off)", [](TestCase &t)
+        {
+            // IV1b: the offline engine shares VU1 data only when its library
+            // exports it (PS2X_OM1_LEAN=1/2). With the knob off vu1Data()
+            // returns null and adoptData must refuse, so the knob-off path
+            // keeps its own copies. Gated on PS2X_OM1_OFFLINE_LIB like the
+            // SS5 microvu tests: without it the test skips.
+            const char *libPath = std::getenv("PS2X_OM1_OFFLINE_LIB");
+            if (!libPath || !*libPath)
+            {
+                std::cout << "[skip: PS2X_OM1_OFFLINE_LIB unset] ";
+                return;
+            }
+            const char *prevEngine = std::getenv("PS2X_VU1_ENGINE");
+            const std::string savedEngine = prevEngine ? prevEngine : "";
+            const char *prevLib = std::getenv("PS2X_MICROVU_LIB");
+            const std::string savedLib = prevLib ? prevLib : "";
+            const char *prevLean = std::getenv("PS2X_OM1_LEAN");
+            const std::string savedLean = prevLean ? prevLean : "";
+            const uint64_t prevFpControl = ps2_fpmode::readControl();
+            setenv("PS2X_VU1_ENGINE", "offline", 1);
+            setenv("PS2X_MICROVU_LIB", libPath, 1);
+            unsetenv("PS2X_OM1_LEAN"); // knob off: vu1Data() returns null
+            std::string error;
+            const bool configured = ps2_microvu::configure(true, error);
+            t.IsTrue(configured, "offline engine configures with the knob off");
+            if (configured)
+            {
+                t.IsTrue(ps2_microvu::selected(), "offline engine is selected");
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+                t.IsTrue(!ps2_microvu::adoptData(fx.mem),
+                         "adoptData refuses offline when vu1Data is null (knob off)");
+                ps2_microvu::shutdown();
+            }
+            else
+            {
+                std::cout << "[offline unavailable: " << error << "] ";
+            }
+            ps2_fpmode::writeControl(prevFpControl);
+            if (!savedEngine.empty())
+                setenv("PS2X_VU1_ENGINE", savedEngine.c_str(), 1);
+            else
+                unsetenv("PS2X_VU1_ENGINE");
+            if (!savedLib.empty())
+                setenv("PS2X_MICROVU_LIB", savedLib.c_str(), 1);
+            else
+                unsetenv("PS2X_MICROVU_LIB");
+            if (!savedLean.empty())
+                setenv("PS2X_OM1_LEAN", savedLean.c_str(), 1);
+        });
     });
 }
