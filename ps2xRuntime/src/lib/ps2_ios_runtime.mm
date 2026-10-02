@@ -2,6 +2,8 @@
 // for iOS (PS2X_IS_IOS in ps2xRuntime/CMakeLists.txt).
 #include "ps2_ios_runtime.h"
 #include "ps2_env_file.h"
+#include "ps2_input_diag.h"
+#include "ps2_touch_events.h"
 #include "ps2_knobs.h"
 #include "ps2_record_env.h"
 #include "ps2_vsync_lock.h"
@@ -329,24 +331,56 @@ std::string perfDeviceState()
     return buf;
 }
 
-int touchPoints(int64_t *ids, float *xs, float *ys, int max)
+int touchPoints(int64_t *ids, float *xs, float *ys, int max, bool controllerConnected)
 {
-    int n = 0;
+    int64_t liveIds[8];
+    float liveXs[8], liveYs[8];
+    int nLive = 0;
     const int devices = SDL_GetNumTouchDevices();
-    for (int d = 0; d < devices && n < max; ++d)
+    for (int d = 0; d < devices && nLive < 8; ++d)
     {
         const SDL_TouchID id = SDL_GetTouchDevice(d);
         const int fingers = SDL_GetNumTouchFingers(id);
-        for (int f = 0; f < fingers && n < max; ++f)
+        for (int f = 0; f < fingers && nLive < 8; ++f)
         {
             if (const SDL_Finger *finger = SDL_GetTouchFinger(id, f))
             {
-                ids[n] = static_cast<int64_t>(finger->id);
-                xs[n] = finger->x;
-                ys[n] = finger->y;
-                ++n;
+                liveIds[nLive] = static_cast<int64_t>(finger->id);
+                liveXs[nLive] = finger->x;
+                liveYs[nLive] = finger->y;
+                ++nLive;
             }
         }
+    }
+    // IN4 Part A: merge the event-fed finger records (default on). A touch
+    // down+up inside one pump is returned once here, at its touch-down
+    // point; the PS2X_IOS_TOUCH_EVENTS=0 path is the old live list.
+    if (!ps2x::inputdiag::touchseam::eventsOn())
+    {
+        int n = 0;
+        for (int i = 0; i < nLive && n < max; ++i, ++n)
+        {
+            ids[n] = liveIds[i];
+            xs[n] = liveXs[i];
+            ys[n] = liveYs[i];
+        }
+        return n;
+    }
+    ps2x::touchev::LiveFinger live[8];
+    for (int i = 0; i < nLive; ++i)
+    {
+        live[i].id = liveIds[i];
+        live[i].x = liveXs[i];
+        live[i].y = liveYs[i];
+    }
+    ps2x::touchev::OutTouch out[8];
+    const int cap = max < 8 ? max : 8;
+    const int n = ps2x::inputdiag::touchseam::table().merge(live, nLive, controllerConnected, out, cap);
+    for (int i = 0; i < n; ++i)
+    {
+        ids[i] = out[i].id;
+        xs[i] = out[i].x;
+        ys[i] = out[i].y;
     }
     return n;
 }

@@ -20,6 +20,7 @@ void register_ps2_android_env_tests();
 void register_ps2_knobs_tests();
 void register_ps2_log_tests();
 void register_ps2_perf_log_tests();
+void register_ps2_input_diag_tests();
 void register_ps2_adpf_tests();
 void register_ps2_thread_affinity_tests();
 void register_ps2_runtime_io_tests();
@@ -81,6 +82,7 @@ int main()
     register_ps2_knobs_tests();
     register_ps2_log_tests();
     register_ps2_perf_log_tests();
+    register_ps2_input_diag_tests();
     register_ps2_adpf_tests();
     register_ps2_thread_affinity_tests();
     register_ps2_runtime_io_tests();

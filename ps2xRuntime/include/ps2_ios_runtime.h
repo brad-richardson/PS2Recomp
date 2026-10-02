@@ -32,7 +32,12 @@ bool panelSize(int &w, int &h);
 // I26: current touches from SDL's finger state, normalised 0..1 to the
 // window (x right, y down). Returns how many were written (<= max).
 // VT1: IDs are SDL finger IDs (stable per touch until lift-off).
-int touchPoints(int64_t *ids, float *xs, float *ys, int max);
+// IN4: merges the SDL_AddEventWatch finger records (Part A, default on via
+// PS2X_IOS_TOUCH_EVENTS) so a touch down+up inside one pump is still
+// returned once, at its touch-down point; multi-peer (tap-pair) records are
+// dropped while a controller is connected, so Brad's two-finger marker never
+// reaches the guest.
+int touchPoints(int64_t *ids, float *xs, float *ys, int max, bool controllerConnected);
 // IP3: one-line device state for the perf log ("thermal=<0-3> lpm=<0/1>
 // batt=<0-100|-1> chg=<0/1>"; batt=-1 when the level is unknown). Main
 // thread only; cheap (no I/O).

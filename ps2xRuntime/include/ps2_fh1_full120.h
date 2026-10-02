@@ -26,6 +26,7 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_runtime_macros.h"
+#include "ps2_input_diag.h"
 
 #include <algorithm>
 #include <array>
@@ -2396,6 +2397,39 @@ inline bool fastHooks() noexcept
     return on;
 }
 
+// IN4 rider layer (PS2X_INPUT_DIAG=1): the minimal port of IN3's in3-in tap
+// (branch in3, commit 4774566): at each entry of the rider control
+// dispatcher 0x111728 (a1 = block filled by 0x121068; low 20 bits of +0 are
+// the action-map bits), report watch-bit edges (L1 0x40000 / R2 0x80000 /
+// square bits) per rider P into the input log's guest ring. The note keeps
+// per-P baselines and a 20000-line cap; off (or past the cap) it is one
+// cached-bool check.
+inline void in4NoteRider(uint8_t *ram, R5900Context *ctx)
+{
+    static const bool on = [] { return ps2x::inputdiag::enabled(); }();
+    if (!on)
+        return;
+    const uint32_t P = getRegU32(ctx, 4), a1 = getRegU32(ctx, 5);
+    uint32_t w0 = 0u;
+    rd32(ram, a1, w0);
+    w0 &= 0xfffffu; // action bits only (the stick bytes live above bit 20)
+    static uint32_t lastP[8] = {};
+    static uint32_t lastBits[8] = {};
+    static bool have[8] = {};
+    uint32_t slot = 0u;
+    while (slot < 8u && lastP[slot] != 0u && lastP[slot] != P)
+        ++slot;
+    if (slot == 8u)
+        return;
+    const uint32_t old = have[slot] && lastP[slot] == P ? lastBits[slot] : w0;
+    lastP[slot] = P;
+    lastBits[slot] = w0;
+    have[slot] = true;
+    if (((old ^ w0) & ps2x::inputdiag::kRiderWatch) == 0u)
+        return;
+    ps2x::inputdiag::noteRider(P, old, w0, g_lastTick);
+}
+
 template <bool Fast>
 inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
@@ -2445,6 +2479,13 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         fh9OnBranch(ram, ctx, sourcePc, targetPc, skip);
     if (on && (!Fast || bf->lab))
         skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
+    // IN4 rider layer (PS2X_INPUT_DIAG=1): edges of the rider action-block
+    // watch bits at each entry of the rider control dispatcher 0x111728
+    // (a1 = block filled by 0x121068; low 20 bits of +0 = action-map bits;
+    // the IN3 in3-in tap's site, branch in3 4774566). One compare per branch
+    // when off; the note itself early-outs on the cached knob.
+    if (targetPc == 0x111728u && ctx)
+        in4NoteRider(ram, ctx);
     const bool drawSkip = on && flag(&BranchFlags::draw, drawLimit) && !skip && drawHook(ctx, sourcePc, targetPc);
     skip = skip || drawSkip;
     if (Fast && !bf->tap)

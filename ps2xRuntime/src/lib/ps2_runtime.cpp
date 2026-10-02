@@ -26,6 +26,7 @@
 #include "ps2_present_fallback.h"
 #include "ps2_present_geometry.h"
 #include "ps2_pad_latch.h"
+#include "ps2_input_diag.h"
 #include "ps2_adpf.h"
 #include "ps2_perf_log.h"
 #include "ps2_vsync_lock.h"
@@ -2075,9 +2076,16 @@ bool gamepadInUse()
 int virtualPadTouches(ps2x::vpad::TouchPoint *ts, int max, float screenWidth, float screenHeight)
 {
 #if defined(PS2X_IOS)
+    // IN4: a connected-but-unused controller still leaves the overlay path
+    // live (gamepadInUse needs a press first); the merge drops multi-peer
+    // (tap-pair) records while any controller is connected, so Brad's
+    // two-finger marker never reaches the guest.
+    bool controllerConnected = false;
+    for (int i = 0; i < 8 && !controllerConnected; ++i)
+        controllerConnected = IsGamepadAvailable(i);
     int64_t ids[8];
     float xs[8], ys[8];
-    const int n = ps2x::ios::touchPoints(ids, xs, ys, max < 8 ? max : 8);
+    const int n = ps2x::ios::touchPoints(ids, xs, ys, max < 8 ? max : 8, controllerConnected);
     for (int i = 0; i < n; ++i)
     {
         ts[i].id = ids[i];
@@ -2097,6 +2105,14 @@ int virtualPadTouches(ps2x::vpad::TouchPoint *ts, int max, float screenWidth, fl
     ts[0].y = static_cast<float>(GetMouseY());
     return 1;
 #endif
+}
+
+// IN4: publish to the IN2 latch, noting host-word transitions for the input
+// diagnostics log (PS2X_INPUT_DIAG=1; transition only, zero cost off).
+void publishPad(uint16_t mask, uint64_t tick)
+{
+    ps2x::inputdiag::notePublish(mask, tick);
+    ps2x::padlatch::sharedLatch().publish(mask);
 }
 
 void drawVirtualPad(const ps2x::vpad::Layout &layout, uint16_t pressed, const ps2x::vpad::StickVec &stick)
@@ -2309,6 +2325,8 @@ void bg1OnPause()
     // thread never stalls on it. Bounded: entries since the last flush (the
     // 60 s timer bounds it) into a fresh tail-pause file.
     ps2x::perflog::flushTail("pause");
+    // IN4: input-diagnostics ring flush (same kill-proofing; no-op unless on).
+    ps2x::inputdiag::flush("pause");
     // PR3: the pad recorder's open span + stdio buffer (same kill-proofing).
     ps2_stubs::padRecordFlushNow("pause");
     std::fprintf(stderr, "[bg1] paused at tick=%llu gate_acked=%d\n",
@@ -6667,7 +6685,7 @@ void PS2Runtime::run()
             uint16_t pressed = vpadFrame.pressed;
             pressed = static_cast<uint16_t>(pressed | ps2x::vpad::activeTestTap(vpadTestTaps, ps2x::padlatch::wallMs()));
             if (padLatchOn)
-                ps2x::padlatch::sharedLatch().publish(static_cast<uint16_t>(pressed | raylibPressed));
+                publishPad(static_cast<uint16_t>(pressed | raylibPressed), m_memory.gs().vsyncTick.load());
             else
                 ps2x::vpad::liveMask().store(pressed, std::memory_order_relaxed);
             ps2x::vpad::StickVec stick = vpadFrame.stick;
@@ -6701,7 +6719,7 @@ void PS2Runtime::run()
         else if (vpadWanted)
         {
             if (padLatchOn)
-                ps2x::padlatch::sharedLatch().publish(raylibPressed);
+                publishPad(raylibPressed, m_memory.gs().vsyncTick.load());
             else
                 ps2x::vpad::liveMask().store(0u, std::memory_order_relaxed);
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
@@ -6709,8 +6727,12 @@ void PS2Runtime::run()
         else if (padLatchOn)
         {
             // Overlay off (desktop default): raylib buttons still feed the latch.
-            ps2x::padlatch::sharedLatch().publish(raylibPressed);
+            publishPad(raylibPressed, m_memory.gs().vsyncTick.load());
         }
+        // IN4: input-diagnostics per-frame (SDL watch install, 1 s stat line,
+        // 5 s timer flush; no-ops unless PS2X_INPUT_DIAG=1, except the
+        // once-only watch install that Part A touches need).
+        ps2x::inputdiag::pollHost(m_memory.gs().vsyncTick.load());
         // DS1: quick-save/load status line, drawn by the host over the
         // presented frame (never into the guest frame): "saving..." while a
         // save waits, else the last result for 4 s. Skipped with the rest of
@@ -6772,6 +6794,8 @@ void PS2Runtime::run()
                 if (!vkShows)
                     ps2x::perflog::notePresent();
             }
+            // IN4: input-diagnostics present count (no-op unless on).
+            ps2x::inputdiag::notePresent();
 #if defined(__ANDROID__)
             ++s_glSwapsOnWindow;
 #endif
@@ -6847,4 +6871,6 @@ void PS2Runtime::run()
     // force-stop SIGKILLs past here, so the Odin reads the per-second lines).
     if (perfLog)
         ps2x::perflog::dumpTail();
+    // IN4: input-diagnostics ring dump (no-op unless on).
+    ps2x::inputdiag::flush("shutdown");
 }

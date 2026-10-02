@@ -532,6 +532,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_memory.cpp
     src/lib/ps2_pad.cpp
     src/lib/ps2_perf_log.cpp
+    src/lib/ps2_input_diag.cpp
     src/lib/ps2_runtime.cpp
     src/lib/ps2_savestate.cpp
     src/lib/ps2_vif1_interpreter.cpp

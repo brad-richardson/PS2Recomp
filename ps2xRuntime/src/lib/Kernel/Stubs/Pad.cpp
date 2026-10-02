@@ -5,6 +5,7 @@
 #include "ps2_e41_trace.h"
 #include "ps2_e44_trace.h"
 #include "ps2_pad_latch.h"
+#include "ps2_input_diag.h"
 #include "ps2_record_env.h"
 #include "ps2_ssx3_course_manifest.h"
 #include "runtime/ps2_savestate.h"
@@ -2077,12 +2078,14 @@ namespace ps2_stubs
             }
 
             bool usedBackend = false;
+            uint16_t backendWord = 0u; // IN4: pre-script port word for the guest layer
             if (!useOverride)
             {
                 uint8_t backendData[32]{};
                 if (runtime && runtime->padBackend().readState(port, slot, backendData, sizeof(backendData)))
                 {
                     state.buttons = static_cast<uint16_t>(backendData[2] | (backendData[3] << 8));
+                    backendWord = state.buttons;
                     state.rx = backendData[4];
                     state.ry = backendData[5];
                     state.lx = backendData[6];
@@ -2105,6 +2108,11 @@ namespace ps2_stubs
             tk12OnRead(state, guestVsyncTick, runtime, port); // APH1 DEV-ONLY: no-op unless PS2X_TK12_AP_ROUTE set
             padRecordOnRead(state, guestVsyncTick, port, slot); // IR1 DEV-ONLY: no-op unless PS2X_PAD_RECORD set
 
+            // IN4 DEV-ONLY PS2X_INPUT_DIAG=1: guest layer, each transition of
+            // the port-0 pad word the guest consumed (backend word,
+            // pre-script; transition only, zero cost off).
+            if (port == 0 && usedBackend)
+                ps2x::inputdiag::noteGuest(backendWord, guestVsyncTick);
             // IN2 DEV-ONLY PS2X_PAD_READ_LOG=1: every guest read (vsync
             // tick, final active-low buttons incl. latch + script, wall ms
             // on the padlatch epoch). ~1 line per guest frame.
