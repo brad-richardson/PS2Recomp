@@ -1,6 +1,19 @@
 include(CheckIPOSupported)
 
-check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
+# BF2c: the try_compile probe cannot pass under the NDK (it loses ANDROID_ABI
+# and links with -fuse-ld=gold, whose LLVMgold.so plugin NDK r28 removed) — a
+# false negative. ThinLTO itself links fine in this container (our GE1 lib
+# ships LTO_PCSX2_CORE=ON from it; ARMSX2 release does the same), so trust NDK
+# Clang directly. Everywhere else keeps the probe.
+if(ANDROID AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(IPO_SUPPORTED TRUE)
+    # BF2d: CMake 3.22 appends -fuse-ld=gold for IPO links behind a stale
+    # NDK<22 guard that misfires here (CMAKE_ANDROID_NDK_VERSION unset);
+    # NDK r28 removed gold. lld consumes ThinLTO natively (GE1 precedent).
+    set(CMAKE_CXX_LINK_OPTIONS_IPO "-fuse-ld=lld")
+else()
+    check_ipo_supported(RESULT IPO_SUPPORTED OUTPUT IPO_ERROR)
+endif()
 
 function(EnableFastReleaseMode TargetName)
     message("> Enabling optimization for: ${TargetName}")
@@ -35,8 +48,11 @@ function(EnableFastReleaseMode TargetName)
     endif()
 
     if(IPO_SUPPORTED)
+        # BF2c: AGP builds the RelWithDebInfo cmake config (not Release), so
+        # the IPO property must cover both configs to have any effect there.
         set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET ${TargetName} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
     else()
-        message(WARNING "Interprocedural optimization not supported: ${ipo_error}")
+        message(WARNING "Interprocedural optimization not supported: ${IPO_ERROR}")
     endif()
 endfunction()
