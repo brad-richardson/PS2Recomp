@@ -96,6 +96,9 @@ case "$PLAT" in
     git -C "$ARMSX2" archive HEAD | tar -x -C "$SRC"
     mkdir -p "$SRC/ssx3-ge1/android-platform"
     cp -a "$HERE/ge1" "$SRC/ssx3-ge1/adapter"
+    # The recipe stages the adapter dir whole: the platform-local CHD stub
+    # rides along so ../adapter/ax4b_android_stubs.cpp resolves remotely.
+    cp "$HERE/platform/android/ax4b_android_stubs.cpp" "$SRC/ssx3-ge1/adapter/"
     cp "$HERE/platform/android/CMakeLists.txt" "$SRC/ssx3-ge1/android-platform/CMakeLists.txt"
     [ -f "$SRC/pcsx2/GS/GSState.cpp" ] && [ -f "$SRC/ssx3-ge1/adapter/ge1_gs.cpp" ] && [ -f "$SRC/ssx3-ge1/android-platform/CMakeLists.txt" ] \
       || { echo "srcdir assembly failed" >&2; exit 2; }

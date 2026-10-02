@@ -41,9 +41,10 @@ add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../adapter" "${CMAKE_BINARY_DIR}/g
 
 # AX4b: upstream CHD-sibling stub for the GE1 lib (no JNI layer provides it;
 # see ax4b_android_stubs.cpp). Linked into ge1_gs only; mv2 never pulls
-# ChdFileReader.
+# ChdFileReader. Sourced from ../adapter: the bradflix recipe stages the
+# adapter dir whole but only this file's CMakeLists from the platform dir.
 if(ANDROID)
-  add_library(ax4b_android_stubs STATIC ax4b_android_stubs.cpp)
+  add_library(ax4b_android_stubs STATIC "${CMAKE_CURRENT_SOURCE_DIR}/../adapter/ax4b_android_stubs.cpp")
   target_link_libraries(ge1_gs PRIVATE ax4b_android_stubs)
 endif()
 
