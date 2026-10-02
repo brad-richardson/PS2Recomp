@@ -1,4 +1,7 @@
 #include "ps2_iop_host.h"
+#include "ps2_e3.h"
+#include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h"
 
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
@@ -135,6 +138,12 @@ bool PS2IopHostAdapter::readGuest(uint32_t address, void *destination, size_t si
     {
         return false;
     }
+    // UPR1: HLE IOP mode keeps the fork's SIF heap at 0x04000000.
+    if (m_runtime.hleIopMode() && ps2_stubs::isSifIopHeapAddress(address))
+    {
+        return ps2_stubs::readSifIopHeap(address, destination, size);
+    }
+
     uint8_t *source = nullptr;
     if (!guestRange(address, size, source))
     {
@@ -153,6 +162,11 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
     {
         return false;
     }
+    if (m_runtime.hleIopMode() && ps2_stubs::isSifIopHeapAddress(address))
+    {
+        return ps2_stubs::writeSifIopHeap(address, source, size);
+    }
+
     uint8_t *destination = nullptr;
     if (!guestRange(address, size, destination))
     {
@@ -162,13 +176,31 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
     {
         uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
         ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::writeGuest", nullptr);
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, address, size); // E3b R3b
         std::memcpy(destination, source, size);
+        // E44 Part-3 EE watch: IOP/SIF write into EE RAM (dev-only,
+        // default off). No guest ctx on this path.
+        ps2_e44_trace::emitRangeOverlap(rdram, nullptr, address, static_cast<uint32_t>(size),
+                                        "iop-write", 0u, false, __func__);
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), address,
+                                          static_cast<uint32_t>(size), rdram,
+                                          "iop-write", "iop", 0u);
+        if (e3t.active)
+        {
+            ps2_e3::tapEnd(std::move(e3t), "iop-write", rdram, "-");
+        }
     }
     return true;
 }
 
 bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
 {
+    if (m_runtime.hleIopMode() && ps2_stubs::isSifIopHeapAddress(address))
+    {
+        return ps2_stubs::zeroSifIopHeap(address, size);
+    }
+
     uint8_t *destination = nullptr;
     if (!guestRange(address, size, destination))
     {
@@ -178,13 +210,31 @@ bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
     {
         uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
         ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::zeroGuest", nullptr);
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, address, size); // E3b R3b
         std::memset(destination, 0, size);
+        // E44 Part-3 EE watch (dev-only, default off). No ctx on this path.
+        ps2_e44_trace::emitRangeOverlap(rdram, nullptr, address, static_cast<uint32_t>(size),
+                                        "iop-zero", 0u, false, __func__);
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), address,
+                                          static_cast<uint32_t>(size), rdram,
+                                          "iop-zero", "zero", 0u);
+        if (e3t.active)
+        {
+            ps2_e3::tapEnd(std::move(e3t), "iop-zero", rdram, "fill=0");
+        }
     }
     return true;
 }
 
 bool PS2IopHostAdapter::normalizeGuestAddress(uint32_t address, uint32_t &normalized) const
 {
+    if (m_runtime.hleIopMode() && ps2_stubs::isSifIopHeapAddress(address))
+    {
+        normalized = address;
+        return ps2_stubs::isSifIopHeapRange(address, 0u);
+    }
+
     bool scratchpad = false;
     if (!ps2ResolveGuestPointer(address, normalized, scratchpad) || scratchpad)
     {

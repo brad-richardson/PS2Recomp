@@ -1,6 +1,11 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "RPC.h"
 #include "../../ps2_iop_transport.h"
+#include "game_overrides.h"
+#include "ps2_park_snapshot.h"
+#include "ps2_e41_trace.h"
+#include "ps2_snd_spike.h"
 
 namespace ps2_syscalls
 {
@@ -150,13 +155,44 @@ namespace ps2_syscalls
 
     } // namespace
 
+    namespace
+    {
+        // P1ac: SSX3-only gate for the SIF ready-handshake completion in
+        // sceSifSendCmd below. Set by the ps2_game_overrides descriptor
+        // (SLUS_207.72, entry 0x100008); the HLE process loads one ELF, so
+        // a process-wide flag matches the registry's apply-once-at-load
+        // model.
+        std::atomic<bool> g_ssx3SifHandshakeEnabled{false};
+
+        void applySsx3SifHandshake(PS2Runtime &runtime)
+        {
+            // The checked-in runtime can use an older external codegen tree
+            // whose _sceSifSendCmd stub still calls the six-argument handler.
+            runtime.replaceFunction(0x00426078u, &ps2_syscalls::_sceSifSendCmd);
+            g_ssx3SifHandshakeEnabled.store(true, std::memory_order_relaxed);
+        }
+    } // namespace
+
+    PS2_REGISTER_GAME_OVERRIDE("ssx3-sif-handshake",
+                               "SLUS_207.72",
+                               0x00100008u,
+                               0u,
+                               applySsx3SifHandshake);
+
+    void resetSsx3SifHandshakeForTesting()
+    {
+        g_ssx3SifHandshakeEnabled.store(false, std::memory_order_relaxed);
+    }
+
     void SifStopModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const int32_t moduleId = static_cast<int32_t>(getRegU32(ctx, 4)); // $a0
         const uint32_t resultAddr = getRegU32(ctx, 7);                    // $a3 (int* result, optional)
 
+        // UPR1: HLE IOP mode never consults the IOP emulator.
         int32_t moduleResult = -1;
-        const bool stoppedByEmulator = runtime->stopIopModule(moduleId, &moduleResult);
+        const bool stoppedByEmulator = runtime && !runtime->hleIopMode() &&
+                                       runtime->stopIopModule(moduleId, &moduleResult);
         uint32_t refsLeft = 0;
         const bool knownModule = trackSifModuleStop(moduleId, &refsLeft);
         const int32_t ret = (stoppedByEmulator || knownModule) ? 0 : -1;
@@ -166,7 +202,9 @@ namespace ps2_syscalls
             int32_t *hostResult = reinterpret_cast<int32_t *>(getMemPtr(rdram, resultAddr));
             if (hostResult)
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, resultAddr, sizeof(int32_t)); // E3b R3b B14
                 *hostResult = stoppedByEmulator ? moduleResult : (knownModule ? 0 : -1);
+                ps2_e3::tapEnd(std::move(e3t), "sif-stopmod", rdram, "-");
             }
         }
 
@@ -193,41 +231,90 @@ namespace ps2_syscalls
         const uint32_t argumentSize = getRegU32(ctx, 5); // $a1
         const uint32_t argumentAddr = getRegU32(ctx, 6); // $a2
         const std::string modulePath = readGuestCStringBounded(rdram, pathAddr, kMaxSifModulePathBytes);
+        const int parkTid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
+        auto dropLoad = [&](bool withPath)
+        {
+            ps2_log::emitDrop("syscall/SifLoadModule", "error");
+            ps2_park::ParkRpcEvent parkLoad;
+            parkLoad.op = "load";
+            parkLoad.tid = parkTid;
+            parkLoad.claimed = false;
+            if (withPath)
+                parkLoad.path = modulePath;
+            ps2_park::tallyRpcEvent(std::move(parkLoad));
+            setReturnS32(ctx, -1);
+        };
         if (modulePath.empty())
         {
-            setReturnS32(ctx, -1);
+            dropLoad(false);
             return;
         }
 
-        std::vector<uint8_t> arguments;
-        constexpr uint32_t kMaxIopModuleArguments = 64u * 1024u;
-        if (!copyGuestBytesBounded(rdram, argumentAddr, argumentSize, kMaxIopModuleArguments, arguments))
+        int32_t moduleId = -1;
+        if (!runtime || runtime->hleIopMode())
         {
-            setReturnS32(ctx, -1);
-            return;
-        }
+            // UPR1: HLE IOP mode (SSX 3) tracks the load only; no IRX runs.
+            moduleId = trackSifModuleLoad(modulePath);
+            if (moduleId <= 0)
+            {
+                dropLoad(true);
+                return;
+            }
 
-        if (!runtime)
+            uint32_t refs = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_sif_module_mutex);
+                auto it = g_sif_modules_by_id.find(moduleId);
+                if (it != g_sif_modules_by_id.end())
+                {
+                    refs = it->second.refCount;
+                }
+            }
+            logSifModuleAction("load", moduleId, modulePath, refs);
+        }
+        else
         {
-            setReturnS32(ctx, -1);
-            return;
+            std::vector<uint8_t> arguments;
+            constexpr uint32_t kMaxIopModuleArguments = 64u * 1024u;
+            if (!copyGuestBytesBounded(rdram, argumentAddr, argumentSize, kMaxIopModuleArguments, arguments))
+            {
+                dropLoad(true);
+                return;
+            }
+
+            const auto loaded = runtime->loadIopModule(modulePath, arguments.empty() ? nullptr : arguments.data(), static_cast<uint32_t>(arguments.size()));
+            if (!loaded.handled || loaded.moduleId <= 0)
+            {
+                dropLoad(true);
+                return;
+            }
+
+            moduleId = loaded.moduleId;
+            trackSifModuleLoadExternal(modulePath, moduleId);
+            logSifModuleAction("load-emulated", moduleId, modulePath, 1u);
         }
 
-        const auto loaded = runtime->loadIopModule(modulePath, arguments.empty() ? nullptr : arguments.data(), static_cast<uint32_t>(arguments.size()));
-        if (!loaded.handled || loaded.moduleId <= 0)
-        {
-            setReturnS32(ctx, -1);
-            return;
-        }
+        // T1: every LoadModule call lands in the snapshot tally.
+        ps2_park::ParkRpcEvent parkLoad;
+        parkLoad.op = "load";
+        parkLoad.sid = static_cast<uint32_t>(moduleId);
+        parkLoad.tid = parkTid;
+        parkLoad.claimed = true;
+        parkLoad.path = modulePath;
+        ps2_park::tallyRpcEvent(std::move(parkLoad));
 
-        trackSifModuleLoadExternal(modulePath, loaded.moduleId);
-        logSifModuleAction("load-emulated", loaded.moduleId, modulePath, 1u);
-        setReturnS32(ctx, loaded.moduleId);
+        setReturnS32(ctx, moduleId);
     }
 
     void SifInitRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         std::lock_guard<std::mutex> lock(g_rpc_mutex);
+        // HLE IOP mode keeps the per-init transport reset; with the IOP
+        // emulator a reset would drop the modules the game just loaded.
+        if (runtime && runtime->hleIopMode())
+        {
+            PS2IopTransport::reset(runtime);
+        }
         if (!g_rpc_initialized)
         {
             g_rpc_servers.clear();
@@ -268,10 +355,19 @@ namespace ps2_syscalls
             event.flags = kSifRpcDebugFlagMissingClient;
             event.result = -1;
             pushSifRpcDebugEvent(event);
+            ps2_log::emitDrop("syscall/SifBindRpc", "error");
+            ps2_park::ParkRpcEvent parkBind;
+            parkBind.op = "bind";
+            parkBind.sid = rpcId;
+            parkBind.fno = mode;
+            parkBind.tid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
+            parkBind.claimed = false;
+            ps2_park::tallyRpcEvent(std::move(parkBind));
             setReturnS32(ctx, -1);
             return;
         }
 
+        ps2_e3::Tap e3client = ps2_e3::tapBegin(rdram, clientPtr, sizeof(t_SifRpcClientData)); // E3b R3b B7
         client->command = 0;
         client->buf = 0;
         client->cbuf = 0;
@@ -283,6 +379,7 @@ namespace ps2_syscalls
         client->hdr.mode = mode;
 
         uint32_t serverPtr = 0;
+        bool parkServerPrebound = false;
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
             client->hdr.rpc_id = g_rpc_next_id++;
@@ -290,6 +387,7 @@ namespace ps2_syscalls
             if (it != g_rpc_servers.end())
             {
                 serverPtr = it->second.sd_ptr;
+                parkServerPrebound = true;
             }
             g_rpc_clients[clientPtr] = {};
             g_rpc_clients[clientPtr].sid = rpcId;
@@ -307,8 +405,10 @@ namespace ps2_syscalls
                 t_SifRpcServerData *dummy = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, serverPtr));
                 if (dummy)
                 {
+                    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, serverPtr, sizeof(*dummy)); // E3b R3b B7
                     std::memset(dummy, 0, sizeof(*dummy));
                     dummy->sid = static_cast<int>(rpcId);
+                    ps2_e3::tapEnd(std::move(e3t), "sif-bind", rdram, "f=dummy");
                 }
                 std::lock_guard<std::mutex> lock(g_rpc_mutex);
                 g_rpc_servers[rpcId] = {rpcId, serverPtr};
@@ -328,6 +428,7 @@ namespace ps2_syscalls
             client->buf = 0;
             client->cbuf = 0;
         }
+        ps2_e3::tapEnd(std::move(e3client), "sif-bind", rdram, "f=client");
 
         SifRpcDebugEvent event = makeRpcDebugEvent("BindRpc", ctx, runtime);
         event.clientPtr = clientPtr;
@@ -336,6 +437,15 @@ namespace ps2_syscalls
         event.mode = mode;
         event.result = 0;
         pushSifRpcDebugEvent(event);
+        // T1: claimed = a server was already registered for this sid
+        // (vs the dummy allocated above so the bind loop proceeds).
+        ps2_park::ParkRpcEvent parkBind;
+        parkBind.op = "bind";
+        parkBind.sid = rpcId;
+        parkBind.fno = mode;
+        parkBind.tid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
+        parkBind.claimed = parkServerPrebound;
+        ps2_park::tallyRpcEvent(std::move(parkBind));
         setReturnS32(ctx, 0);
     }
 
@@ -474,6 +584,19 @@ namespace ps2_syscalls
             event.flags = kSifRpcDebugFlagMissingClient | ((mode & kSifRpcModeNowait) ? kSifRpcDebugFlagNowait : 0u);
             event.result = -1;
             pushSifRpcDebugEvent(event);
+            char dropArgs[64];
+            std::snprintf(dropArgs, sizeof(dropArgs), "sid=0x%x rpc=0x%x mode=0x%x",
+                          sidHint, rpcNum, mode);
+            ps2_log::emitDrop("syscall/SifCallRpc", "missing-client", dropArgs);
+            ps2_park::ParkRpcEvent parkCall;
+            parkCall.op = "call";
+            parkCall.sid = sidHint;
+            parkCall.fno = rpcNum;
+            parkCall.sendSize = sendSize;
+            parkCall.recvSize = receiveSize;
+            parkCall.tid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
+            parkCall.claimed = false;
+            ps2_park::tallyRpcEvent(std::move(parkCall));
             setReturnS32(ctx, -1);
             return;
         }
@@ -500,6 +623,8 @@ namespace ps2_syscalls
                 }
             }
         }
+
+        ps2_snd_spike::noteRpc(rdram, sid, rpcNum, sendBuf, sendSize); // SND HLE (always on, AU10)
 
         const uint32_t serverPtr = client->server;
         auto *server = serverPtr
@@ -638,6 +763,8 @@ namespace ps2_syscalls
                 fillRpcDebugPreview(rdram, sendBuf, sendSize, event.sendPreview, event.sendPreviewSize);
                 fillRpcDebugPreview(rdram, receiveBuffer, receiveSize, event.recvPreview, event.recvPreviewSize);
                 event.result = 0;
+                if (!handled && runtime)
+                    runtime->noteUnhandledRpc(sid, rpcNum);
 #if PS2X_ENABLE_IOP_RPC_TRACE
                 if ((event.flags & kSifRpcDebugFlagUnhandled) != 0u)
                 {
@@ -645,6 +772,17 @@ namespace ps2_syscalls
                 }
 #endif
                 pushSifRpcDebugEvent(event);
+                // T1: one tally row per completed call; claimed = the HLE
+                // handled it or a server function ran (same `handled`).
+                ps2_park::ParkRpcEvent parkCall;
+                parkCall.op = "call";
+                parkCall.sid = sid;
+                parkCall.fno = rpcNum;
+                parkCall.sendSize = sendSize;
+                parkCall.recvSize = receiveSize;
+                parkCall.tid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
+                parkCall.claimed = handled;
+                ps2_park::tallyRpcEvent(std::move(parkCall));
             };
 
             setReturnS32(&parent, 0);
@@ -730,10 +868,12 @@ namespace ps2_syscalls
             event.flags = kSifRpcDebugFlagMissingClient;
             event.result = -1;
             pushSifRpcDebugEvent(event);
+            ps2_log::emitDrop("syscall/SifRegisterRpc", "error");
             setReturnS32(ctx, -1);
             return;
         }
 
+        ps2_e3::Tap e3sd = ps2_e3::tapBegin(rdram, sdPtr, sizeof(t_SifRpcServerData)); // E3b R3b B7
         sd->sid = static_cast<int>(sid);
         sd->func = func;
         sd->buf = buf;
@@ -751,6 +891,7 @@ namespace ps2_syscalls
         sd->base = qd;
         sd->link = 0;
         sd->next = 0;
+        ps2_e3::tapEnd(std::move(e3sd), "sif-reg", rdram, "f=server");
 
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
@@ -762,7 +903,9 @@ namespace ps2_syscalls
                 {
                     if (!queue->link)
                     {
+                        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, qd, sizeof(t_SifRpcDataQueue)); // E3b R3b B7
                         queue->link = sdPtr;
+                        ps2_e3::tapEnd(std::move(e3t), "sif-reg", rdram, "f=qlink");
                     }
                     else
                     {
@@ -774,7 +917,10 @@ namespace ps2_syscalls
                                 break;
                             if (!cur->link)
                             {
+                                ps2_e3::Tap e3t = // E3b R3b B7
+                                    ps2_e3::tapBegin(rdram, curPtr, sizeof(t_SifRpcServerData));
                                 cur->link = sdPtr;
+                                ps2_e3::tapEnd(std::move(e3t), "sif-reg", rdram, "f=clink");
                                 break;
                             }
                             if (cur->link == sdPtr)
@@ -793,9 +939,12 @@ namespace ps2_syscalls
                     t_SifRpcClientData *cd = reinterpret_cast<t_SifRpcClientData *>(getMemPtr(rdram, entry.first));
                     if (cd)
                     {
+                        ps2_e3::Tap e3t = // E3b R3b B7
+                            ps2_e3::tapBegin(rdram, entry.first, sizeof(t_SifRpcClientData));
                         cd->server = sdPtr;
                         cd->buf = sd->buf;
                         cd->cbuf = sd->cbuf;
+                        ps2_e3::tapEnd(std::move(e3t), "sif-reg", rdram, "f=client");
                     }
                 }
             }
@@ -835,16 +984,19 @@ namespace ps2_syscalls
         t_SifRpcDataQueue *qd = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, qdPtr));
         if (!qd)
         {
+            ps2_log::emitDrop("syscall/SifSetRpcQueue", "error");
             setReturnS32(ctx, -1);
             return;
         }
 
+        ps2_e3::Tap e3qd = ps2_e3::tapBegin(rdram, qdPtr, sizeof(t_SifRpcDataQueue)); // E3b R3b B7
         qd->thread_id = threadId;
         qd->active = 0;
         qd->link = 0;
         qd->start = 0;
         qd->end = 0;
         qd->next = 0;
+        ps2_e3::tapEnd(std::move(e3qd), "sif-setq", rdram, "f=queue");
 
         {
             std::lock_guard<std::mutex> lock(g_rpc_mutex);
@@ -864,7 +1016,10 @@ namespace ps2_syscalls
                         break;
                     if (!cur->next)
                     {
+                        ps2_e3::Tap e3t = // E3b R3b B7
+                            ps2_e3::tapBegin(rdram, curPtr, sizeof(t_SifRpcDataQueue));
                         cur->next = qdPtr;
+                        ps2_e3::tapEnd(std::move(e3t), "sif-setq", rdram, "f=cnext");
                         break;
                     }
                     curPtr = cur->next;
@@ -908,7 +1063,9 @@ namespace ps2_syscalls
             if (cur->next == qdPtr)
             {
                 t_SifRpcDataQueue *rem = reinterpret_cast<t_SifRpcDataQueue *>(getMemPtr(rdram, qdPtr));
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, curPtr, sizeof(t_SifRpcDataQueue)); // E3b R3b B7
                 cur->next = rem ? rem->next : 0;
+                ps2_e3::tapEnd(std::move(e3t), "sif-remq", rdram, "f=splice");
                 setReturnU32(ctx, qdPtr);
                 return;
             }
@@ -935,9 +1092,15 @@ namespace ps2_syscalls
         if (qd->link == sdPtr)
         {
             t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, sdPtr));
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, qdPtr, sizeof(t_SifRpcDataQueue)); // E3b R3b B7
             qd->link = sd ? sd->link : 0;
+            ps2_e3::tapEnd(std::move(e3t), "sif-rem", rdram, "f=qlink");
             if (sd)
+            {
+                ps2_e3::Tap e3s = ps2_e3::tapBegin(rdram, sdPtr, sizeof(t_SifRpcServerData));
                 sd->link = 0;
+                ps2_e3::tapEnd(std::move(e3s), "sif-rem", rdram, "f=slink");
+            }
             setReturnU32(ctx, sdPtr);
             return;
         }
@@ -951,9 +1114,15 @@ namespace ps2_syscalls
             if (cur->link == sdPtr)
             {
                 t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, sdPtr));
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, curPtr, sizeof(t_SifRpcServerData)); // E3b R3b B7
                 cur->link = sd ? sd->link : 0;
+                ps2_e3::tapEnd(std::move(e3t), "sif-rem", rdram, "f=clink");
                 if (sd)
+                {
+                    ps2_e3::Tap e3s = ps2_e3::tapBegin(rdram, sdPtr, sizeof(t_SifRpcServerData));
                     sd->link = 0;
+                    ps2_e3::tapEnd(std::move(e3s), "sif-rem", rdram, "f=slink");
+                }
                 setReturnU32(ctx, sdPtr);
                 return;
             }
@@ -968,22 +1137,64 @@ namespace ps2_syscalls
         SifCallRpc(rdram, ctx, runtime);
     }
 
-    void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    static void sendCmdDecoded(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
+                               const ps2_snd_spike::SendCmdArgs &args)
     {
-        uint32_t cid = getRegU32(ctx, 4);
-        uint32_t packetAddr = getRegU32(ctx, 5);
-        uint32_t packetSize = getRegU32(ctx, 6);
-        uint32_t srcExtra = getRegU32(ctx, 7);
-
-        uint32_t sp = getRegU32(ctx, 29);
-        uint32_t destExtra = 0;
-        uint32_t sizeExtra = 0;
-        readStackU32(rdram, sp, 0x10, destExtra);
-        readStackU32(rdram, sp, 0x14, sizeExtra);
+        const uint32_t cid = args.cid;
+        uint32_t packetAddr = args.packet;
+        uint32_t packetSize = args.packetSize;
+        uint32_t srcExtra = args.srcExtra;
+        uint32_t destExtra = args.dstExtra;
+        uint32_t sizeExtra = args.extraSize;
+        const uint32_t sendCmdRa = getRegU32(ctx, 31);
+        if (runtime)
+        {
+            ps2_snd_spike::onSendCmd(rdram, ps2_e41_trace::lastVsyncTick(), sendCmdRa, cid, packetAddr, packetSize,
+                                     [runtime](GuestInvocation invocation)
+                                     { runtime->eeScheduler().queueInvocation(std::move(invocation)); });
+        }
 
         if (sizeExtra > 0 && srcExtra && destExtra)
         {
             rpcCopyToRdram(rdram, destExtra, srcExtra, sizeExtra);
+        }
+
+        // P1ac: complete the SSX3 EE<->IOP SIF ready-handshake host-side.
+        // The game sends SET_SREG(1,1) then spins on sregs[1] (guest
+        // 0x52BE04); on HW the IOP's reply arrives via SIF0 DMA and EE
+        // set_sreg writes the word, but the HLE has no IOP SIF peer (this
+        // send is otherwise a no-op). Any nonzero exits the beqz poll;
+        // the value mirrors the sent value and Sony's SetReg(RPCINIT,1).
+        // T1: claimed = the host acted on this send (handshake applied).
+        bool parkClaimed = false;
+        if (g_ssx3SifHandshakeEnabled.load(std::memory_order_relaxed) &&
+            cid == 0x80000001u)
+        {
+            constexpr uint32_t kSregIndexOffset = 4u * sizeof(uint32_t);
+            const uint32_t *sregIndex = nullptr;
+            if (packetAddr != 0u &&
+                packetSize >= 5u * sizeof(uint32_t) &&
+                packetAddr <= UINT32_MAX - kSregIndexOffset)
+            {
+                sregIndex = getEeGuestStruct<uint32_t>(rdram, packetAddr + kSregIndexOffset);
+            }
+            if (sregIndex != nullptr && *sregIndex == 1u)
+            {
+                constexpr uint32_t kSsx3Sregs1Addr = 0x52BE04u;
+                uint8_t *sregs1 = getMemPtr(rdram, kSsx3Sregs1Addr);
+                if (sregs1 != nullptr)
+                {
+                    const uint32_t one = 1u;
+                    std::memcpy(sregs1, &one, sizeof(one));
+                    parkClaimed = true;
+                    static int handshakeCount = 0;
+                    if (handshakeCount < 5)
+                    {
+                        std::cerr << "[sif-handshake] sregs[1]=1" << std::endl;
+                        ++handshakeCount;
+                    }
+                }
+            }
         }
 
         static int logCount = 0;
@@ -996,8 +1207,43 @@ namespace ps2_syscalls
             ++logCount;
         }
 
+        // T1: every SendCmd lands in the snapshot tally (the log line
+        // above caps at 5; the tally does not).
+        ps2_park::ParkRpcEvent parkSend;
+        parkSend.op = "sendcmd";
+        parkSend.sid = cid;
+        parkSend.sendSize = packetSize;
+        parkSend.recvSize = sizeExtra;
+        parkSend.tid = runtime ? runtime->eeScheduler().currentThreadId() : 0;
+        parkSend.claimed = parkClaimed;
+        ps2_park::tallyRpcEvent(std::move(parkSend));
+
         // Return non-zero on success.
         setReturnS32(ctx, 1);
+    }
+
+    void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // Public six-argument entry (also used by the kernel path).
+        const uint32_t sp = getRegU32(ctx, 29);
+        ps2_snd_spike::SendCmdArgs args{};
+        args.cid = getRegU32(ctx, 4);
+        args.packet = getRegU32(ctx, 5);
+        args.packetSize = getRegU32(ctx, 6);
+        args.srcExtra = getRegU32(ctx, 7);
+        readStackU32(rdram, sp, 0x10, args.dstExtra);
+        readStackU32(rdram, sp, 0x14, args.extraSize);
+        sendCmdDecoded(rdram, ctx, runtime, args);
+    }
+
+    void _sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // Private 0x426078 entry: (cid, mode, pkt, size, src, dst, esize).
+        std::array<uint32_t, 11> gpr{};
+        for (uint32_t i = 4; i <= 10; ++i)
+            gpr[i] = getRegU32(ctx, static_cast<int>(i));
+        const auto args = ps2_snd_spike::decodeSendCmdArgs(gpr.data(), gpr.size());
+        sendCmdDecoded(rdram, ctx, runtime, args);
     }
 
     void sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

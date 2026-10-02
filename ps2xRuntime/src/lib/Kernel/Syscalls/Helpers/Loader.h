@@ -1,3 +1,6 @@
+#include "ps2_e3.h" // E3b R3b B13 taps below (self-gated; unset env = no-op)
+#include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
+
 namespace
 {
     std::string readGuestCStringBounded(const uint8_t *rdram, uint32_t guestAddr, size_t maxBytes)
@@ -103,6 +106,53 @@ namespace
                   << " path=\"" << path << "\""
                   << std::endl);
         ++g_sif_module_log_count;
+    }
+
+    // HLE IOP mode (UPR1): synthetic ids for tracked-only module loads.
+    int32_t trackSifModuleLoad(const std::string &path)
+    {
+        if (path.empty())
+        {
+            return -1;
+        }
+
+        const std::string pathKey = normalizeSifModulePathKey(path);
+        if (pathKey.empty())
+        {
+            return -1;
+        }
+
+        std::lock_guard<std::mutex> lock(g_sif_module_mutex);
+
+        auto byPathIt = g_sif_module_id_by_path.find(pathKey);
+        if (byPathIt != g_sif_module_id_by_path.end())
+        {
+            auto byIdIt = g_sif_modules_by_id.find(byPathIt->second);
+            if (byIdIt != g_sif_modules_by_id.end())
+            {
+                SifModuleRecord &record = byIdIt->second;
+                record.loaded = true;
+                ++record.refCount;
+                return record.id;
+            }
+        }
+
+        if (g_next_sif_module_id <= 0)
+        {
+            g_next_sif_module_id = 1;
+        }
+
+        const int32_t moduleId = g_next_sif_module_id++;
+        SifModuleRecord record;
+        record.id = moduleId;
+        record.path = path;
+        record.pathKey = pathKey;
+        record.refCount = 1;
+        record.loaded = true;
+
+        g_sif_module_id_by_path[pathKey] = moduleId;
+        g_sif_modules_by_id[moduleId] = record;
+        return moduleId;
     }
 
     int32_t trackSifModuleLoadExternal(const std::string &path, int32_t moduleId)
@@ -341,11 +391,13 @@ namespace
                 }
 
                 uint8_t *dest = runtime->memory().getScratchpad() + scratchOffset;
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, ph.vaddr, ph.memsz); // E3b R3b B13
                 if (ph.filesz > 0u)
                 {
                     if (!readFileBlockAt(file, ph.offset, dest, ph.filesz))
                     {
                         errorOut = "failed to read ELF segment payload";
+                        ps2_e3::tapEnd(std::move(e3t), "elf-seg", rdram, "spr=1,ok=0");
                         return false;
                     }
                 }
@@ -353,6 +405,11 @@ namespace
                 {
                     std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
                 }
+                ps2_e3::tapEnd(std::move(e3t), "elf-seg", rdram, "spr=1,ok=1");
+                // E44 Part-3 EE watch: ELF segment into scratchpad (dev-only,
+                // default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, nullptr, ph.vaddr, ph.memsz,
+                                                "elf-load", 0u, false, __func__);
             }
             else
             {
@@ -364,11 +421,13 @@ namespace
                 }
 
                 uint8_t *dest = rdram + physAddr;
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, ph.vaddr, ph.memsz); // E3b R3b B13
                 if (ph.filesz > 0u)
                 {
                     if (!readFileBlockAt(file, ph.offset, dest, ph.filesz))
                     {
                         errorOut = "failed to read ELF segment payload";
+                        ps2_e3::tapEnd(std::move(e3t), "elf-seg", rdram, "spr=0,ok=0");
                         return false;
                     }
                 }
@@ -376,6 +435,11 @@ namespace
                 {
                     std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
                 }
+                ps2_e3::tapEnd(std::move(e3t), "elf-seg", rdram, "spr=0,ok=1");
+                // E44 Part-3 EE watch: ELF segment into RAM (dev-only,
+                // default off).
+                ps2_e44_trace::emitRangeOverlap(rdram, nullptr, ph.vaddr, ph.memsz,
+                                                "elf-load", 0u, false, __func__);
             }
 
             loadedAny = true;
@@ -452,7 +516,9 @@ namespace
             {
                 return -1;
             }
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, execDataAddr, sizeof(execData)); // E3b R3b B13
             std::memcpy(guestExec, &execData, sizeof(execData));
+            ps2_e3::tapEnd(std::move(e3t), "elf-exec", rdram, "-");
         }
 
         static uint32_t successLogs = 0;
