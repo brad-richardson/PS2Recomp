@@ -1,0 +1,16 @@
+_ge1_gs_open
+_ge1_gs_close
+_ge1_gs_reset
+_ge1_gs_priv_write
+_ge1_gs_packet
+_ge1_gs_vsync
+_ge1_gs_read_fifo
+_ge1_gs_snapshot
+_ge1_gs_gpu_ms
+_ge1_gs_back_ms
+_ge1_gs_flush_caches
+_ge1_gs_export_iosurface
+_ge1_gs_release_iosurface
+_ge1_gs_freeze_size
+_ge1_gs_freeze_save
+_ge1_gs_freeze_load
