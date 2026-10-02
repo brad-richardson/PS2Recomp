@@ -100,7 +100,9 @@ case "$PLAT" in
     [ -f "$SRC/pcsx2/GS/GSState.cpp" ] && [ -f "$SRC/ssx3-ge1/adapter/ge1_gs.cpp" ] && [ -f "$SRC/ssx3-ge1/android-platform/CMakeLists.txt" ] \
       || { echo "srcdir assembly failed" >&2; exit 2; }
     S12=$(git -C "$ARMSX2" rev-parse --short=12 HEAD)
-    bash ~/dev/ssx3/local/tooling/build/bradflix_ge1_lib.sh "$SRC" "ax4b-$S12"
+    # A retry after a failed remote scratch (which the recipe keeps) needs a
+    # fresh scratch name; content addressing still dedups the published lib.
+    bash ~/dev/ssx3/local/tooling/build/bradflix_ge1_lib.sh "$SRC" "ax4b-$S12${BUILD_SUFFIX:-}"
     ;;
   ios|ios-sim)
     if [ "$PLAT" = "ios" ]; then SYSROOT=iphoneos; else SYSROOT=iphonesimulator; fi

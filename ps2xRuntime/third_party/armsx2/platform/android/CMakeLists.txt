@@ -39,6 +39,14 @@ add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../vendor-pcsx2/3rdparty/libretro"
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../vendor-pcsx2/pcsx2" "${CMAKE_BINARY_DIR}/pcsx2")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../adapter" "${CMAKE_BINARY_DIR}/ge1-adapter")
 
+# AX4b: upstream CHD-sibling stub for the GE1 lib (no JNI layer provides it;
+# see ax4b_android_stubs.cpp). Linked into ge1_gs only; mv2 never pulls
+# ChdFileReader.
+if(ANDROID)
+  add_library(ax4b_android_stubs STATIC ax4b_android_stubs.cpp)
+  target_link_libraries(ge1_gs PRIVATE ax4b_android_stubs)
+endif()
+
 # AX4b: the mv2 bridge rides the same vendor tree (it links shaderc_combined
 # from the Android bundle). Staged only by the mv recipe; the ge1 recipe
 # (bradflix_ge1_lib.sh) does not stage it, so this is an EXISTS guard, never
