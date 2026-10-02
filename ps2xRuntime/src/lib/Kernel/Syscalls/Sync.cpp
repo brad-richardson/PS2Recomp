@@ -1,11 +1,27 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "Sync.h"
 #include "runtime/ee_scheduler.h"
+
+#include <cstdlib>
+#include <iostream>
 
 namespace ps2_syscalls
 {
     namespace
     {
+        // P1u CreateSema param/return census. Gated on PS2X_DIAG_SEMA_CREATE
+        // (unset/empty = compiled in, nothing printed, callers pay only a
+        // cached static check).
+        bool diagSemaCreateEnabled()
+        {
+            static const bool enabled = [] {
+                const char *env = std::getenv("PS2X_DIAG_SEMA_CREATE");
+                return env != nullptr && env[0] != '\0';
+            }();
+            return enabled;
+        }
+
         constexpr uint32_t WEF_OR = 0x01u;
         constexpr uint32_t WEF_CLEAR = 0x10u;
         constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
@@ -72,18 +88,33 @@ namespace ps2_syscalls
         const auto *param = address == 0u ? nullptr : getEeGuestStruct<ee_sema_t>(rdram, address);
         if (!param)
         {
+            char dropArgs[32];
+            std::snprintf(dropArgs, sizeof(dropArgs), "param=0x%x", address);
+            ps2_log::emitDrop("syscall/CreateSema", "KE_ERROR", dropArgs);
             setReturnS32(ctx, KE_ERROR);
+            if (diagSemaCreateEnabled())
+            {
+                std::cerr << "[diag:sema-create] tid=" << runtime->eeScheduler().currentThreadId() << " pc=0x"
+                          << std::hex << ctx->pc << " ra=0x" << getRegU32(ctx, 31) << std::dec << " param=0x"
+                          << std::hex << address << std::dec << " noparam ret=" << KE_ERROR << std::endl;
+            }
             return;
         }
 
         // ee_sema_t from ps2sdk. The IOP attr/option/init/max ordering is not
         // accepted by the EE runtime.
-        setReturnS32(ctx,
-                     scheduler(rdram, ctx, runtime)
-                         .createSemaphore(param->init_count,
-                                          param->max_count,
-                                          param->attr,
-                                          param->option));
+        EeScheduler &ee = scheduler(rdram, ctx, runtime);
+        const int result =
+            ee.createSemaphore(param->init_count, param->max_count, param->attr, param->option);
+        setReturnS32(ctx, result);
+        if (diagSemaCreateEnabled())
+        {
+            std::cerr << "[diag:sema-create] tid=" << ee.currentThreadId() << " pc=0x" << std::hex << ctx->pc
+                      << " ra=0x" << getRegU32(ctx, 31) << std::dec << " param=0x" << std::hex << address << std::dec
+                      << " count=" << param->count << " max=" << param->max_count << " init=" << param->init_count
+                      << " wait=" << param->wait_threads << " attr=" << param->attr << " option=" << param->option
+                      << " ret=" << result << std::endl;
+        }
     }
 
     void DeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -128,21 +159,28 @@ namespace ps2_syscalls
         const EeSemaphore *semaphore = ee.semaphore(static_cast<int>(getRegU32(ctx, 4)));
         if (!semaphore)
         {
-            setReturnS32(ctx, KE_UNKNOWN_SEMID);
+            ps2_log::emitDrop("syscall/ReferSemaStatus", "KE_UNKNOWN_SEMID");
+            // P12: stock ReferSemaStatus returns plain -1 for unknown ids
+            // (0x80004e04 jr/addiu v0,zero,-1, also via the 0x80004e1c bltz
+            // for freed slots; no -408 in KERNEL).
+            setReturnS32(ctx, KE_ERROR);
             return;
         }
         auto *status = getEeGuestStruct<ee_sema_t>(rdram, getRegU32(ctx, 5));
         if (!status)
         {
+            ps2_log::emitDrop("syscall/ReferSemaStatus", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, getRegU32(ctx, 5), sizeof(ee_sema_t)); // E3b R3c D6
         status->count = semaphore->count;
         status->max_count = semaphore->maxCount;
         status->init_count = semaphore->initCount;
         status->wait_threads = static_cast<int>(semaphore->waiters.size());
         status->attr = semaphore->attr;
         status->option = semaphore->option;
+        ps2_e3::tapEnd(std::move(e3t), "sema-refer", rdram, "-");
         setReturnS32(ctx, KE_OK);
     }
 
@@ -163,6 +201,7 @@ namespace ps2_syscalls
         const auto *param = address == 0u ? nullptr : getEeGuestStruct<EeEventFlagParam>(rdram, address);
         if (!param)
         {
+            ps2_log::emitDrop("syscall/CreateEventFlag", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -209,11 +248,13 @@ namespace ps2_syscalls
         const uint32_t mode = getRegU32(ctx, 6);
         if ((mode & ~WEF_MODE_MASK) != 0u)
         {
+            ps2_log::emitDrop("syscall/WaitEventFlag", "KE_ILLEGAL_MODE");
             setReturnS32(ctx, KE_ILLEGAL_MODE);
             return;
         }
         if (bits == 0u)
         {
+            ps2_log::emitDrop("syscall/WaitEventFlag", "KE_EVF_ILPAT");
             setReturnS32(ctx, KE_EVF_ILPAT);
             return;
         }
@@ -221,17 +262,20 @@ namespace ps2_syscalls
         const EeEventFlag *flag = ee.eventFlag(id);
         if (!flag)
         {
+            ps2_log::emitDrop("syscall/WaitEventFlag", "KE_UNKNOWN_EVFID");
             setReturnS32(ctx, KE_UNKNOWN_EVFID);
             return;
         }
         if ((flag->attr & EA_MULTI) == 0u && !flag->waiters.empty())
         {
+            ps2_log::emitDrop("syscall/WaitEventFlag", "KE_EVF_MULTI");
             setReturnS32(ctx, KE_EVF_MULTI);
             return;
         }
         const uint32_t resultAddress = getRegU32(ctx, 7);
         if (resultAddress != 0u && !getEeGuestStruct<uint32_t>(rdram, resultAddress))
         {
+            ps2_log::emitDrop("syscall/WaitEventFlag", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -245,11 +289,13 @@ namespace ps2_syscalls
         const uint32_t mode = getRegU32(ctx, 6);
         if ((mode & ~WEF_MODE_MASK) != 0u)
         {
+            ps2_log::emitDrop("syscall/PollEventFlag", "KE_ILLEGAL_MODE");
             setReturnS32(ctx, KE_ILLEGAL_MODE);
             return;
         }
         if (bits == 0u)
         {
+            ps2_log::emitDrop("syscall/PollEventFlag", "KE_EVF_ILPAT");
             setReturnS32(ctx, KE_EVF_ILPAT);
             return;
         }
@@ -257,11 +303,13 @@ namespace ps2_syscalls
         const EeEventFlag *flag = ee.eventFlag(id);
         if (!flag)
         {
+            ps2_log::emitDrop("syscall/PollEventFlag", "KE_UNKNOWN_EVFID");
             setReturnS32(ctx, KE_UNKNOWN_EVFID);
             return;
         }
         if ((flag->attr & EA_MULTI) == 0u && !flag->waiters.empty())
         {
+            ps2_log::emitDrop("syscall/PollEventFlag", "KE_EVF_MULTI");
             setReturnS32(ctx, KE_EVF_MULTI);
             return;
         }
@@ -271,6 +319,7 @@ namespace ps2_syscalls
             output = getEeGuestStruct<uint32_t>(rdram, getRegU32(ctx, 7));
             if (!output)
             {
+                ps2_log::emitDrop("syscall/PollEventFlag", "KE_ERROR");
                 setReturnS32(ctx, KE_ERROR);
                 return;
             }
@@ -279,7 +328,9 @@ namespace ps2_syscalls
         const int result = ee.pollEventFlag(id, bits, mode, observed);
         if (result == KE_OK && output)
         {
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, getRegU32(ctx, 7), sizeof(uint32_t)); // E3b R3c D4
             *output = observed;
+            ps2_e3::tapEnd(std::move(e3t), "ev-poll", rdram, "-");
         }
         setReturnS32(ctx, result);
     }
@@ -306,15 +357,18 @@ namespace ps2_syscalls
         const EeEventFlag *flag = ee.eventFlag(static_cast<int>(getRegU32(ctx, 4)));
         if (!flag)
         {
+            ps2_log::emitDrop("syscall/ReferEventFlagStatus", "KE_UNKNOWN_EVFID");
             setReturnS32(ctx, KE_UNKNOWN_EVFID);
             return;
         }
         auto *status = getEeGuestStruct<EeEventFlagStatus>(rdram, getRegU32(ctx, 5));
         if (!status)
         {
+            ps2_log::emitDrop("syscall/ReferEventFlagStatus", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, getRegU32(ctx, 5), sizeof(EeEventFlagStatus)); // E3b R3c D5
         *status = {flag->attr,
                    flag->option,
                    flag->initBits,
@@ -322,6 +376,7 @@ namespace ps2_syscalls
                    static_cast<int32_t>(flag->waiters.size()),
                    0,
                    0};
+        ps2_e3::tapEnd(std::move(e3t), "ev-refer", rdram, "-");
         setReturnS32(ctx, KE_OK);
     }
 

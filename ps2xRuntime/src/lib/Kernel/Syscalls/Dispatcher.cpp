@@ -1,11 +1,111 @@
 #include "Common.h"
 #include "Dispatcher.h"
 #include "System.h"
+#include "TraceChannel.h"
+#include "ps2_mpg_src_trace.h"
+
+#include <cstdlib>
+
+namespace
+{
+    // P1c steady-state diagnostics, gated on PS2X_DIAG_PERIOD_MS (unset =
+    // compiled in, nothing printed, callers pay only a counter increment).
+    uint64_t diagPeriodMs()
+    {
+        static const uint64_t period = [] {
+            if (const char *env = std::getenv("PS2X_DIAG_PERIOD_MS"))
+            {
+                if (env[0] != '\0')
+                {
+                    char *end = nullptr;
+                    const unsigned long long parsed = std::strtoull(env, &end, 10);
+                    if (end != env)
+                    {
+                        return static_cast<uint64_t>(parsed);
+                    }
+                }
+            }
+            return static_cast<uint64_t>(0);
+        }();
+        return period;
+    }
+
+    uint64_t diagNowMs()
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+    }
+
+    struct SyscallDiagEntry
+    {
+        uint64_t count = 0;
+        uint32_t firstPc = 0;
+        uint32_t lastPc = 0;
+    };
+
+    std::unordered_map<uint32_t, SyscallDiagEntry> g_diagSyscallCounts;
+    uint64_t g_diagSyscallLastMs = 0;
+    uint64_t g_diagSyscallBlock = 0;
+}
 
 namespace ps2_syscalls
 {
+    // Flushes the pending syscall histogram when a period boundary has
+    // passed. Called from the dispatch hook below and from the scheduler
+    // tick so a quiet steady state still emits (possibly empty) blocks.
+    void diagSyscallsPeriodicFlush()
+    {
+        const uint64_t period = diagPeriodMs();
+        if (period == 0u)
+        {
+            return;
+        }
+        const uint64_t now = diagNowMs();
+        if (g_diagSyscallLastMs == 0u)
+        {
+            g_diagSyscallLastMs = now;
+            return;
+        }
+        if (now - g_diagSyscallLastMs < period)
+        {
+            return;
+        }
+        g_diagSyscallLastMs = now;
+        std::vector<std::pair<uint32_t, SyscallDiagEntry>> sorted(g_diagSyscallCounts.begin(), g_diagSyscallCounts.end());
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const auto &a, const auto &b) { return a.second.count > b.second.count; });
+        std::cerr << "[diag:syscalls] block=" << g_diagSyscallBlock++
+                  << " distinct=" << sorted.size()
+                  << " period_ms=" << period << std::endl;
+        for (size_t i = 0; i < sorted.size() && i < 20u; ++i)
+        {
+            std::cerr << "[diag:syscall] id=0x" << std::hex << sorted[i].first << std::dec
+                      << " count=" << sorted[i].second.count
+                      << " first=0x" << std::hex << sorted[i].second.firstPc
+                      << " last=0x" << std::hex << sorted[i].second.lastPc << std::dec << std::endl;
+        }
+        g_diagSyscallCounts.clear();
+    }
+
     bool dispatchNumericSyscall(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        traceChannelEmit(syscallNumber, (ctx != nullptr) ? ctx->pc : 0u); // T18+T22: gated file append only; no guest-state writes
+        static uint64_t s_diagTick = 0;
+        ++s_diagTick;
+        if (diagPeriodMs() != 0u)
+        {
+            const uint32_t callerPc = (ctx != nullptr) ? ctx->pc : 0u;
+            SyscallDiagEntry &entry = g_diagSyscallCounts[syscallNumber];
+            if (entry.count == 0u)
+            {
+                entry.firstPc = callerPc;
+            }
+            entry.lastPc = callerPc;
+            ++entry.count;
+            diagSyscallsPeriodicFlush();
+        }
+
         if (dispatchSyscallOverride(syscallNumber, rdram, ctx, runtime))
         {
             return true;
@@ -163,15 +263,19 @@ namespace ps2_syscalls
             iDeleteSema(rdram, ctx, runtime);
             return true;
         case 0x42:
+            ps2_mpg_src_trace::noteSemaDispatch(rdram, ctx, runtime, "SignalSema");
             SignalSema(rdram, ctx, runtime);
             return true;
         case static_cast<uint32_t>(-0x43):
+            ps2_mpg_src_trace::noteSemaDispatch(rdram, ctx, runtime, "iSignalSema");
             iSignalSema(rdram, ctx, runtime);
             return true;
         case 0x44:
+            ps2_mpg_src_trace::noteSemaDispatch(rdram, ctx, runtime, "WaitSema");
             WaitSema(rdram, ctx, runtime);
             return true;
         case 0x45:
+            ps2_mpg_src_trace::noteSemaDispatch(rdram, ctx, runtime, "PollSema");
             PollSema(rdram, ctx, runtime);
             return true;
         case static_cast<uint32_t>(-0x46):
@@ -309,7 +413,17 @@ namespace ps2_syscalls
             SetMemoryMode(rdram, ctx, runtime);
             return true;
         default:
+        {
+            if (runtime)
+                runtime->noteUnknownSyscall(syscallNumber);
+            // P1w: unhandled syscall number. The guest gets no handler and
+            // (unless an override was installed) no answer. Trace it.
+            char dropArgs[64];
+            std::snprintf(dropArgs, sizeof(dropArgs), "id=0x%x pc=0x%x", syscallNumber,
+                          (ctx != nullptr) ? ctx->pc : 0u);
+            ps2_log::emitDrop("dispatch/numeric", "unknown-syscall", dropArgs);
             return false;
+        }
         }
     }
 }

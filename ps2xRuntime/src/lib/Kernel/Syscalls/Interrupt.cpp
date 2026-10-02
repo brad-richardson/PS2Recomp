@@ -88,6 +88,7 @@ namespace ps2_syscalls
         if ((flagAddress != 0u && !getEeGuestStruct<uint32_t>(rdram, flagAddress)) ||
             (tickAddress != 0u && !getEeGuestStruct<uint64_t>(rdram, tickAddress)))
         {
+            ps2_log::emitDrop("syscall/SetVSyncFlag", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }

@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "ps2_e3.h"
 #include "Thread.h"
 #include "runtime/ee_scheduler.h"
 
@@ -73,23 +74,29 @@ namespace ps2_syscalls
                                                  bool deleteThread)
         {
             EeScheduler &ee = runtime->eeScheduler();
-            const auto handlers = runtime->takeEeExitHandlers(tid);
             std::vector<GuestInvocation> invocations;
-            invocations.reserve(handlers.size());
-            for (const PS2Runtime::EeExitHandlerRegistration &handler : handlers)
             {
-                if (handler.function == 0u || !runtime->hasFunction(handler.function))
+                // CL1: exitCurrent/invokeCurrentSequence below never return
+                // (longjmp when a transfer is armed), abandoning this frame.
+                // Drop the drained registrations first so no vector buffer
+                // leaks on an ExitThread-with-handlers.
+                const auto handlers = runtime->takeEeExitHandlers(tid);
+                invocations.reserve(handlers.size());
+                for (const PS2Runtime::EeExitHandlerRegistration &handler : handlers)
                 {
-                    continue;
+                    if (handler.function == 0u || !runtime->hasFunction(handler.function))
+                    {
+                        continue;
+                    }
+                    GuestInvocation invocation{};
+                    invocation.kind = GuestInvocationKind::ExitHandler;
+                    invocation.context = *ctx;
+                    invocation.context.pc = handler.function;
+                    SET_GPR_U32(&invocation.context, 4, handler.argument);
+                    SET_GPR_U32(&invocation.context, 29, ee.invocationStackTop());
+                    SET_GPR_U32(&invocation.context, 31, 0u);
+                    invocations.push_back(std::move(invocation));
                 }
-                GuestInvocation invocation{};
-                invocation.kind = GuestInvocationKind::ExitHandler;
-                invocation.context = *ctx;
-                invocation.context.pc = handler.function;
-                SET_GPR_U32(&invocation.context, 4, handler.argument);
-                SET_GPR_U32(&invocation.context, 29, ee.invocationStackTop());
-                SET_GPR_U32(&invocation.context, 31, 0u);
-                invocations.push_back(std::move(invocation));
             }
             if (invocations.empty())
             {
@@ -190,18 +197,21 @@ namespace ps2_syscalls
         const uint32_t address = getRegU32(ctx, 4);
         if (address == 0u)
         {
+            ps2_log::emitDrop("syscall/CreateThread", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
         const auto *param = getEeGuestStruct<ee_thread_t>(rdram, address);
         if (!param)
         {
+            ps2_log::emitDrop("syscall/CreateThread", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
 
         if (param->stack_size < 0)
         {
+            ps2_log::emitDrop("syscall/CreateThread", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -214,6 +224,7 @@ namespace ps2_syscalls
                                      stackOffset,
                                      scratch))
             {
+                ps2_log::emitDrop("syscall/CreateThread", "KE_ERROR");
                 setReturnS32(ctx, KE_ERROR);
                 return;
             }
@@ -258,16 +269,19 @@ namespace ps2_syscalls
         GuestThread *target = ee.thread(id);
         if (!target)
         {
+            ps2_log::emitDrop("syscall/StartThread", "KE_UNKNOWN_THID");
             setReturnS32(ctx, KE_UNKNOWN_THID);
             return;
         }
         if (target->status != EeThreadStatus::Dormant)
         {
+            ps2_log::emitDrop("syscall/StartThread", "KE_NOT_DORMANT");
             setReturnS32(ctx, KE_NOT_DORMANT);
             return;
         }
         if (!runtime->hasFunction(target->entry))
         {
+            ps2_log::emitDrop("syscall/StartThread", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
@@ -276,6 +290,7 @@ namespace ps2_syscalls
             target->stack = runtime->guestMalloc(target->stackSize, 16u);
             if (target->stack == 0u)
             {
+                ps2_log::emitDrop("syscall/StartThread", "KE_ERROR");
                 setReturnS32(ctx, KE_ERROR);
                 return;
             }
@@ -342,15 +357,18 @@ namespace ps2_syscalls
         const GuestThread *thread = ee.thread(id);
         if (!thread)
         {
+            ps2_log::emitDrop("syscall/ReferThreadStatus", "KE_UNKNOWN_THID");
             setReturnS32(ctx, KE_UNKNOWN_THID);
             return;
         }
         auto *status = getEeGuestStruct<ee_thread_status_t>(rdram, getRegU32(ctx, 5));
         if (!status)
         {
+            ps2_log::emitDrop("syscall/ReferThreadStatus", "KE_ERROR");
             setReturnS32(ctx, KE_ERROR);
             return;
         }
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, getRegU32(ctx, 5), sizeof(ee_thread_status_t)); // E3b R3c D7
         *status = {};
         status->status = rawThreadStatus(thread->status);
         status->func = thread->entry;
@@ -364,6 +382,7 @@ namespace ps2_syscalls
         status->waitType = rawWaitType(thread->wait.reason);
         status->waitId = waitId(*thread);
         status->wakeupCount = thread->wakeupCount;
+        ps2_e3::tapEnd(std::move(e3t), "thr-refer", rdram, "-");
         setReturnS32(ctx, KE_OK);
     }
 
@@ -399,6 +418,7 @@ namespace ps2_syscalls
     {
         if (getRegU32(ctx, 4) == 0u)
         {
+            ps2_log::emitDrop("syscall/iCancelWakeupThread", "KE_ILLEGAL_THID");
             setReturnS32(ctx, KE_ILLEGAL_THID);
             return;
         }

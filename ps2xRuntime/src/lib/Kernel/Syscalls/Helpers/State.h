@@ -2,6 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include "ps2_hle_pools.h"
+#include <atomic>
+
+// UPR1: fio descriptors live in PS2Vfs (upstream #244); this counts the ones
+// the guest holds open so a save state can refuse them (SS1).
+inline std::atomic<int> g_fioOpenDescriptors{0};
 
 // Thread status
 #define THS_RUN 0x01
@@ -31,7 +37,6 @@ constexpr int KE_NOT_DORMANT = -414;
 constexpr int KE_NOT_SUSPEND = -415;
 constexpr int KE_NOT_WAIT = -416;
 constexpr int KE_RELEASE_WAIT = -418;
-constexpr int KE_SEMA_ZERO = -419;
 constexpr int KE_SEMA_OVF = -420;
 constexpr int KE_EVF_COND = -421;
 constexpr int KE_EVF_MULTI = -422;
