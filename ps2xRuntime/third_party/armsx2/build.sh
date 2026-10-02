@@ -67,6 +67,7 @@ case "$PLAT" in
     cp -a "$HERE/platform/mac" "$ASM/mac-platform"
     cmake -S "$ASM/mac-platform" -B "$BLD" -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH=$PIN/mac/ge1-deps \
       -Dplutovg_DIR=$PIN/mac/ge1-deps/lib/cmake/plutovg \
       -Dplutosvg_DIR=$PIN/mac/ge1-deps/lib/cmake/plutosvg \
       -DOM1RT_WORKTREE=$PIN/microvu/om1rt-inputs/ps2recomp-4f1a953 -DOM1RT_SRC=$PIN/microvu/om1rt-inputs/rt-src \
