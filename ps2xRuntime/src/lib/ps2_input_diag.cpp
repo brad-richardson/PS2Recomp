@@ -268,11 +268,19 @@ int sdlWatch(void * /*userdata*/, SDL_Event *ev)
         touchTable().motion(static_cast<int64_t>(ev->tfinger.fingerId), ev->tfinger.x, ev->tfinger.y, wall);
         break;
     case SDL_FINGERDOWN:
-        touchTable().down(static_cast<int64_t>(ev->tfinger.fingerId), ev->tfinger.x, ev->tfinger.y, wall);
+    {
+        const int64_t fid = static_cast<int64_t>(ev->tfinger.fingerId);
+        touchTable().down(fid, ev->tfinger.x, ev->tfinger.y, wall);
+        if (diagOn())
+            noteTouch(static_cast<uint64_t>(fid), true, ev->tfinger.x, ev->tfinger.y, tick);
         break;
+    }
     case SDL_FINGERUP:
     {
-        touchTable().up(static_cast<int64_t>(ev->tfinger.fingerId), wall);
+        const int64_t fid = static_cast<int64_t>(ev->tfinger.fingerId);
+        touchTable().up(fid, wall);
+        if (diagOn())
+            noteTouch(static_cast<uint64_t>(fid), false, ev->tfinger.x, ev->tfinger.y, tick);
         uint64_t mMs = 0u;
         float mx = 0.0f, my = 0.0f;
         if (touchTable().takeMarker(mMs, mx, my) && diagOn())
@@ -409,6 +417,8 @@ struct HostState
 {
     bool init = false;
     uint16_t lastPublish = 0u;
+    bool vpadInit = false;
+    uint16_t lastVpad = 0u;
     uint64_t presents = 0u;
     uint64_t statTick = 0u;
     uint64_t statPresents = 0u;
@@ -530,6 +540,45 @@ void noteRider(uint32_t p, uint32_t oldBits, uint32_t newBits, uint64_t tick)
     e.b = oldBits;
     e.c = static_cast<int32_t>(newBits);
     guestRing().push(e);
+}
+
+void noteVpad(uint16_t mask, uint64_t tick)
+{
+    if (!diagOn())
+        return;
+    HostState &s = hostState();
+    if (!s.vpadInit)
+    {
+        s.vpadInit = true;
+        s.lastVpad = mask;
+        return; // baseline, no edge yet
+    }
+    if (mask == s.lastVpad)
+        return;
+    Event e;
+    e.wallMs = padlatch::wallMs();
+    e.tick = tick;
+    e.layer = Layer::Vpad;
+    e.a = s.lastVpad;
+    e.b = mask;
+    s.lastVpad = mask;
+    hostRing().push(e);
+}
+
+void noteTouch(uint64_t fingerId, bool down, float x, float y, uint64_t tick)
+{
+    if (!diagOn())
+        return;
+    Event e;
+    e.wallMs = padlatch::wallMs();
+    e.tick = tick;
+    e.layer = Layer::Touch;
+    e.code = static_cast<uint8_t>(down ? TouchCode::Down : TouchCode::Up);
+    e.a = static_cast<uint32_t>(fingerId & 0xFFFFFFFFu);
+    e.b = static_cast<uint32_t>((fingerId >> 32) & 0xFFFFFFFFu);
+    e.x = x;
+    e.y = y;
+    hostRing().push(e);
 }
 
 void noteSdlButton(uint32_t which, uint32_t button, bool down, uint64_t tick)

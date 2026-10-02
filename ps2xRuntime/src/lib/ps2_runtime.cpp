@@ -6683,6 +6683,8 @@ void PS2Runtime::run()
                                                            screenHeight, vpadTouches, touches, 8);
             ps2x::vpad::PadFrame vpadFrame = ps2x::vpad::updatePad(vpadPad, layout, vpadTouches, touches);
             uint16_t pressed = vpadFrame.pressed;
+            // IN4: touch-source layer (transition only, zero cost off).
+            ps2x::inputdiag::noteVpad(pressed, m_memory.gs().vsyncTick.load());
             pressed = static_cast<uint16_t>(pressed | ps2x::vpad::activeTestTap(vpadTestTaps, ps2x::padlatch::wallMs()));
             if (padLatchOn)
                 publishPad(static_cast<uint16_t>(pressed | raylibPressed), m_memory.gs().vsyncTick.load());

@@ -232,7 +232,37 @@ void register_ps2_input_diag_tests()
             t.Equals(formatEvent(s),
                      std::string("[input-stat] wall=1000ms tick=7200 vsyncs_per_s=119.88 presents=120 "
                                  "slots=\"0:1 1:0\" which=\"3\" drops=0"),
-                     "exact stat line"); }); });
+                     "exact stat line"); });
+
+        tc.Run("touch and vpad lines", [](TestCase &t)
+               {
+            Event d;
+            d.wallMs = 50u;
+            d.tick = 60u;
+            d.layer = Layer::Touch;
+            d.code = static_cast<uint8_t>(TouchCode::Down);
+            d.a = 123u;
+            d.b = 0u;
+            d.x = 0.5000f;
+            d.y = 0.2500f;
+            t.Equals(formatEvent(d),
+                     std::string("[input-touch] wall=50ms tick=60 finger down id=123 x=0.5000 y=0.2500"),
+                     "exact touch down line");
+            Event u = d;
+            u.code = static_cast<uint8_t>(TouchCode::Up);
+            u.wallMs = 70u;
+            t.Equals(formatEvent(u),
+                     std::string("[input-touch] wall=70ms tick=60 finger up id=123 x=0.5000 y=0.2500"),
+                     "exact touch up line");
+            Event v;
+            v.wallMs = 55u;
+            v.tick = 61u;
+            v.layer = Layer::Vpad;
+            v.a = 0x0000u;
+            v.b = 0x0010u; // d-pad up (mid-screen, not an edge)
+            t.Equals(formatEvent(v),
+                     std::string("[input-vpad] wall=55ms tick=61 vpad 0x0000->0x0010 +up -none"),
+                     "exact vpad line"); }); });
 
     MiniTest::Case("Ps2InputDiagRing", [](TestCase &tc)
                    {

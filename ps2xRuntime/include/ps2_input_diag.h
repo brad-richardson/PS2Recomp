@@ -24,6 +24,15 @@
 //      multi-peer touches while a controller is connected; and with a
 //      controller in use the vpad branch is skipped anyway, so the overlay
 //      path never publishes touches).
+//   5b. Touch-source layer (Brad 10-02: touch d-pad misses, mid-screen, so
+//      not edge gating): every raw SDL finger down/up (id + normalised
+//      position) plus the vpad pressed-bit transitions from updatePad per
+//      render pass. A touch press that never becomes vpad bits (one-pump
+//      drop, VT1 inert owner) shows here as touch-without-vpad; with Part
+//      A on, the merge leg is exact and any loss sits in updatePad
+//      ownership. One ride on touch or the Backbone shows where a press
+//      stops: touch -> vpad -> pub -> guest -> rider (touch) or
+//      sdl -> pub -> guest -> rider (controller).
 //   6. Once per second: vs/s, presents, and the raylib gamepad slot in use
 //      (IsGamepadAvailable index vs SDL which ids: the IN3 D check).
 //
@@ -40,6 +49,8 @@
 //     + = newly pressed)
 //   [input-rider] wall=<ms>ms tick=<t> P=0x<p> 0x<old>->0x<new> +<names> -<names>
 //   [input-marker] wall=<ms>ms tick=<t> two_finger_tap x=<fx> y=<fy> ctl=<0|1>
+//   [input-touch] wall=<ms>ms tick=<t> finger <down|up> id=<u64> x=<fx> y=<fy> (normalised 0..1)
+//   [input-vpad] wall=<ms>ms tick=<t> vpad 0x<old>->0x<new> +<names> -<names> (updatePad bits)
 //   [input-stat] wall=<ms>ms tick=<t> vsyncs_per_s=<f> presents=<n>
 //     slots="<i:0/1 ...>" which="<w ...>" drops=<n>
 
@@ -67,6 +78,8 @@ enum class Layer : uint8_t
     Rider = 3,
     Marker = 4,
     Stat = 5,
+    Touch = 6, // raw SDL finger down/up (a/b = id lo/hi, x/y normalised)
+    Vpad = 7, // updatePad pressed-bit transitions per render pass
 };
 
 enum class SdlCode : uint8_t
@@ -74,6 +87,12 @@ enum class SdlCode : uint8_t
     Btn = 0, // a=which, b=button, c=down(1)/up(0)
     Axis = 1, // a=which, b=axis, c=value (Sint16)
     Device = 2, // a=which-or-index, c=added(1)/removed(0), text=name
+};
+
+enum class TouchCode : uint8_t
+{
+    Down = 0,
+    Up = 1,
 };
 
 // One structured event (formatted on the flush worker, so producers only
@@ -305,6 +324,24 @@ inline std::string formatEvent(const Event &e)
                       static_cast<unsigned long long>(e.wallMs), static_cast<unsigned long long>(e.tick), e.x, e.y,
                       e.a);
         return head;
+    case Layer::Touch:
+    {
+        const uint64_t id = (static_cast<uint64_t>(e.b) << 32) | e.a;
+        std::snprintf(head, sizeof(head), "[input-touch] wall=%llums tick=%llu finger %s id=%llu x=%.4f y=%.4f",
+                      static_cast<unsigned long long>(e.wallMs), static_cast<unsigned long long>(e.tick),
+                      e.code == static_cast<uint8_t>(TouchCode::Down) ? "down" : "up",
+                      static_cast<unsigned long long>(id), e.x, e.y);
+        return head;
+    }
+    case Layer::Vpad:
+    {
+        const uint32_t rose = e.b & ~e.a;
+        const uint32_t fell = e.a & ~e.b;
+        std::snprintf(head, sizeof(head), "[input-vpad] wall=%llums tick=%llu vpad 0x%04x->0x%04x %s",
+                      static_cast<unsigned long long>(e.wallMs), static_cast<unsigned long long>(e.tick), e.a, e.b,
+                      formatHighChanges(rose, fell).c_str());
+        return head;
+    }
     case Layer::Stat:
         // text carries the preformatted slots + which payload (built at push
         // time, 1/s on the render thread): slots="0:1 1:0" which="1 5".
@@ -389,6 +426,10 @@ void notePublish(uint16_t mask, uint64_t tick);
 void noteGuest(uint16_t word, uint64_t tick);
 // EE thread: rider action-block watch-bit edges (transition, per P slot).
 void noteRider(uint32_t p, uint32_t oldBits, uint32_t newBits, uint64_t tick);
+// Render thread: raw SDL finger down/up (transition-free: every finger).
+void noteTouch(uint64_t fingerId, bool down, float x, float y, uint64_t tick);
+// Render thread: updatePad pressed bits per render pass (transition only).
+void noteVpad(uint16_t mask, uint64_t tick);
 // Render thread: one present shown.
 void notePresent();
 // Render thread, every loop iteration: installs the SDL watch once, emits
