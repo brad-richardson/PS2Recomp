@@ -6,8 +6,9 @@
      PS2X_PAD_SCRIPT so a controller drives the game. I26: "virtualControls"
      (unset = on); off sets PS2X_VIRTUAL_PAD=0. Copied into the .app
      at staging (local/research/I25/build-install.sh). IQ1: "target120"
-     (unset = off) layers the bundled full120.env over ps2x.env at launch;
-     Documents/ps2x.env still wins over both. -->
+     (unset = on, CFG1 D2: full 120 is the default) layers the bundled
+     full120.env over ps2x.env at launch; Documents/ps2x.env still wins
+     over both. -->
 <plist version="1.0">
 <dict>
 	<key>PreferenceSpecifiers</key>
@@ -64,7 +65,7 @@
 			<key>Key</key>
 			<string>target120</string>
 			<key>DefaultValue</key>
-			<false/>
+			<true/>
 		</dict>
 	</array>
 </dict>

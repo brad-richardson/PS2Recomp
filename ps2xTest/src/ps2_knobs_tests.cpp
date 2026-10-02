@@ -71,11 +71,11 @@ void register_ps2_knobs_tests()
 {
     MiniTest::Case("Ps2Knobs", [](TestCase &tc)
                    {
-        tc.Run("android defaults table is exactly the 32 S1+S3+CF4+CU3+CFG1 play keys (VX2: minus VU1_BLOCKS/FLAG_ELIDE; CFG1: minus VERTEX_KICK)", [](TestCase &t)
+        tc.Run("android defaults table is exactly the 33 S1+S3+CF4+CU3+CFG1 play keys (VX2: minus VU1_BLOCKS/FLAG_ELIDE; CFG1: minus VERTEX_KICK)", [](TestCase &t)
                {
             size_t n = 0;
             const ps2x::Cf2AndroidDefault *defs = ps2x::cf2AndroidDefaults(&n);
-            t.Equals(n, static_cast<size_t>(32), "32 defaults");
+            t.Equals(n, static_cast<size_t>(33), "33 defaults");
             const char *want[] = {
                 "PS2X_GS_BACKEND", "PS2X_GS_EXTERNAL_LIBRARY", "GE1_GS_RESOURCES_DIR",
                 "GE1_GS_DATA_DIR", "GE1_GS_AHB_EXPORT", "GE1_ADRENO_BLEND_MIX",
@@ -87,8 +87,9 @@ void register_ps2_knobs_tests()
                 "PS2X_GAME_THREAD_CPUS", "PS2X_MTVU_CPUS", "GE1_VK_TURNIP",
                 "GE1_DRAW_BUFFERING", "GE1_UPSCALE", "PS2X_GE1_EXPORT_SIZE",
                 "PS2X_MTVU_GIF_STAGE", "PS2X_MTVU_VIF_STAGE",
-                // CFG1 Part 2 (D1/D4).
+                // CFG1 Part 2 (D1/D4/D8).
                 "PS2X_MICROVU_FLAG_HACK", "PS2X_MTVU_FINISH_EE", "PS2X_MTVU_VIF1_STAT_FREE",
+                "GE1_ANISO",
             };
             for (const char *key : want)
             {
@@ -153,15 +154,16 @@ void register_ps2_knobs_tests()
             size_t ni = 0, nm = 0;
             const ps2x::Cf2AndroidDefault *ios = ps2x::cf2IosDefaults(&ni);
             const ps2x::Cf2AndroidDefault *mac = ps2x::cf2MacDefaults(&nm);
-            t.Equals(ni, static_cast<size_t>(5), "5 iOS defaults");
-            t.Equals(nm, static_cast<size_t>(4), "4 Mac defaults");
+            t.Equals(ni, static_cast<size_t>(7), "7 iOS defaults");
+            t.Equals(nm, static_cast<size_t>(5), "5 Mac defaults");
             const char *wantIos[] = {
                 "PS2X_MICROVU_FLAG_HACK", "PS2X_MTVU_FINISH_EE", "PS2X_MTVU_VIF1_STAT_FREE",
                 "PS2X_AUDIO_RESAMPLE", "PS2X_VIF1_REVERSE_DMA",
+                "PS2X_SSX3_SIM_MODE", "GE1_ANISO",
             };
             const char *wantMac[] = {
                 "PS2X_MICROVU_FLAG_HACK", "PS2X_MTVU_FINISH_EE", "PS2X_MTVU_VIF1_STAT_FREE",
-                "PS2X_SKIP_MOVIE",
+                "PS2X_SKIP_MOVIE", "GE1_ANISO",
             };
             for (const char *key : wantIos)
             {
@@ -192,10 +194,12 @@ void register_ps2_knobs_tests()
             g.track("PS2X_PROFILE");
             clearDefaults();
             ::setenv("PS2X_AUDIO_RESAMPLE", "off", 1); // explicit wins over sinc
-            t.Equals(ps2x::cf2ApplyIosDefaults(), static_cast<size_t>(4), "4 iOS keys applied");
+            t.Equals(ps2x::cf2ApplyIosDefaults(), static_cast<size_t>(6), "6 iOS keys applied");
             t.Equals(std::string(::getenv("PS2X_AUDIO_RESAMPLE")), std::string("off"), "explicit resample kept");
             t.Equals(std::string(::getenv("PS2X_MICROVU_FLAG_HACK")), std::string("1"), "iOS flag hack defaulted");
             t.Equals(std::string(::getenv("PS2X_VIF1_REVERSE_DMA")), std::string("0"), "iOS readback explicit 0");
+            t.Equals(std::string(::getenv("PS2X_SSX3_SIM_MODE")), std::string("split120_render60_v1"), "iOS 60-path split120");
+            t.Equals(std::string(::getenv("GE1_ANISO")), std::string("16"), "iOS aniso defaulted");
             t.Equals(ps2x::cf2ApplyMacDefaults(), static_cast<size_t>(1), "1 Mac key applied (only SKIP_MOVIE still absent)");
             t.Equals(std::string(::getenv("PS2X_SKIP_MOVIE")), std::string("1"), "Mac movie skip defaulted");
             clearDefaults();

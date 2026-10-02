@@ -31,11 +31,12 @@
 // in the APK's jniLibs (play-current carries it); set GE1_VK_TURNIP=0
 // without it.
 // CFG1 Part 2 folds the remaining signed-off play settings into kDefaults
-// (D1 microVU flag hack, D4 the MQ2+MQ3 probe-drain pair, all det IDENTICAL)
-// and deletes the dead GE1_VERTEX_KICK row (knob gone on the ARMSX2 base;
-// the Odin env line is inert). New per-platform literal tables below do the
-// same for iOS (D1/D4, AU13 sinc, CF4-explicit readback off) and Mac
-// (D1/D4, D5 movie skip); PS2X_PROFILE=reference disables every table.
+// (D1 microVU flag hack, D4 the MQ2+MQ3 probe-drain pair, D8 aniso 16x — all
+// det IDENTICAL) and deletes the dead GE1_VERTEX_KICK row (knob gone on the
+// ARMSX2 base; the Odin env line is inert). New per-platform literal tables
+// below do the same for iOS (D1/D4, AU13 sinc, CF4-explicit readback off, D2
+// split120 at 60, D8 aniso) and Mac (D1/D4, D5 movie skip, D8 aniso);
+// PS2X_PROFILE=reference disables every table.
 //
 // Platform-neutral on purpose so the host unit test compiles this header
 // (same shape as ps2_android_env.h / ps2_env_file.h). The Android loader,
@@ -88,7 +89,7 @@ struct Cf2AndroidDefault
 // adapter). Every value is the signed-off play value (S1 = the P3 set,
 // S3 = lagV, CF4 = readback off: the VIF1_REVERSE_DMA default is "0";
 // CU3 = the Odin default set; CFG1 Part 2 = D1 flag hack + D4 probe-drain
-// pair, minus the dead GE1_VERTEX_KICK row).
+// pair + D8 anisotropic 16x, minus the dead GE1_VERTEX_KICK row).
 // The value must be the literal "0" (unset is also off in the code default,
 // but the applier always sets the key, so only "0" keeps it off).
 inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
@@ -130,6 +131,9 @@ inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
         {"PS2X_MICROVU_FLAG_HACK", "1", false, false, false},
         {"PS2X_MTVU_FINISH_EE", "1", false, false, false},
         {"PS2X_MTVU_VIF1_STAT_FREE", "1", false, false, false},
+        // CFG1 Part 2 (D8): anisotropic 16x on every platform (Brad 10-02).
+        // Output-only (GS adapter plain getenv); det IDENTICAL.
+        {"GE1_ANISO", "16", false, false, false},
     };
     if (countOut)
         *countOut = sizeof(kDefaults) / sizeof(kDefaults[0]);
@@ -218,10 +222,12 @@ inline size_t cf2ApplyAndroidDefaults(const char *bootElf)
 // PS2X_PROFILE=reference disables the table, exactly like Android.
 
 // iOS bundled-play equivalent (D1 flag hack, D4 probe-drain pair, AU13 sinc
-// resample, CF4-explicit readback off). Device-specific values (upscale,
-// SSAA, scanout, zero-copy, paths) and the 120-layer user toggle stay in the
-// bundled env + Settings layers; D2 (iOS-60 SIM_MODE) and D8 (AF16) wait on
-// Brad and stay unset.
+// resample, CF4-explicit readback off, D2 split120 at 60, D8 aniso 16x).
+// Device-specific values (upscale, SSAA, scanout, zero-copy, paths) and the
+// 120-layer user toggle stay in the bundled env + Settings layers; D8 (AF16)
+// is decided (this table), not waiting. The Target 120 switch defaults ON, so
+// the D2 split120 line rules only the user-picked 60 path (the 120 preset
+// overrides to stock + full-120 events).
 inline const Cf2AndroidDefault *cf2IosDefaults(size_t *countOut)
 {
     static const Cf2AndroidDefault kIosDefaults[] = {
@@ -230,6 +236,8 @@ inline const Cf2AndroidDefault *cf2IosDefaults(size_t *countOut)
         {"PS2X_MTVU_VIF1_STAT_FREE", "1", false, false, false},
         {"PS2X_AUDIO_RESAMPLE", "sinc", false, false, false},
         {"PS2X_VIF1_REVERSE_DMA", "0", false, false, false},
+        {"PS2X_SSX3_SIM_MODE", "split120_render60_v1", false, false, false},
+        {"GE1_ANISO", "16", false, false, false},
     };
     if (countOut)
         *countOut = sizeof(kIosDefaults) / sizeof(kIosDefaults[0]);
@@ -237,8 +245,8 @@ inline const Cf2AndroidDefault *cf2IosDefaults(size_t *countOut)
 }
 
 // Mac play-profile equivalent (D1 flag hack, D4 probe-drain pair, D5 movie
-// skip). SOUND stays harness-set (D6); the rest of PLAY_ENV (engines,
-// stages, sim mode, readback, timing) stays explicit in ssx3_boot.py.
+// skip, D8 aniso 16x). SOUND stays harness-set (D6); the rest of PLAY_ENV
+// (engines, stages, sim mode, readback, timing) stays explicit in ssx3_boot.py.
 inline const Cf2AndroidDefault *cf2MacDefaults(size_t *countOut)
 {
     static const Cf2AndroidDefault kMacDefaults[] = {
@@ -246,6 +254,7 @@ inline const Cf2AndroidDefault *cf2MacDefaults(size_t *countOut)
         {"PS2X_MTVU_FINISH_EE", "1", false, false, false},
         {"PS2X_MTVU_VIF1_STAT_FREE", "1", false, false, false},
         {"PS2X_SKIP_MOVIE", "1", false, false, false},
+        {"GE1_ANISO", "16", false, false, false},
     };
     if (countOut)
         *countOut = sizeof(kMacDefaults) / sizeof(kMacDefaults[0]);

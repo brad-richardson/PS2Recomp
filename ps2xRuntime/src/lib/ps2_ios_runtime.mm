@@ -63,13 +63,13 @@ bool autoRouteEnabled()
     return valid && value;
 }
 
-// IQ1: Settings.bundle "Target 120 fps" switch. Unset = off (unlike the
-// switches above), so a fresh install keeps today's 60 behaviour.
+// IQ1: Settings.bundle "Target 120 fps" switch. Unset = ON (CFG1 D2: the
+// default is full 120; split120 serves only the user-picked 60 path).
 bool target120Enabled()
 {
     Boolean valid = false;
     const Boolean value = CFPreferencesGetAppBooleanValue(CFSTR("target120"), kCFPreferencesCurrentApplication, &valid);
-    return valid && value;
+    return !valid || value;
 }
 } // namespace
 
