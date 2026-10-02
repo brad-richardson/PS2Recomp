@@ -1,15 +1,28 @@
 #include "MiniTest.h"
+#include "ps2_e7.h"
+#include "ps2_mtvu.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_savestate.h"
 #include "runtime/gs/gs_frontend.h"
+#include "../../ps2xRuntime/src/lib/ps2_savestate_internal.h" // SQ2: GSSavestate round trip
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "Stubs/DMA.h"
 #include "Stubs/GS.h"
+#include "Stubs/LibC.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <thread>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -33,11 +46,319 @@ namespace
         std::memcpy(dst.data() + pos, &value, sizeof(uint32_t));
     }
 
+    // VPL2: one VIF1 input stream (buffers in processVIF1Data order) plus the
+    // VIF1 / VU1 state it starts from (synthetic, or a PS2X_VPL2_VIFCAP file).
+    struct Vpl2Stream
+    {
+        VIFRegisters regs{};
+        uint32_t pendingQwc = 0;
+        bool pendingHl = false;
+        bool path3Masked = false;
+        std::vector<uint8_t> vu1Data;
+        std::vector<uint8_t> vu1Code;
+        std::vector<std::vector<uint8_t>> bufs;
+    };
+
+    struct Vpl2Outcome
+    {
+        std::vector<uint64_t> atMscal; // per MSCAL/MSCNT: VU1 data + code digest, args
+        std::vector<std::pair<int, std::vector<uint8_t>>> packets;
+        std::vector<uint8_t> vu1Data;
+        std::vector<uint8_t> vu1Code;
+        VIFRegisters regs{};
+        bool masked = false;
+        size_t firstMismatch = 0;
+    };
+
+    uint64_t vpl2Digest(const uint8_t *p, size_t n)
+    {
+        uint64_t h = 0x9E3779B97F4A7C15ull ^ n;
+        for (size_t i = 0; i + 8u <= n; i += 8u)
+        {
+            uint64_t w = 0;
+            std::memcpy(&w, p + i, 8u);
+            h ^= w + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+            h *= 0xBF58476D1CE4E5B9ull;
+        }
+        return h ^ (h >> 31);
+    }
+
+    // Serial (MTVU off, inline VIF1 loop) or staged (threaded MTVU + GIF
+    // stage + VIF stage, each buffer a VIF job). The MSCAL/MSCNT stand-in
+    // records a digest of VU1 data + code, then acts like a program: it
+    // writes VU1 data around TOP and a constant block (so later masked
+    // UNPACKs merge over program output, PV1's RO/RMW classes) and XGKICKs
+    // a digest-bearing PATH1 packet.
+    Vpl2Outcome vpl2Run(const Vpl2Stream &in, bool staged, uint32_t jitterUs)
+    {
+        Vpl2Outcome out;
+        ps2_mtvu::setModeForTest(staged ? ps2_mtvu::Mode::Threaded : ps2_mtvu::Mode::Off, false, jitterUs);
+        PS2Memory mem;
+        if (!mem.initialize())
+            return out;
+        mem.vif1_regs = in.regs;
+        std::memcpy(mem.getVU1Data(), in.vu1Data.data(), PS2_VU1_DATA_SIZE);
+        std::memcpy(mem.getVU1Code(), in.vu1Code.data(), PS2_VU1_CODE_SIZE);
+        if (in.path3Masked)
+        {
+            // PATH3 masked at stream start (captures). A pending PATH2 image
+            // at capture start is not restored: both paths start without it.
+            const uint32_t msk = makeVifCmd(0x06u, 0u, 0x8000u);
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&msk), sizeof(msk));
+        }
+        int lastPath = -1;
+        GifArbiter arbiter([&](const uint8_t *data, uint32_t size)
+                           { out.packets.emplace_back(lastPath, std::vector<uint8_t>(data, data + size)); });
+        arbiter.setPacketListener([&](GifPathId path, uint32_t) { lastPath = static_cast<int>(path); });
+        mem.setGifArbiter(&arbiter);
+        auto program = [&](uint32_t startPC, uint32_t top, uint32_t itop, bool cnt)
+        {
+            uint8_t *vu = mem.getVU1Data();
+            const uint64_t d = vpl2Digest(vu, PS2_VU1_DATA_SIZE) ^
+                               (vpl2Digest(mem.getVU1Code(), PS2_VU1_CODE_SIZE) * 3ull);
+            out.atMscal.push_back(d ^ (static_cast<uint64_t>(startPC) << 1) ^ (static_cast<uint64_t>(top) << 20) ^
+                                  (static_cast<uint64_t>(itop) << 40) ^ (cnt ? 1ull : 0ull));
+            for (uint32_t k = 0; k < 3u; ++k)
+            {
+                const uint32_t q = (top + 7u + k * 5u + (itop & 3u)) & 0x3FFu;
+                const uint64_t v[2] = {d + k, d ^ (static_cast<uint64_t>(q) << 17)};
+                std::memcpy(vu + q * 16u, v, 16u); // program output near TOP
+            }
+            const uint32_t c = (static_cast<uint32_t>(d) % 40u);
+            uint32_t w = static_cast<uint32_t>(d >> 32);
+            std::memcpy(vu + c * 16u + 4u * (d & 3u), &w, 4u); // one lane of state (RMW class)
+            const uint64_t pkt[4] = {1ull | (1ull << 15) | (1ull << 60), 0xEull, d, 0x42ull};
+            mem.submitGifPacket(GifPathId::Path1, reinterpret_cast<const uint8_t *>(pkt), sizeof(pkt));
+        };
+        mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
+                                { program(startPC, top, itop, false); });
+        mem.setVu1MscntCallback([&](uint32_t top, uint32_t itop) { program(0u, top, itop, true); });
+        if (staged)
+        {
+            ps2_mtvu::startGifStage([&mem](ps2_mtvu::GifOp &op) { mem.execGifStageOp(op); });
+            ps2_mtvu::startVifStage(&PS2Memory::execVifStageRec, &mem);
+        }
+        mem.vif1_regs = in.regs;
+        for (const std::vector<uint8_t> &b : in.bufs)
+        {
+            if (staged)
+                ps2_mtvu::submit([&mem, &b]() { mem.processVIF1Data(b.data(), static_cast<uint32_t>(b.size())); },
+                                 b.size(), 0u, true);
+            else
+                mem.processVIF1Data(b.data(), static_cast<uint32_t>(b.size()));
+        }
+        ps2_mtvu::syncAll();
+        if (staged)
+        {
+            ps2_mtvu::stopVifStage();
+            ps2_mtvu::stopGifStage();
+        }
+        out.vu1Data.assign(mem.getVU1Data(), mem.getVU1Data() + PS2_VU1_DATA_SIZE);
+        out.vu1Code.assign(mem.getVU1Code(), mem.getVU1Code() + PS2_VU1_CODE_SIZE);
+        out.regs = mem.vif1_regs;
+        out.masked = mem.isPath3Masked();
+        ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+        mem.setGifArbiter(nullptr);
+        return out;
+    }
+
+    // Index of the first differing MSCAL digest (size of the shorter if none).
+    size_t vpl2FirstMismatch(const Vpl2Outcome &a, const Vpl2Outcome &b)
+    {
+        const size_t n = std::min(a.atMscal.size(), b.atMscal.size());
+        for (size_t i = 0; i < n; ++i)
+            if (a.atMscal[i] != b.atMscal[i])
+                return i;
+        return n;
+    }
+
+    // Random VIF1 streams over every command the loop decodes.
+    Vpl2Stream vpl2Synthetic(uint32_t seed, size_t buffers)
+    {
+        Vpl2Stream s;
+        uint64_t x = 0x243F6A8885A308D3ull ^ seed;
+        auto rnd = [&]() -> uint32_t
+        {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            return static_cast<uint32_t>(x >> 11);
+        };
+        s.vu1Data.resize(PS2_VU1_DATA_SIZE);
+        s.vu1Code.resize(PS2_VU1_CODE_SIZE);
+        for (auto &b : s.vu1Data)
+            b = static_cast<uint8_t>(rnd());
+        for (auto &b : s.vu1Code)
+            b = static_cast<uint8_t>(rnd());
+        uint32_t cycle = 0x0404u; // generator's view of CYCLE (for UNPACK sizes)
+        uint32_t pendingImage = 0u;
+        for (size_t bi = 0; bi < buffers; ++bi)
+        {
+            std::vector<uint8_t> v;
+            if (pendingImage != 0u)
+            {
+                // Image data continuing a DIRECT from an earlier buffer.
+                const uint32_t qw = std::min<uint32_t>(pendingImage, 1u + rnd() % 3u);
+                for (uint32_t i = 0; i < qw * 4u; ++i)
+                    appendU32(v, rnd());
+                pendingImage -= qw;
+            }
+            const uint32_t cmds = 1u + rnd() % 24u;
+            for (uint32_t c = 0; c < cmds; ++c)
+            {
+                const uint32_t pick = rnd() % 100u;
+                if (pick < 40u)
+                {
+                    // UNPACK: every vn/vl, mask bit, TOPS / zero-extend flags.
+                    const uint32_t vn = rnd() % 4u, vl = rnd() % 4u;
+                    const bool m = (rnd() % 3u) == 0u;
+                    const uint8_t opcode = static_cast<uint8_t>(0x60u | (m ? 0x10u : 0u) | (vn << 2) | vl);
+                    uint32_t num = 1u + rnd() % 48u;
+                    if (rnd() % 40u == 0u)
+                        num = 0u; // 256 vectors
+                    uint16_t imm = static_cast<uint16_t>(rnd() & 0x3FFu);
+                    if (rnd() & 1u)
+                        imm |= 0x8000u;
+                    if (rnd() & 1u)
+                        imm |= 0x4000u;
+                    appendU32(v, makeVifCmd(opcode, static_cast<uint8_t>(num), imm));
+                    const int comps = static_cast<int>(vn) + 1;
+                    const int bpc = vl == 0u ? 32 : vl == 1u ? 16 : vl == 2u ? 8 : (vn == 3u ? 4 : 16);
+                    const uint32_t bpv = static_cast<uint32_t>(((vl == 3u && vn == 3u) ? 16 : comps * bpc) + 7) / 8u;
+                    const uint32_t writes = num == 0u ? 256u : num;
+                    uint32_t cl = cycle & 0xFFu, wl = (cycle >> 8) & 0xFFu;
+                    cl = cl ? cl : 1u;
+                    wl = wl ? wl : 1u;
+                    uint32_t srcN = writes;
+                    if (cl < wl)
+                        srcN = (writes / wl) * cl + std::min(writes % wl, cl);
+                    uint32_t bytes = (srcN * bpv + 3u) & ~3u;
+                    if (c + 1u == cmds && rnd() % 25u == 0u && bytes > 8u)
+                        bytes -= 8u; // truncated payload at the buffer end
+                    for (uint32_t i = 0; i < bytes / 4u; ++i)
+                        appendU32(v, rnd());
+                }
+                else if (pick < 46u)
+                {
+                    static const uint16_t cycles[] = {0x0101, 0x0404, 0x0103, 0x0301, 0x0302, 0x0203, 0x0204,
+                                                      0x0402, 0x0000, 0x0100, 0x0001, 0x0305};
+                    cycle = cycles[rnd() % (sizeof(cycles) / sizeof(cycles[0]))];
+                    appendU32(v, makeVifCmd(0x01u, 0u, static_cast<uint16_t>(cycle)));
+                }
+                else if (pick < 51u)
+                {
+                    appendU32(v, makeVifCmd(0x20u, 0u, 0u));
+                    appendU32(v, (rnd() % 4u == 0u) ? 0u : rnd());
+                }
+                else if (pick < 55u)
+                    appendU32(v, makeVifCmd(0x05u, 0u, static_cast<uint16_t>(rnd() % 4u)));
+                else if (pick < 58u)
+                {
+                    appendU32(v, makeVifCmd((rnd() & 1u) ? 0x30u : 0x31u, 0u, 0u));
+                    for (int i = 0; i < 4; ++i)
+                        appendU32(v, rnd());
+                }
+                else if (pick < 62u)
+                    appendU32(v, makeVifCmd((rnd() & 1u) ? 0x02u : 0x03u, 0u, static_cast<uint16_t>(rnd() & 0x3FFu)));
+                else if (pick < 64u)
+                    appendU32(v, makeVifCmd(0x04u, 0u, static_cast<uint16_t>(rnd() & 0x3FFu)));
+                else if (pick < 75u)
+                {
+                    static const uint8_t ms[] = {0x14u, 0x15u, 0x17u};
+                    appendU32(v, makeVifCmd(ms[rnd() % 3u], 0u, static_cast<uint16_t>(rnd() & 0x7FFu)));
+                }
+                else if (pick < 78u)
+                {
+                    const uint32_t n = 1u + rnd() % 8u;
+                    appendU32(v, makeVifCmd(0x4Au, static_cast<uint8_t>(n), static_cast<uint16_t>(rnd() % 2100u)));
+                    for (uint32_t i = 0; i < n * 2u; ++i)
+                        appendU32(v, rnd());
+                }
+                else if (pick < 83u)
+                    appendU32(v, makeVifCmd(0x06u, 0u, (rnd() & 1u) ? 0x8000u : 0u));
+                else if (pick < 88u && pendingImage == 0u)
+                {
+                    // DIRECT/DIRECTHL: an A+D packet, or an IMAGE tag whose data
+                    // runs past this buffer (pending continuation).
+                    const bool image = (rnd() % 3u) == 0u;
+                    appendU32(v, makeVifCmd((rnd() & 1u) ? 0x50u : 0x51u, 0u, 2u));
+                    uint64_t tag[2] = {1ull | (1ull << 15) | (1ull << 60), 0xEull};
+                    if (image)
+                    {
+                        const uint32_t nloop = 2u + rnd() % 6u; // 1 qw here, the rest pending
+                        tag[0] = static_cast<uint64_t>(nloop) | (1ull << 15) | (2ull << 58);
+                        tag[1] = 0u;
+                        pendingImage = nloop - 1u;
+                    }
+                    for (int i = 0; i < 2; ++i)
+                    {
+                        appendU32(v, static_cast<uint32_t>(tag[i]));
+                        appendU32(v, static_cast<uint32_t>(tag[i] >> 32));
+                    }
+                    for (int i = 0; i < 4; ++i)
+                        appendU32(v, rnd());
+                    if (image)
+                        break; // an IMAGE tag ends its buffer; the data continues in the next
+                }
+                else if (pick < 92u)
+                    appendU32(v, makeVifCmd(0x07u, 0u, static_cast<uint16_t>(rnd())));
+                else if (pick < 95u)
+                    appendU32(v, makeVifCmd((rnd() & 1u) ? 0x10u : 0x13u, 0u, 0u));
+                else if (pick < 97u)
+                    appendU32(v, makeVifCmd(0x09u, 0u, 0u)); // unknown opcode
+                else
+                    appendU32(v, 0x80000000u | makeVifCmd(0x00u, 0u, 0u)); // NOP with IRQ
+            }
+            s.bufs.push_back(std::move(v));
+        }
+        s.regs.cycle = 0x0404u;
+        return s;
+    }
+
+    // A PS2X_VPL2_VIFCAP capture (see ps2_vif1_interpreter.cpp); false if unreadable.
+    bool vpl2LoadCapture(const char *path, Vpl2Stream &s)
+    {
+        FILE *f = std::fopen(path, "rb");
+        if (!f)
+            return false;
+        char magic[8] = {};
+        uint32_t regBytes = 0;
+        uint8_t flags[4] = {};
+        bool ok = std::fread(magic, 1, 8, f) == 8 && std::memcmp(magic, "VPL2CAP1", 8) == 0 &&
+                  std::fread(&regBytes, 4, 1, f) == 1 && regBytes == sizeof(VIFRegisters) &&
+                  std::fread(&s.regs, sizeof(VIFRegisters), 1, f) == 1 &&
+                  std::fread(&s.pendingQwc, 4, 1, f) == 1 && std::fread(flags, 1, 4, f) == 4;
+        s.pendingHl = flags[0] != 0u;
+        s.path3Masked = flags[1] != 0u;
+        s.vu1Data.resize(PS2_VU1_DATA_SIZE);
+        s.vu1Code.resize(PS2_VU1_CODE_SIZE);
+        ok = ok && std::fread(s.vu1Data.data(), 1, PS2_VU1_DATA_SIZE, f) == PS2_VU1_DATA_SIZE &&
+             std::fread(s.vu1Code.data(), 1, PS2_VU1_CODE_SIZE, f) == PS2_VU1_CODE_SIZE;
+        uint32_t size = 0;
+        while (ok && std::fread(&size, 4, 1, f) == 1)
+        {
+            std::vector<uint8_t> b(size);
+            if (std::fread(b.data(), 1, size, f) != size)
+                break;
+            s.bufs.push_back(std::move(b));
+        }
+        std::fclose(f);
+        return ok;
+    }
+
+
     void appendU64(std::vector<uint8_t> &dst, uint64_t value)
     {
         const size_t pos = dst.size();
         dst.resize(pos + sizeof(uint64_t));
         std::memcpy(dst.data() + pos, &value, sizeof(uint64_t));
+    }
+
+    uint32_t vu1LaneU32(PS2Memory &mem, uint32_t row, uint32_t lane)
+    {
+        uint32_t value = 0u;
+        std::memcpy(&value, mem.getVU1Data() + row * 16u + lane * 4u, sizeof(value));
+        return value;
     }
 
     uint64_t makeDmaTag(uint16_t qwc, uint8_t id, uint32_t addr, bool irq = false)
@@ -159,6 +480,112 @@ void register_ps2_memory_tests()
 {
     MiniTest::Case("PS2Memory", [](TestCase &tc)
     {
+        tc.Run("MW1 MTVU waitFor park: no lost wake when the job completes around the sleep", [](TestCase &t)
+        {
+            using W = ps2_mtvu::detail::Worker;
+            t.IsTrue(W::parseWaitPark(nullptr), "unset = park");
+            t.IsTrue(W::parseWaitPark("park"), "park = park");
+            t.IsFalse(W::parseWaitPark("spin"), "spin = spin");
+            t.IsTrue(W::parseWaitPark("bogus"), "unknown = park");
+
+            ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Threaded);
+            W &w = ps2_mtvu::detail::worker();
+            const int mode0 = w.waitPark;
+            for (int park : {1, 0})
+            {
+                w.waitPark = park;
+                const char *arm = park ? "park" : "spin";
+                // Case A: the job finishes after the spin gives up and before
+                // waitFor takes the lock (the hook forces that order).
+                {
+                    std::atomic<bool> gate{false};
+                    ps2_mtvu::submit([&gate] {
+                        while (!gate.load(std::memory_order_acquire))
+                            std::this_thread::yield();
+                    }, 0u, 0u);
+                    const uint64_t target = w.submitted.load(std::memory_order_relaxed);
+                    bool hookRan = false;
+                    w.testBeforePark = [&] {
+                        hookRan = true;
+                        gate.store(true, std::memory_order_release);
+                        while (w.completed.load(std::memory_order_acquire) < target)
+                            std::this_thread::yield();
+                    };
+                    const uint64_t parks0 = w.waitParks;
+                    auto f = std::async(std::launch::async, [&w, target] { return w.waitFor(target); });
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    if (!done)
+                    {
+                        gate.store(true);
+                        f.wait();
+                    }
+                    w.testBeforePark = nullptr;
+                    t.IsTrue(done, std::string(arm) + ": completion between spin and sleep is not lost");
+                    t.IsTrue(hookRan, std::string(arm) + ": the wait reached the sleep path");
+                    t.Equals(w.waitParks, parks0, std::string(arm) + ": already complete under the lock, no sleep");
+                }
+                // Case B: the job finishes while the waiter sleeps.
+                {
+                    std::atomic<bool> gate{false};
+                    ps2_mtvu::submit([&gate] {
+                        while (!gate.load(std::memory_order_acquire))
+                            std::this_thread::yield();
+                    }, 0u, 0u);
+                    const uint64_t target = w.submitted.load(std::memory_order_relaxed);
+                    const uint64_t parks0 = w.waitParks;
+                    auto f = std::async(std::launch::async, [&w, target] { return w.waitFor(target); });
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    gate.store(true, std::memory_order_release);
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    if (done)
+                        t.IsTrue(f.get() > 0u, std::string(arm) + ": waited ns reported");
+                    else
+                        f.wait();
+                    t.IsTrue(done, std::string(arm) + ": a sleeping waiter is woken by the completion");
+                    t.Equals(w.waitParks, parks0 + 1u, std::string(arm) + ": the waiter slept once");
+                    t.IsTrue(w.completed.load() >= target, std::string(arm) + ": completed reached target");
+                }
+            }
+            w.waitPark = mode0;
+            ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+        });
+
+        tc.Run("MQ3 VIF1_STAT write skips the unit sync with PS2X_MTVU_VIF1_STAT_FREE", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Threaded);
+            ps2_mtvu::detail::g_vif1StatFree.store(true);
+            ps2_mtvu::detail::Worker &w = ps2_mtvu::detail::worker();
+            std::atomic<bool> gate{false};
+            ps2_mtvu::submit([&gate] {
+                while (!gate.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+            }, 0u, 0u);
+            const uint64_t free0 = ps2_mtvu::detail::g_vif1StatFreePending.load();
+            auto f = std::async(std::launch::async, [&mem] { mem.write32(0x10003C00u, 0x800000u); });
+            const bool returned = f.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+            t.IsTrue(returned, "STAT write returns while a unit job is queued");
+            t.IsTrue(w.pending(), "the job is still queued");
+            t.Equals(ps2_mtvu::detail::g_vif1StatFreePending.load(), free0 + 1u, "counted as a skipped pending sync");
+            t.Equals(mem.read32(0x10003C00u), 0x800000u, "the value is stored");
+            // A VIF1 register with unit-owned state (FBRST) still waits.
+            std::atomic<bool> fbrstDone{false};
+            auto g = std::async(std::launch::async, [&mem, &fbrstDone] {
+                mem.write32(0x10003C10u, 0x8u);
+                fbrstDone.store(true);
+            });
+            const bool fbrstEarly = g.wait_for(std::chrono::milliseconds(50)) == std::future_status::ready;
+            t.IsFalse(fbrstEarly, "FBRST write waits for the unit");
+            gate.store(true, std::memory_order_release);
+            if (!returned)
+                f.wait();
+            g.wait();
+            t.IsTrue(fbrstDone.load(), "FBRST write completes after the drain");
+            ps2_mtvu::detail::g_vif1StatFree.store(false);
+            ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+        });
+
         tc.Run("uncached aliases map to same RDRAM bytes", [](TestCase &t)
         {
             PS2Memory mem;
@@ -177,6 +604,33 @@ void register_ps2_memory_tests()
 
             mem.write32(0x30103000u, 0x2468ACE0u);
             t.Equals(mem.read32(0x00103000u), 0x2468ACE0u, "writes through 0x3010 alias should land in base RDRAM");
+        });
+
+        // MP1 L1: VU1 data can live in an external buffer (the microVU
+        // library's memory); bytes move there and back, EE access follows.
+        tc.Run("MP1 VU1 data adopts an external buffer and moves back", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *owned = mem.getVU1Data();
+            for (uint32_t i = 0; i < PS2_VU1_DATA_SIZE; ++i)
+                owned[i] = static_cast<uint8_t>(i * 7u + 3u);
+            std::vector<uint8_t> ext(PS2_VU1_DATA_SIZE, 0u);
+            mem.adoptExternalVU1Data(ext.data());
+            t.IsTrue(mem.getVU1Data() == ext.data(), "getVU1Data should return the adopted buffer");
+            t.IsTrue(mem.vu1DataExternal(), "adopted buffer should report external");
+            bool same = true;
+            for (uint32_t i = 0; i < PS2_VU1_DATA_SIZE; ++i)
+                same = same && ext[i] == static_cast<uint8_t>(i * 7u + 3u);
+            t.IsTrue(same, "adopt should move the current bytes");
+            mem.write32(PS2_VU1_DATA_BASE + 0x100u, 0xCAFEF00Du);
+            uint32_t v = 0;
+            std::memcpy(&v, ext.data() + 0x100u, sizeof(v));
+            t.Equals(v, 0xCAFEF00Du, "EE writes should land in the adopted buffer");
+            mem.adoptExternalVU1Data(nullptr);
+            t.IsTrue(mem.getVU1Data() == owned, "release should return to the owned buffer");
+            t.IsTrue(!mem.vu1DataExternal(), "owned buffer should not report external");
+            t.Equals(mem.read32(PS2_VU1_DATA_BASE + 0x100u), 0xCAFEF00Du, "release should move the bytes back");
         });
 
         tc.Run("translateAddress handles kseg and uncached aliases", [](TestCase &t)
@@ -306,6 +760,73 @@ void register_ps2_memory_tests()
             mem.writeIORegister(kTimer0Mode, kZret | kCue | kCmpe | kEquf);
 
             t.Equals(mem.advanceEeTimers(6u), 1u, "Timer0 compare should raise TIM0 after three BUSCLK ticks");
+            t.Equals(mem.readIORegister(kTimer0Count), 0u, "ZRET should clear COUNT when it equals COMP");
+        });
+
+        tc.Run("EE1 deferred timers match eager service across checkpoint-size steps", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kTimer0Count = 0x10000000u;
+            constexpr uint32_t kTimer0Mode = 0x10000010u;
+            constexpr uint32_t kTimer0Compare = 0x10000020u;
+            constexpr uint32_t kZret = 1u << 6u;
+            constexpr uint32_t kCue = 1u << 7u;
+            constexpr uint32_t kCmpe = 1u << 8u;
+            constexpr uint32_t kOvfe = 1u << 9u;
+            constexpr uint32_t kEquf = 1u << 10u;
+            constexpr uint32_t kOvff = 1u << 11u;
+            constexpr uint32_t kBusClockDiv256 = 2u;
+
+            // Far event (COMP=100 at 512 cycles/tick): early 512-cycle steps
+            // must defer (pending grows, no mask), reads stay exact.
+            mem.writeIORegister(kTimer0Count, 0u);
+            mem.writeIORegister(kTimer0Compare, 100u);
+            mem.writeIORegister(kTimer0Mode, kBusClockDiv256 | kCue | kCmpe | kEquf | kOvff);
+            for (uint32_t step = 0u; step < 10u; ++step)
+            {
+                t.Equals(mem.advanceEeTimers(512u), 0u, "no interrupt while the event is far");
+            }
+            t.IsTrue(mem.m_eeTimerPending > 0u, "far-event windows should defer service");
+            t.Equals(mem.readIORegister(kTimer0Count), 10u, "reads flush deferred cycles exactly");
+            t.Equals(mem.m_eeTimerPending, 0u, "reads drain the pending window");
+            t.Equals(mem.cyclesUntilNextEeTimerInterrupt(), 90u * 512u,
+                     "the idle deadline accounts for flushed cycles");
+
+            // Run to the compare: the mask must fire on the exact step an
+            // eager implementation would fire (tick 100), with EQUF latched.
+            uint32_t firedStep = 0u;
+            for (uint32_t step = 0u; step < 95u; ++step)
+            {
+                const uint32_t mask = mem.advanceEeTimers(512u);
+                if (mask != 0u)
+                {
+                    firedStep = step + 1u;
+                    t.Equals(mask, 1u, "Timer0 compare should raise TIM0");
+                    break;
+                }
+            }
+            t.Equals(firedStep, 90u, "compare should fire after exactly 90 more ticks");
+            t.IsTrue((mem.readIORegister(kTimer0Mode) & kEquf) != 0u, "compare should latch EQUF");
+            t.Equals(mem.readIORegister(kTimer0Count), 100u, "COUNT should sit on COMP at the event");
+
+            // Overflow path under deferral: wrap, OVFF latch, TIM bit.
+            mem.writeIORegister(kTimer0Count, 0xFFFEu);
+            mem.writeIORegister(kTimer0Compare, 0xFFFFu);
+            mem.writeIORegister(kTimer0Mode, kBusClockDiv256 | kCue | kOvfe | kEquf | kOvff);
+            t.Equals(mem.advanceEeTimers(512u), 0u, "no overflow on the first tick");
+            t.Equals(mem.advanceEeTimers(512u), 1u, "Timer0 overflow should raise TIM0");
+            t.Equals(mem.readIORegister(kTimer0Count), 0u, "COUNT should wrap at 16 bits");
+            t.IsTrue((mem.readIORegister(kTimer0Mode) & kOvff) != 0u, "overflow should latch OVFF");
+
+            // ZRET reset firing mid-window must land on the same COUNT.
+            mem.writeIORegister(kTimer0Count, 0u);
+            mem.writeIORegister(kTimer0Compare, 3u);
+            mem.writeIORegister(kTimer0Mode, kBusClockDiv256 | kZret | kCue | kCmpe | kEquf | kOvff);
+            t.Equals(mem.advanceEeTimers(512u), 0u, "first ZRET tick should not fire");
+            t.Equals(mem.advanceEeTimers(512u), 0u, "second ZRET tick should not fire");
+            t.Equals(mem.advanceEeTimers(512u), 1u, "ZRET compare should raise TIM0 on tick 3");
             t.Equals(mem.readIORegister(kTimer0Count), 0u, "ZRET should clear COUNT when it equals COMP");
         });
 
@@ -440,6 +961,173 @@ void register_ps2_memory_tests()
             t.IsTrue(matches, "UNPACK num=0 should copy 256 V4_32 vectors (4096 bytes)");
         });
 
+        tc.Run("VIF FAST_UNPACK V4_32 bulk wraps at VU end", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xCC, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V4-32, NUM=4, addr=0x3FE => vecs 0x3FE, 0x3FF, 0, 1.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Cu, 4u, 0x03FEu));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                appendU32(packet, 0x10000000u + i);
+            }
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            bool matches = true;
+            const uint32_t vecs[4] = {0x3FEu, 0x3FFu, 0u, 1u};
+            for (uint32_t v = 0; v < 4u && matches; ++v)
+            {
+                for (uint32_t c = 0; c < 4u; ++c)
+                {
+                    uint32_t got = 0u;
+                    std::memcpy(&got, vu + vecs[v] * 16u + c * 4u, 4u);
+                    if (got != 0x10000000u + v * 4u + c)
+                    {
+                        matches = false;
+                        break;
+                    }
+                }
+            }
+            t.IsTrue(matches, "bulk path should wrap the destination at vector 0x400");
+            uint32_t neighbor = 0u;
+            std::memcpy(&neighbor, vu + 2u * 16u, 4u);
+            t.Equals(neighbor, 0xCCCCCCCCu, "vector past the wrapped run stays untouched");
+        });
+
+        tc.Run("VIF FAST_UNPACK honors TOPS-relative destination", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            mem.vif1_regs.tops = 0x3FFu;
+
+            // UNPACK V4-32, NUM=2, addr=0 +TOPS => vecs 0x3FF, 0.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Cu, 2u, 0x8000u));
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                appendU32(packet, 0x20000000u + i);
+            }
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            uint32_t first = 0u, wrapped = 0u;
+            std::memcpy(&first, vu + 0x3FFu * 16u, 4u);
+            std::memcpy(&wrapped, vu + 0u, 4u);
+            t.Equals(first, 0x20000000u, "TOPS-relative first vector");
+            t.Equals(wrapped, 0x20000004u, "TOPS-relative run wraps to vector 0");
+        });
+
+        tc.Run("VIF FAST_UNPACK treats all-data mask as bulk", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x20u, 0u, 0u)); // STMASK
+            appendU32(packet, 0x00000000u);              // every selector = data
+            appendU32(packet, makeVifCmd(0x7Cu, 2u, 0u)); // UNPACK V4-32, mask enable
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                appendU32(packet, 0x30000000u + i);
+            }
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            bool matches = true;
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                uint32_t got = 0u;
+                std::memcpy(&got, vu + i * 4u, 4u);
+                if (got != 0x30000000u + i)
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            t.IsTrue(matches, "all-data mask should store source bytes verbatim");
+        });
+
+        tc.Run("VIF masked UNPACK row fill stays exact under cycle diet", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x20u, 0u, 0u)); // STMASK
+            appendU32(packet, 0x55555555u);              // every selector = row
+            appendU32(packet, makeVifCmd(0x30u, 0u, 0u)); // STROW
+            appendU32(packet, 0xAAAA0001u);
+            appendU32(packet, 0xAAAA0002u);
+            appendU32(packet, 0xAAAA0003u);
+            appendU32(packet, 0xAAAA0004u);
+            appendU32(packet, makeVifCmd(0x7Cu, 2u, 0u)); // UNPACK V4-32, mask enable
+            for (uint32_t i = 0; i < 8u; ++i)
+            {
+                appendU32(packet, 0x40000000u + i);
+            }
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            bool matches = true;
+            for (uint32_t v = 0; v < 2u && matches; ++v)
+            {
+                for (uint32_t c = 0; c < 4u; ++c)
+                {
+                    uint32_t got = 0u;
+                    std::memcpy(&got, vu + v * 16u + c * 4u, 4u);
+                    if (got != 0xAAAA0001u + c)
+                    {
+                        matches = false;
+                        break;
+                    }
+                }
+            }
+            t.IsTrue(matches, "row-fill mask should ignore source on every lane");
+        });
+
+        tc.Run("VIF 4x4 UNPACK with full protect mask leaves memory untouched", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xCC, PS2_VU1_DATA_SIZE);
+
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x01u, 0u, 0x0404u)); // STCYCL 4x4
+            appendU32(packet, makeVifCmd(0x20u, 0u, 0u));      // STMASK
+            appendU32(packet, 0xFFFFFFFFu);                   // every selector = protect
+            appendU32(packet, makeVifCmd(0x7Cu, 4u, 0u));      // UNPACK V4-32, mask enable
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                appendU32(packet, 0x50000000u + i);
+            }
+
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu = mem.getVU1Data();
+            bool untouched = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (vu[i] != 0xCCu)
+                {
+                    untouched = false;
+                    break;
+                }
+            }
+            t.IsTrue(untouched, "protect mask on 4x4 should write nothing");
+        });
+
         tc.Run("VIF control commands update MARK MASK ROW and COL registers", [](TestCase &t)
         {
             PS2Memory mem;
@@ -529,6 +1217,38 @@ void register_ps2_memory_tests()
             t.Equals(sy, 0x00000001u, "zero-extend y");
             t.Equals(sz, 0x00007FFFu, "zero-extend z");
             t.Equals(sw, 0x00008001u, "zero-extend w");
+        });
+
+        tc.Run("VIF UNPACK V4-5 expands RGBA5551 to 8-bit channels", [](TestCase &t)
+        {
+            // RR1: SSX 3 unpacks vertex colours as V4-5; 5-bit channels land
+            // as c << 3 and the 1-bit alpha as a << 7 (0x80), not raw bits.
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V4-5 (opcode 0x6F), num=2, addr=0.
+            const uint16_t colours[2] = {
+                static_cast<uint16_t>(0x8000u | (0x1Fu << 10) | (0x10u << 5) | 0x04u),
+                0x7FFFu};
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Fu, 2u, 0x0000u));
+            const size_t pos = packet.size();
+            packet.resize(pos + sizeof(colours));
+            std::memcpy(packet.data() + pos, colours, sizeof(colours));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            const uint8_t *vu1 = mem.getVU1Data();
+            uint32_t v[8] = {};
+            std::memcpy(v, vu1, sizeof(v));
+            t.Equals(v[0], 0x20u, "R = 4 << 3");
+            t.Equals(v[1], 0x80u, "G = 16 << 3");
+            t.Equals(v[2], 0xF8u, "B = 31 << 3");
+            t.Equals(v[3], 0x80u, "A = 1 << 7");
+            t.Equals(v[4], 0xF8u, "second R");
+            t.Equals(v[5], 0xF8u, "second G");
+            t.Equals(v[6], 0xF8u, "second B");
+            t.Equals(v[7], 0x00u, "second A clear");
         });
 
         tc.Run("VIF UNPACK bit15 adds TOPS to destination address", [](TestCase &t)
@@ -847,6 +1567,90 @@ void register_ps2_memory_tests()
             t.Equals(mem.vif1_regs.tops, 0x30u, "DBF=0 should restore TOPS to BASE");
         });
 
+        tc.Run("E7 byte budget reserves the boundary after boot exhaustion", [](TestCase &t)
+        {
+            ps2_e7::Budget b;
+            t.IsTrue(b.admit(ps2_e7::kBootBytes, false), "exact boot limit fits");
+            t.IsFalse(b.admit(1u, false), "boot overflow is refused");
+            t.IsTrue(b.bootTruncated, "boot overflow is explicit");
+            t.IsTrue(b.admit(ps2_e7::kWindowBytes, true), "boundary remains available");
+            t.IsFalse(b.admit(1u, true), "boundary overflow is refused");
+            t.IsTrue(b.boundaryTruncated, "boundary overflow is explicit");
+            t.IsTrue(ps2_e7::window(599u) && ps2_e7::window(603u), "adjacent boundaries included");
+            t.IsFalse(ps2_e7::window(598u) || ps2_e7::window(604u), "window does not leak");
+        });
+
+        tc.Run("CPU VIF1 quadword FIFO consumes commands in word order", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            const uint32_t setMask = makeVifCmd(0x06u, 0u, 0x8000u);
+            const uint32_t clearMask = makeVifCmd(0x06u, 0u, 0u);
+            mem.write128(0x10005000u, _mm_set_epi32(0, 0, 0, static_cast<int>(setMask)));
+            t.IsTrue(mem.isPath3Masked(), "CPU SQ should reach MSKPATH3, not inert MMIO storage");
+            const uint32_t markA = makeVifCmd(0x07u, 0u, 0x1234u);
+            const uint32_t markB = makeVifCmd(0x07u, 0u, 0x5678u);
+            mem.write128(0x10005000u, _mm_set_epi32(static_cast<int>(markB), static_cast<int>(clearMask), static_cast<int>(markA), static_cast<int>(setMask)));
+            t.IsFalse(mem.isPath3Masked(), "later command in the same quadword should clear the mask");
+            t.Equals(mem.vif1_regs.mark, 0x5678u, "all four command words should run in FIFO order");
+        });
+
+        tc.Run("CPU VIF1 unmask flushes PATH3 before following normal GIF DMA once", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t bytes)
+            {
+                captured.emplace_back(data, data + bytes);
+            });
+            const uint32_t setMask = makeVifCmd(0x06u, 0u, 0x8000u);
+            const uint32_t clearMask = makeVifCmd(0x06u, 0u, 0u);
+            const std::vector<uint8_t> a(16u, 0x11u), b(16u, 0x22u), c(16u, 0x33u);
+            // Same prior condition as E7b: a decoded stream has masked PATH3.
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&setMask), sizeof(setMask));
+            mem.submitGifPacket(GifPathId::Path3, a.data(), static_cast<uint32_t>(a.size()));
+            mem.submitGifPacket(GifPathId::Path3, b.data(), static_cast<uint32_t>(b.size()));
+            t.Equals(captured.size(), size_t(0), "prior PATH3 packets should be retained while masked");
+            mem.write128(0x10005000u, _mm_set_epi32(0, 0, 0, static_cast<int>(clearMask)));
+            t.IsFalse(mem.isPath3Masked(), "CPU unmask should clear the interpreted-stream mask");
+            t.Equals(captured.size(), size_t(2), "CPU unmask should flush both older packets");
+            if (captured.size() == 2u)
+                t.IsTrue(captured[0] == a && captured[1] == b, "older packets should preserve FIFO order");
+            mem.write128(0x10005000u, _mm_set_epi32(0, 0, 0, static_cast<int>(clearMask)));
+            t.Equals(captured.size(), size_t(2), "repeated unmask must not replay retained packets");
+            mem.write128(0x2000u, _mm_loadu_si128(reinterpret_cast<const __m128i *>(c.data())));
+            mem.write32(0x1000a010u, 0x2000u);
+            mem.write32(0x1000a020u, 1u);
+            mem.write32(0x1000a000u, 0x101u);
+            t.Equals(captured.size(), size_t(3), "following normal GIF DMA should deliver after the flush");
+            if (captured.size() == 3u)
+                t.IsTrue(captured[0] == a && captured[1] == b && captured[2] == c, "CPU and DMA ingress must preserve packet order");
+            t.Equals(mem.read32(0x1000a020u), 0u, "normal DMA should finish with QWC zero");
+        });
+
+        tc.Run("CPU VIF1 quadword FIFO uses its full page and translated aliases", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            const __m128i mask = _mm_set_epi32(0, 0, 0, static_cast<int>(makeVifCmd(0x06u, 0u, 0x8000u)));
+            const __m128i clear = _mm_set_epi32(0, 0, 0, static_cast<int>(makeVifCmd(0x06u, 0u, 0u)));
+            for (const uint32_t address : {0x10005000u, 0x10005ff0u, 0x90005020u, 0xb0005030u})
+            {
+                mem.write128(address, mask);
+                t.IsTrue(mem.isPath3Masked(), "VIF1 page mirrors and KSEG aliases should feed one FIFO");
+                mem.write128(address, clear);
+                t.IsFalse(mem.isPath3Masked(), "mirror unmask should feed the same VIF1 state");
+            }
+            mem.write128(0x30004000u, mask);
+            t.Equals(mem.read32(0x4000u), makeVifCmd(0x06u, 0u, 0x8000u), "ordinary RAM aliases remain memory writes");
+            t.IsFalse(mem.isPath3Masked(), "RAM contents must not be decoded as FIFO commands");
+            mem.write128(0x10006000u, mask);
+            t.IsFalse(mem.isPath3Masked(), "neighboring GIF FIFO page must not route to VIF1");
+            mem.write64(0x12000070u, 0x9070u);
+            t.Equals(mem.gs().dispfb1, uint64_t(0x9070u), "display MMIO retains its existing behavior");
+        });
+
         tc.Run("VIF MSKPATH3 uses immediate bit15", [](TestCase &t)
         {
             PS2Memory mem;
@@ -859,57 +1663,6 @@ void register_ps2_memory_tests()
             const uint32_t clearMask = makeVifCmd(0x06u, 0u, 0x0000u);
             mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&clearMask), sizeof(clearMask));
             t.IsFalse(mem.isPath3Masked(), "MSKPATH3 with imm bit15 clear should disable PATH3 mask");
-        });
-
-        tc.Run("VIF1 FIFO MSKPATH3 is visible through GIF_STAT", [](TestCase &t)
-        {
-            PS2Memory mem;
-            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
-
-            const uint32_t setMask = makeVifCmd(0x06u, 0u, 0x8000u);
-            const __m128i setPacket = _mm_set_epi32(0, 0, 0, static_cast<int32_t>(setMask));
-            mem.write128(0x10005000u, setPacket);
-            t.IsTrue(mem.isPath3Masked(), "a direct VIF1 FIFO command should execute MSKPATH3");
-            t.IsTrue((mem.readIORegister(0x10003020u) & 0x2u) != 0u,
-                     "GIF_STAT.M3P should report the VIF1 PATH3 mask");
-
-            const uint32_t clearMask = makeVifCmd(0x06u, 0u, 0x0000u);
-            const __m128i clearPacket = _mm_set_epi32(0, 0, 0, static_cast<int32_t>(clearMask));
-            mem.write128(0x10005000u, clearPacket);
-            t.IsFalse(mem.isPath3Masked(), "a direct VIF1 FIFO command should clear MSKPATH3");
-            t.IsTrue((mem.readIORegister(0x10003020u) & 0x2u) == 0u,
-                     "GIF_STAT.M3P should clear with the VIF1 PATH3 mask");
-
-            mem.writeIORegister(0x10003010u, 0x5u); // GIF_MODE: M3R | IMT
-            mem.writeIORegister(0x10003000u, 0x8u); // GIF_CTRL: PSE
-            t.Equals(mem.readIORegister(0x10003020u) & 0xDu, 0xDu,
-                     "GIF_STAT should mirror GIF_MODE and GIF_CTRL status bits");
-        });
-
-        tc.Run("GIF_STAT exposes synchronously drained DMA occupancy for one EE quantum", [](TestCase &t)
-        {
-            PS2Memory mem;
-            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
-
-            constexpr uint32_t kGifChannel = 0x1000A000u;
-            constexpr uint32_t kSource = 0x00020000u;
-            mem.setGifPacketCallback([](const uint8_t *, uint32_t) {});
-
-            t.IsTrue(mem.writeIORegister(kGifChannel + 0x10u, kSource),
-                     "write GIF MADR should succeed");
-            t.IsTrue(mem.writeIORegister(kGifChannel + 0x20u, 1u),
-                     "write GIF QWC should succeed");
-            t.IsTrue(mem.writeIORegister(kGifChannel + 0x00u, 0x100u),
-                     "start GIF normal DMA should succeed");
-
-            const uint32_t visibleFqc = (mem.readIORegister(0x10003020u) >> 24u) & 0x1Fu;
-            t.Equals(visibleFqc, 1u,
-                     "a synchronously consumed qword should remain observable through GIF_STAT.FQC");
-
-            mem.advanceEeTimers(1u);
-            const uint32_t drainedFqc = (mem.readIORegister(0x10003020u) >> 24u) & 0x1Fu;
-            t.Equals(drainedFqc, 0u,
-                     "the synthetic FIFO observation should expire at the next EE scheduling boundary");
         });
 
         tc.Run("PATH3 mask queues packets until unmask", [](TestCase &t)
@@ -954,6 +1707,330 @@ void register_ps2_memory_tests()
             }
             t.IsTrue(firstOk, "first queued PATH3 packet should flush in-order");
             t.IsTrue(secondOk, "second queued PATH3 packet should flush in-order");
+        });
+
+        tc.Run("PATH3 mask releases one EOP packet per MSKPATH3 unmask window", [](TestCase &t)
+        {
+            // RR1: SSX 3 masks PATH3, kicks one GIF chain holding many EOP
+            // packets, then opens MSKPATH3 0/1 windows before each object.
+            // The mask takes effect at the next EOP, so each window passes
+            // exactly one packet; PATH3 left unmasked drains the rest.
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            std::vector<std::vector<uint8_t>> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.emplace_back(data, data + sizeBytes);
+            });
+
+            // Three PACKED A+D packets (tag NLOOP=1 EOP=1 NREG=1 REGS=0xE),
+            // plus a non-EOP tag glued to the last one: 4 tags, 3 EOP packets.
+            auto appendAd = [](std::vector<uint8_t> &out, bool eop, uint64_t value)
+            {
+                const uint64_t tag[2] = {1ull | (eop ? (1ull << 15) : 0ull) | (1ull << 60), 0xEull};
+                const uint64_t ad[2] = {value, 0x42ull}; // ALPHA_1
+                const uint8_t *a = reinterpret_cast<const uint8_t *>(tag);
+                const uint8_t *b = reinterpret_cast<const uint8_t *>(ad);
+                out.insert(out.end(), a, a + 16);
+                out.insert(out.end(), b, b + 16);
+            };
+            std::vector<uint8_t> chain;
+            appendAd(chain, true, 0x11u);
+            appendAd(chain, true, 0x22u);
+            appendAd(chain, false, 0x33u);
+            appendAd(chain, true, 0x44u);
+
+            auto firstValue = [](const std::vector<uint8_t> &packet)
+            {
+                uint64_t v = 0;
+                std::memcpy(&v, packet.data() + 16, sizeof(v));
+                return v;
+            };
+
+            const uint32_t setMask = makeVifCmd(0x06u, 0u, 0x8000u);
+            const uint32_t clearMask = makeVifCmd(0x06u, 0u, 0x0000u);
+            const uint32_t window[2] = {clearMask, setMask};
+
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&setMask), sizeof(setMask));
+            mem.submitGifPacket(GifPathId::Path3, chain.data(), static_cast<uint32_t>(chain.size()));
+            t.Equals(captured.size(), static_cast<size_t>(0u), "masked PATH3 chain should be queued");
+
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(window), sizeof(window));
+            t.Equals(captured.size(), static_cast<size_t>(1u), "one unmask window passes one EOP packet");
+            t.Equals(captured[0].size(), static_cast<size_t>(32u), "first window packet is the first EOP packet");
+            t.Equals(firstValue(captured[0]), uint64_t(0x11u), "first window passes the first packet");
+            t.IsTrue(mem.isPath3Masked(), "PATH3 is masked again after the window");
+
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(window), sizeof(window));
+            t.Equals(captured.size(), static_cast<size_t>(2u), "second window passes the next EOP packet");
+            t.Equals(firstValue(captured[1]), uint64_t(0x22u), "second window passes the second packet");
+
+            mem.processVIF1Data(reinterpret_cast<const uint8_t *>(&clearMask), sizeof(clearMask));
+            t.Equals(captured.size(), static_cast<size_t>(3u), "an unmask left open drains the rest");
+            t.Equals(captured[2].size(), static_cast<size_t>(64u), "a non-EOP tag stays with its packet");
+            t.Equals(firstValue(captured[2]), uint64_t(0x33u), "last packet keeps the non-EOP tag first");
+        });
+
+        tc.Run("MT1 threaded unit gives the synchronous GIF stream, VU1 memory and EE reads", [](TestCase &t)
+        {
+            // MT1 stage 3: the same EE program run synchronously and with the
+            // unit on its worker thread (plus host jitter) must give the same
+            // GIF packet sequence (path + bytes), VU1 data memory, VIF1 state
+            // and every value the "EE" reads back. Covers DMA-from-RDRAM that
+            // the EE overwrites right after the kick, UNPACK -> MSCAL -> PATH1
+            // content, DIRECT (PATH2), masked PATH3 chains with MSKPATH3
+            // windows, VIF1 FIFO writes, EE VU1-memory writes/reads (sync), GS
+            // privileged writes (R2 jobs) and CSR stores (EE-applied).
+            struct Outcome
+            {
+                std::vector<std::pair<int, std::vector<uint8_t>>> packets;
+                std::vector<uint8_t> vu1Data;
+                std::vector<uint64_t> eeReads;
+                uint32_t row0 = 0;
+                bool masked = false;
+                size_t mscals = 0;
+                size_t offThread = 0;
+            };
+            auto run = [](ps2_mtvu::Mode mode, uint32_t jitterUs, bool gifStage = false, bool vifStage = false) -> Outcome
+            {
+                ps2_mtvu::setModeForTest(mode, false, jitterUs);
+                Outcome out;
+                PS2Memory mem;
+                if (!mem.initialize())
+                    return out;
+                // VPL1: the unit's GIF submit on its own thread behind the op ring.
+                if (gifStage)
+                    ps2_mtvu::startGifStage([&mem](ps2_mtvu::GifOp &op) { mem.execGifStageOp(op); });
+                // VPL2: VIF1 parsing on its own thread ahead of the VU side.
+                if (vifStage)
+                    ps2_mtvu::startVifStage(&PS2Memory::execVifStageRec, &mem);
+                int lastPath = -1;
+                GifArbiter arbiter([&](const uint8_t *data, uint32_t size)
+                                   { out.packets.emplace_back(lastPath, std::vector<uint8_t>(data, data + size)); });
+                arbiter.setPacketListener([&](GifPathId path, uint32_t) { lastPath = static_cast<int>(path); });
+                mem.setGifArbiter(&arbiter);
+                const std::thread::id eeThread = std::this_thread::get_id();
+                mem.setVu1MscalCallback([&](uint32_t startPC, uint32_t top, uint32_t itop)
+                {
+                    // Stand-in for a VU1 program with XGKICK: a PATH1 packet
+                    // whose content depends on VU1 data at TOP.
+                    ++out.mscals;
+                    if (std::this_thread::get_id() != eeThread)
+                        ++out.offThread;
+                    const uint8_t *vu = mem.getVU1Data();
+                    uint64_t sum = startPC ^ (static_cast<uint64_t>(itop) << 40);
+                    for (uint32_t q = 0; q < 4u; ++q)
+                    {
+                        uint64_t w = 0;
+                        std::memcpy(&w, vu + ((top + q) & 0x3FFu) * 16u, sizeof(w));
+                        sum = sum * 1000003ull + w;
+                    }
+                    const uint64_t pkt[4] = {1ull | (1ull << 15) | (1ull << 60), 0xEull, sum, 0x42ull};
+                    mem.submitGifPacket(GifPathId::Path1, reinterpret_cast<const uint8_t *>(pkt), sizeof(pkt));
+                });
+                auto appendU32 = [](std::vector<uint8_t> &v, uint32_t x)
+                {
+                    const uint8_t *b = reinterpret_cast<const uint8_t *>(&x);
+                    v.insert(v.end(), b, b + 4);
+                };
+                auto appendAd = [](std::vector<uint8_t> &v, bool eop, uint64_t value)
+                {
+                    const uint64_t q[4] = {1ull | (eop ? (1ull << 15) : 0ull) | (1ull << 60), 0xEull, value, 0x42ull};
+                    const uint8_t *b = reinterpret_cast<const uint8_t *>(q);
+                    v.insert(v.end(), b, b + sizeof(q));
+                };
+                uint8_t *rdram = mem.getRDRAM();
+                constexpr uint32_t kVif1 = 0x10009000u, kGif = 0x1000A000u;
+                constexpr uint32_t kSrc = 0x00100000u, kGifSrc = 0x00180000u;
+                for (uint32_t i = 0; i < 60u; ++i)
+                {
+                    std::vector<uint8_t> v;
+                    appendU32(v, makeVifCmd(0x01u, 0u, 0x0404u));              // STCYCL 4/4
+                    appendU32(v, makeVifCmd(0x03u, 0u, (i * 8u) & 0x3F0u));    // BASE
+                    appendU32(v, makeVifCmd(0x02u, 0u, 0x40u));                // OFFSET
+                    appendU32(v, makeVifCmd(0x6Cu, 4u, 0x8000u));              // UNPACK V4-32, 4 qw, +TOPS
+                    for (uint32_t w = 0; w < 16u; ++w)
+                        appendU32(v, i * 131u + w * 7u);
+                    appendU32(v, makeVifCmd(0x14u, 0u, (i & 7u) * 2u));        // MSCAL
+                    appendU32(v, makeVifCmd(0x06u, 0u, 0x0000u));              // MSKPATH3 0 (window)
+                    appendU32(v, makeVifCmd(0x06u, 0u, 0x8000u));              // MSKPATH3 1
+                    while (v.size() % 16u != 12u)
+                        appendU32(v, 0u);                                      // NOP pad
+                    appendU32(v, makeVifCmd(0x50u, 0u, 2u));                   // DIRECT 2 qw
+                    appendAd(v, true, 0x1000u + i);
+                    while (v.size() % 16u)
+                        appendU32(v, 0u);
+                    std::memcpy(rdram + kSrc, v.data(), v.size());
+                    mem.writeIORegister(kVif1 + 0x10u, kSrc);
+                    mem.writeIORegister(kVif1 + 0x20u, static_cast<uint32_t>(v.size() / 16u));
+                    mem.writeIORegister(kVif1 + 0x00u, 0x101u);
+                    std::memset(rdram + kSrc, 0xCD, v.size()); // EE reuses the buffer at once
+                    if (i % 5u == 0u)
+                    {
+                        std::vector<uint8_t> g;
+                        for (uint32_t k = 0; k < 3u; ++k)
+                            appendAd(g, true, (static_cast<uint64_t>(i) << 8) | k);
+                        std::memcpy(rdram + kGifSrc, g.data(), g.size());
+                        mem.writeIORegister(kGif + 0x10u, kGifSrc);
+                        mem.writeIORegister(kGif + 0x20u, static_cast<uint32_t>(g.size() / 16u));
+                        mem.writeIORegister(kGif + 0x00u, 0x100u);
+                        std::memset(rdram + kGifSrc, 0xEE, g.size());
+                    }
+                    if (i % 2u == 1u)
+                    {
+                        // VIF0-only kick (EE side; its completion must not touch the unit).
+                        std::vector<uint8_t> v0;
+                        appendU32(v0, makeVifCmd(0x01u, 0u, 0x0404u));
+                        appendU32(v0, makeVifCmd(0x00u, 0u, 0u));
+                        appendU32(v0, makeVifCmd(0x00u, 0u, 0u));
+                        appendU32(v0, makeVifCmd(0x00u, 0u, 0u));
+                        std::memcpy(rdram + 0x00140000u, v0.data(), v0.size());
+                        mem.writeIORegister(0x10008010u, 0x00140000u);
+                        mem.writeIORegister(0x10008020u, 1u);
+                        mem.writeIORegister(0x10008000u, 0x101u);
+                    }
+                    if (i % 3u == 0u)
+                        mem.write32(0x1100C000u + ((i * 48u) & 0x3FF0u), 0xA5000000u | i); // VU1 data (sync)
+                    if (i % 4u == 1u)
+                        out.eeReads.push_back(mem.read32(0x1100C000u + ((i * 64u) & 0x3FF0u)));
+                    if (i % 6u == 2u)
+                    {
+                        const uint32_t fifo[4] = {makeVifCmd(0x06u, 0u, 0x0000u), makeVifCmd(0x06u, 0u, 0x8000u), 0u, 0u};
+                        __m128i q;
+                        std::memcpy(&q, fifo, sizeof(q));
+                        mem.write128(0x10005000u, q); // VIF1 FIFO: an unmask window
+                    }
+                    mem.write64(0x12000070u, 0x100000ull + i); // DISPFB1 (R2 job)
+                    mem.write64(0x12001000u, 0x8ull);          // CSR: clear VSINT (EE-applied)
+                    if (i % 7u == 6u)
+                    {
+                        // As PS2Runtime::Load* does before a GS priv read (unmasked).
+                        ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivRead);
+                        out.eeReads.push_back(mem.read64(0x12000070u) ^ (mem.read64(0x12001000u) << 32));
+                    }
+                }
+                ps2_mtvu::syncAll();
+                out.vu1Data.assign(mem.getVU1Data(), mem.getVU1Data() + PS2_VU1_DATA_SIZE);
+                out.row0 = mem.vif1_regs.row[0];
+                out.masked = mem.isPath3Masked();
+                out.eeReads.push_back(mem.gs().dispfb1);
+                if (vifStage)
+                    ps2_mtvu::stopVifStage();
+                if (gifStage)
+                    ps2_mtvu::stopGifStage();
+                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+                mem.setGifArbiter(nullptr);
+                return out;
+            };
+            const Outcome base = run(ps2_mtvu::Mode::Off, 0u);
+            const Outcome thr = run(ps2_mtvu::Mode::Threaded, 0u);
+            const Outcome jit = run(ps2_mtvu::Mode::Threaded, 300u);
+            const Outcome gif = run(ps2_mtvu::Mode::Threaded, 0u, true);
+            const Outcome gifJit = run(ps2_mtvu::Mode::Threaded, 300u, true);
+            const uint64_t vifEscapes0 = ps2_mtvu::vifLog().nEscapes.load();
+            const Outcome vif = run(ps2_mtvu::Mode::Threaded, 0u, true, true);
+            const Outcome vifJit = run(ps2_mtvu::Mode::Threaded, 300u, true, true);
+            t.IsTrue(base.packets.size() > 150u, "scenario should produce a long GIF stream");
+            t.Equals(base.mscals, static_cast<size_t>(60u), "every kick runs its MSCAL");
+            t.Equals(base.offThread, static_cast<size_t>(0u), "synchronous MSCALs run on the EE thread");
+            t.Equals(thr.offThread, static_cast<size_t>(60u), "threaded MSCALs run on the unit worker");
+            t.Equals(ps2_mtvu::detail::worker().violationsTotal, 0ull, "no unit state touched while jobs are queued");
+            t.Equals(gif.offThread, static_cast<size_t>(60u), "GIF-stage MSCALs still run on the unit worker");
+            t.Equals(ps2_mtvu::detail::gifStage().nEscapes.load(), 0ull, "no GS enqueue bypassed the GIF stage");
+            t.Equals(vif.offThread, static_cast<size_t>(60u), "VIF-stage MSCALs run on the unit worker");
+            t.Equals(ps2_mtvu::vifLog().nEscapes.load(), vifEscapes0, "no VU-side call escaped the VIF stage");
+            for (const Outcome *o : {&thr, &jit, &gif, &gifJit, &vif, &vifJit})
+            {
+                t.IsTrue(o->packets == base.packets, "GIF packet sequence (path + bytes) is identical");
+                t.IsTrue(o->vu1Data == base.vu1Data, "VU1 data memory is identical");
+                t.IsTrue(o->eeReads == base.eeReads, "every EE read-back is identical");
+                t.Equals(o->row0, base.row0, "VIF1 ROW is identical");
+                t.Equals(o->masked, base.masked, "PATH3 mask state is identical");
+            }
+        });
+
+        tc.Run("VPL2 VIF stage: staged VU1 writes equal the inline VIF1 loop at every MSCAL", [](TestCase &t)
+        {
+            // Random VIF1 streams over every UNPACK format (masks, modes 0-3,
+            // CYCLE fill/skip, TOPS, zero-extend, wrap at 0x400, 256-vector
+            // and truncated payloads, unhandled formats), MPG (incl. dropped
+            // and clipped), MSCAL/MSCALF/MSCNT, DIRECT/DIRECTHL with IMAGE
+            // continuations across buffers, MSKPATH3, MARK, FLUSH*, unknown
+            // opcodes. Inline vs VIF stage (with and without jitter): VU1
+            // data + code at every MSCAL, the GIF stream (path + bytes), the
+            // final VIF1 registers and PATH3 mask must all match.
+            const uint64_t escapes0 = ps2_mtvu::vifLog().nEscapes.load();
+            size_t mscals = 0, packets = 0;
+            for (uint32_t seed : {1u, 2u, 3u})
+            {
+                const Vpl2Stream in = vpl2Synthetic(seed, 300u);
+                const Vpl2Outcome serial = vpl2Run(in, false, 0u);
+                mscals += serial.atMscal.size();
+                packets += serial.packets.size();
+                for (uint32_t jitterUs : {0u, 150u})
+                {
+                    const Vpl2Outcome staged = vpl2Run(in, true, jitterUs);
+                    t.Equals(staged.atMscal.size(), serial.atMscal.size(), "same MSCAL count");
+                    t.Equals(vpl2FirstMismatch(staged, serial), serial.atMscal.size(),
+                             "VU1 data + code equal at every MSCAL");
+                    t.IsTrue(staged.vu1Data == serial.vu1Data, "final VU1 data equal");
+                    t.IsTrue(staged.vu1Code == serial.vu1Code, "final VU1 code equal");
+                    t.IsTrue(staged.packets == serial.packets, "GIF stream (path + bytes) equal");
+                    t.IsTrue(std::memcmp(&staged.regs, &serial.regs, sizeof(VIFRegisters)) == 0,
+                             "final VIF1 registers equal");
+                    t.Equals(staged.masked, serial.masked, "PATH3 mask equal");
+                }
+            }
+            t.IsTrue(mscals > 500u, "the streams run many programs");
+            t.IsTrue(packets > 500u, "the streams make a long GIF stream");
+            t.Equals(ps2_mtvu::vifLog().nEscapes.load(), escapes0, "no VU-side call escaped the VIF stage");
+            t.IsTrue(ps2_mtvu::vifLog().nRecs.load() > 10000u, "the staged runs went through the record log");
+        });
+
+        tc.Run("VPL2 VIF stage: captured VIF1 streams replay equal (PS2X_VPL2_REPLAY)", [](TestCase &t)
+        {
+            // Dev gate: PS2X_VPL2_REPLAY=<capture>[:<capture>...] from a
+            // PS2X_VPL2_VIFCAP boot (game data: never committed). Skipped
+            // (passes) when unset.
+            const char *env = std::getenv("PS2X_VPL2_REPLAY");
+            if (!env || !env[0])
+            {
+                t.IsTrue(true, "no capture given");
+                return;
+            }
+            std::string list(env);
+            size_t start = 0;
+            while (start <= list.size())
+            {
+                const size_t end = std::min(list.find(':', start), list.size());
+                const std::string path = list.substr(start, end - start);
+                start = end + 1u;
+                if (path.empty())
+                    continue;
+                Vpl2Stream in;
+                t.IsTrue(vpl2LoadCapture(path.c_str(), in), "capture loads");
+                const uint64_t escapes0 = ps2_mtvu::vifLog().nEscapes.load();
+                const Vpl2Outcome serial = vpl2Run(in, false, 0u);
+                const Vpl2Outcome staged = vpl2Run(in, true, 0u);
+                const size_t mismatch = vpl2FirstMismatch(staged, serial);
+                std::fprintf(stderr, "[vpl2-replay] %s bufs=%zu mscal=%zu/%zu packets=%zu/%zu first_mismatch=%zu "
+                                     "vu1data=%s vu1code=%s gif=%s regs=%s escapes=%llu\n",
+                             path.c_str(), in.bufs.size(), serial.atMscal.size(), staged.atMscal.size(),
+                             serial.packets.size(), staged.packets.size(), mismatch,
+                             staged.vu1Data == serial.vu1Data ? "equal" : "DIFF",
+                             staged.vu1Code == serial.vu1Code ? "equal" : "DIFF",
+                             staged.packets == serial.packets ? "equal" : "DIFF",
+                             std::memcmp(&staged.regs, &serial.regs, sizeof(VIFRegisters)) == 0 ? "equal" : "DIFF",
+                             static_cast<unsigned long long>(ps2_mtvu::vifLog().nEscapes.load() - escapes0));
+                t.IsTrue(serial.atMscal.size() > 0u, "the capture runs programs");
+                t.Equals(staged.atMscal.size(), serial.atMscal.size(), "same MSCAL count");
+                t.Equals(mismatch, serial.atMscal.size(), "VU1 data + code equal at every MSCAL");
+                t.IsTrue(staged.vu1Data == serial.vu1Data, "final VU1 data equal");
+                t.IsTrue(staged.packets == serial.packets, "GIF stream equal");
+                t.IsTrue(std::memcmp(&staged.regs, &serial.regs, sizeof(VIFRegisters)) == 0, "final VIF1 registers equal");
+                t.Equals(ps2_mtvu::vifLog().nEscapes.load(), escapes0, "no escapes");
+            }
         });
 
         tc.Run("GIF arbiter prioritizes PATH1 then PATH2 then PATH3", [](TestCase &t)
@@ -1447,8 +2524,7 @@ void register_ps2_memory_tests()
             });
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
-                     "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
 
             mem.processPendingTransfers();
 
@@ -1487,8 +2563,7 @@ void register_ps2_memory_tests()
             std::memcpy(rdram + kTag + 12u, &itopCmd, sizeof(itopCmd));
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
-                     "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
 
             mem.processPendingTransfers();
 
@@ -1628,8 +2703,7 @@ void register_ps2_memory_tests()
             });
 
             t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kBaseAddr), "write VIF1 TADR should succeed");
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u),
-                     "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
 
             mem.processPendingTransfers();
 
@@ -1671,6 +2745,152 @@ void register_ps2_memory_tests()
             t.Equals(chcr & 0x100u, 0u, "VIF1 STR should clear after DMA chain drain");
             t.Equals(chcr & 0x70000000u, 0x70000000u, "VIF1 CHCR should expose the terminal END tag id");
             t.IsTrue((mem.readIORegister(0x1000E010u) & 0x2u) != 0u, "VIF1 DMA completion should raise D_STAT channel bit");
+        });
+
+        tc.Run("VIF1 DMA chain REF tag keeps embedded MPG when TTE is set", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag = 0x00027600u;
+            constexpr uint32_t kMicro = 0x00027700u;
+            constexpr uint32_t kSlot = 4u; // VU1 code offset = slot * 8.
+
+            uint8_t *rdram = mem.getRDRAM();
+            // REF qwc=1: two micro instructions live at ADDR.
+            writeDmaTag(rdram, kTag, makeDmaTag(1u, 3u, kMicro, false));
+            const uint32_t nopCmd = makeVifCmd(0x00u, 0u, 0u);
+            const uint32_t mpgCmd = makeVifCmd(0x4Au, 2u, kSlot);
+            std::memcpy(rdram + kTag + 8u, &nopCmd, sizeof(nopCmd));
+            std::memcpy(rdram + kTag + 12u, &mpgCmd, sizeof(mpgCmd));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kMicro + i] = static_cast<uint8_t>(0xA0u + i);
+            }
+
+            std::memset(mem.getVU1Code(), 0, PS2_VU1_CODE_SIZE);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
+            // STR + CHAIN + TTE(bit6).
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+
+            mem.processPendingTransfers();
+
+            const uint8_t *vu1Code = mem.getVU1Code();
+            bool codeOk = true;
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                if (vu1Code[kSlot * 8u + i] != static_cast<uint8_t>(0xA0u + i))
+                {
+                    codeOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(codeOk, "REF tag with TTE should upload ADDR microcode at the MPG slot");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "REF chain should clear the STR bit after drain");
+        });
+
+        tc.Run("VIF1 DMA chain REF tag drops embedded MPG when TTE is clear", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag = 0x00027800u;
+            constexpr uint32_t kMicro = 0x00027900u;
+            constexpr uint32_t kSlot = 4u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            writeDmaTag(rdram, kTag, makeDmaTag(1u, 3u, kMicro, false));
+            const uint32_t nopCmd = makeVifCmd(0x00u, 0u, 0u);
+            const uint32_t mpgCmd = makeVifCmd(0x4Au, 2u, kSlot);
+            std::memcpy(rdram + kTag + 8u, &nopCmd, sizeof(nopCmd));
+            std::memcpy(rdram + kTag + 12u, &mpgCmd, sizeof(mpgCmd));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kMicro + i] = static_cast<uint8_t>(0xA0u + i);
+            }
+
+            std::memset(mem.getVU1Code(), 0, PS2_VU1_CODE_SIZE);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag), "write VIF1 TADR should succeed");
+            // STR + CHAIN, TTE(bit6) clear.
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x104u), "write VIF1 CHCR STR|CHAIN should succeed");
+
+            mem.processPendingTransfers();
+
+            const uint8_t *vu1Code = mem.getVU1Code();
+            bool untouched = true;
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                if (vu1Code[kSlot * 8u + i] != 0u)
+                {
+                    untouched = false;
+                    break;
+                }
+            }
+            t.IsTrue(untouched, "REF tag without TTE should not upload microcode");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "REF chain should clear the STR bit after drain");
+        });
+
+        tc.Run("VIF1 DMA chain CNT NEXT END keep embedded MPG with TTE", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kVif1Ch = 0x10009000u;
+            constexpr uint32_t kTag0 = 0x00027A00u;
+            constexpr uint32_t kTag1 = kTag0 + 0x20u;
+            constexpr uint32_t kTag2 = 0x00027B00u;
+            constexpr uint32_t kSlotA = 8u;
+            constexpr uint32_t kSlotB = 12u;
+
+            uint8_t *rdram = mem.getRDRAM();
+            const uint32_t nopCmd = makeVifCmd(0x00u, 0u, 0u);
+
+            writeDmaTag(rdram, kTag0, makeDmaTag(1u, 1u, 0u, false)); // CNT
+            const uint32_t mpgA = makeVifCmd(0x4Au, 2u, kSlotA);
+            std::memcpy(rdram + kTag0 + 8u, &nopCmd, sizeof(nopCmd));
+            std::memcpy(rdram + kTag0 + 12u, &mpgA, sizeof(mpgA));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kTag0 + 16u + i] = static_cast<uint8_t>(0x10u + i);
+            }
+
+            writeDmaTag(rdram, kTag1, makeDmaTag(1u, 2u, kTag2, false)); // NEXT -> kTag2
+            const uint32_t mpgB = makeVifCmd(0x4Au, 2u, kSlotB);
+            std::memcpy(rdram + kTag1 + 8u, &nopCmd, sizeof(nopCmd));
+            std::memcpy(rdram + kTag1 + 12u, &mpgB, sizeof(mpgB));
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                rdram[kTag1 + 16u + i] = static_cast<uint8_t>(0x30u + i);
+            }
+
+            writeDmaTag(rdram, kTag2, makeDmaTag(0u, 7u, 0u, false)); // END
+            std::memcpy(rdram + kTag2 + 8u, &nopCmd, sizeof(nopCmd));
+            std::memcpy(rdram + kTag2 + 12u, &nopCmd, sizeof(nopCmd));
+
+            std::memset(mem.getVU1Code(), 0, PS2_VU1_CODE_SIZE);
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x30u, kTag0), "write VIF1 TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x144u), "write VIF1 CHCR STR|CHAIN|TTE should succeed");
+
+            mem.processPendingTransfers();
+
+            const uint8_t *vu1Code = mem.getVU1Code();
+            bool slotOkA = true;
+            bool slotOkB = true;
+            for (uint32_t i = 0; i < 16u; ++i)
+            {
+                if (vu1Code[kSlotA * 8u + i] != static_cast<uint8_t>(0x10u + i))
+                    slotOkA = false;
+                if (vu1Code[kSlotB * 8u + i] != static_cast<uint8_t>(0x30u + i))
+                    slotOkB = false;
+            }
+            t.IsTrue(slotOkA, "CNT tag with TTE should upload its inline microcode");
+            t.IsTrue(slotOkB, "NEXT tag with TTE should upload its inline microcode");
+            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x100u) == 0u,
+                     "CNT/NEXT/END chain should clear the STR bit after drain");
         });
 
         tc.Run("GIF DMA chain CALL sources payload from TADR+16", [](TestCase &t)
@@ -1778,6 +2998,44 @@ void register_ps2_memory_tests()
             t.IsTrue(q0, "CALL payload should be first");
             t.IsTrue(q1, "RET must still transfer its own payload");
             t.IsTrue(q2, "RET must resume after CALL payload and continue chain");
+        });
+
+        tc.Run("DMA chain longer than 4096 tags runs to its END tag", [](TestCase &t)
+        {
+            // RR1: SSX 3's per-frame VIF1 list reaches ~5,100 tags; a 4096-tag
+            // walker cap silently dropped every object after the cut.
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kGifCh = 0x1000A000u;
+            constexpr uint32_t kBase = 0x00100000u;
+            constexpr uint32_t kCntTags = 5000u;
+            uint8_t *rdram = mem.getRDRAM();
+
+            for (uint32_t i = 0; i <= kCntTags; ++i)
+            {
+                const uint32_t at = kBase + i * 32u;
+                const bool last = (i == kCntTags);
+                writeDmaTag(rdram, at, makeDmaTag(1u, last ? 7u : 1u, 0u, false)); // CNT ... END
+                std::memcpy(rdram + at + 16u, &i, sizeof(i));
+            }
+
+            std::vector<uint8_t> captured;
+            mem.setGifPacketCallback([&](const uint8_t *data, uint32_t sizeBytes)
+            {
+                captured.insert(captured.end(), data, data + sizeBytes);
+            });
+
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x30u, kBase), "write TADR should succeed");
+            t.IsTrue(mem.writeIORegister(kGifCh + 0x00u, 0x104u), "write CHCR should succeed");
+            mem.processPendingTransfers();
+
+            t.Equals(captured.size(), static_cast<size_t>((kCntTags + 1u) * 16u),
+                     "every tag's payload through the END tag is transferred");
+            uint32_t lastIndex = 0;
+            if (captured.size() >= 16u)
+                std::memcpy(&lastIndex, captured.data() + captured.size() - 16u, sizeof(lastIndex));
+            t.Equals(lastIndex, kCntTags, "the END tag's payload arrives last");
         });
 
         tc.Run("GIF DMA chain IRQ stops only when TIE is set", [](TestCase &t)
@@ -2012,38 +3270,6 @@ void register_ps2_memory_tests()
             t.Equals(mem.readIORegister(kDstadr), 0u, "sceDmaReset should clear D_STADR");
         });
 
-        tc.Run("sceDmaSend preserves guest-configured VIF1 TTE", [](TestCase &t)
-        {
-            PS2Runtime runtime;
-            t.IsTrue(runtime.memory().initialize(), "PS2Memory initialize should succeed");
-
-            constexpr uint32_t kVif1Ch = 0x10009000u;
-            constexpr uint32_t kTag = 0x00028500u;
-
-            PS2Memory &mem = runtime.memory();
-            uint8_t *rdram = mem.getRDRAM();
-            writeDmaTag(rdram, kTag, makeDmaTag(0u, 7u, 0u, false)); // END
-            const uint32_t itopCmd = makeVifCmd(0x04u, 0u, 0x66u);
-            std::memcpy(rdram + kTag + 12u, &itopCmd, sizeof(itopCmd));
-
-            // Fatal Frame follows this exact sequence: get channel, set CHCR.TTE,
-            // then submit the chain through sceDmaSend.
-            t.IsTrue(mem.writeIORegister(kVif1Ch + 0x00u, 0x40u),
-                     "guest should be able to configure VIF1 CHCR.TTE before submission");
-
-            R5900Context ctx{};
-            setRegU32(ctx, 4, 1u); // sceDmaGetChan(1) / VIF1
-            setRegU32(ctx, 5, kTag);
-            ps2_stubs::sceDmaSend(rdram, &ctx, &runtime);
-
-            t.Equals(static_cast<int32_t>(::getRegU32(&ctx, 2)), 0,
-                     "sceDmaSend should accept the VIF1 chain");
-            t.IsTrue((mem.readIORegister(kVif1Ch + 0x00u) & 0x40u) != 0u,
-                     "sceDmaSend must preserve guest-configured CHCR.TTE");
-            t.Equals(mem.vif1_regs.itops, 0x66u,
-                     "preserved TTE should deliver the tag high-half VIFcode");
-        });
-
         tc.Run("VIF1 DMA DIRECT image packet reaches GS through arbiter", [](TestCase &t)
         {
             PS2Memory mem;
@@ -2243,6 +3469,1163 @@ void register_ps2_memory_tests()
 
             t.IsTrue(threwRead32, "unaligned read32 should throw");
             t.IsTrue(threwWrite64, "unaligned write64 should throw");
+        });
+
+        tc.Run("SPR_FROM normal-mode DMA copies scratchpad to RAM and completes the channel", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kSprFrom = 0x1000D000u;
+            constexpr uint32_t kDStat = 0x1000E010u;
+            constexpr uint32_t kSadr = 0x100u;
+            constexpr uint32_t kDst = 0x00010000u;
+            constexpr uint32_t kQwc = 64u; // one SSX3 bucket array, as observed on hw
+
+            uint8_t *spr = mem.getScratchpad();
+            uint8_t *rdram = mem.getRDRAM();
+            for (uint32_t i = 0; i < kQwc * 16u; ++i)
+            {
+                spr[kSadr + i] = static_cast<uint8_t>((i * 7u + 3u) & 0xFFu);
+            }
+            std::memset(rdram + kDst, 0xA5u, kQwc * 16u);
+
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x10u, 0x80000000u | kDst), "SPR_FROM MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x20u, kQwc), "SPR_FROM QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x80u, kSadr), "SPR_FROM SADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprFrom + 0x00u, 0x100u), "SPR_FROM CHCR STR write should succeed");
+
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < kQwc * 16u; ++i)
+            {
+                if (rdram[kDst + i] != static_cast<uint8_t>((i * 7u + 3u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "SPR_FROM should move QWC quads from scratchpad+SADR to RAM MADR&0x01FFFFFF");
+            t.Equals(mem.readIORegister(kSprFrom + 0x10u), (0x80000000u | kDst) + kQwc * 16u, "SPR_FROM should advance MADR past the transfer");
+            t.Equals(mem.readIORegister(kSprFrom + 0x20u), 0u, "SPR_FROM should clear QWC on completion");
+            t.Equals(mem.readIORegister(kSprFrom + 0x80u), kSadr + kQwc * 16u, "SPR_FROM should advance SADR past the transfer");
+            t.IsTrue((mem.readIORegister(kSprFrom + 0x00u) & 0x100u) == 0u, "SPR_FROM should report STR clear once done");
+            t.IsTrue((mem.readIORegister(kDStat) & (1u << 8)) != 0u, "SPR_FROM completion should set D_STAT CIS bit 8");
+        });
+
+        tc.Run("SPR_TO normal-mode DMA copies RAM to scratchpad with SADR wraparound", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            constexpr uint32_t kSprTo = 0x1000D400u;
+            constexpr uint32_t kDStat = 0x1000E010u;
+            constexpr uint32_t kSadr = PS2_SCRATCHPAD_SIZE - 32u;
+            constexpr uint32_t kSrc = 0x00020000u;
+            constexpr uint32_t kQwc = 4u; // 64 bytes: 32 to the tail, 32 wrapped to the head
+
+            uint8_t *spr = mem.getScratchpad();
+            uint8_t *rdram = mem.getRDRAM();
+            for (uint32_t i = 0; i < kQwc * 16u; ++i)
+            {
+                rdram[kSrc + i] = static_cast<uint8_t>((i * 11u + 5u) & 0xFFu);
+            }
+            std::memset(spr, 0x5Au, PS2_SCRATCHPAD_SIZE);
+
+            t.IsTrue(mem.writeIORegister(kSprTo + 0x10u, kSrc), "SPR_TO MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprTo + 0x20u, kQwc), "SPR_TO QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprTo + 0x80u, kSadr), "SPR_TO SADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kSprTo + 0x00u, 0x100u), "SPR_TO CHCR STR write should succeed");
+
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < kQwc * 16u; ++i)
+            {
+                const uint32_t sprOff = (kSadr + i) & (PS2_SCRATCHPAD_SIZE - 1u);
+                if (spr[sprOff] != static_cast<uint8_t>((i * 11u + 5u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "SPR_TO should move QWC quads from RAM to scratchpad with 16KB SADR wraparound");
+            t.Equals(mem.readIORegister(kSprTo + 0x10u), kSrc + kQwc * 16u, "SPR_TO should advance MADR past the transfer");
+            t.Equals(mem.readIORegister(kSprTo + 0x20u), 0u, "SPR_TO should clear QWC on completion");
+            t.Equals(mem.readIORegister(kSprTo + 0x80u), (kSadr + kQwc * 16u) & (PS2_SCRATCHPAD_SIZE - 1u),
+                     "SPR_TO should advance SADR with 14-bit wraparound");
+            t.IsTrue((mem.readIORegister(kSprTo + 0x00u) & 0x100u) == 0u, "SPR_TO should report STR clear once done");
+            t.IsTrue((mem.readIORegister(kDStat) & (1u << 9)) != 0u, "SPR_TO completion should set D_STAT CIS bit 9");
+        });
+
+        // RB1: VIF1 normal-mode reverse DMA (CHCR.DIR=0, device->EE). SSX3
+        // sub_002EC478 samples rendered pixels this way (GS TRXDIR=1 + VIF1
+        // MADR/QWC/CHCR=0x100); the old path enqueued MADR as an EE->VIF
+        // source regardless of DIR, so the game read stale memory. PCSX2:
+        // Vif1_Dma.cpp vif1TransferToMemory + Gif_Unit.cpp GSLastDownloadSize.
+        tc.Run("RB1 VIF1 reverse DMA moves GS local->host bytes to EE and completes", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(1);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            // 4x4 PSMCT32 upload at SBP 0, then a TRXDIR=1 readback setup.
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true)); // 4 qwords = 64 bytes
+            appendU64(packet, 0ull);
+            for (uint32_t i = 0; i < 64u; ++i)
+                packet.push_back(static_cast<uint8_t>((i * 3u + 1u) & 0xFFu));
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00030000u;
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * 3u + 1u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "reverse DMA should copy the 4x4 PSMCT32 readback into EE at MADR");
+            t.Equals(mem.readIORegister(kVif1 + 0x10u), kDst + 64u, "reverse DMA should advance MADR past the transfer");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "reverse DMA should clear QWC on a full transfer");
+            t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) == 0u, "reverse DMA should report STR clear once done");
+            t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 1)) != 0u, "reverse DMA completion should set D_STAT CIS bit 1");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        tc.Run("RB1 VIF1 reverse DMA with short FIFO keeps head bytes and leaves QWC", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(1);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            // Same 64-byte FIFO as above (PCSX2: GSLastDownloadSize < QWC warns
+            // "QWC left on VIF FIFO Reverse" and keeps the remainder in QWC).
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+            appendU64(packet, 0ull);
+            for (uint32_t i = 0; i < 64u; ++i)
+                packet.push_back(static_cast<uint8_t>((i * 5u + 2u) & 0xFFu));
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00031000u;
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 128u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 8u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * 5u + 2u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "partial reverse DMA should keep the FIFO head bytes in order");
+            bool tailStale = true;
+            for (uint32_t i = 64u; i < 128u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != 0xA5u)
+                {
+                    tailStale = false;
+                    break;
+                }
+            }
+            t.IsTrue(tailStale, "partial reverse DMA should not touch EE past the FIFO bytes");
+            t.Equals(mem.readIORegister(kVif1 + 0x10u), kDst + 64u, "partial reverse DMA should advance MADR by the consumed bytes");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 4u, "partial reverse DMA should leave the remainder in QWC");
+            t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) == 0u, "partial reverse DMA should still report STR clear");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        tc.Run("RB1 VIF1 reverse DMA sees GS work queued ahead of the kick", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(1);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+            t.IsTrue(gs.setQueueEnabled(true), "GS queue enable should succeed");
+
+            // Upload + TRXDIR=1 setup go through the worker queue; the
+            // reverse kick must drain them first (queue order) before the
+            // download, or it would read an empty FIFO.
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+            gs.writeRegister(GS_REG_TRXPOS, 0ull);
+            gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+            gs.writeRegister(GS_REG_TRXDIR, 0ull);
+            std::vector<uint8_t> packet;
+            appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+            appendU64(packet, 0ull);
+            for (uint32_t i = 0; i < 64u; ++i)
+                packet.push_back(static_cast<uint8_t>((i * 7u + 3u) & 0xFFu));
+            gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+            gs.writeRegister(GS_REG_TRXDIR, 1ull);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00032000u;
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * 7u + 3u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "queued-mode reverse DMA should still land the readback bytes in order");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "queued-mode reverse DMA should clear QWC");
+            t.IsTrue(gs.setQueueEnabled(false), "GS queue disable should succeed");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        tc.Run("RB1 knob off keeps the old forward (stale-destination) behavior", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(0);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+
+            // No GS frontend: the old path treats MADR as an EE->VIF source.
+            // Zeros decode as VIF NOPs, so the forward drain is harmless.
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00033000u;
+            std::memset(mem.getRDRAM() + kDst, 0x00u, 32u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 2u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+
+            bool stillZero = true;
+            for (uint32_t i = 0; i < 32u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != 0x00u)
+                {
+                    stillZero = false;
+                    break;
+                }
+            }
+            t.IsTrue(stillZero, "knob off must not write FIFO bytes to the EE destination (stale, as before)");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "knob off should still clear QWC via the forward drain");
+            t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) == 0u, "knob off should still report STR clear");
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        // RB2: lag1 serves each reverse DMA from the previous TRXDIR=1
+        // snapshot (no drain on the EE). First serve is defined empty (EE
+        // untouched, QWC remainder); the second serve yields the first
+        // snapshot's bytes; the third yields the second's.
+        tc.Run("RB2 lag1 serves zeros first, then the previous snapshot", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(2);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00034000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadAndReadback = [&](uint8_t mul, uint8_t add) {
+                gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                gs.writeRegister(GS_REG_TRXPOS, 0ull);
+                gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                gs.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            auto reverseKick = [&]() {
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+            };
+            auto expectPattern = [&](uint8_t mul, uint8_t add, const char *what) {
+                bool ok = true;
+                for (uint32_t i = 0; i < 64u; ++i)
+                {
+                    if (mem.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * mul + add) & 0xFFu))
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                t.IsTrue(ok, what);
+            };
+
+            uploadAndReadback(3u, 1u); // snapshot 0
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(); // serve 0: no previous snapshot
+            bool untouched = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != 0xA5u)
+                {
+                    untouched = false;
+                    break;
+                }
+            }
+            t.IsTrue(untouched, "lag1 first serve must leave the EE destination untouched");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 4u, "lag1 first serve must keep QWC (short-transfer semantics)");
+            t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) == 0u, "lag1 first serve should still report STR clear");
+            t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 1)) != 0u, "lag1 first serve should set D_STAT CIS bit 1");
+
+            uploadAndReadback(5u, 2u); // snapshot 1
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(); // serve 1: yields snapshot 0
+            expectPattern(3u, 1u, "lag1 second serve must yield the first snapshot's bytes");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "lag1 second serve should clear QWC on a full transfer");
+
+            uploadAndReadback(7u, 3u); // snapshot 2
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(); // serve 2: yields snapshot 1
+            expectPattern(5u, 2u, "lag1 third serve must yield the second snapshot's bytes");
+            t.Equals(mem.readIORegister(kVif1 + 0x10u), kDst + 64u, "lag1 serve should advance MADR past the transfer");
+
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        tc.Run("RB2 lag1 through the queued GS worker stays one snapshot behind", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(2);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+            t.IsTrue(gs.setQueueEnabled(true), "GS queue enable should succeed");
+
+            // Setup + snapshot run on the worker; the serve spins only for
+            // the already-queued previous snapshot, then yields its bytes.
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00035000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadAndReadback = [&](uint8_t mul, uint8_t add) {
+                gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                gs.writeRegister(GS_REG_TRXPOS, 0ull);
+                gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                gs.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            uploadAndReadback(11u, 4u); // snapshot 0 (worker)
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+            bool untouched = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != 0xA5u)
+                {
+                    untouched = false;
+                    break;
+                }
+            }
+            t.IsTrue(untouched, "queued lag1 first serve must leave EE untouched");
+
+            uploadAndReadback(13u, 5u); // snapshot 1 (worker)
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+            t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+            bool bytesOk = true;
+            for (uint32_t i = 0; i < 64u; ++i)
+            {
+                if (mem.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * 11u + 4u) & 0xFFu))
+                {
+                    bytesOk = false;
+                    break;
+                }
+            }
+            t.IsTrue(bytesOk, "queued lag1 second serve must yield the first worker snapshot");
+            t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "queued lag1 second serve should clear QWC");
+            t.IsTrue(gs.setQueueEnabled(false), "GS queue disable should succeed");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        // RB2 Part 3: lagV serves the snapshot 24 back (depth 24 > max
+        // observed burst 17/vsync). First 24 serves are defined empty; serve
+        // 24 yields snapshot 0, serve 25 snapshot 1 (26 snapshots also
+        // exercise the 25-slot ring wraparound).
+        tc.Run("RB2 lagV serves empty x24, then the snapshot 24 back", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(3);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00036000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadAndReadback = [&](uint32_t j) {
+                const uint8_t mul = static_cast<uint8_t>(3u + j);
+                const uint8_t add = static_cast<uint8_t>(1u + 2u * j);
+                gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                gs.writeRegister(GS_REG_TRXPOS, 0ull);
+                gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                gs.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            auto patternByte = [&](uint32_t j, uint32_t i) {
+                const uint8_t mul = static_cast<uint8_t>(3u + j);
+                const uint8_t add = static_cast<uint8_t>(1u + 2u * j);
+                return static_cast<uint8_t>((i * mul + add) & 0xFFu);
+            };
+            for (uint32_t k = 0u; k < 26u; ++k)
+            {
+                uploadAndReadback(k); // snapshot k
+                std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+                if (k < 24u)
+                {
+                    bool untouched = true;
+                    for (uint32_t i = 0; i < 64u; ++i)
+                    {
+                        if (mem.getRDRAM()[kDst + i] != 0xA5u)
+                        {
+                            untouched = false;
+                            break;
+                        }
+                    }
+                    t.IsTrue(untouched, "lagV early serves must leave EE untouched");
+                    t.Equals(mem.readIORegister(kVif1 + 0x20u), 4u, "lagV early serves must keep QWC");
+                }
+                else
+                {
+                    const uint32_t want = k - 24u;
+                    bool ok = true;
+                    for (uint32_t i = 0; i < 64u; ++i)
+                    {
+                        if (mem.getRDRAM()[kDst + i] != patternByte(want, i))
+                        {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    t.IsTrue(ok, "lagV serve k must yield snapshot k-24");
+                    t.Equals(mem.readIORegister(kVif1 + 0x20u), 0u, "lagV full serve should clear QWC");
+                }
+            }
+            t.Equals(mem.readIORegister(kVif1 + 0x10u), kDst + 64u, "lagV serve should advance MADR");
+            t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 1)) != 0u, "lagV serve should set D_STAT CIS bit 1");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        // LT1b: lagF serves probe (frame f, ordinal i) with the bytes of probe
+        // (f-L, i) (L = ps2_rb1_lagfFrames()), keyed by the EE vsync tick. The CPU
+        // backend has no async path, so each set is read synchronously and
+        // published at once. Frame 1 has only 2 probes, so frame 1+L's third
+        // probe has no source and misses (EE untouched, QWC kept), like every
+        // probe in frames 0..L-1.
+        tc.Run("LT1b lagF serves probe (f-L, i): 3 frames x 3 probes, misses", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(4);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00034000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto mulOf = [](uint32_t f, uint32_t i) { return static_cast<uint8_t>(((f * 3u + i) * 2u + 1u) & 0xFFu); };
+            auto addOf = [](uint32_t f, uint32_t i) { return static_cast<uint8_t>((f * 16u + i) & 0xFFu); };
+            const uint32_t lag = ps2_rb1_lagfFrames();
+            const uint32_t frames = lag + 3u;
+            std::vector<uint32_t> probes(frames, 3u);
+            probes[1] = 2u;
+            for (uint32_t f = 0u; f < frames; ++f)
+            {
+                mem.gs().vsyncTick.store(100u + f, std::memory_order_release);
+                for (uint32_t i = 0u; i < probes[f]; ++i)
+                {
+                    gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                    gs.writeRegister(GS_REG_TRXPOS, 0ull);
+                    gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                    gs.writeRegister(GS_REG_TRXDIR, 0ull);
+                    std::vector<uint8_t> packet;
+                    appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                    appendU64(packet, 0ull);
+                    for (uint32_t b = 0; b < 64u; ++b)
+                        packet.push_back(static_cast<uint8_t>((b * mulOf(f, i) + addOf(f, i)) & 0xFFu));
+                    gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                    gs.writeRegister(GS_REG_TRXDIR, 1ull);
+
+                    std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+                    t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                    t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                    t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+
+                    const bool hit = f >= lag && i < probes[f - lag];
+                    bool ok = true;
+                    for (uint32_t b = 0; b < 64u; ++b)
+                    {
+                        const uint8_t want = hit ? static_cast<uint8_t>((b * mulOf(f - lag, i) + addOf(f - lag, i)) & 0xFFu)
+                                                 : 0xA5u;
+                        if (mem.getRDRAM()[kDst + b] != want)
+                        {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    t.IsTrue(ok, hit ? "lagF must serve probe (f-L, i)'s bytes" : "lagF miss must leave EE untouched");
+                    t.Equals(mem.readIORegister(kVif1 + 0x20u), hit ? 0u : 4u,
+                             hit ? "lagF hit clears QWC" : "lagF miss keeps QWC (short-transfer semantics)");
+                    t.Equals(mem.readIORegister(kVif1 + 0x10u), hit ? kDst + 64u : kDst,
+                             hit ? "lagF hit advances MADR" : "lagF miss leaves MADR");
+                    t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) == 0u, "lagF serve reports STR clear");
+                    t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 1)) != 0u, "lagF serve sets D_STAT CIS bit 1");
+                }
+            }
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        tc.Run("RB2 lagV through the queued GS worker serves 24 back", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(3);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+            t.IsTrue(gs.setQueueEnabled(true), "GS queue enable should succeed");
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00037000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadAndReadback = [&](uint32_t j) {
+                const uint8_t mul = static_cast<uint8_t>(5u + j);
+                const uint8_t add = static_cast<uint8_t>(2u + 3u * j);
+                gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                gs.writeRegister(GS_REG_TRXPOS, 0ull);
+                gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                gs.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                gs.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            auto patternByte = [&](uint32_t j, uint32_t i) {
+                const uint8_t mul = static_cast<uint8_t>(5u + j);
+                const uint8_t add = static_cast<uint8_t>(2u + 3u * j);
+                return static_cast<uint8_t>((i * mul + add) & 0xFFu);
+            };
+            for (uint32_t k = 0u; k < 26u; ++k)
+            {
+                uploadAndReadback(k); // snapshot k (worker)
+                std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+                if (k < 24u)
+                {
+                    bool untouched = true;
+                    for (uint32_t i = 0; i < 64u; ++i)
+                    {
+                        if (mem.getRDRAM()[kDst + i] != 0xA5u)
+                        {
+                            untouched = false;
+                            break;
+                        }
+                    }
+                    t.IsTrue(untouched, "queued lagV early serves must leave EE untouched");
+                }
+                else
+                {
+                    const uint32_t want = k - 24u;
+                    bool ok = true;
+                    for (uint32_t i = 0; i < 64u; ++i)
+                    {
+                        if (mem.getRDRAM()[kDst + i] != patternByte(want, i))
+                        {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    t.IsTrue(ok, "queued lagV serve k must yield snapshot k-24");
+                }
+            }
+            t.IsTrue(gs.setQueueEnabled(false), "GS queue disable should succeed");
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        // SQ2: the lag1 slots and counters ride the GS savestate section
+        // (magic tail, present only once a snapshot exists) and resume
+        // exactly: the first post-load serve yields the pre-save snapshot's
+        // bytes, and a new post-load snapshot keeps the one-probe lag.
+        tc.Run("SQ2 lag1 slots resume exactly across a GS save/load", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(2);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00036000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadAndReadback = [&](GS &g, uint8_t mul, uint8_t add) {
+                g.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                g.writeRegister(GS_REG_TRXPOS, 0ull);
+                g.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                g.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0u; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                g.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                g.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            auto reverseKick = [&](PS2Memory &m) {
+                t.IsTrue(m.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                t.IsTrue(m.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                t.IsTrue(m.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+            };
+            auto expectPattern = [&](PS2Memory &m, uint8_t mul, uint8_t add, const char *what) {
+                bool ok = true;
+                for (uint32_t i = 0u; i < 64u; ++i)
+                {
+                    if (m.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * mul + add) & 0xFFu))
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                t.IsTrue(ok, what);
+            };
+
+            uploadAndReadback(gs, 3u, 1u); // snapshot 0
+            uploadAndReadback(gs, 5u, 2u); // snapshot 1
+            std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(mem); // serve 0: defined empty
+
+            ps2_savestate::Writer w;
+            const size_t mark = w.beginSection("gs", ps2_savestate::kGsVersion);
+            GSSavestate::save(gs, w);
+            w.endSection(mark);
+
+            PS2Memory memB;
+            t.IsTrue(memB.initialize(), "PS2Memory B initialize should succeed");
+            GS gsB;
+            gsB.init(memB.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &memB.gs());
+            memB.setGsFrontend(&gsB);
+            ps2_savestate::Reader r(w.buf.data(), w.buf.size());
+            std::string key;
+            uint32_t version = 0u;
+            t.IsTrue(r.beginSection(key, version), "gs section frame parses");
+            t.IsTrue(key == "gs" && version == ps2_savestate::kGsVersion, "gs section key/version round-trip");
+            t.IsTrue(GSSavestate::load(gsB, r), "GS state loads");
+            t.IsTrue(r.endSection("gs"), "gs section fully consumed");
+
+            // Serve 1 on the restored machine yields snapshot 0's bytes
+            // (slots + serves counter restored), not an empty serve.
+            std::memset(memB.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(memB);
+            expectPattern(memB, 3u, 1u, "post-load serve yields the pre-save snapshot 0 bytes");
+            // A new snapshot keeps the lag: serve 2 yields snapshot 1.
+            uploadAndReadback(gsB, 7u, 3u); // snapshot 2
+            std::memset(memB.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(memB);
+            expectPattern(memB, 5u, 2u, "post-load lag continues with snapshot 1 bytes");
+
+            // A save taken before any snapshot (knob-off shape: no tail)
+            // still loads, with fresh lag semantics.
+            PS2Memory memC;
+            t.IsTrue(memC.initialize(), "PS2Memory C initialize should succeed");
+            GS gsC;
+            gsC.init(memC.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &memC.gs());
+            memC.setGsFrontend(&gsC);
+            ps2_savestate::Writer wC;
+            const size_t markC = wC.beginSection("gs", ps2_savestate::kGsVersion);
+            GSSavestate::save(gsC, wC);
+            wC.endSection(markC);
+            t.IsTrue(wC.buf.size() < w.buf.size(), "pre-snapshot save is smaller (no lag tail)");
+            PS2Memory memD;
+            t.IsTrue(memD.initialize(), "PS2Memory D initialize should succeed");
+            GS gsD;
+            gsD.init(memD.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &memD.gs());
+            memD.setGsFrontend(&gsD);
+            ps2_savestate::Reader rC(wC.buf.data(), wC.buf.size());
+            t.IsTrue(rC.beginSection(key, version), "tail-less section frame parses");
+            t.IsTrue(GSSavestate::load(gsD, rC), "tail-less GS state loads");
+            t.IsTrue(rC.endSection("gs"), "tail-less section fully consumed");
+            std::memset(memD.getRDRAM() + kDst, 0xA5u, 64u);
+            reverseKick(memD);
+            bool untouched = true;
+            for (uint32_t i = 0u; i < 64u; ++i)
+            {
+                if (memD.getRDRAM()[kDst + i] != 0xA5u)
+                {
+                    untouched = false;
+                    break;
+                }
+            }
+            t.IsTrue(untouched, "tail-less load serves empty first (fresh lag1 start)");
+
+            mem.setGsFrontend(nullptr);
+            memB.setGsFrontend(nullptr);
+            memC.setGsFrontend(nullptr);
+            memD.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        // DS1: the lag slots are a 25-deep ring (RB2 Part 3, lagV serves 24
+        // back), so the whole ring rides the GS section (SRB3 tail). Saving
+        // past the ring wrap and loading resumes every serve exactly —
+        // including slots past index 1, which SQ2's 2-slot tail dropped.
+        tc.Run("DS1 lag ring slots resume exactly across a GS save/load", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(3); // lagV
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00036000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto uploadSnapshot = [&](GS &g, uint32_t j) {
+                const uint8_t mul = static_cast<uint8_t>(5u + j);
+                const uint8_t add = static_cast<uint8_t>(2u + 3u * j);
+                g.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                g.writeRegister(GS_REG_TRXPOS, 0ull);
+                g.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                g.writeRegister(GS_REG_TRXDIR, 0ull);
+                std::vector<uint8_t> packet;
+                appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                appendU64(packet, 0ull);
+                for (uint32_t i = 0u; i < 64u; ++i)
+                    packet.push_back(static_cast<uint8_t>((i * mul + add) & 0xFFu));
+                g.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                g.writeRegister(GS_REG_TRXDIR, 1ull);
+            };
+            auto serveOnce = [&](PS2Memory &m) {
+                t.IsTrue(m.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                t.IsTrue(m.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                t.IsTrue(m.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+            };
+            auto expectSnapshot = [&](PS2Memory &m, uint32_t j, const char *what) {
+                const uint8_t mul = static_cast<uint8_t>(5u + j);
+                const uint8_t add = static_cast<uint8_t>(2u + 3u * j);
+                bool ok = true;
+                for (uint32_t i = 0u; i < 64u; ++i)
+                {
+                    if (m.getRDRAM()[kDst + i] != static_cast<uint8_t>((i * mul + add) & 0xFFu))
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+                t.IsTrue(ok, what);
+            };
+
+            // Lockstep probes (the real access pattern: each probe snapshots
+            // then serves, so serves stay within the ring depth of snaps).
+            for (uint32_t p = 0u; p < 30u; ++p)
+            {
+                uploadSnapshot(gs, p);
+                std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+                serveOnce(mem);
+                if (p >= 24u)
+                    expectSnapshot(mem, p - 24u, "pre-save lagV serve is exact");
+            }
+
+            ps2_savestate::Writer w;
+            const size_t mark = w.beginSection("gs", ps2_savestate::kGsVersion);
+            GSSavestate::save(gs, w);
+            w.endSection(mark);
+
+            PS2Memory memB;
+            t.IsTrue(memB.initialize(), "PS2Memory B initialize should succeed");
+            GS gsB;
+            gsB.init(memB.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &memB.gs());
+            memB.setGsFrontend(&gsB);
+            ps2_savestate::Reader r(w.buf.data(), w.buf.size());
+            std::string key;
+            uint32_t version = 0u;
+            t.IsTrue(r.beginSection(key, version), "gs section frame parses");
+            t.IsTrue(GSSavestate::load(gsB, r), "GS state loads");
+            t.IsTrue(r.endSection("gs"), "gs section fully consumed");
+
+            // Probes 30..39 yield snapshots 6..15: slots 6..15, which the
+            // pre-ring 2-slot tail never carried (the discriminating check).
+            for (uint32_t p = 30u; p < 40u; ++p)
+            {
+                uploadSnapshot(gsB, p);
+                std::memset(memB.getRDRAM() + kDst, 0xA5u, 64u);
+                serveOnce(memB);
+                expectSnapshot(memB, p - 24u,
+                               ("post-load lagV serve yields snapshot " + std::to_string(p - 24u)).c_str());
+            }
+
+            mem.setGsFrontend(nullptr);
+            memB.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
+        // UV1 Part 2: PCSX2 V2/V3 lane rules. V2 writes v1v0v1v0
+        // (Vif_Unpack.cpp UNPACK_V2 :76-83), except V2-32 zeroes w when the
+        // unpack data starts QW-aligned (x86/Vif_UnpackSSE.cpp xUPK_V2_32
+        // :139-151). V3 takes w from the next source vector's first element,
+        // 0 when that read crosses a source QW boundary or runs past the
+        // buffer (xUPK_V3_* :203-238). Sentinel pre-fill proves every
+        // asserted lane was written, not left stale.
+        tc.Run("UV1 V2_32 unaligned replicates v1v0v1v0", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V2_32 (opcode 0x64), NUM=2, addr=0. Data starts at pos 4
+            // (not QW-aligned) so both vectors replicate fully.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x64u, 2u, 0x0000u));
+            appendU32(packet, 0x11111111u);
+            appendU32(packet, 0x22222222u);
+            appendU32(packet, 0x33333333u);
+            appendU32(packet, 0x44444444u);
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x11111111u, "row0 x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0x22222222u, "row0 y");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x11111111u, "row0 z replicates x");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x22222222u, "row0 w replicates y");
+            t.Equals(vu1LaneU32(mem, 1u, 0u), 0x33333333u, "row1 x");
+            t.Equals(vu1LaneU32(mem, 1u, 1u), 0x44444444u, "row1 y");
+            t.Equals(vu1LaneU32(mem, 1u, 2u), 0x33333333u, "row1 z replicates x");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0x44444444u, "row1 w replicates y");
+        });
+
+        tc.Run("UV1 V2_32 QW-aligned zeroes w", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // Three NOPs pad the UNPACK data start to pos 16 (QW-aligned):
+            // z still replicates x but w is zero (xUPK_V2_32).
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x64u, 2u, 0x0000u));
+            appendU32(packet, 0x11111111u);
+            appendU32(packet, 0x22222222u);
+            appendU32(packet, 0x33333333u);
+            appendU32(packet, 0x44444444u);
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x11111111u, "row0 z replicates x");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000000u, "row0 w is zero when aligned");
+            t.Equals(vu1LaneU32(mem, 1u, 2u), 0x33333333u, "row1 z replicates x");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0x00000000u, "row1 w is zero when aligned");
+        });
+
+        tc.Run("UV1 V2_16 replicates with sign extension", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V2_16 (opcode 0x65), NUM=1. Data start is QW-aligned
+            // (3 NOPs) to lock that the w=0 rule is V2-32-only.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x00u, 0u, 0x0000u));
+            appendU32(packet, makeVifCmd(0x65u, 1u, 0x0000u));
+            const uint16_t comps[2] = {0x00FFu, 0xFF01u};
+            size_t pos = packet.size();
+            packet.resize(pos + sizeof(comps));
+            std::memcpy(packet.data() + pos, comps, sizeof(comps));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x000000FFu, "x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0xFFFFFF01u, "y sign-extended");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x000000FFu, "z replicates x");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0xFFFFFF01u, "w replicates y even when aligned");
+        });
+
+        tc.Run("UV1 V2_8 replicates with sign extension", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V2_8 (opcode 0x66), NUM=1, unaligned data start.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x66u, 1u, 0x0000u));
+            packet.push_back(0x7Fu);
+            packet.push_back(0x80u);
+            packet.push_back(0x00u);
+            packet.push_back(0x00u);
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x0000007Fu, "x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0xFFFFFF80u, "y sign-extended");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x0000007Fu, "z replicates x");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0xFFFFFF80u, "w replicates y");
+        });
+
+        tc.Run("UV1 V3_32 w reads next vector", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V3_32 (opcode 0x68), NUM=2, then a MARK trailer word.
+            // Row0 w = vec1.x; row1 (last) w = the trailer word. Reads at
+            // stream offsets 16 and 28 cross no QW boundary.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x68u, 2u, 0x0000u));
+            appendU32(packet, 0x10101010u);
+            appendU32(packet, 0x20202020u);
+            appendU32(packet, 0x30303030u);
+            appendU32(packet, 0x40404040u);
+            appendU32(packet, 0x50505050u);
+            appendU32(packet, 0x60606060u);
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0xBEEFu));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x10101010u, "row0 x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0x20202020u, "row0 y");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x30303030u, "row0 z");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x40404040u, "row0 w reads vec1.x");
+            t.Equals(vu1LaneU32(mem, 1u, 0u), 0x40404040u, "row1 x");
+            t.Equals(vu1LaneU32(mem, 1u, 1u), 0x50505050u, "row1 y");
+            t.Equals(vu1LaneU32(mem, 1u, 2u), 0x60606060u, "row1 z");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0x0700BEEFu, "row1 w reads trailer word");
+        });
+
+        tc.Run("UV1 V3_32 last vector at buffer end zeroes w", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // NUM=1, exact-size packet: the w-read at [16,20) runs past the
+            // 16-byte buffer, so w is 0.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x68u, 1u, 0x0000u));
+            appendU32(packet, 0x10101010u);
+            appendU32(packet, 0x20202020u);
+            appendU32(packet, 0x30303030u);
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0x30303030u, "z");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000000u, "w is zero past buffer end");
+        });
+
+        tc.Run("UV1 V3_16 w reads next vector with sign extension", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V3_16 (opcode 0x69), NUM=2, then a MARK trailer.
+            // Row0 w = vec1[0]; row1 w = the trailer's low u16 sign-extended.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x69u, 2u, 0x0000u));
+            const uint16_t comps[6] = {0x0001u, 0x00FFu, 0xFF02u, 0x0003u, 0x0004u, 0x0005u};
+            size_t pos = packet.size();
+            packet.resize(pos + sizeof(comps));
+            std::memcpy(packet.data() + pos, comps, sizeof(comps));
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0xBEEFu));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x00000001u, "row0 x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0x000000FFu, "row0 y");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0xFFFFFF02u, "row0 z sign-extended");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000003u, "row0 w reads vec1[0]");
+            t.Equals(vu1LaneU32(mem, 1u, 2u), 0x00000005u, "row1 z");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0xFFFFBEEFu, "row1 w reads trailer u16 sign-extended");
+        });
+
+        tc.Run("UV1 V3_16 last vector at buffer end zeroes w", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // NUM=2, exact-size packet (16 bytes): vec1's w-read at [16,18)
+            // runs past the buffer, so w is 0; vec0 still reads vec1[0].
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x69u, 2u, 0x0000u));
+            const uint16_t comps[6] = {0x0001u, 0x00FFu, 0xFF02u, 0x0003u, 0x0004u, 0x0005u};
+            size_t pos = packet.size();
+            packet.resize(pos + sizeof(comps));
+            std::memcpy(packet.data() + pos, comps, sizeof(comps));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000003u, "row0 w reads vec1[0]");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0x00000000u, "row1 w is zero past buffer end");
+        });
+
+        tc.Run("UV1 V3_8 w reads next vector with sign extension", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // UNPACK V3_8 (opcode 0x6A), NUM=2. totalBytes rounds 6 up to 8,
+            // so the layout is code + vec0 + vec1 + 2 pad bytes + MARK.
+            // Row0 w = vec1[0]; row1 w = pad[0] sign-extended.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Au, 2u, 0x0000u));
+            packet.push_back(0x01u);
+            packet.push_back(0x7Fu);
+            packet.push_back(0x80u);
+            packet.push_back(0x02u);
+            packet.push_back(0x03u);
+            packet.push_back(0x04u);
+            packet.push_back(0xCDu);
+            packet.push_back(0xCDu);
+            appendU32(packet, makeVifCmd(0x07u, 0u, 0x0000u));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 0u), 0x00000001u, "row0 x");
+            t.Equals(vu1LaneU32(mem, 0u, 1u), 0x0000007Fu, "row0 y");
+            t.Equals(vu1LaneU32(mem, 0u, 2u), 0xFFFFFF80u, "row0 z sign-extended");
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000002u, "row0 w reads vec1[0]");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0xFFFFFFCDu, "row1 w reads pad byte sign-extended");
+        });
+
+        tc.Run("UV1 V3_8 last vector at buffer end zeroes w", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            std::memset(mem.getVU1Data(), 0xA5, PS2_VU1_DATA_SIZE);
+
+            // NUM=4, exact-size packet (16 bytes): vec3's w-read at [16,17)
+            // runs past the buffer, so w is 0; the rest read the next byte.
+            std::vector<uint8_t> packet;
+            appendU32(packet, makeVifCmd(0x6Au, 4u, 0x0000u));
+            const uint8_t comps[12] = {0x10u, 0x11u, 0x12u, 0x20u, 0x21u, 0x22u,
+                                       0x30u, 0x31u, 0x32u, 0x40u, 0x41u, 0x42u};
+            size_t pos = packet.size();
+            packet.resize(pos + sizeof(comps));
+            std::memcpy(packet.data() + pos, comps, sizeof(comps));
+            mem.processVIF1Data(packet.data(), static_cast<uint32_t>(packet.size()));
+
+            t.Equals(vu1LaneU32(mem, 0u, 3u), 0x00000020u, "row0 w reads vec1[0]");
+            t.Equals(vu1LaneU32(mem, 1u, 3u), 0x00000030u, "row1 w reads vec2[0]");
+            t.Equals(vu1LaneU32(mem, 2u, 3u), 0x00000040u, "row2 w reads vec3[0]");
+            t.Equals(vu1LaneU32(mem, 3u, 3u), 0x00000000u, "row3 w is zero past buffer end");
+        });
+
+        tc.Run("libc memcpy with overlapping ranges has memmove semantics", [](TestCase &t)
+        {
+            // CL1: the game issues overlapping copies through ps2_stubs::memcpy
+            // (CP4 ASan memcpy-param-overlap from generated sub_003D1BA8), so
+            // the stub implements memmove semantics. Note: Apple libc's memcpy
+            // happens to be overlap-safe, so on the Mac this pins the contract
+            // rather than catching the old code's UB; the ASan suite run is
+            // the UB net (the old code reports memcpy-param-overlap there).
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            uint8_t *rdram = mem.getRDRAM();
+
+            auto runCase = [&](uint32_t dest, uint32_t src, uint32_t size, const char *what)
+            {
+                std::vector<uint8_t> expect(0x400u);
+                for (size_t i = 0u; i < expect.size(); ++i)
+                {
+                    const uint8_t v = static_cast<uint8_t>((i * 2654435761u) >> 24);
+                    rdram[0x1000u + i] = v;
+                    expect[i] = v;
+                }
+                R5900Context ctx{};
+                setRegU32(ctx, 4, dest);
+                setRegU32(ctx, 5, src);
+                setRegU32(ctx, 6, size);
+                ps2_stubs::memcpy(rdram, &ctx, nullptr);
+                ::memmove(expect.data() + ((dest & 0x1FFFFFFFu) - 0x1000u),
+                          expect.data() + ((src & 0x1FFFFFFFu) - 0x1000u), size);
+                t.Equals(::memcmp(rdram + 0x1000u, expect.data(), expect.size()), 0, what);
+                t.Equals(::getRegU32(&ctx, 2), dest, "memcpy returns dest");
+            };
+
+            runCase(0x1008u, 0x1000u, 64u, "backward overlap (dest > src) matches memmove");
+            runCase(0x1000u, 0x1008u, 64u, "forward overlap (dest < src) matches memmove");
+            runCase(0x1200u, 0x1000u, 64u, "disjoint copy matches memmove");
+            runCase(0x801000C0u, 0x00100080u, 128u, "overlap across KSEG0/base aliases matches memmove");
         });
     });
 }

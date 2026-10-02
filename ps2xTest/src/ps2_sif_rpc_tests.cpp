@@ -23,7 +23,7 @@ namespace ps2_stubs
 namespace
 {
     constexpr int KE_OK = 0;
-    constexpr int KE_SEMA_ZERO = -419;
+    constexpr int KE_ERROR = -1;
 
     constexpr uint32_t K_SIF_RPC_MODE_NOWAIT = 0x01u;
     constexpr uint32_t K_STACK_ADDR = 0x00100000u;

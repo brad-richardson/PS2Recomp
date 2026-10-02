@@ -1,9 +1,12 @@
 #include "MiniTest.h"
 #include "runtime/ps2_memory.h"
+#include "ps2_e4.h"
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "runtime/gs/gs_frontend.h"
+#include "ps2_mtvu.h"
+#include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/ps2_gs_memory.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -11,6 +14,7 @@
 #include "runtime/gs/ps2_gs_psmt8.h"
 #include "Stubs/Helpers/Support.h"
 #include "Stubs/GS.h"
+#include "Syscalls/System.h"
 
 #include <atomic>
 #include <chrono>
@@ -20,6 +24,8 @@
 #include <vector>
 
 using namespace ps2_syscalls;
+
+void ps2xGsCsrVBlankStart(PS2Memory &memory, uint64_t tick);
 
 namespace
 {
@@ -422,23 +428,59 @@ void register_ps2_gs_tests()
             constexpr uint32_t kGsCsr = 0x12001000u;
             constexpr uint32_t kGsImr = 0x12001010u;
 
+            // CSR bits 15:14 (FIFO) are read-only hard-wired EMPTY (0x4000): guest
+            // writes cannot change them (hardware behavior, see ps2_memory.cpp).
+            t.Equals(mem.read64(kGsCsr), 0x4000ull, "CSR should reset with FIFO EMPTY");
+
             const uint64_t csrPattern = 0xA1B2C3D4E5F60718ull;
             mem.write64(kGsCsr, csrPattern);
-            t.Equals(mem.read64(kGsCsr), csrPattern, "64-bit CSR read should match prior 64-bit write");
-            t.Equals(mem.read32(kGsCsr), static_cast<uint32_t>(csrPattern & 0xFFFFFFFFull), "CSR low dword read should match");
+            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D4E5F64710ull, "64-bit CSR read should preserve timing-owned FIELD, acknowledge VSINT, and force FIFO EMPTY");
+            t.Equals(mem.read32(kGsCsr), 0xE5F64710u, "CSR low dword read should preserve timing-owned status");
             t.Equals(mem.read32(kGsCsr + 4u), static_cast<uint32_t>(csrPattern >> 32), "CSR high dword read should match");
 
             mem.write32(kGsCsr, 0x11223344u);
-            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D411223344ull, "32-bit low write should preserve CSR high dword");
+            t.Equals(mem.read64(kGsCsr), 0xA1B2C3D411225344ull, "32-bit low write should preserve high dword and timing-owned FIELD");
 
             mem.write32(kGsCsr + 4u, 0x55667788u);
-            t.Equals(mem.read64(kGsCsr), 0x5566778811223344ull, "32-bit high write should preserve CSR low dword");
+            t.Equals(mem.read64(kGsCsr), 0x5566778811225344ull, "32-bit high write should preserve CSR low dword");
+
+            // SSX3's CSR acknowledge writes must not clobber FIFO EMPTY.
+            mem.write64(kGsCsr, 0x8ull);
+            t.Equals(mem.read64(kGsCsr), 0x4000ull, "guest CSR bit 3 write acknowledges VSINT and keeps FIFO EMPTY");
+            mem.write64(kGsCsr, 0x2ull);
+            t.Equals(mem.read64(kGsCsr), 0x4000ull, "FINISH write-one-to-clear should still clear bit 1 with FIFO EMPTY");
 
             const uint64_t imrPattern = 0x0123456789ABCDEFull;
             mem.write64(kGsImr, imrPattern);
             t.Equals(mem.read64(kGsImr), imrPattern, "IMR 64-bit read should match prior write");
             t.Equals(mem.read32(kGsImr), 0x89ABCDEFu, "IMR low dword should match");
             t.Equals(mem.read32(kGsImr + 4u), 0x01234567u, "IMR high dword should match");
+        });
+
+        tc.Run("E54B: VSINT acknowledge and timing-owned FIELD survive 64/32-bit CSR writes", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            constexpr uint32_t kCsr = 0x12001000u;
+            t.Equals(mem.read64(kCsr), 0x4000ull, "reset CSR has FIFO EMPTY and no VSINT/FIELD");
+            mem.write64(kCsr, 0x8ull);
+            t.Equals(mem.read64(kCsr), 0x4000ull, "write64(8) cannot raise VSINT");
+            ps2xGsCsrVBlankStart(mem, 1u);
+            t.Equals(mem.read64(kCsr), 0x6008ull, "first VBlank raises VSINT and odd FIELD");
+            mem.write64(kCsr, 0x8ull);
+            t.Equals(mem.read64(kCsr), 0x6000ull, "write64(8) clears VSINT, preserves FIELD");
+            ps2xGsCsrVBlankStart(mem, 2u);
+            t.Equals(mem.read64(kCsr), 0x4008ull, "next VBlank raises VSINT and advances even FIELD");
+            mem.write32(kCsr, 0x8u);
+            t.Equals(mem.read64(kCsr), 0x4000ull, "write32(8) clears VSINT");
+            mem.write32(kCsr, 0x2008u);
+            t.Equals(mem.read64(kCsr), 0x4000ull, "write32 cannot set FIELD or VSINT");
+            ps2xGsCsrVBlankStart(mem, 3u);
+            t.Equals(mem.read64(kCsr), 0x6008ull, "third VBlank raises VSINT and odd FIELD");
+            mem.write32(kCsr, 0x8u);
+            t.Equals(mem.read64(kCsr), 0x6000ull, "write32 clears VSINT without clearing FIELD");
+            mem.write64(kCsr, 0x0ull);
+            t.Equals(mem.read64(kCsr), 0x6000ull, "write64(0) also preserves FIELD");
         });
 
         tc.Run("unknown GS privileged offsets are no-op and read as zero", [](TestCase &t)
@@ -516,6 +558,82 @@ void register_ps2_gs_tests()
                      "GsSetCrt should leave CRT1 enabled for presentation");
             t.Equals(getRegU32Test(ctx, 2), 0u,
                      "GsSetCrt should return success");
+        });
+
+        // GB3: SetGsCrt programs SMODE1 like the real kernel (NTSC = the
+        // G13 PCSX2 dump's 0x740814504; PAL = CMOD 3), SMODE2 = INT|FFMD<<1.
+        tc.Run("GB3: SetGsCrt programs SMODE1/SMODE2 per mode like the kernel", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            struct Case
+            {
+                uint32_t interlaced, mode, frame;
+                uint64_t smode1, smode2;
+                const char *what;
+            };
+            const Case cases[] = {
+                {1u, 0x2u, 0u, 0x0000000740814504ull, 0x1ull, "NTSC 0x2 interlaced field (SSX 3 shape)"},
+                {1u, 0x0u, 1u, 0x0000000740814504ull, 0x3ull, "NTSC 0x0 alias, interlaced frame"},
+                {0u, 0x2u, 0u, 0x0000000740814504ull, 0x0ull, "NTSC non-interlaced"},
+                {1u, 0x3u, 0u, 0x0000000740816504ull, 0x1ull, "PAL 0x3 interlaced field"},
+                {1u, 0x1u, 1u, 0x0000000740816504ull, 0x3ull, "PAL 0x1 alias, frame"},
+            };
+            for (const Case &c : cases)
+            {
+                R5900Context ctx{};
+                setRegU32(ctx, 4, c.interlaced);
+                setRegU32(ctx, 5, c.mode);
+                setRegU32(ctx, 6, c.frame);
+                runtime.memory().gs().smode1 = 0u;
+                runtime.memory().gs().smode2 = 0u;
+                runtime.memory().gs().pmode = 0u;
+                GsSetCrt(rdram.data(), &ctx, &runtime);
+                t.Equals(runtime.memory().gs().smode1, c.smode1, c.what);
+                t.Equals(runtime.memory().gs().smode2, c.smode2, c.what);
+                t.Equals(runtime.memory().gs().pmode & 0x3ull, 0x1ull, "CRT1 stays enabled");
+                t.Equals(getRegU32Test(ctx, 2), 0u, "returns 0");
+            }
+            // SMODE1 field decode of the NTSC value (PCSX2 GSRegs.h layout).
+            const uint64_t v = gsCrtSmode1ForMode(2u);
+            t.Equals(v & 0x7ull, 4ull, "RC=4");
+            t.Equals((v >> 3) & 0x7Full, 32ull, "LC=32 (analog)");
+            t.Equals((v >> 10) & 0x3ull, 1ull, "T1248=1");
+            t.Equals((v >> 13) & 0x3ull, 2ull, "CMOD=2 (NTSC)");
+            t.Equals((gsCrtSmode1ForMode(3u) >> 13) & 0x3ull, 3ull, "CMOD=3 (PAL)");
+            t.Equals((v >> 16) & 0x1ull, 1ull, "PRST=1");
+            t.Equals((v >> 21) & 0xFull, 4ull, "SPML=4");
+            t.Equals((v >> 30) & 0x3ull, 1ull, "CLKSEL=1");
+            t.Equals((v >> 32) & 0x1Full, 0x7ull, "NVCK=1 SLCK2=1 VCKSEL=1 VHP=0");
+            // Unmodelled modes (VESA 0x1A, DTV 0x50) leave SMODE1 alone.
+            for (uint32_t mode : {0x1Au, 0x50u})
+            {
+                R5900Context ctx{};
+                setRegU32(ctx, 4, 0u);
+                setRegU32(ctx, 5, mode);
+                setRegU32(ctx, 6, 1u);
+                runtime.memory().gs().smode1 = 0x1111ull;
+                GsSetCrt(rdram.data(), &ctx, &runtime);
+                t.Equals(runtime.memory().gs().smode1, 0x1111ull, "unmodelled mode leaves SMODE1");
+                t.Equals(runtime.memory().gs().smode2, 0x2ull, "SMODE2 still follows the args");
+            }
+        });
+
+        tc.Run("GB3: sceGsResetGraph(0, ...) applies SetGsCrt's SMODE1 (the game's real path)", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+            setRegU32(ctx, 4, 0u); // mode 0 = reset
+            setRegU32(ctx, 5, 1u); // interlaced
+            setRegU32(ctx, 6, 2u); // omode NTSC
+            setRegU32(ctx, 7, 0u); // field
+            runtime.memory().gs().smode1 = 0u;
+            ps2_stubs::sceGsResetGraph(rdram.data(), &ctx, &runtime);
+            t.Equals(runtime.memory().gs().smode1, 0x0000000740814504ull, "NTSC SMODE1 after reset");
+            t.Equals(runtime.memory().gs().smode2 & 0x3ull, 0x1ull, "SMODE2 INT=1 FFMD=0");
         });
 
         tc.Run("sceGsSetDefDBuffDc seeds display envs and swap applies the selected page", [](TestCase &t)
@@ -1681,8 +1799,9 @@ void register_ps2_gs_tests()
                      "single-circuit presentation should normalize the last row alpha");
         });
 
-        tc.Run("latched host presentation line-doubles interlaced field output", [](TestCase &t)
+        tc.Run("latched host presentation line-doubles interlaced field output in bob mode", [](TestCase &t)
         {
+            ps2xSetDeinterlaceBobForTest(true);
             std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
             GSRegisters regs{};
             regs.pmode = 0x0001ull;
@@ -1738,6 +1857,7 @@ void register_ps2_gs_tests()
                      "field presentation should duplicate later field scanlines as well");
             t.IsTrue(row0 != row2,
                      "field presentation should still preserve different source content across field rows");
+            ps2xClearDeinterlaceBobForTest();
         });
 
         tc.Run("GIF PACKED A+D writes DISPFB1 and DISPLAY1 privileged registers", [](TestCase &t)
@@ -2113,6 +2233,38 @@ void register_ps2_gs_tests()
 
             mem.write32(0x12001000u, 0x2u);
             t.IsTrue((mem.gs().csr & 0x2ull) == 0ull, "writing CSR bit1 should acknowledge FINISH");
+        });
+
+        tc.Run("MQ2 FINISH write count and EE credits", [](TestCase &t)
+        {
+            // PACKED, NREG=1 (A+D), NLOOP=3: FINISH, TEST_1, FINISH.
+            std::vector<uint8_t> pkt(16u * 4u, 0u);
+            const uint64_t tagLo = 3ull | (1ull << 15) | (0ull << 58) | (1ull << 60);
+            const uint64_t tagHi = 0xEull;
+            std::memcpy(pkt.data(), &tagLo, 8);
+            std::memcpy(pkt.data() + 8, &tagHi, 8);
+            pkt[16 + 8] = static_cast<uint8_t>(GS_REG_FINISH);
+            pkt[32 + 8] = 0x47u; // TEST_1
+            pkt[48 + 8] = static_cast<uint8_t>(GS_REG_FINISH);
+            t.Equals(ps2xGifFinishWrites(pkt.data(), static_cast<uint32_t>(pkt.size())), 2u, "two A+D FINISH writes");
+            t.Equals(ps2xGifFinishWrites(pkt.data(), 16u), 0u, "truncated payload: none counted");
+            t.Equals(ps2xGifFinishWrites(nullptr, 64u), 0u, "null data");
+
+            namespace d = ps2_mtvu::detail;
+            d::g_finishEeCredits.store(0u);
+            const uint64_t skips0 = d::g_finishEeSkips.load(), unmatched0 = d::g_finishEeUnmatched.load();
+            ps2_mtvu::noteEeFinishSet(2u);
+            t.IsTrue(ps2_mtvu::consumeEeFinishCredits(1u), "first write covered");
+            t.IsTrue(ps2_mtvu::consumeEeFinishCredits(1u), "second write covered");
+            t.IsFalse(ps2_mtvu::consumeEeFinishCredits(1u), "no credit left: the unit sets as before");
+            t.Equals(d::g_finishEeSkips.load() - skips0, 2ull, "two skips");
+            t.Equals(d::g_finishEeUnmatched.load() - unmatched0, 1ull, "one unmatched");
+            t.Equals(d::g_finishEeCredits.load(), 0ull, "credits balanced");
+            {
+                const ps2_mtvu::GifEmitPathScope scope(3u);
+                t.Equals(static_cast<uint32_t>(ps2_mtvu::gifEmitPath()), 3u, "emit path set in scope");
+            }
+            t.Equals(static_cast<uint32_t>(ps2_mtvu::gifEmitPath()), 0u, "emit path cleared after scope");
         });
 
         tc.Run("GIF IMAGE packet writes host-to-local data into GS VRAM", [](TestCase &t)
@@ -3890,6 +4042,58 @@ void register_ps2_gs_tests()
                      "triangle fan quad should light at least one framebuffer row");
         });
 
+        tc.Run("GS triangles sharing an edge cover each pixel once (G46 fill rule)", [](TestCase &t)
+        {
+            // G46: a quad split into two alpha-additive triangles. Pixels whose
+            // centers lie exactly on the shared diagonal must be drawn by one
+            // triangle only, otherwise blended quads show a bright seam.
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gs;
+            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+
+            gs.writeRegister(GS_REG_FRAME_1, (1ull << 16)); // FBW=1, PSMCT32, FBP=0
+            gs.writeRegister(GS_REG_ZBUF_1, (1ull << 32));  // ZMSK
+            gs.writeRegister(GS_REG_SCISSOR_1, (63ull << 16) | (63ull << 48));
+            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+            // Cv = (Cs - 0) * FIX(0x80 = 1.0) + Cd: each coverage adds Cs.
+            gs.writeRegister(GS_REG_ALPHA_1, (0x80ull << 32) | (1ull << 6) | (2ull << 4) | (2ull << 2) | 0ull);
+            gs.writeRegister(GS_REG_RGBAQ, 0x10ull | (0x80ull << 24) | (0x3F800000ull << 32));
+            auto xyz = [](uint32_t x, uint32_t y) -> uint64_t
+            {
+                return static_cast<uint64_t>(x * 16u) | (static_cast<uint64_t>(y * 16u) << 16);
+            };
+            const uint64_t prim = static_cast<uint64_t>(GS_PRIM_TRIANGLE) | (1ull << 6); // ABE
+            gs.writeRegister(GS_REG_PRIM, prim);
+            gs.writeRegister(GS_REG_XYZ2, xyz(4u, 4u));
+            gs.writeRegister(GS_REG_XYZ2, xyz(28u, 4u));
+            gs.writeRegister(GS_REG_XYZ2, xyz(4u, 28u));
+            gs.writeRegister(GS_REG_PRIM, prim);
+            gs.writeRegister(GS_REG_XYZ2, xyz(28u, 4u));
+            gs.writeRegister(GS_REG_XYZ2, xyz(28u, 28u));
+            gs.writeRegister(GS_REG_XYZ2, xyz(4u, 28u));
+
+            uint32_t once = 0u, twice = 0u, holes = 0u;
+            for (uint32_t y = 4u; y < 28u; ++y)
+            {
+                for (uint32_t x = 4u; x < 28u; ++x)
+                {
+                    const uint32_t r = GSMem::ReadCT32(vram.data(), 0u, 1u, x, y) & 0xFFu;
+                    if (r == 0x10u)
+                        ++once;
+                    else if (r == 0x20u)
+                        ++twice;
+                    else
+                        ++holes;
+                }
+            }
+            t.Equals(twice, 0u, "no pixel inside the quad is blended by both triangles");
+            t.Equals(holes, 0u, "every pixel inside the quad is covered");
+            t.Equals(once, 24u * 24u, "the quad's 24x24 pixels are each drawn exactly once");
+            const uint32_t outside = GSMem::ReadCT32(vram.data(), 0u, 1u, 28u, 28u) & 0xFFu;
+            t.Equals(outside, 0u, "bottom-right corner pixel (28,28) stays outside the quad");
+        });
+
         tc.Run("sceGsExecLoadImage and sceGsExecStoreImage roundtrip and free guest packets", [](TestCase &t)
         {
             PS2Runtime runtime;
@@ -4139,8 +4343,12 @@ void register_ps2_gs_tests()
                      "VSync callback should receive a positive tick value");
             t.Equals(g_gsSyncCallbackGp.load(std::memory_order_acquire), kGsCallbackGp,
                      "callback invocation should preserve the registered GP");
-            t.IsTrue(g_gsSyncCallbackSp.load(std::memory_order_acquire) >= 0x01F00000u,
+            // P1y: 6046260 relocated the reserved async pool from the RAM top
+            // to kernel-reserved low RAM [0x80000,0x100000); pin both bounds.
+            t.IsTrue(g_gsSyncCallbackSp.load(std::memory_order_acquire) >= 0x00080000u,
                      "callback invocation should use the reserved async stack pool");
+            t.IsTrue(g_gsSyncCallbackSp.load(std::memory_order_acquire) < 0x00100000u,
+                     "callback stack should stay below the ELF image base");
             t.IsTrue(g_gsSyncCallbackSp.load(std::memory_order_acquire) != kGsCallbackCallerSp,
                      "callback invocation must not reuse the caller stack");
         });
@@ -4616,6 +4824,130 @@ void register_ps2_gs_tests()
             }
             t.IsTrue(pattern2Ok,
                      "second T4HL transfer to a different DBP should be byte-correct, proving the discarded excess bytes from the first transfer did not leak into subsequent transfer state");
+        });
+
+        tc.Run("E4 env parse accepts decimal/hex and rejects junk (E4)", [](TestCase &t)
+        {
+            uint64_t parsed = 0;
+            t.IsTrue(ps2_e4::parseU64("600", parsed) && parsed == 600u, "decimal tick should parse");
+            t.IsTrue(ps2_e4::parseU64("0x258", parsed) && parsed == 600u, "hex tick should parse");
+            t.IsTrue(!ps2_e4::parseU64("", parsed), "empty should not parse");
+            t.IsTrue(!ps2_e4::parseU64("60x", parsed), "trailing junk should not parse");
+            t.IsTrue(!ps2_e4::parseU64(nullptr, parsed), "null should not parse");
+        });
+
+        tc.Run("E4 history-entry formatter keeps the branch-table fields (E4)", [](TestCase &t)
+        {
+            GSDebugHistoryEntry draw{};
+            draw.seq = 7;
+            draw.vsyncTick = 600;
+            draw.frameIndex = 3;
+            draw.kind = GSDebugEventKind::Draw;
+            draw.prim.type = GS_PRIM_SPRITE;
+            draw.prim.tme = true;
+            draw.frame.fbp = 112;
+            draw.frame.fbw = 8;
+            draw.frame.psm = 1;
+            draw.tex0.tbp0 = 0;
+            draw.vertexCount = 2;
+            const std::string text = ps2_e4::formatHistoryEntry(draw);
+            t.IsTrue(text.find("kind=draw") != std::string::npos, "draw kind should be named");
+            t.IsTrue(text.find("fbp=112") != std::string::npos, "destination fbp should be kept");
+            t.IsTrue(text.find("tick=600") != std::string::npos, "vsync tick should be kept");
+            t.IsTrue(text.find("verts=2") != std::string::npos, "vertex count should be kept");
+
+            GSDebugHistoryEntry present{};
+            present.kind = GSDebugEventKind::Present;
+            present.displayFbp = 112;
+            present.sourceFbp = 112;
+            present.width = 512;
+            present.height = 448;
+            const std::string ptext = ps2_e4::formatHistoryEntry(present);
+            t.IsTrue(ptext.find("kind=present") != std::string::npos, "present kind should be named");
+            t.IsTrue(ptext.find("112,112,512x448") != std::string::npos, "present fbps/geometry should be kept");
+        });
+
+        tc.Run("E4 surface collector dedupes, decodes DISPFB, and caps at 16 (E4)", [](TestCase &t)
+        {
+            GSDebugHistoryEntry a{};
+            a.kind = GSDebugEventKind::Draw;
+            a.prim.tme = true;
+            a.frame.fbp = 112;
+            a.frame.fbw = 8;
+            a.frame.psm = 1;
+            a.tex0.tbp0 = 0;
+            a.tex0.tbw = 8;
+            a.tex0.psm = 0;
+            a.tex0.tw = 10;
+            a.tex0.th = 9;
+            GSDebugHistoryEntry b = a;
+            b.tex0.tbp0 = 64; // same destination, second texture
+            const std::vector<GSDebugHistoryEntry> history{a, a, b};
+            const uint64_t dispfb1 = 112u | (8u << 9) | (1u << 15);
+            const uint64_t display1 = 447ull << 44;
+            const auto collected = ps2_e4::collectSurfaces(history, dispfb1, display1, 0u, 0u);
+            t.IsTrue(!collected.second, "5 surfaces should not truncate");
+            t.Equals(collected.first.size(), static_cast<size_t>(5), "dst x1 + tex x2 + disp1 + disp2 expected");
+            bool sawTex64 = false, sawDisp1 = false;
+            for (const ps2_e4::E4Surface &s : collected.first)
+            {
+                if (s.kind == "draw-tex" && s.base == 64u)
+                {
+                    sawTex64 = true;
+                }
+                if (s.kind == "disp1" && s.base == 112u && s.bw == 8u && s.h == 448u)
+                {
+                    sawDisp1 = true;
+                }
+            }
+            t.IsTrue(sawTex64, "second texture surface should survive dedupe");
+            t.IsTrue(sawDisp1, "DISPFB1 should decode to fbp=112 fbw=8 H=448");
+
+            std::vector<GSDebugHistoryEntry> many;
+            for (uint32_t i = 0; i < 20u; ++i)
+            {
+                GSDebugHistoryEntry e{};
+                e.kind = GSDebugEventKind::Draw;
+                e.frame.fbp = 100u + i;
+                e.frame.fbw = 8;
+                many.push_back(e);
+            }
+            const auto capped = ps2_e4::collectSurfaces(many, dispfb1, display1, 0u, 0u);
+            t.IsTrue(capped.second, "22 surfaces should truncate");
+            t.Equals(capped.first.size(), ps2_e4::kMaxSurfaces, "surface set should cap at 16");
+        });
+
+        tc.Run("deinterlace value parses to weave unless exactly bob", [](TestCase &t)
+        {
+            t.IsFalse(ps2xDeinterlaceBobValue(nullptr), "unset weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue(""), "empty weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue("weave"), "weave weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue("BOB"), "case differs weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue("bob "), "trailing space weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue(" bob"), "leading space weaves");
+            t.IsFalse(ps2xDeinterlaceBobValue("1"), "1 weaves");
+            t.IsTrue(ps2xDeinterlaceBobValue("bob"), "exactly bob bobs");
+        });
+
+        tc.Run("deinterlace weave is identity, bob doubles one field", [](TestCase &t)
+        {
+            constexpr uint32_t kHeight = 8u;
+            for (uint32_t y = 0u; y < kHeight; ++y)
+            {
+                t.Equals(ps2xDeinterlaceSourceLine(y, kHeight, false, false), y, "weave even field is identity");
+                t.Equals(ps2xDeinterlaceSourceLine(y, kHeight, true, false), y, "weave odd field is identity");
+            }
+            for (uint32_t y = 0u; y < kHeight; y += 2u)
+            {
+                t.Equals(ps2xDeinterlaceSourceLine(y, kHeight, false, true), y, "bob even field keeps even lines");
+                t.Equals(ps2xDeinterlaceSourceLine(y + 1u, kHeight, false, true), y, "bob even field doubles even lines");
+                t.Equals(ps2xDeinterlaceSourceLine(y, kHeight, true, true), y + 1u, "bob odd field doubles odd lines");
+                t.Equals(ps2xDeinterlaceSourceLine(y + 1u, kHeight, true, true), y + 1u, "bob odd field keeps odd lines");
+            }
+            t.IsTrue(ps2xDeinterlaceSourceLine(0u, kHeight, false, true) != ps2xDeinterlaceSourceLine(0u, kHeight, true, true),
+                     "fields alternate instead of freezing on one");
+            t.Equals(ps2xDeinterlaceSourceLine(kHeight - 1u, kHeight - 1u, true, true), kHeight - 2u,
+                     "bob clamps the odd field at an odd height");
         });
     });
 }

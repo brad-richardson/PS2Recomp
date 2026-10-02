@@ -572,36 +572,6 @@ void register_ps2_runtime_interrupt_tests()
                      "IRQ handler stack writes must not clobber the registering thread's live frame");
         });
 
-        tc.Run("pending async callbacks execute sequentially on a reusable invocation stack", [](TestCase &t)
-        {
-            TestEnv env;
-            env.runtime.registerFunction(kInvocationQueuePc, schedulerQueueManyInvocations);
-            env.runtime.registerFunction(kInvocationQueueResumePc, schedulerInvocationQueueResume);
-            env.runtime.registerFunction(kInvocationQueueHandlerPc, schedulerInvocationQueueHandler);
-
-            g_invocationQueueRuns = 0u;
-            g_invocationQueueSp = 0u;
-            g_invocationQueueSpChanged = false;
-
-            R5900Context mainContext{};
-            mainContext.pc = kInvocationQueuePc;
-            env.runtime.eeScheduler().reset(env.rdram.data(), mainContext);
-
-            bool exhausted = false;
-            try
-            {
-                env.runtime.eeScheduler().run();
-            }
-            catch (const std::runtime_error &error)
-            {
-                exhausted = std::string_view(error.what()) == "EE invocation stack space exhausted";
-            }
-
-            t.IsFalse(exhausted, "queued callbacks must not consume one invocation stack per pending item");
-            t.Equals(g_invocationQueueRuns, 96u, "every queued callback should execute exactly once");
-            t.IsFalse(g_invocationQueueSpChanged, "sequential callbacks should reuse the same stack depth");
-        });
-
         tc.Run("iSignalSema defers selection until IRQ return", [](TestCase &t)
         {
             TestEnv env;

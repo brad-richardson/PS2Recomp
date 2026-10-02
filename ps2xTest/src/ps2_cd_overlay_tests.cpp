@@ -1,0 +1,365 @@
+#include "MiniTest.h"
+#include "ps2_cd_overlay.h"
+
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
+
+// TK3: runtime virtual CD directory. A synthetic ISO9660 image in memory:
+// PVD at 16, root at 20, /DATA at 21, /DATA/WORLDS at 22 (BAM.BIG, IRR.DAT).
+namespace
+{
+namespace fs = std::filesystem;
+constexpr uint32_t kSec = ps2_cd_overlay::kSectorSize;
+constexpr uint32_t kImageSectors = 40;
+
+void both32(uint8_t *p, uint32_t v) { ps2_cd_overlay::detail::both32(p, v); }
+
+uint32_t le32(const uint8_t *p) { return ps2_cd_overlay::detail::le32(p); }
+
+size_t putRecord(std::vector<uint8_t> &img, size_t at, const std::string &name, uint32_t lbn, uint32_t size, bool dir)
+{
+    const size_t len = 33 + name.size() + ((name.size() % 2) == 0 ? 1 : 0);
+    img[at] = static_cast<uint8_t>(len);
+    both32(&img[at + 2], lbn);
+    both32(&img[at + 10], size);
+    img[at + 18] = 103; // 2003
+    img[at + 25] = dir ? 2 : 0;
+    img[at + 32] = static_cast<uint8_t>(name.size());
+    std::memcpy(&img[at + 33], name.data(), name.size());
+    return at + len;
+}
+
+size_t putDots(std::vector<uint8_t> &img, uint32_t self, uint32_t parent)
+{
+    size_t o = putRecord(img, self * kSec, std::string(1, '\0'), self, kSec, true);
+    return putRecord(img, o, std::string(1, '\1'), parent, kSec, true);
+}
+
+std::vector<uint8_t> makeImage(int extraWorldRecords = 0)
+{
+    std::vector<uint8_t> img(kImageSectors * kSec, 0);
+    uint8_t *pvd = &img[16 * kSec];
+    pvd[0] = 1;
+    std::memcpy(pvd + 1, "CD001", 5);
+    putRecord(img, 16 * kSec + 156, std::string(1, '\0'), 20, kSec, true);
+    size_t o = putDots(img, 20, 20);
+    putRecord(img, o, "DATA", 21, kSec, true);
+    o = putDots(img, 21, 20);
+    putRecord(img, o, "WORLDS", 22, kSec, true);
+    o = putDots(img, 22, 21);
+    o = putRecord(img, o, "BAM.BIG;1", 30, 4096, false);
+    o = putRecord(img, o, "IRR.DAT;1", 32, 100, false);
+    for (int i = 0; i < extraWorldRecords; ++i)
+        o = putRecord(img, o, "Z" + std::to_string(1000 + i) + ".DAT;1", 33, 1, false);
+    return img;
+}
+
+ps2_cd_overlay::SectorReader reader(const std::vector<uint8_t> &img)
+{
+    return [&img](uint32_t lbn, uint8_t *dst)
+    {
+        if (lbn >= img.size() / kSec)
+            return false;
+        std::memcpy(dst, &img[lbn * kSec], kSec);
+        return true;
+    };
+}
+
+fs::path makeOverlayDir(const std::string &tag, const std::vector<std::pair<std::string, size_t>> &files)
+{
+    const fs::path root = fs::temp_directory_path() / ("ps2x-tk3-" + tag);
+    fs::remove_all(root);
+    for (const auto &[rel, bytes] : files)
+    {
+        fs::create_directories((root / rel).parent_path());
+        std::ofstream(root / rel, std::ios::binary) << std::string(bytes, 'x');
+    }
+    return root;
+}
+
+std::vector<std::string> names(const std::vector<uint8_t> &sector)
+{
+    std::vector<std::string> out;
+    for (uint32_t o = 0; o < kSec && sector[o] != 0; o += sector[o])
+        out.emplace_back(reinterpret_cast<const char *>(&sector[o + 33]), sector[o + 32]);
+    return out;
+}
+
+// TK25c: a composite descriptor sector followed by its own pieces.
+fs::path makeComposite(const std::string &tag, const std::string &header, size_t pieceSectors)
+{
+    const fs::path root = fs::temp_directory_path() / ("ps2x-tk10-" + tag);
+    fs::remove_all(root);
+    fs::create_directories(root / "DATA/WORLDS");
+    std::string bytes = header;
+    bytes.resize(kSec, '\0');
+    for (size_t i = 0; i < pieceSectors; ++i)
+        bytes += std::string(kSec, static_cast<char>('a' + i));
+    std::ofstream(root / "DATA/WORLDS/GARI.BIG", std::ios::binary) << bytes;
+    return root;
+}
+
+// TK25c: synthetic image with /DATA/AUDIO/SPEECH.BIG (lbn 30, 8192 B) and
+// /DATA/WORLDS/BAM.BIG (lbn 34, 4096 B). File sectors hold a per-sector
+// pattern byte (0xA0+i / 0xB0+i) so served bytes are checkable.
+std::vector<uint8_t> makeAliasImage()
+{
+    std::vector<uint8_t> img(kImageSectors * kSec, 0);
+    uint8_t *pvd = &img[16 * kSec];
+    pvd[0] = 1;
+    std::memcpy(pvd + 1, "CD001", 5);
+    putRecord(img, 16 * kSec + 156, std::string(1, '\0'), 20, kSec, true);
+    size_t o = putDots(img, 20, 20);
+    putRecord(img, o, "DATA", 21, kSec, true);
+    o = putDots(img, 21, 20);
+    o = putRecord(img, o, "AUDIO", 22, kSec, true);
+    putRecord(img, o, "WORLDS", 23, kSec, true);
+    o = putDots(img, 22, 21);
+    putRecord(img, o, "SPEECH.BIG;1", 30, 8192, false);
+    o = putDots(img, 23, 21);
+    putRecord(img, o, "BAM.BIG;1", 34, 4096, false);
+    for (int i = 0; i < 4; ++i)
+        std::memset(&img[(30 + i) * kSec], 0xA0 + i, kSec);
+    for (int i = 0; i < 2; ++i)
+        std::memset(&img[(34 + i) * kSec], 0xB0 + i, kSec);
+    return img;
+}
+
+// TK25c: a bare host composite file (loadDiscAlias takes the path directly):
+// descriptor sector + one sector per char of `pieces`.
+fs::path makeAliasHost(const std::string &tag, const std::string &header, const std::string &pieces)
+{
+    const fs::path root = fs::temp_directory_path() / ("ps2x-tk25c-" + tag);
+    fs::remove_all(root);
+    fs::create_directories(root);
+    std::string bytes = header;
+    bytes.resize(kSec, '\0');
+    for (char c : pieces)
+        bytes += std::string(kSec, c);
+    const fs::path host = root / "SPEECH.BIG";
+    std::ofstream(host, std::ios::binary) << bytes;
+    return host;
+}
+
+const std::string kAliasHead = "PS2XCMP1\nsize 8192\nimage 40\n"
+                               "self 2048 1\niso 31 1\nself 4096 2\nend\n";
+} // namespace
+
+void register_ps2_cd_overlay_tests()
+{
+    MiniTest::Case("Ps2CdOverlay", [](TestCase &tc)
+                   {
+        tc.Run("adds a sorted record past the image end", [](TestCase &t)
+               {
+            const auto img = makeImage();
+            const fs::path dir = makeOverlayDir("add", {{"data/worlds/gari.big", 5000}});
+            ps2_cd_overlay::Overlay ov;
+            std::string err;
+            t.IsTrue(ps2_cd_overlay::build(dir, kImageSectors, reader(img), ov, err), err.c_str());
+            t.Equals(ov.files.size(), static_cast<size_t>(1), "one file");
+            t.Equals(ov.files[0].isoPath, std::string("/DATA/WORLDS/GARI.BIG;1"), "iso path");
+            t.Equals(ov.files[0].lbn, 48u, "first lbn aligned past the image");
+            t.Equals(ov.files[0].sectors, 3u, "sectors");
+            t.IsTrue(ov.contains(48) && ov.contains(50) && !ov.contains(47), "range");
+            t.IsTrue(ov.fileFor(49) == &ov.files[0], "fileFor");
+            t.Equals(ov.dirSectors.size(), static_cast<size_t>(1), "one directory sector");
+            const auto &sec = ov.dirSectors.at(22);
+            const auto n = names(sec);
+            t.Equals(n.size(), static_cast<size_t>(5), "five records");
+            t.Equals(n[2], std::string("BAM.BIG;1"), "sorted 1");
+            t.Equals(n[3], std::string("GARI.BIG;1"), "sorted 2");
+            t.Equals(n[4], std::string("IRR.DAT;1"), "sorted 3");
+            uint32_t o = 0;
+            for (int i = 0; i < 3; ++i)
+                o += sec[o];
+            t.Equals(le32(&sec[o + 2]), 48u, "extent");
+            t.Equals(le32(&sec[o + 10]), 5000u, "size");
+            t.Equals(sec[o + 9], static_cast<uint8_t>(48), "big-endian extent low byte");
+            t.Equals(sec[o + 18], static_cast<uint8_t>(103), "date copied from .");
+
+            std::vector<uint8_t> buf(3 * kSec, 0xAA);
+            ov.patchDirSectors(21, 3, buf.data(), buf.size());
+            t.IsTrue(std::memcmp(&buf[kSec], sec.data(), kSec) == 0, "patched in the middle of a read");
+            t.Equals(buf[0], static_cast<uint8_t>(0xAA), "other sectors untouched");
+            fs::remove_all(dir); });
+
+        tc.Run("refuses loudly", [](TestCase &t)
+               {
+            const auto img = makeImage();
+            ps2_cd_overlay::Overlay ov;
+            std::string err;
+            struct Case { const char *tag; const char *rel; };
+            for (const Case c : {Case{"exists", "DATA/WORLDS/BAM.BIG"}, Case{"nodir", "DATA/NEWDIR/X.BIG"},
+                                 Case{"badname", "DATA/WORLDS/GARI-2.BIG"}, Case{"noext", "DATA/WORLDS/GARI"}})
+            {
+                const fs::path dir = makeOverlayDir(c.tag, {{c.rel, 10}});
+                t.IsFalse(ps2_cd_overlay::build(dir, kImageSectors, reader(img), ov, err), c.tag);
+                t.IsTrue(ov.files.empty() && !ov.contains(48), "nothing kept");
+                fs::remove_all(dir);
+            }
+            const auto full = makeImage(43); // 43 x 44 B more: the new record no longer fits
+            const fs::path dir = makeOverlayDir("full", {{"DATA/WORLDS/GARI.BIG", 10}});
+            t.IsFalse(ps2_cd_overlay::build(dir, kImageSectors, reader(full), ov, err), "sector overflow");
+            t.IsTrue(err.find("would need 2 sectors") != std::string::npos, err.c_str());
+            fs::remove_all(dir);
+            t.IsFalse(ps2_cd_overlay::build("/nonexistent-tk3", kImageSectors, reader(img), ov, err), "missing dir"); });
+        tc.Run("composite: stock image ranges plus host pieces (TK10)", [](TestCase &t)
+               {
+            const auto img = makeImage();
+            // 4 sectors seen: host piece 'a', BAM.BIG's 2 sectors (lbn 30-31), host piece 'b' (100 B used).
+            const std::string head = "PS2XCMP1\nsize " + std::to_string(3 * kSec + 100) + "\nimage 40\n"
+                                     "self 2048 1\niso 30 2\nself 4096 1\nend\n";
+            const fs::path dir = makeComposite("ok", head, 2);
+            ps2_cd_overlay::Overlay ov;
+            std::string err;
+            t.IsTrue(ps2_cd_overlay::build(dir, kImageSectors, reader(img), ov, err), err.c_str());
+            const auto &f = ov.files.at(0);
+            t.Equals(f.sizeBytes, static_cast<uint64_t>(3 * kSec + 100), "size from the descriptor");
+            t.Equals(f.sectors, 4u, "sectors");
+            t.Equals(f.segments.size(), static_cast<size_t>(3), "segments");
+            const auto &sec = ov.dirSectors.at(22);
+            uint32_t o = 0;
+            for (int i = 0; i < 3; ++i)
+                o += sec[o];
+            t.Equals(le32(&sec[o + 10]), static_cast<uint32_t>(3 * kSec + 100), "record size is the composite size");
+            t.IsTrue(ov.log.back().find("composite 3 segments, 2 sectors from the image") != std::string::npos, ov.log.back().c_str());
+
+            using P = ps2_cd_overlay::Piece;
+            const auto all = ps2_cd_overlay::resolve(f, 0, 4 * kSec);
+            t.Equals(all.size(), static_cast<size_t>(3), "three pieces");
+            t.IsTrue(all[0].kind == P::Host && all[0].offset == kSec && all[0].bytes == kSec, "piece a");
+            t.IsTrue(all[1].kind == P::Image && all[1].offset == 30 * kSec && all[1].bytes == 2 * kSec, "stock range");
+            t.IsTrue(all[2].kind == P::Host && all[2].offset == 2 * kSec && all[2].bytes == kSec, "piece b");
+            const auto mid = ps2_cd_overlay::resolve(f, kSec + 10, kSec);
+            t.Equals(mid.size(), static_cast<size_t>(1), "inside one segment");
+            t.IsTrue(mid[0].kind == P::Image && mid[0].offset == 30 * kSec + 10, "offset within the image range");
+            const auto cross = ps2_cd_overlay::resolve(f, 2 * kSec + 2000, 100);
+            t.Equals(cross.size(), static_cast<size_t>(2), "crosses into piece b");
+            t.IsTrue(cross[0].bytes == 48 && cross[1].kind == P::Host && cross[1].offset == 2 * kSec && cross[1].bytes == 52, "split");
+            const auto past = ps2_cd_overlay::resolve(f, 3 * kSec, 2 * kSec);
+            t.IsTrue(past.size() == 2 && past[1].kind == P::Zero && past[1].bytes == kSec, "past the segments reads zeros");
+            ps2_cd_overlay::OverlayFile plain;
+            const auto p = ps2_cd_overlay::resolve(plain, 7, 9);
+            t.IsTrue(p.size() == 1 && p[0].kind == P::Host && p[0].offset == 7 && p[0].bytes == 9, "plain file is one host range");
+            fs::remove_all(dir);
+
+            struct Bad { const char *tag; std::string head; };
+            for (const Bad &b : {Bad{"image", "PS2XCMP1\nsize 2048\nimage 41\niso 30 1\nend\n"},
+                                 Bad{"cover", "PS2XCMP1\nsize 4096\nimage 40\niso 30 1\nend\n"},
+                                 Bad{"isoend", "PS2XCMP1\nsize 4096\nimage 40\niso 39 2\nend\n"},
+                                 Bad{"selfend", "PS2XCMP1\nsize 4096\nimage 40\nself 2048 3\nend\n"},
+                                 Bad{"selfhead", "PS2XCMP1\nsize 2048\nimage 40\nself 0 1\nend\n"},
+                                 Bad{"noend", "PS2XCMP1\nsize 2048\nimage 40\niso 30 1\n"},
+                                 Bad{"junk", "PS2XCMP1\nsize 2048\nimage 40\ncopy 30 1\nend\n"}})
+            {
+                const fs::path d = makeComposite(b.tag, b.head, 2);
+                t.IsFalse(ps2_cd_overlay::build(d, kImageSectors, reader(img), ov, err), b.tag);
+                t.IsTrue(ov.files.empty() && err.find("GARI.BIG") != std::string::npos, err.c_str());
+                fs::remove_all(d);
+            } });
+        tc.Run("alias: disc lookup, load and sector mapping across segments (TK25c)", [](TestCase &t)
+               {
+            const auto img = makeAliasImage();
+            uint32_t lbn = 0;
+            uint64_t size = 0;
+            std::string err;
+            t.IsTrue(ps2_cd_overlay::findDiscFile(kImageSectors, reader(img), "/DATA/AUDIO/SPEECH.BIG", lbn, size, err), err.c_str());
+            t.Equals(lbn, 30u, "extent");
+            t.Equals(size, static_cast<uint64_t>(8192), "size");
+            t.IsTrue(ps2_cd_overlay::findDiscFile(kImageSectors, reader(img), "/data/audio/speech.big;1", lbn, size, err), "case-insensitive, version suffix");
+            t.Equals(lbn, 30u, "extent again");
+            t.IsFalse(ps2_cd_overlay::findDiscFile(kImageSectors, reader(img), "/DATA/AUDIO/NOPE.BIG", lbn, size, err), "missing file");
+            t.IsFalse(ps2_cd_overlay::findDiscFile(kImageSectors, reader(img), "DATA/AUDIO/SPEECH.BIG", lbn, size, err), "needs the leading slash");
+
+            // Sector 0 replaced (host 'R'), sector 1 stock (image lbn 31),
+            // sectors 2-3 replaced (host 'S', 'T').
+            const fs::path host = makeAliasHost("ok", kAliasHead, "RST");
+            ps2_cd_overlay::DiscAlias a;
+            t.IsTrue(ps2_cd_overlay::loadDiscAlias("/DATA/AUDIO/SPEECH.BIG", host, kImageSectors, reader(img), a, err), err.c_str());
+            t.IsTrue(a.loaded, "loaded");
+            t.Equals(a.discLbn, 30u, "disc lbn");
+            t.Equals(a.discSectors, 4u, "disc sectors");
+            t.Equals(a.composite.segments.size(), static_cast<size_t>(3), "segments");
+
+            using P = ps2_cd_overlay::Piece;
+            const auto all = ps2_cd_overlay::resolve(a.composite, 0, 4 * kSec);
+            t.Equals(all.size(), static_cast<size_t>(3), "three pieces");
+            t.IsTrue(all[0].kind == P::Host && all[0].offset == kSec && all[0].bytes == kSec, "sector 0 from the host");
+            t.IsTrue(all[1].kind == P::Image && all[1].offset == 31 * kSec && all[1].bytes == kSec, "sector 1 from the image");
+            t.IsTrue(all[2].kind == P::Host && all[2].offset == 2 * kSec && all[2].bytes == 2 * kSec, "sectors 2-3 from the host");
+            const auto cross = ps2_cd_overlay::resolve(a.composite, kSec - 100, 200);
+            t.Equals(cross.size(), static_cast<size_t>(2), "crosses the host/image boundary");
+            t.IsTrue(cross[0].kind == P::Host && cross[0].offset == 2 * kSec - 100 && cross[0].bytes == 100, "tail of sector 0");
+            t.IsTrue(cross[1].kind == P::Image && cross[1].offset == 31 * kSec && cross[1].bytes == 100, "head of sector 1");
+
+            // Serve the bytes the guest would get: host pieces + image pieces.
+            std::vector<uint8_t> served(4 * kSec);
+            uint8_t *out = served.data();
+            for (const P &pc : all)
+            {
+                if (pc.kind == P::Image)
+                    std::memcpy(out, &img[pc.offset], static_cast<size_t>(pc.bytes));
+                else
+                {
+                    std::ifstream h(host, std::ios::binary);
+                    h.seekg(static_cast<std::streamoff>(pc.offset), std::ios::beg);
+                    h.read(reinterpret_cast<char *>(out), static_cast<std::streamsize>(pc.bytes));
+                    t.Equals(static_cast<size_t>(h.gcount()), static_cast<size_t>(pc.bytes), "host piece readable");
+                }
+                out += pc.bytes;
+            }
+            t.Equals(served[0], static_cast<uint8_t>('R'), "replaced sector 0");
+            t.Equals(served[kSec], static_cast<uint8_t>(0xA1), "stock sector 1 pattern");
+            t.Equals(served[2 * kSec], static_cast<uint8_t>('S'), "replaced sector 2");
+            t.Equals(served[3 * kSec], static_cast<uint8_t>('T'), "replaced sector 3");
+            fs::remove_all(host.parent_path()); });
+        tc.Run("alias: size mismatch and bad composites are refused (TK25c)", [](TestCase &t)
+               {
+            const auto img = makeAliasImage();
+            ps2_cd_overlay::DiscAlias a;
+            std::string err;
+            const fs::path small = makeAliasHost("small", "PS2XCMP1\nsize 6144\nimage 40\nself 2048 1\niso 31 1\nself 4096 1\nend\n", "RS");
+            t.IsFalse(ps2_cd_overlay::loadDiscAlias("/DATA/AUDIO/SPEECH.BIG", small, kImageSectors, reader(img), a, err), "short composite");
+            t.IsTrue(err.find("size mismatch") != std::string::npos, err.c_str());
+            t.IsFalse(a.loaded, "not loaded");
+            fs::remove_all(small.parent_path());
+            // An `iso` segment outside the aliased file (BAM.BIG's lbn 34) is refused.
+            const fs::path foreign = makeAliasHost("foreign", "PS2XCMP1\nsize 8192\nimage 40\niso 30 3\niso 34 1\nend\n", "");
+            t.IsFalse(ps2_cd_overlay::loadDiscAlias("/DATA/AUDIO/SPEECH.BIG", foreign, kImageSectors, reader(img), a, err), "foreign iso");
+            t.IsTrue(err.find("outside the file's range") != std::string::npos, err.c_str());
+            fs::remove_all(foreign.parent_path());
+            // A plain (non-composite) host file is refused.
+            const fs::path plain = makeAliasHost("plain", "not a composite\n", "");
+            t.IsFalse(ps2_cd_overlay::loadDiscAlias("/DATA/AUDIO/SPEECH.BIG", plain, kImageSectors, reader(img), a, err), "plain file");
+            t.IsTrue(err.find("not a PS2XCMP1") != std::string::npos, err.c_str());
+            fs::remove_all(plain.parent_path());
+            t.IsFalse(ps2_cd_overlay::loadDiscAlias("/DATA/AUDIO/NOPE.BIG", plain, kImageSectors, reader(img), a, err), "missing disc file"); });
+        tc.Run("alias: pending switch serves the range, off serves nothing (TK25c)", [](TestCase &t)
+               {
+            const auto img = makeAliasImage();
+            ps2_cd_overlay::clearModeAlias();
+            ps2_cd_overlay::DiscAlias a;
+            for (uint32_t lbn : {0u, 29u, 30u, 33u, 34u})
+                t.IsFalse(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), lbn, a), "off: nothing served");
+            const fs::path host = makeAliasHost("on", kAliasHead, "RST");
+            ps2_cd_overlay::setModeAlias("/DATA/AUDIO/SPEECH.BIG", host.string());
+            t.IsTrue(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 30, a), "first sector served");
+            t.Equals(a.discLbn, 30u, "range");
+            t.IsTrue(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 33, a), "last sector served");
+            t.IsFalse(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 29, a), "before the range");
+            t.IsFalse(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 34, a), "BAM.BIG untouched");
+            // A refused load (size mismatch) serves nothing but stays pending.
+            const fs::path small = makeAliasHost("bad", "PS2XCMP1\nsize 6144\nimage 40\nself 2048 1\niso 31 1\nself 4096 1\nend\n", "RS");
+            ps2_cd_overlay::setModeAlias("/DATA/AUDIO/SPEECH.BIG", small.string());
+            t.IsFalse(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 30, a), "refused: disc served");
+            ps2_cd_overlay::clearModeAlias();
+            t.IsFalse(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 30, a), "off again");
+            auto pending = ps2_cd_overlay::pendingAlias();
+            t.IsTrue(pending.first.empty() && pending.second.empty(), "pending cleared");
+            fs::remove_all(host.parent_path());
+            fs::remove_all(small.parent_path()); });
+    });
+}

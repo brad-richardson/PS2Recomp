@@ -1,19 +1,89 @@
 #include "MiniTest.h"
+#include "game_overrides.h"
+#include "ps2_e3.h"
+#include "ps2_log.h"
+#include "ps2_park_snapshot.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
 #include "runtime/ee_scheduler.h"
+#if PS2X_ENABLE_DET_HASH_TAP
+#define XXH_NO_XXH32
+#define XXH_NO_XXH3
+#define XXH_INLINE_ALL
+#include "runtime/third_party/xxhash.h"
+#endif
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <csignal>
 #include <cstdint>
+#include <cstdlib>
+#include <ctime>
 #include <cstring>
+#include <cstdio>
 #include <sstream>
+#include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
+#if !defined(_WIN32)
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 using namespace ps2_syscalls;
+
+// Narrow fixture access: inject records, then exercise the scheduler's real
+// due-batch and idle-wait paths. No production test mode is involved.
+struct EeSchedulerTestAccess
+{
+    using Clock = std::chrono::steady_clock;
+
+    static bool cycleOnly(const EeScheduler &ee) { return ee.m_cycleOnlyEvents; }
+    static bool eventClockCycles(const EeScheduler &ee) { return ee.m_eventClockCycles; }
+    static void clearDeadlines(EeScheduler &ee)
+    {
+        ee.m_deadlines.clear();
+        ee.updateNextDeadline();
+    }
+    static void addAlarm(EeScheduler &ee, uint64_t cycle, Clock::time_point hostDeadline,
+                         uint32_t id, uint32_t handler)
+    {
+        ee.m_alarms.emplace(static_cast<int>(id), EeAlarm{static_cast<int>(id), 1u, handler, 0u, 0u, 0u});
+        ee.scheduleEvent(cycle, hostDeadline, EeEvent{EeEventType::Alarm, id, 0u});
+    }
+    static void due(EeScheduler &ee) { ee.processDueDeadlines(); }
+    static void idle(EeScheduler &ee) { ee.waitForEvent(); }
+    static void pending(EeScheduler &ee) { ee.processPendingEvents(); }
+    static uint64_t cycle(const EeScheduler &ee) { return ee.m_eeCycle; }
+    static uint64_t nextDeadline(const EeScheduler &ee) { return ee.m_nextDeadlineCycle.load(std::memory_order_acquire); }
+#if PS2X_ENABLE_DET_HASH_TAP
+    static uint64_t hashEvery(const EeScheduler &ee) { return ee.m_detHashEvery; }
+    static auto hash(const EeScheduler &ee) { return ee.makeDetHashSnapshot(); }
+    static void hashLineCount(uint32_t value) { EeScheduler::s_detHashLines.store(value); }
+#endif
+    static void vblank(EeScheduler &ee) { ee.processEvent(EeEvent{EeEventType::VBlankStart, 0, 0}); }
+    static std::vector<uint32_t> queuedPcs(const EeScheduler &ee)
+    {
+        std::vector<uint32_t> pcs;
+        for (const GuestInvocation &invocation : ee.m_pendingInvocations)
+            pcs.push_back(invocation.context.pc);
+        return pcs;
+    }
+};
+
+namespace ps2_syscalls
+{
+    // Defined in ps2xRuntime Syscalls/RPC.cpp; TU-local forward declaration
+    // (same pattern as the resetSifState declaration in ps2_runtime.cpp).
+    void resetSsx3SifHandshakeForTesting();
+    // Defined in ps2xRuntime Syscalls/Ssx3CopiedPayload.cpp (K1).
+    void resetSsx3CopiedPayloadForTesting();
+}
 
 namespace
 {
@@ -26,7 +96,6 @@ namespace
     constexpr int KE_UNKNOWN_THID = -407;
     constexpr int KE_UNKNOWN_SEMID = -408;
     constexpr int KE_DORMANT = -413;
-    constexpr int KE_SEMA_ZERO = -419;
     constexpr int KE_SEMA_OVF = -420;
     constexpr int KE_WAIT_DELETE = -425;
     constexpr int KE_RELEASE_WAIT = -418;
@@ -335,8 +404,15 @@ namespace
 
     void schedulerMainExit(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        GuestExecutionProbe probe(runtime);
-        gSchedulerTrace->push_back(1);
+        // CP4-fix: the probe must be destroyed before ExitThread transfers.
+        // The transfer longjmps (no unwinding), so a probe left alive across
+        // it never decrements and the next guest entry over-counts. ExitThread
+        // dispatches no nested guest code, so ending the probe here loses no
+        // re-entrancy coverage; all entry checks stay in the constructor.
+        {
+            GuestExecutionProbe probe(runtime);
+            gSchedulerTrace->push_back(1);
+        }
         ExitThread(rdram, ctx, runtime);
     }
 
@@ -360,6 +436,63 @@ namespace
         {
             runtime->requestStop();
         }
+    }
+
+    // PF1: an outer function calls F; F calls itself, and a checkpoint fires
+    // at that recursive dispatch. The suspended F leaves ctx->pc == its entry;
+    // the outer caller must keep unwinding instead of reading that as a return.
+    constexpr uint32_t K_PF1_F = 0x300600u;
+    constexpr uint32_t K_PF1_F_RET = 0x300608u;
+    constexpr uint32_t K_PF1_OUTER_RET = 0x300700u;
+    int gPf1FEntries = 0;
+
+    void pf1Outer(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(1);
+        setRegU32(*ctx, 31, K_PF1_OUTER_RET);
+        if (!runtime->dispatchGuestBranch(rdram, ctx, K_PF1_F, K_SCHED_MAIN, K_PF1_OUTER_RET,
+                                          PS2Runtime::GuestBranchKind::IndirectCall, "JALR"))
+        {
+            return;
+        }
+        // Reached only if the suspended callee was mistaken for a return.
+        gSchedulerTrace->push_back(2);
+        ctx->pc = 0u;
+        runtime->requestStop();
+    }
+
+    void pf1F(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        if (++gPf1FEntries == 1)
+        {
+            gSchedulerTrace->push_back(10);
+            runtime->postEeEvent(EeEvent{EeEventType::ExternalWake, 0u, 0u});
+            setRegU32(*ctx, 31, K_PF1_F_RET);
+            if (!runtime->dispatchGuestBranch(rdram, ctx, K_PF1_F, K_PF1_F + 4u, K_PF1_F_RET,
+                                              PS2Runtime::GuestBranchKind::DirectCall, "JAL"))
+            {
+                return;
+            }
+            gSchedulerTrace->push_back(13);
+            ctx->pc = K_PF1_OUTER_RET;
+            return;
+        }
+        // The resumed recursive call: return to F's continuation.
+        gSchedulerTrace->push_back(11);
+        ctx->pc = K_PF1_F_RET;
+    }
+
+    void pf1FRet(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        gSchedulerTrace->push_back(12);
+        ctx->pc = K_PF1_OUTER_RET;
+    }
+
+    void pf1OuterRet(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        gSchedulerTrace->push_back(3);
+        ctx->pc = 0u;
+        runtime->requestStop();
     }
 
     void schedulerRotateA(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -543,12 +676,493 @@ namespace
             std::memset(&ctx, 0, sizeof(ctx));
         }
     };
+
+    struct SavedClockEnv
+    {
+        struct Value
+        {
+            const char *name;
+            bool present;
+            std::string text;
+
+            explicit Value(const char *key) : name(key), present(std::getenv(key) != nullptr),
+                                              text(present ? std::getenv(key) : "") {}
+
+            void restore() const
+            {
+#ifdef _WIN32
+                _putenv_s(name, present ? text.c_str() : "");
+#else
+                if (present) setenv(name, text.c_str(), 1);
+                else unsetenv(name);
+#endif
+            }
+        };
+
+        Value deterministic{"PS2X_DETERMINISTIC"};
+        Value eventClock{"PS2X_EVENT_CLOCK"};
+        Value hashEvery{"PS2X_DET_HASH_EVERY"};
+        Value timezone{"TZ"};
+
+        ~SavedClockEnv()
+        {
+            deterministic.restore();
+            eventClock.restore();
+            hashEvery.restore();
+            timezone.restore();
+#ifdef _WIN32
+            _tzset();
+#else
+            tzset();
+#endif
+        }
+    };
+
+    bool setClockEnv(const char *name, const char *value)
+    {
+#ifdef _WIN32
+        return _putenv_s(name, value == nullptr ? "" : value) == 0;
+#else
+        return value == nullptr ? unsetenv(name) == 0 : setenv(name, value, 1) == 0;
+#endif
+    }
+
+    std::array<uint8_t, 8> clockBytes(const std::tm &tm)
+    {
+        const auto bcd = [](int value) {
+            return static_cast<uint8_t>(((value / 10) << 4) | (value % 10));
+        };
+        return {0, bcd(tm.tm_sec), bcd(tm.tm_min), bcd(tm.tm_hour), 0,
+                bcd(tm.tm_mday), bcd(tm.tm_mon + 1), bcd((tm.tm_year + 1900) % 100)};
+    }
+
+    std::array<uint8_t, 8> localClockBytes(std::time_t time)
+    {
+        std::tm tm{};
+#ifdef _WIN32
+        localtime_s(&tm, &time);
+#else
+        localtime_r(&time, &tm);
+#endif
+        return clockBytes(tm);
+    }
+#if !defined(_WIN32)
+    std::string captureStderr(const std::function<void()> &action)
+    {
+        std::fflush(stderr);
+        FILE *file = std::tmpfile();
+        if (!file)
+            return {};
+        const int saved = dup(fileno(stderr));
+        if (saved < 0 || dup2(fileno(file), fileno(stderr)) < 0)
+        {
+            std::fclose(file);
+            return {};
+        }
+        action();
+        std::fflush(stderr);
+        dup2(saved, fileno(stderr));
+        close(saved);
+        std::fseek(file, 0, SEEK_END);
+        const long length = std::ftell(file);
+        std::rewind(file);
+        std::string output(length > 0 ? static_cast<size_t>(length) : 0u, '\0');
+        if (!output.empty())
+            std::fread(output.data(), 1, output.size(), file);
+        std::fclose(file);
+        return output;
+    }
+#endif
 }
 
 void register_ps2_runtime_kernel_tests()
 {
     MiniTest::Case("PS2RuntimeKernel", [](TestCase &tc)
     {
+        tc.Run("sceCdReadClock fixed UTC and host-local passthrough", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            TestEnv env;
+            constexpr uint32_t clockAddr = 0x1800u;
+            constexpr std::array<uint8_t, 8> fixed{0x00, 0x56, 0x34, 0x12,
+                                                    0x00, 0x16, 0x07, 0x04};
+            const auto readClock = [&]() {
+                std::memset(env.rdram.data() + clockAddr, 0xA5, 8);
+                setRegU32(env.ctx, 4, clockAddr);
+                ps2_stubs::sceCdReadClock(env.rdram.data(), &env.ctx, &env.runtime);
+                t.Equals(getRegS32(env.ctx, 2), 1, "valid guest clock pointer returns 1");
+                std::array<uint8_t, 8> bytes{};
+                std::memcpy(bytes.data(), env.rdram.data() + clockAddr, bytes.size());
+                return bytes;
+            };
+            const auto checkFixed = [&](const char *label) {
+                const auto actual = readClock();
+                for (size_t i = 0; i < fixed.size(); ++i)
+                    t.Equals(actual[i], fixed[i], std::string(label) + " byte " + std::to_string(i));
+            };
+            const auto checkHost = [&](const char *label) {
+                const std::time_t before = std::time(nullptr);
+                const auto actual = readClock();
+                const std::time_t after = std::time(nullptr);
+                t.IsTrue(actual == localClockBytes(before) || actual == localClockBytes(after),
+                         std::string(label) + " matches bracketing host-local time");
+            };
+
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "1"), "set deterministic mode");
+            checkFixed("first fixed call");
+            checkFixed("repeated fixed call");
+            t.IsTrue(setClockEnv("TZ", "UTC0"), "set UTC timezone");
+#ifdef _WIN32
+            _tzset();
+#else
+            tzset();
+#endif
+            checkFixed("fixed call after timezone change");
+            t.IsTrue(setClockEnv("TZ", "PST8PDT"), "change timezone again");
+#ifdef _WIN32
+            _tzset();
+#else
+            tzset();
+#endif
+            checkFixed("fixed call in second timezone");
+
+            uint8_t *priorScratchpad = ps2GetScratchpadHostPtr();
+            ps2SetScratchpadHostPtr(nullptr);
+            std::memset(env.rdram.data() + clockAddr, 0xA5, 8);
+            setRegU32(env.ctx, 4, PS2_SCRATCHPAD_BASE);
+            ps2_stubs::sceCdReadClock(env.rdram.data(), &env.ctx, &env.runtime);
+            ps2SetScratchpadHostPtr(priorScratchpad);
+            t.Equals(getRegS32(env.ctx, 2), 0, "unbacked guest scratchpad pointer returns 0");
+            for (size_t i = 0; i < 8; ++i)
+                t.Equals(env.rdram[clockAddr + i], uint8_t{0xA5}, "invalid pointer leaves RAM intact");
+
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", nullptr), "unset deterministic mode");
+            checkHost("unset flag");
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "0"), "set zero flag");
+            checkHost("zero flag");
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", ""), "set empty flag");
+            checkHost("empty flag");
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "yes"), "set other flag");
+            checkHost("other flag");
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "1"), "restore deterministic mode");
+            checkFixed("fixed call after host-local calls");
+        });
+
+#if PS2X_ENABLE_DET_HASH_TAP
+        tc.Run("XXH64 seed-zero vectors and streaming are stable", [](TestCase &t)
+        {
+            t.Equals(XXH64("", 0, 0), uint64_t{0xef46db3751d8e999ULL}, "official empty vector");
+            t.Equals(XXH64("hello", 5, 0), uint64_t{0x26c7827d889f6da3ULL}, "hello vector");
+            XXH64_state_t stream{};
+            XXH64_reset(&stream, 0);
+            XXH64_update(&stream, "he", 2);
+            XXH64_update(&stream, "llo", 3);
+            t.Equals(XXH64_digest(&stream), XXH64("hello", 5, 0), "incremental equals one-shot");
+        });
+
+        tc.Run("hash interval parser accepts only exact decimal uint64", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            const std::array<std::pair<const char *, uint64_t>, 5> valid{{
+                {nullptr, 0}, {"", 0}, {"0", 0}, {"001", 1},
+                {"18446744073709551615", UINT64_MAX}}};
+            for (const auto &[input, expected] : valid)
+            {
+                t.IsTrue(setClockEnv("PS2X_DET_HASH_EVERY", input), "set valid interval");
+                TestEnv env;
+                t.Equals(EeSchedulerTestAccess::hashEvery(env.runtime.eeScheduler()), expected,
+                         "parsed valid interval");
+                setClockEnv("PS2X_DET_HASH_EVERY", "bad");
+                t.Equals(EeSchedulerTestAccess::hashEvery(env.runtime.eeScheduler()), expected,
+                         "snapshot stays instance-local");
+            }
+            for (const char *input : {"+1", "-1", " 1", "1 ", "1x", "18446744073709551616"})
+            {
+                t.IsTrue(setClockEnv("PS2X_DET_HASH_EVERY", input), "set invalid interval");
+                TestEnv env;
+                t.Equals(EeSchedulerTestAccess::hashEvery(env.runtime.eeScheduler()), uint64_t{0},
+                         "invalid interval disabled");
+            }
+        });
+
+        tc.Run("hash stream distinguishes all four regions, ordering and little-endian count", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            setClockEnv("PS2X_DET_HASH_EVERY", "1");
+            TestEnv env;
+            PS2Memory &mem = env.runtime.memory();
+            t.IsTrue(mem.initialize(), "real PS2Memory initialized");
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(mem.getRDRAM(), env.ctx);
+            auto base = EeSchedulerTestAccess::hash(ee);
+            t.IsTrue(base.valid, "all regions available");
+            uint8_t *regions[] = {mem.getRDRAM(), mem.getScratchpad(),
+                                  mem.getVU1Data(), mem.getVU1Code()};
+            for (uint8_t *region : regions)
+            {
+                region[0] ^= 0x80u;
+                const auto changed = EeSchedulerTestAccess::hash(ee);
+                t.IsTrue(changed.valid && changed.combined != base.combined,
+                         "single byte changes complete stream");
+                const int differences = (changed.rdram != base.rdram) +
+                    (changed.scratchpad != base.scratchpad) +
+                    (changed.vu1Data != base.vu1Data) + (changed.vu1Code != base.vu1Code);
+                t.Equals(differences, 1, "exactly its own region hash changes");
+                region[0] ^= 0x80u;
+            }
+            // Ordering needs different region bytes: swapping zero-filled
+            // regions otherwise produces the same concatenated stream.
+            regions[0][0] = 0x11u;
+            regions[1][0] = 0x22u;
+            regions[2][0] = 0x33u;
+            regions[3][0] = 0x44u;
+            base = EeSchedulerTestAccess::hash(ee);
+            XXH64_state_t stream{};
+            XXH64_reset(&stream, 0);
+            XXH64_update(&stream, mem.getRDRAM(), PS2_RAM_SIZE);
+            XXH64_update(&stream, mem.getScratchpad(), PS2_SCRATCHPAD_SIZE);
+            XXH64_update(&stream, mem.getVU1Data(), PS2_VU1_DATA_SIZE);
+            XXH64_update(&stream, mem.getVU1Code(), PS2_VU1_CODE_SIZE);
+            const uint8_t zeroCount[8]{};
+            XXH64_update(&stream, zeroCount, 8);
+            t.Equals(base.combined, XXH64_digest(&stream), "specified region order and count bytes");
+            XXH64_reset(&stream, 0);
+            XXH64_update(&stream, mem.getScratchpad(), PS2_SCRATCHPAD_SIZE);
+            XXH64_update(&stream, mem.getRDRAM(), PS2_RAM_SIZE);
+            XXH64_update(&stream, mem.getVU1Data(), PS2_VU1_DATA_SIZE);
+            XXH64_update(&stream, mem.getVU1Code(), PS2_VU1_CODE_SIZE);
+            XXH64_update(&stream, zeroCount, 8);
+            t.IsTrue(base.combined != XXH64_digest(&stream), "reordered regions differ");
+            env.runtime.gs().init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            env.runtime.vu1().execute(mem.getVU1Code(), PS2_VU1_CODE_SIZE,
+                mem.getVU1Data(), PS2_VU1_DATA_SIZE, env.runtime.gs(), &mem,
+                0, 0, 0, 1);
+            const auto one = EeSchedulerTestAccess::hash(ee);
+            t.Equals(one.count, uint64_t{1}, "VU1 start count is numeric");
+            XXH64_reset(&stream, 0);
+            XXH64_update(&stream, mem.getRDRAM(), PS2_RAM_SIZE);
+            XXH64_update(&stream, mem.getScratchpad(), PS2_SCRATCHPAD_SIZE);
+            XXH64_update(&stream, mem.getVU1Data(), PS2_VU1_DATA_SIZE);
+            XXH64_update(&stream, mem.getVU1Code(), PS2_VU1_CODE_SIZE);
+            const uint8_t oneCount[8]{1, 0, 0, 0, 0, 0, 0, 0};
+            XXH64_update(&stream, oneCount, 8);
+            t.Equals(one.combined, XXH64_digest(&stream), "count uses explicit little-endian bytes");
+        });
+#if !defined(_WIN32)
+        tc.Run("VBlank hash follows guest writes and queued callback and IRQ; cap stops output", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            setClockEnv("PS2X_DET_HASH_EVERY", "1");
+            TestEnv env;
+            PS2Memory &mem = env.runtime.memory();
+            t.IsTrue(mem.initialize(), "real PS2Memory initialized");
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(mem.getRDRAM(), env.ctx);
+            constexpr uint32_t cb = 0x1100u, irq = 0x1200u;
+            env.runtime.registerFunction(cb, [](uint8_t *, R5900Context *, PS2Runtime *) {});
+            env.runtime.registerFunction(irq, [](uint8_t *, R5900Context *, PS2Runtime *) {});
+            ee.setVSyncFlag(0x1000u, 0x1010u);
+            (void)ee.setGsVSyncCallback(cb, 0, 0);
+            ee.addIrqHandler(false, 2, irq, true, 0, 0, 0);
+            EeSchedulerTestAccess::hashLineCount(0);
+            const std::string line = captureStderr([&] { EeSchedulerTestAccess::vblank(ee); });
+            uint32_t flag = 0;
+            uint64_t tick = 0;
+            std::memcpy(&flag, mem.getRDRAM() + 0x1000u, 4);
+            std::memcpy(&tick, mem.getRDRAM() + 0x1010u, 8);
+            t.Equals(flag, uint32_t{1}, "guest flag written");
+            t.Equals(tick, uint64_t{1}, "guest tick written");
+            t.IsTrue(EeSchedulerTestAccess::queuedPcs(ee) == std::vector<uint32_t>{cb, irq},
+                     "callback and IRQ queued before tap returns");
+            const auto after = EeSchedulerTestAccess::hash(ee);
+            char expected[32];
+            std::snprintf(expected, sizeof(expected), "rdram=%016llx",
+                          static_cast<unsigned long long>(after.rdram));
+            t.IsTrue(line.find("[det-hash:v1] tick=1") != std::string::npos &&
+                     line.find(expected) != std::string::npos,
+                     "emitted hash sees guest-visible writes");
+            EeSchedulerTestAccess::hashLineCount(4094);
+            const std::string capped = captureStderr([&] {
+                EeSchedulerTestAccess::vblank(ee);
+                EeSchedulerTestAccess::vblank(ee);
+                EeSchedulerTestAccess::vblank(ee);
+            });
+            t.IsTrue(capped.find("tick=2") != std::string::npos &&
+                     capped.find("line cap 4096 reached") != std::string::npos &&
+                     capped.find("tick=3") == std::string::npos,
+                     "one final hash then cap marker and stop");
+            size_t start = 0;
+            while (start < capped.size())
+            {
+                const size_t end = capped.find('\n', start);
+                t.IsTrue((end == std::string::npos ? capped.size() : end) - start < 256,
+                         "each output line stays under 256 bytes");
+                start = end == std::string::npos ? capped.size() : end + 1;
+            }
+            EeSchedulerTestAccess::hashLineCount(0);
+        });
+#endif
+#else
+#if !defined(_WIN32)
+        tc.Run("hash environment cannot emit in compile-disabled build", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            setClockEnv("PS2X_DET_HASH_EVERY", "1");
+            TestEnv env;
+            t.IsTrue(env.runtime.memory().initialize(), "real PS2Memory initialized");
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.runtime.memory().getRDRAM(), env.ctx);
+            const std::string output = captureStderr([&] { EeSchedulerTestAccess::vblank(ee); });
+            t.IsTrue(output.find("[det-hash") == std::string::npos, "no hash output with env set");
+        });
+#endif
+#endif
+
+        tc.Run("cycle-only scheduler parses the exact flag once per instance", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            setClockEnv("PS2X_EVENT_CLOCK", nullptr);
+            for (const char *flag : std::array<const char *, 5>{nullptr, "", "0", "yes", "1"})
+            {
+                t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", flag), "set scheduler flag");
+                TestEnv env;
+                t.Equals(EeSchedulerTestAccess::cycleOnly(env.runtime.eeScheduler()),
+                         flag != nullptr && std::strcmp(flag, "1") == 0, "exact scheduler flag");
+                t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "0"), "change flag after construction");
+                t.Equals(EeSchedulerTestAccess::cycleOnly(env.runtime.eeScheduler()),
+                         flag != nullptr && std::strcmp(flag, "1") == 0, "mode remains instance-local");
+            }
+        });
+
+        tc.Run("independent cycle event clock advances idle without a host deadline", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "0"), "deterministic mode off");
+            t.IsTrue(setClockEnv("PS2X_EVENT_CLOCK", "cycles"), "cycle clock on");
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            t.IsTrue(EeSchedulerTestAccess::eventClockCycles(ee), "event clock independent of deterministic flag");
+            t.IsTrue(EeSchedulerTestAccess::cycleOnly(ee), "cycle-due events selected");
+            ee.reset(env.rdram.data(), env.ctx);
+            EeSchedulerTestAccess::clearDeadlines(ee);
+            EeSchedulerTestAccess::addAlarm(ee, 100u,
+                EeSchedulerTestAccess::Clock::now() + std::chrono::hours(1), 1u, 0x1100u);
+            const auto start = EeSchedulerTestAccess::Clock::now();
+            EeSchedulerTestAccess::idle(ee);
+            t.Equals(EeSchedulerTestAccess::cycle(ee), uint64_t{100u}, "idle reaches earliest guest event");
+            t.IsTrue(EeSchedulerTestAccess::Clock::now() - start < std::chrono::seconds(1),
+                     "future host deadline does not pace idle");
+            EeSchedulerTestAccess::pending(ee);
+            t.IsTrue(EeSchedulerTestAccess::queuedPcs(ee) == std::vector<uint32_t>{0x1100u},
+                     "event delivered before further advancement");
+        });
+
+        tc.Run("cycle event clock reaches VBlank and waits for real external wake", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            setClockEnv("PS2X_DETERMINISTIC", "0");
+            setClockEnv("PS2X_EVENT_CLOCK", "cycles");
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            const uint64_t vblankCycle = EeSchedulerTestAccess::nextDeadline(ee);
+            EeSchedulerTestAccess::idle(ee);
+            t.Equals(EeSchedulerTestAccess::cycle(ee), vblankCycle, "idle reaches stock VBlank cycle");
+
+            EeSchedulerTestAccess::clearDeadlines(ee);
+            const uint64_t before = EeSchedulerTestAccess::cycle(ee);
+            std::thread wake([&] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(3));
+                ee.postEvent(EeEvent{EeEventType::ExternalWake, 0u, 0u});
+            });
+            EeSchedulerTestAccess::idle(ee);
+            wake.join();
+            t.Equals(EeSchedulerTestAccess::cycle(ee), before,
+                     "without a guest deadline, external wake does not fabricate cycles");
+            ee.requestStop();
+            EeSchedulerTestAccess::idle(ee);
+            t.Equals(EeSchedulerTestAccess::cycle(ee), before, "stop returns without advancement");
+        });
+
+        tc.Run("cycle-only due batches ignore reversed host deadlines", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "1"), "enable cycle-only mode");
+            const auto now = EeSchedulerTestAccess::Clock::now();
+            const auto earlyHost = now - std::chrono::seconds(1);
+            const auto lateHost = now + std::chrono::hours(1);
+            const auto runPair = [&](uint64_t firstCycle, uint64_t secondCycle,
+                                     const std::vector<uint32_t> &expected) {
+                TestEnv env;
+                EeScheduler &ee = env.runtime.eeScheduler();
+                ee.reset(env.rdram.data(), env.ctx);
+                EeSchedulerTestAccess::clearDeadlines(ee);
+                EeSchedulerTestAccess::addAlarm(ee, firstCycle, lateHost, 1u, 0x1100u);
+                EeSchedulerTestAccess::addAlarm(ee, secondCycle, earlyHost, 2u, 0x1200u);
+                ee.accountCycles(120u);
+                EeSchedulerTestAccess::due(ee);
+                t.IsTrue(EeSchedulerTestAccess::queuedPcs(ee) == expected,
+                         "real dispatch uses cycle then alarm ID, not host deadline");
+            };
+            runPair(100u, 100u, {0x1100u, 0x1200u});
+            runPair(100u, 110u, {0x1100u, 0x1200u});
+        });
+
+        tc.Run("idle scheduler picks timer by cycle and preserves event equality", [](TestCase &t)
+        {
+            SavedClockEnv restoreEnv;
+            constexpr uint32_t alarmPc = 0x1100u;
+            constexpr uint32_t timerPc = 0x1300u;
+            const auto run = [&](const char *flag, const char *eventClock, uint32_t timerCycle) {
+                setClockEnv("PS2X_DETERMINISTIC", flag);
+                setClockEnv("PS2X_EVENT_CLOCK", eventClock);
+                TestEnv env;
+                env.runtime.registerFunction(timerPc, [](uint8_t *, R5900Context *, PS2Runtime *) {});
+                EeScheduler &ee = env.runtime.eeScheduler();
+                ee.reset(env.rdram.data(), env.ctx);
+                EeSchedulerTestAccess::clearDeadlines(ee);
+                // EE timer 0 runs at half the EE clock: compare 40/50 ticks
+                // produces an interrupt at guest cycle 80/100.
+                env.runtime.memory().write32(0x10000020u, timerCycle / 2u);
+                env.runtime.memory().write32(0x10000010u, 0x180u);
+                ee.addIrqHandler(false, 9u, timerPc, true, 0u, 0u, 0u);
+                EeSchedulerTestAccess::addAlarm(ee, 100u,
+                    EeSchedulerTestAccess::Clock::now() - std::chrono::seconds(1), 1u, alarmPc);
+                EeSchedulerTestAccess::idle(ee);
+                const uint64_t firstCycle = EeSchedulerTestAccess::cycle(ee);
+                EeSchedulerTestAccess::pending(ee);
+                const auto firstPcs = EeSchedulerTestAccess::queuedPcs(ee);
+                if (firstCycle < 100u)
+                {
+                    EeSchedulerTestAccess::idle(ee);
+                    EeSchedulerTestAccess::pending(ee);
+                }
+                return std::tuple<uint64_t, std::vector<uint32_t>, std::vector<uint32_t>>{
+                    firstCycle, firstPcs, EeSchedulerTestAccess::queuedPcs(ee)};
+            };
+            const auto [timerFirstCycle, timerFirstPcs, timerThenAlarm] = run("1", nullptr, 80u);
+            t.Equals(timerFirstCycle, uint64_t{80u}, "timer wins at cycle 80");
+            t.IsTrue(timerFirstPcs == std::vector<uint32_t>{timerPc}, "timer IRQ queued first");
+            t.IsTrue(timerThenAlarm == std::vector<uint32_t>{timerPc, alarmPc}, "alarm follows at cycle 100");
+
+            const auto [equalCycle, equalFirstPcs, equalAll] = run("1", nullptr, 100u);
+            t.Equals(equalCycle, uint64_t{100u}, "equal timer and alarm target cycle 100");
+            t.IsTrue(equalFirstPcs == std::vector<uint32_t>{alarmPc, timerPc},
+                     "scheduled event precedes equal-cycle timer IRQ");
+            t.IsTrue(equalAll == equalFirstPcs, "equal-cycle dispatch completes in one pass");
+
+            const auto [independentCycle, independentFirst, independentAll] = run("0", "cycles", 80u);
+            t.Equals(independentCycle, uint64_t{80u}, "independent clock selects earlier timer");
+            t.IsTrue(independentFirst == std::vector<uint32_t>{timerPc}, "timer delivered first");
+            t.IsTrue(independentAll == std::vector<uint32_t>{timerPc, alarmPc}, "alarm follows timer");
+
+            const auto [legacyCycle, legacyFirstPcs, legacyAll] = run("0", nullptr, 80u);
+            t.Equals(legacyCycle, uint64_t{100u}, "default host deadline chooses later guest event");
+            t.IsTrue(legacyFirstPcs == std::vector<uint32_t>{alarmPc, timerPc},
+                     "legacy dispatch order follows host-selected target");
+            t.IsTrue(legacyAll == legacyFirstPcs, "legacy dispatch completes in one pass");
+        });
+
         tc.Run("unsigned loads and ABI word writes extend independently", [](TestCase &t)
         {
             constexpr uint64_t kUpper = 0x1122334455667788ull;
@@ -630,6 +1244,319 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(semaphore->option, semaParam.option, "semaphore option must be decoded from offset 0x14");
         });
 
+        tc.Run("CreateSema stores max_count as-is and waiter-less signals never overflow (P1aa; amends P1v)", [](TestCase &t)
+        {
+            TestEnv env;
+            EeSemaStatus zeroParam{};
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &zeroParam, sizeof(zeroParam));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int zeroId = getRegS32(env.ctx, 2);
+            t.IsTrue(zeroId > 0, "zero-max CreateSema must return a usable id, not KE_ERROR");
+            const EeSemaphore *zeroSema = env.runtime.eeScheduler().semaphore(zeroId);
+            t.IsTrue(zeroSema != nullptr, "zero-max CreateSema must create an object");
+            if (zeroSema != nullptr)
+            {
+                t.Equals(zeroSema->maxCount, 0, "zero max_count is stored as-is (kernel has no clamp, P1z)");
+                t.Equals(zeroSema->count, 0, "a zero-max semaphore starts at init_count 0");
+            }
+
+            EeSemaStatus validParam{};
+            validParam.max_count = 7;
+            validParam.init_count = 3;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &validParam, sizeof(validParam));
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int validId = getRegS32(env.ctx, 2);
+            const EeSemaphore *validSema = env.runtime.eeScheduler().semaphore(validId);
+            t.IsTrue(validId > 0 && validSema != nullptr, "valid creates still succeed");
+            if (validSema != nullptr)
+            {
+                t.Equals(validSema->maxCount, 7, "a valid max_count is stored unchanged");
+                t.Equals(validSema->count, 3, "a valid init_count is stored unchanged");
+            }
+
+            EeSemaStatus negParam{};
+            negParam.max_count = -2;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &negParam, sizeof(negParam));
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int negId = getRegS32(env.ctx, 2);
+            t.IsTrue(negId > 0, "a negative max_count is accepted (kernel checks only init<0, P1z-2)");
+            const EeSemaphore *negSema = env.runtime.eeScheduler().semaphore(negId);
+            if (negSema != nullptr)
+            {
+                t.Equals(negSema->maxCount, -2, "a negative max_count is stored as-is");
+            }
+
+            EeSemaStatus overParam{};
+            overParam.max_count = 3;
+            overParam.init_count = 5;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &overParam, sizeof(overParam));
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int overId = getRegS32(env.ctx, 2);
+            t.IsTrue(overId > 0, "init_count above max_count is accepted (no init<=max check in the kernel)");
+            const EeSemaphore *overSema = env.runtime.eeScheduler().semaphore(overId);
+            if (overSema != nullptr)
+            {
+                t.Equals(overSema->maxCount, 3, "an over-init max_count is stored unchanged");
+                t.Equals(overSema->count, 5, "an over-init init_count is stored unchanged");
+            }
+
+            EeSemaStatus badParam{};
+            badParam.max_count = 4;
+            badParam.init_count = -1;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &badParam, sizeof(badParam));
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "a negative init_count is still rejected");
+
+            // P1v's own race window, kernel-true: two waiter-less signals hold
+            // count 2 and both waits succeed; no KE_SEMA_OVF exists (P1z-3).
+            TestEnv win;
+            EeScheduler &ee = win.runtime.eeScheduler();
+            ee.reset(win.rdram.data(), win.ctx);
+            ee.bindMainContextForSyscall(win.ctx, win.rdram.data());
+            const int winId = ee.createSemaphore(0, 0, 0u, 0u);
+            t.IsTrue(winId > 0, "the race-window semaphore must be created");
+            const EeSemaphore *winSema = ee.semaphore(winId);
+            t.IsTrue(winSema != nullptr, "the race-window semaphore must exist");
+            if (winSema != nullptr)
+            {
+                t.Equals(ee.signalSemaphore(winId, false), winId, "the first waiter-less signal succeeds");
+                t.Equals(ee.signalSemaphore(winId, false), winId, "the second waiter-less signal succeeds (no OVF)");
+                t.Equals(ee.semaphore(winId)->count, 2, "two waiter-less signals hold count 2");
+                ee.waitSemaphore(winId);
+                t.Equals(getRegS32(ee.thread(1)->context, 2), winId, "the first wait consumes");
+                ee.waitSemaphore(winId);
+                t.Equals(getRegS32(ee.thread(1)->context, 2), winId, "the second wait consumes");
+                t.Equals(ee.semaphore(winId)->count, 0, "both waits consumed the count back to 0");
+            }
+        });
+
+        tc.Run("PollSema on a zero-count semaphore returns KE_ERROR like the kernel (P10)", [](TestCase &t)
+        {
+            TestEnv env;
+            EeSemaStatus param{};
+            param.max_count = 1;
+            param.init_count = 0;
+            std::memcpy(env.rdram.data() + K_PARAM_ADDR, &param, sizeof(param));
+            setRegU32(env.ctx, 4, K_PARAM_ADDR);
+            CreateSema(env.rdram.data(), &env.ctx, &env.runtime);
+            const int semaId = getRegS32(env.ctx, 2);
+            t.IsTrue(semaId > 0, "the poll test semaphore must be created");
+
+            // Kernel PollSema (0x80004dc0) misses with plain -1: blez at
+            // 0x80004de4 falls back to the jr/addiu v0,zero,-1 pair, and no
+            // -419 immediate exists anywhere in KERNEL (P10 re-derivation).
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "a zero-count poll must miss with KE_ERROR (-1), not KE_SEMA_ZERO");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            SignalSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), semaId, "a waiter-less signal succeeds");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), semaId, "a poll at count 1 consumes and returns the id");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            PollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "the next poll misses again with KE_ERROR");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(semaId));
+            iPollSema(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "iPollSema shares the kernel -1 miss value");
+        });
+
+        tc.Run("unknown semaphore ids return KE_ERROR like the kernel on every sema path (P12)", [](TestCase &t)
+        {
+            // Stock-kernel unknown-id returns (P12 re-derivation, P1z
+            // method): delete 0x80004a94 (b), signal 0x80004c04 (b), wait
+            // 0x80004d30 (b), poll 0x80004dcc (jr), refer 0x80004e04 (jr)
+            // all land on addiu v0,zero,-1 — for out-of-range AND freed
+            // (count<0) ids alike — and no -408 immediate exists anywhere
+            // in KERNEL.
+            constexpr int kBogus = 9999;
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+
+            t.Equals(ee.deleteSemaphore(kBogus, false), KE_ERROR,
+                     "DeleteSema on a never-created id must miss with KE_ERROR (-1)");
+            t.Equals(ee.signalSemaphore(kBogus, false), KE_ERROR,
+                     "SignalSema on a never-created id must miss with KE_ERROR (-1)");
+            t.Equals(ee.pollSemaphore(kBogus), KE_ERROR,
+                     "PollSema on a never-created id must miss with KE_ERROR (-1)");
+            ee.waitSemaphore(kBogus);
+            t.Equals(getRegS32(ee.thread(1)->context, 2), KE_ERROR,
+                     "WaitSema on a never-created id must miss with KE_ERROR (-1)");
+
+            setRegU32(env.ctx, 4, static_cast<uint32_t>(kBogus));
+            setRegU32(env.ctx, 5, K_STATUS_ADDR);
+            ReferSemaStatus(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR,
+                     "ReferSemaStatus on a never-created id must miss with KE_ERROR (-1)");
+
+            const int doomed = ee.createSemaphore(0, 1, 0u, 0u);
+            t.IsTrue(doomed > 0, "the throwaway semaphore must be created");
+            t.Equals(ee.deleteSemaphore(doomed, false), doomed, "deleting the throwaway succeeds");
+            t.Equals(ee.signalSemaphore(doomed, false), KE_ERROR,
+                     "SignalSema on a deleted id must miss with KE_ERROR (-1)");
+            t.Equals(ee.pollSemaphore(doomed), KE_ERROR,
+                     "PollSema on a deleted id must miss with KE_ERROR (-1)");
+        });
+
+        tc.Run("Drop census lines format exactly and the kill-switch gates emission (P1w)", [](TestCase &t)
+        {
+            t.Equals(ps2_log::formatDropLine("sched/x", "r", "a=1"), "[drop] sched/x r a=1",
+                     "drop lines use the exact [drop] site reason args shape");
+            t.Equals(ps2_log::formatDropLine("sched/x", "r", ""), "[drop] sched/x r -",
+                     "empty args render as a dash");
+
+            // Save/restore any ambient kill-switch so parallel tests are unaffected.
+            const char *prior = std::getenv("PS2X_DROP_SILENCE");
+            const std::string saved = prior != nullptr ? prior : "";
+            const bool hadPrior = prior != nullptr;
+
+            unsetenv("PS2X_DROP_SILENCE");
+            t.IsTrue(!ps2_log::dropsMuted(), "drops are on by default (kill-switch unset)");
+            std::ostringstream unmuted;
+            ps2_log::emitDropTo(unmuted, "s", "r", "a");
+            t.Equals(unmuted.str(), "[drop] s r a\n", "unmuted emission writes one line");
+
+            setenv("PS2X_DROP_SILENCE", "1", 1);
+            t.IsTrue(ps2_log::dropsMuted(), "a non-empty kill-switch mutes drops");
+            std::ostringstream muted;
+            ps2_log::emitDropTo(muted, "s", "r", "a");
+            t.Equals(muted.str(), "", "muted emission writes nothing");
+
+            setenv("PS2X_DROP_SILENCE", "", 1);
+            t.IsTrue(!ps2_log::dropsMuted(), "an empty kill-switch value still emits");
+
+            if (hadPrior)
+            {
+                setenv("PS2X_DROP_SILENCE", saved.c_str(), 1);
+            }
+            else
+            {
+                unsetenv("PS2X_DROP_SILENCE");
+            }
+        });
+
+        tc.Run("Park tallies count dispatches, semas, RPC, GS and drops (T1)", [](TestCase &t)
+        {
+            ps2_park::resetTalliesForTesting();
+            ps2_log::resetDropCensusForTesting();
+
+            ps2_park::tallyDispatch(0x41ea18u, 0x41aac0u);
+            ps2_park::tallyDispatch(0x41ea18u, 0x41aaccu);
+            ps2_park::tallyDispatch(0x326478u, 0x3260ecu);
+            const auto &hot = ps2_park::hotPcCounts();
+            t.Equals(hot.size(), static_cast<size_t>(2), "two distinct dispatch targets tallied");
+            t.Equals(hot.at(0x41ea18u).count, static_cast<uint64_t>(2), "repeat target counts twice");
+            t.Equals(hot.at(0x41ea18u).firstRa, static_cast<uint32_t>(0x41aac0u), "first ra kept");
+            t.Equals(hot.at(0x41ea18u).lastRa, static_cast<uint32_t>(0x41aaccu), "last ra kept");
+
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+            const int sema = ee.createSemaphore(1, 5, 0u, 0u);
+            t.IsTrue(sema > 0, "throwaway sema created");
+            ee.waitSemaphore(sema);
+            t.Equals(ee.signalSemaphore(sema, false), sema, "signal returns the id");
+            t.Equals(ps2_park::semaCreates().size(), static_cast<size_t>(1), "one create row");
+            t.Equals(ps2_park::semaCreates()[0].id, sema, "create row names the sema");
+            t.Equals(ps2_park::semaCreates()[0].maxCount, 5, "create row keeps max");
+            t.Equals(ps2_park::semaWaitHist()[sema].size(), static_cast<size_t>(1), "one waiter pc");
+            t.Equals(ps2_park::semaSignalHist()[sema].size(), static_cast<size_t>(1), "one signaller pc");
+            ps2_park::tallySched(1);
+            ps2_park::tallySched(3);
+            t.Equals(ps2_park::schedCounts()[1], static_cast<uint64_t>(1), "sched count per thread");
+
+            ps2_park::ParkRpcEvent call;
+            call.op = "call";
+            call.sid = 0x80000211u;
+            call.fno = 0x1u;
+            call.sendSize = 16u;
+            call.recvSize = 144u;
+            call.tid = 3;
+            call.claimed = false;
+            ps2_park::tallyRpcEvent(call);
+            t.Equals(ps2_park::rpcEvents().size(), static_cast<size_t>(1), "one rpc row");
+            t.Equals(ps2_park::rpcEvents()[0].sid, static_cast<uint32_t>(0x80000211u), "rpc row keeps sid");
+
+            ps2_park::tallyGsKick(true);
+            ps2_park::tallyGsKick(false);
+            ps2_park::tallyGsGif();
+            ps2_park::tallyGsCopyReg();
+            t.Equals(ps2_park::gsKickCount().load(), static_cast<uint64_t>(2), "two kicks");
+            t.Equals(ps2_park::gsKickDrawingCount().load(), static_cast<uint64_t>(1), "one drawing kick");
+            t.Equals(ps2_park::gsGifPacketCount().load(), static_cast<uint64_t>(1), "one gif packet");
+            t.Equals(ps2_park::gsCopyRegCount().load(), static_cast<uint64_t>(1), "one copy reg");
+
+            std::ostringstream sink;
+            ps2_log::emitDropTo(sink, "sched/x", "KE_ERROR", "id=9");
+            ps2_log::emitDropTo(sink, "sched/x", "KE_ERROR", "id=10");
+            const auto census = ps2_log::snapshotDropCensus();
+            t.Equals(census.size(), static_cast<size_t>(1), "census groups by site+reason");
+            t.Equals(census[0].count, static_cast<uint64_t>(2), "both drops counted");
+        });
+
+        tc.Run("Park snapshot JSON/table render the exact schema (T1)", [](TestCase &t)
+        {
+            ps2_park::ParkSnapshotData data;
+            data.source = "emitter";
+            ps2_park::ParkThreadRow thread;
+            thread.id = 3;
+            thread.status = 2;
+            thread.statusName = "Waiting";
+            thread.waitReason = 2;
+            thread.waitReasonName = "Semaphore";
+            thread.waitId = 30;
+            thread.pc = 0x423de8u;
+            thread.ra = 0x31aca4u;
+            thread.sp = 0x61ff00u;
+            thread.entry = 0x31ac60u;
+            thread.priority = 101;
+            thread.scheduled = 43u;
+            thread.chain = {0x31aca4u, 0x31a700u};
+            data.threads.push_back(thread);
+            ps2_park::ParkSemaRow sema;
+            sema.id = 30;
+            sema.count = 0;
+            sema.maxCount = 1024;
+            sema.initCount = 0;
+            sema.waiters = 1;
+            data.semaphores.push_back(sema);
+            ps2_park::ParkRpcEvent load;
+            load.op = "load";
+            load.sid = 7u;
+            load.tid = 1;
+            load.claimed = true;
+            load.path = "cdrom0:/data/x.\"irx\"\n";
+            data.rpc.push_back(load);
+
+            const std::string json = ps2_park::renderParkJson(data);
+            t.IsTrue(json.find("\"schema\": \"ps2x-park-snapshot/1\"") != std::string::npos,
+                     "json carries the schema tag");
+            t.IsTrue(json.find("\"status_name\": \"Waiting\"") != std::string::npos,
+                     "json carries thread rows");
+            t.IsTrue(json.find("\"chain\": [\"0x31aca4\", \"0x31a700\"]") != std::string::npos,
+                     "json renders the ra chain as hex");
+            t.IsTrue(json.find("x.\\\"irx\\\"\n") == std::string::npos,
+                     "raw quotes must not leak into json");
+            t.IsTrue(json.find("x.\\\"irx\\\"\\n") != std::string::npos,
+                     "json escapes quotes and newlines in paths");
+
+            const std::string table = ps2_park::renderParkTable(data);
+            t.IsTrue(table.find("park snapshot (emitter") != std::string::npos,
+                     "table carries the source header");
+            t.IsTrue(table.find("id=3 Waiting wait=Semaphore:30 pc=0x423de8") != std::string::npos,
+                     "table renders the thread line");
+            t.IsTrue(table.find("load claimed n=1") != std::string::npos,
+                     "table tallies sif/rpc by op and side");
+        });
+
         tc.Run("EE scheduler selects absolute priority then FIFO", [](TestCase &t)
         {
             TestEnv env;
@@ -666,6 +1593,119 @@ void register_ps2_runtime_kernel_tests()
                       "all EE guest functions must execute on the single scheduler host thread");
             t.IsFalse(gGuestExecutingFlagMissing.load(std::memory_order_acquire),
                       "the scheduler must publish guest execution only around the active guest call");
+        });
+
+#if !defined(_WIN32)
+        tc.Run("CTX1: PS2X_EE_SWITCH fast and sigmask transfers run the same trace; mask and SIGSEGV handler intact", [](TestCase &t)
+        {
+            t.Equals(EeScheduler::transferSaveMaskFor(nullptr), 0, "unset is fast (no mask save)");
+            t.Equals(EeScheduler::transferSaveMaskFor("fast"), 0, "fast saves no mask");
+            t.Equals(EeScheduler::transferSaveMaskFor("bogus"), 0, "unknown values fall back to fast");
+#if defined(__GLIBC__)
+            t.Equals(EeScheduler::transferSaveMaskFor("sigmask"), 0, "sigmask keeps glibc setjmp semantics");
+#else
+            t.Equals(EeScheduler::transferSaveMaskFor("sigmask"), 1, "sigmask keeps Apple/bionic setjmp semantics");
+#endif
+            const char *prior = std::getenv("PS2X_EE_SWITCH");
+            const std::string priorValue = prior != nullptr ? prior : "";
+            const auto runTrace = [](const char *mode) {
+                setenv("PS2X_EE_SWITCH", mode, 1);
+                TestEnv env;
+                std::vector<int> trace;
+                gSchedulerTrace = &trace;
+                env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
+                env.runtime.registerFunction(K_SCHED_A, schedulerTraceA);
+                env.runtime.registerFunction(K_SCHED_B, schedulerTraceB);
+                env.ctx.pc = K_SCHED_MAIN;
+                EeScheduler &ee = env.runtime.eeScheduler();
+                ee.reset(env.rdram.data(), env.ctx);
+                const int lowA = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x20000u, 0x800u, 0, 20, 0});
+                const int highA = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x21000u, 0x800u, 0, 5, 0});
+                const int highB = ee.createThread(EeThreadCreateParams{0, K_SCHED_B, 0x22000u, 0x800u, 0, 5, 0});
+                ee.startThread(lowA, 0, env.ctx, false);
+                ee.startThread(highA, 0, env.ctx, false);
+                ee.startThread(highB, 0, env.ctx, false);
+                ee.run();
+                gSchedulerTrace = nullptr;
+                return trace;
+            };
+            sigset_t before{};
+            pthread_sigmask(SIG_SETMASK, nullptr, &before);
+            const std::vector<int> fastTrace = runTrace("fast");
+            const std::vector<int> maskTrace = runTrace("sigmask");
+            if (prior != nullptr)
+                setenv("PS2X_EE_SWITCH", priorValue.c_str(), 1);
+            else
+                unsetenv("PS2X_EE_SWITCH");
+            t.IsTrue(!fastTrace.empty(), "fast mode runs guest threads across a transfer");
+            t.IsTrue(fastTrace == maskTrace, "fast and sigmask transfers produce the same trace");
+            sigset_t after{};
+            pthread_sigmask(SIG_SETMASK, nullptr, &after);
+            bool sameMask = true;
+            for (int sig = 1; sig < 32; ++sig)
+                sameMask = sameMask && sigismember(&before, sig) == sigismember(&after, sig);
+            t.IsTrue(sameMask, "the executor thread's signal mask is unchanged after fast transfers");
+
+            static volatile sig_atomic_t segvSeen = 0;
+            struct sigaction action{};
+            struct sigaction old{};
+            action.sa_handler = [](int) { segvSeen = 1; };
+            sigemptyset(&action.sa_mask);
+            t.Equals(sigaction(SIGSEGV, &action, &old), 0, "install a SIGSEGV handler");
+            segvSeen = 0;
+            raise(SIGSEGV);
+            sigaction(SIGSEGV, &old, nullptr);
+            t.IsTrue(segvSeen == 1, "a SIGSEGV handler still fires on the executor thread after fast transfers");
+            t.Equals(fastTrace.size(), size_t{4}, "fast mode runs the four-entry FIFO trace");
+        });
+#endif
+
+        tc.Run("RD1: every EE context, incl. StartThread's, has VU0 vf0 = (0,0,0,1)", [](TestCase &t)
+        {
+            // VU0 vf0 is hardwired to (0,0,0,1). SSX 3 builds the player's bind-pose
+            // matrices on a loader thread with vaddw.xyz vf1, vf0, vf0w (= 1,1,1); with
+            // vf0 = 0 every rotation lost its diagonal and the rider collapsed.
+            auto isHardwiredVf0 = [](const R5900Context &c) {
+                alignas(16) float f[4];
+                _mm_store_ps(f, c.vu0_vf[0]);
+                return f[0] == 0.0f && f[1] == 0.0f && f[2] == 0.0f && f[3] == 1.0f;
+            };
+            R5900Context fresh{};
+            t.IsTrue(isHardwiredVf0(fresh), "a default-constructed context must have vf0 = (0,0,0,1)");
+
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+            const int id = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u,
+                                                                0u, 20, 0u});
+            t.Equals(ee.startThread(id, 0u, env.ctx, false), KE_OK, "StartThread should succeed");
+            t.IsTrue(isHardwiredVf0(ee.thread(id)->context),
+                     "a started thread's context must have vf0 = (0,0,0,1)");
+        });
+
+        tc.Run("F4: every EE context, incl. StartThread's, has VU0 R = 1.0-bits", [](TestCase &t)
+        {
+            // Main sets vu0_r to 1.0 in every lane; after the RD1 ctor fix R was
+            // the last main-vs-thread delta (TC1 audit), so it moves here too.
+            auto isOneBitsR = [](const R5900Context &c) {
+                alignas(16) uint32_t w[4];
+                _mm_store_si128(reinterpret_cast<__m128i *>(w), _mm_castps_si128(c.vu0_r));
+                return w[0] == 0x3F800000u && w[1] == 0x3F800000u &&
+                       w[2] == 0x3F800000u && w[3] == 0x3F800000u;
+            };
+            R5900Context fresh{};
+            t.IsTrue(isOneBitsR(fresh), "a default-constructed context must have R = 1.0-bits");
+
+            TestEnv env;
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.bindMainContextForSyscall(env.ctx, env.rdram.data());
+            const int id = ee.createThread(EeThreadCreateParams{0u, K_SCHED_HIGH, 0x24000u, 0x800u,
+                                                                0u, 20, 0u});
+            t.Equals(ee.startThread(id, 0u, env.ctx, false), KE_OK, "StartThread should succeed");
+            t.IsTrue(isOneBitsR(ee.thread(id)->context),
+                     "a started thread's context must have R = 1.0-bits");
         });
 
         tc.Run("thread lifecycle, nested suspend, WAIT-SUSPEND, and wakeup count are centralized", [](TestCase &t)
@@ -831,6 +1871,27 @@ void register_ps2_runtime_kernel_tests()
 
             const std::vector<int> expected{1, 10, 20, 11};
             t.IsTrue(trace == expected, "explicit rotation should move the current head behind its FIFO peer");
+        });
+
+        tc.Run("PF1: a checkpoint at a recursive call is an unwind, not a return", [](TestCase &t)
+        {
+            TestEnv env;
+            std::vector<int> trace;
+            gSchedulerTrace = &trace;
+            gPf1FEntries = 0;
+            env.runtime.registerFunction(K_SCHED_MAIN, pf1Outer);
+            env.runtime.registerFunction(K_PF1_F, pf1F);
+            env.runtime.registerFunction(K_PF1_F_RET, pf1FRet);
+            env.runtime.registerFunction(K_PF1_OUTER_RET, pf1OuterRet);
+            env.ctx.pc = K_SCHED_MAIN;
+
+            EeScheduler &ee = env.runtime.eeScheduler();
+            ee.reset(env.rdram.data(), env.ctx);
+            ee.run();
+
+            const std::vector<int> expected{1, 10, 11, 12, 3};
+            t.IsTrue(trace == expected,
+                     "the outer caller must not continue while its callee is suspended at its own entry");
         });
 
         tc.Run("starting a strictly higher-priority thread preempts immediately", [](TestCase &t)
@@ -1059,7 +2120,7 @@ void register_ps2_runtime_kernel_tests()
 
             setRegU32(env.ctx, 4, 0x7FFFu);
             PollSema(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), KE_UNKNOWN_SEMID, "PollSema should reject unknown semaphore ids");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "PollSema should reject unknown semaphore ids with KE_ERROR like the kernel (P12)");
 
             setRegU32(env.ctx, 4, 0xFFFFFFFFu);
             t.IsTrue(callSyscall(0x3Du, env.rdram.data(), &env.ctx, &env.runtime), "SetupHeap syscall should dispatch");
@@ -1562,6 +2623,381 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
                      kExpectedHandler,
                      "GetEntryAddress should read and return the handler address from the table");
+        });
+
+        tc.Run("SIF handshake stays off without the SSX3 override (P1ac gate)", [](TestCase &t)
+        {
+            TestEnv env;
+            resetSsx3SifHandshakeForTesting();
+
+            constexpr uint32_t kPacketAddr = 0x00009000u;
+            constexpr uint32_t kSregs1Addr = 0x52BE04u;
+            constexpr uint32_t kPacket[] = {0u, 0u, 0u, 0u, 1u, 1u};
+            writeGuestWords(env.rdram.data(), kPacketAddr, kPacket, std::size(kPacket));
+
+            setRegU32(env.ctx, 4, 0x80000001u);
+            setRegU32(env.ctx, 5, kPacketAddr);
+            setRegU32(env.ctx, 6, 0x18u);
+            setRegU32(env.ctx, 7, 0u);
+            setRegU32(env.ctx, 29, 0x00100000u);
+            sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.Equals(getRegS32(env.ctx, 2), 1, "SendCmd must still return 1 with the gate off");
+            t.Equals(readGuestU32(env.rdram.data(), kSregs1Addr), 0u,
+                     "sregs[1] must stay 0 when the SSX3 override did not apply");
+            resetSsx3SifHandshakeForTesting();
+        });
+
+        tc.Run("SIF handshake writes sregs[1]=1 for SSX3 SET_SREG(1,1) (P1ac)", [](TestCase &t)
+        {
+            TestEnv env;
+            resetSsx3SifHandshakeForTesting();
+            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+
+            constexpr uint32_t kPacketAddr = 0x00009000u;
+            constexpr uint32_t kSregs1Addr = 0x52BE04u;
+            constexpr uint32_t kPacket[] = {0u, 0u, 0u, 0u, 1u, 1u};
+            writeGuestWords(env.rdram.data(), kPacketAddr, kPacket, std::size(kPacket));
+
+            setRegU32(env.ctx, 4, 0x80000001u);
+            setRegU32(env.ctx, 5, kPacketAddr);
+            setRegU32(env.ctx, 6, 0x18u);
+            setRegU32(env.ctx, 7, 0u);
+            setRegU32(env.ctx, 29, 0x00100000u);
+            sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.Equals(getRegS32(env.ctx, 2), 1, "SendCmd must still return 1");
+            t.Equals(readGuestU32(env.rdram.data(), kSregs1Addr), 1u,
+                     "SSX3 SET_SREG(1,1) must complete the handshake with sregs[1]=1");
+            resetSsx3SifHandshakeForTesting();
+        });
+
+        tc.Run("private SIF SendCmd uses seven registers for SET_SREG", [](TestCase &t)
+        {
+            TestEnv env;
+            resetSsx3SifHandshakeForTesting();
+            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+
+            constexpr uint32_t kPacketAddr = 0x00009000u;
+            constexpr uint32_t kPacket[] = {0u, 0u, 0u, 0u, 1u, 1u};
+            writeGuestWords(env.rdram.data(), kPacketAddr, kPacket, std::size(kPacket));
+            setRegU32(env.ctx, 4, 0x80000001u);
+            setRegU32(env.ctx, 5, 1u); // mode, not packet address
+            setRegU32(env.ctx, 6, kPacketAddr);
+            setRegU32(env.ctx, 7, 0x18u);
+            setRegU32(env.ctx, 8, 0u);
+            setRegU32(env.ctx, 9, 0u);
+            setRegU32(env.ctx, 10, 0u);
+            _sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+
+            t.Equals(getRegS32(env.ctx, 2), 1, "private SendCmd must return success");
+            t.Equals(readGuestU32(env.rdram.data(), 0x52BE04u), 1u,
+                     "private SendCmd must read the packet from a2");
+            resetSsx3SifHandshakeForTesting();
+        });
+
+        tc.Run("SIF handshake ignores other cids and sreg slots (P1ac)", [](TestCase &t)
+        {
+            TestEnv env;
+            resetSsx3SifHandshakeForTesting();
+            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+
+            constexpr uint32_t kPacketAddr = 0x00009000u;
+            constexpr uint32_t kSregs1Addr = 0x52BE04u;
+
+            constexpr uint32_t kBindPacket[] = {0u, 0u, 0u, 0u, 1u, 1u};
+            writeGuestWords(env.rdram.data(), kPacketAddr, kBindPacket, std::size(kBindPacket));
+            setRegU32(env.ctx, 4, 0x00000019u);
+            setRegU32(env.ctx, 5, kPacketAddr);
+            setRegU32(env.ctx, 6, 0x18u);
+            setRegU32(env.ctx, 7, 0u);
+            setRegU32(env.ctx, 29, 0x00100000u);
+            sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 1, "SendCmd must still return 1 for other cids");
+            t.Equals(readGuestU32(env.rdram.data(), kSregs1Addr), 0u,
+                     "a non-SET_SREG cid must not touch sregs[1]");
+
+            constexpr uint32_t kOtherSlot[] = {0u, 0u, 0u, 0u, 2u, 1u};
+            writeGuestWords(env.rdram.data(), kPacketAddr, kOtherSlot, std::size(kOtherSlot));
+            setRegU32(env.ctx, 4, 0x80000001u);
+            sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
+            t.Equals(getRegS32(env.ctx, 2), 1, "SendCmd must still return 1 for other sreg slots");
+            t.Equals(readGuestU32(env.rdram.data(), kSregs1Addr), 0u,
+                     "SET_SREG for a slot other than 1 must not touch sregs[1]");
+            resetSsx3SifHandshakeForTesting();
+        });
+
+        tc.Run("SSX3 copied payload lookup serves all six installer keys (K1)", [](TestCase &t)
+        {
+            TestEnv env;
+            resetSsx3CopiedPayloadForTesting();
+            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+
+            // The game's own six pairs (ELF 0x4564C0, destination 0x80075300).
+            constexpr uint32_t kPairs[] = {
+                0x55u, 0x80075038u, 0x56u, 0x800750C8u, 0x57u, 0x80075108u,
+                0x58u, 0x80075158u, 0x59u, 0x800751A8u, 0x03u, 0x80075330u,
+            };
+            constexpr uint32_t kSrc = 0x4561C0u;
+            constexpr uint32_t kDstPhys = 0x75000u;
+            constexpr uint32_t kSize = 0x330u;
+            for (uint32_t i = 0; i < kSize; ++i)
+            {
+                env.rdram[kSrc + i] = static_cast<uint8_t>((i * 31u + 7u) & 0xFFu);
+            }
+            writeGuestWords(env.rdram.data(), kSrc + 0x300u, kPairs, std::size(kPairs));
+            std::memcpy(env.rdram.data() + kDstPhys, env.rdram.data() + kSrc, kSize);
+
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x5Bu, 0x80075000u);
+            for (size_t i = 0; i < std::size(kPairs); i += 2)
+            {
+                setRegU32(env.ctx, 4, kPairs[i]);
+                t.IsTrue(callSyscall(0x5Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                         "copied-payload lookup should dispatch");
+                t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), kPairs[i + 1],
+                         "copied-payload lookup should return the payload's own value");
+            }
+            setRegU32(env.ctx, 4, 0x54u);
+            t.IsTrue(callSyscall(0x5Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "a lookup miss should still dispatch");
+            t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)), 0u,
+                     "a lookup miss should return 0 like the payload");
+            resetSsx3CopiedPayloadForTesting();
+        });
+
+        tc.Run("SSX3 copied payload helpers validate like the payload (K1)", [](TestCase &t)
+        {
+            TestEnv env;
+            resetSsx3CopiedPayloadForTesting();
+            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+
+            constexpr uint32_t kSrc = 0x4561C0u;
+            constexpr uint32_t kDstPhys = 0x75000u;
+            constexpr uint32_t kSize = 0x330u;
+            for (uint32_t i = 0; i < kSize; ++i)
+            {
+                env.rdram[kSrc + i] = static_cast<uint8_t>((i * 31u + 7u) & 0xFFu);
+            }
+            std::memcpy(env.rdram.data() + kDstPhys, env.rdram.data() + kSrc, kSize);
+
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x55u, 0x80075038u);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x56u, 0x800750C8u);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x57u, 0x80075108u);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x58u, 0x80075158u);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x59u, 0x800751A8u);
+
+            setRegU32(env.ctx, 4, 0x2Fu);
+            t.IsTrue(callSyscall(0x56u, env.rdram.data(), &env.ctx, &env.runtime), "0x56 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), 0x2F, "0x56 with a0<0x30 should return the index");
+            setRegU32(env.ctx, 4, 0x30u);
+            t.IsTrue(callSyscall(0x56u, env.rdram.data(), &env.ctx, &env.runtime), "0x56 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x56 with a0>=0x30 should return -1");
+
+            constexpr uint32_t kOut0 = 0x00002000u;
+            constexpr uint32_t kOut1 = 0x00002100u;
+            constexpr uint32_t kOut2 = 0x00002200u;
+            constexpr uint32_t kOut3 = 0x00002300u;
+            writeGuestU32(env.rdram.data(), kOut0, 0xDEADBEEFu);
+            writeGuestU32(env.rdram.data(), kOut1, 0xDEADBEEFu);
+            writeGuestU32(env.rdram.data(), kOut2, 0xDEADBEEFu);
+            writeGuestU32(env.rdram.data(), kOut3, 0xDEADBEEFu);
+            setRegU32(env.ctx, 4, 0x10u);
+            setRegU32(env.ctx, 5, kOut0);
+            setRegU32(env.ctx, 6, kOut1);
+            setRegU32(env.ctx, 7, kOut2);
+            setRegU32(env.ctx, 8, kOut3);
+            t.IsTrue(callSyscall(0x57u, env.rdram.data(), &env.ctx, &env.runtime), "0x57 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), 0x10, "0x57 with a0<0x30 should return the index");
+            t.Equals(readGuestU32(env.rdram.data(), kOut0), 0u, "0x57 should store empty-TLB zeros");
+            t.Equals(readGuestU32(env.rdram.data(), kOut1), 0u, "0x57 should store empty-TLB zeros");
+            t.Equals(readGuestU32(env.rdram.data(), kOut2), 0u, "0x57 should store empty-TLB zeros");
+            t.Equals(readGuestU32(env.rdram.data(), kOut3), 0u, "0x57 should store empty-TLB zeros");
+            setRegU32(env.ctx, 4, 0x30u);
+            t.IsTrue(callSyscall(0x57u, env.rdram.data(), &env.ctx, &env.runtime), "0x57 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x57 with a0>=0x30 should return -1");
+
+            for (const uint32_t a1 : {0x00123456u, 0x309ABCDEu, 0x40FEDCBAu})
+            {
+                setRegU32(env.ctx, 5, a1);
+                t.IsTrue(callSyscall(0x55u, env.rdram.data(), &env.ctx, &env.runtime),
+                         "0x55 should dispatch");
+                t.Equals(getRegS32(env.ctx, 2), 0, "0x55 with a valid top nibble should succeed");
+            }
+            for (const uint32_t a1 : {0x10123456u, 0x20123456u, 0x50123456u})
+            {
+                setRegU32(env.ctx, 5, a1);
+                t.IsTrue(callSyscall(0x55u, env.rdram.data(), &env.ctx, &env.runtime),
+                         "0x55 should dispatch");
+                t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x55 with an invalid top nibble should return -1");
+            }
+
+            t.IsTrue(callSyscall(0x58u, env.rdram.data(), &env.ctx, &env.runtime), "0x58 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x58 with no HLE mappings should miss with -1");
+
+            setRegU32(env.ctx, 4, 0x1001u);
+            t.IsTrue(callSyscall(0x59u, env.rdram.data(), &env.ctx, &env.runtime), "0x59 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x59 with a misaligned size should return -1");
+            setRegU32(env.ctx, 4, 0x1000u);
+            t.IsTrue(callSyscall(0x59u, env.rdram.data(), &env.ctx, &env.runtime), "0x59 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR, "0x59 with a small size should return -1");
+            setRegU32(env.ctx, 4, 0u);
+            t.IsTrue(callSyscall(0x59u, env.rdram.data(), &env.ctx, &env.runtime), "0x59 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), 0, "0x59 with size 0 should succeed with 0");
+            setRegU32(env.ctx, 4, 0x10000000u);
+            t.IsTrue(callSyscall(0x59u, env.rdram.data(), &env.ctx, &env.runtime), "0x59 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), 0, "0x59 should allocate wired index 0 first");
+            t.IsTrue(callSyscall(0x59u, env.rdram.data(), &env.ctx, &env.runtime), "0x59 should dispatch");
+            t.Equals(getRegS32(env.ctx, 2), 1, "0x59 should allocate wired index 1 next");
+            resetSsx3CopiedPayloadForTesting();
+        });
+
+        tc.Run("SSX3 copied payload refuses broken copies and other games (K1)", [](TestCase &t)
+        {
+            TestEnv env;
+            resetSsx3CopiedPayloadForTesting();
+
+            constexpr uint32_t kSrc = 0x4561C0u;
+            constexpr uint32_t kDstPhys = 0x75000u;
+            constexpr uint32_t kSize = 0x330u;
+            for (uint32_t i = 0; i < kSize; ++i)
+            {
+                env.rdram[kSrc + i] = static_cast<uint8_t>((i * 31u + 7u) & 0xFFu);
+            }
+            std::memcpy(env.rdram.data() + kDstPhys, env.rdram.data() + kSrc, kSize);
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x5Bu, 0x80075000u);
+
+            setRegU32(env.ctx, 4, 0x55u);
+            t.IsTrue(callSyscall(0x5Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "an unarmed quirk should still dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR,
+                     "an unarmed quirk should keep the existing KE_ERROR drop path");
+
+            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+            env.rdram[kDstPhys + 0x10u] ^= 0xFFu;
+            setRegU32(env.ctx, 4, 0x55u);
+            t.IsTrue(callSyscall(0x5Bu, env.rdram.data(), &env.ctx, &env.runtime),
+                     "a broken copy should still dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR,
+                     "a broken copy should keep the existing KE_ERROR drop path");
+
+            env.rdram[kDstPhys + 0x10u] ^= 0xFFu;
+            env.runtime.setEeSyscallOverride(env.rdram.data(), 0x54u, 0x80075000u);
+            setRegU32(env.ctx, 4, 0x55u);
+            t.IsTrue(callSyscall(0x54u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "an unmatched pair should still dispatch");
+            t.Equals(getRegS32(env.ctx, 2), KE_ERROR,
+                     "an unmatched (syscall, handler) pair should keep the KE_ERROR drop path");
+            resetSsx3CopiedPayloadForTesting();
+        });
+
+        tc.Run("SetSyscall publishes markers the scanner cross-checks (K1)", [](TestCase &t)
+        {
+            TestEnv env;
+            constexpr uint32_t kTableBase = 0x80011F80u;
+            setRegU32(env.ctx, 4, 0x83u);
+            setRegU32(env.ctx, 5, 0x42C168u);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall should dispatch for the 0x83 marker");
+            setRegU32(env.ctx, 4, 0x5Au);
+            setRegU32(env.ctx, 5, 0x42C130u);
+            t.IsTrue(callSyscall(0x74u, env.rdram.data(), &env.ctx, &env.runtime),
+                     "SetSyscall should dispatch for the 0x5A marker");
+
+            constexpr uint32_t kMarkA = (kTableBase + 0x83u * 4u) & 0x1FFFFFFFu;
+            constexpr uint32_t kMarkB = (kTableBase + 0x5Au * 4u) & 0x1FFFFFFFu;
+            t.Equals(readGuestU32(env.rdram.data(), kMarkA), 0x42C168u,
+                     "the 0x83 marker should be visible in the KSEG0 mirror");
+            t.Equals(readGuestU32(env.rdram.data(), kMarkB), 0x42C130u,
+                     "the 0x5A marker should be visible in the KSEG0 mirror");
+            t.Equals(kMarkA - 0x83u * 4u, kMarkB - 0x5Au * 4u,
+                     "both markers should cross-check to the same table base");
+        });
+
+        tc.Run("E3 overlap math normalizes aliases and splits wraps (E3b)", [](TestCase &t)
+        {
+            uint64_t parsed = 0u;
+            t.IsTrue(ps2_e3::parseU64("1000", parsed) && parsed == 1000u, "decimal INV should parse");
+            t.IsTrue(ps2_e3::parseU64("0x70001C00", parsed) && parsed == 0x70001C00u, "hex base should parse");
+            t.IsTrue(!ps2_e3::parseU64("", parsed), "empty should not parse");
+            t.IsTrue(!ps2_e3::parseU64("12x", parsed), "trailing junk should not parse");
+
+            const ps2_e3::NormAddr raw = ps2_e3::normAddr(0x501420u);
+            t.IsTrue(raw.space == ps2_e3::kRamSpace && raw.off == 0x501420u, "raw RAM should stay put");
+            const ps2_e3::NormAddr kseg0 = ps2_e3::normAddr(0x8501420u);
+            t.IsTrue(kseg0.space == ps2_e3::kRamSpace && kseg0.off == 0x501420u, "KSEG0 should strip to RAM");
+            const ps2_e3::NormAddr kseg1 = ps2_e3::normAddr(0xB001420u);
+            t.IsTrue(kseg1.space == ps2_e3::kRamSpace && kseg1.off == 0x1001420u, "KSEG1 should strip to RAM");
+            const ps2_e3::NormAddr spr = ps2_e3::normAddr(0x70001C10u);
+            t.IsTrue(spr.space == ps2_e3::kSprSpace && spr.off == 0x1C10u, "scratchpad should map to SPR");
+            const ps2_e3::NormAddr sprAlias = ps2_e3::normAddr(0xF0000010u);
+            t.IsTrue(sprAlias.space == ps2_e3::kSprSpace && sprAlias.off == 0x10u, "SPR alias should map to SPR");
+
+            ps2_e3::Interval ivs[4];
+            t.Equals(ps2_e3::splitIntervals(0x501420u, 32u, ivs, 4u), static_cast<size_t>(1u),
+                     "plain RAM range should be one interval");
+            t.IsTrue(ivs[0].space == ps2_e3::kRamSpace && ivs[0].off == 0x501420u && ivs[0].len == 32u,
+                     "plain interval should keep addr/len");
+            t.Equals(ps2_e3::splitIntervals(0x1FFFFF8u, 16u, ivs, 4u), static_cast<size_t>(2u),
+                     "RAM wrap should split in two");
+            t.IsTrue(ivs[0].off == 0x1FFFFF8u && ivs[0].len == 8u && ivs[1].off == 0u && ivs[1].len == 8u,
+                     "RAM wrap halves should be [top,8) + [0,8)");
+            t.Equals(ps2_e3::splitIntervals(0x70003FF8u, 16u, ivs, 4u), static_cast<size_t>(2u),
+                     "SPR wrap should split in two");
+            t.IsTrue(ivs[0].space == ps2_e3::kSprSpace && ivs[0].off == 0x3FF8u && ivs[0].len == 8u &&
+                         ivs[1].space == ps2_e3::kRamSpace && ivs[1].off == 0u && ivs[1].len == 8u,
+                     "generic mapping past 0x70004000 falls to RAM 0 (getMemPtr semantics)");
+            t.Equals(ps2_e3::splitSpace(ps2_e3::kSprSpace, 0x3FF8u, 16u, ivs, 4u), static_cast<size_t>(2u),
+                     "engine SPR wrap should split in two");
+            t.IsTrue(ivs[0].space == ps2_e3::kSprSpace && ivs[0].off == 0x3FF8u && ivs[0].len == 8u &&
+                         ivs[1].space == ps2_e3::kSprSpace && ivs[1].off == 0u && ivs[1].len == 8u,
+                     "engine SPR wrap halves should be [top,8) + [SPR 0,8)");
+            t.Equals(ps2_e3::splitIntervals(0x1000u, 0u, ivs, 4u), static_cast<size_t>(0u),
+                     "zero length should split to nothing");
+
+            const ps2_e3::Win wins[2] = {{0x501420u, ps2_e3::kRamSpace, 0x501420u},
+                                         {0x70001C10u, ps2_e3::kSprSpace, 0x1C10u}};
+            size_t idx[8];
+            t.Equals(ps2_e3::overlapWins(ps2_e3::kRamSpace, 0x501424u, 4u, wins, 2u, idx, 8u),
+                     static_cast<size_t>(1u), "inner RAM store should hit");
+            t.Equals(idx[0], static_cast<size_t>(0u), "inner hit should be window 0");
+            t.Equals(ps2_e3::overlapWins(ps2_e3::kRamSpace, 0x501428u, 8u, wins, 2u, idx, 8u),
+                     static_cast<size_t>(0u), "abutting store should miss (boundary-exact)");
+            t.Equals(ps2_e3::overlapWins(ps2_e3::kSprSpace, 0x1C14u, 4u, wins, 2u, idx, 8u),
+                     static_cast<size_t>(1u), "inner SPR store should hit");
+            t.Equals(ps2_e3::overlapWins(ps2_e3::kRamSpace, 0x1C10u, 8u, wins, 2u, idx, 8u),
+                     static_cast<size_t>(0u), "same offset in the wrong space should miss");
+        });
+
+        tc.Run("E3 tap captures before-slices on overlap only (E3b)", [](TestCase &t)
+        {
+            std::vector<uint8_t> ram(0x2000u, 0xA5u);
+            std::vector<uint8_t> spr(0x4000u, 0x5Au);
+            uint8_t *savedSpr = ps2GetScratchpadHostPtr();
+            ps2SetScratchpadHostPtr(spr.data());
+
+            const std::vector<ps2_e3::Win> wins = {{0x1000u, ps2_e3::kRamSpace, 0x1000u},
+                                                   {0x70000100u, ps2_e3::kSprSpace, 0x100u}};
+            ps2_e3::Tap hit = ps2_e3::tapBeginImpl(ram.data(), 0x1000u, 4u, wins);
+            t.IsTrue(hit.active, "overlapping RAM tap should be active");
+            t.Equals(hit.wins.size(), static_cast<size_t>(1u), "one window should overlap");
+            t.IsTrue(hit.wins[0].beforeOk && hit.wins[0].before[0] == 0xA5u,
+                     "before-slice should carry RAM bytes");
+
+            ps2_e3::Tap miss = ps2_e3::tapBeginImpl(ram.data(), 0x2000u, 4u, wins);
+            t.IsTrue(!miss.active, "disjoint tap should stay inactive");
+
+            ps2_e3::Tap sprHit = ps2_e3::tapBeginImpl(ram.data(), 0x70000100u, 4u, wins);
+            t.IsTrue(sprHit.active, "overlapping SPR tap should be active");
+            t.IsTrue(sprHit.wins[0].beforeOk && sprHit.wins[0].before[0] == 0x5Au,
+                     "before-slice should carry SPR bytes");
+
+            uint64_t lo = 0u;
+            uint64_t hi = 0u;
+            t.IsTrue(ps2_e3::readOld(ram.data(), 0x1000u, 4u, lo, hi), "old-value gather should succeed");
+            t.Equals(lo, 0xA5A5A5A5ull, "old lo should assemble little-endian");
+            t.Equals(hi, 0ull, "old hi should be zero for width 4");
+
+            ps2SetScratchpadHostPtr(savedSpr);
         });
     });
 }
