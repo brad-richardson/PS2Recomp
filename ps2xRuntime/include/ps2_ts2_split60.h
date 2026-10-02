@@ -63,6 +63,9 @@ struct State
     uint32_t guestThread = 0;
     bool guestInterrupt = false;
     uint64_t scopeErrors = 0;
+    // TK34: rdram seen at begin() and whether the crash-body word is at 1/120.
+    uint8_t *ram = nullptr;
+    bool crashBodyHalf = false;
     // Guest-thread-keyed records. Occupancy in practice is 1 (the main guest
     // thread runs the rider pass); the linear scan hits slot 0. Overflow
     // keeps exact map semantics past the flat slots; it is cold-only.
@@ -186,6 +189,48 @@ inline bool fixUnconverted() noexcept
         return !(v && v[0] == '1' && v[1] == '\0');
     }();
     return on;
+}
+
+// TK34: the wipeout-body integrator sub_00136F30 (FH23 "crashbody") steps
+// pos/vel/spin/quaternion by f4 = R+0x300 * [0x49be38] (1/60; single reader
+// 0x136f48, an lwc1 that is not one of the HL2 split sites). Case 2 (wipeout)
+// runs the rider pass twice per stock update, so under split120 the crashed
+// body moved 2x and fell at 4x gravity (TK33 §3: d2z -2.00 vs stock -0.50 per
+// stock tick). PS2X_SSX3_SPLIT120_CRASHBODY=1 (default off; guest-affecting)
+// holds the word at 1/120 for exactly the halves halfLoad converts (active
+// rider context, selector case 0/1/2 or TS3 NOFIX) and puts 1/60 back at
+// finish(), so every other reader time sees the stock word.
+inline constexpr uint32_t kCrashBodyWord = 0x49be38u;
+inline constexpr uint32_t kCrashBodyStock = 0x3c888889u; // 1/60
+inline constexpr uint32_t kCrashBodyHalf = 0x3c088889u;  // 1/120
+inline bool crashBodyEnabled() noexcept
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_SSX3_SPLIT120_CRASHBODY");
+        const bool b = v && v[0] == '1' && v[1] == '\0';
+        if (b)
+            std::fprintf(stderr, "[ts2-crashbody] armed (0x%x 1/60 -> 1/120 in converted split halves)\n",
+                         kCrashBodyWord);
+        return b;
+    }();
+    return on;
+}
+
+inline bool crashBodyWrite(uint8_t *ram, uint32_t expected, uint32_t value) noexcept
+{
+    static bool refused = false;
+    if (!ram || refused) return false;
+    uint32_t got = 0;
+    std::memcpy(&got, ram + kCrashBodyWord, 4);
+    if (got != expected)
+    {
+        refused = true;
+        std::fprintf(stderr, "[ts2-crashbody] refused: [0x%x]=%08x expected %08x; disabled\n",
+                     kCrashBodyWord, got, expected);
+        return false;
+    }
+    std::memcpy(ram + kCrashBodyWord, &value, 4);
+    return true;
 }
 
 inline bool countEnabled() noexcept
@@ -418,7 +463,7 @@ inline bool skipSecondHalfPrediction(const uint8_t *ram, R5900Context *ctx,
     return true;
 }
 
-inline void begin(const uint8_t *ram, R5900Context *ctx) noexcept
+inline void begin(uint8_t *ram, R5900Context *ctx) noexcept
 {
     // Belt-and-braces for non-scheduler flows: conversions need an active
     // context, so the flag is filled before any converting load can run.
@@ -456,6 +501,13 @@ inline void begin(const uint8_t *ram, R5900Context *ctx) noexcept
     current.predictorEpoch = identity.epoch;
     current.continuation = 0x128de4u;
     current.active = true;
+    // TK34: same conversion rule as halfLoad (cases >= 3 keep stock values).
+    if (halfMode() && crashBodyEnabled() && !(fixUnconverted() && current.selectorCase >= 3u) &&
+        crashBodyWrite(ram, kCrashBodyStock, kCrashBodyHalf))
+    {
+        s.ram = ram;
+        s.crashBodyHalf = true;
+    }
 }
 
 inline void finish() noexcept
@@ -468,6 +520,11 @@ inline void finish() noexcept
     // missing key did; either way this is a scope error.
     if (td == nullptr || !td->ctx.active) { ++s.scopeErrors; return; }
     td->ctx.active = false;
+    if (s.crashBodyHalf)
+    {
+        s.crashBodyHalf = false;
+        crashBodyWrite(s.ram, kCrashBodyHalf, kCrashBodyStock);
+    }
 }
 
 // TS3: unconverted cases run once per stock update. In half 1 the dispatch

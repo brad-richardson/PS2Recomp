@@ -365,6 +365,192 @@ namespace
     std::atomic<uint64_t> g_ssx3PatchCacheSkips{0u};
     std::atomic<uint64_t> g_ssx3PatchCacheSkips2{0u};
 
+    // TK34: grow the type-1 cache (PS2X_SSX3_PATCH_CACHE_GROW=1, default
+    // off; guest-affecting only once the stock 220 slots run out). Imported
+    // Tricky terrain (Mesablanca mine, TK33 §2) wants more than 220 type-1
+    // slots: a slot stays held two sweeps after its patch leaves the visible
+    // list (sub_00374B38 clears mark bits 0x4 then 0x8, frees on the third),
+    // so turnover overruns the stack while the list itself is <= 220.
+    // Everything per slot is a heap block sized by the stock capacities:
+    // sub_0038AF30 calls the initializer sub_00372B78(cache = r+0x10, 900,
+    // 220, 140, second pools 0, 146, 93) and allocates the 0x100-B DMA blocks
+    // (cap*0x100 at r+0x440..0x448, copies at r+0x44C..0x454). For type 1
+    // (cache c): records 12 B [c+0x10] (copy c+0x1C), free stack [c+0x28]
+    // (copy c+0x34, count c+0x40), buffers 0x1B0/0x120/0x120 B at
+    // [c+0x4C]/[c+0x58]/[c+0x64], second pool 0x1B0 B [c+0x1B8] with stack
+    // [c+0x1C4] (copy c+0x1D0, count c+0x1DC), caps [c+4] and [c+0x1AC].
+    // Readers use the copies and base+slot*stride; the sweep loops to [c+4].
+    // Growth is lazy, so RAM stays byte-identical to stock until the first
+    // empty pop: then the arrays are copied into a free region above the
+    // runtime HLE pools (default 0x01F40000, PS2X_SSX3_PATCH_CACHE_GROW_BASE),
+    // the new slots are pushed and every pointer above is repointed. The old
+    // blocks stay intact (a slot's DMA block is built once at allocation and
+    // may hold REF tags to its old buffers; an in-flight chain may call them),
+    // and free() (0x317E98) of a relocated pointer is handed the original
+    // heap block, so the game's deinit frees exactly what it allocated. The
+    // region must read all-zero and hold no thread stack, else growth is
+    // refused and the TK15 guard (if armed) keeps skipping.
+    constexpr uint32_t kSsx3PatchCacheInit = 0x00372B78u;
+    constexpr uint32_t kSsx3GuestFree = 0x00317E98u;
+    struct Ssx3PatchGrow
+    {
+        bool active = false;
+        bool refused = false;
+        uint32_t cache = 0u;
+        std::vector<std::pair<uint32_t, uint32_t>> moved; // relocated -> original
+    };
+    Ssx3PatchGrow g_ssx3PatchGrow;
+
+    uint32_t ssx3PatchGrowCap()
+    {
+        static const uint32_t cap = [] {
+            const char *e = std::getenv("PS2X_SSX3_PATCH_CACHE_GROW");
+            if (!e || !*e || std::strcmp(e, "0") == 0)
+                return 0u;
+            uint32_t v = std::strcmp(e, "1") == 0 ? 440u : static_cast<uint32_t>(std::strtoul(e, nullptr, 0));
+            if (v <= 220u || v > 2048u)
+            {
+                std::fprintf(stderr, "[ssx3-patch-grow] refused PS2X_SSX3_PATCH_CACHE_GROW=%s (1 or 221..2048)\n", e);
+                return 0u;
+            }
+            std::fprintf(stderr, "[ssx3-patch-grow] armed (type-1 cache 220 -> %u on the first empty pop)\n", v);
+            return v;
+        }();
+        return cap;
+    }
+
+    bool ssx3PatchCacheGrow(uint8_t *rdram, R5900Context *ctx, uint32_t cache)
+    {
+        Ssx3PatchGrow &g = g_ssx3PatchGrow;
+        const uint32_t newCap = ssx3PatchGrowCap();
+        if (newCap == 0u || g.active || g.refused)
+            return false;
+        auto rd = [&](uint32_t a) {
+            uint32_t v = 0u;
+            std::memcpy(&v, rdram + (a & PS2_RAM_MASK), 4u);
+            return v;
+        };
+        auto wr = [&](uint32_t a, uint32_t v) { std::memcpy(rdram + (a & PS2_RAM_MASK), &v, 4u); };
+        auto refuse = [&](const char *why, uint32_t a, uint32_t b) {
+            g.refused = true;
+            std::fprintf(stderr, "[ssx3-patch-grow] refused: %s (0x%x 0x%x)\n", why, a, b);
+            return false;
+        };
+        const uint32_t c = cache;
+        const uint32_t r = c - 0x10u;
+        if ((c & PS2_RAM_MASK) + 0x1E4u > PS2_RAM_SIZE || (c & 3u))
+            return refuse("cache", c, 0u);
+        const uint32_t cap = rd(c + 4u), secCap = rd(c + 0x1ACu);
+        const uint32_t rec = rd(c + 0x10u), stk = rd(c + 0x28u), bufA = rd(c + 0x4Cu), bufB = rd(c + 0x58u),
+                       bufC = rd(c + 0x64u), dma = rd(r + 0x444u), secBuf = rd(c + 0x1B8u), secStk = rd(c + 0x1C4u);
+        if (rec != rd(c + 0x1Cu) || stk != rd(c + 0x34u) || dma != rd(r + 0x450u) || secStk != rd(c + 0x1D0u))
+            return refuse("pointer copies differ", rec, stk);
+        if (cap == 0u || cap >= newCap || secCap > 1024u)
+            return refuse("capacity", cap, secCap);
+        const uint32_t count = rd(c + 0x40u), secCount = rd(c + 0x1DCu);
+        if (count > cap || secCount > secCap)
+            return refuse("stack count", count, secCount);
+        const uint32_t newSec = secCap ? (secCap * newCap + cap - 1u) / cap : 0u;
+        static const uint32_t base = [] {
+            const char *e = std::getenv("PS2X_SSX3_PATCH_CACHE_GROW_BASE");
+            return e && *e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 16)) : 0x01F40000u;
+        }();
+        auto al = [](uint32_t v) { return (v + 0xFFu) & ~0xFFu; };
+        uint32_t at = base & ~0xFFu;
+        auto take = [&](uint32_t bytes) { const uint32_t a = at; at += al(bytes); return a; };
+        const uint32_t nRec = take(newCap * 12u), nStk = take(newCap * 4u), nA = take(newCap * 0x1B0u),
+                       nB = take(newCap * 0x120u), nC = take(newCap * 0x120u), nDma = take(newCap * 0x100u),
+                       nSecBuf = take(newSec * 0x1B0u), nSecStk = take(newSec * 4u);
+        const uint32_t lo = base & ~0xFFu, hi = at;
+        if (lo < 0x01F31300u || hi > PS2_RAM_SIZE)
+            return refuse("region bounds", lo, hi);
+        const uint32_t sp = getRegU32(ctx, 29) & PS2_RAM_MASK;
+        if (sp >= lo && sp < hi + 0x10000u)
+            return refuse("region holds the stack", sp, hi);
+        for (uint32_t a = lo; a < hi; a += 4u)
+            if (rd(a) != 0u)
+                return refuse("region not zero", a, rd(a));
+        const uint32_t high = rec & ~PS2_RAM_MASK; // keep the game's address segment
+        auto cp = [&](uint32_t dst, uint32_t src, uint32_t bytes) {
+            if (bytes)
+                std::memcpy(rdram + (dst & PS2_RAM_MASK), rdram + (src & PS2_RAM_MASK), bytes);
+        };
+        cp(nRec, rec, cap * 12u);
+        for (uint32_t i = cap; i < newCap; ++i)
+            wr(nRec + i * 12u + 8u, 0xFFFFFFFFu); // init: records zero, +8 = -1
+        cp(nStk, stk, count * 4u);
+        for (uint32_t i = 0; i < newCap - cap; ++i)
+            wr(nStk + (count + i) * 4u, cap + i);
+        cp(nA, bufA, cap * 0x1B0u);
+        cp(nB, bufB, cap * 0x120u);
+        cp(nC, bufC, cap * 0x120u);
+        cp(nDma, dma, cap * 0x100u);
+        cp(nSecBuf, secBuf, secCap * 0x1B0u);
+        cp(nSecStk, secStk, secCount * 4u);
+        for (uint32_t i = 0; i < newSec - secCap; ++i)
+            wr(nSecStk + (secCount + i) * 4u, secCap + i);
+        wr(c + 4u, newCap);
+        wr(c + 0x40u, count + (newCap - cap));
+        wr(c + 0x1ACu, newSec);
+        wr(c + 0x1DCu, secCount + (newSec - secCap));
+        const std::pair<uint32_t, uint32_t> moves[] = {
+            {c + 0x10u, rec}, {c + 0x1Cu, rec}, {c + 0x28u, stk}, {c + 0x34u, stk}, {c + 0x4Cu, bufA},
+            {c + 0x58u, bufB}, {c + 0x64u, bufC}, {r + 0x444u, dma}, {r + 0x450u, dma}, {c + 0x1B8u, secBuf},
+            {c + 0x1C4u, secStk}, {c + 0x1D0u, secStk}};
+        const uint32_t dst[] = {nRec, nRec, nStk, nStk, nA, nB, nC, nDma, nDma, nSecBuf, nSecStk, nSecStk};
+        g.moved.clear();
+        for (size_t i = 0; i < std::size(moves); ++i)
+        {
+            const uint32_t to = high | dst[i];
+            wr(moves[i].first, to);
+            if (i == 1u || i == 3u || i == 8u || i == 11u)
+                continue; // copies of the field before; one free each
+            if (moves[i].second != 0u)
+                g.moved.emplace_back(to, moves[i].second);
+        }
+        g.active = true;
+        g.cache = c;
+        std::fprintf(stderr,
+                     "[ssx3-patch-grow] grown cache=0x%x type1 %u->%u (count %u->%u) second %u->%u (count %u->%u) "
+                     "region=0x%x..0x%x sp=0x%x patch=0x%x\n",
+                     c, cap, newCap, count, count + (newCap - cap), secCap, newSec, secCount,
+                     secCount + (newSec - secCap), lo, hi, sp, getRegU32(ctx, 5));
+        return true;
+    }
+
+    // TK34: free() of a relocated block frees the original; re-init forgets.
+    void ssx3PatchGrowFree(R5900Context *ctx)
+    {
+        Ssx3PatchGrow &g = g_ssx3PatchGrow;
+        if (!g.active || !ctx)
+            return;
+        const uint32_t p = getRegU32(ctx, 4);
+        for (auto it = g.moved.begin(); it != g.moved.end(); ++it)
+        {
+            if (it->first != p)
+                continue;
+            SET_GPR_U32(ctx, 4, it->second);
+            g.moved.erase(it);
+            if (g.moved.empty())
+            {
+                g.active = false;
+                std::fprintf(stderr, "[ssx3-patch-grow] released cache=0x%x (originals freed)\n", g.cache);
+            }
+            return;
+        }
+    }
+
+    void ssx3PatchGrowInit(R5900Context *ctx)
+    {
+        Ssx3PatchGrow &g = g_ssx3PatchGrow;
+        if (ssx3PatchGrowCap() == 0u)
+            return;
+        if (g.active)
+            std::fprintf(stderr, "[ssx3-patch-grow] re-init cache=0x%x with %zu blocks unfreed; reset\n",
+                         getRegU32(ctx, 4), g.moved.size());
+        g = Ssx3PatchGrow{};
+    }
+
     bool ssx3PatchCacheGuard(uint8_t *rdram, R5900Context *ctx)
     {
         static const bool on = [] {
@@ -374,7 +560,8 @@ namespace
                 std::fprintf(stderr, "[ssx3-patch-guard] armed (0x3747A0 returns -1 when a slot/buffer stack it pops is empty)\n");
             return v;
         }();
-        if (!on || !rdram || !ctx)
+        const bool grow = ssx3PatchGrowCap() != 0u;
+        if ((!on && !grow) || !rdram || !ctx)
             return false;
         const uint32_t type = getRegU32(ctx, 6);
         if (type > 2u)
@@ -395,6 +582,10 @@ namespace
             std::memcpy(&count2, rdram + count2Addr, 4u);
             if (count2 > 0)
                 return false;
+            if (grow && type == 1u && ssx3PatchCacheGrow(rdram, ctx, getRegU32(ctx, 4)))
+                return false;
+            if (!on)
+                return false;
             SET_GPR_S32(ctx, 2, -1);
             const uint64_t n2 = g_ssx3PatchCacheSkips2.fetch_add(1u, std::memory_order_relaxed) + 1u;
             if (n2 <= 4u || (n2 & (n2 - 1u)) == 0u)
@@ -402,6 +593,10 @@ namespace
                              static_cast<unsigned long long>(n2), type, count2, getRegU32(ctx, 5));
             return true;
         }
+        if (grow && type == 1u && ssx3PatchCacheGrow(rdram, ctx, getRegU32(ctx, 4)))
+            return false;
+        if (!on)
+            return false;
         SET_GPR_S32(ctx, 2, -1);
         const uint64_t n = g_ssx3PatchCacheSkips.fetch_add(1u, std::memory_order_relaxed) + 1u;
         if (n <= 4u || (n & (n - 1u)) == 0u)
@@ -3989,6 +4184,16 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     {
         ctx->pc = fallthroughPc;
         return true;
+    }
+    if (targetPc == kSsx3GuestFree && g_ssx3PatchGrow.active &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
+    {
+        ssx3PatchGrowFree(ctx);
+    }
+    if (targetPc == kSsx3PatchCacheInit &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
+    {
+        ssx3PatchGrowInit(ctx);
     }
     if (targetPc == kSsx3DrawKeyCall &&
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
