@@ -11,8 +11,12 @@
 #             platform from this repo's HEAD) and runs bradflix_ge1_lib.sh
 #             <srcdir> ax4b-<sha12> on bradflix (Docker ssx3-android, memory =
 #             memory-swap, oom-score-adj 500, shared ccache). Produces the
-#             canonical ge1lib-* + pull; MV2/OM1 subdirs are NOT staged by that
-#             recipe, so platform/android skips them behind EXISTS/DEFINED guards.
+#             canonical ge1lib-* + pull; the srcdir also carries ssx3-ge1/mv2
+#             (PB20) for the mv recipe (which stages mv2-adapter remotely with
+#             the assembly-relative sibling links and configures
+#             -DLTO_PCSX2_CORE=OFF -DENABLE_RECOMPILER_TEST_HOOKS=ON).
+#             platform/android skips unstaged adapters behind EXISTS/DEFINED
+#             guards.
 #   ios:      static ge1 (device, iphoneos) via platform/ios (IG1 recipe).
 #   ios-sim:  static ge1 (simulator, iphonesimulator) via platform/ios (IG1 recipe).
 #             mv2 is not wired on iOS: mv2-adapter links shaderc_combined, which
@@ -100,7 +104,15 @@ case "$PLAT" in
     # rides along so ../adapter/ax4b_android_stubs.cpp resolves remotely.
     cp "$HERE/platform/android/ax4b_android_stubs.cpp" "$SRC/ssx3-ge1/adapter/"
     cp "$HERE/platform/android/CMakeLists.txt" "$SRC/ssx3-ge1/android-platform/CMakeLists.txt"
+    # PB20: the srcdir also carries the mv2 bridge (ssx3-ge1/mv2) so the mv
+    # recipe can stage mv2-adapter remotely (assembly-relative ../tests +
+    # ../pcsx2 sibling links, -DENABLE_RECOMPILER_TEST_HOOKS=ON and
+    # -DLTO_PCSX2_CORE=OFF are that recipe's configure flags; the platform
+    # CMake forces hooks ON whenever mv2-adapter is staged and links the CHD
+    # stub into mv2_microvu). The ge1 recipe ignores ssx3-ge1/mv2.
+    cp -a "$HERE/mv2" "$SRC/ssx3-ge1/mv2"
     [ -f "$SRC/pcsx2/GS/GSState.cpp" ] && [ -f "$SRC/ssx3-ge1/adapter/ge1_gs.cpp" ] && [ -f "$SRC/ssx3-ge1/android-platform/CMakeLists.txt" ] \
+      && [ -f "$SRC/ssx3-ge1/mv2/CMakeLists.txt" ] && [ -f "$SRC/ssx3-ge1/mv2/MicrovuBridge.cpp" ] \
       || { echo "srcdir assembly failed" >&2; exit 2; }
     S12=$(git -C "$ARMSX2" rev-parse --short=12 HEAD)
     # A retry after a failed remote scratch (which the recipe keeps) needs a
