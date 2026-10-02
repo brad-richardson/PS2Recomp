@@ -1,19 +1,134 @@
 #include "MiniTest.h"
+#include "ps2_microvu.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/ps2_memory.h"
+#include <type_traits>
+#include "runtime/ps2_vu0.h"
 #include "runtime/ps2_vu1.h"
+#include "ps2_fpmode.h"
+#include "vu1_recomp_fixture.h"
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <sstream>
 #include <vector>
+#include <algorithm>
+#include <cstdlib>
+#include <string>
+#include <thread>
 
 namespace
 {
     constexpr uint32_t kVuUpperNop = 0x000002FFu;
+
+#if PS2X_VU1_FIXTURE_TEST
+    // VR3: one VU0 differential case. The reference is the VU0 interpreter
+    // with every write queued; each other mode (generated pairs; VU0 direct
+    // commit in the interpreter and in generated pairs) must leave the same
+    // VU state and data memory after a budget cut, after resume() and after a
+    // fresh execute() (the runtime's only VU0 continuation).
+    struct Vu0DiffStats
+    {
+        uint64_t runs = 0, mismatches = 0, generatedCycles = 0;
+        uint32_t programs = 0;
+    };
+
+    struct Vu0Start
+    {
+        VuState state{};
+        std::vector<uint8_t> data;
+    };
+
+    struct Vu0Snapshot
+    {
+        VuState state{};
+        std::vector<uint8_t> data;
+        uint64_t generatedCycles = 0;
+    };
+
+    // mode: 0 interpreter queued (reference), 1 generated queued,
+    // 2 interpreter direct commit, 3 generated direct commit.
+    inline Vu0Snapshot runVu0Once(const VU0Interpreter::RecompProgram *generated, uint8_t *code,
+                                  const Vu0Start &start, uint32_t startPc, int mode, uint32_t budget,
+                                  uint32_t check, GS &gs)
+    {
+        VU0Interpreter vu;
+        if (mode == 1 || mode == 3)
+            vu.setRecompProgramForTest(generated);
+        vu.setDirectCommitForTest(mode >= 2 ? 1 : 0);
+        std::memcpy(vu.state().vf, start.state.vf, sizeof(start.state.vf));
+        std::memcpy(vu.state().vi, start.state.vi, sizeof(start.state.vi));
+        std::memcpy(vu.state().acc, start.state.acc, sizeof(start.state.acc));
+        vu.state().mac = start.state.mac;
+        vu.state().status = start.state.status;
+        vu.state().clip = start.state.clip;
+        vu.state().q = start.state.q;
+        vu.state().i = start.state.i;
+        Vu0Snapshot snap;
+        snap.data = start.data;
+        vu.execute(code, PS2_VU0_CODE_SIZE, snap.data.data(), PS2_VU0_DATA_SIZE, gs, nullptr, startPc, 0u, 0u, budget);
+        if (check == 1u)
+            vu.resume(code, PS2_VU0_CODE_SIZE, snap.data.data(), PS2_VU0_DATA_SIZE, gs, nullptr, 0u, 0u, 4096u);
+        else if (check == 2u)
+            vu.execute(code, PS2_VU0_CODE_SIZE, snap.data.data(), PS2_VU0_DATA_SIZE, gs, nullptr, startPc, 0u, 0u, 4096u);
+        snap.generatedCycles = vu.recompCyclesForTest();
+        std::memcpy(&snap.state, &vu.state(), sizeof(VuState));
+        return snap;
+    }
+
+    inline void diffVu0Program(const char *label, const VU0Interpreter::RecompProgram *generated, uint8_t *code,
+                               const Vu0Start &start, uint32_t startPc, uint32_t maxBudget,
+                               const std::vector<int> &modes, GS &gs, Vu0DiffStats &stats)
+    {
+        ++stats.programs;
+        const auto same = [](const Vu0Snapshot &a, const Vu0Snapshot &b)
+        {
+            return std::memcmp(&a.state, &b.state, sizeof(VuState)) == 0 && a.data == b.data;
+        };
+        for (uint32_t budget = 1; budget <= maxBudget; ++budget)
+        {
+            for (uint32_t check = 0; check < 3u; ++check)
+            {
+                const Vu0Snapshot ref = runVu0Once(generated, code, start, startPc, 0, budget, check, gs);
+                for (const int mode : modes)
+                {
+                    ++stats.runs;
+                    const Vu0Snapshot got = runVu0Once(generated, code, start, startPc, mode, budget, check, gs);
+                    stats.generatedCycles += got.generatedCycles;
+                    if (same(ref, got))
+                        continue;
+                    if (++stats.mismatches > 3u)
+                        continue;
+                    std::fprintf(stderr, "VR3 VU0 mismatch (%s): program pc 0x%x mode %d budget %u check %u\n",
+                                 label, startPc, mode, budget, check);
+                    for (uint32_t reg = 0; reg < 32u; ++reg)
+                        if (std::memcmp(ref.state.vf[reg], got.state.vf[reg], 16) != 0)
+                            std::fprintf(stderr, "  vf%u ref %g %g %g %g got %g %g %g %g\n", reg,
+                                         ref.state.vf[reg][0], ref.state.vf[reg][1], ref.state.vf[reg][2], ref.state.vf[reg][3],
+                                         got.state.vf[reg][0], got.state.vf[reg][1], got.state.vf[reg][2], got.state.vf[reg][3]);
+                    for (uint32_t reg = 0; reg < 16u; ++reg)
+                        if (ref.state.vi[reg] != got.state.vi[reg])
+                            std::fprintf(stderr, "  vi%u ref %d got %d\n", reg, ref.state.vi[reg], got.state.vi[reg]);
+                    std::fprintf(stderr, "  mac %x/%x status %x/%x clip %x/%x q %g/%g cycles %llu/%llu pc %x/%x acc %d data %d\n",
+                                 ref.state.mac, got.state.mac, ref.state.status, got.state.status, ref.state.clip, got.state.clip,
+                                 ref.state.q, got.state.q, static_cast<unsigned long long>(ref.state.cycles),
+                                 static_cast<unsigned long long>(got.state.cycles), ref.state.pc, got.state.pc,
+                                 std::memcmp(ref.state.acc, got.state.acc, 16) != 0, ref.data != got.data);
+                }
+            }
+        }
+    }
+
+    // VR3 (c): VU0 direct commit in the interpreter and in generated pairs.
+    inline std::vector<int> vu0DiffModes() { return {1, 2, 3}; }
+#endif
 
     struct Vu1Fixture
     {
@@ -211,12 +326,139 @@ namespace
     {
         std::memcpy(values, data + qwordIndex * 16u, sizeof(float) * 4u);
     }
+
+    // SS5: real-library microVU tests. Gated on PS2X_MICROVU_LIB (the MV2
+    // dylib; the test binary must carry the JIT entitlement, as SS4's runner
+    // did): without it the tests skip. run() is thread-agnostic, so the tests
+    // configure directly instead of starting the MTVU worker.
+    struct Ss5MicrovuSession
+    {
+        std::string prevEngine;
+        bool hadEngine = false;
+        bool configured = false;
+        uint64_t prevFpControl = 0;
+
+        bool begin()
+        {
+            const char *lib = std::getenv("PS2X_MICROVU_LIB");
+            if (!lib || !*lib)
+            {
+                std::cout << "[skip: PS2X_MICROVU_LIB unset] ";
+                return false;
+            }
+            if (const char *e = std::getenv("PS2X_VU1_ENGINE"))
+            {
+                prevEngine = e;
+                hadEngine = true;
+            }
+            // The library installs ChopZero/FTZ FP control at init and every
+            // run and never restores it (production resets per MTVU job); the
+            // session restores the host mode so later tests' strtod/printf
+            // rounding is unaffected.
+            prevFpControl = ps2_fpmode::readControl();
+            setenv("PS2X_VU1_ENGINE", "microvu", 1);
+            std::string error;
+            if (!ps2_microvu::configure(true, error) || !ps2_microvu::selected())
+            {
+                std::cout << "[skip: microvu unavailable: " << error << "] ";
+                end();
+                return false;
+            }
+            configured = true;
+            return true;
+        }
+
+        void end()
+        {
+            if (configured)
+            {
+                ps2_microvu::shutdown();
+                configured = false;
+            }
+            ps2_fpmode::writeControl(prevFpControl);
+            if (hadEngine)
+                setenv("PS2X_VU1_ENGINE", prevEngine.c_str(), 1);
+            else
+                unsetenv("PS2X_VU1_ENGINE");
+        }
+    };
+
+    // A 500-iteration integer loop (~1500 VU cycles): counts vi01 up to the
+    // vi02 limit, stores a seeded VF to data memory every iteration, ends at
+    // E-bit, no XGKICK. All-positive immediates (0x08 is IADDIU, whose
+    // immediate is zero-extended). budget=64 breaks and completes; budget=1
+    // exceeds the 64-resume continue cap and parks; budget=1M never breaks.
+    void uploadSs5Loop(Vu1Fixture &fx)
+    {
+        writeTrackedVuInstructionPair(fx, 0u, makeVuIaddiu(2u, 0u, 500), kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 8u, makeVuIaddiu(1u, 1u, 1), kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 16u, makeVuSq(0xFu, 3u, 1u, 0), kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 24u, makeVuIbne(1u, 2u, -3), kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 32u, 0u, kVuUpperNop);
+        writeTrackedVuInstructionPair(fx, 40u, 0u, kVuUpperNop | 0x40000000u);
+    }
+
+    bool runSs5Loop(Vu1Fixture &fx, uint32_t budget, VuState &outState, std::vector<uint8_t> &outData)
+    {
+        outState = VuState{};
+        // A nonzero VF seed (carried in by the seed-once path) so the loop's
+        // stores write detectably nonzero data.
+        outState.vf[3][0] = 1.0f;
+        outState.vf[3][1] = 2.0f;
+        outState.vf[3][2] = 3.0f;
+        outState.vf[3][3] = 4.0f;
+        outData.assign(PS2_VU1_DATA_SIZE, 0u);
+        return ps2_microvu::run(fx.mem, outData.data(), outState, 0u, false, 0u, 0u, 0u, budget);
+    }
+
+    // VU state identity across budgets, excluding the cycle counter: each
+    // budget-exhausted call charges exactly `budget` cycles and drops the
+    // final atomic block's overrun, so continued runs count fewer cycles than
+    // one unbounded run for identical registers and memories.
+    bool sameSs5State(const VuState &a, const VuState &b)
+    {
+        VuState x = a, y = b;
+        x.cycles = 0;
+        y.cycles = 0;
+        return std::memcmp(&x, &y, sizeof(VuState)) == 0;
+    }
+
+    bool anyNonzeroByte(const std::vector<uint8_t> &v)
+    {
+        for (uint8_t b : v)
+            if (b != 0u)
+                return true;
+        return false;
+    }
 }
 
 void register_ps2_vu1_tests()
 {
     MiniTest::Case("PS2VU1", [](TestCase &tc)
     {
+#if PS2X_ENABLE_DET_HASH_TAP
+        tc.Run("deterministic count includes VU1 starts, excludes resume and VU0, resets with instance", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU fixture initialized");
+            VU1Interpreter vu1;
+            VU0Interpreter vu0;
+            t.Equals(vu1.programStartCount(), uint64_t{0}, "initial count");
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                        fx.gs, &fx.mem, 0, 0, 0, 1);
+            vu1.resume(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                       fx.gs, &fx.mem, 0, 0, 1);
+            vu0.execute(fx.code, PS2_VU0_CODE_SIZE, fx.data, PS2_VU0_DATA_SIZE,
+                        fx.gs, &fx.mem, 0, 0, 0, 1);
+            t.Equals(vu1.programStartCount(), uint64_t{1}, "resume did not start a program");
+            t.Equals(vu0.programStartCount(), uint64_t{0}, "VU0 excluded");
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
+                        fx.gs, &fx.mem, 0, 0, 0, 1);
+            t.Equals(vu1.programStartCount(), uint64_t{2}, "second VU1 start");
+            vu1.reset();
+            t.Equals(vu1.programStartCount(), uint64_t{0}, "reset clears instance count");
+        });
+#endif
         tc.Run("upper ADD applies the destination mask", [](TestCase &t)
         {
             Vu1Fixture fx;
@@ -307,6 +549,41 @@ void register_ps2_vu1_tests()
                      "ITOF0 should convert positive fixed-point source bits");
             t.Equals(vu1.state().vf[2][3], -32768.0f,
                      "ITOF0 should convert negative fixed-point source bits");
+        });
+
+        tc.Run("RP1: MAX/MINI compare raw bits and keep integer data (no denormal flush)", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            // SSX 3's carve trail copies RGBA ints with MAX.xyzw vfN, vfM, vfM.
+            writeVuInstructionPair(fx.code, 0u, 0u, makeVuUpper(0x2Bu, 0xFu, 1u, 1u, 3u)); // MAX vf3, vf1, vf1
+            writeVuInstructionPair(fx.code, 8u, 0u, makeVuUpper(0x2Bu, 0xFu, 2u, 1u, 4u)); // MAX vf4, vf1, vf2
+            writeVuInstructionPair(fx.code, 16u, 0u, makeVuUpper(0x2Fu, 0xFu, 2u, 1u, 5u)); // MINI vf5, vf1, vf2
+            writeVuInstructionPair(fx.code, 24u, 0u, makeVuUpper(0x10u, 0xFu, 1u, 2u, 6u)); // MAXx vf6, vf2, vf1x
+
+            VU1Interpreter vu1;
+            const uint32_t a[4] = {0x6Eu, 0x7Fu, 0x80000001u, 0x3F800000u};
+            const uint32_t b[4] = {0x70u, 0x0u, 0x80000002u, 0xBF800000u};
+            std::memcpy(vu1.state().vf[1], a, sizeof(a));
+            std::memcpy(vu1.state().vf[2], b, sizeof(b));
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                        0u, 0u, 0u, 16u);
+
+            auto bits = [&](int reg) {
+                std::vector<uint32_t> out(4);
+                std::memcpy(out.data(), vu1.state().vf[reg], 16);
+                return out;
+            };
+            t.IsTrue(bits(3) == std::vector<uint32_t>{0x6Eu, 0x7Fu, 0x80000001u, 0x3F800000u},
+                     "MAX of a register with itself is a bit-exact move, integer colours included");
+            t.IsTrue(bits(4) == std::vector<uint32_t>{0x70u, 0x7Fu, 0x80000001u, 0x3F800000u},
+                     "MAX orders denormal bit patterns as sign-magnitude values");
+            t.IsTrue(bits(5) == std::vector<uint32_t>{0x6Eu, 0x0u, 0x80000002u, 0xBF800000u},
+                     "MINI orders denormal bit patterns as sign-magnitude values");
+            t.IsTrue(bits(6) == std::vector<uint32_t>{0x70u, 0x6Eu, 0x6Eu, 0x6Eu},
+                     "MAXbc broadcasts the raw ft component");
         });
 
         tc.Run("MTIR decodes fsf as a component selector", [](TestCase &t)
@@ -809,9 +1086,11 @@ void register_ps2_vu1_tests()
             };
             constexpr EfuCase cases[] = {
                 {0x70u, 11u}, {0x71u, 18u}, {0x72u, 18u}, {0x73u, 24u},
-                {0x74u, 54u}, {0x75u, 54u}, {0x76u, 12u}, {0x77u, 18u},
-                {0x78u, 12u}, {0x79u, 29u}, {0x7Au, 12u}, {0x7Cu, 54u},
-                {0x7Du, 44u}};
+                {0x74u, 54u}, {0x75u, 54u}, {0x76u, 12u},
+                // E53: PCSX2 LowerOP_T3: 0x78 ESQRT, 0x79 ERSQRT, 0x7A ERCPR,
+                // 0x7C ESIN, 0x7D EATAN, 0x7E EEXP (0x77 is undefined).
+                {0x78u, 12u}, {0x79u, 18u}, {0x7Au, 12u}, {0x7Cu, 29u},
+                {0x7Du, 54u}, {0x7Eu, 44u}};
 
             for (const EfuCase &efu : cases)
             {
@@ -839,6 +1118,44 @@ void register_ps2_vu1_tests()
                          "WAITP should count every EFU stall as an elapsed VU cycle");
                 t.IsTrue(std::isfinite(vu1.state().p),
                          "architected EFU opcode should commit a finite P result");
+            }
+        });
+
+        tc.Run("EFU decode follows PCSX2 LowerOP_T3: 0x8000afbd is ERSQRT (E53)", [](TestCase &t)
+        {
+            // 0x8000afbd = ERSQRT P, vf21x (funct2 0x79), from SSX 3's hot vertex
+            // loop. With vf21.x = 4, P = 1/sqrt(4) = 0.5 (ESIN would give ~-0.76).
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            writeVuInstructionPair(fx.code, 0u, 0x8000afbdu, kVuUpperNop);
+            writeVuInstructionPair(fx.code, 8u, makeVuLowerSpecial(0x7Bu, 0u), kVuUpperNop); // WAITP
+            VU1Interpreter vu1;
+            vu1.state().vf[21][0] = 4.0f;
+            vu1.execute(fx.code, PS2_VU1_CODE_SIZE,
+                        fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                        0u, 0u, 0u, 19u);
+            t.Equals(vu1.state().p, 0.5f, "0x8000afbd with vf21.x = 4: P = 0.5, got " + std::to_string(vu1.state().p));
+
+            struct Named
+            {
+                uint8_t op;
+                float in;
+                float want;
+                uint32_t latency;
+            };
+            // ESQRT 4 = 2, ERCPR 4 = 0.25, EEXP 0 = 1 (1/(1+0)^4).
+            constexpr Named named[] = {{0x78u, 4.0f, 2.0f, 12u}, {0x7Au, 4.0f, 0.25f, 12u}, {0x7Eu, 0.0f, 1.0f, 44u}};
+            for (const Named &n : named)
+            {
+                std::memset(fx.code, 0, PS2_VU1_CODE_SIZE);
+                writeVuInstructionPair(fx.code, 0u, makeVuLowerSpecial(n.op, 1u, 0u, 0u, 0u), kVuUpperNop);
+                writeVuInstructionPair(fx.code, 8u, makeVuLowerSpecial(0x7Bu, 0u), kVuUpperNop);
+                VU1Interpreter v;
+                v.state().vf[1][0] = n.in;
+                v.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE, fx.gs, &fx.mem,
+                          0u, 0u, 0u, n.latency + 1u);
+                t.IsTrue(std::fabs(v.state().p - n.want) < 1e-5f,
+                         "EFU op " + std::to_string(n.op) + ": want " + std::to_string(n.want) + ", got " + std::to_string(v.state().p));
             }
         });
 
@@ -1711,6 +2028,951 @@ void register_ps2_vu1_tests()
                      "reserved opcode should retain the diagnostic PC");
             t.Equals(vu1.state().vi[1], 0,
                      "instruction following a reserved opcode must not execute");
+        });
+
+        tc.Run("emitted VU0 pairs hand off with a guaranteed tail call (F4-2b)", [](TestCase &t)
+        {
+            // Regression test for the Odin S1 stack overflow: every generated
+            // handoff must be a guaranteed tail call. VX2: the emitter writes
+            // VU0 images only (pair functions, one exact table, no blocks).
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+
+            writeVuInstructionPair(fx.code, 0u, makeVuIaddiu(1u, 0u, 7), kVuUpperNop);
+            writeVuInstructionPair(fx.code, 8u, makeVuIaddiu(2u, 0u, 3), kVuUpperNop);
+            const std::filesystem::path tmp =
+                std::filesystem::temp_directory_path() / "ps2_f4_2b_emit_test.cpp";
+            t.IsTrue(VU0Interpreter::emitRecompSource(fx.code, 16u, 0x12345678ull, tmp.string()),
+                     "emitter should succeed");
+            std::ifstream in(tmp, std::ios::binary);
+            std::ostringstream text;
+            text << in.rdbuf();
+            in.close();
+            std::filesystem::remove(tmp);
+
+            const std::string &s = text.str();
+            const auto count = [&s](const char *needle)
+            {
+                size_t n = 0, at = 0;
+                while ((at = s.find(needle, at)) != std::string::npos)
+                {
+                    ++n;
+                    at += 1;
+                }
+                return n;
+            };
+            t.Equals(count("PS2X_VU_MUSTTAIL return next(vu, c);"), static_cast<size_t>(2u),
+                     "both pair handoffs are guaranteed tail calls through next()");
+            t.Equals(count("PS2X_VU_MUSTTAIL return fn(vu, c);"), static_cast<size_t>(1u),
+                     "next() dispatches with a guaranteed tail call");
+            t.IsTrue(s.find("#include \"ps2_vu0_recomp_gen.h\"") != std::string::npos &&
+                     s.find("VU0RecompImage<0x0000000012345678ull>::kPairs[2] = {") != std::string::npos &&
+                     s.find("program.pairs = ") != std::string::npos,
+                     "a VU0 image with one exact pair table is emitted and registered");
+            t.IsTrue(s.find("VU1") == std::string::npos && s.find("kPairsNative") == std::string::npos &&
+                     s.find("static bool b") == std::string::npos && s.find("static bool B") == std::string::npos,
+                     "no VU1 names, native table or block functions");
+        });
+
+        // VB1: the direct-commit path (writes applied at issue) against the
+        // queued path it replaces, on random programs built from FMAC/ACC/
+        // CLIP uppers and LQ/SQ/LQI/SQI/ILW/IADDIU/flag/FSSET/FCSET/DIV/
+        // WAITQ/branch lowers. Every run is cut at every budget from 1 to the
+        // program length; after each cut both paths must hold the same VU
+        // state and data memory, both after resume() to the end and after a
+        // fresh execute() (whose scheduler reset drops queued writes).
+        tc.Run("VB1 direct commit matches queued commit at every budget cut", [](TestCase &t)
+        {
+            uint64_t seed = 0x9E3779B97F4A7C15ull;
+            const auto rnd = [&seed](uint32_t n) -> uint32_t
+            {
+                seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+                return static_cast<uint32_t>((seed >> 33) % n);
+            };
+            const auto randomUpper = [&]() -> uint32_t
+            {
+                const uint8_t dest = static_cast<uint8_t>(1u + rnd(15u));
+                const uint8_t ft = static_cast<uint8_t>(1u + rnd(8u));
+                const uint8_t fs = static_cast<uint8_t>(1u + rnd(8u));
+                const uint8_t fd = static_cast<uint8_t>(1u + rnd(8u));
+                switch (rnd(6u))
+                {
+                case 0: return kVuUpperNop;
+                // OPMSUB/OPMULA (0x2E) only as .xyz, as real code writes them:
+                // their usage declares fs lanes = dest, and they read fs.xyz.
+                case 1:
+                {
+                    const uint8_t op = static_cast<uint8_t>(rnd(0x30u));
+                    return makeVuUpper(op, op == 0x2Eu ? uint8_t{0xE} : dest, ft, fs, fd);
+                }
+                case 2:
+                {
+                    const uint8_t op = static_cast<uint8_t>(0x28u + rnd(8u));
+                    return makeVuUpper(op, op == 0x2Eu ? uint8_t{0xE} : dest, ft, fs, fd);
+                }
+                case 3:
+                {
+                    static const uint8_t kAcc[] = {0x00, 0x03, 0x08, 0x0B, 0x18, 0x1A, 0x1C, 0x1E, 0x20, 0x21, 0x28, 0x29, 0x2A, 0x2D, 0x2E};
+                    const uint8_t op = kAcc[rnd(sizeof(kAcc))];
+                    return makeVuUpperSpecial(op, op == 0x2Eu ? uint8_t{0xE} : dest, ft, fs);
+                }
+                case 4: return makeVuUpperSpecial(0x1Fu, 0xEu, ft, fs); // CLIP
+                default: return makeVuUpperSpecial(static_cast<uint8_t>(0x10u + rnd(8u)), dest, ft, fs);
+                }
+            };
+            const auto randomLower = [&](uint32_t pair, uint32_t length) -> uint32_t
+            {
+                const uint8_t dest = static_cast<uint8_t>(1u + rnd(15u));
+                const uint8_t vf = static_cast<uint8_t>(1u + rnd(8u));
+                const uint8_t vi = static_cast<uint8_t>(1u + rnd(4u));
+                switch (rnd(16u))
+                {
+                case 0: return makeVuLq(dest, vf, 0u, static_cast<int16_t>(rnd(64u)));
+                case 1: return makeVuSq(dest, vf, 0u, static_cast<int16_t>(rnd(64u)));
+                case 2: return makeVuLowerSpecial(0x34u, vi, vf, 0u, dest); // LQI
+                case 3: return makeVuLowerSpecial(0x35u, vf, vi, 0u, dest); // SQI
+                case 4: return makeVuIlw(0x8u, vi, 0u, static_cast<int16_t>(rnd(64u)));
+                case 5: return makeVuIaddiu(vi, static_cast<uint8_t>(rnd(5u)), static_cast<int16_t>(rnd(8u)));
+                case 6: return makeVuFlagRegister(static_cast<uint8_t>(0x18u + 2u * rnd(2u)), vi, static_cast<uint8_t>(rnd(5u))); // FMEQ/FMAND
+                case 7: return makeVuFlagImmediate(static_cast<uint8_t>(0x14u + 2u * rnd(2u)), vi, static_cast<uint16_t>(rnd(0x1000u))); // FSEQ/FSAND
+                case 8: return makeVuFlagImmediate(0x15u, 0u, static_cast<uint16_t>(rnd(0x1000u))); // FSSET
+                case 9: return (0x12u << 25) | rnd(0x1000000u); // FCAND vi1
+                case 10: return (0x11u << 25) | rnd(0x1000000u); // FCSET
+                case 11: return makeVuDiv(static_cast<uint8_t>(1u + rnd(8u)), static_cast<uint8_t>(1u + rnd(8u)), static_cast<uint8_t>(rnd(4u)), static_cast<uint8_t>(rnd(4u)));
+                case 12: return makeVuLowerSpecial(0x3Bu, 0u); // WAITQ
+                case 13:
+                {
+                    if (pair + 3u >= length)
+                        return 0x8000033Cu;
+                    const int16_t forward = static_cast<int16_t>(1 + rnd(3u));
+                    return rnd(2u) != 0u ? makeVuIbne(vi, static_cast<uint8_t>(rnd(5u)), forward)
+                                         : makeVuBranch(forward);
+                }
+                case 14: return makeVuFlagImmediate(0x1Cu, vi, 0u); // FCGET
+                default: return 0x8000033Cu;
+                }
+            };
+
+            struct Snapshot
+            {
+                VuState state;
+                std::vector<uint8_t> data;
+            };
+            const auto sameSnapshot = [](const Snapshot &a, const Snapshot &b)
+            {
+                return std::memcmp(&a.state, &b.state, sizeof(VuState)) == 0 && a.data == b.data;
+            };
+
+            std::vector<uint8_t> code(PS2_VU1_CODE_SIZE, 0u);
+            std::vector<uint8_t> initialData(PS2_VU1_DATA_SIZE, 0u);
+            GS gs;
+            uint32_t mismatches = 0u, runs = 0u;
+            for (uint32_t program = 0; program < 200u && mismatches == 0u; ++program)
+            {
+                std::fill(code.begin(), code.end(), uint8_t{0});
+                const uint32_t length = 12u + rnd(28u);
+                for (uint32_t pair = 0; pair < length; ++pair)
+                {
+                    const uint32_t upper = randomUpper();
+                    writeVuInstructionPair(code.data(), pair * 8u, randomLower(pair, length), upper);
+                }
+                writeVuInstructionPair(code.data(), length * 8u, 0x8000033Cu, kVuUpperNop | 0x40000000u);
+                writeVuInstructionPair(code.data(), length * 8u + 8u, 0x8000033Cu, kVuUpperNop);
+                for (uint32_t i = 0; i < 64u * 16u; i += 4u)
+                {
+                    const float value = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 64.0f;
+                    std::memcpy(initialData.data() + i, &value, sizeof(value));
+                }
+                VuState start{};
+                for (uint32_t reg = 1; reg < 32u; ++reg)
+                    for (uint32_t lane = 0; lane < 4u; ++lane)
+                        start.vf[reg][lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                for (uint32_t reg = 1; reg < 16u; ++reg)
+                    start.vi[reg] = static_cast<int32_t>(rnd(16u));
+
+                const auto runMode = [&](int mode, uint32_t budget, bool fresh) -> Snapshot
+                {
+                    VU1Interpreter vu;
+                    vu.setDirectCommitForTest(mode);
+                    std::memcpy(vu.state().vf, start.vf, sizeof(start.vf));
+                    std::memcpy(vu.state().vi, start.vi, sizeof(start.vi));
+                    Snapshot snap;
+                    snap.data = initialData;
+                    vu.execute(code.data(), PS2_VU1_CODE_SIZE, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
+                               nullptr, 0u, 0u, 0u, budget);
+                    if (fresh)
+                        vu.execute(code.data(), PS2_VU1_CODE_SIZE, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
+                                   nullptr, 0u, 0u, 0u, 4096u);
+                    else
+                        vu.resume(code.data(), PS2_VU1_CODE_SIZE, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
+                                  nullptr, 0u, 0u, 4096u);
+                    std::memcpy(&snap.state, &vu.state(), sizeof(VuState));
+                    return snap;
+                };
+                const auto cutMode = [&](int mode, uint32_t budget) -> Snapshot
+                {
+                    VU1Interpreter vu;
+                    vu.setDirectCommitForTest(mode);
+                    std::memcpy(vu.state().vf, start.vf, sizeof(start.vf));
+                    std::memcpy(vu.state().vi, start.vi, sizeof(start.vi));
+                    Snapshot snap;
+                    snap.data = initialData;
+                    vu.execute(code.data(), PS2_VU1_CODE_SIZE, snap.data.data(), PS2_VU1_DATA_SIZE, gs,
+                               nullptr, 0u, 0u, 0u, budget);
+                    std::memcpy(&snap.state, &vu.state(), sizeof(VuState));
+                    return snap;
+                };
+
+                const uint32_t maxBudget = 4u * length + 64u;
+                for (uint32_t budget = 1; budget <= maxBudget && mismatches == 0u; ++budget)
+                {
+                    ++runs;
+                    const Snapshot pairs[3][2] = {
+                        {cutMode(0, budget), cutMode(1, budget)},
+                        {runMode(0, budget, false), runMode(1, budget, false)},
+                        {runMode(0, budget, true), runMode(1, budget, true)}};
+                    for (uint32_t kind = 0; kind < 3u; ++kind)
+                    {
+                        const Snapshot &q = pairs[kind][0];
+                        const Snapshot &d = pairs[kind][1];
+                        if (sameSnapshot(q, d))
+                            continue;
+                        ++mismatches;
+                        std::fprintf(stderr, "VB1 differential mismatch: program %u length %u budget %u check %s\n",
+                                     program, length, budget, kind == 0 ? "cut" : kind == 1 ? "resume" : "fresh-execute");
+                        for (uint32_t reg = 0; reg < 32u; ++reg)
+                            if (std::memcmp(q.state.vf[reg], d.state.vf[reg], 16) != 0)
+                                std::fprintf(stderr, "  vf%u queued %g %g %g %g direct %g %g %g %g\n", reg,
+                                             q.state.vf[reg][0], q.state.vf[reg][1], q.state.vf[reg][2], q.state.vf[reg][3],
+                                             d.state.vf[reg][0], d.state.vf[reg][1], d.state.vf[reg][2], d.state.vf[reg][3]);
+                        for (uint32_t reg = 0; reg < 16u; ++reg)
+                            if (q.state.vi[reg] != d.state.vi[reg])
+                                std::fprintf(stderr, "  vi%u queued %d direct %d\n", reg, q.state.vi[reg], d.state.vi[reg]);
+                        std::fprintf(stderr, "  mac %x/%x status %x/%x clip %x/%x q %g/%g p %g/%g cycles %llu/%llu pc %x/%x acc %d data %d\n",
+                                     q.state.mac, d.state.mac, q.state.status, d.state.status, q.state.clip, d.state.clip,
+                                     q.state.q, d.state.q, q.state.p, d.state.p,
+                                     static_cast<unsigned long long>(q.state.cycles), static_cast<unsigned long long>(d.state.cycles),
+                                     q.state.pc, d.state.pc, std::memcmp(q.state.acc, d.state.acc, 16) != 0, q.data != d.data);
+                        for (uint32_t pair = 0; pair < 20u; ++pair)
+                        {
+                            uint32_t lo = 0, up = 0;
+                            std::memcpy(&lo, code.data() + pair * 8u, 4);
+                            std::memcpy(&up, code.data() + pair * 8u + 4u, 4);
+                            std::fprintf(stderr, "  pair %u lower %08x upper %08x\n", pair, lo, up);
+                        }
+                        break;
+                    }
+                }
+            }
+            t.Equals(mismatches, 0u, "direct and queued commits agree at every cut");
+            t.IsTrue(runs > 1000u, "differential covered many cuts");
+        });
+
+#if PS2X_VU1_FMAC_SIMD_AVAILABLE
+        tc.Run("VF1 PCSX2 default microVU float and flag rules", [](TestCase &t)
+        {
+            // Q1's pinned PCSX2 microVU: default clamp level 1; ordinary
+            // FMAC results report native S/Z, with no computed U/O. The host
+            // VU FP control is the same chop + FZ/DAZ used by run().
+            ps2_fpmode::ScopedPs2Mode fp;
+            const auto bitsOf = [](float v)
+            {
+                uint32_t bits;
+                std::memcpy(&bits, &v, sizeof(bits));
+                return bits;
+            };
+            // VX1: the same checks on both engines (VU0: scalar FMAC core).
+            const auto check = [&](auto unitTag)
+            {
+                using Vu = typename decltype(unitTag)::type;
+                Vu vu;
+                vu.setFloatModeForTest(true);
+                const bool simd = Vu::kUnit == VuUnit::VU1;
+                auto &s = vu.state();
+
+                s.vf[1][0] = 1.0f;
+                s.vf[2][0] = -1.0f;
+                vu.execUpperForTest(makeVuUpper(0x28u, 0x8u, 2u, 1u, 3u), simd, true);
+                t.Equals(bitsOf(s.vf[3][0]), 0u, "ADD cancellation yields positive zero");
+                t.Equals(s.mac, 0x8u, "native zero sets MAC X.Z");
+                t.Equals(s.status, 0x41u, "native zero sets current and sticky Z");
+
+                s.vf[1][0] = std::numeric_limits<float>::max();
+                s.vf[2][0] = std::numeric_limits<float>::max();
+                vu.execUpperForTest(makeVuUpper(0x28u, 0x8u, 2u, 1u, 3u), simd, true);
+                t.Equals(bitsOf(s.vf[3][0]), 0x7F7FFFFFu,
+                         "Normal-mode ADD leaves its native Chop/Zero finite maximum");
+                t.Equals(s.mac, 0u, "default microVU leaves MAC overflow clear");
+                t.Equals(s.status & 0xFu, 0u, "default microVU leaves current overflow clear");
+
+                s.vf[1][0] = std::numeric_limits<float>::infinity();
+                s.vf[2][0] = 0.0f;
+                vu.execUpperForTest(makeVuUpper(0x2Au, 0x8u, 2u, 1u, 3u), simd, true);
+                t.Equals(bitsOf(s.vf[3][0]), 0u, "MUL's level 1 Fs clamp avoids infinity times zero");
+                t.Equals(s.mac, 0x8u, "MUL reports native zero only");
+
+                s.acc[0] = 1.0f;
+                s.vf[1][0] = std::numeric_limits<float>::min();
+                s.vf[2][0] = 0.5f;
+                s.status = 0u;
+                vu.execUpperForTest(makeVuUpper(0x29u, 0x8u, 2u, 1u, 3u), simd, true);
+                t.Equals(bitsOf(s.vf[3][0]), bitsOf(1.0f), "MADD keeps native single result");
+                t.Equals(s.status, 0u, "microVU default has no product underflow sticky");
+            };
+            check(std::type_identity<VU0Interpreter>{});
+            check(std::type_identity<VU1Interpreter>{});
+        });
+
+        // VR4 D1: the vector FMAC core against the scalar reference, bit for
+        // bit, on every upper op (FMAC ops take the vector path; the rest must
+        // fall through unchanged), every dest mask, operands drawn from the
+        // classes the normalization and classification treat specially (±0,
+        // denormals, Inf/NaN bit patterns, FLT_MIN/FLT_MAX neighbourhoods,
+        // exponents whose products or sums straddle the U/O thresholds,
+        // cancellations), and flag commits direct, queued, behind queued
+        // entries and behind a queued FSSET. PS2X_VR4_FMAC_CASES overrides
+        // the case count.
+        tc.Run("VR4 vector FMAC core matches the scalar reference bit for bit", [](TestCase &t)
+        {
+            uint64_t cases = 2000000u;
+            if (const char *env = std::getenv("PS2X_VR4_FMAC_CASES"))
+                cases = std::strtoull(env, nullptr, 10);
+            std::vector<uint32_t> ops;      // upper words with dest/regs zero
+            std::vector<uint32_t> fmacOps;  // FMAC ops only (setup writes)
+            const auto isFmacOp = [](uint32_t code, bool special)
+            {
+                if (code <= 0x0Fu || (code >= 0x18u && code <= 0x1Cu) || code == 0x1Eu ||
+                    (code >= 0x20u && code <= 0x2Au) || code == 0x2Cu || code == 0x2Du || code == 0x2Eu)
+                    return true;
+                (void)special;
+                return false;
+            };
+            for (uint32_t op = 0; op <= 0x2Fu; ++op)
+            {
+                ops.push_back(op);
+                if (isFmacOp(op, false))
+                    fmacOps.push_back(op);
+            }
+            for (uint32_t code = 0; code <= 0x30u; ++code)
+            {
+                if (code == 0x2Bu)
+                    continue; // reserved (reportReservedInstruction)
+                const uint32_t word = 0x3Cu | (code & 3u) | ((code >> 2) << 6);
+                ops.push_back(word);
+                if (isFmacOp(code, true))
+                    fmacOps.push_back(word);
+            }
+            uint64_t rng = 0x9E3779B97F4A7C15ull;
+            const auto next = [&rng]()
+            {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                return rng;
+            };
+            const auto operand = [&next]() -> uint32_t
+            {
+                const uint64_t r = next();
+                const uint32_t sign = (r & 1u) != 0u ? 0x80000000u : 0u;
+                uint32_t mantissa = static_cast<uint32_t>(r >> 8) & 0x7FFFFFu;
+                switch ((r >> 1) & 3u)
+                {
+                case 0: mantissa = 0u; break;
+                case 1: mantissa = 0x7FFFFFu; break;
+                default: break;
+                }
+                uint32_t exponent = 0u;
+                switch ((r >> 3) % 14u)
+                {
+                case 0: return sign;                                     // ±0
+                case 1: return sign | ((static_cast<uint32_t>(r >> 32) & 0x7FFFFFu) | 1u); // denormal
+                case 2: return sign | 0x7F800000u;                       // Inf
+                case 3: return sign | 0x7F800000u | ((static_cast<uint32_t>(r >> 32) & 0x7FFFFFu) | 1u); // NaN
+                case 4: exponent = 0xFEu - static_cast<uint32_t>((r >> 40) & 1u); break;  // FLT_MAX side
+                case 5: exponent = 1u + static_cast<uint32_t>((r >> 40) & 1u); break;     // FLT_MIN side
+                case 6: case 7: exponent = 0x3Eu + static_cast<uint32_t>((r >> 40) % 5u); break;  // products near U
+                case 8: case 9: exponent = 0xBDu + static_cast<uint32_t>((r >> 40) % 5u); break;  // products near O
+                case 10: exponent = 0x7Eu + static_cast<uint32_t>((r >> 40) % 3u); break;
+                default: exponent = 1u + static_cast<uint32_t>((r >> 40) % 0xFEu); break;
+                }
+                return sign | (exponent << 23) | mantissa;
+            };
+            const auto asFloat = [](uint32_t bits)
+            {
+                float value = 0.0f;
+                std::memcpy(&value, &bits, sizeof(value));
+                return value;
+            };
+
+            VU1Interpreter scalar;
+            VU1Interpreter simd;
+            uint64_t mismatches = 0, overflow = 0, underflow = 0, zero = 0, queuedCases = 0, fssetCases = 0;
+            for (uint64_t n = 0; n < cases; ++n)
+            {
+                const uint32_t dest = 1u + static_cast<uint32_t>(next() % 15u);
+                const uint32_t regs = static_cast<uint32_t>(next());
+                const uint32_t ft = regs & 31u, fs = (regs >> 5) & 31u, fd = (regs >> 10) & 31u;
+                const uint32_t opWord = ops[next() % ops.size()];
+                const bool special = (opWord & 0x3Cu) == 0x3Cu;
+                const uint32_t instr = (dest << 21) | (ft << 16) | (fs << 11) | (special ? opWord : (opWord | (fd << 6)));
+                const uint64_t mode = next() % 5u;
+                const uint32_t prior = 1u + static_cast<uint32_t>(next() % 6u);
+                std::vector<uint32_t> setup;
+                if (mode >= 2u)
+                    for (uint32_t k = 0; k < prior; ++k)
+                    {
+                        const uint32_t r = static_cast<uint32_t>(next());
+                        const uint32_t w = fmacOps[r % fmacOps.size()];
+                        const bool sp = (w & 0x3Cu) == 0x3Cu;
+                        setup.push_back(((1u + (r >> 8) % 15u) << 21) | (((r >> 12) & 31u) << 16) |
+                                        (((r >> 17) & 31u) << 11) | (sp ? w : (w | (((r >> 22) & 31u) << 6))));
+                    }
+                const uint16_t fsset = static_cast<uint16_t>(next() & 0xFFFu);
+                VuState start{};
+                for (auto &row : start.vf)
+                    for (float &value : row)
+                        value = asFloat(operand());
+                if (next() % 8u == 0u)
+                {
+                    // cancellations: vt = ±vs, acc = ±vs
+                    const uint32_t flip = (next() & 1u) != 0u ? 0x80000000u : 0u;
+                    for (uint32_t c = 0; c < 4u; ++c)
+                    {
+                        uint32_t bits = 0u;
+                        std::memcpy(&bits, &start.vf[fs][c], sizeof(bits));
+                        start.vf[ft][c] = asFloat(bits ^ flip);
+                        start.acc[c] = asFloat(bits ^ (flip ^ 0x80000000u));
+                    }
+                }
+                else
+                    for (float &value : start.acc)
+                        value = asFloat(operand());
+                start.q = asFloat(operand());
+                start.i = asFloat(operand());
+                start.mac = static_cast<uint32_t>(next()) & 0xFFFFu;
+                start.status = static_cast<uint32_t>(next()) & 0xFFFu;
+                start.clip = static_cast<uint32_t>(next()) & 0xFFFFFFu;
+
+                std::vector<uint64_t> snap[2];
+                for (int form = 0; form < 2; ++form)
+                {
+                    VU1Interpreter &vu = form == 0 ? scalar : simd;
+                    vu.reset();
+                    vu.state() = start;
+                    if (mode == 4u)
+                        vu.queueFssetForTest(fsset);
+                    for (uint32_t w : setup)
+                        vu.execUpperForTest(w, form == 1, false);
+                    vu.execUpperForTest(instr, form == 1, mode != 0u && mode != 3u);
+                    snap[form] = vu.fmacStateForTest();
+                }
+                if (mode >= 2u)
+                    ++queuedCases;
+                if (mode == 4u)
+                    ++fssetCases;
+                const uint32_t status = scalar.state().status;
+                overflow += (status & 8u) != 0u;
+                underflow += (status & 4u) != 0u;
+                zero += (status & 1u) != 0u;
+                if (snap[0] != snap[1])
+                {
+                    if (++mismatches <= 5u)
+                    {
+                        size_t field = 0;
+                        while (field < snap[0].size() && snap[0][field] == snap[1][field])
+                            ++field;
+                        std::fprintf(stderr,
+                                     "VR4 FMAC mismatch: case %llu instr 0x%08x mode %llu setup %zu field %zu scalar 0x%llx simd 0x%llx\n",
+                                     static_cast<unsigned long long>(n), instr, static_cast<unsigned long long>(mode),
+                                     setup.size(), field, static_cast<unsigned long long>(snap[0][field]),
+                                     static_cast<unsigned long long>(snap[1][field]));
+                    }
+                }
+            }
+            std::printf("VR4 FMAC coverage: cases=%llu ops=%zu queued-setup=%llu fsset=%llu status O=%llu U=%llu Z=%llu mismatches=%llu\n",
+                        static_cast<unsigned long long>(cases), ops.size(),
+                        static_cast<unsigned long long>(queuedCases), static_cast<unsigned long long>(fssetCases),
+                        static_cast<unsigned long long>(overflow), static_cast<unsigned long long>(underflow),
+                        static_cast<unsigned long long>(zero), static_cast<unsigned long long>(mismatches));
+            t.Equals(mismatches, uint64_t{0}, "vector FMAC core matches the scalar reference");
+        });
+#endif
+#if PS2X_VU1_FIXTURE_TEST
+        // VR2 (VX2): the VU1 interpreter with direct commit (VB1, the VU1
+        // default) against every write queued (the reference timing model),
+        // on the synthetic VU1 images of vu1_recomp_fixture.h (the generated
+        // VU1 pairs these images once fed are gone). Every program is cut at
+        // every budget; VU state (flags included), data memory and PATH1
+        // packets must match at the cut, after resume() and after a fresh
+        // execute().
+        tc.Run("VR2 fixture images: VU1 direct commit matches the queued interpreter at every budget cut", [](TestCase &t)
+        {
+            struct Snapshot
+            {
+                VuState state;
+                std::vector<uint8_t> data;
+                std::vector<std::vector<uint8_t>> gif; // ordered PATH1 packets (image 2)
+                bool stopped = false;                  // an error stop ended the last run (not compared)
+            };
+            std::vector<uint8_t> code(vu1_fixture::kCodeSize, 0u);
+            std::vector<uint8_t> initialData(PS2_VU1_DATA_SIZE, 0u);
+            GS gs;
+            // Image 2 kicks GIF packets: a PS2Memory + GS to receive them, in order.
+            PS2Memory gifMem;
+            t.IsTrue(gifMem.initialize(), "PS2Memory for PATH1 capture");
+            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+            GS gifGs;
+            gifGs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
+            std::vector<std::vector<uint8_t>> gifPackets;
+            gifMem.setGifPacketCallback([&gifPackets](const uint8_t *packet, uint32_t sizeBytes)
+            {
+                gifPackets.emplace_back(packet, packet + sizeBytes);
+            });
+            uint64_t gifPacketsSeen = 0u;
+            uint32_t gapPrograms = 0u, stopPath = 0u;
+            uint32_t mismatches = 0u, runs = 0u, programsRun = 0u;
+            vu1_fixture::Rng rnd{0x2545F4914F6CDD1Dull};
+            for (uint32_t image = 0; image < vu1_fixture::kImageCount; ++image)
+            {
+                const std::vector<vu1_fixture::Program> programs = vu1_fixture::buildImage(image, code.data());
+                for (const vu1_fixture::Program &program : programs)
+                {
+                    ++programsRun;
+                    for (uint32_t i = 0; i < 64u * 16u; i += 4u)
+                    {
+                        const float value = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 64.0f;
+                        std::memcpy(initialData.data() + i, &value, sizeof(value));
+                    }
+                    for (uint32_t k = 0; k < vu1_fixture::kTagCount; ++k)
+                    {
+                        uint8_t *tag = initialData.data() + (vu1_fixture::kTagQword + 4u * k) * 16u;
+                        const uint64_t word = makeGifTag(static_cast<uint16_t>(1u + (k & 1u)), GIF_FMT_IMAGE, 0u, true);
+                        std::memset(tag, 0, 16u);
+                        std::memcpy(tag, &word, sizeof(word));
+                        std::memset(tag + 16u, static_cast<int>(0x10u + k), 32u);
+                    }
+                    const bool kicks = image == 2u;
+                    VuState start{};
+                    for (uint32_t reg = 1; reg < 32u; ++reg)
+                        for (uint32_t lane = 0; lane < 4u; ++lane)
+                            start.vf[reg][lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                    for (uint32_t reg = 1; reg < 16u; ++reg)
+                        start.vi[reg] = static_cast<int32_t>(rnd(16u));
+                    start.mac = rnd(0x10000u);
+                    start.status = rnd(0x1000u);
+                    start.clip = rnd(0x1000000u);
+
+                    // check 0: cut; 1: cut + resume(); 2: cut + fresh execute().
+                    // direct: false = every write queued, true = direct commit (VB1).
+                    const auto runOnce = [&](bool direct, uint32_t budget, uint32_t check) -> Snapshot
+                    {
+                        VU1Interpreter vu;
+                        vu.setDirectCommitForTest(direct ? 1 : 0);
+                        std::memcpy(vu.state().vf, start.vf, sizeof(start.vf));
+                        std::memcpy(vu.state().vi, start.vi, sizeof(start.vi));
+                        vu.state().mac = start.mac;
+                        vu.state().status = start.status;
+                        vu.state().clip = start.clip;
+                        Snapshot snap;
+                        snap.data = initialData;
+                        GS &runGs = kicks ? gifGs : gs;
+                        PS2Memory *runMem = kicks ? &gifMem : nullptr;
+                        gifPackets.clear();
+                        vu.execute(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, runGs,
+                                   runMem, program.startPc, 0u, 0u, budget);
+                        if (check == 1u)
+                            vu.resume(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, runGs,
+                                      runMem, 0u, 0u, 4096u);
+                        else if (check == 2u)
+                            vu.execute(code.data(), vu1_fixture::kCodeSize, snap.data.data(), PS2_VU1_DATA_SIZE, runGs,
+                                       runMem, program.startPc, 0u, 0u, 4096u);
+                        snap.gif.swap(gifPackets);
+                        snap.stopped = vu.stopRequestedForTest();
+                        gifPacketsSeen += snap.gif.size();
+                        std::memcpy(&snap.state, &vu.state(), sizeof(VuState));
+                        return snap;
+                    };
+
+                    // Image 2's EFU (up to 54 cycles), FDIV and PATH1 transfers run longer.
+                    const uint32_t maxBudget = (kicks ? 8u : 4u) * program.length + (kicks ? 128u : 64u);
+                    const auto same = [](const Snapshot &a, const Snapshot &b)
+                    {
+                        return std::memcmp(&a.state, &b.state, sizeof(VuState)) == 0 && a.data == b.data && a.gif == b.gif;
+                    };
+                    bool programGap = false;
+                    for (uint32_t budget = 1; budget <= maxBudget; ++budget)
+                    {
+                        for (uint32_t check = 0; check < 3u; ++check)
+                        {
+                            runs += 2u;
+                            const Snapshot ref = runOnce(false, budget, check);
+                            const Snapshot direct = runOnce(true, budget, check);
+                            if (same(ref, direct))
+                                continue;
+                            ++mismatches;
+                            programGap = true;
+                            stopPath += ref.stopped || direct.stopped ? 1u : 0u;
+                            if (mismatches > 3u)
+                                continue;
+                            std::fprintf(stderr, "VR2 differential mismatch: image %u program pc 0x%x length %u budget %u check %s\n",
+                                         image, program.startPc, program.length, budget,
+                                         check == 0u ? "cut" : check == 1u ? "resume" : "fresh-execute");
+                            for (uint32_t reg = 0; reg < 32u; ++reg)
+                                if (std::memcmp(ref.state.vf[reg], direct.state.vf[reg], 16) != 0)
+                                    std::fprintf(stderr, "  vf%u ref %g %g %g %g direct %g %g %g %g\n", reg,
+                                                 ref.state.vf[reg][0], ref.state.vf[reg][1], ref.state.vf[reg][2], ref.state.vf[reg][3],
+                                                 direct.state.vf[reg][0], direct.state.vf[reg][1], direct.state.vf[reg][2], direct.state.vf[reg][3]);
+                            for (uint32_t reg = 0; reg < 16u; ++reg)
+                                if (ref.state.vi[reg] != direct.state.vi[reg])
+                                    std::fprintf(stderr, "  vi%u ref %d direct %d\n", reg, ref.state.vi[reg], direct.state.vi[reg]);
+                            std::fprintf(stderr, "  mac %x/%x status %x/%x clip %x/%x q %g/%g p %g/%g i %g/%g cycles %llu/%llu pc %x/%x acc %d data %d gif %zu/%zu equal %d\n",
+                                         ref.state.mac, direct.state.mac, ref.state.status, direct.state.status, ref.state.clip, direct.state.clip,
+                                         ref.state.q, direct.state.q, ref.state.p, direct.state.p, ref.state.i, direct.state.i,
+                                         static_cast<unsigned long long>(ref.state.cycles), static_cast<unsigned long long>(direct.state.cycles),
+                                         ref.state.pc, direct.state.pc, std::memcmp(ref.state.acc, direct.state.acc, 16) != 0, ref.data != direct.data,
+                                         ref.gif.size(), direct.gif.size(), ref.gif == direct.gif);
+                        }
+                    }
+                    gapPrograms += programGap ? 1u : 0u;
+                }
+            }
+            std::fprintf(stderr, "[vr2-diff] images %u programs %u runs %u gif_packets %llu mismatches %u (programs %u, on an error stop %u)\n",
+                         vu1_fixture::kImageCount, programsRun, runs,
+                         static_cast<unsigned long long>(gifPacketsSeen), mismatches, gapPrograms, stopPath);
+            t.Equals(mismatches, 0u, "direct commit and the queued interpreter agree at every cut");
+            t.IsTrue(programsRun > 200u, "every fixture image ran");
+            t.IsTrue(runs > 50000u, "differential covered many cuts");
+            t.IsTrue(gifPacketsSeen > 1000u, "image 2 kicked PATH1 packets");
+        });
+
+        // VR3: the same differential for VU0 images (4 KiB, VU0Interpreter,
+        // vu1_fixture::buildVu0Image), every program cut at every budget.
+        tc.Run("VR3 generated VU0 pairs match the queued VU0 interpreter at every budget cut", [](TestCase &t)
+        {
+            std::vector<uint8_t> code(vu1_fixture::kVu0CodeSize, 0u);
+            GS gs;
+            Vu0DiffStats stats;
+            vu1_fixture::Rng rnd{0x3C6EF372FE94F82Aull};
+            for (uint32_t image = 0; image < vu1_fixture::kVu0ImageCount; ++image)
+            {
+                const VU0Interpreter::RecompProgram *generated =
+                    VU0Interpreter::findRecompProgram(vu1_fixture::kVu0ImageHash[image]);
+                t.IsTrue(generated != nullptr && generated->codeSize == vu1_fixture::kVu0CodeSize,
+                         "VU0 fixture image is compiled in");
+                if (generated == nullptr)
+                    return;
+                const std::vector<vu1_fixture::Program> programs = vu1_fixture::buildVu0Image(image, code.data());
+                for (const vu1_fixture::Program &program : programs)
+                {
+                    Vu0Start start;
+                    start.data.assign(PS2_VU0_DATA_SIZE, 0u);
+                    for (uint32_t i = 0; i < 64u * 16u; i += 4u)
+                    {
+                        const float value = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 64.0f;
+                        std::memcpy(start.data.data() + i, &value, sizeof(value));
+                    }
+                    for (uint32_t reg = 1; reg < 32u; ++reg)
+                        for (uint32_t lane = 0; lane < 4u; ++lane)
+                            start.state.vf[reg][lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                    for (uint32_t reg = 1; reg < 16u; ++reg)
+                        start.state.vi[reg] = static_cast<int32_t>(rnd(16u));
+                    start.state.mac = rnd(0x10000u);
+                    start.state.status = rnd(0x1000u);
+                    start.state.clip = rnd(0x1000000u);
+                    start.state.q = 1.0f;
+                    diffVu0Program("fixture", generated, code.data(), start, program.startPc,
+                                   4u * program.length + 64u, vu0DiffModes(), gs, stats);
+                }
+            }
+            std::fprintf(stderr, "[vr3-diff] vu0 images %u programs %u runs %llu generated_cycles %llu mismatches %llu\n",
+                         vu1_fixture::kVu0ImageCount, stats.programs, static_cast<unsigned long long>(stats.runs),
+                         static_cast<unsigned long long>(stats.generatedCycles),
+                         static_cast<unsigned long long>(stats.mismatches));
+            t.Equals(stats.mismatches, uint64_t{0}, "every VU0 mode matches the queued VU0 interpreter at every cut");
+            t.IsTrue(stats.programs > 150u, "all VU0 fixture images ran");
+            t.IsTrue(stats.runs > 20000u, "differential covered many cuts");
+            t.IsTrue(stats.generatedCycles > 50000u, "the generated VU0 pairs actually ran");
+        });
+
+        // VR3: local-only differential on a game VU0 image. Runs when the tests
+        // are built with PS2X_VU0_RECOMP_DIR and PS2X_VR3_VU0_IMAGE names its
+        // vu0_<hash>.bin (PS2X_VR3_VU0_IMAGE_DUMP) and PS2X_VR3_VU0_ENTRIES
+        // lists start pcs (hex, comma-separated); otherwise it only says so.
+        // Seeded random states; every cut up to 1,024 cycles past the full run.
+        tc.Run("VR3 generated VU0 game image matches the VU0 interpreter (local only)", [](TestCase &t)
+        {
+            const char *imagePath = std::getenv("PS2X_VR3_VU0_IMAGE");
+            const char *entryList = std::getenv("PS2X_VR3_VU0_ENTRIES");
+            if (imagePath == nullptr || entryList == nullptr)
+            {
+                std::fprintf(stderr, "[vr3-game-diff] skipped (PS2X_VR3_VU0_IMAGE / PS2X_VR3_VU0_ENTRIES unset)\n");
+                return;
+            }
+            std::vector<uint8_t> code(PS2_VU0_CODE_SIZE, 0u);
+            std::ifstream in(imagePath, std::ios::binary);
+            in.read(reinterpret_cast<char *>(code.data()), static_cast<std::streamsize>(code.size()));
+            t.IsTrue(in.gcount() == static_cast<std::streamsize>(code.size()), "game VU0 image read");
+            const std::string name = std::filesystem::path(imagePath).filename().string();
+            const uint64_t hash = std::strtoull(name.substr(4, 16).c_str(), nullptr, 16);
+            const VU0Interpreter::RecompProgram *generated = VU0Interpreter::findRecompProgram(hash);
+            t.IsTrue(generated != nullptr && generated->codeSize == PS2_VU0_CODE_SIZE,
+                     "game VU0 image is compiled in (PS2X_VU0_RECOMP_DIR)");
+            if (generated == nullptr)
+                return;
+            std::vector<uint32_t> entries;
+            for (std::stringstream list(entryList); list.good();)
+            {
+                std::string item;
+                std::getline(list, item, ',');
+                if (!item.empty())
+                    entries.push_back(static_cast<uint32_t>(std::strtoul(item.c_str(), nullptr, 16)));
+            }
+            GS gs;
+            Vu0DiffStats stats;
+            vu1_fixture::Rng rnd{0x510E527FADE682D1ull};
+            for (const uint32_t entry : entries)
+            {
+                for (uint32_t seed = 0; seed < 24u; ++seed)
+                {
+                    Vu0Start start;
+                    start.data.assign(PS2_VU0_DATA_SIZE, 0u);
+                    for (uint32_t i = 0; i < PS2_VU0_DATA_SIZE; i += 4u)
+                    {
+                        const float value = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 64.0f;
+                        std::memcpy(start.data.data() + i, &value, sizeof(value));
+                    }
+                    for (uint32_t reg = 1; reg < 32u; ++reg)
+                        for (uint32_t lane = 0; lane < 4u; ++lane)
+                            start.state.vf[reg][lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                    for (uint32_t lane = 0; lane < 4u; ++lane)
+                        start.state.acc[lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                    for (uint32_t reg = 1; reg < 16u; ++reg)
+                        start.state.vi[reg] = static_cast<int32_t>(rnd(256u));
+                    start.state.mac = rnd(0x10000u);
+                    start.state.status = rnd(0x1000u);
+                    start.state.clip = rnd(0x1000000u);
+                    start.state.q = 1.0f;
+                    start.state.i = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                    const Vu0Snapshot full = runVu0Once(generated, code.data(), start, entry, 0, 4096u, 0u, gs);
+                    const uint32_t maxBudget = static_cast<uint32_t>(std::min<uint64_t>(full.state.cycles + 8u, 1024u));
+                    diffVu0Program("game", generated, code.data(), start, entry, maxBudget, vu0DiffModes(), gs, stats);
+                }
+            }
+            std::fprintf(stderr, "[vr3-game-diff] hash %016llx entries %zu starts %u runs %llu generated_cycles %llu mismatches %llu\n",
+                         static_cast<unsigned long long>(hash), entries.size(), stats.programs,
+                         static_cast<unsigned long long>(stats.runs),
+                         static_cast<unsigned long long>(stats.generatedCycles),
+                         static_cast<unsigned long long>(stats.mismatches));
+            t.Equals(stats.mismatches, uint64_t{0}, "every VU0 mode matches the queued VU0 interpreter on the game image");
+            t.IsTrue(stats.generatedCycles > 0u, "the generated game image ran");
+        });
+#endif
+        // F12-fix: the tracked flag-map cache is shared by all instances of a unit
+        // instances; with PS2X_MTVU=1 the MTVU thread (VU1) and GameThread
+        // (VU0 microprograms) emplaced concurrently (F12 B2 SIGSEGV). Two
+        // threads hammer the same images here; every map must match the
+        // single-threaded reference (MiniTest is not thread-safe, so workers
+        // only set flags and the assertions run after join).
+        tc.Run("F12-fix tracked flag maps build identically from two threads", [](TestCase &t)
+               {
+            constexpr int kImages = 8;
+            constexpr int kIters = 50;
+            std::vector<std::vector<uint8_t>> images;
+            for (int i = 0; i < kImages; ++i)
+            {
+                // Distinct sizes => distinct cache keys (keyed by size when
+                // no recomp hash is looked up).
+                const uint32_t size = 64u * static_cast<uint32_t>(i + 1);
+                std::vector<uint8_t> img(size, 0u);
+                for (uint32_t p = 0; p < size / 8u; ++p)
+                {
+                    const uint32_t lower = 0x40000000u | (static_cast<uint32_t>(i * 16 + p) * 0x01010101u);
+                    std::memcpy(img.data() + p * 8u, &lower, 4u);
+                    std::memcpy(img.data() + p * 8u + 4u, &kVuUpperNop, 4u);
+                }
+                images.push_back(std::move(img));
+            }
+            VU1Interpreter ref;
+            std::vector<std::vector<uint8_t>> want;
+            for (const auto &img : images)
+            {
+                const uint32_t size = static_cast<uint32_t>(img.size());
+                const uint8_t *first = ref.directFlagMapForTest(img.data(), size, true);
+                const uint8_t *second = ref.directFlagMapForTest(img.data(), size, true);
+                t.IsTrue(first != nullptr && first == second, "cache hit returns the same map");
+                if (first == nullptr)
+                    return;
+                want.emplace_back(first, first + size / 8u);
+            }
+            auto hammer = [&](auto unitTag) {
+                bool ok = true;
+                typename decltype(unitTag)::type vu;
+                for (int it = 0; it < kIters && ok; ++it)
+                {
+                    for (size_t i = 0; i < images.size() && ok; ++i)
+                    {
+                        const auto &img = images[i];
+                        const uint8_t *map =
+                            vu.directFlagMapForTest(img.data(), static_cast<uint32_t>(img.size()), true);
+                        ok = map != nullptr &&
+                             std::memcmp(map, want[i].data(), img.size() / 8u) == 0;
+                    }
+                }
+                return ok;
+            };
+            bool vu1Ok = false, vu0Ok = false;
+            std::thread w0([&] { vu1Ok = hammer(std::type_identity<VU1Interpreter>{}); });
+            std::thread w1([&] { vu0Ok = hammer(std::type_identity<VU0Interpreter>{}); });
+            w0.join();
+            w1.join();
+            t.IsTrue(vu1Ok, "VU1-unit thread maps match the reference");
+            t.IsTrue(vu0Ok, "VU0-unit thread maps match the reference"); });
+
+        tc.Run("ss5: microvu small-budget run matches unbounded", [](TestCase &t)
+        {
+            Ss5MicrovuSession lib;
+            if (!lib.begin())
+                return;
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            uploadSs5Loop(fx);
+
+            VuState small{};
+            std::vector<uint8_t> smallData;
+            const uint64_t breaksBefore = ps2_microvu::budgetBreaks();
+            bool served = false;
+            try
+            {
+                served = runSs5Loop(fx, 64u, small, smallData);
+            }
+            catch (const std::exception &e)
+            {
+                t.Fail(std::string("budget=64 run should continue, not throw: ") + e.what());
+            }
+            t.IsTrue(served, "budget=64 run serves the job");
+            const uint64_t smallBreaks = ps2_microvu::budgetBreaks() - breaksBefore;
+            t.IsTrue(smallBreaks > 0, "budget=64 breaks on a ~1500-cycle loop");
+            t.IsTrue(small.cycles > 1000, "the continued run executes the whole loop");
+            t.IsTrue(small.vi[1] >= 500 && small.vi[2] == 500, "the continued run counts to the limit");
+            t.IsTrue(ps2_microvu::saveReady(small).empty(), "a completed-continued job leaves no park");
+
+            // A shutdown/configure cycle drops all JIT state so the unbounded
+            // run re-seeds from identical inputs (the library seeds once).
+            lib.end();
+            if (!lib.begin())
+            {
+                t.Fail("microvu should re-configure for the unbounded run");
+                return;
+            }
+            VuState wide{};
+            std::vector<uint8_t> wideData;
+            const uint64_t wideBefore = ps2_microvu::budgetBreaks();
+            bool servedWide = false;
+            try
+            {
+                servedWide = runSs5Loop(fx, 1u << 20, wide, wideData);
+            }
+            catch (const std::exception &e)
+            {
+                t.Fail(std::string("unbounded run should not throw: ") + e.what());
+            }
+            t.IsTrue(servedWide, "unbounded run serves the job");
+            t.IsTrue(ps2_microvu::budgetBreaks() - wideBefore == 0, "unbounded run never breaks");
+            t.IsTrue(sameSs5State(small, wide), "small-budget final VU state matches unbounded");
+            t.IsTrue(smallData == wideData, "small-budget data memory matches unbounded");
+            t.IsTrue(anyNonzeroByte(smallData), "the loop's stores reach data memory");
+            lib.end();
+        });
+
+        tc.Run("ss5: microvu continue-cap parks and save defers", [](TestCase &t)
+        {
+            Ss5MicrovuSession lib;
+            if (!lib.begin())
+                return;
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+            uploadSs5Loop(fx);
+
+            VuState state{};
+            std::vector<uint8_t> data;
+            bool served = false;
+            try
+            {
+                served = runSs5Loop(fx, 1u, state, data);
+            }
+            catch (const std::exception &e)
+            {
+                t.Fail(std::string("budget=1 run should continue, not throw: ") + e.what());
+            }
+            t.IsTrue(served, "cap-hit run still serves (truncated)");
+            t.IsTrue(ps2_microvu::saveReady(state) == ps2_microvu::kBudgetParkedReason,
+                     "a save during a park defers with vu1: budget-parked");
+
+            // The next library run supersedes the park: a fresh unbounded job
+            // clears it and the save gate re-opens.
+            lib.end();
+            if (!lib.begin())
+            {
+                t.Fail("microvu should re-configure after the park");
+                return;
+            }
+            VuState state2{};
+            std::vector<uint8_t> data2;
+            t.IsTrue(runSs5Loop(fx, 1u << 20, state2, data2), "unbounded run serves after the park");
+            t.IsTrue(ps2_microvu::saveReady(state2).empty(), "the park clears after the next job finishes");
+            lib.end();
+        });
+
+        tc.Run("iv1b: adoptData refuses offline when vu1Data is null (knob off)", [](TestCase &t)
+        {
+            // IV1b: the offline engine shares VU1 data only when its library
+            // exports it (PS2X_OM1_LEAN=1/2). With the knob off vu1Data()
+            // returns null and adoptData must refuse, so the knob-off path
+            // keeps its own copies. Gated on PS2X_OM1_OFFLINE_LIB like the
+            // SS5 microvu tests: without it the test skips.
+            const char *libPath = std::getenv("PS2X_OM1_OFFLINE_LIB");
+            if (!libPath || !*libPath)
+            {
+                std::cout << "[skip: PS2X_OM1_OFFLINE_LIB unset] ";
+                return;
+            }
+            const char *prevEngine = std::getenv("PS2X_VU1_ENGINE");
+            const std::string savedEngine = prevEngine ? prevEngine : "";
+            const char *prevLib = std::getenv("PS2X_MICROVU_LIB");
+            const std::string savedLib = prevLib ? prevLib : "";
+            const char *prevLean = std::getenv("PS2X_OM1_LEAN");
+            const std::string savedLean = prevLean ? prevLean : "";
+            const uint64_t prevFpControl = ps2_fpmode::readControl();
+            setenv("PS2X_VU1_ENGINE", "offline", 1);
+            setenv("PS2X_MICROVU_LIB", libPath, 1);
+            unsetenv("PS2X_OM1_LEAN"); // knob off: vu1Data() returns null
+            std::string error;
+            const bool configured = ps2_microvu::configure(true, error);
+            t.IsTrue(configured, "offline engine configures with the knob off");
+            if (configured)
+            {
+                t.IsTrue(ps2_microvu::selected(), "offline engine is selected");
+                Vu1Fixture fx;
+                t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
+                t.IsTrue(!ps2_microvu::adoptData(fx.mem),
+                         "adoptData refuses offline when vu1Data is null (knob off)");
+                ps2_microvu::shutdown();
+            }
+            else
+            {
+                std::cout << "[offline unavailable: " << error << "] ";
+            }
+            ps2_fpmode::writeControl(prevFpControl);
+            if (!savedEngine.empty())
+                setenv("PS2X_VU1_ENGINE", savedEngine.c_str(), 1);
+            else
+                unsetenv("PS2X_VU1_ENGINE");
+            if (!savedLib.empty())
+                setenv("PS2X_MICROVU_LIB", savedLib.c_str(), 1);
+            else
+                unsetenv("PS2X_MICROVU_LIB");
+            if (!savedLean.empty())
+                setenv("PS2X_OM1_LEAN", savedLean.c_str(), 1);
         });
     });
 }
