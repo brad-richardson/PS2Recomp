@@ -27,6 +27,12 @@ namespace
 {
     constexpr uint32_t kSourceRate = 48000u; // SNDDRV output rate (AU9: tag-1 upsampled 3->4)
     constexpr size_t kWavLimitBytes = 200000000u;
+    // AU18: PS2X_AUDIO_DC_BLOCK. Exactly "1" = DC-blocking high-pass on the
+    // final host output (default off; the orchestrator and Brad decide).
+    inline bool dcBlockFromEnv(const char *value)
+    {
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }
     // AT1: PCSX2 AudioStreamParameters defaults (AudioStreamTypes.h).
     constexpr int kStSequenceMs = 30;
     constexpr int kStSeekWindowMs = 20;
@@ -60,6 +66,11 @@ namespace
         ps2_audio_stretch::StretchController controller;
         bool lockTempo = false; // AU15: PS2X_VSYNC_LOCK_AUDIO=tempo with PS2X_VSYNC_LOCK=1
         bool feedDemand = false; // AU16: PS2X_STRETCH_FEED=demand
+        // AU18: DC blocker state (audio-callback thread only, except init).
+        // 1-pole high-pass, fc ~5 Hz, per channel, on the final output.
+        bool dcBlock = false;
+        double dcPrevX[2] = {0.0, 0.0};
+        double dcPrevY[2] = {0.0, 0.0};
         // AU16 path depth per 5 s window: ring fill + (engaged) frames the
         // stretcher holds ahead of it = push->callback-output latency.
         uint64_t pathSteps = 0;
@@ -123,6 +134,9 @@ namespace
 
     int16_t unpackLeft(uint32_t frame) { return static_cast<int16_t>(frame & 0xffffu); }
     int16_t unpackRight(uint32_t frame) { return static_cast<int16_t>(frame >> 16); }
+
+    // AU18 DC blocker (defined below, after floatToS16).
+    void dcBlockFrames(int16_t *samples, size_t frames);
 
     void recordWav(WavFile &wav, const int16_t *samples, size_t count)
     {
@@ -217,6 +231,8 @@ namespace
             }
         }
         noteWindowCallback(frames, true, 1.0f);
+        if (g_output.dcBlock)
+            dcBlockFrames(output, frames);
         recordWav(g_output.wav, output, samples);
         recordWav(g_output.postWav, output, samples);
         minuteStats(std::chrono::steady_clock::now());
@@ -234,6 +250,29 @@ namespace
     {
         const long rounded = std::lround(static_cast<double>(v) * 32768.0);
         return static_cast<int16_t>(std::clamp(rounded, -32768l, 32767l));
+    }
+
+    // AU18: DC-blocking high-pass on the final host output, the way the PS2's
+    // AC-coupled analog out behaves: 1-pole, cutoff ~5 Hz, per channel, after
+    // the stretcher, before the device (and the WAV taps, so they capture the
+    // device stream). Knob PS2X_AUDIO_DC_BLOCK=1, default off. Output-only:
+    // the guest ring, mix and det-hash are untouched.
+    void dcBlockFrames(int16_t *samples, size_t frames)
+    {
+        constexpr double kFcHz = 5.0;
+        const double r =
+            std::exp(-2.0 * 3.141592653589793 * kFcHz / static_cast<double>(kSourceRate));
+        for (size_t i = 0; i < frames; ++i)
+        {
+            for (int c = 0; c < 2; ++c)
+            {
+                const double x = static_cast<double>(samples[2u * i + c]) / 32768.0;
+                const double y = x - g_output.dcPrevX[c] + r * g_output.dcPrevY[c];
+                g_output.dcPrevX[c] = x;
+                g_output.dcPrevY[c] = y;
+                samples[2u * i + c] = floatToS16(static_cast<float>(y));
+            }
+        }
     }
 
     // Pop up to want frames from the ring (no zero-fill: the caller decides).
@@ -572,6 +611,8 @@ namespace
             unpackFrames(fed.data(), fed.size(), g_output.srcBuf.data());
             recordWav(g_output.wav, g_output.srcBuf.data(), fed.size() * 2u);
         }
+        if (g_output.dcBlock)
+            dcBlockFrames(output, frames);
         recordWav(g_output.postWav, output, static_cast<size_t>(frames) * 2u);
         noteWindowCallback(frames, step.bypass, step.bypass ? 1.0f : step.tempo);
         stretchStats(now);
@@ -661,6 +702,9 @@ bool initialize()
     }
     g_output.stretch =
         ps2_audio_stretch::stretchEnabledFromEnv(std::getenv("PS2X_AUDIO_STRETCH"));
+    g_output.dcBlock = dcBlockFromEnv(std::getenv("PS2X_AUDIO_DC_BLOCK"));
+    if (g_output.dcBlock)
+        std::cerr << "[snd-output] dc-block=on (AU18: 1-pole 5 Hz high-pass on the final output)\n";
     if (!g_output.stretch)
         std::cerr << "[snd-output] stretch=off (PS2X_AUDIO_STRETCH=0)\n";
     if (g_output.stretch)
