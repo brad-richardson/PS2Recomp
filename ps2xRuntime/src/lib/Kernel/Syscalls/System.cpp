@@ -1,29 +1,85 @@
 #include "Common.h"
+#include "ps2_e3.h"
+#include "ps2_e41_trace.h"
+#include "Ssx3CopiedPayload.h"
 #include "System.h"
+#include "ps2_hle_pools.h"
+
+#include <cstdlib>
+#include <cstring>
 
 namespace ps2_syscalls
 {
-    void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    // GB3: SMODE1 as the real kernel's SetGsCrt leaves it, per video mode.
+    // NTSC is byte-for-byte the value in the G13 PCSX2 GS dump of SSX 3
+    // (real BIOS; priv block at file offset 0x52c233: SMODE1 0x740814504,
+    // SMODE2 0x1). PAL differs only in CMOD=3, per the field table in PCSX2
+    // pcsx2/GS/GSRegs.h (SMODE1 comment, rev 9056c0834): CLKSEL=1 CMOD=2|3
+    // LC=32 NVCK=1 PRST=1 RC=4 SLCK2=1 SPML=4 T1248=1 VCKSEL=1, rest 0.
+    // Mode numbers as PCSX2's SetGsCrt syscall hook reads them
+    // (R5900OpcodeImpl.cpp: 0/2 NTSC, 1/3 PAL). Other modes (VESA, DTV,
+    // DVD) return 0: SMODE1 is then left as it was.
+    uint64_t gsCrtSmode1ForMode(uint32_t videoMode)
     {
-        int interlaced = getRegU32(ctx, 4); // $a0 - 0=non-interlaced, 1=interlaced
-        int videoMode = getRegU32(ctx, 5);  // $a1 - 0=NTSC, 1=PAL, 2=VESA, 3=HiVision
-        int frameMode = getRegU32(ctx, 6);  // $a2 - 0=field, 1=frame
-
-        if (runtime)
+        constexpr uint64_t kSmode1Ntsc = 0x0000000740814504ull;
+        constexpr uint64_t kSmode1Pal = 0x0000000740816504ull; // CMOD 2 -> 3 (bit 13)
+        switch (videoMode & 0xFFu)
         {
-            auto &gs = runtime->memory().gs();
-            const uint64_t smode2 =
-                (static_cast<uint64_t>(interlaced) & 0x1ull) |
-                ((static_cast<uint64_t>(frameMode) & 0x1ull) << 1);
+        case 0x0:
+        case 0x2:
+            return kSmode1Ntsc;
+        case 0x1:
+        case 0x3:
+            return kSmode1Pal;
+        default:
+            return 0u;
+        }
+    }
 
+    void applyGsCrt(PS2Runtime *runtime, uint32_t interlaced, uint32_t videoMode, uint32_t frameMode,
+                    const char *caller)
+    {
+        if (!runtime)
+            return;
+        auto &gs = runtime->memory().gs();
+        const uint64_t smode2 =
+            (static_cast<uint64_t>(interlaced) & 0x1ull) |
+            ((static_cast<uint64_t>(frameMode) & 0x1ull) << 1);
+        const uint64_t smode1 = gsCrtSmode1ForMode(videoMode);
+
+        // GB3: a priv store; in-stream when the GS queue is on.
+        runtime->memory().gsPrivStore([&gs, smode1, smode2]()
+                                      {
+            if (smode1 != 0u)
+            {
+                gs.smode1 = smode1;
+            }
             gs.smode2 = smode2;
 
             // Keep CRT1 enabled after the BIOS syscall selects a display mode.
             if ((gs.pmode & 0x3ull) == 0ull)
             {
                 gs.pmode |= 0x1ull;
-            }
+            } });
+
+        static std::atomic<uint32_t> s_logged{0};
+        if (s_logged.fetch_add(1u, std::memory_order_relaxed) < 8u)
+        {
+            std::cerr << "[gs:setcrt] via=" << caller << " interlaced=" << interlaced << " mode=0x" << std::hex
+                      << videoMode << " field_frame=" << std::dec << frameMode << " smode1=0x" << std::hex
+                      << smode1 << " smode2=0x" << smode2 << std::dec
+                      << std::endl;
         }
+    }
+
+    void GsSetCrt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        int interlaced = getRegU32(ctx, 4); // $a0 - 0=non-interlaced, 1=interlaced
+        int videoMode = getRegU32(ctx, 5);  // $a1 - 0/2=NTSC, 1/3=PAL, 0x1A+=VESA, 0x50+=DTV
+        int frameMode = getRegU32(ctx, 6);  // $a2 - 0=field, 1=frame
+
+        applyGsCrt(runtime, static_cast<uint32_t>(interlaced), static_cast<uint32_t>(videoMode),
+                   static_cast<uint32_t>(frameMode), "syscall");
 
         RUNTIME_LOG("PS2 GsSetCrt: interlaced=" << interlaced
                                                 << ", videoMode=" << videoMode
@@ -42,6 +98,7 @@ namespace ps2_syscalls
         uint64_t imr = 0;
         if (runtime)
         {
+            runtime->memory().gsPrivSync(); // GB3: see queued IMR stores
             imr = runtime->memory().gs().imr;
         }
 
@@ -64,8 +121,11 @@ namespace ps2_syscalls
         uint64_t oldImr = 0;
         if (runtime)
         {
+            runtime->memory().gsPrivSync(); // GB3: see queued IMR stores
             oldImr = runtime->memory().gs().imr;
-            runtime->memory().gs().imr = newImr;
+            auto &gs = runtime->memory().gs();
+            runtime->memory().gsPrivStore([&gs, newImr]()
+                                          { gs.imr = newImr; });
         }
         RUNTIME_LOG("PS2 GsPutIMR: " << " new=0x" << newImr
                                      << " a0_64=0x" << GPR_U64(ctx, 4)
@@ -99,6 +159,7 @@ namespace ps2_syscalls
         {
             std::cerr << "PS2 GetOsdConfigParam error: Invalid parameter address: 0x"
                       << std::hex << paramAddr << std::dec << std::endl;
+            ps2_log::emitDrop("syscall/GetOsdConfigParam", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -112,7 +173,12 @@ namespace ps2_syscalls
             raw = g_osd_config_raw;
         }
 
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, paramAddr, sizeof(uint32_t)); // E3b R3c D9
         *param = raw;
+        ps2_e3::tapEnd(std::move(e3t), "osd-param", rdram, "-");
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), paramAddr,
+                                          sizeof(uint32_t), rdram, "sys-osd-param", "osd", 0u);
 
         setReturnS32(ctx, 0);
     }
@@ -125,6 +191,7 @@ namespace ps2_syscalls
         {
             std::cerr << "PS2 SetOsdConfigParam error: Invalid parameter address: 0x"
                       << std::hex << paramAddr << std::dec << std::endl;
+            ps2_log::emitDrop("syscall/SetOsdConfigParam", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -177,6 +244,7 @@ namespace ps2_syscalls
             {
                 std::cerr << "PS2 SetOsdConfigParam2 error: Invalid parameter address: 0x"
                           << std::hex << (paramAddr + i) << std::dec << std::endl;
+                ps2_log::emitDrop("syscall/SetOsdConfigParam2", "error");
                 setReturnS32(ctx, -1);
                 return;
             }
@@ -234,6 +302,7 @@ namespace ps2_syscalls
         };
         const uint32_t copyBytes = std::min<uint32_t>(size, 4u);
 
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, paramAddr, copyBytes); // E3b R3c D10
         for (uint32_t i = 0; i < copyBytes; ++i)
         {
             uint8_t *dst = getMemPtr(rdram, paramAddr + i);
@@ -241,13 +310,49 @@ namespace ps2_syscalls
             {
                 std::cerr << "PS2 GetOsdConfigParam2 error: Invalid parameter address: 0x"
                           << std::hex << (paramAddr + i) << std::dec << std::endl;
+                ps2_log::emitDrop("syscall/GetOsdConfigParam2", "error");
                 setReturnS32(ctx, -1);
                 return;
             }
             *dst = rawBytes[i];
         }
+        ps2_e3::tapEnd(std::move(e3t), "osd-param2", rdram, "-");
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), paramAddr,
+                                          copyBytes, rdram, "sys-osd-param2", "osd", 0u);
 
         setReturnS32(ctx, 0);
+    }
+
+    void GetRomName(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        uint32_t bufAddr = getRegU32(ctx, 4); // $a0
+        size_t bufSize = getRegU32(ctx, 5);   // $a1
+        char *hostBuf = reinterpret_cast<char *>(getMemPtr(rdram, bufAddr));
+        const char *romName = "ROMVER 0100";
+
+        if (!hostBuf)
+        {
+            std::cerr << "GetRomName error: Invalid buffer address" << std::endl;
+            ps2_log::emitDrop("syscall/GetRomName", "error");
+            setReturnS32(ctx, -1); // Error
+            return;
+        }
+        if (bufSize == 0)
+        {
+            setReturnS32(ctx, 0);
+            return;
+        }
+
+        strncpy(hostBuf, romName, bufSize - 1);
+        hostBuf[bufSize - 1] = '\0';
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), bufAddr,
+                                          static_cast<uint32_t>(bufSize), rdram,
+                                          "sys-rom-name", "romver", 0u);
+
+        // returns the length of the string (excluding null?) or error
+        setReturnS32(ctx, (int32_t)strlen(hostBuf));
     }
 
     void SifLoadElfPart(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -292,21 +397,43 @@ namespace ps2_syscalls
         const uint32_t argumentAddr = getRegU32(ctx, 6); // $a2
         if (!rdram || bufferAddr == 0u)
         {
+            ps2_log::emitDrop("syscall/sceSifLoadModuleBuffer", "error");
             setReturnS32(ctx, -1);
             return;
         }
 
+        // Match buffer-based module loads to stable synthetic tags so module ID lookup remains deterministic.
         const std::string moduleTag = makeSifModuleBufferTag(rdram, bufferAddr);
+        if (!runtime || runtime->hleIopMode())
+        {
+            // UPR1: HLE IOP mode (SSX 3) tracks the load only; no IRX runs.
+            const int32_t moduleId = trackSifModuleLoad(moduleTag);
+            if (moduleId <= 0)
+            {
+                ps2_log::emitDrop("syscall/sceSifLoadModuleBuffer", "error");
+                setReturnS32(ctx, -1);
+                return;
+            }
+
+            uint32_t refs = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_sif_module_mutex);
+                auto it = g_sif_modules_by_id.find(moduleId);
+                if (it != g_sif_modules_by_id.end())
+                {
+                    refs = it->second.refCount;
+                }
+            }
+            logSifModuleAction("load-buffer", moduleId, moduleTag, refs);
+            setReturnS32(ctx, moduleId);
+            return;
+        }
+
         std::vector<uint8_t> arguments;
         constexpr uint32_t kMaxIopModuleArguments = 64u * 1024u;
         if (!copyGuestBytesBounded(rdram, argumentAddr, argumentSize, kMaxIopModuleArguments, arguments))
         {
-            setReturnS32(ctx, -1);
-            return;
-        }
-
-        if (!runtime)
-        {
+            ps2_log::emitDrop("syscall/sceSifLoadModuleBuffer", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -314,6 +441,7 @@ namespace ps2_syscalls
         const auto loaded = runtime->loadIopModuleBuffer(bufferAddr, arguments.empty() ? nullptr : arguments.data(), static_cast<uint32_t>(arguments.size()));
         if (!loaded.handled || loaded.moduleId <= 0)
         {
+            ps2_log::emitDrop("syscall/sceSifLoadModuleBuffer", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -371,6 +499,8 @@ namespace ps2_syscalls
         }
 
         static std::mutex s_unknownMutex;
+        if (runtime)
+            runtime->noteUnknownSyscall(syscallId);
         static std::unordered_map<uint32_t, uint64_t> s_unknownCounts;
         {
             std::lock_guard<std::mutex> lock(s_unknownMutex);
@@ -382,6 +512,13 @@ namespace ps2_syscalls
             }
         }
 
+        // P1w: uncapped census line (the unknown-id log above goes quiet
+        // after the first hit until every 5000th).
+        {
+            char dropArgs[64];
+            std::snprintf(dropArgs, sizeof(dropArgs), "id=0x%x pc=0x%x", syscallId, ctx->pc);
+            ps2_log::emitDrop("syscall/TODO", "unimplemented-syscall", dropArgs);
+        }
         // Bootstrap default: avoid hard-failing loops that probe syscall availability.
         setReturnS32(ctx, 0);
     }
@@ -405,6 +542,16 @@ namespace ps2_syscalls
 
         if (!runtime->hasFunction(handler))
         {
+            // K1: the game's copied syscall payload (SSX3 0x80075000) has
+            // no function-table entry by construction; serve the
+            // provenance-checked HLE equivalent before the KE_ERROR drop.
+            if (tryDispatchSsx3CopiedPayload(syscallNumber, handler, rdram, ctx))
+            {
+                return true;
+            }
+            char dropArgs[64];
+            std::snprintf(dropArgs, sizeof(dropArgs), "syscall=0x%x handler=0x%x", syscallNumber, handler);
+            ps2_log::emitDrop("syscall/dispatchSyscallOverride", "KE_ERROR", dropArgs);
             setReturnS32(ctx, KE_ERROR);
             return true;
         }
@@ -447,6 +594,10 @@ namespace ps2_syscalls
         if (uint8_t *ptr = getMemPtr(rdram, guestAddr))
         {
             std::memcpy(ptr, &value, sizeof(value));
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), guestAddr,
+                                              sizeof(value), rdram, "sys-kernel-word",
+                                              "kernel", 0u);
         }
     }
 
@@ -464,6 +615,7 @@ namespace ps2_syscalls
         const uint32_t syscallIndex = getRegU32(ctx, 4);
         const uint32_t handler = getRegU32(ctx, 5);
         runtime->setEeSyscallOverride(rdram, syscallIndex, handler);
+        noteSsx3CopiedPayloadInstall(syscallIndex, handler);
 
         setReturnS32(ctx, 0);
     }
@@ -543,7 +695,7 @@ namespace ps2_syscalls
         const uint32_t heapBase = (heapBaseRaw + 0xFu) & ~0xFu;
 
         // Silent Hill and other games often pass -1 (0xFFFFFFFF) to mean "rest of RAM".
-        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
+        const uint32_t kDefaultGuestHeapEnd = ps2_hle_pools::heapCeiling(); // TK39
         uint32_t heapLimit = kDefaultGuestHeapEnd;
 
         if (heapSize != 0u && heapSize != 0xFFFFFFFFu)
@@ -583,7 +735,7 @@ namespace ps2_syscalls
     {
         (void)rdram;
 
-        static constexpr uint32_t kDefaultGuestHeapEnd = 0x01F00000u;
+        const uint32_t kDefaultGuestHeapEnd = ps2_hle_pools::heapCeiling(); // TK39
 
         const uint32_t ret = runtime
                                  ? runtime->guestHeapLimit()
@@ -962,6 +1114,15 @@ namespace ps2_syscalls
             {
                 ps2TraceGuestRangeWrite(rdram, dest, size, "syscallCopy", ctx);
                 std::memcpy(destPtr, srcPtr, size);
+        // E44 Part-3 EE watch (dev-only, default off).
+        ps2_e44_trace::emitRangeOverlap(rdram, ctx, dest, size, "syscallCopy", src, true, "syscallCopy");
+                if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                {
+                    char src[32];
+                    std::snprintf(src, sizeof(src), "src=0x%x", src);
+                    ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dest, size,
+                                                  rdram, "syscall-copy", src, 0u);
+                }
             }
         }
         setReturnS32(ctx, 0);
@@ -987,6 +1148,7 @@ namespace ps2_syscalls
         uint32_t arg = getRegU32(ctx, 5);
         if (func == 0)
         {
+            ps2_log::emitDrop("syscall/RegisterExitHandler", "error");
             setReturnS32(ctx, -1);
             return;
         }
