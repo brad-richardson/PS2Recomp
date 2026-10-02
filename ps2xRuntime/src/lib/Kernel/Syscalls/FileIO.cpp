@@ -1,4 +1,6 @@
 #include "Common.h"
+#include "ps2_e3.h"
+#include "ps2_e41_trace.h"
 #include "FileIO.h"
 
 namespace ps2_syscalls
@@ -27,17 +29,29 @@ namespace ps2_syscalls
         if (!ps2Path)
         {
             std::cerr << "fioOpen error: Invalid path address" << std::endl;
+            ps2_log::emitDrop("syscall/fioOpen", "error");
             setReturnS32(ctx, -1);
             return;
         }
 
         if (!runtime)
         {
+            ps2_log::emitDrop("syscall/fioOpen", "error");
             setReturnS32(ctx, -1);
             return;
         }
 
         const int32_t descriptor = runtime->vfs().open(ps2Path, static_cast<uint32_t>(flags), currentVfsMounts(), runtime->romDevice());
+        if (descriptor < 0)
+        {
+            ps2_log::emitDrop("syscall/fioOpen", "error");
+        }
+        else
+        {
+            g_fioOpenDescriptors.fetch_add(1, std::memory_order_relaxed);
+            if (ps2_e41_trace::armed()) // E41 ioman-open log
+                ps2_e41_trace::noteFioOpen(ps2_e41_trace::lastVsyncTick(), ps2Path, ps2Path, descriptor);
+        }
         setReturnS32(ctx, descriptor);
     }
 
@@ -47,13 +61,20 @@ namespace ps2_syscalls
 
         if (!runtime)
         {
+            ps2_log::emitDrop("syscall/fioClose", "error");
             setReturnS32(ctx, -1);
             return;
         }
 
         const int32_t ret = runtime->vfs().close(ps2Fd);
+        if (ret >= 0)
+        {
+            g_fioOpenDescriptors.fetch_sub(1, std::memory_order_relaxed);
+            ps2_e41_trace::noteFioClose(ps2Fd); // E41 fd-name map drop (self-gated)
+        }
         if (ret < 0)
         {
+            ps2_log::emitDrop("syscall/fioClose", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -99,12 +120,14 @@ namespace ps2_syscalls
         if (!hostBuf)
         {
             std::cerr << "fioRead error: Invalid buffer address for fd " << ps2Fd << std::endl;
+            ps2_log::emitDrop("syscall/fioRead", "EFAULT");
             setReturnS32(ctx, -1); // -EFAULT
             return;
         }
         if (!runtime)
         {
             std::cerr << "fioRead error: Invalid file descriptor " << ps2Fd << std::endl;
+            ps2_log::emitDrop("syscall/fioRead", "EBADF");
             setReturnS32(ctx, -1); // -EBADF
             return;
         }
@@ -114,16 +137,37 @@ namespace ps2_syscalls
             return;
         }
 
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, bufAddr, size); // E3b R3c (before the read)
         const int64_t readResult = runtime->vfs().read(ps2Fd, hostBuf, size);
         if (readResult < 0)
         {
+            ps2_log::emitDrop("syscall/fioRead", "error");
             setReturnS32(ctx, -1);
             return;
         }
         const size_t bytesRead = static_cast<size_t>(readResult);
+        if (e3t.active && bytesRead > 0)
+        {
+            char e3x[64];
+            std::snprintf(e3x, sizeof(e3x), "fd=%d", ps2Fd);
+            e3t.len = bytesRead;
+            ps2_e3::tapEnd(std::move(e3t), "fio-read", rdram, e3x);
+        }
         if (bytesRead > 0)
         {
             ps2TraceGuestRangeWrite(rdram, bufAddr, static_cast<uint32_t>(bytesRead), "fioRead", ctx);
+            // E44 Part-3 EE watch (dev-only, default off).
+            ps2_e44_trace::emitRangeOverlap(rdram, ctx, bufAddr, static_cast<uint32_t>(bytesRead), "fioRead", 0u, false, "fioRead");
+            if (ps2_e41_trace::armed()) // E41 fioread log + plant watch
+            {
+                const uint64_t tick = ps2_e41_trace::lastVsyncTick();
+                ps2_e41_trace::noteFioRead(tick, ps2Fd, bufAddr, bytesRead);
+                char src[32];
+                std::snprintf(src, sizeof(src), "fd=%d", ps2Fd);
+                ps2_e41_trace::notePlantRange(tick, bufAddr,
+                                              static_cast<uint32_t>(bytesRead), rdram,
+                                              "fio-read", src, 0u);
+            }
         }
 
         {
@@ -167,12 +211,14 @@ namespace ps2_syscalls
         const uint8_t *hostBuf = getConstMemPtr(rdram, bufAddr);
         if (!hostBuf)
         {
+            ps2_log::emitDrop("syscall/fioWrite", "error");
             setReturnS32(ctx, -1);
             return;
         }
 
         if (!runtime)
         {
+            ps2_log::emitDrop("syscall/fioWrite", "EFAULT");
             setReturnS32(ctx, -1); // -EFAULT
             return;
         }
@@ -186,6 +232,7 @@ namespace ps2_syscalls
         const int64_t writeResult = runtime->vfs().write(ps2Fd, hostBuf, size);
         if (writeResult < 0)
         {
+            ps2_log::emitDrop("syscall/fioWrite", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -203,6 +250,7 @@ namespace ps2_syscalls
         if (!runtime)
         {
             std::cerr << "fioLseek error: Invalid file descriptor " << ps2Fd << std::endl;
+            ps2_log::emitDrop("syscall/fioLseek", "EBADF");
             setReturnS32(ctx, -1); // -EBADF
             return;
         }
@@ -221,6 +269,7 @@ namespace ps2_syscalls
             break;
         default:
             std::cerr << "fioLseek error: Invalid whence value " << whence << " for fd " << ps2Fd << std::endl;
+            ps2_log::emitDrop("syscall/fioLseek", "EINVAL");
             setReturnS32(ctx, -1); // -EINVAL
             return;
         }
@@ -228,6 +277,7 @@ namespace ps2_syscalls
         const int64_t newPos = runtime->vfs().seek(ps2Fd, offset, hostWhence);
         if (newPos < 0)
         {
+            ps2_log::emitDrop("syscall/fioLseek", "error");
             setReturnS32(ctx, -1);
         }
         else
@@ -235,6 +285,7 @@ namespace ps2_syscalls
             if (static_cast<uint64_t>(newPos) > 0x7FFFFFFFu)
             {
                 std::cerr << "fioLseek warning: New position exceeds 32-bit for fd " << ps2Fd << std::endl;
+                ps2_log::emitDrop("syscall/fioLseek", "error");
                 setReturnS32(ctx, -1);
             }
             else
@@ -253,6 +304,7 @@ namespace ps2_syscalls
         if (!ps2Path)
         {
             std::cerr << "fioMkdir error: Invalid path address" << std::endl;
+            ps2_log::emitDrop("syscall/fioMkdir", "EFAULT");
             setReturnS32(ctx, -1); // -EFAULT
             return;
         }
@@ -260,6 +312,7 @@ namespace ps2_syscalls
         if (!runtime || !runtime->vfs().resolveHostPath(ps2Path, currentVfsMounts(), hostPath))
         {
             std::cerr << "fioMkdir error: Failed to translate path '" << ps2Path << "'" << std::endl;
+            ps2_log::emitDrop("syscall/fioMkdir", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -270,6 +323,7 @@ namespace ps2_syscalls
         {
             std::cerr << "fioMkdir error: create_directory failed for '" << hostPath.string()
                       << "': " << ec.message() << std::endl;
+            ps2_log::emitDrop("syscall/fioMkdir", "error");
             setReturnS32(ctx, -1);
         }
         else
@@ -286,6 +340,7 @@ namespace ps2_syscalls
         if (!ps2Path)
         {
             std::cerr << "fioChdir error: Invalid path address" << std::endl;
+            ps2_log::emitDrop("syscall/fioChdir", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -293,6 +348,7 @@ namespace ps2_syscalls
         PS2VfsStat status;
         if (!runtime || !runtime->vfs().stat(ps2Path, currentVfsMounts(), runtime->romDevice(), status) || !status.directory)
         {
+            ps2_log::emitDrop("syscall/fioChdir", "error");
             setReturnS32(ctx, -1);
         }
         else
@@ -308,6 +364,7 @@ namespace ps2_syscalls
         if (!ps2Path)
         {
             std::cerr << "fioRmdir error: Invalid path address" << std::endl;
+            ps2_log::emitDrop("syscall/fioRmdir", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -315,6 +372,7 @@ namespace ps2_syscalls
         if (!runtime || !runtime->vfs().resolveHostPath(ps2Path, currentVfsMounts(), hostPath))
         {
             std::cerr << "fioRmdir error: Failed to translate path '" << ps2Path << "'" << std::endl;
+            ps2_log::emitDrop("syscall/fioRmdir", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -325,6 +383,7 @@ namespace ps2_syscalls
         if (!success || ec)
         {
             std::cerr << "fioRmdir error: remove failed for '" << hostPath.string() << "': " << ec.message() << std::endl;
+            ps2_log::emitDrop("syscall/fioRmdir", "error");
             setReturnS32(ctx, -1);
         }
         else
@@ -345,18 +404,21 @@ namespace ps2_syscalls
         if (!ps2Path)
         {
             std::cerr << "fioGetstat error: Invalid path addr" << std::endl;
+            ps2_log::emitDrop("syscall/fioGetstat", "error");
             setReturnS32(ctx, -1);
             return;
         }
         if (!ps2StatBuf)
         {
             std::cerr << "fioGetstat error: Invalid buffer addr" << std::endl;
+            ps2_log::emitDrop("syscall/fioGetstat", "error");
             setReturnS32(ctx, -1);
             return;
         }
 
         if (!runtime)
         {
+            ps2_log::emitDrop("syscall/fioGetstat", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -364,6 +426,7 @@ namespace ps2_syscalls
         PS2VfsStat status;
         if (!runtime->vfs().stat(ps2Path, currentVfsMounts(), runtime->romDevice(), status))
         {
+            ps2_log::emitDrop("syscall/fioGetstat", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -387,6 +450,7 @@ namespace ps2_syscalls
         if (!ps2Path)
         {
             std::cerr << "fioRemove error: Invalid path" << std::endl;
+            ps2_log::emitDrop("syscall/fioRemove", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -395,6 +459,7 @@ namespace ps2_syscalls
         if (!runtime || !runtime->vfs().resolveHostPath(ps2Path, currentVfsMounts(), hostPath))
         {
             std::cerr << "fioRemove error: Path translate fail" << std::endl;
+            ps2_log::emitDrop("syscall/fioRemove", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -405,6 +470,7 @@ namespace ps2_syscalls
         if (!success || ec)
         {
             std::cerr << "fioRemove error: remove failed for '" << hostPath.string() << "': " << ec.message() << std::endl;
+            ps2_log::emitDrop("syscall/fioRemove", "error");
             setReturnS32(ctx, -1);
         }
         else
