@@ -150,6 +150,13 @@ if(PS2X_BUILD_RUNTIME)
     add_subdirectory("ps2xRuntime")
 endif()
 
+# HAL1: app-local libhardware shim from source (Android only). The 'hardware'
+# target builds libhardware.so, which the APK packages from this build, not
+# from -Pps2xJniLibsDir (a jniLibs copy is a hard gradle error).
+if(ANDROID)
+    add_subdirectory("android/hwcompat")
+endif()
+
 if(PS2X_BUILD_ANALYZER)
     add_subdirectory("ps2xAnalyzer")
 endif()
