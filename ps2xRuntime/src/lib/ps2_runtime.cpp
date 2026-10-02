@@ -987,6 +987,257 @@ namespace
         st.frameSunk = 0u;
     }
 
+    // TK38: SSX 3 camera spatial-query list guard (PS2X_SSX3_SPATIAL_LIST_GUARD=1,
+    // default off; guest-affecting only once a list is full). sub_0022ADD8
+    // builds a query object q on the stack and fills fixed-size lists with
+    // no bound check (TK37): inside nodes {node, mask} at q+0x98 (count
+    // q+0x94, 512 x 8 B), straddling nodes at q+0x109C (count q+0x1098, 512
+    // x 8 B), then item lists of 4-B entries: list 1 q+0x20A0 (count
+    // q+0x209C, 2048), list 2 q+0x40A4 (q+0x40A0, 1024), list 3 q+0x50AC
+    // (q+0x50A8, 2048), list 4 q+0x70B0 (q+0x70AC, 512). Imported Tricky
+    // courses put all instances in one location, so a wide view straddles
+    // more than 512 tree nodes (Elysium: 517); entry 512 lands on list 1's
+    // count and the later appends write random RAM (TK37 JALR).
+    // Appends happen inline, so the guard works at the calls around them:
+    // - the tree walk (inside 0x22AABC, straddle 0x22AC54) recurses by goto
+    //   inside the one generated sub_0022A830, so no append reaches a
+    //   dispatch. A straddle overrun only writes q+0x209C..: list 1-4 counts,
+    //   entries and the pending-item words, which sub_0022ADD8 zeroed before
+    //   the walk and nothing reads or writes until it ends. At the first call
+    //   after the walk (0x22AF88 -> sub_0022A698) the straddle count is
+    //   clamped to 512 (the nodes past it are dropped) and those fields are
+    //   zeroed again. That holds while the overrun stays inside q (count <=
+    //   3557). An inside overrun is not repairable (entry 512 lands on the
+    //   straddle count mid-walk); it is only reported.
+    // - one append per call: sub_00229FC8 (list 1 0x22A0EC or list 2
+    //   0x22A114) and sub_0022A128 (list 3 or 4). At entry, for each of its
+    //   lists that is full, save slot cap-1 and write count cap-1, as the
+    //   TK22 draw table does: an append lands on slot cap-1 and the count
+    //   returns to cap. The next guest dispatch (the next item's call; returns
+    //   and the jump tables don't dispatch) puts the saved entry and count cap
+    //   back. If the count reads cap there, the append happened and was
+    //   refused (a drop). The first cap entries are kept and every stored
+    //   entry is genuine.
+    // A dropped node's instances miss that query's visit (no draw/visit for
+    // one frame). Stock
+    // SSX 3 stays far below every cap, where the guard only reads.
+    struct Ssx3SpatialList
+    {
+        const char *name;
+        uint32_t countOff;
+        uint32_t entryOff;
+        uint32_t stride;
+        int32_t cap;
+    };
+    constexpr Ssx3SpatialList kSsx3SpatialLists[] = {
+        {"inside", 0x94u, 0x98u, 8u, 512},
+        {"straddle", 0x1098u, 0x109Cu, 8u, 512},
+        {"list1", 0x209Cu, 0x20A0u, 4u, 2048},
+        {"list2", 0x40A0u, 0x40A4u, 4u, 1024},
+        {"list3", 0x50A8u, 0x50ACu, 4u, 2048},
+        {"list4", 0x70ACu, 0x70B0u, 4u, 512},
+    };
+    constexpr uint32_t kSsx3SpatialWalkEndCall = 0x0022AF88u;
+    // Fields sub_0022ADD8 zeroes before the walk that a straddle overrun can reach.
+    constexpr uint32_t kSsx3QueryZeroed[] = {0x209Cu, 0x40A0u, 0x50A4u, 0x50A8u, 0x70ACu, 0x78B0u,
+                                             0x78B4u, 0x7AB8u, 0x7ABCu, 0x7BC0u, 0x7FC4u};
+    constexpr int32_t kSsx3StraddleRepairMax = static_cast<int32_t>((0x7FC8u - 0x109Cu) / 8u);
+    constexpr uint32_t kSsx3SpatialItems12 = 0x00229FC8u;
+    constexpr uint32_t kSsx3SpatialItems34 = 0x0022A128u;
+    constexpr uint32_t kSsx3SpatialInside1 = 0x0022A5A0u;
+    constexpr uint32_t kSsx3SpatialInside3 = 0x0022A698u;
+
+    struct Ssx3SpatialBorrow
+    {
+        uint32_t q = 0u;
+        int list = -1;
+        uint32_t saved[2] = {};
+    };
+    struct Ssx3SpatialState
+    {
+        Ssx3SpatialBorrow borrow[2];
+        int borrows = 0;
+        uint64_t drops[6] = {};
+        uint64_t nodeCuts[6] = {};
+        int32_t high[6] = {};
+        uint64_t restoreOdd = 0u;
+    };
+    Ssx3SpatialState g_ssx3Spatial;
+    std::atomic<bool> g_ssx3SpatialPending{false};
+
+    bool ssx3SpatialGuardOn()
+    {
+        static const bool on = [] {
+            const char *e = std::getenv("PS2X_SSX3_SPATIAL_LIST_GUARD");
+            const bool v = e && e[0] == '1';
+            if (v)
+                std::fprintf(stderr, "[ssx3-spatial-guard] armed (camera query lists refuse appends at capacity: "
+                                     "inside/straddle 512, list1 2048, list2 1024, list3 2048, list4 512)\n");
+            return v;
+        }();
+        return on;
+    }
+
+    void ssx3SpatialHigh(int list, int32_t count)
+    {
+        // Observation: report each new high-water mark by 64s.
+        int32_t &h = g_ssx3Spatial.high[list];
+        if (count < h + 64 && !(count >= kSsx3SpatialLists[list].cap && h < kSsx3SpatialLists[list].cap))
+            return;
+        h = count;
+        std::fprintf(stderr, "[ssx3-spatial-guard] high list=%s count=%d cap=%d\n", kSsx3SpatialLists[list].name,
+                     count, kSsx3SpatialLists[list].cap);
+    }
+
+    void ssx3SpatialRestore(uint8_t *rdram)
+    {
+        Ssx3SpatialState &st = g_ssx3Spatial;
+        for (int i = 0; i < st.borrows; ++i)
+        {
+            const Ssx3SpatialBorrow &b = st.borrow[i];
+            const Ssx3SpatialList &l = kSsx3SpatialLists[b.list];
+            const int32_t count = ssx3ReadS32(rdram, b.q + l.countOff);
+            if (count == l.cap)
+            {
+                const uint64_t n = ++st.drops[b.list];
+                if (n <= 4u || (n & (n - 1u)) == 0u)
+                    std::fprintf(stderr, "[ssx3-spatial-guard] list=%s drops=%llu\n", l.name,
+                                 static_cast<unsigned long long>(n));
+            }
+            else if (count != l.cap - 1 && ++st.restoreOdd <= 8u)
+            {
+                std::fprintf(stderr, "[ssx3-spatial-guard] restore saw list=%s count=%d (expected %d or %d)\n", l.name,
+                             count, l.cap - 1, l.cap);
+            }
+            const uint32_t slot = b.q + l.entryOff + l.stride * static_cast<uint32_t>(l.cap - 1);
+            ssx3WriteU32(rdram, slot, b.saved[0]);
+            if (l.stride == 8u)
+                ssx3WriteU32(rdram, slot + 4u, b.saved[1]);
+            ssx3WriteU32(rdram, b.q + l.countOff, static_cast<uint32_t>(l.cap));
+        }
+        st.borrows = 0;
+        g_ssx3SpatialPending.store(false, std::memory_order_relaxed);
+    }
+
+    void ssx3SpatialBorrowIfFull(uint8_t *rdram, uint32_t q, int list)
+    {
+        const Ssx3SpatialList &l = kSsx3SpatialLists[list];
+        const int32_t count = ssx3ReadS32(rdram, q + l.countOff);
+        ssx3SpatialHigh(list, count);
+        if (count < l.cap)
+            return;
+        if (count > l.cap)
+        {
+            // Already past capacity (an unguarded writer): leave it alone.
+            if (++g_ssx3Spatial.restoreOdd <= 8u)
+                std::fprintf(stderr, "[ssx3-spatial-guard] list=%s count=%d over cap %d at entry\n", l.name, count,
+                             l.cap);
+            return;
+        }
+        Ssx3SpatialState &st = g_ssx3Spatial;
+        Ssx3SpatialBorrow &b = st.borrow[st.borrows++];
+        b.q = q;
+        b.list = list;
+        const uint32_t slot = q + l.entryOff + l.stride * static_cast<uint32_t>(l.cap - 1);
+        b.saved[0] = static_cast<uint32_t>(ssx3ReadS32(rdram, slot));
+        b.saved[1] = l.stride == 8u ? static_cast<uint32_t>(ssx3ReadS32(rdram, slot + 4u)) : 0u;
+        ssx3WriteU32(rdram, q + l.countOff, static_cast<uint32_t>(l.cap - 1));
+        g_ssx3SpatialPending.store(true, std::memory_order_relaxed);
+    }
+
+    void ssx3SpatialCutInside(uint8_t *rdram, R5900Context *ctx, int list, uint32_t chainOff)
+    {
+        const Ssx3SpatialList &l = kSsx3SpatialLists[list];
+        const uint32_t q = getRegU32(ctx, 4);
+        const uint32_t entries = getRegU32(ctx, 5);
+        const int32_t n = static_cast<int32_t>(getRegU32(ctx, 6));
+        if (n <= 0)
+            return;
+        const int32_t count = ssx3ReadS32(rdram, q + l.countOff);
+        int64_t room = static_cast<int64_t>(l.cap) - count;
+        int32_t keep = 0;
+        uint32_t steps = 0u;
+        for (; keep < n; ++keep)
+        {
+            const uint32_t node = static_cast<uint32_t>(ssx3ReadS32(rdram, entries + 8u * static_cast<uint32_t>(keep)));
+            int64_t len = 0;
+            for (uint32_t item = static_cast<uint32_t>(ssx3ReadS32(rdram, node + chainOff)); item != 0u && len <= room;
+                 item = static_cast<uint32_t>(ssx3ReadS32(rdram, item)))
+            {
+                ++len;
+                if (++steps > 65536u)
+                {
+                    len = room + 1; // runaway chain: treat as not fitting
+                    break;
+                }
+            }
+            if (len > room)
+                break;
+            room -= len;
+        }
+        ssx3SpatialHigh(list, count);
+        if (keep == n)
+            return;
+        SET_GPR_S32(ctx, 6, keep);
+        const uint64_t c = g_ssx3Spatial.nodeCuts[list] += static_cast<uint64_t>(n - keep);
+        const uint64_t calls = ++g_ssx3Spatial.drops[list];
+        if (calls <= 4u || (calls & (calls - 1u)) == 0u)
+            std::fprintf(stderr, "[ssx3-spatial-guard] list=%s drops=%llu nodes_cut=%d of %d (count=%d, total %llu)\n",
+                         l.name, static_cast<unsigned long long>(calls), n - keep, n, count,
+                         static_cast<unsigned long long>(c));
+    }
+
+    void ssx3SpatialRepairWalk(uint8_t *rdram, uint32_t q)
+    {
+        Ssx3SpatialState &st = g_ssx3Spatial;
+        const int32_t inside = ssx3ReadS32(rdram, q + kSsx3SpatialLists[0].countOff);
+        const int32_t straddle = ssx3ReadS32(rdram, q + kSsx3SpatialLists[1].countOff);
+        ssx3SpatialHigh(0, inside);
+        ssx3SpatialHigh(1, straddle);
+        if (inside > kSsx3SpatialLists[0].cap || straddle < 0 || straddle > kSsx3StraddleRepairMax)
+        {
+            if (++st.restoreOdd <= 8u)
+                std::fprintf(stderr, "[ssx3-spatial-guard] unrepairable walk q=0x%x inside=%d straddle=%d\n", q, inside,
+                             straddle);
+            return;
+        }
+        if (straddle <= kSsx3SpatialLists[1].cap)
+            return;
+        st.nodeCuts[1] += static_cast<uint64_t>(straddle - kSsx3SpatialLists[1].cap);
+        const uint64_t n = ++st.drops[1];
+        if (n <= 4u || (n & (n - 1u)) == 0u)
+            std::fprintf(stderr, "[ssx3-spatial-guard] list=straddle drops=%llu count=%d clamped to %d (nodes cut total %llu)\n",
+                         static_cast<unsigned long long>(n), straddle, kSsx3SpatialLists[1].cap,
+                         static_cast<unsigned long long>(st.nodeCuts[1]));
+        ssx3WriteU32(rdram, q + kSsx3SpatialLists[1].countOff, static_cast<uint32_t>(kSsx3SpatialLists[1].cap));
+        for (uint32_t off : kSsx3QueryZeroed)
+            ssx3WriteU32(rdram, q + off, 0u);
+    }
+
+    void ssx3SpatialGuard(uint8_t *rdram, R5900Context *ctx, uint32_t targetPc, uint32_t sourcePc)
+    {
+        if (!rdram || !ctx)
+            return;
+        switch (targetPc)
+        {
+        case kSsx3SpatialItems12:
+            ssx3SpatialBorrowIfFull(rdram, getRegU32(ctx, 4), 2);
+            ssx3SpatialBorrowIfFull(rdram, getRegU32(ctx, 4), 3);
+            return;
+        case kSsx3SpatialItems34:
+            ssx3SpatialBorrowIfFull(rdram, getRegU32(ctx, 4), 4);
+            ssx3SpatialBorrowIfFull(rdram, getRegU32(ctx, 4), 5);
+            return;
+        case kSsx3SpatialInside1: ssx3SpatialCutInside(rdram, ctx, 2, 0x20u); return;
+        case kSsx3SpatialInside3:
+            if (sourcePc == kSsx3SpatialWalkEndCall)
+                ssx3SpatialRepairWalk(rdram, getRegU32(ctx, 4));
+            ssx3SpatialCutInside(rdram, ctx, 4, 0x24u);
+            return;
+        default: return;
+        }
+    }
+
     void enforceSsx3Widescreen(uint8_t *rdram, uint32_t sourcePc)
     {
         if (!rdram || !g_ssx3WidescreenActive.load(std::memory_order_acquire)) return;
@@ -4145,6 +4396,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     {
         ssx3DrawTableRestore(rdram);
     }
+    // TK38: put back the query-list slots a refused append borrowed.
+    if (g_ssx3SpatialPending.load(std::memory_order_relaxed))
+    {
+        ssx3SpatialRestore(rdram);
+    }
     // EE1P2: one product gate per dispatch; rider-pass detail (boundary
     // begin, helper tracking, prediction skip) runs only when a split mode
     // is armed. The g2b/observer calls below fold away in release builds.
@@ -4223,6 +4479,12 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
     {
         ssx3DrawPoolPin(rdram, ctx, sourcePc);
+    }
+    if ((targetPc == kSsx3SpatialItems12 || targetPc == kSsx3SpatialItems34 ||
+         targetPc == kSsx3SpatialInside1 || targetPc == kSsx3SpatialInside3) &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) && ssx3SpatialGuardOn())
+    {
+        ssx3SpatialGuard(rdram, ctx, targetPc, sourcePc);
     }
     if (targetPc == kSsx3DrawReset &&
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
