@@ -3,25 +3,89 @@
 
     <application
         android:label="PS2 Recomp"
-        android:hasCode="false"
-        android:isGame="true">
+        android:hasCode="true"
+        android:isGame="true"
+        android:appCategory="game">
 
+        <!-- N11: allow simpleperf from the shell on release builds (stays non-debuggable) -->
+        <profileable android:shell="true" />
+
+        <!-- GPU2: opt in to Android Game Mode (performance + battery); no
+             downscaling or fps override, so the OS can't change our render
+             size or frame rate. -->
+        <meta-data
+            android:name="android.game_mode_config"
+            android:resource="@xml/game_mode_config" />
+
+        <!-- TG1: exported (no launcher entry) so tooling keeps using
+             am start -n com.ps2x.runner/android.app.NativeActivity (60, base
+             env). singleTask: one runtime per process; a relaunch brings the
+             running game forward. -->
         <activity
             android:name="android.app.NativeActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation"
             android:screenOrientation="landscape"
+            android:launchMode="singleTask"
             android:exported="true">
 
             <!-- Runner shared library built by ps2xRuntime/CMakeLists.txt -->
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="ps2EntryRunner" />
+        </activity>
 
+        <!-- TG1: 60/120 launch choice. Two launcher entries alias one
+             trampoline; the 120 one layers files/full120.env (see
+             LaunchActivity.java). Own empty affinity + excludeFromRecents so
+             Recents shows only the game task. -->
+        <activity
+            android:name=".LaunchActivity"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:exported="false" />
+
+        <activity-alias
+            android:name=".Launch60"
+            android:label="SSX 3 · 60"
+            android:icon="@mipmap/ic_ssx_60"
+            android:roundIcon="@mipmap/ic_ssx_60"
+            android:targetActivity=".LaunchActivity"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".Launch120"
+            android:label="SSX 3 · 120"
+            android:icon="@mipmap/ic_ssx_120"
+            android:roundIcon="@mipmap/ic_ssx_120"
+            android:targetActivity=".LaunchActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- TKO1: Tricky courses at 60; layers files/tricky.env over the
+             base env (see LaunchActivity.java). -->
+        <activity-alias
+            android:name=".LaunchTricky"
+            android:label="SSX 3 · Tricky"
+            android:icon="@mipmap/ic_ssx_tricky"
+            android:roundIcon="@mipmap/ic_ssx_tricky"
+            android:targetActivity=".LaunchActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
     </application>
 
 </manifest>
