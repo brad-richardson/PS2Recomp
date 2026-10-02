@@ -152,6 +152,8 @@ bool configure(bool mtvu_threaded, std::string& error)
     s_api.close = &ps2x_microvu_shutdown;
     s_api.run = &ps2x_microvu_run;
     s_api.getStats = &ps2x_microvu_get_stats;
+    // IV1: the static offline core exports its VU1 data (non-null only under PS2X_OM1_LEAN=1/2).
+    s_api.vu1Data = &ps2x_microvu_vu1_data;
     if (ps2x_microvu_abi() != PS2X_MICROVU_ABI) {
         error = "offline ABI mismatch (static)";
         shutdown();
@@ -215,7 +217,9 @@ bool adoptData(PS2Memory& memory)
     // path is deleted). Same bytes at every point the runtime can observe
     // (EE access and det-hash ticks sync the unit first). The offline engine
     // keeps its own copies (it may MISS and restart statically).
-    if (!s_selected || s_engine != "microvu" || !s_api.vu1Data)
+    // IV1: the offline engine shares too when its library exports the data
+    // (PS2X_OM1_LEAN=1/2; =1 keeps a per-job backup for the MISS->static restart).
+    if (!s_selected || (s_engine != "microvu" && s_engine != "offline") || !s_api.vu1Data)
         return false;
     uint8_t* const lib = s_api.vu1Data();
     if (!lib)
