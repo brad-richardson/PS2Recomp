@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace ps2_stubs
 {
@@ -78,4 +80,83 @@ namespace ps2_stubs
     PadDebugSnapshot getPadDebugSnapshot();
     void setPadOverrideState(uint16_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
     void clearPadOverrideState();
+
+    // E31 DEV-ONLY scripted pad input (PS2X_PAD_SCRIPT). One parsed entry:
+    // press `pressMask` (active-low clear mask, 0 = no buttons) and/or drive
+    // the flagged analog axes while atMs <= nowMs < atMs + holdMs, where
+    // nowMs is milliseconds since the first pad call (wall clock), or guest
+    // milliseconds (vsyncTick * 1000/59.94) when PS2X_PAD_SCRIPT_CLOCK=vsync.
+    struct PadScriptEntry
+    {
+        uint64_t atMs = 0u;
+        uint64_t holdMs = 0u;
+        uint16_t pressMask = 0u;
+        bool hasLx = false;
+        bool hasLy = false;
+        bool hasRx = false;
+        bool hasRy = false;
+        uint8_t lx = 0x80u;
+        uint8_t ly = 0x80u;
+        uint8_t rx = 0x80u;
+        uint8_t ry = 0x80u;
+    };
+
+    // Parses "t_ms:spec:hold_ms,..." where spec is '+'-joined button names
+    // (select/l3/r3/start/up/right/down/left/l2/r2/l1/r1/triangle/circle/
+    // cross/square) and/or axis assignments (lx/ly/rx/ry = 0..255).
+    // Returns false (entries untouched) on any malformed entry.
+    bool parsePadScript(const char *spec, std::vector<PadScriptEntry> &entries);
+
+    // RP2: reads `path` and parses it with parsePadScript (the '@/path'
+    // form of PS2X_PAD_SCRIPT). Returns false (entries untouched) when
+    // the file cannot be read or its content is malformed; never aborts
+    // (the abort-on-failure lives in the env-var init path only).
+    bool parsePadScriptFile(const char *path, std::vector<PadScriptEntry> &entries);
+
+    // Test hooks. Install a script without the env var, drive its clock
+    // explicitly, and restore the default-off state. Production code paths
+    // never call these.
+    bool setPadScriptForTest(const char *spec);
+    // RP2: install a script from a file (same grammar); false when the
+    // file cannot be read or parsed. Production never calls this.
+    bool setPadScriptFromFileForTest(const char *path);
+    // FH17: true when the installed script replays on the FH5 events clock
+    // (a '# padrec v1' events recording, or PS2X_PAD_SCRIPT_EVENTS_CLOCK=fh5).
+    bool padScriptLegacyEventsClockForTest();
+    void setPadScriptNowMsForTest(uint64_t nowMs);
+    // E33: select the guest-vsync clock (vsyncTick * 1000/59.94 ms) instead
+    // of the wall clock, and drive the tick explicitly.
+    void setPadScriptVsyncClockForTest(bool vsyncClock);
+    void setPadScriptVsyncTickForTest(uint64_t tick);
+    void clearPadScriptForTest();
+
+    // APH1 dev harness (PS2X_TK12_AP_* closed-loop route autopilot).
+    // Test hooks: reset the autopilot latch and report whether the route
+    // env arms it. Production code paths never call these.
+    void clearTk12ForTest();
+    bool tk12ArmedForTest();
+
+    // IR1 DEV-ONLY pad recorder (PS2X_PAD_RECORD). Test hooks: arm the
+    // recorder on an explicit path, drive the tick explicitly (tests have
+    // no runtime), finalize the file (emits the tail like a clean exit)
+    // and disarm, or reset to the default-off state. Production code paths
+    // never call these.
+    bool setPadRecordForTest(const char *path);
+    void setPadRecordTickForTest(uint64_t tick);
+    void closePadRecordForTest();
+    void clearPadRecordForTest();
+    // IR1b dir mode: arm one session file under `dir`, pruning to the
+    // newest `keep` files at arm time. Production never calls this.
+    bool setPadRecordDirForTest(const char *dir, uint64_t keep);
+
+    // DS1: a mid-session state load rewinds the guest clock; the open
+    // recording segment ends here and a new one begins (dir mode: a new
+    // session file whose header notes the load tick; file mode: a comment
+    // marker plus a fresh segment), so no file holds overlapping ticks.
+    // No-op when the recorder is off or capped.
+    void padRecordNoteLoad(uint64_t loadedTick);
+
+    // PR3: emit the open span and fflush now (BG1 pause, so a force-stop
+    // after backgrounding keeps every row). No-op when the recorder is off.
+    void padRecordFlushNow(const char *reason);
 }
