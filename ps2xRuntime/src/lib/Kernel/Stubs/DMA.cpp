@@ -1,4 +1,6 @@
 #include "Common.h"
+#include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h"
 #include "DMA.h"
 
 namespace ps2_stubs
@@ -63,6 +65,12 @@ namespace ps2_stubs
         {
             std::lock_guard<std::mutex> lock(g_dmaEnvMutex);
             std::memcpy(dst, &g_dmaCurrentEnv, sizeof(g_dmaCurrentEnv));
+        // E44 Part-3 EE watch (dev-only, default off).
+        ps2_e44_trace::emitRangeOverlap(rdram, ctx, envAddr, static_cast<uint32_t>(sizeof(g_dmaCurrentEnv)), "dma-getenv", 0u, false, "sceDmaGetEnv");
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), envAddr,
+                                              sizeof(g_dmaCurrentEnv), rdram,
+                                              "dma-getenv", "dma-env", 0u);
         }
         setReturnU32(ctx, envAddr);
     }
@@ -83,6 +91,7 @@ namespace ps2_stubs
         const uint8_t *src = getConstMemPtr(rdram, envAddr);
         if (!src || !runtime)
         {
+            ps2_log::emitDrop("stub/sceDmaPutEnv", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -92,6 +101,7 @@ namespace ps2_stubs
 
         if (env.sts >= kStsTable.size())
         {
+            ps2_log::emitDrop("stub/sceDmaPutEnv", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -233,4 +243,22 @@ namespace ps2_stubs
     {
         TODO_NAMED("sceDmaWatch", rdram, ctx, runtime);
     }
+}
+
+// SS1 save states: the DMA environment set by sceDmaPutEnv.
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    void dmaSavestateSave(ps2_savestate::Writer &w)
+    {
+        std::lock_guard<std::mutex> lock(ps2_stubs::g_dmaEnvMutex);
+        w.pod(ps2_stubs::g_dmaCurrentEnv);
+    }
+    bool dmaSavestateLoad(ps2_savestate::Reader &r)
+    {
+        std::lock_guard<std::mutex> lock(ps2_stubs::g_dmaEnvMutex);
+        return r.pod(ps2_stubs::g_dmaCurrentEnv);
+    }
+    const bool kDmaSavestateRegistered =
+        ps2_savestate::registerSection("stub:dma", {1u, &dmaSavestateSave, &dmaSavestateLoad, nullptr});
 }

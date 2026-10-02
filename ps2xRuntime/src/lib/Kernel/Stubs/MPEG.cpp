@@ -1,4 +1,6 @@
 #include "Common.h"
+#include "ps2_fpmode.h"
+#include "ps2_e3.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
 
@@ -16,6 +18,8 @@ extern "C"
 }
 #endif
 
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 
@@ -23,6 +27,8 @@ extern "C"
 
 namespace ps2_stubs
 {
+    static void getMpegPicture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, bool requestInput);
+
     namespace
     {
         struct MpegDecodedFrame
@@ -35,6 +41,8 @@ namespace ps2_stubs
         };
 
 #if PS2X_HAS_FFMPEG
+        // I23: env-gated vector diagnostic (defined after MpegFfmpegDecoder).
+        void maybeRunMpegVectorDiagnostic();
         std::string ffmpegErrorString(int err)
         {
             std::array<char, AV_ERROR_MAX_STRING_SIZE> buffer{};
@@ -73,10 +81,16 @@ namespace ps2_stubs
 
             bool feed(const uint8_t *data, size_t size, std::deque<MpegDecodedFrame> &frames, int64_t pts90k = -1, int64_t dts90k = -1)
             {
+                // E53: FFmpeg runs in host IEEE mode, not the EE thread's PS2 FP mode.
+                ps2_fpmode::ScopedHostMode hostFpMode;
                 if (!data || size == 0)
                 {
                     return true;
                 }
+
+                // I23: once-per-process vector check on first real input (no-op unless
+                // PS2X_MPEG_VECTOR_PATH is set; decodes through an isolated instance).
+                maybeRunMpegVectorDiagnostic();
 
                 if (!ensureInitialized())
                 {
@@ -154,11 +168,31 @@ namespace ps2_stubs
                     });
                 }
 
+                // I23: env-gated feed trace (observable WITHOUT AGRESSIVE_LOGS —
+                // the AGRESSIVE build also forces the per-call flushed file tracker
+                // into all game objects, so surgical tracing stays available standalone).
+                static uint32_t s_feedTraceCount = 0u;
+                static int s_feedTraceOn = -1;
+                if (s_feedTraceOn < 0)
+                {
+                    const char *traceEnv = std::getenv("PS2X_MPEG_FEED_TRACE");
+                    s_feedTraceOn = (traceEnv != nullptr && *traceEnv != '\0') ? 1 : 0;
+                }
+                if (s_feedTraceOn && s_feedTraceCount < 32u)
+                {
+                    ++s_feedTraceCount;
+                    std::cerr << "[MPEG:feed-trace] inSize=" << size << " parsed=" << totalParsed
+                              << " packets=" << totalPacketsSent << " newFrames=" << (frames.size() - framesBefore)
+                              << " totalFrames=" << frames.size() << std::endl;
+                }
+
                 return true;
             }
 
             bool flush(std::deque<MpegDecodedFrame> &frames)
             {
+                // E53: FFmpeg runs in host IEEE mode, not the EE thread's PS2 FP mode.
+                ps2_fpmode::ScopedHostMode hostFpMode;
                 if (!m_initialized || m_drained)
                 {
                     return true;
@@ -443,6 +477,133 @@ namespace ps2_stubs
             bool m_initialized = false;
             bool m_drained = false;
         };
+
+        // I23: env-gated MPEG vector diagnostic. When PS2X_MPEG_VECTOR_PATH
+        // names a readable file, its bytes are decoded once through an
+        // ISOLATED MpegFfmpegDecoder (never the playback queue — no guest
+        // state is touched) and the counters + RGBA digest are printed to
+        // stderr UNGATED (observable without AGRESSIVE_LOGS). Default (env
+        // unset): zero behavior change. The isolated feed/flush also emit
+        // the standard capped [MPEG:feed] line when AGRESSIVE_LOGS is on.
+        uint64_t mpegVectorFnv1a64(const uint8_t *data, size_t size)
+        {
+            uint64_t hash = 0xcbf29ce484222325ull;
+            for (size_t i = 0; i < size; ++i)
+            {
+                hash ^= static_cast<uint64_t>(data[i]);
+                hash *= 0x100000001b3ull;
+            }
+            return hash;
+        }
+
+        void maybeRunMpegVectorDiagnostic()
+        {
+            static bool s_vectorRan = false;
+            if (s_vectorRan)
+            {
+                return;
+            }
+            // Set before running: the isolated feed() below re-enters here.
+            s_vectorRan = true;
+            const char *path = std::getenv("PS2X_MPEG_VECTOR_PATH");
+            if (path == nullptr || *path == '\0')
+            {
+                return;
+            }
+            FILE *file = std::fopen(path, "rb");
+            if (file == nullptr)
+            {
+                std::cerr << "[MPEG:vector] error: cannot open " << path << std::endl;
+                return;
+            }
+            std::vector<uint8_t> bytes;
+            uint8_t chunk[4096];
+            size_t got = 0;
+            while ((got = std::fread(chunk, 1, sizeof(chunk), file)) > 0)
+            {
+                bytes.insert(bytes.end(), chunk, chunk + got);
+            }
+            std::fclose(file);
+            const uint64_t inputFnv = mpegVectorFnv1a64(bytes.data(), bytes.size());
+            std::cerr << "[MPEG:vector] path=" << path << " inSize=" << bytes.size() << " inputFnv64=" << std::hex
+                      << inputFnv << std::dec << std::endl;
+
+            MpegFfmpegDecoder probe;
+            std::deque<MpegDecodedFrame> frames;
+            const bool feedOk = probe.feed(bytes.data(), bytes.size(), frames);
+            const size_t afterFeed = frames.size();
+            std::cerr << "[MPEG:vector] feed: ok=" << feedOk << " newFrames=" << afterFeed << std::endl;
+            const bool flushOk = probe.flush(frames);
+            std::cerr << "[MPEG:vector] flush: ok=" << flushOk << " newFrames=" << (frames.size() - afterFeed)
+                      << " totalFrames=" << frames.size() << std::endl;
+
+            size_t rgbaTotal = 0;
+            for (const auto &frame : frames)
+            {
+                rgbaTotal += frame.rgba.size();
+            }
+            uint64_t rgbaFnv = 0xcbf29ce484222325ull;
+            for (const auto &frame : frames)
+            {
+                for (uint8_t b : frame.rgba)
+                {
+                    rgbaFnv ^= static_cast<uint64_t>(b);
+                    rgbaFnv *= 0x100000001b3ull;
+                }
+            }
+            size_t shown = 0;
+            for (const auto &frame : frames)
+            {
+                if (shown >= 8)
+                {
+                    break;
+                }
+                std::cerr << "[MPEG:vector] frame" << shown << " " << frame.width << "x" << frame.height
+                          << " rgba=" << frame.rgba.size() << std::endl;
+                ++shown;
+            }
+            std::vector<uint8_t> flat;
+            flat.reserve(rgbaTotal);
+            for (const auto &frame : frames)
+            {
+                flat.insert(flat.end(), frame.rgba.begin(), frame.rgba.end());
+            }
+            char firstHex[129] = {};
+            char lastHex[129] = {};
+            const size_t headLen = std::min<size_t>(64, flat.size());
+            for (size_t i = 0; i < headLen; ++i)
+            {
+                std::snprintf(firstHex + i * 2, 3, "%02x", flat[i]);
+            }
+            const size_t tailStart = flat.size() > 64 ? flat.size() - 64 : 0;
+            for (size_t i = tailStart; i < flat.size(); ++i)
+            {
+                std::snprintf(lastHex + (i - tailStart) * 2, 3, "%02x", flat[i]);
+            }
+            std::cerr << "[MPEG:vector] rgba=" << rgbaTotal << " fnv64=" << std::hex << rgbaFnv << std::dec
+                      << " first64=" << firstHex << " last64=" << lastHex << std::endl;
+
+            const char *tmpDir = std::getenv("TMPDIR");
+            if (tmpDir != nullptr && *tmpDir != '\0' && !flat.empty())
+            {
+                std::string outPath = std::string(tmpDir) + "/i23-vector-rgba.bin";
+                FILE *out = std::fopen(outPath.c_str(), "wb");
+                if (out != nullptr)
+                {
+                    std::fwrite(flat.data(), 1, flat.size(), out);
+                    std::fclose(out);
+                    std::cerr << "[MPEG:vector] wrote=" << outPath << " bytes=" << flat.size() << std::endl;
+                }
+                else
+                {
+                    std::cerr << "[MPEG:vector] wrote=none (open failed)" << std::endl;
+                }
+            }
+            else
+            {
+                std::cerr << "[MPEG:vector] wrote=none (no TMPDIR or empty)" << std::endl;
+            }
+        }
 #else
         // TODO
         class MpegFfmpegDecoder
@@ -525,6 +686,22 @@ namespace ps2_stubs
             std::vector<MpegRegisteredCallback> callbacks;
         };
 
+        // One caller-owned request, retained by its invocation/wait continuations.
+        // The global index is weak so it cannot outlive an EE scheduler/runtime.
+        struct MpegNonStreamDelivery
+        {
+            PS2Runtime *runtime = nullptr;
+            uint32_t mpegAddr = 0u;
+            uint32_t type = 0u;
+            int ownerThread = 0;
+            std::vector<MpegRegisteredCallback> callbacks;
+            size_t nextCallback = 0u;
+            uint32_t callbackData = 0u;
+            uint32_t callbackEntry = 0u;
+            uint64_t tag = 0u;
+            bool cancelled = false;
+        };
+
         struct MpegStubState
         {
             bool initialized = false;
@@ -540,13 +717,30 @@ namespace ps2_stubs
             uint32_t getPictureWaitTraceCount = 0u;
             uint32_t pictureTraceCount = 0u;
             uint32_t isEndTraceCount = 0u;
+            uint32_t devSkipMovieTraceCount = 0u;
             std::unordered_map<uint32_t, std::vector<MpegRegisteredCallback>> callbacksByMpeg;
             std::unordered_map<uint32_t, MpegPlaybackState> playbackByMpeg;
+            std::unordered_map<uint64_t, std::weak_ptr<MpegNonStreamDelivery>> nonStreamDeliveries;
         };
 
         std::mutex g_mpeg_stub_mutex;
         constexpr uint32_t kMpegPictureWaitType = 1u;
         MpegStubState g_mpeg_stub_state;
+        // DEV-ONLY startup-movie bypass (PS2X_SKIP_MOVIE=1). Default OFF: the
+        // value must be exactly "1"; absent, "0", "true" or empty all leave the
+        // faithful movie path untouched. Development bring-up scaffolding, NOT
+        // a fix -- see local/research/E29. Faithful movie correctness is E30.
+        bool devSkipMovie()
+        {
+            static const bool skip = [] {
+                if (const char *env = std::getenv("PS2X_SKIP_MOVIE"))
+                {
+                    return env[0] == '1' && env[1] == '\0';
+                }
+                return false;
+            }();
+            return skip;
+        }
 
         // TODO this resolution should follow runtime resolution
         constexpr uint32_t kStubMovieWidth = 320u;
@@ -596,7 +790,13 @@ namespace ps2_stubs
                 frameRateNumerator = 60u;
                 break;
             default:
+            {
+                // P1w: unrecognized frame-rate code yields a zero interval.
+                char dropArgs[32];
+                std::snprintf(dropArgs, sizeof(dropArgs), "code=%u", frameRateCode);
+                ps2_log::emitDrop("stub/mpegPictureIntervalQ32", "unknown-frame-rate", dropArgs);
                 return 0u;
+            }
             }
 
             const uint64_t extensionNumerator = static_cast<uint64_t>(frameRateExtensionN) + 1u;
@@ -1150,6 +1350,64 @@ namespace ps2_stubs
             return out;
         }
 
+        std::vector<MpegRegisteredCallback> matchingNonStreamCallbacks(uint32_t mpegAddr, uint32_t requestedType)
+        {
+            std::vector<MpegRegisteredCallback> out;
+            const auto it = g_mpeg_stub_state.callbacksByMpeg.find(mpegAddr);
+            if (it != g_mpeg_stub_state.callbacksByMpeg.end())
+            {
+                for (const MpegRegisteredCallback &callback : it->second)
+                {
+                    if (!callback.stream && callback.type == requestedType)
+                    {
+                        out.push_back(callback);
+                    }
+                }
+            }
+            return out;
+        }
+
+        uint64_t nonStreamDeliveryKey(uint32_t mpegAddr, uint32_t type)
+        {
+            return (static_cast<uint64_t>(mpegAddr) << 32u) | type;
+        }
+
+        // Called under the MPEG lock. Cancelling a queued entry changes only
+        // that owned invocation; an already executing callback retains its data
+        // until onComplete and cannot dispatch the rest of the collected list.
+        void invalidateNonStreamDeliveries(uint32_t mpegAddr)
+        {
+            for (auto it = g_mpeg_stub_state.nonStreamDeliveries.begin();
+                 it != g_mpeg_stub_state.nonStreamDeliveries.end();)
+            {
+                if (static_cast<uint32_t>(it->first >> 32u) != mpegAddr)
+                {
+                    ++it;
+                    continue;
+                }
+                if (const auto delivery = it->second.lock())
+                {
+                    delivery->cancelled = true;
+                    EeScheduler &scheduler = delivery->runtime->eeScheduler();
+                    if (GuestThread *owner = scheduler.thread(delivery->ownerThread))
+                    {
+                        for (GuestInvocation &invocation : owner->invocations)
+                        {
+                            if (invocation.kind == GuestInvocationKind::HleCall &&
+                                invocation.tag == delivery->tag &&
+                                invocation.context.pc == delivery->callbackEntry)
+                            {
+                                invocation.context.pc = 0u;
+                            }
+                        }
+                    }
+                    // This schedules a wake; it never executes guest code here.
+                    scheduler.completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_WAIT_DELETE);
+                }
+                it = g_mpeg_stub_state.nonStreamDeliveries.erase(it);
+            }
+        }
+
         void queueStreamCallbackEvent(uint32_t mpegAddr,
                                       uint32_t streamType,
                                       uint32_t dataAddr,
@@ -1570,12 +1828,14 @@ namespace ps2_stubs
                 return false;
             }
 
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, addr, kMpegCallbackDataSize); // E3b R3e E9
             std::memset(data, 0, kMpegCallbackDataSize);
             *reinterpret_cast<uint32_t *>(data + 0x00u) = event.streamType;
             *reinterpret_cast<uint32_t *>(data + 0x08u) = event.dataAddr;
             *reinterpret_cast<uint32_t *>(data + 0x0Cu) = event.len;
             *reinterpret_cast<uint64_t *>(data + 0x10u) = event.pts;
             *reinterpret_cast<uint64_t *>(data + 0x18u) = event.dts;
+            ps2_e3::tapEnd(std::move(e3t), "mpeg-cb", rdram, "-");
             return true;
         }
 
@@ -1618,6 +1878,71 @@ namespace ps2_stubs
                 runtime->guestFree(cbDataAddr);
             };
             runtime->eeScheduler().queueInvocation(std::move(invocation));
+        }
+
+        void dispatchGuestNonStreamCallback(uint8_t *rdram,
+                                            R5900Context *callerCtx,
+                                            std::shared_ptr<MpegNonStreamDelivery> delivery)
+        {
+            PS2Runtime *runtime = delivery->runtime;
+            while (delivery && !delivery->cancelled && delivery->nextCallback < delivery->callbacks.size())
+            {
+                const MpegRegisteredCallback callback = delivery->callbacks[delivery->nextCallback++];
+                if (callback.func == 0u || !runtime->hasFunction(callback.func))
+                {
+                    continue;
+                }
+                // The observed non-stream producer initializes only word 0.
+                // Do not reuse the unrelated 0x20-byte stream-event layout.
+                const uint32_t cbDataAddr = runtime->guestMalloc(sizeof(uint32_t), alignof(uint32_t));
+                uint8_t *data = cbDataAddr != 0u ? getMemPtr(rdram, cbDataAddr) : nullptr;
+                if (!data)
+                {
+                    runtime->guestFree(cbDataAddr);
+                    continue;
+                }
+                ps2_e3::Tap tap = ps2_e3::tapBegin(rdram, cbDataAddr, sizeof(uint32_t));
+                std::memcpy(data, &delivery->type, sizeof(uint32_t));
+                ps2_e3::tapEnd(std::move(tap), "mpeg-nonstream-cb", rdram, "-");
+                delivery->callbackData = cbDataAddr;
+                delivery->callbackEntry = callback.func;
+                delivery->tag = 0x4D50454700000000ull | callback.handle;
+
+                GuestInvocation invocation{};
+                invocation.kind = GuestInvocationKind::HleCall;
+                invocation.tag = delivery->tag;
+                invocation.context = *callerCtx;
+                invocation.context.pc = callback.func;
+                SET_GPR_U32(&invocation.context, 4, delivery->mpegAddr);
+                SET_GPR_U32(&invocation.context, 5, cbDataAddr);
+                SET_GPR_U32(&invocation.context, 6, callback.data);
+                // Keep the caller's stack. Zero RA is the scheduler's HLE
+                // continuation sentinel; the original RA/PC remain in parent.
+                SET_GPR_U32(&invocation.context, 31, 0u);
+                invocation.onComplete = [rdram, runtime, delivery](const R5900Context &, R5900Context &parent)
+                {
+                    runtime->guestFree(delivery->callbackData);
+                    delivery->callbackData = 0u;
+                    if (delivery->cancelled)
+                    {
+                        setReturnS32(&parent, KE_WAIT_DELETE);
+                        return;
+                    }
+                    // Callback v0 is deliberately ignored. Preserve registration
+                    // order, then continue this request without re-triggering it.
+                    dispatchGuestNonStreamCallback(rdram, &parent, delivery);
+                    getMpegPicture(rdram, &parent, runtime, false);
+                };
+                // CL1: invokeCurrent never returns (longjmp when a transfer is
+                // armed, throw otherwise), so this frame is abandoned on the
+                // transfer path. The queued invocation's onComplete above owns
+                // the only ref the delivery needs across the transfer; release
+                // ours first so no abandoned shared_ptr leaks (SQ1 P3: one
+                // immortal ~100-200 B shell per input dispatch). No re-acquire
+                // is needed: nothing after this call runs with this frame alive.
+                delivery.reset();
+                runtime->eeScheduler().invokeCurrent(std::move(invocation));
+            }
         }
 
         void dispatchStreamCallbacks(uint8_t *rdram,
@@ -1668,13 +1993,14 @@ namespace ps2_stubs
                     static_cast<size_t>(mbx) * static_cast<size_t>(outHeight) * 16u * 4u;
                 for (uint32_t y = 0u; y < outHeight; ++y)
                 {
-                    uint8_t *dst = getMemPtr(
-                        rdram,
-                        destAddr + static_cast<uint32_t>(stripOffset + static_cast<size_t>(y) * 16u * 4u));
+                    const uint32_t e3row =
+                        destAddr + static_cast<uint32_t>(stripOffset + static_cast<size_t>(y) * 16u * 4u);
+                    uint8_t *dst = getMemPtr(rdram, e3row);
                     if (!dst)
                     {
                         continue;
                     }
+                    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, e3row, 64u); // E3b R3e E9
                     for (uint32_t x = 0u; x < 16u; ++x)
                     {
                         dst[x * 4u + 0u] = 0u;
@@ -1682,6 +2008,7 @@ namespace ps2_stubs
                         dst[x * 4u + 2u] = 0u;
                         dst[x * 4u + 3u] = 0x80u;
                     }
+                    ps2_e3::tapEnd(std::move(e3t), "mpeg-strip", rdram, "blank=1");
                 }
             }
         }
@@ -1705,14 +2032,15 @@ namespace ps2_stubs
                     static_cast<size_t>(mbx) * static_cast<size_t>(outHeight) * 16u * 4u;
                 for (uint32_t y = 0u; y < outHeight; ++y)
                 {
-                    uint8_t *dst = getMemPtr(
-                        rdram,
-                        destAddr + static_cast<uint32_t>(stripOffset + static_cast<size_t>(y) * 16u * 4u));
+                    const uint32_t e3row =
+                        destAddr + static_cast<uint32_t>(stripOffset + static_cast<size_t>(y) * 16u * 4u);
+                    uint8_t *dst = getMemPtr(rdram, e3row);
                     if (!dst)
                     {
                         continue;
                     }
 
+                    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, e3row, 64u); // E3b R3e E9
                     for (uint32_t x = 0u; x < 16u; ++x)
                     {
                         const uint32_t srcX = mbx * 16u + x;
@@ -1738,12 +2066,18 @@ namespace ps2_stubs
                             dst[x * 4u + 3u] = 0x80u;
                         }
                     }
+                    ps2_e3::tapEnd(std::move(e3t), "mpeg-strip", rdram, "blank=0");
                 }
             }
         }
 
         void resetMpegStubStateUnlocked()
         {
+            while (!g_mpeg_stub_state.nonStreamDeliveries.empty())
+            {
+                invalidateNonStreamDeliveries(static_cast<uint32_t>(
+                    g_mpeg_stub_state.nonStreamDeliveries.begin()->first >> 32u));
+            }
             g_mpeg_stub_state.initialized = false;
             g_mpeg_stub_state.nextCallbackHandle = 1u;
             g_mpeg_stub_state.cdStreamGeneration = 0u;
@@ -1757,6 +2091,7 @@ namespace ps2_stubs
             g_mpeg_stub_state.getPictureWaitTraceCount = 0u;
             g_mpeg_stub_state.pictureTraceCount = 0u;
             g_mpeg_stub_state.isEndTraceCount = 0u;
+            g_mpeg_stub_state.devSkipMovieTraceCount = 0u;
             g_mpeg_stub_state.callbacksByMpeg.clear();
             g_mpeg_stub_state.playbackByMpeg.clear();
         }
@@ -1766,6 +2101,33 @@ namespace ps2_stubs
     {
         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
         resetMpegStubStateUnlocked();
+    }
+
+    // CP4-fix: CP4's scheduler transfer longjmps out of guest code, so the
+    // C++ frames between the transfer site and run() never unwind. In
+    // particular getMpegPicture's `delivery` shared_ptr is abandoned, which
+    // keeps the delivery (and its scheduler/runtime pointers) reachable via
+    // the weak index after the runtime dies; a later reset then touches the
+    // dead scheduler (suite segfault). Drop this runtime's index entries at
+    // destruction so no later reset can reach them. This never touches the
+    // dying scheduler, and the game runtime is never destroyed mid-game, so
+    // the fast path is unchanged.
+    void invalidateMpegNonStreamDeliveriesForRuntime(PS2Runtime *runtime)
+    {
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        for (auto it = g_mpeg_stub_state.nonStreamDeliveries.begin();
+             it != g_mpeg_stub_state.nonStreamDeliveries.end();)
+        {
+            const auto delivery = it->second.lock();
+            if (delivery && delivery->runtime == runtime)
+            {
+                it = g_mpeg_stub_state.nonStreamDeliveries.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
     }
 
     void enqueueMpegDecodedFrameForTesting(uint32_t mpegAddr)
@@ -1799,6 +2161,7 @@ namespace ps2_stubs
         g_mpeg_stub_state.getPictureWaitTraceCount = 0u;
         g_mpeg_stub_state.pictureTraceCount = 0u;
         g_mpeg_stub_state.isEndTraceCount = 0u;
+        g_mpeg_stub_state.devSkipMovieTraceCount = 0u;
 
         for (auto &[mpegAddr, playback] : g_mpeg_stub_state.playbackByMpeg)
         {
@@ -1963,7 +2326,11 @@ namespace ps2_stubs
             {
                 uint8_t *q = getMemPtr(rdram, ptr + 0x28u);
                 if (q)
+                {
+                    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, ptr + 0x28u, 4u); // E3b R3e E9
                     *reinterpret_cast<uint32_t *>(q) = 0u;
+                    ps2_e3::tapEnd(std::move(e3t), "mpeg-clearref", rdram, "-");
+                }
             }
         }
         setReturnU32(ctx, 1u);
@@ -1972,14 +2339,20 @@ namespace ps2_stubs
     static void mpegGuestWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
     {
         if (uint8_t *p = getMemPtr(rdram, addr))
+        {
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, addr, 4u); // E3b R3e E9 choke
             *reinterpret_cast<uint32_t *>(p) = value;
+            ps2_e3::tapEnd(std::move(e3t), "mpeg-w32", rdram, "-");
+        }
     }
     static void mpegGuestWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
     {
         if (uint8_t *p = getMemPtr(rdram, addr))
         {
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, addr, 8u); // E3b R3e E9 choke
             *reinterpret_cast<uint32_t *>(p) = static_cast<uint32_t>(value);
             *reinterpret_cast<uint32_t *>(p + 4) = static_cast<uint32_t>(value >> 32);
+            ps2_e3::tapEnd(std::move(e3t), "mpeg-w64", rdram, "-");
         }
     }
 
@@ -2000,6 +2373,7 @@ namespace ps2_stubs
 
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            invalidateNonStreamDeliveries(param_1);
             getPlaybackState(param_1) = makeFreshPlaybackState();
         }
 
@@ -2007,6 +2381,10 @@ namespace ps2_stubs
         const uint32_t innerSize = static_cast<uint32_t>(iVar2_signed) - 0x118u;
 
         mpegGuestWrite32(rdram, param_1 + 0x40, uVar3);
+        // End word read by sceMpegIsEnd. The stock Create clears it through
+        // its sceMpegReset call (SSX 3: jal 0x402b58 at 0x40292c); without
+        // this a handle reusing the previous movie's work area starts ended.
+        mpegGuestWrite32(rdram, uVar3 + 0x00, 0u);
 
         const uint32_t a1_init = uVar3 + 0x118u;
         mpegGuestWrite32(rdram, puVar4 + 0x0, a1_init);
@@ -2069,6 +2447,7 @@ namespace ps2_stubs
         const uint32_t mpegAddr = getRegU32(ctx, 4);
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            invalidateNonStreamDeliveries(mpegAddr);
             g_mpeg_stub_state.callbacksByMpeg.erase(mpegAddr);
             g_mpeg_stub_state.playbackByMpeg.erase(mpegAddr);
         }
@@ -2280,7 +2659,7 @@ namespace ps2_stubs
         setReturnU32(ctx, getPlaybackState(mpegAddr).decodeMode);
     }
 
-    void sceMpegGetPicture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    static void getMpegPicture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, bool requestInput)
     {
         const uint32_t mpegAddr = getRegU32(ctx, 4);
         const uint32_t imageAddr = getRegU32(ctx, 5);
@@ -2289,9 +2668,88 @@ namespace ps2_stubs
         uint32_t frameCount = 0u;
         bool haveFrame = false;
         MpegDecodedFrame frame;
+        std::shared_ptr<MpegNonStreamDelivery> delivery;
+        bool dispatchInput = false;
+        bool publishEnd = false;
+        {
+            std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            // Original GetPicture's IPU-busy input request produces cbData
+            // word0=1. No other non-stream type or trigger is synthesized.
+            constexpr uint32_t inputRequestType = 1u;
+            const uint64_t key = nonStreamDeliveryKey(mpegAddr, inputRequestType);
+            // CL1: entry PRESENCE is the "input already requested" memory, not
+            // refcount survival. Completed deliveries now die once their last
+            // queued invocation finishes (no frame-owned ref survives the
+            // transfer below), but a present entry still suppresses
+            // re-dispatch exactly as the pre-CP4 leaked ref did: without this,
+            // every drought GetPicture would re-request input and change guest
+            // behavior. The erase sites (invalidate/reset/dtor/load) re-arm
+            // the request, as before.
+            const auto pendingIt = g_mpeg_stub_state.nonStreamDeliveries.find(key);
+            const bool alreadyRequested = pendingIt != g_mpeg_stub_state.nonStreamDeliveries.end();
+            if (alreadyRequested)
+            {
+                delivery = pendingIt->second.lock();
+            }
+            MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+            if (requestInput && !alreadyRequested && playback.decodedFrames.empty() &&
+                !g_mpeg_stub_state.currentCdStreamEofSeen && !playback.streamEnded && !playback.decoderFailed)
+            {
+                auto callbacks = matchingNonStreamCallbacks(mpegAddr, inputRequestType);
+                if (!callbacks.empty())
+                {
+                    delivery = std::make_shared<MpegNonStreamDelivery>();
+                    delivery->runtime = runtime;
+                    delivery->mpegAddr = mpegAddr;
+                    delivery->type = inputRequestType;
+                    delivery->callbacks = std::move(callbacks);
+                    g_mpeg_stub_state.nonStreamDeliveries[key] = delivery;
+                    dispatchInput = true;
+                }
+            }
+        }
+        if (dispatchInput)
+        {
+            // AddBs re-enters the MPEG mutex. Dispatch only after collecting
+            // under the lock, on the GetPicture caller rather than an RPC thread.
+            runtime->eeScheduler().bindMainContextForSyscall(*ctx, rdram);
+            delivery->ownerThread = runtime->eeScheduler().currentThreadId();
+            // CL1: the dispatch transfers (invokeCurrent never returns), so
+            // this frame is abandoned with it. Move our ref in: the queued
+            // invocation owns the only ref across the transfer.
+            dispatchGuestNonStreamCallback(rdram, ctx, std::move(delivery));
+        }
         {
             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
+            // DEV-ONLY (PS2X_SKIP_MOVIE=1) startup-movie bypass. NOT a fix, and
+            // not on any default path. Bounded to ONE thing: thread 1 does not
+            // PARK in the picture wait below. Everything before this point --
+            // the non-stream delivery, the producer dispatch, the guest's
+            // sceMpegAddBs, the parser feed -- runs exactly as it does with the
+            // flag off. Marking the playback ended puts the state machine in the
+            // same state finishPlaybackStream() and the program-end path already
+            // produce, so the guest takes its OWN end-of-stream exit (the RCMP
+            // player's counter-bounded re-ask loop at guest 0x3b1050) instead of
+            // blocking on a picture this runtime cannot yet deliver. The decoder
+            // is deliberately NOT flushed: the bypass synthesizes no frames.
+            if (devSkipMovie() && playback.decodedFrames.empty() && !playback.streamEnded)
+            {
+                playback.streamEnded = true;
+                playback.cdStreamGeneration = g_mpeg_stub_state.cdStreamGeneration;
+                if (g_mpeg_stub_state.devSkipMovieTraceCount < 32u)
+                {
+                    PS2_IF_AGRESSIVE_LOGS({
+                        std::cerr << "[MPEG:DEV-SKIP-MOVIE] bypass armed (PS2X_SKIP_MOVIE=1), mpeg=0x"
+                                  << std::hex << mpegAddr << std::dec
+                                  << " n=" << (g_mpeg_stub_state.devSkipMovieTraceCount + 1u)
+                                  << " requestInput=" << requestInput
+                                  << " sawInput=" << playback.sawInput
+                                  << " served=" << playback.picturesServed << std::endl;
+                    });
+                    ++g_mpeg_stub_state.devSkipMovieTraceCount;
+                }
+            }
             if (playback.decodedFrames.empty() &&
                 !g_mpeg_stub_state.currentCdStreamEofSeen &&
                 !playback.streamEnded &&
@@ -2312,6 +2770,9 @@ namespace ps2_stubs
                     EeWaitReason::Mpeg,
                     kMpegPictureWaitType,
                     mpegAddr,
+                    // CL1: no delivery capture (the body never used it); the
+                    // wait abandons this frame on transfer, so nothing owned
+                    // may be held here.
                     [rdram, runtime](R5900Context &resumeContext)
                     {
                         if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
@@ -2348,6 +2809,7 @@ namespace ps2_stubs
                     runtime->eeScheduler().waitVSync(
                         eligibleTick - 1u,
                         -1,
+                        // CL1: no delivery capture (the body never used it); see above.
                         [rdram, runtime](R5900Context &resumeContext)
                         {
                             if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
@@ -2387,6 +2849,12 @@ namespace ps2_stubs
                 height = playback.height;
                 frameCount = playback.picturesServed;
             }
+            // The stock library's sceMpegIsEnd (SSX 3: 0x402b38) is a plain
+            // load of [[mpeg+0x40]+0]; nothing else tells the guest the movie
+            // is over. Publish it once playback has ended and no decoded
+            // picture is left to serve: the bypass sets streamEnded above, the
+            // faithful path at program end or producer EOF (after the flush).
+            publishEnd = playback.streamEnded && playback.decodedFrames.empty();
         }
 
         mpegGuestWrite32(rdram, mpegAddr + 0x00u, width);
@@ -2398,11 +2866,17 @@ namespace ps2_stubs
             const uint32_t iVar1 = *reinterpret_cast<uint32_t *>(base + 0x40);
             if (uint8_t *inner = getMemPtr(rdram, iVar1))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, iVar1 + 0xb0u, 0x38u); // E3b R3e E9
                 *reinterpret_cast<uint32_t *>(inner + 0xb0) = 1;
                 *reinterpret_cast<uint32_t *>(inner + 0xd8) = (getRegU32(ctx, 5) & 0x0FFFFFFFu) | 0x20000000u;
                 *reinterpret_cast<uint32_t *>(inner + 0xe4) = getRegU32(ctx, 6);
                 *reinterpret_cast<uint32_t *>(inner + 0xdc) = 0;
                 *reinterpret_cast<uint32_t *>(inner + 0xe0) = 0;
+                ps2_e3::tapEnd(std::move(e3t), "mpeg-getpic", rdram, "-");
+            }
+            if (publishEnd && iVar1 != 0u)
+            {
+                mpegGuestWrite32(rdram, iVar1 + 0x00u, 1u);
             }
         }
 
@@ -2416,6 +2890,11 @@ namespace ps2_stubs
         }
 
         setReturnS32(ctx, 0);
+    }
+
+    void sceMpegGetPicture(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        getMpegPicture(rdram, ctx, runtime, true);
     }
 
     void sceMpegGetPictureRAW8(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -2505,6 +2984,7 @@ namespace ps2_stubs
         const uint32_t param_1 = getRegU32(ctx, 4);
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+            invalidateNonStreamDeliveries(param_1);
             MpegPlaybackState &playback = getPlaybackState(param_1);
             MpegPlaybackState resetState = makeFreshPlaybackStatePreservingConfig(playback);
             if (playback.streamEnded || playback.decoderFailed)
@@ -2570,4 +3050,117 @@ namespace ps2_stubs
         getPlaybackState(mpegAddr).imageBufferAddr = imageBufferAddr;
         setReturnS32(ctx, 0);
     }
+}
+
+// SS1 save states: MPEG HLE bookkeeping. A live playback (FFmpeg decoder,
+// decoded frames) or a non-stream delivery can't be captured: saves defer.
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    void mpegSavestateSave(ps2_savestate::Writer &w)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        const auto &s = g_mpeg_stub_state;
+        w.b(s.initialized);
+        w.u32(s.nextCallbackHandle);
+        for (uint64_t v : {s.cdStreamGeneration, s.cdStreamBytesProduced, s.cdStreamBytesDemuxed})
+            w.u64(v);
+        w.b(s.cdStreamEofPending);
+        w.b(s.currentCdStreamEofSeen);
+        ps2_savestate::writeOrdered(w, s.callbacksByMpeg, [](ps2_savestate::Writer &ww, const auto &e) {
+            ww.u32(e.first);
+            ww.podVec(e.second);
+        });
+        // Playback bookkeeping without a live decoder (ready() refuses one).
+        ps2_savestate::writeOrdered(w, s.playbackByMpeg, [](ps2_savestate::Writer &ww, const auto &e) {
+            const MpegPlaybackState &p = e.second;
+            ww.u32(e.first);
+            for (uint32_t v : {p.picturesServed, p.width, p.height, p.decodeMode, p.imageBufferAddr})
+                ww.u32(v);
+            for (bool v : {p.sawInput, p.sawSequenceEnd, p.streamEnded, p.decoderFailed, p.waitingForVideoSequenceHeader,
+                           p.hasFrameRateExtension})
+                ww.b(v);
+            ww.u64(p.cdStreamGeneration);
+            ww.podVec(p.videoSequenceSyncBuffer);
+            ww.podVec(p.pssBuffer);
+            ww.podVec(p.pssGuestAddrs);
+            for (uint8_t v : {p.frameRateCode, p.frameRateExtensionN, p.frameRateExtensionD})
+                ww.u8(v);
+            ww.podVec(p.videoTimingScanBuffer);
+            for (uint64_t v : {p.pictureIntervalQ32, p.nextPictureTickQ32, p.presentationEndTickQ32,
+                               p.ptsPresentationBaseTickQ32})
+                ww.u64(v);
+            ww.pod(p.firstPresentedPts90k);
+        });
+    }
+    bool mpegSavestateLoad(ps2_savestate::Reader &r)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        auto &s = g_mpeg_stub_state;
+        s.initialized = r.b();
+        s.nextCallbackHandle = r.u32();
+        for (uint64_t *v : {&s.cdStreamGeneration, &s.cdStreamBytesProduced, &s.cdStreamBytesDemuxed})
+            *v = r.u64();
+        s.cdStreamEofPending = r.b();
+        s.currentCdStreamEofSeen = r.b();
+        ps2_savestate::readOrdered(r, s.callbacksByMpeg, [](ps2_savestate::Reader &rr, auto &e) {
+            e.first = rr.u32();
+            rr.podVec(e.second);
+        });
+        ps2_savestate::readOrdered(r, s.playbackByMpeg, [](ps2_savestate::Reader &rr, auto &e) {
+            MpegPlaybackState &p = e.second;
+            e.first = rr.u32();
+            for (uint32_t *v : {&p.picturesServed, &p.width, &p.height, &p.decodeMode, &p.imageBufferAddr})
+                *v = rr.u32();
+            for (bool *v : {&p.sawInput, &p.sawSequenceEnd, &p.streamEnded, &p.decoderFailed,
+                            &p.waitingForVideoSequenceHeader, &p.hasFrameRateExtension})
+                *v = rr.b();
+            p.cdStreamGeneration = rr.u64();
+            rr.podVec(p.videoSequenceSyncBuffer);
+            rr.podVec(p.pssBuffer);
+            rr.podVec(p.pssGuestAddrs);
+            for (uint8_t *v : {&p.frameRateCode, &p.frameRateExtensionN, &p.frameRateExtensionD})
+                *v = rr.u8();
+            rr.podVec(p.videoTimingScanBuffer);
+            for (uint64_t *v : {&p.pictureIntervalQ32, &p.nextPictureTickQ32, &p.presentationEndTickQ32,
+                                &p.ptsPresentationBaseTickQ32})
+                *v = rr.u64();
+            rr.pod(p.firstPresentedPts90k);
+        });
+        s.nonStreamDeliveries.clear();
+        return r.ok();
+    }
+    std::string mpegSavestateReady()
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        // A decoder whose stream has ended holds no state a later stream
+        // needs (the next one starts at a sequence header, which a fresh
+        // decoder decodes identically), so it is dropped; a mid-stream
+        // decoder or queued pictures defer the save.
+        for (const auto &[addr, playback] : g_mpeg_stub_state.playbackByMpeg)
+        {
+            const bool ended = playback.sawSequenceEnd || playback.streamEnded;
+            if (!playback.decodedFrames.empty() || (playback.decoder && !ended))
+            {
+                char why[160];
+                std::snprintf(why, sizeof(why),
+                              "MPEG decoder live addr=0x%x decoder=%d frames=%zu seqEnd=%d streamEnded=%d served=%u",
+                              addr, playback.decoder ? 1 : 0, playback.decodedFrames.size(),
+                              playback.sawSequenceEnd ? 1 : 0, playback.streamEnded ? 1 : 0, playback.picturesServed);
+                return why;
+            }
+        }
+        for (const auto &[tag, weak] : g_mpeg_stub_state.nonStreamDeliveries)
+        {
+            (void)tag;
+            if (!weak.expired())
+                return "MPEG non-stream delivery live";
+        }
+        return {};
+    }
+    const bool kMpegSavestateRegistered =
+        ps2_savestate::registerSection("stub:mpeg", {2u, &mpegSavestateSave, &mpegSavestateLoad, &mpegSavestateReady});
 }

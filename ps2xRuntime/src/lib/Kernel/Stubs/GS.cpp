@@ -1,9 +1,13 @@
 #include "Common.h"
+#include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h"
 #include "GS.h"
 #include "ps2_log.h"
+#include "ps2_mtvu.h"
 #include "runtime/gs/ps2_gs_common.h"
 #include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/ee_scheduler.h"
+#include "../Syscalls/System.h"
 
 namespace ps2_stubs
 {
@@ -109,6 +113,7 @@ namespace ps2_stubs
 
         void applyGsClearPacket(PS2Runtime *runtime, const GsClearMem &clear)
         {
+            ps2_mtvu::sync(ps2_mtvu::Reason::GsHle); // MT1: HLE drives the GS directly
             if (!runtime->syncCoreSubsystems() || !hasSeededGsClearPacket(clear))
             {
                 return;
@@ -598,6 +603,7 @@ namespace ps2_stubs
         GsImageMem img{};
         if (!runtime || !runtime->syncCoreSubsystems() || !readGsImage(rdram, imgAddr, img))
         {
+            ps2_log::emitDrop("stub/sceGsExecLoadImage", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -605,6 +611,7 @@ namespace ps2_stubs
         const uint32_t rowBytes = bytesForPixels(img.psm, static_cast<uint32_t>(img.width));
         if (rowBytes == 0)
         {
+            ps2_log::emitDrop("stub/sceGsExecLoadImage", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -618,6 +625,7 @@ namespace ps2_stubs
         uint32_t pktAddr = runtime->guestMalloc(totalQwc * 16u, 16u);
         if (pktAddr == 0)
         {
+            ps2_log::emitDrop("stub/sceGsExecLoadImage", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -627,6 +635,7 @@ namespace ps2_stubs
         if (!pkt || !src)
         {
             runtime->guestFree(pktAddr);
+            ps2_log::emitDrop("stub/sceGsExecLoadImage", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -675,6 +684,7 @@ namespace ps2_stubs
         GsImageMem img{};
         if (!runtime || !runtime->syncCoreSubsystems() || !readGsImage(rdram, imgAddr, img))
         {
+            ps2_log::emitDrop("stub/sceGsExecStoreImage", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -682,6 +692,7 @@ namespace ps2_stubs
         const uint32_t rowBytes = bytesForPixels(img.psm, static_cast<uint32_t>(img.width));
         if (rowBytes == 0)
         {
+            ps2_log::emitDrop("stub/sceGsExecStoreImage", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -692,6 +703,7 @@ namespace ps2_stubs
         uint8_t *dst = getMemPtr(rdram, dstAddr);
         if (!dst)
         {
+            ps2_log::emitDrop("stub/sceGsExecStoreImage", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -712,6 +724,7 @@ namespace ps2_stubs
         uint32_t pktAddr = runtime->guestMalloc(80u, 16u);
         if (pktAddr == 0)
         {
+            ps2_log::emitDrop("stub/sceGsExecStoreImage", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -720,6 +733,7 @@ namespace ps2_stubs
         if (!pkt)
         {
             runtime->guestFree(pktAddr);
+            ps2_log::emitDrop("stub/sceGsExecStoreImage", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -745,6 +759,13 @@ namespace ps2_stubs
         mem.processPendingTransfers();
 
         ps2TraceGuestRangeWrite(rdram, dstAddr, totalImageBytes, "sceGsExecStoreImage", ctx);
+        // E44 Part-3 EE watch (dev-only, default off).
+        ps2_e44_trace::emitRangeOverlap(rdram, ctx, dstAddr, totalImageBytes, "sceGsExecStoreImage", 0u, false, "sceGsExecStoreImage");
+        if (ps2_e41_trace::plantArmed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dstAddr,
+                                          totalImageBytes, rdram, "gs-store-image",
+                                          "gs-image", 0u);
+        ps2_mtvu::sync(ps2_mtvu::Reason::GsHle); // MT1: GS->host readback
         runtime->gs().consumeLocalToHostBytes(dst, totalImageBytes);
         runtime->guestFree(pktAddr);
 
@@ -763,6 +784,7 @@ namespace ps2_stubs
         GsDispEnvMem env{};
         if (!readGsDispEnv(rdram, envAddr, env))
         {
+            ps2_log::emitDrop("stub/sceGsPutDispEnv", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -776,6 +798,7 @@ namespace ps2_stubs
         GsRegPairMem pairs[8]{};
         if (!readGsRegPairs(rdram, envAddr, pairs, 8u))
         {
+            ps2_log::emitDrop("stub/sceGsPutDrawEnv", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -794,6 +817,7 @@ namespace ps2_stubs
         {
             if (runtime && !runtime->syncCoreSubsystems())
             {
+                ps2_log::emitDrop("stub/sceGsResetGraph", "error");
                 setReturnS32(ctx, -1);
                 return;
             }
@@ -802,6 +826,10 @@ namespace ps2_stubs
             g_gparam.omode = static_cast<uint8_t>(omode & 0xFF);
             g_gparam.ffmode = static_cast<uint8_t>(ffmode & 0x1);
             writeGsGParamToScratch(runtime);
+            // GB3: the real sceGsResetGraph calls SetGsCrt(interlace, omode,
+            // ffmode) here; this HLE stub never reached syscall 0x02, so
+            // SMODE1 stayed 0 (G44's blocker). Apply the same effect.
+            ps2_syscalls::applyGsCrt(runtime, interlace, omode, ffmode, "sceGsResetGraph");
             uint64_t pmode = makePmode(1, 0, 0, 0, 0, 0x80);
             uint64_t smode2 = (interlace & 0x1) | ((ffmode & 0x1) << 1);
             uint64_t dispfb = makeDispFb(0, 10, 0, 0, 0);
@@ -931,6 +959,7 @@ namespace ps2_stubs
 
         if (!writeGsDBuffDc(rdram, envAddr, db))
         {
+            ps2_log::emitDrop("stub/sceGsSetDefDBuffDc", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -990,6 +1019,7 @@ namespace ps2_stubs
 
         if (!writeGsDBuff(rdram, envAddr, db))
         {
+            ps2_log::emitDrop("stub/sceGsSetDefDBuff", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -1136,6 +1166,7 @@ namespace ps2_stubs
         GsDBuffDcMem db{};
         if (!runtime || !readGsDBuffDc(rdram, envAddr, db))
         {
+            ps2_log::emitDrop("stub/sceGsSwapDBuffDc", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -1167,6 +1198,7 @@ namespace ps2_stubs
             if (hasSeededGsClearPacket(db.clear0))
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear0.prim.value >> 9) & 0x1u);
+                ps2_mtvu::sync(ps2_mtvu::Reason::GsHle);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear0.rgbaq.value));
             }
             applyGsClearPacket(runtime, db.clear0);
@@ -1178,6 +1210,7 @@ namespace ps2_stubs
             if (hasSeededGsClearPacket(db.clear1))
             {
                 const uint32_t clearContext = static_cast<uint32_t>((db.clear1.prim.value >> 9) & 0x1u);
+                ps2_mtvu::sync(ps2_mtvu::Reason::GsHle);
                 runtime->gs().clearFramebufferContext(clearContext, static_cast<uint32_t>(db.clear1.rgbaq.value));
             }
             applyGsClearPacket(runtime, db.clear1);
@@ -1194,6 +1227,7 @@ namespace ps2_stubs
         GsDBuffMem db{};
         if (!runtime || !readGsDBuff(rdram, envAddr, db))
         {
+            ps2_log::emitDrop("stub/sceGsSwapDBuff", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -1227,6 +1261,7 @@ namespace ps2_stubs
             {
                 if (++count > kTimeout)
                 {
+                    ps2_log::emitDrop("stub/sceGsSyncPath", "error");
                     setReturnS32(ctx, -1);
                     return;
                 }
@@ -1236,6 +1271,7 @@ namespace ps2_stubs
             {
                 if (++count > kTimeout)
                 {
+                    ps2_log::emitDrop("stub/sceGsSyncPath", "error");
                     setReturnS32(ctx, -1);
                     return;
                 }
@@ -1245,6 +1281,7 @@ namespace ps2_stubs
             {
                 if (++count > kTimeout)
                 {
+                    ps2_log::emitDrop("stub/sceGsSyncPath", "error");
                     setReturnS32(ctx, -1);
                     return;
                 }
@@ -1254,6 +1291,7 @@ namespace ps2_stubs
             {
                 if (++count > kTimeout)
                 {
+                    ps2_log::emitDrop("stub/sceGsSyncPath", "error");
                     setReturnS32(ctx, -1);
                     return;
                 }

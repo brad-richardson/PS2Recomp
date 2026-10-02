@@ -1,4 +1,9 @@
+#include "runtime/ps2_savestate.h"
 #include "Common.h"
+#include "ps2_e3.h"
+#include "ps2_fh1_full120.h"
+#include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h"
 #include "CD.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
@@ -31,9 +36,68 @@ namespace ps2_stubs
         uint32_t g_cdStReadTraceCount = 0u;
         CdStreamTimingState g_cdStreamTiming;
 
+        // Async CD callback (sceCdCallback / sceCdInitEeCB HLE). The game
+        // registers a CD completion callback whose invocation signals the
+        // semaphore its thread waits on.
+        uint32_t g_cdCallbackFn = 0u;
+        uint32_t g_cdCallbackGp = 0u;
+        uint32_t g_cdCallbackStackTop = 0u;
+
+        // P1c steady-state diagnostics, gated on PS2X_DIAG_PERIOD_MS (unset =
+        // compiled in, nothing printed). The tag mark lets the scheduler log
+        // when it starts the queued invocation (see EeScheduler::run()).
+        constexpr uint64_t kCdCallbackDiagTagBase = 0x4344434200000000ULL;
+
+        uint64_t diagPeriodMs()
+        {
+            static const uint64_t period = [] {
+                if (const char *env = std::getenv("PS2X_DIAG_PERIOD_MS"))
+                {
+                    if (env[0] != '\0')
+                    {
+                        char *end = nullptr;
+                        const unsigned long long parsed = std::strtoull(env, &end, 10);
+                        if (end != env)
+                        {
+                            return static_cast<uint64_t>(parsed);
+                        }
+                    }
+                }
+                return static_cast<uint64_t>(0);
+            }();
+            return period;
+        }
+
+        void queueCdCallback(R5900Context *ctx, PS2Runtime *runtime, uint32_t func)
+        {
+            (void)ctx;
+            if (g_cdCallbackFn == 0u || runtime == nullptr)
+            {
+                return;
+            }
+            GuestInvocation invocation{};
+            invocation.kind = GuestInvocationKind::Interrupt;
+            invocation.tag = kCdCallbackDiagTagBase | static_cast<uint64_t>(func);
+            invocation.context.pc = g_cdCallbackFn;
+            SET_GPR_U32(&invocation.context, 4, func);
+            SET_GPR_U32(&invocation.context, 5, 0u);
+            SET_GPR_U32(&invocation.context, 28, g_cdCallbackGp);
+            SET_GPR_U32(&invocation.context, 29, g_cdCallbackStackTop);
+            SET_GPR_U32(&invocation.context, 31, 0u);
+            if (diagPeriodMs() != 0u)
+            {
+                std::cerr << "[cd:callback] queued func=" << func
+                          << " cb=0x" << std::hex << g_cdCallbackFn << std::dec << std::endl;
+            }
+            runtime->eeScheduler().queueInvocation(std::move(invocation));
+        }
+
         uint64_t currentCdStreamTick(PS2Runtime *runtime)
         {
-            return runtime != nullptr ? runtime->eeScheduler().currentVSyncTick() : 0u;
+            // FH1: the field clock stays 59.94 Hz under full120's 2x VBlank.
+            if (ps2_fh1::eventsMode())
+                return ps2_fh1::stockHalfTicks() / 2u; // FH5: stock-time accumulator
+            return runtime != nullptr ? runtime->eeScheduler().currentVSyncTick() / ps2_fh1::vblankDivisor() : 0u;
         }
 
         uint32_t dvdStreamSectorsPerSecond(uint8_t spindleControl)
@@ -51,7 +115,13 @@ namespace ps2_stubs
             case 1u:  // optimized
             case 20u: // max
             default:
+            {
+                // P1w: unrecognized spindle mode falls back to X4 timing.
+                char dropArgs[32];
+                std::snprintf(dropArgs, sizeof(dropArgs), "mode=%u", spindleControl);
+                ps2_log::emitDrop("stub/dvdStreamSectorsPerSecond", "unknown-spin-mode", dropArgs);
                 return kDvdSectorsPerSecondX4;
+            }
             }
         }
 
@@ -209,6 +279,13 @@ namespace ps2_stubs
         const uint32_t a0 = getRegU32(ctx, 4); // usually lbn
         const uint32_t a1 = getRegU32(ctx, 5); // usually sector count
         const uint32_t a2 = getRegU32(ctx, 6); // usually destination buffer
+        if (diagPeriodMs() != 0u)
+        {
+            std::cerr << "[diag:cd] sceCdRead lbn=0x" << std::hex << a0
+                      << " sectors=" << std::dec << a1
+                      << " buf=0x" << std::hex << a2
+                      << " ret=0x" << ctx->pc << std::dec << std::endl;
+        }
 
         struct CdReadArgs
         {
@@ -240,7 +317,37 @@ namespace ps2_stubs
                 return true;
             }
 
-            return readCdSectors(args.lbn, args.sectors, rdram + offset, bytes);
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, args.buf, bytes); // E3b R3c C1
+            const bool e3ok = readCdSectors(args.lbn, args.sectors, rdram + offset, bytes);
+            // E44 Part-3 EE watch: disc sectors into EE RAM (dev-only, default off).
+            if (e3ok && bytes != 0u)
+                ps2_e44_trace::emitRangeOverlap(rdram, nullptr, args.buf, static_cast<uint32_t>(bytes),
+                                                        "cd-read", 0u, false, "sceCdRead");
+            if (e3t.active)
+            {
+                char e3x[64];
+                std::snprintf(e3x, sizeof(e3x), "lbn=0x%x,ok=%d", args.lbn, e3ok ? 1 : 0);
+                ps2_e3::tapEnd(std::move(e3t), "cd-read", rdram, e3x);
+            }
+            if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
+            {
+                const uint64_t tick = currentCdStreamTick(runtime);
+                CdFileEntry fileEntry{};
+                const char *file = "-";
+                std::string fileLeaf;
+                if (findRegisteredCdFileForLbn(args.lbn, fileEntry) && !fileEntry.hostPath.empty())
+                {
+                    fileLeaf = fileEntry.hostPath.filename().string();
+                    file = fileLeaf.c_str();
+                }
+                const uint64_t seq = ps2_e41_trace::noteCdRead(tick, args.lbn, args.sectors,
+                                                              args.buf, "sceCdRead", file);
+                char src[32];
+                std::snprintf(src, sizeof(src), "lbn=0x%x", args.lbn);
+                ps2_e41_trace::notePlantRange(tick, args.buf, bytes, rdram,
+                                              "sceCdRead", src, seq);
+            }
+            return e3ok;
         };
 
         CdReadArgs selected{a0, a1, a2, "a0/a1/a2"};
@@ -297,7 +404,17 @@ namespace ps2_stubs
                 const size_t bytes = clampReadBytes(a1, offset);
                 if (bytes > 0)
                 {
+                    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, a2, bytes); // E3b R3c C2
                     std::memset(rdram + offset, 0, bytes);
+                    ps2_e3::tapEnd(std::move(e3t), "cd-read", rdram, "lbn=unresolved,ok=0");
+                    if (ps2_e41_trace::armed()) // E41 unresolved-read log + plant watch
+                    {
+                        const uint64_t tick = currentCdStreamTick(runtime);
+                        const uint64_t seq = ps2_e41_trace::noteCdRead(
+                            tick, a0, a1, a2, "sceCdRead-unresolved", "-");
+                        ps2_e41_trace::notePlantRange(tick, a2, bytes, rdram,
+                                                      "sceCdRead-zero", "zero-fill", seq);
+                    }
                 }
 
                 static uint32_t unresolvedLogCount = 0;
@@ -315,8 +432,29 @@ namespace ps2_stubs
 
         if (ok)
         {
+            if (diagPeriodMs() != 0u)
+            {
+                const uint32_t payloadOff = selected.buf & PS2_RAM_MASK;
+                char payloadHex[17];
+                const char *payloadDigits = "0123456789abcdef";
+                for (int payloadI = 0; payloadI < 8; ++payloadI)
+                {
+                    unsigned payloadB = 0u;
+                    const uint32_t payloadAddr = payloadOff + static_cast<uint32_t>(payloadI);
+                    if (rdram != nullptr && payloadAddr < PS2_RAM_SIZE)
+                    {
+                        payloadB = rdram[payloadAddr];
+                    }
+                    payloadHex[2 * payloadI] = payloadDigits[(payloadB >> 4) & 0xFu];
+                    payloadHex[2 * payloadI + 1] = payloadDigits[payloadB & 0xFu];
+                }
+                payloadHex[16] = '\0';
+                std::cerr << "[diag:cd] sceCdRead payload lbn=0x" << std::hex << selected.lbn
+                          << " buf=0x" << selected.buf << " bytes=" << payloadHex << std::dec << std::endl;
+            }
             g_cdStreamingLbn = selected.lbn + selected.sectors;
             setReturnS32(ctx, 1); // command accepted/success
+            queueCdCallback(ctx, runtime, 1u); // SCECdFuncRead
             return;
         }
 
@@ -355,7 +493,12 @@ namespace ps2_stubs
 
     void sceCdCallback(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        setReturnS32(ctx, 0);
+        (void)rdram;
+        (void)runtime;
+        const uint32_t previous = g_cdCallbackFn;
+        g_cdCallbackFn = getRegU32(ctx, 4);
+        g_cdCallbackGp = getRegU32(ctx, 28);
+        setReturnS32(ctx, static_cast<int32_t>(previous));
     }
 
     void sceCdChangeThreadPriority(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -389,7 +532,12 @@ namespace ps2_stubs
         uint32_t tocAddr = getRegU32(ctx, 4);
         if (uint8_t *toc = getMemPtr(rdram, tocAddr))
         {
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, tocAddr, 1024); // E3b R3e C5
             std::memset(toc, 0, 1024);
+            ps2_e3::tapEnd(std::move(e3t), "cd-toc", rdram, "fill=0");
+            if (ps2_e41_trace::armed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(currentCdStreamTick(runtime), tocAddr, 1024u,
+                                              rdram, "cd-toc", "zero-fill", 0u);
         }
         setReturnS32(ctx, 1);
     }
@@ -404,6 +552,17 @@ namespace ps2_stubs
 
     void sceCdInitEeCB(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        (void)rdram;
+        (void)runtime;
+        const uint32_t stackAddr = getRegU32(ctx, 5);
+        const uint32_t stackSize = getRegU32(ctx, 6);
+        g_cdCallbackStackTop = stackAddr + stackSize;
+        if (diagPeriodMs() != 0u)
+        {
+            std::cerr << "[diag:cd] sceCdInitEeCB stack=0x" << std::hex << stackAddr
+                      << " size=0x" << stackSize
+                      << " ret=0x" << ctx->pc << std::dec << std::endl;
+        }
         setReturnS32(ctx, 1);
     }
 
@@ -445,6 +604,7 @@ namespace ps2_stubs
     void sceCdPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
+        queueCdCallback(ctx, runtime, 5u); // SCECdFuncPause
     }
 
     void sceCdPosToInt(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -453,6 +613,7 @@ namespace ps2_stubs
         const uint8_t *pos = getConstMemPtr(rdram, posAddr);
         if (!pos)
         {
+            ps2_log::emitDrop("stub/sceCdPosToInt", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -495,7 +656,37 @@ namespace ps2_stubs
                 bytes = maxBytes;
             }
 
-            if (!readCdSectors(lbn, sectors, rdram + offset, bytes))
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, buf, bytes); // E3b R3c C3
+            const bool e3ok = readCdSectors(lbn, sectors, rdram + offset, bytes);
+            // E44 Part-3 EE watch: async chain sectors (dev-only, default off).
+            if (e3ok && bytes != 0u)
+                ps2_e44_trace::emitRangeOverlap(rdram, nullptr, buf, static_cast<uint32_t>(bytes),
+                                                        "cd-read", 0u, false, "cd-chain");
+            if (e3t.active)
+            {
+                char e3x[64];
+                std::snprintf(e3x, sizeof(e3x), "lbn=0x%x,ok=%d", lbn, e3ok ? 1 : 0);
+                ps2_e3::tapEnd(std::move(e3t), "cd-chain", rdram, e3x);
+            }
+            if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
+            {
+                const uint64_t tick = currentCdStreamTick(runtime);
+                CdFileEntry fileEntry{};
+                const char *file = "-";
+                std::string fileLeaf;
+                if (findRegisteredCdFileForLbn(lbn, fileEntry) && !fileEntry.hostPath.empty())
+                {
+                    fileLeaf = fileEntry.hostPath.filename().string();
+                    file = fileLeaf.c_str();
+                }
+                const uint64_t seq = ps2_e41_trace::noteCdRead(tick, lbn, sectors, buf,
+                                                              "sceCdReadChain", file);
+                char src[32];
+                std::snprintf(src, sizeof(src), "lbn=0x%x", lbn);
+                ps2_e41_trace::notePlantRange(tick, buf, bytes, rdram,
+                                              "sceCdReadChain", src, seq);
+            }
+            if (!e3ok)
             {
                 ok = false;
                 break;
@@ -517,15 +708,31 @@ namespace ps2_stubs
             return;
         }
 
-        std::time_t now = std::time(nullptr);
         std::tm localTm{};
+        const char *deterministic = std::getenv("PS2X_DETERMINISTIC");
+        const bool fixedClock = deterministic != nullptr && std::strcmp(deterministic, "1") == 0;
+        if (fixedClock)
+        {
+            // Dev-only fixed UTC calendar; the BCD writer below is shared.
+            localTm.tm_year = 2004 - 1900;
+            localTm.tm_mon = 7 - 1;
+            localTm.tm_mday = 16;
+            localTm.tm_hour = 12;
+            localTm.tm_min = 34;
+            localTm.tm_sec = 56;
+        }
+        else
+        {
+            std::time_t now = std::time(nullptr);
 #ifdef _WIN32
-        localtime_s(&localTm, &now);
+            localtime_s(&localTm, &now);
 #else
-        localtime_r(&now, &localTm);
+            localtime_r(&now, &localTm);
 #endif
+        }
 
         // sceCdCLOCK format (BCD fields).
+        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, clockAddr, 8); // E3b R3e C5
         clockData[0] = 0;
         clockData[1] = toBcd(static_cast<uint32_t>(localTm.tm_sec));
         clockData[2] = toBcd(static_cast<uint32_t>(localTm.tm_min));
@@ -534,6 +741,11 @@ namespace ps2_stubs
         clockData[5] = toBcd(static_cast<uint32_t>(localTm.tm_mday));
         clockData[6] = toBcd(static_cast<uint32_t>(localTm.tm_mon + 1));
         clockData[7] = toBcd(static_cast<uint32_t>((localTm.tm_year + 1900) % 100));
+        const char *clockSource = fixedClock ? "fixed-utc-2004-07-16" : "wallclock-local";
+        ps2_e3::tapEnd(std::move(e3t), "cd-clock", rdram, clockSource);
+        if (ps2_e41_trace::armed()) // E41 plant watch
+            ps2_e41_trace::notePlantRange(currentCdStreamTick(runtime), clockAddr, 8u,
+                                          rdram, "cd-clock", clockSource, 0u);
         setReturnS32(ctx, 1);
     }
 
@@ -635,6 +847,17 @@ namespace ps2_stubs
             return;
         }
 
+        if (ps2_e41_trace::armed()) // E41 cdsearch log + plant watch
+        {
+            const uint64_t tick = currentCdStreamTick(runtime);
+            ps2_e41_trace::noteCdSearch(tick, path.c_str(), resolvedEntry.baseLbn,
+                                        resolvedEntry.sizeBytes);
+            char src[32];
+            std::snprintf(src, sizeof(src), "lbn=0x%x", resolvedEntry.baseLbn);
+            ps2_e41_trace::notePlantRange(tick, fileAddr, 32u, rdram,
+                                          "sceCdSearchFile", src, 0u);
+        }
+
         g_cdStreamingLbn = resolvedEntry.baseLbn;
         g_cdStreamingEndLbn = resolvedEntry.baseLbn + resolvedEntry.sectors;
         if (shouldTrace)
@@ -657,6 +880,7 @@ namespace ps2_stubs
     void sceCdStandby(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
+        queueCdCallback(ctx, runtime, 3u); // SCECdFuncStandby
     }
 
     void sceCdStatus(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -689,6 +913,7 @@ namespace ps2_stubs
     void sceCdStop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setReturnS32(ctx, 1);
+        queueCdCallback(ctx, runtime, 4u); // SCECdFuncStop
     }
 
     void sceCdStPause(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -716,6 +941,34 @@ namespace ps2_stubs
             }
             setReturnS32(ctx, static_cast<int32_t>(state.sectorsRead));
         }
+
+        void continueCdStRead(uint8_t *rdram,
+                              R5900Context *ctx,
+                              PS2Runtime *runtime,
+                              CdStReadContinuation state);
+
+        // SS1: the vsync-wait resume, shared by the live wait and the
+        // save-state rebuild (EeCompletionTag kind kCompletionCdStRead).
+        std::function<void(R5900Context &)> makeCdStReadResume(uint8_t *rdram, PS2Runtime *runtime,
+                                                               CdStReadContinuation state)
+        {
+            return [rdram, runtime, state](R5900Context &resumeContext)
+            {
+                if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
+                {
+                    return;
+                }
+                continueCdStRead(rdram, &resumeContext, runtime, state);
+            };
+        }
+
+        std::function<void(R5900Context &)> rebuildCdStReadResume(const uint32_t args[4], PS2Runtime *runtime)
+        {
+            CdStReadContinuation state{args[0], args[1], args[2], args[3]};
+            return makeCdStReadResume(runtime->memory().getRDRAM(), runtime, state);
+        }
+        const bool kCdStReadFactoryRegistered =
+            ps2_savestate::registerCompletionFactory(ps2_savestate::kCompletionCdStRead, &rebuildCdStReadResume);
 
         void continueCdStRead(uint8_t *rdram,
                               R5900Context *ctx,
@@ -779,17 +1032,12 @@ namespace ps2_stubs
                     const uint32_t buffered = bufferedCdStreamSectors(runtime);
                     const uint32_t needed = wakeSectors > buffered ? wakeSectors - buffered : 1u;
                     const uint64_t wakeTick = cdStreamWakeTickForSectors(runtime, needed);
-                    runtime->eeScheduler().waitVSync(
+                    runtime->eeScheduler().waitVSyncTagged(
                         wakeTick - 1u,
                         -1,
-                        [rdram, runtime, state](R5900Context &resumeContext)
-                        {
-                            if (static_cast<int32_t>(getRegU32(&resumeContext, 2)) < 0)
-                            {
-                                return;
-                            }
-                            continueCdStRead(rdram, &resumeContext, runtime, state);
-                        });
+                        makeCdStReadResume(rdram, runtime, state),
+                        EeCompletionTag{ps2_savestate::kCompletionCdStRead,
+                                        {state.requestedSectors, state.buffer, state.errorAddress, state.sectorsRead}});
                 }
 
                 uint32_t sectors = std::min(remaining, available);
@@ -808,7 +1056,37 @@ namespace ps2_stubs
 
                 const uint32_t readLbn = g_cdStreamingLbn;
                 const size_t readBytes = static_cast<size_t>(sectors) * kCdSectorSize;
-                if (!readCdSectors(readLbn, sectors, rdram + offset, readBytes))
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destination, readBytes); // E3b R3c C4
+                const bool e3ok = readCdSectors(readLbn, sectors, rdram + offset, readBytes);
+                // E44 Part-3 EE watch: streaming sectors (dev-only, default off).
+                if (e3ok && readBytes != 0u)
+                    ps2_e44_trace::emitRangeOverlap(rdram, nullptr, destination, static_cast<uint32_t>(readBytes),
+                                                        "cd-read", 0u, false, "cd-streaming");
+                if (e3t.active)
+                {
+                    char e3x[64];
+                    std::snprintf(e3x, sizeof(e3x), "lbn=0x%x,ok=%d", readLbn, e3ok ? 1 : 0);
+                    ps2_e3::tapEnd(std::move(e3t), "cd-stread", rdram, e3x);
+                }
+                if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
+                {
+                    const uint64_t tick = currentCdStreamTick(runtime);
+                    CdFileEntry fileEntry{};
+                    const char *file = "-";
+                    std::string fileLeaf;
+                    if (findRegisteredCdFileForLbn(readLbn, fileEntry) && !fileEntry.hostPath.empty())
+                    {
+                        fileLeaf = fileEntry.hostPath.filename().string();
+                        file = fileLeaf.c_str();
+                    }
+                    const uint64_t seq = ps2_e41_trace::noteCdRead(
+                        tick, readLbn, sectors, destination, "sceCdStRead", file);
+                    char src[32];
+                    std::snprintf(src, sizeof(src), "lbn=0x%x", readLbn);
+                    ps2_e41_trace::notePlantRange(tick, destination, readBytes, rdram,
+                                                  "sceCdStRead", src, seq);
+                }
+                if (!e3ok)
                 {
                     finishCdStRead(rdram, ctx, state, g_lastCdError);
                     return;
@@ -982,8 +1260,57 @@ namespace ps2_stubs
         uint32_t statusPtr = getRegU32(ctx, 5);
         if (uint32_t *status = reinterpret_cast<uint32_t *>(getMemPtr(rdram, statusPtr)); status)
         {
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, statusPtr, sizeof(uint32_t)); // E3b R3e C5
             *status = 0;
+            ps2_e3::tapEnd(std::move(e3t), "cd-tray", rdram, "-");
+            if (ps2_e41_trace::armed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(currentCdStreamTick(runtime), statusPtr,
+                                              sizeof(uint32_t), rdram, "cd-tray", "zero", 0u);
         }
         setReturnS32(ctx, 1);
     }
+
+    uint32_t getCdCallbackStackTop()
+    {
+        return g_cdCallbackStackTop;
+    }
+}
+
+// SS1 save states: CD.cpp's own globals (its Support.h copy registers
+// separately). Streaming position lives in Support.h (g_cdStreaming*).
+namespace
+{
+    void cdSavestateSave(ps2_savestate::Writer &w)
+    {
+        using namespace ps2_stubs;
+        const auto &t = g_cdStreamTiming;
+        w.b(t.initialized);
+        w.b(t.active);
+        w.b(t.paused);
+        for (uint32_t v : {t.capacitySectors, t.bankCount, t.sectorsPerBank, t.sectorsPerSecond})
+            w.u32(v);
+        for (uint64_t v : {t.producedSectors, t.consumedSectors, t.productionRemainder, t.lastVSyncTick})
+            w.u64(v);
+        w.u32(g_cdCallbackFn);
+        w.u32(g_cdCallbackGp);
+        w.u32(g_cdCallbackStackTop);
+    }
+    bool cdSavestateLoad(ps2_savestate::Reader &r)
+    {
+        using namespace ps2_stubs;
+        auto &t = g_cdStreamTiming;
+        t.initialized = r.b();
+        t.active = r.b();
+        t.paused = r.b();
+        for (uint32_t *v : {&t.capacitySectors, &t.bankCount, &t.sectorsPerBank, &t.sectorsPerSecond})
+            *v = r.u32();
+        for (uint64_t *v : {&t.producedSectors, &t.consumedSectors, &t.productionRemainder, &t.lastVSyncTick})
+            *v = r.u64();
+        g_cdCallbackFn = r.u32();
+        g_cdCallbackGp = r.u32();
+        g_cdCallbackStackTop = r.u32();
+        return r.ok();
+    }
+    const bool kCdSavestateRegistered =
+        ps2_savestate::registerSection("stub:cd", {1u, &cdSavestateSave, &cdSavestateLoad, nullptr});
 }

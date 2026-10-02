@@ -1,4 +1,7 @@
 #include "Common.h"
+#include "ps2_e3.h"
+#include "ps2_e41_trace.h"
+#include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
 #include "MemoryCard.h"
 
 namespace ps2_stubs
@@ -281,7 +284,13 @@ namespace ps2_stubs
                 return;
             }
 
+            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, addr, value.size() + 1u); // E3b R3c C10
             std::memcpy(dst, value.c_str(), value.size() + 1u);
+            ps2_e3::tapEnd(std::move(e3t), "mc-str", rdram, "-");
+            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), addr,
+                                              static_cast<uint32_t>(value.size() + 1u),
+                                              rdram, "mc-str", "string", 0u);
         }
 
         void writeMcDateTime(SceMcStDateTime &out, std::time_t value)
@@ -829,7 +838,15 @@ namespace ps2_stubs
                         }
                         else if (uint8_t *dst = getMemPtr(rdram, tableAddr))
                         {
+                            ps2_e3::Tap e3t = ps2_e3::tapBegin( // E3b R3c C10
+                                rdram, tableAddr, entryCount * sizeof(SceMcTblGetDir));
                             std::memcpy(dst, entries.data(), entryCount * sizeof(SceMcTblGetDir));
+                            ps2_e3::tapEnd(std::move(e3t), "mc-getdir", rdram, "-");
+                            if (ps2_e41_trace::plantArmed()) // E41 plant watch
+                                ps2_e41_trace::notePlantRange(
+                                    ps2_e41_trace::lastVsyncTick(), tableAddr,
+                                    static_cast<uint32_t>(entryCount * sizeof(SceMcTblGetDir)),
+                                    rdram, "mc-getdir", "dirtable", 0u);
                             result = static_cast<int32_t>(entryCount);
                         }
                         else
@@ -887,21 +904,27 @@ namespace ps2_stubs
         {
             if (uint8_t *out = getMemPtr(rdram, typePtr))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, typePtr, sizeof(cardType)); // E3b R3c
                 std::memcpy(out, &cardType, sizeof(cardType));
+                ps2_e3::tapEnd(std::move(e3t), "mc-getinfo", rdram, "f=type");
             }
         }
         if (freePtr != 0u)
         {
             if (uint8_t *out = getMemPtr(rdram, freePtr))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, freePtr, sizeof(freeBlocks)); // E3b R3c
                 std::memcpy(out, &freeBlocks, sizeof(freeBlocks));
+                ps2_e3::tapEnd(std::move(e3t), "mc-getinfo", rdram, "f=free");
             }
         }
         if (formatPtr != 0u)
         {
             if (uint8_t *out = getMemPtr(rdram, formatPtr))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, formatPtr, sizeof(format)); // E3b R3c
                 std::memcpy(out, &format, sizeof(format));
+                ps2_e3::tapEnd(std::move(e3t), "mc-getinfo", rdram, "f=format");
             }
         }
 
@@ -1068,7 +1091,17 @@ namespace ps2_stubs
             }
             else
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, dstAddr, static_cast<size_t>(size)); // E3b R3c
                 const size_t bytesRead = std::fread(dst, 1u, static_cast<size_t>(size), it->second.file);
+                if (e3t.active && bytesRead > 0)
+                {
+                    e3t.len = bytesRead;
+                    ps2_e3::tapEnd(std::move(e3t), "mc-read", rdram, "-");
+                    // E44 Part-3 EE watch: memcard payload (dev-only, default off).
+                    if (bytesRead > 0)
+                        ps2_e44_trace::emitRangeOverlap(rdram, ctx, dstAddr, static_cast<uint32_t>(bytesRead),
+                                                        "mc-read", 0u, false, "mc-read");
+                }
                 result = std::ferror(it->second.file) ? kMcResultDeniedPermit : static_cast<int32_t>(bytesRead);
                 if (std::ferror(it->second.file))
                 {
@@ -1209,6 +1242,7 @@ namespace ps2_stubs
         // on it to tell idle polling apart from command completion.
         if (!hadPending)
         {
+            ps2_log::emitDrop("stub/sceMcSync", "error");
             setReturnS32(ctx, -1);
             return;
         }
@@ -1219,14 +1253,18 @@ namespace ps2_stubs
         {
             if (uint8_t *out = getMemPtr(rdram, cmdPtr))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, cmdPtr, sizeof(cmd)); // E3b R3c
                 std::memcpy(out, &cmd, sizeof(cmd));
+                ps2_e3::tapEnd(std::move(e3t), "mc-sync", rdram, "f=cmd");
             }
         }
         if (resultPtr != 0u)
         {
             if (uint8_t *out = getMemPtr(rdram, resultPtr))
             {
+                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, resultPtr, sizeof(result)); // E3b R3c
                 std::memcpy(out, &result, sizeof(result));
+                ps2_e3::tapEnd(std::move(e3t), "mc-sync", rdram, "f=result");
             }
         }
 
@@ -1529,4 +1567,82 @@ namespace ps2_stubs
     {
         setReturnS32(ctx, 1);
     }
+}
+
+// SS1 save states: memory-card HLE state. Open card files are not captured
+// (refused); the card directory on disk travels with the save file.
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    void mcSavestateSave(ps2_savestate::Writer &w)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        for (int32_t v : {g_mcNextFd, g_mcLastCmd, g_mcLastResult, g_cvMcFileCursor})
+            w.pod(v);
+        w.b(g_mcCommandPending);
+        for (const auto &port : g_mcPorts)
+        {
+            w.str(port.currentDir);
+            w.b(port.formatted);
+        }
+    }
+    bool mcSavestateLoad(ps2_savestate::Reader &r)
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        for (int32_t *v : {&g_mcNextFd, &g_mcLastCmd, &g_mcLastResult, &g_cvMcFileCursor})
+            r.pod(*v);
+        g_mcCommandPending = r.b();
+        for (auto &port : g_mcPorts)
+        {
+            port.currentDir = r.str();
+            port.formatted = r.b();
+        }
+        return r.ok();
+    }
+    std::string mcSavestateReady()
+    {
+        using namespace ps2_stubs;
+        std::lock_guard<std::mutex> lock(g_mcStateMutex);
+        return g_mcFiles.empty() ? std::string() : std::string("memory-card files open");
+    }
+    const bool kMcSavestateRegistered =
+        ps2_savestate::registerSection("stub:mc", {1u, &mcSavestateSave, &mcSavestateLoad, &mcSavestateReady});
+
+    // Card contents on disk travel with the state (ports 0 and 1).
+    void mcDirSavestateSave(ps2_savestate::Writer &w)
+    {
+        for (int32_t port = 0; port < 2; ++port)
+            ps2_savestate::writeDirTree(w, ps2_stubs::getMcRootPath(port).string());
+    }
+    bool mcDirSavestateLoad(ps2_savestate::Reader &r)
+    {
+        // DS1: quick loads keep the on-disk card on any difference (disk
+        // wins, never overwritten); the env-knob path keeps refusing.
+        std::string *noteSink = nullptr;
+        const bool lenient = ps2_savestate::quickLoadCardMode(noteSink);
+        for (int32_t port = 0; port < 2 && r.ok(); ++port)
+        {
+            const std::string root = ps2_stubs::getMcRootPath(port).string();
+            if (!lenient)
+            {
+                if (!ps2_savestate::readDirTree(r, root))
+                    return false;
+                continue;
+            }
+            std::string note;
+            if (!ps2_savestate::readDirTreeLenient(r, root, note))
+                return false;
+            if (noteSink && !note.empty())
+            {
+                if (!noteSink->empty())
+                    *noteSink += "; ";
+                *noteSink += "port" + std::to_string(port) + " " + note;
+            }
+        }
+        return r.ok();
+    }
+    const bool kMcDirSavestateRegistered =
+        ps2_savestate::registerSection("stub:mcdir", {2u, &mcDirSavestateSave, &mcDirSavestateLoad, nullptr});
 }
