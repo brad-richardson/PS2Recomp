@@ -18,6 +18,7 @@
 #include <ctime>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__linux__)
@@ -27,6 +28,9 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <pthread.h>
+#if __has_include(<pthread/qos.h>)
+#include <pthread/qos.h> // PT3: utility QoS for the background tail-flush worker
+#endif
 #endif
 
 #if defined(__linux__)
@@ -488,14 +492,25 @@ struct Logger
     // PT2: per-stage drain cursors (heads consumed by the last poll()).
     uint64_t stageConsumed[kStageCount] = {};
     // PT2 Part 2a: kill-proof tail flush cursors + cadence + current file.
+    // PT3: the timer flush runs on a background worker (see tailFlushBusy):
+    // tailConsumed/tailCurrent are only touched by the flushing thread (the
+    // worker for "timer"; the caller for "pause", after joining the worker).
     uint64_t tailConsumed[kStageCount] = {};
     std::chrono::steady_clock::time_point lastTailFlush{};
     std::string tailCurrent;
+    // PT3: at most one timer flush in flight. poll() claims the flag and
+    // starts tailFlushThread; a set flag means skip this cadence. The thread
+    // handle is only touched on the main thread (poll/dumpTail/pause join
+    // it; the destructor reaps it).
+    std::atomic<bool> tailFlushBusy{false};
+    std::thread tailFlushThread;
     // PT2 Part 2b: in-app kgsl sampling (Android only; main thread).
     bool kgslDeniedNote = false;
 
     ~Logger()
     {
+        if (tailFlushThread.joinable())
+            tailFlushThread.join();
         if (file)
             std::fclose(file);
 #if defined(__linux__) || defined(__APPLE__)
@@ -679,6 +694,11 @@ bool readSysfs(const char *path, char *buf, size_t cap)
 #endif
 } // namespace
 
+// PT3: file-local timer-flush launcher (defined after flushTailWrite): poll()
+// starts the 60 s flush on a background worker instead of blocking the host
+// main loop on ~87k fprintf'd entries.
+void requestTimerFlush();
+
 void poll(uint64_t vsyncTick)
 {
     Logger &log = logger();
@@ -689,9 +709,11 @@ void poll(uint64_t vsyncTick)
     const auto now = std::chrono::steady_clock::now();
     // PT2 Part 2a: rolling ring flush (kill-proof tail). Ahead of the 1 s
     // gate: poll() runs every main-loop iteration, the flush every 60 s.
+    // PT3: the flush runs on a background worker (at most one in flight; a
+    // busy worker means skip this cadence and retry at the next poll).
     if (std::chrono::duration<double>(now - log.lastTailFlush).count() >= 60.0)
     {
-        flushTail("timer");
+        requestTimerFlush();
         log.lastTailFlush = now;
     }
     const double windowS = std::chrono::duration<double>(now - log.windowStart).count();
@@ -925,7 +947,14 @@ void notePresent()
     }
 }
 
-void flushTail(const char *reason)
+// PT3: the actual tail-file write. Runs on the background worker for
+// "timer" (see requestTimerFlush) and synchronously on the caller for
+// "pause" (flushTail joins the worker first), so tailConsumed/tailCurrent
+// are only ever touched by one thread at a time. The ring reads are
+// lock-free, so the GameThread never stalls on this. The [perf-tail-flush]
+// marker trails the entries: it carries the worker's wall ms for the whole
+// open+write+close+prune (dev-only timing field).
+void flushTailWrite(const char *reason)
 {
     Logger &log = logger();
     if (!log.active.load(std::memory_order_relaxed) || !log.file)
@@ -984,14 +1013,13 @@ void flushTail(const char *reason)
             log.tailCurrent = path;
         }
     }
+    const auto t0 = std::chrono::steady_clock::now();
     std::FILE *out = std::fopen(path.c_str(), "a");
     if (!out)
     {
         std::fprintf(stderr, "[perf] cannot open %s; tail flush skipped\n", path.c_str());
         return;
     }
-    std::fprintf(out, "[perf-tail-flush] reason=%s tick=%llu entries=%llu\n", pause ? "pause" : "timer",
-                 static_cast<unsigned long long>(maxTick), static_cast<unsigned long long>(entries));
     for (const Range &rg : ranges)
     {
         StageRing &r = stageRing(rg.stage);
@@ -1008,6 +1036,71 @@ void flushTail(const char *reason)
     for (size_t i = 0; i < kStageCount; ++i)
         log.tailConsumed[i] = ranges[i].head;
     pruneTailFiles(dir);
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    // Marker trails the entries so it can carry the worker ms. Same tag as
+    // the PT2 stock marker plus ms (readers grep the tag, not its position).
+    out = std::fopen(path.c_str(), "a");
+    if (out)
+    {
+        std::fprintf(out, "[perf-tail-flush] reason=%s tick=%llu entries=%llu ms=%.1f\n",
+                     pause ? "pause" : "timer", static_cast<unsigned long long>(maxTick),
+                     static_cast<unsigned long long>(entries), ms);
+        std::fflush(out);
+        std::fclose(out);
+    }
+    std::fprintf(stderr, "[perf-tail-flush] reason=%s tick=%llu entries=%llu ms=%.1f\n",
+                 pause ? "pause" : "timer", static_cast<unsigned long long>(maxTick),
+                 static_cast<unsigned long long>(entries), ms);
+}
+
+void flushTail(const char *reason)
+{
+    Logger &log = logger();
+    const bool pause = reason && std::strcmp(reason, "pause") == 0;
+    if (pause)
+    {
+        // Synchronous: the app is backgrounding and has to persist. Join an
+        // in-flight timer flush first so tailConsumed/tailCurrent stay
+        // single-threaded, then write on this thread.
+        if (log.tailFlushThread.joinable())
+        {
+            log.tailFlushThread.join();
+            log.tailFlushBusy.store(false, std::memory_order_release);
+        }
+        flushTailWrite("pause");
+        return;
+    }
+    // Direct "timer" calls (anything but poll's cadence) stay synchronous so
+    // the API is total; poll() itself uses requestTimerFlush below.
+    if (log.tailFlushThread.joinable())
+    {
+        log.tailFlushThread.join();
+        log.tailFlushBusy.store(false, std::memory_order_release);
+    }
+    flushTailWrite("timer");
+}
+
+// PT3: start the 60 s flush on a background worker (utility QoS on Apple)
+// instead of blocking the host main loop. At most one flush is in flight: a
+// set busy flag means skip this cadence (poll() retries in 60 s).
+void requestTimerFlush()
+{
+    Logger &log = logger();
+    if (!log.active.load(std::memory_order_relaxed) || !log.file)
+        return;
+    if (log.tailFlushBusy.exchange(true, std::memory_order_acq_rel))
+        return;
+    // Reap the previous (finished: the flag was clear) worker first.
+    if (log.tailFlushThread.joinable())
+        log.tailFlushThread.join();
+    log.tailFlushThread = std::thread([] {
+#if defined(__APPLE__) && defined(QOS_CLASS_UTILITY)
+        (void)::pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
+        flushTailWrite("timer");
+        logger().tailFlushBusy.store(false, std::memory_order_release);
+    });
 }
 
 void dumpTail()
@@ -1015,6 +1108,13 @@ void dumpTail()
     Logger &log = logger();
     if (!log.active.load(std::memory_order_relaxed) || !log.file)
         return;
+    // PT3: wait for an in-flight timer flush so the tail files are complete
+    // before the full-ring dump runs (and no worker outlives shutdown).
+    if (log.tailFlushThread.joinable())
+    {
+        log.tailFlushThread.join();
+        log.tailFlushBusy.store(false, std::memory_order_release);
+    }
     for (size_t i = 0; i < kStageCount; ++i)
     {
         const Stage s = static_cast<Stage>(i);

@@ -19,10 +19,11 @@
 //
 // This header holds the pure parts (tested by ps2_perf_log_tests.cpp); the
 // file I/O and platform snapshots live in src/lib/ps2_perf_log.cpp. poll()
-// and dumpTail() are main-thread only; notePresent() is thread-safe (the VK
-// path calls it from the GS worker) and all three are no-ops until the first
-// poll() with the knob on; with the knob off the call sites compile to one
-// bool check each (zero cost).
+// and dumpTail() are main-thread only (PT3: poll's 60 s tail flush runs on a
+// background worker, at most one in flight; dumpTail joins it); notePresent()
+// is thread-safe (the VK path calls it from the GS worker) and all three are
+// no-ops until the first poll() with the knob on; with the knob off the call
+// sites compile to one bool check each (zero cost).
 
 #include <algorithm>
 #include <array>
@@ -687,10 +688,13 @@ void dumpTail();
 // PT2 Part 2a: kill-proof ring flush. Drains entries accumulated since the
 // last flush into a timestamped tail file (reason "timer": appends the
 // current tail-*.log, rotating past the size cap; reason "pause": a fresh
-// tail-pause-*.log), with a [perf-tail-flush] marker first. A swipe-kill
-// loses at most the unflushed remainder. No-op unless active. Main thread
-// only (poll's 60 s cadence + the BG1 pause path); lock-free ring reads,
-// so the GameThread never stalls on it.
+// tail-pause-*.log), with a [perf-tail-flush] marker carrying the entry
+// count plus the worker's wall ms (PT3 dev-only timing field). A swipe-kill
+// loses at most the unflushed remainder. No-op unless active. PT3: the
+// "timer" cadence runs on a background worker (utility QoS on Apple, at most
+// one in flight, skips when busy) so the host main loop never blocks on it;
+// "pause" stays synchronous on the caller (it joins the worker first).
+// Lock-free ring reads, so the GameThread never stalls on it.
 void flushTail(const char *reason);
 // Calling thread's CPU ns, or kCpuUnsupported where no cheap query exists.
 constexpr uint64_t kCpuUnsupported = ~0ull;

@@ -1,8 +1,10 @@
 #include "MiniTest.h"
 #include "ps2_perf_log.h"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -484,9 +486,56 @@ void register_ps2_perf_log_tests()
             s.kgslBusy = "43.2";
             s.kgslClk = "800000000";
             t.Equals(ps2x::perflog::formatLine(s),
-                     std::string("[perf] wall=2026-09-28T12:00:01Z t=61.0s tick=3660 vsyncs_per_s=59.94 "
-                                 "presents=60 maxgap_ms=17.1 threads=\"na\" device=\"na\" "
-                                 "gpubusy_pct=43.2 gpuclk=800000000"),
-                     "gpu line"); });
+                      std::string("[perf] wall=2026-09-28T12:00:01Z t=61.0s tick=3660 vsyncs_per_s=59.94 "
+                                  "presents=60 maxgap_ms=17.1 threads=\"na\" device=\"na\" "
+                                  "gpubusy_pct=43.2 gpuclk=800000000"),
+                      "gpu line"); });
+
+        // PT3: the timer flush reads stage rings from a second thread while
+        // the stage owners write: a concurrent drain loses/duplicates nothing.
+        tc.Run("StageRing second-thread drain is exact while writing", [](TestCase &t)
+               {
+            ps2x::perflog::StageRing r;
+            constexpr uint64_t kN = 8000; // under one lap: nothing overwritten
+            std::atomic<uint64_t> written{0};
+            std::vector<uint64_t> seen;
+            seen.reserve(kN);
+            std::thread reader([&] {
+                uint64_t consumed = 0;
+                while (written.load(std::memory_order_acquire) < kN)
+                {
+                    const uint64_t head = r.head();
+                    consumed = ps2x::perflog::clampDrainStart(consumed, head, ps2x::perflog::StageRing::kCap);
+                    for (uint64_t i = consumed; i != head; ++i)
+                        seen.push_back(ps2x::perflog::StageRing::decode(r.slotAt(i)).tick);
+                    consumed = head;
+                }
+                const uint64_t head = r.head();
+                const uint64_t start =
+                    ps2x::perflog::clampDrainStart(consumed, head, ps2x::perflog::StageRing::kCap);
+                for (uint64_t i = start; i != head; ++i)
+                    seen.push_back(ps2x::perflog::StageRing::decode(r.slotAt(i)).tick);
+            });
+            for (uint64_t i = 1; i <= kN; ++i)
+            {
+                r.push(static_cast<uint32_t>(i), 1.0f);
+                written.store(i, std::memory_order_release);
+            }
+            reader.join();
+            t.Equals(seen.size(), static_cast<size_t>(kN), "every push drained once");
+            std::vector<bool> have(kN + 1, false);
+            bool bad = false;
+            for (uint64_t tick : seen)
+            {
+                if (tick < 1 || tick > kN || have[tick])
+                    bad = true;
+                else
+                    have[tick] = true;
+            }
+            t.IsTrue(!bad, "no lost or duplicated entries");
+            bool all = true;
+            for (uint64_t i = 1; i <= kN; ++i)
+                all = all && have[i];
+            t.IsTrue(all, "ticks 1..N all present"); });
     });
 }
