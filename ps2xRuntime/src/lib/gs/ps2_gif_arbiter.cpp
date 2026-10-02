@@ -236,6 +236,7 @@ void GifArbiter::drain()
             {
                 m_shadowFn(pkt.pathId, pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
             }
+            const ps2_mtvu::GifEmitPathScope emitPath(static_cast<uint8_t>(pkt.pathId)); // MQ2
             if (m_processPathFn)
                 m_processPathFn(pkt.pathId, pkt.data);
             else

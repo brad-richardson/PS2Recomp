@@ -3069,6 +3069,24 @@ void PS2Memory::processPendingTransfers()
 
     if (mtvuSubmit)
     {
+        // MQ2 (PS2X_MTVU_FINISH_EE=1): PCSX2's GIF unit sets CSR.FINISH for a
+        // PATH3 A+D FINISH on the EE as it takes the transfer, with the
+        // PATH1/MTVU work only counted (Gif_Unit.h fakePackets). Do the same
+        // here, in program order; the unit consumes the credits instead of
+        // setting FINISH again when it emits these packets.
+        if (m_finishTimingPcsx2 && ps2_mtvu::finishEe())
+        {
+            uint32_t writes = 0u;
+            for (const MtvuPiece &piece : mtvuPieces)
+                if (piece.gif)
+                    writes += ps2xGifFinishWrites(piece.bytes.data(), static_cast<uint32_t>(piece.bytes.size()));
+            if (writes != 0u)
+            {
+                ps2_mtvu::noteEeFinishSet(writes);
+                gs_regs.csr.fetch_or(0x2u);
+                ps2_mtvu::ge3EpOnSet(1u);
+            }
+        }
         ps2_mtvu::submit([this, pieces = std::move(mtvuPieces)]() mutable
                          {
             for (MtvuPiece &piece : pieces)

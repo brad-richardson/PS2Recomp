@@ -46,6 +46,9 @@ struct GSDebugSnapshot
     size_t localToHostPendingBytes = 0;
 };
 
+// MQ2: number of A+D FINISH writes in a GIF packet (0 if malformed first).
+uint32_t ps2xGifFinishWrites(const uint8_t *data, uint32_t sizeBytes);
+
 enum class GSDebugEventKind : uint8_t
 {
     GifTag = 0,

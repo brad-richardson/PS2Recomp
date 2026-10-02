@@ -17,6 +17,12 @@
 //   PS2X_MTVU_LAG=1     R3: VBlankStart waits only for the previous frame's
 //                       jobs (full sync on det-hash ticks); up to one frame of
 //                       extra display latency, no guest change.
+//   PS2X_MTVU_FINISH_EE=1  MQ2 (with PS2X_GS_FINISH_TIMING=pcsx2): a DMA kick
+//                       whose PATH3 GIF pieces carry A+D FINISH sets CSR.FINISH
+//                       on the EE at submit, in program order (PCSX2's EE-side
+//                       GIF unit); the unit then consumes one credit per such
+//                       write instead of setting FINISH again. PATH1/PATH2
+//                       FINISH stays unit-side.
 //   PS2X_MTVU_CPUS=a,b  pin the worker (Linux/Android).
 //   PS2X_MTVU_JITTER=N  test: sleep 0..N us before each job (host timing only).
 //   PS2X_GAME_THREAD_STACK_KB also sizes the worker's stack.
@@ -185,6 +191,15 @@ namespace ps2_mtvu
         // use; threaded only through configure() (runtime init) or tests.
         inline std::atomic<int> g_mode{-1};
         inline std::atomic<bool> g_lag{false};
+        // MQ2: EE-side PATH3 FINISH (PS2X_MTVU_FINISH_EE=1, threaded only).
+        inline std::atomic<bool> g_finishEe{false};
+        inline std::atomic<uint64_t> g_finishEeCredits{0}; // EE-set writes the unit has not reached yet
+        inline std::atomic<uint64_t> g_finishEeSets{0};    // EE submits that set FINISH
+        inline std::atomic<uint64_t> g_finishEeSkips{0};   // unit PATH3 FINISH writes covered by a credit
+        inline std::atomic<uint64_t> g_finishEeUnmatched{0}; // unit PATH3 FINISH writes with no credit (set as before)
+        // MQ2: the GIF path of the packet the arbiter is emitting on this
+        // thread (0 = none, e.g. a direct XGKICK); set around the process call.
+        inline thread_local uint8_t t_gifEmitPath = 0u;
 
         inline int mode()
         {
@@ -1469,6 +1484,12 @@ namespace ps2_mtvu
                 if (w.violations[i] != 0u)
                     std::fprintf(stderr, " V:%s=%llu", siteName(static_cast<Site>(i)),
                                  static_cast<unsigned long long>(w.violations[i]));
+            if (g_finishEe.load(std::memory_order_relaxed))
+                std::fprintf(stderr, " finishee=%llu/%llu/%llu credits=%llu",
+                             static_cast<unsigned long long>(g_finishEeSets.load(std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(g_finishEeSkips.load(std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(g_finishEeUnmatched.load(std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(g_finishEeCredits.load(std::memory_order_relaxed)));
             std::fprintf(stderr, "\n");
             if (g_gifStage.load(std::memory_order_relaxed))
             {
@@ -1638,10 +1659,14 @@ namespace ps2_mtvu
         if (const char *j = std::getenv("PS2X_MTVU_JITTER"))
             detail::worker().jitterUs = static_cast<uint32_t>(std::strtoul(j, nullptr, 10));
         detail::g_lag.store(lagOn, std::memory_order_relaxed);
+        const char *fe = std::getenv("PS2X_MTVU_FINISH_EE");
+        detail::g_finishEe.store(m == static_cast<int>(Mode::Threaded) && fe && std::strcmp(fe, "1") == 0,
+                                 std::memory_order_relaxed);
         detail::g_mode.store(m, std::memory_order_relaxed);
         if (e && std::strcmp(e, "1") == 0)
-            std::fprintf(stderr, "[mtvu] mode=%s lag=%d jitter_us=%u%s\n", m ? "threaded" : "off",
-                         lagOn ? 1 : 0, detail::worker().jitterUs,
+            std::fprintf(stderr, "[mtvu] mode=%s lag=%d finish_ee=%d jitter_us=%u%s\n", m ? "threaded" : "off",
+                         lagOn ? 1 : 0, detail::g_finishEe.load(std::memory_order_relaxed) ? 1 : 0,
+                         detail::worker().jitterUs,
                          diagArmed ? " (a dev trace is armed: threaded mode refused)" : "");
     }
 
@@ -1900,6 +1925,54 @@ namespace ps2_mtvu
             return;
         }
         detail::syncSlow(r, detail);
+    }
+
+    // MQ2: EE-side PATH3 FINISH (PS2X_MTVU_FINISH_EE=1).
+    inline bool finishEe()
+    {
+        return detail::g_finishEe.load(std::memory_order_relaxed);
+    }
+
+    // EE, at a DMA-kick submit: `writes` A+D FINISH writes in the kick's
+    // PATH3 pieces were applied to CSR here; the unit must not set them again.
+    // Called before submit(), whose queue mutex publishes the credit.
+    inline void noteEeFinishSet(uint32_t writes)
+    {
+        detail::g_finishEeCredits.fetch_add(writes, std::memory_order_relaxed);
+        detail::g_finishEeSets.fetch_add(1u, std::memory_order_relaxed);
+    }
+
+    // Unit thread, emitting a PATH3 packet with `writes` A+D FINISH writes:
+    // true = all covered by EE credits (skip the CSR set). False = no credit
+    // (counted; the caller sets FINISH as before).
+    inline bool consumeEeFinishCredits(uint32_t writes)
+    {
+        uint64_t have = detail::g_finishEeCredits.load(std::memory_order_relaxed);
+        while (have >= writes)
+        {
+            if (detail::g_finishEeCredits.compare_exchange_weak(have, have - writes, std::memory_order_relaxed))
+            {
+                detail::g_finishEeSkips.fetch_add(writes, std::memory_order_relaxed);
+                return true;
+            }
+        }
+        if (detail::g_finishEeUnmatched.fetch_add(1u, std::memory_order_relaxed) < 8u)
+            std::fprintf(stderr, "[mtvu] finish-ee UNMATCHED unit PATH3 FINISH (writes=%u credits=%llu)\n", writes,
+                         static_cast<unsigned long long>(have));
+        return false;
+    }
+
+    // Arbiter: marks the path of the packet being emitted on this thread.
+    struct GifEmitPathScope
+    {
+        explicit GifEmitPathScope(uint8_t path) { detail::t_gifEmitPath = path; }
+        ~GifEmitPathScope() { detail::t_gifEmitPath = 0u; }
+        GifEmitPathScope(const GifEmitPathScope &) = delete;
+        GifEmitPathScope &operator=(const GifEmitPathScope &) = delete;
+    };
+    inline uint8_t gifEmitPath()
+    {
+        return detail::t_gifEmitPath;
     }
 
     // Threaded: queue unit work. fbrst = the kicking context's VU0 FBRST

@@ -5,6 +5,7 @@
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "runtime/gs/gs_frontend.h"
+#include "ps2_mtvu.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/ps2_gs_memory.h"
@@ -2231,6 +2232,38 @@ void register_ps2_gs_tests()
 
             mem.write32(0x12001000u, 0x2u);
             t.IsTrue((mem.gs().csr & 0x2ull) == 0ull, "writing CSR bit1 should acknowledge FINISH");
+        });
+
+        tc.Run("MQ2 FINISH write count and EE credits", [](TestCase &t)
+        {
+            // PACKED, NREG=1 (A+D), NLOOP=3: FINISH, TEST_1, FINISH.
+            std::vector<uint8_t> pkt(16u * 4u, 0u);
+            const uint64_t tagLo = 3ull | (1ull << 15) | (0ull << 58) | (1ull << 60);
+            const uint64_t tagHi = 0xEull;
+            std::memcpy(pkt.data(), &tagLo, 8);
+            std::memcpy(pkt.data() + 8, &tagHi, 8);
+            pkt[16 + 8] = static_cast<uint8_t>(GS_REG_FINISH);
+            pkt[32 + 8] = 0x47u; // TEST_1
+            pkt[48 + 8] = static_cast<uint8_t>(GS_REG_FINISH);
+            t.Equals(ps2xGifFinishWrites(pkt.data(), static_cast<uint32_t>(pkt.size())), 2u, "two A+D FINISH writes");
+            t.Equals(ps2xGifFinishWrites(pkt.data(), 16u), 0u, "truncated payload: none counted");
+            t.Equals(ps2xGifFinishWrites(nullptr, 64u), 0u, "null data");
+
+            namespace d = ps2_mtvu::detail;
+            d::g_finishEeCredits.store(0u);
+            const uint64_t skips0 = d::g_finishEeSkips.load(), unmatched0 = d::g_finishEeUnmatched.load();
+            ps2_mtvu::noteEeFinishSet(2u);
+            t.IsTrue(ps2_mtvu::consumeEeFinishCredits(1u), "first write covered");
+            t.IsTrue(ps2_mtvu::consumeEeFinishCredits(1u), "second write covered");
+            t.IsFalse(ps2_mtvu::consumeEeFinishCredits(1u), "no credit left: the unit sets as before");
+            t.Equals(d::g_finishEeSkips.load() - skips0, 2ull, "two skips");
+            t.Equals(d::g_finishEeUnmatched.load() - unmatched0, 1ull, "one unmatched");
+            t.Equals(d::g_finishEeCredits.load(), 0ull, "credits balanced");
+            {
+                const ps2_mtvu::GifEmitPathScope scope(3u);
+                t.Equals(static_cast<uint32_t>(ps2_mtvu::gifEmitPath()), 3u, "emit path set in scope");
+            }
+            t.Equals(static_cast<uint32_t>(ps2_mtvu::gifEmitPath()), 0u, "emit path cleared after scope");
         });
 
         tc.Run("GIF IMAGE packet writes host-to-local data into GS VRAM", [](TestCase &t)

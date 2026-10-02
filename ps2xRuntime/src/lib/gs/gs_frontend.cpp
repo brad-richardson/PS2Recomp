@@ -170,8 +170,11 @@ namespace
     // PACKED: only slots whose tag nibble is A+D (0xE) can carry it.
     // REGLIST: the register ids live in the tag. Anything malformed returns
     // false and the normal decode path handles (or rejects) the packet.
-    bool packetHasFinishAD(const uint8_t *data, uint32_t sizeBytes)
+    // MQ2: counts the A+D FINISH writes, stopping at `limit` (malformed data
+    // ends the scan with the count so far). packetHasFinishAD = limit 1.
+    uint32_t countFinishAD(const uint8_t *data, uint32_t sizeBytes, uint32_t limit)
     {
+        uint32_t found = 0u;
         uint32_t offset = 0u;
         while (offset + 16u <= sizeBytes)
         {
@@ -187,7 +190,7 @@ namespace
             {
                 const uint64_t items = static_cast<uint64_t>(nloop) * nreg;
                 if (items > (sizeBytes - offset) / 16u)
-                    return false;
+                    return found;
                 // GP2: cheap reject — collect the A+D (0xE) slot mask from the
                 // tag once. Tags without A+D skip the payload with no
                 // per-item work; tags with A+D check only those slots
@@ -210,8 +213,9 @@ namespace
                             const uint64_t at = offset +
                                 (static_cast<uint64_t>(k) * nreg + s) * 16u;
                             if (static_cast<uint8_t>(loadLE64(data + at + 8u)) ==
-                                static_cast<uint8_t>(GS_REG_FINISH))
-                                return true;
+                                    static_cast<uint8_t>(GS_REG_FINISH) &&
+                                ++found >= limit)
+                                return found;
                         }
                     }
                 }
@@ -221,23 +225,34 @@ namespace
             {
                 for (uint32_t r = 0u; r < nreg; ++r)
                 {
+                    // One write per loop iteration; an nloop-0 tag counts
+                    // once, as the presence scan always matched it.
                     if (static_cast<uint8_t>((tagHi >> (r * 4u)) & 0xFu) ==
                         static_cast<uint8_t>(GS_REG_FINISH))
-                        return true;
+                    {
+                        found += nloop != 0u ? nloop : 1u;
+                        if (found >= limit)
+                            return found;
+                    }
                 }
                 const uint64_t valueBytes = static_cast<uint64_t>(nloop) * nreg * 8ull;
                 if (valueBytes > sizeBytes - offset)
-                    return false;
+                    return found;
                 offset += static_cast<uint32_t>(valueBytes);
             }
             else
             {
                 // IMAGE modes consume the rest of the transfer; FINISH never
                 // hides in texel data.
-                return false;
+                return found;
             }
         }
-        return false;
+        return found;
+    }
+
+    bool packetHasFinishAD(const uint8_t *data, uint32_t sizeBytes)
+    {
+        return countFinishAD(data, sizeBytes, 1u) != 0u;
     }
 
     std::atomic<uint32_t> s_debugGifPacketCount{0};
@@ -1350,6 +1365,11 @@ void GS::noteFinishTimingPcsx2(const uint8_t *data, uint32_t sizeBytes)
     if (!m_finishTimingPcsx2 || !m_privRegs || !data || sizeBytes < 16u)
         return;
     if (!packetHasFinishAD(data, sizeBytes))
+        return;
+    // MQ2: a PATH3 packet the EE already applied at its DMA-kick submit.
+    if (ps2_mtvu::finishEe() && !t_inGsWorker && ps2_mtvu::gifEmitPath() == 3u &&
+        ps2_mtvu::onUnitGsProducer() &&
+        ps2_mtvu::consumeEeFinishCredits(countFinishAD(data, sizeBytes, ~0u)))
         return;
     m_privRegs->csr.fetch_or(0x2u);
     // GE3 Part 6: record the setter kind for the open probe episode (if any).
@@ -3023,4 +3043,11 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
         m_preferredDisplayDestFbp = ctx.frame.fbp;
         m_hasPreferredDisplaySource = true;
     }
+}
+
+// MQ2: EE-side FINISH scan for snapshotted PATH3 pieces (same scan as the
+// unit's noteFinishTimingPcsx2).
+uint32_t ps2xGifFinishWrites(const uint8_t *data, uint32_t sizeBytes)
+{
+    return (data && sizeBytes >= 16u) ? countFinishAD(data, sizeBytes, ~0u) : 0u;
 }
