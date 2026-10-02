@@ -2,12 +2,16 @@
 #define PS2_LOG_H
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <sstream>
+#include <streambuf>
 #include <string>
 #include <vector>
 
@@ -113,6 +117,245 @@ inline void clear_runtime_log_entries()
 {
     std::lock_guard<std::mutex> lock(runtime_log_mutex());
     runtime_log_entries().clear();
+}
+
+// UX1: the one line-buffered diagnostic writer. Multi-fragment lines
+// (std::cerr << a << b << ... chains from several threads) interleave
+// mid-line on the way to logcat: 59 % of [rb2] lines spliced on the Odin
+// (RB2 Part 2). emitLine takes one complete line (no trailing newline),
+// and emits it under a process-wide mutex as a single fwrite + fflush:
+// exactly one write() per line on unbuffered stderr (Android), one
+// buffer-append + flush on buffered stderr (hosts; complete lines stay
+// whole in order). Same stdio channel as every other stderr writer, so
+// log order is preserved (a raw write(2) would jump ahead of buffered
+// content). Diagnostic-gated call sites only: one small allocation per
+// emitted line, zero cost when the knob is off.
+inline std::mutex &diagLineMutex()
+{
+    static std::mutex m;
+    return m;
+}
+
+// LG1: every line leaves through writeLineAtomic: one fwrite + fflush of a
+// complete, newline-terminated buffer under diagLineMutex. emitLine (complete
+// lines), the cerr/cout line-atomic buffers below and the raylib TraceLog
+// callback (main.cpp) all funnel here, so concurrent writers can no longer
+// splice into each other mid-line. Content is unchanged.
+inline void writeLineAtomic(std::FILE *dest, const char *data, size_t size)
+{
+    if (size == 0)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(diagLineMutex());
+    std::fwrite(data, 1, size, dest);
+    std::fflush(dest);
+}
+
+inline void emitLine(const std::string &line)
+{
+    const std::string out = line + '\n';
+    writeLineAtomic(stderr, out.data(), out.size());
+}
+
+// LG1: std::streambuf that collects each thread's fragments (the
+// `std::cerr << a << b << std::endl` chains; cerr is unitbuf, so every `<<`
+// used to be its own write()) and hands complete lines to writeLineAtomic.
+// A partial line stays in the writing thread's buffer until its newline
+// arrives (or the thread exits / the atexit flush runs), capped at 64 KiB so
+// a newline-less writer cannot grow it forever.
+class LineAtomicBuf : public std::streambuf
+{
+public:
+    explicit LineAtomicBuf(std::FILE *dest) : m_dest(dest) {}
+
+    // Calling thread's partial line (exit path).
+    void flushPartial() { flushThread(true); }
+
+protected:
+    int_type overflow(int_type ch) override
+    {
+        if (traits_type::eq_int_type(ch, traits_type::eof()))
+        {
+            return traits_type::not_eof(ch);
+        }
+        const char c = traits_type::to_char_type(ch);
+        append(&c, 1);
+        return ch;
+    }
+
+    std::streamsize xsputn(const char *s, std::streamsize n) override
+    {
+        append(s, static_cast<size_t>(n));
+        return n;
+    }
+
+    int sync() override { return 0; } // unitbuf must not cut partial lines
+
+private:
+    struct Pending
+    {
+        std::string text;
+        LineAtomicBuf *owner = nullptr;
+        ~Pending()
+        {
+            if (owner && !text.empty())
+            {
+                writeLineAtomic(owner->m_dest, text.data(), text.size());
+            }
+        }
+    };
+
+    Pending &pending()
+    {
+        // One Pending per (thread, buffer): cerr and cout each own one.
+        thread_local std::map<const LineAtomicBuf *, Pending> tl;
+        Pending &p = tl[this];
+        p.owner = this;
+        return p;
+    }
+
+    void append(const char *s, size_t n)
+    {
+        pending().text.append(s, n);
+        flushThread(false);
+    }
+
+    void flushThread(bool all)
+    {
+        Pending &p = pending();
+        if (p.text.empty())
+        {
+            return;
+        }
+        size_t cut = p.text.rfind('\n');
+        if (all || p.text.size() > 65536)
+        {
+            cut = p.text.size() - 1;
+        }
+        if (cut == std::string::npos)
+        {
+            return;
+        }
+        writeLineAtomic(m_dest, p.text.data(), cut + 1);
+        p.text.erase(0, cut + 1);
+    }
+
+    std::FILE *m_dest;
+};
+
+inline LineAtomicBuf &lineAtomicErrBuf()
+{
+    static LineAtomicBuf b(stderr);
+    return b;
+}
+
+inline LineAtomicBuf &lineAtomicOutBuf()
+{
+    static LineAtomicBuf b(stdout);
+    return b;
+}
+
+// LG1: route std::cerr / std::clog / std::cout through LineAtomicBuf and make
+// stdout line-buffered so stdio writers (printf) also flush whole lines.
+// Called once at the top of main(). Idempotent.
+inline void installLineAtomicLogging()
+{
+    static bool installed = false;
+    if (installed)
+    {
+        return;
+    }
+    installed = true;
+    std::cerr.rdbuf(&lineAtomicErrBuf());
+    std::clog.rdbuf(&lineAtomicErrBuf());
+    std::cout.rdbuf(&lineAtomicOutBuf());
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    std::atexit([]() {
+        lineAtomicErrBuf().flushPartial();
+        lineAtomicOutBuf().flushPartial();
+    });
+}
+
+// P1w no-silent-drops census. Every rejected or unhandled path emits one
+// "[drop] <site> <reason> <args>" line on stderr, ON by default in every
+// build including the runner; a non-empty PS2X_DROP_SILENCE mutes. The env
+// is read fresh per call: drops are exceptional so there is no hot-path
+// cost, and the kill-switch stays testable and honors late-set env.
+// Deliberately cerr-only (no runtime-log ring append): the census channel
+// is the log, and a drop flood must not evict ring entries.
+inline bool dropsMuted()
+{
+    const char *env = std::getenv("PS2X_DROP_SILENCE");
+    return env != nullptr && env[0] != '\0';
+}
+
+inline std::string formatDropLine(const std::string &site, const std::string &reason, const std::string &args)
+{
+    std::ostringstream out;
+    out << "[drop] " << site << ' ' << reason << ' ' << (args.empty() ? "-" : args);
+    return out.str();
+}
+
+// T1 in-memory census of PRINTED [drop] lines, keyed by site+reason (the
+// P24-2a census shape: args vary per call and stay in the log only). The
+// bump sits after the mute check so the census equals the visible lines.
+// Drops are exceptional: one map increment, no hot-path cost. Single
+// writer (EE executor / analyzer pass); no lock, like the P1c counters.
+struct DropCensusRow
+{
+    std::string site;
+    std::string reason;
+    uint64_t count = 0;
+};
+
+inline std::map<std::pair<std::string, std::string>, uint64_t> &dropCensusCounts()
+{
+    static std::map<std::pair<std::string, std::string>, uint64_t> counts;
+    return counts;
+}
+
+inline void recordDropCensus(const std::string &site, const std::string &reason)
+{
+    ++dropCensusCounts()[{site, reason}];
+}
+
+inline std::vector<DropCensusRow> snapshotDropCensus()
+{
+    std::vector<DropCensusRow> rows;
+    for (const auto &[key, count] : dropCensusCounts())
+    {
+        rows.push_back(DropCensusRow{key.first, key.second, count});
+    }
+    return rows;
+}
+
+inline void resetDropCensusForTesting()
+{
+    dropCensusCounts().clear();
+}
+
+inline void emitDropTo(std::ostream &out,
+                       const std::string &site,
+                       const std::string &reason,
+                       const std::string &args = "")
+{
+    if (dropsMuted())
+    {
+        return;
+    }
+    out << formatDropLine(site, reason, args) << std::endl;
+    recordDropCensus(site, reason);
+}
+
+inline void emitDrop(const std::string &site, const std::string &reason, const std::string &args = "")
+{
+    if (dropsMuted())
+    {
+        return;
+    }
+    emitLine(formatDropLine(site, reason, args));
+    recordDropCensus(site, reason);
 }
 }
 
