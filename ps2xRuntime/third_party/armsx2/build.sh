@@ -65,6 +65,7 @@ case "$PLAT" in
     ln -s "$ARMSX2/common" "$ASM/common"
     ln -s "$ARMSX2/cmake" "$ASM/cmake"
     cp -a "$HERE/platform/mac" "$ASM/mac-platform"
+    ln -s "$ARMSX2/3rdparty" "$ASM/mac-platform/3rdparty"
     cmake -S "$ASM/mac-platform" -B "$BLD" -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_PREFIX_PATH=$PIN/mac/ge1-deps \
@@ -107,6 +108,7 @@ case "$PLAT" in
     ln -s "$ARMSX2" "$ASM/vendor-pcsx2"
     ln -s "$HERE/ge1" "$ASM/adapter"
     cp -a "$HERE/platform/ios" "$ASM/ios-platform"
+    ln -s "$ARMSX2/3rdparty" "$ASM/ios-platform/3rdparty"
     env -u CC -u CXX -u OBJC -u OBJCXX cmake -S "$ASM/ios-platform" -B "$BLD" -G Ninja \
       -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=$SYSROOT \
       -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_BUILD_TYPE=Release \
