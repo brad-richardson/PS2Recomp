@@ -3004,7 +3004,10 @@ void GS::lagfOnGuestVsync(uint64_t tick)
     m_lagfGsTick = tick;
     m_lagfGsOrdinal = 0u;
 
-    const uint64_t back = static_cast<uint64_t>(ps2_rb1_lagfFrames()) - 2u;
+    // Fixed one-frame GPU slack, independent of L (LT1b Part 3): resolve the
+    // sets made before the previous VSync. Tying the delay to L (g-(L-2)) made a
+    // set the worker sees a tick late resolve on the very tick the EE serves it.
+    constexpr uint64_t back = 1u;
     if (tick >= back)
     {
         const auto &mark = m_lagfVsyncSets[(tick - back) % m_lagfVsyncSets.size()];

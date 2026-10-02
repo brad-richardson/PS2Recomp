@@ -286,7 +286,8 @@ public:
     // Each TRXDIR=1 set gets a ticket j (its GS-stream sequence number) and an
     // asynchronous backend request (GE1: GPU copy at the set's stream point, no
     // fence wait); the GS worker resolves tickets at a fixed guest VSync (sets
-    // made before VSync g-(L-2) resolve at VSync g) into the slot table. The EE
+    // made before VSync g-1 resolve at VSync g: one frame of GPU slack,
+    // independent of L) into the slot table. The EE
     // serves probe (frame f, ordinal i) with the bytes of probe (f-L, i): the EE
     // records, per guest frame, the serve index of its first probe, and serve k
     // pairs with set k (one TRXDIR=1 per reverse DMA, the same pairing RB2
