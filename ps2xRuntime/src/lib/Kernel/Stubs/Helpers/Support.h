@@ -1,3 +1,5 @@
+#include "ps2_mtvu.h"
+#include "ps2_cd_overlay.h"
 #include <algorithm>
 #include <cctype>
 
@@ -28,6 +30,11 @@ namespace
     uint32_t g_cdStreamingLbn = 0;
     uint32_t g_cdStreamingEndLbn = 0xFFFFFFFFu;
     bool g_cdInitialized = false;
+
+    constexpr uint32_t kIopHeapBase = 0x04000000;
+    constexpr uint32_t kIopHeapLimit = 0x04500000;
+    constexpr uint32_t kIopHeapAlign = 64;
+    uint32_t g_iopHeapNext = kIopHeapBase;
 
     std::string toLowerAscii(std::string value)
     {
@@ -432,8 +439,145 @@ namespace
         return true;
     }
 
+    // Serves `f`'s bytes [offset, offset + byteCount) through its TK10
+    // composite segments (Image = the disc image, Host = a host file). Shared
+    // by the TK3 overlay branch and the TK25c mode alias below.
+    bool serveComposite(const ps2_cd_overlay::OverlayFile &f, const std::filesystem::path &imagePath,
+                        uint64_t offset, uint8_t *dst, size_t byteCount)
+    {
+        if (!dst)
+        {
+            g_lastCdError = -1;
+            return false;
+        }
+        uint8_t *out = dst;
+        for (const ps2_cd_overlay::Piece &piece : ps2_cd_overlay::resolve(f, offset, byteCount))
+        {
+            const size_t n = static_cast<size_t>(piece.bytes);
+            if (piece.kind == ps2_cd_overlay::Piece::Zero)
+            {
+                std::memset(out, 0, n);
+            }
+            else if (!readHostRange(piece.kind == ps2_cd_overlay::Piece::Image ? imagePath : f.host, piece.offset,
+                                    out, n))
+            {
+                return false;
+            }
+            out += n;
+        }
+        g_lastCdError = 0;
+        return true;
+    }
+
+    // TK3: PS2X_CD_OVERLAY=<dir> (default off). Built once, on the first CD
+    // read, from the configured image; a refusal logs and serves the disc as is.
+    const ps2_cd_overlay::Overlay *cdOverlay()
+    {
+        static const ps2_cd_overlay::Overlay *const overlay = []() -> const ps2_cd_overlay::Overlay *
+        {
+            const char *env = std::getenv("PS2X_CD_OVERLAY");
+            if (!env || !*env)
+            {
+                return nullptr;
+            }
+            const std::filesystem::path image = getCdImagePath();
+            uint64_t imageSectors = 0;
+            if (image.empty() || !tryGetCdImageTotalSectors(imageSectors))
+            {
+                std::cerr << "[cd-overlay] REFUSED: PS2X_CD_OVERLAY needs PS2X_CD_IMAGE" << std::endl;
+                return nullptr;
+            }
+            std::ifstream file(image, std::ios::binary);
+            const ps2_cd_overlay::SectorReader read = [&file, imageSectors](uint32_t lbn, uint8_t *dst)
+            {
+                if (lbn >= imageSectors)
+                {
+                    return false;
+                }
+                file.clear();
+                file.seekg(static_cast<std::streamoff>(lbn) * kCdSectorSize, std::ios::beg);
+                file.read(reinterpret_cast<char *>(dst), kCdSectorSize);
+                return file.gcount() == static_cast<std::streamsize>(kCdSectorSize);
+            };
+            auto *built = new ps2_cd_overlay::Overlay();
+            std::string err;
+            if (!file.is_open() || !ps2_cd_overlay::build(env, imageSectors, read, *built, err))
+            {
+                std::cerr << "[cd-overlay] REFUSED: " << (file.is_open() ? err : "cannot open the CD image") << std::endl;
+                delete built;
+                return nullptr;
+            }
+            for (const std::string &line : built->log)
+            {
+                std::cerr << "[cd-overlay] " << line << std::endl;
+            }
+            return built;
+        }();
+        return overlay;
+    }
+
     bool readCdSectors(uint32_t lbn, uint32_t sectors, uint8_t *dst, size_t byteCount)
     {
+        // TK25c: mode-scoped CD alias (default off). While a manifest mode
+        // with `alias = ...` is on, the aliased disc file's LBN range is
+        // served from its host composite; mode off (or any other LBN) reads
+        // exactly as before. Reads past the file's end fall through to the
+        // disc below.
+        {
+            const auto pending = ps2_cd_overlay::pendingAlias();
+            if (!pending.first.empty() && !pending.second.empty())
+            {
+                const std::filesystem::path imagePath = getCdImagePath();
+                uint64_t imageSectors = 0;
+                if (!imagePath.empty() && tryGetCdImageTotalSectors(imageSectors))
+                {
+                    std::ifstream imageFile(imagePath, std::ios::binary);
+                    const ps2_cd_overlay::SectorReader read =
+                        [&imageFile, imageSectors](uint32_t rlbn, uint8_t *sectorDst)
+                    {
+                        if (rlbn >= imageSectors)
+                        {
+                            return false;
+                        }
+                        imageFile.clear();
+                        imageFile.seekg(static_cast<std::streamoff>(rlbn) * kCdSectorSize, std::ios::beg);
+                        imageFile.read(reinterpret_cast<char *>(sectorDst), kCdSectorSize);
+                        return imageFile.gcount() == static_cast<std::streamsize>(kCdSectorSize);
+                    };
+                    ps2_cd_overlay::DiscAlias alias;
+                    if (ps2_cd_overlay::resolveActiveAlias(imageSectors, read, lbn, alias))
+                    {
+                        const uint64_t offset = static_cast<uint64_t>(lbn - alias.discLbn) * kCdSectorSize;
+                        if (offset + byteCount <= alias.discSize)
+                        {
+                            return serveComposite(alias.composite, imagePath, offset, dst, byteCount);
+                        }
+                    }
+                }
+            }
+        }
+        const ps2_cd_overlay::Overlay *overlay = cdOverlay();
+        if (overlay && overlay->contains(lbn))
+        {
+            const ps2_cd_overlay::OverlayFile *file = overlay->fileFor(lbn);
+            if (!file)
+            {
+                if (dst)
+                {
+                    std::memset(dst, 0, byteCount);
+                }
+                g_lastCdError = 0;
+                return true;
+            }
+            const uint64_t offset = static_cast<uint64_t>(lbn - file->lbn) * kCdSectorSize;
+            if (file->segments.empty())
+            {
+                return readHostRange(file->host, offset, dst, byteCount);
+            }
+            // TK10 composite: stock disc ranges + pieces of the host file.
+            return serveComposite(*file, getCdImagePath(), offset, dst, byteCount);
+        }
+
         for (const auto &[key, entry] : g_cdFilesByKey)
         {
             const uint32_t endLbn = entry.baseLbn + entry.sectors;
@@ -463,7 +607,12 @@ namespace
             }
 
             const uint64_t offset = static_cast<uint64_t>(lbn) * kCdSectorSize;
-            return readHostRange(cdImage, offset, dst, byteCount);
+            const bool ok = readHostRange(cdImage, offset, dst, byteCount);
+            if (ok && overlay)
+            {
+                overlay->patchDirSectors(lbn, sectors, dst, byteCount);
+            }
+            return ok;
         }
 
         std::cerr << "sceCdRead unresolved LBN 0x" << std::hex << lbn
@@ -475,6 +624,10 @@ namespace
 
     bool isResolvableCdLbn(uint32_t lbn)
     {
+        if (const ps2_cd_overlay::Overlay *overlay = cdOverlay(); overlay && overlay->contains(lbn))
+        {
+            return true;
+        }
         for (const auto &[key, entry] : g_cdFilesByKey)
         {
             const uint32_t endLbn = entry.baseLbn + entry.sectors;
@@ -509,6 +662,11 @@ namespace
 
     uint32_t cdStreamingEndLbnForStart(uint32_t lbn)
     {
+        if (const ps2_cd_overlay::Overlay *overlay = cdOverlay(); overlay && overlay->contains(lbn))
+        {
+            const ps2_cd_overlay::OverlayFile *file = overlay->fileFor(lbn);
+            return file ? file->lbn + file->sectors : lbn;
+        }
         CdFileEntry entry{};
         if (findRegisteredCdFileForLbn(lbn, entry))
         {
@@ -1355,11 +1513,7 @@ namespace
         uint32_t madr = 0;
         uint32_t qwc = 0;
         uint32_t tadr = payloadPhys;
-        PS2Memory &mem = runtime->memory();
-
-        const uint32_t configuredChcr = mem.readIORegister(channelBase + 0x00u);
-        const uint32_t transferTagEnable = configuredChcr & 0x00000040u;
-        uint32_t chcr = 0x00000181u | transferTagEnable; // DIR=1, TIE=1, STR=1 (normal mode).
+        uint32_t chcr = 0x00000181u; // DIR=1, TIE=1, STR=1 (normal mode).
 
         if (preferNormalCount)
         {
@@ -1368,9 +1522,10 @@ namespace
         }
         else
         {
-            chcr = 0x00000185u | transferTagEnable; // MODE=1 chain, DIR=1, TIE=1, STR=1.
+            chcr = 0x00000185u; // MODE=1 chain, DIR=1, TIE=1, STR=1.
         }
 
+        PS2Memory &mem = runtime->memory();
         mem.writeIORegister(channelBase + 0x20u, qwc & 0xFFFFu);
         mem.writeIORegister(channelBase + 0x10u, madr);
         mem.writeIORegister(channelBase + 0x30u, tadr);
@@ -1400,10 +1555,10 @@ namespace
             if (g_dmaStubLogCount < kMaxDmaStubLogs)
             {
                 RUNTIME_LOG("[sceDmaSend] ch=0x" << std::hex << channelBase
-                                                 << " madr=0x" << madr
-                                                 << " qwc=0x" << qwc
-                                                 << " tadr=0x" << tadr
-                                                 << " chcr=0x" << chcr << std::dec << std::endl);
+                          << " madr=0x" << madr
+                          << " qwc=0x" << qwc
+                          << " tadr=0x" << tadr
+                          << " chcr=0x" << chcr << std::dec << std::endl);
 
                 if (!preferNormalCount && (channelBase == 0x10009000u || channelBase == 0x1000A000u))
                 {
@@ -1416,13 +1571,13 @@ namespace
                         std::memcpy(&w2, tagPtr + 8u, sizeof(w2));
                         std::memcpy(&w3, tagPtr + 12u, sizeof(w3));
                         RUNTIME_LOG("[sceDmaSend:head] ch=0x" << std::hex << channelBase
-                                                              << " tagQwc=0x" << static_cast<uint32_t>(tagLo & 0xFFFFu)
-                                                              << " id=0x" << static_cast<uint32_t>((tagLo >> 28u) & 0x7u)
-                                                              << " irq=0x" << static_cast<uint32_t>((tagLo >> 31u) & 0x1u)
-                                                              << " addr=0x" << static_cast<uint32_t>((tagLo >> 32u) & 0x7FFFFFFFu)
-                                                              << " w2=0x" << w2
-                                                              << " w3=0x" << w3
-                                                              << std::dec << std::endl);
+                                  << " tagQwc=0x" << static_cast<uint32_t>(tagLo & 0xFFFFu)
+                                  << " id=0x" << static_cast<uint32_t>((tagLo >> 28u) & 0x7u)
+                                  << " irq=0x" << static_cast<uint32_t>((tagLo >> 31u) & 0x1u)
+                                  << " addr=0x" << static_cast<uint32_t>((tagLo >> 32u) & 0x7FFFFFFFu)
+                                  << " w2=0x" << w2
+                                  << " w3=0x" << w3
+                                  << std::dec << std::endl);
                     }
                 }
                 ++g_dmaStubLogCount;
@@ -1836,9 +1991,9 @@ namespace
         return true;
     }
 
-    static bool readGsDBuff(uint8_t *rdram, uint32_t addr, GsDBuffMem &out)
+    static bool readGsDBuff(uint8_t* rdram, uint32_t addr, GsDBuffMem& out)
     {
-        const uint8_t *ptr = getConstMemPtr(rdram, addr);
+        const uint8_t* ptr = getConstMemPtr(rdram, addr);
         if (!ptr)
             return false;
         std::memcpy(&out, ptr, sizeof(out));
@@ -1854,9 +2009,9 @@ namespace
         return true;
     }
 
-    static bool writeGsDBuff(uint8_t *rdram, uint32_t addr, const GsDBuffMem &db)
+    static bool writeGsDBuff(uint8_t* rdram, uint32_t addr, const GsDBuffMem& db)
     {
-        uint8_t *ptr = getMemPtr(rdram, addr);
+        uint8_t* ptr = getMemPtr(rdram, addr);
         if (!ptr)
             return false;
         std::memcpy(ptr, &db, sizeof(db));
@@ -1879,19 +2034,23 @@ namespace
         if (!runtime || !runtime->syncCoreSubsystems())
             return;
         auto &regs = runtime->memory().gs();
-        regs.pmode = env.pmode;
-        regs.smode2 = env.smode2;
-        regs.dispfb1 = env.dispfb;
-        regs.display1 = env.display;
-        regs.dispfb2 = env.dispfb;
-        regs.display2 = env.display;
-        regs.bgcolor = env.bgcolor;
+        // GB3: in-stream when the GS queue is on.
+        runtime->memory().gsPrivStore([&regs, env]()
+                                      {
+            regs.pmode = env.pmode;
+            regs.smode2 = env.smode2;
+            regs.dispfb1 = env.dispfb;
+            regs.display1 = env.display;
+            regs.dispfb2 = env.dispfb;
+            regs.display2 = env.display;
+            regs.bgcolor = env.bgcolor; });
     }
 
     static void applyGsRegPairs(PS2Runtime *runtime, const GsRegPairMem *pairs, size_t pairCount)
     {
         if (!runtime || !pairs || !runtime->syncCoreSubsystems())
             return;
+        ps2_mtvu::sync(ps2_mtvu::Reason::GsHle); // MT1: HLE drives the GS directly
         for (size_t i = 0; i < pairCount; ++i)
         {
             runtime->gs().writeRegister(static_cast<uint8_t>(pairs[i].reg & 0xFFu), pairs[i].value);
@@ -1950,4 +2109,74 @@ namespace
         std::memcpy(scratch + kGsParamScratchOffset, &g_gparam, sizeof(g_gparam));
         return PS2_SCRATCHPAD_BASE + kGsParamScratchOffset;
     }
+}
+
+// SS1 save states: this header's globals sit in an anonymous namespace and
+// the Stubs TUs are not unity-built, so every includer owns its own copy.
+// Each copy registers one section keyed by its TU ("support:Stubs/CD.cpp").
+// Path/size caches (leaf index, image size) are rebuilt; libc FILE handles
+// must be closed at the save point.
+#include "runtime/ps2_savestate.h"
+namespace
+{
+    std::string supportSavestateKey()
+    {
+        const std::string path = __BASE_FILE__;
+        const size_t slash = path.find_last_of('/');
+        const size_t parent = slash == std::string::npos ? std::string::npos : path.find_last_of('/', slash - 1);
+        return "support:" + (parent == std::string::npos ? path : path.substr(parent + 1));
+    }
+
+    void supportSavestateSave(ps2_savestate::Writer &w)
+    {
+        ps2_savestate::writeOrdered(w, g_cdFilesByKey, [](ps2_savestate::Writer &ww, const auto &e) {
+            ww.str(e.first);
+            ww.str(e.second.hostPath.string());
+            ww.u32(e.second.sizeBytes);
+            ww.u32(e.second.baseLbn);
+            ww.u32(e.second.sectors);
+        });
+        w.u32(g_nextPseudoLbn);
+        w.pod(g_lastCdError);
+        w.u32(g_cdMode);
+        w.u32(g_cdStreamingLbn);
+        w.u32(g_cdStreamingEndLbn);
+        w.b(g_cdInitialized);
+        w.u32(g_iopHeapNext);
+        w.u32(g_next_file_handle);
+        ps2_savestate::writeOrderedPod(w, g_dmaPendingPolls);
+        w.pod(g_gparam);
+    }
+
+    bool supportSavestateLoad(ps2_savestate::Reader &r)
+    {
+        ps2_savestate::readOrdered(r, g_cdFilesByKey, [](ps2_savestate::Reader &rr, auto &e) {
+            e.first = rr.str();
+            e.second.hostPath = rr.str();
+            e.second.sizeBytes = rr.u32();
+            e.second.baseLbn = rr.u32();
+            e.second.sectors = rr.u32();
+        });
+        g_nextPseudoLbn = r.u32();
+        r.pod(g_lastCdError);
+        g_cdMode = r.u32();
+        g_cdStreamingLbn = r.u32();
+        g_cdStreamingEndLbn = r.u32();
+        g_cdInitialized = r.b();
+        g_iopHeapNext = r.u32();
+        g_next_file_handle = r.u32();
+        ps2_savestate::readOrderedPod(r, g_dmaPendingPolls);
+        r.pod(g_gparam);
+        return r.ok();
+    }
+
+    std::string supportSavestateReady()
+    {
+        if (!g_file_map.empty())
+            return "libc FILE handles open";
+        return {};
+    }
+
+    const bool kSupportSavestateRegistered = ps2_savestate::registerSection(
+        supportSavestateKey(), {1u, &supportSavestateSave, &supportSavestateLoad, &supportSavestateReady});
 }

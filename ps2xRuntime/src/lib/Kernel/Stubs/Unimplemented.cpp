@@ -12,6 +12,16 @@ namespace ps2_stubs
     {
         const std::string stubName = name ? name : "unknown";
 
+        // P1w: every unimplemented-stub call is census-counted here. The
+        // warning below is rate-limited (calls past the cap return -1
+        // silently), so only this line sees all of them.
+        {
+            char dropArgs[160];
+            std::snprintf(dropArgs, sizeof(dropArgs), "name=%s pc=0x%x ra=0x%x", stubName.c_str(),
+                          ctx->pc, getRegU32(ctx, 31));
+            ps2_log::emitDrop("stub/TODO_NAMED", "unimplemented", dropArgs);
+        }
+
         uint32_t callCount = 0;
         {
             std::lock_guard<std::mutex> lock(g_stubWarningMutex);
