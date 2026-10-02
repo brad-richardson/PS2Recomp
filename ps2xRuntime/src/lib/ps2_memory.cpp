@@ -566,7 +566,7 @@ uint32_t ps2_rb1_lagfFrames()
     static const uint32_t frames = [] {
         const char *env = std::getenv("PS2X_RB_LAGF_FRAMES");
         if (!env || env[0] == '\0')
-            return 3u;
+            return 4u; // LT1b Part 2 (orchestrator 10-02): the GS sees ~3/4 of sets a frame late
         const unsigned long v = std::strtoul(env, nullptr, 10);
         return static_cast<uint32_t>(v < 2ul ? 2ul : (v > 4ul ? 4ul : v));
     }();

@@ -293,7 +293,9 @@ public:
     // uses), so ticket = start(f-L) + i. Frames are EE vsync ticks; the key never
     // depends on where the worker saw a VSync. No probe (f-L, i): serve 0 bytes
     // (today's stale behaviour, the light stays visible), counted. L =
-    // PS2X_RB_LAGF_FRAMES (2..4, default 3). Deterministic per platform: only
+    // PS2X_RB_LAGF_FRAMES (2..4, default 4: about 3 in 4 probe packets reach
+    // the worker after the next VSync, so L=3 left the EE spinning on the
+    // resolve; LT1b Part 2). Deterministic per platform: only
     // the spin is timing-dependent. Backends without the async path (CPU) read
     // synchronously at the set instead. PS2X_RB_LAGF_VERIFY=1 (diag) also runs
     // the sync consume at each set and compares it with the async bytes at
