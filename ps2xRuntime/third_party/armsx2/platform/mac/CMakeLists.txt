@@ -39,8 +39,11 @@ write_svnrev_h()
 
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../vendor-pcsx2/common" "${CMAKE_BINARY_DIR}/common")
 # CN1A: ARMSX2's Vulkan GS sources include VKLibretro.cpp unconditionally and need the
-# header-only libretro-headers target before pcsx2/.
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../vendor-pcsx2/3rdparty/libretro" "${CMAKE_BINARY_DIR}/3rdparty/libretro")
+# header-only libretro-headers target before pcsx2/. The vendor SearchForStuff may
+# already provide it; add only when missing (unique binary dir either way).
+if(NOT TARGET libretro-headers)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../vendor-pcsx2/3rdparty/libretro" "${CMAKE_BINARY_DIR}/libretro-headers")
+endif()
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../vendor-pcsx2/pcsx2" "${CMAKE_BINARY_DIR}/pcsx2")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../adapter" "${CMAKE_BINARY_DIR}/ge1-adapter")
 
