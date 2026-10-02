@@ -256,6 +256,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_MTVU_GIF_CPUS",
         "PS2X_MTVU_GIF_STAGE",
         "PS2X_MTVU_LAG",
+        "PS2X_MTVU_VIF1_STAT_FREE",
         "PS2X_MTVU_VIF_CPUS",
         "PS2X_MTVU_VIF_STAGE",
         "PS2X_PAD_LATCH",

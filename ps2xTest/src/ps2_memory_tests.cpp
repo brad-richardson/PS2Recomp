@@ -550,6 +550,42 @@ void register_ps2_memory_tests()
             ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
         });
 
+        tc.Run("MQ3 VIF1_STAT write skips the unit sync with PS2X_MTVU_VIF1_STAT_FREE", [](TestCase &t)
+        {
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Threaded);
+            ps2_mtvu::detail::g_vif1StatFree.store(true);
+            ps2_mtvu::detail::Worker &w = ps2_mtvu::detail::worker();
+            std::atomic<bool> gate{false};
+            ps2_mtvu::submit([&gate] {
+                while (!gate.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+            }, 0u, 0u);
+            const uint64_t free0 = ps2_mtvu::detail::g_vif1StatFreePending.load();
+            auto f = std::async(std::launch::async, [&mem] { mem.write32(0x10003C00u, 0x800000u); });
+            const bool returned = f.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+            t.IsTrue(returned, "STAT write returns while a unit job is queued");
+            t.IsTrue(w.pending(), "the job is still queued");
+            t.Equals(ps2_mtvu::detail::g_vif1StatFreePending.load(), free0 + 1u, "counted as a skipped pending sync");
+            t.Equals(mem.read32(0x10003C00u), 0x800000u, "the value is stored");
+            // A VIF1 register with unit-owned state (FBRST) still waits.
+            std::atomic<bool> fbrstDone{false};
+            auto g = std::async(std::launch::async, [&mem, &fbrstDone] {
+                mem.write32(0x10003C10u, 0x8u);
+                fbrstDone.store(true);
+            });
+            const bool fbrstEarly = g.wait_for(std::chrono::milliseconds(50)) == std::future_status::ready;
+            t.IsFalse(fbrstEarly, "FBRST write waits for the unit");
+            gate.store(true, std::memory_order_release);
+            if (!returned)
+                f.wait();
+            g.wait();
+            t.IsTrue(fbrstDone.load(), "FBRST write completes after the drain");
+            ps2_mtvu::detail::g_vif1StatFree.store(false);
+            ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+        });
+
         tc.Run("uncached aliases map to same RDRAM bytes", [](TestCase &t)
         {
             PS2Memory mem;

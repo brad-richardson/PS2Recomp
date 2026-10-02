@@ -23,6 +23,8 @@
 //                       GIF unit); the unit then consumes one credit per such
 //                       write instead of setting FINISH again. PATH1/PATH2
 //                       FINISH stays unit-side.
+//   PS2X_MTVU_VIF1_STAT_FREE=1  MQ3: a guest VIF1_STAT (FDR) write skips the
+//                       Vif1Reg unit sync (it touches no unit-owned state).
 //   PS2X_MTVU_CPUS=a,b  pin the worker (Linux/Android).
 //   PS2X_MTVU_JITTER=N  test: sleep 0..N us before each job (host timing only).
 //   PS2X_GAME_THREAD_STACK_KB also sizes the worker's stack.
@@ -193,6 +195,9 @@ namespace ps2_mtvu
         inline std::atomic<bool> g_lag{false};
         // MQ2: EE-side PATH3 FINISH (PS2X_MTVU_FINISH_EE=1, threaded only).
         inline std::atomic<bool> g_finishEe{false};
+        inline std::atomic<bool> g_vif1StatFree{false};         // MQ3
+        inline std::atomic<uint64_t> g_vif1StatFreeN{0};        // MQ3: writes that skipped the sync
+        inline std::atomic<uint64_t> g_vif1StatFreePending{0};  // MQ3: ... with unit jobs queued
         inline std::atomic<uint64_t> g_finishEeCredits{0}; // EE-set writes the unit has not reached yet
         inline std::atomic<uint64_t> g_finishEeSets{0};    // EE submits that set FINISH
         inline std::atomic<uint64_t> g_finishEeSkips{0};   // unit PATH3 FINISH writes covered by a credit
@@ -1490,6 +1495,10 @@ namespace ps2_mtvu
                              static_cast<unsigned long long>(g_finishEeSkips.load(std::memory_order_relaxed)),
                              static_cast<unsigned long long>(g_finishEeUnmatched.load(std::memory_order_relaxed)),
                              static_cast<unsigned long long>(g_finishEeCredits.load(std::memory_order_relaxed)));
+            if (g_vif1StatFree.load(std::memory_order_relaxed))
+                std::fprintf(stderr, " vif1statfree=%llu/%llu",
+                             static_cast<unsigned long long>(g_vif1StatFreeN.load(std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(g_vif1StatFreePending.load(std::memory_order_relaxed)));
             std::fprintf(stderr, "\n");
             if (g_gifStage.load(std::memory_order_relaxed))
             {
@@ -1662,10 +1671,15 @@ namespace ps2_mtvu
         const char *fe = std::getenv("PS2X_MTVU_FINISH_EE");
         detail::g_finishEe.store(m == static_cast<int>(Mode::Threaded) && fe && std::strcmp(fe, "1") == 0,
                                  std::memory_order_relaxed);
+        const char *vs = std::getenv("PS2X_MTVU_VIF1_STAT_FREE");
+        detail::g_vif1StatFree.store(m == static_cast<int>(Mode::Threaded) && vs && std::strcmp(vs, "1") == 0,
+                                     std::memory_order_relaxed);
         detail::g_mode.store(m, std::memory_order_relaxed);
         if (e && std::strcmp(e, "1") == 0)
-            std::fprintf(stderr, "[mtvu] mode=%s lag=%d finish_ee=%d jitter_us=%u%s\n", m ? "threaded" : "off",
-                         lagOn ? 1 : 0, detail::g_finishEe.load(std::memory_order_relaxed) ? 1 : 0,
+            std::fprintf(stderr, "[mtvu] mode=%s lag=%d finish_ee=%d vif1stat_free=%d jitter_us=%u%s\n",
+                         m ? "threaded" : "off", lagOn ? 1 : 0,
+                         detail::g_finishEe.load(std::memory_order_relaxed) ? 1 : 0,
+                         detail::g_vif1StatFree.load(std::memory_order_relaxed) ? 1 : 0,
                          detail::worker().jitterUs,
                          diagArmed ? " (a dev trace is armed: threaded mode refused)" : "");
     }
@@ -1960,6 +1974,20 @@ namespace ps2_mtvu
             std::fprintf(stderr, "[mtvu] finish-ee UNMATCHED unit PATH3 FINISH (writes=%u credits=%llu)\n", writes,
                          static_cast<unsigned long long>(have));
         return false;
+    }
+
+    // MQ3: PS2X_MTVU_VIF1_STAT_FREE=1 (threaded only).
+    inline bool vif1StatFree()
+    {
+        return detail::g_vif1StatFree.load(std::memory_order_relaxed);
+    }
+    // EE: a VIF1_STAT write skipped its sync (counts those with jobs queued,
+    // i.e. the ones that would have waited).
+    inline void noteVif1StatFree()
+    {
+        detail::g_vif1StatFreeN.fetch_add(1u, std::memory_order_relaxed);
+        if (detail::worker().pending())
+            detail::g_vif1StatFreePending.fetch_add(1u, std::memory_order_relaxed);
     }
 
     // Arbiter: marks the path of the packet being emitted on this thread.

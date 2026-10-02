@@ -1859,7 +1859,15 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
 
     if (address >= 0x10003C00u && address < 0x10003E00u)
     {
-        ps2_mtvu::sync(ps2_mtvu::Reason::Vif1Reg); // MT1: vif1_regs are unit-owned
+        // MQ3 (PS2X_MTVU_VIF1_STAT_FREE=1): a VIF1_STAT write (FDR) only
+        // updates m_ioRegisters above, which no unit thread reads (EE-side
+        // readers only: readIORegister/read64, the DMA kick, savestate), and
+        // has no vif1_regs case below, so it needs no unit sync (PCSX2's
+        // vif1STAT runs on the EE with no MTVU wait).
+        if (address == 0x10003C00u && ps2_mtvu::vif1StatFree())
+            ps2_mtvu::noteVif1StatFree();
+        else
+            ps2_mtvu::sync(ps2_mtvu::Reason::Vif1Reg); // MT1: vif1_regs are unit-owned
         m_vifWriteCount.fetch_add(1, std::memory_order_relaxed);
 
         switch (address)
