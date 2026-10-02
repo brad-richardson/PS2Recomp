@@ -69,6 +69,8 @@ case "$PLAT" in
     ln -s vendor-pcsx2/cmake "$ASM/cmake"
     cp -a "$HERE/platform/mac" "$ASM/mac-platform"
     ln -s "$ARMSX2/3rdparty" "$ASM/mac-platform/3rdparty"
+    # GE1S: the Apple toolchain (brew LLVM against Apple SDK headers breaks).
+    export CC=/usr/bin/cc CXX=/usr/bin/c++
     cmake -S "$ASM/mac-platform" -B "$BLD" -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_PREFIX_PATH=$PIN/mac/ge1-deps \
