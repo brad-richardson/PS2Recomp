@@ -616,7 +616,11 @@ void GS::executeQueuedCommand(GsCommand &cmd)
         break;
     case GsCmdKind::GuestVsync:
         if (m_backend)
+        {
             m_backend->GuestVsync(cmd.regValue, cmd.u32a);
+            if (ps2_rb1_reverseDmaMode() == 4)
+                lagfOnGuestVsync(cmd.regValue); // LT1b: after GE1's VSync drain
+        }
         break;
     case GsCmdKind::Consume:
     {
@@ -2068,6 +2072,8 @@ void GS::noteGuestVsync(uint64_t tick)
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     m_backend->GuestVsync(tick, field);
+    if (ps2_rb1_reverseDmaMode() == 4)
+        lagfOnGuestVsync(tick); // LT1b
 }
 
 void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
@@ -2415,8 +2421,14 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             // worker-ordered right after its setup (the backend overwrites
             // its pending count per setup, so a later consume would not see
             // this transfer's bytes). Off/sync modes skip: one relaxed load.
-            if (m_trxdir == 1u && ps2_rb1_reverseDmaMode() >= 2)
-                snapshotLaggedReadback();
+            if (m_trxdir == 1u)
+            {
+                const int rbMode = ps2_rb1_reverseDmaMode();
+                if (rbMode == 2 || rbMode == 3)
+                    snapshotLaggedReadback();
+                else if (rbMode == 4)
+                    lagfRequest(command); // LT1b
+            }
         }
         recordTransferDebugEventUnlocked();
         ps2x_gs_capture::transfer(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
@@ -2893,6 +2905,284 @@ uint32_t GS::serveLaggedReadback(uint8_t *dst, uint32_t maxBytes, uint64_t &spin
     const uint32_t n = (have < maxBytes) ? have : maxBytes;
     if (dst && n != 0u)
         std::memcpy(dst, m_rb2Slot[slot], n);
+    return n;
+}
+
+namespace
+{
+// LT1b: PS2X_RB_LAGF_VERIFY=1 (diag): also read every lagF set synchronously
+// and compare with the async bytes at resolve.
+bool lagfVerifyOn()
+{
+    static const bool on = [] {
+        const char *env = std::getenv("PS2X_RB_LAGF_VERIFY");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+std::string lagfHead(const uint8_t *p, uint32_t n)
+{
+    std::ostringstream o;
+    const uint32_t headN = (n < 8u) ? n : 8u;
+    for (uint32_t i = 0u; i < headN; ++i)
+        o << std::hex << static_cast<uint32_t>(p[i]) << (i + 1u < headN ? ":" : "");
+    return o.str();
+}
+} // namespace
+
+GS::LagfSlot *GS::lagfSlots()
+{
+    std::lock_guard<std::mutex> lock(m_lagfMutex);
+    if (!m_lagfSlots)
+        m_lagfSlots = std::make_unique<LagfSlot[]>(kLagfRing);
+    return m_lagfSlots.get();
+}
+
+void GS::lagfRequest(const GSTransferCommand &command)
+{
+    // Worker-ordered (queued mode) or inline, right after BeginTransfer.
+    LagfSlot *slots = lagfSlots();
+    const uint64_t ticket = m_lagfSets++;
+    LagfSlot &slot = slots[ticket % kLagfRing];
+    const bool async = m_backend && m_backend->RequestLocalToHostAsync(command, ticket);
+    const bool verify = async && lagfVerifyOn();
+    uint8_t buf[kRb2LagSlotBytes];
+    uint32_t n = 0u;
+    bool truncated = false;
+    if (!async || verify)
+    {
+        // Same consume + remainder drain as snapshotLaggedReadback.
+        t_l2hSite = "lagf";
+        n = consumeLocalToHostBytes(buf, kRb2LagSlotBytes);
+        uint8_t drain[1024];
+        for (;;)
+        {
+            const uint32_t m = consumeLocalToHostBytes(drain, sizeof(drain));
+            if (m == 0u)
+                break;
+            truncated = true;
+            if (m < sizeof(drain))
+                break;
+        }
+        t_l2hSite = "rpc";
+    }
+    if (verify)
+    {
+        if (m_lagfVerifyBytes.size() != kLagfRing)
+            m_lagfVerifyBytes.resize(kLagfRing);
+        m_lagfVerifyBytes[ticket % kLagfRing].assign(buf, buf + (truncated ? 0u : n));
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_lagfMutex);
+        slot.ready.store(~0ull, std::memory_order_relaxed);
+        slot.async = async;
+        slot.gsTick = m_lagfGsTick;
+        slot.gsOrdinal = m_lagfGsOrdinal++;
+        if (!async)
+        {
+            slot.bytes = truncated ? 0u : n;
+            if (slot.bytes)
+                std::memcpy(slot.data, buf, slot.bytes);
+            slot.ready.store(ticket, std::memory_order_release);
+        }
+    }
+    (async ? m_lagfAsync : m_lagfFallback).fetch_add(1u, std::memory_order_relaxed);
+}
+
+void GS::lagfOnGuestVsync(uint64_t tick)
+{
+    // Worker, right after the backend's VSync (GE1 drained its back queue there,
+    // so every ticket requested before this VSync has executed).
+    if (!m_lagfVsyncSetsInit)
+    {
+        for (auto &e : m_lagfVsyncSets)
+            e = {~0ull, 0u};
+        m_lagfVsyncSetsInit = true;
+    }
+    m_lagfVsyncSets[tick % m_lagfVsyncSets.size()] = {tick, m_lagfSets};
+    m_lagfGsTick = tick;
+    m_lagfGsOrdinal = 0u;
+
+    const uint64_t back = static_cast<uint64_t>(ps2_rb1_lagfFrames()) - 2u;
+    if (tick >= back)
+    {
+        const auto &mark = m_lagfVsyncSets[(tick - back) % m_lagfVsyncSets.size()];
+        const uint64_t hi = (mark.first == tick - back) ? mark.second : m_lagfResolved;
+        if (hi > m_lagfResolved)
+        {
+            LagfSlot *slots = lagfSlots();
+            if (m_backend)
+                m_backend->ResolveLocalToHostAsync(hi);
+            static std::atomic<uint32_t> lagfMismatchLog{0};
+            for (uint64_t t = m_lagfResolved; t < hi; ++t)
+            {
+                LagfSlot &slot = slots[t % kLagfRing];
+                if (!slot.async)
+                    continue; // published at the set
+                uint8_t buf[kRb2LagSlotBytes];
+                const uint32_t n = m_backend ? m_backend->TakeLocalToHostAsync(t, buf, sizeof(buf)) : 0u;
+                if (n == 0u)
+                    m_lagfUnresolved.fetch_add(1u, std::memory_order_relaxed);
+                if (lagfVerifyOn() && m_lagfVerifyBytes.size() == kLagfRing)
+                {
+                    const std::vector<uint8_t> &ref = m_lagfVerifyBytes[t % kLagfRing];
+                    const bool same = ref.size() == n && (n == 0u || std::memcmp(ref.data(), buf, n) == 0);
+                    m_lagfVerifyCompared.fetch_add(1u, std::memory_order_relaxed);
+                    if (!same)
+                    {
+                        m_lagfVerifyMismatch.fetch_add(1u, std::memory_order_relaxed);
+                        if (lagfMismatchLog.fetch_add(1u, std::memory_order_relaxed) < 16u)
+                        {
+                            uint32_t firstDiff = 0u;
+                            while (firstDiff < n && firstDiff < ref.size() && ref[firstDiff] == buf[firstDiff])
+                                ++firstDiff;
+                            std::ostringstream o;
+                            o << "[lagF] verify MISMATCH ticket=" << t << " gs_tick=" << slot.gsTick
+                              << " ordinal=" << slot.gsOrdinal << " sync_bytes=" << ref.size()
+                              << " async_bytes=" << n << " first_diff=" << firstDiff
+                              << " sync_head=" << lagfHead(ref.data(), static_cast<uint32_t>(ref.size()))
+                              << " async_head=" << lagfHead(buf, n);
+                            ps2_log::emitLine(o.str());
+                        }
+                    }
+                }
+                std::lock_guard<std::mutex> lock(m_lagfMutex);
+                slot.bytes = n;
+                if (n)
+                    std::memcpy(slot.data, buf, n);
+                slot.ready.store(t, std::memory_order_release);
+            }
+            m_lagfResolved = hi;
+        }
+    }
+
+    if ((tick % 300u) == 0u)
+    {
+        uint64_t spinP99 = 0u, total = 0u;
+        for (const auto &b : m_lagfSpinHist)
+            total += b.load(std::memory_order_relaxed);
+        if (total)
+        {
+            uint64_t acc = 0u;
+            for (size_t i = 0; i < m_lagfSpinHist.size(); ++i)
+            {
+                acc += m_lagfSpinHist[i].load(std::memory_order_relaxed);
+                if (acc * 100u >= total * 99u)
+                {
+                    spinP99 = (i == 0u) ? 0u : (1ull << i); // bucket upper bound, us
+                    break;
+                }
+            }
+        }
+        uint64_t be[8] = {};
+        const bool haveBe = m_backend && m_backend->LocalToHostAsyncStats(be);
+        std::ostringstream o;
+        o << "[lagF] sum tick=" << tick << " L=" << ps2_rb1_lagfFrames() << " sets=" << m_lagfSets
+          << " async=" << m_lagfAsync.load() << " fallback=" << m_lagfFallback.load()
+          << " resolved=" << m_lagfResolved << " unresolved=" << m_lagfUnresolved.load()
+          << " served=" << m_lagfServed.load() << " misses=" << m_lagfMisses.load()
+          << " timeouts=" << m_lagfTimeouts.load() << " ord_mismatch=" << m_lagfOrdMismatch.load()
+          << " fdelta=" << m_lagfFrameDelta[0].load() << "/" << m_lagfFrameDelta[1].load() << "/"
+          << m_lagfFrameDelta[2].load() << "/" << m_lagfFrameDelta[3].load() << "/"
+          << m_lagfFrameDelta[4].load() << "/out=" << m_lagfFrameDelta[5].load()
+          << " spin_p99_le_us=" << spinP99 << " spin_max_us=" << m_lagfSpinMaxUs.load()
+          << " verify=" << m_lagfVerifyCompared.load() << "/mismatch=" << m_lagfVerifyMismatch.load();
+        if (haveBe)
+            o << " ge1=req:" << be[0] << ",res:" << be[1] << ",take:" << be[2] << ",gpu:" << be[3]
+              << ",mem:" << be[4] << ",fence_wait:" << be[5] << ",env_mismatch:" << be[6];
+        ps2_log::emitLine(o.str());
+    }
+}
+
+uint32_t GS::serveLagFrameReadback(uint8_t *dst, uint32_t maxBytes, uint64_t eeTick, LagfServeInfo &info)
+{
+    // EE thread. Key: (eeTick, ordinal since that tick's first probe).
+    info = {};
+    const uint64_t lag = ps2_rb1_lagfFrames();
+    if (eeTick < m_lagfLastEeTick)
+        m_lagfEe.fill(LagfEeFrame{}); // savestate load to an earlier tick
+    m_lagfLastEeTick = eeTick;
+    LagfEeFrame &cur = m_lagfEe[eeTick % m_lagfEe.size()];
+    if (cur.tick != eeTick)
+        cur = LagfEeFrame{eeTick, m_lagfServes, 0u};
+    info.ordinal = cur.count++;
+    ++m_lagfServes;
+    bool have = false;
+    if (eeTick >= lag)
+    {
+        info.srcTick = eeTick - lag;
+        const LagfEeFrame &src = m_lagfEe[info.srcTick % m_lagfEe.size()];
+        if (src.tick == info.srcTick && info.ordinal < src.count)
+        {
+            info.ticket = src.start + info.ordinal;
+            have = true;
+        }
+    }
+    if (!have)
+    {
+        info.miss = true;
+        m_lagfMisses.fetch_add(1u, std::memory_order_relaxed);
+        return 0u;
+    }
+
+    LagfSlot *slots = lagfSlots();
+    LagfSlot &slot = slots[info.ticket % kLagfRing];
+    // The ticket was set >= L frames ago and resolves at a fixed GS VSync, so the
+    // spin is ~0 unless the worker runs > L-2 frames behind. Hang-guard only.
+    static constexpr uint64_t kLagfServeTimeoutUs = 500000u;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (uint64_t i = 0u;; ++i)
+    {
+        if (slot.ready.load(std::memory_order_acquire) == info.ticket)
+            break;
+        if ((i & 1023u) == 1023u)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            info.spinUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count());
+            if (info.spinUs >= kLagfServeTimeoutUs)
+            {
+                info.timedOut = true;
+                m_lagfTimeouts.fetch_add(1u, std::memory_order_relaxed);
+                std::ostringstream o;
+                o << "[lagF] serve ticket=" << info.ticket << " TIMEOUT (sets=" << m_lagfSets
+                  << " ready=" << slot.ready.load(std::memory_order_relaxed) << ")";
+                ps2_log::emitLine(o.str());
+                return 0u;
+            }
+            std::this_thread::yield();
+        }
+    }
+    info.spinUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - t0)
+                                            .count());
+    {
+        size_t b = 0u;
+        while (b + 1u < m_lagfSpinHist.size() && (1ull << b) <= info.spinUs)
+            ++b;
+        m_lagfSpinHist[b].fetch_add(1u, std::memory_order_relaxed);
+        uint64_t prev = m_lagfSpinMaxUs.load(std::memory_order_relaxed);
+        while (info.spinUs > prev &&
+               !m_lagfSpinMaxUs.compare_exchange_weak(prev, info.spinUs, std::memory_order_relaxed))
+        {
+        }
+    }
+    std::lock_guard<std::mutex> lock(m_lagfMutex);
+    if (slot.ready.load(std::memory_order_relaxed) != info.ticket)
+    {
+        m_lagfTimeouts.fetch_add(1u, std::memory_order_relaxed); // overwritten (ring wrap): never expected
+        return 0u;
+    }
+    if (slot.gsOrdinal != info.ordinal)
+        m_lagfOrdMismatch.fetch_add(1u, std::memory_order_relaxed);
+    const int64_t delta = static_cast<int64_t>(info.srcTick) - static_cast<int64_t>(slot.gsTick);
+    m_lagfFrameDelta[(delta >= -2 && delta <= 2) ? static_cast<size_t>(delta + 2) : 5u].fetch_add(
+        1u, std::memory_order_relaxed);
+    const uint32_t n = (slot.bytes < maxBytes) ? slot.bytes : maxBytes;
+    if (dst && n)
+        std::memcpy(dst, slot.data, n);
+    m_lagfServed.fetch_add(1u, std::memory_order_relaxed);
     return n;
 }
 

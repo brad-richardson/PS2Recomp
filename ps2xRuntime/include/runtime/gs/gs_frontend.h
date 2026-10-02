@@ -282,6 +282,36 @@ public:
     // snapshot wait, timedOut sets on the hang-guard timeout (serve zeros).
     uint32_t serveLaggedReadback(uint8_t *dst, uint32_t maxBytes, uint64_t &spinUs, bool &timedOut);
 
+    // LT1b: lagF (`PS2X_VIF1_REVERSE_DMA=lagF`, mode 4), the frame-keyed lag.
+    // Each TRXDIR=1 set gets a ticket j (its GS-stream sequence number) and an
+    // asynchronous backend request (GE1: GPU copy at the set's stream point, no
+    // fence wait); the GS worker resolves tickets at a fixed guest VSync (sets
+    // made before VSync g-(L-2) resolve at VSync g) into the slot table. The EE
+    // serves probe (frame f, ordinal i) with the bytes of probe (f-L, i): the EE
+    // records, per guest frame, the serve index of its first probe, and serve k
+    // pairs with set k (one TRXDIR=1 per reverse DMA, the same pairing RB2
+    // uses), so ticket = start(f-L) + i. Frames are EE vsync ticks; the key never
+    // depends on where the worker saw a VSync. No probe (f-L, i): serve 0 bytes
+    // (today's stale behaviour, the light stays visible), counted. L =
+    // PS2X_RB_LAGF_FRAMES (2..4, default 3). Deterministic per platform: only
+    // the spin is timing-dependent. Backends without the async path (CPU) read
+    // synchronously at the set instead. PS2X_RB_LAGF_VERIFY=1 (diag) also runs
+    // the sync consume at each set and compares it with the async bytes at
+    // resolve. Savestates: tickets in flight are not serialized; after a load,
+    // probes serve 0 bytes until L frames have passed (the EE frame table is
+    // keyed by tick and cleared when the tick moves backwards).
+    struct LagfServeInfo
+    {
+        uint64_t ticket = 0;
+        uint64_t srcTick = 0;
+        uint32_t ordinal = 0;
+        bool miss = false;
+        bool timedOut = false;
+        uint64_t spinUs = 0;
+    };
+    static constexpr uint64_t kLagfRing = 512u;
+    uint32_t serveLagFrameReadback(uint8_t *dst, uint32_t maxBytes, uint64_t eeTick, LagfServeInfo &info);
+
     void refreshDisplaySnapshot();
 
     void WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value);
@@ -440,6 +470,51 @@ private:
     bool m_rb2SlotTruncated[kRb2LagRing] = {false};
     uint64_t m_rb2Serves = 0u;
     std::atomic<uint64_t> m_rb2Timeouts{0};
+
+    // LT1b (appended last): lagF state. Slots are published under m_lagfMutex
+    // with a release store of `ready` (= the ticket they hold); the EE spins on
+    // an acquire load, then copies under the mutex. Worker-only: m_lagfSets,
+    // the GS frame/ordinal and resolve cursor, the VSync set marks, verify
+    // bytes. EE-only: the frame table and serve counter.
+    struct LagfSlot
+    {
+        std::atomic<uint64_t> ready{~0ull};
+        bool async = false;
+        uint32_t bytes = 0u;
+        uint64_t gsTick = 0u;
+        uint32_t gsOrdinal = 0u;
+        uint8_t data[kRb2LagSlotBytes];
+    };
+    struct LagfEeFrame
+    {
+        uint64_t tick = ~0ull;
+        uint64_t start = 0u;
+        uint32_t count = 0u;
+    };
+    void lagfRequest(const GSTransferCommand &command);
+    void lagfOnGuestVsync(uint64_t tick);
+    LagfSlot *lagfSlots();
+    std::mutex m_lagfMutex;
+    std::unique_ptr<LagfSlot[]> m_lagfSlots;
+    std::vector<std::vector<uint8_t>> m_lagfVerifyBytes;
+    uint64_t m_lagfSets = 0u;
+    uint64_t m_lagfGsTick = 0u;
+    uint32_t m_lagfGsOrdinal = 0u;
+    uint64_t m_lagfResolved = 0u;
+    std::array<std::pair<uint64_t, uint64_t>, 8> m_lagfVsyncSets{};
+    bool m_lagfVsyncSetsInit = false;
+    std::array<LagfEeFrame, 8> m_lagfEe{};
+    uint64_t m_lagfServes = 0u;
+    uint64_t m_lagfLastEeTick = 0u;
+    // Counters ([lagF] sum lines): async requests, sync fallbacks, served,
+    // misses, timeouts, ordinal mismatches, frame-delta histogram (-2..+2, index
+    // 0..4; outside counted at 5), spin log2 histogram (us), verify compared /
+    // mismatched / unresolved.
+    std::atomic<uint64_t> m_lagfAsync{0}, m_lagfFallback{0}, m_lagfServed{0}, m_lagfMisses{0},
+        m_lagfTimeouts{0}, m_lagfOrdMismatch{0}, m_lagfVerifyCompared{0}, m_lagfVerifyMismatch{0},
+        m_lagfUnresolved{0}, m_lagfSpinMaxUs{0};
+    std::array<std::atomic<uint64_t>, 6> m_lagfFrameDelta{};
+    std::array<std::atomic<uint64_t>, 24> m_lagfSpinHist{};
 };
 
 #endif

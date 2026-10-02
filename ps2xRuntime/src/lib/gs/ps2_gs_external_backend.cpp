@@ -75,6 +75,13 @@ struct Ge1Api
 #endif
     // BG1: optional (pre-PW1 libraries lack it; a missing symbol only skips the pause flush).
     decltype(&ge1_gs_flush_caches) flushCaches = nullptr;
+    // LT1b: optional probe quartet (pre-LT1b libraries lack it; lagF then reads
+    // synchronously at the set).
+    decltype(&ge1_gs_probe_request) probeRequest = nullptr;
+    decltype(&ge1_gs_probe_resolve_frame) probeResolve = nullptr;
+    decltype(&ge1_gs_probe_take) probeTake = nullptr;
+    decltype(&ge1_gs_probe_stats) probeStats = nullptr;
+    bool probeBound() const { return probeRequest && probeResolve && probeTake; }
     // DS1: optional (pre-DS1 libraries lack them; without them a GE1-live
     // save keeps refusing, as before).
     decltype(&ge1_gs_freeze_size) freezeSize = nullptr;
@@ -145,6 +152,11 @@ struct Ge1Api
         freezeLoad = reinterpret_cast<decltype(freezeLoad)>(dlsym(library, "ge1_gs_freeze_load"));
         if (!freezeBound())
             std::fprintf(stderr, "[gs:external] GE1 library predates ge1_gs_freeze_*; live saves refuse\n");
+        // LT1b: optional probe quartet (see above); never fails the load.
+        probeRequest = reinterpret_cast<decltype(probeRequest)>(dlsym(library, "ge1_gs_probe_request"));
+        probeResolve = reinterpret_cast<decltype(probeResolve)>(dlsym(library, "ge1_gs_probe_resolve_frame"));
+        probeTake = reinterpret_cast<decltype(probeTake)>(dlsym(library, "ge1_gs_probe_take"));
+        probeStats = reinterpret_cast<decltype(probeStats)>(dlsym(library, "ge1_gs_probe_stats"));
         // PT2 Part 2: optional back-thread query (see above); never fails the load.
         backMs = reinterpret_cast<decltype(backMs)>(dlsym(library, "ge1_gs_back_ms"));
         if (!backMs)
@@ -663,6 +675,48 @@ public:
         log("C max=%u got=%u cursor=%zu/%zu tick=%llu\n", maxBytes, n,
             m_fifoCursor, m_fifo.size(), tickNow());
         return n;
+    }
+
+    // LT1b: lagF probes go to GE1's ticketed async path when the library has it.
+    // The setup stays armed exactly as BeginTransfer left it (a verify-mode sync
+    // consume after this call still reads this transfer).
+    bool RequestLocalToHostAsync(const GSTransferCommand &command, uint64_t ticket) override
+    {
+        if (!m_ge1Active || !m_ge1.probeBound())
+            return false;
+        const uint64_t bitbltbuf = static_cast<uint64_t>(command.bitbltbuf.sbp) |
+                                   (static_cast<uint64_t>(command.bitbltbuf.sbw) << 16) |
+                                   (static_cast<uint64_t>(command.bitbltbuf.spsm) << 24) |
+                                   (static_cast<uint64_t>(command.bitbltbuf.dbp) << 32) |
+                                   (static_cast<uint64_t>(command.bitbltbuf.dbw) << 48) |
+                                   (static_cast<uint64_t>(command.bitbltbuf.dpsm) << 56);
+        const uint64_t trxpos = static_cast<uint64_t>(command.trxpos.ssax) |
+                                (static_cast<uint64_t>(command.trxpos.ssay) << 16) |
+                                (static_cast<uint64_t>(command.trxpos.dsax) << 32) |
+                                (static_cast<uint64_t>(command.trxpos.dsay) << 48) |
+                                (static_cast<uint64_t>(command.trxpos.dir) << 59);
+        const uint64_t trxreg = static_cast<uint64_t>(command.trxreg.rrw) |
+                                (static_cast<uint64_t>(command.trxreg.rrh) << 32);
+        return m_ge1.probeRequest(bitbltbuf, trxpos, trxreg, ticket) == 1;
+    }
+
+    void ResolveLocalToHostAsync(uint64_t ticketHi) override
+    {
+        if (m_ge1Active && m_ge1.probeBound())
+            m_ge1.probeResolve(0u, ticketHi);
+    }
+
+    uint32_t TakeLocalToHostAsync(uint64_t ticket, uint8_t *dst, uint32_t maxBytes) override
+    {
+        if (!m_ge1Active || !m_ge1.probeBound())
+            return 0u;
+        const int n = m_ge1.probeTake(ticket, dst, maxBytes);
+        return n > 0 ? static_cast<uint32_t>(n) : 0u;
+    }
+
+    bool LocalToHostAsyncStats(uint64_t out[8]) const override
+    {
+        return m_ge1Active && m_ge1.probeStats && m_ge1.probeStats(out) == 1;
     }
 
     uint32_t ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const override

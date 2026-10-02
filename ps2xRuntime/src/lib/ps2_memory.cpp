@@ -190,6 +190,8 @@ namespace
                 return 2;
             if (std::strcmp(env, "lagV") == 0)
                 return 3;
+            if (std::strcmp(env, "lagF") == 0)
+                return 4; // LT1b: frame-keyed async lag (GS::serveLagFrameReadback)
             return 1;
         }();
         return mode;
@@ -557,6 +559,18 @@ void ps2_rb1_setReverseDmaOverride(int mode)
 int ps2_rb1_reverseDmaMode()
 {
     return vif1ReverseDmaModeLocal();
+}
+
+uint32_t ps2_rb1_lagfFrames()
+{
+    static const uint32_t frames = [] {
+        const char *env = std::getenv("PS2X_RB_LAGF_FRAMES");
+        if (!env || env[0] == '\0')
+            return 3u;
+        const unsigned long v = std::strtoul(env, nullptr, 10);
+        return static_cast<uint32_t>(v < 2ul ? 2ul : (v > 4ul ? 4ul : v));
+    }();
+    return frames;
 }
 
 // Helpers for GS VRAM addressing (PSMCT32 path).
@@ -2010,10 +2024,20 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint8_t rb2Buf[GS::kRb2LagSlotBytes];
                     uint64_t rb2SpinUs = 0u;
                     bool rb2Timeout = false;
-                    const uint32_t rb2Avail = m_gsFrontend
-                                                  ? m_gsFrontend->serveLaggedReadback(rb2Buf, sizeof(rb2Buf),
-                                                                                      rb2SpinUs, rb2Timeout)
-                                                  : 0u;
+                    // LT1b: lagF keys by (EE vsync tick, ordinal) instead of sequence.
+                    const bool lagF = vif1ReverseDmaModeLocal() == 4;
+                    GS::LagfServeInfo lagfInfo;
+                    const uint32_t rb2Avail =
+                        !m_gsFrontend ? 0u
+                        : lagF ? m_gsFrontend->serveLagFrameReadback(
+                                     rb2Buf, sizeof(rb2Buf), gs_regs.vsyncTick.load(std::memory_order_acquire),
+                                     lagfInfo)
+                               : m_gsFrontend->serveLaggedReadback(rb2Buf, sizeof(rb2Buf), rb2SpinUs, rb2Timeout);
+                    if (lagF)
+                    {
+                        rb2SpinUs = lagfInfo.spinUs;
+                        rb2Timeout = lagfInfo.timedOut;
+                    }
                     const uint32_t rb2Give = (rb2Avail < rb2Want) ? rb2Avail : rb2Want;
                     uint32_t rb2Done = 0u;
                     while (rb2Done < rb2Give)
@@ -2082,10 +2106,16 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             // UX1: build then emit once (was a std::cerr chain;
                             // see the snap side). Bytes identical.
                             std::ostringstream rb2Line;
-                            rb2Line << "[rb2] serve madr=0x" << std::hex << madr << std::dec
+                            if (lagF)
+                                rb2Line << "[lagF] serve tick=" << gs_regs.vsyncTick.load(std::memory_order_relaxed)
+                                        << " ord=" << lagfInfo.ordinal << " src_tick=" << lagfInfo.srcTick
+                                        << " ticket=" << lagfInfo.ticket << " miss=" << (lagfInfo.miss ? 1 : 0)
+                                        << " ";
+                            rb2Line << (lagF ? "" : "[rb2] ") << "serve madr=0x" << std::hex << madr << std::dec
                                     << " qwc=" << qwc << " avail=" << rb2Avail << " served=" << rb2Done
                                     << " depth="
-                                    << ((vif1ReverseDmaModeLocal() == 3) ? GS::kRb2LagVDepth : 1u)
+                                    << (lagF ? static_cast<uint64_t>(ps2_rb1_lagfFrames())
+                                             : ((vif1ReverseDmaModeLocal() == 3) ? GS::kRb2LagVDepth : 1u))
                                     << " spin_us=" << rb2SpinUs << " timeout=" << (rb2Timeout ? 1 : 0)
                                     << " u24min=0x" << std::hex << rb2Min << " u24mean=0x"
                                     << (rb2Pix ? (rb2Sum / rb2Pix) : 0u) << " u24max=0x" << rb2Max

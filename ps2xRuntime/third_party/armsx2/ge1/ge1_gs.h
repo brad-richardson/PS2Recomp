@@ -19,6 +19,17 @@ GE1_API int ge1_gs_priv_write(uint32_t offset, uint64_t value);
 GE1_API int ge1_gs_packet(uint8_t path, const uint8_t* bytes, uint32_t byte_count);
 GE1_API int ge1_gs_vsync(uint32_t field, uint64_t csr, uint64_t smode1, uint64_t syncv);
 GE1_API int ge1_gs_read_fifo(uint8_t* bytes, uint32_t qwords);
+// LT1b: ticketed asynchronous local->host probes (PS2X_VIF1_REVERSE_DMA=lagF).
+// request: at the probe's stream point, right after the packet carrying its
+// TRXDIR=1 (GS register layouts). resolve_frame: at VSync, resolves every queued
+// probe with ticket < ticket_hi whose record already executed (returns the count).
+// take: copies a resolved probe's bytes once (returns bytes, 0 = not resolved).
+// stats: 8 counters (GSState::m_probe_stats). Optional symbols (pre-LT1b libraries
+// lack them; lagF then falls back to a sync read at the set).
+GE1_API int ge1_gs_probe_request(uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg, uint64_t ticket);
+GE1_API int ge1_gs_probe_resolve_frame(uint64_t ticket_lo, uint64_t ticket_hi);
+GE1_API int ge1_gs_probe_take(uint64_t ticket, uint8_t* out, uint32_t bytes);
+GE1_API int ge1_gs_probe_stats(uint64_t out[8]);
 GE1_API int ge1_gs_snapshot(uint32_t* width, uint32_t* height, const uint32_t** rgba);
 typedef void (*ge1_gs_export_done_fn)(void* ctx, int ok);
 GE1_API int ge1_gs_export_iosurface(void* iosurface, uint32_t width, uint32_t height,

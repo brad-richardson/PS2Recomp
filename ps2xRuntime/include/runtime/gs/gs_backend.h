@@ -107,6 +107,33 @@ public:
         return size == 0u;
     }
 
+    // LT1b (PS2X_VIF1_REVERSE_DMA=lagF): ticketed asynchronous local->host.
+    // RequestLocalToHostAsync runs worker-ordered right after BeginTransfer of a
+    // TRXDIR=1 setup; false = unsupported (the frontend then reads the bytes
+    // synchronously at the set, which is what the CPU backend does). Resolve
+    // runs at a guest VSync for every requested ticket < ticketHi; Take copies
+    // one resolved ticket's bytes once (0 = none). Stats: 8 backend counters
+    // (false = none). Defaults: unsupported / no-ops.
+    virtual bool RequestLocalToHostAsync(const GSTransferCommand &command, uint64_t ticket)
+    {
+        (void)command;
+        (void)ticket;
+        return false;
+    }
+    virtual void ResolveLocalToHostAsync(uint64_t ticketHi) { (void)ticketHi; }
+    virtual uint32_t TakeLocalToHostAsync(uint64_t ticket, uint8_t *dst, uint32_t maxBytes)
+    {
+        (void)ticket;
+        (void)dst;
+        (void)maxBytes;
+        return 0u;
+    }
+    virtual bool LocalToHostAsyncStats(uint64_t out[8]) const
+    {
+        (void)out;
+        return false;
+    }
+
     // BG1: persist host-side caches (external GS: the Vulkan pipeline cache
     // plus newly recorded TFX selectors). Default no-op; only the external
     // backend implements it. Runs on the GS worker at stream position.

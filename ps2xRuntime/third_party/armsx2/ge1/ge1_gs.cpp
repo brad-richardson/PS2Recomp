@@ -561,6 +561,59 @@ extern "C" GE1_API int ge1_gs_read_fifo(uint8_t* bytes, uint32_t qwords)
     return 1;
 }
 
+// LT1b: GS_HAS_PROBE_API marks a vendor GS with the probe entry points; older
+// vendors (the Odin's ssx3-armsx2 lineage until the cherry-pick) still build and
+// export stubs that report "unsupported" (request returns 0), so the runtime falls
+// back to a sync read at the set.
+extern "C" GE1_API int ge1_gs_probe_request(uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg, uint64_t ticket)
+{
+#if defined(GS_HAS_PROBE_API)
+    if (!s_open)
+        return 0;
+    GSProbeRequest(bitbltbuf, trxpos, trxreg, ticket);
+    return 1;
+#else
+    (void)bitbltbuf; (void)trxpos; (void)trxreg; (void)ticket;
+    return 0;
+#endif
+}
+
+extern "C" GE1_API int ge1_gs_probe_resolve_frame(uint64_t ticket_lo, uint64_t ticket_hi)
+{
+#if defined(GS_HAS_PROBE_API)
+    return s_open ? static_cast<int>(GSProbeResolve(ticket_lo, ticket_hi)) : 0;
+#else
+    (void)ticket_lo; (void)ticket_hi;
+    return 0;
+#endif
+}
+
+extern "C" GE1_API int ge1_gs_probe_take(uint64_t ticket, uint8_t* out, uint32_t bytes)
+{
+#if defined(GS_HAS_PROBE_API)
+    return s_open ? static_cast<int>(GSProbeTake(ticket, out, bytes)) : 0;
+#else
+    (void)ticket; (void)out; (void)bytes;
+    return 0;
+#endif
+}
+
+extern "C" GE1_API int ge1_gs_probe_stats(uint64_t out[8])
+{
+#if defined(GS_HAS_PROBE_API)
+    if (!s_open || !out)
+        return 0;
+    u64 st[8];
+    GSProbeStats(st);
+    for (int i = 0; i < 8; i++)
+        out[i] = st[i];
+    return 1;
+#else
+    (void)out;
+    return 0;
+#endif
+}
+
 extern "C" GE1_API int ge1_gs_snapshot(uint32_t* width, uint32_t* height, const uint32_t** rgba)
 {
     if (!s_open || !width || !height || !rgba)

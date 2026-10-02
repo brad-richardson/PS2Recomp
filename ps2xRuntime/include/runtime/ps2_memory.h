@@ -565,6 +565,8 @@ public:
 // 2 = lag1, 3 = lagV). Reads the test override first, then the
 // once-per-process env.
 int ps2_rb1_reverseDmaMode();
+// LT1b: lagF lag in guest frames (PS2X_RB_LAGF_FRAMES, 2..4, default 3).
+uint32_t ps2_rb1_lagfFrames();
 void ps2_rb1_setReverseDmaOverride(int mode);
 
 #endif // PS2_MEMORY_H

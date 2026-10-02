@@ -3829,6 +3829,74 @@ void register_ps2_memory_tests()
             ps2_rb1_setReverseDmaOverride(-1);
         });
 
+        // LT1b: lagF serves probe (frame f, ordinal i) with the bytes of probe
+        // (f-3, i) (default L=3), keyed by the EE vsync tick. The CPU backend has
+        // no async path, so each set is read synchronously and published at once.
+        // Frame 1 has only 2 probes, so frame 4's third probe has no source and
+        // misses (EE untouched, QWC kept), like every probe in frames 0-2.
+        tc.Run("LT1b lagF serves probe (f-L, i): 3 frames x 3 probes, misses", [](TestCase &t)
+        {
+            ps2_rb1_setReverseDmaOverride(4);
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory initialize should succeed");
+            GS gs;
+            gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+            mem.setGsFrontend(&gs);
+
+            constexpr uint32_t kVif1 = 0x10009000u;
+            constexpr uint32_t kDst = 0x00034000u;
+            const uint64_t bitblt = (0ull << 0) | (1ull << 16) | (0ull << 24) |
+                                    (0ull << 32) | (1ull << 48) | (0ull << 56);
+            auto mulOf = [](uint32_t f, uint32_t i) { return static_cast<uint8_t>(((f * 3u + i) * 2u + 1u) & 0xFFu); };
+            auto addOf = [](uint32_t f, uint32_t i) { return static_cast<uint8_t>((f * 16u + i) & 0xFFu); };
+            const uint32_t probes[6] = {3u, 2u, 3u, 3u, 3u, 3u};
+            for (uint32_t f = 0u; f < 6u; ++f)
+            {
+                mem.gs().vsyncTick.store(100u + f, std::memory_order_release);
+                for (uint32_t i = 0u; i < probes[f]; ++i)
+                {
+                    gs.writeRegister(GS_REG_BITBLTBUF, bitblt);
+                    gs.writeRegister(GS_REG_TRXPOS, 0ull);
+                    gs.writeRegister(GS_REG_TRXREG, (4ull << 0) | (4ull << 32));
+                    gs.writeRegister(GS_REG_TRXDIR, 0ull);
+                    std::vector<uint8_t> packet;
+                    appendU64(packet, makeGifTag(4u, GIF_FMT_IMAGE, 0u, true));
+                    appendU64(packet, 0ull);
+                    for (uint32_t b = 0; b < 64u; ++b)
+                        packet.push_back(static_cast<uint8_t>((b * mulOf(f, i) + addOf(f, i)) & 0xFFu));
+                    gs.processGIFPacket(packet.data(), static_cast<uint32_t>(packet.size()));
+                    gs.writeRegister(GS_REG_TRXDIR, 1ull);
+
+                    std::memset(mem.getRDRAM() + kDst, 0xA5u, 64u);
+                    t.IsTrue(mem.writeIORegister(kVif1 + 0x10u, kDst), "VIF1 MADR write should succeed");
+                    t.IsTrue(mem.writeIORegister(kVif1 + 0x20u, 4u), "VIF1 QWC write should succeed");
+                    t.IsTrue(mem.writeIORegister(kVif1 + 0x00u, 0x100u), "VIF1 CHCR STR with DIR=0 should succeed");
+
+                    const bool hit = f >= 3u && i < probes[f - 3u];
+                    bool ok = true;
+                    for (uint32_t b = 0; b < 64u; ++b)
+                    {
+                        const uint8_t want = hit ? static_cast<uint8_t>((b * mulOf(f - 3u, i) + addOf(f - 3u, i)) & 0xFFu)
+                                                 : 0xA5u;
+                        if (mem.getRDRAM()[kDst + b] != want)
+                        {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    t.IsTrue(ok, hit ? "lagF must serve probe (f-3, i)'s bytes" : "lagF miss must leave EE untouched");
+                    t.Equals(mem.readIORegister(kVif1 + 0x20u), hit ? 0u : 4u,
+                             hit ? "lagF hit clears QWC" : "lagF miss keeps QWC (short-transfer semantics)");
+                    t.Equals(mem.readIORegister(kVif1 + 0x10u), hit ? kDst + 64u : kDst,
+                             hit ? "lagF hit advances MADR" : "lagF miss leaves MADR");
+                    t.IsTrue((mem.readIORegister(kVif1 + 0x00u) & 0x100u) == 0u, "lagF serve reports STR clear");
+                    t.IsTrue((mem.readIORegister(0x1000E010u) & (1u << 1)) != 0u, "lagF serve sets D_STAT CIS bit 1");
+                }
+            }
+            mem.setGsFrontend(nullptr);
+            ps2_rb1_setReverseDmaOverride(-1);
+        });
+
         tc.Run("RB2 lagV through the queued GS worker serves 24 back", [](TestCase &t)
         {
             ps2_rb1_setReverseDmaOverride(3);

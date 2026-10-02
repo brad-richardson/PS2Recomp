@@ -5,6 +5,10 @@ _ge1_gs_priv_write
 _ge1_gs_packet
 _ge1_gs_vsync
 _ge1_gs_read_fifo
+_ge1_gs_probe_request
+_ge1_gs_probe_resolve_frame
+_ge1_gs_probe_take
+_ge1_gs_probe_stats
 _ge1_gs_snapshot
 _ge1_gs_gpu_ms
 _ge1_gs_back_ms
