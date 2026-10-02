@@ -1,12 +1,12 @@
 #include "ps2_runtime.h"
 #include "games_database.h"
+#include "ps2_knobs.h"
 #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
 #include "ps2_debug_panel.h"
 #endif
 
-#ifdef _DEBUG
 #include "ps2_log.h"
-#endif
+#include "raylib.h"
 
 #include <iostream>
 #include <string>
@@ -14,6 +14,8 @@
 #include <exception>
 #include <algorithm>
 #include <cstdlib>
+#include <cstdarg>
+#include <cstdio>
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -21,6 +23,25 @@
 #include <thread>
 #include <cstdio>
 #include <cstring>
+#if defined(__ANDROID__)
+#endif
+#endif
+
+#if defined(PS2X_IOS)
+#include "ps2_ios_runtime.h"
+#endif
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+// I7: on iOS, SDL2main provides the real main() (UIKit app delegate +
+// runloop) and SDL_main.h renames our main to SDL_main. Desktop-inert:
+// TARGET_OS_IPHONE is 0 on macOS, and CMake links SDL2main only when
+// PS2X_IS_IOS. Chain verified: SDL.h -> SDL_main.h -> SDL_stdinc.h ->
+// SDL_config.h -> SDL_platform.h defines __IPHONEOS__ from
+// TARGET_OS_IPHONE, which selects SDL_MAIN_NEEDED.
+#if TARGET_OS_IPHONE
+#include <SDL2/SDL.h>
+#endif
 #endif
 
 namespace
@@ -65,7 +86,11 @@ namespace
                                          {
                                              return;
                                          }
-                                         char line[1024];
+                                         // CF2 S0: 8 KB so the ~3.7 KB [knobs] startup line lands as one
+                                         // logcat entry (logd truncates past ~4 KB; the suite asserts the
+                                         // bound). Chunked reads split multi-KB lines into unmarked
+                                         // continuations that exact log compares can't rejoin safely.
+                                         char line[8192];
                                          while (fgets(line, sizeof(line), reader))
                                          {
                                              size_t len = std::strlen(line);
@@ -91,6 +116,33 @@ namespace
         }
     }
 #endif
+
+    // LG1: raylib's default TraceLog writes "INFO: ..." to stdout (desktop) or
+    // logcat under its own tag (Android), interleaving with runtime lines. This
+    // callback formats the same text ("LEVEL: message", levels below the
+    // current threshold never reach a callback) and sends the finished line
+    // through the shared line-atomic writer.
+    void raylibTraceToLineWriter(int logLevel, const char *text, va_list args)
+    {
+        const char *prefix = "";
+        switch (logLevel)
+        {
+        case LOG_TRACE: prefix = "TRACE: "; break;
+        case LOG_DEBUG: prefix = "DEBUG: "; break;
+        case LOG_INFO: prefix = "INFO: "; break;
+        case LOG_WARNING: prefix = "WARNING: "; break;
+        case LOG_ERROR: prefix = "ERROR: "; break;
+        case LOG_FATAL: prefix = "FATAL: "; break;
+        default: break;
+        }
+        char body[1024];
+        std::vsnprintf(body, sizeof(body), text, args);
+        ps2_log::emitLine(std::string(prefix) + body);
+        if (logLevel == LOG_FATAL)
+        {
+            std::exit(EXIT_FAILURE);
+        }
+    }
 
     void setupTerminateLogger() // to help on release build crashs
     {
@@ -147,6 +199,15 @@ namespace
             std::cout << "Using argv boot path" << std::endl;
             return std::filesystem::path(argv[1]);
         }
+#if defined(PS2X_IOS)
+        // I25: home-screen launches pass no argv; the bundled ps2x.env names
+        // the ELF (PS2X_BOOT_ELF=${BUNDLE}/SLUS_207.72).
+        if (const char *bootElf = std::getenv("PS2X_BOOT_ELF"); bootElf && bootElf[0] != '\0')
+        {
+            std::cout << "Using PS2X_BOOT_ELF boot path" << std::endl;
+            return std::filesystem::path(bootElf);
+        }
+#endif
 #if defined(PS2X_DEFAULT_BOOT_ELF)
         std::cout << "Using default boot file" << std::endl;
         const std::filesystem::path configuredPath = std::filesystem::path(PS2X_DEFAULT_BOOT_ELF);
@@ -169,7 +230,23 @@ int main(int argc, char *argv[])
 #if defined(__ANDROID__)
     redirectStdioToLogcat();
 #endif
+    // LG1: line-atomic cerr/cout + raylib TraceLog, before any thread starts.
+    ps2_log::installLineAtomicLogging();
+    SetTraceLogCallback(raylibTraceToLineWriter);
+#if defined(PS2X_IOS)
+    ps2x::ios::prepareEnvironment(argc > 0 ? argv[0] : nullptr);
+#endif
+#if defined(__APPLE__) && !defined(PS2X_IOS) && !defined(__ANDROID__)
+    // CFG1 Part 2: compiled Mac play defaults (D1/D4/D5) for keys the launch
+    // env did not set. PS2X_PROFILE=reference disables them all.
+    ps2x::cf2ApplyMacDefaults();
+#endif
     setupTerminateLogger();
+
+    // CF2 S0: always-on resolved-knob line. After the env loaders (Android
+    // static init, iOS prepareEnvironment above), before every boot path
+    // (replay/test/game) so all modes carry it.
+    ps2x::cf2DumpKnobs();
 
     try
     {
@@ -226,7 +303,32 @@ int main(int argc, char *argv[])
             return 1;
         }
 
+        if (const char *cdImageEnv = std::getenv("PS2X_CD_IMAGE"))
+        {
+            if (cdImageEnv[0] != '\0')
+            {
+                PS2Runtime::IoPaths ioPaths = PS2Runtime::getIoPaths();
+                ioPaths.cdImage = std::filesystem::path(cdImageEnv);
+                PS2Runtime::setIoPaths(ioPaths);
+            }
+        }
+
+        // I25: writable memory-card root (the iOS bundle is read-only, so the
+        // default <elf dir>/mc0 can't be written there). mc1 is its sibling.
+        if (const char *mcRootEnv = std::getenv("PS2X_MC_ROOT"))
+        {
+            if (mcRootEnv[0] != '\0')
+            {
+                PS2Runtime::IoPaths ioPaths = PS2Runtime::getIoPaths();
+                ioPaths.mcRoot = std::filesystem::path(mcRootEnv);
+                PS2Runtime::setIoPaths(ioPaths);
+            }
+        }
+
         runtime.run();
+        // main exits with _Exit, which bypasses PS2Runtime's destructor.
+        // Emit the per-target coverage summary on this normal return path.
+        runtime.printMissingFunctionCounts();
 
 #ifdef _DEBUG
         ps2_log::print_saved_location();
@@ -248,3 +350,13 @@ int main(int argc, char *argv[])
     std::cerr.flush();
     std::_Exit(1);
 }
+
+// I7: keep SDL_main.h's main->SDL_main rename inside this TU: ps2EntryRunner
+// builds with unity build, so without this the rename would leak into any
+// sibling TU batched after main.cpp. (No sibling uses `main` today; this is
+// insurance while P-lane concurrently edits src/runner/.)
+#if defined(__APPLE__)
+#if TARGET_OS_IPHONE
+#undef main
+#endif
+#endif

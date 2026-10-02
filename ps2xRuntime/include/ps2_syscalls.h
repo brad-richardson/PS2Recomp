@@ -16,6 +16,10 @@ namespace ps2_syscalls
 #define PS2_DECLARE_SYSCALL(name) void name(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     PS2_SYSCALL_LIST(PS2_DECLARE_SYSCALL)
 #undef PS2_DECLARE_SYSCALL
+    // UPR1: GetRomName is no longer a name-stubbed handler (upstream #244
+    // recompiles ABI-incompatible variants), but pinned codegen (SSX 3) still
+    // calls this HLE version directly.
+    void GetRomName(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
 
     void iDeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void EnableIntcHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
