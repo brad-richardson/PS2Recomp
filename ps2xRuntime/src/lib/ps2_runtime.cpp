@@ -382,14 +382,15 @@ namespace
     // Readers use the copies and base+slot*stride; the sweep loops to [c+4].
     // Growth is lazy, so RAM stays byte-identical to stock until the first
     // empty pop: then the arrays are copied into a free region above the
-    // runtime HLE pools (default 0x01F40000, PS2X_SSX3_PATCH_CACHE_GROW_BASE),
+    // runtime HLE pools (default 0x01F31400, PS2X_SSX3_PATCH_CACHE_GROW_BASE),
     // the new slots are pushed and every pointer above is repointed. The old
     // blocks stay intact (a slot's DMA block is built once at allocation and
     // may hold REF tags to its old buffers; an in-flight chain may call them),
     // and free() (0x317E98) of a relocated pointer is handed the original
     // heap block, so the game's deinit frees exactly what it allocated. The
-    // region must read all-zero and hold no thread stack, else growth is
-    // refused and the TK15 guard (if armed) keeps skipping.
+    // region must read all-zero and end >= 32 KB below the current sp (the
+    // main stack sits at the top of RAM: sp 0x1FF7790 in a Mesablanca race),
+    // else growth is refused and the TK15 guard (if armed) keeps skipping.
     constexpr uint32_t kSsx3PatchCacheInit = 0x00372B78u;
     constexpr uint32_t kSsx3GuestFree = 0x00317E98u;
     struct Ssx3PatchGrow
@@ -453,7 +454,7 @@ namespace
         const uint32_t newSec = secCap ? (secCap * newCap + cap - 1u) / cap : 0u;
         static const uint32_t base = [] {
             const char *e = std::getenv("PS2X_SSX3_PATCH_CACHE_GROW_BASE");
-            return e && *e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 16)) : 0x01F40000u;
+            return e && *e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 16)) : 0x01F31400u;
         }();
         auto al = [](uint32_t v) { return (v + 0xFFu) & ~0xFFu; };
         uint32_t at = base & ~0xFFu;
@@ -465,7 +466,7 @@ namespace
         if (lo < 0x01F31300u || hi > PS2_RAM_SIZE)
             return refuse("region bounds", lo, hi);
         const uint32_t sp = getRegU32(ctx, 29) & PS2_RAM_MASK;
-        if (sp >= lo && sp < hi + 0x10000u)
+        if (sp >= lo && sp < hi + 0x8000u)
             return refuse("region holds the stack", sp, hi);
         for (uint32_t a = lo; a < hi; a += 4u)
             if (rd(a) != 0u)
@@ -571,6 +572,17 @@ namespace
             return false;
         int32_t count = 0;
         std::memcpy(&count, rdram + countAddr, 4u);
+        if (grow && type == 1u && g_ssx3PatchGrow.active)
+        {
+            // Demand after growth: report each new low of the free count by 10s.
+            static int32_t low = 1 << 30;
+            if (count < low - 9 || (count == 0 && low != 0))
+            {
+                low = count;
+                std::fprintf(stderr, "[ssx3-patch-grow] type1 free low=%d (in use %d of %u)\n", count,
+                             static_cast<int32_t>(ssx3PatchGrowCap()) - count, ssx3PatchGrowCap());
+            }
+        }
         if (count > 0)
         {
             if (getRegU32(ctx, 8) == 0u)

@@ -191,16 +191,20 @@ inline bool fixUnconverted() noexcept
     return on;
 }
 
-// TK34: the wipeout-body integrator sub_00136F30 (FH23 "crashbody") steps
-// pos/vel/spin/quaternion by f4 = R+0x300 * [0x49be38] (1/60; single reader
-// 0x136f48, an lwc1 that is not one of the HL2 split sites). Case 2 (wipeout)
-// runs the rider pass twice per stock update, so under split120 the crashed
-// body moved 2x and fell at 4x gravity (TK33 §3: d2z -2.00 vs stock -0.50 per
-// stock tick). PS2X_SSX3_SPLIT120_CRASHBODY=1 (default off; guest-affecting)
-// holds the word at 1/120 for exactly the halves halfLoad converts (active
-// rider context, selector case 0/1/2 or TS3 NOFIX) and puts 1/60 back at
-// finish(), so every other reader time sees the stock word.
-inline constexpr uint32_t kCrashBodyWord = 0x49be38u;
+// TK34: the wipeout (selector case 2, handler sub_00136E98) reads four
+// private 1/60 dt words that are not HL2 split sites: [0x49be38] by the body
+// integrator sub_00136F30 (FH23 "crashbody", single reader 0x136f48), and
+// [0x49be78] / [0x49bef4] / [0x49befc] by the motion-solver callers
+// sub_00137750 / sub_001391A8 (FH12 "crash", single readers 0x137754,
+// 0x13940c, 0x1394f4). The solver quantum is a split site (113808, 1/120), so
+// each converted half advanced the crashed rider a full 1/60 in two quanta:
+// 2x per half, two halves per stock update, so the crash fall ran at 4x
+// gravity (TK33 §3: d2z -2.00 vs stock -0.50 per stock tick).
+// PS2X_SSX3_SPLIT120_CRASHBODY=1 (default off; guest-affecting) holds the
+// four words at 1/120 for exactly the halves halfLoad converts (active rider
+// context, selector case 0/1/2, or TS3 NOFIX) and puts 1/60 back at finish(),
+// so every other reader time (case 5's once-per-update 1391a8) sees stock.
+inline constexpr uint32_t kCrashWords[] = {0x49be38u, 0x49be78u, 0x49bef4u, 0x49befcu};
 inline constexpr uint32_t kCrashBodyStock = 0x3c888889u; // 1/60
 inline constexpr uint32_t kCrashBodyHalf = 0x3c088889u;  // 1/120
 inline bool crashBodyEnabled() noexcept
@@ -209,27 +213,31 @@ inline bool crashBodyEnabled() noexcept
         const char *v = std::getenv("PS2X_SSX3_SPLIT120_CRASHBODY");
         const bool b = v && v[0] == '1' && v[1] == '\0';
         if (b)
-            std::fprintf(stderr, "[ts2-crashbody] armed (0x%x 1/60 -> 1/120 in converted split halves)\n",
-                         kCrashBodyWord);
+            std::fprintf(stderr, "[ts2-crashbody] armed (0x49be38/0x49be78/0x49bef4/0x49befc 1/60 -> 1/120 in "
+                                 "converted split halves)\n");
         return b;
     }();
     return on;
 }
 
+// Verify all four words, then write all four; a mismatch disables the knob.
 inline bool crashBodyWrite(uint8_t *ram, uint32_t expected, uint32_t value) noexcept
 {
     static bool refused = false;
     if (!ram || refused) return false;
-    uint32_t got = 0;
-    std::memcpy(&got, ram + kCrashBodyWord, 4);
-    if (got != expected)
+    for (uint32_t a : kCrashWords)
     {
-        refused = true;
-        std::fprintf(stderr, "[ts2-crashbody] refused: [0x%x]=%08x expected %08x; disabled\n",
-                     kCrashBodyWord, got, expected);
-        return false;
+        uint32_t got = 0;
+        std::memcpy(&got, ram + a, 4);
+        if (got != expected)
+        {
+            refused = true;
+            std::fprintf(stderr, "[ts2-crashbody] refused: [0x%x]=%08x expected %08x; disabled\n", a, got, expected);
+            return false;
+        }
     }
-    std::memcpy(ram + kCrashBodyWord, &value, 4);
+    for (uint32_t a : kCrashWords)
+        std::memcpy(ram + a, &value, 4);
     return true;
 }
 
