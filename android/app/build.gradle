@@ -77,7 +77,7 @@ android {
                         "-DPS2X_ANDROID_MARCH=${ps2xAndroidMarch}",
                         '-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG',
                         '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG'
-                targets 'ps2EntryRunner'
+                targets 'ps2EntryRunner', 'hardware'
             }
         }
 
@@ -92,6 +92,13 @@ android {
 
     if (ps2xJniLibsDir) {
         sourceSets.main.jniLibs.srcDirs = [ps2xJniLibsDir]
+        // HAL1: libhardware.so is built from source (android/hwcompat) by the
+        // 'hardware' cmake target above. A jniLibs copy must never silently
+        // win the merge, so it is a hard error: strip it from the jniLibs dir.
+        def halDup = new File(ps2xJniLibsDir, 'arm64-v8a/libhardware.so')
+        if (halDup.exists()) {
+            throw new GradleException("libhardware.so is now built from source (android/hwcompat); remove ${halDup} from ps2xJniLibsDir")
+        }
     }
 
     externalNativeBuild {
