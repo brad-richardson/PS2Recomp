@@ -55,15 +55,18 @@ case "$PLAT" in
     ASM=$BUILD_ROOT/mac-asm-$STAMP; BLD=$BUILD_ROOT/mac-build-$STAMP
     [ -e "$ASM" ] || [ -e "$BLD" ] && { echo "refusing to reuse $ASM or $BLD" >&2; exit 2; }
     mkdir -p "$ASM" "$BLD"
-    ln -s "$ARMSX2" "$ASM/vendor-pcsx2"
+    # Real copy (not a symlink): CMake resolves symlinked source dirs to one
+    # canonical path, which collides binary dirs when pcsx2/ re-adds libretro.
+    mkdir -p "$ASM/vendor-pcsx2"
+    git -C "$ARMSX2" archive HEAD | tar -x -C "$ASM/vendor-pcsx2"
     ln -s "$HERE/ge1" "$ASM/adapter"
     ln -s "$HERE/om1/rt" "$ASM/om1rt-adapter"
     ln -s "$HERE/om1/record" "$ASM/om1-adapter"
-    ln -s "$ARMSX2/pcsx2" "$ASM/pcsx2"
-    ln -s "$ARMSX2/tests" "$ASM/tests"
-    ln -s "$ARMSX2/3rdparty" "$ASM/3rdparty"
-    ln -s "$ARMSX2/common" "$ASM/common"
-    ln -s "$ARMSX2/cmake" "$ASM/cmake"
+    ln -s vendor-pcsx2/pcsx2 "$ASM/pcsx2"
+    ln -s vendor-pcsx2/tests "$ASM/tests"
+    ln -s vendor-pcsx2/3rdparty "$ASM/3rdparty"
+    ln -s vendor-pcsx2/common "$ASM/common"
+    ln -s vendor-pcsx2/cmake "$ASM/cmake"
     cp -a "$HERE/platform/mac" "$ASM/mac-platform"
     ln -s "$ARMSX2/3rdparty" "$ASM/mac-platform/3rdparty"
     cmake -S "$ASM/mac-platform" -B "$BLD" -G Ninja \
@@ -105,7 +108,9 @@ case "$PLAT" in
       [ -e "$BUNDLE/$d" ] || { echo "missing bundle dep $d" >&2; exit 2; }
       ln -s "$BUNDLE/$d" "$DEPS/$d"
     done
-    ln -s "$ARMSX2" "$ASM/vendor-pcsx2"
+    # Real copy (not a symlink): same binary-dir collision as mac.
+    mkdir -p "$ASM/vendor-pcsx2"
+    git -C "$ARMSX2" archive HEAD | tar -x -C "$ASM/vendor-pcsx2"
     ln -s "$HERE/ge1" "$ASM/adapter"
     cp -a "$HERE/platform/ios" "$ASM/ios-platform"
     ln -s "$ARMSX2/3rdparty" "$ASM/ios-platform/3rdparty"
