@@ -18,6 +18,9 @@
 
 namespace {
 bool s_ready = false;
+// MP1 L1: PS2X_MICROVU_BRIDGE_LEAN=0 keeps the pre-MP1 byte-by-byte code diff
+// (read once at init; the runtime reads the same knob for shared data).
+bool s_leanDiff = true;
 
 // MP1 L1: first differing byte of a/b (n if none). Chunked memcmp (the
 // libc's vector compare) instead of a byte loop; same result.
@@ -146,6 +149,8 @@ extern "C" PS2X_MV2_EXPORT int ps2x_microvu_init(const char** error)
     if (EmuConfig.Speedhacks.vuFlagHack)
         std::fprintf(stderr, "[microvu] flag hack on (VU2, PCSX2 default vuFlagHack)\n");
     EmuConfig.Gamefixes.XgKickHack = false;
+    const char* lean = std::getenv("PS2X_MICROVU_BRIDGE_LEAN");
+    s_leanDiff = !(lean && lean[0] == '0');
     s_ready = true;
     return 1;
 }
@@ -189,11 +194,18 @@ extern "C" PS2X_MV2_EXPORT int ps2x_microvu_run(
     if (generation != s_code_generation) {
         uint32_t first = code_size;
         uint32_t last = 0;
-        // MP1 L1 lean diff, unconditional (CU4 B3): bound the recompile
-        // clear to the changed micro-program range.
-        first = firstDiff(VU1.Micro, code, code_size);
-        if (first != code_size)
-            last = lastDiffEnd(VU1.Micro, code, code_size, first);
+        if (s_leanDiff) {
+            first = firstDiff(VU1.Micro, code, code_size);
+            if (first != code_size)
+                last = lastDiffEnd(VU1.Micro, code, code_size, first);
+        } else {
+            for (uint32_t i = 0; i < code_size; ++i) {
+                if (VU1.Micro[i] != code[i]) {
+                    first = std::min(first, i);
+                    last = i + 1;
+                }
+            }
+        }
         std::memcpy(VU1.Micro, code, code_size);
         if (first == code_size) {
             first = 0;
