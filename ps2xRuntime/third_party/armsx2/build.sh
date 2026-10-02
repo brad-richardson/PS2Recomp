@@ -59,9 +59,12 @@ case "$PLAT" in
     # canonical path, which collides binary dirs when pcsx2/ re-adds libretro.
     mkdir -p "$ASM/vendor-pcsx2"
     git -C "$ARMSX2" archive HEAD | tar -x -C "$ASM/vendor-pcsx2"
-    ln -s "$HERE/ge1" "$ASM/adapter"
-    ln -s "$HERE/om1/rt" "$ASM/om1rt-adapter"
-    ln -s "$HERE/om1/record" "$ASM/om1-adapter"
+    # Real copies (not symlinks): macOS resolves symlink/.. physically (to the
+    # link target's parent), so the adapters' ../tests + ../vendor-pcsx2 refs
+    # would escape the assembly. The worktree is clean, so copies = HEAD.
+    cp -a "$HERE/ge1" "$ASM/adapter"
+    cp -a "$HERE/om1/rt" "$ASM/om1rt-adapter"
+    cp -a "$HERE/om1/record" "$ASM/om1-adapter"
     ln -s vendor-pcsx2/pcsx2 "$ASM/pcsx2"
     ln -s vendor-pcsx2/tests "$ASM/tests"
     ln -s vendor-pcsx2/3rdparty "$ASM/3rdparty"
@@ -113,7 +116,8 @@ case "$PLAT" in
     # Real copy (not a symlink): same binary-dir collision as mac.
     mkdir -p "$ASM/vendor-pcsx2"
     git -C "$ARMSX2" archive HEAD | tar -x -C "$ASM/vendor-pcsx2"
-    ln -s "$HERE/ge1" "$ASM/adapter"
+    # Real copy (not a symlink): macOS resolves symlink/.. physically.
+    cp -a "$HERE/ge1" "$ASM/adapter"
     cp -a "$HERE/platform/ios" "$ASM/ios-platform"
     ln -s "$ARMSX2/3rdparty" "$ASM/ios-platform/3rdparty"
     env -u CC -u CXX -u OBJC -u OBJCXX cmake -S "$ASM/ios-platform" -B "$BLD" -G Ninja \
