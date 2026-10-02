@@ -130,6 +130,12 @@ namespace ps2_stubs
     void setPadScriptVsyncTickForTest(uint64_t tick);
     void clearPadScriptForTest();
 
+    // APH1 dev harness (PS2X_TK12_AP_* closed-loop route autopilot).
+    // Test hooks: reset the autopilot latch and report whether the route
+    // env arms it. Production code paths never call these.
+    void clearTk12ForTest();
+    bool tk12ArmedForTest();
+
     // IR1 DEV-ONLY pad recorder (PS2X_PAD_RECORD). Test hooks: arm the
     // recorder on an explicit path, drive the tick explicitly (tests have
     // no runtime), finalize the file (emits the tail like a clean exit)

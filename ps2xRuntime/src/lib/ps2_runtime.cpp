@@ -1928,7 +1928,22 @@ void dumpPresentationFrame(const uint8_t *rgba,
         }
         return ticks;
     }();
-    if (selectedTicks[0] != 0u)
+    // APH1 DEV-ONLY (same class as PS2X_PAD_SCRIPT, default off):
+    // PS2X_TK12_CLIP=FROM,TO,STEP also dumps every STEP-th guest tick in
+    // [FROM, TO] (one frame per tick) for a review clip.
+    static const std::array<unsigned long long, 3> tk12Clip = [] {
+        std::array<unsigned long long, 3> c{0ull, 0ull, 0ull};
+        if (const char *e = std::getenv("PS2X_TK12_CLIP"))
+            if (std::sscanf(e, "%llu,%llu,%llu", &c[0], &c[1], &c[2]) != 3)
+                c = {0ull, 0ull, 0ull};
+        return c;
+    }();
+    static uint64_t tk12LastClipTick = ~0ull;
+    const bool tk12Take = tk12Clip[2] != 0ull && tick >= tk12Clip[0] && tick <= tk12Clip[1] &&
+                          (tick - tk12Clip[0]) % tk12Clip[2] == 0ull && tick != tk12LastClipTick;
+    if (tk12Take)
+        tk12LastClipTick = tick;
+    else if (selectedTicks[0] != 0u)
     {
         static std::array<bool, 24> captured{};
         bool selected = false;

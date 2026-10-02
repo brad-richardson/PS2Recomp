@@ -12,6 +12,8 @@
 #include "ps2_log.h"
 
 #include <algorithm>
+#include <cmath>
+#include <mutex>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -723,6 +725,194 @@ namespace ps2_stubs
             const auto now = std::chrono::steady_clock::now();
             return static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - g_padScript.startWall).count());
+        }
+
+        // APH1 dev harness (same class as PS2X_PAD_SCRIPT, default off):
+        // closed-loop steering along a route so a QA boot can ride a whole
+        // race. Off unless PS2X_TK12_AP_ROUTE names a file of "x y" lines
+        // (world XY, +Z up). Rider R = [PS2X_TK12_AP_PTR], position R+0x110.
+        // Active on guest vsync ticks [PS2X_TK12_AP_FROM, PS2X_TK12_AP_TO];
+        // drives lx (proportional) and d-pad left/right (|err| > DPAD deg)
+        // toward the route point LOOK units ahead of the rider's projection.
+        // Left turns the XY heading counter-clockwise (memory: ssx3 rider).
+        struct Tk12Autopilot
+        {
+            bool init = false;
+            bool on = false;
+            bool done = false;
+            uint32_t ptr = 0x53FF4Cu;
+            uint64_t from = 0;
+            uint64_t to = ~0ull;
+            uint64_t logEvery = 30;
+            uint64_t lastLog = 0;
+            double look = 1500.0;
+            double fullDeg = 35.0;
+            double dpadDeg = 10.0;
+            std::vector<double> xs, ys, zs, cum;
+            bool has3d = false;
+            size_t idx = 0;
+            bool haveAnchor = false;
+            double ax = 0.0, ay = 0.0;
+            bool haveHeading = false;
+            double heading = 0.0;
+        };
+        Tk12Autopilot g_tk12;
+        std::mutex g_tk12Mutex;
+
+        void tk12Init()
+        {
+            g_tk12.init = true;
+            const char *route = std::getenv("PS2X_TK12_AP_ROUTE");
+            if (!route || !*route)
+                return;
+            auto envU = [](const char *k, uint64_t &out) {
+                if (const char *v = std::getenv(k)) out = std::strtoull(v, nullptr, 0);
+            };
+            auto envD = [](const char *k, double &out) {
+                if (const char *v = std::getenv(k)) out = std::strtod(v, nullptr);
+            };
+            uint64_t ptr = g_tk12.ptr;
+            envU("PS2X_TK12_AP_PTR", ptr);
+            g_tk12.ptr = static_cast<uint32_t>(ptr);
+            envU("PS2X_TK12_AP_FROM", g_tk12.from);
+            envU("PS2X_TK12_AP_TO", g_tk12.to);
+            envU("PS2X_TK12_AP_LOG_EVERY", g_tk12.logEvery);
+            envD("PS2X_TK12_AP_LOOK", g_tk12.look);
+            envD("PS2X_TK12_AP_FULL_DEG", g_tk12.fullDeg);
+            envD("PS2X_TK12_AP_DPAD_DEG", g_tk12.dpadDeg);
+            std::FILE *f = std::fopen(route, "r");
+            if (!f)
+            {
+                std::fprintf(stderr, "[tk12-ap] cannot open route '%s'\n", route);
+                return;
+            }
+            char line[256];
+            while (std::fgets(line, sizeof(line), f))
+            {
+                double x = 0, y = 0, z = 0;
+                const int n = std::sscanf(line, "%lf %lf %lf", &x, &y, &z);
+                if (n < 2)
+                    continue;
+                g_tk12.xs.push_back(x);
+                g_tk12.ys.push_back(y);
+                g_tk12.zs.push_back(z);
+                g_tk12.has3d = g_tk12.has3d || n == 3;
+            }
+            std::fclose(f);
+            if (g_tk12.xs.size() < 2)
+            {
+                std::fprintf(stderr, "[tk12-ap] route '%s' has < 2 points\n", route);
+                return;
+            }
+            g_tk12.cum.assign(g_tk12.xs.size(), 0.0);
+            for (size_t i = 1; i < g_tk12.xs.size(); ++i)
+                g_tk12.cum[i] = g_tk12.cum[i - 1] + std::hypot(g_tk12.xs[i] - g_tk12.xs[i - 1], g_tk12.ys[i] - g_tk12.ys[i - 1]);
+            g_tk12.on = true;
+            std::fprintf(stderr, "[tk12-ap] armed: %zu points, length %.0f, ptr 0x%x, ticks %llu..%llu, look %.0f\n",
+                         g_tk12.xs.size(), g_tk12.cum.back(), g_tk12.ptr,
+                         static_cast<unsigned long long>(g_tk12.from), static_cast<unsigned long long>(g_tk12.to), g_tk12.look);
+        }
+
+        void tk12OnRead(PadInputState &state, uint64_t tick, PS2Runtime *runtime, int port)
+        {
+            std::lock_guard<std::mutex> lock(g_tk12Mutex);
+            if (!g_tk12.init)
+                tk12Init();
+            if (!g_tk12.on || g_tk12.done || port != 0 || !runtime || tick < g_tk12.from || tick > g_tk12.to)
+                return;
+            uint8_t *rdram = runtime->memory().getRDRAM();
+            if (!rdram)
+                return;
+            uint32_t r = 0;
+            std::memcpy(&r, rdram + (g_tk12.ptr & PS2_RAM_MASK), 4);
+            if (r == 0 || (r & PS2_RAM_MASK) + 0x120u > PS2_RAM_SIZE)
+                return;
+            float p[3];
+            std::memcpy(p, rdram + ((r + 0x110u) & PS2_RAM_MASK), sizeof(p));
+            if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || std::fabs(p[0]) > 2e6f || std::fabs(p[1]) > 2e6f ||
+                (p[0] == 0.0f && p[1] == 0.0f))
+                return;
+            const double px = p[0], py = p[1], pz = p[2];
+            // Heading from motion (anchor refreshed every >= 20 units; a jump > 3000 is a reset).
+            if (!g_tk12.haveAnchor)
+            {
+                g_tk12.ax = px; g_tk12.ay = py; g_tk12.haveAnchor = true;
+            }
+            else
+            {
+                const double d = std::hypot(px - g_tk12.ax, py - g_tk12.ay);
+                if (d > 3000.0)
+                {
+                    g_tk12.ax = px; g_tk12.ay = py; g_tk12.haveHeading = false;
+                }
+                else if (d >= 20.0)
+                {
+                    g_tk12.heading = std::atan2(py - g_tk12.ay, px - g_tk12.ax);
+                    g_tk12.haveHeading = true;
+                    g_tk12.ax = px; g_tk12.ay = py;
+                }
+            }
+            // Project onto the route near the last index (full search when far off).
+            const auto &xs = g_tk12.xs, &ys = g_tk12.ys, &zs = g_tk12.zs, &cum = g_tk12.cum;
+            const size_t nseg = xs.size() - 1;
+            auto project = [&](size_t lo, size_t hi, double &bestD, double &bestS, size_t &bestI) {
+                bestD = 1e30;
+                for (size_t i = lo; i < hi && i < nseg; ++i)
+                {
+                    const double dx = xs[i + 1] - xs[i], dy = ys[i + 1] - ys[i];
+                    const double l2 = dx * dx + dy * dy;
+                    double t = l2 > 0 ? ((px - xs[i]) * dx + (py - ys[i]) * dy) / l2 : 0.0;
+                    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+                    // 3D distance when the route has z (stacked course sections, e.g. Aloha).
+                    const double dz = g_tk12.has3d ? pz - (zs[i] + t * (zs[i + 1] - zs[i])) : 0.0;
+                    const double d = std::sqrt(std::pow(px - (xs[i] + t * dx), 2) + std::pow(py - (ys[i] + t * dy), 2) + dz * dz);
+                    if (d < bestD) { bestD = d; bestS = cum[i] + t * std::sqrt(l2); bestI = i; }
+                }
+            };
+            double dist = 0, s = 0;
+            size_t bi = g_tk12.idx;
+            project(g_tk12.idx > 10 ? g_tk12.idx - 10 : 0, g_tk12.idx + 60, dist, s, bi);
+            if (dist > 4000.0)
+                project(0, nseg, dist, s, bi);
+            g_tk12.idx = bi;
+            const double total = cum.back();
+            if (s >= total - 1.0)
+            {
+                g_tk12.done = true;
+                std::fprintf(stderr, "[tk12-ap] route end at tick %llu pos (%.1f, %.1f, %.1f)\n",
+                             static_cast<unsigned long long>(tick), px, py, static_cast<double>(p[2]));
+                return;
+            }
+            const double want = std::min(total, s + g_tk12.look);
+            size_t j = bi;
+            while (j + 1 < nseg && cum[j + 1] < want) ++j;
+            const double segLen = cum[j + 1] - cum[j];
+            const double tt = segLen > 0 ? (want - cum[j]) / segLen : 0.0;
+            const double tx = xs[j] + tt * (xs[j + 1] - xs[j]), ty = ys[j] + tt * (ys[j + 1] - ys[j]);
+            double err = 0.0;
+            uint8_t lx = kPadAnalogCenter;
+            if (g_tk12.haveHeading)
+            {
+                err = std::atan2(ty - py, tx - px) - g_tk12.heading;
+                while (err > M_PI) err -= 2 * M_PI;
+                while (err < -M_PI) err += 2 * M_PI;
+                const double deg = err * 180.0 / M_PI;
+                double u = deg / g_tk12.fullDeg;
+                u = u > 1 ? 1 : (u < -1 ? -1 : u);
+                lx = static_cast<uint8_t>(std::lround(128.0 - u * 127.0));
+                state.lx = lx;
+                if (deg > g_tk12.dpadDeg)
+                    state.buttons = static_cast<uint16_t>(state.buttons & ~kPadBtnLeft);
+                else if (deg < -g_tk12.dpadDeg)
+                    state.buttons = static_cast<uint16_t>(state.buttons & ~kPadBtnRight);
+            }
+            if (g_tk12.logEvery && tick >= g_tk12.lastLog + g_tk12.logEvery)
+            {
+                g_tk12.lastLog = tick;
+                std::fprintf(stderr, "[tk12-ap] t=%llu pos=(%.1f,%.1f,%.1f) s=%.0f/%.0f off=%.0f err=%.1f lx=%u\n",
+                             static_cast<unsigned long long>(tick), px, py, static_cast<double>(p[2]), s, total, dist,
+                             err * 180.0 / M_PI, lx);
+            }
         }
 
         void padScriptOnRead(PadInputState &state, uint64_t guestVsyncTick)
@@ -1912,6 +2102,7 @@ namespace ps2_stubs
             const uint64_t guestVsyncTick =
                 runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
             padScriptOnRead(state, guestVsyncTick); // E31 DEV-ONLY: no-op unless PS2X_PAD_SCRIPT set
+            tk12OnRead(state, guestVsyncTick, runtime, port); // APH1 DEV-ONLY: no-op unless PS2X_TK12_AP_ROUTE set
             padRecordOnRead(state, guestVsyncTick, port, slot); // IR1 DEV-ONLY: no-op unless PS2X_PAD_RECORD set
 
             // IN2 DEV-ONLY PS2X_PAD_READ_LOG=1: every guest read (vsync
@@ -2585,6 +2776,23 @@ namespace ps2_stubs
         std::lock_guard<std::mutex> lock(g_padScript.mutex);
         g_padScript.testVsyncSet = true;
         g_padScript.testVsyncTick = tick;
+    }
+
+    // APH1 test hooks: reset the autopilot latch and report whether the
+    // route env arms it (inert unless PS2X_TK12_AP_ROUTE names a route).
+    // Production code paths never call these.
+    void clearTk12ForTest()
+    {
+        std::lock_guard<std::mutex> lock(g_tk12Mutex);
+        g_tk12 = Tk12Autopilot{};
+    }
+
+    bool tk12ArmedForTest()
+    {
+        std::lock_guard<std::mutex> lock(g_tk12Mutex);
+        if (!g_tk12.init)
+            tk12Init();
+        return g_tk12.on;
     }
 
     void clearPadScriptForTest()

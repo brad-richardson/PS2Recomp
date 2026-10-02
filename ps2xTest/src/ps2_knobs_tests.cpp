@@ -202,6 +202,8 @@ void register_ps2_knobs_tests()
                 t.IsTrue(std::strcmp(knobs[i - 1], knobs[i]) < 0, "sorted and unique");
             t.IsTrue(ps2x::cf2KnobIsCurated("PS2X_SOUND"), "curated hit");
             t.IsFalse(ps2x::cf2KnobIsCurated("PS2X_VSYNC_RATE_LOG"), "diag left to the scan");
+            t.IsTrue(ps2x::cf2KnobIsCurated("PS2X_TK12_AP_ROUTE"), "APH1 dev AP route curated");
+            t.IsTrue(ps2x::cf2KnobIsCurated("PS2X_TK12_CLIP"), "APH1 dev clip curated");
         });
 
         tc.Run("dump line shows set values, unset markers and set diag extras", [](TestCase &t)
@@ -253,8 +255,9 @@ void register_ps2_knobs_tests()
             const std::string line = ps2x::cf2BuildKnobsLine();
             // logd truncates past ~4 KB (LOGGER_ENTRY_MAX_PAYLOAD 4076); the
             // real PB7-shape leg prints ~3987 bytes. Trip here before growth
-            // truncates.
-            t.IsTrue(line.size() < 4000, "dump under 4000 bytes");
+            // truncates. APH1 adds nine TK12 dev knobs (~239 B when unset),
+            // so the PB7-shape leg now prints ~4226 bytes.
+            t.IsTrue(line.size() < 4300, "dump under 4300 bytes");
             t.IsTrue(line.find(" PS2X_GS_BACKEND=external") != std::string::npos, "default visible");
             t.IsTrue(line.find(" PS2X_VIF1_REVERSE_DMA=0") != std::string::npos, "readback-off default visible");
         });

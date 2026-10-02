@@ -758,6 +758,60 @@ void register_pad_input_tests()
             closePadPort(ctx, rdram);
         });
 
+        tc.Run("tk12 autopilot is inert when unset (APH1)", [](TestCase &t)
+               {
+            // Guard every knob the harness reads so ambient env cannot arm it.
+            Pl1EnvGuard routeGuard("PS2X_TK12_AP_ROUTE");
+            Pl1EnvGuard ptrGuard("PS2X_TK12_AP_PTR");
+            Pl1EnvGuard fromGuard("PS2X_TK12_AP_FROM");
+            Pl1EnvGuard toGuard("PS2X_TK12_AP_TO");
+            Pl1EnvGuard logGuard("PS2X_TK12_AP_LOG_EVERY");
+            Pl1EnvGuard lookGuard("PS2X_TK12_AP_LOOK");
+            Pl1EnvGuard fullGuard("PS2X_TK12_AP_FULL_DEG");
+            Pl1EnvGuard dpadGuard("PS2X_TK12_AP_DPAD_DEG");
+            ::unsetenv("PS2X_TK12_AP_ROUTE");
+            ::unsetenv("PS2X_TK12_AP_PTR");
+            ::unsetenv("PS2X_TK12_AP_FROM");
+            ::unsetenv("PS2X_TK12_AP_TO");
+            ::unsetenv("PS2X_TK12_AP_LOG_EVERY");
+            ::unsetenv("PS2X_TK12_AP_LOOK");
+            ::unsetenv("PS2X_TK12_AP_FULL_DEG");
+            ::unsetenv("PS2X_TK12_AP_DPAD_DEG");
+            ps2_stubs::clearTk12ForTest();
+            t.IsTrue(!ps2_stubs::tk12ArmedForTest(), "no route env means the autopilot stays off");
+
+            // Pad reads are unmodified with the harness unset.
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            runPadRead(ctx, rdram);
+            t.Equals(readButtons(rdram), static_cast<uint16_t>(0xFFFFu), "reads are unmodified with no route");
+            const uint8_t *data = rdram.data() + kPadDataAddr;
+            t.Equals(data[6], static_cast<uint8_t>(0x80), "lx centered with no route");
+
+            // Positive control: a two-point route file arms the harness.
+            const std::string routePath =
+                (std::filesystem::temp_directory_path() / "aph1_tk12_route_test.txt").string();
+            std::remove(routePath.c_str());
+            {
+                std::FILE *f = std::fopen(routePath.c_str(), "w");
+                t.IsTrue(f != nullptr, "route file should be writable");
+                if (f)
+                {
+                    std::fputs("0 0\n1000 0\n", f);
+                    std::fclose(f);
+                }
+            }
+            ::setenv("PS2X_TK12_AP_ROUTE", routePath.c_str(), 1);
+            ps2_stubs::clearTk12ForTest();
+            t.IsTrue(ps2_stubs::tk12ArmedForTest(), "a route file arms the autopilot");
+            ps2_stubs::clearTk12ForTest();
+            std::remove(routePath.c_str());
+            closePadPort(ctx, rdram);
+        });
+
         tc.Run("pad recorder emits a replayable script", [](TestCase &t)
                {
             const std::string recPath =
