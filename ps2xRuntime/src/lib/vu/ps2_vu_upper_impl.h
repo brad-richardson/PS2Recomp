@@ -1,13 +1,22 @@
-#include "runtime/ps2_vu1.h"
-#include "ps2_vu1_detail.h"
+#ifndef PS2_VU1_UPPER_IMPL_H
+#define PS2_VU1_UPPER_IMPL_H
 
+// VR1: the upper-instruction executor, moved verbatim from ps2_vu1_upper.cpp so the
+// generated VU1 programs can inline it with a constant instruction word (the
+// opcode switch folds away). The interpreter calls it through the out-of-line
+// execUpper() wrapper in ps2_vu1_upper.cpp.
+
+#include "runtime/ps2_vu_core.h"
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include "ps2_vu_detail.h"
+#include "ps2_vu_fmac_impl.h"
+#include "ps2_vu_fmac_simd.h"
 
-namespace
+namespace ps2_vu1_upper_detail
 {
-    int32_t vuFloatToInt(float value, float scale)
+    inline int32_t vuFloatToInt(float value, float scale)
     {
         const double scaled = static_cast<double>(value) * static_cast<double>(scale);
         if (scaled >= static_cast<double>(std::numeric_limits<int32_t>::max()))
@@ -16,14 +25,59 @@ namespace
             return std::numeric_limits<int32_t>::min();
         return static_cast<int32_t>(scaled);
     }
+
+    // RP1: MAX/MINI compare the raw register bits as sign-magnitude integers and
+    // pass the chosen operand through unchanged: no denormal flush, no Inf/NaN
+    // clamp (PCSX2 VUops.cpp fp_max/fp_min). Games move integer data with MAX,
+    // e.g. SSX 3's carve trail copies RGBA ints with MAX.xyzw vf09, vf04, vf04.
+    inline float vuMinMaxBits(float a, float b, bool wantMax)
+    {
+        int32_t ia = 0;
+        int32_t ib = 0;
+        std::memcpy(&ia, &a, sizeof(ia));
+        std::memcpy(&ib, &b, sizeof(ib));
+        const bool bothNegative = ia < 0 && ib < 0;
+        const bool pickA = (wantMax != bothNegative) ? (ia > ib) : (ia < ib);
+        return pickA ? a : b;
+    }
 }
+
+using namespace ps2_vu1_upper_detail;
 
 // ============================================================================
 // Upper instructions (FMAC pipeline)
 // ============================================================================
-void VU1Interpreter::execUpper(uint32_t instr)
+template <class D>
+template <bool kSimd, int kFloatMode>
+PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::execUpperImpl(uint32_t instr)
 {
     m_currentUpperInstruction = instr;
+    // E57: upper NOP (special 0x2F/0x30) returns before the operand
+    // normalization below, which has no side effects.
+    if ((instr & 0x3Cu) == 0x3Cu)
+    {
+        const uint8_t special = static_cast<uint8_t>((instr & 0x3u) | ((instr >> 4) & 0x7Cu));
+        if (special == 0x2Fu || special == 0x30u)
+            return;
+    }
+#if PS2X_VU1_FMAC_SIMD_AVAILABLE
+    // VR4 D1: the vector FMAC core takes every op that ends in
+    // applyFmacDest/applyFmacDestAcc (same results, flags and commits).
+    if constexpr (kSimd || kFloatMode == 1)
+    {
+        if (fmacSimdDispatch<kFloatMode>(instr))
+            return;
+    }
+    else if (kFloatMode == -1 && m_pcsx2Float)
+    {
+        // The PCSX2 mode uses the same native-vector core when the exact
+        // reference is selected with PS2X_VU1_FMAC_SIMD=OFF (including tests).
+        if (fmacSimdDispatch<kFloatMode>(instr))
+            return;
+    }
+#else
+    static_assert(!kSimd, "vector FMAC core unavailable in this build");
+#endif
     uint8_t dest = DEST(instr);
     uint8_t ft = FT(instr);
     uint8_t fs = FS(instr);
@@ -99,9 +153,9 @@ void VU1Interpreter::execUpper(uint32_t instr)
     case 0x12:
     case 0x13: // MAXbc
     {
-        float bc = broadcast(vt, op & 3);
+        const float bc = m_state.vf[ft][op & 3];
         for (int c = 0; c < 4; c++)
-            result[c] = (vs[c] > bc) ? vs[c] : bc;
+            result[c] = vuMinMaxBits(m_state.vf[fs][c], bc, true);
         applyDest(vd, result, dest);
         return;
     }
@@ -110,9 +164,9 @@ void VU1Interpreter::execUpper(uint32_t instr)
     case 0x16:
     case 0x17: // MINIbc
     {
-        float bc = broadcast(vt, op & 3);
+        const float bc = m_state.vf[ft][op & 3];
         for (int c = 0; c < 4; c++)
-            result[c] = (vs[c] < bc) ? vs[c] : bc;
+            result[c] = vuMinMaxBits(m_state.vf[fs][c], bc, false);
         applyDest(vd, result, dest);
         return;
     }
@@ -134,7 +188,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
         return;
     case 0x1D: // MAXi
         for (int c = 0; c < 4; c++)
-            result[c] = (vs[c] > i) ? vs[c] : i;
+            result[c] = vuMinMaxBits(m_state.vf[fs][c], m_state.i, true);
         applyDest(vd, result, dest);
         return;
     case 0x1E: // MULi
@@ -144,7 +198,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
         return;
     case 0x1F: // MINIi
         for (int c = 0; c < 4; c++)
-            result[c] = (vs[c] < i) ? vs[c] : i;
+            result[c] = vuMinMaxBits(m_state.vf[fs][c], m_state.i, false);
         applyDest(vd, result, dest);
         return;
     case 0x20: // ADDq
@@ -204,7 +258,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
         return;
     case 0x2B: // MAX
         for (int c = 0; c < 4; c++)
-            result[c] = (vs[c] > vt[c]) ? vs[c] : vt[c];
+            result[c] = vuMinMaxBits(m_state.vf[fs][c], m_state.vf[ft][c], true);
         applyDest(vd, result, dest);
         return;
     case 0x2C: // SUB
@@ -226,7 +280,7 @@ void VU1Interpreter::execUpper(uint32_t instr)
         return;
     case 0x2F: // MINI
         for (int c = 0; c < 4; c++)
-            result[c] = (vs[c] < vt[c]) ? vs[c] : vt[c];
+            result[c] = vuMinMaxBits(m_state.vf[fs][c], m_state.vf[ft][c], false);
         applyDest(vd, result, dest);
         return;
 
@@ -504,3 +558,4 @@ void VU1Interpreter::execUpper(uint32_t instr)
         return;
     }
 }
+#endif
