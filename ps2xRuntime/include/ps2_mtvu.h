@@ -887,6 +887,11 @@ namespace ps2_mtvu
             // Threaded-mode receipts (EE only).
             std::array<uint64_t, static_cast<size_t>(Reason::Count)> waits{};
             std::array<uint64_t, static_cast<size_t>(Reason::Count)> waitNs{};
+            // IOSR1: syncAll() with no reason (Reason::Count: shutdown and
+            // stage-transition paths, never steady state). Counted separately
+            // so the per-window [perf-mtvu] reasons sum to ee.mtvu.
+            uint64_t otherWaits = 0;
+            uint64_t otherWaitNs = 0;
             std::array<uint64_t, static_cast<size_t>(Site::Count)> violations{};
             uint64_t violationsTotal = 0;
             uint64_t jobs = 0;
@@ -1911,6 +1916,133 @@ namespace ps2_mtvu
         return detail::worker().waitNs[static_cast<size_t>(r)];
     }
 
+    // IOSR1: per-window MTVU sync attribution for the iOS `[perf-mtvu]` log
+    // line. The EE executor calls noteMtvuWindowTick() once per tick (gated by
+    // the caller on the perf-log switch: one branch when the log is off); the
+    // main thread's perflog::poll() takes the window with takeMtvuWindowSample().
+    // All waits[]/waitNs[] reads happen on the EE thread that writes them;
+    // the window accumulators are EE-fetch_add / main-thread-exchange. Output
+    // only: no guest state, det-neutral.
+    static constexpr size_t kMtvuReasonCount = static_cast<size_t>(Reason::Count);
+
+    struct MtvuWindowSample
+    {
+        std::array<uint64_t, kMtvuReasonCount> n{};
+        std::array<uint64_t, kMtvuReasonCount> ns{};
+        uint64_t otherN = 0;
+        uint64_t otherNs = 0;
+        uint64_t finisheeSkips = 0;    // MQ2 unit PATH3 FINISH writes covered by a credit
+        uint64_t vif1statfreeSkips = 0; // MQ3 VIF1_STAT writes that skipped the sync
+    };
+
+    namespace detail
+    {
+        struct MtvuWinAccum
+        {
+            std::array<std::atomic<uint64_t>, kMtvuReasonCount> n;
+            std::array<std::atomic<uint64_t>, kMtvuReasonCount> ns;
+            std::atomic<uint64_t> otherN;
+            std::atomic<uint64_t> otherNs;
+            std::atomic<uint64_t> finisheeSkips;
+            std::atomic<uint64_t> vif1statfreeSkips;
+            MtvuWinAccum()
+            {
+                for (auto &a : n)
+                    a.store(0u, std::memory_order_relaxed);
+                for (auto &a : ns)
+                    a.store(0u, std::memory_order_relaxed);
+                otherN.store(0u, std::memory_order_relaxed);
+                otherNs.store(0u, std::memory_order_relaxed);
+                finisheeSkips.store(0u, std::memory_order_relaxed);
+                vif1statfreeSkips.store(0u, std::memory_order_relaxed);
+            }
+        };
+
+        inline MtvuWinAccum &mtvuWin()
+        {
+            static MtvuWinAccum w;
+            return w;
+        }
+
+        struct MtvuWinLast
+        {
+            std::array<uint64_t, kMtvuReasonCount> n{};
+            std::array<uint64_t, kMtvuReasonCount> ns{};
+            uint64_t otherN = 0;
+            uint64_t otherNs = 0;
+            uint64_t finisheeSkips = 0;
+            uint64_t vif1statfreeSkips = 0;
+        };
+
+        inline MtvuWinLast &mtvuWinLast()
+        {
+            static MtvuWinLast w;
+            return w;
+        }
+    } // namespace detail
+
+    // EE side, once per tick. The caller gates on the perf-log switch.
+    inline void noteMtvuWindowTick()
+    {
+        if (!threaded())
+            return;
+        detail::Worker &w = detail::worker();
+        detail::MtvuWinLast &last = detail::mtvuWinLast();
+        detail::MtvuWinAccum &win = detail::mtvuWin();
+        for (size_t i = 0; i < kMtvuReasonCount; ++i)
+        {
+            const uint64_t curN = w.waits[i];
+            const uint64_t dn = curN >= last.n[i] ? curN - last.n[i] : curN;
+            if (dn != 0u)
+                win.n[i].fetch_add(dn, std::memory_order_relaxed);
+            last.n[i] = curN;
+            const uint64_t curNs = w.waitNs[i];
+            const uint64_t dNs = curNs >= last.ns[i] ? curNs - last.ns[i] : curNs;
+            if (dNs != 0u)
+                win.ns[i].fetch_add(dNs, std::memory_order_relaxed);
+            last.ns[i] = curNs;
+        }
+        const uint64_t curON = w.otherWaits;
+        const uint64_t dON = curON >= last.otherN ? curON - last.otherN : curON;
+        if (dON != 0u)
+            win.otherN.fetch_add(dON, std::memory_order_relaxed);
+        last.otherN = curON;
+        const uint64_t curONs = w.otherWaitNs;
+        const uint64_t dONs = curONs >= last.otherNs ? curONs - last.otherNs : curONs;
+        if (dONs != 0u)
+            win.otherNs.fetch_add(dONs, std::memory_order_relaxed);
+        last.otherNs = curONs;
+        const uint64_t curFe = detail::g_finishEeSkips.load(std::memory_order_relaxed);
+        const uint64_t dFe = curFe >= last.finisheeSkips ? curFe - last.finisheeSkips : curFe;
+        if (dFe != 0u)
+            win.finisheeSkips.fetch_add(dFe, std::memory_order_relaxed);
+        last.finisheeSkips = curFe;
+        const uint64_t curVsf = detail::g_vif1StatFreeN.load(std::memory_order_relaxed);
+        const uint64_t dVsf = curVsf >= last.vif1statfreeSkips ? curVsf - last.vif1statfreeSkips : curVsf;
+        if (dVsf != 0u)
+            win.vif1statfreeSkips.fetch_add(dVsf, std::memory_order_relaxed);
+        last.vif1statfreeSkips = curVsf;
+    }
+
+    // Main-thread side (perflog::poll): exchange the window accumulators.
+    // False when MTVU is not threaded (no line is emitted).
+    inline bool takeMtvuWindowSample(MtvuWindowSample &out)
+    {
+        if (!threaded())
+            return false;
+        detail::MtvuWinAccum &win = detail::mtvuWin();
+        for (size_t i = 0; i < kMtvuReasonCount; ++i)
+        {
+            out.n[i] = win.n[i].exchange(0u, std::memory_order_relaxed);
+            out.ns[i] = win.ns[i].exchange(0u, std::memory_order_relaxed);
+        }
+        out.otherN = win.otherN.exchange(0u, std::memory_order_relaxed);
+        out.otherNs = win.otherNs.exchange(0u, std::memory_order_relaxed);
+        out.finisheeSkips = win.finisheeSkips.exchange(0u, std::memory_order_relaxed);
+        out.vif1statfreeSkips = win.vif1statfreeSkips.exchange(0u, std::memory_order_relaxed);
+        return true;
+    }
+
     // Threaded: wait for every submitted job.
     inline void syncAll(Reason r = Reason::Count)
     {
@@ -1922,6 +2054,12 @@ namespace ps2_mtvu
         {
             ++w.waits[static_cast<size_t>(r)];
             w.waitNs[static_cast<size_t>(r)] += ns;
+        }
+        else
+        {
+            // IOSR1: unattributed waits (the [perf-mtvu] "other" bucket).
+            ++w.otherWaits;
+            w.otherWaitNs += ns;
         }
     }
 

@@ -392,12 +392,37 @@ void register_ps2_perf_log_tests()
                      "golden stage line"); });
 
         tc.Run("formatStageLine n=0 reads -1 with an empty hist", [](TestCase &t)
-               {
+                {
             const auto st = ps2x::perflog::summarizeStage({});
             t.Equals(ps2x::perflog::formatStageLine("gs.busy", st),
                      std::string("[perf-stage] tick0=0 tick1=0 stage=gs.busy n=0 mean=-1.000 "
                                  "p50=-1.000 p95=-1.000 p99=-1.000 max=-1.000 hist=\"\""),
                      "empty stage line"); });
+
+        // IOSR1: per-reason MTVU window line (all reasons in order, the
+        // unattributed "other" bucket, and the MQ2/MQ3 skip counts).
+        tc.Run("formatMtvuLine golden with skips", [](TestCase &t)
+                {
+            const ps2x::perflog::MtvuReasonCell cells[] = {
+                {"vblank", 8u, 28900000u},
+                {"vu1mem", 0u, 0u},
+                {"finishpoll", 12u, 8390000u},
+            };
+            t.Equals(ps2x::perflog::formatMtvuLine(9115u, cells, 3, 0u, 0u, 376u, 752u),
+                     std::string("[perf-mtvu] tick=9115 vblank=8/28.900 vu1mem=0/0.000 "
+                                 "finishpoll=12/8.390 other=0/0.000 "
+                                 "finishee_skip=376 vif1statfree_skip=752"),
+                     "golden mtvu line"); });
+
+        tc.Run("formatMtvuLine all-zero window", [](TestCase &t)
+                {
+            const ps2x::perflog::MtvuReasonCell cells[] = {
+                {"vblank", 0u, 0u},
+            };
+            t.Equals(ps2x::perflog::formatMtvuLine(100u, cells, 1, 0u, 0u, 0u, 0u),
+                     std::string("[perf-mtvu] tick=100 vblank=0/0.000 other=0/0.000 "
+                                 "finishee_skip=0 vif1statfree_skip=0"),
+                     "zero mtvu line"); });
 
         // PT2 Part 2a/b: drain clamp, kgsl parsers, gpu line fields.
         tc.Run("clampDrainStart keeps the newest lap", [](TestCase &t)

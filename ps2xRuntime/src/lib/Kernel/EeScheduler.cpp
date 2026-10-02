@@ -3207,6 +3207,11 @@ void EeScheduler::perfTailCutFrame(uint64_t tick)
         pushMs(ps2x::perflog::Stage::EeEnq, m_perfEnqueueNs);
         pushMs(ps2x::perflog::Stage::EeMtvu, mtvuSum - m_perfMtvuNs);
         pushMs(ps2x::perflog::Stage::EeMtvuVb, mtvuVb - m_perfMtvuVbNs);
+        // IOSR1: per-reason MTVU attribution for the [perf-mtvu] window line.
+        // One branch when the log is off; the deltas are EE-side (the same
+        // thread that writes the counters), published via lock-free adds.
+        if (m_perfTail)
+            ps2_mtvu::noteMtvuWindowTick();
     }
     m_perfFrameStartWall = wall;
     m_perfFrameStartCpu = cpu;

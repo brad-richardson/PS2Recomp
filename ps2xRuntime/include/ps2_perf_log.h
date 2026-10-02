@@ -407,6 +407,17 @@ inline std::vector<std::string> planPrune(std::vector<FileEntry> entries, uint64
 //     p95=<f> p99=<f> max=<f> hist="<lo>:<count> ..."
 //   [perf-tail] tick=<u> stage=<name> ms=<f>
 //
+// IOSR1: one [perf-mtvu] line per window (main thread, after [perf-lock],
+// before the [perf-stage] lines; only when MTVU is threaded):
+//   [perf-mtvu] tick=<u> <reason>=<n>/<ms> ... other=<n>/<ms>
+//     finishee_skip=<n> vif1statfree_skip=<n>
+// <reason> covers every ps2_mtvu::Reason in enum order (vblank first);
+// <n> is the window's sync count for that reason, <ms> its waited ms.
+// other = unattributed waits (Reason::Count callers); reasons + other sum to
+// the window's ee.mtvu. finishee_skip = MQ2 unit PATH3 FINISH writes covered
+// by an EE credit; vif1statfree_skip = MQ3 VIF1_STAT writes that skipped the
+// Vif1Reg sync.
+//
 // Stats are nearest-rank over the drained entries (rank ceil(q*n)-1); hist
 // buckets are 0.25 ms wide over 0..20 ms plus an "ovf" overflow bucket, so
 // odin_run.py can merge whole windows into exact-ish tails. A line with n=0
@@ -614,6 +625,41 @@ inline std::string formatStageLine(const char *name, const StageStats &st)
         line += cell;
     }
     line += '"';
+    return line;
+}
+
+// IOSR1: one [perf-mtvu] cell per ps2_mtvu::Reason (name from
+// ps2_mtvu::reasonName, in enum order), plus the unattributed "other" bucket
+// and the MQ2/MQ3 skip counts. Pure (host suite covers the exact text).
+struct MtvuReasonCell
+{
+    const char *name = "?";
+    uint64_t n = 0;
+    uint64_t ns = 0;
+};
+
+inline std::string formatMtvuLine(uint64_t tick, const MtvuReasonCell *cells, size_t count,
+                                  uint64_t otherN, uint64_t otherNs, uint64_t finisheeSkips,
+                                  uint64_t vif1statfreeSkips)
+{
+    char head[64];
+    std::snprintf(head, sizeof(head), "[perf-mtvu] tick=%llu",
+                  static_cast<unsigned long long>(tick));
+    std::string line = head;
+    char cell[96];
+    for (size_t i = 0; i < count; ++i)
+    {
+        std::snprintf(cell, sizeof(cell), " %s=%llu/%.3f", cells[i].name,
+                      static_cast<unsigned long long>(cells[i].n), cells[i].ns / 1e6);
+        line += cell;
+    }
+    std::snprintf(cell, sizeof(cell), " other=%llu/%.3f",
+                  static_cast<unsigned long long>(otherN), otherNs / 1e6);
+    line += cell;
+    std::snprintf(cell, sizeof(cell), " finishee_skip=%llu vif1statfree_skip=%llu",
+                  static_cast<unsigned long long>(finisheeSkips),
+                  static_cast<unsigned long long>(vif1statfreeSkips));
+    line += cell;
     return line;
 }
 

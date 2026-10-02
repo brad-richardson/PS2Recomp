@@ -4,6 +4,7 @@
 // wall second, flushed per poll so a crash keeps the tail. Failures disable
 // the log with one stderr note.
 #include "ps2_perf_log.h"
+#include "ps2_mtvu.h"
 #include "ps2_snd_audio_output.h"
 #include "ps2_vsync_lock.h"
 #if defined(PS2X_IOS)
@@ -853,6 +854,28 @@ void poll(uint64_t vsyncTick)
         pLocked = locked;
         pLate = late;
         pUnlocked = unlocked;
+    }
+    {
+        // IOSR1: per-reason MTVU sync attribution for this window. The EE
+        // published per-tick deltas into the window accumulators; the take
+        // exchanges them here (main thread). No line when MTVU is off.
+        ps2_mtvu::MtvuWindowSample sample;
+        if (ps2_mtvu::takeMtvuWindowSample(sample))
+        {
+            MtvuReasonCell cells[ps2_mtvu::kMtvuReasonCount];
+            for (size_t i = 0; i < ps2_mtvu::kMtvuReasonCount; ++i)
+            {
+                cells[i].name =
+                    ps2_mtvu::reasonName(static_cast<ps2_mtvu::Reason>(i));
+                cells[i].n = sample.n[i];
+                cells[i].ns = sample.ns[i];
+            }
+            const std::string line =
+                formatMtvuLine(vsyncTick, cells, ps2_mtvu::kMtvuReasonCount,
+                               sample.otherN, sample.otherNs, sample.finisheeSkips,
+                               sample.vif1statfreeSkips);
+            std::fprintf(log.file, "%s\n", line.c_str());
+        }
     }
     for (size_t i = 0; i < kStageCount; ++i)
         drainStage(static_cast<Stage>(i), log.stageConsumed[i], log.file);
