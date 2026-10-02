@@ -3,6 +3,7 @@
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/recompiler_reporter.h"
 #include "ps2recomp/types.h"
+#include "ps2_codegen_abi.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -156,6 +157,14 @@ namespace ps2recomp
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableEnd = 0x" << std::hex << tableEnd << "u;\n";
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = " << std::dec << slotCount << "u;\n";
         ss << "PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[" << std::dec << (slotCount == 0u ? 1u : slotCount) << "u] = {};\n\n";
+
+        // HL3: codegen ABI marker. Game-object builds link the runtime guard
+        // (ps2_codegen_abi_guard.cpp), which references this symbol: a
+        // pre-HL3 generated tree fails to link instead of silently dropping
+        // the split120 hook. This line changes register_functions.cpp, so the
+        // register pin forces a re-pin on every ABI bump.
+        ss << "// HL3: codegen ABI marker; see ps2_codegen_abi.h for the version history.\n";
+        ss << "extern const uint32_t g_ps2xCodegenAbiVersion = " << std::dec << ps2_codegen_abi::kVersion << "u;\n\n";
 
         ss << "namespace {\n";
         ss << "struct GeneratedFunctionTableInitializer {\n";

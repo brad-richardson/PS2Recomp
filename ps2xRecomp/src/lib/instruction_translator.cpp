@@ -5,6 +5,7 @@
 #include "ps2recomp/types.h"
 #include "ps2recomp/control_flow_utils.h"
 #include "runtime/ps2_address.h"
+#include "ps2_ts2_splitsites.h"
 
 #include <fmt/format.h>
 
@@ -92,6 +93,11 @@ namespace ps2recomp
         if (inst.isMmio)
         {
             return fmt::format("runtime->Load{}(rdram, ctx, {})", width, addr);
+        }
+        if (width == 32 && ps2_ts2_splitsites::isSite(inst.address))
+        {
+            // HL2: the split120 hook survives only at the conversion PCs.
+            return fmt::format("READ32_SPLIT({})", addr);
         }
         return fmt::format("READ{}({})", width, addr);
     }
@@ -211,6 +217,11 @@ namespace ps2recomp
                 inst.rt,
                 genWrite(32, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), "bits"));
         case OPCODE_LDC2:
+            // TC1: vf0 is hardwired to (0,0,0,1); hardware ignores writes to it.
+            // PCSX2 LQC2 still performs the memory read into a dummy, so keep the
+            // load (special-address side effects, diag taps) and drop the store.
+            if (inst.rt == 0)
+                return fmt::format("(void){}; // LQC2 to vf0 ignored (vf0 hardwired to (0,0,0,1))", genRead(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
             return fmt::format("ctx->vu0_vf[{}] = _mm_castsi128_ps({});", inst.rt, genRead(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate)));
         case OPCODE_SDC2:
             return genWrite(128, fmt::format("ADD32(GPR_U32(ctx, {}), {})", inst.rs, inst.simmediate), fmt::format("_mm_castps_si128(ctx->vu0_vf[{}])", inst.rt)) + ";";
@@ -338,11 +349,13 @@ namespace ps2recomp
         case OPCODE_PREF:
             return "// PREF instruction (ignored)";
         case OPCODE_LL:
+            // HL2: site-aware like translateMemoryRead (no site is LL today).
             return fmt::format(
                 "{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
-                "SET_GPR_S32(ctx, {}, (int32_t)READ32(addr)); "
+                "SET_GPR_S32(ctx, {}, (int32_t){}(addr)); "
                 "ctx->llbit = 1; ctx->lladdr = addr; }}",
-                inst.rs, inst.simmediate, inst.rt);
+                inst.rs, inst.simmediate, inst.rt,
+                ps2_ts2_splitsites::isSite(inst.address) ? "READ32_SPLIT" : "READ32");
         case OPCODE_SC:
             return fmt::format(
                 "{{ uint32_t addr = ADD32(GPR_U32(ctx, {}), {}); "
