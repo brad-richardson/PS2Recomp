@@ -7,6 +7,15 @@
 #include <mutex>
 #include <vector>
 
+// Field-presentation control for interlaced field-mode output (SMODE2
+// interlaced, frame mode off): PS2X_DEINTERLACE, default "weave" (present
+// every line of the full-height buffer). "bob" restores the historical
+// behavior of showing one field's lines doubled, alternating each vsync.
+bool ps2xDeinterlaceBobValue(const char *value);
+uint32_t ps2xDeinterlaceSourceLine(uint32_t y, uint32_t height, bool oddField, bool bob);
+void ps2xSetDeinterlaceBobForTest(bool bob);
+void ps2xClearDeinterlaceBobForTest();
+
 class GSCpuBackend final : public GSRasterBackend
 {
 public:

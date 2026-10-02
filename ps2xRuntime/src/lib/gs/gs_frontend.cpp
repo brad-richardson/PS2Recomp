@@ -1,14 +1,31 @@
 #include "runtime/gs/gs_frontend.h"
+#include "ps2_fpmode.h"
+#include "ps2_e7.h"
+#include "ps2_gfx_stats.h"
+#include "ps2_mtvu.h"
 #include "runtime/gs/gs_cpu_backend.h"
+#include "runtime/gs/gs_stream_capture.h"
+#include "ps2_e4.h"
 #include "ps2_log.h"
+#include "ps2_park_snapshot.h"
 #include "runtime/ps2_memory.h"
+#include <array>
 #include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <chrono> // RB2: serve-spin timeout
+#include <thread> // RB2: serve-spin yield
+
+// HP3: same default as ps2_runtime_macros.h (CMake option
+// PS2X_ENABLE_DIAG_TAPS defines it for every CMake build).
+#ifndef PS2X_ENABLE_DIAG_TAPS
+#define PS2X_ENABLE_DIAG_TAPS 0
+#endif
 
 namespace
 {
@@ -34,6 +51,61 @@ namespace
         uint64_t v;
         std::memcpy(&v, p, 8);
         return v;
+    }
+
+    // External GS owns rendering state. Keep only writes whose effects can
+    // escape through guest registers, transfers, or the local-to-host FIFO.
+    static constexpr bool isGuestGsControlRegister(uint8_t reg)
+    {
+        switch (reg)
+        {
+        case GS_REG_BITBLTBUF:
+        case GS_REG_TRXPOS:
+        case GS_REG_TRXREG:
+        case GS_REG_TRXDIR:
+        case GS_REG_HWREG:
+        case GS_REG_SIGNAL:
+        case GS_REG_FINISH:
+        case GS_REG_LABEL:
+        case 0x5a: // DISPFB1 HLE alias
+        case 0x5b: // DISPFB2 HLE alias
+        case 0x5c: // DISPLAY2 HLE alias
+        case 0x5f: // BGCOLOR HLE alias
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    // N8D7M12 Part 5F4P2: 64-bit FNV-1a helpers with explicit LE field
+    // encoding. Variable-length payloads are length-prefixed (u32 LE)
+    // so concatenations cannot alias.
+    static constexpr uint64_t kPktSeqOffset = 14695981039346656037ull;
+    static constexpr uint64_t kPktSeqPrime = 1099511628211ull;
+
+    static inline void pktSeqMixByte(uint64_t &digest, uint8_t b)
+    {
+        digest ^= static_cast<uint64_t>(b);
+        digest *= kPktSeqPrime;
+    }
+
+    static inline void pktSeqMixU32(uint64_t &digest, uint32_t v)
+    {
+        for (int i = 0; i < 4; ++i)
+            pktSeqMixByte(digest, static_cast<uint8_t>((v >> (i * 8)) & 0xFFu));
+    }
+
+    static inline void pktSeqMixU64(uint64_t &digest, uint64_t v)
+    {
+        for (int i = 0; i < 8; ++i)
+            pktSeqMixByte(digest, static_cast<uint8_t>((v >> (i * 8)) & 0xFFu));
+    }
+
+    static inline void pktSeqMixBytes(uint64_t &digest, const uint8_t *data, size_t size)
+    {
+        pktSeqMixU32(digest, static_cast<uint32_t>(size));
+        for (size_t i = 0; i < size; ++i)
+            pktSeqMixByte(digest, data[i]);
     }
 
     struct PackedGifPacketTag
@@ -94,6 +166,95 @@ namespace
                                     { return true; });
     }
 
+    // GE3 Part 2: read-only scan for an A+D FINISH (0x61) register write.
+    // PACKED: only slots whose tag nibble is A+D (0xE) can carry it.
+    // REGLIST: the register ids live in the tag. Anything malformed returns
+    // false and the normal decode path handles (or rejects) the packet.
+    // MQ2: counts the A+D FINISH writes, stopping at `limit` (malformed data
+    // ends the scan with the count so far). packetHasFinishAD = limit 1.
+    uint32_t countFinishAD(const uint8_t *data, uint32_t sizeBytes, uint32_t limit)
+    {
+        uint32_t found = 0u;
+        uint32_t offset = 0u;
+        while (offset + 16u <= sizeBytes)
+        {
+            const uint64_t tagLo = loadLE64(data + offset);
+            const uint64_t tagHi = loadLE64(data + offset + 8u);
+            offset += 16u;
+            const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
+            const uint32_t flg = static_cast<uint32_t>((tagLo >> 58u) & 0x3u);
+            uint32_t nreg = static_cast<uint32_t>((tagLo >> 60u) & 0xFu);
+            if (nreg == 0u)
+                nreg = 16u;
+            if (flg == GIF_FMT_PACKED)
+            {
+                const uint64_t items = static_cast<uint64_t>(nloop) * nreg;
+                if (items > (sizeBytes - offset) / 16u)
+                    return found;
+                // GP2: cheap reject — collect the A+D (0xE) slot mask from the
+                // tag once. Tags without A+D skip the payload with no
+                // per-item work; tags with A+D check only those slots
+                // (strided, no modulo). Same slots as the old item loop, so
+                // the result is identical.
+                uint32_t adMask = 0u;
+                for (uint32_t r = 0u; r < nreg; ++r)
+                {
+                    if (((tagHi >> (r * 4u)) & 0xFu) == 0xEu)
+                        adMask |= (1u << r);
+                }
+                if (adMask != 0u)
+                {
+                    for (uint32_t s = 0u; s < nreg; ++s)
+                    {
+                        if ((adMask & (1u << s)) == 0u)
+                            continue;
+                        for (uint32_t k = 0u; k < nloop; ++k)
+                        {
+                            const uint64_t at = offset +
+                                (static_cast<uint64_t>(k) * nreg + s) * 16u;
+                            if (static_cast<uint8_t>(loadLE64(data + at + 8u)) ==
+                                    static_cast<uint8_t>(GS_REG_FINISH) &&
+                                ++found >= limit)
+                                return found;
+                        }
+                    }
+                }
+                offset += static_cast<uint32_t>(items * 16u);
+            }
+            else if (flg == GIF_FMT_REGLIST)
+            {
+                for (uint32_t r = 0u; r < nreg; ++r)
+                {
+                    // One write per loop iteration; an nloop-0 tag counts
+                    // once, as the presence scan always matched it.
+                    if (static_cast<uint8_t>((tagHi >> (r * 4u)) & 0xFu) ==
+                        static_cast<uint8_t>(GS_REG_FINISH))
+                    {
+                        found += nloop != 0u ? nloop : 1u;
+                        if (found >= limit)
+                            return found;
+                    }
+                }
+                const uint64_t valueBytes = static_cast<uint64_t>(nloop) * nreg * 8ull;
+                if (valueBytes > sizeBytes - offset)
+                    return found;
+                offset += static_cast<uint32_t>(valueBytes);
+            }
+            else
+            {
+                // IMAGE modes consume the rest of the transfer; FINISH never
+                // hides in texel data.
+                return found;
+            }
+        }
+        return found;
+    }
+
+    bool packetHasFinishAD(const uint8_t *data, uint32_t sizeBytes)
+    {
+        return countFinishAD(data, sizeBytes, 1u) != 0u;
+    }
+
     std::atomic<uint32_t> s_debugGifPacketCount{0};
     std::atomic<uint32_t> s_debugGsRegisterCount{0};
     std::atomic<uint32_t> s_debugGsPackedVertexCount{0};
@@ -102,13 +263,419 @@ namespace
     std::atomic<uint32_t> s_debugTexaWriteCount{0};
     std::atomic<uint32_t> s_debugCvFontUploadCount{0};
     std::atomic<uint32_t> s_debugLocalCopyCount{0};
+
+    struct GsPacketVramTrace
+    {
+        uint64_t tick;
+        uint64_t index;
+        uint8_t path;
+        const uint8_t *vram;
+        uint32_t vramSize;
+
+        ~GsPacketVramTrace()
+        {
+            ps2x_gs_capture::packetDone(tick, index, path, vram, vramSize);
+        }
+    };
+}
+
+// GB2: true while the calling thread is this GS's worker executing a
+// queued command. Public methods route to the queue only when a worker
+// exists AND the caller is not the worker itself, so the worker runs the
+// exact direct-call bodies without re-enqueueing.
+namespace
+{
+    thread_local bool t_inGsWorker = false;
+
+    // SQ2: per-tick local->host lifecycle trace (PS2X_GS_L2H_TRACE=1). Set
+    // and consume sites are tagged so the trace shows who set pending and
+    // who should clear it. The guest PC is not visible on the GS worker, so
+    // EE sync serves log their madr instead (see ps2_memory.cpp).
+    thread_local const char *t_l2hSite = "rpc";
+
+    bool l2hTraceOn()
+    {
+        static const bool on = [] {
+            const char *env = std::getenv("PS2X_GS_L2H_TRACE");
+            return env && env[0] != '\0' && env[0] != '0';
+        }();
+        return on;
+    }
+
+    struct GsWorkerScope
+    {
+        GsWorkerScope() { t_inGsWorker = true; }
+        ~GsWorkerScope() { t_inGsWorker = false; }
+    };
+
+    // GF1: dev-only live comparator of what the GS worker consumes
+    // (PS2X_GS_CONSUMED_LOG=1): FNV-1a over (kind, path, bytes) of every GIF
+    // packet in execution order, printed every 65536 packets. Unlike the [pk]
+    // log (unit-side submits) it sees the queue's output, so a transport
+    // change must leave it identical. Worker thread only; off = one branch.
+    struct ConsumedLog
+    {
+        bool on = false;
+        uint64_t n = 0;
+        uint64_t h = 1469598103934665603ull;
+    };
+
+    ConsumedLog &consumedLog()
+    {
+        static ConsumedLog s{[]
+                             {
+                                 const char *e = std::getenv("PS2X_GS_CONSUMED_LOG");
+                                 return e != nullptr && e[0] == '1';
+                             }()};
+        return s;
+    }
+
+    void noteConsumedGif(uint8_t kind, uint8_t path, const uint8_t *data, size_t size)
+    {
+        ConsumedLog &s = consumedLog();
+        auto mix = [&](uint8_t b)
+        {
+            s.h ^= b;
+            s.h *= 1099511628211ull;
+        };
+        mix(kind);
+        mix(path);
+        for (size_t i = 0; i < size; ++i)
+            mix(data[i]);
+        if ((++s.n & 0xFFFFu) == 0u)
+            std::fprintf(stderr, "[gs:consumed] n=%llu h=%016llx\n", static_cast<unsigned long long>(s.n),
+                         static_cast<unsigned long long>(s.h));
+    }
+
+    struct QueuedPreferredSource
+    {
+        bool has = false;
+        GSFrameReg source{};
+        uint32_t destFbp = 0;
+    };
 }
 
 
 GS::GS()
     : m_backend(std::make_unique<GSCpuBackend>())
 {
+    // GE3 Part 2: default off; strict opt-in only.
+    if (const char *finishTiming = std::getenv("PS2X_GS_FINISH_TIMING"))
+        m_finishTimingPcsx2 = std::strcmp(finishTiming, "pcsx2") == 0;
     reset();
+}
+
+GS::~GS() = default;
+
+bool GS::setQueueEnabled(bool enabled, size_t maxDescriptors)
+{
+    if (enabled && !m_worker)
+    {
+        auto worker = std::make_unique<GsWorker>(maxDescriptors != 0u ? maxDescriptors
+                                                                     : GsWorker::kDefaultMaxDescriptors,
+                                                 GsWorker::kDefaultMaxPayloadBytes,
+                                                 [this](GsCommand &cmd)
+                                                 { executeQueuedCommand(cmd); });
+        worker->start();
+        m_worker = std::move(worker);
+    }
+    else if (!enabled && m_worker)
+    {
+        m_worker->stop();
+        m_worker.reset();
+    }
+    return true;
+}
+
+void GS::drainQueue()
+{
+    ps2_mtvu::touch(ps2_mtvu::Site::GsDrain); // MT1: unit-owned
+    if (!m_worker || t_inGsWorker)
+        return;
+    if (m_worker->isQuiescent())
+    {
+        // N8D7M12 Part 5F4P2: no Fence is enqueued here, so copy the
+        // running digest into the snapshot directly. Queue empty AND
+        // nothing executing (single replay producer) makes this stable.
+        // N8D7M12 Part 5F4P3: relaxed fast check first so default-off
+        // drains never acquire the mutex; re-check under lock for races.
+        if (!m_pktSeqEnabled.load(std::memory_order_relaxed))
+            return; // provable no-op: nothing queued, nothing executing
+        std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+        if (!m_pktSeqEnabled.load(std::memory_order_relaxed))
+            return;
+        m_pktSeqSnapshot = m_pktSeqDigest;
+        m_pktSeqSnapshotCommands = m_pktSeqCommands;
+        return; // provable no-op: nothing queued, nothing executing
+    }
+    GsCommand cmd;
+    cmd.kind = GsCmdKind::Fence;
+    cmd.rpc = std::make_shared<GsRpcBase>();
+    std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+    m_worker->enqueue(std::move(cmd));
+    rpc->wait();
+}
+
+// BG1: run the backend's host-side cache persist on the GS worker at stream
+// position (an RPC the caller waits on), so it never races queued GS work.
+// Direct mode (or a call from the worker itself) runs it now.
+void GS::flushExternalCaches()
+{
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::FlushCaches;
+        cmd.rpc = std::make_shared<GsRpcBase>();
+        std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return;
+    }
+    std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+    if (m_backend)
+        m_backend->FlushCaches();
+}
+
+void GS::setPktSeqEnabled(bool enabled)
+{
+    // N8D7M12 Part 5F4P3: locked for race-safety; the relaxed store
+    // publishes the flag for the per-command fast check.
+    std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+    m_pktSeqEnabled.store(enabled, std::memory_order_relaxed);
+    if (enabled)
+    {
+        m_pktSeqDigest = kPktSeqOffset;
+        m_pktSeqCommands = 0u;
+        m_pktSeqSnapshot = kPktSeqOffset;
+        m_pktSeqSnapshotCommands = 0u;
+    }
+    else
+    {
+        m_pktSeqSnapshot = 0u;
+        m_pktSeqSnapshotCommands = 0u;
+    }
+}
+
+bool GS::pktSeqEnabled() const
+{
+    // N8D7M12 Part 5F4P3: race-safe relaxed load, no mutex needed.
+    return m_pktSeqEnabled.load(std::memory_order_relaxed);
+}
+
+uint64_t GS::pktSeqSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+    return m_pktSeqSnapshot;
+}
+
+uint64_t GS::pktSeqSnapshotCommands() const
+{
+    std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+    return m_pktSeqSnapshotCommands;
+}
+
+void GS::noteConsumedCommand(const GsCommand &cmd)
+{
+    // N8D7M12 Part 5F4P3: default-off fast path. Relaxed load before
+    // the mutex, so OFF never acquires m_pktSeqMutex per command.
+    // Guarded re-check under lock covers a concurrent toggle; ON then
+    // updates digest/count exactly as before.
+    if (!m_pktSeqEnabled.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+    if (!m_pktSeqEnabled.load(std::memory_order_relaxed))
+        return;
+    if (cmd.kind == GsCmdKind::Fence)
+    {
+        // Timing-dependent presence: snapshot only, never hashed/counted.
+        m_pktSeqSnapshot = m_pktSeqDigest;
+        m_pktSeqSnapshotCommands = m_pktSeqCommands;
+        return;
+    }
+    uint64_t &d = m_pktSeqDigest;
+    pktSeqMixByte(d, static_cast<uint8_t>(cmd.kind));
+    switch (cmd.kind)
+    {
+    case GsCmdKind::GifPacket:
+        // Consumed path comes from prior NoteGifPath consumption (FIFO),
+        // so read the live field, not the packet itself.
+        pktSeqMixByte(d, static_cast<uint8_t>(m_curGifPath));
+        pktSeqMixBytes(d, cmd.bytes.data(), cmd.bytes.size());
+        break;
+    case GsCmdKind::NoteGifPath:
+        pktSeqMixByte(d, cmd.pathId);
+        break;
+    case GsCmdKind::RegWrite:
+        pktSeqMixByte(d, cmd.regAddr);
+        pktSeqMixU64(d, cmd.regValue);
+        break;
+    case GsCmdKind::UploadImageNative:
+        pktSeqMixU64(d, cmd.setupRegs[0]);
+        pktSeqMixU64(d, cmd.setupRegs[1]);
+        pktSeqMixU64(d, cmd.setupRegs[2]);
+        pktSeqMixU64(d, cmd.setupRegs[3]);
+        pktSeqMixBytes(d, cmd.bytes.data(), cmd.bytes.size());
+        break;
+    case GsCmdKind::NativePacked:
+        pktSeqMixBytes(d, cmd.bytes.data(), cmd.bytes.size());
+        break;
+    case GsCmdKind::ClearCtx:
+        pktSeqMixU32(d, cmd.u32a);
+        pktSeqMixU32(d, cmd.u32b);
+        break;
+    case GsCmdKind::ClearActive:
+        pktSeqMixU32(d, cmd.u32a);
+        break;
+    case GsCmdKind::WriteVram:
+        pktSeqMixU32(d, cmd.u32a);
+        pktSeqMixU32(d, cmd.u32b);
+        pktSeqMixU32(d, cmd.u32c);
+        pktSeqMixU32(d, cmd.u32d);
+        pktSeqMixU32(d, cmd.u32e);
+        pktSeqMixU32(d, static_cast<uint32_t>(cmd.regValue));
+        break;
+    case GsCmdKind::PrivWrite:
+        // Opaque callable: kind tag only (content gap, declared).
+        break;
+    case GsCmdKind::GuestVsync:
+        pktSeqMixU64(d, cmd.regValue);
+        pktSeqMixU32(d, cmd.u32a);
+        break;
+    default:
+        // Side RPCs (Consume/ReadVram/RefreshSnapshot/DiagPresent/…)
+        // carry no packet bytes: kind tag only, still counted so the
+        // count stays run-deterministic under the fixed replay script.
+        break;
+    }
+    ++m_pktSeqCommands;
+}
+
+void GS::executeQueuedCommand(GsCommand &cmd)
+{
+    // N8D7M12 Part 5F4P2: hash before the handler runs so a GifPacket
+    // sees the prior-consumed m_curGifPath value. N8D7M12 Part 5F4P3:
+    // noteConsumedCommand fast-returns while disabled without locking.
+    if (cmd.kind == GsCmdKind::GifPacket && (cmd.u32a & kGsGifPacketHasPath) != 0u)
+    {
+        // GF1 H1: the folded NoteGifPath runs first, digest included, so the
+        // consumed sequence is the one the two separate commands produce.
+        if (m_pktSeqEnabled.load(std::memory_order_relaxed))
+        {
+            GsCommand note;
+            note.kind = GsCmdKind::NoteGifPath;
+            note.pathId = cmd.pathId;
+            noteConsumedCommand(note);
+        }
+        m_curGifPath = static_cast<GifPathId>(cmd.pathId);
+    }
+    noteConsumedCommand(cmd);
+    const GsWorkerScope scope;
+    switch (cmd.kind)
+    {
+    case GsCmdKind::GifPacket:
+        if (consumedLog().on)
+            noteConsumedGif(static_cast<uint8_t>(cmd.kind), static_cast<uint8_t>(m_curGifPath), cmd.bytes.data(),
+                            cmd.bytes.size());
+        processGIFPacket(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
+        break;
+    case GsCmdKind::NoteGifPath:
+        m_curGifPath = static_cast<GifPathId>(cmd.pathId);
+        break;
+    case GsCmdKind::RegWrite:
+        writeRegister(cmd.regAddr, cmd.regValue);
+        break;
+    case GsCmdKind::UploadImageNative:
+        uploadImageNative(cmd.setupRegs[0], cmd.setupRegs[1], cmd.setupRegs[2], cmd.setupRegs[3],
+                          cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
+        break;
+    case GsCmdKind::NativePacked:
+        if (consumedLog().on)
+            noteConsumedGif(static_cast<uint8_t>(cmd.kind), static_cast<uint8_t>(m_curGifPath), cmd.bytes.data(),
+                            cmd.bytes.size());
+        processNativePackedGIFPacket(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
+        break;
+    case GsCmdKind::ClearCtx:
+        std::static_pointer_cast<GsRpc<bool>>(cmd.rpc)->result =
+            clearFramebufferContext(cmd.u32a, cmd.u32b);
+        break;
+    case GsCmdKind::ClearActive:
+        std::static_pointer_cast<GsRpc<bool>>(cmd.rpc)->result = clearActiveFramebuffer(cmd.u32a);
+        break;
+    case GsCmdKind::WriteVram:
+        WriteVram(cmd.u32a, cmd.u32b, cmd.u32c, cmd.u32d, cmd.u32e,
+                  static_cast<uint32_t>(cmd.regValue));
+        break;
+    case GsCmdKind::ClearDebugHistory:
+        clearDebugHistory();
+        break;
+    case GsCmdKind::SetDebugPaused:
+        setDebugHistoryPaused(cmd.u32a != 0u);
+        break;
+    case GsCmdKind::PrivWrite:
+        privWrite(std::move(cmd.apply));
+        break;
+    case GsCmdKind::GuestVsync:
+        if (m_backend)
+        {
+            m_backend->GuestVsync(cmd.regValue, cmd.u32a);
+            if (ps2_rb1_reverseDmaMode() == 4)
+                lagfOnGuestVsync(cmd.regValue); // LT1b: after GE1's VSync drain
+        }
+        break;
+    case GsCmdKind::Consume:
+    {
+        auto rpc = std::static_pointer_cast<GsRpc<std::vector<uint8_t>>>(cmd.rpc);
+        rpc->result.resize(cmd.u32a);
+        const uint32_t n = consumeLocalToHostBytes(rpc->result.data(), cmd.u32a);
+        rpc->result.resize(n);
+        break;
+    }
+    case GsCmdKind::ReadVram:
+        std::static_pointer_cast<GsRpc<uint32_t>>(cmd.rpc)->result =
+            ReadVram(cmd.u32a, cmd.u32b, cmd.u32c, cmd.u32d, cmd.u32e);
+        break;
+    case GsCmdKind::RefreshSnapshot:
+        refreshDisplaySnapshot();
+        break;
+    case GsCmdKind::LatchPresent:
+        latchHostPresentationFrame();
+        break;
+    case GsCmdKind::Reset:
+        reset();
+        break;
+    case GsCmdKind::GetDebugSnapshot:
+        std::static_pointer_cast<GsRpc<GSDebugSnapshot>>(cmd.rpc)->result = getDebugSnapshot();
+        break;
+    case GsCmdKind::GetDebugHistory:
+        std::static_pointer_cast<GsRpc<std::vector<GSDebugHistoryEntry>>>(cmd.rpc)->result =
+            getDebugHistory();
+        break;
+    case GsCmdKind::IsDebugPaused:
+        std::static_pointer_cast<GsRpc<bool>>(cmd.rpc)->result = isDebugHistoryPaused();
+        break;
+    case GsCmdKind::GetPreferredSource:
+    {
+        auto rpc = std::static_pointer_cast<GsRpc<QueuedPreferredSource>>(cmd.rpc);
+        rpc->result.has = getPreferredDisplaySource(rpc->result.source, rpc->result.destFbp);
+        break;
+    }
+    case GsCmdKind::SetBackend:
+        setRasterBackend(std::move(cmd.backend));
+        break;
+    case GsCmdKind::Fence:
+        break;
+    case GsCmdKind::DiagPresent:
+        std::static_pointer_cast<GsRpc<PresentationFrame>>(cmd.rpc)->result = presentForDiagnostics();
+        break;
+    case GsCmdKind::FlushCaches:
+        if (m_backend)
+            m_backend->FlushCaches();
+        break;
+    }
+    // GP4 H5: the payload bytes are dead after execute; return the buffer to
+    // the pool instead of freeing it (no-op unless the pool is enabled).
+    if (!cmd.bytes.empty())
+        m_packetPool.release(std::move(cmd.bytes));
 }
 
 void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
@@ -124,6 +691,17 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
 
 void GS::reset()
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsReset); // MT1: unit-owned
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::Reset;
+        cmd.rpc = std::make_shared<GsRpcBase>();
+        std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     std::memset(m_ctx, 0, sizeof(m_ctx));
     m_prim = {};
@@ -156,6 +734,7 @@ void GS::reset()
     m_trxdir = 3;
     m_vtxCount = 0;
     m_vtxIndex = 0;
+    m_curGifPath = GifPathId::Path1;
     m_preferredDisplaySourceFrame = {};
     m_preferredDisplayDestFbp = 0;
     m_hasPreferredDisplaySource = false;
@@ -225,6 +804,16 @@ const uint8_t *GS::lockDisplaySnapshot(uint32_t &outSize)
 
 GSDebugSnapshot GS::getDebugSnapshot() const
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GetDebugSnapshot;
+        auto rpc = std::make_shared<GsRpc<GSDebugSnapshot>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
 
     GSDebugSnapshot snapshot{};
@@ -265,6 +854,16 @@ GSDebugSnapshot GS::getDebugSnapshot() const
 
 std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GetDebugHistory;
+        auto rpc = std::make_shared<GsRpc<std::vector<GSDebugHistoryEntry>>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
 
     std::vector<GSDebugHistoryEntry> out;
@@ -279,6 +878,13 @@ std::vector<GSDebugHistoryEntry> GS::getDebugHistory() const
 
 void GS::clearDebugHistory()
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::ClearDebugHistory;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     m_debugHistoryWrite = 0;
     m_debugHistoryCount = 0;
@@ -289,12 +895,30 @@ void GS::clearDebugHistory()
 
 bool GS::isDebugHistoryPaused() const
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::IsDebugPaused;
+        auto rpc = std::make_shared<GsRpc<bool>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     return m_debugHistoryPaused;
 }
 
 void GS::setDebugHistoryPaused(bool paused)
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::SetDebugPaused;
+        cmd.u32a = paused ? 1u : 0u;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     m_debugHistoryPaused = paused;
 }
@@ -341,6 +965,11 @@ void GS::recordDebugEventUnlocked(GSDebugHistoryEntry entry)
     entry.seq = m_debugNextSeq++;
     entry.vsyncTick = tick;
     entry.frameIndex = m_debugFrameIndex;
+
+    if (entry.kind == GSDebugEventKind::Draw)
+    {
+        ps2_e4::noteSubmit(tick, entry.frame.fbp); // E4 T6 census (armed window only)
+    }
 
     m_debugHistory[m_debugHistoryWrite] = entry;
     m_debugHistoryWrite = (m_debugHistoryWrite + 1u) % kDebugHistoryCapacity;
@@ -475,6 +1104,18 @@ void GS::recordPresentDebugEventUnlocked(uint32_t displayFbp, uint32_t sourceFbp
 
 bool GS::getPreferredDisplaySource(GSFrameReg &outSource, uint32_t &outDestFbp) const
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GetPreferredSource;
+        auto rpc = std::make_shared<GsRpc<QueuedPreferredSource>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        outSource = rpc->result.source;
+        outDestFbp = rpc->result.destFbp;
+        return rpc->result.has;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!m_hasPreferredDisplaySource)
     {
@@ -500,6 +1141,16 @@ uint32_t GS::getLastDisplayBaseBytes() const
 
 void GS::refreshDisplaySnapshot()
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::RefreshSnapshot;
+        cmd.rpc = std::make_shared<GsRpcBase>();
+        std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return;
+    }
     snapshotVRAM();
 }
 
@@ -526,6 +1177,16 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
 
 void GS::latchHostPresentationFrame()
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::LatchPresent;
+        cmd.rpc = std::make_shared<GsRpcBase>();
+        std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return;
+    }
     GSPresentationRequest request{};
     {
         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
@@ -575,6 +1236,33 @@ void GS::latchHostPresentationFrame()
     }
 }
 
+PresentationFrame GS::presentForDiagnostics()
+{
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::DiagPresent;
+        auto rpc = std::make_shared<GsRpc<PresentationFrame>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return std::move(rpc->result);
+    }
+    GSPresentationRequest request{};
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        if (!m_backend || !m_privRegs)
+            return {};
+        request = buildPresentationRequestUnlocked();
+    }
+    std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
+    if (!m_backend)
+        return {};
+    m_backend->Flush();
+    m_backend->Sync(GSSyncReason::Presentation);
+    return m_backend->Present(request);
+}
+
 bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
                                           uint32_t &outWidth,
                                           uint32_t &outHeight,
@@ -610,7 +1298,10 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
     outPixels.resize(packedRowBytes * static_cast<size_t>(outHeight));
     if (outWidth != 0u && outHeight != 0u)
     {
-        const size_t sourceRowBytes = static_cast<size_t>(kHostFrameWidth) * 4u;
+        // HR1: frames that don't fit the legacy 640x512 host frame
+        // (paraLLEl high-resolution scanout) arrive packed at stride = width.
+        const bool packed = outWidth > kHostFrameWidth || outHeight > 512u;
+        const size_t sourceRowBytes = static_cast<size_t>(packed ? outWidth : kHostFrameWidth) * 4u;
         for (uint32_t y = 0; y < outHeight; ++y)
         {
             const size_t srcOffset = static_cast<size_t>(y) * sourceRowBytes;
@@ -638,15 +1329,176 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
     return true;
 }
 
+void GS::processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uint8_t> &bytes)
+{
+    const uint32_t sizeBytes = static_cast<uint32_t>(bytes.size());
+    if (!m_worker || t_inGsWorker || sizeBytes < 16u)
+    {
+        if (notePath)
+            noteGifPath(path);
+        processGIFPacket(bytes.data(), sizeBytes);
+        return;
+    }
+    ps2_mtvu::touch(ps2_mtvu::Site::GsProcess); // MT1: unit-owned
+    GsCommand cmd;
+    cmd.kind = GsCmdKind::GifPacket;
+    if (notePath)
+    {
+        cmd.u32a = kGsGifPacketHasPath;
+        cmd.pathId = static_cast<uint8_t>(path);
+    }
+    // GF1 H2: take the arbiter's own copy instead of copying it again (the
+    // arbiter clears the packet after this call; listener and shadow ran first).
+    cmd.bytes = std::move(bytes);
+    // GE3 Part 2/3: PCSX2 sets CSR FINISH at GIF arbitration on the
+    // submitting thread. All prior packets are already enqueued (=
+    // GIF-drained), so set the bit now, in stream order. Decode keeps
+    // Flush+Sync for backend ordering but no longer sets CSR.
+    noteFinishTimingPcsx2(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
+    m_worker->enqueue(std::move(cmd));
+}
+
+    // GE3 Part 5: thread attribution for submit-side FINISH sets (observer
+    // only). EE-thread sets are the common case and stay silent; the
+    // [gs:finish-only] exempt-PC log covers EE demand.
+    std::atomic<uint64_t> s_finishWorkerSets{0u};
+    std::atomic<uint64_t> s_finishMtvuSets{0u};
+
+void GS::noteFinishTimingPcsx2(const uint8_t *data, uint32_t sizeBytes)
+{
+    if (!m_finishTimingPcsx2 || !m_privRegs || !data || sizeBytes < 16u)
+        return;
+    if (!packetHasFinishAD(data, sizeBytes))
+        return;
+    // MQ2: a PATH3 packet the EE already applied at its DMA-kick submit.
+    if (ps2_mtvu::finishEe() && !t_inGsWorker && ps2_mtvu::gifEmitPath() == 3u &&
+        ps2_mtvu::onUnitGsProducer() &&
+        ps2_mtvu::consumeEeFinishCredits(countFinishAD(data, sizeBytes, ~0u)))
+        return;
+    m_privRegs->csr.fetch_or(0x2u);
+    // GE3 Part 6: record the setter kind for the open probe episode (if any).
+    const uint32_t setterKind = t_inGsWorker ? 3u : (ps2_mtvu::onUnitGsProducer() ? 2u : 1u);
+    ps2_mtvu::ge3EpOnSet(setterKind);
+    if (t_inGsWorker)
+    {
+        if (s_finishWorkerSets.fetch_add(1u, std::memory_order_relaxed) == 0u)
+            std::fprintf(stderr, "[gs:finish-thread] first set from gs-worker (decode-time redundant)\n");
+    }
+    else if (ps2_mtvu::onUnitGsProducer())
+    {
+        const uint64_t n = s_finishMtvuSets.fetch_add(1u, std::memory_order_relaxed);
+        if (n < 8u)
+        {
+            std::fprintf(stderr, "[gs:finish-thread] mtvu-thread set n=%llu\n",
+                         static_cast<unsigned long long>(n + 1u));
+        }
+    }
+}
+
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsProcess); // MT1: unit-owned
+    // GE3 Part 2: PCSX2-timed FINISH is set here on the submitting thread
+    // (EE or MTVU unit), in stream order, before the worker decodes.
+    noteFinishTimingPcsx2(data, sizeBytes);
+    if (m_worker && !t_inGsWorker)
+    {
+        if (!data || sizeBytes < 16)
+            return;
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GifPacket;
+        cmd.bytes = m_packetPool.acquire(sizeBytes); // GP4 H5: empty unless enabled
+        cmd.bytes.assign(data, data + sizeBytes);
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
+    // E53: GS math runs in host IEEE mode even when called from the EE thread (PS2 FP mode).
+    ps2_fpmode::ScopedHostMode hostFpMode;
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16 || !m_backend)
         return;
 
+    // HP3 F15: the submit index feeds only the stream-capture trace and
+    // the [vq] line; skip the atomic RMW in speed builds (index reads 0).
+#if PS2X_ENABLE_DIAG_TAPS
+    const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+#else
+    const uint64_t index = 0u;
+#endif
+    const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
+    const uint8_t path = static_cast<uint8_t>(m_curGifPath);
+    GsPacketVramTrace trace{tick, index, path, m_localMemoryStorage, m_localMemorySize};
+    ps2x_gs_capture::packet(tick, path, data, sizeBytes);
+    ps2_e7::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u, "gs-enter", data, sizeBytes);
+    // GB3 Part 2: a raw-GIF backend (paraLLEl) renders the packet itself; the
+    // decode below still runs for CSR/transfer/preferred-source state.
+    if (m_rawGifBackend.load(std::memory_order_relaxed))
+        m_backend->RawGifPacket(static_cast<uint32_t>(m_curGifPath), data, sizeBytes);
     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
         return;
 
+    if (m_minimalGifDecode.load(std::memory_order_relaxed))
+    {
+        uint32_t offset = 0u;
+        while (offset + 16u <= sizeBytes)
+        {
+            const uint64_t tagLo = loadLE64(data + offset);
+            const uint64_t tagHi = loadLE64(data + offset + 8u);
+            offset += 16u;
+            const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7fffu);
+            const uint32_t nregField = static_cast<uint32_t>((tagLo >> 60u) & 0xfu);
+            const uint32_t nreg = nregField ? nregField : 16u;
+            const uint32_t flg = static_cast<uint32_t>((tagLo >> 58u) & 0x3u);
+            const uint64_t items = static_cast<uint64_t>(nloop) * nreg;
+            if (flg == GIF_FMT_PACKED)
+            {
+                const uint64_t bytes = items * 16u;
+                if (bytes > sizeBytes - offset)
+                    return;
+                bool hasAd = false;
+                for (uint32_t r = 0; r < nreg; ++r)
+                    hasAd |= ((tagHi >> (r * 4u)) & 0xfu) == 0xeu;
+                if (hasAd)
+                {
+                    for (uint64_t i = 0; i < items; ++i, offset += 16u)
+                    {
+                        if (((tagHi >> ((i % nreg) * 4u)) & 0xfu) != 0xeu)
+                            continue;
+                        const uint8_t reg = static_cast<uint8_t>(loadLE64(data + offset + 8u));
+                        if (isGuestGsControlRegister(reg))
+                            writeRegisterUnlocked(reg, loadLE64(data + offset));
+                    }
+                }
+                else
+                    offset += static_cast<uint32_t>(bytes);
+            }
+            else if (flg == GIF_FMT_REGLIST)
+            {
+                const uint64_t bytes = (items + 1u) / 2u * 16u;
+                if (bytes > sizeBytes - offset)
+                    return;
+                offset += static_cast<uint32_t>(bytes);
+            }
+            else if (flg == GIF_FMT_IMAGE)
+            {
+                const uint32_t bytes = static_cast<uint32_t>(std::min<uint64_t>(
+                    static_cast<uint64_t>(nloop) * 16u, sizeBytes - offset));
+                processImageData(data + offset, bytes);
+                offset += bytes;
+            }
+            else
+                return;
+        }
+        return;
+    }
+
+    // T1: true GIF-packet count (the [gs:gif] line below caps at 48).
+    // HP3 F15: opt-in behind the cached park flag (snapshot reads it
+    // only when park is on).
+    if (ps2_park::parkEnabled())
+    {
+        ps2_park::tallyGsGif();
+    }
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t packetIndex = s_debugGifPacketCount.fetch_add(1, std::memory_order_relaxed);
         if (packetIndex < 48u)
@@ -738,6 +1590,23 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsNative); // MT1: unit-owned
+    if (m_worker && !t_inGsWorker)
+    {
+        // The DMA-chain caller needs the verdict synchronously, but the
+        // verdict is a pure function of the bytes: validate here, decode on
+        // the worker. The worker re-validates the same bytes identically.
+        if (!data || sizeBytes < 16u || !validatePackedGifPacket(data, sizeBytes))
+            return false;
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::NativePacked;
+        cmd.bytes = m_packetPool.acquire(sizeBytes); // GP4 H5: empty unless enabled
+        cmd.bytes.assign(data, data + sizeBytes);
+        m_worker->enqueue(std::move(cmd));
+        return true;
+    }
+    // E53: GS math runs in host IEEE mode even when called from the EE thread (PS2 FP mode).
+    ps2_fpmode::ScopedHostMode hostFpMode;
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (!data || sizeBytes < 16u || !m_backend)
         return false;
@@ -745,8 +1614,36 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!validatePackedGifPacket(data, sizeBytes))
         return false;
 
+    // HP3 F15: see above (capture/vq index only).
+#if PS2X_ENABLE_DIAG_TAPS
+    const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+#else
+    const uint64_t index = 0u;
+#endif
+    const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
+    const uint8_t path = static_cast<uint8_t>(m_curGifPath);
+    GsPacketVramTrace trace{tick, index, path, m_localMemoryStorage, m_localMemorySize};
+    ps2x_gs_capture::packet(tick, path, data, sizeBytes);
+    // GE2: raw-stream backends must see this packet too (the capture counts
+    // it); the default is a no-op so paraLLEl is unaffected.
+    if (m_rawGifBackend.load(std::memory_order_relaxed))
+        m_backend->RawNativePackedPacket(data, sizeBytes);
+    const bool minimal = m_minimalGifDecode.load(std::memory_order_relaxed);
     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
                                                 {
+        if (minimal)
+        {
+            uint32_t offset = tag.payloadOffset;
+            for (uint32_t loop = 0u; loop < tag.nloop; ++loop)
+                for (uint32_t r = 0u; r < tag.nreg; ++r, offset += 16u)
+                    if (tag.regs[r] == 0xeu)
+                    {
+                        const uint8_t reg = static_cast<uint8_t>(loadLE64(data + offset + 8u));
+                        if (isGuestGsControlRegister(reg))
+                            writeRegisterUnlocked(reg, loadLE64(data + offset));
+                    }
+            return true;
+        }
         m_curQ = 1.0f;
 
         recordGifTagDebugEventUnlocked(sizeBytes, tag.nloop, GIF_FMT_PACKED, tag.nreg);
@@ -783,7 +1680,34 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
                            const uint8_t *data,
                            uint32_t sizeBytes)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsNative); // MT1: unit-owned
+    if (m_worker && !t_inGsWorker)
+    {
+        if (!data || sizeBytes == 0)
+            return;
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::UploadImageNative;
+        cmd.setupRegs[0] = bitbltbuf;
+        cmd.setupRegs[1] = trxpos;
+        cmd.setupRegs[2] = trxreg;
+        cmd.setupRegs[3] = trxdir;
+        cmd.bytes = m_packetPool.acquire(sizeBytes); // GP4 H5: empty unless enabled
+        cmd.bytes.assign(data, data + sizeBytes);
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    // HP3 F15: see above (capture/vq index only).
+#if PS2X_ENABLE_DIAG_TAPS
+    const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
+#else
+    const uint64_t index = 0u;
+#endif
+    const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
+    GsPacketVramTrace trace{tick, index, static_cast<uint8_t>(m_curGifPath),
+                            m_localMemoryStorage, m_localMemorySize};
+    ps2x_gs_capture::nativeUpload(tick,
+                                  bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
     uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
 }
 
@@ -1061,8 +1985,95 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
 
 void GS::writeRegister(uint8_t regAddr, uint64_t value)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsWriteReg); // MT1: unit-owned
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::RegWrite;
+        cmd.regAddr = regAddr;
+        cmd.regValue = value;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
+    // E53: GS math runs in host IEEE mode even when called from the EE thread (PS2 FP mode).
+    ps2_fpmode::ScopedHostMode hostFpMode;
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    m_regWriteCount.fetch_add(1u, std::memory_order_relaxed);
     writeRegisterUnlocked(regAddr, value);
+    if (m_rawGifBackend.load(std::memory_order_relaxed))
+        m_backend->RawWriteRegister(regAddr, value); // GB3: HLE W1/W2 bypass the GIF stream
+}
+
+namespace
+{
+// GE2: the 19 small priv registers the capture (ps2_memory.cpp) and the
+// external-backend mirror both track, as MMIO offsets. vsyncTick is a
+// host-side tick, not a guest register, and is excluded by both.
+constexpr uint32_t kGe2MirrorOffsets[19] = {
+    0x0000u, 0x0010u, 0x0020u, 0x0030u, 0x0040u, 0x0050u, 0x0060u,
+    0x0070u, 0x0080u, 0x0090u, 0x00A0u, 0x00B0u, 0x00C0u, 0x00D0u,
+    0x00E0u, 0x1000u, 0x1010u, 0x1040u, 0x1080u};
+
+std::array<uint64_t, 19> ge2SnapshotPrivRegs(const GSRegisters &r)
+{
+    return std::array<uint64_t, 19>{r.pmode, r.smode1, r.smode2, r.srfsh,
+        r.synch1, r.synch2, r.syncv, r.dispfb1, r.display1, r.dispfb2,
+        r.display2, r.extbuf, r.extdata, r.extwrite, r.bgcolor,
+        r.csr.load(std::memory_order_acquire), r.imr, r.busdir,
+        r.siglblid.load(std::memory_order_acquire)};
+}
+} // namespace
+
+void GS::privWrite(std::function<void()> apply)
+{
+    ps2_mtvu::touch(ps2_mtvu::Site::GsPriv); // MT1: unit-owned
+    if (!apply)
+        return;
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::PrivWrite;
+        cmd.apply = std::move(apply);
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
+    m_privWriteCount.fetch_add(1u, std::memory_order_relaxed);
+    // GE2: mirror changed priv values to an opted-in backend in stream
+    // order. One relaxed flag check when off; the diff runs at apply time
+    // in both direct and worker modes (this is the single apply funnel).
+    const bool mirror = m_wantsPrivMirror.load(std::memory_order_relaxed) && m_privRegs && m_backend;
+    const auto before = mirror ? ge2SnapshotPrivRegs(*m_privRegs) : std::array<uint64_t, 19>{};
+    apply();
+    if (mirror)
+    {
+        const auto after = ge2SnapshotPrivRegs(*m_privRegs);
+        for (size_t i = 0; i < before.size(); ++i)
+            if (before[i] != after[i])
+                m_backend->PrivMirrored(kGe2MirrorOffsets[i], after[i]);
+    }
+}
+
+void GS::noteGuestVsync(uint64_t tick)
+{
+    if (!m_wantsGuestVsync.load(std::memory_order_acquire) || !m_backend)
+        return;
+    // FIELD at the boundary is tick parity by construction
+    // (ps2xGsCsrVBlankStart sets FIELD = tick & 1); deriving it here keeps
+    // the queued mode exact, where the CSR PrivWrite has not executed yet.
+    const uint32_t field = static_cast<uint32_t>(tick & 1u);
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GuestVsync;
+        cmd.regValue = tick;
+        cmd.u32a = field;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    m_backend->GuestVsync(tick, field);
+    if (ps2_rb1_reverseDmaMode() == 4)
+        lagfOnGuestVsync(tick); // LT1b
 }
 
 void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
@@ -1122,6 +2133,12 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         regAddr == GS_REG_FRAME_2 ||
         regAddr == GS_REG_XYOFFSET_2 ||
         regAddr == GS_REG_SCISSOR_2;
+    // T1: true copy-reg count (the [gs:copy-reg] line below caps at 64).
+    // HP3: same park opt-in as tallyGsGif (adjacent T1 tally).
+    if (isCopyRelevantReg && ps2_park::parkEnabled())
+    {
+        ps2_park::tallyGsCopyReg();
+    }
     PS2_IF_AGRESSIVE_LOGS({
         if (isCopyRelevantReg &&
             s_debugCopyRegCount.fetch_add(1u, std::memory_order_relaxed) < 64u)
@@ -1392,8 +2409,44 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             command.trxreg = m_trxreg;
             command.direction = m_trxdir;
             m_backend->BeginTransfer(command);
+            // SQ2: trace the local->host set (before the lag1 snapshot
+            // drains it, so pending shows the fresh transfer).
+            if (m_trxdir == 1u && l2hTraceOn())
+            {
+                const uint32_t pend = m_backend->GetTransferSnapshot().localToHostPendingBytes;
+                std::cerr << "[l2h-trace] tick="
+                          << (m_privRegs ? m_privRegs->vsyncTick.load(std::memory_order_acquire) : 0u)
+                          << " set rrw=" << m_trxreg.rrw << " rrh=" << m_trxreg.rrh
+                          << " spsm=" << m_bitbltbuf.spsm << " pending=" << pend << std::endl;
+            }
+            // RB2: in lag1/lagV mode snapshot this local->host transfer now,
+            // worker-ordered right after its setup (the backend overwrites
+            // its pending count per setup, so a later consume would not see
+            // this transfer's bytes). Off/sync modes skip: one relaxed load.
+            if (m_trxdir == 1u)
+            {
+                const int rbMode = ps2_rb1_reverseDmaMode();
+                if (rbMode == 2 || rbMode == 3)
+                    snapshotLaggedReadback();
+                else if (rbMode == 4)
+                    lagfRequest(command); // LT1b
+            }
         }
         recordTransferDebugEventUnlocked();
+        ps2x_gs_capture::transfer(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
+                                  (static_cast<uint64_t>(m_bitbltbuf.sbp) |
+                                   (static_cast<uint64_t>(m_bitbltbuf.sbw) << 16) |
+                                   (static_cast<uint64_t>(m_bitbltbuf.spsm) << 24) |
+                                   (static_cast<uint64_t>(m_bitbltbuf.dbp) << 32) |
+                                   (static_cast<uint64_t>(m_bitbltbuf.dbw) << 48) |
+                                   (static_cast<uint64_t>(m_bitbltbuf.dpsm) << 56)),
+                                  (static_cast<uint64_t>(m_trxpos.ssax) |
+                                   (static_cast<uint64_t>(m_trxpos.ssay) << 16) |
+                                   (static_cast<uint64_t>(m_trxpos.dsax) << 32) |
+                                   (static_cast<uint64_t>(m_trxpos.dsay) << 48) |
+                                   (static_cast<uint64_t>(m_trxpos.dir) << 59)),
+                                  (static_cast<uint64_t>(m_trxreg.rrw) |
+                                   (static_cast<uint64_t>(m_trxreg.rrh) << 32)), m_trxdir);
         break;
     }
     case GS_REG_HWREG:
@@ -1467,9 +2520,16 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         {
             uint32_t id = static_cast<uint32_t>(value & 0xFFFFFFFF);
             uint32_t mask = static_cast<uint32_t>(value >> 32);
-            uint32_t lo = static_cast<uint32_t>(m_privRegs->siglblid & 0xFFFFFFFF);
-            lo = (lo & ~mask) | (id & mask);
-            m_privRegs->siglblid = (m_privRegs->siglblid & 0xFFFFFFFF00000000ULL) | lo;
+            // GB2 Part 7: CAS loop — siglblid is atomic (game-thread
+            // guest stores race this worker masked-RMW).
+            uint64_t expected = m_privRegs->siglblid.load();
+            uint64_t desired;
+            do
+            {
+                uint32_t lo = static_cast<uint32_t>(expected & 0xFFFFFFFF);
+                lo = (lo & ~mask) | (id & mask);
+                desired = (expected & 0xFFFFFFFF00000000ULL) | lo;
+            } while (!m_privRegs->siglblid.compare_exchange_weak(expected, desired));
             m_privRegs->csr.fetch_or(0x1);
         }
         break;
@@ -1481,7 +2541,10 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             m_backend->Flush();
             m_backend->Sync(GSSyncReason::Finish);
         }
-        if (m_privRegs)
+        // GE3 Part 3: in EE-owned FINISH mode the submit side owns CSR FINISH
+        // (set at GIF arbitration, cleared by the guest W1C); the worker
+        // decode keeps backend ordering only and must not re-raise the bit.
+        if (m_privRegs && !m_finishTimingPcsx2)
             m_privRegs->csr.fetch_or(0x2);
         break;
     }
@@ -1491,9 +2554,15 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         {
             uint32_t id = static_cast<uint32_t>(value & 0xFFFFFFFF);
             uint32_t mask = static_cast<uint32_t>(value >> 32);
-            uint32_t hi = static_cast<uint32_t>(m_privRegs->siglblid >> 32);
-            hi = (hi & ~mask) | (id & mask);
-            m_privRegs->siglblid = (static_cast<uint64_t>(hi) << 32) | (m_privRegs->siglblid & 0xFFFFFFFF);
+            // GB2 Part 7: CAS loop — see SIGNAL above.
+            uint64_t expected = m_privRegs->siglblid.load();
+            uint64_t desired;
+            do
+            {
+                uint32_t hi = static_cast<uint32_t>(expected >> 32);
+                hi = (hi & ~mask) | (id & mask);
+                desired = (static_cast<uint64_t>(hi) << 32) | (expected & 0xFFFFFFFF);
+            } while (!m_privRegs->siglblid.compare_exchange_weak(expected, desired));
         }
         break;
     }
@@ -1528,6 +2597,13 @@ void GS::vertexKick(bool drawing)
 {
     ++m_vtxCount;
     ++m_vtxIndex;
+
+    // T1: true kick count (the [gs:kick] line below caps at 96).
+    // HP3: same park opt-in as tallyGsGif (adjacent T1 tally).
+    if (ps2_park::parkEnabled())
+    {
+        ps2_park::tallyGsKick(drawing);
+    }
 
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t debugIndex = s_debugGsVertexKickCount.fetch_add(1, std::memory_order_relaxed);
@@ -1578,6 +2654,31 @@ void GS::vertexKick(bool drawing)
         updatePreferredDisplaySourceForDraw(batch);
         m_backend->Submit(batch);
         recordDrawDebugEventUnlocked(needed);
+        // E33: per-path draw census. One relaxed check when stats are off.
+        if (ps2_gfx_stats::enabled())
+        {
+            float xMin = m_vtxQueue[0].x;
+            float xMax = m_vtxQueue[0].x;
+            float yMin = m_vtxQueue[0].y;
+            float yMax = m_vtxQueue[0].y;
+            double zMin = m_vtxQueue[0].z;
+            double zMax = m_vtxQueue[0].z;
+            const int count = std::min(needed, kMaxVerts);
+            for (int i = 1; i < count; ++i)
+            {
+                const GSVertex &v = m_vtxQueue[i];
+                xMin = std::min(xMin, v.x);
+                xMax = std::max(xMax, v.x);
+                yMin = std::min(yMin, v.y);
+                yMax = std::max(yMax, v.y);
+                zMin = std::min(zMin, v.z);
+                zMax = std::max(zMax, v.z);
+            }
+            ps2_gfx_stats::noteDraw(m_curGifPath, static_cast<uint32_t>(needed),
+                                    xMin, xMax, yMin, yMax, zMin, zMax,
+                                    batch.state.context.frame.fbp,
+                                    static_cast<uint32_t>(batch.state.prim.type));
+        }
     }
 
     switch (m_prim.type)
@@ -1616,26 +2717,496 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
 
 bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsClear); // MT1: unit-owned
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::ClearCtx;
+        cmd.u32a = contextIndex;
+        cmd.u32b = rgba;
+        auto rpc = std::make_shared<GsRpc<bool>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    ps2x_gs_capture::clearContext(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
+                                  contextIndex, rgba);
     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
 }
 
 bool GS::clearActiveFramebuffer(uint32_t rgba)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsClear); // MT1: unit-owned
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::ClearActive;
+        cmd.u32a = rgba;
+        auto rpc = std::make_shared<GsRpc<bool>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
 }
 
 uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
+    ps2_mtvu::touch(ps2_mtvu::Site::GsReadback); // MT1: unit-owned
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::Consume;
+        cmd.u32a = maxBytes;
+        auto rpc = std::make_shared<GsRpc<std::vector<uint8_t>>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        const size_t n = std::min<size_t>(rpc->result.size(), maxBytes);
+        if (dst && n != 0u)
+            std::memcpy(dst, rpc->result.data(), n);
+        return static_cast<uint32_t>(n);
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
+    const uint32_t n = m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
+    if (l2hTraceOn())
+    {
+        const uint32_t pend = m_backend ? m_backend->GetTransferSnapshot().localToHostPendingBytes : 0u;
+        std::cerr << "[l2h-trace] tick="
+                  << (m_privRegs ? m_privRegs->vsyncTick.load(std::memory_order_acquire) : 0u)
+                  << " consume site=" << t_l2hSite << " max=" << maxBytes << " got=" << n
+                  << " pending=" << pend << std::endl;
+    }
+    ps2x_gs_capture::localToHost(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
+                                 maxBytes, dst, n);
+    return n;
+}
+
+namespace
+{
+// RB2: cap on [rb2] log lines (snapshot + serve sides each read their own
+// copy). PS2X_RB2_LOG_MAX, default 8; the inventory boot raises it.
+uint32_t rb2LogMax()
+{
+    static const uint32_t max = [] {
+        const char *env = std::getenv("PS2X_RB2_LOG_MAX");
+        if (!env || env[0] == '\0')
+            return 8u;
+        return static_cast<uint32_t>(std::strtoul(env, nullptr, 10));
+    }();
+    return max;
+}
+} // namespace
+
+void GS::snapshotLaggedReadback()
+{
+    // Runs worker-ordered (queued mode) or inline (no worker). Consume into
+    // a stack buffer first: the slot lock below stays a leaf (consume takes
+    // m_stateMutex, already held by our caller).
+    uint8_t buf[kRb2LagSlotBytes];
+    t_l2hSite = "snap"; // SQ2: tag the snapshot consume for the l2h trace
+    const uint32_t n = consumeLocalToHostBytes(buf, kRb2LagSlotBytes);
+    t_l2hSite = "rpc";
+    // Drain any remainder so the next transfer starts from an empty FIFO.
+    bool truncated = false;
+    uint8_t drain[1024];
+    t_l2hSite = "drain"; // SQ2: tag the remainder drain for the l2h trace
+    for (;;)
+    {
+        const uint32_t m = consumeLocalToHostBytes(drain, sizeof(drain));
+        if (m == 0u)
+            break;
+        truncated = true;
+        if (m < sizeof(drain))
+            break;
+    }
+    t_l2hSite = "rpc";
+    uint64_t idx = 0u;
+    {
+        std::lock_guard<std::mutex> lock(m_rb2Mutex);
+        idx = m_rb2Snaps.load(std::memory_order_relaxed);
+        const uint64_t slot = idx % kRb2LagRing;
+        if (n != 0u)
+            std::memcpy(m_rb2Slot[slot], buf, n);
+        m_rb2SlotBytes[slot] = n;
+        m_rb2SlotTruncated[slot] = truncated;
+        m_rb2Snaps.store(idx + 1u, std::memory_order_release);
+    }
+    static std::atomic<uint32_t> rb2SnapLog{0};
+    if (rb2SnapLog.fetch_add(1u, std::memory_order_relaxed) < rb2LogMax())
+    {
+        // UX1: build then emit once (was a std::cerr chain: the GS worker
+        // and EE threads spliced 59 % of [rb2] lines on the Odin). Bytes
+        // identical: same insertions, newline via emitLine.
+        std::ostringstream rb2Line;
+        rb2Line << "[rb2] snap j=" << idx << " bytes=" << n << " trunc=" << (truncated ? 1 : 0)
+                << " head=";
+        const uint32_t headN = (n < 8u) ? n : 8u;
+        for (uint32_t i = 0u; i < headN; ++i)
+            rb2Line << std::hex << static_cast<uint32_t>(buf[i]) << (i + 1u < headN ? ":" : "");
+        ps2_log::emitLine(rb2Line.str());
+    }
+}
+
+uint32_t GS::serveLaggedReadback(uint8_t *dst, uint32_t maxBytes, uint64_t &spinUs, bool &timedOut)
+{
+    spinUs = 0u;
+    timedOut = false;
+    // Lag depth from the live knob: lag1 serves k-1, lagV serves k-24.
+    const uint64_t depth = (ps2_rb1_reverseDmaMode() == 3) ? kRb2LagVDepth : 1u;
+    uint64_t k = 0u;
+    {
+        std::lock_guard<std::mutex> lock(m_rb2Mutex);
+        k = m_rb2Serves++;
+    }
+    if (k < depth)
+        return 0u; // No snapshot D back yet: defined empty serve (EE untouched).
+    // Wait for snapshot k-D. With depth >= the max probes/vsync the worker
+    // completed it >1 frame ago, so the spin is ~0; only its count is
+    // timing-dependent, never the bytes. The timeout is a hang-guard for a
+    // reverse DMA with no preceding TRXDIR, which the probe never issues.
+    static constexpr uint64_t kRb2ServeTimeoutUs = 500000u;
+    const uint64_t want = k - depth;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (uint64_t i = 0u;; ++i)
+    {
+        if (m_rb2Snaps.load(std::memory_order_acquire) > want)
+            break;
+        if ((i & 1023u) == 1023u)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            spinUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count());
+            if (spinUs >= kRb2ServeTimeoutUs)
+            {
+                timedOut = true;
+                m_rb2Timeouts.fetch_add(1u, std::memory_order_relaxed);
+                std::ostringstream rb2Line;
+                rb2Line << "[rb2] serve k=" << k << " TIMEOUT waiting for snap " << want
+                        << " (snaps=" << m_rb2Snaps.load(std::memory_order_relaxed) << ")";
+                ps2_log::emitLine(rb2Line.str());
+                return 0u;
+            }
+            std::this_thread::yield();
+        }
+    }
+    {
+        const auto now = std::chrono::steady_clock::now();
+        spinUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count());
+    }
+    std::lock_guard<std::mutex> lock(m_rb2Mutex);
+    const uint64_t slot = want % kRb2LagRing;
+    if (m_rb2SlotTruncated[slot])
+        return 0u;
+    const uint32_t have = m_rb2SlotBytes[slot];
+    const uint32_t n = (have < maxBytes) ? have : maxBytes;
+    if (dst && n != 0u)
+        std::memcpy(dst, m_rb2Slot[slot], n);
+    return n;
+}
+
+namespace
+{
+// LT1b: PS2X_RB_LAGF_VERIFY=1 (diag): also read every lagF set synchronously
+// and compare with the async bytes at resolve.
+bool lagfVerifyOn()
+{
+    static const bool on = [] {
+        const char *env = std::getenv("PS2X_RB_LAGF_VERIFY");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+std::string lagfHead(const uint8_t *p, uint32_t n)
+{
+    std::ostringstream o;
+    const uint32_t headN = (n < 8u) ? n : 8u;
+    for (uint32_t i = 0u; i < headN; ++i)
+        o << std::hex << static_cast<uint32_t>(p[i]) << (i + 1u < headN ? ":" : "");
+    return o.str();
+}
+} // namespace
+
+GS::LagfSlot *GS::lagfSlots()
+{
+    std::lock_guard<std::mutex> lock(m_lagfMutex);
+    if (!m_lagfSlots)
+        m_lagfSlots = std::make_unique<LagfSlot[]>(kLagfRing);
+    return m_lagfSlots.get();
+}
+
+void GS::lagfRequest(const GSTransferCommand &command)
+{
+    // Worker-ordered (queued mode) or inline, right after BeginTransfer.
+    LagfSlot *slots = lagfSlots();
+    const uint64_t ticket = m_lagfSets++;
+    LagfSlot &slot = slots[ticket % kLagfRing];
+    const bool async = m_backend && m_backend->RequestLocalToHostAsync(command, ticket);
+    const bool verify = async && lagfVerifyOn();
+    uint8_t buf[kRb2LagSlotBytes];
+    uint32_t n = 0u;
+    bool truncated = false;
+    if (!async || verify)
+    {
+        // Same consume + remainder drain as snapshotLaggedReadback.
+        t_l2hSite = "lagf";
+        n = consumeLocalToHostBytes(buf, kRb2LagSlotBytes);
+        uint8_t drain[1024];
+        for (;;)
+        {
+            const uint32_t m = consumeLocalToHostBytes(drain, sizeof(drain));
+            if (m == 0u)
+                break;
+            truncated = true;
+            if (m < sizeof(drain))
+                break;
+        }
+        t_l2hSite = "rpc";
+    }
+    if (verify)
+    {
+        if (m_lagfVerifyBytes.size() != kLagfRing)
+            m_lagfVerifyBytes.resize(kLagfRing);
+        m_lagfVerifyBytes[ticket % kLagfRing].assign(buf, buf + (truncated ? 0u : n));
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_lagfMutex);
+        slot.ready.store(~0ull, std::memory_order_relaxed);
+        slot.async = async;
+        slot.gsTick = m_lagfGsTick;
+        slot.gsOrdinal = m_lagfGsOrdinal++;
+        if (!async)
+        {
+            slot.bytes = truncated ? 0u : n;
+            if (slot.bytes)
+                std::memcpy(slot.data, buf, slot.bytes);
+            slot.ready.store(ticket, std::memory_order_release);
+        }
+    }
+    (async ? m_lagfAsync : m_lagfFallback).fetch_add(1u, std::memory_order_relaxed);
+}
+
+void GS::lagfOnGuestVsync(uint64_t tick)
+{
+    // Worker, right after the backend's VSync (GE1 drained its back queue there,
+    // so every ticket requested before this VSync has executed).
+    if (!m_lagfVsyncSetsInit)
+    {
+        for (auto &e : m_lagfVsyncSets)
+            e = {~0ull, 0u};
+        m_lagfVsyncSetsInit = true;
+    }
+    m_lagfVsyncSets[tick % m_lagfVsyncSets.size()] = {tick, m_lagfSets};
+    m_lagfGsTick = tick;
+    m_lagfGsOrdinal = 0u;
+
+    // Fixed one-frame GPU slack, independent of L (LT1b Part 3): resolve the
+    // sets made before the previous VSync. Tying the delay to L (g-(L-2)) made a
+    // set the worker sees a tick late resolve on the very tick the EE serves it.
+    constexpr uint64_t back = 1u;
+    if (tick >= back)
+    {
+        const auto &mark = m_lagfVsyncSets[(tick - back) % m_lagfVsyncSets.size()];
+        const uint64_t hi = (mark.first == tick - back) ? mark.second : m_lagfResolved;
+        if (hi > m_lagfResolved)
+        {
+            LagfSlot *slots = lagfSlots();
+            if (m_backend)
+                m_backend->ResolveLocalToHostAsync(hi);
+            static std::atomic<uint32_t> lagfMismatchLog{0};
+            for (uint64_t t = m_lagfResolved; t < hi; ++t)
+            {
+                LagfSlot &slot = slots[t % kLagfRing];
+                if (!slot.async)
+                    continue; // published at the set
+                uint8_t buf[kRb2LagSlotBytes];
+                const uint32_t n = m_backend ? m_backend->TakeLocalToHostAsync(t, buf, sizeof(buf)) : 0u;
+                if (n == 0u)
+                    m_lagfUnresolved.fetch_add(1u, std::memory_order_relaxed);
+                if (lagfVerifyOn() && m_lagfVerifyBytes.size() == kLagfRing)
+                {
+                    const std::vector<uint8_t> &ref = m_lagfVerifyBytes[t % kLagfRing];
+                    const bool same = ref.size() == n && (n == 0u || std::memcmp(ref.data(), buf, n) == 0);
+                    m_lagfVerifyCompared.fetch_add(1u, std::memory_order_relaxed);
+                    if (!same)
+                    {
+                        m_lagfVerifyMismatch.fetch_add(1u, std::memory_order_relaxed);
+                        if (lagfMismatchLog.fetch_add(1u, std::memory_order_relaxed) < 16u)
+                        {
+                            uint32_t firstDiff = 0u;
+                            while (firstDiff < n && firstDiff < ref.size() && ref[firstDiff] == buf[firstDiff])
+                                ++firstDiff;
+                            std::ostringstream o;
+                            o << "[lagF] verify MISMATCH ticket=" << t << " gs_tick=" << slot.gsTick
+                              << " ordinal=" << slot.gsOrdinal << " sync_bytes=" << ref.size()
+                              << " async_bytes=" << n << " first_diff=" << firstDiff
+                              << " sync_head=" << lagfHead(ref.data(), static_cast<uint32_t>(ref.size()))
+                              << " async_head=" << lagfHead(buf, n);
+                            ps2_log::emitLine(o.str());
+                        }
+                    }
+                }
+                std::lock_guard<std::mutex> lock(m_lagfMutex);
+                slot.bytes = n;
+                if (n)
+                    std::memcpy(slot.data, buf, n);
+                slot.ready.store(t, std::memory_order_release);
+            }
+            m_lagfResolved = hi;
+        }
+    }
+
+    if ((tick % 300u) == 0u)
+    {
+        uint64_t spinP99 = 0u, total = 0u;
+        for (const auto &b : m_lagfSpinHist)
+            total += b.load(std::memory_order_relaxed);
+        if (total)
+        {
+            uint64_t acc = 0u;
+            for (size_t i = 0; i < m_lagfSpinHist.size(); ++i)
+            {
+                acc += m_lagfSpinHist[i].load(std::memory_order_relaxed);
+                if (acc * 100u >= total * 99u)
+                {
+                    spinP99 = (i == 0u) ? 0u : (1ull << i); // bucket upper bound, us
+                    break;
+                }
+            }
+        }
+        uint64_t be[8] = {};
+        const bool haveBe = m_backend && m_backend->LocalToHostAsyncStats(be);
+        std::ostringstream o;
+        o << "[lagF] sum tick=" << tick << " L=" << ps2_rb1_lagfFrames() << " sets=" << m_lagfSets
+          << " async=" << m_lagfAsync.load() << " fallback=" << m_lagfFallback.load()
+          << " resolved=" << m_lagfResolved << " unresolved=" << m_lagfUnresolved.load()
+          << " served=" << m_lagfServed.load() << " misses=" << m_lagfMisses.load()
+          << " timeouts=" << m_lagfTimeouts.load() << " ord_mismatch=" << m_lagfOrdMismatch.load()
+          << " fdelta=" << m_lagfFrameDelta[0].load() << "/" << m_lagfFrameDelta[1].load() << "/"
+          << m_lagfFrameDelta[2].load() << "/" << m_lagfFrameDelta[3].load() << "/"
+          << m_lagfFrameDelta[4].load() << "/out=" << m_lagfFrameDelta[5].load()
+          << " spin_p99_le_us=" << spinP99 << " spin_max_us=" << m_lagfSpinMaxUs.load()
+          << " verify=" << m_lagfVerifyCompared.load() << "/mismatch=" << m_lagfVerifyMismatch.load();
+        if (haveBe)
+            o << " ge1=req:" << be[0] << ",res:" << be[1] << ",take:" << be[2] << ",gpu:" << be[3]
+              << ",mem:" << be[4] << ",fence_wait:" << be[5] << ",env_mismatch:" << be[6];
+        ps2_log::emitLine(o.str());
+    }
+}
+
+uint32_t GS::serveLagFrameReadback(uint8_t *dst, uint32_t maxBytes, uint64_t eeTick, LagfServeInfo &info)
+{
+    // EE thread. Key: (eeTick, ordinal since that tick's first probe).
+    info = {};
+    const uint64_t lag = ps2_rb1_lagfFrames();
+    if (eeTick < m_lagfLastEeTick)
+        m_lagfEe.fill(LagfEeFrame{}); // savestate load to an earlier tick
+    m_lagfLastEeTick = eeTick;
+    LagfEeFrame &cur = m_lagfEe[eeTick % m_lagfEe.size()];
+    if (cur.tick != eeTick)
+        cur = LagfEeFrame{eeTick, m_lagfServes, 0u};
+    info.ordinal = cur.count++;
+    ++m_lagfServes;
+    bool have = false;
+    if (eeTick >= lag)
+    {
+        info.srcTick = eeTick - lag;
+        const LagfEeFrame &src = m_lagfEe[info.srcTick % m_lagfEe.size()];
+        if (src.tick == info.srcTick && info.ordinal < src.count)
+        {
+            info.ticket = src.start + info.ordinal;
+            have = true;
+        }
+    }
+    if (!have)
+    {
+        info.miss = true;
+        m_lagfMisses.fetch_add(1u, std::memory_order_relaxed);
+        return 0u;
+    }
+
+    LagfSlot *slots = lagfSlots();
+    LagfSlot &slot = slots[info.ticket % kLagfRing];
+    // The ticket was set >= L frames ago and resolves at a fixed GS VSync, so the
+    // spin is ~0 unless the worker runs > L-2 frames behind. Hang-guard only.
+    static constexpr uint64_t kLagfServeTimeoutUs = 500000u;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (uint64_t i = 0u;; ++i)
+    {
+        if (slot.ready.load(std::memory_order_acquire) == info.ticket)
+            break;
+        if ((i & 1023u) == 1023u)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            info.spinUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(now - t0).count());
+            if (info.spinUs >= kLagfServeTimeoutUs)
+            {
+                info.timedOut = true;
+                m_lagfTimeouts.fetch_add(1u, std::memory_order_relaxed);
+                std::ostringstream o;
+                o << "[lagF] serve ticket=" << info.ticket << " TIMEOUT (sets=" << m_lagfSets
+                  << " ready=" << slot.ready.load(std::memory_order_relaxed) << ")";
+                ps2_log::emitLine(o.str());
+                return 0u;
+            }
+            std::this_thread::yield();
+        }
+    }
+    info.spinUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - t0)
+                                            .count());
+    {
+        size_t b = 0u;
+        while (b + 1u < m_lagfSpinHist.size() && (1ull << b) <= info.spinUs)
+            ++b;
+        m_lagfSpinHist[b].fetch_add(1u, std::memory_order_relaxed);
+        uint64_t prev = m_lagfSpinMaxUs.load(std::memory_order_relaxed);
+        while (info.spinUs > prev &&
+               !m_lagfSpinMaxUs.compare_exchange_weak(prev, info.spinUs, std::memory_order_relaxed))
+        {
+        }
+    }
+    std::lock_guard<std::mutex> lock(m_lagfMutex);
+    if (slot.ready.load(std::memory_order_relaxed) != info.ticket)
+    {
+        m_lagfTimeouts.fetch_add(1u, std::memory_order_relaxed); // overwritten (ring wrap): never expected
+        return 0u;
+    }
+    if (slot.gsOrdinal != info.ordinal)
+        m_lagfOrdMismatch.fetch_add(1u, std::memory_order_relaxed);
+    const int64_t delta = static_cast<int64_t>(info.srcTick) - static_cast<int64_t>(slot.gsTick);
+    m_lagfFrameDelta[(delta >= -2 && delta <= 2) ? static_cast<size_t>(delta + 2) : 5u].fetch_add(
+        1u, std::memory_order_relaxed);
+    const uint32_t n = (slot.bytes < maxBytes) ? slot.bytes : maxBytes;
+    if (dst && n)
+        std::memcpy(dst, slot.data, n);
+    m_lagfServed.fetch_add(1u, std::memory_order_relaxed);
+    return n;
 }
 
 void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 {
     if (!backend)
         backend = std::make_unique<GSCpuBackend>();
+
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::SetBackend;
+        cmd.backend = std::move(backend);
+        cmd.rpc = std::make_shared<GsRpcBase>();
+        std::shared_ptr<GsRpcBase> rpc = cmd.rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return;
+    }
 
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
@@ -1659,16 +3230,51 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
 
     m_backend = std::move(backend);
     m_backend->Initialize(m_localMemoryStorage, m_localMemorySize);
+    m_rawGifBackend.store(m_backend->WantsRawGif(), std::memory_order_release);
+    m_minimalGifDecode.store(m_backend->WantsMinimalGifDecode(), std::memory_order_release);
+    m_wantsGuestVsync.store(m_backend->WantsGuestVsync(), std::memory_order_release);
+    m_wantsPrivMirror.store(m_backend->WantsPrivMirror(), std::memory_order_release);
 }
 
 uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::ReadVram;
+        cmd.u32a = psm;
+        cmd.u32b = base;
+        cmd.u32c = bw;
+        cmd.u32d = x;
+        cmd.u32e = y;
+        auto rpc = std::make_shared<GsRpc<uint32_t>>();
+        cmd.rpc = rpc;
+        m_worker->enqueue(std::move(cmd));
+        rpc->wait();
+        return rpc->result;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     return m_backend ? m_backend->ReadVram(psm, base, bw, x, y) : 0u;
 }
 
 void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
 {
+    if (m_worker && !t_inGsWorker)
+    {
+        // Fire-and-forget keeps stream order; any later RPC (ReadVram,
+        // present, consume) fences it. Direct readers of VRAM bytes all go
+        // through RPCs, so no caller can observe the write early or late.
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::WriteVram;
+        cmd.u32a = psm;
+        cmd.u32b = base;
+        cmd.u32c = bw;
+        cmd.u32d = x;
+        cmd.u32e = y;
+        cmd.regValue = value;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     if (m_backend)
         m_backend->WriteVram(psm, base, bw, x, y, value);
@@ -1732,4 +3338,11 @@ void GS::updatePreferredDisplaySourceForDraw(const GSPrimitiveBatch &batch)
         m_preferredDisplayDestFbp = ctx.frame.fbp;
         m_hasPreferredDisplaySource = true;
     }
+}
+
+// MQ2: EE-side FINISH scan for snapshotted PATH3 pieces (same scan as the
+// unit's noteFinishTimingPcsx2).
+uint32_t ps2xGifFinishWrites(const uint8_t *data, uint32_t sizeBytes)
+{
+    return (data && sizeBytes >= 16u) ? countFinishAD(data, sizeBytes, ~0u) : 0u;
 }
