@@ -81,7 +81,13 @@ struct Ge1Api
     decltype(&ge1_gs_probe_resolve_frame) probeResolve = nullptr;
     decltype(&ge1_gs_probe_take) probeTake = nullptr;
     decltype(&ge1_gs_probe_stats) probeStats = nullptr;
-    bool probeBound() const { return probeRequest && probeResolve && probeTake; }
+    // IOSL1: same policy as the suite-pinned Ge1ProbeBindTable (stats optional).
+    bool probeBound() const
+    {
+        return ps2x_gs_external::Ge1ProbeBindTable{probeRequest, probeResolve, probeTake,
+                                                   probeStats}
+            .bound();
+    }
     // DS1: optional (pre-DS1 libraries lack them; without them a GE1-live
     // save keeps refusing, as before).
     decltype(&ge1_gs_freeze_size) freezeSize = nullptr;
@@ -107,6 +113,16 @@ struct Ge1Api
             gpuMs = ::ge1_gs_gpu_ms;
             backMs = ::ge1_gs_back_ms; // PT2 Part 2: static bind (same ABI)
             flushCaches = ::ge1_gs_flush_caches; // BG1 fold: static bind (same ABI)
+            // IOSL1: static probe bind (LT1b quartet). iOS links GE1
+            // statically, so lagF uses the linked symbols directly. Unlike
+            // the dlsym path this needs the symbols at link time (the
+            // a64c36c1 GE1 build provides them); a pre-LT1b dylib on the
+            // dlopen path still leaves them null and falls back to a sync
+            // read at the set.
+            probeRequest = ::ge1_gs_probe_request;
+            probeResolve = ::ge1_gs_probe_resolve_frame;
+            probeTake = ::ge1_gs_probe_take;
+            probeStats = ::ge1_gs_probe_stats;
             freezeSize = ::ge1_gs_freeze_size; // DS1: static bind (same ABI)
             freezeSave = ::ge1_gs_freeze_save;
             freezeLoad = ::ge1_gs_freeze_load;

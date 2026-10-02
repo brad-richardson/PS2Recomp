@@ -73,6 +73,13 @@ std::vector<uint8_t> drain(GSRasterBackend &be, uint32_t chunk = 65536u)
     return out;
 }
 
+// IOSL1: probe-bind-table stubs (LT1b signatures, no GE1 linkage: the suite
+// never links the adapter, so it pins the table policy with its own symbols).
+int probeRequestStub(uint64_t, uint64_t, uint64_t, uint64_t) { return 0; }
+int probeResolveStub(uint64_t, uint64_t) { return 0; }
+int probeTakeStub(uint64_t, uint8_t *, uint32_t) { return 0; }
+int probeStatsStub(uint64_t[8]) { return 0; }
+
 } // namespace
 
 void register_ps2_gs_external_tests()
@@ -92,6 +99,29 @@ void register_ps2_gs_external_tests()
             ::setenv("PS2X_GS_BACKEND", "external", 1);
             t.IsTrue(ps2x_gs_external::requested(), "exact match => requested");
         });
+
+        tc.Run("IOSL1 static probe bind table: request+resolve+take arm lagF, stats optional",
+               [](TestCase &t)
+               {
+                   using ps2x_gs_external::Ge1ProbeBindTable;
+                   const Ge1ProbeBindTable full{&probeRequestStub, &probeResolveStub,
+                                                &probeTakeStub, &probeStatsStub};
+                   t.IsTrue(full.bound(), "full LT1b quartet (the iOS static bind) arms async");
+                   const Ge1ProbeBindTable noStats{&probeRequestStub, &probeResolveStub,
+                                                   &probeTakeStub, nullptr};
+                   t.IsTrue(noStats.bound(), "stats is diagnostics-only; null stats still arms");
+                   const Ge1ProbeBindTable noRequest{nullptr, &probeResolveStub,
+                                                     &probeTakeStub, &probeStatsStub};
+                   t.IsFalse(noRequest.bound(), "missing request falls back to sync");
+                   const Ge1ProbeBindTable noResolve{&probeRequestStub, nullptr,
+                                                     &probeTakeStub, &probeStatsStub};
+                   t.IsFalse(noResolve.bound(), "missing resolve falls back to sync");
+                   const Ge1ProbeBindTable noTake{&probeRequestStub, &probeResolveStub,
+                                                  nullptr, &probeStatsStub};
+                   t.IsFalse(noTake.bound(), "missing take falls back to sync");
+                   const Ge1ProbeBindTable empty{};
+                   t.IsFalse(empty.bound(), "pre-LT1b table (all null) falls back to sync");
+               });
 
         tc.Run("recording counts: gif paths, vsync gaps, priv, regs", [](TestCase &t)
         {

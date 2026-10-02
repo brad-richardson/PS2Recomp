@@ -15,6 +15,7 @@
 // extracted library later replaces the inner backend behind this same shell.
 
 #include "runtime/gs/gs_backend.h"
+#include "runtime/gs/ge1_gs_api.h"
 
 #include <cstdint>
 #include <memory>
@@ -24,6 +25,19 @@ struct GSRegisters;
 
 namespace ps2x_gs_external
 {
+// IOSL1: static ("builtin") GE1 probe bind table (LT1b quartet). iOS links
+// GE1 statically, so the runtime binds the linked symbols instead of dlsym.
+// stats is diagnostics-only: the async path needs request + resolve + take.
+// Production (Ge1Api::probeBound) and the suite share this policy.
+struct Ge1ProbeBindTable
+{
+    decltype(&ge1_gs_probe_request) request = nullptr;
+    decltype(&ge1_gs_probe_resolve_frame) resolveFrame = nullptr;
+    decltype(&ge1_gs_probe_take) take = nullptr;
+    decltype(&ge1_gs_probe_stats) stats = nullptr;
+    bool bound() const { return request != nullptr && resolveFrame != nullptr && take != nullptr; }
+};
+
 // Always built (no extra linkage); true.
 bool available();
 
