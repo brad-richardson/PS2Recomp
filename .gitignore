@@ -23,3 +23,6 @@ android/app/.cxx/
 android/local.properties
 android/.gradle/ 
 .idea/
+ps2xRuntime/src/runner/sub_*.cpp
+ps2xRuntime/src/runner/ps2_recompiled_*.h
+._*
