@@ -5257,11 +5257,12 @@ namespace
         static const int mode = []
         {
             const char *value = std::getenv("PS2X_SSX3_VIS_NATIVE");
-            int m = 0;
+            // Default on (VNP1P2: exact refactor, 3 det keys IDENTICAL); 0 = the VU0 engine, check = both.
+            int m = 1;
             if (value != nullptr && std::strcmp(value, "check") == 0)
                 m = 2;
-            else if (value != nullptr && value[0] == '1')
-                m = 1;
+            else if (value != nullptr && value[0] == '0')
+                m = 0;
             if (m == 0)
                 return 0;
             const char *floatMode = std::getenv("PS2X_VU_FLOAT");
