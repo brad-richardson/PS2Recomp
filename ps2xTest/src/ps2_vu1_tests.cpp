@@ -9,6 +9,8 @@
 #include "runtime/ps2_vu1.h"
 #include "ps2_fpmode.h"
 #include "vu1_recomp_fixture.h"
+#include "runtime/ps2_savestate.h"
+#include "../../ps2xRuntime/src/lib/ps2_savestate_internal.h"
 
 #include <cmath>
 #include <cstdint>
@@ -18,6 +20,7 @@
 #include <fstream>
 #include <limits>
 #include <iostream>
+#include <new>
 #include <sstream>
 #include <vector>
 #include <algorithm>
@@ -38,6 +41,7 @@ namespace
     struct Vu0DiffStats
     {
         uint64_t runs = 0, mismatches = 0, generatedCycles = 0, haltRuns = 0;
+        uint64_t savestateCompares = 0, savestateMismatches = 0;
         uint32_t programs = 0;
     };
 
@@ -52,6 +56,9 @@ namespace
         VuState state{};
         std::vector<uint8_t> data;
         uint64_t generatedCycles = 0;
+        // VBK1: the unit's savestate bytes right after the cut: pipelines
+        // (pending writes), ready tables, sequence counters, stop flags.
+        std::vector<uint8_t> saved;
     };
 
     // mode: 0 interpreter queued (reference), 1 generated queued,
@@ -61,7 +68,15 @@ namespace
                                   const Vu0Start &start, uint32_t startPc, int mode, uint32_t budget,
                                   uint32_t check, GS &gs)
     {
-        VU0Interpreter vu;
+        // VBK1: zeroed storage, so the raw-written pipeline structs' padding
+        // is the same in every mode (their {} initializers leave it as found).
+        alignas(VU0Interpreter) unsigned char storage[sizeof(VU0Interpreter)] = {};
+        VU0Interpreter &vu = *new (storage) VU0Interpreter();
+        struct Destroy
+        {
+            VU0Interpreter &v;
+            ~Destroy() { v.~VU0Interpreter(); }
+        } destroy{vu};
         if (mode == 1 || mode == 3 || mode >= 4)
             vu.setRecompProgramForTest(generated);
         vu.setBlocksForTest(mode >= 4 ? 1 : 0);
@@ -79,6 +94,12 @@ namespace
         Vu0Snapshot snap;
         snap.data = start.data;
         vu.execute(code, PS2_VU0_CODE_SIZE, snap.data.data(), PS2_VU0_DATA_SIZE, gs, nullptr, startPc, 0u, 0u, budget);
+        if (check == 0u)
+        {
+            ps2_savestate::Writer w;
+            VuSavestate::save(vu, w);
+            snap.saved.swap(w.buf);
+        }
         if (check == 1u)
             vu.resume(code, PS2_VU0_CODE_SIZE, snap.data.data(), PS2_VU0_DATA_SIZE, gs, nullptr, 0u, 0u, 4096u);
         else if (check == 2u)
@@ -103,11 +124,32 @@ namespace
             {
                 const Vu0Snapshot ref = runVu0Once(generated, code, start, startPc, 0, budget, check, gs);
                 stats.haltRuns += ref.state.stoppedByD || ref.state.stoppedByT ? 1u : 0u;
+                // VBK1: at the cut, the whole saved unit (pending writes
+                // included) must match the interpreter with the same commit
+                // policy: queued modes 1/4 vs 0, direct modes 3/5 vs 2.
+                const Vu0Snapshot refDirect =
+                    check == 0u ? runVu0Once(generated, code, start, startPc, 2, budget, check, gs) : Vu0Snapshot{};
                 for (const int mode : modes)
                 {
                     ++stats.runs;
                     const Vu0Snapshot got = runVu0Once(generated, code, start, startPc, mode, budget, check, gs);
                     stats.generatedCycles += got.generatedCycles;
+                    if (check == 0u && mode != 2)
+                    {
+                        ++stats.savestateCompares;
+                        const Vu0Snapshot &policyRef = mode == 1 || mode == 4 ? ref : refDirect;
+                        if (got.saved != policyRef.saved)
+                        {
+                            if (++stats.savestateMismatches <= 3u)
+                            {
+                                size_t at = 0u;
+                                while (at < got.saved.size() && at < policyRef.saved.size() && got.saved[at] == policyRef.saved[at])
+                                    ++at;
+                                std::fprintf(stderr, "VBK1 VU0 savestate mismatch (%s): program pc 0x%x mode %d budget %u (%zu vs %zu bytes, first diff at %zu)\n",
+                                             label, startPc, mode, budget, policyRef.saved.size(), got.saved.size(), at);
+                            }
+                        }
+                    }
                     if (same(ref, got))
                         continue;
                     if (++stats.mismatches > 3u)
@@ -2712,11 +2754,14 @@ void register_ps2_vu1_tests()
                 if (cerrBuffer != nullptr)
                     std::cerr.rdbuf(cerrBuffer);
             }
-            std::fprintf(stderr, "[vr3-diff] vu0 images %u programs %u runs %llu generated_cycles %llu halt_runs %llu mismatches %llu\n",
+            std::fprintf(stderr, "[vr3-diff] vu0 images %u programs %u runs %llu generated_cycles %llu halt_runs %llu mismatches %llu savestate_compares %llu savestate_mismatches %llu\n",
                          vu1_fixture::kVu0ImageCount, stats.programs, static_cast<unsigned long long>(stats.runs),
                          static_cast<unsigned long long>(stats.generatedCycles),
                          static_cast<unsigned long long>(stats.haltRuns),
-                         static_cast<unsigned long long>(stats.mismatches));
+                         static_cast<unsigned long long>(stats.mismatches),
+                         static_cast<unsigned long long>(stats.savestateCompares),
+                         static_cast<unsigned long long>(stats.savestateMismatches));
+            t.Equals(stats.savestateMismatches, uint64_t{0}, "every generated mode saves the same unit as the interpreter at every cut (VBK1)");
             t.IsTrue(stats.haltRuns > 0u, "the edges image stopped on D/T bits (VBK1)");
             t.Equals(stats.mismatches, uint64_t{0}, "every VU0 mode matches the queued VU0 interpreter at every cut");
             t.IsTrue(stats.programs > 150u, "all VU0 fixture images ran");
@@ -2788,11 +2833,14 @@ void register_ps2_vu1_tests()
                     diffVu0Program("game", generated, code.data(), start, entry, maxBudget, vu0DiffModes(), gs, stats);
                 }
             }
-            std::fprintf(stderr, "[vr3-game-diff] hash %016llx entries %zu starts %u runs %llu generated_cycles %llu mismatches %llu\n",
+            std::fprintf(stderr, "[vr3-game-diff] hash %016llx entries %zu starts %u runs %llu generated_cycles %llu mismatches %llu savestate_compares %llu savestate_mismatches %llu\n",
                          static_cast<unsigned long long>(hash), entries.size(), stats.programs,
                          static_cast<unsigned long long>(stats.runs),
                          static_cast<unsigned long long>(stats.generatedCycles),
-                         static_cast<unsigned long long>(stats.mismatches));
+                         static_cast<unsigned long long>(stats.mismatches),
+                         static_cast<unsigned long long>(stats.savestateCompares),
+                         static_cast<unsigned long long>(stats.savestateMismatches));
+            t.Equals(stats.savestateMismatches, uint64_t{0}, "every generated mode saves the same unit as the interpreter on the game image (VBK1)");
             t.Equals(stats.mismatches, uint64_t{0}, "every VU0 mode matches the queued VU0 interpreter on the game image");
             t.IsTrue(stats.generatedCycles > 0u, "the generated game image ran");
         });
