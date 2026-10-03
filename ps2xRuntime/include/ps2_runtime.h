@@ -433,6 +433,11 @@ public:
 
     void executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
     void vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address);
+    // VZ1: VU0 lean entry. PS2X_VU0_LEAN_ENTRY=0 restores the exact path;
+    // default on once gated. importVu0Context takes the lean flag explicitly
+    // so the poisoned-state differential can drive both paths in one process.
+    static bool vu0LeanEntryEnabled();
+    static void importVu0Context(const R5900Context *ctx, VuState &state, bool lean);
     // E53: CTC2 to CMSAR1 starts a VU1 micro subroutine (PCSX2 VU0.cpp CTC2 -> vu1ExecMicro).
     void vu1StartMicroProgramFromEe(R5900Context *ctx, uint32_t cmsar1);
 
