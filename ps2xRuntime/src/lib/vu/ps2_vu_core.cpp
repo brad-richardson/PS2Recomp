@@ -1307,9 +1307,12 @@ void VuCore<D>::run(uint8_t *vuCode, uint32_t codeSize,
     // VU0 only; for VU1 the lookup only keys the tracked direct-commit map).
     const RecompProgram *recomp = lookupRecompProgram(vuCode, codeSize, memory);
     // VBK1: the block table (same pcs; leaders run a group of pairs per call).
-    const bool blocks = recomp != nullptr && recomp->blockPairs != nullptr &&
-                        (m_blocksOverride >= 0 ? m_blocksOverride != 0 : vu0BlocksEnabled());
-    const RecompPairFn *recompPairs = recomp != nullptr ? (blocks ? recomp->blockPairs : recomp->pairs) : nullptr;
+    // Part 2: the guarded group table (mode 2), same pcs again.
+    const int blocksMode = recomp == nullptr ? 0 : m_blocksOverride >= 0 ? m_blocksOverride : vu0BlocksMode();
+    const RecompPairFn *recompPairs = recomp == nullptr ? nullptr
+                                      : blocksMode == 2 && recomp->groupPairs != nullptr ? recomp->groupPairs
+                                      : blocksMode >= 1 && recomp->blockPairs != nullptr ? recomp->blockPairs
+                                                                                         : recomp->pairs;
     // VB1: direct commit (VU1 always; VX2 dropped PS2X_VU1_DIRECT, whose
     // default was on). VR3: VU0 behind its own knob (PS2X_VU0_DIRECT=1;
     // default off).

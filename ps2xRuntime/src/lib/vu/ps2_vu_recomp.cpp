@@ -19,6 +19,9 @@
 //   PS2X_VU0_BLOCKS=1          run the image's block table (VBK1: groups of
 //                              straight-line pairs per host function; same
 //                              per-pair semantics). 0/unset = the pair table.
+//                              2 = the guarded group table (VBK1 Part 2: the
+//                              groups' statically scheduled bodies behind an
+//                              entry guard; a failed guard runs table 1's group).
 //   PS2X_VU1_RECOMP_STATS=1    print cumulative generated/interpreted VU0
 //                              cycles (the [vu0-recomp] line).
 
@@ -93,14 +96,14 @@ bool VuCore<D>::vu0RecompEnabled()
 }
 
 template <class D>
-bool VuCore<D>::vu0BlocksEnabled()
+int VuCore<D>::vu0BlocksMode()
 {
-    static const bool enabled = []
+    static const int mode = []
     {
         const char *value = std::getenv("PS2X_VU0_BLOCKS");
-        return value != nullptr && value[0] == '1';
+        return value == nullptr ? 0 : value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0;
     }();
-    return enabled;
+    return mode;
 }
 
 template <class D>
@@ -211,11 +214,18 @@ bool VuCore<D>::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
            "    using P = VU0::Pipeline;\n"
            "    static const VU0::RecompPairFn kPairs[" << pairCount << "];\n"
            "    static const VU0::RecompPairFn kBlockPairs[" << pairCount << "];\n"
+           "    static const VU0::RecompPairFn kGroupPairs[" << pairCount << "];\n"
            "    // Chain to the next pair's function (tail call) while run()'s loop\n"
            "    // header would let it issue; otherwise return to run().\n"
            "    static bool next(VU0 &vu, VU0::RunContext &c)\n    {\n"
            "        if (!vu.recompChainReady(c))\n            return false;\n"
            "        const VU0::RecompPairFn fn = kPairs[vu.m_state.pc >> 3];\n"
+           "        if (fn == nullptr)\n            return false;\n"
+           "        PS2X_VU_MUSTTAIL return fn(vu, c);\n    }\n"
+           "    // VBK1 Part 2: next() over the guarded group table (PS2X_VU0_BLOCKS=2).\n"
+           "    static bool nextGroup(VU0 &vu, VU0::RunContext &c)\n    {\n"
+           "        if (!vu.recompChainReady(c))\n            return false;\n"
+           "        const VU0::RecompPairFn fn = kGroupPairs[vu.m_state.pc >> 3];\n"
            "        if (fn == nullptr)\n            return false;\n"
            "        PS2X_VU_MUSTTAIL return fn(vu, c);\n    }\n"
            "    // VBK1: next() over the block table (PS2X_VU0_BLOCKS=1).\n"
@@ -357,6 +367,152 @@ bool VuCore<D>::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
         }
         out << "        PS2X_VU_MUSTTAIL return nextBlock(vu, c);\n    }\n";
     }
+    // VBK1 Part 2: guarded group bodies (the VR2 stage-4 VU1 plan, applied to
+    // the groups above). Per group: a frameless guard trampoline gNNNN
+    // (recompGroupReady, else the exact group bNNNN) and the out-of-line
+    // body BNNNN. Per pair of the body:
+    //  - kNoStall: no FDIV/EFU pipeline use, no WAITQ/WAITP, and every VF/VI/
+    //    ACC lane it reads is ready by issue order alone: written in the
+    //    group at least its latency pairs earlier, or not written in the
+    //    group and the pair is >= 3 pairs in (a write issued before the
+    //    group lands within kDirectMaxLatency = 4 cycles of its issue; every
+    //    pair takes >= 1 cycle, stalls only delay issue further).
+    //  - plain tail: not a branch/jump/E-bit pair, not their delay slot, no
+    //    D/T bit (the guard rules out pending branch/E/halt state), so the
+    //    pc/branch/halt tail reduces to pc + 8.
+    //  - in-place mask (GV2's rule): the direct-map bit, no shadowed or
+    //    suppressed same-register interference, single VI at latency <= 1;
+    //    ACC always (the guard makes every write direct).
+    //  - the direct-map byte is buildDirectFlagMap of these code bytes, the
+    //    same map run() uses for tracked VU0 code.
+    // maxCycles = kDirectMaxLatency + sum(1 + worst stall): FDIV/WAITQ 13,
+    // EFU/WAITP 54, any other non-noStall pair 4 (its reads wait at most for
+    // a 4-cycle VF/VI write). Between pairs only the stop request is checked.
+    std::vector<uint8_t> directMap;
+    decoder->buildDirectFlagMap(vuCode, codeSize, directMap);
+    uint32_t guardedPairs = 0u, noStallPairs = 0u, plainTailPairs = 0u, inPlacePairs = 0u;
+    for (size_t block = 0; block < blockStarts.size(); ++block)
+    {
+        const uint32_t start = blockStarts[block];
+        const uint32_t length = blockLengths[block];
+        std::vector<DecodedInstructionPair> p(length);
+        std::vector<uint8_t> isBranch(length, 0u);
+        for (uint32_t k = 0; k < length; ++k)
+        {
+            p[k] = decoder->decodeInstructionPair(vuCode, (start + k) * 8u);
+            if (!p[k].iBit)
+            {
+                const uint8_t opHi = static_cast<uint8_t>((p[k].lower >> 25) & 0x7Fu);
+                isBranch[k] = opHi == 0x20u || opHi == 0x21u || opHi == 0x24u || opHi == 0x25u || opHi == 0x28u ||
+                              opHi == 0x29u || (opHi >= 0x2Cu && opHi <= 0x2Fu);
+            }
+        }
+        std::array<std::array<std::pair<uint32_t, uint32_t>, 4>, 32> vfWriter{};
+        std::array<std::pair<uint32_t, uint32_t>, 16> viWriter{};
+        std::array<std::pair<uint32_t, uint32_t>, 4> accWriter{};
+        uint32_t maxCycles = kDirectMaxLatency;
+        std::vector<uint8_t> noStall(length), plainTail(length);
+        std::vector<int> inPlace(length, 0);
+        for (uint32_t k = 0; k < length; ++k)
+        {
+            const DecodedInstructionPair &q = p[k];
+            const auto ready = [&](const std::pair<uint32_t, uint32_t> &w)
+            { return w.first != 0u ? k - (w.first - 1u) >= w.second : k >= 3u; };
+            bool quiet = q.lowerUsage.pipeline != PipelineFdiv && q.lowerUsage.pipeline != PipelineEfu &&
+                         !q.lowerUsage.waitQ && !q.lowerUsage.waitP;
+            for (const InstructionUsage *usage : {&q.upperUsage, &q.lowerUsage})
+            {
+                for (uint32_t r = 0; r < usage->vfReadCount; ++r)
+                    for (uint32_t c = 0; c < 4u; ++c)
+                        if ((usage->vfRead[r].lanes & laneBit(c)) != 0u)
+                            quiet = quiet && ready(vfWriter[usage->vfRead[r].reg][c]);
+                for (uint32_t v = usage->viRead & 0xFFFEu; v != 0u; v &= v - 1u)
+                    quiet = quiet && ready(viWriter[std::countr_zero(v)]);
+                for (uint32_t c = 0; c < 4u; ++c)
+                    if ((usage->accRead & laneBit(c)) != 0u)
+                        quiet = quiet && ready(accWriter[c]);
+            }
+            noStall[k] = quiet ? 1u : 0u;
+            const bool ender = isBranch[k] != 0u || q.eBit;
+            const bool slot = k > 0u && (isBranch[k - 1u] != 0u || p[k - 1u].eBit);
+            plainTail[k] = !ender && !slot && !q.dBit && !q.tBit ? 1u : 0u;
+            const uint32_t worst = quiet ? 0u
+                                   : (q.lowerUsage.pipeline == PipelineEfu || q.lowerUsage.waitP)    ? 54u
+                                   : (q.lowerUsage.pipeline == PipelineFdiv || q.lowerUsage.waitQ) ? 13u
+                                                                                                    : 4u;
+            maxCycles += 1u + worst;
+
+            const uint8_t map = directMap[start + k];
+            const bool hasUpper = q.upperUsage.vfWrite.reg != 0u;
+            const bool hasLower = q.lowerUsage.vfWrite.reg != 0u && q.suppressedLowerVf != q.lowerUsage.vfWrite.reg;
+            if (hasUpper && (map & kDirectMapUpperVf) != 0u && q.upperVfShadowReg == 0u &&
+                q.suppressedLowerVf != q.upperUsage.vfWrite.reg)
+                inPlace[k] |= kInPlaceUpperVf;
+            if (hasLower && (map & kDirectMapLowerVf) != 0u &&
+                (!hasUpper || q.lowerUsage.vfWrite.reg != q.upperUsage.vfWrite.reg))
+                inPlace[k] |= kInPlaceLowerVf;
+            if (q.upperUsage.accWrite != 0u)
+                inPlace[k] |= kInPlaceAcc;
+            const uint32_t viWrites = q.lowerUsage.viWrite & 0xFFFEu;
+            const uint32_t viLatency = q.lowerUsage.viLatency != 0u ? q.lowerUsage.viLatency : q.lowerUsage.latency;
+            if (viWrites != 0u && (viWrites & (viWrites - 1u)) == 0u && viLatency <= 1u)
+                inPlace[k] |= kInPlaceVi;
+
+            const auto markWrite = [&](const VfAccess &w, uint32_t latency)
+            {
+                for (uint32_t c = 0; c < 4u; ++c)
+                    if ((w.lanes & laneBit(c)) != 0u)
+                        vfWriter[w.reg][c] = {k + 1u, latency};
+            };
+            const VfAccess lw = q.lowerUsage.vfWrite;
+            if (lw.reg != 0u && q.suppressedLowerVf != lw.reg)
+                markWrite(lw, q.lowerUsage.vfLatency != 0u ? q.lowerUsage.vfLatency : q.lowerUsage.latency);
+            if (q.upperUsage.vfWrite.reg != 0u)
+                markWrite(q.upperUsage.vfWrite,
+                          q.upperUsage.vfLatency != 0u ? q.upperUsage.vfLatency : q.upperUsage.latency);
+            for (uint32_t v = viWrites; v != 0u; v &= v - 1u)
+                viWriter[std::countr_zero(v)] = {k + 1u, viLatency};
+            for (uint32_t c = 0; c < 4u; ++c)
+                if ((q.upperUsage.accWrite & laneBit(c)) != 0u)
+                    accWriter[c] = {k + 1u, kAccForwardLatency};
+        }
+
+        char label[16];
+        std::snprintf(label, sizeof(label), "%04x", start * 8u);
+        out << "    static bool g" << label << "(VU0 &vu, VU0::RunContext &c)\n    {\n"
+            << "        if (!vu.recompGroupReady(c, " << maxCycles << "u))\n"
+            << "            PS2X_VU_MUSTTAIL return b" << label << "(vu, c);\n"
+            << "        PS2X_VU_MUSTTAIL return B" << label << "(vu, c);\n    }\n"
+            << "    PS2X_VU_NOINLINE static bool B" << label << "(VU0 &vu, VU0::RunContext &c)\n    {\n";
+        for (uint32_t k = 0; k < length; ++k)
+        {
+            char pairLabel[16];
+            std::snprintf(pairLabel, sizeof(pairLabel), "%04x", (start + k) * 8u);
+            out << "        if (vu.issuePair<true, " << unsigned(directMap[start + k]) << ", "
+                << (noStall[k] != 0u) << ", 0x" << std::hex << codeSize << std::dec << "u, "
+                << (plainTail[k] != 0u) << ", -1, " << inPlace[k] << ">(d" << pairLabel << ", c";
+            if (plainTail[k] != 0u)
+                out << ", 0x" << std::hex << (((start + k) * 8u + 8u) & (codeSize - 1u)) << std::dec << "u";
+            out << "))\n            return true;\n";
+            if (k + 1u < length)
+                out << "        if (!vu.recompChainReady(c))\n            return false;\n";
+            ++guardedPairs;
+            noStallPairs += noStall[k];
+            plainTailPairs += plainTail[k];
+            inPlacePairs += inPlace[k] != 0 ? 1u : 0u;
+        }
+        const uint32_t nextIndex = start + length;
+        if (plainTail[length - 1u] != 0u && nextIndex < pairCount && emitted[nextIndex])
+        {
+            // The next pair starts the next group (groups are maximal runs).
+            char nextLabel[16];
+            std::snprintf(nextLabel, sizeof(nextLabel), "%04x", nextIndex * 8u);
+            out << "        if (!vu.recompChainReady(c))\n            return false;\n"
+                << "        PS2X_VU_MUSTTAIL return g" << nextLabel << "(vu, c);\n    }\n";
+        }
+        else
+            out << "        PS2X_VU_MUSTTAIL return nextGroup(vu, c);\n    }\n";
+    }
     // The block summary line VU0 images always carried (no blocks).
     out << "};\n\n// VR2 stage 4: 0 blocks, 0 block pairs, 0 without a scoreboard read, 0 with a plain tail\n";
     out << "// VBK1: " << blockStarts.size() << " pair groups (sizes";
@@ -364,6 +520,9 @@ bool VuCore<D>::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
         if (histogram[length] != 0u)
             out << " " << length << "x" << histogram[length];
     out << ")\n";
+    out << "// VBK1 Part 2: " << blockStarts.size() << " guarded groups, " << guardedPairs << " pairs, " << noStallPairs
+        << " without a scoreboard read, " << plainTailPairs << " with a plain tail, " << inPlacePairs
+        << " with an in-place commit\n";
     out << "const VU0::RecompPairFn " << image << "::kPairs[" << pairCount << "] = {\n";
     for (uint32_t index = 0; index < pairCount; ++index)
     {
@@ -383,6 +542,17 @@ bool VuCore<D>::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
             << ",\n";
     }
     out << "};\n\n";
+    out << "const VU0::RecompPairFn " << image << "::kGroupPairs[" << pairCount << "] = {\n";
+    for (uint32_t index = 0; index < pairCount; ++index)
+    {
+        char label[16];
+        std::snprintf(label, sizeof(label), "%04x", index * 8u);
+        out << "        "
+            << (!emitted[index] ? std::string("nullptr")
+                                : "&" + image + (blockLeader[index] ? "::g" : "::f") + label)
+            << ",\n";
+    }
+    out << "};\n\n";
     out << "namespace\n{\n    const bool kRegistered = []\n    {\n"
            "        VU0::RecompProgram program;\n"
            "        program.hash = " << hashText << ";\n"
@@ -390,6 +560,7 @@ bool VuCore<D>::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
            "        program.pairCount = " << pairCount << "u;\n"
            "        program.pairs = " << image << "::kPairs;\n"
            "        program.blockPairs = " << image << "::kBlockPairs;\n"
+           "        program.groupPairs = " << image << "::kGroupPairs;\n"
            "        VU0::registerRecompProgram(program);\n"
            "        return true;\n    }();\n}\n";
 
@@ -594,7 +765,7 @@ const uint8_t *VuCore<D>::directFlagMap(const uint8_t *vuCode, uint32_t codeSize
 
 #define PS2X_VU_RECOMP_INSTANTIATE(U)                                                              \
     template bool VuCore<U>::vu0RecompEnabled();                                                   \
-    template bool VuCore<U>::vu0BlocksEnabled();                                                   \
+    template int VuCore<U>::vu0BlocksMode();                                                       \
     template void VuCore<U>::registerRecompProgram(const RecompProgram &);                         \
     template const VuCore<U>::RecompProgram *VuCore<U>::findRecompProgram(uint64_t);               \
     template const VuCore<U>::RecompProgram *VuCore<U>::lookupRecompProgram(const uint8_t *, uint32_t, \

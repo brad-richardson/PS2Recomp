@@ -195,6 +195,10 @@ PS2X_VU1_ALWAYS_INLINE inline void VuCore<D>::directViWriteInPlace(uint8_t reg, 
     if (reg == 0u)
         return;
     m_viLatestWrite[reg] = ++m_nextWriteSequence;
+    // VBK1 Part 2: the executors leave a VI result untruncated (IADDIU can
+    // reach 0x7FFF + 0x7FFF); directViWrite stores it as int16, so the
+    // in-place commit must too (the VU0 fixtures caught 38237 vs -27299).
+    m_state.vi[reg] = static_cast<int16_t>(m_state.vi[reg]);
     noteDirect(m_cycle + latency);
 }
 
@@ -578,6 +582,28 @@ template <class D>
 PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::recompChainReady(RunContext &)
 {
     return !m_stopRequested;
+}
+
+// VBK1 Part 2 (the VR2 stage-4 guard, now for VU0 groups): a guarded group's
+// body issues its pairs with kBlock (no budget checks, every write direct,
+// the emitter's direct-map byte), kNoStall where the emitter proved every read
+// ready, in-place commits and plain pc tails. That is exact when, at entry:
+// direct commit is on for this run (the per-pair direct test's first half),
+// no branch, E-bit or halt is pending (the group starts a pc sequence; a
+// leader reached as a delay slot fails here), and maxCycles (the emitter's
+// bound: every stall, every issue and the last direct landing) fits before
+// budgetEnd, so no budget cut and no direct-commit refusal can fall inside.
+template <class D>
+PS2X_VU1_ALWAYS_INLINE inline bool VuCore<D>::recompGroupReady(const RunContext &ctx, uint32_t maxCycles)
+{
+    if (!m_directRunOk || m_state.branchPending || m_state.ebit || m_state.haltAfterDelaySlot ||
+        m_cycle + maxCycles > ctx.budgetEnd)
+    {
+        ++m_groupMisses;
+        return false;
+    }
+    ++m_groupEntries;
+    return true;
 }
 
 #endif
