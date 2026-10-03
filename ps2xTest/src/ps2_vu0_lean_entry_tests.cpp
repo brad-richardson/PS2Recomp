@@ -3,6 +3,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_savestate.h"
+#include <new>
 #include "runtime/ps2_vu0.h"
 #include "runtime/ps2_vu_state.h"
 #include "../../ps2xRuntime/src/lib/ps2_savestate_internal.h"
@@ -296,7 +297,20 @@ void register_ps2_vu0_lean_entry_tests()
                     poisonState(leanImport);
                     PS2Runtime::importVu0Context(&ctx, exactImport, false);
                     PS2Runtime::importVu0Context(&ctx, leanImport, true);
-                    VU0Interpreter refVu, gotVu;
+                    // VBK1: VuSavestate writes the pipeline structs raw (w.pod),
+                    // padding included, and their {} member initializers do not
+                    // zero padding, so two stack-constructed units can save
+                    // different padding bytes (m_fdiv: 17 bytes of fields in 24).
+                    // Construct both in zeroed storage so only real state differs.
+                    alignas(VU0Interpreter) unsigned char refStorage[sizeof(VU0Interpreter)] = {};
+                    alignas(VU0Interpreter) unsigned char gotStorage[sizeof(VU0Interpreter)] = {};
+                    VU0Interpreter &refVu = *new (refStorage) VU0Interpreter();
+                    VU0Interpreter &gotVu = *new (gotStorage) VU0Interpreter();
+                    struct Destroy
+                    {
+                        VU0Interpreter &a, &b;
+                        ~Destroy() { a.~VU0Interpreter(); b.~VU0Interpreter(); }
+                    } destroy{refVu, gotVu};
                     std::memcpy(&refVu.state(), &exactImport, sizeof(VuState));
                     std::memcpy(&gotVu.state(), &leanImport, sizeof(VuState));
                     std::vector<uint8_t> refData = data, gotData = data;
@@ -310,8 +324,13 @@ void register_ps2_vu0_lean_entry_tests()
                     if (refW.buf != gotW.buf)
                     {
                         if (++mismatches <= 3u)
-                            std::fprintf(stderr, "[vz1] savestate mismatch image %u pc 0x%x (%zu vs %zu bytes)\n",
-                                         image, prog.startPc, refW.buf.size(), gotW.buf.size());
+                        {
+                            size_t at = 0u;
+                            while (at < refW.buf.size() && at < gotW.buf.size() && refW.buf[at] == gotW.buf[at])
+                                ++at;
+                            std::fprintf(stderr, "[vz1] savestate mismatch image %u pc 0x%x (%zu vs %zu bytes, first diff at %zu)\n",
+                                         image, prog.startPc, refW.buf.size(), gotW.buf.size(), at);
+                        }
                         continue;
                     }
                     // Continuation: the runtime's only VU0 continuation is a

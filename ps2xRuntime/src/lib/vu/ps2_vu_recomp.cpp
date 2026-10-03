@@ -16,6 +16,9 @@
 //   PS2X_VU0_RECOMP_DUMP=<dir> write <dir>/vu0e_<hash>.cpp for each VU0 image
 //                              without generated code (game-derived: keep it
 //                              outside the repo).
+//   PS2X_VU0_BLOCKS=1          run the image's block table (VBK1: groups of
+//                              straight-line pairs per host function; same
+//                              per-pair semantics). 0/unset = the pair table.
 //   PS2X_VU1_RECOMP_STATS=1    print cumulative generated/interpreted VU0
 //                              cycles (the [vu0-recomp] line).
 
@@ -84,6 +87,17 @@ bool VuCore<D>::vu0RecompEnabled()
     static const bool enabled = []
     {
         const char *value = std::getenv("PS2X_VU0_RECOMP");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+template <class D>
+bool VuCore<D>::vu0BlocksEnabled()
+{
+    static const bool enabled = []
+    {
+        const char *value = std::getenv("PS2X_VU0_BLOCKS");
         return value != nullptr && value[0] == '1';
     }();
     return enabled;
@@ -196,11 +210,18 @@ bool VuCore<D>::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
            "    using U = VU0::InstructionUsage;\n"
            "    using P = VU0::Pipeline;\n"
            "    static const VU0::RecompPairFn kPairs[" << pairCount << "];\n"
+           "    static const VU0::RecompPairFn kBlockPairs[" << pairCount << "];\n"
            "    // Chain to the next pair's function (tail call) while run()'s loop\n"
            "    // header would let it issue; otherwise return to run().\n"
            "    static bool next(VU0 &vu, VU0::RunContext &c)\n    {\n"
            "        if (!vu.recompChainReady(c))\n            return false;\n"
            "        const VU0::RecompPairFn fn = kPairs[vu.m_state.pc >> 3];\n"
+           "        if (fn == nullptr)\n            return false;\n"
+           "        PS2X_VU_MUSTTAIL return fn(vu, c);\n    }\n"
+           "    // VBK1: next() over the block table (PS2X_VU0_BLOCKS=1).\n"
+           "    static bool nextBlock(VU0 &vu, VU0::RunContext &c)\n    {\n"
+           "        if (!vu.recompChainReady(c))\n            return false;\n"
+           "        const VU0::RecompPairFn fn = kBlockPairs[vu.m_state.pc >> 3];\n"
            "        if (fn == nullptr)\n            return false;\n"
            "        PS2X_VU_MUSTTAIL return fn(vu, c);\n    }\n";
     std::vector<bool> emitted(pairCount, false);
@@ -244,8 +265,105 @@ bool VuCore<D>::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
             // and overflows small stacks (Odin S1: 512 nested f-frames).
             << "        PS2X_VU_MUSTTAIL return next(vu, c);\n    }\n";
     }
+    // VBK1: block functions. A block is a run of up to kVu0BlockMaxPairs
+    // emitted pairs that starts at a leader: pc 0, a static branch target,
+    // the pair after a branch's or E-bit pair's delay slot, the pair after a
+    // D/T-bit pair, a pair after a reserved one, or the pair after a full
+    // block. Each pair keeps its pair function's exact step (the same
+    // issuePair call); between pairs the block re-checks what next() checks
+    // (the stop request) plus that the pc is the next pair's, and otherwise
+    // leaves through the block table, so the leader choice only affects
+    // speed. Non-leaders in the block table are the pair functions, which
+    // chain over the pair table until run() is re-entered.
+    std::vector<bool> leader(pairCount, false);
+    {
+        const auto mark = [&](uint32_t index)
+        {
+            if (index < pairCount)
+                leader[index] = true;
+        };
+        mark(0u);
+        for (uint32_t index = 0; index < pairCount; ++index)
+        {
+            const DecodedInstructionPair d = decoder->decodeInstructionPair(vuCode, index * 8u);
+            if (!emitted[index])
+            {
+                mark(index + 1u);
+                continue;
+            }
+            if (d.eBit)
+                mark(index + 2u);
+            if (d.dBit || d.tBit)
+            {
+                mark(index + 1u);
+                mark(index + 2u);
+            }
+            if (d.iBit)
+                continue;
+            const uint8_t opHi = static_cast<uint8_t>((d.lower >> 25) & 0x7Fu);
+            const bool jump = opHi == 0x24u || opHi == 0x25u;
+            const bool branch = opHi == 0x20u || opHi == 0x21u || opHi == 0x28u || opHi == 0x29u ||
+                                (opHi >= 0x2Cu && opHi <= 0x2Fu);
+            if (branch)
+            {
+                const int32_t imm = static_cast<int32_t>(d.lower << 21) >> 21;
+                mark(((index * 8u + 8u + static_cast<uint32_t>(imm * 8)) & (codeSize - 1u)) / 8u);
+            }
+            if (branch || jump)
+                mark(index + 2u);
+        }
+    }
+    constexpr uint32_t kVu0BlockMaxPairs = 16u;
+    std::vector<uint32_t> blockStarts;
+    std::vector<uint32_t> blockLengths;
+    for (uint32_t index = 0; index < pairCount;)
+    {
+        if (!emitted[index])
+        {
+            ++index;
+            continue;
+        }
+        uint32_t end = index + 1u;
+        while (end < pairCount && emitted[end] && !leader[end] && end - index < kVu0BlockMaxPairs)
+            ++end;
+        blockStarts.push_back(index);
+        blockLengths.push_back(end - index);
+        index = end;
+    }
+    std::vector<bool> blockLeader(pairCount, false);
+    uint32_t histogram[kVu0BlockMaxPairs + 1u] = {};
+    for (size_t block = 0; block < blockStarts.size(); ++block)
+    {
+        const uint32_t start = blockStarts[block];
+        const uint32_t length = blockLengths[block];
+        blockLeader[start] = true;
+        ++histogram[length];
+        char label[16];
+        std::snprintf(label, sizeof(label), "%04x", start * 8u);
+        out << "    PS2X_VU_NOINLINE static bool b" << label << "(VU0 &vu, VU0::RunContext &c)\n    {\n";
+        for (uint32_t k = 0; k < length; ++k)
+        {
+            char pairLabel[16];
+            std::snprintf(pairLabel, sizeof(pairLabel), "%04x", (start + k) * 8u);
+            out << "        if (vu.issuePair<true" << codeSizeArgs << ">(d" << pairLabel << ", c))\n"
+                << "            return true;\n";
+            if (k + 1u < length)
+            {
+                char nextPc[16];
+                std::snprintf(nextPc, sizeof(nextPc), "0x%xu", (start + k + 1u) * 8u);
+                out << "        if (!vu.recompChainReady(c) || vu.m_state.pc != " << nextPc << ")\n"
+                    << "            PS2X_VU_MUSTTAIL return nextBlock(vu, c);\n";
+            }
+        }
+        out << "        PS2X_VU_MUSTTAIL return nextBlock(vu, c);\n    }\n";
+    }
     // The block summary line VU0 images always carried (no blocks).
     out << "};\n\n// VR2 stage 4: 0 blocks, 0 block pairs, 0 without a scoreboard read, 0 with a plain tail\n";
+    out << "// VBK1: " << blockStarts.size() << " pair groups (sizes";
+    for (uint32_t length = 1; length <= kVu0BlockMaxPairs; ++length)
+        if (histogram[length] != 0u)
+            out << " " << length << "x" << histogram[length];
+    out << ")\n";
     out << "const VU0::RecompPairFn " << image << "::kPairs[" << pairCount << "] = {\n";
     for (uint32_t index = 0; index < pairCount; ++index)
     {
@@ -254,12 +372,24 @@ bool VuCore<D>::emitRecompSource(const uint8_t *vuCode, uint32_t codeSize,
         out << "        " << (!emitted[index] ? std::string("nullptr") : "&" + image + "::f" + label) << ",\n";
     }
     out << "};\n\n";
+    out << "const VU0::RecompPairFn " << image << "::kBlockPairs[" << pairCount << "] = {\n";
+    for (uint32_t index = 0; index < pairCount; ++index)
+    {
+        char label[16];
+        std::snprintf(label, sizeof(label), "%04x", index * 8u);
+        out << "        "
+            << (!emitted[index] ? std::string("nullptr")
+                                : "&" + image + (blockLeader[index] ? "::b" : "::f") + label)
+            << ",\n";
+    }
+    out << "};\n\n";
     out << "namespace\n{\n    const bool kRegistered = []\n    {\n"
            "        VU0::RecompProgram program;\n"
            "        program.hash = " << hashText << ";\n"
            "        program.codeSize = " << codeSize << "u;\n"
            "        program.pairCount = " << pairCount << "u;\n"
            "        program.pairs = " << image << "::kPairs;\n"
+           "        program.blockPairs = " << image << "::kBlockPairs;\n"
            "        VU0::registerRecompProgram(program);\n"
            "        return true;\n    }();\n}\n";
 
@@ -464,6 +594,7 @@ const uint8_t *VuCore<D>::directFlagMap(const uint8_t *vuCode, uint32_t codeSize
 
 #define PS2X_VU_RECOMP_INSTANTIATE(U)                                                              \
     template bool VuCore<U>::vu0RecompEnabled();                                                   \
+    template bool VuCore<U>::vu0BlocksEnabled();                                                   \
     template void VuCore<U>::registerRecompProgram(const RecompProgram &);                         \
     template const VuCore<U>::RecompProgram *VuCore<U>::findRecompProgram(uint64_t);               \
     template const VuCore<U>::RecompProgram *VuCore<U>::lookupRecompProgram(const uint8_t *, uint32_t, \

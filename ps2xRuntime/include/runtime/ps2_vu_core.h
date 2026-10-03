@@ -109,6 +109,10 @@ public:
         uint32_t codeSize = 0;
         uint32_t pairCount = 0;
         const RecompPairFn *pairs = nullptr;
+        // VBK1: the same pcs, with each block leader running a group of
+        // straight-line pairs in one host function (PS2X_VU0_BLOCKS=1). Null
+        // in images emitted before VBK1 (they always run pairs).
+        const RecompPairFn *blockPairs = nullptr;
     };
     // One registry per unit (VX1; was one shared registry keyed by hash).
     static void registerRecompProgram(const RecompProgram &program);
@@ -124,6 +128,9 @@ public:
     // VB1: test hook for the direct-commit path: -1 follows the unit default
     // (VU1 on; VU0 PS2X_VU0_DIRECT), 0 queues every write, 1 forces it on.
     void setDirectCommitForTest(int mode) { m_directOverride = mode; }
+    // VBK1: test hook for the block table: -1 follows PS2X_VU0_BLOCKS, 0 runs
+    // the pair table, 1 the block table (when the image has one).
+    void setBlocksForTest(int mode) { m_blocksOverride = mode; }
     // VR2: test hook for generated code without a tracked PS2Memory: run this
     // registered image whenever the code size matches (null = normal lookup).
     static const RecompProgram *findRecompProgram(uint64_t hash);
@@ -401,6 +408,9 @@ protected:
     // VR3: ... and whole-memory VU0 code (PS2X_VU0_RECOMP=1; default off).
     static constexpr uint32_t kRecompVu0CodeSize = 0x1000u;
     static bool vu0RecompEnabled();
+    // VBK1: PS2X_VU0_BLOCKS=1 runs an image's block table (default off).
+    static bool vu0BlocksEnabled();
+    int m_blocksOverride = -1;
     const RecompProgram *lookupRecompProgram(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory);
     const RecompProgram *m_recompProgram = nullptr;
     const RecompProgram *m_recompTestProgram = nullptr;

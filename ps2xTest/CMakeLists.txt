@@ -189,8 +189,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_link_libraries(vu1_fixture_gen PRIVATE ps2_runtime)
     set(VU1_FIXTURE_DIR ${CMAKE_CURRENT_BINARY_DIR}/vu1_fixture)
     set(VU1_FIXTURE_SOURCES)
-    # VR3: VU0 variants (vu1_recomp_fixture.h kVu0ImageCount).
-    foreach(_vu0_fixture RANGE 7)
+    # VR3: VU0 variants (vu1_recomp_fixture.h kVu0ImageCount; VBK1: 8 = edges).
+    foreach(_vu0_fixture RANGE 8)
         list(APPEND VU1_FIXTURE_SOURCES ${VU1_FIXTURE_DIR}/vu0_fixture_${_vu0_fixture}.cpp)
     endforeach()
     add_custom_command(
