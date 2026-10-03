@@ -9,7 +9,7 @@ static ps2_fh1::HookConfig hk1AllActive()
 {
     ps2_fh1::HookConfig c;
     c.mode = ps2_fh1::Mode::Events;
-    c.main = ps2_fh1::kFixAll;
+    c.main = ps2_fh1::kFixAll | ps2_fh1::kFixLift; // all plus the opt-in lift (covers every census hook)
     c.fix12 = ps2_fh1::kFix12All;
     c.guestActive = true;
     c.draw = true;
@@ -120,7 +120,10 @@ void register_ps2_fh1_hooktable_tests()
             // On-gated hooks are out while the guest flip is inactive.
             t.IsFalse(hookTableHit(hi, 0x000001u, 0x317348u), "clock tgt out");
             t.IsFalse(hookTableHit(hi, 0x230bb8u, 0x000001u), "session src out");
-            t.IsFalse(hookTableHit(hi, 0x000001u, 0x22b008u), "draw tgt out");
+            // The draw render slot stays via the tap counters (tapOn), but the
+            // draw gate sources are out while inactive.
+            t.IsFalse(hookTableHit(hi, 0x317208u, 0x000001u), "draw gate src out");
+            t.IsTrue(hookTableHit(hi, 0x000001u, 0x22b008u), "render tgt stays (tap)");
             t.IsFalse(hookTableHit(hi, 0xaaa000u, 0x000001u), "lab src out");
             // Entry/exit detection, rclock continuity and mode-agnostic taps stay.
             t.IsTrue(hookTableHit(hi, 0x3171b4u, 0x000001u), "app-update src stays");
