@@ -322,6 +322,47 @@ namespace ps2_mtvu
         inline std::atomic<std::thread::id> g_gifTid{};
         inline void workerJobDoneFromGif(); // after Worker
 
+        // MW2: PS2X_MTVU_STAGE_WAIT. park: spin kStageParkSpinNs (<= 4 us)
+        // with a CPU pause (arm64 `yield`, x86 `pause`; the clock is read
+        // every 16 polls), then the existing condvar sleep. spin (the default
+        // in this lane): today's exact path, 50 us of
+        // std::this_thread::yield() + clock reads, then the same sleep.
+        // Same wake protocol either way: every publish is a `tail`
+        // release-store + seq_cst fence followed by a notify under `m` iff
+        // `sleeping`, and the sleep sets `sleeping`, fences, and re-checks
+        // `tail` before waiting, so a publish that lands between the spin
+        // and the sleep is seen by the re-check and no wake is lost.
+        static constexpr uint64_t kStageParkSpinNs = 4000u;
+        inline bool parseStagePark(const char *e)
+        {
+            return e && std::strcmp(e, "park") == 0;
+        }
+        inline int &stageWaitMode()
+        {
+            static int v = -1; // -1 unresolved; 0 spin, 1 park (tests set it directly)
+            return v;
+        }
+        inline bool stagePark()
+        {
+            int v = stageWaitMode();
+            if (v < 0)
+            {
+                v = parseStagePark(std::getenv("PS2X_MTVU_STAGE_WAIT")) ? 1 : 0;
+                stageWaitMode() = v;
+                std::fprintf(stderr, "[mtvu] stage-wait=%s\n", v ? "park" : "spin");
+            }
+            return v != 0;
+        }
+        inline void setStageWaitForTest(int v) { stageWaitMode() = v; }
+        static inline void stageCpuPause()
+        {
+#if defined(__aarch64__) || defined(_M_ARM64)
+            __asm__ __volatile__("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+            __builtin_ia32_pause();
+#endif
+        }
+
         // Ordered SPSC ring of GifOps: producer = the MTVU thread, consumer =
         // the MTVU-GIF thread. Batched publishes (every kPublishEvery ops and
         // at JobEnd), no shared atomic per op, and a wake only when the other
@@ -361,6 +402,7 @@ namespace ps2_mtvu
             std::condition_variable cvProducer;
             std::thread th;
             bool running = false; // EE / init only
+            std::function<void()> testBeforePark; // suite hook: runs after the spin, before the sleep
             // Receipts (logged only).
             std::atomic<uint64_t> nPub{0};
             std::atomic<uint64_t> nSleeps{0};
@@ -486,17 +528,36 @@ namespace ps2_mtvu
             bool waitWork()
             {
                 const uint64_t t0 = nowNs();
-                for (;;)
+                if (stagePark())
                 {
-                    if (stop.load(std::memory_order_relaxed))
-                        return false;
-                    cTailCache = tail.load(std::memory_order_acquire);
-                    if (cTailCache != cHead)
-                        return true;
-                    if (nowNs() - t0 >= kSpinNs)
-                        break;
-                    std::this_thread::yield();
+                    for (unsigned i = 0;; ++i)
+                    {
+                        if (stop.load(std::memory_order_relaxed))
+                            return false;
+                        cTailCache = tail.load(std::memory_order_acquire);
+                        if (cTailCache != cHead)
+                            return true;
+                        if ((i & 15u) == 15u && nowNs() - t0 >= kStageParkSpinNs)
+                            break;
+                        stageCpuPause();
+                    }
                 }
+                else
+                {
+                    for (;;)
+                    {
+                        if (stop.load(std::memory_order_relaxed))
+                            return false;
+                        cTailCache = tail.load(std::memory_order_acquire);
+                        if (cTailCache != cHead)
+                            return true;
+                        if (nowNs() - t0 >= kSpinNs)
+                            break;
+                        std::this_thread::yield();
+                    }
+                }
+                if (testBeforePark)
+                    testBeforePark();
                 sleeping.store(true, std::memory_order_relaxed);
                 std::atomic_thread_fence(std::memory_order_seq_cst);
                 if (tail.load(std::memory_order_relaxed) == cHead && !stop.load(std::memory_order_relaxed))
@@ -666,6 +727,7 @@ namespace ps2_mtvu
             std::condition_variable cvProducer;
             std::thread th;       // the MTVU-VIF thread
             bool running = false; // EE / init only
+            std::function<void()> testBeforePark; // suite hook: runs after the spin, before the sleep
             std::atomic<bool> vuIn{false}; // the MTVU thread is inside vuLoop
             // Receipts (logged only).
             std::atomic<uint64_t> nPub{0};
@@ -805,17 +867,36 @@ namespace ps2_mtvu
             bool waitWork()
             {
                 const uint64_t t0 = nowNs();
-                for (;;)
+                if (stagePark())
                 {
-                    if (stop.load(std::memory_order_relaxed))
-                        return false;
-                    cTailCache = tail.load(std::memory_order_acquire);
-                    if (cTailCache != cHead)
-                        return true;
-                    if (nowNs() - t0 >= kSpinNs)
-                        break;
-                    std::this_thread::yield();
+                    for (unsigned i = 0;; ++i)
+                    {
+                        if (stop.load(std::memory_order_relaxed))
+                            return false;
+                        cTailCache = tail.load(std::memory_order_acquire);
+                        if (cTailCache != cHead)
+                            return true;
+                        if ((i & 15u) == 15u && nowNs() - t0 >= kStageParkSpinNs)
+                            break;
+                        stageCpuPause();
+                    }
                 }
+                else
+                {
+                    for (;;)
+                    {
+                        if (stop.load(std::memory_order_relaxed))
+                            return false;
+                        cTailCache = tail.load(std::memory_order_acquire);
+                        if (cTailCache != cHead)
+                            return true;
+                        if (nowNs() - t0 >= kSpinNs)
+                            break;
+                        std::this_thread::yield();
+                    }
+                }
+                if (testBeforePark)
+                    testBeforePark();
                 sleeping.store(true, std::memory_order_relaxed);
                 std::atomic_thread_fence(std::memory_order_seq_cst);
                 if (tail.load(std::memory_order_relaxed) == cHead && !stop.load(std::memory_order_relaxed))
