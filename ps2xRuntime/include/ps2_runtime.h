@@ -406,8 +406,8 @@ public:
                              GuestBranchKind kind,
                              const char *debugName);
     // DSP1: the exact dispatch path (every hook, census and diagnostic);
-    // dispatchGuestBranch hands off to it unless PS2X_EE_DISPATCH_FAST=1
-    // and the lean front proves no hook can act.
+    // dispatchGuestBranch hands off to it when PS2X_EE_DISPATCH_FAST=0 or
+    // the lean front cannot prove that no hook acts.
     bool dispatchGuestBranchFull(uint8_t *rdram,
                                  R5900Context *ctx,
                                  uint32_t targetPc,

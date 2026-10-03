@@ -1202,9 +1202,6 @@ void EeScheduler::postEvent(EeEvent event)
 // cache miss, timer service, pending/stop/deadline/slice-expiry work.
 bool EeScheduler::checkpointDueFull(uint32_t cycles) noexcept
 {
-#if PS2X_DSP1_COUNT
-    ++ps2_dsp1::g_counts.ckFull;
-#endif
     accountCycles(cycles);
     m_runningThread = currentThread();
     m_runningThreadId = m_currentThreadId;

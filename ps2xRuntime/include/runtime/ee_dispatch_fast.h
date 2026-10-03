@@ -1,7 +1,7 @@
 #pragma once
 
-// DSP1: EE branch dispatch and checkpoint fast paths, PS2X_EE_DISPATCH_FAST=1
-// (default off; exact refactor, same charges, same Count/IRQ service points,
+// DSP1: EE branch dispatch and checkpoint fast paths, PS2X_EE_DISPATCH_FAST
+// (default on; 0 = today's exact out-of-line paths; exact refactor, same charges, same Count/IRQ service points,
 // same hook calls and order, same binding reads, same resume behaviour).
 //
 // - eeCheckpointDue: knob on, the generated backward edge runs the
@@ -38,14 +38,10 @@
 #define PS2X_DSP1_ALWAYS_INLINE
 #endif
 
-#ifndef PS2X_DSP1_COUNT
-#define PS2X_DSP1_COUNT 0
-#endif
-
 namespace ps2_dsp1
 {
-// Set once at runtime construction from PS2X_EE_DISPATCH_FAST (1 = on;
-// unset/0 = the exact out-of-line paths). A plain load on every checkpoint.
+// Set once at runtime construction from PS2X_EE_DISPATCH_FAST (unset/1 = on;
+// 0 = the exact out-of-line paths). A plain load on every checkpoint.
 inline bool g_fast = false;
 // g_fast minus split120 (PS2X_SSX3_SIM_MODE=split120_render60_v1, the only
 // mode where ps2_ts2_split60::halfMode() can be true): that mode keeps the
@@ -55,36 +51,14 @@ inline bool g_fastCheckpoint = false;
 inline bool knobFromEnv() noexcept
 {
     const char *v = std::getenv("PS2X_EE_DISPATCH_FAST");
-    if (!v || !*v || std::strcmp(v, "0") == 0)
-        return false;
-    if (std::strcmp(v, "1") == 0)
+    if (!v || !*v || std::strcmp(v, "1") == 0)
         return true;
+    if (std::strcmp(v, "0") == 0)
+        return false;
     std::fprintf(stderr, "dsp1-refused PS2X_EE_DISPATCH_FAST=%s (want 0|1)\n", v);
     std::abort();
 }
 
-#if PS2X_DSP1_COUNT
-// Counting build only (diagnostic, not for speed): cumulative per-process
-// counters, printed at vsync ticks by the dispatch path.
-struct Counts
-{
-    uint64_t disp[5] = {};       // by GuestBranchKind
-    uint64_t dispEligible = 0;   // fast path would run (quiet, filter miss, function present)
-    uint64_t dispPending = 0;    // draw/spatial restore pending
-    uint64_t dispFilterTgt = 0;  // target in the hook filter
-    uint64_t dispFilterSrc = 0;  // source in the hook filter (target missed)
-    uint64_t dispNoFn = 0;       // no generated function at target
-    uint64_t dispCkTaken = 0;    // dispatch checkpoint returned true
-    uint64_t dispFh1Skip = 0;    // FH1 onBranch returned skip
-    uint64_t onBr = 0;           // ps2_fh1::onBranch calls
-    uint64_t onBrHit = 0;        // ... whose HK1 table lookup hits (chain runs)
-    uint64_t eeCk = 0;           // eeCheckpointDue calls (generated backward edges)
-    uint64_t eeCkTrue = 0;
-    uint64_t ckFull = 0;         // EeScheduler::checkpointDueFull runs (all callers)
-    uint64_t lookup = 0;         // lookupFunction calls
-};
-inline Counts g_counts;
-#endif
 } // namespace ps2_dsp1
 
 inline void PS2Runtime::markGuestUnwind() noexcept
