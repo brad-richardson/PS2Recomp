@@ -29,7 +29,10 @@ namespace ps2x::iop
 
         bool serviceActive(const detail::IopService &service) const
         {
-            return moduleManager.isLoaded(service.moduleAliases());
+            // RBF1: in HLE mode the core services route unconditionally, as
+            // before the rebase (SSX 3's tracked-only loads never enter the
+            // module manager). Emulator mode keeps the module gate.
+            return hleCoreServices || moduleManager.isLoaded(service.moduleAliases());
         }
 
         void refreshServiceModuleKeys()
@@ -86,6 +89,9 @@ namespace ps2x::iop
         std::string lastError;
         detail::IopModuleManager moduleManager;
         detail::IopEmulator emulator;
+        // RBF1: HLE-mode unconditional core-service routing (a mode, not
+        // state: reset() preserves it).
+        bool hleCoreServices = false;
     };
 
     IopSubsystem::IopSubsystem(IopHost &host)
@@ -111,8 +117,18 @@ namespace ps2x::iop
         }
         m_impl->emulator.reset();
         m_impl->refreshServiceModuleKeys();
+        // RBF1: hleCoreServices is a mode, not state: it survives the reset
+        // (SifInitRpc included) and rebuildRoutes re-applies it.
         m_impl->rebuildRoutes();
     }
+
+    void IopSubsystem::setHleCoreServices(bool hle)
+    {
+        m_impl->hleCoreServices = hle;
+        m_impl->rebuildRoutes();
+    }
+
+    bool IopSubsystem::hleCoreServices() const { return m_impl->hleCoreServices; }
 
     ModuleLoadResult IopSubsystem::loadModule(std::string_view path, const void *arguments, uint32_t argumentSize)
     {

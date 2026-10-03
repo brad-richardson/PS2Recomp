@@ -23,6 +23,17 @@ namespace ps2x::iop
 
         void reset();
 
+        // RBF1: HLE-mode routing for the core services (MCSERV, dbcman,
+        // libsd). The pre-rebase subsystem registered these unconditionally;
+        // upstream #244 gates each on its module aliases being loaded. In HLE
+        // mode SSX 3 never loads physical IRX (tracked-only loads), so the
+        // gate would leave all three routes absent. Setting this restores the
+        // old unconditional policy for HLE mode only; emulator mode keeps
+        // upstream's module-gated policy. It is a mode, not state: reset()
+        // keeps it, so SifInitRpc resets cannot drop the routes.
+        void setHleCoreServices(bool hle);
+        [[nodiscard]] bool hleCoreServices() const;
+
         [[nodiscard]] ModuleLoadResult loadModule(std::string_view path, const void *arguments = nullptr, uint32_t argumentSize = 0);
         [[nodiscard]] ModuleLoadResult loadModuleBuffer(uint32_t guestAddress, const void *arguments = nullptr, uint32_t argumentSize = 0);
         [[nodiscard]] bool stopModule(int32_t moduleId, int32_t *result = nullptr);

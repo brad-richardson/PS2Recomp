@@ -8,6 +8,7 @@
 #include "ps2_savestate_internal.h"
 
 #include "ps2_runtime.h"
+#include "runtime/ps2_vfs.h"
 #include "ps2_iop_host.h"
 #include "ps2_pad_latch.h"
 #include "ps2_snd_spike.h"
@@ -57,6 +58,10 @@ namespace ps2_savestate
         std::atomic<bool> g_hostRandUsed{false};
         std::atomic<bool> g_resumeSkip{false};
         std::string g_elfPath;
+        // RBF1: file version of the section payload currently handed to a
+        // load hook (0 outside a section load). Written by loadImpl's apply
+        // pass; read by versioned load hooks (stub:sif, syscalls).
+        uint32_t g_loadingSectionVersion = 0u;
     } // namespace
 
     bool registerSection(const std::string &key, SectionHooks hooks)
@@ -64,6 +69,18 @@ namespace ps2_savestate
         return sectionRegistry().emplace(key, hooks).second;
     }
     const std::map<std::string, SectionHooks> &registeredSections() { return sectionRegistry(); }
+
+    void setLoadingSectionVersion(uint32_t version) { g_loadingSectionVersion = version; }
+    uint32_t loadingSectionVersion() { return g_loadingSectionVersion; }
+
+    // RBF1: binds the calling runtime's VFS around a registered-section
+    // loop so the runtime-free "syscalls" section can carry the VFS
+    // descriptor counter. Unbinds on scope exit (early returns included).
+    struct VfsBindingScope
+    {
+        explicit VfsBindingScope(PS2Vfs *vfs) { PS2Vfs::setSavestateBinding(vfs); }
+        ~VfsBindingScope() { PS2Vfs::setSavestateBinding(nullptr); }
+    };
 
     bool registerCompletionFactory(uint32_t kind, CompletionFactory factory)
     {
@@ -834,6 +851,11 @@ namespace ps2_savestate
         mark = w.beginSection("gs", kGsVersion);
         w.bytes(gsw.buf.data(), gsw.buf.size());
         w.endSection(mark);
+        // RBF1: the "syscalls" section carries the VFS descriptor counter
+        // (v3+) but is runtime-free, so the calling runtime's VFS is bound
+        // for the section loop (RAII: the card-traversal early return below
+        // must not leak the binding).
+        const VfsBindingScope vfsBinding(&runtime.vfs());
         for (const auto &[key, hooks] : registeredSections())
         {
             mark = w.beginSection(key, hooks.version);
@@ -978,12 +1000,31 @@ namespace ps2_savestate
         }
 
         // Every section this build knows must be present exactly once, at
-        // this build's version.
+        // an accepted version: exactly this build's version, or within
+        // [minLoadVersion, version] for sections with a migration reader
+        // (RBF1: stub:sif and syscalls read their v1 payloads).
         std::map<std::string, uint32_t> expected = {
             {"memory", kMemoryVersion}, {"kernel", kRuntimeVersion}, {"scheduler", kSchedulerVersion},
             {"vu0", kVuVersion}, {"vu1", kVuVersion}, {"gs", kGsVersion}};
         for (const auto &[k, hooks] : registeredSections())
             expected[k] = hooks.version;
+        auto versionAccepted = [](const std::string &key, uint32_t version) {
+            const auto it = registeredSections().find(key);
+            if (it == registeredSections().end())
+                return true; // core section: exact check below covers it
+            const uint32_t min = it->second.minLoadVersion == 0u ? it->second.version : it->second.minLoadVersion;
+            return version >= min && version <= it->second.version;
+        };
+        auto versionMismatch = [](const std::string &key, uint32_t version, uint32_t current) {
+            const auto it = registeredSections().find(key);
+            if (it != registeredSections().end() && it->second.minLoadVersion != 0u)
+            {
+                const uint32_t min = it->second.minLoadVersion;
+                return "section " + key + " version " + std::to_string(version) + " outside [" +
+                       std::to_string(min) + ", " + std::to_string(current) + "]";
+            }
+            return "section " + key + " version " + std::to_string(version) + " != " + std::to_string(current);
+        };
 
         // Pass 1: validate every section frame before any state is touched,
         // so a refused file leaves the fresh machine as it was.
@@ -1000,9 +1041,9 @@ namespace ps2_savestate
                     error = "unknown section " + key + " (built without its owner?)";
                     return false;
                 }
-                if (want->second != version)
+                if (!versionAccepted(key, version))
                 {
-                    error = "section " + key + " version " + std::to_string(version) + " != " + std::to_string(want->second);
+                    error = versionMismatch(key, version, want->second);
                     return false;
                 }
                 if (seen[key])
@@ -1034,8 +1075,11 @@ namespace ps2_savestate
         // No-op when MTVU is off or idle, so boot-time loads are unaffected.
         ps2_mtvu::sync(ps2_mtvu::Reason::SaveState);
 
-        // Pass 2: apply.
+        // Pass 2: apply. The VFS is bound for the section loop (see the
+        // save path): the "syscalls" v1/v3 payloads restore its descriptor
+        // counter into the calling runtime.
         std::map<std::string, bool> loaded;
+        const VfsBindingScope vfsBinding(&runtime.vfs());
         while (r.ok() && r.pos() < r.size())
         {
             if (!r.beginSection(key, version))
@@ -1046,9 +1090,9 @@ namespace ps2_savestate
                 error = "unknown section " + key + " (built without its owner?)";
                 return false;
             }
-            if (want->second != version)
+            if (!versionAccepted(key, version))
             {
-                error = "section " + key + " version " + std::to_string(version) + " != " + std::to_string(want->second);
+                error = versionMismatch(key, version, want->second);
                 return false;
             }
             if (loaded[key])
@@ -1057,6 +1101,7 @@ namespace ps2_savestate
                 return false;
             }
             bool ok = false;
+            setLoadingSectionVersion(version);
             if (key == "memory")
                 ok = PS2RuntimeSavestate::loadMemory(runtime.memory(), r);
             else if (key == "kernel")
@@ -1076,6 +1121,7 @@ namespace ps2_savestate
             }
             else
                 ok = registeredSections().at(key).load(r);
+            setLoadingSectionVersion(0u);
             if (!ok || !r.endSection(key))
             {
                 error = "section " + key + ": " + (r.ok() ? std::string("load failed") : r.error());

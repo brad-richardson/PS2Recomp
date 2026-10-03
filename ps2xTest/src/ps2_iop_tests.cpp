@@ -71,5 +71,45 @@ void register_ps2_iop_tests()
 
         });
 
+        tc.Run("RBF1: HLE mode routes the core services without module loads, across resets", [](TestCase &t)
+        {
+            // RRV1 #2: the pre-rebase policy registered MCSERV, dbcman and
+            // libsd unconditionally. SSX 3's HLE-mode loads are tracked-only
+            // and never enter the module manager, so without this the three
+            // routes stay absent even after successful binds.
+            iop_test::Host host;
+            ps2x::iop::IopSubsystem subsystem(host);
+            subsystem.setHleCoreServices(true);
+            t.IsTrue(subsystem.hleCoreServices(), "HLE routing is on");
+
+            constexpr uint32_t kLibSdSid = 0x80000701u;
+            constexpr uint32_t kMcservSid = 0x80000400u;
+            constexpr uint32_t kDbcmanSid = 0x80001300u;
+            t.IsTrue(subsystem.canBindRpc(kLibSdSid), "libsd binds with no module loaded in HLE mode");
+            t.IsTrue(subsystem.canBindRpc(kMcservSid), "MCSERV binds with no module loaded in HLE mode");
+            t.IsTrue(subsystem.canBindRpc(kDbcmanSid), "dbcman binds with no module loaded in HLE mode");
+            for (const auto &row : subsystem.debugSnapshot().services)
+                t.IsTrue(row.active, "HLE service active without a load: " + row.name);
+
+            auto callLibSd = [&]() {
+                return subsystem.handleRpc(iop_test::request(kLibSdSid, 3u)).handled;
+            };
+            t.IsTrue(callLibSd(), "bind -> call reaches libsd in HLE mode");
+            t.Equals(host.audioCalls, 1u, "the call reaches the HLE audio contract");
+
+            subsystem.reset(); // models the SifInitRpc transport reset
+            t.IsTrue(subsystem.hleCoreServices(), "HLE routing survives the reset");
+            t.IsTrue(subsystem.canBindRpc(kLibSdSid), "libsd still binds after the reset");
+            t.IsTrue(subsystem.canBindRpc(kMcservSid), "MCSERV still binds after the reset");
+            t.IsTrue(subsystem.canBindRpc(kDbcmanSid), "dbcman still binds after the reset");
+            t.IsTrue(callLibSd(), "reset -> call still reaches libsd in HLE mode");
+            t.Equals(host.audioCalls, 2u, "the post-reset call reaches the HLE audio contract");
+
+            subsystem.setHleCoreServices(false);
+            t.IsFalse(subsystem.canBindRpc(kLibSdSid),
+                      "emulator mode keeps the module gate once HLE routing is off");
+            t.IsFalse(callLibSd(), "emulator mode without a load does not claim the SID");
+        });
+
     });
 }

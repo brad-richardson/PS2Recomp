@@ -1315,12 +1315,35 @@ namespace
     bool sifSavestateLoad(ps2_savestate::Reader &r)
     {
         using namespace ps2_stubs;
+        // RBF1: accept v1 (pre-rebase) payloads. v1 stored each command
+        // handler as one word (the function address); v2 stores
+        // {function, argument}. The old code never dispatched through a
+        // stored argument — sceSifAddCmdHandler kept only $a1 (the handler)
+        // and sceSifSendCmd never invoked handlers — so a migrated handler
+        // runs with argument 0, exactly what the old machine passed (nothing).
+        // Layout is otherwise identical, so only the handler map reads
+        // versioned; the loader stamps the file's version (1 or 2).
+        const uint32_t version = ps2_savestate::loadingSectionVersion();
+        if (version != 0u && version != 1u && version != 2u)
+            return r.fail("stub:sif loader got version");
         std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
         std::lock_guard<std::mutex> heapLock(g_sifHeapMutex);
         g_nextSifDmaTransferId = r.u32();
         ps2_savestate::readOrderedPod(r, g_sifRegs);
         ps2_savestate::readOrderedPod(r, g_sifSregs);
-        ps2_savestate::readOrderedPod(r, g_sifCmdHandlers);
+        if (version == 1u)
+        {
+            ps2_savestate::readOrdered(r, g_sifCmdHandlers, [](ps2_savestate::Reader &rr, auto &e) {
+                rr.pod(e.first);
+                const uint32_t function = rr.u32();
+                e.second.function = function;
+                e.second.argument = 0u;
+            });
+        }
+        else
+        {
+            ps2_savestate::readOrderedPod(r, g_sifCmdHandlers);
+        }
         g_sifHeapAllocations.clear();
         const uint64_t n = r.count(1u << 20);
         for (uint64_t i = 0; i < n && r.ok(); ++i)
@@ -1335,5 +1358,19 @@ namespace
         return r.ok();
     }
     const bool kSifSavestateRegistered =
-        ps2_savestate::registerSection("stub:sif", {2u, &sifSavestateSave, &sifSavestateLoad, nullptr});
+        ps2_savestate::registerSection("stub:sif", {2u, &sifSavestateSave, &sifSavestateLoad, nullptr, 1u});
+}
+
+namespace ps2_stubs
+{
+    bool sifCmdHandlerForTest(uint32_t commandId, uint32_t &function, uint32_t &argument)
+    {
+        std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
+        const auto it = g_sifCmdHandlers.find(commandId);
+        if (it == g_sifCmdHandlers.end())
+            return false;
+        function = it->second.function;
+        argument = it->second.argument;
+        return true;
+    }
 }

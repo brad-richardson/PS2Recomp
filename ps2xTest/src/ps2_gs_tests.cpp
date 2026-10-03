@@ -15,6 +15,8 @@
 #include "Stubs/Helpers/Support.h"
 #include "Stubs/GS.h"
 #include "Syscalls/System.h"
+#include "runtime/ps2_savestate.h"
+#include "../../ps2xRuntime/src/lib/ps2_savestate_internal.h"
 
 #include <atomic>
 #include <chrono>
@@ -2072,6 +2074,103 @@ void register_ps2_gs_tests()
                 t.Equals(pixel, sample.color,
                          "T4 triangle sampling should fetch the manual-layout atlas texel from the correct 128x128 page");
             }
+        });
+
+        tc.Run("RBF1: CPU-backend CLUT survives a savestate through a fresh backend", [](TestCase &t)
+        {
+            // RRV1 #3: indexed draws consume the backend's cached palette,
+            // not VRAM. A state saved after a palette load must restore that
+            // cache: a fresh backend draws with CLD=0 from the restored
+            // palette even after the backing VRAM changed.
+            constexpr uint32_t kTexTbp = 64u;
+            constexpr uint32_t kClutCbp = 128u;
+            constexpr uint64_t kTex0Base =
+                (static_cast<uint64_t>(kTexTbp) << 0) |
+                (8ull << 14) |
+                (static_cast<uint64_t>(GS_PSM_T4) << 20) |
+                (9ull << 26) |
+                (9ull << 30) |
+                (1ull << 34) |
+                (1ull << 35) |
+                (static_cast<uint64_t>(kClutCbp) << 37) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 51) |
+                (1ull << 55);
+            constexpr uint64_t kTex0Load = kTex0Base | (1ull << 61); // CLD=1: reload the palette
+            constexpr uint64_t kTex0Keep = kTex0Base;               // CLD=0: draw from the cache
+            constexpr uint64_t kFrame =
+                (0ull << 0) |
+                (1ull << 16) |
+                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
+            constexpr uint64_t kPrim =
+                static_cast<uint64_t>(GS_PRIM_TRIANGLE) |
+                (1ull << 4);
+            constexpr uint64_t kRgbaq = 0x3F80000080808080ull;
+            constexpr uint32_t kIndex = 1u;
+            constexpr uint32_t kColor = 0xFF0000FFu;
+
+            auto packSt = [](float s, float tVal) -> uint64_t {
+                uint32_t sb = 0u, tb = 0u;
+                std::memcpy(&sb, &s, sizeof(sb));
+                std::memcpy(&tb, &tVal, sizeof(tb));
+                return static_cast<uint64_t>(sb) | (static_cast<uint64_t>(tb) << 32);
+            };
+            auto drawIndexed = [&](GS &gs, uint64_t tex0) {
+                gs.writeRegister(GS_REG_FRAME_1, kFrame);
+                gs.writeRegister(GS_REG_ZBUF_1, (1ull << 32));
+                gs.writeRegister(GS_REG_SCISSOR_1, (0ull << 0) | (4ull << 16) | (0ull << 32) | (4ull << 48));
+                gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+                gs.writeRegister(GS_REG_ALPHA_1, 0ull);
+                gs.writeRegister(GS_REG_TEX0_1, tex0);
+                gs.writeRegister(GS_REG_TEX1_1, 0ull);
+                gs.writeRegister(GS_REG_PRIM, kPrim);
+                gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
+                const uint64_t st = packSt((5.0f + 0.25f) / 512.0f, (5.0f + 0.25f) / 512.0f);
+                gs.writeRegister(GS_REG_ST, st);
+                gs.writeRegister(GS_REG_XYZ2, 0ull);
+                gs.writeRegister(GS_REG_ST, st);
+                gs.writeRegister(GS_REG_XYZ2, (64ull << 0) | (0ull << 16));
+                gs.writeRegister(GS_REG_ST, st);
+                gs.writeRegister(GS_REG_XYZ2, (0ull << 0) | (64ull << 16));
+            };
+
+            std::vector<uint8_t> vram1(PS2_GS_VRAM_SIZE, 0u);
+            GS gs1;
+            gs1.init(vram1.data(), static_cast<uint32_t>(vram1.size()), nullptr);
+            writeReferencePSMT4Texel(vram1, kTexTbp, 8u, 5u, 5u, static_cast<uint8_t>(kIndex));
+            const uint32_t clutOff = referenceAddrPSMCT32(kClutCbp, 1u, kIndex, 0u);
+            std::memcpy(vram1.data() + clutOff, &kColor, sizeof(kColor));
+            drawIndexed(gs1, kTex0Load);
+            t.Equals(readReferencePSMCT32Pixel(vram1, 0u, 1u, 1u, 1u), kColor, "CLD=1 draws the loaded palette");
+
+            ps2_savestate::Writer w;
+            GSSavestate::save(gs1, w);
+
+            // A fresh backend over the restored VRAM (the memory section's
+            // job, memcpy here): without the CLUT restore the cached palette
+            // is zeros, so CLD=0 cannot reproduce the color.
+            std::vector<uint8_t> vram2 = vram1;
+            GS gs2;
+            gs2.init(vram2.data(), static_cast<uint32_t>(vram2.size()), nullptr);
+            drawIndexed(gs2, kTex0Keep);
+            t.IsTrue(readReferencePSMCT32Pixel(vram2, 0u, 1u, 1u, 1u) != kColor,
+                     "a fresh backend without the restore draws a zero palette, not the saved color");
+
+            ps2_savestate::Reader r(w.buf.data(), w.buf.size());
+            t.IsTrue(GSSavestate::load(gs2, r), "GS section loads");
+            std::fill(vram2.begin() + clutOff, vram2.begin() + clutOff + 4u, 0xAAu); // backing VRAM changed
+            drawIndexed(gs2, kTex0Keep);
+            t.Equals(readReferencePSMCT32Pixel(vram2, 0u, 1u, 1u, 1u), kColor,
+                     "after the restore, CLD=0 draws the restored palette despite changed backing VRAM");
+
+            // Backend blob edges: pre-fix empty blobs load as a zero palette,
+            // and a corrupt blob is refused.
+            GSCpuBackend backend;
+            std::vector<uint8_t> vram3(PS2_GS_VRAM_SIZE, 0u);
+            backend.Initialize(vram3.data(), static_cast<uint32_t>(vram3.size()));
+            t.IsTrue(backend.SavestateLoad(nullptr, 0u), "empty blob stays loadable (pre-fix states)");
+            const uint8_t shortBlob[7] = {0u, 1u, 2u, 3u, 4u, 5u, 6u};
+            t.IsFalse(backend.SavestateLoad(shortBlob, sizeof(shortBlob)), "truncated blob is refused");
         });
 
         tc.Run("PSMT8 address mapping matches Veronica Conv8to32 layout", [](TestCase &t)

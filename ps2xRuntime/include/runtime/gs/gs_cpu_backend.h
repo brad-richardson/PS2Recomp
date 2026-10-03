@@ -34,6 +34,13 @@ public:
     void Sync(GSSyncReason reason) override;
     PresentationFrame Present(const GSPresentationRequest &request) override;
 
+    // RBF1 (RRV1 #3): the cached CLUT contents and base latches are not in
+    // PS2Memory (LoadClut snapshots VRAM texels), so they travel in the GS
+    // section's backend blob. Restore invalidates the derived texture page
+    // cache. An empty blob (pre-fix states) loads as a zero palette.
+    void SavestateSave(std::vector<uint8_t> &out) override;
+    bool SavestateLoad(const uint8_t *data, size_t size) override;
+
     bool ClearFramebuffer(const GSContext &context, uint32_t rgba) override;
     uint32_t ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes) override;
 

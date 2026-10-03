@@ -4,7 +4,10 @@
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_savestate.h"
+#include "runtime/ps2_vfs.h"
+#include "runtime/ps2_rom_device.h"
 #include "../../ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.h"
+#include "../../ps2xRuntime/src/lib/Kernel/Stubs/SIF.h"
 #include "../../ps2xRuntime/src/lib/ps2_savestate_internal.h"
 
 #include <chrono>
@@ -764,6 +767,167 @@ void register_ps2_savestate_tests()
                 Reader r(bad.data(), bad.size());
                 t.IsTrue(!ps2_savestate::readDirTreeLenient(r, same.string(), note), "truncation refused");
             }
+            fs::remove_all(base);
+        });
+
+        tc.Run("RBF1: stub:sif v1 handlers migrate with argument 0, v2 keeps its argument", [](TestCase &t)
+        {
+            // v1 layout (pre-rebase, tag ssx3-pre-rebase-1002): u32 transfer
+            // id, regs map, sregs map, handlers as map<u32,u32>, heap allocs,
+            // heap bytes, cmd/s-cmd buffers, initialized flag.
+            ps2_stubs::resetSifState();
+            const auto &hooks = ps2_savestate::registeredSections().at("stub:sif");
+            t.Equals(hooks.version, 2u, "stub:sif still saves v2");
+            t.Equals(hooks.minLoadVersion, 1u, "stub:sif accepts v1 and v2");
+            const size_t kHeapBytes = 0x500000u; // kIopHeapLimit - kIopHeapBase (Stubs/Helpers/Support.h)
+
+            auto craftPayload = [](bool v1, uint32_t cid, uint32_t function, uint32_t argument) {
+                Writer w;
+                w.u32(9u);
+                const std::unordered_map<uint32_t, uint32_t> empty;
+                ps2_savestate::writeOrderedPod(w, empty);
+                ps2_savestate::writeOrderedPod(w, empty);
+                if (v1)
+                {
+                    std::unordered_map<uint32_t, uint32_t> handlers;
+                    handlers[cid] = function;
+                    ps2_savestate::writeOrderedPod(w, handlers);
+                }
+                else
+                {
+                    std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> handlers;
+                    handlers[cid] = {function, argument};
+                    ps2_savestate::writeOrdered(w, handlers, [](Writer &ww, const auto &e) {
+                        ww.pod(e.first);
+                        ww.u32(e.second.first);
+                        ww.u32(e.second.second);
+                    });
+                }
+                w.u64(0u);
+                const std::vector<uint8_t> heap(kHeapBytes, 0u);
+                w.bytes(heap.data(), heap.size());
+                w.u32(0u);
+                w.u32(0u);
+                w.b(false);
+                return w.buf;
+            };
+
+            { // v1: function-only handler runs with argument 0
+                const std::vector<uint8_t> payload = craftPayload(true, 7u, 0x00100400u, 0u);
+                Reader r(payload.data(), payload.size());
+                ps2_savestate::setLoadingSectionVersion(1u);
+                const bool ok = hooks.load(r);
+                ps2_savestate::setLoadingSectionVersion(0u);
+                t.IsTrue(ok && r.ok(), std::string("v1 payload loads: ") + (r.ok() ? "ok-flag" : r.error()));
+                t.IsTrue(r.pos() == r.size(), "v1 payload fully consumed");
+                uint32_t function = 0u, argument = 0u;
+                t.IsTrue(ps2_stubs::sifCmdHandlerForTest(7u, function, argument), "handler present");
+                t.Equals(function, 0x00100400u, "function address preserved");
+                t.Equals(argument, 0u, "migrated handler runs with argument 0 (the old code passed none)");
+            }
+            { // v2: {function, argument} round trips
+                const std::vector<uint8_t> payload = craftPayload(false, 11u, 0x00200800u, 0x42u);
+                Reader r(payload.data(), payload.size());
+                ps2_savestate::setLoadingSectionVersion(2u);
+                const bool ok = hooks.load(r);
+                ps2_savestate::setLoadingSectionVersion(0u);
+                t.IsTrue(ok && r.ok(), "v2 payload loads");
+                uint32_t function = 0u, argument = 0u;
+                t.IsTrue(ps2_stubs::sifCmdHandlerForTest(11u, function, argument), "handler present");
+                t.Equals(function, 0x00200800u, "v2 function preserved");
+                t.Equals(argument, 0x42u, "v2 argument preserved");
+            }
+            ps2_stubs::resetSifState();
+        });
+
+        tc.Run("RBF1: syscalls v1 resumes the VFS counter, v2 leaves it, v3 carries it", [](TestCase &t)
+        {
+            const auto &hooks = ps2_savestate::registeredSections().at("syscalls");
+            t.Equals(hooks.version, 3u, "syscalls now saves v3");
+            t.Equals(hooks.minLoadVersion, 1u, "syscalls accepts v1..v3");
+
+            PS2Vfs vfs;
+            PS2Vfs::setSavestateBinding(&vfs);
+            vfs.setNextDescriptorForSavestate(5u);
+            Writer w;
+            hooks.save(w); // v3 payload (v2 fields + trailing counter)
+            const std::vector<uint8_t> v3 = w.buf;
+            t.IsTrue(v3.size() >= 4u, "v3 payload non-empty");
+
+            // v2 = v3 without the trailing counter; v1 = v2 with the old
+            // leading g_nextFd word (pre-rebase layout: u32 + v2 fields).
+            const std::vector<uint8_t> v2(v3.begin(), v3.end() - 4u);
+            Writer pre;
+            pre.u32(7u); // the old g_nextFd value the v1 file carries
+            std::vector<uint8_t> v1 = pre.buf;
+            v1.insert(v1.end(), v2.begin(), v2.end());
+
+            { // v1: the old allocator word resumes the VFS counter
+                vfs.setNextDescriptorForSavestate(3u);
+                Reader r(v1.data(), v1.size());
+                ps2_savestate::setLoadingSectionVersion(1u);
+                const bool ok = hooks.load(r);
+                ps2_savestate::setLoadingSectionVersion(0u);
+                t.IsTrue(ok && r.ok(), "v1 payload loads");
+                t.IsTrue(r.pos() == r.size(), "v1 payload fully consumed");
+                t.Equals(vfs.nextDescriptorForSavestate(), 7u, "old g_nextFd resumes the VFS counter");
+            }
+            { // v2: no counter word, the VFS is untouched
+                vfs.setNextDescriptorForSavestate(9u);
+                Reader r(v2.data(), v2.size());
+                ps2_savestate::setLoadingSectionVersion(2u);
+                const bool ok = hooks.load(r);
+                ps2_savestate::setLoadingSectionVersion(0u);
+                t.IsTrue(ok && r.ok(), "v2 payload loads");
+                t.Equals(vfs.nextDescriptorForSavestate(), 9u, "v2 leaves the VFS counter alone");
+            }
+            { // v3: the trailing counter restores
+                vfs.setNextDescriptorForSavestate(3u);
+                Reader r(v3.data(), v3.size());
+                ps2_savestate::setLoadingSectionVersion(3u);
+                const bool ok = hooks.load(r);
+                ps2_savestate::setLoadingSectionVersion(0u);
+                t.IsTrue(ok && r.ok(), "v3 payload loads");
+                t.Equals(vfs.nextDescriptorForSavestate(), 5u, "v3 restores the saved counter");
+            }
+            PS2Vfs::setSavestateBinding(nullptr);
+        });
+
+        tc.Run("RBF1: VFS open/close/open allocates on, save/restore resumes the counter", [](TestCase &t)
+        {
+            namespace fs = std::filesystem;
+            const fs::path base = fs::temp_directory_path() / "rbf1-vfs-test";
+            fs::remove_all(base);
+            fs::create_directories(base);
+            { std::ofstream(base / "f.txt", std::ios::binary) << "bytes"; }
+            PS2VfsMounts mounts;
+            mounts.hostRoot = base;
+            const PS2RomDevice rom;
+
+            PS2Vfs vfs;
+            t.Equals(vfs.open("host:f.txt", PS2_FIO_O_RDONLY, mounts, rom), 3, "first descriptor is 3");
+            t.Equals(vfs.close(3), 0, "close succeeds");
+            t.Equals(vfs.open("host:f.txt", PS2_FIO_O_RDONLY, mounts, rom), 4, "counter advances across a close");
+            t.Equals(vfs.close(4), 0, "close succeeds");
+            t.Equals(vfs.nextDescriptorForSavestate(), 5u, "two open/close cycles leave the counter at 5");
+
+            // Save with no files open, then restore into a fresh counter: the
+            // next open must match uninterrupted execution (fd 5).
+            const auto &hooks = ps2_savestate::registeredSections().at("syscalls");
+            PS2Vfs::setSavestateBinding(&vfs);
+            Writer w;
+            hooks.save(w);
+            PS2Vfs::setSavestateBinding(nullptr);
+            vfs.setNextDescriptorForSavestate(3u); // fresh-process restore
+            PS2Vfs::setSavestateBinding(&vfs);
+            Reader r(w.buf.data(), w.buf.size());
+            ps2_savestate::setLoadingSectionVersion(3u);
+            const bool ok = hooks.load(r);
+            ps2_savestate::setLoadingSectionVersion(0u);
+            PS2Vfs::setSavestateBinding(nullptr);
+            t.IsTrue(ok && r.ok(), "section reloads");
+            t.Equals(vfs.open("host:f.txt", PS2_FIO_O_RDONLY, mounts, rom), 5, "reopen matches uninterrupted fd");
+            t.Equals(vfs.close(5), 0, "close succeeds");
             fs::remove_all(base);
         });
     });

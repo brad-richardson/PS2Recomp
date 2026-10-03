@@ -15,8 +15,8 @@ option(PS2X_DEV_NO_THINLTO "Dev builds only: skip ThinLTO IPO on the runner link
 option(PS2X_GAME_IPO "BF2: ThinLTO IPO on ps2_game_objects in Release (Android + Mac)" OFF)
 set(PS2X_ANDROID_MARCH "" CACHE STRING "BF2: Android-only -march value for the first-party runtime targets (empty = toolchain default)")
 
-option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" ON)
-option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" ON)
+option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" OFF)
+option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
 option(PS2X_ENABLE_IOP_RPC_TRACE "Log unhandled IOP/SIF RPC trace suggestions" ON)
 option(PS2X_STRICT_RETURN_DIAGNOSTICS "Route generated JR $ra returns through runtime branch diagnostics" OFF)
 option(PS2X_SHOW_WINDOWS_CONSOLE "Show a console window for ps2EntryRunner on Windows release builds" ON)
