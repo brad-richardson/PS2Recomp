@@ -1584,5 +1584,172 @@ void register_ps2_gs_queue_tests()
             t.Equals(worker.pendingCount(), 0u, "queue should drain");
             t.Equals(worker.pendingBytes(), 0u, "byte accounting should drain");
         });
+
+        // PKB1 item 1+2: no-zero-fill + pooled arbiter copies carry exactly
+        // the source bytes, in the same drain order as the exact path, across
+        // both submit shapes (direct submit and copyForSubmit+submitStaged).
+        tc.Run("PKB1 arbiter copies are byte-exact with no zero-fill", [](TestCase &t)
+        {
+            auto run = [&](bool noZeroFill, bool pooled, std::vector<std::vector<uint8_t>> &out)
+            {
+                GsPacketPool pool;
+                pool.setEnabled(pooled);
+                std::vector<std::vector<uint8_t>> seen;
+                std::vector<GifPathId> paths;
+                GifArbiter arb(
+                    [&](const uint8_t *data, uint32_t size)
+                    { seen.emplace_back(data, data + size); });
+                arb.setPacketPool(pooled ? &pool : nullptr);
+                arb.setNoZeroFill(noZeroFill);
+                // Listener records the true path per drained packet.
+                arb.setPacketListener([&](GifPathId path, uint32_t) { paths.push_back(path); });
+                const GifPathId allPaths[] = {GifPathId::Path1, GifPathId::Path2, GifPathId::Path3};
+                for (uint32_t i = 0; i < 120u; ++i)
+                {
+                    // Vary the size so pooled buffers get reused at different
+                    // lengths (stale-byte exposure if the copy were short).
+                    // Min 32: bytes 16..19 hold the embedded sequence id.
+                    const size_t size = 32u + ((i * 37u) % 5u) * 16u;
+                    std::vector<uint8_t> pkt(size);
+                    for (size_t b = 0; b < size; ++b)
+                        pkt[b] = static_cast<uint8_t>((i * 131u + b * 17u + 0x5Au) & 0xFFu);
+                    // Embed the sequence id after the tag word.
+                    uint32_t id = i;
+                    std::memcpy(pkt.data() + 16, &id, sizeof(id));
+                    const GifPathId path = allPaths[i % 3u];
+                    if ((i & 1u) == 0u)
+                        arb.submit(path, pkt.data(), static_cast<uint32_t>(pkt.size()));
+                    else
+                        arb.submitStaged(path, arb.copyForSubmit(pkt.data(), static_cast<uint32_t>(pkt.size())),
+                                         false);
+                }
+                arb.drain();
+                t.Equals(paths.size(), static_cast<size_t>(120), "every packet should drain");
+                t.Equals(seen.size(), static_cast<size_t>(120), "every packet should reach the process fn");
+                out = std::move(seen);
+                // Every drained packet must carry exactly its source bytes
+                // (bytes 16..19 hold the embedded sequence id).
+                for (size_t k = 0; k < out.size(); ++k)
+                {
+                    uint32_t id = 0;
+                    std::memcpy(&id, out[k].data() + 16, sizeof(id));
+                    const size_t wantSize = 32u + ((id * 37u) % 5u) * 16u;
+                    bool exact = out[k].size() == wantSize;
+                    for (size_t b = 0; b < out[k].size() && exact; ++b)
+                    {
+                        if (b >= 16u && b < 20u)
+                            continue; // the embedded id, checked below
+                        exact = out[k][b] == static_cast<uint8_t>((id * 131u + b * 17u + 0x5Au) & 0xFFu);
+                    }
+                    if (!exact)
+                    {
+                        t.IsTrue(false, "drained packet should carry exactly its source bytes");
+                        break;
+                    }
+                }
+                return paths;
+            };
+            std::vector<std::vector<uint8_t>> exactOut, pkbOut;
+            const std::vector<GifPathId> exactPaths = run(false, false, exactOut);
+            const std::vector<GifPathId> pkbPaths = run(true, true, pkbOut);
+            t.Equals(pkbOut.size(), exactOut.size(), "no packet lost with PKB1 copies");
+            bool same = pkbOut.size() == exactOut.size() && pkbPaths == exactPaths;
+            for (size_t k = 0; k < pkbOut.size() && same; ++k)
+                same = pkbOut[k] == exactOut[k];
+            t.IsTrue(same, "no-zero-fill pooled copies drain the same ordered bytes as the exact path");
+        });
+
+        // PKB1 item 3: tiny-queue stress. Pooled arbiter (no-zero-fill) into
+        // a GS on a 4-deep queue with batched pops + batched releases: no
+        // lost packets, FIFO kept, same digest/count/VRAM as the direct path.
+        tc.Run("PKB1 tiny-queue stress keeps every packet in order", [](TestCase &t)
+        {
+            const std::vector<std::vector<uint8_t>> pkts = {
+                makePackedTriangle(200u, 10u, 30u), makeReglistPoints(),
+                makeImageUpload(0x100u, 0u, 0u, 8u, 8u, 3u), makePackedTriangle(5u, 250u, 60u)};
+            auto run = [&](bool pkb, std::vector<uint8_t> &vramOut, uint64_t &seq, uint64_t &cmds)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GSRegisters regs{};
+                initQueueTestRegs(regs);
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+                gs.setPktSeqEnabled(true);
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+                // Both runs go through the 4-deep queue (the digest counts
+                // queued commands); the PKB1 run adds the pooled arbiter,
+                // batched pops and batched releases.
+                gs.setQueueEnabled(true, 4u); // tiny: 4 descriptors
+                GsPacketPool arbPool;
+                if (pkb)
+                {
+                    gs.setPacketPoolEnabled(true);
+                    gs.setWorkerPopBatch(GsWorker::kPopBatch);
+                    gs.setReleaseBatching(true);
+                    arbPool.setEnabled(true);
+                }
+                GifArbiter arb([&](const uint8_t *data, uint32_t size) { gs.processGIFPacket(data, size); });
+                if (pkb)
+                {
+                    arb.setPacketPool(&arbPool);
+                    arb.setNoZeroFill(true);
+                }
+                const GifPathId allPaths[] = {GifPathId::Path1, GifPathId::Path2, GifPathId::Path3};
+                for (size_t r = 0; r < 25u; ++r)
+                {
+                    for (size_t k = 0; k < pkts.size(); ++k)
+                    {
+                        const auto &pkt = pkts[k];
+                        const GifPathId path = allPaths[(r * pkts.size() + k) % 3u];
+                        if (((r + k) & 1u) == 0u)
+                            arb.submit(path, pkt.data(), static_cast<uint32_t>(pkt.size()));
+                        else
+                            arb.submitStaged(path,
+                                             arb.copyForSubmit(pkt.data(), static_cast<uint32_t>(pkt.size())),
+                                             false);
+                    }
+                    arb.drain();
+                }
+                gs.drainQueue();
+                if (pkb)
+                {
+                    t.IsTrue(gs.packetPool().pooledCount() != 0u,
+                             "pool should retain buffers after the stress");
+                }
+                seq = gs.pktSeqSnapshot();
+                cmds = gs.pktSeqSnapshotCommands();
+                vramOut = snapshotVramBytes(gs);
+            };
+            std::vector<uint8_t> vExact, vPkb;
+            uint64_t sExact = 0, sPkb = 0, cExact = 0, cPkb = 0;
+            run(false, vExact, sExact, cExact);
+            run(true, vPkb, sPkb, cPkb);
+            t.IsTrue(cExact != 0u, "digest should count commands");
+            t.Equals(cPkb, cExact, "tiny-queue PKB1 run should execute every command");
+            t.Equals(sPkb, sExact, "tiny-queue PKB1 run should give the same consumed digest");
+            t.IsTrue(vPkb == vExact, "tiny-queue PKB1 run should give the same VRAM");
+        });
+
+        // PKB1 item 3: releaseBulk returns a batch under one lock round with
+        // the same caps as release().
+        tc.Run("PKB1 releaseBulk batches under the pool caps", [](TestCase &t)
+        {
+            GsPacketPool pool;
+            std::vector<std::vector<uint8_t>> batch;
+            for (size_t i = 0; i < 10u; ++i)
+                batch.emplace_back(256u, static_cast<uint8_t>(i));
+            pool.releaseBulk(batch);
+            t.IsTrue(batch.empty(), "disabled releaseBulk should drop the batch");
+            t.Equals(pool.pooledCount(), 0u, "disabled releaseBulk should not pool");
+            pool.setEnabled(true);
+            for (size_t i = 0; i < 10u; ++i)
+                batch.emplace_back(256u, static_cast<uint8_t>(i));
+            pool.releaseBulk(batch);
+            t.IsTrue(batch.empty(), "releaseBulk should consume the batch");
+            t.Equals(pool.pooledCount(), 10u, "releaseBulk should pool every fitting buffer");
+            std::vector<uint8_t> got = pool.acquire(200u);
+            t.IsTrue(got.capacity() >= 256u, "bulk-pooled buffers should be reusable");
+            t.IsTrue(pool.pooledBytes() <= GsPacketPool::kMaxBytes, "pool should honor the byte cap");
+        });
     });
 }

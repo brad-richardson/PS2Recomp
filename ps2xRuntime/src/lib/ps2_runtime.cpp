@@ -310,6 +310,15 @@ namespace
         return env != nullptr && std::strcmp(env, "1") == 0;
     }
 
+    // PKB1: PS2X_PKB=0 restores today's exact path (zero-fill + memcpy,
+    // diet-gated pool, one-by-one pops, per-packet releases). Unset or "1"
+    // turns the three PKB1 items on. Read once, at GS setup.
+    bool pkbRequested()
+    {
+        const char *env = std::getenv("PS2X_PKB");
+        return env == nullptr || std::strcmp(env, "1") == 0;
+    }
+
     // GF1 H4: with the diet, the GS queue holds 8192 descriptors instead of
     // 1024 (the 16 MiB byte cap stays), so the unit runs ahead through the GS
     // worker's GPU waits instead of blocking. PS2X_GS_QUEUE_DESC overrides
@@ -2975,6 +2984,26 @@ bool PS2Runtime::syncCoreSubsystems()
                   << ", H4 queue descriptors=" << gsQueueDescriptors()
                    << ", H5 pooled packet buffers, H6 pop batch=" << GsWorker::kPopBatch
                    << ", MP1 lean=1 alloc-lean=1" << std::endl;
+    }
+    // PKB1 (PS2X_PKB=1, default on once gated; 0 = today's exact path):
+    // MTVU/GS packet buffer ownership. Item 1: no zero-fill before a full
+    // copy (arbiter submit + staged copy). Item 2: pooled per-packet buffers
+    // (lifetime ends at the GS worker's release; copies only, so live guest
+    // or VU memory is never aliased across its next write). Item 3: batched
+    // worker pops + batched pool releases per wake. Pure refactor: same
+    // bytes in the same order (det IDENTICAL); FIFO, RPC and JobEnd
+    // boundaries and the JobEnd/Drain/Call flush points are untouched.
+    // Independent of the diet block above (re-running its pool/pop-batch
+    // setters is idempotent).
+    if (pkbRequested())
+    {
+        m_gifArbiter.setNoZeroFill(true);
+        m_gs.setPacketPoolEnabled(true);
+        m_gifArbiter.setPacketPool(&m_gs.packetPool());
+        m_gs.setWorkerPopBatch(GsWorker::kPopBatch);
+        m_gs.setReleaseBatching(true);
+        std::cerr << "[gs:pkb] on (PS2X_PKB=1): no-zero-fill copies, pooled packet buffers, pop batch="
+                  << GsWorker::kPopBatch << ", batched releases" << std::endl;
     }
     // MP2 census: UNPACK fast-path vs fallback per format + GIF bytes per
     // path (PS2X_MP2_CENSUS=1, default off). Logged, never hashed; MTVU

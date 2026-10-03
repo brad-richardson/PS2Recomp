@@ -3,6 +3,7 @@
 #include "ps2_mtvu.h"
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -159,20 +160,46 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
     pkt.path3Image = (pathId == GifPathId::Path3) && isImagePacket(data, sizeBytes);
     if (m_pool) // GP4 H5: pooled buffer when one fits, else a fresh vector
         pkt.data = m_pool->acquire(sizeBytes);
-    pkt.data.resize(sizeBytes);
-    std::memcpy(pkt.data.data(), data, sizeBytes);
+    if (m_noZeroFill)
+    {
+        // PKB1 item 1: the copy below overwrites every byte, so skip the
+        // resize's zero-fill. assign() copies straight into the buffer
+        // (reusing pooled capacity when it fits).
+        pkt.data.assign(data, data + sizeBytes);
+#ifndef NDEBUG
+        // The buffer must hold exactly the source bytes: no stale pooled
+        // byte may survive beside or beneath the copy.
+        assert(pkt.data.size() == sizeBytes && std::memcmp(pkt.data.data(), data, sizeBytes) == 0);
+#endif
+    }
+    else
+    {
+        pkt.data.resize(sizeBytes);
+        std::memcpy(pkt.data.data(), data, sizeBytes);
+    }
     capturePacket(pathId, data, sizeBytes);
     m_queue.push_back(std::move(pkt));
 }
 
 std::vector<uint8_t> GifArbiter::copyForSubmit(const uint8_t *data, uint32_t sizeBytes) const
 {
-    // Same bytes as submit(): pooled buffer when one fits, then resize+memcpy.
+    // Same bytes as submit(): pooled buffer when one fits, then the copy.
     std::vector<uint8_t> out;
     if (m_pool)
         out = m_pool->acquire(sizeBytes);
-    out.resize(sizeBytes);
-    std::memcpy(out.data(), data, sizeBytes);
+    if (m_noZeroFill)
+    {
+        // PKB1 item 1: see submit(). assign() overwrites every byte.
+        out.assign(data, data + sizeBytes);
+#ifndef NDEBUG
+        assert(out.size() == sizeBytes && std::memcmp(out.data(), data, sizeBytes) == 0);
+#endif
+    }
+    else
+    {
+        out.resize(sizeBytes);
+        std::memcpy(out.data(), data, sizeBytes);
+    }
     return out;
 }
 
