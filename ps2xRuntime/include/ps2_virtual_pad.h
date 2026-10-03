@@ -338,7 +338,56 @@ namespace ps2x::vpad
         return std::sqrt(dx * dx + dy * dy) <= l.dpadR * 1.15f;
     }
 
-    inline PadFrame updatePad(PadState &st, const Layout &l, const TouchPoint *ts, int n)
+    // VT3 (Brad): shoulder band. A touch-down in the stick zone above the
+    // shoulder discs' bottom edge (+ half a radius margin) belongs to the
+    // nearest shoulder button, never the stick: near-misses on L1/L2 on a
+    // phone used to anchor the floating stick at the top of the screen (or
+    // go inert under an owned stick). The y-band rule (rather than a 1.6x
+    // disc) was chosen so there are no gaps: corners and the strip between
+    // the shoulders also belong to a shoulder. The stick may only start
+    // below the band. PS2X_VPAD_SHOULDER_BAND=0 restores VT1 (1.0x discs).
+    inline float shoulderBandBottom(const Layout &l)
+    {
+        float bottom = -1.0f, rmax = 0.0f;
+        for (const Button &b : l.buttons)
+        {
+            if (b.mask != kL1 && b.mask != kL2)
+                continue;
+            bottom = bottom < b.y + b.r ? b.y + b.r : bottom;
+            rmax = rmax < b.r ? b.r : rmax;
+        }
+        if (bottom < 0.0f)
+            return -1.0f; // no shoulders in the layout: no band
+        return bottom + 0.5f * rmax;
+    }
+
+    // Nearest shoulder for a band touch-down: L1/L2, plus Select/Start only
+    // if one sits up in the band (none does on the current layout).
+    inline uint16_t nearestShoulder(const Layout &l, float x, float y, float bandBottom)
+    {
+        uint16_t best = 0u;
+        float bestD2 = 0.0f;
+        for (const Button &b : l.buttons)
+        {
+            const bool shoulder = b.mask == kL1 || b.mask == kL2;
+            const bool topMenu =
+                (b.mask == kSelect || b.mask == kStart) && b.y < bandBottom;
+            if (!shoulder && !topMenu)
+                continue;
+            const float dx = x - b.x;
+            const float dy = y - b.y;
+            const float d2 = dx * dx + dy * dy;
+            if (best == 0u || d2 < bestD2)
+            {
+                best = b.mask;
+                bestD2 = d2;
+            }
+        }
+        return best;
+    }
+
+    inline PadFrame updatePad(PadState &st, const Layout &l, const TouchPoint *ts, int n,
+                              bool shoulderBand = true)
     {
         PadFrame out;
         // Drop lifted owners.
@@ -382,6 +431,21 @@ namespace ps2x::vpad
             TouchOwner o{ts[i].id, TouchClass::Inert, 0u};
             if (ts[i].x < l.stickZoneX)
             {
+                // VT3 shoulder band: above the shoulder discs (+ margin) a
+                // touch-down belongs to the nearest shoulder, never the
+                // stick, so the stick only ever starts below the band.
+                const float bandBottom = shoulderBand ? shoulderBandBottom(l) : -1.0f;
+                const uint16_t bandHit =
+                    (bandBottom >= 0.0f && ts[i].y < bandBottom)
+                        ? nearestShoulder(l, ts[i].x, ts[i].y, bandBottom)
+                        : 0u;
+                if (bandHit != 0u)
+                {
+                    o.cls = TouchClass::Button;
+                    o.mask = bandHit;
+                    st.owners.push_back(o);
+                    continue;
+                }
                 // Stick zone: buttons claim only their drawn disc (1.0x);
                 // the 1.0x-1.2x ring belongs to the stick.
                 const uint16_t hit = buttonAt(l, ts[i].x, ts[i].y, 1.0f);
@@ -422,9 +486,13 @@ namespace ps2x::vpad
                 }
             }
         }
-        // Pressed mask from owners' current positions.
-        for (const TouchOwner &o : st.owners)
+        // Pressed mask from owners' current positions. VT3 slide-on (IN3's
+        // (b)): an Inert owner whose position enters a Button-class disc
+        // becomes that Button until lift (same scale as touch-down
+        // classification: 1.0x in the stick zone, 1.2x on the right).
+        for (size_t oi = 0; oi < st.owners.size(); ++oi)
         {
+            TouchOwner &o = st.owners[oi];
             const TouchPoint *cur = nullptr;
             for (int i = 0; i < n; ++i)
             {
@@ -436,6 +504,16 @@ namespace ps2x::vpad
             }
             if (!cur)
                 continue;
+            if (shoulderBand && o.cls == TouchClass::Inert)
+            {
+                const float scale = (cur->x < l.stickZoneX) ? 1.0f : 1.2f;
+                const uint16_t slide = buttonAt(l, cur->x, cur->y, scale);
+                if (slide != 0u && !isDpad(slide) && !isFace(slide))
+                {
+                    o.cls = TouchClass::Button;
+                    o.mask = slide;
+                }
+            }
             switch (o.cls)
             {
             case TouchClass::Button:

@@ -509,5 +509,137 @@ void register_ps2_virtual_pad_tests()
             const auto w = parseTestTouches("300:0.1:0.5:5,300:0.8:0.5:5");
             n = activeTestTouchesWithIds(w, 302, 874.0f, 402.0f, ts, 0, 8);
             t.Equals(n, 2, "two overlapping auto-id touches");
-            t.IsTrue(ts[0].id != ts[1].id, "auto IDs distinct"); }); });
+            t.IsTrue(ts[0].id != ts[1].id, "auto IDs distinct"); });
+
+        tc.Run("VT3: Brad's two lost iPhone touches give L1/L2", [](TestCase &t)
+               {
+            // iPhone 16 Pro Max landscape: the layout the app builds.
+            const Layout l = makeLayout(956.0f, 440.0f);
+            const float band = shoulderBandBottom(l);
+            t.IsTrue(std::fabs(band - (0.10f * 440.0f + 0.07f * 440.0f + 0.5f * 0.07f * 440.0f)) < 1e-3f,
+                     "band = L1/L2 bottom edge + half a radius (90.2pt)");
+            // Ride 5: 137.3 s at (0.071, 0.164) held 556 ms, 193.5 s at
+            // (0.081, 0.096) held 624 ms. Both produced nothing (VT1: the
+            // first became the stick, since no stick finger was down).
+            {
+                PadState st;
+                TouchPoint p{51, 0.0711f * 956.0f, 0.1636f * 440.0f};
+                PadFrame f = updatePad(st, l, &p, 1);
+                t.Equals(static_cast<uint32_t>(f.pressed), static_cast<uint32_t>(kL2), "137.3 s touch gives L2");
+                t.IsFalse(f.stick.active, "137.3 s touch never owns the stick");
+            }
+            {
+                PadState st;
+                TouchPoint p{52, 0.0812f * 956.0f, 0.0955f * 440.0f};
+                PadFrame f = updatePad(st, l, &p, 1);
+                t.Equals(static_cast<uint32_t>(f.pressed), static_cast<uint32_t>(kL2), "193.5 s touch gives L2");
+                t.IsFalse(f.stick.active, "193.5 s touch never owns the stick");
+            }
+            // The nearby registered L1 at (0.152, 0.104) still gives L1.
+            {
+                PadState st;
+                TouchPoint p{53, 0.152f * 956.0f, 0.104f * 440.0f};
+                PadFrame f = updatePad(st, l, &p, 1);
+                t.Equals(static_cast<uint32_t>(f.pressed), static_cast<uint32_t>(kL1), "registered L1 still L1");
+            }
+            // Knob off (PS2X_VPAD_SHOULDER_BAND=0): today exactly — both
+            // lost touches anchor the stick and press nothing.
+            {
+                PadState st;
+                TouchPoint p{54, 0.0711f * 956.0f, 0.1636f * 440.0f};
+                PadFrame f = updatePad(st, l, &p, 1, false);
+                t.IsTrue(f.stick.active, "knob off: 137.3 s touch owns the stick (today)");
+                t.Equals(static_cast<uint32_t>(f.pressed), 0u, "knob off: 137.3 s touch presses nothing");
+            }
+            {
+                PadState st;
+                TouchPoint p{55, 0.0812f * 956.0f, 0.0955f * 440.0f};
+                PadFrame f = updatePad(st, l, &p, 1, false);
+                t.IsTrue(f.stick.active, "knob off: 193.5 s touch owns the stick (today)");
+                t.Equals(static_cast<uint32_t>(f.pressed), 0u, "knob off: 193.5 s touch presses nothing");
+            } });
+
+        tc.Run("VT3: stick starts below the band; second finger below band inert", [](TestCase &t)
+               {
+            const Layout l = makeLayout(956.0f, 440.0f);
+            const float band = shoulderBandBottom(l);
+            PadState st;
+            // Centre-left stick touch still gives the stick.
+            TouchPoint s{61, l.stickRestX, l.stickRestY};
+            PadFrame f = updatePad(st, l, &s, 1);
+            t.IsTrue(f.stick.active, "centre-left touch owns the stick");
+            t.Equals(static_cast<uint32_t>(f.pressed), 0u, "stick touch-down presses nothing");
+            // A second finger in the stick zone, below the band (VT1 rule).
+            TouchPoint ts[2] = {s, {62, 0.35f * 956.0f, 0.60f * 440.0f}};
+            t.IsTrue(ts[1].y > band, "second finger is below the band");
+            f = updatePad(st, l, ts, 2);
+            t.IsTrue(f.stick.active && f.stick.ax == st.stick.ax, "second finger does not steal the anchor");
+            t.Equals(static_cast<uint32_t>(f.pressed), 0u, "second finger presses nothing");
+            // Just below the band, off every disc: still the stick.
+            {
+                PadState st2;
+                TouchPoint p{63, 0.19f * 956.0f, band + 2.0f};
+                PadFrame g = updatePad(st2, l, &p, 1);
+                t.IsTrue(g.stick.active, "touch just below the band owns the stick");
+                t.Equals(static_cast<uint32_t>(g.pressed), 0u, "touch just below the band presses nothing");
+            }
+            // Same x, just above the band: the nearest shoulder (L1 here).
+            {
+                PadState st3;
+                TouchPoint p{64, 0.19f * 956.0f, band - 2.0f};
+                PadFrame g = updatePad(st3, l, &p, 1);
+                t.Equals(static_cast<uint32_t>(g.pressed), static_cast<uint32_t>(kL1), "touch just above the band gives L1");
+                t.IsFalse(g.stick.active, "band touch never owns the stick");
+            } });
+
+        tc.Run("VT3: slide-on turns an inert touch into its Button", [](TestCase &t)
+               {
+            const Layout l = makeLayout(956.0f, 440.0f);
+            const Button *l1 = nullptr, *r1 = nullptr;
+            for (const Button &b : l.buttons)
+            {
+                if (b.mask == kL1) l1 = &b;
+                if (b.mask == kR1) r1 = &b;
+            }
+            // Left: stick owned, second finger below the band slides onto L1.
+            {
+                PadState st;
+                TouchPoint ts[2] = {{71, l.stickRestX, l.stickRestY}, {72, 0.35f * 956.0f, 0.60f * 440.0f}};
+                PadFrame f = updatePad(st, l, ts, 2);
+                t.Equals(static_cast<uint32_t>(f.pressed), 0u, "second finger starts inert");
+                ts[1].x = l1->x; ts[1].y = l1->y;
+                f = updatePad(st, l, ts, 2);
+                t.Equals(static_cast<uint32_t>(f.pressed), static_cast<uint32_t>(kL1), "slide onto L1 presses L1");
+                t.IsTrue(f.stick.active, "stick survives the slide-on");
+                // Slide back off: Button stays until lift (VT1 sticky rule).
+                ts[1].x = 0.35f * 956.0f; ts[1].y = 0.60f * 440.0f;
+                f = updatePad(st, l, ts, 2);
+                t.Equals(static_cast<uint32_t>(f.pressed), static_cast<uint32_t>(kL1), "slid-on L1 stays past slide-off");
+                f = updatePad(st, l, ts, 1);
+                t.Equals(static_cast<uint32_t>(f.pressed), 0u, "lift releases the slid-on L1");
+                t.IsTrue(f.stick.active, "stick survives the L1 lift");
+            }
+            // Right: an inert touch sliding onto R1 gives R1 until lift.
+            // (700, 100) is right-side ground: clear of the D-pad disc and
+            // every 1.2x button disc on the 956x440 layout.
+            {
+                PadState st;
+                TouchPoint p{73, 700.0f, 100.0f};
+                PadFrame f = updatePad(st, l, &p, 1);
+                t.Equals(static_cast<uint32_t>(f.pressed), 0u, "off-disc right touch is inert");
+                p.x = r1->x; p.y = r1->y;
+                f = updatePad(st, l, &p, 1);
+                t.Equals(static_cast<uint32_t>(f.pressed), static_cast<uint32_t>(kR1), "slide onto R1 presses R1");
+                f = updatePad(st, l, nullptr, 0);
+                t.Equals(static_cast<uint32_t>(f.pressed), 0u, "lift releases the slid-on R1");
+            }
+            // Knob off: no slide-on (today exactly).
+            {
+                PadState st;
+                TouchPoint p{74, 700.0f, 100.0f};
+                PadFrame f = updatePad(st, l, &p, 1, false);
+                p.x = r1->x; p.y = r1->y;
+                f = updatePad(st, l, &p, 1, false);
+                t.Equals(static_cast<uint32_t>(f.pressed), 0u, "knob off: slide onto R1 stays inert");
+            } }); });
 }

@@ -6418,6 +6418,9 @@ void PS2Runtime::run()
     const std::vector<ps2x::vpad::TestTap> vpadTestTaps =
         ps2x::vpad::parseTestTap(std::getenv("PS2X_VPAD_TEST_TAP")); // DEV-ONLY
     ps2x::vpad::PadState vpadPad; // VT1: touch ownership + stick anchor, carried across frames
+    // VT3: PS2X_VPAD_SHOULDER_BAND=0 restores the VT1 hit test (1.0x discs,
+    // no shoulder band, no slide-on); unset or anything but "0" = on.
+    const bool vpadShoulderBand = ps2x::vpad::enabledFromEnv(std::getenv("PS2X_VPAD_SHOULDER_BAND"));
     float vpadTestStickX = 0.0f, vpadTestStickY = 0.0f;
     const bool vpadTestStick =
         ps2x::vpad::parseTestStick(std::getenv("PS2X_VPAD_TEST_STICK"), vpadTestStickX, vpadTestStickY); // DEV-ONLY
@@ -6751,7 +6754,8 @@ void PS2Runtime::run()
             int touches = virtualPadTouches(vpadTouches, 8, screenWidth, screenHeight);
             touches = ps2x::vpad::activeTestTouchesWithIds(vpadTestTouches, m_memory.gs().vsyncTick.load(), screenWidth,
                                                            screenHeight, vpadTouches, touches, 8);
-            ps2x::vpad::PadFrame vpadFrame = ps2x::vpad::updatePad(vpadPad, layout, vpadTouches, touches);
+            ps2x::vpad::PadFrame vpadFrame =
+                ps2x::vpad::updatePad(vpadPad, layout, vpadTouches, touches, vpadShoulderBand);
             uint16_t pressed = vpadFrame.pressed;
             // IN4: touch-source layer (transition only, zero cost off).
             ps2x::inputdiag::noteVpad(pressed, m_memory.gs().vsyncTick.load());
