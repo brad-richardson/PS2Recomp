@@ -405,6 +405,16 @@ public:
                              uint32_t fallthroughPc,
                              GuestBranchKind kind,
                              const char *debugName);
+    // DSP1: the exact dispatch path (every hook, census and diagnostic);
+    // dispatchGuestBranch hands off to it unless PS2X_EE_DISPATCH_FAST=1
+    // and the lean front proves no hook can act.
+    bool dispatchGuestBranchFull(uint8_t *rdram,
+                                 R5900Context *ctx,
+                                 uint32_t targetPc,
+                                 uint32_t sourcePc,
+                                 uint32_t fallthroughPc,
+                                 GuestBranchKind kind,
+                                 const char *debugName);
     void reportMissingFunction(uint8_t *rdram,
                                R5900Context *ctx,
                                uint32_t targetPc,
@@ -470,7 +480,15 @@ public:
     EeScheduler &eeScheduler();
     const EeScheduler &eeScheduler() const;
     void postEeEvent(EeEvent event);
-    bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
+    // DSP1: inline (runtime/ee_dispatch_fast.h); eeCheckpointDueSlow is the
+    // exact out-of-line path the knob-off build runs.
+    inline bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
+    bool eeCheckpointDueSlow(uint32_t cycles) noexcept;
+    // DSP1: ps2_guest_unwind mark/clear plus a per-runtime mirror, so the
+    // post-call check skips the thread_local read while nothing is marked.
+    inline void markGuestUnwind() noexcept;
+    inline void clearGuestUnwind() noexcept;
+    inline bool guestUnwindPending() const noexcept;
     uint32_t readEeCount(R5900Context *ctx) noexcept;
     void writeEeCount(R5900Context *ctx, uint32_t value) noexcept;
     [[noreturn]] void eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc);
@@ -582,6 +600,7 @@ private:
     VU1Interpreter m_vu1;
     R5900Context m_cpuContext;
     std::unique_ptr<EeScheduler> m_eeScheduler;
+    bool m_guestUnwindMarked = false; // DSP1: superset of ps2_guest_unwind::pending()
     mutable std::mutex m_eeKernelStateMutex;
     std::unordered_map<int, std::vector<EeExitHandlerRegistration>> m_eeExitHandlers;
     std::unordered_map<uint32_t, uint32_t> m_eeSyscallOverrides;
@@ -644,5 +663,7 @@ extern const uint32_t g_ps2RecompiledFunctionTableBase;
 extern const uint32_t g_ps2RecompiledFunctionTableEnd;
 extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
 extern PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[];
+
+#include "runtime/ee_scheduler.h" // DSP1: inline eeCheckpointDue (runtime/ee_dispatch_fast.h)
 
 #endif // PS2_RUNTIME_H

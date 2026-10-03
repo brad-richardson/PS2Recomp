@@ -631,3 +631,6 @@ private:
     EeKernelSnapshot m_snapshot;
     uint64_t m_snapshotSequence = 0;
 };
+
+// DSP1: inline eeCheckpointDue and the unwind mirror (needs EeScheduler complete).
+#include "runtime/ee_dispatch_fast.h"
