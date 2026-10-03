@@ -27,6 +27,7 @@
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_input_diag.h"
+#include "ps2_fh1_restamp.h"
 
 #include <algorithm>
 #include <array>
@@ -182,6 +183,9 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixFx = 1u << 31,       // rider effects controller P+0xb40 (0x2e1120 glint timers, 0x2e1f70 fader) + board-wake scroll 0x2ef6d0: per-update steps halved (class b/h, FH13)
     kFixClock2 = 1ull << 32, // events mode: stock-time accumulator counts the interval that ended, not the one scheduled (FH17)
     kFixHudfill = 1ull << 33, // race-HUD trick-combo fill (HUD object +0x70, 0x1ebf70/0x1ebf98 in 0x1e9a30): per-update step 1/48 -> 1/96 (class b, FH20)
+    // FH26 candidates, opt-in (not in "all"; add them as "all,stick2"):
+    kFixStick2 = 1ull << 34,    // 0x133308 bounded offset slews [0x49bc94]/[0x49bca0] (0x1340a8/0x134224): ~0.05 per update -> half (class b, FCR1 1)
+    kFixClockSign = 1ull << 35, // with clock: the 0x1e1458 stamp's exit restamp keeps the signed elapsed (FCR1 3)
 };
 
 // FH12 groups live in their own mask (the main mask's bits are taken). Same
@@ -230,16 +234,18 @@ inline uint32_t fixMask12() noexcept
         if (!enabled() || !v || !*v)
             return 0u;
         const std::string s(v);
+        const uint32_t all = kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse | kFix12Crash |
+                             kFix12FxTimer | kFix12Bounce | kFix12Particles | kFix12CrashBody | kFix12Uber | kFix12Popups |
+                             kFix12SndDt | kFix12HudProg;
         if (s == "all")
-            return kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse | kFix12Crash | kFix12FxTimer |
-                   kFix12Bounce | kFix12Particles | kFix12CrashBody | kFix12Uber | kFix12Popups | kFix12SndDt |
-                   kFix12HudProg;
+            return all;
         uint32_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
         {
             const size_t comma = s.find(',', at);
-            m |= fh12Item(s.substr(at, comma == std::string::npos ? std::string::npos : comma - at));
+            const std::string item = s.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+            m |= item == "all" ? all : fh12Item(item); // FH26: "all,<opt-in>"
             if (comma == std::string::npos)
                 break;
             at = comma + 1u;
@@ -256,19 +262,21 @@ inline uint64_t fixMask() noexcept
         if (!enabled() || !v || !*v)
             return 0u;
         const std::string s(v);
+        const uint64_t all = kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock |
+                             kFixSession | kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng |
+                             kFixTrick | kFixAnim | kFixBonus | kFixAiGate | kFixTakeoff | kFixFlags | kFixSteer |
+                             kFixRail | kFixReset | kFixMeter | kFixBoost | kFixGround | kFixEntry | kFixRclock |
+                             kFixEmitter | kFixFx | kFixClock2 | kFixHudfill; // kFixLift is opt-in (FH8: no window where it binds)
         if (s == "all")
-            return kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession |
-                   kFixTimers | kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim |
-                   kFixBonus | kFixAiGate | kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset |
-                    kFixMeter | kFixBoost | kFixGround | kFixEntry | kFixRclock |
-                    kFixEmitter | kFixFx | kFixClock2 | kFixHudfill; // kFixLift is opt-in (FH8: no window where it binds)
+            return all;
         uint64_t m = 0u;
         size_t at = 0u;
         while (at <= s.size())
         {
             const size_t comma = s.find(',', at);
             const std::string item = s.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
-            if (item == "rider") m |= kFixRider;
+            if (item == "all") m |= all; // FH26: "all,<opt-in>"
+            else if (item == "rider") m |= kFixRider;
             else if (item == "countdown") m |= kFixCountdown;
             else if (item == "drag") m |= kFixDrag;
             else if (item == "event") m |= kFixEvent;
@@ -301,6 +309,8 @@ inline uint64_t fixMask() noexcept
             else if (item == "fx") m |= kFixFx;
             else if (item == "clock2") m |= kFixClock2;
             else if (item == "hudfill") m |= kFixHudfill;
+            else if (item == "stick2") m |= kFixStick2;
+            else if (item == "clocksign") m |= kFixClockSign;
             else if (fh12Item(item) != 0u) {} // FH12 mask (fixMask12)
             else if (!item.empty())
             {
@@ -404,7 +414,7 @@ inline std::vector<Word> labWords();
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
-    const std::array<Word, 112> words = {{
+    const std::array<Word, 114> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -475,6 +485,12 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFixStick, 0x49bbfcu, kSixtieth, kHundredTwentieth, "stick_hold1_1339a0"},
         {kFixStick, 0x49bc98u, kSixtieth, kHundredTwentieth, "stick_slew0_134138"},
         {kFixStick, 0x49bca4u, kSixtieth, kHundredTwentieth, "stick_slew1_1342b4"},
+        // FH26 stick2 (FCR1 1, opt-in): the bounded steps before those slews move the offsets S+0x28/S+0x2c
+        // toward their targets by [0x49bc94]/[0x49bca0] (~0.05, single GP readers 0x1340a8/0x134224) times a
+        // gap factor <= 1 and (0.5 + 0.5|in|), clamped at the target, with no dt: 2x per stock tick at 120.
+        // Halved (exponent - 1, exact): one stock step per two updates while the clamp doesn't bind.
+        {kFixStick2, 0x49bc94u, 0x3d4cc9c7u, 0x3cccc9c7u, "stick2_offset0_1340a8"},
+        {kFixStick2, 0x49bca0u, 0x3d4cd331u, 0x3cccd331u, "stick2_offset1_134224"},
         // FH7 (FA1 3.2): 0x11b3f8 per rider per update R+0x2e4 = d*cap +
         // (1-d)*target with no dt: at 120 the post-air/post-boost cap relaxes
         // 2x as fast in real time. Retentions d -> sqrt(d), each word a single
@@ -1105,29 +1121,38 @@ inline bool entryFix() noexcept
     return on;
 }
 
+inline bool clockSignFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixClockSign) != 0u;
+    return on;
+}
+
 inline void restamp10s(uint8_t *ram, uint32_t a, bool toActive)
 {
     uint32_t stamp = 0u, upd = 0u;
     if (!rd32(ram, kPeriod10sStamp, stamp) || !rd32(ram, a + 0x1cu, upd))
         return;
-    int32_t e = static_cast<int32_t>(upd - stamp);
-    if (e < 0) e = 0;
     uint32_t next = 0u;
     if (toActive)
     {
         // Elapsed stock updates E of 601 -> 2E of 1202; the game still fires at
         // (A1c - stamp) >= 601, so stamp' = A1c + 601 - 2E (no further shift).
-        if (e > 601) e = 601;
-        next = upd + 601u - 2u * static_cast<uint32_t>(e);
+        next = ps2_fh1_restamp::enter(upd, stamp);
         g_lastStamp10s = next;
     }
     else
     {
-        // Remaining 120 Hz updates R = 601 - (A1c - stamp) -> R/2 stock.
-        int32_t r = 601 - e;
-        if (r < 0) r = 0;
-        next = upd - 601u + static_cast<uint32_t>(r / 2);
+        // Remaining 120 Hz updates R = 601 - (A1c - stamp) -> R/2 stock. The
+        // active stamp is usually in the future (signed compare at 0x1e1490):
+        // FIX clocksign (FH26) keeps that negative elapsed; without it the FH5
+        // clamp leaves 300 stock updates (FCR1 §3).
+        next = clockSignFix() ? ps2_fh1_restamp::exitSigned(upd, stamp) : ps2_fh1_restamp::exitClamped(upd, stamp);
     }
+    static uint32_t lines = 0u;
+    if (tapOn() && lines++ < 64u)
+        std::fprintf(stderr, "fh1-restamp10s %s upd=%u stamp=%u next=%u remaining_stock=%d\n", toActive ? "enter" : "exit",
+                     upd, stamp, next, toActive ? ps2_fh1_restamp::stockRemaining(upd, next) / 2
+                                                : ps2_fh1_restamp::stockRemaining(upd, next));
     wr32(ram, kPeriod10sStamp, next);
 }
 
@@ -1533,7 +1558,7 @@ inline bool drawHook(R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 }
 
 // PS2X_FH1_SRC=tgt[:a0][,...] (hex; diagnostic, any mode): print the source
-// pc, a0-a3 and f0/f1/f12/f20/f21 of calls to tgt (optionally only with that
+// pc, a0-a3 and f0/f1/f12/f20/f21 (FH26: then f13/f14) of calls to tgt (optionally only with that
 // a0), 2000 lines max.
 struct SrcWant { uint32_t tgt, a0; bool anyA0; };
 
@@ -1573,12 +1598,77 @@ inline void srcTap(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t 
             ++lines;
             std::fprintf(stderr,
                          "fh1-src tick=%llu src=%08x tgt=%08x a0=%08x a1=%08x a2=%08x a3=%08x odd=%d f0=%g f1=%g f12=%g "
-                         "f20=%g f21=%g\n",
+                         "f20=%g f21=%g f13=%g f14=%g\n",
                          static_cast<unsigned long long>(g_lastTick), sourcePc, targetPc, getRegU32(ctx, 4),
                          getRegU32(ctx, 5), getRegU32(ctx, 6), getRegU32(ctx, 7), g_rngOdd ? 1 : 0, ctx->f[0], ctx->f[1],
-                         ctx->f[12], ctx->f[20], ctx->f[21]);
+                         ctx->f[12], ctx->f[20], ctx->f[21], ctx->f[13], ctx->f[14]);
         }
     (void)ram;
+}
+
+// PS2X_FH26_TAP=<S>[:<from>-<to>] (hex S, decimal VBlank ticks; diagnostic, any mode with
+// PS2X_FH1_TAP=1 or full120): at each call of the stick-angle tracker 0x133308 with a0 == S (P+0x3f0),
+// before the call, one line: tick, update A+0x1c, stock half-ticks, active, the input word [a1+0],
+// S+0..+0x5c and, for R = [S+0x58], R+0x1e0..+0x1e8 (velocity), R+0x2f4, R+0x438, R+0xde0..+0xde4.
+// Raw hex words; decode offline. 8000 lines max.
+struct Fh26Tap
+{
+    uint32_t s = 0u;
+    uint64_t from = 0u, to = ~0ull;
+};
+
+inline const Fh26Tap &fh26Tap()
+{
+    static const Fh26Tap t = [] {
+        Fh26Tap r;
+        const char *p = std::getenv("PS2X_FH26_TAP");
+        if (!p || !*p)
+            return r;
+        char *end = nullptr;
+        r.s = static_cast<uint32_t>(std::strtoul(p, &end, 16));
+        if (*end == ':')
+        {
+            r.from = std::strtoull(end + 1, &end, 10);
+            if (*end == '-')
+                r.to = std::strtoull(end + 1, &end, 10);
+        }
+        return r;
+    }();
+    return t;
+}
+
+inline void fh26TapCall(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
+{
+    const Fh26Tap &t = fh26Tap();
+    if (targetPc != 0x133308u || !ctx || getRegU32(ctx, 4) != t.s || g_lastTick < t.from || g_lastTick > t.to)
+        return;
+    static uint32_t lines = 0u;
+    if (lines++ >= 8000u)
+        return;
+    char line[1024];
+    int n = 0;
+    uint32_t a = 0u, upd = 0u, in = 0u, r = 0u, w = 0u;
+    if (rd32(ram, kMgrPtr, a) && a)
+        rd32(ram, a + 0x1cu, upd);
+    rd32(ram, getRegU32(ctx, 5), in);
+    rd32(ram, t.s + 0x58u, r);
+    n += std::snprintf(line + n, sizeof(line) - n, "fh26-s tick=%llu upd=%u half=%llu act=%d in=%08x S",
+                       static_cast<unsigned long long>(g_lastTick), upd,
+                       static_cast<unsigned long long>(stockHalfTicks()), g_guestActive ? 1 : 0, in);
+    for (uint32_t o = 0u; o < 0x60u; o += 4u)
+    {
+        rd32(ram, t.s + o, w);
+        n += std::snprintf(line + n, sizeof(line) - n, " %08x", w);
+    }
+    n += std::snprintf(line + n, sizeof(line) - n, " R=%08x", r);
+    for (uint32_t o : {0x1e0u, 0x1e4u, 0x1e8u, 0x2f4u, 0x438u, 0xde0u, 0xde4u})
+    {
+        w = 0u;
+        if (r)
+            rd32(ram, r + o, w);
+        n += std::snprintf(line + n, sizeof(line) - n, " %08x", w);
+    }
+    std::fprintf(stderr, "%s\n", line);
 }
 
 // ---- FH9 AI animation/gate tap (PS2X_FH9_AI=<rider R, hex>; diagnostic, observation-only) ----
@@ -2378,7 +2468,7 @@ inline const BranchFlags &branchFlags() noexcept
         r.flags = flagsFix();
         r.rclock = rclockFix();
         r.fh12 = fh12Hooks();
-        r.src = !srcWants().empty();
+        r.src = !srcWants().empty() || fh26Tap().s != 0u;
         r.fh9 = fh9Tap().r != 0u;
         r.lab = !labHooks("PS2X_FH1_HALF", true).empty() || !labHooks("PS2X_FH1_SKIP", false).empty();
         r.draw = drawLimit();
@@ -2474,7 +2564,10 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     if (on && flag(&BranchFlags::fh12, fh12Hooks))
         fh12PreHook(ram, ctx, targetPc);
     if (!Fast || bf->src)
+    {
         srcTap(ram, ctx, sourcePc, targetPc);
+        fh26TapCall(ram, ctx, targetPc);
+    }
     if (!Fast || bf->fh9)
         fh9OnBranch(ram, ctx, sourcePc, targetPc, skip);
     if (on && (!Fast || bf->lab))
