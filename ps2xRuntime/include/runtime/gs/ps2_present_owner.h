@@ -8,8 +8,6 @@
 //   PRODUCING -> FREE       complete(failed or stale generation)
 //   READY     -> FREE       superseded by a newer READY before acquisition,
 //                           or retired by bumpGeneration()
-//   READY     -> PRODUCING  reserve() reclaims the oldest unacquired READY
-//                           frame when no slot is FREE
 //   READY     -> CURRENT    acquire() (presenter's CPU hold)
 //   CURRENT   -> CURRENT    repeat draws (noteRead() moves the last-read fence)
 //   CURRENT   -> RETIRING   a newer frame is acquired (or dropCurrent())
@@ -59,13 +57,12 @@ enum class Acquire
 struct Counters
 {
     uint64_t reserves = 0;       // FREE -> PRODUCING
-    uint64_t noSlot = 0;         // reserve() found no FREE slot (export dropped)
+    uint64_t noSlot = 0;         // reserve() found no FREE slot (export dropped; READY kept)
     uint64_t completesOk = 0;    // PRODUCING -> READY
     uint64_t completesFailed = 0;// PRODUCING -> FREE (export failed)
     uint64_t staleGen = 0;       // PRODUCING -> FREE (older generation)
     uint64_t outOfOrder = 0;     // completion older than the newest READY/CURRENT
     uint64_t superseded = 0;     // READY -> FREE without being acquired
-    uint64_t reclaimed = 0;      // of which: READY reclaimed by reserve() (no FREE slot)
     uint64_t acquires = 0;       // READY -> CURRENT
     uint64_t repeats = 0;        // CURRENT drawn again
     uint64_t reads = 0;          // noteRead() calls

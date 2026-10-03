@@ -59,30 +59,10 @@ int Pool::reserve(uint64_t *gen, uint64_t nowNs)
             *gen = m_gen;
         return static_cast<int>(i);
     }
-    // No FREE slot: reclaim the oldest unacquired READY frame (no consumer
-    // holds it; acquire() is atomic under this mutex). Never CURRENT,
-    // RETIRING or PRODUCING.
-    int oldest = -1;
-    for (size_t i = 0; i < m_slots.size(); ++i)
-    {
-        if (m_slots[i].state == SlotState::Ready &&
-            (oldest < 0 || m_slots[i].info.seq < m_slots[static_cast<size_t>(oldest)].info.seq))
-            oldest = static_cast<int>(i);
-    }
-    if (oldest >= 0)
-    {
-        Slot &s = m_slots[static_cast<size_t>(oldest)];
-        ++m_c.superseded;
-        ++m_c.reclaimed;
-        freeLocked(s, nowNs);
-        s.state = SlotState::Producing;
-        s.gen = m_gen;
-        s.t.reserveNs = nowNs;
-        ++m_c.reserves;
-        if (gen)
-            *gen = m_gen;
-        return oldest;
-    }
+    // No FREE slot: drop this export (NoSlot). The READY frame is kept for
+    // the presenter: reclaiming it (PSO1 first cut) left the 60 Hz presenter
+    // with only a PRODUCING slot at acquire time under 120 exports/s, so it
+    // repeated CURRENT (iPad: 0.739 unique presents vs 1.000 legacy).
     ++m_c.noSlot;
     return -1;
 }
