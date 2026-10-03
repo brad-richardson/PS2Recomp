@@ -559,10 +559,11 @@ void register_ps2_memory_tests()
             t.Equals(ps2_mtvu::detail::parseStagePark("park"), 1, "park = GIF only");
             t.Equals(ps2_mtvu::detail::parseStagePark("park_all"), 2, "park_all = both");
             t.Equals(ps2_mtvu::detail::parseStagePark("park2"), 3, "park2 = GIF lock-free wake");
+            t.Equals(ps2_mtvu::detail::parseStagePark("park3"), 4, "park3 = GIF batched wake");
             t.Equals(ps2_mtvu::detail::parseStagePark("bogus"), 0, "unknown = spin");
 
             const int stage0 = ps2_mtvu::detail::stageWaitMode();
-            for (int mode : {3, 2, 1, 0})
+            for (int mode : {4, 3, 2, 1, 0})
             {
                 ps2_mtvu::detail::setStageWaitForTest(mode);
                 const char *arm = ps2_mtvu::detail::stageModeName(mode);
