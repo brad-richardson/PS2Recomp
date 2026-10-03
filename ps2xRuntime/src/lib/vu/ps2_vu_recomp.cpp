@@ -16,14 +16,17 @@
 //   PS2X_VU0_RECOMP_DUMP=<dir> write <dir>/vu0e_<hash>.cpp for each VU0 image
 //                              without generated code (game-derived: keep it
 //                              outside the repo).
-//   PS2X_VU0_BLOCKS=1          run the image's block table (VBK1: groups of
-//                              straight-line pairs per host function; same
-//                              per-pair semantics). 0/unset = the pair table.
-//                              2 = the guarded group table (VBK1 Part 2: the
-//                              groups' statically scheduled bodies behind an
-//                              entry guard; a failed guard runs table 1's group).
+//   PS2X_VU0_BLOCKS            which table of a generated image runs.
+//                              2/unset (default, VBK1 Part 3) = the guarded
+//                              group table: the groups' statically scheduled
+//                              bodies behind an entry guard (a failed guard
+//                              runs table 1's group). 1 = the group table
+//                              (straight-line pairs per host function, same
+//                              per-pair steps). 0 = the pair table (exact
+//                              reference path).
 //   PS2X_VU1_RECOMP_STATS=1    print cumulative generated/interpreted VU0
-//                              cycles (the [vu0-recomp] line).
+//                              cycles, the table mode and the guarded-group
+//                              entries/misses (the [vu0-recomp] line).
 
 #include "runtime/ps2_vu0.h"
 #include "runtime/ps2_vu1.h"
@@ -95,13 +98,17 @@ bool VuCore<D>::vu0RecompEnabled()
     return enabled;
 }
 
+// VBK1 Part 3: the guarded group table is the default (an exact refactor:
+// det IDENTICAL on every key with it on). PS2X_VU0_BLOCKS=0 restores the
+// pair table (the exact reference path), 1 the unguarded group table; any
+// other value or unset = 2. Images without the tables fall back in run().
 template <class D>
 int VuCore<D>::vu0BlocksMode()
 {
     static const int mode = []
     {
         const char *value = std::getenv("PS2X_VU0_BLOCKS");
-        return value == nullptr ? 0 : value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0;
+        return value != nullptr && value[0] == '0' ? 0 : value != nullptr && value[0] == '1' ? 1 : 2;
     }();
     return mode;
 }
@@ -141,11 +148,14 @@ const typename VuCore<D>::RecompProgram *VuCore<D>::lookupRecompProgram(
     if (vu0 && recompStatsEnabled() && (++m_recompRuns & 0x3FFFu) == 0u)
     {
         const uint64_t total = m_recompCycles + m_interpCycles;
-        std::fprintf(stderr, "[vu0-recomp] runs=%llu generated_cycles=%llu interpreted_cycles=%llu generated_share=%.4f\n",
+        std::fprintf(stderr, "[vu0-recomp] runs=%llu generated_cycles=%llu interpreted_cycles=%llu generated_share=%.4f "
+                             "blocks_mode=%d group_entries=%llu group_misses=%llu\n",
                      static_cast<unsigned long long>(m_recompRuns),
                      static_cast<unsigned long long>(m_recompCycles),
                      static_cast<unsigned long long>(m_interpCycles),
-                     total != 0u ? static_cast<double>(m_recompCycles) / static_cast<double>(total) : 0.0);
+                     total != 0u ? static_cast<double>(m_recompCycles) / static_cast<double>(total) : 0.0,
+                     m_blocksOverride >= 0 ? m_blocksOverride : vu0BlocksMode(),
+                     static_cast<unsigned long long>(m_groupEntries), static_cast<unsigned long long>(m_groupMisses));
     }
     const uint64_t generation = vu0 ? memory->getVU0CodeGeneration() : memory->getVU1CodeGeneration();
     if (m_recompValid && m_recompCode == vuCode && m_recompCodeSize == codeSize &&

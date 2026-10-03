@@ -114,7 +114,7 @@ public:
         // in images emitted before VBK1 (they always run pairs).
         const RecompPairFn *blockPairs = nullptr;
         // VBK1 Part 2: the same groups behind an entry guard
-        // (PS2X_VU0_BLOCKS=2): a leader whose guard holds runs its group's
+        // (PS2X_VU0_BLOCKS=2, the default since Part 3): a leader whose guard holds runs its group's
         // statically scheduled body (VR2 stage-4 issue: no per-pair scoreboard
         // read where proven ready, constant direct-commit bits, in-place
         // commits, plain pc tails); a failed guard runs the exact group.
@@ -434,8 +434,8 @@ protected:
     // VR3: ... and whole-memory VU0 code (PS2X_VU0_RECOMP=1; default off).
     static constexpr uint32_t kRecompVu0CodeSize = 0x1000u;
     static bool vu0RecompEnabled();
-    // VBK1: PS2X_VU0_BLOCKS=1 runs an image's block table, 2 its guarded
-    // group table (default 0, the pair table).
+    // VBK1: PS2X_VU0_BLOCKS: 2/unset its guarded group table (default,
+    // Part 3), 1 its block table, 0 the pair table.
     static int vu0BlocksMode();
     int m_blocksOverride = -1;
     // VBK1 Part 2: the guard of a guarded group (ps2_vu_step_impl.h).
