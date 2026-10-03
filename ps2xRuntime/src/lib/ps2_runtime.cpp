@@ -5,7 +5,6 @@
 #include "ps2_microvu.h"
 #include "ps2_e7.h"
 #include "ps2_mpg_src_trace.h"
-#include "ps2_vq.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e43_trace.h"
 #include "ps2_e44_trace.h"
@@ -3261,8 +3260,7 @@ bool PS2Runtime::syncCoreSubsystems()
     // MT1: PS2X_MTVU=1 runs the unit on its own thread unless a dev trace
     // that shares state with unit code is armed (those need the inline path).
     ps2_mtvu::configure(ps2_e7::enabled() || ps2_mpg_src_trace::enabled() || ps2x_gs_capture::enabled() ||
-                        ps2_e44_trace::enabled() || ps2_e43_trace::enabled() || ps2_e41_trace::armed() ||
-                        ps2_vq::enabled());
+                        ps2_e44_trace::enabled() || ps2_e43_trace::enabled() || ps2_e41_trace::armed());
     // VPL1: PS2X_MTVU_GIF_STAGE=1 (default off) moves the unit's GIF submit
     // (arbiter + GS-worker handoff) onto its own thread behind an ordered op
     // ring; the unit keeps VIF1/VU1 and the byte copies. Needs threaded MTVU
