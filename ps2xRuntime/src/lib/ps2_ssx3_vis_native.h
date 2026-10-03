@@ -3,9 +3,9 @@
 
 // VNP1: native port of SSX 3's VU0 visibility test, micro program 0xDB8 of VU0
 // image 40829a098c260b4f (the AABB/frustum test called by the terrain test
-// 0x22A128 and the instance test 0x229FC8). PS2X_SSX3_VIS_NATIVE=1 runs it in
-// host code instead of the VU0 engine; =check runs both and compares; unset/0
-// keeps the exact engine (default).
+// 0x22A128 and the instance test 0x229FC8), plus the walker's 0x570 (VNP1P2).
+// PS2X_SSX3_VIS_NATIVE unset/1 runs them in host code (default); =check runs
+// both and compares; =0 keeps the VU0 engine (the reference path).
 //
 // Contract: on return, every R5900Context field that executeVU0Microprogram's
 // exact path exports (VF/VI/ACC/Q/P/I/R, MAC/status/clip, TPC/PC, ITOP, VPU
