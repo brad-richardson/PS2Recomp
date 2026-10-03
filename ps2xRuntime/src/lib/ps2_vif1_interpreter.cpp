@@ -1,5 +1,4 @@
 // Based on Blackline Interactive implementation
-#include "ps2_rr1_alpha_tap.h"
 #include "ps2_mtvu.h"
 #include "runtime/ps2_memory.h"
 #include <bit>
@@ -9,9 +8,7 @@
 #include <string>
 #include "ps2_e7.h"
 #include "ps2_e44_trace.h"
-#include "ps2_gfx_stats.h"
 #include "ps2_mpg_src_trace.h"
-#include "ps2_uv1_counters.h"
 
 enum VIFCmd : uint8_t
 {
@@ -336,82 +333,10 @@ void PS2Memory::processVIF1Data(uint32_t srcPhys, uint32_t sizeBytes)
     processVIF1Data(m_rdram + srcPhys, sizeBytes);
 }
 
-#if PS2X_ENABLE_DET_HASH_TAP || PS2X_ENABLE_DIAG_TAPS
-// VPL2 DEV-ONLY capture (det/diag builds): PS2X_VPL2_VIFCAP=<file> writes the
-// VIF1 state + VU1 data/code at the first processVIF1Data call on or after
-// vsync PS2X_VPL2_VIFCAP_FROM (default 0), then every buffer handed to
-// processVIF1Data, for PS2X_VPL2_VIFCAP_CALLS calls (default 100000). Run
-// with the VIF stage off (the capture reads VU1 memory once, in order).
-// Format: "VPL2CAP1", u32 sizeof(VIFRegisters), VIFRegisters, u32 pendingQwc,
-// u8 pendingHl, u8 path3Masked, 2 pad, VU1 data 16 KiB, VU1 code 16 KiB,
-// then per call u32 size + bytes. The ps2x_tests replay reads it.
-void PS2Memory::vpl2CaptureNote(const uint8_t *data, uint32_t sizeBytes)
-{
-    struct Cap
-    {
-        FILE *f = nullptr;
-        uint64_t from = 0;
-        uint64_t left = 0;
-        bool armed = false;
-        bool started = false;
-    };
-    static Cap cap = []
-    {
-        Cap c;
-        const char *path = std::getenv("PS2X_VPL2_VIFCAP");
-        if (!path || !path[0])
-            return c;
-        if (const char *e = std::getenv("PS2X_VPL2_VIFCAP_FROM"))
-            c.from = std::strtoull(e, nullptr, 10);
-        c.left = 100000u;
-        if (const char *e = std::getenv("PS2X_VPL2_VIFCAP_CALLS"))
-            c.left = std::strtoull(e, nullptr, 10);
-        c.f = std::fopen(path, "wb");
-        c.armed = c.f != nullptr;
-        std::fprintf(stderr, "[vpl2-cap] %s from=%llu calls=%llu\n", c.armed ? path : "open failed",
-                     static_cast<unsigned long long>(c.from), static_cast<unsigned long long>(c.left));
-        return c;
-    }();
-    if (!cap.armed)
-        return;
-    if (!cap.started)
-    {
-        if (gs_regs.vsyncTick.load(std::memory_order_relaxed) < cap.from || !m_vu1Data || !m_vu1Code)
-            return;
-        cap.started = true;
-        std::fwrite("VPL2CAP1", 1, 8, cap.f);
-        const uint32_t regBytes = sizeof(VIFRegisters);
-        std::fwrite(&regBytes, 4, 1, cap.f);
-        std::fwrite(&vif1_regs, sizeof(VIFRegisters), 1, cap.f);
-        std::fwrite(&m_vif1PendingPath2ImageQwc, 4, 1, cap.f);
-        const uint8_t flags[4] = {static_cast<uint8_t>(m_vif1PendingPath2DirectHl ? 1u : 0u),
-                                  static_cast<uint8_t>(m_path3Masked ? 1u : 0u), 0u, 0u};
-        std::fwrite(flags, 1, 4, cap.f);
-        std::fwrite(m_vu1Data, 1, PS2_VU1_DATA_SIZE, cap.f);
-        std::fwrite(m_vu1Code, 1, PS2_VU1_CODE_SIZE, cap.f);
-        std::fprintf(stderr, "[vpl2-cap] start tick=%llu\n",
-                     static_cast<unsigned long long>(gs_regs.vsyncTick.load(std::memory_order_relaxed)));
-    }
-    std::fwrite(&sizeBytes, 4, 1, cap.f);
-    std::fwrite(data, 1, sizeBytes, cap.f);
-    if (--cap.left == 0u)
-    {
-        std::fclose(cap.f);
-        cap.f = nullptr;
-        cap.armed = false;
-        std::fprintf(stderr, "[vpl2-cap] done tick=%llu\n",
-                     static_cast<unsigned long long>(gs_regs.vsyncTick.load(std::memory_order_relaxed)));
-    }
-}
-#endif
-
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
 {
     if (sizeBytes == 0u)
         return;
-#if PS2X_ENABLE_DET_HASH_TAP || PS2X_ENABLE_DIAG_TAPS
-    vpl2CaptureNote(data, sizeBytes);
-#endif
     if (ps2_mtvu::vifStageDefer())
     {
         // VPL2: parse here, the VU side runs from the log on the MTVU thread
@@ -520,8 +445,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             const uint32_t offset = pos - 4u;
             const bool wasMasked = m_path3Masked;
             m_path3Masked = (imm & 0x8000u) != 0u;
-            ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 MSKPATH3 was=%u now=%u queued=%zu",
-                        wasMasked, m_path3Masked, m_path3MaskedFifo.size());
             if (ps2_e7::enabled())
                 ps2_e7::event(gs_regs.vsyncTick.load(), "vif-mask", "cmd=0x%x offset=%u was=%u now=%u queued=%zu", cmd, offset, wasMasked, m_path3Masked, m_path3MaskedFifo.size());
             if (wasMasked && !m_path3Masked)
@@ -537,13 +460,11 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
         {
             const char *flushName = (opcode == VIF_FLUSHE) ? "FLUSHE" : ((opcode == VIF_FLUSH) ? "FLUSH" : "FLUSHA");
-            ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 %s masked=%u queued=%zu", flushName, m_path3Masked, m_path3MaskedFifo.size());
             continue;
         }
         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
         {
             uint32_t startPC = (uint32_t)imm * 8u;
-            ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 MSCAL pc=0x%x", startPC);
 
             // Values visible to the VU program for this MSCAL.
             // DobieStation semantics: ITOP = ITOPS; TOP = current TOPS;
@@ -560,8 +481,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
-            // E33: one relaxed check when stats are off.
-            ps2_gfx_stats::noteMscal();
             if (m_vu1MscalCallback)
                 m_vu1MscalCallback(startPC, runTop, runItop);
             continue;
@@ -580,8 +499,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                 vif1_regs.tops = (vif1_regs.base + vif1_regs.ofst) & 0x3FFu;
             vif1_regs.stat ^= (1u << 7); // toggle DBF
 
-            // E33: one relaxed check when stats are off.
-            ps2_gfx_stats::noteMscnt();
             if (m_vu1MscntCallback)
                 m_vu1MscntCallback(runTop, runItop);
             continue;
@@ -664,7 +581,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             if (qwCount > 0)
             {
                 const bool directHl = (opcode == VIF_DIRECTHL);
-                ps2_rr1::ev(gs_regs.vsyncTick.load(std::memory_order_relaxed), "vif1 DIRECT qw=%u masked=%u", qwCount, m_path3Masked);
                 submitGifPacket(GifPathId::Path2, data + pos, qwCount * 16, true, directHl);
 
                 const uint32_t pendingImageQw = pendingGifImageQwc(data + pos, qwCount * 16u);
@@ -748,12 +664,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             const uint32_t uv1DataStartPos = pos;
             const bool uv1UnpackQwAligned = ((uv1DataStartPos & 15u) == 0u);
 
-            // UV1: default-off per-vsync UNPACK format census.
-            ps2_uv1_vif_fmt::note(gs_regs.vsyncTick.load(std::memory_order_relaxed),
-                                  opcode, zeroExtend, vif1_regs.mode & 3u,
-                                  vif1_regs.cycle & 0xFFu,
-                                  (vif1_regs.cycle >> 8) & 0xFFu,
-                                  (imm & 0x8000u) != 0u, num);
 
             // VS1: bulk fast path for the common V4_32 stream case (UV1: 31% of
             // UNPACK commands; the per-vector loop below is ~0.6 ms/frame on
@@ -767,29 +677,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                 (vif1_regs.mode & 3u) == 0u && cl == wl && m_vu1Data != nullptr &&
                 totalBytes > 0u && pos + totalBytes <= sizeBytes &&
                 (!maskEnable || vifUnpackMaskAllData(vif1_regs.mask, wl));
-            // MP2 census: outcome per format + first failing bulk clause
-            // (mirrors the gate above; logged, never hashed).
-            if (ps2_mtvu::mp2Census())
-            {
-                const int mp2Fmt = (vl & 3u) | ((vn & 3u) << 2);
-                const bool mp2Bounds =
-                    m_vu1Data != nullptr && totalBytes > 0u && pos + totalBytes <= sizeBytes;
-                if (!mp2Bounds)
-                    ps2_mtvu::noteMp2Unpack(mp2Fmt, 2, -1, totalBytes);
-                else if (unpackBulk)
-                    ps2_mtvu::noteMp2Unpack(mp2Fmt, 0, -1, totalBytes);
-                else
-                {
-                    int rej = 4;
-                    if (!(vl == 0u && vn == 3u))
-                        rej = 1;
-                    else if ((vif1_regs.mode & 3u) != 0u)
-                        rej = 2;
-                    else if (cl != wl)
-                        rej = 3;
-                    ps2_mtvu::noteMp2Unpack(mp2Fmt, 1, rej, totalBytes);
-                }
-            }
             if (unpackBulk)
             {
                 const uint8_t *bulkSrc = data + pos;
@@ -1358,27 +1245,6 @@ void PS2Memory::processVIF1DataStaged(const uint8_t *data, uint32_t sizeBytes)
                 (vif1_regs.mode & 3u) == 0u && cl == wl && m_vu1Data != nullptr &&
                 totalBytes > 0u && pos + totalBytes <= sizeBytes &&
                 (!maskEnable || vifUnpackMaskAllData(vif1_regs.mask, wl));
-            if (ps2_mtvu::mp2Census())
-            {
-                const int mp2Fmt = (vl & 3u) | ((vn & 3u) << 2);
-                const bool mp2Bounds =
-                    m_vu1Data != nullptr && totalBytes > 0u && pos + totalBytes <= sizeBytes;
-                if (!mp2Bounds)
-                    ps2_mtvu::noteMp2Unpack(mp2Fmt, 2, -1, totalBytes);
-                else if (unpackBulk)
-                    ps2_mtvu::noteMp2Unpack(mp2Fmt, 0, -1, totalBytes);
-                else
-                {
-                    int rej = 4;
-                    if (!(vl == 0u && vn == 3u))
-                        rej = 1;
-                    else if ((vif1_regs.mode & 3u) != 0u)
-                        rej = 2;
-                    else if (cl != wl)
-                        rej = 3;
-                    ps2_mtvu::noteMp2Unpack(mp2Fmt, 1, rej, totalBytes);
-                }
-            }
             if (unpackBulk)
             {
                 // V4-32 with cl == wl: writeVectorCount source qwords land at

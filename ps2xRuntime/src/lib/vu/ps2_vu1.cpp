@@ -7,7 +7,6 @@
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
-#include "ps2_gfx_stats.h"
 #include "ps2_vu_step_impl.h"
 
 #include <cstring>
@@ -140,8 +139,6 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
     if (!m_activeVuData || m_activeVuDataSize < 16u)
         return;
 
-    // E33: one relaxed check when stats are off.
-    ps2_gfx_stats::noteXgkick();
 
     const uint32_t sourceAddress = (qwordAddress * 16u) % m_activeVuDataSize;
     m_xgkick.reset();

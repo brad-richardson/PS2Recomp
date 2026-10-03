@@ -315,38 +315,6 @@ namespace
         return s;
     }
 
-    // A PS2X_VPL2_VIFCAP capture (see ps2_vif1_interpreter.cpp); false if unreadable.
-    bool vpl2LoadCapture(const char *path, Vpl2Stream &s)
-    {
-        FILE *f = std::fopen(path, "rb");
-        if (!f)
-            return false;
-        char magic[8] = {};
-        uint32_t regBytes = 0;
-        uint8_t flags[4] = {};
-        bool ok = std::fread(magic, 1, 8, f) == 8 && std::memcmp(magic, "VPL2CAP1", 8) == 0 &&
-                  std::fread(&regBytes, 4, 1, f) == 1 && regBytes == sizeof(VIFRegisters) &&
-                  std::fread(&s.regs, sizeof(VIFRegisters), 1, f) == 1 &&
-                  std::fread(&s.pendingQwc, 4, 1, f) == 1 && std::fread(flags, 1, 4, f) == 4;
-        s.pendingHl = flags[0] != 0u;
-        s.path3Masked = flags[1] != 0u;
-        s.vu1Data.resize(PS2_VU1_DATA_SIZE);
-        s.vu1Code.resize(PS2_VU1_CODE_SIZE);
-        ok = ok && std::fread(s.vu1Data.data(), 1, PS2_VU1_DATA_SIZE, f) == PS2_VU1_DATA_SIZE &&
-             std::fread(s.vu1Code.data(), 1, PS2_VU1_CODE_SIZE, f) == PS2_VU1_CODE_SIZE;
-        uint32_t size = 0;
-        while (ok && std::fread(&size, 4, 1, f) == 1)
-        {
-            std::vector<uint8_t> b(size);
-            if (std::fread(b.data(), 1, size, f) != size)
-                break;
-            s.bufs.push_back(std::move(b));
-        }
-        std::fclose(f);
-        return ok;
-    }
-
-
     void appendU64(std::vector<uint8_t> &dst, uint64_t value)
     {
         const size_t pos = dst.size();
@@ -2126,51 +2094,6 @@ void register_ps2_memory_tests()
             t.IsTrue(packets > 500u, "the streams make a long GIF stream");
             t.Equals(ps2_mtvu::vifLog().nEscapes.load(), escapes0, "no VU-side call escaped the VIF stage");
             t.IsTrue(ps2_mtvu::vifLog().nRecs.load() > 10000u, "the staged runs went through the record log");
-        });
-
-        tc.Run("VPL2 VIF stage: captured VIF1 streams replay equal (PS2X_VPL2_REPLAY)", [](TestCase &t)
-        {
-            // Dev gate: PS2X_VPL2_REPLAY=<capture>[:<capture>...] from a
-            // PS2X_VPL2_VIFCAP boot (game data: never committed). Skipped
-            // (passes) when unset.
-            const char *env = std::getenv("PS2X_VPL2_REPLAY");
-            if (!env || !env[0])
-            {
-                t.IsTrue(true, "no capture given");
-                return;
-            }
-            std::string list(env);
-            size_t start = 0;
-            while (start <= list.size())
-            {
-                const size_t end = std::min(list.find(':', start), list.size());
-                const std::string path = list.substr(start, end - start);
-                start = end + 1u;
-                if (path.empty())
-                    continue;
-                Vpl2Stream in;
-                t.IsTrue(vpl2LoadCapture(path.c_str(), in), "capture loads");
-                const uint64_t escapes0 = ps2_mtvu::vifLog().nEscapes.load();
-                const Vpl2Outcome serial = vpl2Run(in, false, 0u);
-                const Vpl2Outcome staged = vpl2Run(in, true, 0u);
-                const size_t mismatch = vpl2FirstMismatch(staged, serial);
-                std::fprintf(stderr, "[vpl2-replay] %s bufs=%zu mscal=%zu/%zu packets=%zu/%zu first_mismatch=%zu "
-                                     "vu1data=%s vu1code=%s gif=%s regs=%s escapes=%llu\n",
-                             path.c_str(), in.bufs.size(), serial.atMscal.size(), staged.atMscal.size(),
-                             serial.packets.size(), staged.packets.size(), mismatch,
-                             staged.vu1Data == serial.vu1Data ? "equal" : "DIFF",
-                             staged.vu1Code == serial.vu1Code ? "equal" : "DIFF",
-                             staged.packets == serial.packets ? "equal" : "DIFF",
-                             std::memcmp(&staged.regs, &serial.regs, sizeof(VIFRegisters)) == 0 ? "equal" : "DIFF",
-                             static_cast<unsigned long long>(ps2_mtvu::vifLog().nEscapes.load() - escapes0));
-                t.IsTrue(serial.atMscal.size() > 0u, "the capture runs programs");
-                t.Equals(staged.atMscal.size(), serial.atMscal.size(), "same MSCAL count");
-                t.Equals(mismatch, serial.atMscal.size(), "VU1 data + code equal at every MSCAL");
-                t.IsTrue(staged.vu1Data == serial.vu1Data, "final VU1 data equal");
-                t.IsTrue(staged.packets == serial.packets, "GIF stream equal");
-                t.IsTrue(std::memcmp(&staged.regs, &serial.regs, sizeof(VIFRegisters)) == 0, "final VIF1 registers equal");
-                t.Equals(ps2_mtvu::vifLog().nEscapes.load(), escapes0, "no escapes");
-            }
         });
 
         tc.Run("GIF arbiter prioritizes PATH1 then PATH2 then PATH3", [](TestCase &t)

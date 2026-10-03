@@ -61,7 +61,6 @@ add_library(ps2_test_lib STATIC
     src/ps2_sif_dma_tests.cpp
     src/ps2_recompiler_tests.cpp
     src/ps2_runtime_expansion_tests.cpp
-    src/ps2_gfx_stats_tests.cpp
     src/ps2_fpu_semantics_tests.cpp
     src/ps2_fpu_cop2_audit_tests.cpp
     src/ps2_tz_offset_tests.cpp
