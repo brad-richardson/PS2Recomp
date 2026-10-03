@@ -550,6 +550,143 @@ void register_ps2_memory_tests()
             ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
         });
 
+        tc.Run("MW2 MTVU stage waitWork park: no lost wake when the publish races the park", [](TestCase &t)
+        {
+            using ps2_mtvu::detail::GifStage;
+            using ps2_mtvu::detail::VifLog;
+            t.IsFalse(ps2_mtvu::detail::parseStagePark(nullptr), "unset = spin");
+            t.IsTrue(ps2_mtvu::detail::parseStagePark("park"), "park = park");
+            t.IsFalse(ps2_mtvu::detail::parseStagePark("spin"), "spin = spin");
+            t.IsFalse(ps2_mtvu::detail::parseStagePark("bogus"), "unknown = spin");
+
+            const int stage0 = ps2_mtvu::detail::stageWaitMode();
+            for (int park : {1, 0})
+            {
+                ps2_mtvu::detail::setStageWaitForTest(park);
+                const char *arm = park ? "park" : "spin";
+                // GIF stage, case A: the publish lands after the spin gives up
+                // and before the sleep (the hook forces that order).
+                {
+                    GifStage g;
+                    g.slots.reset(new ps2_mtvu::GifOp[GifStage::kSlots]);
+                    bool hookRan = false;
+                    g.testBeforePark = [&] {
+                        hookRan = true;
+                        ps2_mtvu::GifOp *op = g.claim(0u);
+                        t.IsTrue(op != nullptr, std::string(arm) + ": gif claim in hook");
+                        if (op)
+                        {
+                            op->kind = ps2_mtvu::GifOp::Kind::Drain;
+                            op->acct = 0u;
+                            g.commit(*op, true);
+                        }
+                    };
+                    const uint64_t sleeps0 = g.nSleeps.load(std::memory_order_relaxed);
+                    auto f = std::async(std::launch::async, [&g] { return g.waitWork(); });
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    g.testBeforePark = nullptr;
+                    if (!done)
+                    {
+                        g.stop.store(true, std::memory_order_relaxed);
+                        f.wait();
+                    }
+                    t.IsTrue(done, std::string(arm) + ": gif publish between spin and sleep is not lost");
+                    t.IsTrue(hookRan, std::string(arm) + ": gif wait reached the sleep path");
+                    if (done)
+                    {
+                        t.IsTrue(f.get(), std::string(arm) + ": gif waitWork reports work");
+                        t.Equals(g.nSleeps.load(std::memory_order_relaxed), sleeps0,
+                                 std::string(arm) + ": publish seen by the re-check, no sleep");
+                    }
+                }
+                // GIF stage, case B: the publish lands while the waiter sleeps.
+                {
+                    GifStage g;
+                    g.slots.reset(new ps2_mtvu::GifOp[GifStage::kSlots]);
+                    const uint64_t sleeps0 = g.nSleeps.load(std::memory_order_relaxed);
+                    auto f = std::async(std::launch::async, [&g] { return g.waitWork(); });
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    ps2_mtvu::GifOp *op = g.claim(0u);
+                    t.IsTrue(op != nullptr, std::string(arm) + ": gif claim for wake");
+                    if (op)
+                    {
+                        op->kind = ps2_mtvu::GifOp::Kind::Drain;
+                        op->acct = 0u;
+                        g.commit(*op, true);
+                    }
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    if (!done)
+                    {
+                        g.stop.store(true, std::memory_order_relaxed);
+                        f.wait();
+                    }
+                    t.IsTrue(done, std::string(arm) + ": a sleeping gif waiter is woken by the publish");
+                    if (done)
+                    {
+                        t.IsTrue(f.get(), std::string(arm) + ": gif waitWork reports work after wake");
+                        t.Equals(g.nSleeps.load(std::memory_order_relaxed), sleeps0 + 1u,
+                                 std::string(arm) + ": the gif waiter slept once");
+                    }
+                }
+                // VIF log, case A: the publish lands between the spin and the sleep.
+                {
+                    VifLog l;
+                    l.reset(nullptr, nullptr);
+                    bool hookRan = false;
+                    l.testBeforePark = [&] {
+                        hookRan = true;
+                        uint8_t *p = l.reserve(16u);
+                        t.IsTrue(p != nullptr, std::string(arm) + ": vif reserve in hook");
+                        if (p)
+                            l.commit(16u, true);
+                    };
+                    const uint64_t sleeps0 = l.nSleeps.load(std::memory_order_relaxed);
+                    auto f = std::async(std::launch::async, [&l] { return l.waitWork(); });
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    l.testBeforePark = nullptr;
+                    if (!done)
+                    {
+                        l.stop.store(true, std::memory_order_relaxed);
+                        f.wait();
+                    }
+                    t.IsTrue(done, std::string(arm) + ": vif publish between spin and sleep is not lost");
+                    t.IsTrue(hookRan, std::string(arm) + ": vif wait reached the sleep path");
+                    if (done)
+                    {
+                        t.IsTrue(f.get(), std::string(arm) + ": vif waitWork reports work");
+                        t.Equals(l.nSleeps.load(std::memory_order_relaxed), sleeps0,
+                                 std::string(arm) + ": publish seen by the re-check, no sleep");
+                    }
+                }
+                // VIF log, case B: the publish lands while the waiter sleeps.
+                {
+                    VifLog l;
+                    l.reset(nullptr, nullptr);
+                    const uint64_t sleeps0 = l.nSleeps.load(std::memory_order_relaxed);
+                    auto f = std::async(std::launch::async, [&l] { return l.waitWork(); });
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    uint8_t *p = l.reserve(16u);
+                    t.IsTrue(p != nullptr, std::string(arm) + ": vif reserve for wake");
+                    if (p)
+                        l.commit(16u, true);
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    if (!done)
+                    {
+                        l.stop.store(true, std::memory_order_relaxed);
+                        f.wait();
+                    }
+                    t.IsTrue(done, std::string(arm) + ": a sleeping vif waiter is woken by the publish");
+                    if (done)
+                    {
+                        t.IsTrue(f.get(), std::string(arm) + ": vif waitWork reports work after wake");
+                        t.Equals(l.nSleeps.load(std::memory_order_relaxed), sleeps0 + 1u,
+                                 std::string(arm) + ": the vif waiter slept once");
+                    }
+                }
+            }
+            ps2_mtvu::detail::setStageWaitForTest(stage0);
+        });
+
         tc.Run("MQ3 VIF1_STAT write skips the unit sync with PS2X_MTVU_VIF1_STAT_FREE", [](TestCase &t)
         {
             PS2Memory mem;
