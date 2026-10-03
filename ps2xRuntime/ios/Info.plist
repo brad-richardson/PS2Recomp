@@ -24,8 +24,6 @@
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleGetInfoString</key>
 	<string></string>
-	<key>CFBundleIconFile</key>
-	<string></string>
 	<key>CFBundleIdentifier</key>
 	<string>org.ps2x.ps2entryrunner</string>
 	<key>CFBundleInfoDictionaryVersion</key>
