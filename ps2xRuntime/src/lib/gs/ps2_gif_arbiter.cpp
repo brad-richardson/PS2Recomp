@@ -152,8 +152,6 @@ void GifArbiter::submit(GifPathId pathId, const uint8_t *data, uint32_t sizeByte
     if (!data || sizeBytes < 16 || !m_processFn)
         return;
 
-    if (ps2_mtvu::mp2Census()) // MP2: per-path GIF bytes (logged, not hashed)
-        ps2_mtvu::noteMp2GifSubmit(static_cast<int>(pathId), sizeBytes);
     GifArbiterPacket pkt;
     pkt.pathId = pathId;
     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
@@ -210,8 +208,6 @@ void GifArbiter::submitStaged(GifPathId pathId, std::vector<uint8_t> &&bytes, bo
     if (bytes.empty() || sizeBytes < 16 || !m_processFn)
         return;
 
-    if (ps2_mtvu::mp2Census()) // MP2: per-path GIF bytes (logged, not hashed)
-        ps2_mtvu::noteMp2GifSubmit(static_cast<int>(pathId), sizeBytes);
     GifArbiterPacket pkt;
     pkt.pathId = pathId;
     pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;

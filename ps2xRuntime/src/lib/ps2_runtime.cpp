@@ -5,14 +5,10 @@
 #include "ps2_microvu.h"
 #include "ps2_e7.h"
 #include "ps2_mpg_src_trace.h"
-#include "ps2_pk.h"
-#include "ps2_rr1_alpha_tap.h"
-#include "ps2_uv1_counters.h"
 #include "ps2_vq.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e43_trace.h"
 #include "ps2_e44_trace.h"
-#include "ps2_gfx_stats.h"
 #include "ps2_ssx3_vis_native.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_ssx3_course_manifest.h"
@@ -193,7 +189,6 @@ void rlEnableColorBlend(void);
 #endif
 #include "ps2_e7.h"
 #include "ps2_e15.h"
-#include "ps2_pk.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/ee_guest_unwind.h"
 #include "ThreadNaming.h"
@@ -3231,7 +3226,7 @@ bool PS2Runtime::syncCoreSubsystems()
     {
         m_gifArbiter.setProcessPathPacketFn([this](GifPathId path, std::vector<uint8_t> &bytes)
                                             {
-                                                const bool note = ps2_gfx_stats::enabled() || m_gs.rawGifBackendActive();
+                                                const bool note = m_gs.rawGifBackendActive();
                                                 m_gs.processGIFPacketWithPath(path, note, bytes);
                                             });
         // H3: on the unit thread, wake the GS worker once per wakeCmds queued
@@ -3289,30 +3284,15 @@ bool PS2Runtime::syncCoreSubsystems()
         std::cerr << "[gs:pkb] on (PS2X_PKB=1): no-zero-fill copies, pooled packet buffers, pop batch="
                   << GsWorker::kPopBatch << ", batched releases" << std::endl;
     }
-    // MP2 census: UNPACK fast-path vs fallback per format + GIF bytes per
-    // path (PS2X_MP2_CENSUS=1, default off). Logged, never hashed; MTVU
-    // stays threaded (this flag is not in configure()'s diag list).
-    if (const char *env = std::getenv("PS2X_MP2_CENSUS"))
-    {
-        const bool on = env[0] == '1' && env[1] == '\0';
-        ps2_mtvu::setMP2Census(on);
-        if (on)
-            std::cerr << "[mtvu] mp2 census on (PS2X_MP2_CENSUS=1)" << std::endl;
-    }
-    // E33: per-path GIF census + GS draw attribution. The listener runs
-    // before each packet's process call (same thread, synchronous drain),
-    // so draws kicked while processing land on this packet's path. One
-    // relaxed check per packet when stats are off.
+    // The listener runs before each packet's process call (same thread,
+    // synchronous drain), so draws kicked while processing land on this
+    // packet's path.
     m_gifArbiter.setPacketListener([this, handoffDiet](GifPathId path, uint32_t size)
                                    {
-                                       const bool stats = ps2_gfx_stats::enabled();
-                                       if (stats)
-                                       {
-                                           ps2_gfx_stats::noteGifPacket(path, size);
-                                       }
+                                       (void)size;
                                        // GB3 Part 2: a raw-GIF backend needs every packet's path.
                                        // GF1 H1: with the diet the path rides in the packet command.
-                                       if (!handoffDiet && (stats || m_gs.rawGifBackendActive()))
+                                       if (!handoffDiet && m_gs.rawGifBackendActive())
                                        {
                                            m_gs.noteGifPath(path);
                                        }
@@ -3337,12 +3317,8 @@ bool PS2Runtime::syncCoreSubsystems()
     };
     // MT1: PS2X_MTVU=1 runs the unit on its own thread unless a dev trace
     // that shares state with unit code is armed (those need the inline path).
-    // PS2X_PKLOG stays allowed: its packet log is atomic-indexed and locked,
-    // so the [pk] sequence (idx, fnv, len, src) is a GS-stream comparator.
-    ps2_mtvu::configure(ps2_e7::enabled() || ps2_rr1::alphaTapOn() || ps2_rr1::evOn() ||
-                        ps2_mpg_src_trace::enabled() || ps2_gfx_stats::enabled() || ps2x_gs_capture::enabled() ||
-                        ps2_e44_trace::enabled() || ps2_e43_trace::enabled() ||
-                        ps2_e41_trace::armed() || ps2_uv1_vif_fmt::enabled() || ps2_uv1_dma_stall::enabled() ||
+    ps2_mtvu::configure(ps2_e7::enabled() || ps2_mpg_src_trace::enabled() || ps2x_gs_capture::enabled() ||
+                        ps2_e44_trace::enabled() || ps2_e43_trace::enabled() || ps2_e41_trace::armed() ||
                         ps2_vq::enabled());
     // VPL1: PS2X_MTVU_GIF_STAGE=1 (default off) moves the unit's GIF submit
     // (arbiter + GS-worker handoff) onto its own thread behind an ordered op
@@ -5029,7 +5005,7 @@ namespace
             const char *floatMode = std::getenv("PS2X_VU_FLOAT");
             const bool pcsx2Float = floatMode != nullptr && std::strcmp(floatMode, "pcsx2") == 0;
             const bool diag = vr3_vu0_census::enabled() || std::getenv("PS2X_E53_VU0_LOG") != nullptr ||
-                              ps2_e44_trace::enabled() || ps2_gfx_stats::enabled();
+                              ps2_e44_trace::enabled();
             if (!ps2_ssx3_vis_native::available() || pcsx2Float || diag)
             {
                 std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s ignored (available=%d pcsx2_float=%d diag=%d)\n",
@@ -6024,8 +6000,6 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 }
                 ps2_mtvu::ge3EpOnRead((value & 0x2u) != 0u);
             }
-            ps2_pk::notePrivRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
-                                 ctx ? ctx->pc : 0u, vaddr);
             return value;
         }
         return m_memory.read32(vaddr);
@@ -6072,8 +6046,6 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
                 }
                 ps2_mtvu::ge3EpOnRead((value & 0x2u) != 0u);
             }
-            ps2_pk::notePrivRead(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), value,
-                                 ctx ? ctx->pc : 0u, vaddr);
             return value;
         }
         return m_memory.read64(vaddr);

@@ -16,7 +16,6 @@
 #include "ps2_fh1_full120.h"
 #include "ps2_vsync_lock.h"
 #include "ps2_mpg_src_trace.h"
-#include "ps2_gfx_stats.h"
 #include "ps2_e15.h"
 #include "ps2_vq.h"
 #include "runtime/gs/gs_stream_capture.h"
@@ -3323,7 +3322,6 @@ void EeScheduler::processEvent(const EeEvent &event)
             if (m_vsyncPace && !m_hostPace.enabled && m_vsyncPacer.periodNs() != wantPeriod)
                 m_vsyncPacer = ps2_vsync_pacer::Pacer(wantPeriod);
         }
-        ps2_gfx_stats::noteVsync(m_vsyncTick); // E33 per-vsync census cut
         ps2_e41_trace::noteVsync(m_vsyncTick); // E41 cdread/plant vsync mirror
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
         ps2_vq::noteVBlank(m_vsyncTick, m_runtime.gs(), m_runtime.memory().gs()); // GB2 Part 2 quiescent gate

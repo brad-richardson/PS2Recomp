@@ -3,7 +3,6 @@
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
-#include "ps2_gfx_stats.h"
 #include "ps2_vu_detail.h"
 #include "ps2_vu_step_impl.h"
 #include "ps2_vu_fmac_impl.h"
@@ -1293,7 +1292,6 @@ void VuCore<D>::run(uint8_t *vuCode, uint32_t codeSize,
     const uint64_t previousControl = ps2_fpmode::readControl();
     ps2_fpmode::writeControl(ps2_fpmode::ps2Control(previousControl));
     const uint64_t budgetEnd = m_cycle + maxCycles;
-    const uint64_t entryCycle = m_cycle;
     RunContext ctx;
     ctx.vuCode = vuCode;
     ctx.codeSize = codeSize;
@@ -1378,9 +1376,6 @@ void VuCore<D>::run(uint8_t *vuCode, uint32_t codeSize,
     // marker (E/D/T bit, halt delay slot) exactly at/over its cycle budget
     // was truncated: its remaining draws never issue. One relaxed check
     // when stats are off.
-    const uint64_t cyclesUsed = m_cycle - entryCycle;
-    const bool budgetExhausted = !programEnded && !m_stopRequested && m_cycle >= budgetEnd;
-    ps2_gfx_stats::noteVuRun(cyclesUsed, budgetExhausted);
     m_state.cycles = m_cycle;
     ps2_fpmode::writeControl(previousControl);
 }

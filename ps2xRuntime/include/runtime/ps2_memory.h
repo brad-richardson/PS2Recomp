@@ -474,9 +474,6 @@ public:
     // VPL2: a submitGifPacket call from the VIF thread, as a record.
     void vifStageGif(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately, bool path2DirectHl);
     void vifStageMsk3(uint16_t imm);
-#if PS2X_ENABLE_DET_HASH_TAP || PS2X_ENABLE_DIAG_TAPS
-    void vpl2CaptureNote(const uint8_t *data, uint32_t sizeBytes); // VPL2 dev capture
-#endif
     GS *m_gsFrontend = nullptr;
     Vu1MscalCallback m_vu1MscalCallback;
     Vu1MscntCallback m_vu1MscntCallback;
