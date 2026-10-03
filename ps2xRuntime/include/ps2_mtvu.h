@@ -324,19 +324,25 @@ namespace ps2_mtvu
 
         // MW2: PS2X_MTVU_STAGE_WAIT. park: park the GIF stage only (the
         // IHP1 lever: its 50 us yield-spin is 77-84 % of the MTVU-GIF
-        // thread). park_all: park the VIF log too. A parked stage spins
-        // kStageParkSpinNs (<= 4 us) with a CPU pause (arm64 `yield`, x86
-        // `pause`; the clock is read every 16 polls), then the existing
-        // condvar sleep. spin (the default in this lane): today's exact
-        // path, 50 us of std::this_thread::yield() + clock reads, then the
-        // same sleep. Same wake protocol every way: every publish is a `tail`
-        // release-store + seq_cst fence followed by a notify under `m` iff
-        // `sleeping`, and the sleep sets `sleeping`, fences, and re-checks
-        // `tail` before waiting, so a publish that lands between the spin
-        // and the sleep is seen by the re-check and no wake is lost.
+        // thread). park_all: park the VIF log too. park2: GIF-only park with
+        // a lock-free producer wake (no mutex on the hot publish path; the
+        // waiter's predicate re-check makes the lock unnecessary — a notify
+        // before the sleep finds its work via `tail != cHead`, one after
+        // wakes it; wake points are unchanged, so no latency beyond one job).
+        // A parked stage spins kStageParkSpinNs (<= 4 us) with a CPU pause
+        // (arm64 `yield`, x86 `pause`; the clock is read every 16 polls),
+        // then the existing condvar sleep. spin (the default in this lane):
+        // today's exact path, 50 us of std::this_thread::yield() + clock
+        // reads, then the same sleep. Same wake protocol every way: every
+        // publish is a `tail` release-store + seq_cst fence followed by a
+        // notify iff `sleeping`, and the sleep sets `sleeping`, fences, and
+        // re-checks `tail` before waiting, so a publish that lands between
+        // the spin and the sleep is seen by the re-check and no wake is lost.
         static constexpr uint64_t kStageParkSpinNs = 4000u;
         inline int parseStagePark(const char *e)
         {
+            if (e && std::strcmp(e, "park2") == 0)
+                return 3;
             if (e && std::strcmp(e, "park_all") == 0)
                 return 2;
             if (e && std::strcmp(e, "park") == 0)
@@ -345,8 +351,12 @@ namespace ps2_mtvu
         }
         inline int &stageWaitMode()
         {
-            static int v = -1; // -1 unresolved; 0 spin, 1 park (GIF only), 2 park_all (tests set it directly)
+            static int v = -1; // -1 unresolved; 0 spin, 1 park, 2 park_all, 3 park2 (tests set it directly)
             return v;
+        }
+        inline const char *stageModeName(int v)
+        {
+            return v >= 3 ? "park2" : (v == 2 ? "park_all" : (v == 1 ? "park" : "spin"));
         }
         inline int stageMode()
         {
@@ -355,10 +365,12 @@ namespace ps2_mtvu
             {
                 v = parseStagePark(std::getenv("PS2X_MTVU_STAGE_WAIT"));
                 stageWaitMode() = v;
-                std::fprintf(stderr, "[mtvu] stage-wait=%s\n", v == 2 ? "park_all" : (v == 1 ? "park" : "spin"));
+                std::fprintf(stderr, "[mtvu] stage-wait=%s\n", stageModeName(v));
             }
             return v;
         }
+        inline bool gifPark() { return stageMode() == 1 || stageMode() >= 3; }
+        inline bool vifPark() { return stageMode() == 2; }
         inline void setStageWaitForTest(int v) { stageWaitMode() = v; }
         static inline void stageCpuPause()
         {
@@ -411,6 +423,7 @@ namespace ps2_mtvu
             std::function<void()> testBeforePark; // suite hook: runs after the spin, before the sleep
             // Receipts (logged only).
             std::atomic<uint64_t> nPub{0};
+            std::atomic<uint64_t> nWakes{0}; // producer notifies sent while the consumer slept
             std::atomic<uint64_t> nSleeps{0};
             std::atomic<uint64_t> nFullWaits{0};
             std::atomic<uint64_t> nEscapes{0};
@@ -442,10 +455,23 @@ namespace ps2_mtvu
                 std::atomic_thread_fence(std::memory_order_seq_cst);
                 if (sleeping.load(std::memory_order_relaxed))
                 {
+                    nWakes.fetch_add(1u, std::memory_order_relaxed);
+                    if (stageMode() >= 3)
                     {
-                        std::lock_guard<std::mutex> lock(m);
+                        // park2: no mutex on the hot publish path. No wake is
+                        // lost: the notify is preceded by the tail store, and
+                        // the waiter re-checks `tail != cHead` under `m`
+                        // before sleeping, so a notify that lands before the
+                        // sleep finds its work, and one after wakes it.
+                        cvConsumer.notify_one();
                     }
-                    cvConsumer.notify_one();
+                    else
+                    {
+                        {
+                            std::lock_guard<std::mutex> lock(m);
+                        }
+                        cvConsumer.notify_one();
+                    }
                 }
             }
             // Wait until `done()` holds (the consumer made room / ran
@@ -534,7 +560,7 @@ namespace ps2_mtvu
             bool waitWork()
             {
                 const uint64_t t0 = nowNs();
-                if (stageMode() >= 1)
+                if (gifPark())
                 {
                     for (unsigned i = 0;; ++i)
                     {
@@ -873,7 +899,7 @@ namespace ps2_mtvu
             bool waitWork()
             {
                 const uint64_t t0 = nowNs();
-                if (stageMode() >= 2)
+                if (vifPark())
                 {
                     for (unsigned i = 0;; ++i)
                     {
@@ -1598,9 +1624,10 @@ namespace ps2_mtvu
                 const uint64_t tailNow = g.tail.load(std::memory_order_acquire);
                 const uint64_t ops = tailNow - g.summaryTail;
                 g.summaryTail = tailNow;
-                std::fprintf(stderr, "[mtvu] gif-stage tick=%llu ops=%llu pub=%llu sleeps=%llu fullwaits=%llu escapes=%llu busy_ms=%.1f\n",
+                std::fprintf(stderr, "[mtvu] gif-stage tick=%llu ops=%llu pub=%llu wakes=%llu sleeps=%llu fullwaits=%llu escapes=%llu busy_ms=%.1f\n",
                              static_cast<unsigned long long>(tick), static_cast<unsigned long long>(ops),
                              static_cast<unsigned long long>(g.nPub.exchange(0u, std::memory_order_relaxed)),
+                             static_cast<unsigned long long>(g.nWakes.exchange(0u, std::memory_order_relaxed)),
                              static_cast<unsigned long long>(g.nSleeps.exchange(0u, std::memory_order_relaxed)),
                              static_cast<unsigned long long>(g.nFullWaits.exchange(0u, std::memory_order_relaxed)),
                              static_cast<unsigned long long>(g.nEscapes.load(std::memory_order_relaxed)),
