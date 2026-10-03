@@ -554,16 +554,17 @@ void register_ps2_memory_tests()
         {
             using ps2_mtvu::detail::GifStage;
             using ps2_mtvu::detail::VifLog;
-            t.IsFalse(ps2_mtvu::detail::parseStagePark(nullptr), "unset = spin");
-            t.IsTrue(ps2_mtvu::detail::parseStagePark("park"), "park = park");
-            t.IsFalse(ps2_mtvu::detail::parseStagePark("spin"), "spin = spin");
-            t.IsFalse(ps2_mtvu::detail::parseStagePark("bogus"), "unknown = spin");
+            t.Equals(ps2_mtvu::detail::parseStagePark(nullptr), 0, "unset = spin");
+            t.Equals(ps2_mtvu::detail::parseStagePark("spin"), 0, "spin = spin");
+            t.Equals(ps2_mtvu::detail::parseStagePark("park"), 1, "park = GIF only");
+            t.Equals(ps2_mtvu::detail::parseStagePark("park_all"), 2, "park_all = both");
+            t.Equals(ps2_mtvu::detail::parseStagePark("bogus"), 0, "unknown = spin");
 
             const int stage0 = ps2_mtvu::detail::stageWaitMode();
-            for (int park : {1, 0})
+            for (int mode : {2, 1, 0})
             {
-                ps2_mtvu::detail::setStageWaitForTest(park);
-                const char *arm = park ? "park" : "spin";
+                ps2_mtvu::detail::setStageWaitForTest(mode);
+                const char *arm = mode == 2 ? "park_all" : (mode == 1 ? "park" : "spin");
                 // GIF stage, case A: the publish lands after the spin gives up
                 // and before the sleep (the hook forces that order).
                 {
