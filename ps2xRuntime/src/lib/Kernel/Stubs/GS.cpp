@@ -1,6 +1,5 @@
 #include "Common.h"
 #include "ps2_e41_trace.h"
-#include "ps2_e44_trace.h"
 #include "GS.h"
 #include "ps2_log.h"
 #include "ps2_mtvu.h"
@@ -760,7 +759,6 @@ namespace ps2_stubs
 
         ps2TraceGuestRangeWrite(rdram, dstAddr, totalImageBytes, "sceGsExecStoreImage", ctx);
         // E44 Part-3 EE watch (dev-only, default off).
-        ps2_e44_trace::emitRangeOverlap(rdram, ctx, dstAddr, totalImageBytes, "sceGsExecStoreImage", 0u, false, "sceGsExecStoreImage");
         if (ps2_e41_trace::plantArmed()) // E41 plant watch
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dstAddr,
                                           totalImageBytes, rdram, "gs-store-image",

@@ -18,7 +18,6 @@ namespace ps2_mtvu
     struct GifOp; // ps2_mtvu.h (VPL1 GIF stage)
     struct VifRec; // ps2_mtvu.h (VPL2 VIF stage)
 }
-#include "../ps2_vif_src_span.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
 #elif defined(USE_SSE2NEON)
@@ -494,9 +493,6 @@ public:
         uint32_t srcAddr = 0;
         uint32_t qwc = 0;
         std::vector<uint8_t> chainData;
-        // E40 Part-3: EE source spans for chainData bytes (VIF1 chain
-        // mode only; empty unless the SRC trace was enabled at walk time).
-        std::vector<Ps2VifSrcSpan> srcSpans;
     };
     std::vector<PendingTransfer> m_pendingGifTransfers;
     std::vector<PendingTransfer> m_pendingVif0Transfers;

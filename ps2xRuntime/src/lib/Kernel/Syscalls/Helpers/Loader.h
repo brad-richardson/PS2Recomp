@@ -1,4 +1,3 @@
-#include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
 
 namespace
 {
@@ -404,8 +403,6 @@ namespace
                 }
                 // E44 Part-3 EE watch: ELF segment into scratchpad (dev-only,
                 // default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, nullptr, ph.vaddr, ph.memsz,
-                                                "elf-load", 0u, false, __func__);
             }
             else
             {
@@ -431,8 +428,6 @@ namespace
                 }
                 // E44 Part-3 EE watch: ELF segment into RAM (dev-only,
                 // default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, nullptr, ph.vaddr, ph.memsz,
-                                                "elf-load", 0u, false, __func__);
             }
 
             loadedAny = true;

@@ -1,6 +1,5 @@
 #include "Common.h"
 #include "ps2_e41_trace.h"
-#include "ps2_e44_trace.h"
 #include "ps2_snd_spike.h"
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
@@ -804,7 +803,6 @@ namespace ps2_stubs
         {
             std::memcpy(rd + 0x10u, &srcAddr, sizeof(srcAddr));
         // E44 Part-3 EE watch (dev-only, default off).
-        ps2_e44_trace::emitRangeOverlap(rdram, ctx, rdAddr + 0x10u, 12u, "sif-recvdata", 0u, false, "sceSifGetOtherData");
             std::memcpy(rd + 0x14u, &dstAddr, sizeof(dstAddr));
             std::memcpy(rd + 0x18u, &size, sizeof(size));
             if (ps2_e41_trace::plantArmed()) // E41 plant watch

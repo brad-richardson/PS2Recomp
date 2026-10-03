@@ -7,8 +7,6 @@
 #include <cstring>
 #include <string>
 #include "ps2_e7.h"
-#include "ps2_e44_trace.h"
-#include "ps2_mpg_src_trace.h"
 
 enum VIFCmd : uint8_t
 {
@@ -128,9 +126,6 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
 {
     if (sizeBytes == 0u)
         return;
-
-    // E44 Part-2 VIF0 kick census (dev-only, default off).
-    ps2_e44_trace::noteVif0Kick();
 
     uint32_t pos = 0;
     while (pos + 4 <= sizeBytes)
@@ -312,10 +307,8 @@ void PS2Memory::processVIF0Data(const uint8_t *data, uint32_t sizeBytes)
         }
         else
         {
-            // E44 Part-2 VIF0 unknown-opcode census (dev-only, default
-            // off). No MSCAL/MSCALF/MSCNT/BASE/OFFSET branch exists, so a
+            // No MSCAL/MSCALF/MSCNT/BASE/OFFSET branch exists, so a
             // VU0 program kicked here is silently dropped with the tail.
-            ps2_e44_trace::noteVif0Unk(opcode, imm, num, sizeBytes - pos);
             break;
         }
     }
@@ -536,22 +529,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             // MPG payload is instruction-packed and should not be QW-aligned.
             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
             const uint32_t mpgBytes = instructionCount * 8u;
-            // E40 Part-3 DEV-ONLY payload source: for dest-0 uploads, log
-            // the EE address these payload bytes came from (chain span,
-            // normal-mode MADR base, or fifo marker).
-            if (imm == 0u && ps2_mpg_src_trace::payArmed())
-            {
-                uint32_t srcEe = 0u;
-                int32_t srcTag = -1;
-                uint32_t srcTagAt = 0u;
-                uint32_t srcMode = ps2_mpg_src_trace::PayNone;
-                if (ps2_mpg_src_trace::lookupPay(data + pos, srcEe, srcTag, srcTagAt, srcMode))
-                {
-                    ps2_mpg_src_trace::noteMpgpay(
-                        gs_regs.vsyncTick.load(std::memory_order_relaxed),
-                        num, srcEe, srcMode, srcTag, srcTagAt);
-                }
-            }
             if (m_vu1Code && destAddr < PS2_VU1_CODE_SIZE && mpgBytes > 0)
             {
                 uint32_t copyBytes = mpgBytes;

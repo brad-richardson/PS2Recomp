@@ -79,10 +79,7 @@ add_library(ps2_test_lib STATIC
 
 if(PS2X_ENABLE_DIAG_TAPS)
     target_sources(ps2_test_lib PRIVATE
-        src/ps2_mpg_src_trace_tests.cpp
         src/ps2_e41_trace_tests.cpp
-        src/ps2_e43_trace_tests.cpp
-        src/ps2_e44_trace_tests.cpp
     )
 endif()
 

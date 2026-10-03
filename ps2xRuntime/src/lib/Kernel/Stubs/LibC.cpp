@@ -1,7 +1,6 @@
 #include "runtime/ps2_savestate.h"
 #include "Common.h"
 #include "ps2_e41_trace.h"
-#include "ps2_e44_trace.h"
 #include "LibC.h"
 #include "ps2_log.h"
 
@@ -172,8 +171,6 @@ namespace ps2_stubs
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, copied, "memcpy", ctx);
                 // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, copied,
-                                                        "memcpy", srcAddr, true, "memcpy");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
             {
                 char src[32];
@@ -220,8 +217,6 @@ namespace ps2_stubs
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, written, "memset", ctx);
                 // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, written,
-                                                        "memset", 0u, false, "memset");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
                                               written, rdram, "libc-memset", "fill", 0u);
@@ -263,8 +258,6 @@ namespace ps2_stubs
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, written, "memclr", ctx);
                 // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, written,
-                                                        "memclr", 0u, false, "memclr");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
                                               written, rdram, "libc-memclr", "zero", 0u);
@@ -308,8 +301,6 @@ namespace ps2_stubs
         {
             ps2TraceGuestRangeWrite(rdram, destAddr, copied, "memmove", ctx);
                 // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, copied,
-                                                        "memmove", srcAddr, true, "memmove");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
             {
                 char src[32];
@@ -362,8 +353,6 @@ namespace ps2_stubs
             ::strcpy(hostDest, hostSrc);
             ps2TraceGuestRangeWrite(rdram, destAddr, static_cast<uint32_t>(::strlen(hostSrc) + 1u), "strcpy", ctx);
                 // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, static_cast<uint32_t>(::strlen(hostSrc) + 1u),
-                                                        "strcpy", 0u, false, "strcpy");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
             {
                 char src[32];
@@ -399,8 +388,6 @@ namespace ps2_stubs
             ::strncpy(hostDest, hostSrc, size);
             ps2TraceGuestRangeWrite(rdram, destAddr, size, "strncpy", ctx);
                 // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, size,
-                                                        "strncpy", 0u, false, "strncpy");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
             {
                 char src[32];
@@ -706,8 +693,6 @@ namespace ps2_stubs
             {
                 ps2TraceGuestRangeWrite(rdram, str_addr, static_cast<uint32_t>(writeLen), "sprintf", ctx);
                 // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, str_addr, static_cast<uint32_t>(writeLen),
-                                                        "sprintf", 0u, false, "sprintf");
                 if (ps2_e41_trace::plantArmed()) // E41 plant watch
                     ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), str_addr,
                                                   static_cast<uint32_t>(writeLen), rdram,
@@ -758,8 +743,6 @@ namespace ps2_stubs
                 {
                     ps2TraceGuestRangeWrite(rdram, str_addr, static_cast<uint32_t>(output.size()), "snprintf", ctx);
                 // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, str_addr, static_cast<uint32_t>(output.size()),
-                                                        "snprintf", 0u, false, "snprintf");
                     if (ps2_e41_trace::plantArmed()) // E41 plant watch
                         ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), str_addr,
                                                       static_cast<uint32_t>(output.size()), rdram,

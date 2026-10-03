@@ -1,5 +1,4 @@
 #include "ps2_e41_trace.h" // E41 plant watch (default off)
-#include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
 #include <cstdlib> // getenv for the deterministic timezone override
 
 static void setRegU32(R5900Context *ctx, int reg, uint32_t value)

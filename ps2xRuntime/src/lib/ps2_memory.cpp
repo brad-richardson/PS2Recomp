@@ -1,7 +1,5 @@
 #include "runtime/ps2_memory.h"
-#include "ps2_e44_trace.h"
 #include "ps2_e7.h"
-#include "ps2_mpg_src_trace.h"
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_stream_capture.h"
@@ -241,77 +239,6 @@ namespace
     inline bool isIoRegister(uint32_t addr)
     {
         return Ps2AddressInRange(addr, PS2_IO_BASE, PS2_IO_SIZE);
-    }
-
-    // E40 DEV-ONLY: bounded command-boundary scan of a VIF1 REF payload for
-    // a VIF MPG opcode (0x4A in bits 24..30). Walks at most 64 QWs;
-    // fixed-size commands step by their size, DIRECT skips its payload,
-    // UNPACK/overrun/unknown-high stop conservatively (an MPG deeper in the
-    // payload may be missed; in-range tags never need this path).
-    inline bool e40PayloadHasMpg(const uint8_t *base, uint32_t maxSz, uint32_t phys, uint32_t bytes)
-    {
-        if (bytes > 1024u)
-            bytes = 1024u;
-        if (phys >= maxSz)
-            return false;
-        if (bytes > maxSz - phys)
-            bytes = maxSz - phys;
-        uint32_t pos = 0u;
-        while (pos + 4u <= bytes)
-        {
-            uint32_t w = 0u;
-            std::memcpy(&w, base + phys + pos, sizeof(w));
-            const uint8_t opcode = static_cast<uint8_t>((w >> 24) & 0x7Fu);
-            pos += 4u;
-            switch (opcode)
-            {
-            case 0x00: // NOP
-            case 0x01: // STCYCL
-            case 0x02: // OFFSET
-            case 0x03: // BASE
-            case 0x04: // ITOP
-            case 0x05: // STMOD
-            case 0x06: // MSKPATH3
-            case 0x07: // MARK
-            case 0x10: // FLUSHE
-            case 0x11: // FLUSH
-            case 0x13: // FLUSHA
-            case 0x14: // MSCAL
-            case 0x15: // MSCALF
-            case 0x17: // MSCNT
-                break;
-            case 0x20: // STMASK
-                if (pos + 4u > bytes)
-                    return false;
-                pos += 4u;
-                break;
-            case 0x30: // STROW
-            case 0x31: // STCOL
-                if (pos + 16u > bytes)
-                    return false;
-                pos += 16u;
-                break;
-            case 0x4A: // MPG
-                return true;
-            case 0x50: // DIRECT
-            case 0x51: // DIRECTHL
-            {
-                uint32_t qw = w & 0xFFFFu;
-                if (qw == 0u)
-                    qw = 65536u;
-                const uint64_t skip = static_cast<uint64_t>(qw) * 16ull;
-                if (skip > static_cast<uint64_t>(bytes - pos))
-                    return false;
-                pos += static_cast<uint32_t>(skip);
-                break;
-            }
-            default:
-                if (opcode >= 0x60u)
-                    return false; // UNPACK or unknown-high: stop conservatively.
-                break;            // Other unknown words: step on.
-            }
-        }
-        return false;
     }
 
     inline uint64_t *gsRegPtr(GSRegisters &gs, uint32_t addr)
@@ -1380,13 +1307,6 @@ void PS2Memory::write8(uint32_t address, uint8_t value)
     if (scratch)
     {
         m_scratchpad[physAddr] = value;
-        // E44 scratchpad write watch (dev-only, default off;
-        // silent while a Store* tap holds the guard).
-        // HP3 F12: the E44 gate (TLS + atomics) ran on every scratchpad
-        // write; call only in taps builds (tests call noteMemWrite directly).
-#if PS2X_ENABLE_DIAG_TAPS
-        ps2_e44_trace::noteMemWrite(m_rdram, address, 1u, "write8");
-#endif
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1431,12 +1351,6 @@ void PS2Memory::write16(uint32_t address, uint16_t value)
     if (scratch)
     {
         storeScalar<uint16_t>(m_scratchpad, physAddr, PS2_SCRATCHPAD_SIZE, value, "write16 scratchpad", address);
-        // E44 scratchpad write watch (dev-only, default off;
-        // silent while a Store* tap holds the guard).
-        // HP3 F12: see write8 above.
-#if PS2X_ENABLE_DIAG_TAPS
-        ps2_e44_trace::noteMemWrite(m_rdram, address, 2u, "write16");
-#endif
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1529,12 +1443,6 @@ void PS2Memory::write32(uint32_t address, uint32_t value, uint32_t guestPc)
     if (scratch)
     {
         storeScalar<uint32_t>(m_scratchpad, physAddr, PS2_SCRATCHPAD_SIZE, value, "write32 scratchpad", address);
-        // E44 scratchpad write watch (dev-only, default off;
-        // silent while a Store* tap holds the guard).
-        // HP3 F12: see write8 above.
-#if PS2X_ENABLE_DIAG_TAPS
-        ps2_e44_trace::noteMemWrite(m_rdram, address, 4u, "write32");
-#endif
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1619,12 +1527,6 @@ void PS2Memory::write64(uint32_t address, uint64_t value, uint32_t guestPc)
     if (scratch)
     {
         storeScalar<uint64_t>(m_scratchpad, physAddr, PS2_SCRATCHPAD_SIZE, value, "write64 scratchpad", address);
-        // E44 scratchpad write watch (dev-only, default off;
-        // silent while a Store* tap holds the guard).
-        // HP3 F12: see write8 above.
-#if PS2X_ENABLE_DIAG_TAPS
-        ps2_e44_trace::noteMemWrite(m_rdram, address, 8u, "write64");
-#endif
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -1672,18 +1574,6 @@ void PS2Memory::write128(uint32_t address, __m128i value)
     {
         alignas(16) uint8_t packet[16];
         _mm_storeu_si128(reinterpret_cast<__m128i *>(packet), value);
-        // E40 Part-3: CPU FIFO writes carry no EE source address.
-        // HP3 F13: the two-atomic enabled() ran on every FIFO quadword;
-        // pay-map only in taps builds (the e7 fifo events below stay:
-        // cached-pointer checks, and E7 must work in speed builds).
-#if PS2X_ENABLE_DIAG_TAPS
-        const bool e40Pay = ps2_mpg_src_trace::enabled();
-        if (e40Pay)
-        {
-            ps2_mpg_src_trace::setPayMap(
-                nullptr, 0u, nullptr, 0u, ps2_mpg_src_trace::PayFifo, 0u);
-        }
-#endif
         {
             // MT1: a FIFO quadword is a 16-byte unit job (D/T rule as for DMA).
             const bool dt = ps2_mtvu::active() && ps2_mtvu::dtFallback();
@@ -1705,12 +1595,6 @@ void PS2Memory::write128(uint32_t address, __m128i value)
                 processVIF1Data(packet, sizeof(packet));
             }
         }
-#if PS2X_ENABLE_DIAG_TAPS
-        if (e40Pay)
-        {
-            ps2_mpg_src_trace::clearPayMap();
-        }
-#endif
         if (ps2_e7::enabled())
             ps2_e7::event(gs_regs.vsyncTick.load(), "fifo-after", "mask=%u queued=%zu route=interpreter", m_path3Masked, m_path3MaskedFifo.size());
         return;
@@ -1720,12 +1604,6 @@ void PS2Memory::write128(uint32_t address, __m128i value)
     {
         inRange(physAddr, sizeof(__m128i), PS2_SCRATCHPAD_SIZE, "write128 scratchpad", address);
         _mm_storeu_si128(reinterpret_cast<__m128i *>(&m_scratchpad[physAddr]), value);
-        // E44 scratchpad write watch (dev-only, default off;
-        // silent while a Store* tap holds the guard).
-        // HP3 F12: see write8 above.
-#if PS2X_ENABLE_DIAG_TAPS
-        ps2_e44_trace::noteMemWrite(m_rdram, address, 16u, "write128");
-#endif
     }
     else if (physAddr < PS2_RAM_SIZE)
     {
@@ -2271,12 +2149,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 }
                 else if (mode == 1)
                 {
-                    // E40 Part-4 DEV-ONLY: chain-tag dump for the first
-                    // in-window VIF1 kicks (dev-only; one atomic check
-                    // when off).
-                    const uint64_t e40Vsync = gs_regs.vsyncTick.load(std::memory_order_relaxed);
-                    const bool e40Ctag = (channelBase == 0x10009000u) &&
-                                         ps2_mpg_src_trace::noteCtagKick(e40Vsync);
                     uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
                     uint32_t asr0 = m_ioRegisters[channelBase + 0x40];
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
@@ -2288,15 +2160,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     const int kMaxChainTags = 1 << 20;
                     std::vector<uint8_t> chainBuf;
                     chainBuf.reserve(m_chainBufHint);
-
-                    // E40 Part-3 DEV-ONLY: EE source spans for VIF1 chain
-                    // bytes. Empty unless the SRC trace is enabled.
-                    // Declared before appendData, which captures by ref.
-                    std::vector<Ps2VifSrcSpan> e40Spans;
-                    const bool e40Record = (channelBase == 0x10009000u) &&
-                                           ps2_mpg_src_trace::enabled();
-                    int32_t e40TagId = -1;
-                    uint32_t e40TagAt = 0u;
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
                     {
@@ -2328,18 +2191,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 chunk = maxSz2 - src;
                             if (chunk == 0)
                                 break;
-                            // E40 Part-3: record the EE source span for the
-                            // appended bytes (dev-only; e40Record gates).
-                            if (e40Record)
-                            {
-                                Ps2VifSrcSpan span;
-                                span.bufOff = static_cast<uint32_t>(chainBuf.size());
-                                span.len = chunk;
-                                span.eeAddr = srcAddr + (total - bytes);
-                                span.tagId = e40TagId;
-                                span.tagAt = e40TagAt;
-                                e40Spans.push_back(span);
-                            }
                             chainBuf.insert(chainBuf.end(), base2 + src, base2 + src + chunk);
                             bytes -= chunk;
                             src += chunk;
@@ -2381,20 +2232,10 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         uint64_t tag = loadScalar<uint64_t>(tp, 0, 16, "dma chain tag", tagAddr);
                         uint16_t tagQwc = static_cast<uint16_t>(tag & 0xFFFF);
                         uint32_t id = static_cast<uint32_t>((tag >> 28) & 0x7);
-                        e40TagId = static_cast<int32_t>(id);
-                        e40TagAt = curTagEE;
                         const bool irq = ((tag >> 31) & 0x1ull) != 0ull;
                         uint32_t addr = static_cast<uint32_t>((tag >> 32) & 0x7FFFFFFF);
                         lastTagUpper = static_cast<uint32_t>((tag >> 16) & 0xFFFFu);
                         ++tagsProcessed;
-                        // E40 Part-4: tag dump for the first in-window kicks.
-                        if (e40Ctag)
-                        {
-                            uint32_t ctte0 = 0u, ctte1 = 0u;
-                            std::memcpy(&ctte0, tp + 8u, sizeof(ctte0));
-                            std::memcpy(&ctte1, tp + 12u, sizeof(ctte1));
-                            ps2_mpg_src_trace::noteCtag(e40Vsync, curTagEE, id, tagQwc, addr, ctte0, ctte1);
-                        }
 
                         uint32_t dataAddr = 0;
                         bool hasPayload = (tagQwc > 0);
@@ -2464,45 +2305,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             break;
                         }
 
-                        // E40 DEV-ONLY MPG source trace: for VIF1 REF/REFS/REFE
-                        // tags, log the tag site + REF addr and arm a write
-                        // watch on the addr word when the tag qualifies
-                        // (in-range addr, or an MPG found by bounded scan).
-                        if (channelBase == 0x10009000u &&
-                            (id == 0u || id == 3u || id == 4u) &&
-                            ps2_mpg_src_trace::enabled())
-                        {
-                            bool qualifies = (addr >= ps2_mpg_src_trace::kAddrLo &&
-                                              addr < ps2_mpg_src_trace::kAddrHi);
-                            if (!qualifies && hasPayload)
-                            {
-                                try
-                                {
-                                    const bool pScratch = isScratchpad(dataAddr);
-                                    const uint32_t pPhys = translateAddress(dataAddr);
-                                    const uint8_t *pBase = pScratch ? m_scratchpad : m_rdram;
-                                    const uint32_t pMax = pScratch ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
-                                    const uint64_t pBytes64 = static_cast<uint64_t>(tagQwc) * 16ull;
-                                    const uint32_t pBytes = (pBytes64 > 0xFFFFFFFFull)
-                                                                ? 0xFFFFFFFFu
-                                                                : static_cast<uint32_t>(pBytes64);
-                                    qualifies = e40PayloadHasMpg(pBase, pMax, pPhys, pBytes);
-                                }
-                                catch (...)
-                                {
-                                }
-                            }
-                            if (qualifies)
-                            {
-                                uint32_t tte0 = 0u, tte1 = 0u;
-                                std::memcpy(&tte0, tp + 8u, sizeof(tte0));
-                                std::memcpy(&tte1, tp + 12u, sizeof(tte1));
-                                ps2_mpg_src_trace::noteMpgsrc(
-                                    gs_regs.vsyncTick.load(std::memory_order_relaxed),
-                                    curTagEE, id, tagQwc, addr, tte0, tte1);
-                            }
-                        }
-
                         // VIF0/VIF1 chain transfers with CHCR.TTE (bit 6) set move the
                         // DMAtag's upper 64 bits (two embedded VIF codes) into the VIF
                         // stream ahead of the tag's data, for every tag id. REF/REFS/REFE
@@ -2514,18 +2316,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             ((chcr & (1u << 6)) != 0u);
                         if (vifTagTransfer)
                         {
-                            // E40 Part-3: the tag's upper 8 bytes are EE
-                            // bytes tagAt+8..tagAt+16.
-                            if (e40Record)
-                            {
-                                Ps2VifSrcSpan span;
-                                span.bufOff = static_cast<uint32_t>(chainBuf.size());
-                                span.len = 8u;
-                                span.eeAddr = curTagEE + 8u;
-                                span.tagId = e40TagId;
-                                span.tagAt = e40TagAt;
-                                e40Spans.push_back(span);
-                            }
                             chainBuf.insert(chainBuf.end(), tp + 8u, tp + 16u);
                         }
 
@@ -2562,9 +2352,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         pt.srcAddr = 0;
                         pt.qwc = 0;
                         pt.chainData = std::move(chainBuf);
-                        // E40 Part-3: EE source spans (non-empty for VIF1
-                        // only, and only when traced at walk time).
-                        pt.srcSpans = std::move(e40Spans);
                         if (channelBase == 0x1000A000)
                         {
                             m_pendingGifTransfers.push_back(std::move(pt));
@@ -2604,14 +2391,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 // MADR/SADR, clear QWC/STR, raise the channel's D_STAT CIS.
                 const bool sprFrom = (channelBase == 0x1000D000u);
                 const uint32_t sprMode = (value >> 2) & 0x3u;
-                // E44 Part-2 SPR MOD!=0 kick counter (dev-only, default
-                // off). Chain/interleave SPR modes are not implemented:
-                // silent drop, so every such kick is evidence.
-                if (sprMode != 0u && ps2_e44_trace::enabled())
-                {
-                    ps2_e44_trace::noteSprMod(sprFrom, sprMode, madr,
-                                              m_ioRegisters[channelBase + 0x80u], qwc);
-                }
                 if (sprMode == 0u && m_rdram && m_scratchpad)
                 {
                     const uint64_t bytes64 = static_cast<uint64_t>(qwc) * 16ull;
@@ -2619,7 +2398,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint32_t bytes = totalBytes;
                     uint32_t ramAddr = madr & PS2_RAM_MASK;
                     uint32_t sprAddr = m_ioRegisters[channelBase + 0x80u] & (PS2_SCRATCHPAD_SIZE - 1u);
-                    const uint32_t e3Sadr0 = sprAddr;
                     while (bytes > 0u)
                     {
                         uint32_t ramChunk = PS2_RAM_SIZE - ramAddr;
@@ -2645,22 +2423,6 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     }
 
 
-                    // E44 scratchpad write watch: SPR_TO (RAM -> scratchpad)
-                    // copy only (SPR_FROM reads the scratchpad). Dev-only,
-                    // default off. madr/SADR still pre-advance.
-                    if (!sprFrom && ps2_e44_trace::enabled())
-                    {
-                        ps2_e44_trace::noteSprDma(m_rdram, madr & PS2_RAM_MASK, e3Sadr0, totalBytes);
-                        // Boot-C last-writer record (ungated; own locking).
-                        ps2_e44_trace::trackLastWriterDma(m_rdram, madr & PS2_RAM_MASK, e3Sadr0, totalBytes);
-                    }
-                    // E44 Part-2 SPR_FROM (scratchpad -> RAM) tap: EXTRA EE
-                    // words only. Dev-only, default off. madr is the RAM
-                    // dest start here, e3Sadr0 the scratchpad src start.
-                    if (sprFrom && ps2_e44_trace::enabled())
-                    {
-                        ps2_e44_trace::noteSprFromDma(m_rdram, madr & PS2_RAM_MASK, e3Sadr0, totalBytes);
-                    }
                     m_ioRegisters[channelBase + 0x10u] = madr + totalBytes;
                     m_ioRegisters[channelBase + 0x20u] = 0u;
                     m_ioRegisters[channelBase + 0x80u] = sprAddr;
@@ -2956,25 +2718,11 @@ void PS2Memory::processPendingTransfers()
         }
         m_pendingVif1Transfers.clear();
     }
-    // E40 Part-3: install the payload source map around each delivery
-    // (dev-only; one atomic check when off).
-    const bool e40Pay = ps2_mpg_src_trace::enabled();
     for (auto &p : m_pendingVif1Transfers)
     {
         if (!p.chainData.empty())
         {
-            if (e40Pay)
-            {
-                ps2_mpg_src_trace::setPayMap(
-                    p.chainData.data(), static_cast<uint32_t>(p.chainData.size()),
-                    p.srcSpans.data(), static_cast<uint32_t>(p.srcSpans.size()),
-                    ps2_mpg_src_trace::PayChain, 0u);
-            }
             processVIF1Data(p.chainData.data(), static_cast<uint32_t>(p.chainData.size()));
-            if (e40Pay)
-            {
-                ps2_mpg_src_trace::clearPayMap();
-            }
         }
         else if (p.qwc > 0)
         {
@@ -2989,7 +2737,6 @@ void PS2Memory::processPendingTransfers()
             {
                 continue;
             }
-            uint32_t payEe = p.srcAddr;
             if (p.fromScratchpad)
             {
                 uint32_t bytesLeft = sizeBytes;
@@ -3002,20 +2749,9 @@ void PS2Memory::processPendingTransfers()
                         chunk = PS2_SCRATCHPAD_SIZE - srcPhys;
                     if (chunk == 0)
                         break;
-                    if (e40Pay)
-                    {
-                        ps2_mpg_src_trace::setPayMap(
-                            m_scratchpad + srcPhys, chunk, nullptr, 0u,
-                            ps2_mpg_src_trace::PayNormal, payEe);
-                    }
                     processVIF1Data(m_scratchpad + srcPhys, chunk);
-                    if (e40Pay)
-                    {
-                        ps2_mpg_src_trace::clearPayMap();
-                    }
                     bytesLeft -= chunk;
                     srcPhys += chunk;
-                    payEe += chunk;
                 }
             }
             else
@@ -3030,20 +2766,9 @@ void PS2Memory::processPendingTransfers()
                         chunk = PS2_RAM_SIZE - srcPhys;
                     if (chunk == 0)
                         break;
-                    if (e40Pay)
-                    {
-                        ps2_mpg_src_trace::setPayMap(
-                            m_rdram + srcPhys, chunk, nullptr, 0u,
-                            ps2_mpg_src_trace::PayNormal, payEe);
-                    }
                     processVIF1Data(srcPhys, chunk);
-                    if (e40Pay)
-                    {
-                        ps2_mpg_src_trace::clearPayMap();
-                    }
                     bytesLeft -= chunk;
                     srcPhys += chunk;
-                    payEe += chunk;
                 }
             }
         }
