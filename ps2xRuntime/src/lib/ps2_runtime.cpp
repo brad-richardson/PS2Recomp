@@ -1393,9 +1393,42 @@ namespace
         ctx->vu0_vpu_stat2 = 0;
     }
 
-    void copyVu0ContextToState(const R5900Context *ctx, VuState &state)
+    void copyVu0ContextToStateImpl(const R5900Context *ctx, VuState &state, bool lean)
     {
-        std::memset(&state, 0, sizeof(state));
+        if (!lean)
+        {
+            std::memset(&state, 0, sizeof(state));
+        }
+        else
+        {
+            // VZ1: skip the 664-byte clear. Every byte the import assigns is
+            // written below; beginProgram() assigns pc/ebit/halt/stopped/top/
+            // itop/branch*/vf0 before run() reads them, and run() publishes
+            // cycles at the end. Only cycles (observed by the idle path and
+            // the census tap) and the struct padding (serialized raw by
+            // VuSavestate::saveCore, and covered by the sizeof(VuState)==664
+            // format guard) still need zeroing here. Gap bounds derive from
+            // offsetof, never from hard-coded byte counts.
+            state.cycles = 0;
+            char *bytes = reinterpret_cast<char *>(&state);
+            constexpr size_t kPad0Begin = offsetof(VuState, stoppedByT) + sizeof(state.stoppedByT);
+            constexpr size_t kPad0End = offsetof(VuState, top);
+            static_assert(kPad0End > kPad0Begin, "VZ1: VuState tail layout changed (pad0)");
+            std::memset(bytes + kPad0Begin, 0, kPad0End - kPad0Begin);
+            constexpr size_t kPad1Begin = offsetof(VuState, branchPending) + sizeof(state.branchPending);
+            constexpr size_t kPad1End = offsetof(VuState, branchTarget);
+            static_assert(kPad1End > kPad1Begin, "VZ1: VuState tail layout changed (pad1)");
+            std::memset(bytes + kPad1Begin, 0, kPad1End - kPad1Begin);
+            constexpr size_t kTailBegin = offsetof(VuState, branchDelay) + sizeof(state.branchDelay);
+            constexpr size_t kTailEnd = sizeof(state);
+            static_assert(kTailEnd > kTailBegin, "VZ1: VuState tail layout changed (tail)");
+            std::memset(bytes + kTailBegin, 0, kTailEnd - kTailBegin);
+        }
+        // The import-assigned prefix (vf..status) must stay dense: no padding
+        // may hide between two assigned fields, or the lean path above would
+        // leave stale bytes where the exact path leaves zeros.
+        static_assert(offsetof(VuState, status) + sizeof(VuState::status) == offsetof(VuState, cycles),
+                      "VZ1: VuState prefix layout changed; re-audit the lean clear");
 
         for (uint32_t i = 0; i < 32u; ++i)
         {
@@ -1552,6 +1585,23 @@ namespace
         }
         return out;
     }
+}
+
+// VZ1: VU0 lean entry (PS2X_VU0_LEAN_ENTRY=0 restores the exact path;
+// default on once gated).
+bool PS2Runtime::vu0LeanEntryEnabled()
+{
+    static const bool enabled = []
+    {
+        const char *value = std::getenv("PS2X_VU0_LEAN_ENTRY");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+void PS2Runtime::importVu0Context(const R5900Context *ctx, VuState &state, bool lean)
+{
+    copyVu0ContextToStateImpl(ctx, state, lean);
 }
 
 // UPR1: SSX 3 runs on the fork's HLE IOP/SIF/RPC paths, never upstream's IOP
@@ -5210,10 +5260,11 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
 
     const bool census = vr3_vu0_census::enabled();
     const uint64_t censusT0 = census ? vr3_vu0_census::nowNs() : 0u;
-    // VR3: copyVu0ContextToState rewrites all of m_state and execute() resets
+    // VR3: importVu0Context rewrites all of m_state and execute() resets
     // the scheduler, so only reset()'s cycle/count part is live here.
+    // VZ1: the import takes the lean path unless PS2X_VU0_LEAN_ENTRY=0.
     m_vu0.resetForVu0Start();
-    copyVu0ContextToState(ctx, m_vu0.state());
+    importVu0Context(ctx, m_vu0.state(), vu0LeanEntryEnabled());
     const uint64_t censusT1 = census ? vr3_vu0_census::nowNs() : 0u;
     m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
                   vu0Data, PS2_VU0_DATA_SIZE,

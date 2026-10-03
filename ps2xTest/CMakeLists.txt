@@ -48,6 +48,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_memory_tests.cpp
     src/ps2_vu1_tests.cpp
     src/ps2_vu_tests.cpp
+    src/ps2_vu0_lean_entry_tests.cpp
     src/ps2_gs_tests.cpp
     src/ps2_gs_queue_tests.cpp
     src/ps2_gs_replay_tests.cpp
