@@ -25,6 +25,10 @@ namespace ps2_ssx3_vis_native
 {
     constexpr uint64_t kImageHash = 0x40829a098c260b4full;
     constexpr uint32_t kStartPc = 0xDB8u;
+    // VNP1P2: the walker's AABB program (0xAC8's body with four leading NOP
+    // pairs, no BAL; E at 0x6D0 so the end pc is 0x6E0; vi15 untouched).
+    // Reached through VCALLMS (0x22a934). VF10-13/15/16 come from ctx.
+    constexpr uint32_t kStartPc570 = 0x570u;
 
     // True when this build has the vector FMAC core the port mirrors.
     bool available();
@@ -36,6 +40,10 @@ namespace ps2_ssx3_vis_native
     // Runs program 0xDB8 on ctx with VU0 data memory vu0Data (4 KiB, read
     // only). Caller has checked imageMatches().
     void runDb8(R5900Context *ctx, const uint8_t *vu0Data);
+
+    // Runs program 0x570 on ctx (reads no data memory). Caller has checked
+    // imageMatches().
+    void runP570(R5900Context *ctx);
 
     // Test hook (ps2x_tests): the runtime's exact VU0 export.
     void exportVu0StateForTest(const VuState &state, R5900Context *ctx);
@@ -59,7 +67,7 @@ namespace ps2_ssx3_vis_native
 
     // check mode: counts calls and mismatches, prints the first mismatches
     // with their inputs and a periodic summary (stderr, "[vnp1]").
-    void noteCheck(const Vu0Snapshot &in, const Vu0Snapshot &ref, const Vu0Snapshot &got);
+    void noteCheck(uint32_t startPc, const Vu0Snapshot &in, const Vu0Snapshot &ref, const Vu0Snapshot &got);
 }
 
 #endif
