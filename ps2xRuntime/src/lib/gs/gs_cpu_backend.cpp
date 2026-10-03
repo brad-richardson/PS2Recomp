@@ -697,6 +697,55 @@ void GSCpuBackend::TextureFlush()
     m_texturePageCache.Invalidate();
 }
 
+namespace
+{
+    // RBF1: backend-blob layout for the CLUT cache (GS section, opaque to
+    // older builds: they see a non-empty blob and refuse it cleanly).
+    constexpr uint32_t kClutBlobMagic = 0x544C4331u; // "CLT1" LE
+    constexpr size_t kClutBlobSize = sizeof(uint32_t) + 512u * sizeof(uint16_t) + 2u * sizeof(uint32_t);
+} // namespace
+
+void GSCpuBackend::SavestateSave(std::vector<uint8_t> &out)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    out.resize(kClutBlobSize);
+    uint8_t *dst = out.data();
+    std::memcpy(dst, &kClutBlobMagic, sizeof(kClutBlobMagic));
+    dst += sizeof(kClutBlobMagic);
+    std::memcpy(dst, m_clut.data(), m_clut.size() * sizeof(m_clut[0]));
+    dst += m_clut.size() * sizeof(m_clut[0]);
+    std::memcpy(dst, m_clutCbp.data(), m_clutCbp.size() * sizeof(m_clutCbp[0]));
+}
+
+bool GSCpuBackend::SavestateLoad(const uint8_t *data, size_t size)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (size == 0u)
+    {
+        // Pre-fix states saved an empty backend blob: a zero palette, as a
+        // fresh backend would have.
+        m_clut.fill(0u);
+        m_clutCbp.fill(0u);
+        m_texturePageCache.Invalidate();
+        return true;
+    }
+    if (!data || size != kClutBlobSize)
+        return false;
+    uint32_t magic = 0u;
+    std::memcpy(&magic, data, sizeof(magic));
+    if (magic != kClutBlobMagic)
+        return false;
+    const uint8_t *src = data + sizeof(magic);
+    std::memcpy(m_clut.data(), src, m_clut.size() * sizeof(m_clut[0]));
+    src += m_clut.size() * sizeof(m_clut[0]);
+    std::memcpy(m_clutCbp.data(), src, m_clutCbp.size() * sizeof(m_clutCbp[0]));
+    // The restored palette no longer matches whatever the texture cache
+    // derived from the pre-load VRAM: drop it so indexed draws re-derive
+    // from the restored state.
+    m_texturePageCache.Invalidate();
+    return true;
+}
+
 void GSCpuBackend::Sync(GSSyncReason)
 {
     // CPU backend is immediate. GPU backends may wait on fences/readbacks here.

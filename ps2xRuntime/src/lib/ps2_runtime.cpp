@@ -2835,6 +2835,11 @@ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
 void PS2Runtime::resetIop()
 {
     m_iopSubsystem->reset();
+    // RBF1: HLE mode keeps the pre-rebase unconditional core-service routing
+    // (MCSERV, dbcman, libsd); emulator mode keeps the module gate. Every
+    // reset path runs through here (init, ELF load, run(), SifInitRpc), so
+    // the mode cannot be lost by a transport reset.
+    m_iopSubsystem->setHleCoreServices(m_hleIopMode);
 }
 
 ps2x::iop::DebugSnapshot PS2Runtime::iopDebugSnapshot() const
@@ -3584,6 +3589,10 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
             std::fprintf(stderr, "[iop-mode] ignoring PS2X_IOP_MODE=%s (hle|emulator)\n", iopMode);
     }
     std::fprintf(stderr, "[iop-mode] %s\n", m_hleIopMode ? "hle" : "emulator");
+    // RBF1: the ELF-load reset above predates the mode decision; assert the
+    // HLE core-service routing for the decided mode (run() re-asserts it via
+    // resetIop() on every boot, as do SifInitRpc resets).
+    m_iopSubsystem->setHleCoreServices(m_hleIopMode);
 
     // TK2: host course manifest (PS2X_SSX3_COURSE_MANIFEST, default off).
     ps2_ssx3_course::applyFromEnv(m_memory.getRDRAM());

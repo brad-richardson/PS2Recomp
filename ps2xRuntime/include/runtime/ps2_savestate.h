@@ -13,8 +13,9 @@
 // File: "PS2XSAVE" + u32 format version, then sections
 //   [u32 keyLen][key][u32 sectionVersion][u64 size][payload].
 // Section 0 is "header" (key=value lines). A layout change bumps that
-// section's version; the loader refuses unknown, missing or mismatched
-// sections instead of reading garbage.
+// section's version; the loader refuses unknown, missing or out-of-range
+// sections instead of reading garbage (a section may accept a
+// [minLoadVersion, version] range when its load hook migrates old payloads).
 
 #include <algorithm>
 #include <array>
@@ -381,9 +382,21 @@ namespace ps2_savestate
         SaveFn save = nullptr;
         LoadFn load = nullptr;
         ReadyFn ready = nullptr;
+        // RBF1: oldest payload the load hook still reads (a format migration).
+        // 0 (the default) means exact: only `version` is accepted, as before.
+        // The loader accepts [minLoadVersion, version] and stamps the file's
+        // version for the load hook via setLoadingSectionVersion below.
+        uint32_t minLoadVersion = 0u;
     };
     bool registerSection(const std::string &key, SectionHooks hooks);
     const std::map<std::string, SectionHooks> &registeredSections();
+
+    // RBF1: version of the section payload the loader is handing to a load
+    // hook (0 outside a section load). Lets one load hook serve several
+    // accepted versions (e.g. the stub:sif v1 migration, whose handlers
+    // stored one word instead of {function, argument}).
+    void setLoadingSectionVersion(uint32_t version);
+    [[nodiscard]] uint32_t loadingSectionVersion();
 
     // Rebuilds an EE wait/resume completion from its tag (EeCompletionTag in
     // ee_scheduler.h). Factories register from the TU that owns the closure.

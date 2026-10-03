@@ -87,7 +87,8 @@ public:
     }
     // SS1 save states (on the GS thread, after a drain). Idle = no transfer
     // or local->host bytes in flight. Save/Load carry state that is not in
-    // PS2Memory (the CPU backend's VRAM is PS2Memory's, so it has none).
+    // PS2Memory (the CPU backend's VRAM is PS2Memory's, but its cached CLUT
+    // contents and base latches are not: RBF1 serializes those).
     // SS3: SavestateBusyReason names the deferral ("gs-transfer") when idle
     // is false for a specific new cause; "" keeps the generic text.
     // SQ1: SavestateQuiesce settles host-side-only pending work (a render

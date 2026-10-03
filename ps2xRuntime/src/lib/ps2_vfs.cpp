@@ -310,3 +310,26 @@ std::vector<PS2VfsDescriptorInfo> PS2Vfs::descriptors() const
         result.push_back({descriptor, entry.device, entry.path});
     return result;
 }
+
+namespace
+{
+    // RBF1: VFS bound by the savestate save/load paths around the registered-
+    // section loop (the "syscalls" section is runtime-free). Plain static:
+    // saves and loads never overlap on a thread.
+    PS2Vfs *g_savestateBinding = nullptr;
+} // namespace
+
+void PS2Vfs::setSavestateBinding(PS2Vfs *vfs) { g_savestateBinding = vfs; }
+PS2Vfs *PS2Vfs::savestateBinding() { return g_savestateBinding; }
+
+uint32_t PS2Vfs::nextDescriptorForSavestate() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return static_cast<uint32_t>(m_nextDescriptor < 3 ? 3 : m_nextDescriptor);
+}
+
+void PS2Vfs::setNextDescriptorForSavestate(uint32_t next)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_nextDescriptor = next < 3u ? 3 : static_cast<int32_t>(next);
+}

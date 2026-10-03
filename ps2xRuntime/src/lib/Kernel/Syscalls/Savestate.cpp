@@ -3,6 +3,7 @@
 
 #include "Common.h"
 #include "runtime/ps2_savestate.h"
+#include "runtime/ps2_vfs.h"
 
 namespace
 {
@@ -49,10 +50,29 @@ namespace
             ww.pod(e.second);
         });
         w.pod(g_next_sif_module_id);
+        // RBF1 v3 (RRV1 #4): the VFS descriptor counter. Appended at the end
+        // so the v2 prefix is untouched. A null binding (direct section test
+        // without a runtime) saves the fresh-constructed value.
+        PS2Vfs *bound = PS2Vfs::savestateBinding();
+        w.u32(bound ? bound->nextDescriptorForSavestate() : 3u);
     }
 
     bool syscallLoad(Reader &r)
     {
+        // RBF1: accept v1 (pre-rebase) payloads. v1 led with the old global
+        // fio allocator g_nextFd; the VFS now owns descriptors (RRV1 #4), so
+        // the old counter resumes there. v2 has no counter word: the VFS
+        // keeps its fresh value, matching today's behavior. v3 appends the
+        // counter at the end. An unstamped call (0) reads the current layout.
+        const uint32_t version = ps2_savestate::loadingSectionVersion();
+        if (version != 0u && version != 1u && version != 2u && version != 3u)
+            return r.fail("syscalls loader got version");
+        if (version == 1u)
+        {
+            const uint32_t nextFd = r.u32();
+            if (PS2Vfs *vfs = PS2Vfs::savestateBinding())
+                vfs->setNextDescriptorForSavestate(nextFd);
+        }
         ps2_savestate::readOrdered(r, g_rpc_servers, [](Reader &rr, auto &e) {
             e.first = rr.u32();
             e.second.sid = rr.u32();
@@ -91,6 +111,12 @@ namespace
             rr.pod(e.second);
         });
         r.pod(g_next_sif_module_id);
+        if (version == 3u || version == 0u)
+        {
+            const uint32_t nextDescriptor = r.u32();
+            if (PS2Vfs *vfs = PS2Vfs::savestateBinding())
+                vfs->setNextDescriptorForSavestate(nextDescriptor);
+        }
         return r.ok();
     }
 
@@ -102,7 +128,7 @@ namespace
     }
 
     const bool kSyscallSavestateRegistered =
-        ps2_savestate::registerSection("syscalls", {2u, &syscallSave, &syscallLoad, &syscallReady});
+        ps2_savestate::registerSection("syscalls", {3u, &syscallSave, &syscallLoad, &syscallReady, 1u});
 } // namespace
 
 // Referenced from ps2_savestate.cpp: nothing else uses this object, so the

@@ -63,4 +63,8 @@ namespace ps2_stubs
     void sceSifStopDma(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifSyncIop(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
     void sceSifWriteBackDCache(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+
+    // RBF1: test hook for the stub:sif v1 migration (v1 stored each handler
+    // as one function word; v2 stores {function, argument}).
+    bool sifCmdHandlerForTest(uint32_t commandId, uint32_t &function, uint32_t &argument);
 }

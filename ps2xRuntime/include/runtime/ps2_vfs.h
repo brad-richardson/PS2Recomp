@@ -68,6 +68,16 @@ public:
     [[nodiscard]] bool resolveHostPath(std::string_view path, const PS2VfsMounts &mounts, std::filesystem::path &result) const;
     [[nodiscard]] std::vector<PS2VfsDescriptorInfo> descriptors() const;
 
+    // RBF1 savestate bridge: the registered "syscalls" section is
+    // runtime-free, but the descriptor counter it carries (v3+) lives on the
+    // calling PS2Runtime's VFS. The savestate save/load paths bind that VFS
+    // around the section loop; section code must tolerate a null binding
+    // (direct section tests). The counter itself stays mutex-guarded.
+    static void setSavestateBinding(PS2Vfs *vfs);
+    [[nodiscard]] static PS2Vfs *savestateBinding();
+    [[nodiscard]] uint32_t nextDescriptorForSavestate() const;
+    void setNextDescriptorForSavestate(uint32_t next);
+
 private:
     struct OpenDescriptor
     {
