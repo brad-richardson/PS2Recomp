@@ -1194,6 +1194,11 @@ if(PS2X_IS_IOS)
     )
     # IP1: universal device family so iPadOS runs full screen (was: Xcode default 1, iPhone compat box).
     set_target_properties(ps2EntryRunner PROPERTIES XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
+    # ICO1: app icon = the Android launcher mountain (tools/make_ios_icon.swift renders the PNG).
+    # Xcode compiles the asset catalog with actool and merges CFBundleIcons into Info.plist.
+    target_sources(ps2EntryRunner PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ios/Assets.xcassets")
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/ios/Assets.xcassets" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+    set_target_properties(ps2EntryRunner PROPERTIES XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon")
     # IB3 (AirPods): AVAudioSession lives here; the OM1/GI1 blocks link it
     # too when they are on (duplicate -framework flags are harmless).
     target_link_libraries(ps2EntryRunner PRIVATE "-framework AVFoundation")
