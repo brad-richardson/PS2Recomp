@@ -48,6 +48,11 @@ public:
     void setProcessPathPacketFn(ProcessPathPacketFn fn) { m_processPathFn = std::move(fn); }
     // GP4 H5: borrow the GS packet pool (null = direct alloc, the default).
     void setPacketPool(GsPacketPool *pool) { m_pool = pool; }
+    // PKB1 item 1: copy straight into the packet buffer (assign) instead of
+    // resize-zero-fill + memcpy. The buffer is fully overwritten either way,
+    // so the GS stream is unchanged. Off = today's resize+memcpy path.
+    void setNoZeroFill(bool on) { m_noZeroFill = on; }
+    bool noZeroFill() const { return m_noZeroFill; }
     // MP1 L3: drain() orders queues of up to two packets with the one
     // compare stable_sort would make, without the call (libc++ stable_sort
     // allocates a temporary buffer per call for this element type). CU4 B1:
@@ -72,6 +77,7 @@ private:
     ShadowPacketFn m_shadowFn;
     ProcessPathPacketFn m_processPathFn;
     GsPacketPool *m_pool = nullptr; // GP4 H5: borrowed, null unless the diet block sets it
+    bool m_noZeroFill = false; // PKB1 item 1: assign-copy instead of resize+memcpy
     std::vector<GifArbiterPacket> m_queue;
 
     static bool isImagePacket(const uint8_t *data, uint32_t sizeBytes);

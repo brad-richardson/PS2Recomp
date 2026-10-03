@@ -204,6 +204,47 @@ public:
         m_free.push_back(std::move(bytes));
     }
 
+    // PKB1 item 3: return a batch of consumed buffers under a single lock
+    // round instead of one round per packet. Same caps and swap-out rule as
+    // release(), applied per buffer in order; buffers that don't fit are
+    // freed (left for their owners to drop). The batch vector is consumed.
+    void releaseBulk(std::vector<std::vector<uint8_t>> &batch)
+    {
+        if (batch.empty())
+            return;
+        if (!enabled())
+        {
+            batch.clear();
+            return;
+        }
+        Lock lock(m_lock);
+        for (auto &bytes : batch)
+        {
+            const size_t cap = bytes.capacity();
+            if (cap == 0u || cap > kMaxBufferBytes)
+                continue;
+            bytes.clear();
+            if (m_free.size() >= kMaxBuffers || m_bytes + cap > kMaxBytes)
+            {
+                size_t smallest = m_free.size();
+                for (size_t i = 0; i < m_free.size(); ++i)
+                    if (smallest == m_free.size() || m_free[i].capacity() < m_free[smallest].capacity())
+                        smallest = i;
+                if (smallest == m_free.size() || m_free[smallest].capacity() >= cap ||
+                    m_bytes - m_free[smallest].capacity() + cap > kMaxBytes)
+                    continue;
+                m_bytes -= m_free[smallest].capacity();
+                m_bytes += cap;
+                // The smaller buffer leaves through `bytes`; freed below.
+                std::swap(m_free[smallest], bytes);
+                continue;
+            }
+            m_bytes += cap;
+            m_free.push_back(std::move(bytes));
+        }
+        batch.clear();
+    }
+
     size_t pooledCount() const
     {
         Lock lock(m_lock);

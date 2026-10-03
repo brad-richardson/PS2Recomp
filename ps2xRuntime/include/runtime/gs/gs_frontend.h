@@ -143,6 +143,12 @@ public:
         if (m_worker)
             m_worker->setPopBatch(n);
     }
+    // PKB1 item 3: batch pool releases per worker wake. While on, the worker
+    // stashes consumed payload buffers and returns up to kPopBatch of them
+    // under one pool lock round (releaseBulk) instead of one round per
+    // packet. Off = release each command's bytes immediately (today's path).
+    void setReleaseBatching(bool on);
+    bool releaseBatching() const { return m_releaseBatching; }
     // Blocks until all previously enqueued commands have executed.
     void drainQueue();
     // BG1: persist the backend's host-side caches (external GS only; a no-op
@@ -322,6 +328,8 @@ public:
 
 private:
     void executeQueuedCommand(GsCommand &cmd);
+    // PKB1 item 3: bulk-return the stashed buffers (single pool lock round).
+    void flushReleaseStash();
     void noteConsumedCommand(const GsCommand &cmd);
     void snapshotVRAM();
     void writeRegisterUnlocked(uint8_t regAddr, uint64_t value);
@@ -425,6 +433,12 @@ private:
     // GP4 H5: reusable packet buffers (producers acquire, the worker
     // releases after execute). Thread-safe; inert unless enabled.
     GsPacketPool m_packetPool;
+    // PKB1 item 3: stash of consumed payload buffers awaiting a bulk
+    // release. Touched on the GS worker thread only (executeQueuedCommand
+    // runs there in queued mode); flushed under one lock round every
+    // kPopBatch buffers and whenever the queue stops.
+    std::vector<std::vector<uint8_t>> m_releaseStash;
+    bool m_releaseBatching = false;
     // GB2 Part 2: monotonic submit counters (atomic: incremented on the
     // worker when queued, read on the game thread after a drain).
     std::atomic<uint64_t> m_submitCount{0};

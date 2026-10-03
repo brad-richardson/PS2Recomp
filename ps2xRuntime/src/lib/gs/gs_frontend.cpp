@@ -383,6 +383,8 @@ bool GS::setQueueEnabled(bool enabled, size_t maxDescriptors)
     {
         m_worker->stop();
         m_worker.reset();
+        // PKB1 item 3: the drained queue may have left a partial stash.
+        flushReleaseStash();
     }
     return true;
 }
@@ -674,8 +676,36 @@ void GS::executeQueuedCommand(GsCommand &cmd)
     }
     // GP4 H5: the payload bytes are dead after execute; return the buffer to
     // the pool instead of freeing it (no-op unless the pool is enabled).
+    // PKB1 item 3: while release batching is on, the worker stashes consumed
+    // buffers and returns them under one pool lock round per kPopBatch
+    // executed commands instead of one round per packet. Same buffers, same
+    // pool, same order; the stash is worker-thread-only (the GsWorkerScope
+    // above marks it), so the shutdown-inline path below still releases
+    // immediately, as does everything while the pool is disabled.
     if (!cmd.bytes.empty())
-        m_packetPool.release(std::move(cmd.bytes));
+    {
+        if (m_releaseBatching && t_inGsWorker && m_packetPool.enabled())
+        {
+            m_releaseStash.push_back(std::move(cmd.bytes));
+            if (m_releaseStash.size() >= GsWorker::kPopBatch)
+                m_packetPool.releaseBulk(m_releaseStash);
+        }
+        else
+            m_packetPool.release(std::move(cmd.bytes));
+    }
+}
+
+void GS::setReleaseBatching(bool on)
+{
+    m_releaseBatching = on;
+    if (!on)
+        flushReleaseStash();
+}
+
+void GS::flushReleaseStash()
+{
+    if (!m_releaseStash.empty())
+        m_packetPool.releaseBulk(m_releaseStash);
 }
 
 void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
