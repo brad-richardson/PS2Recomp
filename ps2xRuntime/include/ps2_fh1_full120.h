@@ -2516,6 +2516,10 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addTgt(kRaceTickCallee);
         addTgt(kRaceTick2Callee);
         addTgt(kSession);
+        // FH27 bonusflip: the trick-state recorder in eventsOnBranch (0x1218ac -> 0x117c28) runs
+        // in stock windows too, so it is not on-gated (flips rescale states seen while inactive).
+        if ((c.main & kFixBonus) != 0u && (c.main & kFixBonusFlip) != 0u)
+            addTgt(kTrickPass);
     }
     if ((c.main & kFixClock) != 0u && on)
     {
