@@ -448,15 +448,95 @@ namespace vu1_fixture
     // VR3: VU0 differential images (4 KiB, VU0-legal ops): 0-1 mix (two
     // seeds), 2-3 pipes without the VU0-reserved ops (two seeds), 4..7 the
     // flag-distance list of image 1 in consecutive windows (each starts where
-    // the previous one filled up).
+    // the previous one filled up). VBK1: 8 = the edges image below.
     constexpr uint32_t kVu0CodeSize = 0x1000u;
-    constexpr uint32_t kVu0ImageCount = 8u;
+    constexpr uint32_t kVu0ImageCount = 9u;
+    constexpr uint32_t kVu0EdgeImage = 8u;
     constexpr uint64_t kVu0ImageHash[kVu0ImageCount] = {
         0x5652330000000000ull, 0x5652330000000001ull, 0x5652330000000002ull, 0x5652330000000003ull,
-        0x5652330000000004ull, 0x5652330000000005ull, 0x5652330000000006ull, 0x5652330000000007ull};
+        0x5652330000000004ull, 0x5652330000000005ull, 0x5652330000000006ull, 0x5652330000000007ull,
+        0x56424B3100000008ull};
+
+    inline uint32_t isubiu(uint8_t it, uint8_t is, int16_t imm)
+    {
+        return (0x09u << 25) | (static_cast<uint32_t>(it & 0xFu) << 16) | (static_cast<uint32_t>(is & 0xFu) << 11) |
+               (static_cast<uint32_t>(imm) & 0x7FFu);
+    }
+
+    // VBK1: the VU0 edges image. Random quiet programs, each with one edge
+    // the block table must keep exact (feature = program index % 9):
+    // 0 D bit on a plain pair; 1 T bit on a branch (halt after its delay
+    // slot); 2 a VU0-reserved op (WAITP) mid-program; 3 E bit on a branch;
+    // 4 E bit in a branch's delay slot; 5 a branch reading the VI the
+    // previous pair wrote (branch VI backup); 6 upper/lower writing and
+    // reading the same VF in one pair (shadowing); 7 a backward counted loop
+    // (a block leader reached by a taken branch, three times); 8 a branch in
+    // a branch's delay slot. D/T halts need the test to enable D/T.
+    inline std::vector<Program> buildVu0EdgeImage(uint8_t *code)
+    {
+        std::memset(code, 0, kVu0CodeSize);
+        std::vector<Program> programs;
+        const uint32_t maxPairs = kVu0CodeSize / 8u;
+        Rng rnd{0x56424B31EDCE0001ull};
+        uint32_t next = 0u;
+        for (uint32_t index = 0;; ++index)
+        {
+            const uint32_t length = 12u + rnd(14u);
+            if (next + length + 2u > maxPairs)
+                break;
+            const uint32_t start = next;
+            std::vector<uint32_t> lo(length), up(length);
+            for (uint32_t pair = 0; pair < length; ++pair)
+            {
+                lo[pair] = quietLower(rnd);
+                up[pair] = randomUpper(rnd);
+            }
+            const uint32_t k = 2u + rnd(length - 9u); // the edge sits at k .. k + 6
+            const uint8_t vi = static_cast<uint8_t>(1u + rnd(4u));
+            switch (index % 9u)
+            {
+            case 0: up[k] |= 0x10000000u; break;                              // D
+            case 1: lo[k] = branch(2); up[k] |= 0x08000000u; break;            // T on a branch
+            case 2: lo[k] = lowerSpecial(0x7Bu, 0u); break;                    // WAITP: reserved on VU0
+            case 3: lo[k] = branch(2); up[k] |= 0x40000000u; break;            // E on a branch
+            case 4: lo[k] = branch(3); up[k + 1u] |= 0x40000000u; break;       // E in a delay slot
+            case 5:
+                lo[k] = iaddiu(vi, vi, static_cast<int16_t>(1u + rnd(3u)));
+                lo[k + 1u] = ibne(vi, static_cast<uint8_t>(rnd(5u)), 2);
+                break;
+            case 6:
+            {
+                const uint8_t vf = static_cast<uint8_t>(1u + rnd(8u));
+                up[k] = upper(0x28u, 0xFu, static_cast<uint8_t>(1u + rnd(8u)), static_cast<uint8_t>(1u + rnd(8u)), vf);
+                lo[k] = rnd(2u) != 0u ? sq(0xFu, vf, 0u, static_cast<int16_t>(rnd(64u)))
+                                      : lq(static_cast<uint8_t>(1u + rnd(15u)), vf, 0u, static_cast<int16_t>(rnd(64u)));
+                up[k + 1u] = upper(0x2Cu, 0xFu, vf, static_cast<uint8_t>(1u + rnd(8u)), vf); // SUB vf, vf, x
+                lo[k + 1u] = lq(static_cast<uint8_t>(1u + rnd(15u)), vf, 0u, static_cast<int16_t>(rnd(64u)));
+                break;
+            }
+            case 7:
+                lo[k - 2u] = iaddiu(7u, 0u, 3);
+                lo[k + 3u] = isubiu(7u, 7u, 1);
+                lo[k + 5u] = ibne(7u, 0u, -6); // back to k; delay slot k + 6
+                break;
+            default:
+                lo[k] = branch(3);
+                lo[k + 1u] = ibne(vi, 0u, 2);
+                break;
+            }
+            for (uint32_t pair = 0; pair < length; ++pair)
+                writePair(code, (start + pair) * 8u, lo[pair], up[pair]);
+            const uint32_t total = length + writeEnd(code, (start + length) * 8u);
+            programs.push_back({start * 8u, total});
+            next = start + total;
+        }
+        return programs;
+    }
 
     inline std::vector<Program> buildVu0Image(uint32_t image, uint8_t *code)
     {
+        if (image == kVu0EdgeImage)
+            return buildVu0EdgeImage(code);
         if (image < 4u)
             return buildImage(image < 2u ? 0u : 2u, code, kVu0CodeSize, true, image & 1u);
         uint32_t skip = 0u;

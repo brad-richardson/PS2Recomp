@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <iostream>
 #include <sstream>
 #include <vector>
 #include <algorithm>
@@ -36,7 +37,7 @@ namespace
     // fresh execute() (the runtime's only VU0 continuation).
     struct Vu0DiffStats
     {
-        uint64_t runs = 0, mismatches = 0, generatedCycles = 0;
+        uint64_t runs = 0, mismatches = 0, generatedCycles = 0, haltRuns = 0;
         uint32_t programs = 0;
     };
 
@@ -54,15 +55,19 @@ namespace
     };
 
     // mode: 0 interpreter queued (reference), 1 generated queued,
-    // 2 interpreter direct commit, 3 generated direct commit.
+    // 2 interpreter direct commit, 3 generated direct commit; VBK1: 4/5 the
+    // generated block table, queued / direct commit.
     inline Vu0Snapshot runVu0Once(const VU0Interpreter::RecompProgram *generated, uint8_t *code,
                                   const Vu0Start &start, uint32_t startPc, int mode, uint32_t budget,
                                   uint32_t check, GS &gs)
     {
         VU0Interpreter vu;
-        if (mode == 1 || mode == 3)
+        if (mode == 1 || mode == 3 || mode >= 4)
             vu.setRecompProgramForTest(generated);
-        vu.setDirectCommitForTest(mode >= 2 ? 1 : 0);
+        vu.setBlocksForTest(mode >= 4 ? 1 : 0);
+        vu.setDirectCommitForTest(mode == 2 || mode == 3 || mode == 5 ? 1 : 0);
+        vu.state().dBitEnabled = start.state.dBitEnabled;
+        vu.state().tBitEnabled = start.state.tBitEnabled;
         std::memcpy(vu.state().vf, start.state.vf, sizeof(start.state.vf));
         std::memcpy(vu.state().vi, start.state.vi, sizeof(start.state.vi));
         std::memcpy(vu.state().acc, start.state.acc, sizeof(start.state.acc));
@@ -97,6 +102,7 @@ namespace
             for (uint32_t check = 0; check < 3u; ++check)
             {
                 const Vu0Snapshot ref = runVu0Once(generated, code, start, startPc, 0, budget, check, gs);
+                stats.haltRuns += ref.state.stoppedByD || ref.state.stoppedByT ? 1u : 0u;
                 for (const int mode : modes)
                 {
                     ++stats.runs;
@@ -127,7 +133,8 @@ namespace
     }
 
     // VR3 (c): VU0 direct commit in the interpreter and in generated pairs.
-    inline std::vector<int> vu0DiffModes() { return {1, 2, 3}; }
+    // VBK1: and the block table, queued and direct.
+    inline std::vector<int> vu0DiffModes() { return {1, 2, 3, 4, 5}; }
 #endif
 
     struct Vu1Fixture
@@ -2034,7 +2041,8 @@ void register_ps2_vu1_tests()
         {
             // Regression test for the Odin S1 stack overflow: every generated
             // handoff must be a guaranteed tail call. VX2: the emitter writes
-            // VU0 images only (pair functions, one exact table, no blocks).
+            // VU0 images only (pair functions, one exact table; VBK1: plus the
+            // block table of pair groups).
             Vu1Fixture fx;
             t.IsTrue(fx.initialize(), "VU1 fixture should initialize");
 
@@ -2063,15 +2071,24 @@ void register_ps2_vu1_tests()
             };
             t.Equals(count("PS2X_VU_MUSTTAIL return next(vu, c);"), static_cast<size_t>(2u),
                      "both pair handoffs are guaranteed tail calls through next()");
-            t.Equals(count("PS2X_VU_MUSTTAIL return fn(vu, c);"), static_cast<size_t>(1u),
-                     "next() dispatches with a guaranteed tail call");
+            t.Equals(count("PS2X_VU_MUSTTAIL return fn(vu, c);"), static_cast<size_t>(2u),
+                     "next() and nextBlock() dispatch with a guaranteed tail call");
             t.IsTrue(s.find("#include \"ps2_vu0_recomp_gen.h\"") != std::string::npos &&
                      s.find("VU0RecompImage<0x0000000012345678ull>::kPairs[2] = {") != std::string::npos &&
                      s.find("program.pairs = ") != std::string::npos,
                      "a VU0 image with one exact pair table is emitted and registered");
+            // VBK1: the block table: one group (both pairs) whose every exit
+            // is a guaranteed tail call through nextBlock().
+            t.IsTrue(s.find("VU0RecompImage<0x0000000012345678ull>::kBlockPairs[2] = {") != std::string::npos &&
+                     s.find("program.blockPairs = ") != std::string::npos &&
+                     count("static bool b0000(") == 1u && count("static bool b0008(") == 0u,
+                     "a block table with one pair group is emitted and registered (VBK1)");
+            t.IsTrue(count("return nextBlock(vu, c);") >= 2u &&
+                         count("return nextBlock(vu, c);") == count("PS2X_VU_MUSTTAIL return nextBlock(vu, c);"),
+                     "every block exit is a guaranteed tail call (VBK1)");
             t.IsTrue(s.find("VU1") == std::string::npos && s.find("kPairsNative") == std::string::npos &&
-                     s.find("static bool b") == std::string::npos && s.find("static bool B") == std::string::npos,
-                     "no VU1 names, native table or block functions");
+                     s.find("static bool B") == std::string::npos,
+                     "no VU1 names or native table");
         });
 
         // VB1: the direct-commit path (writes applied at issue) against the
@@ -2661,9 +2678,16 @@ void register_ps2_vu1_tests()
                          "VU0 fixture image is compiled in");
                 if (generated == nullptr)
                     return;
+                t.IsTrue(generated->blockPairs != nullptr, "VU0 fixture image has a block table (VBK1)");
                 const std::vector<vu1_fixture::Program> programs = vu1_fixture::buildVu0Image(image, code.data());
+                // VBK1: the edges image's reserved-op programs report on every run.
+                const bool edges = image == vu1_fixture::kVu0EdgeImage;
+                std::ostringstream quiet;
+                std::streambuf *const cerrBuffer = edges ? std::cerr.rdbuf(quiet.rdbuf()) : nullptr;
+                uint32_t programIndex = 0u;
                 for (const vu1_fixture::Program &program : programs)
                 {
+                    const bool haltsEnabled = edges && ((programIndex++ / 9u) & 1u) == 0u;
                     Vu0Start start;
                     start.data.assign(PS2_VU0_DATA_SIZE, 0u);
                     for (uint32_t i = 0; i < 64u * 16u; i += 4u)
@@ -2680,14 +2704,20 @@ void register_ps2_vu1_tests()
                     start.state.status = rnd(0x1000u);
                     start.state.clip = rnd(0x1000000u);
                     start.state.q = 1.0f;
-                    diffVu0Program("fixture", generated, code.data(), start, program.startPc,
+                    start.state.dBitEnabled = haltsEnabled;
+                    start.state.tBitEnabled = haltsEnabled;
+                    diffVu0Program(edges ? "edges" : "fixture", generated, code.data(), start, program.startPc,
                                    4u * program.length + 64u, vu0DiffModes(), gs, stats);
                 }
+                if (cerrBuffer != nullptr)
+                    std::cerr.rdbuf(cerrBuffer);
             }
-            std::fprintf(stderr, "[vr3-diff] vu0 images %u programs %u runs %llu generated_cycles %llu mismatches %llu\n",
+            std::fprintf(stderr, "[vr3-diff] vu0 images %u programs %u runs %llu generated_cycles %llu halt_runs %llu mismatches %llu\n",
                          vu1_fixture::kVu0ImageCount, stats.programs, static_cast<unsigned long long>(stats.runs),
                          static_cast<unsigned long long>(stats.generatedCycles),
+                         static_cast<unsigned long long>(stats.haltRuns),
                          static_cast<unsigned long long>(stats.mismatches));
+            t.IsTrue(stats.haltRuns > 0u, "the edges image stopped on D/T bits (VBK1)");
             t.Equals(stats.mismatches, uint64_t{0}, "every VU0 mode matches the queued VU0 interpreter at every cut");
             t.IsTrue(stats.programs > 150u, "all VU0 fixture images ran");
             t.IsTrue(stats.runs > 20000u, "differential covered many cuts");
