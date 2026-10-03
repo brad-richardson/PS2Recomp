@@ -379,6 +379,31 @@ namespace ps2_ssx3_vis_native
         return true;
     }
 
+    // copyVu0StateToContext's view of the end state (shared by runDb8 and
+    // runP570: both leave VF9/VF14, VF17-31, Q/P/I and ITOP untouched).
+    PS2X_VU1_ALWAYS_INLINE inline void exportState(R5900Context *ctx, const Regs &r, uint32_t endPc)
+    {
+        ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+        for (int i = 1; i <= 16; ++i)
+            if (i != 9 && i != 14)
+                storeVf(ctx->vu0_vf[i], r.vf[i]);
+        for (int i = 0; i < 16; ++i)
+            ctx->vi[i] = static_cast<uint16_t>(r.vi[i]);
+        ctx->vi[0] = 0;
+        storeVf(ctx->vu0_acc, r.acc);
+        alignas(16) uint32_t rWords[4];
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(rWords), _mm_castps_si128(ctx->vu0_r));
+        ctx->vu0_r = _mm_castsi128_ps(_mm_set1_epi32(static_cast<int32_t>(0x3F800000u | (rWords[0] & 0x007FFFFFu))));
+        ctx->vu0_mac_flags = r.flags.mac;
+        ctx->vu0_clip_flags = r.clip;
+        ctx->vu0_clip_flags2 = r.clip;
+        ctx->vu0_status = static_cast<uint16_t>((ctx->vu0_status & 0xFF0u) | (r.flags.sticky << 6) | r.flags.cur);
+        ctx->vu0_pc = endPc;
+        ctx->vu0_tpc = endPc;
+        ctx->vu0_vpu_stat = ctx->vu0_vpu_stat & 0xFF00u;
+        ctx->vu0_vpu_stat2 = 0;
+    }
+
     void runDb8(R5900Context *ctx, const uint8_t *vu0Data)
     {
         // VuCore::run's FP control (round toward zero + flush to zero);
@@ -462,25 +487,31 @@ namespace ps2_ssx3_vis_native
         }
 
         // copyVu0StateToContext's view of the end state.
-        ctx->vu0_vf[0] = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
+        exportState(ctx, r, endPc);
+    }
+
+    void runP570(R5900Context *ctx)
+    {
+        // VNP1P2: the walker's AABB program. The four leading NOP pairs move
+        // vf0 to vf0 (no FMAC, no flag write); the body is sub0ac8 with
+        // VF10-13/15/16 from ctx (the walker's macro-op setup; .w lanes
+        // carried over from earlier programs). No data-memory read, no BAL
+        // (VCALLMS leaves vi15 alone), E at 0x6D0 so the end pc is 0x6E0.
+        ps2_fpmode::ScopedPs2Mode fpMode;
+
+        Regs r;
+        r.vf[0] = v4f{0.0f, 0.0f, 0.0f, 1.0f};
         for (int i = 1; i <= 16; ++i)
-            if (i != 9 && i != 14)
-                storeVf(ctx->vu0_vf[i], r.vf[i]);
+            r.vf[i] = loadVf(ctx->vu0_vf[i]);
         for (int i = 0; i < 16; ++i)
-            ctx->vi[i] = static_cast<uint16_t>(r.vi[i]);
-        ctx->vi[0] = 0;
-        storeVf(ctx->vu0_acc, r.acc);
-        alignas(16) uint32_t rWords[4];
-        _mm_storeu_si128(reinterpret_cast<__m128i *>(rWords), _mm_castps_si128(ctx->vu0_r));
-        ctx->vu0_r = _mm_castsi128_ps(_mm_set1_epi32(static_cast<int32_t>(0x3F800000u | (rWords[0] & 0x007FFFFFu))));
-        ctx->vu0_mac_flags = r.flags.mac;
-        ctx->vu0_clip_flags = r.clip;
-        ctx->vu0_clip_flags2 = r.clip;
-        ctx->vu0_status = static_cast<uint16_t>((ctx->vu0_status & 0xFF0u) | (r.flags.sticky << 6) | r.flags.cur);
-        ctx->vu0_pc = endPc;
-        ctx->vu0_tpc = endPc;
-        ctx->vu0_vpu_stat = ctx->vu0_vpu_stat & 0xFF00u;
-        ctx->vu0_vpu_stat2 = 0;
+            r.vi[i] = static_cast<int16_t>(ctx->vi[i]);
+        r.vi[0] = 0;
+        r.acc = loadVf(ctx->vu0_acc);
+        r.clip = ctx->vu0_clip_flags;
+
+        sub0ac8(r);
+
+        exportState(ctx, r, 0x6E0u);
     }
 #else
     bool available()
@@ -489,6 +520,10 @@ namespace ps2_ssx3_vis_native
     }
 
     void runDb8(R5900Context *, const uint8_t *)
+    {
+    }
+
+    void runP570(R5900Context *)
     {
     }
 #endif
@@ -599,16 +634,25 @@ namespace ps2_ssx3_vis_native
         return same;
     }
 
-    void noteCheck(const Vu0Snapshot &in, const Vu0Snapshot &ref, const Vu0Snapshot &got)
+    void noteCheck(uint32_t startPc, const Vu0Snapshot &in, const Vu0Snapshot &ref, const Vu0Snapshot &got)
     {
         static uint64_t calls = 0, mismatches = 0;
+        static uint64_t callsDb8 = 0, calls570 = 0, mismDb8 = 0, mism570 = 0;
         static uint64_t results[5] = {};
         ++calls;
+        if (startPc == kStartPc570)
+            ++calls570;
+        else
+            ++callsDb8;
         if (ref.vi[1] < 5u)
             ++results[ref.vi[1]];
         if (!equal(ref, got, false))
         {
             ++mismatches;
+            if (startPc == kStartPc570)
+                ++mism570;
+            else
+                ++mismDb8;
             if (mismatches <= 16u)
             {
                 uint32_t w[12];
@@ -616,18 +660,20 @@ namespace ps2_ssx3_vis_native
                 std::memcpy(w + 4, &in.vf[21], 16);
                 std::memcpy(w + 8, &in.vf[22], 16);
                 std::fprintf(stderr,
-                             "[vnp1] MISMATCH call=%llu vf20=%08x,%08x,%08x,%08x vf21=%08x,%08x,%08x,%08x "
+                             "[vnp1] MISMATCH pc=%03x call=%llu vf20=%08x,%08x,%08x,%08x vf21=%08x,%08x,%08x,%08x "
                              "vf22=%08x,%08x,%08x,%08x vi14=%04x ref_vi1=%u got_vi1=%u\n",
-                             static_cast<unsigned long long>(calls), w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7],
+                             startPc, static_cast<unsigned long long>(calls), w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7],
                              w[8], w[9], w[10], w[11], in.vi[14], ref.vi[1], got.vi[1]);
                 (void)equal(ref, got, true);
             }
         }
         if ((calls & 0xFFFFu) == 0u || calls == 1024u)
-            std::fprintf(stderr, "[vnp1] check calls=%llu mismatches=%llu results=%llu,%llu,%llu,%llu,%llu\n",
+            std::fprintf(stderr, "[vnp1] check calls=%llu mismatches=%llu results=%llu,%llu,%llu,%llu,%llu pc=db8:%llu,570:%llu mism_db8=%llu mism_570=%llu\n",
                          static_cast<unsigned long long>(calls), static_cast<unsigned long long>(mismatches),
                          static_cast<unsigned long long>(results[0]), static_cast<unsigned long long>(results[1]),
                          static_cast<unsigned long long>(results[2]), static_cast<unsigned long long>(results[3]),
-                         static_cast<unsigned long long>(results[4]));
+                         static_cast<unsigned long long>(results[4]), static_cast<unsigned long long>(callsDb8),
+                         static_cast<unsigned long long>(calls570), static_cast<unsigned long long>(mismDb8),
+                         static_cast<unsigned long long>(mism570));
     }
 }
