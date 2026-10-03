@@ -149,8 +149,6 @@ extern "C" PS2X_MV2_EXPORT int ps2x_microvu_init(const char** error)
     if (EmuConfig.Speedhacks.vuFlagHack)
         std::fprintf(stderr, "[microvu] flag hack on (VU2, PCSX2 default vuFlagHack)\n");
     EmuConfig.Gamefixes.XgKickHack = false;
-    const char* lean = std::getenv("PS2X_MICROVU_BRIDGE_LEAN");
-    s_leanDiff = !(lean && lean[0] == '0');
     s_ready = true;
     return 1;
 }

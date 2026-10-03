@@ -297,18 +297,10 @@ extern "C" GE1_API int ge1_gs_open(int blending_level)
     // GE4: Adreno sw-blend workaround (menu font static). Env-gated, default off.
     if (const char* bmix = std::getenv("GE1_ADRENO_BLEND_MIX"); bmix && std::strcmp(bmix, "1") == 0)
         config.AdrenoPreferBlendMix = true;
-    // CN1-C: GE1_ADRENO_OVERONE=split keeps the per-batch GE7 split for over-one blend-mix
-    // promotions (exact path); unset = one pre-draw copy per such draw.
-    if (const char* ov = std::getenv("GE1_ADRENO_OVERONE"); ov && std::strcmp(ov, "split") == 0)
-        config.AdrenoOverOneSplit = true;
     // GS10: PCSX2's per-game draw-buffering hack (GameIndex drawBuffering; SSX 3's
     // 3-pass terrain interleave halves draws/passes, GS9). Output-only. Default off.
     if (const char* db = std::getenv("GE1_DRAW_BUFFERING"); db && std::strcmp(db, "1") == 0)
         config.UserHacks_DrawBuffering = true;
-    // GI1: diagnostic fetch disable (matches the Simulator, which forces fetch
-    // off because sim Metal rejects fetch pipelines). Default off.
-    if (const char* nofetch = std::getenv("GE1_DISABLE_FETCH"); nofetch && std::strcmp(nofetch, "1") == 0)
-        config.DisableFramebufferFetch = true;
     // GP6/BP1 on the ARMSX2 base (CN1A): ARMSX2 2.7.2 carries the GSBackQueue
     // split (our GP6 port is their code) as a plain on/off GSOptions::BackThread;
     // the inline/lockstep bisect rungs are gone. Unset or empty resolves to the

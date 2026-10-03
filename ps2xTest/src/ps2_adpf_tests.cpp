@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <string>
 
-// AD1: PS2X_ADPF pure parts — knob parse, target-ms parse, thread names.
+// AD1: PS2X_ADPF pure parts — knob parse, thread names.
 void register_ps2_adpf_tests()
 {
     MiniTest::Case("Ps2Adpf", [](TestCase &tc)
@@ -17,28 +17,10 @@ void register_ps2_adpf_tests()
             t.IsTrue(!ps2x::adpf::enabledFromEnv(nullptr), "null off");
             t.IsTrue(!ps2x::adpf::enabledFromEnv("10"), "10 off"); });
 
-        tc.Run("parseTargetNs reads decimal ms, defaults otherwise", [](TestCase &t)
-               {
-            t.Equals(ps2x::adpf::parseTargetNs(nullptr), ps2x::adpf::kDefaultTargetNs, "null default");
-            t.Equals(ps2x::adpf::parseTargetNs(""), ps2x::adpf::kDefaultTargetNs, "empty default");
-            t.Equals(ps2x::adpf::parseTargetNs("10"), INT64_C(10000000), "10ms");
-            t.Equals(ps2x::adpf::parseTargetNs("6"), INT64_C(6000000), "6ms");
-            t.Equals(ps2x::adpf::parseTargetNs("2.5"), INT64_C(2500000), "fractional");
-            t.Equals(ps2x::adpf::parseTargetNs("0"), ps2x::adpf::kDefaultTargetNs, "zero default");
-            t.Equals(ps2x::adpf::parseTargetNs("-3"), ps2x::adpf::kDefaultTargetNs, "negative default");
-            t.Equals(ps2x::adpf::parseTargetNs("fast"), ps2x::adpf::kDefaultTargetNs, "junk default");
-            t.Equals(ps2x::adpf::parseTargetNs("10ms"), ps2x::adpf::kDefaultTargetNs, "trailing junk default"); });
-
-        tc.Run("parseReportMode: only \"critical\" selects Critical", [](TestCase &t)
+        tc.Run("reportMode is Busy (the critical override is deleted)", [](TestCase &t)
                {
             using ps2x::adpf::ReportMode;
-            t.IsTrue(ps2x::adpf::parseReportMode(nullptr) == ReportMode::Busy, "null busy");
-            t.IsTrue(ps2x::adpf::parseReportMode("") == ReportMode::Busy, "empty busy");
-            t.IsTrue(ps2x::adpf::parseReportMode("busy") == ReportMode::Busy, "busy");
-            t.IsTrue(ps2x::adpf::parseReportMode("critical") == ReportMode::Critical, "critical");
-            t.IsTrue(ps2x::adpf::parseReportMode("Critical") == ReportMode::Busy, "case-sensitive");
-            t.IsTrue(ps2x::adpf::parseReportMode("critical ") == ReportMode::Busy, "trailing junk busy");
-            t.IsTrue(ps2x::adpf::reportMode() == ReportMode::Busy, "off Android: always busy"); });
+            t.IsTrue(ps2x::adpf::reportMode() == ReportMode::Busy, "always busy"); });
 
         tc.Run("threadName covers all four sessions", [](TestCase &t)
                {

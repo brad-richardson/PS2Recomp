@@ -2927,18 +2927,6 @@ PS2Runtime::PS2Runtime()
         ps2_dsp1::g_fastCheckpoint =
             ps2_dsp1::g_fast && !(simMode && std::strcmp(simMode, "split120_render60_v1") == 0);
     }
-#if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
-    if (const char *sbrMode = std::getenv("PS2X_SBR_MODE"))
-    {
-        if (std::strcmp(sbrMode, "s64") == 0)
-            m_sbrUseS64 = true;
-        else if (std::strcmp(sbrMode, "s32") == 0)
-            m_sbrUseS64 = false;
-        else
-            std::cerr << "[sbr] invalid PS2X_SBR_MODE '" << sbrMode
-                      << "' (expected s32|s64); using s32" << std::endl;
-    }
-#endif
     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
 

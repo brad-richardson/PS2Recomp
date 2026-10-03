@@ -134,9 +134,9 @@ inline HostPaceConfig hostPaceFromEnv(const char *rate1, const char *rate2, cons
 
 inline HostPaceConfig hostPaceFromProcessEnv()
 {
-    return hostPaceFromEnv(
-        std::getenv("PS2X_HOST_PACE_RATE"), std::getenv("PS2X_HOST_PACE_RATE2"),
-        std::getenv("PS2X_HOST_PACE_TICK2"));
+    // The PS2X_HOST_PACE_RATE[/RATE2/TICK2] override is deleted: host pacing
+    // stays off. hostPaceFromEnv above keeps its unit tests.
+    return HostPaceConfig{};
 }
 
 constexpr int64_t periodForRate(double rate)

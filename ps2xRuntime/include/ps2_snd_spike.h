@@ -321,8 +321,6 @@ inline void initLocked(State &s)
         s.dumpDir = d;
     if (const char *p = std::getenv("PS2X_SND_TAG1"); p && *p)
         s.tag1File = std::fopen(p, "wb");
-    if (const char *p = std::getenv("PS2X_SND_VOICES"); p && std::strcmp(p, "0") == 0)
-        s.voices = false;
     if (const char *p = std::getenv("PS2X_SND_MIX_RAW"); p && *p)
         s.mixRaw = std::fopen(p, "wb");
     s.spu.interp = ps2_snd_spu::parseInterp(std::getenv("PS2X_SPU_INTERP"));
