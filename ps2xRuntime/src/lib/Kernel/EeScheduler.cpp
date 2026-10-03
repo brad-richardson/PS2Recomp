@@ -17,7 +17,6 @@
 #include "ps2_vsync_lock.h"
 #include "ps2_mpg_src_trace.h"
 #include "ps2_e15.h"
-#include "ps2_vq.h"
 #include "runtime/gs/gs_stream_capture.h"
 #if PS2X_ENABLE_DET_HASH_TAP
 #define XXH_NO_XXH32
@@ -3137,8 +3136,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         }
         ps2_e41_trace::noteVsync(m_vsyncTick); // E41 cdread/plant vsync mirror
         m_runtime.memory().gs().vsyncTick.store(m_vsyncTick, std::memory_order_release);
-        ps2_vq::noteVBlank(m_vsyncTick, m_runtime.gs(), m_runtime.memory().gs()); // GB2 Part 2 quiescent gate
-        ps2x_gs_capture::vblank(m_vsyncTick); // same stream position as the live VQ sample
+        ps2x_gs_capture::vblank(m_vsyncTick); // capture at the VBlank stream position
         ps2xGsCsrVBlankStart(m_runtime.memory(), m_vsyncTick);
         // GE2: guest-VSync command at every VBlank, after the CSR FIELD
         // update (queued behind its PrivWrite when the queue is on). No-op

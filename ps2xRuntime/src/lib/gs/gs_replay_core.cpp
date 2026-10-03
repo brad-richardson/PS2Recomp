@@ -8,7 +8,6 @@
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/ps2_memory.h"
-#include "ps2_vq.h"
 
 #include "ps2_fpmode.h"
 #include <cstdio>
@@ -30,6 +29,34 @@ namespace
             hash *= 16777619u;
         }
         return hash;
+    }
+
+    // Moved verbatim from ps2_vq.h (KNC1P2 B5 deletes the VQ header): writes
+    // vq-<tick>.ppm (RGB) for a replay sample frame.
+    void dumpPpm(const char *dir, uint64_t tick, const PresentationFrame &frame)
+    {
+        char path[1024];
+        std::snprintf(path, sizeof(path), "%s/vq-%06llu.ppm", dir, static_cast<unsigned long long>(tick));
+        FILE *f = std::fopen(path, "wb");
+        if (!f)
+            return;
+        std::fprintf(f, "P6\n%u %u\n255\n", frame.width, frame.height);
+        const size_t stride = static_cast<size_t>(640u) * 4u;
+        std::vector<uint8_t> row(static_cast<size_t>(frame.width) * 3u);
+        for (uint32_t y = 0; y < frame.height; ++y)
+        {
+            const size_t off = static_cast<size_t>(y) * stride;
+            if (off + static_cast<size_t>(frame.width) * 4u > frame.pixels.size())
+                break;
+            for (uint32_t x = 0; x < frame.width; ++x)
+            {
+                row[x * 3u + 0u] = frame.pixels[off + x * 4u + 0u];
+                row[x * 3u + 1u] = frame.pixels[off + x * 4u + 1u];
+                row[x * 3u + 2u] = frame.pixels[off + x * 4u + 2u];
+            }
+            std::fwrite(row.data(), 1, row.size(), f);
+        }
+        std::fclose(f);
     }
 
     struct ScopedReplayRtz
@@ -370,7 +397,7 @@ Ps2xGsReplayResult ps2x_gs_replay_run()
             const PresentationFrame frame = gs.presentForDiagnostics();
             if (const char *dir = std::getenv("PS2X_GS_REPLAY_PPM_DIR"))
                 if (named && *dir && frame)
-                    ps2_vq::dumpPpm(dir, tick, frame);
+                    dumpPpm(dir, tick, frame);
             if (named)
             {
                 std::cout << "GB4_FRAME tick=" << tick
@@ -405,7 +432,7 @@ Ps2xGsReplayResult ps2x_gs_replay_run()
                             request.contextFrames[1] = displayFrame(regs.dispfb2);
                             const PresentationFrame rawFrame = raw.Present(request);
                             if (rawFrame)
-                                ps2_vq::dumpPpm(rawDir, tick, rawFrame);
+                                dumpPpm(rawDir, tick, rawFrame);
                             std::cout << "GB4_RAW_FRAME tick=" << tick
                                       << " dispfb1_fbp=" << (regs.dispfb1 & 0x1ffu)
                                       << " display_fbp=" << rawFrame.displayFbp
