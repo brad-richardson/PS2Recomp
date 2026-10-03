@@ -387,6 +387,10 @@ namespace ps2_savestate
         // The loader accepts [minLoadVersion, version] and stamps the file's
         // version for the load hook via setLoadingSectionVersion below.
         uint32_t minLoadVersion = 0u;
+        // FH27: a section added after files already exist. A file without it
+        // still loads (the owner keeps its fresh-process state, as before the
+        // section existed); a file with it is checked like any other.
+        bool optional = false;
     };
     bool registerSection(const std::string &key, SectionHooks hooks);
     const std::map<std::string, SectionHooks> &registeredSections();

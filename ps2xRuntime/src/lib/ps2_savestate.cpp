@@ -39,6 +39,7 @@
 #endif
 
 void ps2_savestate_linkSyscallSection(); // Kernel/Syscalls/Savestate.cpp
+void ps2_fh1_linkSavestateSection();      // Kernel/Fh1Savestate.cpp (FH27)
 
 namespace ps2_savestate
 {
@@ -102,6 +103,7 @@ namespace ps2_savestate
     {
         static const Config cfg = [] {
             ps2_savestate_linkSyscallSection();
+            ps2_fh1_linkSavestateSection();
             Config c;
             auto env = [](const char *k) -> std::string {
                 const char *v = std::getenv(k);
@@ -1015,6 +1017,10 @@ namespace ps2_savestate
             const uint32_t min = it->second.minLoadVersion == 0u ? it->second.version : it->second.minLoadVersion;
             return version >= min && version <= it->second.version;
         };
+        auto sectionOptional = [](const std::string &key) {
+            const auto it = registeredSections().find(key);
+            return it != registeredSections().end() && it->second.optional;
+        };
         auto versionMismatch = [](const std::string &key, uint32_t version, uint32_t current) {
             const auto it = registeredSections().find(key);
             if (it != registeredSections().end() && it->second.minLoadVersion != 0u)
@@ -1062,7 +1068,7 @@ namespace ps2_savestate
             for (const auto &[k, v] : expected)
             {
                 (void)v;
-                if (!seen[k])
+                if (!seen[k] && !sectionOptional(k))
                 {
                     error = "missing section " + k;
                     return false;
@@ -1137,7 +1143,7 @@ namespace ps2_savestate
         for (const auto &[k, v] : expected)
         {
             (void)v;
-            if (!loaded[k])
+            if (!loaded[k] && !sectionOptional(k))
             {
                 error = "missing section " + k;
                 return false;
