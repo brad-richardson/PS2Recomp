@@ -703,6 +703,79 @@ void register_ps2_runtime_expansion_tests()
                      "missing target should remain visible in ctx->pc for diagnostics");
         });
 
+        tc.Run("DSP1 fast dispatch and checkpoint match the exact path", [](TestCase &t)
+        {
+            // Same scenarios with PS2X_EE_DISPATCH_FAST off (exact path) and on
+            // (lean front): identical return, pc, callee effect, stop state.
+            struct Outcome
+            {
+                bool ret = false;
+                uint32_t pc = 0u;
+                uint32_t v0 = 0u;
+                bool stop = false;
+                uint32_t jumps = 0u;
+            };
+            struct Case
+            {
+                uint32_t reg;
+                uint32_t target;
+                uint32_t fallthrough;
+                PS2Runtime::GuestBranchKind kind;
+                PS2Runtime::RecompiledFunction fn;
+            };
+            const Case cases[] = {
+                {0x3000u, 0x3000u, 0x2008u, PS2Runtime::GuestBranchKind::IndirectCall, &testGuestBranchImplicitReturnHandler},
+                {0x3000u, 0x3000u, 0x2008u, PS2Runtime::GuestBranchKind::DirectCall, &testGuestBranchImplicitReturnHandler},
+                {0x3400u, 0x3400u, 0u, PS2Runtime::GuestBranchKind::IndirectJump, &testGuestJumpTargetHandler},
+                {0x3400u, 0x3400u, 0u, PS2Runtime::GuestBranchKind::DirectJump, &testGuestJumpTargetHandler},
+                {0x3100u, 0x3100u, 0x2008u, PS2Runtime::GuestBranchKind::IndirectCall, &testGuestBranchTransferHandler},
+                {0x3200u, 0x3210u, 0x2008u, PS2Runtime::GuestBranchKind::IndirectCall, &testGuestBranchImplicitReturnHandler},
+            };
+            const bool savedFast = ps2_dsp1::g_fast;
+            const bool savedCk = ps2_dsp1::g_fastCheckpoint;
+            for (const Case &c : cases)
+            {
+                Outcome o[2];
+                for (int fast = 0; fast < 2; ++fast)
+                {
+                    ps2_dsp1::g_fast = fast != 0;
+                    PS2Runtime runtime;
+                    ps2_dsp1::g_fast = fast != 0; // the constructor re-reads the env
+                    runtime.setMissingFunctionPolicy(PS2Runtime::MissingFunctionPolicy::Stop);
+                    runtime.registerFunction(c.reg, c.fn);
+                    gGuestJumpTargetCount.store(0u, std::memory_order_relaxed);
+                    R5900Context ctx{};
+                    ctx.pc = 0x2000u;
+                    o[fast].ret = runtime.dispatchGuestBranch(nullptr, &ctx, c.target, 0x2000u, c.fallthrough, c.kind, "dsp1");
+                    o[fast].pc = ctx.pc;
+                    o[fast].v0 = ::getRegU32(&ctx, 2);
+                    o[fast].stop = runtime.isStopRequested();
+                    o[fast].jumps = gGuestJumpTargetCount.load(std::memory_order_relaxed);
+                }
+                t.Equals(o[1].ret, o[0].ret, "fast dispatch return matches");
+                t.Equals(o[1].pc, o[0].pc, "fast dispatch pc matches");
+                t.Equals(o[1].v0, o[0].v0, "fast dispatch callee effect matches");
+                t.Equals(o[1].stop, o[0].stop, "fast dispatch stop state matches");
+                t.Equals(o[1].jumps, o[0].jumps, "fast dispatch never runs a jump target nested");
+            }
+            // Checkpoints: the inline path charges and answers like the exact one.
+            std::vector<int> due[2];
+            uint32_t count[2] = {};
+            for (int fast = 0; fast < 2; ++fast)
+            {
+                PS2Runtime runtime;
+                ps2_dsp1::g_fastCheckpoint = fast != 0;
+                for (int i = 0; i < 5000; ++i)
+                    due[fast].push_back(runtime.eeCheckpointDue(static_cast<uint32_t>(1 + (i % 64))) ? 1 : 0);
+                R5900Context ctx{};
+                count[fast] = runtime.readEeCount(&ctx);
+            }
+            t.IsTrue(due[1] == due[0], "fast checkpoint answers match");
+            t.Equals(count[1], count[0], "fast checkpoint charges match");
+            ps2_dsp1::g_fast = savedFast;
+            ps2_dsp1::g_fastCheckpoint = savedCk;
+        });
+
         tc.Run("MPEG init and callback stubs return success instead of TODO errors", [](TestCase &t)
         {
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);

@@ -1111,7 +1111,7 @@ void EeScheduler::run()
         // mpegTrace stays outside the jump so its destructor still records
         // the unwind exactly as before (E15 dev trace only).
         ps2_e15::Trace mpegTrace("scheduler",m_vsyncTick,m_rdram,&context,context.pc,0u,m_currentThreadId);
-        ps2_guest_unwind::clear();
+        m_runtime.clearGuestUnwind(); // DSP1: ps2_guest_unwind::clear() + the runtime mirror
 #if PS2X_EE_SIGJMP
         if (sigsetjmp(m_transferJmp, m_transferSaveMask) == 0)
 #else
@@ -1202,6 +1202,9 @@ void EeScheduler::postEvent(EeEvent event)
 // cache miss, timer service, pending/stop/deadline/slice-expiry work.
 bool EeScheduler::checkpointDueFull(uint32_t cycles) noexcept
 {
+#if PS2X_DSP1_COUNT
+    ++ps2_dsp1::g_counts.ckFull;
+#endif
     accountCycles(cycles);
     m_runningThread = currentThread();
     m_runningThreadId = m_currentThreadId;

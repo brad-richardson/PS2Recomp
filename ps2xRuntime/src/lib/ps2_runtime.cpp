@@ -2953,6 +2953,14 @@ PS2Runtime::PS2Runtime()
     }
     m_missingFunctionPolicy.store(static_cast<uint32_t>(defaultPolicy), std::memory_order_relaxed);
     m_abortOnMissingFunction = defaultPolicy == MissingFunctionPolicy::Stop;
+    // DSP1: PS2X_EE_DISPATCH_FAST (default off). split120 keeps the
+    // out-of-line checkpoint (the only mode with half-mode restarts).
+    ps2_dsp1::g_fast = ps2_dsp1::knobFromEnv();
+    {
+        const char *simMode = std::getenv("PS2X_SSX3_SIM_MODE");
+        ps2_dsp1::g_fastCheckpoint =
+            ps2_dsp1::g_fast && !(simMode && std::strcmp(simMode, "split120_render60_v1") == 0);
+    }
 #if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
     if (const char *sbrMode = std::getenv("PS2X_SBR_MODE"))
     {
@@ -4253,6 +4261,9 @@ PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 #if PS2X_ENABLE_DIAG_TAPS
     pushDispatchPc(address);
 #endif
+#if PS2X_DSP1_COUNT
+    ++ps2_dsp1::g_counts.lookup;
+#endif
 
     uint32_t slot = 0u;
     if (generatedFunctionTableSlot(address, slot))
@@ -4595,6 +4606,211 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     }
 }
 
+// DSP1: dispatch fast path (PS2X_EE_DISPATCH_FAST=1, default off).
+//
+// dispatchGuestBranchFull below is the exact path. In the common case
+// (no split mode, census, park or diag period; FH1 hooks in HK1 table mode;
+// no draw/spatial restore pending; neither PC listed by any hook; a generated
+// function at the target), it performs only these steps: an HK1 table miss
+// (no side effects, HK1 census §1), no target hook match, ctx->pc = target,
+// checkpointDue(kGuestDispatchCycles), then for calls the table function,
+// the FH11 post-call fix when armed, and the stop/unwind/fall-through checks.
+// The lean front does exactly those steps and hands every other case to the
+// full path before any mutation, so charges, service points, hook calls and
+// order, binding reads and resume behaviour are unchanged.
+//
+// "Listed by any hook" is a 4096-bit filter per side (source, target), a
+// superset of every PC the dispatch-side hooks compare against: the target
+// hooks below (patch cache, guest free, draw table/pool, spatial guard, draw
+// reset, widescreen) and, with FH1 reachable, HK1's interest table for the
+// current guest-active state. A filter hit runs the full path (exact).
+namespace
+{
+constexpr uint32_t kDspFilterBits = 4096u;
+
+inline uint32_t dspBit(uint32_t pc) noexcept
+{
+    return (pc >> 2) & (kDspFilterBits - 1u);
+}
+
+struct DspState
+{
+    int armed = -1;           // -1: not computed, 0: full path only, 1: lean front
+    bool fh1 = false;         // FH1 onBranch reachable (enabled() || tapOn())
+    bool always = false;      // HK1 always-run (diagnostic taps): full path
+    bool guestActive = false; // ps2_fh1::g_guestActive the filter was built for
+    uint64_t src[kDspFilterBits / 64u] = {};
+    uint64_t tgt[kDspFilterBits / 64u] = {};
+};
+DspState g_dsp;
+
+inline bool dspTest(const uint64_t *bits, uint32_t pc) noexcept
+{
+    const uint32_t i = dspBit(pc);
+    return ((bits[i >> 6] >> (i & 63u)) & 1u) != 0u;
+}
+
+inline void dspSet(uint64_t *bits, uint32_t pc) noexcept
+{
+    const uint32_t i = dspBit(pc);
+    bits[i >> 6] |= uint64_t{1} << (i & 63u);
+}
+
+__attribute__((noinline, cold)) void dspBuildFilter()
+{
+    std::fill(std::begin(g_dsp.src), std::end(g_dsp.src), 0u);
+    std::fill(std::begin(g_dsp.tgt), std::end(g_dsp.tgt), 0u);
+    // dispatchGuestBranchFull's own target hooks (call kinds only; listed for
+    // every kind, a superset).
+    for (uint32_t pc : {kSsx3PatchCacheAlloc, kSsx3GuestFree, kSsx3PatchCacheInit, kSsx3DrawKeyCall,
+                        kSsx3DrawLookup, kSsx3DrawTexLookup, kSsx3SpatialItems12, kSsx3SpatialItems34,
+                        kSsx3SpatialInside1, kSsx3SpatialInside3, kSsx3DrawReset, 0x00228C08u})
+        dspSet(g_dsp.tgt, pc);
+    g_dsp.always = false;
+    g_dsp.guestActive = ps2_fh1::g_guestActive;
+    if (g_dsp.fh1)
+    {
+        // The same table ps2_fh1::onBranch consults (same build trigger).
+        const ps2_fh1::HookInterest &hi = ps2_fh1::activeHookInterest();
+        g_dsp.always = hi.always;
+        for (uint32_t pc : hi.src)
+            dspSet(g_dsp.src, pc);
+        for (uint32_t pc : hi.tgt)
+            dspSet(g_dsp.tgt, pc);
+    }
+}
+
+__attribute__((noinline, cold)) bool dspArm()
+{
+    bool on = !PS2X_ENABLE_DIAG_TAPS; // lookupFunction's dispatch history
+    on = on && !ps2_ts2_split60::enabled() && !ps2_ts2_split60::caseCountEnabled() &&
+         !ps2_ts2_split60::countEnabled();
+    on = on && !ps2_park::parkEnabled() && diagPeriodMs() == 0u;
+    g_dsp.fh1 = ps2_fh1::enabled() || ps2_fh1::tapOn();
+    on = on && (!g_dsp.fh1 || ps2_fh1::hookPreclassify()); // chain mode runs every hook
+    if (on)
+        dspBuildFilter();
+    g_dsp.armed = on ? 1 : 0;
+    return on;
+}
+
+// The generated function the lean front may call, or nullptr for the full
+// path. Pure apart from the filter (re)build.
+inline PS2Runtime::RecompiledFunction dspFastTarget(uint32_t targetPc, uint32_t sourcePc)
+{
+    if (g_dsp.armed != 1 && (g_dsp.armed == 0 || !dspArm()))
+        return nullptr;
+    if (g_ssx3DrawPending.load(std::memory_order_relaxed) || g_ssx3SpatialPending.load(std::memory_order_relaxed))
+        return nullptr;
+    if (g_dsp.fh1 && g_dsp.guestActive != ps2_fh1::g_guestActive)
+        dspBuildFilter(); // guestFlip: HK1 rebuilds its table on the same trigger
+    if (g_dsp.always || dspTest(g_dsp.tgt, targetPc) || dspTest(g_dsp.src, sourcePc))
+        return nullptr;
+    uint32_t slot = 0u;
+    if (!generatedFunctionTableSlot(targetPc, slot))
+        return nullptr;
+    return g_ps2RecompiledFunctionTable[slot];
+}
+
+#if PS2X_DSP1_COUNT
+std::unordered_map<uint32_t, uint64_t> g_dspSrcHist;
+std::unordered_map<uint32_t, uint64_t> g_dspFilterTgtHist;
+uint64_t g_dspNextPrint = 0u;
+
+void dspPrintTop(const char *name, const std::unordered_map<uint32_t, uint64_t> &h, uint64_t tick)
+{
+    std::vector<std::pair<uint64_t, uint32_t>> v;
+    v.reserve(h.size());
+    for (const auto &e : h)
+        v.emplace_back(e.second, e.first);
+    std::sort(v.begin(), v.end(), std::greater<>());
+    std::fprintf(stderr, "[dsp1-top] tick=%llu %s distinct=%zu", static_cast<unsigned long long>(tick), name, v.size());
+    for (size_t i = 0; i < v.size() && i < 16u; ++i)
+        std::fprintf(stderr, " %06x:%llu", v[i].second, static_cast<unsigned long long>(v[i].first));
+    std::fprintf(stderr, "\n");
+}
+
+void dspCount(PS2Runtime &rt, uint8_t *, R5900Context *, uint32_t targetPc, uint32_t sourcePc,
+              PS2Runtime::GuestBranchKind kind)
+{
+    ps2_dsp1::Counts &c = ps2_dsp1::g_counts;
+    const uint64_t tick = rt.memory().gs().vsyncTick.load(std::memory_order_relaxed);
+    if (tick >= g_dspNextPrint)
+    {
+        if (g_dspNextPrint != 0u)
+        {
+            std::fprintf(stderr,
+                         "[dsp1-count] tick=%llu disp=%llu dcall=%llu icall=%llu djump=%llu ijump=%llu ret=%llu "
+                         "eligible=%llu pending=%llu filterTgt=%llu filterSrc=%llu noFn=%llu ckTaken=%llu "
+                         "fh1Skip=%llu onBr=%llu onBrHit=%llu eeCk=%llu eeCkTrue=%llu ckFull=%llu lookup=%llu\n",
+                         static_cast<unsigned long long>(tick),
+                         static_cast<unsigned long long>(c.disp[0] + c.disp[1] + c.disp[2] + c.disp[3] + c.disp[4]),
+                         static_cast<unsigned long long>(c.disp[static_cast<int>(PS2Runtime::GuestBranchKind::DirectCall)]),
+                         static_cast<unsigned long long>(c.disp[static_cast<int>(PS2Runtime::GuestBranchKind::IndirectCall)]),
+                         static_cast<unsigned long long>(c.disp[static_cast<int>(PS2Runtime::GuestBranchKind::DirectJump)]),
+                         static_cast<unsigned long long>(c.disp[static_cast<int>(PS2Runtime::GuestBranchKind::IndirectJump)]),
+                         static_cast<unsigned long long>(c.disp[static_cast<int>(PS2Runtime::GuestBranchKind::Return)]),
+                         static_cast<unsigned long long>(c.dispEligible), static_cast<unsigned long long>(c.dispPending),
+                         static_cast<unsigned long long>(c.dispFilterTgt), static_cast<unsigned long long>(c.dispFilterSrc),
+                         static_cast<unsigned long long>(c.dispNoFn), static_cast<unsigned long long>(c.dispCkTaken),
+                         static_cast<unsigned long long>(c.dispFh1Skip), static_cast<unsigned long long>(c.onBr),
+                         static_cast<unsigned long long>(c.onBrHit), static_cast<unsigned long long>(c.eeCk),
+                         static_cast<unsigned long long>(c.eeCkTrue), static_cast<unsigned long long>(c.ckFull),
+                         static_cast<unsigned long long>(c.lookup));
+            if (tick >= 30600u && tick < 30800u)
+            {
+                dspPrintTop("src", g_dspSrcHist, tick);
+                dspPrintTop("filterTgt", g_dspFilterTgtHist, tick);
+            }
+        }
+        if (tick >= 29400u && tick < 29600u)
+        {
+            g_dspSrcHist.clear(); // histograms cover [29400, 30600)
+            g_dspFilterTgtHist.clear();
+        }
+        g_dspNextPrint = tick < 29400u ? 29400u : (tick / 200u + 1u) * 200u;
+    }
+    ++c.disp[static_cast<int>(kind) & 7];
+    if (tick >= 29400u && tick < 30600u)
+        ++g_dspSrcHist[sourcePc];
+    const int armed = g_dsp.armed;
+    if (armed == 0 || (armed < 0 && !dspArm()))
+        return;
+    if (g_ssx3DrawPending.load(std::memory_order_relaxed) || g_ssx3SpatialPending.load(std::memory_order_relaxed))
+    {
+        ++c.dispPending;
+    }
+    else
+    {
+        if (g_dsp.fh1 && g_dsp.guestActive != ps2_fh1::g_guestActive)
+            dspBuildFilter();
+        if (g_dsp.always || dspTest(g_dsp.tgt, targetPc))
+        {
+            ++c.dispFilterTgt;
+            if (tick >= 29400u && tick < 30600u)
+                ++g_dspFilterTgtHist[targetPc];
+        }
+        else if (dspTest(g_dsp.src, sourcePc))
+            ++c.dispFilterSrc;
+        else if (!rt.hasFunction(targetPc))
+            ++c.dispNoFn;
+        else
+            ++c.dispEligible;
+    }
+    if (g_dsp.fh1)
+    {
+        ++c.onBr;
+        if (ps2_fh1::hookPreclassify())
+        {
+            const ps2_fh1::HookInterest &hi = ps2_fh1::activeHookInterest();
+            if (hi.always || ps2_fh1::hookTableHit(hi, sourcePc, targetPc))
+                ++c.onBrHit;
+        }
+    }
+}
+#endif // PS2X_DSP1_COUNT
+} // namespace
+
 bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      R5900Context *ctx,
                                      uint32_t targetPc,
@@ -4603,6 +4819,50 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      GuestBranchKind kind,
                                      const char *debugName)
 {
+    RecompiledFunction fn = nullptr;
+    if (!ps2_dsp1::g_fast || !m_eeScheduler || (fn = dspFastTarget(targetPc, sourcePc)) == nullptr)
+    {
+        return dispatchGuestBranchFull(rdram, ctx, targetPc, sourcePc, fallthroughPc, kind, debugName);
+    }
+    ctx->pc = targetPc;
+    bool due;
+    PS2X_DSP1_INLINE_CALL due = m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles);
+    if (due)
+    {
+        markGuestUnwind();
+        return false;
+    }
+    if (kind != GuestBranchKind::DirectCall && kind != GuestBranchKind::IndirectCall)
+    {
+        return false; // ctx->pc == targetPc, as the full path leaves it
+    }
+    fn(rdram, ctx, this);
+    if (ps2_fh1::g_postArmed)
+    {
+        ps2_fh1::onReturn(rdram, ctx, targetPc, !isStopRequested() && ctx->pc != 0u && !guestUnwindPending());
+    }
+    if (isStopRequested() || ctx->pc == 0u || guestUnwindPending())
+    {
+        return false;
+    }
+    if (ctx->pc == targetPc)
+    {
+        ctx->pc = fallthroughPc;
+    }
+    return ctx->pc == fallthroughPc;
+}
+
+__attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdram,
+                                                                   R5900Context *ctx,
+                                                                   uint32_t targetPc,
+                                                                   uint32_t sourcePc,
+                                                                   uint32_t fallthroughPc,
+                                                                   GuestBranchKind kind,
+                                                                   const char *debugName)
+{
+#if PS2X_DSP1_COUNT
+    dspCount(*this, rdram, ctx, targetPc, sourcePc, kind);
+#endif
     // TK22: put back the draw-table slot a refused append borrowed.
     if (g_ssx3DrawPending.load(std::memory_order_relaxed) &&
         (sourcePc < kSsx3DrawKeyCall || sourcePc >= kSsx3DrawKeyEnd))
@@ -4656,6 +4916,9 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // FH1: full120 manager patch at the init hook + env-only tap counts.
     if ((ps2_fh1::enabled() || ps2_fh1::tapOn()) && ps2_fh1::onBranch(rdram, ctx, sourcePc, targetPc))
     {
+#if PS2X_DSP1_COUNT
+        ++ps2_dsp1::g_counts.dispFh1Skip;
+#endif
         ctx->pc = fallthroughPc;
         return true;
     }
@@ -4716,7 +4979,10 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // this charge bounds straight-line call chains that have no local loop.
     if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
     {
-        ps2_guest_unwind::mark();
+#if PS2X_DSP1_COUNT
+        ++ps2_dsp1::g_counts.dispCkTaken;
+#endif
+        markGuestUnwind();
         return false;
     }
 
@@ -6247,8 +6513,11 @@ void PS2Runtime::postEeEvent(EeEvent event)
     m_eeScheduler->postEvent(event);
 }
 
-bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
+bool PS2Runtime::eeCheckpointDueSlow(uint32_t cycles) noexcept
 {
+#if PS2X_DSP1_COUNT
+    ++ps2_dsp1::g_counts.eeCk;
+#endif
     // EE1P2: one product gate per checkpoint; the restart suppressor runs
     // only in split120 halves.
     if (ps2_ts2_split60::halfMode() && ps2_ts2_split60::consumeRestartCheckpoint()) return false;
@@ -6256,7 +6525,10 @@ bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
     {
         return false;
     }
-    ps2_guest_unwind::mark();
+#if PS2X_DSP1_COUNT
+    ++ps2_dsp1::g_counts.eeCkTrue;
+#endif
+    markGuestUnwind();
     return true;
 }
 
