@@ -1449,6 +1449,9 @@ private:
     {
         if (!ps2x_present_share::enabled() || !m_ge1.exportIOSurface)
             return IOExport::Failed;
+        // PSO1 Part 2 diagnostic: tick-locked capture gate (inert by default).
+        if (!ps2x_present_share::captureGateAllowsExport(tick))
+            return IOExport::NoSlot;
         if (ps2x_present_share::ownershipEnabled())
             return presentIOSurfaceOwned(tick);
         IOSurfacePool &pool = ioPool();

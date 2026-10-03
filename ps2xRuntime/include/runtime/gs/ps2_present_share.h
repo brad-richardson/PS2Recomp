@@ -68,9 +68,21 @@ struct FenceStats
     bool appleSync = false;
 };
 FenceStats fenceStats();
+// PSO1 Part 2 diagnostic, tick-locked capture gate (both modes; inert unless
+// PS2X_PRESENT_CAPTURE_DIR and PS2X_PRESENT_CAPTURE_TICKS are set). While a
+// target tick T is pending, the producer skips exports for ticks T-4..T-1
+// (slots drain) and > T, so the presenter ends up showing exactly T with no
+// newer export reserved: a serialized reference even on the legacy path.
+// Guest execution is untouched (only exports are skipped).
+bool captureGateAllowsExport(uint64_t tick); // producer (GS worker)
+uint64_t captureGatePending();               // 0 = none / gate off
+uint64_t captureGateBlockedSinceNs();        // first refusal for the pending target
+void captureGateDone(uint64_t target);       // presenter: captured or missed
+
 // iOS only, PSO1 diagnostic (PS2X_PRESENT_CAPTURE_DIR): read the bound
 // drawable back (glReadPixels RGBA) and write it as PPM. GL thread only.
 bool captureDrawable(int width, int height, const char *path);
+void finishGl(); // iOS only: glFinish on the current EAGL context
 
 // Diagnostic (PS2X_PRESENT_SHARE_DUMP_TICKS): read the GL frame texture back
 // (what DrawTexturePro samples) and write the w x h top-left region as PPM.
