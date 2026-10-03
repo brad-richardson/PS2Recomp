@@ -42,6 +42,7 @@ namespace
     {
         uint64_t runs = 0, mismatches = 0, generatedCycles = 0, haltRuns = 0;
         uint64_t savestateCompares = 0, savestateMismatches = 0;
+        uint64_t groupEntries = 0, groupMisses = 0; // VBK1 Part 2, modes 6/7
         uint32_t programs = 0;
     };
 
@@ -59,11 +60,13 @@ namespace
         // VBK1: the unit's savestate bytes right after the cut: pipelines
         // (pending writes), ready tables, sequence counters, stop flags.
         std::vector<uint8_t> saved;
+        uint64_t groupEntries = 0, groupMisses = 0;
     };
 
     // mode: 0 interpreter queued (reference), 1 generated queued,
     // 2 interpreter direct commit, 3 generated direct commit; VBK1: 4/5 the
-    // generated block table, queued / direct commit.
+    // generated block table, queued / direct commit; Part 2: 6/7 the guarded
+    // group table, queued (every guard fails: direct commit is off) / direct.
     inline Vu0Snapshot runVu0Once(const VU0Interpreter::RecompProgram *generated, uint8_t *code,
                                   const Vu0Start &start, uint32_t startPc, int mode, uint32_t budget,
                                   uint32_t check, GS &gs)
@@ -79,8 +82,8 @@ namespace
         } destroy{vu};
         if (mode == 1 || mode == 3 || mode >= 4)
             vu.setRecompProgramForTest(generated);
-        vu.setBlocksForTest(mode >= 4 ? 1 : 0);
-        vu.setDirectCommitForTest(mode == 2 || mode == 3 || mode == 5 ? 1 : 0);
+        vu.setBlocksForTest(mode >= 6 ? 2 : mode >= 4 ? 1 : 0);
+        vu.setDirectCommitForTest(mode == 2 || mode == 3 || mode == 5 || mode == 7 ? 1 : 0);
         vu.state().dBitEnabled = start.state.dBitEnabled;
         vu.state().tBitEnabled = start.state.tBitEnabled;
         std::memcpy(vu.state().vf, start.state.vf, sizeof(start.state.vf));
@@ -105,6 +108,8 @@ namespace
         else if (check == 2u)
             vu.execute(code, PS2_VU0_CODE_SIZE, snap.data.data(), PS2_VU0_DATA_SIZE, gs, nullptr, startPc, 0u, 0u, 4096u);
         snap.generatedCycles = vu.recompCyclesForTest();
+        snap.groupEntries = vu.groupEntriesForTest();
+        snap.groupMisses = vu.groupMissesForTest();
         std::memcpy(&snap.state, &vu.state(), sizeof(VuState));
         return snap;
     }
@@ -134,10 +139,12 @@ namespace
                     ++stats.runs;
                     const Vu0Snapshot got = runVu0Once(generated, code, start, startPc, mode, budget, check, gs);
                     stats.generatedCycles += got.generatedCycles;
+                    stats.groupEntries += got.groupEntries;
+                    stats.groupMisses += got.groupMisses;
                     if (check == 0u && mode != 2)
                     {
                         ++stats.savestateCompares;
-                        const Vu0Snapshot &policyRef = mode == 1 || mode == 4 ? ref : refDirect;
+                        const Vu0Snapshot &policyRef = mode == 1 || mode == 4 || mode == 6 ? ref : refDirect;
                         if (got.saved != policyRef.saved)
                         {
                             if (++stats.savestateMismatches <= 3u)
@@ -175,8 +182,9 @@ namespace
     }
 
     // VR3 (c): VU0 direct commit in the interpreter and in generated pairs.
-    // VBK1: and the block table, queued and direct.
-    inline std::vector<int> vu0DiffModes() { return {1, 2, 3, 4, 5}; }
+    // VBK1: and the block table, queued and direct; Part 2: the guarded group
+    // table, queued and direct.
+    inline std::vector<int> vu0DiffModes() { return {1, 2, 3, 4, 5, 6, 7}; }
 #endif
 
     struct Vu1Fixture
@@ -2079,6 +2087,45 @@ void register_ps2_vu1_tests()
                      "instruction following a reserved opcode must not execute");
         });
 
+        // VBK1 Part 2: the guarded-group proof assumes a VF/VI write issued
+        // before a group lands within 4 cycles of its issue. Sweep every VU0
+        // lower opcode (bits 31:25 x the low 11 bits, register fields set) and
+        // every upper opcode (bits 10:0); no write may exceed 4 cycles.
+        tc.Run("VU0 VF/VI write latencies are <= 4 for every opcode (VBK1 Part 2 proof)", [](TestCase &t)
+        {
+            VU0Interpreter vu;
+            uint32_t worst = 0u, writes = 0u;
+            for (uint32_t opHi = 0; opHi < 128u; ++opHi)
+                for (uint32_t low = 0; low < 2048u; ++low)
+                {
+                    const uint32_t lower = (opHi << 25) | (0xFu << 21) | (3u << 16) | (2u << 11) | low;
+                    const std::array<uint32_t, 4> l = vu.writeLatenciesForTest(lower, kVuUpperNop);
+                    if (l[3] != 0u)
+                        continue;
+                    for (uint32_t i = 1; i < 3u; ++i)
+                        if (l[i] != 0u)
+                        {
+                            ++writes;
+                            worst = std::max(worst, l[i]);
+                        }
+                }
+            for (uint32_t low = 0; low < 2048u; ++low) // the upper opcode is bits 10:0
+            {
+                const uint32_t upper = (0xFu << 21) | (3u << 16) | (2u << 11) | low;
+                const std::array<uint32_t, 4> l = vu.writeLatenciesForTest(0x8000033Cu, upper);
+                if (l[3] != 0u)
+                    continue;
+                if (l[0] != 0u)
+                {
+                    ++writes;
+                    worst = std::max(worst, l[0]);
+                }
+            }
+            std::fprintf(stderr, "[vbk1-latency] writes %u worst %u\n", writes, worst);
+            t.IsTrue(writes > 1000u, "the sweep decoded VF/VI writes");
+            t.IsTrue(worst <= 4u, "no VU0 VF/VI write lands later than 4 cycles after issue");
+        });
+
         tc.Run("emitted VU0 pairs hand off with a guaranteed tail call (F4-2b)", [](TestCase &t)
         {
             // Regression test for the Odin S1 stack overflow: every generated
@@ -2113,8 +2160,17 @@ void register_ps2_vu1_tests()
             };
             t.Equals(count("PS2X_VU_MUSTTAIL return next(vu, c);"), static_cast<size_t>(2u),
                      "both pair handoffs are guaranteed tail calls through next()");
-            t.Equals(count("PS2X_VU_MUSTTAIL return fn(vu, c);"), static_cast<size_t>(2u),
-                     "next() and nextBlock() dispatch with a guaranteed tail call");
+            t.Equals(count("PS2X_VU_MUSTTAIL return fn(vu, c);"), static_cast<size_t>(3u),
+                     "next(), nextBlock() and nextGroup() dispatch with a guaranteed tail call");
+            // VBK1 Part 2: the guarded group: trampoline + body, every exit a
+            // guaranteed tail call, the table and its registration.
+            t.IsTrue(count("static bool g0000(") == 1u && count("static bool B0000(") == 1u &&
+                         count("PS2X_VU_MUSTTAIL return b0000(vu, c);") == 1u &&
+                         count("PS2X_VU_MUSTTAIL return B0000(vu, c);") == 1u &&
+                         count("return nextGroup(vu, c);") == count("PS2X_VU_MUSTTAIL return nextGroup(vu, c);") &&
+                         s.find("VU0RecompImage<0x0000000012345678ull>::kGroupPairs[2] = {") != std::string::npos &&
+                         s.find("program.groupPairs = ") != std::string::npos,
+                     "a guarded group with a tail-calling trampoline is emitted and registered (VBK1 Part 2)");
             t.IsTrue(s.find("#include \"ps2_vu0_recomp_gen.h\"") != std::string::npos &&
                      s.find("VU0RecompImage<0x0000000012345678ull>::kPairs[2] = {") != std::string::npos &&
                      s.find("program.pairs = ") != std::string::npos,
@@ -2128,8 +2184,7 @@ void register_ps2_vu1_tests()
             t.IsTrue(count("return nextBlock(vu, c);") >= 2u &&
                          count("return nextBlock(vu, c);") == count("PS2X_VU_MUSTTAIL return nextBlock(vu, c);"),
                      "every block exit is a guaranteed tail call (VBK1)");
-            t.IsTrue(s.find("VU1") == std::string::npos && s.find("kPairsNative") == std::string::npos &&
-                     s.find("static bool B") == std::string::npos,
+            t.IsTrue(s.find("VU1") == std::string::npos && s.find("kPairsNative") == std::string::npos,
                      "no VU1 names or native table");
         });
 
@@ -2762,6 +2817,10 @@ void register_ps2_vu1_tests()
                          static_cast<unsigned long long>(stats.savestateCompares),
                          static_cast<unsigned long long>(stats.savestateMismatches));
             t.Equals(stats.savestateMismatches, uint64_t{0}, "every generated mode saves the same unit as the interpreter at every cut (VBK1)");
+            std::fprintf(stderr, "[vbk1-groups] fixture guarded entries %llu guard misses %llu\n",
+                         static_cast<unsigned long long>(stats.groupEntries), static_cast<unsigned long long>(stats.groupMisses));
+            t.IsTrue(stats.groupEntries > 10000u && stats.groupMisses > 10000u,
+                     "guarded group bodies ran, and failed guards fell back, on the fixtures (VBK1 Part 2)");
             t.IsTrue(stats.haltRuns > 0u, "the edges image stopped on D/T bits (VBK1)");
             t.Equals(stats.mismatches, uint64_t{0}, "every VU0 mode matches the queued VU0 interpreter at every cut");
             t.IsTrue(stats.programs > 150u, "all VU0 fixture images ran");
@@ -2841,6 +2900,9 @@ void register_ps2_vu1_tests()
                          static_cast<unsigned long long>(stats.savestateCompares),
                          static_cast<unsigned long long>(stats.savestateMismatches));
             t.Equals(stats.savestateMismatches, uint64_t{0}, "every generated mode saves the same unit as the interpreter on the game image (VBK1)");
+            std::fprintf(stderr, "[vbk1-groups] game guarded entries %llu guard misses %llu\n",
+                         static_cast<unsigned long long>(stats.groupEntries), static_cast<unsigned long long>(stats.groupMisses));
+            t.IsTrue(stats.groupEntries > 0u, "guarded group bodies ran on the game image (VBK1 Part 2)");
             t.Equals(stats.mismatches, uint64_t{0}, "every VU0 mode matches the queued VU0 interpreter on the game image");
             t.IsTrue(stats.generatedCycles > 0u, "the generated game image ran");
         });

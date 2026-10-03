@@ -113,6 +113,12 @@ public:
         // straight-line pairs in one host function (PS2X_VU0_BLOCKS=1). Null
         // in images emitted before VBK1 (they always run pairs).
         const RecompPairFn *blockPairs = nullptr;
+        // VBK1 Part 2: the same groups behind an entry guard
+        // (PS2X_VU0_BLOCKS=2): a leader whose guard holds runs its group's
+        // statically scheduled body (VR2 stage-4 issue: no per-pair scoreboard
+        // read where proven ready, constant direct-commit bits, in-place
+        // commits, plain pc tails); a failed guard runs the exact group.
+        const RecompPairFn *groupPairs = nullptr;
     };
     // One registry per unit (VX1; was one shared registry keyed by hash).
     static void registerRecompProgram(const RecompProgram &program);
@@ -129,8 +135,28 @@ public:
     // (VU1 on; VU0 PS2X_VU0_DIRECT), 0 queues every write, 1 forces it on.
     void setDirectCommitForTest(int mode) { m_directOverride = mode; }
     // VBK1: test hook for the block table: -1 follows PS2X_VU0_BLOCKS, 0 runs
-    // the pair table, 1 the block table (when the image has one).
+    // the pair table, 1 the block table, 2 the guarded group table (when the
+    // image has one).
     void setBlocksForTest(int mode) { m_blocksOverride = mode; }
+    // VBK1 Part 2: write latencies of one decoded pair, for the ISA-wide
+    // check of the guarded-group proof: {upper VF, lower VF, lower VI,
+    // reserved} (0 = no such write).
+    std::array<uint32_t, 4> writeLatenciesForTest(uint32_t lower, uint32_t upper) const
+    {
+        uint8_t code[8];
+        std::memcpy(code, &lower, 4);
+        std::memcpy(code + 4, &upper, 4);
+        const DecodedInstructionPair d = decodeInstructionPair(code, 0u);
+        const auto lat = [](const InstructionUsage &u, uint8_t specific)
+        { return static_cast<uint32_t>(specific != 0u ? specific : u.latency); };
+        return {d.upperUsage.vfWrite.reg != 0u ? lat(d.upperUsage, d.upperUsage.vfLatency) : 0u,
+                d.lowerUsage.vfWrite.reg != 0u ? lat(d.lowerUsage, d.lowerUsage.vfLatency) : 0u,
+                (d.lowerUsage.viWrite & 0xFFFEu) != 0u ? lat(d.lowerUsage, d.lowerUsage.viLatency) : 0u,
+                (d.upperUsage.reserved || d.lowerUsage.reserved) ? 1u : 0u};
+    }
+    // VBK1 Part 2: guarded group bodies entered / guards that failed.
+    uint64_t groupEntriesForTest() const { return m_groupEntries; }
+    uint64_t groupMissesForTest() const { return m_groupMisses; }
     // VR2: test hook for generated code without a tracked PS2Memory: run this
     // registered image whenever the code size matches (null = normal lookup).
     static const RecompProgram *findRecompProgram(uint64_t hash);
@@ -408,9 +434,13 @@ protected:
     // VR3: ... and whole-memory VU0 code (PS2X_VU0_RECOMP=1; default off).
     static constexpr uint32_t kRecompVu0CodeSize = 0x1000u;
     static bool vu0RecompEnabled();
-    // VBK1: PS2X_VU0_BLOCKS=1 runs an image's block table (default off).
-    static bool vu0BlocksEnabled();
+    // VBK1: PS2X_VU0_BLOCKS=1 runs an image's block table, 2 its guarded
+    // group table (default 0, the pair table).
+    static int vu0BlocksMode();
     int m_blocksOverride = -1;
+    // VBK1 Part 2: the guard of a guarded group (ps2_vu_step_impl.h).
+    PS2X_VU1_ALWAYS_INLINE bool recompGroupReady(const RunContext &ctx, uint32_t maxCycles);
+    uint64_t m_groupEntries = 0, m_groupMisses = 0;
     const RecompProgram *lookupRecompProgram(const uint8_t *vuCode, uint32_t codeSize, PS2Memory *memory);
     const RecompProgram *m_recompProgram = nullptr;
     const RecompProgram *m_recompTestProgram = nullptr;
