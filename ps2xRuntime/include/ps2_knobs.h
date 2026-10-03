@@ -134,6 +134,10 @@ inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
         // CFG1 Part 2 (D8): anisotropic 16x on every platform (Brad 10-02).
         // Output-only (GS adapter plain getenv); det IDENTICAL.
         {"GE1_ANISO", "16", false, false, false},
+        // AU19 (Brad 10-02): DC-blocking high-pass on everywhere. Output-only
+        // (AU18 1-pole 5 Hz filter on the final host output); det IDENTICAL
+        // with the knob on. Same literal flag fields as the AU13 sinc entry.
+        {"PS2X_AUDIO_DC_BLOCK", "1", false, false, false},
     };
     if (countOut)
         *countOut = sizeof(kDefaults) / sizeof(kDefaults[0]);
@@ -238,6 +242,8 @@ inline const Cf2AndroidDefault *cf2IosDefaults(size_t *countOut)
         {"PS2X_VIF1_REVERSE_DMA", "0", false, false, false},
         {"PS2X_SSX3_SIM_MODE", "split120_render60_v1", false, false, false},
         {"GE1_ANISO", "16", false, false, false},
+        // AU19 (Brad 10-02): DC block on everywhere (same literal fields).
+        {"PS2X_AUDIO_DC_BLOCK", "1", false, false, false},
     };
     if (countOut)
         *countOut = sizeof(kIosDefaults) / sizeof(kIosDefaults[0]);
@@ -255,6 +261,8 @@ inline const Cf2AndroidDefault *cf2MacDefaults(size_t *countOut)
         {"PS2X_MTVU_VIF1_STAT_FREE", "1", false, false, false},
         {"PS2X_SKIP_MOVIE", "1", false, false, false},
         {"GE1_ANISO", "16", false, false, false},
+        // AU19 (Brad 10-02): DC block on everywhere (same literal fields).
+        {"PS2X_AUDIO_DC_BLOCK", "1", false, false, false},
     };
     if (countOut)
         *countOut = sizeof(kMacDefaults) / sizeof(kMacDefaults[0]);
