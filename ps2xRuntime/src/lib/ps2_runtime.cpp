@@ -16,6 +16,7 @@
 #include "ps2_e43_trace.h"
 #include "ps2_e44_trace.h"
 #include "ps2_gfx_stats.h"
+#include "ps2_ssx3_vis_native.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_ssx3_course_manifest.h"
 #include "ps2_ssx3_lod.h"
@@ -5244,6 +5245,46 @@ namespace vr3_vu0_census
     }
 }
 
+// VNP1: PS2X_SSX3_VIS_NATIVE (unset/0 = the VU0 engine, the exact path;
+// 1 = SSX 3's visibility test 0xDB8 in host code; check = both, compared).
+// Off whenever something reads the engine's own per-run state (the VU0
+// census, E53/E44 logs, gfx stats) or the PCSX2 float mode is selected.
+namespace
+{
+    int ssx3VisNativeMode()
+    {
+        static const int mode = []
+        {
+            const char *value = std::getenv("PS2X_SSX3_VIS_NATIVE");
+            int m = 0;
+            if (value != nullptr && std::strcmp(value, "check") == 0)
+                m = 2;
+            else if (value != nullptr && value[0] == '1')
+                m = 1;
+            if (m == 0)
+                return 0;
+            const char *floatMode = std::getenv("PS2X_VU_FLOAT");
+            const bool pcsx2Float = floatMode != nullptr && std::strcmp(floatMode, "pcsx2") == 0;
+            const bool diag = vr3_vu0_census::enabled() || std::getenv("PS2X_E53_VU0_LOG") != nullptr ||
+                              ps2_e44_trace::enabled() || ps2_gfx_stats::enabled();
+            if (!ps2_ssx3_vis_native::available() || pcsx2Float || diag)
+            {
+                std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s ignored (available=%d pcsx2_float=%d diag=%d)\n",
+                             value, ps2_ssx3_vis_native::available() ? 1 : 0, pcsx2Float ? 1 : 0, diag ? 1 : 0);
+                return 0;
+            }
+            std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s\n", m == 2 ? "check" : "1");
+            return m;
+        }();
+        return mode;
+    }
+}
+
+void ps2_ssx3_vis_native::exportVu0StateForTest(const VuState &state, R5900Context *ctx)
+{
+    copyVu0StateToContext(state, ctx);
+}
+
 void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
     (void)rdram;
@@ -5256,6 +5297,26 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     {
         seedVu0IdleSuccess(ctx);
         return;
+    }
+
+    bool visCheck = false;
+    ps2_ssx3_vis_native::Vu0Snapshot visIn, visNative;
+    if (startPC == ps2_ssx3_vis_native::kStartPc)
+    {
+        const int visMode = ssx3VisNativeMode();
+        if (visMode != 0 && ps2_ssx3_vis_native::imageMatches(vu0Code, m_memory.getVU0CodeGeneration()))
+        {
+            if (visMode == 1)
+            {
+                ps2_ssx3_vis_native::runDb8(ctx, vu0Data);
+                return;
+            }
+            visIn = ps2_ssx3_vis_native::snapshot(*ctx);
+            ps2_ssx3_vis_native::runDb8(ctx, vu0Data);
+            visNative = ps2_ssx3_vis_native::snapshot(*ctx);
+            ps2_ssx3_vis_native::restore(*ctx, visIn);
+            visCheck = true;
+        }
     }
 
     const bool census = vr3_vu0_census::enabled();
@@ -5272,6 +5333,8 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
                   startPC, 0u, ctx->vu0_itop, 4096);
     const uint64_t censusT2 = census ? vr3_vu0_census::nowNs() : 0u;
     copyVu0StateToContext(m_vu0.state(), ctx);
+    if (visCheck)
+        ps2_ssx3_vis_native::noteCheck(visIn, ps2_ssx3_vis_native::snapshot(*ctx), visNative);
     if (census)
     {
         const uint64_t censusT3 = vr3_vu0_census::nowNs();
