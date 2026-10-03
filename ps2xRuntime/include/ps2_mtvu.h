@@ -475,8 +475,15 @@ namespace ps2_mtvu
                 if (sleeping.load(std::memory_order_relaxed))
                 {
                     const int mode = stageMode();
+                    // park3: batch the wake to a boundary/fill, not every publish.
+                    // refreshCaches first: pHeadCache goes stale in steady
+                    // streaming (refreshed only when the ring fills), and a
+                    // stale cache makes the fill backstop fire on every
+                    // publish. One acquire-load per publish while parked.
+                    if (mode == 4)
+                        refreshCaches();
                     if (mode == 4 && !boundary && pTail - pHeadCache < kWakeFill)
-                        return; // park3: batch the wake to a boundary/fill, not every publish
+                        return;
                     nWakes.fetch_add(1u, std::memory_order_relaxed);
                     if (mode >= 3)
                     {
