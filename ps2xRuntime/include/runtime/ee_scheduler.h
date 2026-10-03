@@ -293,11 +293,6 @@ public:
     static constexpr uint32_t kGuestDispatchCycles = 8u;
     static constexpr uint64_t kDefaultTimeSliceCycles = 65536ull;
 
-    // CTX1: sigsetjmp mask-save flag for PS2X_EE_SWITCH (run() reads it once).
-    // fast (default, also unset/unknown) = 0: no signal-mask save. sigmask =
-    // GT3's platform setjmp semantics (1 on Apple/bionic, 0 on glibc).
-    static int transferSaveMaskFor(const char *mode);
-
     explicit EeScheduler(PS2Runtime &runtime);
     ~EeScheduler();
 
@@ -514,10 +509,6 @@ private:
     void publishIdleDebugContext();
 
     PS2Runtime &m_runtime;
-    // Benchmark mode: scheduled events and idle advancement use guest cycles.
-    // ExternalWake carries no guest-cycle timestamp and is outside this
-    // scheduled-event ordering guarantee.
-    const bool m_eventClockCycles;
     const bool m_cycleOnlyEvents;
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t m_detHashEvery = 0;
@@ -569,15 +560,14 @@ private:
     std::atomic<bool> m_guestExecuting{false};
     // CP4: non-exceptional transfer out of guest code (executor thread only,
     // set by run() around each guest call; run() is non-reentrant).
-    // GT3: sigsetjmp with a run()-time mask-save flag that keeps each
-    // platform's setjmp semantics (bionic/Apple save the mask, glibc doesn't).
-    // CTX1: PS2X_EE_SWITCH=fast (default) clears it (transferSaveMaskFor).
+// GT3: sigsetjmp with no mask save (fast transfers; the CTX1 PS2X_EE_SWITCH
+// sigmask path is deleted).
 #if PS2X_EE_SIGJMP
     sigjmp_buf m_transferJmp{};
 #else
     std::jmp_buf m_transferJmp{};
 #endif
-    int m_transferSaveMask = 1;
+    int m_transferSaveMask = 0;
     bool m_transferArmed = false;
     std::atomic<bool> m_stopRequested{false};
     std::atomic<bool> m_checkpointPending{false};

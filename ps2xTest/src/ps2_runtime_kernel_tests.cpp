@@ -43,7 +43,6 @@ struct EeSchedulerTestAccess
     using Clock = std::chrono::steady_clock;
 
     static bool cycleOnly(const EeScheduler &ee) { return ee.m_cycleOnlyEvents; }
-    static bool eventClockCycles(const EeScheduler &ee) { return ee.m_eventClockCycles; }
     static void clearDeadlines(EeScheduler &ee)
     {
         ee.m_deadlines.clear();
@@ -699,14 +698,12 @@ namespace
         };
 
         Value deterministic{"PS2X_DETERMINISTIC"};
-        Value eventClock{"PS2X_EVENT_CLOCK"};
         Value hashEvery{"PS2X_DET_HASH_EVERY"};
         Value timezone{"TZ"};
 
         ~SavedClockEnv()
         {
             deterministic.restore();
-            eventClock.restore();
             hashEvery.restore();
             timezone.restore();
 #ifdef _WIN32
@@ -1020,7 +1017,6 @@ void register_ps2_runtime_kernel_tests()
         tc.Run("cycle-only scheduler parses the exact flag once per instance", [](TestCase &t)
         {
             SavedClockEnv restoreEnv;
-            setClockEnv("PS2X_EVENT_CLOCK", nullptr);
             for (const char *flag : std::array<const char *, 5>{nullptr, "", "0", "yes", "1"})
             {
                 t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", flag), "set scheduler flag");
@@ -1031,56 +1027,6 @@ void register_ps2_runtime_kernel_tests()
                 t.Equals(EeSchedulerTestAccess::cycleOnly(env.runtime.eeScheduler()),
                          flag != nullptr && std::strcmp(flag, "1") == 0, "mode remains instance-local");
             }
-        });
-
-        tc.Run("independent cycle event clock advances idle without a host deadline", [](TestCase &t)
-        {
-            SavedClockEnv restoreEnv;
-            t.IsTrue(setClockEnv("PS2X_DETERMINISTIC", "0"), "deterministic mode off");
-            t.IsTrue(setClockEnv("PS2X_EVENT_CLOCK", "cycles"), "cycle clock on");
-            TestEnv env;
-            EeScheduler &ee = env.runtime.eeScheduler();
-            t.IsTrue(EeSchedulerTestAccess::eventClockCycles(ee), "event clock independent of deterministic flag");
-            t.IsTrue(EeSchedulerTestAccess::cycleOnly(ee), "cycle-due events selected");
-            ee.reset(env.rdram.data(), env.ctx);
-            EeSchedulerTestAccess::clearDeadlines(ee);
-            EeSchedulerTestAccess::addAlarm(ee, 100u,
-                EeSchedulerTestAccess::Clock::now() + std::chrono::hours(1), 1u, 0x1100u);
-            const auto start = EeSchedulerTestAccess::Clock::now();
-            EeSchedulerTestAccess::idle(ee);
-            t.Equals(EeSchedulerTestAccess::cycle(ee), uint64_t{100u}, "idle reaches earliest guest event");
-            t.IsTrue(EeSchedulerTestAccess::Clock::now() - start < std::chrono::seconds(1),
-                     "future host deadline does not pace idle");
-            EeSchedulerTestAccess::pending(ee);
-            t.IsTrue(EeSchedulerTestAccess::queuedPcs(ee) == std::vector<uint32_t>{0x1100u},
-                     "event delivered before further advancement");
-        });
-
-        tc.Run("cycle event clock reaches VBlank and waits for real external wake", [](TestCase &t)
-        {
-            SavedClockEnv restoreEnv;
-            setClockEnv("PS2X_DETERMINISTIC", "0");
-            setClockEnv("PS2X_EVENT_CLOCK", "cycles");
-            TestEnv env;
-            EeScheduler &ee = env.runtime.eeScheduler();
-            ee.reset(env.rdram.data(), env.ctx);
-            const uint64_t vblankCycle = EeSchedulerTestAccess::nextDeadline(ee);
-            EeSchedulerTestAccess::idle(ee);
-            t.Equals(EeSchedulerTestAccess::cycle(ee), vblankCycle, "idle reaches stock VBlank cycle");
-
-            EeSchedulerTestAccess::clearDeadlines(ee);
-            const uint64_t before = EeSchedulerTestAccess::cycle(ee);
-            std::thread wake([&] {
-                std::this_thread::sleep_for(std::chrono::milliseconds(3));
-                ee.postEvent(EeEvent{EeEventType::ExternalWake, 0u, 0u});
-            });
-            EeSchedulerTestAccess::idle(ee);
-            wake.join();
-            t.Equals(EeSchedulerTestAccess::cycle(ee), before,
-                     "without a guest deadline, external wake does not fabricate cycles");
-            ee.requestStop();
-            EeSchedulerTestAccess::idle(ee);
-            t.Equals(EeSchedulerTestAccess::cycle(ee), before, "stop returns without advancement");
         });
 
         tc.Run("cycle-only due batches ignore reversed host deadlines", [](TestCase &t)
@@ -1112,9 +1058,8 @@ void register_ps2_runtime_kernel_tests()
             SavedClockEnv restoreEnv;
             constexpr uint32_t alarmPc = 0x1100u;
             constexpr uint32_t timerPc = 0x1300u;
-            const auto run = [&](const char *flag, const char *eventClock, uint32_t timerCycle) {
+            const auto run = [&](const char *flag, uint32_t timerCycle) {
                 setClockEnv("PS2X_DETERMINISTIC", flag);
-                setClockEnv("PS2X_EVENT_CLOCK", eventClock);
                 TestEnv env;
                 env.runtime.registerFunction(timerPc, [](uint8_t *, R5900Context *, PS2Runtime *) {});
                 EeScheduler &ee = env.runtime.eeScheduler();
@@ -1139,23 +1084,18 @@ void register_ps2_runtime_kernel_tests()
                 return std::tuple<uint64_t, std::vector<uint32_t>, std::vector<uint32_t>>{
                     firstCycle, firstPcs, EeSchedulerTestAccess::queuedPcs(ee)};
             };
-            const auto [timerFirstCycle, timerFirstPcs, timerThenAlarm] = run("1", nullptr, 80u);
+            const auto [timerFirstCycle, timerFirstPcs, timerThenAlarm] = run("1", 80u);
             t.Equals(timerFirstCycle, uint64_t{80u}, "timer wins at cycle 80");
             t.IsTrue(timerFirstPcs == std::vector<uint32_t>{timerPc}, "timer IRQ queued first");
             t.IsTrue(timerThenAlarm == std::vector<uint32_t>{timerPc, alarmPc}, "alarm follows at cycle 100");
 
-            const auto [equalCycle, equalFirstPcs, equalAll] = run("1", nullptr, 100u);
+            const auto [equalCycle, equalFirstPcs, equalAll] = run("1", 100u);
             t.Equals(equalCycle, uint64_t{100u}, "equal timer and alarm target cycle 100");
             t.IsTrue(equalFirstPcs == std::vector<uint32_t>{alarmPc, timerPc},
                      "scheduled event precedes equal-cycle timer IRQ");
             t.IsTrue(equalAll == equalFirstPcs, "equal-cycle dispatch completes in one pass");
 
-            const auto [independentCycle, independentFirst, independentAll] = run("0", "cycles", 80u);
-            t.Equals(independentCycle, uint64_t{80u}, "independent clock selects earlier timer");
-            t.IsTrue(independentFirst == std::vector<uint32_t>{timerPc}, "timer delivered first");
-            t.IsTrue(independentAll == std::vector<uint32_t>{timerPc, alarmPc}, "alarm follows timer");
-
-            const auto [legacyCycle, legacyFirstPcs, legacyAll] = run("0", nullptr, 80u);
+            const auto [legacyCycle, legacyFirstPcs, legacyAll] = run("0", 80u);
             t.Equals(legacyCycle, uint64_t{100u}, "default host deadline chooses later guest event");
             t.IsTrue(legacyFirstPcs == std::vector<uint32_t>{alarmPc, timerPc},
                      "legacy dispatch order follows host-selected target");
@@ -1593,71 +1533,6 @@ void register_ps2_runtime_kernel_tests()
             t.IsFalse(gGuestExecutingFlagMissing.load(std::memory_order_acquire),
                       "the scheduler must publish guest execution only around the active guest call");
         });
-
-#if !defined(_WIN32)
-        tc.Run("CTX1: PS2X_EE_SWITCH fast and sigmask transfers run the same trace; mask and SIGSEGV handler intact", [](TestCase &t)
-        {
-            t.Equals(EeScheduler::transferSaveMaskFor(nullptr), 0, "unset is fast (no mask save)");
-            t.Equals(EeScheduler::transferSaveMaskFor("fast"), 0, "fast saves no mask");
-            t.Equals(EeScheduler::transferSaveMaskFor("bogus"), 0, "unknown values fall back to fast");
-#if defined(__GLIBC__)
-            t.Equals(EeScheduler::transferSaveMaskFor("sigmask"), 0, "sigmask keeps glibc setjmp semantics");
-#else
-            t.Equals(EeScheduler::transferSaveMaskFor("sigmask"), 1, "sigmask keeps Apple/bionic setjmp semantics");
-#endif
-            const char *prior = std::getenv("PS2X_EE_SWITCH");
-            const std::string priorValue = prior != nullptr ? prior : "";
-            const auto runTrace = [](const char *mode) {
-                setenv("PS2X_EE_SWITCH", mode, 1);
-                TestEnv env;
-                std::vector<int> trace;
-                gSchedulerTrace = &trace;
-                env.runtime.registerFunction(K_SCHED_MAIN, schedulerMainExit);
-                env.runtime.registerFunction(K_SCHED_A, schedulerTraceA);
-                env.runtime.registerFunction(K_SCHED_B, schedulerTraceB);
-                env.ctx.pc = K_SCHED_MAIN;
-                EeScheduler &ee = env.runtime.eeScheduler();
-                ee.reset(env.rdram.data(), env.ctx);
-                const int lowA = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x20000u, 0x800u, 0, 20, 0});
-                const int highA = ee.createThread(EeThreadCreateParams{0, K_SCHED_A, 0x21000u, 0x800u, 0, 5, 0});
-                const int highB = ee.createThread(EeThreadCreateParams{0, K_SCHED_B, 0x22000u, 0x800u, 0, 5, 0});
-                ee.startThread(lowA, 0, env.ctx, false);
-                ee.startThread(highA, 0, env.ctx, false);
-                ee.startThread(highB, 0, env.ctx, false);
-                ee.run();
-                gSchedulerTrace = nullptr;
-                return trace;
-            };
-            sigset_t before{};
-            pthread_sigmask(SIG_SETMASK, nullptr, &before);
-            const std::vector<int> fastTrace = runTrace("fast");
-            const std::vector<int> maskTrace = runTrace("sigmask");
-            if (prior != nullptr)
-                setenv("PS2X_EE_SWITCH", priorValue.c_str(), 1);
-            else
-                unsetenv("PS2X_EE_SWITCH");
-            t.IsTrue(!fastTrace.empty(), "fast mode runs guest threads across a transfer");
-            t.IsTrue(fastTrace == maskTrace, "fast and sigmask transfers produce the same trace");
-            sigset_t after{};
-            pthread_sigmask(SIG_SETMASK, nullptr, &after);
-            bool sameMask = true;
-            for (int sig = 1; sig < 32; ++sig)
-                sameMask = sameMask && sigismember(&before, sig) == sigismember(&after, sig);
-            t.IsTrue(sameMask, "the executor thread's signal mask is unchanged after fast transfers");
-
-            static volatile sig_atomic_t segvSeen = 0;
-            struct sigaction action{};
-            struct sigaction old{};
-            action.sa_handler = [](int) { segvSeen = 1; };
-            sigemptyset(&action.sa_mask);
-            t.Equals(sigaction(SIGSEGV, &action, &old), 0, "install a SIGSEGV handler");
-            segvSeen = 0;
-            raise(SIGSEGV);
-            sigaction(SIGSEGV, &old, nullptr);
-            t.IsTrue(segvSeen == 1, "a SIGSEGV handler still fires on the executor thread after fast transfers");
-            t.Equals(fastTrace.size(), size_t{4}, "fast mode runs the four-entry FIFO trace");
-        });
-#endif
 
         tc.Run("RD1: every EE context, incl. StartThread's, has VU0 vf0 = (0,0,0,1)", [](TestCase &t)
         {

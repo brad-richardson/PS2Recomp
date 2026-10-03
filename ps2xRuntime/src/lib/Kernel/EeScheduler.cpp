@@ -181,14 +181,10 @@ namespace
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
     : m_runtime(runtime),
-      m_eventClockCycles([] {
-          const char *flag = std::getenv("PS2X_EVENT_CLOCK");
-          return flag != nullptr && std::strcmp(flag, "cycles") == 0;
-      }()),
       m_cycleOnlyEvents([] {
           const char *flag = std::getenv("PS2X_DETERMINISTIC");
           return flag != nullptr && std::strcmp(flag, "1") == 0;
-      }() || m_eventClockCycles),
+      }()),
       m_hostPace(ps2_vsync_pacer::hostPaceFromProcessEnv()),
       m_vsyncPace(!ps2_vsync_pacer::unpacedFromProcessEnv() || m_hostPace.enabled)
 {
@@ -543,19 +539,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
 // GameThread changes its signal mask between an arm and its transfer, and no
 // transfer leaves a signal handler or an alternate stack, so the save is pure
 // cost (sigprocmask + __sigaltstack were 7.8 % of the Mac GameThread's busy
-// time in IP6's profile). sigmask keeps the GT3 path for A/B.
-int EeScheduler::transferSaveMaskFor(const char *mode)
-{
-    if (mode != nullptr && std::strcmp(mode, "sigmask") == 0)
-    {
-#if defined(__GLIBC__)
-        return 0; // GT3: mask save as plain setjmp does it on this libc.
-#else
-        return 1;
-#endif
-    }
-    return 0;
-}
+// time in IP6's profile). The mask is never saved (fast transfers).
 
 void EeScheduler::run()
 {
@@ -564,18 +548,6 @@ void EeScheduler::run()
     // unless PS2X_EE_FPMODE=ieee; restored when run() returns.
     ps2_fpmode::ScopedEeMode eeFpMode;
     m_running.store(true, std::memory_order_release);
-#if PS2X_EE_SIGJMP
-    m_transferSaveMask = transferSaveMaskFor(std::getenv("PS2X_EE_SWITCH"));
-    {
-        static bool logged = false;
-        if (!logged)
-        {
-            logged = true;
-            std::fprintf(stderr, "[ee-switch] mode=%s savemask=%d\n",
-                         m_transferSaveMask != 0 ? "sigmask" : "fast", m_transferSaveMask);
-        }
-    }
-#endif
     // PT2: cache the perf-log knob once (env is fixed before run()).
     // AD1: ADPF reuses this same accounting (no re-measure), so it turns the
     // accounting on too; knob-off is identical to before.
@@ -3388,25 +3360,6 @@ void EeScheduler::waitForEvent()
             deadlineCycle = timerCycle;
             hostDeadline = timerHostDeadline;
         }
-    }
-
-    if (m_eventClockCycles)
-    {
-        // The queue was empty while holding m_eventMutex. Advance to the
-        // earliest guest event/timer, then let the ordinary event pass deliver
-        // it before any further idle advancement. A host completion posted
-        // after this selection is consumed by that next pass.
-        const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;
-        lock.unlock();
-        uint64_t remaining = elapsed;
-        while (remaining > 0u)
-        {
-            const uint32_t step = static_cast<uint32_t>(std::min<uint64_t>(remaining, std::numeric_limits<uint32_t>::max()));
-            accountCycles(step);
-            remaining -= step;
-        }
-        m_checkpointPending.store(true, std::memory_order_release);
-        return;
     }
 
     const uint64_t perfT0 = m_perfTail ? ps2x::perflog::steadyNs() : 0u;
