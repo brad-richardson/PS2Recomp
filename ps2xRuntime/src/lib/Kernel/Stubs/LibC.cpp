@@ -1,6 +1,5 @@
 #include "runtime/ps2_savestate.h"
 #include "Common.h"
-#include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e44_trace.h"
 #include "LibC.h"
@@ -98,7 +97,6 @@ namespace ps2_stubs
         uint32_t size = getRegU32(ctx, 6);     // $a2
         size = sanitizeMemTransferSize(size, "memcpy");
 
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destAddr, size); // E3b R3h
         uint32_t copied = 0u;
         // CL1: the game issues overlapping copies through this stub (CP4
         // ASan: memcpy-param-overlap from generated sub_003D1BA8). Host
@@ -184,13 +182,6 @@ namespace ps2_stubs
                                               copied, rdram, "libc-memcpy", src, 0u);
             }
         }
-        if (e3t.active && copied != 0u)
-        {
-            char e3x[96];
-            std::snprintf(e3x, sizeof(e3x), "src=0x%x,req=%u", srcAddr, size);
-            e3t.len = copied;
-            ps2_e3::tapEnd(std::move(e3t), "libc-memcpy", rdram, e3x);
-        }
 
         // returns dest pointer ($v0 = $a0)
         ctx->r[2] = ctx->r[4];
@@ -203,7 +194,6 @@ namespace ps2_stubs
         uint32_t size = getRegU32(ctx, 6);           // $a2
         size = sanitizeMemTransferSize(size, "memset");
 
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destAddr, size); // E3b R3h
         uint32_t written = 0u;
         uint32_t curDst = destAddr;
         while (written < size)
@@ -236,13 +226,6 @@ namespace ps2_stubs
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
                                               written, rdram, "libc-memset", "fill", 0u);
         }
-        if (e3t.active && written != 0u)
-        {
-            char e3x[64];
-            std::snprintf(e3x, sizeof(e3x), "v=0x%x,req=%u", value & 0xFFu, size);
-            e3t.len = written;
-            ps2_e3::tapEnd(std::move(e3t), "libc-memset", rdram, e3x);
-        }
 
         // returns dest pointer ($v0 = $a0)
         ctx->r[2] = ctx->r[4];
@@ -254,7 +237,6 @@ namespace ps2_stubs
         uint32_t size = getRegU32(ctx, 5);     // $a1
         size = sanitizeMemTransferSize(size, "memclr");
 
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destAddr, size); // E3b R3h
         uint32_t written = 0u;
         uint32_t curDst = destAddr;
         while (written < size)
@@ -287,13 +269,6 @@ namespace ps2_stubs
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
                                               written, rdram, "libc-memclr", "zero", 0u);
         }
-        if (e3t.active && written != 0u)
-        {
-            char e3x[64];
-            std::snprintf(e3x, sizeof(e3x), "req=%u", size);
-            e3t.len = written;
-            ps2_e3::tapEnd(std::move(e3t), "libc-memclr", rdram, e3x);
-        }
 
         ctx->r[2] = ctx->r[4];
     }
@@ -305,7 +280,6 @@ namespace ps2_stubs
         uint32_t size = getRegU32(ctx, 6);     // $a2
         size = sanitizeMemTransferSize(size, "memmove");
 
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destAddr, size); // E3b R3h
         uint32_t copied = 0u;
         std::vector<uint8_t> tmp;
         tmp.reserve(size);
@@ -343,13 +317,6 @@ namespace ps2_stubs
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), destAddr,
                                               copied, rdram, "libc-memmove", src, 0u);
             }
-        }
-        if (e3t.active && copied != 0u)
-        {
-            char e3x[96];
-            std::snprintf(e3x, sizeof(e3x), "src=0x%x,req=%u", srcAddr, size);
-            e3t.len = copied;
-            ps2_e3::tapEnd(std::move(e3t), "libc-memmove", rdram, e3x);
         }
 
         // returns dest pointer ($v0 = $a0)
@@ -392,14 +359,7 @@ namespace ps2_stubs
 
         if (hostDest && hostSrc)
         {
-            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destAddr, ::strlen(hostSrc) + 1u); // E3b R3h
             ::strcpy(hostDest, hostSrc);
-            if (e3t.active)
-            {
-                char e3x[64];
-                std::snprintf(e3x, sizeof(e3x), "src=0x%x", srcAddr);
-                ps2_e3::tapEnd(std::move(e3t), "libc-strcpy", rdram, e3x);
-            }
             ps2TraceGuestRangeWrite(rdram, destAddr, static_cast<uint32_t>(::strlen(hostSrc) + 1u), "strcpy", ctx);
                 // E44 Part-3 EE watch (dev-only, default off).
                 ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, static_cast<uint32_t>(::strlen(hostSrc) + 1u),
@@ -436,14 +396,7 @@ namespace ps2_stubs
 
         if (hostDest && hostSrc)
         {
-            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destAddr, size); // E3b R3h
             ::strncpy(hostDest, hostSrc, size);
-            if (e3t.active)
-            {
-                char e3x[64];
-                std::snprintf(e3x, sizeof(e3x), "src=0x%x", srcAddr);
-                ps2_e3::tapEnd(std::move(e3t), "libc-strncpy", rdram, e3x);
-            }
             ps2TraceGuestRangeWrite(rdram, destAddr, size, "strncpy", ctx);
                 // E44 Part-3 EE watch (dev-only, default off).
                 ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr, size,
@@ -548,18 +501,7 @@ namespace ps2_stubs
 
         if (hostDest && hostSrc)
         {
-            const uint32_t e3off = static_cast<uint32_t>(::strlen(hostDest));
-            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destAddr + e3off, ::strlen(hostSrc) + 1u); // E3b R3h
             ::strcat(hostDest, hostSrc);
-            if (e3t.active)
-            {
-                char e3x[64];
-                std::snprintf(e3x, sizeof(e3x), "src=0x%x", srcAddr);
-                ps2_e3::tapEnd(std::move(e3t), "libc-strcat", rdram, e3x);
-                // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr + e3off, static_cast<uint32_t>(::strlen(hostSrc) + 1u),
-                                                        "strcat", 0u, false, "strcat");
-            }
         }
         else
         {
@@ -584,19 +526,7 @@ namespace ps2_stubs
 
         if (hostDest && hostSrc)
         {
-            const uint32_t e3off = static_cast<uint32_t>(::strlen(hostDest));
-            const uint32_t e3len = std::min<uint32_t>(static_cast<uint32_t>(::strlen(hostSrc)), size) + 1u;
-            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, destAddr + e3off, e3len); // E3b R3h
             ::strncat(hostDest, hostSrc, size);
-            if (e3t.active)
-            {
-                char e3x[64];
-                std::snprintf(e3x, sizeof(e3x), "src=0x%x", srcAddr);
-                ps2_e3::tapEnd(std::move(e3t), "libc-strncat", rdram, e3x);
-                // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, destAddr + e3off, e3len,
-                                                        "strncat", 0u, false, "strncat");
-            }
         }
         else
         {
@@ -770,15 +700,8 @@ namespace ps2_stubs
                 rendered.resize(kSafeSprintfBytes - 1);
             }
             const size_t writeLen = rendered.size() + 1u;
-            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, str_addr, writeLen); // E3b R3h
             const bool e3ok =
                 writeGuestBytes(rdram, runtime, str_addr, reinterpret_cast<const uint8_t *>(rendered.c_str()), writeLen);
-            if (e3t.active)
-            {
-                char e3x[32];
-                std::snprintf(e3x, sizeof(e3x), "ok=%d", e3ok ? 1 : 0);
-                ps2_e3::tapEnd(std::move(e3t), "libc-sprintf", rdram, e3x);
-            }
             if (e3ok)
             {
                 ps2TraceGuestRangeWrite(rdram, str_addr, static_cast<uint32_t>(writeLen), "sprintf", ctx);
@@ -830,14 +753,7 @@ namespace ps2_stubs
                 {
                     std::memcpy(output.data(), rendered.data(), copyLen);
                 }
-                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, str_addr, output.size()); // E3b R3h
                 const bool e3ok = writeGuestBytes(rdram, runtime, str_addr, output.data(), output.size());
-                if (e3t.active)
-                {
-                    char e3x[32];
-                    std::snprintf(e3x, sizeof(e3x), "ok=%d", e3ok ? 1 : 0);
-                    ps2_e3::tapEnd(std::move(e3t), "libc-snprintf", rdram, e3x);
-                }
                 if (e3ok)
                 {
                     ps2TraceGuestRangeWrite(rdram, str_addr, static_cast<uint32_t>(output.size()), "snprintf", ctx);
@@ -980,16 +896,7 @@ namespace ps2_stubs
 
         if (hostPtr && fp && size > 0 && count > 0)
         {
-            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, ptrAddr, static_cast<uint64_t>(size) * count); // E3b R3h
             items_read = ::fread(hostPtr, size, count, fp);
-            if (e3t.active && items_read > 0)
-            {
-                e3t.len = items_read * static_cast<size_t>(size);
-                ps2_e3::tapEnd(std::move(e3t), "libc-fread", rdram, "-");
-                // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, ptrAddr, static_cast<uint32_t>(items_read * size),
-                                                        "fread", 0u, false, "fread");
-            }
         }
         else
         {
@@ -1377,18 +1284,8 @@ namespace ps2_stubs
             {
                 rendered.resize(kSafeVsprintfBytes - 1);
             }
-            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, str_addr, rendered.size() + 1u); // E3b R3h
             const bool e3ok = writeGuestBytes(rdram, runtime, str_addr,
                                               reinterpret_cast<const uint8_t *>(rendered.c_str()), rendered.size() + 1u);
-            if (e3t.active)
-            {
-                char e3x[32];
-                std::snprintf(e3x, sizeof(e3x), "ok=%d", e3ok ? 1 : 0);
-                ps2_e3::tapEnd(std::move(e3t), "libc-vsprintf", rdram, e3x);
-                // E44 Part-3 EE watch (dev-only, default off).
-                ps2_e44_trace::emitRangeOverlap(rdram, ctx, str_addr, static_cast<uint32_t>(rendered.size() + 1u),
-                                                        "vsprintf", 0u, false, "vsprintf");
-            }
             if (e3ok)
             {
                 ret = static_cast<int>(rendered.size());

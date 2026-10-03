@@ -1,6 +1,5 @@
 #include "Common.h"
 #include "ps2_build_id.h"
-#include "ps2_e3.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e44_trace.h"
@@ -92,213 +91,6 @@ namespace ps2_stubs
         // so a save state can carry it.
         std::atomic<uint32_t> g_padFrameCount{0};
         int g_padReadLogCount = 0;
-
-        // E2a stimulus hook: CU4 B7 deleted the PS2X_PAD_STIM_AFTER/WALLMIN
-        // tunables (stale CU1 S3 taps). The stimulus never arms: one
-        // relaxed atomic check per pad call, zero behavior change.
-        struct PadStimulus
-        {
-            std::mutex mutex;
-            bool initDone = false;
-            bool enabled = false;
-            uint64_t afterReads = 0;
-            uint64_t wallMinSec = 0;
-            std::chrono::steady_clock::time_point startWall{};
-            uint64_t totalReads = 0;
-            uint64_t totalGetState = 0;
-            uint64_t totalPortOpens = 0;
-            uint64_t postFirePortOpens = 0;
-            bool fired = false;
-            std::vector<uint32_t> preFireGetStateRa;
-            std::vector<uint32_t> postFireNewRa;
-        };
-        PadStimulus g_padStim;
-        std::atomic<bool> g_padStimInitDone{false};
-        std::atomic<bool> g_padStimArmed{false};
-
-        constexpr uint64_t kPadStimMilestoneReads = 25000ull;
-        constexpr uint64_t kPadStimWaitMilestoneReads = 1000ull;
-        constexpr uint16_t kPadStimButtons = 0x0000; // active-low: all pressed
-        constexpr uint8_t kPadStimLx = 0x00;
-        constexpr uint8_t kPadStimLy = 0x00;
-        constexpr uint8_t kPadStimRx = 0xFF;
-        constexpr uint8_t kPadStimRy = 0xFF;
-
-        uint64_t padStimWallSecLocked()
-        {
-            const auto now = std::chrono::steady_clock::now();
-            return static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::seconds>(now - g_padStim.startWall).count());
-        }
-
-        void padStimInitLocked()
-        {
-            if (g_padStim.initDone)
-            {
-                return;
-            }
-            g_padStim.initDone = true;
-            g_padStim.startWall = std::chrono::steady_clock::now();
-            // CU4 B7: the PS2X_PAD_STIM_AFTER/WALLMIN tunables are deleted
-            // (stale CU1 S3 taps). The stimulus never arms.
-        }
-
-        void padStimEnsureInit()
-        {
-            if (g_padStimInitDone.load(std::memory_order_relaxed))
-            {
-                return;
-            }
-            std::lock_guard<std::mutex> lock(g_padStim.mutex);
-            padStimInitLocked();
-            g_padStimInitDone.store(true, std::memory_order_relaxed);
-        }
-
-        bool padStimHasRa(const std::vector<uint32_t> &vec, uint32_t ra)
-        {
-            for (const uint32_t v : vec)
-            {
-                if (v == ra)
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        void padStimOnRead(PadInputState &state)
-        {
-            padStimEnsureInit();
-            if (!g_padStimArmed.load(std::memory_order_relaxed))
-            {
-                return;
-            }
-            std::lock_guard<std::mutex> lock(g_padStim.mutex);
-            if (!g_padStim.enabled)
-            {
-                return;
-            }
-            ++g_padStim.totalReads;
-            const uint64_t reads = g_padStim.totalReads;
-            if (!g_padStim.fired)
-            {
-                const uint64_t wall = padStimWallSecLocked();
-                const bool readsPast = reads >= g_padStim.afterReads;
-                if (readsPast && wall >= g_padStim.wallMinSec)
-                {
-                    g_padStim.fired = true;
-                    std::fprintf(stderr,
-                                 "[padstim] FIRED reads=%llu wall=%llus getstate=%llu "
-                                 "portopens=%llu preFireGetStateRaN=%llu\n",
-                                 static_cast<unsigned long long>(reads),
-                                 static_cast<unsigned long long>(wall),
-                                 static_cast<unsigned long long>(g_padStim.totalGetState),
-                                 static_cast<unsigned long long>(g_padStim.totalPortOpens),
-                                 static_cast<unsigned long long>(g_padStim.preFireGetStateRa.size()));
-                }
-                else if (reads % kPadStimMilestoneReads == 0ull ||
-                         (readsPast && reads % kPadStimWaitMilestoneReads == 0ull))
-                {
-                    std::fprintf(stderr,
-                                 "[padstim] progress reads=%llu wall=%llus getstate=%llu "
-                                 "portopens=%llu readsPast=%d\n",
-                                 static_cast<unsigned long long>(reads),
-                                 static_cast<unsigned long long>(wall),
-                                 static_cast<unsigned long long>(g_padStim.totalGetState),
-                                 static_cast<unsigned long long>(g_padStim.totalPortOpens),
-                                 readsPast ? 1 : 0);
-                }
-            }
-            else if (reads % kPadStimMilestoneReads == 0ull)
-            {
-                std::fprintf(stderr,
-                             "[padstim] post reads=%llu wall=%llus getstate=%llu "
-                             "portopens=%llu postFirePortOpens=%llu postFireNewRaN=%llu\n",
-                             static_cast<unsigned long long>(reads),
-                             static_cast<unsigned long long>(padStimWallSecLocked()),
-                             static_cast<unsigned long long>(g_padStim.totalGetState),
-                             static_cast<unsigned long long>(g_padStim.totalPortOpens),
-                             static_cast<unsigned long long>(g_padStim.postFirePortOpens),
-                             static_cast<unsigned long long>(g_padStim.postFireNewRa.size()));
-            }
-            if (g_padStim.fired)
-            {
-                state.buttons = kPadStimButtons;
-                state.lx = kPadStimLx;
-                state.ly = kPadStimLy;
-                state.rx = kPadStimRx;
-                state.ry = kPadStimRy;
-            }
-        }
-
-        void padStimOnGetState(uint32_t ra)
-        {
-            padStimEnsureInit();
-            if (!g_padStimArmed.load(std::memory_order_relaxed))
-            {
-                return;
-            }
-            std::lock_guard<std::mutex> lock(g_padStim.mutex);
-            if (!g_padStim.enabled)
-            {
-                return;
-            }
-            ++g_padStim.totalGetState;
-            if (!g_padStim.fired)
-            {
-                if (g_padStim.preFireGetStateRa.size() < 64 &&
-                    !padStimHasRa(g_padStim.preFireGetStateRa, ra))
-                {
-                    g_padStim.preFireGetStateRa.push_back(ra);
-                }
-                return;
-            }
-            if (!padStimHasRa(g_padStim.preFireGetStateRa, ra) &&
-                !padStimHasRa(g_padStim.postFireNewRa, ra))
-            {
-                if (g_padStim.postFireNewRa.size() < 64)
-                {
-                    g_padStim.postFireNewRa.push_back(ra);
-                }
-                std::fprintf(stderr,
-                             "[padstim] GETSTATE-NEWRA ra=0x%08x reads=%llu wall=%llus "
-                             "getstate=%llu\n",
-                             ra,
-                             static_cast<unsigned long long>(g_padStim.totalReads),
-                             static_cast<unsigned long long>(padStimWallSecLocked()),
-                             static_cast<unsigned long long>(g_padStim.totalGetState));
-            }
-        }
-
-        void padStimOnPortOpen(uint32_t ra, int port, int slot)
-        {
-            padStimEnsureInit();
-            if (!g_padStimArmed.load(std::memory_order_relaxed))
-            {
-                return;
-            }
-            std::lock_guard<std::mutex> lock(g_padStim.mutex);
-            if (!g_padStim.enabled)
-            {
-                return;
-            }
-            ++g_padStim.totalPortOpens;
-            if (!g_padStim.fired)
-            {
-                return;
-            }
-            ++g_padStim.postFirePortOpens;
-            if (g_padStim.postFirePortOpens <= 10ull)
-            {
-                std::fprintf(stderr,
-                             "[padstim] PORTOPEN post-fire n=%llu ra=0x%08x port=%d slot=%d "
-                             "reads=%llu wall=%llus\n",
-                             static_cast<unsigned long long>(g_padStim.postFirePortOpens),
-                             ra, port, slot,
-                             static_cast<unsigned long long>(g_padStim.totalReads),
-                             static_cast<unsigned long long>(padStimWallSecLocked()));
-            }
-        }
 
         // E31 DEV-ONLY scripted pad input (PS2X_PAD_SCRIPT). Unset/empty
         // (default) = one relaxed atomic check per pad read, zero behavior
@@ -2099,7 +1891,6 @@ namespace ps2_stubs
                 }
             }
 
-            padStimOnRead(state); // E2a: no-op (CU4 B7 deleted the stim knobs)
             // E33: vsync-clock scripts read guest time from the GS vsync
             // tick; wall-clock scripts ignore it. Null runtime (tests) = 0.
             const uint64_t guestVsyncTick =
@@ -2411,8 +2202,6 @@ namespace ps2_stubs
     void scePadPortOpen(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         (void)runtime;
-        padStimOnPortOpen(getRegU32(ctx, 31), static_cast<int>(getRegU32(ctx, 4)),
-                          static_cast<int>(getRegU32(ctx, 5))); // E2a tripwire: 3FF708 arm
         const uint32_t dmaAddr = getRegU32(ctx, 6);
         uint8_t *dmaStr = getMemPtr(rdram, dmaAddr);
         std::lock_guard<std::mutex> lock(g_padStateMutex);
@@ -2434,11 +2223,9 @@ namespace ps2_stubs
         if (dmaStr)
         {
             ps2TraceGuestRangeWrite(rdram, dmaAddr, 32u, "scePadPortOpen", ctx);
-            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, dmaAddr, 32u); // E3b R3e E2
             std::memset(dmaStr, 0, 32);
         // E44 Part-3 EE watch (dev-only, default off).
         ps2_e44_trace::emitRangeOverlap(rdram, ctx, dmaAddr, 32u, "pad-open", 0u, false, "scePadPortOpen");
-            ps2_e3::tapEnd(std::move(e3t), "pad-open", rdram, "fill=0");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dmaAddr,
                                               32u, rdram, "pad-open", "zero", 0u);
@@ -2459,19 +2246,12 @@ namespace ps2_stubs
         }
 
         ps2TraceGuestRangeWrite(rdram, dataAddr, 32u, "scePadRead", ctx);
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, dataAddr, 32u); // E3b R3e E1
         const bool e3ok = readPadPortData(port, slot, runtime, data, dataAddr);
         // E44 Part-3 EE watch (dev-only, default off).
         ps2_e44_trace::emitRangeOverlap(rdram, ctx, dataAddr, 32u, "pad-read", 0u, false, "scePadRead");
         if (ps2_e41_trace::plantArmed()) // E41 plant watch
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dataAddr,
                                           32u, rdram, "pad-read", "pad", 0u);
-        if (e3t.active)
-        {
-            char e3x[64];
-            std::snprintf(e3x, sizeof(e3x), "port=%d,slot=%d,ok=%d", port, slot, e3ok ? 1 : 0);
-            ps2_e3::tapEnd(std::move(e3t), "pad-read", rdram, e3x);
-        }
         if (!e3ok)
         {
             setReturnS32(ctx, 0);
@@ -2528,10 +2308,8 @@ namespace ps2_stubs
         }
 
         const char *text = (state == 0) ? "COMPLETE" : "BUSY";
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, strAddr, 32); // E3b R3e E3
         std::strncpy(buf, text, 31);
         buf[31] = '\0';
-        ps2_e3::tapEnd(std::move(e3t), "pad-str", rdram, "fn=req");
         setReturnS32(ctx, 0);
     }
 
@@ -2644,10 +2422,8 @@ namespace ps2_stubs
             text = "DISCONNECTED";
         }
 
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, strAddr, 32); // E3b R3e E3
         std::strncpy(buf, text, 31);
         buf[31] = '\0';
-        ps2_e3::tapEnd(std::move(e3t), "pad-str", rdram, "fn=state");
         setReturnS32(ctx, 0);
     }
 

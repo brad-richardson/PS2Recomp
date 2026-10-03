@@ -12,7 +12,6 @@
 #include "ps2_gfx_stats.h"
 #include "ps2_mpg_src_trace.h"
 #include "ps2_uv1_counters.h"
-#include "ps2_vif_mpg_log.h"
 
 enum VIFCmd : uint8_t
 {
@@ -635,64 +634,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                         gs_regs.vsyncTick.load(std::memory_order_relaxed),
                         num, srcEe, srcMode, srcTag, srcTagAt);
                 }
-            }
-            // E39 DEV-ONLY MPG log: classify the copy outcome before running it.
-            if (ps2_vif_mpg_log::enabled())
-            {
-                const uint64_t vsync = gs_regs.vsyncTick.load(std::memory_order_relaxed);
-                const uint32_t availBytes = (pos < sizeBytes) ? (sizeBytes - pos) : 0u;
-                const uint32_t payloadBytes = (mpgBytes < availBytes) ? mpgBytes : availBytes;
-                const uint32_t fnv = ps2_vif_mpg_log::fnv1a32(data + pos, payloadBytes);
-                const uint32_t maskedDest = destAddr & 0x3FFFu;
-                const char *outcome = "copied";
-                if (!m_vu1Code || destAddr >= PS2_VU1_CODE_SIZE)
-                {
-                    outcome = "drop_addr";
-                }
-                else
-                {
-                    uint32_t copyBytes = mpgBytes;
-                    if (destAddr + copyBytes > PS2_VU1_CODE_SIZE)
-                        copyBytes = PS2_VU1_CODE_SIZE - destAddr;
-                    if (pos + copyBytes > sizeBytes)
-                        outcome = "drop_partial";
-                    else if (destAddr + mpgBytes > PS2_VU1_CODE_SIZE)
-                        outcome = "clipped";
-                }
-                bool hasS2 = false, shortS2 = false, hasS8 = false, shortS8 = false;
-                uint32_t s2lo = 0u, s2hi = 0u, s8lo = 0u, s8hi = 0u;
-                const uint32_t off2 = ps2_vif_mpg_log::slotPayloadOffset(maskedDest, mpgBytes, 2u);
-                if (off2 != ps2_vif_mpg_log::kNoOffset)
-                {
-                    if (off2 + 8u <= availBytes)
-                    {
-                        std::memcpy(&s2lo, data + pos + off2, sizeof(s2lo));
-                        std::memcpy(&s2hi, data + pos + off2 + 4u, sizeof(s2hi));
-                        hasS2 = true;
-                    }
-                    else
-                    {
-                        shortS2 = true;
-                    }
-                }
-                const uint32_t off8 = ps2_vif_mpg_log::slotPayloadOffset(maskedDest, mpgBytes, 8u);
-                if (off8 != ps2_vif_mpg_log::kNoOffset)
-                {
-                    if (off8 + 8u <= availBytes)
-                    {
-                        std::memcpy(&s8lo, data + pos + off8, sizeof(s8lo));
-                        std::memcpy(&s8hi, data + pos + off8 + 4u, sizeof(s8hi));
-                        hasS8 = true;
-                    }
-                    else
-                    {
-                        shortS8 = true;
-                    }
-                }
-                ps2_vif_mpg_log::note(vsync, imm, num, destAddr, destAddr + mpgBytes,
-                                      outcome, availBytes, fnv,
-                                      hasS2, s2lo, s2hi, shortS2,
-                                      hasS8, s8lo, s8hi, shortS8);
             }
             if (m_vu1Code && destAddr < PS2_VU1_CODE_SIZE && mpgBytes > 0)
             {

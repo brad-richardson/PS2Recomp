@@ -3,15 +3,12 @@
 #include "ps2_ts2_split60.h"
 #include "ps2_mtvu.h"
 #include "ps2_microvu.h"
-#include "ps2_e4.h"
 #include "ps2_e7.h"
 #include "ps2_mpg_src_trace.h"
 #include "ps2_pk.h"
 #include "ps2_rr1_alpha_tap.h"
 #include "ps2_uv1_counters.h"
-#include "ps2_vif_mpg_log.h"
 #include "ps2_vq.h"
-#include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e43_trace.h"
 #include "ps2_e44_trace.h"
@@ -3344,9 +3341,9 @@ bool PS2Runtime::syncCoreSubsystems()
     // so the [pk] sequence (idx, fnv, len, src) is a GS-stream comparator.
     ps2_mtvu::configure(ps2_e7::enabled() || ps2_rr1::alphaTapOn() || ps2_rr1::evOn() ||
                         ps2_mpg_src_trace::enabled() || ps2_gfx_stats::enabled() || ps2x_gs_capture::enabled() ||
-                        ps2_vif_mpg_log::enabled() || ps2_e44_trace::enabled() || ps2_e43_trace::enabled() ||
+                        ps2_e44_trace::enabled() || ps2_e43_trace::enabled() ||
                         ps2_e41_trace::armed() || ps2_uv1_vif_fmt::enabled() || ps2_uv1_dma_stall::enabled() ||
-                        ps2_e4::enabled() || ps2_vq::enabled());
+                        ps2_vq::enabled());
     // VPL1: PS2X_MTVU_GIF_STAGE=1 (default off) moves the unit's GIF submit
     // (arbiter + GS-worker handoff) onto its own thread behind an ordered op
     // ring; the unit keeps VIF1/VU1 and the byte copies. Needs threaded MTVU
@@ -4191,9 +4188,6 @@ void ps2DiagWatchReportDirect(uint32_t writeAddr,
     diagWatchEmit(writeAddr, width, valueLo, valueHi, pc, threadId, ra, sp);
 }
 
-// E3b R2: legacy [diag:watch] line stays verbatim; when the E3 span is armed
-// and the store overlaps a watched window (normalized, wrap-safe), an
-// [e3:r2] row with old/new values + src tag is emitted on the shared seq.
 // src: 0 = WRITE* macro pre-report, 1 = Store* (special-address second
 // report; miner dedupes adjacent macro+store identical pairs).
 static void diagWatchReportImpl(uint8_t *rdram, uint32_t writeAddr, uint32_t width, uint64_t valueLo,
@@ -4207,16 +4201,6 @@ static void diagWatchReportImpl(uint8_t *rdram, uint32_t writeAddr, uint32_t wid
     diagWatchEmit(writeAddr, width, valueLo, valueHi, pc, tid, ra, sp);
     if (ps2_e7::enabled() && runtime != nullptr)
         ps2_e7::fields(runtime->memory().gs().vsyncTick.load(), rdram, writeAddr, width, valueLo, valueHi, pc, tid);
-    if (ps2_e3::armed() && ps2_e3::storeOverlaps(writeAddr, width))
-    {
-        uint64_t oldLo = 0u;
-        uint64_t oldHi = 0u;
-        // Called BEFORE the store it annotates on every path (WRITE* macros
-        // report pre-store; Store* report before m_memory.write*), so this
-        // read is the pre-store value.
-        ps2_e3::readOld(rdram, writeAddr, width, oldLo, oldHi);
-        ps2_e3::emitR2(e3src, writeAddr, width, oldLo, oldHi, valueLo, valueHi, pc, tid, ra, sp);
-    }
 }
 
 void ps2DiagWatchReport(uint8_t *rdram,
@@ -4635,190 +4619,6 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
     }
 }
 
-// E3b R1/R4: record state machine + invocation summaries, fed from
-// dispatchGuestBranch only (362DE8/394ED0/395000/363490/376938/362CC8).
-// Read-only: GPRs + getMemPtr halfword reads, no guest writes (C1).
-// a1 == s1 at 394ED0 entry (362DE8:320/1043 set a1=s1; stride 0x80 at :896);
-// the 0x362f84 check reads [s1+0x1E] after 394ED0 returns, so entry reads +
-// shared-seq R2/R3 rows bracket exactly what the check saw.
-namespace
-{
-struct E3Rec
-{
-    bool open = false;
-    uint64_t n = 0u;
-    uint64_t inv = 0u;
-    uint64_t seqEntry = 0u;
-    uint32_t a0 = 0u;
-    uint32_t a1 = 0u;
-    uint32_t a2 = 0u;
-    uint32_t s1e = 0u;
-    uint32_t ra = 0u;
-    uint32_t src = 0u;
-    int32_t k = -1;
-    uint32_t h10pre = 0u;
-    uint32_t h1cpre = 0u;
-    uint32_t h1epre = 0u;
-    bool preOk = false;
-    bool sawCall = false;
-    uint32_t s1c = 0u;
-};
-
-struct E3InvStat
-{
-    uint64_t nrec = 0u;
-    uint32_t s1min = 0xFFFFFFFFu;
-    uint32_t s1max = 0u;
-    uint32_t bases = 0u; // bit0 ramp, bit1 steady(expected), bit2 other/unchecked
-};
-
-static E3Rec g_e3rec;
-static E3InvStat g_e3inv;
-static uint64_t g_e3n394 = 0u;
-
-bool e3ReadH(uint8_t *rdram, uint32_t addr, uint32_t &out)
-{
-    const uint8_t *lo = getConstMemPtr(rdram, addr);
-    const uint8_t *hi = getConstMemPtr(rdram, addr + 1u);
-    if (!lo || !hi)
-    {
-        return false;
-    }
-    out = static_cast<uint32_t>(lo[0]) | (static_cast<uint32_t>(hi[0]) << 8);
-    return true;
-}
-
-const char *e3BaseClass(uint32_t a1, int32_t &kOut)
-{
-    kOut = -1;
-    const uint32_t base = ps2_e3::expectedS1Base();
-    if (base == 0u)
-    {
-        return "unchecked";
-    }
-    if (a1 >= base && a1 < base + 20u * 0x80u && ((a1 - base) % 0x80u) == 0u)
-    {
-        kOut = static_cast<int32_t>((a1 - base) / 0x80u);
-        return "ok";
-    }
-    if (a1 >= 0x70000000u && a1 < 0x70000000u + 20u * 0x80u && ((a1 - 0x70000000u) % 0x80u) == 0u)
-    {
-        return "ramp";
-    }
-    return "other";
-}
-
-void e3CloseRec(uint8_t *rdram)
-{
-    if (!g_e3rec.open)
-    {
-        return;
-    }
-    g_e3rec.open = false;
-    uint32_t h10o = 0u;
-    uint32_t h1co = 0u;
-    uint32_t h1eo = 0u;
-    const bool ok10 = e3ReadH(rdram, g_e3rec.a1 + 0x10u, h10o);
-    const bool ok1c = e3ReadH(rdram, g_e3rec.a1 + 0x1Cu, h1co);
-    const bool ok1e = e3ReadH(rdram, g_e3rec.a1 + 0x1Eu, h1eo);
-    int32_t k = -1;
-    const char *base = e3BaseClass(g_e3rec.a1, k);
-    ps2_e3::emitR1(g_e3rec.seqEntry, g_e3rec.n, g_e3rec.inv, g_e3rec.a0, g_e3rec.a1, g_e3rec.a2, g_e3rec.s1e,
-                   g_e3rec.ra, g_e3rec.src, k, g_e3rec.h10pre, g_e3rec.h1cpre, g_e3rec.h1epre, g_e3rec.preOk,
-                   g_e3rec.sawCall, g_e3rec.s1c, h10o, h1co, h1eo, ok10 && ok1c && ok1e, base);
-    g_e3inv.nrec++;
-    if (g_e3rec.a1 < g_e3inv.s1min)
-    {
-        g_e3inv.s1min = g_e3rec.a1;
-    }
-    if (g_e3rec.a1 > g_e3inv.s1max)
-    {
-        g_e3inv.s1max = g_e3rec.a1;
-    }
-    if (std::strcmp(base, "ramp") == 0)
-    {
-        g_e3inv.bases |= 1u;
-    }
-    else if (std::strcmp(base, "ok") == 0)
-    {
-        g_e3inv.bases |= 2u;
-    }
-    else
-    {
-        g_e3inv.bases |= 4u;
-    }
-}
-
-void e3Note394(uint8_t *rdram, R5900Context *ctx, uint32_t srcPc)
-{
-    const uint64_t n = g_e3n394++;
-    if (!ps2_e3::armed())
-    {
-        return;
-    }
-    if (g_e3rec.open)
-    {
-        e3CloseRec(rdram); // previous record: outcome + post-reads at this entry
-    }
-    g_e3rec.open = true;
-    g_e3rec.n = n;
-    g_e3rec.inv = ps2_e3::invStorage().load(std::memory_order_relaxed);
-    g_e3rec.seqEntry = ps2_e3::seqNext();
-    g_e3rec.a0 = ctx ? getRegU32(ctx, 4) : 0u;
-    g_e3rec.a1 = ctx ? getRegU32(ctx, 5) : 0u;
-    g_e3rec.a2 = ctx ? getRegU32(ctx, 6) : 0u;
-    g_e3rec.s1e = ctx ? getRegU32(ctx, 17) : 0u;
-    g_e3rec.ra = ctx ? getRegU32(ctx, 31) : 0u;
-    g_e3rec.src = srcPc;
-    int32_t k = -1;
-    e3BaseClass(g_e3rec.a1, k);
-    g_e3rec.k = k;
-    const bool ok10 = e3ReadH(rdram, g_e3rec.a1 + 0x10u, g_e3rec.h10pre);
-    const bool ok1c = e3ReadH(rdram, g_e3rec.a1 + 0x1Cu, g_e3rec.h1cpre);
-    const bool ok1e = e3ReadH(rdram, g_e3rec.a1 + 0x1Eu, g_e3rec.h1epre);
-    g_e3rec.preOk = ok10 && ok1c && ok1e;
-    g_e3rec.sawCall = false;
-    g_e3rec.s1c = 0u;
-}
-
-void e3Note39500(R5900Context *ctx)
-{
-    if (!ps2_e3::armed() || !g_e3rec.open || g_e3rec.sawCall)
-    {
-        return;
-    }
-    g_e3rec.sawCall = true;
-    g_e3rec.s1c = ctx ? getRegU32(ctx, 17) : 0u;
-}
-
-void e3Note362DE8(uint8_t *rdram, R5900Context *ctx, uint32_t srcPc)
-{
-    if (ps2_e3::armed())
-    {
-        // Flush the completing invocation while still armed (rows must
-        // precede the span-complete marker); then advance the counter.
-        const uint64_t inv = ps2_e3::invStorage().load(std::memory_order_relaxed);
-        e3CloseRec(rdram);
-        const uint32_t b = g_e3inv.bases;
-        const uint32_t nb = (b & 1u) + ((b >> 1) & 1u) + ((b >> 2) & 1u);
-        ps2_e3::emitR4Sum(inv, g_e3inv.nrec, g_e3inv.nrec ? g_e3inv.s1min : 0u,
-                           g_e3inv.nrec ? g_e3inv.s1max : 0u, nb, nb > 1u);
-    }
-    const uint64_t ord = ps2_e3::noteInvEntry();
-    const uint64_t t = ps2_e3::targetInv();
-    if (ord == t || ord == t + 1u)
-    {
-        g_e3inv = E3InvStat{};
-        ps2_e3::emitR4(ord, "362DE8", ctx ? getRegU32(ctx, 31) : 0u, srcPc);
-    }
-}
-
-void e3NoteR4(uint64_t inv, const char *fn, R5900Context *ctx, uint32_t srcPc)
-{
-    ps2_e3::emitR4(inv, fn, ctx ? getRegU32(ctx, 31) : 0u, srcPc);
-}
-} // namespace
-
 bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      R5900Context *ctx,
                                      uint32_t targetPc,
@@ -4999,45 +4799,6 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         entry.lastRa = callerRa;
         ++entry.count;
         diagCallsPeriodicFlush();
-    }
-
-    // P1ad 394ED0 park probe: CU4 B7 deleted the tunable; the probe never
-    // fires. Fresh dispatches only (checkpoint resumes do not re-dispatch).
-
-    // E3b R1/R4 taps (read-only; CU4 B4 deleted the PS2X_E3_INV tunable so
-    // ps2_e3::enabled() is statically false). No isCall gate:
-    // the 394ED0 probe above counts every dispatch and matches the ps2_log
-    // enter census exactly, so the E3 invocation counter uses the same rule.
-    if (ps2_e3::enabled())
-    {
-        if (targetPc == 0x362DE8u)
-        {
-            e3Note362DE8(rdram, ctx, sourcePc);
-        }
-        else if (targetPc == 0x394ED0u)
-        {
-            e3Note394(rdram, ctx, sourcePc);
-        }
-        else if (targetPc == 0x395000u)
-        {
-            e3Note39500(ctx);
-        }
-        else if (ps2_e3::armed())
-        {
-            const uint64_t inv = ps2_e3::invStorage().load(std::memory_order_relaxed);
-            if (targetPc == 0x363490u)
-            {
-                e3NoteR4(inv, "363490", ctx, sourcePc);
-            }
-            else if (targetPc == 0x376938u)
-            {
-                e3NoteR4(inv, "376938", ctx, sourcePc);
-            }
-            else if (targetPc == 0x362CC8u)
-            {
-                e3NoteR4(inv, "362CC8", ctx, sourcePc);
-            }
-        }
     }
 
     RecompiledFunction targetFn = lookupFunction(targetPc);

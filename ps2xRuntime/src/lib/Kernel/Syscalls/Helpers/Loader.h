@@ -1,4 +1,3 @@
-#include "ps2_e3.h" // E3b R3b B13 taps below (self-gated; unset env = no-op)
 #include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
 
 namespace
@@ -391,13 +390,11 @@ namespace
                 }
 
                 uint8_t *dest = runtime->memory().getScratchpad() + scratchOffset;
-                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, ph.vaddr, ph.memsz); // E3b R3b B13
                 if (ph.filesz > 0u)
                 {
                     if (!readFileBlockAt(file, ph.offset, dest, ph.filesz))
                     {
                         errorOut = "failed to read ELF segment payload";
-                        ps2_e3::tapEnd(std::move(e3t), "elf-seg", rdram, "spr=1,ok=0");
                         return false;
                     }
                 }
@@ -405,7 +402,6 @@ namespace
                 {
                     std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
                 }
-                ps2_e3::tapEnd(std::move(e3t), "elf-seg", rdram, "spr=1,ok=1");
                 // E44 Part-3 EE watch: ELF segment into scratchpad (dev-only,
                 // default off).
                 ps2_e44_trace::emitRangeOverlap(rdram, nullptr, ph.vaddr, ph.memsz,
@@ -421,13 +417,11 @@ namespace
                 }
 
                 uint8_t *dest = rdram + physAddr;
-                ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, ph.vaddr, ph.memsz); // E3b R3b B13
                 if (ph.filesz > 0u)
                 {
                     if (!readFileBlockAt(file, ph.offset, dest, ph.filesz))
                     {
                         errorOut = "failed to read ELF segment payload";
-                        ps2_e3::tapEnd(std::move(e3t), "elf-seg", rdram, "spr=0,ok=0");
                         return false;
                     }
                 }
@@ -435,7 +429,6 @@ namespace
                 {
                     std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
                 }
-                ps2_e3::tapEnd(std::move(e3t), "elf-seg", rdram, "spr=0,ok=1");
                 // E44 Part-3 EE watch: ELF segment into RAM (dev-only,
                 // default off).
                 ps2_e44_trace::emitRangeOverlap(rdram, nullptr, ph.vaddr, ph.memsz,
@@ -516,9 +509,7 @@ namespace
             {
                 return -1;
             }
-            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, execDataAddr, sizeof(execData)); // E3b R3b B13
             std::memcpy(guestExec, &execData, sizeof(execData));
-            ps2_e3::tapEnd(std::move(e3t), "elf-exec", rdram, "-");
         }
 
         static uint32_t successLogs = 0;

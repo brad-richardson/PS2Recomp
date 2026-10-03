@@ -1,5 +1,4 @@
 #include "ps2_iop_host.h"
-#include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "ps2_e44_trace.h"
 
@@ -176,7 +175,6 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
     {
         uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
         ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::writeGuest", nullptr);
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, address, size); // E3b R3b
         std::memcpy(destination, source, size);
         // E44 Part-3 EE watch: IOP/SIF write into EE RAM (dev-only,
         // default off). No guest ctx on this path.
@@ -186,10 +184,6 @@ bool PS2IopHostAdapter::writeGuest(uint32_t address, const void *source, size_t 
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), address,
                                           static_cast<uint32_t>(size), rdram,
                                           "iop-write", "iop", 0u);
-        if (e3t.active)
-        {
-            ps2_e3::tapEnd(std::move(e3t), "iop-write", rdram, "-");
-        }
     }
     return true;
 }
@@ -210,7 +204,6 @@ bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
     {
         uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
         ps2TraceGuestRangeWrite(rdram, address, static_cast<uint32_t>(size), "IopHost::zeroGuest", nullptr);
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, address, size); // E3b R3b
         std::memset(destination, 0, size);
         // E44 Part-3 EE watch (dev-only, default off). No ctx on this path.
         ps2_e44_trace::emitRangeOverlap(rdram, nullptr, address, static_cast<uint32_t>(size),
@@ -219,10 +212,6 @@ bool PS2IopHostAdapter::zeroGuest(uint32_t address, size_t size)
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), address,
                                           static_cast<uint32_t>(size), rdram,
                                           "iop-zero", "zero", 0u);
-        if (e3t.active)
-        {
-            ps2_e3::tapEnd(std::move(e3t), "iop-zero", rdram, "fill=0");
-        }
     }
     return true;
 }
