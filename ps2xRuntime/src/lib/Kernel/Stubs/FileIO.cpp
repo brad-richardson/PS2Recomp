@@ -1,5 +1,4 @@
 #include "Common.h"
-#include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "FileIO.h"
 
@@ -40,9 +39,7 @@ namespace ps2_stubs
         uint32_t statAddr = getRegU32(ctx, 5);
         if (uint8_t *statBuf = getMemPtr(rdram, statAddr))
         {
-            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, statAddr, 128); // E3b R3c C8
             std::memset(statBuf, 0, 128);
-            ps2_e3::tapEnd(std::move(e3t), "fstat", rdram, "fill=0");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), statAddr,
                                               128u, rdram, "fio-fstat", "zero", 0u);
@@ -101,9 +98,7 @@ namespace ps2_stubs
             }
 
             const uint32_t ready = 0u;
-            ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, argAddr, sizeof(ready)); // E3b R3c C9
             std::memcpy(argPtr, &ready, sizeof(ready));
-            ps2_e3::tapEnd(std::move(e3t), "ioctl", rdram, "cmd=1");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), argAddr,
                                               sizeof(ready), rdram, "fio-ioctl", "ready", 0u);
@@ -144,9 +139,7 @@ namespace ps2_stubs
         }
 
         // Minimal fake stat payload: zeroed structure indicates a valid, readable file.
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, statAddr, 128); // E3b R3c C8
         std::memset(statBuf, 0, 128);
-        ps2_e3::tapEnd(std::move(e3t), "stat", rdram, "fill=0");
         if (ps2_e41_trace::plantArmed()) // E41 plant watch
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), statAddr,
                                           128u, rdram, "fio-stat", "zero", 0u);

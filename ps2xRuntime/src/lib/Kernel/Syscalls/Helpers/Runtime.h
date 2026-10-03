@@ -1,4 +1,3 @@
-#include "ps2_e3.h" // E3b R3b taps below (self-gated; unset env = no-op)
 #include "ps2_e41_trace.h" // E41 plant watch (default off)
 #include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
 #include <cstdlib> // getenv for the deterministic timezone override
@@ -32,7 +31,6 @@ static void rpcCopyToRdram(uint8_t *rdram, uint32_t dst, uint32_t src, size_t si
         }
     }
 
-    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, dst, clampedSize); // E3b R3b
     for (size_t i = 0; i < clampedSize; ++i)
     {
         const uint32_t dstAddr = dst + static_cast<uint32_t>(i);
@@ -44,15 +42,6 @@ static void rpcCopyToRdram(uint8_t *rdram, uint32_t dst, uint32_t src, size_t si
             break;
         }
         *dstPtr = *srcPtr;
-    }
-    if (e3t.active)
-    {
-        char e3x[64];
-        std::snprintf(e3x, sizeof(e3x), "src=0x%x", src);
-        ps2_e3::tapEnd(std::move(e3t), "rpc-copy", rdram, e3x);
-    // E44 Part-3 EE watch (dev-only, default off). Post-copy.
-    ps2_e44_trace::emitRangeOverlap(rdram, nullptr, dst, static_cast<uint32_t>(clampedSize),
-                                    "rpc-copy", src, true, __func__);
     }
     if (ps2_e41_trace::plantArmed()) // E41 plant watch
     {
@@ -85,7 +74,6 @@ static void rpcZeroRdram(uint8_t *rdram, uint32_t dst, size_t size)
         }
     }
 
-    ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, dst, clampedSize); // E3b R3b
     for (size_t i = 0; i < clampedSize; ++i)
     {
         const uint32_t dstAddr = dst + static_cast<uint32_t>(i);
@@ -95,13 +83,6 @@ static void rpcZeroRdram(uint8_t *rdram, uint32_t dst, size_t size)
             break;
         }
         *dstPtr = 0;
-    }
-    if (e3t.active)
-    {
-        ps2_e3::tapEnd(std::move(e3t), "rpc-zero", rdram, "fill=0");
-    // E44 Part-3 EE watch (dev-only, default off). Post-fill.
-    ps2_e44_trace::emitRangeOverlap(rdram, nullptr, dst, static_cast<uint32_t>(clampedSize),
-                                    "rpc-zero", 0u, false, __func__);
     }
     if (ps2_e41_trace::plantArmed()) // E41 plant watch
         ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dst,

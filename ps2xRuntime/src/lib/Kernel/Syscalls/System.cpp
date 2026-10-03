@@ -1,5 +1,4 @@
 #include "Common.h"
-#include "ps2_e3.h"
 #include "ps2_e41_trace.h"
 #include "Ssx3CopiedPayload.h"
 #include "System.h"
@@ -173,9 +172,7 @@ namespace ps2_syscalls
             raw = g_osd_config_raw;
         }
 
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, paramAddr, sizeof(uint32_t)); // E3b R3c D9
         *param = raw;
-        ps2_e3::tapEnd(std::move(e3t), "osd-param", rdram, "-");
         if (ps2_e41_trace::plantArmed()) // E41 plant watch
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), paramAddr,
                                           sizeof(uint32_t), rdram, "sys-osd-param", "osd", 0u);
@@ -302,7 +299,6 @@ namespace ps2_syscalls
         };
         const uint32_t copyBytes = std::min<uint32_t>(size, 4u);
 
-        ps2_e3::Tap e3t = ps2_e3::tapBegin(rdram, paramAddr, copyBytes); // E3b R3c D10
         for (uint32_t i = 0; i < copyBytes; ++i)
         {
             uint8_t *dst = getMemPtr(rdram, paramAddr + i);
@@ -316,7 +312,6 @@ namespace ps2_syscalls
             }
             *dst = rawBytes[i];
         }
-        ps2_e3::tapEnd(std::move(e3t), "osd-param2", rdram, "-");
         if (ps2_e41_trace::plantArmed()) // E41 plant watch
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), paramAddr,
                                           copyBytes, rdram, "sys-osd-param2", "osd", 0u);
