@@ -643,6 +643,10 @@ void EeScheduler::run()
     const ps2_savestate::Config &ssConfig = ps2_savestate::config();
     uint64_t ssSaveAt = ssConfig.saveAt;
     bool ssSkipEvents = ps2_savestate::takeResumeSkip();
+    // FH27: a loaded state may resume inside an events window (the fh1
+    // section restored the commit); the EE budget follows it from here.
+    if (ssSkipEvents && ps2_fh1::eventsMode())
+        m_eeClockShift = ps2_fh1::eeClockShiftNow();
     uint64_t ssLastDeferTick = ~0ull;
     uint32_t ssDeferLines = 0u;
     // SS5: the vu1 budget-parked defer cannot be permanent. A park clears on
@@ -680,6 +684,8 @@ void EeScheduler::run()
                 // As after a boot-time load: the save was taken right after
                 // an event pass, so the next iteration must not run one.
                 ssSkipEvents = true;
+                if (ps2_fh1::eventsMode())
+                    m_eeClockShift = ps2_fh1::eeClockShiftNow(); // FH27: as for a boot-time load
                 // Fresh input + audio state for the rewound machine: the
                 // saved latch edges and PCM belonged to the pre-load
                 // timeline (SS1 §Dropping det: clear, don't refuse).

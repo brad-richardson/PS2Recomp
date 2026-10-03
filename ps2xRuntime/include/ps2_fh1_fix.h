@@ -50,6 +50,8 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     // FH26 (Brad 10-02 "Yes ship both"; in "all", "all,-stick2" opts out):
     kFixStick2 = 1ull << 34,    // 0x133308 bounded offset slews [0x49bc94]/[0x49bca0] (0x1340a8/0x134224): ~0.05 per update -> half (class b, FCR1 1)
     kFixClockSign = 1ull << 35, // with clock: the 0x1e1458 stamp's exit restamp keeps the signed elapsed (FCR1 3)
+    // FH27 (opt-in, not in "all"):
+    kFixBonusFlip = 1ull << 36, // with bonus: a live trick-bonus rate +0x3c is rescaled at each events flip (FCR1 4)
 };
 
 // FH12 groups live in their own mask (the main mask's bits are taken). Same
@@ -70,6 +72,8 @@ enum : uint32_t
     kFix12Popups = 1u << 11,   // HUD timed slots (0x116fb8, crash score popups): elapsed += 1/60 per update (class b, FH24)
     kFix12SndDt = 1u << 12,    // race sound-tree update 0x285bf8 (from 0x22c014): private dt vblanks * 1/60 (class h, FH24)
     kFix12HudProg = 1u << 13,  // race-HUD progress table 0x4c8bc8 (0x210618/0x20eda0): per-update slew limits (class b, FH24)
+    // FH27 (opt-in, not in "all"):
+    kFix12Loops2 = 1u << 14,   // with loops: a loop controller built while active (ctor 0x341aa0, step = x/A.rate at 120) gets its step in stock units (FCR1 4)
 };
 
 inline uint32_t fh12Item(const std::string &item) noexcept
@@ -88,6 +92,7 @@ inline uint32_t fh12Item(const std::string &item) noexcept
     if (item == "popups") return kFix12Popups;
     if (item == "snddt") return kFix12SndDt;
     if (item == "hudprog") return kFix12HudProg;
+    if (item == "loops2") return kFix12Loops2;
     return 0u;
 }
 
@@ -129,6 +134,7 @@ inline uint64_t fixItem(const std::string &item) noexcept
     if (item == "hudfill") return kFixHudfill;
     if (item == "stick2") return kFixStick2;
     if (item == "clocksign") return kFixClockSign;
+    if (item == "bonusflip") return kFixBonusFlip;
     return 0u;
 }
 

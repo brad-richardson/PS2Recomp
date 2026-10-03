@@ -1006,6 +1006,76 @@ inline void restamp10s(uint8_t *ram, uint32_t a, bool toActive)
     wr32(ram, kPeriod10sStamp, next);
 }
 
+// ---- FH27 bonusflip (FIX=bonusflip, with bonus; FCR1 §4) ------------------
+// bonus halves a trick-bonus rate +0x3c when it is awarded while active, but
+// the rate keeps accruing (0x117d38-64, while +0x40 >= 0) until 0x117838
+// resets it, typically at landing. A flip in between leaves it in the wrong
+// units: an airborne pause exits events and the resumed updates run stock
+// (entry waits for every rider to be grounded), so the halved rate accrues
+// at half speed. bonusflip remembers the trick states the rider pass hands
+// to 0x117c28 (call 0x1218ac, a0 = [P+0x790]; any mode, events only) and at
+// each flip rescales those with a live accrual: x0.5 on entry, x2 on exit
+// (exact). Only states seen within kBonusSeenTicks VBlanks are touched, so a
+// stale address from an earlier level is never written.
+inline constexpr uint32_t kTrickPassSite = 0x1218acu, kTrickPass = 0x117c28u;
+inline constexpr uint64_t kBonusSeenTicks = 16u;
+struct BonusSeen
+{
+    uint32_t state = 0u;
+    uint64_t tick = 0u;
+};
+inline std::array<BonusSeen, 8> g_bonusSeen{};
+
+inline bool bonusFlipFix() noexcept
+{
+    static const bool on = eventsMode() && (fixMask() & kFixBonus) != 0u && (fixMask() & kFixBonusFlip) != 0u;
+    return on;
+}
+
+inline void bonusNoteState(uint32_t state, uint64_t tick) noexcept
+{
+    if (!state)
+        return;
+    BonusSeen *slot = &g_bonusSeen[0];
+    for (BonusSeen &e : g_bonusSeen)
+    {
+        if (e.state == state)
+        {
+            slot = &e;
+            break;
+        }
+        if (e.tick < slot->tick)
+            slot = &e; // oldest (or empty) slot; ties keep the lowest index
+    }
+    slot->state = state;
+    slot->tick = tick;
+}
+
+inline void bonusRescale(uint8_t *ram, uint64_t tick, bool toActive)
+{
+    for (const BonusSeen &e : g_bonusSeen)
+    {
+        if (!e.state || tick - e.tick > kBonusSeenTicks)
+            continue;
+        uint32_t tb = 0u, rb = 0u;
+        if (!rd32(ram, e.state + 0x40u, tb) || !rd32(ram, e.state + 0x3cu, rb) || rb == 0u)
+            continue;
+        float t = 0.0f, r = 0.0f;
+        std::memcpy(&t, &tb, 4);
+        std::memcpy(&r, &rb, 4);
+        if (!(t >= 0.0f)) // 0x117d28: accrues while 0 <= +0x40
+            continue;
+        const float n = toActive ? r * 0.5f : r * 2.0f;
+        uint32_t nb = 0u;
+        std::memcpy(&nb, &n, 4);
+        wr32(ram, e.state + 0x3cu, nb);
+        static uint32_t lines = 0u;
+        if (lines++ < 64u)
+            std::fprintf(stderr, "fh1-bonusflip %s tick=%llu state=%08x t=%g rate=%g->%g\n", toActive ? "enter" : "exit",
+                         static_cast<unsigned long long>(tick), e.state, t, r, n);
+    }
+}
+
 inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
 {
     uint32_t a = 0u;
@@ -1028,6 +1098,8 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
         wr32(ram, kBandHi, kBandHiStock);
         wr32(ram, kBandLo, kBandLoStock);
     }
+    if (bonusFlipFix())
+        bonusRescale(ram, tick, toActive);
     g_producerCalls = g_raceTickCalls = g_raceTick2Calls = g_sessionCalls = 0u;
     g_rngUpdates = 0u;
     g_drawK = 0u;
@@ -1044,6 +1116,8 @@ inline uint64_t g_lastTick = 0u;
 
 inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
+    if (targetPc == kTrickPass && sourcePc == kTrickPassSite && ctx && bonusFlipFix())
+        bonusNoteState(getRegU32(ctx, 4), g_lastTick);
     if (targetPc == kSelectorDispatch && ctx)
     {
         uint32_t sel = 0u;
@@ -1782,7 +1856,7 @@ inline bool flagsFix() noexcept
 struct PostCall
 {
     uint32_t target = 0u, sp = 0u, obj = 0u;
-    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back
+    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27)
     uint32_t saved[6] = {};
 };
 inline PostCall g_post;
@@ -1861,6 +1935,15 @@ inline constexpr uint32_t kTexFlip = 0x35f410u;
 inline constexpr uint32_t kLoopMode1 = 0x341e48u;
 inline constexpr uint32_t kLoopMode2 = 0x341ec0u;
 inline constexpr uint32_t kLoopMode3 = 0x341f38u;
+// FH27 loops2: the loop-controller ctor 0x341aa0 bakes +0x10 = x / A.rate
+// (0x341bf0-0x341c20, int rate, then neg.s for direction 1). The post-call
+// above assumes a step in stock units (A.rate 60), true for the level-load
+// instances. Controllers built while active (A.rate 120; FH27 census: race
+// ticks 9839-17541 from the scene builder 0x2fae38 at 0x2fbe80) got half
+// that step, then halved again per update. Post-call on the ctor: +0x10 x2,
+// exact (x/120 and x/60 differ by a power of two), so every later update
+// sees a stock-unit step, active or not.
+inline constexpr uint32_t kLoopCtor = 0x341aa0u;
 // FH21 fxtimer: rider-FX timer updater sub_0x2e2260 (P+0xb44 word at +0x4,
 // stored at 0x2e2388, writer pc/ra 0x2e2388/0x2e2350 in the Happiness
 // mid-race lab). Its step f21 = [0x49f6a8] (1/60) is also the trail-push dt
@@ -1908,11 +1991,22 @@ inline void fh12PreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 {
     if (!ctx || (targetPc != kSpinUpdate && targetPc != kTexUv && targetPc != kTexFlip &&
                  targetPc != kLoopMode1 && targetPc != kLoopMode2 && targetPc != kLoopMode3 &&
-                 targetPc != kFxTimerUpdate))
+                 targetPc != kFxTimerUpdate && targetPc != kLoopCtor))
         return;
     const uint32_t m = fixMask12();
     const uint32_t o = getRegU32(ctx, 4);
     uint32_t w = 0u;
+    if (targetPc == kLoopCtor)
+    {
+        if ((m & kFix12Loops) == 0u || (m & kFix12Loops2) == 0u)
+            return;
+        g_post.kind = 4u;
+        g_post.target = targetPc;
+        g_post.sp = getRegU32(ctx, 29);
+        g_post.obj = o;
+        g_postArmed = true;
+        return;
+    }
     if (targetPc == kFxTimerUpdate)
     {
         if ((m & kFix12FxTimer) == 0u || !rd32(ram, o + 0x4u, g_post.saved[0]))
@@ -1967,6 +2061,17 @@ inline void fh12OnReturn(uint8_t *ram)
 {
     const uint32_t o = g_post.obj;
     auto bitsToF = [](uint32_t b) { float f = 0.0f; std::memcpy(&f, &b, 4); return f; };
+    if (g_post.kind == 4u)
+    {
+        // FH27 loops2: built while active, so the baked step is in 120 Hz units.
+        const float s = rdf(ram, o + 0x10u);
+        wrf(ram, o + 0x10u, s * 2.0f);
+        static uint32_t lines = 0u;
+        if (lines++ < 64u)
+            std::fprintf(stderr, "fh1-loops2 tick=%llu ctl=%08x step=%g->%g\n", static_cast<unsigned long long>(g_lastTick),
+                         o, s, s * 2.0f);
+        return;
+    }
     if (g_post.kind == 3u)
     {
         // FH21 fxtimer: P+0xb44 was decremented by its full 1/60 step inside
@@ -2767,8 +2872,75 @@ inline void scanVBlank(const uint8_t *ram, uint64_t tick)
 // EE thread, at VBlankStart after the tick advanced. A state loaded from a
 // stock run (SS1) skips the init hook: convert at the first VBlank that finds
 // the manager at stock rate/dt instead.
+// PS2X_FH27_ANIM=<R hex>[:from-to] (diagnostic, env-only, any mode): one line per VBlank with the
+// rider animation channel 2 of ctrl = [R+0x784] (channel ch at [ctrl+0x50]+8ch: +0 track count, +4 head;
+// tracks chained by +0xc8): the channel's animation id [R+0x784+8] (0x312aa0(R+0x784, 2)), then per
+// track (at most 4): time +0x8 / length +0x10 / rate +0xc, sub-timer 1 (+0x24/+0x2c/+0x28), speed
+// +0x90, blend weight +0x94 -> target +0x98 over remaining +0x9c (0x313800), flag +0xa0. 4000 lines.
+struct Fh27Anim
+{
+    uint32_t r = 0u;
+    uint64_t from = 0u, to = ~0ull;
+};
+
+inline const Fh27Anim &fh27Anim()
+{
+    static const Fh27Anim a = [] {
+        Fh27Anim x;
+        const char *v = std::getenv("PS2X_FH27_ANIM");
+        if (!v || !*v)
+            return x;
+        char *end = nullptr;
+        x.r = static_cast<uint32_t>(std::strtoul(v, &end, 16));
+        if (end && *end == ':')
+        {
+            x.from = std::strtoull(end + 1, &end, 10);
+            if (end && *end == '-')
+                x.to = std::strtoull(end + 1, &end, 10);
+        }
+        return x;
+    }();
+    return a;
+}
+
+inline void fh27AnimVBlank(const uint8_t *ram, uint64_t tick)
+{
+    const Fh27Anim &a = fh27Anim();
+    if (!a.r || tick < a.from || tick > a.to)
+        return;
+    static uint32_t lines = 0u;
+    uint32_t ctrl = 0u, id = 0u, base = 0u, n = 0u, t = 0u;
+    if (lines >= 4000u || !rd32(ram, a.r + 0x784u, ctrl) || !rd32(ram, a.r + 0x78cu, id) || !ctrl ||
+        !rd32(ram, ctrl + 0x50u, base) || !base || !rd32(ram, base + 16u, n) || !rd32(ram, base + 20u, t))
+        return;
+    ++lines;
+    char buf[1024];
+    int k = std::snprintf(buf, sizeof buf, "fh27-anim tick=%llu odd=%d id=%x n=%u", static_cast<unsigned long long>(tick),
+                          g_rngOdd ? 1 : 0, id, n);
+    auto f = [ram](uint32_t addr) {
+        uint32_t w = 0u;
+        rd32(ram, addr, w);
+        float v = 0.0f;
+        std::memcpy(&v, &w, 4);
+        return static_cast<double>(v);
+    };
+    for (int d = 0; d < 4 && t && k > 0 && k < static_cast<int>(sizeof buf) - 160; ++d)
+    {
+        uint32_t flag = 0u;
+        rd32(ram, t + 0xa0u, flag);
+        k += std::snprintf(buf + k, sizeof buf - static_cast<size_t>(k),
+                           " | %08x t=%.4f/%.4f r=%.4f t1=%.4f/%.4f r1=%.4f s=%.4f w=%.4f->%.4f rem=%.4f fl=%u", t,
+                           f(t + 0x8u), f(t + 0x10u), f(t + 0xcu), f(t + 0x24u), f(t + 0x2cu), f(t + 0x28u),
+                           f(t + 0x90u), f(t + 0x94u), f(t + 0x98u), f(t + 0x9cu), flag);
+        if (!rd32(ram, t + 0xc8u, t))
+            break;
+    }
+    std::fprintf(stderr, "%s\n", buf);
+}
+
 inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
 {
+    fh27AnimVBlank(ram, tick);
     maybeCapture(gs, tick);
     scanVBlank(ram, tick);
     fh10OnVBlank(ram, tick);
