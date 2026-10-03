@@ -2432,6 +2432,9 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         hr1Timer.latched = true;
         s_lastPresentationTick = currentTick;
         s_hasLatchedInitialFrame = true;
+        // PL3: the latched frame is this iteration's presented frame (the
+        // latch wall stands in for its guest-vsync wall for frame age).
+        ps2x::perflog::noteFrameAvailable(currentTick, ps2x::perflog::steadyNs(), 0u);
     }
     else if (s_hasUploadedFrame && !iosSkipLatch)
     {
@@ -2498,6 +2501,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                 outWidth = s_lastWidth = shared.width;
                 outHeight = s_lastHeight = shared.height;
                 s_hasUploadedFrame = true;
+                // PL3: guest tick through the mailbox (see SharedFrame).
+                ps2x::perflog::noteFrameAvailable(shared.tick, shared.submitWallNs, shared.seq);
                 return;
             }
         }
@@ -2517,6 +2522,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                 outWidth = s_lastWidth = shared.width;
                 outHeight = s_lastHeight = shared.height;
                 s_hasUploadedFrame = true;
+                // PL3: guest tick through the mailbox (see SharedFrame).
+                ps2x::perflog::noteFrameAvailable(shared.tick, shared.submitWallNs, shared.seq);
                 return;
             }
         }
@@ -6868,7 +6875,12 @@ void PS2Runtime::run()
                 vkShows = ps2x_present_vk::active();
 #endif
                 if (!vkShows)
+                {
                     ps2x::perflog::notePresent();
+                    // PL3: unique displayed frame against this iteration's
+                    // staged frame (latch tick or mailbox publication).
+                    ps2x::perflog::notePresentedFrame();
+                }
             }
             // IN4: input-diagnostics present count (no-op unless on).
             ps2x::inputdiag::notePresent();

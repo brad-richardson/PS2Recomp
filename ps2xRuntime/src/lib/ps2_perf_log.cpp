@@ -17,6 +17,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -135,32 +136,50 @@ std::string utcIso(std::time_t when)
 }
 
 #if defined(__APPLE__)
-// Cumulative user+system CPU ms per thread, in task_threads() order (same
-// source as logThreadCpu in ps2_runtime.cpp); names fall back to t#<index>.
-std::vector<std::pair<std::string, double>> snapshotThreadCpu()
+// PL3: cumulative user+system CPU ms per thread, keyed by the STABLE Mach
+// thread ID (thread_identifier_info), not the task_threads() enumeration
+// index (whose churn reset deltas or attached them to the wrong thread).
+// Names fall back to t/main; isMain marks the snapshot thread (poll() and
+// tryOpen() run on the main thread only).
+std::vector<StableThreadSample> snapshotThreadCpu()
 {
-    std::vector<std::pair<std::string, double>> out;
+    std::vector<StableThreadSample> out;
     thread_act_array_t threads = nullptr;
     mach_msg_type_number_t count = 0;
     if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS)
         return out;
+    const thread_act_t self = mach_thread_self();
     for (mach_msg_type_number_t i = 0; i < count; ++i)
     {
+        thread_identifier_info_data_t ident{};
+        mach_msg_type_number_t nic = THREAD_IDENTIFIER_INFO_COUNT;
+        if (thread_info(threads[i], THREAD_IDENTIFIER_INFO, reinterpret_cast<thread_info_t>(&ident), &nic) !=
+            KERN_SUCCESS)
+        {
+            // No stable ID: skip rather than key by enumeration position.
+            mach_port_deallocate(mach_task_self(), threads[i]);
+            continue;
+        }
         thread_basic_info_data_t info{};
         mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
-        if (thread_info(threads[i], THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info), &n) == KERN_SUCCESS)
+        if (thread_info(threads[i], THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info), &n) != KERN_SUCCESS)
         {
-            char name[64] = {0};
-            if (pthread_t pt = pthread_from_mach_thread_np(threads[i]))
-                pthread_getname_np(pt, name, sizeof(name));
-            const double ms = (info.user_time.seconds + info.system_time.seconds) * 1000.0 +
-                              (info.user_time.microseconds + info.system_time.microseconds) / 1000.0;
-            char label[80];
-            std::snprintf(label, sizeof(label), "%s#%u", name[0] ? name : "t", i);
-            out.emplace_back(label, ms);
+            mach_port_deallocate(mach_task_self(), threads[i]);
+            continue;
         }
+        char name[64] = {0};
+        if (pthread_t pt = pthread_from_mach_thread_np(threads[i]))
+            pthread_getname_np(pt, name, sizeof(name));
+        StableThreadSample s;
+        s.id = ident.thread_id;
+        s.name = name;
+        s.isMain = (threads[i] == self);
+        s.cumMs = (info.user_time.seconds + info.system_time.seconds) * 1000.0 +
+                  (info.user_time.microseconds + info.system_time.microseconds) / 1000.0;
+        out.push_back(std::move(s));
         mach_port_deallocate(mach_task_self(), threads[i]);
     }
+    mach_port_deallocate(mach_task_self(), self);
     vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), count * sizeof(thread_act_t));
     return out;
 }
@@ -175,6 +194,7 @@ struct LinuxCpuSample
 {
     long tid = 0;
     std::string label; // "<comm>#<tid>"
+    std::string comm; // thread name, for the PL3 role sum
     double cumMs = 0.0; // user+system, cumulative
 };
 
@@ -270,11 +290,31 @@ bool snapshotLinuxThreadCpu(long clkTck, std::vector<LinuxCpuSample> &out)
         LinuxCpuSample sample;
         sample.tid = tid;
         sample.label = label;
+        sample.comm = cpu.comm;
         sample.cumMs = procTicksToMs(cpu.utime + cpu.stime, clkTck);
         out.push_back(std::move(sample));
     }
     ::closedir(dir);
     return true;
+}
+
+// PL3: Linux snapshots keyed by stable kernel tid (readdir order is
+// unstable). The main thread's tid equals the pid.
+std::vector<StableThreadSample> stableFromLinux(const std::vector<LinuxCpuSample> &snap)
+{
+    std::vector<StableThreadSample> out;
+    out.reserve(snap.size());
+    const long mainTid = ::getpid();
+    for (const LinuxCpuSample &c : snap)
+    {
+        StableThreadSample st;
+        st.id = static_cast<uint64_t>(c.tid);
+        st.name = c.comm;
+        st.cumMs = c.cumMs;
+        st.isMain = (c.tid == mainTid);
+        out.push_back(std::move(st));
+    }
+    return out;
 }
 #endif
 
@@ -464,6 +504,8 @@ std::string sampleLinuxDevice()
 
 struct Logger
 {
+    // PL3: cap on the per-window frame-age samples (presents/window fit).
+    static constexpr size_t kFrameAgeCap = 2048;
     bool tried = false; // main thread only (poll/dumpTail/tryOpen)
     std::atomic<bool> active{false}; // read by notePresent from any thread
     std::FILE *file = nullptr;
@@ -477,16 +519,28 @@ struct Logger
     std::atomic<uint64_t> presentLastNs{0};
     std::atomic<uint64_t> presentMaxGapNs{0};
     std::atomic<bool> havePresent{false};
-    // FH6: present-path detail (PS2X_PERF_PRESENT_DETAIL=1).
-    bool presentDetail = false;
+    // FH6: present-path detail (always counted while the log is on).
     std::atomic<uint64_t> gsVsyncs{0}, latches{0}, latchNs{0}, latchMaxNs{0};
-#if defined(__APPLE__)
-    std::vector<std::pair<std::string, double>> lastCpu;
-    bool haveCpu = false;
+    // PL3: unique-frame identity. noteFrameAvailable (main thread, each new
+    // frame) stages the pending frame; notePresentedFrame (main thread, each
+    // present) compares it against the last shown one; noteWorkerPresent (VK
+    // worker, each shown buffer) keys off the buffer id instead. Guarded by
+    // presentMu (present rate only).
+    std::mutex presentMu;
+    bool haveAvail = false;
+    uint64_t availTick = 0, availBirthNs = 0, availExt = 0, availSeq = 0;
+    bool havePresented = false;
+    uint64_t presentedSeq = 0;
+    uint64_t uniqueFrames = 0, dupFrames = 0;
+    uint64_t lastWorkerId = 0;
+    bool haveWorkerId = false;
+    std::vector<double> frameAges; // ms, capped at kFrameAgeCap
+#if defined(__APPLE__) || defined(__linux__)
+    // PL3: previous window's stable-ID snapshot (see diffStableCpu).
+    std::vector<StableThreadSample> lastCpuStable;
+    bool haveCpuStable = false;
 #endif
 #if defined(__linux__)
-    std::vector<LinuxCpuSample> lastCpuLinux;
-    bool haveCpuLinux = false;
     long clkTck = 0;
 #endif
     // PT2: per-stage drain cursors (heads consumed by the last poll()).
@@ -585,20 +639,22 @@ struct Logger
         windowTick = tick;
         lastTailFlush = now; // PT2 Part 2a: first rolling flush at t+60 s
 #if defined(__APPLE__)
-        lastCpu = snapshotThreadCpu();
-        haveCpu = true;
+        lastCpuStable = snapshotThreadCpu();
+        haveCpuStable = true;
 #endif
 #if defined(__linux__)
         clkTck = ::sysconf(_SC_CLK_TCK);
         if (clkTck <= 0)
             clkTck = 100; // Linux default USER_HZ
-        snapshotLinuxThreadCpu(clkTck, lastCpuLinux);
-        haveCpuLinux = true;
-#endif
         {
-            const char *d = std::getenv("PS2X_PERF_PRESENT_DETAIL");
-            presentDetail = d && std::strcmp(d, "1") == 0; // before active: readers gate on active
+            std::vector<LinuxCpuSample> snap;
+            if (snapshotLinuxThreadCpu(clkTck, snap))
+            {
+                lastCpuStable = stableFromLinux(snap);
+                haveCpuStable = true;
+            }
         }
+#endif
         active.store(true, std::memory_order_release);
         std::fprintf(stderr, "[perf] logging to %s\n", path.c_str());
     }
@@ -727,45 +783,39 @@ void poll(uint64_t vsyncTick)
     s.presents = log.presentCount.exchange(0u, std::memory_order_relaxed);
     const uint64_t maxGapNs = log.presentMaxGapNs.exchange(0u, std::memory_order_relaxed);
     s.maxGapMs = s.presents >= 2 ? static_cast<double>(maxGapNs) / 1e6 : -1.0;
+    RoleSums cpuSums;
+    bool haveCpuSums = false;
 #if defined(__APPLE__)
     {
-        const auto snap = snapshotThreadCpu();
+        // PL3: stable-ID deltas (see diffStableCpu) plus the per-role sums.
+        const std::vector<StableThreadSample> snap = snapshotThreadCpu();
         s.threadsAvailable = true;
-        for (size_t i = 0; i < snap.size(); ++i)
-        {
-            double base = -1.0;
-            if (log.haveCpu && i < log.lastCpu.size() && log.lastCpu[i].first == snap[i].first)
-                base = log.lastCpu[i].second;
-            s.threads.push_back({snap[i].first, base >= 0.0 ? snap[i].second - base : 0.0});
-        }
-        log.lastCpu = snap;
-        log.haveCpu = true;
+        const std::vector<StableThreadDelta> deltas = diffStableCpu(log.lastCpuStable, log.haveCpuStable, snap);
+        for (const StableThreadDelta &d : deltas)
+            s.threads.push_back({d.label, d.ms, d.isNew});
+        cpuSums = sumRoles(deltas);
+        haveCpuSums = true;
+        log.lastCpuStable = snap;
+        log.haveCpuStable = true;
     }
 #elif defined(__linux__)
     {
         std::vector<LinuxCpuSample> snap;
         if (snapshotLinuxThreadCpu(log.clkTck > 0 ? log.clkTck : 100, snap))
         {
+            // PL3: same stable-ID matching as Apple (tids are stable; the
+            // readdir order is not, so the old index-free code already keyed
+            // by tid — now with the new-thread mark and the role sums).
             s.threadsAvailable = true;
-            for (const LinuxCpuSample &cur : snap)
-            {
-                double base = -1.0;
-                if (log.haveCpuLinux)
-                {
-                    for (const LinuxCpuSample &prev : log.lastCpuLinux)
-                    {
-                        if (prev.tid == cur.tid)
-                        {
-                            base = prev.cumMs;
-                            break;
-                        }
-                    }
-                }
-                const double delta = base >= 0.0 ? cur.cumMs - base : 0.0;
-                s.threads.push_back({cur.label, delta >= 0.0 ? delta : 0.0});
-            }
-            log.lastCpuLinux = snap;
-            log.haveCpuLinux = true;
+            const std::vector<StableThreadSample> stable = stableFromLinux(snap);
+            const std::vector<StableThreadDelta> deltas =
+                diffStableCpu(log.lastCpuStable, log.haveCpuStable, stable);
+            for (const StableThreadDelta &d : deltas)
+                s.threads.push_back({d.label, d.ms, d.isNew});
+            cpuSums = sumRoles(deltas);
+            haveCpuSums = true;
+            log.lastCpuStable = stable;
+            log.haveCpuStable = true;
         }
         else
         {
@@ -813,18 +863,43 @@ void poll(uint64_t vsyncTick)
 #endif
     const std::string line = formatLine(s);
     std::fprintf(log.file, "%s\n", line.c_str());
-    if (log.presentDetail)
+    if (haveCpuSums)
+        std::fprintf(log.file, "%s\n", formatCpuLine(vsyncTick, cpuSums).c_str());
     {
+        // PL3: the [perf-present] line is now unconditional (the old
+        // PS2X_PERF_PRESENT_DETAIL knob is retired): presents plus unique
+        // displayed frames and frame age.
         const uint64_t gv = log.gsVsyncs.exchange(0u, std::memory_order_relaxed);
         const uint64_t la = log.latches.exchange(0u, std::memory_order_relaxed);
         const uint64_t lns = log.latchNs.exchange(0u, std::memory_order_relaxed);
         const uint64_t lmax = log.latchMaxNs.exchange(0u, std::memory_order_relaxed);
-        std::fprintf(log.file,
-                     "[perf-present] tick=%llu vblanks=%llu gs_vsyncs=%llu latches=%llu latch_ms_avg=%.2f "
-                     "latch_ms_max=%.2f presents=%llu\n",
-                     (unsigned long long)vsyncTick, (unsigned long long)(vsyncTick - log.windowTick),
-                     (unsigned long long)gv, (unsigned long long)la, la ? (static_cast<double>(lns) / 1e6) / la : 0.0,
-                     static_cast<double>(lmax) / 1e6, (unsigned long long)s.presents);
+        PresentStats pst;
+        pst.vblanks = vsyncTick - log.windowTick;
+        pst.gsVsyncs = gv;
+        pst.latches = la;
+        pst.latchAvgMs = la ? (static_cast<double>(lns) / 1e6) / static_cast<double>(la) : 0.0;
+        pst.latchMaxMs = static_cast<double>(lmax) / 1e6;
+        pst.presents = s.presents;
+        {
+            std::lock_guard<std::mutex> lock(log.presentMu);
+            pst.uframes = log.uniqueFrames;
+            pst.udup = log.dupFrames;
+            log.uniqueFrames = 0;
+            log.dupFrames = 0;
+            if (!log.frameAges.empty())
+            {
+                pst.ageP50Ms = ageP50(log.frameAges);
+                double ageMax = log.frameAges[0];
+                for (double a : log.frameAges)
+                {
+                    if (a > ageMax)
+                        ageMax = a;
+                }
+                pst.ageMaxMs = ageMax;
+            }
+            log.frameAges.clear();
+        }
+        std::fprintf(log.file, "%s\n", formatPresentLine(vsyncTick, pst).c_str());
     }
     {
         // IP6: host audio rates per wall second (device callback demand,
@@ -909,20 +984,89 @@ void poll(uint64_t vsyncTick)
 void noteGsVsync()
 {
     Logger &log = logger();
-    if (log.presentDetail && log.active.load(std::memory_order_relaxed))
-        log.gsVsyncs.fetch_add(1u, std::memory_order_relaxed);
+    if (!log.active.load(std::memory_order_relaxed))
+        return;
+    log.gsVsyncs.fetch_add(1u, std::memory_order_relaxed);
 }
 
 void noteLatch(uint64_t ns)
 {
     Logger &log = logger();
-    if (!log.presentDetail || !log.active.load(std::memory_order_relaxed))
+    if (!log.active.load(std::memory_order_relaxed))
         return;
     log.latches.fetch_add(1u, std::memory_order_relaxed);
     log.latchNs.fetch_add(ns, std::memory_order_relaxed);
     uint64_t prev = log.latchMaxNs.load(std::memory_order_relaxed);
     while (ns > prev && !log.latchMaxNs.compare_exchange_weak(prev, ns, std::memory_order_relaxed))
     {
+    }
+}
+
+// PL3: stage the pending frame for the unique-frame count. A new internal
+// sequence starts whenever the guest tick advances or the mailbox sequence
+// does (repeats of the same frame keep the old one, so the present reads a
+// duplicate).
+void noteFrameAvailable(uint64_t tick, uint64_t birthWallNs, uint64_t extSeq)
+{
+    Logger &log = logger();
+    if (!log.active.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard<std::mutex> lock(log.presentMu);
+    const bool isNew =
+        !log.haveAvail || tick != log.availTick || (extSeq != 0u && extSeq != log.availExt);
+    log.haveAvail = true;
+    log.availTick = tick;
+    log.availBirthNs = birthWallNs;
+    log.availExt = extSeq;
+    if (isNew)
+        ++log.availSeq;
+}
+
+// PL3: one main-thread present against the pending frame.
+void notePresentedFrame()
+{
+    Logger &log = logger();
+    if (!log.active.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard<std::mutex> lock(log.presentMu);
+    if (!log.haveAvail)
+        return;
+    if (!log.havePresented || log.availSeq != log.presentedSeq)
+    {
+        log.havePresented = true;
+        log.presentedSeq = log.availSeq;
+        ++log.uniqueFrames;
+        if (log.availBirthNs != 0u && log.frameAges.size() < Logger::kFrameAgeCap)
+        {
+            const uint64_t now = steadyNs();
+            if (now > log.availBirthNs)
+                log.frameAges.push_back(static_cast<double>(now - log.availBirthNs) / 1e6);
+        }
+    }
+    else
+    {
+        ++log.dupFrames;
+    }
+}
+
+// PL3: VK worker path (no mailbox identity): presents plus a unique count
+// keyed off the shown buffer id (a re-shown buffer reads as a duplicate).
+void noteWorkerPresent(uint64_t id)
+{
+    Logger &log = logger();
+    if (!log.active.load(std::memory_order_relaxed))
+        return;
+    notePresent();
+    std::lock_guard<std::mutex> lock(log.presentMu);
+    if (!log.haveWorkerId || id != log.lastWorkerId)
+    {
+        log.haveWorkerId = true;
+        log.lastWorkerId = id;
+        ++log.uniqueFrames;
+    }
+    else
+    {
+        ++log.dupFrames;
     }
 }
 

@@ -226,6 +226,7 @@ struct IOSurfaceExportCtx
     uint64_t epoch;
     int slot;
     uint64_t tick;
+    uint64_t submitWallNs; // PL3: steady-clock export-submit time (frame age birth)
 };
 
 void dumpIOSurface(void *surface, uint64_t tick)
@@ -295,7 +296,8 @@ void ioExportDone(void *rawCtx, int ok)
             dumpIOSurface(surface, ctx->tick);
             IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
             ps2x_present_share::publish({surface, static_cast<uint32_t>(IOSurfaceGetWidth(ref)),
-                                         static_cast<uint32_t>(IOSurfaceGetHeight(ref)), ++pool.seq});
+                                         static_cast<uint32_t>(IOSurfaceGetHeight(ref)), ++pool.seq,
+                                         ctx->tick, ctx->submitWallNs});
             static std::once_flag once;
             std::call_once(once, [tick = ctx->tick] {
                 std::fprintf(stderr, "[gs:external] GE1 IOSurface first publish tick=%llu\n",
@@ -1431,7 +1433,8 @@ private:
             pool.busy[slot].store(false);
             return false;
         }
-        std::unique_ptr<IOSurfaceExportCtx> ctx(new IOSurfaceExportCtx{epoch, slot, tick});
+        std::unique_ptr<IOSurfaceExportCtx> ctx(
+            new IOSurfaceExportCtx{epoch, slot, tick, ps2x::perflog::steadyNs()});
         const int rc =
             m_ge1.exportIOSurface(surface, m_exportW, m_exportH, &ioExportDone, ctx.get());
         if (rc != 1)

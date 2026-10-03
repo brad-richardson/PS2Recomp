@@ -2,6 +2,7 @@
 #include "ps2_perf_log.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <thread>
@@ -537,5 +538,129 @@ void register_ps2_perf_log_tests()
             for (uint64_t i = 1; i <= kN; ++i)
                 all = all && have[i];
             t.IsTrue(all, "ticks 1..N all present"); });
+
+        // PL3: deltas key by stable ID, not enumeration position: a churned
+        // snapshot (reordered, one thread gone, one new) keeps the survivors'
+        // deltas and starts the newcomer at zero marked new.
+        tc.Run("diffStableCpu survives enumeration churn", [](TestCase &t)
+               {
+            using ps2x::perflog::StableThreadSample;
+            const std::vector<StableThreadSample> prev{{101, "GameThread", 1000.0, false},
+                                                       {202, "MTVU", 500.0, false},
+                                                       {303, "MTVU", 10.0, false}};
+            const std::vector<StableThreadSample> cur{{303, "MTVU", 30.0, false},
+                                                      {101, "GameThread", 1100.0, false},
+                                                      {404, "MTVU", 7.0, false}};
+            const auto deltas = ps2x::perflog::diffStableCpu(prev, true, cur);
+            t.Equals(deltas.size(), static_cast<size_t>(3), "one delta per live thread");
+            t.Equals(deltas[0].label, std::string("MTVU#303"), "stable label, not position");
+            t.Equals(deltas[0].ms, 20.0, "survivor delta kept across reorder");
+            t.IsTrue(!deltas[0].isNew, "survivor not new");
+            t.Equals(deltas[1].ms, 100.0, "game delta kept");
+            t.Equals(deltas[2].ms, 0.0, "newcomer starts at zero");
+            t.IsTrue(deltas[2].isNew, "newcomer marked new");
+            t.Equals(deltas[2].label, std::string("MTVU#404"), "newcomer keeps full label"); });
+
+        tc.Run("diffStableCpu first window and renames read new", [](TestCase &t)
+               {
+            using ps2x::perflog::StableThreadSample;
+            const std::vector<StableThreadSample> cur{{101, "GameThread", 1000.0, true}};
+            const auto first = ps2x::perflog::diffStableCpu({}, false, cur);
+            t.Equals(first.size(), static_cast<size_t>(1), "one delta");
+            t.IsTrue(first[0].isNew, "everything is new on the first window");
+            t.Equals(first[0].ms, 0.0, "first-window delta is zero");
+            t.IsTrue(first[0].isMain, "main flag carried");
+            // Same ID, different name (ID reuse after death): never reuse the
+            // old delta.
+            const std::vector<StableThreadSample> prev{{101, "GameThread", 1000.0, false}};
+            const std::vector<StableThreadSample> renamed{{101, "Worker", 5000.0, false}};
+            const auto second = ps2x::perflog::diffStableCpu(prev, true, renamed);
+            t.IsTrue(second[0].isNew, "renamed ID reads new");
+            t.Equals(second[0].ms, 0.0, "renamed delta is zero, not 4000"); });
+
+        tc.Run("roleOf names the runtime roles, main wins", [](TestCase &t)
+               {
+            using ps2x::perflog::roleOf;
+            t.Equals(roleOf("GameThread", false), std::string("game"), "game");
+            t.Equals(roleOf("MTVU", false), std::string("mtvu"), "mtvu");
+            t.Equals(roleOf("MTVU-VIF", false), std::string("vif"), "vif");
+            t.Equals(roleOf("MTVU-GIF", false), std::string("gif"), "gif");
+            t.Equals(roleOf("GsWorker", false), std::string("gs"), "gs");
+            t.Equals(roleOf("Audio", false), std::string("audio"), "audio");
+            t.Equals(roleOf("SDLTimer", false), std::string("other"), "unknown to other");
+            t.Equals(roleOf("GameThread", true), std::string("main"), "main wins over name");
+            t.Equals(roleOf("t", true), std::string("main"), "unnamed main"); });
+
+        tc.Run("sumRoles folds duplicate names, formatCpuLine golden", [](TestCase &t)
+               {
+            using ps2x::perflog::StableThreadDelta;
+            // The old bug: idle MTVU#11 overwrote active MTVU#8. Both share
+            // the mtvu role now, so the sum keeps the active thread's CPU.
+            const std::vector<StableThreadDelta> deltas{
+                {"GameThread#101", 100.0, false, "GameThread", false},
+                {"MTVU#202", 794.3, false, "MTVU", false},
+                {"MTVU#303", 0.0, false, "MTVU", false},
+                {"MTVU-GIF#404", 50.0, false, "MTVU-GIF", false},
+                {"t#505", 12.5, true, "t", true}};
+            const auto sums = ps2x::perflog::sumRoles(deltas);
+            t.Equals(sums.game, 100.0, "game");
+            t.Equals(sums.mtvu, 794.3, "both MTVUs summed, active kept");
+            t.Equals(sums.gif, 50.0, "gif");
+            t.Equals(sums.main, 12.5, "main");
+            t.Equals(sums.vif, 0.0, "vif absent is zero");
+            t.IsTrue(std::fabs(sums.total() - 956.8) < 1e-9, "total matches the thread cells");
+            t.Equals(ps2x::perflog::formatCpuLine(32823, sums),
+                      std::string("[perf-cpu] tick=32823 game=100.0 mtvu=794.3 vif=0.0 gif=50.0 gs=0.0 "
+                                  "main=12.5 audio=0.0 other=0.0 total=956.8"),
+                      "cpu golden"); });
+
+        tc.Run("formatLine marks new threads with a star", [](TestCase &t)
+               {
+            ps2x::perflog::Sample s;
+            s.wall = "2026-10-03T00:00:01Z";
+            s.elapsedS = 2.0;
+            s.tick = 120;
+            s.vsyncsPerS = 60.0;
+            s.presents = 60;
+            s.maxGapMs = 17.0;
+            s.threadsAvailable = true;
+            s.threads = {{"GameThread#101", 100.0, false}, {"MTVU#404", 0.0, true}};
+            s.device = "na";
+            t.Equals(ps2x::perflog::formatLine(s),
+                      std::string("[perf] wall=2026-10-03T00:00:01Z t=2.0s tick=120 vsyncs_per_s=60.00 "
+                                  "presents=60 maxgap_ms=17.0 threads=\"GameThread#101=100.0 MTVU#404=0.0*\" "
+                                  "device=\"na\" gpubusy_pct=na gpuclk=na"),
+                      "star line"); });
+
+        tc.Run("formatPresentLine golden, empty ages read -1", [](TestCase &t)
+               {
+            ps2x::perflog::PresentStats st;
+            st.vblanks = 120;
+            st.gsVsyncs = 120;
+            st.latches = 60;
+            st.latchAvgMs = 0.11;
+            st.latchMaxMs = 0.42;
+            st.presents = 60;
+            st.uframes = 58;
+            st.udup = 2;
+            st.ageP50Ms = 9.31;
+            st.ageMaxMs = 18.74;
+            t.Equals(ps2x::perflog::formatPresentLine(3681, st),
+                      std::string("[perf-present] tick=3681 vblanks=120 gs_vsyncs=120 latches=60 "
+                                  "latch_ms_avg=0.11 latch_ms_max=0.42 presents=60 uframes=58 udup=2 "
+                                  "frame_age_ms_p50=9.31 frame_age_ms_max=18.74"),
+                      "present golden");
+            ps2x::perflog::PresentStats empty;
+            t.Equals(ps2x::perflog::formatPresentLine(60, empty),
+                      std::string("[perf-present] tick=60 vblanks=0 gs_vsyncs=0 latches=0 latch_ms_avg=0.00 "
+                                  "latch_ms_max=0.00 presents=0 uframes=0 udup=0 frame_age_ms_p50=-1.00 "
+                                  "frame_age_ms_max=-1.00"),
+                      "empty ages"); });
+
+        tc.Run("ageP50 is the nearest rank, empty is -1", [](TestCase &t)
+               {
+            t.Equals(ps2x::perflog::ageP50({}), -1.0, "empty is -1");
+            t.Equals(ps2x::perflog::ageP50({9.0}), 9.0, "single");
+            t.Equals(ps2x::perflog::ageP50({30.0, 10.0, 20.0}), 20.0, "median of three"); });
     });
 }
