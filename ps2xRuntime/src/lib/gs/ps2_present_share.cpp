@@ -28,6 +28,25 @@ bool enabled()
 #endif
 }
 
+// PSO1: compiled default for PS2X_PRESENT_OWNERSHIP (off until the
+// orchestrator's gate flips it; 0 keeps the pre-PSO1 mailbox).
+constexpr bool kOwnershipDefault = false;
+
+bool ownershipEnabled()
+{
+#if defined(__APPLE__)
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_PRESENT_OWNERSHIP");
+        if (!v || !*v)
+            return kOwnershipDefault;
+        return std::strcmp(v, "1") == 0;
+    }();
+    return on;
+#else
+    return false;
+#endif
+}
+
 void publish(const SharedFrame &frame)
 {
     std::lock_guard<std::mutex> lock(g_shareMutex);
