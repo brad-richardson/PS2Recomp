@@ -654,13 +654,10 @@ public:
                 // presenter keeps its last safe frame (UploadFrame prefers the
                 // shared frame anyway), so no synchronous CPU snapshot.
             }
-            else if (!(iosPresentUnpaced() && ps2x_present_share::enabled()))
+            else
             {
                 snapshotToFrame(request, frame);
             }
-            // IQ1 (PS2X_PRESENT_UNPACED=1, benchmark-only): a busy pool never
-            // falls back to the synchronous CPU snapshot; the host keeps
-            // showing the newest published surface.
 #else
             {
                 snapshotToFrame(request, frame);
@@ -1328,17 +1325,11 @@ private:
         }
         uint64_t ids[4];
         for (int i = 0; i < 4; ++i) ids[i] = m_ahbSlots[i].id;
-        // Benchmark-only: let guest GS work continue when the display still
-        // owns every buffer. A later VSync will present the newest frame.
-        static const bool unpacedPresent = [] {
-            const char *v = std::getenv("PS2X_PRESENT_UNPACED");
-            return v && std::strcmp(v, "1") == 0;
-        }();
         const ps2x_present_vk::Pick pick =
-            ps2x_present_vk::pickReusable(ids, 4, m_ahbStart, unpacedPresent ? 0 : 1000);
+            ps2x_present_vk::pickReusable(ids, 4, m_ahbStart, 1000);
         if (pick.index < 0)
         {
-            if (!unpacedPresent && pick.giveUp)
+            if (pick.giveUp)
                 ps2x_present_vk::fallBack("GE1 AHB compositor release timeout");
             return false;
         }
@@ -1366,15 +1357,6 @@ private:
     {
         static const bool on = [] {
             const char *v = std::getenv("PS2X_PRESENT_PER_VSYNC");
-            return v && std::strcmp(v, "1") == 0;
-        }();
-        return on;
-    }
-
-    static bool iosPresentUnpaced()
-    {
-        static const bool on = [] {
-            const char *v = std::getenv("PS2X_PRESENT_UNPACED");
             return v && std::strcmp(v, "1") == 0;
         }();
         return on;
