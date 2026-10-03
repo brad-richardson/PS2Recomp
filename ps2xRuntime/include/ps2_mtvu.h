@@ -322,36 +322,42 @@ namespace ps2_mtvu
         inline std::atomic<std::thread::id> g_gifTid{};
         inline void workerJobDoneFromGif(); // after Worker
 
-        // MW2: PS2X_MTVU_STAGE_WAIT. park: spin kStageParkSpinNs (<= 4 us)
-        // with a CPU pause (arm64 `yield`, x86 `pause`; the clock is read
-        // every 16 polls), then the existing condvar sleep. spin (the default
-        // in this lane): today's exact path, 50 us of
-        // std::this_thread::yield() + clock reads, then the same sleep.
-        // Same wake protocol either way: every publish is a `tail`
+        // MW2: PS2X_MTVU_STAGE_WAIT. park: park the GIF stage only (the
+        // IHP1 lever: its 50 us yield-spin is 77-84 % of the MTVU-GIF
+        // thread). park_all: park the VIF log too. A parked stage spins
+        // kStageParkSpinNs (<= 4 us) with a CPU pause (arm64 `yield`, x86
+        // `pause`; the clock is read every 16 polls), then the existing
+        // condvar sleep. spin (the default in this lane): today's exact
+        // path, 50 us of std::this_thread::yield() + clock reads, then the
+        // same sleep. Same wake protocol every way: every publish is a `tail`
         // release-store + seq_cst fence followed by a notify under `m` iff
         // `sleeping`, and the sleep sets `sleeping`, fences, and re-checks
         // `tail` before waiting, so a publish that lands between the spin
         // and the sleep is seen by the re-check and no wake is lost.
         static constexpr uint64_t kStageParkSpinNs = 4000u;
-        inline bool parseStagePark(const char *e)
+        inline int parseStagePark(const char *e)
         {
-            return e && std::strcmp(e, "park") == 0;
+            if (e && std::strcmp(e, "park_all") == 0)
+                return 2;
+            if (e && std::strcmp(e, "park") == 0)
+                return 1;
+            return 0;
         }
         inline int &stageWaitMode()
         {
-            static int v = -1; // -1 unresolved; 0 spin, 1 park (tests set it directly)
+            static int v = -1; // -1 unresolved; 0 spin, 1 park (GIF only), 2 park_all (tests set it directly)
             return v;
         }
-        inline bool stagePark()
+        inline int stageMode()
         {
             int v = stageWaitMode();
             if (v < 0)
             {
-                v = parseStagePark(std::getenv("PS2X_MTVU_STAGE_WAIT")) ? 1 : 0;
+                v = parseStagePark(std::getenv("PS2X_MTVU_STAGE_WAIT"));
                 stageWaitMode() = v;
-                std::fprintf(stderr, "[mtvu] stage-wait=%s\n", v ? "park" : "spin");
+                std::fprintf(stderr, "[mtvu] stage-wait=%s\n", v == 2 ? "park_all" : (v == 1 ? "park" : "spin"));
             }
-            return v != 0;
+            return v;
         }
         inline void setStageWaitForTest(int v) { stageWaitMode() = v; }
         static inline void stageCpuPause()
@@ -528,7 +534,7 @@ namespace ps2_mtvu
             bool waitWork()
             {
                 const uint64_t t0 = nowNs();
-                if (stagePark())
+                if (stageMode() >= 1)
                 {
                     for (unsigned i = 0;; ++i)
                     {
@@ -867,7 +873,7 @@ namespace ps2_mtvu
             bool waitWork()
             {
                 const uint64_t t0 = nowNs();
-                if (stagePark())
+                if (stageMode() >= 2)
                 {
                     for (unsigned i = 0;; ++i)
                     {
