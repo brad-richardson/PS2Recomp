@@ -274,7 +274,7 @@ std::vector<FrameTimes> Pool::times() const
 
 Pool &sharedPool()
 {
-    static Pool pool(3);
+    static Pool pool(kSharedSlots);
     return pool;
 }
 

@@ -280,6 +280,45 @@ void register_ps2_present_owner_tests()
             t.Equals(pool.counters().unsafe, 0ull, "no unsafe requests");
             t.IsTrue(produced.load() > 100u && reads > 100u, "stress made progress"); });
 
+        tc.Run("120/s exports vs a 60 Hz presenter, two exports in flight: 3 slots drop, 5 do not", [](TestCase &t)
+               {
+            // iPad shape (Part 2): exports every 8.3 ms take ~one interval to
+            // complete (produce p50 8.0 ms), so two overlap; the presenter
+            // runs every second export event: retire, acquire, read (fence).
+            auto run = [](int slots) {
+                Pool pool(slots);
+                std::deque<std::pair<int, uint64_t>> inFlight;
+                uint64_t fence = 0, now = 0, seq = 0;
+                for (int ev = 0; ev < 1200; ++ev)
+                {
+                    if (inFlight.size() == 2u)
+                    {
+                        FrameInfo f;
+                        f.seq = ++seq;
+                        pool.complete(inFlight.front().first, inFlight.front().second, true, f, ++now);
+                        inFlight.pop_front();
+                    }
+                    uint64_t g = 0;
+                    const int s = pool.reserve(&g, ++now);
+                    if (s >= 0)
+                        inFlight.push_back({s, g});
+                    if (ev % 2 == 1)
+                    {
+                        pool.retireReadsThrough(fence, ++now); // previous read done
+                        FrameInfo shown;
+                        int slot = -1;
+                        if (pool.acquire(&shown, &slot, ++now) != Acquire::None)
+                            pool.noteRead(++fence, ++now);
+                    }
+                }
+                return pool.counters();
+            };
+            const auto c3 = run(3), c5 = run(5);
+            t.IsTrue(c3.noSlot > 100u, "3 slots: exports dropped");
+            t.Equals(c5.noSlot, 0ull, "5 slots: no drops");
+            t.Equals(c5.unsafe, 0ull, "5 slots: no unsafe requests");
+            t.IsTrue(c5.repeats <= 1u, "5 slots: a new frame every present"); });
+
         tc.Run("legacy first-free-slot mailbox reproduces the PRV1 §2 reuse (model)", [](TestCase &t)
                {
             // Pre-PSO1 protocol: busy cleared at completion, mailbox = metadata copy.

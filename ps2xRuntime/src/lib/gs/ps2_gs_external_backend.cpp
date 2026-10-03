@@ -205,7 +205,13 @@ uint32_t fnv1a32(const uint8_t *data, size_t size, uint32_t hash = 2166136261u)
 // completion handler may fire after the backend is destroyed, so the epoch
 // stales in-flight exports instead of freeing anything. IX1: the slots take
 // the backend's export size (640x480 unless PS2X_GE1_EXPORT_SIZE is set).
-constexpr int kIOSurfaceSlotCount = 3;
+// PSO1 Part 3: the ownership pool holds 5 slots (ps2x_present_own::kSharedSlots):
+// with 3, CURRENT + RETIRING (~33 ms hold at a 60 Hz presenter) dropped ~40 %
+// of 120/s exports. The legacy first-free path (knob 0) still uses only the
+// first kLegacySlotCount, unchanged.
+constexpr int kIOSurfaceSlotCount = 5;
+constexpr int kLegacySlotCount = 3;
+static_assert(ps2x_present_own::kSharedSlots <= kIOSurfaceSlotCount, "pool slots need surfaces");
 
 struct IOSurfacePool
 {
@@ -1456,7 +1462,7 @@ private:
             return presentIOSurfaceOwned(tick);
         IOSurfacePool &pool = ioPool();
         int slot = -1;
-        for (int i = 0; i < kIOSurfaceSlotCount; ++i)
+        for (int i = 0; i < kLegacySlotCount; ++i)
         {
             bool expected = false;
             if (pool.busy[i].compare_exchange_strong(expected, true))
