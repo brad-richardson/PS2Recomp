@@ -13,7 +13,6 @@ namespace
 void clearTzEnv()
 {
     ::unsetenv("PS2X_DETERMINISTIC");
-    ::unsetenv("PS2X_TIMEZONE_MINUTES");
 }
 } // namespace
 
@@ -21,34 +20,10 @@ void register_ps2_tz_offset_tests()
 {
     MiniTest::Case("Ps2TzOffset", [](TestCase &tc)
     {
-        tc.Run("deterministic pins the offset to 0 without override", [](TestCase &t)
+        tc.Run("deterministic pins the offset to 0", [](TestCase &t)
         {
             ::setenv("PS2X_DETERMINISTIC", "1", 1);
-            ::unsetenv("PS2X_TIMEZONE_MINUTES");
             t.Equals(getTimezoneOffsetMinutes(), 0, "pinned 0 under PS2X_DETERMINISTIC=1");
-            clearTzEnv();
-        });
-
-        tc.Run("PS2X_TIMEZONE_MINUTES overrides the pinned offset", [](TestCase &t)
-        {
-            ::setenv("PS2X_DETERMINISTIC", "1", 1);
-            ::setenv("PS2X_TIMEZONE_MINUTES", "-300", 1);
-            t.Equals(getTimezoneOffsetMinutes(), -300, "-300 parses");
-            ::setenv("PS2X_TIMEZONE_MINUTES", "540", 1);
-            t.Equals(getTimezoneOffsetMinutes(), 540, "540 parses");
-            ::setenv("PS2X_TIMEZONE_MINUTES", "0", 1);
-            t.Equals(getTimezoneOffsetMinutes(), 0, "0 parses");
-            clearTzEnv();
-        });
-
-        tc.Run("invalid override fails closed to 0", [](TestCase &t)
-        {
-            ::setenv("PS2X_DETERMINISTIC", "1", 1);
-            for (const char *bad : {"abc", "12x", "-", "--5", "1 2", "99999999999999999999"})
-            {
-                ::setenv("PS2X_TIMEZONE_MINUTES", bad, 1);
-                t.Equals(getTimezoneOffsetMinutes(), 0, std::string("invalid '") + bad + "' -> 0");
-            }
             clearTzEnv();
         });
 

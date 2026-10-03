@@ -10,8 +10,7 @@
 // I26: on-screen virtual controls (layout + hit test; no raylib/SDL here so
 // the host suite can test it). The iOS render loop draws the overlay, maps
 // the current touches through pressedMask() and publishes the result to the
-// IN2 pad latch (ps2_pad_latch.h; liveMask() only on the PS2X_PAD_LATCH=0
-// path). PSPadBackend::readState takes the latched mask, and a
+// IN2 pad latch (ps2_pad_latch.h). PSPadBackend::readState takes the latched mask, and a
 // PS2X_PAD_SCRIPT press is applied on top of that as before.
 // I32: the left D-pad is now a floating analog stick (updateStick tracks
 // the anchor across frames; liveStick() carries the left-stick bytes) and
@@ -814,14 +813,5 @@ namespace ps2x::vpad
     inline bool enabledFromEnv(const char *value)
     {
         return !(value && value[0] == '0');
-    }
-
-    // Pressed bits published by the render thread. IN2: read by the pad
-    // backend only on the PS2X_PAD_LATCH=0 path; the latch path publishes
-    // through ps2x::padlatch::SharedLatch instead.
-    inline std::atomic<uint16_t> &liveMask()
-    {
-        static std::atomic<uint16_t> mask{0u};
-        return mask;
     }
 }

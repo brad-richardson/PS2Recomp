@@ -81,11 +81,9 @@ void register_ps2_pad_latch_tests()
             l.noteSample(kStart); // held since before the first sample
             t.Equals(static_cast<uint32_t>(l.consumeRead()), static_cast<uint32_t>(kStart), "held shows down"); });
 
-        tc.Run("latch env switch defaults on", [](TestCase &t)
+        tc.Run("latch hardwired on", [](TestCase &t)
                {
-            t.IsTrue(ps2x::padlatch::enabledFromEnv(nullptr), "unset = on");
-            t.IsTrue(ps2x::padlatch::enabledFromEnv("1"), "1 = on");
-            t.IsFalse(ps2x::padlatch::enabledFromEnv("0"), "0 = off"); });
+            t.IsTrue(ps2x::padlatch::latchEnabled(), "latch always on"); });
 
         tc.Run("dev test taps parse and window on the wall clock", [](TestCase &t)
                {
@@ -102,7 +100,6 @@ void register_ps2_pad_latch_tests()
 
         tc.Run("pad backend takes the latched mask (latch on)", [](TestCase &t)
                {
-            unsetenv("PS2X_PAD_LATCH");
             sharedLatch().resetForTest();
             PSPadBackend backend;
             uint8_t data[32]{};
@@ -125,7 +122,6 @@ void register_ps2_pad_latch_tests()
 
         tc.Run("port 1 follows live without consuming the latch", [](TestCase &t)
                {
-            unsetenv("PS2X_PAD_LATCH");
             sharedLatch().resetForTest();
             PSPadBackend backend;
             uint8_t data[32]{};
@@ -137,19 +133,5 @@ void register_ps2_pad_latch_tests()
             t.Equals(static_cast<uint32_t>(~static_cast<uint16_t>(data[2] | (data[3] << 8)) & 0xFFFFu),
                      static_cast<uint32_t>(kCross), "port 0 still consumes the press");
             sharedLatch().resetForTest(); });
-
-        tc.Run("pad backend keeps direct sampling with PS2X_PAD_LATCH=0", [](TestCase &t)
-               {
-            setenv("PS2X_PAD_LATCH", "0", 1);
-            sharedLatch().resetForTest();
-            PSPadBackend backend;
-            uint8_t data[32]{};
-            liveMask().store(static_cast<uint16_t>(kCross | kStart));
-            t.IsTrue(backend.readState(0, 0, data, sizeof(data)), "readState ok");
-            const uint16_t btns = static_cast<uint16_t>(data[2] | (data[3] << 8));
-            liveMask().store(0u);
-            unsetenv("PS2X_PAD_LATCH");
-            t.Equals(static_cast<uint32_t>(btns & (kCross | kStart)), 0u, "cross+start active-low");
-            t.Equals(static_cast<uint32_t>(btns | kCross | kStart), 0xFFFFu, "nothing else pressed");
-            sharedLatch().resetForTest(); }); });
+                   });
 }

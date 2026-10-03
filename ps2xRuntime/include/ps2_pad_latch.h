@@ -28,20 +28,14 @@
 // guest speed, so spam-tapping a menu yields one press, not N. Holds are
 // continuous (live-follow).
 //
-// DEV-ONLY PS2X_PAD_LATCH=0 restores the pre-IN2 path (direct sampling in
-// readState) for A/B; default on. DEV-ONLY PS2X_PAD_READ_LOG=1 logs host
+// The latch is always on (the DEV-ONLY PS2X_PAD_LATCH=0 pre-IN2 path is
+// deleted). DEV-ONLY PS2X_PAD_READ_LOG=1 logs host
 // edges (publish side) and every guest read (Pad.cpp side) to stderr.
 namespace ps2x::padlatch
 {
-    // PS2X_PAD_LATCH: unset or anything but "0" = latch on.
-    inline bool enabledFromEnv(const char *value)
-    {
-        return !(value && value[0] == '0');
-    }
-
     inline bool latchEnabled()
     {
-        return enabledFromEnv(std::getenv("PS2X_PAD_LATCH"));
+        return true;
     }
 
     inline bool readLogEnabled()
