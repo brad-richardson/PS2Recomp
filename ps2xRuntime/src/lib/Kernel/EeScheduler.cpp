@@ -177,31 +177,6 @@ namespace
 
     // Per-thread schedule counts since the last periodic dump.
     std::unordered_map<int, uint64_t> g_diagSchedCounts;
-
-    // P1s sema delivery-mechanism diagnostics. Gated on PS2X_DIAG_SEMA
-    // (unset/empty = compiled in, nothing printed, callers pay only a
-    // cached static check). One line per signal/wait with the waker
-    // context and the wake decision.
-    bool diagSemaEnabled()
-    {
-        static const bool enabled = [] {
-            const char *env = std::getenv("PS2X_DIAG_SEMA");
-            return env != nullptr && env[0] != '\0';
-        }();
-        return enabled;
-    }
-
-    // P1u object-pointer capture for unknown-id waits. Gated on
-    // PS2X_DIAG_SEMA_S0 (unset/empty = wait lines byte-identical to P1s,
-    // callers pay only a cached static check).
-    bool diagSemaS0Enabled()
-    {
-        static const bool enabled = [] {
-            const char *env = std::getenv("PS2X_DIAG_SEMA_S0");
-            return env != nullptr && env[0] != '\0';
-        }();
-        return enabled;
-    }
 }
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
@@ -214,12 +189,6 @@ EeScheduler::EeScheduler(PS2Runtime &runtime)
           const char *flag = std::getenv("PS2X_DETERMINISTIC");
           return flag != nullptr && std::strcmp(flag, "1") == 0;
       }() || m_eventClockCycles),
-#if PS2X_ENABLE_DIAG_TAPS
-      m_eventClockCensus([] {
-          const char *flag = std::getenv("PS2X_EVENT_CLOCK_CENSUS");
-          return flag != nullptr && std::strcmp(flag, "1") == 0;
-      }()),
-#endif
       m_hostPace(ps2_vsync_pacer::hostPaceFromProcessEnv()),
       m_vsyncPace(!ps2_vsync_pacer::unpacedFromProcessEnv() || m_hostPace.enabled)
 {
@@ -548,10 +517,6 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     m_gsVSyncCallbackSp = 0;
     m_runtime.memory().gs().vsyncTick.store(0u, std::memory_order_release);
     m_runtime.memory().resetEeTimers();
-#if PS2X_ENABLE_DIAG_TAPS
-    m_eventClockCounts = {};
-#endif
-
     GuestThread main{};
     main.id = kMainThreadId;
     main.context = mainContext;
@@ -1823,27 +1788,9 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
         const uint32_t parkRa = parkWaker ? getRegU32(&parkWaker->activeContext(), 31) : 0u;
         ps2_park::tallySemaSignal(id, m_currentThreadId, parkPc, parkRa);
     }
-    const bool semaDiag = diagSemaEnabled();
-    const GuestThread *waker = semaDiag ? currentThread() : nullptr;
-    const uint32_t wakerPc = waker ? waker->activeContext().pc : 0u;
-    const uint32_t wakerRa = waker ? getRegU32(&waker->activeContext(), 31) : 0u;
-    const size_t wakerInvDepth = waker ? waker->invocations.size() : 0u;
-    const int wakerInvKind = (waker && !waker->invocations.empty())
-                                 ? static_cast<int>(waker->invocations.back().kind)
-                                 : -1;
-    const uint64_t wakerInvTag = (waker && !waker->invocations.empty()) ? waker->invocations.back().tag : 0u;
     EeSemaphore *object = semaphore(id);
     if (!object)
     {
-        if (semaDiag)
-        {
-            std::cerr << "[diag:sema] op=signal id=" << id << " count=-1->-1 waiters=0->0"
-                      << " waker=" << m_currentThreadId << " pc=0x" << std::hex << wakerPc
-                      << " ra=0x" << wakerRa << std::dec << " inInt=" << (m_insideInterrupt ? 1 : 0)
-                      << " iSafe=" << (interruptSafe ? 1 : 0) << " invKind=" << wakerInvKind
-                      << " invDepth=" << wakerInvDepth << " cbFunc=" << std::hex << wakerInvTag << std::dec
-                      << " target=- tStatus=-1 tSusp=-1 result=" << KE_ERROR << std::endl;
-        }
         char dropArgs[32];
         std::snprintf(dropArgs, sizeof(dropArgs), "id=%d", id);
         ps2_log::emitDrop("sched/signalSemaphore", "KE_UNKNOWN_SEMID", dropArgs);
@@ -1851,48 +1798,20 @@ int EeScheduler::signalSemaphore(int id, bool interruptSafe)
         // (0x80004c04 b -> addiu v0,zero,-1; no -408 in KERNEL).
         return KE_ERROR;
     }
-    const int countBefore = object->count;
-    const size_t waitersBefore = object->waiters.size();
     if (!object->waiters.empty())
     {
         const int waiterId = object->waiters.front();
         object->waiters.pop_front();
         GuestThread *waiter = thread(waiterId);
         assert(waiter != nullptr);
-        const int targetStatus = static_cast<int>(waiter->status);
-        const int targetSusp = waiter->suspendCount;
-        const int targetWaitReason = static_cast<int>(waiter->wait.reason);
-        const int targetWaitId = waitObjectId(waiter->wait);
         makeReady(*waiter, id, interruptSafe);
         publishSnapshot();
-        if (semaDiag)
-        {
-            std::cerr << "[diag:sema] op=signal id=" << id << " count=" << countBefore << "->" << object->count
-                      << " waiters=" << waitersBefore << "->" << object->waiters.size()
-                      << " waker=" << m_currentThreadId << " pc=0x" << std::hex << wakerPc
-                      << " ra=0x" << wakerRa << std::dec << " inInt=" << (m_insideInterrupt ? 1 : 0)
-                      << " iSafe=" << (interruptSafe ? 1 : 0) << " invKind=" << wakerInvKind
-                      << " invDepth=" << wakerInvDepth << " cbFunc=" << std::hex << wakerInvTag << std::dec
-                      << " target=" << waiterId << " tStatus=" << targetStatus << " tSusp=" << targetSusp
-                      << " tWaitReason=" << targetWaitReason << " tWaitId=" << targetWaitId
-                      << " result=" << id << std::endl;
-        }
         return id;
     }
     // P1aa (amends P1v per the P1z kernel disassembly): the EE signal path
     // has no OVF check, so waiter-less signals always ++count and return id.
     ++object->count;
     publishSnapshot();
-    if (semaDiag)
-    {
-        std::cerr << "[diag:sema] op=signal id=" << id << " count=" << countBefore << "->" << object->count
-                  << " waiters=" << waitersBefore << "->" << object->waiters.size()
-                  << " waker=" << m_currentThreadId << " pc=0x" << std::hex << wakerPc
-                  << " ra=0x" << wakerRa << std::dec << " inInt=" << (m_insideInterrupt ? 1 : 0)
-                  << " iSafe=" << (interruptSafe ? 1 : 0) << " invKind=" << wakerInvKind
-                  << " invDepth=" << wakerInvDepth << " cbFunc=" << std::hex << wakerInvTag << std::dec
-                  << " target=- tStatus=-1 tSusp=-1 result=" << id << std::endl;
-    }
     return id;
 }
 
@@ -1933,7 +1852,6 @@ void EeScheduler::waitSemaphore(int id)
         const uint32_t parkRa = parkSelf ? getRegU32(&parkSelf->activeContext(), 31) : 0u;
         ps2_park::tallySemaWait(id, m_currentThreadId, parkPc, parkRa);
     }
-    const bool semaDiag = diagSemaEnabled();
     EeSemaphore *object = semaphore(id);
     if (!object)
     {
@@ -1943,51 +1861,19 @@ void EeScheduler::waitSemaphore(int id)
         // b -> addiu v0,zero,-1, passed through the wrapper which only
         // special-cases -2; no -408 in KERNEL). No park, like the kernel.
         setReturnS32(&self->activeContext(), KE_ERROR);
-        if (semaDiag)
-        {
-            std::cerr << "[diag:sema] op=wait id=" << id << " count=-1->-1 parked=0"
-                      << " waker=" << m_currentThreadId << " pc=0x" << std::hex << self->activeContext().pc
-                      << " ra=0x" << getRegU32(&self->activeContext(), 31) << std::dec
-                      << " inInt=" << (m_insideInterrupt ? 1 : 0)
-                      << " result=" << KE_ERROR;
-            if (diagSemaS0Enabled())
-            {
-                std::cerr << " s0=0x" << std::hex << getRegU32(&self->activeContext(), 16) << std::dec;
-            }
-            std::cerr << std::endl;
-        }
         return;
     }
     if (object->count != 0)
     {
-        const int countBefore = object->count;
         --object->count;
         GuestThread *self = currentThread();
         assert(self != nullptr);
         setReturnS32(&self->activeContext(), id);
         publishSnapshot();
-        if (semaDiag)
-        {
-            std::cerr << "[diag:sema] op=wait id=" << id << " count=" << countBefore << "->" << object->count
-                      << " parked=0"
-                      << " waker=" << m_currentThreadId << " pc=0x" << std::hex << self->activeContext().pc
-                      << " ra=0x" << getRegU32(&self->activeContext(), 31) << std::dec
-                      << " inInt=" << (m_insideInterrupt ? 1 : 0)
-                      << " result=" << id << std::endl;
-        }
         return;
     }
     GuestThread *self = currentThread();
     assert(self != nullptr);
-    if (semaDiag)
-    {
-        std::cerr << "[diag:sema] op=wait id=" << id << " count=0->0 parked=1"
-                  << " waker=" << m_currentThreadId << " pc=0x" << std::hex << self->activeContext().pc
-                  << " ra=0x" << getRegU32(&self->activeContext(), 31) << std::dec
-                  << " inInt=" << (m_insideInterrupt ? 1 : 0)
-                  << " waiters=" << object->waiters.size() << "->" << (object->waiters.size() + 1)
-                  << " result=park" << std::endl;
-    }
     object->waiters.push_back(self->id);
     blockCurrent(EeWaitState{EeWaitReason::Semaphore, EeSemaphoreWait{id}});
 }
@@ -2241,21 +2127,6 @@ bool EeScheduler::hasInvocation(GuestInvocationKind kind, uint64_t tag) const
 
 namespace
 {
-// CT1: default-off one-line INTC log. PS2X_INTC_LOG=1 prints every
-// addIrqHandler registration and every dispatchIrq call; unset = off.
-bool intcLogEnabled()
-{
-    static const bool enabled = []
-    {
-        if (const char *env = std::getenv("PS2X_INTC_LOG"))
-        {
-            return env[0] == '1' && env[1] == '\0';
-        }
-        return false;
-    }();
-    return enabled;
-}
-
 // CT1: default-off coverage print at a fixed vsync. PS2X_COVERAGE_TICK=<n>
 // prints the [coverage:*] lines when the tick is reached (SIGTERM-stopped
 // boots never reach the destructor print); unset = off.
@@ -2337,14 +2208,8 @@ int EeScheduler::addIrqHandler(bool dmac,
                                   argument,
                                   gp,
                                   sp,
-                                  true,
-                                  append ? ++tail : --head});
-    if (intcLogEnabled())
-    {
-        std::cerr << "[intc:add] dmac=" << (dmac ? 1 : 0) << " cause=" << cause
-                  << " handler=0x" << std::hex << handler << std::dec
-                  << " id=" << id << std::endl;
-    }
+                                   true,
+                                   append ? ++tail : --head});
     return id;
 }
 
@@ -2420,12 +2285,6 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     const uint32_t mask = dmac ? m_enabledDmacMask : m_enabledIntcMask;
     if (cause < 32u && (mask & (1u << cause)) == 0u)
     {
-        if (intcLogEnabled())
-        {
-            std::cerr << "[intc:dispatch] tick=" << m_vsyncTick
-                      << " dmac=" << (dmac ? 1 : 0) << " cause=" << cause
-                      << " matched=0 masked=1" << std::endl;
-        }
         return;
     }
     const auto &handlers = dmac ? m_dmacHandlers : m_intcHandlers;
@@ -2457,12 +2316,6 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     }
     std::sort(matching.begin(), matching.end(), [](const EeIrqHandler &left, const EeIrqHandler &right)
               { return left.order < right.order; });
-    if (intcLogEnabled())
-    {
-        std::cerr << "[intc:dispatch] tick=" << m_vsyncTick
-                  << " dmac=" << (dmac ? 1 : 0) << " cause=" << cause
-                  << " matched=" << matching.size() << " masked=0" << std::endl;
-    }
     for (const EeIrqHandler &handler : matching)
     {
         // E40 Part-6: log every queued guest handler dispatch (T51 mirror).
@@ -3294,18 +3147,6 @@ void EeScheduler::processEvent(const EeEvent &event)
 #if PS2X_ENABLE_DIAG_TAPS
         if ((m_vsyncTick % 300u) == 0u)
             ge1_wait_census::clear(m_vsyncTick);
-        if (m_eventClockCensus && (m_vsyncTick % 300u) == 0u)
-        {
-            const auto &c = m_eventClockCounts;
-            std::fprintf(stderr, "[event-clock] tick=%llu cycles=%d advance=%llu/%llu "
-                                 "selected=event:%llu,timer:%llu hostwait=%llu/%.3fms "
-                                 "externalwait=%llu/%.3fms\n",
-                         (unsigned long long)m_vsyncTick, m_eventClockCycles ? 1 : 0,
-                         (unsigned long long)c.advances, (unsigned long long)c.advancedCycles,
-                         (unsigned long long)c.eventSelections, (unsigned long long)c.timerSelections,
-                         (unsigned long long)c.hostWaits, c.hostWaitNs / 1e6,
-                         (unsigned long long)c.externalWaits, c.externalWaitNs / 1e6);
-        }
 #endif
         if (m_vsyncTick == coverageTick())
         {
@@ -3513,24 +3354,11 @@ void EeScheduler::waitForEvent()
     const bool hasTimerDeadline = timerCycles != std::numeric_limits<uint64_t>::max();
     if (m_deadlines.empty() && !hasTimerDeadline)
     {
-#if PS2X_ENABLE_DIAG_TAPS
-        const auto waitStart = m_eventClockCensus ? std::chrono::steady_clock::now()
-                                                 : std::chrono::steady_clock::time_point{};
-#endif
         const uint64_t perfT0 = m_perfTail ? ps2x::perflog::steadyNs() : 0u;
         m_eventCv.wait(lock, [this]()
                        { return !m_events.empty() || m_stopRequested.load(std::memory_order_acquire); });
         if (m_perfTail)
             m_perfEventNs += ps2x::perflog::steadyNs() - perfT0;
-#if PS2X_ENABLE_DIAG_TAPS
-        if (m_eventClockCensus)
-        {
-            ++m_eventClockCounts.externalWaits;
-            m_eventClockCounts.externalWaitNs += static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - waitStart).count());
-        }
-#endif
         return;
     }
 
@@ -3549,10 +3377,6 @@ void EeScheduler::waitForEvent()
                                            });
         deadlineCycle = next->deadlineCycle;
         hostDeadline = next->hostDeadline;
-#if PS2X_ENABLE_DIAG_TAPS
-        if (m_eventClockCensus)
-            ++m_eventClockCounts.eventSelections;
-#endif
     }
     if (hasTimerDeadline)
     {
@@ -3563,14 +3387,6 @@ void EeScheduler::waitForEvent()
         {
             deadlineCycle = timerCycle;
             hostDeadline = timerHostDeadline;
-#if PS2X_ENABLE_DIAG_TAPS
-            if (m_eventClockCensus)
-            {
-                ++m_eventClockCounts.timerSelections;
-                if (!m_deadlines.empty())
-                    --m_eventClockCounts.eventSelections;
-            }
-#endif
         }
     }
 
@@ -3581,13 +3397,6 @@ void EeScheduler::waitForEvent()
         // it before any further idle advancement. A host completion posted
         // after this selection is consumed by that next pass.
         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;
-#if PS2X_ENABLE_DIAG_TAPS
-        if (m_eventClockCensus)
-        {
-            ++m_eventClockCounts.advances;
-            m_eventClockCounts.advancedCycles += elapsed;
-        }
-#endif
         lock.unlock();
         uint64_t remaining = elapsed;
         while (remaining > 0u)
@@ -3600,25 +3409,12 @@ void EeScheduler::waitForEvent()
         return;
     }
 
-#if PS2X_ENABLE_DIAG_TAPS
-    const auto waitStart = m_eventClockCensus ? std::chrono::steady_clock::now()
-                                             : std::chrono::steady_clock::time_point{};
-#endif
     const uint64_t perfT0 = m_perfTail ? ps2x::perflog::steadyNs() : 0u;
     const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
                                                { return !m_events.empty() ||
                                                         m_stopRequested.load(std::memory_order_acquire); });
     if (m_perfTail)
         m_perfEventNs += ps2x::perflog::steadyNs() - perfT0;
-#if PS2X_ENABLE_DIAG_TAPS
-    if (m_eventClockCensus)
-    {
-        ++m_eventClockCounts.hostWaits;
-        m_eventClockCounts.hostWaitNs += static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - waitStart).count());
-    }
-#endif
     if (!signaled)
     {
         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;

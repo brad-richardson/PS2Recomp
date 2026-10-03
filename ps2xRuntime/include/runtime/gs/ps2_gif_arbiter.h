@@ -85,15 +85,4 @@ private:
     static bool drainsBefore(const GifArbiterPacket &a, const GifArbiterPacket &b);
 };
 
-// VPL1 GIF-stream digest (PS2X_GIF_DIGEST=1; logged only, never hashed):
-// FNV-1a over every drained arbiter packet (path + bytes) and a marker per
-// unit GS-frontend call, in execution order. Prints "[gif-digest] n=… fnv=…"
-// every 16384 packets and at exit; equal line sequences = equal GIF stream.
-namespace ps2_gif_digest
-{
-    bool enabled();
-    void mixPacket(uint8_t path, const uint8_t *data, uint32_t sizeBytes);
-    void mixMarker(uint8_t kind, uint64_t value);
-}
-
 #endif

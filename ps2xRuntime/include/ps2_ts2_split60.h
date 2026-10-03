@@ -12,11 +12,7 @@
 #include <unordered_map>
 
 // EE1P2: this header is the split120 product path and stays compiled in
-// release builds. Only the TS3 case census is diagnostic; PS2X_ENABLE_TS2_DIAG
-// gates it.
-#ifndef PS2X_ENABLE_TS2_DIAG
-#define PS2X_ENABLE_TS2_DIAG 0
-#endif
+// release builds.
 
 namespace ps2_ts2_split60
 {
@@ -97,21 +93,6 @@ struct State
     uint32_t cachedKey = 0;
     ThreadData *cachedData = nullptr;
     bool cachedValid = false;
-    // HL1: diagnostic counters (PS2X_TS2_HALFLOAD_COUNT=1, default off). A
-    // plain env knob, not TS2_DIAG, so instrumented builds work where diag
-    // taps compile out. Same EE-thread-only owner as the rest of State.
-    uint64_t halfLoadCalls = 0;
-    uint64_t halfLoadActive = 0;
-    uint64_t halfLoadConverted = 0;
-    uint64_t halfLoadRefreshes = 0;
-    uint64_t halfLoadLastBin = 0;
-#if PS2X_ENABLE_TS2_DIAG
-    uint64_t ts3CaseCounts[7] = {};
-    uint64_t ts3CbCounts[5] = {};
-    uint64_t ts3CaseFirstTick[7] = {};
-    uint64_t ts3LastPrintBin = 0;
-    bool ts3PrintArmed = false;
-#endif
     ThreadData *findThread(uint32_t key) noexcept
     {
         for (uint32_t i = 0; i < kThreadSlots; ++i)
@@ -241,15 +222,6 @@ inline bool crashBodyWrite(uint8_t *ram, uint32_t expected, uint32_t value) noex
     return true;
 }
 
-inline bool countEnabled() noexcept
-{
-    static const bool on = [] {
-        const char *s = std::getenv("PS2X_TS2_HALFLOAD_COUNT");
-        return s && s[0] == '1' && s[1] == '\0';
-    }();
-    return on;
-}
-
 // HL1: guest-thread record cache, unconditional (CU4 B3: the
 // PS2X_TS2_HL1_CACHE=0 legacy per-load scan is deleted). Exact either way.
 
@@ -262,92 +234,7 @@ inline uint32_t read32(const uint8_t *ram, uint32_t address) noexcept
     return value;
 }
 
-#if PS2X_ENABLE_TS2_DIAG
-// TS3: opt-in per-case/callback census. Observation only (guest untouched),
-// works in stock and split modes. Counts are cumulative per guest thread;
-// the print fires every 600 vsync ticks plus one line per first sighting of
-// an unconverted case, so a full race stays under ~40 lines.
-inline bool caseCountEnabled() noexcept
-{
-    static const bool on = [] {
-        const char *v = std::getenv("PS2X_TS2_CASE_COUNT");
-        return v && v[0] == '1' && v[1] == '\0';
-    }();
-    return on;
-}
-// TT1: census arrays live in State above (same EE-thread-only owner).
 
-inline void ts3PrintCounts(uint64_t tick) noexcept
-{
-    State &s = g_state;
-    std::fprintf(stderr,
-        "ts2-case-count tick=%llu c0=%llu c1=%llu c2=%llu c3=%llu c4=%llu c5=%llu cOther=%llu cb13ebec=%llu cb13858c=%llu cb13b038=%llu cb13b094=%llu cb13b534=%llu\n",
-        static_cast<unsigned long long>(tick),
-        static_cast<unsigned long long>(s.ts3CaseCounts[0]),
-        static_cast<unsigned long long>(s.ts3CaseCounts[1]),
-        static_cast<unsigned long long>(s.ts3CaseCounts[2]),
-        static_cast<unsigned long long>(s.ts3CaseCounts[3]),
-        static_cast<unsigned long long>(s.ts3CaseCounts[4]),
-        static_cast<unsigned long long>(s.ts3CaseCounts[5]),
-        static_cast<unsigned long long>(s.ts3CaseCounts[6]),
-        static_cast<unsigned long long>(s.ts3CbCounts[0]),
-        static_cast<unsigned long long>(s.ts3CbCounts[1]),
-        static_cast<unsigned long long>(s.ts3CbCounts[2]),
-        static_cast<unsigned long long>(s.ts3CbCounts[3]),
-        static_cast<unsigned long long>(s.ts3CbCounts[4]));
-}
-
-inline void noteTs3Counts(const uint8_t *ram, R5900Context *ctx,
-                          uint32_t source, uint32_t target,
-                          bool isCall, bool isIndirect, uint64_t tick) noexcept
-{
-    if (!ctx) return;
-    State &s = g_state;
-    if (isCall && !isIndirect && source == 0x128ddcu && target == 0x1216e0u)
-    {
-        const uint32_t r = getRegU32(ctx, 4) & 0x1fffffffu;
-        const uint32_t p = read32(ram, r + 0x77cu) & 0x1fffffffu;
-        const uint32_t c = read32(ram, p + 0xde0u);
-        const uint32_t slot = (c <= 5u) ? c : 6u;
-        ++s.ts3CaseCounts[slot];
-        if (c >= 3u && s.ts3CaseFirstTick[slot] == 0u)
-        {
-            s.ts3CaseFirstTick[slot] = tick ? tick : 1u;
-            std::fprintf(stderr, "ts2-case-first case=%u tick=%llu\n",
-                         c, static_cast<unsigned long long>(tick));
-        }
-    }
-    if (isCall && isIndirect)
-    {
-        switch (source)
-        {
-        case 0x13ebecu: ++s.ts3CbCounts[0]; break;
-        case 0x13858cu: ++s.ts3CbCounts[1]; break;
-        case 0x13b038u: ++s.ts3CbCounts[2]; break;
-        case 0x13b094u: ++s.ts3CbCounts[3]; break;
-        case 0x13b534u: ++s.ts3CbCounts[4]; break;
-        default: break;
-        }
-    }
-    const uint64_t bin = tick / 600u;
-    if (!s.ts3PrintArmed || bin != s.ts3LastPrintBin)
-    {
-        s.ts3PrintArmed = true;
-        s.ts3LastPrintBin = bin;
-        ts3PrintCounts(tick);
-    }
-}
-#else
-inline bool caseCountEnabled() noexcept
-{
-    return false;
-}
-inline void noteTs3Counts(const uint8_t *, R5900Context *,
-                          uint32_t, uint32_t,
-                          bool, bool, uint64_t) noexcept
-{
-}
-#endif // PS2X_ENABLE_TS2_DIAG
 
 // Called only after the first rider pass has fully returned to 128dec.
 inline bool beginSecondHalf() noexcept
@@ -374,7 +261,7 @@ inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
     if (!halfMode()) return bits;
     State &s = g_state;
     if (s.guestInterrupt) return bits;
-    if (countEnabled()) ++s.halfLoadCalls;
+
     const ThreadData *td;
     {
         if (!s.cachedValid || s.cachedKey != s.guestThread)
@@ -382,12 +269,12 @@ inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
             s.cachedData = s.findThread(s.guestThread);
             s.cachedKey = s.guestThread;
             s.cachedValid = true;
-            if (countEnabled()) ++s.halfLoadRefreshes;
+
         }
         td = s.cachedData;
     }
     if (td == nullptr || !td->ctx.active) return bits;
-    if (countEnabled()) ++s.halfLoadActive;
+
     // TS3: cases 4/5 reach converted sites through the shared 121aa0/113648
     // helpers. They run once at full H, so their loads keep stock values.
     if (fixUnconverted() && td->ctx.selectorCase >= 3u) return bits;
@@ -413,28 +300,8 @@ inline uint32_t halfLoad(uint32_t pc, uint32_t address, uint32_t bits) noexcept
     case ps2_ts2_splitsites::kSite13ee80: if (address == 0x49c12cu) out = 0x3c088889u; break;
     default: break;
     }
-    if (out != bits && countEnabled()) ++s.halfLoadConverted;
-    return out;
-}
 
-// Called per dispatch with the current vsync tick; prints cumulative
-// counters every 300 ticks (~10 lines per boot).
-inline void countTick(uint64_t tick) noexcept
-{
-    if (!countEnabled()) return;
-    State &s = g_state;
-    const uint64_t bin = tick / 300u;
-    if (bin == s.halfLoadLastBin) return;
-    s.halfLoadLastBin = bin;
-    std::fprintf(stderr,
-                 "ts2-halfload tick=%llu calls=%llu active=%llu converted=%llu refreshes=%llu cache=%s\n",
-                 static_cast<unsigned long long>(tick),
-                 static_cast<unsigned long long>(s.halfLoadCalls),
-                 static_cast<unsigned long long>(s.halfLoadActive),
-                 static_cast<unsigned long long>(s.halfLoadConverted),
-                  static_cast<unsigned long long>(s.halfLoadRefreshes),
-                  "on");
-    std::fflush(stderr);
+    return out;
 }
 
 inline void setThread(uint32_t id, bool interrupt) noexcept

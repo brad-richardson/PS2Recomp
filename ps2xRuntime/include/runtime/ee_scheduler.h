@@ -519,16 +519,6 @@ private:
     // scheduled-event ordering guarantee.
     const bool m_eventClockCycles;
     const bool m_cycleOnlyEvents;
-#if PS2X_ENABLE_DIAG_TAPS
-    const bool m_eventClockCensus;
-    struct EventClockCensus
-    {
-        uint64_t advances = 0, advancedCycles = 0;
-        uint64_t eventSelections = 0, timerSelections = 0;
-        uint64_t hostWaits = 0, hostWaitNs = 0;
-        uint64_t externalWaits = 0, externalWaitNs = 0;
-    } m_eventClockCounts;
-#endif
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t m_detHashEvery = 0;
 #endif
