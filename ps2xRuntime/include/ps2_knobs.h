@@ -417,6 +417,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_UNPACED",
         "PS2X_VIF1_REVERSE_DMA",
         "PS2X_VIRTUAL_PAD",
+        "PS2X_VU0_BLOCKS",
         "PS2X_VU0_DIRECT",
         "PS2X_VU0_RECOMP",
         "PS2X_VU1_ENGINE",
