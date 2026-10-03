@@ -315,20 +315,12 @@ namespace
 
     // GF1 H4: with the diet, the GS queue holds 8192 descriptors instead of
     // 1024 (the 16 MiB byte cap stays), so the unit runs ahead through the GS
-    // worker's GPU waits instead of blocking. PS2X_GS_QUEUE_DESC overrides
-    // (e.g. 1024 to measure H1-H3 alone). Host bound only. 0 = default.
+    // worker's GPU waits instead of blocking. Host bound only.
     size_t gsQueueDescriptors()
     {
         if (!gsHandoffDietRequested())
             return 0u;
-        size_t desc = 8192u;
-        if (const char *env = std::getenv("PS2X_GS_QUEUE_DESC"))
-        {
-            const long v = std::strtol(env, nullptr, 10);
-            if (v >= 16 && v <= 1048576)
-                desc = static_cast<size_t>(v);
-        }
-        return desc;
+        return 8192u;
     }
 
     // SLUS_207.72 stores its video choice in bits 20-21 of the first options
@@ -3163,18 +3155,6 @@ bool PS2Runtime::syncCoreSubsystems()
 
     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
     m_memory.setGsFrontend(&m_gs); // GB3: priv stores ride the GS stream when queued
-    // GB2 step (a): PS2X_GS_QUEUE=1 runs the CPU GS backend on its own
-    // thread behind the command queue. Default off: direct calls, today's
-    // code path. Enabled here during init, before the game thread spawns.
-    if (const char *queueEnv = std::getenv("PS2X_GS_QUEUE"))
-    {
-        if (std::strcmp(queueEnv, "1") == 0 && !m_gs.queueEnabled())
-        {
-            m_gs.setQueueEnabled(true, gsQueueDescriptors());
-            std::cerr << "[gs:queue] enabled (PS2X_GS_QUEUE=1): CPU backend on GS worker thread"
-                      << std::endl;
-        }
-    }
     // GE2: PS2X_GS_BACKEND=external = the external-GS backend (GE1 when
     // PS2X_GS_EXTERNAL_LIBRARY names it), fed by the queue (forced on: every
     // backend call runs on the one GS worker thread). Unset or any other value
@@ -3211,20 +3191,13 @@ bool PS2Runtime::syncCoreSubsystems()
                                                 const bool note = m_gs.rawGifBackendActive();
                                                 m_gs.processGIFPacketWithPath(path, note, bytes);
                                             });
-        // H3: on the unit thread, wake the GS worker once per wakeCmds queued
+        // H3: on the unit thread, wake the GS worker once per 64 queued
         // commands (or wakeBytes) and at every unit job end, instead of once
-        // per GIF drain (one futex wake per XGKICK). PS2X_GS_WAKE_CMDS tunes.
-        uint32_t wakeCmds = 64u;
-        if (const char *env = std::getenv("PS2X_GS_WAKE_CMDS"))
-        {
-            const long v = std::strtol(env, nullptr, 10);
-            if (v >= 0 && v <= 65536)
-                wakeCmds = static_cast<uint32_t>(v);
-        }
+        // per GIF drain (one futex wake per XGKICK).
+        const uint32_t wakeCmds = 64u;
         const size_t wakeBytes = 256u * 1024u;
         m_gs.setWorkerDeferredWakes(wakeCmds, wakeBytes);
-        if (wakeCmds != 0u)
-            ps2_mtvu::jobEndFn() = [this]() { m_gs.flushWorkerWake(); };
+        ps2_mtvu::jobEndFn() = [this]() { m_gs.flushWorkerWake(); };
         // MP1 L2: lean handoff (sleep-aware notifies, one worker lock per pop,
         // lock-free unit drain batches). Wake timing only: same commands, same
         // order. Needs the deferred wakes (the job-end flush above); always on
@@ -6986,17 +6959,6 @@ void PS2Runtime::run()
             // the app is in the background). For throughput measurement, the
             // AHB sink may drop presents; poll faster than the display rate.
             PollInputEvents();
-#if defined(__ANDROID__)
-            static const bool s_unpacedPresent = [] {
-                const char *v = std::getenv("PS2X_PRESENT_UNPACED");
-                return v && std::strcmp(v, "1") == 0;
-            }();
-            if (vkLive && s_unpacedPresent)
-            {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            else
-#endif
             {
                 static auto s_nextFrame = std::chrono::steady_clock::now();
                 // DP1: the skip-GL loop latches one guest frame per iteration, so it must run at the
