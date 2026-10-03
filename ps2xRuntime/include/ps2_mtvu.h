@@ -329,6 +329,16 @@ namespace ps2_mtvu
         // waiter's predicate re-check makes the lock unnecessary — a notify
         // before the sleep finds its work via `tail != cHead`, one after
         // wakes it; wake points are unchanged, so no latency beyond one job).
+        // park3: GIF-only park with a BATCHED wake — the producer notifies a
+        // sleeping consumer only on job boundaries (JobEnd/Drain/Call ops,
+        // every job ends with one published immediately) or past kWakeFill
+        // pending ops, not on every publish. No work is lost: the waiter
+        // re-checks `tail != cHead` under `m` before sleeping, so any publish
+        // is seen; a skipped wake only delays intra-job GIF-side overlap
+        // until the job's boundary publish. Worst case: one unit job of GIF
+        // start delay (µs-scale MTVU work, sub-tick; the 100 ms cv-timeout is
+        // the pathological backstop). JobEnd itself always wakes, so
+        // EE-visible completion (completed++) latency is unchanged.
         // A parked stage spins kStageParkSpinNs (<= 4 us) with a CPU pause
         // (arm64 `yield`, x86 `pause`; the clock is read every 16 polls),
         // then the existing condvar sleep. spin (the default in this lane):
@@ -341,6 +351,8 @@ namespace ps2_mtvu
         static constexpr uint64_t kStageParkSpinNs = 4000u;
         inline int parseStagePark(const char *e)
         {
+            if (e && std::strcmp(e, "park3") == 0)
+                return 4;
             if (e && std::strcmp(e, "park2") == 0)
                 return 3;
             if (e && std::strcmp(e, "park_all") == 0)
@@ -351,12 +363,12 @@ namespace ps2_mtvu
         }
         inline int &stageWaitMode()
         {
-            static int v = -1; // -1 unresolved; 0 spin, 1 park, 2 park_all, 3 park2 (tests set it directly)
+            static int v = -1; // -1 unresolved; 0 spin, 1 park, 2 park_all, 3 park2, 4 park3 (tests set it directly)
             return v;
         }
         inline const char *stageModeName(int v)
         {
-            return v >= 3 ? "park2" : (v == 2 ? "park_all" : (v == 1 ? "park" : "spin"));
+            return v >= 4 ? "park3" : (v == 3 ? "park2" : (v == 2 ? "park_all" : (v == 1 ? "park" : "spin")));
         }
         inline int stageMode()
         {
@@ -445,7 +457,14 @@ namespace ps2_mtvu
                 pHeadCache = head.load(std::memory_order_acquire);
                 pDoneBytesCache = doneBytes.load(std::memory_order_acquire);
             }
-            void publish()
+            // Backstop so a huge boundary-free job still wakes the consumer:
+            // at most 1/4 of the ring can sit un-noticed (pHeadCache may be
+            // stale, which only over-wakes, never under).
+            static constexpr uint64_t kWakeFill = 1024u;
+            // boundary: this publish carries a job boundary (JobEnd/Drain/
+            // Call) or comes from the blocked-producer path (producerWait/
+            // fence: rare and latency-sensitive, always wakes).
+            void publish(bool boundary)
             {
                 if (pPub == pTail)
                     return;
@@ -455,14 +474,14 @@ namespace ps2_mtvu
                 std::atomic_thread_fence(std::memory_order_seq_cst);
                 if (sleeping.load(std::memory_order_relaxed))
                 {
+                    const int mode = stageMode();
+                    if (mode == 4 && !boundary && pTail - pHeadCache < kWakeFill)
+                        return; // park3: batch the wake to a boundary/fill, not every publish
                     nWakes.fetch_add(1u, std::memory_order_relaxed);
-                    if (stageMode() >= 3)
+                    if (mode >= 3)
                     {
-                        // park2: no mutex on the hot publish path. No wake is
-                        // lost: the notify is preceded by the tail store, and
-                        // the waiter re-checks `tail != cHead` under `m`
-                        // before sleeping, so a notify that lands before the
-                        // sleep finds its work, and one after wakes it.
+                        // park2/park3: no mutex on the hot publish path (see
+                        // the MW2 header note for the no-lost-wake argument).
                         cvConsumer.notify_one();
                     }
                     else
@@ -479,7 +498,7 @@ namespace ps2_mtvu
             template <typename Pred>
             void producerWait(Pred done)
             {
-                publish();
+                publish(true);
                 for (int spin = 0; spin < 256; ++spin)
                 {
                     refreshCaches();
@@ -522,7 +541,7 @@ namespace ps2_mtvu
                 ++pTail;
                 pBytes += op.acct;
                 if (publishNow || pTail - pPub >= kPublishEvery)
-                    publish();
+                    publish(op.kind != GifOp::Kind::Submit);
             }
             // Wait until the consumer has run every op pushed so far.
             void fence()
