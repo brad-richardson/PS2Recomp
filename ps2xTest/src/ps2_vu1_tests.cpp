@@ -12,6 +12,7 @@
 #include "runtime/ps2_savestate.h"
 #include "../../ps2xRuntime/src/lib/ps2_savestate_internal.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -2905,6 +2906,115 @@ void register_ps2_vu1_tests()
             t.IsTrue(stats.groupEntries > 0u, "guarded group bodies ran on the game image (VBK1 Part 2)");
             t.Equals(stats.mismatches, uint64_t{0}, "every VU0 mode matches the queued VU0 interpreter on the game image");
             t.IsTrue(stats.generatedCycles > 0u, "the generated game image ran");
+        });
+        // VBK1 Part 2: local-only VU0 image cost bench (PS2X_VBK1_BENCH=<rounds>
+        // with the game-image env above). Direct commit on (the play setting);
+        // each round times every start of every entry once per table (pair /
+        // group / guarded group), rotating the table order; prints the median
+        // ns per program run. Results must match across tables.
+        tc.Run("VBK1 VU0 image bench (local only)", [](TestCase &t)
+        {
+            const char *imagePath = std::getenv("PS2X_VR3_VU0_IMAGE");
+            const char *entryList = std::getenv("PS2X_VR3_VU0_ENTRIES");
+            const char *roundsText = std::getenv("PS2X_VBK1_BENCH");
+            if (imagePath == nullptr || entryList == nullptr || roundsText == nullptr)
+            {
+                std::fprintf(stderr, "[vbk1-bench] skipped (PS2X_VBK1_BENCH unset)\n");
+                return;
+            }
+            std::vector<uint8_t> code(PS2_VU0_CODE_SIZE, 0u);
+            std::ifstream in(imagePath, std::ios::binary);
+            in.read(reinterpret_cast<char *>(code.data()), static_cast<std::streamsize>(code.size()));
+            const std::string name = std::filesystem::path(imagePath).filename().string();
+            const VU0Interpreter::RecompProgram *generated =
+                VU0Interpreter::findRecompProgram(std::strtoull(name.substr(4, 16).c_str(), nullptr, 16));
+            t.IsTrue(generated != nullptr && generated->groupPairs != nullptr, "game image with group tables compiled in");
+            if (generated == nullptr || generated->groupPairs == nullptr)
+                return;
+            std::vector<uint32_t> entries;
+            for (std::stringstream list(entryList); list.good();)
+            {
+                std::string item;
+                std::getline(list, item, ',');
+                if (!item.empty())
+                    entries.push_back(static_cast<uint32_t>(std::strtoul(item.c_str(), nullptr, 16)));
+            }
+            struct Start
+            {
+                uint32_t pc;
+                VuState state;
+                std::vector<uint8_t> data;
+            };
+            std::vector<Start> starts;
+            vu1_fixture::Rng rnd{0x510E527FADE682D1ull};
+            for (const uint32_t entry : entries)
+                for (uint32_t seed = 0; seed < 24u; ++seed)
+                {
+                    Start st{entry, VuState{}, std::vector<uint8_t>(PS2_VU0_DATA_SIZE, 0u)};
+                    for (uint32_t i = 0; i < PS2_VU0_DATA_SIZE; i += 4u)
+                    {
+                        const float value = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 64.0f;
+                        std::memcpy(st.data.data() + i, &value, sizeof(value));
+                    }
+                    for (uint32_t reg = 1; reg < 32u; ++reg)
+                        for (uint32_t lane = 0; lane < 4u; ++lane)
+                            st.state.vf[reg][lane] = static_cast<float>(static_cast<int32_t>(rnd(2001u)) - 1000) / 32.0f;
+                    for (uint32_t reg = 1; reg < 16u; ++reg)
+                        st.state.vi[reg] = static_cast<int32_t>(rnd(256u));
+                    st.state.q = 1.0f;
+                    starts.push_back(std::move(st));
+                }
+            // Tracked code (the game's case): run from PS2Memory's VU0 code
+            // memory so run() reuses the cached direct-flag map instead of
+            // rebuilding it per call (untracked test code does).
+            PS2Memory mem;
+            t.IsTrue(mem.initialize(), "PS2Memory for tracked VU0 code");
+            uint8_t *trackedCode = mem.getVU0Code();
+            std::memcpy(trackedCode, code.data(), code.size());
+            GS gs;
+            const int tables[3] = {0, 1, 2};
+            std::vector<double> ns[3];
+            uint64_t cycles[3] = {}, checksum[3] = {}, cycTotal[3] = {};
+            const uint32_t rounds = static_cast<uint32_t>(std::max(1, std::atoi(roundsText)));
+            std::vector<uint8_t> data(PS2_VU0_DATA_SIZE);
+            for (uint32_t round = 0; round < rounds; ++round)
+                for (uint32_t j = 0; j < 3u; ++j)
+                {
+                    const uint32_t m = (round + j) % 3u;
+                    VU0Interpreter vu;
+                    vu.setRecompProgramForTest(generated);
+                    vu.setDirectCommitForTest(1);
+                    vu.setBlocksForTest(tables[m]);
+                    uint64_t sum = 0u, cyc = 0u;
+                    const auto t0 = std::chrono::steady_clock::now();
+                    for (const Start &st : starts)
+                    {
+                        std::memcpy(vu.state().vf, st.state.vf, sizeof(st.state.vf));
+                        std::memcpy(vu.state().vi, st.state.vi, sizeof(st.state.vi));
+                        vu.state().q = st.state.q;
+                        std::memcpy(data.data(), st.data.data(), data.size());
+                        const uint64_t before = vu.state().cycles;
+                        vu.execute(trackedCode, PS2_VU0_CODE_SIZE, data.data(), PS2_VU0_DATA_SIZE, gs, &mem, st.pc, 0u, 0u, 4096u);
+                        cycTotal[m] += vu.state().cycles - before; // m_cycle runs on across execute()
+                        sum = sum * 31u + static_cast<uint32_t>(vu.state().vi[1]) + vu.state().mac + vu.state().cycles;
+                        cyc = vu.state().cycles;
+                    }
+                    const auto t1 = std::chrono::steady_clock::now();
+                    ns[m].push_back(std::chrono::duration<double, std::nano>(t1 - t0).count() / static_cast<double>(starts.size()));
+                    cycles[m] = cyc;
+                    checksum[m] = sum;
+                }
+            const auto median = [](std::vector<double> v)
+            {
+                std::sort(v.begin(), v.end());
+                return v[v.size() / 2u];
+            };
+            const double cyclesPerRun = static_cast<double>(cycTotal[0]) / (static_cast<double>(rounds) * starts.size());
+            std::fprintf(stderr, "[vbk1-bench] starts %zu rounds %u VU cycles/run %.1f ns/run median: pairs %.1f groups %.1f guarded %.1f (groups %.3f, guarded %.3f of pairs)\n",
+                         starts.size(), rounds, cyclesPerRun, median(ns[0]), median(ns[1]), median(ns[2]),
+                         median(ns[1]) / median(ns[0]), median(ns[2]) / median(ns[0]));
+            t.IsTrue(checksum[0] == checksum[1] && checksum[0] == checksum[2] && cycles[0] == cycles[1] && cycles[0] == cycles[2],
+                     "every table computed the same results");
         });
 #endif
         // F12-fix: the tracked flag-map cache is shared by all instances of a unit
