@@ -23,9 +23,16 @@ struct SharedFrame
     // the submit wall stands in for the frame's guest-vsync wall time.
     uint64_t tick = 0;
     uint64_t submitWallNs = 0;
+    int slot = -1; // PSO1: export pool slot (witness / ownership), -1 unknown
 };
 
 bool enabled(); // PS2X_PRESENT_ZERO_COPY=1 (macOS: GL blit; iOS: GLES texture cache)
+
+// PSO1 (PRV1 §3): PS2X_PRESENT_OWNERSHIP=1 replaces publish()/latest() on the
+// iOS export with ps2x_present_own::Pool (ownPool()): reserved READY/CURRENT
+// frames, reuse only after the presenter's GL read fence completes. 0 = the
+// pre-PSO1 mailbox (exact legacy path). Default: kOwnershipDefault.
+bool ownershipEnabled();
 
 // Apple: a w x h BGRA8 IOSurface that CoreVideo, GL/GLES and Metal accept
 // (CVPixelBufferCreate with IOSurface properties; the pixel buffer stays
@@ -45,6 +52,25 @@ bool blitToTexture(const SharedFrame &frame, unsigned int texId);
 // the current EAGL context (CVOpenGLESTextureCache), cached per surface; the
 // presenter draws it directly. 0 on failure.
 unsigned int acquireTexture(const SharedFrame &frame);
+
+// iOS only, PSO1: GL read fences on the presenter's EAGL stream
+// (GL_APPLE_sync; GLES2). submitReadFence() runs after the shared quad's
+// batch flush and returns the read's fence sequence (> 0). Without
+// GL_APPLE_sync, or after a fence failure, it falls back to glFinish (counted)
+// and the returned sequence is already complete. pollReadFences() polls with
+// a zero timeout, oldest first, and returns the highest completed sequence.
+// Both run on the GL thread only.
+uint64_t submitReadFence();
+uint64_t pollReadFences();
+struct FenceStats
+{
+    uint64_t submitted = 0, completed = 0, pending = 0, failures = 0, finishFallbacks = 0, overflowFinishes = 0;
+    bool appleSync = false;
+};
+FenceStats fenceStats();
+// iOS only, PSO1 diagnostic (PS2X_PRESENT_CAPTURE_DIR): read the bound
+// drawable back (glReadPixels RGBA) and write it as PPM. GL thread only.
+bool captureDrawable(int width, int height, const char *path);
 
 // Diagnostic (PS2X_PRESENT_SHARE_DUMP_TICKS): read the GL frame texture back
 // (what DrawTexturePro samples) and write the w x h top-left region as PPM.

@@ -12,6 +12,7 @@
 #include <TargetConditionals.h>
 
 #include <cstdio>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 

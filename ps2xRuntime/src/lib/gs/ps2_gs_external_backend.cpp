@@ -14,6 +14,7 @@
 #endif
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
 #include "runtime/gs/ps2_present_share.h"
+#include "runtime/gs/ps2_present_owner.h"
 #include "ps2_ios_runtime.h"
 #include "ps2_present_geometry.h"
 #include <IOSurface/IOSurfaceRef.h>
@@ -227,6 +228,8 @@ struct IOSurfaceExportCtx
     int slot;
     uint64_t tick;
     uint64_t submitWallNs; // PL3: steady-clock export-submit time (frame age birth)
+    uint64_t ownGen = 0u;  // PSO1: ownership generation (PS2X_PRESENT_OWNERSHIP=1)
+    uint64_t ownSeq = 0u;  // PSO1: content sequence, assigned at reserve
 };
 
 void dumpIOSurface(void *surface, uint64_t tick)
@@ -288,6 +291,33 @@ void ioExportDone(void *rawCtx, int ok)
 {
     std::unique_ptr<IOSurfaceExportCtx> ctx(static_cast<IOSurfaceExportCtx *>(rawCtx));
     IOSurfacePool &pool = ioPool();
+    if (ps2x_present_share::ownershipEnabled())
+    {
+        // PSO1: READY only on success in the current epoch; the slot stays
+        // reserved (READY/CURRENT) until the presenter's read retires it.
+        std::lock_guard<std::mutex> lock(pool.mutex);
+        const bool live = ok && ctx->epoch == pool.epoch;
+        void *surface = pool.surfaces[ctx->slot];
+        IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
+        ps2x_present_own::FrameInfo info;
+        if (live && surface)
+        {
+            dumpIOSurface(surface, ctx->tick);
+            info = {surface, static_cast<uint32_t>(IOSurfaceGetWidth(ref)),
+                    static_cast<uint32_t>(IOSurfaceGetHeight(ref)), ctx->ownSeq, ctx->tick, ctx->submitWallNs};
+        }
+        const bool published = ps2x_present_own::sharedPool().complete(
+            ctx->slot, ctx->ownGen, live && surface, info, ps2x::perflog::steadyNs());
+        if (published)
+        {
+            static std::once_flag once;
+            std::call_once(once, [tick = ctx->tick] {
+                std::fprintf(stderr, "[gs:external] GE1 IOSurface first publish tick=%llu (ownership)\n",
+                             (unsigned long long)tick);
+            });
+        }
+        return;
+    }
     {
         std::lock_guard<std::mutex> lock(pool.mutex);
         if (ok && ctx->epoch == pool.epoch)
@@ -297,7 +327,7 @@ void ioExportDone(void *rawCtx, int ok)
             IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
             ps2x_present_share::publish({surface, static_cast<uint32_t>(IOSurfaceGetWidth(ref)),
                                          static_cast<uint32_t>(IOSurfaceGetHeight(ref)), ++pool.seq,
-                                         ctx->tick, ctx->submitWallNs});
+                                         ctx->tick, ctx->submitWallNs, ctx->slot});
             static std::once_flag once;
             std::call_once(once, [tick = ctx->tick] {
                 std::fprintf(stderr, "[gs:external] GE1 IOSurface first publish tick=%llu\n",
@@ -358,6 +388,8 @@ public:
             std::lock_guard<std::mutex> lock(ioPool().mutex);
             ++ioPool().epoch;
         }
+        if (ps2x_present_share::ownershipEnabled())
+            ps2x_present_own::sharedPool().bumpGeneration();
 #endif
         if (m_ge1Active)
             m_ge1.close();
@@ -601,12 +633,20 @@ public:
             // GI1: async GPU export publishes through the shared mailbox; the
             // pixels stay empty either way (AHB shape). Zero-copy off, or a
             // busy/failed export, falls back to the CPU snapshot.
-            if (presentIOSurface(request.vsyncTick))
+            const IOExport exported = presentIOSurface(request.vsyncTick);
+            if (exported == IOExport::Queued)
             {
                 frame.width = 640u;
                 frame.height = 480u;
                 frame.displayFbp = static_cast<uint32_t>(request.dispfb1 & 0x1ffu);
                 frame.sourceFbp = frame.displayFbp;
+            }
+            else if (exported == IOExport::NoSlot && ps2x_present_share::ownershipEnabled() &&
+                     ps2x_present_own::sharedPool().hasFrame())
+            {
+                // PSO1 (PRV1 §2): pool exhaustion is ordinary backpressure; the
+                // presenter keeps its last safe frame (UploadFrame prefers the
+                // shared frame anyway), so no synchronous CPU snapshot.
             }
             else if (!(iosPresentUnpaced() && ps2x_present_share::enabled()))
             {
@@ -1396,12 +1436,21 @@ private:
 
     // GI1: queue an async GPU export into a free IOSurface slot. The publish
     // happens later, from the command buffer's completion handler (ioExportDone).
-    // False = fall back to the CPU snapshot for this frame (all slots busy,
-    // no composed frame yet, or the export failed).
-    bool presentIOSurface(uint64_t tick)
+    // Not Queued = fall back to the CPU snapshot for this frame (all slots
+    // busy, no composed frame yet, or the export failed). PSO1: NoSlot is
+    // reported separately (ordinary backpressure under ownership).
+    enum class IOExport
+    {
+        Queued,
+        NoSlot,
+        Failed,
+    };
+    IOExport presentIOSurface(uint64_t tick)
     {
         if (!ps2x_present_share::enabled() || !m_ge1.exportIOSurface)
-            return false;
+            return IOExport::Failed;
+        if (ps2x_present_share::ownershipEnabled())
+            return presentIOSurfaceOwned(tick);
         IOSurfacePool &pool = ioPool();
         int slot = -1;
         for (int i = 0; i < kIOSurfaceSlotCount; ++i)
@@ -1414,7 +1463,8 @@ private:
             }
         }
         if (slot < 0)
-            return false;
+            return IOExport::NoSlot;
+        ps2x_present_own::witnessWrite(slot);
         void *surface = nullptr;
         uint64_t epoch = 0u;
         {
@@ -1431,7 +1481,7 @@ private:
         if (!surface)
         {
             pool.busy[slot].store(false);
-            return false;
+            return IOExport::Failed;
         }
         std::unique_ptr<IOSurfaceExportCtx> ctx(
             new IOSurfaceExportCtx{epoch, slot, tick, ps2x::perflog::steadyNs()});
@@ -1440,10 +1490,55 @@ private:
         if (rc != 1)
         {
             pool.busy[slot].store(false);
-            return false;
+            return IOExport::Failed;
         }
         ctx.release(); // ioExportDone owns it from here (fires exactly once)
-        return true;
+        return IOExport::Queued;
+    }
+
+    // PSO1 (PRV1 §3): reserve a FREE slot (never READY, CURRENT or a slot
+    // whose last GL read is outstanding), export into it, and let the
+    // completion handler publish it READY. Same export call and sizes as the
+    // legacy path; only the slot choice and its release differ.
+    IOExport presentIOSurfaceOwned(uint64_t tick)
+    {
+        IOSurfacePool &pool = ioPool();
+        ps2x_present_own::Pool &own = ps2x_present_own::sharedPool();
+        const uint64_t now = ps2x::perflog::steadyNs();
+        uint64_t gen = 0u;
+        const int slot = own.reserve(&gen, now);
+        if (slot < 0)
+            return IOExport::NoSlot;
+        ps2x_present_own::witnessWrite(slot);
+        void *surface = nullptr;
+        uint64_t epoch = 0u;
+        uint64_t seq = 0u;
+        {
+            std::lock_guard<std::mutex> lock(pool.mutex);
+            // IX1: resize replaces only this FREE slot's surface; the old one
+            // stays alive for the process (createSurface).
+            if (!pool.surfaces[slot] ||
+                IOSurfaceGetWidth(static_cast<IOSurfaceRef>(pool.surfaces[slot])) != m_exportW ||
+                IOSurfaceGetHeight(static_cast<IOSurfaceRef>(pool.surfaces[slot])) != m_exportH)
+                pool.surfaces[slot] = ps2x_present_share::createSurface(m_exportW, m_exportH);
+            surface = pool.surfaces[slot];
+            epoch = pool.epoch;
+            seq = ++pool.seq;
+        }
+        if (!surface)
+        {
+            own.complete(slot, gen, false, {}, ps2x::perflog::steadyNs());
+            return IOExport::Failed;
+        }
+        std::unique_ptr<IOSurfaceExportCtx> ctx(new IOSurfaceExportCtx{epoch, slot, tick, now, gen, seq});
+        const int rc = m_ge1.exportIOSurface(surface, m_exportW, m_exportH, &ioExportDone, ctx.get());
+        if (rc != 1)
+        {
+            own.complete(slot, gen, false, {}, ps2x::perflog::steadyNs());
+            return IOExport::Failed;
+        }
+        ctx.release(); // ioExportDone owns it from here (fires exactly once)
+        return IOExport::Queued;
     }
 #endif
 

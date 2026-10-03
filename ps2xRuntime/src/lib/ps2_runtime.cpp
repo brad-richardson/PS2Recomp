@@ -40,6 +40,7 @@
 #include "runtime/gs/gs_stream_capture.h"
 #include "runtime/gs/ps2_gs_external_backend.h"
 #include "runtime/gs/ps2_present_share.h"
+#include "runtime/gs/ps2_present_owner.h"
 #include "runtime/gs/ps2_present_vk_ledger.h" // DP1: displayHz() (pure; same value on every platform)
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
@@ -2288,6 +2289,207 @@ static std::atomic<uint64_t> g_hr1LatchNs{0}, g_hr1UploadNs{0}, g_hr1Uploads{0};
 // HR1 spike (PS2X_PRESENT_ZERO_COPY=1 on iOS): the shared GLES texture to draw
 // instead of frameTex; id 0 = use frameTex.
 static Texture2D g_hr1ShareTex{};
+
+// PSO1 (PRV1 §3): presenter side of the shared-surface ownership. Main
+// (GL) thread only. The witness records the producer write count of the
+// slot whose pixels are being shown; a change before the read is submitted
+// (both modes) or before its fence completes (ownership) is an unsafe reuse.
+namespace pso1
+{
+struct Stress
+{
+    uint32_t everyN = 0u;   // delay every Nth newly acquired frame (0 = off)
+    uint32_t delayMs = 0u;  // after acquisition, before the quad is submitted
+    uint32_t retireEvery = 1u; // poll read fences every Nth host iteration
+};
+static Stress stressFromEnv()
+{
+    Stress st;
+    // PS2X_PRESENT_OWN_STRESS=<everyN>:<delayMs>[:<retireEvery>]
+    if (const char *v = std::getenv("PS2X_PRESENT_OWN_STRESS"))
+    {
+        unsigned a = 0u, b = 0u, c = 1u;
+        if (std::sscanf(v, "%u:%u:%u", &a, &b, &c) >= 2)
+        {
+            st.everyN = a;
+            st.delayMs = b;
+            st.retireEvery = c == 0u ? 1u : c;
+        }
+    }
+    return st;
+}
+static const Stress &stress()
+{
+    static const Stress st = stressFromEnv();
+    return st;
+}
+static int g_shownSlot = -1;          // slot of the frame being drawn (witness)
+static uint64_t g_shownWrites = 0u;   // its producer write count at acquisition
+static uint64_t g_shownSeq = 0u;
+static bool g_shownNew = false;       // this iteration acquired a new frame
+static uint64_t g_shownTick = 0u;
+static uint64_t g_newAcquires = 0u;
+static uint64_t g_pendingSlotFence = 0u; // last read's fence (ownership)
+static int g_pendingSlot = -1;
+static uint64_t g_pendingWrites = 0u;
+static uint64_t g_unsafeAtDraw = 0u;  // slot rewritten between acquire and draw
+static uint64_t g_unsafeAtRetire = 0u;// slot rewritten before the read's fence completed
+static uint64_t g_stressDelays = 0u;
+static uint64_t g_iter = 0u;
+static uint64_t g_lastLogNs = 0u;
+
+static bool logOn()
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_PRESENT_OWN_LOG");
+        if (v && *v)
+            return std::strcmp(v, "1") == 0;
+        return ps2x_present_share::ownershipEnabled() || stress().everyN != 0u;
+    }();
+    return on;
+}
+
+static void noteShown(int slot, uint64_t seq, uint64_t tick)
+{
+    g_shownNew = (seq != g_shownSeq) || slot != g_shownSlot;
+    if (g_shownNew)
+    {
+        g_shownSlot = slot;
+        g_shownSeq = seq;
+        g_shownTick = tick;
+        g_shownWrites = ps2x_present_own::witnessWrites(slot);
+        ++g_newAcquires;
+    }
+}
+
+// Poll read fences (ownership only) and retire the slots they cover.
+static void pollRetire()
+{
+    if (!ps2x_present_share::ownershipEnabled())
+        return;
+    ++g_iter;
+    if (stress().retireEvery > 1u && (g_iter % stress().retireEvery) != 0u)
+        return;
+    const uint64_t done = ps2x_present_share::pollReadFences();
+    if (g_pendingSlot >= 0 && done >= g_pendingSlotFence)
+    {
+        if (ps2x_present_own::witnessWrites(g_pendingSlot) != g_pendingWrites)
+            ++g_unsafeAtRetire;
+        g_pendingSlot = -1;
+    }
+    ps2x_present_own::sharedPool().retireReadsThrough(done, ps2x::perflog::steadyNs());
+}
+
+// Before the shared quad is submitted (stress delay + draw-time witness).
+static void beforeDraw()
+{
+    if (g_shownNew && stress().everyN != 0u && (g_newAcquires % stress().everyN) == 0u)
+    {
+        ++g_stressDelays;
+        std::this_thread::sleep_for(std::chrono::milliseconds(stress().delayMs));
+    }
+}
+
+// After the shared quad's batch flush: draw-time witness, read fence.
+static void afterDraw()
+{
+    if (g_shownSlot >= 0 && ps2x_present_own::witnessWrites(g_shownSlot) != g_shownWrites)
+        ++g_unsafeAtDraw;
+    if (!ps2x_present_share::ownershipEnabled())
+        return;
+    const uint64_t fence = ps2x_present_share::submitReadFence();
+    ps2x_present_own::sharedPool().noteRead(fence, ps2x::perflog::steadyNs());
+    g_pendingSlot = g_shownSlot;
+    g_pendingSlotFence = fence;
+    g_pendingWrites = g_shownWrites;
+}
+
+static void maybeLog(bool force = false)
+{
+    if (!logOn())
+        return;
+    const uint64_t now = ps2x::perflog::steadyNs();
+    if (!force && now - g_lastLogNs < 10'000'000'000ull)
+        return;
+    g_lastLogNs = now;
+    const ps2x_present_own::Counters c = ps2x_present_own::sharedPool().counters();
+    const ps2x_present_share::FenceStats f = ps2x_present_share::fenceStats();
+    std::vector<uint64_t> produce, readyAge, hold, readLat;
+    for (const ps2x_present_own::FrameTimes &t : ps2x_present_own::sharedPool().times())
+    {
+        if (t.completeNs > t.reserveNs && t.reserveNs)
+            produce.push_back(t.completeNs - t.reserveNs);
+        if (t.acquireNs > t.completeNs && t.completeNs)
+            readyAge.push_back(t.acquireNs - t.completeNs);
+        if (t.freeNs > t.acquireNs && t.acquireNs)
+            hold.push_back(t.freeNs - t.acquireNs);
+        if (t.freeNs > t.lastReadNs && t.lastReadNs)
+            readLat.push_back(t.freeNs - t.lastReadNs);
+    }
+    auto us = [](uint64_t ns) { return static_cast<unsigned long long>(ns / 1000u); };
+    using ps2x_present_own::percentile;
+    std::fprintf(stderr,
+                 "[present-own] own=%d gen=%llu reserves=%llu noslot=%llu ok=%llu failed=%llu stale=%llu ooo=%llu "
+                 "superseded=%llu acquires=%llu repeats=%llu reads=%llu retired=%llu retired_now=%llu "
+                 "pool_unsafe=%llu unsafe_draw=%llu unsafe_retire=%llu new_frames=%llu stress_delays=%llu "
+                 "fences=%llu/%llu pending=%llu fence_fail=%llu finish=%llu overflow_finish=%llu apple_sync=%d "
+                 "produce_us p50=%llu max=%llu ready_age_us p50=%llu max=%llu hold_us p50=%llu p99=%llu "
+                 "read_retire_us p50=%llu p99=%llu max=%llu n=%zu\n",
+                 ps2x_present_share::ownershipEnabled() ? 1 : 0, (unsigned long long)c.generation,
+                 (unsigned long long)c.reserves, (unsigned long long)c.noSlot, (unsigned long long)c.completesOk,
+                 (unsigned long long)c.completesFailed, (unsigned long long)c.staleGen,
+                 (unsigned long long)c.outOfOrder, (unsigned long long)c.superseded,
+                 (unsigned long long)c.acquires, (unsigned long long)c.repeats, (unsigned long long)c.reads,
+                 (unsigned long long)c.retired, (unsigned long long)c.retiredImmediate,
+                 (unsigned long long)c.unsafe, (unsigned long long)g_unsafeAtDraw,
+                 (unsigned long long)g_unsafeAtRetire, (unsigned long long)g_newAcquires,
+                 (unsigned long long)g_stressDelays, (unsigned long long)f.completed,
+                 (unsigned long long)f.submitted, (unsigned long long)f.pending, (unsigned long long)f.failures,
+                 (unsigned long long)f.finishFallbacks, (unsigned long long)f.overflowFinishes, f.appleSync ? 1 : 0,
+                 us(percentile(produce, 0.5)), us(percentile(produce, 1.0)), us(percentile(readyAge, 0.5)),
+                 us(percentile(readyAge, 1.0)), us(percentile(hold, 0.5)), us(percentile(hold, 0.99)),
+                 us(percentile(readLat, 0.5)), us(percentile(readLat, 0.99)), us(percentile(readLat, 1.0)),
+                 produce.size());
+}
+
+// Diagnostic (PS2X_PRESENT_CAPTURE_TICKS=a,b,c + PS2X_PRESENT_CAPTURE_DIR):
+// read the final drawable back for every distinct shown guest tick in
+// [t, t + PS2X_PRESENT_CAPTURE_SPAN) (default 8), before the swap.
+static void maybeCapture()
+{
+    static const char *dir = std::getenv("PS2X_PRESENT_CAPTURE_DIR");
+    if (!dir || !*dir || g_shownSlot < 0 || !g_shownNew)
+        return;
+    static const std::vector<uint64_t> targets = [] {
+        std::vector<uint64_t> t;
+        if (const char *v = std::getenv("PS2X_PRESENT_CAPTURE_TICKS"))
+        {
+            std::stringstream ss(v);
+            std::string item;
+            while (std::getline(ss, item, ','))
+                t.push_back(std::strtoull(item.c_str(), nullptr, 10));
+        }
+        return t;
+    }();
+    static const uint64_t span = [] {
+        const char *v = std::getenv("PS2X_PRESENT_CAPTURE_SPAN");
+        return v ? std::strtoull(v, nullptr, 10) : 8ull;
+    }();
+    for (uint64_t t : targets)
+    {
+        if (g_shownTick >= t && g_shownTick < t + span)
+        {
+            rlDrawRenderBatchActive();
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            const std::string path = std::string(dir) + "/cap-t" + std::to_string(t) + "-g" +
+                                     std::to_string(g_shownTick) + ".ppm";
+            ps2x_present_share::captureDrawable(GetRenderWidth(), GetRenderHeight(), path.c_str());
+            return;
+        }
+    }
+}
+} // namespace pso1
 #endif
 
 #if defined(__APPLE__)
@@ -2518,14 +2720,48 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     }
 #endif
 #if defined(PS2X_IOS)
-    if (ps2x_present_share::enabled())
+    if (ps2x_present_share::enabled() && ps2x_present_share::ownershipEnabled())
     {
+        // PSO1: retire completed reads, then atomically acquire the newest
+        // READY frame (or repeat CURRENT). The slot stays reserved until a
+        // newer frame replaces it and its last read's fence completes.
+        pso1::pollRetire();
+        pso1::maybeLog();
+        ps2x_present_own::FrameInfo info;
+        int slot = -1;
+        if (ps2x_present_own::sharedPool().acquire(&info, &slot, ps2x::perflog::steadyNs()) !=
+            ps2x_present_own::Acquire::None)
+        {
+            const ps2x_present_share::SharedFrame shared{info.surface, info.width,       info.height, info.seq,
+                                                         info.tick,    info.submitWallNs, slot};
+            const unsigned int id = ps2x_present_share::acquireTexture(shared);
+            if (id != 0u)
+            {
+                g_hr1ShareTex = Texture2D{id, static_cast<int>(shared.width), static_cast<int>(shared.height), 1,
+                                          PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                pso1::noteShown(slot, shared.seq, shared.tick);
+                outWidth = s_lastWidth = shared.width;
+                outHeight = s_lastHeight = shared.height;
+                s_hasUploadedFrame = true;
+                // PL3: guest tick through the mailbox (see SharedFrame).
+                ps2x::perflog::noteFrameAvailable(shared.tick, shared.submitWallNs, shared.seq);
+                return;
+            }
+            ps2x_present_own::sharedPool().dropCurrent(ps2x::perflog::steadyNs());
+        }
+        g_hr1ShareTex = Texture2D{};
+        pso1::g_shownSlot = -1;
+    }
+    else if (ps2x_present_share::enabled())
+    {
+        pso1::maybeLog();
         ps2x_present_share::SharedFrame shared;
         if (ps2x_present_share::latest(shared))
         {
             const unsigned int id = ps2x_present_share::acquireTexture(shared);
             if (id != 0u)
             {
+                pso1::noteShown(shared.slot, shared.seq, shared.tick);
                 g_hr1ShareTex = Texture2D{id, static_cast<int>(shared.width), static_cast<int>(shared.height), 1,
                                           PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
                 outWidth = s_lastWidth = shared.width;
@@ -6730,8 +6966,10 @@ void PS2Runtime::run()
                                      std::floor((renderH - srcHeight) * 0.5f) / dpiScale, srcWidth / dpiScale,
                                      srcHeight / dpiScale};
             }
+            pso1::beforeDraw();
             DrawTexturePro(g_hr1ShareTex, srcRect, shareDst, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
             rlDrawRenderBatchActive();
+            pso1::afterDraw();
             rlEnableColorBlend();
         }
         else
@@ -6902,6 +7140,10 @@ void PS2Runtime::run()
         }
         if (!skipGl)
         {
+#if defined(PS2X_IOS)
+            if (g_hr1ShareTex.id != 0u)
+                pso1::maybeCapture();
+#endif
             EndDrawing();
             if (perfLog)
             {

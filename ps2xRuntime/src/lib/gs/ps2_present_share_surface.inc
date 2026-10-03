@@ -1,5 +1,5 @@
 // HR1: shared by ps2_present_share_mac.cpp and ps2_present_share_ios.mm.
-// Needs <CoreVideo/CoreVideo.h> and <unordered_map> included before it.
+// Needs <CoreVideo/CoreVideo.h>, <mutex> and <unordered_map> included before it.
 namespace ps2x_present_share
 {
 namespace
@@ -7,6 +7,13 @@ namespace
 std::unordered_map<void *, CVPixelBufferRef> &pixelBuffers()
 {
     static std::unordered_map<void *, CVPixelBufferRef> m;
+    return m;
+}
+// PSO1 (PRV1 §2): createSurface (GS worker, slot creation/resize) and
+// pixelBufferFor (main thread, texture acquisition) can overlap.
+std::mutex &pixelBuffersMutex()
+{
+    static std::mutex m;
     return m;
 }
 } // namespace
@@ -32,12 +39,16 @@ void *createSurface(uint32_t width, uint32_t height)
     std::fprintf(stderr, "[present-share] surface %ux%u rc=%d surface=%p\n", width, height, rc, (void *)surface);
     if (!surface)
         return nullptr;
-    pixelBuffers()[surface] = pb; // retained for the process (prototype)
+    {
+        std::lock_guard<std::mutex> lock(pixelBuffersMutex());
+        pixelBuffers()[surface] = pb; // retained for the process (prototype)
+    }
     return surface;
 }
 
 void *pixelBufferFor(void *surface)
 {
+    std::lock_guard<std::mutex> lock(pixelBuffersMutex());
     auto it = pixelBuffers().find(surface);
     return it == pixelBuffers().end() ? nullptr : it->second;
 }

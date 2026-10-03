@@ -14,6 +14,10 @@
 #include <TargetConditionals.h>
 
 #include <cstdio>
+#include <cstring>
+#include <deque>
+#include <mutex>
+#include <vector>
 #include <unordered_map>
 
 #include "ps2_present_share_surface.inc"
@@ -87,4 +91,130 @@ bool blitToTexture(const SharedFrame &, unsigned int)
 }
 
 void dumpTexture(unsigned int, int, int, uint32_t, uint32_t, const char *) {}
+
+// PSO1: presenter read fences (GL_APPLE_sync on the EAGL GLES2 context).
+namespace
+{
+struct PendingFence
+{
+    uint64_t seq;
+    GLsync sync;
+};
+std::deque<PendingFence> g_fences;
+uint64_t g_fenceSeq = 0u;
+uint64_t g_fenceDone = 0u;
+FenceStats g_fenceStats;
+int g_appleSync = -1; // -1 unknown, 0 no, 1 yes
+constexpr size_t kMaxPendingFences = 8u; // bounded: a stuck stream glFinishes
+
+bool haveAppleSync()
+{
+    if (g_appleSync < 0)
+    {
+        const char *ext = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
+        g_appleSync = (ext && std::strstr(ext, "GL_APPLE_sync")) ? 1 : 0;
+        g_fenceStats.appleSync = g_appleSync == 1;
+        std::fprintf(stderr, "[present-own] GL_APPLE_sync=%d\n", g_appleSync);
+    }
+    return g_appleSync == 1;
+}
+
+// glFinish completes every earlier command on this stream: all reads done.
+void finishAll()
+{
+    glFinish();
+    for (PendingFence &f : g_fences)
+        glDeleteSyncAPPLE(f.sync);
+    g_fences.clear();
+    g_fenceDone = g_fenceSeq;
+}
+} // namespace
+
+uint64_t submitReadFence()
+{
+    const uint64_t seq = ++g_fenceSeq;
+    ++g_fenceStats.submitted;
+    if (!haveAppleSync())
+    {
+        ++g_fenceStats.finishFallbacks;
+        finishAll();
+        return seq;
+    }
+    if (g_fences.size() >= kMaxPendingFences)
+    {
+        ++g_fenceStats.overflowFinishes;
+        finishAll();
+        return seq;
+    }
+    GLsync sync = glFenceSyncAPPLE(GL_SYNC_GPU_COMMANDS_COMPLETE_APPLE, 0);
+    if (!sync)
+    {
+        ++g_fenceStats.failures;
+        finishAll();
+        return seq;
+    }
+    g_fences.push_back({seq, sync});
+    return seq;
+}
+
+uint64_t pollReadFences()
+{
+    while (!g_fences.empty())
+    {
+        PendingFence &f = g_fences.front();
+        const GLenum r = glClientWaitSyncAPPLE(f.sync, GL_SYNC_FLUSH_COMMANDS_BIT_APPLE, 0);
+        if (r == GL_ALREADY_SIGNALED_APPLE || r == GL_CONDITION_SATISFIED_APPLE)
+        {
+            glDeleteSyncAPPLE(f.sync);
+            g_fenceDone = f.seq;
+            ++g_fenceStats.completed;
+            g_fences.pop_front();
+            continue;
+        }
+        if (r == GL_WAIT_FAILED_APPLE)
+        {
+            // Never treat a failed query as completion: finish the stream.
+            ++g_fenceStats.failures;
+            finishAll();
+        }
+        break; // GL_TIMEOUT_EXPIRED_APPLE: later fences are later still
+    }
+    g_fenceStats.pending = g_fences.size();
+    return g_fenceDone;
+}
+
+FenceStats fenceStats()
+{
+    FenceStats s = g_fenceStats;
+    s.pending = g_fences.size();
+    return s;
+}
+
+bool captureDrawable(int width, int height, const char *path)
+{
+    if (width <= 0 || height <= 0)
+        return false;
+    std::vector<uint8_t> px(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    FILE *f = std::fopen(path, "wb");
+    if (!f)
+        return false;
+    std::fprintf(f, "P6\n%d %d\n255\n", width, height);
+    std::vector<uint8_t> row(static_cast<size_t>(width) * 3u);
+    for (int y = height - 1; y >= 0; --y) // GL rows are bottom-up
+    {
+        const uint8_t *src = &px[static_cast<size_t>(y) * static_cast<size_t>(width) * 4u];
+        for (int x = 0; x < width; ++x)
+        {
+            row[static_cast<size_t>(x) * 3u + 0u] = src[x * 4 + 0];
+            row[static_cast<size_t>(x) * 3u + 1u] = src[x * 4 + 1];
+            row[static_cast<size_t>(x) * 3u + 2u] = src[x * 4 + 2];
+        }
+        std::fwrite(row.data(), 1u, row.size(), f);
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[present-own] captured %dx%d -> %s\n", width, height, path);
+    return true;
+}
 } // namespace ps2x_present_share

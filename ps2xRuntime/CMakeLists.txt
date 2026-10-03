@@ -632,6 +632,7 @@ endif()
 add_library(ps2_gs_shadow STATIC
     src/lib/gs/ps2_present_share.cpp # HR1 shared-frame mailbox (PS2X_PRESENT_ZERO_COPY; iOS GE1 export)
     src/lib/gs/ps2_present_vk_ledger.cpp # VK2: Android Vulkan present bookkeeping (pure, unit-tested)
+    src/lib/gs/ps2_present_owner.cpp # PSO1: iOS shared-surface ownership (pure, unit-tested)
 )
 # HR1 prototype: GL side of PS2X_PRESENT_ZERO_COPY (macOS desktop only).
 if(APPLE AND NOT PS2X_IS_IOS)
