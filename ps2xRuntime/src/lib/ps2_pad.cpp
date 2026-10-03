@@ -157,19 +157,11 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
 
     // IN2: the latch path takes the render-thread-published mask (port 0
     // consumes one presented mask per guest read; other ports follow live
-    // without advancing it). PS2X_PAD_LATCH=0 keeps the pre-IN2 direct
-    // sampling (raylib buttons + liveMask) for A/B.
-    if (ps2x::padlatch::latchEnabled())
+    // without advancing it).
     {
         const uint16_t latched = (port == 0) ? ps2x::padlatch::sharedLatch().consume()
                                              : ps2x::padlatch::sharedLatch().peekLive();
         btns &= static_cast<uint16_t>(~latched);
-    }
-    else
-    {
-        btns &= static_cast<uint16_t>(~ray.pressed);
-        // I26: on-screen virtual controls (iOS overlay; always 0 elsewhere).
-        btns &= static_cast<uint16_t>(~ps2x::vpad::liveMask().load(std::memory_order_relaxed));
     }
 
     // I32: the virtual analog stick overrides the left stick while the

@@ -2797,8 +2797,8 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
                                                    &sourceFbp,
                                                    &usedPreferredDisplaySource))
     {
-        // I26: black while no guest frame exists (was magenta); PS2X_FALLBACK_MAGENTA=1 restores it (dev only).
-        static const ps2x::FallbackRgba s_fallback = ps2x::fallbackFrameColorFromEnv();
+        // I26: black while no guest frame exists.
+        static const ps2x::FallbackRgba s_fallback = ps2x::fallbackFrameColor();
         Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, Color{s_fallback.r, s_fallback.g, s_fallback.b, s_fallback.a});
         dumpPresentationFrame(static_cast<const uint8_t *>(blank.data), FB_WIDTH, FB_HEIGHT, currentTick, 0u,
                               0u, false, true, rt->memory().gs().smode2, rt->memory().gs().pmode,
@@ -6781,12 +6781,10 @@ void PS2Runtime::run()
         // IN2: the render thread publishes the vpad + raylib button union
         // to the pad latch every host frame (host ~60 Hz vs guest reads at
         // guest speed); readState consumes one presented mask per guest
-        // read. PS2X_PAD_LATCH=0 keeps the pre-IN2 liveMask publish.
-        const bool padLatchOn = ps2x::padlatch::latchEnabled();
+        // read.
         const uint16_t ds1RawPressed = ps2xSampleRaylibPad().pressed;
-        uint16_t raylibPressed = padLatchOn ? ds1RawPressed : 0u;
-        // DS1: quick-save/load chord, edge-triggered (the shell action runs
-        // even when the latch is off). The chord is stripped from the guest
+        uint16_t raylibPressed = ds1RawPressed;
+        // DS1: quick-save/load chord, edge-triggered. The chord is stripped from the guest
         // mask while engaged, so the game never sees it. Inert without a
         // physical gamepad (det boots unaffected: no buttons, no edges).
         {
@@ -6828,10 +6826,7 @@ void PS2Runtime::run()
             // IN4: touch-source layer (transition only, zero cost off).
             ps2x::inputdiag::noteVpad(pressed, m_memory.gs().vsyncTick.load());
             pressed = static_cast<uint16_t>(pressed | ps2x::vpad::activeTestTap(vpadTestTaps, ps2x::padlatch::wallMs()));
-            if (padLatchOn)
-                publishPad(static_cast<uint16_t>(pressed | raylibPressed), m_memory.gs().vsyncTick.load());
-            else
-                ps2x::vpad::liveMask().store(pressed, std::memory_order_relaxed);
+            publishPad(static_cast<uint16_t>(pressed | raylibPressed), m_memory.gs().vsyncTick.load());
             ps2x::vpad::StickVec stick = vpadFrame.stick;
             if (vpadTestStick)
             {
@@ -6862,13 +6857,10 @@ void PS2Runtime::run()
         }
         else if (vpadWanted)
         {
-            if (padLatchOn)
-                publishPad(raylibPressed, m_memory.gs().vsyncTick.load());
-            else
-                ps2x::vpad::liveMask().store(0u, std::memory_order_relaxed);
+            publishPad(raylibPressed, m_memory.gs().vsyncTick.load());
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
         }
-        else if (padLatchOn)
+        else
         {
             // Overlay off (desktop default): raylib buttons still feed the latch.
             publishPad(raylibPressed, m_memory.gs().vsyncTick.load());

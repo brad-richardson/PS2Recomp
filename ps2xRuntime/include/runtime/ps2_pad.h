@@ -14,8 +14,7 @@ public:
 };
 
 // IN2: raylib gamepad/keyboard button selection + sampling, shared by the
-// render-thread latch publisher (PS2Runtime::run) and the PS2X_PAD_LATCH=0
-// readState path. `pressed` is active-high PS2 button bits (1 = pressed).
+// render-thread latch publisher (PS2Runtime::run) and readState. `pressed` is active-high PS2 button bits (1 = pressed).
 struct PSRaylibPadSample
 {
     uint16_t pressed = 0u;

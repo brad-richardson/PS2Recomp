@@ -234,53 +234,14 @@ static int hostTimezoneOffsetMinutes()
 #endif
 }
 
-// Strict decimal-minutes parse for PS2X_TIMEZONE_MINUTES: optional '-',
-// 1+ digits, nothing else. Fails closed to 0 with one diagnostic.
-static int parseTimezoneOverrideMinutes(const char *value)
-{
-    static bool warned = false;
-    if (value == nullptr || value[0] == '\0')
-        return 0;
-    const char *p = value;
-    bool negative = false;
-    if (*p == '-')
-    {
-        negative = true;
-        ++p;
-    }
-    if (*p < '0' || *p > '9')
-        goto invalid;
-    {
-        long number = 0;
-        for (; *p >= '0' && *p <= '9'; ++p)
-        {
-            number = number * 10L + (*p - '0');
-            if (number > 100000L)
-                goto invalid;
-        }
-        if (*p != '\0')
-            goto invalid;
-        if (negative)
-            number = -number;
-        return static_cast<int>(number);
-    }
-invalid:
-    if (!warned)
-    {
-        warned = true;
-        std::fprintf(stderr, "[osd-tz] invalid PS2X_TIMEZONE_MINUTES; using 0\n");
-    }
-    return 0;
-}
-
 static int getTimezoneOffsetMinutes()
 {
     // LX1b: the OSD timezone leaked the host zone into deterministic runs
     // (Mac vs Linux split at det-hash tick 39). Pin it under deterministic
-    // mode; PS2X_TIMEZONE_MINUTES overrides with decimal minutes.
+    // mode (the PS2X_TIMEZONE_MINUTES override is deleted: always 0).
     const char *deterministic = std::getenv("PS2X_DETERMINISTIC");
     if (deterministic != nullptr && std::strcmp(deterministic, "1") == 0)
-        return parseTimezoneOverrideMinutes(std::getenv("PS2X_TIMEZONE_MINUTES"));
+        return 0;
     return hostTimezoneOffsetMinutes();
 }
 
