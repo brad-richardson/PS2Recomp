@@ -585,13 +585,6 @@ endif()
 # platforms, diag/det builds opt back in via the build scripts. The split120
 # product path (ps2_ts2_split60 rider-pass continuation) stays always-on
 # behind one runtime gate per hot path.
-option(PS2X_ENABLE_TS2_DIAG "Compile the TS3 case census (PS2X_TS2_CASE_COUNT)" OFF)
-if(PS2X_ENABLE_TS2_DIAG)
-    target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_TS2_DIAG=1)
-else()
-    target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_TS2_DIAG=0)
-endif()
-
 option(PS2X_ENABLE_DET_HASH_TAP "Compile the bounded deterministic VBlank XXH64 tap" OFF)
 if(PS2X_ENABLE_DET_HASH_TAP)
     target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DET_HASH_TAP=1)

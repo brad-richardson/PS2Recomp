@@ -2135,12 +2135,9 @@ inline void fh12OnReturn(uint8_t *ram)
 // PS2X_FH10_HIST=a-b[,c-d] (VBlank ticks, needs PS2X_FH1_TAP=1): counts every
 // dispatched call target inside each range and prints the counts when the
 // range ends, "fh10-hist range=a-b tgt=... n=...", largest first (1500 lines
-// per range; PS2X_FH10_HIST_MAX=n raises the cap). Comparing a crash, rail or meter window with a plain riding
+// per range). Comparing a crash, rail or meter window with a plain riding
 // window (or stock with events per stock second) names the functions that
 // run only there, or once per update.
-// PS2X_FH10_POKE=tick:addr:value[,...] (tick decimal, addr/value hex): writes
-// the 32-bit word at that VBlank (lab input, e.g. a full meter). It changes
-// the guest: lab boots only.
 struct Fh10Hist
 {
     std::vector<std::pair<uint64_t, uint64_t>> ranges;
@@ -2196,144 +2193,6 @@ inline void fh10HistBranch(uint32_t targetPc)
 
 inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 {
-    static const std::vector<std::array<uint64_t, 3>> pokes = [] {
-        std::vector<std::array<uint64_t, 3>> v;
-        const char *p = std::getenv("PS2X_FH10_POKE");
-        while (p && *p)
-        {
-            char *end = nullptr;
-            const uint64_t t = std::strtoull(p, &end, 10);
-            if (*end != ':') break;
-            const uint64_t a = std::strtoull(end + 1, &end, 16);
-            if (*end != ':') break;
-            const uint64_t val = std::strtoull(end + 1, &end, 16);
-            v.push_back({t, a, val});
-            if (*end != ',') break;
-            p = end + 1;
-        }
-        return v;
-    }();
-    for (const auto &k : pokes)
-        if (k[0] == tick)
-        {
-            uint32_t old = 0u;
-            rd32(ram, static_cast<uint32_t>(k[1]), old);
-            wr32(ram, static_cast<uint32_t>(k[1]), static_cast<uint32_t>(k[2]));
-            std::fprintf(stderr, "fh10-poke tick=%llu addr=%08llx old=%08x new=%08llx\n",
-                         static_cast<unsigned long long>(tick), static_cast<unsigned long long>(k[1]), old,
-                         static_cast<unsigned long long>(k[2]));
-        }
-    // PS2X_FH10_MONO=T1,...,Tk[:lo-hi] (k 3..8, ticks decimal, range hex): at Tk
-    // prints every word in [lo,hi) that changed strictly monotonically across
-    // the k snapshots, as a float (finite, |v| < 1e7) or as an int (|step| <=
-    // 4096): "fh10-mono addr=... f|i=v1,...,vk" (4000 lines). Finds ramps that
-    // aren't linear (meter fills, eased counters); compare two modes offline.
-    static struct Mono
-    {
-        std::vector<uint64_t> t;
-        uint32_t lo = 0u, hi = PS2_RAM_SIZE;
-        std::vector<std::vector<uint32_t>> snap;
-    } mono = [] {
-        Mono m;
-        const char *p = std::getenv("PS2X_FH10_MONO");
-        while (p && *p && m.t.size() < 8u)
-        {
-            char *end = nullptr;
-            m.t.push_back(std::strtoull(p, &end, 10));
-            if (*end == ':')
-            {
-                m.lo = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
-                if (*end == '-') m.hi = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
-                break;
-            }
-            if (*end != ',') break;
-            p = end + 1;
-        }
-        if (m.t.size() < 3u)
-            m.t.clear();
-        m.hi = std::min<uint32_t>(m.hi, PS2_RAM_SIZE);
-        return m;
-    }();
-    for (size_t k = 0; k < mono.t.size(); ++k)
-    {
-        if (mono.t[k] != tick)
-            continue;
-        mono.snap.emplace_back((mono.hi - mono.lo) / 4u);
-        std::memcpy(mono.snap.back().data(), ram + mono.lo, mono.snap.back().size() * 4u);
-        if (k + 1u != mono.t.size() || mono.snap.size() != mono.t.size())
-            continue;
-        uint32_t hits = 0u;
-        const size_t n = mono.snap[0].size(), K = mono.snap.size();
-        for (size_t i = 0; i < n && hits < 4000u; ++i)
-        {
-            bool fUp = true, fDn = true, iUp = true, iDn = true, fin = true;
-            for (size_t j = 0; j < K; ++j)
-            {
-                float f = 0.0f;
-                std::memcpy(&f, &mono.snap[j][i], 4);
-                fin = fin && std::isfinite(f) && std::fabs(f) < 1e7f;
-            }
-            for (size_t j = 1; j < K; ++j)
-            {
-                float a = 0.0f, b = 0.0f;
-                std::memcpy(&a, &mono.snap[j - 1][i], 4);
-                std::memcpy(&b, &mono.snap[j][i], 4);
-                fUp = fUp && b > a;
-                fDn = fDn && b < a;
-                const int64_t d = static_cast<int64_t>(static_cast<int32_t>(mono.snap[j][i])) -
-                                  static_cast<int32_t>(mono.snap[j - 1][i]);
-                iUp = iUp && d > 0 && d <= 4096;
-                iDn = iDn && d < 0 && d >= -4096;
-            }
-            const bool asFloat = fin && (fUp || fDn), asInt = iUp || iDn;
-            if (!asFloat && !asInt)
-                continue;
-            ++hits;
-            char line[512];
-            int w = std::snprintf(line, sizeof(line), "fh10-mono addr=%08zx %s=", mono.lo + i * 4u, asFloat ? "f" : "i");
-            for (size_t j = 0; j < K; ++j)
-            {
-                float f = 0.0f;
-                std::memcpy(&f, &mono.snap[j][i], 4);
-                w += asFloat ? std::snprintf(line + w, sizeof(line) - w, "%s%.6g", j ? "," : "", f)
-                             : std::snprintf(line + w, sizeof(line) - w, "%s%d", j ? "," : "",
-                                             static_cast<int32_t>(mono.snap[j][i]));
-            }
-            std::fprintf(stderr, "%s\n", line);
-        }
-        std::fprintf(stderr, "fh10-mono done hits=%u\n", hits);
-        mono.snap.clear();
-    }
-    // PS2X_FH10_DUMP=dir:T1,T2,... (ticks decimal, up to 64): writes RDRAM as
-    // <dir>/ram-<tick>.bin at those VBlanks, for offline scans (32 MiB each).
-    static const std::pair<std::string, std::vector<uint64_t>> dump = [] {
-        std::pair<std::string, std::vector<uint64_t>> d;
-        const char *p = std::getenv("PS2X_FH10_DUMP");
-        const char *colon = p ? std::strchr(p, ':') : nullptr;
-        if (!colon)
-            return d;
-        d.first.assign(p, colon);
-        p = colon + 1;
-        while (*p && d.second.size() < 64u)
-        {
-            char *end = nullptr;
-            d.second.push_back(std::strtoull(p, &end, 10));
-            if (*end != ',') break;
-            p = end + 1;
-        }
-        return d;
-    }();
-    for (const uint64_t t : dump.second)
-        if (t == tick)
-        {
-            const std::string path = dump.first + "/ram-" + std::to_string(tick) + ".bin";
-            if (FILE *f = std::fopen(path.c_str(), "wb"))
-            {
-                std::fwrite(ram, 1, PS2_RAM_SIZE, f);
-                std::fclose(f);
-                std::fprintf(stderr, "fh10-dump tick=%llu path=%s\n", static_cast<unsigned long long>(tick), path.c_str());
-            }
-        }
     Fh10Hist &h = fh10Hist();
     for (const auto &r : h.ranges)
     {
@@ -2346,10 +2205,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
         std::sort(out.begin(), out.end(), [](const auto &x, const auto &y) {
             return x.first != y.first ? x.first > y.first : x.second < y.second;
         });
-        static const size_t maxLines = [] {
-            const char *m = std::getenv("PS2X_FH10_HIST_MAX"); // FH13: full list when set
-            return (m && *m) ? static_cast<size_t>(std::strtoul(m, nullptr, 10)) : size_t{1500u};
-        }();
+        static const size_t maxLines = size_t{1500u};
         size_t lines = 0u;
         for (const auto &e : out)
         {

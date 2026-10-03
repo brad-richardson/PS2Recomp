@@ -3341,13 +3341,9 @@ void PS2Memory::unitGsCall(uint8_t marker, uint64_t value, std::function<void()>
     {
         ps2_mtvu::gifStageCall([marker, value, fn = std::move(fn)]()
                                {
-                                   if (ps2_gif_digest::enabled())
-                                       ps2_gif_digest::mixMarker(marker, value);
                                    fn(); });
         return;
     }
-    if (ps2_gif_digest::enabled())
-        ps2_gif_digest::mixMarker(marker, value);
     fn();
 }
 

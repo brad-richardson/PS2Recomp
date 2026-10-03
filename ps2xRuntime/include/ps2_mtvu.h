@@ -32,13 +32,7 @@
 //   - counts sync-point hits per reason, and the first sync after each job;
 //   - reports a touch() of unit-owned state on the EE thread after a job
 //     with no sync in between (VIOLATION lines: a threaded build would race);
-//   - with PS2X_MTVU_CENSUS_OUT=<file>, writes one event per line for the
-//     offline two-timeline model (tau = EE host ns with unit work removed):
-//       J <tau> <unit_ns> <d|f>   job (d = DMA kick, f = VIF1 FIFO write)
-//       S <tau> <reason> <detail> every sync hit (guest pc / address in hex;
-//                                 repeats with no job in between collapse)
-//       V <tau> <tick>            VBlankStart (always a sync)
-//     plus a summary line on stderr every 300 vsyncs.
+//   - plus a summary line on stderr every 300 vsyncs.
 
 #include <array>
 #include <atomic>
@@ -1597,8 +1591,6 @@ namespace ps2_mtvu
             uint64_t tick = 0;
             Reason lastReason = Reason::Count;
             uint32_t lastDetail = 0;
-            FILE *out = nullptr;
-            bool outTried = false;
             std::function<bool()> dtFallback;
             std::vector<uint8_t> scratch;
         };
@@ -1612,22 +1604,6 @@ namespace ps2_mtvu
         inline uint64_t tau()
         {
             return nowNs() - census().unitNs;
-        }
-
-        inline FILE *out()
-        {
-            Census &c = census();
-            if (!c.outTried)
-            {
-                c.outTried = true;
-                if (const char *path = std::getenv("PS2X_MTVU_CENSUS_OUT"))
-                {
-                    c.out = std::fopen(path, "w");
-                    if (c.out)
-                        std::setvbuf(c.out, nullptr, _IOFBF, 1u << 20);
-                }
-            }
-            return c.out;
         }
 
         inline void syncSlow(Reason r, uint32_t detail)
@@ -1644,8 +1620,6 @@ namespace ps2_mtvu
                 return;
             c.lastReason = r;
             c.lastDetail = detail;
-            if (FILE *f = out())
-                std::fprintf(f, "S %llu %s %x\n", static_cast<unsigned long long>(tau()), reasonName(r), detail);
         }
 
         inline void touchSlow(Site s)
@@ -2414,9 +2388,6 @@ namespace ps2_mtvu
             if (m_kind == 'f')
                 ++c.fifoJobs;
             c.dirty = true;
-            if (FILE *f = detail::out())
-                std::fprintf(f, "J %llu %llu %c\n", static_cast<unsigned long long>(m_tau),
-                             static_cast<unsigned long long>(m_ns), m_kind);
         }
         void pause()
         {
@@ -2512,13 +2483,6 @@ namespace ps2_mtvu
         detail::Census &c = detail::census();
         c.tick = tick;
         sync(Reason::VBlank);
-        if (FILE *f = detail::out())
-        {
-            std::fprintf(f, "V %llu %llu\n", static_cast<unsigned long long>(detail::tau()),
-                         static_cast<unsigned long long>(tick));
-            if ((tick % 60u) == 0u)
-                std::fflush(f);
-        }
         if ((tick % 300u) == 0u)
             detail::summary();
     }

@@ -959,16 +959,6 @@ public:
         if (m_ge1Active && iosPresentPerVsync())
             presentIOSurface(tick);
 #endif
-#if PS2X_ENABLE_DIAG_TAPS && defined(__ANDROID__)
-        if (m_ge1Active && m_frameCensus && (tick % 300u) == 0u)
-            std::fprintf(stderr, "[gs:frame-counts] tick=%llu processed=%llu "
-                                 "present_attempt=%llu export_started=%llu export_complete=%llu "
-                                 "queued=%llu no_slot=%llu\n",
-                         (unsigned long long)tick, (unsigned long long)m_stats.vsyncs,
-                         (unsigned long long)m_ahbAttempts, (unsigned long long)m_ahbExportStarted,
-                         (unsigned long long)m_ahbExportCompleted, (unsigned long long)m_ahbQueued,
-                         (unsigned long long)m_ahbNoSlot);
-#endif
         if (m_lastVsyncTick != 0u && tick != m_lastVsyncTick + 1u)
             ++m_stats.vsyncGaps;
         m_lastVsyncTick = tick;
@@ -1289,20 +1279,12 @@ private:
         if (m_pendingAhb < 0)
             return true;
         m_ge1.waitExport(m_pendingFence);
-#if PS2X_ENABLE_DIAG_TAPS
-        ++m_ahbExportCompleted;
-#endif
         AhbSlot &slot = m_ahbSlots[static_cast<size_t>(m_pendingAhb)];
-        dumpAhb(slot.buffer, m_pendingTick);
         const bool queued = ps2x_present_vk::queue(slot.id, m_exportW, m_exportH);
         m_pendingAhb = -1;
         m_pendingFence = 0u;
         if (!queued)
             ps2x_present_vk::fallBack("GE1 AHB queue failed");
-#if PS2X_ENABLE_DIAG_TAPS
-        if (queued)
-            ++m_ahbQueued;
-#endif
         return queued;
     }
 
@@ -1323,41 +1305,8 @@ private:
         }
     }
 
-    void dumpAhb(AHardwareBuffer *buffer, uint64_t tick)
-    {
-        if (tick != 2100u && tick != 3000u)
-            return;
-        const char *dir = std::getenv("PS2X_GS_AHB_DUMP_DIR");
-        if (!dir || !*dir)
-            return;
-        AHardwareBuffer_Desc desc = {};
-        AHardwareBuffer_describe(buffer, &desc);
-        void *mapped = nullptr;
-        if (AHardwareBuffer_lock(buffer, AHARDWAREBUFFER_USAGE_CPU_READ_RARELY, -1, nullptr, &mapped) != 0 || !mapped)
-        {
-            std::fprintf(stderr, "[gs:external] AHB dump lock failed tick=%llu\n", (unsigned long long)tick);
-            return;
-        }
-        const std::string path = std::string(dir) + "/ge1-ahb-t" + std::to_string(tick) + ".ppm";
-        FILE *file = std::fopen(path.c_str(), "wb");
-        if (file)
-        {
-            std::fprintf(file, "P6\n%u %u\n255\n", desc.width, desc.height);
-            const auto *src = static_cast<const uint8_t *>(mapped);
-            for (uint32_t y = 0; y < desc.height; ++y)
-                for (uint32_t x = 0; x < desc.width; ++x)
-                    std::fwrite(src + (static_cast<size_t>(y) * desc.stride + x) * 4u, 1, 3, file);
-            std::fclose(file);
-            std::fprintf(stderr, "[gs:external] AHB dump tick=%llu path=%s\n", (unsigned long long)tick, path.c_str());
-        }
-        AHardwareBuffer_unlock(buffer, nullptr);
-    }
-
     bool presentAhb(uint64_t tick)
     {
-#if PS2X_ENABLE_DIAG_TAPS
-        ++m_ahbAttempts;
-#endif
         if (m_ahbSlots[0].id && m_ahbEpoch != ps2x_present_vk::poolEpoch())
             retireAhbSlots();
         if (!queuePendingAhb())
@@ -1389,9 +1338,6 @@ private:
             ps2x_present_vk::pickReusable(ids, 4, m_ahbStart, unpacedPresent ? 0 : 1000);
         if (pick.index < 0)
         {
-#if PS2X_ENABLE_DIAG_TAPS
-            ++m_ahbNoSlot;
-#endif
             if (!unpacedPresent && pick.giveUp)
                 ps2x_present_vk::fallBack("GE1 AHB compositor release timeout");
             return false;
@@ -1408,15 +1354,9 @@ private:
             ps2x_present_vk::fallBack("GE1 GPU to AHB export failed");
             return false;
         }
-#if PS2X_ENABLE_DIAG_TAPS
-        ++m_ahbExportStarted;
-#endif
         m_pendingAhb = pick.index;
         m_pendingFence = fence;
         m_pendingTick = tick;
-        // Finish fixed-tick diagnostic exports before their stop boundary.
-        if (std::getenv("PS2X_GS_AHB_DUMP_DIR") && (tick == 2100u || tick == 3000u))
-            return queuePendingAhb();
         return true;
     }
 #endif
@@ -1616,14 +1556,6 @@ private:
     bool m_perVsyncLive = false; // FH6: GuestVsync presents (latch no longer exports)
     uint64_t m_pendingFence = 0u;
     uint64_t m_pendingTick = 0u;
-#if PS2X_ENABLE_DIAG_TAPS
-    const bool m_frameCensus = [] {
-        const char *flag = std::getenv("PS2X_GS_FRAME_CENSUS");
-        return flag != nullptr && std::strcmp(flag, "1") == 0;
-    }();
-    uint64_t m_ahbAttempts = 0, m_ahbExportStarted = 0;
-    uint64_t m_ahbExportCompleted = 0, m_ahbQueued = 0, m_ahbNoSlot = 0;
-#endif
 #endif
     uint8_t m_ge1LastPath = 3u;
     uint32_t m_ge1FifoBytes = 0u;

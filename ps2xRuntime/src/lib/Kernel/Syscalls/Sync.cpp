@@ -9,18 +9,6 @@ namespace ps2_syscalls
 {
     namespace
     {
-        // P1u CreateSema param/return census. Gated on PS2X_DIAG_SEMA_CREATE
-        // (unset/empty = compiled in, nothing printed, callers pay only a
-        // cached static check).
-        bool diagSemaCreateEnabled()
-        {
-            static const bool enabled = [] {
-                const char *env = std::getenv("PS2X_DIAG_SEMA_CREATE");
-                return env != nullptr && env[0] != '\0';
-            }();
-            return enabled;
-        }
-
         constexpr uint32_t WEF_OR = 0x01u;
         constexpr uint32_t WEF_CLEAR = 0x10u;
         constexpr uint32_t WEF_CLEAR_ALL = 0x20u;
@@ -91,12 +79,6 @@ namespace ps2_syscalls
             std::snprintf(dropArgs, sizeof(dropArgs), "param=0x%x", address);
             ps2_log::emitDrop("syscall/CreateSema", "KE_ERROR", dropArgs);
             setReturnS32(ctx, KE_ERROR);
-            if (diagSemaCreateEnabled())
-            {
-                std::cerr << "[diag:sema-create] tid=" << runtime->eeScheduler().currentThreadId() << " pc=0x"
-                          << std::hex << ctx->pc << " ra=0x" << getRegU32(ctx, 31) << std::dec << " param=0x"
-                          << std::hex << address << std::dec << " noparam ret=" << KE_ERROR << std::endl;
-            }
             return;
         }
 
@@ -106,14 +88,6 @@ namespace ps2_syscalls
         const int result =
             ee.createSemaphore(param->init_count, param->max_count, param->attr, param->option);
         setReturnS32(ctx, result);
-        if (diagSemaCreateEnabled())
-        {
-            std::cerr << "[diag:sema-create] tid=" << ee.currentThreadId() << " pc=0x" << std::hex << ctx->pc
-                      << " ra=0x" << getRegU32(ctx, 31) << std::dec << " param=0x" << std::hex << address << std::dec
-                      << " count=" << param->count << " max=" << param->max_count << " init=" << param->init_count
-                      << " wait=" << param->wait_threads << " attr=" << param->attr << " option=" << param->option
-                      << " ret=" << result << std::endl;
-        }
     }
 
     void DeleteSema(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

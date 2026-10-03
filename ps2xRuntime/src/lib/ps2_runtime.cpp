@@ -2726,32 +2726,6 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
             }
             if (ps2x_present_share::blitToTexture(shared, tex.id))
             {
-                // Diagnostic: PS2X_PRESENT_SHARE_DUMP_TICKS="a,b,c" + PS2X_FRAME_DUMP_DIR.
-                static std::vector<uint64_t> s_dumpTicks = [] {
-                    std::vector<uint64_t> ticks;
-                    if (const char *v = std::getenv("PS2X_PRESENT_SHARE_DUMP_TICKS"))
-                    {
-                        std::stringstream ss(v);
-                        std::string item;
-                        while (std::getline(ss, item, ','))
-                            ticks.push_back(std::strtoull(item.c_str(), nullptr, 10));
-                    }
-                    return ticks;
-                }();
-                const char *dumpDir = std::getenv("PS2X_FRAME_DUMP_DIR");
-                for (uint64_t &t : s_dumpTicks)
-                {
-                    if (t != 0u && dumpDir && currentTick >= t)
-                    {
-                        const std::string path = std::string(dumpDir) + "/share-t" + std::to_string(t) + "-at" +
-                                                 std::to_string(currentTick) + ".ppm";
-                        std::error_code ec;
-                        std::filesystem::create_directories(dumpDir, ec);
-                        ps2x_present_share::dumpTexture(tex.id, tex.width, tex.height, shared.width,
-                                                        shared.height, path.c_str());
-                        t = 0u;
-                    }
-                }
                 outWidth = s_lastWidth = shared.width;
                 outHeight = s_lastHeight = shared.height;
                 s_hasUploadedFrame = true;
@@ -4409,18 +4383,6 @@ std::string PS2Runtime::formatDispatchHistory() const
 
 namespace
 {
-    bool diagReportAll()
-    {
-        static const bool reportAll = [] {
-            if (const char *env = std::getenv("PS2X_DIAG_REPORT_ALL"))
-            {
-                return env[0] == '1' && env[1] == '\0';
-            }
-            return false;
-        }();
-        return reportAll;
-    }
-
     // CU4 B7: the PS2X_DIAG_DRIVER_PROBE tunable is deleted (stale CU1 S3
     // tap). The driver-entry probe never fires.
 
@@ -4448,7 +4410,7 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
         ++m_missingFunctionCounts[targetPc];
     }
     const bool firstReport = !m_missingFunctionReported.exchange(true, std::memory_order_acq_rel);
-    const bool shouldPrint = policy == MissingFunctionPolicy::Stop || firstReport || diagReportAll();
+    const bool shouldPrint = policy == MissingFunctionPolicy::Stop || firstReport;
 
     const uint32_t pc = ctx->pc;
     const uint32_t ra = static_cast<uint32_t>(_mm_extract_epi32(ctx->r[31], 0));
@@ -4795,21 +4757,6 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
             return true;
         }
     }
-    // TS3: opt-in case/callback census, observation only, stock and split
-    // modes. In release builds the gate is a constant false and folds away.
-    if (ps2_ts2_split60::caseCountEnabled())
-    {
-        ps2_ts2_split60::noteTs3Counts(rdram, ctx, sourcePc, targetPc,
-            kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall,
-            kind == GuestBranchKind::IndirectCall || kind == GuestBranchKind::IndirectJump,
-            m_memory.gs().vsyncTick.load());
-    }
-    // HL1: halfLoad call census. Env-gated (unlike the TS3 census it stays
-    // live where TS2_DIAG compiles out).
-    if (ps2_ts2_split60::countEnabled())
-    {
-        ps2_ts2_split60::countTick(m_memory.gs().vsyncTick.load(std::memory_order_relaxed));
-    }
     // FH1: full120 manager patch at the init hook + env-only tap counts.
     if ((ps2_fh1::enabled() || ps2_fh1::tapOn()) && ps2_fh1::onBranch(rdram, ctx, sourcePc, targetPc))
     {
@@ -5003,146 +4950,11 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
                        exception == EXCEPTION_TLB_REFILL);
 }
 
-// VR3: dev-only VU0 census (PS2X_VR3_VU0_CENSUS=1, default off; one static
-// branch per VU0 start when off). Per (code image, startPC): starts, VU0
-// cycles, budget hits; VU0 code-generation changes seen at a start (each one
-// rebuilds the decode cache) and whether the image bytes changed; wall time
-// split into entry (reset + copy in), run and exit (copy out). Cumulative
-// tables on stderr every 600 vsync ticks (FR1-R1 race window = 1800..2400).
-// PS2X_VR3_VU0_IMAGE_DUMP=<dir> also writes each distinct 4 KiB code image as
-// vu0_<xxh64>.bin (derived from game data: keep it outside the repo).
-namespace vr3_vu0_census
-{
-    bool enabled()
-    {
-        static const bool on = []
-        {
-            const char *value = std::getenv("PS2X_VR3_VU0_CENSUS");
-            return value != nullptr && value[0] == '1';
-        }();
-        return on;
-    }
-
-    struct ProgRow
-    {
-        uint64_t calls = 0;
-        uint64_t cycles = 0;
-        uint64_t maxCycles = 0;
-        uint64_t budgetHits = 0;
-    };
-
-    struct State
-    {
-        std::mutex mutex;
-        std::map<std::pair<uint64_t, uint32_t>, ProgRow> progs;
-        std::map<uint32_t, uint64_t> callers;
-        std::map<uint64_t, uint64_t> imageFirstTick;
-        uint64_t lastGeneration = ~0ull;
-        uint64_t hash = 0;
-        uint64_t calls = 0;
-        uint64_t vcallmsr = 0;
-        uint64_t generationChanges = 0;
-        uint64_t imageChanges = 0;
-        uint64_t nsEntry = 0;
-        uint64_t nsRun = 0;
-        uint64_t nsExit = 0;
-        uint64_t nextDumpTick = 600;
-    };
-
-    State &state()
-    {
-        static State s;
-        return s;
-    }
-
-    std::atomic<uint64_t> pendingVcallmsr{0};
-
-    uint64_t nowNs()
-    {
-        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                         std::chrono::steady_clock::now().time_since_epoch())
-                                         .count());
-    }
-
-    void note(const uint8_t *vu0Code, uint64_t generation, uint64_t tick, uint32_t startPC,
-              uint32_t caller, uint64_t cycles, uint64_t nsEntry, uint64_t nsRun, uint64_t nsExit)
-    {
-        State &s = state();
-        std::lock_guard<std::mutex> lock(s.mutex);
-        if (generation != s.lastGeneration)
-        {
-            ++s.generationChanges;
-            const uint64_t hash = XXH64(vu0Code, PS2_VU0_CODE_SIZE, 0);
-            if (hash != s.hash || s.lastGeneration == ~0ull)
-                ++s.imageChanges;
-            s.hash = hash;
-            s.lastGeneration = generation;
-            if (s.imageFirstTick.emplace(hash, tick).second)
-            {
-                static const char *dir = std::getenv("PS2X_VR3_VU0_IMAGE_DUMP");
-                if (dir != nullptr && dir[0] != '\0')
-                {
-                    char name[64];
-                    std::snprintf(name, sizeof(name), "/vu0_%016llx.bin",
-                                  static_cast<unsigned long long>(hash));
-                    std::ofstream out(std::string(dir) + name, std::ios::binary);
-                    out.write(reinterpret_cast<const char *>(vu0Code), PS2_VU0_CODE_SIZE);
-                }
-            }
-        }
-        ++s.calls;
-        s.vcallmsr += pendingVcallmsr.exchange(0, std::memory_order_relaxed);
-        ProgRow &row = s.progs[{s.hash, startPC}];
-        ++row.calls;
-        row.cycles += cycles;
-        row.maxCycles = std::max(row.maxCycles, cycles);
-        row.budgetHits += cycles >= 4096u ? 1u : 0u;
-        ++s.callers[caller];
-        s.nsEntry += nsEntry;
-        s.nsRun += nsRun;
-        s.nsExit += nsExit;
-        if (tick < s.nextDumpTick)
-            return;
-        s.nextDumpTick = (tick / 600u + 1u) * 600u;
-        uint64_t cyclesTotal = 0, budgetTotal = 0;
-        for (const auto &entry : s.progs)
-        {
-            cyclesTotal += entry.second.cycles;
-            budgetTotal += entry.second.budgetHits;
-        }
-        std::fprintf(stderr, "[vr3-vu0] tick=%llu calls=%llu vcallmsr=%llu gen_changes=%llu image_changes=%llu images=%zu progs=%zu cycles=%llu budget_hits=%llu ns_entry=%llu ns_run=%llu ns_exit=%llu\n",
-                     static_cast<unsigned long long>(tick), static_cast<unsigned long long>(s.calls),
-                     static_cast<unsigned long long>(s.vcallmsr),
-                     static_cast<unsigned long long>(s.generationChanges),
-                     static_cast<unsigned long long>(s.imageChanges), s.imageFirstTick.size(),
-                     s.progs.size(), static_cast<unsigned long long>(cyclesTotal),
-                     static_cast<unsigned long long>(budgetTotal),
-                     static_cast<unsigned long long>(s.nsEntry), static_cast<unsigned long long>(s.nsRun),
-                     static_cast<unsigned long long>(s.nsExit));
-        for (const auto &entry : s.imageFirstTick)
-            std::fprintf(stderr, "[vr3-vu0-image] tick=%llu hash=%016llx first_tick=%llu\n",
-                         static_cast<unsigned long long>(tick),
-                         static_cast<unsigned long long>(entry.first),
-                         static_cast<unsigned long long>(entry.second));
-        for (const auto &entry : s.progs)
-            std::fprintf(stderr, "[vr3-vu0-prog] tick=%llu hash=%016llx start=0x%x calls=%llu cycles=%llu max=%llu budget_hits=%llu\n",
-                         static_cast<unsigned long long>(tick),
-                         static_cast<unsigned long long>(entry.first.first), entry.first.second,
-                         static_cast<unsigned long long>(entry.second.calls),
-                         static_cast<unsigned long long>(entry.second.cycles),
-                         static_cast<unsigned long long>(entry.second.maxCycles),
-                         static_cast<unsigned long long>(entry.second.budgetHits));
-        for (const auto &entry : s.callers)
-            std::fprintf(stderr, "[vr3-vu0-caller] tick=%llu ra=0x%x calls=%llu\n",
-                         static_cast<unsigned long long>(tick), entry.first,
-                         static_cast<unsigned long long>(entry.second));
-    }
-}
 
 // VNP1: PS2X_SSX3_VIS_NATIVE (unset/0 = the VU0 engine, the exact path;
 // 1 = SSX 3's visibility tests 0xDB8 + the walker's 0x570 in host code;
 // check = both, compared). Off whenever something reads the engine's own
-// per-run state (the VU0 census, E53/E44 logs, gfx stats) or the PCSX2
+// per-run state (E53/E44 logs, gfx stats) or the PCSX2
 // float mode is selected.
 namespace
 {
@@ -5161,8 +4973,7 @@ namespace
                 return 0;
             const char *floatMode = std::getenv("PS2X_VU_FLOAT");
             const bool pcsx2Float = floatMode != nullptr && std::strcmp(floatMode, "pcsx2") == 0;
-            const bool diag = vr3_vu0_census::enabled() || std::getenv("PS2X_E53_VU0_LOG") != nullptr ||
-                              ps2_e44_trace::enabled();
+            const bool diag = std::getenv("PS2X_E53_VU0_LOG") != nullptr || ps2_e44_trace::enabled();
             if (!ps2_ssx3_vis_native::available() || pcsx2Float || diag)
             {
                 std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s ignored (available=%d pcsx2_float=%d diag=%d)\n",
@@ -5223,29 +5034,18 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
         }
     }
 
-    const bool census = vr3_vu0_census::enabled();
-    const uint64_t censusT0 = census ? vr3_vu0_census::nowNs() : 0u;
     // VR3: importVu0Context rewrites all of m_state and execute() resets
     // the scheduler, so only reset()'s cycle/count part is live here.
     // VZ1: the import takes the lean path unless PS2X_VU0_LEAN_ENTRY=0.
     m_vu0.resetForVu0Start();
     importVu0Context(ctx, m_vu0.state(), vu0LeanEntryEnabled());
-    const uint64_t censusT1 = census ? vr3_vu0_census::nowNs() : 0u;
     m_vu0.execute(vu0Code, PS2_VU0_CODE_SIZE,
                   vu0Data, PS2_VU0_DATA_SIZE,
                   m_gs, &m_memory,
                   startPC, 0u, ctx->vu0_itop, 4096);
-    const uint64_t censusT2 = census ? vr3_vu0_census::nowNs() : 0u;
     copyVu0StateToContext(m_vu0.state(), ctx);
     if (visCheck)
         ps2_ssx3_vis_native::noteCheck(visPc, visIn, ps2_ssx3_vis_native::snapshot(*ctx), visNative);
-    if (census)
-    {
-        const uint64_t censusT3 = vr3_vu0_census::nowNs();
-        vr3_vu0_census::note(vu0Code, m_memory.getVU0CodeGeneration(), m_memory.gs().vsyncTick.load(),
-                             startPC, getRegU32(ctx, 31), m_vu0.state().cycles,
-                             censusT1 - censusT0, censusT2 - censusT1, censusT3 - censusT2);
-    }
     // E53: dev-only VU0 start log (PS2X_E53_VU0_LOG=1, default off): caller
     // pc, start, cycles, and an FNV-1a of VU0 data memory after the run so an
     // upload that lands shows up as a changing hash. First 64 starts, then
@@ -5281,8 +5081,6 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
 void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)
 {
     // VCALLMS and VCALLMSR both route here.
-    if (vr3_vu0_census::enabled())
-        vr3_vu0_census::pendingVcallmsr.fetch_add(1, std::memory_order_relaxed);
     executeVU0Microprogram(rdram, ctx, address);
 }
 

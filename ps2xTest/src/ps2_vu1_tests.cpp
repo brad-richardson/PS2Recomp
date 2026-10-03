@@ -2831,7 +2831,7 @@ void register_ps2_vu1_tests()
 
         // VR3: local-only differential on a game VU0 image. Runs when the tests
         // are built with PS2X_VU0_RECOMP_DIR and PS2X_VR3_VU0_IMAGE names its
-        // vu0_<hash>.bin (PS2X_VR3_VU0_IMAGE_DUMP) and PS2X_VR3_VU0_ENTRIES
+        // vu0_<hash>.bin and PS2X_VR3_VU0_ENTRIES
         // lists start pcs (hex, comma-separated); otherwise it only says so.
         // Seeded random states; every cut up to 1,024 cycles past the full run.
         tc.Run("VR3 generated VU0 game image matches the VU0 interpreter (local only)", [](TestCase &t)

@@ -528,7 +528,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     /* HL2: no split120 hook here. The generator emits READ32_SPLIT only at */ \
     /* the 12 conversion PCs (ps2_ts2_splitsites.h); every other load kept */ \
     /* stock values through halfLoad's default case, so skipping the call is */ \
-    /* exact. (The ts2-halfload counters now tally SPLIT-site executions.) */ \
+    /* exact. */ \
     if (ps2x_tap_mpg::uploadloadArmed() &&                \
         ps2x_tap_mpg::isUploaderValue(_rv))               \
         ps2x_tap_mpg::noteUploadloadCtx(runtime, ctx, _addr, 4u, (uint64_t)_rv, 0u, ps2xE40Fn); \
