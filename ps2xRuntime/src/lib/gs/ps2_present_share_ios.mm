@@ -190,6 +190,11 @@ FenceStats fenceStats()
     return s;
 }
 
+void finishGl()
+{
+    glFinish();
+}
+
 bool captureDrawable(int width, int height, const char *path)
 {
     if (width <= 0 || height <= 0)

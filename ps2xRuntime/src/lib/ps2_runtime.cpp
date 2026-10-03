@@ -2452,41 +2452,41 @@ static void maybeLog(bool force = false)
                  produce.size());
 }
 
-// Diagnostic (PS2X_PRESENT_CAPTURE_TICKS=a,b,c + PS2X_PRESENT_CAPTURE_DIR):
-// read the final drawable back for every distinct shown guest tick in
-// [t, t + PS2X_PRESENT_CAPTURE_SPAN) (default 8), before the swap.
+// Diagnostic (PS2X_PRESENT_CAPTURE_TICKS=a,b,c + PS2X_PRESENT_CAPTURE_DIR),
+// tick-locked (PSO1 Part 2): the capture gate (ps2_present_share.h) stops
+// exports around the pending target T, so the shown frame settles on T with
+// no newer export reserved. Read the final drawable back before the swap
+// after glFinish; the slot's producer write count must still equal the one
+// at acquisition (else the file is tagged -unsafe). A target that is not
+// shown within 500 ms of the gate engaging (its export was dropped) is
+// logged as missed and skipped.
 static void maybeCapture()
 {
     static const char *dir = std::getenv("PS2X_PRESENT_CAPTURE_DIR");
-    if (!dir || !*dir || g_shownSlot < 0 || !g_shownNew)
+    const uint64_t target = ps2x_present_share::captureGatePending();
+    if (!dir || !*dir || target == 0u || g_shownSlot < 0)
         return;
-    static const std::vector<uint64_t> targets = [] {
-        std::vector<uint64_t> t;
-        if (const char *v = std::getenv("PS2X_PRESENT_CAPTURE_TICKS"))
-        {
-            std::stringstream ss(v);
-            std::string item;
-            while (std::getline(ss, item, ','))
-                t.push_back(std::strtoull(item.c_str(), nullptr, 10));
-        }
-        return t;
-    }();
-    static const uint64_t span = [] {
-        const char *v = std::getenv("PS2X_PRESENT_CAPTURE_SPAN");
-        return v ? std::strtoull(v, nullptr, 10) : 8ull;
-    }();
-    for (uint64_t t : targets)
+    if (g_shownTick == target)
     {
-        if (g_shownTick >= t && g_shownTick < t + span)
-        {
-            rlDrawRenderBatchActive();
-            std::error_code ec;
-            std::filesystem::create_directories(dir, ec);
-            const std::string path = std::string(dir) + "/cap-t" + std::to_string(t) + "-g" +
-                                     std::to_string(g_shownTick) + ".ppm";
-            ps2x_present_share::captureDrawable(GetRenderWidth(), GetRenderHeight(), path.c_str());
-            return;
-        }
+        rlDrawRenderBatchActive();
+        ps2x_present_share::finishGl();
+        const bool safe = ps2x_present_own::witnessWrites(g_shownSlot) == g_shownWrites;
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const std::string path = std::string(dir) + "/cap-t" + std::to_string(target) + (safe ? "" : "-unsafe") +
+                                 ".ppm";
+        ps2x_present_share::captureDrawable(GetRenderWidth(), GetRenderHeight(), path.c_str());
+        std::fprintf(stderr, "[present-own] capture tick=%llu safe=%d slot=%d seq=%llu\n",
+                     (unsigned long long)target, safe ? 1 : 0, g_shownSlot, (unsigned long long)g_shownSeq);
+        ps2x_present_share::captureGateDone(target);
+        return;
+    }
+    const uint64_t since = ps2x_present_share::captureGateBlockedSinceNs();
+    if (g_shownTick > target || (since != 0u && ps2x::perflog::steadyNs() - since > 500'000'000ull))
+    {
+        std::fprintf(stderr, "[present-own] capture tick=%llu missed shown=%llu\n", (unsigned long long)target,
+                     (unsigned long long)g_shownTick);
+        ps2x_present_share::captureGateDone(target);
     }
 }
 } // namespace pso1
