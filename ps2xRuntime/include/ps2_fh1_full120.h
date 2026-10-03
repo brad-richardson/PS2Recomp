@@ -2594,6 +2594,7 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addTgt(kLoopMode2);
         addTgt(kLoopMode3);
         addTgt(kFxTimerUpdate);
+        addTgt(kLoopCtor); // FH27 loops2: the ctor pre-hook (merge MRG2: HK1 predates FH27)
     }
     for (uint32_t t : c.srcTgts)
         addTgt(t); // PS2X_FH1_SRC watch list (diagnostic, runs whatever the mode)
