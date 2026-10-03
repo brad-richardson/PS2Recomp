@@ -1,6 +1,5 @@
 #include "Common.h"
 #include "ps2_e41_trace.h"
-#include "ps2_e44_trace.h" // E44 Part-3 EE watch (default off)
 #include "MemoryCard.h"
 
 namespace ps2_stubs

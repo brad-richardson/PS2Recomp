@@ -15,7 +15,6 @@
 #include "ps2_ts2_split60.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_vsync_lock.h"
-#include "ps2_mpg_src_trace.h"
 #include "ps2_e15.h"
 #include "runtime/gs/gs_stream_capture.h"
 #if PS2X_ENABLE_DET_HASH_TAP
@@ -1060,7 +1059,6 @@ void EeScheduler::run()
                 m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
                 ps2_ts2_split60::setThread(static_cast<uint32_t>(m_currentThreadId), m_insideInterrupt);
                 ps2_ts2_split60::finishIfContinuation(&context);
-                ps2_mpg_src_trace::noteSliceIrq(m_insideInterrupt);
                 m_guestExecuting.store(true, std::memory_order_release);
                 // EE1: unconditional (one relaxed store on a context switch);
                 // release builds compile the watch check out but E7 thread
@@ -1080,7 +1078,6 @@ void EeScheduler::run()
             mpegTrace.finish(m_vsyncTick);
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
-            ps2_mpg_src_trace::noteSliceIrq(false);
         }
         else
         {
@@ -1088,7 +1085,6 @@ void EeScheduler::run()
             // ran; falls through to processPendingEvents below unchanged.
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
-            ps2_mpg_src_trace::noteSliceIrq(false);
         }
 
         processPendingEvents();
@@ -2290,7 +2286,6 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
     for (const EeIrqHandler &handler : matching)
     {
         // E40 Part-6: log every queued guest handler dispatch (T51 mirror).
-        ps2_mpg_src_trace::noteIrq(m_vsyncTick, dmac, cause, handler.handler);
         GuestInvocation invocation{};
         invocation.kind = GuestInvocationKind::Interrupt;
         invocation.context.pc = handler.handler;

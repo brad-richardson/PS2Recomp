@@ -2,7 +2,6 @@
 #include "ps2_build_id.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_e41_trace.h"
-#include "ps2_e44_trace.h"
 #include "ps2_pad_latch.h"
 #include "ps2_input_diag.h"
 #include "ps2_record_env.h"
@@ -2225,7 +2224,6 @@ namespace ps2_stubs
             ps2TraceGuestRangeWrite(rdram, dmaAddr, 32u, "scePadPortOpen", ctx);
             std::memset(dmaStr, 0, 32);
         // E44 Part-3 EE watch (dev-only, default off).
-        ps2_e44_trace::emitRangeOverlap(rdram, ctx, dmaAddr, 32u, "pad-open", 0u, false, "scePadPortOpen");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dmaAddr,
                                               32u, rdram, "pad-open", "zero", 0u);
@@ -2248,7 +2246,6 @@ namespace ps2_stubs
         ps2TraceGuestRangeWrite(rdram, dataAddr, 32u, "scePadRead", ctx);
         const bool e3ok = readPadPortData(port, slot, runtime, data, dataAddr);
         // E44 Part-3 EE watch (dev-only, default off).
-        ps2_e44_trace::emitRangeOverlap(rdram, ctx, dataAddr, 32u, "pad-read", 0u, false, "scePadRead");
         if (ps2_e41_trace::plantArmed()) // E41 plant watch
             ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), dataAddr,
                                           32u, rdram, "pad-read", "pad", 0u);

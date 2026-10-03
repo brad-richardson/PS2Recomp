@@ -4,10 +4,7 @@
 #include "ps2_mtvu.h"
 #include "ps2_microvu.h"
 #include "ps2_e7.h"
-#include "ps2_mpg_src_trace.h"
 #include "ps2_e41_trace.h"
-#include "ps2_e43_trace.h"
-#include "ps2_e44_trace.h"
 #include "ps2_ssx3_vis_native.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_ssx3_course_manifest.h"
@@ -3259,8 +3256,7 @@ bool PS2Runtime::syncCoreSubsystems()
     };
     // MT1: PS2X_MTVU=1 runs the unit on its own thread unless a dev trace
     // that shares state with unit code is armed (those need the inline path).
-    ps2_mtvu::configure(ps2_e7::enabled() || ps2_mpg_src_trace::enabled() || ps2x_gs_capture::enabled() ||
-                        ps2_e44_trace::enabled() || ps2_e43_trace::enabled() || ps2_e41_trace::armed());
+    ps2_mtvu::configure(ps2_e7::enabled() || ps2x_gs_capture::enabled() || ps2_e41_trace::armed());
     // VPL1: PS2X_MTVU_GIF_STAGE=1 (default off) moves the unit's GIF submit
     // (arbiter + GS-worker handoff) onto its own thread behind an ordered op
     // ring; the unit keeps VIF1/VU1 and the byte copies. Needs threaded MTVU
@@ -3705,11 +3701,6 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
         {
             std::memset(dest + ph.filesz, 0, ph.memsz - ph.filesz);
         }
-
-        // E44 Part-3 EE watch: ELF segment into RAM/scratchpad (dev-only,
-        // default off). Boot-time; in-window for Boot D (FROM=0).
-        ps2_e44_trace::emitRangeOverlap(m_memory.getRDRAM(), nullptr, ph.vaddr, ph.memsz,
-                                        "elf-load", 0u, false, __func__);
 
         RUNTIME_LOG("Loading segment: 0x" << std::hex << ph.vaddr
                                           << " - 0x" << (static_cast<uint64_t>(ph.vaddr) + static_cast<uint64_t>(ph.memsz))
@@ -4932,7 +4923,7 @@ namespace
                 return 0;
             const char *floatMode = std::getenv("PS2X_VU_FLOAT");
             const bool pcsx2Float = floatMode != nullptr && std::strcmp(floatMode, "pcsx2") == 0;
-            const bool diag = std::getenv("PS2X_E53_VU0_LOG") != nullptr || ps2_e44_trace::enabled();
+            const bool diag = std::getenv("PS2X_E53_VU0_LOG") != nullptr;
             if (!ps2_ssx3_vis_native::available() || pcsx2Float || diag)
             {
                 std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s ignored (available=%d pcsx2_float=%d diag=%d)\n",
@@ -5026,14 +5017,6 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
                              m_vu0.state().cycles >= 4096u ? 1 : 0, h);
             }
         }
-    }
-    // E44 Part-2 VU0 call trace (dev-only, default off). m_cycle was
-    // reset by resetForVu0Start() above, so state().cycles is this call's usage.
-    if (ps2_e44_trace::enabled())
-    {
-        const uint64_t used = m_vu0.state().cycles;
-        ps2_e44_trace::noteVu0Call(ctx, startPC, used, used >= 4096u,
-                                   m_vu0.state().vi[1], m_vu0.state().vi[2]);
     }
 }
 

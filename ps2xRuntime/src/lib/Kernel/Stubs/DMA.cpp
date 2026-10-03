@@ -1,6 +1,5 @@
 #include "Common.h"
 #include "ps2_e41_trace.h"
-#include "ps2_e44_trace.h"
 #include "DMA.h"
 
 namespace ps2_stubs
@@ -66,7 +65,6 @@ namespace ps2_stubs
             std::lock_guard<std::mutex> lock(g_dmaEnvMutex);
             std::memcpy(dst, &g_dmaCurrentEnv, sizeof(g_dmaCurrentEnv));
         // E44 Part-3 EE watch (dev-only, default off).
-        ps2_e44_trace::emitRangeOverlap(rdram, ctx, envAddr, static_cast<uint32_t>(sizeof(g_dmaCurrentEnv)), "dma-getenv", 0u, false, "sceDmaGetEnv");
             if (ps2_e41_trace::plantArmed()) // E41 plant watch
                 ps2_e41_trace::notePlantRange(ps2_e41_trace::lastVsyncTick(), envAddr,
                                               sizeof(g_dmaCurrentEnv), rdram,

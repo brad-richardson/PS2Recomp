@@ -2,7 +2,6 @@
 #include "Dispatcher.h"
 #include "System.h"
 #include "TraceChannel.h"
-#include "ps2_mpg_src_trace.h"
 
 #include <cstdlib>
 
@@ -263,19 +262,15 @@ namespace ps2_syscalls
             iDeleteSema(rdram, ctx, runtime);
             return true;
         case 0x42:
-            ps2_mpg_src_trace::noteSemaDispatch(rdram, ctx, runtime, "SignalSema");
             SignalSema(rdram, ctx, runtime);
             return true;
         case static_cast<uint32_t>(-0x43):
-            ps2_mpg_src_trace::noteSemaDispatch(rdram, ctx, runtime, "iSignalSema");
             iSignalSema(rdram, ctx, runtime);
             return true;
         case 0x44:
-            ps2_mpg_src_trace::noteSemaDispatch(rdram, ctx, runtime, "WaitSema");
             WaitSema(rdram, ctx, runtime);
             return true;
         case 0x45:
-            ps2_mpg_src_trace::noteSemaDispatch(rdram, ctx, runtime, "PollSema");
             PollSema(rdram, ctx, runtime);
             return true;
         case static_cast<uint32_t>(-0x46):
