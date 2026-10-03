@@ -59,6 +59,7 @@ void register_ps2_vsync_lock_tests();
 void register_ps2_fh1_restamp_tests();
 void register_ps2_fh1_fix_tests();
 void register_ps2_fh1_savestate_tests();
+void register_ps2_fh1_hooktable_tests();
 void register_ps2_savestate_tests();
 void register_ps2_tc1_vf0_tests();
 void reset_ps2_test_function_table();
@@ -124,6 +125,7 @@ int main()
     register_ps2_fh1_restamp_tests();
     register_ps2_fh1_fix_tests();
     register_ps2_fh1_savestate_tests();
+    register_ps2_fh1_hooktable_tests();
     register_ps2_savestate_tests();
     register_ps2_tc1_vf0_tests();
     int res = MiniTest::Run();

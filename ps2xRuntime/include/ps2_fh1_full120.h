@@ -2442,6 +2442,248 @@ inline bool fastHooks() noexcept
     return on;
 }
 
+// ---- HK1 hook preclassification (IPR1 bet 2) ------------------------------
+// onBranch runs ~15 hook calls on every dispatched guest branch. Most hooks
+// act only on fixed source/target PCs (census in local/research/HK1/REPORT.md
+// §1: every RAM/register/counter side effect in onBranchT is gated on a PC
+// match, so a branch matching no listed PC is provably inert). A precomputed
+// lookup answers "could any enabled hook act on this branch?": branches that
+// miss skip the chain; branches that hit run today's exact onBranchT body
+// (order and side effects unchanged).
+//
+// PS2X_SSX3_FULL120_HOOKS=table (default) | chain (today's exact path).
+// The table is built once per FIX mask/mode/env selection, and rebuilt
+// whenever the events guest-active state changes (guestFlip), so stock-rate
+// menu/pause stretches skip the on-gated hooks too. The transient per-update
+// gates (g_rngOdd, on, skip) stay inside the chain: the table lists a hook's
+// PCs whenever its FIX item is enabled, a conservative over-approximation, so
+// a hit always runs the full chain and a miss cannot have acted.
+inline bool hookPreclassify() noexcept
+{
+    static const bool table = [] {
+        const char *v = std::getenv("PS2X_SSX3_FULL120_HOOKS");
+        if (!v || !*v || std::strcmp(v, "table") == 0)
+            return true;
+        if (std::strcmp(v, "chain") == 0)
+            return false;
+        std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_HOOKS=%s (want table|chain)\n", v);
+        std::abort();
+    }();
+    return table;
+}
+
+// Pure input for the table (production fills it from mode()/fixMask()/
+// fixMask12()/g_guestActive and the env-derived tap/lab/src/fh9/hist state;
+// unit tests construct it directly, so no process env leaks into the test).
+struct HookConfig
+{
+    Mode mode = Mode::Off;
+    uint64_t main = 0u;
+    uint32_t fix12 = 0u;
+    bool guestActive = false;
+    bool draw = false;
+    bool tapOn = false;
+    std::vector<uint32_t> tapCountPcs;
+    bool histRanges = false;
+    std::vector<uint32_t> srcTgts; // PS2X_FH1_SRC targets
+    uint32_t fh26s = 0u;           // PS2X_FH26_TAP S, 0 = off
+    uint32_t fh9r = 0u;            // PS2X_FH9_AI rider, 0 = off
+    std::vector<std::pair<uint32_t, uint32_t>> labPairs; // HALF + SKIP (src, tgt)
+};
+
+struct HookInterest
+{
+    std::vector<uint32_t> src; // sorted unique source PCs of interest
+    std::vector<uint32_t> tgt; // sorted unique target PCs of interest
+    bool always = false;       // diagnostic needs-every-branch mode (fh9 tap, hist ranges)
+};
+
+inline HookInterest buildHookInterest(const HookConfig &c)
+{
+    HookInterest r;
+    auto addSrc = [&](uint32_t pc) { r.src.push_back(pc); };
+    auto addTgt = [&](uint32_t pc) { r.tgt.push_back(pc); };
+    const bool on = c.mode == Mode::Always || (c.mode == Mode::Events && c.guestActive);
+    if (c.mode == Mode::Always)
+        addSrc(kHookSite); // manager-init patch site
+    if (c.mode == Mode::Events)
+    {
+        // eventsOnBranch sites (entry/exit facts + the app-update flip test).
+        addSrc(kRaceTickCallSite);
+        addSrc(kRaceTick2CallSite);
+        addSrc(kAppUpdateSite);
+        addTgt(kSelectorDispatch);
+        addTgt(kRaceTickCallee);
+        addTgt(kRaceTick2Callee);
+        addTgt(kSession);
+    }
+    if ((c.main & kFixClock) != 0u && on)
+    {
+        addTgt(kProducer);
+        addTgt(kPeriod10s);
+    }
+    if ((c.main & kFixRaceClock) != 0u && on)
+    {
+        addSrc(kRaceTick2CallSite);
+        addTgt(kRaceTick2Callee);
+        addSrc(kRaceTickCallSite);
+        addTgt(kRaceTickCallee);
+    }
+    if ((c.main & kFixLaunch) != 0u && on)
+        addTgt(kLaunchHelper);
+    if ((c.main & kFixSession) != 0u && on)
+    {
+        addSrc(kSessionCallSite);
+        addTgt(kSession);
+    }
+    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate)) != 0u && on) ||
+                        ((c.fix12 & kFix12Particles) != 0u && on);
+    if (parity)
+        addSrc(kAppUpdateSite); // parityHook counts app-update dispatches
+    if ((c.main & kFixRng) != 0u && on)
+    {
+        // rngHook: odd-update skips of the trail/lookAt calls, the two stream-1
+        // Bernoulli rolls, and the flash-countdown hold (any source each).
+        addTgt(kTrailPush);
+        addTgt(kLookAt);
+        addTgt(kRngDraw0);
+        addTgt(kFlashSched);
+        addSrc(kLensRollSite);
+        addSrc(kFlashRollSite);
+    }
+    if ((c.main & kFixTrick) != 0u && on)
+    {
+        addSrc(kComboSite);
+        addTgt(kComboAccrue);
+    }
+    if ((c.main & kFixAiGate) != 0u && on)
+    {
+        // aiGateHook: odd-update answers of the race-tick read at 4 sites.
+        addSrc(0x10bdccu);
+        addSrc(0x10da6cu);
+        addSrc(0x10dc30u);
+        addSrc(0x10b8acu);
+        addTgt(kRaceTickGet);
+    }
+    if ((c.fix12 & kFix12Particles) != 0u && on)
+    {
+        addSrc(kParticleSiteAll);
+        addSrc(kParticleSiteOne);
+        addTgt(kParticlePass);
+    }
+    if ((c.main & kFixBonus) != 0u && on)
+    {
+        addSrc(kBonusSite);
+        addTgt(kBonusNext);
+    }
+    if ((c.main & kFixLift) != 0u && on)
+    {
+        addSrc(kLiftProbeSite);
+        addTgt(kLiftProbe);
+    }
+    if ((c.main & kFixFlags) != 0u && on)
+        addTgt(kFlagUpdate);
+    if ((c.main & kFixRclock) != 0u)
+        addTgt(kRenderFrameGet); // also answered after exit (frozen offset)
+    if ((c.fix12 & (kFix12Spin | kFix12Texanim | kFix12Loops | kFix12FxTimer)) != 0u && on)
+    {
+        addTgt(kSpinUpdate);
+        addTgt(kTexUv);
+        addTgt(kTexFlip);
+        addTgt(kLoopMode1);
+        addTgt(kLoopMode2);
+        addTgt(kLoopMode3);
+        addTgt(kFxTimerUpdate);
+    }
+    for (uint32_t t : c.srcTgts)
+        addTgt(t); // PS2X_FH1_SRC watch list (diagnostic, runs whatever the mode)
+    if (c.fh26s != 0u)
+        addTgt(0x133308u); // stick-angle tracker tap
+    if (c.fh9r != 0u)
+        r.always = true; // FH9 AI tap replicates per-branch state: run the chain
+    if (on)
+        for (const auto &p : c.labPairs)
+        {
+            addSrc(p.first);
+            addTgt(p.second);
+        }
+    addTgt(0x111728u); // IN4 rider-action tap (knob-checked inside; one compare)
+    if (c.draw && on)
+    {
+        addSrc(kRenderGateMode1);
+        addSrc(kRenderGateMode0);
+        addTgt(kRenderTarget);
+    }
+    if (c.tapOn)
+    {
+        addTgt(kUpdateTarget);
+        addTgt(kRenderTarget);
+        for (uint32_t t : c.tapCountPcs)
+            addTgt(t);
+        if (c.histRanges)
+            r.always = true; // FH10 hist counts every target inside its ranges
+    }
+    auto dedup = [](std::vector<uint32_t> &v) {
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+    };
+    dedup(r.src);
+    dedup(r.tgt);
+    return r;
+}
+
+inline bool hookTableHit(const HookInterest &r, uint32_t sourcePc, uint32_t targetPc) noexcept
+{
+    return std::binary_search(r.src.begin(), r.src.end(), sourcePc) ||
+           std::binary_search(r.tgt.begin(), r.tgt.end(), targetPc);
+}
+
+inline HookConfig currentHookConfig()
+{
+    HookConfig c;
+    c.mode = mode();
+    c.main = fixMask();
+    c.fix12 = fixMask12();
+    c.guestActive = g_guestActive;
+    c.draw = drawLimit();
+    c.tapOn = tap().on;
+    {
+        const Tap &t = tap();
+        c.tapCountPcs.assign(t.countPcs.begin(), t.countPcs.begin() + t.nCount);
+    }
+    c.histRanges = !fh10Hist().ranges.empty();
+    for (const SrcWant &w : srcWants())
+        c.srcTgts.push_back(w.tgt);
+    c.fh26s = fh26Tap().s;
+    c.fh9r = fh9Tap().r;
+    for (const LabHook &h : labHooks("PS2X_FH1_HALF", true))
+        c.labPairs.emplace_back(h.src, h.tgt);
+    for (const LabHook &h : labHooks("PS2X_FH1_SKIP", false))
+        c.labPairs.emplace_back(h.src, h.tgt);
+    return c;
+}
+
+struct HookTableCache
+{
+    HookInterest interest;
+    bool guestActive = false;
+    bool built = false;
+};
+
+inline const HookInterest &activeHookInterest()
+{
+    static HookTableCache c;
+    // FIX mask/mode/env are fixed after first read; the events guest-active
+    // flip (guestFlip) is the only runtime rebuild trigger.
+    if (!c.built || c.guestActive != g_guestActive)
+    {
+        c.interest = buildHookInterest(currentHookConfig());
+        c.guestActive = g_guestActive;
+        c.built = true;
+    }
+    return c.interest;
+}
+
 // IN4 rider layer (PS2X_INPUT_DIAG=1): the minimal port of IN3's in3-in tap
 // (branch in3, commit 4774566): at each entry of the rider control
 // dispatcher 0x111728 (a1 = block filled by 0x121068; low 20 bits of +0 are
@@ -2558,9 +2800,16 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
 }
 
 // Out of line as before, so dispatchGuestBranch keeps its shape (and its PGO
-// profile match).
+// profile match). HK1: the table path first asks the precomputed lookup; a
+// miss is provably inert (census §1) and returns "don't skip" directly.
 __attribute__((noinline)) inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
+    if (hookPreclassify())
+    {
+        const HookInterest &hi = activeHookInterest();
+        if (!hi.always && !hookTableHit(hi, sourcePc, targetPc))
+            return false;
+    }
     return fastHooks() ? onBranchT<true>(ram, ctx, sourcePc, targetPc) : onBranchT<false>(ram, ctx, sourcePc, targetPc);
 }
 
