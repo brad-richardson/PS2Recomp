@@ -106,7 +106,7 @@ void register_ps2_present_owner_tests()
             t.IsTrue(pool.state(sB) == SlotState::Current, "B still CURRENT");
             t.Equals(pool.counters().unsafe, 0ull, "no unsafe requests"); });
 
-        tc.Run("exhaustion: CURRENT + RETIRING + READY leaves no slot; READY is superseded", [](TestCase &t)
+        tc.Run("exhaustion: CURRENT + RETIRING + READY drops the export and keeps READY", [](TestCase &t)
                {
             Pool pool(3);
             Producer p(pool);
@@ -120,18 +120,15 @@ void register_ps2_present_owner_tests()
             pool.noteRead(2, 6);
             const int third = p.produce(7);
             t.IsTrue(third >= 0, "third slot READY");
-            t.IsTrue(p.produce(8) == third, "no FREE slot: the unacquired READY frame is reclaimed");
-            t.Equals(pool.counters().reclaimed, 1ull, "one reclaimed");
+            // CURRENT + RETIRING + READY -> the export is dropped, READY kept
+            const uint64_t before = pool.counters().noSlot;
+            t.IsTrue(p.produce(8) < 0, "no FREE slot: export dropped");
+            t.Equals(pool.counters().noSlot, before + 1ull, "noSlot counted");
+            t.IsTrue(pool.state(third) == SlotState::Ready, "the READY frame survives for the presenter");
             FrameInfo shown;
             int shownSlot = -1;
-            // CURRENT + RETIRING + PRODUCING (export in flight) -> no slot
-            uint64_t g = 0;
-            const int inFlight = pool.reserve(&g, 9);
-            t.IsTrue(inFlight == third, "READY reclaimed again for the in-flight export");
-            const uint64_t before = pool.counters().noSlot;
-            t.IsTrue(p.produce(10) < 0, "no FREE or READY slot");
-            t.Equals(pool.counters().noSlot, before + 1ull, "noSlot counted");
-            t.IsTrue(pool.acquire(&shown, &shownSlot, 11) == Acquire::Repeat, "CURRENT still shown");
+            t.IsTrue(pool.acquire(&shown, &shownSlot, 11) == Acquire::New && shownSlot == third,
+                     "presenter gets the kept READY frame");
             pool.retireReadsThrough(1, 12);
             t.IsTrue(p.produce(13) >= 0, "retired slot reusable"); });
 
@@ -252,8 +249,10 @@ void register_ps2_present_owner_tests()
             const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(800);
             while (std::chrono::steady_clock::now() < end)
             {
-                // fences complete late and in order
-                while (!outstanding.empty() && rng() % 3u == 0u)
+                // fences complete late and in order; like submitReadFence(),
+                // more than 8 pending reads finish the stream (glFinish)
+                const bool finish = outstanding.size() > 8u;
+                while (!outstanding.empty() && (finish || rng() % 3u == 0u))
                 {
                     const Read r = outstanding.front();
                     if (pixels[static_cast<size_t>(r.slot)].load() != r.seq)
