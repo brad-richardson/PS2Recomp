@@ -138,7 +138,10 @@ private:
     bool m_ringFull = false;
 };
 
-// The process-wide pool for the iOS IOSurface export (3 slots, PRV1 §3).
+// The process-wide pool for the iOS IOSurface export. PRV1 §3 started at 3;
+// PSO1 Part 3: 5, so CURRENT + RETIRING + READY + in-flight exports fit
+// without dropping 120/s exports (BGRA export size x 5 of IOSurface memory).
+constexpr int kSharedSlots = 5;
 Pool &sharedPool();
 
 // Witness (both modes): counts producer writes per slot so the presenter can
