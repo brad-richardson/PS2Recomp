@@ -430,7 +430,8 @@ public:
     void printMissingFunctionCounts() const;
 #if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
     // SB1 tripwire: kind 0=LT 1=GE 2=LE 3=GT. Evaluates the 32-bit and 64-bit
-    // predicates, notes disagreements, returns the PS2X_SBR_MODE selection.
+    // predicates, notes disagreements, returns the s32 selection (the
+    // PS2X_SBR_MODE override is deleted).
     bool sbrTripwire(int kind, R5900Context *ctx, uint32_t rs, uint32_t pc);
     void noteSignedBranchMismatch(uint32_t pc, uint32_t rs, uint64_t value, uint64_t tick, uint64_t eeCycle);
 #endif

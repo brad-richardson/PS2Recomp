@@ -51,7 +51,7 @@ inline bool enabledFromEnv(const char *value)
     return value != nullptr && value[0] == '1' && value[1] == '\0';
 }
 
-constexpr int64_t kDefaultTargetNs = 10'000'000; // PS2X_ADPF_TARGET_MS default
+constexpr int64_t kDefaultTargetNs = 10'000'000; // ADPF target (the PS2X_ADPF_TARGET_MS override is deleted)
 
 // PB9: reportActualWorkDuration rejects 0 ns (AD1 §5d: exact-40 mtvu errors
 // across legs, plus one racy gsb). Zero-busy ticks carry no boost signal, so
@@ -61,24 +61,9 @@ inline bool shouldReport(uint64_t busyNs)
     return busyNs != 0;
 }
 
-// Parse PS2X_ADPF_TARGET_MS (decimal ms) into ns. Missing, unparseable or
-// non-positive input reads the default; the suite covers the edges.
-inline int64_t parseTargetNs(const char *value)
-{
-    if (value == nullptr || value[0] == '\0')
-        return kDefaultTargetNs;
-    char *end = nullptr;
-    const double ms = std::strtod(value, &end);
-    if (end == value || *end != '\0' || !(ms > 0.0))
-        return kDefaultTargetNs;
-    const double ns = ms * 1e6;
-    if (!(ns > 0.0) || ns >= 9.0e18)
-        return kDefaultTargetNs;
-    return static_cast<int64_t>(ns);
-}
-
-// PW2: what the sessions report. Busy (default, AD1): each thread's own
-// busy time. Critical (PS2X_ADPF_REPORT=critical): every session reports the
+// PW2: what the sessions report. Busy (the only mode; the
+// PS2X_ADPF_REPORT=critical override is deleted): each thread's own
+// busy time. Critical: every session reports the
 // GameThread frame's critical path = ee.busy + MTVU syncs + GS enqueue waits
 // (the frame's wall minus pacer, pause-gate and guest-idle event waits), so
 // the governor lowers clocks while frames finish early and boosts all four
@@ -89,12 +74,6 @@ enum class ReportMode : uint8_t
     Busy = 0,
     Critical,
 };
-
-// Parse PS2X_ADPF_REPORT: "critical" selects Critical; anything else Busy.
-inline ReportMode parseReportMode(const char *value)
-{
-    return (value != nullptr && std::strcmp(value, "critical") == 0) ? ReportMode::Critical : ReportMode::Busy;
-}
 
 #if defined(__ANDROID__)
 // Cached knob reads (env is fixed before main; parsed once each).

@@ -120,22 +120,13 @@ inline bool hooksOn() noexcept
 }
 
 // log2 of the EE clock multiplier (charged cycles = cycles >> shift).
+// Always 2x (the PS2X_SSX3_FULL120_EE_X 1|2|4 override is deleted).
 inline uint32_t eeClockShift() noexcept
 {
     static const uint32_t shift = [] {
         if (!enabled())
             return 0u;
-        const char *v = std::getenv("PS2X_SSX3_FULL120_EE_X");
-        if (!v || !*v)
-            return 1u;
-        if (std::strcmp(v, "1") == 0)
-            return 0u;
-        if (std::strcmp(v, "2") == 0)
-            return 1u;
-        if (std::strcmp(v, "4") == 0)
-            return 2u;
-        std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_FULL120_EE_X=%s (want 1|2|4)\n", v);
-        std::abort();
+        return 1u;
     }();
     return shift;
 }

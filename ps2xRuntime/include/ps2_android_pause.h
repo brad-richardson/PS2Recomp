@@ -26,13 +26,12 @@
 namespace ps2x::androidPause
 {
 
-// PS2X_ANDROID_PAUSE_BG: default on; the exact value "0" keeps the pre-BG1
-// behaviour (the guest keeps running while backgrounded). Read fresh per
-// transition (transitions are rare; the value cannot change at runtime).
+// BG1 pause is always on (the PS2X_ANDROID_PAUSE_BG=0 pre-BG1 opt-out is
+// deleted). Read fresh per transition (transitions are rare; the value cannot
+// change at runtime).
 inline bool pauseOnBackgroundEnabled()
 {
-    const char *value = std::getenv("PS2X_ANDROID_PAUSE_BG");
-    return value == nullptr || std::strcmp(value, "0") != 0;
+    return true;
 }
 
 inline std::atomic<bool> &pausedFlag()

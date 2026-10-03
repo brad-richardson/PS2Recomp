@@ -161,15 +161,11 @@ inline bool halfMode() noexcept
 }
 
 // TS3: run unconverted selector cases (3/4/5) once per stock update at full
-// H. This is the product default in split mode; PS2X_TS3_NOFIX=1 restores the
-// pre-fix behavior (every case twice, every reviewed site at H/2) for A/B.
+// H. This is the product default in split mode (the PS2X_TS3_NOFIX=1 pre-fix
+// A/B path is deleted).
 inline bool fixUnconverted() noexcept
 {
-    static const bool on = [] {
-        const char *v = std::getenv("PS2X_TS3_NOFIX");
-        return !(v && v[0] == '1' && v[1] == '\0');
-    }();
-    return on;
+    return true;
 }
 
 // TK34: the wipeout (selector case 2, handler sub_00136E98) reads four

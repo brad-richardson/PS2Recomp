@@ -232,8 +232,7 @@ bool enabled()
 
 int64_t targetNs()
 {
-    static const int64_t ns = parseTargetNs(std::getenv("PS2X_ADPF_TARGET_MS"));
-    return ns;
+    return kDefaultTargetNs;
 }
 
 void noteThread(Thread t)
@@ -285,8 +284,7 @@ void report(Thread t, uint64_t busyNs)
 
 ReportMode reportMode()
 {
-    static const ReportMode mode = parseReportMode(std::getenv("PS2X_ADPF_REPORT"));
-    return mode;
+    return ReportMode::Busy;
 }
 
 void reportFrame(uint64_t criticalNs)
