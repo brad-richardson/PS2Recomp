@@ -32,6 +32,7 @@ void register_ps2_memory_tests();
 void register_ps2_vu1_tests();
 void register_ps2_vu_tests();
 void register_ps2_vu0_lean_entry_tests();
+void register_ps2_ssx3_vis_native_tests();
 void register_ps2_gs_tests();
 void register_ps2_gs_queue_tests();
 void register_ps2_gs_replay_tests();
@@ -100,6 +101,7 @@ int main()
     register_ps2_vu1_tests();
     register_ps2_vu_tests();
     register_ps2_vu0_lean_entry_tests();
+    register_ps2_ssx3_vis_native_tests();
     register_ps2_gs_tests();
     register_ps2_gs_queue_tests();
     register_ps2_gs_replay_tests();
