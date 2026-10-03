@@ -132,6 +132,17 @@ void register_ps2_fh1_hooktable_tests()
             t.IsTrue(hookTableHit(hi, 0x000001u, 0x111728u), "in4 stays");
         });
 
+        tc.Run("FH27: bonusflip recorder (any phase) and loops2 ctor (active)", [](TestCase &t)
+        {
+            HookConfig c = hk1AllActive();
+            t.IsFalse(hookTableHit(buildHookInterest(c), 0x000001u, 0x117c28u), "no recorder without bonusflip");
+            c.main |= kFixBonusFlip;
+            t.IsTrue(hookTableHit(buildHookInterest(c), 0x000001u, 0x117c28u), "recorder hits (active)");
+            t.IsTrue(hookTableHit(buildHookInterest(c), 0x000001u, 0x341aa0u), "loops2 ctor hits (active)");
+            c.guestActive = false;
+            t.IsTrue(hookTableHit(buildHookInterest(c), 0x000001u, 0x117c28u), "recorder hits (stock window)");
+        });
+
         tc.Run("always mode lists the manager-init site", [](TestCase &t)
         {
             HookConfig c = hk1AllActive();
