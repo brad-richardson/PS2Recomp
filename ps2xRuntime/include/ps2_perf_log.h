@@ -52,6 +52,9 @@ struct ThreadDelta
 {
     std::string name;
     double ms = 0.0;
+    // PL3: true when this thread identity first appeared this window (its
+    // delta starts at zero). Prints as a trailing "*" on the cell.
+    bool isNew = false;
 };
 
 struct Sample
@@ -100,7 +103,8 @@ inline std::string formatLine(const Sample &s)
                 line += ' ';
             first = false;
             char cell[96];
-            std::snprintf(cell, sizeof(cell), "%s=%.1f", sanitizeThreadName(t.name).c_str(), t.ms);
+            std::snprintf(cell, sizeof(cell), "%s=%.1f%s", sanitizeThreadName(t.name).c_str(), t.ms,
+                          t.isNew ? "*" : "");
             line += cell;
         }
     }
@@ -672,15 +676,228 @@ inline uint64_t steadyNs()
                                      .count());
 }
 
+// PL3: stable thread identity + per-role CPU sums + unique displayed frames.
+// The old logger keyed Apple CPU deltas by task_threads() enumeration index,
+// so a thread appearing or disappearing could reset a delta or attach it to
+// the wrong thread (and the old winseries.py stripped the #N suffix, letting
+// an idle MTVU#11 overwrite the active MTVU#8). Snapshots now carry the
+// stable Mach thread ID (Linux: kernel tid); deltas match by ID, a new ID
+// (or a renamed thread on a reused ID) starts at zero with isNew set, and
+// the per-window [perf-cpu] line sums deltas per role. All pure: the host
+// suite covers the matching, roles and line formats on canned snapshots.
+struct StableThreadSample
+{
+    uint64_t id = 0; // Mach thread_id on Apple, kernel tid on Linux
+    std::string name; // pthread/thread name (may be empty)
+    double cumMs = 0.0; // cumulative user+system CPU ms at snapshot time
+    bool isMain = false; // the snapshot thread (poll() is main-thread only)
+};
+
+struct StableThreadDelta
+{
+    std::string label; // "<name>#<id>" ("t"/"main" when unnamed)
+    double ms = 0.0; // window delta, or 0.0 when new
+    bool isNew = false; // ID unseen (or renamed) since the previous snapshot
+    std::string role; // base thread name for the [perf-cpu] sum (see roleOf)
+    bool isMain = false;
+};
+
+// Match a fresh snapshot against the previous one by stable ID. Order follows
+// the fresh snapshot; entries with no live predecessor start at zero marked
+// new. havePrev=false (first window) marks everything new.
+inline std::vector<StableThreadDelta> diffStableCpu(const std::vector<StableThreadSample> &prev, bool havePrev,
+                                                    const std::vector<StableThreadSample> &cur)
+{
+    std::vector<StableThreadDelta> out;
+    out.reserve(cur.size());
+    for (const StableThreadSample &c : cur)
+    {
+        double base = -1.0;
+        if (havePrev)
+        {
+            for (const StableThreadSample &p : prev)
+            {
+                if (p.id == c.id && p.name == c.name)
+                {
+                    base = p.cumMs;
+                    break;
+                }
+            }
+        }
+        StableThreadDelta d;
+        const std::string baseName = c.name.empty() ? (c.isMain ? "main" : "t") : c.name;
+        char label[96];
+        std::snprintf(label, sizeof(label), "%s#%llu", sanitizeThreadName(baseName).c_str(),
+                      static_cast<unsigned long long>(c.id));
+        d.label = label;
+        d.role = baseName;
+        d.isMain = c.isMain;
+        if (base >= 0.0)
+        {
+            d.ms = c.cumMs - base;
+            if (d.ms < 0.0)
+                d.ms = 0.0;
+        }
+        else
+        {
+            d.ms = 0.0;
+            d.isNew = true;
+        }
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+
+// Per-role CPU sums. Roles are the thread names the runtime sets
+// (GameThread, MTVU, MTVU-VIF, MTVU-GIF, GsWorker, Audio); the snapshot
+// (main) thread reads "main"; everything else folds into "other".
+inline std::string roleOf(const std::string &baseName, bool isMain)
+{
+    if (isMain)
+        return "main";
+    if (baseName == "GameThread")
+        return "game";
+    if (baseName == "MTVU-VIF")
+        return "vif";
+    if (baseName == "MTVU-GIF")
+        return "gif";
+    if (baseName == "MTVU")
+        return "mtvu";
+    if (baseName == "GsWorker")
+        return "gs";
+    if (baseName == "Audio")
+        return "audio";
+    return "other";
+}
+
+struct RoleSums
+{
+    double game = 0.0;
+    double mtvu = 0.0;
+    double vif = 0.0;
+    double gif = 0.0;
+    double gs = 0.0;
+    double main = 0.0;
+    double audio = 0.0;
+    double other = 0.0;
+    double total() const { return game + mtvu + vif + gif + gs + main + audio + other; }
+};
+
+inline RoleSums sumRoles(const std::vector<StableThreadDelta> &deltas)
+{
+    RoleSums sums;
+    for (const StableThreadDelta &d : deltas)
+    {
+        const std::string role = roleOf(d.role, d.isMain);
+        const double ms = d.ms >= 0.0 ? d.ms : 0.0;
+        if (role == "game")
+            sums.game += ms;
+        else if (role == "mtvu")
+            sums.mtvu += ms;
+        else if (role == "vif")
+            sums.vif += ms;
+        else if (role == "gif")
+            sums.gif += ms;
+        else if (role == "gs")
+            sums.gs += ms;
+        else if (role == "main")
+            sums.main += ms;
+        else if (role == "audio")
+            sums.audio += ms;
+        else
+            sums.other += ms;
+    }
+    return sums;
+}
+
+// One [perf-cpu] line per window (after the [perf] line): per-role CPU ms
+// deltas on the same basis as the threads="..." cells, so role sums can be
+// checked against the thread totals (total= below).
+inline std::string formatCpuLine(uint64_t tick, const RoleSums &sums)
+{
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+                  "[perf-cpu] tick=%llu game=%.1f mtvu=%.1f vif=%.1f gif=%.1f gs=%.1f main=%.1f audio=%.1f "
+                  "other=%.1f total=%.1f",
+                  static_cast<unsigned long long>(tick), sums.game, sums.mtvu, sums.vif, sums.gif, sums.gs,
+                  sums.main, sums.audio, sums.other, sums.total());
+    return buf;
+}
+
+// Nearest-rank p50 over a copy of frame-age samples (same rank rule as
+// summarizeStage); empty input reads -1 (no samples this window).
+inline double ageP50(const std::vector<double> &ages)
+{
+    if (ages.empty())
+        return -1.0;
+    std::vector<double> sorted = ages;
+    std::sort(sorted.begin(), sorted.end());
+    const double exact = std::ceil(0.50 * static_cast<double>(sorted.size()));
+    size_t i = exact < 1.0 ? 0 : static_cast<size_t>(exact) - 1;
+    if (i >= sorted.size())
+        i = sorted.size() - 1;
+    return sorted[i];
+}
+
+struct PresentStats
+{
+    uint64_t vblanks = 0; // guest VSyncs in the window (tick - windowTick)
+    uint64_t gsVsyncs = 0; // GuestVsync calls the GS backend processed
+    uint64_t latches = 0; // host-loop latch RPCs
+    double latchAvgMs = 0.0;
+    double latchMaxMs = 0.0;
+    uint64_t presents = 0; // EndDrawing/queue present events (may repeat frames)
+    uint64_t uframes = 0; // presents showing a new guest frame
+    uint64_t udup = 0; // presents re-showing the previous frame
+    double ageP50Ms = -1.0; // present wall minus that frame's export wall
+    double ageMaxMs = -1.0;
+};
+
+// One [perf-present] line per window (after [perf]/[perf-cpu]): presents count
+// EndDrawing/queue calls, uframes counts presents whose frame differs from
+// the previous one (guest tick carried through the shared-frame mailbox on
+// the share path, latch tick elsewhere). frame_age is present wall minus the
+// frame's export-submit wall (the export runs inside that guest tick's
+// processing); -1 when no aged frame was shown.
+inline std::string formatPresentLine(uint64_t tick, const PresentStats &st)
+{
+    char buf[320];
+    std::snprintf(buf, sizeof(buf),
+                  "[perf-present] tick=%llu vblanks=%llu gs_vsyncs=%llu latches=%llu latch_ms_avg=%.2f "
+                  "latch_ms_max=%.2f presents=%llu uframes=%llu udup=%llu frame_age_ms_p50=%.2f "
+                  "frame_age_ms_max=%.2f",
+                  static_cast<unsigned long long>(tick), static_cast<unsigned long long>(st.vblanks),
+                  static_cast<unsigned long long>(st.gsVsyncs), static_cast<unsigned long long>(st.latches),
+                  st.latchAvgMs, st.latchMaxMs, static_cast<unsigned long long>(st.presents),
+                  static_cast<unsigned long long>(st.uframes), static_cast<unsigned long long>(st.udup),
+                  st.ageP50Ms, st.ageMaxMs);
+    return buf;
+}
+
 // Runtime API (src/lib/ps2_perf_log.cpp). enabled() reads the knob; call it
 // once and cache the result at the call site.
 bool enabled();
 void poll(uint64_t vsyncTick);
 void notePresent();
-// FH6 (PS2X_PERF_PRESENT_DETAIL=1): present-path counts per window, printed as
-// one [perf-present] line after each [perf] line. noteGsVsync: guest VSyncs
-// the GS backend processed (worker); noteLatch: one host-loop latch RPC and
-// its duration. Lock-free; no-ops unless the log and the knob are on.
+// PL3: unique displayed frames. The main thread calls noteFrameAvailable()
+// whenever an iteration makes a new frame available (latch of a new guest
+// tick, or a newly published shared frame) and notePresentedFrame() at each
+// main-thread present (beside notePresent()); a present whose frame differs
+// from the previous one counts as unique, otherwise a duplicate. Birth wall
+// is the export-submit wall for that frame (0 = unknown: still counted, no
+// age sample). The VK worker path has no mailbox identity: it calls
+// noteWorkerPresent(id) per shown buffer instead (presents + unique when the
+// buffer id changes since the last shown one, no age). Lock-free except a
+// short mutex in the frame-identity updates; no-ops unless the log is on.
+// poll() prints one [perf-present] line per window (presents, uframes, age).
+void noteFrameAvailable(uint64_t tick, uint64_t birthWallNs, uint64_t extSeq);
+void notePresentedFrame();
+void noteWorkerPresent(uint64_t id);
+// Present-path counts per window (always counted while the log is on; the
+// old PS2X_PERF_PRESENT_DETAIL knob is retired, the [perf-present] line is
+// now unconditional). noteGsVsync: guest VSyncs the GS backend processed
+// (worker); noteLatch: one host-loop latch RPC and its duration. Lock-free;
+// no-ops unless the log is on.
 void noteGsVsync();
 void noteLatch(uint64_t ns);
 // Full-ring [perf-tail] dump (graceful shutdown only; no-op unless active).

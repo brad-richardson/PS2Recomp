@@ -17,7 +17,12 @@ struct SharedFrame
     void *surface = nullptr; // IOSurfaceRef, owned by the backend's VkImage
     uint32_t width = 0;
     uint32_t height = 0;
-    uint64_t seq = 0;
+    uint64_t seq = 0; // publication count (newest frame wins)
+    // PL3: guest tick + export-submit wall (steady ns) for the unique-frame
+    // count and frame age. The export runs inside this tick's processing, so
+    // the submit wall stands in for the frame's guest-vsync wall time.
+    uint64_t tick = 0;
+    uint64_t submitWallNs = 0;
 };
 
 bool enabled(); // PS2X_PRESENT_ZERO_COPY=1 (macOS: GL blit; iOS: GLES texture cache)

@@ -486,11 +486,12 @@ bool queue(uint64_t id, uint32_t w, uint32_t h)
 {
     // PT2: a shown buffer is the present event on this path (the main loop
     // skips GL swaps once the layer is live, so EndDrawing never fires).
-    // notePresent is thread-safe (GS worker calls it); the GL-path call is
-    // skipped while active(), so each frame counts exactly once.
+    // noteWorkerPresent is thread-safe (GS worker calls it); the GL-path call is
+    // skipped while active(), so each frame counts exactly once. PL3: the
+    // buffer id keys the unique count (a re-shown buffer reads as a duplicate).
     const bool shown = ledger().queue(id, w, h);
     if (shown)
-        ps2x::perflog::notePresent();
+        ps2x::perflog::noteWorkerPresent(id);
     return shown;
 }
 
