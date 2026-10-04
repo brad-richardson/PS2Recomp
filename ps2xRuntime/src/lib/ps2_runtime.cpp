@@ -21,6 +21,7 @@
 #include "ps2_perf_log.h"
 #include "ps2_vsync_lock.h"
 #include "ps2_virtual_pad.h"
+#include "ps2_ui_toast.h"
 #include "runtime/ps2_pad.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
@@ -6876,6 +6877,35 @@ void PS2Runtime::run()
 #endif
                 DrawRectangle(ds1X - 12, ds1Y - 8, ds1Tw + 24, ds1Font + 16, Color{0, 0, 0, 160});
                 DrawText(ds1Msg.c_str(), ds1X, ds1Y, ds1Font, Color{255, 255, 255, 230});
+#if defined(__ANDROID__)
+                if (vkUnder)
+                    EndBlendMode();
+#endif
+            }
+        }
+        // ACH2: reusable toast (ps2x::ui::toast; QSR1 reuses it after the
+        // merge). Same host-drawn placement as the DS1 line, one row lower.
+        if (!skipGl)
+        {
+            std::string toastMsg;
+            if (ps2x::ui::pollToast(toastMsg) && !toastMsg.empty())
+            {
+                if (toastMsg.size() > 120u)
+                    toastMsg.resize(120u);
+                const int toastFont = std::max(16, static_cast<int>(screenHeight / 36.0f));
+                const int toastTw = MeasureText(toastMsg.c_str(), toastFont);
+                const int toastX = static_cast<int>(screenWidth / 2.0f) - toastTw / 2;
+                const int toastY = static_cast<int>(screenHeight * 0.12f);
+#if defined(__ANDROID__)
+                if (vkUnder)
+                {
+                    rlSetBlendFactorsSeparate(0x0302 /*SRC_ALPHA*/, 0x0303 /*ONE_MINUS_SRC_ALPHA*/,
+                                              1 /*ONE*/, 0x0303, 0x8006 /*FUNC_ADD*/, 0x8006);
+                    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+                }
+#endif
+                DrawRectangle(toastX - 12, toastY - 8, toastTw + 24, toastFont + 16, Color{0, 0, 0, 160});
+                DrawText(toastMsg.c_str(), toastX, toastY, toastFont, Color{255, 255, 255, 230});
 #if defined(__ANDROID__)
                 if (vkUnder)
                     EndBlendMode();
