@@ -79,7 +79,11 @@ namespace
         }
         if (!r.ok())
             return false;
-        const bool same = savedMode == static_cast<uint8_t>(mode()) && savedFix == fixMask() && savedFix12 == fixMask12();
+        // FLK2: flare only skips odd-update probe-loop calls (no converted words, no state of its own beyond
+        // the shared update parity), so a state loads with it toggled either way.
+        const uint32_t kStateless12 = kFix12Flare;
+        const bool same = savedMode == static_cast<uint8_t>(mode()) && savedFix == fixMask() &&
+                          (savedFix12 & ~kStateless12) == (fixMask12() & ~kStateless12);
         if (!same)
         {
             if (converted(b[0], b[1], b[2], b[3], b[5]))

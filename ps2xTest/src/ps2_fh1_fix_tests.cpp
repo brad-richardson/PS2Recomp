@@ -58,6 +58,16 @@ void register_ps2_fh1_fix_tests()
             t.Equals(f.fh12, kFix12All & ~kFix12Loops2, "fh12 drops loops2");
         });
 
+        tc.Run("FLK2 flare is opt-in", [](TestCase &t)
+        {
+            t.IsTrue((kFix12All & kFix12Flare) == 0u, "flare not in all");
+            const FixMasks f = parseFix("all,flare");
+            t.IsTrue(f.ok, "parses");
+            t.Equals(f.main, kFixAll, "main untouched");
+            t.Equals(f.fh12, kFix12All | kFix12Flare, "fh12 adds flare");
+            t.Equals(parseFix("all,flare,-flare").fh12, kFix12All, "opt-out");
+        });
+
         tc.Run("unknown items refuse", [](TestCase &t)
         {
             const FixMasks f = parseFix("all,stik2");
