@@ -9,6 +9,7 @@
 #include "ps2_fh1_full120.h"
 #include "ps2_ssx3_course_manifest.h"
 #include "ps2_ssx3_lod.h"
+#include "ps2_ssx3_tricky_hud.h"
 #include "ps2_ssx3_tricky_menu.h"
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
@@ -2087,6 +2088,59 @@ void dumpPresentationFrame(const uint8_t *rgba,
              << std::hex << hash;
     ps2_log::emitLine(dumpLine.str());
 }
+
+// TK43a: Tricky meter reskin (output-only). Composed into the latched host
+// frame before dump/upload, so dumps and presents match. Reads committed
+// guest words; writes no guest memory, so the det-hash cannot move. Active
+// only on a non-Stock course-manifest mode: SSX 3 courses skip untouched.
+void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t height, uint64_t tick)
+{
+    static const bool wanted = [] {
+        const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD");
+        return env && env[0] == '1';
+    }();
+    static ps2_ssx3_tricky_hud::Atlas atlas;
+    static bool atlasTried = false;
+    static bool lastFull = false;
+    static uint64_t splashUntil = 0u;
+    if (!wanted || !rt || !rgba || width == 0u || height == 0u)
+        return;
+    ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
+    uint8_t *rdram = rt->memory().getRDRAM();
+    if (!ms.armed || !rdram || ps2_ssx3_course::modeCurrent(ms, rdram) == 0u)
+    {
+        lastFull = false; // re-arm the first-full splash for the next race
+        return;
+    }
+    if (!atlasTried)
+    {
+        atlasTried = true;
+        const char *art = std::getenv("PS2X_SSX3_TRICKY_HUD_ART");
+        atlas = ps2_ssx3_tricky_hud::loadAtlasFile(art);
+        std::fprintf(stderr, "[ssx3-tricky-hud] art '%s': %s\n", art ? art : "(unset)",
+                     atlas.ok ? "loaded" : "missing/invalid, overlay off");
+    }
+    if (!atlas.ok)
+        return;
+    uint32_t ptrAddr = ps2_ssx3_tricky_hud::kDefaultRiderPtr;
+    if (const char *p = std::getenv("PS2X_TK12_AP_PTR"))
+        ptrAddr = static_cast<uint32_t>(std::strtoul(p, nullptr, 0));
+    const ps2_ssx3_tricky_hud::MeterFrame mf =
+        ps2_ssx3_tricky_hud::readMeterFrame(rdram, PS2_RAM_SIZE, ptrAddr);
+    if (!mf.ok)
+        return;
+    // TK43a Part 2 diag: forced DISPLAY values for screenshots (unlisted knob,
+    // class diag; the guest words above are still only read, never written).
+    static const ps2_ssx3_tricky_hud::ForceValue forced =
+        ps2_ssx3_tricky_hud::parseForce(std::getenv("PS2X_SSX3_TRICKY_HUD_FORCE"));
+    const float shownFill = forced.ok ? forced.fill : mf.fill;
+    const bool full = (forced.ok ? forced.level : mf.level) >= 1;
+    if (full && !lastFull)
+        splashUntil = tick + 45u;
+    lastFull = full;
+    ps2_ssx3_tricky_hud::composeOverlay(rgba, static_cast<int>(width), static_cast<int>(height), atlas, shownFill,
+                                       full, tick, splashUntil);
+}
 } // namespace
 
 // I26: on-screen virtual controls, drawn by the host over the presented frame
@@ -2994,6 +3048,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     if (!s_scratch.empty() && width != 0u && height != 0u &&
         s_scratch.size() == static_cast<size_t>(width) * static_cast<size_t>(height) * 4u)
     {
+        trickyHudOverlay(rt, s_scratch.data(), width, height, currentTick); // TK43a: output-only reskin
         dumpPresentationFrame(s_scratch.data(), width, height, currentTick, displayFbp, sourceFbp,
                               usedPreferredDisplaySource, false, rt->memory().gs().smode2,
                               rt->memory().gs().pmode, rt->memory().gs().display1, rt->memory().gs().display2,
