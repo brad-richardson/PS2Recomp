@@ -444,8 +444,11 @@ uint64_t allocateBuffer(uint32_t w, uint32_t h, AHardwareBuffer **out)
     desc.height = h;
     desc.layers = 1;
     desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+    // TK43e: CPU_WRITE_RARELY for the TRICKY meter composite (the overlay
+    // locks the HUD region read/write after the GPU export, before queue).
     desc.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-                 AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY | AHARDWAREBUFFER_USAGE_CPU_READ_RARELY;
+                 AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY | AHARDWAREBUFFER_USAGE_CPU_READ_RARELY |
+                 AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY;
     AHardwareBuffer *buf = nullptr;
     const int rc = AHardwareBuffer_allocate(&desc, &buf);
     AHardwareBuffer_Desc got = {};
