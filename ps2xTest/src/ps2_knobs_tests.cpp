@@ -281,7 +281,7 @@ void register_ps2_knobs_tests()
                {
             size_t n = 0;
             const char *const *knobs = ps2x::cf2DumpKnobs(&n);
-            t.IsTrue(n >= 100, "at least a hundred curated knobs (VX2 dropped four dead VU1 knobs)");
+            t.IsTrue(n >= 90, "at least ninety curated knobs (KNC1P2 B4d dropped 17 dead knobs; 96 remain)");
             for (size_t i = 1; i < n; ++i)
                 t.IsTrue(std::strcmp(knobs[i - 1], knobs[i]) < 0, "sorted and unique");
             t.IsTrue(ps2x::cf2KnobIsCurated("PS2X_SOUND"), "curated hit");
