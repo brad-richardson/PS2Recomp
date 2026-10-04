@@ -48,14 +48,14 @@ void register_ps2_fh1_fix_tests()
             t.IsTrue(parseFix("all,").ok, "trailing comma");
         });
 
-        tc.Run("FH27 bonusflip and loops2 are opt-in", [](TestCase &t)
+        tc.Run("FH27 bonusflip and loops2 are in all (DEF1, Brad 10-03)", [](TestCase &t)
         {
-            t.IsTrue((kFixAll & kFixBonusFlip) == 0u, "bonusflip not in all");
-            t.IsTrue((kFix12All & kFix12Loops2) == 0u, "loops2 not in all");
-            const FixMasks f = parseFix("all,bonusflip,loops2");
+            t.IsTrue((kFixAll & kFixBonusFlip) != 0u, "bonusflip in all");
+            t.IsTrue((kFix12All & kFix12Loops2) != 0u, "loops2 in all");
+            const FixMasks f = parseFix("all,-bonusflip,-loops2");
             t.IsTrue(f.ok, "parses");
-            t.Equals(f.main, kFixAll | kFixBonusFlip, "main adds bonusflip");
-            t.Equals(f.fh12, kFix12All | kFix12Loops2, "fh12 adds loops2");
+            t.Equals(f.main, kFixAll & ~static_cast<uint64_t>(kFixBonusFlip), "main drops bonusflip");
+            t.Equals(f.fh12, kFix12All & ~kFix12Loops2, "fh12 drops loops2");
         });
 
         tc.Run("unknown items refuse", [](TestCase &t)

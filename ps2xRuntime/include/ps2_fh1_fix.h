@@ -50,7 +50,7 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     // FH26 (Brad 10-02 "Yes ship both"; in "all", "all,-stick2" opts out):
     kFixStick2 = 1ull << 34,    // 0x133308 bounded offset slews [0x49bc94]/[0x49bca0] (0x1340a8/0x134224): ~0.05 per update -> half (class b, FCR1 1)
     kFixClockSign = 1ull << 35, // with clock: the 0x1e1458 stamp's exit restamp keeps the signed elapsed (FCR1 3)
-    // FH27 (opt-in, not in "all"):
+    // FH27 (in "all" since DEF1, Brad 10-03 "yes make them defaults"; "all,-bonusflip" opts out):
     kFixBonusFlip = 1ull << 36, // with bonus: a live trick-bonus rate +0x3c is rescaled at each events flip (FCR1 4)
 };
 
@@ -72,7 +72,7 @@ enum : uint32_t
     kFix12Popups = 1u << 11,   // HUD timed slots (0x116fb8, crash score popups): elapsed += 1/60 per update (class b, FH24)
     kFix12SndDt = 1u << 12,    // race sound-tree update 0x285bf8 (from 0x22c014): private dt vblanks * 1/60 (class h, FH24)
     kFix12HudProg = 1u << 13,  // race-HUD progress table 0x4c8bc8 (0x210618/0x20eda0): per-update slew limits (class b, FH24)
-    // FH27 (opt-in, not in "all"):
+    // FH27 (in "all" since DEF1, Brad 10-03; "all,-loops2" opts out):
     kFix12Loops2 = 1u << 14,   // with loops: a loop controller built while active (ctor 0x341aa0, step = x/A.rate at 120) gets its step in stock units (FCR1 4)
 };
 
@@ -139,15 +139,17 @@ inline uint64_t fixItem(const std::string &item) noexcept
 }
 
 // "all": every group except kFixLift (FH8: no window where it binds) and the
-// internal kFixRamp. FH26 adds stick2 + clocksign (Brad 10-02).
+// internal kFixRamp. FH26 adds stick2 + clocksign (Brad 10-02); DEF1 adds
+// bonusflip + loops2 (Brad 10-03).
 inline constexpr uint64_t kFixAll =
     kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession | kFixTimers |
     kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim | kFixBonus | kFixAiGate |
     kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset | kFixMeter | kFixBoost | kFixGround | kFixEntry |
-    kFixRclock | kFixEmitter | kFixFx | kFixClock2 | kFixHudfill | kFixStick2 | kFixClockSign;
+    kFixRclock | kFixEmitter | kFixFx | kFixClock2 | kFixHudfill | kFixStick2 | kFixClockSign | kFixBonusFlip;
 inline constexpr uint32_t kFix12All = kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse |
                                       kFix12Crash | kFix12FxTimer | kFix12Bounce | kFix12Particles |
-                                      kFix12CrashBody | kFix12Uber | kFix12Popups | kFix12SndDt | kFix12HudProg;
+                                      kFix12CrashBody | kFix12Uber | kFix12Popups | kFix12SndDt | kFix12HudProg |
+                                      kFix12Loops2;
 
 struct FixMasks
 {
