@@ -386,6 +386,74 @@ inline int litCoils(float fill)
     return lit;
 }
 
+// One bilinear atlas sample (straight-alpha float source), shared by blit
+// and the TK43e sprite pre-render so the two are bit-identical by
+// construction. (rx, ry) is the dest-px position relative to the draw.
+inline void sampleAtlas(const Atlas &a, const Rect &s, int rx, int ry, int dw, int dh, float dim,
+                        float &sr, float &sg, float &sb, float &sa)
+{
+    const float v = (static_cast<float>(ry) + 0.5f) * static_cast<float>(s.h) / static_cast<float>(dh) - 0.5f;
+    int v0 = static_cast<int>(std::floor(v));
+    float fv = v - static_cast<float>(v0);
+    if (v0 < 0)
+    {
+        v0 = 0;
+        fv = 0.0f;
+    }
+    if (v0 > s.h - 2)
+    {
+        v0 = s.h - 2;
+        fv = 1.0f;
+    }
+    if (s.h < 2)
+    {
+        v0 = 0;
+        fv = 0.0f;
+    }
+    const float u = (static_cast<float>(rx) + 0.5f) * static_cast<float>(s.w) / static_cast<float>(dw) - 0.5f;
+    int u0 = static_cast<int>(std::floor(u));
+    float fu = u - static_cast<float>(u0);
+    if (u0 < 0)
+    {
+        u0 = 0;
+        fu = 0.0f;
+    }
+    if (u0 > s.w - 2)
+    {
+        u0 = s.w - 2;
+        fu = 1.0f;
+    }
+    if (s.w < 2)
+    {
+        u0 = 0;
+        fu = 0.0f;
+    }
+    const uint8_t *p00 = &a.rgba[((s.y + v0) * a.w + s.x + u0) * 4];
+    const uint8_t *p10 = p00 + 4;
+    const uint8_t *p01 = p00 + static_cast<size_t>(a.w) * 4u;
+    const uint8_t *p11 = p01 + 4;
+    const float w00 = (1.0f - fu) * (1.0f - fv);
+    const float w10 = fu * (1.0f - fv);
+    const float w01 = (1.0f - fu) * fv;
+    const float w11 = fu * fv;
+    sr = (p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11) * dim;
+    sg = (p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11) * dim;
+    sb = (p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11) * dim;
+    sa = (p00[3] * w00 + p10[3] * w10 + p01[3] * w01 + p11[3] * w11) / 255.0f;
+}
+
+// Alpha-over blend of one float sample onto a frame px (blit's formula).
+inline void blendSample(float sr, float sg, float sb, float sa, uint8_t *d)
+{
+    if (sa <= 0.0f)
+        return;
+    const float ia = 1.0f - sa;
+    d[0] = static_cast<uint8_t>(sr * sa + d[0] * ia + 0.5f);
+    d[1] = static_cast<uint8_t>(sg * sa + d[1] * ia + 0.5f);
+    d[2] = static_cast<uint8_t>(sb * sa + d[2] * ia + 0.5f);
+    d[3] = 255;
+}
+
 // Bilinear atlas blit with alpha-over onto an RGBA frame (both top-left).
 inline void blit(const Atlas &a, const Rect &s, uint8_t *frame, int fw, int fh, int dx, int dy, int dw,
                  int dh, float dim = 1.0f)
@@ -398,64 +466,14 @@ inline void blit(const Atlas &a, const Rect &s, uint8_t *frame, int fw, int fh, 
     const int y1 = dy + dh > fh ? fh : dy + dh;
     for (int y = y0; y < y1; ++y)
     {
-        const float v = (static_cast<float>(y - dy) + 0.5f) * static_cast<float>(s.h) / static_cast<float>(dh) - 0.5f;
-        int v0 = static_cast<int>(std::floor(v));
-        float fv = v - static_cast<float>(v0);
-        if (v0 < 0)
-        {
-            v0 = 0;
-            fv = 0.0f;
-        }
-        if (v0 > s.h - 2)
-        {
-            v0 = s.h - 2;
-            fv = 1.0f;
-        }
-        if (s.h < 2)
-        {
-            v0 = 0;
-            fv = 0.0f;
-        }
         for (int x = x0; x < x1; ++x)
         {
-            const float u = (static_cast<float>(x - dx) + 0.5f) * static_cast<float>(s.w) / static_cast<float>(dw) - 0.5f;
-            int u0 = static_cast<int>(std::floor(u));
-            float fu = u - static_cast<float>(u0);
-            if (u0 < 0)
-            {
-                u0 = 0;
-                fu = 0.0f;
-            }
-            if (u0 > s.w - 2)
-            {
-                u0 = s.w - 2;
-                fu = 1.0f;
-            }
-            if (s.w < 2)
-            {
-                u0 = 0;
-                fu = 0.0f;
-            }
-            const uint8_t *p00 = &a.rgba[((s.y + v0) * a.w + s.x + u0) * 4];
-            const uint8_t *p10 = p00 + 4;
-            const uint8_t *p01 = p00 + static_cast<size_t>(a.w) * 4u;
-            const uint8_t *p11 = p01 + 4;
-            const float w00 = (1.0f - fu) * (1.0f - fv);
-            const float w10 = fu * (1.0f - fv);
-            const float w01 = (1.0f - fu) * fv;
-            const float w11 = fu * fv;
-            const float sr = (p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11) * dim;
-            const float sg = (p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11) * dim;
-            const float sb = (p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11) * dim;
-            const float sa = (p00[3] * w00 + p10[3] * w10 + p01[3] * w01 + p11[3] * w11) / 255.0f;
+            float sr = 0.0f, sg = 0.0f, sb = 0.0f, sa = 0.0f;
+            sampleAtlas(a, s, x - dx, y - dy, dw, dh, dim, sr, sg, sb, sa);
             if (sa <= 0.0f)
                 continue;
-            uint8_t *d = &frame[(static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(x)) * 4u];
-            const float ia = 1.0f - sa;
-            d[0] = static_cast<uint8_t>(sr * sa + d[0] * ia + 0.5f);
-            d[1] = static_cast<uint8_t>(sg * sa + d[1] * ia + 0.5f);
-            d[2] = static_cast<uint8_t>(sb * sa + d[2] * ia + 0.5f);
-            d[3] = 255;
+            blendSample(sr, sg, sb, sa,
+                        &frame[(static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(x)) * 4u]);
         }
     }
 }
@@ -510,16 +528,22 @@ inline void smearCover(uint8_t *frame, int fw, int fh, int x0, int y0, int x1, i
 }
 
 // Layout in 640x480 space (measured off the SSX 3 meter footprint), mapped
-// onto any export size right-anchored and height-scaled. The guest score
+// onto any export size right-anchored and per-axis scaled. The guest score
 // above y=50 is kept; everything else the meter covers is replaced.
+// TK43e: the VK/AHB export (1920x1080) is the snapshot content stretched
+// per axis (3.0 x 2.25, the anamorphic 16:9), not uniformly scaled: a
+// height-only scale misplaces the smear by ~78 px and peeks the guest ball
+// (TK43e gari leg sc04). sx == sy on 640x480 and 1280x960, so the GL path
+// and the tuned geometry are unchanged there.
 struct Layout
 {
-    float s = 1.0f; // h/480
+    float sx = 1.0f; // fw/640
+    float sy = 1.0f; // fh/480
     int fw = 640;
-    int X(float x) const { return static_cast<int>(std::lround(fw - (640.0f - x) * s)); }
-    int Y(float y) const { return static_cast<int>(std::lround(y * s)); }
-    int W(float w) const { return static_cast<int>(std::lround(w * s)); }
-    int H(float h) const { return static_cast<int>(std::lround(h * s)); }
+    int X(float x) const { return static_cast<int>(std::lround(fw - (640.0f - x) * sx)); }
+    int Y(float y) const { return static_cast<int>(std::lround(y * sy)); }
+    int W(float w) const { return static_cast<int>(std::lround(w * sx)); }
+    int H(float h) const { return static_cast<int>(std::lround(h * sy)); }
 };
 
 // TK43e: the HUD's screen region (buffer px, clipped to the frame): the
@@ -536,7 +560,8 @@ inline Rect hudRegionRect(int fw, int fh)
     if (fw <= 0 || fh <= 0)
         return {0, 0, 0, 0};
     Layout L;
-    L.s = static_cast<float>(fh) / 480.0f;
+    L.sx = static_cast<float>(fw) / 640.0f;
+    L.sy = static_cast<float>(fh) / 480.0f;
     L.fw = fw;
     int x0 = L.X(481) - 3;
     int y0 = L.Y(49) - 3;
@@ -568,7 +593,8 @@ inline void composeHudInto(uint8_t *dst, int bw, int bh, int ox, int oy, int fw,
     if (!dst || !a.ok || bw <= 0 || bh <= 0 || fw <= 0 || fh <= 0)
         return;
     Layout L;
-    L.s = static_cast<float>(fh) / 480.0f;
+    L.sx = static_cast<float>(fw) / 640.0f;
+    L.sy = static_cast<float>(fh) / 480.0f;
     L.fw = fw;
     // Pole through the stack (covers the SSX 3 red center line, x582-586):
     // Tricky's grey cylinder profile stretched across its width.
@@ -645,6 +671,174 @@ inline void composeOverlay(uint8_t *frame, int fw, int fh, const Atlas &a, float
     for (int y = 0; y < r.h; ++y)
         std::memcpy(&frame[(static_cast<size_t>(r.y + y) * static_cast<size_t>(fw) + static_cast<size_t>(r.x)) * 4u],
                     &tmp[static_cast<size_t>(y) * rowBytes], rowBytes);
+}
+
+// TK43e: pre-scaled art sprites for the VK/AHB path. The export size is
+// fixed per run, so every draw's bilinear samples are too: renderSprite
+// pre-computes them once (float, via the same sampleAtlas) and stampSprite
+// blends them per frame with the same blendSample. Cached == direct
+// bit-exact (locked by the Region test); per-frame bilinear drops to zero.
+// Only the background-dependent smear still runs per frame.
+struct SpriteImg
+{
+    int w = 0;
+    int h = 0;
+    std::vector<float> px; // w*h*4 straight-alpha float samples
+};
+
+inline SpriteImg renderSprite(const Atlas &a, const Rect &s, int dw, int dh, float dim)
+{
+    SpriteImg img;
+    if (!a.ok || dw <= 0 || dh <= 0)
+        return img;
+    img.w = dw;
+    img.h = dh;
+    img.px.resize(static_cast<size_t>(dw) * static_cast<size_t>(dh) * 4u);
+    for (int y = 0; y < dh; ++y)
+        for (int x = 0; x < dw; ++x)
+        {
+            float sr = 0.0f, sg = 0.0f, sb = 0.0f, sa = 0.0f;
+            sampleAtlas(a, s, x, y, dw, dh, dim, sr, sg, sb, sa);
+            float *o = &img.px[(static_cast<size_t>(y) * static_cast<size_t>(dw) + static_cast<size_t>(x)) * 4u];
+            o[0] = sr;
+            o[1] = sg;
+            o[2] = sb;
+            o[3] = sa;
+        }
+    return img;
+}
+
+inline void stampSprite(const SpriteImg &img, uint8_t *dst, int bw, int bh, int dx, int dy)
+{
+    if (!dst || bw <= 0 || bh <= 0 || img.w <= 0 || img.h <= 0 || img.px.empty())
+        return;
+    const int x0 = dx < 0 ? 0 : dx;
+    const int y0 = dy < 0 ? 0 : dy;
+    const int x1 = dx + img.w > bw ? bw : dx + img.w;
+    const int y1 = dy + img.h > bh ? bh : dy + img.h;
+    for (int y = y0; y < y1; ++y)
+        for (int x = x0; x < x1; ++x)
+        {
+            const float *o =
+                &img.px[(static_cast<size_t>(y - dy) * static_cast<size_t>(img.w) + static_cast<size_t>(x - dx)) *
+                        4u];
+            if (o[3] <= 0.0f)
+                continue;
+            blendSample(o[0], o[1], o[2], o[3],
+                        &dst[(static_cast<size_t>(y) * static_cast<size_t>(bw) + static_cast<size_t>(x)) * 4u]);
+        }
+}
+
+// Every draw's dest rect (frame coords) + pre-rendered variant images.
+// Dest rects come from the same Layout calls as composeHudInto.
+struct HudSprites
+{
+    bool ok = false;
+    const Atlas *atlas = nullptr;
+    int fw = 0;
+    int fh = 0;
+    Rect region;
+    Rect poleDst;
+    SpriteImg pole;
+    Rect ringDst[kCoils];
+    SpriteImg ringImg[5]; // 0..3 bands, 4 silver
+    Rect jewelDst;
+    SpriteImg jewelImg[3]; // 0 grey, 1 red bright, 2 red dim
+    int smearX0 = 0, smearY0 = 0, smearX1 = 0, smearY1 = 0;
+    Rect archDst[6];
+    SpriteImg archChrome[6], archRed[6];
+    Rect pillDst;
+    SpriteImg pillImg[2]; // 0 red (full), 1 grey
+    Rect splashDst;
+    SpriteImg splash;
+};
+
+inline bool buildHudSprites(HudSprites &ss, const Atlas &a, int fw, int fh)
+{
+    ss = HudSprites{};
+    if (!a.ok || fw <= 0 || fh <= 0)
+        return false;
+    Layout L;
+    L.sx = static_cast<float>(fw) / 640.0f;
+    L.sy = static_cast<float>(fh) / 480.0f;
+    L.fw = fw;
+    ss.fw = fw;
+    ss.fh = fh;
+    ss.atlas = &a;
+    ss.region = hudRegionRect(fw, fh);
+    if (ss.region.w <= 0 || ss.region.h <= 0)
+        return false;
+    ss.poleDst = {L.X(584), L.Y(140), L.W(5), L.H(260)};
+    ss.pole = renderSprite(a, poleRect(), ss.poleDst.w, ss.poleDst.h, 1.0f);
+    for (int i = 0; i < kCoils; ++i)
+    {
+        const float cy = 395.0f - static_cast<float>(i) * 16.5f;
+        ss.ringDst[i] = {L.X(563), L.Y(cy - 6.0f), L.W(49), L.H(12)};
+    }
+    for (int b = 0; b < 4; ++b)
+        ss.ringImg[b] = renderSprite(a, ringRect(b), ss.ringDst[0].w, ss.ringDst[0].h, 1.0f);
+    ss.ringImg[4] = renderSprite(a, silverRingRect(), ss.ringDst[0].w, ss.ringDst[0].h, 1.0f);
+    ss.jewelDst = {L.X(568), L.Y(107), L.W(40), L.H(36)};
+    ss.jewelImg[0] = renderSprite(a, jewelGreyRect(), ss.jewelDst.w, ss.jewelDst.h, 1.0f);
+    ss.jewelImg[1] = renderSprite(a, jewelRedRect(), ss.jewelDst.w, ss.jewelDst.h, 1.0f);
+    ss.jewelImg[2] = renderSprite(a, jewelRedRect(), ss.jewelDst.w, ss.jewelDst.h, 0.82f);
+    ss.smearX0 = L.X(536);
+    ss.smearY0 = L.Y(49);
+    ss.smearX1 = L.X(628);
+    ss.smearY1 = L.Y(101);
+    static const int kArch[6][2] = {
+        {527, 94}, {550, 83}, {565, 72}, {579, 79}, {595, 73}, {607, 94},
+    };
+    for (int i = 0; i < 6; ++i)
+    {
+        const Rect dstR = letterRect(i);
+        ss.archDst[i] = {L.X(kArch[i][0]), L.Y(kArch[i][1]), L.W(dstR.w), L.H(dstR.h)};
+        ss.archChrome[i] = renderSprite(a, letterRect(i), ss.archDst[i].w, ss.archDst[i].h, 1.0f);
+        ss.archRed[i] = renderSprite(a, litLetterRect(i), ss.archDst[i].w, ss.archDst[i].h, 1.0f);
+    }
+    ss.pillDst = {L.X(571), L.Y(400), L.W(34), L.H(30)};
+    ss.pillImg[0] = renderSprite(a, pillRect(), ss.pillDst.w, ss.pillDst.h, 1.0f);
+    ss.pillImg[1] = renderSprite(a, pillGreyRect(), ss.pillDst.w, ss.pillDst.h, 1.0f);
+    ss.splashDst = {L.X(481), L.Y(114), L.W(156), L.H(116)};
+    ss.splash = renderSprite(a, snowflakeRect(), ss.splashDst.w, ss.splashDst.h, 1.0f);
+    ss.ok = true;
+    return true;
+}
+
+// The cached compose: same draws, same order, same values as
+// composeHudInto; per-frame state only picks variant images.
+inline void stampHudInto(uint8_t *tmp, int bw, int bh, int ox, int oy, const HudSprites &ss, float fill,
+                         bool full, uint64_t tick, uint64_t splashUntilTick, int litLetters,
+                         uint64_t flashUntilTick)
+{
+    if (!tmp || !ss.ok || bw <= 0 || bh <= 0)
+        return;
+    stampSprite(ss.pole, tmp, bw, bh, ss.poleDst.x - ox, ss.poleDst.y - oy);
+    const int lit = litCoils(fill);
+    for (int i = 0; i < kCoils; ++i)
+    {
+        const SpriteImg &img = i < lit ? ss.ringImg[i / 4] : ss.ringImg[4];
+        stampSprite(img, tmp, bw, bh, ss.ringDst[i].x - ox, ss.ringDst[i].y - oy);
+    }
+    const bool dim = full && (((tick >> 3) & 1u) != 0u);
+    stampSprite(full ? (dim ? ss.jewelImg[2] : ss.jewelImg[1]) : ss.jewelImg[0], tmp, bw, bh,
+                ss.jewelDst.x - ox, ss.jewelDst.y - oy);
+    smearCover(tmp, bw, bh, ss.smearX0 - ox, ss.smearY0 - oy, ss.smearX1 - ox, ss.smearY1 - oy);
+    if (litLetters < 0)
+        litLetters = 0;
+    if (litLetters > 6)
+        litLetters = 6;
+    const bool flashing = tick < flashUntilTick;
+    const bool flashRed = flashing && (((tick >> 3) & 1u) == 0u);
+    for (int i = 0; i < 6; ++i)
+    {
+        const bool red = flashing ? flashRed : (i < litLetters);
+        stampSprite(red ? ss.archRed[i] : ss.archChrome[i], tmp, bw, bh, ss.archDst[i].x - ox,
+                    ss.archDst[i].y - oy);
+    }
+    stampSprite(full ? ss.pillImg[0] : ss.pillImg[1], tmp, bw, bh, ss.pillDst.x - ox, ss.pillDst.y - oy);
+    if (tick < splashUntilTick)
+        stampSprite(ss.splash, tmp, bw, bh, ss.splashDst.x - ox, ss.splashDst.y - oy);
 }
 
 // TK43e: the overlay's process-wide state, shared by the GL call site (the

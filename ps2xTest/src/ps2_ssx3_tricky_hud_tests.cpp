@@ -407,12 +407,14 @@ void register_ps2_ssx3_tricky_hud_tests()
                {
             using namespace ps2_ssx3_tricky_hud;
             const int kArch[6][2] = {{527, 94}, {550, 83}, {565, 72}, {579, 79}, {595, 73}, {607, 94}};
-            for (int pass = 0; pass < 2; ++pass)
+            const int sizes[3][2] = {{640, 480}, {1280, 960}, {1920, 1080}};
+            for (int pass = 0; pass < 3; ++pass)
             {
-                const int fw = pass == 0 ? 640 : 1280;
-                const int fh = pass == 0 ? 480 : 960;
+                const int fw = sizes[pass][0];
+                const int fh = sizes[pass][1];
                 Layout L;
-                L.s = static_cast<float>(fh) / 480.0f;
+                L.sx = static_cast<float>(fw) / 640.0f;
+                L.sy = static_cast<float>(fh) / 480.0f;
                 L.fw = fw;
                 const Rect r = hudRegionRect(fw, fh);
                 auto inside = [&](int x, int y) { return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h; };
@@ -450,10 +452,11 @@ void register_ps2_ssx3_tricky_hud_tests()
                {
             using namespace ps2_ssx3_tricky_hud;
             Atlas a = synthAtlas();
-            for (int pass = 0; pass < 2; ++pass)
+            const int sizes[3][2] = {{640, 480}, {1280, 960}, {1920, 1080}};
+            for (int pass = 0; pass < 3; ++pass)
             {
-                const int fw = pass == 0 ? 640 : 1280;
-                const int fh = pass == 0 ? 480 : 960;
+                const int fw = sizes[pass][0];
+                const int fh = sizes[pass][1];
                 std::vector<uint8_t> f(static_cast<size_t>(fw) * static_cast<size_t>(fh) * 4u);
                 uint32_t rng = 0x12345678u;
                 for (size_t i = 0; i < f.size(); ++i)
@@ -512,5 +515,47 @@ void register_ps2_ssx3_tricky_hud_tests()
             for (int y = 0; y < r.h; ++y)
                 std::memcpy(&g[(static_cast<size_t>(r.y + y) * fw + r.x) * 4u],
                             &tmp[static_cast<size_t>(y) * r.w * 4u], static_cast<size_t>(r.w) * 4u);
-            t.IsTrue(f == g, "manual region path matches"); });});
+            t.IsTrue(f == g, "manual region path matches"); });
+        tc.Run("cached stamps equal direct compose at 1x, 2x and 1080p", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas a = synthAtlas();
+            const int sizes[3][2] = {{640, 480}, {1280, 960}, {1920, 1080}};
+            const float fills[3] = {0.0f, 0.53f, 1.0f};
+            for (int s = 0; s < 3; ++s)
+            {
+                const int fw = sizes[s][0], fh = sizes[s][1];
+                HudSprites ss;
+                t.IsTrue(buildHudSprites(ss, a, fw, fh), "sprites build");
+                for (int v = 0; v < 3; ++v)
+                {
+                    const float fill = fills[v];
+                    const bool full = v == 2;
+                    // tick 8u = dim pulse phase; splash live; 4 letters.
+                    const uint64_t tick = 8u, splash = 90u;
+                    std::vector<uint8_t> f(static_cast<size_t>(fw) * fh * 4u);
+                    uint32_t rng = 0x51ab1eFu + static_cast<uint32_t>(s * 16 + v);
+                    for (size_t i = 0; i < f.size(); ++i)
+                    {
+                        rng = rng * 1664525u + 1013904223u;
+                        f[i] = static_cast<uint8_t>(rng >> 24);
+                    }
+                    std::vector<uint8_t> g = f;
+                    composeOverlay(f.data(), fw, fh, a, fill, full, tick, splash, 4, 0u);
+                    const Rect r = hudRegionRect(fw, fh);
+                    std::vector<uint8_t> tmp(static_cast<size_t>(r.w) * r.h * 4u);
+                    for (int y = 0; y < r.h; ++y)
+                        std::memcpy(&tmp[static_cast<size_t>(y) * r.w * 4u],
+                                    &g[(static_cast<size_t>(r.y + y) * fw + r.x) * 4u],
+                                    static_cast<size_t>(r.w) * 4u);
+                    stampHudInto(tmp.data(), r.w, r.h, r.x, r.y, ss, fill, full, tick, splash, 4, 0u);
+                    for (int y = 0; y < r.h; ++y)
+                        std::memcpy(&g[(static_cast<size_t>(r.y + y) * fw + r.x) * 4u],
+                                    &tmp[static_cast<size_t>(y) * r.w * 4u],
+                                    static_cast<size_t>(r.w) * 4u);
+                    char name[64];
+                    std::snprintf(name, sizeof(name), "cached==direct %dx%d v%d", fw, fh, v);
+                    t.IsTrue(f == g, name);
+                }
+            } });});
 }
