@@ -814,4 +814,46 @@ namespace ps2x::vpad
     {
         return !(value && value[0] == '0');
     }
+    // QSR1: touch quick-save menu geometry (pure; the render loop draws it
+    // and hit-tests before the guest pad, so menu touches never reach the
+    // game). A dot top-centre plus an expanded Save/Load/Retry row under it.
+    // Top-centre: the right column is full (R1/R2 shoulders at 0.10u, the
+    // face cluster's right edge 0.005u from the screen edge), so a corner
+    // dot would cover R2/L2. Hit values: 0 = none, 1 = dot,
+    // 2/3/4 = save/load/retry.
+    struct Qsr1MenuGeom
+    {
+        float dotX, dotY, dotR;
+        float rowY, rowR, rowX[3];
+    };
+
+    inline Qsr1MenuGeom qsr1MenuLayout(float w, float h)
+    {
+        Qsr1MenuGeom g{};
+        g.dotX = w * 0.5f;
+        g.dotY = 0.10f * h;
+        g.dotR = 0.045f * h;
+        g.rowY = 0.24f * h;
+        g.rowR = 0.06f * h;
+        g.rowX[0] = w * 0.5f - 0.16f * h;
+        g.rowX[1] = w * 0.5f;
+        g.rowX[2] = w * 0.5f + 0.16f * h;
+        return g;
+    }
+
+    inline int qsr1MenuHit(const Qsr1MenuGeom &g, bool expanded, float x, float y)
+    {
+        const float ddx = x - g.dotX, ddy = y - g.dotY;
+        if (ddx * ddx + ddy * ddy <= g.dotR * g.dotR)
+            return 1;
+        if (!expanded)
+            return 0;
+        for (int i = 0; i < 3; ++i)
+        {
+            const float dx = x - g.rowX[i], dy = y - g.rowY;
+            if (dx * dx + dy * dy <= g.rowR * g.rowR)
+                return 2 + i;
+        }
+        return 0;
+    }
 }
