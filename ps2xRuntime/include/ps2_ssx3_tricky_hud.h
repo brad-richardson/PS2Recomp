@@ -43,24 +43,28 @@ struct Rect
     int x, y, w, h;
 };
 
-// Atlas rects mirror make_trickyhud_atlas.py ATLAS (256x256 RGBA).
-inline Rect ringRect(int band) // band 0..3 = pale, gold, orange, red (bottom..top)
+// Atlas rects mirror make_trickyhud_atlas.py ATLAS (256x256 RGBA). TK43a2:
+// cut from the correct (linear-CLUT) decode; Tricky's art is red, orange,
+// gold and silver rings, chrome letters pre-rotated for the arc, a silver
+// and a red jewel, all drawn at 1 texel = 1 buffer px in the real game.
+inline Rect ringRect(int band) // band 0..3 = gold, orange, orange, red (bottom..top)
 {
-    static const Rect kBands[4] = {{144, 0, 48, 14}, {96, 0, 48, 14}, {48, 0, 48, 14}, {0, 0, 48, 14}};
+    static const Rect kBands[4] = {{98, 0, 49, 12}, {49, 0, 49, 12}, {49, 0, 49, 12}, {0, 0, 49, 12}};
     return kBands[band < 0 ? 0 : (band > 3 ? 3 : band)];
 }
-inline Rect silverRingRect() { return {192, 0, 48, 14}; }
-inline Rect letterRect(int i) // 0..5 = T,R,I,C,K,Y (TK43a Part 2: spaced arch)
+inline Rect silverRingRect() { return {147, 0, 49, 12}; }
+inline Rect poleRect() { return {200, 0, 31, 2}; } // cylinder profile, drawn across the pole
+inline Rect letterRect(int i) // 0..5 = T,R,I,C,K,Y
 {
-    static const Rect kLetters[6] = {{0, 16, 19, 50},  {20, 16, 15, 30}, {36, 16, 12, 33},
-                                     {49, 16, 12, 33}, {62, 16, 15, 29}, {78, 16, 14, 29}};
+    static const Rect kLetters[6] = {{0, 16, 35, 25},  {36, 16, 19, 27}, {56, 16, 17, 31},
+                                     {74, 16, 19, 23}, {94, 16, 25, 35}, {120, 16, 30, 30}};
     return kLetters[i < 0 ? 0 : (i > 5 ? 5 : i)];
 }
-inline Rect jewelGreyRect() { return {100, 16, 46, 33}; }
-inline Rect jewelRedRect() { return {150, 16, 46, 33}; }
-inline Rect pillRect() { return {100, 52, 28, 18}; }
-inline Rect pillGreyRect() { return {180, 52, 28, 18}; }
-inline Rect snowflakeRect() { return {132, 52, 38, 32}; } // Part 3: re-cut (full flake)
+inline Rect jewelGreyRect() { return {152, 16, 35, 32}; }
+inline Rect jewelRedRect() { return {188, 16, 35, 32}; }
+inline Rect pillRect() { return {0, 56, 22, 18}; }
+inline Rect pillGreyRect() { return {24, 56, 22, 18}; }
+inline Rect snowflakeRect() { return {48, 56, 38, 32}; }
 
 struct Atlas
 {
@@ -196,10 +200,8 @@ inline int litCoils(float fill)
 }
 
 // Bilinear atlas blit with alpha-over onto an RGBA frame (both top-left).
-// tint (optional): desaturate the sample to luminance, then scale by
-// tint[3] (Part 3: chrome + red-shadow letters from the gold map4 art).
 inline void blit(const Atlas &a, const Rect &s, uint8_t *frame, int fw, int fh, int dx, int dy, int dw,
-                 int dh, float dim = 1.0f, const float *tint = nullptr)
+                 int dh, float dim = 1.0f)
 {
     if (!a.ok || !frame || fw <= 0 || fh <= 0 || dw <= 0 || dh <= 0)
         return;
@@ -255,22 +257,9 @@ inline void blit(const Atlas &a, const Rect &s, uint8_t *frame, int fw, int fh, 
             const float w10 = fu * (1.0f - fv);
             const float w01 = (1.0f - fu) * fv;
             const float w11 = fu * fv;
-            float sr = (p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11) * dim;
-            float sg = (p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11) * dim;
-            float sb = (p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11) * dim;
-            if (tint)
-            {
-                const float lum = (sr * 299.0f + sg * 587.0f + sb * 114.0f) / 1000.0f;
-                sr = lum * tint[0];
-                sg = lum * tint[1];
-                sb = lum * tint[2];
-            }
-            if (sr > 255.0f)
-                sr = 255.0f;
-            if (sg > 255.0f)
-                sg = 255.0f;
-            if (sb > 255.0f)
-                sb = 255.0f;
+            const float sr = (p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11) * dim;
+            const float sg = (p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11) * dim;
+            const float sb = (p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11) * dim;
             const float sa = (p00[3] * w00 + p10[3] * w10 + p01[3] * w01 + p11[3] * w11) / 255.0f;
             if (sa <= 0.0f)
                 continue;
@@ -333,26 +322,6 @@ inline void smearCover(uint8_t *frame, int fw, int fh, int x0, int y0, int x1, i
     }
 }
 
-inline void fillRect(uint8_t *frame, int fw, int fh, int dx, int dy, int dw, int dh, uint8_t r, uint8_t g,
-                     uint8_t b)
-{
-    if (!frame || fw <= 0 || fh <= 0)
-        return;
-    const int x0 = dx < 0 ? 0 : dx;
-    const int y0 = dy < 0 ? 0 : dy;
-    const int x1 = dx + dw > fw ? fw : dx + dw;
-    const int y1 = dy + dh > fh ? fh : dy + dh;
-    for (int y = y0; y < y1; ++y)
-        for (int x = x0; x < x1; ++x)
-        {
-            uint8_t *d = &frame[(static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(x)) * 4u];
-            d[0] = r;
-            d[1] = g;
-            d[2] = b;
-            d[3] = 255;
-        }
-}
-
 // Layout in 640x480 space (measured off the SSX 3 meter footprint), mapped
 // onto any export size right-anchored and height-scaled. The guest score
 // above y=50 is kept; everything else the meter covers is replaced.
@@ -374,18 +343,19 @@ inline void composeOverlay(uint8_t *frame, int fw, int fh, const Atlas &a, float
     Layout L;
     L.s = static_cast<float>(fh) / 480.0f;
     L.fw = fw;
-    // Pole through the stack (covers the SSX 3 red center line, x582-586).
-    fillRect(frame, fw, fh, L.X(584), L.Y(140), L.W(5), L.H(260), 26, 22, 30);
-    // 16 rings, bottom-up: pale, gold, orange, red bands; unlit slots silver.
-    // Part 2 geometry off Brad's recording: flat rings (44x9) on a 16.5 px
-    // pitch, pole visible through the 7.5 px gaps. The pitch fits the SSX 3
-    // coil footprint (y143-395) with the jewel touching above, not over it.
+    // Pole through the stack (covers the SSX 3 red center line, x582-586):
+    // Tricky's grey cylinder profile stretched across its width.
+    blit(a, poleRect(), frame, fw, fh, L.X(584), L.Y(140), L.W(5), L.H(260));
+    // 16 rings, bottom-up: gold, orange, orange, red bands; unlit slots
+    // silver. Native 49x12 (the real game draws them 1:1) on Part 2's
+    // 16.5 px pitch, which fits the SSX 3 coil footprint (y143-395) with the
+    // jewel touching above; the pole shows through the 4.5 px gaps.
     const int lit = litCoils(fill);
     for (int i = 0; i < kCoils; ++i)
     {
         const float cy = 395.0f - static_cast<float>(i) * 16.5f;
         const Rect src = i < lit ? ringRect(i / 4) : silverRingRect();
-        blit(a, src, frame, fw, fh, L.X(566), L.Y(cy - 4.5f), L.W(44), L.H(9));
+        blit(a, src, frame, fw, fh, L.X(563), L.Y(cy - 6.0f), L.W(49), L.H(12));
     }
     // Jewel over the ball: grey, or red pulsing at ~3.7 Hz when full.
     const Rect jewel = full ? jewelRedRect() : jewelGreyRect();
@@ -394,37 +364,21 @@ inline void composeOverlay(uint8_t *frame, int fw, int fh, const Atlas &a, float
     // Label cover: feathered sky smear, no panel (Part 3). The chrome arch
     // draws over it; the score (above y49) and jewel (below y101) are spared.
     smearCover(frame, fw, fh, L.X(536), L.Y(49), L.X(628), L.Y(101));
-    // Chrome arch (Part 3, off Brad's tiles): 6 letters at ~1.1x native
-    // (aspect preserved), x527-639 = 2.5 ring widths, bottoms arched
-    // (middle 97, ends 103) just above the jewel. Red drop shadow first
-    // (T fakes the recording's wider left swoosh), chrome over it.
-    static const float kChrome[3] = {1.6f, 1.6f, 1.65f};
-    static const float kShadow[3] = {1.6f, 0.3f, 0.25f};
-    static const int kArch[6][4] = {
-        {527, 67, 19, 36}, {549, 65, 17, 35}, {569, 59, 14, 38},
-        {586, 59, 14, 38}, {603, 67, 17, 33}, {623, 70, 16, 33},
+    // Chrome arch (TK43a2): the 6 pre-rotated letter sprites at native size,
+    // each placed at its offset from the stack center (x587.5) and jewel top
+    // (y107) template-matched in Brad's recording (t135, t460).
+    static const int kArch[6][2] = {
+        {527, 94}, {550, 83}, {565, 72}, {579, 79}, {595, 73}, {607, 94},
     };
     for (int i = 0; i < 6; ++i)
     {
-        const int sox = i == 0 ? -5 : -1; // T swoosh (tile 3: red tail to x1342)
-        blit(a, letterRect(i), frame, fw, fh, L.X(kArch[i][0] + sox), L.Y(kArch[i][1] + 4),
-             L.W(kArch[i][2]), L.H(kArch[i][3]), 1.0f, kShadow);
+        const Rect src = letterRect(i);
+        blit(a, src, frame, fw, fh, L.X(kArch[i][0]), L.Y(kArch[i][1]), L.W(src.w), L.H(src.h));
     }
-    for (int i = 0; i < 6; ++i)
-        blit(a, letterRect(i), frame, fw, fh, L.X(kArch[i][0]), L.Y(kArch[i][1]), L.W(kArch[i][2]),
-             L.H(kArch[i][3]), 1.0f, kChrome);
-    // Pill slot over the S (y400-427): grey when not full, red (two
-    // overlapping stamps cover the S fully) when full. Real Tricky shows no
-    // pill until full; the grey slot keeps the S covered and mirrors the jewel.
-    if (full)
-    {
-        blit(a, pillRect(), frame, fw, fh, L.X(571), L.Y(398), L.W(34), L.H(24));
-        blit(a, pillRect(), frame, fw, fh, L.X(571), L.Y(418), L.W(34), L.H(24));
-    }
-    else
-    {
-        blit(a, pillGreyRect(), frame, fw, fh, L.X(571), L.Y(400), L.W(34), L.H(30));
-    }
+    // Pill slot over the S (y400-427): Tricky's red S hexagon when full,
+    // its grey copy otherwise. Real Tricky shows no pill until full; the
+    // grey slot keeps the SSX 3 S covered and mirrors the jewel.
+    blit(a, full ? pillRect() : pillGreyRect(), frame, fw, fh, L.X(571), L.Y(400), L.W(34), L.H(30));
     // First-full snowflake splash (TK43 section 1.3: cheap one-shot).
     // Part 3: full re-cut flake, recording orange, 156x116 over the jewel
     // bottom and top ~5 rings (tile 1: x346-463 y101-166).
