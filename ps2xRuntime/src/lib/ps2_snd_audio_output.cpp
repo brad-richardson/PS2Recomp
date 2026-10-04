@@ -2,6 +2,7 @@
 
 #include "ThreadNaming.h"
 #include "ps2_audio_stretch.h"
+#include "ps2_ssx3_tricky_song.h"
 #include "ps2_snd_spike.h"
 #include "ps2_vsync_lock.h"
 #include "ps2_vsync_pacer.h"
@@ -231,6 +232,9 @@ namespace
             }
         }
         noteWindowCallback(frames, true, 1.0f);
+        // TK43c: the Tricky song burst mixes over the final output (no-op
+        // when idle or unloaded), before the DC blocker and WAV taps.
+        ps2_ssx3_tricky_song::mixInto(output, frames);
         if (g_output.dcBlock)
             dcBlockFrames(output, frames);
         recordWav(g_output.wav, output, samples);
@@ -611,6 +615,9 @@ namespace
             unpackFrames(fed.data(), fed.size(), g_output.srcBuf.data());
             recordWav(g_output.wav, g_output.srcBuf.data(), fed.size() * 2u);
         }
+        // TK43c: the Tricky song burst mixes over the final output (no-op
+        // when idle or unloaded), before the DC blocker and WAV taps.
+        ps2_ssx3_tricky_song::mixInto(output, frames);
         if (g_output.dcBlock)
             dcBlockFrames(output, frames);
         recordWav(g_output.postWav, output, static_cast<size_t>(frames) * 2u);
@@ -705,6 +712,8 @@ bool initialize()
     g_output.dcBlock = dcBlockFromEnv(std::getenv("PS2X_AUDIO_DC_BLOCK"));
     if (g_output.dcBlock)
         std::cerr << "[snd-output] dc-block=on (AU18: 1-pole 5 Hz high-pass on the final output)\n";
+    // TK43c: stage the Tricky song for meter-full bursts (silent unless set).
+    ps2_ssx3_tricky_song::initFromEnv();
     if (!g_output.stretch)
         std::cerr << "[snd-output] stretch=off (PS2X_AUDIO_STRETCH=0)\n";
     if (g_output.stretch)
