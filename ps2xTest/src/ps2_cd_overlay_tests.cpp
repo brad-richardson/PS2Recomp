@@ -361,5 +361,42 @@ void register_ps2_cd_overlay_tests()
             t.IsTrue(pending.first.empty() && pending.second.empty(), "pending cleared");
             fs::remove_all(host.parent_path());
             fs::remove_all(small.parent_path()); });
+        tc.Run("alias: several aliases route per file (TKP4b)", [](TestCase &t)
+               {
+            const auto img = makeAliasImage();
+            ps2_cd_overlay::clearModeAlias();
+            // BAM.BIG (lbn 34, 4096 B): sector 0 replaced (host 'Q'), sector 1 stock (image lbn 35).
+            const fs::path speech = makeAliasHost("multi-s", kAliasHead, "RST");
+            const fs::path bam = makeAliasHost("multi-b", "PS2XCMP1\nsize 4096\nimage 40\nself 2048 1\niso 35 1\nend\n", "Q");
+            ps2_cd_overlay::setModeAliases({{"/DATA/AUDIO/SPEECH.BIG", speech.string()},
+                                            {"/DATA/WORLDS/BAM.BIG", bam.string()}});
+            t.Equals(ps2_cd_overlay::pendingAliases().size(), static_cast<size_t>(2), "two pending");
+            ps2_cd_overlay::DiscAlias a;
+            t.IsTrue(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 30, a), "speech served");
+            t.Equals(a.discLbn, 30u, "speech range");
+            t.IsTrue(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 33, a), "speech last sector");
+            t.Equals(a.discLbn, 30u, "still speech");
+            t.IsTrue(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 34, a), "bam served");
+            t.Equals(a.discLbn, 34u, "bam range");
+            t.IsTrue(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 35, a), "bam last sector");
+            t.IsFalse(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 29, a), "before both");
+            t.IsFalse(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 36, a), "past both");
+            // One refused load serves the disc; the good alias still routes.
+            const fs::path small = makeAliasHost("multi-bad", "PS2XCMP1\nsize 6144\nimage 40\nself 2048 1\niso 31 1\nself 4096 1\nend\n", "RS");
+            ps2_cd_overlay::setModeAliases({{"/DATA/AUDIO/SPEECH.BIG", small.string()},
+                                            {"/DATA/WORLDS/BAM.BIG", bam.string()}});
+            t.IsFalse(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 30, a), "refused: disc served");
+            t.IsTrue(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 34, a), "good alias routes");
+            // The single-alias form still arms exactly one.
+            ps2_cd_overlay::setModeAlias("/DATA/AUDIO/SPEECH.BIG", speech.string());
+            t.Equals(ps2_cd_overlay::pendingAliases().size(), static_cast<size_t>(1), "single pending");
+            t.IsTrue(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 30, a), "single serves");
+            t.IsFalse(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 34, a), "single leaves bam");
+            ps2_cd_overlay::clearModeAlias();
+            t.IsFalse(ps2_cd_overlay::resolveActiveAlias(kImageSectors, reader(img), 30, a), "off again");
+            t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "pending cleared");
+            fs::remove_all(speech.parent_path());
+            fs::remove_all(bam.parent_path());
+            fs::remove_all(small.parent_path()); });
     });
 }

@@ -28,12 +28,13 @@
 //     and/or name +4 while the mode is on; `-` keeps the field; one per event)
 //   poke = 0x<va>:<old>:<new>  (same-length printable string swap, no ':'
 //     inside; e.g. 0x47BDB0:data/ui/courspic.big:data/ui/courspit.big)
-//   alias = <disc>:<host>  (TK25c, at most one per mode: while the mode is
-//     on, CD reads of the disc file <disc> (e.g. /DATA/AUDIO/SPEECH.BIG) are
-//     served from the host composite <host> (a TK10 PS2XCMP1 file of the same
-//     size); mode off serves the disc unchanged. The mode still needs >= 1
-//     row or poke: the current mode is derived from RAM, where an alias
-//     leaves no trace.)
+//   alias = <disc>:<host>  (TK25c, TKP4b: repeatable, one line per disc file:
+//     while the mode is on, CD reads of each disc file <disc> (e.g.
+//     /DATA/AUDIO/SPEECH.BIG) are served from its host composite <host> (a
+//     TK10 PS2XCMP1 file of the same size); mode off serves the disc
+//     unchanged. Disc paths must be distinct within a mode (case-insensitive,
+//     like the ISO lookup). The mode still needs >= 1 row or poke: the
+//     current mode is derived from RAM, where an alias leaves no trace.)
 // Modes are inert unless PS2X_SSX3_COURSE_PICKER=1; see the mode section.
 // `node` (TK6's DONOTUSE nav-node writer) is refused: the padding slots have
 // no menu widget, so the menu aborts at Select Peak (TK6 p1/p2). The nav
@@ -46,6 +47,7 @@
 // Guest-affecting when set (it rewrites guest .data); unset = no reads, no
 // writes. Platform-neutral so the host unit test compiles it.
 
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -54,6 +56,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ps2_cd_overlay.h"
@@ -120,14 +123,19 @@ struct Poke
     std::string newBytes;
 };
 
+// TKP4b: one mode-scoped CD alias (TK25c allowed one per mode).
+struct ModeAlias
+{
+    std::string disc; // disc file, e.g. /DATA/AUDIO/SPEECH.BIG
+    std::string host; // host composite file
+};
+
 struct Mode
 {
     std::string name;
     std::vector<ModeRow> rows;
     std::vector<Poke> pokes;
-    bool hasAlias = false; // TK25c: mode-scoped CD alias (one per mode)
-    std::string aliasDisc; // disc file, e.g. /DATA/AUDIO/SPEECH.BIG
-    std::string aliasHost; // host composite file
+    std::vector<ModeAlias> aliases; // distinct disc paths, served while the mode is on
 };
 
 inline std::string trim(const std::string &s)
@@ -149,6 +157,16 @@ inline bool parseInt(const std::string &v, int lo, int hi, int32_t &out)
     if (!end || *end != '\0' || n < lo || n > hi)
         return false;
     out = static_cast<int32_t>(n);
+    return true;
+}
+
+inline bool sameDisc(const std::string &a, const std::string &b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
     return true;
 }
 
@@ -317,9 +335,7 @@ inline bool parse(const std::string &text, std::vector<Block> &out, std::string 
             }
             else if (key == "alias")
             {
-                // TK25c: alias = <disc>:<host>, at most one per mode.
-                if (m.hasAlias)
-                    return fail("alias twice in mode " + m.name);
+                // TKP4b: alias = <disc>:<host>, repeatable; disc paths must be distinct.
                 const size_t c = val.find(':');
                 const std::string disc = c == std::string::npos ? std::string{} : trim(val.substr(0, c));
                 const std::string host = c == std::string::npos ? std::string{} : trim(val.substr(c + 1));
@@ -333,9 +349,10 @@ inline bool parse(const std::string &text, std::vector<Block> &out, std::string 
                     return fail("alias host must be 1-" +
                                 std::to_string(ps2_cd_overlay::kAliasHostMaxLen) +
                                 " printable ASCII bytes without ':'");
-                m.hasAlias = true;
-                m.aliasDisc = disc;
-                m.aliasHost = host;
+                for (const ModeAlias &o : m.aliases)
+                    if (sameDisc(o.disc, disc))
+                        return fail("alias " + disc + " twice in mode " + m.name);
+                m.aliases.push_back(ModeAlias{disc, host});
             }
             else if (key == "event")
             {
@@ -876,7 +893,11 @@ inline bool armModes(Modes &ms, const uint8_t *ram, const std::vector<Mode> &mod
     std::string list = "Stock";
     for (const Mode &m : ms.modes)
         list += ", " + m.name + " (" + std::to_string(m.rows.size()) + " rows, " + std::to_string(m.pokes.size()) +
-                " pokes" + (m.hasAlias ? ", alias" : "") + ")";
+                " pokes" +
+                (m.aliases.empty() ? ""
+                                   : m.aliases.size() == 1 ? ", alias"
+                                                           : ", " + std::to_string(m.aliases.size()) + " aliases") +
+                ")";
     log("modes: armed [" + list + "], chord L3+R3 in the menus");
     return true;
 }
@@ -929,13 +950,18 @@ inline int modeNext(Modes &ms, uint8_t *ram, std::string &msg, std::vector<std::
     const size_t cur = modeCurrent(ms, ram);
     const size_t next = (cur + 1u) % (ms.modes.size() + 1u);
     const Mode *target = next ? &ms.modes[next - 1u] : nullptr;
-    // TK25c: the alias follows the mode (off on Stock and on modes without
-    // one). Set after the refusal checks above, with the RAM writes.
-    if (target && target->hasAlias)
+    // TKP4b: the aliases follow the mode (off on Stock and on modes without
+    // any). Set after the refusal checks above, with the RAM writes.
+    if (target && !target->aliases.empty())
     {
-        ps2_cd_overlay::setModeAlias(target->aliasDisc, target->aliasHost);
-        if (writes)
-            writes->push_back("alias " + target->aliasDisc + " -> " + target->aliasHost);
+        std::vector<std::pair<std::string, std::string>> list;
+        for (const ModeAlias &a : target->aliases)
+        {
+            list.emplace_back(a.disc, a.host);
+            if (writes)
+                writes->push_back("alias " + a.disc + " -> " + a.host);
+        }
+        ps2_cd_overlay::setModeAliases(list);
     }
     else
         ps2_cd_overlay::clearModeAlias();

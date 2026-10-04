@@ -383,13 +383,15 @@ void register_ps2_ssx3_course_manifest_tests()
                            b, err, &m),
                       err.c_str());
             t.Equals(m.size(), static_cast<size_t>(1), "one mode");
-            t.IsTrue(m[0].hasAlias, "has alias");
-            t.Equals(m[0].aliasDisc, std::string("/DATA/AUDIO/SPEECH.BIG"), "disc");
-            t.Equals(m[0].aliasHost, std::string("/host/speech-big"), "host");
+            t.Equals(m[0].aliases.size(), static_cast<size_t>(1), "one alias");
+            t.Equals(m[0].aliases[0].disc, std::string("/DATA/AUDIO/SPEECH.BIG"), "disc");
+            t.Equals(m[0].aliases[0].host, std::string("/host/speech-big"), "host");
             const char *bad[] = {
                 "alias = /D/S.BIG:/h\n",                        // before any mode
                 "event = 0\nname = X\nalias = /D/S.BIG:/h\n",    // event key, not mode key
-                "mode = T\nrow = 0:A:B\nalias = /D/S.BIG:/h\nalias = /D/S.BIG:/h\n", // twice
+                "mode = T\nrow = 0:A:B\nalias = /D/S.BIG:/h\nalias = /D/S.BIG:/h\n", // same disc twice
+                "mode = T\nrow = 0:A:B\nalias = /D/S.BIG:/h1\nalias = /D/S.BIG:/h2\n", // same disc, other host
+                "mode = T\nrow = 0:A:B\nalias = /D/S.BIG:/h\nalias = /d/s.big:/h2\n", // same disc, other case
                 "mode = T\nrow = 0:A:B\nalias = /D/S.BIG\n",     // no host
                 "mode = T\nrow = 0:A:B\nalias = :/h\n",          // no disc
                 "mode = T\nrow = 0:A:B\nalias = DATA/S.BIG:/h\n", // no leading slash
@@ -428,6 +430,55 @@ void register_ps2_ssx3_course_manifest_tests()
             t.Equals(status, std::string("Mode: Two"), "second mode");
             pending = ps2_cd_overlay::pendingAlias();
             t.IsTrue(pending.first.empty(), "Two has no alias: off");
+            ms = Modes{}; // leave the process-wide modes disarmed
+            ps2_cd_overlay::clearModeAlias();
+        });
+
+        tc.Run("TKP4b multi-alias: parse, distinct discs, and the switch arms them all", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            std::vector<Block> b;
+            std::vector<Mode> m;
+            std::string err;
+            t.IsTrue(parse("mode = Tricky\nrow = 0:GARI:Garibaldi\n"
+                           "alias = /DATA/AUDIO/SPEECH.BIG:/host/speech-big\n"
+                           "alias = /DATA/AUDIO/MUSIC.BIG:/host/music-big\n"
+                           "alias = /DATA/AUDIO/MUSIC2.BIG:/host/music2-big\n",
+                           b, err, &m),
+                      err.c_str());
+            t.Equals(m.size(), static_cast<size_t>(1), "one mode");
+            t.Equals(m[0].aliases.size(), static_cast<size_t>(3), "three aliases");
+            t.Equals(m[0].aliases[1].disc, std::string("/DATA/AUDIO/MUSIC.BIG"), "second disc");
+            t.Equals(m[0].aliases[2].host, std::string("/host/music2-big"), "third host");
+
+            // The switch arms every alias on entry and clears them on exit.
+            auto ram = stockTables();
+            stockTopology(ram);
+            std::vector<std::string> lines;
+            auto log = [&](const std::string &s) { lines.push_back(s); };
+            t.IsTrue(parse("mode = Tricky\nrow = 0:GARI:Garibaldi\n"
+                           "alias = /DATA/AUDIO/SPEECH.BIG:/host/speech-big\n"
+                           "alias = /DATA/AUDIO/MUSIC.BIG:/host/music-big\n",
+                           b, err, &m),
+                      err.c_str());
+            Modes &ms = courseModes();
+            t.IsTrue(armModes(ms, ram.data(), m, log), "armed");
+            t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "arming starts with the aliases off");
+            std::string status;
+            auto idle = padBuffer(0);
+            auto chord = padBuffer(kBtnL3 | kBtnR3);
+            pickerOnPadRead(ram.data(), idle.data(), 1, status);
+            pickerOnPadRead(ram.data(), chord.data(), 2, status);
+            t.Equals(status, std::string("Mode: Tricky"), "status");
+            const auto armed = ps2_cd_overlay::pendingAliases();
+            t.Equals(armed.size(), static_cast<size_t>(2), "both armed");
+            t.Equals(armed[0].first, std::string("/DATA/AUDIO/SPEECH.BIG"), "first disc");
+            t.Equals(armed[1].second, std::string("/host/music-big"), "second host");
+            pickerOnPadRead(ram.data(), idle.data(), 3, status);
+            chord = padBuffer(kBtnL3 | kBtnR3);
+            pickerOnPadRead(ram.data(), chord.data(), 4, status);
+            t.Equals(status, std::string("Mode: Stock"), "back to stock");
+            t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "stock clears the aliases");
             ms = Modes{}; // leave the process-wide modes disarmed
             ps2_cd_overlay::clearModeAlias();
         }); });
