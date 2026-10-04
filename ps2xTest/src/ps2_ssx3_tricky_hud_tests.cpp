@@ -24,11 +24,11 @@ Atlas synthAtlas()
 {
     using namespace ps2_ssx3_tricky_hud;
     std::vector<uint8_t> px(256u * 256u * 4u, 0);
-    paintRect(px, ringRect(0), 10); // pale
-    paintRect(px, ringRect(1), 20); // gold
-    paintRect(px, ringRect(2), 30); // orange
+    paintRect(px, ringRect(0), 10); // gold
+    paintRect(px, ringRect(1), 30); // orange (bands 1 and 2 share the cell)
     paintRect(px, ringRect(3), 40); // red
     paintRect(px, silverRingRect(), 50);
+    paintRect(px, poleRect(), 70);
     paintRect(px, letterRect(0), 60);
     paintRect(px, letterRect(1), 61);
     paintRect(px, letterRect(2), 62);
@@ -174,14 +174,14 @@ void register_ps2_ssx3_tricky_hud_tests()
             t.IsTrue(pxAt(f, 640, 588, 415) == 130, "grey pill slot");
             t.IsTrue(pxAt(f, 640, 500, 150) == 1, "no splash");
             t.IsTrue(pxAt(f, 640, 600, 20) == 1, "score kept");
-            t.IsTrue(pxAt(f, 640, 586, 156) == 26, "pole"); });
+            t.IsTrue(pxAt(f, 640, 586, 156) == 70, "pole"); });
         tc.Run("half meter: 8 lit in band order, 8 silver", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
             Atlas a = synthAtlas();
             auto f = blankFrame(640, 480);
             composeOverlay(f.data(), 640, 480, a, 0.5f, false, 1000u, 0u);
-            const uint8_t want[16] = {10, 10, 10, 10, 20, 20, 20, 20, 50, 50, 50, 50, 50, 50, 50, 50};
+            const uint8_t want[16] = {10, 10, 10, 10, 30, 30, 30, 30, 50, 50, 50, 50, 50, 50, 50, 50};
             for (int i = 0; i < 16; ++i)
                 t.IsTrue(pxAt(f, 640, ringCx(), ringCy(i)) == want[i], "ring band"); });
         tc.Run("full meter: bands, red jewel, pill, splash", [](TestCase &t)
@@ -190,12 +190,12 @@ void register_ps2_ssx3_tricky_hud_tests()
             Atlas a = synthAtlas();
             auto f = blankFrame(640, 480);
             composeOverlay(f.data(), 640, 480, a, 1.0f, true, 1000u, 1045u);
-            const uint8_t want[16] = {10, 10, 10, 10, 20, 20, 20, 20, 30, 30, 30, 30, 40, 40, 40, 40};
+            const uint8_t want[16] = {10, 10, 10, 10, 30, 30, 30, 30, 30, 30, 30, 30, 40, 40, 40, 40};
             t.IsTrue(pxAt(f, 640, 588, 125) == 120, "splash covers jewel center");
             t.IsTrue(pxAt(f, 640, 535, 150) == 120, "splash");
             t.IsTrue(pxAt(f, 640, 630, 150) == 120, "splash right arm");
             t.IsTrue(pxAt(f, 640, 588, ringCy(15)) == 120, "splash covers top ring");
-            t.IsTrue(pxAt(f, 640, 535, 110) == 1, "nothing above flake top");
+            t.IsTrue(pxAt(f, 640, 500, 110) == 1, "nothing above flake top");
             t.IsTrue(pxAt(f, 640, 588, 410) == 110, "pill");
             auto g = blankFrame(640, 480);
             composeOverlay(g.data(), 640, 480, a, 1.0f, true, 2000u, 1045u);
@@ -213,25 +213,23 @@ void register_ps2_ssx3_tricky_hud_tests()
             auto g = blankFrame(640, 480);
             composeOverlay(g.data(), 640, 480, a, 1.0f, true, 8u, 0u);
             t.IsTrue(pxAt(g, 640, 575, 120) == 82, "dim phase"); });
-        tc.Run("arch letters chrome with arc bottoms, red shadow", [](TestCase &t)
+        tc.Run("arch letters native on the recording arc", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
             Atlas a = synthAtlas();
             auto f = blankFrame(640, 480);
             composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u);
-            // Chrome = solid cell v * 1.6 (r,g) / 1.65 (b), truncated.
-            t.IsTrue(pxAt(f, 640, 536, 85) == 96, "T");
-            t.IsTrue(pxAt(f, 640, 557, 82) == 98, "R");
-            t.IsTrue(pxAt(f, 640, 576, 78) == 99, "I");
-            t.IsTrue(pxAt(f, 640, 593, 78) == 101, "C");
-            t.IsTrue(pxAt(f, 640, 611, 83) == 102, "K");
-            t.IsTrue(pxAt(f, 640, 631, 86) == 104, "Y");
-            t.IsTrue(pxAt(f, 640, 576, 61) == 99, "I raised");
-            t.IsTrue(pxAt(f, 640, 536, 61) == 1, "T starts lower");
-            t.IsTrue(pxAt(f, 640, 567, 80, 1) == 2, "gap shows smear, no panel");
-            t.IsTrue(pxAt(f, 640, 531, 105) == 96, "T shadow red r");
-            t.IsTrue(pxAt(f, 640, 531, 105, 1) == 18, "T shadow red g");
-            t.IsTrue(pxAt(f, 640, 531, 105, 2) == 15, "T shadow red b"); });
+            // Raw cell values (no tint): T 527,94 R 550,83 I 565,72 C 579,79
+            // K 595,73 Y 607,94, each at its native cell size.
+            t.IsTrue(pxAt(f, 640, 540, 105) == 60, "T");
+            t.IsTrue(pxAt(f, 640, 558, 95) == 61, "R");
+            t.IsTrue(pxAt(f, 640, 570, 80) == 62, "I");
+            t.IsTrue(pxAt(f, 640, 588, 90) == 63, "C");
+            t.IsTrue(pxAt(f, 640, 605, 80) == 64, "K");
+            t.IsTrue(pxAt(f, 640, 625, 110) == 65, "Y");
+            t.IsTrue(pxAt(f, 640, 570, 74) == 62, "I raised");
+            t.IsTrue(pxAt(f, 640, 540, 90) == 1, "T starts lower");
+            t.IsTrue(pxAt(f, 640, 563, 78, 1) == 2, "gap shows smear, no panel"); });
         tc.Run("label smear covers band, feathers, spares surroundings", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
@@ -262,10 +260,10 @@ void register_ps2_ssx3_tricky_hud_tests()
                     d[3] = 255;
                 }
             composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u);
-            // (567,75): R/I letter gap, t=31/92 -> (133,0,67), label green gone.
-            t.IsTrue(pxAt(f, 640, 567, 75) == 133, "smear mid r");
-            t.IsTrue(pxAt(f, 640, 567, 75, 1) == 0, "smear mid g");
-            t.IsTrue(pxAt(f, 640, 567, 75, 2) == 67, "smear mid b");
+            // (545,70): left of R, above T, t=9/92 -> (180,0,20), label green gone.
+            t.IsTrue(pxAt(f, 640, 545, 70) == 180, "smear mid r");
+            t.IsTrue(pxAt(f, 640, 545, 70, 1) == 0, "smear mid g");
+            t.IsTrue(pxAt(f, 640, 545, 70, 2) == 20, "smear mid b");
             t.IsTrue(pxAt(f, 640, 530, 60) == 200, "left of smear kept");
             t.IsTrue(pxAt(f, 640, 635, 60, 2) == 200, "right of smear kept");
             t.IsTrue(pxAt(f, 640, 582, 20, 1) == 200, "above smear kept");
