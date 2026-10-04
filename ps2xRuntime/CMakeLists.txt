@@ -1211,6 +1211,11 @@ if(PS2X_IS_IOS)
         # second SDL's UIKit ObjC classes crash at launch (duplicate
         # SDL_LifecycleObserver). The GS closure never references SDL3.
         list(FILTER PS2X_GE1_ARCHIVES EXCLUDE REGEX ".*/sdl3/.*\\.a$")
+        # ACH2: drop PCSX2's bundled rcheevos: it shadows our vendored copy
+        # (same rc_* symbols, different version/layout -> silent misbehavior).
+        # Nothing in the GS closure references it (link fails loud if it ever
+        # does); our rc_runtime/rc_hash come from third_party/rcheevos.
+        list(FILTER PS2X_GE1_ARCHIVES EXCLUDE REGEX ".*/rcheevos/.*\\.a$")
         list(LENGTH PS2X_GE1_ARCHIVES PS2X_GE1_ARCHIVE_COUNT)
         message(STATUS "PS2X: GI1 static GS: ${PS2X_GE1_ARCHIVE_COUNT} archives from ${PS2X_GE1_IOS_BUILD}")
         target_link_libraries(ps2EntryRunner PRIVATE ${PS2X_GE1_ARCHIVES})
