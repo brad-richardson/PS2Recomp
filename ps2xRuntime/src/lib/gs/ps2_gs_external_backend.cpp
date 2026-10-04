@@ -12,6 +12,7 @@
 #include "ps2_present_geometry.h"
 #include "ps2_ssx3_tricky_hud_state.h"
 #include <android/hardware_buffer.h>
+#include <android/rect.h>
 #endif
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
 #include "runtime/gs/ps2_present_share.h"
@@ -1315,18 +1316,31 @@ private:
         const ps2_ssx3_tricky_hud::Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
         if (r.w <= 0 || r.h <= 0)
             return;
+        // Pre-scaled art, once per run (the export size and atlas are fixed).
+        if (!m_hudSprites.ok || m_hudSprites.atlas != p.atlas ||
+            m_hudSprites.fw != static_cast<int>(imgW) || m_hudSprites.fh != static_cast<int>(imgH))
+        {
+            if (!buildHudSprites(m_hudSprites, *p.atlas, static_cast<int>(imgW), static_cast<int>(imgH)))
+            {
+                if (++m_hudBuildFails == 1u)
+                    std::fprintf(stderr, "[ssx3-tricky-hud] vk: sprite build failed, overlay off\n");
+                return;
+            }
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: sprites built %ux%u\n", imgW, imgH);
+        }
         AHardwareBuffer_Desc desc = {};
         AHardwareBuffer_describe(buffer, &desc);
         if (desc.stride < imgW)
             return;
         const auto t0 = std::chrono::steady_clock::now();
         void *ptr = nullptr;
-        // Whole-buffer lock (base pointer, manual row math): the region copy
-        // is stride-aware, and no rect-lock pointer assumption is needed.
+        // Region-scoped lock (the NDK returns the buffer base either way;
+        // the rect scopes the write-back, and the copy is stride-aware).
+        const ARect lockRect{r.x, r.y, r.x + r.w, r.y + r.h};
         if (AHardwareBuffer_lock(buffer,
                                  AHARDWAREBUFFER_USAGE_CPU_READ_RARELY |
                                      AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY,
-                                 -1, nullptr, &ptr) != 0 ||
+                                 -1, &lockRect, &ptr) != 0 ||
             !ptr)
         {
             if (++m_hudLockFails == 1u)
@@ -1341,9 +1355,8 @@ private:
             std::memcpy(&m_hudTemp[static_cast<size_t>(y) * rowBytes],
                         base + static_cast<size_t>(r.y + y) * strideBytes + static_cast<size_t>(r.x) * 4u,
                         rowBytes);
-        composeHudInto(m_hudTemp.data(), r.w, r.h, r.x, r.y, static_cast<int>(imgW),
-                       static_cast<int>(imgH), *p.atlas, p.fill, p.full, tick, p.splashUntil,
-                       p.litLetters, p.flashUntil);
+        stampHudInto(m_hudTemp.data(), r.w, r.h, r.x, r.y, m_hudSprites, p.fill, p.full, tick,
+                     p.splashUntil, p.litLetters, p.flashUntil);
         uint8_t *wbase = static_cast<uint8_t *>(ptr);
         for (int y = 0; y < r.h; ++y)
             std::memcpy(wbase + static_cast<size_t>(r.y + y) * strideBytes + static_cast<size_t>(r.x) * 4u,
@@ -1616,9 +1629,11 @@ private:
     uint64_t m_pendingFence = 0u;
     uint64_t m_pendingTick = 0u;
     std::vector<uint8_t> m_hudTemp; // TK43e: VK/AHB overlay scratch (HUD region rows)
+    ps2_ssx3_tricky_hud::HudSprites m_hudSprites; // pre-scaled art (built once per run)
     uint64_t m_hudComposites = 0u;
     uint64_t m_hudCompositeNs = 0u;
     uint64_t m_hudLockFails = 0u;
+    uint64_t m_hudBuildFails = 0u;
 #endif
     uint8_t m_ge1LastPath = 3u;
     uint32_t m_ge1FifoBytes = 0u;
