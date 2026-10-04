@@ -2133,6 +2133,31 @@ void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t he
         letters.lit = 0;
         letters.flashUntil = 0;
         lettersInTricky = false;
+        // TK43d build 2 only: log the chain comparison on SSX 3 courses too
+        // (the overlay itself stays off here; leaves with VERIFY in build 3).
+        // apEnv is read fresh: the SSX 3 proof sets PS2X_TK12_AP_PTR=0x53FF4C.
+        if (verifyWanted && rdram && verifyLines < 4000u && tick % 30u == 0u)
+        {
+            const char *apEnvStock = std::getenv("PS2X_TK12_AP_PTR");
+            uint32_t apRStock = 0u;
+            if (apEnvStock)
+            {
+                const uint32_t ptrAddr =
+                    static_cast<uint32_t>(std::strtoul(apEnvStock, nullptr, 0));
+                const uint32_t slot = ptrAddr & ps2_ssx3_tricky_hud::kRamMask;
+                if (slot + 4u <= PS2_RAM_SIZE)
+                    std::memcpy(&apRStock, rdram + slot, 4);
+            }
+            const uint32_t chainRStock =
+                ps2_ssx3_tricky_hud::resolveChainR(rdram, PS2_RAM_SIZE);
+            ++verifyLines;
+            std::fprintf(stderr,
+                         "[ssx3-tricky-hud] verify tick=%llu apR=%08x chainR=%08x %s ok=%d "
+                         "fill=%.3f level=%d\n",
+                         static_cast<unsigned long long>(tick), apRStock, chainRStock,
+                         !apEnvStock ? "no-ap" : (apRStock == chainRStock ? "match" : "MISMATCH"),
+                         0, 0.0, 0);
+        }
         return;
     }
     if (!atlasTried)
