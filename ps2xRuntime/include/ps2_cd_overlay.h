@@ -519,17 +519,18 @@ inline bool build(const std::filesystem::path &dir, uint64_t imageSectors, const
     return true;
 }
 
-// ---- TK25c: mode-scoped CD alias ------------------------------------------
-// A manifest mode block may carry `alias = /DATA/AUDIO/SPEECH.BIG:<host composite>`.
-// While that mode is on, readCdSectors serves that disc file's LBN range from
-// the host file (a TK10 PS2XCMP1 composite: `iso` segments for unchanged
-// ranges, `self` for the replaced members). Same size is required: a size
-// mismatch is refused at load and the disc is served unchanged. No alias
-// (mode off or Stock) = byte-identical reads to today; the knob is the
-// manifest (default off everywhere).
+// ---- TK25c: mode-scoped CD alias (TKP4b: several per mode) -------------------
+// A manifest mode block may carry `alias = <disc>:<host composite>` lines
+// (e.g. SPEECH.BIG + MUSIC.BIG + MUSIC2.BIG). While that mode is on,
+// readCdSectors serves each disc file's LBN range from its host file (a TK10
+// PS2XCMP1 composite: `iso` segments for unchanged ranges, `self` for the
+// replaced members). Same size is required: a size mismatch is refused at
+// load and the disc is served unchanged. No alias (mode off or Stock) =
+// byte-identical reads to today; the knob is the manifest (default off
+// everywhere).
 //
-// The alias is set by the course-mode switch (L3+R3 chord) and consumed
-// lazily by the CD layer, which owns the image reader: setModeAlias stores
+// The aliases are set by the course-mode switch (L3+R3 chord) and consumed
+// lazily by the CD layer, which owns the image reader: setModeAliases stores
 // the strings, and resolveActiveAlias loads + validates on the next read
 // (once per mode activation; failures are logged once and serve the disc).
 
@@ -719,12 +720,11 @@ namespace alias_detail
 struct State
 {
     std::mutex mu;
-    std::string disc; // pending strings from the last mode switch (empty = off)
-    std::string host;
+    // TKP4b: pending aliases from the last mode switch (empty = off).
+    std::vector<std::pair<std::string, std::string>> pending;
     uint64_t generation = 0;
-    DiscAlias loaded; // valid when loadedGen == generation
+    std::vector<DiscAlias> loaded; // this generation's successes, valid when loadedGen == generation
     uint64_t loadedGen = 0;
-    bool loadFailed = false; // failed this generation (logged once)
 };
 
 inline State &state()
@@ -734,68 +734,91 @@ inline State &state()
 }
 } // namespace alias_detail
 
-// Called by the course-mode switch. Empty strings = off.
-inline void setModeAlias(const std::string &disc, const std::string &host)
+// Called by the course-mode switch. An empty list = off.
+inline void setModeAliases(const std::vector<std::pair<std::string, std::string>> &list)
 {
     alias_detail::State &s = alias_detail::state();
     std::lock_guard<std::mutex> lock(s.mu);
-    if (s.disc == disc && s.host == host)
+    if (s.pending == list)
         return;
-    s.disc = disc;
-    s.host = host;
+    s.pending = list;
     ++s.generation;
-    s.loadFailed = false;
 }
 
-inline void clearModeAlias() { setModeAlias(std::string{}, std::string{}); }
+// Single-alias form (TK25c): both empty = off.
+inline void setModeAlias(const std::string &disc, const std::string &host)
+{
+    if (disc.empty() && host.empty())
+        setModeAliases({});
+    else
+        setModeAliases({{disc, host}});
+}
 
-// Test/observer hook: the pending strings (empty = off).
+inline void clearModeAlias() { setModeAliases({}); }
+
+// Test/observer hooks: the pending list (empty = off); the single form
+// returns the first pending pair (empty pair = off).
+inline std::vector<std::pair<std::string, std::string>> pendingAliases()
+{
+    alias_detail::State &s = alias_detail::state();
+    std::lock_guard<std::mutex> lock(s.mu);
+    return s.pending;
+}
+
 inline std::pair<std::string, std::string> pendingAlias()
 {
     alias_detail::State &s = alias_detail::state();
     std::lock_guard<std::mutex> lock(s.mu);
-    return {s.disc, s.host};
+    if (s.pending.empty())
+        return {};
+    return s.pending.front();
 }
 
 // The loaded alias serving `lbn`, loading + validating on the first read of
 // a mode activation. Returns false (serve the disc as today) when off, when
-// `lbn` is outside the aliased range, or when the load was refused.
+// `lbn` is outside every aliased range, or when the load was refused.
 inline bool resolveActiveAlias(uint64_t imageSectors, const SectorReader &read, uint32_t lbn, DiscAlias &out)
 {
     alias_detail::State &s = alias_detail::state();
     std::lock_guard<std::mutex> lock(s.mu);
-    if (s.disc.empty() || s.host.empty())
+    if (s.pending.empty())
         return false;
-    if (s.loadedGen != s.generation && !s.loadFailed)
+    if (s.loadedGen != s.generation)
     {
-        DiscAlias a;
-        std::string err;
-        if (loadDiscAlias(s.disc, std::filesystem::path(s.host), imageSectors, read, a, err))
+        s.loaded.clear();
+        for (const auto &[disc, host] : s.pending)
         {
-            uint64_t fromImage = 0;
-            for (const Segment &seg : a.composite.segments)
-                fromImage += seg.image ? seg.sectors : 0;
-            char b[256];
-            std::snprintf(b, sizeof b, "[cd-alias] %s -> %s (%u sectors, %llu from the image)",
-                          a.discPath.c_str(), a.host.string().c_str(), a.discSectors,
-                          static_cast<unsigned long long>(fromImage));
-            std::cerr << b << std::endl;
-            s.loaded = a;
-        }
-        else
-        {
-            std::cerr << "[cd-alias] REFUSED: " << err << " (serving the disc unchanged)" << std::endl;
-            s.loadFailed = true;
+            if (disc.empty() || host.empty())
+                continue; // a half-empty pair is off, silently (TK25c)
+            DiscAlias a;
+            std::string err;
+            if (loadDiscAlias(disc, std::filesystem::path(host), imageSectors, read, a, err))
+            {
+                uint64_t fromImage = 0;
+                for (const Segment &seg : a.composite.segments)
+                    fromImage += seg.image ? seg.sectors : 0;
+                char b[256];
+                std::snprintf(b, sizeof b, "[cd-alias] %s -> %s (%u sectors, %llu from the image)",
+                              a.discPath.c_str(), a.host.string().c_str(), a.discSectors,
+                              static_cast<unsigned long long>(fromImage));
+                std::cerr << b << std::endl;
+                s.loaded.push_back(a);
+            }
+            else
+            {
+                std::cerr << "[cd-alias] REFUSED: " << err << " (serving the disc unchanged)" << std::endl;
+            }
         }
         s.loadedGen = s.generation;
     }
-    if (s.loadFailed || !s.loaded.loaded)
-        return false;
-    const DiscAlias &a = s.loaded;
-    if (lbn < a.discLbn || lbn >= a.discLbn + a.discSectors)
-        return false;
-    out = a;
-    return true;
+    for (const DiscAlias &a : s.loaded)
+    {
+        if (lbn < a.discLbn || lbn >= a.discLbn + a.discSectors)
+            continue;
+        out = a;
+        return true;
+    }
+    return false;
 }
 
 } // namespace ps2_cd_overlay
