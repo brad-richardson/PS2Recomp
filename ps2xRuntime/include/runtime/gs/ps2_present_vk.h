@@ -61,7 +61,8 @@ void setHostWindow(ANativeWindow *window, ANativeActivity *activity, int aspect,
 void windowLost();
 
 // GsWorker: RGBA8 buffer for a w x h slot (GPU color output + sampled +
-// composer overlay + CPU_READ_RARELY, which keeps Qualcomm gralloc linear).
+// composer overlay + CPU_READ_RARELY, which keeps Qualcomm gralloc linear,
+// + CPU_WRITE_RARELY for the TK43e TRICKY meter composite).
 // Returns its allocation id (0 on failure); the sink owns the app's reference
 // from here on. *out is valid until retireBuffer(id).
 uint64_t allocateBuffer(uint32_t w, uint32_t h, AHardwareBuffer **out);

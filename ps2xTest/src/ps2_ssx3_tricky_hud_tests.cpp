@@ -397,4 +397,120 @@ void register_ps2_ssx3_tricky_hud_tests()
             composeOverlay(g.data(), 640, 480, a, 0.0f, false, 1032u, 0u, 6, 2000u);
             t.IsTrue(pxAt(g, 640, 540, 105) == 60, "chrome phase T");
             t.IsTrue(pxAt(g, 640, 625, 110) == 65, "chrome phase Y"); });});
+
+    // TK43e: the region refactor. composeOverlay draws the region path, so
+    // the region must contain every draw (and the smear's edge samples) and
+    // everything outside it must be untouched.
+    MiniTest::Case("Ps2Ssx3TrickyHudRegion", [](TestCase &tc)
+                   {
+        tc.Run("region contains every draw at 1x and 2x", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            const int kArch[6][2] = {{527, 94}, {550, 83}, {565, 72}, {579, 79}, {595, 73}, {607, 94}};
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                const int fw = pass == 0 ? 640 : 1280;
+                const int fh = pass == 0 ? 480 : 960;
+                Layout L;
+                L.s = static_cast<float>(fh) / 480.0f;
+                L.fw = fw;
+                const Rect r = hudRegionRect(fw, fh);
+                auto inside = [&](int x, int y) { return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h; };
+                char name[64];
+                // Pole, rings (centers +/- half size), jewel.
+                std::snprintf(name, sizeof(name), "pole %dx%d", fw, fh);
+                t.IsTrue(inside(L.X(584), L.Y(140)) && inside(L.X(589), L.Y(400)), name);
+                for (int i = 0; i < 16; ++i)
+                {
+                    const float cy = 395.0f - static_cast<float>(i) * 16.5f;
+                    std::snprintf(name, sizeof(name), "ring %d %dx%d", i, fw, fh);
+                    t.IsTrue(inside(L.X(563), L.Y(cy - 6.0f)) && inside(L.X(612), L.Y(cy + 6.0f)), name);
+                }
+                std::snprintf(name, sizeof(name), "jewel %dx%d", fw, fh);
+                t.IsTrue(inside(L.X(568), L.Y(107)) && inside(L.X(608), L.Y(143)), name);
+                // Smear rect plus its 2 px edge samples.
+                std::snprintf(name, sizeof(name), "smear %dx%d", fw, fh);
+                t.IsTrue(inside(L.X(536) - 2, L.Y(49)) && inside(L.X(628) + 2, L.Y(101)), name);
+                // Arch letters at native size.
+                for (int i = 0; i < 6; ++i)
+                {
+                    const Rect d = letterRect(i);
+                    std::snprintf(name, sizeof(name), "arch %d %dx%d", i, fw, fh);
+                    t.IsTrue(inside(L.X(kArch[i][0]), L.Y(kArch[i][1])) &&
+                                 inside(L.X(kArch[i][0] + d.w), L.Y(kArch[i][1] + d.h)),
+                             name);
+                }
+                // Pill and splash.
+                std::snprintf(name, sizeof(name), "pill+splash %dx%d", fw, fh);
+                t.IsTrue(inside(L.X(571), L.Y(400)) && inside(L.X(605), L.Y(430)) &&
+                             inside(L.X(481), L.Y(114)) && inside(L.X(637), L.Y(230)),
+                         name);
+            } });
+        tc.Run("compose leaves outside-region pixels untouched", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas a = synthAtlas();
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                const int fw = pass == 0 ? 640 : 1280;
+                const int fh = pass == 0 ? 480 : 960;
+                std::vector<uint8_t> f(static_cast<size_t>(fw) * static_cast<size_t>(fh) * 4u);
+                uint32_t rng = 0x12345678u;
+                for (size_t i = 0; i < f.size(); ++i)
+                {
+                    rng = rng * 1664525u + 1013904223u;
+                    f[i] = static_cast<uint8_t>(rng >> 24);
+                }
+                for (size_t i = 3; i < f.size(); i += 4)
+                    f[i] = 255;
+                const std::vector<uint8_t> before = f;
+                // Full meter + splash live + letters + fanfare: every draw on.
+                composeOverlay(f.data(), fw, fh, a, 1.0f, true, 1024u, 2000u, 6, 2000u);
+                const Rect r = hudRegionRect(fw, fh);
+                bool outsideSame = true;
+                bool insideMoved = false;
+                for (int y = 0; y < fh && outsideSame; ++y)
+                    for (int x = 0; x < fw; ++x)
+                    {
+                        const size_t o = (static_cast<size_t>(y) * fw + x) * 4u;
+                        const bool in = x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+                        if (in)
+                            insideMoved = insideMoved || std::memcmp(&f[o], &before[o], 4u) != 0;
+                        else if (std::memcmp(&f[o], &before[o], 4u) != 0)
+                        {
+                            outsideSame = false;
+                            break;
+                        }
+                    }
+                char name[64];
+                std::snprintf(name, sizeof(name), "outside untouched %dx%d", fw, fh);
+                t.IsTrue(outsideSame, name);
+                std::snprintf(name, sizeof(name), "inside drew %dx%d", fw, fh);
+                t.IsTrue(insideMoved, name);
+            } });
+        tc.Run("region path equals the wrapper", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas a = synthAtlas();
+            const int fw = 640, fh = 480;
+            std::vector<uint8_t> f(static_cast<size_t>(fw) * fh * 4u);
+            uint32_t rng = 0xdeadbeeFu;
+            for (size_t i = 0; i < f.size(); ++i)
+            {
+                rng = rng * 1664525u + 1013904223u;
+                f[i] = static_cast<uint8_t>(rng >> 24);
+            }
+            std::vector<uint8_t> g = f;
+            composeOverlay(f.data(), fw, fh, a, 0.73f, true, 77u, 90u, 4, 0u);
+            const Rect r = hudRegionRect(fw, fh);
+            std::vector<uint8_t> tmp(static_cast<size_t>(r.w) * r.h * 4u);
+            for (int y = 0; y < r.h; ++y)
+                std::memcpy(&tmp[static_cast<size_t>(y) * r.w * 4u],
+                            &g[(static_cast<size_t>(r.y + y) * fw + r.x) * 4u],
+                            static_cast<size_t>(r.w) * 4u);
+            composeHudInto(tmp.data(), r.w, r.h, r.x, r.y, fw, fh, a, 0.73f, true, 77u, 90u, 4, 0u);
+            for (int y = 0; y < r.h; ++y)
+                std::memcpy(&g[(static_cast<size_t>(r.y + y) * fw + r.x) * 4u],
+                            &tmp[static_cast<size_t>(y) * r.w * 4u], static_cast<size_t>(r.w) * 4u);
+            t.IsTrue(f == g, "manual region path matches"); });});
 }

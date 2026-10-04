@@ -29,6 +29,12 @@
 // 64-tick all-red flash, then the letters reset (real Tricky past R is
 // unobserved; reset and say so). The red sprites are new atlas cells
 // (map1 red wordmark run, TK43a2 boxes); the atlas magic is TKHUD2.
+//
+// TK43e: the draw list is composeHudInto (region + origin), drawn by both
+// the GL path (composeOverlay: copy out, compose, copy back) and the VK/AHB
+// path (queuePendingAhb composites the region into the locked AHB before
+// queue); the state both call sites share is HudState, decided per frame by
+// updateHudStateLocked (ps2_ssx3_tricky_hud_state.h).
 
 #include <atomic>
 #include <cmath>
@@ -36,6 +42,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -515,18 +522,57 @@ struct Layout
     int H(float h) const { return static_cast<int>(std::lround(h * s)); }
 };
 
-inline void composeOverlay(uint8_t *frame, int fw, int fh, const Atlas &a, float fill, bool full,
-                           uint64_t tick, uint64_t splashUntilTick, int litLetters,
+// TK43e: the HUD's screen region (buffer px, clipped to the frame): the
+// union of every draw below in 640x480 space is x481-640 (splash left to
+// the right edge) by y49-430 (smear top to pill bottom), plus a 3 px margin
+// for Layout rounding (each mapped edge rounds at most 1 px) and the
+// smear's 2 px edge samples. Every write and every background read (smear
+// edge samples, alpha-over dst) lands strictly inside, so composing into a
+// temp pre-filled with the region's background and copying back is exactly
+// composeOverlay. The VK/AHB path (no host pixels) composites this region
+// straight into the locked AHB; the GL path draws the same region.
+inline Rect hudRegionRect(int fw, int fh)
+{
+    if (fw <= 0 || fh <= 0)
+        return {0, 0, 0, 0};
+    Layout L;
+    L.s = static_cast<float>(fh) / 480.0f;
+    L.fw = fw;
+    int x0 = L.X(481) - 3;
+    int y0 = L.Y(49) - 3;
+    int x1 = fw;
+    int y1 = L.Y(430) + 3;
+    if (x0 < 0)
+        x0 = 0;
+    if (y0 < 0)
+        y0 = 0;
+    if (x1 > fw)
+        x1 = fw;
+    if (y1 > fh)
+        y1 = fh;
+    if (x1 < x0)
+        x1 = x0;
+    if (y1 < y0)
+        y1 = y0;
+    return {x0, y0, x1 - x0, y1 - y0};
+}
+
+// TK43e: the draw list, once, into a tight-rows buffer holding the HUD
+// region's background at frame origin (ox, oy) of an fw x fh frame. The GL
+// path and the VK/AHB path both draw this; composeOverlay is the GL
+// wrapper (copy out, compose, copy back).
+inline void composeHudInto(uint8_t *dst, int bw, int bh, int ox, int oy, int fw, int fh, const Atlas &a,
+                           float fill, bool full, uint64_t tick, uint64_t splashUntilTick, int litLetters,
                            uint64_t flashUntilTick)
 {
-    if (!frame || !a.ok || fw <= 0 || fh <= 0)
+    if (!dst || !a.ok || bw <= 0 || bh <= 0 || fw <= 0 || fh <= 0)
         return;
     Layout L;
     L.s = static_cast<float>(fh) / 480.0f;
     L.fw = fw;
     // Pole through the stack (covers the SSX 3 red center line, x582-586):
     // Tricky's grey cylinder profile stretched across its width.
-    blit(a, poleRect(), frame, fw, fh, L.X(584), L.Y(140), L.W(5), L.H(260));
+    blit(a, poleRect(), dst, bw, bh, L.X(584) - ox, L.Y(140) - oy, L.W(5), L.H(260));
     // 16 rings, bottom-up: gold, orange, orange, red bands; unlit slots
     // silver. Native 49x12 (the real game draws them 1:1) on Part 2's
     // 16.5 px pitch, which fits the SSX 3 coil footprint (y143-395) with the
@@ -536,15 +582,15 @@ inline void composeOverlay(uint8_t *frame, int fw, int fh, const Atlas &a, float
     {
         const float cy = 395.0f - static_cast<float>(i) * 16.5f;
         const Rect src = i < lit ? ringRect(i / 4) : silverRingRect();
-        blit(a, src, frame, fw, fh, L.X(563), L.Y(cy - 6.0f), L.W(49), L.H(12));
+        blit(a, src, dst, bw, bh, L.X(563) - ox, L.Y(cy - 6.0f) - oy, L.W(49), L.H(12));
     }
     // Jewel over the ball: grey, or red pulsing at ~3.7 Hz when full.
     const Rect jewel = full ? jewelRedRect() : jewelGreyRect();
     const float dim = (full && ((tick >> 3) & 1u) != 0u) ? 0.82f : 1.0f;
-    blit(a, jewel, frame, fw, fh, L.X(568), L.Y(107), L.W(40), L.H(36), dim);
+    blit(a, jewel, dst, bw, bh, L.X(568) - ox, L.Y(107) - oy, L.W(40), L.H(36), dim);
     // Label cover: feathered sky smear, no panel (Part 3). The chrome arch
     // draws over it; the score (above y49) and jewel (below y101) are spared.
-    smearCover(frame, fw, fh, L.X(536), L.Y(49), L.X(628), L.Y(101));
+    smearCover(dst, bw, bh, L.X(536) - ox, L.Y(49) - oy, L.X(628) - ox, L.Y(101) - oy);
     // Chrome arch (TK43a2): the 6 pre-rotated letter sprites at native size,
     // each placed at its offset from the stack center (x587.5) and jewel top
     // (y107) template-matched in Brad's recording (t135, t460).
@@ -564,18 +610,123 @@ inline void composeOverlay(uint8_t *frame, int fw, int fh, const Atlas &a, float
     {
         const bool red = flashing ? flashRed : (i < litLetters);
         const Rect src = red ? litLetterRect(i) : letterRect(i);
-        const Rect dst = letterRect(i);
-        blit(a, src, frame, fw, fh, L.X(kArch[i][0]), L.Y(kArch[i][1]), L.W(dst.w), L.H(dst.h));
+        const Rect dstR = letterRect(i);
+        blit(a, src, dst, bw, bh, L.X(kArch[i][0]) - ox, L.Y(kArch[i][1]) - oy, L.W(dstR.w), L.H(dstR.h));
     }
     // Pill slot over the S (y400-427): Tricky's red S hexagon when full,
     // its grey copy otherwise. Real Tricky shows no pill until full; the
     // grey slot keeps the SSX 3 S covered and mirrors the jewel.
-    blit(a, full ? pillRect() : pillGreyRect(), frame, fw, fh, L.X(571), L.Y(400), L.W(34), L.H(30));
+    blit(a, full ? pillRect() : pillGreyRect(), dst, bw, bh, L.X(571) - ox, L.Y(400) - oy, L.W(34),
+         L.H(30));
     // First-full snowflake splash (TK43 section 1.3: cheap one-shot).
     // Part 3: full re-cut flake, recording orange, 156x116 over the jewel
     // bottom and top ~5 rings (tile 1: x346-463 y101-166).
     if (tick < splashUntilTick)
-        blit(a, snowflakeRect(), frame, fw, fh, L.X(481), L.Y(114), L.W(156), L.H(116));
+        blit(a, snowflakeRect(), dst, bw, bh, L.X(481) - ox, L.Y(114) - oy, L.W(156), L.H(116));
+}
+
+inline void composeOverlay(uint8_t *frame, int fw, int fh, const Atlas &a, float fill, bool full,
+                           uint64_t tick, uint64_t splashUntilTick, int litLetters,
+                           uint64_t flashUntilTick)
+{
+    if (!frame || !a.ok || fw <= 0 || fh <= 0)
+        return;
+    const Rect r = hudRegionRect(fw, fh);
+    if (r.w <= 0 || r.h <= 0)
+        return;
+    std::vector<uint8_t> tmp(static_cast<size_t>(r.w) * static_cast<size_t>(r.h) * 4u);
+    const size_t rowBytes = static_cast<size_t>(r.w) * 4u;
+    for (int y = 0; y < r.h; ++y)
+        std::memcpy(&tmp[static_cast<size_t>(y) * rowBytes],
+                    &frame[(static_cast<size_t>(r.y + y) * static_cast<size_t>(fw) + static_cast<size_t>(r.x)) * 4u],
+                    rowBytes);
+    composeHudInto(tmp.data(), r.w, r.h, r.x, r.y, fw, fh, a, fill, full, tick, splashUntilTick,
+                   litLetters, flashUntilTick);
+    for (int y = 0; y < r.h; ++y)
+        std::memcpy(&frame[(static_cast<size_t>(r.y + y) * static_cast<size_t>(fw) + static_cast<size_t>(r.x)) * 4u],
+                    &tmp[static_cast<size_t>(y) * rowBytes], rowBytes);
+}
+
+// TK43e: the overlay's process-wide state, shared by the GL call site (the
+// main thread, trickyHudOverlay in ps2_runtime.cpp) and the VK/AHB call
+// site (the GS worker, queuePendingAhb in ps2_gs_external_backend.cpp).
+// Only one path runs at a time, but a mid-run VK->GL fallback can overlap
+// them for a frame; the mutex keeps the letters/splash/atlas continuous.
+struct HudState
+{
+    std::mutex mu;
+    bool wantedInit = false;
+    bool wanted = false;
+    Atlas atlas;
+    bool atlasTried = false;
+    bool lastFull = false;
+    uint64_t splashUntil = 0u;
+    LetterState letters;
+    bool lettersInTricky = false;
+    bool lettersPresetInit = false;
+    int lettersPreset = -1;
+    bool forcedInit = false;
+    ForceValue forced;
+};
+
+inline HudState &hudState()
+{
+    static HudState s;
+    return s;
+}
+
+// The per-frame compose decision (pure values out; the atlas is immutable
+// once ok, so the pointer stays valid after the mutex is released).
+struct HudParams
+{
+    bool draw = false;
+    const Atlas *atlas = nullptr;
+    float fill = 0.0f;
+    bool full = false;
+    uint64_t splashUntil = 0u;
+    int litLetters = 0;
+    uint64_t flashUntil = 0u;
+};
+
+inline bool hudWanted()
+{
+    HudState &st = hudState();
+    std::lock_guard<std::mutex> lock(st.mu);
+    if (!st.wantedInit)
+    {
+        st.wantedInit = true;
+        const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD");
+        st.wanted = env && env[0] == '1';
+    }
+    return st.wanted;
+}
+
+// TK43e: the GS worker has no PS2Runtime*, so the main thread publishes the
+// live RDRAM base every host iteration (UploadFrame entry), and the VK/AHB
+// call site reads it here. Never written, only read, like the GL path.
+inline std::atomic<const uint8_t *> &liveRdramPtr()
+{
+    static std::atomic<const uint8_t *> p(nullptr);
+    return p;
+}
+
+inline std::atomic<size_t> &liveRdramSize()
+{
+    static std::atomic<size_t> n(0u);
+    return n;
+}
+
+inline void publishRdram(const uint8_t *rdram, size_t size)
+{
+    liveRdramPtr().store(rdram, std::memory_order_release);
+    liveRdramSize().store(size, std::memory_order_release);
+}
+
+inline const uint8_t *liveRdram(size_t &size)
+{
+    const uint8_t *p = liveRdramPtr().load(std::memory_order_acquire);
+    size = liveRdramSize().load(std::memory_order_acquire);
+    return p;
 }
 
 } // namespace ps2_ssx3_tricky_hud

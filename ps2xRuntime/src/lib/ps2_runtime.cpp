@@ -10,6 +10,7 @@
 #include "ps2_ssx3_course_manifest.h"
 #include "ps2_ssx3_lod.h"
 #include "ps2_ssx3_tricky_hud.h"
+#include "ps2_ssx3_tricky_hud_state.h"
 #include "ps2_ssx3_tricky_menu.h"
 #include "ps2_ssx3_tricky_song.h"
 #include "ps2_log.h"
@@ -2096,112 +2097,21 @@ void dumpPresentationFrame(const uint8_t *rgba,
 // only on a non-Stock course-manifest mode: SSX 3 courses skip untouched.
 void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t height, uint64_t tick)
 {
-    static const bool wanted = [] {
-        const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD");
-        return env && env[0] == '1';
-    }();
-    static ps2_ssx3_tricky_hud::Atlas atlas;
-    static bool atlasTried = false;
-    static bool lastFull = false;
-    static uint64_t splashUntil = 0u;
-    // TK43c: letter + song state (host-side only; the guest never sees it).
-    static ps2_ssx3_tricky_hud::LetterState letters;
-    static bool lettersInTricky = false;
-    static const int lettersPreset = ps2_ssx3_tricky_hud::parseLettersPreset(
-        std::getenv("PS2X_SSX3_TRICKY_LETTERS_PRESET"));
-    if (!wanted || !rt || !rgba || width == 0u || height == 0u)
+    // TK43e: the GL call site. The state decision is shared with the VK/AHB
+    // call site (queuePendingAhb); the atlas pointer outlives the lock (the
+    // atlas is immutable once ok).
+    if (!rt || !rgba || width == 0u || height == 0u)
         return;
-    ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
-    uint8_t *rdram = rt->memory().getRDRAM();
-    if (!ms.armed || !rdram || ps2_ssx3_course::modeCurrent(ms, rdram) == 0u)
+    ps2_ssx3_tricky_hud::HudParams p;
     {
-        lastFull = false; // re-arm the first-full splash for the next race
-        // TK43c: leaving Tricky mode resets the letters and swallows any
-        // taps that landed outside Tricky courses (letters are Tricky-only).
-        letters.seen =
-            ps2_ssx3_tricky_hud::uberTap().count.load(std::memory_order_relaxed);
-        letters.lit = 0;
-        letters.flashUntil = 0;
-        lettersInTricky = false;
+        std::lock_guard<std::mutex> lock(ps2_ssx3_tricky_hud::hudState().mu);
+        p = ps2_ssx3_tricky_hud::updateHudStateLocked(ps2_ssx3_tricky_hud::hudState(),
+                                                     rt->memory().getRDRAM(), PS2_RAM_SIZE, tick);
+    }
+    if (!p.draw || !p.atlas)
         return;
-    }
-    if (!atlasTried)
-    {
-        atlasTried = true;
-        const char *art = std::getenv("PS2X_SSX3_TRICKY_HUD_ART");
-        atlas = ps2_ssx3_tricky_hud::loadAtlasFile(art);
-        std::fprintf(stderr, "[ssx3-tricky-hud] art '%s': %s\n", art ? art : "(unset)",
-                     atlas.ok ? "loaded" : "missing/invalid, overlay off");
-    }
-    if (!atlas.ok)
-        return;
-    // TK43c: consume uber taps (even when the meter words are unreadable,
-    // so no stale backlog lights letters late). Mode entry applies the
-    // diag preset, if any; otherwise the session starts unlit.
-    {
-        const uint64_t taps =
-            ps2_ssx3_tricky_hud::uberTap().count.load(std::memory_order_relaxed);
-        if (!lettersInTricky)
-        {
-            lettersInTricky = true;
-            letters.seen = taps;
-            letters.lit = lettersPreset >= 0 ? lettersPreset : 0;
-            letters.flashUntil = 0;
-            if (lettersPreset >= 0)
-                std::fprintf(stderr, "[ssx3-tricky-hud] letters preset=%d tick=%llu\n",
-                             lettersPreset, static_cast<unsigned long long>(tick));
-        }
-        const int wasLit = letters.lit;
-        const uint64_t wasFlash = letters.flashUntil;
-        ps2_ssx3_tricky_hud::updateLetters(letters, taps, tick);
-        if (letters.lit != wasLit && letters.lit > 0)
-        {
-            static const char kName[7] = "TRICKY";
-            std::fprintf(stderr, "[ssx3-tricky-hud] letter %c lit (%d/6) tick=%llu\n",
-                         kName[letters.lit - 1], letters.lit,
-                         static_cast<unsigned long long>(tick));
-        }
-        if (letters.flashUntil != 0u && wasFlash == 0u)
-            std::fprintf(stderr, "[ssx3-tricky-hud] TRICKY spelled: fanfare flash until=%llu\n",
-                         static_cast<unsigned long long>(letters.flashUntil));
-        if (letters.lit == 0 && wasLit == 6)
-            std::fprintf(stderr, "[ssx3-tricky-hud] letters reset tick=%llu\n",
-                         static_cast<unsigned long long>(tick));
-    }
-    // TK43d: PS2X_TK12_AP_PTR is an override when SET; otherwise the HUD
-    // follows the game-owned chain (normal play sets no AP pointer).
-    const char *apEnv = std::getenv("PS2X_TK12_AP_PTR");
-    uint32_t apR = 0u;
-    if (apEnv)
-    {
-        const uint32_t ptrAddr = static_cast<uint32_t>(std::strtoul(apEnv, nullptr, 0));
-        const uint32_t slot = ptrAddr & ps2_ssx3_tricky_hud::kRamMask;
-        if (slot + 4u <= PS2_RAM_SIZE)
-            std::memcpy(&apR, rdram + slot, 4);
-    }
-    const uint32_t chainR = ps2_ssx3_tricky_hud::resolveChainR(rdram, PS2_RAM_SIZE);
-    const uint32_t r = apEnv ? apR : chainR;
-    ps2_ssx3_tricky_hud::MeterFrame mf =
-        ps2_ssx3_tricky_hud::readMeterFrameAt(rdram, PS2_RAM_SIZE, r);
-    if (!mf.ok)
-        return;
-    // TK43a Part 2 diag: forced DISPLAY values for screenshots (unlisted knob,
-    // class diag; the guest words above are still only read, never written).
-    static const ps2_ssx3_tricky_hud::ForceValue forced =
-        ps2_ssx3_tricky_hud::parseForce(std::getenv("PS2X_SSX3_TRICKY_HUD_FORCE"));
-    const float shownFill = forced.ok ? forced.fill : mf.fill;
-    const bool full = (forced.ok ? forced.level : mf.level) >= 1;
-    if (full && !lastFull)
-    {
-        splashUntil = tick + 45u;
-        // TK43c: the meter's empty->full transition opens a ~5 s song burst
-        // (no-op when no song is staged).
-        ps2_ssx3_tricky_song::startBurst(tick);
-    }
-    lastFull = full;
-    ps2_ssx3_tricky_hud::composeOverlay(rgba, static_cast<int>(width), static_cast<int>(height), atlas, shownFill,
-                                       full, tick, splashUntil, letters.lit,
-                                       letters.flashUntil);
+    ps2_ssx3_tricky_hud::composeOverlay(rgba, static_cast<int>(width), static_cast<int>(height), *p.atlas,
+                                       p.fill, p.full, tick, p.splashUntil, p.litLetters, p.flashUntil);
 }
 } // namespace
 
@@ -2877,6 +2787,10 @@ void bg1OnResume()
 
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
 {
+    // TK43e: publish the live RDRAM base for the VK/AHB overlay call site
+    // (the GS worker has no PS2Runtime*). First line, so the per-VSync
+    // early return below does not skip it. Read-only for the consumer.
+    ps2_ssx3_tricky_hud::publishRdram(rt ? rt->memory().getRDRAM() : nullptr, PS2_RAM_SIZE);
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
     static bool s_hasLatchedInitialFrame = false;
     static uint32_t s_lastDisplayFbp = std::numeric_limits<uint32_t>::max();

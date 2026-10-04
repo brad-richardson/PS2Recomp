@@ -10,6 +10,7 @@
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
 #include "ps2_present_geometry.h"
+#include "ps2_ssx3_tricky_hud_state.h"
 #include <android/hardware_buffer.h>
 #endif
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
@@ -27,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1277,12 +1279,87 @@ private:
             return true;
         m_ge1.waitExport(m_pendingFence);
         AhbSlot &slot = m_ahbSlots[static_cast<size_t>(m_pendingAhb)];
+        // TK43e: the export is done and the buffer is not yet queued, so
+        // the slot is ours: composite the TRICKY meter before queueing.
+        compositeTrickyHudAhb(slot.buffer, m_exportW, m_exportH, m_pendingTick);
         const bool queued = ps2x_present_vk::queue(slot.id, m_exportW, m_exportH);
         m_pendingAhb = -1;
         m_pendingFence = 0u;
         if (!queued)
             ps2x_present_vk::fallBack("GE1 AHB queue failed");
         return queued;
+    }
+
+    // TK43e: the VK/AHB overlay call site (GS worker). The HUD region is
+    // copied out of the locked AHB, composed on the CPU (the same draw list
+    // as the GL path) and copied back. Overlay failure NEVER fails the
+    // present: it skips the composite and the frame queues as usual.
+    void compositeTrickyHudAhb(AHardwareBuffer *buffer, uint32_t imgW, uint32_t imgH, uint64_t tick)
+    {
+        using namespace ps2_ssx3_tricky_hud;
+        if (!buffer || imgW == 0u || imgH == 0u)
+            return;
+        if (!hudWanted())
+            return;
+        size_t ramSize = 0u;
+        const uint8_t *rdram = liveRdram(ramSize);
+        if (!rdram || ramSize == 0u)
+            return;
+        HudParams p;
+        {
+            std::lock_guard<std::mutex> lock(hudState().mu);
+            p = updateHudStateLocked(hudState(), rdram, ramSize, tick);
+        }
+        if (!p.draw || !p.atlas)
+            return;
+        const ps2_ssx3_tricky_hud::Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
+        if (r.w <= 0 || r.h <= 0)
+            return;
+        AHardwareBuffer_Desc desc = {};
+        AHardwareBuffer_describe(buffer, &desc);
+        if (desc.stride < imgW)
+            return;
+        const auto t0 = std::chrono::steady_clock::now();
+        void *ptr = nullptr;
+        // Whole-buffer lock (base pointer, manual row math): the region copy
+        // is stride-aware, and no rect-lock pointer assumption is needed.
+        if (AHardwareBuffer_lock(buffer,
+                                 AHARDWAREBUFFER_USAGE_CPU_READ_RARELY |
+                                     AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY,
+                                 -1, nullptr, &ptr) != 0 ||
+            !ptr)
+        {
+            if (++m_hudLockFails == 1u)
+                std::fprintf(stderr, "[ssx3-tricky-hud] vk: AHardwareBuffer_lock failed, overlay off\n");
+            return;
+        }
+        const size_t strideBytes = static_cast<size_t>(desc.stride) * 4u;
+        const size_t rowBytes = static_cast<size_t>(r.w) * 4u;
+        m_hudTemp.resize(static_cast<size_t>(r.w) * static_cast<size_t>(r.h) * 4u);
+        const uint8_t *base = static_cast<const uint8_t *>(ptr);
+        for (int y = 0; y < r.h; ++y)
+            std::memcpy(&m_hudTemp[static_cast<size_t>(y) * rowBytes],
+                        base + static_cast<size_t>(r.y + y) * strideBytes + static_cast<size_t>(r.x) * 4u,
+                        rowBytes);
+        composeHudInto(m_hudTemp.data(), r.w, r.h, r.x, r.y, static_cast<int>(imgW),
+                       static_cast<int>(imgH), *p.atlas, p.fill, p.full, tick, p.splashUntil,
+                       p.litLetters, p.flashUntil);
+        uint8_t *wbase = static_cast<uint8_t *>(ptr);
+        for (int y = 0; y < r.h; ++y)
+            std::memcpy(wbase + static_cast<size_t>(r.y + y) * strideBytes + static_cast<size_t>(r.x) * 4u,
+                        &m_hudTemp[static_cast<size_t>(y) * rowBytes], rowBytes);
+        AHardwareBuffer_unlock(buffer, nullptr);
+        const auto t1 = std::chrono::steady_clock::now();
+        m_hudCompositeNs +=
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        if (++m_hudComposites == 1u)
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: first composite tick=%llu region=%dx%d\n",
+                         static_cast<unsigned long long>(tick), r.w, r.h);
+        else if (m_hudComposites % 600u == 0u)
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: composites=%llu avg=%.1f us\n",
+                         static_cast<unsigned long long>(m_hudComposites),
+                         static_cast<double>(m_hudCompositeNs) / 1000.0 /
+                             static_cast<double>(m_hudComposites));
     }
 
     void retireAhbSlots()
@@ -1538,6 +1615,10 @@ private:
     bool m_perVsyncLive = false; // FH6: GuestVsync presents (latch no longer exports)
     uint64_t m_pendingFence = 0u;
     uint64_t m_pendingTick = 0u;
+    std::vector<uint8_t> m_hudTemp; // TK43e: VK/AHB overlay scratch (HUD region rows)
+    uint64_t m_hudComposites = 0u;
+    uint64_t m_hudCompositeNs = 0u;
+    uint64_t m_hudLockFails = 0u;
 #endif
     uint8_t m_ge1LastPath = 3u;
     uint32_t m_ge1FifoBytes = 0u;
