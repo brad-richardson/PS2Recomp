@@ -841,6 +841,116 @@ inline void stampHudInto(uint8_t *tmp, int bw, int bh, int ox, int oy, const Hud
         stampSprite(ss.splash, tmp, bw, bh, ss.splashDst.x - ox, ss.splashDst.y - oy);
 }
 
+// TK43e Part 2: stride-aware direct composite. Stamps straight into the
+// locked AHB (no region temp round-trip): same draws, same order, same
+// sample/blend math as the temp path, so bit-identical values. base points
+// at the region origin; rows advance by strideBytes; (bw, bh) clip.
+inline void stampSpriteS(const SpriteImg &img, uint8_t *base, size_t strideBytes, int bw, int bh, int dx,
+                         int dy)
+{
+    if (!base || bw <= 0 || bh <= 0 || img.w <= 0 || img.h <= 0 || img.px.empty())
+        return;
+    const int x0 = dx < 0 ? 0 : dx;
+    const int y0 = dy < 0 ? 0 : dy;
+    const int x1 = dx + img.w > bw ? bw : dx + img.w;
+    const int y1 = dy + img.h > bh ? bh : dy + img.h;
+    for (int y = y0; y < y1; ++y)
+        for (int x = x0; x < x1; ++x)
+        {
+            const float *o =
+                &img.px[(static_cast<size_t>(y - dy) * static_cast<size_t>(img.w) + static_cast<size_t>(x - dx)) *
+                        4u];
+            if (o[3] <= 0.0f)
+                continue;
+            blendSample(o[0], o[1], o[2], o[3], base + static_cast<size_t>(y) * strideBytes +
+                                                     static_cast<size_t>(x) * 4u);
+        }
+}
+
+inline void smearCoverS(uint8_t *base, size_t strideBytes, int bw, int bh, int x0, int y0, int x1, int y1)
+{
+    if (!base || bw <= 0 || bh <= 0 || x1 <= x0 || y1 <= y0)
+        return;
+    const int xa = x0 < 0 ? 0 : x0;
+    const int xb = x1 > bw ? bw : x1;
+    const int ya = y0 < 0 ? 0 : y0;
+    const int yb = y1 > bh ? bh : y1;
+    const float span = static_cast<float>(x1 - x0);
+    for (int y = ya; y < yb; ++y)
+    {
+        const int lx = x0 - 2 < 0 ? 0 : x0 - 2;
+        const int rx = x1 + 2 > bw - 1 ? bw - 1 : x1 + 2;
+        const uint8_t *L = base + static_cast<size_t>(y) * strideBytes + static_cast<size_t>(lx) * 4u;
+        const uint8_t *R = base + static_cast<size_t>(y) * strideBytes + static_cast<size_t>(rx) * 4u;
+        const float lr = L[0], lg = L[1], lb = L[2];
+        const float rr = R[0], rg = R[1], rb = R[2];
+        const float fy0 = static_cast<float>(y - y0) / 3.0f;
+        const float fy1 = static_cast<float>(y1 - y) / 3.0f;
+        for (int x = xa; x < xb; ++x)
+        {
+            const float t = static_cast<float>(x - x0) / span;
+            float a = fy0;
+            if (fy1 < a)
+                a = fy1;
+            const float fx0 = static_cast<float>(x - x0) / 2.0f;
+            const float fx1 = static_cast<float>(x1 - x) / 2.0f;
+            if (fx0 < a)
+                a = fx0;
+            if (fx1 < a)
+                a = fx1;
+            if (a <= 0.0f)
+                continue;
+            if (a > 1.0f)
+                a = 1.0f;
+            uint8_t *d = base + static_cast<size_t>(y) * strideBytes + static_cast<size_t>(x) * 4u;
+            const float ia = 1.0f - a;
+            d[0] = static_cast<uint8_t>((lr + (rr - lr) * t) * a + d[0] * ia + 0.5f);
+            d[1] = static_cast<uint8_t>((lg + (rg - lg) * t) * a + d[1] * ia + 0.5f);
+            d[2] = static_cast<uint8_t>((lb + (rb - lb) * t) * a + d[2] * ia + 0.5f);
+        }
+    }
+}
+
+// The cached compose, stride-aware: same draws, same order, same values as
+// stampHudInto. ahbBase is the buffer base; r is the HUD region in it.
+inline void stampHudDirect(uint8_t *ahbBase, size_t strideBytes, const Rect &r, const HudSprites &ss,
+                           float fill, bool full, uint64_t tick, uint64_t splashUntilTick, int litLetters,
+                           uint64_t flashUntilTick)
+{
+    if (!ahbBase || !ss.ok || r.w <= 0 || r.h <= 0)
+        return;
+    uint8_t *base = ahbBase + static_cast<size_t>(r.y) * strideBytes + static_cast<size_t>(r.x) * 4u;
+    const int bw = r.w, bh = r.h, ox = r.x, oy = r.y;
+    stampSpriteS(ss.pole, base, strideBytes, bw, bh, ss.poleDst.x - ox, ss.poleDst.y - oy);
+    const int lit = litCoils(fill);
+    for (int i = 0; i < kCoils; ++i)
+    {
+        const SpriteImg &img = i < lit ? ss.ringImg[i / 4] : ss.ringImg[4];
+        stampSpriteS(img, base, strideBytes, bw, bh, ss.ringDst[i].x - ox, ss.ringDst[i].y - oy);
+    }
+    const bool dim = full && (((tick >> 3) & 1u) != 0u);
+    stampSpriteS(full ? (dim ? ss.jewelImg[2] : ss.jewelImg[1]) : ss.jewelImg[0], base, strideBytes, bw, bh,
+                 ss.jewelDst.x - ox, ss.jewelDst.y - oy);
+    smearCoverS(base, strideBytes, bw, bh, ss.smearX0 - ox, ss.smearY0 - oy, ss.smearX1 - ox,
+                ss.smearY1 - oy);
+    if (litLetters < 0)
+        litLetters = 0;
+    if (litLetters > 6)
+        litLetters = 6;
+    const bool flashing = tick < flashUntilTick;
+    const bool flashRed = flashing && (((tick >> 3) & 1u) == 0u);
+    for (int i = 0; i < 6; ++i)
+    {
+        const bool red = flashing ? flashRed : (i < litLetters);
+        stampSpriteS(red ? ss.archRed[i] : ss.archChrome[i], base, strideBytes, bw, bh,
+                     ss.archDst[i].x - ox, ss.archDst[i].y - oy);
+    }
+    stampSpriteS(full ? ss.pillImg[0] : ss.pillImg[1], base, strideBytes, bw, bh, ss.pillDst.x - ox,
+                 ss.pillDst.y - oy);
+    if (tick < splashUntilTick)
+        stampSpriteS(ss.splash, base, strideBytes, bw, bh, ss.splashDst.x - ox, ss.splashDst.y - oy);
+}
+
 // TK43e: the overlay's process-wide state, shared by the GL call site (the
 // main thread, trickyHudOverlay in ps2_runtime.cpp) and the VK/AHB call
 // site (the GS worker, queuePendingAhb in ps2_gs_external_backend.cpp).
