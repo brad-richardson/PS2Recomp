@@ -2109,15 +2109,16 @@ void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t he
     static bool lettersInTricky = false;
     static const int lettersPreset = ps2_ssx3_tricky_hud::parseLettersPreset(
         std::getenv("PS2X_SSX3_TRICKY_LETTERS_PRESET"));
-    // TK43c diag: scan RDRAM for the race rider when no AP_PTR slot covers
-    // the route (unlisted knob PS2X_SSX3_TRICKY_HUD_SCAN=1; leaves with the
-    // lane). Retried at most once per 60 ticks until the meter reads.
-    static const bool scanWanted = [] {
-        const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD_SCAN");
+    // TK43d diag: verify the game-owned rider chain against the AP pointer
+    // (unlisted knob PS2X_SSX3_TRICKY_HUD_VERIFY=1; diag class, owner lane
+    // TK43d — leaves with the lane). The overlay displays from the chain
+    // even when the AP override is set, and logs apR vs chainR every 30
+    // ticks (every tick on mismatch) for the proof table.
+    static const bool verifyWanted = [] {
+        const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD_VERIFY");
         return env && env[0] == '1';
     }();
-    static uint32_t scannedR = 0u;
-    static uint64_t lastScanTick = 0u;
+    static uint64_t verifyLines = 0u;
     if (!wanted || !rt || !rgba || width == 0u || height == 0u)
         return;
     ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
@@ -2177,22 +2178,31 @@ void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t he
             std::fprintf(stderr, "[ssx3-tricky-hud] letters reset tick=%llu\n",
                          static_cast<unsigned long long>(tick));
     }
-    uint32_t ptrAddr = ps2_ssx3_tricky_hud::kDefaultRiderPtr;
-    if (const char *p = std::getenv("PS2X_TK12_AP_PTR"))
-        ptrAddr = static_cast<uint32_t>(std::strtoul(p, nullptr, 0));
-    ps2_ssx3_tricky_hud::MeterFrame mf =
-        ps2_ssx3_tricky_hud::readMeterFrame(rdram, PS2_RAM_SIZE, ptrAddr);
-    if (!mf.ok && scanWanted)
+    // TK43d: PS2X_TK12_AP_PTR is an override when SET; otherwise the HUD
+    // follows the game-owned chain (normal play sets no AP pointer).
+    const char *apEnv = std::getenv("PS2X_TK12_AP_PTR");
+    uint32_t apR = 0u;
+    if (apEnv)
     {
-        if (scannedR != 0u)
-            mf = ps2_ssx3_tricky_hud::readMeterFrameAt(rdram, PS2_RAM_SIZE, scannedR);
-        if (!mf.ok && tick - lastScanTick >= 60u)
-        {
-            lastScanTick = tick;
-            scannedR = ps2_ssx3_tricky_hud::scanRider(rdram, PS2_RAM_SIZE);
-            if (scannedR != 0u)
-                mf = ps2_ssx3_tricky_hud::readMeterFrameAt(rdram, PS2_RAM_SIZE, scannedR);
-        }
+        const uint32_t ptrAddr = static_cast<uint32_t>(std::strtoul(apEnv, nullptr, 0));
+        const uint32_t slot = ptrAddr & ps2_ssx3_tricky_hud::kRamMask;
+        if (slot + 4u <= PS2_RAM_SIZE)
+            std::memcpy(&apR, rdram + slot, 4);
+    }
+    const uint32_t chainR = ps2_ssx3_tricky_hud::resolveChainR(rdram, PS2_RAM_SIZE);
+    const uint32_t r = (apEnv && !verifyWanted) ? apR : chainR;
+    ps2_ssx3_tricky_hud::MeterFrame mf =
+        ps2_ssx3_tricky_hud::readMeterFrameAt(rdram, PS2_RAM_SIZE, r);
+    if (verifyWanted && verifyLines < 4000u &&
+        (tick % 30u == 0u || (apEnv && apR != chainR)))
+    {
+        ++verifyLines;
+        std::fprintf(stderr,
+                     "[ssx3-tricky-hud] verify tick=%llu apR=%08x chainR=%08x %s ok=%d "
+                     "fill=%.3f level=%d\n",
+                     static_cast<unsigned long long>(tick), apR, chainR,
+                     !apEnv ? "no-ap" : (apR == chainR ? "match" : "MISMATCH"), mf.ok ? 1 : 0,
+                     static_cast<double>(mf.fill), mf.level);
     }
     if (!mf.ok)
         return;
