@@ -289,8 +289,31 @@ namespace ps2_stubs
                                               rdram, "mc-str", "string", 0u);
         }
 
+        // DET2: PS2X_DETERMINISTIC=1 pins every card date to the CD RTC's
+        // fixed calendar (CD.cpp, 2004-07-16 12:34:56). GetDir otherwise
+        // hands the guest host mtimes (and time(nullptr) for . and ..), so a
+        // fresh copy of the same card changed det hashes from the boot-time
+        // card scan on (t123 on the Tricky Elysium route).
+        bool mcFixedClock()
+        {
+            const char *deterministic = std::getenv("PS2X_DETERMINISTIC");
+            return deterministic != nullptr && std::strcmp(deterministic, "1") == 0;
+        }
+
         void writeMcDateTime(SceMcStDateTime &out, std::time_t value)
         {
+            if (mcFixedClock())
+            {
+                out.Resv2 = 0;
+                out.Sec = 56;
+                out.Min = 34;
+                out.Hour = 12;
+                out.Day = 16;
+                out.Month = 7;
+                out.Year = 2004;
+                return;
+            }
+
             std::tm tm{};
             if (!localtimeSafeMc(&value, &tm))
             {
