@@ -2109,16 +2109,6 @@ void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t he
     static bool lettersInTricky = false;
     static const int lettersPreset = ps2_ssx3_tricky_hud::parseLettersPreset(
         std::getenv("PS2X_SSX3_TRICKY_LETTERS_PRESET"));
-    // TK43d diag: verify the game-owned rider chain against the AP pointer
-    // (unlisted knob PS2X_SSX3_TRICKY_HUD_VERIFY=1; diag class, owner lane
-    // TK43d — leaves with the lane). The overlay displays from the chain
-    // even when the AP override is set, and logs apR vs chainR every 30
-    // ticks (every tick on mismatch) for the proof table.
-    static const bool verifyWanted = [] {
-        const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD_VERIFY");
-        return env && env[0] == '1';
-    }();
-    static uint64_t verifyLines = 0u;
     if (!wanted || !rt || !rgba || width == 0u || height == 0u)
         return;
     ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
@@ -2133,31 +2123,6 @@ void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t he
         letters.lit = 0;
         letters.flashUntil = 0;
         lettersInTricky = false;
-        // TK43d build 2 only: log the chain comparison on SSX 3 courses too
-        // (the overlay itself stays off here; leaves with VERIFY in build 3).
-        // apEnv is read fresh: the SSX 3 proof sets PS2X_TK12_AP_PTR=0x53FF4C.
-        if (verifyWanted && rdram && verifyLines < 4000u && tick % 30u == 0u)
-        {
-            const char *apEnvStock = std::getenv("PS2X_TK12_AP_PTR");
-            uint32_t apRStock = 0u;
-            if (apEnvStock)
-            {
-                const uint32_t ptrAddr =
-                    static_cast<uint32_t>(std::strtoul(apEnvStock, nullptr, 0));
-                const uint32_t slot = ptrAddr & ps2_ssx3_tricky_hud::kRamMask;
-                if (slot + 4u <= PS2_RAM_SIZE)
-                    std::memcpy(&apRStock, rdram + slot, 4);
-            }
-            const uint32_t chainRStock =
-                ps2_ssx3_tricky_hud::resolveChainR(rdram, PS2_RAM_SIZE);
-            ++verifyLines;
-            std::fprintf(stderr,
-                         "[ssx3-tricky-hud] verify tick=%llu apR=%08x chainR=%08x %s ok=%d "
-                         "fill=%.3f level=%d\n",
-                         static_cast<unsigned long long>(tick), apRStock, chainRStock,
-                         !apEnvStock ? "no-ap" : (apRStock == chainRStock ? "match" : "MISMATCH"),
-                         0, 0.0, 0);
-        }
         return;
     }
     if (!atlasTried)
@@ -2215,20 +2180,9 @@ void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t he
             std::memcpy(&apR, rdram + slot, 4);
     }
     const uint32_t chainR = ps2_ssx3_tricky_hud::resolveChainR(rdram, PS2_RAM_SIZE);
-    const uint32_t r = (apEnv && !verifyWanted) ? apR : chainR;
+    const uint32_t r = apEnv ? apR : chainR;
     ps2_ssx3_tricky_hud::MeterFrame mf =
         ps2_ssx3_tricky_hud::readMeterFrameAt(rdram, PS2_RAM_SIZE, r);
-    if (verifyWanted && verifyLines < 4000u &&
-        (tick % 30u == 0u || (apEnv && apR != chainR)))
-    {
-        ++verifyLines;
-        std::fprintf(stderr,
-                     "[ssx3-tricky-hud] verify tick=%llu apR=%08x chainR=%08x %s ok=%d "
-                     "fill=%.3f level=%d\n",
-                     static_cast<unsigned long long>(tick), apR, chainR,
-                     !apEnv ? "no-ap" : (apR == chainR ? "match" : "MISMATCH"), mf.ok ? 1 : 0,
-                     static_cast<double>(mf.fill), mf.level);
-    }
     if (!mf.ok)
         return;
     // TK43a Part 2 diag: forced DISPLAY values for screenshots (unlisted knob,
