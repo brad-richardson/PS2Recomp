@@ -6,6 +6,7 @@
 #include "ps2_perf_log.h"
 #include "runtime/gs/gs_worker.h"
 #include "runtime/ps2_savestate.h"
+#include "ps2_ui_toast.h" // QSR1 completion toasts (kind-gated below)
 #include "Stubs/Pad.h"
 #include "../ps2_savestate_internal.h"
 #include "runtime/ee_guest_unwind.h"
@@ -627,11 +628,19 @@ void EeScheduler::run()
                 ps2_stubs::padRecordNoteLoad(m_vsyncTick);
                 std::fprintf(stderr, "[savestate] quick-load ok: %s\n", note.c_str());
                 ps2_savestate::noteQuickStatus(note);
+                // QSR1: manual loads toast on completion; retry (auto slot)
+                // keeps the tap-time "Retrying" (still live: loads land in
+                // ~50 ms, toasts show 3 s). DS1 chord slots stay silent.
+                if (ps2_savestate::quickSlotKind(ds1LoadPath) ==
+                    ps2_savestate::QuickSlotKind::Qsr1Manual)
+                    ps2x::ui::toast("Loaded", 3.0f);
             }
             else
             {
                 std::fprintf(stderr, "[savestate] quick-load refused: %s\n", error.c_str());
                 ps2_savestate::noteQuickStatus("load refused: " + error);
+                if (ps2_savestate::quickSlotKind(ds1LoadPath) != ps2_savestate::QuickSlotKind::Other)
+                    ps2x::ui::toast("Load refused: build changed", 3.0f);
             }
         }
         std::string ds1SavePath;
@@ -654,6 +663,11 @@ void EeScheduler::run()
                     ps2_savestate::clearPendingQuickSave();
                     ps2_savestate::writeQuickInfo(ds1SavePath, m_vsyncTick, currentEeCycle());
                     ps2_savestate::noteQuickStatus("saved at tick " + std::to_string(m_vsyncTick));
+                    // QSR1: manual saves toast; the race-start auto snapshot
+                    // stays silent (the user didn't tap anything).
+                    if (ps2_savestate::quickSlotKind(ds1SavePath) ==
+                        ps2_savestate::QuickSlotKind::Qsr1Manual)
+                        ps2x::ui::toast("Saved", 3.0f);
                 }
                 else
                     ssSaveAt = 0u;

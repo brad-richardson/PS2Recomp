@@ -2337,9 +2337,8 @@ std::string qsr1SlotPath(const char *tag) // tag = "manual" | "auto"
 
 void qsr1Toast(const char *msg)
 {
-    // TODO(QSR1): route through ps2x::ui::toast once ACH2 merges (no second
-    // toast implementation). Log-only until then.
     std::fprintf(stderr, "[qsr1-toast] %s\n", msg);
+    ps2x::ui::toast(msg, 3.0f);
 }
 
 void qsr1FireSave()
@@ -2352,10 +2351,8 @@ void qsr1FireSave()
             ps2_savestate::noteQuickStatus("busy (save/load already pending)");
         else
             ps2_savestate::noteQuickStatus("quick-save failed (see log)");
-        qsr1Toast("Save failed");
     }
-    else
-        qsr1Toast("Saving...");
+    // Completion toasts "Saved" from the scheduler (QSR1 slots only).
 }
 
 void qsr1FireLoad(const char *tag, const char *what)
@@ -2367,7 +2364,6 @@ void qsr1FireLoad(const char *tag, const char *what)
     {
         std::fprintf(stderr, "[qsr1] %s: no snapshot in slot %s\n", what, slot.c_str());
         ps2_savestate::noteQuickStatus("no snapshot in this slot yet");
-        qsr1Toast("No snapshot in this slot yet");
         return;
     }
     if (!ps2_savestate::requestQuickLoad(slot))
@@ -2376,10 +2372,10 @@ void qsr1FireLoad(const char *tag, const char *what)
             ps2_savestate::noteQuickStatus("busy (save/load already pending)");
         else
             ps2_savestate::noteQuickStatus("quick-load failed (see log)");
-        qsr1Toast("Load failed");
     }
-    else
-        qsr1Toast(what);
+    else if (std::strcmp(what, "retry") == 0)
+        qsr1Toast("Retrying");
+    // Manual loads toast "Loaded" on completion from the scheduler.
 }
 
 // (QSR1 menu geometry lives in ps2_virtual_pad.h: pure + unit-tested.)
