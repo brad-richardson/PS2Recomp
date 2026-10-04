@@ -4592,8 +4592,10 @@ __attribute__((noinline, cold)) void dspBuildFilter()
 __attribute__((noinline, cold)) bool dspArm()
 {
     bool on = !PS2X_ENABLE_DIAG_TAPS; // lookupFunction's dispatch history
-    on = on && !ps2_ts2_split60::enabled() && !ps2_ts2_split60::caseCountEnabled() &&
-         !ps2_ts2_split60::countEnabled();
+    // KNC1P2 B3 deleted the TS2 counting diag (PS2X_TS2_HALFLOAD_COUNT,
+    // PS2X_TS2_CASE_COUNT): counting is unconditionally off, so only the
+    // split-mode product check remains.
+    on = on && !ps2_ts2_split60::enabled();
     on = on && !ps2_park::parkEnabled() && diagPeriodMs() == 0u;
     g_dsp.fh1 = ps2_fh1::enabled() || ps2_fh1::tapOn();
     on = on && (!g_dsp.fh1 || ps2_fh1::hookPreclassify()); // chain mode runs every hook
