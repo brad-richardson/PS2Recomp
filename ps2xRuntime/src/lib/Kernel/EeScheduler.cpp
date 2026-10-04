@@ -14,6 +14,7 @@
 #include "ps2_ts2_split60.h"
 #include "ps2_ts2_split60.h"
 #include "ps2_fh1_full120.h"
+#include "ps2_ach.h"
 #include "ps2_vsync_lock.h"
 #include "ps2_e15.h"
 #include "runtime/gs/gs_stream_capture.h"
@@ -3120,6 +3121,10 @@ void EeScheduler::processEvent(const EeEvent &event)
             m_runtime.printMissingFunctionCounts();
         }
         ps2_fh1::onVBlank(m_rdram, m_vsyncTick, m_runtime.gs()); // FH1 tap/seq (env-only)
+        // ACH2: local achievements at the stock tick (read-only wrt guest;
+        // one getenv when the knob is off). After onVBlank so FH1's
+        // g_stockHalfExact is fresh for this VBlank.
+        ps2_ach::onVBlankTick(m_vsyncTick, m_rdram, m_runtime.memory().getScratchpad());
         if (ps2_fh1::eventsMode())
         {
             // FH5: the committed event state sets the EE budget and the pacer

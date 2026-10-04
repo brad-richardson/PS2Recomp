@@ -75,6 +75,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_fh1_hooktable_tests.cpp
     src/ps2_savestate_tests.cpp
     src/ps2_tc1_vf0_tests.cpp
+    src/ps2_ach_tests.cpp
 )
 
 if(PS2X_ENABLE_DIAG_TAPS)

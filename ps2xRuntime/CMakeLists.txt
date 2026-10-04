@@ -547,6 +547,7 @@ add_library(ps2_runtime STATIC
     src/lib/vu/ps2_vu1.cpp
     src/lib/vu/ps2_microvu.cpp
     src/lib/games_database.cpp
+    src/lib/ps2_ach.cpp # ACH2: local achievements runtime
 )
 
 if(PS2X_ENABLE_RUNTIME_LOGS)
@@ -776,8 +777,9 @@ endif()
 # (default on; PS2X_AUDIO_STRETCH=0 disables). Static, LGPL-2.1 applied
 # as GPL per section 3.
 add_subdirectory(third_party/soundtouch)
+add_subdirectory(third_party/rcheevos) # ACH2: rc_runtime + rc_hash (no rc_client)
 
-target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop ps2x_soundtouch)
+target_link_libraries(ps2_runtime PUBLIC ps2_host_backend ffmpeg ps2_iop ps2x_soundtouch ps2x_rcheevos)
 target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
