@@ -2152,6 +2152,25 @@ int virtualPadTouches(ps2x::vpad::TouchPoint *ts, int max, float screenWidth, fl
         ts[i].y = ys[i] * screenHeight;
     }
     return n;
+#elif defined(__ANDROID__)
+    // QSR1: the touchscreen drives the overlay (vpad + quick menu) on
+    // Android; the mouse fallback below never fires on a phone. Positions
+    // are pixels, matching the mouse branch.
+    (void)screenWidth;
+    (void)screenHeight;
+    if (max < 1)
+        return 0;
+    int n = GetTouchPointCount();
+    if (n > max)
+        n = max;
+    for (int i = 0; i < n; ++i)
+    {
+        const Vector2 p = GetTouchPosition(i);
+        ts[i].id = GetTouchPointId(i);
+        ts[i].x = p.x;
+        ts[i].y = p.y;
+    }
+    return n;
 #else
     (void)screenWidth;
     (void)screenHeight;
@@ -2278,7 +2297,9 @@ void ds1FireQuickLoad()
 // QSR1 prototype: touch quick save/load/restart, behind PS2X_QUICKSTATE_UI=1
 // (default off). iOS slots live in Documents/states (PS2X_IOS_DOCUMENTS, set
 // by the iOS launcher): the bundle elfDirectory is read-only, so DS1's
-// elfDirectory/states path can never work on iOS.
+// elfDirectory/states path can never work on iOS. Elsewhere slots sit next
+// to the memory card (mcRoot's parent), never under elfDirectory: on Mac
+// det boots elfDirectory is the pinned CD tree (PI1: read-only).
 bool qsr1UiOn()
 {
     static const bool on = [] {
@@ -2290,9 +2311,9 @@ bool qsr1UiOn()
 
 std::string qsr1SlotDir()
 {
-    if (const char *docs = std::getenv("PS2X_IOS_DOCUMENTS"); docs && docs[0] != '\0')
-        return (std::filesystem::path(docs) / "states").string();
-    return (PS2Runtime::getIoPaths().elfDirectory / "states").string();
+    const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+    return ps2x::vpad::qsr1SlotDirFor(std::getenv("PS2X_IOS_DOCUMENTS"), paths.mcRoot.string(),
+                                      paths.elfDirectory.string());
 }
 
 std::string qsr1SlotPath(const char *tag) // tag = "manual" | "auto"
@@ -2314,6 +2335,13 @@ std::string qsr1SlotPath(const char *tag) // tag = "manual" | "auto"
     return (fs::path(qsr1SlotDir()) / ("quick-" + std::string(tag) + "-" + leaf + ".state")).string();
 }
 
+void qsr1Toast(const char *msg)
+{
+    // TODO(QSR1): route through ps2x::ui::toast once ACH2 merges (no second
+    // toast implementation). Log-only until then.
+    std::fprintf(stderr, "[qsr1-toast] %s\n", msg);
+}
+
 void qsr1FireSave()
 {
     const std::string slot = qsr1SlotPath("manual");
@@ -2324,7 +2352,10 @@ void qsr1FireSave()
             ps2_savestate::noteQuickStatus("busy (save/load already pending)");
         else
             ps2_savestate::noteQuickStatus("quick-save failed (see log)");
+        qsr1Toast("Save failed");
     }
+    else
+        qsr1Toast("Saving...");
 }
 
 void qsr1FireLoad(const char *tag, const char *what)
@@ -2336,6 +2367,7 @@ void qsr1FireLoad(const char *tag, const char *what)
     {
         std::fprintf(stderr, "[qsr1] %s: no snapshot in slot %s\n", what, slot.c_str());
         ps2_savestate::noteQuickStatus("no snapshot in this slot yet");
+        qsr1Toast("No snapshot in this slot yet");
         return;
     }
     if (!ps2_savestate::requestQuickLoad(slot))
@@ -2344,10 +2376,60 @@ void qsr1FireLoad(const char *tag, const char *what)
             ps2_savestate::noteQuickStatus("busy (save/load already pending)");
         else
             ps2_savestate::noteQuickStatus("quick-load failed (see log)");
+        qsr1Toast("Load failed");
     }
+    else
+        qsr1Toast(what);
 }
 
 // (QSR1 menu geometry lives in ps2_virtual_pad.h: pure + unit-tested.)
+
+// QSR1: race-start auto snapshot outside full-120 (RETRY at 60/split120).
+// The game's race-start transition is the race-tick call (jal 0x12a250 at
+// 0x113dcc, $s0 = race object; ps2_fh1::kRaceTick2CallSite, the same site
+// the events enter-request reads) with the race clock [$s0+0xc] at 0/1:
+// the first updates of a fresh race (FH5 entry rule). Full-120 off (the
+// shipped 60, split120_render60_v1) runs the full dispatch (the DSP1 lean
+// front is off in split mode), so the EE branch dispatch checks the two
+// PC pairs directly: negligible cost, knob-gated, stock dispatch pays
+// nothing when off. Stock-sim 60 (lean front on, sites unlisted) is not
+// covered; no shipped 60 uses it.
+// Armed at boot; a snapshot disarms; re-arm on race end (the session
+// finish flag at [a0+0x610] on calls to 0x26f4a8) or after 600 ticks
+// without a race-tick call (menus don't call the site). A backward tick
+// jump (quick-load) also re-arms; the re-fire then writes the same
+// start-line state it loaded, so it is harmless.
+namespace
+{
+bool g_qsr1RaceArmed = true;
+uint64_t g_qsr1LastRaceTickVsync = 0u;
+} // namespace
+
+void qsr1NoteRaceTick2(const uint8_t *rdram, R5900Context *ctx, uint64_t vsyncTick)
+{
+    if (vsyncTick < g_qsr1LastRaceTickVsync || vsyncTick - g_qsr1LastRaceTickVsync > 600u)
+        g_qsr1RaceArmed = true;
+    g_qsr1LastRaceTickVsync = vsyncTick;
+    if (!g_qsr1RaceArmed)
+        return;
+    uint32_t raceTime = 0u;
+    // The bump's store sits in the call's delay slot, so +0xc is already the new value.
+    if (!ctx || !ps2_fh1::rd32(rdram, ::getRegU32(ctx, 16) + 0xcu, raceTime) || raceTime > 1u)
+        return;
+    g_qsr1RaceArmed = false;
+    const std::string autoSlot = qsr1SlotPath("auto");
+    std::fprintf(stderr, "[qsr1] 60-mode auto snapshot at race start tick=%llu slot=%s\n",
+                 static_cast<unsigned long long>(vsyncTick), autoSlot.c_str());
+    if (!ps2_savestate::requestQuickSave(autoSlot))
+        std::fprintf(stderr, "[qsr1] 60-mode auto snapshot busy/failed (see log)\n");
+}
+
+void qsr1NoteSession(const uint8_t *rdram, R5900Context *ctx)
+{
+    uint32_t fin = 0u;
+    if (ctx && ps2_fh1::rd32(rdram, ::getRegU32(ctx, 4) + 0x610u, fin) && fin != 0u)
+        g_qsr1RaceArmed = true;
+}
 
 // DS1 DEV-ONLY scheduled chord (host testing without a gamepad):
 // PS2X_SAVESTATE_HOTKEY_AT="2000:save,2600:load" fires each op once at the
@@ -4790,6 +4872,15 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
         ctx->pc = fallthroughPc;
         return true;
     }
+    // QSR1: 60-mode race-start detection (full-120 off only; the events
+    // trigger owns Always/Events, so the two never double-fire).
+    if (qsr1UiOn() && ps2_fh1::mode() == ps2_fh1::Mode::Off)
+    {
+        if (sourcePc == ps2_fh1::kRaceTick2CallSite && targetPc == ps2_fh1::kRaceTick2Callee)
+            qsr1NoteRaceTick2(rdram, ctx, m_memory.gs().vsyncTick.load(std::memory_order_relaxed));
+        else if (targetPc == ps2_fh1::kSession)
+            qsr1NoteSession(rdram, ctx);
+    }
     if (targetPc == kSsx3PatchCacheAlloc &&
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) &&
         ssx3PatchCacheGuard(rdram, ctx))
@@ -6926,7 +7017,7 @@ void PS2Runtime::run()
                     }
                     else if (hit == 4)
                     {
-                        qsr1FireLoad("auto", "restart");
+                        qsr1FireLoad("auto", "retry");
                         qsr1Expanded = false;
                     }
                 }
@@ -6971,7 +7062,7 @@ void PS2Runtime::run()
             if (vkUnder)
                 EndBlendMode();
 #endif
-            // QSR1: menu dot + expanded Save/Load/Race column.
+            // QSR1: menu dot + expanded Save/Load/Retry row.
             if (qsr1UiOn())
             {
                 const ps2x::vpad::Qsr1MenuGeom qsr1dg = ps2x::vpad::qsr1MenuLayout(screenWidth, screenHeight);
@@ -6986,13 +7077,16 @@ void PS2Runtime::run()
                 }
                 if (qsr1Expanded)
                 {
-                    static const char *labels[3] = {"SAVE", "LOAD", "RACE"};
+                    static const char *labels[3] = {"SAVE", "LOAD", "RETRY"};
                     for (int i = 0; i < 3; ++i)
                     {
                         const Vector2 c{qsr1dg.rowX[i], qsr1dg.rowY};
                         DrawCircleV(c, qsr1dg.rowR, Color{255, 255, 255, 60});
                         DrawCircleLinesV(c, qsr1dg.rowR, Color{255, 255, 255, 160});
-                        const int fs = 18;
+                        // Shrink the label until it fits inside the disc.
+                        int fs = 18;
+                        while (fs > 10 && MeasureText(labels[i], fs) > static_cast<int>(qsr1dg.rowR * 1.6f))
+                            --fs;
                         const int tw = MeasureText(labels[i], fs);
                         DrawText(labels[i], static_cast<int>(qsr1dg.rowX[i]) - tw / 2,
                                  static_cast<int>(qsr1dg.rowY) - fs / 2, fs, Color{255, 255, 255, 220});

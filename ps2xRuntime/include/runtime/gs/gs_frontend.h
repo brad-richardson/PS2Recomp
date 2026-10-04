@@ -359,6 +359,7 @@ private:
 
     GSContext &activeContext();
     friend struct GSSavestate;
+    friend struct GsLagfTestAccess; // QSR1 SRB4 unit test only
 
     uint8_t *m_localMemoryStorage = nullptr;
     uint32_t m_localMemorySize = 0u;

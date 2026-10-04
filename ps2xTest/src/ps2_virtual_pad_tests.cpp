@@ -649,5 +649,15 @@ void register_ps2_virtual_pad_tests()
                 for (int i = 0; i < 3; ++i)
                     t.IsTrue(g.rowX[i] - g.rowR >= 0.0f && g.rowX[i] + g.rowR <= w && g.rowY - g.rowR >= 0.0f,
                              "row inside");
-            } }); });
+            } });
+
+        tc.Run("qsr1: slot dir sits next to the card, never under elfDirectory", [](TestCase &t)
+               {
+            t.Equals(qsr1SlotDirFor("/docs", "/run/mc0", "/pinned/cd"), "/docs/states", "ios docs wins");
+            t.Equals(qsr1SlotDirFor(nullptr, "/run/mc0", "/pinned/cd"), "/run/states", "card parent");
+            t.Equals(qsr1SlotDirFor("", "/run/mc0", "/pinned/cd"), "/run/states", "empty docs = unset");
+            t.Equals(qsr1SlotDirFor(nullptr, "", "/pinned/cd"), "/pinned/cd/states", "no card: elf fallback");
+            t.Equals(qsr1SlotDirFor(nullptr, "mc0", "/pinned/cd"), "/pinned/cd/states",
+                     "parentless card: elf fallback");
+        }); });
 }
