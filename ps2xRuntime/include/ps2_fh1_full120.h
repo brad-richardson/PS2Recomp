@@ -1947,6 +1947,22 @@ inline bool particlesFix() noexcept
     return on;
 }
 
+// FLK2 flare: every light flare's intensity is the raw visibility fraction its depth probe returned
+// that update. The probe loop 0x2e3130 (loop A: sun, result obj+0x6274; loop B: lights, result
+// [entry]+0x40+view*4) is called once per update through the thunk 0x2e3110 (jal at 0x2e3118, return
+// value unused); the flare draw 0x2e2868 (from 0x2e3478) passes that word, unsmoothed and with no random
+// term, as the sprite alpha to the render device's draw 0x3781a0. At 120 the depth-noise flicker of the
+// fraction therefore ran twice per wall second (FLK2 Part 2: same per-update size as stock and PCSX2).
+// On odd updates the probe-loop call is skipped, so every visibility word holds the even update's value
+// and probes run at stock cadence (class d, like particles). Opt-in, not in "all".
+inline constexpr uint32_t kFlareProbeSite = 0x2e3118u, kFlareProbeLoop = 0x2e3130u;
+
+inline bool flareFix() noexcept
+{
+    static const bool on = enabled() && (fixMask12() & kFix12Flare) != 0u;
+    return on;
+}
+
 inline bool fh12Hooks() noexcept
 {
     static const bool on = enabled() && (fixMask12() & (kFix12Spin | kFix12Texanim | kFix12Loops | kFix12FxTimer)) != 0u;
@@ -2221,7 +2237,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles;
+        particles, flare;
     bool src, fh9, lab, draw, tap;
 };
 
@@ -2239,7 +2255,8 @@ inline const BranchFlags &branchFlags() noexcept
         r.trick = trickFix();
         r.aiGate = aiGateFix();
         r.particles = particlesFix();
-        r.parity = r.rng || r.trick || r.aiGate || r.particles;
+        r.flare = flareFix();
+        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare;
         r.bonus = bonusFix();
         r.lift = liftFix();
         r.flags = flagsFix();
@@ -2363,7 +2380,7 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addTgt(kSession);
     }
     const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate)) != 0u && on) ||
-                        ((c.fix12 & kFix12Particles) != 0u && on);
+                        ((c.fix12 & (kFix12Particles | kFix12Flare)) != 0u && on);
     if (parity)
         addSrc(kAppUpdateSite); // parityHook counts app-update dispatches
     if ((c.main & kFixRng) != 0u && on)
@@ -2396,6 +2413,11 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addSrc(kParticleSiteAll);
         addSrc(kParticleSiteOne);
         addTgt(kParticlePass);
+    }
+    if ((c.fix12 & kFix12Flare) != 0u && on)
+    {
+        addSrc(kFlareProbeSite);
+        addTgt(kFlareProbeLoop);
     }
     if ((c.main & kFixBonus) != 0u && on)
     {
@@ -2566,7 +2588,7 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     if (on && flag(&BranchFlags::launch, launchFix))
         launchPreHook(ram, ctx, targetPc);
     bool skip = on && flag(&BranchFlags::session, sessionFix) && sessionSkip(sourcePc, targetPc);
-    if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix() || particlesFix())))
+    if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix() || particlesFix() || flareFix())))
         parityHook(ram, sourcePc);
     if (on && flag(&BranchFlags::rng, rngFix))
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
@@ -2576,6 +2598,9 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = aiGateHook(ctx, sourcePc, targetPc) || skip;
     if (on && flag(&BranchFlags::particles, particlesFix) && g_rngOdd && targetPc == kParticlePass &&
         (sourcePc == kParticleSiteAll || sourcePc == kParticleSiteOne))
+        skip = true;
+    if (on && flag(&BranchFlags::flare, flareFix) && g_rngOdd && sourcePc == kFlareProbeSite &&
+        targetPc == kFlareProbeLoop)
         skip = true;
     if (on && flag(&BranchFlags::bonus, bonusFix))
         bonusHook(ram, ctx, sourcePc, targetPc);

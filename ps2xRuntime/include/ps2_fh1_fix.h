@@ -74,6 +74,8 @@ enum : uint32_t
     kFix12HudProg = 1u << 13,  // race-HUD progress table 0x4c8bc8 (0x210618/0x20eda0): per-update slew limits (class b, FH24)
     // FH27 (in "all" since DEF1, Brad 10-03; "all,-loops2" opts out):
     kFix12Loops2 = 1u << 14,   // with loops: a loop controller built while active (ctor 0x341aa0, step = x/A.rate at 120) gets its step in stock units (FCR1 4)
+    // FLK2 Part 3 (opt-in, not in "all"):
+    kFix12Flare = 1u << 15,    // light/sun visibility probe loop 0x2e3130 (thunk 0x2e3110): odd updates skipped, flare intensity held per stock period (class d)
 };
 
 inline uint32_t fh12Item(const std::string &item) noexcept
@@ -93,6 +95,7 @@ inline uint32_t fh12Item(const std::string &item) noexcept
     if (item == "snddt") return kFix12SndDt;
     if (item == "hudprog") return kFix12HudProg;
     if (item == "loops2") return kFix12Loops2;
+    if (item == "flare") return kFix12Flare;
     return 0u;
 }
 
