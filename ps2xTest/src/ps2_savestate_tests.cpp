@@ -965,5 +965,20 @@ void register_ps2_savestate_tests()
             t.Equals(vfs.close(5), 0, "close succeeds");
             fs::remove_all(base);
         });
+
+        tc.Run("qsr1: completion toasts fire for the touch menu's slots only", [](TestCase &t)
+               {
+            using ps2_savestate::QuickSlotKind;
+            using ps2_savestate::quickSlotKind;
+            t.IsTrue(quickSlotKind("/docs/states/quick-manual-mc0.state") == QuickSlotKind::Qsr1Manual,
+                     "manual slot");
+            t.IsTrue(quickSlotKind("/docs/states/quick-auto-mc0.state") == QuickSlotKind::Qsr1Auto,
+                     "auto slot");
+            t.IsTrue(quickSlotKind("/run/states/quicksave-mc0.state") == QuickSlotKind::Other,
+                     "DS1 chord slot stays silent");
+            t.IsTrue(quickSlotKind("/run/save-2500.state") == QuickSlotKind::Other, "env save stays silent");
+            t.IsTrue(quickSlotKind("quick-auto-mc0.state") == QuickSlotKind::Qsr1Auto, "bare filename");
+            t.IsTrue(quickSlotKind("") == QuickSlotKind::Other, "empty path");
+        });
     });
 }

@@ -509,6 +509,19 @@ namespace ps2_savestate
     // to it). Two roots with the same leaf share a slot (play's mc0 and
     // mc0-allpeak don't collide).
     std::string quickSlotPath(const std::string &elfDir, const std::string &mcRoot);
+    // QSR1 completion toasts fire for the touch menu's slots only (DS1
+    // chord slots keep the status line alone). Pure; unit-tested.
+    enum class QuickSlotKind { Other, Qsr1Manual, Qsr1Auto };
+    inline QuickSlotKind quickSlotKind(const std::string &path)
+    {
+        const char *base = std::strrchr(path.c_str(), '/');
+        base = base ? base + 1 : path.c_str();
+        if (std::strncmp(base, "quick-manual-", 13) == 0)
+            return QuickSlotKind::Qsr1Manual;
+        if (std::strncmp(base, "quick-auto-", 11) == 0)
+            return QuickSlotKind::Qsr1Auto;
+        return QuickSlotKind::Other;
+    }
     // Small "<slot>.info" sidecar written after a quick save lands (tick,
     // utc, build identity): pullable proof without opening the state.
     void writeQuickInfo(const std::string &statePath, uint64_t tick, uint64_t eeCycle);
