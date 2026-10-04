@@ -1,7 +1,20 @@
-# ACH2: vendored rcheevos condition engine + game hash (no rc_client).
+# ACH2: vendored rcheevos (full: runtime + hash + client + api).
 # Pin: RetroAchievements/rcheevos f87c0de (see README.ach2.md). Compiled on
-# Mac, iOS and Android as part of ps2_runtime. Pure C, no sockets.
+# Mac, iOS and Android as part of ps2_runtime. Pure C, no sockets: the
+# engine never calls rc_client (offline local achievements only); rc_client
+# is linked solely to satisfy the PCSX2 Achievements TU inside the GE1
+# archives, whose own bundled rcheevos copy we exclude (same rc_* symbols,
+# different pin -> silent misbehavior if both link).
 add_library(ps2x_rcheevos STATIC
+    src/rapi/rc_api_common.c
+    src/rapi/rc_api_editor.c
+    src/rapi/rc_api_info.c
+    src/rapi/rc_api_runtime.c
+    src/rapi/rc_api_user.c
+    src/rc_client.c
+    src/rc_client_compat_ach2.c
+    src/rc_client_external.c
+    src/rc_client_raintegration.c
     src/rcheevos/alloc.c
     src/rcheevos/condition.c
     src/rcheevos/condset.c
@@ -36,6 +49,7 @@ target_include_directories(ps2x_rcheevos PUBLIC
 )
 target_include_directories(ps2x_rcheevos PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/rapi"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/rcheevos"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/rhash"
 )
