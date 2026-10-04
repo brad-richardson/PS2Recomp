@@ -332,42 +332,35 @@ void register_ps2_ssx3_tricky_hud_tests()
             t.IsTrue(st.lit == 0 && st.flashUntil == 0u, "reset after flash");
             updateLetters(st, 8u, 400u);
             t.IsTrue(st.lit == 1, "spelling restarts"); });
-        tc.Run("rider scan finds the player, skips zero pages", [](TestCase &t)
+        tc.Run("chain resolves the player rider, fails closed", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
             std::vector<uint8_t> ram(0x600000, 0);
             auto w32 = [&](uint32_t a, uint32_t v) { std::memcpy(&ram[a], &v, 4); };
             auto wf = [&](uint32_t a, float v) { std::memcpy(&ram[a], &v, 4); };
-            // Snapshot = the player's position.
-            wf(0x5409c0u, 100.0f);
-            wf(0x5409c4u, 200.0f);
-            wf(0x5409c8u, 300.0f);
-            // Rival first in RAM (scan order must not win).
-            wf(0x4000u + kRiderFillOff, 0.2f);
-            w32(0x4000u + kRiderUberOff, 1u);
-            wf(0x4000u + kRiderTimerOff, 5.0f);
-            wf(0x4000u + kRiderPosOff, 1000.0f);
-            wf(0x4000u + kRiderPosOff + 4u, 2000.0f);
-            wf(0x4000u + kRiderPosOff + 8u, 3000.0f);
-            // Player.
+            // G=0x1000 -> A=0x2000 -> B=0x3000 -> R=0x5000.
+            // (The root is addressed through the RDRAM mask, as in the game.)
+            w32(kChainRoot & kRamMask, 0x1000u);
+            w32(0x1000u + kChainAOff, 0x2000u);
+            w32(0x2000u + kChainBOff, 0x3000u);
+            w32(0x3000u + kChainROff, 0x5000u);
             wf(0x5000u + kRiderFillOff, 0.5f);
             w32(0x5000u + kRiderUberOff, 3u);
-            wf(0x5000u + kRiderTimerOff, 20.0f);
-            wf(0x5000u + kRiderPosOff, 100.0f);
-            wf(0x5000u + kRiderPosOff + 4u, 200.0f);
-            wf(0x5000u + kRiderPosOff + 8u, 300.0f);
-            // 0x1000 is a zero page: matches the bare triple, must lose on pos.
-            // 0x6000 is denormal dust (veh3): same, must lose on the norm floor.
-            wf(0x6000u + kRiderFillOff, 0.0f);
-            w32(0x6000u + kRiderUberOff, 0u);
-            wf(0x6000u + kRiderTimerOff, 0.0f);
-            wf(0x6000u + kRiderPosOff, 1e-30f);
-            t.IsTrue(scanRider(ram.data(), ram.size()) == 0x5000u, "picks the player");
+            t.IsTrue(resolveChainR(ram.data(), ram.size()) == 0x5000u, "full chain");
             MeterFrame f = readMeterFrameAt(ram.data(), ram.size(), 0x5000u);
             t.IsTrue(f.ok && f.fill == 0.5f && f.level == 3, "direct read");
+            // Each broken hop fails closed.
+            w32(0x2000u + kChainBOff, 0u);
+            t.IsTrue(resolveChainR(ram.data(), ram.size()) == 0u, "null B");
+            w32(0x2000u + kChainBOff, 0x3000u);
+            w32(0x1000u + kChainAOff, 0u);
+            t.IsTrue(resolveChainR(ram.data(), ram.size()) == 0u, "null A");
+            w32(0x1000u + kChainAOff, 0x2000u);
+            w32(kChainRoot & kRamMask, 0u);
+            t.IsTrue(resolveChainR(ram.data(), ram.size()) == 0u, "null root");
             std::vector<uint8_t> empty(0x10000, 0);
-            t.IsTrue(scanRider(empty.data(), empty.size()) == 0u, "no rider, no pick");
-            t.IsTrue(scanRider(nullptr, 0) == 0u, "null ram"); });
+            t.IsTrue(resolveChainR(empty.data(), empty.size()) == 0u, "short ram");
+            t.IsTrue(resolveChainR(nullptr, 0) == 0u, "null ram"); });
         tc.Run("diag letters preset parses 0..5", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;

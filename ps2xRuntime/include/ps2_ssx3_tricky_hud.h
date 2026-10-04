@@ -6,9 +6,10 @@
 // driven by SSX 3's committed boost words (TK43 memo section 4.1):
 //   fill = f32[R+0x2f8] normalized to 16 coils (SSX 3 shows floor(10*fill)),
 //   full = i32[R+0x2f4] (uber level) >= 1.
-// R = u32[PS2X_TK12_AP_PTR] (the rider pointer the Tricky AP recipes set;
-// APH1 default 0x53FF4C when unset). Letters lighting, the song and the
-// announcer are later lanes (TK43b/c).
+// R reaches the player-1 rider through the game's own globals (TK43d):
+// R = [[[0x4a28a8]+0x84]+0xC]+0x28 (PS2X_TK12_AP_PTR stays as an override
+// when set). Letters lighting, the song and the announcer are later lanes
+// (TK43b/c).
 //
 // Active only when PS2X_SSX3_TRICKY_HUD=1 AND a non-Stock course-manifest
 // mode is in RAM (the TK25c alias scope): SSX 3 courses are byte-identical
@@ -43,10 +44,11 @@ namespace ps2_ssx3_tricky_hud
 
 constexpr uint32_t kRiderFillOff = 0x2f8u;   // f32 boost target 0..1 (FH10)
 constexpr uint32_t kRiderUberOff = 0x2f4u;   // i32 uber level 0..10 (`sw`, 0x10e9e8)
-constexpr uint32_t kRiderTimerOff = 0x2f0u;  // f32 uber timer, 20 s / 60 s (FH10)
-constexpr uint32_t kRiderPosOff = 0x110u;    // f32x3 position (Pad.cpp AP)
-constexpr uint32_t kRiderSnapPos = 0x5409c0u; // f32x3 rider snapshot (TM2 tap)
-constexpr uint32_t kDefaultRiderPtr = 0x53ff4cu; // APH1 default (Pad.cpp)
+// TK43d chain root: [gp-0x848] (gp = 0x4a30f0, the ELF .reginfo ri_gp_value).
+constexpr uint32_t kChainRoot = 0x4a28a8u;
+constexpr uint32_t kChainAOff = 0x84u;       // game object (0x1298c8, func_28B1C8)
+constexpr uint32_t kChainBOff = 0x0cu;       // race object (func_28B1D8; tick at +8)
+constexpr uint32_t kChainROff = 0x28u;       // player-1 rider (HUD s5=0 entry, 0x29ab40)
 constexpr uint32_t kRamMask = 0x01ffffffu;   // 32 MB RDRAM (ps2_memory.h)
 constexpr int kCoils = 16;
 constexpr int kAtlasW = 256;
@@ -181,94 +183,41 @@ inline MeterFrame readMeterFrame(const uint8_t *ram, size_t ramSize, uint32_t pt
     return readMeterFrameAt(ram, ramSize, r);
 }
 
-// Diag-only rider scan (PS2X_SSX3_TRICKY_HUD_SCAN=1; unlisted knob, diag
-// class, owner lane TK43c — leaves with the lane). Finds race-rider
-// structs in RDRAM when no AP_PTR slot covers the route (TK43a gap 3: the
-// A7 replay sets neither 0x53FF4C nor 0x54003c). A candidate R
-// (4-aligned) satisfies: f32[R+0x2f8] in [0,1], i32[R+0x2f4] in [0,10],
-// f32[R+0x2f0] in [-1,120], and a finite position at R+0x110 with
-// squared norm > 1 (excludes zero pages and denormal dust, which match
-// the bare triple); structs overlapping
-// the snapshot itself are skipped (self-match phantoms). Logs up to 8
-// candidates and returns the one whose position best matches the
-// 0x5409c0 rider snapshot, or 0. Rivals match too; the snapshot picks the
-// player. Stale structs across a quit are a known limitation (the vehicle
-// runs one race).
-inline uint32_t scanRider(const uint8_t *ram, size_t ramSize)
+// TK43d: the player-1 rider through the game's own globals:
+// R = [[[0x4a28a8]+0x84]+0xC]+0x28. The SSX 3 HUD draws its meter from the
+// same struct: 0x29ab40 reads s2 = [func_28B1D8()+s5+0x28] (s5 = 0 for
+// player 1) and s2 carries the rider words (+0x2F0 at 0x29acd8, +0x790 at
+// 0x29abfc as in boost-add 0x10e990, +0x870 at 0x29ac80 as in func_29AB08
+// with a1 = R). Each hop is null- and range-checked; any failure returns 0
+// (menus / pre-race: the overlay draws nothing, as before).
+inline uint32_t resolveChainR(const uint8_t *ram, size_t ramSize)
 {
-    uint32_t cands[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    int n = 0;
-    if (ram && ramSize > static_cast<size_t>(kRiderFillOff) + 4u)
-    {
-        const size_t end = ramSize - (static_cast<size_t>(kRiderFillOff) + 4u);
-        for (size_t r = 4u; r <= end && n < 8; r += 4u)
-        {
-            // Skip structs overlapping the snapshot itself (self-match
-            // phantoms: R = snap - 0x110 reads its "pos" from the snapshot).
-            if (r + static_cast<size_t>(kRiderFillOff) + 4u > kRiderSnapPos &&
-                r < static_cast<size_t>(kRiderSnapPos) + 12u)
-                continue;
-            float fill = 0.0f, timer = 0.0f, px = 0.0f, py = 0.0f, pz = 0.0f;
-            int32_t level = 0;
-            std::memcpy(&fill, ram + r + kRiderFillOff, 4);
-            std::memcpy(&level, ram + r + kRiderUberOff, 4);
-            std::memcpy(&timer, ram + r + kRiderTimerOff, 4);
-            if (!std::isfinite(fill) || fill < 0.0f || fill > 1.0f)
-                continue;
-            if (level < 0 || level > 10)
-                continue;
-            if (!std::isfinite(timer) || timer < -1.0f || timer > 120.0f)
-                continue;
-            if (r + kRiderPosOff + 12u > ramSize)
-                continue;
-            std::memcpy(&px, ram + r + kRiderPosOff, 4);
-            std::memcpy(&py, ram + r + kRiderPosOff + 4u, 4);
-            std::memcpy(&pz, ram + r + kRiderPosOff + 8u, 4);
-            if (!std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pz))
-                continue;
-            const double norm = static_cast<double>(px) * px + static_cast<double>(py) * py +
-                                static_cast<double>(pz) * pz;
-            // Squared norm > 1 (veh3: bare > 0 admits denormal dust in
-            // low memory; real riders sit kilometers out, norm ~ 1e10).
-            if (!(norm > 1.0))
-                continue;
-            cands[n++] = static_cast<uint32_t>(r);
-        }
-    }
-    float snap[3] = {0.0f, 0.0f, 0.0f};
-    if (ram && static_cast<size_t>(kRiderSnapPos) + 12u <= ramSize)
-        std::memcpy(snap, ram + kRiderSnapPos, 12);
-    int best = 0;
-    double bestD = 1e300;
-    for (int i = 0; i < n; ++i)
-    {
-        float p[3] = {0.0f, 0.0f, 0.0f};
-        std::memcpy(p, ram + cands[i] + kRiderPosOff, 12);
-        float fill = 0.0f;
-        int32_t level = 0;
-        std::memcpy(&fill, ram + cands[i] + kRiderFillOff, 4);
-        std::memcpy(&level, ram + cands[i] + kRiderUberOff, 4);
-        const double dx = p[0] - snap[0], dy = p[1] - snap[1], dz = p[2] - snap[2];
-        const double d = dx * dx + dy * dy + dz * dz;
-        std::fprintf(stderr,
-                     "[ssx3-tricky-hud] scan cand %d R=%08x fill=%.3f level=%d "
-                     "pos=%.1f,%.1f,%.1f d2=%.1f\n",
-                     i, cands[i], static_cast<double>(fill), level, static_cast<double>(p[0]),
-                     static_cast<double>(p[1]), static_cast<double>(p[2]), d);
-        if (d < bestD)
-        {
-            bestD = d;
-            best = i;
-        }
-    }
-    if (n == 0)
-    {
-        std::fprintf(stderr, "[ssx3-tricky-hud] scan: no rider found\n");
+    if (!ram || ramSize == 0u)
         return 0u;
-    }
-    std::fprintf(stderr, "[ssx3-tricky-hud] scan: %d candidate(s), pick %d R=%08x\n", n, best,
-                 cands[best]);
-    return cands[best];
+    uint32_t g = 0u, a = 0u, b = 0u, r = 0u;
+    const uint32_t gs = kChainRoot & kRamMask;
+    if (gs + 4u > ramSize)
+        return 0u;
+    std::memcpy(&g, ram + gs, 4);
+    if (g == 0u)
+        return 0u;
+    const uint32_t as = (g + kChainAOff) & kRamMask;
+    if (as + 4u > ramSize)
+        return 0u;
+    std::memcpy(&a, ram + as, 4);
+    if (a == 0u)
+        return 0u;
+    const uint32_t bs = (a + kChainBOff) & kRamMask;
+    if (bs + 4u > ramSize)
+        return 0u;
+    std::memcpy(&b, ram + bs, 4);
+    if (b == 0u)
+        return 0u;
+    const uint32_t rs = (b + kChainROff) & kRamMask;
+    if (rs + 4u > ramSize)
+        return 0u;
+    std::memcpy(&r, ram + rs, 4);
+    return r;
 }
 
 // Diag-only display override (PS2X_SSX3_TRICKY_HUD_FORCE="fill,level", e.g.
