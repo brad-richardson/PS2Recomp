@@ -335,8 +335,9 @@ namespace ps2_mtvu
         // EE-visible completion (completed++) latency is unchanged.
         // A parked stage spins kStageParkSpinNs (<= 4 us) with a CPU pause
         // (arm64 `yield`, x86 `pause`; the clock is read every 16 polls),
-        // then the existing condvar sleep. spin (the default in this lane):
-        // today's exact path, 50 us of std::this_thread::yield() + clock
+        // then the existing condvar sleep. park is the default (DEF1, Brad
+        // 10-03: iPhone 0 vs 8 hitches, Odin neutral-to-positive); spin is
+        // the exact path, 50 us of std::this_thread::yield() + clock
         // reads, then the same sleep. Same wake protocol every way: every
         // publish is a `tail` release-store + seq_cst fence followed by a
         // notify iff `sleeping`, and the sleep sets `sleeping`, fences, and
@@ -345,15 +346,15 @@ namespace ps2_mtvu
         static constexpr uint64_t kStageParkSpinNs = 4000u;
         inline int parseStagePark(const char *e)
         {
+            if (e && std::strcmp(e, "spin") == 0)
+                return 0;
             if (e && std::strcmp(e, "park3") == 0)
                 return 4;
             if (e && std::strcmp(e, "park2") == 0)
                 return 3;
             if (e && std::strcmp(e, "park_all") == 0)
                 return 2;
-            if (e && std::strcmp(e, "park") == 0)
-                return 1;
-            return 0;
+            return 1; // DEF1: unset (or anything else) parks the GIF stage
         }
         inline int &stageWaitMode()
         {

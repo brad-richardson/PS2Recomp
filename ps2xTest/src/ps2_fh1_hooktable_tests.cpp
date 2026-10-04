@@ -135,6 +135,7 @@ void register_ps2_fh1_hooktable_tests()
         tc.Run("FH27: bonusflip recorder (any phase) and loops2 ctor (active)", [](TestCase &t)
         {
             HookConfig c = hk1AllActive();
+            c.main &= ~static_cast<uint64_t>(kFixBonusFlip); // DEF1: bonusflip is in all; clear it for the negative case
             t.IsFalse(hookTableHit(buildHookInterest(c), 0x000001u, 0x117c28u), "no recorder without bonusflip");
             c.main |= kFixBonusFlip;
             t.IsTrue(hookTableHit(buildHookInterest(c), 0x000001u, 0x117c28u), "recorder hits (active)");
