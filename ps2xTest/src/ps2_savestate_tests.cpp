@@ -401,6 +401,41 @@ void register_ps2_savestate_tests()
             std::filesystem::remove(path);
         });
 
+        tc.Run("det2: PS2X_DETERMINISTIC pins GetDir dates (host mtimes and . / .. now)", [](TestCase &t)
+        {
+            namespace fs = std::filesystem;
+            const fs::path card = fs::temp_directory_path() / "det2-mcdate-test";
+            fs::remove_all(card);
+            fs::create_directories(card / "SAVE");
+            { std::ofstream(card / "top.dat", std::ios::binary) << "top"; }
+            fs::last_write_time(card / "top.dat", ss4FileTime(1700000200, 0));
+            fs::last_write_time(card / "SAVE", ss4FileTime(1600000300, 0));
+            const char *prev = std::getenv("PS2X_DETERMINISTIC");
+            const std::string saved = prev ? prev : "";
+            PS2Runtime rt;
+            {
+                Ss4IoPathsGuard g(card);
+                // 4 entries: . .. SAVE top.dat; dates are bytes 0..15 of each 64-byte entry.
+                const uint8_t fixed[8] = {0, 56, 34, 12, 16, 7, 2004 & 0xFF, 2004 >> 8};
+                ::setenv("PS2X_DETERMINISTIC", "1", 1);
+                const std::vector<uint8_t> det = ss4GetDir(rt, "mc0:/", 4);
+                bool allFixed = true;
+                for (int e = 0; e < 4; ++e)
+                    for (int half = 0; half < 2; ++half)
+                        allFixed = allFixed && std::memcmp(det.data() + e * 64 + half * 8, fixed, 8) == 0;
+                t.IsTrue(allFixed, "every entry's create/modify date is 2004-07-16 12:34:56");
+                ::unsetenv("PS2X_DETERMINISTIC");
+                const std::vector<uint8_t> host = ss4GetDir(rt, "mc0:/", 4);
+                t.IsTrue(std::memcmp(host.data() + 2 * 64 + 8, host.data() + 3 * 64 + 8, 8) != 0,
+                         "without det the dates follow host mtimes");
+            }
+            if (prev)
+                ::setenv("PS2X_DETERMINISTIC", saved.c_str(), 1);
+            else
+                ::unsetenv("PS2X_DETERMINISTIC");
+            fs::remove_all(card);
+        });
+
         tc.Run("ss3 s4: card dirs and timestamps round-trip; GetDir equal after load", [](TestCase &t)
         {
             namespace fs = std::filesystem;
