@@ -19,10 +19,21 @@
 //
 // Change class: output-only. The guest det-hash cannot move: this reads
 // committed guest words and writes only the host presentation buffer.
+//
+// TK43c: TRICKY letters + fanfare flash (still output-only). Uber landings
+// are counted by a host-side CD tap (noteCdReadForUber, called from
+// ps2_e41_trace::noteCdRead): the speech engine opens an Arcade_Uber slot's
+// stream with a >=2-sector read at a fixed disc LBN, once per trigger. The
+// overlay lights one red letter per tap (T->R->I->C->K->Y); the 6th opens a
+// 64-tick all-red flash, then the letters reset (real Tricky past R is
+// unobserved; reset and say so). The red sprites are new atlas cells
+// (map1 red wordmark run, TK43a2 boxes); the atlas magic is TKHUD2.
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -32,6 +43,9 @@ namespace ps2_ssx3_tricky_hud
 
 constexpr uint32_t kRiderFillOff = 0x2f8u;   // f32 boost target 0..1 (FH10)
 constexpr uint32_t kRiderUberOff = 0x2f4u;   // i32 uber level 0..10 (`sw`, 0x10e9e8)
+constexpr uint32_t kRiderTimerOff = 0x2f0u;  // f32 uber timer, 20 s / 60 s (FH10)
+constexpr uint32_t kRiderPosOff = 0x110u;    // f32x3 position (Pad.cpp AP)
+constexpr uint32_t kRiderSnapPos = 0x5409c0u; // f32x3 rider snapshot (TM2 tap)
 constexpr uint32_t kDefaultRiderPtr = 0x53ff4cu; // APH1 default (Pad.cpp)
 constexpr uint32_t kRamMask = 0x01ffffffu;   // 32 MB RDRAM (ps2_memory.h)
 constexpr int kCoils = 16;
@@ -60,6 +74,12 @@ inline Rect letterRect(int i) // 0..5 = T,R,I,C,K,Y
                                      {74, 16, 19, 23}, {94, 16, 25, 35}, {120, 16, 30, 30}};
     return kLetters[i < 0 ? 0 : (i > 5 ? 5 : i)];
 }
+inline Rect litLetterRect(int i) // 0..5 = T,R,I,C,K,Y, lit red (TK43c)
+{
+    static const Rect kLit[6] = {{0, 96, 35, 24},  {36, 96, 19, 27}, {56, 96, 17, 31},
+                                 {74, 96, 18, 23}, {94, 96, 25, 34}, {120, 96, 30, 30}};
+    return kLit[i < 0 ? 0 : (i > 5 ? 5 : i)];
+}
 inline Rect jewelGreyRect() { return {152, 16, 35, 32}; }
 inline Rect jewelRedRect() { return {188, 16, 35, 32}; }
 inline Rect pillRect() { return {0, 56, 22, 18}; }
@@ -74,11 +94,13 @@ struct Atlas
     bool ok = false;
 };
 
-// Header: "TKHUD1\0\0" + u32le w,h,reserved, then w*h*4 RGBA bytes.
+// Header: "TKHUD2\0\0" + u32le w,h,reserved, then w*h*4 RGBA bytes.
+// TK43c: magic bumped (TKHUD1 atlases lack the red-letter row and are
+// refused; the atlas is staged fresh, never committed).
 inline Atlas parseAtlas(const uint8_t *data, size_t size)
 {
     Atlas a;
-    static const char kMagic[8] = {'T', 'K', 'H', 'U', 'D', '1', '\0', '\0'};
+    static const char kMagic[8] = {'T', 'K', 'H', 'U', 'D', '2', '\0', '\0'};
     if (!data || size < 20u || std::memcmp(data, kMagic, 8) != 0)
         return a;
     uint32_t w = 0, h = 0;
@@ -120,16 +142,11 @@ struct MeterFrame
     int32_t level = 0;
 };
 
-inline MeterFrame readMeterFrame(const uint8_t *ram, size_t ramSize, uint32_t ptrAddr)
+inline MeterFrame readMeterFrameAt(const uint8_t *ram, size_t ramSize, uint32_t r)
 {
     MeterFrame f;
     if (!ram || ramSize == 0u)
         return f;
-    const uint32_t slot = ptrAddr & kRamMask;
-    if (slot + 4u > ramSize)
-        return f;
-    uint32_t r = 0;
-    std::memcpy(&r, ram + slot, 4);
     const uint32_t rb = r & kRamMask;
     if (r == 0u || rb + kRiderFillOff + 4u > ramSize)
         return f;
@@ -150,6 +167,108 @@ inline MeterFrame readMeterFrame(const uint8_t *ram, size_t ramSize, uint32_t pt
     f.fill = fill;
     f.level = level;
     return f;
+}
+
+inline MeterFrame readMeterFrame(const uint8_t *ram, size_t ramSize, uint32_t ptrAddr)
+{
+    if (!ram || ramSize == 0u)
+        return MeterFrame();
+    const uint32_t slot = ptrAddr & kRamMask;
+    if (slot + 4u > ramSize)
+        return MeterFrame();
+    uint32_t r = 0;
+    std::memcpy(&r, ram + slot, 4);
+    return readMeterFrameAt(ram, ramSize, r);
+}
+
+// Diag-only rider scan (PS2X_SSX3_TRICKY_HUD_SCAN=1; unlisted knob, diag
+// class, owner lane TK43c — leaves with the lane). Finds race-rider
+// structs in RDRAM when no AP_PTR slot covers the route (TK43a gap 3: the
+// A7 replay sets neither 0x53FF4C nor 0x54003c). A candidate R
+// (4-aligned) satisfies: f32[R+0x2f8] in [0,1], i32[R+0x2f4] in [0,10],
+// f32[R+0x2f0] in [-1,120], and a finite position at R+0x110 with
+// squared norm > 1 (excludes zero pages and denormal dust, which match
+// the bare triple); structs overlapping
+// the snapshot itself are skipped (self-match phantoms). Logs up to 8
+// candidates and returns the one whose position best matches the
+// 0x5409c0 rider snapshot, or 0. Rivals match too; the snapshot picks the
+// player. Stale structs across a quit are a known limitation (the vehicle
+// runs one race).
+inline uint32_t scanRider(const uint8_t *ram, size_t ramSize)
+{
+    uint32_t cands[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    int n = 0;
+    if (ram && ramSize > static_cast<size_t>(kRiderFillOff) + 4u)
+    {
+        const size_t end = ramSize - (static_cast<size_t>(kRiderFillOff) + 4u);
+        for (size_t r = 4u; r <= end && n < 8; r += 4u)
+        {
+            // Skip structs overlapping the snapshot itself (self-match
+            // phantoms: R = snap - 0x110 reads its "pos" from the snapshot).
+            if (r + static_cast<size_t>(kRiderFillOff) + 4u > kRiderSnapPos &&
+                r < static_cast<size_t>(kRiderSnapPos) + 12u)
+                continue;
+            float fill = 0.0f, timer = 0.0f, px = 0.0f, py = 0.0f, pz = 0.0f;
+            int32_t level = 0;
+            std::memcpy(&fill, ram + r + kRiderFillOff, 4);
+            std::memcpy(&level, ram + r + kRiderUberOff, 4);
+            std::memcpy(&timer, ram + r + kRiderTimerOff, 4);
+            if (!std::isfinite(fill) || fill < 0.0f || fill > 1.0f)
+                continue;
+            if (level < 0 || level > 10)
+                continue;
+            if (!std::isfinite(timer) || timer < -1.0f || timer > 120.0f)
+                continue;
+            if (r + kRiderPosOff + 12u > ramSize)
+                continue;
+            std::memcpy(&px, ram + r + kRiderPosOff, 4);
+            std::memcpy(&py, ram + r + kRiderPosOff + 4u, 4);
+            std::memcpy(&pz, ram + r + kRiderPosOff + 8u, 4);
+            if (!std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pz))
+                continue;
+            const double norm = static_cast<double>(px) * px + static_cast<double>(py) * py +
+                                static_cast<double>(pz) * pz;
+            // Squared norm > 1 (veh3: bare > 0 admits denormal dust in
+            // low memory; real riders sit kilometers out, norm ~ 1e10).
+            if (!(norm > 1.0))
+                continue;
+            cands[n++] = static_cast<uint32_t>(r);
+        }
+    }
+    float snap[3] = {0.0f, 0.0f, 0.0f};
+    if (ram && static_cast<size_t>(kRiderSnapPos) + 12u <= ramSize)
+        std::memcpy(snap, ram + kRiderSnapPos, 12);
+    int best = 0;
+    double bestD = 1e300;
+    for (int i = 0; i < n; ++i)
+    {
+        float p[3] = {0.0f, 0.0f, 0.0f};
+        std::memcpy(p, ram + cands[i] + kRiderPosOff, 12);
+        float fill = 0.0f;
+        int32_t level = 0;
+        std::memcpy(&fill, ram + cands[i] + kRiderFillOff, 4);
+        std::memcpy(&level, ram + cands[i] + kRiderUberOff, 4);
+        const double dx = p[0] - snap[0], dy = p[1] - snap[1], dz = p[2] - snap[2];
+        const double d = dx * dx + dy * dy + dz * dz;
+        std::fprintf(stderr,
+                     "[ssx3-tricky-hud] scan cand %d R=%08x fill=%.3f level=%d "
+                     "pos=%.1f,%.1f,%.1f d2=%.1f\n",
+                     i, cands[i], static_cast<double>(fill), level, static_cast<double>(p[0]),
+                     static_cast<double>(p[1]), static_cast<double>(p[2]), d);
+        if (d < bestD)
+        {
+            bestD = d;
+            best = i;
+        }
+    }
+    if (n == 0)
+    {
+        std::fprintf(stderr, "[ssx3-tricky-hud] scan: no rider found\n");
+        return 0u;
+    }
+    std::fprintf(stderr, "[ssx3-tricky-hud] scan: %d candidate(s), pick %d R=%08x\n", n, best,
+                 cands[best]);
+    return cands[best];
 }
 
 // Diag-only display override (PS2X_SSX3_TRICKY_HUD_FORCE="fill,level", e.g.
@@ -187,6 +306,118 @@ inline ForceValue parseForce(const char *s)
     v.fill = fill;
     v.level = static_cast<int32_t>(level);
     return v;
+}
+
+// TK43c: Arcade_Uber stream-open tap. The speech engine opens a slot's
+// stream with a 1-sector staging read at the slot's first sector, then
+// 15-sector chunks from the next sector (TK43b A7 cdread: slot 2 @t12083
+// 0x614d9(1)+0x614da(15)...; slot 1 @t13398 0x6147c(1)+0x6147d(15)...;
+// B repeats both LBNs at t12141/t13398/t19424). The tap matches the
+// >=2-sector read at slot-start+1: slot 0's first sector (0x61416) is also
+// touched by neighboring Silence/Prompts streams, but its second sector
+// (0x61417) sits inside Arcade_Uber.dat and is read by no other stream.
+// LBNs computed off the pinned SSX 3 ISO (SPEECH.BIG LBN 393999 +
+// Arcade_Uber.dat member 8929152 + SCHl slot offsets); identical under the
+// TK43b alias composite (same-size, same layout). Slots 1-2 verified once
+// per trigger in A7+B; slot 0 is predicted (it has never fired in any
+// boot). Called from ps2_e41_trace::noteCdRead on every CD read, whether
+// or not the read trace is armed; self-gated on PS2X_SSX3_TRICKY_HUD.
+inline constexpr uint32_t kUberTapLbn[3] = {0x61417u, 0x6147du, 0x614dau};
+
+inline int slotForUberRead(uint32_t lbn, uint32_t sectors)
+{
+    if (sectors < 2u)
+        return -1;
+    for (int i = 0; i < 3; ++i)
+    {
+        if (lbn == kUberTapLbn[i])
+            return i;
+    }
+    return -1;
+}
+
+struct UberTap
+{
+    std::atomic<uint64_t> count{0};
+    std::atomic<uint64_t> tick{0};
+    std::atomic<int> slot{-1};
+};
+
+inline UberTap &uberTap()
+{
+    static UberTap t;
+    return t;
+}
+
+inline void noteCdReadForUber(uint32_t lbn, uint32_t sectors, uint64_t vsync)
+{
+    static const bool wanted = [] {
+        const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD");
+        return env && env[0] == '1';
+    }();
+    if (!wanted)
+        return;
+    const int slot = slotForUberRead(lbn, sectors);
+    if (slot < 0)
+        return;
+    UberTap &t = uberTap();
+    const uint64_t n = t.count.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    t.tick.store(vsync, std::memory_order_relaxed);
+    t.slot.store(slot, std::memory_order_relaxed);
+    std::fprintf(stderr, "[ssx3-tricky-hud] uber #%llu slot=%d tick=%llu\n",
+                 static_cast<unsigned long long>(n), slot,
+                 static_cast<unsigned long long>(vsync));
+}
+
+// TK43c: letter state machine (pure; the overlay owns the state).
+// One lit letter per uber tap, T->R->I->C->K->Y. Triggers arriving during
+// the fanfare flash are consumed but light nothing (triggers are minutes
+// apart; a mid-flash trigger cannot spell). The 6th letter opens the
+// 64-tick all-red flash; when it lapses the letters reset.
+constexpr uint64_t kLetterFlashTicks = 64u;
+
+struct LetterState
+{
+    uint64_t seen = 0;      // tap count consumed
+    int lit = 0;            // 0..6
+    uint64_t flashUntil = 0; // fanfare window (0 = none)
+};
+
+inline void updateLetters(LetterState &st, uint64_t count, uint64_t tick)
+{
+    while (st.seen < count)
+    {
+        ++st.seen;
+        if (tick < st.flashUntil)
+            continue;
+        if (st.lit < 6)
+        {
+            ++st.lit;
+            if (st.lit == 6)
+                st.flashUntil = tick + kLetterFlashTicks;
+        }
+    }
+    if (st.lit == 6 && st.flashUntil != 0u && tick >= st.flashUntil)
+    {
+        st.lit = 0;
+        st.flashUntil = 0;
+    }
+}
+
+// Diag-only letter preset (PS2X_SSX3_TRICKY_LETTERS_PRESET=N, 0..5): the
+// overlay enters Tricky mode with N letters already lit, so the fanfare
+// path is provable in-game on a replay with fewer than 6 ubers. Unlisted
+// knob (diag class): shows in the knobs line as an extra. Owner lane:
+// TK43c (leaves with the lane). Returns -1 when unset/invalid.
+inline int parseLettersPreset(const char *s)
+{
+    if (!s || !*s)
+        return -1;
+    char *end = nullptr;
+    const long v = std::strtol(s, &end, 10);
+    if (end == s || *end != '\0' || v < 0 || v > 5)
+        return -1;
+    return static_cast<int>(v);
 }
 
 inline int litCoils(float fill)
@@ -336,7 +567,8 @@ struct Layout
 };
 
 inline void composeOverlay(uint8_t *frame, int fw, int fh, const Atlas &a, float fill, bool full,
-                           uint64_t tick, uint64_t splashUntilTick)
+                           uint64_t tick, uint64_t splashUntilTick, int litLetters,
+                           uint64_t flashUntilTick)
 {
     if (!frame || !a.ok || fw <= 0 || fh <= 0)
         return;
@@ -367,13 +599,24 @@ inline void composeOverlay(uint8_t *frame, int fw, int fh, const Atlas &a, float
     // Chrome arch (TK43a2): the 6 pre-rotated letter sprites at native size,
     // each placed at its offset from the stack center (x587.5) and jewel top
     // (y107) template-matched in Brad's recording (t135, t460).
+    // TK43c: the first `litLetters` draw from the red cells (same dest
+    // rects; the red art is the same graffiti shapes). During the fanfare
+    // window the whole arch blinks red/chrome at the jewel-pulse cadence.
+    if (litLetters < 0)
+        litLetters = 0;
+    if (litLetters > 6)
+        litLetters = 6;
+    const bool flashing = tick < flashUntilTick;
+    const bool flashRed = flashing && (((tick >> 3) & 1u) == 0u);
     static const int kArch[6][2] = {
         {527, 94}, {550, 83}, {565, 72}, {579, 79}, {595, 73}, {607, 94},
     };
     for (int i = 0; i < 6; ++i)
     {
-        const Rect src = letterRect(i);
-        blit(a, src, frame, fw, fh, L.X(kArch[i][0]), L.Y(kArch[i][1]), L.W(src.w), L.H(src.h));
+        const bool red = flashing ? flashRed : (i < litLetters);
+        const Rect src = red ? litLetterRect(i) : letterRect(i);
+        const Rect dst = letterRect(i);
+        blit(a, src, frame, fw, fh, L.X(kArch[i][0]), L.Y(kArch[i][1]), L.W(dst.w), L.H(dst.h));
     }
     // Pill slot over the S (y400-427): Tricky's red S hexagon when full,
     // its grey copy otherwise. Real Tricky shows no pill until full; the

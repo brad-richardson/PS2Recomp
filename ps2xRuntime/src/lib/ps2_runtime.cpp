@@ -11,6 +11,7 @@
 #include "ps2_ssx3_lod.h"
 #include "ps2_ssx3_tricky_hud.h"
 #include "ps2_ssx3_tricky_menu.h"
+#include "ps2_ssx3_tricky_song.h"
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
 #include "ps2_park_snapshot.h"
@@ -2103,6 +2104,20 @@ void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t he
     static bool atlasTried = false;
     static bool lastFull = false;
     static uint64_t splashUntil = 0u;
+    // TK43c: letter + song state (host-side only; the guest never sees it).
+    static ps2_ssx3_tricky_hud::LetterState letters;
+    static bool lettersInTricky = false;
+    static const int lettersPreset = ps2_ssx3_tricky_hud::parseLettersPreset(
+        std::getenv("PS2X_SSX3_TRICKY_LETTERS_PRESET"));
+    // TK43c diag: scan RDRAM for the race rider when no AP_PTR slot covers
+    // the route (unlisted knob PS2X_SSX3_TRICKY_HUD_SCAN=1; leaves with the
+    // lane). Retried at most once per 60 ticks until the meter reads.
+    static const bool scanWanted = [] {
+        const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD_SCAN");
+        return env && env[0] == '1';
+    }();
+    static uint32_t scannedR = 0u;
+    static uint64_t lastScanTick = 0u;
     if (!wanted || !rt || !rgba || width == 0u || height == 0u)
         return;
     ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
@@ -2110,6 +2125,13 @@ void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t he
     if (!ms.armed || !rdram || ps2_ssx3_course::modeCurrent(ms, rdram) == 0u)
     {
         lastFull = false; // re-arm the first-full splash for the next race
+        // TK43c: leaving Tricky mode resets the letters and swallows any
+        // taps that landed outside Tricky courses (letters are Tricky-only).
+        letters.seen =
+            ps2_ssx3_tricky_hud::uberTap().count.load(std::memory_order_relaxed);
+        letters.lit = 0;
+        letters.flashUntil = 0;
+        lettersInTricky = false;
         return;
     }
     if (!atlasTried)
@@ -2122,11 +2144,56 @@ void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t he
     }
     if (!atlas.ok)
         return;
+    // TK43c: consume uber taps (even when the meter words are unreadable,
+    // so no stale backlog lights letters late). Mode entry applies the
+    // diag preset, if any; otherwise the session starts unlit.
+    {
+        const uint64_t taps =
+            ps2_ssx3_tricky_hud::uberTap().count.load(std::memory_order_relaxed);
+        if (!lettersInTricky)
+        {
+            lettersInTricky = true;
+            letters.seen = taps;
+            letters.lit = lettersPreset >= 0 ? lettersPreset : 0;
+            letters.flashUntil = 0;
+            if (lettersPreset >= 0)
+                std::fprintf(stderr, "[ssx3-tricky-hud] letters preset=%d tick=%llu\n",
+                             lettersPreset, static_cast<unsigned long long>(tick));
+        }
+        const int wasLit = letters.lit;
+        const uint64_t wasFlash = letters.flashUntil;
+        ps2_ssx3_tricky_hud::updateLetters(letters, taps, tick);
+        if (letters.lit != wasLit && letters.lit > 0)
+        {
+            static const char kName[7] = "TRICKY";
+            std::fprintf(stderr, "[ssx3-tricky-hud] letter %c lit (%d/6) tick=%llu\n",
+                         kName[letters.lit - 1], letters.lit,
+                         static_cast<unsigned long long>(tick));
+        }
+        if (letters.flashUntil != 0u && wasFlash == 0u)
+            std::fprintf(stderr, "[ssx3-tricky-hud] TRICKY spelled: fanfare flash until=%llu\n",
+                         static_cast<unsigned long long>(letters.flashUntil));
+        if (letters.lit == 0 && wasLit == 6)
+            std::fprintf(stderr, "[ssx3-tricky-hud] letters reset tick=%llu\n",
+                         static_cast<unsigned long long>(tick));
+    }
     uint32_t ptrAddr = ps2_ssx3_tricky_hud::kDefaultRiderPtr;
     if (const char *p = std::getenv("PS2X_TK12_AP_PTR"))
         ptrAddr = static_cast<uint32_t>(std::strtoul(p, nullptr, 0));
-    const ps2_ssx3_tricky_hud::MeterFrame mf =
+    ps2_ssx3_tricky_hud::MeterFrame mf =
         ps2_ssx3_tricky_hud::readMeterFrame(rdram, PS2_RAM_SIZE, ptrAddr);
+    if (!mf.ok && scanWanted)
+    {
+        if (scannedR != 0u)
+            mf = ps2_ssx3_tricky_hud::readMeterFrameAt(rdram, PS2_RAM_SIZE, scannedR);
+        if (!mf.ok && tick - lastScanTick >= 60u)
+        {
+            lastScanTick = tick;
+            scannedR = ps2_ssx3_tricky_hud::scanRider(rdram, PS2_RAM_SIZE);
+            if (scannedR != 0u)
+                mf = ps2_ssx3_tricky_hud::readMeterFrameAt(rdram, PS2_RAM_SIZE, scannedR);
+        }
+    }
     if (!mf.ok)
         return;
     // TK43a Part 2 diag: forced DISPLAY values for screenshots (unlisted knob,
@@ -2136,10 +2203,16 @@ void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t he
     const float shownFill = forced.ok ? forced.fill : mf.fill;
     const bool full = (forced.ok ? forced.level : mf.level) >= 1;
     if (full && !lastFull)
+    {
         splashUntil = tick + 45u;
+        // TK43c: the meter's empty->full transition opens a ~5 s song burst
+        // (no-op when no song is staged).
+        ps2_ssx3_tricky_song::startBurst(tick);
+    }
     lastFull = full;
     ps2_ssx3_tricky_hud::composeOverlay(rgba, static_cast<int>(width), static_cast<int>(height), atlas, shownFill,
-                                       full, tick, splashUntil);
+                                       full, tick, splashUntil, letters.lit,
+                                       letters.flashUntil);
 }
 } // namespace
 

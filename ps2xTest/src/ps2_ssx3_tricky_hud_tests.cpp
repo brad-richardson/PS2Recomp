@@ -4,6 +4,8 @@
 // TK43a: Tricky meter reskin compositor/reader/atlas tests. The atlas is
 // synthetic solid-color rects (no game art); rect positions mirror the
 // staged trickyhud.bin layout in make_trickyhud_atlas.py.
+// TK43c: red-letter cells, the uber CD tap, the letter machine, the diag
+// preset, the fanfare flash.
 namespace
 {
 using ps2_ssx3_tricky_hud::Atlas;
@@ -35,13 +37,19 @@ Atlas synthAtlas()
     paintRect(px, letterRect(3), 63);
     paintRect(px, letterRect(4), 64);
     paintRect(px, letterRect(5), 65);
+    paintRect(px, litLetterRect(0), 140); // lit red T..Y
+    paintRect(px, litLetterRect(1), 141);
+    paintRect(px, litLetterRect(2), 142);
+    paintRect(px, litLetterRect(3), 143);
+    paintRect(px, litLetterRect(4), 144);
+    paintRect(px, litLetterRect(5), 145);
     paintRect(px, jewelGreyRect(), 90);
     paintRect(px, jewelRedRect(), 100);
     paintRect(px, pillRect(), 110);
     paintRect(px, pillGreyRect(), 130);
     paintRect(px, snowflakeRect(), 120);
     std::vector<uint8_t> blob;
-    const char magic[8] = {'T', 'K', 'H', 'U', 'D', '1', '\0', '\0'};
+    const char magic[8] = {'T', 'K', 'H', 'U', 'D', '2', '\0', '\0'};
     blob.insert(blob.end(), magic, magic + 8);
     const uint32_t wh[3] = {256u, 256u, 0u};
     const uint8_t *wbp = reinterpret_cast<const uint8_t *>(wh);
@@ -83,7 +91,7 @@ void register_ps2_ssx3_tricky_hud_tests()
             t.IsTrue(a.ok, "synthetic atlas parses");
             t.IsTrue(a.w == 256 && a.h == 256, "dims");
             std::vector<uint8_t> blob;
-            const char magic[8] = {'T', 'K', 'H', 'U', 'D', '1', '\0', '\0'};
+            const char magic[8] = {'T', 'K', 'H', 'U', 'D', '2', '\0', '\0'};
             blob.insert(blob.end(), magic, magic + 8);
             const uint32_t wh[3] = {256u, 256u, 0u};
             blob.insert(blob.end(), reinterpret_cast<const uint8_t *>(wh),
@@ -93,6 +101,9 @@ void register_ps2_ssx3_tricky_hud_tests()
             blob[0] = 'X';
             t.IsTrue(!parseAtlas(blob.data(), blob.size()).ok, "bad magic");
             blob[0] = 'T';
+            blob[5] = '1';
+            t.IsTrue(!parseAtlas(blob.data(), blob.size()).ok, "TKHUD1 refused");
+            blob[5] = '2';
             t.IsTrue(!parseAtlas(blob.data(), 100).ok, "truncated");
             blob[9] = 0; // w = 0x100 LE; clear the high byte -> w = 0
             t.IsTrue(!parseAtlas(blob.data(), blob.size()).ok, "zero width"); });});
@@ -167,7 +178,7 @@ void register_ps2_ssx3_tricky_hud_tests()
             using namespace ps2_ssx3_tricky_hud;
             Atlas a = synthAtlas();
             auto f = blankFrame(640, 480);
-            composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u);
+            composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u, 0, 0u);
             for (int i = 0; i < 16; ++i)
                 t.IsTrue(pxAt(f, 640, ringCx(), ringCy(i)) == 50, "ring silver");
             t.IsTrue(pxAt(f, 640, 588, 125) == 90, "jewel grey");
@@ -180,7 +191,7 @@ void register_ps2_ssx3_tricky_hud_tests()
             using namespace ps2_ssx3_tricky_hud;
             Atlas a = synthAtlas();
             auto f = blankFrame(640, 480);
-            composeOverlay(f.data(), 640, 480, a, 0.5f, false, 1000u, 0u);
+            composeOverlay(f.data(), 640, 480, a, 0.5f, false, 1000u, 0u, 0, 0u);
             const uint8_t want[16] = {10, 10, 10, 10, 30, 30, 30, 30, 50, 50, 50, 50, 50, 50, 50, 50};
             for (int i = 0; i < 16; ++i)
                 t.IsTrue(pxAt(f, 640, ringCx(), ringCy(i)) == want[i], "ring band"); });
@@ -189,7 +200,7 @@ void register_ps2_ssx3_tricky_hud_tests()
             using namespace ps2_ssx3_tricky_hud;
             Atlas a = synthAtlas();
             auto f = blankFrame(640, 480);
-            composeOverlay(f.data(), 640, 480, a, 1.0f, true, 1000u, 1045u);
+            composeOverlay(f.data(), 640, 480, a, 1.0f, true, 1000u, 1045u, 0, 0u);
             const uint8_t want[16] = {10, 10, 10, 10, 30, 30, 30, 30, 30, 30, 30, 30, 40, 40, 40, 40};
             t.IsTrue(pxAt(f, 640, 588, 125) == 120, "splash covers jewel center");
             t.IsTrue(pxAt(f, 640, 535, 150) == 120, "splash");
@@ -198,7 +209,7 @@ void register_ps2_ssx3_tricky_hud_tests()
             t.IsTrue(pxAt(f, 640, 500, 110) == 1, "nothing above flake top");
             t.IsTrue(pxAt(f, 640, 588, 410) == 110, "pill");
             auto g = blankFrame(640, 480);
-            composeOverlay(g.data(), 640, 480, a, 1.0f, true, 2000u, 1045u);
+            composeOverlay(g.data(), 640, 480, a, 1.0f, true, 2000u, 1045u, 0, 0u);
             for (int i = 0; i < 16; ++i)
                 t.IsTrue(pxAt(g, 640, ringCx(), ringCy(i)) == want[i], "ring band");
             t.IsTrue(pxAt(g, 640, 588, 125) == 100, "jewel red after splash");
@@ -208,17 +219,17 @@ void register_ps2_ssx3_tricky_hud_tests()
             using namespace ps2_ssx3_tricky_hud;
             Atlas a = synthAtlas();
             auto f = blankFrame(640, 480);
-            composeOverlay(f.data(), 640, 480, a, 1.0f, true, 0u, 0u);
+            composeOverlay(f.data(), 640, 480, a, 1.0f, true, 0u, 0u, 0, 0u);
             t.IsTrue(pxAt(f, 640, 575, 120) == 100, "bright phase");
             auto g = blankFrame(640, 480);
-            composeOverlay(g.data(), 640, 480, a, 1.0f, true, 8u, 0u);
+            composeOverlay(g.data(), 640, 480, a, 1.0f, true, 8u, 0u, 0, 0u);
             t.IsTrue(pxAt(g, 640, 575, 120) == 82, "dim phase"); });
         tc.Run("arch letters native on the recording arc", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
             Atlas a = synthAtlas();
             auto f = blankFrame(640, 480);
-            composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u);
+            composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u, 0, 0u);
             // Raw cell values (no tint): T 527,94 R 550,83 I 565,72 C 579,79
             // K 595,73 Y 607,94, each at its native cell size.
             t.IsTrue(pxAt(f, 640, 540, 105) == 60, "T");
@@ -259,7 +270,7 @@ void register_ps2_ssx3_tricky_hud_tests()
                     }
                     d[3] = 255;
                 }
-            composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u);
+            composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u, 0, 0u);
             // (545,70): left of R, above T, t=9/92 -> (180,0,20), label green gone.
             t.IsTrue(pxAt(f, 640, 545, 70) == 180, "smear mid r");
             t.IsTrue(pxAt(f, 640, 545, 70, 1) == 0, "smear mid g");
@@ -276,7 +287,7 @@ void register_ps2_ssx3_tricky_hud_tests()
             using namespace ps2_ssx3_tricky_hud;
             Atlas a = synthAtlas();
             auto f = blankFrame(1280, 960);
-            composeOverlay(f.data(), 1280, 960, a, 1.0f, false, 1000u, 0u);
+            composeOverlay(f.data(), 1280, 960, a, 1.0f, false, 1000u, 0u, 0, 0u);
             t.IsTrue(pxAt(f, 1280, 1176, 2 * ringCy(0)) == 10, "bottom ring at 2x");
             t.IsTrue(pxAt(f, 1280, 1176, 2 * ringCy(15)) == 40, "top ring at 2x"); });
         tc.Run("faults draw nothing and never crash", [](TestCase &t)
@@ -284,8 +295,113 @@ void register_ps2_ssx3_tricky_hud_tests()
             using namespace ps2_ssx3_tricky_hud;
             Atlas bad;
             auto f = blankFrame(640, 480);
-            composeOverlay(f.data(), 640, 480, bad, 1.0f, true, 0u, 45u);
+            composeOverlay(f.data(), 640, 480, bad, 1.0f, true, 0u, 45u, 0, 0u);
             t.IsTrue(pxAt(f, 640, 588, 391) == 1, "bad atlas inert");
-            composeOverlay(nullptr, 640, 480, synthAtlas(), 1.0f, true, 0u, 45u);
+            composeOverlay(nullptr, 640, 480, synthAtlas(), 1.0f, true, 0u, 45u, 0, 0u);
             t.IsTrue(true, "null frame survives"); });});
+
+    MiniTest::Case("Ps2Ssx3TrickyHudLetters", [](TestCase &tc)
+                   {
+        tc.Run("uber tap matches slot stream opens only", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            t.IsTrue(slotForUberRead(0x61417u, 15u) == 0, "slot 0");
+            t.IsTrue(slotForUberRead(0x6147du, 15u) == 1, "slot 1");
+            t.IsTrue(slotForUberRead(0x614dau, 15u) == 2, "slot 2");
+            t.IsTrue(slotForUberRead(0x6147du, 2u) == 1, "chunk floor");
+            t.IsTrue(slotForUberRead(0x6147cu, 15u) == -1, "staging sector, not a stream open");
+            t.IsTrue(slotForUberRead(0x61416u, 1u) == -1, "preamble touch");
+            t.IsTrue(slotForUberRead(0x6147du, 1u) == -1, "1-sector read ignored");
+            t.IsTrue(slotForUberRead(0x61251u, 15u) == -1, "other member stream");
+            t.IsTrue(slotForUberRead(0x6147eu, 15u) == -1, "mid-stream chunk"); });
+        tc.Run("letter machine lights, flashes, resets", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            LetterState st;
+            updateLetters(st, 3u, 100u);
+            t.IsTrue(st.lit == 3 && st.seen == 3u && st.flashUntil == 0u, "3 taps light 3");
+            updateLetters(st, 3u, 200u);
+            t.IsTrue(st.lit == 3 && st.flashUntil == 0u, "no taps, steady");
+            updateLetters(st, 6u, 300u);
+            t.IsTrue(st.lit == 6 && st.flashUntil == 300u + kLetterFlashTicks, "6th opens flash");
+            updateLetters(st, 7u, 310u);
+            t.IsTrue(st.lit == 6 && st.seen == 7u, "mid-flash tap consumed, not lit");
+            updateLetters(st, 7u, 300u + kLetterFlashTicks - 1u);
+            t.IsTrue(st.lit == 6, "flash holds");
+            updateLetters(st, 7u, 300u + kLetterFlashTicks);
+            t.IsTrue(st.lit == 0 && st.flashUntil == 0u, "reset after flash");
+            updateLetters(st, 8u, 400u);
+            t.IsTrue(st.lit == 1, "spelling restarts"); });
+        tc.Run("rider scan finds the player, skips zero pages", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            std::vector<uint8_t> ram(0x600000, 0);
+            auto w32 = [&](uint32_t a, uint32_t v) { std::memcpy(&ram[a], &v, 4); };
+            auto wf = [&](uint32_t a, float v) { std::memcpy(&ram[a], &v, 4); };
+            // Snapshot = the player's position.
+            wf(0x5409c0u, 100.0f);
+            wf(0x5409c4u, 200.0f);
+            wf(0x5409c8u, 300.0f);
+            // Rival first in RAM (scan order must not win).
+            wf(0x4000u + kRiderFillOff, 0.2f);
+            w32(0x4000u + kRiderUberOff, 1u);
+            wf(0x4000u + kRiderTimerOff, 5.0f);
+            wf(0x4000u + kRiderPosOff, 1000.0f);
+            wf(0x4000u + kRiderPosOff + 4u, 2000.0f);
+            wf(0x4000u + kRiderPosOff + 8u, 3000.0f);
+            // Player.
+            wf(0x5000u + kRiderFillOff, 0.5f);
+            w32(0x5000u + kRiderUberOff, 3u);
+            wf(0x5000u + kRiderTimerOff, 20.0f);
+            wf(0x5000u + kRiderPosOff, 100.0f);
+            wf(0x5000u + kRiderPosOff + 4u, 200.0f);
+            wf(0x5000u + kRiderPosOff + 8u, 300.0f);
+            // 0x1000 is a zero page: matches the bare triple, must lose on pos.
+            // 0x6000 is denormal dust (veh3): same, must lose on the norm floor.
+            wf(0x6000u + kRiderFillOff, 0.0f);
+            w32(0x6000u + kRiderUberOff, 0u);
+            wf(0x6000u + kRiderTimerOff, 0.0f);
+            wf(0x6000u + kRiderPosOff, 1e-30f);
+            t.IsTrue(scanRider(ram.data(), ram.size()) == 0x5000u, "picks the player");
+            MeterFrame f = readMeterFrameAt(ram.data(), ram.size(), 0x5000u);
+            t.IsTrue(f.ok && f.fill == 0.5f && f.level == 3, "direct read");
+            std::vector<uint8_t> empty(0x10000, 0);
+            t.IsTrue(scanRider(empty.data(), empty.size()) == 0u, "no rider, no pick");
+            t.IsTrue(scanRider(nullptr, 0) == 0u, "null ram"); });
+        tc.Run("diag letters preset parses 0..5", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            t.IsTrue(parseLettersPreset("0") == 0, "zero");
+            t.IsTrue(parseLettersPreset("5") == 5, "five");
+            t.IsTrue(parseLettersPreset(nullptr) == -1, "null");
+            t.IsTrue(parseLettersPreset("") == -1, "empty");
+            t.IsTrue(parseLettersPreset("6") == -1, "six refused");
+            t.IsTrue(parseLettersPreset("-1") == -1, "negative refused");
+            t.IsTrue(parseLettersPreset("x") == -1, "junk");
+            t.IsTrue(parseLettersPreset("5x") == -1, "trailing junk"); });
+        tc.Run("lit letters draw red, rest chrome", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas a = synthAtlas();
+            auto f = blankFrame(640, 480);
+            composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u, 3, 0u);
+            t.IsTrue(pxAt(f, 640, 540, 105) == 140, "T red");
+            t.IsTrue(pxAt(f, 640, 558, 95) == 141, "R red");
+            t.IsTrue(pxAt(f, 640, 570, 80) == 142, "I red");
+            t.IsTrue(pxAt(f, 640, 588, 90) == 63, "C chrome");
+            t.IsTrue(pxAt(f, 640, 605, 80) == 64, "K chrome");
+            t.IsTrue(pxAt(f, 640, 625, 110) == 65, "Y chrome"); });
+        tc.Run("fanfare flash blinks all red then all chrome", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas a = synthAtlas();
+            // (1024>>3)&1 == 0: red phase. (1032>>3)&1 == 1: chrome phase.
+            auto f = blankFrame(640, 480);
+            composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1024u, 0u, 6, 2000u);
+            t.IsTrue(pxAt(f, 640, 540, 105) == 140, "red phase T");
+            t.IsTrue(pxAt(f, 640, 625, 110) == 145, "red phase Y");
+            auto g = blankFrame(640, 480);
+            composeOverlay(g.data(), 640, 480, a, 0.0f, false, 1032u, 0u, 6, 2000u);
+            t.IsTrue(pxAt(g, 640, 540, 105) == 60, "chrome phase T");
+            t.IsTrue(pxAt(g, 640, 625, 110) == 65, "chrome phase Y"); });});
 }
