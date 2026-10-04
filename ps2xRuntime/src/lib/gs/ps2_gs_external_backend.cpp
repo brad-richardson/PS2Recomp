@@ -1348,19 +1348,10 @@ private:
             return;
         }
         const size_t strideBytes = static_cast<size_t>(desc.stride) * 4u;
-        const size_t rowBytes = static_cast<size_t>(r.w) * 4u;
-        m_hudTemp.resize(static_cast<size_t>(r.w) * static_cast<size_t>(r.h) * 4u);
-        const uint8_t *base = static_cast<const uint8_t *>(ptr);
-        for (int y = 0; y < r.h; ++y)
-            std::memcpy(&m_hudTemp[static_cast<size_t>(y) * rowBytes],
-                        base + static_cast<size_t>(r.y + y) * strideBytes + static_cast<size_t>(r.x) * 4u,
-                        rowBytes);
-        stampHudInto(m_hudTemp.data(), r.w, r.h, r.x, r.y, m_hudSprites, p.fill, p.full, tick,
-                     p.splashUntil, p.litLetters, p.flashUntil);
-        uint8_t *wbase = static_cast<uint8_t *>(ptr);
-        for (int y = 0; y < r.h; ++y)
-            std::memcpy(wbase + static_cast<size_t>(r.y + y) * strideBytes + static_cast<size_t>(r.x) * 4u,
-                        &m_hudTemp[static_cast<size_t>(y) * rowBytes], rowBytes);
+        // Part 2: stamp straight into the locked AHB (no region temp
+        // round-trip; same values as the temp path, locked by test).
+        stampHudDirect(static_cast<uint8_t *>(ptr), strideBytes, r, m_hudSprites, p.fill, p.full, tick,
+                       p.splashUntil, p.litLetters, p.flashUntil);
         AHardwareBuffer_unlock(buffer, nullptr);
         const auto t1 = std::chrono::steady_clock::now();
         m_hudCompositeNs +=
@@ -1628,7 +1619,6 @@ private:
     bool m_perVsyncLive = false; // FH6: GuestVsync presents (latch no longer exports)
     uint64_t m_pendingFence = 0u;
     uint64_t m_pendingTick = 0u;
-    std::vector<uint8_t> m_hudTemp; // TK43e: VK/AHB overlay scratch (HUD region rows)
     ps2_ssx3_tricky_hud::HudSprites m_hudSprites; // pre-scaled art (built once per run)
     uint64_t m_hudComposites = 0u;
     uint64_t m_hudCompositeNs = 0u;

@@ -557,5 +557,43 @@ void register_ps2_ssx3_tricky_hud_tests()
                     std::snprintf(name, sizeof(name), "cached==direct %dx%d v%d", fw, fh, v);
                     t.IsTrue(f == g, name);
                 }
+            } });
+        tc.Run("direct strided stamps equal the temp path", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas a = synthAtlas();
+            const int sizes[2][2] = {{640, 480}, {1920, 1080}};
+            const int stridePad[2] = {0, 64};
+            for (int s = 0; s < 2; ++s)
+            {
+                const int fw = sizes[s][0], fh = sizes[s][1];
+                const int stride = fw + stridePad[s];
+                const size_t strideBytes = static_cast<size_t>(stride) * 4u;
+                HudSprites ss;
+                t.IsTrue(buildHudSprites(ss, a, fw, fh), "sprites build");
+                // Full meter + splash live + letters + flash: every draw on.
+                std::vector<uint8_t> f(static_cast<size_t>(stride) * fh * 4u);
+                uint32_t rng = 0x77aa11u + static_cast<uint32_t>(s);
+                for (size_t i = 0; i < f.size(); ++i)
+                {
+                    rng = rng * 1664525u + 1013904223u;
+                    f[i] = static_cast<uint8_t>(rng >> 24);
+                }
+                std::vector<uint8_t> g = f;
+                // Temp path (Part 1): region copy out/in with stride.
+                const Rect r = hudRegionRect(fw, fh);
+                std::vector<uint8_t> tmp(static_cast<size_t>(r.w) * r.h * 4u);
+                for (int y = 0; y < r.h; ++y)
+                    std::memcpy(&tmp[static_cast<size_t>(y) * r.w * 4u],
+                                &f[static_cast<size_t>(r.y + y) * strideBytes + static_cast<size_t>(r.x) * 4u],
+                                static_cast<size_t>(r.w) * 4u);
+                stampHudInto(tmp.data(), r.w, r.h, r.x, r.y, ss, 1.0f, true, 8u, 90u, 4, 90u);
+                for (int y = 0; y < r.h; ++y)
+                    std::memcpy(&f[static_cast<size_t>(r.y + y) * strideBytes + static_cast<size_t>(r.x) * 4u],
+                                &tmp[static_cast<size_t>(y) * r.w * 4u], static_cast<size_t>(r.w) * 4u);
+                stampHudDirect(g.data(), strideBytes, r, ss, 1.0f, true, 8u, 90u, 4, 90u);
+                char name[64];
+                std::snprintf(name, sizeof(name), "direct==temp stride=%d", stride);
+                t.IsTrue(f == g, name);
             } });});
 }
