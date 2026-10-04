@@ -60,7 +60,7 @@ inline Rect jewelGreyRect() { return {100, 16, 46, 33}; }
 inline Rect jewelRedRect() { return {150, 16, 46, 33}; }
 inline Rect pillRect() { return {100, 52, 28, 18}; }
 inline Rect pillGreyRect() { return {180, 52, 28, 18}; }
-inline Rect snowflakeRect() { return {132, 52, 43, 26}; }
+inline Rect snowflakeRect() { return {132, 52, 38, 32}; } // Part 3: re-cut (full flake)
 
 struct Atlas
 {
@@ -196,8 +196,10 @@ inline int litCoils(float fill)
 }
 
 // Bilinear atlas blit with alpha-over onto an RGBA frame (both top-left).
+// tint (optional): desaturate the sample to luminance, then scale by
+// tint[3] (Part 3: chrome + red-shadow letters from the gold map4 art).
 inline void blit(const Atlas &a, const Rect &s, uint8_t *frame, int fw, int fh, int dx, int dy, int dw,
-                 int dh, float dim = 1.0f)
+                 int dh, float dim = 1.0f, const float *tint = nullptr)
 {
     if (!a.ok || !frame || fw <= 0 || fh <= 0 || dw <= 0 || dh <= 0)
         return;
@@ -253,9 +255,22 @@ inline void blit(const Atlas &a, const Rect &s, uint8_t *frame, int fw, int fh, 
             const float w10 = fu * (1.0f - fv);
             const float w01 = (1.0f - fu) * fv;
             const float w11 = fu * fv;
-            const float sr = (p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11) * dim;
-            const float sg = (p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11) * dim;
-            const float sb = (p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11) * dim;
+            float sr = (p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11) * dim;
+            float sg = (p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11) * dim;
+            float sb = (p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11) * dim;
+            if (tint)
+            {
+                const float lum = (sr * 299.0f + sg * 587.0f + sb * 114.0f) / 1000.0f;
+                sr = lum * tint[0];
+                sg = lum * tint[1];
+                sb = lum * tint[2];
+            }
+            if (sr > 255.0f)
+                sr = 255.0f;
+            if (sg > 255.0f)
+                sg = 255.0f;
+            if (sb > 255.0f)
+                sb = 255.0f;
             const float sa = (p00[3] * w00 + p10[3] * w10 + p01[3] * w01 + p11[3] * w11) / 255.0f;
             if (sa <= 0.0f)
                 continue;
@@ -269,25 +284,53 @@ inline void blit(const Atlas &a, const Rect &s, uint8_t *frame, int fw, int fh, 
     }
 }
 
-inline void darkenRect(uint8_t *frame, int fw, int fh, int dx, int dy, int dw, int dh, float a)
+// Label cover (Part 3: replaces the dark panel): each row of [x0,x1) is
+// filled with the horizontal lerp between the sky sampled just outside
+// both edges, feathered 2 px horizontally / 3 px vertically so no rect
+// edge shows. The SSX 3 SUPER UBER label (x545-615 y52-97) sits fully
+// inside; the chrome arch draws over the smear.
+inline void smearCover(uint8_t *frame, int fw, int fh, int x0, int y0, int x1, int y1)
 {
-    if (!frame || fw <= 0 || fh <= 0 || a <= 0.0f)
+    if (!frame || fw <= 0 || fh <= 0 || x1 <= x0 || y1 <= y0)
         return;
-    if (a > 1.0f)
-        a = 1.0f;
-    const int x0 = dx < 0 ? 0 : dx;
-    const int y0 = dy < 0 ? 0 : dy;
-    const int x1 = dx + dw > fw ? fw : dx + dw;
-    const int y1 = dy + dh > fh ? fh : dy + dh;
-    const float keep = 1.0f - a;
-    for (int y = y0; y < y1; ++y)
-        for (int x = x0; x < x1; ++x)
+    const int xa = x0 < 0 ? 0 : x0;
+    const int xb = x1 > fw ? fw : x1;
+    const int ya = y0 < 0 ? 0 : y0;
+    const int yb = y1 > fh ? fh : y1;
+    const float span = static_cast<float>(x1 - x0);
+    for (int y = ya; y < yb; ++y)
+    {
+        const int lx = x0 - 2 < 0 ? 0 : x0 - 2;
+        const int rx = x1 + 2 > fw - 1 ? fw - 1 : x1 + 2;
+        const uint8_t *L = &frame[(static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(lx)) * 4u];
+        const uint8_t *R = &frame[(static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(rx)) * 4u];
+        const float lr = L[0], lg = L[1], lb = L[2];
+        const float rr = R[0], rg = R[1], rb = R[2];
+        const float fy0 = static_cast<float>(y - y0) / 3.0f;
+        const float fy1 = static_cast<float>(y1 - y) / 3.0f;
+        for (int x = xa; x < xb; ++x)
         {
+            const float t = static_cast<float>(x - x0) / span;
+            float a = fy0;
+            if (fy1 < a)
+                a = fy1;
+            const float fx0 = static_cast<float>(x - x0) / 2.0f;
+            const float fx1 = static_cast<float>(x1 - x) / 2.0f;
+            if (fx0 < a)
+                a = fx0;
+            if (fx1 < a)
+                a = fx1;
+            if (a <= 0.0f)
+                continue;
+            if (a > 1.0f)
+                a = 1.0f;
             uint8_t *d = &frame[(static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(x)) * 4u];
-            d[0] = static_cast<uint8_t>(d[0] * keep + 0.5f);
-            d[1] = static_cast<uint8_t>(d[1] * keep + 0.5f);
-            d[2] = static_cast<uint8_t>(d[2] * keep + 0.5f);
+            const float ia = 1.0f - a;
+            d[0] = static_cast<uint8_t>((lr + (rr - lr) * t) * a + d[0] * ia + 0.5f);
+            d[1] = static_cast<uint8_t>((lg + (rg - lg) * t) * a + d[1] * ia + 0.5f);
+            d[2] = static_cast<uint8_t>((lb + (rb - lb) * t) * a + d[2] * ia + 0.5f);
         }
+    }
 }
 
 inline void fillRect(uint8_t *frame, int fw, int fh, int dx, int dy, int dw, int dh, uint8_t r, uint8_t g,
@@ -348,19 +391,28 @@ inline void composeOverlay(uint8_t *frame, int fw, int fh, const Atlas &a, float
     const Rect jewel = full ? jewelRedRect() : jewelGreyRect();
     const float dim = (full && ((tick >> 3) & 1u) != 0u) ? 0.82f : 1.0f;
     blit(a, jewel, frame, fw, fh, L.X(568), L.Y(107), L.W(40), L.H(36), dim);
-    // Soft backing slab under the arch: the graffiti glyphs leave tall
-    // transparent runs the SUPER UBER label (y52-97) peeks through. Nested
-    // darkens (center ~= 0.58) feather the edges; the chrome draws over it.
-    darkenRect(frame, fw, fh, L.X(544), L.Y(48), L.W(96), L.H(62), 0.20f);
-    darkenRect(frame, fw, fh, L.X(547), L.Y(51), L.W(90), L.H(56), 0.30f);
-    darkenRect(frame, fw, fh, L.X(550), L.Y(54), L.W(84), L.H(50), 0.25f);
-    // Chrome arch: 6 spaced letters (h24, 7 px gaps) with arc bottoms.
-    blit(a, letterRect(0), frame, fw, fh, L.X(539), L.Y(63), L.W(9), L.H(24));
-    blit(a, letterRect(1), frame, fw, fh, L.X(555), L.Y(59), L.W(12), L.H(24));
-    blit(a, letterRect(2), frame, fw, fh, L.X(574), L.Y(55), L.W(9), L.H(24));
-    blit(a, letterRect(3), frame, fw, fh, L.X(590), L.Y(55), L.W(9), L.H(24));
-    blit(a, letterRect(4), frame, fw, fh, L.X(606), L.Y(59), L.W(12), L.H(24));
-    blit(a, letterRect(5), frame, fw, fh, L.X(625), L.Y(63), L.W(12), L.H(24));
+    // Label cover: feathered sky smear, no panel (Part 3). The chrome arch
+    // draws over it; the score (above y49) and jewel (below y101) are spared.
+    smearCover(frame, fw, fh, L.X(536), L.Y(49), L.X(628), L.Y(101));
+    // Chrome arch (Part 3, off Brad's tiles): 6 letters at ~1.1x native
+    // (aspect preserved), x527-639 = 2.5 ring widths, bottoms arched
+    // (middle 97, ends 103) just above the jewel. Red drop shadow first
+    // (T fakes the recording's wider left swoosh), chrome over it.
+    static const float kChrome[3] = {1.6f, 1.6f, 1.65f};
+    static const float kShadow[3] = {1.6f, 0.3f, 0.25f};
+    static const int kArch[6][4] = {
+        {527, 67, 19, 36}, {549, 65, 17, 35}, {569, 59, 14, 38},
+        {586, 59, 14, 38}, {603, 67, 17, 33}, {623, 70, 16, 33},
+    };
+    for (int i = 0; i < 6; ++i)
+    {
+        const int sox = i == 0 ? -5 : -1; // T swoosh (tile 3: red tail to x1342)
+        blit(a, letterRect(i), frame, fw, fh, L.X(kArch[i][0] + sox), L.Y(kArch[i][1] + 4),
+             L.W(kArch[i][2]), L.H(kArch[i][3]), 1.0f, kShadow);
+    }
+    for (int i = 0; i < 6; ++i)
+        blit(a, letterRect(i), frame, fw, fh, L.X(kArch[i][0]), L.Y(kArch[i][1]), L.W(kArch[i][2]),
+             L.H(kArch[i][3]), 1.0f, kChrome);
     // Pill slot over the S (y400-427): grey when not full, red (two
     // overlapping stamps cover the S fully) when full. Real Tricky shows no
     // pill until full; the grey slot keeps the S covered and mirrors the jewel.
@@ -374,8 +426,10 @@ inline void composeOverlay(uint8_t *frame, int fw, int fh, const Atlas &a, float
         blit(a, pillGreyRect(), frame, fw, fh, L.X(571), L.Y(400), L.W(34), L.H(30));
     }
     // First-full snowflake splash (TK43 section 1.3: cheap one-shot).
+    // Part 3: full re-cut flake, recording orange, 156x116 over the jewel
+    // bottom and top ~5 rings (tile 1: x346-463 y101-166).
     if (tick < splashUntilTick)
-        blit(a, snowflakeRect(), frame, fw, fh, L.X(529), L.Y(95), L.W(108), L.H(65));
+        blit(a, snowflakeRect(), frame, fw, fh, L.X(481), L.Y(114), L.W(156), L.H(116));
 }
 
 } // namespace ps2_ssx3_tricky_hud

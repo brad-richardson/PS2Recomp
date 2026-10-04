@@ -172,7 +172,7 @@ void register_ps2_ssx3_tricky_hud_tests()
                 t.IsTrue(pxAt(f, 640, ringCx(), ringCy(i)) == 50, "ring silver");
             t.IsTrue(pxAt(f, 640, 588, 125) == 90, "jewel grey");
             t.IsTrue(pxAt(f, 640, 588, 415) == 130, "grey pill slot");
-            t.IsTrue(pxAt(f, 640, 535, 100) == 1, "no splash");
+            t.IsTrue(pxAt(f, 640, 500, 150) == 1, "no splash");
             t.IsTrue(pxAt(f, 640, 600, 20) == 1, "score kept");
             t.IsTrue(pxAt(f, 640, 586, 156) == 26, "pole"); });
         tc.Run("half meter: 8 lit in band order, 8 silver", [](TestCase &t)
@@ -192,15 +192,17 @@ void register_ps2_ssx3_tricky_hud_tests()
             composeOverlay(f.data(), 640, 480, a, 1.0f, true, 1000u, 1045u);
             const uint8_t want[16] = {10, 10, 10, 10, 20, 20, 20, 20, 30, 30, 30, 30, 40, 40, 40, 40};
             t.IsTrue(pxAt(f, 640, 588, 125) == 120, "splash covers jewel center");
-            t.IsTrue(pxAt(f, 640, 535, 100) == 120, "splash");
+            t.IsTrue(pxAt(f, 640, 535, 150) == 120, "splash");
+            t.IsTrue(pxAt(f, 640, 630, 150) == 120, "splash right arm");
             t.IsTrue(pxAt(f, 640, 588, ringCy(15)) == 120, "splash covers top ring");
+            t.IsTrue(pxAt(f, 640, 535, 110) == 1, "nothing above flake top");
             t.IsTrue(pxAt(f, 640, 588, 410) == 110, "pill");
             auto g = blankFrame(640, 480);
             composeOverlay(g.data(), 640, 480, a, 1.0f, true, 2000u, 1045u);
             for (int i = 0; i < 16; ++i)
                 t.IsTrue(pxAt(g, 640, ringCx(), ringCy(i)) == want[i], "ring band");
             t.IsTrue(pxAt(g, 640, 588, 125) == 100, "jewel red after splash");
-            t.IsTrue(pxAt(g, 640, 535, 100) == 1, "splash expired"); });
+            t.IsTrue(pxAt(g, 640, 535, 150) == 1, "splash expired"); });
         tc.Run("jewel pulses when full", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
@@ -211,23 +213,66 @@ void register_ps2_ssx3_tricky_hud_tests()
             auto g = blankFrame(640, 480);
             composeOverlay(g.data(), 640, 480, a, 1.0f, true, 8u, 0u);
             t.IsTrue(pxAt(g, 640, 575, 120) == 82, "dim phase"); });
-        tc.Run("arch letters spaced with arc bottoms", [](TestCase &t)
+        tc.Run("arch letters chrome with arc bottoms, red shadow", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
             Atlas a = synthAtlas();
             auto f = blankFrame(640, 480);
             composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u);
-            t.IsTrue(pxAt(f, 640, 543, 75) == 60, "T");
-            t.IsTrue(pxAt(f, 640, 561, 71) == 61, "R");
-            t.IsTrue(pxAt(f, 640, 578, 67) == 62, "I");
-            t.IsTrue(pxAt(f, 640, 594, 67) == 63, "C");
-            t.IsTrue(pxAt(f, 640, 612, 71) == 64, "K");
-            t.IsTrue(pxAt(f, 640, 631, 75) == 65, "Y");
-            t.IsTrue(pxAt(f, 640, 578, 56) == 62, "I raised");
-            t.IsTrue(pxAt(f, 640, 541, 60) == 1, "T lower, outside slab");
-            t.IsTrue(pxAt(f, 640, 551, 75, 1) == 1, "gap between letters");
-            t.IsTrue(pxAt(f, 640, 548, 80, 1) == 1, "backing slab dims label gap");
-            t.IsTrue(pxAt(f, 640, 520, 80, 1) == 2, "slab ends at x544"); });
+            // Chrome = solid cell v * 1.6 (r,g) / 1.65 (b), truncated.
+            t.IsTrue(pxAt(f, 640, 536, 85) == 96, "T");
+            t.IsTrue(pxAt(f, 640, 557, 82) == 98, "R");
+            t.IsTrue(pxAt(f, 640, 576, 78) == 99, "I");
+            t.IsTrue(pxAt(f, 640, 593, 78) == 101, "C");
+            t.IsTrue(pxAt(f, 640, 611, 83) == 102, "K");
+            t.IsTrue(pxAt(f, 640, 631, 86) == 104, "Y");
+            t.IsTrue(pxAt(f, 640, 576, 61) == 99, "I raised");
+            t.IsTrue(pxAt(f, 640, 536, 61) == 1, "T starts lower");
+            t.IsTrue(pxAt(f, 640, 567, 80, 1) == 2, "gap shows smear, no panel");
+            t.IsTrue(pxAt(f, 640, 531, 105) == 96, "T shadow red r");
+            t.IsTrue(pxAt(f, 640, 531, 105, 1) == 18, "T shadow red g");
+            t.IsTrue(pxAt(f, 640, 531, 105, 2) == 15, "T shadow red b"); });
+        tc.Run("label smear covers band, feathers, spares surroundings", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas a = synthAtlas();
+            std::vector<uint8_t> f(static_cast<size_t>(640) * 480u * 4u);
+            for (int y = 0; y < 480; ++y)
+                for (int x = 0; x < 640; ++x)
+                {
+                    uint8_t *d = &f[(static_cast<size_t>(y) * 640u + static_cast<size_t>(x)) * 4u];
+                    if (x <= 534) // sky left
+                    {
+                        d[0] = 200;
+                        d[1] = 0;
+                        d[2] = 0;
+                    }
+                    else if (x >= 630) // sky right
+                    {
+                        d[0] = 0;
+                        d[1] = 0;
+                        d[2] = 200;
+                    }
+                    else // the "label"
+                    {
+                        d[0] = 0;
+                        d[1] = 200;
+                        d[2] = 0;
+                    }
+                    d[3] = 255;
+                }
+            composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u);
+            // (567,75): R/I letter gap, t=31/92 -> (133,0,67), label green gone.
+            t.IsTrue(pxAt(f, 640, 567, 75) == 133, "smear mid r");
+            t.IsTrue(pxAt(f, 640, 567, 75, 1) == 0, "smear mid g");
+            t.IsTrue(pxAt(f, 640, 567, 75, 2) == 67, "smear mid b");
+            t.IsTrue(pxAt(f, 640, 530, 60) == 200, "left of smear kept");
+            t.IsTrue(pxAt(f, 640, 635, 60, 2) == 200, "right of smear kept");
+            t.IsTrue(pxAt(f, 640, 582, 20, 1) == 200, "above smear kept");
+            // (582,50): top feather row a=1/3 over green -> (33,133,33).
+            t.IsTrue(pxAt(f, 640, 582, 50) == 33, "feather r");
+            t.IsTrue(pxAt(f, 640, 582, 50, 1) == 133, "feather g");
+            t.IsTrue(pxAt(f, 640, 582, 50, 2) == 33, "feather b"); });
         tc.Run("layout scales to export size", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
