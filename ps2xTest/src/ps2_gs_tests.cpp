@@ -17,11 +17,13 @@
 #include "runtime/ps2_savestate.h"
 #include "../../ps2xRuntime/src/lib/ps2_savestate_internal.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace ps2_syscalls;
@@ -416,6 +418,111 @@ namespace
         };
     }
 }
+
+// QSR1 SRB4: test-only lagF state access (friend of GS).
+struct GsLagfTestAccess
+{
+    struct Slot
+    {
+        uint64_t index = 0u, ready = ~0ull;
+        bool async = false;
+        uint32_t bytes = 0u;
+        uint64_t gsTick = 0u;
+        uint32_t gsOrdinal = 0u;
+        std::vector<uint8_t> data;
+    };
+    struct Snap
+    {
+        uint64_t sets = 0u, serves = 0u, gsTick = 0u, resolved = 0u, lastEeTick = 0u;
+        uint32_t gsOrdinal = 0u;
+        bool vsyncInit = false;
+        std::array<std::pair<uint64_t, uint64_t>, 8> vsyncSets{};
+        struct Ee
+        {
+            uint64_t tick = ~0ull, start = 0u;
+            uint32_t count = 0u;
+        };
+        std::array<Ee, 8> ee{};
+        std::vector<Slot> live; // ready != ~0, index order
+    };
+
+    // Five live tickets (serves..serves+4) plus one stale ticket below serves.
+    static void set(GS &gs, uint64_t sets, uint64_t serves)
+    {
+        gs.m_lagfSets = sets;
+        gs.m_lagfServes = serves;
+        gs.m_lagfGsTick = 500u;
+        gs.m_lagfGsOrdinal = 7u;
+        gs.m_lagfResolved = serves + 5u;
+        gs.m_lagfLastEeTick = 480u;
+        gs.m_lagfVsyncSetsInit = true;
+        for (uint64_t i = 0; i < 8u; ++i)
+            gs.m_lagfVsyncSets[i] = {400u + i, i};
+        for (uint64_t i = 0; i < 8u; ++i)
+        {
+            gs.m_lagfEe[i].tick = i < 3u ? 480u - i : ~0ull;
+            gs.m_lagfEe[i].start = i < 3u ? 90u - 3u * i : 0u;
+            gs.m_lagfEe[i].count = i < 3u ? 2u : 0u;
+        }
+        GS::LagfSlot *slots = gs.lagfSlots();
+        for (uint64_t k = 0; k < 5u; ++k)
+        {
+            GS::LagfSlot &s = slots[(serves + k) % GS::kLagfRing];
+            s.async = (k % 2u) == 0u;
+            s.bytes = 64u + static_cast<uint32_t>(k);
+            s.gsTick = 490u + k;
+            s.gsOrdinal = static_cast<uint32_t>(k);
+            for (uint32_t j = 0; j < s.bytes; ++j)
+                s.data[j] = static_cast<uint8_t>((k * 31u + j) & 0xffu);
+            s.ready.store(serves + k, std::memory_order_relaxed);
+        }
+        GS::LagfSlot &stale = slots[10];
+        stale.async = true;
+        stale.bytes = 32u;
+        stale.gsTick = 100u;
+        stale.gsOrdinal = 1u;
+        std::memset(stale.data, 0xCD, stale.bytes);
+        stale.ready.store(serves - 40u, std::memory_order_relaxed);
+    }
+
+    static Snap get(const GS &gs)
+    {
+        Snap s;
+        s.sets = gs.m_lagfSets;
+        s.serves = gs.m_lagfServes;
+        s.gsTick = gs.m_lagfGsTick;
+        s.gsOrdinal = gs.m_lagfGsOrdinal;
+        s.resolved = gs.m_lagfResolved;
+        s.lastEeTick = gs.m_lagfLastEeTick;
+        s.vsyncInit = gs.m_lagfVsyncSetsInit;
+        s.vsyncSets = gs.m_lagfVsyncSets;
+        for (uint64_t i = 0; i < 8u; ++i)
+        {
+            s.ee[i].tick = gs.m_lagfEe[i].tick;
+            s.ee[i].start = gs.m_lagfEe[i].start;
+            s.ee[i].count = gs.m_lagfEe[i].count;
+        }
+        if (gs.m_lagfSlots)
+        {
+            for (uint64_t i = 0; i < GS::kLagfRing; ++i)
+            {
+                const uint64_t ready = gs.m_lagfSlots[i].ready.load(std::memory_order_relaxed);
+                if (ready == ~0ull)
+                    continue;
+                Slot sl;
+                sl.index = i;
+                sl.ready = ready;
+                sl.async = gs.m_lagfSlots[i].async;
+                sl.bytes = gs.m_lagfSlots[i].bytes;
+                sl.gsTick = gs.m_lagfSlots[i].gsTick;
+                sl.gsOrdinal = gs.m_lagfSlots[i].gsOrdinal;
+                sl.data.assign(gs.m_lagfSlots[i].data, gs.m_lagfSlots[i].data + sl.bytes);
+                s.live.push_back(std::move(sl));
+            }
+        }
+        return s;
+    }
+};
 
 void register_ps2_gs_tests()
 {
@@ -2170,6 +2277,68 @@ void register_ps2_gs_tests()
             t.IsTrue(backend.SavestateLoad(nullptr, 0u), "empty blob stays loadable (pre-fix states)");
             const uint8_t shortBlob[7] = {0u, 1u, 2u, 3u, 4u, 5u, 6u};
             t.IsFalse(backend.SavestateLoad(shortBlob, sizeof(shortBlob)), "truncated blob is refused");
+        });
+
+        tc.Run("QSR1 SRB4: lagF ring survives a savestate through a fresh GS", [](TestCase &t)
+        {
+            std::vector<uint8_t> vram1(PS2_GS_VRAM_SIZE, 0u);
+            GS gs1;
+            gs1.init(vram1.data(), static_cast<uint32_t>(vram1.size()), nullptr);
+            GsLagfTestAccess::set(gs1, 100u, 90u);
+            ps2_savestate::Writer w;
+            GSSavestate::save(gs1, w);
+            const std::string bytes(reinterpret_cast<const char *>(w.buf.data()), w.buf.size());
+            t.IsTrue(bytes.find("SRB4") != std::string::npos, "lagF-active section carries the SRB4 tail");
+
+            std::vector<uint8_t> vram2(PS2_GS_VRAM_SIZE, 0u);
+            GS gs2;
+            gs2.init(vram2.data(), static_cast<uint32_t>(vram2.size()), nullptr);
+            // Poison the target ring: its tickets (>= restored serves) must
+            // not survive the load.
+            GsLagfTestAccess::set(gs2, 1000u, 900u);
+            ps2_savestate::Reader r(w.buf.data(), w.buf.size());
+            t.IsTrue(GSSavestate::load(gs2, r), "GS section loads");
+            const GsLagfTestAccess::Snap got = GsLagfTestAccess::get(gs2);
+            t.Equals(got.sets, 100ull, "sets");
+            t.Equals(got.serves, 90ull, "serves");
+            t.Equals(got.gsTick, 500ull, "gsTick");
+            t.Equals(got.gsOrdinal, 7u, "gsOrdinal");
+            t.Equals(got.resolved, 95ull, "resolved");
+            t.Equals(got.lastEeTick, 480ull, "lastEeTick");
+            t.IsTrue(got.vsyncInit, "vsyncSetsInit");
+            for (uint64_t i = 0; i < 8u; ++i)
+            {
+                t.Equals(got.vsyncSets[i].first, 400ull + i, "vsyncSets tick");
+                t.Equals(got.vsyncSets[i].second, i, "vsyncSets mark");
+                t.Equals(got.ee[i].tick, i < 3u ? 480ull - i : ~0ull, "ee tick");
+                t.Equals(got.ee[i].start, i < 3u ? 90ull - 3u * i : 0ull, "ee start");
+                t.Equals(got.ee[i].count, i < 3u ? 2u : 0u, "ee count");
+            }
+            t.Equals(got.live.size(), static_cast<size_t>(5), "only unconsumed tickets travel");
+            for (uint64_t k = 0; k < got.live.size(); ++k)
+            {
+                const auto &sl = got.live[k];
+                t.Equals(sl.index, 90ull + k, "slot index");
+                t.Equals(sl.ready, 90ull + k, "slot ready");
+                t.Equals(sl.bytes, 64u + static_cast<uint32_t>(k), "slot bytes");
+                t.Equals(sl.gsTick, 490ull + k, "slot gsTick");
+                t.Equals(sl.gsOrdinal, static_cast<uint32_t>(k), "slot gsOrdinal");
+                bool dataOk = sl.data.size() == sl.bytes;
+                for (uint32_t j = 0; dataOk && j < sl.bytes; ++j)
+                    dataOk = sl.data[j] == static_cast<uint8_t>((k * 31u + j) & 0xffu);
+                t.IsTrue(dataOk, "slot data");
+            }
+
+            // Probe-free files keep the v3 layout (no tail at all).
+            std::vector<uint8_t> vram3(PS2_GS_VRAM_SIZE, 0u);
+            GS gs3;
+            gs3.init(vram3.data(), static_cast<uint32_t>(vram3.size()), nullptr);
+            ps2_savestate::Writer w3;
+            GSSavestate::save(gs3, w3);
+            const std::string bytes3(reinterpret_cast<const char *>(w3.buf.data()), w3.buf.size());
+            t.IsTrue(bytes3.find("SRB4") == std::string::npos, "probe-free section has no SRB4 tail");
+            t.IsTrue(bytes3.find("SRB3") == std::string::npos, "probe-free section has no SRB3 tail");
+            t.IsTrue(bytes3.find("SRB2") == std::string::npos, "probe-free section has no SRB2 tail");
         });
 
         tc.Run("PSMT8 address mapping matches Veronica Conv8to32 layout", [](TestCase &t)

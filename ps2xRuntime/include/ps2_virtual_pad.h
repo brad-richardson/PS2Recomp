@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -855,5 +856,21 @@ namespace ps2x::vpad
                 return 2 + i;
         }
         return 0;
+    }
+
+    // QSR1 slot-dir rule (pure; unit-tested). iOS Documents wins; otherwise
+    // the memory card's parent dir — never elfDirectory, which on Mac det
+    // boots is the pinned CD tree (PI1: read-only). Last resort (no usable
+    // card path): elfDirectory, matching DS1.
+    inline std::string qsr1SlotDirFor(const char *iosDocs, const std::string &mcRoot,
+                                      const std::string &elfDir)
+    {
+        namespace fs = std::filesystem;
+        if (iosDocs && iosDocs[0] != '\0')
+            return (fs::path(iosDocs) / "states").string();
+        const fs::path card(mcRoot);
+        if (!mcRoot.empty() && card.has_parent_path())
+            return (card.parent_path() / "states").string();
+        return (fs::path(elfDir) / "states").string();
     }
 }

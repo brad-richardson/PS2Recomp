@@ -313,6 +313,42 @@ namespace ps2_savestate
             return sha;
         }
 
+        // QSR1: the microVU library identity (DS1's deferred microvu_lib_sha).
+        // Loadable builds (Mac/Android dlopen via PS2X_MICROVU_LIB) hash the
+        // dylib; static builds (the iOS offline core linked in) report
+        // "static". Same cache shape as the runner.
+        std::string microvuLibShaCached()
+        {
+            namespace fs = std::filesystem;
+            static std::mutex mutex;
+            static std::string cachedPath, cachedSha;
+            static uint64_t cachedSize = 0u;
+            static fs::file_time_type cachedTime{};
+            static bool haveCache = false;
+            const char *env = std::getenv("PS2X_MICROVU_LIB");
+            const std::string path = env ? env : "";
+            if (path.empty())
+                return "static";
+            std::error_code ec;
+            const uint64_t size = static_cast<uint64_t>(fs::file_size(path, ec));
+            if (ec)
+                return "unknown";
+            const fs::file_time_type mtime = fs::last_write_time(path, ec);
+            if (ec)
+                return "unknown";
+            std::lock_guard<std::mutex> lock(mutex);
+            if (haveCache && cachedPath == path && cachedSize == size && cachedTime == mtime)
+                return cachedSha;
+            std::string sha = "unknown";
+            sha256File(path, sha);
+            cachedPath = path;
+            cachedSha = sha;
+            cachedSize = size;
+            cachedTime = mtime;
+            haveCache = true;
+            return sha;
+        }
+
         // Cheap ISO identity: size + SHA-256 of the first and last MiB.
         std::string isoIdentity(const std::string &path)
         {
@@ -700,6 +736,7 @@ namespace ps2_savestate
             if (withRunnerSha)
                 runnerSha = runnerShaCached();
             h.push_back({"runner_sha", runnerSha, config().strict});
+            h.push_back({"microvu_lib_sha", microvuLibShaCached(), config().strict});
             std::string elfSha = "unknown";
             sha256File(g_elfPath, elfSha);
             h.push_back({"elf_sha", elfSha, true});
@@ -973,10 +1010,12 @@ namespace ps2_savestate
         {
             auto it = saved.find(line.key);
             const std::string have = it == saved.end() ? std::string("<missing>") : it->second;
-            if (line.key == "runner_sha")
+            if (line.key == "runner_sha" || line.key == "microvu_lib_sha")
             {
                 // S5: strict refuses an unobtainable identity ("unknown" on
-                // either side), not just a mismatch.
+                // either side), not just a mismatch. QSR1: microvu_lib_sha
+                // follows the runner_sha precedent exactly (pre-QSR1 files
+                // lack the line and refuse in strict mode).
                 switch (checkRunnerSha(have, line.value, strict))
                 {
                 case RunnerShaVerdict::Accept:
@@ -1257,6 +1296,7 @@ namespace ps2_savestate
     void warmRunnerSha()
     {
         (void)runnerShaCached();
+        (void)microvuLibShaCached(); // QSR1: ~12 MB dylib, off the first save
     }
 
     bool takePendingQuickLoad(std::string &path)
@@ -1340,6 +1380,7 @@ namespace ps2_savestate
         else
             infoPath += ".info";
         const std::string runnerSha = runnerShaCached();
+        const std::string microvuSha = microvuLibShaCached();
         char utc[32] = {0};
         const std::time_t now = std::time(nullptr);
 #if defined(_WIN32)
@@ -1362,7 +1403,8 @@ namespace ps2_savestate
             << "save_utc=" << utc << "\n"
             << "ee_cycle=" << eeCycle << "\n"
             << "deterministic=" << (config().deterministic ? "1" : "0") << "\n"
-            << "runner_sha=" << runnerSha << "\n";
+            << "runner_sha=" << runnerSha << "\n"
+            << "microvu_lib_sha=" << microvuSha << "\n";
         out.close();
         if (!out)
             std::fprintf(stderr, "[savestate] quick-save: cannot write %s\n", infoPath.c_str());
@@ -1946,6 +1988,8 @@ namespace
     constexpr uint32_t kRb2TailMagic = 0x32425253u; // "SRB2" LE
     // DS1: magic heading the lag ring tail (RB2 Part 3 ring, lagV depth).
     constexpr uint32_t kRb2RingTailMagic = 0x33425253u; // "SRB3" LE
+    // QSR1: magic heading the lagF frame-keyed ring tail (LT1b async probes).
+    constexpr uint32_t kLagfTailMagic = 0x34425253u; // "SRB4" LE
 } // namespace
 
 void GSSavestate::save(GS &gs, Writer &w)
@@ -2009,6 +2053,64 @@ void GSSavestate::save(GS &gs, Writer &w)
             }
         }
     }
+    // QSR1 SRB4: the lagF frame-keyed probe ring (LT1b). Without it a load
+    // on a probe route serves misses for up to L frames (0 bytes, guest
+    // dest left stale) before the eeTick-backward reset self-heals. Same
+    // gating as SRB3 (written only once a probe exists, so knob-off and
+    // probe-free states keep the v3 layout byte-for-byte). Only slots
+    // holding unconsumed tickets (ready >= serves) travel: older tickets
+    // are dead (a serve spins until the worker overwrites the slot), and
+    // the worker re-resolves requested-but-unresolved tickets post-load
+    // from the restored cursors. Counters/histograms/verify bytes are
+    // diagnostics and stay behind.
+    {
+        std::lock_guard<std::mutex> lagfLock(gs.m_lagfMutex);
+        if (gs.m_lagfSets != 0u && gs.m_lagfSlots)
+        {
+            w.u32(kLagfTailMagic);
+            w.u64(gs.m_lagfSets);
+            w.u64(gs.m_lagfGsTick);
+            w.u32(gs.m_lagfGsOrdinal);
+            w.u64(gs.m_lagfResolved);
+            for (const auto &mark : gs.m_lagfVsyncSets)
+            {
+                w.u64(mark.first);
+                w.u64(mark.second);
+            }
+            w.b(gs.m_lagfVsyncSetsInit);
+            for (const auto &frame : gs.m_lagfEe)
+            {
+                w.u64(frame.tick);
+                w.u64(frame.start);
+                w.u32(frame.count);
+            }
+            w.u64(gs.m_lagfServes);
+            w.u64(gs.m_lagfLastEeTick);
+            w.u64(GS::kLagfRing);
+            uint64_t carried = 0u;
+            for (uint64_t i = 0; i < GS::kLagfRing; ++i)
+            {
+                const uint64_t ready = gs.m_lagfSlots[i].ready.load(std::memory_order_relaxed);
+                if (ready != ~0ull && ready >= gs.m_lagfServes)
+                    ++carried;
+            }
+            w.u64(carried);
+            for (uint64_t i = 0; i < GS::kLagfRing; ++i)
+            {
+                const GS::LagfSlot &slot = gs.m_lagfSlots[i];
+                const uint64_t ready = slot.ready.load(std::memory_order_relaxed);
+                if (ready == ~0ull || ready < gs.m_lagfServes)
+                    continue;
+                w.u64(i);
+                w.u64(ready);
+                w.b(slot.async);
+                w.u32(slot.bytes);
+                w.u64(slot.gsTick);
+                w.u32(slot.gsOrdinal);
+                w.bytes(slot.data, sizeof(slot.data));
+            }
+        }
+    }
 }
 
 bool GSSavestate::load(GS &gs, Reader &r)
@@ -2062,11 +2164,18 @@ bool GSSavestate::load(GS &gs, Reader &r)
             gs.m_rb2SlotTruncated[i] = false;
             std::memset(gs.m_rb2Slot[i], 0, sizeof(gs.m_rb2Slot[i]));
         }
-        if (!r.atEnd())
+        // QSR1: tails loop (SRB2/SRB3/SRB4 each at most once); the lagV
+        // and lagF rings are different modes, but the loop stays correct
+        // if both ever appear in one file.
+        bool seenLag1 = false, seenRing = false, seenLagf = false;
+        while (!r.atEnd())
         {
             const uint32_t magic = r.u32();
             if (magic == kRb2TailMagic)
             {
+                if (seenLag1)
+                    return r.fail("GS lag tail duplicate");
+                seenLag1 = true;
                 const uint64_t snaps = r.u64();
                 const uint64_t serves = r.u64();
                 const uint32_t bytes0 = r.u32();
@@ -2087,6 +2196,9 @@ bool GSSavestate::load(GS &gs, Reader &r)
             }
             else if (magic == kRb2RingTailMagic)
             {
+                if (seenRing)
+                    return r.fail("GS lag tail duplicate");
+                seenRing = true;
                 const uint64_t snaps = r.u64();
                 const uint64_t serves = r.u64();
                 const uint64_t ring = r.u64();
@@ -2107,6 +2219,83 @@ bool GSSavestate::load(GS &gs, Reader &r)
                     return false;
                 gs.m_rb2Snaps.store(snaps, std::memory_order_relaxed);
                 gs.m_rb2Serves = serves;
+            }
+            else if (magic == kLagfTailMagic)
+            {
+                if (seenLagf)
+                    return r.fail("GS lag tail duplicate");
+                seenLagf = true;
+                const uint64_t sets = r.u64();
+                const uint64_t gsTick = r.u64();
+                const uint32_t gsOrdinal = r.u32();
+                const uint64_t resolved = r.u64();
+                if (sets == 0u)
+                    return r.fail("GS lagF tail out of range");
+                std::array<std::pair<uint64_t, uint64_t>, 8> vsyncSets{};
+                for (auto &mark : vsyncSets)
+                {
+                    mark.first = r.u64();
+                    mark.second = r.u64();
+                }
+                const bool vsyncInit = r.b();
+                std::array<GS::LagfEeFrame, 8> ee{};
+                for (auto &frame : ee)
+                {
+                    frame.tick = r.u64();
+                    frame.start = r.u64();
+                    frame.count = r.u32();
+                }
+                const uint64_t serves = r.u64();
+                const uint64_t lastEeTick = r.u64();
+                const uint64_t ring = r.u64();
+                if (ring != GS::kLagfRing)
+                    return r.fail("GS lagF tail out of range");
+                const uint64_t carried = r.u64();
+                if (carried > GS::kLagfRing)
+                    return r.fail("GS lagF tail out of range");
+                // Allocate outside m_lagfMutex (non-recursive; lagfSlots takes it).
+                GS::LagfSlot *slots = gs.lagfSlots();
+                if (!slots)
+                    return r.fail("GS lagF slots unavailable");
+                std::lock_guard<std::mutex> lagfLock(gs.m_lagfMutex);
+                for (uint64_t i = 0; i < GS::kLagfRing; ++i)
+                {
+                    slots[i].ready.store(~0ull, std::memory_order_relaxed);
+                    slots[i].async = false;
+                    slots[i].bytes = 0u;
+                    slots[i].gsTick = 0u;
+                    slots[i].gsOrdinal = 0u;
+                    std::memset(slots[i].data, 0, sizeof(slots[i].data));
+                }
+                for (uint64_t k = 0; k < carried && r.ok(); ++k)
+                {
+                    const uint64_t idx = r.u64();
+                    const uint64_t ready = r.u64();
+                    const bool async = r.b();
+                    const uint32_t bytes = r.u32();
+                    const uint64_t sTick = r.u64();
+                    const uint32_t sOrd = r.u32();
+                    if (idx >= GS::kLagfRing || bytes > sizeof(slots[idx].data))
+                        return r.fail("GS lagF tail out of range");
+                    if (!r.bytes(slots[idx].data, sizeof(slots[idx].data)))
+                        return false;
+                    slots[idx].async = async;
+                    slots[idx].bytes = bytes;
+                    slots[idx].gsTick = sTick;
+                    slots[idx].gsOrdinal = sOrd;
+                    slots[idx].ready.store(ready, std::memory_order_relaxed);
+                }
+                if (!r.ok())
+                    return false;
+                gs.m_lagfSets = sets;
+                gs.m_lagfGsTick = gsTick;
+                gs.m_lagfGsOrdinal = gsOrdinal;
+                gs.m_lagfResolved = resolved;
+                gs.m_lagfVsyncSets = vsyncSets;
+                gs.m_lagfVsyncSetsInit = vsyncInit;
+                gs.m_lagfEe = ee;
+                gs.m_lagfServes = serves;
+                gs.m_lagfLastEeTick = lastEeTick;
             }
             else
             {
