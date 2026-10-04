@@ -623,5 +623,31 @@ void register_ps2_virtual_pad_tests()
                 p.x = r1->x; p.y = r1->y;
                 f = updatePad(st, l, &p, 1, false);
                 t.Equals(static_cast<uint32_t>(f.pressed), 0u, "knob off: slide onto R1 stays inert");
+            } });
+
+        tc.Run("qsr1: menu dot + save/load/race row hit test", [](TestCase &t)
+               {
+            const float ws[2] = {874.0f, 1180.0f}, hs[2] = {402.0f, 820.0f};
+            for (int k = 0; k < 2; ++k)
+            {
+                const float w = ws[k], h = hs[k];
+                const Qsr1MenuGeom g = qsr1MenuLayout(w, h);
+                t.Equals(qsr1MenuHit(g, false, g.dotX, g.dotY), 1, "dot centre hits collapsed");
+                t.Equals(qsr1MenuHit(g, false, g.rowX[0], g.rowY), 0, "row misses while collapsed");
+                t.Equals(qsr1MenuHit(g, true, g.rowX[0], g.rowY), 2, "save");
+                t.Equals(qsr1MenuHit(g, true, g.rowX[1], g.rowY), 3, "load");
+                t.Equals(qsr1MenuHit(g, true, g.rowX[2], g.rowY), 4, "race");
+                t.Equals(qsr1MenuHit(g, true, w * 0.5f, h * 0.5f), 0, "screen centre misses");
+                // Menu zones press no guest button (hit-test runs first anyway;
+                // this keeps the guest controls fully reachable around the menu).
+                const Layout l = makeLayout(w, h);
+                const float mx[4] = {g.dotX, g.rowX[0], g.rowX[1], g.rowX[2]};
+                const float my[4] = {g.dotY, g.rowY, g.rowY, g.rowY};
+                t.Equals(static_cast<uint32_t>(pressedMask(l, mx, my, 4)), 0u, "menu zones are guest-inert");
+                // All menu discs inside the window.
+                t.IsTrue(g.dotX - g.dotR >= 0.0f && g.dotX + g.dotR <= w && g.dotY - g.dotR >= 0.0f, "dot inside");
+                for (int i = 0; i < 3; ++i)
+                    t.IsTrue(g.rowX[i] - g.rowR >= 0.0f && g.rowX[i] + g.rowR <= w && g.rowY - g.rowR >= 0.0f,
+                             "row inside");
             } }); });
 }

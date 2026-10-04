@@ -123,6 +123,9 @@ void prepareEnvironment(const char *argv0)
     }
     const char *home = std::getenv("HOME");
     const std::filesystem::path documents = home ? std::filesystem::path(home) / "Documents" : std::filesystem::path();
+    // QSR1: publish Documents for the touch-slot dir (PS2X_IOS_DOCUMENTS/states).
+    if (!documents.empty())
+        setenv("PS2X_IOS_DOCUMENTS", documents.string().c_str(), 1);
     const std::map<std::string, std::string> vars{
         {"BUNDLE", bundle.string()},
         {"DOCUMENTS", documents.string()},

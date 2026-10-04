@@ -2275,6 +2275,80 @@ void ds1FireQuickLoad()
     }
 }
 
+// QSR1 prototype: touch quick save/load/restart, behind PS2X_QUICKSTATE_UI=1
+// (default off). iOS slots live in Documents/states (PS2X_IOS_DOCUMENTS, set
+// by the iOS launcher): the bundle elfDirectory is read-only, so DS1's
+// elfDirectory/states path can never work on iOS.
+bool qsr1UiOn()
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_QUICKSTATE_UI");
+        return v && std::string(v) == "1";
+    }();
+    return on;
+}
+
+std::string qsr1SlotDir()
+{
+    if (const char *docs = std::getenv("PS2X_IOS_DOCUMENTS"); docs && docs[0] != '\0')
+        return (std::filesystem::path(docs) / "states").string();
+    return (PS2Runtime::getIoPaths().elfDirectory / "states").string();
+}
+
+std::string qsr1SlotPath(const char *tag) // tag = "manual" | "auto"
+{
+    namespace fs = std::filesystem;
+    const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
+    const std::string mcRoot =
+        paths.mcRoot.empty() ? (paths.elfDirectory / "mc0").string() : paths.mcRoot.string();
+    std::string leaf = fs::path(mcRoot).filename().string();
+    if (leaf.empty() || leaf == "." || leaf == "/")
+        leaf = "mc0";
+    for (char &c : leaf)
+    {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                        c == '-' || c == '_' || c == '.';
+        if (!ok)
+            c = '_';
+    }
+    return (fs::path(qsr1SlotDir()) / ("quick-" + std::string(tag) + "-" + leaf + ".state")).string();
+}
+
+void qsr1FireSave()
+{
+    const std::string slot = qsr1SlotPath("manual");
+    std::fprintf(stderr, "[qsr1] save tapped slot=%s\n", slot.c_str());
+    if (!ps2_savestate::requestQuickSave(slot))
+    {
+        if (ps2_savestate::quickRequestPending())
+            ps2_savestate::noteQuickStatus("busy (save/load already pending)");
+        else
+            ps2_savestate::noteQuickStatus("quick-save failed (see log)");
+    }
+}
+
+void qsr1FireLoad(const char *tag, const char *what)
+{
+    const std::string slot = qsr1SlotPath(tag);
+    std::fprintf(stderr, "[qsr1] %s tapped slot=%s\n", what, slot.c_str());
+    std::error_code ec;
+    if (!std::filesystem::exists(slot, ec) || ec)
+    {
+        std::fprintf(stderr, "[qsr1] %s: no snapshot in slot %s\n", what, slot.c_str());
+        ps2_savestate::noteQuickStatus("no snapshot in this slot yet");
+        return;
+    }
+    if (!ps2_savestate::requestQuickLoad(slot))
+    {
+        if (ps2_savestate::quickRequestPending())
+            ps2_savestate::noteQuickStatus("busy (save/load already pending)");
+        else
+            ps2_savestate::noteQuickStatus("quick-load failed (see log)");
+    }
+}
+
+// (QSR1 menu geometry lives in ps2_virtual_pad.h: pure + unit-tested.)
+
 // DS1 DEV-ONLY scheduled chord (host testing without a gamepad):
 // PS2X_SAVESTATE_HOTKEY_AT="2000:save,2600:load" fires each op once at the
 // first present with vsyncTick >= tick. Malformed entries are ignored.
@@ -6446,6 +6520,9 @@ void PS2Runtime::run()
     PSChordState ds1Chord; // SELECT+L3 save / SELECT+R3 load, carried across frames
     std::vector<Ds1Hotkey> ds1Hotkeys =
         parseDs1Hotkeys(std::getenv("PS2X_SAVESTATE_HOTKEY_AT")); // DS1 DEV-ONLY scheduled chord
+    bool qsr1Expanded = false; // QSR1 menu open, carried across frames
+    std::vector<int64_t> qsr1Down; // touch ids currently on the menu (edge = new id)
+    bool qsr1AutoDone = false; // auto snapshot taken for the current events window
     // DS1: hash the runner for save/load identity on a background thread
     // while the game boots (a ~200 MB pass; the first quick-save would
     // otherwise hitch on it). The cache mutex guards the result.
@@ -6785,6 +6862,26 @@ void PS2Runtime::run()
                     ds1FireQuickLoad();
             }
         }
+        // QSR1: auto snapshot at events enter (Restart race loads it). The
+        // signal is g_guestActive, set by guestFlip on the enter flip
+        // (ps2_fh1_full120.h); re-armed at every events exit, so each race
+        // gets a fresh start-line snapshot. Events mode only.
+        if (qsr1UiOn())
+        {
+            if (ps2_fh1::g_guestActive && ps2_fh1::mode() == ps2_fh1::Mode::Events)
+            {
+                if (!qsr1AutoDone)
+                {
+                    qsr1AutoDone = true;
+                    const std::string autoSlot = qsr1SlotPath("auto");
+                    std::fprintf(stderr, "[qsr1] auto snapshot at events enter slot=%s\n", autoSlot.c_str());
+                    if (!ps2_savestate::requestQuickSave(autoSlot))
+                        std::fprintf(stderr, "[qsr1] auto snapshot busy/failed (see log)\n");
+                }
+            }
+            else
+                qsr1AutoDone = false;
+        }
         if (vpadWanted && !vpadPadConnected)
         {
             const ps2x::vpad::Layout layout = ps2x::vpad::makeLayout(screenWidth, screenHeight);
@@ -6792,6 +6889,54 @@ void PS2Runtime::run()
             int touches = virtualPadTouches(vpadTouches, 8, screenWidth, screenHeight);
             touches = ps2x::vpad::activeTestTouchesWithIds(vpadTestTouches, m_memory.gs().vsyncTick.load(), screenWidth,
                                                            screenHeight, vpadTouches, touches, 8);
+            // QSR1: menu taps fire on touch-down; menu-zone touches are
+            // dropped here so they never reach the guest pad.
+            if (qsr1UiOn())
+            {
+                const ps2x::vpad::Qsr1MenuGeom qsr1g = ps2x::vpad::qsr1MenuLayout(screenWidth, screenHeight);
+                std::vector<int64_t> qsr1Still;
+                int qsr1Kept = 0;
+                for (int i = 0; i < touches; ++i)
+                {
+                    const int hit =
+                        ps2x::vpad::qsr1MenuHit(qsr1g, qsr1Expanded, vpadTouches[i].x, vpadTouches[i].y);
+                    if (hit == 0)
+                    {
+                        vpadTouches[qsr1Kept++] = vpadTouches[i];
+                        continue;
+                    }
+                    qsr1Still.push_back(vpadTouches[i].id);
+                    if (std::find(qsr1Down.begin(), qsr1Down.end(), vpadTouches[i].id) != qsr1Down.end())
+                        continue;
+                    qsr1Down.push_back(vpadTouches[i].id);
+                    if (hit == 1)
+                    {
+                        qsr1Expanded = !qsr1Expanded;
+                        std::fprintf(stderr, "[qsr1] menu %s\n", qsr1Expanded ? "expanded" : "collapsed");
+                    }
+                    else if (hit == 2)
+                    {
+                        qsr1FireSave();
+                        qsr1Expanded = false;
+                    }
+                    else if (hit == 3)
+                    {
+                        qsr1FireLoad("manual", "load");
+                        qsr1Expanded = false;
+                    }
+                    else if (hit == 4)
+                    {
+                        qsr1FireLoad("auto", "restart");
+                        qsr1Expanded = false;
+                    }
+                }
+                touches = qsr1Kept;
+                std::vector<int64_t> qsr1Left;
+                for (int64_t id : qsr1Down)
+                    if (std::find(qsr1Still.begin(), qsr1Still.end(), id) != qsr1Still.end())
+                        qsr1Left.push_back(id);
+                qsr1Down = qsr1Left;
+            }
             ps2x::vpad::PadFrame vpadFrame =
                 ps2x::vpad::updatePad(vpadPad, layout, vpadTouches, touches, vpadShoulderBand);
             uint16_t pressed = vpadFrame.pressed;
@@ -6826,6 +6971,34 @@ void PS2Runtime::run()
             if (vkUnder)
                 EndBlendMode();
 #endif
+            // QSR1: menu dot + expanded Save/Load/Race column.
+            if (qsr1UiOn())
+            {
+                const ps2x::vpad::Qsr1MenuGeom qsr1dg = ps2x::vpad::qsr1MenuLayout(screenWidth, screenHeight);
+                const Vector2 qsr1dc{qsr1dg.dotX, qsr1dg.dotY};
+                DrawCircleV(qsr1dc, qsr1dg.dotR, Color{255, 255, 255, 45});
+                DrawCircleLinesV(qsr1dc, qsr1dg.dotR, Color{255, 255, 255, 140});
+                {
+                    const int fs = 20;
+                    const int tw = MeasureText("...", fs);
+                    DrawText("...", static_cast<int>(qsr1dg.dotX) - tw / 2,
+                             static_cast<int>(qsr1dg.dotY) - fs / 2, fs, Color{255, 255, 255, 200});
+                }
+                if (qsr1Expanded)
+                {
+                    static const char *labels[3] = {"SAVE", "LOAD", "RACE"};
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        const Vector2 c{qsr1dg.rowX[i], qsr1dg.rowY};
+                        DrawCircleV(c, qsr1dg.rowR, Color{255, 255, 255, 60});
+                        DrawCircleLinesV(c, qsr1dg.rowR, Color{255, 255, 255, 160});
+                        const int fs = 18;
+                        const int tw = MeasureText(labels[i], fs);
+                        DrawText(labels[i], static_cast<int>(qsr1dg.rowX[i]) - tw / 2,
+                                 static_cast<int>(qsr1dg.rowY) - fs / 2, fs, Color{255, 255, 255, 220});
+                    }
+                }
+            }
         }
         else if (vpadWanted)
         {
