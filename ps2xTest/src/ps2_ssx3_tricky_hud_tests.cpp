@@ -302,30 +302,29 @@ void register_ps2_ssx3_tricky_hud_tests()
 
     MiniTest::Case("Ps2Ssx3TrickyHudLetters", [](TestCase &tc)
                    {
-        tc.Run("uber tap matches slot stream opens only", [](TestCase &t)
+        tc.Run("uber post filter matches accepted 0x2133 posts only", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
-            t.IsTrue(slotForUberRead(0x61417u, 15u) == 0, "slot 0");
-            t.IsTrue(slotForUberRead(0x6147du, 15u) == 1, "slot 1");
-            t.IsTrue(slotForUberRead(0x614dau, 15u) == 2, "slot 2");
-            t.IsTrue(slotForUberRead(0x6147du, 2u) == 1, "chunk floor");
-            t.IsTrue(slotForUberRead(0x6147cu, 15u) == -1, "staging sector, not a stream open");
-            t.IsTrue(slotForUberRead(0x61416u, 1u) == -1, "preamble touch");
-            t.IsTrue(slotForUberRead(0x6147du, 1u) == -1, "1-sector read ignored");
-            t.IsTrue(slotForUberRead(0x61251u, 15u) == -1, "other member stream");
-            t.IsTrue(slotForUberRead(0x6147eu, 15u) == -1, "mid-stream chunk"); });
+            t.IsTrue(kUberSpeechEvent == 0x2133u, "Arcade_Uber event");
+            t.IsTrue(kSpeechPostFunc == 0x2b1458u, "post function");
+            t.IsTrue(isUberPost(0x2133u, 1u), "accepted uber post");
+            t.IsTrue(isUberPost(0x2133u, 0xffffffu), "nonzero v0 counts");
+            t.IsTrue(!isUberPost(0x2133u, 0u), "refused post ignored");
+            t.IsTrue(!isUberPost(0x20a7u, 1u), "Power_Ups post ignored");
+            t.IsTrue(!isUberPost(0x2145u, 1u), "Icons post ignored");
+            t.IsTrue(!isUberPost(0u, 1u), "null event ignored"); });
         tc.Run("letter machine lights, flashes, resets", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
             LetterState st;
             updateLetters(st, 3u, 100u);
-            t.IsTrue(st.lit == 3 && st.seen == 3u && st.flashUntil == 0u, "3 taps light 3");
+            t.IsTrue(st.lit == 3 && st.seen == 3u && st.flashUntil == 0u, "3 posts light 3");
             updateLetters(st, 3u, 200u);
-            t.IsTrue(st.lit == 3 && st.flashUntil == 0u, "no taps, steady");
+            t.IsTrue(st.lit == 3 && st.flashUntil == 0u, "no posts, steady");
             updateLetters(st, 6u, 300u);
             t.IsTrue(st.lit == 6 && st.flashUntil == 300u + kLetterFlashTicks, "6th opens flash");
             updateLetters(st, 7u, 310u);
-            t.IsTrue(st.lit == 6 && st.seen == 7u, "mid-flash tap consumed, not lit");
+            t.IsTrue(st.lit == 6 && st.seen == 7u, "mid-flash post consumed, not lit");
             updateLetters(st, 7u, 300u + kLetterFlashTicks - 1u);
             t.IsTrue(st.lit == 6, "flash holds");
             updateLetters(st, 7u, 300u + kLetterFlashTicks);
@@ -419,6 +418,33 @@ void register_ps2_ssx3_tricky_hud_tests()
             t.IsTrue(updateRaceClock(st, 103u, 3001u), "resume shows at once");
             t.IsTrue(updateRaceClock(st, 1u, 3002u), "gate restart (backward) shows");
             t.IsTrue(!updateRaceClock(st, 1u, 3005u), "freeze after restart hides"); });
+        tc.Run("race clock opens the adopt window at boundaries only", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            RaceClock st;
+            updateRaceClock(st, 300u, 7000u);
+            t.IsTrue(st.adoptUntil == 0u, "init opens no window");
+            updateRaceClock(st, 301u, 7001u);
+            t.IsTrue(st.adoptUntil == 0u, "forward bump opens no window");
+            t.IsTrue(updateRaceClock(st, 0u, 7452u), "restart still races");
+            t.IsTrue(st.adoptUntil == 7452u + kGoAdoptTicks, "backward jump opens the window");
+            const uint64_t w = st.adoptUntil;
+            updateRaceClock(st, 1u, 7453u);
+            t.IsTrue(st.adoptUntil == w, "quick GO after restart keeps the window");
+            updateRaceClock(st, 2u, 7454u);
+            t.IsTrue(st.adoptUntil == w, "steady advance keeps the window");
+            // GO from a frozen 0 (gari race 2: frozen at 0 for 1100+ ticks).
+            RaceClock g;
+            updateRaceClock(g, 0u, 6200u);
+            updateRaceClock(g, 0u, 7387u);
+            t.IsTrue(g.adoptUntil == 0u, "freeze opens no window");
+            t.IsTrue(updateRaceClock(g, 1u, 7388u), "GO races");
+            t.IsTrue(g.adoptUntil == 7388u + kGoAdoptTicks, "GO from a frozen 0 opens the window");
+            // A mid-race 0->1 (never frozen) is not a boundary.
+            RaceClock m;
+            updateRaceClock(m, 0u, 100u);
+            updateRaceClock(m, 1u, 101u);
+            t.IsTrue(m.adoptUntil == 0u, "unfrozen 0->1 opens no window"); });
         tc.Run("race chain B resolves, fails closed", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;

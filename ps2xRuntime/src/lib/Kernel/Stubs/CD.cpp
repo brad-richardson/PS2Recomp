@@ -2,7 +2,7 @@
 #include "Common.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_e41_trace.h"
-#include "ps2_ssx3_tricky_hud.h" // TK44: uber-letter CD tap (STL-only header)
+
 #include "CD.h"
 #include "MPEG.h"
 #include "runtime/ee_scheduler.h"
@@ -317,12 +317,6 @@ namespace ps2_stubs
             }
 
             const bool e3ok = readCdSectors(args.lbn, args.sectors, rdram + offset, bytes);
-            // TK44: the Tricky uber tap runs on every served read (self-gated;
-            // the trace below stays armed-gated). It used to live in
-            // noteCdRead, so it never fired unless the CD trace was on.
-            if (e3ok)
-                ps2_ssx3_tricky_hud::noteCdReadForUber(args.lbn, args.sectors,
-                                                       currentCdStreamTick(runtime));
             if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
             {
                 const uint64_t tick = currentCdStreamTick(runtime);
@@ -647,9 +641,6 @@ namespace ps2_stubs
             }
 
             const bool e3ok = readCdSectors(lbn, sectors, rdram + offset, bytes);
-            // TK44: the Tricky uber tap runs on every served read (self-gated).
-            if (e3ok)
-                ps2_ssx3_tricky_hud::noteCdReadForUber(lbn, sectors, currentCdStreamTick(runtime));
             if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
             {
                 const uint64_t tick = currentCdStreamTick(runtime);
@@ -1037,10 +1028,6 @@ namespace ps2_stubs
                 const uint32_t readLbn = g_cdStreamingLbn;
                 const size_t readBytes = static_cast<size_t>(sectors) * kCdSectorSize;
                 const bool e3ok = readCdSectors(readLbn, sectors, rdram + offset, readBytes);
-                // TK44: the Tricky uber tap runs on every served read (self-gated).
-                if (e3ok)
-                    ps2_ssx3_tricky_hud::noteCdReadForUber(readLbn, sectors,
-                                                           currentCdStreamTick(runtime));
                 if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
                 {
                     const uint64_t tick = currentCdStreamTick(runtime);
