@@ -520,7 +520,7 @@ inline void poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_t r
     }
     st.wasTricky = true;
     if (gems.empty())
-        return out;
+        return;
     const uint32_t r = ps2_ssx3_tricky_hud::resolveChainR(ram, ramSize);
     const uint32_t b = ps2_ssx3_tricky_hud::resolveChainB(ram, ramSize);
     if (r == 0u || b == 0u || a0 != r)
@@ -589,7 +589,7 @@ inline void poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_t r
         {
             std::memcpy(st.prev, cur, sizeof(cur));
             st.prevValid = true;
-            return out;
+            return;
         }
     }
     if (!st.prevValid || teleportJump(st.prev, cur))
