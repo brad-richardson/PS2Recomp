@@ -49,15 +49,15 @@ void register_ps2_fh1_fh28_tests()
         tc.Run("jcam retention correction composes to d per pair", [](TestCase &t)
         {
             // FXT1 T1b: d = 0.9649, offsets decay by exactly d per stock tick.
-            // Each corrected update applies sqrt(d); the pair must recover d.
-            const uint32_t dBits = floatToBits(0.9649f);
-            const uint32_t offBits = floatToBits(-9.582f);
-            const uint32_t once = jcamRetainCorrect(offBits, dBits);
-            const float got = bitsToFloat(once);
-            const float want = -9.582f / std::sqrt(0.9649f);
-            t.IsTrue(std::fabs(got - want) <= 1e-6f, "one update applies 1/sqrt(d)");
-            const float pair = (got / -9.582f) * (got / -9.582f);
-            t.IsTrue(std::fabs(pair - 0.9649f) <= 1e-6f, "pair composes to d");
+            // The guest multiplies by d; the hook sees the product and divides
+            // by sqrt(d), so each corrected update retains sqrt(d) and the
+            // pair recovers d.
+            const float d = 0.9649f, pre = -9.582f;
+            const uint32_t postBits = floatToBits(pre * d); // the guest multiply
+            const float got = bitsToFloat(jcamRetainCorrect(postBits, floatToBits(d)));
+            t.IsTrue(std::fabs(got - pre * std::sqrt(d)) <= 1e-5f, "one update retains sqrt(d)");
+            const float step = got / pre;
+            t.IsTrue(std::fabs(step * step - d) <= 1e-6f, "pair composes to d");
         });
 
         tc.Run("jcam retention correction guards bad d", [](TestCase &t)
