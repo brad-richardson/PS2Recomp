@@ -383,6 +383,8 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_SSX3_FULL120_FIX",
         "PS2X_SSX3_LOD_SCALE",
         "PS2X_SSX3_SIM_MODE",
+        "PS2X_SSX3_TRICKY_GEMS",
+        "PS2X_SSX3_TRICKY_GEMS_TABLE",
         "PS2X_SSX3_TRICKY_HUD",
         "PS2X_SSX3_TRICKY_HUD_ART",
         "PS2X_SSX3_TRICKY_MENU",

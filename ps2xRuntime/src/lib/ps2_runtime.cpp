@@ -13,6 +13,7 @@
 #include "ps2_ssx3_tricky_hud_state.h"
 #include "ps2_ssx3_tricky_menu.h"
 #include "ps2_ssx3_tricky_song.h"
+#include "ps2_ssx3_tricky_gems.h"
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
 #include "ps2_park_snapshot.h"
@@ -4833,7 +4834,8 @@ __attribute__((noinline, cold)) void dspBuildFilter()
     // every kind, a superset).
     for (uint32_t pc : {kSsx3PatchCacheAlloc, kSsx3GuestFree, kSsx3PatchCacheInit, kSsx3DrawKeyCall,
                         kSsx3DrawLookup, kSsx3DrawTexLookup, kSsx3SpatialItems12, kSsx3SpatialItems34,
-                        kSsx3SpatialInside1, kSsx3SpatialInside3, kSsx3DrawReset, 0x00228C08u})
+                        kSsx3SpatialInside1, kSsx3SpatialInside3, kSsx3DrawReset, 0x00228C08u,
+                        0x001216E0u, 0x00117838u, 0x002A3EB8u}) // TK45c: rider pass, bank-clear, speech
         dspSet(g_dsp.tgt, pc);
     g_dsp.always = false;
     g_dsp.guestActive = ps2_fh1::g_guestActive;
@@ -4934,6 +4936,54 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
                                                                    GuestBranchKind kind,
                                                                    const char *debugName)
 {
+    // TK45c: Tricky gem multipliers (PS2X_SSX3_TRICKY_GEMS=1; default off).
+    // Boundary hook = the per-rider half-step pickup poll (player-1 only);
+    // bank-clear hook clears +0x1c4 with +0x18; speech hook captures the
+    // Icons callout contexts. Nested calls happen only here (EE thread,
+    // hook context). Listed in the DSP1 target filter above.
+    if ((kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) &&
+        ps2_tk45c::enabled())
+    {
+        const uint64_t gemsTick = m_memory.gs().vsyncTick.load(std::memory_order_relaxed);
+        if (sourcePc == 0x128ddcu && targetPc == 0x1216e0u)
+        {
+            ps2_ssx3_course::Modes &gemsMs = ps2_ssx3_course::courseModes();
+            const bool gemsTricky =
+                gemsMs.armed && ps2_ssx3_course::modeCurrent(gemsMs, rdram) != 0u;
+            const ps2_tk45c::Callout co = ps2_tk45c::poll(ps2_tk45c::state(), ps2_tk45c::table(), rdram,
+                                                         PS2_RAM_SIZE, gemsTick, getRegU32(ctx, 4),
+                                                         gemsTricky);
+            if (co.fire)
+            {
+                const ps2_tk45c::Capture &cap = ps2_tk45c::state().cap;
+                R5900Context savedGems = *ctx;
+                SET_GPR_U32(ctx, 4, cap.a0);
+                SET_GPR_U32(ctx, 5, cap.a1);
+                SET_GPR_U32(ctx, 6, co.mask);
+                for (int gi = 0; gi < 8; ++gi)
+                    SET_GPR_U32(ctx, 16 + gi, cap.s[gi]);
+                ctx->f[20] = co.ladder;
+                SET_GPR_U32(ctx, 31, 0x0badc0deu);
+                const bool gemsOk =
+                    dispatchGuestBranch(rdram, ctx, 0x2a3eb8u, 0u, 0x0badc0deu,
+                                        GuestBranchKind::DirectCall, "TK45C-CALL");
+                const uint32_t gemsV0 = getRegU32(ctx, 2);
+                *ctx = savedGems;
+                std::fprintf(stderr, "[tk45c] tick=%llu callout mask=%u ok=%d v0=%08x\n",
+                             (unsigned long long)gemsTick, co.mask, gemsOk ? 1 : 0, gemsV0);
+            }
+        }
+        if (targetPc == 0x117838u)
+            ps2_tk45c::onBankClear(rdram, PS2_RAM_SIZE, gemsTick, getRegU32(ctx, 4));
+        if (targetPc == 0x2a3eb8u && sourcePc != 0u)
+        {
+            uint32_t gs[8];
+            for (int gi = 0; gi < 8; ++gi)
+                gs[gi] = getRegU32(ctx, 16 + gi);
+            ps2_tk45c::captureIcons(ps2_tk45c::state(), getRegU32(ctx, 4), getRegU32(ctx, 5), gs, ctx->f[20],
+                                    gemsTick);
+        }
+    }
     // TK22: put back the draw-table slot a refused append borrowed.
     if (g_ssx3DrawPending.load(std::memory_order_relaxed) &&
         (sourcePc < kSsx3DrawKeyCall || sourcePc >= kSsx3DrawKeyEnd))
