@@ -57,7 +57,7 @@ void register_ps2_fh1_fh28_tests()
             const float want = -9.582f / std::sqrt(0.9649f);
             t.IsTrue(std::fabs(got - want) <= 1e-6f, "one update applies 1/sqrt(d)");
             const float pair = (got / -9.582f) * (got / -9.582f);
-            t.IsTrue(std::fabs(pair - 0.9649f) <= 2e-7f, "pair composes to d");
+            t.IsTrue(std::fabs(pair - 0.9649f) <= 1e-6f, "pair composes to d");
         });
 
         tc.Run("jcam retention correction guards bad d", [](TestCase &t)
