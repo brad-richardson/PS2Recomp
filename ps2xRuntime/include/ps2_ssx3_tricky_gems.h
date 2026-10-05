@@ -45,12 +45,9 @@ constexpr uint32_t kOneBits = 0x3f800000u;
 constexpr uint32_t kBoundarySrc = 0x128ddcu;
 constexpr uint32_t kBoundaryTgt = 0x1216e0u;
 constexpr uint32_t kBankClear = 0x117838u;
-constexpr uint32_t kSpeechFn = 0x2a3eb8u; // replay target (nested call)
-// Capture point: sub_0029CED8 entry. s2=a0, s3=a2, f20=f12 on entry, and the
-// Icons call passes a0=s2, a1=s3, a2=mask, so capturing (a0, a2) here is the
-// same context the speech fn would get — but the dispatch runs on every HUD
-// update while the speech fn only fires on an exact combo hit (gems1: never).
-constexpr uint32_t kDispatchFn = 0x29ced8u;
+// No speech callout: the Icons path is combo-bound and muted in races
+// (TK45c REPORT §callout, brief's "or explain why not"). Pickup, mult,
+// hide and bank-clear only; no nested guest calls anywhere.
 constexpr uint32_t kRiderPosOff = 0x110u;
 constexpr uint32_t kTrickOff = 0x790u;
 constexpr uint32_t kMultOff = 0x1c4u;
@@ -58,11 +55,13 @@ constexpr uint32_t kTrickSize = 0x1ccu;
 constexpr uint32_t kRaceClockOff = 0xcu;
 constexpr uint32_t kAppliedOff = 0x10u; // bank-applied mult (pre-reset read proves consume)
 constexpr uint32_t kInstPosOff = 0x40u;
-constexpr uint32_t kDeadLow = 0x05u;
+constexpr uint32_t kDeadLow = 0x05u; // hide: instance+8 low byte (lab: 23->05 dies)
+constexpr uint32_t kShowLow = 0x03u;  // world-loaded alive low byte (reshow target)
+constexpr uint32_t kAliveLow2 = 0x23u; // lab-bound alive low byte (also hideable)
+constexpr uint32_t kMaxRes = 4u;       // instances per gem (stacked triples + 1)
 constexpr float kTeleportJump = 3000.0f;
 constexpr size_t kMaxGems = 512u;
 constexpr uint32_t kScanChunk = 1u << 20;
-constexpr uint32_t kCallSentinel = 0x0badc0deu;
 
 inline bool readU32(const uint8_t *ram, size_t ramSize, uint32_t addr, uint32_t &out) noexcept
 {
@@ -256,15 +255,6 @@ inline const std::vector<Gem> &table()
     return t;
 }
 
-struct Capture
-{
-    bool ok = false;
-    uint64_t tick = 0u;
-    uint32_t a0 = 0u, a1 = 0u;
-    uint32_t s[8] = {0};
-    float f20 = 0.0f;
-};
-
 struct State
 {
     bool init = false;
@@ -279,8 +269,9 @@ struct State
     uint32_t scanCursor = 0u;
     ps2_ssx3_tricky_hud::RaceClock raceClock;
     uint64_t collected[(kMaxGems + 63u) / 64u] = {0};
-    uint32_t resolved[kMaxGems] = {0};
-    Capture cap;
+    uint32_t resolved[kMaxGems][kMaxRes] = {{0}};
+    uint8_t nres[kMaxGems] = {0};
+    bool ambig[kMaxGems] = {false};
 };
 
 inline State &state() noexcept
@@ -289,16 +280,7 @@ inline State &state() noexcept
     return st;
 }
 
-inline void fullReset(State &st) noexcept
-{
-    st.prevValid = false;
-    st.scanDone = false;
-    st.scanCursor = 0u;
-    st.rehideArmed = false;
-    st.raceClock = ps2_ssx3_tricky_hud::RaceClock{};
-    std::memset(st.collected, 0, sizeof(st.collected));
-    std::memset(st.resolved, 0, sizeof(st.resolved));
-}
+// fullReset is defined after isCollected/setCollected (below).
 
 inline bool isCollected(const State &st, size_t i) noexcept
 {
@@ -308,6 +290,51 @@ inline bool isCollected(const State &st, size_t i) noexcept
 inline void setCollected(State &st, size_t i) noexcept
 {
     st.collected[i >> 6] |= uint64_t{1} << (i & 63u);
+}
+
+// New race/session (or Tricky->Stock): collected gems show again (the world
+// is NOT reloaded — same instance addresses — so race 2 would otherwise run
+// with invisible-but-live gems). Only 05->03 with a reverified translation;
+// stale pointers (course change) mismatch and are skipped.
+inline void fullReset(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_t ramSize,
+                      uint64_t tick) noexcept
+{
+    if (ram && ramSize != 0u && !gems.empty())
+    {
+        for (size_t i = 0u; i < gems.size() && i < kMaxGems; ++i)
+        {
+            if (!isCollected(st, i))
+                continue;
+            for (uint8_t j = 0u; j < st.nres[i]; ++j)
+            {
+                const uint32_t pb = st.resolved[i][j];
+                if (pb == 0u)
+                    continue;
+                uint32_t v[3] = {0};
+                uint32_t gg[3] = {0};
+                std::memcpy(gg, gems[i].xyz, 12);
+                if (!readU32(ram, ramSize, pb + kInstPosOff, v[0]) ||
+                    !readU32(ram, ramSize, pb + kInstPosOff + 4u, v[1]) ||
+                    !readU32(ram, ramSize, pb + kInstPosOff + 8u, v[2]) || v[0] != gg[0] ||
+                    v[1] != gg[1] || v[2] != gg[2])
+                    continue;
+                uint32_t w8 = 0u;
+                if (readU32(ram, ramSize, pb + 8u, w8) && (w8 & 0xffu) == kDeadLow &&
+                    writeU32(ram, ramSize, pb + 8u, (w8 & ~0xffu) | kShowLow))
+                    std::fprintf(stderr, "[tk45c] tick=%llu RESHOW %s rid=%u at=%08x\n",
+                                 (unsigned long long)tick, gems[i].course, gems[i].rid, pb);
+            }
+        }
+    }
+    st.prevValid = false;
+    st.scanDone = false;
+    st.scanCursor = 0u;
+    st.rehideArmed = false;
+    st.raceClock = ps2_ssx3_tricky_hud::RaceClock{};
+    std::memset(st.collected, 0, sizeof(st.collected));
+    std::memset(st.resolved, 0, sizeof(st.resolved));
+    std::memset(st.nres, 0, sizeof(st.nres));
+    std::memset(st.ambig, 0, sizeof(st.ambig));
 }
 
 // x-index over the table (built once): per RAM word one binary search.
@@ -364,23 +391,33 @@ inline void scanChunk(State &st, const std::vector<Gem> &gems, const uint8_t *ra
             std::memcpy(g, gems[i].xyz, 12);
             if (v[0] != g[0] || v[1] != g[1] || v[2] != g[2])
                 continue;
-            // Sanity: the node's link words must be mapped RAM (strict;
-            // a hide-write to a mis-resolved struct would corrupt).
+            // Sanity: the node's link words must be null or mapped RAM.
+            // Null links are legit (ram1: all 25 first-misses had a null
+            // link); the hide write re-verifies the translation anyway.
             uint32_t w0 = 0u, w1 = 0u;
             std::memcpy(&w0, ram + q, 4);
             std::memcpy(&w1, ram + q + 4u, 4);
             const uint32_t p0 = w0 & kRamMask, p1 = w1 & kRamMask;
-            if (w0 == 0u || w1 == 0u || (w0 & ~kRamMask) != 0u || (w1 & ~kRamMask) != 0u ||
-                p0 + 64u > ramSize || p1 + 64u > ramSize)
+            if ((w0 & ~kRamMask) != 0u || (w1 & ~kRamMask) != 0u ||
+                (w0 != 0u && p0 + 64u > ramSize) || (w1 != 0u && p1 + 64u > ramSize))
                 continue;
-            if (st.resolved[i] != 0u && st.resolved[i] != q)
+            if (st.ambig[i])
+                continue;
+            bool seen = false;
+            for (uint8_t j = 0u; j < st.nres[i]; ++j)
+                seen = seen || st.resolved[i][j] == q;
+            if (seen)
+                continue;
+            if (st.nres[i] >= kMaxRes)
             {
-                std::fprintf(stderr, "[tk45c] tick=%llu %s rid=%u AMBIGUOUS (%08x vs %08x), hide off\n",
-                             (unsigned long long)tick, gems[i].course, gems[i].rid, st.resolved[i], q);
-                st.resolved[i] = 0u; // fail closed: never hide an ambiguous gem
+                std::fprintf(stderr, "[tk45c] tick=%llu %s rid=%u AMBIGUOUS (%u+ instances), hide off\n",
+                             (unsigned long long)tick, gems[i].course, gems[i].rid,
+                             (unsigned)kMaxRes);
+                st.ambig[i] = true; // fail closed: never hide an ambiguous gem
+                st.nres[i] = 0u;
                 continue;
             }
-            st.resolved[i] = q;
+            st.resolved[i][st.nres[i]++] = q;
         }
     }
     st.scanCursor = end;
@@ -389,24 +426,9 @@ inline void scanChunk(State &st, const std::vector<Gem> &gems, const uint8_t *ra
         st.scanDone = true;
         size_t n = 0u;
         for (size_t i = 0u; i < gems.size(); ++i)
-            n += st.resolved[i] != 0u ? 1u : 0u;
+            n += st.nres[i] != 0u ? 1u : 0u;
         std::fprintf(stderr, "[tk45c] tick=%llu scan complete: %zu/%zu gems resolved clk=%u\n",
                      (unsigned long long)tick, n, gems.size(), clock);
-        // TK45C-DIAG (lane-only; remove before merge): resolved-rid membership.
-        if (const char *dp = std::getenv("PS2X_SSX3_TRICKY_GEMS_DUMP"))
-        {
-            if (std::FILE *df = std::fopen(dp, "a"))
-            {
-                std::fprintf(df, "tick=%llu n=%zu clk=%u rids:",
-                             (unsigned long long)tick, n, clock);
-                for (size_t i = 0u; i < gems.size(); ++i)
-                    if (st.resolved[i] != 0u)
-                        std::fprintf(df, " %s:%u@%08x", gems[i].course, gems[i].rid,
-                                     st.resolved[i]);
-                std::fprintf(df, "\n");
-                std::fclose(df);
-            }
-        }
         // Re-hide pass after a reset/teleport re-scan: collected gems whose
         // instance came back alive (streaming revive) hide again.
         if (st.rehideArmed)
@@ -414,39 +436,32 @@ inline void scanChunk(State &st, const std::vector<Gem> &gems, const uint8_t *ra
             st.rehideArmed = false;
             for (size_t i = 0u; i < gems.size(); ++i)
             {
-                if (!isCollected(st, i) || st.resolved[i] == 0u)
+                if (!isCollected(st, i))
                     continue;
-                uint8_t *wram = const_cast<uint8_t *>(ram);
-                uint32_t v[3] = {0};
-                const uint32_t pb = st.resolved[i] & kRamMask;
-                if (pb + kInstPosOff + 12u > ramSize)
-                    continue;
-                std::memcpy(v, wram + pb + kInstPosOff, 12);
-                uint32_t g[3] = {0};
-                std::memcpy(g, gems[i].xyz, 12);
-                if (v[0] != g[0] || v[1] != g[1] || v[2] != g[2])
-                    continue; // stale pointer: leave it alone
-                uint32_t b = 0u;
-                if (!readU32(wram, ramSize, pb + 8u, b))
-                    continue;
-                if ((b & 0xffu) != kDeadLow && writeU32(wram, ramSize, pb + 8u, (b & ~0xffu) | kDeadLow))
-                    std::fprintf(stderr, "[tk45c] tick=%llu REHIDE %s rid=%u at=%08x\n",
-                                 (unsigned long long)tick, gems[i].course, gems[i].rid, pb);
+                for (uint8_t j = 0u; j < st.nres[i]; ++j)
+                {
+                    uint8_t *wram = const_cast<uint8_t *>(ram);
+                    uint32_t v[3] = {0};
+                    const uint32_t pb = st.resolved[i][j] & kRamMask;
+                    if (pb + kInstPosOff + 12u > ramSize)
+                        continue;
+                    std::memcpy(v, wram + pb + kInstPosOff, 12);
+                    uint32_t g[3] = {0};
+                    std::memcpy(g, gems[i].xyz, 12);
+                    if (v[0] != g[0] || v[1] != g[1] || v[2] != g[2])
+                        continue; // stale pointer: leave it alone
+                    uint32_t b = 0u;
+                    if (!readU32(wram, ramSize, pb + 8u, b))
+                        continue;
+                    const uint32_t lo = b & 0xffu;
+                    if ((lo == kShowLow || lo == kAliveLow2) &&
+                        writeU32(wram, ramSize, pb + 8u, (b & ~0xffu) | kDeadLow))
+                        std::fprintf(stderr, "[tk45c] tick=%llu REHIDE %s rid=%u at=%08x\n",
+                                     (unsigned long long)tick, gems[i].course, gems[i].rid, pb);
+                }
             }
         }
     }
-}
-
-struct Callout
-{
-    bool fire = false;
-    uint32_t mask = 0u;
-    float ladder = 0.0f;
-};
-
-inline uint32_t maskForValue(unsigned v) noexcept
-{
-    return v == 2u ? 1u : v == 3u ? 2u : 4u; // Icons jal sites 0x29d1e4/20c/238
 }
 
 // Validate the trick-state pointer (TKA1: full span, alignment, finite use).
@@ -469,18 +484,16 @@ inline bool trickState(const uint8_t *ram, size_t ramSize, uint32_t r, uint32_t 
 }
 
 // The boundary-hook poll (state, table and course flag injected, so tests
-// drive it with fake RAM; the glue passes the singletons). Returns a
-// callout action for the glue (which owns ctx/dispatch); every other
-// effect lands here. All writes conditional.
-inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_t ramSize, uint64_t tick,
-                    uint32_t a0, bool tricky)
+// drive it with fake RAM; the glue passes the singletons). All writes
+// conditional.
+inline void poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_t ramSize, uint64_t tick,
+                 uint32_t a0, bool tricky)
 {
-    Callout out;
     if (!tricky)
     {
         if (st.wasTricky)
         {
-            fullReset(st);
+            fullReset(st, gems, ram, ramSize, tick);
             st.pendingClear = true; // a stale multiplier must not leak into Stock
         }
         st.wasTricky = false;
@@ -503,7 +516,7 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
                 st.pendingClear = false;
             }
         }
-        return out;
+        return;
     }
     st.wasTricky = true;
     if (gems.empty())
@@ -515,13 +528,13 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
         // Not player-1's pass (AI rider) or an unreadable chain: hold.
         if (r == 0u || b == 0u)
             st.prevValid = false;
-        return out;
+        return;
     }
     uint32_t clock = 0u;
     if (!readU32(ram, ramSize, b + kRaceClockOff, clock))
     {
         st.prevValid = false;
-        return out;
+        return;
     }
     if (!st.init)
     {
@@ -534,7 +547,7 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
     {
         // New race/session or retry: per-race state resets (TKA1), the world
         // reloaded, and any stale multiplier clears once T is valid.
-        fullReset(st);
+        fullReset(st, gems, ram, ramSize, tick);
         st.pendingClear = true;
     }
     st.lastR = r;
@@ -542,7 +555,7 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
     if (!racing)
     {
         st.prevValid = false;
-        return out;
+        return;
     }
     float cur[3] = {0, 0, 0};
     if (!readF32(ram, ramSize, r + kRiderPosOff, cur[0]) ||
@@ -550,7 +563,7 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
         !readF32(ram, ramSize, r + kRiderPosOff + 8u, cur[2]))
     {
         st.prevValid = false;
-        return out;
+        return;
     }
     uint32_t t = 0u;
     const bool tOk = trickState(ram, ramSize, r, t);
@@ -568,16 +581,6 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
                              t, (double)f);
         }
         st.pendingClear = false;
-    }
-    // TK45C-DIAG (lane-only; remove before merge): per-step rider trace.
-    if (const char *tp = std::getenv("PS2X_SSX3_TRICKY_GEMS_TRACE"))
-    {
-        if (std::FILE *tf = std::fopen(tp, "a"))
-        {
-            std::fprintf(tf, "%llu %.3f %.3f %.3f %u\n", (unsigned long long)tick, (double)cur[0],
-                         (double)cur[1], (double)cur[2], clock);
-            std::fclose(tf);
-        }
     }
     if (!st.scanDone)
     {
@@ -602,9 +605,11 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
             st.scanCursor = 0u;
             st.rehideArmed = true;
             std::memset(st.resolved, 0, sizeof(st.resolved)); // re-scan re-resolves
+            std::memset(st.nres, 0, sizeof(st.nres));
+            std::memset(st.ambig, 0, sizeof(st.ambig));
             std::fprintf(stderr, "[tk45c] tick=%llu TELEPORT, re-scan armed\n", (unsigned long long)tick);
         }
-        return out;
+        return;
     }
     for (size_t i = 0u; i < gems.size(); ++i)
     {
@@ -627,39 +632,54 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
                     wrote = writeF32(ram, ramSize, t + kMultOff, want);
             }
         }
-        const char *hide = "NOHIDE-unresolved";
-        const uint32_t pb = st.resolved[i];
-        if (pb != 0u)
+        // Hide EVERY live instance (stacked gems share the spot); the line
+        // reports the worst outcome (refused/failed > hidden > already > stale).
+        int ho = 0; // 0 stale, 1 hidden, 2 already, 3 refused, 4 write-failed
+        if (st.nres[i] != 0u && !st.ambig[i])
         {
-            hide = "NOHIDE-stale";
-            uint32_t v[3] = {0};
-            if (readU32(ram, ramSize, pb + kInstPosOff, v[0]) &&
-                readU32(ram, ramSize, pb + kInstPosOff + 4u, v[1]) &&
-                readU32(ram, ramSize, pb + kInstPosOff + 8u, v[2]))
+            uint32_t gg[3] = {0};
+            std::memcpy(gg, g.xyz, 12);
+            for (uint8_t j = 0u; j < st.nres[i]; ++j)
             {
-                uint32_t gg[3] = {0};
-                std::memcpy(gg, g.xyz, 12);
-                if (v[0] == gg[0] && v[1] == gg[1] && v[2] == gg[2])
+                const uint32_t pb = st.resolved[i][j];
+                if (pb == 0u)
+                    continue;
+                uint32_t v[3] = {0};
+                if (!readU32(ram, ramSize, pb + kInstPosOff, v[0]) ||
+                    !readU32(ram, ramSize, pb + kInstPosOff + 4u, v[1]) ||
+                    !readU32(ram, ramSize, pb + kInstPosOff + 8u, v[2]) || v[0] != gg[0] ||
+                    v[1] != gg[1] || v[2] != gg[2])
+                    continue;
+                uint32_t w8 = 0u;
+                if (!readU32(ram, ramSize, pb + 8u, w8))
                 {
-                    uint32_t w8 = 0u;
-                    if (readU32(ram, ramSize, pb + 8u, w8))
-                    {
-                        if ((w8 & 0xffu) == kDeadLow)
-                        {
-                            hide = "already-hidden";
-                        }
-                        else if (writeU32(ram, ramSize, pb + 8u, (w8 & ~0xffu) | kDeadLow))
-                        {
-                            hide = "HIDDEN";
-                        }
-                        else
-                        {
-                            hide = "NOHIDE-write-failed";
-                        }
-                    }
+                    ho = 4;
+                    continue;
                 }
+                const uint32_t lo = w8 & 0xffu;
+                if (lo == kDeadLow)
+                {
+                    if (ho == 0)
+                        ho = 2;
+                }
+                else if (lo != kShowLow && lo != kAliveLow2)
+                    ho = 3;
+                else if (writeU32(ram, ramSize, pb + 8u, (w8 & ~0xffu) | kDeadLow))
+                {
+                    if (ho != 3 && ho != 4)
+                        ho = 1;
+                }
+                else
+                    ho = 4;
             }
         }
+        const char *hide = st.ambig[i] ? "NOHIDE-ambiguous"
+            : st.nres[i] == 0u           ? "NOHIDE-unresolved"
+            : ho == 1                    ? "HIDDEN"
+            : ho == 2                    ? "already-hidden"
+            : ho == 3                    ? "NOHIDE-refused"
+            : ho == 4                    ? "NOHIDE-write-failed"
+                                         : "NOHIDE-stale";
         float ap = 0.0f;
         const bool apOk = tOk && readF32(ram, ramSize, t + kAppliedOff, ap);
         std::fprintf(stderr,
@@ -667,20 +687,8 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
                      (unsigned long long)tick, g.course, g.rid, (unsigned)g.value, (double)had,
                      (double)(wrote ? want : had), hide, apOk ? std::to_string((double)ap).c_str() : "n/a",
                      t, clock, g.donor);
-        if (st.cap.ok)
-        {
-            out.fire = true;
-            out.mask = maskForValue(g.value);
-            out.ladder = want;
-        }
-        else
-        {
-            std::fprintf(stderr, "[tk45c] tick=%llu callout SKIP (no Icons capture yet)\n",
-                         (unsigned long long)tick);
-        }
     }
     std::memcpy(st.prev, cur, sizeof(cur));
-    return out;
 }
 
 // Bank-clear entry (a0 = trick struct): clear +0x1c4 where the game clears
@@ -688,9 +696,13 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
 // itself is conditional, so clean states see zero writes. sub_00117838 is a
 // straight-line reset (no +0x1c4 reads, no calls), so entry == exit; the bank
 // consumes +0x1c4 in the caller before the reset (TK45b: bank 0x11962c).
-inline void onBankClear(uint8_t *ram, size_t ramSize, uint64_t tick, uint32_t t, uint32_t clock)
+// 0x117860 is the sole +0x18 clear (the only other +0x18 writer is the
+// ladder max-track at 0x1194a0), so wipeout clears here too, via one of the
+// 8 reset callers (src= identifies which, empirically).
+inline void onBankClear(uint8_t *ram, size_t ramSize, uint64_t tick, uint32_t t, uint32_t clock,
+                        uint32_t src)
 {
-    // (Knob-gated by the glue, like poll/captureIcons.)
+    // (Knob-gated by the glue, like poll.)
     if (!ram || ramSize == 0u || t == 0u || (t & 3u) != 0u || (t & ~kRamMask) != 0u)
         return;
     if (t + kTrickSize + 4u > ramSize)
@@ -705,31 +717,9 @@ inline void onBankClear(uint8_t *ram, size_t ramSize, uint64_t tick, uint32_t t,
     float ap = 0.0f;
     const bool apOk = readF32(ram, ramSize, t + kAppliedOff, ap);
     if (writeF32(ram, ramSize, t + kMultOff, 1.0f))
-        std::fprintf(stderr, "[tk45c] tick=%llu BANK-CLEAR T=%08x was=%.1f ap=%s clk=%u\n",
+        std::fprintf(stderr, "[tk45c] tick=%llu BANK-CLEAR T=%08x was=%.1f ap=%s clk=%u src=%08x\n",
                      (unsigned long long)tick, t, (double)f,
-                     apOk ? std::to_string((double)ap).c_str() : "n/a", clock);
-}
-
-// Capture the Icons callout context at the dispatch entry (a0, a2). a0 must
-// be a mapped struct (probed); a1 (= dispatch a2) may be 0 — the speech fn
-// early-returns on a1 == 0, so a null replay is a silent no-op. Fail closed.
-inline bool captureIcons(State &st, uint32_t a0, uint32_t a1, const uint32_t s[8], float f20,
-                         uint64_t tick, const uint8_t *ram, size_t ramSize)
-{
-    uint32_t probe = 0u;
-    if (a0 == 0u || (a0 & ~kRamMask) != 0u || !readU32(ram, ramSize, a0, probe))
-        return false;
-    const bool first = !st.cap.ok;
-    st.cap.ok = true;
-    st.cap.tick = tick;
-    st.cap.a0 = a0;
-    st.cap.a1 = a1;
-    std::memcpy(st.cap.s, s, sizeof(st.cap.s));
-    st.cap.f20 = f20;
-    if (first)
-        std::fprintf(stderr, "[tk45c] tick=%llu Icons capture a0=%08x a1=%08x s2=%08x s3=%08x\n",
-                     (unsigned long long)tick, a0, a1, s[2], s[3]);
-    return true;
+                     apOk ? std::to_string((double)ap).c_str() : "n/a", clock, src);
 }
 
 } // namespace ps2_tk45c
