@@ -161,13 +161,14 @@ MiniTest::Case("Ps2Ssx3TrickyGemsPoll", [](TestCase &tc)
             // Capture, then cross gem1 (x3): mult 2 -> 3, callout fires.
             // (fakeRace resets the mult; restore the 2.0 to test max-up.)
             uint32_t s[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-            ps2_tk45c::captureIcons(st, 0xaaaa0000u, 0xbbbb0000u, s, 3.0f, 1002);
+            t.IsTrue(ps2_tk45c::captureIcons(st, kA, 0xbbbb0000u, s, 3.0f, 1002, ram.data(), ram.size()),
+                     "capture validates");
             fakeRace(ram, 1950, 0, 0, 103);
             wf(ram, kT + 0x1c4u, 2.0f);
             ps2_tk45c::Callout o4 = ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1003, kR, true);
             t.IsTrue(rf(ram, kT + 0x1c4u) == 3.0f, "mult max-tracks to 3");
             t.IsTrue(o4.fire && o4.mask == 2u && o4.ladder == 3.0f, "callout x3");
-            t.IsTrue(st.cap.a0 == 0xaaaa0000u, "capture kept");
+            t.IsTrue(st.cap.a0 == kA, "capture kept");
             // Cross gem2 (x2) with mult 3: hold, still collected + hidden.
             fakeRace(ram, 2950, 0, 0, 104);
             wf(ram, kT + 0x1c4u, 3.0f);
@@ -257,16 +258,36 @@ MiniTest::Case("Ps2Ssx3TrickyGemsGuards", [](TestCase &tc)
             {
                 std::vector<uint8_t> ram(kRamSize, 0);
                 wf(ram, kT + 0x1c4u, 3.0f);
-                ps2_tk45c::onBankClear(ram.data(), ram.size(), 2000, kT);
+                ps2_tk45c::onBankClear(ram.data(), ram.size(), 2000, kT, 100);
                 t.IsTrue(rf(ram, kT + 0x1c4u) == 1.0f, "bank clears");
-                ps2_tk45c::onBankClear(ram.data(), ram.size(), 2001, kT);
+                ps2_tk45c::onBankClear(ram.data(), ram.size(), 2001, kT, 101);
                 t.IsTrue(rf(ram, kT + 0x1c4u) == 1.0f, "clean no-op");
                 wf(ram, kT + 0x1c4u, std::numeric_limits<float>::quiet_NaN());
-                ps2_tk45c::onBankClear(ram.data(), ram.size(), 2002, kT);
+                ps2_tk45c::onBankClear(ram.data(), ram.size(), 2002, kT, 102);
                 t.IsTrue(std::isnan(rf(ram, kT + 0x1c4u)), "NaN refused");
-                ps2_tk45c::onBankClear(ram.data(), ram.size(), 2003, 0u);
-                ps2_tk45c::onBankClear(ram.data(), ram.size(), 2004, kT + 1u);
+                ps2_tk45c::onBankClear(ram.data(), ram.size(), 2003, 0u, 103);
+                ps2_tk45c::onBankClear(ram.data(), ram.size(), 2004, kT + 1u, 104);
                 t.IsTrue(true, "bad T survives");
+                // Full-span guard: T ending past RAM refuses (no OOB write).
+                wf(ram, kRamSize - 4u, 3.0f);
+                ps2_tk45c::onBankClear(ram.data(), ram.size(), 2005, kRamSize - 4u, 105);
+                t.IsTrue(rf(ram, kRamSize - 4u) == 3.0f, "short span refuses");
+            }
+            // Capture validation: null/unmapped a0 refused, null a1 allowed.
+            {
+                std::vector<uint8_t> ram(kRamSize, 0);
+                uint32_t s[8] = {0};
+                State st;
+                t.IsTrue(!ps2_tk45c::captureIcons(st, 0u, 0u, s, 0.0f, 100, ram.data(), ram.size()) &&
+                             !st.cap.ok,
+                         "null a0 refused");
+                t.IsTrue(!ps2_tk45c::captureIcons(st, 0xaaaa0000u, 0u, s, 0.0f, 101, ram.data(),
+                                                 ram.size()) &&
+                             !st.cap.ok,
+                         "unmapped a0 refused");
+                t.IsTrue(ps2_tk45c::captureIcons(st, kA, 0u, s, 0.0f, 102, ram.data(), ram.size()) &&
+                             st.cap.ok && st.cap.a1 == 0u,
+                         "null a1 allowed");
             }
         }); });
 
@@ -281,7 +302,7 @@ MiniTest::Case("Ps2Ssx3TrickyGemsScan", [](TestCase &tc)
             fakeInstance(ram, kInst1, 2000, 0, 0);
             State st;
             for (int i = 0; i < 40 && !st.scanDone; ++i)
-                ps2_tk45c::scanChunk(st, gems, ram.data(), ram.size(), 3000);
+                ps2_tk45c::scanChunk(st, gems, ram.data(), ram.size(), 3000, 100);
             t.IsTrue(st.scanDone, "scan completes");
             t.IsTrue(st.resolved[0] == kInst0 && st.resolved[1] == kInst1 && st.resolved[2] == 0u,
                      "two resolved, third absent");
@@ -289,7 +310,7 @@ MiniTest::Case("Ps2Ssx3TrickyGemsScan", [](TestCase &tc)
             fakeInstance(ram, 0x220000u, 1000, 0, 0);
             State st2;
             for (int i = 0; i < 40 && !st2.scanDone; ++i)
-                ps2_tk45c::scanChunk(st2, gems, ram.data(), ram.size(), 3000);
+                ps2_tk45c::scanChunk(st2, gems, ram.data(), ram.size(), 3000, 100);
             t.IsTrue(st2.resolved[0] == 0u && st2.resolved[1] == kInst1, "ambiguity fails closed");
         }); });
 }
