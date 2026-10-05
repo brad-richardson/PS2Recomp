@@ -89,7 +89,6 @@
 
 #include "runtime/ps2_memory.h" // PS2_RAM_SIZE / PS2_RAM_MASK
 #include "ps2_runtime.h" // R5900Context / getRegU32 (E42 ctx attribution)
-#include "ps2_ssx3_tricky_hud.h" // TK43c: uber-letter CD tap (STL-only header)
 
 #include <atomic>
 #include <cstdint>
@@ -325,10 +324,9 @@ inline uint64_t noteCdRead(uint64_t vsync, uint32_t lbn, uint32_t sectors,
                            uint32_t destEe, const char *mode, const char *file)
 {
     detail::ensureInit();
-    // TK43c: uber-letter tap. Self-gated on PS2X_SSX3_TRICKY_HUD; runs on
-    // every CD read whether or not the read trace is armed (atomics only,
-    // no guest touch, output-only).
-    ps2_ssx3_tricky_hud::noteCdReadForUber(lbn, sectors, vsync);
+    // TK44: the uber-letter tap left noteCdRead for the CD serve path
+    // (CD.cpp calls it on every served read; calling it here too would
+    // double-count whenever the trace is armed).
     detail::State &s = detail::state();
     std::lock_guard<std::mutex> lock(s.mutex);
     if (!s.enabled)

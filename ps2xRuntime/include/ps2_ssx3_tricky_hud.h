@@ -35,6 +35,12 @@
 // path (queuePendingAhb composites the region into the locked AHB before
 // queue); the state both call sites share is HudState, decided per frame by
 // updateHudStateLocked (ps2_ssx3_tricky_hud_state.h).
+//
+// TK44: race-only visibility (the chain resolves in menus, so the meter used
+// to draw on the event card and in pause): the overlay draws only while the
+// HUD race time [B+0xc] advances (GO..finish; frozen in pause, results,
+// menus and on the pre-race card). The uber tap moved to the CD serve path
+// (it never fired: noteCdRead's callers are trace-armed-gated).
 
 #include <atomic>
 #include <cmath>
@@ -51,6 +57,12 @@ namespace ps2_ssx3_tricky_hud
 
 constexpr uint32_t kRiderFillOff = 0x2f8u;   // f32 boost target 0..1 (FH10)
 constexpr uint32_t kRiderUberOff = 0x2f4u;   // i32 uber level 0..10 (`sw`, 0x10e9e8)
+// TK44: the race object's frame counters (chain B; ps2_fh1_full120.h System 12).
+constexpr uint32_t kRaceTickOff = 0x8u;      // race tick (bumps every rider pass, incl. results fly-by)
+constexpr uint32_t kRaceClockOff = 0xcu;     // HUD race time (runs GO..finish; frozen in pause/menus/results)
+// TK44: presents after a clock freeze before the meter hides. 2 is 120-safe:
+// at full120 the clock bumps 1x per 2 guest ticks, so grace 1 would flicker.
+constexpr uint64_t kRaceClockGraceTicks = 2u;
 // TK43d chain root: [gp-0x848] (gp = 0x4a30f0, the ELF .reginfo ri_gp_value).
 constexpr uint32_t kChainRoot = 0x4a28a8u;
 constexpr uint32_t kChainAOff = 0x84u;       // game object (0x1298c8, func_28B1C8)
@@ -227,6 +239,62 @@ inline uint32_t resolveChainR(const uint8_t *ram, size_t ramSize)
     return r;
 }
 
+// TK44: the chain's race object (B = [[0x4a28a8]+0x84]+0xC), carrying the
+// race counters. Null/range-checked like resolveChainR; 0 on any failure.
+inline uint32_t resolveChainB(const uint8_t *ram, size_t ramSize)
+{
+    if (!ram || ramSize == 0u)
+        return 0u;
+    uint32_t g = 0u, a = 0u, b = 0u;
+    const uint32_t gs = kChainRoot & kRamMask;
+    if (gs + 4u > ramSize)
+        return 0u;
+    std::memcpy(&g, ram + gs, 4);
+    if (g == 0u)
+        return 0u;
+    const uint32_t as = (g + kChainAOff) & kRamMask;
+    if (as + 4u > ramSize)
+        return 0u;
+    std::memcpy(&a, ram + as, 4);
+    if (a == 0u)
+        return 0u;
+    const uint32_t bs = (a + kChainBOff) & kRamMask;
+    if (bs + 4u > ramSize)
+        return 0u;
+    std::memcpy(&b, ram + bs, 4);
+    return b;
+}
+
+// TK44: race-only visibility from the HUD race time [B+0xc] (pure; the
+// overlay owns the state). Any change (forward bump, gate restart) proves a
+// live race; a freeze older than the grace hides (pause, results, menus,
+// pre-race card). Nothing shows until the first advance is seen.
+struct RaceClock
+{
+    bool init = false;
+    bool seen = false;
+    uint32_t last = 0u;
+    uint64_t lastTick = 0u;
+};
+
+inline bool updateRaceClock(RaceClock &st, uint32_t clock, uint64_t tick)
+{
+    if (!st.init)
+    {
+        st.init = true;
+        st.last = clock;
+        st.lastTick = tick;
+        return false;
+    }
+    if (clock != st.last)
+    {
+        st.last = clock;
+        st.lastTick = tick;
+        st.seen = true;
+    }
+    return st.seen && (tick - st.lastTick) <= kRaceClockGraceTicks;
+}
+
 // Diag-only display override (PS2X_SSX3_TRICKY_HUD_FORCE="fill,level", e.g.
 // "1,1"): forces the OVERLAY's displayed values for screenshots. Host-side
 // only; never writes guest memory. Unlisted knob (diag class): it shows in
@@ -276,8 +344,10 @@ inline ForceValue parseForce(const char *s)
 // Arcade_Uber.dat member 8929152 + SCHl slot offsets); identical under the
 // TK43b alias composite (same-size, same layout). Slots 1-2 verified once
 // per trigger in A7+B; slot 0 is predicted (it has never fired in any
-// boot). Called from ps2_e41_trace::noteCdRead on every CD read, whether
-// or not the read trace is armed; self-gated on PS2X_SSX3_TRICKY_HUD.
+// boot). Called from the CD serve path (Kernel/Stubs/CD.cpp) on every
+// served read; self-gated on PS2X_SSX3_TRICKY_HUD. TK44: it used to be
+// called from ps2_e41_trace::noteCdRead, whose call sites are gated on the
+// trace being armed, so no tap ever fired on a play build.
 inline constexpr uint32_t kUberTapLbn[3] = {0x61417u, 0x6147du, 0x614dau};
 
 inline int slotForUberRead(uint32_t lbn, uint32_t sectors)
@@ -971,6 +1041,8 @@ struct HudState
     int lettersPreset = -1;
     bool forcedInit = false;
     ForceValue forced;
+    RaceClock raceClock;     // TK44: race-only visibility from [B+0xc]
+    bool lastRacing = false; // TK44: last racing value (transition log)
 };
 
 inline HudState &hudState()
