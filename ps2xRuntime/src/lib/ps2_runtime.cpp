@@ -4835,7 +4835,7 @@ __attribute__((noinline, cold)) void dspBuildFilter()
     for (uint32_t pc : {kSsx3PatchCacheAlloc, kSsx3GuestFree, kSsx3PatchCacheInit, kSsx3DrawKeyCall,
                         kSsx3DrawLookup, kSsx3DrawTexLookup, kSsx3SpatialItems12, kSsx3SpatialItems34,
                         kSsx3SpatialInside1, kSsx3SpatialInside3, kSsx3DrawReset, 0x00228C08u,
-                        0x001216E0u, 0x00117838u, 0x002A3EB8u}) // TK45c: rider pass, bank-clear, speech
+                        0x001216E0u, 0x00117838u, 0x0029CED8u}) // TK45c: rider pass, bank-clear, Icons dispatch
         dspSet(g_dsp.tgt, pc);
     g_dsp.always = false;
     g_dsp.guestActive = ps2_fh1::g_guestActive;
@@ -4974,14 +4974,26 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
             }
         }
         if (targetPc == 0x117838u)
-            ps2_tk45c::onBankClear(rdram, PS2_RAM_SIZE, gemsTick, getRegU32(ctx, 4));
-        if (targetPc == 0x2a3eb8u && sourcePc != 0u)
         {
+            uint32_t gemsClock = 0u;
+            const uint32_t gemsB = ps2_ssx3_tricky_hud::resolveChainB(rdram, PS2_RAM_SIZE);
+            if (gemsB != 0u)
+            {
+                const uint32_t gemsCs = (gemsB + 0xcu) & 0x01ffffffu;
+                if (gemsCs + 4u <= PS2_RAM_SIZE)
+                    std::memcpy(&gemsClock, rdram + gemsCs, 4);
+            }
+            ps2_tk45c::onBankClear(rdram, PS2_RAM_SIZE, gemsTick, getRegU32(ctx, 4), gemsClock);
+        }
+        if (targetPc == 0x29ced8u)
+        {
+            // Icons dispatch entry: the speech fn gets a0=s2=dispatch-a0 and
+            // a1=s3=dispatch-a2, so capture (a0, a2) = (r4, r6).
             uint32_t gs[8];
             for (int gi = 0; gi < 8; ++gi)
                 gs[gi] = getRegU32(ctx, 16 + gi);
-            ps2_tk45c::captureIcons(ps2_tk45c::state(), getRegU32(ctx, 4), getRegU32(ctx, 5), gs, ctx->f[20],
-                                    gemsTick);
+            ps2_tk45c::captureIcons(ps2_tk45c::state(), getRegU32(ctx, 4), getRegU32(ctx, 6), gs, ctx->f[20],
+                                    gemsTick, rdram, PS2_RAM_SIZE);
         }
     }
     // TK22: put back the draw-table slot a refused append borrowed.

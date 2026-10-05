@@ -45,13 +45,18 @@ constexpr uint32_t kOneBits = 0x3f800000u;
 constexpr uint32_t kBoundarySrc = 0x128ddcu;
 constexpr uint32_t kBoundaryTgt = 0x1216e0u;
 constexpr uint32_t kBankClear = 0x117838u;
-constexpr uint32_t kSpeechFn = 0x2a3eb8u;
+constexpr uint32_t kSpeechFn = 0x2a3eb8u; // replay target (nested call)
+// Capture point: sub_0029CED8 entry. s2=a0, s3=a2, f20=f12 on entry, and the
+// Icons call passes a0=s2, a1=s3, a2=mask, so capturing (a0, a2) here is the
+// same context the speech fn would get — but the dispatch runs on every HUD
+// update while the speech fn only fires on an exact combo hit (gems1: never).
+constexpr uint32_t kDispatchFn = 0x29ced8u;
 constexpr uint32_t kRiderPosOff = 0x110u;
 constexpr uint32_t kTrickOff = 0x790u;
 constexpr uint32_t kMultOff = 0x1c4u;
 constexpr uint32_t kTrickSize = 0x1ccu;
 constexpr uint32_t kRaceClockOff = 0xcu;
-constexpr uint32_t kLiveScore = 0x117950u;
+constexpr uint32_t kAppliedOff = 0x10u; // bank-applied mult (pre-reset read proves consume)
 constexpr uint32_t kInstPosOff = 0x40u;
 constexpr uint32_t kDeadLow = 0x05u;
 constexpr float kTeleportJump = 3000.0f;
@@ -337,7 +342,7 @@ inline const XIndex &xIndex(const std::vector<Gem> &gems)
 // R-translation, bitwise; lab-proven). Called from the boundary hook;
 // yields after kScanChunk bytes so no frame hitches.
 inline void scanChunk(State &st, const std::vector<Gem> &gems, const uint8_t *ram, size_t ramSize,
-                      uint64_t tick)
+                      uint64_t tick, uint32_t clock)
 {
     if (st.scanDone || !ram || ramSize == 0u || gems.empty())
         return;
@@ -385,8 +390,23 @@ inline void scanChunk(State &st, const std::vector<Gem> &gems, const uint8_t *ra
         size_t n = 0u;
         for (size_t i = 0u; i < gems.size(); ++i)
             n += st.resolved[i] != 0u ? 1u : 0u;
-        std::fprintf(stderr, "[tk45c] tick=%llu scan complete: %zu/%zu gems resolved\n",
-                     (unsigned long long)tick, n, gems.size());
+        std::fprintf(stderr, "[tk45c] tick=%llu scan complete: %zu/%zu gems resolved clk=%u\n",
+                     (unsigned long long)tick, n, gems.size(), clock);
+        // TK45C-DIAG (lane-only; remove before merge): resolved-rid membership.
+        if (const char *dp = std::getenv("PS2X_SSX3_TRICKY_GEMS_DUMP"))
+        {
+            if (std::FILE *df = std::fopen(dp, "a"))
+            {
+                std::fprintf(df, "tick=%llu n=%zu clk=%u rids:",
+                             (unsigned long long)tick, n, clock);
+                for (size_t i = 0u; i < gems.size(); ++i)
+                    if (st.resolved[i] != 0u)
+                        std::fprintf(df, " %s:%u@%08x", gems[i].course, gems[i].rid,
+                                     st.resolved[i]);
+                std::fprintf(df, "\n");
+                std::fclose(df);
+            }
+        }
         // Re-hide pass after a reset/teleport re-scan: collected gems whose
         // instance came back alive (streaming revive) hide again.
         if (st.rehideArmed)
@@ -438,7 +458,9 @@ inline bool trickState(const uint8_t *ram, size_t ramSize, uint32_t r, uint32_t 
         t = 0u;
         return false;
     }
-    if (((t + kTrickSize) & kRamMask) + 4u > ramSize || (t & ~kRamMask) != 0u)
+    // Full-span, wrap-free: t is already masked-small, so t + size cannot
+    // overflow u32; the (x & mask) + 4 shape can never fire for aligned t.
+    if ((t & ~kRamMask) != 0u || t + kTrickSize + 4u > ramSize)
     {
         t = 0u;
         return false;
@@ -547,9 +569,19 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
         }
         st.pendingClear = false;
     }
+    // TK45C-DIAG (lane-only; remove before merge): per-step rider trace.
+    if (const char *tp = std::getenv("PS2X_SSX3_TRICKY_GEMS_TRACE"))
+    {
+        if (std::FILE *tf = std::fopen(tp, "a"))
+        {
+            std::fprintf(tf, "%llu %.3f %.3f %.3f %u\n", (unsigned long long)tick, (double)cur[0],
+                         (double)cur[1], (double)cur[2], clock);
+            std::fclose(tf);
+        }
+    }
     if (!st.scanDone)
     {
-        scanChunk(st, gems, ram, ramSize, tick);
+        scanChunk(st, gems, ram, ramSize, tick, clock);
         if (!st.scanDone)
         {
             std::memcpy(st.prev, cur, sizeof(cur));
@@ -628,13 +660,13 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
                 }
             }
         }
-        float live = 0.0f;
-        const bool liveOk = readF32(ram, ramSize, kLiveScore, live);
+        float ap = 0.0f;
+        const bool apOk = tOk && readF32(ram, ramSize, t + kAppliedOff, ap);
         std::fprintf(stderr,
-                     "[tk45c] tick=%llu PICKUP %s rid=%u x%u mult %.1f->%.1f %s live=%s T=%08x %s\n",
+                     "[tk45c] tick=%llu PICKUP %s rid=%u x%u mult %.1f->%.1f %s ap=%s T=%08x clk=%u %s\n",
                      (unsigned long long)tick, g.course, g.rid, (unsigned)g.value, (double)had,
-                     (double)(wrote ? want : had), hide, liveOk ? std::to_string((double)live).c_str() : "n/a",
-                     t, g.donor);
+                     (double)(wrote ? want : had), hide, apOk ? std::to_string((double)ap).c_str() : "n/a",
+                     t, clock, g.donor);
         if (st.cap.ok)
         {
             out.fire = true;
@@ -653,13 +685,15 @@ inline Callout poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_
 
 // Bank-clear entry (a0 = trick struct): clear +0x1c4 where the game clears
 // +0x18. Unconditional on mode (fixes stale across courses); the write
-// itself is conditional, so clean states see zero writes.
-inline void onBankClear(uint8_t *ram, size_t ramSize, uint64_t tick, uint32_t t)
+// itself is conditional, so clean states see zero writes. sub_00117838 is a
+// straight-line reset (no +0x1c4 reads, no calls), so entry == exit; the bank
+// consumes +0x1c4 in the caller before the reset (TK45b: bank 0x11962c).
+inline void onBankClear(uint8_t *ram, size_t ramSize, uint64_t tick, uint32_t t, uint32_t clock)
 {
     // (Knob-gated by the glue, like poll/captureIcons.)
     if (!ram || ramSize == 0u || t == 0u || (t & 3u) != 0u || (t & ~kRamMask) != 0u)
         return;
-    if (((t + kMultOff) & kRamMask) + 4u > ramSize)
+    if (t + kTrickSize + 4u > ramSize)
         return;
     uint32_t cur = 0u;
     if (!readU32(ram, ramSize, t + kMultOff, cur) || cur == kOneBits)
@@ -668,14 +702,23 @@ inline void onBankClear(uint8_t *ram, size_t ramSize, uint64_t tick, uint32_t t)
     std::memcpy(&f, &cur, 4);
     if (!std::isfinite(f))
         return;
+    float ap = 0.0f;
+    const bool apOk = readF32(ram, ramSize, t + kAppliedOff, ap);
     if (writeF32(ram, ramSize, t + kMultOff, 1.0f))
-        std::fprintf(stderr, "[tk45c] tick=%llu BANK-CLEAR T=%08x was=%.1f\n", (unsigned long long)tick, t,
-                     (double)f);
+        std::fprintf(stderr, "[tk45c] tick=%llu BANK-CLEAR T=%08x was=%.1f ap=%s clk=%u\n",
+                     (unsigned long long)tick, t, (double)f,
+                     apOk ? std::to_string((double)ap).c_str() : "n/a", clock);
 }
 
-inline void captureIcons(State &st, uint32_t a0, uint32_t a1, const uint32_t s[8], float f20,
-                         uint64_t tick)
+// Capture the Icons callout context at the dispatch entry (a0, a2). a0 must
+// be a mapped struct (probed); a1 (= dispatch a2) may be 0 — the speech fn
+// early-returns on a1 == 0, so a null replay is a silent no-op. Fail closed.
+inline bool captureIcons(State &st, uint32_t a0, uint32_t a1, const uint32_t s[8], float f20,
+                         uint64_t tick, const uint8_t *ram, size_t ramSize)
 {
+    uint32_t probe = 0u;
+    if (a0 == 0u || (a0 & ~kRamMask) != 0u || !readU32(ram, ramSize, a0, probe))
+        return false;
     const bool first = !st.cap.ok;
     st.cap.ok = true;
     st.cap.tick = tick;
@@ -686,6 +729,7 @@ inline void captureIcons(State &st, uint32_t a0, uint32_t a1, const uint32_t s[8
     if (first)
         std::fprintf(stderr, "[tk45c] tick=%llu Icons capture a0=%08x a1=%08x s2=%08x s3=%08x\n",
                      (unsigned long long)tick, a0, a1, s[2], s[3]);
+    return true;
 }
 
 } // namespace ps2_tk45c
