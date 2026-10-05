@@ -42,6 +42,10 @@ inline HudParams updateHudStateLocked(HudState &st, const uint8_t *rdram, size_t
         st.letters.lit = 0;
         st.letters.flashUntil = 0;
         st.lettersInTricky = false;
+        // TK44: leaving Tricky mode re-arms race visibility (the next entry
+        // needs a fresh clock advance before anything shows).
+        st.raceClock = RaceClock{};
+        st.lastRacing = false;
         return p;
     }
     if (!st.atlasTried)
@@ -116,6 +120,37 @@ inline HudParams updateHudStateLocked(HudState &st, const uint8_t *rdram, size_t
     }
     const float shownFill = st.forced.ok ? st.forced.fill : mf.fill;
     const bool full = (st.forced.ok ? st.forced.level : mf.level) >= 1;
+    // TK44: race-only visibility. [B+0xc] is the HUD race time: bumped once
+    // per race update at 0x113dc4-dd0 (delay slot of jal 0x12a250 at
+    // 0x113dcc), GO..finish; frozen in pause, results, menus and on the
+    // pre-race card (FH5: pause/results request stock = the bump not run).
+    // [B+0x8] is NOT used: the rider pass (and its bump) keeps running
+    // under the Rival-card intro and the results fly-by. Unreadable clock
+    // (no race object) keeps the legacy show: without the AP override that
+    // path already returned above (R resolves through B).
+    bool racing = true;
+    {
+        const uint32_t b = resolveChainB(rdram, ramSize);
+        const uint32_t cs = (b + kRaceClockOff) & kRamMask;
+        if (b != 0u && cs + 4u <= ramSize)
+        {
+            uint32_t clock = 0u;
+            std::memcpy(&clock, rdram + cs, 4);
+            racing = updateRaceClock(st.raceClock, clock, tick);
+            if (racing != st.lastRacing)
+            {
+                st.lastRacing = racing;
+                std::fprintf(stderr, "[ssx3-tricky-hud] race clock %s B=0x%08x clock=%u tick=%llu\n",
+                             racing ? "running, meter shown" : "frozen, meter hidden", b, clock,
+                             static_cast<unsigned long long>(tick));
+            }
+        }
+    }
+    if (!racing)
+    {
+        st.lastFull = full; // silent: a hidden edge fires no splash/burst
+        return p;
+    }
     if (full && !st.lastFull)
     {
         st.splashUntil = tick + 45u;

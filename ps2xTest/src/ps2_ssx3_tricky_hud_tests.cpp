@@ -398,6 +398,45 @@ void register_ps2_ssx3_tricky_hud_tests()
             t.IsTrue(pxAt(g, 640, 540, 105) == 60, "chrome phase T");
             t.IsTrue(pxAt(g, 640, 625, 110) == 65, "chrome phase Y"); });});
 
+    // TK44: race-only visibility. The overlay draws only while the HUD race
+    // time [B+0xc] advances (GO..finish); a freeze older than the grace hides
+    // (pause, results, menus, pre-race card).
+    MiniTest::Case("Ps2Ssx3TrickyHudRace", [](TestCase &tc)
+                   {
+        tc.Run("race clock shows on advance, hides on freeze", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            RaceClock st;
+            t.IsTrue(!updateRaceClock(st, 100u, 1000u), "init hides until an advance is seen");
+            t.IsTrue(!updateRaceClock(st, 100u, 1001u), "frozen clock never shows");
+            t.IsTrue(!updateRaceClock(st, 100u, 2000u), "frozen clock never shows, late");
+            t.IsTrue(updateRaceClock(st, 101u, 2001u), "first advance shows");
+            t.IsTrue(updateRaceClock(st, 102u, 2002u), "steady advance shows");
+            t.IsTrue(updateRaceClock(st, 102u, 2003u), "1 frozen tick within grace shows");
+            t.IsTrue(updateRaceClock(st, 102u, 2004u), "grace edge shows");
+            t.IsTrue(!updateRaceClock(st, 102u, 2005u), "freeze past grace hides");
+            t.IsTrue(!updateRaceClock(st, 102u, 3000u), "long freeze hides");
+            t.IsTrue(updateRaceClock(st, 103u, 3001u), "resume shows at once");
+            t.IsTrue(updateRaceClock(st, 1u, 3002u), "gate restart (backward) shows");
+            t.IsTrue(!updateRaceClock(st, 1u, 3005u), "freeze after restart hides"); });
+        tc.Run("race chain B resolves, fails closed", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            std::vector<uint8_t> ram(0x600000, 0);
+            auto w32 = [&](uint32_t a, uint32_t v) { std::memcpy(&ram[a], &v, 4); };
+            w32(kChainRoot & kRamMask, 0x1000u);
+            w32(0x1000u + kChainAOff, 0x2000u);
+            w32(0x2000u + kChainBOff, 0x3000u);
+            t.IsTrue(resolveChainB(ram.data(), ram.size()) == 0x3000u, "B resolves");
+            w32(0x2000u + kChainBOff, 0u);
+            t.IsTrue(resolveChainB(ram.data(), ram.size()) == 0u, "null B");
+            w32(0x2000u + kChainBOff, 0x3000u);
+            w32(0x1000u + kChainAOff, 0u);
+            t.IsTrue(resolveChainB(ram.data(), ram.size()) == 0u, "null A");
+            std::vector<uint8_t> empty(0x10000, 0);
+            t.IsTrue(resolveChainB(empty.data(), empty.size()) == 0u, "short ram");
+            t.IsTrue(resolveChainB(nullptr, 0) == 0u, "null ram"); });});
+
     // TK43e: the region refactor. composeOverlay draws the region path, so
     // the region must contain every draw (and the smear's edge samples) and
     // everything outside it must be untouched.
