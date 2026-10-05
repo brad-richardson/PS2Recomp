@@ -4835,7 +4835,7 @@ __attribute__((noinline, cold)) void dspBuildFilter()
     for (uint32_t pc : {kSsx3PatchCacheAlloc, kSsx3GuestFree, kSsx3PatchCacheInit, kSsx3DrawKeyCall,
                         kSsx3DrawLookup, kSsx3DrawTexLookup, kSsx3SpatialItems12, kSsx3SpatialItems34,
                         kSsx3SpatialInside1, kSsx3SpatialInside3, kSsx3DrawReset, 0x00228C08u,
-                        0x001216E0u, 0x00117838u, 0x0029CED8u}) // TK45c: rider pass, bank-clear, Icons dispatch
+                        0x001216E0u, 0x00117838u}) // TK45c: rider pass, bank-clear
         dspSet(g_dsp.tgt, pc);
     g_dsp.always = false;
     g_dsp.guestActive = ps2_fh1::g_guestActive;
@@ -4938,9 +4938,8 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
 {
     // TK45c: Tricky gem multipliers (PS2X_SSX3_TRICKY_GEMS=1; default off).
     // Boundary hook = the per-rider half-step pickup poll (player-1 only);
-    // bank-clear hook clears +0x1c4 with +0x18; speech hook captures the
-    // Icons callout contexts. Nested calls happen only here (EE thread,
-    // hook context). Listed in the DSP1 target filter above.
+    // bank-clear hook clears +0x1c4 with +0x18. Listed in the DSP1 target
+    // filter above. No nested guest calls (no speech callout: REPORT §callout).
     if ((kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) &&
         ps2_tk45c::enabled())
     {
@@ -4950,28 +4949,8 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
             ps2_ssx3_course::Modes &gemsMs = ps2_ssx3_course::courseModes();
             const bool gemsTricky =
                 gemsMs.armed && ps2_ssx3_course::modeCurrent(gemsMs, rdram) != 0u;
-            const ps2_tk45c::Callout co = ps2_tk45c::poll(ps2_tk45c::state(), ps2_tk45c::table(), rdram,
-                                                         PS2_RAM_SIZE, gemsTick, getRegU32(ctx, 4),
-                                                         gemsTricky);
-            if (co.fire)
-            {
-                const ps2_tk45c::Capture &cap = ps2_tk45c::state().cap;
-                R5900Context savedGems = *ctx;
-                SET_GPR_U32(ctx, 4, cap.a0);
-                SET_GPR_U32(ctx, 5, cap.a1);
-                SET_GPR_U32(ctx, 6, co.mask);
-                for (int gi = 0; gi < 8; ++gi)
-                    SET_GPR_U32(ctx, 16 + gi, cap.s[gi]);
-                ctx->f[20] = co.ladder;
-                SET_GPR_U32(ctx, 31, 0x0badc0deu);
-                const bool gemsOk =
-                    dispatchGuestBranch(rdram, ctx, 0x2a3eb8u, 0u, 0x0badc0deu,
-                                        GuestBranchKind::DirectCall, "TK45C-CALL");
-                const uint32_t gemsV0 = getRegU32(ctx, 2);
-                *ctx = savedGems;
-                std::fprintf(stderr, "[tk45c] tick=%llu callout mask=%u ok=%d v0=%08x\n",
-                             (unsigned long long)gemsTick, co.mask, gemsOk ? 1 : 0, gemsV0);
-            }
+            ps2_tk45c::poll(ps2_tk45c::state(), ps2_tk45c::table(), rdram, PS2_RAM_SIZE, gemsTick,
+                            getRegU32(ctx, 4), gemsTricky);
         }
         if (targetPc == 0x117838u)
         {
@@ -4983,17 +4962,7 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
                 if (gemsCs + 4u <= PS2_RAM_SIZE)
                     std::memcpy(&gemsClock, rdram + gemsCs, 4);
             }
-            ps2_tk45c::onBankClear(rdram, PS2_RAM_SIZE, gemsTick, getRegU32(ctx, 4), gemsClock);
-        }
-        if (targetPc == 0x29ced8u)
-        {
-            // Icons dispatch entry: the speech fn gets a0=s2=dispatch-a0 and
-            // a1=s3=dispatch-a2, so capture (a0, a2) = (r4, r6).
-            uint32_t gs[8];
-            for (int gi = 0; gi < 8; ++gi)
-                gs[gi] = getRegU32(ctx, 16 + gi);
-            ps2_tk45c::captureIcons(ps2_tk45c::state(), getRegU32(ctx, 4), getRegU32(ctx, 6), gs, ctx->f[20],
-                                    gemsTick, rdram, PS2_RAM_SIZE);
+            ps2_tk45c::onBankClear(rdram, PS2_RAM_SIZE, gemsTick, getRegU32(ctx, 4), gemsClock, sourcePc);
         }
     }
     // TK22: put back the draw-table slot a refused append borrowed.
