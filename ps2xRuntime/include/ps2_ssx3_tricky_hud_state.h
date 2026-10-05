@@ -37,8 +37,8 @@ inline HudParams updateHudStateLocked(HudState &st, const uint8_t *rdram, size_t
     {
         st.lastFull = false; // re-arm the first-full splash for the next race
         // TK43c: leaving Tricky mode resets the letters and swallows any
-        // taps that landed outside Tricky courses (letters are Tricky-only).
-        st.letters.seen = uberTap().count.load(std::memory_order_relaxed);
+        // posts that landed outside Tricky courses (letters are Tricky-only).
+        st.letters.seen = uberPosts().count.load(std::memory_order_relaxed);
         st.letters.lit = 0;
         st.letters.flashUntil = 0;
         st.lettersInTricky = false;
@@ -63,11 +63,11 @@ inline HudParams updateHudStateLocked(HudState &st, const uint8_t *rdram, size_t
         st.lettersPresetInit = true;
         st.lettersPreset = parseLettersPreset(std::getenv("PS2X_SSX3_TRICKY_LETTERS_PRESET"));
     }
-    // TK43c: consume uber taps (even when the meter words are unreadable,
+    // TK43c: consume uber posts (even when the meter words are unreadable,
     // so no stale backlog lights letters late). Mode entry applies the
     // diag preset, if any; otherwise the session starts unlit.
     {
-        const uint64_t taps = uberTap().count.load(std::memory_order_relaxed);
+        const uint64_t taps = uberPosts().count.load(std::memory_order_relaxed);
         if (!st.lettersInTricky)
         {
             st.lettersInTricky = true;
@@ -150,6 +150,13 @@ inline HudParams updateHudStateLocked(HudState &st, const uint8_t *rdram, size_t
     {
         st.lastFull = full; // silent: a hidden edge fires no splash/burst
         return p;
+    }
+    if (tick <= st.raceClock.adoptUntil)
+    {
+        // TK47: post-boundary adopt window (restart or GO/countdown
+        // start): the guest (re)initializes meter words here, so adopt
+        // them silently instead of edging (no splash/burst).
+        st.lastFull = full;
     }
     if (full && !st.lastFull)
     {

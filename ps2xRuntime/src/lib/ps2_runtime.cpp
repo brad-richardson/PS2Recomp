@@ -1877,6 +1877,82 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-menu",
                            0u,
                            applyTrickyMenu);
 
+// TK47: TRICKY letters from the game's own uber post (output-only). The game
+// posts Arcade_Uber (event 0x2133) through the speech-queue post function at
+// 0x2B1458, called only from func_2A3DE0 (jal at 0x2a3e68); func_2A3DE0 has
+// exactly three callers (jal at 0x29b704/0x29b7b4/0x29b804), so every
+// uber-post source converges on this one call. The wrapper records the post
+// when a2 == 0x2133 and the post is accepted (v0 != 0, the game's own
+// success test at 0x2a3e70), on Tricky courses only. It reads regs/RAM and
+// writes only host counters, so the det-hash cannot move. Knob off: nothing
+// is wrapped.
+namespace
+{
+    PS2Runtime::RecompiledFunction g_tkUberPost = nullptr;
+
+    void tkUberPostWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t a2 = (ctx != nullptr) ? getRegU32(ctx, 6) : 0u;
+        if (g_tkUberPost)
+            g_tkUberPost(rdram, ctx, runtime);
+        const uint32_t v0 = (ctx != nullptr) ? getRegU32(ctx, 2) : 0u;
+        if (!ps2_ssx3_tricky_hud::isUberPost(a2, v0))
+            return;
+        if (rdram != nullptr)
+        {
+            ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
+            if (!ms.armed || ps2_ssx3_course::modeCurrent(ms, rdram) == 0u)
+                return; // Stock course: letters are Tricky-only
+        }
+        const uint64_t tick = (runtime != nullptr)
+                                  ? static_cast<uint64_t>(runtime->memory().gs().vsyncTick.load(
+                                        std::memory_order_relaxed))
+                                  : 0ull;
+        ps2_ssx3_tricky_hud::noteUberPost(tick);
+    }
+
+    void applyTrickyUberPost(PS2Runtime &runtime)
+    {
+        const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD");
+        if (!env || env[0] != '1')
+            return;
+        constexpr uint32_t kPc = ps2_ssx3_tricky_hud::kSpeechPostFunc;
+        constexpr uint32_t kWord = 0x0080582du; // daddu $t3,$a0,$zero @0x2b1458
+        const uint8_t *ram = runtime.memory().getRDRAM();
+        uint32_t word = 0u;
+        if (ram)
+            std::memcpy(&word, ram + (kPc & PS2_RAM_MASK), 4u);
+        if (!ram || word != kWord)
+        {
+            std::fprintf(stderr,
+                         "[ssx3-tricky-hud] refused: 0x%x reads 0x%08x, expected 0x%08x; "
+                         "uber post not wrapped\n",
+                         kPc, word, kWord);
+            return;
+        }
+        g_tkUberPost = runtime.lookupFunction(kPc);
+        if (!g_tkUberPost)
+        {
+            std::fprintf(stderr, "[ssx3-tricky-hud] refused: no function at 0x%x; uber post not wrapped\n",
+                         kPc);
+            return;
+        }
+        if (!runtime.replaceFunction(kPc, &tkUberPostWrapper))
+        {
+            std::fprintf(stderr, "[ssx3-tricky-hud] cannot wrap 0x%x\n", kPc);
+            std::abort();
+        }
+        std::fprintf(stderr, "[ssx3-tricky-hud] uber post wrapped at 0x%x (letters from the game's 0x2133 post)\n",
+                     kPc);
+    }
+}
+
+PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-uber-post",
+                           "SLUS_207.72",
+                           0x00100008u,
+                           0u,
+                           applyTrickyUberPost);
+
 // LOD1: draw distance (PS2X_SSX3_LOD_SCALE=<f>, default off;
 // ps2_ssx3_lod.h). The wrapper scales the far argument ($f14) at the entry
 // of the renderer's projection setter and calls the original, so an EE

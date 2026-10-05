@@ -44,6 +44,11 @@ namespace
         std::string path;
         std::fstream file;
         size_t bytes = 0;
+        // TK47 probe (audio-callback thread only): tapped-sample peak and
+        // tap count, dumped with the burst summary when a burst finishes.
+        uint64_t tapCalls = 0;
+        int tapPeak = 0;
+        int tapWinPeak = 0; // since the latest burst start
     };
 
     struct Output
@@ -97,6 +102,16 @@ namespace
         uint64_t traceTrLines = 0;
         bool traceLastBypass = true;
         std::chrono::steady_clock::time_point traceT0{};
+        // TK47 probe (audio-callback thread only): final-buffer (sink)
+        // peak per callback path, dumped when a Tricky burst finishes.
+        uint64_t sinkCallsDirect = 0;
+        uint64_t sinkCallsStretch = 0;
+        int sinkPeakDirect = 0;
+        int sinkPeakStretch = 0;
+        int winSinkDirect = 0; // since the latest burst start
+        int winSinkStretch = 0;
+        uint64_t probeBurstsReported = 0;
+        uint64_t probeBurstsSeen = 0;
     } g_output;
     // IP6: [perf-audio] window counters. The device callback is the only
     // writer of the cb* / tempo fields; takeWindowCounters (main thread)
@@ -143,6 +158,20 @@ namespace
     {
         if (!wav.file.is_open())
             return;
+        // TK47 probe: peak over the tapped samples (same thread as the mix).
+        if (samples && count > 0u)
+        {
+            ++wav.tapCalls;
+            for (size_t i = 0; i < count; ++i)
+            {
+                const int v = static_cast<int>(samples[i]);
+                const int a = v < 0 ? -v : v;
+                if (a > wav.tapPeak)
+                    wav.tapPeak = a;
+                if (a > wav.tapWinPeak)
+                    wav.tapWinPeak = a;
+            }
+        }
         const size_t writable = std::min(count * sizeof(int16_t), kWavLimitBytes - wav.bytes);
         if (!writable)
             return;
@@ -162,6 +191,76 @@ namespace
                               static_cast<char>(dataBytes >> 16), static_cast<char>(dataBytes >> 24)};
         wav.file.write(data, sizeof(data));
         wav.file.flush();
+    }
+
+    // TK47 probe: peak over the final buffer handed to the sink (post-tap;
+    // the taps run last, so this equals the tapped bytes by construction),
+    // plus one combined line per finished Tricky burst. Window peaks reset
+    // at each burst start (the WAV taps of the starting callback ran just
+    // before the reset, so tap windows miss that one callback).
+    void probeSink(const char *path, const int16_t *output, size_t frames)
+    {
+        const bool stretch = path && path[0] == 's';
+        ps2_ssx3_tricky_song::Player &pl = ps2_ssx3_tricky_song::player();
+        if (pl.burstsStarted != g_output.probeBurstsSeen)
+        {
+            g_output.probeBurstsSeen = pl.burstsStarted;
+            g_output.winSinkDirect = 0;
+            g_output.winSinkStretch = 0;
+            g_output.wav.tapWinPeak = 0;
+            g_output.postWav.tapWinPeak = 0;
+        }
+        if (output && frames > 0u)
+        {
+            int peak = 0;
+            const size_t n = frames * 2u;
+            for (size_t i = 0; i < n; ++i)
+            {
+                const int v = static_cast<int>(output[i]);
+                const int a = v < 0 ? -v : v;
+                if (a > peak)
+                    peak = a;
+            }
+            if (stretch)
+            {
+                ++g_output.sinkCallsStretch;
+                if (peak > g_output.sinkPeakStretch)
+                    g_output.sinkPeakStretch = peak;
+                if (peak > g_output.winSinkStretch)
+                    g_output.winSinkStretch = peak;
+            }
+            else
+            {
+                ++g_output.sinkCallsDirect;
+                if (peak > g_output.sinkPeakDirect)
+                    g_output.sinkPeakDirect = peak;
+                if (peak > g_output.winSinkDirect)
+                    g_output.winSinkDirect = peak;
+            }
+        }
+        if (pl.burstsDone != g_output.probeBurstsReported)
+        {
+            g_output.probeBurstsReported = pl.burstsDone;
+            const ps2_ssx3_tricky_song::BurstStats &b = pl.last;
+            std::fprintf(stderr,
+                         "[snd-output] tricky-probe burstsDone=%llu mixPath=%s consumed=%llu "
+                         "songPeak=%d busBefore=%d busAfter=%d sat=%llu winSinkDirect=%d "
+                         "winSinkStretch=%d winTapWav=%d winTapPost=%d sinkDirect=%d/%llu "
+                         "sinkStretch=%d/%llu tapWav=%d/%llu tapPost=%d/%llu\n",
+                         static_cast<unsigned long long>(pl.burstsDone), b.path,
+                         static_cast<unsigned long long>(b.consumed), b.songPeak, b.busBefore,
+                         b.busAfter, static_cast<unsigned long long>(b.sat),
+                         g_output.winSinkDirect, g_output.winSinkStretch,
+                         g_output.wav.tapWinPeak, g_output.postWav.tapWinPeak,
+                         g_output.sinkPeakDirect,
+                         static_cast<unsigned long long>(g_output.sinkCallsDirect),
+                         g_output.sinkPeakStretch,
+                         static_cast<unsigned long long>(g_output.sinkCallsStretch),
+                         g_output.wav.tapPeak,
+                         static_cast<unsigned long long>(g_output.wav.tapCalls),
+                         g_output.postWav.tapPeak,
+                         static_cast<unsigned long long>(g_output.postWav.tapCalls));
+        }
     }
 
     bool nextInputFrame(uint32_t &frame)
@@ -234,11 +333,12 @@ namespace
         noteWindowCallback(frames, true, 1.0f);
         // TK43c: the Tricky song burst mixes over the final output (no-op
         // when idle or unloaded), before the DC blocker and WAV taps.
-        ps2_ssx3_tricky_song::mixInto(output, frames);
+        ps2_ssx3_tricky_song::mixInto(output, frames, "direct");
         if (g_output.dcBlock)
             dcBlockFrames(output, frames);
         recordWav(g_output.wav, output, samples);
         recordWav(g_output.postWav, output, samples);
+        probeSink("direct", output, frames);
         minuteStats(std::chrono::steady_clock::now());
     }
 
@@ -617,10 +717,11 @@ namespace
         }
         // TK43c: the Tricky song burst mixes over the final output (no-op
         // when idle or unloaded), before the DC blocker and WAV taps.
-        ps2_ssx3_tricky_song::mixInto(output, frames);
+        ps2_ssx3_tricky_song::mixInto(output, frames, "stretch");
         if (g_output.dcBlock)
             dcBlockFrames(output, frames);
         recordWav(g_output.postWav, output, static_cast<size_t>(frames) * 2u);
+        probeSink("stretch", output, frames);
         noteWindowCallback(frames, step.bypass, step.bypass ? 1.0f : step.tempo);
         stretchStats(now);
         minuteStats(now);

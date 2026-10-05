@@ -15,11 +15,18 @@
 // offset is in-session only (not persisted). Knob unset/invalid = the
 // mixer is a no-op and the output is byte-identical.
 //
+// TK47: burst probe. mixInto counts what it consumes (frames, song peak,
+// mix-bus peak before/after, saturations, callback path) and dumps one
+// stderr line per finished burst; startBurst/initFromEnv log the Player
+// address so a duplicated static across .so boundaries would show as an
+// address mismatch. No new knob: nothing is logged unless a song staged.
+//
 // Change class: output-only. No guest reads or writes; the guest det-hash
 // cannot move. Threading: the song PCM is immutable after initFromEnv
 // (audio init, before callbacks start); startBurst runs on the game thread
 // and publishes one atomic; mixInto runs on the audio thread and consumes
-// it with CAS.
+// it with CAS. All probe fields below are audio-thread-only (the dumps
+// read them from the same thread).
 
 #include <atomic>
 #include <cstdint>
@@ -118,12 +125,42 @@ inline Song loadSongFile(const char *path)
     return parseSongWav(buf.data(), buf.size());
 }
 
+// TK47 probe: per-burst consume stats (audio thread only).
+struct BurstStats
+{
+    uint64_t consumed = 0;
+    int songPeak = 0;
+    int busBefore = 0;
+    int busAfter = 0;
+    uint64_t sat = 0;
+    const char *path = "?";
+};
+
+inline void dumpBurstStats(const BurstStats &b, const char *how, uint64_t n)
+{
+    std::fprintf(stderr,
+                 "[ssx3-tricky-song] probe %s #%llu path=%s consumed=%llu songPeak=%d "
+                 "busBefore=%d busAfter=%d sat=%llu\n",
+                 how, static_cast<unsigned long long>(n), b.path,
+                 static_cast<unsigned long long>(b.consumed), b.songPeak, b.busBefore,
+                 b.busAfter, static_cast<unsigned long long>(b.sat));
+}
+
 struct Player
 {
     Song song;
     // 0 (low 32 = 0) = idle; else (startFrame << 32) | framesLeft.
     std::atomic<uint64_t> cmd{0};
     uint64_t resume = 0; // game-thread only
+    int songPeak = 0;    // max |sample| over the staged PCM (initFromEnv)
+    // TK47 probe (audio thread only; see the header comment).
+    BurstStats cur;
+    BurstStats last;
+    uint64_t burstsDone = 0;
+    uint64_t burstsStarted = 0;
+    uint32_t probeLastLeft = 0;
+    bool probeActive = false;
+    bool probeMixLogged = false;
 };
 
 inline Player &player()
@@ -142,9 +179,21 @@ inline void initFromEnv()
     std::fprintf(stderr, "[ssx3-tricky-song] file '%s': %s\n", path,
                  p.song.ok ? "loaded" : "missing/invalid, song off");
     if (p.song.ok)
-        std::fprintf(stderr, "[ssx3-tricky-song] frames=%u (%.1f s), burst=%llu frames\n",
+    {
+        int peak = 0;
+        for (const int16_t v : p.song.pcm)
+        {
+            const int a = v < 0 ? -(int)v : (int)v;
+            if (a > peak)
+                peak = a;
+        }
+        p.songPeak = peak;
+        std::fprintf(stderr,
+                     "[ssx3-tricky-song] frames=%u (%.1f s), burst=%llu frames, peak=%d, player=%p\n",
                      p.song.frames, p.song.frames / static_cast<double>(kRate),
-                     static_cast<unsigned long long>(kBurstFrames));
+                     static_cast<unsigned long long>(kBurstFrames), peak,
+                     static_cast<const void *>(&p));
+    }
 }
 
 // Game thread: open a burst at the resume offset. A burst already playing
@@ -158,11 +207,13 @@ inline void startBurst(uint64_t tick)
     const uint64_t start = p.resume % p.song.frames;
     p.resume = (start + kBurstFrames) % p.song.frames;
     p.cmd.store((start << 32) | kBurstFrames, std::memory_order_release);
-    std::fprintf(stderr, "[ssx3-tricky-song] burst start=%llu end=%llu resume=%llu tick=%llu\n",
+    std::fprintf(stderr,
+                 "[ssx3-tricky-song] burst start=%llu end=%llu resume=%llu tick=%llu player=%p songPeak=%d\n",
                  static_cast<unsigned long long>(start),
                  static_cast<unsigned long long>(start + kBurstFrames),
                  static_cast<unsigned long long>(p.resume),
-                 static_cast<unsigned long long>(tick));
+                 static_cast<unsigned long long>(tick),
+                 static_cast<const void *>(&p), p.songPeak);
 }
 
 inline int16_t satAdd(int16_t a, int16_t b)
@@ -177,11 +228,19 @@ inline int16_t satAdd(int16_t a, int16_t b)
 
 // Audio thread: saturating-add up to `frames` burst samples over `out`.
 // No-op when idle or unloaded (output byte-identical with the knob off).
-inline void mixInto(int16_t *out, size_t frames)
+// `path` labels the calling callback ("direct"/"stretch") for the probe.
+inline void mixInto(int16_t *out, size_t frames, const char *path = "direct")
 {
     Player &p = player();
     if (!p.song.ok || !out || frames == 0u)
         return;
+    if (!p.probeMixLogged)
+    {
+        p.probeMixLogged = true;
+        std::fprintf(stderr, "[ssx3-tricky-song] mix player=%p ok=%d frames=%u peak=%d path=%s\n",
+                     static_cast<const void *>(&p), p.song.ok ? 1 : 0, p.song.frames,
+                     p.songPeak, path ? path : "?");
+    }
     uint64_t s = p.cmd.load(std::memory_order_acquire);
     while ((s & 0xffffffffull) != 0u)
     {
@@ -192,13 +251,51 @@ inline void mixInto(int16_t *out, size_t frames)
         if (!p.cmd.compare_exchange_weak(s, next, std::memory_order_acq_rel,
                                          std::memory_order_acquire))
             continue; // a restart raced us; mix from the fresh command
+        // TK47 probe: exactly one accounting pass per call (past the CAS).
+        // `left` only grows via startBurst, so a larger `left` than the
+        // last consume means a restart overwrote this burst mid-flight.
+        if (!p.probeActive || left > p.probeLastLeft)
+        {
+            if (p.probeActive && p.cur.consumed > 0u)
+                dumpBurstStats(p.cur, "restart", p.burstsDone + 1u);
+            p.cur = BurstStats{};
+            p.cur.path = (path && *path) ? path : "?";
+            p.probeActive = true;
+            ++p.burstsStarted;
+        }
+        p.probeLastLeft = left - static_cast<uint32_t>(n);
         const uint64_t off = (static_cast<uint64_t>(start) + (kBurstFrames - left)) %
                              p.song.frames;
         for (size_t i = 0; i < n; ++i)
         {
             const uint64_t f = (off + i) % p.song.frames;
-            out[2u * i] = satAdd(out[2u * i], p.song.pcm[2u * f]);
-            out[2u * i + 1u] = satAdd(out[2u * i + 1u], p.song.pcm[2u * f + 1u]);
+            for (int c = 0; c < 2; ++c)
+            {
+                const size_t k = 2u * i + static_cast<size_t>(c);
+                const int16_t song = p.song.pcm[2u * f + static_cast<size_t>(c)];
+                const int before = static_cast<int>(out[k]);
+                const int v = before + static_cast<int>(song);
+                const int aSong = song < 0 ? -(int)song : (int)song;
+                const int aBefore = before < 0 ? -before : before;
+                if (aSong > p.cur.songPeak)
+                    p.cur.songPeak = aSong;
+                if (aBefore > p.cur.busBefore)
+                    p.cur.busBefore = aBefore;
+                if (v > 32767 || v < -32768)
+                    ++p.cur.sat;
+                out[k] = satAdd(out[k], song);
+                const int aAfter = out[k] < 0 ? -(int)out[k] : (int)out[k];
+                if (aAfter > p.cur.busAfter)
+                    p.cur.busAfter = aAfter;
+            }
+        }
+        p.cur.consumed += n;
+        if (p.probeLastLeft == 0u)
+        {
+            p.last = p.cur;
+            ++p.burstsDone;
+            dumpBurstStats(p.cur, "done", p.burstsDone);
+            p.probeActive = false;
         }
         return;
     }

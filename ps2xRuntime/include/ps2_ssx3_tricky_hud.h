@@ -22,12 +22,10 @@
 // committed guest words and writes only the host presentation buffer.
 //
 // TK43c: TRICKY letters + fanfare flash (still output-only). Uber landings
-// are counted by a host-side CD tap (noteCdReadForUber, called from
-// ps2_e41_trace::noteCdRead): the speech engine opens an Arcade_Uber slot's
-// stream with a >=2-sector read at a fixed disc LBN, once per trigger. The
-// overlay lights one red letter per tap (T->R->I->C->K->Y); the 6th opens a
-// 64-tick all-red flash, then the letters reset (real Tricky past R is
-// unobserved; reset and say so). The red sprites are new atlas cells
+// were counted by a host-side CD tap (TK47: now the game's own 0x2133 post;
+// the overlay lights one red letter per post, T->R->I->C->K->Y); the 6th
+// opens a 64-tick all-red flash, then the letters reset (real Tricky past
+// R is unobserved; reset and say so). The red sprites are new atlas cells
 // (map1 red wordmark run, TK43a2 boxes); the atlas magic is TKHUD2.
 //
 // TK43e: the draw list is composeHudInto (region + origin), drawn by both
@@ -41,6 +39,11 @@
 // HUD race time [B+0xc] advances (GO..finish; frozen in pause, results,
 // menus and on the pre-race card). The uber tap moved to the CD serve path
 // (it never fired: noteCdRead's callers are trace-armed-gated).
+//
+// TK47: letters count the game's own uber post (0x2133 through 0x2B1458,
+// wrapped in ps2_runtime.cpp) instead of the deleted CD-LBN tap; a
+// post-boundary adopt window (restart or GO from a frozen 0) swallows the
+// guest's post-GO meter init writes (no spurious GO burst).
 
 #include <atomic>
 #include <cmath>
@@ -63,6 +66,13 @@ constexpr uint32_t kRaceClockOff = 0xcu;     // HUD race time (runs GO..finish; 
 // TK44: presents after a clock freeze before the meter hides. 2 is 120-safe:
 // at full120 the clock bumps 1x per 2 guest ticks, so grace 1 would flicker.
 constexpr uint64_t kRaceClockGraceTicks = 2u;
+// TK47: post-boundary adopt window (host ticks). The guest (re)initializes
+// meter words around race boundaries, and a same-session race can step
+// 0->full ~65 ticks after GO (gari peek: R stable, fill 0->0.9999 and
+// level 0->1 between 7450-7455 at GO+65). No legit top lands within 120
+// ticks of a boundary: the rider is at the gate and the meter starts
+// empty (race-1 reference: 0/0 at GO; earliest legit top GO+~2500).
+constexpr uint64_t kGoAdoptTicks = 120u;
 // TK43d chain root: [gp-0x848] (gp = 0x4a30f0, the ELF .reginfo ri_gp_value).
 constexpr uint32_t kChainRoot = 0x4a28a8u;
 constexpr uint32_t kChainAOff = 0x84u;       // game object (0x1298c8, func_28B1C8)
@@ -269,12 +279,17 @@ inline uint32_t resolveChainB(const uint8_t *ram, size_t ramSize)
 // overlay owns the state). Any change (forward bump, gate restart) proves a
 // live race; a freeze older than the grace hides (pause, results, menus,
 // pre-race card). Nothing shows until the first advance is seen.
+// TK47: a race boundary (backward jump, or an advance from a frozen 0 at
+// GO/countdown start) opens the adopt window through `adoptUntil`: while
+// `tick <= adoptUntil` the caller adopts the meter words instead of
+// edging, so post-GO init writes can't fire a spurious burst.
 struct RaceClock
 {
     bool init = false;
     bool seen = false;
     uint32_t last = 0u;
     uint64_t lastTick = 0u;
+    uint64_t adoptUntil = 0u;
 };
 
 inline bool updateRaceClock(RaceClock &st, uint32_t clock, uint64_t tick)
@@ -288,6 +303,9 @@ inline bool updateRaceClock(RaceClock &st, uint32_t clock, uint64_t tick)
     }
     if (clock != st.last)
     {
+        const bool frozen = (tick - st.lastTick) > kRaceClockGraceTicks;
+        if (clock < st.last || (st.last == 0u && frozen))
+            st.adoptUntil = tick + kGoAdoptTicks;
         st.last = clock;
         st.lastTick = tick;
         st.seen = true;
@@ -332,66 +350,49 @@ inline ForceValue parseForce(const char *s)
     return v;
 }
 
-// TK43c: Arcade_Uber stream-open tap. The speech engine opens a slot's
-// stream with a 1-sector staging read at the slot's first sector, then
-// 15-sector chunks from the next sector (TK43b A7 cdread: slot 2 @t12083
-// 0x614d9(1)+0x614da(15)...; slot 1 @t13398 0x6147c(1)+0x6147d(15)...;
-// B repeats both LBNs at t12141/t13398/t19424). The tap matches the
-// >=2-sector read at slot-start+1: slot 0's first sector (0x61416) is also
-// touched by neighboring Silence/Prompts streams, but its second sector
-// (0x61417) sits inside Arcade_Uber.dat and is read by no other stream.
-// LBNs computed off the pinned SSX 3 ISO (SPEECH.BIG LBN 393999 +
-// Arcade_Uber.dat member 8929152 + SCHl slot offsets); identical under the
-// TK43b alias composite (same-size, same layout). Slots 1-2 verified once
-// per trigger in A7+B; slot 0 is predicted (it has never fired in any
-// boot). Called from the CD serve path (Kernel/Stubs/CD.cpp) on every
-// served read; self-gated on PS2X_SSX3_TRICKY_HUD. TK44: it used to be
-// called from ps2_e41_trace::noteCdRead, whose call sites are gated on the
-// trace being armed, so no tap ever fired on a play build.
-inline constexpr uint32_t kUberTapLbn[3] = {0x61417u, 0x6147du, 0x614dau};
+// TK47: uber-post event counter. The game posts the uber speech event
+// (a2=0x2133, Arcade_Uber) through the speech-queue post function at
+// 0x2B1458, called only from func_2A3DE0 (jal at 0x2a3e68; the 0x2133
+// immediate exists nowhere else in the game). func_2A3DE0 itself has
+// exactly three callers (jal at 0x29b704/0x29b7b4/0x29b804 in
+// sub_0029B430/0029B738/0029B7E0: the uber-level transition and the
+// trick-bank handler), so every uber-post source converges on this one
+// call (ee-at/ee-xref citation in local/research/TK47/REPORT.md). The
+// runtime wraps 0x2B1458 (ps2_runtime.cpp, TK47; armed only when
+// PS2X_SSX3_TRICKY_HUD=1) and records the post when the event is 0x2133
+// and the post is accepted (v0 != 0, the game's own success test at
+// 0x2a3e70); Stock courses return early without recording. This replaces
+// the TK43c/TK44 CD-LBN tap (deleted: the game serves 0x61413/14/16 at a
+// top, never the table's 0x61417/7d/da, TK44 section 7; the LBN proxy was
+// the wrong contract anyway, TKA1 F9). One count per post = one letter
+// per uber (Brad: "one per any uber, like SSX 3").
+constexpr uint32_t kUberSpeechEvent = 0x2133u; // Arcade_Uber (TK43 section 2.2)
+constexpr uint32_t kSpeechPostFunc = 0x2b1458u;
 
-inline int slotForUberRead(uint32_t lbn, uint32_t sectors)
+inline bool isUberPost(uint32_t a2, uint32_t v0)
 {
-    if (sectors < 2u)
-        return -1;
-    for (int i = 0; i < 3; ++i)
-    {
-        if (lbn == kUberTapLbn[i])
-            return i;
-    }
-    return -1;
+    return a2 == kUberSpeechEvent && v0 != 0u;
 }
 
-struct UberTap
+struct UberPosts
 {
     std::atomic<uint64_t> count{0};
     std::atomic<uint64_t> tick{0};
-    std::atomic<int> slot{-1};
 };
 
-inline UberTap &uberTap()
+inline UberPosts &uberPosts()
 {
-    static UberTap t;
+    static UberPosts t;
     return t;
 }
 
-inline void noteCdReadForUber(uint32_t lbn, uint32_t sectors, uint64_t vsync)
+inline void noteUberPost(uint64_t vsync)
 {
-    static const bool wanted = [] {
-        const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD");
-        return env && env[0] == '1';
-    }();
-    if (!wanted)
-        return;
-    const int slot = slotForUberRead(lbn, sectors);
-    if (slot < 0)
-        return;
-    UberTap &t = uberTap();
+    UberPosts &t = uberPosts();
     const uint64_t n = t.count.fetch_add(1u, std::memory_order_relaxed) + 1u;
     t.tick.store(vsync, std::memory_order_relaxed);
-    t.slot.store(slot, std::memory_order_relaxed);
-    std::fprintf(stderr, "[ssx3-tricky-hud] uber #%llu slot=%d tick=%llu\n",
-                 static_cast<unsigned long long>(n), slot,
+    std::fprintf(stderr, "[ssx3-tricky-hud] uber #%llu tick=%llu\n",
+                 static_cast<unsigned long long>(n),
                  static_cast<unsigned long long>(vsync));
 }
 

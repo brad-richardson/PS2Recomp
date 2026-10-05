@@ -92,7 +92,14 @@ void register_ps2_ssx3_tricky_song_tests()
             p.song.ok = false;
             p.song.frames = 0u;
             p.song.pcm.clear();
-            p.resume = 0u; });
+            p.resume = 0u;
+            p.songPeak = 0;
+            p.cur = BurstStats{};
+            p.last = BurstStats{};
+            p.burstsDone = 0u;
+            p.burstsStarted = 0u;
+            p.probeLastLeft = 0u;
+            p.probeActive = false; });
         tc.Run("mix adds, saturates, wraps, idles to no-op", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_song;
@@ -128,5 +135,61 @@ void register_ps2_ssx3_tricky_song_tests()
             p.song.ok = false;
             p.song.frames = 0u;
             p.song.pcm.clear();
-            p.resume = 0u; });});
+            p.resume = 0u;
+            p.songPeak = 0;
+            p.cur = BurstStats{};
+            p.last = BurstStats{};
+            p.burstsDone = 0u;
+            p.burstsStarted = 0u;
+            p.probeLastLeft = 0u;
+            p.probeActive = false; });
+        tc.Run("probe counts consumes, peaks, saturations", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_song;
+            Player &p = player();
+            p.song.frames = 2u;
+            p.song.pcm = {1000, -2000, 3000, -4000};
+            p.song.ok = true;
+            p.cmd.store(0u, std::memory_order_relaxed);
+            p.resume = 0u;
+            p.songPeak = 0;
+            p.cur = BurstStats{};
+            p.last = BurstStats{};
+            p.burstsDone = 0u;
+            p.burstsStarted = 0u;
+            p.probeLastLeft = 0u;
+            p.probeActive = false;
+            startBurst(0u); // start=0, left=240000
+            int16_t out[4] = {100, 200, 30000, -30000};
+            mixInto(out, 2u, "stretch");
+            t.IsTrue(out[0] == 1100 && out[1] == -1800, "mix unchanged");
+            t.IsTrue(out[2] == 32767 && out[3] == -32768, "mix saturates");
+            t.IsTrue(p.cur.consumed == 2u, "consumed counted");
+            t.IsTrue(p.cur.songPeak == 4000, "song peak");
+            t.IsTrue(p.cur.busBefore == 30000, "bus peak before");
+            t.IsTrue(p.cur.busAfter == 32768, "bus peak after");
+            t.IsTrue(p.cur.sat == 2u, "saturations counted");
+            t.IsTrue(std::strcmp(p.cur.path, "stretch") == 0, "path labelled");
+            t.IsTrue(p.burstsStarted == 1u && p.burstsDone == 0u, "partial burst open");
+            // kBurstFrames % 2 == 0, so start = (off + left) % 2: off=1.
+            p.cmd.store((0ull << 32) | 1u, std::memory_order_relaxed);
+            int16_t one[2] = {0, 0};
+            mixInto(one, 1u, "stretch");
+            t.IsTrue(one[0] == 3000 && one[1] == -4000, "frame 1");
+            t.IsTrue(p.burstsDone == 1u, "completion counted");
+            t.IsTrue(p.last.consumed == 3u, "total consumed");
+            t.IsTrue(p.last.songPeak == 4000 && p.last.sat == 2u, "snapshot kept");
+            t.IsTrue(!p.probeActive, "burst closed");
+            p.cmd.store(0u, std::memory_order_relaxed);
+            p.song.ok = false;
+            p.song.frames = 0u;
+            p.song.pcm.clear();
+            p.resume = 0u;
+            p.songPeak = 0;
+            p.cur = BurstStats{};
+            p.last = BurstStats{};
+            p.burstsDone = 0u;
+            p.burstsStarted = 0u;
+            p.probeLastLeft = 0u;
+            p.probeActive = false; });});
 }
