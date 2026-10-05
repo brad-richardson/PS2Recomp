@@ -282,20 +282,24 @@ MiniTest::Case("Ps2Ssx3TrickyGemsGuards", [](TestCase &tc)
                 st.scanDone = true;
                 st.resolved[0][0] = kInst0;
                 st.nres[0] = 1u;
-                // 0x23 (lab alive): hides.
+                // 0x23 (lab alive): hides. (Three polls: seed, prev, cross.)
                 ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1000, kR, true);
-                fakeRace(ram, 1050, 0, 0, 101);
+                fakeRace(ram, 950, 0, 0, 101);
                 ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1001, kR, true);
+                fakeRace(ram, 1050, 0, 0, 102);
+                ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1002, kR, true);
                 t.IsTrue((r32(ram, kInst0 + 8u) & 0xffu) == 0x05u, "0x23 hides");
                 // Unknown low 0x13: refused (byte untouched), mult still tracks.
                 w32(ram, kInst0 + 8u, 0x00010013u);
                 st.collected[0] = 0u;
                 st.prevValid = false;
-                fakeRace(ram, 850, 0, 0, 102);
-                ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1002, kR, true);
-                fakeRace(ram, 1050, 0, 0, 103);
-                wf(ram, kT + 0x1c4u, 1.0f);
+                fakeRace(ram, 850, 0, 0, 103);
                 ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1003, kR, true);
+                fakeRace(ram, 880, 0, 0, 104); // still outside (880+100=980<1000)
+                ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1004, kR, true);
+                fakeRace(ram, 1050, 0, 0, 105);
+                wf(ram, kT + 0x1c4u, 1.0f);
+                ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1005, kR, true);
                 t.IsTrue((r32(ram, kInst0 + 8u) & 0xffu) == 0x13u, "0x13 refused");
                 t.IsTrue(rf(ram, kT + 0x1c4u) == 2.0f, "mult tracks despite refuse");
             }
