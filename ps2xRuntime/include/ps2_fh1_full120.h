@@ -235,8 +235,6 @@ inline bool fh28PoolOverride(uint32_t address, uint64_t mainMask) noexcept
         return true; // spawn: the 0x2e1520 caller's dt (fx halves it)
     if ((mainMask & kFixC2Cap) != 0u && address == 0x49c5fcu)
         return true; // c2cap: the C2 ramp rate (camera halves it)
-    if ((mainMask & kFixPid) != 0u && (address == 0x49c624u || address == 0x49c628u))
-        return true; // pid: the heading span/base (camera sqrt-converts them)
     return false;
 }
 
@@ -1388,23 +1386,17 @@ inline uint32_t jcamRetainCorrect(uint32_t offBits, uint32_t dBits) noexcept
     return out;
 }
 
-// ---- FH28 pid group: camera heading PID at stock cadence --------------------
-// 0x162c78 (a0 = shot; seven jal sites, return unused at all of them) runs
-// the heading PID recurrence (histories shot+0x340/+0x354/+0x368, index
-// +0x37c) and the heading compose. At 120 the history turned over twice per
-// stock tick with ~1.9x the response (FXT1 T3); a gain tweak is not
-// established (FXA1 U3), so the whole call is serviced on even updates only
-// (class d, like trick/particles/flare). The compose's fourth-root path then
-// also steps once per pair, so pid restores its stock constants (the
-// camera-halved heading span/base, via fh28PoolOverride) instead of the
-// sqrt-converted pair.
-inline constexpr uint32_t kPidUpdate = 0x162c78u;
+// ---- FH28 pid group: INERT (reserved bit, no behavior) ------------------------
+// The camera heading PID 0x162c78 (FXT1 T3) cannot be converted as
+// prescribed: skipping or holding any part of its state (calls, heading,
+// histories) collapses the entry gate's delta-like input ([s1+0x44] >
+// 27.78), the gate fails, and the recurrence latches off within ~2 updates
+// mid-race, not just at the transition (FH28 V3/V3c/V3d/V3g; Test-F
+// neutered-hook control runs normally). The kFixPid bit still parses (so
+// FIX lists naming pid stay valid) but installs no hook and overrides no
+// pool word. A future lane needs an entry-gate-aware redesign, not a
+// cadence hold. See local/research/FH28/REPORT.md.
 
-inline bool pidFix() noexcept
-{
-    static const bool on = enabled() && (fixMask() & kFixPid) != 0u;
-    return on;
-}
 
 // ---- FH28 c2cap group: C2 blend counter at stock cadence --------------------
 // 0x162998 (a0 = shot, a1 = param; six jal sites, return unused at all of
@@ -2392,7 +2384,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, pid, c2cap;
+        particles, flare, jcam, c2cap;
     bool src, fh9, lab, draw, tap;
 };
 
@@ -2412,9 +2404,8 @@ inline const BranchFlags &branchFlags() noexcept
         r.particles = particlesFix();
         r.flare = flareFix();
         r.jcam = jcamFix();
-        r.pid = pidFix();
         r.c2cap = c2capFix();
-        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap;
+        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.c2cap;
         r.bonus = bonusFix();
         r.lift = liftFix();
         r.flags = flagsFix();
@@ -2537,7 +2528,7 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addSrc(kSessionCallSite);
         addTgt(kSession);
     }
-    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixPid | kFixC2Cap)) != 0u && on) ||
+    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixC2Cap)) != 0u && on) ||
                         ((c.fix12 & (kFix12Particles | kFix12Flare)) != 0u && on);
     if (parity)
         addSrc(kAppUpdateSite); // parityHook counts app-update dispatches
@@ -2559,8 +2550,7 @@ inline HookInterest buildHookInterest(const HookConfig &c)
     }
     if ((c.main & kFixJcam) != 0u && on)
         addTgt(kJcamJump); // FH28: countdown pre-hook + retention post-hook (any source)
-    if ((c.main & kFixPid) != 0u && on)
-        addTgt(kPidUpdate); // FH28: odd-update skip (any source)
+    // FH28 pid installs no hook (inert bit, see above).
     if ((c.main & kFixC2Cap) != 0u && on)
         addTgt(kC2Update); // FH28: odd-update skip (any source)
     if ((c.main & kFixAiGate) != 0u && on)
@@ -2753,7 +2743,7 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         launchPreHook(ram, ctx, targetPc);
     bool skip = on && flag(&BranchFlags::session, sessionFix) && sessionSkip(sourcePc, targetPc);
     if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix() || particlesFix() || flareFix() || jcamFix() ||
-                                    pidFix() || c2capFix())))
+                                    c2capFix())))
         parityHook(ram, sourcePc);
     if (on && flag(&BranchFlags::rng, rngFix))
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
@@ -2769,8 +2759,6 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = true;
     if (on && flag(&BranchFlags::jcam, jcamFix))
         jcamPreHook(ram, ctx, targetPc);
-    if (on && flag(&BranchFlags::pid, pidFix) && g_rngOdd && targetPc == kPidUpdate)
-        skip = true;
     if (on && flag(&BranchFlags::c2cap, c2capFix) && g_rngOdd && targetPc == kC2Update)
         skip = true;
     if (on && flag(&BranchFlags::bonus, bonusFix))

@@ -36,9 +36,8 @@ void register_ps2_fh1_fh28_tests()
             t.IsFalse(fh28PoolOverride(0x49f628u, kFixAll), "spawn word needs spawn");
             t.IsTrue(fh28PoolOverride(0x49c5fcu, static_cast<uint64_t>(kFixC2Cap)), "c2cap word");
             t.IsFalse(fh28PoolOverride(0x49c5fcu, kFixAll), "c2cap word needs c2cap");
-            t.IsTrue(fh28PoolOverride(0x49c624u, static_cast<uint64_t>(kFixPid)), "pid span");
-            t.IsTrue(fh28PoolOverride(0x49c628u, static_cast<uint64_t>(kFixPid)), "pid base");
-            t.IsFalse(fh28PoolOverride(0x49c624u, kFixAll), "pid span needs pid");
+            t.IsFalse(fh28PoolOverride(0x49c624u, all28), "pid span stays patched");
+            t.IsFalse(fh28PoolOverride(0x49c628u, all28), "pid base stays patched");
             // Nothing else is overridden, even with every FH28 bit on.
             t.IsFalse(fh28PoolOverride(0x49c650u, all28), "unpatched jump clock untouched");
             t.IsFalse(fh28PoolOverride(0x49bb04u, all28), "pose word untouched");
@@ -88,18 +87,16 @@ void register_ps2_fh1_fh28_tests()
             c.main = kFixAll;
             c.guestActive = true;
             t.IsFalse(hookTableHit(buildHookInterest(c), 0x000001u, 0x1635f8u), "jcam out of all");
-            t.IsFalse(hookTableHit(buildHookInterest(c), 0x000001u, 0x162c78u), "pid out of all");
             t.IsFalse(hookTableHit(buildHookInterest(c), 0x000001u, 0x162998u), "c2cap out of all");
             c.main |= static_cast<uint64_t>(kFixJcam | kFixPose | kFixPid | kFixC2Cap | kFixSpawn);
             const HookInterest hi = buildHookInterest(c);
             t.IsTrue(hookTableHit(hi, 0x000001u, 0x1635f8u), "jcam tgt hits");
-            t.IsTrue(hookTableHit(hi, 0x000001u, 0x162c78u), "pid tgt hits");
+            t.IsFalse(hookTableHit(hi, 0x000001u, 0x162c78u), "pid installs no hook (inert)");
             t.IsTrue(hookTableHit(hi, 0x000001u, 0x162998u), "c2cap tgt hits");
             t.IsTrue(hookTableHit(hi, 0x3171b4u, 0x000001u), "parity src hits");
             c.guestActive = false;
             const HookInterest idle = buildHookInterest(c);
             t.IsFalse(hookTableHit(idle, 0x000001u, 0x1635f8u), "jcam out while inactive");
-            t.IsFalse(hookTableHit(idle, 0x000001u, 0x162c78u), "pid out while inactive");
             t.IsFalse(hookTableHit(idle, 0x000001u, 0x162998u), "c2cap out while inactive");
         });
     });
