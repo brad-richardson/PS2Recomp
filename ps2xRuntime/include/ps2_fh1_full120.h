@@ -225,6 +225,21 @@ struct Word
 
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive);
 
+// FH28: an opt-in stock-cadence group restores the stock pool word on its own
+// path (the owning group's halving would otherwise double-convert a step that
+// now lands once per pair). True = drop this address from the word list, so
+// it keeps its stock value in both flip directions. Pure (unit-tested).
+inline bool fh28PoolOverride(uint32_t address, uint64_t mainMask) noexcept
+{
+    if ((mainMask & kFixSpawn) != 0u && address == 0x49f628u)
+        return true; // spawn: the 0x2e1520 caller's dt (fx halves it)
+    if ((mainMask & kFixC2Cap) != 0u && address == 0x49c5fcu)
+        return true; // c2cap: the C2 ramp rate (camera halves it)
+    if ((mainMask & kFixPid) != 0u && (address == 0x49c624u || address == 0x49c628u))
+        return true; // pid: the heading span/base (camera sqrt-converts them)
+    return false;
+}
+
 // Manager rate/dt plus TS1's single-coherent word table (TS1 REPORT G0,
 // ps2_ts1_mode.h @ ts1 420c34a), minus TS1's multiplier: here the doubled
 // VBlank supplies the second update. Every word is verified before any write.
@@ -254,7 +269,7 @@ inline void patchAtManagerInit(uint8_t *ram)
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
 {
-    const std::array<Word, 114> words = {{
+    const std::array<Word, 122> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -471,13 +486,27 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         // reader in the whole codegen is 0x1ebf70 (class b, single reader -> halve). KD lab: stock
         // +0.0208333/stock-tick, events +0.0416666 (ratio 2.000); halved: 1.000x (fh20-E21).
         {kFixHudfill, 0x49d9e4u, 0x3caaaaabu, 0x3c2aaaabu, "hudfill_1ebf70"},
+        // FH28 pose: the pose/lean control triples (current R+0x1fc, bound R+0x200, target R+0x204)
+        // slew toward the target by at most the bound per update in 0x1211f8 (no dt multiply), so
+        // at 120 the lean stepped twice per stock tick (FXT1 T2: -0.0667/wall-tick, clamp in half
+        // the time). The eight bound words below (all 1/30, each a single lwc1 reader, no writers)
+        // feed R+0x200 (and sibling triple bounds) from the rider-state setters; halving them is
+        // exact (a power-of-two scale) and totals one stock bound per pair (class b).
+        {kFixPose, 0x49bb04u, 0x3d088889u, kSixtieth, "pose_bound_1318a4"},
+        {kFixPose, 0x49bb08u, 0x3d088889u, kSixtieth, "pose_bound_131908"},
+        {kFixPose, 0x49bb0cu, 0x3d088889u, kSixtieth, "pose_bound_131940"},
+        {kFixPose, 0x49bb10u, 0x3d088889u, kSixtieth, "pose_bound_131968"},
+        {kFixPose, 0x49bb18u, 0x3d088889u, kSixtieth, "pose_bound_1319d8"},
+        {kFixPose, 0x49bb30u, 0x3d088889u, kSixtieth, "pose_bound_131b78"},
+        {kFixPose, 0x49b958u, 0x3d088889u, kSixtieth, "pose_bound_12e8e0"},
+        {kFixPose, 0x49b95cu, 0x3d088889u, kSixtieth, "pose_bound_12e998"},
     }};
     uint64_t mask = fixMask();
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
         mask |= kFixRamp;
     std::vector<Word> all;
     for (const Word &w : words)
-        if (w.fix == 0u || (mask & w.fix) != 0u)
+        if ((w.fix == 0u || (mask & w.fix) != 0u) && !fh28PoolOverride(w.address, mask))
             all.push_back(w);
     // FH12 words (own mask). recover: the wipeout state 0x12cb68 decays the recovery bar P+0x2c0+0x70 by
     // [0x49b914]/[0x49b918] (+-1/240, single readers 0x12cbc4/0x12cbdc) per update; a circle press adds
@@ -1318,6 +1347,88 @@ inline bool rngHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t
     return false;
 }
 
+// ---- FH28 jcam group: jump-camera countdown + landing retention -------------
+// 0x1635f8 (a0 = shot, a1 = scratch; six jal sites, all a0 = s0) runs the
+// jump countdown n (shot+0x2c4, set to 15 at 0x162b30, decremented at
+// 0x1636b8-0x1636c0 whenever [a1+0x60] != 0 and [a0+0x2d0] == 0) and the
+// landing-offset retention (offsets +0x20c/+0x210/+0x21c/+0x220 times the
+// runtime d in shot+0x224 at 0x163fa0-0x163fd0, gated on [shot+0x2e4]).
+// At 120 n fell twice per stock tick and the retention squared per pair
+// (FXT1 T1a/T1b). The rest of the function (jump clocks from camera-halved
+// words, the compose) must keep running per update, so the fixes are
+// surgical, not a whole-call skip:
+// - countdown (class d): on odd updates, pre-increment n when the decrement
+//   block will run, so the pair nets one decrement. The n == 14 init block
+//   then evaluates twice per value (idempotent store); the handoff zeroing
+//   still fires once (blez skips at n <= 1).
+// - retention (class a): after the call, when the retention ran (the guest's
+//   own gate record [shot+0x2e4] != 0; there are no early returns, and no
+//   writer of +0x224 past the retention), divide the four offsets by
+//   sqrt(d): the multiply applied d, the pair should apply d, so each
+//   update corrects to sqrt(d) (pure (unit-tested) helper below).
+inline constexpr uint32_t kJcamJump = 0x1635f8u;
+inline constexpr uint32_t kJcamOffs[4] = {0x20cu, 0x210u, 0x21cu, 0x220u};
+
+inline bool jcamFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixJcam) != 0u;
+    return on;
+}
+
+inline uint32_t jcamRetainCorrect(uint32_t offBits, uint32_t dBits) noexcept
+{
+    float off = 0.0f, d = 0.0f;
+    std::memcpy(&off, &offBits, 4);
+    std::memcpy(&d, &dBits, 4);
+    if (!(d > 0.0f) || !(d < 2.0f))
+        return offBits; // non-positive or non-finite d: leave the guest value
+    float v = off / std::sqrt(d);
+    uint32_t out = 0u;
+    std::memcpy(&out, &v, 4);
+    return out;
+}
+
+// ---- FH28 pid group: camera heading PID at stock cadence --------------------
+// 0x162c78 (a0 = shot; seven jal sites, return unused at all of them) runs
+// the heading PID recurrence (histories shot+0x340/+0x354/+0x368, index
+// +0x37c) and the heading compose. At 120 the history turned over twice per
+// stock tick with ~1.9x the response (FXT1 T3); a gain tweak is not
+// established (FXA1 U3), so the whole call is serviced on even updates only
+// (class d, like trick/particles/flare). The compose's fourth-root path then
+// also steps once per pair, so pid restores its stock constants (the
+// camera-halved heading span/base, via fh28PoolOverride) instead of the
+// sqrt-converted pair.
+inline constexpr uint32_t kPidUpdate = 0x162c78u;
+
+inline bool pidFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixPid) != 0u;
+    return on;
+}
+
+// ---- FH28 c2cap group: C2 blend counter at stock cadence --------------------
+// 0x162998 (a0 = shot, a1 = param; six jal sites, return unused at all of
+// them) counts n in shot+0x2c0 toward the 820 cap and writes
+// max(0, 1-(n-120)*rate). Camera halves the rate word but not the counter,
+// so at 120 the onset came after 1 s and the fade stuck at 0.5 (FXT1 T6).
+// Serviced on even updates only (class d); c2cap restores the stock rate
+// (via fh28PoolOverride), so the onset lands at 2 s and the fade completes.
+inline constexpr uint32_t kC2Update = 0x162998u;
+
+inline bool c2capFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixC2Cap) != 0u;
+    return on;
+}
+
+// ---- FH28 spawn group: glint spawn substream at stock phase -----------------
+// No hook: pool-only (see fh28PoolOverride). The 0x2e1520 spawn caller pushes
+// trails with f12 = [0x49f628], which fx halves; rng then skips the odd
+// pushes, so the spawn phase ran at ~0.25x (FXT1 T4). With the stock word the
+// accumulator crosses twice per pair, the odd pushes are still skipped, and
+// each accepted push carries the stock phase: stock count at stock phase.
+// (Requires rng, like loops2 requires loops.)
+
 // ---- FH13 rclock: the render-frame clock at stock cadence -------------------
 // The render device ([gp+0x2a90], vtable [+0x10d8]) counts rendered frames at
 // +0x5a74 (++ at 0x382b30, once per render) and hands it out only through the
@@ -1822,7 +1933,7 @@ inline bool flagsFix() noexcept
 struct PostCall
 {
     uint32_t target = 0u, sp = 0u, obj = 0u;
-    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27)
+    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27), 5 jcam retention (FH28)
     uint32_t saved[6] = {};
 };
 inline PostCall g_post;
@@ -1844,6 +1955,45 @@ inline void flagsPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 
 inline void fh12OnReturn(uint8_t *ram);
 
+// FH28 jcam pre/post hooks (here: they arm/consume the post-call record).
+inline void jcamPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
+{
+    if (targetPc != kJcamJump || !ctx)
+        return;
+    const uint32_t shot = getRegU32(ctx, 4);
+    if (g_rngOdd)
+    {
+        const uint32_t scratch = getRegU32(ctx, 5);
+        uint32_t flag = 0u, skip = 0u, n = 0u;
+        if (rd32(ram, scratch + 0x60u, flag) && flag != 0u &&
+            rd32(ram, shot + 0x2d0u, skip) && skip == 0u &&
+            rd32(ram, shot + 0x2c4u, n))
+            wr32(ram, shot + 0x2c4u, n + 1u);
+    }
+    g_post.target = targetPc;
+    g_post.sp = getRegU32(ctx, 29);
+    g_post.obj = shot;
+    g_post.kind = 5u;
+    g_postArmed = true;
+}
+
+inline void jcamOnReturn(uint8_t *ram)
+{
+    const uint32_t shot = g_post.obj;
+    uint32_t gate = 0u, dBits = 0u;
+    if (!rd32(ram, shot + 0x2e4u, gate) || gate == 0u)
+        return;
+    if (!rd32(ram, shot + 0x224u, dBits))
+        return;
+    for (uint32_t o : kJcamOffs)
+    {
+        uint32_t bits = 0u;
+        if (!rd32(ram, shot + o, bits))
+            continue;
+        wr32(ram, shot + o, jcamRetainCorrect(bits, dBits));
+    }
+}
+
 inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned)
 {
     if (targetPc != g_post.target || !ctx || getRegU32(ctx, 29) != g_post.sp)
@@ -1851,6 +2001,11 @@ inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool re
     g_postArmed = false;
     if (!returned)
         return;
+    if (g_post.kind == 5u)
+    {
+        jcamOnReturn(ram);
+        return;
+    }
     if (g_post.kind != 0u)
     {
         fh12OnReturn(ram);
@@ -2237,7 +2392,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare;
+        particles, flare, jcam, pid, c2cap;
     bool src, fh9, lab, draw, tap;
 };
 
@@ -2256,7 +2411,10 @@ inline const BranchFlags &branchFlags() noexcept
         r.aiGate = aiGateFix();
         r.particles = particlesFix();
         r.flare = flareFix();
-        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare;
+        r.jcam = jcamFix();
+        r.pid = pidFix();
+        r.c2cap = c2capFix();
+        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap;
         r.bonus = bonusFix();
         r.lift = liftFix();
         r.flags = flagsFix();
@@ -2379,7 +2537,7 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addSrc(kSessionCallSite);
         addTgt(kSession);
     }
-    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate)) != 0u && on) ||
+    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixPid | kFixC2Cap)) != 0u && on) ||
                         ((c.fix12 & (kFix12Particles | kFix12Flare)) != 0u && on);
     if (parity)
         addSrc(kAppUpdateSite); // parityHook counts app-update dispatches
@@ -2399,6 +2557,12 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addSrc(kComboSite);
         addTgt(kComboAccrue);
     }
+    if ((c.main & kFixJcam) != 0u && on)
+        addTgt(kJcamJump); // FH28: countdown pre-hook + retention post-hook (any source)
+    if ((c.main & kFixPid) != 0u && on)
+        addTgt(kPidUpdate); // FH28: odd-update skip (any source)
+    if ((c.main & kFixC2Cap) != 0u && on)
+        addTgt(kC2Update); // FH28: odd-update skip (any source)
     if ((c.main & kFixAiGate) != 0u && on)
     {
         // aiGateHook: odd-update answers of the race-tick read at 4 sites.
@@ -2588,7 +2752,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     if (on && flag(&BranchFlags::launch, launchFix))
         launchPreHook(ram, ctx, targetPc);
     bool skip = on && flag(&BranchFlags::session, sessionFix) && sessionSkip(sourcePc, targetPc);
-    if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix() || particlesFix() || flareFix())))
+    if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix() || particlesFix() || flareFix() || jcamFix() ||
+                                    pidFix() || c2capFix())))
         parityHook(ram, sourcePc);
     if (on && flag(&BranchFlags::rng, rngFix))
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
@@ -2601,6 +2766,12 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = true;
     if (on && flag(&BranchFlags::flare, flareFix) && g_rngOdd && sourcePc == kFlareProbeSite &&
         targetPc == kFlareProbeLoop)
+        skip = true;
+    if (on && flag(&BranchFlags::jcam, jcamFix))
+        jcamPreHook(ram, ctx, targetPc);
+    if (on && flag(&BranchFlags::pid, pidFix) && g_rngOdd && targetPc == kPidUpdate)
+        skip = true;
+    if (on && flag(&BranchFlags::c2cap, c2capFix) && g_rngOdd && targetPc == kC2Update)
         skip = true;
     if (on && flag(&BranchFlags::bonus, bonusFix))
         bonusHook(ram, ctx, sourcePc, targetPc);

@@ -68,6 +68,21 @@ void register_ps2_fh1_fix_tests()
             t.Equals(parseFix("all,flare,-flare").fh12, kFix12All, "opt-out");
         });
 
+        tc.Run("FH28 jcam/pose/pid/c2cap/spawn are opt-in", [](TestCase &t)
+        {
+            const uint64_t fh28 = static_cast<uint64_t>(kFixJcam | kFixPose | kFixPid | kFixC2Cap | kFixSpawn);
+            t.IsTrue((kFixAll & fh28) == 0u, "none in all");
+            const FixMasks f = parseFix("all,-ground,jcam,pose,pid,c2cap,spawn");
+            t.IsTrue(f.ok, "parses");
+            t.Equals(f.main, (kFixAll & ~static_cast<uint64_t>(kFixGround)) | fh28, "all minus ground plus fh28");
+            t.Equals(f.fh12, kFix12All, "fh12 untouched");
+            t.Equals(parseFix("jcam").main, static_cast<uint64_t>(kFixJcam), "jcam alone");
+            t.Equals(parseFix("pose").main, static_cast<uint64_t>(kFixPose), "pose alone");
+            t.Equals(parseFix("pid").main, static_cast<uint64_t>(kFixPid), "pid alone");
+            t.Equals(parseFix("c2cap").main, static_cast<uint64_t>(kFixC2Cap), "c2cap alone");
+            t.Equals(parseFix("spawn").main, static_cast<uint64_t>(kFixSpawn), "spawn alone");
+        });
+
         tc.Run("unknown items refuse", [](TestCase &t)
         {
             const FixMasks f = parseFix("all,stik2");

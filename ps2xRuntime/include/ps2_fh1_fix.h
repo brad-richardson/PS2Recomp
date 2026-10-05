@@ -52,6 +52,12 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixClockSign = 1ull << 35, // with clock: the 0x1e1458 stamp's exit restamp keeps the signed elapsed (FCR1 3)
     // FH27 (in "all" since DEF1, Brad 10-03 "yes make them defaults"; "all,-bonusflip" opts out):
     kFixBonusFlip = 1ull << 36, // with bonus: a live trick-bonus rate +0x3c is rescaled at each events flip (FCR1 4)
+    // FH28 (opt-in, not in "all"; Brad's feel test decides defaults):
+    kFixJcam = 1ull << 37, // jump camera 0x1635f8: countdown n (shot+0x2c4) at stock cadence, landing-offset retention d -> sqrt(d) per update (class d/a, FXT1 T1)
+    kFixPose = 1ull << 38, // pose/lean triple slew bounds (R+0x200 writers): 1/30 -> 1/60 per update (class b, FXT1 T2)
+    kFixPid = 1ull << 39,  // camera heading PID 0x162c78 at stock cadence, heading base/span back to stock (class d, FXT1 T3)
+    kFixC2Cap = 1ull << 40, // C2 blend counter 0x162998 at stock cadence, ramp rate back to stock (class d, FXT1 T6)
+    kFixSpawn = 1ull << 41, // glint spawn substream: stock dt for the 0x2e1520 caller's word (class h, FXT1 T4)
 };
 
 // FH12 groups live in their own mask (the main mask's bits are taken). Same
@@ -138,6 +144,11 @@ inline uint64_t fixItem(const std::string &item) noexcept
     if (item == "stick2") return kFixStick2;
     if (item == "clocksign") return kFixClockSign;
     if (item == "bonusflip") return kFixBonusFlip;
+    if (item == "jcam") return kFixJcam;
+    if (item == "pose") return kFixPose;
+    if (item == "pid") return kFixPid;
+    if (item == "c2cap") return kFixC2Cap;
+    if (item == "spawn") return kFixSpawn;
     return 0u;
 }
 
