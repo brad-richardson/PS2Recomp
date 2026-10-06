@@ -68,7 +68,7 @@ public final class RunnerApplication extends Application {
                 return;
             }
             String hash = hex(MessageDigest.getInstance("SHA-256").digest(manifest));
-            File root = new File(getFilesDir(), "app-pack").getAbsoluteFile();
+            File root = new File(getFilesDir().getCanonicalFile(), "app-pack");
             if (!root.equals(root.getCanonicalFile()))
                 throw new IOException("Pack root symlink: " + root);
             File pack = new File(root, hash);
