@@ -1345,6 +1345,36 @@ inline bool rngHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t
     return false;
 }
 
+// ---- FH30 envfilt: fixed-target environment response (opt-in, class a) ------
+// Caller 0x2c096c negates target[0] into f12; the live value is +0.08.
+// 0x2bcf54/5c square f12, then 0x2bcf7c..0x2bd03c implement six
+// y' = (1-f12^2)*y + f12^2*target filters and copy their targets unchanged.
+// Two half updates must retain 1-f12^2, hence f120^2 = 1-sqrt(1-f12^2).
+// Rationalize to avoid cancellation for small f12. Only this caller is
+// converted: 0x2c08cc's -1 and 0x2c093c's +1 initialize/copy immediately;
+// 0x2c0990 supplies a different interpolation parameter. No calls are skipped.
+inline constexpr uint32_t kEnvFiltUpdate = 0x2bcf38u;
+inline constexpr uint32_t kEnvFiltSite = 0x2c096cu;
+
+inline float envFiltHalfInput(float f) noexcept
+{
+    if (!(f > 0.0f && f < 1.0f))
+        return f;
+    const double x = f;
+    return static_cast<float>(x / std::sqrt(1.0 + std::sqrt(1.0 - x * x)));
+}
+
+inline bool envFiltFix() noexcept
+{
+    return (fixMask() & kFixEnvFilt) != 0u;
+}
+
+inline void envFiltPreHook(R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc) noexcept
+{
+    if (ctx && sourcePc == kEnvFiltSite && targetPc == kEnvFiltUpdate)
+        ctx->f[12] = envFiltHalfInput(ctx->f[12]);
+}
+
 // ---- FH28 jcam group: jump-camera countdown + landing retention -------------
 // 0x1635f8 (a0 = shot, a1 = scratch; six jal sites, all a0 = s0) runs the
 // jump countdown n (shot+0x2c4, set to 15 at 0x162b30, decremented at
@@ -2453,7 +2483,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, pid, c2cap;
+        particles, flare, jcam, pid, c2cap, envFilt;
     bool src, fh9, lab, draw, tap;
 };
 
@@ -2474,6 +2504,7 @@ inline const BranchFlags &branchFlags() noexcept
         r.flare = flareFix();
         r.jcam = jcamFix();
         r.pid = pidFix();
+        r.envFilt = envFiltFix();
         r.c2cap = c2capFix();
         r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap;
         r.bonus = bonusFix();
@@ -2620,6 +2651,8 @@ inline HookInterest buildHookInterest(const HookConfig &c)
     }
     if ((c.main & kFixJcam) != 0u && on)
         addTgt(kJcamJump); // FH28: countdown pre-hook + retention post-hook (any source)
+    if ((c.main & kFixEnvFilt) != 0u && on)
+        addTgt(kEnvFiltUpdate); // FH30: conversion only at kEnvFiltSite
     if ((c.main & kFixPid) != 0u && on)
         addTgt(kPidUpdate); // FH29: second-update hold + rollback (any source)
     if ((c.main & kFixC2Cap) != 0u && on)
@@ -2830,6 +2863,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = true;
     if (on && flag(&BranchFlags::jcam, jcamFix))
         jcamPreHook(ram, ctx, targetPc);
+    if (on && flag(&BranchFlags::envFilt, envFiltFix))
+        envFiltPreHook(ctx, sourcePc, targetPc);
     if (on && flag(&BranchFlags::pid, pidFix))
         pidPreHook(ram, ctx, targetPc);
     if (on && flag(&BranchFlags::c2cap, c2capFix) && g_rngOdd && targetPc == kC2Update)
