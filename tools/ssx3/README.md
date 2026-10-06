@@ -106,13 +106,24 @@ PGO is optional; no profile is bundled or fetched.
 
 [iOS base preset](presets/ios.env) and [full120 layer](presets/full120-ios.env)
 export settings without a personal host/card path or automatic pad route.
-They require your own game inputs and offline VU1 stage. iOS has no JIT VU1;
+They require your own game inputs and offline VU1 stage. The handwritten
+[offline host machinery](offline-core/README.md) is included as source,
+separate from the external recorded assembly/tables. iOS has no JIT VU1;
 its OM1 assembly/tables are local game-derived outputs. The complete portable
 recording/generation and app-signing recipe remains incomplete; consult the
-[build inventory](../../docs/ssx3-build.md). Shader prewarm lists are optional
-24-byte host pipeline selector tuples (PS/VS/extras, no texture or guest code),
-not a reason to fetch another user's recordings. Their public source lives in
-the pinned ARMSX2 Metal renderer.
+[build inventory](../../docs/ssx3-build.md). Shader prewarm lists are optional 24-byte host pipeline selector tuples
+(PS/VS/extras, no texture, asset identifier, instruction or guest memory).
+[tfx-selectors.json](tfx-selectors.json) contains 247 shader configurations;
+write them to your private build directory with:
+
+```sh
+python3 tools/ssx3/write_prewarm.py /path/to/private-build/tfx-prewarm.bin
+```
+
+Set `GE1_TFX_PREWARM` to that writable file if desired. The renderer appends
+new host selector tuples while running. The format is defined by
+`PipelineSelectorMTL` in the pinned public ARMSX2 Metal renderer; this list
+is configuration, separate from the forbidden offline VU recordings.
 
 No ISO, ELF, BIOS, generated EE/VU source, offline recording, texture/font pack,
 converted course/audio, memory card, capture, PGO profile or compiled app is
