@@ -45,6 +45,8 @@ GE1_API float ge1_gs_back_ms(void);
 // PW1: flush the Vulkan pipeline cache and persist newly recorded TFX selectors now.
 // For a future app pause/stop hook; the periodic ge1_gs_vsync path covers force-stop.
 GE1_API int ge1_gs_flush_caches(void);
+// PCF1: GS-thread policy setter; explicit app-pause flush still overrides it.
+GE1_API void ge1_gs_set_cache_flush_deferred(int deferred);
 // DS1: quick-save support. Thin wrappers over GSfreeze (the GS runs
 // single-threaded, GSVSyncMode::Disabled, so the caller owns the renderer).
 // freeze_size returns the blob bytes (>0) or 0 when closed/failed;

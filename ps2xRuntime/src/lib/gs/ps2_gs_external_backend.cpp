@@ -81,6 +81,7 @@ struct Ge1Api
 #endif
     // BG1: optional (pre-PW1 libraries lack it; a missing symbol only skips the pause flush).
     decltype(&ge1_gs_flush_caches) flushCaches = nullptr;
+    decltype(&ge1_gs_set_cache_flush_deferred) deferCacheFlush = nullptr;
     // LT1b: optional probe quartet (pre-LT1b libraries lack it; lagF then reads
     // synchronously at the set).
     decltype(&ge1_gs_probe_request) probeRequest = nullptr;
@@ -119,6 +120,7 @@ struct Ge1Api
             gpuMs = ::ge1_gs_gpu_ms;
             backMs = ::ge1_gs_back_ms; // PT2 Part 2: static bind (same ABI)
             flushCaches = ::ge1_gs_flush_caches; // BG1 fold: static bind (same ABI)
+            deferCacheFlush = ::ge1_gs_set_cache_flush_deferred;
             // IOSL1: static probe bind (LT1b quartet). iOS links GE1
             // statically, so lagF uses the linked symbols directly. Unlike
             // the dlsym path this needs the symbols at link time (the
@@ -168,6 +170,9 @@ struct Ge1Api
             reinterpret_cast<decltype(flushCaches)>(dlsym(library, "ge1_gs_flush_caches"));
         if (!flushCaches)
             std::fprintf(stderr, "[gs:external] GE1 library predates ge1_gs_flush_caches; pause flush off\n");
+        // PCF1: optional for older GE1 libraries (their periodic policy is unchanged).
+        deferCacheFlush = reinterpret_cast<decltype(deferCacheFlush)>(
+            dlsym(library, "ge1_gs_set_cache_flush_deferred"));
         // DS1: optional freeze trio (see above); never fails the load.
         freezeSize = reinterpret_cast<decltype(freezeSize)>(dlsym(library, "ge1_gs_freeze_size"));
         freezeSave = reinterpret_cast<decltype(freezeSave)>(dlsym(library, "ge1_gs_freeze_save"));
@@ -899,6 +904,12 @@ public:
             rc = m_ge1.flushCaches();
         std::fprintf(stderr, "[gs:external] BG1 pause flush rc=%d tick=%llu\n", rc, tickNow());
         log("# bg1-flush rc=%d tick=%llu\n", rc, tickNow());
+    }
+
+    void SetCacheFlushDeferred(bool deferred) override
+    {
+        if (m_ge1Active && m_ge1.deferCacheFlush)
+            m_ge1.deferCacheFlush(deferred ? 1 : 0);
     }
 
     void GuestVsync(uint64_t tick, uint32_t field) override

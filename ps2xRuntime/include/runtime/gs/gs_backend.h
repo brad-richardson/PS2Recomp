@@ -68,6 +68,8 @@ public:
     // FIELD bit (0/1); a PCSX2 adapter maps it to GSvsync's convention
     // (FIELD ? 0 : 1) at its own boundary. Defaults: opted out, no-op.
     virtual bool WantsGuestVsync() const { return false; }
+    // PCF1: host-only persistence policy, delivered before the matching VSync.
+    virtual void SetCacheFlushDeferred(bool deferred) { (void)deferred; }
     virtual void GuestVsync(uint64_t tick, uint32_t field)
     {
         (void)tick;

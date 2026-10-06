@@ -572,6 +572,7 @@ void GS::executeQueuedCommand(GsCommand &cmd)
     case GsCmdKind::GuestVsync:
         if (m_backend)
         {
+            m_backend->SetCacheFlushDeferred(cmd.u32b != 0);
             m_backend->GuestVsync(cmd.regValue, cmd.u32a);
             if (ps2_rb1_reverseDmaMode() == 4)
                 lagfOnGuestVsync(cmd.regValue); // LT1b: after GE1's VSync drain
@@ -2031,7 +2032,7 @@ void GS::privWrite(std::function<void()> apply)
     }
 }
 
-void GS::noteGuestVsync(uint64_t tick)
+void GS::noteGuestVsync(uint64_t tick, bool deferCacheFlush)
 {
     if (!m_wantsGuestVsync.load(std::memory_order_acquire) || !m_backend)
         return;
@@ -2045,10 +2046,12 @@ void GS::noteGuestVsync(uint64_t tick)
         cmd.kind = GsCmdKind::GuestVsync;
         cmd.regValue = tick;
         cmd.u32a = field;
+        cmd.u32b = deferCacheFlush ? 1u : 0u;
         m_worker->enqueue(std::move(cmd));
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    m_backend->SetCacheFlushDeferred(deferCacheFlush);
     m_backend->GuestVsync(tick, field);
     if (ps2_rb1_reverseDmaMode() == 4)
         lagfOnGuestVsync(tick); // LT1b

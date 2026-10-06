@@ -43,6 +43,8 @@ bool s_open = false;
 std::FILE* s_stats = nullptr;
 std::uint64_t s_vsyncs = 0;
 std::uint64_t s_flush_every = 0;
+bool s_flush_deferred = false;
+bool s_flush_pending = false;
 std::string s_prewarm_path;
 std::chrono::steady_clock::time_point s_last_vsync{}; // SH1: stats CSV wall_us
 constexpr std::uint32_t kSelectorTakeBatch = 1024;
@@ -489,6 +491,7 @@ extern "C" GE1_API void ge1_gs_close(void)
     s_open = false;
     s_vsyncs = 0;
     s_flush_every = 0;
+    s_flush_deferred = s_flush_pending = false;
     s_prewarm_path.clear();
     s_last_vsync = {};
     s_pixels.clear();
@@ -546,11 +549,29 @@ extern "C" GE1_API int ge1_gs_vsync(uint32_t field, uint64_t csr, uint64_t smode
     std::uint64_t flush_us = 0;
     if (s_flush_every > 0 && (s_vsyncs % s_flush_every) == 0)
     {
+        if (s_flush_deferred && !s_flush_pending && s_stats)
+            std::fprintf(s_stats, "# PCF1 deferred vsync=%llu wall_us=%llu\n",
+                static_cast<unsigned long long>(s_vsyncs),
+                static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count()));
+        s_flush_pending = true;
+    }
+    // Consume once at the first menu/pause boundary, after GSvsync drains the back queue.
+    // No live Vulkan objects cross threads and no serialization runs in active events.
+    if (s_flush_pending && !s_flush_deferred)
+    {
         const auto t0 = std::chrono::steady_clock::now();
         GSFlushPipelineCache();
         persist_recorded_selectors();
         flush_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - t0).count());
+        s_flush_pending = false;
+        if (s_stats)
+            std::fprintf(s_stats, "# PCF1 flushed vsync=%llu wall_us=%llu flush_us=%llu\n",
+                static_cast<unsigned long long>(s_vsyncs),
+                static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count()),
+                static_cast<unsigned long long>(flush_us));
     }
     if (s_stats)
     {
@@ -714,12 +735,18 @@ extern "C" GE1_API float ge1_gs_back_ms(void)
     return s_open ? GSGetAndResetBackThreadMs() : -1.0f;
 }
 
+extern "C" GE1_API void ge1_gs_set_cache_flush_deferred(int deferred)
+{
+    s_flush_deferred = deferred != 0;
+}
+
 extern "C" GE1_API int ge1_gs_flush_caches(void)
 {
     if (!s_open)
         return 0;
     GSFlushPipelineCache();
     persist_recorded_selectors();
+    s_flush_pending = false;
     return 1;
 }
 
