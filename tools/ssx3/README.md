@@ -28,7 +28,7 @@ Run from this checkout (replace the paths):
 python3 tools/ssx3/build.py prepare --iso '/path/to/your/SSX 3 (USA).iso' --work /path/to/private-build
 python3 tools/ssx3/build.py mac-libs --work /path/to/private-build
 python3 tools/ssx3/build.py mac --work /path/to/private-build
-/path/to/private-build/runner-build/ps2xRuntime/ps2x_tests
+/path/to/private-build/runner-build/ps2xTest/ps2x_tests
 python3 tools/ssx3/build.py run --work /path/to/private-build
 ```
 
