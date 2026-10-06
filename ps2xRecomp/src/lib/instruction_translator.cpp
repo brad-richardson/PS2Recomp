@@ -70,7 +70,9 @@ namespace ps2recomp
 
     MemoryAccessHint InstructionTranslator::effectiveMemoryHintFor(const Instruction &inst, const MemoryAccessHint &memoryHint) const
     {
-        // TODO disable for now since it causing issues with some games.
+        // Preserve supplied memory hints; an instruction's MMIO annotation
+        // selects runtime Load/Store routing, not a replacement effective address.
+        // SSX3 staged migration: ssx3/local/research/CGR2/piece4/REPORT.md.
         return memoryHint;
     }
 
