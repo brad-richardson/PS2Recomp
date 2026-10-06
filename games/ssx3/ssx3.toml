@@ -223,6 +223,7 @@ extra_function_starts = [
   "0x00153258",
   "0x00155380",
   "0x001566E8",
+  "0x00198DA0", # Equip Gear comparison callback after sub_00198AF0 return (EQG1).
   "0x0026A068",
   "0x0026A0B8",
   "0x00284940",
