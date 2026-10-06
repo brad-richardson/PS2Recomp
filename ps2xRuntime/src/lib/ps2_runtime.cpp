@@ -366,6 +366,26 @@ namespace
     constexpr uint32_t kSsx3PatchCacheAlloc = 0x003747A0u;
     std::atomic<uint64_t> g_ssx3PatchCacheSkips{0u};
     std::atomic<uint64_t> g_ssx3PatchCacheSkips2{0u};
+    // TK54: the skip above is not "not drawn" on every caller path. In
+    // sub_0038B0F8 all four call sites store the returned slot (sh v0,
+    // 0xC(patch)) and, with slot < 0, skip only func_38C788 (DMA block
+    // build); they still call the per-frame chain append func_38CA70 (sites
+    // 0x38BF18/0x38BFA0/0x38C018: slot in a2, `lh 0xC(s0)`) or func_38CE20
+    // (site 0x38C0D0: slot in a1). Neither checks the slot: record -1 (12 B
+    // before the records) and DMA block -1 (0x100 B before [r+0x440+4*type])
+    // go into the frame's VIF1 chain as a CALL to stale bytes. TK54 (Aloha
+    // results, t13700-13790): every frame with a type-0 skip released only
+    // 10-46 of ~110 masked PATH3 scene uploads (the rest of the scene chain
+    // never ran: scenery drops to sky), the leftover uploads sat ahead of the
+    // results font upload, and the text then sampled a world texture in the
+    // shared streaming slot (TBP 11017). With the guard armed, a negative
+    // slot now skips those two calls too, so the patch is just not drawn for
+    // the frame, as TK15 intended. Their return values are unused (the
+    // loops continue). Stock never pops an empty stack, so a negative slot
+    // only exists after a guard skip.
+    constexpr uint32_t kSsx3PatchChainAppend = 0x0038CA70u;
+    constexpr uint32_t kSsx3PatchChainAppendCE = 0x0038CE20u;
+    std::atomic<uint64_t> g_ssx3PatchChainSkips{0u};
 
     // TK34: grow the type-1 cache (PS2X_SSX3_PATCH_CACHE_GROW=1, default
     // off; guest-affecting only once the stock 220 slots run out). Imported
@@ -554,15 +574,35 @@ namespace
         g = Ssx3PatchGrow{};
     }
 
-    bool ssx3PatchCacheGuard(uint8_t *rdram, R5900Context *ctx)
+    bool ssx3PatchCacheGuardOn()
     {
         static const bool on = [] {
             const char *e = std::getenv("PS2X_SSX3_PATCH_CACHE_GUARD");
             const bool v = e && e[0] == '1';
             if (v)
-                std::fprintf(stderr, "[ssx3-patch-guard] armed (0x3747A0 returns -1 when a slot/buffer stack it pops is empty)\n");
+                std::fprintf(stderr, "[ssx3-patch-guard] armed (0x3747A0 returns -1 when a slot/buffer stack it pops is empty; "
+                                     "0x38CA70/0x38CE20 skip a negative slot)\n");
             return v;
         }();
+        return on;
+    }
+
+    bool ssx3PatchChainGuard(R5900Context *ctx, uint32_t targetPc)
+    {
+        if (!ctx || !ssx3PatchCacheGuardOn())
+            return false;
+        const int32_t slot = static_cast<int16_t>(getRegU32(ctx, targetPc == kSsx3PatchChainAppend ? 6 : 5) & 0xFFFFu);
+        if (slot >= 0)
+            return false;
+        const uint64_t n = g_ssx3PatchChainSkips.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        if (n <= 4u || (n & (n - 1u)) == 0u)
+            std::fprintf(stderr, "[ssx3-patch-guard] chain skip #%llu fn=0x%x slot=%d\n", static_cast<unsigned long long>(n), targetPc, slot);
+        return true;
+    }
+
+    bool ssx3PatchCacheGuard(uint8_t *rdram, R5900Context *ctx)
+    {
+        const bool on = ssx3PatchCacheGuardOn();
         const bool grow = ssx3PatchGrowCap() != 0u;
         if ((!on && !grow) || !rdram || !ctx)
             return false;
@@ -5076,7 +5116,7 @@ __attribute__((noinline, cold)) void dspBuildFilter()
     std::fill(std::begin(g_dsp.tgt), std::end(g_dsp.tgt), 0u);
     // dispatchGuestBranchFull's own target hooks (call kinds only; listed for
     // every kind, a superset).
-    for (uint32_t pc : {kSsx3PatchCacheAlloc, kSsx3GuestFree, kSsx3PatchCacheInit, kSsx3DrawKeyCall,
+    for (uint32_t pc : {kSsx3PatchCacheAlloc, kSsx3PatchChainAppend, kSsx3PatchChainAppendCE, kSsx3GuestFree, kSsx3PatchCacheInit, kSsx3DrawKeyCall,
                         kSsx3DrawLookup, kSsx3DrawTexLookup, kSsx3SpatialItems12, kSsx3SpatialItems34,
                         kSsx3SpatialInside1, kSsx3SpatialInside3, kSsx3DrawReset, 0x00228C08u,
                         0x001216E0u, 0x00117838u}) // TK45c: rider pass, bank-clear
@@ -5276,6 +5316,13 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
     if (targetPc == kSsx3PatchCacheAlloc &&
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) &&
         ssx3PatchCacheGuard(rdram, ctx))
+    {
+        ctx->pc = fallthroughPc;
+        return true;
+    }
+    if ((targetPc == kSsx3PatchChainAppend || targetPc == kSsx3PatchChainAppendCE) &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) &&
+        ssx3PatchChainGuard(ctx, targetPc))
     {
         ctx->pc = fallthroughPc;
         return true;
