@@ -8,6 +8,7 @@
 #include "ps2_microvu.h"
 #include "ps2_microvu_api.h"
 #include "ps2_mtvu.h"
+#include "ps2_telemetry.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_vu_state.h"
 
@@ -201,6 +202,7 @@ bool configure(bool mtvu_threaded, std::string& error)
     s_selected = true;
     s_engine = name;
     std::fprintf(stderr, "[microvu] engine=%s lib=%s\n", name, lib);
+    ps2x::telemetry::vuInit(); // TEL1: PS2X_VU_TELEMETRY (output-only)
 #else
     (void)mtvu_threaded;
     (void)error;
@@ -247,6 +249,7 @@ void shutdown()
 {
 #if defined(PS2X_MICROVU_LOADABLE)
     if (s_selected) {
+        ps2x::telemetry::vuFlush(0); // TEL1: write the open window
         std::fprintf(stderr, "[microvu] engine=%s restarts=%llu breaks=%llu\n", s_engine.c_str(),
                      (unsigned long long)s_restarts.load(std::memory_order_relaxed),
                      (unsigned long long)s_budgetBreaks.load(std::memory_order_relaxed));
@@ -341,6 +344,11 @@ bool run(PS2Memory& memory, uint8_t* data, VuState& state,
 #if defined(PS2X_MICROVU_LOADABLE)
     if (!s_selected)
         throw std::runtime_error("microvu run called without selection");
+    // TEL1: program census + run wall (output-only; inert unless PS2X_VU_TELEMETRY).
+    ps2x::telemetry::VuRun tel;
+    if (ps2x::telemetry::vuOn())
+        tel.begin(memory.getVU1Code(), PS2_VU1_CODE_SIZE, memory.getVU1CodeGeneration(), start_pc, resume,
+                  memory.gs().vsyncTick.load(std::memory_order_relaxed));
     ps2x_microvu_state shadow{};
     importState(shadow, state);
     const char* why = nullptr;
