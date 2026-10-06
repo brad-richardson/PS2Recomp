@@ -49,7 +49,7 @@ absolute local TOML paths, and checks registration SHA256
 Use a fresh work directory for regeneration; existing output is refused.
 
 `mac-libs` pins the public ARMSX2 fork to
-`c842826abf89a51cd8a6047252f23f2c9afc5ad3` (includes the texture-directory
+`46093cbc36c59e11992163a2054fdc4795bb8108` (UPR2 on ARMSX2 2.8.1+, including the texture-directory
 API required by this GE1 adapter), builds plutovg v1.1.0 and plutosvg v0.0.7
 locally, builds GE1 and the JIT bridge, and stages public renderer resources
 and metallibs. It requires no OM1 recordings, offline stage or private header
