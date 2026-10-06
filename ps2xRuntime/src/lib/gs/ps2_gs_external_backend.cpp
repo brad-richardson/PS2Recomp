@@ -4,6 +4,7 @@
 // only stats()/lastPresent() take the mutex (cross-thread readers).
 
 #include "runtime/gs/ps2_gs_external_backend.h"
+#include "ps2_telemetry.h"
 #include "ps2_adpf.h"
 #include "ps2_perf_log.h"
 #include "runtime/gs/ge1_gs_api.h"
@@ -448,7 +449,11 @@ public:
 #if defined(__ANDROID__) || defined(PS2X_GE1_STATIC_IOSURFACE)
             configureOutputSize();
 #endif
-            if (!m_ge1.load(path) || !m_ge1.open(4))
+            // TEL1: PS2X_GS_TELEMETRY / PS2X_GS_TFX_RECORD set GE1's PW1 env before open.
+            ps2x::telemetry::gsBeforeOpen();
+            const bool ge1Ok = m_ge1.load(path) && m_ge1.open(4);
+            ps2x::telemetry::gsAfterOpen(ge1Ok);
+            if (!ge1Ok)
             {
                 std::fprintf(stderr, "[gs:external] GE1 Full GS init failed\n");
                 std::exit(78);
