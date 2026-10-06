@@ -8,6 +8,7 @@
 #include "ps2_savestate_internal.h"
 
 #include "ps2_runtime.h"
+#include "ps2_ssx3_tricky_layer.h"
 #include "runtime/ps2_vfs.h"
 #include "ps2_iop_host.h"
 #include "ps2_pad_latch.h"
@@ -1209,6 +1210,12 @@ namespace ps2_savestate
                 return false;
             }
         }
+        // TKL1 stage 3 (TKA1 F1): reconcile the Tricky layer with the restored
+        // machine before guest execution resumes and before any next CD read
+        // (aliases follow the restored mode; a new epoch retires stale
+        // packets/bursts; run state resets). Single funnel: boot-time and
+        // quick loads both land here.
+        ps2_ssx3_tricky_layer::onStateLoaded(runtime.memory().getRDRAM(), PS2_RAM_SIZE, savedTick);
         setResumeSkip();
         if (savedTickOut)
             *savedTickOut = savedTick;

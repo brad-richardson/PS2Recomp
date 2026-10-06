@@ -63,10 +63,16 @@ constexpr float kTeleportJump = 3000.0f;
 constexpr size_t kMaxGems = 512u;
 constexpr uint32_t kScanChunk = 1u << 20;
 
+// TKL1 F7: the central lanes validate through validateGuestPtr (nonzero,
+// RAM-mirror segment, 4-aligned, span inside RDRAM, no wrap). Callers pass
+// either a validated-small address plus a small offset (t, pb: sums cannot
+// wrap u32) or use readGuestU32/readGuestF32 for base+off in one step.
 inline bool readU32(const uint8_t *ram, size_t ramSize, uint32_t addr, uint32_t &out) noexcept
 {
-    const uint32_t p = addr & kRamMask;
-    if (!ram || ramSize == 0u || p + 4u > ramSize)
+    if (!ram || ramSize == 0u)
+        return false;
+    uint32_t p = 0u;
+    if (!ps2_ssx3_tricky_hud::validateGuestPtr(addr, 4u, ramSize, p))
         return false;
     std::memcpy(&out, ram + p, 4);
     return true;
@@ -83,8 +89,10 @@ inline bool readF32(const uint8_t *ram, size_t ramSize, uint32_t addr, float &ou
 
 inline bool writeU32(uint8_t *ram, size_t ramSize, uint32_t addr, uint32_t v) noexcept
 {
-    const uint32_t p = addr & kRamMask;
-    if (!ram || ramSize == 0u || p + 4u > ramSize)
+    if (!ram || ramSize == 0u)
+        return false;
+    uint32_t p = 0u;
+    if (!ps2_ssx3_tricky_hud::validateGuestPtr(addr, 4u, ramSize, p))
         return false;
     std::memcpy(ram + p, &v, 4);
     return true;
@@ -468,18 +476,13 @@ inline void scanChunk(State &st, const std::vector<Gem> &gems, const uint8_t *ra
 inline bool trickState(const uint8_t *ram, size_t ramSize, uint32_t r, uint32_t &t) noexcept
 {
     t = 0u;
-    if (!readU32(ram, ramSize, r + kTrickOff, t) || t == 0u || (t & 3u) != 0u)
-    {
-        t = 0u;
+    uint32_t v = 0u;
+    if (!ps2_ssx3_tricky_hud::readGuestU32(ram, ramSize, r, kTrickOff, v))
         return false;
-    }
-    // Full-span, wrap-free: t is already masked-small, so t + size cannot
-    // overflow u32; the (x & mask) + 4 shape can never fire for aligned t.
-    if ((t & ~kRamMask) != 0u || t + kTrickSize + 4u > ramSize)
-    {
-        t = 0u;
+    uint32_t to = 0u;
+    if (!ps2_ssx3_tricky_hud::validateGuestPtr(v, static_cast<size_t>(kTrickSize) + 4u, ramSize, to))
         return false;
-    }
+    t = v;
     return true;
 }
 
@@ -531,7 +534,7 @@ inline void poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_t r
         return;
     }
     uint32_t clock = 0u;
-    if (!readU32(ram, ramSize, b + kRaceClockOff, clock))
+    if (!ps2_ssx3_tricky_hud::readGuestU32(ram, ramSize, b, kRaceClockOff, clock))
     {
         st.prevValid = false;
         return;
@@ -543,7 +546,7 @@ inline void poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_t r
         st.lastClock = clock;
     }
     const bool racing = ps2_ssx3_tricky_hud::updateRaceClock(st.raceClock, clock, tick);
-    if (r != st.lastR || clock < st.lastClock)
+    if (ps2_ssx3_tricky_hud::raceBoundaryCrossed(st.lastR, st.lastClock, r, clock))
     {
         // New race/session or retry: per-race state resets (TKA1), the world
         // reloaded, and any stale multiplier clears once T is valid.
@@ -558,9 +561,9 @@ inline void poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_t r
         return;
     }
     float cur[3] = {0, 0, 0};
-    if (!readF32(ram, ramSize, r + kRiderPosOff, cur[0]) ||
-        !readF32(ram, ramSize, r + kRiderPosOff + 4u, cur[1]) ||
-        !readF32(ram, ramSize, r + kRiderPosOff + 8u, cur[2]))
+    if (!ps2_ssx3_tricky_hud::readGuestF32(ram, ramSize, r, kRiderPosOff, cur[0]) ||
+        !ps2_ssx3_tricky_hud::readGuestF32(ram, ramSize, r, kRiderPosOff + 4u, cur[1]) ||
+        !ps2_ssx3_tricky_hud::readGuestF32(ram, ramSize, r, kRiderPosOff + 8u, cur[2]))
     {
         st.prevValid = false;
         return;
@@ -703,9 +706,10 @@ inline void onBankClear(uint8_t *ram, size_t ramSize, uint64_t tick, uint32_t t,
                         uint32_t src)
 {
     // (Knob-gated by the glue, like poll.)
-    if (!ram || ramSize == 0u || t == 0u || (t & 3u) != 0u || (t & ~kRamMask) != 0u)
+    if (!ram || ramSize == 0u)
         return;
-    if (t + kTrickSize + 4u > ramSize)
+    uint32_t to = 0u;
+    if (!ps2_ssx3_tricky_hud::validateGuestPtr(t, static_cast<size_t>(kTrickSize) + 4u, ramSize, to))
         return;
     uint32_t cur = 0u;
     if (!readU32(ram, ramSize, t + kMultOff, cur) || cur == kOneBits)

@@ -10,7 +10,7 @@
 #include "ps2_ssx3_course_manifest.h"
 #include "ps2_ssx3_lod.h"
 #include "ps2_ssx3_tricky_hud.h"
-#include "ps2_ssx3_tricky_hud_state.h"
+#include "ps2_ssx3_tricky_layer.h"
 #include "ps2_ssx3_tricky_menu.h"
 #include "ps2_ssx3_tricky_song.h"
 #include "ps2_ssx3_tricky_gems.h"
@@ -1910,7 +1910,7 @@ namespace
                                   ? static_cast<uint64_t>(runtime->memory().gs().vsyncTick.load(
                                         std::memory_order_relaxed))
                                   : 0ull;
-        ps2_ssx3_tricky_hud::noteUberPost(tick);
+        ps2_ssx3_tricky_layer::noteUberPost(tick);
     }
 
     void applyTrickyUberPost(PS2Runtime &runtime)
@@ -2170,22 +2170,23 @@ void dumpPresentationFrame(const uint8_t *rgba,
 }
 
 // TK43a: Tricky meter reskin (output-only). Composed into the latched host
-// frame before dump/upload, so dumps and presents match. Reads committed
-// guest words; writes no guest memory, so the det-hash cannot move. Active
-// only on a non-Stock course-manifest mode: SSX 3 courses skip untouched.
+// frame before dump/upload, so dumps and presents match. TKL1: consumes the
+// EE's immutable packet (tick + epoch) and never touches RDRAM, so the
+// det-hash cannot move. Active only on a non-Stock course-manifest mode:
+// SSX 3 courses skip untouched.
 void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t height, uint64_t tick)
 {
-    // TK43e: the GL call site. The state decision is shared with the VK/AHB
-    // call site (queuePendingAhb); the atlas pointer outlives the lock (the
-    // atlas is immutable once ok).
+    // TKL1: the GL call site. The state decision is the layer's per-VBlank
+    // packet, shared with the VK/AHB call site (queuePendingAhb); the atlas
+    // pointer outlives the lock (the atlas is immutable once ok). A stale
+    // (pre-load/pre-exit) packet is skipped.
     if (!rt || !rgba || width == 0u || height == 0u)
         return;
-    ps2_ssx3_tricky_hud::HudParams p;
-    {
-        std::lock_guard<std::mutex> lock(ps2_ssx3_tricky_hud::hudState().mu);
-        p = ps2_ssx3_tricky_hud::updateHudStateLocked(ps2_ssx3_tricky_hud::hudState(),
-                                                     rt->memory().getRDRAM(), PS2_RAM_SIZE, tick);
-    }
+    ps2_ssx3_tricky_layer::PresentationPacket p;
+    if (!ps2_ssx3_tricky_layer::config().hud || !ps2_ssx3_tricky_layer::latestPacket(p))
+        return;
+    if (p.epoch != ps2_ssx3_tricky_layer::epoch())
+        return;
     if (!p.draw || !p.atlas)
         return;
     ps2_ssx3_tricky_hud::composeOverlay(rgba, static_cast<int>(width), static_cast<int>(height), *p.atlas,
@@ -2868,10 +2869,8 @@ void bg1OnResume()
 
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
 {
-    // TK43e: publish the live RDRAM base for the VK/AHB overlay call site
-    // (the GS worker has no PS2Runtime*). First line, so the per-VSync
-    // early return below does not skip it. Read-only for the consumer.
-    ps2_ssx3_tricky_hud::publishRdram(rt ? rt->memory().getRDRAM() : nullptr, PS2_RAM_SIZE);
+    // TKL1: no RDRAM publication (the TK43e publishRdram is gone): the GL
+    // and VK/AHB overlay call sites consume the EE's immutable packet.
     static uint64_t s_lastPresentationTick = std::numeric_limits<uint64_t>::max();
     static bool s_hasLatchedInitialFrame = false;
     static uint32_t s_lastDisplayFbp = std::numeric_limits<uint32_t>::max();
@@ -4973,11 +4972,7 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
             uint32_t gemsClock = 0u;
             const uint32_t gemsB = ps2_ssx3_tricky_hud::resolveChainB(rdram, PS2_RAM_SIZE);
             if (gemsB != 0u)
-            {
-                const uint32_t gemsCs = (gemsB + 0xcu) & 0x01ffffffu;
-                if (gemsCs + 4u <= PS2_RAM_SIZE)
-                    std::memcpy(&gemsClock, rdram + gemsCs, 4);
-            }
+                ps2_ssx3_tricky_hud::readGuestU32(rdram, PS2_RAM_SIZE, gemsB, 0xcu, gemsClock);
             ps2_tk45c::onBankClear(rdram, PS2_RAM_SIZE, gemsTick, getRegU32(ctx, 4), gemsClock, sourcePc);
         }
     }

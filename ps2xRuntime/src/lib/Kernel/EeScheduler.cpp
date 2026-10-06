@@ -15,6 +15,7 @@
 #include "ps2_ts2_split60.h"
 #include "ps2_ts2_split60.h"
 #include "ps2_fh1_full120.h"
+#include "ps2_ssx3_tricky_layer.h"
 #include "ps2_ach.h"
 #include "ps2_vsync_lock.h"
 #include "ps2_e15.h"
@@ -3146,6 +3147,11 @@ void EeScheduler::processEvent(const EeEvent &event)
         // TEL2: session-log race tracker (read-only; one bool check when off).
         if (ps2x::tel::sessionOn())
             ps2x::tel::onVBlank(m_vsyncTick, m_rdram, PS2_RAM_SIZE, ps2_fh1::eventsMode(), ps2_fh1::g_guestActive);
+        // TKL1: the Tricky layer's EE-owned per-VBlank reducer (read-only
+        // wrt guest; one cached-config check when the layer is off). After
+        // the tick increment, like every sibling hook: the sample belongs
+        // to the interval that just completed.
+        ps2_ssx3_tricky_layer::onVBlankTick(m_rdram, PS2_RAM_SIZE, m_vsyncTick);
         if (ps2_fh1::eventsMode())
         {
             // FH5: the committed event state sets the EE budget and the pacer

@@ -31,8 +31,8 @@
 // TK43e: the draw list is composeHudInto (region + origin), drawn by both
 // the GL path (composeOverlay: copy out, compose, copy back) and the VK/AHB
 // path (queuePendingAhb composites the region into the locked AHB before
-// queue); the state both call sites share is HudState, decided per frame by
-// updateHudStateLocked (ps2_ssx3_tricky_hud_state.h).
+// queue); TKL1: both consume the layer's immutable packet, decided per
+// VBlank by the EE-owned reducer (ps2_ssx3_tricky_layer.h).
 //
 // TK44: race-only visibility (the chain resolves in menus, so the meter used
 // to draw on the event card and in pause): the overlay draws only while the
@@ -45,13 +45,11 @@
 // post-boundary adopt window (restart or GO from a frozen 0) swallows the
 // guest's post-GO meter init writes (no spurious GO burst).
 
-#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -125,9 +123,34 @@ struct Atlas
     bool ok = false;
 };
 
+// TKL1 F8: every hard-coded sprite rect (plus the bilinear sampler's reads)
+// must fit the atlas. The sampler clamps to s.w-2/s.h-2 and reads the four
+// neighbors, so a rect inside the atlas with both dims >= 2 can never read
+// out of bounds; anything smaller is refused with the atlas.
+inline bool atlasLayoutValid(int w, int h)
+{
+    if (w <= 0 || h <= 0)
+        return false;
+    const Rect rects[] = {
+        ringRect(0), ringRect(1), ringRect(2), ringRect(3), silverRingRect(), poleRect(),
+        letterRect(0), letterRect(1), letterRect(2), letterRect(3), letterRect(4), letterRect(5),
+        litLetterRect(0), litLetterRect(1), litLetterRect(2), litLetterRect(3), litLetterRect(4),
+        litLetterRect(5), jewelGreyRect(), jewelRedRect(), pillRect(), pillGreyRect(), snowflakeRect(),
+    };
+    for (const Rect &s : rects)
+    {
+        if (s.w < 2 || s.h < 2 || s.x < 0 || s.y < 0 || s.x + s.w > w || s.y + s.h > h)
+            return false;
+    }
+    return true;
+}
+
 // Header: "TKHUD2\0\0" + u32le w,h,reserved, then w*h*4 RGBA bytes.
 // TK43c: magic bumped (TKHUD1 atlases lack the red-letter row and are
 // refused; the atlas is staged fresh, never committed).
+// TKL1 F8: the layout is exactly 256x256 (the staged atlas from
+// make_trickyhud_atlas.py); any other dimensions are refused, since the
+// hard-coded rects above assume this layout.
 inline Atlas parseAtlas(const uint8_t *data, size_t size)
 {
     Atlas a;
@@ -137,7 +160,9 @@ inline Atlas parseAtlas(const uint8_t *data, size_t size)
     uint32_t w = 0, h = 0;
     std::memcpy(&w, data + 8, 4);
     std::memcpy(&h, data + 12, 4);
-    if (w == 0u || h == 0u || w > 1024u || h > 1024u)
+    if (w != static_cast<uint32_t>(kAtlasW) || h != static_cast<uint32_t>(kAtlasH))
+        return a;
+    if (!atlasLayoutValid(static_cast<int>(w), static_cast<int>(h)))
         return a;
     const size_t want = 20u + static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
     if (size < want)
@@ -157,13 +182,91 @@ inline Atlas loadAtlasFile(const char *path)
     std::FILE *f = std::fopen(path, "rb");
     if (!f)
         return a;
+    // TKL1 F8: bound the read before allocating (a 256x256 atlas is 256 KiB;
+    // anything past 4 MiB is refused without growing the buffer further).
+    static constexpr size_t kMaxAtlasFile = 20u + 1024u * 1024u * 4u;
     std::vector<uint8_t> buf;
     uint8_t chunk[65536];
     size_t n = 0;
+    bool tooBig = false;
     while ((n = std::fread(chunk, 1, sizeof(chunk), f)) > 0u)
+    {
+        if (buf.size() + n > kMaxAtlasFile)
+        {
+            tooBig = true;
+            break;
+        }
         buf.insert(buf.end(), chunk, chunk + n);
+    }
     std::fclose(f);
+    if (tooBig)
+        return a;
     return parseAtlas(buf.data(), buf.size());
+}
+
+// TKL1 F7: strict guest-pointer validation. A readable/writable guest
+// pointer must be nonzero, name a RAM mirror segment (low/KUSEG, KSEG0
+// cached or KSEG1 uncached; the game keeps these structs in low RAM),
+// be 4-aligned, and span the whole request inside RDRAM with no u32
+// wrap. Stale/non-RAM pointers fail closed instead of wrapping into
+// valid host RAM. `offset` is the validated RDRAM offset on success.
+inline bool validateGuestPtr(uint32_t addr, size_t size, size_t ramSize, uint32_t &offset)
+{
+    if (addr == 0u || !ramSize || size == 0u || size > ramSize)
+        return false;
+    const uint32_t seg = addr >> 28;
+    if (seg != 0u && seg != 8u && seg != 9u && seg != 0xAu && seg != 0xBu)
+        return false;
+    if ((addr & 3u) != 0u)
+        return false;
+    const uint32_t off = addr & kRamMask;
+    if (static_cast<size_t>(off) > ramSize - size)
+        return false;
+    offset = off;
+    return true;
+}
+
+// One validated u32/f32 lane: the span (base..base+off+4) is validated
+// before any arithmetic on offsets, so a wild base can never wrap into
+// range. All offsets below are small constants; base+off+4 cannot wrap
+// u32 once the span check passes (offsets are < ramSize).
+inline bool readGuestU32(const uint8_t *ram, size_t ramSize, uint32_t base, uint32_t off, uint32_t &out)
+{
+    if (!ram || ramSize == 0u)
+        return false;
+    uint32_t bo = 0u;
+    if (!validateGuestPtr(base, static_cast<size_t>(off) + 4u, ramSize, bo))
+        return false;
+    std::memcpy(&out, ram + bo + off, 4);
+    return true;
+}
+
+inline bool readGuestF32(const uint8_t *ram, size_t ramSize, uint32_t base, uint32_t off, float &out)
+{
+    uint32_t b = 0u;
+    if (!readGuestU32(ram, ramSize, base, off, b))
+        return false;
+    std::memcpy(&out, &b, 4);
+    return true;
+}
+
+inline bool writeGuestU32(uint8_t *ram, size_t ramSize, uint32_t base, uint32_t off, uint32_t v)
+{
+    if (!ram || ramSize == 0u)
+        return false;
+    uint32_t bo = 0u;
+    if (!validateGuestPtr(base, static_cast<size_t>(off) + 4u, ramSize, bo))
+        return false;
+    std::memcpy(ram + bo + off, &v, 4);
+    return true;
+}
+
+// One race-boundary predicate (TKL1 stage 3): a new rider struct or a
+// rewound race clock. The layer reducer and the gems poll evaluate it at
+// their own safe points (per-VBlank vs per-physics-step).
+inline bool raceBoundaryCrossed(uint32_t lastR, uint32_t lastClock, uint32_t r, uint32_t clock)
+{
+    return r != lastR || clock < lastClock;
 }
 
 struct MeterFrame
@@ -178,8 +281,8 @@ inline MeterFrame readMeterFrameAt(const uint8_t *ram, size_t ramSize, uint32_t 
     MeterFrame f;
     if (!ram || ramSize == 0u)
         return f;
-    const uint32_t rb = r & kRamMask;
-    if (r == 0u || rb + kRiderFillOff + 4u > ramSize)
+    uint32_t rb = 0u;
+    if (!validateGuestPtr(r, static_cast<size_t>(kRiderFillOff) + 4u, ramSize, rb))
         return f;
     float fill = 0.0f;
     int32_t level = 0;
@@ -204,11 +307,9 @@ inline MeterFrame readMeterFrame(const uint8_t *ram, size_t ramSize, uint32_t pt
 {
     if (!ram || ramSize == 0u)
         return MeterFrame();
-    const uint32_t slot = ptrAddr & kRamMask;
-    if (slot + 4u > ramSize)
+    uint32_t r = 0u;
+    if (!readGuestU32(ram, ramSize, ptrAddr, 0u, r))
         return MeterFrame();
-    uint32_t r = 0;
-    std::memcpy(&r, ram + slot, 4);
     return readMeterFrameAt(ram, ramSize, r);
 }
 
@@ -217,61 +318,37 @@ inline MeterFrame readMeterFrame(const uint8_t *ram, size_t ramSize, uint32_t pt
 // same struct: 0x29ab40 reads s2 = [func_28B1D8()+s5+0x28] (s5 = 0 for
 // player 1) and s2 carries the rider words (+0x2F0 at 0x29acd8, +0x790 at
 // 0x29abfc as in boost-add 0x10e990, +0x870 at 0x29ac80 as in func_29AB08
-// with a1 = R). Each hop is null- and range-checked; any failure returns 0
-// (menus / pre-race: the overlay draws nothing, as before).
+// with a1 = R). Each hop is F7-validated (segment/alignment/span, no wrap);
+// any failure returns 0 (menus / pre-race: the overlay draws nothing).
 inline uint32_t resolveChainR(const uint8_t *ram, size_t ramSize)
 {
     if (!ram || ramSize == 0u)
         return 0u;
     uint32_t g = 0u, a = 0u, b = 0u, r = 0u;
-    const uint32_t gs = kChainRoot & kRamMask;
-    if (gs + 4u > ramSize)
+    if (!readGuestU32(ram, ramSize, kChainRoot, 0u, g) || g == 0u)
         return 0u;
-    std::memcpy(&g, ram + gs, 4);
-    if (g == 0u)
+    if (!readGuestU32(ram, ramSize, g, kChainAOff, a) || a == 0u)
         return 0u;
-    const uint32_t as = (g + kChainAOff) & kRamMask;
-    if (as + 4u > ramSize)
+    if (!readGuestU32(ram, ramSize, a, kChainBOff, b) || b == 0u)
         return 0u;
-    std::memcpy(&a, ram + as, 4);
-    if (a == 0u)
+    if (!readGuestU32(ram, ramSize, b, kChainROff, r))
         return 0u;
-    const uint32_t bs = (a + kChainBOff) & kRamMask;
-    if (bs + 4u > ramSize)
-        return 0u;
-    std::memcpy(&b, ram + bs, 4);
-    if (b == 0u)
-        return 0u;
-    const uint32_t rs = (b + kChainROff) & kRamMask;
-    if (rs + 4u > ramSize)
-        return 0u;
-    std::memcpy(&r, ram + rs, 4);
     return r;
 }
 
 // TK44: the chain's race object (B = [[0x4a28a8]+0x84]+0xC), carrying the
-// race counters. Null/range-checked like resolveChainR; 0 on any failure.
+// race counters. F7-validated like resolveChainR; 0 on any failure.
 inline uint32_t resolveChainB(const uint8_t *ram, size_t ramSize)
 {
     if (!ram || ramSize == 0u)
         return 0u;
     uint32_t g = 0u, a = 0u, b = 0u;
-    const uint32_t gs = kChainRoot & kRamMask;
-    if (gs + 4u > ramSize)
+    if (!readGuestU32(ram, ramSize, kChainRoot, 0u, g) || g == 0u)
         return 0u;
-    std::memcpy(&g, ram + gs, 4);
-    if (g == 0u)
+    if (!readGuestU32(ram, ramSize, g, kChainAOff, a) || a == 0u)
         return 0u;
-    const uint32_t as = (g + kChainAOff) & kRamMask;
-    if (as + 4u > ramSize)
+    if (!readGuestU32(ram, ramSize, a, kChainBOff, b))
         return 0u;
-    std::memcpy(&a, ram + as, 4);
-    if (a == 0u)
-        return 0u;
-    const uint32_t bs = (a + kChainBOff) & kRamMask;
-    if (bs + 4u > ramSize)
-        return 0u;
-    std::memcpy(&b, ram + bs, 4);
     return b;
 }
 
@@ -374,27 +451,9 @@ inline bool isUberPost(uint32_t a2, uint32_t v0)
     return a2 == kUberSpeechEvent && v0 != 0u;
 }
 
-struct UberPosts
-{
-    std::atomic<uint64_t> count{0};
-    std::atomic<uint64_t> tick{0};
-};
-
-inline UberPosts &uberPosts()
-{
-    static UberPosts t;
-    return t;
-}
-
-inline void noteUberPost(uint64_t vsync)
-{
-    UberPosts &t = uberPosts();
-    const uint64_t n = t.count.fetch_add(1u, std::memory_order_relaxed) + 1u;
-    t.tick.store(vsync, std::memory_order_relaxed);
-    std::fprintf(stderr, "[ssx3-tricky-hud] uber #%llu tick=%llu\n",
-                 static_cast<unsigned long long>(n),
-                 static_cast<unsigned long long>(vsync));
-}
+// TKL1: the post counter moved to the layer's tick-tagged PostQueue
+// (ps2_ssx3_tricky_layer.h); the EE wrapper records there and the VBlank
+// reducer drains it. This header keeps only the filter + constants.
 
 // TK43c: letter state machine (pure; the overlay owns the state).
 // One lit letter per uber tap, T->R->I->C->K->Y. Triggers arriving during
@@ -1022,88 +1081,11 @@ inline void stampHudDirect(uint8_t *ahbBase, size_t strideBytes, const Rect &r, 
         stampSpriteS(ss.splash, base, strideBytes, bw, bh, ss.splashDst.x - ox, ss.splashDst.y - oy);
 }
 
-// TK43e: the overlay's process-wide state, shared by the GL call site (the
-// main thread, trickyHudOverlay in ps2_runtime.cpp) and the VK/AHB call
-// site (the GS worker, queuePendingAhb in ps2_gs_external_backend.cpp).
-// Only one path runs at a time, but a mid-run VK->GL fallback can overlap
-// them for a frame; the mutex keeps the letters/splash/atlas continuous.
-struct HudState
-{
-    std::mutex mu;
-    bool wantedInit = false;
-    bool wanted = false;
-    Atlas atlas;
-    bool atlasTried = false;
-    bool lastFull = false;
-    uint64_t splashUntil = 0u;
-    LetterState letters;
-    bool lettersInTricky = false;
-    bool lettersPresetInit = false;
-    int lettersPreset = -1;
-    bool forcedInit = false;
-    ForceValue forced;
-    RaceClock raceClock;     // TK44: race-only visibility from [B+0xc]
-    bool lastRacing = false; // TK44: last racing value (transition log)
-};
-
-inline HudState &hudState()
-{
-    static HudState s;
-    return s;
-}
-
-// The per-frame compose decision (pure values out; the atlas is immutable
-// once ok, so the pointer stays valid after the mutex is released).
-struct HudParams
-{
-    bool draw = false;
-    const Atlas *atlas = nullptr;
-    float fill = 0.0f;
-    bool full = false;
-    uint64_t splashUntil = 0u;
-    int litLetters = 0;
-    uint64_t flashUntil = 0u;
-};
-
-inline bool hudWanted()
-{
-    HudState &st = hudState();
-    std::lock_guard<std::mutex> lock(st.mu);
-    if (!st.wantedInit)
-    {
-        st.wantedInit = true;
-        const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD");
-        st.wanted = env && env[0] == '1';
-    }
-    return st.wanted;
-}
-
-// TK43e: the GS worker has no PS2Runtime*, so the main thread publishes the
-// live RDRAM base every host iteration (UploadFrame entry), and the VK/AHB
-// call site reads it here. Never written, only read, like the GL path.
-inline std::atomic<const uint8_t *> &liveRdramPtr()
-{
-    static std::atomic<const uint8_t *> p(nullptr);
-    return p;
-}
-
-inline std::atomic<size_t> &liveRdramSize()
-{
-    static std::atomic<size_t> n(0u);
-    return n;
-}
-
-inline void publishRdram(const uint8_t *rdram, size_t size)
-{
-    liveRdramPtr().store(rdram, std::memory_order_release);
-    liveRdramSize().store(size, std::memory_order_release);
-}
-
-inline const uint8_t *liveRdram(size_t &size)
-{
-    const uint8_t *p = liveRdramPtr().load(std::memory_order_acquire);
-    size = liveRdramSize().load(std::memory_order_acquire);
-    return p;
-}
+// TKL1: the renderer-owned state (HudState), the per-frame decision
+// (HudParams) and the live-RDRAM publication (publishRdram/liveRdram) are
+// gone. The EE-owned layer (ps2_ssx3_tricky_layer.h) publishes an immutable
+// per-VBlank packet; the GL and AHB compositors consume it and never touch
+// RDRAM. This header keeps the pure pieces: readers, reducers, the atlas
+// and the pixel composer (the reference pixel math, unchanged).
 
 } // namespace ps2_ssx3_tricky_hud
