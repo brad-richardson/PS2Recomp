@@ -1900,6 +1900,18 @@ namespace
                 call(0x3a3398u, 2, obj, f + 0x300); // zero RGBA, native mesh update
                 return true;
             }
+            // Original MapInfo owns SE_box/SE_check location markers through
+            // the current UI state. Its normal show/hide calls restore them
+            // on stock rows; hide them with that same native operation here.
+            for (; index < 33; ++index)
+            {
+                const uint32_t marker = index - 17;
+                std::snprintf(reinterpret_cast<char *>(ram + f + 0x240), 128,
+                              marker < 8 ? "SE_box%u" : "SE_check%u", marker % 8);
+                wr32(ram, f + 0x2d0, index + 1);
+                call(0x39e8b8u, 2, rd32(ram, controller + 0x2ec), f + 0x240);
+                return true;
+            }
             finish();
         }
         else
