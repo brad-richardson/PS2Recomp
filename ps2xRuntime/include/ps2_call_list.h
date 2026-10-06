@@ -4,6 +4,9 @@
 
 // I know ugly, but will work for now.
 
+// CGR2: keep the GetRomName name binding for the pinned SSX3 HLE codegen.
+// Executing the guest ROM routine is a separate deliberate migration; see
+// ssx3/local/research/CGR1/REPORT.md and CGR2/REPORT.md.
 #define PS2_SYSCALL_LIST(X)    \
     X(FlushCache)              \
     X(iFlushCache)             \
@@ -120,6 +123,7 @@
     X(GetOsdConfigParam2)      \
     X(SetOsdConfigParam2)      \
     X(EnableCache)             \
+    X(GetRomName)              \
     X(DisableCache)            \
     X(SifLoadElfPart)          \
     X(sceSifLoadElf)           \
