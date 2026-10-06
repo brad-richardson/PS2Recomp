@@ -738,14 +738,18 @@ extern "C" GE1_API float ge1_gs_back_ms(void)
 extern "C" GE1_API void ge1_gs_set_cache_flush_deferred(int deferred)
 {
     s_flush_deferred = deferred != 0;
+    GSSetPipelineCacheFlushDeferred(s_flush_deferred);
 }
 
 extern "C" GE1_API int ge1_gs_flush_caches(void)
 {
     if (!s_open)
         return 0;
+    // App-pause explicitly overrides the event policy after the runtime pauses EE.
+    GSSetPipelineCacheFlushDeferred(false);
     GSFlushPipelineCache();
     persist_recorded_selectors();
+    GSSetPipelineCacheFlushDeferred(s_flush_deferred);
     s_flush_pending = false;
     return 1;
 }
