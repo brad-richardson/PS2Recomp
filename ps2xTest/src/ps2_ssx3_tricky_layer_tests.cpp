@@ -130,6 +130,7 @@ void resetLayerForTest()
     p.probeMixLogged = true; // quiet: the mix log is proven elsewhere
     ps2_cd_overlay::clearModeAlias();
     ps2_ssx3_course::courseModes() = ps2_ssx3_course::Modes{};
+    ps2_ssx3_tricky::state().tricky = false;
 }
 
 Atlas synthAtlas256()
@@ -472,17 +473,21 @@ void register_ps2_ssx3_tricky_layer_tests()
             // the load rebuilds the mode's aliases before any CD read.
             ramToMode(ram, true);
             t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "desync set up");
+            ps2_ssx3_tricky::state().tricky = false; // stale the other way
             const uint64_t e = epoch();
             onStateLoaded(ram.data(), ram.size(), 5000u);
             const auto got = ps2_cd_overlay::pendingAliases();
             t.IsTrue(got.size() == 1u && got[0].first == "/DISC" && got[0].second == "/HOST",
                      "aliases rebuilt");
             t.IsTrue(epoch() == e + 1u, "load retires the epoch");
+            t.IsTrue(ps2_ssx3_tricky::state().tricky, "menu flag follows restored Tricky");
             // Stock rows restored with a stale pending list: cleared.
             ps2_cd_overlay::setModeAliases({{"/DISC", "/HOST"}});
+            ps2_ssx3_tricky::state().tricky = true; // stale the other way
             ramToMode(ram, false);
             onStateLoaded(ram.data(), ram.size(), 5001u);
             t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "stock clears");
+            t.IsTrue(!ps2_ssx3_tricky::state().tricky, "menu flag follows restored Stock");
             resetLayerForTest();
             clearConfigForTest(); }); });
 }

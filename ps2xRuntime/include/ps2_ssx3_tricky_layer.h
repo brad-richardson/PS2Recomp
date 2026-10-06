@@ -25,6 +25,7 @@
 #include "ps2_ssx3_course_manifest.h"
 #include "ps2_ssx3_tricky_gems.h"
 #include "ps2_ssx3_tricky_hud.h"
+#include "ps2_ssx3_tricky_menu.h"
 #include "ps2_ssx3_tricky_song.h"
 
 #include <atomic>
@@ -618,6 +619,10 @@ inline void onStateLoaded(uint8_t *rdram, size_t ramSize, uint64_t tick)
     if (ms.armed)
     {
         const size_t cur = ps2_ssx3_course::modeCurrent(ms, rdram);
+        // TKL1 merge: the menu wrapper's Tricky flag means "modeSet(true)
+        // is in effect" (Tricky rows + aliases); reconcile it with the
+        // restored mode so a later menu exit cleans up correctly (F5 tail).
+        ps2_ssx3_tricky::state().tricky = (cur != 0u);
         if (cur != 0u && cur - 1u < ms.modes.size())
         {
             const ps2_ssx3_course::Mode &m = ms.modes[cur - 1u];
