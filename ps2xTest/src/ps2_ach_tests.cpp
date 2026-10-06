@@ -375,6 +375,64 @@ void register_ps2_ach_tests()
             t.IsFalse(ps2x::ui::pollToast(got), "empty clears");
             ps2x::ui::clearToastForTest(); });
 
+        tc.Run("toast queue: one at a time, paced by expiry (ACH4)", [](TestCase &t)
+               {
+            ps2_ach::ToastQueue q;
+            std::string text;
+            t.IsFalse(q.poll(0, false, text), "empty queue shows nothing");
+            q.push("A", "first");
+            q.push("B", "");
+            q.push("C", "third");
+            t.Equals(q.pending(), static_cast<size_t>(3u), "3 pending");
+            t.IsTrue(q.poll(1000, false, text), "first shows at once");
+            t.Equals(text, std::string("A — first"), "title + desc");
+            t.Equals(q.lastShown(), text, "lastShown tracks it");
+            t.IsFalse(q.poll(1001, false, text), "next waits while A is held");
+            t.IsFalse(q.poll(3999, false, text), "still held at 2999 ms");
+            t.IsTrue(q.poll(4000, false, text), "B after A expires");
+            t.Equals(text, std::string("B"), "no desc, no dash");
+            t.IsFalse(q.due(6999), "C not due before B expires");
+            t.IsTrue(q.due(7000), "C due at expiry");
+            t.IsTrue(q.poll(7000, false, text) && text == "C — third", "C third, FIFO order");
+            t.Equals(q.pending(), static_cast<size_t>(0u), "drained");
+            t.IsFalse(q.poll(20000, false, text), "nothing after drain");
+            t.IsFalse(q.due(20000), "not due when empty"); });
+
+        tc.Run("toast queue: another toast defers, then the queue resumes (ACH4)", [](TestCase &t)
+               {
+            ps2_ach::ToastQueue q;
+            std::string text;
+            q.push("A", "");
+            q.push("B", "");
+            t.IsTrue(q.poll(0, false, text) && text == "A", "A shows");
+            // Quick save interrupts at 1 s and is live until 4 s.
+            t.IsFalse(q.poll(3000, true, text), "B waits while Saved is on screen");
+            t.IsFalse(q.poll(3999, true, text), "still waiting");
+            t.Equals(q.pending(), static_cast<size_t>(1u), "B kept");
+            t.IsTrue(q.poll(4000, false, text) && text == "B", "B after Saved clears"); });
+
+        tc.Run("toast queue: > 4 pending coalesce, cap 16 (ACH4)", [](TestCase &t)
+               {
+            ps2_ach::ToastQueue q;
+            std::string text;
+            for (int i = 0; i < 4; ++i)
+                q.push("T" + std::to_string(i), "d");
+            t.IsTrue(q.poll(0, false, text) && text == "T0 — d", "4 pending: individual");
+            t.Equals(q.pending(), static_cast<size_t>(3u), "3 left");
+            ps2_ach::ToastQueue big;
+            for (int i = 0; i < 20; ++i)
+                big.push("T" + std::to_string(i), "d");
+            t.Equals(big.pending(), static_cast<size_t>(20u), "16 held + 4 counted");
+            t.IsTrue(big.poll(0, false, text), "coalesced toast shows");
+            t.Equals(text, std::string("Unlocked: T0, T1, T2 +17 more"), "3 titles + count");
+            t.Equals(big.pending(), static_cast<size_t>(0u), "coalesced drains all");
+            ps2_ach::ToastQueue five;
+            for (int i = 0; i < 5; ++i)
+                five.push("T" + std::to_string(i), "");
+            t.IsTrue(five.poll(0, false, text) && text == "Unlocked: T0, T1, T2 +2 more", "5 pending coalesce");
+            five.clear();
+            t.IsFalse(five.due(0), "clear empties"); });
+
         tc.Run("paths: override wins, else beside the card", [](TestCase &t)
                {
             EnvHold hold;
@@ -447,6 +505,15 @@ void register_ps2_ach_tests()
             for (uint64_t tick = 26; tick <= 35; ++tick)
                 ps2_ach::onVBlankTick(tick, race.rdram.data(), race.scratch.data());
             t.Equals(ps2_ach::unlocksTotal(), 2u, "no re-unlock while held");
+            {
+                // ACH4: the burst is queued, not collapsed: one shown, one waiting.
+                std::string live;
+                t.IsTrue(ps2x::ui::pollToast(live), "first unlock toast is live");
+                t.IsTrue(live.rfind("race started", 0) == 0 || live.rfind("Happiness entered", 0) == 0,
+                         "live toast is an unlock");
+                t.Equals(ps2_ach::toastsPending(), static_cast<size_t>(1u), "second unlock still queued");
+                ps2x::ui::clearToastForTest();
+            }
             ps2_ach::UnlockMap persisted;
             t.IsTrue(ps2_ach::loadStateFile(dir + "/achievements-state.json", persisted),
                      "state file written");
