@@ -5212,7 +5212,7 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
             const bool gemsTricky =
                 gemsMs.armed && ps2_ssx3_course::modeCurrent(gemsMs, rdram) != 0u;
             ps2_tk45c::poll(ps2_tk45c::state(), ps2_tk45c::table(), rdram, PS2_RAM_SIZE, gemsTick,
-                            getRegU32(ctx, 4), gemsTricky);
+                            getRegU32(ctx, 4), gemsTricky, ps2_tk45c::spinEnabled());
         }
         if (targetPc == 0x117838u)
         {

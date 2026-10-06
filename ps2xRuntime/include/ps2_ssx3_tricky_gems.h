@@ -12,6 +12,11 @@
 // Knob PS2X_SSX3_TRICKY_GEMS=1 (default off); table
 // PS2X_SSX3_TRICKY_GEMS_TABLE (staged sidecar from bake_gems.py).
 //
+// TK55: resolved gems also spin (visual only): rows 0/1 of each live gem
+// instance's matrix are rewritten from the stock-rate race clock, so the
+// spin is the same at 60 and 120 and pauses with the race. On with GEMS=1;
+// PS2X_SSX3_TRICKY_GEM_SPIN=0 turns it off (A/B).
+//
 // Threading (TKA1): everything runs on the EE thread at dispatch hooks (a
 // simulation-update point, each physics step); nested guest calls happen
 // only in hook context (synchronous, like any game call). Never on the GS
@@ -62,6 +67,14 @@ constexpr uint32_t kMaxRes = 4u;       // instances per gem (stacked triples + 1
 constexpr float kTeleportJump = 3000.0f;
 constexpr size_t kMaxGems = 512u;
 constexpr uint32_t kScanChunk = 1u << 20;
+// TK55: visual spin. The static renderer draws each instance through its
+// matrix rows +0x10/+0x20/+0x30 (+0x40 translation): poking rows 0/1 turns
+// only the gem (TK55 poke test). 3 deg per race-clock unit = 180 deg/s on
+// the 60 Hz stock-rate clock (it bumps once per 2 guest ticks at full120).
+constexpr uint32_t kRow0Off = 0x10u;
+constexpr uint32_t kRow1Off = 0x20u;
+constexpr uint32_t kRow2Off = 0x30u;
+constexpr uint32_t kSpinDegPerClock = 3u;
 
 // TKL1 F7: the central lanes validate through validateGuestPtr (nonzero,
 // RAM-mirror segment, 4-aligned, span inside RDRAM, no wrap). Callers pass
@@ -280,6 +293,8 @@ struct State
     uint32_t resolved[kMaxGems][kMaxRes] = {{0}};
     uint8_t nres[kMaxGems] = {0};
     bool ambig[kMaxGems] = {false};
+    bool spinLogged = false; // TK55: one SPIN line per scan
+    bool spinSeen[kMaxGems] = {false}; // TK55: one SPIN-GEM line per gem per race
 };
 
 inline State &state() noexcept
@@ -343,6 +358,8 @@ inline void fullReset(State &st, const std::vector<Gem> &gems, uint8_t *ram, siz
     std::memset(st.resolved, 0, sizeof(st.resolved));
     std::memset(st.nres, 0, sizeof(st.nres));
     std::memset(st.ambig, 0, sizeof(st.ambig));
+    st.spinLogged = false;
+    std::memset(st.spinSeen, 0, sizeof(st.spinSeen));
 }
 
 // x-index over the table (built once): per RAM word one binary search.
@@ -486,11 +503,143 @@ inline bool trickState(const uint8_t *ram, size_t ramSize, uint32_t r, uint32_t 
     return true;
 }
 
+// TK55 knob PS2X_SSX3_TRICKY_GEM_SPIN: on with GEMS=1 unless set to 0 (A/B).
+inline bool spinEnabled() noexcept
+{
+    static const bool on = [] {
+        const char *e = std::getenv("PS2X_SSX3_TRICKY_GEM_SPIN");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+
+// Spun rows 0/1 for angle `deg` about the instance's own axis (row 2). The
+// result depends only on what spinning leaves invariant (row 2, the row
+// scale, handedness) plus the angle, so it carries no host history: the same
+// RAM + clock gives the same bytes after a savestate load. Canonical phase 0
+// is world X projected onto the plane normal to the axis (world Y if X is
+// near the axis). Refuses non-finite, degenerate, non-uniformly scaled or
+// sheared bases (fail closed).
+inline bool spinRows(const float r0[3], const float r1[3], const float r2[3], uint32_t deg, float o0[3],
+                     float o1[3]) noexcept
+{
+    for (int k = 0; k < 3; ++k)
+        if (!std::isfinite(r0[k]) || !std::isfinite(r1[k]) || !std::isfinite(r2[k]))
+            return false;
+    const double s0 = std::sqrt(double(r0[0]) * r0[0] + double(r0[1]) * r0[1] + double(r0[2]) * r0[2]);
+    const double s1 = std::sqrt(double(r1[0]) * r1[0] + double(r1[1]) * r1[1] + double(r1[2]) * r1[2]);
+    const double s2 = std::sqrt(double(r2[0]) * r2[0] + double(r2[1]) * r2[1] + double(r2[2]) * r2[2]);
+    if (!(s0 > 1e-6) || !(s2 > 1e-6) || std::fabs(s0 - s1) > 1e-3 * s0)
+        return false;
+    const double a[3] = {r2[0] / s2, r2[1] / s2, r2[2] / s2};
+    const double d0 = (r0[0] * a[0] + r0[1] * a[1] + r0[2] * a[2]) / s0;
+    const double d1 = (r1[0] * a[0] + r1[1] * a[1] + r1[2] * a[2]) / s1;
+    const double d01 = (double(r0[0]) * r1[0] + double(r0[1]) * r1[1] + double(r0[2]) * r1[2]) / (s0 * s1);
+    if (std::fabs(d0) > 1e-3 || std::fabs(d1) > 1e-3 || std::fabs(d01) > 1e-3)
+        return false;
+    // Handedness of (r0, r1, axis): kept so a mirrored instance stays mirrored.
+    const double cz[3] = {double(r0[1]) * r1[2] - double(r0[2]) * r1[1], double(r0[2]) * r1[0] - double(r0[0]) * r1[2],
+                          double(r0[0]) * r1[1] - double(r0[1]) * r1[0]};
+    const double h = (cz[0] * a[0] + cz[1] * a[1] + cz[2] * a[2]) < 0.0 ? -1.0 : 1.0;
+    double c0[3] = {1.0 - a[0] * a[0], -a[0] * a[1], -a[0] * a[2]};
+    double n = std::sqrt(c0[0] * c0[0] + c0[1] * c0[1] + c0[2] * c0[2]);
+    if (n < 0.5)
+    {
+        c0[0] = -a[1] * a[0];
+        c0[1] = 1.0 - a[1] * a[1];
+        c0[2] = -a[1] * a[2];
+        n = std::sqrt(c0[0] * c0[0] + c0[1] * c0[1] + c0[2] * c0[2]);
+    }
+    for (double &v : c0)
+        v /= n;
+    const double c1[3] = {h * (a[1] * c0[2] - a[2] * c0[1]), h * (a[2] * c0[0] - a[0] * c0[2]),
+                          h * (a[0] * c0[1] - a[1] * c0[0])};
+    const double th = double(deg % 360u) * (3.14159265358979323846 / 180.0);
+    const double c = std::cos(th), s = std::sin(th);
+    for (int k = 0; k < 3; ++k)
+    {
+        o0[k] = static_cast<float>(s0 * (c * c0[k] + s * c1[k]));
+        o1[k] = static_cast<float>(s0 * (-s * c0[k] + c * c1[k]));
+    }
+    return true;
+}
+
+// Spin every resolved, alive gem instance to the clock's angle. Only rows 0/1
+// (xyz) change; the w lanes, row 2, translation, flags and every pickup input
+// stay as they are, so contact/scoring are untouched. Writes are conditional
+// (no-op when the bytes already hold). Hidden (collected) or unknown-state
+// instances and stale pointers are skipped. Returns instances spun this call.
+inline size_t spinGems(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_t ramSize, uint64_t tick,
+                       uint32_t clock)
+{
+    if (!ram || ramSize == 0u || !st.scanDone)
+        return 0u;
+    const uint32_t deg = (clock % 120u) * kSpinDegPerClock;
+    size_t spun = 0u, refused = 0u;
+    for (size_t i = 0u; i < gems.size() && i < kMaxGems; ++i)
+    {
+        if (st.ambig[i] || isCollected(st, i))
+            continue;
+        uint32_t gg[3] = {0};
+        std::memcpy(gg, gems[i].xyz, 12);
+        size_t gemSpun = 0u;
+        for (uint8_t j = 0u; j < st.nres[i]; ++j)
+        {
+            const uint32_t pb = st.resolved[i][j];
+            uint32_t p = 0u;
+            if (pb == 0u || !ps2_ssx3_tricky_hud::validateGuestPtr(pb, kInstPosOff + 12u, ramSize, p))
+                continue;
+            uint32_t v[3] = {0};
+            std::memcpy(v, ram + p + kInstPosOff, 12);
+            if (v[0] != gg[0] || v[1] != gg[1] || v[2] != gg[2])
+                continue; // stale pointer
+            uint32_t w8 = 0u;
+            std::memcpy(&w8, ram + p + 8u, 4);
+            const uint32_t lo = w8 & 0xffu;
+            if (lo != kShowLow && lo != kAliveLow2)
+                continue;
+            float r[3][3];
+            for (int k = 0; k < 3; ++k)
+            {
+                std::memcpy(r[0] + k, ram + p + kRow0Off + 4u * k, 4);
+                std::memcpy(r[1] + k, ram + p + kRow1Off + 4u * k, 4);
+                std::memcpy(r[2] + k, ram + p + kRow2Off + 4u * k, 4);
+            }
+            float o0[3], o1[3];
+            if (!spinRows(r[0], r[1], r[2], deg, o0, o1))
+            {
+                ++refused;
+                continue;
+            }
+            if (std::memcmp(o0, r[0], 12) != 0)
+                std::memcpy(ram + p + kRow0Off, o0, 12);
+            if (std::memcmp(o1, r[1], 12) != 0)
+                std::memcpy(ram + p + kRow1Off, o1, 12);
+            ++spun;
+            ++gemSpun;
+        }
+        if (gemSpun != 0u && !st.spinSeen[i])
+        {
+            st.spinSeen[i] = true;
+            std::fprintf(stderr, "[tk55] tick=%llu SPIN-GEM %s rid=%u x%u n=%zu at=%08x clk=%u deg=%u %s\n",
+                         (unsigned long long)tick, gems[i].course, gems[i].rid, (unsigned)gems[i].value, gemSpun,
+                         st.resolved[i][0], clock, deg, gems[i].donor);
+        }
+    }
+    if (!st.spinLogged)
+    {
+        st.spinLogged = true;
+        std::fprintf(stderr, "[tk55] tick=%llu SPIN %zu instances (%zu refused) clk=%u deg=%u\n",
+                     (unsigned long long)tick, spun, refused, clock, deg);
+    }
+    return spun;
+}
+
 // The boundary-hook poll (state, table and course flag injected, so tests
 // drive it with fake RAM; the glue passes the singletons). All writes
 // conditional.
 inline void poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_t ramSize, uint64_t tick,
-                 uint32_t a0, bool tricky)
+                 uint32_t a0, bool tricky, bool spin = false)
 {
     if (!tricky)
     {
@@ -595,6 +744,9 @@ inline void poll(State &st, const std::vector<Gem> &gems, uint8_t *ram, size_t r
             return;
         }
     }
+    // TK55: visual spin (racing, scan done; the clock is frozen in pause).
+    if (spin)
+        spinGems(st, gems, ram, ramSize, tick, clock);
     if (!st.prevValid || teleportJump(st.prev, cur))
     {
         const bool jump = st.prevValid && teleportJump(st.prev, cur);

@@ -70,6 +70,34 @@ void fakeInstance(std::vector<uint8_t> &ram, uint32_t at, float x, float y, floa
     wf(ram, at + 0x48u, z);
 }
 
+// TK55: an upright gem basis (Mesa rid 540's authored rows), w lanes marked.
+void fakeMatrix(std::vector<uint8_t> &ram, uint32_t at, const float r0[3], const float r1[3], const float r2[3])
+{
+    for (int k = 0; k < 3; ++k)
+    {
+        wf(ram, at + 0x10u + 4u * k, r0[k]);
+        wf(ram, at + 0x20u + 4u * k, r1[k]);
+        wf(ram, at + 0x30u + 4u * k, r2[k]);
+    }
+    w32(ram, at + 0x1cu, 0x11111111u);
+    w32(ram, at + 0x2cu, 0x22222222u);
+    w32(ram, at + 0x3cu, 0x33333333u);
+}
+
+double dot3(const float a[3], const float b[3])
+{
+    return double(a[0]) * b[0] + double(a[1]) * b[1] + double(a[2]) * b[2];
+}
+
+bool near(double a, double b, double eps = 1e-5)
+{
+    return std::fabs(a - b) <= eps;
+}
+
+const float kGemR0[3] = {-0.15126082f, -0.98849386f, 0.0f};
+const float kGemR1[3] = {0.98849386f, -0.15126082f, 0.0f};
+const float kGemR2[3] = {0.0f, 0.0f, 1.0f};
+
 const char *kTable2 = "# synthetic three-gem table\n"
                       "TEST 10 1000 0 0 100 2 Gem_Yellow_Test\n"
                       "TEST 20 2000 0 0 100 3 Gem_Orange_Test\n"
@@ -302,6 +330,154 @@ MiniTest::Case("Ps2Ssx3TrickyGemsGuards", [](TestCase &tc)
                 ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1005, kR, true);
                 t.IsTrue((r32(ram, kInst0 + 8u) & 0xffu) == 0x13u, "0x13 refused");
                 t.IsTrue(rf(ram, kT + 0x1c4u) == 2.0f, "mult tracks despite refuse");
+            }
+        }); });
+
+MiniTest::Case("Ps2Ssx3TrickyGemsSpin", [](TestCase &tc)
+               {
+        tc.Run("spin rows: rotation about the own axis, history-free", [](TestCase &t)
+               {
+            float o0[3], o1[3];
+            t.IsTrue(ps2_tk45c::spinRows(kGemR0, kGemR1, kGemR2, 0u, o0, o1), "upright accepted");
+            t.IsTrue(near(o0[0], 1) && near(o0[1], 0) && near(o1[0], 0) && near(o1[1], 1) && o0[2] == 0.0f &&
+                         o1[2] == 0.0f,
+                     "phase 0 = world X/Y");
+            t.IsTrue(ps2_tk45c::spinRows(kGemR0, kGemR1, kGemR2, 90u, o0, o1), "90 accepted");
+            t.IsTrue(near(o0[0], 0) && near(o0[1], 1) && near(o1[0], -1) && near(o1[1], 0), "90 deg turns X to Y");
+            for (uint32_t deg : {3u, 177u, 357u})
+            {
+                t.IsTrue(ps2_tk45c::spinRows(kGemR0, kGemR1, kGemR2, deg, o0, o1), "accepted");
+                t.IsTrue(near(dot3(o0, o0), 1) && near(dot3(o1, o1), 1) && near(dot3(o0, o1), 0), "orthonormal");
+                t.IsTrue(near(dot3(o0, kGemR2), 0) && near(dot3(o1, kGemR2), 0), "axis kept");
+                const float cz = o0[0] * o1[1] - o0[1] * o1[0];
+                t.IsTrue(near(cz, 1), "right-handed kept");
+            }
+            // History-free: spinning an already-spun basis to the same angle
+            // lands on the same rows (savestate load mid-spin), and the same
+            // input gives the same bytes.
+            float s0[3], s1[3], q0[3], q1[3], p0[3], p1[3];
+            t.IsTrue(ps2_tk45c::spinRows(kGemR0, kGemR1, kGemR2, 213u, s0, s1), "spun once");
+            t.IsTrue(ps2_tk45c::spinRows(s0, s1, kGemR2, 60u, q0, q1), "from spun");
+            t.IsTrue(ps2_tk45c::spinRows(kGemR0, kGemR1, kGemR2, 60u, p0, p1), "from authored");
+            bool same = true;
+            for (int k = 0; k < 3; ++k)
+                same = same && near(q0[k], p0[k], 1e-6) && near(q1[k], p1[k], 1e-6);
+            t.IsTrue(same, "angle is absolute");
+            float d0[3], d1[3];
+            ps2_tk45c::spinRows(kGemR0, kGemR1, kGemR2, 60u, d0, d1);
+            t.IsTrue(std::memcmp(d0, p0, 12) == 0 && std::memcmp(d1, p1, 12) == 0, "deterministic bytes");
+            // Tilted, scaled and mirrored bases keep axis, scale and handedness.
+            const float a2[3] = {0.0f, 1.2f, 1.6f}; // scale 2 axis (0, .6, .8)
+            const float a0[3] = {2.0f, 0.0f, 0.0f};
+            const float a1[3] = {0.0f, 1.6f, -1.2f}; // a0 x a1 = (0,2.4,3.2) ~ +a2
+            t.IsTrue(ps2_tk45c::spinRows(a0, a1, a2, 45u, o0, o1), "tilted accepted");
+            t.IsTrue(near(dot3(o0, o0), 4, 1e-4) && near(dot3(o1, o1), 4, 1e-4), "scale kept");
+            t.IsTrue(near(dot3(o0, a2), 0, 1e-4) && near(dot3(o1, a2), 0, 1e-4), "tilted axis kept");
+            const double hz = (double(o0[1]) * o1[2] - double(o0[2]) * o1[1]) * a2[0] +
+                              (double(o0[2]) * o1[0] - double(o0[0]) * o1[2]) * a2[1] +
+                              (double(o0[0]) * o1[1] - double(o0[1]) * o1[0]) * a2[2];
+            t.IsTrue(hz > 0.0, "tilted handedness kept");
+            const float m1[3] = {-kGemR1[0], -kGemR1[1], -kGemR1[2]};
+            t.IsTrue(ps2_tk45c::spinRows(kGemR0, m1, kGemR2, 30u, o0, o1), "mirrored accepted");
+            t.IsTrue(o0[0] * o1[1] - o0[1] * o1[0] < 0.0f, "mirror kept");
+            // Fail closed.
+            const float big[3] = {2.0f * kGemR1[0], 2.0f * kGemR1[1], 0.0f};
+            t.IsTrue(!ps2_tk45c::spinRows(kGemR0, big, kGemR2, 30u, o0, o1), "non-uniform scale refused");
+            const float shear[3] = {0.5f, 0.5f, 0.7f};
+            t.IsTrue(!ps2_tk45c::spinRows(kGemR0, kGemR1, shear, 30u, o0, o1), "shear refused");
+            const float zero[3] = {0, 0, 0};
+            t.IsTrue(!ps2_tk45c::spinRows(zero, zero, kGemR2, 30u, o0, o1), "zero refused");
+            float nan[3] = {kGemR0[0], kGemR0[1], 0.0f};
+            nan[2] = std::numeric_limits<float>::quiet_NaN();
+            t.IsTrue(!ps2_tk45c::spinRows(nan, kGemR1, kGemR2, 30u, o0, o1), "NaN refused");
+        });
+        tc.Run("poll spins live gems only; visual-only, Tricky-gated", [](TestCase &t)
+               {
+            std::vector<Gem> gems;
+            t.IsTrue(parse2(gems), "table");
+            auto setup = [&](std::vector<uint8_t> &ram, State &st) {
+                fakeRace(ram, 500, 0, 0, 100);
+                fakeInstance(ram, kInst0, 1000, 0, 0);
+                fakeInstance(ram, kInst1, 2000, 0, 0);
+                fakeMatrix(ram, kInst0, kGemR0, kGemR1, kGemR2);
+                fakeMatrix(ram, kInst1, kGemR0, kGemR1, kGemR2);
+                st.scanDone = true;
+                st.resolved[0][0] = kInst0;
+                st.nres[0] = 1u;
+                st.resolved[1][0] = kInst1;
+                st.nres[1] = 1u;
+            };
+            std::vector<uint8_t> ram(kRamSize, 0);
+            State st;
+            setup(ram, st);
+            const std::vector<uint8_t> before = ram;
+            ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1000, kR, true, true);
+            fakeRace(ram, 600, 0, 0, 101);
+            ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1001, kR, true, true);
+            // clk 101 -> (101 % 120) * 3 = 303 deg.
+            float e0[3], e1[3];
+            ps2_tk45c::spinRows(kGemR0, kGemR1, kGemR2, 303u, e0, e1);
+            t.IsTrue(std::memcmp(ram.data() + kInst0 + 0x10u, e0, 12) == 0 &&
+                         std::memcmp(ram.data() + kInst0 + 0x20u, e1, 12) == 0,
+                     "gem0 rows at clock angle");
+            t.IsTrue(std::memcmp(ram.data() + kInst1 + 0x10u, e0, 12) == 0, "gem1 rows at clock angle");
+            bool untouched = std::memcmp(ram.data() + kInst0 + 0x30u, before.data() + kInst0 + 0x30u, 0x1cu) == 0 &&
+                             r32(ram, kInst0 + 0x1cu) == 0x11111111u && r32(ram, kInst0 + 0x2cu) == 0x22222222u &&
+                             r32(ram, kInst0 + 8u) == 0x00210123u && rf(ram, kT + 0x1c4u) == 1.0f;
+            t.IsTrue(untouched, "row2, translation, w lanes, flags, mult untouched");
+            // Only rows 0/1 of the two instances differ from the start image.
+            size_t diff = 0u;
+            for (size_t k = 0u; k < ram.size(); ++k)
+                if (ram[k] != before[k])
+                {
+                    const uint32_t a = static_cast<uint32_t>(k);
+                    const bool rows = (a >= kInst0 + 0x10u && a < kInst0 + 0x2cu) ||
+                                      (a >= kInst1 + 0x10u && a < kInst1 + 0x2cu);
+                    const bool race = a >= kB && a < kB + 0x10u; // fakeRace clock + position
+                    const bool pos = a >= kR + 0x110u && a < kR + 0x11cu;
+                    if (!rows && !race && !pos)
+                        ++diff;
+                }
+            t.IsTrue(diff == 0u, "no other bytes written");
+            // Same clock again: zero writes.
+            const std::vector<uint8_t> again = ram;
+            ps2_tk45c::poll(st, gems, ram.data(), ram.size(), 1002, kR, true, true);
+            t.IsTrue(ram == again, "same clock is a no-op");
+            // Hidden (collected) gem is left alone; spin knob off writes nothing.
+            {
+                std::vector<uint8_t> r2(kRamSize, 0);
+                State s2;
+                setup(r2, s2);
+                w32(r2, kInst0 + 8u, 0x00210105u);
+                ps2_tk45c::poll(s2, gems, r2.data(), r2.size(), 1000, kR, true, true);
+                fakeRace(r2, 600, 0, 0, 101);
+                ps2_tk45c::poll(s2, gems, r2.data(), r2.size(), 1001, kR, true, true);
+                t.IsTrue(std::memcmp(r2.data() + kInst0 + 0x10u, kGemR0, 12) == 0, "hidden gem not spun");
+                t.IsTrue(std::memcmp(r2.data() + kInst1 + 0x10u, e0, 12) == 0, "live gem spun");
+            }
+            {
+                std::vector<uint8_t> r3(kRamSize, 0);
+                State s3;
+                setup(r3, s3);
+                const std::vector<uint8_t> b3 = r3;
+                ps2_tk45c::poll(s3, gems, r3.data(), r3.size(), 1000, kR, true, false);
+                t.IsTrue(std::memcmp(r3.data() + kInst0, b3.data() + kInst0, 0x50) == 0, "spin off: no writes");
+                ps2_tk45c::poll(s3, gems, r3.data(), r3.size(), 1001, kR, false, true);
+                t.IsTrue(std::memcmp(r3.data() + kInst0, b3.data() + kInst0, 0x50) == 0, "stock: no writes");
+            }
+            // Pickup is unchanged with spin on: crossing gem0 still collects x2 and hides.
+            {
+                std::vector<uint8_t> r4(kRamSize, 0);
+                State s4;
+                setup(r4, s4);
+                fakeRace(r4, 850, 0, 0, 100);
+                ps2_tk45c::poll(s4, gems, r4.data(), r4.size(), 1000, kR, true, true);
+                fakeRace(r4, 950, 0, 0, 101);
+                ps2_tk45c::poll(s4, gems, r4.data(), r4.size(), 1001, kR, true, true);
+                fakeRace(r4, 1050, 0, 0, 102);
+                ps2_tk45c::poll(s4, gems, r4.data(), r4.size(), 1002, kR, true, true);
+                t.IsTrue(rf(r4, kT + 0x1c4u) == 2.0f && (r32(r4, kInst0 + 8u) & 0xffu) == 0x05u,
+                         "pickup x2 + hide unchanged");
             }
         }); });
 
