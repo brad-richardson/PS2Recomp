@@ -672,8 +672,6 @@ namespace
     // pool count is pinned to 2047 (the allocation lands on the sink) and
     // prev to the dummy (so the sink is never linked into a drawn chain and
     // never takes the top-level append path).
-    // PS2X_SSX3_DRAWTABLE_STATS=1 (observation only) logs the end-of-frame
-    // counts at the reset call.
     constexpr uint32_t kSsx3DrawKeyCall = 0x00364240u;
     constexpr uint32_t kSsx3DrawKeyEnd = 0x00364360u;
     constexpr uint32_t kSsx3DrawAppendLoop1Call = 0x0036307Cu;
@@ -701,17 +699,8 @@ namespace
         uint64_t refusals = 0u;
         uint64_t restoreOdd = 0u;
         uint64_t poolOver = 0u;
-        // Stats, per frame (cleared at the reset call).
-        uint32_t siteAppends[5] = {};
-        uint32_t frameRefusals = 0u;
-        uint32_t frameSunk = 0u;
         uint64_t sunk = 0u;
         uint64_t walkCut = 0u;
-        uint64_t frames = 0u;
-        uint64_t loggedFrames = 0u;
-        uint64_t windowTick = 0u;
-        int32_t winMax[5] = {};
-        uint32_t winAppends = 0u;
     };
     Ssx3DrawTableState g_ssx3Draw;
     std::atomic<bool> g_ssx3DrawPending{false};
@@ -728,18 +717,6 @@ namespace
             return m;
         }();
         return mode;
-    }
-
-    bool ssx3DrawTableStatsOn()
-    {
-        static const bool on = [] {
-            const char *e = std::getenv("PS2X_SSX3_DRAWTABLE_STATS");
-            const bool v = e && e[0] == '1';
-            if (v)
-                std::fprintf(stderr, "[ssx3-drawtable-stats] armed (end-of-frame counts at the 0x362CC8 reset)\n");
-            return v;
-        }();
-        return on;
     }
 
     int32_t ssx3ReadS32(const uint8_t *rdram, uint32_t addr)
@@ -794,15 +771,12 @@ namespace
     void ssx3DrawTableGuard(uint8_t *rdram, R5900Context *ctx, uint32_t sourcePc)
     {
         const int mode = ssx3DrawTableMode();
-        const bool stats = ssx3DrawTableStatsOn();
-        if ((mode == 0 && !stats) || !rdram || !ctx)
+        if (mode == 0 || !rdram || !ctx)
             return;
         int site = -1;
         const uint32_t tb = ssx3DrawTableBase(rdram, ctx, sourcePc, site);
         if (site < 0)
             return;
-        if (stats)
-            ++g_ssx3Draw.siteAppends[site];
         if (mode == 1)
         {
             if (site > 1)
@@ -835,7 +809,6 @@ namespace
         st.pending = true;
         g_ssx3DrawPending.store(true, std::memory_order_relaxed);
         ssx3WriteU32(rdram, tb + 0x7CA4u, static_cast<uint32_t>(kSsx3DrawTableCap - 1));
-        ++st.frameRefusals;
         const uint64_t n = ++st.refusals;
         if (n <= 4u || (n & (n - 1u)) == 0u)
             std::fprintf(stderr, "[ssx3-drawtable-guard] refuse #%llu site=%d count=%d\n",
@@ -895,7 +868,6 @@ namespace
             ssx3WriteU32(rdram, found + 0x0Cu, 0u);
             ssx3WriteU32(rdram, found + 0x10u, 0u);
             ssx3WriteU32(rdram, found + 0x18u, 0u);
-            ++st.frameSunk;
             const uint64_t n = ++st.sunk;
             if (n <= 4u || (n & (n - 1u)) == 0u)
                 std::fprintf(stderr, "[ssx3-drawtable-guard] pool full: sink #%llu site=0x%x pool=%d\n",
@@ -925,24 +897,19 @@ namespace
         if (cont == 0)
             return;
         ssx3WriteU32(rdram, getRegU32(ctx, 20) + 0x7CA0u, ssx3DrawPoolRecord(b, kSsx3DrawPoolReal));
-        ++g_ssx3Draw.frameSunk;
     }
 
     // At the reset call (a0 = b): the previous frame's final counts.
     void ssx3DrawTableFrame(const uint8_t *rdram, const R5900Context *ctx, uint64_t tick)
     {
         const int mode = ssx3DrawTableMode();
-        const bool stats = ssx3DrawTableStatsOn();
-        if ((mode != 2 && !stats) || !rdram || !ctx)
+        if (mode != 2 || !rdram || !ctx)
             return;
         Ssx3DrawTableState &st = g_ssx3Draw;
         const uint32_t b = getRegU32(ctx, 4);
-        const int32_t items = ssx3ReadS32(rdram, b);
         const int32_t tex = ssx3ReadS32(rdram, b + 0x51480u);
-        const int32_t texStatic = ssx3ReadS32(rdram, b + 0x57484u);
         const int32_t pool = ssx3ReadS32(rdram, b + 0x57494u);
-        const int32_t table = ssx3ReadS32(rdram, b + 0x67CA4u);
-        if (mode == 2 && (pool > kSsx3DrawPoolCap || tex > kSsx3DrawTexCap))
+        if (pool > kSsx3DrawPoolCap || tex > kSsx3DrawTexCap)
         {
             const uint64_t n = ++st.poolOver;
             if (n <= 4u || (n & (n - 1u)) == 0u)
@@ -950,41 +917,6 @@ namespace
                              static_cast<unsigned long long>(n), static_cast<unsigned long long>(tick),
                              pool, kSsx3DrawPoolCap, tex, kSsx3DrawTexCap);
         }
-        if (!stats)
-            return;
-        uint32_t appends = 0u;
-        for (uint32_t a : st.siteAppends)
-            appends += a;
-        ++st.frames;
-        const bool over = appends > static_cast<uint32_t>(kSsx3DrawTableCap) || pool > kSsx3DrawPoolCap ||
-                          tex > kSsx3DrawTexCap || table > kSsx3DrawTableCap;
-        if (over)
-        {
-            const uint64_t n = ++st.loggedFrames;
-            if (n <= 64u || (n & 63u) == 0u)
-                std::fprintf(stderr,
-                             "[ssx3-drawtable-stats] over #%llu t=%llu b=0x%x items=%d tex=%d(static %d) pool=%d table=%d "
-                             "appends=%u (%u/%u/%u/%u/%u) refused=%u sunk=%u\n",
-                             static_cast<unsigned long long>(n), static_cast<unsigned long long>(tick), b, items, tex,
-                             texStatic, pool, table, appends, st.siteAppends[0], st.siteAppends[1], st.siteAppends[2],
-                             st.siteAppends[3], st.siteAppends[4], st.frameRefusals, st.frameSunk);
-        }
-        const int32_t vals[5] = {items, tex, pool, table, static_cast<int32_t>(appends)};
-        for (int i = 0; i < 5; ++i)
-            st.winMax[i] = std::max(st.winMax[i], vals[i]);
-        if (tick >= st.windowTick + 300u)
-        {
-            std::fprintf(stderr, "[ssx3-drawtable-stats] window t=%llu frames=%llu max items=%d tex=%d pool=%d table=%d appends=%d\n",
-                         static_cast<unsigned long long>(tick), static_cast<unsigned long long>(st.frames),
-                         st.winMax[0], st.winMax[1], st.winMax[2], st.winMax[3], st.winMax[4]);
-            st.windowTick = tick;
-            for (int32_t &m : st.winMax)
-                m = 0;
-        }
-        for (uint32_t &a : st.siteAppends)
-            a = 0u;
-        st.frameRefusals = 0u;
-        st.frameSunk = 0u;
     }
 
     // TK38: SSX 3 camera spatial-query list guard (PS2X_SSX3_SPATIAL_LIST_GUARD=1,
