@@ -31,7 +31,9 @@ Its interface is `build.sh <mac|android|ios|ios-sim> --armsx2 <checkout>
 ([parser](../ps2xRuntime/third_party/armsx2/build.sh#L29)). It requires clean
 source trees, archives the supplied ARMSX2 HEAD, and records both source SHAs.
 It does **not** fetch a fixed renderer revision or generate the game inputs.
-A portable replacement for its hardcoded private staging remains outstanding.
+The public tools/ssx3 entry avoids this staging for its Mac baseline and
+provides an unvalidated Android source dependency/library command. Portable
+iOS offline recording/generation remains outstanding.
 
 Mac builds `libge1_gs.dylib`, `ge1_replay` and `libmv2_microvu.dylib` using
 private pinned dependencies and OM1RT inputs

@@ -89,11 +89,15 @@ apps containing it.
 
 ## Optional local optimization and iOS
 
-VU0 images: run your own runner with `PS2X_VU0_RECOMP_DUMP` pointing to a private
-directory, then build the public `vu1_fixture_gen` target and re-emit your own
-4 KiB image with `vu1_fixture_gen --image <image.bin> <output-dir>`.
-Supply that output through `PS2X_VU0_RECOMP_DIR` / `ps2xVu0RecompDir`. The
-baseline above deliberately accepts no pre-generated VU images.
+VU0 images: run your own baseline runner with `PS2X_VU0_RECOMP_DUMP`
+pointing to an existing private directory. The runtime emitter directly writes
+`vu0e_<hash>.cpp` when it encounters the program; no pre-existing image is
+needed. Supply that directory through CMake `PS2X_VU0_RECOMP_DIR` or Gradle
+`ps2xVu0RecompDir` and rebuild, then use `PS2X_VU0_RECOMP=1`. If you already
+have your own raw 4 KiB microprogram image, the public `vu1_fixture_gen
+--image <image.bin> <output-dir>` can re-emit it without another boot. These
+outputs are game-derived and stay private. The baseline command above
+builds with interpreted VU0; it does not take another user's VU images.
 
 Android PGO: use Gradle `-Pps2xPgoGenerate=ON
 -Pps2xPgoHelperDir=/path/to/this/tools/ssx3/pgo`, play with your own disc and

@@ -10,7 +10,7 @@ hide the failure. This source preview still has [private build gaps](ssx3-build.
 | --- | --- | --- |
 | ISO/ELF checksum differs | Compare both supported hashes; stop before generation. Another region or revision is not supported by this contract. | [Input contract](ssx3-inputs.md) |
 | `missing pinned input` or `missing GE1 bundle` | The library script needs private staging; installing CMake alone does not close this gap. It has no dry-run mode. | [build.sh](../ps2xRuntime/third_party/armsx2/build.sh#L55), [iOS](../ps2xRuntime/third_party/armsx2/build.sh#L124) |
-| `om1rt-adapter needs -D...` | The Mac recipe consumes private OM1RT core/header/recording inputs. Library compilation does not generate them. | [OM1 CMake](../ps2xRuntime/third_party/armsx2/om1/rt/CMakeLists.txt#L12) |
+| `om1rt-adapter needs -D...` | The older Mac build.sh consumes private OM1RT inputs; the public tools/ssx3 mac-libs command uses the JIT bridge without that stage. | [OM1 CMake](../ps2xRuntime/third_party/armsx2/om1/rt/CMakeLists.txt#L12) |
 | Android duplicate `libhardware.so` | Remove only the duplicate from your own staged JNI directory; the HAL builds from source. | [Gradle guard](../android/app/build.gradle#L93) |
 | `[gs:external] GE1 dlopen` failure | Verify `PS2X_GS_EXTERNAL_LIBRARY`, host ABI and dependent libraries against your local build manifest. | [loader](../ps2xRuntime/src/lib/gs/ps2_gs_external_backend.cpp#L142) |
 | microVU `dlopen failed` / ABI mismatch | Verify `PS2X_MICROVU_LIB` and matching source/library stage. Default dynamic names are `libmv2_microvu.so` or `.dylib`; iOS uses a static offline core. | [microVU loader](../ps2xRuntime/src/lib/vu/ps2_microvu.cpp#L152) |
