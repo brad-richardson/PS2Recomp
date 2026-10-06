@@ -1,11 +1,12 @@
 # PS2Recomp — SSX 3 arm64 source preview
 
 The `ssx3` branch is an SSX 3 PS2 static-recompilation fork of
-[ran-j/PS2Recomp](https://github.com/ran-j/PS2Recomp). The active targets are
-arm64 macOS, Android and iOS. GameCube and x86 are not supported play targets.
-This is a source preview: an independent build from a disc alone is **not yet
-reproducible with public tooling**. Existing play builds use private generated
-inputs and dependency staging. No game-bearing downloads are provided.
+[ran-j/PS2Recomp](https://github.com/ran-j/PS2Recomp). The supported build host is macOS on Apple silicon;
+play targets are Android arm64 and iOS. Windows/x86 is unsupported.
+[Build from your own disc](tools/ssx3/README.md) provides pinned EE preparation,
+a Mac runner/library recipe and Android build commands. This source preview
+still lacks a complete portable iOS offline-VU1 recipe; device builds are not
+established by Mac validation. No game-bearing downloads are provided.
 
 Start with the [supported input contract](docs/ssx3-inputs.md), then the
 [build dependency map](docs/ssx3-build.md). For a locally prepared Android

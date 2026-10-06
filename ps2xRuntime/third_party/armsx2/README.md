@@ -1,5 +1,7 @@
 # ARMSX2 carry: adapters + platform builds (AX4b)
 
+New local preparation/build entry: [tools/ssx3](../../../tools/ssx3/README.md). Supported build host: macOS Apple silicon; play targets: Android arm64 / iOS. Windows/x86 is unsupported.
+
 The ARMSX2-side carry (GS + microVU on ARMSX2 master) lives on the PCSX2
 fork branch `armsx2-ssx3-one` (12 in-tree fix groups SG01–SG12; class table
 and group list: `SSX3-CARRY.md` at that branch's root). Everything additive
@@ -11,7 +13,8 @@ time and fail fast when unset).
 
 ## External-user build status
 
-This is source integration, not a portable dependency bootstrap. `build.sh`
+The new tools/ssx3 entry supplies a public Mac dependency/library build and
+an unvalidated Android source dependency/library command. The older `build.sh`
 is the maintainer's host recipe: Mac requires private pinned GE1 dependencies
 and OM1RT inputs; Android delegates to a private remote build helper; iOS
 requires a pre-staged dependency bundle. The script has no `--help`/dry-run

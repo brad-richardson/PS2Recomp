@@ -1,5 +1,7 @@
 # Android SSX 3 local setup
 
+New local preparation/build entry: [tools/ssx3](../tools/ssx3/README.md). Supported build host: macOS Apple silicon; play targets: Android arm64 / iOS. Windows/x86 is unsupported.
+
 Read the [input contract](../docs/ssx3-inputs.md) and
 [private dependency gaps](../docs/ssx3-build.md) first. These commands assume
 already prepared, matching EE/VU0 code, JNI libraries and GS resources. They

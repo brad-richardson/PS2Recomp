@@ -1,7 +1,10 @@
 # SSX 3 build prerequisites and current gaps
 
-This is a dependency inventory, **not a clean-machine build recipe**. Public
-source alone does not yet reproduce the SSX 3 play build. Prepare the
+New local preparation/build entry: [tools/ssx3](../tools/ssx3/README.md). Supported build host: macOS Apple silicon; play targets: Android arm64 / iOS. Windows/x86 is unsupported.
+
+This is the maintainer build dependency inventory. The new public entry
+regenerates EE code and builds a Mac baseline without PGO or generated VU0;
+optimized device play builds still require additional local preparation. Prepare the
 [exact supported inputs](ssx3-inputs.md) locally first. Library compilation and
 SSX 3 guest-code generation are separate steps.
 

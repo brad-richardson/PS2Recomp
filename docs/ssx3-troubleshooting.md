@@ -1,5 +1,7 @@
 # SSX 3 troubleshooting
 
+New local preparation/build entry: [tools/ssx3](../tools/ssx3/README.md). Supported build host: macOS Apple silicon; play targets: Android arm64 / iOS. Windows/x86 is unsupported.
+
 First record the source revision and the exact stage that failed. Stop at a
 wrong input hash, ABI mismatch or guest crash; do not change several knobs to
 hide the failure. This source preview still has [private build gaps](ssx3-build.md).

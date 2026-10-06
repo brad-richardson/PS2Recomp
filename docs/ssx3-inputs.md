@@ -1,5 +1,7 @@
 # Supported SSX 3 inputs
 
+New local preparation/build entry: [tools/ssx3](../tools/ssx3/README.md). Supported build host: macOS Apple silicon; play targets: Android arm64 / iOS. Windows/x86 is unsupported.
+
 The supported identity is SSX 3 (USA), PS2 serial **SLUS-20772**, with the
 extracted executable named `SLUS_207.72`. Support is for these exact bytes,
 not every USA pressing or another region:
@@ -31,9 +33,10 @@ external input/build directories. The runner reads the ISO through
 [disc configuration](../ps2xRuntime/src/main.cpp#L309)). Android's boot path is
 compiled through `ps2xBootElf`; see [Android setup](../android/README.md).
 
-The exact SSX 3 generation recipe (generator revision, TOML/function map,
-post-generation transforms and full output manifest) is still pending as a
-portable public contract. Running the current generic analyzer/recompiler is
-not a verified substitute for the existing play inputs. See the
-[private build gaps](ssx3-build.md). Do not publish generated code, recordings,
-game-bearing binaries or extracted/remastered packs as build receipts.
+The [public preparation script](../tools/ssx3/README.md) pins the historical
+EE generator and rewrites current TOML/map paths for your local output. It
+checks the extracted ELF and generated registration identities. This does not
+reproduce optimized VU images, iOS offline recordings or PGO profiles; those
+remain local generation tasks. Running a newer generic analyzer/recompiler is
+not a substitute for the pinned EE generator. Do not publish generated code,
+recordings, game-bearing binaries or extracted/remastered packs as receipts.
