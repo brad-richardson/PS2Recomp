@@ -356,7 +356,7 @@ GuestRaceState readGuestRaceState(const uint8_t *ram, size_t size)
     // predicate blocks guest race updates at 0x230B18-24. TK44's clock
     // gate alone cannot distinguish this from results/card freezes.
     if (!readGuestU32(ram, size, app, 0x48u, ui) || !ui) return g;
-    const uint32_t pauseHash = ps2_ssx3_tricky_menu::nameHash("cOVTemplate_PauseMenu");
+    const uint32_t pauseHash = ps2_ssx3_tricky::nameHash("cOVTemplate_PauseMenu");
     for (uint32_t listOff : {0x18u, 0x34u})
     {
         uint32_t node = 0u;
