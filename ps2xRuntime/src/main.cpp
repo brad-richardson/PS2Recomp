@@ -6,6 +6,7 @@
 #endif
 
 #include "ps2_log.h"
+#include "ps2_session_telemetry.h" // TEL2
 #include "raylib.h"
 
 #include <iostream>
@@ -99,6 +100,8 @@ namespace
                                                  line[len - 1] = '\0';
                                              }
                                              __android_log_write(ANDROID_LOG_INFO, "ps2x", line);
+                                             // TEL2: error lines into the session log (no-op when off).
+                                             ps2x::tel::noteLogLine(line);
                                          }
                                          fclose(reader);
                                          g_logcatPipeFds[0] = -1;

@@ -7,6 +7,8 @@
 #include "ps2_mtvu.h"
 #include "ps2_snd_audio_output.h"
 #include "ps2_vsync_lock.h"
+#include "ps2_android_pause.h"
+#include "ps2_session_telemetry.h" // TEL2
 #if defined(PS2X_IOS)
 #include "ps2_ios_runtime.h"
 #endif
@@ -669,7 +671,7 @@ Logger &logger()
 // PT2: drain one stage's new entries into a [perf-stage] line. A cursor more
 // than a lap behind (a poll stall longer than the ring) drops the overwritten
 // oldest entries and keeps the newest lap.
-void drainStage(Stage s, uint64_t &consumed, std::FILE *file)
+StageStats drainStage(Stage s, uint64_t &consumed, std::FILE *file)
 {
     StageRing &r = stageRing(s);
     const uint64_t head = r.head();
@@ -679,8 +681,10 @@ void drainStage(Stage s, uint64_t &consumed, std::FILE *file)
     for (uint64_t i = consumed; i != head; ++i)
         v.push_back(StageRing::decode(r.slotAt(i)));
     consumed = head;
-    const std::string line = formatStageLine(stageName(s), summarizeStage(v));
+    const StageStats st = summarizeStage(v);
+    const std::string line = formatStageLine(stageName(s), st);
     std::fprintf(file, "%s\n", line.c_str());
+    return st;
 }
 
 // PT2 Part 2a: tail-file family ("tail-*.log" + "tail-pause-*.log"), pruned
@@ -974,9 +978,17 @@ void poll(uint64_t vsyncTick)
             std::fprintf(log.file, "%s\n", line.c_str());
         }
     }
+    ps2x::tel::StageMax stageMax[kStageCount];
     for (size_t i = 0; i < kStageCount; ++i)
-        drainStage(static_cast<Stage>(i), log.stageConsumed[i], log.file);
+    {
+        const StageStats st = drainStage(static_cast<Stage>(i), log.stageConsumed[i], log.file);
+        stageMax[i] = {stageName(static_cast<Stage>(i)), st.n ? st.max : -1.0};
+    }
     std::fflush(log.file);
+    // TEL2: session-log hitch/race-window accounting (no-op when off). Not
+    // while the BG1 gate holds the game thread (a paused window is no hitch).
+    if (!ps2x::androidPause::pausedFlag().load(std::memory_order_relaxed))
+        ps2x::tel::notePerfWindow(vsyncTick, s.vsyncsPerS, s.maxGapMs, stageMax, kStageCount);
     log.windowStart = now;
     log.windowTick = vsyncTick;
 }
