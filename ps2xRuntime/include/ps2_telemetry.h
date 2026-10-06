@@ -99,6 +99,7 @@ public:
             {
                 it = m_images.emplace(h, static_cast<uint32_t>(m_imageHash.size())).first;
                 m_imageHash.push_back(h);
+                m_pcIndex.resize(m_imageHash.size() * kPcSlots, kNone);
                 ++m_w.newImages;
             }
             m_image = it->second;
@@ -110,14 +111,14 @@ public:
             return kNone;
         }
         const uint32_t pc = startPc & 0x3ff8u;
-        const uint64_t key = (static_cast<uint64_t>(m_image) << 16) | pc;
-        auto it = m_entryIndex.find(key);
-        if (it != m_entryIndex.end())
-            return it->second;
+        // Direct (image, pc/8) table: no hashing on the per-run path.
+        uint32_t &slot = m_pcIndex[static_cast<size_t>(m_image) * kPcSlots + (pc >> 3)];
+        if (slot != kNone)
+            return slot;
         if (m_entries.size() >= kVuMaxEntries)
             return kNone;
         const uint32_t idx = static_cast<uint32_t>(m_entries.size());
-        m_entryIndex.emplace(key, idx);
+        slot = idx;
         Entry e;
         e.image = m_image;
         e.pc = pc;
@@ -212,7 +213,8 @@ private:
     uint32_t m_image = 0;
     std::unordered_map<uint64_t, uint32_t> m_images;
     std::vector<uint64_t> m_imageHash;
-    std::unordered_map<uint64_t, uint32_t> m_entryIndex;
+    static constexpr size_t kPcSlots = 0x4000 / 8; // 8 KiB of index per distinct image
+    std::vector<uint32_t> m_pcIndex;
     std::vector<Entry> m_entries;
     std::vector<uint32_t> m_pending;
     Window m_w;
