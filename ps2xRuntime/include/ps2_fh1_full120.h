@@ -29,6 +29,7 @@
 #include "ps2_input_diag.h"
 #include "ps2_fh1_restamp.h"
 #include "ps2_fh1_fix.h"
+#include "ps2_fh1_ground2.h"
 
 #include <algorithm>
 #include <array>
@@ -2080,6 +2081,45 @@ inline void jcamOnReturn(uint8_t *ram)
     }
 }
 
+// FH33 contributor 1 only: capture 113e80's rider, then replace its bound
+// R+1f4 before 121210 consumes it. Target R+1f8 includes the guest's speed
+// scaling; mode 2/3/13 includes the guest's extra bound multiplier.
+inline bool ground2Fix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixGround2) != 0u;
+    return on;
+}
+inline void ground2PreHook(R5900Context *ctx, uint32_t targetPc)
+{
+    if (targetPc != 0x113e80u || !ctx || g_postArmed) return;
+    g_post.target = targetPc;
+    g_post.sp = getRegU32(ctx, 29);
+    g_post.obj = getRegU32(ctx, 4);
+    g_post.saved[0] = getRegU32(ctx, 28);
+    g_post.kind = 7u;
+    g_postArmed = true;
+}
+inline void ground2OnReturn(uint8_t *ram)
+{
+    const uint32_t R = g_post.obj, gp = g_post.saved[0];
+    auto read = [ram](uint32_t addr) {
+        uint32_t bits = 0u;
+        if (!rd32(ram, addr, bits)) return std::nan("");
+        float f; std::memcpy(&f, &bits, 4); return double(f);
+    };
+    uint32_t mode = 0u;
+    if (!rd32(ram, R+0x438u, mode)) return;
+    const double multiplier = mode == 2u || mode == 3u || mode == 13u ? read(gp-0x7c30u) : 1.0;
+    const double dt = read(gp-0x7c2cu) * ((fixMask() & kFixSteer) ? 2.0 : 1.0);
+    const double scale = dt*multiplier;
+    const double current = read(R+0x1f0u), target = read(R+0x1f8u);
+    const double gap = std::abs(target-current);
+    const double a = read(gp-0x7c3cu)*scale, b = read(gp-0x7c38u)*scale, c = read(gp-0x7c34u)*scale;
+    if (!std::isfinite(gap+a+b+c) || !(a > 0 && a < 1 && b > 0 && c >= b/(1-a))) return;
+    const float bound = static_cast<float>(gap-ground2Residual(gap,a,b,c));
+    uint32_t bits; std::memcpy(&bits, &bound, 4); wr32(ram, R+0x1f4u, bits);
+}
+
 inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned)
 {
     if (targetPc != g_post.target || !ctx || getRegU32(ctx, 29) != g_post.sp)
@@ -2092,6 +2132,11 @@ inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool re
     }
     if (!returned)
         return;
+    if (g_post.kind == 7u)
+    {
+        ground2OnReturn(ram);
+        return;
+    }
     if (g_post.kind == 5u)
     {
         jcamOnReturn(ram);
@@ -2483,7 +2528,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, pid, c2cap, envFilt;
+        particles, flare, jcam, pid, c2cap, envFilt, ground2;
     bool src, fh9, lab, draw, tap;
 };
 
@@ -2502,6 +2547,7 @@ inline const BranchFlags &branchFlags() noexcept
         r.aiGate = aiGateFix();
         r.particles = particlesFix();
         r.flare = flareFix();
+        r.ground2 = ground2Fix();
         r.jcam = jcamFix();
         r.pid = pidFix();
         r.envFilt = envFiltFix();
@@ -2649,6 +2695,8 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addSrc(kComboSite);
         addTgt(kComboAccrue);
     }
+    if ((c.main & kFixGround2) != 0u && on)
+        addTgt(0x113e80u);
     if ((c.main & kFixJcam) != 0u && on)
         addTgt(kJcamJump); // FH28: countdown pre-hook + retention post-hook (any source)
     if ((c.main & kFixEnvFilt) != 0u && on)
@@ -2861,6 +2909,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     if (on && flag(&BranchFlags::flare, flareFix) && g_rngOdd && sourcePc == kFlareProbeSite &&
         targetPc == kFlareProbeLoop)
         skip = true;
+    if (on && flag(&BranchFlags::ground2, ground2Fix))
+        ground2PreHook(ctx, targetPc);
     if (on && flag(&BranchFlags::jcam, jcamFix))
         jcamPreHook(ram, ctx, targetPc);
     if (on && flag(&BranchFlags::envFilt, envFiltFix))

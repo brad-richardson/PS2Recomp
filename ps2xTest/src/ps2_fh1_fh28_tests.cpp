@@ -28,6 +28,16 @@ void register_ps2_fh1_fh28_tests()
     using namespace ps2_fh1;
     MiniTest::Case("Ps2Fh1Fh28", [](TestCase &tc)
     {
+        tc.Run("FH33 steering post-hook is classified only while active", [](TestCase &t)
+        {
+            HookConfig c; c.mode = Mode::Events; c.main = kFixGround2; c.guestActive = true;
+            t.IsTrue(hookTableHit(buildHookInterest(c), 0u, 0x113e80u), "active steering hook");
+            c.guestActive = false;
+            t.IsFalse(hookTableHit(buildHookInterest(c), 0u, 0x113e80u), "inactive steering untouched");
+            c.guestActive = true; c.main = kFixAll;
+            t.IsFalse(hookTableHit(buildHookInterest(c), 0u, 0x113e80u), "default steering untouched");
+        });
+
         tc.Run("FH30 envfilt is opt-in and its table follows active events", [](TestCase &t)
         {
             t.IsTrue((kFixAll & kFixEnvFilt) == 0u, "not in all");

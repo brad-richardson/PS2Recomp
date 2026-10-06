@@ -1,5 +1,8 @@
 #include "MiniTest.h"
 #include "ps2_fh1_fix.h"
+#include "ps2_fh1_ground2.h"
+#include <cmath>
+#include <algorithm>
 
 #include <cstdint>
 #include <string>
@@ -9,6 +12,29 @@ void register_ps2_fh1_fix_tests()
     using namespace ps2_fh1;
     MiniTest::Case("Ps2Fh1Fix", [](TestCase &tc)
     {
+        tc.Run("FH33 ground2 is opt-in and squares to the bounded stock map", [](TestCase &t)
+        {
+            t.IsTrue((kFixAll & kFixGround2) == 0u, "excluded from all");
+            t.Equals(parseFix("all,ground2").main, kFixAll | kFixGround2, "opt-in");
+            t.Equals(parseFix("all,ground2,-ground2").main, kFixAll, "opt-out");
+            for (double multiplier : {1.0, 0.5, 2.0})
+            {
+                const double a = .2*multiplier, b = (.1/60)*multiplier, c = (14.0/60)*multiplier;
+                double maxError = 0;
+                for (unsigned i = 0; i <= 40000; ++i)
+                {
+                    const double g = i/10000.0;
+                    const double h = ground2Residual(g,a,b,c);
+                    const double stock = std::max(0.0,g-std::clamp(a*g,b,c));
+                    maxError = std::max(maxError, std::abs(ground2Residual(h,a,b,c)-stock));
+                    if (!(h >= 0 && h <= g)) { t.IsTrue(false, "half step contracts"); return; }
+                }
+                t.IsTrue(maxError < 1e-12, "two half steps equal stock across floor, proportional, cap and transitions");
+            }
+            t.IsTrue(std::abs(ground2Residual(.06,.2,.1/60,14.0/60)/.06-std::sqrt(.8)) < 1e-14,
+                     "proportional retention sqrt(.8)");
+        });
+
         tc.Run("all includes stick2 and clocksign (FH26, Brad 10-02) and both masks", [](TestCase &t)
         {
             const FixMasks f = parseFix("all");
