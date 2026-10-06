@@ -15,6 +15,7 @@
 #include "ps2_ssx3_tricky_song.h"
 #include "ps2_ssx3_tricky_gems.h"
 #include "ps2_ssx3_tricky_preview.h"
+#include <filesystem>
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
 #include "ps2_park_snapshot.h"
@@ -1740,6 +1741,22 @@ namespace
         tkLog(runtime, buf);
     }
 
+    // Optional overlay files are part of the layer, not a new runtime knob.
+    // Old presets with only COURSPIT retain their original frontend path.
+    bool tkPreviewAsset(uint8_t *ram, int event)
+    {
+        using namespace ps2_ssx3_tricky_preview;
+        if (!course(ram, PS2_RAM_SIZE, event)) return false;
+        const char *overlay = std::getenv("PS2X_CD_OVERLAY");
+        const uint32_t code = ps2_ssx3_tricky::rd32(ram, 0x442950u + event * 4);
+        if (!overlay || !range(code, 5, PS2_RAM_SIZE)) return false;
+        std::string name("TP");
+        name.append(reinterpret_cast<char *>(ram + code), 4);
+        name += ".SSH";
+        std::error_code ec;
+        return std::filesystem::is_regular_file(std::filesystem::path(overlay) / "DATA" / "UI" / name, ec);
+    }
+
     // TK52: the continuation, its return address, arguments and register
     // spill are guest stack bytes. A checkpoint or state load at any guest
     // call therefore resumes the same phase without pending host state.
@@ -1750,10 +1767,25 @@ namespace
         using ps2_ssx3_tricky::wr32;
         const uint32_t controller = getRegU32(ctx, 4);
         const uint32_t sp = getRegU32(ctx, 29);
+        // A list-refresh continuation already owns this guest-stack frame.
+        if (range(sp, kFrameBytes, PS2_RAM_SIZE) && rd32(rdram, sp) == kFrameMagic && rd32(rdram, sp + 0x2dc) == 1)
+        {
+            g_tkMapInfo(rdram, ctx, runtime);
+            return;
+        }
         const auto &modes = ps2_ssx3_course::courseModes();
-        // Single-instance proof before fan-out: Garibaldi only.
-        if (!modes.armed || !ps2_ssx3_course::modeCurrent(modes, rdram) ||
-            cursorEvent(rdram, PS2_RAM_SIZE, controller) != 0 ||
+        bool previous = false;
+        if (range(controller, 0x2f0, PS2_RAM_SIZE))
+        {
+            const uint32_t app = rd32(rdram, 0x4a28a8u);
+            const uint32_t async = range(app, 0x120, PS2_RAM_SIZE) ? rd32(rdram, app + 0x11c) : 0;
+            const uint32_t slot = rd32(rdram, controller + 0x2d8);
+            previous = slot < 5 && range(async, 5 * 0x11c, PS2_RAM_SIZE) &&
+                std::memcmp(rdram + async + slot * 0x11c, "data/ui/TP", 10) == 0;
+        }
+        const bool selected = modes.armed && ps2_ssx3_course::modeCurrent(modes, rdram) &&
+            tkPreviewAsset(rdram, cursorEvent(rdram, PS2_RAM_SIZE, controller));
+        if ((!selected && !previous) ||
             sp < kFrameBytes || !range(sp - kFrameBytes, kFrameBytes, PS2_RAM_SIZE))
         {
             g_tkMapInfo(rdram, ctx, runtime);
@@ -1781,6 +1813,11 @@ namespace
         const auto finish = [&]() {
             const uint32_t pc = rd32(ram, f + 12);
             std::memcpy(ctx->r, ram + f + 0x20, sizeof(ctx->r));
+            if (rd32(ram, f + 0x2dc) == 1)
+            {
+                std::memcpy(&ctx->r[2], ram + f + 0x320, 16);
+                std::memcpy(&ctx->r[3], ram + f + 0x330, 16);
+            }
             wr32(ram, f, 0);
             tkSetGpr(ctx, 29, f + kFrameBytes);
             tkSetGpr(ctx, 31, pc);
@@ -1800,8 +1837,18 @@ namespace
             const uint32_t app = rd32(ram, 0x4a28a8u);
             const uint32_t async = range(app, 0x120, PS2_RAM_SIZE) ? rd32(ram, app + 0x11cu) : 0;
             const uint32_t slot = rd32(ram, controller + 0x2d8u);
-            const uint32_t up = widget(ram, PS2_RAM_SIZE, rd32(ram, controller + 0x2e8u), "up");
-            if (event != 0 || slot >= 5 || !range(async, 5 * 0x11c, PS2_RAM_SIZE) || !up)
+            const uint32_t up = widget(ram, PS2_RAM_SIZE, rd32(ram, controller + 0x2e8u), "HelpText");
+            const auto &modes = ps2_ssx3_course::courseModes();
+            const bool selected = modes.armed && ps2_ssx3_course::modeCurrent(modes, ram) && tkPreviewAsset(ram, event);
+            if (!selected)
+            {
+                // A cursor move onto a stock/excluded row on the same peak
+                // must reload that peak, even though the peak index did not change.
+                wr32(ram, controller + 0x2d4, 0xffffffffu);
+                call(0x203990u, 3, controller, 0);
+                return true;
+            }
+            if (slot >= 5 || !range(async, 5 * 0x11c, PS2_RAM_SIZE) || !up)
             {
                 tkLog(runtime, "preview: cursor/async/widget unavailable");
                 finish();
@@ -1832,6 +1879,29 @@ namespace
                   " file=" + reinterpret_cast<const char *>(ram + data));
             call(0x3a0c50u, 2, rd32(ram, f + 0x1c), f + 0x240); // owned cUIText copy
         }
+        else if (phase == 2)
+        {
+            // The host mountain's 17 route meshes are separate widgets.
+            // Use their own color setter, which also updates vertex colors.
+            // +0x1c alone would leave the cached geometry drawing old routes.
+            const uint32_t bases[] = {0x4713a8u, 0x471420u, 0x471488u};
+            const uint32_t counts[] = {6, 6, 5};
+            uint32_t index = rd32(ram, f + 0x2d0);
+            for (; index < 17; ++index)
+            {
+                uint32_t group = index < 6 ? 0 : index < 12 ? 1 : 2;
+                uint32_t row = index - (group == 0 ? 0 : group == 1 ? counts[0] : counts[0] + counts[1]);
+                const uint32_t name = rd32(ram, bases[group] + row * 4);
+                if (!range(name, 32, PS2_RAM_SIZE) || std::memchr(ram + name, 0, 32) == nullptr) continue;
+                const uint32_t obj = widget(ram, PS2_RAM_SIZE, rd32(ram, controller + 0x2e8),
+                                           reinterpret_cast<const char *>(ram + name));
+                if (!obj) continue;
+                wr32(ram, f + 0x2d0, index + 1);
+                call(0x3a3398u, 2, obj, f + 0x300); // zero RGBA, native mesh update
+                return true;
+            }
+            finish();
+        }
         else
             finish();
         return true;
@@ -1851,6 +1921,30 @@ namespace
             s.redirect = false;
             ++s.refreshes;
             tkLog(runtime, "list refreshed #" + std::to_string(s.refreshes));
+            // The existing chord refresh fills row labels only. Refresh the
+            // pane too when the TK52 assets are installed, including Stock
+            // restoration without requiring another cursor move.
+            const char *overlay = std::getenv("PS2X_CD_OVERLAY");
+            std::error_code ec;
+            using namespace ps2_ssx3_tricky_preview;
+            const uint32_t sp = getRegU32(ctx, 29);
+            if (overlay && range(s.mapController, 0x2f0, PS2_RAM_SIZE) && sp >= kFrameBytes &&
+                range(sp - kFrameBytes, kFrameBytes, PS2_RAM_SIZE) &&
+                std::filesystem::is_regular_file(std::filesystem::path(overlay) / "DATA/UI/TPARA1.SSH", ec))
+            {
+                const uint32_t f = sp - kFrameBytes;
+                std::memset(rdram + f, 0, kFrameBytes);
+                wr32(rdram, f, kFrameMagic);
+                wr32(rdram, f + 8, s.mapController);
+                wr32(rdram, f + 12, s.returnPc);
+                wr32(rdram, f + 0x2dc, 1);
+                std::memcpy(rdram + f + 0x320, &ctx->r[2], 16);
+                std::memcpy(rdram + f + 0x330, &ctx->r[3], 16);
+                tkSetGpr(ctx, 29, f);
+                tkSetGpr(ctx, 4, s.mapController);
+                tkSetGpr(ctx, 31, kTrampoline);
+                ctx->pc = kMapInfo;
+            }
             return;
         }
         tkLog(runtime, "trampoline reached without a pending refresh (sp mismatch or no redirect)");

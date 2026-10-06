@@ -48,4 +48,18 @@ inline int cursorEvent(const uint8_t *ram, uint32_t size, uint32_t controller)
     const uint32_t event = rd32(ram, bases[type] + peak * counts[type] * 0x6cu + row * 0x6cu);
     return event < ps2_ssx3_course::kRows ? static_cast<int>(event) : -1;
 }
+inline bool course(const uint8_t *ram, uint32_t size, int event)
+{
+    // Only these TKP4 substitutions; Megaplex stays outside TK52.
+    const struct { int event; const char *archive; } rows[] = {
+        {0,"GARI"}, {1,"SNOW"}, {2,"MESA"}, {4,"MERQ"}, {6,"ALASKA"},
+        {7,"UNTRACK"}, {11,"PIPE"}, {14,"ALOHA"}, {16,"ELYS"}};
+    for (const auto &row : rows)
+        if (event == row.event)
+        {
+            const uint32_t a = ps2_ssx3_course::kEventBase + event * ps2_ssx3_course::kEventStride + 68;
+            return range(a, 16, size) && std::strcmp(reinterpret_cast<const char *>(ram + a), row.archive) == 0;
+        }
+    return false;
+}
 } // namespace ps2_ssx3_tricky_preview

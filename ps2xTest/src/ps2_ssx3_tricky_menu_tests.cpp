@@ -107,6 +107,18 @@ void register_ps2_ssx3_tricky_menu_tests()
             t.Equals(cursorEvent(ram.data(), 1024, controller), -1, "short RAM rejected before globals");
             t.IsFalse(range(0xfffffffc, 16, ram.size()), "overflowing pointer rejected"); });
 
+        tc.Run("TK52: course gate excludes stock rows, other substitutions and Megaplex", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_preview;
+            auto ram = stockCourseRam();
+            t.IsFalse(course(ram.data(), ram.size(), 0), "stock archive");
+            std::memcpy(ram.data() + ps2_ssx3_course::kEventBase + 68, "GARI", 5);
+            t.IsTrue(course(ram.data(), ram.size(), 0), "Garibaldi substitution");
+            std::memcpy(ram.data() + ps2_ssx3_course::kEventBase + 15 * 100 + 68, "MEGA", 5);
+            t.IsFalse(course(ram.data(), ram.size(), 15), "Megaplex excluded");
+            t.IsFalse(course(ram.data(), ram.size(), -1), "no cursor");
+            t.IsFalse(course(ram.data(), 1024, 0), "short RAM"); });
+
         tc.Run("name hash matches the LUI/LOC hashes (func_317618)", [](TestCase &t)
                {
             using ps2_ssx3_tricky::nameHash;

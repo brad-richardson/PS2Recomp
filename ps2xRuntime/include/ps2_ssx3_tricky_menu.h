@@ -41,7 +41,10 @@
 //     checkpoint inside the fill resumes like any other guest call.
 //     The controller comes from the fill's own entry (a0) and is forgotten at
 //     each main-menu build and whenever an event is live.
-// (c) Not built: per-cursor course pictures in the Map pane (TK11 report).
+// (c) TK52: optional TP*.SSH files in the Tricky CD overlay activate course
+// pictures/descriptions in Select Event. Native FE async slots own the
+// textures. Continuation state lives on the guest stack; stock/excluded
+// rows restore the peak map. Without these files the old path remains.
 //
 // Guest-affecting when on (it rewrites guest .data/heap and redirects one
 // return); off by default. Platform-neutral so the host unit test compiles it.
