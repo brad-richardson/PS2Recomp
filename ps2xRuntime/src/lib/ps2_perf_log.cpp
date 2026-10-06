@@ -929,6 +929,7 @@ void poll(uint64_t vsyncTick)
                          a.tempoMean, a.tempoMin, a.tempoMax, session.c_str());
         }
     }
+    double telemetryHz = 0.0; // unknown unless the lock reports a valid, fresh grid
     if (ps2_vsync_lock::enabled())
     {
         // IP7: vsync-lock health per window (deltas): grid feeds, pacer
@@ -944,6 +945,12 @@ void poll(uint64_t vsyncTick)
             late = vl.late;
             unlocked = vl.unlocked;
             g = vl.tracker.grid();
+        }
+        if (g.valid && g.periodNs > 0.0)
+        {
+            const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+            if (ns >= g.lastLatchNs && ns - g.lastLatchNs <= 250000000)
+                telemetryHz = 1e9 / g.periodNs;
         }
         std::fprintf(log.file,
                      "[perf-lock] tick=%llu latches=%llu locked=%llu late=%llu unlocked=%llu valid=%d hz=%.3f\n",
@@ -988,7 +995,8 @@ void poll(uint64_t vsyncTick)
     // TEL2: session-log hitch/race-window accounting (no-op when off). Not
     // while the BG1 gate holds the game thread (a paused window is no hitch).
     if (!ps2x::androidPause::pausedFlag().load(std::memory_order_relaxed))
-        ps2x::tel::notePerfWindow(vsyncTick, s.vsyncsPerS, s.maxGapMs, stageMax, kStageCount);
+        ps2x::tel::notePerfWindow(log.windowTick, vsyncTick, windowS, telemetryHz,
+                                    s.vsyncsPerS, s.maxGapMs, stageMax, kStageCount);
     log.windowStart = now;
     log.windowTick = vsyncTick;
 }

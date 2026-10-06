@@ -2,6 +2,7 @@
 #include "ps2_session_telemetry.h"
 
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,187 @@ void register_ps2_session_telemetry_tests()
             edges |= r.step(500, 0x700000u, true, 3u); // backwards while idle
             t.Equals(edges, static_cast<uint32_t>(kEdgeNone), "no edges");
             t.IsTrue(r.st == RaceTracker::Idle, "idle"); });
+
+        tc.Run("TLG1: replay TEL3 session edges", [](TestCase &t)
+               {
+            // session-20261005-213843-27149.log SHA256 e9523753691cf15e…
+            // Full logged edge sequence; no interpolation is claimed as guest evidence.
+            struct Row { double wall; uint64_t tick; const char *edge; unsigned n, event, mode, clock; bool reset, stopped; };
+            const Row rows[] = {
+                {27.3, 1620u, "start", 1u, 17u, 4u, 1u, false, false},
+                {29.2, 1822u, "stop", 1u, 0u, 0u, 87u, false, false},
+                {36.5, 2268u, "end", 1u, 0u, 0u, 0u, true, true},
+                {53.1, 3276u, "start", 2u, 5u, 4u, 1u, false, false},
+                {59.5, 4052u, "end", 2u, 0u, 0u, 0u, true, false},
+                {226.6, 14218u, "start", 3u, 5u, 1u, 1u, false, false},
+                {377.7, 32568u, "stop", 3u, 0u, 0u, 9161u, false, false},
+                {383.9, 32946u, "end", 3u, 0u, 0u, 0u, true, true},
+                {387.3, 33153u, "start", 4u, 5u, 1u, 1u, false, false},
+                {416.4, 36693u, "end", 4u, 0u, 0u, 0u, true, false},
+                {420.6, 36949u, "start", 5u, 5u, 1u, 1u, false, false},
+                {571.1, 55225u, "stop", 5u, 0u, 0u, 9124u, false, false},
+                {579.0, 55708u, "end", 5u, 0u, 0u, 0u, true, true},
+                {582.0, 55892u, "start", 6u, 5u, 1u, 9124u, false, false},
+                {582.1, 55893u, "end", 6u, 0u, 0u, 0u, true, false},
+                {595.4, 56706u, "start", 7u, 8u, 4u, 1u, false, false},
+                {601.1, 57393u, "end", 7u, 0u, 0u, 0u, true, false},
+                {654.4, 60638u, "start", 8u, 8u, 2u, 1u, false, false},
+                {690.0, 64940u, "stop", 8u, 0u, 0u, 2137u, false, false},
+                {696.2, 65317u, "end", 8u, 0u, 0u, 0u, true, true},
+                {699.2, 65498u, "start", 9u, 8u, 2u, 1u, false, false},
+                {701.3, 65756u, "end", 9u, 0u, 0u, 0u, true, false},
+                {705.3, 65996u, "start", 10u, 8u, 2u, 1u, false, false},
+                {741.4, 70360u, "stop", 10u, 0u, 0u, 2168u, false, false},
+                {746.6, 70677u, "end", 10u, 0u, 0u, 0u, true, true},
+                {749.5, 70858u, "start", 11u, 8u, 2u, 1u, false, false},
+                {751.1, 71054u, "end", 11u, 0u, 0u, 0u, true, false},
+                {768.3, 72096u, "start", 12u, 11u, 4u, 1u, false, false},
+                {774.3, 72827u, "end", 12u, 0u, 0u, 0u, true, false},
+                {806.2, 74766u, "start", 13u, 11u, 3u, 1u, false, false},
+                {892.7, 85266u, "stop", 13u, 0u, 0u, 5236u, false, false},
+                {898.9, 85644u, "end", 13u, 0u, 0u, 0u, true, true},
+                {901.9, 85824u, "start", 14u, 11u, 3u, 1u, false, false},
+                {903.6, 86036u, "end", 14u, 0u, 0u, 0u, true, false},
+                {907.6, 86280u, "start", 15u, 11u, 3u, 1u, false, false},
+                {986.2, 95816u, "stop", 15u, 0u, 0u, 4754u, false, false},
+                {992.9, 96221u, "end", 15u, 0u, 0u, 0u, true, true},
+                {995.8, 96401u, "start", 16u, 11u, 3u, 1u, false, false},
+                {998.5, 96719u, "end", 16u, 0u, 0u, 0u, true, false},
+                {1012.8, 97591u, "start", 17u, 14u, 5u, 1u, false, false},
+                {1102.1, 108431u, "stop", 17u, 0u, 0u, 5406u, false, false},
+                {1104.7, 108587u, "end", 17u, 0u, 0u, 0u, true, true},
+                {1105.5, 108636u, "start", 18u, 14u, 5u, 1u, false, false},
+                {1293.4, 131464u, "stop", 18u, 0u, 0u, 11400u, false, false},
+                {1297.1, 131688u, "end", 18u, 0u, 0u, 0u, true, true},
+                {1297.2, 131696u, "start", 19u, 14u, 5u, 5u, false, false},
+                {1302.5, 132321u, "end", 19u, 0u, 0u, 0u, true, false},
+                {1376.6, 136828u, "start", 20u, 14u, 6u, 1u, false, false},
+                {1572.5, 160628u, "stop", 20u, 0u, 0u, 11886u, false, false},
+                {1575.9, 160840u, "end", 20u, 0u, 0u, 0u, true, true},
+                {1576.1, 160848u, "start", 21u, 14u, 6u, 5u, false, false},
+                {1580.4, 161356u, "end", 21u, 0u, 0u, 0u, true, false},
+                {1694.8, 168316u, "start", 22u, 14u, 6u, 1u, false, false},
+                {2128.0, 220990u, "stop", 22u, 0u, 0u, 26323u, false, false},
+                {2358.7, 235017u, "end", 22u, 0u, 0u, 0u, false, true},
+            };
+            SegmentLabels labels;
+            GuestRaceState unlogged; // TEL3 logged neither finished nor pause-menu presence.
+            unsigned freeRideRuns = 0u;
+            uint64_t count = 0u;
+            for (const auto &row : rows)
+            {
+                if (std::strcmp(row.edge, "start") == 0)
+                {
+                    labels.start(row.tick, row.clock, unlogged);
+                    if (row.n == 2u || row.n == 7u || row.n == 12u)
+                    {
+                        t.Equals(row.mode, 4u, "Brad-confirmed Free Ride mode");
+                        t.IsTrue(std::strcmp(labels.end(row.tick + 30u).kind, "run") == 0,
+                                 "Free Ride is a normal run, never pre/flyover");
+                        ++freeRideRuns;
+                    }
+                }
+                else if (std::strcmp(row.edge, "stop") == 0) labels.stop(unlogged);
+                else
+                {
+                    const auto out = labels.end(row.tick);
+                    t.IsTrue(std::strcmp(out.outcome, "unknown") == 0,
+                             "historical log cannot prove finished versus aborted");
+                    t.IsTrue(std::strcmp(out.kind, "pre") != 0, "no mode-based pre label");
+                    if (row.n == 6u || row.n == 19u || row.n == 21u)
+                        t.IsTrue(out.pending, "missing guest flags cannot exclude pause/finish for a blip");
+                    ++count;
+                }
+            }
+            t.Equals(freeRideRuns, 3u, "all confirmed campaign transport rides");
+            t.Equals(count, uint64_t(22), "all logged segments replayed"); });
+
+        tc.Run("TLG1: guest pause predicate, session chain, and mode table", [](TestCase &t)
+               {
+            std::vector<uint8_t> ram(8u * 1024u * 1024u, 0u);
+            const auto put = [&](uint32_t addr, uint32_t word) { std::memcpy(ram.data() + addr, &word, 4u); };
+            const uint32_t root = 0x600000u, app = 0x601000u, session = 0x602000u, ui = 0x603000u;
+            const uint32_t tail1 = 0x604000u, tail2 = 0x604100u, node = 0x604200u;
+            put(0x4a28a8u, root); put(root + 0x84u, app); put(app + 0x28u, session);
+            put(app + 0x48u, ui);
+            put(ui + 0x1cu, tail1); put(tail1, tail1); put(tail1 + 4u, tail1);
+            put(ui + 0x38u, tail2); put(tail2, tail2); put(tail2 + 4u, tail2);
+            auto g = readGuestRaceState(ram.data(), ram.size());
+            t.IsTrue(g.session == session && g.finishedKnown && !g.finished, "session+0x610 readable zero");
+            t.IsTrue(g.pauseKnown && !g.paused, "empty UI lists are not a pause");
+            PauseEdges pause;
+            t.IsTrue(pause.step(g) == nullptr, "adopt unpaused");
+            // Guest 0x317618 hash for the literal at 0x46F818 (pause template).
+            uint32_t hash = 0u;
+            for (const char *c = "cOVTemplate_PauseMenu"; *c; ++c)
+            {
+                hash = (hash << 4) + uint32_t(*c);
+                const uint32_t high = hash & 0xf0000000u;
+                if (high) hash ^= (high >> 23) ^ high;
+            }
+            put(ui + 0x1cu, node); put(node, tail1); put(node + 4u, tail1); put(node + 0xcu, hash);
+            g = readGuestRaceState(ram.data(), ram.size());
+            t.IsTrue(g.pauseKnown && g.paused, "guest pause template in first list");
+            t.IsTrue(std::strcmp(pause.step(g), "pause") == 0, "pause-menu rising edge");
+            t.IsTrue(pause.step(g) == nullptr, "no repeated edge");
+            put(ui + 0x1cu, tail1); put(ui + 0x38u, node); put(node, tail2); put(node + 4u, tail2);
+            t.IsTrue(readGuestRaceState(ram.data(), ram.size()).paused, "guest searches second list too");
+            put(ui + 0x38u, tail2);
+            g = readGuestRaceState(ram.data(), ram.size());
+            t.IsTrue(std::strcmp(pause.step(g), "resume") == 0, "pause template removed");
+            put(session + 0x610u, 1u);
+            g = readGuestRaceState(ram.data(), ram.size());
+            t.IsTrue(g.finished && !g.paused, "finish is distinct from pause");
+            put(ui + 0x1cu, node); put(node + 4u, node + 0x20u);
+            put(node + 0x20u, node); put(node + 0x24u, node); put(node + 0xcu, 0u);
+            t.IsFalse(readGuestRaceState(ram.data(), ram.size()).pauseKnown, "corrupt cycle is bounded/unknown");
+            put(app + 0x48u, 0x007fffffu);
+            t.IsFalse(readGuestRaceState(ram.data(), ram.size()).pauseKnown, "invalid UI pointer");
+            put(app + 0x28u, 0x007ffffcu);
+            t.IsFalse(readGuestRaceState(ram.data(), ram.size()).finishedKnown, "out of range finished word");
+            std::memcpy(ram.data() + 0x43e7d0u + 4u * 60u, "Free Ride", 10u);
+            t.IsTrue(readModeName(ram.data(), ram.size(), 4u) == "Free Ride", "mode name from guest table");
+            t.IsTrue(readModeName(ram.data(), ram.size(), 255u) == "?", "invalid signed mode rejected"); });
+
+        tc.Run("TLG1: guest lifecycle overrides short/nonzero clock guesses", [](TestCase &t)
+               {
+            const GuestRaceState live{0x602000u, true, false, true, false};
+            auto fin = live; fin.finished = true;
+            auto paused = live; paused.paused = true;
+            SegmentLabels labels;
+            labels.start(100u, 99u, live); labels.stop(fin);
+            auto out = labels.end(101u);
+            t.IsTrue(std::strcmp(out.kind, "run") == 0 && std::strcmp(out.outcome, "finished") == 0,
+                     "guest finish explains a short nonzero-clock segment");
+            labels.start(100u, 99u, live); labels.stop(paused);
+            t.IsTrue(std::strcmp(labels.end(101u).kind, "run") == 0, "pause explains a short segment");
+            labels.start(100u, 1u, live); labels.stop(live);
+            t.IsTrue(std::strcmp(labels.end(200u).kind, "aborted") == 0, "unfinished stop");
+            labels.start(100u, 99u, live);
+            t.IsTrue(std::strcmp(labels.end(200u).kind, "post") == 0, "unexplained nonzero-clock segment");
+            t.IsTrue(std::strcmp(labels.end(101u).kind, "glitch") == 0, "unexplained short segment"); });
+
+        tc.Run("TLG1: interior windows, pause, rate transition and locked lost time", [](TestCase &t)
+               {
+            RunRates rates;
+            rates.start(100);
+            rates.stop(300); // true frozen clock tick, not grace-expiry tick
+            rates.start(400);
+            rates.stop(500); // rate flip
+            rates.start(501);
+            rates.stop(900);
+            rates.windows = {{90, 210, 1.0, 121.7, 120.0}, // start edge
+                             {150, 270, 1.0, 121.7, 120.0}, // interior, 1.7 missing ticks
+                             {270, 390, 1.0, 121.7, 120.0}, // stop edge
+                             {390, 450, 1.0, 60.85, 60.0}, // resume edge
+                             {450, 570, 1.0, 121.7, 120.0}, // rate edge
+                             {600, 720, 1.0, 121.7, 120.0}};
+            auto out = rates.summary();
+            t.Equals(out.count, uint64_t(2), "only wholly Running windows");
+            t.IsTrue(out.mean == 120.0 && out.min == 120.0, "edge rate not included");
+            t.IsTrue(std::abs(out.lostMs - 3400.0 / 121.7) < 0.00001, "deficit divided by locked rate");
+            rates.windows = {{600, 720, 1.0, 0.0, 120.0}};
+            t.IsTrue(rates.summary().lostMs == 0.0, "unknown lock rate contributes no claimed loss"); });
 
         tc.Run("error filter and budget", [](TestCase &t)
                {
