@@ -11,6 +11,12 @@ it is not the optimized device play build. Android dependency/library and APK co
 below but is unvalidated here. iOS offline-VU1 preparation remains incomplete. No Android or iOS acceptance is
 claimed by a Mac title boot.
 
+The runner-only path and source-built Metal/microVU libraries were validated
+on macOS Apple silicon from an isolated fresh clone on 2026-10-06, using only
+the caller's supported disc image. One boot reached the "Press START button"
+title screen. The optional suite, Android and iOS were not validated by that
+acceptance run.
+
 ## Mac
 
 Install Xcode with its command-line and Metal toolchains, Python 3, Git,
