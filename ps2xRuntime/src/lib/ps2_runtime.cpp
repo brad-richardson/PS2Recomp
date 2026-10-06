@@ -14,6 +14,7 @@
 #include "ps2_ssx3_tricky_menu.h"
 #include "ps2_ssx3_tricky_song.h"
 #include "ps2_ssx3_tricky_gems.h"
+#include "ps2_ssx3_tricky_preview.h"
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
 #include "ps2_park_snapshot.h"
@@ -1593,6 +1594,7 @@ namespace
     PS2Runtime::RecompiledFunction g_tkPadGlue = nullptr;
     PS2Runtime::RecompiledFunction g_tkLuiLoad = nullptr;
     PS2Runtime::RecompiledFunction g_tkTrampoline = nullptr;
+    PS2Runtime::RecompiledFunction g_tkMapInfo = nullptr;
     __m128i g_tkV0{}; // scePadRead's return registers across a list refresh
     __m128i g_tkV1{};
 
@@ -1738,8 +1740,106 @@ namespace
         tkLog(runtime, buf);
     }
 
+    // TK52: the continuation, its return address, arguments and register
+    // spill are guest stack bytes. A checkpoint or state load at any guest
+    // call therefore resumes the same phase without pending host state.
+    void tkMapInfoWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        using namespace ps2_ssx3_tricky_preview;
+        using ps2_ssx3_tricky::rd32;
+        using ps2_ssx3_tricky::wr32;
+        const uint32_t controller = getRegU32(ctx, 4);
+        const uint32_t sp = getRegU32(ctx, 29);
+        const auto &modes = ps2_ssx3_course::courseModes();
+        // Single-instance proof before fan-out: Garibaldi only.
+        if (!modes.armed || !ps2_ssx3_course::modeCurrent(modes, rdram) ||
+            cursorEvent(rdram, PS2_RAM_SIZE, controller) != 0 ||
+            sp < kFrameBytes || !range(sp - kFrameBytes, kFrameBytes, PS2_RAM_SIZE))
+        {
+            g_tkMapInfo(rdram, ctx, runtime);
+            return;
+        }
+        const uint32_t frame = sp - kFrameBytes;
+        std::memset(rdram + frame, 0, kFrameBytes);
+        wr32(rdram, frame, kFrameMagic);
+        wr32(rdram, frame + 8, controller);
+        wr32(rdram, frame + 12, getRegU32(ctx, 31));
+        tkSetGpr(ctx, 29, frame);
+        tkSetGpr(ctx, 31, ps2_ssx3_tricky::kTrampoline);
+        g_tkMapInfo(rdram, ctx, runtime);
+    }
+
+    bool tkPreviewContinue(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        using namespace ps2_ssx3_tricky_preview;
+        using ps2_ssx3_tricky::rd32;
+        using ps2_ssx3_tricky::wr32;
+        const uint32_t f = getRegU32(ctx, 29);
+        if (!range(f, kFrameBytes, PS2_RAM_SIZE) || rd32(ram, f) != kFrameMagic) return false;
+        const uint32_t controller = rd32(ram, f + 8);
+        const uint32_t phase = rd32(ram, f + 4);
+        const auto finish = [&]() {
+            const uint32_t pc = rd32(ram, f + 12);
+            std::memcpy(ctx->r, ram + f + 0x20, sizeof(ctx->r));
+            wr32(ram, f, 0);
+            tkSetGpr(ctx, 29, f + kFrameBytes);
+            tkSetGpr(ctx, 31, pc);
+            ctx->pc = pc;
+        };
+        const auto call = [&](uint32_t pc, uint32_t next, uint32_t a0, uint32_t a1) {
+            wr32(ram, f + 4, next);
+            tkSetGpr(ctx, 4, a0);
+            tkSetGpr(ctx, 5, a1);
+            tkSetGpr(ctx, 31, ps2_ssx3_tricky::kTrampoline);
+            ctx->pc = pc;
+        };
+        if (phase == 0)
+        {
+            std::memcpy(ram + f + 0x20, ctx->r, sizeof(ctx->r));
+            const int event = cursorEvent(ram, PS2_RAM_SIZE, controller);
+            const uint32_t app = rd32(ram, 0x4a28a8u);
+            const uint32_t async = range(app, 0x120, PS2_RAM_SIZE) ? rd32(ram, app + 0x11cu) : 0;
+            const uint32_t slot = rd32(ram, controller + 0x2d8u);
+            const uint32_t up = widget(ram, PS2_RAM_SIZE, rd32(ram, controller + 0x2e8u), "up");
+            if (event != 0 || slot >= 5 || !range(async, 5 * 0x11c, PS2_RAM_SIZE) || !up)
+            {
+                tkLog(runtime, "preview: cursor/async/widget unavailable");
+                finish();
+                return true;
+            }
+            wr32(ram, f + 0x10, async);
+            wr32(ram, f + 0x14, slot);
+            wr32(ram, f + 0x18, static_cast<uint32_t>(event));
+            wr32(ram, f + 0x1c, up);
+            call(0x1a38c0u, 1, async, slot); // owned async slot cleanup
+        }
+        else if (phase == 1)
+        {
+            const uint32_t async = rd32(ram, f + 0x10), slot = rd32(ram, f + 0x14);
+            const uint32_t data = async + slot * 0x11cu;
+            const uint32_t event = rd32(ram, f + 0x18);
+            const uint32_t code = rd32(ram, 0x442950u + event * 4);
+            if (!range(code, 5, PS2_RAM_SIZE)) { finish(); return true; }
+            std::snprintf(reinterpret_cast<char *>(ram + data), 0x100, "data/ui/TP%.4s.ssh", ram + code);
+            wr32(ram, data + 0x108, 1); // stock async load
+            wr32(ram, data + 0x114, 1); // stock status: start load
+            wr32(ram, controller + 0x2dc, 0); // Map waits for slot READY
+            const uint32_t pic = rd32(ram, controller + 0x2e4);
+            if (range(pic, 0x80, PS2_RAM_SIZE)) wr32(ram, pic + 0x7c, 0);
+            const uint32_t row = ps2_ssx3_course::kEventBase + event * ps2_ssx3_course::kEventStride;
+            std::snprintf(reinterpret_cast<char *>(ram + f + 0x240), 128, "Ride %.31s from SSX Tricky.", ram + row + 4);
+            tkLog(runtime, "preview: event=" + std::to_string(event) + " slot=" + std::to_string(slot) +
+                  " file=" + reinterpret_cast<const char *>(ram + data));
+            call(0x3a0c50u, 2, rd32(ram, f + 0x1c), f + 0x240); // owned cUIText copy
+        }
+        else
+            finish();
+        return true;
+    }
+
     void tkTrampolineWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (tkPreviewContinue(rdram, ctx, runtime)) return;
         using namespace ps2_ssx3_tricky;
         State &s = state();
         if (s.redirect && getRegU32(ctx, 29) == s.sp)
@@ -1769,6 +1869,11 @@ namespace
         if (!knob())
             return;
         const uint8_t *ram = runtime.memory().getRDRAM();
+        if (!ram || ps2_ssx3_tricky::rd32(ram, ps2_ssx3_tricky_preview::kMapInfo) != 0x27bdf440u)
+        {
+            std::fprintf(stderr, "[ssx3-tricky] refused: Map info entry does not match\n");
+            return;
+        }
         for (const EntryWord &w : kEntryWords)
             if (!ram || ps2_ssx3_tricky::rd32(ram, w.pc) != w.word)
             {
@@ -1787,7 +1892,8 @@ namespace
                               {kMapFill, &g_tkMapFill, &tkMapFillWrapper},
                               {kPadReadGlue, &g_tkPadGlue, &tkPadGlueWrapper},
                               {kLuiLoad, &g_tkLuiLoad, &tkLuiLoadWrapper},
-                              {kTrampoline, &g_tkTrampoline, &tkTrampolineWrapper}};
+                              {kTrampoline, &g_tkTrampoline, &tkTrampolineWrapper},
+                              {ps2_ssx3_tricky_preview::kMapInfo, &g_tkMapInfo, &tkMapInfoWrapper}};
         for (const Hook &h : hooks)
             if (!(*h.orig = runtime.lookupFunction(h.pc)))
             {

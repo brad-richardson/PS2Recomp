@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_ssx3_tricky_menu.h"
+#include "ps2_ssx3_tricky_preview.h"
 
 #include <cstring>
 #include <string>
@@ -69,6 +70,43 @@ void register_ps2_ssx3_tricky_menu_tests()
 {
     MiniTest::Case("Ps2Ssx3TrickyMenu", [](TestCase &tc)
                    {
+        tc.Run("TK52: highlighted event follows the nav cursor across peaks and event types", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_preview;
+            using namespace ps2_ssx3_tricky;
+            auto ram = stockCourseRam();
+            constexpr uint32_t controller = 0x600000, screen = 0x601000, count = 0x602000;
+            constexpr uint32_t objects = 0x603000, nav = 0x604000;
+            put32(ram, controller + 0x2e8, screen);
+            put32(ram, screen + 0x38, count);
+            put32(ram, count, 1);
+            put32(ram, screen + 0x3c, objects);
+            put32(ram, objects, nav);
+            put32(ram, 0x4a259c, 2);
+            put32(ram, 0x535c08, 22); // accepted event is deliberately different
+            const char *names[] = {"Peak1RaceLocations", "Peak2FreestyleLocations", "Peak3FreerideLocations"};
+            const uint32_t bases[] = {0x4781d0, 0x4786e0 + 0x21c, 0x478d38 + 2 * 0x360};
+            for (uint32_t type = 0; type < 3; ++type)
+            {
+                put32(ram, 0x4a25a0, type);
+                put32(ram, 0x4a25a4, type);
+                put32(ram, nav + 0x38, nameHash(names[type]));
+                put32(ram, bases[type], 0);
+                put32(ram, bases[type] + 0x6c, 7);
+                ram[nav + 0x95] = 0;
+                t.Equals(cursorEvent(ram.data(), ram.size(), controller), 0, "first highlighted row");
+                ram[nav + 0x95] = 1;
+                t.Equals(cursorEvent(ram.data(), ram.size(), controller), 7, "cursor moved, accepted event unchanged");
+                ram[nav + 0x95] = 255;
+                t.Equals(cursorEvent(ram.data(), ram.size(), controller), -1, "invalid row rejected");
+            }
+            put32(ram, count, 0xffffffff);
+            t.Equals(cursorEvent(ram.data(), ram.size(), controller), -1, "bad widget count rejected");
+            put32(ram, 0x4a259c, 1);
+            t.Equals(cursorEvent(ram.data(), ram.size(), controller), -1, "Select Goal stays stock");
+            t.Equals(cursorEvent(ram.data(), 1024, controller), -1, "short RAM rejected before globals");
+            t.IsFalse(range(0xfffffffc, 16, ram.size()), "overflowing pointer rejected"); });
+
         tc.Run("name hash matches the LUI/LOC hashes (func_317618)", [](TestCase &t)
                {
             using ps2_ssx3_tricky::nameHash;
