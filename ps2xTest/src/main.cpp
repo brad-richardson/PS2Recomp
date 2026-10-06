@@ -66,6 +66,7 @@ void register_ps2_fh1_fh28_tests();
 void register_ps2_savestate_tests();
 void register_ps2_tc1_vf0_tests();
 void register_ps2_ach_tests();
+void register_ps2_session_telemetry_tests();
 void reset_ps2_test_function_table();
 
 int main()
@@ -136,6 +137,7 @@ int main()
     register_ps2_savestate_tests();
     register_ps2_tc1_vf0_tests();
     register_ps2_ach_tests();
+    register_ps2_session_telemetry_tests();
     int res = MiniTest::Run();
     std::cout.flush();
     std::cerr.flush();

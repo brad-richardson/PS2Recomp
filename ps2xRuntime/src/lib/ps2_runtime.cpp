@@ -230,6 +230,7 @@ void rlEnableColorBlend(void);
 #define XXH_NO_XXH3
 #define XXH_INLINE_ALL
 #include "runtime/third_party/xxhash.h"
+#include "ps2_session_telemetry.h" // TEL2
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #endif
@@ -2844,6 +2845,8 @@ void bg1OnPause()
     ps2x::inputdiag::flush("pause");
     // PR3: the pad recorder's open span + stdio buffer (same kill-proofing).
     ps2_stubs::padRecordFlushNow("pause");
+    // TEL2: coverage dump + session line while the game thread is gated.
+    ps2x::tel::onAppPause(tick);
     std::fprintf(stderr, "[bg1] paused at tick=%llu gate_acked=%d\n",
                  static_cast<unsigned long long>(tick), acked ? 1 : 0);
 }
@@ -2858,6 +2861,7 @@ void bg1OnResume()
     const uint64_t tick =
         g_bg1Runtime ? g_bg1Runtime->eeScheduler().currentVSyncTick() : 0u;
     std::fprintf(stderr, "[bg1] resumed at tick=%llu\n", static_cast<unsigned long long>(tick));
+    ps2x::tel::onAppResume(tick); // TEL2
 }
 } // namespace
 #endif
@@ -3687,6 +3691,9 @@ bool PS2Runtime::initialize(const char *title)
 {
     try
     {
+        // TEL2: coverage map + session log (knobs off = nothing allocated);
+        // before the game thread starts.
+        ps2x::tel::init(g_ps2RecompiledFunctionTableBase, g_ps2RecompiledFunctionTableSlotCount);
         if (!m_memory.initialize())
         {
             std::cerr << "Failed to initialize PS2 memory" << std::endl;
@@ -4406,6 +4413,7 @@ bool PS2Runtime::replaceFunction(uint32_t address, RecompiledFunction func)
     }
 
     g_ps2RecompiledFunctionTable[slot] = func;
+    ps2x::tel::noteOverride(address); // TEL2: init-time record for the coverage dump
     return true;
 }
 
@@ -4487,14 +4495,20 @@ void PS2Runtime::setMissingFunctionPolicy(MissingFunctionPolicy policy)
 
 void PS2Runtime::noteUnknownSyscall(uint32_t id)
 {
-    std::lock_guard<std::mutex> lock(m_coverageMutex);
-    ++m_unknownSyscallCounts[id];
+    {
+        std::lock_guard<std::mutex> lock(m_coverageMutex);
+        ++m_unknownSyscallCounts[id];
+    }
+    ps2x::tel::noteUnknownSyscall(id); // TEL2
 }
 
 void PS2Runtime::noteUnhandledRpc(uint32_t sid, uint32_t function)
 {
-    std::lock_guard<std::mutex> lock(m_coverageMutex);
-    ++m_unhandledRpcCounts[(static_cast<uint64_t>(sid) << 32u) | function];
+    {
+        std::lock_guard<std::mutex> lock(m_coverageMutex);
+        ++m_unhandledRpcCounts[(static_cast<uint64_t>(sid) << 32u) | function];
+    }
+    ps2x::tel::noteUnhandledRpc(sid, function); // TEL2
 }
 
 void PS2Runtime::printMissingFunctionCounts() const
@@ -4620,6 +4634,7 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
         std::lock_guard<std::mutex> lock(m_coverageMutex);
         ++m_missingFunctionCounts[targetPc];
     }
+    ps2x::tel::noteMissingFunction(targetPc, sourcePc); // TEL2
     const bool firstReport = !m_missingFunctionReported.exchange(true, std::memory_order_acq_rel);
     const bool shouldPrint = policy == MissingFunctionPolicy::Stop || firstReport;
 
@@ -4882,6 +4897,7 @@ inline PS2Runtime::RecompiledFunction dspFastTarget(uint32_t targetPc, uint32_t 
     uint32_t slot = 0u;
     if (!generatedFunctionTableSlot(targetPc, slot))
         return nullptr;
+    ps2x::tel::coverSlot(slot); // TEL2 (one relaxed load when off)
     return g_ps2RecompiledFunctionTable[slot];
 }
 
@@ -5133,6 +5149,7 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
         diagCallsPeriodicFlush();
     }
 
+    ps2x::tel::coverPc(targetPc); // TEL2 (one relaxed load when off)
     RecompiledFunction targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
     // HP3 F4: the E11/E12 card observation + E15 MPEG trace run a Trace
@@ -7407,6 +7424,7 @@ void PS2Runtime::run()
     // force-stop SIGKILLs past here, so the Odin reads the per-second lines).
     if (perfLog)
         ps2x::perflog::dumpTail();
+    ps2x::tel::onExit(m_memory.gs().vsyncTick.load()); // TEL2: final coverage dump
     // IN4: input-diagnostics ring dump (no-op unless on).
     ps2x::inputdiag::flush("shutdown");
 }

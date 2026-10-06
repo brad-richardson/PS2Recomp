@@ -549,6 +549,7 @@ add_library(ps2_runtime STATIC
     src/lib/vu/ps2_microvu.cpp
     src/lib/games_database.cpp
     src/lib/ps2_ach.cpp # ACH2: local achievements runtime
+    src/lib/ps2_session_telemetry.cpp # TEL2: coverage + session log
 )
 
 if(PS2X_ENABLE_RUNTIME_LOGS)

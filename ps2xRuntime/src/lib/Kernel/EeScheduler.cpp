@@ -43,6 +43,8 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "ps2_session_telemetry.h" // TEL2
+
 #if PS2X_ENABLE_DIAG_TAPS
 namespace ge1_wait_census { void clear(uint64_t tick); }
 #endif
@@ -1049,6 +1051,7 @@ void EeScheduler::run()
             }
             continue;
         }
+        ps2x::tel::coverPc(context.pc); // TEL2 (one relaxed load when off)
         PS2Runtime::RecompiledFunction function = m_runtime.lookupFunction(context.pc);
 
         if (checkpointDue(kGuestDispatchCycles))
@@ -3133,12 +3136,16 @@ void EeScheduler::processEvent(const EeEvent &event)
         {
             std::cerr << "[coverage:tick] vsync=" << m_vsyncTick << std::endl;
             m_runtime.printMissingFunctionCounts();
+            ps2x::tel::onCoverageTick(m_vsyncTick); // TEL2: file dump too (no-op when off)
         }
         ps2_fh1::onVBlank(m_rdram, m_vsyncTick, m_runtime.gs()); // FH1 tap/seq (env-only)
         // ACH2: local achievements at the stock tick (read-only wrt guest;
         // one getenv when the knob is off). After onVBlank so FH1's
         // g_stockHalfExact is fresh for this VBlank.
         ps2_ach::onVBlankTick(m_vsyncTick, m_rdram, m_runtime.memory().getScratchpad());
+        // TEL2: session-log race tracker (read-only; one bool check when off).
+        if (ps2x::tel::sessionOn())
+            ps2x::tel::onVBlank(m_vsyncTick, m_rdram, PS2_RAM_SIZE, ps2_fh1::eventsMode(), ps2_fh1::g_guestActive);
         if (ps2_fh1::eventsMode())
         {
             // FH5: the committed event state sets the EE budget and the pacer
