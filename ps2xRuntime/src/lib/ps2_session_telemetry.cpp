@@ -5,9 +5,11 @@
 #include "ps2_knobs.h"
 #include "ps2_ssx3_course_manifest.h"
 #include "ps2_ssx3_tricky_hud.h"
+#include "ps2_ssx3_tricky_menu.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <ctime>
@@ -57,8 +59,14 @@ struct State
     bool raceSaw120 = false;
     std::chrono::steady_clock::time_point raceWall;
     std::atomic<bool> raceRunning{false};
-    uint64_t raceWindows = 0u, raceHitches = 0u;
-    double raceVsSum = 0.0, raceVsMin = 1e9;
+    uint64_t raceHitches = 0u;
+    SegmentLabels labels;
+    RunRates rates;
+    PauseEdges pause;
+    bool spanOpen = false;
+    uint32_t mode = 0xffu;
+    std::string modeName = "?";
+    bool rate120 = false;
     uint64_t races = 0u;
     double resumeAtS = -1.0; // last app resume (its first windows span the pause)
     // Dumper thread.
@@ -315,16 +323,69 @@ void logRaceStart(State &s, uint64_t tick, const uint8_t *ram, size_t ramSize, b
     char buf[512];
     std::snprintf(buf, sizeof(buf),
                   "race-start n=%llu event=%d name=\"%s\" loc=\"%s\" archive=\"%s\" disc=%d mode_b=%u game_b=%u "
-                  "sim=%s full120=%s course_mode=\"%s\" race_time=%u wall=%s",
+                  "sim=%s full120=%s course_mode=\"%s\" race_time=%u wall=%s kind=run mode=\"%s\"",
                   static_cast<unsigned long long>(s.races), ok ? static_cast<int>(ev) : -1, name.c_str(),
                   code.c_str(), archive.c_str(), static_cast<int>(disc == 0xffu ? -1 : static_cast<int>(disc)),
                   static_cast<unsigned>(mode48), static_cast<unsigned>(game49), sim && sim[0] ? sim : "unset",
-                  fh1Events ? "events" : "off", tricky.c_str(), clock, utcIso().c_str());
+                  fh1Events ? "events" : "off", tricky.c_str(), clock, utcIso().c_str(), s.modeName.c_str());
     (void)tick;
     sesLineLocked(s, buf);
 }
 
 } // namespace
+
+GuestRaceState readGuestRaceState(const uint8_t *ram, size_t size)
+{
+    using ps2_ssx3_tricky_hud::readGuestU32;
+    GuestRaceState g;
+    uint32_t root = 0u, app = 0u, session = 0u, ui = 0u;
+    if (!readGuestU32(ram, size, ps2_ssx3_tricky_hud::kChainRoot, 0u, root) || !root ||
+        !readGuestU32(ram, size, root, 0x84u, app) || !app)
+        return g;
+    // 0x230BB8/BC: a0=[app+0x28] → 0x26F4A8; FH1 observes [a0+0x610].
+    if (readGuestU32(ram, size, app, 0x28u, session) && session)
+    {
+        uint32_t fin = 0u;
+        g.session = session;
+        g.finishedKnown = readGuestU32(ram, size, session, 0x610u, fin);
+        g.finished = g.finishedKnown && fin != 0u;
+    }
+    // Exact read-only equivalent of 0x20CBA0's pause predicate:
+    // app+0x48 → UI; find nameHash("cOVTemplate_PauseMenu") in the two
+    // UI+0x18 circular lists (0x39F9D8, +0x1c second list). This same
+    // predicate blocks guest race updates at 0x230B18-24. TK44's clock
+    // gate alone cannot distinguish this from results/card freezes.
+    if (!readGuestU32(ram, size, app, 0x48u, ui) || !ui) return g;
+    const uint32_t pauseHash = ps2_ssx3_tricky_menu::nameHash("cOVTemplate_PauseMenu");
+    for (uint32_t listOff : {0x18u, 0x34u})
+    {
+        uint32_t node = 0u;
+        if (!readGuestU32(ram, size, ui, listOff + 4u, node) || !node) return g;
+        bool ended = false;
+        for (unsigned n = 0u; n < 128u; ++n)
+        {
+            uint32_t next = 0u, prev = 0u, hash = 0u;
+            if (!readGuestU32(ram, size, node, 4u, next) || !next ||
+                !readGuestU32(ram, size, node, 0u, prev)) return g;
+            if (next == node && prev == node) { ended = true; break; }
+            if (!readGuestU32(ram, size, node, 0xcu, hash)) return g;
+            if (hash == pauseHash) { g.pauseKnown = true; g.paused = true; return g; }
+            node = next;
+        }
+        if (!ended) return g; // corrupt cycle or over budget: unknown, never a false resume
+    }
+    g.pauseKnown = true;
+    return g;
+}
+
+std::string readModeName(const uint8_t *ram, size_t size, uint32_t mode)
+{
+    // 0x145398: signed [0x535C10] indexes 60-byte records at 0x43E7D0.
+    // TK1 lists this seven-record mode table separately from sub-modes.
+    if (!ram || mode >= 7u) return "?";
+    const std::string name = guestStr(ram, size, 0x43e7d0u + mode * 60u, 60u);
+    return name.empty() ? "?" : name;
+}
 
 bool coverageOn()
 {
@@ -422,55 +483,97 @@ void onVBlank(uint64_t tick, const uint8_t *rdram, size_t ramSize, bool fh1Event
     uint32_t clock = 0u;
     if (b != 0u)
         clock = rd32(rdram, ramSize, b + ps2_ssx3_tricky_hud::kRaceClockOff, clockOk);
+    const GuestRaceState guest = readGuestRaceState(rdram, ramSize);
     RaceTracker &r = s.race;
     const RaceTracker::State before = r.st;
+    const uint64_t lastChange = r.lastChangeTick;
     const uint32_t e = r.step(tick, b, clockOk, clock);
-    if (r.st == RaceTracker::Running && fh1GuestActive)
-        s.raceSaw120 = true;
-    // Perf windows count toward the race only while its clock runs.
-    s.raceRunning.store(r.st == RaceTracker::Running, std::memory_order_relaxed);
-    if (e == kEdgeNone)
-        return;
     std::lock_guard<std::mutex> lock(s.mu);
-    char buf[320];
+    char buf[768];
+    if (const char *edge = s.pause.step(guest))
+    {
+        std::snprintf(buf, sizeof(buf), "%s n=%llu session=0x%x evidence=pause-menu-template",
+                      edge, static_cast<unsigned long long>(s.races), guest.session);
+        sesLineLocked(s, buf);
+    }
+    // Do not let the end/reset sample's new guest object explain the old run.
+    if (!(e & kEdgeEnd)) s.labels.observe(guest);
+    const bool running = r.st == RaceTracker::Running && !(guest.pauseKnown && guest.paused);
+    s.raceRunning.store(running, std::memory_order_relaxed);
+    if (running && fh1GuestActive) s.raceSaw120 = true;
+    if (s.spanOpen && (!running || s.rate120 != fh1GuestActive))
+    {
+        s.rates.stop((e & kEdgeStop) ? r.stopTick : (e & kEdgeEnd) ? lastChange : tick - 1u);
+        s.spanOpen = false;
+    }
+    s.rate120 = fh1GuestActive;
     if (e & kEdgeEnd)
     {
+        const auto label = s.labels.end(tick);
+        const auto rates = s.rates.summary();
         const double durS =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - s.raceWall).count();
         std::snprintf(buf, sizeof(buf),
                       "race-end n=%llu reason=%s ticks=%llu wall_s=%.1f last_stop_tick=%llu race_time_at_stop=%u "
-                      "was=%s guest120_seen=%d perf_windows=%llu vs_mean=%.2f vs_min=%.2f hitches=%llu",
+                      "was=%s guest120_seen=%d perf_windows=%llu vs_mean=%.2f vs_min=%.2f hitches=%llu "
+                      "lost_ms=%.2f lost_windows=%llu kind=%s outcome=%s classification_pending=%d mode=\"%s\"",
                       static_cast<unsigned long long>(s.races), r.endReason,
                       static_cast<unsigned long long>(tick - r.startTick), durS,
                       static_cast<unsigned long long>(r.stopTick), r.stopClock,
                       before == RaceTracker::Stopped ? "stopped" : "running", s.raceSaw120 ? 1 : 0,
-                      static_cast<unsigned long long>(s.raceWindows),
-                      s.raceWindows ? s.raceVsSum / static_cast<double>(s.raceWindows) : 0.0,
-                      s.raceWindows ? s.raceVsMin : 0.0, static_cast<unsigned long long>(s.raceHitches));
+                      static_cast<unsigned long long>(rates.count), rates.mean, rates.min,
+                      static_cast<unsigned long long>(s.raceHitches), rates.lostMs,
+                      static_cast<unsigned long long>(rates.lockedCount), label.kind, label.outcome,
+                      label.pending ? 1 : 0, s.modeName.c_str());
         sesLineLocked(s, buf);
     }
     if (e & kEdgeStart)
     {
         ++s.races;
+        s.labels.start(tick, clock, guest);
+        const size_t modeAddr = kCurCourse + 0x48u;
+        s.mode = modeAddr < ramSize ? rdram[modeAddr] : 0xffu;
+        s.modeName = readModeName(rdram, ramSize, s.mode);
         s.raceSaw120 = fh1GuestActive;
         s.raceWall = std::chrono::steady_clock::now();
-        s.raceWindows = s.raceHitches = 0u;
-        s.raceVsSum = 0.0;
-        s.raceVsMin = 1e9;
+        s.raceHitches = 0u;
+        s.rates = RunRates{};
+        s.spanOpen = false;
+        r.stopTick = 0u;
+        r.stopClock = 0u;
         logRaceStart(s, tick, rdram, ramSize, fh1Events, clock);
     }
     if (e & kEdgeStop)
     {
-        std::snprintf(buf, sizeof(buf), "race-stop n=%llu race_time=%u clock_tick=%llu",
+        // Grace ends later than the true frozen tick, including across rate flips.
+        for (auto &span : s.rates.spans)
+            if (span.end > r.stopTick) span.end = r.stopTick;
+        s.spanOpen = false;
+        s.labels.stop(guest);
+        std::snprintf(buf, sizeof(buf),
+                      "race-stop n=%llu race_time=%u clock_tick=%llu session=0x%x finished=%s paused=%s "
+                      "outcome=%s mode=\"%s\"",
                       static_cast<unsigned long long>(s.races), r.stopClock,
-                      static_cast<unsigned long long>(r.stopTick));
+                      static_cast<unsigned long long>(r.stopTick), guest.session,
+                      guest.finishedKnown ? (guest.finished ? "1" : "0") : "unknown",
+                      guest.pauseKnown ? (guest.paused ? "1" : "0") : "unknown",
+                      guest.finishedKnown ? (guest.finished ? "finished" : "aborted") : "unknown",
+                      s.modeName.c_str());
         sesLineLocked(s, buf);
     }
     if (e & kEdgeResume)
     {
+        // A clock resume is distinct from the menu's resume edge.
+        s.labels.stopSeen = false;
+        s.labels.stopKnown = false;
         std::snprintf(buf, sizeof(buf), "race-resume n=%llu race_time=%u", static_cast<unsigned long long>(s.races),
                       clock);
         sesLineLocked(s, buf);
+    }
+    if (running && !s.spanOpen)
+    {
+        s.rates.start(tick);
+        s.spanOpen = true;
     }
 }
 
@@ -593,20 +696,26 @@ void noteLogLine(const char *line)
     noteError(s, line);
 }
 
-void notePerfWindow(uint64_t tick, double vsyncsPerS, double maxGapMs, const StageMax *stages, size_t count)
+void notePerfWindow(uint64_t beginTick, uint64_t tick, double windowS, double expectedHz,
+                    double vsyncsPerS, double maxGapMs, const StageMax *stages, size_t count)
 {
     State &s = st();
     if (!s.ses)
         return;
-    (void)tick;
     std::lock_guard<std::mutex> lock(s.mu);
     const bool racing = s.raceRunning.load(std::memory_order_relaxed);
+    if (expectedHz > 0.0)
+    {
+        const double nominal = 60000.0 / 1001.0 * (s.rate120 ? 2.0 : 1.0);
+        const double stride = std::round(expectedHz / nominal);
+        const double ratio = stride * nominal / expectedHz;
+        expectedHz = stride >= 1.0 && ratio >= 0.95 && ratio <= 1.05 ? expectedHz / stride : 0.0;
+    }
     if (racing)
     {
-        ++s.raceWindows;
-        s.raceVsSum += vsyncsPerS;
-        if (vsyncsPerS < s.raceVsMin)
-            s.raceVsMin = vsyncsPerS;
+        // Bounded: at 1 Hz this covers over eight hours in one segment.
+        if (s.rates.windows.size() < 32768u)
+            s.rates.windows.push_back({beginTick, tick, windowS, expectedHz, vsyncsPerS});
     }
     if (maxGapMs < kHitchMs)
         return;

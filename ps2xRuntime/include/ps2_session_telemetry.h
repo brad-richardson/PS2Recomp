@@ -101,7 +101,8 @@ struct StageMax
     const char *name;
     double maxMs; // -1 when the stage did not fire
 };
-void notePerfWindow(uint64_t tick, double vsyncsPerS, double maxGapMs, const StageMax *stages, size_t count);
+void notePerfWindow(uint64_t beginTick, uint64_t tick, double windowS, double expectedHz,
+                    double vsyncsPerS, double maxGapMs, const StageMax *stages, size_t count);
 
 // ---- Pure helpers ----------------------------------------------------------------
 
@@ -234,6 +235,120 @@ inline bool containsWord(const char *line, const char *word)
     }
     return false;
 }
+
+// TLG1: guest lifecycle observations. The clock by itself does not distinguish
+// a menu pause from a finish. Unknown is preserved on an unreadable guest chain.
+struct GuestRaceState
+{
+    uint32_t session = 0u;
+    bool finishedKnown = false, finished = false;
+    bool pauseKnown = false, paused = false;
+};
+
+// Read-only equivalents of the guest's predicates, implemented in the runtime.
+GuestRaceState readGuestRaceState(const uint8_t *ram, size_t size);
+std::string readModeName(const uint8_t *ram, size_t size, uint32_t mode);
+
+struct SegmentLabels
+{
+    uint64_t startTick = 0u;
+    uint32_t startClock = 0u;
+    bool stopSeen = false, stopKnown = false, finished = false, pauseSeen = false;
+    bool pauseKnown = false;
+    void start(uint64_t tick, uint32_t clock, const GuestRaceState &g)
+    {
+        *this = SegmentLabels{};
+        startTick = tick;
+        startClock = clock;
+        observe(g);
+    }
+    void observe(const GuestRaceState &g)
+    {
+        pauseKnown = g.pauseKnown;
+        pauseSeen = pauseSeen || (g.pauseKnown && g.paused);
+        finished = finished || (g.finishedKnown && g.finished);
+    }
+    void stop(const GuestRaceState &g)
+    {
+        observe(g);
+        stopSeen = true;
+        stopKnown = g.finishedKnown;
+    }
+    struct Result { const char *kind; const char *outcome; bool pending; };
+    Result end(uint64_t tick) const
+    {
+        const char *outcome = finished ? "finished" : stopSeen && stopKnown ? "aborted" : "unknown";
+        // A finished or paused live run takes precedence over clock/length guesses.
+        if (finished || pauseSeen) return {"run", outcome, false};
+        if (stopSeen && stopKnown) return {"aborted", outcome, false};
+        const bool ambiguous = tick - startTick < 30u || startClock > 1u;
+        if (ambiguous && !pauseKnown) return {"run", outcome, true};
+        if (tick - startTick < 30u) return {"glitch", outcome, false};
+        if (startClock > 1u) return {"post", outcome, false};
+        return {"run", outcome, false};
+    }
+};
+
+struct PauseEdges
+{
+    bool known = false, paused = false;
+    // Unknown samples do not invent a resume; the next known sample adopts.
+    const char *step(const GuestRaceState &g)
+    {
+        if (!g.pauseKnown) { known = false; return nullptr; }
+        const char *edge = (!known && g.paused) || (known && paused != g.paused)
+                           ? (g.paused ? "pause" : "resume") : nullptr;
+        known = true;
+        paused = g.paused;
+        return edge;
+    }
+};
+
+struct RunningSpan { uint64_t begin, end; };
+struct RateWindow
+{
+    uint64_t begin, end;
+    double seconds, hz, vs;
+};
+struct RunRates
+{
+    std::vector<RunningSpan> spans;
+    std::vector<RateWindow> windows;
+    uint64_t begin = 0u;
+    void start(uint64_t tick) { begin = tick; }
+    void stop(uint64_t tick)
+    {
+        // A freeze is discovered after the grace period; retrospectively trim
+        // any rate-flip span recorded between the frozen tick and that discovery.
+        for (auto &span : spans)
+            if (span.end > tick) span.end = tick;
+        if (tick >= begin) spans.push_back({begin, tick});
+    }
+    struct Summary { uint64_t count = 0u, lockedCount = 0u; double mean = 0.0, min = 0.0, lostMs = 0.0; };
+    Summary summary() const
+    {
+        Summary out;
+        double seconds = 0.0, ticks = 0.0;
+        for (const auto &w : windows)
+            for (const auto &span : spans)
+                if (w.begin >= span.begin && w.end <= span.end && w.end > w.begin && w.seconds > 0.0)
+                {
+                    ++out.count;
+                    seconds += w.seconds;
+                    ticks += static_cast<double>(w.end - w.begin);
+                    if (out.count == 1u || w.vs < out.min) out.min = w.vs;
+                    if (w.hz > 0.0)
+                    {
+                        ++out.lockedCount;
+                        const double deficit = w.seconds * w.hz - static_cast<double>(w.end - w.begin);
+                        if (deficit > 0.0) out.lostMs += deficit * 1000.0 / w.hz;
+                    }
+                    break;
+                }
+        if (seconds > 0.0) out.mean = ticks / seconds;
+        return out;
+    }
+};
 
 // Error lines worth a session-log entry (Android logcat tap). Our own [tel]
 // notes never match. "refused" counts only as a word (our refusal lines:
