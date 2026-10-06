@@ -118,13 +118,14 @@ def prepare(a):
 
 
 def mac(a):
+    extra = 'ON' if a.suite else 'OFF'
     configure(ROOT, a.work / 'runner-build', '-DPS2X_GAME_CODEGEN_DIR=' + str(a.work / 'codegen'),
-        '-DPS2X_VU0_RECOMP_DIR=', '-DPS2X_BUILD_RECOMP=ON', '-DPS2X_BUILD_ANALYZER=OFF',
-        '-DPS2X_BUILD_TEST=ON', '-DPS2X_ENABLE_DEBUG_UI=OFF', '-DPS2X_ENABLE_RUNTIME_LOGS=OFF',
+        '-DPS2X_VU0_RECOMP_DIR=', '-DPS2X_BUILD_RECOMP=' + extra, '-DPS2X_BUILD_ANALYZER=' + extra,
+        '-DPS2X_BUILD_TEST=' + extra, '-DPS2X_ENABLE_DEBUG_UI=OFF', '-DPS2X_ENABLE_RUNTIME_LOGS=OFF',
         '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_ENABLE_DIAG_TAPS=OFF',
         '-DPS2X_ENABLE_DIAG_WATCH=OFF', '-DPS2X_ENABLE_TS2_DIAG=OFF')
     run('cmake', '--build', a.work / 'runner-build', '--parallel', a.jobs,
-        '--target', 'ps2EntryRunner', 'ps2x_tests')
+        '--target', 'ps2EntryRunner', *(['ps2x_tests'] if a.suite else []))
 
 
 def android(a):
@@ -244,6 +245,7 @@ def main():
     p.add_argument('--iso', type=Path, help='own supported USA disc image (prepare only)')
     p.add_argument('--jnilibs', type=Path, help='own source-built Android JNI libraries')
     p.add_argument('--ndk', type=Path, help='local Android NDK 28.2.13676358')
+    p.add_argument('--suite', action='store_true', help='also build optional Mac development suite and its analyzer/recompiler fixtures')
     p.add_argument('--jobs', type=int, default=8)
     a = p.parse_args()
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':

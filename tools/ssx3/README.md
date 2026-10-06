@@ -28,11 +28,19 @@ Run from this checkout (replace the paths):
 python3 tools/ssx3/build.py prepare --iso '/path/to/your/SSX 3 (USA).iso' --work /path/to/private-build
 python3 tools/ssx3/build.py mac-libs --work /path/to/private-build
 python3 tools/ssx3/build.py mac --work /path/to/private-build
-/path/to/private-build/runner-build/ps2xTest/ps2x_tests
 python3 tools/ssx3/build.py run --work /path/to/private-build
 ```
 
-Run the suite **from the checkout root**. The generator pin is
+The default Mac target is the runner. The development suite is optional and
+requires analyzer/recompiler fixture targets; it is separate from the external
+runner/title acceptance:
+
+```sh
+python3 tools/ssx3/build.py mac --work /path/to/private-build --suite
+/path/to/private-build/runner-build/ps2xTest/ps2x_tests
+```
+
+Run that suite **from the checkout root**. The generator pin is
 `fc1f3effa3f2a79f4482ac0b7952191fa5f3a51e` (HL3); the current game TOML/map
 includes the Equip Gear extra entry. `prepare` checks ISO and extracted ELF
 SHA256, clones the historical generator from the public fork, builds it, writes
