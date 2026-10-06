@@ -24,7 +24,11 @@
 //     with a present gap >= 50 ms, with that window's per-stage max ms),
 //     error lines (FATAL/JALR/refused via the Android logcat tap; missing
 //     functions, unknown syscalls, unhandled RPCs from the CT1 hooks), app
-//     pause/resume and a 5-minute heartbeat. Budgets cap hitch and error
+//     pause/resume and a 5-minute heartbeat. TEL4 adds health at 30 s and
+//     run boundaries, plus run-summary on stop/end/exit. GPU percentiles merge
+//     accepted whole-window histograms (0.25 ms bins, upper edges; >=20 overflow).
+//     RSS/thermal maxima are sampled, not continuous peaks. Present gaps count
+//     actual intervals >=16 ms; slow windows use stock59.94/event119.88. Budgets cap hitch and error
 //     lines so a bad session stays a few KB per hour.
 //
 // Every write failure is swallowed (one stderr note); the game never waits

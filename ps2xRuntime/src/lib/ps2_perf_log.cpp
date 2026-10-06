@@ -907,7 +907,8 @@ void poll(uint64_t vsyncTick)
 #endif
     if (ps2x::tel::sessionOn()) {
         std::lock_guard<std::mutex> lock(healthGpuMu);
-        healthGpuBusy = s.kgslBusy; healthGpuClk = s.kgslClk;
+        healthGpuBusy = s.kgslBusy.empty() ? "na" : s.kgslBusy;
+        healthGpuClk = s.kgslClk.empty() ? "na" : s.kgslClk;
     }
     const std::string line = formatLine(s);
     std::fprintf(log.file, "%s\n", line.c_str());

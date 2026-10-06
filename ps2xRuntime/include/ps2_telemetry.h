@@ -33,10 +33,17 @@
 //   W t_ms vsync_first vsync_last vsyncs new_tfx tfx_us new_spv spv_us flush_us
 //     tfx_slow tfx_max_us up_kb uploads tex_new tex_new_us wall_max_us
 //     wall_gt20ms wall_gt50ms c_dropped
+//     TEL4 appends repl_indexed repl_precache_ms1 repl_loaded repl_used
+//     repl_cache_bytes repl_failures repl_gpu_bytes hash_cache_bytes.
+//     Gauges and cumulative totals are the last sample, not window sums.
+//     precache_ms1 is 0 while pending/off, otherwise completion ms since GS init + 1.
+//     loaded counts successful decodes; used counts distinct complete hash keys
+//     demanded by source lookup after a successful replacement upload (not preload).
 //   P <text>  GE1's own comment rows (the boot prewarm line), passed through.
 // Column names come from GE1's CSV header, so a GE1 that adds/drops columns
 // still parses (missing columns read 0).
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
