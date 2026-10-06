@@ -1011,6 +1011,22 @@ namespace ps2recomp
             m_relocations = m_elfParser->getRelocations();
             collectCorrectnessCriticalFunctionStarts();
 
+            // SSX3 compatibility: preserve the CD-reader's historical overlap.
+            // ssx3/local/research/CGR2/REPORT.md isolates tick-53 drift to
+            // repartitioning this body and its seven scheduler resume entries.
+            // The extra dispatch boundaries change guest cycle accounting.
+            if (fs::path(m_config.inputPath).filename() == "SLUS_207.72")
+            {
+                for (auto &function : m_functions)
+                {
+                    if (function.start == 0x003E3B00u)
+                    {
+                        function.end = 0x003E3D78u;
+                        break;
+                    }
+                }
+            }
+
             if (m_functions.empty())
             {
                 m_reporter.error("elf", "No functions found in ELF file.");
@@ -2201,6 +2217,25 @@ namespace ps2recomp
                 << " rejected-prologues=" << interiorStats.prologuesRejected
                 << " referenced-leaves=" << interiorStats.referencedLeaves;
             m_reporter.progress(msg.str());
+        }
+
+        // Keep these SSX3 scheduler resumes in the historical CD-reader owner,
+        // even where fresh ELF discovery finds an overlapping function. See
+        // ssx3/local/research/CGR2/REPORT.md: moving them changes cycle accounting.
+        if (fs::path(m_config.inputPath).filename() == "SLUS_207.72")
+        {
+            constexpr uint32_t historicalResumes[] = {
+                0x003E3C18u, 0x003E3C20u, 0x003E3C28u, 0x003E3C68u,
+                0x003E3CA8u, 0x003E3D4Cu, 0x003E3D6Cu};
+            for (auto &[ownerStart, targets] : m_resumeEntryTargetsByOwner)
+            {
+                for (const uint32_t target : historicalResumes)
+                {
+                    targets.erase(std::remove(targets.begin(), targets.end(), target), targets.end());
+                }
+            }
+            auto &targets = m_resumeEntryTargetsByOwner[0x003E3B00u];
+            targets.insert(targets.end(), std::begin(historicalResumes), std::end(historicalResumes));
         }
 
         size_t totalTargets = 0u;
