@@ -1,5 +1,7 @@
 // GE1's private PCSX2 GS host. This adapter calls public GS.h entry points.
 #include "ge1_gs.h"
+#include "tfx-prewarm-data.h"
+#include <set>
 #include "pcsx2/GS.h"
 #include "pcsx2/GS/GS.h"
 #include "pcsx2/Host.h"
@@ -435,40 +437,57 @@ extern "C" GE1_API int ge1_gs_open(int blending_level)
                 s_flush_every = 600;
             GSSetTFXSelectorRecord(true);
             const std::uint32_t sel_size = GSGetTFXSelectorSize();
+            // PCF1: ship the recorded coverage with the library on APK and iOS builds.
+            // Keep the existing env opt-in and writable recording path; union its records
+            // with the matching renderer's list (VK 32 bytes, Metal 24 bytes).
+            std::vector<u8> blob;
+            if (sel_size == 32)
+                blob.assign(std::begin(ge1_prewarm::kVk), std::end(ge1_prewarm::kVk));
+            else if (sel_size == 24)
+                blob.assign(std::begin(ge1_prewarm::kMetal), std::end(ge1_prewarm::kMetal));
             std::ifstream in(prewarm, std::ios::binary | std::ios::ate);
             if (sel_size > 0 && in)
             {
                 const std::size_t bytes = static_cast<std::size_t>(in.tellg());
                 if (bytes > 0 && bytes <= 4u * 1024u * 1024u && (bytes % sel_size) == 0)
                 {
-                    const std::uint32_t count = static_cast<std::uint32_t>(bytes / sel_size);
-                    std::vector<u8> blob(bytes);
+                    const std::size_t offset = blob.size();
+                    blob.resize(offset + bytes);
                     in.seekg(0);
-                    in.read(reinterpret_cast<char*>(blob.data()), static_cast<std::streamsize>(bytes));
-                    if (in)
-                    {
-                        // Don't re-record what prewarm creates: the file already holds them.
-                        GSSetTFXSelectorRecord(false);
-                        const auto t0 = std::chrono::steady_clock::now();
-                        const std::uint32_t created =
-                            GSPrewarmTFXPipelines(blob.data(), count > 65536 ? 65536 : count);
-                        GSSetTFXSelectorRecord(true);
-                        const std::uint64_t us = static_cast<std::uint64_t>(
-                            std::chrono::duration_cast<std::chrono::microseconds>(
-                                std::chrono::steady_clock::now() - t0).count());
-                        Console.WriteLn("PW1: prewarmed %u/%u TFX pipelines in %llu us from '%s'", created,
-                            count, static_cast<unsigned long long>(us), prewarm);
-                        if (s_stats)
-                        {
-                            std::fprintf(s_stats, "# prewarm selectors=%u created=%u us=%llu\n", count, created,
-                                static_cast<unsigned long long>(us));
-                            std::fflush(s_stats);
-                        }
-                    }
+                    in.read(reinterpret_cast<char*>(blob.data() + offset), static_cast<std::streamsize>(bytes));
+                    if (!in)
+                        blob.resize(offset);
                 }
                 else if (bytes > 0)
-                {
                     Console.Error("PW1: ignoring malformed selector file '%s' (%zu bytes)", prewarm, bytes);
+            }
+            if (sel_size > 0 && !blob.empty())
+            {
+                std::set<std::vector<u8>> unique;
+                for (std::size_t offset = 0; offset < blob.size(); offset += sel_size)
+                    unique.emplace(blob.begin() + offset, blob.begin() + offset + sel_size);
+                blob.clear();
+                for (const auto& key : unique)
+                {
+                    if (blob.size() / sel_size == 65536)
+                        break;
+                    blob.insert(blob.end(), key.begin(), key.end());
+                }
+                const std::uint32_t count = static_cast<std::uint32_t>(blob.size() / sel_size);
+                GSSetTFXSelectorRecord(false);
+                const auto t0 = std::chrono::steady_clock::now();
+                const std::uint32_t created = GSPrewarmTFXPipelines(blob.data(), count);
+                GSSetTFXSelectorRecord(true);
+                const std::uint64_t us = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - t0).count());
+                Console.WriteLn("PCF1: prewarmed %u/%u TFX pipelines in %llu us (record bytes=%u) from shipped + '%s'", created,
+                    count, static_cast<unsigned long long>(us), sel_size, prewarm);
+                if (s_stats)
+                {
+                    std::fprintf(s_stats, "# prewarm selectors=%u created=%u us=%llu\n", count, created,
+                        static_cast<unsigned long long>(us));
+                    std::fflush(s_stats);
                 }
             }
         }
