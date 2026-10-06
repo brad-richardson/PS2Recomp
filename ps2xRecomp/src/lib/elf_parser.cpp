@@ -1,5 +1,6 @@
 #include "ps2recomp/elf_parser.h"
 #include "ps2recomp/instructions.h"
+#include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/recompiler_reporter.h"
 #include "ps2recomp/types.h"
 #include <iostream>
@@ -2076,6 +2077,36 @@ namespace ps2recomp
             }
 
             func.end = (nextStart > func.start) ? nextStart : (func.start + 4);
+        }
+
+        // Upstream extractFunctions (c5a9d02) accepts explicit symbol/map
+        // extents and otherwise ends at the next discovered start. A start
+        // can also be the preceding transfer's delay instruction. Preserve
+        // that real instruction in both extents instead of letting the emitter
+        // substitute a synthetic NOP (CGR2 late-race regression).
+        // ERET has no delay slot; use the decoder's architectural property.
+        R5900Decoder decoder;
+        for (auto &function : functions)
+        {
+            const Section *section = FindFunctionSectionByAddress(m_sections, function.start);
+            if (!section || function.end <= function.start ||
+                function.end < section->address ||
+                (function.end - section->address) % MIPS_INSTRUCTION_SIZE != 0)
+            {
+                continue;
+            }
+            const uint32_t endOffset = function.end - section->address;
+            if (endOffset < MIPS_INSTRUCTION_SIZE || endOffset > section->size ||
+                section->size - endOffset < MIPS_INSTRUCTION_SIZE)
+            {
+                continue;
+            }
+            uint32_t terminalRaw = 0;
+            if (ReadSectionWord(*section, endOffset - MIPS_INSTRUCTION_SIZE, terminalRaw) &&
+                decoder.decodeInstruction(function.end - MIPS_INSTRUCTION_SIZE, terminalRaw, false).hasDelaySlot)
+            {
+                function.end += MIPS_INSTRUCTION_SIZE;
+            }
         }
 
         return functions;

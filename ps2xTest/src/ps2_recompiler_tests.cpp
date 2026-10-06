@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <unordered_map>
 #include <vector>
 
@@ -866,10 +867,111 @@ static bool writeRecompilerTestConfig(const std::filesystem::path &configPath,
     return static_cast<bool>(config);
 }
 
+// Synthetic instructions at CGR2's five failing map extents, plus JALR/ERET
+// and an executable-section boundary. No game ELF or generated code is needed.
+struct DelayExtentCase
+{
+    uint32_t start, end, terminal, following;
+    bool hasFollowing, extend;
+};
+static constexpr std::array<DelayExtentCase, 8> kDelayExtentCases{{
+    {0x119068u, 0x119080u, 0x03E00008u, 0xACE50000u, true, true},
+    {0x131D30u, 0x132040u, 0x03E00008u, 0x27BD0040u, true, true},
+    {0x132770u, 0x13283Cu, 0x03E00008u, 0x27BD0030u, true, true},
+    {0x14A130u, 0x14A17Cu, 0x03E00008u, 0x2402FFFFu, true, true},
+    {0x152758u, 0x152940u, 0x03E00008u, 0x27BD0060u, true, true},
+    {0x160000u, 0x160004u, 0x0320F809u, 0x27BD0010u, true, true},
+    {0x161000u, 0x161004u, 0x42000018u, 0x27BD0010u, true, false},
+    {0x162000u, 0x162004u, 0x03E00008u, 0u, false, false},
+}};
+
+static bool writeDelayExtentElfAndMap(const std::filesystem::path &elfPath,
+                                     const std::filesystem::path &mapPath)
+{
+    ELFIO::elfio writer;
+    writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
+    writer.set_type(ELFIO::ET_EXEC);
+    writer.set_machine(ELFIO::EM_MIPS);
+    writer.set_entry(kDelayExtentCases.front().start);
+    std::ofstream map(mapPath);
+    map << "name,start,end,size\n";
+    for (size_t i = 0; i < kDelayExtentCases.size(); ++i)
+    {
+        const auto &c = kDelayExtentCases[i];
+        std::vector<uint32_t> words((c.end - c.start) / 4u + (c.hasFollowing ? 1u : 0u), 0u);
+        words[(c.end - c.start) / 4u - 1u] = c.terminal;
+        if (c.hasFollowing) words.back() = c.following;
+        auto *text = writer.sections.add(".text" + std::to_string(i));
+        text->set_type(ELFIO::SHT_PROGBITS);
+        text->set_flags(ELFIO::SHF_ALLOC | ELFIO::SHF_EXECINSTR);
+        text->set_addr_align(4);
+        text->set_address(c.start);
+        text->set_data(reinterpret_cast<const char *>(words.data()), words.size() * sizeof(uint32_t));
+        auto *segment = writer.segments.add();
+        segment->set_type(ELFIO::PT_LOAD);
+        segment->set_flags(ELFIO::PF_R | ELFIO::PF_X);
+        segment->set_align(4);
+        segment->add_section_index(text->get_index(), 4);
+        map << "extent_" << std::dec << i << ",0x" << std::hex << c.start
+            << ",0x" << c.end << ",0x" << c.end - c.start << '\n';
+        // Keep a separately mapped entry at the shared delay instruction.
+        if (c.hasFollowing)
+            map << "following_" << std::dec << i << ",0x" << std::hex << c.end
+                << ",0x" << c.end + 4u << ",0x4\n";
+    }
+    map.close();
+    return static_cast<bool>(map) && writer.save(elfPath.string());
+}
+
 void register_ps2_recompiler_tests()
 {
     MiniTest::Case("PS2Recompiler", [](TestCase &tc)
                    {
+        tc.Run("discovered extents preserve five CGR2 return delay slots and JALR", [](TestCase &t) {
+            const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const auto root = std::filesystem::temp_directory_path() / ("ps2recomp-delay-extents-" + suffix);
+            std::filesystem::create_directories(root);
+            const auto elf = root / "fixture.elf";
+            const auto map = root / "fixture.csv";
+            const bool written = writeDelayExtentElfAndMap(elf, map);
+            t.IsTrue(written, "synthetic extent fixture should be written");
+            if (written)
+            {
+                ElfParser parser(elf.string());
+                t.IsTrue(parser.parse() && parser.loadGhidraFunctionMap(map.string()), "extent fixture should parse");
+                const auto functions = parser.extractFunctions();
+                for (size_t i = 0; i < kDelayExtentCases.size(); ++i)
+                {
+                    const auto &c = kDelayExtentCases[i];
+                    const auto fn = std::find_if(functions.begin(), functions.end(), [&](const Function &f) { return f.start == c.start; });
+                    t.IsTrue(fn != functions.end(), "every fixture function should survive discovery");
+                    if (fn != functions.end())
+                        t.Equals(fn->end, c.end + (c.extend ? 4u : 0u), "real delay slot must fit; ERET and section end must not expand");
+                    if (c.hasFollowing)
+                        t.IsTrue(std::any_of(functions.begin(), functions.end(), [&](const Function &f) { return f.start == c.end; }),
+                                 "overlapping following entry must remain available");
+                }
+                const auto config = root / "fixture.toml";
+                t.IsTrue(writeRecompilerTestConfig(config, elf, root / "output", {}), "config should be written");
+                { std::ofstream file(config, std::ios::app); file << "ghidra_output = \"" << map.generic_string() << "\"\n"; }
+                PS2Recompiler recompiler(config.string());
+                t.IsTrue(recompiler.initialize() && recompiler.recompile(), "extent fixture should recompile");
+                recompiler.generateOutput();
+                for (size_t i = 0; i < 6u; ++i)
+                {
+                    std::ostringstream name;
+                    name << "extent_" << i << "_0x" << std::hex << kDelayExtentCases[i].start << ".cpp";
+                    std::ifstream file(root / "output" / name.str());
+                    const std::string generated{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+                    std::ostringstream word;
+                    word << "0x" << std::hex << kDelayExtentCases[i].following;
+                    t.IsTrue(generated.find(word.str()) != std::string::npos, "generator must emit the real store/register update instead of a synthetic NOP");
+                }
+            }
+            std::error_code error;
+            std::filesystem::remove_all(root, error);
+        });
+
         tc.Run("game helpers are not classified as runtime stubs", [](TestCase &t) {
             t.IsFalse(ps2_runtime_calls::isStubName("Pad_init"),
                       "Pad_init should be recompiled as game code");
