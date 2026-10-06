@@ -32,6 +32,7 @@ namespace GSTextureReplacements
 {
 // GSTextureReplacements.h (RMT1); declared here to keep the texture-cache headers out of the adapter.
 void SetDirectoryOverride(std::string dump_dir, std::string replace_dir);
+void Telemetry(u64 out[8]);
 }
 
 namespace {
@@ -420,7 +421,7 @@ extern "C" GE1_API int ge1_gs_open(int blending_level)
             s_stats = std::fopen(csv, "w");
             if (s_stats)
             {
-                std::fprintf(s_stats, "vsync,new_tfx,tfx_us,new_spv,spv_us,flush_us,tfx_slow,tfx_max_us,up_kb,uploads,tex_new,tex_new_us,wall_us\n");
+                std::fprintf(s_stats, "vsync,new_tfx,tfx_us,new_spv,spv_us,flush_us,tfx_slow,tfx_max_us,up_kb,uploads,tex_new,tex_new_us,wall_us,repl_indexed,repl_precache_ms1,repl_loaded,repl_used,repl_cache_bytes,repl_failures,repl_gpu_bytes,hash_cache_bytes\n");
                 std::fflush(s_stats);
             }
             else
@@ -604,14 +605,20 @@ extern "C" GE1_API int ge1_gs_vsync(uint32_t field, uint64_t csr, uint64_t smode
         const std::uint64_t wall_us = s_last_vsync.time_since_epoch().count() == 0 ? 0 :
             static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - s_last_vsync).count());
         s_last_vsync = now;
-        std::fprintf(s_stats, "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+        static u64 replacement[8] = {};
+        if (s_vsyncs == 1 || s_vsyncs % 120 == 0) GSTextureReplacements::Telemetry(replacement);
+        std::fprintf(s_stats, "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
             static_cast<unsigned long long>(s_vsyncs),
             static_cast<unsigned long long>(new_tfx), static_cast<unsigned long long>(tfx_ns / 1000),
             static_cast<unsigned long long>(new_spv), static_cast<unsigned long long>(spv_ns / 1000),
             static_cast<unsigned long long>(flush_us), static_cast<unsigned long long>(st[0]),
             static_cast<unsigned long long>(st[1] / 1000), static_cast<unsigned long long>(st[2] / 1024),
             static_cast<unsigned long long>(st[3]), static_cast<unsigned long long>(st[4]),
-            static_cast<unsigned long long>(st[5] / 1000), static_cast<unsigned long long>(wall_us));
+            static_cast<unsigned long long>(st[5] / 1000), static_cast<unsigned long long>(wall_us),
+            (unsigned long long)replacement[0], (unsigned long long)replacement[1],
+            (unsigned long long)replacement[2], (unsigned long long)replacement[3],
+            (unsigned long long)replacement[4], (unsigned long long)replacement[5],
+            (unsigned long long)replacement[6], (unsigned long long)replacement[7]);
         std::fflush(s_stats);
     }
     return 1;

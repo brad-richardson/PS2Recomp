@@ -338,6 +338,7 @@ struct ThermalState
     bool acquired = false;
 };
 ThermalState gThermal;
+std::mutex gThermalMu;
 
 void lookupThermalFns()
 {
@@ -354,6 +355,7 @@ void lookupThermalFns()
 
 int32_t perfThermalStatus()
 {
+    std::lock_guard<std::mutex> lock(gThermalMu);
     if (!gThermal.lookedUp)
         lookupThermalFns();
     if (!gThermal.fns.acquireManager || !gThermal.fns.getStatus || !gThermal.fns.releaseManager)
@@ -368,6 +370,7 @@ int32_t perfThermalStatus()
 
 void releaseThermalManager()
 {
+    std::lock_guard<std::mutex> lock(gThermalMu);
     // Shutdown only (Logger dtor): never triggers a lookup.
     if (gThermal.manager && gThermal.fns.releaseManager)
         gThermal.fns.releaseManager(gThermal.manager);
@@ -520,6 +523,7 @@ struct Logger
     std::atomic<uint64_t> presentCount{0};
     std::atomic<uint64_t> presentLastNs{0};
     std::atomic<uint64_t> presentMaxGapNs{0};
+    std::atomic<uint64_t> presentGaps16{0};
     std::atomic<bool> havePresent{false};
     // FH6: present-path detail (always counted while the log is on).
     std::atomic<uint64_t> gsVsyncs{0}, latches{0}, latchNs{0}, latchMaxNs{0};
@@ -752,7 +756,42 @@ bool readSysfs(const char *path, char *buf, size_t cap)
     return n > 0;
 }
 #endif
+std::mutex healthGpuMu;
+std::string healthGpuBusy = "na", healthGpuClk = "na";
 } // namespace
+
+DeviceHealth deviceHealth()
+{
+    DeviceHealth out;
+    std::string rss = "na", temp = "na", busy = "na", clk = "na";
+#if defined(__linux__)
+    if (FILE* f = std::fopen("/proc/self/statm", "r")) {
+        unsigned long long pages = 0, resident = 0;
+        if (std::fscanf(f, "%llu %llu", &pages, &resident) == 2) {
+            const long size = sysconf(_SC_PAGESIZE);
+            if (size > 0) { out.rss = resident * size; rss = std::to_string(out.rss); }
+        }
+        std::fclose(f);
+    }
+    out.thermal = perfThermalStatus();
+    char buf[64] = {};
+    long tenth = 0;
+    if (readSysfs("/sys/class/power_supply/battery/temp", buf, sizeof(buf)) &&
+        parseSysfsLong(buf, tenth)) temp = std::to_string(tenth / 10.0);
+    if (!enabled()) {
+        uint64_t b=0, total=0, hz=0; double pct=0;
+        if (readSysfs("/sys/class/kgsl/kgsl-3d0/gpubusy", buf, sizeof(buf)) &&
+            parseKgslBusy(buf,b,total) && kgslSamplePct(b,total,pct)) busy = std::to_string(pct);
+        if (readSysfs("/sys/class/kgsl/kgsl-3d0/gpuclk", buf, sizeof(buf)) && parseKgslClk(buf,hz)) clk=std::to_string(hz);
+    } else {
+        std::lock_guard<std::mutex> lock(healthGpuMu);
+        busy = healthGpuBusy; clk = healthGpuClk;
+    }
+#endif
+    out.fields = "rss_bytes=" + rss + " thermal=" + (out.thermal < 0 ? "na" : std::to_string(out.thermal)) +
+                 " battery_c=" + temp + " gpu_hz=" + clk + " gpu_busy_pct=" + busy;
+    return out;
+}
 
 // PT3: file-local timer-flush launcher (defined after flushTailWrite): poll()
 // starts the 60 s flush on a background worker instead of blocking the host
@@ -786,6 +825,7 @@ void poll(uint64_t vsyncTick)
     s.vsyncsPerS = static_cast<double>(vsyncTick - log.windowTick) / windowS;
     s.presents = log.presentCount.exchange(0u, std::memory_order_relaxed);
     const uint64_t maxGapNs = log.presentMaxGapNs.exchange(0u, std::memory_order_relaxed);
+    const uint64_t gaps16 = log.presentGaps16.exchange(0u, std::memory_order_relaxed);
     s.maxGapMs = s.presents >= 2 ? static_cast<double>(maxGapNs) / 1e6 : -1.0;
     RoleSums cpuSums;
     bool haveCpuSums = false;
@@ -865,6 +905,10 @@ void poll(uint64_t vsyncTick)
             s.kgslClk = std::to_string(hz);
     }
 #endif
+    if (ps2x::tel::sessionOn()) {
+        std::lock_guard<std::mutex> lock(healthGpuMu);
+        healthGpuBusy = s.kgslBusy; healthGpuClk = s.kgslClk;
+    }
     const std::string line = formatLine(s);
     std::fprintf(log.file, "%s\n", line.c_str());
     if (haveCpuSums)
@@ -989,14 +1033,14 @@ void poll(uint64_t vsyncTick)
     for (size_t i = 0; i < kStageCount; ++i)
     {
         const StageStats st = drainStage(static_cast<Stage>(i), log.stageConsumed[i], log.file);
-        stageMax[i] = {stageName(static_cast<Stage>(i)), st.n ? st.max : -1.0};
+        stageMax[i] = {stageName(static_cast<Stage>(i)), st.n ? st.max : -1.0, st};
     }
     std::fflush(log.file);
     // TEL2: session-log hitch/race-window accounting (no-op when off). Not
     // while the BG1 gate holds the game thread (a paused window is no hitch).
     if (!ps2x::androidPause::pausedFlag().load(std::memory_order_relaxed))
         ps2x::tel::notePerfWindow(log.windowTick, vsyncTick, windowS, telemetryHz,
-                                    s.vsyncsPerS, s.maxGapMs, stageMax, kStageCount);
+                                    s.vsyncsPerS, s.maxGapMs, stageMax, kStageCount, gaps16);
     log.windowStart = now;
     log.windowTick = vsyncTick;
 }
@@ -1104,6 +1148,7 @@ void notePresent()
     if (had && prev != 0u && now > prev)
     {
         const uint64_t gap = now - prev;
+        if (gap >= 16000000u) log.presentGaps16.fetch_add(1, std::memory_order_relaxed);
         uint64_t m = log.presentMaxGapNs.load(std::memory_order_relaxed);
         while (gap > m && !log.presentMaxGapNs.compare_exchange_weak(m, gap, std::memory_order_relaxed))
         {

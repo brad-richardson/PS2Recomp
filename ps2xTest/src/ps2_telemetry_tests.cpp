@@ -114,6 +114,22 @@ void register_ps2_telemetry_tests()
             t.IsTrue(out.find("\t9000\t0\t0\t5\n") != std::string::npos, "wall max 9000, 5 dropped");
             t.IsTrue(out.rfind("W\t10000\t1\t261\t261\t", 0) == 0, "vsync range from remapped column"); });
 
+        tc.Run("TEL4: replacement snapshot is cumulative and header mapped", [](TestCase &t)
+               {
+            ps2x::telemetry::GsCsvSummary s;
+            std::string out;
+            s.feed("vsync,repl_used,repl_indexed,repl_precache_ms1,repl_loaded,repl_cache_bytes,repl_failures,repl_gpu_bytes,hash_cache_bytes", 0, out);
+            s.feed("1,3,700,0,400,10000,2,20000,30000", 1, out);
+            s.feed("2,5,700,901,700,8000,4,25000,32000", 2, out);
+            s.takeWindow(10000, out);
+            t.IsTrue(out.find("\t700\t901\t700\t5\t8000\t4\t25000\t32000\n") != std::string::npos,
+                     "latest gauges and cumulative totals, not per-frame sums");
+            out.clear();
+            s.feed("3,6,700,901,700,9000,4,26000,34000", 10001, out);
+            s.takeWindow(20000, out);
+            t.IsTrue(out.find("\t700\t901\t700\t6\t9000\t4\t26000\t34000\n") != std::string::npos,
+                     "snapshot survives next window without summing"); });
+
         tc.Run("sessionPath joins dir, prefix and stamp", [](TestCase &t)
                {
             const std::string p = ps2x::telemetry::sessionPath("/x/telemetry", "vu1", "tsv");

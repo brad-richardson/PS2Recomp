@@ -62,6 +62,15 @@ struct State
     uint64_t raceHitches = 0u;
     SegmentLabels labels;
     RunRates rates;
+    struct HealthWindow {
+        uint64_t begin, end, gaps16, rss;
+        int thermal;
+        bool slow;
+        std::array<uint64_t, ps2x::perflog::kHistBuckets + 1> gpu{};
+    };
+    std::vector<HealthWindow> healthWindows;
+    uint64_t runRssMax = 0;
+    int runThermalMax = -1;
     PauseEdges pause;
     bool spanOpen = false;
     uint32_t mode = 0xffu;
@@ -231,6 +240,45 @@ void dumpCoverage(const char *reason)
     sesLine(line);
 }
 
+void healthLocked(State& s, const char* reason)
+{
+    const auto d = ps2x::perflog::deviceHealth();
+    if (s.race.st != RaceTracker::Idle || std::strcmp(reason, "run-end") == 0) {
+        s.runRssMax = std::max(s.runRssMax, d.rss);
+        s.runThermalMax = std::max(s.runThermalMax, d.thermal);
+    }
+    sesLineLocked(s, std::string("health reason=") + reason + " n=" + std::to_string(s.races) + " " + d.fields);
+}
+
+void runSummaryLocked(State& s, const char* reason)
+{
+    std::array<uint64_t, ps2x::perflog::kHistBuckets + 1> hist{};
+    uint64_t n=0, gaps=0, slow=0, windows=0, rss=s.runRssMax;
+    int thermal=s.runThermalMax;
+    for (const auto& w : s.healthWindows)
+        for (const auto& span : s.rates.spans)
+            if (w.begin >= span.begin && w.end <= span.end && w.end > w.begin) {
+                ++windows; gaps += w.gaps16; slow += w.slow;
+                rss = std::max(rss, w.rss); thermal=std::max(thermal,w.thermal);
+                for (size_t i=0; i<hist.size(); ++i) { hist[i]+=w.gpu[i]; n+=w.gpu[i]; }
+                break;
+            }
+    auto rank = [&](double q) {
+        if (!n) return std::string("na");
+        uint64_t seen=0, target=static_cast<uint64_t>(std::ceil(n*q));
+        for (size_t i=0; i<hist.size(); ++i) if ((seen+=hist[i])>=target)
+            return i == ps2x::perflog::kHistBuckets ? std::string(">=20") :
+                std::to_string((i+1)*ps2x::perflog::kHistBucketMs);
+        return std::string("na");
+    };
+    sesLineLocked(s, "run-summary n=" + std::to_string(s.races) + " reason=" + reason +
+        " gpu_n=" + std::to_string(n) + " gpu_p50_ms=" + rank(.50) + " gpu_p99_ms=" + rank(.99) +
+        " hist_bucket_ms=0.25 present_gaps_ge16ms=" + std::to_string(gaps) +
+        " slow_windows=" + std::to_string(slow) + " perf_windows=" + std::to_string(windows) +
+        " thermal_max=" + (thermal<0 ? "na" : std::to_string(thermal)) +
+        " rss_max_bytes=" + (rss ? std::to_string(rss) : "na"));
+}
+
 void heartbeat()
 {
     State &s = st();
@@ -243,16 +291,21 @@ void dumperLoop()
 {
     State &s = st();
     auto next = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    auto healthNext = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     for (;;)
     {
         bool requested = false;
         {
             std::unique_lock<std::mutex> lock(s.dmu);
-            s.dcv.wait_until(lock, next, [&] { return s.dumpRequested; });
+            s.dcv.wait_until(lock, std::min(next, healthNext), [&] { return s.dumpRequested; });
             requested = s.dumpRequested;
             s.dumpRequested = false;
         }
         const auto now = std::chrono::steady_clock::now();
+        if (now >= healthNext) {
+            if (s.ses) { std::lock_guard<std::mutex> lock(s.mu); healthLocked(s, "periodic"); }
+            healthNext = now + std::chrono::seconds(30);
+        }
         if (!requested && now < next)
             continue;
         if (now >= next)
@@ -457,6 +510,7 @@ void init(uint32_t tableBase, uint32_t slotCount)
                       utcIso().c_str(), s.cov ? 1 : 0);
         sesLineLocked(s, buf);
         sesLineLocked(s, knobs);
+        healthLocked(s, "session-start");
     }
     std::fprintf(stderr, "[tel] session=%s coverage=%s session_log=%s\n", s.sessionId.c_str(),
                  s.cov ? s.covDir.c_str() : "off", s.ses ? s.sesPath.c_str() : "off");
@@ -526,6 +580,8 @@ void onVBlank(uint64_t tick, const uint8_t *rdram, size_t ramSize, bool fh1Event
                       static_cast<unsigned long long>(rates.lockedCount), label.kind, label.outcome,
                       label.pending ? 1 : 0, s.modeName.c_str());
         sesLineLocked(s, buf);
+        healthLocked(s, "run-end");
+        runSummaryLocked(s, r.endReason);
     }
     if (e & kEdgeStart)
     {
@@ -538,10 +594,12 @@ void onVBlank(uint64_t tick, const uint8_t *rdram, size_t ramSize, bool fh1Event
         s.raceWall = std::chrono::steady_clock::now();
         s.raceHitches = 0u;
         s.rates = RunRates{};
+        s.healthWindows.clear(); s.runRssMax=0; s.runThermalMax=-1;
         s.spanOpen = false;
         r.stopTick = 0u;
         r.stopClock = 0u;
         logRaceStart(s, tick, rdram, ramSize, fh1Events, clock);
+        healthLocked(s, "run-start");
     }
     if (e & kEdgeStop)
     {
@@ -560,6 +618,8 @@ void onVBlank(uint64_t tick, const uint8_t *rdram, size_t ramSize, bool fh1Event
                       guest.finishedKnown ? (guest.finished ? "finished" : "aborted") : "unknown",
                       s.modeName.c_str());
         sesLineLocked(s, buf);
+        healthLocked(s, "run-stop");
+        runSummaryLocked(s, "stop");
     }
     if (e & kEdgeResume)
     {
@@ -614,6 +674,12 @@ void onExit(uint64_t tick)
         return;
     s.lastTick.store(tick, std::memory_order_relaxed);
     dumpCoverage("exit");
+    if (s.ses) {
+        std::lock_guard<std::mutex> lock(s.mu);
+        if (s.spanOpen) { s.rates.stop(tick); s.spanOpen=false; }
+        healthLocked(s, "session-end");
+        if (s.race.st != RaceTracker::Idle) runSummaryLocked(s, "exit");
+    }
     sesLine("exit");
 }
 
@@ -697,7 +763,7 @@ void noteLogLine(const char *line)
 }
 
 void notePerfWindow(uint64_t beginTick, uint64_t tick, double windowS, double expectedHz,
-                    double vsyncsPerS, double maxGapMs, const StageMax *stages, size_t count)
+                    double vsyncsPerS, double maxGapMs, const StageMax *stages, size_t count, uint64_t gaps16)
 {
     State &s = st();
     if (!s.ses)
@@ -716,6 +782,14 @@ void notePerfWindow(uint64_t beginTick, uint64_t tick, double windowS, double ex
         // Bounded: at 1 Hz this covers over eight hours in one segment.
         if (s.rates.windows.size() < 32768u)
             s.rates.windows.push_back({beginTick, tick, windowS, expectedHz, vsyncsPerS});
+        if (s.healthWindows.size() < 32768u) {
+            const auto d = ps2x::perflog::deviceHealth();
+            State::HealthWindow w{beginTick,tick,gaps16,d.rss,d.thermal,
+                vsyncsPerS < (s.rate120 ? 119.88 : 59.94)};
+            for (size_t i=0; i<count; ++i)
+                if (stages[i].name && std::strcmp(stages[i].name,"gpu.busy")==0) w.gpu=stages[i].stats.hist;
+            s.healthWindows.push_back(w);
+        }
     }
     if (maxGapMs < kHitchMs)
         return;

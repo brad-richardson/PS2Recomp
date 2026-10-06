@@ -240,6 +240,7 @@ public:
         kTexNew,
         kTexNewUs,
         kWallUs,
+        kReplIndexed, kReplPrecache, kReplLoaded, kReplUsed, kReplCache, kReplFailures, kReplGpu, kHashCache,
         kCols
     };
 
@@ -283,8 +284,9 @@ public:
         m_w.last = v[kVsync];
         ++m_w.vsyncs;
         for (int c = kNewTfx; c < kCols; ++c)
-            if (c != kTfxMaxUs && c != kWallUs)
+            if (c != kTfxMaxUs && c != kWallUs && c < kReplIndexed)
                 m_w.sum[c] += v[c];
+        for (int c = kReplIndexed; c < kCols; ++c) m_w.sum[c] = v[c];
         if (v[kTfxMaxUs] > m_w.sum[kTfxMaxUs])
             m_w.sum[kTfxMaxUs] = v[kTfxMaxUs];
         if (v[kWallUs] > m_w.sum[kWallUs])
@@ -329,6 +331,13 @@ public:
                       u(m_w.sum[kTfxMaxUs]), u(m_w.sum[kUpKb]), u(m_w.sum[kUploads]), u(m_w.sum[kTexNew]),
                       u(m_w.sum[kTexNewUs]), u(m_w.sum[kWallUs]), u(m_w.gt20), u(m_w.gt50), u(m_w.dropped));
         out += buf;
+        if (std::find(m_map.begin(), m_map.end(), kReplIndexed) != m_map.end()) {
+            out.pop_back();
+            for (int c = kReplIndexed; c < kCols; ++c) {
+                out += '\t'; out += std::to_string(m_w.sum[c]);
+            }
+            out += '\n';
+        }
         m_w = Window{};
         m_windowStartMs = tMs;
     }
@@ -338,7 +347,7 @@ private:
     {
         static const char *const kNames[kCols] = {"vsync",   "new_tfx",  "tfx_us",  "new_spv", "spv_us",
                                                   "flush_us", "tfx_slow", "tfx_max_us", "up_kb",   "uploads",
-                                                  "tex_new", "tex_new_us", "wall_us"};
+                                                  "tex_new", "tex_new_us", "wall_us", "repl_indexed", "repl_precache_ms1", "repl_loaded", "repl_used", "repl_cache_bytes", "repl_failures", "repl_gpu_bytes", "hash_cache_bytes"};
         m_map.clear();
         size_t i = 0;
         while (i <= line.size())

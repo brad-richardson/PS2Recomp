@@ -251,7 +251,7 @@ void gsBeforeOpen()
                 " window_ms=10000 source=GE1_PIPE_STATS_CSV (format: ps2xRuntime/include/ps2_telemetry.h)\n"
                 "#C\tt_ms\tvsync\tnew_tfx\ttfx_us\tnew_spv\tspv_us\tflush_us\ttfx_slow\ttfx_max_us\twall_us\n"
                 "#W\tt_ms\tvsync_first\tvsync_last\tvsyncs\tnew_tfx\ttfx_us\tnew_spv\tspv_us\tflush_us\ttfx_slow"
-                "\ttfx_max_us\tup_kb\tuploads\ttex_new\ttex_new_us\twall_max_us\twall_gt20ms\twall_gt50ms\tc_dropped\n");
+                "\ttfx_max_us\tup_kb\tuploads\ttex_new\ttex_new_us\twall_max_us\twall_gt20ms\twall_gt50ms\tc_dropped\trepl_indexed\trepl_precache_ms1\trepl_loaded\trepl_used\trepl_cache_bytes\trepl_failures\trepl_gpu_bytes\thash_cache_bytes\n");
     const int readFd = fds[0];
     // Drain thread: reads until every write end closes (ge1_gs_close), then
     // writes the last window. Detached; it owns the sink and the read end.

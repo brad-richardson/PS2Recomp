@@ -34,6 +34,7 @@
 // are covered by ps2xTest/src/ps2_session_telemetry_tests.cpp.
 
 #include <atomic>
+#include "ps2_perf_log.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -100,9 +101,10 @@ struct StageMax
 {
     const char *name;
     double maxMs; // -1 when the stage did not fire
+    ps2x::perflog::StageStats stats{};
 };
 void notePerfWindow(uint64_t beginTick, uint64_t tick, double windowS, double expectedHz,
-                    double vsyncsPerS, double maxGapMs, const StageMax *stages, size_t count);
+                    double vsyncsPerS, double maxGapMs, const StageMax *stages, size_t count, uint64_t gaps16 = 0);
 
 // ---- Pure helpers ----------------------------------------------------------------
 

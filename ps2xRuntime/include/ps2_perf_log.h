@@ -877,6 +877,9 @@ inline std::string formatPresentLine(uint64_t tick, const PresentStats &st)
 // Runtime API (src/lib/ps2_perf_log.cpp). enabled() reads the knob; call it
 // once and cache the result at the call site.
 bool enabled();
+// TEL4: cold sampler; GPU read-reset counters use the perf poll's cached sample.
+struct DeviceHealth { std::string fields; uint64_t rss = 0; int thermal = -1; };
+DeviceHealth deviceHealth();
 void poll(uint64_t vsyncTick);
 void notePresent();
 // PL3: unique displayed frames. The main thread calls noteFrameAvailable()
