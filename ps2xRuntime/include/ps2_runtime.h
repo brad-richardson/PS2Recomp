@@ -367,6 +367,11 @@ public:
                              DebugUiCallback shutdownCallback,
                              void *userData);
 
+    // FH32 camera preview executes cloned guest code on private RAM/context.
+    // It must not charge guest cycles, dispatch hooks or service interrupts.
+    bool m_fh32Preview = false;
+    bool m_fh32PreviewFailed = false;
+    uint32_t m_fh32PreviewBudget = 0u;
     using RecompiledFunction = void (*)(uint8_t *, R5900Context *, PS2Runtime *);
 
     enum class GuestBranchKind

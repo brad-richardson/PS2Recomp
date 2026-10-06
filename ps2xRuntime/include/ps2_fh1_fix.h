@@ -59,6 +59,7 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixC2Cap = 1ull << 40, // C2 blend counter 0x162998 at stock cadence, ramp rate back to stock (class d, FXT1 T6)
     kFixSpawn = 1ull << 41, // glint spawn substream: stock dt for the 0x2e1520 caller's word (class h, FXT1 T4)
     kFixGround2 = 1ull << 43, // FH33 opt-in: bounded steering response exact half-map (class a/j; not in all)
+    kFixJcam2 = 1ull << 44, // FH32 opt-in: camera-only stock-cadence shadow predictor publication (class d/c, owner FH32)
     kFixEnvFilt = 1ull << 42, // FH30 opt-in: 0x2c096c -> 0x2bcf38 squared-gain response at 120 (class a; not in all)
 };
 
@@ -147,6 +148,7 @@ inline uint64_t fixItem(const std::string &item) noexcept
     if (item == "stick2") return kFixStick2;
     if (item == "clocksign") return kFixClockSign;
     if (item == "bonusflip") return kFixBonusFlip;
+    if (item == "jcam2") return kFixJcam2;
     if (item == "jcam") return kFixJcam;
     if (item == "pose") return kFixPose;
     if (item == "pid") return kFixPid;

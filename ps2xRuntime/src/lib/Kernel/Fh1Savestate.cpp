@@ -132,6 +132,24 @@ namespace
         return true;
     }
 
+    void fh32Save(Writer &w) { w.pod(ps2_fh1::g_jcam2Shadows); }
+    bool fh32Load(Reader &r)
+    {
+        if (ps2_savestate::loadingSectionVersion()==1u)
+        {
+            // A's inactive stock seeds contain zero phase/pending state.
+            // Active A states cannot silently acquire C's different contract.
+            std::array<uint8_t,236> legacy{}; r.pod(legacy);
+            if (!r.ok()) return false;
+            for (uint8_t b:legacy) if(b) return r.fail("fh32: active design A state cannot load design C");
+            ps2_fh1::jcam2Reset(); return true;
+        }
+        decltype(ps2_fh1::g_jcam2Shadows) shadows{};
+        r.pod(shadows); if (!r.ok()) return false;
+        ps2_fh1::g_jcam2Shadows=shadows; return true;
+    }
+    const bool kFh32Registered = ps2_savestate::registerSection(
+        "fh32", {2u,&fh32Save,&fh32Load,nullptr,1u,/*optional=*/true});
     const bool kFh1Registered = ps2_savestate::registerSection(
         "fh1", {kFh1Version, &fh1Save, &fh1Load, nullptr, 0u, /*optional=*/true});
 } // namespace
@@ -140,4 +158,5 @@ namespace
 void ps2_fh1_linkSavestateSection()
 {
     (void)kFh1Registered;
+    (void)kFh32Registered;
 }

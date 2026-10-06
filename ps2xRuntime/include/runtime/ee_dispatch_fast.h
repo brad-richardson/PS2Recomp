@@ -85,6 +85,12 @@ inline bool PS2Runtime::guestUnwindPending() const noexcept
 // threshold, so a plain inline still leaves one call per backward edge.
 PS2X_DSP1_ALWAYS_INLINE inline bool PS2Runtime::eeCheckpointDue(uint32_t cycles) noexcept
 {
+    if (m_fh32Preview)
+    {
+        if (m_fh32PreviewBudget) { --m_fh32PreviewBudget; return false; }
+        m_fh32PreviewFailed = true;
+        return true; // bounded private evaluation, no live guest unwind
+    }
     if (!ps2_dsp1::g_fastCheckpoint)
         return eeCheckpointDueSlow(cycles);
     // Same sequence as eeCheckpointDueSlow with half mode off; the

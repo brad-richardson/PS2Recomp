@@ -4910,6 +4910,23 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
                                      GuestBranchKind kind,
                                      const char *debugName)
 {
+    if (m_fh32Preview)
+    {
+        if (!ctx || !m_fh32PreviewBudget || m_fh32PreviewFailed)
+        { m_fh32PreviewFailed = true; return false; }
+        --m_fh32PreviewBudget;
+        ctx->pc = targetPc;
+        if (kind == GuestBranchKind::Return) return true;
+        if (kind == GuestBranchKind::DirectJump || kind == GuestBranchKind::IndirectJump)
+            return false; // private trampoline resumes the destination
+        if (kind != GuestBranchKind::DirectCall && kind != GuestBranchKind::IndirectCall)
+        { m_fh32PreviewFailed = true; return false; }
+        RecompiledFunction preview = lookupFunction(targetPc);
+        if (!preview) { m_fh32PreviewFailed = true; return false; }
+        preview(rdram, ctx, this);
+        if (m_fh32PreviewFailed || ctx->pc != fallthroughPc) return false;
+        return true;
+    }
     RecompiledFunction fn = nullptr;
     if (!ps2_dsp1::g_fast || !m_eeScheduler || (fn = dspFastTarget(targetPc, sourcePc)) == nullptr)
     {
@@ -5012,7 +5029,7 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
         }
     }
     // FH1: full120 manager patch at the init hook + env-only tap counts.
-    if ((ps2_fh1::enabled() || ps2_fh1::tapOn()) && ps2_fh1::onBranch(rdram, ctx, sourcePc, targetPc))
+    if ((ps2_fh1::enabled() || ps2_fh1::tapOn()) && ps2_fh1::onBranch(rdram, ctx, sourcePc, targetPc, this))
     {
         ctx->pc = fallthroughPc;
         return true;

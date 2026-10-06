@@ -38,6 +38,84 @@ void register_ps2_fh1_fh28_tests()
             t.IsFalse(hookTableHit(buildHookInterest(c), 0u, 0x113e80u), "default steering untouched");
         });
 
+
+        tc.Run("FH32 C parser and audited camera query routing", [](TestCase &t)
+        {
+            t.IsTrue((kFixAll&kFixJcam2)==0u,"opt in only");
+            t.IsTrue((kFixJcam2&kFixGround2)==0u,"camera and steering masks independent");
+            t.Equals(parseFix("all,jcam2,-jcam2").main,kFixAll,"off mask unchanged");
+            t.Equals(parseFix("all,jcam2").main,kFixAll|kFixJcam2,"parses");
+            HookConfig c; c.mode=Mode::Events;c.main=kFixJcam2;c.guestActive=true;
+            for(uint32_t pc:{kJcam2Solver,kJcam2Launch,kJcam2Query})
+                t.IsTrue(hookTableHit(buildHookInterest(c),0u,pc),"active hook hit");
+            c.guestActive=false;
+            t.IsFalse(hookTableHit(buildHookInterest(c),kJcam2QuerySite,kJcam2Query),"inactive miss");
+            std::vector<uint8_t> ram(PS2_RAM_SIZE);
+            R5900Context ctx{};SET_GPR_U32(&ctx,4,0x1000u);
+            wr32(ram.data(),0x1004u,0x2000u);wr32(ram.data(),0x2788u,0x3000u);
+            jcam2Reset();auto &shadow=jcam2Shadow(0x3000u);
+            shadow.ready=true;shadow.body[0xacu/4u]=1u;
+            t.IsFalse(jcam2Hook(ram.data(),&ctx,0x111111u,kJcam2Query,nullptr),"other consumers not intercepted");
+            t.IsTrue(jcam2Hook(ram.data(),&ctx,kJcam2QuerySite,kJcam2Query,nullptr),"camera uses shadow");
+            t.Equals(getRegU32(&ctx,2),1u,"contact published");
+            shadow.body[0xacu/4u]=0u;
+            jcam2Hook(ram.data(),&ctx,kJcam2QuerySite,kJcam2Query,nullptr);
+            t.Equals(getRegU32(&ctx,2),0u,"absent contact stays false");
+            jcam2Reset();
+        });
+        tc.Run("FH32 C private evaluation preserves live RAM CPU and cycles", [](TestCase &t)
+        {
+            std::vector<uint8_t> ram(PS2_RAM_SIZE,0x5au);
+            R5900Context ctx{};PS2Runtime runtime;
+            SET_GPR_U32(&ctx,4,0x1000u);SET_GPR_U32(&ctx,5,0x2000u);
+            SET_GPR_U32(&ctx,6,0x3000u);SET_GPR_U32(&ctx,31,0x4000u);
+            ctx.f[12]=1.0f/120.0f;
+            wr32(ram.data(),0x49bf1cu,kHundredTwentieth);
+            runtime.eeScheduler().reset(ram.data(),ctx);
+            runtime.eeScheduler().publishSnapshot();
+            const auto originalClock=runtime.eeScheduler().snapshot().eeCycle;
+            const R5900Context original=ctx;
+            const auto before=ram;
+            jcam2Reset();auto &shadow=jcam2Shadow(0x1000u);
+            const auto fn=+[](uint8_t *privateRam,R5900Context *privateCtx,PS2Runtime *rt)
+            {
+                // Nested preview work is bounded and never charges guest time.
+                (void)rt->eeCheckpointDue(100u);
+                wr32(privateRam,0x1000u+0xacu,1u);
+                wr32(privateRam,0x5000u,0xdeadbeefu); // simulated geometry cache write
+                uint32_t dt=0u;std::memcpy(&dt,&privateCtx->f[12],4u);
+                wr32(privateRam,0x1000u+0x98u,dt);
+                privateCtx->pc=getRegU32(privateCtx,31);
+            };
+            t.IsTrue(jcam2Service(ram.data(),ctx,runtime,shadow,10u,fn),"private evaluation complete");
+            t.IsTrue(ram==before,"all live RAM untouched, including stack and pools");
+            t.IsTrue(std::memcmp(&ctx,&original,sizeof(ctx))==0,"all live CPU fields untouched");
+            t.Equals(shadow.body[0x98u/4u],kSixtieth,"stock dt supplied");
+            t.IsTrue(jcam2Contact(shadow),"shadow contact captured");
+            t.IsFalse(runtime.m_fh32Preview,"guard released");
+            runtime.eeScheduler().publishSnapshot();
+            t.Equals(runtime.eeScheduler().snapshot().eeCycle,originalClock,"preview excludes cycles from live scheduler");
+            jcam2Reset();
+        });
+        tc.Run("FH32 C restart parity, held publication and pause lifecycle", [](TestCase &t)
+        {
+            std::vector<uint8_t> ram(PS2_RAM_SIZE);
+            R5900Context ctx{};SET_GPR_U32(&ctx,4,0x1000u);
+            for(uint64_t first:{10u,11u})
+            {
+                jcam2Reset();auto &s=jcam2Shadow(0x1000u);
+                t.IsTrue(jcam2Due(s,first),"immediate service on either parity");
+                s.ready=true;s.tick=first;s.body[0xacu/4u]=0u;
+                t.IsFalse(jcam2Due(s,first+1u),"alternate update held");
+                t.IsTrue(jcam2Due(s,first+2u),"stock cadence");
+                t.IsFalse(jcam2Contact(s),"no contact invented on held update");
+                jcam2Hook(ram.data(),&ctx,0x139a04u,kJcam2Launch,nullptr);
+                t.IsTrue(jcam2Due(s,first+1u),"restart services immediately regardless of parity");
+                jcam2Reset();
+                t.IsFalse(jcam2Shadow(0x1000u).ready,"event exit/re-entry discards publication");
+            }
+            jcam2Reset();
+        });
         tc.Run("FH30 envfilt is opt-in and its table follows active events", [](TestCase &t)
         {
             t.IsTrue((kFixAll & kFixEnvFilt) == 0u, "not in all");

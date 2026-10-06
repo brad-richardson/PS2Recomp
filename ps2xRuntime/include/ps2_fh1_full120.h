@@ -1070,6 +1070,92 @@ inline void bonusRescale(uint8_t *ram, uint64_t tick, bool toActive)
     }
 }
 
+
+// FH32 C: a separate stock predictor, published only to0x1636d4->0x15f720.
+// The live0x113648 and every rider/control consumer remain untouched. Guest
+// geometry is evaluated on private RAM/context; even query-cache writes stay
+// private. This is host camera work, not extra emulated EE instructions.
+inline constexpr uint32_t kJcam2Solver = 0x113648u, kJcam2Site = 0x139a5cu;
+inline constexpr uint32_t kJcam2Launch = 0x1135b8u, kJcam2Query = 0x15f720u;
+inline constexpr uint32_t kJcam2QuerySite = 0x1636d4u;
+inline constexpr uint32_t kJcam2Pool[9] = {0x49b480u,0x49b48cu,0x49b4a0u,
+    0x49b4a4u,0x49b4a8u,0x49b4acu,0x49b494u,0x49b498u,0x49b49cu};
+inline constexpr uint32_t kJcam2Stock[9] = {kSixtieth,kSixtieth,kSixtieth,
+    0xbb5a740fu,0xc1fd5556u,0xc162aaabu,kSixtieth,0x3c23d70au,0x426fffffu};
+struct Jcam2Shadow
+{
+    uint32_t obj = 0u, services = 0u;
+    uint64_t tick = 0u;
+    std::array<uint32_t,44> body{}; // predictor through contact enum+ac
+    bool ready = false;
+};
+inline std::array<Jcam2Shadow,16> g_jcam2Shadows{};
+inline bool jcam2Fix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixJcam2) != 0u;
+    return on;
+}
+inline void jcam2Reset() noexcept { g_jcam2Shadows = {}; }
+inline Jcam2Shadow &jcam2Shadow(uint32_t obj)
+{
+    auto *slot = &g_jcam2Shadows[0];
+    for (auto &s : g_jcam2Shadows)
+    {
+        if (s.obj == obj) return s;
+        if (!s.obj || s.tick < slot->tick) slot = &s;
+    }
+    *slot = {}; slot->obj = obj; return *slot;
+}
+inline bool jcam2Due(const Jcam2Shadow &s, uint64_t tick) noexcept
+{ return !s.ready || tick < s.tick || tick-s.tick >= 2u; }
+inline bool jcam2Contact(const Jcam2Shadow &s) noexcept
+{ return s.ready && (s.body[0xacu/4u] == 1u || s.body[0xacu/4u] == 3u); }
+inline bool jcam2Service(uint8_t *ram, const R5900Context &live, PS2Runtime &runtime,
+                         Jcam2Shadow &s, uint64_t tick, PS2Runtime::RecompiledFunction fn)
+{
+    if (!fn || (s.obj & 3u) || s.obj+0xb0u > PS2_RAM_SIZE) return false;
+    // Reused scratch; it is reconstructed from the live world each service.
+    static std::vector<uint8_t> scratch(PS2_RAM_SIZE);
+    std::memcpy(scratch.data(),ram,PS2_RAM_SIZE);
+    if (!s.ready) std::memcpy(s.body.data(),ram+s.obj,0xb0u);
+    std::memcpy(scratch.data()+s.obj,s.body.data(),0xb0u);
+    const uint32_t pos=getRegU32(&live,5)&0x1fffffffu;
+    const uint32_t vel=getRegU32(&live,6)&0x1fffffffu;
+    if (pos+16u>PS2_RAM_SIZE || vel+16u>PS2_RAM_SIZE) return false;
+    std::memcpy(scratch.data()+pos,s.body.data()+0x70u/4u,16u);
+    std::memcpy(scratch.data()+vel,s.body.data()+0x80u/4u,16u);
+    for (unsigned i=0;i<9;++i) wr32(scratch.data(),kJcam2Pool[i],kJcam2Stock[i]);
+    R5900Context preview=live;
+    // The caller supplies multiplier*private dt. Convert only this argument
+    // using the current C4 pool value; all arithmetic stays in guest FPU order.
+    uint32_t dtBits=0u; rd32(ram,0x49bf1cu,dtBits);
+    if (dtBits==kHundredTwentieth) preview.f[12]=FPU_MUL_S(preview.f[12],2.0f);
+    else if (dtBits!=kSixtieth) return false;
+    preview.pc=kJcam2Solver;
+    const uint32_t returned=getRegU32(&live,31);
+    runtime.m_fh32Preview=true;
+    runtime.m_fh32PreviewFailed=false;
+    runtime.m_fh32PreviewBudget=8192u;
+    try
+    {
+        fn(scratch.data(),&preview,&runtime);
+        while (!runtime.m_fh32PreviewFailed && preview.pc!=returned)
+        {
+            if (!runtime.m_fh32PreviewBudget) { runtime.m_fh32PreviewFailed=true; break; }
+            --runtime.m_fh32PreviewBudget;
+            auto resume=runtime.lookupFunction(preview.pc);
+            if (!resume) { runtime.m_fh32PreviewFailed=true; break; }
+            resume(scratch.data(),&preview,&runtime);
+        }
+    }
+    catch (...) { runtime.m_fh32Preview=false; throw; }
+    runtime.m_fh32Preview=false;
+    if (runtime.m_fh32PreviewFailed || preview.pc!=returned) return false;
+    std::memcpy(s.body.data(),scratch.data()+s.obj,0xb0u);
+    s.tick=tick; s.ready=true; ++s.services;
+    return true;
+}
+
 inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
 {
     uint32_t a = 0u;
@@ -1084,6 +1170,7 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
         std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_SIM_MODE=%s (full120 replaces split120)\n", sim);
         std::abort();
     }
+    if (jcam2Fix()) jcam2Reset();
     applyWords(ram, a, toActive);
     if (clockFix())
         restamp10s(ram, a, toActive);
@@ -1107,6 +1194,30 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
 }
 
 inline uint64_t g_lastTick = 0u;
+
+
+inline bool jcam2Hook(uint8_t *ram, R5900Context *ctx, uint32_t source, uint32_t target,
+                       PS2Runtime *runtime)
+{
+    if (!ctx) return false;
+    const uint32_t obj=getRegU32(ctx,4)&0x1fffffffu;
+    if (target==kJcam2Launch)
+    { auto &s=jcam2Shadow(obj); s.ready=false; s.services=0u; return false; }
+    if (source==kJcam2Site && target==kJcam2Solver && runtime)
+    {
+        auto &s=jcam2Shadow(obj);
+        if (jcam2Due(s,g_lastTick) && !jcam2Service(ram,*ctx,*runtime,s,g_lastTick,runtime->lookupFunction(kJcam2Solver)))
+        { std::fprintf(stderr,"FATAL FH32 camera predictor preview did not complete tick=%llu\n", static_cast<unsigned long long>(g_lastTick)); std::abort(); }
+        return false; // live solver still runs, with original RAM and context
+    }
+    if (source!=kJcam2QuerySite || target!=kJcam2Query) return false;
+    uint32_t rider=0u,predictor=0u;
+    if (!rd32(ram,obj+4u,rider) || !rd32(ram,rider+0x788u,predictor)) return false;
+    for (const auto &s:g_jcam2Shadows)
+        if (s.obj==predictor && s.ready)
+        { SET_GPR_U32(ctx,2,jcam2Contact(s)?1u:0u); return true; }
+    return false; // no matching initialized shadow: retain original query
+}
 
 inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
@@ -2528,7 +2639,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, pid, c2cap, envFilt, ground2;
+        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2;
     bool src, fh9, lab, draw, tap;
 };
 
@@ -2549,6 +2660,7 @@ inline const BranchFlags &branchFlags() noexcept
         r.flare = flareFix();
         r.ground2 = ground2Fix();
         r.jcam = jcamFix();
+        r.jcam2 = jcam2Fix();
         r.pid = pidFix();
         r.envFilt = envFiltFix();
         r.c2cap = c2capFix();
@@ -2699,6 +2811,10 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addTgt(0x113e80u);
     if ((c.main & kFixJcam) != 0u && on)
         addTgt(kJcamJump); // FH28: countdown pre-hook + retention post-hook (any source)
+    if ((c.main & kFixJcam2) != 0u && on)
+    {
+        addTgt(kJcam2Solver); addTgt(kJcam2Launch); addTgt(kJcam2Query);
+    }
     if ((c.main & kFixEnvFilt) != 0u && on)
         addTgt(kEnvFiltUpdate); // FH30: conversion only at kEnvFiltSite
     if ((c.main & kFixPid) != 0u && on)
@@ -2873,7 +2989,7 @@ inline void in4NoteRider(uint8_t *ram, R5900Context *ctx)
 }
 
 template <bool Fast>
-inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc, PS2Runtime *runtime = nullptr)
 {
     // GT3: Fast reads the once-computed flags; !Fast makes the original calls
     // in the original order. Every flag is fixed after its first read.
@@ -2911,6 +3027,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = true;
     if (on && flag(&BranchFlags::ground2, ground2Fix))
         ground2PreHook(ctx, targetPc);
+    if (on && flag(&BranchFlags::jcam2, jcam2Fix))
+        skip = jcam2Hook(ram,ctx,sourcePc,targetPc,runtime) || skip;
     if (on && flag(&BranchFlags::jcam, jcamFix))
         jcamPreHook(ram, ctx, targetPc);
     if (on && flag(&BranchFlags::envFilt, envFiltFix))
@@ -2971,7 +3089,7 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
 // Out of line as before, so dispatchGuestBranch keeps its shape (and its PGO
 // profile match). HK1: the table path first asks the precomputed lookup; a
 // miss is provably inert (census §1) and returns "don't skip" directly.
-__attribute__((noinline)) inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+__attribute__((noinline)) inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc, PS2Runtime *runtime = nullptr)
 {
     if (hookPreclassify())
     {
@@ -2979,7 +3097,7 @@ __attribute__((noinline)) inline bool onBranch(uint8_t *ram, R5900Context *ctx, 
         if (!hi.always && !hookTableHit(hi, sourcePc, targetPc))
             return false;
     }
-    return fastHooks() ? onBranchT<true>(ram, ctx, sourcePc, targetPc) : onBranchT<false>(ram, ctx, sourcePc, targetPc);
+    return fastHooks() ? onBranchT<true>(ram, ctx, sourcePc, targetPc, runtime) : onBranchT<false>(ram, ctx, sourcePc, targetPc, runtime);
 }
 
 // ---- Per-VBlank frame capture (PS2X_FH1_SEQ=dir, PS2X_FH1_SEQ_TICKS=a-b[,c-d]) --
