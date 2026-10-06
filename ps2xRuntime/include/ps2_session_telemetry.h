@@ -216,18 +216,43 @@ struct RaceTracker
     }
 };
 
+// True when `word` occurs in `line` as a standalone word: the char before is
+// not [A-Za-z0-9_] and the char after is not [A-Za-z0-9_=], so counter keys
+// such as "vk_refused=0" or "refused=3" never match (ACH4).
+inline bool containsWord(const char *line, const char *word)
+{
+    const size_t n = std::strlen(word);
+    auto isWordChar = [](char c)
+    { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; };
+    for (const char *p = std::strstr(line, word); p; p = std::strstr(p + 1, word))
+    {
+        const bool startOk = p == line || !isWordChar(p[-1]);
+        const char after = p[n];
+        const bool endOk = after == '\0' || (!isWordChar(after) && after != '=');
+        if (startOk && endOk)
+            return true;
+    }
+    return false;
+}
+
 // Error lines worth a session-log entry (Android logcat tap). Our own [tel]
-// notes never match.
+// notes never match. "refused" counts only as a word (our refusal lines:
+// "[ssx3-tricky] refused:", "fh1-full120-refused ...", "[cd-overlay]
+// REFUSED:"), never inside a key=value stat name (ACH4: "[present-vk]
+// window-change stats ... vk_refused=0" was a false error).
 inline bool isErrorLine(const char *line)
 {
     if (!line || !line[0])
         return false;
     if (std::strncmp(line, "[tel]", 5) == 0)
         return false;
-    static const char *const kPats[] = {"FATAL", "JALR", "refused", "REFUSED", "Refused",
-                                        "terminate called", "Abort", "SIGSEGV"};
+    static const char *const kPats[] = {"FATAL", "JALR", "terminate called", "Abort", "SIGSEGV"};
     for (const char *p : kPats)
         if (std::strstr(line, p))
+            return true;
+    static const char *const kWords[] = {"refused", "REFUSED", "Refused"};
+    for (const char *w : kWords)
+        if (containsWord(line, w))
             return true;
     return false;
 }

@@ -17,6 +17,7 @@
 #include "rc_runtime.h"
 
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -508,6 +509,7 @@ bool g_nullMemLogged = false;
 uint64_t g_vblanks = 0;
 uint64_t g_evals = 0;
 uint64_t g_unlocks = 0;
+ToastQueue g_toasts; // ACH4: EE thread only (push in eventHandler, pump at VBlank)
 
 uint32_t RC_CCONV readCb(uint32_t address, uint8_t *buffer, uint32_t numBytes, void *ud)
 {
@@ -517,15 +519,34 @@ uint32_t RC_CCONV readCb(uint32_t address, uint8_t *buffer, uint32_t numBytes, v
 
 void toastUnlock(const Entry &e)
 {
-    // The shared overlay toast (drawn by the render thread; Android mirrors
-    // to the Java Toast). The [ach] unlocked log line stays as the record.
-    std::string text = e.title;
-    if (!e.desc.empty())
-    {
-        text += " — ";
-        text += e.desc;
-    }
-    ps2x::ui::toast(text, 3.0f);
+    // ACH4: queued, not shown here; pumpToasts() hands them to the shared
+    // overlay toast (Android mirrors to the Java Toast) one at a time, so a
+    // burst is not collapsed by its latest-wins slot. The [ach] unlocked log
+    // line stays as the record.
+    g_toasts.push(e.title, e.desc);
+}
+
+uint64_t nowMs()
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+
+// Once per VBlank (knob on): idle cost is one clock read and two compares
+// (the shared toast's mutex is only taken when the next toast is due).
+// Another user's live toast (quick save/load) defers the next unlock toast
+// until it expires; ours is recognised by its text.
+void pumpToasts()
+{
+    const uint64_t now = nowMs();
+    if (!g_toasts.due(now))
+        return;
+    std::string live;
+    const bool otherBusy = ps2x::ui::pollToast(live) && live != g_toasts.lastShown();
+    std::string text;
+    if (g_toasts.poll(now, otherBusy, text))
+        ps2x::ui::toast(text, static_cast<float>(ToastQueue::kShowMs) / 1000.0f);
 }
 
 void RC_CCONV eventHandler(const rc_runtime_event_t *e)
@@ -627,6 +648,7 @@ void onVBlankTick(uint64_t tick, const uint8_t *rdram, const uint8_t *scratch)
     ++g_vblanks;
     if (!knobOn())
         return;
+    pumpToasts();
     if (trickyActive())
     {
         if (!g_trickyLogged)
@@ -663,6 +685,8 @@ void onVBlankTick(uint64_t tick, const uint8_t *rdram, const uint8_t *scratch)
     rc_runtime_do_frame(&g_rt, eventHandler, readCb, nullptr, nullptr);
     for (uint32_t id : g_pendingDeact)
         rc_runtime_deactivate_achievement(&g_rt, id);
+    if (!g_pendingDeact.empty())
+        pumpToasts(); // first unlock of a burst shows this VBlank
     ++g_evals;
     if ((g_evals % 600u) == 0u)
         std::fprintf(stderr, "[ach] status evals=%llu unlocks=%llu active=%u tick=%llu\n",
@@ -675,6 +699,7 @@ uint64_t evalsTotal() { return g_evals; }
 uint64_t vblanksSeen() { return g_vblanks; }
 uint64_t unlocksTotal() { return g_unlocks; }
 uint32_t activeCount() { return static_cast<uint32_t>(g_entries.size() - g_unlocks); }
+size_t toastsPending() { return g_toasts.pending(); }
 bool trickyLatched() { return g_trickyLogged; }
 
 void resetForTest()
@@ -699,6 +724,7 @@ void resetForTest()
     g_vblanks = 0;
     g_evals = 0;
     g_unlocks = 0;
+    g_toasts.clear();
 }
 
 } // namespace ps2_ach

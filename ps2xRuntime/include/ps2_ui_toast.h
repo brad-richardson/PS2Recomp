@@ -4,8 +4,10 @@
 // ps2x::ui::toast(text, seconds) from any thread; the render thread draws the
 // live toast in the overlay pass (ps2_runtime.cpp, next to the DS1 status
 // line: host-drawn over the presented frame, never into the guest frame).
-// Latest toast wins; at most one is ever shown. Output-only: no guest state
-// is read or written, so det hashes are unaffected.
+// Latest toast wins; at most one is ever shown. Bursty callers queue on
+// their side (ps2_ach's ToastQueue paces unlocks one at a time, ACH4).
+// Output-only: no guest state is read or written, so det hashes are
+// unaffected.
 //
 // Android mirrors to the Java Toast as well (Ux1Toast, like DS2/DS1's UX1
 // mirror): the play config skips all GL (skipGl), so the overlay draw is

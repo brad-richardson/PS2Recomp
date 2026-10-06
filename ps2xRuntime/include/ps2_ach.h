@@ -17,7 +17,10 @@
 //   Memory-card files are never touched.
 // - Toast on first unlock: the shared ps2x::ui::toast (title + description),
 //   drawn in the overlay pass (Android also mirrors to the Java Toast).
-//   The [ach] unlocked log line stays as the record.
+//   The [ach] unlocked log line stays as the record. ACH4: unlocks go
+//   through a FIFO (ToastQueue below) paced one toast at a time from the
+//   VBlank tick, so a burst (several at the finish line) is never collapsed
+//   by the shared toast's latest-wins slot.
 // - Knob: PS2X_ACHIEVEMENTS=1, default off. Knob off = one getenv per
 //   VBlank, no guest effect. The engine only READS guest memory, so the
 //   det hash is identical with it running.
@@ -27,6 +30,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <map>
 #include <string>
 #include <vector>
@@ -89,6 +93,98 @@ class StockGate
     uint64_t lastFrame_;
     bool haveFrame_;
     uint64_t evals_;
+};
+
+// ---- Unlock toast queue (pure; ACH4) --------------------------------------
+// FIFO of unlock toasts, handed out one at a time: each is held for kShowMs,
+// the next starts after it expires. While another toast user's toast is on
+// screen (quick save/load: otherBusy) nothing new starts; the queue resumes
+// once it clears. At most kCap entries are held (later unlocks only count).
+// When more than kCoalesceAbove are pending at show time, one combined toast
+// names the first kCoalesceTitles titles and "+N more" for the rest. Clock is
+// injected (monotonic ms) so tests drive it.
+class ToastQueue
+{
+  public:
+    static constexpr size_t kCap = 16;
+    static constexpr size_t kCoalesceAbove = 4;
+    static constexpr size_t kCoalesceTitles = 3;
+    static constexpr uint64_t kShowMs = 3000;
+
+    void push(const std::string &title, const std::string &desc)
+    {
+        if (items_.size() < kCap)
+            items_.push_back(Item{title, desc});
+        else
+            ++overflow_;
+    }
+
+    // Unlocks waiting (held + counted overflow).
+    size_t pending() const { return items_.size() + overflow_; }
+    // True when something is waiting and the previous toast has expired
+    // (the cheap pre-check before poll()).
+    bool due(uint64_t nowMs) const { return pending() != 0u && nowMs >= busyUntilMs_; }
+
+    // When a toast should be posted now: true with its text (show it for
+    // kShowMs). nowMs is monotonic.
+    bool poll(uint64_t nowMs, bool otherBusy, std::string &text)
+    {
+        if (!due(nowMs) || otherBusy)
+            return false;
+        if (pending() > kCoalesceAbove)
+        {
+            text = "Unlocked: ";
+            size_t named = 0;
+            while (!items_.empty() && named < kCoalesceTitles)
+            {
+                if (named)
+                    text += ", ";
+                text += items_.front().title;
+                items_.pop_front();
+                ++named;
+            }
+            const size_t more = items_.size() + overflow_;
+            items_.clear();
+            overflow_ = 0;
+            text += " +" + std::to_string(more) + " more";
+        }
+        else
+        {
+            const Item &it = items_.front();
+            text = it.title;
+            if (!it.desc.empty())
+            {
+                text += " — ";
+                text += it.desc;
+            }
+            items_.pop_front();
+        }
+        busyUntilMs_ = nowMs + kShowMs;
+        lastShown_ = text;
+        return true;
+    }
+
+    // The text this queue posted last (to tell its own toast from others').
+    const std::string &lastShown() const { return lastShown_; }
+
+    void clear()
+    {
+        items_.clear();
+        overflow_ = 0;
+        busyUntilMs_ = 0;
+        lastShown_.clear();
+    }
+
+  private:
+    struct Item
+    {
+        std::string title;
+        std::string desc;
+    };
+    std::deque<Item> items_;
+    size_t overflow_ = 0;
+    uint64_t busyUntilMs_ = 0;
+    std::string lastShown_;
 };
 
 // ---- Guest memory view (pure) --------------------------------------------
@@ -155,6 +251,7 @@ uint64_t evalsTotal();
 uint64_t vblanksSeen();
 uint64_t unlocksTotal();
 uint32_t activeCount();
+size_t toastsPending(); // ACH4: unlock toasts still queued
 bool trickyLatched(); // true once a Tricky-off VBlank was observed
 void resetForTest();
 

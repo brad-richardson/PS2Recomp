@@ -60,6 +60,25 @@ void register_ps2_session_telemetry_tests()
             t.IsFalse(isErrorLine("[tel] coverage write failed FATAL"), "own notes skipped");
             t.IsFalse(isErrorLine(""), "empty");
             t.IsFalse(isErrorLine(nullptr), "null");
+            // ACH4: "refused" is a word, never a key=value stat name.
+            t.IsFalse(isErrorLine("[present-vk] window-change stats vk_queued=0 vk_dropped=0 vk_skipped=0 "
+                                  "vk_callbacks=0 vk_release_timeouts=0 vk_cb_timeouts=0 vk_fence_timeouts=0 "
+                                  "vk_fence_errors=0 vk_eintr=0 vk_stale_cb=0 vk_absent_cb=0 vk_refused=0 "
+                                  "vk_layers=1 vk_layers_detached=0 vk_layers_made=1 vk_layers_released=0 "
+                                  "vk_bufs=0 vk_bufs_released=0 vk_fences_held=0 vk_tokens=0 "
+                                  "vk_release_wait_ms_avg=0.000 vk_apply_ms_avg=0.000 "
+                                  "vk_latch_interval_ms_avg=0.00 proc_fds=128"),
+                       "present-vk window-change stats (vk_refused=0) is not an error");
+            t.IsFalse(isErrorLine("[gs] periodic appends=3 refused=0 sunk=1"), "bare refused= key");
+            t.IsTrue(isErrorLine("[ssx3-tricky] refused: no function at 0x100; nothing wrapped"), "refused:");
+            t.IsTrue(isErrorLine("[cd-overlay] REFUSED: PS2X_CD_OVERLAY needs PS2X_CD_IMAGE"), "REFUSED:");
+            t.IsTrue(isErrorLine("[savestate] quick-load refused: build changed"), "quick-load refused");
+            t.IsTrue(isErrorLine("[mtvu] gif-stage refused"), "refused at end of line");
+            t.IsTrue(isErrorLine("Refused"), "whole line");
+            t.IsTrue(isErrorLine("libc: terminate called after throwing"), "terminate");
+            t.IsTrue(isErrorLine("Fatal signal 6 (SIGABRT) Abort message"), "Abort");
+            t.IsTrue(isErrorLine("Fatal signal 11 (SIGSEGV)"), "SIGSEGV");
+            t.IsFalse(isErrorLine("unrefusedly fine"), "inside a word");
             ErrorBudget b;
             uint32_t n = 0u;
             t.IsTrue(b.admit("FATAL tick=1", n) && n == 1u, "first");
