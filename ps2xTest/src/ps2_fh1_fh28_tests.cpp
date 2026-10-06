@@ -28,6 +28,50 @@ void register_ps2_fh1_fh28_tests()
     using namespace ps2_fh1;
     MiniTest::Case("Ps2Fh1Fh28", [](TestCase &tc)
     {
+        tc.Run("FH30 envfilt is opt-in and its table follows active events", [](TestCase &t)
+        {
+            t.IsTrue((kFixAll & kFixEnvFilt) == 0u, "not in all");
+            const FixMasks f = parseFix("all,envfilt");
+            t.IsTrue(f.ok, "parses");
+            t.Equals(f.main, kFixAll | kFixEnvFilt, "adds only envfilt");
+            t.Equals(parseFix("all,envfilt,-envfilt").main, kFixAll, "opt-out");
+            HookConfig c;
+            c.mode = Mode::Events;
+            c.main = kFixEnvFilt;
+            c.guestActive = true;
+            t.IsTrue(hookTableHit(buildHookInterest(c), kEnvFiltSite, kEnvFiltUpdate), "active hit");
+            c.guestActive = false;
+            t.IsFalse(hookTableHit(buildHookInterest(c), kEnvFiltSite, kEnvFiltUpdate), "inactive miss");
+        });
+
+        tc.Run("FH30 squared-gain half input composes to stock retention", [](TestCase &t)
+        {
+            for (const float f : {0.00001f, 0.01f, 0.08f, 0.3f, 0.8f, 0.999f})
+            {
+                const double h = envFiltHalfInput(f);
+                const double halfRetention = 1.0 - h * h;
+                t.IsTrue(std::fabs(halfRetention * halfRetention - (1.0 - double(f)*f)) < 1e-7,
+                         "pair retains stock gap");
+            }
+            // Boundary/copy branches and invalid inputs retain their exact bits.
+            for (const uint32_t b : {0u, 0x80000000u, 0xbf800000u, 0x3f800000u,
+                                     0x40000000u, 0x7f800000u, 0x7fc00000u})
+                t.Equals(floatToBits(envFiltHalfInput(bitsToFloat(b))), b, "preserves non-response input");
+        });
+
+        tc.Run("FH30 pre-hook converts only the audited caller", [](TestCase &t)
+        {
+            R5900Context ctx{};
+            ctx.f[12] = 0.08f;
+            envFiltPreHook(&ctx, 0x2c0990u, kEnvFiltUpdate);
+            t.Equals(floatToBits(ctx.f[12]), floatToBits(0.08f), "other interpolation untouched");
+            envFiltPreHook(&ctx, kEnvFiltSite, 0x123456u);
+            t.Equals(floatToBits(ctx.f[12]), floatToBits(0.08f), "other target untouched");
+            envFiltPreHook(&ctx, kEnvFiltSite, kEnvFiltUpdate);
+            t.IsTrue(std::fabs(ctx.f[12] - 0.056613925f) < 1e-7f, "live input converted");
+            envFiltPreHook(nullptr, kEnvFiltSite, kEnvFiltUpdate);
+        });
+
         tc.Run("pool overrides only fire for their group", [](TestCase &t)
         {
             const uint64_t all28 =
