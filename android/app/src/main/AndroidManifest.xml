@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
+        android:name=".RunnerApplication"
         android:label="PS2 Recomp"
         android:hasCode="true"
         android:isGame="true"

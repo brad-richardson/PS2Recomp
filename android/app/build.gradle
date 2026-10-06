@@ -6,6 +6,8 @@ plugins {
 def ps2xBootElf = project.findProperty('ps2xBootElf') ?: '/storage/emulated/0/Android/data/com.ps2x.runner/files/game.elf'
 def ps2xGameCodegenDir = project.findProperty('ps2xGameCodegenDir') ?: ''
 def ps2xJniLibsDir = project.findProperty('ps2xJniLibsDir') ?: ''
+// Private game-derived assets enter only at build time, outside the source tree.
+def ps2xPackDir = project.findProperty('ps2xPackDir') ?: ''
 // VR3: generated VU0 images (vu0_<hash>.cpp); used only with PS2X_VU0_RECOMP=1 at run time.
 def ps2xVu0RecompDir = project.findProperty('ps2xVu0RecompDir') ?: ''
 // VR4 D1: vector FMAC core (CMake PS2X_VU1_FMAC_SIMD), ON/OFF (default ON).
@@ -34,6 +36,12 @@ def ps2xGameIpo = project.findProperty('ps2xGameIpo') ?: 'ON'
 def ps2xAndroidMarch = project.findProperty('ps2xAndroidMarch') ?: 'armv8.2-a+fp16+dotprod'
 
 android {
+    androidResources {
+        noCompress 'png'
+    }
+    if (ps2xPackDir) {
+        sourceSets.main.assets.srcDirs += [ps2xPackDir]
+    }
     namespace 'com.ps2x.runner'
     compileSdk 34
     ndkVersion '28.2.13676358'

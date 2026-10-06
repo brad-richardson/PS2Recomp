@@ -38,7 +38,19 @@ void setEnvEntries(const std::string &content, const char *layer)
 {
     for (const auto &entry : ps2x::parseEnvFileContent(content))
     {
-        setenv(entry.first.c_str(), entry.second.c_str(), 1);
+        // The Application prepares the bundled pack before NativeActivity
+        // loads this library. Explicit filesystem paths still pass through.
+        const char *appPack = std::getenv("PS2X_APP_PACK");
+        std::string value = entry.second;
+        const std::string token = "${APP_PACK}";
+        const std::string replacement = appPack ? appPack : "";
+        size_t pos = 0;
+        while ((pos = value.find(token, pos)) != std::string::npos)
+        {
+            value.replace(pos, token.size(), replacement);
+            pos += replacement.size();
+        }
+        setenv(entry.first.c_str(), value.c_str(), 1);
         __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, (std::string(layer) + ": set " + entry.first).c_str());
     }
 }

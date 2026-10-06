@@ -129,6 +129,7 @@ void prepareEnvironment(const char *argv0)
     const std::map<std::string, std::string> vars{
         {"BUNDLE", bundle.string()},
         {"DOCUMENTS", documents.string()},
+        {"APP_PACK", (bundle / "remaster").string()},
     };
 
     std::string bundleRaw, presetRaw, documentsRaw;
