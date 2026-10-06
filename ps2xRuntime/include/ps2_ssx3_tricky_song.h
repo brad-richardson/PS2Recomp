@@ -10,10 +10,10 @@
 // baked into the staged file). Saturating add; the WAV taps capture the
 // burst because the mix lands before them.
 //
-// The meter-full edge is detected by trickyHudOverlay (ps2_runtime.cpp),
-// which calls startBurst; the audio callbacks call mixInto. The resume
-// offset is in-session only (not persisted). Knob unset/invalid = the
-// mixer is a no-op and the output is byte-identical.
+// The meter-full edge is detected by the layer's VBlank reducer
+// (ps2_ssx3_tricky_layer.h), which calls startBurst; the audio callbacks
+// call mixInto. The resume offset is in-session only (not persisted). Knob
+// unset/invalid = the mixer is a no-op and the output is byte-identical.
 //
 // TK47: burst probe. mixInto counts what it consumes (frames, song peak,
 // mix-bus peak before/after, saturations, callback path) and dumps one
@@ -151,6 +151,14 @@ struct Player
     Song song;
     // 0 (low 32 = 0) = idle; else (startFrame << 32) | framesLeft.
     std::atomic<uint64_t> cmd{0};
+    // TKL1 stage 3: pause suspends, leaving the race cancels. `suspended`
+    // freezes consumption (the resume is exact: mixInto never consumes while
+    // set). `liveEpoch` retires stale bursts: startBurst stamps `cmdEpoch`
+    // with it, and mixInto drops any command from an older generation
+    // (cancel/load/boundary). EE-owned; the audio thread only reads.
+    std::atomic<bool> suspended{false};
+    std::atomic<uint64_t> liveEpoch{0};
+    std::atomic<uint64_t> cmdEpoch{0};
     uint64_t resume = 0; // game-thread only
     int songPeak = 0;    // max |sample| over the staged PCM (initFromEnv)
     // TK47 probe (audio thread only; see the header comment).
@@ -196,9 +204,11 @@ inline void initFromEnv()
     }
 }
 
-// Game thread: open a burst at the resume offset. A burst already playing
-// is restarted from the resume offset (a re-full within 5 s of a full);
-// the resume only ever advances by whole bursts, wrapping at the song end.
+// EE thread (the layer's VBlank reducer): open a burst at the resume
+// offset. A burst already playing is restarted from the resume offset (a
+// re-full within 5 s of a full); the resume only ever advances by whole
+// bursts, wrapping at the song end. Stamps the live generation first, so a
+// command the mixer reads always carries a generation at least as new.
 inline void startBurst(uint64_t tick)
 {
     Player &p = player();
@@ -206,6 +216,7 @@ inline void startBurst(uint64_t tick)
         return;
     const uint64_t start = p.resume % p.song.frames;
     p.resume = (start + kBurstFrames) % p.song.frames;
+    p.cmdEpoch.store(p.liveEpoch.load(std::memory_order_relaxed), std::memory_order_release);
     p.cmd.store((start << 32) | kBurstFrames, std::memory_order_release);
     std::fprintf(stderr,
                  "[ssx3-tricky-song] burst start=%llu end=%llu resume=%llu tick=%llu player=%p songPeak=%d\n",
@@ -214,6 +225,31 @@ inline void startBurst(uint64_t tick)
                  static_cast<unsigned long long>(p.resume),
                  static_cast<unsigned long long>(tick),
                  static_cast<const void *>(&p), p.songPeak);
+}
+
+// EE thread: freeze (true) or resume (false) consumption. The flag tracks
+// the race phase even with no song staged (no audible effect then); logs
+// transitions only; called every VBlank.
+inline void setSuspended(bool s)
+{
+    Player &p = player();
+    const bool was = p.suspended.exchange(s, std::memory_order_acq_rel);
+    if (was != s)
+        std::fprintf(stderr, "[ssx3-tricky-song] burst %s\n", s ? "suspended" : "resumed");
+}
+
+// EE thread: drop any in-flight burst and retire its generation, so audio
+// callbacks that already loaded the command still ignore it. Logs only when
+// a burst was actually in flight.
+inline void cancelBurst()
+{
+    Player &p = player();
+    if (!p.song.ok)
+        return;
+    p.liveEpoch.fetch_add(1u, std::memory_order_acq_rel);
+    const uint64_t s = p.cmd.exchange(0u, std::memory_order_acq_rel);
+    if ((s & 0xffffffffull) != 0u)
+        std::fprintf(stderr, "[ssx3-tricky-song] burst cancelled\n");
 }
 
 inline int16_t satAdd(int16_t a, int16_t b)
@@ -241,7 +277,17 @@ inline void mixInto(int16_t *out, size_t frames, const char *path = "direct")
                      static_cast<const void *>(&p), p.song.ok ? 1 : 0, p.song.frames,
                      p.songPeak, path ? path : "?");
     }
+    // TKL1: a suspended burst is not consumed (pause suspends); a command
+    // from a retired generation is dropped and cleaned up (cancel/load).
+    if (p.suspended.load(std::memory_order_acquire))
+        return;
     uint64_t s = p.cmd.load(std::memory_order_acquire);
+    if ((s & 0xffffffffull) != 0u &&
+        p.cmdEpoch.load(std::memory_order_acquire) != p.liveEpoch.load(std::memory_order_acquire))
+    {
+        p.cmd.store(0u, std::memory_order_relaxed);
+        return;
+    }
     while ((s & 0xffffffffull) != 0u)
     {
         const uint32_t left = static_cast<uint32_t>(s & 0xffffffffull);

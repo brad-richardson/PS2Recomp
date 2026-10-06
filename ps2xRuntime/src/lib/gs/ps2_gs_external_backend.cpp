@@ -11,7 +11,8 @@
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
 #include "ps2_present_geometry.h"
-#include "ps2_ssx3_tricky_hud_state.h"
+#include "ps2_ssx3_tricky_hud.h"
+#include "ps2_ssx3_tricky_layer.h"
 #include <android/hardware_buffer.h>
 #include <android/rect.h>
 #endif
@@ -1305,17 +1306,13 @@ private:
         using namespace ps2_ssx3_tricky_hud;
         if (!buffer || imgW == 0u || imgH == 0u)
             return;
-        if (!hudWanted())
+        // TKL1: consume the EE's immutable packet (tick + epoch); never
+        // touch RDRAM. A stale (pre-load/pre-exit) packet is skipped.
+        ps2_ssx3_tricky_layer::PresentationPacket p;
+        if (!ps2_ssx3_tricky_layer::config().hud || !ps2_ssx3_tricky_layer::latestPacket(p))
             return;
-        size_t ramSize = 0u;
-        const uint8_t *rdram = liveRdram(ramSize);
-        if (!rdram || ramSize == 0u)
+        if (p.epoch != ps2_ssx3_tricky_layer::epoch())
             return;
-        HudParams p;
-        {
-            std::lock_guard<std::mutex> lock(hudState().mu);
-            p = updateHudStateLocked(hudState(), rdram, ramSize, tick);
-        }
         if (!p.draw || !p.atlas)
             return;
         const ps2_ssx3_tricky_hud::Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
