@@ -72,8 +72,8 @@ void register_elf_analyzer_tests()
                      "libdma memclr should resolve to a runtime stub");
             t.IsTrue(FunctionClassifier::hasRuntimeHandler("__divdi3"),
                      "libgcc 64-bit division should resolve to a runtime stub");
-            t.IsFalse(FunctionClassifier::hasRuntimeHandler("GetRomName"),
-                      "ABI-incompatible GetRomName variants must be recompiled instead of name-stubbed");
+            t.IsTrue(FunctionClassifier::hasRuntimeHandler("GetRomName"),
+                     "CGR2 retains the pinned SSX3 GetRomName binding until deliberate guest-ABI migration");
             t.IsFalse(FunctionClassifier::hasRuntimeHandler("__sbprintf"),
                       "optional stdio internals should not resolve as automatic runtime stubs");
             t.IsFalse(FunctionClassifier::hasRuntimeHandler("__sprint"),
