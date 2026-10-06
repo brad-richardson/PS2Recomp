@@ -9,6 +9,22 @@ GPL-3.0-or-later, like PCSX2/ARMSX2. No game data, generated code, captures
 or private OM1 inputs live here (OM1 inputs arrive via `-D` paths at build
 time and fail fast when unset).
 
+## External-user build status
+
+This is source integration, not a portable dependency bootstrap. `build.sh`
+is the maintainer's host recipe: Mac requires private pinned GE1 dependencies
+and OM1RT inputs; Android delegates to a private remote build helper; iOS
+requires a pre-staged dependency bundle. The script has no `--help`/dry-run
+mode and does not pin or fetch the supplied ARMSX2 checkout
+([parser and checks](build.sh#L29), [Mac inputs](build.sh#L55),
+[Android delegation](build.sh#L95), [iOS bundle](build.sh#L124)).
+
+Building GE1 does not generate SSX 3 EE/VU0 code or iOS offline VU1 tables.
+Those stay in external, user-owned input directories. See the
+[platform dependency inventory](../../../docs/ssx3-build.md),
+[input contract](../../../docs/ssx3-inputs.md) and
+[troubleshooting](../../../docs/ssx3-troubleshooting.md).
+
 ## Layout
 
 | Dir | From (at `ax4-one 8d603d5632`) | What |
@@ -22,7 +38,7 @@ time and fail fast when unset).
 | `platform/mac/` | new (GE1S + `microvu_libs.sh` mac) | Mac top-level project |
 | `platform/android/` | `ssx3-ge1/android-platform/` | Android top-level project (+ mv2/om1 guards) |
 | `platform/ios/` | `ssx3-ge1/ios-platform/` + `om1-ios-platform/` | iOS top-level project + stubs (OM1 archive bits under `om1/`) |
-| `build.sh` | new (unifies `microvu_libs.sh`, `bradflix_ge1_lib.sh`, GE1S, IG1) | one script: `mac\|android\|ios\|ios-sim --armsx2 <dir>` |
+| `build.sh` | new (unifies prior private host recipes) | one script: `mac\|android\|ios\|ios-sim --armsx2 <dir>` |
 
 Dropped, deduplicated onto the vendor `cmake/` tree + the Android bundle:
 `ssx3/mv1-android-platform/`, `ssx3/mv2-android-platform/` (3,225 lines of
@@ -37,8 +53,8 @@ All moved files are byte-identical to their `ax4-one` paths except the
 
 - **Mac** `libge1_gs.dylib` + `ge1_replay` (Metal + MoltenVK), and
   `libmv2_microvu.dylib` from the om1rt recipe (the Mac det lib).
-- **Android** `libge1_gs.so` via the `bradflix_ge1_lib.sh` recipe
-  (Docker `ssx3-android`, shared ccache).
+- **Android** `libge1_gs.so` via a private remote Docker recipe
+  ([delegation](build.sh#L120)); the staged tree also carries mv2 sources.
 - **iOS** static `libge1_gs.a` (+ `libPCSX2.a`, `libcommon.a`) via the IG1
   recipe (device + sim). mv2 is not wired on iOS (needs `shaderc_combined`;
   the app runs VU1 from the OM1 offline stage).
