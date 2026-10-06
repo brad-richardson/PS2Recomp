@@ -26,6 +26,12 @@
 
 bool ge1_host_reserve_sw_code(); // ge1_host.cpp (CN1A)
 
+namespace GSTextureReplacements
+{
+// GSTextureReplacements.h (RMT1); declared here to keep the texture-cache headers out of the adapter.
+void SetDirectoryOverride(std::string dump_dir, std::string replace_dir);
+}
+
 namespace {
 alignas(16) std::array<u8, 8192> s_priv{};
 std::vector<u32> s_pixels;
@@ -195,6 +201,31 @@ void configure_filtering(Pcsx2Config::GSOptions& config)
     }
 }
 
+// RMT1: PCSX2 texture dump/replacement (GSTextureReplacements), output-only, all default off.
+//   GE1_TEX_DUMP=<dir>     write every hash-cached texture's base level as PNG into <dir>
+//                          (PCSX2 names: <tex0 hash>[-<clut hash>][-r<W>x<H>]-<bits>.png).
+//   GE1_TEX_REPLACE=<dir>  load replacements (png/dds/ktx, any depth below <dir>) by the same names.
+//   GE1_TEX_PRELOAD=1      decode the whole replacement set on a worker at open (PCSX2 precache);
+//                          =sync instead loads on first use on the GS thread (no pop-in, stalls).
+// GE1 runs no VM, so it has no disc serial; the directories go to PCSX2 as absolute overrides.
+void configure_texture_replacement(Pcsx2Config::GSOptions& config)
+{
+    const char* dump = std::getenv("GE1_TEX_DUMP");
+    const char* repl = std::getenv("GE1_TEX_REPLACE");
+    const char* pre = std::getenv("GE1_TEX_PRELOAD");
+    const bool want_dump = dump && *dump;
+    const bool want_repl = repl && *repl;
+    GSTextureReplacements::SetDirectoryOverride(want_dump ? dump : "", want_repl ? repl : "");
+    config.DumpReplaceableTextures = want_dump;
+    config.LoadTextureReplacements = want_repl;
+    config.PrecacheTextureReplacements = want_repl && pre && std::strcmp(pre, "1") == 0;
+    config.LoadTextureReplacementsAsync = !(want_repl && pre && std::strcmp(pre, "sync") == 0);
+    if (want_dump || want_repl)
+        std::fprintf(stderr, "RMT1: tex dump=%s replace=%s precache=%d async=%d\n", want_dump ? dump : "off",
+            want_repl ? repl : "off", config.PrecacheTextureReplacements ? 1 : 0,
+            config.LoadTextureReplacementsAsync ? 1 : 0);
+}
+
 constexpr u32 kOffsets[20] = {
     0x0000, 0x0010, 0x0020, 0x0030, 0x0040, 0x0050, 0x0060,
     0x0070, 0x0080, 0x0090, 0x00a0, 0x00b0, 0x00c0, 0x00d0,
@@ -294,6 +325,7 @@ extern "C" GE1_API int ge1_gs_open(int blending_level)
     }
     // UR2: upscale fixes (only > 1x), anisotropic + trilinear filtering. Unset = today.
     configure_filtering(config);
+    configure_texture_replacement(config);
     // GE4: Adreno sw-blend workaround (menu font static). Env-gated, default off.
     if (const char* bmix = std::getenv("GE1_ADRENO_BLEND_MIX"); bmix && std::strcmp(bmix, "1") == 0)
         config.AdrenoPreferBlendMix = true;
