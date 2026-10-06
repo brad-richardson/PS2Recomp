@@ -75,6 +75,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_vsync_pacer_tests.cpp
     src/ps2_vsync_lock_tests.cpp
     src/ps2_fh1_restamp_tests.cpp
+    src/ps2_fh1_life2_tests.cpp
     src/ps2_fh1_fix_tests.cpp
     src/ps2_fh1_savestate_tests.cpp
     src/ps2_fh1_hooktable_tests.cpp

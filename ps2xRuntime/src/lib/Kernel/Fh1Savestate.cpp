@@ -148,6 +148,36 @@ namespace
         r.pod(shadows); if (!r.ok()) return false;
         ps2_fh1::g_jcam2Shadows=shadows; return true;
     }
+    void life2Save(Writer &w)
+    {
+        using namespace ps2_fh1;
+        w.b(life2Fix());
+        for (const auto &world : g_life2Worlds)
+        { w.u32(world.object); for (auto x:world.stamps) w.u32(x); for (auto x:world.half) w.u8(x); }
+        w.u32(static_cast<uint32_t>(g_life2Anchors.size()));
+        for (const auto &a:g_life2Anchors) {w.u32(a.input);w.u32(a.timeline);w.u32(a.ordinal);}
+    }
+    bool life2Load(Reader &r)
+    {
+        using namespace ps2_fh1;
+        const bool enabledAtSave=r.b();
+        decltype(g_life2Worlds) worlds{};
+        for (auto &world:worlds)
+        { world.object=r.u32(); for (auto &x:world.stamps) x=r.u32(); for (auto &x:world.half) {x=r.u8();if(x>1u)return r.fail("life2: invalid half age");} }
+        const uint32_t n=r.u32();
+        if(n>16384u)return r.fail("life2: invalid anchor count");
+        std::vector<Life2Anchor> anchors;
+        for(uint32_t i=0;i<n;++i) anchors.push_back({r.u32(),r.u32(),r.u32()});
+        if(!r.ok())return false;
+        if(enabledAtSave!=life2Fix())
+        {
+            if(enabledAtSave)return r.fail("life2: recording/streaming metadata needs life2 enabled");
+            g_life2Worlds={};g_life2Anchors.clear();return true;
+        }
+        g_life2Worlds=worlds;g_life2Anchors=std::move(anchors);return true;
+    }
+    const bool kLife2Registered=ps2_savestate::registerSection(
+        "life2", {1u,&life2Save,&life2Load,nullptr,0u,/*optional=*/true});
     const bool kFh32Registered = ps2_savestate::registerSection(
         "fh32", {2u,&fh32Save,&fh32Load,nullptr,1u,/*optional=*/true});
     const bool kFh1Registered = ps2_savestate::registerSection(
@@ -159,4 +189,5 @@ void ps2_fh1_linkSavestateSection()
 {
     (void)kFh1Registered;
     (void)kFh32Registered;
+    (void)kLife2Registered;
 }

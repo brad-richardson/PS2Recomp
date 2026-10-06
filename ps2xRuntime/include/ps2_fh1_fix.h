@@ -60,6 +60,7 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixSpawn = 1ull << 41, // glint spawn substream: stock dt for the 0x2e1520 caller's word (class h, FXT1 T4)
     kFixGround2 = 1ull << 43, // FH33 opt-in: bounded steering response exact half-map (class a/j; not in all)
     kFixJcam2 = 1ull << 44, // FH32 opt-in: camera-only stock-cadence shadow predictor publication (class d/c, owner FH32)
+    kFixLife2 = 1ull << 45, // LCY2 opt-in: streaming live-age units and replay snapshot input ordinals (class e/d; owner LCY2)
     kFixEnvFilt = 1ull << 42, // FH30 opt-in: 0x2c096c -> 0x2bcf38 squared-gain response at 120 (class a; not in all)
 };
 
@@ -111,6 +112,7 @@ inline uint32_t fh12Item(const std::string &item) noexcept
 // Main-mask group by name (0 = not a main-mask name).
 inline uint64_t fixItem(const std::string &item) noexcept
 {
+    if (item == "life2") return kFixLife2;
     if (item == "rider") return kFixRider;
     if (item == "countdown") return kFixCountdown;
     if (item == "drag") return kFixDrag;

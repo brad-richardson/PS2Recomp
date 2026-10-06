@@ -226,6 +226,8 @@ struct Word
 
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive);
 
+#include "ps2_fh1_life2.inl"
+
 // FH28: an opt-in stock-cadence group restores the stock pool word on its own
 // path (the owning group's halving would otherwise double-convert a step that
 // now lands once per pair). True = drop this address from the word list, so
@@ -1110,6 +1112,7 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
         std::abort();
     }
     if (jcam2Fix()) jcam2Reset();
+    if (life2Fix()) life2Flip(ram, a, toActive);
     applyWords(ram, a, toActive);
     if (clockFix())
         restamp10s(ram, a, toActive);
@@ -2578,7 +2581,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2;
+        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2;
     bool src, fh9, draw, tap;
 };
 
@@ -2600,6 +2603,7 @@ inline const BranchFlags &branchFlags() noexcept
         r.ground2 = ground2Fix();
         r.jcam = jcamFix();
         r.jcam2 = jcam2Fix();
+        r.life2 = life2Fix();
         r.pid = pidFix();
         r.envFilt = envFiltFix();
         r.c2cap = c2capFix();
@@ -2704,6 +2708,11 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         // in stock windows too, so it is not on-gated (flips rescale states seen while inactive).
         if ((c.main & kFixBonus) != 0u && (c.main & kFixBonusFlip) != 0u)
             addTgt(kTrickPass);
+    }
+    if (c.mode != Mode::Off && (c.main & kFixLife2) != 0u)
+    {
+        for (uint32_t pc : kLife2Targets) addTgt(pc);
+        for (uint32_t pc : kLife2Sources) addSrc(pc);
     }
     if ((c.main & kFixClock) != 0u && on)
     {
@@ -2929,6 +2938,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     }
     if (Fast ? bf->events : mode() == Mode::Events)
         eventsOnBranch(ram, ctx, sourcePc, targetPc);
+    if (flag(&BranchFlags::life2, life2Fix))
+        life2Hook(ram, ctx, sourcePc, targetPc);
     const bool on = Fast ? (bf->always || (bf->events && g_guestActive)) : hooksOn();
     if (on && flag(&BranchFlags::clock, clockFix))
         clockPreHook(ram, targetPc);
