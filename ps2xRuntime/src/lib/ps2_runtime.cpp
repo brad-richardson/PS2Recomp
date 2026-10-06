@@ -5234,9 +5234,8 @@ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)
 
 // VNP1: PS2X_SSX3_VIS_NATIVE (unset/0 = the VU0 engine, the exact path;
 // 1 = SSX 3's visibility tests 0xDB8 + the walker's 0x570 in host code;
-// check = both, compared). Off whenever something reads the engine's own
-// per-run state (E53/E44 logs, gfx stats) or the PCSX2
-// float mode is selected.
+// check = both, compared). Off when the native image is unavailable or
+// the PCSX2 float mode is selected.
 namespace
 {
     int ssx3VisNativeMode()
@@ -5254,11 +5253,10 @@ namespace
                 return 0;
             const char *floatMode = std::getenv("PS2X_VU_FLOAT");
             const bool pcsx2Float = floatMode != nullptr && std::strcmp(floatMode, "pcsx2") == 0;
-            const bool diag = std::getenv("PS2X_E53_VU0_LOG") != nullptr;
-            if (!ps2_ssx3_vis_native::available() || pcsx2Float || diag)
+            if (!ps2_ssx3_vis_native::available() || pcsx2Float)
             {
-                std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s ignored (available=%d pcsx2_float=%d diag=%d)\n",
-                             value, ps2_ssx3_vis_native::available() ? 1 : 0, pcsx2Float ? 1 : 0, diag ? 1 : 0);
+                std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s ignored (available=%d pcsx2_float=%d)\n",
+                             value, ps2_ssx3_vis_native::available() ? 1 : 0, pcsx2Float ? 1 : 0);
                 return 0;
             }
             std::fprintf(stderr, "[vnp1] PS2X_SSX3_VIS_NATIVE=%s\n", m == 2 ? "check" : "1");
@@ -5327,28 +5325,6 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3
     copyVu0StateToContext(m_vu0.state(), ctx);
     if (visCheck)
         ps2_ssx3_vis_native::noteCheck(visPc, visIn, ps2_ssx3_vis_native::snapshot(*ctx), visNative);
-    // E53: dev-only VU0 start log (PS2X_E53_VU0_LOG=1, default off): caller
-    // pc, start, cycles, and an FNV-1a of VU0 data memory after the run so an
-    // upload that lands shows up as a changing hash. First 64 starts, then
-    // every 256th.
-    {
-        static const bool e53Log = std::getenv("PS2X_E53_VU0_LOG") != nullptr;
-        if (e53Log)
-        {
-            static std::atomic<uint64_t> e53Count{0};
-            const uint64_t n = e53Count.fetch_add(1, std::memory_order_relaxed) + 1u;
-            if (n <= 64u || (n % 256u) == 0u)
-            {
-                uint32_t h = 2166136261u;
-                for (uint32_t i = 0; i < PS2_VU0_DATA_SIZE; ++i)
-                    h = (h ^ vu0Data[i]) * 16777619u;
-                std::fprintf(stderr, "[E53] vu0start n=%llu caller=0x%x startPC=0x%x cycles=%llu budget_hit=%d vu0data_fnv=%08x\n",
-                             static_cast<unsigned long long>(n), ctx->pc, startPC,
-                             static_cast<unsigned long long>(m_vu0.state().cycles),
-                             m_vu0.state().cycles >= 4096u ? 1 : 0, h);
-            }
-        }
-    }
 }
 
 void PS2Runtime::vu0StartMicroProgram(uint8_t *rdram, R5900Context *ctx, uint32_t address)

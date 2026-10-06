@@ -820,67 +820,6 @@ inline void clockPostHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
     wr32(ram, obj + 0xdcu, bits);
 }
 
-// EE thread, every guest dispatch while enabled() or the tap is on.
-// ---- Lab hooks (env only, full120 only; for trying a conversion without a
-// rebuild). PS2X_FH1_HALF=src:tgt:reg:off[,...] (hex): on every other
-// dispatch src->tgt, [reg+off] -= 1 (a per-update counter bumped just before
-// that call keeps stock cadence). PS2X_FH1_SKIP=src:tgt[,...]: skip every
-// other src->tgt call (service at stock cadence, class d).
-struct LabHook
-{
-    uint32_t src = 0, tgt = 0, reg = 0, off = 0, calls = 0;
-};
-
-inline std::vector<LabHook> &labHooks(const char *env, bool withTarget)
-{
-    static std::vector<LabHook> half, skip;
-    std::vector<LabHook> &v = withTarget ? half : skip;
-    static bool parsedHalf = false, parsedSkip = false;
-    bool &parsed = withTarget ? parsedHalf : parsedSkip;
-    if (parsed)
-        return v;
-    parsed = true;
-    const char *p = std::getenv(env);
-    while (p && *p)
-    {
-        LabHook h;
-        char *end = nullptr;
-        h.src = static_cast<uint32_t>(std::strtoul(p, &end, 16));
-        if (*end != ':') break;
-        h.tgt = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
-        if (withTarget)
-        {
-            if (*end != ':') break;
-            h.reg = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
-            if (*end != ':') break;
-            h.off = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
-        }
-        v.push_back(h);
-        if (*end != ',') break;
-        p = end + 1;
-    }
-    if (!v.empty())
-        std::fprintf(stderr, "fh1-full120 lab %s hooks=%zu\n", env, v.size());
-    return v;
-}
-
-inline bool labHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
-{
-    for (LabHook &h : labHooks("PS2X_FH1_HALF", true))
-        if (h.src == sourcePc && h.tgt == targetPc && ctx && (h.calls++ & 1u) != 0u)
-        {
-            const uint32_t addr = getRegU32(ctx, static_cast<int>(h.reg)) + h.off;
-            uint32_t v = 0u;
-            if (rd32(ram, addr, v))
-                wr32(ram, addr, v - 1u);
-        }
-    bool skip = false;
-    for (LabHook &h : labHooks("PS2X_FH1_SKIP", false))
-        if (h.src == sourcePc && h.tgt == targetPc)
-            skip = skip || (h.calls++ & 1u) != 0u;
-    return skip;
-}
-
 // ---- Launch wall response, PS2X_SSX3_FULL120_FIX=launch (class f) ----------
 // 0x114298 (launch/landing transition helper; callers 0x12eafc, 0x130890,
 // 0x13bfe8, 0x13f19c) projects the rider velocity R+0x1e0 off the contact
@@ -2640,7 +2579,7 @@ struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
         particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2;
-    bool src, fh9, lab, draw, tap;
+    bool src, fh9, draw, tap;
 };
 
 inline const BranchFlags &branchFlags() noexcept
@@ -2672,7 +2611,6 @@ inline const BranchFlags &branchFlags() noexcept
         r.fh12 = fh12Hooks();
         r.src = !srcWants().empty() || fh26Tap().s != 0u;
         r.fh9 = fh9Tap().r != 0u;
-        r.lab = !labHooks("PS2X_FH1_HALF", true).empty() || !labHooks("PS2X_FH1_SKIP", false).empty();
         r.draw = drawLimit();
         r.tap = tap().on;
         return r;
@@ -2720,7 +2658,7 @@ inline bool hookPreclassify() noexcept
 }
 
 // Pure input for the table (production fills it from mode()/fixMask()/
-// fixMask12()/g_guestActive and the env-derived tap/lab/src/fh9/hist state;
+// fixMask12()/g_guestActive and the env-derived tap/src/fh9/hist state;
 // unit tests construct it directly, so no process env leaks into the test).
 struct HookConfig
 {
@@ -2735,7 +2673,6 @@ struct HookConfig
     std::vector<uint32_t> srcTgts; // PS2X_FH1_SRC targets
     uint32_t fh26s = 0u;           // PS2X_FH26_TAP S, 0 = off
     uint32_t fh9r = 0u;            // PS2X_FH9_AI rider, 0 = off
-    std::vector<std::pair<uint32_t, uint32_t>> labPairs; // HALF + SKIP (src, tgt)
 };
 
 struct HookInterest
@@ -2872,12 +2809,6 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addTgt(0x133308u); // stick-angle tracker tap
     if (c.fh9r != 0u)
         r.always = true; // FH9 AI tap replicates per-branch state: run the chain
-    if (on)
-        for (const auto &p : c.labPairs)
-        {
-            addSrc(p.first);
-            addTgt(p.second);
-        }
     addTgt(0x111728u); // IN4 rider-action tap (knob-checked inside; one compare)
     if (c.draw && on)
     {
@@ -2927,10 +2858,6 @@ inline HookConfig currentHookConfig()
         c.srcTgts.push_back(w.tgt);
     c.fh26s = fh26Tap().s;
     c.fh9r = fh9Tap().r;
-    for (const LabHook &h : labHooks("PS2X_FH1_HALF", true))
-        c.labPairs.emplace_back(h.src, h.tgt);
-    for (const LabHook &h : labHooks("PS2X_FH1_SKIP", false))
-        c.labPairs.emplace_back(h.src, h.tgt);
     return c;
 }
 
@@ -3054,8 +2981,6 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     }
     if (!Fast || bf->fh9)
         fh9OnBranch(ram, ctx, sourcePc, targetPc, skip);
-    if (on && (!Fast || bf->lab))
-        skip = labHook(ram, ctx, sourcePc, targetPc) || skip;
     // IN4 rider layer (PS2X_INPUT_DIAG=1): edges of the rider action-block
     // watch bits at each entry of the rider control dispatcher 0x111728
     // (a1 = block filled by 0x121068; low 20 bits of +0 = action-map bits;

@@ -19,7 +19,6 @@ static ps2_fh1::HookConfig hk1AllActive()
     c.srcTgts.push_back(0xdead00u);
     c.fh26s = 0x1234u;
     c.fh9r = 0u;
-    c.labPairs.emplace_back(0xaaa000u, 0xbbb000u);
     return c;
 }
 
@@ -43,7 +42,6 @@ void register_ps2_fh1_hooktable_tests()
                 0x1197acu,                       // bonus rate store
                 0x15f0ecu,                       // lift probe
                 0x317208u, 0x31723cu,            // draw gates
-                0xaaa000u,                       // lab HALF/SKIP source
             };
             for (uint32_t s : srcs)
                 t.IsTrue(hookTableHit(hi, s, dead), "src hits");
@@ -69,7 +67,6 @@ void register_ps2_fh1_hooktable_tests()
                 0x2e2260u, // fh12 spin/texanim/loops/fxtimer
                 0xdead00u,  // PS2X_FH1_SRC watch
                 0x133308u,  // FH26 stick tap
-                0xbbb000u,  // lab pair target
                 0x111728u,  // IN4 rider dispatcher
                 0x22b008u,  // draw render slot
                 0x2306b8u,  // tap update target
