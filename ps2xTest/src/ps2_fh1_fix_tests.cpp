@@ -2,6 +2,7 @@
 #include "ps2_fh1_fix.h"
 #include "ps2_fh1_ground2.h"
 #include "ps2_fh1_input2.h"
+#include "ps2_fh1_fh35.h"
 #include <cmath>
 #include <algorithm>
 
@@ -227,6 +228,50 @@ void register_ps2_fh1_fix_tests()
             t.Equals(parseFix("pid").main, static_cast<uint64_t>(kFixPid), "pid alone");
             t.Equals(parseFix("c2cap").main, static_cast<uint64_t>(kFixC2Cap), "c2cap alone");
             t.Equals(parseFix("spawn").main, static_cast<uint64_t>(kFixSpawn), "spawn alone");
+        });
+
+        tc.Run("FH35 trails corrects only direct half-dt callers", [](TestCase &t)
+        {
+            static_assert(sizeof(FixMasks{}.main) == sizeof(uint64_t), "main FIX mask must retain bits above 47");
+            t.Equals(static_cast<uint64_t>(kFixTrails), 1ull << 48, "trails uses bit 48");
+            t.Equals(static_cast<uint64_t>(kFixChase2), 1ull << 49, "chase2 uses bit 49");
+            t.IsTrue(((kFixTrails|kFixChase2) & ((1ull << 46)|(1ull << 47)))==0u,"INP2 bits reserved");
+            t.IsTrue((kFixAll & (kFixTrails|kFixChase2))==0u,"both opt-in");
+            t.Equals(parseFix("all,trails,chase2").main,kFixAll|kFixTrails|kFixChase2,"adds both");
+            t.Equals(parseFix("all,trails,chase2,-trails,-chase2").main,kFixAll,"removes both");
+            const float half=fh35Float(0x3c088889u), stock=fh35Float(0x3c888889u);
+            for (uint32_t pc : {0x345e4cu,0x345fdcu,0x34600cu,0x346028u})
+            {
+                t.Equals(fh35Bits(directTrailDt(pc,half)),fh35Bits(stock),"direct stock dt");
+                t.Equals(fh35Bits(directTrailDt(pc,stock)),fh35Bits(stock),"already stock unchanged");
+                t.Equals(fh35Bits(directTrailDt(pc,0.02f)),fh35Bits(0.02f),"custom dt unchanged");
+            }
+            for (uint32_t pc : {0x345b7cu,0x345b8cu,0x3718d0u,0x2e1520u,0u})
+                t.Equals(fh35Bits(directTrailDt(pc,half)),fh35Bits(half),"control unchanged");
+        });
+        tc.Run("FH35 chase2 recovers stock retention with exact endpoints", [](TestCase &t)
+        {
+            for (bool b : {false,true})
+            {
+                const float k0=fh35Float(b?0x3f055b3fu:0x3f6c0535u), k1=fh35Float(b?0x3f72dce8u:0x3f7c217au);
+                const float r0=fh35Float(b?0x3e8aefe0u:0x3f59999au), r1=fh35Float(b?0x3f666666u:0x3f7851ecu);
+                float out=-1;
+                t.IsTrue(!chase2Retention(k0,k1,0,out) && out==-1,"low endpoint untouched");
+                t.IsTrue(!chase2Retention(k0,k1,1,out) && out==-1,"high endpoint untouched");
+                for (unsigned i=1;i<1000;++i)
+                {
+                    const float x=i/1000.0f;
+                    t.IsTrue(chase2Retention(k0,k1,x,out),"interior selected");
+                    const double expected=double(r0)+(double(r1)-r0)*x;
+                    t.IsTrue(std::fabs(double(out)*out-expected)<2e-7,"pair recovers stock lerp");
+                }
+            }
+            float out=42;
+            t.IsTrue(!chase2Retention(.8f,.9f,.5f,out) && out==42,"custom endpoints untouched");
+            t.Equals(chase2T(.375f,.125f,.625f),.5f,"same midpoint geometry");
+            t.Equals(chase2T(-.375f,.125f,.625f),.5f,"absolute direction");
+            t.Equals(chase2T(.05f,.1f,.6f),0.0f,"low clamp");
+            t.Equals(chase2T(.7f,.1f,.6f),1.0f,"high clamp");
         });
 
         tc.Run("unknown items refuse", [](TestCase &t)

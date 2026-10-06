@@ -31,6 +31,7 @@
 #include "ps2_fh1_fix.h"
 #include "ps2_fh1_ground2.h"
 #include "ps2_fh1_input2.h"
+#include "ps2_fh1_fh35.h"
 
 #include <algorithm>
 #include <array>
@@ -2218,11 +2219,49 @@ inline void ground2OnReturn(uint8_t *ram)
     uint32_t bits; std::memcpy(&bits, &bound, 4); wr32(ram, R+0x1f4u, bits);
 }
 
+// FH35: caller-specific trails and C1 interpolate-then-root, both opt-in.
+inline bool trailsFix() noexcept
+{
+    static const bool on=enabled() && (fixMask() & (kFixTrails|kFixRng|kFixEmitter)) == (kFixTrails|kFixRng|kFixEmitter);
+    return on;
+}
+inline bool chase2Fix() noexcept
+{
+    static const bool on=enabled() && (fixMask() & (kFixChase2|kFixCamera)) == (kFixChase2|kFixCamera);
+    return on;
+}
+inline void trailsPreHook(R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    if (ctx && targetPc==kTrailPush) ctx->f[12]=directTrailDt(sourcePc,ctx->f[12]);
+}
+inline void chase2PreHook(R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    if (!ctx || sourcePc!=0x1626e4u || g_postArmed) return;
+    g_post={}; g_post.target=targetPc; g_post.sp=getRegU32(ctx,29); g_post.kind=9u; g_postArmed=true;
+}
+inline void chase2OnReturn(uint8_t *ram, R5900Context *ctx)
+{
+    const uint32_t state=getRegU32(ctx,2);
+    const bool alternate=state==2u || state==3u || state==13u;
+    const unsigned i0=alternate?22u:25u, i1=alternate?23u:26u;
+    uint32_t bits;
+    if (!rd32(ram,getRegU32(ctx,29)+0x38u,bits)) return;
+    const float t=chase2T(fh35Float(bits),ctx->f[alternate?21:27],ctx->f[alternate?20:24]);
+    float k;
+    if (chase2Retention(ctx->f[i0],ctx->f[i1],t,k))
+        ctx->f[i0]=ctx->f[i1]=k; // guest lerp now yields the one rooted retention
+}
+
 inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned)
 {
     if (targetPc != g_post.target || !ctx || getRegU32(ctx, 29) != g_post.sp)
         return;
     g_postArmed = false;
+    if (g_post.kind == 9u)
+    {
+        if (returned) chase2OnReturn(ram,ctx);
+        return;
+    }
     if (g_post.kind == 6u)
     {
         pidHoldRelease(ram, g_post.obj, g_post.saved, returned); // gains come back even when suspended
@@ -2626,7 +2665,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2;
+        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2, trails, chase2;
     bool src, fh9, draw, tap;
 };
 
@@ -2653,6 +2692,8 @@ inline const BranchFlags &branchFlags() noexcept
         r.pid = pidFix();
         r.envFilt = envFiltFix();
         r.c2cap = c2capFix();
+        r.trails=trailsFix();
+        r.chase2=chase2Fix();
         r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap || r.input2 || inputChainFix();
         r.bonus = bonusFix();
         r.lift = liftFix();
@@ -2871,6 +2912,8 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addSrc(kRenderGateMode0);
         addTgt(kRenderTarget);
     }
+    if (on && (c.main & (kFixChase2|kFixCamera)) == (kFixChase2|kFixCamera))
+        addSrc(0x1626e4u);
     if (c.tapOn)
     {
         addTgt(kUpdateTarget);
@@ -3047,6 +3090,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         in4NoteRider(ram, ctx);
     const bool drawSkip = on && flag(&BranchFlags::draw, drawLimit) && !skip && drawHook(ctx, sourcePc, targetPc);
     skip = skip || drawSkip;
+    if (on && !skip && flag(&BranchFlags::trails,trailsFix)) trailsPreHook(ctx,sourcePc,targetPc);
+    if (on && !skip && flag(&BranchFlags::chase2,chase2Fix)) chase2PreHook(ctx,sourcePc,targetPc);
     if (Fast && !bf->tap)
         return skip;
     Tap &t = tap();

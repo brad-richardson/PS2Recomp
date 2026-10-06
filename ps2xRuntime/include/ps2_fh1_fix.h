@@ -60,6 +60,8 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixSpawn = 1ull << 41, // glint spawn substream: stock dt for the 0x2e1520 caller's word (class h, FXT1 T4)
     kFixInputChain = 1ull << 47, // INP3 opt-in prototype: coupled directional tracker at stock cadence
     kFixInput2 = 1ull << 46, // INP2 opt-in: digital guard/repeat clocks only (INP3 split)
+    kFixTrails = 1ull << 48, // FH35 opt-in: direct trail callers at stock dt with rng+emitter (class h/d; owner FH35)
+    kFixChase2 = 1ull << 49, // FH35 opt-in: C1 interpolation before rooting retention (class a; owner FH35)
     kFixGround2 = 1ull << 43, // FH33 opt-in: bounded steering response exact half-map (class a/j; not in all)
     kFixJcam2 = 1ull << 44, // FH32 opt-in: camera-only stock-cadence shadow predictor publication (class d/c, owner FH32)
     kFixLife2 = 1ull << 45, // LCY2 opt-in: streaming live-age units and replay snapshot input ordinals (class e/d; owner LCY2)
@@ -161,6 +163,8 @@ inline uint64_t fixItem(const std::string &item) noexcept
     if (item == "c2cap") return kFixC2Cap;
     if (item == "spawn") return kFixSpawn;
     if (item == "envfilt") return kFixEnvFilt;
+    if (item == "trails") return kFixTrails;
+    if (item == "chase2") return kFixChase2;
     return 0u;
 }
 
