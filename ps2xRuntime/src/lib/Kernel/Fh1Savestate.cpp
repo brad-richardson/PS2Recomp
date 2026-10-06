@@ -86,7 +86,8 @@ namespace
                           (savedFix12 & ~kStateless12) == (fixMask12() & ~kStateless12);
         if (!same)
         {
-            if (converted(b[0], b[1], b[2], b[3], b[5]))
+            // INP2 tags guest counters even in inactive stock windows.
+            if (((savedFix ^ fixMask()) & (kFixInput2 | kFixInputChain)) != 0u || converted(b[0], b[1], b[2], b[3], b[5]))
                 return r.fail("fh1: state saved with full-120 guest words converted (mode " +
                               std::to_string(savedMode) + ") needs the same PS2X_SSX3_FULL120 mode and FIX masks");
             std::fprintf(stderr, "[savestate] fh1: saved in mode %u, running mode %u; full-120 state left fresh\n",

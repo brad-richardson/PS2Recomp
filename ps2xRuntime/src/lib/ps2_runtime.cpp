@@ -1583,6 +1583,92 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-full120-clock",
                            0u,
                            applyFh1Full120);
 
+// INP2: run the guest updater to preserve its allocation and register effects,
+// then replace only digital record results. Raw values still update at 120.
+namespace
+{
+    PS2Runtime::RecompiledFunction g_input2Update = nullptr;
+    PS2Runtime::RecompiledFunction g_inputChainBoundary = nullptr, g_inputChainResume = nullptr;
+    void input2UpdateWrapper(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t bank = getRegU32(ctx, 4) & 0x1ffffffu, count = getRegU32(ctx, 5);
+        const uint32_t ra = getRegU32(ctx, 31);
+        uint32_t oldCount = 0u;
+        if (count > 24u || bank > 0x2000000u-4u-24u*28u || !ps2_fh1::rd32(ram, bank, oldCount))
+        {
+            g_input2Update(ram, ctx, runtime);
+            return;
+        }
+        std::array<ps2_fh1::Input2Record, 24> old{};
+        for (uint32_t i = 0; i < std::min(count, oldCount); ++i)
+            std::memcpy(&old[i], ram + bank + 4u + i*28u, 28u);
+        const unsigned step = ps2_fh1::hooksOn() ? 1u : 2u;
+        g_input2Update(ram, ctx, runtime);
+        if (ctx->pc != ra || ps2_guest_unwind::pending()) return;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const uint32_t base = bank + 4u + i*28u;
+            uint32_t rawBits = 0u;
+            if (!ps2_fh1::rd32(ram, base, rawBits)) return;
+            float raw; std::memcpy(&raw, &rawBits, 4u);
+            ps2_fh1::input2Step(old[i], raw, step);
+            old[i].raw = rawBits;
+            std::memcpy(ram + base, &old[i], 28u);
+        }
+    }
+    void inputChainBoundaryWrapper(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t ra = getRegU32(ctx, 31);
+        g_inputChainBoundary(ram, ctx, runtime);
+        if (ra != 0x133648u || ctx->pc != ra || ps2_guest_unwind::pending() ||
+            !ps2_fh1::hooksOn() || !ps2_fh1::g_rngOdd) return;
+        const uint32_t s = getRegU32(ctx, 16);
+        uint32_t phase = 0u;
+        if (ps2_fh1::rd32(ram, s + 0xcu, phase))
+            ps2_fh1::wr32(ram, s + 0xcu, ps2_fh1::inputChainPark(phase));
+    }
+    void inputChainResumeWrapper(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // Restore before all downstream rate/pose/animation consumers, even
+        // when this call resumes after a scheduler checkpoint.
+        if (getRegU32(ctx, 31) == 0x133c48u)
+        {
+            const uint32_t s = getRegU32(ctx, 16);
+            uint32_t phase = 0u;
+            if (ps2_fh1::rd32(ram, s + 0xcu, phase))
+                ps2_fh1::wr32(ram, s + 0xcu, ps2_fh1::inputChainRestore(phase));
+        }
+        g_inputChainResume(ram, ctx, runtime);
+    }
+    void applyInput2(PS2Runtime &runtime)
+    {
+        if (ps2_fh1::input2Fix())
+        {
+            g_input2Update = runtime.lookupFunction(0x321298u);
+            if (!g_input2Update || !runtime.replaceFunction(0x321298u, &input2UpdateWrapper))
+            {
+                std::fprintf(stderr, "input2 refused: missing input updater\n");
+                std::abort();
+            }
+            std::fprintf(stderr, "input2: digital stock clocks only\n");
+        }
+        if (ps2_fh1::inputChainFix())
+        {
+            g_inputChainBoundary = runtime.lookupFunction(0x114130u);
+            g_inputChainResume = runtime.lookupFunction(0x14dc80u);
+            if (!g_inputChainBoundary || !g_inputChainResume ||
+                !runtime.replaceFunction(0x114130u, &inputChainBoundaryWrapper) ||
+                !runtime.replaceFunction(0x14dc80u, &inputChainResumeWrapper))
+            {
+                std::fprintf(stderr, "inputchain refused: missing tracker boundaries\n");
+                std::abort();
+            }
+            std::fprintf(stderr, "inputchain: stock directional recurrence; grabs/raw/animation stay 120\n");
+        }
+    }
+}
+PS2_REGISTER_GAME_OVERRIDE("ssx3-input2", "SLUS_207.72", 0x00100008u, 0u, applyInput2);
+
 // TK11: Tricky mode frontend entry (PS2X_SSX3_TRICKY_MENU=1, default off;
 // ps2_ssx3_tricky_menu.h). Every wrapper acts at its function's entry (or,
 // for the scePadRead glue, after a stub that never calls guest code), so an

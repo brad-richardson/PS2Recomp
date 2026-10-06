@@ -83,6 +83,55 @@ void register_ps2_fh1_savestate_tests()
 {
     MiniTest::Case("Ps2Fh1Savestate", [](TestCase &tc)
     {
+        tc.Run("INP2 inputchain owns its pool across odd and even exits", [](TestCase &t)
+        {
+            using namespace ps2_fh1;
+            const FixMasks masks = parseFix("stick,stick2,inputchain");
+            const std::array<uint32_t, 7> addresses = {
+                0x49bbe8u, 0x49bbf8u, 0x49bbfcu, 0x49bc98u, 0x49bca4u, 0x49bc94u, 0x49bca0u};
+            const std::array<uint32_t, 7> stock = {
+                kSixtieth, kSixtieth, kSixtieth, kSixtieth, kSixtieth, 0x3d4cc9c7u, 0x3d4cd331u};
+            const std::array<uint32_t, 7> active = {
+                kHundredTwentieth, kHundredTwentieth, kHundredTwentieth, kHundredTwentieth,
+                kHundredTwentieth, 0x3cccc9c7u, 0x3cccd331u};
+            std::vector<uint8_t> ram(PS2_RAM_SIZE);
+            constexpr uint32_t manager = 0x1000u;
+            for (bool odd : {false, true})
+            {
+                wr32(ram.data(), manager+0x10u, 60u);
+                wr32(ram.data(), manager+0x14u, kSixtieth);
+                wr32(ram.data(), manager+0x24u, 0x3f800000u);
+                for (size_t i = 0; i < addresses.size(); ++i)
+                {
+                    wr32(ram.data(), addresses[i], stock[i]);
+                    t.IsTrue(fh28PoolOverride(addresses[i], masks.main), "owned word excluded from shared validation");
+                    t.IsTrue(!fh28PoolOverride(addresses[i], kFixStick|kFixStick2), "off path retains ordinary conversion");
+                }
+                t.IsTrue(!fh28PoolOverride(0x49bbe4u, masks.main), "neighbor word is not excluded");
+                applyWords(ram.data(), manager, true, masks);
+                for (size_t i = 0; i < addresses.size(); ++i)
+                {
+                    uint32_t got = 0u; rd32(ram.data(), addresses[i], got);
+                    t.Equals(got, active[i], "inputchain initializes converted pool at entry");
+                }
+                inputChainPoolStep(ram.data(), odd);
+                for (size_t i = 0; i < addresses.size(); ++i)
+                {
+                    uint32_t got = 0u; rd32(ram.data(), addresses[i], got);
+                    t.Equals(got, odd ? 0u : stock[i], "same odd/even cadence as the runtime");
+                }
+                // Exercise the real shared validator: either cadence value
+                // used to abort here before any stock restore could run.
+                applyWords(ram.data(), manager, false, masks);
+                for (size_t i = 0; i < addresses.size(); ++i)
+                {
+                    uint32_t got = 0u; rd32(ram.data(), addresses[i], got);
+                    t.Equals(got, stock[i], "exit succeeds and all seven words are stock");
+                }
+                uint32_t rate = 0u; rd32(ram.data(), manager+0x10u, rate);
+                t.Equals(rate, 60u, "shared manager restore still runs");
+            }
+        });
         tc.Run("fh1 is registered, v1, optional (pre-FH27 files still load)", [](TestCase &t)
         {
             ps2_fh1_linkSavestateSection();
@@ -144,6 +193,18 @@ void register_ps2_fh1_savestate_tests()
             setFresh();
             t.IsTrue(loadFh1(fix), "inactive, other FIX mask: loads");
             t.IsTrue(!loadFh1(fixActive), "converted, other FIX mask: refused");
+            setFresh();
+        });
+
+        tc.Run("INP2 mask cannot change across an inactive tagged-counter state", [](TestCase &t)
+        {
+            setFresh();
+            std::vector<uint8_t> idle = saveFh1();
+            // The saved main mask is little-endian after the mode byte.
+            // Use the group value so later FIX allocations cannot stale this fixture.
+            for (unsigned byte = 0; byte < sizeof(uint64_t); ++byte)
+                idle[1u + byte] ^= static_cast<uint8_t>(ps2_fh1::kFixInput2 >> (8u * byte));
+            t.IsTrue(!loadFh1(idle), "tagged counters require the same input2 selection even outside an event");
             setFresh();
         });
 

@@ -1,10 +1,15 @@
 #include "MiniTest.h"
 #include "ps2_fh1_fix.h"
 #include "ps2_fh1_ground2.h"
+#include "ps2_fh1_input2.h"
 #include <cmath>
 #include <algorithm>
 
 #include <cstdint>
+#include <fstream>
+#include <regex>
+#include <set>
+#include <sstream>
 #include <string>
 
 void register_ps2_fh1_fix_tests()
@@ -12,6 +17,121 @@ void register_ps2_fh1_fix_tests()
     using namespace ps2_fh1;
     MiniTest::Case("Ps2Fh1Fix", [](TestCase &tc)
     {
+        tc.Run("INP2 every declared FIX group has a unique bit in its mask", [](TestCase &t)
+        {
+            // Read the declarations rather than maintain a second group list:
+            // future additions must participate, including internal kFixRamp.
+            // The two masks deliberately have independent bit namespaces.
+            std::ifstream file("ps2xRuntime/include/ps2_fh1_fix.h");
+            t.IsTrue(file.is_open(), "run the suite from the fork worktree root");
+            if (!file.is_open()) return;
+            std::ostringstream buffer;
+            buffer << file.rdbuf();
+            const std::string source = buffer.str();
+            const std::regex member(R"(^\s*(kFix[A-Za-z0-9_]+)\b)");
+            const std::regex definition(R"(^\s*(kFix[A-Za-z0-9_]+)\s*=\s*1(ull|u)\s*<<\s*([0-9]+)\s*,)");
+            auto check = [&](const char *declaration, unsigned width)
+            {
+                const size_t at = source.find(declaration);
+                t.IsTrue(at != std::string::npos, "FIX enum declaration found");
+                if (at == std::string::npos) return;
+                const size_t begin = source.find('{', at), end = source.find('}', begin);
+                t.IsTrue(begin != std::string::npos && end != std::string::npos, "FIX enum body found");
+                if (begin == std::string::npos || end == std::string::npos) return;
+                std::istringstream body(source.substr(begin+1, end-begin-1));
+                std::set<unsigned> seen;
+                std::string line;
+                while (std::getline(body, line))
+                {
+                    std::smatch name, value;
+                    if (!std::regex_search(line, name, member)) continue;
+                    const std::string group = name[1].str();
+                    const bool explicitBit = std::regex_search(line, value, definition);
+                    t.IsTrue(explicitBit, group + " declares one explicit bit");
+                    if (!explicitBit) continue;
+                    const unsigned bit = static_cast<unsigned>(std::stoul(value[3].str()));
+                    t.IsTrue(bit < width, group + " fits its mask");
+                    t.IsTrue(bit < 32u || value[2].str() == "ull", group + " uses a wide shift when required");
+                    t.IsTrue(seen.insert(bit).second, group + " does not alias another FIX group");
+                }
+                t.IsTrue(!seen.empty(), "all FIX declarations scanned");
+            };
+            check("enum Fix : uint64_t", 64u);
+            check("enum : uint32_t", 32u);
+        });
+        tc.Run("INP2 input opts are independent of jcam2 life2 and ground2", [](TestCase &t)
+        {
+            const uint64_t existing = kFixJcam2 | kFixLife2 | kFixGround2;
+            t.IsTrue(((kFixInput2 | kFixInputChain) & existing) == 0u, "new bits do not alias current-tip opts");
+            t.IsTrue((kFixInput2 & kFixInputChain) == 0u, "counter and chaining bits differ");
+            t.Equals(parseFix("jcam2,life2,ground2,input2,inputchain,-input2,-inputchain").main,
+                     existing, "removing input opts preserves the other selections");
+        });
+        tc.Run("INP2 four-stock-frame guard and 24/12 repeats", [](TestCase &t)
+        {
+            t.IsTrue((kFixAll & kFixInput2) == 0u, "input2 excluded from all");
+            t.Equals(parseFix("all,input2,-input2").main, kFixAll, "input2 parses and opts out");
+            for (unsigned step : {1u, 2u})
+            {
+                Input2Record r{}; r.guard = 3u;
+                input2Step(r, 1.f, step);
+                t.Equals(r.press, 1u, "idle press immediate");
+                t.Equals(r.repeat, 1u, "initial repeat pulse");
+                for (unsigned half = step; half < 8u; half += step)
+                {
+                    input2Step(r, 0.f, step);
+                    t.Equals(r.level, 1u, "digital hold lasts four stock frames");
+                    t.Equals(r.press | r.release, 0u, "edge cleared each guest update");
+                }
+                input2Step(r, 0.f, step);
+                t.Equals(r.release, 1u, "release exactly at four stock frames");
+                r = {}; r.guard = 3u;
+                for (unsigned half = 0u; half <= 100u; half += step)
+                {
+                    input2Step(r, 1.f, step);
+                    t.Equals(r.repeat, (half == 0u || (half >= 48u && (half-48u)%24u == 0u)) ? 1u : 0u,
+                             "repeat stock deadlines");
+                }
+            }
+        });
+        tc.Run("INP2 event flips and saved records preserve half updates", [](TestCase &t)
+        {
+            Input2Record r{}; r.guard = 3u;
+            input2Step(r, 1.f, 2u); // stock press
+            input2Step(r, 0.f, 1u); // first active half
+            Input2Record restored = r; // persistent state is exactly the guest record
+            for (unsigned n = 0u; n < 7u; ++n)
+            {
+                input2Step(r, 0.f, 1u); input2Step(restored, 0.f, 1u);
+                t.Equals(r.guard, restored.guard, "reload exact remaining guard");
+                t.Equals(r.level, n == 6u ? 0u : 1u, "flip keeps eight-half-frame interval");
+            }
+            r = {}; r.guard = 3u;
+            input2Step(r, 1.f, 1u);
+            input2Step(r, 0.f, 1u); // remaining seven halves
+            for (unsigned n = 0; n < 3; ++n) input2Step(r, 0.f, 2u);
+            t.Equals(r.level, 1u, "exit keeps odd half remaining");
+            input2Step(r, 0.f, 2u);
+            t.Equals(r.level, 0u, "exit rounds to next available stock update");
+            Input2Record legacy{}; legacy.guard = 1u; legacy.level = 1u; legacy.countdown = 10u;
+            input2Step(legacy, 1.f, 1u);
+            t.Equals(legacy.countdown, 19u, "legacy remaining repeat converts to half units");
+            t.Equals(legacy.guard, kInput2Tag | 5u, "legacy guard converts once");
+        });
+        tc.Run("INP3 phase parking survives a guest-memory checkpoint", [](TestCase &t)
+        {
+            t.IsTrue((kFixAll & kFixInputChain) == 0u, "prototype excluded from all");
+            t.Equals(parseFix("all,inputchain,-inputchain").main, kFixAll, "separate chain opt-in");
+            for (uint32_t phase = 0; phase <= 3; ++phase)
+            {
+                const uint32_t saved = inputChainPark(phase);
+                t.IsTrue(saved > 3u, "no active branch while parked");
+                t.Equals(inputChainRestore(saved), phase, "phase restored exactly");
+                t.Equals(inputChainPark(saved), saved, "parking idempotent after resume");
+                t.Equals(inputChainRestore(phase), phase, "ordinary phase unchanged");
+            }
+        });
+
         tc.Run("FH33 ground2 is opt-in and squares to the bounded stock map", [](TestCase &t)
         {
             t.IsTrue((kFixAll & kFixGround2) == 0u, "excluded from all");

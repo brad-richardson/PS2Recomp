@@ -30,6 +30,7 @@
 #include "ps2_fh1_restamp.h"
 #include "ps2_fh1_fix.h"
 #include "ps2_fh1_ground2.h"
+#include "ps2_fh1_input2.h"
 
 #include <algorithm>
 #include <array>
@@ -224,20 +225,48 @@ struct Word
     const char *label;
 };
 
-inline void applyWords(uint8_t *ram, uint32_t a, bool toActive);
+// Inputchain owns the same seven words normally converted by stick/stick2.
+// Keep one definition for the shared table, cadence writer and flip writer.
+inline constexpr std::array<Word, 7> kInputChainWords = {{
+    {kFixStick, 0x49bbe8u, kSixtieth, kHundredTwentieth, "stick_steady_133878"},
+    {kFixStick, 0x49bbf8u, kSixtieth, kHundredTwentieth, "stick_hold0_133974"},
+    {kFixStick, 0x49bbfcu, kSixtieth, kHundredTwentieth, "stick_hold1_1339a0"},
+    {kFixStick, 0x49bc98u, kSixtieth, kHundredTwentieth, "stick_slew0_134138"},
+    {kFixStick, 0x49bca4u, kSixtieth, kHundredTwentieth, "stick_slew1_1342b4"},
+    {kFixStick2, 0x49bc94u, 0x3d4cc9c7u, 0x3cccc9c7u, "stick2_offset0_1340a8"},
+    {kFixStick2, 0x49bca0u, 0x3d4cd331u, 0x3cccd331u, "stick2_offset1_134224"},
+}};
+
+inline void inputChainPoolFlip(uint8_t *ram, bool toActive) noexcept
+{
+    for (const Word &w : kInputChainWords)
+        wr32(ram, w.address, toActive ? w.replacement : w.expected);
+}
+
+inline void inputChainPoolStep(uint8_t *ram, bool odd) noexcept
+{
+    for (const Word &w : kInputChainWords)
+        wr32(ram, w.address, odd ? 0u : w.expected);
+}
+
+inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &masks = fixMasks());
 
 #include "ps2_fh1_life2.inl"
 
 // FH28: an opt-in stock-cadence group restores the stock pool word on its own
 // path (the owning group's halving would otherwise double-convert a step that
 // now lands once per pair). True = drop this address from the word list, so
-// it keeps its stock value in both flip directions. Pure (unit-tested).
+// the owning path handles it in both flip directions. Pure (unit-tested).
 inline bool fh28PoolOverride(uint32_t address, uint64_t mainMask) noexcept
 {
     if ((mainMask & kFixSpawn) != 0u && address == 0x49f628u)
         return true; // spawn: the 0x2e1520 caller's dt (fx halves it)
     if ((mainMask & kFixC2Cap) != 0u && address == 0x49c5fcu)
         return true; // c2cap: the C2 ramp rate (camera halves it)
+    if ((mainMask & kFixInputChain) != 0u)
+        for (const Word &w : kInputChainWords)
+            if (address == w.address)
+                return true;
     return false;
 }
 
@@ -268,7 +297,7 @@ inline void patchAtManagerInit(uint8_t *ram)
 // The word table, applied in either direction (FH5): toActive expects the
 // stock value and writes the replacement; the reverse expects the
 // replacement. Every word is verified before any write; a mismatch refuses.
-inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
+inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &masks)
 {
     const std::array<Word, 122> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
@@ -336,17 +365,13 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         // [gp-0x744c] (0x134138/0x1342b4). Stock 1/60 per update ran 2x in the
         // air (fh5-k1/k2 SCANL); the lab (fh5-k4) moved the first-cliff score
         // 3930 -> 3530 (stock 3200).
-        {kFixStick, 0x49bbe8u, kSixtieth, kHundredTwentieth, "stick_steady_133878"},
-        {kFixStick, 0x49bbf8u, kSixtieth, kHundredTwentieth, "stick_hold0_133974"},
-        {kFixStick, 0x49bbfcu, kSixtieth, kHundredTwentieth, "stick_hold1_1339a0"},
-        {kFixStick, 0x49bc98u, kSixtieth, kHundredTwentieth, "stick_slew0_134138"},
-        {kFixStick, 0x49bca4u, kSixtieth, kHundredTwentieth, "stick_slew1_1342b4"},
+        kInputChainWords[0], kInputChainWords[1], kInputChainWords[2],
+        kInputChainWords[3], kInputChainWords[4],
         // FH26 stick2 (FCR1 1; in "all" since Brad 10-02): the bounded steps before those slews move the offsets S+0x28/S+0x2c
         // toward their targets by [0x49bc94]/[0x49bca0] (~0.05, single GP readers 0x1340a8/0x134224) times a
         // gap factor <= 1 and (0.5 + 0.5|in|), clamped at the target, with no dt: 2x per stock tick at 120.
         // Halved (exponent - 1, exact): one stock step per two updates while the clamp doesn't bind.
-        {kFixStick2, 0x49bc94u, 0x3d4cc9c7u, 0x3cccc9c7u, "stick2_offset0_1340a8"},
-        {kFixStick2, 0x49bca0u, 0x3d4cd331u, 0x3cccd331u, "stick2_offset1_134224"},
+        kInputChainWords[5], kInputChainWords[6],
         // FH7 (FA1 3.2): 0x11b3f8 per rider per update R+0x2e4 = d*cap +
         // (1-d)*target with no dt: at 120 the post-air/post-boost cap relaxes
         // 2x as fast in real time. Retentions d -> sqrt(d), each word a single
@@ -502,7 +527,7 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFixPose, 0x49b958u, 0x3d088889u, kSixtieth, "pose_bound_12e8e0"},
         {kFixPose, 0x49b95cu, 0x3d088889u, kSixtieth, "pose_bound_12e998"},
     }};
-    uint64_t mask = fixMask();
+    uint64_t mask = masks.main;
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
         mask |= kFixRamp;
     std::vector<Word> all;
@@ -561,7 +586,7 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
         {kFix12HudProg, {0u, 0x49dc04u, 0xc2392f69u, 0xc1b92f69u, "hudprog_gap_down_20ee78"}},
     }};
     for (const auto &w : words12)
-        if ((fixMask12() & w.first) != 0u)
+        if ((masks.fh12 & w.first) != 0u)
             all.push_back(w.second);
     for (const Word &w : all)
     {
@@ -576,6 +601,8 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive)
     }
     for (const Word &w : all)
         wr32(ram, w.address, toActive ? w.replacement : w.expected);
+    if ((mask & kFixInputChain) != 0u)
+        inputChainPoolFlip(ram, toActive);
     std::fprintf(stderr, "fh1-full120 words=%zu %s\n", all.size(), toActive ? "active" : "stock");
 }
 
@@ -1367,6 +1394,12 @@ inline void parityHook(uint8_t *ram, uint32_t sourcePc)
     if (sourcePc != kAppUpdateSite)
         return;
     g_rngOdd = (g_rngUpdates++ & 1u) != 0u;
+    // INP3: keep the coupled nonlinear directional recurrence at stock
+    // cadence. Only its seven private pool words change; grabs, physics and
+    // animation clocks keep their existing 120 steps. Inputchain owns these
+    // words across both flips; shared conversion never validates its cadence values.
+    if ((fixMask() & kFixInputChain) != 0u)
+        inputChainPoolStep(ram, g_rngOdd);
     if (!rngFix())
         return;
     if (g_rngOdd)
@@ -2137,6 +2170,18 @@ inline void jcamOnReturn(uint8_t *ram)
 // FH33 contributor 1 only: capture 113e80's rider, then replace its bound
 // R+1f4 before 121210 consumes it. Target R+1f8 includes the guest's speed
 // scaling; mode 2/3/13 includes the guest's extra bound multiplier.
+inline bool inputChainFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixInputChain) != 0u;
+    return on;
+}
+
+inline bool input2Fix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixInput2) != 0u;
+    return on;
+}
+
 inline bool ground2Fix() noexcept
 {
     static const bool on = enabled() && (fixMask() & kFixGround2) != 0u;
@@ -2581,7 +2626,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2;
+        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2;
     bool src, fh9, draw, tap;
 };
 
@@ -2601,13 +2646,14 @@ inline const BranchFlags &branchFlags() noexcept
         r.particles = particlesFix();
         r.flare = flareFix();
         r.ground2 = ground2Fix();
+        r.input2 = input2Fix();
         r.jcam = jcamFix();
         r.jcam2 = jcam2Fix();
         r.life2 = life2Fix();
         r.pid = pidFix();
         r.envFilt = envFiltFix();
         r.c2cap = c2capFix();
-        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap;
+        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap || r.input2 || inputChainFix();
         r.bonus = bonusFix();
         r.lift = liftFix();
         r.flags = flagsFix();
@@ -2733,7 +2779,7 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addSrc(kSessionCallSite);
         addTgt(kSession);
     }
-    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixPid | kFixC2Cap)) != 0u && on) ||
+    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixPid | kFixC2Cap | kFixInput2 | kFixInputChain)) != 0u && on) ||
                         ((c.fix12 & (kFix12Particles | kFix12Flare)) != 0u && on);
     if (parity)
         addSrc(kAppUpdateSite); // parityHook counts app-update dispatches
@@ -2949,7 +2995,7 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         launchPreHook(ram, ctx, targetPc);
     bool skip = on && flag(&BranchFlags::session, sessionFix) && sessionSkip(sourcePc, targetPc);
     if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix() || particlesFix() || flareFix() || jcamFix() ||
-                                    pidFix() || c2capFix())))
+                                    pidFix() || c2capFix() || input2Fix() || inputChainFix())))
         parityHook(ram, sourcePc);
     if (on && flag(&BranchFlags::rng, rngFix))
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;

@@ -58,6 +58,8 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixPid = 1ull << 39,  // camera heading PID 0x162c78: recurrence + 5-slot histories at stock cadence (second update of a pair held with zero gains, then rolled back) (class d, FXT1 T3, FH29)
     kFixC2Cap = 1ull << 40, // C2 blend counter 0x162998 at stock cadence, ramp rate back to stock (class d, FXT1 T6)
     kFixSpawn = 1ull << 41, // glint spawn substream: stock dt for the 0x2e1520 caller's word (class h, FXT1 T4)
+    kFixInputChain = 1ull << 47, // INP3 opt-in prototype: coupled directional tracker at stock cadence
+    kFixInput2 = 1ull << 46, // INP2 opt-in: digital guard/repeat clocks only (INP3 split)
     kFixGround2 = 1ull << 43, // FH33 opt-in: bounded steering response exact half-map (class a/j; not in all)
     kFixJcam2 = 1ull << 44, // FH32 opt-in: camera-only stock-cadence shadow predictor publication (class d/c, owner FH32)
     kFixLife2 = 1ull << 45, // LCY2 opt-in: streaming live-age units and replay snapshot input ordinals (class e/d; owner LCY2)
@@ -140,6 +142,8 @@ inline uint64_t fixItem(const std::string &item) noexcept
     if (item == "meter") return kFixMeter;
     if (item == "boost") return kFixBoost;
     if (item == "ground") return kFixGround;
+    if (item == "inputchain") return kFixInputChain;
+    if (item == "input2") return kFixInput2;
     if (item == "ground2") return kFixGround2;
     if (item == "entry") return kFixEntry;
     if (item == "rclock") return kFixRclock;
