@@ -1386,17 +1386,64 @@ inline uint32_t jcamRetainCorrect(uint32_t offBits, uint32_t dBits) noexcept
     return out;
 }
 
-// ---- FH28 pid group: INERT (reserved bit, no behavior) ------------------------
-// The camera heading PID 0x162c78 (FXT1 T3) cannot be converted as
-// prescribed: skipping or holding any part of its state (calls, heading,
-// histories) collapses the entry gate's delta-like input ([s1+0x44] >
-// 27.78), the gate fails, and the recurrence latches off within ~2 updates
-// mid-race, not just at the transition (FH28 V3/V3c/V3d/V3g; Test-F
-// neutered-hook control runs normally). The kFixPid bit still parses (so
-// FIX lists naming pid stay valid) but installs no hook and overrides no
-// pool word. A future lane needs an entry-gate-aware redesign, not a
-// cadence hold. See local/research/FH28/REPORT.md.
+// ---- FH29 pid group: camera heading PID recurrence at stock cadence ---------
+// 0x162c78 (a0 = shot, a1 = the caller's scratch from 0x162568; seven jal
+// sites) gates on the target's smoothed speed ([a1+0x44] > 27.78, built from
+// the target velocity, not from PID state), then runs a 5-slot recurrence:
+// p = idx-1, out = O[p] + Kp(e - O[p]) + Ki*sum(R) + Kd(E[p] - e), with
+// E/O/R at shot+0x340/+0x354/+0x368, idx +0x37c and gains +0x380/+0x384/
+// +0x388, and composes the heading toward the velocity with a retention
+// from out (camera converts that retention per update). At 120 the
+// recurrence and its histories turned over twice per stock tick (FXT1 T3).
+// The call must run every update: it also writes the normalized heading to
+// [a1+0x30] for the callees after it, which a skipped call leaves stale
+// (FH28's skip/hold variants). So (class d) the first update of a pair
+// commits as at stock, and on the second the gains are zeroed for the call
+// (out = O[p], the committed output, held across the pair like the stock
+// tick) and the slot it wrote plus idx are rolled back after it. The
+// recurrence, its histories and Ki/Kd memory then step once per stock tick.
+inline constexpr uint32_t kPidUpdate = 0x162c78u;
+inline constexpr uint32_t kPidIdx = 0x37cu;
+inline constexpr uint32_t kPidHist[3] = {0x340u, 0x354u, 0x368u};
+inline constexpr uint32_t kPidGains[3] = {0x380u, 0x384u, 0x388u};
 
+inline bool pidFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixPid) != 0u;
+    return on;
+}
+
+// Hold arm (pure on ram, unit-tested): saves idx, the three history words at
+// idx and the gains into saved[0..6], then zeroes the gains. False (nothing
+// written) when a word can't be read or idx is out of the ring.
+inline bool pidHoldArm(uint8_t *ram, uint32_t shot, uint32_t *saved) noexcept
+{
+    uint32_t idx = 0u;
+    if (!rd32(ram, shot + kPidIdx, idx) || idx >= 5u)
+        return false;
+    saved[0] = idx;
+    for (int i = 0; i < 3; ++i)
+        if (!rd32(ram, shot + kPidHist[i] + idx * 4u, saved[1 + i]) ||
+            !rd32(ram, shot + kPidGains[i], saved[4 + i]))
+            return false;
+    for (uint32_t g : kPidGains)
+        wr32(ram, shot + g, 0u);
+    return true;
+}
+
+// Hold release: the gains always come back; the slot and idx roll back only
+// after a call that returned (a callee suspended at a checkpoint resumes with
+// real gains and commits that update; deterministic).
+inline void pidHoldRelease(uint8_t *ram, uint32_t shot, const uint32_t *saved, bool returned) noexcept
+{
+    for (int i = 0; i < 3; ++i)
+        wr32(ram, shot + kPidGains[i], saved[4 + i]);
+    if (!returned)
+        return;
+    for (int i = 0; i < 3; ++i)
+        wr32(ram, shot + kPidHist[i] + saved[0] * 4u, saved[1 + i]);
+    wr32(ram, shot + kPidIdx, saved[0]);
+}
 
 // ---- FH28 c2cap group: C2 blend counter at stock cadence --------------------
 // 0x162998 (a0 = shot, a1 = param; six jal sites, return unused at all of
@@ -1925,8 +1972,8 @@ inline bool flagsFix() noexcept
 struct PostCall
 {
     uint32_t target = 0u, sp = 0u, obj = 0u;
-    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27), 5 jcam retention (FH28)
-    uint32_t saved[6] = {};
+    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27), 5 jcam retention (FH28), 6 pid hold (FH29)
+    uint32_t saved[7] = {};
 };
 inline PostCall g_post;
 inline bool g_postArmed = false;
@@ -1969,6 +2016,23 @@ inline void jcamPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
     g_postArmed = true;
 }
 
+// FH29 pid: the second update of a pair holds the recurrence (see pidHoldArm).
+// A record already pending (none nests with 0x162c78 today) keeps that update
+// unheld rather than being overwritten.
+inline void pidPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
+{
+    if (targetPc != kPidUpdate || !ctx || !g_rngOdd || g_postArmed)
+        return;
+    const uint32_t shot = getRegU32(ctx, 4);
+    if (!pidHoldArm(ram, shot, g_post.saved))
+        return;
+    g_post.target = targetPc;
+    g_post.sp = getRegU32(ctx, 29);
+    g_post.obj = shot;
+    g_post.kind = 6u;
+    g_postArmed = true;
+}
+
 inline void jcamOnReturn(uint8_t *ram)
 {
     const uint32_t shot = g_post.obj;
@@ -1991,6 +2055,11 @@ inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool re
     if (targetPc != g_post.target || !ctx || getRegU32(ctx, 29) != g_post.sp)
         return;
     g_postArmed = false;
+    if (g_post.kind == 6u)
+    {
+        pidHoldRelease(ram, g_post.obj, g_post.saved, returned); // gains come back even when suspended
+        return;
+    }
     if (!returned)
         return;
     if (g_post.kind == 5u)
@@ -2384,7 +2453,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, c2cap;
+        particles, flare, jcam, pid, c2cap;
     bool src, fh9, lab, draw, tap;
 };
 
@@ -2404,8 +2473,9 @@ inline const BranchFlags &branchFlags() noexcept
         r.particles = particlesFix();
         r.flare = flareFix();
         r.jcam = jcamFix();
+        r.pid = pidFix();
         r.c2cap = c2capFix();
-        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.c2cap;
+        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap;
         r.bonus = bonusFix();
         r.lift = liftFix();
         r.flags = flagsFix();
@@ -2528,7 +2598,7 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addSrc(kSessionCallSite);
         addTgt(kSession);
     }
-    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixC2Cap)) != 0u && on) ||
+    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixPid | kFixC2Cap)) != 0u && on) ||
                         ((c.fix12 & (kFix12Particles | kFix12Flare)) != 0u && on);
     if (parity)
         addSrc(kAppUpdateSite); // parityHook counts app-update dispatches
@@ -2550,7 +2620,8 @@ inline HookInterest buildHookInterest(const HookConfig &c)
     }
     if ((c.main & kFixJcam) != 0u && on)
         addTgt(kJcamJump); // FH28: countdown pre-hook + retention post-hook (any source)
-    // FH28 pid installs no hook (inert bit, see above).
+    if ((c.main & kFixPid) != 0u && on)
+        addTgt(kPidUpdate); // FH29: second-update hold + rollback (any source)
     if ((c.main & kFixC2Cap) != 0u && on)
         addTgt(kC2Update); // FH28: odd-update skip (any source)
     if ((c.main & kFixAiGate) != 0u && on)
@@ -2743,7 +2814,7 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         launchPreHook(ram, ctx, targetPc);
     bool skip = on && flag(&BranchFlags::session, sessionFix) && sessionSkip(sourcePc, targetPc);
     if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix() || particlesFix() || flareFix() || jcamFix() ||
-                                    c2capFix())))
+                                    pidFix() || c2capFix())))
         parityHook(ram, sourcePc);
     if (on && flag(&BranchFlags::rng, rngFix))
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
@@ -2759,6 +2830,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = true;
     if (on && flag(&BranchFlags::jcam, jcamFix))
         jcamPreHook(ram, ctx, targetPc);
+    if (on && flag(&BranchFlags::pid, pidFix))
+        pidPreHook(ram, ctx, targetPc);
     if (on && flag(&BranchFlags::c2cap, c2capFix) && g_rngOdd && targetPc == kC2Update)
         skip = true;
     if (on && flag(&BranchFlags::bonus, bonusFix))

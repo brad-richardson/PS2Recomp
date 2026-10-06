@@ -55,7 +55,7 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     // FH28 (opt-in, not in "all"; Brad's feel test decides defaults):
     kFixJcam = 1ull << 37, // jump camera 0x1635f8: countdown n (shot+0x2c4) at stock cadence, landing-offset retention d -> sqrt(d) per update (class d/a, FXT1 T1)
     kFixPose = 1ull << 38, // pose/lean triple slew bounds (R+0x200 writers): 1/30 -> 1/60 per update (class b, FXT1 T2)
-    kFixPid = 1ull << 39,  // INERT reserved bit (parses, no behavior): the PID 0x162c78 cadence hold latches its entry gate (FH28 V3/V3g; see REPORT). A future lane redesigns it.
+    kFixPid = 1ull << 39,  // camera heading PID 0x162c78: recurrence + 5-slot histories at stock cadence (second update of a pair held with zero gains, then rolled back) (class d, FXT1 T3, FH29)
     kFixC2Cap = 1ull << 40, // C2 blend counter 0x162998 at stock cadence, ramp rate back to stock (class d, FXT1 T6)
     kFixSpawn = 1ull << 41, // glint spawn substream: stock dt for the 0x2e1520 caller's word (class h, FXT1 T4)
 };
