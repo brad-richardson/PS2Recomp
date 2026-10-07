@@ -38,7 +38,17 @@ struct R5900Context;
 namespace ps2_savestate
 {
     inline constexpr char kMagic[8] = {'P', 'S', '2', 'X', 'S', 'A', 'V', 'E'};
-    inline constexpr uint32_t kFormatVersion = 1u;
+    // SSF1: section frames carry a payload checksum. Older, unchecked files
+    // must not enter the live quick-load path.
+    inline constexpr uint32_t kFormatVersion = 2u;
+
+    inline uint64_t sectionDigest(const uint8_t *data, size_t size)
+    {
+        uint64_t hash = 14695981039346656037ull;
+        for (size_t i = 0; i < size; ++i)
+            hash = (hash ^ data[i]) * 1099511628211ull;
+        return hash;
+    }
 
     class Writer
     {
@@ -90,7 +100,10 @@ namespace ps2_savestate
         }
         void endSection(size_t mark)
         {
-            const uint64_t size = buf.size() - mark - sizeof(uint64_t);
+            const size_t payload = mark + sizeof(uint64_t);
+            const uint64_t digest = sectionDigest(buf.data() + payload, buf.size() - payload);
+            u64(digest);
+            const uint64_t size = buf.size() - payload;
             std::memcpy(buf.data() + mark, &size, sizeof(size));
         }
     };
@@ -101,6 +114,8 @@ namespace ps2_savestate
         Reader(const uint8_t *data, size_t size) : m_data(data), m_size(size) {}
 
         bool ok() const { return m_ok; }
+        bool validationOnly() const { return m_validationOnly; }
+        void setValidationOnly(bool value) { m_validationOnly = value; }
         const std::string &error() const { return m_error; }
         bool fail(const std::string &why)
         {
@@ -196,9 +211,14 @@ namespace ps2_savestate
             bytes(key.data(), keyLen);
             version = u32();
             const uint64_t size = u64();
-            if (!m_ok || size > m_size - m_pos)
+            if (!m_ok || size > m_size - m_pos || size < sizeof(uint64_t))
                 return fail("bad section size for " + key);
-            m_sectionEnd = m_pos + static_cast<size_t>(size);
+            m_frameEnd = m_pos + static_cast<size_t>(size);
+            m_sectionEnd = m_frameEnd - sizeof(uint64_t);
+            uint64_t savedDigest = 0;
+            std::memcpy(&savedDigest, m_data + m_sectionEnd, sizeof(savedDigest));
+            if (savedDigest != sectionDigest(m_data + m_pos, m_sectionEnd - m_pos))
+                return fail("section " + key + " checksum mismatch");
             return true;
         }
         bool endSection(const std::string &key)
@@ -207,13 +227,16 @@ namespace ps2_savestate
                 return false;
             if (m_pos != m_sectionEnd)
                 return fail("section " + key + " not fully consumed");
+            m_pos = m_frameEnd;
             m_sectionEnd = 0;
+            m_frameEnd = 0;
             return true;
         }
         void skipSection()
         {
-            m_pos = m_sectionEnd;
+            m_pos = m_frameEnd;
             m_sectionEnd = 0;
+            m_frameEnd = 0;
         }
 
     private:
@@ -222,7 +245,9 @@ namespace ps2_savestate
         size_t m_size;
         size_t m_pos = 0;
         size_t m_sectionEnd = 0;
+        size_t m_frameEnd = 0;
         bool m_ok = true;
+        bool m_validationOnly = false;
         std::string m_error;
     };
 
@@ -391,6 +416,9 @@ namespace ps2_savestate
         // still loads (the owner keeps its fresh-process state, as before the
         // section existed); a file with it is checked like any other.
         bool optional = false;
+        // Pure payload validator run during preflight, before any owner is
+        // allowed to restore live state. It must not mutate process state.
+        LoadFn validate = nullptr;
     };
     bool registerSection(const std::string &key, SectionHooks hooks);
     const std::map<std::string, SectionHooks> &registeredSections();

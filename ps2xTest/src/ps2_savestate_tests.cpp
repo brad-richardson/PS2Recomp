@@ -439,6 +439,26 @@ void register_ps2_savestate_tests()
             std::filesystem::remove(path);
         });
 
+        tc.Run("ssf1: a late payload is rejected before section decoding", [](TestCase &t)
+        {
+            Writer w;
+            size_t mark = w.beginSection("memory", ps2_savestate::kMemoryVersion);
+            w.u32(0x12345678u);
+            w.endSection(mark);
+            mark = w.beginSection("life2", 1u);
+            w.u32(0xabcdef01u);
+            w.endSection(mark);
+            const size_t lateByte = w.buf.size() - sizeof(uint64_t) - sizeof(uint32_t);
+            w.buf[lateByte] ^= 1u;
+            Reader r(w.buf.data(), w.buf.size());
+            std::string key;
+            uint32_t version = 0;
+            t.IsTrue(r.beginSection(key, version), "early section intact");
+            r.skipSection();
+            t.IsTrue(!r.beginSection(key, version), "poisoned late section refused");
+            t.IsTrue(r.error().find("checksum mismatch") != std::string::npos, "names integrity failure");
+        });
+
         tc.Run("det2: PS2X_DETERMINISTIC pins GetDir dates (host mtimes and . / .. now)", [](TestCase &t)
         {
             namespace fs = std::filesystem;

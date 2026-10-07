@@ -3405,7 +3405,7 @@ namespace ps2_ssx3_patch_grow
 {
 Layout layout() { return {ssx3PatchGrowBase(), ssx3PatchGrowCap()}; }
 State snapshot() { return g_ssx3PatchGrow; }
-bool restore(const State &state)
+bool valid(const State &state)
 {
     if (state.moved.size() > 8u || (state.active != !state.moved.empty()) ||
         (state.active && (state.cache == 0u || state.refused)))
@@ -3421,6 +3421,12 @@ bool restore(const State &state)
             if (state.moved[j].first == to)
                 return false;
     }
+    return true;
+}
+bool restore(const State &state)
+{
+    if (!valid(state))
+        return false;
     g_ssx3PatchGrow = state;
     return true;
 }

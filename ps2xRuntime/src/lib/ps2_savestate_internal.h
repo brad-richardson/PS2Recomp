@@ -44,6 +44,7 @@ struct PS2RuntimeSavestate
     static void saveMemory(const PS2Memory &m, ps2_savestate::Writer &w);
     static bool loadMemory(PS2Memory &m, ps2_savestate::Reader &r);
     static void saveKernel(const PS2Runtime &rt, ps2_savestate::Writer &w);
+    static bool validateKernel(const PS2Runtime &rt, ps2_savestate::Reader &r);
     static bool loadKernel(PS2Runtime &rt, ps2_savestate::Reader &r);
 };
 

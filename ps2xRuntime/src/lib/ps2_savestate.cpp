@@ -11,6 +11,7 @@
 #include "ps2_hle_pools.h"
 #include "ps2_ssx3_patch_grow_state.h"
 #include "ps2_ssx3_tricky_layer.h"
+#include "ps2_fh1_full120.h"
 #include "runtime/ps2_vfs.h"
 #include "ps2_iop_host.h"
 #include "ps2_pad_latch.h"
@@ -24,6 +25,7 @@
 #include "runtime/ps2_vu1.h"
 
 #include <chrono>
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -730,6 +732,39 @@ namespace ps2_savestate
             bool refuse; // mismatch refuses the load (else warn)
         };
 
+        std::string contentIdentity(const char *path)
+        {
+            if (!path || !*path)
+                return "off";
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            const fs::path root(path);
+            if (fs::is_regular_file(root, ec))
+            {
+                std::string sha;
+                return sha256File(root.string(), sha) ? root.lexically_normal().string() + ":" + sha : "unreadable";
+            }
+            if (ec || !fs::is_directory(root, ec) || ec)
+                return "missing:" + root.lexically_normal().string();
+            std::vector<std::string> entries;
+            for (fs::recursive_directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec))
+            {
+                if (!it->is_regular_file(ec) || ec)
+                    continue;
+                std::string sha;
+                if (!sha256File(it->path().string(), sha))
+                    return "unreadable:" + it->path().string();
+                entries.push_back(it->path().lexically_relative(root).generic_string() + ":" + sha);
+            }
+            if (ec)
+                return "unreadable:" + root.string();
+            std::sort(entries.begin(), entries.end());
+            std::string listing = root.lexically_normal().string() + "\n";
+            for (const auto &entry : entries)
+                listing += entry + "\n";
+            return sha256Hex(reinterpret_cast<const uint8_t *>(listing.data()), listing.size());
+        }
+
         std::vector<HeaderLine> makeHeader(uint64_t vsyncTick, bool withRunnerSha)
         {
             const char *env = nullptr;
@@ -755,6 +790,21 @@ namespace ps2_savestate
             h.push_back({"hle_grow_capacity", std::to_string(grow.capacity), true});
             h.push_back({"hle_arena_base", std::to_string(ps2_hle_pools::kHleArenaBase), true});
             h.push_back({"hle_arena_bytes", std::to_string(ps2_hle_pools::kHleArenaBytes), true});
+            const char *sim = std::getenv("PS2X_SSX3_SIM_MODE");
+            h.push_back({"sim_mode", sim && *sim ? sim : "off", true});
+            h.push_back({"full120_mode", std::to_string(static_cast<unsigned>(ps2_fh1::mode())), true});
+            h.push_back({"full120_fix", std::to_string(ps2_fh1::fixMask()) + ":" +
+                                             std::to_string(ps2_fh1::fixMask12()), true});
+            env = std::getenv("PS2X_VIF1_REVERSE_DMA");
+            h.push_back({"readback_mode", env && *env ? env : "0", true});
+            for (const char *knob : {"PS2X_SSX3_SPLIT120_CRASHBODY", "PS2X_SSX3_SPLIT120_BOUNCE",
+                                     "PS2X_SSX3_COURSE_PICKER", "PS2X_SSX3_TRICKY_MENU"})
+            {
+                env = std::getenv(knob);
+                h.push_back({knob, env && std::strcmp(env, "1") == 0 ? "1" : "0", true});
+            }
+            h.push_back({"tricky_manifest", contentIdentity(std::getenv("PS2X_SSX3_COURSE_MANIFEST")), true});
+            h.push_back({"tricky_overlay", contentIdentity(std::getenv("PS2X_CD_OVERLAY")), true});
             env = std::getenv("PS2X_PAD_SCRIPT_CLOCK");
             h.push_back({"pad_clock", env ? env : "", true});
             const std::string prefix = padScriptPrefix(std::getenv("PS2X_PAD_SCRIPT"), vsyncTick);
@@ -1016,7 +1066,11 @@ namespace ps2_savestate
             return false;
         }
         const std::map<std::string, std::string> saved = parseHeader(r.str());
-        r.endSection(key);
+        if (!r.endSection(key))
+        {
+            error = r.error();
+            return false;
+        }
         const uint64_t savedTick = std::strtoull(saved.count("save_tick") ? saved.at("save_tick").c_str() : "0", nullptr, 10);
         for (const HeaderLine &line : makeHeader(savedTick, true))
         {
@@ -1064,7 +1118,7 @@ namespace ps2_savestate
         auto versionAccepted = [](const std::string &key, uint32_t version) {
             const auto it = registeredSections().find(key);
             if (it == registeredSections().end())
-                return true; // core section: exact check below covers it
+                return false; // core sections use the exact expected version
             const uint32_t min = it->second.minLoadVersion == 0u ? it->second.version : it->second.minLoadVersion;
             return version >= min && version <= it->second.version;
         };
@@ -1098,7 +1152,8 @@ namespace ps2_savestate
                     error = "unknown section " + key + " (built without its owner?)";
                     return false;
                 }
-                if (!versionAccepted(key, version))
+                if (version != want->second &&
+                    (registeredSections().find(key) == registeredSections().end() || !versionAccepted(key, version)))
                 {
                     error = versionMismatch(key, version, want->second);
                     return false;
@@ -1109,7 +1164,22 @@ namespace ps2_savestate
                     return false;
                 }
                 seen[key] = true;
-                scan.skipSection();
+                if (key == "kernel" ||
+                    (registeredSections().count(key) && registeredSections().at(key).validate))
+                {
+                    scan.setValidationOnly(true);
+                    setLoadingSectionVersion(version);
+                    const bool valid = key == "kernel" ? PS2RuntimeSavestate::validateKernel(runtime, scan)
+                                                        : registeredSections().at(key).validate(scan);
+                    setLoadingSectionVersion(0u);
+                    if (!valid || !scan.endSection(key))
+                    {
+                        error = "section " + key + ": " + (scan.ok() ? std::string("preflight failed") : scan.error());
+                        return false;
+                    }
+                }
+                else
+                    scan.skipSection();
             }
             if (!scan.ok())
             {
@@ -1135,6 +1205,12 @@ namespace ps2_savestate
         // Pass 2: apply. The VFS is bound for the section loop (see the
         // save path): the "syscalls" v1/v3 payloads restore its descriptor
         // counter into the calling runtime.
+        auto failClosed = [&](const std::string &reason) -> bool {
+            std::fprintf(stderr, "[savestate] FATAL: load commit failed after state mutation began: %s; stopping machine\n",
+                         reason.c_str());
+            std::fflush(stderr);
+            std::abort();
+        };
         std::map<std::string, bool> loaded;
         const VfsBindingScope vfsBinding(&runtime.vfs());
         while (r.ok() && r.pos() < r.size())
@@ -1145,17 +1221,18 @@ namespace ps2_savestate
             if (want == expected.end())
             {
                 error = "unknown section " + key + " (built without its owner?)";
-                return false;
+                return failClosed(error);
             }
-            if (!versionAccepted(key, version))
+            if (version != want->second &&
+                (registeredSections().find(key) == registeredSections().end() || !versionAccepted(key, version)))
             {
                 error = versionMismatch(key, version, want->second);
-                return false;
+                return failClosed(error);
             }
             if (loaded[key])
             {
                 error = "duplicate section " + key;
-                return false;
+                return failClosed(error);
             }
             bool ok = false;
             setLoadingSectionVersion(version);
@@ -1182,14 +1259,14 @@ namespace ps2_savestate
             if (!ok || !r.endSection(key))
             {
                 error = "section " + key + ": " + (r.ok() ? std::string("load failed") : r.error());
-                return false;
+                return failClosed(error);
             }
             loaded[key] = true;
         }
         if (!r.ok())
         {
             error = r.error();
-            return false;
+            return failClosed(error);
         }
         for (const auto &[k, v] : expected)
         {
@@ -1197,7 +1274,7 @@ namespace ps2_savestate
             if (!loaded[k] && !sectionOptional(k))
             {
                 error = "missing section " + k;
-                return false;
+                return failClosed(error);
             }
         }
         if (ps2_microvu::selected())
@@ -1212,13 +1289,13 @@ namespace ps2_savestate
             if (st.stoppedByD || st.stoppedByT)
             {
                 error = "microvu: state saved mid-VU1-chain (D/T stop); cannot seed";
-                return false;
+                return failClosed(error);
             }
             std::string resetError;
             if (!ps2_microvu::resetForLoad(resetError))
             {
                 error = "microvu reset failed: " + resetError;
-                return false;
+                return failClosed(error);
             }
         }
         // TKL1 stage 3 (TKA1 F1): reconcile the Tricky layer with the restored
@@ -1795,6 +1872,48 @@ void PS2RuntimeSavestate::saveKernel(const PS2Runtime &rt, Writer &w)
     w.b(static_cast<bool>(rt.m_iopHost));
     w.u64(nextToken);
     w.u64(nextHandle);
+}
+
+bool PS2RuntimeSavestate::validateKernel(const PS2Runtime &rt, Reader &r)
+{
+    // Decode into local values so HMS2 layout and grow-map failures cannot
+    // follow a memory/scheduler/VU overwrite.
+    R5900Context cpu{};
+    r.pod(cpu);
+    decltype(rt.m_eeExitHandlers) exits;
+    readOrdered(r, exits, [](Reader &rr, auto &e) {
+        rr.pod(e.first);
+        e.second.resize(static_cast<size_t>(rr.count(1u << 16)));
+        for (auto &h : e.second) { h.function = rr.u32(); h.argument = rr.u32(); }
+    });
+    decltype(rt.m_eeSyscallOverrides) overrides;
+    readOrderedPod(r, overrides);
+    decltype(rt.m_eeSyscallMirrorAddresses) mirrors;
+    readOrdered(r, mirrors, [](Reader &rr, uint32_t &v) { v = rr.u32(); });
+    decltype(rt.m_guestHeapBlocks) blocks;
+    blocks.resize(static_cast<size_t>(r.count(1u << 24)));
+    for (auto &b : blocks) { b.addr = r.u32(); b.size = r.u32(); b.free = r.b(); }
+    for (unsigned i = 0; i < 4; ++i) (void)r.u32();
+    (void)r.b();
+    const auto layout = ps2_ssx3_patch_grow::layout();
+    const uint32_t base = r.u32(), capacity = r.u32();
+    if (base != layout.base || capacity != layout.capacity)
+        return r.fail("TK34 grow layout differs");
+    ps2_ssx3_patch_grow::State grow;
+    grow.active = r.b(); grow.refused = r.b(); grow.cache = r.u32();
+    grow.moved.resize(static_cast<size_t>(r.count(8u)));
+    for (auto &[to, from] : grow.moved) { to = r.u32(); from = r.u32(); }
+    if (!r.ok() || !ps2_ssx3_patch_grow::valid(grow))
+        return r.fail("invalid TK34 grow state");
+    (void)r.u32(); (void)r.u32();
+    const uint64_t modules = r.count(1u << 16);
+    for (uint64_t i = 0; i < modules && r.ok(); ++i)
+    { (void)r.str(); (void)r.u32(); (void)r.u64(); (void)r.b(); }
+    const bool hadIopHost = r.b();
+    (void)r.u64(); (void)r.u64();
+    if (hadIopHost != static_cast<bool>(rt.m_iopHost))
+        return r.fail("IOP host adapter presence differs");
+    return r.ok();
 }
 
 bool PS2RuntimeSavestate::loadKernel(PS2Runtime &rt, Reader &r)

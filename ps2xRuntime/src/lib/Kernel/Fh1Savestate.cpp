@@ -94,6 +94,8 @@ namespace
                          savedMode, static_cast<unsigned>(mode()));
             return true;
         }
+        if (r.validationOnly())
+            return true;
         g_schedActive = b[0];
         g_commitActive = b[1];
         g_guestActive = b[2];
@@ -143,11 +145,11 @@ namespace
             std::array<uint8_t,236> legacy{}; r.pod(legacy);
             if (!r.ok()) return false;
             for (uint8_t b:legacy) if(b) return r.fail("fh32: active design A state cannot load design C");
-            ps2_fh1::jcam2Reset(); return true;
+            if (!r.validationOnly()) ps2_fh1::jcam2Reset(); return true;
         }
         decltype(ps2_fh1::g_jcam2Shadows) shadows{};
         r.pod(shadows); if (!r.ok()) return false;
-        ps2_fh1::g_jcam2Shadows=shadows; return true;
+        if (!r.validationOnly()) ps2_fh1::g_jcam2Shadows=shadows; return true;
     }
     void life2Save(Writer &w)
     {
@@ -173,16 +175,16 @@ namespace
         if(enabledAtSave!=life2Fix())
         {
             if(enabledAtSave)return r.fail("life2: recording/streaming metadata needs life2 enabled");
-            g_life2Worlds={};g_life2Anchors.clear();return true;
+            if (!r.validationOnly()) { g_life2Worlds={};g_life2Anchors.clear(); } return true;
         }
-        g_life2Worlds=worlds;g_life2Anchors=std::move(anchors);return true;
+        if (!r.validationOnly()) { g_life2Worlds=worlds;g_life2Anchors=std::move(anchors); } return true;
     }
     const bool kLife2Registered=ps2_savestate::registerSection(
-        "life2", {1u,&life2Save,&life2Load,nullptr,0u,/*optional=*/true});
+        "life2", {1u,&life2Save,&life2Load,nullptr,0u,/*optional=*/true,&life2Load});
     const bool kFh32Registered = ps2_savestate::registerSection(
-        "fh32", {2u,&fh32Save,&fh32Load,nullptr,1u,/*optional=*/true});
+        "fh32", {2u,&fh32Save,&fh32Load,nullptr,1u,/*optional=*/true,&fh32Load});
     const bool kFh1Registered = ps2_savestate::registerSection(
-        "fh1", {kFh1Version, &fh1Save, &fh1Load, nullptr, 0u, /*optional=*/true});
+        "fh1", {kFh1Version, &fh1Save, &fh1Load, nullptr, 0u, /*optional=*/true, &fh1Load});
 } // namespace
 
 // Referenced from the scheduler TU so a static-library link keeps this one.

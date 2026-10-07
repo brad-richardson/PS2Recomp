@@ -24,6 +24,7 @@ struct Layout
 
 Layout layout();
 State snapshot();
+bool valid(const State &state);
 bool restore(const State &state);
 void reset();
 } // namespace ps2_ssx3_patch_grow
