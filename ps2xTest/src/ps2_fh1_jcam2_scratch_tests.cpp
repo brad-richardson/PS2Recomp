@@ -107,6 +107,27 @@ void firstTouch()
     lazyShutdown();
     _exit(0);
 }
+void smallPriorAltStack()
+{
+    void *memory = mmap(nullptr, 32768u, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (memory == MAP_FAILED) _exit(1);
+    stack_t prior{};
+    prior.ss_sp = memory;
+    prior.ss_size = 32768u;
+    if (sigaltstack(&prior, nullptr) != 0) _exit(2);
+    std::vector<uint8_t> live(PS2_RAM_SIZE, 0x41);
+    uint8_t *image = lazyBegin(live.data());
+    if (!image) _exit(3);
+    stack_t active{};
+    if (sigaltstack(nullptr, &active) != 0 || active.ss_sp == memory || active.ss_size < 65536u) _exit(4);
+    volatile uint8_t value = image[65536u];
+    if (value != 0x41) _exit(5);
+    lazyEnd();
+    lazyShutdown();
+    stack_t restored{};
+    if (sigaltstack(nullptr, &restored) != 0 || restored.ss_sp != memory || restored.ss_size != 32768u) _exit(6);
+    _exit(0);
+}
 void genuineFault()
 {
     prior(&sentinel, SA_SIGINFO | SA_NODEFER | SA_RESETHAND);
@@ -238,6 +259,9 @@ void register_ps2_fh1_jcam2_scratch_tests()
             t.Equals(code, kProtectionCode, "protection si_code");
         });
         tc.Run("first touch and alternate stack", [](TestCase &t) { t.Equals(exited(child(&firstTouch)), 0, "first touch/errno/stack"); });
+        tc.Run("small prior alternate stack is restored", [](TestCase &t) {
+            t.Equals(exited(child(&smallPriorAltStack)), 0, "larger stack and prior restore");
+        });
         tc.Run("saved one-shot handler mask NODEFER RESETHAND", [](TestCase &t) {
             const int observed = exited(child(&genuineFault));
             std::fprintf(stderr, "[jcam2-chain-probe] bits=%d expected=127\n", observed);

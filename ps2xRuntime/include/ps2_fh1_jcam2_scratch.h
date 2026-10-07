@@ -72,6 +72,7 @@ struct LazyImage
     void *altMemory = nullptr;
     size_t altSize = 0u;
     pthread_t altOwner{};
+    stack_t altPrevious{};
 };
 
 inline LazyImage g_lazy;
@@ -245,9 +246,8 @@ inline bool prepareAltStack(LazyImage &z)
     if (!(current.ss_flags & SS_DISABLE))
     {
         if (current.ss_sp && current.ss_size >= need) return true;
-        std::fprintf(stderr, "[jcam2-scratch] lazy init failed step=altstack-size errno=0 size=%zu need=%zu\n",
-                     current.ss_size, need);
-        return false;
+        // Android's runtime supplies a 32 KiB stack on the GameThread. Use
+        // our 64 KiB stack for this owner thread and restore its stack later.
     }
     void *memory = mmap(nullptr, need, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (memory == MAP_FAILED)
@@ -268,6 +268,7 @@ inline bool prepareAltStack(LazyImage &z)
     z.altMemory = memory;
     z.altSize = need;
     z.altOwner = pthread_self();
+    z.altPrevious = current;
     return true;
 }
 
@@ -278,9 +279,10 @@ inline void releaseAltStack(LazyImage &z)
     stack_t current{};
     if (sigaltstack(nullptr, &current) == 0 && current.ss_sp == z.altMemory)
     {
-        stack_t disabled{};
-        disabled.ss_flags = SS_DISABLE;
-        if (sigaltstack(&disabled, nullptr) == 0)
+        stack_t previous = z.altPrevious;
+        if (previous.ss_flags & SS_DISABLE) previous.ss_flags = SS_DISABLE;
+        else previous.ss_flags = 0;
+        if (sigaltstack(&previous, nullptr) == 0)
         {
             munmap(z.altMemory, z.altSize);
             z.altMemory = nullptr;
