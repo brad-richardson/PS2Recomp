@@ -59,9 +59,11 @@ struct State
     uint32_t guestThread = 0;
     bool guestInterrupt = false;
     uint64_t scopeErrors = 0;
-    // TK34: rdram seen at begin() and whether the crash-body word is at 1/120.
+    // TK34/SPL1: rdram seen at begin() and which word sets hold their half
+    // value for the current converted half.
     uint8_t *ram = nullptr;
     bool crashBodyHalf = false;
+    bool bounceHalf = false;
     // Guest-thread-keyed records. Occupancy in practice is 1 (the main guest
     // thread runs the rider pass); the linear scan hits slot 0. Overflow
     // keeps exact map semantics past the flat slots; it is cold-only.
@@ -181,14 +183,66 @@ inline bool fixUnconverted() noexcept
 // four words at 1/120 for exactly the halves halfLoad converts (active rider
 // context, selector case 0/1/2, or TS3 NOFIX) and puts 1/60 back at finish(),
 // so every other reader time (case 5's once-per-update 1391a8) sees stock.
+// SPL1: the bounce oscillator (FH22 "bounce") has the same shape. The case-0
+// integrate handler sub_0013D818 advances the rider bounce phase by
+// f20*[0x49c13c] (2.65, single reader 0x13f0d4) per call, and split120 calls
+// it in both halves, so the 60 entry ran the bounce at ~2x (SPL1: phase
+// advance 1.9-2.3x stock per tick). PS2X_SSX3_SPLIT120_BOUNCE=1 (default off;
+// guest-affecting) holds [0x49c13c] at 1.325 for the same converted halves.
+//
+// One word set per knob. Every word must read either its stock or its half
+// value (a savestate taken while the rider pass is suspended mid-half carries
+// the half value; both are known-good), then all are written. Any other value
+// refuses that set for the session (logged once) and leaves RAM untouched.
+struct HalfWords
+{
+    const char *tag;
+    const uint32_t *addrs;
+    uint32_t count;
+    uint32_t stock;
+    uint32_t half;
+    bool refused = false;
+};
+
+inline bool halfWordsWrite(uint8_t *ram, HalfWords &w, uint32_t value) noexcept
+{
+    if (!ram || w.refused) return false;
+    for (uint32_t i = 0; i < w.count; ++i)
+    {
+        uint32_t got = 0;
+        std::memcpy(&got, ram + w.addrs[i], 4);
+        if (got != w.stock && got != w.half)
+        {
+            w.refused = true;
+            std::fprintf(stderr, "[%s] refused: [0x%x]=%08x expected %08x or %08x; disabled\n", w.tag, w.addrs[i], got,
+                         w.stock, w.half);
+            return false;
+        }
+    }
+    for (uint32_t i = 0; i < w.count; ++i)
+        std::memcpy(ram + w.addrs[i], &value, 4);
+    return true;
+}
+
+// Knob values: exactly "1" turns a set on.
+inline bool knobOn(const char *v) noexcept
+{
+    return v && v[0] == '1' && v[1] == '\0';
+}
+
 inline constexpr uint32_t kCrashWords[] = {0x49be38u, 0x49be78u, 0x49bef4u, 0x49befcu};
 inline constexpr uint32_t kCrashBodyStock = 0x3c888889u; // 1/60
 inline constexpr uint32_t kCrashBodyHalf = 0x3c088889u;  // 1/120
+inline constexpr uint32_t kBounceWords[] = {0x49c13cu};
+inline constexpr uint32_t kBounceStock = 0x4029999au; // 2.65
+inline constexpr uint32_t kBounceHalf = 0x3fa9999au;  // 1.325
+inline HalfWords g_crashWords{"ts2-crashbody", kCrashWords, 4u, kCrashBodyStock, kCrashBodyHalf};
+inline HalfWords g_bounceWords{"ts2-bounce", kBounceWords, 1u, kBounceStock, kBounceHalf};
+
 inline bool crashBodyEnabled() noexcept
 {
     static const bool on = [] {
-        const char *v = std::getenv("PS2X_SSX3_SPLIT120_CRASHBODY");
-        const bool b = v && v[0] == '1' && v[1] == '\0';
+        const bool b = knobOn(std::getenv("PS2X_SSX3_SPLIT120_CRASHBODY"));
         if (b)
             std::fprintf(stderr, "[ts2-crashbody] armed (0x49be38/0x49be78/0x49bef4/0x49befc 1/60 -> 1/120 in "
                                  "converted split halves)\n");
@@ -197,25 +251,15 @@ inline bool crashBodyEnabled() noexcept
     return on;
 }
 
-// Verify all four words, then write all four; a mismatch disables the knob.
-inline bool crashBodyWrite(uint8_t *ram, uint32_t expected, uint32_t value) noexcept
+inline bool bounceEnabled() noexcept
 {
-    static bool refused = false;
-    if (!ram || refused) return false;
-    for (uint32_t a : kCrashWords)
-    {
-        uint32_t got = 0;
-        std::memcpy(&got, ram + a, 4);
-        if (got != expected)
-        {
-            refused = true;
-            std::fprintf(stderr, "[ts2-crashbody] refused: [0x%x]=%08x expected %08x; disabled\n", a, got, expected);
-            return false;
-        }
-    }
-    for (uint32_t a : kCrashWords)
-        std::memcpy(ram + a, &value, 4);
-    return true;
+    static const bool on = [] {
+        const bool b = knobOn(std::getenv("PS2X_SSX3_SPLIT120_BOUNCE"));
+        if (b)
+            std::fprintf(stderr, "[ts2-bounce] armed (0x49c13c 2.65 -> 1.325 in converted split halves)\n");
+        return b;
+    }();
+    return on;
 }
 
 // HL1: guest-thread record cache, unconditional (CU4 B3: the
@@ -372,12 +416,19 @@ inline void begin(uint8_t *ram, R5900Context *ctx) noexcept
     current.predictorEpoch = identity.epoch;
     current.continuation = 0x128de4u;
     current.active = true;
-    // TK34: same conversion rule as halfLoad (cases >= 3 keep stock values).
-    if (halfMode() && crashBodyEnabled() && !(fixUnconverted() && current.selectorCase >= 3u) &&
-        crashBodyWrite(ram, kCrashBodyStock, kCrashBodyHalf))
+    // TK34/SPL1: same conversion rule as halfLoad (cases >= 3 keep stock values).
+    if (halfMode() && !(fixUnconverted() && current.selectorCase >= 3u))
     {
-        s.ram = ram;
-        s.crashBodyHalf = true;
+        if (crashBodyEnabled() && halfWordsWrite(ram, g_crashWords, kCrashBodyHalf))
+        {
+            s.ram = ram;
+            s.crashBodyHalf = true;
+        }
+        if (bounceEnabled() && halfWordsWrite(ram, g_bounceWords, kBounceHalf))
+        {
+            s.ram = ram;
+            s.bounceHalf = true;
+        }
     }
 }
 
@@ -394,7 +445,12 @@ inline void finish() noexcept
     if (s.crashBodyHalf)
     {
         s.crashBodyHalf = false;
-        crashBodyWrite(s.ram, kCrashBodyHalf, kCrashBodyStock);
+        halfWordsWrite(s.ram, g_crashWords, kCrashBodyStock);
+    }
+    if (s.bounceHalf)
+    {
+        s.bounceHalf = false;
+        halfWordsWrite(s.ram, g_bounceWords, kBounceStock);
     }
 }
 
