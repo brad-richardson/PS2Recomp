@@ -112,7 +112,7 @@ def scan(args):
         log = args.generation_log.read_text()
         for pattern, category in [
             (r'truncating decode', 'decode_truncation'),
-            (r'TODO_NAMED|unhandled instruction', 'todo_fallback'),
+            (r'TODO_NAMED|\bUnhandled instructions: [1-9][0-9]*\b', 'todo_fallback'),
             (r'\bdecode failures: [1-9]', 'decode_failure'),
         ]:
             matches = re.findall(pattern, log, re.I)
