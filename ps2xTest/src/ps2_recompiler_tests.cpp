@@ -1635,6 +1635,19 @@ void register_ps2_recompiler_tests()
                      "spaces, a stray line, a bad address and a duplicate address are rejected");
         });
 
+        tc.Run("readable symbol names keep the address and drop the signature", [](TestCase &t) {
+            t.Equals(PS2Recompiler::ReadableSymbolName("BXrand__Fv", 0x3177F0u), std::string("BXrand_0x3177f0"),
+                     "a verified name drops its CodeWarrior signature");
+            t.Equals(PS2Recompiler::ReadableSymbolName("cAirPredictor_reset (unverified)", 0x113198u),
+                     std::string("cAirPredictor_reset_u_0x113198"), "unverified names carry _u");
+            t.Equals(PS2Recompiler::ReadableSymbolName("cCrowdRender2D__cCrowdRender2D__FPii", 0x2DB700u),
+                     std::string("cCrowdRender2D_cCrowdRender2D_0x2db700"), "double underscores fold");
+            t.Equals(PS2Recompiler::ReadableSymbolName("strlen (unverified)", 0x416810u),
+                     std::string("strlen_u_0x416810"), "a libc name never becomes the bare host symbol");
+            t.Equals(PS2Recompiler::ReadableSymbolName("__", 0x100000u), std::string(),
+                     "nothing readable left means no rename");
+        });
+
         tc.Run("config manager defaults extra_function_starts to empty", [](TestCase &t) {
             const auto uniqueSuffix = std::to_string(
                 static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));

@@ -11,8 +11,9 @@ input = "/Volumes/Extreme SSD/ps2recomp-spike/P1/SLUS_207.72"
 # Path to Ghidra exported function map (optional CSV)
 ghidra_output = "/Volumes/Extreme SSD/ps2recomp-spike/PS2Recomp/games/ssx3/ssx3-functions.sweep.csv"
 
-# SYM2: ssxdecomp names as "// Name:" banner comments only (resolved next to
-# this file; symbols, file names and stub selection keep sub_ names).
+# SYM2/SYM3: ssxdecomp names (resolved next to this file) as "// Name:"
+# banner lines and as the C++ symbol (BXrand_0x3177f0; _u = unverified).
+# File names, Function::name and stub selection keep sub_ names.
 symbol_names = "ssx3-symbols.tsv"
 
 # Path to output directory

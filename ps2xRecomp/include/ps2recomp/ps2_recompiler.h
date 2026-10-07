@@ -68,6 +68,11 @@ namespace ps2recomp
         // [A-Za-z0-9_]+ are skipped and listed in rejected.
         static std::unordered_map<uint32_t, std::string> LoadSymbolDisplayNames(
             std::istream &input, std::vector<std::string> &rejected);
+        // SYM3: the generated C++ symbol for a banner name: the CodeWarrior
+        // signature ("__F...") dropped, "__" runs folded to "_", "_u" when
+        // unverified, and the start address kept ("BXrand_0x3177f0",
+        // "cAirPredictor_reset_u_0x113198"). Empty when nothing readable is left.
+        static std::string ReadableSymbolName(const std::string &displayName, uint32_t start);
 
     private:
         ConfigManager m_configManager;
@@ -92,6 +97,9 @@ namespace ps2recomp
         std::unordered_set<uint32_t> m_correctnessCriticalFunctionStarts;
         std::map<uint32_t, std::string> m_generatedStubs;
         std::unordered_map<uint32_t, std::string> m_functionRenames;
+        // SYM3: symbol_names banner text by start; m_functionRenames keeps the
+        // sub_ names for file names, the C++ symbols get ReadableSymbolName.
+        std::unordered_map<uint32_t, std::string> m_symbolDisplayNames;
         std::unordered_map<uint32_t, std::vector<uint32_t>> m_resumeEntryTargetsByOwner;
         CodeGenerator::BootstrapInfo m_bootstrapInfo;
 

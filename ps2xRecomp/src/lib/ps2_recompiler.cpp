@@ -1146,6 +1146,7 @@ namespace ps2recomp
                 msg << "symbol_names: " << displayNames.size() << " banner names from " << m_config.symbolNamesPath;
                 m_reporter.progress(msg.str());
                 m_codeGenerator->setDisplayNames(displayNames);
+                m_symbolDisplayNames = displayNames;
             }
 
             fs::create_directories(m_config.outputPath);
@@ -1349,9 +1350,43 @@ namespace ps2recomp
                 m_functionRenames[function.start] = makeName(function);
             }
 
+            // SYM3: readable C++ symbols for symbol_names entries. Function::name,
+            // stub/skip/entry selection and file names keep the sub_ names; the
+            // dispatch table stays keyed by address.
+            std::unordered_map<uint32_t, std::string> symbolNames = m_functionRenames;
+            if (!m_symbolDisplayNames.empty())
+            {
+                std::unordered_set<std::string> used;
+                for (const auto &[start, name] : symbolNames)
+                    used.insert(name);
+                std::vector<uint32_t> starts;
+                for (const auto &[start, display] : m_symbolDisplayNames)
+                    starts.push_back(start);
+                std::sort(starts.begin(), starts.end());
+                std::size_t renamed = 0;
+                for (uint32_t start : starts)
+                {
+                    auto it = symbolNames.find(start);
+                    if (it == symbolNames.end())
+                        continue;
+                    const std::string readable = ReadableSymbolName(m_symbolDisplayNames.at(start), start);
+                    if (readable.empty() || used.contains(readable))
+                    {
+                        m_reporter.warning("symbol_names", "kept " + it->second + ": no unique readable name");
+                        continue;
+                    }
+                    used.insert(readable);
+                    it->second = readable;
+                    ++renamed;
+                }
+                std::ostringstream msg;
+                msg << "symbol_names: " << renamed << " readable symbols";
+                m_reporter.progress(msg.str());
+            }
+
             if (m_codeGenerator)
             {
-                m_codeGenerator->setRenamedFunctions(m_functionRenames);
+                m_codeGenerator->setRenamedFunctions(symbolNames);
             }
 
             if (m_bootstrapInfo.valid && m_codeGenerator)
@@ -1361,8 +1396,8 @@ namespace ps2recomp
                                             { return fn.start == m_bootstrapInfo.entry; });
                 if (entryIt != m_functions.end())
                 {
-                    auto renameIt = m_functionRenames.find(entryIt->start);
-                    if (renameIt != m_functionRenames.end())
+                    auto renameIt = symbolNames.find(entryIt->start);
+                    if (renameIt != symbolNames.end())
                     {
                         m_bootstrapInfo.entryName = renameIt->second;
                     }
@@ -2776,6 +2811,42 @@ namespace ps2recomp
             names.emplace(address, unverified ? fields[1] + " (unverified)" : fields[1]);
         }
         return names;
+    }
+
+    std::string PS2Recompiler::ReadableSymbolName(const std::string &displayName, uint32_t start)
+    {
+        static constexpr std::string_view kUnverified = " (unverified)";
+        std::string base = displayName;
+        bool unverified = false;
+        if (base.size() > kUnverified.size() &&
+            base.compare(base.size() - kUnverified.size(), kUnverified.size(), kUnverified) == 0)
+        {
+            base.resize(base.size() - kUnverified.size());
+            unverified = true;
+        }
+        if (const std::size_t signature = base.rfind("__F"); signature != std::string::npos && signature > 0)
+            base.resize(signature);
+
+        std::string folded;
+        for (char c : base)
+        {
+            const unsigned char u = static_cast<unsigned char>(c);
+            if (!(std::isalnum(u) || c == '_'))
+                return "";
+            if (c == '_' && (folded.empty() || folded.back() == '_'))
+                continue;
+            folded.push_back(c);
+        }
+        while (!folded.empty() && folded.back() == '_')
+            folded.pop_back();
+        if (folded.empty())
+            return "";
+        if (std::isdigit(static_cast<unsigned char>(folded.front())))
+            folded.insert(0, "ps2_");
+
+        std::ostringstream name;
+        name << folded << (unverified ? "_u" : "") << "_0x" << std::hex << start;
+        return name.str();
     }
 
     std::string PS2Recompiler::ClampFilenameLength(const std::string &baseName, const std::string &extension, std::size_t maxLength)
