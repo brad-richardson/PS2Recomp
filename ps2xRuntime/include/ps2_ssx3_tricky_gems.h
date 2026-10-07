@@ -514,9 +514,9 @@ inline bool spinEnabled() noexcept
 }
 
 // Spun rows 0/1 for angle `deg` about the instance's own axis (row 2). The
-// result depends only on what spinning leaves invariant (row 2, the row
-// scale, handedness) plus the angle, so it carries no host history: the same
-// RAM + clock gives the same bytes after a savestate load. Canonical phase 0
+// result depends only on what spinning leaves invariant (row 2, the snapped
+// row scale, handedness) plus the angle, so it carries no host history: a
+// savestate load lands on the same bytes as an uninterrupted run. Canonical phase 0
 // is world X projected onto the plane normal to the axis (world Y if X is
 // near the axis). Refuses non-finite, degenerate, non-uniformly scaled or
 // sheared bases (fail closed).
@@ -554,12 +554,20 @@ inline bool spinRows(const float r0[3], const float r1[3], const float r2[3], ui
         v /= n;
     const double c1[3] = {h * (a[1] * c0[2] - a[2] * c0[1]), h * (a[2] * c0[0] - a[0] * c0[2]),
                           h * (a[0] * c0[1] - a[1] * c0[0])};
+    // Snap the scale to a 12-bit mantissa: each write leaves |row| within
+    // ~1e-7 of the snapped value, far inside its 2^-13 rounding half-step, so
+    // the scale (and every output byte) no longer depends on how many writes
+    // came before (TK55: unsnapped, 316 of 1184 sequential writes differed
+    // in bytes from the direct result and a savestate load diverged).
+    int ex = 0;
+    const double man = std::frexp(s0, &ex);
+    const double sq = std::ldexp(std::round(std::ldexp(man, 12)), ex - 12);
     const double th = double(deg % 360u) * (3.14159265358979323846 / 180.0);
     const double c = std::cos(th), s = std::sin(th);
     for (int k = 0; k < 3; ++k)
     {
-        o0[k] = static_cast<float>(s0 * (c * c0[k] + s * c1[k]));
-        o1[k] = static_cast<float>(s0 * (-s * c0[k] + c * c1[k]));
+        o0[k] = static_cast<float>(sq * (c * c0[k] + s * c1[k]));
+        o1[k] = static_cast<float>(sq * (-s * c0[k] + c * c1[k]));
     }
     return true;
 }
