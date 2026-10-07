@@ -13,19 +13,6 @@
 
 namespace ps2recomp
 {
-    namespace
-    {
-        Instruction makeSyntheticDelaySlot(uint32_t address)
-        {
-            Instruction inst{};
-            inst.address = address;
-            inst.raw = 0;
-            inst.opcode = OPCODE_SPECIAL;
-            inst.function = SPECIAL_SLL;
-            return inst;
-        }
-    }
-
     FunctionEmitter::FunctionEmitter(CodeGenerator &codeGenerator)
         : m_codeGenerator(codeGenerator)
     {
@@ -139,17 +126,13 @@ namespace ps2recomp
                         i + 1 < instructions.size() &&
                         instructions[i + 1].address == inst.address + 4u;
 
-                    Instruction syntheticDelaySlot{};
-                    const Instruction *delaySlot = nullptr;
-                    if (hasDecodedDelaySlot)
+                    if (!hasDecodedDelaySlot)
                     {
-                        delaySlot = &instructions[i + 1];
+                        std::ostringstream msg;
+                        msg << "missing decoded delay slot at 0x" << std::hex << inst.address + 4u;
+                        throw std::runtime_error(msg.str());
                     }
-                    else
-                    {
-                        syntheticDelaySlot = makeSyntheticDelaySlot(inst.address + 4u);
-                        delaySlot = &syntheticDelaySlot;
-                    }
+                    const Instruction *delaySlot = &instructions[i + 1];
 
                     if (hasDecodedDelaySlot && internalTargets.contains(delaySlot->address))
                     {
