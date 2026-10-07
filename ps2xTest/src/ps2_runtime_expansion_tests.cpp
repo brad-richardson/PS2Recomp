@@ -3,6 +3,7 @@
 #include "ps2recomp/instructions.h"
 #include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/types.h"
+#include "ps2_hle_pools.h"
 #include "ps2_runtime.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_syscalls.h"
@@ -294,6 +295,9 @@ namespace
     constexpr uint32_t kNonStreamImage = 0x00150000u;
     constexpr uint32_t kNonStreamInput = 0x00126000u;
     constexpr uint32_t kNonStreamHeap = 0x00800000u;
+    // HNG1: MPEG callback data comes from the runtime's HLE arena, not the
+    // game's SetupHeap heap.
+    constexpr uint32_t kNonStreamCbData = ps2_hle_pools::kHleArenaBase;
     constexpr uint32_t kNonStreamStack = 0x01E00000u;
 
     struct NonStreamProbe
@@ -330,8 +334,8 @@ namespace
 
     void nonStreamCheckFreed(PS2Runtime *runtime)
     {
-        const uint32_t reused = runtime->guestMalloc(4u, 4u);
-        gNonStream.freed = reused == kNonStreamHeap;
+        const uint32_t reused = runtime->guestMallocHle(4u, 4u);
+        gNonStream.freed = reused == kNonStreamCbData;
         runtime->guestFree(reused);
     }
 
@@ -355,7 +359,7 @@ namespace
         const uint32_t cbData = ::getRegU32(ctx, 5);
         gNonStream.delivered.push_back(::getRegU32(ctx, 6));
         gNonStream.args &= ::getRegU32(ctx, 4) == kNonStreamHandle &&
-                          cbData == kNonStreamHeap && Ps2FastRead32(rdram, cbData) == 1u;
+                          cbData == kNonStreamCbData && Ps2FastRead32(rdram, cbData) == 1u;
         gNonStream.wordOnly &= Ps2FastRead32(rdram, cbData + 4u) == 0xA5A5A5A5u;
         gNonStream.ownership &= runtime->eeScheduler().currentThreadId() == 1 &&
                                ::getRegU32(ctx, 29) == kNonStreamStack;
@@ -417,7 +421,7 @@ namespace
         ps2_stubs::resetMpegStubState();
         ps2_stubs::notifyMpegCdStreamStart();
         runtime.configureGuestHeap(kNonStreamHeap, kNonStreamHeap + 0x10000u);
-        std::memset(rdram.data() + kNonStreamHeap, 0xA5, 64u);
+        std::memset(rdram.data() + kNonStreamCbData, 0xA5, 64u);
         gNonStream = NonStreamProbe{};
         gNonStream.feedBytes = feedBytes;
         gNonStream.callbackResult = callbackResult;
