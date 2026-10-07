@@ -67,9 +67,11 @@ inline uint32_t inputChainPark(uint32_t phase) noexcept
     return phase <= 3u ? phase | kInputChainHold : phase;
 }
 // INP5: a phase-3 tracker with no target, current rotation, accumulated
-// rotation or offsets can admit an initial direction without advancing a
-// pending recognition recurrence. Preserve signed zero as numerical zero.
-inline bool inputChainNeutral(uint32_t phase, const std::array<uint32_t, 8> &angles) noexcept
+// rotation or offsets, and no accumulated sequence motion (S+30/+34),
+// can admit an initial direction without advancing a pending recurrence.
+// The guest clears 30/34 at 133170/174 and 1336fc/700; completion and
+// publication preserve them (133ba4..bbc, 135be0). Preserve signed zero as numerical zero.
+inline bool inputChainNeutral(uint32_t phase, const std::array<uint32_t, 10> &angles) noexcept
 {
     return phase == 3u && std::all_of(angles.begin(), angles.end(),
         [](uint32_t bits) { return (bits & 0x7fffffffu) == 0u; });

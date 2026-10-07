@@ -135,7 +135,7 @@ void register_ps2_fh1_fix_tests()
 
         tc.Run("INP5 neutral admission excludes pending rotation and chaining", [](TestCase &t)
         {
-            std::array<uint32_t, 8> angles{};
+            std::array<uint32_t, 10> angles{};
             t.IsTrue(inputChainNeutral(3u, angles), "neutral idle may run on either half");
             for (uint32_t phase : {0u, 1u, 2u, kInputChainHold | 3u})
                 t.IsTrue(!inputChainNeutral(phase, angles), "active or parked phase stays held");
@@ -144,9 +144,16 @@ void register_ps2_fh1_fix_tests()
             for (unsigned i = 0; i < angles.size(); ++i)
             {
                 angles[i] = 0x3f800000u;
-                t.IsTrue(!inputChainNeutral(3u, angles), "each target/current/accumulator/offset prevents admission");
+                t.IsTrue(!inputChainNeutral(3u, angles), "each target/current/offset/sequence accumulator prevents admission");
                 angles[i] = 0x80000000u;
             }
+            // INP5 chain-6212: all normalized angle words are zero after
+            // publication, but the guest sequence accumulator retains motion.
+            angles.fill(0u);
+            angles[8] = 0x40561151u; // S+30 at raw6323
+            t.IsTrue(!inputChainNeutral(3u, angles), "completed spin is not initial idle");
+            angles[8] = 0u; // original guest reset/new-target store
+            t.IsTrue(inputChainNeutral(3u, angles), "guest reset restores initial idle");
         });
 
         tc.Run("FH33 ground2 is opt-in and squares to the bounded stock map", [](TestCase &t)
