@@ -9,6 +9,52 @@
 
 namespace {
 using namespace ps2_fh1_jcam2;
+#if defined(__APPLE__)
+constexpr int kProtectionSignal = SIGBUS;
+constexpr int kProtectionCode = 1; // observed by the child probe
+#else
+constexpr int kProtectionSignal = SIGSEGV;
+constexpr int kProtectionCode = SEGV_ACCERR;
+#endif
+int probeWriteFd = -1;
+void probeHandler(int sig, siginfo_t *info, void *)
+{
+    const int result[2] = {sig, info ? info->si_code : 0};
+    write(probeWriteFd, result, sizeof(result));
+    _exit(0);
+}
+bool probeProtectionFault(int &sig, int &code)
+{
+    int fds[2]{};
+    if (pipe(fds) != 0) return false;
+    const pid_t pid = fork();
+    if (pid == 0)
+    {
+        close(fds[0]);
+        probeWriteFd = fds[1];
+        struct sigaction sa{};
+        sa.sa_sigaction = &probeHandler;
+        sa.sa_flags = SA_SIGINFO;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGSEGV, &sa, nullptr);
+        sigaction(SIGBUS, &sa, nullptr);
+        void *p = mmap(nullptr, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p == MAP_FAILED) _exit(2);
+        volatile uint8_t value = *static_cast<volatile uint8_t *>(p);
+        (void)value;
+        _exit(3);
+    }
+    close(fds[1]);
+    int result[2]{};
+    const ssize_t n = read(fds[0], result, sizeof(result));
+    close(fds[0]);
+    int status = 0;
+    const bool okay = pid > 0 && waitpid(pid, &status, 0) == pid &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0 && n == sizeof(result);
+    sig = result[0];
+    code = result[1];
+    return okay;
+}
 
 int child(void (*fn)())
 {
@@ -24,8 +70,9 @@ void sentinel(int sig, siginfo_t *, void *)
 {
     sigset_t mask{};
     sigprocmask(SIG_SETMASK, nullptr, &mask);
-    const bool flags = sig == SIGSEGV && sigismember(&mask, SIGUSR1) == 1 &&
-                       sigismember(&mask, SIGSEGV) == 0 && g_resetSegv.load();
+    const bool flags = sig == kProtectionSignal && sigismember(&mask, SIGUSR1) == 1 &&
+                       sigismember(&mask, kProtectionSignal) == 0 &&
+                       (sig == SIGBUS ? g_resetBus : g_resetSegv).load();
     _exit(flags ? 21 : 22);
 }
 void plainSentinel(int, siginfo_t *, void *) { _exit(31); }
@@ -37,6 +84,7 @@ void prior(void (*handler)(int, siginfo_t *, void *), int flags = SA_SIGINFO)
     sigemptyset(&sa.sa_mask);
     sigaddset(&sa.sa_mask, SIGUSR1);
     sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
 }
 void firstTouch()
 {
@@ -108,6 +156,7 @@ void ignored()
     sa.sa_handler = SIG_IGN;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
     std::vector<uint8_t> live(PS2_RAM_SIZE);
     if (!lazyBegin(live.data())) _exit(1);
     raise(SIGSEGV);
@@ -122,6 +171,7 @@ void defaultCrash()
     sa.sa_handler = SIG_DFL;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
     std::vector<uint8_t> live(PS2_RAM_SIZE);
     if (!lazyBegin(live.data())) _exit(1);
     void *p = mmap(nullptr, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -132,10 +182,29 @@ void defaultCrash()
 } // namespace
 #endif
 
+int ps2_fh1_jcam2_protection_probe()
+{
+#if PS2X_JCAM2_LAZY_SUPPORTED
+    int sig = 0, code = 0;
+    const bool okay = probeProtectionFault(sig, code);
+    std::printf("jcam2 protection probe: signal=%d si_code=%d status=%s\n",
+                sig, code, okay ? "ok" : "failed");
+    return okay ? 0 : 1;
+#else
+    return 2;
+#endif
+}
+
 void register_ps2_fh1_jcam2_scratch_tests()
 {
 #if PS2X_JCAM2_LAZY_SUPPORTED
     MiniTest::Case("Ps2Fh1Jcam2Scratch", [](TestCase &tc) {
+        tc.Run("protection fault probe", [](TestCase &t) {
+            int sig = 0, code = 0;
+            t.IsTrue(probeProtectionFault(sig, code), "child reports signal/code");
+            t.Equals(sig, kProtectionSignal, "protection signal");
+            t.Equals(code, kProtectionCode, "protection si_code");
+        });
         tc.Run("first touch and alternate stack", [](TestCase &t) { t.Equals(exited(child(&firstTouch)), 0, "first touch/errno/stack"); });
         tc.Run("saved handler mask NODEFER RESETHAND", [](TestCase &t) { t.Equals(exited(child(&genuineFault)), 21, "saved action flags"); });
         tc.Run("other thread chains", [](TestCase &t) { t.Equals(exited(child(&foreignThread)), 31, "foreign thread"); });
@@ -144,7 +213,7 @@ void register_ps2_fh1_jcam2_scratch_tests()
         tc.Run("prior IGN survives", [](TestCase &t) { t.Equals(exited(child(&ignored)), 0, "SIG_IGN"); });
         tc.Run("unhandled fault terminates by signal", [](TestCase &t) {
             const int status = child(&defaultCrash);
-            t.IsTrue(WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV, "SIG_DFL");
+            t.IsTrue(WIFSIGNALED(status) && WTERMSIG(status) == kProtectionSignal, "SIG_DFL");
         });
     });
 #endif

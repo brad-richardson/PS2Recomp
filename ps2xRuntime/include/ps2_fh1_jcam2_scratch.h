@@ -146,13 +146,26 @@ inline bool isExecuteFault(void *uc, uintptr_t b)
     return pc >= b && pc < b + PS2_RAM_SIZE;
 }
 
+inline bool isProtectionFault(int sig, const siginfo_t *info)
+{
+    if (!info) return false;
+#if defined(__APPLE__)
+    // EEP2 child probe on Darwin arm64: a PROT_NONE read reports SIGBUS,
+    // si_code=1 (KERN_PROTECTION_FAILURE), despite signal.h naming 1
+    // BUS_ADRALN. The image range/page/owner checks below still apply.
+    return sig == SIGBUS && info->si_code == 1;
+#else
+    return sig == SIGSEGV && info->si_code == SEGV_ACCERR;
+#endif
+}
+
 inline void faultHandler(int sig, siginfo_t *info, void *uc)
 {
     const int savedErrno = errno;
     LazyImage &z = g_lazy;
     const uintptr_t a = reinterpret_cast<uintptr_t>(info ? info->si_addr : nullptr);
     const uintptr_t b = reinterpret_cast<uintptr_t>(z.base);
-    if (sig == SIGSEGV && info && info->si_code == SEGV_ACCERR &&
+    if (isProtectionFault(sig, info) &&
         z.active.load(std::memory_order_acquire) && b && a >= b &&
         a < b + PS2_RAM_SIZE && !isExecuteFault(uc, b) &&
         pthread_equal(pthread_self(), z.owner))

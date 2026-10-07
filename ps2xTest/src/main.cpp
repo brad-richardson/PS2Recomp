@@ -67,6 +67,7 @@ void register_ps2_fh1_savestate_tests();
 void register_ps2_fh1_hooktable_tests();
 void register_ps2_fh1_fh28_tests();
 void register_ps2_fh1_jcam2_scratch_tests();
+int ps2_fh1_jcam2_protection_probe();
 void register_ps2_savestate_tests();
 void register_ps2_tc1_vf0_tests();
 void register_ps2_ach_tests();
@@ -75,6 +76,8 @@ void reset_ps2_test_function_table();
 
 int main()
 {
+    if (std::getenv("PS2X_JCAM2_PROBE"))
+        return ps2_fh1_jcam2_protection_probe();
     MiniTest::BeforeEach(reset_ps2_test_function_table);
 
     register_code_generator_tests();
