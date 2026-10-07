@@ -168,13 +168,14 @@ inline uint64_t fixItem(const std::string &item) noexcept
     return 0u;
 }
 
-// "all": every group except kFixLift (FH8: no window where it binds) and the
+// "all": every group except kFixLift (FH8: no window where it binds),
+// kFixGround (GRD1: its force is already scaled by converted dt), and the
 // internal kFixRamp. FH26 adds stick2 + clocksign (Brad 10-02); DEF1 adds
 // bonusflip + loops2 (Brad 10-03).
 inline constexpr uint64_t kFixAll =
     kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession | kFixTimers |
     kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim | kFixBonus | kFixAiGate |
-    kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset | kFixMeter | kFixBoost | kFixGround | kFixEntry |
+    kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset | kFixMeter | kFixBoost | kFixEntry |
     kFixRclock | kFixEmitter | kFixFx | kFixClock2 | kFixHudfill | kFixStick2 | kFixClockSign | kFixBonusFlip;
 inline constexpr uint32_t kFix12All = kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse |
                                       kFix12Crash | kFix12FxTimer | kFix12Bounce | kFix12Particles |

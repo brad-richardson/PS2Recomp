@@ -178,6 +178,14 @@ void register_ps2_fh1_fix_tests()
             t.IsTrue(std::abs(ground2Residual(.06,.2,.1/60,14.0/60)/.06-std::sqrt(.8)) < 1e-14,
                      "proportional retention sqrt(.8)");
         });
+        tc.Run("GRD1 ground is opt-in and all minus ground is unchanged", [](TestCase &t)
+        {
+            t.IsTrue((kFixAll & kFixGround) == 0u, "ground excluded from all");
+            t.Equals(parseFix("all,-ground").main, kFixAll, "old play layer remains equivalent");
+            t.Equals(parseFix("all,ground").main, kFixAll | kFixGround, "ground remains selectable");
+            t.Equals(parseFix("all,ground,-ground").main, kFixAll, "opt-in can be removed");
+            t.IsTrue((kFixAll & kFixGround2) == 0u, "ground2 remains separate");
+        });
 
         tc.Run("all includes stick2 and clocksign (FH26, Brad 10-02) and both masks", [](TestCase &t)
         {
@@ -244,7 +252,7 @@ void register_ps2_fh1_fix_tests()
             t.IsTrue((kFixAll & fh28) == 0u, "none in all");
             const FixMasks f = parseFix("all,-ground,jcam,pose,pid,c2cap,spawn");
             t.IsTrue(f.ok, "parses");
-            t.Equals(f.main, (kFixAll & ~static_cast<uint64_t>(kFixGround)) | fh28, "all minus ground plus fh28");
+            t.Equals(f.main, kFixAll | fh28, "all minus ground plus fh28");
             t.Equals(f.fh12, kFix12All, "fh12 untouched");
             t.Equals(parseFix("jcam").main, static_cast<uint64_t>(kFixJcam), "jcam alone");
             t.Equals(parseFix("pose").main, static_cast<uint64_t>(kFixPose), "pose alone");
