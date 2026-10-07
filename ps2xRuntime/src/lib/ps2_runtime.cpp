@@ -1,5 +1,6 @@
 #include "ps2_runtime.h"
 #include "ps2_hle_pools.h"
+#include "ps2_ssx3_patch_grow_state.h"
 #include "ps2_ts2_split60.h"
 #include "ps2_mtvu.h"
 #include "ps2_microvu.h"
@@ -414,14 +415,7 @@ namespace
     // else growth is refused and the TK15 guard (if armed) keeps skipping.
     constexpr uint32_t kSsx3PatchCacheInit = 0x00372B78u;
     constexpr uint32_t kSsx3GuestFree = 0x00317E98u;
-    struct Ssx3PatchGrow
-    {
-        bool active = false;
-        bool refused = false;
-        uint32_t cache = 0u;
-        std::vector<std::pair<uint32_t, uint32_t>> moved; // relocated -> original
-    };
-    Ssx3PatchGrow g_ssx3PatchGrow;
+    ps2_ssx3_patch_grow::State g_ssx3PatchGrow;
 
     uint32_t ssx3PatchGrowCap()
     {
@@ -441,9 +435,19 @@ namespace
         return cap;
     }
 
+    uint32_t ssx3PatchGrowBase()
+    {
+        static const uint32_t base = [] {
+            const char *e = std::getenv("PS2X_SSX3_PATCH_CACHE_GROW_BASE");
+            return e && *e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 16))
+                           : ps2_hle_pools::kHleArenaBase + ps2_hle_pools::kHleArenaBytes;
+        }();
+        return base;
+    }
+
     bool ssx3PatchCacheGrow(uint8_t *rdram, R5900Context *ctx, uint32_t cache)
     {
-        Ssx3PatchGrow &g = g_ssx3PatchGrow;
+        auto &g = g_ssx3PatchGrow;
         const uint32_t newCap = ssx3PatchGrowCap();
         if (newCap == 0u || g.active || g.refused)
             return false;
@@ -473,11 +477,7 @@ namespace
         if (count > cap || secCount > secCap)
             return refuse("stack count", count, secCount);
         const uint32_t newSec = secCap ? (secCap * newCap + cap - 1u) / cap : 0u;
-        static const uint32_t base = [] {
-            const char *e = std::getenv("PS2X_SSX3_PATCH_CACHE_GROW_BASE");
-            return e && *e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 16))
-                           : ps2_hle_pools::kHleArenaBase + ps2_hle_pools::kHleArenaBytes;
-        }();
+        const uint32_t base = ssx3PatchGrowBase();
         auto al = [](uint32_t v) { return (v + 0xFFu) & ~0xFFu; };
         uint32_t at = base & ~0xFFu;
         auto take = [&](uint32_t bytes) { const uint32_t a = at; at += al(bytes); return a; };
@@ -544,7 +544,7 @@ namespace
     // TK34: free() of a relocated block frees the original; re-init forgets.
     void ssx3PatchGrowFree(R5900Context *ctx)
     {
-        Ssx3PatchGrow &g = g_ssx3PatchGrow;
+        auto &g = g_ssx3PatchGrow;
         if (!g.active || !ctx)
             return;
         const uint32_t p = getRegU32(ctx, 4);
@@ -565,13 +565,13 @@ namespace
 
     void ssx3PatchGrowInit(R5900Context *ctx)
     {
-        Ssx3PatchGrow &g = g_ssx3PatchGrow;
+        auto &g = g_ssx3PatchGrow;
         if (ssx3PatchGrowCap() == 0u)
             return;
         if (g.active)
             std::fprintf(stderr, "[ssx3-patch-grow] re-init cache=0x%x with %zu blocks unfreed; reset\n",
                          getRegU32(ctx, 4), g.moved.size());
-        g = Ssx3PatchGrow{};
+        g = ps2_ssx3_patch_grow::State{};
     }
 
     bool ssx3PatchCacheGuardOn()
@@ -3392,8 +3392,35 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
     s_hasUploadedFrame = true;
 }
 
+namespace ps2_ssx3_patch_grow
+{
+Layout layout() { return {ssx3PatchGrowBase(), ssx3PatchGrowCap()}; }
+State snapshot() { return g_ssx3PatchGrow; }
+bool restore(const State &state)
+{
+    if (state.moved.size() > 8u || (state.active != !state.moved.empty()) ||
+        (state.active && (state.cache == 0u || state.refused)))
+        return false;
+    for (size_t i = 0; i < state.moved.size(); ++i)
+    {
+        const auto [to, from] = state.moved[i];
+        const uint32_t phys = to & PS2_RAM_MASK;
+        if (phys < (ssx3PatchGrowBase() & ~0xFFu) || phys >= PS2_RAM_SIZE ||
+            (from & PS2_RAM_MASK) >= ps2_hle_pools::heapCeiling())
+            return false;
+        for (size_t j = 0; j < i; ++j)
+            if (state.moved[j].first == to)
+                return false;
+    }
+    g_ssx3PatchGrow = state;
+    return true;
+}
+void reset() { g_ssx3PatchGrow = State{}; }
+} // namespace ps2_ssx3_patch_grow
+
 PS2Runtime::PS2Runtime()
 {
+    ps2_ssx3_patch_grow::reset();
 #ifndef NDEBUG
     MissingFunctionPolicy defaultPolicy = MissingFunctionPolicy::Stop;
 #else
@@ -6129,8 +6156,8 @@ uint32_t PS2Runtime::guestMallocHle(uint32_t size, uint32_t alignment)
     }
     static std::atomic<bool> warned{false};
     if (!warned.exchange(true))
-        std::fprintf(stderr, "[hle-arena] full (size=0x%x); using the SetupHeap heap\n", size);
-    return guestMalloc(size, alignment);
+        std::fprintf(stderr, "[hle-arena] full (size=0x%x); allocation refused\n", size);
+    return 0u;
 }
 
 void PS2Runtime::guestFree(uint32_t guestAddr)

@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_runtime.h"
+#include "ps2_hle_pools.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "runtime/gs/gs_frontend.h"
@@ -4532,10 +4533,11 @@ void register_ps2_gs_tests()
                       "TRXDIR payload must encode dir=0 (host-to-local)");
         });
 
-        tc.Run("sceGsResetGraph frees its temporary GIF packet", [](TestCase &t)
+        tc.Run("sceGsResetGraph uses and releases the HLE arena, leaving SetupHeap untouched", [](TestCase &t)
         {
             PS2Runtime runtime;
             t.IsTrue(runtime.memory().initialize(), "runtime memory initialize should succeed");
+            runtime.configureGuestHeap(0x00540000u, ps2_hle_pools::heapCeiling());
 
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
             R5900Context ctx{};
@@ -4547,8 +4549,9 @@ void register_ps2_gs_tests()
 
             t.Equals(static_cast<int32_t>(getRegU32Test(ctx, 2)), 0,
                      "sceGsResetGraph should succeed in reset mode");
-            expectGuestHeapReusable(t, runtime,
-                                    "sceGsResetGraph should free its temporary GIF packet");
+            t.Equals(runtime.guestHeapEnd(), 0x00540000u, "ResetGraph never allocates from SetupHeap");
+            t.Equals(runtime.guestMallocHle(128u, 16u), ps2_hle_pools::kHleArenaBase,
+                     "ResetGraph releases its packet after GIF consumption");
         });
 
         tc.Run("sceGsSyncV resumes through the scheduler with deterministic field parity", [](TestCase &t)

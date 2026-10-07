@@ -836,7 +836,9 @@ namespace ps2_stubs
 
             if (runtime)
             {
-                uint32_t pktAddr = runtime->guestMalloc(128u, 16u);
+                // The packet is runtime-owned until the GIF DMA below copies
+                // its bytes (also when MTVU queues the copied work).
+                uint32_t pktAddr = runtime->guestMallocHle(128u, 16u);
                 if (pktAddr != 0u)
                 {
                     uint8_t *pkt = getMemPtr(rdram, pktAddr);
@@ -871,7 +873,16 @@ namespace ps2_stubs
                     else
                     {
                         runtime->guestFree(pktAddr);
+                        ps2_log::emitDrop("stub/sceGsResetGraph", "error");
+                        setReturnS32(ctx, -1);
+                        return;
                     }
+                }
+                else
+                {
+                    ps2_log::emitDrop("stub/sceGsResetGraph", "error");
+                    setReturnS32(ctx, -1);
+                    return;
                 }
             }
         }

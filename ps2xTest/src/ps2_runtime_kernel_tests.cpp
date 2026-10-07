@@ -1766,8 +1766,12 @@ void register_ps2_runtime_kernel_tests()
             env.runtime.guestFree(game);
             t.Equals(env.runtime.guestMalloc(0x10u, 16u), game, "SetupHeap frees are unaffected");
 
+            const uint32_t heapEnd = env.runtime.guestHeapEnd();
             const uint32_t spill = env.runtime.guestMallocHle(ps2_hle_pools::kHleArenaBytes, 16u);
-            t.IsTrue(spill != 0u && (spill < lo || spill >= hi), "a full arena falls back to the SetupHeap heap");
+            t.Equals(spill, 0u, "an exhausted arena refuses instead of falling into SetupHeap");
+            t.Equals(env.runtime.guestHeapEnd(), heapEnd, "exhaustion makes zero SetupHeap allocations");
+            t.Equals(env.runtime.guestMalloc(0x10u, 16u), game + 0x10u,
+                     "the next SetupHeap address is unchanged by arena exhaustion");
         });
 
         tc.Run("memalign stubs allocate aligned guest memory", [](TestCase &t)

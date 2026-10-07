@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "ps2_microvu.h"
 #include "ps2_runtime.h"
+#include "ps2_ssx3_patch_grow_state.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_savestate.h"
@@ -112,6 +113,43 @@ void register_ps2_savestate_tests()
 {
     MiniTest::Case("Ps2Savestate", [](TestCase &tc)
     {
+        tc.Run("HMS2: TK34 grow map survives cold restore and pre-grow rewind", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            Writer before, grown;
+            PS2RuntimeSavestate::saveKernel(runtime, before);
+
+            ps2_ssx3_patch_grow::State state;
+            state.active = true;
+            state.cache = 0x00560000u;
+            state.moved = {{0x01F33400u, 0x00570000u}, {0x01F34000u, 0x00571000u}};
+            t.IsTrue(ps2_ssx3_patch_grow::restore(state), "test grow map accepted");
+            PS2RuntimeSavestate::saveKernel(runtime, grown);
+
+            ps2_ssx3_patch_grow::reset(); // cold process has no map
+            Reader cold(grown.buf.data(), grown.buf.size());
+            t.IsTrue(PS2RuntimeSavestate::loadKernel(runtime, cold), "cold load restores grow map");
+            const auto restored = ps2_ssx3_patch_grow::snapshot();
+            t.IsTrue(restored.active && restored.cache == state.cache && restored.moved == state.moved,
+                     "course exit can translate both relocated frees");
+
+            Reader rewind(before.buf.data(), before.buf.size());
+            t.IsTrue(PS2RuntimeSavestate::loadKernel(runtime, rewind), "pre-grow rewind loads");
+            t.IsTrue(!ps2_ssx3_patch_grow::snapshot().active &&
+                     ps2_ssx3_patch_grow::snapshot().moved.empty(), "rewind removes future map");
+            t.IsTrue(ps2_ssx3_patch_grow::restore(state), "later grow can own the same relocation anew");
+            ps2_ssx3_patch_grow::State refused;
+            refused.refused = true;
+            t.IsTrue(ps2_ssx3_patch_grow::restore(refused), "refused state accepted");
+            Writer refusedBytes;
+            PS2RuntimeSavestate::saveKernel(runtime, refusedBytes);
+            ps2_ssx3_patch_grow::reset();
+            Reader refusedLoad(refusedBytes.buf.data(), refusedBytes.buf.size());
+            t.IsTrue(PS2RuntimeSavestate::loadKernel(runtime, refusedLoad) &&
+                     ps2_ssx3_patch_grow::snapshot().refused, "refusal survives a cold load");
+            ps2_ssx3_patch_grow::reset();
+        });
+
         tc.Run("writer/reader round trip and bounds", [](TestCase &t)
         {
             Writer w;

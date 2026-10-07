@@ -8,6 +8,8 @@
 #include "ps2_savestate_internal.h"
 
 #include "ps2_runtime.h"
+#include "ps2_hle_pools.h"
+#include "ps2_ssx3_patch_grow_state.h"
 #include "ps2_ssx3_tricky_layer.h"
 #include "runtime/ps2_vfs.h"
 #include "ps2_iop_host.h"
@@ -744,6 +746,15 @@ namespace ps2_savestate
             env = std::getenv("PS2X_CD_IMAGE");
             h.push_back({"iso", env ? isoIdentity(env) : std::string("none"), true});
             h.push_back({"deterministic", config().deterministic ? "1" : "0", true});
+            const auto grow = ps2_ssx3_patch_grow::layout();
+            h.push_back({"hle_pools_low", ps2_hle_pools::low() ? "1" : "0", true});
+            h.push_back({"hle_heap_ceiling", std::to_string(ps2_hle_pools::heapCeiling()), true});
+            h.push_back({"hle_callback_floor", std::to_string(ps2_hle_pools::callbackStackFloor()), true});
+            h.push_back({"hle_callback_top", std::to_string(0x00100000u), true});
+            h.push_back({"hle_grow_base", std::to_string(grow.base), true});
+            h.push_back({"hle_grow_capacity", std::to_string(grow.capacity), true});
+            h.push_back({"hle_arena_base", std::to_string(ps2_hle_pools::kHleArenaBase), true});
+            h.push_back({"hle_arena_bytes", std::to_string(ps2_hle_pools::kHleArenaBytes), true});
             env = std::getenv("PS2X_PAD_SCRIPT_CLOCK");
             h.push_back({"pad_clock", env ? env : "", true});
             const std::string prefix = padScriptPrefix(std::getenv("PS2X_PAD_SCRIPT"), vsyncTick);
@@ -1755,6 +1766,19 @@ void PS2RuntimeSavestate::saveKernel(const PS2Runtime &rt, Writer &w)
     w.u32(rt.m_guestHeapLimit);
     w.u32(rt.m_guestHeapSuggestedBase);
     w.b(rt.m_guestHeapConfigured);
+    const auto growLayout = ps2_ssx3_patch_grow::layout();
+    const auto growState = ps2_ssx3_patch_grow::snapshot();
+    w.u32(growLayout.base);
+    w.u32(growLayout.capacity);
+    w.b(growState.active);
+    w.b(growState.refused);
+    w.u32(growState.cache);
+    w.u64(growState.moved.size());
+    for (const auto &[to, from] : growState.moved)
+    {
+        w.u32(to);
+        w.u32(from);
+    }
     w.u32(rt.m_asyncCallbackStackFloor);
     w.u32(rt.m_asyncCallbackStackTop);
     w.u64(rt.m_loadedModules.size());
@@ -1799,6 +1823,23 @@ bool PS2RuntimeSavestate::loadKernel(PS2Runtime &rt, Reader &r)
     rt.m_guestHeapLimit = r.u32();
     rt.m_guestHeapSuggestedBase = r.u32();
     rt.m_guestHeapConfigured = r.b();
+    const auto growLayout = ps2_ssx3_patch_grow::layout();
+    const uint32_t savedGrowBase = r.u32();
+    const uint32_t savedGrowCapacity = r.u32();
+    if (savedGrowBase != growLayout.base || savedGrowCapacity != growLayout.capacity)
+        return r.fail("TK34 grow layout differs");
+    ps2_ssx3_patch_grow::State growState;
+    growState.active = r.b();
+    growState.refused = r.b();
+    growState.cache = r.u32();
+    growState.moved.resize(static_cast<size_t>(r.count(8u)));
+    for (auto &[to, from] : growState.moved)
+    {
+        to = r.u32();
+        from = r.u32();
+    }
+    if (!r.ok() || !ps2_ssx3_patch_grow::restore(growState))
+        return r.fail("invalid TK34 grow state");
     // HNG1: the HLE arena is not in the state; its blocks are short-lived
     // MPEG buffers, so a load starts it empty.
     rt.m_hleArenaBlocks.clear();

@@ -19,7 +19,7 @@ namespace ps2_savestate
 {
     inline constexpr uint32_t kHeaderVersion = 1u;
     inline constexpr uint32_t kMemoryVersion = 1u;
-    inline constexpr uint32_t kRuntimeVersion = 1u;
+    inline constexpr uint32_t kRuntimeVersion = 2u; // HMS2: TK34 grow map and layout
     inline constexpr uint32_t kSchedulerVersion = 1u;
     inline constexpr uint32_t kVuVersion = 1u;
     inline constexpr uint32_t kGsVersion = 3u; // v3: CLUT tail + palette indices (S2), vertex queue (S3), footer
