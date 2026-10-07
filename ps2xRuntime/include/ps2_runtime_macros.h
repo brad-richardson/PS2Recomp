@@ -408,7 +408,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     uint32_t _addr = (uint32_t)(addr);                        \
     return _addr <= PS2_RAM_SIZE - sizeof(uint8_t) /* EX1 */ \
         ? Ps2CanonicalRead8(rdram, _addr)                    \
-        : (PS2Runtime::isSpecialAddress(_addr)               \
+        : (PS2Runtime::isSpecialAddress(_addr, 1u)               \
             ? runtime->Load8(rdram, ctx, _addr)               \
             : FAST_READ8(_addr)); }())
 
@@ -416,7 +416,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     uint32_t _addr = (uint32_t)(addr);                        \
     return _addr <= PS2_RAM_SIZE - sizeof(uint16_t) /* EX1 */ \
         ? Ps2CanonicalRead16(rdram, _addr)                   \
-        : (PS2Runtime::isSpecialAddress(_addr)               \
+        : (PS2Runtime::isSpecialAddress(_addr, 2u)               \
             ? runtime->Load16(rdram, ctx, _addr)              \
             : FAST_READ16(_addr)); }())
 
@@ -424,7 +424,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     uint32_t _addr = (uint32_t)(addr);                        \
     uint32_t _rv = _addr <= PS2_RAM_SIZE - sizeof(uint32_t) /* EX1 */ \
         ? Ps2CanonicalRead32(rdram, _addr)                   \
-        : (PS2Runtime::isSpecialAddress(_addr)               \
+        : (PS2Runtime::isSpecialAddress(_addr, 4u)               \
             ? runtime->Load32(rdram, ctx, _addr)              \
             : FAST_READ32(_addr));                           \
     /* HL2: no split120 hook here. The generator emits READ32_SPLIT only at */ \
@@ -438,7 +438,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     uint32_t _addr = (uint32_t)(addr);                        \
     uint32_t _rv = _addr <= PS2_RAM_SIZE - sizeof(uint32_t) /* EX1 */ \
         ? Ps2CanonicalRead32(rdram, _addr)                   \
-        : (PS2Runtime::isSpecialAddress(_addr)               \
+        : (PS2Runtime::isSpecialAddress(_addr, 4u)               \
             ? runtime->Load32(rdram, ctx, _addr)              \
             : FAST_READ32(_addr));                           \
     if (ps2_ts2_split60::halfMode()) /* EE1P2: one product gate per 32-bit load */ \
@@ -449,7 +449,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     uint32_t _addr = (uint32_t)(addr);                        \
     uint64_t _rv = _addr <= PS2_RAM_SIZE - sizeof(uint64_t) /* EX1 */ \
         ? Ps2CanonicalRead64(rdram, _addr)                   \
-        : (PS2Runtime::isSpecialAddress(_addr)               \
+        : (PS2Runtime::isSpecialAddress(_addr, 8u)               \
             ? runtime->Load64(rdram, ctx, _addr)              \
             : FAST_READ64(_addr));                           \
     return _rv; }())
@@ -458,7 +458,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
     uint32_t _addr = (uint32_t)(addr);                        \
     __m128i _rv = _addr <= PS2_RAM_SIZE - sizeof(__m128i) /* EX1 */ \
         ? Ps2CanonicalRead128(rdram, _addr)                  \
-        : (PS2Runtime::isSpecialAddress(_addr)               \
+        : (PS2Runtime::isSpecialAddress(_addr, 16u)               \
             ? runtime->Load128(rdram, ctx, _addr)             \
             : FAST_READ128(_addr));                          \
     return _rv; }())
@@ -474,7 +474,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 1u, (uint64_t)_wv, 0u, ctx, runtime);    \
         if (_addr <= PS2_RAM_SIZE - sizeof(uint8_t) || /* EX1: canonical RAM */        \
-            !PS2Runtime::isSpecialAddress(_addr))                                      \
+            !PS2Runtime::isSpecialAddress(_addr, 1u))                                      \
         {                                                                              \
             ps2TraceGuestWrite(rdram, _addr, 1u, _wv, 0u, "WRITE8", ctx);              \
             FAST_WRITE8(_addr, _wv);                                                   \
@@ -496,7 +496,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         if (ps2DiagWatchEnabled())                                                       \
             ps2DiagWatchReport(rdram, _addr, 2u, (uint64_t)_wv, 0u, ctx, runtime);      \
         if (_addr <= PS2_RAM_SIZE - sizeof(uint16_t) || /* EX1: canonical RAM */       \
-            !PS2Runtime::isSpecialAddress(_addr))                                      \
+            !PS2Runtime::isSpecialAddress(_addr, 2u))                                      \
         {                                                                                \
             ps2TraceGuestWrite(rdram, _addr, 2u, _wv, 0u, "WRITE16", ctx);               \
             FAST_WRITE16(_addr, _wv);                                                    \
@@ -518,7 +518,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         if (ps2DiagWatchEnabled())                                                       \
             ps2DiagWatchReport(rdram, _addr, 4u, (uint64_t)_wv, 0u, ctx, runtime);      \
         if (_addr <= PS2_RAM_SIZE - sizeof(uint32_t) || /* EX1: canonical RAM */       \
-            !PS2Runtime::isSpecialAddress(_addr))                                      \
+            !PS2Runtime::isSpecialAddress(_addr, 4u))                                      \
         {                                                                                \
             ps2TraceGuestWrite(rdram, _addr, 4u, _wv, 0u, "WRITE32", ctx);               \
             FAST_WRITE32(_addr, _wv);                                                    \
@@ -540,7 +540,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 8u, _wv, 0u, ctx, runtime);              \
         if (_addr <= PS2_RAM_SIZE - sizeof(uint64_t) || /* EX1: canonical RAM */       \
-            !PS2Runtime::isSpecialAddress(_addr))                                      \
+            !PS2Runtime::isSpecialAddress(_addr, 8u))                                      \
         {                                                                              \
             ps2TraceGuestWrite(rdram, _addr, 8u, _wv, 0u, "WRITE64", ctx);             \
             FAST_WRITE64(_addr, _wv);                                                  \
@@ -564,7 +564,7 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         if (ps2DiagWatchEnabled())                                                     \
             ps2DiagWatchReport(rdram, _addr, 16u, _lo, _hi, ctx, runtime);            \
         if (_addr <= PS2_RAM_SIZE - sizeof(__m128i) || /* EX1: canonical RAM */        \
-            !PS2Runtime::isSpecialAddress(_addr))                                      \
+            !PS2Runtime::isSpecialAddress(_addr, 16u))                                      \
         {                                                                              \
             ps2TraceGuestWrite(rdram, _addr, 16u, _lo, _hi, "WRITE128", ctx);          \
             FAST_WRITE128(_addr, _value);                                              \

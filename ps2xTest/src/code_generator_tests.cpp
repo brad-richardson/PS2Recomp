@@ -4,6 +4,8 @@
 #include "ps2recomp/ps2_recompiler.h"
 #include "ps2recomp/types.h"
 #include "ps2_codegen_abi.h"
+#include "runtime/ps2_address.h"
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -169,6 +171,57 @@ void register_code_generator_tests()
 {
     MiniTest::Case("CodeGenerator", [](TestCase &tc)
                    {
+    tc.Run("generated VU bank accesses route at every alias boundary and width", [](TestCase &t) {
+        // These expected extents are independent of the classifier table.
+        constexpr std::array<std::pair<uint32_t, uint32_t>, 4> banks{{
+            {0x11000000u, 0x1000u}, {0x11004000u, 0x1000u},
+            {0x11008000u, 0x4000u}, {0x1100c000u, 0x4000u},
+        }};
+        constexpr std::array<uint32_t, 3> aliases{{0u, 0x80000000u, 0xa0000000u}};
+        constexpr std::array<uint32_t, 5> widths{{1u, 2u, 4u, 8u, 16u}};
+        constexpr std::array<uint32_t, 5> loads{{OPCODE_LB, OPCODE_LH, OPCODE_LW, OPCODE_LD, OPCODE_LQ}};
+        constexpr std::array<uint32_t, 5> stores{{OPCODE_SB, OPCODE_SH, OPCODE_SW, OPCODE_SD, OPCODE_SQ}};
+        CodeGenerator gen({}, {});
+        size_t checked = 0;
+        std::string firstFailure;
+        for (const auto [base, size] : banks)
+        {
+            const std::array<uint32_t, 6> points{{base - 16u, base - 1u, base,
+                                                   base + size - 16u, base + size - 1u, base + size}};
+            for (uint32_t alias : aliases)
+            for (uint32_t phys : points)
+            for (size_t wi = 0; wi < widths.size(); ++wi)
+            {
+                const uint32_t addr = phys | alias;
+                const uint32_t width = widths[wi];
+                bool expectedSpecial = false;
+                for (const auto [otherBase, otherSize] : banks)
+                    expectedSpecial |= phys < otherBase + otherSize &&
+                                       static_cast<uint64_t>(phys) + width > otherBase;
+                MemoryAccessHint hint{};
+                hint.hasAddress = true;
+                hint.address = addr;
+                for (bool write : {false, true})
+                {
+                    const Instruction inst = makeIType(0x9000u, write ? stores[wi] : loads[wi], 1, 2, 0);
+                    const std::string generated = gen.translateInstruction(inst, hint);
+                    const std::string route = write ? "runtime->Store" : "runtime->Load";
+                    const bool routed = generated.find(route + std::to_string(width * 8u) + "(") != std::string::npos;
+                    if ((routed != expectedSpecial || Ps2IsSpecialAddress(addr, width) != expectedSpecial) && firstFailure.empty())
+                    {
+                        std::ostringstream out;
+                        out << "addr=0x" << std::hex << addr << std::dec << " width=" << width
+                            << " write=" << write << " expected=" << expectedSpecial << " generated=" << generated;
+                        firstFailure = out.str();
+                    }
+                    ++checked;
+                }
+            }
+        }
+        t.Equals(checked, size_t{720}, "all VU bank/alias/boundary/width/direction combinations executed through code generation");
+        t.IsTrue(firstFailure.empty(), firstFailure.empty() ? "all generated accesses routed correctly" : firstFailure);
+    });
+
     tc.Run("Generated sources cannot be shadowed by stale local declaration headers", [](TestCase &t) {
         Function func;
         func.name = "header_lookup";
@@ -1577,7 +1630,7 @@ void register_code_generator_tests()
                      "resolved HLE calls must not retain the unchanged-PC compatibility guard");
         });
 
-        tc.Run("trailing JAL without decoded delay slot still emits call flow", [](TestCase &t) {
+        tc.Run("trailing JAL without decoded delay slot is rejected", [](TestCase &t) {
             Function func;
             func.name = "jal_truncated";
             func.start = 0xA100;
@@ -1593,17 +1646,12 @@ void register_code_generator_tests()
             Instruction jal = makeJal(0xA100, 0xB000);
 
             CodeGenerator gen({targetSym}, {});
-            std::string generated = gen.generateFunction(func, {jal}, false);
-            printGeneratedCode("trailing JAL without decoded delay slot still emits call flow", generated);
-
-            t.IsTrue(generated.find("SET_GPR_U32(ctx, 31, 0xA108u);") != std::string::npos,
-                     "truncated trailing JAL should still set RA");
-            t.IsTrue(generated.find("runtime->dispatchGuestBranch(rdram, ctx, 0xB000u") != std::string::npos,
-                     "truncated trailing JAL should still emit the call dispatch");
-            t.IsTrue(generated.find("0xA100u, 0xA108u") != std::string::npos,
-                     "truncated trailing JAL should still pass the fallthrough to runtime dispatch");
-            t.IsTrue(generated.find("// JAL 0xB000 - Handled by branch logic") == std::string::npos,
-                     "truncated trailing JAL must not degrade to comment-only output");
+            bool rejected = false;
+            try { (void)gen.generateFunction(func, {jal}, false); }
+            catch (const std::runtime_error &e) {
+                rejected = std::string(e.what()).find("missing decoded delay slot at 0xa104") != std::string::npos;
+            }
+            t.IsTrue(rejected, "a bare CodeGenerator without ELF must reject an unreadable JAL slot");
         });
 
         tc.Run("JAL to internal target becomes goto", [](TestCase &t) {
@@ -1802,7 +1850,7 @@ void register_code_generator_tests()
                      "JR $31 should pass a return-specific debug name");
         });
 
-        tc.Run("trailing JR $31 without decoded delay slot still emits return flow", [](TestCase &t) {
+        tc.Run("trailing JR $31 without decoded delay slot is rejected", [](TestCase &t) {
             Function func;
             func.name = "jr_ra_truncated";
             func.start = 0x1500;
@@ -1817,19 +1865,12 @@ void register_code_generator_tests()
             Instruction jr = makeJr(0x1514, 31);
 
             CodeGenerator gen({}, {});
-            std::string generated = gen.generateFunction(func, {jal, jalDelay, atReturn, atTarget, jr}, false);
-            printGeneratedCode("trailing JR $31 without decoded delay slot still emits return flow", generated);
-
-            t.IsTrue(generated.find("const uint32_t jumpTarget = GPR_U32(ctx, 31);") != std::string::npos,
-                     "truncated trailing JR should still read the return target");
-            t.IsFalse(generated.find("switch (jumpTarget)") != std::string::npos,
-                      "truncated trailing JR should not emit a broad local return-target switch");
-            t.IsTrue(generated.find("label_1508:") != std::string::npos,
-                     "truncated trailing JR should still include the internal return label");
-            t.IsTrue(generated.find("// JR $31 - Handled by branch logic") == std::string::npos,
-                     "truncated trailing JR must not degrade to comment-only output");
-            t.IsTrue(generated.find("PS2Runtime::GuestBranchKind::Return") != std::string::npos,
-                     "truncated JR $31 should still use return diagnostics");
+            bool rejected = false;
+            try { (void)gen.generateFunction(func, {jal, jalDelay, atReturn, atTarget, jr}, false); }
+            catch (const std::runtime_error &e) {
+                rejected = std::string(e.what()).find("missing decoded delay slot at 0x1518") != std::string::npos;
+            }
+            t.IsTrue(rejected, "a bare CodeGenerator without ELF must reject an unreadable JR slot");
         });
 
         tc.Run("unresolved JR non-RA uses dispatcher resume entries without broad local switch", [](TestCase &t) {
@@ -1922,7 +1963,7 @@ void register_code_generator_tests()
             Instruction target0 = makeNop(0x1620);
             Instruction target1 = makeNop(0x1630);
 
-            JumpTable configured{};
+            ps2recomp::JumpTable configured{};
             configured.address = tableAddress;
             configured.entries.push_back({0u, 0x1620u});
             configured.entries.push_back({1u, 0x1630u});

@@ -85,7 +85,7 @@ namespace ps2recomp
         {
             const uint32_t resolvedAddress = memoryHint.address;
             const std::string resolvedAddressExpr = addressLiteral(resolvedAddress);
-            if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress))
+            if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress, memoryAccessSize(width)))
             {
                 return fmt::format("runtime->Load{}(rdram, ctx, {})", width, resolvedAddressExpr);
             }
@@ -114,7 +114,7 @@ namespace ps2recomp
         {
             const uint32_t resolvedAddress = memoryHint.address;
             const std::string resolvedAddressExpr = addressLiteral(resolvedAddress);
-            if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress))
+            if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress, memoryAccessSize(width)))
             {
                 return fmt::format("runtime->Store{}(rdram, ctx, {}, {})", width, resolvedAddressExpr, value);
             }

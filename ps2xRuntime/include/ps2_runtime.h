@@ -198,6 +198,15 @@ struct alignas(16) R5900Context
     ~R5900Context() = default;
 };
 
+// A guest exception raised during generated execution must unwind before a
+// Load expression can write its destination or a branch can publish its target.
+// Tests and non-generated callers retain the normal returning SignalException.
+namespace ps2_guest_exception_transfer
+{
+    struct Raised {};
+    inline thread_local R5900Context *activeContext = nullptr;
+}
+
 inline uint32_t getRegU32(const R5900Context *ctx, int reg)
 {
     // Check if reg is valid (0-31)
@@ -532,9 +541,9 @@ public:
                                  uint32_t tadr,
                                  uint32_t chcr);
 
-    static inline bool isSpecialAddress(uint32_t addr)
+    static inline bool isSpecialAddress(uint32_t addr, uint32_t width = 1u)
     {
-        return Ps2IsSpecialAddress(addr);
+        return Ps2IsSpecialAddress(addr, width);
     }
 
 public:
