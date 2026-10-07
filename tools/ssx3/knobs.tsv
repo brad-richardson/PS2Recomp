@@ -45,7 +45,6 @@ PS2X_COVERAGE_TICK	gate	CT1
 PS2X_DEINTERLACE	play-default	renderer
 PS2X_DETERMINISTIC	gate	E55B2
 PS2X_DET_HASH_EVERY	gate	E55C2
-PS2X_DIAG_PARK	active-lane	renderer
 PS2X_DIAG_PERIOD_MS	active-lane	renderer
 PS2X_DIAG_WATCH	active-lane	renderer
 PS2X_DISPLAY_HZ	play-default	DP1

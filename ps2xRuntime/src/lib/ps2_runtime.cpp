@@ -18,7 +18,6 @@
 #include <filesystem>
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
-#include "ps2_park_snapshot.h"
 #include "ps2_present_fallback.h"
 #include "ps2_present_geometry.h"
 #include "ps2_pad_latch.h"
@@ -5104,7 +5103,7 @@ __attribute__((noinline, cold)) bool dspArm()
     // PS2X_TS2_CASE_COUNT): counting is unconditionally off, so only the
     // split-mode product check remains.
     on = on && !ps2_ts2_split60::enabled();
-    on = on && !ps2_park::parkEnabled() && diagPeriodMs() == 0u;
+    on = on && diagPeriodMs() == 0u;
     g_dsp.fh1 = ps2_fh1::enabled() || ps2_fh1::tapOn();
     on = on && (!g_dsp.fh1 || ps2_fh1::hookPreclassify()); // chain mode runs every hook
     if (on)
@@ -5377,16 +5376,8 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
 
     // HP3 F2: s_diagCallTick was incremented here but never read
     // anywhere; removed (no observable change in any build).
-    // T1: cumulative hot-pc tally. HP3 F3: opt-in behind the cached
-    // park flag so speed builds pay one load+branch per dispatch; the
-    // snapshot (EeScheduler park fill) reads it only when park is on.
-    if (ps2_park::parkEnabled())
-    {
-        ps2_park::tallyDispatch(targetPc, (ctx != nullptr) ? getRegU32(ctx, 31) : 0u);
-    }
     // P1c HLE stub/call histogram at the register_functions.cpp binding
-    // lookup, per-period and cleared (the T1 tally above is cumulative
-    // for the whole boot). Already gated on the diag period.
+    // lookup, per-period and cleared. Already gated on the diag period.
     if (diagPeriodMs() != 0u)
     {
         const uint32_t callerRa = (ctx != nullptr) ? getRegU32(ctx, 31) : 0u;

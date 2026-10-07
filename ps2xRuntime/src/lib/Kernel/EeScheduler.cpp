@@ -29,7 +29,6 @@
 #include "ps2_snd_spike.h"
 
 #include "ps2_log.h"
-#include "ps2_park_snapshot.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_android_pause.h"
 
@@ -296,163 +295,6 @@ void EeScheduler::emitDetHashTap()
 }
 #endif
 
-// T1 park snapshot fill: runs on the executor inside run() when SIGTERM
-// (or PARK_TIMEOUT_MS) fires. Reads live kernel state plus the always-on
-// T1 tallies, writes ONE JSON + ONE table, then stops the boot on the
-// SIGTERM path only (a timeout snapshot is mid-run, non-terminal).
-namespace
-{
-const char *parkStatusName(EeThreadStatus status)
-{
-    switch (status)
-    {
-    case EeThreadStatus::Running:
-        return "Running";
-    case EeThreadStatus::Ready:
-        return "Ready";
-    case EeThreadStatus::Waiting:
-        return "Waiting";
-    case EeThreadStatus::WaitingSuspended:
-        return "WaitingSuspended";
-    case EeThreadStatus::Suspended:
-        return "Suspended";
-    case EeThreadStatus::Dormant:
-        return "Dormant";
-    default:
-        return "Unknown";
-    }
-}
-
-const char *parkWaitReasonName(EeWaitReason reason)
-{
-    switch (reason)
-    {
-    case EeWaitReason::None:
-        return "None";
-    case EeWaitReason::Sleep:
-        return "Sleep";
-    case EeWaitReason::Semaphore:
-        return "Semaphore";
-    case EeWaitReason::EventFlag:
-        return "EventFlag";
-    case EeWaitReason::VSync:
-        return "VSync";
-    case EeWaitReason::External:
-        return "External";
-    case EeWaitReason::Mpeg:
-        return "Mpeg";
-    default:
-        return "Unknown";
-    }
-}
-} // namespace
-
-void parkSnapshotWriteOnce(EeScheduler &ee, PS2Runtime &runtime)
-{
-    if (!ps2_park::takeSnapshotTurn())
-    {
-        return;
-    }
-    ps2_park::ParkSnapshotData data;
-    const EeKernelSnapshot snap = ee.snapshot();
-    const std::map<int, uint64_t> &sched = ps2_park::schedCounts();
-    for (const EeThreadSnapshot &t : snap.threads)
-    {
-        ps2_park::ParkThreadRow row;
-        row.id = t.id;
-        row.status = static_cast<int>(t.status);
-        row.statusName = parkStatusName(t.status);
-        row.waitReason = static_cast<int>(t.waitReason);
-        row.waitReasonName = parkWaitReasonName(t.waitReason);
-        row.waitId = t.waitId;
-        row.pc = t.pc;
-        row.entry = t.entry;
-        row.priority = t.currentPriority;
-        if (const auto it = sched.find(t.id); it != sched.end())
-        {
-            row.scheduled = it->second;
-        }
-        // Shallow ra chain: live $ra, then stacked invocation pcs
-        // innermost-first (no guest-stack walk; see the T1 report).
-        if (const GuestThread *live = ee.thread(t.id))
-        {
-            const R5900Context &active = live->activeContext();
-            row.ra = getRegU32(&active, 31);
-            row.sp = getRegU32(&active, 29);
-            row.chain.push_back(row.ra);
-            for (size_t i = live->invocations.size(); i > 0; --i)
-            {
-                row.chain.push_back(live->invocations[i - 1].context.pc);
-            }
-        }
-        data.threads.push_back(std::move(row));
-    }
-    std::sort(data.threads.begin(), data.threads.end(),
-              [](const ps2_park::ParkThreadRow &a, const ps2_park::ParkThreadRow &b) {
-                  return a.id < b.id;
-              });
-    for (const EeSemaphoreSnapshot &s : snap.semaphores)
-    {
-        ps2_park::ParkSemaRow row;
-        row.id = s.id;
-        row.count = s.count;
-        row.maxCount = s.maxCount;
-        row.waiters = s.waiters;
-        if (const EeSemaphore *live = ee.semaphore(s.id))
-        {
-            row.initCount = live->initCount;
-        }
-        data.semaphores.push_back(row);
-    }
-    std::sort(data.semaphores.begin(), data.semaphores.end(),
-              [](const ps2_park::ParkSemaRow &a, const ps2_park::ParkSemaRow &b) {
-                  return a.id < b.id;
-              });
-    data.creates = ps2_park::semaCreates();
-    data.waitHist = ps2_park::semaWaitHist();
-    data.signalHist = ps2_park::semaSignalHist();
-    for (const auto &[pc, entry] : ps2_park::hotPcCounts())
-    {
-        ps2_park::ParkHotPc hot;
-        hot.pc = pc;
-        hot.count = entry.count;
-        hot.firstRa = entry.firstRa;
-        hot.lastRa = entry.lastRa;
-        data.hotPc.push_back(hot);
-    }
-    std::sort(data.hotPc.begin(), data.hotPc.end(),
-              [](const ps2_park::ParkHotPc &a, const ps2_park::ParkHotPc &b) {
-                  return a.count > b.count;
-              });
-    for (const ps2_log::DropCensusRow &d : ps2_log::snapshotDropCensus())
-    {
-        ps2_park::ParkDrop drop;
-        drop.site = d.site;
-        drop.reason = d.reason;
-        drop.count = d.count;
-        data.drops.push_back(std::move(drop));
-    }
-    data.rpc = ps2_park::rpcEvents();
-    data.rpcOverflow = ps2_park::rpcEventsOverflow();
-    data.gs.kicks = ps2_park::gsKickCount().load(std::memory_order_relaxed);
-    data.gs.kicksDrawing = ps2_park::gsKickDrawingCount().load(std::memory_order_relaxed);
-    data.gs.gifPackets = ps2_park::gsGifPacketCount().load(std::memory_order_relaxed);
-    data.gs.copyRegs = ps2_park::gsCopyRegCount().load(std::memory_order_relaxed);
-    data.gs.dmaStarts = runtime.memory().dmaStartCount();
-    data.gs.gifCopies = runtime.memory().gifCopyCount();
-    data.gs.gsWrites = runtime.memory().gsWriteCount();
-    data.gs.vifWrites = runtime.memory().vifWriteCount();
-    data.sched = sched;
-    if (!ps2_park::writeParkFiles(data, ps2_park::parkDir()))
-    {
-        std::cerr << "[diag:park] snapshot write FAILED dir=" << ps2_park::parkDir() << std::endl;
-    }
-    if (ps2_park::termRequested())
-    {
-        ee.requestStop();
-    }
-}
-
 EeScheduler::~EeScheduler()
 {
     requestStop();
@@ -563,8 +405,6 @@ void EeScheduler::run()
     };
     const EnqueueSinkGuard enqueueSinkGuard{};
     GsWorker::setEnqueueWaitSink(m_perfTail ? &m_perfEnqueueNs : nullptr);
-    // T1 park snapshot: install the SIGTERM handler once when enabled.
-    ps2_park::installParkTermHandler();
 
     // P1c steady-state diagnostics state (PS2X_DIAG_PERIOD_MS). HP3 F7:
     // compiled out of speed builds (was one increment + check per loop
@@ -596,12 +436,6 @@ void EeScheduler::run()
 
     while (!m_stopRequested.load(std::memory_order_acquire))
     {
-        // T1: SIGTERM (or PARK_TIMEOUT_MS) writes ONE JSON + ONE table,
-        // then stops the boot on the SIGTERM path only.
-        if (ps2_park::parkSnapshotDue())
-        {
-            parkSnapshotWriteOnce(*this, m_runtime);
-        }
         if (ssSkipEvents)
             ssSkipEvents = false;
         else
@@ -755,10 +589,6 @@ void EeScheduler::run()
                 // vsync/GS/DMA progress past silent guest walls.
                 std::cerr << "[diag:frame] block=" << (s_diagBlock - 1)
                           << " vsync=" << m_runtime.memory().gs().vsyncTick.load(std::memory_order_relaxed)
-                          << " kicks=" << ps2_park::gsKickCount().load(std::memory_order_relaxed)
-                          << " kicksDrawing=" << ps2_park::gsKickDrawingCount().load(std::memory_order_relaxed)
-                          << " gif=" << ps2_park::gsGifPacketCount().load(std::memory_order_relaxed)
-                          << " copyRegs=" << ps2_park::gsCopyRegCount().load(std::memory_order_relaxed)
                           << " dma=" << m_runtime.memory().dmaStartCount()
                           << " gifCopy=" << m_runtime.memory().gifCopyCount()
                           << " gsWrites=" << m_runtime.memory().gsWriteCount()
@@ -872,7 +702,6 @@ void EeScheduler::run()
             if (next)
             {
                 makeRunning(*next);
-                ps2_park::tallySched(next->id);
                 // HP3 F7: per-schedule P1c bump; taps builds only.
 #if PS2X_ENABLE_DIAG_TAPS
                 if (diagPeriodMs() != 0u)
@@ -886,7 +715,6 @@ void EeScheduler::run()
                 GuestThread *owner = &acquireInvocationThread();
                 GuestInvocation invocation = std::move(m_pendingInvocations.front());
                 m_pendingInvocations.pop_front();
-                ps2_park::tallySched(owner->id);
                 // HP3 F7: invocation-path P1c bump; taps builds only.
 #if PS2X_ENABLE_DIAG_TAPS
                 if (diagPeriodMs() != 0u)
@@ -1728,13 +1556,6 @@ int EeScheduler::createSemaphore(int initCount, int maxCount, uint32_t attr, uin
     semaphore.option = option;
     m_semaphores.emplace(id, std::move(semaphore));
     publishSnapshot();
-    // T1: success-only create row (the miner filters [diag:sema-create]
-    // to ret>0 the same way; noparam/failure lines stay log-only).
-    {
-        const GuestThread *creator = currentThread();
-        const uint32_t creatorPc = creator ? creator->activeContext().pc : 0u;
-        ps2_park::tallySemaCreate(id, m_currentThreadId, creatorPc, initCount, maxCount);
-    }
     return id;
 }
 
@@ -1767,13 +1588,6 @@ int EeScheduler::deleteSemaphore(int id, bool interruptSafe)
 int EeScheduler::signalSemaphore(int id, bool interruptSafe)
 {
     assertExecutor();
-    // T1: entry tally covers exactly the calls the [diag:sema] lines cover.
-    {
-        const GuestThread *parkWaker = currentThread();
-        const uint32_t parkPc = parkWaker ? parkWaker->activeContext().pc : 0u;
-        const uint32_t parkRa = parkWaker ? getRegU32(&parkWaker->activeContext(), 31) : 0u;
-        ps2_park::tallySemaSignal(id, m_currentThreadId, parkPc, parkRa);
-    }
     EeSemaphore *object = semaphore(id);
     if (!object)
     {
@@ -1831,13 +1645,6 @@ int EeScheduler::pollSemaphore(int id)
 void EeScheduler::waitSemaphore(int id)
 {
     assertExecutor();
-    // T1: entry tally covers exactly the calls the [diag:sema] lines cover.
-    {
-        const GuestThread *parkSelf = currentThread();
-        const uint32_t parkPc = parkSelf ? parkSelf->activeContext().pc : 0u;
-        const uint32_t parkRa = parkSelf ? getRegU32(&parkSelf->activeContext(), 31) : 0u;
-        ps2_park::tallySemaWait(id, m_currentThreadId, parkPc, parkRa);
-    }
     EeSemaphore *object = semaphore(id);
     if (!object)
     {

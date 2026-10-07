@@ -5,7 +5,6 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_stream_capture.h"
 #include "ps2_log.h"
-#include "ps2_park_snapshot.h"
 #include "runtime/ps2_memory.h"
 #include <array>
 #include <atomic>
@@ -1439,13 +1438,6 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
         return;
     }
 
-    // T1: true GIF-packet count (the [gs:gif] line below caps at 48).
-    // HP3 F15: opt-in behind the cached park flag (snapshot reads it
-    // only when park is on).
-    if (ps2_park::parkEnabled())
-    {
-        ps2_park::tallyGsGif();
-    }
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t packetIndex = s_debugGifPacketCount.fetch_add(1, std::memory_order_relaxed);
         if (packetIndex < 48u)
@@ -2065,7 +2057,7 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         }
     });
 
-    const bool isCopyRelevantReg =
+    [[maybe_unused]] const bool isCopyRelevantReg =
         regAddr == GS_REG_PRIM ||
         regAddr == GS_REG_TEX0_2 ||
         regAddr == GS_REG_TEX1_2 ||
@@ -2075,12 +2067,6 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
         regAddr == GS_REG_FRAME_2 ||
         regAddr == GS_REG_XYOFFSET_2 ||
         regAddr == GS_REG_SCISSOR_2;
-    // T1: true copy-reg count (the [gs:copy-reg] line below caps at 64).
-    // HP3: same park opt-in as tallyGsGif (adjacent T1 tally).
-    if (isCopyRelevantReg && ps2_park::parkEnabled())
-    {
-        ps2_park::tallyGsCopyReg();
-    }
     PS2_IF_AGRESSIVE_LOGS({
         if (isCopyRelevantReg &&
             s_debugCopyRegCount.fetch_add(1u, std::memory_order_relaxed) < 64u)
@@ -2530,12 +2516,6 @@ void GS::vertexKick(bool drawing)
     ++m_vtxCount;
     ++m_vtxIndex;
 
-    // T1: true kick count (the [gs:kick] line below caps at 96).
-    // HP3: same park opt-in as tallyGsGif (adjacent T1 tally).
-    if (ps2_park::parkEnabled())
-    {
-        ps2_park::tallyGsKick(drawing);
-    }
 
     PS2_IF_AGRESSIVE_LOGS({
         const uint32_t debugIndex = s_debugGsVertexKickCount.fetch_add(1, std::memory_order_relaxed);
