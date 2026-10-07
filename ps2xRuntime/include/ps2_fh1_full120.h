@@ -32,6 +32,7 @@
 #include "ps2_fh1_ground2.h"
 #include "ps2_fh1_input2.h"
 #include "ps2_fh1_fh35.h"
+#include "ps2_fh1_jcam2_scratch.h"
 
 #include <algorithm>
 #include <array>
@@ -1083,23 +1084,35 @@ inline bool jcam2Service(uint8_t *ram, const R5900Context &live, PS2Runtime &run
                          Jcam2Shadow &s, uint64_t tick, PS2Runtime::RecompiledFunction fn)
 {
     if (!fn || (s.obj & 3u) || s.obj+0xb0u > PS2_RAM_SIZE) return false;
-    // Reused scratch; it is reconstructed from the live world each service.
-    static std::vector<uint8_t> scratch(PS2_RAM_SIZE);
-    std::memcpy(scratch.data(),ram,PS2_RAM_SIZE);
-    if (!s.ready) std::memcpy(s.body.data(),ram+s.obj,0xb0u);
-    std::memcpy(scratch.data()+s.obj,s.body.data(),0xb0u);
     const uint32_t pos=getRegU32(&live,5)&0x1fffffffu;
     const uint32_t vel=getRegU32(&live,6)&0x1fffffffu;
     if (pos+16u>PS2_RAM_SIZE || vel+16u>PS2_RAM_SIZE) return false;
-    std::memcpy(scratch.data()+pos,s.body.data()+0x70u/4u,16u);
-    std::memcpy(scratch.data()+vel,s.body.data()+0x80u/4u,16u);
-    for (unsigned i=0;i<9;++i) wr32(scratch.data(),kJcam2Pool[i],kJcam2Stock[i]);
-    R5900Context preview=live;
     // The caller supplies multiplier*private dt. Convert only this argument
     // using the current C4 pool value; all arithmetic stays in guest FPU order.
     uint32_t dtBits=0u; rd32(ram,0x49bf1cu,dtBits);
+    if (dtBits!=kHundredTwentieth && dtBits!=kSixtieth) return false;
+    // Private RAM image, reconstructed from the live world each service.
+    // EEP1: lazily filled (only pages the preview touches are copied, see
+    // ps2_fh1_jcam2_scratch.h); PS2X_SSX3_JCAM2_SCRATCH=full copies all of RAM.
+    uint8_t *img=ps2_fh1_jcam2::lazyRequested() ? ps2_fh1_jcam2::lazyBegin(ram) : nullptr;
+    struct LazyClose
+    {
+        bool on;
+        ~LazyClose() { if (on) ps2_fh1_jcam2::lazyEnd(); }
+    } lazyClose{img!=nullptr};
+    if (!img)
+    {
+        static std::vector<uint8_t> scratch(PS2_RAM_SIZE);
+        std::memcpy(scratch.data(),ram,PS2_RAM_SIZE);
+        img=scratch.data();
+    }
+    if (!s.ready) std::memcpy(s.body.data(),ram+s.obj,0xb0u);
+    std::memcpy(img+s.obj,s.body.data(),0xb0u);
+    std::memcpy(img+pos,s.body.data()+0x70u/4u,16u);
+    std::memcpy(img+vel,s.body.data()+0x80u/4u,16u);
+    for (unsigned i=0;i<9;++i) wr32(img,kJcam2Pool[i],kJcam2Stock[i]);
+    R5900Context preview=live;
     if (dtBits==kHundredTwentieth) preview.f[12]=FPU_MUL_S(preview.f[12],2.0f);
-    else if (dtBits!=kSixtieth) return false;
     preview.pc=kJcam2Solver;
     const uint32_t returned=getRegU32(&live,31);
     runtime.m_fh32Preview=true;
@@ -1107,20 +1120,20 @@ inline bool jcam2Service(uint8_t *ram, const R5900Context &live, PS2Runtime &run
     runtime.m_fh32PreviewBudget=8192u;
     try
     {
-        fn(scratch.data(),&preview,&runtime);
+        fn(img,&preview,&runtime);
         while (!runtime.m_fh32PreviewFailed && preview.pc!=returned)
         {
             if (!runtime.m_fh32PreviewBudget) { runtime.m_fh32PreviewFailed=true; break; }
             --runtime.m_fh32PreviewBudget;
             auto resume=runtime.lookupFunction(preview.pc);
             if (!resume) { runtime.m_fh32PreviewFailed=true; break; }
-            resume(scratch.data(),&preview,&runtime);
+            resume(img,&preview,&runtime);
         }
     }
     catch (...) { runtime.m_fh32Preview=false; throw; }
     runtime.m_fh32Preview=false;
     if (runtime.m_fh32PreviewFailed || preview.pc!=returned) return false;
-    std::memcpy(s.body.data(),scratch.data()+s.obj,0xb0u);
+    std::memcpy(s.body.data(),img+s.obj,0xb0u);
     s.tick=tick; s.ready=true; ++s.services;
     return true;
 }
