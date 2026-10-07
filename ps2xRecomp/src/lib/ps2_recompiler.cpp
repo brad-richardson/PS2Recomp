@@ -1130,6 +1130,23 @@ namespace ps2recomp
             m_codeGenerator->setBootstrapInfo(m_bootstrapInfo);
             m_codeGenerator->setConfiguredJumpTables(m_config.jumpTables);
             m_codeGenerator->setEmitInstructionComments(true);
+            if (!m_config.symbolNamesPath.empty())
+            {
+                std::ifstream symbolNames(m_config.symbolNamesPath);
+                if (!symbolNames)
+                {
+                    m_reporter.error("config", "cannot read symbol_names: " + m_config.symbolNamesPath);
+                    return false;
+                }
+                std::vector<std::string> rejected;
+                const auto displayNames = LoadSymbolDisplayNames(symbolNames, rejected);
+                for (const std::string &row : rejected)
+                    m_reporter.warning("symbol_names", "skipped row: " + row);
+                std::ostringstream msg;
+                msg << "symbol_names: " << displayNames.size() << " banner names from " << m_config.symbolNamesPath;
+                m_reporter.progress(msg.str());
+                m_codeGenerator->setDisplayNames(displayNames);
+            }
 
             fs::create_directories(m_config.outputPath);
 
@@ -2704,6 +2721,61 @@ namespace ps2recomp
             return StubTarget::Stub;
         }
         return StubTarget::Unknown;
+    }
+
+    std::unordered_map<uint32_t, std::string> PS2Recompiler::LoadSymbolDisplayNames(
+        std::istream &input, std::vector<std::string> &rejected)
+    {
+        std::unordered_map<uint32_t, std::string> names;
+        std::string line;
+        bool header = true;
+        while (std::getline(input, line))
+        {
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            if (header)
+            {
+                header = false;
+                continue;
+            }
+            if (line.empty())
+                continue;
+            std::vector<std::string> fields;
+            std::size_t begin = 0;
+            for (std::size_t tab; (tab = line.find('\t', begin)) != std::string::npos; begin = tab + 1)
+                fields.push_back(line.substr(begin, tab - begin));
+            fields.push_back(line.substr(begin));
+
+            uint32_t address = 0;
+            bool valid = fields.size() >= 2 && !fields[1].empty();
+            if (valid)
+            {
+                try
+                {
+                    std::size_t used = 0;
+                    const unsigned long parsed = std::stoul(fields[0], &used, 0);
+                    valid = used == fields[0].size() && parsed <= 0xFFFFFFFFul;
+                    address = static_cast<uint32_t>(parsed);
+                }
+                catch (const std::exception &)
+                {
+                    valid = false;
+                }
+            }
+            if (valid)
+            {
+                valid = std::all_of(fields[1].begin(), fields[1].end(), [](unsigned char c)
+                                    { return std::isalnum(c) || c == '_'; });
+            }
+            if (!valid || names.contains(address))
+            {
+                rejected.push_back(line);
+                continue;
+            }
+            const bool unverified = fields.size() >= 4 && fields[3] == "unverified";
+            names.emplace(address, unverified ? fields[1] + " (unverified)" : fields[1]);
+        }
+        return names;
     }
 
     std::string PS2Recompiler::ClampFilenameLength(const std::string &baseName, const std::string &extension, std::size_t maxLength)

@@ -1,6 +1,7 @@
 #include "ps2recomp/config_manager.h"
 #include "ps2recomp/recompiler_reporter.h"
 #include <toml.hpp>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -39,6 +40,12 @@ namespace ps2recomp
 
             config.inputPath = toml::find<std::string>(general, "input");
             config.ghidraMapPath = toml::find_or<std::string>(general, "ghidra_output", "");
+            config.symbolNamesPath = toml::find_or<std::string>(general, "symbol_names", "");
+            if (!config.symbolNamesPath.empty() && std::filesystem::path(config.symbolNamesPath).is_relative())
+            {
+                config.symbolNamesPath =
+                    (std::filesystem::path(m_configPath).parent_path() / config.symbolNamesPath).lexically_normal().string();
+            }
             config.outputPath = toml::find<std::string>(general, "output");
             config.singleFileOutput = toml::find_or<bool>(general, "single_file_output", false);
             config.lowMemoryMode = toml::find_or<bool>(general, "low_memory_mode", config.lowMemoryMode);
@@ -327,6 +334,8 @@ namespace ps2recomp
         toml::table general;
         general["input"] = config.inputPath;
         general["ghidra_output"] = config.ghidraMapPath;
+        if (!config.symbolNamesPath.empty())
+            general["symbol_names"] = config.symbolNamesPath;
         general["output"] = config.outputPath;
         general["single_file_output"] = config.singleFileOutput;
         general["low_memory_mode"] = config.lowMemoryMode;

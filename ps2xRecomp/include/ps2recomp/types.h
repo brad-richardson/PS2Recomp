@@ -178,6 +178,11 @@ namespace ps2recomp
         std::string inputPath;
         std::string outputPath;
         std::string ghidraMapPath;
+        // SYM2: optional address/name/source/confidence TSV (e.g. the ssxdecomp
+        // sidecar). Comment-only: each listed function gets a "// Name:" banner
+        // line; Function::name, symbols, file names and stub/skip selection
+        // never see these names. A relative path resolves from the config file.
+        std::string symbolNamesPath;
         bool singleFileOutput = false;
         bool lowMemoryMode = false;
         uint32_t outputWorkerThreads = 0;

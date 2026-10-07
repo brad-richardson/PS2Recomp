@@ -74,6 +74,10 @@ namespace ps2recomp
         GifDmaKickPlan gifDmaKickPlan{};
         ss << "// Function: " << function.name << "\n";
         ss << "// Address: 0x" << std::hex << function.start << " - 0x" << function.end << std::dec << "\n";
+        if (const auto displayIt = cg.m_displayNames.find(function.start); displayIt != cg.m_displayNames.end())
+        {
+            ss << "// Name: " << displayIt->second << "\n";
+        }
 
         std::string sanitizedName = cg.getFunctionName(function.start);
         if (sanitizedName.empty())

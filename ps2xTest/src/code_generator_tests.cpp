@@ -192,6 +192,35 @@ void register_code_generator_tests()
                  "the registration source must use the same unambiguous stub header");
     });
 
+    tc.Run("display names add a banner line only", [](TestCase &t) {
+        Function func;
+        func.name = "sub_00416810";
+        func.start = 0x416810;
+        func.end = 0x416814;
+        func.isRecompiled = true;
+
+        CodeGenerator plain({}, {});
+        plain.setRenamedFunctions({{func.start, "sub_00416810_0x416810"}});
+        const std::string without = plain.generateFunction(func, {makeNop(func.start)}, true);
+
+        CodeGenerator named({}, {});
+        named.setRenamedFunctions({{func.start, "sub_00416810_0x416810"}});
+        named.setDisplayNames({{func.start, "strlen (unverified)"}, {0x500000u, "elsewhere"}});
+        const std::string with = named.generateFunction(func, {makeNop(func.start)}, true);
+
+        const std::string banner = "// Address: 0x416810 - 0x416814\n";
+        const std::string line = "// Name: strlen (unverified)\n";
+        t.IsTrue(without.find("// Name:") == std::string::npos, "no display names, no banner line");
+        t.IsTrue(with.find(banner + line) != std::string::npos, "the name follows the address banner");
+        std::string stripped = with;
+        stripped.erase(stripped.find(line), line.size());
+        t.Equals(stripped, without, "the banner line is the only difference");
+        t.IsTrue(with.find("void sub_00416810_0x416810(") != std::string::npos,
+                 "the generated symbol keeps its sub_ name");
+        t.IsTrue(named.generateFunctionRegistration({func}, {}) == plain.generateFunctionRegistration({func}, {}),
+                 "registration output is unchanged");
+    });
+
     tc.Run("unsigned integer loads use explicit zero extension", [](TestCase &t) {
         CodeGenerator gen({}, {});
         const std::string lbu = gen.translateInstruction(makeIType(0x8F10, OPCODE_LBU, 1, 2, 0x10));

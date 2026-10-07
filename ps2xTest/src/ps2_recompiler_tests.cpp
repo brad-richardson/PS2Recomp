@@ -1589,6 +1589,52 @@ void register_ps2_recompiler_tests()
             std::filesystem::remove(configPath, removeError);
         });
 
+        tc.Run("config manager resolves symbol_names from the config directory", [](TestCase &t) {
+            const auto uniqueSuffix = std::to_string(
+                static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const std::filesystem::path dir =
+                std::filesystem::temp_directory_path() / ("ps2recomp-symbol-names-" + uniqueSuffix);
+            std::filesystem::create_directories(dir);
+            const std::filesystem::path configPath = dir / "game.toml";
+            const std::filesystem::path absentPath = dir / "absent.toml";
+
+            std::ofstream configFile(configPath);
+            configFile << "[general]\ninput = \"dummy.elf\"\noutput = \"out\"\nsymbol_names = \"names/symbols.tsv\"\n";
+            configFile.close();
+            std::ofstream absentFile(absentPath);
+            absentFile << "[general]\ninput = \"dummy.elf\"\noutput = \"out\"\n";
+            absentFile.close();
+
+            const RecompilerConfig config = ConfigManager(configPath.string()).loadConfig();
+            t.Equals(config.symbolNamesPath, (dir / "names" / "symbols.tsv").lexically_normal().string(),
+                     "a relative symbol_names path resolves next to the config file");
+            const RecompilerConfig absent = ConfigManager(absentPath.string()).loadConfig();
+            t.IsTrue(absent.symbolNamesPath.empty(), "symbol_names defaults to off");
+
+            std::error_code removeError;
+            std::filesystem::remove_all(dir, removeError);
+        });
+
+        tc.Run("symbol display names parse verified, unverified and bad rows", [](TestCase &t) {
+            std::istringstream tsv(
+                "address\tname\tsource\tconfidence\r\n"
+                "0x003177F0\tBXrand__Fv\tsrc:7\texact-start+size+signature-metadata\r\n"
+                "0x00416810\tstrlen\tsrc:9\tunverified\n"
+                "0x00100000\tbad name\tsrc\tunverified\n"
+                "0x00100004\tline\nbreak\n"
+                "zzz\tnoaddr\tsrc\tunverified\n"
+                "0x003177F0\tdupe\tsrc\tunverified\n"
+                "\n");
+            std::vector<std::string> rejected;
+            const auto names = PS2Recompiler::LoadSymbolDisplayNames(tsv, rejected);
+            t.Equals(names.size(), static_cast<size_t>(3), "two sidecar rows plus the name-only row load");
+            t.Equals(names.at(0x3177F0u), std::string("BXrand__Fv"), "verified names carry no marker");
+            t.Equals(names.at(0x416810u), std::string("strlen (unverified)"), "unverified names are marked");
+            t.Equals(names.at(0x100004u), std::string("line"), "a row without confidence is unmarked");
+            t.Equals(rejected.size(), static_cast<size_t>(4),
+                     "spaces, a stray line, a bad address and a duplicate address are rejected");
+        });
+
         tc.Run("config manager defaults extra_function_starts to empty", [](TestCase &t) {
             const auto uniqueSuffix = std::to_string(
                 static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count()));

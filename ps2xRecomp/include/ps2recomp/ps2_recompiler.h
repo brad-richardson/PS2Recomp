@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <filesystem>
+#include <istream>
 #include <memory>
 #include <map>
 
@@ -61,6 +62,12 @@ namespace ps2recomp
             std::unordered_map<uint32_t, std::vector<uint32_t>> &targetsByOwner);
 
         static std::string ClampFilenameLength(const std::string& baseName, const std::string& extension, std::size_t maxLength);
+        // SYM2: parse an address/name/source/confidence TSV (header row first)
+        // into banner text: "name", or "name (unverified)" when confidence is
+        // "unverified". Rows whose address doesn't parse or whose name isn't
+        // [A-Za-z0-9_]+ are skipped and listed in rejected.
+        static std::unordered_map<uint32_t, std::string> LoadSymbolDisplayNames(
+            std::istream &input, std::vector<std::string> &rejected);
 
     private:
         ConfigManager m_configManager;

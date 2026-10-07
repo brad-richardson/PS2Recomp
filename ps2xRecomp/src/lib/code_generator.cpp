@@ -156,6 +156,11 @@ namespace ps2recomp
         m_emitInstructionComments = emitInstructionComments;
     }
 
+    void CodeGenerator::setDisplayNames(const std::unordered_map<uint32_t, std::string> &displayNames)
+    {
+        m_displayNames = displayNames;
+    }
+
     void CodeGenerator::setReporter(RecompilerReporter *reporter)
     {
         m_reporter = reporter;
