@@ -236,18 +236,33 @@ inline void restoreOwned(int sig, const struct sigaction &old)
 inline bool prepareAltStack(LazyImage &z)
 {
     stack_t current{};
-    if (sigaltstack(nullptr, &current) != 0) return false;
+    if (sigaltstack(nullptr, &current) != 0)
+    {
+        std::fprintf(stderr, "[jcam2-scratch] lazy init failed step=sigaltstack-query errno=%d\n", errno);
+        return false;
+    }
     const size_t need = static_cast<size_t>(SIGSTKSZ) > 65536u ? static_cast<size_t>(SIGSTKSZ) : 65536u;
     if (!(current.ss_flags & SS_DISABLE))
-        return current.ss_sp && current.ss_size >= need;
+    {
+        if (current.ss_sp && current.ss_size >= need) return true;
+        std::fprintf(stderr, "[jcam2-scratch] lazy init failed step=altstack-size errno=0 size=%zu need=%zu\n",
+                     current.ss_size, need);
+        return false;
+    }
     void *memory = mmap(nullptr, need, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (memory == MAP_FAILED) return false;
+    if (memory == MAP_FAILED)
+    {
+        std::fprintf(stderr, "[jcam2-scratch] lazy init failed step=altstack-mmap errno=%d\n", errno);
+        return false;
+    }
     stack_t ours{};
     ours.ss_sp = memory;
     ours.ss_size = need;
     if (sigaltstack(&ours, nullptr) != 0)
     {
+        const int error = errno;
         munmap(memory, need);
+        std::fprintf(stderr, "[jcam2-scratch] lazy init failed step=sigaltstack-install errno=%d\n", error);
         return false;
     }
     z.altMemory = memory;
@@ -278,11 +293,26 @@ inline bool lazyInit(SigactionFn installAction = ::sigaction)
 {
     LazyImage &z = g_lazy;
     if (z.failed) return false;
-    if (z.base) return pthread_equal(pthread_self(), z.owner);
+    if (z.base)
+    {
+        if (pthread_equal(pthread_self(), z.owner)) return true;
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true))
+            std::fprintf(stderr, "[jcam2-scratch] lazy init failed step=owner-thread errno=0\n");
+        return false;
+    }
     const long ps = sysconf(_SC_PAGESIZE);
-    if (ps <= 0 || (PS2_RAM_SIZE % static_cast<size_t>(ps)) != 0u) { z.failed = true; return false; }
+    if (ps <= 0 || (PS2_RAM_SIZE % static_cast<size_t>(ps)) != 0u)
+    {
+        std::fprintf(stderr, "[jcam2-scratch] lazy init failed step=page-size errno=%d page=%ld\n", errno, ps);
+        z.failed = true; return false;
+    }
     void *m = mmap(nullptr, PS2_RAM_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (m == MAP_FAILED) { z.failed = true; return false; }
+    if (m == MAP_FAILED)
+    {
+        std::fprintf(stderr, "[jcam2-scratch] lazy init failed step=image-mmap errno=%d\n", errno);
+        z.failed = true; return false;
+    }
     if (!prepareAltStack(z))
     {
         munmap(m, PS2_RAM_SIZE);
@@ -298,19 +328,23 @@ inline bool lazyInit(SigactionFn installAction = ::sigaction)
     g_resetBus.store(false, std::memory_order_relaxed);
     if (installAction(SIGSEGV, &sa, &g_oldSegv) != 0)
     {
+        const int error = errno;
         munmap(m, PS2_RAM_SIZE);
         releaseAltStack(z);
+        std::fprintf(stderr, "[jcam2-scratch] lazy init failed step=sigaction-SIGSEGV errno=%d\n", error);
         z.failed = true;
         return false;
     }
     z.installedSegv = true;
     if (installAction(SIGBUS, &sa, &g_oldBus) != 0)
     {
+        const int error = errno;
         restoreOwned(SIGSEGV, g_oldSegv);
         struct sigaction now{};
         z.installedSegv = sigaction(SIGSEGV, nullptr, &now) == 0 && isOurAction(now);
         munmap(m, PS2_RAM_SIZE);
         releaseAltStack(z);
+        std::fprintf(stderr, "[jcam2-scratch] lazy init failed step=sigaction-SIGBUS errno=%d\n", error);
         z.failed = true;
         return false;
     }

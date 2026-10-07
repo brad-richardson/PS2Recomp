@@ -1083,6 +1083,14 @@ inline bool jcam2Contact(const Jcam2Shadow &s) noexcept
 inline bool jcam2Service(uint8_t *ram, const R5900Context &live, PS2Runtime &runtime,
                          Jcam2Shadow &s, uint64_t tick, PS2Runtime::RecompiledFunction fn)
 {
+    static bool firstService = true;
+    if (firstService)
+    {
+        firstService = false;
+        std::fprintf(stderr, "[jcam2-scratch] first service tick=%llu supported=%d lazy_requested=%d\n",
+                     static_cast<unsigned long long>(tick), PS2X_JCAM2_LAZY_SUPPORTED,
+                     ps2_fh1_jcam2::lazyRequested() ? 1 : 0);
+    }
     if (!fn || (s.obj & 3u) || s.obj+0xb0u > PS2_RAM_SIZE) return false;
     const uint32_t pos=getRegU32(&live,5)&0x1fffffffu;
     const uint32_t vel=getRegU32(&live,6)&0x1fffffffu;

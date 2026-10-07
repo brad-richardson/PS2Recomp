@@ -161,6 +161,27 @@ void failedInstall()
     lazyShutdown();
     _exit(0);
 }
+bool failedInstallLogs()
+{
+    int fds[2]{};
+    if (pipe(fds) != 0) return false;
+    const pid_t pid = fork();
+    if (pid == 0)
+    {
+        close(fds[0]);
+        if (dup2(fds[1], STDERR_FILENO) < 0) _exit(3);
+        close(fds[1]);
+        failedInstall();
+    }
+    close(fds[1]);
+    char message[512]{};
+    const ssize_t n = read(fds[0], message, sizeof(message) - 1u);
+    close(fds[0]);
+    int status = 0;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid ||
+        !WIFEXITED(status) || WEXITSTATUS(status) != 0 || n <= 0) return false;
+    return std::strstr(message, "step=sigaction-SIGBUS errno=22") != nullptr;
+}
 void ignored()
 {
     struct sigaction sa{};
@@ -225,6 +246,7 @@ void register_ps2_fh1_jcam2_scratch_tests()
         tc.Run("other thread chains", [](TestCase &t) { t.Equals(exited(child(&foreignThread)), 31, "foreign thread"); });
         tc.Run("execute fault chains", [](TestCase &t) { t.Equals(exited(child(&executeFault)), 31, "execute fault"); });
         tc.Run("SIGBUS failure rolls SIGSEGV back", [](TestCase &t) { t.Equals(exited(child(&failedInstall)), 0, "transactional install"); });
+        tc.Run("SIGBUS failure logs step and errno", [](TestCase &t) { t.IsTrue(failedInstallLogs(), "failure diagnostic"); });
         tc.Run("prior IGN survives", [](TestCase &t) { t.Equals(exited(child(&ignored)), 0, "SIG_IGN"); });
         tc.Run("unhandled fault terminates by signal", [](TestCase &t) {
             const int status = child(&defaultCrash);
