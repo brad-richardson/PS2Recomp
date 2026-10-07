@@ -261,20 +261,6 @@ namespace
     std::atomic<uint32_t> s_debugTexaWriteCount{0};
     std::atomic<uint32_t> s_debugCvFontUploadCount{0};
     std::atomic<uint32_t> s_debugLocalCopyCount{0};
-
-    struct GsPacketVramTrace
-    {
-        uint64_t tick;
-        uint64_t index;
-        uint8_t path;
-        const uint8_t *vram;
-        uint32_t vramSize;
-
-        ~GsPacketVramTrace()
-        {
-            ps2x_gs_capture::packetDone(tick, index, path, vram, vramSize);
-        }
-    };
 }
 
 // GB2: true while the calling thread is this GS's worker executing a
@@ -284,21 +270,6 @@ namespace
 namespace
 {
     thread_local bool t_inGsWorker = false;
-
-    // SQ2: per-tick local->host lifecycle trace (PS2X_GS_L2H_TRACE=1). Set
-    // and consume sites are tagged so the trace shows who set pending and
-    // who should clear it. The guest PC is not visible on the GS worker, so
-    // EE sync serves log their madr instead (see ps2_memory.cpp).
-    thread_local const char *t_l2hSite = "rpc";
-
-    bool l2hTraceOn()
-    {
-        static const bool on = [] {
-            const char *env = std::getenv("PS2X_GS_L2H_TRACE");
-            return env && env[0] != '\0' && env[0] != '0';
-        }();
-        return on;
-    }
 
     struct GsWorkerScope
     {
@@ -1397,16 +1368,13 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!data || sizeBytes < 16 || !m_backend)
         return;
 
-    // HP3 F15: the submit index feeds only the stream-capture trace and
-    // the [vq] line; skip the atomic RMW in speed builds (index reads 0).
+    // HP3 F15: the submit count feeds only the [vq] line; skip the atomic
+    // RMW in speed builds.
 #if PS2X_ENABLE_DIAG_TAPS
-    const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
-#else
-    const uint64_t index = 0u;
+    m_submitCount.fetch_add(1u, std::memory_order_relaxed);
 #endif
     const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
     const uint8_t path = static_cast<uint8_t>(m_curGifPath);
-    GsPacketVramTrace trace{tick, index, path, m_localMemoryStorage, m_localMemorySize};
     ps2x_gs_capture::packet(tick, path, data, sizeBytes);
     ps2_e7::packet(m_privRegs ? m_privRegs->vsyncTick.load() : 0u, "gs-enter", data, sizeBytes);
     // GB3 Part 2: a raw-GIF backend (paraLLEl) renders the packet itself; the
@@ -1593,15 +1561,12 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
     if (!validatePackedGifPacket(data, sizeBytes))
         return false;
 
-    // HP3 F15: see above (capture/vq index only).
+    // HP3 F15: see above ([vq] count only).
 #if PS2X_ENABLE_DIAG_TAPS
-    const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
-#else
-    const uint64_t index = 0u;
+    m_submitCount.fetch_add(1u, std::memory_order_relaxed);
 #endif
     const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
     const uint8_t path = static_cast<uint8_t>(m_curGifPath);
-    GsPacketVramTrace trace{tick, index, path, m_localMemoryStorage, m_localMemorySize};
     ps2x_gs_capture::packet(tick, path, data, sizeBytes);
     // GE2: raw-stream backends must see this packet too (the capture counts
     // it); the default is a no-op so paraLLEl is unaffected.
@@ -1676,15 +1641,11 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
         return;
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-    // HP3 F15: see above (capture/vq index only).
+    // HP3 F15: see above ([vq] count only).
 #if PS2X_ENABLE_DIAG_TAPS
-    const uint64_t index = m_submitCount.fetch_add(1u, std::memory_order_relaxed);
-#else
-    const uint64_t index = 0u;
+    m_submitCount.fetch_add(1u, std::memory_order_relaxed);
 #endif
     const uint64_t tick = m_privRegs ? m_privRegs->vsyncTick.load() : 0u;
-    GsPacketVramTrace trace{tick, index, static_cast<uint8_t>(m_curGifPath),
-                            m_localMemoryStorage, m_localMemorySize};
     ps2x_gs_capture::nativeUpload(tick,
                                   bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
     uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
@@ -2390,16 +2351,6 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
             command.trxreg = m_trxreg;
             command.direction = m_trxdir;
             m_backend->BeginTransfer(command);
-            // SQ2: trace the local->host set (before the lag1 snapshot
-            // drains it, so pending shows the fresh transfer).
-            if (m_trxdir == 1u && l2hTraceOn())
-            {
-                const uint32_t pend = m_backend->GetTransferSnapshot().localToHostPendingBytes;
-                std::cerr << "[l2h-trace] tick="
-                          << (m_privRegs ? m_privRegs->vsyncTick.load(std::memory_order_acquire) : 0u)
-                          << " set rrw=" << m_trxreg.rrw << " rrh=" << m_trxreg.rrh
-                          << " spsm=" << m_bitbltbuf.spsm << " pending=" << pend << std::endl;
-            }
             // RB2: in lag1/lagV mode snapshot this local->host transfer now,
             // worker-ordered right after its setup (the backend overwrites
             // its pending count per setup, so a later consume would not see
@@ -2729,14 +2680,6 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
     }
     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
     const uint32_t n = m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
-    if (l2hTraceOn())
-    {
-        const uint32_t pend = m_backend ? m_backend->GetTransferSnapshot().localToHostPendingBytes : 0u;
-        std::cerr << "[l2h-trace] tick="
-                  << (m_privRegs ? m_privRegs->vsyncTick.load(std::memory_order_acquire) : 0u)
-                  << " consume site=" << t_l2hSite << " max=" << maxBytes << " got=" << n
-                  << " pending=" << pend << std::endl;
-    }
     ps2x_gs_capture::localToHost(m_privRegs ? m_privRegs->vsyncTick.load() : 0u,
                                  maxBytes, dst, n);
     return n;
@@ -2764,13 +2707,10 @@ void GS::snapshotLaggedReadback()
     // a stack buffer first: the slot lock below stays a leaf (consume takes
     // m_stateMutex, already held by our caller).
     uint8_t buf[kRb2LagSlotBytes];
-    t_l2hSite = "snap"; // SQ2: tag the snapshot consume for the l2h trace
     const uint32_t n = consumeLocalToHostBytes(buf, kRb2LagSlotBytes);
-    t_l2hSite = "rpc";
     // Drain any remainder so the next transfer starts from an empty FIFO.
     bool truncated = false;
     uint8_t drain[1024];
-    t_l2hSite = "drain"; // SQ2: tag the remainder drain for the l2h trace
     for (;;)
     {
         const uint32_t m = consumeLocalToHostBytes(drain, sizeof(drain));
@@ -2780,7 +2720,6 @@ void GS::snapshotLaggedReadback()
         if (m < sizeof(drain))
             break;
     }
-    t_l2hSite = "rpc";
     uint64_t idx = 0u;
     {
         std::lock_guard<std::mutex> lock(m_rb2Mutex);
@@ -2911,7 +2850,6 @@ void GS::lagfRequest(const GSTransferCommand &command)
     if (!async || verify)
     {
         // Same consume + remainder drain as snapshotLaggedReadback.
-        t_l2hSite = "lagf";
         n = consumeLocalToHostBytes(buf, kRb2LagSlotBytes);
         uint8_t drain[1024];
         for (;;)
@@ -2923,7 +2861,6 @@ void GS::lagfRequest(const GSTransferCommand &command)
             if (m < sizeof(drain))
                 break;
         }
-        t_l2hSite = "rpc";
     }
     if (verify)
     {

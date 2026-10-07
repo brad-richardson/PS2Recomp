@@ -293,17 +293,6 @@ void GsWorker::threadMain()
     ThreadNaming::SetCurrentThreadName("GsWorker");
     // AD1: bind this thread's TID to its ADPF hint session.
     ps2x::adpf::noteThread(ps2x::adpf::Thread::GsWorker);
-    // TN1: PS2X_GS_WORKER_CPUS="4,5" pins this thread to itself (mirrors the
-    // N11 game-thread knob); unset/empty = no change. Unconditional stderr
-    // line (RUNTIME_LOG compiles out of release builds).
-    if (const char *workerCpus = std::getenv("PS2X_GS_WORKER_CPUS"))
-    {
-        if (workerCpus[0] != '\0')
-        {
-            const int rc = ps2x::pinCurrentThreadToCpus(ps2x::parseCpuList(workerCpus));
-            std::fprintf(stderr, "[affinity] gs worker cpus=%s rc=%d\n", workerCpus, rc);
-        }
-    }
     // PT2: per-tick busy time (handler only; queue-idle excluded). The frame
     // cuts at each in-stream GuestVsync (tick in regValue); knob off is one
     // predictable branch per command.

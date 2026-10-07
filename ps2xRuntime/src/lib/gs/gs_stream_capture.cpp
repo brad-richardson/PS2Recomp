@@ -123,15 +123,6 @@ namespace
 
 namespace ps2x_gs_capture
 {
-    uint64_t bisectTo()
-    {
-        static const uint64_t value = [] {
-            const char *env = std::getenv("PS2X_GS_BISECT_TO");
-            return env && *env ? std::strtoull(env, nullptr, 10) : 0ull;
-        }();
-        return value;
-    }
-
     uint64_t stopAt()
     {
         static const uint64_t value = [] {
@@ -159,24 +150,6 @@ namespace ps2x_gs_capture
         put32(body.data() + 1, sizeBytes);
         std::memcpy(body.data() + 5, data, sizeBytes);
         record(Packet, tick, body.data(), static_cast<uint32_t>(body.size()));
-    }
-
-    void packetDone(uint64_t tick, uint64_t index, uint8_t path,
-                    const uint8_t *vram, uint32_t vramSize)
-    {
-        const uint64_t to = bisectTo();
-        if (!enabled() || to == 0u || tick >= to || !vram || vramSize == 0u)
-            return;
-        uint32_t hash = 2166136261u;
-        for (uint32_t i = 0; i < vramSize; ++i)
-        {
-            hash ^= vram[i];
-            hash *= 16777619u;
-        }
-        std::fprintf(stderr, "[gb4:packet] idx=%llu tick=%llu path=%u vram=%08x\n",
-                     static_cast<unsigned long long>(index),
-                     static_cast<unsigned long long>(tick),
-                     static_cast<unsigned>(path), hash);
     }
 
     void privWrite(uint64_t tick, uint32_t registerOffset, uint64_t value)
@@ -252,8 +225,7 @@ namespace ps2x_gs_capture
             c.file = nullptr;
             c.stoppedAtCap = true;
         }
-        else if (c.file && ((stopAt() != 0u && tick >= stopAt()) ||
-                            (bisectTo() != 0u && tick >= bisectTo())))
+        else if (c.file && stopAt() != 0u && tick >= stopAt())
         {
             std::fclose(c.file);
             c.file = nullptr;

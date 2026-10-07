@@ -410,8 +410,6 @@ public:
         if (m_ge1Active)
             m_ge1.close();
         m_ge1.unload();
-        if (m_gpuCsv)
-            std::fclose(m_gpuCsv);
         {
             std::lock_guard<std::mutex> lock(s_apiMutex);
             if (s_live == this)
@@ -474,12 +472,6 @@ public:
             std::fprintf(stderr, "[gs:external] GE1 Full live GS loaded: %s\n", path);
             // AD1: ADPF reuses this accounting, so it turns it on too.
             m_perfTail = ps2x::perflog::enabled() || ps2x::adpf::enabled();
-            if (const char *csv = std::getenv("PS2X_GS_EXTERNAL_GPU_CSV"); csv && *csv)
-            {
-                m_gpuCsv = std::fopen(csv, "w");
-                if (m_gpuCsv)
-                    std::fputs("tick,gpu_ms\n", m_gpuCsv);
-            }
         }
         else
         {
@@ -923,16 +915,13 @@ public:
                              (unsigned long long)tick);
                 std::exit(78);
             }
-            // PT2: gpuMs() is reset-on-read, so sample once and share between
-            // the CSV and the gpu.busy ring. With both off the call is
-            // skipped exactly as before; <0 (closed/unsupported) pushes
-            // nothing (the stage line reads n=0).
-            if (m_gpuCsv || m_perfTail)
+            // PT2: gpuMs() is reset-on-read; it feeds the gpu.busy ring. With
+            // the ring off the call is skipped; <0 (closed/unsupported)
+            // pushes nothing (the stage line reads n=0).
+            if (m_perfTail)
             {
                 const float gpuMs = m_ge1.gpuMs();
-                if (m_gpuCsv)
-                    std::fprintf(m_gpuCsv, "%llu,%.6f\n", (unsigned long long)tick, gpuMs);
-                if (m_perfTail && gpuMs >= 0.0f)
+                if (gpuMs >= 0.0f)
                     ps2x::perflog::stageRing(ps2x::perflog::Stage::GpuBusy)
                         .push(static_cast<uint32_t>(tick), gpuMs);
             }
@@ -1641,7 +1630,6 @@ private:
     uint8_t m_ge1LastPath = 3u;
     uint32_t m_ge1FifoBytes = 0u;
     bool m_ge1FifoServed = false;
-    FILE *m_gpuCsv = nullptr;
     // PT2: cached PS2X_PERF_LOG (set in Initialize); feeds the gpu.busy ring.
     bool m_perfTail = false;
     std::unique_ptr<GSCpuBackend> m_inner;

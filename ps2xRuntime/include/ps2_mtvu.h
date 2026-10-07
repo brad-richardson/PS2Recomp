@@ -651,14 +651,6 @@ namespace ps2_mtvu
                 const UnitThreadGuard unitGuard;
                 g_gifTid.store(std::this_thread::get_id(), std::memory_order_relaxed);
                 ThreadNaming::SetCurrentThreadName("MTVU-GIF");
-                if (const char *cpus = std::getenv("PS2X_MTVU_GIF_CPUS"))
-                {
-                    if (cpus[0] != '\0')
-                    {
-                        const int rc = ps2x::pinCurrentThreadToCpus(ps2x::parseCpuList(cpus));
-                        std::fprintf(stderr, "[affinity] mtvu-gif thread cpus=%s rc=%d\n", cpus, rc);
-                    }
-                }
                 bool busy = false;
                 uint64_t busyT0 = 0;
                 for (;;)
@@ -1286,14 +1278,6 @@ namespace ps2_mtvu
                 const UnitThreadGuard unitGuard;
                 g_vifTid.store(std::this_thread::get_id(), std::memory_order_relaxed);
                 ThreadNaming::SetCurrentThreadName("MTVU-VIF");
-                if (const char *cpus = std::getenv("PS2X_MTVU_VIF_CPUS"))
-                {
-                    if (cpus[0] != '\0')
-                    {
-                        const int rc = ps2x::pinCurrentThreadToCpus(ps2x::parseCpuList(cpus));
-                        std::fprintf(stderr, "[affinity] mtvu-vif thread cpus=%s rc=%d\n", cpus, rc);
-                    }
-                }
                 VifLog &L = vif;
                 uint64_t rng = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) | 3u;
                 for (;;)

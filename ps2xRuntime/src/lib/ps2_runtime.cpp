@@ -2802,44 +2802,6 @@ void qsr1NoteSession(const uint8_t *rdram, R5900Context *ctx)
         g_qsr1RaceArmed = true;
 }
 
-// DS1 DEV-ONLY scheduled chord (host testing without a gamepad):
-// PS2X_SAVESTATE_HOTKEY_AT="2000:save,2600:load" fires each op once at the
-// first present with vsyncTick >= tick. Malformed entries are ignored.
-struct Ds1Hotkey
-{
-    uint64_t tick = 0u;
-    bool save = true;
-    bool fired = false;
-};
-std::vector<Ds1Hotkey> parseDs1Hotkeys(const char *env)
-{
-    std::vector<Ds1Hotkey> out;
-    if (!env || !env[0])
-        return out;
-    std::string text(env);
-    size_t begin = 0u;
-    while (begin <= text.size())
-    {
-        const size_t end = text.find(',', begin);
-        const std::string item = text.substr(begin, end == std::string::npos ? end : end - begin);
-        const size_t colon = item.find(':');
-        if (colon != std::string::npos)
-        {
-            const uint64_t tick = std::strtoull(item.substr(0, colon).c_str(), nullptr, 10);
-            const std::string op = item.substr(colon + 1u);
-            if (tick != 0u && (op == "save" || op == "load"))
-                out.push_back(Ds1Hotkey{tick, op == "save", false});
-            else
-                std::fprintf(stderr, "[savestate] ignoring malformed HOTKEY_AT entry '%s'\n", item.c_str());
-        }
-        else if (!item.empty())
-            std::fprintf(stderr, "[savestate] ignoring malformed HOTKEY_AT entry '%s'\n", item.c_str());
-        if (end == std::string::npos)
-            break;
-        begin = end + 1u;
-    }
-    return out;
-}
 } // namespace
 
 // HR1: main-thread present cost split, reported by PS2X_THREAD_CPU_LOG=1.
@@ -7025,8 +6987,6 @@ void PS2Runtime::run()
     const bool perfLog = ps2x::perflog::enabled();
     const bool vpadWanted = virtualPadWanted();
     PSChordState ds1Chord; // SELECT+L3 save / SELECT+R3 load, carried across frames
-    std::vector<Ds1Hotkey> ds1Hotkeys =
-        parseDs1Hotkeys(std::getenv("PS2X_SAVESTATE_HOTKEY_AT")); // DS1 DEV-ONLY scheduled chord
     bool qsr1Expanded = false; // QSR1 menu open, carried across frames
     std::vector<int64_t> qsr1Down; // touch ids currently on the menu (edge = new id)
     bool qsr1AutoDone = false; // auto snapshot taken for the current events window
@@ -7356,18 +7316,6 @@ void PS2Runtime::run()
                 (ds1RawPressed & (ps2x::vpad::kL3 | ps2x::vpad::kR3)) != 0u)
                 raylibPressed = static_cast<uint16_t>(
                     raylibPressed & ~(ps2x::vpad::kSelect | ps2x::vpad::kL3 | ps2x::vpad::kR3));
-        }
-        // DS1 DEV-ONLY scheduled chord (same shell path as the gamepad).
-        for (Ds1Hotkey &ds1Hk : ds1Hotkeys)
-        {
-            if (!ds1Hk.fired && m_memory.gs().vsyncTick.load() >= ds1Hk.tick)
-            {
-                ds1Hk.fired = true;
-                if (ds1Hk.save)
-                    ds1FireQuickSave();
-                else
-                    ds1FireQuickLoad();
-            }
         }
         // QSR1: auto snapshot at events enter (Restart race loads it). The
         // signal is g_guestActive, set by guestFlip on the enter flip

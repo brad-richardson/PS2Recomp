@@ -6,10 +6,7 @@
 // without it the ring overflows and drops frames host-side. Env:
 //   PS2X_SND_LOG=<file>    event log (bounded, kMaxLines).
 //   PS2X_SND_DUMP_DIR=<d>  payload dumps (bounded, kMaxDumpBytes).
-//   PS2X_SND_TAG1=<file>   consecutive 0x620-byte tag-1 records (bounded).
 //   PS2X_SND_VOICES=0      music only: skip the SPU voice layer (AU9).
-//   PS2X_SND_MIX_RAW=<f>   guest-time 48 kHz mix, per frame s16 music L/R then
-//                          voices L/R (bounded).
 //
 // SNDDRV protocol (AU2 Part A, local/research/AU2/REPORT.md):
 //   IOP->EE cid 1, +0x10 type: 0 = tick (opt = IOP address the EE DMAs its
@@ -56,8 +53,6 @@ namespace ps2_snd_spike
 
 inline constexpr uint64_t kMaxLines = 60000ull;
 inline constexpr uint64_t kMaxDumpBytes = 256ull << 20;
-inline constexpr uint64_t kMaxTag1Bytes = 128ull << 20;
-inline constexpr uint64_t kMaxMixRawBytes = 256ull << 20;
 inline constexpr uint64_t kTickCycles = 3145728ull; // 294,912,000 * 384 / 36,000
 inline constexpr uint32_t kPcmFramesPerTick = 384u;
 inline constexpr uint32_t kPcmBytesPerTick = kPcmFramesPerTick * 2u * sizeof(int16_t);
@@ -78,8 +73,6 @@ struct State
     bool init = false;
     bool enabled = false;
     FILE *log = nullptr;
-    FILE *tag1File = nullptr;
-    uint64_t tag1Bytes = 0;
     std::string dumpDir;
     uint64_t lines = 0;
     uint64_t dumpBytes = 0;
@@ -90,31 +83,12 @@ struct State
     uint32_t doneRing = 0;
     std::map<uint32_t, std::vector<uint8_t>> iopMem; // IOP dst -> last payload
     bool voices = true;
-    FILE *mixRaw = nullptr;
-    uint64_t mixRawBytes = 0;
     ps2_snd_spu::Spu spu;
     ps2_snd_spu::Driver driver;
     ps2_snd_spu::Upsampler34 upLeft, upRight;
     // AU13: PS2X_AUDIO_RESAMPLE=sinc swaps the music upsampler (PS2X_SPU_INTERP sets spu.interp).
     bool sinc = false;
     ps2_snd_spu::SincUpsampler34 sincLeft, sincRight;
-    // AU13 dev-only PS2X_SND_VARIANTS_DIR: every interp x resample combination rendered
-    // side by side from the same guest inputs (48 kHz stereo s16 files + per-variant cost).
-    struct Variant
-    {
-        ps2_snd_spu::Interp interp = ps2_snd_spu::Interp::Gauss;
-        bool sinc = false;
-        ps2_snd_spu::Spu spu;
-        ps2_snd_spu::Driver driver;
-        ps2_snd_spu::Upsampler34 upL, upR;
-        ps2_snd_spu::SincUpsampler34 sL, sR;
-        FILE *out = nullptr;
-        FILE *musicOut = nullptr; // music path only (interp-independent)
-        FILE *voiceOut = nullptr; // voice layer only (resample-independent)
-        uint64_t musicNs = 0, voiceNs = 0, ticks = 0;
-    };
-    std::vector<std::unique_ptr<Variant>> variants;
-    std::string variantsDir;
 };
 
 struct Tag1PcmView
@@ -319,32 +293,9 @@ inline void initLocked(State &s)
         s.log = std::fopen(p, "w");
     if (const char *d = std::getenv("PS2X_SND_DUMP_DIR"); d && *d)
         s.dumpDir = d;
-    if (const char *p = std::getenv("PS2X_SND_TAG1"); p && *p)
-        s.tag1File = std::fopen(p, "wb");
-    if (const char *p = std::getenv("PS2X_SND_MIX_RAW"); p && *p)
-        s.mixRaw = std::fopen(p, "wb");
     s.spu.interp = ps2_snd_spu::parseInterp(std::getenv("PS2X_SPU_INTERP"));
     if (const char *p = std::getenv("PS2X_AUDIO_RESAMPLE"); p && std::strcmp(p, "sinc") == 0)
         s.sinc = true;
-    if (const char *d = std::getenv("PS2X_SND_VARIANTS_DIR"); d && *d)
-    {
-        s.variantsDir = d;
-        for (auto interp : {ps2_snd_spu::Interp::Gauss, ps2_snd_spu::Interp::Cubic, ps2_snd_spu::Interp::Hermite,
-                            ps2_snd_spu::Interp::Linear})
-            for (bool sinc : {false, true})
-            {
-                auto v = std::make_unique<State::Variant>();
-                v->interp = interp;
-                v->sinc = sinc;
-                v->spu.interp = interp;
-                const std::string base = s.variantsDir + "/" + ps2_snd_spu::interpName(interp) + "-" +
-                                         (sinc ? "sinc" : "snddrv");
-                v->out = std::fopen((base + ".s16").c_str(), "wb");
-                v->musicOut = std::fopen((base + ".music.s16").c_str(), "wb");
-                v->voiceOut = std::fopen((base + ".voice.s16").c_str(), "wb");
-                s.variants.push_back(std::move(v));
-            }
-    }
     s.enabled = true;
 }
 
@@ -490,58 +441,6 @@ inline void onSoundTick(uint8_t *rdram, uint64_t guestCycle, Queue &&queue)
                   (unsigned long long)pcmRing().underruns(), (unsigned long long)pcmRing().overflows());
 }
 
-// AU13 dev-only: render every variant from the same inputs and time its two stages.
-inline void mixVariantsLocked(State &s, const int16_t *left, const int16_t *right, const uint8_t *tag3)
-{
-    using namespace ps2_snd_spu;
-    using Clock = std::chrono::steady_clock;
-    for (auto &vp : s.variants)
-    {
-        State::Variant &v = *vp;
-        int32_t music[2 * kTickFrames], dry0[2 * kTickFrames] = {}, dry1[2 * kTickFrames] = {};
-        const auto t0 = Clock::now();
-        if (v.sinc)
-        {
-            v.sL.run(left, music, 2);
-            v.sR.run(right, music + 1, 2);
-        }
-        else
-        {
-            v.upL.run(left, music, 2);
-            v.upR.run(right, music + 1, 2);
-        }
-        const auto t1 = Clock::now();
-        if (s.voices && tag3)
-        {
-            v.driver.update(tag3, v.spu);
-            v.spu.render(dry0, dry1, kTickFrames);
-        }
-        const auto t2 = Clock::now();
-        v.musicNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
-        v.voiceNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count());
-        ++v.ticks;
-        int16_t mix[2 * kTickFrames], mus[2 * kTickFrames], voc[2 * kTickFrames];
-        for (uint32_t i = 0; i < 2 * kTickFrames; ++i)
-        {
-            mus[i] = clamp16(music[i]);
-            voc[i] = clamp16(dry0[i] + dry1[i]);
-            mix[i] = clamp16(clamp16(music[i] + dry0[i]) + dry1[i]);
-        }
-        if (v.out) std::fwrite(mix, sizeof(mix), 1, v.out);
-        if (v.musicOut) std::fwrite(mus, sizeof(mus), 1, v.musicOut);
-        if (v.voiceOut) std::fwrite(voc, sizeof(voc), 1, v.voiceOut);
-        if ((v.ticks % 512u) == 0u)
-        {
-            if (v.out) std::fflush(v.out);
-            if (v.musicOut) std::fflush(v.musicOut);
-            if (v.voiceOut) std::fflush(v.voiceOut);
-            logLocked(s, "au13-variant %s-%s ticks=%llu music_us_per_tick=%.2f voice_us_per_tick=%.2f",
-                      interpName(v.interp), v.sinc ? "sinc" : "snddrv", (unsigned long long)v.ticks,
-                      v.musicNs / 1000.0 / v.ticks, v.voiceNs / 1000.0 / v.ticks);
-        }
-    }
-}
-
 // One sound tick: tag-3 voice updates, 512 frames of SPU voices, the tag-1
 // music upsampled 3->4 (block 1 = left, block 0 = right; AU8), mixed like the
 // SPU2 core chain (music into core 0 with its voices, core 1 voices added).
@@ -562,29 +461,16 @@ inline void mixTickLocked(State &s, const uint8_t *pcm, const uint8_t *tag3)
         s.upLeft.run(left, music, 2);
         s.upRight.run(right, music + 1, 2);
     }
-    if (!s.variants.empty())
-        mixVariantsLocked(s, left, right, tag3);
     if (s.voices && tag3)
     {
         s.driver.update(tag3, s.spu);
         s.spu.render(dry0, dry1, kTickFrames);
     }
-    int16_t raw[4 * kTickFrames];
     for (uint32_t i = 0; i < kTickFrames; ++i)
     {
         const int16_t l = clamp16(clamp16(music[2 * i] + dry0[2 * i]) + dry1[2 * i]);
         const int16_t r = clamp16(clamp16(music[2 * i + 1] + dry0[2 * i + 1]) + dry1[2 * i + 1]);
         pcmRing().pushFrame(static_cast<uint16_t>(l) | (static_cast<uint32_t>(static_cast<uint16_t>(r)) << 16));
-        raw[4 * i] = clamp16(music[2 * i]);
-        raw[4 * i + 1] = clamp16(music[2 * i + 1]);
-        raw[4 * i + 2] = clamp16(dry0[2 * i] + dry1[2 * i]);
-        raw[4 * i + 3] = clamp16(dry0[2 * i + 1] + dry1[2 * i + 1]);
-    }
-    if (s.mixRaw && s.mixRawBytes + sizeof(raw) <= kMaxMixRawBytes &&
-        std::fwrite(raw, 1, sizeof(raw), s.mixRaw) == sizeof(raw))
-    {
-        s.mixRawBytes += sizeof(raw);
-        std::fflush(s.mixRaw);
     }
 }
 
@@ -609,16 +495,6 @@ inline bool onSetDma(const uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t
         if (findTag1Pcm(bytes.data(), bytes.size(), view))
         {
             mixTickLocked(s, bytes.data() + view.offset, findTag3(bytes.data(), bytes.size()));
-            const size_t record = view.offset - 16u;
-            if (s.tag1File && record + 0x620u <= bytes.size() &&
-                s.tag1Bytes + 0x620u <= kMaxTag1Bytes)
-            {
-                if (std::fwrite(bytes.data() + record, 1, 0x620u, s.tag1File) == 0x620u)
-                {
-                    s.tag1Bytes += 0x620u;
-                    std::fflush(s.tag1File);
-                }
-            }
         }
     }
     if (tagbuf)
@@ -670,8 +546,6 @@ inline void onSendCmd(uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t cid,
                           (unsigned long long)vsync, spuDst, size);
             dumpLocked(s, name, it->second.data() + off, n);
             s.spu.writeRam(spuDst, it->second.data() + off, n);
-            for (auto &v : s.variants)
-                v->spu.writeRam(spuDst, it->second.data() + off, n);
         }
     }
     if (id != 0u && s.handler != 0u)
