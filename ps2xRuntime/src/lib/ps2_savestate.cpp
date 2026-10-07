@@ -12,6 +12,7 @@
 #include "ps2_ssx3_patch_grow_state.h"
 #include "ps2_ssx3_tricky_layer.h"
 #include "ps2_fh1_full120.h"
+#include "ps2_ts2_split60.h"
 #include "runtime/ps2_vfs.h"
 #include "ps2_iop_host.h"
 #include "ps2_pad_latch.h"
@@ -1309,6 +1310,11 @@ namespace ps2_savestate
         if (gems.scanCursor != 0u && ps2_ssx3_tricky_layer::config().gems)
             ps2_tk45c::rebuildResolved(gems, ps2_tk45c::table(), runtime.memory().getRDRAM(),
                                       PS2_RAM_SIZE, savedTick);
+        ps2_ts2_split60::g_state.ram =
+            (ps2_ts2_split60::g_state.crashBodyHalf || ps2_ts2_split60::g_state.bounceHalf)
+                ? runtime.memory().getRDRAM() : nullptr;
+        ps2_ts2_split60::g_state.cachedData = nullptr;
+        ps2_ts2_split60::g_state.cachedValid = false;
         ps2_ssx3_tricky_layer::onStateLoaded(runtime.memory().getRDRAM(), PS2_RAM_SIZE, savedTick);
         setResumeSkip();
         if (savedTickOut)
@@ -2035,7 +2041,69 @@ namespace
             return r.fail("trickygems: invalid scan cursor");
         for (float x : next.prev)
             if (!std::isfinite(x)) return r.fail("trickygems: invalid segment");
-        ps2_tk45c::state() = next; // derived instance lookup is rebuilt from restored RAM after all sections.
+        if (!r.validationOnly())
+            ps2_tk45c::state() = next; // derived lookup is rebuilt from restored RAM after all sections.
+        return true;
+    }
+
+    void split120Save(Writer &w)
+    {
+        using namespace ps2_ts2_split60;
+        const State &s = g_state;
+        const char *mode = std::getenv("PS2X_SSX3_SIM_MODE");
+        w.str(mode ? mode : "");
+        w.b(crashBodyEnabled()); w.b(bounceEnabled());
+        w.u32(s.guestThread); w.b(s.guestInterrupt); w.u64(s.scopeErrors);
+        w.b(s.crashBodyHalf); w.b(s.bounceHalf);
+        w.b(g_crashWords.refused); w.b(g_bounceWords.refused);
+        for (const auto &slot : s.threads) { w.b(slot.used); w.u32(slot.key); w.pod(slot.data); }
+        w.u32(static_cast<uint32_t>(s.threadOverflow.size()));
+        for (const auto &[key, data] : s.threadOverflow) { w.u32(key); w.pod(data); }
+        for (const auto &slot : s.riders) { w.b(slot.used); w.u32(slot.key); w.pod(slot.id); }
+        w.u32(static_cast<uint32_t>(s.riderOverflow.size()));
+        for (const auto &[key, id] : s.riderOverflow) { w.u32(key); w.pod(id); }
+    }
+
+    bool split120Load(Reader &r)
+    {
+        using namespace ps2_ts2_split60;
+        State next{};
+        const std::string savedMode = r.str();
+        const char *mode = std::getenv("PS2X_SSX3_SIM_MODE");
+        const bool crash = r.b(), bounce = r.b();
+        if (savedMode != (mode ? mode : "") || crash != crashBodyEnabled() || bounce != bounceEnabled())
+            return r.fail("split120: SIM_MODE or crash/bounce option differs");
+        next.guestThread = r.u32(); next.guestInterrupt = r.b(); next.scopeErrors = r.u64();
+        next.crashBodyHalf = r.b(); next.bounceHalf = r.b();
+        const bool crashRefused = r.b(), bounceRefused = r.b();
+        for (auto &slot : next.threads) { slot.used = r.b(); slot.key = r.u32(); r.pod(slot.data); }
+        const uint32_t nt = r.u32();
+        if (nt > 1024u) return r.fail("split120: too many threads");
+        for (uint32_t i = 0; i < nt; ++i)
+        {
+            const uint32_t key = r.u32(); ThreadData data{}; r.pod(data);
+            if (!next.threadOverflow.emplace(key, data).second) return r.fail("split120: duplicate thread");
+        }
+        for (auto &slot : next.riders) { slot.used = r.b(); slot.key = r.u32(); r.pod(slot.id); }
+        const uint32_t nr = r.u32();
+        if (nr > 1024u) return r.fail("split120: too many riders");
+        for (uint32_t i = 0; i < nr; ++i)
+        {
+            const uint32_t key = r.u32(); PredictorIdentity id{}; r.pod(id);
+            if (!next.riderOverflow.emplace(key, id).second) return r.fail("split120: duplicate rider");
+        }
+        if (!r.ok()) return false;
+        for (const auto &slot : next.threads)
+            if (slot.used && (slot.data.half > 1u || slot.data.ctx.halfIndex > 1u))
+                return r.fail("split120: invalid half");
+        for (const auto &[key, data] : next.threadOverflow)
+            if (data.half > 1u || data.ctx.halfIndex > 1u) return r.fail("split120: invalid overflow half");
+        if (!r.validationOnly())
+        {
+            g_state = std::move(next); // ram/cache pointers rebound after all sections.
+            g_crashWords.refused = crashRefused;
+            g_bounceWords.refused = bounceRefused;
+        }
         return true;
     }
 
@@ -2622,5 +2690,7 @@ namespace
     const bool kPadLatchRegistered =
         ps2_savestate::registerSection("padlatch", {1u, &padLatchSave, &padLatchLoad, &padLatchReady});
     const bool kTrickyGemsRegistered =
-        ps2_savestate::registerSection("trickygems", {1u, &trickyGemsSave, &trickyGemsLoad, nullptr});
+        ps2_savestate::registerSection("trickygems", {1u, &trickyGemsSave, &trickyGemsLoad, nullptr, 0u, false, &trickyGemsLoad});
+    const bool kSplit120Registered =
+        ps2_savestate::registerSection("split120", {1u, &split120Save, &split120Load, nullptr, 0u, false, &split120Load});
 } // namespace

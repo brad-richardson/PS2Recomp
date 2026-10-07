@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_ts2_split60.h"
+#include "runtime/ps2_savestate.h"
 
 #include <cstring>
 #include <vector>
@@ -31,6 +32,41 @@ std::vector<uint8_t> stockRam()
 void register_ps2_ts2_split60_tests()
 {
     using namespace ps2_ts2_split60;
+    MiniTest::Case("Ps2Ts2Split120Savestate", [](TestCase &tc)
+                   {
+        auto saved = std::move(g_state);
+        const bool oldCrash = g_crashWords.refused, oldBounce = g_bounceWords.refused;
+        g_state = State{};
+        g_state.guestThread = 7u;
+        g_state.threads[0].used = true;
+        g_state.threads[0].key = 7u;
+        g_state.threads[0].data.half = 1u;
+        g_state.threads[0].data.ctx.active = true;
+        g_state.threads[0].data.ctx.selectorCase = 2u;
+        g_state.threads[0].data.ctx.restartCheckpointPending = true;
+        g_state.riders[0].used = true;
+        g_state.riders[0].key = 0x1234u;
+        g_state.riders[0].id.epoch = 3u;
+        g_state.crashBodyHalf = true;
+        g_crashWords.refused = true;
+        const auto &hooks = ps2_savestate::registeredSections().at("split120");
+        ps2_savestate::Writer w;
+        hooks.save(w);
+        g_state = State{};
+        g_crashWords.refused = false;
+        ps2_savestate::Reader r(w.buf.data(), w.buf.size());
+        tc.Equals(hooks.version, 1u, "section version");
+        tc.IsTrue(hooks.load(r) && r.ok() && r.atEnd(), "section round trip");
+        tc.Equals(g_state.guestThread, 7u, "guest thread");
+        tc.Equals(g_state.threads[0].data.half, 1u, "half 1");
+        tc.IsTrue(g_state.threads[0].data.ctx.active &&
+                  g_state.threads[0].data.ctx.restartCheckpointPending, "active continuation");
+        tc.Equals(g_state.riders[0].id.epoch, 3u, "predictor epoch");
+        tc.IsTrue(g_state.crashBodyHalf && g_crashWords.refused, "word ownership and refusal");
+        tc.IsTrue(g_state.ram == nullptr && !g_state.cachedValid, "runtime pointers unbound");
+        g_state = std::move(saved);
+        g_crashWords.refused = oldCrash;
+        g_bounceWords.refused = oldBounce; });
     MiniTest::Case("Ps2Ts2Split60HalfWords", [](TestCase &tc)
                    {
         tc.Run("constants are the FH12 rows (2.65 / 1.325, 1/60 / 1/120)", [](TestCase &t)
