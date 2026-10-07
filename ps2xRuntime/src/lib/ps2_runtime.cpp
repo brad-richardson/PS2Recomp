@@ -3509,6 +3509,7 @@ PS2Runtime::~PS2Runtime()
     ps2_mtvu::setDtFallbackFn({});
     ps2_mtvu::fbrstFn() = {};
     ps2_mtvu::jobEndFn() = {};
+    ps2_fh1_jcam2::lazyShutdown();
     ps2_microvu::shutdown();
     printMissingFunctionCounts();
     try

@@ -66,6 +66,7 @@ void register_ps2_fh1_fix_tests();
 void register_ps2_fh1_savestate_tests();
 void register_ps2_fh1_hooktable_tests();
 void register_ps2_fh1_fh28_tests();
+void register_ps2_fh1_jcam2_scratch_tests();
 void register_ps2_savestate_tests();
 void register_ps2_tc1_vf0_tests();
 void register_ps2_ach_tests();
@@ -140,6 +141,7 @@ int main()
     register_ps2_fh1_savestate_tests();
     register_ps2_fh1_hooktable_tests();
     register_ps2_fh1_fh28_tests();
+    register_ps2_fh1_jcam2_scratch_tests();
     register_ps2_savestate_tests();
     register_ps2_tc1_vf0_tests();
     register_ps2_ach_tests();

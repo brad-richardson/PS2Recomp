@@ -17,6 +17,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 
 #if defined(PS2X_MICROVU_STATIC) || defined(__ANDROID__) || defined(__APPLE__)
 #define PS2X_MICROVU_LOADABLE 1
@@ -27,6 +30,41 @@
 
 namespace ps2_microvu {
 namespace {
+#if defined(__APPLE__)
+// PCSX2's Darwin PageFaultHandler::Install clears the process task's
+// EXC_BAD_ACCESS port before assigning its own per-thread port. A preexisting
+// task crash reporter is still needed for faults PCSX2 declines. The adapter
+// restores the task port after PCSX2 initialization; thread ports retain
+// precedence. task_get_exception_ports gives us send rights to release.
+struct TaskBadAccessPorts {
+    exception_mask_t masks[EXC_TYPES_COUNT]{};
+    mach_port_t ports[EXC_TYPES_COUNT]{};
+    exception_behavior_t behaviors[EXC_TYPES_COUNT]{};
+    thread_state_flavor_t flavors[EXC_TYPES_COUNT]{};
+    mach_msg_type_number_t count = EXC_TYPES_COUNT;
+    bool valid = false;
+    TaskBadAccessPorts()
+    {
+        valid = task_get_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS, masks,
+                                         &count, ports, behaviors, flavors) == KERN_SUCCESS;
+    }
+    bool restore() const
+    {
+        if (!valid) return false;
+        for (mach_msg_type_number_t i = 0; i < count; ++i)
+            if (task_set_exception_ports(mach_task_self(), masks[i], ports[i],
+                                         behaviors[i], flavors[i]) != KERN_SUCCESS)
+                return false;
+        return true;
+    }
+    ~TaskBadAccessPorts()
+    {
+        if (!valid) return;
+        for (mach_msg_type_number_t i = 0; i < count; ++i)
+            if (MACH_PORT_VALID(ports[i])) mach_port_deallocate(mach_task_self(), ports[i]);
+    }
+};
+#endif
 #if defined(PS2X_MICROVU_LOADABLE)
 struct Api {
 #if !defined(PS2X_MICROVU_STATIC)
@@ -194,7 +232,24 @@ bool configure(bool mtvu_threaded, std::string& error)
     }
 #endif
     const char* why = nullptr;
-    if (!s_api.init(&why)) {
+#if defined(__APPLE__)
+    TaskBadAccessPorts priorTaskPorts;
+    if (!priorTaskPorts.valid) {
+        error = "cannot snapshot task EXC_BAD_ACCESS port before microvu init";
+        shutdown();
+        return false;
+    }
+#endif
+    const bool initialized = s_api.init(&why) != 0;
+#if defined(__APPLE__)
+    const bool taskPortsRestored = priorTaskPorts.restore();
+    if (!taskPortsRestored) {
+        error = "cannot restore task EXC_BAD_ACCESS port after microvu init";
+        shutdown();
+        return false;
+    }
+#endif
+    if (!initialized) {
         error = why ? why : "microvu init failed";
         shutdown();
         return false;

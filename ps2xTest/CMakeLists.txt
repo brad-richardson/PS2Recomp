@@ -81,6 +81,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_fh1_savestate_tests.cpp
     src/ps2_fh1_hooktable_tests.cpp
     src/ps2_fh1_fh28_tests.cpp
+    src/ps2_fh1_jcam2_scratch_tests.cpp
     src/ps2_savestate_tests.cpp
     src/ps2_tc1_vf0_tests.cpp
     src/ps2_ach_tests.cpp

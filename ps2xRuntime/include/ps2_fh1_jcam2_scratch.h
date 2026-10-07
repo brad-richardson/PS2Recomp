@@ -20,6 +20,7 @@
 #include "runtime/ps2_memory.h"
 
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -31,6 +32,11 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
+#if defined(__APPLE__)
+#include <sys/ucontext.h>
+#else
+#include <ucontext.h>
+#endif
 #include <unistd.h>
 #else
 #define PS2X_JCAM2_LAZY_SUPPORTED 0
@@ -62,35 +68,94 @@ struct LazyImage
     std::atomic<bool> active{false};
     uint64_t services = 0u, faults = 0u;
     bool failed = false;
+    bool installedSegv = false, installedBus = false;
+    void *altMemory = nullptr;
+    size_t altSize = 0u;
+    pthread_t altOwner{};
 };
 
 inline LazyImage g_lazy;
 inline struct sigaction g_oldSegv{}, g_oldBus{};
+inline void faultHandler(int sig, siginfo_t *info, void *uc);
+static_assert(std::atomic<bool>::is_always_lock_free && std::atomic<uint32_t>::is_always_lock_free,
+              "jcam2 fault-handler atomics must be lock-free");
+inline std::atomic<bool> g_resetSegv{false}, g_resetBus{false};
+
+inline bool isOurAction(const struct sigaction &sa)
+{
+    return (sa.sa_flags & SA_SIGINFO) && sa.sa_sigaction == &faultHandler;
+}
 
 inline void chainSignal(int sig, siginfo_t *info, void *uc)
 {
     const struct sigaction &old = sig == SIGBUS ? g_oldBus : g_oldSegv;
-    if ((old.sa_flags & SA_SIGINFO) != 0 && old.sa_sigaction)
+    // The sentinels share storage with sa_sigaction on POSIX: inspect them
+    // before deciding whether this is a three-argument action.
+    if (old.sa_handler == SIG_IGN) return;
+    const bool reset = (old.sa_flags & SA_RESETHAND) &&
+        (sig == SIGBUS ? g_resetBus : g_resetSegv).exchange(true, std::memory_order_relaxed);
+    if (old.sa_handler == SIG_DFL || reset)
     {
+        struct sigaction dfl{};
+        dfl.sa_handler = SIG_DFL;
+        sigemptyset(&dfl.sa_mask);
+        // A synchronous fault must terminate with the original signal. The
+        // current handler normally masks it, so unblock it before re-raising.
+        sigaction(sig, &dfl, nullptr);
+        sigset_t one{};
+        sigemptyset(&one);
+        sigaddset(&one, sig);
+        sigprocmask(SIG_UNBLOCK, &one, nullptr);
+        raise(sig);
+        _exit(128 + sig); // only reachable if a platform refuses the signal
+    }
+    sigset_t current{}, during = old.sa_mask;
+    sigprocmask(SIG_SETMASK, nullptr, &current);
+    // The ucontext contains the mask before our handler's automatic signal
+    // blocking. Apply the saved action to that mask, including SA_NODEFER.
+    const sigset_t &before = uc ? static_cast<ucontext_t *>(uc)->uc_sigmask : current;
+    for (int n = 1; n < NSIG; ++n)
+        if (sigismember(&before, n) == 1) sigaddset(&during, n);
+    if (old.sa_flags & SA_NODEFER) sigdelset(&during, sig);
+    else sigaddset(&during, sig);
+    sigprocmask(SIG_SETMASK, &during, nullptr);
+    if (old.sa_flags & SA_RESETHAND)
+        (sig == SIGBUS ? g_resetBus : g_resetSegv).store(true, std::memory_order_relaxed);
+    if (old.sa_flags & SA_SIGINFO)
         old.sa_sigaction(sig, info, uc);
-        return;
-    }
-    if (old.sa_handler != SIG_DFL && old.sa_handler != SIG_IGN && old.sa_handler)
-    {
+    else if (old.sa_handler)
         old.sa_handler(sig);
-        return;
-    }
-    // Default action: restore it and return; the faulting access re-faults.
-    signal(sig, SIG_DFL);
+    sigprocmask(SIG_SETMASK, &current, nullptr);
+}
+
+inline bool isExecuteFault(void *uc, uintptr_t b)
+{
+    if (!uc) return true; // do not open an unknown access type
+    const auto *ctx = static_cast<ucontext_t *>(uc);
+#if defined(__APPLE__) && defined(__aarch64__)
+    const uintptr_t pc = static_cast<uintptr_t>(ctx->uc_mcontext->__ss.__pc);
+#elif defined(__linux__) && defined(__aarch64__)
+    const uintptr_t pc = static_cast<uintptr_t>(ctx->uc_mcontext.pc);
+#elif defined(__APPLE__) && defined(__x86_64__)
+    const uintptr_t pc = static_cast<uintptr_t>(ctx->uc_mcontext->__ss.__rip);
+#elif defined(__linux__) && defined(__x86_64__)
+    const uintptr_t pc = static_cast<uintptr_t>(ctx->uc_mcontext.gregs[REG_RIP]);
+#else
+    return true;
+#endif
+    return pc >= b && pc < b + PS2_RAM_SIZE;
 }
 
 inline void faultHandler(int sig, siginfo_t *info, void *uc)
 {
+    const int savedErrno = errno;
     LazyImage &z = g_lazy;
     const uintptr_t a = reinterpret_cast<uintptr_t>(info ? info->si_addr : nullptr);
     const uintptr_t b = reinterpret_cast<uintptr_t>(z.base);
-    if (z.active.load(std::memory_order_acquire) && b && a >= b &&
-        a < b + PS2_RAM_SIZE && pthread_equal(pthread_self(), z.owner))
+    if (sig == SIGSEGV && info && info->si_code == SEGV_ACCERR &&
+        z.active.load(std::memory_order_acquire) && b && a >= b &&
+        a < b + PS2_RAM_SIZE && !isExecuteFault(uc, b) &&
+        pthread_equal(pthread_self(), z.owner))
     {
         const size_t p = (a - b) / z.page;
         if (!z.resident[p])
@@ -103,22 +168,79 @@ inline void faultHandler(int sig, siginfo_t *info, void *uc)
                 const uint32_t n = z.freshCount.load(std::memory_order_relaxed);
                 z.fresh[n] = static_cast<uint32_t>(p);
                 z.freshCount.store(n + 1u, std::memory_order_relaxed);
+                errno = savedErrno;
                 return;
             }
         }
     }
     chainSignal(sig, info, uc);
+    errno = savedErrno;
 }
 
-inline bool lazyInit()
+using SigactionFn = int (*)(int, const struct sigaction *, struct sigaction *);
+inline void restoreOwned(int sig, const struct sigaction &old)
+{
+    struct sigaction now{};
+    if (sigaction(sig, nullptr, &now) == 0 && isOurAction(now))
+        sigaction(sig, &old, nullptr);
+}
+
+inline bool prepareAltStack(LazyImage &z)
+{
+    stack_t current{};
+    if (sigaltstack(nullptr, &current) != 0) return false;
+    const size_t need = static_cast<size_t>(SIGSTKSZ) > 65536u ? static_cast<size_t>(SIGSTKSZ) : 65536u;
+    if (!(current.ss_flags & SS_DISABLE))
+        return current.ss_sp && current.ss_size >= need;
+    void *memory = mmap(nullptr, need, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (memory == MAP_FAILED) return false;
+    stack_t ours{};
+    ours.ss_sp = memory;
+    ours.ss_size = need;
+    if (sigaltstack(&ours, nullptr) != 0)
+    {
+        munmap(memory, need);
+        return false;
+    }
+    z.altMemory = memory;
+    z.altSize = need;
+    z.altOwner = pthread_self();
+    return true;
+}
+
+inline void releaseAltStack(LazyImage &z)
+{
+    if (!z.altMemory) return;
+    if (!pthread_equal(pthread_self(), z.altOwner)) return; // retain live stack on its owner thread
+    stack_t current{};
+    if (sigaltstack(nullptr, &current) == 0 && current.ss_sp == z.altMemory)
+    {
+        stack_t disabled{};
+        disabled.ss_flags = SS_DISABLE;
+        if (sigaltstack(&disabled, nullptr) == 0)
+        {
+            munmap(z.altMemory, z.altSize);
+            z.altMemory = nullptr;
+            z.altSize = 0u;
+        }
+    }
+}
+
+inline bool lazyInit(SigactionFn installAction = ::sigaction)
 {
     LazyImage &z = g_lazy;
-    if (z.base) return true;
     if (z.failed) return false;
+    if (z.base) return pthread_equal(pthread_self(), z.owner);
     const long ps = sysconf(_SC_PAGESIZE);
     if (ps <= 0 || (PS2_RAM_SIZE % static_cast<size_t>(ps)) != 0u) { z.failed = true; return false; }
     void *m = mmap(nullptr, PS2_RAM_SIZE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (m == MAP_FAILED) { z.failed = true; return false; }
+    if (!prepareAltStack(z))
+    {
+        munmap(m, PS2_RAM_SIZE);
+        z.failed = true;
+        return false;
+    }
     z.page = static_cast<size_t>(ps);
     z.pages = PS2_RAM_SIZE / z.page;
     z.resident.assign(z.pages, 0u);
@@ -127,15 +249,48 @@ inline bool lazyInit()
     sa.sa_sigaction = &faultHandler;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
-    if (sigaction(SIGSEGV, &sa, &g_oldSegv) != 0 || sigaction(SIGBUS, &sa, &g_oldBus) != 0)
+    if (installAction(SIGSEGV, &sa, &g_oldSegv) != 0)
     {
         munmap(m, PS2_RAM_SIZE);
+        releaseAltStack(z);
         z.failed = true;
         return false;
     }
+    z.installedSegv = true;
+    if (installAction(SIGBUS, &sa, &g_oldBus) != 0)
+    {
+        restoreOwned(SIGSEGV, g_oldSegv);
+        struct sigaction now{};
+        z.installedSegv = sigaction(SIGSEGV, nullptr, &now) == 0 && isOurAction(now);
+        munmap(m, PS2_RAM_SIZE);
+        releaseAltStack(z);
+        z.failed = true;
+        return false;
+    }
+    z.installedBus = true;
+    z.owner = pthread_self();
     z.base = static_cast<uint8_t *>(m);
     std::fprintf(stderr, "[jcam2-scratch] lazy image page=%zu pages=%zu\n", z.page, z.pages);
     return true;
+}
+
+inline void lazyShutdown()
+{
+    LazyImage &z = g_lazy;
+    z.active.store(false, std::memory_order_release);
+    if (z.installedBus) restoreOwned(SIGBUS, g_oldBus);
+    if (z.installedSegv) restoreOwned(SIGSEGV, g_oldSegv);
+    z.installedBus = z.installedSegv = false;
+    if (z.base) munmap(z.base, PS2_RAM_SIZE);
+    z.base = nullptr;
+    z.live = nullptr;
+    z.resident.clear();
+    z.fresh.clear();
+    z.runs.clear();
+    z.freshCount.store(0u, std::memory_order_relaxed);
+    z.services = z.faults = 0u;
+    z.failed = false;
+    releaseAltStack(z);
 }
 
 // Opens the service: re-copies the footprint from live and arms the handler.
@@ -197,5 +352,6 @@ inline void lazyEnd()
 #else
 inline uint8_t *lazyBegin(const uint8_t *) { return nullptr; }
 inline void lazyEnd() {}
+inline void lazyShutdown() {}
 #endif
 } // namespace ps2_fh1_jcam2
