@@ -1303,6 +1303,12 @@ namespace ps2_savestate
         // (aliases follow the restored mode; a new epoch retires stale
         // packets/bursts; run state resets). Single funnel: boot-time and
         // quick loads both land here.
+        // SSF2: derived gem instance addresses must come from restored RAM,
+        // and split120's half-word owner must point at this runtime's RAM.
+        ps2_tk45c::State &gems = ps2_tk45c::state();
+        if (gems.scanCursor != 0u && ps2_ssx3_tricky_layer::config().gems)
+            ps2_tk45c::rebuildResolved(gems, ps2_tk45c::table(), runtime.memory().getRDRAM(),
+                                      PS2_RAM_SIZE, savedTick);
         ps2_ssx3_tricky_layer::onStateLoaded(runtime.memory().getRDRAM(), PS2_RAM_SIZE, savedTick);
         setResumeSkip();
         if (savedTickOut)
@@ -1988,6 +1994,51 @@ bool PS2RuntimeSavestate::loadKernel(PS2Runtime &rt, Reader &r)
 // VU1Interpreter instance never started an XGKICK) and skips it on load.
 namespace
 {
+    using ps2_savestate::Reader;
+    using ps2_savestate::Writer;
+
+    void trickyGemsSave(Writer &w)
+    {
+        const auto &s = ps2_tk45c::state();
+        w.b(ps2_ssx3_tricky_layer::config().gems);
+        w.u32(static_cast<uint32_t>(ps2_ssx3_tricky_layer::config().gems ? ps2_tk45c::table().size() : 0u));
+        for (bool b : {s.init, s.wasTricky, s.prevValid, s.scanDone, s.pendingClear, s.rehideArmed,
+                       s.raceClock.init, s.raceClock.seen, s.spinLogged}) w.b(b);
+        w.bytes(s.prev, sizeof(s.prev));
+        w.u32(s.lastR); w.u32(s.lastClock); w.u32(s.scanCursor);
+        w.u32(s.raceClock.last); w.u64(s.raceClock.lastTick); w.u64(s.raceClock.adoptUntil);
+        w.bytes(s.collected, sizeof(s.collected));
+        w.bytes(s.spinSeen, sizeof(s.spinSeen));
+    }
+
+    bool trickyGemsLoad(Reader &r)
+    {
+        ps2_tk45c::State next{};
+        const bool savedEnabled = r.b();
+        const uint32_t savedCount = r.u32();
+        const bool nowEnabled = ps2_ssx3_tricky_layer::config().gems;
+        if (savedEnabled != nowEnabled ||
+            savedCount != (nowEnabled ? ps2_tk45c::table().size() : 0u))
+            return r.fail("trickygems: mode or table size differs");
+        next.init = r.b(); next.wasTricky = r.b(); next.prevValid = r.b();
+        next.scanDone = r.b(); next.pendingClear = r.b(); next.rehideArmed = r.b();
+        next.raceClock.init = r.b(); next.raceClock.seen = r.b(); next.spinLogged = r.b();
+        r.bytes(next.prev, sizeof(next.prev));
+        next.lastR = r.u32(); next.lastClock = r.u32(); next.scanCursor = r.u32();
+        next.raceClock.last = r.u32(); next.raceClock.lastTick = r.u64();
+        next.raceClock.adoptUntil = r.u64();
+        r.bytes(next.collected, sizeof(next.collected));
+        r.bytes(next.spinSeen, sizeof(next.spinSeen));
+        if (!r.ok()) return false;
+        if (next.scanCursor > PS2_RAM_SIZE || next.scanCursor % ps2_tk45c::kScanChunk != 0u ||
+            next.scanDone != (next.scanCursor == PS2_RAM_SIZE))
+            return r.fail("trickygems: invalid scan cursor");
+        for (float x : next.prev)
+            if (!std::isfinite(x)) return r.fail("trickygems: invalid segment");
+        ps2_tk45c::state() = next; // derived instance lookup is rebuilt from restored RAM after all sections.
+        return true;
+    }
+
     template <class D>
     constexpr bool kVuHasXgkick = D::kUnit == VuUnit::VU1;
 }
@@ -2570,4 +2621,6 @@ namespace
         "snd", {ps2_savestate::kSndVersion, &SndSavestate::save, &SndSavestate::load, nullptr});
     const bool kPadLatchRegistered =
         ps2_savestate::registerSection("padlatch", {1u, &padLatchSave, &padLatchLoad, &padLatchReady});
+    const bool kTrickyGemsRegistered =
+        ps2_savestate::registerSection("trickygems", {1u, &trickyGemsSave, &trickyGemsLoad, nullptr});
 } // namespace

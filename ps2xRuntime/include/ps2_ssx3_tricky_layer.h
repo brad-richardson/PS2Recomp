@@ -623,9 +623,9 @@ inline void onVBlankTick(uint8_t *rdram, size_t ramSize, uint64_t tick)
 // loadImpl), before guest execution resumes and before any next CD read:
 // the restored RAM's mode selects the pending CD aliases directly, bypassing
 // modeSet's cur==want early return. Then a new epoch retires stale packets
-// and bursts, the run state resets, and the gems poll restarts reset-only
-// (TK45c's stated policy: the bitmap drops; the saved multiplier word is
-// guest state and restores exactly).
+// and bursts. Gem collection state is restored by the "trickygems" section;
+// a load must never use the previous timeline's resolved addresses to unhide
+// instances in the newly restored RAM.
 inline void onStateLoaded(uint8_t *rdram, size_t ramSize, uint64_t tick)
 {
     if (!rdram || ramSize == 0u)
@@ -666,8 +666,6 @@ inline void onStateLoaded(uint8_t *rdram, size_t ramSize, uint64_t tick)
     q.head = q.tail; // drop pre-load posts (the old timeline's events)
     ps2_ssx3_tricky_song::cancelBurst();
     ps2_ssx3_tricky_song::setSuspended(false);
-    if (config().gems)
-        ps2_tk45c::fullReset(ps2_tk45c::state(), ps2_tk45c::table(), rdram, ramSize, tick);
     PresentationPacket p;
     p.tick = tick;
     p.epoch = epoch();

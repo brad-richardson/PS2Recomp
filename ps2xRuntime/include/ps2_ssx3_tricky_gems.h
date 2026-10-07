@@ -489,6 +489,23 @@ inline void scanChunk(State &st, const std::vector<Gem> &gems, const uint8_t *ra
     }
 }
 
+// Reconstruct only the lookup derived from saved RAM. Keep the logical scan
+// cursor and collected bitmap; suppress the normal re-hide pass while
+// inspecting the restored bytes, since load itself must not change them.
+inline void rebuildResolved(State &st, const std::vector<Gem> &gems, const uint8_t *ram,
+                            size_t ramSize, uint64_t tick)
+{
+    const uint32_t target = st.scanCursor;
+    if (target == 0u || target > ramSize || gems.empty() || !ram) return;
+    const bool rehide = st.rehideArmed;
+    st.scanCursor = 0u;
+    st.scanDone = false;
+    st.rehideArmed = false;
+    while (st.scanCursor < target)
+        scanChunk(st, gems, ram, ramSize, tick, st.lastClock);
+    st.rehideArmed = rehide;
+}
+
 // Validate the trick-state pointer (TKA1: full span, alignment, finite use).
 inline bool trickState(const uint8_t *ram, size_t ramSize, uint32_t r, uint32_t &t) noexcept
 {

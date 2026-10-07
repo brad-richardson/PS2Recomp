@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 
 #include "ps2_ssx3_tricky_gems.h"
+#include "runtime/ps2_savestate.h"
 
 #include <cmath>
 #include <cstdint>
@@ -115,6 +116,43 @@ void register_ps2_ssx3_tricky_gems_tests();
 
 void register_ps2_ssx3_tricky_gems_tests()
 {
+    MiniTest::Case("Ps2TrickyGemsSavestate", [](TestCase &tc)
+                   {
+        State saved = ps2_tk45c::state();
+        State &s = ps2_tk45c::state();
+        s = State{};
+        s.init = true; s.wasTricky = true; s.prevValid = true;
+        s.prev[0] = 12.5f; s.lastR = kR; s.lastClock = 40u;
+        s.pendingClear = true; s.raceClock.init = true; s.raceClock.lastTick = 100u;
+        ps2_tk45c::setCollected(s, 2u);
+        const auto &hooks = ps2_savestate::registeredSections().at("trickygems");
+        ps2_savestate::Writer w;
+        hooks.save(w);
+        s = State{};
+        ps2_savestate::Reader r(w.buf.data(), w.buf.size());
+        tc.Equals(hooks.version, 1u, "section version");
+        tc.IsTrue(hooks.load(r) && r.ok() && r.atEnd(), "section round trip");
+        tc.IsTrue(s.init && s.wasTricky && s.prevValid && s.pendingClear, "race and pending state");
+        tc.IsTrue(ps2_tk45c::isCollected(s, 2u), "collection bitmap");
+        tc.Equals(s.lastClock, 40u, "race clock");
+        tc.Equals(s.raceClock.lastTick, 100ull, "clock epoch");
+        tc.IsTrue(s.nres[2] == 0u, "lookup not restored from old process");
+        s = saved;
+
+        std::vector<uint8_t> ram(3u * ps2_tk45c::kScanChunk);
+        std::vector<Gem> gems(1);
+        gems[0].xyz[0] = 1000.0f; gems[0].xyz[1] = 0.0f; gems[0].xyz[2] = 0.0f;
+        fakeInstance(ram, kInst0, 1000.0f, 0.0f, 0.0f);
+        State rebuilt{};
+        rebuilt.scanCursor = static_cast<uint32_t>(ram.size());
+        rebuilt.scanDone = true;
+        rebuilt.rehideArmed = true;
+        rebuilt.resolved[0][0] = 0xdeadbeefu;
+        rebuilt.nres[0] = 1u;
+        const std::vector<uint8_t> before = ram;
+        ps2_tk45c::rebuildResolved(rebuilt, gems, ram.data(), ram.size(), 200u);
+        tc.Equals(rebuilt.resolved[0][0], kInst0, "lookup rebuilt from RAM");
+        tc.IsTrue(rebuilt.rehideArmed && ram == before, "load inspection leaves RAM untouched"); });
     MiniTest::Case("Ps2Ssx3TrickyGemsSwept", [](TestCase &tc)
                {
         tc.Run("segment through sphere hits, miss misses", [](TestCase &t)
