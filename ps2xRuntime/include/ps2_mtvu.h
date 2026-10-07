@@ -181,6 +181,15 @@ namespace ps2_mtvu
         return fn;
     }
 
+    // GPK1 (PS2X_MTVU_GS_BATCH): PS2Runtime installs; runs on the MTVU-GIF
+    // thread before it publishes consumed ops, so the GS commands those ops
+    // staged are in the GS worker queue before anyone sees the ops done.
+    inline std::function<void()> &gifPublishFn()
+    {
+        static std::function<void()> fn;
+        return fn;
+    }
+
     namespace detail
     {
         // -1 = not resolved yet: census comes from the environment on first
@@ -557,6 +566,8 @@ namespace ps2_mtvu
             // --- consumer (MTVU-GIF thread) ---
             void publishHead()
             {
+                if (const auto &staged = gifPublishFn())
+                    staged();
                 cPub = cHead;
                 head.store(cHead, std::memory_order_release);
                 doneBytes.store(cBytes, std::memory_order_release);
@@ -692,6 +703,8 @@ namespace ps2_mtvu
                     if (kind == GifOp::Kind::JobEnd || cHead - cPub >= kPublishEvery)
                         publishHead();
                 }
+                if (const auto &staged = gifPublishFn())
+                    staged();
                 g_gifTid.store(std::thread::id{}, std::memory_order_relaxed);
             }
 

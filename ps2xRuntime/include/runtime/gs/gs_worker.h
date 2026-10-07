@@ -341,6 +341,21 @@ public:
     // the thread must call flushWake() before it waits on anything but an RPC.
     static void beginLocalBatch();
     static void endLocalBatch();
+    // GPK1 (PS2X_MTVU_GS_BATCH=1, default off): staged publish. On the
+    // MTVU-GIF thread, a fire-and-forget enqueue inside a local batch is
+    // staged thread-locally and published later under one queue-mutex round
+    // (the GS worker queue lock was the contended per-command cost, GPK1
+    // attribution). Each staged command is then admitted exactly as
+    // enqueue() would: same order, bounds, backpressure and deferred-wake
+    // rules. flushStaged() publishes; the GIF stage calls it before it
+    // publishes consumed ops (so anything that waits on the GIF stage sees
+    // the commands queued), flushWake() and any other enqueue from the
+    // thread (RPCs included) publish first, and a stage reaching
+    // kStageMaxCommands/kStageMaxBytes publishes itself. Host transport only.
+    static constexpr size_t kStageMaxCommands = 64;
+    static constexpr size_t kStageMaxBytes = 256u * 1024u;
+    static void setStagedPublish(bool on);
+    static void flushStaged();
 
     size_t pendingCount() const;
     size_t pendingBytes() const;
@@ -356,6 +371,11 @@ public:
 
 private:
     void threadMain();
+    // Admits one command with m_mutex held (enqueue's body). Returns whether
+    // the caller must notify m_hasWork after unlocking. Shutdown runs the
+    // command inline and returns with the lock released.
+    bool admitLocked(std::unique_lock<std::mutex> &lock, GsCommand &cmd);
+    void publishStaged();
 
     Handler m_handler;
     const size_t m_maxDescriptors;

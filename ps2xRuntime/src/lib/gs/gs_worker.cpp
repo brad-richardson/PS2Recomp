@@ -17,6 +17,12 @@ namespace
 thread_local uint64_t *t_enqueueWaitSink = nullptr;
 // MP1 L2: this thread's local batch depth (see beginLocalBatch).
 thread_local uint32_t t_localBatchDepth = 0;
+// GPK1: staged publish (see GsWorker::setStagedPublish).
+std::atomic<bool> s_stagedPublish{false};
+std::atomic<uint64_t> s_stagedRounds{0}; // receipts: staged publish rounds
+thread_local std::vector<GsCommand> t_staged;
+thread_local GsWorker *t_stagedWorker = nullptr;
+thread_local size_t t_stagedBytes = 0;
 
 uint64_t steadyNowNs()
 {
@@ -40,6 +46,42 @@ void GsWorker::endLocalBatch()
 void GsWorker::setEnqueueWaitSink(uint64_t *sink)
 {
     t_enqueueWaitSink = sink;
+}
+
+void GsWorker::setStagedPublish(bool on)
+{
+    s_stagedPublish.store(on, std::memory_order_relaxed);
+}
+
+void GsWorker::flushStaged()
+{
+    if (!t_staged.empty())
+        t_stagedWorker->publishStaged();
+}
+
+void GsWorker::publishStaged()
+{
+    s_stagedRounds.fetch_add(1u, std::memory_order_relaxed);
+    // Staged commands were local-batch enqueues: admit them as such.
+    ++t_localBatchDepth;
+    bool wake = false;
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        for (GsCommand &cmd : t_staged)
+        {
+            if (!lock.owns_lock())
+                lock.lock();
+            wake |= admitLocked(lock, cmd);
+        }
+    }
+    --t_localBatchDepth;
+    t_staged.clear();
+    t_stagedBytes = 0;
+    if (wake)
+    {
+        m_wakes.fetch_add(1u, std::memory_order_relaxed);
+        m_hasWork.notify_one();
+    }
 }
 
 GsWorker::GsWorker(size_t maxDescriptors, size_t maxPayloadBytes, Handler handler)
@@ -91,9 +133,39 @@ void GsWorker::enqueue(GsCommand cmd)
         ps2_mtvu::gifStageEscape();
     else if (ps2_mtvu::vifStageDefer()) // VPL2: counted (must read 0)
         ps2_mtvu::vifStageNoteEscape();
+    if (s_stagedPublish.load(std::memory_order_relaxed))
+    {
+        // GPK1: stage a fire-and-forget local-batch command from the GIF
+        // stage; anything else publishes this thread's stage first.
+        if (t_localBatchDepth != 0u && !cmd.rpc && ps2_mtvu::onGifStage())
+        {
+            if (t_stagedWorker != this)
+                flushStaged();
+            t_stagedWorker = this;
+            t_stagedBytes += cmd.payloadBytes();
+            t_staged.push_back(std::move(cmd));
+            if (t_staged.size() >= kStageMaxCommands || t_stagedBytes >= kStageMaxBytes)
+                publishStaged();
+            return;
+        }
+        flushStaged();
+    }
+    std::unique_lock<std::mutex> lock(m_mutex);
+    const bool wake = admitLocked(lock, cmd);
+    if (!lock.owns_lock())
+        return;
+    lock.unlock();
+    if (wake)
+    {
+        m_wakes.fetch_add(1u, std::memory_order_relaxed);
+        m_hasWork.notify_one();
+    }
+}
+
+bool GsWorker::admitLocked(std::unique_lock<std::mutex> &lock, GsCommand &cmd)
+{
     const size_t bytes = cmd.payloadBytes();
     const bool hasRpc = cmd.rpc != nullptr;
-    std::unique_lock<std::mutex> lock(m_mutex);
     // Backpressure: a full ring blocks the producer (GIF FIFO-full stall).
     // An oversize single command bypasses the byte cap so it can always
     // make progress once the queue drains below it.
@@ -144,7 +216,7 @@ void GsWorker::enqueue(GsCommand cmd)
         m_handler(cmd);
         if (cmd.rpc)
             cmd.rpc->signal();
-        return;
+        return false;
     }
     m_queuedBytes += bytes;
     m_queue.push_back(std::move(cmd));
@@ -183,12 +255,7 @@ void GsWorker::enqueue(GsCommand cmd)
         wake = m_workerIdle;
         m_workerIdle = false;
     }
-    lock.unlock();
-    if (wake)
-    {
-        m_wakes.fetch_add(1u, std::memory_order_relaxed);
-        m_hasWork.notify_one();
-    }
+    return wake;
 }
 
 void GsWorker::beginBatch()
@@ -238,6 +305,8 @@ void GsWorker::endBatch(bool mayDefer)
 
 void GsWorker::flushWake()
 {
+    if (t_stagedWorker == this)
+        flushStaged(); // GPK1: publish before delivering the wake
     std::unique_lock<std::mutex> lock(m_mutex);
     if (m_batchDepth != 0 || !m_batchDirty)
         return;
@@ -398,10 +467,11 @@ void GsWorker::threadMain()
         }
         const uint64_t executed = m_executedCount.fetch_add(batchSize, std::memory_order_relaxed) + batchSize;
         if (deferOn && (executed >> 18) != ((executed - batchSize) >> 18))
-            std::fprintf(stderr, "[gs:handoff] executed=%llu wakes=%llu deferred=%llu watchdog=%llu\n",
+            std::fprintf(stderr, "[gs:handoff] executed=%llu wakes=%llu deferred=%llu watchdog=%llu staged_rounds=%llu\n",
                          static_cast<unsigned long long>(executed),
                          static_cast<unsigned long long>(m_wakes.load(std::memory_order_relaxed)),
                          static_cast<unsigned long long>(m_deferred.load(std::memory_order_relaxed)),
-                          static_cast<unsigned long long>(m_watchdog.load(std::memory_order_relaxed)));
+                         static_cast<unsigned long long>(m_watchdog.load(std::memory_order_relaxed)),
+                         static_cast<unsigned long long>(s_stagedRounds.load(std::memory_order_relaxed)));
     }
 }

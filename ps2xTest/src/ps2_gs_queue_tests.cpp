@@ -1272,6 +1272,94 @@ void register_ps2_gs_queue_tests()
             t.Equals(worker.enqueuedCount(), worker.executedCount(), "every command should execute");
         });
 
+        // GPK1: staged publish on the GIF stage thread keeps FIFO order,
+        // holds commands until a publish point, and publishes before an RPC,
+        // flushWake and at the stage cap.
+        tc.Run("GPK1 staged publish keeps FIFO order and publishes at flush points", [](TestCase &t)
+        {
+            std::vector<uint32_t> seen;
+            std::mutex seenMutex;
+            GsWorker worker(0u, 0u, [&](GsCommand &cmd)
+                            {
+                                std::lock_guard<std::mutex> lock(seenMutex);
+                                seen.push_back(cmd.u32b);
+                            });
+            worker.setDeferredWakes(64u, 256u * 1024u);
+            worker.start();
+            GsWorker::setStagedPublish(true);
+            uint32_t next = 0;
+            bool heldUntilFlush = false, rpcAfterStaged = false, capPublished = false;
+            std::thread gif(
+                [&]
+                {
+                    ps2_mtvu::detail::g_gifTid.store(std::this_thread::get_id(), std::memory_order_relaxed);
+                    auto packet = [&]
+                    {
+                        GsWorker::beginLocalBatch();
+                        GsCommand c;
+                        c.kind = GsCmdKind::GifPacket;
+                        c.u32b = next++;
+                        c.bytes.resize(16u, 0x5Au);
+                        worker.enqueue(std::move(c));
+                        GsWorker::endLocalBatch();
+                    };
+                    // Held: nothing reaches the queue before a publish point.
+                    for (int i = 0; i < 10; ++i)
+                        packet();
+                    heldUntilFlush = worker.enqueuedCount() == 0u;
+                    GsWorker::flushStaged();
+                    // An RPC publishes the stage first, then runs after it.
+                    for (int i = 0; i < 5; ++i)
+                        packet();
+                    GsCommand fence;
+                    fence.kind = GsCmdKind::Fence;
+                    fence.u32b = 0xFFFFFFFFu;
+                    fence.rpc = std::make_shared<GsRpcBase>();
+                    std::shared_ptr<GsRpcBase> rpc = fence.rpc;
+                    worker.enqueue(std::move(fence));
+                    rpc->wait();
+                    {
+                        std::lock_guard<std::mutex> lock(seenMutex);
+                        rpcAfterStaged = seen.size() == 16u && seen.back() == 0xFFFFFFFFu;
+                    }
+                    // The cap publishes without a flush call.
+                    const uint64_t before = worker.enqueuedCount();
+                    for (size_t i = 0; i < GsWorker::kStageMaxCommands; ++i)
+                        packet();
+                    capPublished = worker.enqueuedCount() == before + GsWorker::kStageMaxCommands;
+                    // Random runs, published by flushWake (job end).
+                    uint64_t rng = 0x9E3779B97F4A7C15ull;
+                    for (int job = 0; job < 200; ++job)
+                    {
+                        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                        const int drains = 1 + static_cast<int>(rng % 90u);
+                        for (int d = 0; d < drains; ++d)
+                            packet();
+                        worker.flushWake();
+                    }
+                    ps2_mtvu::detail::g_gifTid.store(std::thread::id{}, std::memory_order_relaxed);
+                });
+            gif.join();
+            GsWorker::setStagedPublish(false);
+            for (int i = 0; i < 400 && !worker.isQuiescent(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            worker.stop();
+            t.IsTrue(heldUntilFlush, "staged commands should stay off the queue until a publish point");
+            t.IsTrue(rpcAfterStaged, "an RPC should publish the stage first and run after it");
+            t.IsTrue(capPublished, "a full stage should publish itself");
+            t.Equals(worker.enqueuedCount(), worker.executedCount(), "every command should execute");
+            bool ordered = true;
+            uint32_t expect = 0;
+            for (const uint32_t v : seen)
+            {
+                if (v == 0xFFFFFFFFu)
+                    continue;
+                ordered = ordered && v == expect++;
+            }
+            t.IsTrue(ordered && expect == next, "staged commands should execute in FIFO order");
+            t.Equals(worker.watchdogCount(), 0ull, "no deferred wake should go stale");
+        });
+
         // GF1 H1/H2: one command carrying the path gives the same consumed
         // sequence and VRAM as NoteGifPath + GifPacket.
         tc.Run("GF1 processGIFPacketWithPath matches noteGifPath + processGIFPacket", [](TestCase &t)

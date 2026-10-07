@@ -308,6 +308,15 @@ namespace
         return env != nullptr && std::strcmp(env, "1") == 0;
     }
 
+    // GPK1: PS2X_MTVU_GS_BATCH=1 stages the MTVU-GIF thread's GS commands
+    // and publishes them under one queue-mutex round (default off; needs
+    // the diet's deferred wakes). Read once, at GS setup.
+    bool gsBatchRequested()
+    {
+        const char *env = std::getenv("PS2X_MTVU_GS_BATCH");
+        return env != nullptr && std::strcmp(env, "1") == 0;
+    }
+
     // PKB1: PS2X_PKB=0 restores today's exact path (zero-fill + memcpy,
     // diet-gated pool, one-by-one pops, per-packet releases). Unset or "1"
     // turns the three PKB1 items on. Read once, at GS setup.
@@ -3724,6 +3733,14 @@ bool PS2Runtime::syncCoreSubsystems()
         const size_t wakeBytes = 256u * 1024u;
         m_gs.setWorkerDeferredWakes(wakeCmds, wakeBytes);
         ps2_mtvu::jobEndFn() = [this]() { m_gs.flushWorkerWake(); };
+        // GPK1: staged publish from the GIF stage (same commands, same
+        // order, same admission; one queue-mutex round per stage).
+        if (gsBatchRequested())
+        {
+            GsWorker::setStagedPublish(true);
+            ps2_mtvu::gifPublishFn() = []() { GsWorker::flushStaged(); };
+            std::cerr << "[gs:handoff] GPK1 staged publish on (PS2X_MTVU_GS_BATCH=1)" << std::endl;
+        }
         // MP1 L2: lean handoff (sleep-aware notifies, one worker lock per pop,
         // lock-free unit drain batches). Wake timing only: same commands, same
         // order. Needs the deferred wakes (the job-end flush above); always on
