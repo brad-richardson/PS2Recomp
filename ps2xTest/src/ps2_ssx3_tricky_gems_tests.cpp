@@ -368,17 +368,17 @@ MiniTest::Case("Ps2Ssx3TrickyGemsSpin", [](TestCase &tc)
             t.IsTrue(std::memcmp(d0, p0, 12) == 0 && std::memcmp(d1, p1, 12) == 0, "deterministic bytes");
             // Byte-exact history independence: 1184 sequential clock steps
             // (each spun from the previous write) equal the direct result.
-            float a0[3], a1[3];
-            std::memcpy(a0, kGemR0, 12);
-            std::memcpy(a1, kGemR1, 12);
+            float h0[3], h1[3];
+            std::memcpy(h0, kGemR0, 12);
+            std::memcpy(h1, kGemR1, 12);
             int seqDiffs = 0;
             for (uint32_t clk = 16u; clk < 1200u; ++clk)
             {
                 const uint32_t deg = (clk % 120u) * 3u;
                 float n0[3], n1[3], e0[3], e1[3];
-                ps2_tk45c::spinRows(a0, a1, kGemR2, deg, n0, n1);
-                std::memcpy(a0, n0, 12);
-                std::memcpy(a1, n1, 12);
+                ps2_tk45c::spinRows(h0, h1, kGemR2, deg, n0, n1);
+                std::memcpy(h0, n0, 12);
+                std::memcpy(h1, n1, 12);
                 ps2_tk45c::spinRows(kGemR0, kGemR1, kGemR2, deg, e0, e1);
                 seqDiffs += (std::memcmp(n0, e0, 12) != 0 || std::memcmp(n1, e1, 12) != 0) ? 1 : 0;
             }
