@@ -282,6 +282,32 @@ void register_ps2_ssx3_tricky_hud_tests()
             t.IsTrue(pxAt(f, 640, 582, 50) == 33, "feather r");
             t.IsTrue(pxAt(f, 640, 582, 50, 1) == 133, "feather g");
             t.IsTrue(pxAt(f, 640, 582, 50, 2) == 33, "feather b"); });
+        tc.Run("coil cover hides the stock meter behind the rings", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas a = synthAtlas();
+            std::vector<uint8_t> f(static_cast<size_t>(640) * 480u * 4u);
+            for (int y = 0; y < 480; ++y)
+                for (int x = 0; x < 640; ++x)
+                {
+                    uint8_t *d = &f[(static_cast<size_t>(y) * 640u + static_cast<size_t>(x)) * 4u];
+                    d[0] = x <= 551 ? 200 : 0;              // sky left (cover x0-2 = 551)
+                    d[1] = x > 551 && x < 610 ? 200 : 0;    // the stock coil (green)
+                    d[2] = x >= 610 ? 200 : 0;              // sky right (cover x1+2 = 610)
+                    d[3] = 255;
+                }
+            composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u, 0, 0u);
+            // (570,386): ring gap (ring 0 y389, ring 1 ends y385), off the pole;
+            // t = 17/55 -> (138,0,62), stock green gone.
+            t.IsTrue(pxAt(f, 640, 570, 386) == 138, "gap r");
+            t.IsTrue(pxAt(f, 640, 570, 386, 1) == 0, "gap g");
+            t.IsTrue(pxAt(f, 640, 570, 386, 2) == 62, "gap b");
+            // (556,300): left of the rings (x563), t = 3/55 -> (189,0,11).
+            t.IsTrue(pxAt(f, 640, 556, 300) == 189, "left sliver r");
+            t.IsTrue(pxAt(f, 640, 556, 300, 1) == 0, "left sliver g");
+            t.IsTrue(pxAt(f, 640, 552, 300, 1) == 200, "left of cover kept");
+            t.IsTrue(pxAt(f, 640, 580, 450, 1) == 200, "below cover kept");
+            t.IsTrue(pxAt(f, 640, ringCx(), ringCy(0)) == 50, "rings draw over the cover"); });
         tc.Run("layout scales to export size", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
@@ -498,6 +524,10 @@ void register_ps2_ssx3_tricky_hud_tests()
                 // Smear rect plus its 2 px edge samples.
                 std::snprintf(name, sizeof(name), "smear %dx%d", fw, fh);
                 t.IsTrue(inside(L.X(536) - 2, L.Y(49)) && inside(L.X(628) + 2, L.Y(101)), name);
+                // TR3 coil cover plus its 2 px edge samples.
+                const Rect cc = coilCoverRect(L);
+                std::snprintf(name, sizeof(name), "coil cover %dx%d", fw, fh);
+                t.IsTrue(inside(cc.x - 2, cc.y) && inside(cc.x + cc.w + 2, cc.y + cc.h - 1), name);
                 // Arch letters at native size.
                 for (int i = 0; i < 6; ++i)
                 {

@@ -676,6 +676,18 @@ struct Layout
     int H(float h) const { return static_cast<int>(std::lround(h * sy)); }
 };
 
+// TR3: the SSX 3 SUPER UBER coil, stem, ball and S draw under this overlay
+// (Odin 1080p export, Brad 10-06: coil x559-603, ball y110-130, S y399-415;
+// the full-state gold glow reaches x~557). Tricky's rings (x563-612, 4.5 px
+// gaps) never hid them, so the red uber coil and the glow showed through.
+// Covered by the label cover's feathered smear before any Tricky draw.
+inline Rect coilCoverRect(const Layout &L)
+{
+    const int x0 = L.X(553);
+    const int y0 = L.Y(104);
+    return {x0, y0, L.X(608) - x0, L.Y(428) - y0};
+}
+
 // TK43e: the HUD's screen region (buffer px, clipped to the frame): the
 // union of every draw below in 640x480 space is x481-640 (splash left to
 // the right edge) by y49-430 (smear top to pill bottom), plus a 3 px margin
@@ -726,6 +738,9 @@ inline void composeHudInto(uint8_t *dst, int bw, int bh, int ox, int oy, int fw,
     L.sx = static_cast<float>(fw) / 640.0f;
     L.sy = static_cast<float>(fh) / 480.0f;
     L.fw = fw;
+    // TR3: coil cover, first, so every Tricky part lands on it.
+    const Rect cc = coilCoverRect(L);
+    smearCover(dst, bw, bh, cc.x - ox, cc.y - oy, cc.x + cc.w - ox, cc.y + cc.h - oy);
     // Pole through the stack (covers the SSX 3 red center line, x582-586):
     // Tricky's grey cylinder profile stretched across its width.
     blit(a, poleRect(), dst, bw, bh, L.X(584) - ox, L.Y(140) - oy, L.W(5), L.H(260));
@@ -868,6 +883,7 @@ struct HudSprites
     int fw = 0;
     int fh = 0;
     Rect region;
+    Rect coilCover;
     Rect poleDst;
     SpriteImg pole;
     Rect ringDst[kCoils];
@@ -898,6 +914,7 @@ inline bool buildHudSprites(HudSprites &ss, const Atlas &a, int fw, int fh)
     ss.region = hudRegionRect(fw, fh);
     if (ss.region.w <= 0 || ss.region.h <= 0)
         return false;
+    ss.coilCover = coilCoverRect(L);
     ss.poleDst = {L.X(584), L.Y(140), L.W(5), L.H(260)};
     ss.pole = renderSprite(a, poleRect(), ss.poleDst.w, ss.poleDst.h, 1.0f);
     for (int i = 0; i < kCoils; ++i)
@@ -943,6 +960,8 @@ inline void stampHudInto(uint8_t *tmp, int bw, int bh, int ox, int oy, const Hud
 {
     if (!tmp || !ss.ok || bw <= 0 || bh <= 0)
         return;
+    const Rect &cc = ss.coilCover;
+    smearCover(tmp, bw, bh, cc.x - ox, cc.y - oy, cc.x + cc.w - ox, cc.y + cc.h - oy);
     stampSprite(ss.pole, tmp, bw, bh, ss.poleDst.x - ox, ss.poleDst.y - oy);
     const int lit = litCoils(fill);
     for (int i = 0; i < kCoils; ++i)
@@ -1051,6 +1070,8 @@ inline void stampHudDirect(uint8_t *ahbBase, size_t strideBytes, const Rect &r, 
         return;
     uint8_t *base = ahbBase + static_cast<size_t>(r.y) * strideBytes + static_cast<size_t>(r.x) * 4u;
     const int bw = r.w, bh = r.h, ox = r.x, oy = r.y;
+    const Rect &cc = ss.coilCover;
+    smearCoverS(base, strideBytes, bw, bh, cc.x - ox, cc.y - oy, cc.x + cc.w - ox, cc.y + cc.h - oy);
     stampSpriteS(ss.pole, base, strideBytes, bw, bh, ss.poleDst.x - ox, ss.poleDst.y - oy);
     const int lit = litCoils(fill);
     for (int i = 0; i < kCoils; ++i)
