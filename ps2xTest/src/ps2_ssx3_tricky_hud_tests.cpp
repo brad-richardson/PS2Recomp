@@ -487,7 +487,24 @@ void register_ps2_ssx3_tricky_hud_tests()
             t.IsTrue(resolveChainB(ram.data(), ram.size()) == 0u, "null A");
             std::vector<uint8_t> empty(0x10000, 0);
             t.IsTrue(resolveChainB(empty.data(), empty.size()) == 0u, "short ram");
-            t.IsTrue(resolveChainB(nullptr, 0) == 0u, "null ram"); });});
+            t.IsTrue(resolveChainB(nullptr, 0) == 0u, "null ram"); });
+        tc.Run("replay state resolves, fails closed", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            std::vector<uint8_t> ram(0x600000, 0);
+            auto w32 = [&](uint32_t a, uint32_t v) { std::memcpy(&ram[a], &v, 4); };
+            w32(kChainRoot & kRamMask, 0x1000u);
+            w32(0x1000u + kChainAOff, 0x2000u);
+            w32(0x2000u + kChainReplayOff, 0x4000u);
+            uint32_t s = 99u;
+            t.IsTrue(readReplayState(ram.data(), ram.size(), s) && s == 0u, "live race records (0)");
+            w32(0x4000u, 1u);
+            t.IsTrue(readReplayState(ram.data(), ram.size(), s) && s == 1u, "auto replay (1)");
+            w32(0x2000u + kChainReplayOff, 0u);
+            t.IsTrue(!readReplayState(ram.data(), ram.size(), s), "null replay");
+            w32(0x1000u + kChainAOff, 0u);
+            t.IsTrue(!readReplayState(ram.data(), ram.size(), s), "null A");
+            t.IsTrue(!readReplayState(nullptr, 0, s), "null ram"); });});
 
     // TK43e: the region refactor. composeOverlay draws the region path, so
     // the region must contain every draw (and the smear's edge samples) and

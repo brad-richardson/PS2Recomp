@@ -352,6 +352,26 @@ inline uint32_t resolveChainB(const uint8_t *ram, size_t ramSize)
     return b;
 }
 
+// TR3: the game object's replay (P = [[[0x4a28a8]+0x84]+0x28]; the callers
+// of cReplay_stopAutoReplay 0x2706F0 pass [A+0x28]) and its state word at
+// P+0: 0 while a live race records, 1 while the results screen's auto
+// replay plays behind the menu, where the race clock restarts and runs
+// (Garibaldi savestates t12000 / t13500). False on any failed read.
+constexpr uint32_t kChainReplayOff = 0x28u;
+inline bool readReplayState(const uint8_t *ram, size_t ramSize, uint32_t &state)
+{
+    if (!ram || ramSize == 0u)
+        return false;
+    uint32_t g = 0u, a = 0u, p = 0u;
+    if (!readGuestU32(ram, ramSize, kChainRoot, 0u, g) || g == 0u)
+        return false;
+    if (!readGuestU32(ram, ramSize, g, kChainAOff, a) || a == 0u)
+        return false;
+    if (!readGuestU32(ram, ramSize, a, kChainReplayOff, p) || p == 0u)
+        return false;
+    return readGuestU32(ram, ramSize, p, 0u, state);
+}
+
 // TK44: race-only visibility from the HUD race time [B+0xc] (pure; the
 // overlay owns the state). Any change (forward bump, gate restart) proves a
 // live race; a freeze older than the grace hides (pause, results, menus,

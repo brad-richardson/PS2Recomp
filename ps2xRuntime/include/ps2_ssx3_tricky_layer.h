@@ -333,6 +333,7 @@ struct Reducer
     uint64_t splashUntil = 0u;
     ps2_ssx3_tricky_hud::RaceClock raceClock;
     bool lastRacing = false;
+    uint32_t lastReplayState = 0u;
     RacePhase lastPhase = RacePhase::Frontend;
     bool phaseInit = false;
     bool wasOutsideLive = false;
@@ -357,6 +358,7 @@ inline void resetRunState(Reducer &r)
     r.splashUntil = 0u;
     r.raceClock = ps2_ssx3_tricky_hud::RaceClock{};
     r.lastRacing = false;
+    r.lastReplayState = 0u;
     r.phaseInit = false;
     r.lastPhase = RacePhase::Frontend;
     r.wasOutsideLive = false;
@@ -493,6 +495,19 @@ inline void onVBlankTick(uint8_t *rdram, size_t ramSize, uint64_t tick)
         {
             clockOk = true;
             racing = ps2_ssx3_tricky_hud::updateRaceClock(r.raceClock, clock, tick);
+            // TR3: the results screen's auto replay restarts and runs the
+            // race clock; it is not a live race (meter hidden, no edges,
+            // song suspended). An unreadable replay keeps the clock's word.
+            uint32_t rs = 0u;
+            const bool rsOk = ps2_ssx3_tricky_hud::readReplayState(rdram, ramSize, rs);
+            if (rsOk && rs != r.lastReplayState)
+            {
+                r.lastReplayState = rs;
+                std::fprintf(stderr, "[ssx3-tricky-hud] replay state %u tick=%llu\n", rs,
+                             static_cast<unsigned long long>(tick));
+            }
+            if (rsOk && rs != 0u)
+                racing = false;
             if (racing != r.lastRacing)
             {
                 r.lastRacing = racing;
