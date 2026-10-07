@@ -500,7 +500,6 @@ namespace ps2_stubs
             uint32_t height = 240u;
             uint32_t decodeMode = 0u;
             uint32_t imageBufferAddr = 0u;
-            uint32_t workBlock = 0u; // HNG1: Create's 0x600 HLE-arena block, freed by Delete
             bool sawInput = false;
             bool sawSequenceEnd = false;
             bool streamEnded = false;
@@ -862,7 +861,6 @@ namespace ps2_stubs
             MpegPlaybackState playback = makeFreshPlaybackState();
             playback.decodeMode = oldPlayback.decodeMode;
             playback.imageBufferAddr = oldPlayback.imageBufferAddr;
-            playback.workBlock = oldPlayback.workBlock;
             playback.width = oldPlayback.width;
             playback.height = oldPlayback.height;
             return playback;
@@ -2207,13 +2205,10 @@ namespace ps2_stubs
             return;
         }
 
-        uint32_t workBlock = 0u;
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             invalidateNonStreamDeliveries(param_1);
-            MpegPlaybackState &playback = getPlaybackState(param_1);
-            workBlock = playback.workBlock;
-            playback = makeFreshPlaybackState();
+            getPlaybackState(param_1) = makeFreshPlaybackState();
         }
 
         const uint32_t puVar4 = uVar3 + 0x108u;
@@ -2231,16 +2226,18 @@ namespace ps2_stubs
         mpegGuestWrite32(rdram, puVar4 + 0x8, a1_init);
         mpegGuestWrite32(rdram, puVar4 + 0xC, a1_init);
 
-        // HNG1: one block per handle (a re-Create reuses it); Delete frees it,
-        // so the attract movie's create/delete loop cannot fill the arena.
-        const uint32_t allocResult =
-            workBlock ? workBlock : (runtime ? runtime->guestMallocHle(0x600, 8u) : (uVar3 + 0x200u));
-        mpegGuestWrite32(rdram, uVar3 + 0x44, allocResult);
-        if (runtime)
+        // HNG1: the stock Create takes this block from the caller's work area
+        // (SSX 3: jal _sceMpegAlloc 0x402d88 with a2=0x600, a3=8 on the
+        // descriptor at work+0x108, result stored at +0x44 by 0x402920), not
+        // from a heap. A heap block was never freed (SSX 3 links no
+        // sceMpegDelete), so each attract movie leaked 0x600 bytes.
+        uint32_t allocResult = 0u;
+        if (innerSize >= 0x600u)
         {
-            std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
-            getPlaybackState(param_1).workBlock = allocResult;
+            allocResult = (a1_init + 7u) & ~7u;
+            mpegGuestWrite32(rdram, puVar4 + 0x8, allocResult + 0x600u);
         }
+        mpegGuestWrite32(rdram, uVar3 + 0x44, allocResult);
 
         // param_1[0..2] = 0; param_1[4..0xe] = 0xffffffff/0 as per decompilation
         mpegGuestWrite32(rdram, param_1 + 0x00, 0);
@@ -2292,20 +2289,12 @@ namespace ps2_stubs
         (void)rdram;
 
         const uint32_t mpegAddr = getRegU32(ctx, 4);
-        uint32_t workBlock = 0u;
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             invalidateNonStreamDeliveries(mpegAddr);
             g_mpeg_stub_state.callbacksByMpeg.erase(mpegAddr);
-            const auto it = g_mpeg_stub_state.playbackByMpeg.find(mpegAddr);
-            if (it != g_mpeg_stub_state.playbackByMpeg.end())
-            {
-                workBlock = it->second.workBlock;
-                g_mpeg_stub_state.playbackByMpeg.erase(it);
-            }
+            g_mpeg_stub_state.playbackByMpeg.erase(mpegAddr);
         }
-        if (runtime && workBlock)
-            runtime->guestFree(workBlock);
         runtime->eeScheduler().completeExternalWait(kMpegPictureWaitType, mpegAddr, KE_WAIT_DELETE);
         setReturnU32(ctx, 0u);
     }

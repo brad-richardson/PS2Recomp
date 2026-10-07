@@ -1144,39 +1144,33 @@ void register_ps2_runtime_expansion_tests()
             t.Equals(endWord(), 0u, "a fresh handle should not start ended");
         });
 
-        tc.Run("MPEG create/delete reuses one HLE-arena work block (HNG1)", [](TestCase &t)
+        tc.Run("MPEG create takes its 0x600 block from the work area like the stock library (HNG1)", [](TestCase &t)
         {
             PS2Runtime runtime;
             std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
             ps2_stubs::resetMpegStubState();
             constexpr uint32_t kMpegAddr = 0x00120000u;
             constexpr uint32_t kMpegWorkAddr = 0x00130000u;
-            auto call = [&](void (*fn)(uint8_t *, R5900Context *, PS2Runtime *), uint32_t a1, uint32_t a2) {
-                R5900Context ctx{};
-                setRegU32(ctx, 4, kMpegAddr);
-                setRegU32(ctx, 5, a1);
-                setRegU32(ctx, 6, a2);
-                fn(rdram.data(), &ctx, &runtime);
-            };
-            uint32_t first = 0u;
-            bool same = true;
-            // The attract movie loops create/delete; each cycle must give its block back.
+            uint32_t ret = 0u;
+            // The attract movie creates a fresh handle per movie and SSX 3 links no
+            // sceMpegDelete: nothing may be taken from a heap.
             for (int i = 0; i < 20; ++i)
             {
-                call(ps2_stubs::sceMpegCreate, kMpegWorkAddr, 0x2000u);
-                const uint32_t block = Ps2FastRead32(rdram.data(), kMpegWorkAddr + 0x44u);
-                if (i == 0)
-                    first = block;
-                same &= block == first;
-                if (i % 2 == 0)
-                    call(ps2_stubs::sceMpegCreate, kMpegWorkAddr, 0x2000u); // re-Create without Delete
-                same &= Ps2FastRead32(rdram.data(), kMpegWorkAddr + 0x44u) == first;
-                call(ps2_stubs::sceMpegDelete, 0u, 0u);
+                R5900Context ctx{};
+                setRegU32(ctx, 4, kMpegAddr + static_cast<uint32_t>(i) * 0x100u);
+                setRegU32(ctx, 5, kMpegWorkAddr);
+                setRegU32(ctx, 6, 0x2000u);
+                ps2_stubs::sceMpegCreate(rdram.data(), &ctx, &runtime);
+                ret = ::getRegU32(&ctx, 2);
             }
-            t.IsTrue(first - ps2_hle_pools::kHleArenaBase < ps2_hle_pools::kHleArenaBytes, "work block comes from the HLE arena");
-            t.IsTrue(same, "every create reuses the same block");
-            const uint32_t probe = runtime.guestMallocHle(ps2_hle_pools::kHleArenaBytes - 0x10u, 16u);
-            t.Equals(probe, ps2_hle_pools::kHleArenaBase, "after the last delete the whole arena is free again");
+            const uint32_t block = Ps2FastRead32(rdram.data(), kMpegWorkAddr + 0x44u);
+            t.Equals(block, kMpegWorkAddr + 0x118u, "the 0x600 block is the first dynamic allocation in the work area");
+            t.Equals(Ps2FastRead32(rdram.data(), kMpegWorkAddr + 0x108u + 8u), block + 0x600u,
+                     "the work-area allocator advances past the block (_sceMpegAlloc)");
+            t.Equals(ret, block + 0x600u, "Create returns the advanced dynamic pointer");
+            t.Equals(runtime.guestMallocHle(ps2_hle_pools::kHleArenaBytes, 16u), ps2_hle_pools::kHleArenaBase,
+                     "twenty creates leave the HLE arena entirely free");
+            t.Equals(runtime.guestHeapEnd(), runtime.guestHeapBase(), "and take nothing from the SetupHeap heap");
         });
 
         tc.Run("MPEG non-stream R1 delivers in registration order on the caller", [](TestCase &t)
