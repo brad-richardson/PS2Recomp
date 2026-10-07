@@ -86,6 +86,23 @@ inline bool isOurAction(const struct sigaction &sa)
     return (sa.sa_flags & SA_SIGINFO) && sa.sa_sigaction == &faultHandler;
 }
 
+inline struct sigaction defaultAction()
+{
+    struct sigaction sa{};
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    return sa;
+}
+
+inline struct sigaction ourAction()
+{
+    struct sigaction sa{};
+    sa.sa_sigaction = &faultHandler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    return sa;
+}
+
 inline void chainSignal(int sig, siginfo_t *info, void *uc)
 {
     const struct sigaction &old = sig == SIGBUS ? g_oldBus : g_oldSegv;
@@ -96,9 +113,7 @@ inline void chainSignal(int sig, siginfo_t *info, void *uc)
         (sig == SIGBUS ? g_resetBus : g_resetSegv).exchange(true, std::memory_order_relaxed);
     if (old.sa_handler == SIG_DFL || reset)
     {
-        struct sigaction dfl{};
-        dfl.sa_handler = SIG_DFL;
-        sigemptyset(&dfl.sa_mask);
+        const struct sigaction dfl = defaultAction();
         // A synchronous fault must terminate with the original signal. The
         // current handler normally masks it, so unblock it before re-raising.
         sigaction(sig, &dfl, nullptr);
@@ -108,6 +123,19 @@ inline void chainSignal(int sig, siginfo_t *info, void *uc)
         sigprocmask(SIG_UNBLOCK, &one, nullptr);
         raise(sig);
         _exit(128 + sig); // only reachable if a platform refuses the signal
+    }
+    // SA_RESETHAND resets the kernel disposition before entering the saved
+    // action. Keep our wrapper only after that action returns, so it can
+    // continue servicing image pages while later unrelated faults see DFL.
+    const bool oneShot = (old.sa_flags & SA_RESETHAND) != 0;
+    if (oneShot)
+    {
+        struct sigaction now{};
+        if (sigaction(sig, nullptr, &now) == 0 && isOurAction(now))
+        {
+            const struct sigaction dfl = defaultAction();
+            sigaction(sig, &dfl, nullptr);
+        }
     }
     sigset_t current{}, during = old.sa_mask;
     sigprocmask(SIG_SETMASK, nullptr, &current);
@@ -119,13 +147,20 @@ inline void chainSignal(int sig, siginfo_t *info, void *uc)
     if (old.sa_flags & SA_NODEFER) sigdelset(&during, sig);
     else sigaddset(&during, sig);
     sigprocmask(SIG_SETMASK, &during, nullptr);
-    if (old.sa_flags & SA_RESETHAND)
-        (sig == SIGBUS ? g_resetBus : g_resetSegv).store(true, std::memory_order_relaxed);
     if (old.sa_flags & SA_SIGINFO)
         old.sa_sigaction(sig, info, uc);
     else if (old.sa_handler)
         old.sa_handler(sig);
     sigprocmask(SIG_SETMASK, &current, nullptr);
+    if (oneShot)
+    {
+        struct sigaction now{};
+        if (sigaction(sig, nullptr, &now) == 0 && now.sa_handler == SIG_DFL)
+        {
+            const struct sigaction ours = ourAction();
+            sigaction(sig, &ours, nullptr);
+        }
+    }
 }
 
 inline bool isExecuteFault(void *uc, uintptr_t b)
@@ -258,10 +293,9 @@ inline bool lazyInit(SigactionFn installAction = ::sigaction)
     z.pages = PS2_RAM_SIZE / z.page;
     z.resident.assign(z.pages, 0u);
     z.fresh.assign(z.pages, 0u);
-    struct sigaction sa{};
-    sa.sa_sigaction = &faultHandler;
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    sigemptyset(&sa.sa_mask);
+    const struct sigaction sa = ourAction();
+    g_resetSegv.store(false, std::memory_order_relaxed);
+    g_resetBus.store(false, std::memory_order_relaxed);
     if (installAction(SIGSEGV, &sa, &g_oldSegv) != 0)
     {
         munmap(m, PS2_RAM_SIZE);
@@ -291,8 +325,9 @@ inline void lazyShutdown()
 {
     LazyImage &z = g_lazy;
     z.active.store(false, std::memory_order_release);
-    if (z.installedBus) restoreOwned(SIGBUS, g_oldBus);
-    if (z.installedSegv) restoreOwned(SIGSEGV, g_oldSegv);
+    const struct sigaction dfl = defaultAction();
+    if (z.installedBus) restoreOwned(SIGBUS, g_resetBus.load() ? dfl : g_oldBus);
+    if (z.installedSegv) restoreOwned(SIGSEGV, g_resetSegv.load() ? dfl : g_oldSegv);
     z.installedBus = z.installedSegv = false;
     if (z.base) munmap(z.base, PS2_RAM_SIZE);
     z.base = nullptr;

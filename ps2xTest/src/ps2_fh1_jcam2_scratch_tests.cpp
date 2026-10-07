@@ -70,10 +70,17 @@ void sentinel(int sig, siginfo_t *, void *)
 {
     sigset_t mask{};
     sigprocmask(SIG_SETMASK, nullptr, &mask);
-    const bool flags = sig == kProtectionSignal && sigismember(&mask, SIGUSR1) == 1 &&
-                       sigismember(&mask, kProtectionSignal) == 0 &&
-                       (sig == SIGBUS ? g_resetBus : g_resetSegv).load();
-    _exit(flags ? 21 : 22);
+    struct sigaction now{};
+    sigaction(sig, nullptr, &now);
+    const struct sigaction &old = sig == SIGBUS ? g_oldBus : g_oldSegv;
+    const int flags = (sig == kProtectionSignal ? 1 : 0) |
+                      (sigismember(&mask, SIGUSR1) == 1 ? 2 : 0) |
+                      (sigismember(&mask, kProtectionSignal) == 0 ? 4 : 0) |
+                      (now.sa_handler == SIG_DFL ? 8 : 0) |
+                      ((sig == SIGBUS ? g_resetBus : g_resetSegv).load() ? 16 : 0) |
+                      ((old.sa_flags & SA_NODEFER) ? 32 : 0) |
+                      ((old.sa_flags & SA_RESETHAND) ? 64 : 0);
+    _exit(flags);
 }
 void plainSentinel(int, siginfo_t *, void *) { _exit(31); }
 void prior(void (*handler)(int, siginfo_t *, void *), int flags = SA_SIGINFO)
@@ -105,6 +112,10 @@ void genuineFault()
     prior(&sentinel, SA_SIGINFO | SA_NODEFER | SA_RESETHAND);
     std::vector<uint8_t> live(PS2_RAM_SIZE);
     if (!lazyBegin(live.data())) _exit(1);
+    // Darwin drops SA_RESETHAND from the action returned by sigaction for
+    // SIGBUS (observed bits=39). Supply a saved one-shot action explicitly
+    // to test the chain's reset semantics on every supported POSIX host.
+    (kProtectionSignal == SIGBUS ? g_oldBus : g_oldSegv).sa_flags |= SA_RESETHAND;
     void *p = mmap(nullptr, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     volatile uint8_t value = *static_cast<volatile uint8_t *>(p);
     (void)value;
@@ -206,7 +217,11 @@ void register_ps2_fh1_jcam2_scratch_tests()
             t.Equals(code, kProtectionCode, "protection si_code");
         });
         tc.Run("first touch and alternate stack", [](TestCase &t) { t.Equals(exited(child(&firstTouch)), 0, "first touch/errno/stack"); });
-        tc.Run("saved handler mask NODEFER RESETHAND", [](TestCase &t) { t.Equals(exited(child(&genuineFault)), 21, "saved action flags"); });
+        tc.Run("saved one-shot handler mask NODEFER RESETHAND", [](TestCase &t) {
+            const int observed = exited(child(&genuineFault));
+            std::fprintf(stderr, "[jcam2-chain-probe] bits=%d expected=127\n", observed);
+            t.Equals(observed, 127, "saved action flags");
+        });
         tc.Run("other thread chains", [](TestCase &t) { t.Equals(exited(child(&foreignThread)), 31, "foreign thread"); });
         tc.Run("execute fault chains", [](TestCase &t) { t.Equals(exited(child(&executeFault)), 31, "execute fault"); });
         tc.Run("SIGBUS failure rolls SIGSEGV back", [](TestCase &t) { t.Equals(exited(child(&failedInstall)), 0, "transactional install"); });
