@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "game_overrides.h"
+#include "ps2_hle_pools.h"
 #include "ps2_log.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -1740,6 +1741,33 @@ void register_ps2_runtime_kernel_tests()
             env.runtime.guestFree(grown);
             const uint32_t reused = env.runtime.guestMalloc(0x80u, 16u);
             t.Equals(reused, heapBase, "guestFree should make the head block reusable");
+        });
+
+        tc.Run("HLE arena blocks stay outside the game's SetupHeap arena (HNG1)", [](TestCase &t)
+        {
+            TestEnv env;
+            // The game owns [base, ceiling) through its own allocator.
+            env.runtime.configureGuestHeap(0x00540000u, ps2_hle_pools::heapCeiling());
+            const uint32_t lo = ps2_hle_pools::kHleArenaBase;
+            const uint32_t hi = lo + ps2_hle_pools::kHleArenaBytes;
+            t.IsTrue(lo >= ps2_hle_pools::heapCeiling(), "arena must sit above the game's heap ceiling");
+
+            const uint32_t work = env.runtime.guestMallocHle(0x600u, 8u);
+            const uint32_t cb = env.runtime.guestMallocHle(4u, 4u);
+            t.IsTrue(work >= lo && work + 0x600u <= hi, "MPEG work block comes from the arena");
+            t.IsTrue(cb >= lo && cb + 4u <= hi && cb >= work + 0x600u, "callback block follows it in the arena");
+            t.Equals(env.runtime.guestHeapEnd(), 0x00540000u, "arena use leaves the SetupHeap heap untouched");
+
+            env.runtime.guestFree(cb);
+            t.Equals(env.runtime.guestMallocHle(4u, 4u), cb, "guestFree returns an arena block to the arena");
+
+            const uint32_t game = env.runtime.guestMalloc(0x10u, 16u);
+            t.Equals(game, 0x00540000u, "SetupHeap allocations still start at its base");
+            env.runtime.guestFree(game);
+            t.Equals(env.runtime.guestMalloc(0x10u, 16u), game, "SetupHeap frees are unaffected");
+
+            const uint32_t spill = env.runtime.guestMallocHle(ps2_hle_pools::kHleArenaBytes, 16u);
+            t.IsTrue(spill != 0u && (spill < lo || spill >= hi), "a full arena falls back to the SetupHeap heap");
         });
 
         tc.Run("memalign stubs allocate aligned guest memory", [](TestCase &t)

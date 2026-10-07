@@ -1799,6 +1799,9 @@ bool PS2RuntimeSavestate::loadKernel(PS2Runtime &rt, Reader &r)
     rt.m_guestHeapLimit = r.u32();
     rt.m_guestHeapSuggestedBase = r.u32();
     rt.m_guestHeapConfigured = r.b();
+    // HNG1: the HLE arena is not in the state; its blocks are short-lived
+    // MPEG buffers, so a load starts it empty.
+    rt.m_hleArenaBlocks.clear();
     rt.m_asyncCallbackStackFloor = r.u32();
     rt.m_asyncCallbackStackTop = r.u32();
     rt.m_loadedModules.resize(static_cast<size_t>(r.count(1u << 16)));

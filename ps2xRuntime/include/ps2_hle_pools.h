@@ -44,6 +44,16 @@ inline uint32_t heapCeiling()
     return low() ? 0x01F31000u : 0x01F00000u;
 }
 
+// HNG1: the runtime's private arena for guest blocks it hands to the game
+// (MPEG callback data and work). SetupHeap/EndOfHeap give the game
+// [_end, heapCeiling()) as its own arena, and SSX 3's recompiled allocator
+// manages that range itself, so a block from the SetupHeap heap can land on
+// memory the game already owns (10-06: a 16-byte pool link became 1). This
+// band sits above the ceiling in both modes, after the sound packet's done
+// ring (0x01F31100..0x01F31300); the TK34 grow region starts after it.
+inline constexpr uint32_t kHleArenaBase = 0x01F31400u;
+inline constexpr uint32_t kHleArenaBytes = 0x00002000u;
+
 inline uint32_t callbackStackFloor()
 {
     return low() ? 0x000B2000u : 0x00080000u;

@@ -1696,7 +1696,7 @@ namespace ps2_stubs
                 return;
             }
 
-            const uint32_t cbDataAddr = runtime->guestMalloc(kMpegCallbackDataSize, 16u);
+            const uint32_t cbDataAddr = runtime->guestMallocHle(kMpegCallbackDataSize, 16u);
             if (cbDataAddr == 0u)
             {
                 return;
@@ -1740,7 +1740,7 @@ namespace ps2_stubs
                 }
                 // The observed non-stream producer initializes only word 0.
                 // Do not reuse the unrelated 0x20-byte stream-event layout.
-                const uint32_t cbDataAddr = runtime->guestMalloc(sizeof(uint32_t), alignof(uint32_t));
+                const uint32_t cbDataAddr = runtime->guestMallocHle(sizeof(uint32_t), alignof(uint32_t));
                 uint8_t *data = cbDataAddr != 0u ? getMemPtr(rdram, cbDataAddr) : nullptr;
                 if (!data)
                 {
@@ -2226,7 +2226,7 @@ namespace ps2_stubs
         mpegGuestWrite32(rdram, puVar4 + 0x8, a1_init);
         mpegGuestWrite32(rdram, puVar4 + 0xC, a1_init);
 
-        const uint32_t allocResult = runtime ? runtime->guestMalloc(0x600, 8u) : (uVar3 + 0x200u);
+        const uint32_t allocResult = runtime ? runtime->guestMallocHle(0x600, 8u) : (uVar3 + 0x200u);
         mpegGuestWrite32(rdram, uVar3 + 0x44, allocResult);
 
         // param_1[0..2] = 0; param_1[4..0xe] = 0xffffffff/0 as per decompilation

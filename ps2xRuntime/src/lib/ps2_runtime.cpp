@@ -403,7 +403,7 @@ namespace
     // Readers use the copies and base+slot*stride; the sweep loops to [c+4].
     // Growth is lazy, so RAM stays byte-identical to stock until the first
     // empty pop: then the arrays are copied into a free region above the
-    // runtime HLE pools (default 0x01F31400, PS2X_SSX3_PATCH_CACHE_GROW_BASE),
+    // runtime HLE pools and the HNG1 arena (default 0x01F33400, PS2X_SSX3_PATCH_CACHE_GROW_BASE),
     // the new slots are pushed and every pointer above is repointed. The old
     // blocks stay intact (a slot's DMA block is built once at allocation and
     // may hold REF tags to its old buffers; an in-flight chain may call them),
@@ -475,7 +475,8 @@ namespace
         const uint32_t newSec = secCap ? (secCap * newCap + cap - 1u) / cap : 0u;
         static const uint32_t base = [] {
             const char *e = std::getenv("PS2X_SSX3_PATCH_CACHE_GROW_BASE");
-            return e && *e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 16)) : 0x01F31400u;
+            return e && *e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 16))
+                           : ps2_hle_pools::kHleArenaBase + ps2_hle_pools::kHleArenaBytes;
         }();
         auto al = [](uint32_t v) { return (v + 0xFFu) & ~0xFFu; };
         uint32_t at = base & ~0xFFu;
@@ -484,7 +485,7 @@ namespace
                        nB = take(newCap * 0x120u), nC = take(newCap * 0x120u), nDma = take(newCap * 0x100u),
                        nSecBuf = take(newSec * 0x1B0u), nSecStk = take(newSec * 4u);
         const uint32_t lo = base & ~0xFFu, hi = at;
-        if (lo < 0x01F31300u || hi > PS2_RAM_SIZE)
+        if (lo < ps2_hle_pools::kHleArenaBase + ps2_hle_pools::kHleArenaBytes || hi > PS2_RAM_SIZE)
             return refuse("region bounds", lo, hi);
         const uint32_t sp = getRegU32(ctx, 29) & PS2_RAM_MASK;
         if (sp >= lo && sp < hi + 0x8000u)
@@ -3437,6 +3438,7 @@ PS2Runtime::PS2Runtime()
 
     m_loadedModules.clear();
     m_guestHeapBlocks.clear();
+    m_hleArenaBlocks.clear();
     m_guestHeapBase = kGuestHeapDefaultBase;
     m_guestHeapEnd = kGuestHeapDefaultBase;
     m_guestHeapLimit = std::min(guestHeapHardLimit(), PS2_RAM_SIZE);
@@ -6110,6 +6112,27 @@ uint32_t PS2Runtime::guestRealloc(uint32_t guestAddr, uint32_t newSize, uint32_t
     return newAddr;
 }
 
+uint32_t PS2Runtime::guestMallocHle(uint32_t size, uint32_t alignment)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+        if (m_hleArenaBlocks.empty())
+            m_hleArenaBlocks.push_back({ps2_hle_pools::kHleArenaBase, ps2_hle_pools::kHleArenaBytes, true});
+        // Same first-fit allocator over the arena's own block list.
+        const uint32_t heapEnd = m_guestHeapEnd;
+        m_guestHeapBlocks.swap(m_hleArenaBlocks);
+        const uint32_t addr = allocateGuestBlockLocked(size, alignment);
+        m_guestHeapBlocks.swap(m_hleArenaBlocks);
+        m_guestHeapEnd = heapEnd;
+        if (addr != 0u)
+            return addr;
+    }
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true))
+        std::fprintf(stderr, "[hle-arena] full (size=0x%x); using the SetupHeap heap\n", size);
+    return guestMalloc(size, alignment);
+}
+
 void PS2Runtime::guestFree(uint32_t guestAddr)
 {
     if (guestAddr == 0u)
@@ -6118,6 +6141,14 @@ void PS2Runtime::guestFree(uint32_t guestAddr)
     }
 
     std::lock_guard<std::mutex> lock(m_guestHeapMutex);
+    const uint32_t phys = guestAddr & PS2_RAM_MASK;
+    if (phys - ps2_hle_pools::kHleArenaBase < ps2_hle_pools::kHleArenaBytes)
+    {
+        m_guestHeapBlocks.swap(m_hleArenaBlocks);
+        freeGuestBlockLocked(guestAddr);
+        m_guestHeapBlocks.swap(m_hleArenaBlocks);
+        return;
+    }
     ensureGuestHeapInitializedLocked();
     freeGuestBlockLocked(guestAddr);
 }
