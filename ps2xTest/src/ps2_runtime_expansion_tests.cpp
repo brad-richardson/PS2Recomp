@@ -1490,6 +1490,41 @@ void register_ps2_runtime_expansion_tests()
             t.Equals(ctx.pc, EXCEPTION_VECTOR_BOOT, "BEV=1 should route exception to boot vector");
         });
 
+        tc.Run("generated load fault unwinds before destination writeback and following effects", [](TestCase &t)
+        {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            for (bool delay : {false, true})
+            {
+                R5900Context ctx{};
+                ctx.pc = 0x2004u;
+                ctx.branch_pc = 0x2000u;
+                ctx.in_delay_slot = delay;
+                ctx.cop0_status = 0u;
+                setRegU32(ctx, 2, 0x12345678u);
+                bool unwound = false;
+                ps2_guest_exception_transfer::activeContext = &ctx;
+                try
+                {
+                    // The generated LW expression writes its register only
+                    // after Load32 returns. A misaligned access must unwind.
+                    SET_GPR_U32(&ctx, 2, runtime.Load32(rdram.data(), &ctx, 0x11000001u));
+                    rdram[0x100u] = 0xabu;
+                }
+                catch (const ps2_guest_exception_transfer::Raised &)
+                {
+                    unwound = true;
+                }
+                ps2_guest_exception_transfer::activeContext = nullptr;
+                t.IsTrue(unwound, "fault must transfer out of generated execution");
+                t.Equals(getRegU32(&ctx, 2), 0x12345678u, "fault must suppress load destination writeback");
+                t.Equals(rdram[0x100u], uint8_t{0}, "fault must suppress later memory effects");
+                t.Equals(ctx.pc, EXCEPTION_VECTOR_GENERAL, "fault must preserve exception vector");
+                t.Equals(ctx.cop0_epc, delay ? 0x2000u : 0x2004u, "EPC must reflect delay state");
+                t.Equals((ctx.cop0_cause & COP0_CAUSE_BD) != 0u, delay, "BD must reflect delay state");
+            }
+        });
+
         tc.Run("handleSyscall rejects invocation in delay slot", [](TestCase &t)
         {
             PS2Runtime runtime;

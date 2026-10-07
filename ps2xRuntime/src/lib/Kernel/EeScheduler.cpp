@@ -907,10 +907,17 @@ void EeScheduler::run()
                 // release builds compile the watch check out but E7 thread
                 // attribution still reads this cell.
                 ps2DiagWatchSetThread(m_currentThreadId);
+                ps2_guest_exception_transfer::activeContext = &context;
                 function(m_rdram, &context, &m_runtime);
+                ps2_guest_exception_transfer::activeContext = nullptr;
+            }
+            catch (const ps2_guest_exception_transfer::Raised &)
+            {
+                ps2_guest_exception_transfer::activeContext = nullptr;
             }
             catch (...)
             {
+                ps2_guest_exception_transfer::activeContext = nullptr;
                 m_transferArmed = false;
                 m_guestExecuting.store(false, std::memory_order_release);
                 m_running.store(false, std::memory_order_release);
@@ -924,6 +931,7 @@ void EeScheduler::run()
         }
         else
         {
+            ps2_guest_exception_transfer::activeContext = nullptr;
             // Longjmp landing: the epilogue the EeDispatcherTransfer catch
             // ran; falls through to processPendingEvents below unchanged.
             m_guestExecuting.store(false, std::memory_order_release);

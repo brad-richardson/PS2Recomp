@@ -886,7 +886,8 @@ static constexpr std::array<DelayExtentCase, 8> kDelayExtentCases{{
 }};
 
 static bool writeDelayExtentElfAndMap(const std::filesystem::path &elfPath,
-                                     const std::filesystem::path &mapPath)
+                                     const std::filesystem::path &mapPath,
+                                     bool includeUnreadableBoundary = true)
 {
     ELFIO::elfio writer;
     writer.create(ELFIO::ELFCLASS32, ELFIO::ELFDATA2LSB);
@@ -895,7 +896,8 @@ static bool writeDelayExtentElfAndMap(const std::filesystem::path &elfPath,
     writer.set_entry(kDelayExtentCases.front().start);
     std::ofstream map(mapPath);
     map << "name,start,end,size\n";
-    for (size_t i = 0; i < kDelayExtentCases.size(); ++i)
+    const size_t caseCount = kDelayExtentCases.size() - (includeUnreadableBoundary ? 0u : 1u);
+    for (size_t i = 0; i < caseCount; ++i)
     {
         const auto &c = kDelayExtentCases[i];
         std::vector<uint32_t> words((c.end - c.start) / 4u + (c.hasFollowing ? 1u : 0u), 0u);
@@ -933,14 +935,14 @@ void register_ps2_recompiler_tests()
             std::filesystem::create_directories(root);
             const auto elf = root / "fixture.elf";
             const auto map = root / "fixture.csv";
-            const bool written = writeDelayExtentElfAndMap(elf, map);
+            const bool written = writeDelayExtentElfAndMap(elf, map, false);
             t.IsTrue(written, "synthetic extent fixture should be written");
             if (written)
             {
                 ElfParser parser(elf.string());
                 t.IsTrue(parser.parse() && parser.loadGhidraFunctionMap(map.string()), "extent fixture should parse");
                 const auto functions = parser.extractFunctions();
-                for (size_t i = 0; i < kDelayExtentCases.size(); ++i)
+                for (size_t i = 0; i < kDelayExtentCases.size() - 1u; ++i)
                 {
                     const auto &c = kDelayExtentCases[i];
                     const auto fn = std::find_if(functions.begin(), functions.end(), [&](const Function &f) { return f.start == c.start; });
@@ -968,6 +970,36 @@ void register_ps2_recompiler_tests()
                     t.IsTrue(generated.find(word.str()) != std::string::npos, "generator must emit the real store/register update instead of a synthetic NOP");
                 }
             }
+            std::error_code error;
+            std::filesystem::remove_all(root, error);
+        });
+
+        tc.Run("delayed instruction at executable section end is rejected", [](TestCase &t) {
+            const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+            const auto root = std::filesystem::temp_directory_path() / ("ps2recomp-unreadable-slot-" + suffix);
+            std::filesystem::create_directories(root);
+            const auto elf = root / "fixture.elf";
+            const auto map = root / "fixture.csv";
+            t.IsTrue(writeDelayExtentElfAndMap(elf, map), "section-end fixture should be written");
+            ElfParser parser(elf.string());
+            t.IsTrue(parser.parse() && parser.loadGhidraFunctionMap(map.string()), "section-end fixture should parse");
+            const auto functions = parser.extractFunctions();
+            const auto boundary = std::find_if(functions.begin(), functions.end(), [](const Function &f) {
+                return f.start == 0x162000u;
+            });
+            t.IsTrue(boundary != functions.end() && boundary->end == 0x162004u,
+                     "discovery must not invent a word beyond the executable section");
+            const auto config = root / "fixture.toml";
+            t.IsTrue(writeRecompilerTestConfig(config, elf, root / "output", {}), "config should be written");
+            { std::ofstream file(config, std::ios::app); file << "ghidra_output = \"" << map.generic_string() << "\"\n"; }
+            PS2Recompiler recompiler(config.string());
+            t.IsTrue(recompiler.initialize() && recompiler.recompile(), "section-end fixture should decode");
+            bool rejected = false;
+            try { recompiler.generateOutput(); }
+            catch (const std::runtime_error &e) {
+                rejected = std::string(e.what()).find("0x162004") != std::string::npos;
+            }
+            t.IsTrue(rejected, "generation must reject the unreadable return slot");
             std::error_code error;
             std::filesystem::remove_all(root, error);
         });

@@ -146,6 +146,10 @@ namespace ps2recomp
             }
         }
 
+        // A returning runtime fault helper clears delay-slot state while
+        // publishing the exception vector. Do not overwrite that PC with the
+        // branch target or execute any branch epilogue after the fault.
+        m_ss << fmt::format("{}if (!ctx->in_delay_slot) {{ return; }}\n", indent);
         m_ss << fmt::format("{}ctx->in_delay_slot = false;\n", indent);
     }
 
@@ -157,7 +161,20 @@ namespace ps2recomp
         }
 
         m_ss << fmt::format("    if (ctx->pc == 0x{:X}u) {{\n", delayPc());
-        emitDelaySlot("        ");
+        // Entering PC+4 independently has no preceding branch and no BD bit.
+        // It still executes the slot instruction once, then resumes at PC+8.
+        m_ss << fmt::format("        ctx->pc = 0x{:X}u;\n", delayPc());
+        m_ss << "        ctx->in_delay_slot = false;\n";
+        m_ss << "        ctx->branch_pc = 0u;\n";
+        const std::string code = delaySlotCode();
+        std::istringstream lines(code);
+        std::string line;
+        while (std::getline(lines, line))
+        {
+            if (!line.empty())
+                m_ss << "        " << line << "\n";
+        }
+        m_ss << fmt::format("        if (ctx->pc != 0x{:X}u) {{ return; }}\n", delayPc());
         m_ss << fmt::format("        ctx->pc = 0x{:X}u;\n", fallthroughPc());
 
         if (isInternalTarget(fallthroughPc()))

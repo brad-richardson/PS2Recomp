@@ -1471,6 +1471,8 @@ namespace
         ctx->cop0_status |= COP0_STATUS_EXL;
         ctx->pc = selectExceptionVector(ctx, tlbRefill);
         ctx->in_delay_slot = false;
+        if (ps2_guest_exception_transfer::activeContext == ctx)
+            throw ps2_guest_exception_transfer::Raised{};
     }
 
     std::filesystem::path normalizeAbsolutePath(const std::filesystem::path &path)

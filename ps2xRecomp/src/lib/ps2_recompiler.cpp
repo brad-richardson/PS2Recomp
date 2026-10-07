@@ -1315,6 +1315,64 @@ namespace ps2recomp
     {
         try
         {
+            // Discovery extends terminal delay slots, but a later entry
+            // reslice can remove PC+4 from an owner's decoded vector. Restore
+            // the actual ELF instruction before parallel output emission.
+            // Never manufacture a NOP when the executable word is unreadable.
+            size_t restoredDelaySlots = 0;
+            for (const auto &function : m_functions)
+            {
+                if (!shouldGenerateCodeForFunction(function) || function.isStub || function.isSkipped)
+                    continue;
+                auto decodedIt = m_decodedFunctions.find(function.start);
+                if (decodedIt == m_decodedFunctions.end())
+                    continue;
+                auto &instructions = decodedIt->second;
+                for (size_t i = 0; i < instructions.size(); ++i)
+                {
+                    const Instruction &inst = instructions[i];
+                    if (!inst.hasDelaySlot ||
+                        (i + 1u < instructions.size() && instructions[i + 1u].address == inst.address + 4u))
+                        continue;
+
+                    const uint32_t slotPc = inst.address + 4u;
+                    const bool readableExecutableSlot = std::any_of(m_sections.begin(), m_sections.end(),
+                        [&](const Section &section) {
+                            return section.isCode && inst.address >= section.address &&
+                                   slotPc >= section.address && section.size >= 4u &&
+                                   slotPc - section.address <= section.size - 4u;
+                        });
+                    if (!readableExecutableSlot)
+                    {
+                        std::ostringstream msg;
+                        msg << "unreadable executable delay slot at 0x" << std::hex << slotPc;
+                        throw std::runtime_error(msg.str());
+                    }
+
+                    uint32_t raw = m_elfParser->readWord(slotPc);
+                    if (const auto patchIt = m_config.patches.find(slotPc); patchIt != m_config.patches.end() &&
+                        shouldApplyConfiguredPatch(classifyPatchedInstruction(raw), m_config))
+                    {
+                        raw = static_cast<uint32_t>(std::stoul(patchIt->second, nullptr, 0));
+                    }
+                    Instruction slot = m_decoder->decodeInstruction(slotPc, raw, !m_config.lowMemoryMode);
+                    if (const auto mmioIt = m_config.mmioByInstructionAddress.find(slotPc);
+                        mmioIt != m_config.mmioByInstructionAddress.end())
+                    {
+                        slot.isMmio = true;
+                        slot.mmioAddress = mmioIt->second;
+                    }
+                    instructions.insert(instructions.begin() + static_cast<std::ptrdiff_t>(i + 1u), slot);
+                    ++restoredDelaySlots;
+                    ++i;
+                }
+            }
+            if (restoredDelaySlots != 0u)
+            {
+                m_reporter.progress("restored " + std::to_string(restoredDelaySlots) +
+                                    " decoded delay slot(s) from executable ELF words after reslicing");
+            }
+
             m_functionRenames.clear();
 
             auto makeName = [&](const Function &function) -> std::string
