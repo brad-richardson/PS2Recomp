@@ -1664,7 +1664,15 @@ namespace
             !ps2_fh1::hooksOn() || !ps2_fh1::g_rngOdd) return;
         const uint32_t s = getRegU32(ctx, 16);
         uint32_t phase = 0u;
-        if (ps2_fh1::rd32(ram, s + 0xcu, phase))
+        if (!ps2_fh1::rd32(ram, s + 0xcu, phase)) return;
+        std::array<uint32_t, 8> angles{};
+        bool readable = true;
+        for (uint32_t i = 0; i < angles.size(); ++i)
+            readable &= ps2_fh1::rd32(ram, s + 0x10u + i*4u, angles[i]);
+        // Neutral phase 3 admits input at the original guest boundary. Its
+        // target stores must survive into pose/animation selection (134c54).
+        // Nonneutral phase 3 still parks post-120 chaining, as in INP3.
+        if (!readable || !ps2_fh1::inputChainNeutral(phase, angles))
             ps2_fh1::wr32(ram, s + 0xcu, ps2_fh1::inputChainPark(phase));
     }
     void inputChainResumeWrapper(uint8_t *ram, R5900Context *ctx, PS2Runtime *runtime)

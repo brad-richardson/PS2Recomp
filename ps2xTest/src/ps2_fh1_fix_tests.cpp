@@ -133,6 +133,22 @@ void register_ps2_fh1_fix_tests()
             }
         });
 
+        tc.Run("INP5 neutral admission excludes pending rotation and chaining", [](TestCase &t)
+        {
+            std::array<uint32_t, 8> angles{};
+            t.IsTrue(inputChainNeutral(3u, angles), "neutral idle may run on either half");
+            for (uint32_t phase : {0u, 1u, 2u, kInputChainHold | 3u})
+                t.IsTrue(!inputChainNeutral(phase, angles), "active or parked phase stays held");
+            angles.fill(0x80000000u);
+            t.IsTrue(inputChainNeutral(3u, angles), "negative zero is neutral");
+            for (unsigned i = 0; i < angles.size(); ++i)
+            {
+                angles[i] = 0x3f800000u;
+                t.IsTrue(!inputChainNeutral(3u, angles), "each target/current/accumulator/offset prevents admission");
+                angles[i] = 0x80000000u;
+            }
+        });
+
         tc.Run("FH33 ground2 is opt-in and squares to the bounded stock map", [](TestCase &t)
         {
             t.IsTrue((kFixAll & kFixGround2) == 0u, "excluded from all");
