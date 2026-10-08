@@ -387,7 +387,7 @@ bool stampIOSurfaceHud(void *surface, uint64_t tick,
     const uint32_t imgH = static_cast<uint32_t>(IOSurfaceGetHeight(ref));
     if (imgW == 0u || imgH == 0u)
         return false;
-    const Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
+    const ps2_ssx3_tricky_hud::Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
     if (r.w <= 0 || r.h <= 0)
         return false;
     // Pre-scaled art, once per run (the export size and atlas are fixed).
