@@ -342,6 +342,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_GS_HANDOFF_DIET",
         "PS2X_GS_REPLAY_BACKEND",
         "PS2X_GS_REPLAY_MODE",
+        "PS2X_GS_WORKER_CPUS",
         "PS2X_MC_ROOT",
         "PS2X_MICROVU_LIB",
         "PS2X_MISSING_FUNCTION_POLICY",

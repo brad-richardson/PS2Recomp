@@ -22,5 +22,14 @@ void register_ps2_thread_affinity_tests()
             t.IsTrue(ps2x::parseCpuList("   ").empty(), "blank");
             t.IsTrue(ps2x::parseCpuList("a,6,,x") == std::vector<int>{6}, "garbage skipped");
             t.IsTrue(ps2x::parseCpuList("-1,6") == std::vector<int>{6}, "negative skipped");
-            t.IsTrue(ps2x::parseCpuList("6,9999999") == std::vector<int>{6}, "absurd dropped"); }); });
+            t.IsTrue(ps2x::parseCpuList("6,9999999") == std::vector<int>{6}, "absurd dropped"); });
+
+        // PIN1: PS2X_GS_WORKER_CPUS shares this parser; pin its A/B-arm inputs.
+        tc.Run("gs worker arm values parse", [](TestCase &t)
+               {
+            t.IsTrue(ps2x::parseCpuList("7") == std::vector<int>{7}, "B arm: prime 7");
+            t.IsTrue(ps2x::parseCpuList("6") == std::vector<int>{6}, "C arm: prime 6");
+            t.IsTrue(ps2x::parseCpuList("0,1,2,3,4,5") ==
+                         std::vector<int>{0, 1, 2, 3, 4, 5},
+                     "B arm MTVU spill set"); }); });
 }

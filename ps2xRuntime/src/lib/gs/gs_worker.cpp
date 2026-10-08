@@ -402,6 +402,16 @@ void GsWorker::threadMain()
     ThreadNaming::SetCurrentThreadName("GsWorker");
     // AD1: bind this thread's TID to its ADPF hint session.
     ps2x::adpf::noteThread(ps2x::adpf::Thread::GsWorker);
+    // PIN1: PS2X_GS_WORKER_CPUS="6,7" pins this thread to itself (the N11
+    // pattern); unset/empty = no change.
+    if (const char *workerCpus = std::getenv("PS2X_GS_WORKER_CPUS"))
+    {
+        if (workerCpus[0] != '\0')
+        {
+            const int rc = ps2x::pinCurrentThreadToCpus(ps2x::parseCpuList(workerCpus));
+            std::fprintf(stderr, "[affinity] gs worker thread cpus=%s rc=%d\n", workerCpus, rc);
+        }
+    }
     // PT2: per-tick busy time (handler only; queue-idle excluded). The frame
     // cuts at each in-stream GuestVsync (tick in regValue); knob off is one
     // predictable branch per command.
