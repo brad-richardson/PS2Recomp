@@ -1488,6 +1488,14 @@ inline bool querySkip(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     uint32_t r = 0u, surf = 0u;
     if (!rd32(ram, pa + 0x18u, r) || !rd32(ram, r + 0x438u, surf) || surf > 0xffffu)
         return false;
+    // The v0!=0 path also reads the query's out-packet instance at [sp+0x110]
+    // (0x13EBC4; null for terrain skips the virtual call at 0x13EBEC). The
+    // skipped query leaves it stale, so write the terrain result; instance
+    // contacts then read as terrain for one half-step (their response runs
+    // on the next even update).
+    const uint32_t sp = getRegU32(ctx, 29);
+    if (!wr32(ram, sp + 0x110u, 0u))
+        return false;
     SET_GPR_U32(ctx, 2, surf != 0u ? 1u : 0u);
     return true;
 }
