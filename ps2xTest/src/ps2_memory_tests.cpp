@@ -658,6 +658,281 @@ void register_ps2_memory_tests()
             ps2_mtvu::detail::setStageWaitForTest(stage0);
         });
 
+        tc.Run("SPN1 producerWait park: no lost wake, FIFO, shutdown with waiters parked", [](TestCase &t)
+        {
+            using ps2_mtvu::detail::GifStage;
+            using ps2_mtvu::detail::VifLog;
+            t.IsFalse(ps2_mtvu::detail::parseStagePark2(nullptr), "unset = off");
+            t.IsTrue(ps2_mtvu::detail::parseStagePark2("1"), "1 = on");
+            t.IsFalse(ps2_mtvu::detail::parseStagePark2("0"), "0 = off");
+            t.IsFalse(ps2_mtvu::detail::parseStagePark2("bogus"), "unknown = off");
+
+            const int park0 = ps2_mtvu::detail::stagePark2Mode();
+            for (int on : {1, 0})
+            {
+                ps2_mtvu::detail::setStagePark2ForTest(on);
+                const char *arm = on ? "on" : "off";
+                // GIF case A: the head publish lands after the producer spin
+                // and before the sleep (the hook forces that order).
+                {
+                    GifStage g;
+                    g.slots.reset(new ps2_mtvu::GifOp[GifStage::kSlots]);
+                    for (uint64_t i = 0; i < GifStage::kSlots; ++i)
+                    {
+                        ps2_mtvu::GifOp *op = g.claim(0u);
+                        if (!op)
+                            break;
+                        op->kind = ps2_mtvu::GifOp::Kind::Submit;
+                        op->acct = 0u;
+                        g.commit(*op, false);
+                    }
+                    t.IsFalse(g.roomFor(0u), std::string(arm) + ": gif ring full");
+                    bool hookRan = false;
+                    g.testBeforeProducerPark = [&] {
+                        hookRan = true;
+                        ++g.cHead;
+                        g.publishHead();
+                    };
+                    auto f = std::async(std::launch::async, [&g] {
+                        g.producerWait([&g] { return g.roomFor(0u); });
+                    });
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    g.testBeforeProducerPark = nullptr;
+                    if (!done)
+                    {
+                        g.stop.store(true, std::memory_order_relaxed);
+                        f.wait();
+                    }
+                    t.IsTrue(done, std::string(arm) + ": gif head publish between spin and sleep is not lost");
+                    t.IsTrue(hookRan, std::string(arm) + ": gif producer wait reached the sleep path");
+                }
+                // GIF case B: the head publish lands while the producer sleeps.
+                {
+                    GifStage g;
+                    g.slots.reset(new ps2_mtvu::GifOp[GifStage::kSlots]);
+                    for (uint64_t i = 0; i < GifStage::kSlots; ++i)
+                    {
+                        ps2_mtvu::GifOp *op = g.claim(0u);
+                        if (!op)
+                            break;
+                        op->kind = ps2_mtvu::GifOp::Kind::Submit;
+                        op->acct = 0u;
+                        g.commit(*op, false);
+                    }
+                    auto f = std::async(std::launch::async, [&g] {
+                        g.producerWait([&g] { return g.roomFor(0u); });
+                    });
+                    bool parked = false;
+                    for (int i = 0; i < 5000; ++i)
+                    {
+                        if (g.producerWaiting.load(std::memory_order_relaxed))
+                        {
+                            parked = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    t.IsTrue(parked, std::string(arm) + ": gif producer parked");
+                    ++g.cHead;
+                    g.publishHead();
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    if (!done)
+                    {
+                        g.stop.store(true, std::memory_order_relaxed);
+                        f.wait();
+                    }
+                    t.IsTrue(done, std::string(arm) + ": a sleeping gif producer is woken by publishHead");
+                }
+                // GIF FIFO: 100 tagged ops come out in order.
+                {
+                    GifStage g;
+                    g.slots.reset(new ps2_mtvu::GifOp[GifStage::kSlots]);
+                    for (uint32_t i = 0; i < 100u; ++i)
+                    {
+                        ps2_mtvu::GifOp *op = g.claim(0u);
+                        t.IsTrue(op != nullptr, std::string(arm) + ": gif fifo claim");
+                        if (!op)
+                            break;
+                        op->kind = ps2_mtvu::GifOp::Kind::Submit;
+                        op->acct = i;
+                        g.commit(*op, false);
+                    }
+                    bool ordered = true;
+                    for (uint32_t i = 0; i < 100u; ++i)
+                    {
+                        if (g.slots[g.cHead & GifStage::kMask].acct != i)
+                            ordered = false;
+                        ++g.cHead;
+                    }
+                    t.IsTrue(ordered, std::string(arm) + ": gif ops drain in FIFO order");
+                }
+                // GIF shutdown: a parked producer waiter returns on stop.
+                {
+                    GifStage g;
+                    g.slots.reset(new ps2_mtvu::GifOp[GifStage::kSlots]);
+                    for (uint64_t i = 0; i < GifStage::kSlots; ++i)
+                    {
+                        ps2_mtvu::GifOp *op = g.claim(0u);
+                        if (!op)
+                            break;
+                        op->kind = ps2_mtvu::GifOp::Kind::Submit;
+                        op->acct = 0u;
+                        g.commit(*op, false);
+                    }
+                    auto f = std::async(std::launch::async, [&g] {
+                        g.producerWait([&g] { return g.roomFor(0u); });
+                    });
+                    bool parked = false;
+                    for (int i = 0; i < 5000; ++i)
+                    {
+                        if (g.producerWaiting.load(std::memory_order_relaxed))
+                        {
+                            parked = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    t.IsTrue(parked, std::string(arm) + ": gif producer parked before shutdown");
+                    g.stop.store(true, std::memory_order_relaxed);
+                    {
+                        std::lock_guard<std::mutex> lock(g.m);
+                    }
+                    g.cvProducer.notify_all();
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    if (!done)
+                        f.wait();
+                    t.IsTrue(done, std::string(arm) + ": gif producer waiter returns on shutdown");
+                }
+                // VIF case A: the head publish lands between spin and sleep.
+                {
+                    VifLog l;
+                    l.reset(nullptr, nullptr);
+                    while (l.room(16u))
+                    {
+                        uint8_t *p = l.reserve(16u);
+                        if (!p)
+                            break;
+                        l.commit(16u, false);
+                    }
+                    t.IsFalse(l.room(16u), std::string(arm) + ": vif log full");
+                    bool hookRan = false;
+                    l.testBeforeProducerPark = [&] {
+                        hookRan = true;
+                        l.cHead += 16u;
+                        l.publishHead();
+                    };
+                    auto f = std::async(std::launch::async, [&l] {
+                        l.producerWait([&l] { return l.room(16u); });
+                    });
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    l.testBeforeProducerPark = nullptr;
+                    if (!done)
+                    {
+                        l.stop.store(true, std::memory_order_relaxed);
+                        f.wait();
+                    }
+                    t.IsTrue(done, std::string(arm) + ": vif head publish between spin and sleep is not lost");
+                    t.IsTrue(hookRan, std::string(arm) + ": vif producer wait reached the sleep path");
+                }
+                // VIF case B: the head publish lands while the producer sleeps.
+                {
+                    VifLog l;
+                    l.reset(nullptr, nullptr);
+                    while (l.room(16u))
+                    {
+                        uint8_t *p = l.reserve(16u);
+                        if (!p)
+                            break;
+                        l.commit(16u, false);
+                    }
+                    auto f = std::async(std::launch::async, [&l] {
+                        l.producerWait([&l] { return l.room(16u); });
+                    });
+                    bool parked = false;
+                    for (int i = 0; i < 5000; ++i)
+                    {
+                        if (l.producerWaiting.load(std::memory_order_relaxed))
+                        {
+                            parked = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    t.IsTrue(parked, std::string(arm) + ": vif producer parked");
+                    l.cHead += 16u;
+                    l.publishHead();
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    if (!done)
+                    {
+                        l.stop.store(true, std::memory_order_relaxed);
+                        f.wait();
+                    }
+                    t.IsTrue(done, std::string(arm) + ": a sleeping vif producer is woken by publishHead");
+                }
+                // VIF FIFO: 500 tagged records come out in order.
+                {
+                    VifLog l;
+                    l.reset(nullptr, nullptr);
+                    for (uint32_t i = 0; i < 500u; ++i)
+                    {
+                        uint8_t *p = l.reserve(16u);
+                        t.IsTrue(p != nullptr, std::string(arm) + ": vif fifo reserve");
+                        if (!p)
+                            break;
+                        std::memcpy(p, &i, sizeof(i));
+                        l.commit(16u, false);
+                    }
+                    l.publish();
+                    bool ordered = true;
+                    for (uint32_t i = 0; i < 500u; ++i)
+                    {
+                        uint32_t v = 0;
+                        std::memcpy(&v, l.buf + (l.cHead & VifLog::kMask), sizeof(v));
+                        if (v != i)
+                            ordered = false;
+                        l.cHead += 16u;
+                    }
+                    t.IsTrue(ordered, std::string(arm) + ": vif records drain in FIFO order");
+                }
+                // VIF shutdown: a parked producer waiter returns on stop.
+                {
+                    VifLog l;
+                    l.reset(nullptr, nullptr);
+                    while (l.room(16u))
+                    {
+                        uint8_t *p = l.reserve(16u);
+                        if (!p)
+                            break;
+                        l.commit(16u, false);
+                    }
+                    auto f = std::async(std::launch::async, [&l] {
+                        l.producerWait([&l] { return l.room(16u); });
+                    });
+                    bool parked = false;
+                    for (int i = 0; i < 5000; ++i)
+                    {
+                        if (l.producerWaiting.load(std::memory_order_relaxed))
+                        {
+                            parked = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    t.IsTrue(parked, std::string(arm) + ": vif producer parked before shutdown");
+                    l.stop.store(true, std::memory_order_relaxed);
+                    {
+                        std::lock_guard<std::mutex> lock(l.m);
+                    }
+                    l.cvProducer.notify_all();
+                    const bool done = f.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+                    if (!done)
+                        f.wait();
+                    t.IsTrue(done, std::string(arm) + ": vif producer waiter returns on shutdown");
+                }
+            }
+            ps2_mtvu::detail::setStagePark2ForTest(park0);
+        });
+
         tc.Run("MQ3 VIF1_STAT write skips the unit sync with PS2X_MTVU_VIF1_STAT_FREE", [](TestCase &t)
         {
             PS2Memory mem;

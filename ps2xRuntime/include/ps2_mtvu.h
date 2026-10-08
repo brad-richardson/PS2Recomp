@@ -388,6 +388,32 @@ namespace ps2_mtvu
         inline bool gifPark() { return stageMode() == 1 || stageMode() >= 3; }
         inline bool vifPark() { return stageMode() == 2; }
         inline void setStageWaitForTest(int v) { stageWaitMode() = v; }
+        // SPN1: PS2X_MTVU_STAGE_PARK2. 1: the producer waits
+        // (GifStage::producerWait on the MTVU thread, VifLog::producerWait
+        // on the MTVU-VIF thread) spin at most kStageParkSpinNs (<= 4 us)
+        // with a CPU pause, then park on cvProducer; unset (or anything
+        // else): the exact path, 256 yields before the same sleep. Default
+        // off. The sleep/wake protocol (producerWaiting + publishHead's
+        // notify + the 1 ms backstop) is unchanged either way, so the
+        // ordering and data are identical; only the spin burns less CPU.
+        inline bool parseStagePark2(const char *e) { return e && std::strcmp(e, "1") == 0; }
+        inline int &stagePark2Mode()
+        {
+            static int v = -1; // -1 unresolved; tests set it directly
+            return v;
+        }
+        inline bool stagePark2()
+        {
+            int v = stagePark2Mode();
+            if (v < 0)
+            {
+                v = parseStagePark2(std::getenv("PS2X_MTVU_STAGE_PARK2")) ? 1 : 0;
+                stagePark2Mode() = v;
+                std::fprintf(stderr, "[mtvu] stage-park2=%s\n", v ? "on" : "off");
+            }
+            return v != 0;
+        }
+        inline void setStagePark2ForTest(int v) { stagePark2Mode() = v; }
         static inline void stageCpuPause()
         {
 #if defined(__aarch64__) || defined(_M_ARM64)
@@ -437,6 +463,7 @@ namespace ps2_mtvu
             std::thread th;
             bool running = false; // EE / init only
             std::function<void()> testBeforePark; // suite hook: runs after the spin, before the sleep
+            std::function<void()> testBeforeProducerPark; // SPN1 suite hook: runs after the producer spin, before the sleep
             // Receipts (logged only).
             std::atomic<uint64_t> nPub{0};
             std::atomic<uint64_t> nWakes{0}; // producer notifies sent while the consumer slept
@@ -510,13 +537,31 @@ namespace ps2_mtvu
             void producerWait(Pred done)
             {
                 publish(true);
-                for (int spin = 0; spin < 256; ++spin)
+                if (stagePark2())
                 {
-                    refreshCaches();
-                    if (done() || stop.load(std::memory_order_relaxed))
-                        return;
-                    std::this_thread::yield();
+                    const uint64_t t0 = nowNs();
+                    for (unsigned i = 0;; ++i)
+                    {
+                        refreshCaches();
+                        if (done() || stop.load(std::memory_order_relaxed))
+                            return;
+                        if ((i & 15u) == 15u && nowNs() - t0 >= kStageParkSpinNs)
+                            break;
+                        stageCpuPause();
+                    }
                 }
+                else
+                {
+                    for (int spin = 0; spin < 256; ++spin)
+                    {
+                        refreshCaches();
+                        if (done() || stop.load(std::memory_order_relaxed))
+                            return;
+                        std::this_thread::yield();
+                    }
+                }
+                if (testBeforeProducerPark)
+                    testBeforeProducerPark();
                 producerWaiting.store(true, std::memory_order_relaxed);
                 std::atomic_thread_fence(std::memory_order_seq_cst);
                 {
@@ -786,6 +831,7 @@ namespace ps2_mtvu
             std::thread th;       // the MTVU-VIF thread
             bool running = false; // EE / init only
             std::function<void()> testBeforePark; // suite hook: runs after the spin, before the sleep
+            std::function<void()> testBeforeProducerPark; // SPN1 suite hook: runs after the producer spin, before the sleep
             std::atomic<bool> vuIn{false}; // the MTVU thread is inside vuLoop
             // Receipts (logged only).
             std::atomic<uint64_t> nPub{0};
@@ -822,13 +868,31 @@ namespace ps2_mtvu
             void producerWait(Pred done)
             {
                 publish();
-                for (int spin = 0; spin < 256; ++spin)
+                if (stagePark2())
                 {
-                    refresh();
-                    if (done() || stop.load(std::memory_order_relaxed))
-                        return;
-                    std::this_thread::yield();
+                    const uint64_t t0 = nowNs();
+                    for (unsigned i = 0;; ++i)
+                    {
+                        refresh();
+                        if (done() || stop.load(std::memory_order_relaxed))
+                            return;
+                        if ((i & 15u) == 15u && nowNs() - t0 >= kStageParkSpinNs)
+                            break;
+                        stageCpuPause();
+                    }
                 }
+                else
+                {
+                    for (int spin = 0; spin < 256; ++spin)
+                    {
+                        refresh();
+                        if (done() || stop.load(std::memory_order_relaxed))
+                            return;
+                        std::this_thread::yield();
+                    }
+                }
+                if (testBeforeProducerPark)
+                    testBeforeProducerPark();
                 producerWaiting.store(true, std::memory_order_relaxed);
                 std::atomic_thread_fence(std::memory_order_seq_cst);
                 {
