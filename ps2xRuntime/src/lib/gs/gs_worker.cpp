@@ -23,6 +23,30 @@ std::atomic<uint64_t> s_stagedRounds{0}; // receipts: staged publish rounds
 thread_local std::vector<GsCommand> t_staged;
 thread_local GsWorker *t_stagedWorker = nullptr;
 thread_local size_t t_stagedBytes = 0;
+// GSW2: GS queue wake hysteresis (PS2X_GS_WAKE_LOWWATER=<n>, default off =
+// 0/unset/invalid). In a GS-bound window the queue is full, so every pop
+// batch freed a little space and did m_hasSpace.notify_all(), waking the
+// blocked MTVU-GIF producer ~200x/update (~1.9 ms/update of futex +
+// mutex-wake time on the Odin, GSW1 REPORT.md section 6). With a mark set,
+// the worker wakes space waiters only once the queue has drained below <n>
+// descriptors, or on worker idle / flushWake / Fence execution. Same
+// commands, same order: only wake timing moves. Notified waiters re-check
+// hasSpace, so a wake is never wrong, only early. Parsed per start() so
+// tests can toggle it with the env between workers (production starts one
+// worker).
+std::atomic<size_t> s_spaceLowWater{0};
+
+size_t parseSpaceLowWater()
+{
+    const char *env = std::getenv("PS2X_GS_WAKE_LOWWATER");
+    if (!env || !*env)
+        return 0u;
+    char *end = nullptr;
+    const unsigned long v = std::strtoul(env, &end, 10);
+    if (end == env)
+        return 0u;
+    return static_cast<size_t>(v);
+}
 
 uint64_t steadyNowNs()
 {
@@ -101,6 +125,11 @@ void GsWorker::start()
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_running)
         return;
+    // GSW2: (re-)read the wake low-water mark; 0 keeps the old every-pop notify.
+    const size_t lowWater = parseSpaceLowWater();
+    s_spaceLowWater.store(lowWater, std::memory_order_relaxed);
+    if (lowWater != 0u)
+        std::fprintf(stderr, "[gs:handoff] GSW2 wake low-water %zu descriptors\n", lowWater);
     m_stopRequested = false;
     m_running = true;
     m_thread = std::thread(&GsWorker::threadMain, this);
@@ -308,8 +337,17 @@ void GsWorker::flushWake()
     if (t_stagedWorker == this)
         flushStaged(); // GPK1: publish before delivering the wake
     std::unique_lock<std::mutex> lock(m_mutex);
+    // GSW2: with wake hysteresis on, a flush also releases space-blocked
+    // producers (knob off adds one atomic load and one branch).
+    const bool space =
+        s_spaceLowWater.load(std::memory_order_relaxed) != 0u && m_spaceWaiters != 0u;
     if (m_batchDepth != 0 || !m_batchDirty)
+    {
+        lock.unlock();
+        if (space)
+            m_hasSpace.notify_all();
         return;
+    }
     m_batchDirty = false;
     m_deferredSinceNs = 0;
     // MP1 L2 (a): notifies a sleeping worker only (a running one
@@ -317,6 +355,8 @@ void GsWorker::flushWake()
     bool notify = m_workerIdle;
     m_workerIdle = false;
     lock.unlock();
+    if (space)
+        m_hasSpace.notify_all();
     if (!notify)
         return;
     m_wakes.fetch_add(1u, std::memory_order_relaxed);
@@ -383,6 +423,7 @@ void GsWorker::threadMain()
             std::unique_lock<std::mutex> lock(m_mutex);
             m_executing = false;
             deferOn = m_wakeCommands != 0u;
+            const size_t lowWater = s_spaceLowWater.load(std::memory_order_relaxed); // GSW2
             const auto ready = [&] { return m_stopRequested || !m_queue.empty(); };
             if (m_wakeCommands == 0u)
             {
@@ -422,6 +463,10 @@ void GsWorker::threadMain()
             {
                 if (m_stopRequested)
                     return;
+                // GSW2: starvation guard — always wake space waiters before
+                // sleeping (the queue is empty, so every waiter can proceed).
+                if (lowWater != 0u && m_spaceWaiters != 0u)
+                    m_hasSpace.notify_all();
                 continue;
             }
             const size_t popBatch = m_popBatch;
@@ -441,7 +486,8 @@ void GsWorker::threadMain()
                 m_deferredSinceNs = 0;
             }
             // MP1 L2 (a): wakes space waiters only when there are some.
-            notifySpace = m_spaceWaiters != 0u;
+            // GSW2: with a low-water mark, only once drained below it.
+            notifySpace = m_spaceWaiters != 0u && (lowWater == 0u || m_queue.size() < lowWater);
         }
         if (notifySpace)
             m_hasSpace.notify_all();
@@ -464,6 +510,18 @@ void GsWorker::threadMain()
             }
             if (batch[i].rpc)
                 batch[i].rpc->signal();
+            // GSW2: a Fence at stream position also releases space-blocked
+            // producers (knob on only; fences are rare, so the lock round
+            // is cheap; knob off adds one kind compare per command).
+            if (batch[i].kind == GsCmdKind::Fence &&
+                s_spaceLowWater.load(std::memory_order_relaxed) != 0u)
+            {
+                std::unique_lock<std::mutex> fenceLock(m_mutex);
+                const bool fenceSpace = m_spaceWaiters != 0u;
+                fenceLock.unlock();
+                if (fenceSpace)
+                    m_hasSpace.notify_all();
+            }
         }
         const uint64_t executed = m_executedCount.fetch_add(batchSize, std::memory_order_relaxed) + batchSize;
         if (deferOn && (executed >> 18) != ((executed - batchSize) >> 18))

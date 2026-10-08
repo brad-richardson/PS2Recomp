@@ -1890,5 +1890,326 @@ void register_ps2_gs_queue_tests()
                 inOrder = inOrder && order[static_cast<size_t>(i)] == i;
             t.IsTrue(inOrder && order.back() == 1000, "jobs should run in submit order");
         });
+
+        // GSW2: the mark is parsed per GsWorker::start, so each test sets the
+        // env before start() and unsets it at the end (checks never throw).
+        tc.Run("GSW2 wake low-water keeps FIFO order under blocking", [](TestCase &t)
+        {
+            ::setenv("PS2X_GS_WAKE_LOWWATER", "1", 1);
+            std::vector<uint32_t> seen;
+            std::mutex seenMutex;
+            GsWorker worker(2u, 1024u,
+                            [&](GsCommand &cmd)
+                            {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                                std::lock_guard<std::mutex> lock(seenMutex);
+                                seen.push_back(cmd.u32b);
+                            });
+            worker.start();
+            for (uint32_t i = 0; i < 12u; ++i)
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.u32b = i;
+                c.bytes.resize(16u, 1u);
+                worker.enqueue(std::move(c));
+            }
+            worker.stop();
+            ::unsetenv("PS2X_GS_WAKE_LOWWATER");
+            t.Equals(worker.enqueuedCount(), worker.executedCount(), "every command should execute");
+            bool ordered = seen.size() == 12u;
+            for (uint32_t i = 0; i < seen.size(); ++i)
+                ordered = ordered && seen[i] == i;
+            t.IsTrue(ordered, "commands should execute in FIFO order with hysteresis on");
+        });
+
+        tc.Run("GSW2 wake low-water has no lost wakeup draining to empty", [](TestCase &t)
+        {
+            ::setenv("PS2X_GS_WAKE_LOWWATER", "1", 1);
+            std::atomic<bool> gate{false};
+            std::atomic<bool> entered{false};
+            std::atomic<int> executed{0};
+            GsWorker worker(2u, 64u,
+                            [&](GsCommand &)
+                            {
+                                entered.store(true, std::memory_order_release);
+                                while (!gate.load(std::memory_order_acquire))
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                                executed.fetch_add(1, std::memory_order_relaxed);
+                            });
+            worker.start();
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.bytes.resize(16u, 1u);
+                worker.enqueue(std::move(c));
+            }
+            for (int i = 0; i < 200 && !entered.load(std::memory_order_acquire); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            t.IsTrue(entered.load(std::memory_order_acquire), "worker should park in the gated handler");
+            for (uint8_t i = 2; i <= 3; ++i)
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.bytes.resize(16u, i);
+                worker.enqueue(std::move(c));
+            }
+            std::atomic<bool> fourthDone{false};
+            std::thread fourth(
+                [&]
+                {
+                    GsCommand c;
+                    c.kind = GsCmdKind::GifPacket;
+                    c.bytes.resize(16u, 4u);
+                    worker.enqueue(std::move(c));
+                    fourthDone.store(true, std::memory_order_release);
+                });
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            t.IsFalse(fourthDone.load(std::memory_order_acquire),
+                      "fourth enqueue should block while the 2-deep ring is full");
+            gate.store(true, std::memory_order_release);
+            fourth.join();
+            for (int i = 0; i < 400 && !worker.isQuiescent(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            t.IsTrue(worker.isQuiescent(), "worker should drain to empty");
+            // The idle path still serves new work after a hysteresis drain.
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.bytes.resize(16u, 5u);
+                worker.enqueue(std::move(c));
+            }
+            worker.stop();
+            ::unsetenv("PS2X_GS_WAKE_LOWWATER");
+            t.IsTrue(fourthDone.load(std::memory_order_acquire),
+                     "blocked producer should proceed once drained below the mark");
+            t.Equals(executed.load(std::memory_order_relaxed), 5,
+                     "all five commands should execute");
+        });
+
+        tc.Run("GSW2 flush and fence wake space-blocked producers", [](TestCase &t)
+        {
+            // Flush: mark 2, 4-deep ring. The first command parks in a gated
+            // handler (fenced on entry, so the ring fills with the worker
+            // parked); the rest sleep 50 ms each. The worker pops one (3 left,
+            // above the mark, no notify) and parks; the blocked producer must
+            // stay blocked until flushWake releases it.
+            ::setenv("PS2X_GS_WAKE_LOWWATER", "2", 1);
+            std::vector<uint32_t> seen;
+            std::mutex seenMutex;
+            std::atomic<bool> gate{false};
+            std::atomic<bool> entered{false};
+            GsWorker worker(4u, 4096u,
+                            [&](GsCommand &cmd)
+                            {
+                                entered.store(true, std::memory_order_release);
+                                if (cmd.u32b == 1u)
+                                {
+                                    while (!gate.load(std::memory_order_acquire))
+                                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                                }
+                                else
+                                {
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                                }
+                                std::lock_guard<std::mutex> lock(seenMutex);
+                                seen.push_back(cmd.u32b);
+                            });
+            worker.start();
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.u32b = 1u;
+                c.bytes.resize(16u, 1u);
+                worker.enqueue(std::move(c));
+            }
+            for (int i = 0; i < 200 && !entered.load(std::memory_order_acquire); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            t.IsTrue(entered.load(std::memory_order_acquire), "worker should park in the gated handler");
+            for (uint32_t i = 2; i <= 5u; ++i)
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.u32b = i;
+                c.bytes.resize(16u, 1u);
+                worker.enqueue(std::move(c));
+            }
+            std::atomic<bool> sixthDone{false};
+            std::thread sixth(
+                [&]
+                {
+                    GsCommand c;
+                    c.kind = GsCmdKind::GifPacket;
+                    c.u32b = 6u;
+                    c.bytes.resize(16u, 1u);
+                    worker.enqueue(std::move(c));
+                    sixthDone.store(true, std::memory_order_release);
+                });
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            t.IsFalse(sixthDone.load(std::memory_order_acquire),
+                      "sixth enqueue should block while the 4-deep ring is full");
+            gate.store(true, std::memory_order_release);
+            int drained = 0;
+            for (int i = 0; i < 400 && worker.pendingCount() != 3u; ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            drained = worker.pendingCount() == 3u ? 1 : 0;
+            t.Equals(drained, 1, "worker should pop one above the mark");
+            t.IsFalse(sixthDone.load(std::memory_order_acquire),
+                      "producer should stay blocked above the mark even with room");
+            worker.flushWake();
+            sixth.join();
+            worker.stop();
+            t.IsTrue(sixthDone.load(std::memory_order_acquire),
+                     "flushWake should release a space-blocked producer");
+            bool ordered = seen.size() == 6u;
+            for (uint32_t i = 0; i < seen.size(); ++i)
+                ordered = ordered && seen[i] == i + 1u;
+            t.IsTrue(ordered, "flush-released commands should execute in FIFO order");
+            // Fence: mark 1, 2-deep ring. A Fence submitted while a producer
+            // is space-blocked must still complete (no deadlock), after the
+            // commands ahead of it; the fence and the producer race for the
+            // freed room in either order.
+            ::setenv("PS2X_GS_WAKE_LOWWATER", "1", 1);
+            std::vector<uint32_t> seenFence;
+            GsWorker fenced(2u, 1024u,
+                            [&](GsCommand &cmd)
+                            {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                                std::lock_guard<std::mutex> lock(seenMutex);
+                                seenFence.push_back(cmd.u32b);
+                            });
+            fenced.start();
+            for (uint32_t i = 1; i <= 3u; ++i)
+            {
+                GsCommand c;
+                c.kind = GsCmdKind::GifPacket;
+                c.u32b = i;
+                c.bytes.resize(16u, 1u);
+                fenced.enqueue(std::move(c));
+            }
+            std::atomic<bool> prodDone{false};
+            std::thread prod(
+                [&]
+                {
+                    GsCommand c;
+                    c.kind = GsCmdKind::GifPacket;
+                    c.u32b = 4u;
+                    c.bytes.resize(16u, 1u);
+                    fenced.enqueue(std::move(c));
+                    prodDone.store(true, std::memory_order_release);
+                });
+            std::atomic<bool> fenceDone{false};
+            std::thread fencer(
+                [&]
+                {
+                    GsCommand fence;
+                    fence.kind = GsCmdKind::Fence;
+                    fence.u32b = 99u;
+                    fence.rpc = std::make_shared<GsRpcBase>();
+                    std::shared_ptr<GsRpcBase> rpc = fence.rpc;
+                    fenced.enqueue(std::move(fence));
+                    rpc->wait();
+                    fenceDone.store(true, std::memory_order_release);
+                });
+            prod.join();
+            fencer.join();
+            fenced.stop();
+            ::unsetenv("PS2X_GS_WAKE_LOWWATER");
+            t.IsTrue(prodDone.load(std::memory_order_acquire), "blocked producer should proceed");
+            t.IsTrue(fenceDone.load(std::memory_order_acquire),
+                     "a fence submitted while a producer is blocked should complete");
+            bool fenceOrder = seenFence.size() == 5u && seenFence[0] == 1u && seenFence[1] == 2u &&
+                              seenFence[2] == 3u &&
+                              ((seenFence[3] == 4u && seenFence[4] == 99u) ||
+                               (seenFence[3] == 99u && seenFence[4] == 4u));
+            t.IsTrue(fenceOrder, "the fence should run after the commands ahead of it");
+        });
+
+        tc.Run("GSW2 wake low-water stress keeps every producer in order", [](TestCase &t)
+        {
+            ::setenv("PS2X_GS_WAKE_LOWWATER", "4", 1);
+            struct Item
+            {
+                uint32_t id;
+                uint32_t seq;
+            };
+            std::vector<Item> seen;
+            std::mutex seenMutex;
+            GsWorker worker(8u, 65536u,
+                            [&](GsCommand &cmd)
+                            {
+                                if ((cmd.u32b & 15u) == 0u)
+                                    std::this_thread::yield();
+                                std::lock_guard<std::mutex> lock(seenMutex);
+                                seen.push_back({cmd.u32a, cmd.u32b});
+                            });
+            worker.start();
+            constexpr int kProducers = 4;
+            constexpr int kEach = 200;
+            std::atomic<int> fencesDone{0};
+            std::vector<std::thread> producers;
+            for (int id = 0; id < kProducers; ++id)
+            {
+                producers.emplace_back(
+                    [&, id]
+                    {
+                        uint64_t rng = 0x9E3779B97F4A7C15ull ^ (static_cast<uint64_t>(id) * 0xBF58476D1CE4E5B9ull);
+                        for (int s = 0; s < kEach; ++s)
+                        {
+                            rng ^= rng << 13;
+                            rng ^= rng >> 7;
+                            rng ^= rng << 17;
+                            GsCommand c;
+                            c.kind = GsCmdKind::GifPacket;
+                            c.u32a = static_cast<uint32_t>(id);
+                            c.u32b = static_cast<uint32_t>(s);
+                            c.bytes.resize(static_cast<size_t>(rng % 4096u),
+                                           static_cast<uint8_t>(id + 1));
+                            worker.enqueue(std::move(c));
+                            if (s % 37 == 36)
+                                worker.flushWake();
+                            if (s % 50 == 49)
+                            {
+                                GsCommand fence;
+                                fence.kind = GsCmdKind::Fence;
+                                fence.u32a = static_cast<uint32_t>(id);
+                                fence.u32b = 0xFFFFFFFFu; // sentinel: skipped by the order check
+                                fence.rpc = std::make_shared<GsRpcBase>();
+                                std::shared_ptr<GsRpcBase> rpc = fence.rpc;
+                                worker.enqueue(std::move(fence));
+                                rpc->wait();
+                                fencesDone.fetch_add(1, std::memory_order_relaxed);
+                            }
+                        }
+                    });
+            }
+            for (auto &th : producers)
+                th.join();
+            for (int i = 0; i < 800 && !worker.isQuiescent(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            worker.stop();
+            ::unsetenv("PS2X_GS_WAKE_LOWWATER");
+            t.Equals(worker.enqueuedCount(), worker.executedCount(), "every command should execute");
+            t.Equals(fencesDone.load(std::memory_order_relaxed), kProducers * (kEach / 50),
+                     "every stress fence should complete");
+            // Per-producer FIFO: each producer's enqueues are sequential, so
+            // its seqs must appear strictly increasing (fences carry id 0).
+            std::lock_guard<std::mutex> lock(seenMutex);
+            t.Equals(seen.size(),
+                     static_cast<size_t>(kProducers * kEach + kProducers * (kEach / 50)),
+                     "every packet and fence should execute");
+            bool ordered = true;
+            int last[4] = {-1, -1, -1, -1};
+            for (const Item &it : seen)
+            {
+                if (it.seq == 0xFFFFFFFFu)
+                    continue; // fences carry no seq; only packets are ordered
+                if (it.id >= 4u || static_cast<int>(it.seq) <= last[it.id])
+                    ordered = false;
+                else
+                    last[it.id] = static_cast<int>(it.seq);
+            }
+            t.IsTrue(ordered, "each producer's packets should execute in order");
+        });
     });
 }
