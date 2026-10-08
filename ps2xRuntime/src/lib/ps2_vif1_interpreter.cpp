@@ -1,6 +1,8 @@
 // Based on Blackline Interactive implementation
 #include "ps2_mtvu.h"
+#include "ps2_vif_unpack_fast.h"
 #include "runtime/ps2_memory.h"
+#include <atomic>
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
@@ -55,6 +57,14 @@ namespace
             }
         }
         return true;
+    }
+
+    // VUP1: once-per-process engagement receipt (B legs show it, A legs don't).
+    void vifUnpackFastLogOnce()
+    {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            std::fprintf(stderr, "[VUP1] fast unpack engaged (PS2X_VIF_UNPACK_FAST=1)\n");
     }
 
     constexpr uint8_t kGifFmtImage = 2u;
@@ -668,6 +678,40 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                                 static_cast<size_t>(writeVectorCount - bulkFirst) * 16u);
                 }
             }
+            else if (m_vifUnpackFast && totalBytes > 0u && pos + totalBytes <= sizeBytes &&
+                     ps2_vif_unpack_fast::eligible(vl, static_cast<uint32_t>(components), maskEnable,
+                                                   vif1_regs.mode & 3u, vif1_regs.mask, wl))
+            {
+                // VUP1 (PS2X_VIF_UNPACK_FAST=1): specialized decoder for the
+                // heavy-window shapes (masked V3/V2-16/32, V4-5/16, V2-8 at
+                // wl == 1, mode 0). wl == 1 makes cyclePos always 0 (only mask
+                // row 0 applies) with source available every cycle, and the
+                // eligibility gate allows only data/row lane specs, so every
+                // lane of every vector is written: no read-modify-write
+                // preload, per-command format/mask/cycle work hoisted. Stores
+                // are byte-identical to the generic loop below.
+                ps2_vif_unpack_fast::noteFastUnpack();
+                vifUnpackFastLogOnce();
+                const uint8_t *srcBase = data + pos;
+                const uint32_t row0 = vif1_regs.mask & 0xFFu;
+                uint32_t spec[4];
+                for (uint32_t f = 0u; f < 4u; ++f)
+                    spec[f] = maskEnable ? ((row0 >> (f * 2u)) & 0x3u) : 0u;
+                for (uint32_t i = 0u; i < writeVectorCount; ++i)
+                {
+                    const uint8_t *srcVec = srcBase + i * bytesPerVector;
+                    const uint32_t destVec = (vuAddr + i * cl) & 0x3FFu;
+                    uint32_t dec[4] = {0u, 0u, 0u, 0u};
+                    ps2_vif_unpack_fast::decodeVector(vl, static_cast<uint32_t>(components), srcVec,
+                                                      zeroExtend, uv1UnpackQwAligned, srcBase, i,
+                                                      bytesPerVector, uv1DataStartPos, sizeBytes, dec);
+                    uint32_t lanes[4];
+                    for (uint32_t f = 0u; f < 4u; ++f)
+                        lanes[f] = (spec[f] == 0u) ? dec[f] : vif1_regs.row[f];
+                    const uint32_t destOff = destVec * 16u;
+                    std::memcpy(m_vu1Data + destOff, lanes, sizeof(lanes));
+                }
+            }
             else if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)
             {
                 const uint8_t *srcBase = data + pos;
@@ -1233,6 +1277,50 @@ void PS2Memory::processVIF1DataStaged(const uint8_t *data, uint32_t sizeBytes)
                     std::memcpy(p, &r, sizeof(r));
                     std::memcpy(p + 16u, data + pos, static_cast<size_t>(writeVectorCount) * 16u);
                     ps2_mtvu::vifStageCommit(size, false);
+                }
+            }
+            else if (m_vifUnpackFast && totalBytes > 0u && pos + totalBytes <= sizeBytes &&
+                     ps2_vif_unpack_fast::eligible(vl, static_cast<uint32_t>(components), maskEnable,
+                                                   vif1_regs.mode & 3u, vif1_regs.mask, wl))
+            {
+                // VUP1 (PS2X_VIF_UNPACK_FAST=1): the same specialized decode
+                // as the inline loop, emitting one full-mask Masked entry per
+                // vector. The record bytes are identical to the generic loop's
+                // (same reserve size, header, entry order and values).
+                ps2_vif_unpack_fast::noteFastUnpack();
+                vifUnpackFastLogOnce();
+                const uint32_t fastSize = (16u + writeVectorCount * 20u + 15u) & ~15u;
+                if (uint8_t *rec = ps2_mtvu::vifStageReserve(fastSize))
+                {
+                    const uint8_t *srcBase = data + pos;
+                    const uint32_t row0 = vif1_regs.mask & 0xFFu;
+                    uint32_t spec[4];
+                    for (uint32_t f = 0u; f < 4u; ++f)
+                        spec[f] = maskEnable ? ((row0 >> (f * 2u)) & 0x3u) : 0u;
+                    uint8_t *out = rec + 16u;
+                    for (uint32_t i = 0u; i < writeVectorCount; ++i)
+                    {
+                        const uint8_t *srcVec = srcBase + i * bytesPerVector;
+                        const uint32_t destVec = (vuAddr + i * cl) & 0x3FFu;
+                        uint32_t dec[4] = {0u, 0u, 0u, 0u};
+                        ps2_vif_unpack_fast::decodeVector(vl, static_cast<uint32_t>(components), srcVec,
+                                                          zeroExtend, uv1UnpackQwAligned, srcBase, i,
+                                                          bytesPerVector, uv1DataStartPos, sizeBytes,
+                                                          dec);
+                        uint32_t vals[4];
+                        for (uint32_t f = 0u; f < 4u; ++f)
+                            vals[f] = (spec[f] == 0u) ? dec[f] : vif1_regs.row[f];
+                        const uint16_t q16 = static_cast<uint16_t>(destVec);
+                        const uint16_t m16 = 0xFFFFu;
+                        std::memcpy(out, &q16, 2u);
+                        std::memcpy(out + 2u, &m16, 2u);
+                        std::memcpy(out + 4u, vals, 16u);
+                        out += 20u;
+                    }
+                    const ps2_mtvu::VifRec r{fastSize, K::Masked, 0u,
+                                             static_cast<uint16_t>(writeVectorCount), 0u, 0u};
+                    std::memcpy(rec, &r, sizeof(r));
+                    ps2_mtvu::vifStageCommit(fastSize, false);
                 }
             }
             else if (m_vu1Data && totalBytes > 0 && pos + totalBytes <= sizeBytes)

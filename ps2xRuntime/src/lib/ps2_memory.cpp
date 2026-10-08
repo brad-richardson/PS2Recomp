@@ -406,6 +406,9 @@ PS2Memory::PS2Memory()
     // GE3 Part 3: EE-owned FINISH (default off; same opt-in as the GS side).
     if (const char *finishTiming = std::getenv("PS2X_GS_FINISH_TIMING"))
         m_finishTimingPcsx2 = std::strcmp(finishTiming, "pcsx2") == 0;
+    // VUP1: specialized UNPACK decoders (default off).
+    if (const char *vifUnpackFast = std::getenv("PS2X_VIF_UNPACK_FAST"))
+        m_vifUnpackFast = std::strcmp(vifUnpackFast, "1") == 0;
     ps2SetScratchpadHostPtr(nullptr);
 }
 

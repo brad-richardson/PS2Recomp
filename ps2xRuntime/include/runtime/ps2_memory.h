@@ -548,6 +548,10 @@ public:
     // GE3 Part 3: PS2X_GS_FINISH_TIMING=pcsx2 (EE-owned FINISH). Same
     // placement rule: appended last so prior offsets never move.
     bool m_finishTimingPcsx2 = false;
+    // VUP1: PS2X_VIF_UNPACK_FAST=1 (specialized UNPACK decoders). Same rule.
+    bool m_vifUnpackFast = false;
+    // VUP1 test hook: unit tests toggle the fast path per PS2Memory.
+    void setVifUnpackFastForTest(bool on) { m_vifUnpackFast = on; }
 };
 
 // RB1 test hook: force the VIF1 reverse-DMA knob for unit tests.

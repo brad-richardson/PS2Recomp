@@ -404,6 +404,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_TRICKY_HUD_ASYNC",
         "PS2X_UNPACED",
         "PS2X_VIF1_REVERSE_DMA",
+        "PS2X_VIF_UNPACK_FAST",
         "PS2X_VIRTUAL_PAD",
         "PS2X_VU0_BLOCKS",
         "PS2X_VU0_DIRECT",
