@@ -187,6 +187,15 @@ void register_ps2_fh1_fix_tests()
             t.IsTrue((kFixAll & kFixGround2) == 0u, "ground2 remains separate");
         });
 
+        tc.Run("JMP3 query is opt-in at bit 50", [](TestCase &t)
+        {
+            t.Equals(static_cast<uint64_t>(kFixQuery), 1ull << 50, "query uses bit 50");
+            t.IsTrue((kFixAll & kFixQuery) == 0u, "excluded from all");
+            t.Equals(parseFix("all,query").main, kFixAll | kFixQuery, "opt-in");
+            t.Equals(parseFix("all,query,-query").main, kFixAll, "opt-out");
+            t.Equals(parseFix("query").main, static_cast<uint64_t>(kFixQuery), "query alone");
+        });
+
         tc.Run("all includes stick2 and clocksign (FH26, Brad 10-02) and both masks", [](TestCase &t)
         {
             const FixMasks f = parseFix("all");

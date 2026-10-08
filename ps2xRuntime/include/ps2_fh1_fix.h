@@ -66,6 +66,7 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixJcam2 = 1ull << 44, // FH32 opt-in: camera-only stock-cadence shadow predictor publication (class d/c, owner FH32)
     kFixLife2 = 1ull << 45, // LCY2 opt-in: streaming live-age units and replay snapshot input ordinals (class e/d; owner LCY2)
     kFixEnvFilt = 1ull << 42, // FH30 opt-in: 0x2c096c -> 0x2bcf38 squared-gain response at 120 (class a; not in all)
+    kFixQuery = 1ull << 50, // JMP3 opt-in: cruise ground query 0x13d1b8 at stock cadence (skip on odd updates; class d; not in all)
 };
 
 // FH12 groups live in their own mask (the main mask's bits are taken). Same
@@ -165,6 +166,7 @@ inline uint64_t fixItem(const std::string &item) noexcept
     if (item == "envfilt") return kFixEnvFilt;
     if (item == "trails") return kFixTrails;
     if (item == "chase2") return kFixChase2;
+    if (item == "query") return kFixQuery;
     return 0u;
 }
 

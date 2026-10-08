@@ -1454,6 +1454,44 @@ inline bool rngHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t
     return false;
 }
 
+// ---- JMP3 query: cruise ground query at stock cadence (opt-in, class d) ---
+// 0x13D1B8 (cruise ground contact query; single call site 0x13EBA0 in 0x13D818)
+// resolves overlapping terrain patches at seams by rule (normal preference,
+// then coarse fraction nearest 0.5). At 120 the query runs twice per stock
+// tick from half-step-apart positions; at a lip seam the two half-steps can
+// resolve DIFFERENT patches (JMP3 gap A: lip-top, then lip wall, then lip-top
+// across three half-steps) while stock's single query resolves one. The
+// one-half-step sideways contact seeds a -44 u/s vz deficit that the lip
+// spring amplifies to -257 u/s at takeoff (stock lands m2, 120 crashes m3).
+// Like rng/session/pid, the query runs on the first update of a pair and is
+// skipped on the second (g_rngOdd): the contact frame (+0x370, +0x438, +0x454,
+// ...) holds its stock-cadence values. The caller uses v0 only as a contact
+// boolean (bnez 0x13EBAC, beqz 0x13ED2C), so the skip restores (held surf != 0).
+inline constexpr uint32_t kCruiseQuerySite = 0x13eba0u, kCruiseQuery = 0x13d1b8u;
+
+inline bool queryFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixQuery) != 0u;
+    return on;
+}
+
+// true = skip this call (contact frame held; v0 = held contact boolean).
+inline bool querySkip(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc) noexcept
+{
+    if (!queryFix() || !g_rngOdd)
+        return false;
+    if (sourcePc != kCruiseQuerySite || targetPc != kCruiseQuery || !ctx)
+        return false;
+    // a0 = rider owner P (0x13EB98: a0 = s1); R = [P+0x18]; surf = [R+0x438].
+    // Bail (run the query) if the chain can't be read or the surf is wild.
+    const uint32_t pa = getRegU32(ctx, 4);
+    uint32_t r = 0u, surf = 0u;
+    if (!rd32(ram, pa + 0x18u, r) || !rd32(ram, r + 0x438u, surf) || surf > 0xffffu)
+        return false;
+    SET_GPR_U32(ctx, 2, surf != 0u ? 1u : 0u);
+    return true;
+}
+
 // ---- FH30 envfilt: fixed-target environment response (opt-in, class a) ------
 // Caller 0x2c096c negates target[0] into f12; the live value is +0.08.
 // 0x2bcf54/5c square f12, then 0x2bcf7c..0x2bd03c implement six
@@ -2723,7 +2761,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2, trails, chase2;
+        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2, trails, chase2, query;
     bool src, fh9, draw, tap;
 };
 
@@ -2752,7 +2790,8 @@ inline const BranchFlags &branchFlags() noexcept
         r.c2cap = c2capFix();
         r.trails=trailsFix();
         r.chase2=chase2Fix();
-        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap || r.input2 || inputChainFix();
+        r.query = queryFix();
+        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap || r.input2 || r.query || inputChainFix();
         r.bonus = bonusFix();
         r.lift = liftFix();
         r.flags = flagsFix();
@@ -2878,7 +2917,12 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addSrc(kSessionCallSite);
         addTgt(kSession);
     }
-    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixPid | kFixC2Cap | kFixInput2 | kFixInputChain)) != 0u && on) ||
+    if ((c.main & kFixQuery) != 0u && on)
+    {
+        addSrc(kCruiseQuerySite);
+        addTgt(kCruiseQuery);
+    }
+    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixPid | kFixC2Cap | kFixInput2 | kFixInputChain | kFixQuery)) != 0u && on) ||
                         ((c.fix12 & (kFix12Particles | kFix12Flare)) != 0u && on);
     if (parity)
         addSrc(kAppUpdateSite); // parityHook counts app-update dispatches
@@ -3100,6 +3144,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         parityHook(ram, sourcePc);
     if (on && flag(&BranchFlags::rng, rngFix))
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
+    if (on && flag(&BranchFlags::query, queryFix))
+        skip = querySkip(ram, ctx, sourcePc, targetPc) || skip;
     if (on && flag(&BranchFlags::trick, trickFix) && g_rngOdd && sourcePc == kComboSite && targetPc == kComboAccrue)
         skip = true;
     if (on && flag(&BranchFlags::aiGate, aiGateFix))
