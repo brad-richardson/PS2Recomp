@@ -2108,6 +2108,9 @@ inline bool flagsFix() noexcept
 // after the callee returns (matched by target and sp, so calls nested inside
 // it don't consume it). A callee suspended at a checkpoint disarms it and
 // that update keeps its unscaled step (deterministic).
+// Arming is call-kind-only: a pre-hook must not clobber a record armed by a
+// different kind (a lost pid record sticks its zeroed gains, freezing chase
+// turnover). Every unwind landing restores the armed record, then clears it.
 struct PostCall
 {
     uint32_t target = 0u, sp = 0u, obj = 0u;
@@ -2117,9 +2120,28 @@ struct PostCall
 inline PostCall g_post;
 inline bool g_postArmed = false;
 
+// CAM2 R1: unwind a pending post-call record. The armed call never completes,
+// so its pre-hook mutations are reverted (pid: gains+ring+idx; jcam: the
+// retention counter bump) and the record is fully cleared, so no later
+// return can match it stale. Save-only kinds (flags, texuv, loops, fxtimer,
+// loop ctor, ground2, chase2) need no RAM undo. Idempotent.
+inline void postUnwindRestore(uint8_t *ram) noexcept
+{
+    if (!g_postArmed)
+        return;
+    if (g_post.kind == 6u)
+        pidHoldRelease(ram, g_post.obj, g_post.saved, true);
+    else if (g_post.kind == 5u)
+        wr32(ram, g_post.obj + 0x2c4u, g_post.saved[0]);
+    g_post = PostCall{};
+    g_postArmed = false;
+}
+
 inline void flagsPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 {
     if (targetPc != kFlagUpdate || !ctx)
+        return;
+    if (g_postArmed && g_post.kind != 0u)
         return;
     g_post.target = targetPc;
     g_post.sp = getRegU32(ctx, 29);
@@ -2138,7 +2160,12 @@ inline void jcamPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 {
     if (targetPc != kJcamJump || !ctx)
         return;
+    if (g_postArmed && g_post.kind != 5u)
+        return;
     const uint32_t shot = getRegU32(ctx, 4);
+    uint32_t npre = 0u;
+    rd32(ram, shot + 0x2c4u, npre);
+    g_post.saved[0] = npre;
     if (g_rngOdd)
     {
         const uint32_t scratch = getRegU32(ctx, 5);
@@ -2431,6 +2458,8 @@ inline void fh12PreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
     {
         if ((m & kFix12Loops) == 0u || (m & kFix12Loops2) == 0u)
             return;
+        if (g_postArmed && g_post.kind != 4u)
+            return;
         g_post.kind = 4u;
         g_post.target = targetPc;
         g_post.sp = getRegU32(ctx, 29);
@@ -2440,7 +2469,11 @@ inline void fh12PreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
     }
     if (targetPc == kFxTimerUpdate)
     {
-        if ((m & kFix12FxTimer) == 0u || !rd32(ram, o + 0x4u, g_post.saved[0]))
+        if ((m & kFix12FxTimer) == 0u)
+            return;
+        if (g_postArmed && g_post.kind != 3u)
+            return;
+        if (!rd32(ram, o + 0x4u, g_post.saved[0]))
             return;
         g_post.kind = 3u;
         g_post.target = targetPc;
@@ -2468,6 +2501,8 @@ inline void fh12PreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
     {
         if ((m & kFix12Texanim) == 0u || !rd32(ram, o, w) || w == 6u)
             return;
+        if (g_postArmed && g_post.kind != 1u)
+            return;
         g_post.kind = 1u;
         rd32(ram, o + 0x10u, g_post.saved[0]);
         rd32(ram, o + 0x30u, g_post.saved[1]);
@@ -2476,6 +2511,8 @@ inline void fh12PreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
     else
     {
         if ((m & kFix12Loops) == 0u)
+            return;
+        if (g_postArmed && g_post.kind != 2u)
             return;
         g_post.kind = 2u;
         rd32(ram, o + 0x1cu, g_post.saved[0]);

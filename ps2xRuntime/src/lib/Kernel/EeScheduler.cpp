@@ -914,6 +914,7 @@ void EeScheduler::run()
             catch (const ps2_guest_exception_transfer::Raised &)
             {
                 ps2_guest_exception_transfer::activeContext = nullptr;
+                ps2_fh1::postUnwindRestore(m_rdram);
             }
             catch (...)
             {
@@ -934,6 +935,7 @@ void EeScheduler::run()
             ps2_guest_exception_transfer::activeContext = nullptr;
             // Longjmp landing: the epilogue the EeDispatcherTransfer catch
             // ran; falls through to processPendingEvents below unchanged.
+            ps2_fh1::postUnwindRestore(m_rdram);
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }

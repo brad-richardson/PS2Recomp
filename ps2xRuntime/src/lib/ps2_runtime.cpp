@@ -5232,6 +5232,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     PS2X_DSP1_INLINE_CALL due = m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles);
     if (due)
     {
+        ps2_fh1::postUnwindRestore(rdram);
         markGuestUnwind();
         return false;
     }
@@ -5402,6 +5403,7 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
     // this charge bounds straight-line call chains that have no local loop.
     if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
     {
+        ps2_fh1::postUnwindRestore(rdram);
         markGuestUnwind();
         return false;
     }

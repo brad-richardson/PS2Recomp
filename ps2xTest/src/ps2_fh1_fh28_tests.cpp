@@ -338,5 +338,138 @@ void register_ps2_fh1_fh28_tests()
             t.IsFalse(hookTableHit(idle, 0x000001u, 0x162998u), "c2cap out while inactive");
             t.IsFalse(hookTableHit(idle, 0x000001u, 0x162c78u), "pid out while inactive");
         });
+
+        tc.Run("post-call unwind restores a pid hold and clears the record", [](TestCase &t)
+        {
+            // CAM2 R1: a pid call unwound past its return (checkpoint, longjmp,
+            // transfer) must get its gains, ring slot and idx back; the record
+            // is fully cleared so no later return can match it stale.
+            const PostCall keepPost = g_post;
+            const bool keepArmed = g_postArmed;
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            const uint32_t shot = 0x100000u;
+            wr32(ram.data(), shot + kPidIdx, 2u);
+            for (uint32_t s = 0; s < 5; ++s)
+                for (int h = 0; h < 3; ++h)
+                    wr32(ram.data(), shot + kPidHist[h] + s * 4u, floatToBits(0.1f * (h + 1) + 0.01f * s));
+            wr32(ram.data(), shot + kPidGains[0], floatToBits(0.0113945f));
+            wr32(ram.data(), shot + kPidGains[1], floatToBits(0.0f));
+            wr32(ram.data(), shot + kPidGains[2], floatToBits(0.00127851f));
+            const std::vector<uint8_t> before = ram;
+            uint32_t saved[7] = {};
+            t.IsTrue(pidHoldArm(ram.data(), shot, saved), "arms");
+            g_post.target = kPidUpdate; g_post.sp = 0x11u; g_post.obj = shot;
+            g_post.kind = 6u;
+            for (int i = 0; i < 7; ++i) g_post.saved[i] = saved[i];
+            g_postArmed = true;
+            // The callee starts (slot + idx advance) but never returns.
+            wr32(ram.data(), shot + kPidHist[0] + 8u, floatToBits(0.77f));
+            wr32(ram.data(), shot + kPidIdx, 3u);
+            postUnwindRestore(ram.data());
+            t.IsTrue(ram == before, "pre-call state back (gains, slot, idx)");
+            t.IsFalse(g_postArmed, "disarmed");
+            t.Equals(g_post.target, 0u, "target cleared");
+            // Idempotent, and the cleared record matches no return.
+            postUnwindRestore(ram.data());
+            t.IsTrue(ram == before, "second restore is a no-op");
+            R5900Context ctx{};
+            const uint32_t sp = 0x11u;
+            std::memcpy(&ctx.r[29], &sp, 4);
+            onReturn(ram.data(), &ctx, kPidUpdate, true);
+            t.IsTrue(ram == before, "stale return matches nothing");
+            g_post = keepPost; g_postArmed = keepArmed;
+        });
+
+        tc.Run("post-call unwind restores jcam n; save-only kinds just clear", [](TestCase &t)
+        {
+            const PostCall keepPost = g_post;
+            const bool keepArmed = g_postArmed;
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            const uint32_t shot = 0x100000u;
+            // jcam: the odd-update bump is reverted.
+            wr32(ram.data(), shot + 0x2c4u, 7u);
+            g_post.obj = shot; g_post.kind = 5u; g_post.saved[0] = 7u;
+            g_post.target = kJcamJump; g_post.sp = 0x22u; g_postArmed = true;
+            wr32(ram.data(), shot + 0x2c4u, 8u); // the pre-hook bump
+            postUnwindRestore(ram.data());
+            uint32_t n = 0u;
+            rd32(ram.data(), shot + 0x2c4u, n);
+            t.Equals(n, 7u, "bump reverted");
+            t.IsFalse(g_postArmed, "disarmed");
+            // flags: save-only, RAM untouched, record cleared.
+            const uint32_t obj = 0x110000u;
+            for (int i = 0; i < 6; ++i)
+                wr32(ram.data(), obj + kFlagPhaseOffs[i], floatToBits(0.5f));
+            g_post.obj = obj; g_post.kind = 0u; g_postArmed = true;
+            for (int i = 0; i < 6; ++i)
+                wr32(ram.data(), obj + kFlagPhaseOffs[i], floatToBits(0.9f)); // callee advanced
+            const std::vector<uint8_t> afterCall = ram;
+            postUnwindRestore(ram.data());
+            t.IsTrue(ram == afterCall, "no RAM undo for save-only kinds");
+            t.IsFalse(g_postArmed, "disarmed");
+            g_post = keepPost; g_postArmed = keepArmed;
+        });
+
+        tc.Run("pre-hook arming is call-kind-only", [](TestCase &t)
+        {
+            // CAM2 R1b: a pre-hook must not clobber a record armed by a
+            // different kind (a lost pid record sticks zeroed gains). Same-kind
+            // re-arm still overwrites (fresh-read corrections stay valid).
+            const PostCall keepPost = g_post;
+            const bool keepArmed = g_postArmed, keepOdd = g_rngOdd;
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+            auto setReg = [&](int r, uint32_t v) { std::memcpy(&ctx.r[r], &v, 4); };
+            const uint32_t shot = 0x100000u, obj2 = 0x110000u, scratch = 0x120000u, shot2 = 0x130000u;
+            // An armed pid record with distinct saved state.
+            wr32(ram.data(), shot + kPidIdx, 1u);
+            wr32(ram.data(), shot + kPidGains[0], floatToBits(0.0113945f));
+            uint32_t saved[7] = {};
+            t.IsTrue(pidHoldArm(ram.data(), shot, saved), "pid arms");
+            g_postArmed = true;
+            g_post.target = kPidUpdate; g_post.sp = 0x11u; g_post.obj = shot; g_post.kind = 6u;
+            for (int i = 0; i < 7; ++i) g_post.saved[i] = saved[i] + 100u; // distinct
+            const PostCall pidRecord = g_post;
+            // flags must refuse: record and phases untouched.
+            for (int i = 0; i < 6; ++i)
+                wr32(ram.data(), obj2 + kFlagPhaseOffs[i], floatToBits(0.25f));
+            setReg(4, obj2); setReg(29, 0x33u);
+            flagsPreHook(ram.data(), &ctx, kFlagUpdate);
+            t.IsTrue(std::memcmp(&g_post, &pidRecord, sizeof(PostCall)) == 0, "flags refuses a pid record");
+            // jcam must refuse before its counter bump.
+            g_rngOdd = true;
+            wr32(ram.data(), scratch + 0x60u, 1u);
+            wr32(ram.data(), obj2 + 0x2d0u, 0u);
+            wr32(ram.data(), obj2 + 0x2c4u, 9u);
+            setReg(4, obj2); setReg(5, scratch);
+            jcamPreHook(ram.data(), &ctx, kJcamJump);
+            t.IsTrue(std::memcmp(&g_post, &pidRecord, sizeof(PostCall)) == 0, "jcam refuses a pid record");
+            uint32_t n = 0u;
+            rd32(ram.data(), obj2 + 0x2c4u, n);
+            t.Equals(n, 9u, "refused jcam leaves the counter alone");
+            // pid keeps refusing while armed (existing behavior): a fresh
+            // shot's gains stay live and the old record stands.
+            wr32(ram.data(), shot2 + kPidIdx, 1u);
+            wr32(ram.data(), shot2 + kPidGains[0], floatToBits(0.5f));
+            setReg(4, shot2);
+            pidPreHook(ram.data(), &ctx, kPidUpdate);
+            uint32_t g = 0u;
+            rd32(ram.data(), shot2 + kPidGains[0], g);
+            t.Equals(g, floatToBits(0.5f), "fresh gains untouched while armed");
+            t.IsTrue(std::memcmp(&g_post, &pidRecord, sizeof(PostCall)) == 0, "pid record intact");
+            // Unarmed: flags arms normally; same-kind re-arms.
+            g_post = PostCall{}; g_postArmed = false;
+            setReg(4, obj2);
+            flagsPreHook(ram.data(), &ctx, kFlagUpdate);
+            t.IsTrue(g_postArmed && g_post.kind == 0u && g_post.obj == obj2, "flags arms when clear");
+            setReg(4, shot);
+            for (int i = 0; i < 6; ++i)
+                wr32(ram.data(), shot + kFlagPhaseOffs[i], floatToBits(0.75f));
+            flagsPreHook(ram.data(), &ctx, kFlagUpdate);
+            uint32_t s0 = 0u;
+            rd32(ram.data(), shot + kFlagPhaseOffs[0], s0);
+            t.IsTrue(g_postArmed && g_post.obj == shot && g_post.saved[0] == s0, "same-kind re-arm overwrites");
+            g_post = keepPost; g_postArmed = keepArmed; g_rngOdd = keepOdd;
+        });
     });
 }
