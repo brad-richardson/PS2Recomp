@@ -11,9 +11,15 @@
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
 #include "ps2_present_geometry.h"
+#endif
+#if defined(__ANDROID__) || defined(PS2X_GE1_STATIC_IOSURFACE)
+// THD1: the Tricky HUD packet + stamp math are platform-neutral; iOS uses
+// the same packet and the BGRA-lane stamp as the Android AHB path.
 #include "ps2_ssx3_tricky_hud.h"
 #include "ps2_ssx3_tricky_layer.h"
 #include "runtime/gs/gs_serial_job_thread.h"
+#endif
+#if defined(__ANDROID__)
 #include <android/hardware_buffer.h>
 #include <android/rect.h>
 #endif
@@ -210,6 +216,20 @@ uint32_t fnv1a32(const uint8_t *data, size_t size, uint32_t hash = 2166136261u)
     return hash;
 }
 
+#if defined(__ANDROID__) || defined(PS2X_GE1_STATIC_IOSURFACE)
+// TKL1: consume the EE's immutable packet (tick + epoch); never
+// touch RDRAM. A stale (pre-load/pre-exit) packet is skipped. Shared by the
+// Android AHB call site and the iOS IOSurface call site (THD1).
+inline bool trickyHudPacket(ps2_ssx3_tricky_layer::PresentationPacket &p)
+{
+    if (!ps2_ssx3_tricky_layer::config().hud || !ps2_ssx3_tricky_layer::latestPacket(p))
+        return false;
+    if (p.epoch != ps2_ssx3_tricky_layer::epoch())
+        return false;
+    return p.draw && p.atlas;
+}
+#endif
+
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
 // GI1: IOSurface slot pool for the async Metal export. Process-global: the
 // surfaces are retained for the process (like createSurface's pool) and the
@@ -302,57 +322,275 @@ void dumpIOSurface(void *surface, uint64_t tick)
     IOSurfaceUnlock(ref, kIOSurfaceLockReadOnly, nullptr);
 }
 
+// THD1: Tricky HUD composite for the iOS zero-copy path. The export is done
+// and the slot is ours (reserved/busy) until publish, so the HUD stamps here,
+// after the GPU export completes and before the consumer reads it — the same
+// timing point as the Android AHB path's composite-after-waitExport-before-
+// queue. Same packet, same stamp math; BGRA lanes (the pool creates 32BGRA
+// surfaces). With PS2X_TRICKY_HUD_ASYNC=1 (the same knob as Android) the stamp
+// + publish run on the GsHud helper; submit() joins the previous job first,
+// so publishes stay ordered with at most one job waiting (backpressure).
+// Knob off, the stamp runs inline under the pool mutex. Both run on the Metal
+// command-buffer completion thread, always off the GS worker. Overlay failure
+// never fails the present: the frame publishes unstamped, as usual.
+struct IOHudState
+{
+    ps2_ssx3_tricky_hud::HudSprites sprites; // pre-scaled art (built once per run)
+    uint64_t composites = 0u;
+    uint64_t compositeNs = 0u;
+    uint64_t lockFails = 0u;
+    uint64_t buildFails = 0u;
+    bool submitted = false; // a HUD job exists; later publishes must join it
+    bool asyncLogged = false;
+};
+
+IOHudState &ioHudState()
+{
+    static IOHudState st;
+    return st;
+}
+
+ps2x_gs::SerialJobThread &ioHudThread()
+{
+    static ps2x_gs::SerialJobThread t{"GsHud"};
+    return t;
+}
+
+std::mutex &ioHudMutex()
+{
+    static std::mutex m;
+    return m;
+}
+
+bool ioHudAsync()
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_TRICKY_HUD_ASYNC");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    return on;
+}
+
+// The composite proper. Runs on the GsHud helper (async) or on the completion
+// thread under the pool mutex (inline); each mode serializes it, so the state
+// above needs no lock. Not under the pool mutex in the async case: the slot is
+// ours until publish, and the IOSurface lock is the CPU/GPU barrier.
+bool stampIOSurfaceHud(void *surface, uint64_t tick,
+                       const ps2_ssx3_tricky_layer::PresentationPacket &p)
+{
+    using namespace ps2_ssx3_tricky_hud;
+    IOHudState &st = ioHudState();
+    if (!surface)
+        return false;
+    IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
+    const uint32_t imgW = static_cast<uint32_t>(IOSurfaceGetWidth(ref));
+    const uint32_t imgH = static_cast<uint32_t>(IOSurfaceGetHeight(ref));
+    if (imgW == 0u || imgH == 0u)
+        return false;
+    const Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
+    if (r.w <= 0 || r.h <= 0)
+        return false;
+    // Pre-scaled art, once per run (the export size and atlas are fixed).
+    if (!st.sprites.ok || st.sprites.atlas != p.atlas || st.sprites.fw != static_cast<int>(imgW) ||
+        st.sprites.fh != static_cast<int>(imgH))
+    {
+        if (!buildHudSprites(st.sprites, *p.atlas, static_cast<int>(imgW), static_cast<int>(imgH)))
+        {
+            if (++st.buildFails == 1u)
+                std::fprintf(stderr, "[ssx3-tricky-hud] io: sprite build failed, overlay off\n");
+            return false;
+        }
+        std::fprintf(stderr, "[ssx3-tricky-hud] io: sprites built %ux%u\n", imgW, imgH);
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    if (IOSurfaceLock(ref, 0, nullptr) != KERN_SUCCESS)
+    {
+        if (++st.lockFails == 1u)
+            std::fprintf(stderr, "[ssx3-tricky-hud] io: IOSurfaceLock failed, overlay off\n");
+        return false;
+    }
+    uint8_t *base = static_cast<uint8_t *>(IOSurfaceGetBaseAddress(ref));
+    const size_t rowBytes = IOSurfaceGetBytesPerRow(ref);
+    if (base && rowBytes >= static_cast<size_t>(imgW) * 4u)
+        stampHudDirect<true>(base, rowBytes, r, st.sprites, p.fill, p.full, tick, p.splashUntil,
+                             p.litLetters, p.flashUntil);
+    IOSurfaceUnlock(ref, 0, nullptr);
+    const auto t1 = std::chrono::steady_clock::now();
+    st.compositeNs +=
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    if (++st.composites == 1u)
+        std::fprintf(stderr, "[ssx3-tricky-hud] io: first composite tick=%llu region=%dx%d\n",
+                     static_cast<unsigned long long>(tick), r.w, r.h);
+    else if (st.composites % 600u == 0u)
+        std::fprintf(stderr, "[ssx3-tricky-hud] io: composites=%llu avg=%.1f us\n",
+                     static_cast<unsigned long long>(st.composites),
+                     static_cast<double>(st.compositeNs) / 1000.0 /
+                         static_cast<double>(st.composites));
+    return true;
+}
+
+struct IOPublish
+{
+    int slot = -1;
+    uint64_t ownGen = 0u;
+    uint64_t ownSeq = 0u;
+    uint64_t tick = 0u;
+    uint64_t submitWallNs = 0u;
+    bool ok = false;
+    uint64_t epoch = 0u;
+};
+
+// The ioExportDone publish tails, extracted verbatim: call with pool.mutex
+// held (the dump contract), from the completion thread or the HUD job.
+void publishOwnedFrame(const IOPublish &a)
+{
+    IOSurfacePool &pool = ioPool();
+    // PSO1: READY only on success in the current epoch; the slot stays
+    // reserved (READY/CURRENT) until the presenter's read retires it.
+    const bool live = a.ok && a.epoch == pool.epoch;
+    void *surface = pool.surfaces[a.slot];
+    IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
+    ps2x_present_own::FrameInfo info;
+    if (live && surface)
+    {
+        dumpIOSurface(surface, a.tick);
+        info = {surface, static_cast<uint32_t>(IOSurfaceGetWidth(ref)),
+                static_cast<uint32_t>(IOSurfaceGetHeight(ref)), a.ownSeq, a.tick, a.submitWallNs};
+    }
+    const bool published = ps2x_present_own::sharedPool().complete(
+        a.slot, a.ownGen, live && surface, info, ps2x::perflog::steadyNs());
+    if (published)
+    {
+        static std::once_flag once;
+        std::call_once(once, [tick = a.tick] {
+            std::fprintf(stderr, "[gs:external] GE1 IOSurface first publish tick=%llu (ownership)\n",
+                         static_cast<unsigned long long>(tick));
+        });
+    }
+}
+
+void publishLegacyFrame(const IOPublish &a)
+{
+    IOSurfacePool &pool = ioPool();
+    if (a.ok && a.epoch == pool.epoch)
+    {
+        void *surface = pool.surfaces[a.slot];
+        dumpIOSurface(surface, a.tick);
+        IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
+        ps2x_present_share::publish({surface, static_cast<uint32_t>(IOSurfaceGetWidth(ref)),
+                                     static_cast<uint32_t>(IOSurfaceGetHeight(ref)), ++pool.seq,
+                                     a.tick, a.submitWallNs, a.slot});
+        static std::once_flag once;
+        std::call_once(once, [tick = a.tick] {
+            std::fprintf(stderr, "[gs:external] GE1 IOSurface first publish tick=%llu\n",
+                         static_cast<unsigned long long>(tick));
+        });
+    }
+}
+
+// A HUD publish job: stamp outside the pool mutex (the helper must never
+// block the GS worker's reserve), then complete exactly as ioExportDone would.
+struct IOHudJob
+{
+    IOPublish pub;
+    bool owned = false;
+    ps2_ssx3_tricky_layer::PresentationPacket packet;
+};
+
+void runIOHudJob(const IOHudJob &job)
+{
+    IOSurfacePool &pool = ioPool();
+    void *surface = nullptr;
+    bool live = false;
+    {
+        std::lock_guard<std::mutex> lock(pool.mutex);
+        live = job.pub.ok && job.pub.epoch == pool.epoch;
+        surface = pool.surfaces[job.pub.slot];
+    }
+    // The slot stays reserved/busy until the tail below completes it, so no
+    // other export can replace pool.surfaces[slot] under this stamp.
+    if (live && surface)
+        stampIOSurfaceHud(surface, job.pub.tick, job.packet);
+    {
+        std::lock_guard<std::mutex> lock(pool.mutex);
+        if (job.owned)
+            publishOwnedFrame(job.pub);
+        else
+            publishLegacyFrame(job.pub);
+    }
+    if (!job.owned)
+        pool.busy[job.pub.slot].store(false);
+}
+
 // Command-buffer completion thread: publish only here (GE2 contract), then
 // free the slot. Never touches backend state; the epoch drops stale exports.
 void ioExportDone(void *rawCtx, int ok)
 {
     std::unique_ptr<IOSurfaceExportCtx> ctx(static_cast<IOSurfaceExportCtx *>(rawCtx));
-    IOSurfacePool &pool = ioPool();
-    if (ps2x_present_share::ownershipEnabled())
+    // THD1: in async mode every completion takes the HUD mutex, so submits
+    // and inline publishes serialize in completion order (the helper's FIFO
+    // then publishes in that order). Knob off, this costs nothing.
+    std::unique_lock<std::mutex> hudLock(ioHudMutex(), std::defer_lock);
+    const bool async = ioHudAsync();
+    if (async)
+        hudLock.lock();
+    const bool owned = ps2x_present_share::ownershipEnabled();
+    const IOPublish pub{ctx->slot, ctx->ownGen, ctx->ownSeq,       ctx->tick,
+                        ctx->submitWallNs,   ok != 0,       ctx->epoch};
+    if (!async)
     {
-        // PSO1: READY only on success in the current epoch; the slot stays
-        // reserved (READY/CURRENT) until the presenter's read retires it.
-        std::lock_guard<std::mutex> lock(pool.mutex);
-        const bool live = ok && ctx->epoch == pool.epoch;
-        void *surface = pool.surfaces[ctx->slot];
-        IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
-        ps2x_present_own::FrameInfo info;
-        if (live && surface)
-        {
-            dumpIOSurface(surface, ctx->tick);
-            info = {surface, static_cast<uint32_t>(IOSurfaceGetWidth(ref)),
-                    static_cast<uint32_t>(IOSurfaceGetHeight(ref)), ctx->ownSeq, ctx->tick, ctx->submitWallNs};
-        }
-        const bool published = ps2x_present_own::sharedPool().complete(
-            ctx->slot, ctx->ownGen, live && surface, info, ps2x::perflog::steadyNs());
-        if (published)
-        {
-            static std::once_flag once;
-            std::call_once(once, [tick = ctx->tick] {
-                std::fprintf(stderr, "[gs:external] GE1 IOSurface first publish tick=%llu (ownership)\n",
-                             (unsigned long long)tick);
-            });
-        }
+        // Knob off: today's locking (one pool-mutex critical section), with
+        // the stamp inside it so overlapping completions publish in order.
+        std::lock_guard<std::mutex> lock(ioPool().mutex);
+        const bool live = pub.ok && pub.epoch == ioPool().epoch;
+        void *surface = ioPool().surfaces[pub.slot];
+        ps2_ssx3_tricky_layer::PresentationPacket p;
+        if (live && surface && trickyHudPacket(p))
+            stampIOSurfaceHud(surface, pub.tick, p);
+        if (owned)
+            publishOwnedFrame(pub);
+        else
+            publishLegacyFrame(pub);
+        if (!owned)
+            ioPool().busy[pub.slot].store(false);
         return;
     }
+    // Async: drain an in-flight HUD job first, so this frame can never
+    // publish ahead of an earlier HUD frame's job. Instant unless a job runs.
+    if (ioHudState().submitted)
+        ioHudThread().join();
+    void *surface = nullptr;
+    bool live = false;
     {
-        std::lock_guard<std::mutex> lock(pool.mutex);
-        if (ok && ctx->epoch == pool.epoch)
-        {
-            void *surface = pool.surfaces[ctx->slot];
-            dumpIOSurface(surface, ctx->tick);
-            IOSurfaceRef ref = static_cast<IOSurfaceRef>(surface);
-            ps2x_present_share::publish({surface, static_cast<uint32_t>(IOSurfaceGetWidth(ref)),
-                                         static_cast<uint32_t>(IOSurfaceGetHeight(ref)), ++pool.seq,
-                                         ctx->tick, ctx->submitWallNs, ctx->slot});
-            static std::once_flag once;
-            std::call_once(once, [tick = ctx->tick] {
-                std::fprintf(stderr, "[gs:external] GE1 IOSurface first publish tick=%llu\n",
-                             (unsigned long long)tick);
-            });
-        }
+        std::lock_guard<std::mutex> lock(ioPool().mutex);
+        live = pub.ok && pub.epoch == ioPool().epoch;
+        surface = ioPool().surfaces[pub.slot];
     }
-    pool.busy[ctx->slot].store(false);
+    ps2_ssx3_tricky_layer::PresentationPacket p;
+    if (live && surface && trickyHudPacket(p))
+    {
+        IOHudState &st = ioHudState();
+        if (!st.asyncLogged)
+        {
+            st.asyncLogged = true;
+            std::fprintf(stderr, "[ssx3-tricky-hud] io: THD1 async composite on (GsHud helper)\n");
+        }
+        st.submitted = true;
+        // submit() joins the previous job first: publishes stay ordered and
+        // the helper never queues more than one.
+        ioHudThread().submit([job = IOHudJob{pub, owned, p}] { runIOHudJob(job); });
+        return;
+    }
+    // No HUD: today's publish.
+    {
+        std::lock_guard<std::mutex> lock(ioPool().mutex);
+        if (owned)
+            publishOwnedFrame(pub);
+        else
+            publishLegacyFrame(pub);
+    }
+    if (!owned)
+        ioPool().busy[pub.slot].store(false);
 }
 #endif
 
@@ -1343,17 +1581,6 @@ private:
         if (!queued)
             ps2x_present_vk::fallBack("GE1 AHB queue failed");
         return queued;
-    }
-
-    // TKL1: consume the EE's immutable packet (tick + epoch); never
-    // touch RDRAM. A stale (pre-load/pre-exit) packet is skipped.
-    static bool trickyHudPacket(ps2_ssx3_tricky_layer::PresentationPacket &p)
-    {
-        if (!ps2_ssx3_tricky_layer::config().hud || !ps2_ssx3_tricky_layer::latestPacket(p))
-            return false;
-        if (p.epoch != ps2_ssx3_tricky_layer::epoch())
-            return false;
-        return p.draw && p.atlas;
     }
 
     // TK43e: the VK/AHB overlay call site (GS worker). The HUD region is

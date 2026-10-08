@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_ssx3_tricky_hud.h"
+#include <utility>
 
 // TK43a: Tricky meter reskin compositor/reader/atlas tests. The atlas is
 // synthetic solid-color rects (no game art); rect positions mirror the
@@ -78,6 +79,54 @@ uint8_t pxAt(const std::vector<uint8_t> &f, int w, int x, int y, int c = 0)
 
 int ringCy(int i) { return static_cast<int>(std::lround(395.0f - 16.5f * i)); }
 int ringCx() { return 588; }
+
+// THD1: non-grey atlas for the BGRA-lane test (synthAtlas is grey, which is
+// swap-invariant and would pass vacuously). Same layout, distinct R/G/B per
+// cell; the splash and one letter are semi-transparent to exercise blending.
+void paintRectRGBA(std::vector<uint8_t> &px, const Rect &r, uint8_t cr, uint8_t cg, uint8_t cb,
+                   uint8_t ca)
+{
+    for (int y = r.y; y < r.y + r.h; ++y)
+        for (int x = r.x; x < r.x + r.w; ++x)
+        {
+            uint8_t *d = &px[(static_cast<size_t>(y) * 256u + static_cast<size_t>(x)) * 4u];
+            d[0] = cr;
+            d[1] = cg;
+            d[2] = cb;
+            d[3] = ca;
+        }
+}
+
+Atlas tintedAtlas()
+{
+    using namespace ps2_ssx3_tricky_hud;
+    std::vector<uint8_t> px(256u * 256u * 4u, 0);
+    paintRectRGBA(px, ringRect(0), 200, 40, 30, 255); // gold band (red-heavy)
+    paintRectRGBA(px, ringRect(1), 220, 120, 30, 255); // orange bands 1+2
+    paintRectRGBA(px, ringRect(3), 200, 30, 30, 255); // red band
+    paintRectRGBA(px, silverRingRect(), 180, 190, 200, 255);
+    paintRectRGBA(px, poleRect(), 90, 90, 110, 255);
+    for (int i = 0; i < 6; ++i)
+    {
+        const uint8_t v = static_cast<uint8_t>(60 + i * 10);
+        paintRectRGBA(px, letterRect(i), v, 120, static_cast<uint8_t>(200 - i * 5), 255);
+        paintRectRGBA(px, litLetterRect(i), 200, static_cast<uint8_t>(30 + i * 5), 40, 255);
+    }
+    paintRectRGBA(px, letterRect(2), 70, 130, 190, 96); // semi chrome I
+    paintRectRGBA(px, jewelGreyRect(), 170, 180, 190, 255);
+    paintRectRGBA(px, jewelRedRect(), 210, 40, 50, 255);
+    paintRectRGBA(px, pillRect(), 200, 40, 40, 255);
+    paintRectRGBA(px, pillGreyRect(), 150, 155, 160, 255);
+    paintRectRGBA(px, snowflakeRect(), 218, 123, 31, 128); // semi orange flake
+    std::vector<uint8_t> blob;
+    const char magic[8] = {'T', 'K', 'H', 'U', 'D', '2', '\0', '\0'};
+    blob.insert(blob.end(), magic, magic + 8);
+    const uint32_t wh[3] = {256u, 256u, 0u};
+    const uint8_t *wbp = reinterpret_cast<const uint8_t *>(wh);
+    blob.insert(blob.end(), wbp, wbp + 12);
+    blob.insert(blob.end(), px.begin(), px.end());
+    return parseAtlas(blob.data(), blob.size());
+}
 } // namespace
 
 void register_ps2_ssx3_tricky_hud_tests()
@@ -708,4 +757,76 @@ void register_ps2_ssx3_tricky_hud_tests()
                 std::snprintf(name, sizeof(name), "direct==temp stride=%d", stride);
                 t.IsTrue(f == g, name);
             } });});
+
+    MiniTest::Case("Ps2Ssx3TrickyHudBgra", [](TestCase &tc)
+                   {
+        tc.Run("THD1 swapped stamp equals RGBA stamp with R/B swapped", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas a = tintedAtlas();
+            t.IsTrue(a.ok, "tinted atlas parses");
+            const int sizes[2][2] = {{640, 480}, {1920, 1080}};
+            const int stridePad[2] = {0, 64};
+            struct State
+            {
+                float fill;
+                bool full;
+                uint64_t tick, splash;
+                int lit;
+                uint64_t flash;
+            };
+            // empty; partial + letters; full dim-jewel + splash + chrome flash;
+            // full bright-jewel + splash + red flash.
+            const State states[4] = {{0.0f, false, 8u, 0u, 0, 0u},
+                                     {0.53f, false, 100u, 0u, 3, 0u},
+                                     {1.0f, true, 8u, 90u, 4, 90u},
+                                     {1.0f, true, 16u, 90u, 5, 90u}};
+            for (int s = 0; s < 2; ++s)
+                for (int q = 0; q < 2; ++q)
+                {
+                    const int fw = sizes[s][0], fh = sizes[s][1];
+                    const int stride = fw + stridePad[q];
+                    const size_t strideBytes = static_cast<size_t>(stride) * 4u;
+                    HudSprites ss; // one shared cache serves both lanes
+                    t.IsTrue(buildHudSprites(ss, a, fw, fh), "sprites build");
+                    const Rect r = hudRegionRect(fw, fh);
+                    for (int v = 0; v < 4; ++v)
+                    {
+                        const State &st = states[v];
+                        std::vector<uint8_t> rgba(static_cast<size_t>(stride) * fh * 4u);
+                        uint32_t rng = 0x1ed51u + static_cast<uint32_t>(s * 64 + q * 16 + v);
+                        for (size_t i = 0; i < rgba.size(); ++i)
+                        {
+                            rng = rng * 1664525u + 1013904223u;
+                            rgba[i] = static_cast<uint8_t>(rng >> 24);
+                        }
+                        // BGRA background: the same bytes with R/B swapped.
+                        std::vector<uint8_t> bgra = rgba;
+                        for (size_t i = 0; i < bgra.size(); i += 4)
+                            std::swap(bgra[i], bgra[i + 2]);
+                        const std::vector<uint8_t> before = rgba;
+                        stampHudDirect<false>(rgba.data(), strideBytes, r, ss, st.fill, st.full,
+                                              st.tick, st.splash, st.lit, st.flash);
+                        stampHudDirect<true>(bgra.data(), strideBytes, r, ss, st.fill, st.full,
+                                             st.tick, st.splash, st.lit, st.flash);
+                        for (size_t i = 0; i < bgra.size(); i += 4)
+                            std::swap(bgra[i], bgra[i + 2]);
+                        char name[96];
+                        std::snprintf(name, sizeof(name), "bgra==swapped rgba %dx%d pad=%d v%d",
+                                      fw, fh, stridePad[q], v);
+                        t.IsTrue(rgba == bgra, name);
+                        bool drew = false;
+                        for (size_t i = 0; i < rgba.size(); i += 4)
+                        {
+                            if (std::memcmp(&rgba[i], &before[i], 4u) != 0)
+                            {
+                                drew = true;
+                                break;
+                            }
+                        }
+                        std::snprintf(name, sizeof(name), "state drew %dx%d pad=%d v%d", fw, fh,
+                                      stridePad[q], v);
+                        t.IsTrue(drew, name);
+                    }
+                } });});
 }

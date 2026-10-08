@@ -604,6 +604,20 @@ inline void blendSample(float sr, float sg, float sb, float sa, uint8_t *d)
     d[3] = 255;
 }
 
+// THD1: the BGRA-lane blend for the iOS IOSurface path
+// (kCVPixelFormatType_32BGRA stores B,G,R,A). Same math as blendSample,
+// swapped lanes; the sprite samples stay RGBA floats either way.
+inline void blendSampleSwapped(float sr, float sg, float sb, float sa, uint8_t *d)
+{
+    if (sa <= 0.0f)
+        return;
+    const float ia = 1.0f - sa;
+    d[2] = static_cast<uint8_t>(sr * sa + d[2] * ia + 0.5f);
+    d[1] = static_cast<uint8_t>(sg * sa + d[1] * ia + 0.5f);
+    d[0] = static_cast<uint8_t>(sb * sa + d[0] * ia + 0.5f);
+    d[3] = 255;
+}
+
 // Bilinear atlas blit with alpha-over onto an RGBA frame (both top-left).
 inline void blit(const Atlas &a, const Rect &s, uint8_t *frame, int fw, int fh, int dx, int dy, int dw,
                  int dh, float dim = 1.0f)
@@ -1014,6 +1028,7 @@ inline void stampHudInto(uint8_t *tmp, int bw, int bh, int ox, int oy, const Hud
 // locked AHB (no region temp round-trip): same draws, same order, same
 // sample/blend math as the temp path, so bit-identical values. base points
 // at the region origin; rows advance by strideBytes; (bw, bh) clip.
+template <bool SwapRB = false>
 inline void stampSpriteS(const SpriteImg &img, uint8_t *base, size_t strideBytes, int bw, int bh, int dx,
                          int dy)
 {
@@ -1031,11 +1046,16 @@ inline void stampSpriteS(const SpriteImg &img, uint8_t *base, size_t strideBytes
                         4u];
             if (o[3] <= 0.0f)
                 continue;
-            blendSample(o[0], o[1], o[2], o[3], base + static_cast<size_t>(y) * strideBytes +
-                                                     static_cast<size_t>(x) * 4u);
+            uint8_t *d =
+                base + static_cast<size_t>(y) * strideBytes + static_cast<size_t>(x) * 4u;
+            if constexpr (SwapRB)
+                blendSampleSwapped(o[0], o[1], o[2], o[3], d);
+            else
+                blendSample(o[0], o[1], o[2], o[3], d);
         }
 }
 
+template <bool SwapRB = false>
 inline void smearCoverS(uint8_t *base, size_t strideBytes, int bw, int bh, int x0, int y0, int x1, int y1)
 {
     if (!base || bw <= 0 || bh <= 0 || x1 <= x0 || y1 <= y0)
@@ -1045,14 +1065,18 @@ inline void smearCoverS(uint8_t *base, size_t strideBytes, int bw, int bh, int x
     const int ya = y0 < 0 ? 0 : y0;
     const int yb = y1 > bh ? bh : y1;
     const float span = static_cast<float>(x1 - x0);
+    // THD1: lane indices for the smear's background reads/writes (BGRA swaps
+    // the R/B lanes; G/A identical). SwapRB=false is the RGBA path, unchanged.
+    constexpr int kR = SwapRB ? 2 : 0;
+    constexpr int kB = SwapRB ? 0 : 2;
     for (int y = ya; y < yb; ++y)
     {
         const int lx = x0 - 2 < 0 ? 0 : x0 - 2;
         const int rx = x1 + 2 > bw - 1 ? bw - 1 : x1 + 2;
         const uint8_t *L = base + static_cast<size_t>(y) * strideBytes + static_cast<size_t>(lx) * 4u;
         const uint8_t *R = base + static_cast<size_t>(y) * strideBytes + static_cast<size_t>(rx) * 4u;
-        const float lr = L[0], lg = L[1], lb = L[2];
-        const float rr = R[0], rg = R[1], rb = R[2];
+        const float lr = L[kR], lg = L[1], lb = L[kB];
+        const float rr = R[kR], rg = R[1], rb = R[kB];
         const float fy0 = static_cast<float>(y - y0) / 3.0f;
         const float fy1 = static_cast<float>(y1 - y) / 3.0f;
         for (int x = xa; x < xb; ++x)
@@ -1073,15 +1097,18 @@ inline void smearCoverS(uint8_t *base, size_t strideBytes, int bw, int bh, int x
                 a = 1.0f;
             uint8_t *d = base + static_cast<size_t>(y) * strideBytes + static_cast<size_t>(x) * 4u;
             const float ia = 1.0f - a;
-            d[0] = static_cast<uint8_t>((lr + (rr - lr) * t) * a + d[0] * ia + 0.5f);
+            d[kR] = static_cast<uint8_t>((lr + (rr - lr) * t) * a + d[kR] * ia + 0.5f);
             d[1] = static_cast<uint8_t>((lg + (rg - lg) * t) * a + d[1] * ia + 0.5f);
-            d[2] = static_cast<uint8_t>((lb + (rb - lb) * t) * a + d[2] * ia + 0.5f);
+            d[kB] = static_cast<uint8_t>((lb + (rb - lb) * t) * a + d[kB] * ia + 0.5f);
         }
     }
 }
 
 // The cached compose, stride-aware: same draws, same order, same values as
 // stampHudInto. ahbBase is the buffer base; r is the HUD region in it.
+// THD1: SwapRB=true stamps BGRA lanes (the iOS IOSurface); false (default)
+// is the RGBA path, unchanged.
+template <bool SwapRB = false>
 inline void stampHudDirect(uint8_t *ahbBase, size_t strideBytes, const Rect &r, const HudSprites &ss,
                            float fill, bool full, uint64_t tick, uint64_t splashUntilTick, int litLetters,
                            uint64_t flashUntilTick)
@@ -1091,19 +1118,20 @@ inline void stampHudDirect(uint8_t *ahbBase, size_t strideBytes, const Rect &r, 
     uint8_t *base = ahbBase + static_cast<size_t>(r.y) * strideBytes + static_cast<size_t>(r.x) * 4u;
     const int bw = r.w, bh = r.h, ox = r.x, oy = r.y;
     const Rect &cc = ss.coilCover;
-    smearCoverS(base, strideBytes, bw, bh, cc.x - ox, cc.y - oy, cc.x + cc.w - ox, cc.y + cc.h - oy);
-    stampSpriteS(ss.pole, base, strideBytes, bw, bh, ss.poleDst.x - ox, ss.poleDst.y - oy);
+    smearCoverS<SwapRB>(base, strideBytes, bw, bh, cc.x - ox, cc.y - oy, cc.x + cc.w - ox,
+                        cc.y + cc.h - oy);
+    stampSpriteS<SwapRB>(ss.pole, base, strideBytes, bw, bh, ss.poleDst.x - ox, ss.poleDst.y - oy);
     const int lit = litCoils(fill);
     for (int i = 0; i < kCoils; ++i)
     {
         const SpriteImg &img = i < lit ? ss.ringImg[i / 4] : ss.ringImg[4];
-        stampSpriteS(img, base, strideBytes, bw, bh, ss.ringDst[i].x - ox, ss.ringDst[i].y - oy);
+        stampSpriteS<SwapRB>(img, base, strideBytes, bw, bh, ss.ringDst[i].x - ox, ss.ringDst[i].y - oy);
     }
     const bool dim = full && (((tick >> 3) & 1u) != 0u);
-    stampSpriteS(full ? (dim ? ss.jewelImg[2] : ss.jewelImg[1]) : ss.jewelImg[0], base, strideBytes, bw, bh,
-                 ss.jewelDst.x - ox, ss.jewelDst.y - oy);
-    smearCoverS(base, strideBytes, bw, bh, ss.smearX0 - ox, ss.smearY0 - oy, ss.smearX1 - ox,
-                ss.smearY1 - oy);
+    stampSpriteS<SwapRB>(full ? (dim ? ss.jewelImg[2] : ss.jewelImg[1]) : ss.jewelImg[0], base,
+                         strideBytes, bw, bh, ss.jewelDst.x - ox, ss.jewelDst.y - oy);
+    smearCoverS<SwapRB>(base, strideBytes, bw, bh, ss.smearX0 - ox, ss.smearY0 - oy, ss.smearX1 - ox,
+                        ss.smearY1 - oy);
     if (litLetters < 0)
         litLetters = 0;
     if (litLetters > 6)
@@ -1113,13 +1141,14 @@ inline void stampHudDirect(uint8_t *ahbBase, size_t strideBytes, const Rect &r, 
     for (int i = 0; i < 6; ++i)
     {
         const bool red = flashing ? flashRed : (i < litLetters);
-        stampSpriteS(red ? ss.archRed[i] : ss.archChrome[i], base, strideBytes, bw, bh,
-                     ss.archDst[i].x - ox, ss.archDst[i].y - oy);
+        stampSpriteS<SwapRB>(red ? ss.archRed[i] : ss.archChrome[i], base, strideBytes, bw, bh,
+                             ss.archDst[i].x - ox, ss.archDst[i].y - oy);
     }
-    stampSpriteS(full ? ss.pillImg[0] : ss.pillImg[1], base, strideBytes, bw, bh, ss.pillDst.x - ox,
-                 ss.pillDst.y - oy);
+    stampSpriteS<SwapRB>(full ? ss.pillImg[0] : ss.pillImg[1], base, strideBytes, bw, bh,
+                         ss.pillDst.x - ox, ss.pillDst.y - oy);
     if (tick < splashUntilTick)
-        stampSpriteS(ss.splash, base, strideBytes, bw, bh, ss.splashDst.x - ox, ss.splashDst.y - oy);
+        stampSpriteS<SwapRB>(ss.splash, base, strideBytes, bw, bh, ss.splashDst.x - ox,
+                             ss.splashDst.y - oy);
 }
 
 // TKL1: the renderer-owned state (HudState), the per-frame decision
