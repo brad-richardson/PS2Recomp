@@ -476,9 +476,9 @@ void retireBuffer(uint64_t id)
 uint32_t poolEpoch() { return ledger().epoch(); }
 uint32_t bufferEpoch(uint64_t id) { return ledger().bufferEpoch(id); }
 
-Pick pickReusable(const uint64_t *ids, int n, int start, int timeoutMs)
+Pick pickReusable(const uint64_t *ids, int n, int start, int timeoutMs, int skip)
 {
-    const Ledger::Pick p = ledger().pick(ids, n, -1, start, timeoutMs);
+    const Ledger::Pick p = ledger().pick(ids, n, skip, start, timeoutMs);
     Pick out;
     out.index = p.index;
     out.giveUp = p.giveUp;

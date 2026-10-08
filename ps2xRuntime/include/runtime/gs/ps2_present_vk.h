@@ -78,6 +78,8 @@ uint32_t poolEpoch();
 uint32_t bufferEpoch(uint64_t id);
 // GsWorker: pick a slot the compositor has released (callback delivered and
 // release fence signalled), starting at `start`, waiting at most timeoutMs.
+// `skip` (index, -1 = none) is never chosen: GSW1's HUD helper may still own
+// that slot before it is queued.
 // index -1: every slot is still held -> skip the frame; giveUp: that has
 // persisted for many frames -> fall back to the readback path.
 struct Pick
@@ -85,7 +87,7 @@ struct Pick
     int index = -1;
     bool giveUp = false;
 };
-Pick pickReusable(const uint64_t *ids, int n, int start, int timeoutMs);
+Pick pickReusable(const uint64_t *ids, int n, int start, int timeoutMs, int skip = -1);
 // GsWorker: queue a finished buffer (w x h valid) that pickReusable returned.
 // False when it was not shown (no layer, broken, old epoch; counted).
 bool queue(uint64_t id, uint32_t w, uint32_t h);

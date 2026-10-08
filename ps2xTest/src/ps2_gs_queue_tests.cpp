@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_serial_job_thread.h"
 #include "runtime/gs/gs_worker.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/ps2_gs_external_backend.h"
@@ -1838,6 +1839,56 @@ void register_ps2_gs_queue_tests()
             std::vector<uint8_t> got = pool.acquire(200u);
             t.IsTrue(got.capacity() >= 256u, "bulk-pooled buffers should be reusable");
             t.IsTrue(pool.pooledBytes() <= GsPacketPool::kMaxBytes, "pool should honor the byte cap");
+        });
+
+        tc.Run("GSW1 serial job thread runs jobs off-thread, in order, one at a time", [](TestCase &t)
+        {
+            const std::thread::id caller = std::this_thread::get_id();
+            std::vector<int> order;
+            std::atomic<int> running{0};
+            bool overlapped = false, onCaller = false;
+            std::mutex m;
+            {
+                ps2x_gs::SerialJobThread helper("GsHudTest");
+                t.IsFalse(helper.join(), "join on an idle, unstarted helper should not wait");
+                for (int i = 0; i < 200; ++i)
+                {
+                    helper.submit([&, i]
+                                  {
+                                      if (running.fetch_add(1) != 0)
+                                          overlapped = true;
+                                      if (std::this_thread::get_id() == caller)
+                                          onCaller = true;
+                                      if (i % 37 == 0)
+                                          std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                                      {
+                                          std::lock_guard<std::mutex> lock(m);
+                                          order.push_back(i);
+                                      }
+                                      running.fetch_sub(1);
+                                  });
+                    if (i % 50 == 49)
+                    {
+                        helper.join();
+                        std::lock_guard<std::mutex> lock(m);
+                        t.Equals(static_cast<int>(order.size()), i + 1, "join should wait for every submitted job");
+                    }
+                }
+                // The destructor stops the helper after the last job.
+                helper.submit([&]
+                              {
+                                  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                                  std::lock_guard<std::mutex> lock(m);
+                                  order.push_back(1000);
+                              });
+            }
+            t.IsFalse(overlapped, "jobs must never overlap");
+            t.IsFalse(onCaller, "jobs must run on the helper thread");
+            t.Equals(static_cast<int>(order.size()), 201, "every job should run, including the one pending at stop");
+            bool inOrder = true;
+            for (int i = 0; i < 200; ++i)
+                inOrder = inOrder && order[static_cast<size_t>(i)] == i;
+            t.IsTrue(inOrder && order.back() == 1000, "jobs should run in submit order");
         });
     });
 }

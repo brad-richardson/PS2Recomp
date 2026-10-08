@@ -13,6 +13,7 @@
 #include "ps2_present_geometry.h"
 #include "ps2_ssx3_tricky_hud.h"
 #include "ps2_ssx3_tricky_layer.h"
+#include "runtime/gs/gs_serial_job_thread.h"
 #include <android/hardware_buffer.h>
 #include <android/rect.h>
 #endif
@@ -396,6 +397,7 @@ public:
     {
 #if defined(__ANDROID__)
         retireAhbSlots();
+        m_hudThread.stop();
 #endif
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
         // GI1: stale in-flight completion handlers (they still free their
@@ -1280,15 +1282,61 @@ private:
 #endif
 
 #if defined(__ANDROID__)
+    // GSW1 (PS2X_TRICKY_HUD_ASYNC=1): wait for the helper's previous
+    // composite + queue. False when that queue was refused (it already fell
+    // back), as the inline path reports its own refused queue.
+    bool joinHudJob()
+    {
+        if (m_hudInFlight < 0)
+            return true;
+        m_hudThread.join();
+        m_hudInFlight = -1;
+        return m_hudJobQueued;
+    }
+
     bool queuePendingAhb()
     {
+        const bool prevQueued = joinHudJob();
         if (m_pendingAhb < 0)
-            return true;
+            return prevQueued;
         m_ge1.waitExport(m_pendingFence);
         AhbSlot &slot = m_ahbSlots[static_cast<size_t>(m_pendingAhb)];
-        // TK43e: the export is done and the buffer is not yet queued, so
-        // the slot is ours: composite the TRICKY meter before queueing.
-        compositeTrickyHudAhb(slot.buffer, m_exportW, m_exportH, m_pendingTick);
+        if (m_hudAsync)
+        {
+            // GSW1: the packet is read here, where the inline path reads it;
+            // the helper stamps the same buffer with the same packet and tick
+            // and queues it. presentAhb skips this slot until the next join,
+            // and the next present joins before it queues, so buffers still
+            // queue in order and are never picked while the helper owns them.
+            ps2_ssx3_tricky_layer::PresentationPacket p;
+            if (trickyHudPacket(p))
+            {
+                const AhbSlot job = slot;
+                const uint32_t w = m_exportW, h = m_exportH;
+                const uint64_t tick = m_pendingTick;
+                if (!m_hudAsyncLogged)
+                {
+                    m_hudAsyncLogged = true;
+                    std::fprintf(stderr, "[ssx3-tricky-hud] vk: GSW1 async composite on (GsHud helper)\n");
+                }
+                m_hudInFlight = m_pendingAhb;
+                m_pendingAhb = -1;
+                m_pendingFence = 0u;
+                m_hudThread.submit([this, job, w, h, tick, p] {
+                    stampTrickyHudAhb(job.buffer, w, h, tick, p);
+                    m_hudJobQueued = ps2x_present_vk::queue(job.id, w, h);
+                    if (!m_hudJobQueued)
+                        ps2x_present_vk::fallBack("GE1 AHB queue failed");
+                });
+                return prevQueued;
+            }
+        }
+        else
+        {
+            // TK43e: the export is done and the buffer is not yet queued, so
+            // the slot is ours: composite the TRICKY meter before queueing.
+            compositeTrickyHudAhb(slot.buffer, m_exportW, m_exportH, m_pendingTick);
+        }
         const bool queued = ps2x_present_vk::queue(slot.id, m_exportW, m_exportH);
         m_pendingAhb = -1;
         m_pendingFence = 0u;
@@ -1297,23 +1345,36 @@ private:
         return queued;
     }
 
+    // TKL1: consume the EE's immutable packet (tick + epoch); never
+    // touch RDRAM. A stale (pre-load/pre-exit) packet is skipped.
+    static bool trickyHudPacket(ps2_ssx3_tricky_layer::PresentationPacket &p)
+    {
+        if (!ps2_ssx3_tricky_layer::config().hud || !ps2_ssx3_tricky_layer::latestPacket(p))
+            return false;
+        if (p.epoch != ps2_ssx3_tricky_layer::epoch())
+            return false;
+        return p.draw && p.atlas;
+    }
+
     // TK43e: the VK/AHB overlay call site (GS worker). The HUD region is
     // copied out of the locked AHB, composed on the CPU (the same draw list
     // as the GL path) and copied back. Overlay failure NEVER fails the
     // present: it skips the composite and the frame queues as usual.
     void compositeTrickyHudAhb(AHardwareBuffer *buffer, uint32_t imgW, uint32_t imgH, uint64_t tick)
     {
+        ps2_ssx3_tricky_layer::PresentationPacket p;
+        if (!trickyHudPacket(p))
+            return;
+        stampTrickyHudAhb(buffer, imgW, imgH, tick, p);
+    }
+
+    // The composite proper. With PS2X_TRICKY_HUD_ASYNC=1 it runs on the GsHud
+    // helper, which then owns m_hudSprites and the m_hud* counters.
+    void stampTrickyHudAhb(AHardwareBuffer *buffer, uint32_t imgW, uint32_t imgH, uint64_t tick,
+                           const ps2_ssx3_tricky_layer::PresentationPacket &p)
+    {
         using namespace ps2_ssx3_tricky_hud;
         if (!buffer || imgW == 0u || imgH == 0u)
-            return;
-        // TKL1: consume the EE's immutable packet (tick + epoch); never
-        // touch RDRAM. A stale (pre-load/pre-exit) packet is skipped.
-        ps2_ssx3_tricky_layer::PresentationPacket p;
-        if (!ps2_ssx3_tricky_layer::config().hud || !ps2_ssx3_tricky_layer::latestPacket(p))
-            return;
-        if (p.epoch != ps2_ssx3_tricky_layer::epoch())
-            return;
-        if (!p.draw || !p.atlas)
             return;
         const ps2_ssx3_tricky_hud::Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
         if (r.w <= 0 || r.h <= 0)
@@ -1370,6 +1431,7 @@ private:
 
     void retireAhbSlots()
     {
+        joinHudJob();
         if (m_pendingAhb >= 0 && m_ge1Active)
             m_ge1.waitExport(m_pendingFence);
         m_pendingAhb = -1;
@@ -1409,7 +1471,7 @@ private:
         uint64_t ids[4];
         for (int i = 0; i < 4; ++i) ids[i] = m_ahbSlots[i].id;
         const ps2x_present_vk::Pick pick =
-            ps2x_present_vk::pickReusable(ids, 4, m_ahbStart, 1000);
+            ps2x_present_vk::pickReusable(ids, 4, m_ahbStart, 1000, m_hudInFlight);
         if (pick.index < 0)
         {
             if (pick.giveUp)
@@ -1626,6 +1688,17 @@ private:
     uint64_t m_hudCompositeNs = 0u;
     uint64_t m_hudLockFails = 0u;
     uint64_t m_hudBuildFails = 0u;
+    // GSW1: PS2X_TRICKY_HUD_ASYNC=1 runs the composite + queue on m_hudThread.
+    // m_hudInFlight: the slot it owns until joinHudJob (-1 = none);
+    // m_hudJobQueued: that job's queue result, read only after the join.
+    const bool m_hudAsync = [] {
+        const char *v = std::getenv("PS2X_TRICKY_HUD_ASYNC");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    int m_hudInFlight = -1;
+    bool m_hudJobQueued = true;
+    bool m_hudAsyncLogged = false;
+    ps2x_gs::SerialJobThread m_hudThread{"GsHud"};
 #endif
     uint8_t m_ge1LastPath = 3u;
     uint32_t m_ge1FifoBytes = 0u;
