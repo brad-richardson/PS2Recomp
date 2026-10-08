@@ -1475,7 +1475,41 @@ inline bool queryFix() noexcept
     return on;
 }
 
-// true = skip this call (contact frame held; v0 = held contact boolean).
+// JMP4: the skipped query leaves its whole out-packet stale, not just the
+// instance slot. The caller (0x13D818) never writes the out region itself; it
+// reads [sp+0x110] (instance, 0x13EBC4: null for terrain skips the virtual
+// call at 0x13EBEC) and [sp+0x148] (float, 0x13ED48 delay slot: c.lt.s
+// against [R+0x454] at 0x13ED44 steers the cruise response). JMP3 zeroed only
+// [sp+0x110], leaving [sp+0x148] as stack garbage; on Ruthless Ridge the
+// garbage float cripples riding (3-4 MPH, no finish). So the even update's
+// full out-packet ([sp+0xC0..sp+0x14C], both out-args a1=sp+0xC0 and
+// a2=sp+0x148) plus v0 is captured on return (post-call kind 8) into a
+// per-owner hold, and the odd update restores it whole: the skip then sees
+// exactly the even update's query results (true stock cadence, terrain and
+// instance paths alike). A hold miss (first update after a state load, a new
+// owner) runs the query instead of skipping.
+inline constexpr uint32_t kQueryHoldStart = 0xc0u, kQueryHoldWords = 35u, kQueryHoldSlots = 8u;
+struct QueryHold
+{
+    uint32_t p = 0u, v0 = 0u;
+    uint32_t w[kQueryHoldWords] = {};
+};
+inline QueryHold g_queryHold[kQueryHoldSlots];
+// Pure slot select (tested): the owner's slot wins, else the first empty slot,
+// else -1 (full: capture overwrites slot 0, skip treats it as a miss).
+inline int queryHoldSelect(const uint32_t *ps, int n, uint32_t p) noexcept
+{
+    int empty = -1;
+    for (int i = 0; i < n; ++i)
+    {
+        if (ps[i] == p)
+            return i;
+        if (empty < 0 && ps[i] == 0u)
+            empty = i;
+    }
+    return empty;
+}
+// true = skip this call (contact frame held; full out-packet + v0 restored).
 inline bool querySkip(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc) noexcept
 {
     if (!queryFix() || !g_rngOdd)
@@ -1488,15 +1522,19 @@ inline bool querySkip(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     uint32_t r = 0u, surf = 0u;
     if (!rd32(ram, pa + 0x18u, r) || !rd32(ram, r + 0x438u, surf) || surf > 0xffffu)
         return false;
-    // The v0!=0 path also reads the query's out-packet instance at [sp+0x110]
-    // (0x13EBC4; null for terrain skips the virtual call at 0x13EBEC). The
-    // skipped query leaves it stale, so write the terrain result; instance
-    // contacts then read as terrain for one half-step (their response runs
-    // on the next even update).
+    const QueryHold *h = nullptr;
+    for (uint32_t i = 0u; i < kQueryHoldSlots; ++i)
+        if (g_queryHold[i].p == pa)
+            h = &g_queryHold[i];
+    if (!h)
+    {
+        return false; // no hold for this owner: run the query, never skip stale
+    }
     const uint32_t sp = getRegU32(ctx, 29);
-    if (!wr32(ram, sp + 0x110u, 0u))
-        return false;
-    SET_GPR_U32(ctx, 2, surf != 0u ? 1u : 0u);
+    for (uint32_t i = 0u; i < kQueryHoldWords; ++i)
+        if (!wr32(ram, sp + kQueryHoldStart + 4u * i, h->w[i]))
+            return false;
+    SET_GPR_U32(ctx, 2, h->v0);
     return true;
 }
 
@@ -2160,7 +2198,7 @@ inline bool flagsFix() noexcept
 struct PostCall
 {
     uint32_t target = 0u, sp = 0u, obj = 0u;
-    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27), 5 jcam retention (FH28), 6 pid hold (FH29)
+    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27), 5 jcam retention (FH28), 6 pid hold (FH29), 7 ground2 (FH33), 8 query hold (JMP4), 9 chase2 (FH35)
     uint32_t saved[7] = {};
 };
 inline PostCall g_post;
@@ -2243,6 +2281,47 @@ inline void pidPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
     g_post.obj = shot;
     g_post.kind = 6u;
     g_postArmed = true;
+}
+
+// Even update: arm the post-call capture. Never clobbers another kind (pid:
+// a lost record sticks zeroed gains); a pending outer record keeps this
+// update uncaptured (the next odd update runs its query on the hold miss).
+inline void queryPreHook(R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc) noexcept
+{
+    if (!queryFix() || g_rngOdd || g_postArmed || !ctx)
+        return;
+    if (sourcePc != kCruiseQuerySite || targetPc != kCruiseQuery)
+        return;
+    g_post.target = targetPc;
+    g_post.sp = getRegU32(ctx, 29);
+    g_post.obj = getRegU32(ctx, 4);
+    g_post.kind = 8u;
+    g_postArmed = true;
+}
+
+// Post-call capture (kind 8, true returns only): the full out-packet + v0.
+inline void queryOnReturn(uint8_t *ram, R5900Context *ctx) noexcept
+{
+    if (!ctx)
+        return;
+    const uint32_t pa = g_post.obj, sp = g_post.sp;
+    uint32_t ps[kQueryHoldSlots];
+    for (uint32_t i = 0u; i < kQueryHoldSlots; ++i)
+        ps[i] = g_queryHold[i].p;
+    int slot = queryHoldSelect(ps, kQueryHoldSlots, pa);
+    if (slot < 0)
+        slot = 0;
+    uint32_t w[kQueryHoldWords];
+    for (uint32_t i = 0u; i < kQueryHoldWords; ++i)
+        if (!rd32(ram, sp + kQueryHoldStart + 4u * i, w[i]))
+        {
+            g_queryHold[slot].p = 0u; // unreadable: force a miss, never a partial hold
+            return;
+        }
+    g_queryHold[slot].p = pa;
+    g_queryHold[slot].v0 = getRegU32(ctx, 2);
+    for (uint32_t i = 0u; i < kQueryHoldWords; ++i)
+        g_queryHold[slot].w[i] = w[i];
 }
 
 inline void jcamOnReturn(uint8_t *ram)
@@ -2366,6 +2445,11 @@ inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool re
     if (g_post.kind == 7u)
     {
         ground2OnReturn(ram);
+        return;
+    }
+    if (g_post.kind == 8u)
+    {
+        queryOnReturn(ram, ctx);
         return;
     }
     if (g_post.kind == 5u)
@@ -3154,6 +3238,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
     if (on && flag(&BranchFlags::query, queryFix))
         skip = querySkip(ram, ctx, sourcePc, targetPc) || skip;
+    if (on && flag(&BranchFlags::query, queryFix))
+        queryPreHook(ctx, sourcePc, targetPc);
     if (on && flag(&BranchFlags::trick, trickFix) && g_rngOdd && sourcePc == kComboSite && targetPc == kComboAccrue)
         skip = true;
     if (on && flag(&BranchFlags::aiGate, aiGateFix))

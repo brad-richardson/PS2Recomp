@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_fh1_fix.h"
+#include "ps2_fh1_full120.h"
 #include "ps2_fh1_ground2.h"
 #include "ps2_fh1_input2.h"
 #include "ps2_fh1_fh35.h"
@@ -194,6 +195,20 @@ void register_ps2_fh1_fix_tests()
             t.Equals(parseFix("all,query").main, kFixAll | kFixQuery, "opt-in");
             t.Equals(parseFix("all,query,-query").main, kFixAll, "opt-out");
             t.Equals(parseFix("query").main, static_cast<uint64_t>(kFixQuery), "query alone");
+        });
+
+        tc.Run("JMP4 query hold selects the owner slot", [](TestCase &t)
+        {
+            uint32_t ps[kQueryHoldSlots] = {};
+            t.Equals(queryHoldSelect(ps, kQueryHoldSlots, 0x144a130u), 0, "first owner takes slot 0");
+            ps[0] = 0x144a130u;
+            t.Equals(queryHoldSelect(ps, kQueryHoldSlots, 0x144a130u), 0, "owner wins its slot");
+            t.Equals(queryHoldSelect(ps, kQueryHoldSlots, 0x144b200u), 1, "second owner takes slot 1");
+            for (uint32_t i = 1u; i < kQueryHoldSlots; ++i)
+                ps[i] = 0x1450000u + i;
+            t.Equals(queryHoldSelect(ps, kQueryHoldSlots, 0x144a130u), 0, "owner still wins when full");
+            t.Equals(queryHoldSelect(ps, kQueryHoldSlots, 0x1460000u), -1, "full table misses");
+            t.Equals(kQueryHoldStart + 4u * kQueryHoldWords, 0x14cu, "hold covers sp+0xC0..0x14C");
         });
 
         tc.Run("all includes stick2 and clocksign (FH26, Brad 10-02) and both masks", [](TestCase &t)
