@@ -26,7 +26,7 @@
 //   PS2X_MTVU_VIF1_STAT_FREE=1  MQ3: a guest VIF1_STAT (FDR) write skips the
 //                       Vif1Reg unit sync (it touches no unit-owned state).
 //   PS2X_MTVU_CPUS=a,b  pin the worker (Linux/Android).
-//   PS2X_MTVU_JITTER=N  test: sleep 0..N us before each job (host timing only).
+//   jitterUs (setModeForTest only): sleep 0..N us before each job (host timing only).
 //   PS2X_GAME_THREAD_STACK_KB also sizes the worker's stack.
 // PS2X_MTVU=census (stage 2', still synchronous, no behaviour change):
 //   - counts sync-point hits per reason, and the first sync after each job;
@@ -1409,7 +1409,7 @@ namespace ps2_mtvu
                 return completed.load(std::memory_order_acquire) != submitted.load(std::memory_order_relaxed);
             }
 
-            // MW1: PS2X_MTVU_WAIT. park (default): spin kParkSpinNs with a CPU
+            // MW1: park (always): spin kParkSpinNs with a CPU
             // pause, then sleep on cvDone. spin: the old path, 256 yields
             // (swtch_pri on Darwin, ~6 % of GameThread busy at the full-120
             // VBlank) and then cvDone. Same condition and ordering either way:
@@ -1442,7 +1442,7 @@ namespace ps2_mtvu
                 const uint64_t t0 = nowNs();
                 if (waitPark < 0)
                 {
-                    waitPark = parseWaitPark(std::getenv("PS2X_MTVU_WAIT")) ? 1 : 0;
+                    waitPark = 1; // KNC4: PS2X_MTVU_WAIT removed (unset since MW1, 10-01); always park
                     std::fprintf(stderr, "[mtvu] wait=%s\n", waitPark ? "park" : "spin");
                 }
                 if (waitPark)
@@ -1687,8 +1687,6 @@ namespace ps2_mtvu
             m = diagArmed ? 0 : static_cast<int>(Mode::Threaded);
         const char *l = std::getenv("PS2X_MTVU_LAG");
         const bool lagOn = m == static_cast<int>(Mode::Threaded) && l && std::strcmp(l, "1") == 0;
-        if (const char *j = std::getenv("PS2X_MTVU_JITTER"))
-            detail::worker().jitterUs = static_cast<uint32_t>(std::strtoul(j, nullptr, 10));
         detail::g_lag.store(lagOn, std::memory_order_relaxed);
         const char *fe = std::getenv("PS2X_MTVU_FINISH_EE");
         detail::g_finishEe.store(m == static_cast<int>(Mode::Threaded) && fe && std::strcmp(fe, "1") == 0,

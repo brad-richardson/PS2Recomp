@@ -44,7 +44,7 @@ namespace ps2x::padlatch
         return env && env[0] == '1';
     }
 
-    // Shared wall clock for the read log and PS2X_VPAD_TEST_TAP: ms since
+    // Shared wall clock for the read log: ms since
     // the first call (the render loop's first frame sets the epoch).
     inline uint64_t wallMs()
     {

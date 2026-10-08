@@ -594,10 +594,8 @@ namespace ps2x::vpad
         return stick;
     }
 
-    // DEV-ONLY PS2X_VPAD_TEST_STICK="lx,ly" (floats in -1..1, clamped):
-    // injects a stick vector instead of the touch-driven one, for runs
-    // without a touch screen (the iOS Simulator here has no GUI to drag).
-    // Raw, no dead zone, so the bytes are exactly predictable.
+    // "lx,ly" (floats in -1..1, clamped): parses a stick vector (suite-covered;
+    // the DEV-ONLY env override is removed). Raw, no dead zone.
     inline bool parseTestStick(const char *spec, float &lx, float &ly)
     {
         if (!spec || !*spec)
@@ -720,10 +718,9 @@ namespace ps2x::vpad
         return n;
     }
 
-    // IN2 DEV-ONLY PS2X_VPAD_TEST_TAP="ms:button:dur_ms,..." : synthetic
-    // button taps on the WALL clock (ms since the render loop's first
-    // frame, the padlatch::wallMs epoch), ORed into the published vpad
-    // mask. Unlike PS2X_VPAD_TEST_TOUCHES (guest-vsync clocked), a tap
+    // IN2 "ms:button:dur_ms,..." (suite-covered; the DEV-ONLY env override is
+    // removed): synthetic button taps on the WALL clock (ms since the render loop's first
+    // frame, the padlatch::wallMs epoch). Unlike PS2X_VPAD_TEST_TOUCHES (guest-vsync clocked), a tap
     // shorter than one guest frame lands between two guest reads, which
     // is the lost-tap repro (pre-latch the guest never sees it).
     // Button names match the pad script. Malformed items are skipped.

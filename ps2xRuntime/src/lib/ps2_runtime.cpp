@@ -413,7 +413,7 @@ namespace
     // Readers use the copies and base+slot*stride; the sweep loops to [c+4].
     // Growth is lazy, so RAM stays byte-identical to stock until the first
     // empty pop: then the arrays are copied into a free region above the
-    // runtime HLE pools and the HNG1 arena (default 0x01F33400, PS2X_SSX3_PATCH_CACHE_GROW_BASE),
+    // runtime HLE pools and the HNG1 arena (base 0x01F33400),
     // the new slots are pushed and every pointer above is repointed. The old
     // blocks stay intact (a slot's DMA block is built once at allocation and
     // may hold REF tags to its old buffers; an in-flight chain may call them),
@@ -446,11 +446,8 @@ namespace
 
     uint32_t ssx3PatchGrowBase()
     {
-        static const uint32_t base = [] {
-            const char *e = std::getenv("PS2X_SSX3_PATCH_CACHE_GROW_BASE");
-            return e && *e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 16))
-                           : ps2_hle_pools::kHleArenaBase + ps2_hle_pools::kHleArenaBytes;
-        }();
+        // KNC4: PS2X_SSX3_PATCH_CACHE_GROW_BASE removed (never set); the arena end is the base.
+        static const uint32_t base = ps2_hle_pools::kHleArenaBase + ps2_hle_pools::kHleArenaBytes;
         return base;
     }
 
@@ -4362,15 +4359,7 @@ bool PS2Runtime::loadELF(const std::string &elfPath)
                                       m_cpuContext.pc,
                                       elfCrc32,
                                       elfCrc32Valid);
-    if (const char *iopMode = std::getenv("PS2X_IOP_MODE"); iopMode && iopMode[0] != '\0')
-    {
-        if (std::strcmp(iopMode, "hle") == 0)
-            m_hleIopMode = true;
-        else if (std::strcmp(iopMode, "emulator") == 0)
-            m_hleIopMode = false;
-        else
-            std::fprintf(stderr, "[iop-mode] ignoring PS2X_IOP_MODE=%s (hle|emulator)\n", iopMode);
-    }
+    // KNC4: PS2X_IOP_MODE override removed (unset since IOPE1, 10-02); the game override above decides.
     std::fprintf(stderr, "[iop-mode] %s\n", m_hleIopMode ? "hle" : "emulator");
     // RBF1: the ELF-load reset above predates the mode decision; assert the
     // HLE core-service routing for the decided mode (run() re-asserts it via
@@ -7083,19 +7072,10 @@ void PS2Runtime::run()
     bool vpadLastPadConnected = true; // forces the first [vpad] line when the overlay shows
     const std::vector<ps2x::vpad::TestTouch> vpadTestTouches =
         ps2x::vpad::parseTestTouches(std::getenv("PS2X_VPAD_TEST_TOUCHES")); // DEV-ONLY
-    const std::vector<ps2x::vpad::TestTap> vpadTestTaps =
-        ps2x::vpad::parseTestTap(std::getenv("PS2X_VPAD_TEST_TAP")); // DEV-ONLY
     ps2x::vpad::PadState vpadPad; // VT1: touch ownership + stick anchor, carried across frames
     // VT3: PS2X_VPAD_SHOULDER_BAND=0 restores the VT1 hit test (1.0x discs,
     // no shoulder band, no slide-on); unset or anything but "0" = on.
     const bool vpadShoulderBand = ps2x::vpad::enabledFromEnv(std::getenv("PS2X_VPAD_SHOULDER_BAND"));
-    float vpadTestStickX = 0.0f, vpadTestStickY = 0.0f;
-    const bool vpadTestStick =
-        ps2x::vpad::parseTestStick(std::getenv("PS2X_VPAD_TEST_STICK"), vpadTestStickX, vpadTestStickY); // DEV-ONLY
-    if (vpadTestStick)
-    {
-        std::fprintf(stderr, "[vpad] test stick lx=%.3f ly=%.3f\n", vpadTestStickX, vpadTestStickY);
-    }
     if (!vpadWanted)
     {
         std::fprintf(stderr, "[vpad] off (PS2X_VIRTUAL_PAD)\n");
@@ -7483,17 +7463,8 @@ void PS2Runtime::run()
             uint16_t pressed = vpadFrame.pressed;
             // IN4: touch-source layer (transition only, zero cost off).
             ps2x::inputdiag::noteVpad(pressed, m_memory.gs().vsyncTick.load());
-            pressed = static_cast<uint16_t>(pressed | ps2x::vpad::activeTestTap(vpadTestTaps, ps2x::padlatch::wallMs()));
             publishPad(static_cast<uint16_t>(pressed | raylibPressed), m_memory.gs().vsyncTick.load());
             ps2x::vpad::StickVec stick = vpadFrame.stick;
-            if (vpadTestStick)
-            {
-                stick.active = true; // drawn deflected at the rest position
-                stick.ax = layout.stickRestX;
-                stick.ay = layout.stickRestY;
-                stick.x = vpadTestStickX;
-                stick.y = vpadTestStickY;
-            }
             uint8_t stickLX = 0x80u, stickLY = 0x80u;
             ps2x::vpad::stickBytes(stick, stickLX, stickLY);
             ps2x::vpad::liveStick().store(static_cast<uint16_t>(stickLX | (stickLY << 8)), std::memory_order_relaxed);

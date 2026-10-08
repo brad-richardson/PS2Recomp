@@ -5,7 +5,6 @@
 // PS2X_SOUND=1 only enables the host audio output that drains the PCM ring;
 // without it the ring overflows and drops frames host-side. Env:
 //   PS2X_SND_LOG=<file>    event log (bounded, kMaxLines).
-//   PS2X_SND_DUMP_DIR=<d>  payload dumps (bounded, kMaxDumpBytes).
 //   PS2X_SND_VOICES=0      music only: skip the SPU voice layer (AU9).
 //
 // SNDDRV protocol (AU2 Part A, local/research/AU2/REPORT.md):
@@ -52,7 +51,6 @@ namespace ps2_snd_spike
 {
 
 inline constexpr uint64_t kMaxLines = 60000ull;
-inline constexpr uint64_t kMaxDumpBytes = 256ull << 20;
 inline constexpr uint64_t kTickCycles = 3145728ull; // 294,912,000 * 384 / 36,000
 inline constexpr uint32_t kPcmFramesPerTick = 384u;
 inline constexpr uint32_t kPcmBytesPerTick = kPcmFramesPerTick * 2u * sizeof(int16_t);
@@ -73,9 +71,7 @@ struct State
     bool init = false;
     bool enabled = false;
     FILE *log = nullptr;
-    std::string dumpDir;
     uint64_t lines = 0;
-    uint64_t dumpBytes = 0;
     uint32_t handler = 0, handlerData = 0, handlerGp = 0;
     uint32_t statusAddr = 0;
     uint32_t serial = 0;
@@ -291,8 +287,6 @@ inline void initLocked(State &s)
     // time whether or not a host audio device consumes the PCM ring.
     if (const char *p = std::getenv("PS2X_SND_LOG"); p && *p)
         s.log = std::fopen(p, "w");
-    if (const char *d = std::getenv("PS2X_SND_DUMP_DIR"); d && *d)
-        s.dumpDir = d;
     s.spu.interp = ps2_snd_spu::parseInterp(std::getenv("PS2X_SPU_INTERP"));
     if (const char *p = std::getenv("PS2X_AUDIO_RESAMPLE"); p && std::strcmp(p, "sinc") == 0)
         s.sinc = true;
@@ -336,19 +330,6 @@ inline void wr32(uint8_t *rdram, uint32_t addr, uint32_t v)
     const uint32_t p = addr & PS2_RAM_MASK;
     if (p + 4u <= PS2_RAM_SIZE)
         std::memcpy(rdram + p, &v, 4);
-}
-
-inline void dumpLocked(State &s, const std::string &name, const uint8_t *data, size_t size)
-{
-    if (s.dumpDir.empty() || size == 0 || s.dumpBytes + size > kMaxDumpBytes)
-        return;
-    const std::string path = s.dumpDir + "/" + name;
-    if (FILE *f = std::fopen(path.c_str(), "wb"))
-    {
-        std::fwrite(data, 1, size, f);
-        std::fclose(f);
-        s.dumpBytes += size;
-    }
 }
 
 inline GuestInvocation makeHandlerCall(const State &s, uint32_t packet)
@@ -499,13 +480,6 @@ inline bool onSetDma(const uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t
     }
     if (tagbuf)
         ++s.tagbufs;
-    if (!tagbuf || s.tagbufs <= 40u || (s.tagbufs % 300u) == 0u)
-    {
-        char name[96];
-        std::snprintf(name, sizeof(name), "setdma-%06llu-v%llu-%s-%08x-%u.bin",
-                      (unsigned long long)s.setdma, (unsigned long long)vsync, tagbuf ? "tag" : "iop", dst, size);
-        dumpLocked(s, name, bytes.data(), bytes.size());
-    }
     logLocked(s, "setdma vsync=%llu ra=0x%x src=0x%x dst=0x%x size=%u attr=0x%x%s", (unsigned long long)vsync, ra,
               src, dst, size, attr, tagbuf ? " tagbuf" : "");
     s.iopMem[dst] = std::move(bytes);
@@ -541,10 +515,6 @@ inline void onSendCmd(uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t cid,
         if (off < it->second.size())
         {
             const size_t n = std::min<size_t>(size, it->second.size() - off);
-            char name[96];
-            std::snprintf(name, sizeof(name), "dmq-%06llu-v%llu-spu%06x-%u.bin", (unsigned long long)s.dmq,
-                          (unsigned long long)vsync, spuDst, size);
-            dumpLocked(s, name, it->second.data() + off, n);
             s.spu.writeRam(spuDst, it->second.data() + off, n);
         }
     }

@@ -359,8 +359,7 @@ public:
     [[nodiscard]] ps2x::iop::DebugSnapshot iopDebugSnapshot() const;
     // UPR1: HLE IOP mode keeps a game on the fork's SIF/RPC paths (SIF heap at
     // 0x04000000, SIF DMA into EE RAM, tracked-only module loads, no IOP
-    // emulator). The SSX 3 game override turns it on; PS2X_IOP_MODE=hle|emulator
-    // overrides after the ELF loads.
+    // emulator). The SSX 3 game override turns it on.
     void setHleIopMode(bool enabled) noexcept { m_hleIopMode = enabled; }
     [[nodiscard]] bool hleIopMode() const noexcept { return m_hleIopMode; }
     uint32_t allocateIopMemory(uint32_t size, uint32_t alignment = 16u);

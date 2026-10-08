@@ -56,9 +56,8 @@ namespace
         AudioStream stream{};
         bool ready = false;
         uint32_t rate = kSourceRate;
-        WavFile wav;     // PS2X_SOUND_WAV: knob off = final output (as before);
-                         // knob on = pre-stretch source-rate frames.
-        WavFile postWav; // PS2X_SND_WAV_OUT: final output (post-stretch).
+        WavFile wav;     // WAV file dump removed (KNC4); tap peaks stay for the tricky-probe line.
+        WavFile postWav; // (KNC4: PS2X_SOUND_WAV / PS2X_SND_WAV_OUT removed, unset since 09-30 / 10-05).
         double phase = 0.0;
         uint32_t previous = 0;
         uint32_t next = 0;
@@ -861,9 +860,8 @@ bool initialize()
         }
     }
     SetAudioStreamCallback(g_output.stream, audioCallback);
-    openWav(g_output.wav, std::getenv("PS2X_SOUND_WAV"),
-            g_output.stretch ? kSourceRate : g_output.rate);
-    openWav(g_output.postWav, std::getenv("PS2X_SND_WAV_OUT"), g_output.rate);
+    openWav(g_output.wav, nullptr, g_output.stretch ? kSourceRate : g_output.rate); // KNC4: file dump off
+    openWav(g_output.postWav, nullptr, g_output.rate);                             // (knobs removed)
     PlayAudioStream(g_output.stream);
     g_output.ready = true;
     std::cerr << "[snd-output] stream rate=" << g_output.rate << " channels=2 bits=16\n";

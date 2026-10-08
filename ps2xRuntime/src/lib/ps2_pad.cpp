@@ -173,19 +173,6 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
         {
             data[6] = static_cast<uint8_t>(vst & 0xFFu);
             data[7] = static_cast<uint8_t>(vst >> 8);
-            // DEV-ONLY: with PS2X_VPAD_TEST_STICK set, log each distinct
-            // injected value as it lands in the pad bytes (the Simulator
-            // proof run; unset everywhere else, so production stays quiet).
-            static const bool s_logStick = std::getenv("PS2X_VPAD_TEST_STICK") != nullptr;
-            if (s_logStick)
-            {
-                static uint16_t s_last = ps2x::vpad::kStickNoOverride;
-                if (vst != s_last)
-                {
-                    s_last = vst;
-                    std::fprintf(stderr, "[vpad] stick pad bytes lx=0x%02x ly=0x%02x\n", data[6], data[7]);
-                }
-            }
         }
     }
 
