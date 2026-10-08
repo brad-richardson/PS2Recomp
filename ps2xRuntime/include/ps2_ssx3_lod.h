@@ -20,6 +20,12 @@
 // the det hash differs with the knob on; gameplay state does not read them
 // [inferred; the LOD1 report checks the rider path]. Knob off: nothing is
 // wrapped.
+//
+// TLS1: PS2X_SSX3_TRICKY_LOD_SCALE=<f> (same range and refusal rules) applies
+// only while the current course is a Tricky course (the Tricky layer's own
+// predicate: course modes armed and modeCurrent != 0). LOD_SCALE keeps its
+// meaning (all courses); where both are set the Tricky value wins on Tricky
+// courses. Both unset = today.
 
 #include <cmath>
 #include <cstdint>
@@ -49,5 +55,20 @@ inline float scale() noexcept
 {
     static const float s = parseScale(std::getenv("PS2X_SSX3_LOD_SCALE"));
     return s;
+}
+
+// TLS1: Tricky-courses-only scale (same parse; 0 = off, <0 = refused).
+inline float trickyScale() noexcept
+{
+    static const float s = parseScale(std::getenv("PS2X_SSX3_TRICKY_LOD_SCALE"));
+    return s;
+}
+
+// Effective scale for one projection-set call. 0 = leave $f14 stock.
+inline float selectScale(float global, float tricky, bool isTricky) noexcept
+{
+    if (isTricky && tricky != 0.0f)
+        return tricky;
+    return global;
 }
 } // namespace ps2_ssx3_lod

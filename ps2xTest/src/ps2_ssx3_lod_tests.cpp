@@ -29,5 +29,16 @@ void register_ps2_ssx3_lod_tests()
             t.IsTrue(parseScale("-2") < 0.0f, "-2");
             t.IsTrue(parseScale("2x") < 0.0f, "2x");
             t.IsTrue(parseScale("nan") < 0.0f, "nan");
-            t.IsTrue(parseScale("inf") < 0.0f, "inf"); }); });
+            t.IsTrue(parseScale("inf") < 0.0f, "inf"); });
+        tc.Run("TLS1: Tricky value wins on Tricky courses, global elsewhere", [](TestCase &t)
+               {
+            using ps2_ssx3_lod::selectScale;
+            t.IsTrue(selectScale(0.0f, 0.0f, false) == 0.0f, "both off on stock");
+            t.IsTrue(selectScale(0.0f, 0.0f, true) == 0.0f, "both off on tricky");
+            t.IsTrue(selectScale(0.9f, 0.0f, false) == 0.9f, "global on stock");
+            t.IsTrue(selectScale(0.9f, 0.0f, true) == 0.9f, "global covers tricky too");
+            t.IsTrue(selectScale(0.0f, 0.8f, true) == 0.8f, "tricky-only applies on tricky");
+            t.IsTrue(selectScale(0.0f, 0.8f, false) == 0.0f, "tricky-only leaves stock alone");
+            t.IsTrue(selectScale(0.9f, 0.8f, true) == 0.8f, "tricky wins on tricky");
+            t.IsTrue(selectScale(0.9f, 0.8f, false) == 0.9f, "global wins on stock"); }); });
 }
