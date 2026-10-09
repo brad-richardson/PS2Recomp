@@ -5437,7 +5437,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false; // ctx->pc == targetPc, as the full path leaves it
     }
     fn(rdram, ctx, this);
-    if (ps2_fh1::g_postArmed)
+    if (ps2_fh1::g_postArmed || ps2_fh1::g_pubArmed) // JDR2: publication restore shares the return hook
     {
         ps2_fh1::onReturn(rdram, ctx, targetPc, !isStopRequested() && ctx->pc != 0u && !guestUnwindPending());
     }
@@ -5680,7 +5680,7 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
 #endif // PS2X_ENABLE_DIAG_TAPS (HP3 F4)
     targetFn(rdram, ctx, this);
     // FH11: full-120 post-call fixes (armed only by a pre-hook in onBranch).
-    if (ps2_fh1::g_postArmed)
+    if (ps2_fh1::g_postArmed || ps2_fh1::g_pubArmed) // JDR2: publication restore shares the return hook
     {
         ps2_fh1::onReturn(rdram, ctx, targetPc, !isStopRequested() && ctx->pc != 0u && !ps2_guest_unwind::pending());
     }

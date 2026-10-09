@@ -1169,6 +1169,11 @@ inline bool queryFix() noexcept;        // JMP4, defined with the hold below
 inline void queryHoldReset() noexcept; // JMP4 hold, defined with it below
 inline bool springHoldFix() noexcept;        // JMP5, defined with the hold below
 inline void springHoldReset() noexcept; // JMP5 hold, defined with it below
+// JDR2 shadowpub (ps2_fh1_pub.h, included before onReturn).
+inline void shadowPubSample(uint8_t *ram, uint32_t pa) noexcept;
+inline void shadowPubMarkSkip(uint8_t *ram, uint32_t pa) noexcept;
+inline void pubRestore(uint8_t *ram) noexcept;
+inline void pubReset() noexcept;
 
 inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
 {
@@ -1187,6 +1192,7 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
     if (jcam2Fix()) jcam2Reset();
     if (toActive && queryFix()) queryHoldReset();
     if (toActive && springHoldFix()) springHoldReset();
+    pubReset(); // JDR2: no publication sample survives a flip
     if (life2Fix()) life2Flip(ram, a, toActive);
     applyWords(ram, a, toActive);
     if (clockFix())
@@ -1620,6 +1626,7 @@ inline bool querySkip(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         if (!wr32(ram, sp + kQueryHoldStart + 4u * i, h->w[i]))
             return false;
     SET_GPR_U32(ctx, 2, h->v0);
+    shadowPubMarkSkip(ram, pa);
     return true;
 }
 
@@ -2338,6 +2345,7 @@ inline bool g_postArmed = false;
 // loop ctor, ground2, chase2, springhold) need no RAM undo. Idempotent.
 inline void postUnwindRestore(uint8_t *ram) noexcept
 {
+    pubRestore(ram); // JDR2: an unwound published call keeps no published word
     if (!g_postArmed)
         return;
     if (g_post.kind == 6u)
@@ -2449,6 +2457,7 @@ inline void queryOnReturn(uint8_t *ram, R5900Context *ctx) noexcept
     g_queryHold[slot].v0 = getRegU32(ctx, 2);
     for (uint32_t i = 0u; i < kQueryHoldWords; ++i)
         g_queryHold[slot].w[i] = w[i];
+    shadowPubSample(ram, pa);
 }
 
 // JMP5 springhold pre-hook (kind 10): arm the post-call capture/restore.
@@ -2604,8 +2613,14 @@ inline void chase2OnReturn(uint8_t *ram, R5900Context *ctx)
         ctx->f[i0]=ctx->f[i1]=k; // guest lerp now yields the one rooted retention
 }
 
+#include "ps2_fh1_pub.h"
+
 inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned)
 {
+    if (g_pubArmed)
+        pubOnReturn(ram, ctx, targetPc);
+    if (!g_postArmed)
+        return;
     if (targetPc != g_post.target || !ctx || getRegU32(ctx, 29) != g_post.sp)
         return;
     g_postArmed = false;
@@ -3037,7 +3052,8 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2, trails, chase2, query, springhold;
+        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2, trails, chase2, query, springhold,
+        shadowpub;
     bool src, fh9, draw, tap;
 };
 
@@ -3068,6 +3084,7 @@ inline const BranchFlags &branchFlags() noexcept
         r.chase2=chase2Fix();
         r.query = queryFix();
         r.springhold = springHoldFix();
+        r.shadowpub = shadowPubFix();
         r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap || r.input2 || r.query || r.springhold || inputChainFix();
         r.bonus = bonusFix();
         r.lift = liftFix();
@@ -3212,6 +3229,13 @@ inline HookInterest buildHookInterest(const HookConfig &c)
     {
         addSrc(kSpringSite);
         addTgt(kSpringForce);
+    }
+    if ((c.main & kFixShadowPub) != 0u && (c.main & kFixQuery) != 0u && on)
+    {
+        addSrc(kShadowPubBarSite);
+        addTgt(kShadowPubBar);
+        addSrc(kShadowPubShapeSite);
+        addTgt(kShadowPubShape);
     }
     const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixPid | kFixC2Cap | kFixInput2 | kFixInputChain | kFixQuery | kFixSpringHold)) != 0u && on) ||
                         ((c.fix12 & (kFix12Particles | kFix12Flare)) != 0u && on);
@@ -3492,6 +3516,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     skip = skip || drawSkip;
     if (on && !skip && flag(&BranchFlags::trails,trailsFix)) trailsPreHook(ctx,sourcePc,targetPc);
     if (on && !skip && flag(&BranchFlags::chase2,chase2Fix)) chase2PreHook(ctx,sourcePc,targetPc);
+    if (on && !skip && flag(&BranchFlags::shadowpub, shadowPubFix))
+        shadowPubPreHook(ram, ctx, sourcePc, targetPc);
     if (Fast && !bf->tap)
         return skip;
     Tap &t = tap();

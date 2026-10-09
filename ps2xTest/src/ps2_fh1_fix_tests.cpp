@@ -211,6 +211,32 @@ void register_ps2_fh1_fix_tests()
             t.Equals(kQueryHoldStart + 4u * kQueryHoldWords, 0x14cu, "hold covers sp+0xC0..0x14C");
         });
 
+        tc.Run("JDR2 shadowpub is opt-in at bit 53", [](TestCase &t)
+        {
+            t.Equals(static_cast<uint64_t>(kFixShadowPub), 1ull << 53, "shadowpub uses bit 53");
+            t.IsTrue((kFixAll & kFixShadowPub) == 0u, "excluded from all");
+            t.Equals(parseFix("all,query,shadowpub").main, kFixAll | kFixQuery | kFixShadowPub, "opt-in");
+            t.Equals(parseFix("all,query,shadowpub,-shadowpub").main, kFixAll | kFixQuery, "opt-out");
+        });
+
+        tc.Run("JDR2 shadowpub publishes only after two even samples with the live frame held", [](TestCase &t)
+        {
+            PubSlot<2> s;
+            const uint32_t a[2] = {0x3f800000u, 0x40000000u}; // 1, 2
+            const uint32_t b[2] = {0x40000000u, 0x40400000u}; // 2, 3
+            pubSample(s, a, 10u);
+            t.IsTrue(!pubReady(s, a, 11u), "one sample is not enough");
+            pubSample(s, b, 12u);
+            pubSample(s, b, 12u); // a second call in the same update only refreshes
+            t.IsTrue(pubReady(s, b, 13u), "odd update after two consecutive even samples publishes");
+            t.IsTrue(!pubReady(s, a, 13u), "a moved live frame never publishes");
+            t.IsTrue(!pubReady(s, b, 15u), "a stale sample never publishes");
+            t.Equals(pubHalfStep(s.cur[0], s.prev[0]), 2.5f, "held + half the last even step");
+            pubSample(s, a, 16u);
+            t.IsTrue(!pubReady(s, a, 17u), "samples 4 updates apart never publish");
+            t.Equals(kShadowPubOffs[6], 0xaacu, "ground-plane words follow the frame");
+        });
+
         tc.Run("JMP6 vnret is opt-in at bit 52", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixVnRet), 1ull << 52, "vnret uses bit 52");
