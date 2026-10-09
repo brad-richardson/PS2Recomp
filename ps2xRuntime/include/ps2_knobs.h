@@ -373,6 +373,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_SAVESTATE_STRICT",
         "PS2X_SKIP_MOVIE",
         "PS2X_SOUND",
+        "PS2X_SSX3_ANIM_PICK_GUARD",
         "PS2X_SSX3_COURSE_MANIFEST",
         "PS2X_SSX3_COURSE_PICKER",
         "PS2X_SSX3_DRAW_HZ",

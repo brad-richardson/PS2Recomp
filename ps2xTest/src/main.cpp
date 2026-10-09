@@ -16,6 +16,7 @@ void register_ps2_env_file_tests();
 void register_ps2_ssx3_course_manifest_tests();
 void register_ps2_ssx3_tricky_menu_tests();
 void register_ps2_ssx3_lod_tests();
+void register_ps2_ssx3_anim_pick_guard_tests();
 void register_ps2_ts2_split60_tests();
 void register_ps2_ssx3_tricky_hud_tests();
 void register_ps2_ssx3_tricky_song_tests();
@@ -95,6 +96,7 @@ int main()
     register_ps2_ssx3_course_manifest_tests();
     register_ps2_ssx3_tricky_menu_tests();
     register_ps2_ssx3_lod_tests();
+    register_ps2_ssx3_anim_pick_guard_tests();
     register_ps2_ts2_split60_tests();
     register_ps2_ssx3_tricky_hud_tests();
     register_ps2_ssx3_tricky_song_tests();
