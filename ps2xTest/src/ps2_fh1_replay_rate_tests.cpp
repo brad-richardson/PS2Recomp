@@ -124,6 +124,7 @@ void register_ps2_fh1_replay_rate_tests()
             s.playInput = 0x1000u;
             craftMode(ram, 3u);
             t.Equals(forcedRate(s, ram.data(), 0x10000u), -1, "mode 3 does not play");
+            s.playInput = 0x1000u;
             craftMode(ram, 1u);
             craftInput(ram, 1u, 0u);
             t.Equals(forcedRate(s, ram.data(), 0x10000u), 1, "sample 3 at 120");
