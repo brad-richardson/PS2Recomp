@@ -1174,6 +1174,7 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
     }
     if (jcam2Fix()) jcam2Reset();
     if (toActive && queryFix()) queryHoldReset();
+    if (toActive && springHoldFix()) springHoldReset();
     if (life2Fix()) life2Flip(ram, a, toActive);
     applyWords(ram, a, toActive);
     if (clockFix())
@@ -1608,6 +1609,48 @@ inline bool querySkip(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
             return false;
     SET_GPR_U32(ctx, 2, h->v0);
     return true;
+}
+
+// ---- JMP5 springhold: h<=0 ground-spring force at stock cadence (opt-in, class d) ----
+// 0x13c878 (normal/spring force; single call site 0x13da38 in the F-chain)
+// evaluates -k*h/H-style terms from the live h (f12). At 120 it runs twice per
+// stock tick on half-step-apart h; through a lip spring-out the re-sampled
+// force per stock tick runs 0.57-0.96x stock (JMP5 F-chain), and last-ground
+// vz collapses (280 -> 131 on gap A) while stock holds ~290. Like query, the
+// even update evaluates and the odd update reuses: the post-call hook holds
+// the even update's f0 per owner and the odd update's return is overwritten
+// with it, so each stock tick applies one evaluation (F*dt/2 + F*dt/2). The
+// call itself still runs on odd updates (no skip: side effects, if any, keep
+// their cadence); only the returned force is held. h>0 calls never capture
+// or restore (the pull branch is untouched). A hold miss (first update after
+// entry/load, a new owner, a stale slot) runs free, never stale.
+inline constexpr uint32_t kSpringSite = 0x13da38u, kSpringForce = 0x13c878u;
+inline constexpr uint32_t kSpringHoldSlots = 8u;
+
+inline bool springHoldFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixSpringHold) != 0u;
+    return on;
+}
+
+struct SpringHold
+{
+    uint32_t p = 0u;      // owner P (a0 at the call)
+    uint32_t f0 = 0u;     // held force bits (f0 at return)
+    uint32_t update = 0u; // g_rngUpdates at capture (even update)
+};
+inline SpringHold g_springHold[kSpringHoldSlots];
+inline void springHoldReset() noexcept
+{
+    for (SpringHold &h : g_springHold)
+        h = SpringHold{};
+}
+// Pure qualify predicate (tested): an odd update at `now` may reuse the slot
+// only when the owner matches and the capture is from the immediately
+// preceding (even) update.
+inline bool springHoldQualify(uint32_t slotP, uint32_t slotUpdate, uint32_t pa, uint32_t now) noexcept
+{
+    return slotP != 0u && slotP == pa && slotUpdate + 1u == now;
 }
 
 // ---- FH30 envfilt: fixed-target environment response (opt-in, class a) ------
@@ -2270,7 +2313,7 @@ inline bool flagsFix() noexcept
 struct PostCall
 {
     uint32_t target = 0u, sp = 0u, obj = 0u;
-    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27), 5 jcam retention (FH28), 6 pid hold (FH29), 7 ground2 (FH33), 8 query hold (JMP4), 9 chase2 (FH35)
+    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27), 5 jcam retention (FH28), 6 pid hold (FH29), 7 ground2 (FH33), 8 query hold (JMP4), 9 chase2 (FH35), 10 springhold (JMP5)
     uint32_t saved[7] = {};
 };
 inline PostCall g_post;
@@ -2280,7 +2323,7 @@ inline bool g_postArmed = false;
 // so its pre-hook mutations are reverted (pid: gains+ring+idx; jcam: the
 // retention counter bump) and the record is fully cleared, so no later
 // return can match it stale. Save-only kinds (flags, texuv, loops, fxtimer,
-// loop ctor, ground2, chase2) need no RAM undo. Idempotent.
+// loop ctor, ground2, chase2, springhold) need no RAM undo. Idempotent.
 inline void postUnwindRestore(uint8_t *ram) noexcept
 {
     if (!g_postArmed)
@@ -2394,6 +2437,58 @@ inline void queryOnReturn(uint8_t *ram, R5900Context *ctx) noexcept
     g_queryHold[slot].v0 = getRegU32(ctx, 2);
     for (uint32_t i = 0u; i < kQueryHoldWords; ++i)
         g_queryHold[slot].w[i] = w[i];
+}
+
+// JMP5 springhold pre-hook (kind 10): arm the post-call capture/restore.
+// Arms on both parities but only for h<=0 calls (f12 at entry; the callee
+// clobbers f12, so the branch is read here). Never clobbers another kind.
+inline void springPreHook(R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc) noexcept
+{
+    if (!springHoldFix() || g_postArmed || !ctx)
+        return;
+    if (sourcePc != kSpringSite || targetPc != kSpringForce)
+        return;
+    if (!(ctx->f[12] <= 0.0f))
+        return; // h>0 pull branch: untouched
+    g_post.target = targetPc;
+    g_post.sp = getRegU32(ctx, 29);
+    g_post.obj = getRegU32(ctx, 4);
+    g_post.saved[0] = g_rngOdd ? 1u : 0u;
+    g_post.kind = 10u;
+    g_postArmed = true;
+}
+
+// Post-call action (kind 10, true returns only): even updates capture f0,
+// odd updates overwrite f0 with the held even value when qualified.
+inline void springOnReturn(R5900Context *ctx) noexcept
+{
+    const uint32_t pa = g_post.obj;
+    if (pa == 0u || !ctx)
+        return;
+    if (g_post.saved[0] == 0u)
+    {
+        uint32_t ps[kSpringHoldSlots];
+        for (uint32_t i = 0u; i < kSpringHoldSlots; ++i)
+            ps[i] = g_springHold[i].p;
+        int slot = queryHoldSelect(ps, kSpringHoldSlots, pa);
+        if (slot < 0)
+            slot = 0;
+        uint32_t bits = 0u;
+        std::memcpy(&bits, &ctx->f[0], 4);
+        g_springHold[slot].p = pa;
+        g_springHold[slot].f0 = bits;
+        g_springHold[slot].update = g_rngUpdates;
+        return;
+    }
+    for (uint32_t i = 0u; i < kSpringHoldSlots; ++i)
+        if (springHoldQualify(g_springHold[i].p, g_springHold[i].update, pa, g_rngUpdates))
+        {
+            float f = 0.0f;
+            std::memcpy(&f, &g_springHold[i].f0, 4);
+            ctx->f[0] = f;
+            return;
+        }
+    // Miss: no fresh hold for this owner; the call's own return stands.
 }
 
 inline void jcamOnReturn(uint8_t *ram)
@@ -2522,6 +2617,11 @@ inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool re
     if (g_post.kind == 8u)
     {
         queryOnReturn(ram, ctx);
+        return;
+    }
+    if (g_post.kind == 10u)
+    {
+        springOnReturn(ctx);
         return;
     }
     if (g_post.kind == 5u)
@@ -2925,7 +3025,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2, trails, chase2, query;
+        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2, trails, chase2, query, springhold;
     bool src, fh9, draw, tap;
 };
 
@@ -2955,7 +3055,8 @@ inline const BranchFlags &branchFlags() noexcept
         r.trails=trailsFix();
         r.chase2=chase2Fix();
         r.query = queryFix();
-        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap || r.input2 || r.query || inputChainFix();
+        r.springhold = springHoldFix();
+        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap || r.input2 || r.query || r.springhold || inputChainFix();
         r.bonus = bonusFix();
         r.lift = liftFix();
         r.flags = flagsFix();
@@ -3095,7 +3196,12 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         addSrc(kCruiseQuerySite);
         addTgt(kCruiseQuery);
     }
-    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixPid | kFixC2Cap | kFixInput2 | kFixInputChain | kFixQuery)) != 0u && on) ||
+    if ((c.main & kFixSpringHold) != 0u && on)
+    {
+        addSrc(kSpringSite);
+        addTgt(kSpringForce);
+    }
+    const bool parity = ((c.main & (kFixRng | kFixTrick | kFixAiGate | kFixJcam | kFixPid | kFixC2Cap | kFixInput2 | kFixInputChain | kFixQuery | kFixSpringHold)) != 0u && on) ||
                         ((c.fix12 & (kFix12Particles | kFix12Flare)) != 0u && on);
     if (parity)
         addSrc(kAppUpdateSite); // parityHook counts app-update dispatches
@@ -3314,7 +3420,7 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         launchPreHook(ram, ctx, targetPc);
     bool skip = on && flag(&BranchFlags::session, sessionFix) && sessionSkip(sourcePc, targetPc);
     if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix() || particlesFix() || flareFix() || jcamFix() ||
-                                    pidFix() || c2capFix() || input2Fix() || inputChainFix())))
+                                    pidFix() || c2capFix() || input2Fix() || inputChainFix() || springHoldFix())))
         parityHook(ram, sourcePc);
     if (on && flag(&BranchFlags::rng, rngFix))
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
@@ -3322,6 +3428,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = querySkip(ram, ctx, sourcePc, targetPc) || skip;
     if (on && flag(&BranchFlags::query, queryFix))
         queryPreHook(ctx, sourcePc, targetPc);
+    if (on && flag(&BranchFlags::springhold, springHoldFix))
+        springPreHook(ctx, sourcePc, targetPc);
     if (on && flag(&BranchFlags::trick, trickFix) && g_rngOdd && sourcePc == kComboSite && targetPc == kComboAccrue)
         skip = true;
     if (on && flag(&BranchFlags::aiGate, aiGateFix))
