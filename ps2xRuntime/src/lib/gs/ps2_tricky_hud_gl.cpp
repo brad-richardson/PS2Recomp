@@ -1,10 +1,13 @@
-// HUD3: shared GLES3 composite (Android EGL + iOS EAGL). See the header.
-// P0 blits the HUD region to a temp texture (exact copy), P1 draws the
-// smears sampling the temp, P2 draws the sprite quads sampling the atlas
-// (RGBA8UI, uploaded once), blended in draw order. The shaders mirror the
-// CPU model (execHudSceneModel) expression for expression; the device diag
-// proves the real GPU output. Any GL failure returns false (CPU fallback);
-// after 3 consecutive failures the backend parks itself broken (CPU forever).
+// HUD4 (from HUD3): shared GLES3 composite (iOS EAGL; the Android EGL glue
+// is dropped). P0 copies the HUD region to a temp texture with a trivial
+// shader (exact copy; a blit would need matching frame/temp formats, and
+// iOS rejects GL_BGRA_EXT as a texture internalformat with INVALID_ENUM),
+// P1 draws the smears sampling the temp, P2 draws the sprite quads sampling
+// the atlas (RGBA8UI, uploaded once), blended in draw order. The shaders
+// mirror the CPU model (execHudSceneModel) expression for expression; the
+// device diag proves the real GPU output. Any GL failure returns false (CPU
+// fallback); after 3 consecutive failures the backend parks itself broken
+// (CPU forever).
 #if defined(__ANDROID__)
 #include <GLES3/gl3.h>
 #elif defined(__APPLE__)
@@ -28,11 +31,10 @@
 
 namespace
 {
-// GL_BGRA_EXT (0x80E1): the enum lives in ES2/glext.h on iOS, which clashes
-// with the ES3 headers; the value is stable across GL/GLES. Used only for
-// the iOS temp texture (temp format == frame format); FBO completeness is
-// checked at runtime and any failure falls back to the CPU stamp.
-constexpr unsigned kGlBgraExt = 0x80E1u;
+// HUD4: the temp is always RGBA8 (see ensureTemp). iOS rejects GL_BGRA_EXT
+// (0x80E1) as a glTexImage2D internalformat (INVALID_ENUM, found on the
+// first iPad leg); the P0 copy is a shader, so no format match is needed
+// and every lane treats the bytes uniformly.
 
 const char *kVsSmear = R"GLSL(
 #version 300 es
@@ -201,6 +203,31 @@ void main()
 }
 )GLSL";
 
+// HUD4 P0: exact region copy, frame texture -> temp (fullscreen triangle
+// from gl_VertexID; no VBO). texelFetch reads the stored bytes uniformly,
+// so the temp holds the same bytes as the frame on every lane.
+const char *kVsCopy = R"GLSL(
+#version 300 es
+void main()
+{
+    float x = -1.0 + float((gl_VertexID & 1) << 2);
+    float y = -1.0 + float((gl_VertexID & 2) << 1);
+    gl_Position = vec4(x, y, 0.0, 1.0);
+}
+)GLSL";
+
+const char *kFsCopy = R"GLSL(
+#version 300 es
+precision highp float;
+uniform sampler2D uSrc;
+uniform ivec2 uOrigin;
+layout(location = 0) out vec4 oColor;
+void main()
+{
+    oColor = texelFetch(uSrc, ivec2(gl_FragCoord.xy) + uOrigin, 0);
+}
+)GLSL";
+
 GLuint compileShader(GLenum type, const char *prefix, const char *src, const char *name)
 {
     GLuint sh = glCreateShader(type);
@@ -294,18 +321,20 @@ struct HudGlBackend
     bool loggedInit = false;
     // Programs (swap variants are lane-diag only, compiled lazily).
     unsigned progSmear = 0, progSmearSwap = 0, progSprite = 0, progSpriteSwap = 0;
+    unsigned progCopy = 0; // HUD4 P0 (no swap variant: the copy is byte-identical)
     int uSmearFrameWH = -1, uSpriteFrameWH = -1, uSpriteAtlas = -1, uSpriteForceAlpha = -1;
     int uTemp = -1;
+    int uCopySrc = -1, uCopyOrigin = -1;
     int uSmearSwapFrameWH = -1, uTempSwap = -1;
     int uSpriteSwapFrameWH = -1, uSpriteSwapAtlas = -1, uSpriteSwapForceAlpha = -1;
     // Geometry (VAO holds the VBO binding + format; data re-uploaded).
     unsigned vaoSmear = 0, vboSmear = 0, vaoSprite = 0, vboSprite = 0;
+    unsigned vaoEmpty = 0; // HUD4 P0 (attribute-less triangle)
     unsigned vboSmearVerts = 0, vboSpriteVerts = 0;
     // Targets.
     unsigned fboFrame = 0, fboRead = 0, fboDraw = 0;
     unsigned texTemp = 0;
     int tempW = 0, tempH = 0;
-    bool tempBgra = false;
     unsigned texAtlas = 0;
     const void *atlasPtr = nullptr;
     // Pass state.
@@ -364,6 +393,21 @@ namespace
 {
 bool ensurePrograms(HudGlBackend *b, bool swap)
 {
+    if (!b->progCopy)
+    {
+        GLuint vs = compileShader(GL_VERTEX_SHADER, "", kVsCopy, "copy-vs");
+        GLuint fs = compileShader(GL_FRAGMENT_SHADER, "", kFsCopy, "copy-fs");
+        if (vs && fs)
+            b->progCopy = linkProgram(vs, fs, "copy");
+        if (vs)
+            glDeleteShader(vs);
+        if (fs)
+            glDeleteShader(fs);
+        if (!b->progCopy)
+            return false;
+        b->uCopySrc = glGetUniformLocation(b->progCopy, "uSrc");
+        b->uCopyOrigin = glGetUniformLocation(b->progCopy, "uOrigin");
+    }
     if (!b->progSmear)
     {
         GLuint vs = compileShader(GL_VERTEX_SHADER, "", kVsSmear, "smear-vs");
@@ -481,6 +525,8 @@ bool ensureBuffers(HudGlBackend *b)
         glGenFramebuffers(1, &b->fboRead);
     if (!b->fboDraw)
         glGenFramebuffers(1, &b->fboDraw);
+    if (!b->vaoEmpty)
+        glGenVertexArrays(1, &b->vaoEmpty);
     return checkGl("ensureBuffers");
 }
 
@@ -510,9 +556,9 @@ bool ensureAtlas(HudGlBackend *b, const ps2_ssx3_tricky_hud::Atlas &atlas)
     return checkGl("ensureAtlas");
 }
 
-bool ensureTemp(HudGlBackend *b, int rw, int rh, bool bgra)
+bool ensureTemp(HudGlBackend *b, int rw, int rh)
 {
-    if (b->texTemp && b->tempW == rw && b->tempH == rh && b->tempBgra == bgra)
+    if (b->texTemp && b->tempW == rw && b->tempH == rh)
         return true;
     if (rw <= 0 || rh <= 0 || rw > 4096 || rh > 4096)
     {
@@ -526,15 +572,13 @@ bool ensureTemp(HudGlBackend *b, int rw, int rh, bool bgra)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    if (bgra)
-        glTexImage2D(GL_TEXTURE_2D, 0, kGlBgraExt, rw, rh, 0, kGlBgraExt, GL_UNSIGNED_BYTE,
-                     nullptr);
-    else
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, rw, rh, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    // Always RGBA8: iOS rejects GL_BGRA_EXT as an internalformat
+    // (INVALID_ENUM), and the P0 copy is a shader, so the temp never needs
+    // to match the frame's format. Bytes stay uniform on every lane.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, rw, rh, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glBindTexture(GL_TEXTURE_2D, 0);
     b->tempW = rw;
     b->tempH = rh;
-    b->tempBgra = bgra;
     return checkGl("ensureTemp");
 }
 
@@ -613,29 +657,35 @@ bool runPasses(HudGlBackend *b, unsigned frameTex, int fw, int fh,
     const int ox = region.x, oy = region.y, rw = region.w, rh = region.h;
     const unsigned progSmear = swap ? b->progSmearSwap : b->progSmear;
     const unsigned progSprite = swap ? b->progSpriteSwap : b->progSprite;
-    if (!progSmear || !progSprite || !frameTex || !b->texTemp)
+    if (!progSmear || !progSprite || !b->progCopy || !frameTex || !b->texTemp)
     {
         std::fprintf(stderr,
-                     "[ssx3-tricky-hud] gpu: passes refused smear=%u sprite=%u frame=%u temp=%u\n",
-                     progSmear, progSprite, frameTex, b->texTemp);
+                     "[ssx3-tricky-hud] gpu: passes refused smear=%u sprite=%u copy=%u frame=%u "
+                     "temp=%u\n",
+                     progSmear, progSprite, b->progCopy, frameTex, b->texTemp);
         return false;
     }
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
-    // P0: exact region copy into the temp (blit, no shader).
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, b->fboRead);
-    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, frameTex,
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    // P0: exact region copy into the temp (trivial shader; no blit, so the
+    // temp format never needs to match the frame's).
+    glBindFramebuffer(GL_FRAMEBUFFER, b->fboDraw);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, b->texTemp,
                            0);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, b->fboDraw);
-    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, b->texTemp,
-                           0);
-    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
-        glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-    {
-        std::fprintf(stderr, "[ssx3-tricky-hud] gpu: blit FBO incomplete\n");
+    if (!checkFbo("copy-target"))
         return false;
-    }
-    glBlitFramebuffer(ox, oy, ox + rw, oy + rh, 0, 0, rw, rh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glViewport(0, 0, rw, rh);
+    glUseProgram(b->progCopy);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, frameTex);
+    glUniform1i(b->uCopySrc, 0);
+    glUniform2i(b->uCopyOrigin, ox, oy);
+    glBindVertexArray(b->vaoEmpty);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+    if (!checkGl("copy-draw"))
+        return false;
     // P1+P2 render into the frame (scissored to the region, as the CPU
     // clips to the region buffer).
     glBindFramebuffer(GL_FRAMEBUFFER, b->fboFrame);
@@ -700,9 +750,10 @@ bool hudGlComposite(HudGlBackend *b, void *platformImage, int fw, int fh,
     {
         if (!ensurePrograms(b, false) || !ensureBuffers(b))
             break;
-        bool rbNative = false;
+        bool rbNative = false; // informational only (the temp is always RGBA8)
         const unsigned frameTex = hudGlPlatformFrameTexture(b->plat, platformImage, fw, fh,
                                                             rbNative);
+        (void)rbNative;
         if (!frameTex)
         {
             std::fprintf(stderr, "[ssx3-tricky-hud] gpu: frame texture failed\n");
@@ -713,7 +764,7 @@ bool hudGlComposite(HudGlBackend *b, void *platformImage, int fw, int fh,
         const Rect region = hudRegionRect(fw, fh);
         if (region.w <= 0 || region.h <= 0)
             break;
-        if (!ensureTemp(b, region.w, region.h, rbNative))
+        if (!ensureTemp(b, region.w, region.h))
         {
             std::fprintf(stderr, "[ssx3-tricky-hud] gpu: temp failed\n");
             break;
@@ -830,7 +881,7 @@ bool hudGlDiagScratch(HudGlBackend *b, const uint8_t *fullFrame, int fw, int fh,
         const Rect region = hudRegionRect(fw, fh);
         if (region.w <= 0 || region.h <= 0)
             break;
-        if (!ensureTemp(b, region.w, region.h, false))
+        if (!ensureTemp(b, region.w, region.h))
             break;
         HudScene sc;
         if (!buildHudScene(sc, sprites, key))
