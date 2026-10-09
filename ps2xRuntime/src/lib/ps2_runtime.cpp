@@ -349,6 +349,15 @@ namespace
         return out;
     }
 
+    // GSB2: PS2X_GS_GIF_ARENA=1 writes XGKICK/DIRECT payloads and native
+    // records once, straight into pooled batch arenas (default off; needs
+    // PS2X_GS_GIF_BATCH=1, like GSB1 needs the diet). Read once, at GS setup.
+    bool gsGifArenaRequested()
+    {
+        const char *env = std::getenv("PS2X_GS_GIF_ARENA");
+        return env != nullptr && std::strcmp(env, "1") == 0;
+    }
+
     // PKB1: PS2X_PKB=0 restores today's exact path (zero-fill + memcpy,
     // diet-gated pool, one-by-one pops, per-packet releases). Unset or "1"
     // turns the three PKB1 items on. Read once, at GS setup.
@@ -3886,7 +3895,8 @@ bool PS2Runtime::syncCoreSubsystems()
         // GSB1: GIF batch command from the GIF stage (same packets, same
         // order, one command per batch; supersedes GPK1 staging on the
         // batching thread when both are on).
-        if (gsGifBatchRequested())
+        const bool gifBatch = gsGifBatchRequested();
+        if (gifBatch)
         {
             const size_t batchBytes = gsGifBatchBytes();
             GsWorker::setGifBatch(true, batchBytes);
@@ -3897,6 +3907,31 @@ bool PS2Runtime::syncCoreSubsystems()
             };
             std::cerr << "[gs:handoff] GSB1 GIF batch on (PS2X_GS_GIF_BATCH=1, bytes="
                       << batchBytes << ")" << std::endl;
+        }
+        // GSB2: zero-copy GIF batches (same packets, same order, views into
+        // pooled arenas instead of a second copy). Needs the batch above;
+        // without it the knob stays inert.
+        if (gsGifArenaRequested())
+        {
+            if (!gifBatch)
+            {
+                std::cerr << "[gs:handoff] GSB2 GIF arena inert (PS2X_GS_GIF_ARENA=1 needs "
+                             "PS2X_GS_GIF_BATCH=1)"
+                          << std::endl;
+            }
+            else
+            {
+                m_gifArbiter.setArenaPool(GsGifArenaPool::create());
+                m_gifArbiter.setProcessViewFn([this](GifPathId path, GsGifArenaRef arena,
+                                                     uint32_t off, uint32_t len)
+                                              {
+                                                  const bool note = m_gs.rawGifBackendActive();
+                                                  m_gs.processViewWithPath(path, note, std::move(arena),
+                                                                           off, len);
+                                              });
+                GsWorker::setGifArena(true);
+                std::cerr << "[gs:handoff] GSB2 GIF arena on (PS2X_GS_GIF_ARENA=1)" << std::endl;
+            }
         }
         // MP1 L2: lean handoff (sleep-aware notifies, one worker lock per pop,
         // lock-free unit drain batches). Wake timing only: same commands, same

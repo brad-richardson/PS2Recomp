@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include "runtime/gs/gs_backend.h"
+#include "runtime/gs/gs_gif_arena.h"
 
 #include <condition_variable>
 #include <cstddef>
@@ -109,6 +110,14 @@ constexpr uint32_t kGsGifBatchSubNote = 1u << 31;
 constexpr uint32_t kGsGifBatchSubPathShift = 24;
 constexpr uint32_t kGsGifBatchSubPathMask = 0x7Fu;
 constexpr uint32_t kGsGifBatchSubLenMask = 0x00FFFFFFu;
+// GSB2: an arena batch keeps the same subs entries and adds one subOff entry
+// per sub (bits 31..17 = arena slot in the command's arenas list, bits
+// 16..0 = byte offset in that arena). A batch over a 16 MiB cap spans at
+// most 256 arenas, which is exactly the slot range; the producer publishes
+// before the 256th.
+constexpr uint32_t kGsGifBatchSubOffSlotShift = 17;
+constexpr uint32_t kGsGifBatchSubOffSlotMax = 255u;
+constexpr uint32_t kGsGifBatchSubOffMask = 0x1FFFFu;
 
 struct GsCommand
 {
@@ -130,11 +139,28 @@ struct GsCommand
     // bit 31 = the kGsGifPacketHasPath note rode with it, bits 30..24 =
     // pathId, bits 23..0 = length. Empty for every other kind.
     std::vector<uint32_t> subs;
+    // GSB2: arena batch only (empty otherwise, and bytes is empty then): the
+    // referenced arenas (one ref each, released when the command retires)
+    // and one subOff entry per sub, pointing into them.
+    std::vector<GsGifArenaRef> arenas;
+    std::vector<uint32_t> subOff;
     std::shared_ptr<GsRpcBase> rpc;          // non-null for RPC kinds
     std::unique_ptr<GSRasterBackend> backend; // SetBackend only
     std::function<void()> apply;              // PrivWrite only
 
-    size_t payloadBytes() const { return bytes.size(); }
+    size_t payloadBytes() const
+    {
+        // GSB2: an arena batch's bytes are its views' lengths (the same sum
+        // GSB1's contiguous bytes hold), so queue backpressure is unchanged.
+        if (kind == GsCmdKind::GifBatch && !arenas.empty())
+        {
+            size_t total = bytes.size();
+            for (const uint32_t sub : subs)
+                total += static_cast<size_t>(sub & kGsGifBatchSubLenMask);
+            return total;
+        }
+        return bytes.size();
+    }
 };
 
 // GP4 H5 (PS2X_GS_HANDOFF_DIET): pool of reusable packet byte-buffers.
@@ -392,6 +418,18 @@ public:
     // Pool the published batch's source vectors return to (one bulk release
     // per batch; null = free them). Set once, before producers run.
     void setBatchPool(GsPacketPool *pool);
+    // GSB2 (PS2X_GS_GIF_ARENA=1, default off; needs PS2X_GS_GIF_BATCH=1): the
+    // batching thread appends arena views instead of copying bytes. Same
+    // publish points, same sub-packet order and bytes, same worker-side
+    // per-packet path; owned-byte packets enqueue alone, as oversize ones do.
+    static void setGifArena(bool on);
+    static bool gifArenaOn();
+    // A view append: batch it under the batch rules (cap, publish points),
+    // else publish first and enqueue it alone with its bytes copied. Only
+    // the batching thread calls this, like the GifPacket path in enqueue().
+    void enqueueView(uint8_t pathId, bool notePath, GsGifArenaRef arena, uint32_t off, uint32_t len);
+    // Receipts: arena views batched (process-wide; tests read deltas).
+    static uint64_t gifArenaViews();
 
     size_t pendingCount() const;
     size_t pendingBytes() const;

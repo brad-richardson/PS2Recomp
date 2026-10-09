@@ -3,7 +3,10 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
+
+#include "runtime/gs/gs_gif_arena.h"
 
 class GsPacketPool; // gs_worker.h (pointer only here)
 
@@ -16,10 +19,15 @@ enum class GifPathId : uint8_t
 
 struct GifArbiterPacket
 {
-    GifPathId pathId;
+    GifPathId pathId = GifPathId::Path1;
     bool path2DirectHl = false;
     bool path3Image = false;
     std::vector<uint8_t> data;
+    // GSB2: arena view (valid iff arena holds a ref; then data is empty and
+    // the length is arenaLen). Set by submitStagedView only.
+    GsGifArenaRef arena;
+    uint32_t arenaOff = 0u;
+    uint32_t arenaLen = 0u;
 };
 
 class GifArbiter
@@ -38,6 +46,11 @@ public:
     // (the callee may take the bytes). Called at the same point, after the
     // listener and the shadow tap.
     using ProcessPathPacketFn = std::function<void(GifPathId, std::vector<uint8_t> &)>;
+    // GSB2 (PS2X_GS_GIF_ARENA): when set, drain() hands each arena-view
+    // packet to this instead, with its path and its view (the callee takes
+    // the ref). Called at the same point as the path function. Owned-byte
+    // packets still go to the path/process function.
+    using ProcessViewFn = std::function<void(GifPathId, GsGifArenaRef, uint32_t, uint32_t)>;
 
     GifArbiter() = default;
     explicit GifArbiter(ProcessPacketFn processFn);
@@ -67,6 +80,20 @@ public:
     // tap, queue position) on the GIF thread.
     std::vector<uint8_t> copyForSubmit(const uint8_t *data, uint32_t sizeBytes) const;
     void submitStaged(GifPathId pathId, std::vector<uint8_t> &&bytes, bool path2DirectHl);
+    // GSB2: the arena split of the same pair. copyViewForSubmit appends the
+    // packet to the current arena (acquiring a fresh one when none is open
+    // or the packet does not fit) and returns its view; false when no pool
+    // is set or the packet exceeds the arena, in which case the caller uses
+    // the classic pair above. MTVU thread only (the current arena is not
+    // synchronized: the GIF-stage ring's own release/acquire carries each
+    // view's bytes to the consumer before its op).
+    void setArenaPool(std::shared_ptr<GsGifArenaPool> pool) { m_arenaPool = std::move(pool); }
+    bool arenaOn() const { return m_arenaPool != nullptr; }
+    bool copyViewForSubmit(const uint8_t *data, uint32_t sizeBytes, GsGifArenaRef &outRef,
+                           uint32_t &outOff);
+    void submitStagedView(GifPathId pathId, GsGifArenaRef arena, uint32_t off, uint32_t len,
+                          bool path2DirectHl);
+    void setProcessViewFn(ProcessViewFn fn) { m_processViewFn = std::move(fn); }
 
     void drain();
     bool empty() const { return m_queue.empty(); }
@@ -76,8 +103,14 @@ private:
     PacketListenerFn m_packetListener;
     ShadowPacketFn m_shadowFn;
     ProcessPathPacketFn m_processPathFn;
+    ProcessViewFn m_processViewFn; // GSB2: set with the arena pool, unset = copy fallback
     GsPacketPool *m_pool = nullptr; // GP4 H5: borrowed, null unless the diet block sets it
     bool m_noZeroFill = false; // PKB1 item 1: assign-copy instead of resize+memcpy
+    // GSB2: the arena pool (shared-owned, so releases stay valid at any
+    // teardown point) and the MTVU thread's open arena + append offset.
+    std::shared_ptr<GsGifArenaPool> m_arenaPool;
+    GsGifArenaRef m_arenaCur;
+    uint32_t m_arenaUsed = 0u;
     std::vector<GifArbiterPacket> m_queue;
 
     static bool isImagePacket(const uint8_t *data, uint32_t sizeBytes);

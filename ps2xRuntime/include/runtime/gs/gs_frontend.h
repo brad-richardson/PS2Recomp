@@ -192,6 +192,11 @@ public:
     // Same effects and order as the two calls; direct mode makes the calls.
     // H2: queued mode takes `bytes` (moved into the command; left empty).
     void processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uint8_t> &bytes);
+    // GSB2 (PS2X_GS_GIF_ARENA): the arena-view half of the above. Queued
+    // mode batches the view (no copy); direct/inline mode runs today's path
+    // on the same bytes synchronously. Same effects and order either way.
+    void processViewWithPath(GifPathId path, bool notePath, GsGifArenaRef arena, uint32_t off,
+                             uint32_t len);
     // GE3 Part 2: PCSX2-timed FINISH. With m_finishTimingPcsx2, sets CSR
     // FINISH now (submitting thread, packet already stream-ordered) when the
     // packet carries an A+D FINISH write. No-op unless the knob is on.

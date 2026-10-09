@@ -34,6 +34,16 @@ thread_local std::vector<uint8_t> t_batch;
 thread_local std::vector<uint32_t> t_batchSubs;
 thread_local std::vector<std::vector<uint8_t>> t_batchSources;
 thread_local GsWorker *t_batchWorker = nullptr;
+// GSB2: the same pending batch in arena mode. Views append here (no byte
+// copy): one subs entry exactly as GSB1 builds it, one subOff entry pointing
+// into t_batchArenas, and the accumulated view bytes for the cap rule. The
+// two modes never mix in one batch (owned-byte packets enqueue alone while
+// the arena is on), so t_batch stays empty here and vice versa.
+std::atomic<bool> s_gifArena{false};
+std::atomic<uint64_t> s_arenaViews{0}; // receipts: views appended to batches
+thread_local std::vector<GsGifArenaRef> t_batchArenas;
+thread_local std::vector<uint32_t> t_batchSubOff;
+thread_local size_t t_batchViewBytes = 0u;
 // GSW2: GS queue wake hysteresis (PS2X_GS_WAKE_LOWWATER=<n>, default off =
 // 0/unset/invalid). In a GS-bound window the queue is full, so every pop
 // batch freed a little space and did m_hasSpace.notify_all(), waking the
@@ -147,6 +157,21 @@ uint64_t GsWorker::gifBatchedCmds()
     return s_batchedCmds.load(std::memory_order_relaxed);
 }
 
+void GsWorker::setGifArena(bool on)
+{
+    s_gifArena.store(on, std::memory_order_relaxed);
+}
+
+bool GsWorker::gifArenaOn()
+{
+    return s_gifArena.load(std::memory_order_relaxed);
+}
+
+uint64_t GsWorker::gifArenaViews()
+{
+    return s_arenaViews.load(std::memory_order_relaxed);
+}
+
 void GsWorker::publishBatch()
 {
     if (t_batchSubs.empty())
@@ -162,9 +187,22 @@ void GsWorker::publishBatch()
         t_batchSources.clear();
     GsCommand cmd;
     cmd.kind = GsCmdKind::GifBatch;
-    cmd.bytes = std::move(t_batch);
+    if (!t_batchArenas.empty())
+    {
+        // GSB2: the batch is views (no contiguous bytes were built): the
+        // arenas move with it and retire when the worker consumes it.
+        cmd.arenas = std::move(t_batchArenas);
+        cmd.subOff = std::move(t_batchSubOff);
+        t_batchArenas.clear();
+        t_batchSubOff.clear();
+        t_batchViewBytes = 0u;
+    }
+    else
+    {
+        cmd.bytes = std::move(t_batch);
+        t_batch.clear();
+    }
     cmd.subs = std::move(t_batchSubs);
-    t_batch.clear();
     t_batchSubs.clear();
     // Batched packets were local-batch enqueues: admit the batch as such.
     ++t_localBatchDepth;
@@ -240,9 +278,11 @@ void GsWorker::enqueue(GsCommand cmd)
         // GSB1: append a local-batch GifPacket from the GIF stage to this
         // thread's batch; anything else publishes the batch first, so the
         // RPC keeps its stream position (GPK1 staging is bypassed on the
-        // batching thread; see the header).
+        // batching thread; see the header). GSB2: while the arena is on,
+        // owned-byte packets are never appended (they enqueue alone below,
+        // as oversize ones do); views arrive through enqueueView.
         if (t_localBatchDepth != 0u && !cmd.rpc && cmd.kind == GsCmdKind::GifPacket &&
-            ps2_mtvu::onGifStage())
+            ps2_mtvu::onGifStage() && !s_gifArena.load(std::memory_order_relaxed))
         {
             if (t_batchWorker != this)
                 flushGifBatch();
@@ -298,6 +338,74 @@ void GsWorker::enqueue(GsCommand cmd)
         m_wakes.fetch_add(1u, std::memory_order_relaxed);
         m_hasWork.notify_one();
     }
+}
+
+void GsWorker::enqueueView(uint8_t pathId, bool notePath, GsGifArenaRef arena, uint32_t off,
+                            uint32_t len)
+{
+    // GSB2: the view half of enqueue()'s GSB1 block. Same publish behavior:
+    // a batchable view appends (subs entry exactly as GSB1 builds it, plus
+    // the subOff pointer); anything else publishes the batch first. A view
+    // that cannot batch (wrong thread, no batch, oversize, or a batch that
+    // would span a 256th arena) enqueues alone with its bytes copied, as
+    // GSB1's oversize packets do.
+    const size_t size = static_cast<size_t>(len);
+    bool batched = false;
+    if (s_gifBatch.load(std::memory_order_relaxed) && s_gifArena.load(std::memory_order_relaxed) &&
+        arena && t_localBatchDepth != 0u && ps2_mtvu::onGifStage())
+    {
+        if (t_batchWorker != this)
+            flushGifBatch();
+        t_batchWorker = this;
+        const size_t cap = s_gifBatchBytes.load(std::memory_order_relaxed);
+        const bool newArena =
+            t_batchArenas.empty() || t_batchArenas.back().get() != arena.get();
+        if (!t_batchSubs.empty() &&
+            (t_batchViewBytes + size > cap ||
+             (newArena && t_batchArenas.size() > kGsGifBatchSubOffSlotMax)))
+            publishBatch();
+        if (size <= cap && size <= kGsGifBatchSubLenMask &&
+            t_batchArenas.size() <= kGsGifBatchSubOffSlotMax &&
+            static_cast<size_t>(off) + size <= GsGifArena::kBytes)
+        {
+            uint32_t slot = 0u;
+            if (!t_batchArenas.empty() && t_batchArenas.back().get() == arena.get())
+                slot = static_cast<uint32_t>(t_batchArenas.size() - 1u);
+            else
+            {
+                slot = static_cast<uint32_t>(t_batchArenas.size());
+                t_batchArenas.push_back(std::move(arena));
+            }
+            // Views of one arena arrive in fill order (the producer seals it
+            // before opening the next), so consecutive views share the slot.
+            const uint32_t entry = (notePath ? kGsGifBatchSubNote : 0u) |
+                                   ((static_cast<uint32_t>(pathId) & kGsGifBatchSubPathMask)
+                                    << kGsGifBatchSubPathShift) |
+                                   static_cast<uint32_t>(size);
+            t_batchSubs.push_back(entry);
+            t_batchSubOff.push_back((slot << kGsGifBatchSubOffSlotShift) |
+                                    (off & kGsGifBatchSubOffMask));
+            t_batchViewBytes += size;
+            s_arenaViews.fetch_add(1u, std::memory_order_relaxed);
+            batched = true;
+        }
+        else
+            flushGifBatch();
+    }
+    else
+        flushGifBatch();
+    if (batched)
+        return;
+    GsCommand cmd;
+    cmd.kind = GsCmdKind::GifPacket;
+    if (notePath)
+    {
+        cmd.u32a = kGsGifPacketHasPath;
+        cmd.pathId = pathId;
+    }
+    if (arena && static_cast<size_t>(off) + size <= GsGifArena::kBytes)
+        cmd.bytes.assign(arena.get()->bytes + off, arena.get()->bytes + off + size);
+    enqueue(std::move(cmd));
 }
 
 bool GsWorker::admitLocked(std::unique_lock<std::mutex> &lock, GsCommand &cmd)
@@ -646,13 +754,16 @@ void GsWorker::threadMain()
         }
         const uint64_t executed = m_executedCount.fetch_add(batchSize, std::memory_order_relaxed) + batchSize;
         if (deferOn && (executed >> 18) != ((executed - batchSize) >> 18))
-            std::fprintf(stderr, "[gs:handoff] executed=%llu wakes=%llu deferred=%llu watchdog=%llu staged_rounds=%llu gif_batches=%llu gif_batched=%llu\n",
+            std::fprintf(stderr, "[gs:handoff] executed=%llu wakes=%llu deferred=%llu watchdog=%llu staged_rounds=%llu gif_batches=%llu gif_batched=%llu gif_arena_views=%llu gif_arenas=%llu gif_arena_hits=%llu\n",
                          static_cast<unsigned long long>(executed),
                          static_cast<unsigned long long>(m_wakes.load(std::memory_order_relaxed)),
                          static_cast<unsigned long long>(m_deferred.load(std::memory_order_relaxed)),
                          static_cast<unsigned long long>(m_watchdog.load(std::memory_order_relaxed)),
                          static_cast<unsigned long long>(s_stagedRounds.load(std::memory_order_relaxed)),
                          static_cast<unsigned long long>(s_batchRounds.load(std::memory_order_relaxed)),
-                         static_cast<unsigned long long>(s_batchedCmds.load(std::memory_order_relaxed)));
+                         static_cast<unsigned long long>(s_batchedCmds.load(std::memory_order_relaxed)),
+                         static_cast<unsigned long long>(s_arenaViews.load(std::memory_order_relaxed)),
+                         static_cast<unsigned long long>(GsGifArenaPool::acquireCount()),
+                         static_cast<unsigned long long>(GsGifArenaPool::poolHitCount()));
     }
 }

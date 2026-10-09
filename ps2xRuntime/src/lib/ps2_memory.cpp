@@ -2915,6 +2915,16 @@ void PS2Memory::arbSubmit(GifPathId pathId, const uint8_t *data, uint32_t sizeBy
         // the next job rewrites); the arbiter work moves.
         if (!data || sizeBytes < 16u)
             return;
+        // GSB2: the copy lands straight in the batch arena and the op carries
+        // a view; oversize/no-pool falls back to the classic op below.
+        GsGifArenaRef view;
+        uint32_t viewOff = 0u;
+        if (m_gifArbiter->copyViewForSubmit(data, sizeBytes, view, viewOff))
+        {
+            ps2_mtvu::gifStageSubmitView(static_cast<uint8_t>(pathId), path2DirectHl,
+                                         std::move(view), viewOff, sizeBytes);
+            return;
+        }
         ps2_mtvu::gifStageSubmit(static_cast<uint8_t>(pathId), path2DirectHl,
                                  m_gifArbiter->copyForSubmit(data, sizeBytes));
         return;
@@ -2961,6 +2971,12 @@ void PS2Memory::execGifStageOp(ps2_mtvu::GifOp &op)
         return;
     if (op.kind == ps2_mtvu::GifOp::Kind::Submit)
     {
+        if (op.arena) // GSB2: a view op stages its view; bytes stay in the arena
+        {
+            m_gifArbiter->submitStagedView(static_cast<GifPathId>(op.path), std::move(op.arena),
+                                           op.arenaOff, op.arenaLen, op.directHl);
+            return;
+        }
         m_gifArbiter->submitStaged(static_cast<GifPathId>(op.path), std::move(op.bytes), op.directHl);
         return;
     }

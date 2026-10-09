@@ -1593,6 +1593,226 @@ void register_ps2_gs_queue_tests()
             t.IsTrue(vOff == vSmall, "small-cap execution should give the same VRAM");
         });
 
+        // GSB2: the arena pool reuses arenas, honors its cap, and hands out
+        // one ref per acquire (the last release returns the arena).
+        tc.Run("GSB2 arena pool acquire/release roundtrip and caps", [](TestCase &t)
+        {
+            auto pool = GsGifArenaPool::create();
+            t.Equals(pool->pooledCount(), 0u, "a fresh pool should hold nothing");
+            GsGifArena *a = pool->acquire();
+            t.IsTrue(a != nullptr, "acquire should never return null");
+            t.Equals(a->refs.load(), 1u, "an issued arena should carry one ref");
+            {
+                GsGifArenaRef r1(a); // adopts the issued ref
+                GsGifArenaRef r2 = r1; // copy addrefs
+                t.Equals(a->refs.load(), 2u, "a copy should addref");
+                GsGifArenaRef r3 = std::move(r2); // move transfers
+                t.Equals(a->refs.load(), 2u, "a move should not change the count");
+                t.IsTrue(!r2, "a moved-from ref should be empty");
+            }
+            t.Equals(pool->pooledCount(), 1u, "the last release should return the arena");
+            GsGifArena *b = pool->acquire();
+            t.IsTrue(b == a, "re-acquire should reuse the pooled arena");
+            t.Equals(pool->pooledCount(), 0u, "re-acquire should pop the pool");
+            GsGifArenaRef held(b); // adopts; released at scope end
+            // Fill past the cap: the pool keeps kMaxArenas and frees the rest
+            // at their last release (observed as a bounded pool).
+            std::vector<GsGifArenaRef> many;
+            for (size_t i = 0; i < GsGifArenaPool::kMaxArenas + 4u; ++i)
+                many.emplace_back(pool->acquire());
+            many.clear();
+            held.reset();
+            t.Equals(pool->pooledCount(), GsGifArenaPool::kMaxArenas,
+                     "the pool should keep at most kMaxArenas");
+        });
+
+        // GSB2: arena batches match batch off through a real arbiter drain +
+        // GS + worker: the consumed-stream digest (per sub-packet), the
+        // command count and VRAM are identical with batch off, GSB1 batch on,
+        // and arena on at the default and a small cap. Packets submit in
+        // mixed-path order so the drain reorders them (PATH1s before PATH2s),
+        // which the digest would catch; the arena's grouping must equal
+        // GSB1's (same cap, same publish points).
+        tc.Run("GSB2 arena matches batch off: digest, count, VRAM and GSB1 grouping", [](TestCase &t)
+        {
+            const std::vector<std::vector<uint8_t>> pkts = {
+                makePackedTriangle(200u, 10u, 30u), makeReglistPoints(),
+                makeImageUpload(0x100u, 0u, 0u, 8u, 8u, 3u), makePackedTriangle(5u, 250u, 60u),
+                makePackedTriangle(100u, 100u, 100u), makeReglistPoints()};
+            // Submit order mixes paths (the drain sorts them); the P3 image
+            // packet also exercises the view-side image test.
+            const GifPathId paths[] = {GifPathId::Path2, GifPathId::Path1, GifPathId::Path3,
+                                       GifPathId::Path2, GifPathId::Path1, GifPathId::Path1};
+            auto run = [&](bool batch, bool arena, size_t capBytes, std::vector<uint8_t> &vramOut,
+                           uint64_t &seq, uint64_t &cmds, uint64_t &rounds, uint64_t &batched,
+                           uint64_t &views)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GSRegisters regs{};
+                initQueueTestRegs(regs);
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+                gs.setQueueEnabled(true);
+                gs.setPktSeqEnabled(true);
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+                GsWorker::setGifBatch(batch, capBytes);
+                GsWorker::setGifArena(arena);
+                // Production wiring: the arbiter drains into the frontend.
+                GifArbiter arbiter([&](const uint8_t *data, uint32_t size)
+                                   { gs.processGIFPacket(data, size); });
+                arbiter.setProcessPathPacketFn([&](GifPathId path, std::vector<uint8_t> &bytes)
+                                               { gs.processGIFPacketWithPath(path, true, bytes); });
+                auto pool = GsGifArenaPool::create();
+                if (arena)
+                {
+                    arbiter.setArenaPool(pool);
+                    arbiter.setProcessViewFn(
+                        [&](GifPathId path, GsGifArenaRef ref, uint32_t off, uint32_t len)
+                        { gs.processViewWithPath(path, true, std::move(ref), off, len); });
+                }
+                // Feed as the GIF stage inside a local batch (one drain, so
+                // the mixed submit order reorders before batching).
+                ps2_mtvu::detail::g_gifTid.store(std::this_thread::get_id(),
+                                                 std::memory_order_relaxed);
+                const uint64_t roundsBefore = GsWorker::gifBatchRounds();
+                const uint64_t batchedBefore = GsWorker::gifBatchedCmds();
+                const uint64_t viewsBefore = GsWorker::gifArenaViews();
+                GsWorker::beginLocalBatch();
+                for (size_t i = 0; i < pkts.size(); ++i)
+                {
+                    if (arena)
+                    {
+                        GsGifArenaRef ref;
+                        uint32_t off = 0u;
+                        t.IsTrue(arbiter.copyViewForSubmit(pkts[i].data(),
+                                                           static_cast<uint32_t>(pkts[i].size()),
+                                                           ref, off),
+                                 "test packets should fit the arena");
+                        arbiter.submitStagedView(paths[i], std::move(ref), off,
+                                                 static_cast<uint32_t>(pkts[i].size()), false);
+                    }
+                    else
+                        arbiter.submit(paths[i], pkts[i].data(),
+                                       static_cast<uint32_t>(pkts[i].size()), false);
+                }
+                arbiter.drain();
+                GsWorker::endLocalBatch();
+                GsWorker::flushGifBatch();
+                rounds = GsWorker::gifBatchRounds() - roundsBefore;
+                batched = GsWorker::gifBatchedCmds() - batchedBefore;
+                views = GsWorker::gifArenaViews() - viewsBefore;
+                ps2_mtvu::detail::g_gifTid.store(std::thread::id{}, std::memory_order_relaxed);
+                GsWorker::setGifBatch(false, 0u);
+                GsWorker::setGifArena(false);
+                gs.drainQueue();
+                seq = gs.pktSeqSnapshot();
+                cmds = gs.pktSeqSnapshotCommands();
+                vramOut = snapshotVramBytes(gs);
+            };
+            std::vector<uint8_t> vOff, vGsb1, vArena, vSmall;
+            uint64_t sOff = 0, sGsb1 = 0, sArena = 0, sSmall = 0;
+            uint64_t cOff = 0, cGsb1 = 0, cArena = 0, cSmall = 0;
+            uint64_t rOff = 0, rGsb1 = 0, rArena = 0, rSmall = 0;
+            uint64_t bOff = 0, bGsb1 = 0, bArena = 0, bSmall = 0;
+            uint64_t vOffN = 0, vGsb1N = 0, vArenaN = 0, vSmallN = 0;
+            run(false, false, 0u, vOff, sOff, cOff, rOff, bOff, vOffN);
+            run(true, false, GsWorker::kGifBatchDefaultBytes, vGsb1, sGsb1, cGsb1, rGsb1, bGsb1,
+                vGsb1N);
+            run(true, true, GsWorker::kGifBatchDefaultBytes, vArena, sArena, cArena, rArena, bArena,
+                vArenaN);
+            run(true, true, 400u, vSmall, sSmall, cSmall, rSmall, bSmall, vSmallN);
+            t.IsTrue(cOff != 0u, "digest should count commands");
+            t.Equals(rOff, 0ull, "batch off should publish no batches");
+            t.IsTrue(rGsb1 == 1u && bGsb1 == pkts.size(), "GSB1 should batch every packet at once");
+            t.IsTrue(vGsb1N == 0u, "GSB1 should batch no views");
+            t.IsTrue(rArena == 1u && bArena == pkts.size() && vArenaN == pkts.size(),
+                     "arena should batch every packet as a view at once");
+            t.Equals(rArena, rGsb1, "arena grouping should equal GSB1 grouping");
+            t.IsTrue(rSmall > 1u && bSmall == pkts.size() && vSmallN == pkts.size(),
+                     "small cap should split into several view batches");
+            t.Equals(sGsb1, sOff, "GSB1 digest should match the separate-command digest");
+            t.Equals(sArena, sOff, "arena digest should match the separate-command digest");
+            t.Equals(cArena, cOff, "arena digest should count the same commands");
+            t.Equals(sSmall, sOff, "small-cap arena digest should match too");
+            t.Equals(cSmall, cOff, "small-cap arena digest should count the same commands");
+            t.IsTrue(vOff == vArena, "arena execution should give the same VRAM");
+            t.IsTrue(vOff == vSmall, "small-cap arena execution should give the same VRAM");
+        });
+
+        // GSB2: a view that cannot batch (over the cap here) publishes the
+        // pending batch first and enqueues alone with identical bytes.
+        tc.Run("GSB2 oversize view publishes the batch first and goes alone", [](TestCase &t)
+        {
+            struct Seen
+            {
+                bool alone;
+                std::vector<uint8_t> bytes;
+            };
+            std::vector<Seen> seen;
+            std::mutex seenMutex;
+            GsWorker worker(0u, 0u, [&](GsCommand &cmd)
+                            {
+                                std::lock_guard<std::mutex> lock(seenMutex);
+                                if (cmd.kind == GsCmdKind::GifBatch)
+                                {
+                                    for (size_t i = 0u; i < cmd.subs.size(); ++i)
+                                    {
+                                        const size_t len =
+                                            cmd.subs[i] & kGsGifBatchSubLenMask;
+                                        const size_t slot =
+                                            cmd.subOff[i] >> kGsGifBatchSubOffSlotShift;
+                                        const size_t at = cmd.subOff[i] & kGsGifBatchSubOffMask;
+                                        const uint8_t *p =
+                                            cmd.arenas[slot].get()->bytes + at;
+                                        seen.push_back({false, {p, p + len}});
+                                    }
+                                }
+                                else if (cmd.kind == GsCmdKind::GifPacket)
+                                    seen.push_back({true, cmd.bytes});
+                            });
+            worker.start();
+            GsWorker::setGifBatch(true, 64u);
+            GsWorker::setGifArena(true);
+            auto pool = GsGifArenaPool::create();
+            std::thread gif(
+                [&]
+                {
+                    ps2_mtvu::detail::g_gifTid.store(std::this_thread::get_id(),
+                                                     std::memory_order_relaxed);
+                    auto view = [&](size_t size, uint8_t fill)
+                    {
+                        GsGifArena *a = pool->acquire();
+                        GsGifArenaRef ref(a);
+                        std::memset(a->bytes, fill, size);
+                        GsWorker::beginLocalBatch();
+                        worker.enqueueView(1u, true, std::move(ref), 0u,
+                                           static_cast<uint32_t>(size));
+                        GsWorker::endLocalBatch();
+                    };
+                    view(16u, 0xA1u);  // batched
+                    view(128u, 0xB2u); // over the 64 B cap: alone, batch first
+                    GsWorker::flushGifBatch();
+                    ps2_mtvu::detail::g_gifTid.store(std::thread::id{}, std::memory_order_relaxed);
+                });
+            gif.join();
+            GsWorker::setGifBatch(false, 0u);
+            GsWorker::setGifArena(false);
+            for (int i = 0; i < 400 && !worker.isQuiescent(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            worker.stop();
+            t.Equals(seen.size(), 2u, "both views should execute");
+            if (seen.size() == 2u)
+            {
+                t.IsTrue(!seen[0].alone && seen[0].bytes.size() == 16u &&
+                             seen[0].bytes[0] == 0xA1u,
+                         "the small view should arrive batched first");
+                t.IsTrue(seen[1].alone && seen[1].bytes.size() == 128u &&
+                             seen[1].bytes[0] == 0xB2u,
+                         "the oversize view should arrive alone with its bytes");
+            }
+            t.Equals(worker.enqueuedCount(), worker.executedCount(), "every command should execute");
+        });
+
         // GF1 H1/H2: one command carrying the path gives the same consumed
         // sequence and VRAM as NoteGifPath + GifPacket.
         tc.Run("GF1 processGIFPacketWithPath matches noteGifPath + processGIFPacket", [](TestCase &t)

@@ -540,6 +540,44 @@ void GS::executeQueuedCommand(GsCommand &cmd)
         // digest note, then processGIFPacket — the same call sequence separate
         // commands produce (capture hook, RawGifPacket call boundaries,
         // minimal decode). One pool release per batch happens below.
+        // GSB2: an arena batch reads each sub-packet through its subOff
+        // pointer instead of the contiguous bytes; the per-packet path is
+        // otherwise identical (same order, same note/path/len handling).
+        if (!cmd.arenas.empty())
+        {
+            const size_t n = cmd.subs.size();
+            for (size_t i = 0u; i < n; ++i)
+            {
+                if (i >= cmd.subOff.size())
+                    break; // malformed table; the producer above cannot emit it
+                const uint32_t sub = cmd.subs[i];
+                const size_t len = static_cast<size_t>(sub & kGsGifBatchSubLenMask);
+                const uint32_t locate = cmd.subOff[i];
+                const size_t slot =
+                    static_cast<size_t>(locate >> kGsGifBatchSubOffSlotShift);
+                const size_t at = static_cast<size_t>(locate & kGsGifBatchSubOffMask);
+                if (slot >= cmd.arenas.size() || !cmd.arenas[slot] ||
+                    at + len > GsGifArena::kBytes)
+                    break; // malformed table; the producer above cannot emit it
+                if ((sub & kGsGifBatchSubNote) != 0u)
+                {
+                    const auto subPath = static_cast<GifPathId>(
+                        (sub >> kGsGifBatchSubPathShift) & kGsGifBatchSubPathMask);
+                    if (m_pktSeqEnabled.load(std::memory_order_relaxed))
+                    {
+                        GsCommand note;
+                        note.kind = GsCmdKind::NoteGifPath;
+                        note.pathId = static_cast<uint8_t>(subPath);
+                        noteConsumedCommand(note);
+                    }
+                    m_curGifPath = subPath;
+                }
+                const uint8_t *ptr = cmd.arenas[slot].get()->bytes + at;
+                noteConsumedGifSubPacket(ptr, len);
+                processGIFPacket(ptr, static_cast<uint32_t>(len));
+            }
+            break;
+        }
         size_t offset = 0u;
         const size_t total = cmd.bytes.size();
         for (const uint32_t sub : cmd.subs)
@@ -1367,6 +1405,30 @@ void GS::processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uin
     if (!ge1_is_native_record(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size())))
         noteFinishTimingPcsx2(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
     m_worker->enqueue(std::move(cmd));
+}
+
+void GS::processViewWithPath(GifPathId path, bool notePath, GsGifArenaRef arena, uint32_t off,
+                             uint32_t len)
+{
+    // GSB2: the FINISH scan and the note run on the same bytes at the same
+    // stream point as processGIFPacketWithPath; only the handoff differs
+    // (a view into the batch instead of a moved vector).
+    const bool valid =
+        arena && len >= 16u && static_cast<size_t>(off) + len <= GsGifArena::kBytes;
+    if (!m_worker || t_inGsWorker || !valid)
+    {
+        if (notePath)
+            noteGifPath(path);
+        if (valid)
+            processGIFPacket(arena.get()->bytes + off, len);
+        return;
+    }
+    ps2_mtvu::touch(ps2_mtvu::Site::GsProcess); // MT1: unit-owned
+    const uint8_t *bytes = arena.get()->bytes + off;
+    // NRT1 2b: a native record holds only vertex packets (no A+D, no FINISH).
+    if (!ge1_is_native_record(bytes, len))
+        noteFinishTimingPcsx2(bytes, len);
+    m_worker->enqueueView(static_cast<uint8_t>(path), notePath, std::move(arena), off, len);
 }
 
     // GE3 Part 5: thread attribution for submit-side FINISH sets (observer

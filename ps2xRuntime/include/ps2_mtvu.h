@@ -57,6 +57,7 @@
 #include "ps2_fpmode.h"
 #include "ps2_perf_log.h"
 #include "ps2_thread_affinity.h"
+#include "runtime/gs/gs_gif_arena.h"
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
 #endif
@@ -81,6 +82,11 @@ namespace ps2_mtvu
         bool directHl = false;
         uint32_t acct = 0;  // bytes counted against the in-flight cap
         std::vector<uint8_t> bytes;
+        // GSB2: arena view (valid iff arena holds a ref; then bytes is empty
+        // and acct is arenaLen). Set by gifStageSubmitView only.
+        GsGifArenaRef arena;
+        uint32_t arenaOff = 0u;
+        uint32_t arenaLen = 0u;
         std::function<void()> fn;
     };
 
@@ -743,6 +749,7 @@ namespace ps2_mtvu
                     run(op);
                     cBytes += op.acct;
                     std::vector<uint8_t>().swap(op.bytes); // no-op once moved from
+                    op.arena.reset(); // GSB2: no-op once moved from
                     op.fn = nullptr;
                     ++cHead;
                     if (kind == GifOp::Kind::JobEnd || cHead - cPub >= kPublishEvery)
@@ -1818,6 +1825,27 @@ namespace ps2_mtvu
             op->directHl = directHl;
             op->acct = acct;
             op->bytes = std::move(bytes);
+            g.commit(*op, false);
+        }
+    }
+
+    // GSB2: the arena half of gifStageSubmit. The op carries a view (one
+    // addref, moved into the slot); the bytes were committed to the arena
+    // before this call, so the ring's own release/acquire carries them to
+    // the consumer. Same thread, same drop rule, same backpressure bytes.
+    inline void gifStageSubmitView(uint8_t path, bool directHl, GsGifArenaRef arena, uint32_t off,
+                                   uint32_t len)
+    {
+        detail::GifStage &g = detail::gifStage();
+        if (GifOp *op = g.claim(len))
+        {
+            op->kind = GifOp::Kind::Submit;
+            op->path = path;
+            op->directHl = directHl;
+            op->acct = len;
+            op->arena = std::move(arena);
+            op->arenaOff = off;
+            op->arenaLen = len;
             g.commit(*op, false);
         }
     }

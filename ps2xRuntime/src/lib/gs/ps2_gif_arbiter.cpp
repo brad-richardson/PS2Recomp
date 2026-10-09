@@ -90,6 +90,47 @@ void GifArbiter::submitStaged(GifPathId pathId, std::vector<uint8_t> &&bytes, bo
     m_queue.push_back(std::move(pkt));
 }
 
+bool GifArbiter::copyViewForSubmit(const uint8_t *data, uint32_t sizeBytes, GsGifArenaRef &outRef,
+                                     uint32_t &outOff)
+{
+    // The one copy: VU1/memory bytes straight into the open arena. The
+    // caller falls back to copyForSubmit when this returns false.
+    if (!m_arenaPool || !data || sizeBytes < 16u || sizeBytes > GsGifArena::kBytes)
+        return false;
+    if (!m_arenaCur || static_cast<size_t>(m_arenaUsed) + sizeBytes > GsGifArena::kBytes)
+    {
+        // Seal the full arena (dropping this handle's ref; live views keep
+        // it alive) and open the next one.
+        m_arenaCur.reset();
+        m_arenaCur = GsGifArenaRef(m_arenaPool->acquire());
+        m_arenaUsed = 0u;
+    }
+    outOff = m_arenaUsed;
+    std::memcpy(m_arenaCur.get()->bytes + m_arenaUsed, data, sizeBytes);
+    m_arenaUsed += sizeBytes;
+    outRef = m_arenaCur; // copy addrefs
+    return true;
+}
+
+void GifArbiter::submitStagedView(GifPathId pathId, GsGifArenaRef arena, uint32_t off, uint32_t len,
+                                  bool path2DirectHl)
+{
+    ps2_mtvu::touch(ps2_mtvu::Site::ArbSubmit); // MT1: unit-owned
+    if (!arena || len < 16u || !m_processFn)
+        return;
+    if (static_cast<size_t>(off) + len > GsGifArena::kBytes)
+        return;
+
+    GifArbiterPacket pkt;
+    pkt.pathId = pathId;
+    pkt.path2DirectHl = (pathId == GifPathId::Path2) && path2DirectHl;
+    pkt.path3Image = (pathId == GifPathId::Path3) && isImagePacket(arena.get()->bytes + off, len);
+    pkt.arena = std::move(arena);
+    pkt.arenaOff = off;
+    pkt.arenaLen = len;
+    m_queue.push_back(std::move(pkt));
+}
+
 void GifArbiter::drain()
 {
     if (!m_processFn)
@@ -116,21 +157,49 @@ void GifArbiter::drain()
     for (size_t i = 0; i < m_queue.size(); ++i)
     {
         auto &pkt = m_queue[i];
-        if (!pkt.data.empty())
+        // GSB2: a view packet carries its bytes in an arena; an owned packet
+        // in data. Both observe the same listener/shadow/scope order below.
+        const bool isView = static_cast<bool>(pkt.arena);
+        const uint8_t *bytes = nullptr;
+        uint32_t size = 0u;
+        if (isView)
+        {
+            bytes = pkt.arena.get()->bytes + pkt.arenaOff;
+            size = pkt.arenaLen;
+        }
+        else if (!pkt.data.empty())
+        {
+            bytes = pkt.data.data();
+            size = static_cast<uint32_t>(pkt.data.size());
+        }
+        if (bytes != nullptr)
         {
             // E33: the listener runs first so GS draw attribution lands on
             // this packet's path before the process function draws with it.
             if (m_packetListener)
             {
-                m_packetListener(pkt.pathId, static_cast<uint32_t>(pkt.data.size()));
+                m_packetListener(pkt.pathId, size);
             }
             // G44: shadow observes first, same order, path preserved.
             if (m_shadowFn)
             {
-                m_shadowFn(pkt.pathId, pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
+                m_shadowFn(pkt.pathId, bytes, size);
             }
             const ps2_mtvu::GifEmitPathScope emitPath(static_cast<uint8_t>(pkt.pathId)); // MQ2
-            if (m_processPathFn)
+            if (isView && m_processViewFn)
+                m_processViewFn(pkt.pathId, std::move(pkt.arena), pkt.arenaOff, pkt.arenaLen);
+            else if (isView)
+            {
+                // No view function (arena half-wired): copy the view and run
+                // today's path. Production always sets the view function with
+                // the pool, so this is defensive only.
+                std::vector<uint8_t> owned(bytes, bytes + size);
+                if (m_processPathFn)
+                    m_processPathFn(pkt.pathId, owned);
+                else
+                    m_processFn(owned.data(), size);
+            }
+            else if (m_processPathFn)
                 m_processPathFn(pkt.pathId, pkt.data);
             else
                 m_processFn(pkt.data.data(), static_cast<uint32_t>(pkt.data.size()));
