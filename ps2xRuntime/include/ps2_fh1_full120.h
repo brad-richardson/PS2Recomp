@@ -1155,6 +1155,9 @@ inline bool jcam2Service(uint8_t *ram, const R5900Context &live, PS2Runtime &run
     return true;
 }
 
+inline bool queryFix() noexcept;        // JMP4, defined with the hold below
+inline void queryHoldReset() noexcept; // JMP4 hold, defined with it below
+
 inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
 {
     uint32_t a = 0u;
@@ -1170,6 +1173,7 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
         std::abort();
     }
     if (jcam2Fix()) jcam2Reset();
+    if (toActive && queryFix()) queryHoldReset();
     if (life2Fix()) life2Flip(ram, a, toActive);
     applyWords(ram, a, toActive);
     if (clockFix())
@@ -1554,6 +1558,15 @@ struct QueryHold
     uint32_t w[kQueryHoldWords] = {};
 };
 inline QueryHold g_queryHold[kQueryHoldSlots];
+// RPL1: every events entry starts with no hold, so the first odd query of a
+// 120 window runs instead of restoring a packet from an earlier window (the
+// previous race, or before a pause; a replay otherwise inherited the live
+// run's last packet and drifted at its first odd landing: RPL1 d6).
+inline void queryHoldReset() noexcept
+{
+    for (QueryHold &h : g_queryHold)
+        h = QueryHold{};
+}
 // Pure slot select (tested): the owner's slot wins, else the first empty slot,
 // else -1 (full: capture overwrites slot 0, skip treats it as a miss).
 inline int queryHoldSelect(const uint32_t *ps, int n, uint32_t p) noexcept

@@ -124,6 +124,11 @@ void register_ps2_fh1_replay_rate_tests()
             s.playInput = 0x1000u;
             craftMode(ram, 3u);
             t.Equals(forcedRate(s, ram.data(), 0x10000u), -1, "mode 3 does not play");
+            craftMode(ram, 1u);
+            craftInput(ram, 1u, 0u);
+            t.Equals(forcedRate(s, ram.data(), 0x10000u), 1, "sample 3 at 120");
+            put(ram, 0x2008u, 0xdef000u | 6u);
+            t.Equals(forcedRate(s, ram.data(), 0x10000u), -1, "buffer no longer the noted recording");
             forget(s, 0x1000u);
             t.IsTrue(track(s, 0x1000u, false) == nullptr, "reset forgets the track");
         });
@@ -145,6 +150,18 @@ void register_ps2_fh1_replay_rate_tests()
                 t.IsFalse(hookTableHit(h, kRecordSite, 1u), "off: no record site");
                 t.IsFalse(hookTableHit(h, kPlaySite, 1u), "off: no play site");
             }
+        });
+        tc.Run("query holds clear at an entry flip", [](TestCase &t) {
+            using namespace ps2_fh1;
+            g_queryHold[0].p = 0x5409b0u;
+            g_queryHold[0].v0 = 1u;
+            g_queryHold[0].w[3] = 0x3f800000u;
+            g_queryHold[5].p = 0x540a60u;
+            queryHoldReset();
+            bool empty = true;
+            for (const QueryHold &h : g_queryHold)
+                empty = empty && h.p == 0u && h.v0 == 0u && h.w[3] == 0u;
+            t.IsTrue(empty, "no owner keeps a hold across an entry");
         });
         tc.Run("save-state section round trip", [](TestCase &t) {
             ps2_fh1_linkSavestateSection();

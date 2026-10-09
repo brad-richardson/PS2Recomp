@@ -217,9 +217,11 @@ inline int forcedRate(State &s, const uint8_t *ram, uint32_t gp)
         s.playInput = 0u;
         return -1;
     }
+    // The buffer must still hold exactly the noted recording (an input object
+    // refilled from elsewhere, e.g. a loaded clip, keeps no stale track).
     const Track *t = track(s, s.playInput, false);
-    uint32_t k = 0u;
-    if (!t || !consumed(ram, s.playInput, k))
+    uint32_t k = 0u, n = 0u;
+    if (!t || !recorded(ram, s.playInput, n) || n != t->total || !consumed(ram, s.playInput, k))
         return -1;
     return rateAt(*t, k);
 }
