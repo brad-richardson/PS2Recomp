@@ -405,6 +405,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_TK12_AP_TO",
         "PS2X_TK12_CLIP",
         "PS2X_TRICKY_HUD_ASYNC",
+        "PS2X_TRICKY_HUD_CACHE",
         "PS2X_UNPACED",
         "PS2X_VIF1_REVERSE_DMA",
         "PS2X_VIF_UNPACK_FAST",

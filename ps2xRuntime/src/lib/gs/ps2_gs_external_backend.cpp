@@ -342,6 +342,8 @@ struct IOHudState
     uint64_t buildFails = 0u;
     bool submitted = false; // a HUD job exists; later publishes must join it
     bool asyncLogged = false;
+    ps2_ssx3_tricky_hud::HudCache cache; // HUD2: fused layer (PS2X_TRICKY_HUD_CACHE=1)
+    uint64_t cacheFallbacks = 0u;
 };
 
 IOHudState &ioHudState()
@@ -371,6 +373,16 @@ bool ioHudAsync()
     return on;
 }
 
+// HUD2: PS2X_TRICKY_HUD_CACHE=1 serves the composite from the fused layer.
+bool ioHudCache()
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_TRICKY_HUD_CACHE");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    return on;
+}
+
 // The composite proper. Runs on the GsHud helper (async) or on the completion
 // thread under the pool mutex (inline); each mode serializes it, so the state
 // above needs no lock. Not under the pool mutex in the async case: the slot is
@@ -390,9 +402,18 @@ bool stampIOSurfaceHud(void *surface, uint64_t tick,
     const ps2_ssx3_tricky_hud::Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
     if (r.w <= 0 || r.h <= 0)
         return false;
+    // HUD2: cached fused layer (PS2X_TRICKY_HUD_CACHE=1). ensureHudLayer owns
+    // its own sprites; on refusal the direct stamp below serves.
+    const bool useCache =
+        ioHudCache() && ensureHudLayer(st.cache, *p.atlas, static_cast<int>(imgW),
+                                       static_cast<int>(imgH), p.fill, p.full, tick, p.splashUntil,
+                                       p.litLetters, p.flashUntil);
+    if (ioHudCache() && !useCache && ++st.cacheFallbacks == 1u)
+        std::fprintf(stderr, "[ssx3-tricky-hud] io: layer build failed, direct stamp fallback\n");
     // Pre-scaled art, once per run (the export size and atlas are fixed).
-    if (!st.sprites.ok || st.sprites.atlas != p.atlas || st.sprites.fw != static_cast<int>(imgW) ||
-        st.sprites.fh != static_cast<int>(imgH))
+    // Skipped when the cached layer serves this composite.
+    if (!useCache && (!st.sprites.ok || st.sprites.atlas != p.atlas ||
+                      st.sprites.fw != static_cast<int>(imgW) || st.sprites.fh != static_cast<int>(imgH)))
     {
         if (!buildHudSprites(st.sprites, *p.atlas, static_cast<int>(imgW), static_cast<int>(imgH)))
         {
@@ -412,8 +433,14 @@ bool stampIOSurfaceHud(void *surface, uint64_t tick,
     uint8_t *base = static_cast<uint8_t *>(IOSurfaceGetBaseAddress(ref));
     const size_t rowBytes = IOSurfaceGetBytesPerRow(ref);
     if (base && rowBytes >= static_cast<size_t>(imgW) * 4u)
-        stampHudDirect<true>(base, rowBytes, r, st.sprites, p.fill, p.full, tick, p.splashUntil,
-                             p.litLetters, p.flashUntil);
+    {
+        // HUD2: the cached layer serves from one fused pass when enabled.
+        if (useCache)
+            stampHudCached<true>(base, rowBytes, r, st.cache.layer);
+        else
+            stampHudDirect<true>(base, rowBytes, r, st.sprites, p.fill, p.full, tick,
+                                 p.splashUntil, p.litLetters, p.flashUntil);
+    }
     IOSurfaceUnlock(ref, 0, nullptr);
     const auto t1 = std::chrono::steady_clock::now();
     st.compositeNs +=
@@ -1606,9 +1633,19 @@ private:
         const ps2_ssx3_tricky_hud::Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
         if (r.w <= 0 || r.h <= 0)
             return;
+        // HUD2: cached fused layer (PS2X_TRICKY_HUD_CACHE=1). ensureHudLayer
+        // owns its own sprites; on refusal the direct stamp below serves.
+        const bool useCache =
+            m_hudCache && ensureHudLayer(m_hudCacheState, *p.atlas, static_cast<int>(imgW),
+                                         static_cast<int>(imgH), p.fill, p.full, tick,
+                                         p.splashUntil, p.litLetters, p.flashUntil);
+        if (m_hudCache && !useCache && ++m_hudCacheFallbacks == 1u)
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: layer build failed, direct stamp fallback\n");
         // Pre-scaled art, once per run (the export size and atlas are fixed).
-        if (!m_hudSprites.ok || m_hudSprites.atlas != p.atlas ||
-            m_hudSprites.fw != static_cast<int>(imgW) || m_hudSprites.fh != static_cast<int>(imgH))
+        // Skipped when the cached layer serves this composite.
+        if (!useCache && (!m_hudSprites.ok || m_hudSprites.atlas != p.atlas ||
+                          m_hudSprites.fw != static_cast<int>(imgW) ||
+                          m_hudSprites.fh != static_cast<int>(imgH)))
         {
             if (!buildHudSprites(m_hudSprites, *p.atlas, static_cast<int>(imgW), static_cast<int>(imgH)))
             {
@@ -1640,8 +1677,12 @@ private:
         const size_t strideBytes = static_cast<size_t>(desc.stride) * 4u;
         // Part 2: stamp straight into the locked AHB (no region temp
         // round-trip; same values as the temp path, locked by test).
-        stampHudDirect(static_cast<uint8_t *>(ptr), strideBytes, r, m_hudSprites, p.fill, p.full, tick,
-                       p.splashUntil, p.litLetters, p.flashUntil);
+        // HUD2: the cached layer serves from one fused pass when enabled.
+        if (useCache)
+            stampHudCached(static_cast<uint8_t *>(ptr), strideBytes, r, m_hudCacheState.layer);
+        else
+            stampHudDirect(static_cast<uint8_t *>(ptr), strideBytes, r, m_hudSprites, p.fill, p.full,
+                           tick, p.splashUntil, p.litLetters, p.flashUntil);
         AHardwareBuffer_unlock(buffer, nullptr);
         const auto t1 = std::chrono::steady_clock::now();
         m_hudCompositeNs +=
@@ -1915,6 +1956,14 @@ private:
     uint64_t m_hudCompositeNs = 0u;
     uint64_t m_hudLockFails = 0u;
     uint64_t m_hudBuildFails = 0u;
+    // HUD2: PS2X_TRICKY_HUD_CACHE=1 serves the composite from the fused
+    // layer (rebuilt on visual-key change); falls back to direct on refusal.
+    const bool m_hudCache = [] {
+        const char *v = std::getenv("PS2X_TRICKY_HUD_CACHE");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    ps2_ssx3_tricky_hud::HudCache m_hudCacheState;
+    uint64_t m_hudCacheFallbacks = 0u;
     // GSW1: PS2X_TRICKY_HUD_ASYNC=1 runs the composite + queue on m_hudThread.
     // m_hudInFlight: the slot it owns until joinHudJob (-1 = none);
     // m_hudJobQueued: that job's queue result, read only after the join.

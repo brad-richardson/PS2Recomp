@@ -1157,5 +1157,496 @@ inline void stampHudDirect(uint8_t *ahbBase, size_t strideBytes, const Rect &r, 
 // per-VBlank packet; the GL and AHB compositors consume it and never touch
 // RDRAM. This header keeps the pure pieces: readers, reducers, the atlas
 // and the pixel composer (the reference pixel math, unchanged).
+//
+// HUD2: fused cached layer (PS2X_TRICKY_HUD_CACHE=1, default off). PRF1: the
+// GsHud composite burns 3.1-3.3 ms per update on Tricky courses (smearCoverS
+// 43 %, stampSpriteS 20 %), pure heat on ~27 passes over the AHB. The HUD's
+// visual state changes far less often than every frame, but the frame under
+// it changes every frame, and the smear reads the LIVE frame (its edge
+// samples), so a frozen layer cannot be byte-identical. The layer therefore
+// caches everything frame-independent per region pixel -- the sprite stack
+// fused into one raw sample (+ an op run where sprites overlap), the
+// smear's geometric feather/lerp -- and the per-frame pass resolves the
+// smear from the live frame and blends once, in a SINGLE pass that reads
+// each frame pixel once and writes it once. The per-pixel statements are
+// the same expressions (same order, same rounding points) as smearCoverS /
+// blendSample, so the cached stamp is byte-identical to stampHudDirect for
+// the same packet and frame (locked by the HudCache suite tests on both
+// channel orders). Rebuild only when the visual key changes; any anomaly
+// (overlapping smears, bad dims) refuses the build and the call site falls
+// back to the direct stamp, so the HUD never drops.
+
+// Per-pixel kind bits (HudLayer::kind).
+constexpr uint8_t kLayerEmpty = 0u;
+constexpr uint8_t kLayerSmear = 1u;  // smear geometry valid (smA, smT)
+constexpr uint8_t kLayerSprite = 2u; // sprite sample valid (sr, sg, sb, sa)
+constexpr uint8_t kLayerMulti = 4u;  // sprite stack: ops run at multi (implies kLayerSprite)
+
+// Everything the stamp reads, reduced to what the pixels show. tick enters
+// only through the pulse phases and the splash/flash windows, so the key
+// changes far less often than every frame.
+struct HudVisualKey
+{
+    const Atlas *atlas = nullptr; // art identity (a new atlas rebuilds)
+    int fw = 0;
+    int fh = 0;
+    int lit = 0;      // litCoils(fill)
+    bool full = false;
+    bool dim = false; // full && ((tick >> 3) & 1)
+    bool splash = false;
+    int letters = 0; // clamped 0..6
+    bool flashing = false;
+    bool flashRed = false;
+    bool operator==(const HudVisualKey &o) const
+    {
+        return atlas == o.atlas && fw == o.fw && fh == o.fh && lit == o.lit && full == o.full &&
+               dim == o.dim && splash == o.splash && letters == o.letters &&
+               flashing == o.flashing && flashRed == o.flashRed;
+    }
+    bool operator!=(const HudVisualKey &o) const { return !(*this == o); }
+};
+
+// The same derivations stampHudDirect applies (same expressions, copied).
+inline HudVisualKey visualKeyFor(const Atlas *atlas, int fw, int fh, float fill, bool full,
+                                uint64_t tick, uint64_t splashUntilTick, int litLetters,
+                                uint64_t flashUntilTick)
+{
+    HudVisualKey k;
+    k.atlas = atlas;
+    k.fw = fw;
+    k.fh = fh;
+    k.lit = litCoils(fill);
+    k.full = full;
+    k.dim = full && (((tick >> 3) & 1u) != 0u);
+    k.splash = tick < splashUntilTick;
+    if (litLetters < 0)
+        litLetters = 0;
+    if (litLetters > 6)
+        litLetters = 6;
+    k.letters = litLetters;
+    k.flashing = tick < flashUntilTick;
+    k.flashRed = k.flashing && (((tick >> 3) & 1u) == 0u);
+    return k;
+}
+
+struct HudLayerPx
+{
+    float sr = 0.0f, sg = 0.0f, sb = 0.0f, sa = 0.0f; // first/only sprite sample (raw floats)
+    float smA = 0.0f, smT = 0.0f;                     // smear feather + edge-lerp position
+    uint32_t multi = 0u;                              // multi-op run start in HudLayer::ops
+};
+
+struct HudLayerRow
+{
+    bool smear = false;
+    int lx = 0, rx = 0; // edge columns (region coords), read before the row's writes
+};
+
+struct HudLayer
+{
+    bool ok = false;
+    int w = 0;
+    int h = 0;
+    std::vector<uint8_t> kind;   // w*h kind bits
+    std::vector<HudLayerPx> px;  // w*h pixel data
+    std::vector<float> ops;      // multi runs: [count, sr,sg,sb,sa x count]
+    std::vector<HudLayerRow> rows; // h row smears
+};
+
+struct HudCache
+{
+    HudSprites sprites; // pre-scaled art (built once per run, as today)
+    HudLayer layer;     // fused layer (rebuilt on visual-key change)
+    HudVisualKey key;
+    bool has = false;
+    uint64_t rebuilds = 0u;
+};
+
+namespace hud2detail
+{
+struct Draw
+{
+    const SpriteImg *img = nullptr;
+    int dx = 0;
+    int dy = 0;
+};
+
+// The draw list stampHudDirect stamps, in order, with identical variant
+// selection and dest rects. Mirrored (not shared) so the default path is
+// untouched; the HudCache suite tests fail loudly on any drift.
+inline void hudDrawList(const HudSprites &ss, const HudVisualKey &key, Draw *out, int &n)
+{
+    n = 0;
+    out[n++] = {&ss.pole, ss.poleDst.x, ss.poleDst.y};
+    for (int i = 0; i < kCoils; ++i)
+        out[n++] = {key.lit > i ? &ss.ringImg[i / 4] : &ss.ringImg[4], ss.ringDst[i].x,
+                    ss.ringDst[i].y};
+    out[n++] = {key.full ? (key.dim ? &ss.jewelImg[2] : &ss.jewelImg[1]) : &ss.jewelImg[0],
+                ss.jewelDst.x, ss.jewelDst.y};
+    for (int i = 0; i < 6; ++i)
+    {
+        const bool red = key.flashing ? key.flashRed : (i < key.letters);
+        out[n++] = {red ? &ss.archRed[i] : &ss.archChrome[i], ss.archDst[i].x, ss.archDst[i].y};
+    }
+    out[n++] = {key.full ? &ss.pillImg[0] : &ss.pillImg[1], ss.pillDst.x, ss.pillDst.y};
+    if (key.splash)
+        out[n++] = {&ss.splash, ss.splashDst.x, ss.splashDst.y};
+}
+
+// One smear's geometry rasterized with smearCoverS's exact clip and feather
+// (same statements, copied). Refuses when this smear shares a row or pixel
+// with an earlier one (the layer holds one smear per row/pixel); the two
+// production smears are y-disjoint, so this never fires there.
+inline bool rasterSmear(HudLayer &L, int x0, int y0, int x1, int y1)
+{
+    const int bw = L.w, bh = L.h;
+    if (x1 <= x0 || y1 <= y0)
+        return true;
+    const int xa = x0 < 0 ? 0 : x0;
+    const int xb = x1 > bw ? bw : x1;
+    const int ya = y0 < 0 ? 0 : y0;
+    const int yb = y1 > bh ? bh : y1;
+    const float span = static_cast<float>(x1 - x0);
+    for (int y = ya; y < yb; ++y)
+    {
+        const int lx = x0 - 2 < 0 ? 0 : x0 - 2;
+        const int rx = x1 + 2 > bw - 1 ? bw - 1 : x1 + 2;
+        HudLayerRow &row = L.rows[static_cast<size_t>(y)];
+        if (row.smear)
+            return false;
+        row.smear = true;
+        row.lx = lx;
+        row.rx = rx;
+        const float fy0 = static_cast<float>(y - y0) / 3.0f;
+        const float fy1 = static_cast<float>(y1 - y) / 3.0f;
+        for (int x = xa; x < xb; ++x)
+        {
+            const float t = static_cast<float>(x - x0) / span;
+            float a = fy0;
+            if (fy1 < a)
+                a = fy1;
+            const float fx0 = static_cast<float>(x - x0) / 2.0f;
+            const float fx1 = static_cast<float>(x1 - x) / 2.0f;
+            if (fx0 < a)
+                a = fx0;
+            if (fx1 < a)
+                a = fx1;
+            if (a <= 0.0f)
+                continue;
+            if (a > 1.0f)
+                a = 1.0f;
+            const size_t i = static_cast<size_t>(y) * static_cast<size_t>(bw) + static_cast<size_t>(x);
+            if (L.kind[i] & kLayerSmear)
+                return false;
+            L.kind[i] |= kLayerSmear;
+            L.px[i].smA = a;
+            L.px[i].smT = t;
+        }
+    }
+    return true;
+}
+} // namespace hud2detail
+
+// Fuse the sprite stack + smear geometry for one visual key. False on any
+// anomaly (the call site falls back to the direct stamp).
+inline bool buildHudLayer(HudLayer &L, const HudSprites &ss, const HudVisualKey &key)
+{
+    L = HudLayer{};
+    if (!ss.ok || ss.region.w <= 0 || ss.region.h <= 0)
+        return false;
+    const int bw = ss.region.w, bh = ss.region.h;
+    const int ox = ss.region.x, oy = ss.region.y;
+    const size_t npx = static_cast<size_t>(bw) * static_cast<size_t>(bh);
+    if (npx == 0u || npx > static_cast<size_t>(16) * 1024u * 1024u)
+        return false;
+    L.w = bw;
+    L.h = bh;
+    L.kind.assign(npx, kLayerEmpty);
+    L.px.resize(npx);
+    L.rows.resize(static_cast<size_t>(bh));
+    const Rect &cc = ss.coilCover;
+    if (!hud2detail::rasterSmear(L, cc.x - ox, cc.y - oy, cc.x + cc.w - ox, cc.y + cc.h - oy))
+        return false;
+    if (!hud2detail::rasterSmear(L, ss.smearX0 - ox, ss.smearY0 - oy, ss.smearX1 - ox,
+                                 ss.smearY1 - oy))
+        return false;
+    hud2detail::Draw draws[1 + kCoils + 1 + 6 + 1 + 1];
+    int ndraws = 0;
+    hud2detail::hudDrawList(ss, key, draws, ndraws);
+    // Pass 1: per-pixel covering-draw counts (draws <= 26, no saturation).
+    std::vector<uint8_t> cnt(npx, 0);
+    for (int d = 0; d < ndraws; ++d)
+    {
+        const SpriteImg &img = *draws[d].img;
+        if (img.w <= 0 || img.h <= 0 || img.px.empty())
+            continue;
+        const int dx = draws[d].dx - ox, dy = draws[d].dy - oy;
+        const int x0 = dx < 0 ? 0 : dx;
+        const int y0 = dy < 0 ? 0 : dy;
+        const int x1 = dx + img.w > bw ? bw : dx + img.w;
+        const int y1 = dy + img.h > bh ? bh : dy + img.h;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x)
+            {
+                const float *o =
+                    &img.px[(static_cast<size_t>(y - dy) * static_cast<size_t>(img.w) +
+                             static_cast<size_t>(x - dx)) *
+                            4u];
+                if (o[3] <= 0.0f)
+                    continue;
+                const size_t i =
+                    static_cast<size_t>(y) * static_cast<size_t>(bw) + static_cast<size_t>(x);
+                if (cnt[i] < 255u)
+                    ++cnt[i];
+            }
+    }
+    // Multi-op pool layout: one run per multi pixel (count + ops).
+    std::vector<uint32_t> run(npx, 0u);
+    size_t poolFloats = 0u;
+    for (size_t i = 0; i < npx; ++i)
+    {
+        if (cnt[i] >= 2u)
+        {
+            run[i] = static_cast<uint32_t>(poolFloats);
+            poolFloats += 1u + 4u * static_cast<size_t>(cnt[i]);
+        }
+    }
+    if (poolFloats > static_cast<size_t>(64) * 1024u * 1024u)
+        return false;
+    L.ops.assign(poolFloats, 0.0f);
+    std::vector<uint32_t> cursor = run;
+    std::vector<uint8_t> seen(npx, 0);
+    // Pass 2: fill singles + runs, in draw order.
+    for (int d = 0; d < ndraws; ++d)
+    {
+        const SpriteImg &img = *draws[d].img;
+        if (img.w <= 0 || img.h <= 0 || img.px.empty())
+            continue;
+        const int dx = draws[d].dx - ox, dy = draws[d].dy - oy;
+        const int x0 = dx < 0 ? 0 : dx;
+        const int y0 = dy < 0 ? 0 : dy;
+        const int x1 = dx + img.w > bw ? bw : dx + img.w;
+        const int y1 = dy + img.h > bh ? bh : dy + img.h;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x)
+            {
+                const float *o =
+                    &img.px[(static_cast<size_t>(y - dy) * static_cast<size_t>(img.w) +
+                             static_cast<size_t>(x - dx)) *
+                            4u];
+                if (o[3] <= 0.0f)
+                    continue;
+                const size_t i =
+                    static_cast<size_t>(y) * static_cast<size_t>(bw) + static_cast<size_t>(x);
+                const uint8_t c = cnt[i];
+                if (c < 2u)
+                {
+                    L.kind[i] |= kLayerSprite;
+                    HudLayerPx &p = L.px[i];
+                    p.sr = o[0];
+                    p.sg = o[1];
+                    p.sb = o[2];
+                    p.sa = o[3];
+                    continue;
+                }
+                if (seen[i] == 0u)
+                {
+                    L.kind[i] |= static_cast<uint8_t>(kLayerSprite | kLayerMulti);
+                    L.px[i].multi = run[i];
+                    L.ops[cursor[i]++] = static_cast<float>(c);
+                }
+                seen[i] = 1u;
+                float *w = &L.ops[cursor[i]];
+                w[0] = o[0];
+                w[1] = o[1];
+                w[2] = o[2];
+                w[3] = o[3];
+                cursor[i] += 4u;
+            }
+    }
+    L.ok = true;
+    return true;
+}
+
+// Ensure sprites + layer for one composite; rebuilds the layer only when the
+// visual key changed. False (sprites or layer refused) means fall back to
+// the direct stamp.
+inline bool ensureHudLayer(HudCache &c, const Atlas &a, int fw, int fh, float fill, bool full,
+                           uint64_t tick, uint64_t splashUntilTick, int litLetters,
+                           uint64_t flashUntilTick)
+{
+    if (!a.ok || fw <= 0 || fh <= 0)
+        return false;
+    if (!c.sprites.ok || c.sprites.atlas != &a || c.sprites.fw != fw || c.sprites.fh != fh)
+    {
+        if (!buildHudSprites(c.sprites, a, fw, fh))
+        {
+            c.has = false;
+            return false;
+        }
+    }
+    const HudVisualKey key = visualKeyFor(&a, fw, fh, fill, full, tick, splashUntilTick,
+                                          litLetters, flashUntilTick);
+    if (c.has && c.layer.ok && c.key == key)
+        return true;
+    HudLayer L;
+    if (!buildHudLayer(L, c.sprites, key))
+    {
+        c.has = false;
+        return false;
+    }
+    c.layer = std::move(L);
+    c.key = key;
+    c.has = true;
+    ++c.rebuilds;
+    return true;
+}
+
+// The cached composite, stride-aware: one pass over the region. base points
+// at the region origin; rows advance by strideBytes. Each row's smear edge
+// samples are read before any write to that row, so they see the pristine
+// frame exactly as the direct stamp's per-smear reads do (the direct stamp
+// reads both smears' edges before any draw touches those columns; the two
+// smears never share a row, refused at build). Per-pixel statements match
+// smearCoverS / blendSample (same order, same rounding points), and sprite
+// stacks replay through the real blend functions in draw order.
+template <bool SwapRB = false>
+inline void stampHudCachedS(uint8_t *base, size_t strideBytes, const HudLayer &L)
+{
+    if (!base || !L.ok || L.w <= 0 || L.h <= 0)
+        return;
+    constexpr int kR = SwapRB ? 2 : 0;
+    constexpr int kB = SwapRB ? 0 : 2;
+    const int bw = L.w, bh = L.h;
+    for (int y = 0; y < bh; ++y)
+    {
+        uint8_t *rowBase = base + static_cast<size_t>(y) * strideBytes;
+        const HudLayerRow &rs = L.rows[static_cast<size_t>(y)];
+        float lr = 0.0f, lg = 0.0f, lb = 0.0f, rr = 0.0f, rg = 0.0f, rb = 0.0f;
+        if (rs.smear)
+        {
+            const uint8_t *Lp = rowBase + static_cast<size_t>(rs.lx) * 4u;
+            const uint8_t *Rp = rowBase + static_cast<size_t>(rs.rx) * 4u;
+            lr = Lp[kR];
+            lg = Lp[1];
+            lb = Lp[kB];
+            rr = Rp[kR];
+            rg = Rp[1];
+            rb = Rp[kB];
+        }
+        for (int x = 0; x < bw; ++x)
+        {
+            const size_t i = static_cast<size_t>(y) * static_cast<size_t>(bw) + static_cast<size_t>(x);
+            const uint8_t k = L.kind[i];
+            if (k == kLayerEmpty)
+                continue;
+            const HudLayerPx &p = L.px[i];
+            uint8_t *d = rowBase + static_cast<size_t>(x) * 4u;
+            if ((k & kLayerSmear) == 0u)
+            {
+                if ((k & kLayerMulti) == 0u)
+                {
+                    if constexpr (SwapRB)
+                        blendSampleSwapped(p.sr, p.sg, p.sb, p.sa, d);
+                    else
+                        blendSample(p.sr, p.sg, p.sb, p.sa, d);
+                    continue;
+                }
+                uint8_t tmp[4] = {d[0], d[1], d[2], d[3]};
+                const float *run = &L.ops[p.multi];
+                const int n = static_cast<int>(run[0]);
+                for (int j = 0; j < n; ++j)
+                {
+                    const float *o = run + 1u + static_cast<size_t>(j) * 4u;
+                    if constexpr (SwapRB)
+                        blendSampleSwapped(o[0], o[1], o[2], o[3], tmp);
+                    else
+                        blendSample(o[0], o[1], o[2], o[3], tmp);
+                }
+                d[0] = tmp[0];
+                d[1] = tmp[1];
+                d[2] = tmp[2];
+                d[3] = tmp[3];
+                continue;
+            }
+            const float a = p.smA;
+            const float t = p.smT;
+            const float ia = 1.0f - a;
+            const uint8_t mR =
+                static_cast<uint8_t>((lr + (rr - lr) * t) * a + d[kR] * ia + 0.5f);
+            const uint8_t mG =
+                static_cast<uint8_t>((lg + (rg - lg) * t) * a + d[1] * ia + 0.5f);
+            const uint8_t mB =
+                static_cast<uint8_t>((lb + (rb - lb) * t) * a + d[kB] * ia + 0.5f);
+            if ((k & kLayerSprite) == 0u)
+            {
+                d[kR] = mR;
+                d[1] = mG;
+                d[kB] = mB;
+                continue;
+            }
+            uint8_t tmp[4] = {0, 0, 0, 255};
+            tmp[kR] = mR;
+            tmp[1] = mG;
+            tmp[kB] = mB;
+            if ((k & kLayerMulti) == 0u)
+            {
+                if constexpr (SwapRB)
+                    blendSampleSwapped(p.sr, p.sg, p.sb, p.sa, tmp);
+                else
+                    blendSample(p.sr, p.sg, p.sb, p.sa, tmp);
+            }
+            else
+            {
+                const float *run = &L.ops[p.multi];
+                const int n = static_cast<int>(run[0]);
+                for (int j = 0; j < n; ++j)
+                {
+                    const float *o = run + 1u + static_cast<size_t>(j) * 4u;
+                    if constexpr (SwapRB)
+                        blendSampleSwapped(o[0], o[1], o[2], o[3], tmp);
+                    else
+                        blendSample(o[0], o[1], o[2], o[3], tmp);
+                }
+            }
+            d[kR] = tmp[kR];
+            d[1] = tmp[1];
+            d[kB] = tmp[kB];
+            d[3] = tmp[3];
+        }
+    }
+}
+
+// stampHudDirect's calling convention (buffer base + region) over a layer.
+template <bool SwapRB = false>
+inline void stampHudCached(uint8_t *bufBase, size_t strideBytes, const Rect &r, const HudLayer &L)
+{
+    if (!bufBase || !L.ok || r.w <= 0 || r.h <= 0 || L.w != r.w || L.h != r.h)
+        return;
+    stampHudCachedS<SwapRB>(bufBase + static_cast<size_t>(r.y) * strideBytes +
+                                static_cast<size_t>(r.x) * 4u,
+                            strideBytes, L);
+}
+
+// The GL call site's calling convention (whole frame + layer): region temp
+// round-trip, as composeOverlay.
+inline void composeOverlayCached(uint8_t *frame, int fw, int fh, const HudLayer &L)
+{
+    if (!frame || !L.ok || fw <= 0 || fh <= 0)
+        return;
+    const Rect r = hudRegionRect(fw, fh);
+    if (r.w <= 0 || r.h <= 0 || L.w != r.w || L.h != r.h)
+        return;
+    std::vector<uint8_t> tmp(static_cast<size_t>(r.w) * static_cast<size_t>(r.h) * 4u);
+    const size_t rowBytes = static_cast<size_t>(r.w) * 4u;
+    for (int y = 0; y < r.h; ++y)
+        std::memcpy(&tmp[static_cast<size_t>(y) * rowBytes],
+                    &frame[(static_cast<size_t>(r.y + y) * static_cast<size_t>(fw) + static_cast<size_t>(r.x)) * 4u],
+                    rowBytes);
+    stampHudCachedS<false>(tmp.data(), rowBytes, L);
+    for (int y = 0; y < r.h; ++y)
+        std::memcpy(&frame[(static_cast<size_t>(r.y + y) * static_cast<size_t>(fw) + static_cast<size_t>(r.x)) * 4u],
+                    &tmp[static_cast<size_t>(y) * rowBytes], rowBytes);
+}
 
 } // namespace ps2_ssx3_tricky_hud

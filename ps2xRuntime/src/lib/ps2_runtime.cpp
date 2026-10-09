@@ -2570,6 +2570,26 @@ void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t he
         return;
     if (!p.draw || !p.atlas)
         return;
+    // HUD2: cached fused layer (PS2X_TRICKY_HUD_CACHE=1, default off). Falls
+    // back to the direct compose on refusal, so the HUD never drops.
+    {
+        static const bool cacheOn = [] {
+            const char *v = std::getenv("PS2X_TRICKY_HUD_CACHE");
+            return v && std::strcmp(v, "1") == 0;
+        }();
+        if (cacheOn)
+        {
+            static ps2_ssx3_tricky_hud::HudCache cache;
+            if (ps2_ssx3_tricky_hud::ensureHudLayer(cache, *p.atlas, static_cast<int>(width),
+                                                   static_cast<int>(height), p.fill, p.full, tick,
+                                                   p.splashUntil, p.litLetters, p.flashUntil))
+            {
+                ps2_ssx3_tricky_hud::composeOverlayCached(rgba, static_cast<int>(width),
+                                                         static_cast<int>(height), cache.layer);
+                return;
+            }
+        }
+    }
     ps2_ssx3_tricky_hud::composeOverlay(rgba, static_cast<int>(width), static_cast<int>(height), *p.atlas,
                                        p.fill, p.full, tick, p.splashUntil, p.litLetters, p.flashUntil);
 }

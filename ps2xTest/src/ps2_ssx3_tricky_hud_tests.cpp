@@ -127,6 +127,44 @@ Atlas tintedAtlas()
     blob.insert(blob.end(), px.begin(), px.end());
     return parseAtlas(blob.data(), blob.size());
 }
+
+// HUD2: fast deterministic frame fill (xorshift32 per u32; the sweep fills
+// thousands of frames, so per-byte LCG is the bottleneck, not the stamps).
+void randomFrame(std::vector<uint8_t> &f, uint32_t seed)
+{
+    uint32_t x = seed != 0u ? seed : 0x9e3779b9u;
+    uint32_t *w = reinterpret_cast<uint32_t *>(f.data());
+    const size_t n = f.size() / 4u;
+    for (size_t i = 0; i < n; ++i)
+    {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        w[i] = x;
+    }
+}
+
+// HUD2: fully random atlas bytes (fixed cells, random content) for maximum
+// rounding-path coverage in the cached-vs-direct sweep.
+Atlas randomAtlas(uint32_t seed)
+{
+    using namespace ps2_ssx3_tricky_hud;
+    std::vector<uint8_t> px(256u * 256u * 4u);
+    uint32_t rng = seed;
+    for (size_t i = 0; i < px.size(); ++i)
+    {
+        rng = rng * 1664525u + 1013904223u;
+        px[i] = static_cast<uint8_t>(rng >> 24);
+    }
+    std::vector<uint8_t> blob;
+    const char magic[8] = {'T', 'K', 'H', 'U', 'D', '2', '\0', '\0'};
+    blob.insert(blob.end(), magic, magic + 8);
+    const uint32_t wh[3] = {256u, 256u, 0u};
+    const uint8_t *wbp = reinterpret_cast<const uint8_t *>(wh);
+    blob.insert(blob.end(), wbp, wbp + 12);
+    blob.insert(blob.end(), px.begin(), px.end());
+    return parseAtlas(blob.data(), blob.size());
+}
 } // namespace
 
 void register_ps2_ssx3_tricky_hud_tests()
@@ -829,4 +867,354 @@ void register_ps2_ssx3_tricky_hud_tests()
                         t.IsTrue(drew, name);
                     }
                 } });});
-}
+
+    MiniTest::Case("Ps2Ssx3TrickyHudCache", [](TestCase &tc)
+                   {
+        tc.Run("HUD2 cached layer equals direct stamp across the visual-key space", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas atlases[2] = {tintedAtlas(), randomAtlas(0xc0ffeeu)};
+            t.IsTrue(atlases[0].ok && atlases[1].ok, "atlases parse");
+            struct State
+            {
+                float fill;
+                bool full;
+                uint64_t tick, splash, flash;
+                int lit;
+            };
+            // Full sweep at 640x480 (816 states: coils 0..16 x full x tick
+            // phase x splash x letters x flash); one shared cache also locks
+            // the rebuild-on-key-change count.
+            std::vector<State> sweep;
+            for (int c = 0; c <= 16; ++c)
+            {
+                const float fill = c < 16 ? (static_cast<float>(c) + 0.5f) / 16.0f : 1.0f;
+                for (int f = 0; f < 2; ++f)
+                    for (int tp = 0; tp < 2; ++tp)
+                    {
+                        const uint64_t tick = tp == 0 ? 0u : 8u;
+                        for (int sp = 0; sp < 2; ++sp)
+                            for (int li = 0; li < 3; ++li)
+                                for (int fl = 0; fl < 2; ++fl)
+                                    sweep.push_back({fill, f != 0, tick, sp != 0 ? tick + 50u : 0u,
+                                                     fl != 0 ? tick + 50u : 0u,
+                                                     li == 0 ? 0 : (li == 1 ? 3 : 6)});
+                    }
+            }
+            // Sampled states for the 1080p legs (every draw on/off corners).
+            const State sampled[8] = {{0.0f, false, 0u, 0u, 0u, 0},
+                                      {0.03f, false, 100u, 0u, 0u, 1},
+                                      {0.5f, false, 8u, 0u, 0u, 3},
+                                      {0.97f, false, 100u, 0u, 0u, 5},
+                                      {1.0f, true, 0u, 50u, 50u, 6},
+                                      {1.0f, true, 8u, 90u, 90u, 4},
+                                      {0.73f, true, 100u, 0u, 200u, 2},
+                                      {0.25f, true, 108u, 200u, 0u, 6}};
+            for (int a = 0; a < 2; ++a)
+            {
+                const Atlas &atlas = atlases[a];
+                HudSprites ss;
+                t.IsTrue(buildHudSprites(ss, atlas, 640, 480), "direct sprites build");
+                HudCache cache;
+                const Rect r = hudRegionRect(640, 480);
+                const size_t strideBytes = 640u * 4u;
+                uint64_t expectRebuilds = 0u;
+                HudVisualKey lastKey;
+                bool haveKey = false;
+                int drew = 0;
+                for (size_t v = 0; v < sweep.size(); ++v)
+                {
+                    const State &st = sweep[v];
+                    const HudVisualKey key =
+                        visualKeyFor(&atlas, 640, 480, st.fill, st.full, st.tick, st.splash,
+                                     st.lit, st.flash);
+                    if (!haveKey || key != lastKey)
+                    {
+                        ++expectRebuilds;
+                        lastKey = key;
+                        haveKey = true;
+                    }
+                    t.IsTrue(ensureHudLayer(cache, atlas, 640, 480, st.fill, st.full, st.tick,
+                                            st.splash, st.lit, st.flash),
+                             "layer ensures");
+                    // Frames per key: 3 on every 4th state (the live-smear
+                    // proof: same layer, different backgrounds), else 1. One
+                    // background per (state, frame), shared by both lanes.
+                    const int frames = (v % 4u == 0u) ? 3 : 1;
+                    for (int fr = 0; fr < frames; ++fr)
+                    {
+                        std::vector<uint8_t> bg(640u * 480u * 4u);
+                        randomFrame(bg, 0x5eed1u +
+                                            static_cast<uint32_t>(a * 1000003u + v * 101u +
+                                                                  fr * 1009u));
+                        for (int lane = 0; lane < 2; ++lane)
+                        {
+                            std::vector<uint8_t> f = bg;
+                            std::vector<uint8_t> g = bg;
+                            if (lane == 0)
+                            {
+                                stampHudDirect<false>(f.data(), strideBytes, r, ss, st.fill,
+                                                      st.full, st.tick, st.splash, st.lit,
+                                                      st.flash);
+                                stampHudCached<false>(g.data(), strideBytes, r, cache.layer);
+                            }
+                            else
+                            {
+                                stampHudDirect<true>(f.data(), strideBytes, r, ss, st.fill,
+                                                     st.full, st.tick, st.splash, st.lit,
+                                                     st.flash);
+                                stampHudCached<true>(g.data(), strideBytes, r, cache.layer);
+                            }
+                            if (f != bg)
+                                ++drew;
+                            if (f != g)
+                            {
+                                char name[128];
+                                std::snprintf(name, sizeof(name),
+                                              "MISMATCH atlas=%d lane=%d v=%zu fill=%.4f full=%d "
+                                              "tick=%llu splash=%llu lit=%d flash=%llu fr=%d",
+                                              a, lane, v, static_cast<double>(st.fill),
+                                              st.full ? 1 : 0,
+                                              static_cast<unsigned long long>(st.tick),
+                                              static_cast<unsigned long long>(st.splash), st.lit,
+                                              static_cast<unsigned long long>(st.flash), fr);
+                                t.IsTrue(false, name);
+                                return;
+                            }
+                        }
+                    }
+                }
+                char name[96];
+                std::snprintf(name, sizeof(name), "rebuilds==key changes atlas=%d (%llu)", a,
+                              static_cast<unsigned long long>(cache.rebuilds));
+                t.IsTrue(cache.rebuilds == expectRebuilds, name);
+                std::snprintf(name, sizeof(name), "all states drew atlas=%d (%d)", a, drew);
+                t.IsTrue(drew > 0, name);
+                // 1080p sampled legs, tight + padded stride, both lanes.
+                const int pads[2] = {0, 64};
+                for (int q = 0; q < 2; ++q)
+                {
+                    const int stride = 1920 + pads[q];
+                    const size_t sb = static_cast<size_t>(stride) * 4u;
+                    HudSprites ss1080;
+                    t.IsTrue(buildHudSprites(ss1080, atlas, 1920, 1080), "1080p sprites build");
+                    HudCache c1080;
+                    const Rect r1080 = hudRegionRect(1920, 1080);
+                    for (int v = 0; v < 8; ++v)
+                    {
+                        const State &st = sampled[v];
+                        t.IsTrue(ensureHudLayer(c1080, atlas, 1920, 1080, st.fill, st.full,
+                                                st.tick, st.splash, st.lit, st.flash),
+                                 "1080p layer ensures");
+                        for (int fr = 0; fr < 3; ++fr)
+                        {
+                            std::vector<uint8_t> bg(static_cast<size_t>(stride) * 1080u * 4u);
+                            randomFrame(bg, 0x9e3779b9u +
+                                                static_cast<uint32_t>(a * 7919u + q * 104729u +
+                                                                      v * 1299709u + fr * 1009u));
+                            for (int lane = 0; lane < 2; ++lane)
+                            {
+                                std::vector<uint8_t> f = bg;
+                                std::vector<uint8_t> g = bg;
+                                if (lane == 0)
+                                {
+                                    stampHudDirect<false>(f.data(), sb, r1080, ss1080, st.fill,
+                                                          st.full, st.tick, st.splash, st.lit,
+                                                          st.flash);
+                                    stampHudCached<false>(g.data(), sb, r1080, c1080.layer);
+                                }
+                                else
+                                {
+                                    stampHudDirect<true>(f.data(), sb, r1080, ss1080, st.fill,
+                                                         st.full, st.tick, st.splash, st.lit,
+                                                         st.flash);
+                                    stampHudCached<true>(g.data(), sb, r1080, c1080.layer);
+                                }
+                                if (f != g)
+                                {
+                                    char nm[128];
+                                    std::snprintf(nm, sizeof(nm),
+                                                  "1080p MISMATCH atlas=%d pad=%d lane=%d v=%d "
+                                                  "fr=%d",
+                                                  a, pads[q], lane, v, fr);
+                                    t.IsTrue(false, nm);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            } });
+        tc.Run("HUD2 recorded ride packets equal direct", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas atlas = tintedAtlas();
+            struct State
+            {
+                float fill;
+                bool full;
+                uint64_t tick, splash, flash;
+                int lit;
+            };
+            // Recorded on a Mac Garibaldi ride (HUD2 gari-rec, [hud2-record]
+            // transitions, one per lit-coil band seen, mid-occurrence tick).
+            // The scripted AP line never fills the meter (no full/letters on
+            // this ride, the THD1 gap); the sweep above covers those states.
+            const State rec[13] = {
+                {0.0312f, false, 11470u, 0u, 0u, 0}, {0.1026f, false, 10613u, 0u, 0u, 0},
+                {0.1377f, false, 10192u, 0u, 0u, 0}, {0.2494f, false, 10006u, 0u, 0u, 0},
+                {0.2812f, false, 9625u, 0u, 0u, 0},  {0.3646f, false, 8987u, 0u, 0u, 0},
+                {0.4051f, false, 8501u, 0u, 0u, 0},  {0.4630f, false, 7806u, 0u, 0u, 0},
+                {0.6094f, false, 7383u, 0u, 0u, 0},  {0.6316f, false, 7117u, 0u, 0u, 0},
+                {0.7430f, false, 7447u, 0u, 0u, 0},  {0.7502f, false, 6910u, 0u, 0u, 0},
+                {0.8919f, false, 6993u, 0u, 0u, 0},
+            };
+            const int sizes[2][2] = {{640, 480}, {1920, 1080}};
+            for (int s = 0; s < 2; ++s)
+            {
+                const int fw = sizes[s][0], fh = sizes[s][1];
+                const size_t sb = static_cast<size_t>(fw) * 4u;
+                HudSprites ss;
+                t.IsTrue(buildHudSprites(ss, atlas, fw, fh), "sprites build");
+                HudCache c;
+                const Rect r = hudRegionRect(fw, fh);
+                for (int v = 0; v < 13; ++v)
+                {
+                    const State &st = rec[v];
+                    t.IsTrue(ensureHudLayer(c, atlas, fw, fh, st.fill, st.full, st.tick,
+                                            st.splash, st.lit, st.flash),
+                             "layer ensures");
+                    for (int fr = 0; fr < 2; ++fr)
+                    {
+                        std::vector<uint8_t> bg(static_cast<size_t>(fw) * fh * 4u);
+                        randomFrame(bg, 0xdec0deu +
+                                            static_cast<uint32_t>(s * 131u + v * 1009u + fr));
+                        for (int lane = 0; lane < 2; ++lane)
+                        {
+                            std::vector<uint8_t> f = bg;
+                            std::vector<uint8_t> g = bg;
+                            if (lane == 0)
+                            {
+                                stampHudDirect<false>(f.data(), sb, r, ss, st.fill, st.full,
+                                                      st.tick, st.splash, st.lit, st.flash);
+                                stampHudCached<false>(g.data(), sb, r, c.layer);
+                            }
+                            else
+                            {
+                                stampHudDirect<true>(f.data(), sb, r, ss, st.fill, st.full,
+                                                     st.tick, st.splash, st.lit, st.flash);
+                                stampHudCached<true>(g.data(), sb, r, c.layer);
+                            }
+                            if (f != g)
+                            {
+                                char nm[96];
+                                std::snprintf(nm, sizeof(nm),
+                                              "recorded MISMATCH %dx%d lane=%d v=%d fr=%d", fw,
+                                              fh, lane, v, fr);
+                                t.IsTrue(false, nm);
+                                return;
+                            }
+                        }
+                    }
+                }
+            } });
+        tc.Run("HUD2 ensure rebuilds only on visual-key change", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas atlas = tintedAtlas();
+            HudCache c;
+            // (fill, full, tick, splash, letters, flash, fw, fh)
+            t.IsTrue(ensureHudLayer(c, atlas, 640, 480, 0.5f, false, 100u, 0u, 2, 0u), "first");
+            t.IsTrue(c.rebuilds == 1u, "one rebuild");
+            // Same key through different raw values: no rebuild.
+            t.IsTrue(ensureHudLayer(c, atlas, 640, 480, 0.52f, false, 101u, 0u, 2, 0u), "same key");
+            t.IsTrue(c.rebuilds == 1u, "still one");
+            t.IsTrue(ensureHudLayer(c, atlas, 640, 480, 0.52f, false, 101u, 50u, 2, 100u),
+                     "windows still off");
+            t.IsTrue(c.rebuilds == 1u, "still one (windows)");
+            // Each key field flips exactly one rebuild.
+            t.IsTrue(ensureHudLayer(c, atlas, 640, 480, 0.0f, false, 101u, 50u, 2, 100u), "lit");
+            t.IsTrue(c.rebuilds == 2u, "lit rebuilds");
+            t.IsTrue(ensureHudLayer(c, atlas, 640, 480, 0.0f, true, 101u, 50u, 2, 100u), "full");
+            t.IsTrue(c.rebuilds == 3u, "full rebuilds");
+            t.IsTrue(ensureHudLayer(c, atlas, 640, 480, 0.0f, true, 104u, 50u, 2, 100u), "dim");
+            t.IsTrue(c.rebuilds == 4u, "dim rebuilds");
+            t.IsTrue(ensureHudLayer(c, atlas, 640, 480, 0.0f, true, 104u, 500u, 2, 100u),
+                     "splash on");
+            t.IsTrue(c.rebuilds == 5u, "splash rebuilds");
+            t.IsTrue(ensureHudLayer(c, atlas, 640, 480, 0.0f, true, 104u, 500u, 5, 100u),
+                     "letters");
+            t.IsTrue(c.rebuilds == 6u, "letters rebuild");
+            t.IsTrue(ensureHudLayer(c, atlas, 640, 480, 0.0f, true, 104u, 500u, 5, 500u),
+                     "flash on");
+            t.IsTrue(c.rebuilds == 7u, "flash rebuilds");
+            t.IsTrue(ensureHudLayer(c, atlas, 640, 480, 0.0f, true, 112u, 500u, 5, 500u),
+                     "flash phase");
+            t.IsTrue(c.rebuilds == 8u, "flash phase rebuilds");
+            t.IsTrue(ensureHudLayer(c, atlas, 1920, 1080, 0.0f, true, 112u, 500u, 5, 500u),
+                     "resize");
+            t.IsTrue(c.rebuilds == 9u, "resize rebuilds");
+            // Refusals fail closed and keep the last good layer.
+            Atlas bad;
+            const uint64_t before = c.rebuilds;
+            t.IsTrue(!ensureHudLayer(c, bad, 640, 480, 0.5f, false, 100u, 0u, 2, 0u), "bad atlas");
+            t.IsTrue(c.has, "keeps last good layer");
+            t.IsTrue(ensureHudLayer(c, atlas, 1920, 1080, 0.0f, true, 112u, 500u, 5, 500u),
+                     "same key serves");
+            t.IsTrue(c.rebuilds == before, "no rebuild on same key");
+            // A new atlas object rebuilds (art identity is in the key).
+            Atlas atlas2 = tintedAtlas();
+            t.IsTrue(ensureHudLayer(c, atlas2, 1920, 1080, 0.0f, true, 112u, 500u, 5, 500u),
+                     "new atlas");
+            t.IsTrue(c.rebuilds == before + 1u, "new atlas rebuilds"); });
+        tc.Run("HUD2 GL cached compose equals direct compose", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas atlas = tintedAtlas();
+            struct State
+            {
+                float fill;
+                bool full;
+                uint64_t tick, splash, flash;
+                int lit;
+            };
+            const State states[4] = {{0.0f, false, 100u, 0u, 0u, 0},
+                                     {0.53f, false, 8u, 0u, 0u, 3},
+                                     {1.0f, true, 8u, 90u, 90u, 4},
+                                     {0.73f, true, 100u, 0u, 200u, 2}};
+            const int sizes[2][2] = {{640, 480}, {1920, 1080}};
+            for (int s = 0; s < 2; ++s)
+            {
+                const int fw = sizes[s][0], fh = sizes[s][1];
+                HudCache c;
+                for (int v = 0; v < 4; ++v)
+                {
+                    const State &st = states[v];
+                    t.IsTrue(ensureHudLayer(c, atlas, fw, fh, st.fill, st.full, st.tick,
+                                            st.splash, st.lit, st.flash),
+                             "layer ensures");
+                    // Same layer, two backgrounds (the live-smear proof).
+                    for (int fr = 0; fr < 2; ++fr)
+                    {
+                        std::vector<uint8_t> f(static_cast<size_t>(fw) * fh * 4u);
+                        uint32_t rng = 0x6c311u + static_cast<uint32_t>(s * 31u + v * 101u + fr);
+                        for (size_t i = 0; i < f.size(); ++i)
+                        {
+                            rng = rng * 1664525u + 1013904223u;
+                            f[i] = static_cast<uint8_t>(rng >> 24);
+                        }
+                        std::vector<uint8_t> g = f;
+                        composeOverlay(f.data(), fw, fh, atlas, st.fill, st.full, st.tick,
+                                       st.splash, st.lit, st.flash);
+                        composeOverlayCached(g.data(), fw, fh, c.layer);
+                        if (f != g)
+                        {
+                            char nm[96];
+                            std::snprintf(nm, sizeof(nm), "GL MISMATCH %dx%d v=%d fr=%d", fw, fh,
+                                          v, fr);
+                            t.IsTrue(false, nm);
+                            return;
+                        }
+                    }
+                }
+            } });});}
