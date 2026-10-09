@@ -547,6 +547,7 @@ add_library(ps2_runtime STATIC
     src/lib/vu/ps2_vu0.cpp
     src/lib/vu/ps2_vu1.cpp
     src/lib/vu/ps2_microvu.cpp
+    src/lib/vu/ps2_native_world.cpp # NRT1
     src/lib/games_database.cpp
     src/lib/ps2_ach.cpp # ACH2: local achievements runtime
     src/lib/ps2_session_telemetry.cpp # TEL2: coverage + session log
@@ -561,6 +562,14 @@ endif()
 # PL1: PUBLIC so the pad recorder and the APK marker TU (and the suite, which
 # links ps2_runtime) all see the same id. Always defined, possibly empty.
 target_compile_definitions(ps2_runtime PUBLIC PS2X_BUILD_ID="${PS2X_BUILD_ID_RESOLVED}")
+
+# NRT1: the native-world model rounds like microVU (FPCR round toward zero):
+# no multiply-add contraction (NEON MUL and ADD stay separate). Its constants
+# are opaque or exact (powers of two), and the model is noinline, so the
+# FPCR switch around it can't be reordered with its math.
+set_source_files_properties(src/lib/vu/ps2_native_world.cpp PROPERTIES
+    COMPILE_OPTIONS "-ffp-contract=off"
+    SKIP_UNITY_BUILD_INCLUSION ON)
 
 # E40-E44 guest-memory watch taps in ps2_runtime_macros.h. Keep them out of
 # every generated function by default on all platforms; dev lanes opt in.

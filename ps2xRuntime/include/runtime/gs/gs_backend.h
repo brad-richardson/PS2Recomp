@@ -53,6 +53,16 @@ public:
         (void)regAddr;
         (void)value;
     }
+    // NRT1 2b: a native record (ge1_gs.h layout: one natively served VU1
+    // job's PATH1 packets). true: the backend consumed it whole; false: the
+    // frontend delivers its packets one by one through the per-packet path.
+    virtual bool RawNativeRecord(uint32_t path, const uint8_t *data, uint32_t sizeBytes)
+    {
+        (void)path;
+        (void)data;
+        (void)sizeBytes;
+        return false;
+    }
     // GE2: HLE-decoded packed-GIF packets (GS::processNativePackedGIFPacket)
     // never enter the raw GIF stream, but the capture records them as
     // packets, so a recording/external backend must see them too to prove

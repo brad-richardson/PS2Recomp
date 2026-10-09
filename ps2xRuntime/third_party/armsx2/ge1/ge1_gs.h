@@ -56,6 +56,57 @@ GE1_API void ge1_gs_set_cache_flush_deferred(int deferred);
 GE1_API int ge1_gs_freeze_size(void);
 GE1_API int ge1_gs_freeze_save(uint8_t* out, uint32_t size);
 GE1_API int ge1_gs_freeze_load(const uint8_t* data, uint32_t size);
+// NRT1 2b: a native record, one per natively served VU1 job: the job's
+// PATH1 GIF packets in kick order, delivered in one call. GE1 runs
+// GSgifTransfer on each packet in order, exactly as that many ge1_gs_packet
+// (path 1) calls would. Layout (little-endian, 16-byte aligned):
+//   qword 0: GE1_NATIVE_RECORD_MAGIC_LO, GE1_NATIVE_RECORD_MAGIC_HI (as a GIF
+//            tag: NLOOP 0, EOP 0, the signature in the must-be-zero bits)
+//   u32 packet count, u32 0, then count u32 byte sizes, padded to 16 bytes
+//   the packets, each a whole GIF packet (multiple of 16 bytes).
+// Optional symbol; without it the runtime delivers the packets one by one.
+#define GE1_NATIVE_RECORD_MAGIC_LO 0x00002A4E52540000ull
+#define GE1_NATIVE_RECORD_MAGIC_HI 0x5245434F52440001ull
+GE1_API int ge1_gs_native_record(const uint8_t* bytes, uint32_t byte_count);
 #ifdef __cplusplus
+}
+
+// Shared by the runtime (builder, unpack fallback) and the adapter. Calls
+// fn(packet, size) per packet in order; false on a malformed record.
+template <class Fn>
+inline bool ge1_native_record_for_each(const uint8_t* bytes, uint32_t size, Fn&& fn)
+{
+    uint64_t lo = 0, hi = 0;
+    if (!bytes || size < 32u || (size & 15u))
+        return false;
+    __builtin_memcpy(&lo, bytes, 8);
+    __builtin_memcpy(&hi, bytes + 8, 8);
+    if (lo != GE1_NATIVE_RECORD_MAGIC_LO || hi != GE1_NATIVE_RECORD_MAGIC_HI)
+        return false;
+    uint32_t count = 0;
+    __builtin_memcpy(&count, bytes + 16, 4);
+    const uint32_t table = (8u + 4u * count + 15u) & ~15u;
+    if (count == 0 || count > 64u || 16u + table > size)
+        return false;
+    uint32_t off = 16u + table;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        uint32_t n = 0;
+        __builtin_memcpy(&n, bytes + 24 + 4 * i, 4);
+        if (n < 16u || (n & 15u) || n > size - off)
+            return false;
+        fn(bytes + off, n);
+        off += n;
+    }
+    return off == size;
+}
+inline bool ge1_is_native_record(const uint8_t* bytes, uint32_t size)
+{
+    uint64_t lo = 0, hi = 0;
+    if (!bytes || size < 32u)
+        return false;
+    __builtin_memcpy(&lo, bytes, 8);
+    __builtin_memcpy(&hi, bytes + 8, 8);
+    return lo == GE1_NATIVE_RECORD_MAGIC_LO && hi == GE1_NATIVE_RECORD_MAGIC_HI;
 }
 #endif

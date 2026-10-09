@@ -108,6 +108,9 @@ struct Ge1Api
     decltype(&ge1_gs_freeze_save) freezeSave = nullptr;
     decltype(&ge1_gs_freeze_load) freezeLoad = nullptr;
     bool freezeBound() const { return freezeSize && freezeSave && freezeLoad; }
+    // NRT1: optional on the dlopen path (an older library lacks it; records
+    // are then delivered packet by packet); linked on the static (iOS) path.
+    decltype(&ge1_gs_native_record) nativeRecord = nullptr;
 
     bool load(const char *path)
     {
@@ -141,6 +144,7 @@ struct Ge1Api
             freezeSize = ::ge1_gs_freeze_size; // DS1: static bind (same ABI)
             freezeSave = ::ge1_gs_freeze_save;
             freezeLoad = ::ge1_gs_freeze_load;
+            nativeRecord = ::ge1_gs_native_record; // NRT1: needs a GE1 build with the folded adapter
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
             exportIOSurface = ::ge1_gs_export_iosurface;
 #endif
@@ -193,6 +197,7 @@ struct Ge1Api
         probeStats = reinterpret_cast<decltype(probeStats)>(dlsym(library, "ge1_gs_probe_stats"));
         // PT2 Part 2: optional back-thread query (see above); never fails the load.
         backMs = reinterpret_cast<decltype(backMs)>(dlsym(library, "ge1_gs_back_ms"));
+        nativeRecord = reinterpret_cast<decltype(nativeRecord)>(dlsym(library, "ge1_gs_native_record"));
         if (!backMs)
             std::fprintf(stderr, "[gs:external] GE1 library predates ge1_gs_back_ms; gsback.busy reads n=0\n");
         return true;
@@ -1117,6 +1122,26 @@ public:
             log("G path=%u size=%u crc=%08x tick=%llu%s\n", path, sizeBytes,
                 data && sizeBytes ? fnv1a32(data, sizeBytes) : 0u, tickNow(),
                 (sizeBytes % 16u) ? " ODD" : "");
+    }
+
+    bool RawNativeRecord(uint32_t path, const uint8_t *data, uint32_t sizeBytes) override
+    {
+        // The per-packet log keeps one line per packet: deliver one by one then.
+        if (!m_ge1Active || !m_ge1.nativeRecord || m_log || path != 1u)
+            return false;
+        if (!m_ge1.nativeRecord(data, sizeBytes))
+        {
+            std::fprintf(stderr, "[gs:external] GE1 native record rejected bytes=%u\n", sizeBytes);
+            std::exit(78);
+        }
+        m_ge1LastPath = 1u;
+        ge1_native_record_for_each(data, sizeBytes, [this](const uint8_t *, uint32_t n) {
+            ++m_stats.gifPackets;
+            m_stats.gifBytes += n;
+            ++m_stats.gifPacketsByPath[1];
+            m_stats.gifQwords[1] += n / 16u;
+        });
+        return true;
     }
 
     void RawWriteRegister(uint8_t regAddr, uint64_t value) override

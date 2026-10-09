@@ -5,6 +5,7 @@
 #include "ps2_android_toast.h"
 #include "ps2_mtvu.h"
 #include "ps2_microvu.h"
+#include "ps2_native_world.h"
 #include "ps2_savestate_internal.h"
 
 #include "ps2_runtime.h"
@@ -866,6 +867,8 @@ namespace ps2_savestate
             // the next tick like any other deferral.
             ps2_mtvu::sync(ps2_mtvu::Reason::SaveState);
             why = ps2_microvu::saveReady(runtime.vu1().state());
+            if (why.empty())
+                why = ps2_native_world::saveReady(); // NRT1
             if (!why.empty())
                 return false;
         }
@@ -1298,6 +1301,7 @@ namespace ps2_savestate
                 error = "microvu reset failed: " + resetError;
                 return failClosed(error);
             }
+            ps2_native_world::resetForLoad(); // NRT1: host group state is not in the file
         }
         // TKL1 stage 3 (TKA1 F1): reconcile the Tricky layer with the restored
         // machine before guest execution resumes and before any next CD read

@@ -7,6 +7,7 @@
 // no dlopen; the ARMSX2-derived sources stay outside this repo).
 #include "ps2_microvu.h"
 #include "ps2_microvu_api.h"
+#include "ps2_native_world.h"
 #include "ps2_mtvu.h"
 #include "ps2_telemetry.h"
 #include "runtime/ps2_memory.h"
@@ -109,6 +110,7 @@ float unbits(uint32_t value)
 }
 void path1(void* opaque, const uint8_t* bytes, uint32_t size)
 {
+    ps2_native_world::onVu1Packet(bytes, size); // NRT1: check-mode capture (inert when off)
     static_cast<PS2Memory*>(opaque)->submitGifPacket(GifPathId::Path1, bytes, size);
 }
 

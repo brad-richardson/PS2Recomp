@@ -19,3 +19,4 @@ _ge1_gs_release_iosurface
 _ge1_gs_freeze_size
 _ge1_gs_freeze_save
 _ge1_gs_freeze_load
+_ge1_gs_native_record

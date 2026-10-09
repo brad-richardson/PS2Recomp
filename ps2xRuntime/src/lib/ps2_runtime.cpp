@@ -4,6 +4,7 @@
 #include "ps2_ts2_split60.h"
 #include "ps2_mtvu.h"
 #include "ps2_microvu.h"
+#include "ps2_native_world.h"
 #include "ps2_e7.h"
 #include "ps2_e41_trace.h"
 #include "ps2_ssx3_vis_native.h"
@@ -4025,9 +4026,14 @@ bool PS2Runtime::syncCoreSubsystems()
                                          m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
                                          if (ps2_microvu::selected())
                                          {
+                                             // NRT1: a natively served static-world job skips VU1.
+                                             if (ps2_native_world::beforeVu1(m_memory, startPC, top, itop))
+                                                 return;
                                              // OM1: a MISS falls through to the static restart below.
-                                             if (ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
-                                                                 startPC, false, top, itop, fbrst, 65536))
+                                             const bool served = ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
+                                                                                  startPC, false, top, itop, fbrst, 65536);
+                                             ps2_native_world::afterVu1();
+                                             if (served)
                                                  return;
                                          }
                                          m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
@@ -4049,11 +4055,16 @@ bool PS2Runtime::syncCoreSubsystems()
                                          const uint32_t fbrst = cpuContext->vu0_fbrst;
                                          ps2_mtvu::submit([this, startPC, top, itop, fbrst]
                                                           {
+                                                              // NRT1: a natively served static-world job skips VU1.
+                                                              if (ps2_native_world::beforeVu1(m_memory, startPC, top, itop))
+                                                                  return;
                                                               // OM1: a MISS restarts statically here; the
                                                               // post-sync VPU_STAT update below is shared.
-                                                              if (!ps2_microvu::run(m_memory, m_memory.getVU1Data(),
-                                                                                    m_vu1.state(), startPC, false,
-                                                                                    top, itop, fbrst, 65536))
+                                                              const bool served = ps2_microvu::run(m_memory, m_memory.getVU1Data(),
+                                                                                                   m_vu1.state(), startPC, false,
+                                                                                                   top, itop, fbrst, 65536);
+                                                              ps2_native_world::afterVu1();
+                                                              if (!served)
                                                                   m_vu1.execute(m_memory.getVU1Code(), PS2_VU1_CODE_SIZE,
                                                                                 m_memory.getVU1Data(), PS2_VU1_DATA_SIZE,
                                                                                 m_gs, &m_memory, startPC, top, itop, 65536);
@@ -4081,6 +4092,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                          m_vu1.state().tBitEnabled = (fbrst & (1u << 11)) != 0u;
                                          if (ps2_microvu::selected())
                                          {
+                                             ps2_native_world::onResume(); // NRT1: counted, expected never
                                              // OM1: a MISS falls through to the static restart below.
                                              if (ps2_microvu::run(m_memory, m_memory.getVU1Data(), m_vu1.state(),
                                                                  0, true, top, itop, fbrst, 65536))
@@ -4105,6 +4117,7 @@ bool PS2Runtime::syncCoreSubsystems()
                                          const uint32_t fbrst = cpuContext->vu0_fbrst;
                                          ps2_mtvu::submit([this, top, itop, fbrst]
                                                           {
+                                                              ps2_native_world::onResume(); // NRT1
                                                               // OM1: a MISS restarts statically here; the
                                                               // post-sync VPU_STAT update below is shared.
                                                               if (!ps2_microvu::run(m_memory, m_memory.getVU1Data(),

@@ -4,6 +4,7 @@
 #include "ps2_mtvu.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_stream_capture.h"
+#include "runtime/gs/ge1_gs_api.h"
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
 #include <array>
@@ -1362,7 +1363,9 @@ void GS::processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uin
     // submitting thread. All prior packets are already enqueued (=
     // GIF-drained), so set the bit now, in stream order. Decode keeps
     // Flush+Sync for backend ordering but no longer sets CSR.
-    noteFinishTimingPcsx2(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
+    // NRT1 2b: a native record holds only vertex packets (no A+D, no FINISH).
+    if (!ge1_is_native_record(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size())))
+        noteFinishTimingPcsx2(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
     m_worker->enqueue(std::move(cmd));
 }
 
@@ -1403,9 +1406,46 @@ void GS::noteFinishTimingPcsx2(const uint8_t *data, uint32_t sizeBytes)
     }
 }
 
+// NRT1 2b: one natively served VU1 job's PATH1 packets (ge1_gs.h layout).
+// By construction they carry only PRIM (PRE) and ST/RGBAQ/XYZF2 vertex data:
+// no A+D, no image, no FINISH, so the per-packet minimal decode, image-upload
+// check and FINISH scan are no-ops for them and are skipped. A backend that
+// takes records whole gets one call; otherwise (or while the stream capture
+// records per-packet) each packet runs the per-packet path in order.
+void GS::processNativeRecord(const uint8_t *data, uint32_t sizeBytes)
+{
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::GifPacket;
+        cmd.bytes = m_packetPool.acquire(sizeBytes);
+        cmd.bytes.assign(data, data + sizeBytes);
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
+    {
+        ps2_fpmode::ScopedHostMode hostFpMode;
+        std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+        if (!m_backend)
+            return;
+        // Whole only when the frontend's own decode is the minimal one (a
+        // no-op for vertex packets); a full software decode needs every packet.
+        if (m_rawGifBackend.load(std::memory_order_relaxed) && m_minimalGifDecode.load(std::memory_order_relaxed) &&
+            !ps2x_gs_capture::enabled() &&
+            m_backend->RawNativeRecord(static_cast<uint32_t>(GifPathId::Path1), data, sizeBytes))
+            return;
+    }
+    ge1_native_record_for_each(data, sizeBytes, [this](const uint8_t *p, uint32_t n) { processGIFPacket(p, n); });
+}
+
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     ps2_mtvu::touch(ps2_mtvu::Site::GsProcess); // MT1: unit-owned
+    if (ge1_is_native_record(data, sizeBytes))
+    {
+        processNativeRecord(data, sizeBytes);
+        return;
+    }
     // GE3 Part 2: PCSX2-timed FINISH is set here on the submitting thread
     // (EE or MTVU unit), in stream order, before the worker decodes.
     noteFinishTimingPcsx2(data, sizeBytes);

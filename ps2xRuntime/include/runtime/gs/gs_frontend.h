@@ -215,6 +215,7 @@ public:
         m_curGifPath = path;
     }
     bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+    void processNativeRecord(const uint8_t *data, uint32_t sizeBytes); // NRT1 2b
     void uploadImageNative(uint64_t bitbltbuf,
                            uint64_t trxpos,
                            uint64_t trxreg,

@@ -543,6 +543,16 @@ extern "C" GE1_API int ge1_gs_priv_write(uint32_t offset, uint64_t value)
     return 1;
 }
 
+extern "C" GE1_API int ge1_gs_native_record(const uint8_t* bytes, uint32_t size)
+{
+    if (!s_open)
+        return 0;
+    // NRT1: each packet exactly as ge1_gs_packet(1, ...) would run it.
+    return ge1_native_record_for_each(bytes, size, [](const uint8_t* p, uint32_t n) {
+        GSgifTransfer(p, n / 16u);
+    }) ? 1 : 0;
+}
+
 extern "C" GE1_API int ge1_gs_packet(uint8_t path, const uint8_t* bytes, uint32_t size)
 {
     if (!s_open || !bytes || !size || (size & 15u))
