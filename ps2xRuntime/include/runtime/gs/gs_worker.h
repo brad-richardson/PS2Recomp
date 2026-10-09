@@ -65,6 +65,8 @@ enum class GsCmdKind : uint8_t
     DiagPresent, // GB3: present into a caller-owned frame (no latch side effects)
     // 24 was OrderedCsrWrite (retired, CU3); values stay stable for pktseq.
     FlushCaches = 25, // BG1: persist host-side caches on the worker at stream position (RPC)
+    GifBatch = 26,    // GSB1: concatenated GifPackets (bytes + subs table); the worker
+                      // runs each sub-packet through the per-packet path in order
 };
 
 // Base fence for RPC commands. The worker signals it after executing the
@@ -101,6 +103,12 @@ struct GsRpc : public GsRpcBase
 // carries its GIF path in pathId; the worker applies it just before the
 // packet, exactly as a NoteGifPath command queued right ahead of it would.
 constexpr uint32_t kGsGifPacketHasPath = 1u;
+// GSB1: GifBatch subs entry layout (bit 31 = the HasPath note rode with it,
+// bits 30..24 = pathId, bits 23..0 = length). GifPathId fits in 7 bits.
+constexpr uint32_t kGsGifBatchSubNote = 1u << 31;
+constexpr uint32_t kGsGifBatchSubPathShift = 24;
+constexpr uint32_t kGsGifBatchSubPathMask = 0x7Fu;
+constexpr uint32_t kGsGifBatchSubLenMask = 0x00FFFFFFu;
 
 struct GsCommand
 {
@@ -118,6 +126,10 @@ struct GsCommand
     uint32_t u32d = 0;
     uint32_t u32e = 0;
     std::vector<uint8_t> bytes;              // GifPacket / UploadImageNative / NativePacked payload
+    // GSB1: GifBatch sub-packet table, one entry per concatenated packet:
+    // bit 31 = the kGsGifPacketHasPath note rode with it, bits 30..24 =
+    // pathId, bits 23..0 = length. Empty for every other kind.
+    std::vector<uint32_t> subs;
     std::shared_ptr<GsRpcBase> rpc;          // non-null for RPC kinds
     std::unique_ptr<GSRasterBackend> backend; // SetBackend only
     std::function<void()> apply;              // PrivWrite only
@@ -356,6 +368,30 @@ public:
     static constexpr size_t kStageMaxBytes = 256u * 1024u;
     static void setStagedPublish(bool on);
     static void flushStaged();
+    // GSB1 (PS2X_GS_GIF_BATCH=1, default off): GIF batch command. On the
+    // MTVU-GIF thread, a GifPacket enqueued inside a local batch is appended
+    // to a thread-local batch (concatenated bytes + the subs table) instead
+    // of taking the queue; publish admits one GifBatch command under one
+    // queue-mutex round. Publish points are exactly GPK1's: the GIF stage's
+    // publishHead hook (gifPublishFn), flushWake (Call/JobEnd/idle), any
+    // other enqueue from the thread (RPCs included, published first so the
+    // RPC keeps its stream position), and a full batch (maxBytes, default
+    // 64 KiB). A single packet larger than maxBytes (or than the 24-bit
+    // length field) publishes the pending batch and enqueues alone, as today.
+    // When both knobs are on, batching supersedes staged publish on the
+    // batching thread (one pending structure, so FIFO order is trivial);
+    // staged publish is untouched everywhere else. Host transport only: the
+    // worker runs each sub-packet through today's per-packet code.
+    static constexpr size_t kGifBatchDefaultBytes = 65536u;
+    static void setGifBatch(bool on, size_t maxBytes);
+    static void flushGifBatch();
+    // Receipts (also on the [gs:handoff] line): batches published and
+    // sub-packets batched, process-wide. Tests read deltas.
+    static uint64_t gifBatchRounds();
+    static uint64_t gifBatchedCmds();
+    // Pool the published batch's source vectors return to (one bulk release
+    // per batch; null = free them). Set once, before producers run.
+    void setBatchPool(GsPacketPool *pool);
 
     size_t pendingCount() const;
     size_t pendingBytes() const;
@@ -376,6 +412,7 @@ private:
     // command inline and returns with the lock released.
     bool admitLocked(std::unique_lock<std::mutex> &lock, GsCommand &cmd);
     void publishStaged();
+    void publishBatch();
 
     Handler m_handler;
     const size_t m_maxDescriptors;
@@ -403,6 +440,10 @@ private:
     // m_hasWork / producers blocked on m_hasSpace. Lean mode notifies only then.
     bool m_workerIdle = false;
     uint32_t m_spaceWaiters = 0;
+
+    // GSB1: pool for published batches' source vectors (GS::setQueueEnabled
+    // points it at the GS packet pool; null in tests, where sources free).
+    GsPacketPool *m_batchPool = nullptr;
 
     // Monotonic diagnostics, safe to read from any thread.
     std::atomic<uint64_t> m_enqueuedCount{0};

@@ -339,6 +339,8 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_GS_EXTERNAL_LIBRARY",
         "PS2X_GS_EXTERNAL_LOG",
         "PS2X_GS_FINISH_TIMING",
+        "PS2X_GS_GIF_BATCH",
+        "PS2X_GS_GIF_BATCH_BYTES",
         "PS2X_GS_HANDOFF_DIET",
         "PS2X_GS_REPLAY_BACKEND",
         "PS2X_GS_REPLAY_MODE",

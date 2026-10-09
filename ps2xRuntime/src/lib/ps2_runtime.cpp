@@ -318,6 +318,36 @@ namespace
         return env != nullptr && std::strcmp(env, "1") == 0;
     }
 
+    // GSB1: PS2X_GS_GIF_BATCH=1 concatenates the MTVU-GIF thread's GIF
+    // packets into one GifBatch command per batch (default off; needs the
+    // handoff diet's deferred wakes, like GPK1). Read once, at GS setup.
+    bool gsGifBatchRequested()
+    {
+        const char *env = std::getenv("PS2X_GS_GIF_BATCH");
+        return env != nullptr && std::strcmp(env, "1") == 0;
+    }
+
+    // GSB1: PS2X_GS_GIF_BATCH_BYTES caps one batch (default 65536; fixed,
+    // no sweep). Unset/empty/invalid keeps the default; otherwise clamped
+    // to [1 KiB, 16 MiB]. Read once, at GS setup.
+    size_t gsGifBatchBytes()
+    {
+        constexpr size_t kDefault = GsWorker::kGifBatchDefaultBytes;
+        const char *env = std::getenv("PS2X_GS_GIF_BATCH_BYTES");
+        if (!env || !*env)
+            return kDefault;
+        char *end = nullptr;
+        const unsigned long v = std::strtoul(env, &end, 10);
+        if (end == env || *end != '\0' || v == 0ul)
+            return kDefault;
+        size_t out = static_cast<size_t>(v);
+        if (out < 1024u)
+            out = 1024u;
+        if (out > 16u * 1024u * 1024u)
+            out = 16u * 1024u * 1024u;
+        return out;
+    }
+
     // PKB1: PS2X_PKB=0 restores today's exact path (zero-fill + memcpy,
     // diet-gated pool, one-by-one pops, per-packet releases). Unset or "1"
     // turns the three PKB1 items on. Read once, at GS setup.
@@ -3851,6 +3881,21 @@ bool PS2Runtime::syncCoreSubsystems()
             GsWorker::setStagedPublish(true);
             ps2_mtvu::gifPublishFn() = []() { GsWorker::flushStaged(); };
             std::cerr << "[gs:handoff] GPK1 staged publish on (PS2X_MTVU_GS_BATCH=1)" << std::endl;
+        }
+        // GSB1: GIF batch command from the GIF stage (same packets, same
+        // order, one command per batch; supersedes GPK1 staging on the
+        // batching thread when both are on).
+        if (gsGifBatchRequested())
+        {
+            const size_t batchBytes = gsGifBatchBytes();
+            GsWorker::setGifBatch(true, batchBytes);
+            ps2_mtvu::gifPublishFn() = []()
+            {
+                GsWorker::flushStaged();
+                GsWorker::flushGifBatch();
+            };
+            std::cerr << "[gs:handoff] GSB1 GIF batch on (PS2X_GS_GIF_BATCH=1, bytes="
+                      << batchBytes << ")" << std::endl;
         }
         // MP1 L2: lean handoff (sleep-aware notifies, one worker lock per pop,
         // lock-free unit drain batches). Wake timing only: same commands, same

@@ -23,6 +23,17 @@ std::atomic<uint64_t> s_stagedRounds{0}; // receipts: staged publish rounds
 thread_local std::vector<GsCommand> t_staged;
 thread_local GsWorker *t_stagedWorker = nullptr;
 thread_local size_t t_stagedBytes = 0;
+// GSB1: GIF batch command (see GsWorker::setGifBatch). One pending batch
+// per thread: concatenated bytes, the subs table, and the source vectors
+// (returned to the pool in bulk at publish). Pending iff subs is non-empty.
+std::atomic<bool> s_gifBatch{false};
+std::atomic<size_t> s_gifBatchBytes{GsWorker::kGifBatchDefaultBytes};
+std::atomic<uint64_t> s_batchRounds{0}; // receipts: batches published
+std::atomic<uint64_t> s_batchedCmds{0}; // receipts: sub-packets batched
+thread_local std::vector<uint8_t> t_batch;
+thread_local std::vector<uint32_t> t_batchSubs;
+thread_local std::vector<std::vector<uint8_t>> t_batchSources;
+thread_local GsWorker *t_batchWorker = nullptr;
 // GSW2: GS queue wake hysteresis (PS2X_GS_WAKE_LOWWATER=<n>, default off =
 // 0/unset/invalid). In a GS-bound window the queue is full, so every pop
 // batch freed a little space and did m_hasSpace.notify_all(), waking the
@@ -108,6 +119,68 @@ void GsWorker::publishStaged()
     }
 }
 
+void GsWorker::setGifBatch(bool on, size_t maxBytes)
+{
+    s_gifBatchBytes.store(maxBytes != 0u ? maxBytes : kGifBatchDefaultBytes,
+                          std::memory_order_relaxed);
+    s_gifBatch.store(on, std::memory_order_relaxed);
+}
+
+void GsWorker::flushGifBatch()
+{
+    if (!t_batchSubs.empty())
+        t_batchWorker->publishBatch();
+}
+
+void GsWorker::setBatchPool(GsPacketPool *pool)
+{
+    m_batchPool = pool;
+}
+
+uint64_t GsWorker::gifBatchRounds()
+{
+    return s_batchRounds.load(std::memory_order_relaxed);
+}
+
+uint64_t GsWorker::gifBatchedCmds()
+{
+    return s_batchedCmds.load(std::memory_order_relaxed);
+}
+
+void GsWorker::publishBatch()
+{
+    if (t_batchSubs.empty())
+        return;
+    s_batchRounds.fetch_add(1u, std::memory_order_relaxed);
+    s_batchedCmds.fetch_add(t_batchSubs.size(), std::memory_order_relaxed);
+    // The sources are dead after the memcpy: return them to the pool under
+    // one lock round, before the queue mutex (the worker never holds m_mutex
+    // while pooling, so the order cannot invert).
+    if (m_batchPool)
+        m_batchPool->releaseBulk(t_batchSources);
+    else
+        t_batchSources.clear();
+    GsCommand cmd;
+    cmd.kind = GsCmdKind::GifBatch;
+    cmd.bytes = std::move(t_batch);
+    cmd.subs = std::move(t_batchSubs);
+    t_batch.clear();
+    t_batchSubs.clear();
+    // Batched packets were local-batch enqueues: admit the batch as such.
+    ++t_localBatchDepth;
+    bool wake = false;
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        wake = admitLocked(lock, cmd);
+    }
+    --t_localBatchDepth;
+    if (wake)
+    {
+        m_wakes.fetch_add(1u, std::memory_order_relaxed);
+        m_hasWork.notify_one();
+    }
+}
+
 GsWorker::GsWorker(size_t maxDescriptors, size_t maxPayloadBytes, Handler handler)
     : m_handler(std::move(handler))
     , m_maxDescriptors(maxDescriptors != 0u ? maxDescriptors : kDefaultMaxDescriptors)
@@ -162,7 +235,43 @@ void GsWorker::enqueue(GsCommand cmd)
         ps2_mtvu::gifStageEscape();
     else if (ps2_mtvu::vifStageDefer()) // VPL2: counted (must read 0)
         ps2_mtvu::vifStageNoteEscape();
-    if (s_stagedPublish.load(std::memory_order_relaxed))
+    if (s_gifBatch.load(std::memory_order_relaxed))
+    {
+        // GSB1: append a local-batch GifPacket from the GIF stage to this
+        // thread's batch; anything else publishes the batch first, so the
+        // RPC keeps its stream position (GPK1 staging is bypassed on the
+        // batching thread; see the header).
+        if (t_localBatchDepth != 0u && !cmd.rpc && cmd.kind == GsCmdKind::GifPacket &&
+            ps2_mtvu::onGifStage())
+        {
+            if (t_batchWorker != this)
+                flushGifBatch();
+            t_batchWorker = this;
+            const size_t cap = s_gifBatchBytes.load(std::memory_order_relaxed);
+            const size_t size = cmd.bytes.size();
+            if (!t_batchSubs.empty() && t_batch.size() + size > cap)
+                publishBatch();
+            // Oversize (or unencodable) packets fall through and enqueue
+            // alone, exactly as today; the pending batch went above.
+            if (size <= cap && size <= kGsGifBatchSubLenMask)
+            {
+                if (t_batchSubs.empty())
+                    t_batch.reserve(cap < kGifBatchDefaultBytes ? cap : kGifBatchDefaultBytes);
+                const uint32_t entry =
+                    ((cmd.u32a & kGsGifPacketHasPath) != 0u ? kGsGifBatchSubNote : 0u) |
+                    ((static_cast<uint32_t>(cmd.pathId) & kGsGifBatchSubPathMask)
+                     << kGsGifBatchSubPathShift) |
+                    static_cast<uint32_t>(size);
+                t_batchSubs.push_back(entry);
+                t_batch.insert(t_batch.end(), cmd.bytes.begin(), cmd.bytes.end());
+                t_batchSources.push_back(std::move(cmd.bytes));
+                return;
+            }
+        }
+        else
+            flushGifBatch();
+    }
+    else if (s_stagedPublish.load(std::memory_order_relaxed))
     {
         // GPK1: stage a fire-and-forget local-batch command from the GIF
         // stage; anything else publishes this thread's stage first.
@@ -336,6 +445,8 @@ void GsWorker::flushWake()
 {
     if (t_stagedWorker == this)
         flushStaged(); // GPK1: publish before delivering the wake
+    if (t_batchWorker == this)
+        flushGifBatch(); // GSB1: same for a pending batch
     std::unique_lock<std::mutex> lock(m_mutex);
     // GSW2: with wake hysteresis on, a flush also releases space-blocked
     // producers (knob off adds one atomic load and one branch).
@@ -535,11 +646,13 @@ void GsWorker::threadMain()
         }
         const uint64_t executed = m_executedCount.fetch_add(batchSize, std::memory_order_relaxed) + batchSize;
         if (deferOn && (executed >> 18) != ((executed - batchSize) >> 18))
-            std::fprintf(stderr, "[gs:handoff] executed=%llu wakes=%llu deferred=%llu watchdog=%llu staged_rounds=%llu\n",
+            std::fprintf(stderr, "[gs:handoff] executed=%llu wakes=%llu deferred=%llu watchdog=%llu staged_rounds=%llu gif_batches=%llu gif_batched=%llu\n",
                          static_cast<unsigned long long>(executed),
                          static_cast<unsigned long long>(m_wakes.load(std::memory_order_relaxed)),
                          static_cast<unsigned long long>(m_deferred.load(std::memory_order_relaxed)),
                          static_cast<unsigned long long>(m_watchdog.load(std::memory_order_relaxed)),
-                         static_cast<unsigned long long>(s_stagedRounds.load(std::memory_order_relaxed)));
+                         static_cast<unsigned long long>(s_stagedRounds.load(std::memory_order_relaxed)),
+                         static_cast<unsigned long long>(s_batchRounds.load(std::memory_order_relaxed)),
+                         static_cast<unsigned long long>(s_batchedCmds.load(std::memory_order_relaxed)));
     }
 }

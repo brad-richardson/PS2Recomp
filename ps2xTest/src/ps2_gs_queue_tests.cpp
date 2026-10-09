@@ -1361,6 +1361,238 @@ void register_ps2_gs_queue_tests()
             t.Equals(worker.watchdogCount(), 0ull, "no deferred wake should go stale");
         });
 
+        // GSB1: the GIF batch command keeps FIFO order, holds packets until
+        // a publish point, publishes before an RPC, at the byte cap and at
+        // flushWake, and enqueues oversize packets alone.
+        tc.Run("GSB1 GIF batch keeps FIFO order and publishes at flush points", [](TestCase &t)
+        {
+            struct Seen
+            {
+                uint8_t path;
+                uint32_t id;
+                bool noted;
+            };
+            std::vector<Seen> seen;
+            std::mutex seenMutex;
+            GsWorker worker(0u, 0u, [&](GsCommand &cmd)
+                            {
+                                std::lock_guard<std::mutex> lock(seenMutex);
+                                if (cmd.kind == GsCmdKind::GifBatch)
+                                {
+                                    size_t off = 0u;
+                                    for (const uint32_t sub : cmd.subs)
+                                    {
+                                        const size_t len = sub & kGsGifBatchSubLenMask;
+                                        uint32_t id = 0u;
+                                        std::memcpy(&id, cmd.bytes.data() + off, sizeof(id));
+                                        seen.push_back({static_cast<uint8_t>((sub >> kGsGifBatchSubPathShift) & kGsGifBatchSubPathMask),
+                                                        id, (sub & kGsGifBatchSubNote) != 0u});
+                                        off += len;
+                                    }
+                                }
+                                else if (cmd.kind == GsCmdKind::GifPacket)
+                                {
+                                    uint32_t id = 0u;
+                                    std::memcpy(&id, cmd.bytes.data(), sizeof(id));
+                                    seen.push_back({cmd.pathId, id,
+                                                    (cmd.u32a & kGsGifPacketHasPath) != 0u});
+                                }
+                                else if (cmd.kind == GsCmdKind::Fence)
+                                    seen.push_back({0u, 0xFFFFFFFFu, false});
+                            });
+            worker.setDeferredWakes(64u, 256u * 1024u);
+            worker.start();
+            GsWorker::setGifBatch(true, GsWorker::kGifBatchDefaultBytes);
+            uint32_t next = 0;
+            bool heldUntilFlush = false, oneBatch = false, rpcAfterBatch = false;
+            bool capPublished = false, oversizeAlone = false;
+            std::thread gif(
+                [&]
+                {
+                    ps2_mtvu::detail::g_gifTid.store(std::this_thread::get_id(), std::memory_order_relaxed);
+                    auto packet = [&](uint8_t path, bool note, size_t size = 16u)
+                    {
+                        GsWorker::beginLocalBatch();
+                        GsCommand c;
+                        c.kind = GsCmdKind::GifPacket;
+                        if (note)
+                        {
+                            c.u32a = kGsGifPacketHasPath;
+                            c.pathId = path;
+                        }
+                        c.bytes.resize(size, 0x5Au);
+                        std::memcpy(c.bytes.data(), &next, sizeof(next));
+                        ++next;
+                        worker.enqueue(std::move(c));
+                        GsWorker::endLocalBatch();
+                    };
+                    auto fence = [&]
+                    {
+                        GsCommand c;
+                        c.kind = GsCmdKind::Fence;
+                        c.rpc = std::make_shared<GsRpcBase>();
+                        std::shared_ptr<GsRpcBase> rpc = c.rpc;
+                        worker.enqueue(std::move(c));
+                        rpc->wait();
+                    };
+                    // Held: nothing reaches the queue before a publish point,
+                    // then one flush publishes exactly one batch.
+                    for (int i = 0; i < 10; ++i)
+                        packet(static_cast<uint8_t>(1 + (i % 3)), i != 4);
+                    heldUntilFlush = worker.enqueuedCount() == 0u;
+                    GsWorker::flushGifBatch();
+                    oneBatch = worker.enqueuedCount() == 1u;
+                    // An RPC publishes the batch first, then runs after it.
+                    for (int i = 0; i < 5; ++i)
+                        packet(1u, true);
+                    fence();
+                    {
+                        std::lock_guard<std::mutex> lock(seenMutex);
+                        rpcAfterBatch = seen.size() == 16u && seen.back().id == 0xFFFFFFFFu;
+                    }
+                    // The byte cap publishes without a flush call: 16-byte
+                    // packets at a 64-byte cap go out 4 to a batch.
+                    GsWorker::setGifBatch(true, 64u);
+                    const uint64_t before = worker.enqueuedCount();
+                    const uint64_t roundsBefore = GsWorker::gifBatchRounds();
+                    for (int i = 0; i < 10; ++i)
+                        packet(2u, true);
+                    capPublished = worker.enqueuedCount() == before + 2u &&
+                                   GsWorker::gifBatchRounds() == roundsBefore + 2u;
+                    GsWorker::flushGifBatch(); // the trailing 2 packets
+                    // An oversize packet enqueues alone, as today.
+                    const uint64_t beforeOver = worker.enqueuedCount();
+                    packet(3u, true, 128u);
+                    oversizeAlone = worker.enqueuedCount() == beforeOver + 1u;
+                    fence();
+                    // Random runs, published by flushWake (job end).
+                    GsWorker::setGifBatch(true, GsWorker::kGifBatchDefaultBytes);
+                    uint64_t rng = 0x9E3779B97F4A7C15ull;
+                    for (int job = 0; job < 200; ++job)
+                    {
+                        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                        const int drains = 1 + static_cast<int>(rng % 90u);
+                        for (int d = 0; d < drains; ++d)
+                            packet(static_cast<uint8_t>(1 + (d % 3)), true);
+                        worker.flushWake();
+                    }
+                    // Batch + staged publish both on: batching supersedes
+                    // staging on this thread, order still FIFO.
+                    GsWorker::setStagedPublish(true);
+                    for (int i = 0; i < 50; ++i)
+                        packet(1u, true);
+                    worker.flushWake();
+                    GsWorker::setStagedPublish(false);
+                    ps2_mtvu::detail::g_gifTid.store(std::thread::id{}, std::memory_order_relaxed);
+                });
+            gif.join();
+            GsWorker::setGifBatch(false, 0u);
+            for (int i = 0; i < 400 && !worker.isQuiescent(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            worker.stop();
+            t.IsTrue(heldUntilFlush, "batched packets should stay off the queue until a publish point");
+            t.IsTrue(oneBatch, "one flush should publish exactly one batch");
+            t.IsTrue(rpcAfterBatch, "an RPC should publish the batch first and run after it");
+            t.IsTrue(capPublished, "a full batch should publish itself at the byte cap");
+            t.IsTrue(oversizeAlone, "an oversize packet should enqueue alone");
+            bool ordered = true;
+            uint32_t expect = 0;
+            for (const Seen &s : seen)
+            {
+                if (s.id == 0xFFFFFFFFu)
+                    continue;
+                ordered = ordered && s.id == expect++;
+            }
+            t.IsTrue(ordered && expect == next, "batched packets should execute in FIFO order");
+            // Paths and notes rode with their packets (packet 4 went
+            // noteless, so its pathId stayed 0 as in production).
+            bool pathsOk = true;
+            expect = 0;
+            for (const Seen &s : seen)
+            {
+                if (s.id == 0xFFFFFFFFu)
+                    continue;
+                if (s.id == expect && expect < 10u)
+                {
+                    const uint8_t wantPath =
+                        expect == 4u ? 0u : static_cast<uint8_t>(1 + (expect % 3));
+                    pathsOk = pathsOk && s.path == wantPath && s.noted == (expect != 4u);
+                }
+                ++expect;
+            }
+            t.IsTrue(pathsOk, "each sub-packet should carry its path and note flag");
+            t.Equals(worker.enqueuedCount(), worker.executedCount(), "every command should execute");
+            t.Equals(worker.watchdogCount(), 0ull, "no deferred wake should go stale");
+        });
+
+        // GSB1: batch on matches batch off through a real GS + worker: the
+        // consumed-stream digest (per sub-packet), the command count and VRAM
+        // are identical at the default cap, a small cap (several batches;
+        // oversize-direct is the identical code path, covered in the test
+        // above) and off.
+        tc.Run("GSB1 batch on matches batch off: digest, count and VRAM", [](TestCase &t)
+        {
+            const std::vector<std::vector<uint8_t>> pkts = {
+                makePackedTriangle(200u, 10u, 30u), makeReglistPoints(),
+                makeImageUpload(0x100u, 0u, 0u, 8u, 8u, 3u), makePackedTriangle(5u, 250u, 60u),
+                makePackedTriangle(100u, 100u, 100u), makeReglistPoints()};
+            const GifPathId paths[] = {GifPathId::Path1, GifPathId::Path2, GifPathId::Path3,
+                                       GifPathId::Path1, GifPathId::Path2, GifPathId::Path3};
+            auto run = [&](bool batch, size_t capBytes, std::vector<uint8_t> &vramOut,
+                           uint64_t &seq, uint64_t &cmds, uint64_t &rounds, uint64_t &batched)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GSRegisters regs{};
+                initQueueTestRegs(regs);
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+                gs.setQueueEnabled(true);
+                gs.setPktSeqEnabled(true);
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+                GsWorker::setGifBatch(batch, capBytes);
+                // Feed as the GIF stage inside local batches: the production
+                // predicate that stages packets into the batch.
+                ps2_mtvu::detail::g_gifTid.store(std::this_thread::get_id(),
+                                                 std::memory_order_relaxed);
+                const uint64_t roundsBefore = GsWorker::gifBatchRounds();
+                const uint64_t batchedBefore = GsWorker::gifBatchedCmds();
+                GsWorker::beginLocalBatch();
+                for (size_t i = 0; i < pkts.size(); ++i)
+                {
+                    std::vector<uint8_t> bytes = pkts[i];
+                    gs.processGIFPacketWithPath(paths[i], i != 1u, bytes);
+                }
+                GsWorker::endLocalBatch();
+                GsWorker::flushGifBatch();
+                rounds = GsWorker::gifBatchRounds() - roundsBefore;
+                batched = GsWorker::gifBatchedCmds() - batchedBefore;
+                ps2_mtvu::detail::g_gifTid.store(std::thread::id{}, std::memory_order_relaxed);
+                GsWorker::setGifBatch(false, 0u);
+                gs.drainQueue();
+                seq = gs.pktSeqSnapshot();
+                cmds = gs.pktSeqSnapshotCommands();
+                vramOut = snapshotVramBytes(gs);
+            };
+            std::vector<uint8_t> vOff, vOn, vSmall;
+            uint64_t sOff = 0, sOn = 0, sSmall = 0, cOff = 0, cOn = 0, cSmall = 0;
+            uint64_t rOff = 0, rOn = 0, rSmall = 0, bOff = 0, bOn = 0, bSmall = 0;
+            run(false, 0u, vOff, sOff, cOff, rOff, bOff);
+            run(true, GsWorker::kGifBatchDefaultBytes, vOn, sOn, cOn, rOn, bOn);
+            // 400 B fits every packet (largest is the 352 B image upload) but
+            // splits the 928 B stream into 3 batches.
+            run(true, 400u, vSmall, sSmall, cSmall, rSmall, bSmall);
+            t.IsTrue(cOff != 0u, "digest should count commands");
+            t.Equals(rOff, 0ull, "batch off should publish no batches");
+            t.IsTrue(rOn == 1u && bOn == pkts.size(), "default cap should batch every packet at once");
+            t.IsTrue(rSmall > 1u && bSmall == pkts.size(), "small cap should split into several batches");
+            t.Equals(sOn, sOff, "batched digest should match the separate-command digest");
+            t.Equals(cOn, cOff, "batched digest should count the same commands");
+            t.Equals(sSmall, sOff, "small-cap digest should match too");
+            t.Equals(cSmall, cOff, "small-cap digest should count the same commands");
+            t.IsTrue(vOff == vOn, "batched execution should give the same VRAM");
+            t.IsTrue(vOff == vSmall, "small-cap execution should give the same VRAM");
+        });
+
         // GF1 H1/H2: one command carrying the path gives the same consumed
         // sequence and VRAM as NoteGifPath + GifPacket.
         tc.Run("GF1 processGIFPacketWithPath matches noteGifPath + processGIFPacket", [](TestCase &t)

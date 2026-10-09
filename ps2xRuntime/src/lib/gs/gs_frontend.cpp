@@ -305,6 +305,9 @@ bool GS::setQueueEnabled(bool enabled, size_t maxDescriptors)
                                                  GsWorker::kDefaultMaxPayloadBytes,
                                                  [this](GsCommand &cmd)
                                                  { executeQueuedCommand(cmd); });
+        // GSB1: published batches' source vectors return here in bulk (inert
+        // unless the pool is enabled, which only the diet/PKB1 blocks do).
+        worker->setBatchPool(&m_packetPool);
         worker->start();
         m_worker = std::move(worker);
     }
@@ -481,31 +484,87 @@ void GS::noteConsumedCommand(const GsCommand &cmd)
     ++m_pktSeqCommands;
 }
 
+void GS::noteConsumedGifSubPacket(const uint8_t *data, size_t size)
+{
+    // Same fast path as noteConsumedCommand (N8D7M12 Part 5F4P3): relaxed
+    // check, lock, re-check, then the exact GifPacket mix sequence (kind tag,
+    // live path, bytes, count).
+    if (!m_pktSeqEnabled.load(std::memory_order_relaxed))
+        return;
+    std::lock_guard<std::mutex> lock(m_pktSeqMutex);
+    if (!m_pktSeqEnabled.load(std::memory_order_relaxed))
+        return;
+    uint64_t &d = m_pktSeqDigest;
+    pktSeqMixByte(d, static_cast<uint8_t>(GsCmdKind::GifPacket));
+    pktSeqMixByte(d, static_cast<uint8_t>(m_curGifPath));
+    pktSeqMixBytes(d, data, size);
+    ++m_pktSeqCommands;
+}
+
 void GS::executeQueuedCommand(GsCommand &cmd)
 {
-    // N8D7M12 Part 5F4P2: hash before the handler runs so a GifPacket
-    // sees the prior-consumed m_curGifPath value. N8D7M12 Part 5F4P3:
-    // noteConsumedCommand fast-returns while disabled without locking.
-    if (cmd.kind == GsCmdKind::GifPacket && (cmd.u32a & kGsGifPacketHasPath) != 0u)
+    // GSB1: a GifBatch digests per sub-packet in its case below (the same
+    // notes the separate commands would produce), never as one command.
+    const bool isBatch = cmd.kind == GsCmdKind::GifBatch;
+    if (!isBatch)
     {
-        // GF1 H1: the folded NoteGifPath runs first, digest included, so the
-        // consumed sequence is the one the two separate commands produce.
-        if (m_pktSeqEnabled.load(std::memory_order_relaxed))
+        // N8D7M12 Part 5F4P2: hash before the handler runs so a GifPacket
+        // sees the prior-consumed m_curGifPath value. N8D7M12 Part 5F4P3:
+        // noteConsumedCommand fast-returns while disabled without locking.
+        if (cmd.kind == GsCmdKind::GifPacket && (cmd.u32a & kGsGifPacketHasPath) != 0u)
         {
-            GsCommand note;
-            note.kind = GsCmdKind::NoteGifPath;
-            note.pathId = cmd.pathId;
-            noteConsumedCommand(note);
+            // GF1 H1: the folded NoteGifPath runs first, digest included, so the
+            // consumed sequence is the one the two separate commands produce.
+            if (m_pktSeqEnabled.load(std::memory_order_relaxed))
+            {
+                GsCommand note;
+                note.kind = GsCmdKind::NoteGifPath;
+                note.pathId = cmd.pathId;
+                noteConsumedCommand(note);
+            }
+            m_curGifPath = static_cast<GifPathId>(cmd.pathId);
         }
-        m_curGifPath = static_cast<GifPathId>(cmd.pathId);
+        noteConsumedCommand(cmd);
     }
-    noteConsumedCommand(cmd);
     const GsWorkerScope scope;
     switch (cmd.kind)
     {
     case GsCmdKind::GifPacket:
         processGIFPacket(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
         break;
+    case GsCmdKind::GifBatch:
+    {
+        // Each sub-packet runs today's per-packet path in order: the folded
+        // path note (digest included) when one rode with it, the consumed
+        // digest note, then processGIFPacket — the same call sequence separate
+        // commands produce (capture hook, RawGifPacket call boundaries,
+        // minimal decode). One pool release per batch happens below.
+        size_t offset = 0u;
+        const size_t total = cmd.bytes.size();
+        for (const uint32_t sub : cmd.subs)
+        {
+            const size_t len = static_cast<size_t>(sub & kGsGifBatchSubLenMask);
+            if (offset + len > total)
+                break; // malformed table; the producer above cannot emit it
+            if ((sub & kGsGifBatchSubNote) != 0u)
+            {
+                const auto subPath = static_cast<GifPathId>(
+                    (sub >> kGsGifBatchSubPathShift) & kGsGifBatchSubPathMask);
+                if (m_pktSeqEnabled.load(std::memory_order_relaxed))
+                {
+                    GsCommand note;
+                    note.kind = GsCmdKind::NoteGifPath;
+                    note.pathId = static_cast<uint8_t>(subPath);
+                    noteConsumedCommand(note);
+                }
+                m_curGifPath = subPath;
+            }
+            noteConsumedGifSubPacket(cmd.bytes.data() + offset, len);
+            processGIFPacket(cmd.bytes.data() + offset, static_cast<uint32_t>(len));
+            offset += len;
+        }
+        break;
+    }
     case GsCmdKind::NoteGifPath:
         m_curGifPath = static_cast<GifPathId>(cmd.pathId);
         break;

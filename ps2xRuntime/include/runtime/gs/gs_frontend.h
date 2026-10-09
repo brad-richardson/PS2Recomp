@@ -331,6 +331,10 @@ private:
     // PKB1 item 3: bulk-return the stashed buffers (single pool lock round).
     void flushReleaseStash();
     void noteConsumedCommand(const GsCommand &cmd);
+    // GSB1: the GifPacket branch of noteConsumedCommand for one GifBatch
+    // sub-packet (same kind tag, live path, bytes and count, without copying
+    // the bytes into a scratch command). Only called for sub-packets.
+    void noteConsumedGifSubPacket(const uint8_t *data, size_t size);
     void snapshotVRAM();
     void writeRegisterUnlocked(uint8_t regAddr, uint64_t value);
     void writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi);
