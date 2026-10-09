@@ -1709,7 +1709,7 @@ private:
         if (m_pendingGpu)
         {
             if (m_hudDiagPending.armed)
-                hudGpuDiagCompare(slot.buffer);
+                hudGpuDiagCompare(slot.buffer, m_hudDiagPending, m_hudDiagPx, m_hudDiagMax, "");
             const bool gpuQueued = ps2x_present_vk::queue(slot.id, m_exportW, m_exportH);
             m_pendingAhb = -1;
             m_pendingFence = 0u;
@@ -1740,7 +1740,7 @@ private:
                 m_pendingAhb = -1;
                 m_pendingFence = 0u;
                 m_hudThread.submit([this, job, w, h, tick, p] {
-                    stampTrickyHudAhb(job.buffer, w, h, tick, p);
+                    compositeTrickyHudAhbAsync(job.buffer, w, h, tick, p);
                     m_hudJobQueued = ps2x_present_vk::queue(job.id, w, h);
                     if (!m_hudJobQueued)
                         ps2x_present_vk::fallBack("GE1 AHB queue failed");
@@ -2005,6 +2005,135 @@ private:
         return true;
     }
 
+    // HUD4 Part 2: helper-side GPU composite (m_hudAsync=1). Runs on the GsHud
+    // helper AFTER the worker's export wait, so the AHB is stable and no wait
+    // is needed before the pristine stash; submits through ge1_gs_hud_scene,
+    // waits its own fence, and returns with the slot composited. True =
+    // GPU-served (skip the stamp); false = the CPU stamp fallback serves.
+    // The GS worker never waits on the helper's fence. State here is
+    // helper-owned (the m_hudGpuAsync* members); the inline path above keeps
+    // its worker-owned twins.
+    bool submitTrickyHudGpuAsync(AHardwareBuffer *buffer, uint32_t imgW, uint32_t imgH,
+                                 uint64_t tick,
+                                 const ps2_ssx3_tricky_layer::PresentationPacket &p)
+    {
+        using namespace ps2_ssx3_tricky_hud;
+        if (!m_hudGpu || !m_ge1.hudScene || !buffer || imgW == 0u || imgH == 0u)
+            return false;
+        const Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
+        if (r.w <= 0 || r.h <= 0 || !p.atlas || !p.atlas->ok)
+            return false;
+        if (!m_hudGpuAsyncSprites.ok || m_hudGpuAsyncSprites.atlas != p.atlas ||
+            m_hudGpuAsyncSprites.fw != static_cast<int>(imgW) ||
+            m_hudGpuAsyncSprites.fh != static_cast<int>(imgH))
+        {
+            if (!buildHudSprites(m_hudGpuAsyncSprites, *p.atlas, static_cast<int>(imgW),
+                                 static_cast<int>(imgH)))
+            {
+                if (++m_hudGpuAsyncFallbacks == 1u)
+                    std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU sprite build failed, "
+                                         "CPU fallback (async)\n");
+                return false;
+            }
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU sprites built %ux%u (async)\n", imgW,
+                         imgH);
+        }
+        const HudVisualKey key =
+            visualKeyFor(p.atlas, static_cast<int>(imgW), static_cast<int>(imgH), p.fill, p.full,
+                         tick, p.splashUntil, p.litLetters, p.flashUntil);
+        HudScene sc;
+        if (!buildHudScene(sc, m_hudGpuAsyncSprites, key))
+        {
+            if (++m_hudGpuAsyncFallbacks == 1u)
+                std::fprintf(stderr,
+                             "[ssx3-tricky-hud] vk: GPU scene build failed, CPU fallback (async)\n");
+            return false;
+        }
+        Ge1HudScene abi;
+        if (!fillGe1HudScene(abi, sc))
+        {
+            if (++m_hudGpuAsyncFallbacks == 1u)
+                std::fprintf(stderr,
+                             "[ssx3-tricky-hud] vk: GPU scene fill failed, CPU fallback (async)\n");
+            return false;
+        }
+        ++m_hudGpuAsyncSeen;
+        // LANE DIAG (PS2X_TRICKY_HUD_GPU_DIAG=1): stash the pristine frame for
+        // the compare below. The worker already waited the export fence, so no
+        // wait is needed here; the play path (diag off) skips this entirely.
+        const bool wantDiag = m_hudDiag && (m_hudGpuAsyncSeen % 30u) == 0u;
+        m_hudGpuAsyncDiag = HudDiagPending{};
+        if (wantDiag)
+        {
+            AHardwareBuffer_Desc dd = {};
+            AHardwareBuffer_describe(buffer, &dd);
+            void *plock = nullptr;
+            if (dd.stride >= imgW &&
+                AHardwareBuffer_lock(buffer, AHARDWAREBUFFER_USAGE_CPU_READ_RARELY, -1, nullptr,
+                                     &plock) == 0 &&
+                plock)
+            {
+                m_hudGpuAsyncDiag.stride = static_cast<size_t>(dd.stride) * 4u;
+                m_hudGpuAsyncDiag.frame.resize(m_hudGpuAsyncDiag.stride * imgH);
+                std::memcpy(m_hudGpuAsyncDiag.frame.data(), plock, m_hudGpuAsyncDiag.frame.size());
+                AHardwareBuffer_unlock(buffer, nullptr);
+                m_hudGpuAsyncDiag.armed = true;
+                m_hudGpuAsyncDiag.packet = p;
+                m_hudGpuAsyncDiag.sprites = m_hudGpuAsyncSprites;
+                m_hudGpuAsyncDiag.tick = tick;
+                m_hudGpuAsyncDiag.fw = static_cast<int>(imgW);
+                m_hudGpuAsyncDiag.fh = static_cast<int>(imgH);
+            }
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        uint64_t compositeFence = 0u;
+        const int rc = m_ge1.hudScene(
+            buffer, &abi, p.atlas->rgba.data(), static_cast<uint32_t>(p.atlas->w),
+            static_cast<uint32_t>(p.atlas->h), static_cast<uint64_t>(reinterpret_cast<uintptr_t>(p.atlas)),
+            &compositeFence);
+        // The helper waits its own fence here; the GS worker never waits on it.
+        if (rc == 1 && compositeFence != 0u)
+            m_ge1.waitExport(compositeFence);
+        const auto t1 = std::chrono::steady_clock::now();
+        if (rc != 1 || compositeFence == 0u)
+        {
+            m_hudGpuAsyncDiag = HudDiagPending{};
+            if (++m_hudGpuAsyncFallbacks == 1u)
+                std::fprintf(stderr,
+                             "[ssx3-tricky-hud] vk: GPU composite failed, CPU fallback (async)\n");
+            return false;
+        }
+        // Timed submit+wait: the helper's per-frame cost, comparable to the CPU stamp's
+        // lock-to-unlock average on the same thread.
+        m_hudGpuAsyncCompositeNs +=
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        if (++m_hudGpuAsyncServed == 1u)
+            std::fprintf(stderr,
+                         "[ssx3-tricky-hud] vk: first GPU composite tick=%llu region=%dx%d (async)\n",
+                         static_cast<unsigned long long>(tick), r.w, r.h);
+        else if (m_hudGpuAsyncServed % 600u == 0u)
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU composites=%llu avg=%.1f us (async)\n",
+                         static_cast<unsigned long long>(m_hudGpuAsyncServed),
+                         static_cast<double>(m_hudGpuAsyncCompositeNs) / 1000.0 /
+                             static_cast<double>(m_hudGpuAsyncServed));
+        if (m_hudGpuAsyncDiag.armed)
+            hudGpuDiagCompare(buffer, m_hudGpuAsyncDiag, m_hudGpuAsyncDiagPx, m_hudGpuAsyncDiagMax,
+                              " (async)");
+        return true;
+    }
+
+    // HUD4 Part 2: the helper job's composite (m_hudAsync=1). GPU submit when
+    // available, else the same CPU stamp the helper runs today. Ordering is
+    // exactly the CPU async path's: the worker waited the export fence, the
+    // helper composites, then the job queues (see queuePendingAhb).
+    void compositeTrickyHudAhbAsync(AHardwareBuffer *buffer, uint32_t imgW, uint32_t imgH,
+                                    uint64_t tick,
+                                    const ps2_ssx3_tricky_layer::PresentationPacket &p)
+    {
+        if (!submitTrickyHudGpuAsync(buffer, imgW, imgH, tick, p))
+            stampTrickyHudAhb(buffer, imgW, imgH, tick, p);
+    }
+
     // HUD4 lane diag, queue-time half: the stashed pristine frame (same
     // packet) through the CPU stamp vs the GPU-composited AHB region.
     struct HudRegCompare
@@ -2036,19 +2165,24 @@ private:
         }
         return c;
     }
-    void hudGpuDiagCompare(AHardwareBuffer *buffer)
+    // HUD4 Part 2: shared by the inline (worker) and async (helper) GPU paths, with
+    // per-mode stash + totals (the two modes never mix in one run, and each caller's
+    // state is touched only on its own thread).
+    struct HudDiagPending; // defined with the members below (parameter lists need the name now)
+    void hudGpuDiagCompare(AHardwareBuffer *buffer, HudDiagPending &pend, uint64_t &totPx,
+                           unsigned &totMax, const char *mode)
     {
         using namespace ps2_ssx3_tricky_hud;
         HudDiagPending st;
-        st.frame.swap(m_hudDiagPending.frame);
-        st.stride = m_hudDiagPending.stride;
-        st.packet = m_hudDiagPending.packet;
-        st.sprites = m_hudDiagPending.sprites;
-        st.tick = m_hudDiagPending.tick;
-        st.fw = m_hudDiagPending.fw;
-        st.fh = m_hudDiagPending.fh;
-        st.armed = m_hudDiagPending.armed;
-        m_hudDiagPending = HudDiagPending{};
+        st.frame.swap(pend.frame);
+        st.stride = pend.stride;
+        st.packet = pend.packet;
+        st.sprites = pend.sprites;
+        st.tick = pend.tick;
+        st.fw = pend.fw;
+        st.fh = pend.fh;
+        st.armed = pend.armed;
+        pend = HudDiagPending{};
         if (!st.armed || !buffer || st.frame.empty() || st.stride == 0u)
             return;
         const int fw = st.fw, fh = st.fh;
@@ -2089,13 +2223,13 @@ private:
                             (static_cast<size_t>(r.y + y) * fw + static_cast<size_t>(r.x)) * 4u,
                         rowBytes);
         const HudRegCompare cmp = hudCompareRegion(cpuReg.data(), gpuReg.data(), r.w, r.h);
-        m_hudDiagPx += cmp.diffPx;
-        if (cmp.maxErr > m_hudDiagMax)
-            m_hudDiagMax = cmp.maxErr;
-        std::fprintf(stderr, "[ssx3-tricky-hud] vk gpu-diag t=%llu px=%llu max=%u (tot %llu max %u)\n",
+        totPx += cmp.diffPx;
+        if (cmp.maxErr > totMax)
+            totMax = cmp.maxErr;
+        std::fprintf(stderr, "[ssx3-tricky-hud] vk gpu-diag t=%llu px=%llu max=%u (tot %llu max %u)%s\n",
                      static_cast<unsigned long long>(st.tick),
                      static_cast<unsigned long long>(cmp.diffPx), cmp.maxErr,
-                     static_cast<unsigned long long>(m_hudDiagPx), m_hudDiagMax);
+                     static_cast<unsigned long long>(totPx), totMax, mode);
     }
 
     void retireAhbSlots()
@@ -2106,6 +2240,7 @@ private:
         m_pendingAhb = -1;
         m_pendingGpu = false; // HUD4: drop the served flag + any diag stash with the slots
         m_hudDiagPending = HudDiagPending{};
+        m_hudGpuAsyncDiag = HudDiagPending{}; // HUD4 Part 2: the async twin (helper joined above)
         for (AhbSlot &slot : m_ahbSlots)
         {
             if (slot.id)
@@ -2168,7 +2303,10 @@ private:
         // GE1's queue (same thread, back-to-back: no added drain or wait).
         // On success m_pendingFence takes the composite fence (it covers the
         // copy) and the queue path skips the CPU stamp for this slot.
-        m_pendingGpu =
+        // HUD4 Part 2: the inline (worker) submit runs only when the helper
+        // is off; in async mode the helper submits after the worker's export
+        // wait (compositeTrickyHudAhbAsync), so the worker never waits on it.
+        m_pendingGpu = !m_hudAsync &&
             compositeTrickyHudGpu(slot.buffer, m_exportW, m_exportH, tick, fence, &m_pendingFence);
         return true;
     }
@@ -2420,6 +2558,18 @@ private:
     bool m_hudJobQueued = true;
     bool m_hudAsyncLogged = false;
     ps2x_gs::SerialJobThread m_hudThread{"GsHud"};
+    // HUD4 Part 2: async GPU submit (m_hudAsync=1): the helper builds the scene,
+    // submits through ge1_gs_hud_scene, waits its own fence and serves the slot;
+    // the worker never waits on it. Helper-owned (the worker touches none of
+    // these in async mode); the inline path keeps its worker-owned twins above.
+    ps2_ssx3_tricky_hud::HudSprites m_hudGpuAsyncSprites;
+    uint64_t m_hudGpuAsyncSeen = 0u;
+    uint64_t m_hudGpuAsyncServed = 0u;
+    uint64_t m_hudGpuAsyncCompositeNs = 0u;
+    uint64_t m_hudGpuAsyncFallbacks = 0u;
+    HudDiagPending m_hudGpuAsyncDiag;
+    uint64_t m_hudGpuAsyncDiagPx = 0u;
+    unsigned m_hudGpuAsyncDiagMax = 0u;
 #endif
     uint8_t m_ge1LastPath = 3u;
     uint32_t m_ge1FifoBytes = 0u;
