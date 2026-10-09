@@ -1157,6 +1157,8 @@ inline bool jcam2Service(uint8_t *ram, const R5900Context &live, PS2Runtime &run
 
 inline bool queryFix() noexcept;        // JMP4, defined with the hold below
 inline void queryHoldReset() noexcept; // JMP4 hold, defined with it below
+inline bool springHoldFix() noexcept;        // JMP5, defined with the hold below
+inline void springHoldReset() noexcept; // JMP5 hold, defined with it below
 
 inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
 {
