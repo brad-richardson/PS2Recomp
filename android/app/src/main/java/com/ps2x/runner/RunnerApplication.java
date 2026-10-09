@@ -84,7 +84,7 @@ public final class RunnerApplication extends Application {
                 throw new IOException("Cannot create " + pack);
             for (String line : new String(manifest, StandardCharsets.UTF_8).split("\\n")) {
                 if (line.isEmpty() || line.startsWith("#")) continue;
-                if (!line.matches("[0-9a-f]{64}  [0-9a-f-]+\\.png"))
+                if (!line.matches("[0-9a-f]{64}  [0-9a-f-]+\\.(png|dds)"))
                     throw new IOException("Invalid pack manifest entry");
                 String name = line.substring(66);
                 if (!names.add(name)) throw new IOException("Duplicate pack entry: " + name);
