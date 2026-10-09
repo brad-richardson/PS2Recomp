@@ -72,6 +72,45 @@ GE1_API int ge1_gs_freeze_load(const uint8_t* data, uint32_t size);
 #define GE1_NATIVE_RECORD_MAGIC_LO 0x00002A4E52540000ull
 #define GE1_NATIVE_RECORD_MAGIC_HI 0x5245434F52440001ull
 GE1_API int ge1_gs_native_record(const uint8_t* bytes, uint32_t byte_count);
+// HUD4: composite one Tricky HUD scene onto an already-exported AHB, on
+// GE1's own Vulkan queue (Android only). The AHB holds the final frame (the
+// export copy just submitted); GE1 submits the composite right behind it on
+// the same queue and returns the composite fence in fence_counter (which
+// covers the export too, in order). Optional symbol; without it (or on any
+// failure, return != 1) the runtime keeps its CPU stamp.
+//   scene: a Ge1HudScene blob (magic + version + fixed-size geometry).
+//   atlasPx: atlasW*atlasH*4 RGBA bytes, top-left origin; atlasId re-uploads
+//     the GPU atlas when (id, w, h) change (the runtime passes its Atlas*).
+// Buddy rule: this struct is mirrored in the adapter
+// (ps2xRuntime/third_party/armsx2/ge1/ge1_gs.h) and in the vendor
+// (GSDeviceVK). All members are 4 bytes (no padding); magic + exact size
+// are checked at both layers, fail-closed, so any drift refuses loudly
+// instead of misdrawing.
+#define GE1_HUD_SCENE_MAGIC 0x44554847u // 'HUDG'
+#define GE1_HUD_SCENE_VERSION 1u
+#define GE1_HUD_SCENE_MAX_QUADS 26
+typedef struct Ge1HudScene
+{
+    uint32_t magic;   // GE1_HUD_SCENE_MAGIC
+    uint32_t version; // GE1_HUD_SCENE_VERSION
+    int32_t regionX, regionY, regionW, regionH; // HUD region, frame coords
+    int32_t nsmears;                            // 0..2
+    int32_t smearX0[2], smearY0[2], smearX1[2], smearY1[2]; // frame coords
+    int32_t smearLX[2], smearRX[2]; // edge columns smearCoverS would read, frame coords
+    int32_t nquads;                 // 0..GE1_HUD_SCENE_MAX_QUADS
+    int32_t quadSrcX[GE1_HUD_SCENE_MAX_QUADS]; // atlas cell, atlas px
+    int32_t quadSrcY[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadSrcW[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadSrcH[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadDX[GE1_HUD_SCENE_MAX_QUADS]; // dest rect, frame coords
+    int32_t quadDY[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadDW[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadDH[GE1_HUD_SCENE_MAX_QUADS];
+    float quadDim[GE1_HUD_SCENE_MAX_QUADS]; // RGB multiplier (alpha unchanged)
+} Ge1HudScene;
+GE1_API int ge1_gs_hud_scene(void* buffer, const Ge1HudScene* scene, const uint8_t* atlasPx,
+                             uint32_t atlasW, uint32_t atlasH, uint64_t atlasId,
+                             uint64_t* fence_counter);
 #ifdef __cplusplus
 }
 

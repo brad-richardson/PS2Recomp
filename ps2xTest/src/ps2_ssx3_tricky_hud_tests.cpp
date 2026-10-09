@@ -1,5 +1,7 @@
 #include "MiniTest.h"
 #include "ps2_ssx3_tricky_hud.h"
+#include "runtime/gs/ge1_gs_api.h"
+#include <cstddef>
 #include <utility>
 
 // TK43a: Tricky meter reskin compositor/reader/atlas tests. The atlas is
@@ -1167,6 +1169,193 @@ void register_ps2_ssx3_tricky_hud_tests()
             t.IsTrue(ensureHudLayer(c, atlas2, 1920, 1080, 0.0f, true, 112u, 500u, 5, 500u),
                      "new atlas");
             t.IsTrue(c.rebuilds == before + 1u, "new atlas rebuilds"); });
+        tc.Run("HUD3 scene model equals direct on sweep", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas atlas = tintedAtlas();
+            const int fw = 640, fh = 480;
+            const size_t sb = static_cast<size_t>(fw) * 4u;
+            HudSprites ss;
+            t.IsTrue(buildHudSprites(ss, atlas, fw, fh), "sprites build");
+            const Rect r = hudRegionRect(fw, fh);
+            // fill bands x full x dim phase x splash x letters x flash phase.
+            const float fills[6] = {0.0f, 0.03f, 0.30f, 0.55f, 0.80f, 1.0f};
+            int checked = 0;
+            for (int fi = 0; fi < 6; ++fi)
+                for (int full = 0; full < 2; ++full)
+                    for (int ph = 0; ph < 2; ++ph)
+                        for (int sp = 0; sp < 2; ++sp)
+                            for (int li = 0; li < 7; li += 3)
+                                for (int fl = 0; fl < 3; ++fl)
+                                {
+                                    const uint64_t tick = 100u + static_cast<uint64_t>(ph * 8);
+                                    const uint64_t splash = sp ? tick + 50u : 0u;
+                                    const uint64_t flash =
+                                        fl == 0 ? 0u : (fl == 1 ? tick + 50u : tick + 8u);
+                                    const bool bfull = full != 0;
+                                    const HudVisualKey key = visualKeyFor(
+                                        &atlas, fw, fh, fills[fi], bfull, tick, splash, li, flash);
+                                    HudScene sc;
+                                    if (!buildHudScene(sc, ss, key))
+                                    {
+                                        t.IsTrue(false, "scene builds");
+                                        return;
+                                    }
+                                    std::vector<uint8_t> bg(static_cast<size_t>(fw) * fh * 4u);
+                                    randomFrame(bg, 0x6e3d01u +
+                                                        static_cast<uint32_t>(checked * 7919u));
+                                    for (int lane = 0; lane < 2; ++lane)
+                                    {
+                                        std::vector<uint8_t> f = bg;
+                                        std::vector<uint8_t> g = bg;
+                                        if (lane == 0)
+                                        {
+                                            stampHudDirect<false>(f.data(), sb, r, ss, fills[fi],
+                                                                  bfull, tick, splash, li, flash);
+                                            execHudSceneModel<false>(g.data(), sb, r, sc, atlas);
+                                        }
+                                        else
+                                        {
+                                            stampHudDirect<true>(f.data(), sb, r, ss, fills[fi],
+                                                                 bfull, tick, splash, li, flash);
+                                            execHudSceneModel<true>(g.data(), sb, r, sc, atlas);
+                                        }
+                                        if (f != g)
+                                        {
+                                            char nm[128];
+                                            std::snprintf(nm, sizeof(nm),
+                                                          "sweep MISMATCH lane=%d fi=%d full=%d "
+                                                          "ph=%d sp=%d li=%d fl=%d",
+                                                          lane, fi, full, ph, sp, li, fl);
+                                            t.IsTrue(false, nm);
+                                            return;
+                                        }
+                                    }
+                                    ++checked;
+                                }
+            t.IsTrue(checked == 6 * 2 * 2 * 2 * 3 * 3, "sweep covered"); });
+        tc.Run("HUD3 scene model equals direct at 1080p and 2x", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas atlas = tintedAtlas();
+            struct State
+            {
+                float fill;
+                bool full;
+                uint64_t tick, splash, flash;
+                int lit;
+            };
+            // HUD2's 13 recorded ride packets (gari-rec [hud2-record]
+            // transitions) plus full-state coverage the scripted ride never
+            // reaches (full/letters/splash/flash).
+            const State rec[13] = {
+                {0.0312f, false, 11470u, 0u, 0u, 0}, {0.1026f, false, 10613u, 0u, 0u, 0},
+                {0.1377f, false, 10192u, 0u, 0u, 0}, {0.2494f, false, 10006u, 0u, 0u, 0},
+                {0.2812f, false, 9625u, 0u, 0u, 0},  {0.3646f, false, 8987u, 0u, 0u, 0},
+                {0.4051f, false, 8501u, 0u, 0u, 0},  {0.4630f, false, 7806u, 0u, 0u, 0},
+                {0.6094f, false, 7383u, 0u, 0u, 0},  {0.6316f, false, 7117u, 0u, 0u, 0},
+                {0.7430f, false, 7447u, 0u, 0u, 0},  {0.7502f, false, 6910u, 0u, 0u, 0},
+                {0.8919f, false, 6993u, 0u, 0u, 0},
+            };
+            const State extra[6] = {
+                {1.0f, true, 8u, 90u, 90u, 6},   // full + splash + fanfare
+                {1.0f, true, 16u, 0u, 0u, 6},    // full, dim phase 0
+                {1.0f, true, 24u, 0u, 0u, 6},    // full, dim phase 1
+                {0.5f, false, 8u, 0u, 200u, 3},  // mid + letters + flash
+                {0.0f, false, 100u, 0u, 0u, 0},  // empty meter
+                {0.97f, true, 104u, 500u, 0u, 5}, // full edge + splash, no flash
+            };
+            const int sizes[2][2] = {{1920, 1080}, {3840, 2160}};
+            for (int s = 0; s < 2; ++s)
+            {
+                const int fw = sizes[s][0], fh = sizes[s][1];
+                HudSprites sprites;
+                t.IsTrue(buildHudSprites(sprites, atlas, fw, fh), "sprites build");
+                const Rect r = hudRegionRect(fw, fh);
+                for (int grp = 0; grp < 2; ++grp)
+                {
+                    const State *states = grp == 0 ? rec : extra;
+                    const int nst = grp == 0 ? 13 : 6;
+                    for (int v = 0; v < nst; ++v)
+                    {
+                        const State &st = states[v];
+                        const HudVisualKey key =
+                            visualKeyFor(&atlas, fw, fh, st.fill, st.full, st.tick,
+                                         st.splash, st.lit, st.flash);
+                        HudScene sc;
+                        if (!buildHudScene(sc, sprites, key))
+                        {
+                            t.IsTrue(false, "scene builds");
+                            return;
+                        }
+                        for (int fr = 0; fr < 2; ++fr)
+                        {
+                            // Padded stride on the second frame (AHB rows are
+                            // stride-padded): the model must match there too.
+                            const size_t pad = fr == 0 ? 0u : 64u;
+                            const size_t sb = static_cast<size_t>(fw) * 4u + pad;
+                            std::vector<uint8_t> bg(sb * static_cast<size_t>(fh));
+                            randomFrame(bg, 0xbeef01u + static_cast<uint32_t>(
+                                                              s * 100003u + grp * 1009u +
+                                                              v * 101u + fr));
+                            for (int lane = 0; lane < 2; ++lane)
+                            {
+                                std::vector<uint8_t> f = bg;
+                                std::vector<uint8_t> g = bg;
+                                if (lane == 0)
+                                {
+                                    stampHudDirect<false>(f.data(), sb, r, sprites, st.fill,
+                                                          st.full, st.tick, st.splash, st.lit,
+                                                          st.flash);
+                                    execHudSceneModel<false>(g.data(), sb, r, sc, atlas);
+                                }
+                                else
+                                {
+                                    stampHudDirect<true>(f.data(), sb, r, sprites, st.fill,
+                                                         st.full, st.tick, st.splash, st.lit,
+                                                         st.flash);
+                                    execHudSceneModel<true>(g.data(), sb, r, sc, atlas);
+                                }
+                                if (f != g)
+                                {
+                                    char nm[128];
+                                    std::snprintf(nm, sizeof(nm),
+                                                  "1080p/2x MISMATCH %dx%d lane=%d grp=%d "
+                                                  "v=%d fr=%d",
+                                                  fw, fh, lane, grp, v, fr);
+                                    t.IsTrue(false, nm);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            } });
+        tc.Run("HUD3 scene rebuilds only on visual-key change", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_hud;
+            Atlas atlas = tintedAtlas();
+            HudSprites sprites;
+            t.IsTrue(buildHudSprites(sprites, atlas, 1920, 1080), "sprites build");
+            const HudVisualKey k1 =
+                visualKeyFor(&atlas, 1920, 1080, 0.5f, false, 100u, 0u, 2, 0u);
+            const HudVisualKey k2 =
+                visualKeyFor(&atlas, 1920, 1080, 0.52f, false, 101u, 0u, 2, 0u);
+            t.IsTrue(k1 == k2, "same key across raw values");
+            HudScene s1, s2;
+            t.IsTrue(buildHudScene(s1, sprites, k1), "scene 1 builds");
+            t.IsTrue(buildHudScene(s2, sprites, k2), "scene 2 builds");
+            t.IsTrue(s1.nquads == s2.nquads && s1.nsmears == s2.nsmears, "same counts");
+            t.IsTrue(std::memcmp(s1.quads, s2.quads, sizeof(s1.quads)) == 0, "same quads");
+            t.IsTrue(std::memcmp(s1.smears, s2.smears, sizeof(s1.smears)) == 0,
+                     "same smears");
+            // A coil flip changes the scene (one ring quad's cell).
+            const HudVisualKey k3 =
+                visualKeyFor(&atlas, 1920, 1080, 0.0f, false, 101u, 0u, 2, 0u);
+            HudScene s3;
+            t.IsTrue(buildHudScene(s3, sprites, k3), "scene 3 builds");
+            t.IsTrue(std::memcmp(s1.quads, s3.quads, sizeof(s1.quads)) != 0,
+                     "coil flip changes quads"); });
         tc.Run("HUD2 GL cached compose equals direct compose", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
@@ -1217,4 +1406,25 @@ void register_ps2_ssx3_tricky_hud_tests()
                         }
                     }
                 }
-            } });});}
+            } });});
+
+    // HUD4: the GE1 scene blob layout. The adapter (ge1_gs.h) and the vendor
+    // (GSDeviceVK HudSceneBlob) mirror Ge1HudScene byte for byte; both check
+    // magic + exact size fail-closed, and this test pins the runtime half.
+    MiniTest::Case("Ps2Ssx3TrickyHudGe1Abi", [](TestCase &tc)
+                   {
+        tc.Run("HUD4 Ge1HudScene layout matches the vendor mirror", [](TestCase &t)
+               {
+            t.IsTrue(sizeof(Ge1HudScene) == 1016u, "blob is 1016 bytes");
+            t.IsTrue(offsetof(Ge1HudScene, regionX) == 8u, "region at 8");
+            t.IsTrue(offsetof(Ge1HudScene, nsmears) == 24u, "nsmears at 24");
+            t.IsTrue(offsetof(Ge1HudScene, nquads) == 76u, "nquads at 76");
+            t.IsTrue(offsetof(Ge1HudScene, quadSrcX) == 80u, "quads at 80");
+            t.IsTrue(offsetof(Ge1HudScene, quadDim) == 912u, "dim at 912");
+            t.IsTrue(GE1_HUD_SCENE_MAGIC == 0x44554847u, "magic HUDG");
+            t.IsTrue(GE1_HUD_SCENE_VERSION == 1u, "version 1");
+            t.IsTrue(GE1_HUD_SCENE_MAX_QUADS == 26, "26 quads");
+            Ge1HudScene s{};
+            s.magic = GE1_HUD_SCENE_MAGIC;
+            s.version = GE1_HUD_SCENE_VERSION;
+            t.IsTrue(s.magic == 0x44554847u && s.version == 1u, "magic/version assign"); });});}

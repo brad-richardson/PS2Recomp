@@ -1628,6 +1628,244 @@ inline void stampHudCached(uint8_t *bufBase, size_t strideBytes, const Rect &r, 
                             strideBytes, L);
 }
 
+// HUD3: GPU scene (platform-neutral). The GPU composite runs 3 passes over
+// the presented image: P0 blits the region to a temp texture (an exact
+// copy), P1 draws the smears sampling the temp, P2 draws every sprite as a
+// textured quad sampling the atlas, blended in draw order. buildHudScene
+// reduces a visual key to the pass geometry; the GLES backends (Android EGL,
+// iOS EAGL) upload it, and execHudSceneModel executes it on the CPU (the
+// suite's algorithm gate vs stampHudDirect).
+//
+// Why the reorder is unobservable: the coil smear runs first on the CPU, so
+// it reads the pristine frame exactly as P1 reads the temp; the label smear
+// runs after the pole/rings/jewel on the CPU, but none of those touch its
+// rows (rings/pole/jewel start at y107+ in layout space, the label smear
+// covers y49-101, and the coil smear covers y104+), so its edge and dst
+// reads are pristine too. The arch/pill/splash draw after the label smear
+// on both paths. Locked by the HudScene suite tests, not by inspection.
+
+// One smear quad, frame coords (the backend subtracts the region origin for
+// temp sampling). lx/rx are the edge columns smearCoverS would read, in
+// frame coords (region-coord clamp == frame-coord clamp to the region).
+struct HudSceneSmear
+{
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    int lx = 0, rx = 0;
+};
+
+// One sprite quad: atlas cell -> frame rect, dim multiplies the RGB sample
+// (alpha unchanged), exactly as sampleAtlas's dim.
+struct HudSceneQuad
+{
+    Rect src;
+    int dx = 0, dy = 0, dw = 0, dh = 0;
+    float dim = 1.0f;
+};
+
+struct HudScene
+{
+    bool ok = false;
+    Rect region;
+    HudSceneSmear smears[2];
+    int nsmears = 0;
+    HudSceneQuad quads[1 + kCoils + 1 + 6 + 1 + 1];
+    int nquads = 0;
+};
+
+// Reduce a visual key to the scene. Variant selection and dest rects mirror
+// stampHudDirect (same expressions); the HudScene suite tests fail loudly on
+// any drift.
+inline bool buildHudScene(HudScene &sc, const HudSprites &ss, const HudVisualKey &key)
+{
+    sc = HudScene{};
+    if (!ss.ok || ss.region.w <= 0 || ss.region.h <= 0)
+        return false;
+    sc.region = ss.region;
+    const int ox = ss.region.x, oy = ss.region.y;
+    const int bw = ss.region.w, bh = ss.region.h;
+    (void)oy;
+    (void)bh;
+    // P1 smears, in stampHudDirect order (coil cover, then the label smear).
+    const int sx0[2] = {ss.coilCover.x, ss.smearX0};
+    const int sy0[2] = {ss.coilCover.y, ss.smearY0};
+    const int sx1[2] = {ss.coilCover.x + ss.coilCover.w, ss.smearX1};
+    const int sy1[2] = {ss.coilCover.y + ss.coilCover.h, ss.smearY1};
+    for (int i = 0; i < 2; ++i)
+    {
+        if (sx1[i] <= sx0[i] || sy1[i] <= sy0[i])
+            continue;
+        HudSceneSmear &sm = sc.smears[sc.nsmears++];
+        sm.x0 = sx0[i];
+        sm.y0 = sy0[i];
+        sm.x1 = sx1[i];
+        sm.y1 = sy1[i];
+        // smearCoverS edge columns (region coords), expressed in frame
+        // coords: lx = max(x0-2, ox), rx = min(x1+2, ox+bw-1).
+        const int rx0 = sx0[i] - ox, rx1 = sx1[i] - ox;
+        const int lx = rx0 - 2 < 0 ? 0 : rx0 - 2;
+        const int rx = rx1 + 2 > bw - 1 ? bw - 1 : rx1 + 2;
+        sm.lx = ox + lx;
+        sm.rx = ox + rx;
+    }
+    // P2 quads, in stampHudDirect draw order (pole, rings, jewel, arch,
+    // pill, splash). Variant selection mirrors hudDrawList (same
+    // expressions); dest rects are the same HudSprites rects. Degenerate
+    // draws are skipped at build: the direct stamp no-ops them identically
+    // (stampSpriteS refuses empty/dwarf images).
+    const int cap = static_cast<int>(sizeof(sc.quads) / sizeof(sc.quads[0]));
+    auto add = [&](const Rect &src, const Rect &dst, float dim) {
+        if (sc.nquads >= cap || dst.w <= 0 || dst.h <= 0)
+            return;
+        HudSceneQuad &q = sc.quads[sc.nquads++];
+        q.src = src;
+        q.dx = dst.x;
+        q.dy = dst.y;
+        q.dw = dst.w;
+        q.dh = dst.h;
+        q.dim = dim;
+    };
+    add(poleRect(), ss.poleDst, 1.0f);
+    for (int i = 0; i < kCoils; ++i)
+        add(key.lit > i ? ringRect(i / 4) : silverRingRect(), ss.ringDst[i], 1.0f);
+    add(key.full ? jewelRedRect() : jewelGreyRect(), ss.jewelDst,
+        (key.full && key.dim) ? 0.82f : 1.0f);
+    for (int i = 0; i < 6; ++i)
+    {
+        const bool red = key.flashing ? key.flashRed : (i < key.letters);
+        add(red ? litLetterRect(i) : letterRect(i), ss.archDst[i], 1.0f);
+    }
+    add(key.full ? pillRect() : pillGreyRect(), ss.pillDst, 1.0f);
+    if (key.splash)
+        add(snowflakeRect(), ss.splashDst, 1.0f);
+    if (sc.nquads <= 0)
+        return false;
+    for (int i = 0; i < sc.nquads; ++i)
+    {
+        if (sc.quads[i].src.w < 2 || sc.quads[i].src.h < 2)
+            return false;
+    }
+    sc.ok = true;
+    return true;
+}
+
+namespace hud3detail
+{
+// One smear from the temp (region temp at tmpBase/region stride; dst is the
+// live frame): smearCoverS's statements, copied, with the edge reads
+// redirected to the temp. (x0..y1) are region coords, as in smearCoverS.
+template <bool SwapRB = false>
+inline void smearFromTemp(const uint8_t *tmpBase, size_t tmpStride, uint8_t *dstBase,
+                          size_t dstStride, int bw, int bh, int x0, int y0, int x1, int y1)
+{
+    if (!tmpBase || !dstBase || bw <= 0 || bh <= 0 || x1 <= x0 || y1 <= y0)
+        return;
+    constexpr int kR = SwapRB ? 2 : 0;
+    constexpr int kB = SwapRB ? 0 : 2;
+    const int xa = x0 < 0 ? 0 : x0;
+    const int xb = x1 > bw ? bw : x1;
+    const int ya = y0 < 0 ? 0 : y0;
+    const int yb = y1 > bh ? bh : y1;
+    const float span = static_cast<float>(x1 - x0);
+    for (int y = ya; y < yb; ++y)
+    {
+        const int lx = x0 - 2 < 0 ? 0 : x0 - 2;
+        const int rx = x1 + 2 > bw - 1 ? bw - 1 : x1 + 2;
+        const uint8_t *L = tmpBase + static_cast<size_t>(y) * tmpStride + static_cast<size_t>(lx) * 4u;
+        const uint8_t *R = tmpBase + static_cast<size_t>(y) * tmpStride + static_cast<size_t>(rx) * 4u;
+        const float lr = L[kR], lg = L[1], lb = L[kB];
+        const float rr = R[kR], rg = R[1], rb = R[kB];
+        const float fy0 = static_cast<float>(y - y0) / 3.0f;
+        const float fy1 = static_cast<float>(y1 - y) / 3.0f;
+        for (int x = xa; x < xb; ++x)
+        {
+            const float t = static_cast<float>(x - x0) / span;
+            float a = fy0;
+            if (fy1 < a)
+                a = fy1;
+            const float fx0 = static_cast<float>(x - x0) / 2.0f;
+            const float fx1 = static_cast<float>(x1 - x) / 2.0f;
+            if (fx0 < a)
+                a = fx0;
+            if (fx1 < a)
+                a = fx1;
+            if (a <= 0.0f)
+                continue;
+            if (a > 1.0f)
+                a = 1.0f;
+            uint8_t *d = dstBase + static_cast<size_t>(y) * dstStride + static_cast<size_t>(x) * 4u;
+            const float ia = 1.0f - a;
+            d[kR] = static_cast<uint8_t>((lr + (rr - lr) * t) * a + d[kR] * ia + 0.5f);
+            d[1] = static_cast<uint8_t>((lg + (rg - lg) * t) * a + d[1] * ia + 0.5f);
+            d[kB] = static_cast<uint8_t>((lb + (rb - lb) * t) * a + d[kB] * ia + 0.5f);
+        }
+    }
+}
+
+// One scene quad from the atlas: blit's statements over the quad's dest
+// rect (region coords), sampling the scene's src cell. Same expressions as
+// blit (same sampleAtlas/blend calls, same clip): the model proves the
+// SCENE (src/dst/order), while the pixel formula is shared by construction.
+template <bool SwapRB = false>
+inline void quadFromAtlas(const Atlas &a, const HudSceneQuad &q, uint8_t *dstBase,
+                          size_t dstStride, int bw, int bh, int ox, int oy)
+{
+    if (!a.ok || !dstBase || bw <= 0 || bh <= 0 || q.dw <= 0 || q.dh <= 0)
+        return;
+    const int dx = q.dx - ox, dy = q.dy - oy;
+    const int x0 = dx < 0 ? 0 : dx;
+    const int y0 = dy < 0 ? 0 : dy;
+    const int x1 = dx + q.dw > bw ? bw : dx + q.dw;
+    const int y1 = dy + q.dh > bh ? bh : dy + q.dh;
+    for (int y = y0; y < y1; ++y)
+    {
+        for (int x = x0; x < x1; ++x)
+        {
+            float sr = 0.0f, sg = 0.0f, sb = 0.0f, sa = 0.0f;
+            sampleAtlas(a, q.src, x - dx, y - dy, q.dw, q.dh, q.dim, sr, sg, sb, sa);
+            if (sa <= 0.0f)
+                continue;
+            uint8_t *d = dstBase + static_cast<size_t>(y) * dstStride + static_cast<size_t>(x) * 4u;
+            if constexpr (SwapRB)
+                blendSampleSwapped(sr, sg, sb, sa, d);
+            else
+                blendSample(sr, sg, sb, sa, d);
+        }
+    }
+}
+} // namespace hud3detail
+
+// Execute a scene on the CPU: P0 copies the region to a temp, P1 runs the
+// smears from the temp, P2 stamps the quads from the atlas in order. Same
+// calling convention as stampHudDirect (buffer base + region). The HudScene
+// suite tests lock this bit-identical to stampHudDirect for the same packet
+// and frame.
+template <bool SwapRB = false>
+inline void execHudSceneModel(uint8_t *bufBase, size_t strideBytes, const Rect &r,
+                              const HudScene &sc, const Atlas &a)
+{
+    if (!bufBase || !sc.ok || !a.ok || r.w <= 0 || r.h <= 0 || sc.region.w != r.w ||
+        sc.region.h != r.h || sc.region.x != r.x || sc.region.y != r.y)
+        return;
+    const int bw = r.w, bh = r.h, ox = r.x, oy = r.y;
+    uint8_t *base = bufBase + static_cast<size_t>(oy) * strideBytes + static_cast<size_t>(ox) * 4u;
+    // P0: exact region copy (what the GPU blit does).
+    std::vector<uint8_t> tmp(static_cast<size_t>(bw) * static_cast<size_t>(bh) * 4u);
+    const size_t tmpStride = static_cast<size_t>(bw) * 4u;
+    for (int y = 0; y < bh; ++y)
+        std::memcpy(&tmp[static_cast<size_t>(y) * tmpStride], base + static_cast<size_t>(y) * strideBytes,
+                    tmpStride);
+    // P1: smears from the temp, in scene order.
+    for (int i = 0; i < sc.nsmears; ++i)
+    {
+        const HudSceneSmear &sm = sc.smears[i];
+        hud3detail::smearFromTemp<SwapRB>(tmp.data(), tmpStride, base, strideBytes, bw, bh,
+                                          sm.x0 - ox, sm.y0 - oy, sm.x1 - ox, sm.y1 - oy);
+    }
+    // P2: quads from the atlas, in scene order.
+    for (int i = 0; i < sc.nquads; ++i)
+        hud3detail::quadFromAtlas<SwapRB>(a, sc.quads[i], base, strideBytes, bw, bh, ox, oy);
+}
+
 // The GL call site's calling convention (whole frame + layer): region temp
 // round-trip, as composeOverlay.
 inline void composeOverlayCached(uint8_t *frame, int fw, int fh, const HudLayer &L)

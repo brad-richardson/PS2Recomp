@@ -738,6 +738,35 @@ extern "C" GE1_API void ge1_gs_release_ahb(void* buffer)
 #endif
 }
 
+// HUD4: one Tricky HUD scene onto an exported AHB, on GE1's queue. Android
+// only; elsewhere (or against a vendor without the entry) this reports
+// unsupported and the runtime keeps its CPU stamp. The blob is validated
+// here and re-validated by the vendor (magic + exact size), fail-closed.
+extern "C" GE1_API int ge1_gs_hud_scene(void* buffer, const Ge1HudScene* scene, const uint8_t* atlasPx,
+                                        uint32_t atlasW, uint32_t atlasH, uint64_t atlasId,
+                                        uint64_t* fence_counter)
+{
+#if defined(__ANDROID__) && defined(GS_HAS_HUD_SCENE_API)
+    if (!s_open || !buffer || !scene || !atlasPx || !fence_counter)
+        return 0;
+    if (scene->magic != GE1_HUD_SCENE_MAGIC || scene->version != GE1_HUD_SCENE_VERSION)
+        return 0;
+    if (scene->nsmears < 0 || scene->nsmears > 2 || scene->nquads < 0 ||
+        scene->nquads > GE1_HUD_SCENE_MAX_QUADS)
+        return 0;
+    if (scene->regionW <= 0 || scene->regionH <= 0 || scene->regionW > 8192 || scene->regionH > 8192)
+        return 0;
+    if (atlasW == 0 || atlasH == 0 || atlasW > 1024 || atlasH > 1024)
+        return 0;
+    return GSCompositeHudAHB(static_cast<AHardwareBuffer*>(buffer), scene, sizeof(*scene), atlasPx,
+                             atlasW, atlasH, atlasId, fence_counter);
+#else
+    (void)buffer; (void)scene; (void)atlasPx; (void)atlasW; (void)atlasH; (void)atlasId;
+    (void)fence_counter;
+    return 0;
+#endif
+}
+
 extern "C" GE1_API int ge1_gs_export_iosurface(void* iosurface, uint32_t width, uint32_t height,
                                                ge1_gs_export_done_fn done, void* ctx)
 {

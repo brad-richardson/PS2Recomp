@@ -646,10 +646,14 @@ if(APPLE AND NOT PS2X_IS_IOS)
     target_link_libraries(ps2_gs_shadow PRIVATE "-framework OpenGL" "-framework IOSurface" "-framework CoreVideo")
 elseif(PS2X_IS_IOS)
     target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_present_share_ios.mm)
+    # HUD4 (from HUD3): GLES3 Tricky HUD composite (EAGL glue + shared passes/shaders).
+    target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_tricky_hud_gl.cpp src/lib/gs/ps2_tricky_hud_gl_eagl.mm)
     target_link_libraries(ps2_gs_shadow PRIVATE "-framework CoreVideo" "-framework OpenGLES" "-framework IOSurface")
 elseif(PS2X_IS_ANDROID)
     # VK1 prototype: PS2X_PRESENT_VULKAN=1 (AHardwareBuffer + SurfaceControl).
     target_sources(ps2_gs_shadow PRIVATE src/lib/gs/ps2_present_vk_android.cpp)
+    # HUD4: the Android GPU composite runs inside GE1 (ge1_gs_hud_scene); no
+    # GLES sources (HUD3's EGL glue is dropped: this Adreno EGL rejects AHBs).
     # The present path reads raylib's android_app (window, activity) like ps2_runtime.cpp.
     target_include_directories(ps2_gs_shadow PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
     target_link_libraries(ps2_gs_shadow PRIVATE android log)

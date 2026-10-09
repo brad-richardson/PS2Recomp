@@ -11,6 +11,8 @@
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
 #include "ps2_present_geometry.h"
+// HUD4: the Android GPU composite runs inside GE1 (ge1_gs_hud_scene, via the
+// Ge1Api table); no GLES backend (HUD3's EGL glue is dropped).
 #endif
 #if defined(__ANDROID__) || defined(PS2X_GE1_STATIC_IOSURFACE)
 // THD1: the Tricky HUD packet + stamp math are platform-neutral; iOS uses
@@ -28,6 +30,7 @@
 #include "runtime/gs/ps2_present_owner.h"
 #include "ps2_ios_runtime.h"
 #include "ps2_present_geometry.h"
+#include "runtime/gs/ps2_tricky_hud_gl.h" // HUD4 (from HUD3): iOS EAGL composite
 #include <IOSurface/IOSurfaceRef.h>
 #include <atomic>
 #include <mach/kern_return.h>
@@ -111,6 +114,9 @@ struct Ge1Api
     // NRT1: optional on the dlopen path (an older library lacks it; records
     // are then delivered packet by packet); linked on the static (iOS) path.
     decltype(&ge1_gs_native_record) nativeRecord = nullptr;
+    // HUD4: optional, Android only (a missing symbol keeps the CPU stamp; the
+    // static iOS path never binds it, so old iOS GE1 libs still link).
+    decltype(&ge1_gs_hud_scene) hudScene = nullptr;
 
     bool load(const char *path)
     {
@@ -198,6 +204,10 @@ struct Ge1Api
         // PT2 Part 2: optional back-thread query (see above); never fails the load.
         backMs = reinterpret_cast<decltype(backMs)>(dlsym(library, "ge1_gs_back_ms"));
         nativeRecord = reinterpret_cast<decltype(nativeRecord)>(dlsym(library, "ge1_gs_native_record"));
+#if defined(__ANDROID__)
+        // HUD4: optional (see above); never fails the load.
+        hudScene = reinterpret_cast<decltype(hudScene)>(dlsym(library, "ge1_gs_hud_scene"));
+#endif
         if (!backMs)
             std::fprintf(stderr, "[gs:external] GE1 library predates ge1_gs_back_ms; gsback.busy reads n=0\n");
         return true;
@@ -349,6 +359,13 @@ struct IOHudState
     bool asyncLogged = false;
     ps2_ssx3_tricky_hud::HudCache cache; // HUD2: fused layer (PS2X_TRICKY_HUD_CACHE=1)
     uint64_t cacheFallbacks = 0u;
+    HudGlBackend *gl = nullptr; // HUD4 (from HUD3): lazy, owned; process-global like the rest
+    uint64_t gpuFallbacks = 0u;
+    // HUD4 lane diag (diag knob): real GPU output vs the CPU stamp (BGRA
+    // lane) every 30th composite.
+    uint64_t diagSeen = 0u;
+    uint64_t diagPx = 0u;
+    unsigned diagMax = 0u;
 };
 
 IOHudState &ioHudState()
@@ -388,6 +405,27 @@ bool ioHudCache()
     return on;
 }
 
+// HUD4 (from HUD3): PS2X_TRICKY_HUD_GPU=1 composites on the GPU (EAGL over
+// the IOSurface); the CPU stamp stays as the reference and the fallback.
+bool ioHudGpu()
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_TRICKY_HUD_GPU");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    return on;
+}
+
+// HUD4 lane diag (diag knob).
+bool ioHudDiag()
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_TRICKY_HUD_GPU_DIAG");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    return on;
+}
+
 // The composite proper. Runs on the GsHud helper (async) or on the completion
 // thread under the pool mutex (inline); each mode serializes it, so the state
 // above needs no lock. Not under the pool mutex in the async case: the slot is
@@ -409,11 +447,12 @@ bool stampIOSurfaceHud(void *surface, uint64_t tick,
         return false;
     // HUD2: cached fused layer (PS2X_TRICKY_HUD_CACHE=1). ensureHudLayer owns
     // its own sprites; on refusal the direct stamp below serves.
+    // HUD4 (from HUD3): the GPU path takes precedence over the cache when both are on.
     const bool useCache =
-        ioHudCache() && ensureHudLayer(st.cache, *p.atlas, static_cast<int>(imgW),
-                                       static_cast<int>(imgH), p.fill, p.full, tick, p.splashUntil,
-                                       p.litLetters, p.flashUntil);
-    if (ioHudCache() && !useCache && ++st.cacheFallbacks == 1u)
+        ioHudCache() && !ioHudGpu() &&
+        ensureHudLayer(st.cache, *p.atlas, static_cast<int>(imgW), static_cast<int>(imgH), p.fill,
+                       p.full, tick, p.splashUntil, p.litLetters, p.flashUntil);
+    if (ioHudCache() && !ioHudGpu() && !useCache && ++st.cacheFallbacks == 1u)
         std::fprintf(stderr, "[ssx3-tricky-hud] io: layer build failed, direct stamp fallback\n");
     // Pre-scaled art, once per run (the export size and atlas are fixed).
     // Skipped when the cached layer serves this composite.
@@ -427,6 +466,80 @@ bool stampIOSurfaceHud(void *surface, uint64_t tick,
             return false;
         }
         std::fprintf(stderr, "[ssx3-tricky-hud] io: sprites built %ux%u\n", imgW, imgH);
+    }
+    // HUD4 (from HUD3): GPU composite (PS2X_TRICKY_HUD_GPU=1). The sprites
+    // above supply the scene rects; any failure falls through to the CPU stamp.
+    if (ioHudGpu())
+    {
+        const ps2_ssx3_tricky_hud::HudVisualKey key =
+            visualKeyFor(p.atlas, static_cast<int>(imgW), static_cast<int>(imgH), p.fill, p.full,
+                         tick, p.splashUntil, p.litLetters, p.flashUntil);
+        const bool wantDiag = ioHudDiag() && (st.diagSeen % 30u) == 0u;
+        std::vector<uint8_t> pristine; // LANE DIAG: full pristine frame
+        size_t pristineStride = 0u;
+        if (wantDiag && IOSurfaceLock(ref, kIOSurfaceLockReadOnly, nullptr) == KERN_SUCCESS)
+        {
+            const uint8_t *plock = static_cast<const uint8_t *>(IOSurfaceGetBaseAddress(ref));
+            pristineStride = IOSurfaceGetBytesPerRow(ref);
+            if (plock && pristineStride >= static_cast<size_t>(imgW) * 4u)
+            {
+                pristine.resize(pristineStride * imgH);
+                std::memcpy(pristine.data(), plock, pristine.size());
+            }
+            IOSurfaceUnlock(ref, kIOSurfaceLockReadOnly, nullptr);
+        }
+        if (!st.gl)
+            st.gl = hudGlCreate();
+        const bool gpuOk =
+            st.gl && hudGlComposite(st.gl, surface, static_cast<int>(imgW),
+                                    static_cast<int>(imgH), *p.atlas, st.sprites, key);
+        ++st.diagSeen;
+        if (gpuOk && wantDiag && !pristine.empty())
+        {
+            // LANE DIAG: GPU region vs the CPU BGRA stamp of the pristine.
+            std::vector<uint8_t> gpuReg(static_cast<size_t>(r.w) * r.h * 4u);
+            const size_t rowBytes = static_cast<size_t>(r.w) * 4u;
+            if (IOSurfaceLock(ref, kIOSurfaceLockReadOnly, nullptr) == KERN_SUCCESS)
+            {
+                const uint8_t *glock =
+                    static_cast<const uint8_t *>(IOSurfaceGetBaseAddress(ref));
+                const size_t rb = IOSurfaceGetBytesPerRow(ref);
+                if (glock && rb == pristineStride)
+                {
+                    for (int y = 0; y < r.h; ++y)
+                        std::memcpy(&gpuReg[static_cast<size_t>(y) * rowBytes],
+                                    glock + static_cast<size_t>(r.y + y) * rb +
+                                        static_cast<size_t>(r.x) * 4u,
+                                    rowBytes);
+                }
+                IOSurfaceUnlock(ref, kIOSurfaceLockReadOnly, nullptr);
+            }
+            std::vector<uint8_t> cpuFull(static_cast<size_t>(imgW) * imgH * 4u);
+            for (uint32_t y = 0; y < imgH; ++y)
+                std::memcpy(&cpuFull[static_cast<size_t>(y) * imgW * 4u],
+                            pristine.data() + static_cast<size_t>(y) * pristineStride,
+                            static_cast<size_t>(imgW) * 4u);
+            stampHudDirect<true>(cpuFull.data(), static_cast<size_t>(imgW) * 4u, r, st.sprites,
+                                 p.fill, p.full, tick, p.splashUntil, p.litLetters, p.flashUntil);
+            std::vector<uint8_t> cpuReg(static_cast<size_t>(r.w) * r.h * 4u);
+            for (int y = 0; y < r.h; ++y)
+                std::memcpy(&cpuReg[static_cast<size_t>(y) * rowBytes],
+                            cpuFull.data() +
+                                (static_cast<size_t>(r.y + y) * imgW + static_cast<size_t>(r.x)) *
+                                    4u,
+                            rowBytes);
+            const HudGlCompare cmp = hudGlCompareRegion(cpuReg.data(), gpuReg.data(), r.w, r.h);
+            st.diagPx += cmp.diffPx;
+            if (cmp.maxErr > st.diagMax)
+                st.diagMax = cmp.maxErr;
+            std::fprintf(stderr, "[ssx3-tricky-hud] io gpu-diag t=%llu px=%llumax%u (tot %llu max %u)\n",
+                         (unsigned long long)tick, (unsigned long long)cmp.diffPx, cmp.maxErr,
+                         (unsigned long long)st.diagPx, st.diagMax);
+        }
+        if (gpuOk)
+            return true; // the GPU backend logs its own composites/avg line
+        if (++st.gpuFallbacks == 1u)
+            std::fprintf(stderr, "[ssx3-tricky-hud] io: GPU composite failed, CPU fallback\n");
     }
     const auto t0 = std::chrono::steady_clock::now();
     if (IOSurfaceLock(ref, 0, nullptr) != KERN_SUCCESS)
@@ -1591,6 +1704,20 @@ private:
             return prevQueued;
         m_ge1.waitExport(m_pendingFence);
         AhbSlot &slot = m_ahbSlots[static_cast<size_t>(m_pendingAhb)];
+        // HUD4: a GPU-served slot skips every stamp path (its fence already
+        // covers the composite); the diag compare (if stashed) runs here.
+        if (m_pendingGpu)
+        {
+            if (m_hudDiagPending.armed)
+                hudGpuDiagCompare(slot.buffer);
+            const bool gpuQueued = ps2x_present_vk::queue(slot.id, m_exportW, m_exportH);
+            m_pendingAhb = -1;
+            m_pendingFence = 0u;
+            m_pendingGpu = false;
+            if (!gpuQueued)
+                ps2x_present_vk::fallBack("GE1 AHB queue failed");
+            return gpuQueued;
+        }
         if (m_hudAsync)
         {
             // GSW1: the packet is read here, where the inline path reads it;
@@ -1660,6 +1787,9 @@ private:
             return;
         // HUD2: cached fused layer (PS2X_TRICKY_HUD_CACHE=1). ensureHudLayer
         // owns its own sprites; on refusal the direct stamp below serves.
+        // HUD4: the GPU composite (if any) already ran at export time; a
+        // GPU-served slot never reaches this stamp (queuePendingAhb skips
+        // it), so the cache arbitration below is CPU-only, as before.
         const bool useCache =
             m_hudCache && ensureHudLayer(m_hudCacheState, *p.atlas, static_cast<int>(imgW),
                                          static_cast<int>(imgH), p.fill, p.full, tick,
@@ -1722,12 +1852,260 @@ private:
                              static_cast<double>(m_hudComposites));
     }
 
+    // HUD4: fill the GE1 scene blob from a built scene. Field order mirrors
+    // Ge1HudScene (ge1_gs_api.h); the adapter + vendor check magic + size.
+    static bool fillGe1HudScene(Ge1HudScene &out, const ps2_ssx3_tricky_hud::HudScene &sc)
+    {
+        using namespace ps2_ssx3_tricky_hud;
+        std::memset(&out, 0, sizeof(out));
+        if (!sc.ok || sc.nsmears < 0 || sc.nsmears > 2 || sc.nquads <= 0 ||
+            sc.nquads > GE1_HUD_SCENE_MAX_QUADS)
+            return false;
+        out.magic = GE1_HUD_SCENE_MAGIC;
+        out.version = GE1_HUD_SCENE_VERSION;
+        out.regionX = sc.region.x;
+        out.regionY = sc.region.y;
+        out.regionW = sc.region.w;
+        out.regionH = sc.region.h;
+        out.nsmears = sc.nsmears;
+        for (int i = 0; i < sc.nsmears; ++i)
+        {
+            out.smearX0[i] = sc.smears[i].x0;
+            out.smearY0[i] = sc.smears[i].y0;
+            out.smearX1[i] = sc.smears[i].x1;
+            out.smearY1[i] = sc.smears[i].y1;
+            out.smearLX[i] = sc.smears[i].lx;
+            out.smearRX[i] = sc.smears[i].rx;
+        }
+        out.nquads = sc.nquads;
+        for (int i = 0; i < sc.nquads; ++i)
+        {
+            out.quadSrcX[i] = sc.quads[i].src.x;
+            out.quadSrcY[i] = sc.quads[i].src.y;
+            out.quadSrcW[i] = sc.quads[i].src.w;
+            out.quadSrcH[i] = sc.quads[i].src.h;
+            out.quadDX[i] = sc.quads[i].dx;
+            out.quadDY[i] = sc.quads[i].dy;
+            out.quadDW[i] = sc.quads[i].dw;
+            out.quadDH[i] = sc.quads[i].dh;
+            out.quadDim[i] = sc.quads[i].dim;
+        }
+        return true;
+    }
+
+    // HUD4: composite at export time (GS worker, back-to-back with exportAhb
+    // in presentAhb). The scene submits right behind the export copy on
+    // GE1's queue; *fence takes the composite fence (which covers the copy).
+    // True = GPU-served (the stamp site skips this slot); false = the CPU
+    // stamp serves it as before. Any failure falls back silently after the
+    // first log line; the overlay never drops.
+    bool compositeTrickyHudGpu(AHardwareBuffer *buffer, uint32_t imgW, uint32_t imgH,
+                               uint64_t tick, uint64_t exportFence, uint64_t *fence)
+    {
+        using namespace ps2_ssx3_tricky_hud;
+        if (!m_hudGpu || !m_ge1.hudScene || !buffer || imgW == 0u || imgH == 0u || !fence)
+            return false;
+        ps2_ssx3_tricky_layer::PresentationPacket p;
+        if (!trickyHudPacket(p))
+            return false;
+        const Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
+        if (r.w <= 0 || r.h <= 0 || !p.atlas || !p.atlas->ok)
+            return false;
+        // GS-worker-owned sprites (the GsHud helper owns m_hudSprites for the
+        // CPU path; the two never share: see the member comment).
+        if (!m_hudGpuSprites.ok || m_hudGpuSprites.atlas != p.atlas ||
+            m_hudGpuSprites.fw != static_cast<int>(imgW) ||
+            m_hudGpuSprites.fh != static_cast<int>(imgH))
+        {
+            if (!buildHudSprites(m_hudGpuSprites, *p.atlas, static_cast<int>(imgW),
+                                 static_cast<int>(imgH)))
+            {
+                if (++m_hudGpuFallbacks == 1u)
+                    std::fprintf(stderr,
+                                 "[ssx3-tricky-hud] vk: GPU sprite build failed, CPU fallback\n");
+                return false;
+            }
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU sprites built %ux%u\n", imgW, imgH);
+        }
+        const HudVisualKey key =
+            visualKeyFor(p.atlas, static_cast<int>(imgW), static_cast<int>(imgH), p.fill, p.full,
+                         tick, p.splashUntil, p.litLetters, p.flashUntil);
+        HudScene sc;
+        if (!buildHudScene(sc, m_hudGpuSprites, key))
+        {
+            if (++m_hudGpuFallbacks == 1u)
+                std::fprintf(stderr,
+                             "[ssx3-tricky-hud] vk: GPU scene build failed, CPU fallback\n");
+            return false;
+        }
+        Ge1HudScene abi;
+        if (!fillGe1HudScene(abi, sc))
+        {
+            if (++m_hudGpuFallbacks == 1u)
+                std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU scene fill failed, CPU fallback\n");
+            return false;
+        }
+        ++m_hudGpuSeen;
+        // LANE DIAG (HUD4, PS2X_TRICKY_HUD_GPU_DIAG=1): stash the pristine
+        // region for the queue-time compare. The extra wait + lock exist only
+        // with the diag knob on; the play path submits straight through.
+        const bool wantDiag = m_hudDiag && (m_hudGpuSeen % 30u) == 0u;
+        m_hudDiagPending = HudDiagPending{};
+        if (wantDiag)
+        {
+            AHardwareBuffer_Desc dd = {};
+            AHardwareBuffer_describe(buffer, &dd);
+            void *plock = nullptr;
+            if (exportFence != 0u)
+                m_ge1.waitExport(exportFence);
+            if (dd.stride >= imgW &&
+                AHardwareBuffer_lock(buffer, AHARDWAREBUFFER_USAGE_CPU_READ_RARELY, -1, nullptr,
+                                     &plock) == 0 &&
+                plock)
+            {
+                m_hudDiagPending.stride = static_cast<size_t>(dd.stride) * 4u;
+                m_hudDiagPending.frame.resize(m_hudDiagPending.stride * imgH);
+                std::memcpy(m_hudDiagPending.frame.data(), plock,
+                            m_hudDiagPending.frame.size());
+                AHardwareBuffer_unlock(buffer, nullptr);
+                m_hudDiagPending.armed = true;
+                m_hudDiagPending.packet = p;
+                m_hudDiagPending.sprites = m_hudGpuSprites;
+                m_hudDiagPending.tick = tick;
+                m_hudDiagPending.fw = static_cast<int>(imgW);
+                m_hudDiagPending.fh = static_cast<int>(imgH);
+            }
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        uint64_t compositeFence = 0u;
+        const int rc = m_ge1.hudScene(
+            buffer, &abi, p.atlas->rgba.data(), static_cast<uint32_t>(p.atlas->w),
+            static_cast<uint32_t>(p.atlas->h), static_cast<uint64_t>(reinterpret_cast<uintptr_t>(p.atlas)),
+            &compositeFence);
+        const auto t1 = std::chrono::steady_clock::now();
+        if (rc != 1 || compositeFence == 0u)
+        {
+            m_hudDiagPending = HudDiagPending{};
+            if (++m_hudGpuFallbacks == 1u)
+                std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU composite failed, CPU fallback\n");
+            return false;
+        }
+        *fence = compositeFence;
+        m_hudGpuCompositeNs +=
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        if (++m_hudGpuServed == 1u)
+            std::fprintf(stderr,
+                         "[ssx3-tricky-hud] vk: first GPU composite tick=%llu region=%dx%d\n",
+                         static_cast<unsigned long long>(tick), r.w, r.h);
+        else if (m_hudGpuServed % 600u == 0u)
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU composites=%llu avg=%.1f us\n",
+                         static_cast<unsigned long long>(m_hudGpuServed),
+                         static_cast<double>(m_hudGpuCompositeNs) / 1000.0 /
+                             static_cast<double>(m_hudGpuServed));
+        return true;
+    }
+
+    // HUD4 lane diag, queue-time half: the stashed pristine frame (same
+    // packet) through the CPU stamp vs the GPU-composited AHB region.
+    struct HudRegCompare
+    {
+        uint64_t diffPx = 0u;
+        unsigned maxErr = 0u;
+    };
+    static HudRegCompare hudCompareRegion(const uint8_t *exp, const uint8_t *got, int w, int h)
+    {
+        HudRegCompare c;
+        if (!exp || !got || w <= 0 || h <= 0)
+            return c;
+        const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
+        for (size_t i = 0; i < n; ++i)
+        {
+            bool diff = false;
+            for (int ch = 0; ch < 4; ++ch)
+            {
+                const unsigned a = exp[i * 4u + static_cast<size_t>(ch)];
+                const unsigned b = got[i * 4u + static_cast<size_t>(ch)];
+                const unsigned e = a > b ? a - b : b - a;
+                if (e != 0u)
+                    diff = true;
+                if (e > c.maxErr)
+                    c.maxErr = e;
+            }
+            if (diff)
+                ++c.diffPx;
+        }
+        return c;
+    }
+    void hudGpuDiagCompare(AHardwareBuffer *buffer)
+    {
+        using namespace ps2_ssx3_tricky_hud;
+        HudDiagPending st;
+        st.frame.swap(m_hudDiagPending.frame);
+        st.stride = m_hudDiagPending.stride;
+        st.packet = m_hudDiagPending.packet;
+        st.sprites = m_hudDiagPending.sprites;
+        st.tick = m_hudDiagPending.tick;
+        st.fw = m_hudDiagPending.fw;
+        st.fh = m_hudDiagPending.fh;
+        st.armed = m_hudDiagPending.armed;
+        m_hudDiagPending = HudDiagPending{};
+        if (!st.armed || !buffer || st.frame.empty() || st.stride == 0u)
+            return;
+        const int fw = st.fw, fh = st.fh;
+        const Rect r = hudRegionRect(fw, fh);
+        if (r.w <= 0 || r.h <= 0 || !st.sprites.ok)
+            return;
+        AHardwareBuffer_Desc desc = {};
+        AHardwareBuffer_describe(buffer, &desc);
+        if (static_cast<size_t>(desc.stride) * 4u != st.stride)
+            return;
+        const ARect lockRect{r.x, r.y, r.x + r.w, r.y + r.h};
+        void *ptr = nullptr;
+        if (AHardwareBuffer_lock(buffer, AHARDWAREBUFFER_USAGE_CPU_READ_RARELY, -1, &lockRect,
+                                 &ptr) != 0 ||
+            !ptr)
+            return;
+        std::vector<uint8_t> gpuReg(static_cast<size_t>(r.w) * r.h * 4u);
+        const size_t rowBytes = static_cast<size_t>(r.w) * 4u;
+        const uint8_t *base =
+            static_cast<const uint8_t *>(ptr) + static_cast<size_t>(r.y) * st.stride +
+            static_cast<size_t>(r.x) * 4u;
+        for (int y = 0; y < r.h; ++y)
+            std::memcpy(&gpuReg[static_cast<size_t>(y) * rowBytes], base + y * st.stride,
+                        rowBytes);
+        AHardwareBuffer_unlock(buffer, nullptr);
+        std::vector<uint8_t> tight(static_cast<size_t>(fw) * fh * 4u);
+        for (int y = 0; y < fh; ++y)
+            std::memcpy(&tight[static_cast<size_t>(y) * fw * 4u],
+                        st.frame.data() + static_cast<size_t>(y) * st.stride,
+                        static_cast<size_t>(fw) * 4u);
+        stampHudDirect<false>(tight.data(), static_cast<size_t>(fw) * 4u, r, st.sprites,
+                              st.packet.fill, st.packet.full, st.tick, st.packet.splashUntil,
+                              st.packet.litLetters, st.packet.flashUntil);
+        std::vector<uint8_t> cpuReg(static_cast<size_t>(r.w) * r.h * 4u);
+        for (int y = 0; y < r.h; ++y)
+            std::memcpy(&cpuReg[static_cast<size_t>(y) * rowBytes],
+                        tight.data() +
+                            (static_cast<size_t>(r.y + y) * fw + static_cast<size_t>(r.x)) * 4u,
+                        rowBytes);
+        const HudRegCompare cmp = hudCompareRegion(cpuReg.data(), gpuReg.data(), r.w, r.h);
+        m_hudDiagPx += cmp.diffPx;
+        if (cmp.maxErr > m_hudDiagMax)
+            m_hudDiagMax = cmp.maxErr;
+        std::fprintf(stderr, "[ssx3-tricky-hud] vk gpu-diag t=%llu px=%llu max=%u (tot %llu max %u)\n",
+                     static_cast<unsigned long long>(st.tick),
+                     static_cast<unsigned long long>(cmp.diffPx), cmp.maxErr,
+                     static_cast<unsigned long long>(m_hudDiagPx), m_hudDiagMax);
+    }
+
     void retireAhbSlots()
     {
         joinHudJob();
         if (m_pendingAhb >= 0 && m_ge1Active)
             m_ge1.waitExport(m_pendingFence);
         m_pendingAhb = -1;
+        m_pendingGpu = false; // HUD4: drop the served flag + any diag stash with the slots
+        m_hudDiagPending = HudDiagPending{};
         for (AhbSlot &slot : m_ahbSlots)
         {
             if (slot.id)
@@ -1786,6 +2164,12 @@ private:
         m_pendingAhb = pick.index;
         m_pendingFence = fence;
         m_pendingTick = tick;
+        // HUD4: submit the HUD composite right behind the export copy on
+        // GE1's queue (same thread, back-to-back: no added drain or wait).
+        // On success m_pendingFence takes the composite fence (it covers the
+        // copy) and the queue path skips the CPU stamp for this slot.
+        m_pendingGpu =
+            compositeTrickyHudGpu(slot.buffer, m_exportW, m_exportH, tick, fence, &m_pendingFence);
         return true;
     }
 #endif
@@ -1989,6 +2373,42 @@ private:
     }();
     ps2_ssx3_tricky_hud::HudCache m_hudCacheState;
     uint64_t m_hudCacheFallbacks = 0u;
+    // HUD4: PS2X_TRICKY_HUD_GPU=1 composites on GE1's queue
+    // (ge1_gs_hud_scene, submitted at export time); the CPU stamp stays as
+    // the reference and the fallback. m_hudGpuSprites is GS-worker-owned:
+    // the GsHud helper owns m_hudSprites for the CPU path, and a GPU-served
+    // slot N can overlap a CPU-stamped slot N-1 on the helper, so the two
+    // paths must not share sprite state.
+    const bool m_hudGpu = [] {
+        const char *v = std::getenv("PS2X_TRICKY_HUD_GPU");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    ps2_ssx3_tricky_hud::HudSprites m_hudGpuSprites;
+    uint64_t m_hudGpuSeen = 0u;
+    uint64_t m_hudGpuServed = 0u;
+    uint64_t m_hudGpuCompositeNs = 0u;
+    uint64_t m_hudGpuFallbacks = 0u;
+    bool m_pendingGpu = false; // the pending slot is GPU-served (skip its stamp)
+    // HUD4 lane diag (PS2X_TRICKY_HUD_GPU_DIAG=1): every 30th served
+    // composite stashes its pristine frame at export time; the queue path
+    // compares the GPU region against the same-packet CPU stamp.
+    const bool m_hudDiag = [] {
+        const char *v = std::getenv("PS2X_TRICKY_HUD_GPU_DIAG");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    struct HudDiagPending
+    {
+        bool armed = false;
+        std::vector<uint8_t> frame; // pristine full frame, st.stride rows
+        size_t stride = 0u;
+        ps2_ssx3_tricky_layer::PresentationPacket packet;
+        ps2_ssx3_tricky_hud::HudSprites sprites; // deep copy (geometry is fixed)
+        uint64_t tick = 0u;
+        int fw = 0, fh = 0;
+    };
+    HudDiagPending m_hudDiagPending;
+    uint64_t m_hudDiagPx = 0u;
+    unsigned m_hudDiagMax = 0u;
     // GSW1: PS2X_TRICKY_HUD_ASYNC=1 runs the composite + queue on m_hudThread.
     // m_hudInFlight: the slot it owns until joinHudJob (-1 = none);
     // m_hudJobQueued: that job's queue result, read only after the join.

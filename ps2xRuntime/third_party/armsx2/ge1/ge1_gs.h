@@ -68,6 +68,36 @@ GE1_API int ge1_gs_freeze_load(const uint8_t* data, uint32_t size);
 #define GE1_NATIVE_RECORD_MAGIC_LO 0x00002A4E52540000ull
 #define GE1_NATIVE_RECORD_MAGIC_HI 0x5245434F52440001ull
 GE1_API int ge1_gs_native_record(const uint8_t* bytes, uint32_t byte_count);
+// HUD4: composite one Tricky HUD scene onto an already-exported AHB, on
+// GE1's own Vulkan queue (Android only). See the runtime-side contract in
+// ps2xRuntime/include/runtime/gs/ge1_gs_api.h. This struct mirrors it
+// exactly (all members 4 bytes, no padding); the adapter checks magic +
+// exact size before passing the blob to the vendor, fail-closed.
+#define GE1_HUD_SCENE_MAGIC 0x44554847u // 'HUDG'
+#define GE1_HUD_SCENE_VERSION 1u
+#define GE1_HUD_SCENE_MAX_QUADS 26
+typedef struct Ge1HudScene
+{
+    uint32_t magic;
+    uint32_t version;
+    int32_t regionX, regionY, regionW, regionH;
+    int32_t nsmears;
+    int32_t smearX0[2], smearY0[2], smearX1[2], smearY1[2];
+    int32_t smearLX[2], smearRX[2];
+    int32_t nquads;
+    int32_t quadSrcX[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadSrcY[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadSrcW[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadSrcH[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadDX[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadDY[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadDW[GE1_HUD_SCENE_MAX_QUADS];
+    int32_t quadDH[GE1_HUD_SCENE_MAX_QUADS];
+    float quadDim[GE1_HUD_SCENE_MAX_QUADS];
+} Ge1HudScene;
+GE1_API int ge1_gs_hud_scene(void* buffer, const Ge1HudScene* scene, const uint8_t* atlasPx,
+                             uint32_t atlasW, uint32_t atlasH, uint64_t atlasId,
+                             uint64_t* fence_counter);
 #ifdef __cplusplus
 }
 
