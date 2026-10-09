@@ -639,5 +639,62 @@ void register_ps2_present_vk_ledger_tests()
             t.Equals(ps2x_present_vk::displayHzFromEnv("144"), 60, "other rates are 60");
             t.Equals(ps2x_present_vk::displayHzFromEnv("120 "), 60, "trailing space is 60");
             t.Equals(ps2x_present_vk::displayHzFromEnv("0120"), 60, "leading zero is 60"); });
+
+        // DSP3: the SF-latch window behind [perf-present] latched=/latch_short=.
+        // complete() counts the latch times; the tests feed synthetic streams
+        // straight into complete() (unknown tokens: only the latch side runs)
+        // and read the window back with takeSfLatchWindow().
+        tc.Run("DSP3: 8.33 ms latch stream reads ~120 latched, all short", [](TestCase &t)
+               {
+            FakeSF sf;
+            Ledger l(sf);
+            l.setLog(false);
+            int64_t latch = 1000000000;
+            for (int i = 0; i < 120; ++i)
+            {
+                l.complete(0x1000u + static_cast<uint64_t>(i), false, -1, latch);
+                latch += 8333333; // 8.33 ms: a 120 Hz SF grid
+            }
+            const Ledger::SfLatchWindow w = l.takeSfLatchWindow();
+            t.Equals(w.latched, 120ull, "120 distinct latch times");
+            t.Equals(w.intervals, 119ull, "one interval per latch after the first");
+            t.Equals(w.shortIntervals, 119ull, "every 8.33 ms interval is short");
+            const Ledger::SfLatchWindow empty = l.takeSfLatchWindow();
+            t.Equals(empty.latched + empty.intervals + empty.shortIntervals, 0ull, "drain resets"); });
+
+        tc.Run("DSP3: 16.67 ms latch stream reads ~60 latched, none short", [](TestCase &t)
+               {
+            FakeSF sf;
+            Ledger l(sf);
+            l.setLog(false);
+            int64_t latch = 2000000000;
+            for (int i = 0; i < 60; ++i)
+            {
+                l.complete(0x2000u + static_cast<uint64_t>(i), false, -1, latch);
+                latch += 16666667; // 16.67 ms: a stuck-at-60 SF grid
+            }
+            const Ledger::SfLatchWindow w = l.takeSfLatchWindow();
+            t.Equals(w.latched, 60ull, "60 distinct latch times");
+            t.Equals(w.intervals, 59ull, "one interval per latch after the first");
+            t.Equals(w.shortIntervals, 0ull, "no 16.67 ms interval is short"); });
+
+        tc.Run("DSP3: duplicates and zeros don't count; the boundary interval survives the drain",
+               [](TestCase &t)
+               {
+            FakeSF sf;
+            Ledger l(sf);
+            l.setLog(false);
+            l.complete(1, false, -1, 3000000000);
+            l.complete(2, false, -1, 3000000000); // same latch twice (two completions, one latch)
+            l.complete(3, false, -1, 0);          // no latch time
+            l.complete(4, false, -1, -7);         // no latch time
+            Ledger::SfLatchWindow w = l.takeSfLatchWindow();
+            t.Equals(w.latched, 1ull, "one distinct latch");
+            t.Equals(w.intervals, 0ull, "no interval from one latch");
+            l.complete(5, false, -1, 3000000000 + 8333333); // next window's first latch
+            w = l.takeSfLatchWindow();
+            t.Equals(w.latched, 1ull, "one latch after the drain");
+            t.Equals(w.intervals, 1ull, "the boundary interval counts (last latch is kept)");
+            t.Equals(w.shortIntervals, 1ull, "8.33 ms is short"); });
     });
 }

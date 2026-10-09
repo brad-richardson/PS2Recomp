@@ -443,10 +443,14 @@ void Ledger::complete(uint64_t token, bool layerInStats, int fd, int64_t latchNs
     ++m_c.callbacks;
     if (latchNs > 0)
     {
+        if (latchNs != m_lastLatch)
+            ++m_sfWin.latched; // DSP3: distinct latch times this window
         if (m_lastLatch > 0 && latchNs > m_lastLatch)
         {
             m_c.latchIntervalSumNs += latchNs - m_lastLatch;
             ++m_c.latchIntervals;
+            ++m_sfWin.intervals;
+            m_sfWin.shortIntervals += (latchNs - m_lastLatch) < kSfLatchShortNs ? 1u : 0u;
         }
         m_lastLatch = latchNs;
     }
@@ -503,6 +507,14 @@ void Ledger::complete(uint64_t token, bool layerInStats, int fd, int64_t latchNs
         maybeReleaseLayerLocked(tok.layer);
     }
     m_cv.notify_all();
+}
+
+Ledger::SfLatchWindow Ledger::takeSfLatchWindow()
+{
+    std::lock_guard<std::mutex> lock(m_m);
+    SfLatchWindow out = m_sfWin;
+    m_sfWin = SfLatchWindow{};
+    return out;
 }
 
 void Ledger::detachLocked(const char *why)

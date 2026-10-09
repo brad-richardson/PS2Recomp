@@ -12,6 +12,9 @@
 #if defined(PS2X_IOS)
 #include "ps2_ios_runtime.h"
 #endif
+#if defined(__ANDROID__)
+#include "runtime/gs/ps2_present_vk.h" // DSP3: SF-latch window drain
+#endif
 
 #include <chrono>
 #include <cstdio>
@@ -566,6 +569,10 @@ struct Logger
     std::thread tailFlushThread;
     // PT2 Part 2b: in-app kgsl sampling (Android only; main thread).
     bool kgslDeniedNote = false;
+    // DSP3 item 4: consecutive windows posting >= 115 but latched < 70 (main
+    // thread only); one [present-vk] note per run once it reaches 10 (~10 s).
+    uint64_t sfStuckWindows = 0;
+    bool sfStuckNoted = false;
 
     ~Logger()
     {
@@ -948,6 +955,33 @@ void poll(uint64_t vsyncTick)
             }
             log.frameAges.clear();
         }
+#if defined(__ANDROID__)
+        // DSP3: distinct SF latch times this window (the VK ledger counts them
+        // in complete(); the drain also resets the window). Off the VK path
+        // (or before the first completion) the drain reads zero.
+        {
+            const ps2x_present_vk::Ledger::SfLatchWindow sf = ps2x_present_vk::takeSfLatchWindow();
+            pst.sfLatched = sf.latched;
+            if (sf.intervals > 0)
+                pst.sfLatchShortPct =
+                    100.0 * static_cast<double>(sf.shortIntervals) / static_cast<double>(sf.intervals);
+            // Item 4: >= 10 s of SF latching 60/s while we post 120/s. One
+            // stderr line per run (no toast); the bench check reads latched=.
+            if (pst.sfLatched < 70 && pst.presents >= 115)
+                ++log.sfStuckWindows;
+            else
+                log.sfStuckWindows = 0;
+            if (log.sfStuckWindows >= 10 && !log.sfStuckNoted)
+            {
+                log.sfStuckNoted = true;
+                std::fprintf(stderr,
+                             "[present-vk] SF latching 60/s (latched=%llu presents=%llu; sleep/wake the "
+                             "screen to reset the SF vsync tracker)\n",
+                             static_cast<unsigned long long>(pst.sfLatched),
+                             static_cast<unsigned long long>(pst.presents));
+            }
+        }
+#endif
         std::fprintf(log.file, "%s\n", formatPresentLine(vsyncTick, pst).c_str());
     }
     {

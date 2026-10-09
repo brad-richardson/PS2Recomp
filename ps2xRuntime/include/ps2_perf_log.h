@@ -851,6 +851,11 @@ struct PresentStats
     uint64_t udup = 0; // presents re-showing the previous frame
     double ageP50Ms = -1.0; // present wall minus that frame's export wall
     double ageMaxMs = -1.0;
+    // DSP3: distinct SurfaceFlinger latch timestamps this window (Android VK
+    // path only; 0 elsewhere) and the share of latch intervals below 12.4 ms
+    // in percent (-1 when the window saw no interval).
+    uint64_t sfLatched = 0;
+    double sfLatchShortPct = -1.0;
 };
 
 // One [perf-present] line per window (after [perf]/[perf-cpu]): presents count
@@ -858,19 +863,21 @@ struct PresentStats
 // the previous one (guest tick carried through the shared-frame mailbox on
 // the share path, latch tick elsewhere). frame_age is present wall minus the
 // frame's export-submit wall (the export runs inside that guest tick's
-// processing); -1 when no aged frame was shown.
+// processing); -1 when no aged frame was shown. latched counts distinct SF
+// latch timestamps (DSP3; Android VK only); latch_short is the share of latch
+// intervals below 12.4 ms in percent (-1 with no interval).
 inline std::string formatPresentLine(uint64_t tick, const PresentStats &st)
 {
-    char buf[320];
+    char buf[384];
     std::snprintf(buf, sizeof(buf),
                   "[perf-present] tick=%llu vblanks=%llu gs_vsyncs=%llu latches=%llu latch_ms_avg=%.2f "
                   "latch_ms_max=%.2f presents=%llu uframes=%llu udup=%llu frame_age_ms_p50=%.2f "
-                  "frame_age_ms_max=%.2f",
+                  "frame_age_ms_max=%.2f latched=%llu latch_short=%.1f%%",
                   static_cast<unsigned long long>(tick), static_cast<unsigned long long>(st.vblanks),
                   static_cast<unsigned long long>(st.gsVsyncs), static_cast<unsigned long long>(st.latches),
                   st.latchAvgMs, st.latchMaxMs, static_cast<unsigned long long>(st.presents),
                   static_cast<unsigned long long>(st.uframes), static_cast<unsigned long long>(st.udup),
-                  st.ageP50Ms, st.ageMaxMs);
+                  st.ageP50Ms, st.ageMaxMs, static_cast<unsigned long long>(st.sfLatched), st.sfLatchShortPct);
     return buf;
 }
 

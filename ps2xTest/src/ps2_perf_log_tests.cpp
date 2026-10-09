@@ -645,16 +645,18 @@ void register_ps2_perf_log_tests()
             st.udup = 2;
             st.ageP50Ms = 9.31;
             st.ageMaxMs = 18.74;
+            st.sfLatched = 119;
+            st.sfLatchShortPct = 98.3;
             t.Equals(ps2x::perflog::formatPresentLine(3681, st),
                       std::string("[perf-present] tick=3681 vblanks=120 gs_vsyncs=120 latches=60 "
                                   "latch_ms_avg=0.11 latch_ms_max=0.42 presents=60 uframes=58 udup=2 "
-                                  "frame_age_ms_p50=9.31 frame_age_ms_max=18.74"),
+                                  "frame_age_ms_p50=9.31 frame_age_ms_max=18.74 latched=119 latch_short=98.3%"),
                       "present golden");
             ps2x::perflog::PresentStats empty;
             t.Equals(ps2x::perflog::formatPresentLine(60, empty),
                       std::string("[perf-present] tick=60 vblanks=0 gs_vsyncs=0 latches=0 latch_ms_avg=0.00 "
                                   "latch_ms_max=0.00 presents=0 uframes=0 udup=0 frame_age_ms_p50=-1.00 "
-                                  "frame_age_ms_max=-1.00"),
+                                  "frame_age_ms_max=-1.00 latched=0 latch_short=-1.0%"),
                       "empty ages"); });
 
         tc.Run("ageP50 is the nearest rank, empty is -1", [](TestCase &t)

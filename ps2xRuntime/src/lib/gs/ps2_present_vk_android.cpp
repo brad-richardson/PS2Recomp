@@ -560,4 +560,6 @@ void appendStats(char *out, unsigned size)
                   u(c.layersReleased), c.records, u(c.buffersReleased), c.openFences, c.tokens, waitMs, applyMs,
                   latchMs);
 }
+
+Ledger::SfLatchWindow takeSfLatchWindow() { return ledger().takeSfLatchWindow(); }
 } // namespace ps2x_present_vk

@@ -118,6 +118,22 @@ public:
     // previous release fence (ownership passes to the ledger; -1 = released).
     void complete(uint64_t token, bool layerInStats, int fd, int64_t latchNs);
 
+    // DSP3: SF latch times since the last drain (the perf log drains once per
+    // window into [perf-present] as latched=/latch_short=). latched counts
+    // distinct latch timestamps; intervals counts the gaps between consecutive
+    // distinct latches (at most one per latch); shortIntervals counts the gaps
+    // below kSfLatchShortNs. Output-only: a counter, always on, no behaviour.
+    static constexpr int64_t kSfLatchShortNs = 12400000; // 12.4 ms: 120 Hz SF grid vs 60 Hz
+    struct SfLatchWindow
+    {
+        uint64_t latched = 0;
+        uint64_t intervals = 0;
+        uint64_t shortIntervals = 0;
+    };
+    // Main thread (perf poll): take and reset the window counts. m_lastLatch
+    // is kept across drains so the window-boundary interval still counts.
+    SfLatchWindow takeSfLatchWindow();
+
     struct Counts
     {
         uint64_t queued = 0, dropped = 0, skipped = 0, callbacks = 0;
@@ -187,6 +203,7 @@ private:
     std::unordered_map<uint64_t, Token> m_tokens;
     Counts m_c;
     int64_t m_lastLatch = 0;
+    SfLatchWindow m_sfWin; // DSP3: since the last takeSfLatchWindow()
 };
 
 // DP1: the panel refresh the Android present path requests (PS2X_DISPLAY_HZ).

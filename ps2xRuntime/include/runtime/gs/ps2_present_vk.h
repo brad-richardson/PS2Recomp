@@ -22,6 +22,8 @@
 // no completion can name them.
 #include <cstdint>
 
+#include "runtime/gs/ps2_present_vk_ledger.h" // DSP3: SfLatchWindow return type
+
 struct AHardwareBuffer;
 struct ANativeWindow;
 struct ANativeActivity;
@@ -98,4 +100,8 @@ long compareBuffer(AHardwareBuffer *buffer, const uint8_t *rgba, uint32_t w, uin
                    const char *dumpDir);
 // One-line counters for the periodic backend stats line.
 void appendStats(char *out, unsigned size);
+// DSP3: drain the SF-latch window counters (Android VK path; the perf poll
+// prints them on [perf-present] as latched=/latch_short=). Needs the ledger
+// header for the return type; implemented in ps2_present_vk_android.cpp.
+Ledger::SfLatchWindow takeSfLatchWindow();
 } // namespace ps2x_present_vk
