@@ -302,7 +302,7 @@ inline void patchAtManagerInit(uint8_t *ram)
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &masks)
 {
-    const std::array<Word, 122> words = {{
+    const std::array<Word, 124> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -529,6 +529,16 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &
         {kFixPose, 0x49bb30u, 0x3d088889u, kSixtieth, "pose_bound_131b78"},
         {kFixPose, 0x49b958u, 0x3d088889u, kSixtieth, "pose_bound_12e8e0"},
         {kFixPose, 0x49b95cu, 0x3d088889u, kSixtieth, "pose_bound_12e998"},
+        // JMP6 vnret: the ground handler 0x13d818 runs two per-update retentions with no dt. After the
+        // ground query (0x13ec18, rider state not 2/3/13) it adds n * (-0.4 * v.n) to the rider-relative
+        // velocity (push z clamped >= -40, an immediate) and rescales to the old speed: 0.6 of the normal
+        // component is kept per update, 0.36 per stock tick at 120, so bump/lip pops flatten (Gravitude
+        // clean pair: v.n peak 38 vs 52 u/s, the 4223/4265 stock airs never leave the snow). Retention
+        // 0.6 -> sqrt(0.6): word -(1 - sqrt(0.6)). The lean brake (0x13e028: velocity *= 0.9 per update
+        // while |R+0x214| > 0.5, |v| < 500, n.z > 0.866) is the same class: 0.9 -> sqrt(0.9). Both words
+        // are single GP readers (codegen grep). The -40 clamp is an immediate and stays per update.
+        {kFixVnRet, 0x49c124u, 0xbecccccdu, 0xbe66d021u, "vn_retain_13ec18"},
+        {kFixVnRet, 0x49c0a8u, 0x3f666666u, 0x3f72dce9u, "lean_brake_13e028"},
     }};
     uint64_t mask = masks.main;
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)

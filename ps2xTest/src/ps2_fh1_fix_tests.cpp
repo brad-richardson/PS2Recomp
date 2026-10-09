@@ -211,6 +211,15 @@ void register_ps2_fh1_fix_tests()
             t.Equals(kQueryHoldStart + 4u * kQueryHoldWords, 0x14cu, "hold covers sp+0xC0..0x14C");
         });
 
+        tc.Run("JMP6 vnret is opt-in at bit 52", [](TestCase &t)
+        {
+            t.Equals(static_cast<uint64_t>(kFixVnRet), 1ull << 52, "vnret uses bit 52");
+            t.IsTrue((kFixAll & kFixVnRet) == 0u, "excluded from all");
+            t.Equals(parseFix("all,vnret").main, kFixAll | kFixVnRet, "opt-in");
+            t.Equals(parseFix("all,vnret,-vnret").main, kFixAll, "opt-out");
+            t.Equals(parseFix("vnret").main, static_cast<uint64_t>(kFixVnRet), "vnret alone");
+        });
+
         tc.Run("JMP5 springhold is opt-in at bit 51", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixSpringHold), 1ull << 51, "springhold uses bit 51");
