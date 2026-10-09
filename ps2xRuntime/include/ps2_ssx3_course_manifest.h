@@ -34,7 +34,9 @@
 //     TK10 PS2XCMP1 file of the same size); mode off serves the disc
 //     unchanged. Disc paths must be distinct within a mode (case-insensitive,
 //     like the ISO lookup). The mode still needs >= 1 row or poke: the
-//     current mode is derived from RAM, where an alias leaves no trace.)
+//     current mode is derived from RAM, where an alias leaves no trace.
+//     IPB24: a relative <host> resolves against the manifest file's parent
+//     directory; an absolute <host> is used as written.)
 // Modes are inert unless PS2X_SSX3_COURSE_PICKER=1; see the mode section.
 // `node` (TK6's DONOTUSE nav-node writer) is refused: the padding slots have
 // no menu widget, so the menu aborts at Select Peak (TK6 p1/p2). The nav
@@ -52,6 +54,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -137,6 +140,24 @@ struct Mode
     std::vector<Poke> pokes;
     std::vector<ModeAlias> aliases; // distinct disc paths, served while the mode is on
 };
+
+// IPB24: a mode alias host that is a relative path resolves against the
+// manifest file's parent directory (the iOS bundle ships the manifest next
+// to its speech composite, and the bundle path is install-specific, so no
+// staged absolute string can name it). Absolute hosts pass through
+// unchanged, as do relative hosts for a manifest path with no parent (a
+// bare filename: the opener resolves them against the working directory,
+// exactly as before).
+inline std::string resolveAliasHost(const std::string &manifestPath, const std::string &host)
+{
+    const std::filesystem::path h(host);
+    if (h.is_absolute())
+        return host;
+    const std::filesystem::path m(manifestPath);
+    if (!m.has_parent_path())
+        return host;
+    return (m.parent_path() / h).lexically_normal().string();
+}
 
 inline std::string trim(const std::string &s)
 {
@@ -1066,6 +1087,10 @@ inline void applyFromEnv(uint8_t *ram)
         log(std::string("refused: ") + path + " " + err + "; nothing written");
         return;
     }
+    // IPB24: relative alias hosts resolve against this manifest's directory.
+    for (Mode &m : modes)
+        for (ModeAlias &a : m.aliases)
+            a.host = resolveAliasHost(path, a.host);
     log(std::string("applying ") + path);
     const int n = apply(ram, blocks, log);
     if (n < 0)

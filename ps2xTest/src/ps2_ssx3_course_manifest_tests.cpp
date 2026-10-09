@@ -1,7 +1,10 @@
 #include "MiniTest.h"
 #include "ps2_ssx3_course_manifest.h"
 
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -481,5 +484,54 @@ void register_ps2_ssx3_course_manifest_tests()
             t.IsTrue(ps2_cd_overlay::pendingAliases().empty(), "stock clears the aliases");
             ms = Modes{}; // leave the process-wide modes disarmed
             ps2_cd_overlay::clearModeAlias();
-        }); });
-}
+        });
+
+        tc.Run("IPB24 alias hosts: relative resolves, absolute unchanged", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            t.Equals(resolveAliasHost("/b/tricky/m-tricky.txt", "speech-tricky-big"),
+                     std::string("/b/tricky/speech-tricky-big"), "relative joins the manifest dir");
+            t.Equals(resolveAliasHost("/b/tricky/m-tricky.txt", "/abs/speech-big"),
+                     std::string("/abs/speech-big"), "absolute passes through");
+            t.Equals(resolveAliasHost("m-tricky.txt", "rel-speech"), std::string("rel-speech"),
+                     "bare manifest filename leaves the host for the working directory");
+            t.Equals(resolveAliasHost("/b/tricky/m-tricky.txt", "sub/../rel-speech"),
+                     std::string("/b/tricky/rel-speech"), "dot segments normalize"); });
+
+        tc.Run("IPB24 applyFromEnv resolves relative alias hosts against the manifest dir", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_course;
+            namespace fs = std::filesystem;
+            const fs::path root = fs::temp_directory_path() / "ps2x-ipb24-manifest";
+            fs::remove_all(root);
+            fs::create_directories(root);
+            const fs::path mf = root / "m-tricky.txt";
+            {
+                std::ofstream out(mf, std::ios::binary);
+                out << "mode = Tricky\nrow = 0:GARI:Garibaldi\n"
+                       "poke = 0x47BDB0:data/ui/courspic.big:data/ui/courspit.big\n"
+                       "alias = /DATA/AUDIO/SPEECH.BIG:rel-speech\n"
+                       "alias = /DATA/AUDIO/MUSIC.BIG:/abs/music-big\n";
+            }
+            auto ram = stockTables();
+            const char oldPoke[] = "data/ui/courspic.big";
+            std::memcpy(&ram[0x47BDB0], oldPoke, sizeof(oldPoke) - 1);
+            ::setenv("PS2X_SSX3_COURSE_MANIFEST", mf.string().c_str(), 1);
+            ::setenv("PS2X_SSX3_COURSE_PICKER", "1", 1);
+            applyFromEnv(ram.data());
+            const bool armed = courseModes().armed;
+            std::string rel, abs;
+            if (armed && !courseModes().modes.empty() && courseModes().modes[0].aliases.size() == 2)
+            {
+                rel = courseModes().modes[0].aliases[0].host;
+                abs = courseModes().modes[0].aliases[1].host;
+            }
+            ::unsetenv("PS2X_SSX3_COURSE_MANIFEST");
+            ::unsetenv("PS2X_SSX3_COURSE_PICKER");
+            courseModes() = Modes{}; // leave the process-wide modes disarmed
+            ps2_cd_overlay::clearModeAlias();
+            fs::remove_all(root);
+            t.IsTrue(armed, "mode armed");
+            t.Equals(rel, (root / "rel-speech").lexically_normal().string(), "relative host resolved");
+            t.Equals(abs, std::string("/abs/music-big"), "absolute host unchanged"); });
+        }); }
