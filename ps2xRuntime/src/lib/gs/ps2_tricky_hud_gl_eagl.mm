@@ -85,7 +85,16 @@ bool hudGlPlatformMakeCurrent(HudGlPlatform *p)
 {
     if (!p || !p->context)
         return false;
-    return [EAGLContext setCurrentContext:p->context] == YES;
+    if ([EAGLContext setCurrentContext:p->context] != YES)
+        return false;
+    // HUD4: the pool reuses surfaces across presents and GE1 Metal renders
+    // each new frame outside GL, so the cached CV textures must be flushed
+    // BEFORE sampling or they serve the previous frame (found on the iPad
+    // leg-eagl2: thousands of px differing at high err = frame-to-frame
+    // content, not shader error). hudGlPlatformFinish flushes after writes.
+    if (p->cache)
+        CVOpenGLESTextureCacheFlush(p->cache, 0);
+    return true;
 }
 
 unsigned hudGlPlatformFrameTexture(HudGlPlatform *p, void *platformImage, int w, int h,
