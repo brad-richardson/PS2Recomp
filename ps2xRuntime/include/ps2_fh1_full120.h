@@ -33,6 +33,7 @@
 #include "ps2_fh1_input2.h"
 #include "ps2_fh1_fh35.h"
 #include "ps2_fh1_jcam2_scratch.h"
+#include "ps2_fh1_replay_rate.h"
 
 #include <algorithm>
 #include <array>
@@ -935,6 +936,14 @@ inline bool entryFix() noexcept
     return on;
 }
 
+// RPL1 (ps2_fh1_replay_rate.h): playback follows the recorded per-sample rate.
+inline bool replayRateOn() noexcept
+{
+    static const bool on = eventsMode() && ps2_fh1_rpl::parseEnabled(std::getenv("PS2X_SSX3_REPLAY_RATE"));
+    return on;
+}
+inline ps2_fh1_rpl::State g_rpl;
+
 inline bool clockSignFix() noexcept
 {
     static const bool on = enabled() && (fixMask() & kFixClockSign) != 0u;
@@ -1210,10 +1219,49 @@ inline bool jcam2Hook(uint8_t *ram, R5900Context *ctx, uint32_t source, uint32_t
     return false; // no matching initialized shadow: retain original query
 }
 
+// RPL1: note each recorded sample's rate; remember the input being played.
+inline void replayRateHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
+{
+    using namespace ps2_fh1_rpl;
+    const uint32_t input = getRegU32(ctx, 4);
+    if (sourcePc == kRecordSite && targetPc == kRecord)
+    {
+        uint32_t k = 0u;
+        if (Track *t = track(g_rpl, input, true))
+        {
+            const bool wasValid = t->valid;
+            if (recorded(ram, input, k))
+                note(*t, k, g_guestActive);
+            else
+                *t = Track{input};
+            static uint32_t lines = 0u;
+            if (wasValid && !t->valid && lines++ < 8u)
+                std::fprintf(stderr, "[rpl1] rate track dropped input=%x ordinal=%u (recording gap)\n", input, k);
+        }
+    }
+    else if (sourcePc == kPlaySite && targetPc == kPlay)
+    {
+        if (g_rpl.playInput != input)
+        {
+            static uint32_t lines = 0u;
+            const Track *t = track(g_rpl, input, false);
+            if (lines++ < 16u)
+                std::fprintf(stderr, "[rpl1] play input=%x track=%s samples=%u edges=%zu tick=%llu\n", input,
+                             t && t->valid ? "yes" : "no", t ? t->total : 0u, t ? t->edges.size() : size_t{0},
+                             static_cast<unsigned long long>(g_lastTick));
+        }
+        g_rpl.playInput = input;
+    }
+    else if (targetPc == kInputReset || targetPc == kInputFree)
+        forget(g_rpl, input);
+}
+
 inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
     if (targetPc == kTrickPass && sourcePc == kTrickPassSite && ctx && bonusFlipFix())
         bonusNoteState(getRegU32(ctx, 4), g_lastTick);
+    if (replayRateOn() && ctx)
+        replayRateHook(ram, ctx, sourcePc, targetPc);
     if (targetPc == kSelectorDispatch && ctx)
     {
         uint32_t sel = 0u;
@@ -1246,14 +1294,25 @@ inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
     }
     else if (sourcePc == kAppUpdateSite)
     {
-        if (g_flipPending)
+        // RPL1: in playback the update about to run gets the recorded rate of
+        // the sample it consumes (mid-burst too); the request follows it.
+        const int forced = replayRateOn() && ctx ? ps2_fh1_rpl::forcedRate(g_rpl, ram, getRegU32(ctx, 28)) : -1;
+        if (forced >= 0)
         {
             g_flipPending = false;
+            g_rpl.forced = true;
+            if ((forced != 0) != g_guestActive)
+                guestFlip(ram, g_lastTick, forced != 0);
+        }
+        else if (g_flipPending || g_rpl.forced)
+        {
+            g_flipPending = false;
+            g_rpl.forced = false;
             if (g_commitActive != g_guestActive)
                 guestFlip(ram, g_lastTick, g_commitActive);
         }
         // A start-edge request stands until its flip (the drop is airborne; the flip precedes this test).
-        const bool want = g_passRan && g_clockRan && (g_guestActive || g_startEdge || !g_anyAir);
+        const bool want = forced >= 0 ? forced != 0 : g_passRan && g_clockRan && (g_guestActive || g_startEdge || !g_anyAir);
         if (g_guestActive || !want)
             g_startEdge = false;
         if (want != g_schedActive)
@@ -2953,6 +3012,7 @@ struct HookConfig
     std::vector<uint32_t> srcTgts; // PS2X_FH1_SRC targets
     uint32_t fh26s = 0u;           // PS2X_FH26_TAP S, 0 = off
     uint32_t fh9r = 0u;            // PS2X_FH9_AI rider, 0 = off
+    bool replay = false;           // RPL1 replay rate (events mode)
 };
 
 struct HookInterest
@@ -2984,6 +3044,14 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         // in stock windows too, so it is not on-gated (flips rescale states seen while inactive).
         if ((c.main & kFixBonus) != 0u && (c.main & kFixBonusFlip) != 0u)
             addTgt(kTrickPass);
+        if (c.replay)
+        {
+            // RPL1: recorder/player calls and input reset/destroy, in every phase.
+            addSrc(ps2_fh1_rpl::kRecordSite);
+            addSrc(ps2_fh1_rpl::kPlaySite);
+            addTgt(ps2_fh1_rpl::kInputReset);
+            addTgt(ps2_fh1_rpl::kInputFree);
+        }
     }
     if (c.mode != Mode::Off && (c.main & kFixLife2) != 0u)
     {
@@ -3150,6 +3218,7 @@ inline HookConfig currentHookConfig()
         c.srcTgts.push_back(w.tgt);
     c.fh26s = fh26Tap().s;
     c.fh9r = fh9Tap().r;
+    c.replay = replayRateOn();
     return c;
 }
 

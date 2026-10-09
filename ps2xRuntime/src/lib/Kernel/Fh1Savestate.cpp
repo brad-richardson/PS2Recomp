@@ -179,6 +179,59 @@ namespace
         }
         if (!r.validationOnly()) { g_life2Worlds=worlds;g_life2Anchors=std::move(anchors); } return true;
     }
+    // RPL1: the per-input recorded-rate tracks, so a state saved during a
+    // recording or a replay keeps the replay on the recorded rates.
+    void rpl1Save(Writer &w)
+    {
+        const auto &s = ps2_fh1::g_rpl;
+        w.u32(static_cast<uint32_t>(s.tracks.size()));
+        for (const auto &t : s.tracks)
+        {
+            w.u32(t.input);
+            w.u32(t.total);
+            w.b(t.valid);
+            w.u32(static_cast<uint32_t>(t.edges.size()));
+            for (const auto &e : t.edges)
+            {
+                w.u32(e.ordinal);
+                w.u8(e.active);
+            }
+        }
+        w.u32(s.playInput);
+        w.b(s.forced);
+    }
+    bool rpl1Load(Reader &r)
+    {
+        ps2_fh1_rpl::State s;
+        if (r.u32() != s.tracks.size())
+            return r.fail("rpl1: track count");
+        for (auto &t : s.tracks)
+        {
+            t.input = r.u32();
+            t.total = r.u32();
+            t.valid = r.b();
+            const uint32_t n = r.u32();
+            if (!r.ok() || n > t.total)
+                return r.fail("rpl1: invalid edge count");
+            t.edges.resize(n);
+            for (auto &e : t.edges)
+            {
+                e.ordinal = r.u32();
+                e.active = r.u8();
+                if (e.active > 1u)
+                    return r.fail("rpl1: invalid edge rate");
+            }
+        }
+        s.playInput = r.u32();
+        s.forced = r.b();
+        if (!r.ok())
+            return false;
+        if (!r.validationOnly())
+            ps2_fh1::g_rpl = std::move(s);
+        return true;
+    }
+    const bool kRpl1Registered = ps2_savestate::registerSection(
+        "rpl1", {1u, &rpl1Save, &rpl1Load, nullptr, 0u, /*optional=*/true, &rpl1Load});
     const bool kLife2Registered=ps2_savestate::registerSection(
         "life2", {1u,&life2Save,&life2Load,nullptr,0u,/*optional=*/true,&life2Load});
     const bool kFh32Registered = ps2_savestate::registerSection(
@@ -193,4 +246,5 @@ void ps2_fh1_linkSavestateSection()
     (void)kFh1Registered;
     (void)kFh32Registered;
     (void)kLife2Registered;
+    (void)kRpl1Registered;
 }
