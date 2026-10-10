@@ -18,7 +18,8 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/ge1_resident_msl.h.in" "${CMAKE_CURR
 target_include_directories(ge1_gs PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 if(APPLE AND NOT IOS)
   target_sources(ge1_gs PRIVATE ge1_resident_metal.mm)
-  set_source_files_properties(ge1_resident_metal.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  # Its own ARC flag: the target's precompiled header is built without ARC.
+  set_source_files_properties(ge1_resident_metal.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS ON)
   target_link_libraries(ge1_gs PRIVATE "-framework Metal" "-framework Foundation")
 endif()
 target_link_libraries(ge1_gs PRIVATE PCSX2_FLAGS PCSX2)
