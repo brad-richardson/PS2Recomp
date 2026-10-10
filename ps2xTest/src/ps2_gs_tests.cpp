@@ -5128,5 +5128,24 @@ void register_ps2_gs_tests()
             t.Equals(ps2xDeinterlaceSourceLine(kHeight - 1u, kHeight - 1u, true, true), kHeight - 2u,
                      "bob clamps the odd field at an odd height");
         });
+
+        tc.Run("GsEmptyTracker counts only events-engaged zero-packet windows", [](TestCase &t)
+        {
+            GsEmptyTracker tr;
+            // Fresh window, no packets, events off: no count.
+            t.IsTrue(!tr.noteVsync(false), "idle window outside events does not count");
+            // Events engaged with packets: no count, and the window resets.
+            tr.notePacket();
+            tr.notePacket();
+            t.IsTrue(!tr.noteVsync(true), "window with packets does not count");
+            t.Equals(tr.packets, 0ull, "vsync resets the packet count");
+            // Events engaged, zero packets: counts.
+            t.IsTrue(tr.noteVsync(true), "empty events window counts");
+            // Same zero-packet window outside events: no count.
+            t.IsTrue(!tr.noteVsync(false), "empty window outside events does not count");
+            // A packet after the count lands in the fresh window.
+            tr.notePacket();
+            t.IsTrue(!tr.noteVsync(true), "packet in the new window suppresses the count");
+        });
     });
 }

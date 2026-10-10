@@ -204,6 +204,10 @@ namespace ps2_mtvu
         inline std::atomic<bool> g_lag{false};
         // MQ2: EE-side PATH3 FINISH (PS2X_MTVU_FINISH_EE=1, threaded only).
         inline std::atomic<bool> g_finishEe{false};
+        // RSK2: grace-bounded completion wait at vblank
+        // (PS2X_MTVU_VBLANK_GRACE_US, microseconds, default 0 = off; parsed
+        // in configure(), threaded lag=1 only).
+        inline std::atomic<uint32_t> g_vblankGraceUs{0};
         inline std::atomic<bool> g_vif1StatFree{false};         // MQ3
         inline std::atomic<uint64_t> g_vif1StatFreeN{0};        // MQ3: writes that skipped the sync
         inline std::atomic<uint64_t> g_vif1StatFreePending{0};  // MQ3: ... with unit jobs queued
@@ -1546,6 +1550,50 @@ namespace ps2_mtvu
                 }
                 return nowNs() - t0;
             }
+
+            // RSK2: waitFor bounded by an absolute steady-clock deadline (ns);
+            // returns ns waited (partial on timeout). Same park discipline as
+            // waitFor (brief spin, then cvDone); the spin is capped by the
+            // deadline so a tiny grace never overshoots it spinning.
+            uint64_t waitForUntil(uint64_t target, uint64_t deadlineNs)
+            {
+                if (completed.load(std::memory_order_acquire) >= target)
+                    return 0u;
+                const uint64_t t0 = nowNs();
+                if (t0 >= deadlineNs)
+                    return 0u;
+                if (waitPark < 0)
+                {
+                    waitPark = 1; // KNC4: PS2X_MTVU_WAIT removed (unset since MW1, 10-01); always park
+                    std::fprintf(stderr, "[mtvu] wait=%s\n", waitPark ? "park" : "spin");
+                }
+                const uint64_t spinBudgetNs =
+                    (deadlineNs - t0) < kParkSpinNs ? (deadlineNs - t0) : kParkSpinNs;
+                for (unsigned i = 0;; ++i)
+                {
+                    if (completed.load(std::memory_order_acquire) >= target)
+                        return nowNs() - t0;
+                    if ((i & 15u) == 15u && nowNs() - t0 >= spinBudgetNs)
+                        break;
+                    cpuPause();
+                }
+                if (completed.load(std::memory_order_acquire) >= target)
+                    return nowNs() - t0;
+                if (nowNs() >= deadlineNs)
+                    return nowNs() - t0;
+                if (testBeforePark)
+                    testBeforePark();
+                std::unique_lock<std::mutex> lock(m);
+                if (completed.load(std::memory_order_acquire) < target)
+                {
+                    ++waitParks;
+                    cvDone.wait_until(lock,
+                                      std::chrono::steady_clock::time_point(
+                                          std::chrono::nanoseconds(deadlineNs)),
+                                      [&] { return completed.load(std::memory_order_acquire) >= target; });
+                }
+                return nowNs() - t0;
+            }
         };
 
         inline Worker &worker()
@@ -1746,6 +1794,11 @@ namespace ps2_mtvu
         return detail::g_lag.load(std::memory_order_relaxed);
     }
 
+    inline uint32_t vblankGraceUs()
+    {
+        return detail::g_vblankGraceUs.load(std::memory_order_relaxed);
+    }
+
     // Runtime init, before the game thread starts. diagArmed: a dev trace
     // that shares state with unit code is on, so PS2X_MTVU=1 stays off.
     inline void configure(bool diagArmed)
@@ -1765,13 +1818,18 @@ namespace ps2_mtvu
         const char *vs = std::getenv("PS2X_MTVU_VIF1_STAT_FREE");
         detail::g_vif1StatFree.store(m == static_cast<int>(Mode::Threaded) && vs && std::strcmp(vs, "1") == 0,
                                      std::memory_order_relaxed);
+        const char *vg = std::getenv("PS2X_MTVU_VBLANK_GRACE_US");
+        uint32_t graceUs = 0u;
+        if (m == static_cast<int>(Mode::Threaded) && vg && vg[0] != '\0')
+            graceUs = static_cast<uint32_t>(std::strtoul(vg, nullptr, 0));
+        detail::g_vblankGraceUs.store(graceUs, std::memory_order_relaxed);
         detail::g_mode.store(m, std::memory_order_relaxed);
         if (e && std::strcmp(e, "1") == 0)
-            std::fprintf(stderr, "[mtvu] mode=%s lag=%d finish_ee=%d vif1stat_free=%d jitter_us=%u%s\n",
+            std::fprintf(stderr, "[mtvu] mode=%s lag=%d finish_ee=%d vif1stat_free=%d jitter_us=%u grace_us=%u%s\n",
                          m ? "threaded" : "off", lagOn ? 1 : 0,
                          detail::g_finishEe.load(std::memory_order_relaxed) ? 1 : 0,
                          detail::g_vif1StatFree.load(std::memory_order_relaxed) ? 1 : 0,
-                         detail::worker().jitterUs,
+                         detail::worker().jitterUs, graceUs,
                          diagArmed ? " (a dev trace is armed: threaded mode refused)" : "");
     }
 
@@ -2524,6 +2582,20 @@ namespace ps2_mtvu
                     const uint64_t ns = w.waitFor(w.seqAtPrevVBlank);
                     ++w.waits[static_cast<size_t>(Reason::VBlank)];
                     w.waitNs[static_cast<size_t>(Reason::VBlank)] += ns;
+                }
+                // RSK2: grace-bounded wait for this frame's already-submitted
+                // jobs (0 = off, pure lag1). The EE pays <= grace only on the
+                // late tail, so MTVU overlap is preserved; like lag0, the
+                // sync-scope change is guest-invisible (RSK1). Counted under
+                // the VBlank reason with the N-1 wait above.
+                const uint32_t graceUs = vblankGraceUs();
+                if (graceUs != 0u && w.completed.load(std::memory_order_acquire) < now)
+                {
+                    const uint64_t deadline =
+                        detail::nowNs() + static_cast<uint64_t>(graceUs) * 1000u;
+                    const uint64_t gns = w.waitForUntil(now, deadline);
+                    ++w.waits[static_cast<size_t>(Reason::VBlank)];
+                    w.waitNs[static_cast<size_t>(Reason::VBlank)] += gns;
                 }
             }
             else

@@ -530,6 +530,9 @@ struct Logger
     std::atomic<bool> havePresent{false};
     // FH6: present-path detail (always counted while the log is on).
     std::atomic<uint64_t> gsVsyncs{0}, latches{0}, latchNs{0}, latchMaxNs{0};
+    // RSK2: events-engaged GuestVsync windows with zero GIF packets (drained
+    // into [perf-present] gsempty= by poll(), same window as gsVsyncs).
+    std::atomic<uint64_t> gsEmptyWindows{0};
     // PL3: unique-frame identity. noteFrameAvailable (main thread, each new
     // frame) stages the pending frame; notePresentedFrame (main thread, each
     // present) compares it against the last shown one; noteWorkerPresent (VK
@@ -929,9 +932,11 @@ void poll(uint64_t vsyncTick)
         const uint64_t la = log.latches.exchange(0u, std::memory_order_relaxed);
         const uint64_t lns = log.latchNs.exchange(0u, std::memory_order_relaxed);
         const uint64_t lmax = log.latchMaxNs.exchange(0u, std::memory_order_relaxed);
+        const uint64_t ge = log.gsEmptyWindows.exchange(0u, std::memory_order_relaxed);
         PresentStats pst;
         pst.vblanks = vsyncTick - log.windowTick;
         pst.gsVsyncs = gv;
+        pst.gsEmpty = ge;
         pst.latches = la;
         pst.latchAvgMs = la ? (static_cast<double>(lns) / 1e6) / static_cast<double>(la) : 0.0;
         pst.latchMaxMs = static_cast<double>(lmax) / 1e6;
@@ -1086,6 +1091,14 @@ void noteGsVsync()
     if (!log.active.load(std::memory_order_relaxed))
         return;
     log.gsVsyncs.fetch_add(1u, std::memory_order_relaxed);
+}
+
+void noteGsEmptyWindow()
+{
+    Logger &log = logger();
+    if (!log.active.load(std::memory_order_relaxed))
+        return;
+    log.gsEmptyWindows.fetch_add(1u, std::memory_order_relaxed);
 }
 
 void noteLatch(uint64_t ns)

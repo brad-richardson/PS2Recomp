@@ -531,6 +531,7 @@ void GS::executeQueuedCommand(GsCommand &cmd)
     switch (cmd.kind)
     {
     case GsCmdKind::GifPacket:
+        m_gsEmpty.notePacket(); // RSK2 gsempty= window
         processGIFPacket(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
         break;
     case GsCmdKind::GifBatch:
@@ -574,6 +575,7 @@ void GS::executeQueuedCommand(GsCommand &cmd)
                 }
                 const uint8_t *ptr = cmd.arenas[slot].get()->bytes + at;
                 noteConsumedGifSubPacket(ptr, len);
+                m_gsEmpty.notePacket(); // RSK2 gsempty= window
                 processGIFPacket(ptr, static_cast<uint32_t>(len));
             }
             break;
@@ -599,6 +601,7 @@ void GS::executeQueuedCommand(GsCommand &cmd)
                 m_curGifPath = subPath;
             }
             noteConsumedGifSubPacket(cmd.bytes.data() + offset, len);
+            m_gsEmpty.notePacket(); // RSK2 gsempty= window
             processGIFPacket(cmd.bytes.data() + offset, static_cast<uint32_t>(len));
             offset += len;
         }
@@ -645,6 +648,10 @@ void GS::executeQueuedCommand(GsCommand &cmd)
             if (ps2_rb1_reverseDmaMode() == 4)
                 lagfOnGuestVsync(cmd.regValue); // LT1b: after GE1's VSync drain
         }
+        // RSK2: close the GIF window (PCF1 u32b = events engaged, in stream
+        // order); the backend call above stays the vsync's only guest effect.
+        if (m_gsEmpty.noteVsync(cmd.u32b != 0u))
+            ps2x::perflog::noteGsEmptyWindow();
         break;
     case GsCmdKind::Consume:
     {

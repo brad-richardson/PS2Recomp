@@ -856,6 +856,10 @@ struct PresentStats
     // in percent (-1 when the window saw no interval).
     uint64_t sfLatched = 0;
     double sfLatchShortPct = -1.0;
+    // RSK2: GuestVsync windows with zero delivered GIF packets while events
+    // were engaged (the RSK1 MTVU-delivery race; any backend with the GS
+    // worker; 0 where the queue is off).
+    uint64_t gsEmpty = 0;
 };
 
 // One [perf-present] line per window (after [perf]/[perf-cpu]): presents count
@@ -865,19 +869,21 @@ struct PresentStats
 // frame's export-submit wall (the export runs inside that guest tick's
 // processing); -1 when no aged frame was shown. latched counts distinct SF
 // latch timestamps (DSP3; Android VK only); latch_short is the share of latch
-// intervals below 12.4 ms in percent (-1 with no interval).
+// intervals below 12.4 ms in percent (-1 with no interval). gsempty counts
+// events-engaged GuestVsync windows with zero GIF packets (RSK2).
 inline std::string formatPresentLine(uint64_t tick, const PresentStats &st)
 {
     char buf[384];
     std::snprintf(buf, sizeof(buf),
                   "[perf-present] tick=%llu vblanks=%llu gs_vsyncs=%llu latches=%llu latch_ms_avg=%.2f "
                   "latch_ms_max=%.2f presents=%llu uframes=%llu udup=%llu frame_age_ms_p50=%.2f "
-                  "frame_age_ms_max=%.2f latched=%llu latch_short=%.1f%%",
+                  "frame_age_ms_max=%.2f latched=%llu latch_short=%.1f%% gsempty=%llu",
                   static_cast<unsigned long long>(tick), static_cast<unsigned long long>(st.vblanks),
                   static_cast<unsigned long long>(st.gsVsyncs), static_cast<unsigned long long>(st.latches),
                   st.latchAvgMs, st.latchMaxMs, static_cast<unsigned long long>(st.presents),
                   static_cast<unsigned long long>(st.uframes), static_cast<unsigned long long>(st.udup),
-                  st.ageP50Ms, st.ageMaxMs, static_cast<unsigned long long>(st.sfLatched), st.sfLatchShortPct);
+                  st.ageP50Ms, st.ageMaxMs, static_cast<unsigned long long>(st.sfLatched), st.sfLatchShortPct,
+                  static_cast<unsigned long long>(st.gsEmpty));
     return buf;
 }
 
@@ -909,6 +915,9 @@ void noteWorkerPresent(uint64_t id);
 // (worker); noteLatch: one host-loop latch RPC and its duration. Lock-free;
 // no-ops unless the log is on.
 void noteGsVsync();
+// RSK2: one events-engaged GuestVsync window closed with zero delivered GIF
+// packets (the GS worker calls it; same lock-free/active-gated discipline).
+void noteGsEmptyWindow();
 void noteLatch(uint64_t ns);
 // Full-ring [perf-tail] dump (graceful shutdown only; no-op unless active).
 void dumpTail();

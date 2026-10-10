@@ -104,6 +104,26 @@ struct GSDebugHistoryEntry
     bool usedPreferred = false;
 };
 
+// RSK2: per-GuestVsync GIF-packet window behind [perf-present] gsempty=.
+// Worker-local: the worker notes each delivered GIF packet (GifPacket plus
+// every GifBatch sub-packet; native records excluded) and closes the window
+// at each GuestVsync. eventsEngaged comes from the command (PCF1 u32b, in
+// stream order). Output-only; no knob.
+struct GsEmptyTracker
+{
+    uint64_t packets = 0; // GIF packets delivered since the last GuestVsync
+    void notePacket() { ++packets; }
+    // Close the window at a GuestVsync. True when this window counts: events
+    // engaged with zero packets (the RSK1 MTVU-delivery race). Always opens
+    // a fresh window.
+    bool noteVsync(bool eventsEngaged)
+    {
+        const bool empty = eventsEngaged && packets == 0u;
+        packets = 0u;
+        return empty;
+    }
+};
+
 class GS
 {
 public:
@@ -381,6 +401,8 @@ private:
     GSContext m_ctx[2];
     GSPrimReg m_prim{};
     GifPathId m_curGifPath = GifPathId::Path1;
+    // RSK2: worker-local GIF window for gsempty= (worker path only).
+    GsEmptyTracker m_gsEmpty;
     GSPrimReg m_primRegister{};
     GSPrimReg m_prmodeRegister{};
 
