@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <atomic>
 #include <iostream>
+#include <memory>
 #include <mutex>
 
 #include "gs/ps2_gif_arbiter.h"
@@ -28,6 +29,7 @@ namespace ps2_mtvu
 #endif
 
 class GS;
+class GsPacketPool; // runtime/gs/gs_worker.h (TRM1: owned instance below)
 
 constexpr uint32_t PS2_RAM_SIZE = 32u * 1024u * 1024u; // 32MB
 constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for 32MB alignment
@@ -501,6 +503,24 @@ public:
     // in writeIORegister (kicks run EE-side only). Kills the O(n^2) growth
     // memcpy (~0.30 ms/f, GT1 §6); reserve-only, contents-identical.
     size_t m_chainBufHint = 1u << 18;
+    // TRM1: pooled per-packet buffers for the EE kick vectors (chainBuf,
+    // MtvuPiece) and the VIF-stage GIF vectors (LEV2 §3: ~0.4 ms VIF +
+    // ~0.35 ms MTVU of scudo churn). A second GsPacketPool instance, owned
+    // here (the GS instance's caps belong to the GS worker). acquire()
+    // returns capacity-or-empty and every site fully overwrites, so bytes
+    // and order are unchanged: exact, no knob. Outlives all users: the
+    // runtime syncs + joins the MTVU/VIF/GIF threads before this member
+    // is destroyed (PS2Runtime::~PS2Runtime).
+    std::unique_ptr<GsPacketPool> m_stagePool;
+    // TRM1: pooled shells for the VifLog GifCopy record payload (a raw
+    // vector pointer crosses VIF -> MTVU). Buffers ride inside the shells
+    // and return to m_stagePool at consume; empty shells return here.
+    std::mutex m_gifShellMutex;
+    std::vector<std::vector<uint8_t> *> m_gifShells;
+    std::vector<uint8_t> acquireStageBytes(size_t size);
+    void releaseStageBytes(std::vector<uint8_t> &&bytes);
+    std::vector<uint8_t> *allocStagedGif();
+    void freeStagedGif(std::vector<uint8_t> *bytes);
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
 
