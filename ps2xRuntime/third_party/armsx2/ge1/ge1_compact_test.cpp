@@ -747,7 +747,7 @@ void DirectedCases()
 		g2.cull_shift = 2;
 		RunCase("grid-2x", g2, GS_TRIANGLESTRIP, {MakePair(strip, StripVerts(60))}, true);
 
-		if (std::getenv("GE1_GKV1_SHIFT0"))
+		// RZV1 S4c: also without the knob (the legacy shift-0 cull is the reference then).
 		{
 			KickSetup g0 = base;
 			g0.cull_shift = 0;
@@ -982,7 +982,8 @@ void MalformedCases()
 }
 
 // Randomized sweeps over stream shapes and environments.
-void RandomCases(u32 seed0, u32 nstreams)
+// RZV1 S4c: shift0 = every stream at cull shift 0 (non-power-of-two upscale).
+void RandomCases(u32 seed0, u32 nstreams, bool shift0 = false)
 {
 	std::mt19937 rng(seed0);
 	const u32 prims[7] = {GS_POINTLIST, GS_LINELIST, GS_LINESTRIP, GS_TRIANGLELIST,
@@ -1003,6 +1004,8 @@ void RandomCases(u32 seed0, u32 nstreams)
 		setup.draw_buffering = (rng() % 3) == 0;
 		setup.recent_buffer_switch = setup.draw_buffering && ((rng() % 2) == 0);
 		setup.cull_shift = ((rng() % 2) == 0) ? 4 : 2;
+		if (shift0)
+			setup.cull_shift = 0;
 		setup.autoflush = ((rng() % 3) == 0) ? GSHWAutoFlushLevel::Enabled :
 		                     (((rng() % 2) == 0) ? GSHWAutoFlushLevel::SpritesOnly :
 		                                          GSHWAutoFlushLevel::Disabled);
@@ -1194,7 +1197,9 @@ int main(int argc, char** argv)
 		MalformedCases();
 		RandomCases(5000, 120);
 		RandomCases(9000, 120);
+		RandomCases(7000, 120, true); // RZV1 S4c: shift 0
 	}
+	GSStaticStatsPrint(); // RZV1 S4c: how many packets the static fast path took (GE1_STATIC_FAST=1)
 	std::printf("ge1_compact_test: %d cases, %d failures\n", g_cases, g_fail);
 	return g_fail ? 1 : 0;
 }
