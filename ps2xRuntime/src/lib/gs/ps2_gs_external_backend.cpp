@@ -114,6 +114,8 @@ struct Ge1Api
     // NRT1: optional on the dlopen path (an older library lacks it; records
     // are then delivered packet by packet); linked on the static (iOS) path.
     decltype(&ge1_gs_native_record) nativeRecord = nullptr;
+    // NRS1: same for compact records (without it the frontend expands them).
+    decltype(&ge1_gs_native_record_compact) nativeRecordCompact = nullptr;
     // HUD4: optional, Android only (a missing symbol keeps the CPU stamp; the
     // static iOS path never binds it, so old iOS GE1 libs still link).
     decltype(&ge1_gs_hud_scene) hudScene = nullptr;
@@ -151,6 +153,7 @@ struct Ge1Api
             freezeSave = ::ge1_gs_freeze_save;
             freezeLoad = ::ge1_gs_freeze_load;
             nativeRecord = ::ge1_gs_native_record; // NRT1: needs a GE1 build with the folded adapter
+            nativeRecordCompact = ::ge1_gs_native_record_compact; // NRS1: same (compact records)
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
             exportIOSurface = ::ge1_gs_export_iosurface;
 #endif
@@ -204,6 +207,8 @@ struct Ge1Api
         // PT2 Part 2: optional back-thread query (see above); never fails the load.
         backMs = reinterpret_cast<decltype(backMs)>(dlsym(library, "ge1_gs_back_ms"));
         nativeRecord = reinterpret_cast<decltype(nativeRecord)>(dlsym(library, "ge1_gs_native_record"));
+        nativeRecordCompact = reinterpret_cast<decltype(nativeRecordCompact)>(
+            dlsym(library, "ge1_gs_native_record_compact"));
 #if defined(__ANDROID__)
         // HUD4: optional (see above); never fails the load.
         hudScene = reinterpret_cast<decltype(hudScene)>(dlsym(library, "ge1_gs_hud_scene"));
@@ -1239,21 +1244,40 @@ public:
 
     bool RawNativeRecord(uint32_t path, const uint8_t *data, uint32_t sizeBytes) override
     {
+        // NRS1: compact records need the compact export; without it the
+        // frontend expands them to GIF packets.
+        const bool compact = ge1_is_compact_record(data, sizeBytes);
         // The per-packet log keeps one line per packet: deliver one by one then.
-        if (!m_ge1Active || !m_ge1.nativeRecord || m_log || path != 1u)
+        if (!m_ge1Active || m_log || path != 1u)
             return false;
-        if (!m_ge1.nativeRecord(data, sizeBytes))
+        if (compact && !m_ge1.nativeRecordCompact)
+            return false;
+        if (!compact && !m_ge1.nativeRecord)
+            return false;
+        const int ok = compact ? m_ge1.nativeRecordCompact(data, sizeBytes)
+                               : m_ge1.nativeRecord(data, sizeBytes);
+        if (!ok && compact)
+        {
+            // The vendor refuses malformed compact records fail-closed; the
+            // frontend expands them instead of dying here.
+            return false;
+        }
+        if (!ok)
         {
             std::fprintf(stderr, "[gs:external] GE1 native record rejected bytes=%u\n", sizeBytes);
             std::exit(78);
         }
         m_ge1LastPath = 1u;
-        ge1_native_record_for_each(data, sizeBytes, [this](const uint8_t *, uint32_t n) {
+        auto countPacket = [this](const uint8_t *, uint32_t n) {
             ++m_stats.gifPackets;
             m_stats.gifBytes += n;
             ++m_stats.gifPacketsByPath[1];
             m_stats.gifQwords[1] += n / 16u;
-        });
+        };
+        if (compact)
+            ge1_compact_record_for_each(data, sizeBytes, countPacket);
+        else
+            ge1_native_record_for_each(data, sizeBytes, countPacket);
         return true;
     }
 

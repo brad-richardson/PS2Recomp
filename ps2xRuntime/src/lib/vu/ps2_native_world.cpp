@@ -40,6 +40,31 @@
 
 namespace ps2_native_world
 {
+// NRS1: strip one kick packet (tag verbatim + N x 48-byte regs) to its dense
+// form (tag verbatim + N x 32-byte Ge1CompactVertex) at dst. Every byte the
+// kick consumes is carried (ST.w0-2, the RGBAQ low bytes, the XYZF2 words);
+// only ST.w3 and the RGBAQ upper bytes, which no kick path reads, are dropped.
+static void compactPacket(const uint8_t *pkt, uint32_t pktSize, uint8_t *dst)
+{
+    const uint32_t nv = (pktSize - 16u) / 48u;
+    std::memcpy(dst, pkt, 16);
+    for (uint32_t i = 0; i < nv; i++)
+    {
+        const uint32_t *reg = reinterpret_cast<const uint32_t *>(pkt + 16 + 48u * i);
+        Ge1CompactVertex v;
+        v.S = reg[0];
+        v.T = reg[1];
+        v.RGBA = (reg[4] & 0xffu) | ((reg[5] & 0xffu) << 8) | ((reg[6] & 0xffu) << 16) |
+                 ((reg[7] & 0xffu) << 24);
+        v.Q = reg[2];
+        v.X = reg[8];
+        v.Y = reg[9];
+        v.Z = reg[10];
+        v.W3 = reg[11];
+        std::memcpy(dst + 16 + 32u * i, &v, 32);
+    }
+}
+
 namespace
 {
 constexpr uint64_t kTerrainImageA = 0x0B1975EC17164657ull;
@@ -54,6 +79,7 @@ struct Knobs
     bool terrain = false;
     bool instances = false; // scenery instances (image 2826c443)
     bool check = false;
+    bool compact = false; // NRS1: emit compact records (dense vertices, no GIF padding)
 };
 const Knobs &knobs()
 {
@@ -77,6 +103,8 @@ const Knobs &knobs()
         }
         if (const char *v = std::getenv("PS2X_SSX3_NATIVE_WORLD_CHECK"))
             r.check = !std::strcmp(v, "1");
+        if (const char *v = std::getenv("PS2X_SSX3_NATIVE_COMPACT"))
+            r.compact = !std::strcmp(v, "1");
         if (r.check)
             r.terrain = r.instances = false; // check mode routes nothing
         return r;
@@ -341,6 +369,36 @@ struct Kicks
         recSize = 16u + table + bodySize();
         return start;
     }
+    // NRS1: the compact record into cbytes (reused across jobs, like bytes):
+    // same packets, dense vertices. Same hook, same VU1 writes; only the
+    // transport bytes differ.
+    std::vector<uint8_t> cbytes;
+    const uint8_t *recordCompact(uint32_t &recSize)
+    {
+        uint32_t dense[4];
+        for (uint32_t i = 0; i < count; ++i)
+            dense[i] = 16u + 32u * ((size[i] - 16u) / 48u);
+        const uint32_t table = (8u + 4u * count + 15u) & ~15u;
+        size_t body = 0;
+        for (uint32_t i = 0; i < count; ++i)
+            body += dense[i];
+        cbytes.clear();
+        cbytes.resize(16u + table + body);
+        const uint64_t magic[2] = {GE1_COMPACT_RECORD_MAGIC_LO, GE1_COMPACT_RECORD_MAGIC_HI};
+        std::memcpy(cbytes.data(), magic, 16);
+        std::memset(cbytes.data() + 16, 0, table);
+        std::memcpy(cbytes.data() + 16, &count, 4);
+        std::memcpy(cbytes.data() + 24, dense, 4u * count);
+        size_t at = 16u + table;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            compactPacket(bodyBytes(off[i]), size[i], cbytes.data() + at);
+            at += dense[i];
+        }
+        recSize = static_cast<uint32_t>(cbytes.size());
+        return cbytes.data();
+    }
+    const uint8_t *bodyBytes(uint32_t o) const { return body() + o; }
 };
 
 // Runs one terrain job of the routed set into g in place, and kicks. Returns
@@ -842,6 +900,33 @@ void buildRecord(const uint8_t *packets, const uint32_t *sizes, uint32_t count, 
     std::memcpy(out.data() + 16 + table, packets, body);
 }
 
+// NRS1: the suite's compact-record builder: same packets as buildRecord's,
+// dense (compactPacket each). GIF-sized `sizes` in, dense sizes out.
+void buildCompactRecord(const uint8_t *packets, const uint32_t *sizes, uint32_t count,
+                        std::vector<uint8_t> &out)
+{
+    uint32_t dense[64];
+    for (uint32_t i = 0; i < count; ++i)
+        dense[i] = 16u + 32u * ((sizes[i] - 16u) / 48u);
+    const uint32_t table = (8u + 4u * count + 15u) & ~15u;
+    size_t body = 0;
+    for (uint32_t i = 0; i < count; ++i)
+        body += dense[i];
+    out.resize(16u + table + body);
+    const uint64_t magic[2] = {GE1_COMPACT_RECORD_MAGIC_LO, GE1_COMPACT_RECORD_MAGIC_HI};
+    std::memcpy(out.data(), magic, 16);
+    std::memset(out.data() + 16, 0, table);
+    std::memcpy(out.data() + 16, &count, 4);
+    std::memcpy(out.data() + 24, dense, 4u * count);
+    size_t off = 0, at = 16u + table;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        compactPacket(packets + off, sizes[i], out.data() + at);
+        off += sizes[i];
+        at += dense[i];
+    }
+}
+
 bool active()
 {
     static const bool a = knobs().terrain || knobs().instances || knobs().check;
@@ -856,7 +941,10 @@ namespace
 bool emitKicks(PS2Memory &memory, State &s)
 {
     uint32_t recSize = 0;
-    const uint8_t *rec = s.kicks.record(recSize);
+    // NRS1: the compact record holds the same packets dense; same hook, same
+    // VU1-memory writes, so the det hashes (vu1Data included) are unchanged.
+    const uint8_t *rec =
+        knobs().compact ? s.kicks.recordCompact(recSize) : s.kicks.record(recSize);
     memory.submitGifPacket(GifPathId::Path1, rec, recSize);
     return true;
 }

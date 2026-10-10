@@ -48,6 +48,9 @@ void resetForLoad();
 // One job's packets (concatenated, with their sizes) as a native record
 // (ge1_gs_api.h layout), as each natively served job emits them.
 void buildRecord(const uint8_t *packets, const uint32_t *sizes, uint32_t count, std::vector<uint8_t> &out);
+// NRS1: same packets as buildRecord's, dense (GIF-sized `sizes` in).
+void buildCompactRecord(const uint8_t *packets, const uint32_t *sizes, uint32_t count,
+                        std::vector<uint8_t> &out);
 
 // Test hooks (synthetic inputs only). Runs the terrain model for one job over
 // a 16 KiB VU1 data image; group state persists across calls until

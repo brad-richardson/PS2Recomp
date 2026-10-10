@@ -68,6 +68,22 @@ GE1_API int ge1_gs_freeze_load(const uint8_t* data, uint32_t size);
 #define GE1_NATIVE_RECORD_MAGIC_LO 0x00002A4E52540000ull
 #define GE1_NATIVE_RECORD_MAGIC_HI 0x5245434F52440001ull
 GE1_API int ge1_gs_native_record(const uint8_t* bytes, uint32_t byte_count);
+// NRS1: the compact native record (PS2X_SSX3_NATIVE_COMPACT=1). Layout and
+// walker in ps2xRuntime/include/runtime/gs/ge1_gs_api.h; the struct is
+// mirrored here and in the vendor (pcsx2/GS/GSCompactRecord.h) per the buddy
+// rule there. The adapter only forwards whole records to the vendor.
+#define GE1_COMPACT_RECORD_MAGIC_LO 0x00002A4E52430000ull
+#define GE1_COMPACT_RECORD_MAGIC_HI 0x5245434F52440002ull
+typedef struct Ge1CompactVertex
+{
+    uint32_t S, T;
+    uint32_t RGBA;
+    uint32_t Q;
+    uint32_t X, Y;
+    uint32_t Z;
+    uint32_t W3;
+} Ge1CompactVertex;
+GE1_API int ge1_gs_native_record_compact(const uint8_t* bytes, uint32_t byte_count);
 // HUD4: composite one Tricky HUD scene onto an already-exported AHB, on
 // GE1's own Vulkan queue (Android only). See the runtime-side contract in
 // ps2xRuntime/include/runtime/gs/ge1_gs_api.h. This struct mirrors it

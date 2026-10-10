@@ -3,7 +3,10 @@
 #include "runtime/gs/ge1_gs_api.h"
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 // NRT1: the terrain model on synthetic VU1 images (no game data). Layout as
@@ -196,6 +199,111 @@ void register_ps2_native_world_tests()
             t.IsFalse(ge1_native_record_for_each(rec.data(), static_cast<uint32_t>(rec.size()),
                                                  [](const uint8_t *, uint32_t) {}),
                       "truncated record rejected"); });
+        tc.Run("compact record: dense fields == packet regs, expansion round-trips consumed bytes", [](TestCase &t)
+               {
+            ps2_native_world::testResetGroup();
+            Vu1Image im = patch4();
+            std::vector<std::vector<uint8_t>> k;
+            t.IsTrue(ps2_native_world::testModelTerrain(im.mem, 0x6b8, kTop, k), "servable");
+            std::vector<uint8_t> cat;
+            std::vector<uint32_t> sizes;
+            for (const auto &p : k)
+            {
+                cat.insert(cat.end(), p.begin(), p.end());
+                sizes.push_back(static_cast<uint32_t>(p.size()));
+            }
+            std::vector<uint8_t> rec;
+            ps2_native_world::buildCompactRecord(cat.data(), sizes.data(), static_cast<uint32_t>(sizes.size()), rec);
+            t.IsTrue(ge1_is_compact_record(rec.data(), static_cast<uint32_t>(rec.size())), "signature");
+            t.IsFalse(ge1_is_native_record(rec.data(), static_cast<uint32_t>(rec.size())), "not the GIF kind");
+            t.Equals(rec.size() % 16, size_t(0), "16-byte aligned");
+            std::vector<std::vector<uint8_t>> back;
+            t.IsTrue(ge1_compact_record_for_each(rec.data(), static_cast<uint32_t>(rec.size()),
+                                                 [&](const uint8_t *p, uint32_t n) { back.emplace_back(p, p + n); }),
+                     "well formed");
+            t.Equals(back.size(), k.size(), "same packets");
+            for (size_t i = 0; i < k.size(); ++i)
+            {
+                const uint32_t nv = (static_cast<uint32_t>(k[i].size()) - 16u) / 48u;
+                t.Equals(back[i].size(), size_t(16 + 32u * nv), "dense size");
+                t.IsTrue(std::memcmp(back[i].data(), k[i].data(), 16) == 0, "tag verbatim");
+                for (uint32_t v = 0; v < nv; ++v)
+                {
+                    Ge1CompactVertex d;
+                    std::memcpy(&d, back[i].data() + 16 + 32u * v, 32);
+                    const uint32_t *reg = reinterpret_cast<const uint32_t *>(k[i].data() + 16 + 48u * v);
+                    t.Equals(d.S, reg[0], "S");
+                    t.Equals(d.T, reg[1], "T");
+                    t.Equals(d.Q, reg[2], "Q");
+                    const uint32_t rgba = (reg[4] & 0xffu) | ((reg[5] & 0xffu) << 8) |
+                                          ((reg[6] & 0xffu) << 16) | ((reg[7] & 0xffu) << 24);
+                    t.Equals(d.RGBA, rgba, "RGBA packed");
+                    t.Equals(d.X, reg[8], "X verbatim");
+                    t.Equals(d.Y, reg[9], "Y verbatim");
+                    t.Equals(d.Z, reg[10], "Z verbatim");
+                    t.Equals(d.W3, reg[11], "W3 verbatim");
+                }
+                // Expansion: the tag verbatim, every consumed byte back.
+                std::vector<uint8_t> exp(16 + 48u * nv);
+                t.IsTrue(ge1_compact_expand_packet(back[i].data(), static_cast<uint32_t>(back[i].size()),
+                                                   exp.data(), static_cast<uint32_t>(exp.size())),
+                         "expands");
+                t.IsTrue(std::memcmp(exp.data(), k[i].data(), 16) == 0, "tag back");
+                for (uint32_t v = 0; v < nv; ++v)
+                {
+                    const uint32_t *g = reinterpret_cast<const uint32_t *>(k[i].data() + 16 + 48u * v);
+                    const uint32_t *e = reinterpret_cast<const uint32_t *>(exp.data() + 16 + 48u * v);
+                    t.Equals(e[0], g[0], "ST.w0 back");
+                    t.Equals(e[1], g[1], "ST.w1 back");
+                    t.Equals(e[2], g[2], "ST.w2 back");
+                    t.Equals(e[4] & 0xffu, g[4] & 0xffu, "R back");
+                    t.Equals(e[5] & 0xffu, g[5] & 0xffu, "G back");
+                    t.Equals(e[6] & 0xffu, g[6] & 0xffu, "B back");
+                    t.Equals(e[7] & 0xffu, g[7] & 0xffu, "A back");
+                    t.Equals(e[8], g[8], "X back");
+                    t.Equals(e[9], g[9], "Y back");
+                    t.Equals(e[10], g[10], "Z back");
+                    t.Equals(e[11], g[11], "W3 back");
+                }
+            }
+            std::vector<uint8_t> bad = rec;
+            bad.resize(bad.size() - 16);
+            t.IsFalse(ge1_compact_record_for_each(bad.data(), static_cast<uint32_t>(bad.size()),
+                                                  [](const uint8_t *, uint32_t) {}),
+                      "truncated compact record rejected"); });
+        tc.Run("compact record: scenery packets dense identically", [](TestCase &t)
+               {
+            ps2_native_world::testResetGroup();
+            Vu1Image im = instance3(0);
+            std::vector<uint8_t> p;
+            t.IsTrue(ps2_native_world::testModelScenery(im.mem, 0x2320, kSTop, 0, p), "header served");
+            const uint32_t sz = static_cast<uint32_t>(p.size());
+            std::vector<uint8_t> rec;
+            ps2_native_world::buildCompactRecord(p.data(), &sz, 1, rec);
+            std::vector<std::vector<uint8_t>> back;
+            t.IsTrue(ge1_compact_record_for_each(rec.data(), static_cast<uint32_t>(rec.size()),
+                                                 [&](const uint8_t *q, uint32_t n) { back.emplace_back(q, q + n); }),
+                     "well formed");
+            t.Equals(back.size(), size_t(1), "one packet");
+            t.IsTrue(std::memcmp(back[0].data(), p.data(), 16) == 0, "tag verbatim");
+            Ge1CompactVertex d;
+            std::memcpy(&d, back[0].data() + 16, 32);
+            t.Equals(d.W3, 0x0000ffffu, "scenery ADC W3 verbatim");
+            t.Equals(d.X, 32760u, "vertex 0 x");
+            // The clip variant's 0xffffffff ADC word rides the same field.
+            ps2_native_world::testResetGroup();
+            Vu1Image in = instance3(0x20);
+            std::vector<uint8_t> pc;
+            t.IsTrue(ps2_native_world::testModelScenery(in.mem, 0x2320, kSTop, 0, pc), "clip variant served");
+            const uint32_t szc = static_cast<uint32_t>(pc.size());
+            std::vector<uint8_t> recc;
+            ps2_native_world::buildCompactRecord(pc.data(), &szc, 1, recc);
+            std::vector<std::vector<uint8_t>> backc;
+            t.IsTrue(ge1_compact_record_for_each(recc.data(), static_cast<uint32_t>(recc.size()),
+                                                 [&](const uint8_t *q, uint32_t n) { backc.emplace_back(q, q + n); }),
+                     "well formed");
+            std::memcpy(&d, backc[0].data() + 16, 32);
+            t.Equals(d.W3, 0xffffffffu, "clip ADC W3 verbatim"); });
         tc.Run("scenery header 0x2320: one packet, ADC, XYZ, ST, RGBA; second pass rewrites ST only", [](TestCase &t)
                {
             ps2_native_world::testResetGroup();
@@ -241,5 +349,50 @@ void register_ps2_native_world_tests()
             t.IsFalse(ps2_native_world::testModelTerrain(im.mem, 0x6b8, kTop, k), "nloop A != strips x 2n");
             Vu1Image ok = patch4();
             t.IsFalse(ps2_native_world::testModelTerrain(ok.mem, 0x868, kTop, k), "mixed patch entry");
-            t.IsFalse(ps2_native_world::testModelTerrain(ok.mem, 0x610, kTop, k), "base-only entry"); }); });
+            t.IsFalse(ps2_native_world::testModelTerrain(ok.mem, 0x610, kTop, k), "base-only entry"); });
+        // NRS1: optional pair dump for ge1_compact_test's file mode. Test-only:
+        // NRS1_DUMP_PAIRS=<path> writes the model packets of the synthetic
+        // images above (u32 npackets, then u32 nbytes + bytes each). No game
+        // data; the file is regenerated, never committed.
+        tc.Run("compact pairs dump (NRS1_DUMP_PAIRS only)", [](TestCase &t)
+               {
+            const char *dir = std::getenv("NRS1_DUMP_PAIRS");
+            if (!dir || !dir[0])
+                return;
+            std::vector<std::vector<uint8_t>> packets;
+            {
+                ps2_native_world::testResetGroup();
+                Vu1Image im = patch4();
+                std::vector<std::vector<uint8_t>> k;
+                t.IsTrue(ps2_native_world::testModelTerrain(im.mem, 0x6b8, kTop, k), "servable");
+                packets.insert(packets.end(), k.begin(), k.end());
+            }
+            {
+                ps2_native_world::testResetGroup();
+                Vu1Image im = instance3(0);
+                std::vector<uint8_t> p;
+                t.IsTrue(ps2_native_world::testModelScenery(im.mem, 0x2320, kSTop, 0, p), "served");
+                packets.push_back(p);
+            }
+            {
+                ps2_native_world::testResetGroup();
+                Vu1Image in = instance3(0x20);
+                std::vector<uint8_t> p;
+                t.IsTrue(ps2_native_world::testModelScenery(in.mem, 0x2320, kSTop, 0, p), "served");
+                packets.push_back(p);
+            }
+            const std::string path = std::string(dir) + "/nrs1-pairs.bin";
+            std::FILE *f = std::fopen(path.c_str(), "wb");
+            t.IsTrue(f != nullptr, "dump opened");
+            if (!f)
+                return;
+            const uint32_t np = static_cast<uint32_t>(packets.size());
+            std::fwrite(&np, 4, 1, f);
+            for (const auto &p : packets)
+            {
+                const uint32_t n = static_cast<uint32_t>(p.size());
+                std::fwrite(&n, 4, 1, f);
+                std::fwrite(p.data(), 1, n, f);
+            }
+            std::fclose(f); }); });
 }
