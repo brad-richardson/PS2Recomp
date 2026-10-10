@@ -8,6 +8,7 @@
 #include "ps2_adpf.h"
 #include "ps2_perf_log.h"
 #include "runtime/gs/ge1_gs_api.h"
+#include "ps2_native_world.h"
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
 #include "ps2_present_geometry.h"
@@ -118,6 +119,8 @@ struct Ge1Api
     decltype(&ge1_gs_native_record_compact) nativeRecordCompact = nullptr;
     // RZV1 S4a: same for keyed records (without it the embedded compact record goes to nativeRecordCompact).
     decltype(&ge1_gs_native_record_keyed) nativeRecordKeyed = nullptr;
+    // RZV1 S4c: optional; the MTVU's prepare call (PS2X_SSX3_NATIVE_KEYED=3).
+    decltype(&ge1_gs_static_prepare) staticPrepare = nullptr;
     // HUD4: optional, Android only (a missing symbol keeps the CPU stamp; the
     // static iOS path never binds it, so old iOS GE1 libs still link).
     decltype(&ge1_gs_hud_scene) hudScene = nullptr;
@@ -157,6 +160,7 @@ struct Ge1Api
             nativeRecord = ::ge1_gs_native_record; // NRT1: needs a GE1 build with the folded adapter
             nativeRecordCompact = ::ge1_gs_native_record_compact; // NRS1: same (compact records)
             nativeRecordKeyed = ::ge1_gs_native_record_keyed;     // RZV1 S4a: same (keyed records)
+            staticPrepare = ::ge1_gs_static_prepare;              // RZV1 S4c: same
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
             exportIOSurface = ::ge1_gs_export_iosurface;
 #endif
@@ -214,6 +218,7 @@ struct Ge1Api
             dlsym(library, "ge1_gs_native_record_compact"));
         nativeRecordKeyed = reinterpret_cast<decltype(nativeRecordKeyed)>(
             dlsym(library, "ge1_gs_native_record_keyed"));
+        staticPrepare = reinterpret_cast<decltype(staticPrepare)>(dlsym(library, "ge1_gs_static_prepare"));
 #if defined(__ANDROID__)
         // HUD4: optional (see above); never fails the load.
         hudScene = reinterpret_cast<decltype(hudScene)>(dlsym(library, "ge1_gs_hud_scene"));
@@ -802,6 +807,7 @@ public:
         if (ps2x_present_share::ownershipEnabled())
             ps2x_present_own::sharedPool().bumpGeneration();
 #endif
+        ps2_native_world::setStaticPrepare(nullptr); // RZV1 S4c: before GE1 goes
         if (m_ge1Active)
             m_ge1.close();
         m_ge1.unload();
@@ -865,6 +871,11 @@ public:
                 std::exit(78);
             }
             std::fprintf(stderr, "[gs:external] GE1 Full live GS loaded: %s\n", path);
+            // RZV1 S4c: the MTVU's prepare call goes straight to GE1 (it only
+            // reads GE1's published cull state). Not with the per-packet log,
+            // which routes records packet by packet.
+            if (!m_log)
+                ps2_native_world::setStaticPrepare(m_ge1.staticPrepare);
             // AD1: ADPF reuses this accounting, so it turns it on too.
             m_perfTail = ps2x::perflog::enabled() || ps2x::adpf::enabled();
         }

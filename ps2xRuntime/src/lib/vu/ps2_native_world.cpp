@@ -85,6 +85,7 @@ struct Knobs
     uint32_t keyWindow = 8; // S4a pool simulation: a key unused for more than this many ticks is evicted
     bool s4b = false;       // RZV1 S4b (KEYED=2): + the resident-pool block (slot, inputs on a miss, base constants, generation program)
     uint32_t poolSlots = 32768; // S4b: the runtime-owned slot pool (GE1 mirrors it slot for slot)
+    bool s4c = false;       // RZV1 S4c (KEYED=3): + the MTVU-prepared kick outcomes (ge1_gs_static_prepare)
 };
 const Knobs &knobs()
 {
@@ -112,8 +113,9 @@ const Knobs &knobs()
             r.compact = !std::strcmp(v, "1");
         if (const char *v = std::getenv("PS2X_SSX3_NATIVE_KEYED"))
         {
-            r.keyed = r.compact && (!std::strcmp(v, "1") || !std::strcmp(v, "2"));
-            r.s4b = r.keyed && !std::strcmp(v, "2");
+            r.keyed = r.compact && (!std::strcmp(v, "1") || !std::strcmp(v, "2") || !std::strcmp(v, "3"));
+            r.s4b = r.keyed && (!std::strcmp(v, "2") || !std::strcmp(v, "3"));
+            r.s4c = r.keyed && !std::strcmp(v, "3");
         }
         if (const char *v = std::getenv("PS2X_SSX3_NATIVE_POOL_SLOTS"))
             r.poolSlots = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
@@ -467,10 +469,11 @@ struct Kicks
     // facts' float work runs under IEEE round-to-nearest without flush-to-zero
     // (GE1's own threads), whatever mode the MTVU thread is in.
     std::vector<uint8_t> kbytes;
-    const uint8_t *recordKeyed(const Ge1KeyedJob &jobIn, uint32_t &recSize, const std::vector<uint8_t> *s4b = nullptr)
+    const uint8_t *recordKeyed(const Ge1KeyedJob &jobIn, uint32_t &recSize, const std::vector<uint8_t> *s4b = nullptr,
+                               bool compactBuilt = false)
     {
-        uint32_t csize = 0;
-        const uint8_t *crec = recordCompact(csize);
+        uint32_t csize = static_cast<uint32_t>(cbytes.size());
+        const uint8_t *crec = compactBuilt ? cbytes.data() : recordCompact(csize);
         Ge1KeyedPass pass[4];
         uint8_t tris[4][3 * 64];
         const uint64_t saved = ps2_fpmode::readControl();
@@ -907,6 +910,9 @@ std::atomic<uint64_t> g_resumeAfterNative{0}, g_unmodelledTerrain{0}, g_checkSki
 std::atomic<uint64_t> g_keyJobs{0}, g_keyHits{0}, g_keyCollide{0}, g_keyBytesAll{0}, g_keyBytesMiss{0}, g_keyDistinct{0},
     g_keyEvicted{0}, g_keyRecBytes{0}, g_keyCompactBytes{0};
 std::atomic<uint64_t> g_s4bMiss{0}, g_s4bHit{0}, g_s4bGenBad{0}; // RZV1 S4b slot pool
+// RZV1 S4c: GE1's prepare export (bound by the external backend), and its use.
+std::atomic<uint32_t (*)(const uint8_t *, uint32_t, uint8_t *, uint32_t)> g_staticPrepare{nullptr};
+std::atomic<uint64_t> g_s4cBlocks{0}, g_s4cNone{0}, g_s4cBytes{0};
 std::atomic<int> g_mismatchDumps{8};
 
 void printStats()
@@ -964,6 +970,10 @@ void printStats()
             std::fprintf(stderr, "[nrt1] s4b pool: slots=%u hit=%llu miss=%llu gen_mismatch=%llu\n", knobs().poolSlots,
                          (unsigned long long)g_s4bHit.load(), (unsigned long long)g_s4bMiss.load(),
                          (unsigned long long)g_s4bGenBad.load());
+        if (knobs().s4c)
+            std::fprintf(stderr, "[nrt1] s4c prepared: blocks=%llu none=%llu bytes=%llu bound=%d\n",
+                         (unsigned long long)g_s4cBlocks.load(), (unsigned long long)g_s4cNone.load(),
+                         (unsigned long long)g_s4cBytes.load(), g_staticPrepare.load() ? 1 : 0);
     }
 }
 
@@ -1178,6 +1188,16 @@ void keyHeader(State &s, uint32_t a, uint32_t b)
 // pool hit), generation entries; the base job's constants (terrain); the
 // inputs (the key bytes) on a miss; the generation program, 16-byte padded.
 // A generation program that doesn't cover the record's vertices ships empty.
+void buildS4b(State &s);
+} // namespace
+
+void setStaticPrepare(uint32_t (*fn)(const uint8_t *, uint32_t, uint8_t *, uint32_t))
+{
+    g_staticPrepare.store(fn, std::memory_order_release);
+}
+
+namespace
+{
 void buildS4b(State &s)
 {
     const uint64_t key = s.job.key;
@@ -1250,7 +1270,37 @@ bool emitKicks(PS2Memory &memory, State &s)
         keyJob(memory, s);
         if (knobs().s4b)
             buildS4b(s);
-        rec = s.kicks.recordKeyed(s.job, recSize, knobs().s4b ? &s.s4b : nullptr);
+        bool compactBuilt = false;
+        if (knobs().s4c)
+        {
+            // RZV1 S4c: GE1 prepares the packets' kick outcome here, on the MTVU,
+            // against the cull state its GS thread last published; the block
+            // rides at the end of the S4b block. IEEE round-to-nearest, no FZ,
+            // for the trace's divides (as the S4a facts).
+            uint32_t csize = 0;
+            const uint8_t *crec = s.kicks.recordCompact(csize);
+            compactBuilt = true;
+            uint32_t got = 0;
+            if (auto fn = g_staticPrepare.load(std::memory_order_acquire))
+            {
+                const size_t at = s.s4b.size();
+                const uint32_t cap = 16u * 1024u;
+                s.s4b.resize(at + cap);
+                const uint64_t saved = ps2_fpmode::readControl();
+                ps2_fpmode::writeControl(saved & ~((uint64_t{3} << 22) | (uint64_t{1} << 24)));
+                got = fn(crec, csize, s.s4b.data() + at, cap);
+                ps2_fpmode::writeControl(saved);
+                s.s4b.resize(at + ((got + 15u) & ~15u));
+            }
+            if (got)
+            {
+                g_s4cBlocks.fetch_add(1, std::memory_order_relaxed);
+                g_s4cBytes.fetch_add(got, std::memory_order_relaxed);
+            }
+            else
+                g_s4cNone.fetch_add(1, std::memory_order_relaxed);
+        }
+        rec = s.kicks.recordKeyed(s.job, recSize, knobs().s4b ? &s.s4b : nullptr, compactBuilt);
         g_keyRecBytes.fetch_add(recSize, std::memory_order_relaxed);
         g_keyCompactBytes.fetch_add(static_cast<uint32_t>(s.kicks.cbytes.size()), std::memory_order_relaxed);
     }

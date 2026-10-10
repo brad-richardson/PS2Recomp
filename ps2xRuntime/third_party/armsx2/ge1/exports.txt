@@ -22,3 +22,4 @@ _ge1_gs_freeze_load
 _ge1_gs_native_record
 _ge1_gs_native_record_compact
 _ge1_gs_native_record_keyed
+_ge1_gs_static_prepare

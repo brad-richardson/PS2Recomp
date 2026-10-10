@@ -152,6 +152,16 @@ typedef struct Ge1KeyedPass
     uint32_t reserved[6];
 } Ge1KeyedPass;
 GE1_API int ge1_gs_native_record_keyed(const uint8_t* bytes, uint32_t byte_count);
+// RZV1 S4c: prepare a compact native record's static-world packets (their
+// kick outcome: emitted triangles, buffer end state, vertex-trace and
+// draw-rect partials) against the cull state GE1's GS thread last published,
+// on the caller's thread (the MTVU). Writes an S4C1 block (vendor
+// GSStaticPrep.h) to out and returns its size; 0 when GE1 has published
+// nothing yet, the record is malformed or cap is too small. The caller must
+// run with IEEE round-to-nearest and no flush-to-zero. Thread-safe and pure:
+// GE1 re-checks every packet's cull state at ingest and prepares itself on a
+// mismatch, so a stale block costs time, never correctness. Optional symbol.
+GE1_API uint32_t ge1_gs_static_prepare(const uint8_t* compact, uint32_t size, uint8_t* out, uint32_t cap);
 // HUD4: composite one Tricky HUD scene onto an already-exported AHB, on
 // GE1's own Vulkan queue (Android only). The AHB holds the final frame (the
 // export copy just submitted); GE1 submits the composite right behind it on

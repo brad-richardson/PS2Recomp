@@ -647,11 +647,40 @@ extern "C" GE1_API int ge1_gs_native_record_keyed(const uint8_t* bytes, uint32_t
     const bool resident = ge1_resident_on();
     if (resident)
         ge1_resident_before(parts);
+    // RZV1 S4c: the MTVU's prepared outcomes (an S4C1 block at the end of the
+    // S4b block, PS2X_SSX3_NATIVE_KEYED=3); the vendor validates it and uses a
+    // packet's only where its cull state is the live one.
+    const uint8_t* s4c = nullptr;
+    uint32_t s4cBytes = 0;
+    if (parts.s4b && parts.s4bBytes >= 128)
+    {
+        uint32_t hdr[4];
+        std::memcpy(hdr, parts.s4b, 16);
+        const uint64_t at = 128ull + 16ull * hdr[2] + ((8ull * hdr[3] + 15ull) & ~15ull);
+        if (hdr[0] == 0x31423453u && at + 16u <= parts.s4bBytes)
+        {
+            s4c = parts.s4b + at;
+            s4cBytes = parts.s4bBytes - static_cast<uint32_t>(at);
+        }
+    }
+    if (s4c)
+        GSStaticRecordBegin(s4c, s4cBytes);
     // The embedded compact record, exactly as ge1_gs_native_record_compact.
     const bool ok = GSgifTransferCompact(parts.compact, parts.compactSize);
+    if (s4c)
+        GSStaticRecordEnd();
     if (resident)
         ge1_resident_after();
     return ok ? 1 : 0;
+}
+
+// RZV1 S4c: see ge1_gs_api.h. Pure (reads the published cull state only), any
+// thread; the caller provides IEEE round-to-nearest without flush-to-zero.
+extern "C" GE1_API uint32_t ge1_gs_static_prepare(const uint8_t* compact, uint32_t size, uint8_t* out, uint32_t cap)
+{
+    if (!compact || !out)
+        return 0;
+    return GSStaticPrepareRecord(compact, size, out, cap);
 }
 
 extern "C" GE1_API int ge1_gs_packet(uint8_t path, const uint8_t* bytes, uint32_t size)

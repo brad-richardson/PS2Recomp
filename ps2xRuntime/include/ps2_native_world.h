@@ -69,4 +69,9 @@ bool testModelTerrain(const uint8_t *vu1Data, uint32_t startPC, uint32_t top,
 bool testModelScenery(const uint8_t *vu1Data, uint32_t startPC, uint32_t top, uint32_t itop,
                       std::vector<uint8_t> &packet);
 void testResetGroup(); // terrain and scenery state
+
+// RZV1 S4c: GE1's ge1_gs_static_prepare (ge1_gs_api.h), bound by the external
+// backend while GE1 is live (null otherwise). PS2X_SSX3_NATIVE_KEYED=3 calls it
+// on the MTVU for every keyed record and attaches the block it returns.
+void setStaticPrepare(uint32_t (*fn)(const uint8_t *compact, uint32_t size, uint8_t *out, uint32_t cap));
 } // namespace ps2_native_world
