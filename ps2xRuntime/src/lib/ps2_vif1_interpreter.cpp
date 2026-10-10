@@ -370,10 +370,7 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
             }
 
             const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingPath2ImageQwc, availableQw);
-            // TRM1: pooled buffer; the two memcpys below overwrite every byte.
-            std::vector<uint8_t> imagePacket =
-                acquireStageBytes(16u + static_cast<size_t>(chunkQw) * 16u);
-            imagePacket.resize(16u + static_cast<size_t>(chunkQw) * 16u);
+            std::vector<uint8_t> imagePacket(16u + static_cast<size_t>(chunkQw) * 16u, 0u);
             const uint64_t imageTag =
                 static_cast<uint64_t>(chunkQw & 0x7FFFu) |
                 ((m_vif1PendingPath2ImageQwc == chunkQw) ? (1ull << 15) : 0ull) |
@@ -385,8 +382,6 @@ void PS2Memory::processVIF1DataImpl(const uint8_t *data, uint32_t sizeBytes)
                             static_cast<uint32_t>(imagePacket.size()),
                             true,
                             m_vif1PendingPath2DirectHl);
-            // TRM1: synchronous consume above; the buffer returns to the pool.
-            releaseStageBytes(std::move(imagePacket));
 
             pos += chunkQw * 16u;
             m_vif1PendingPath2ImageQwc -= chunkQw;
@@ -1024,11 +1019,7 @@ void PS2Memory::processVIF1DataStaged(const uint8_t *data, uint32_t sizeBytes)
             }
 
             const uint32_t chunkQw = std::min<uint32_t>(m_vif1PendingPath2ImageQwc, availableQw);
-            // TRM1: pooled buffer (returns at GifCopy consume); the two
-            // memcpys below overwrite every byte.
-            std::vector<uint8_t> imagePacket =
-                acquireStageBytes(16u + static_cast<size_t>(chunkQw) * 16u);
-            imagePacket.resize(16u + static_cast<size_t>(chunkQw) * 16u);
+            std::vector<uint8_t> imagePacket(16u + static_cast<size_t>(chunkQw) * 16u, 0u);
             const uint64_t imageTag =
                 static_cast<uint64_t>(chunkQw & 0x7FFFu) |
                 ((m_vif1PendingPath2ImageQwc == chunkQw) ? (1ull << 15) : 0ull) |
@@ -1193,11 +1184,9 @@ void PS2Memory::processVIF1DataStaged(const uint8_t *data, uint32_t sizeBytes)
             if (qwCount > 0)
             {
                 const bool directHl = (opcode == VIF_DIRECTHL);
-                // TRM1: pooled buffer (returns at GifCopy consume);
-                // assign() overwrites every byte.
-                std::vector<uint8_t> directBytes = acquireStageBytes(static_cast<size_t>(qwCount) * 16u);
-                directBytes.assign(data + pos, data + pos + static_cast<size_t>(qwCount) * 16u);
-                vifStageGif(GifPathId::Path2, std::move(directBytes), true, directHl);
+                vifStageGif(GifPathId::Path2,
+                            std::vector<uint8_t>(data + pos, data + pos + static_cast<size_t>(qwCount) * 16u),
+                            true, directHl);
 
                 const uint32_t pendingImageQw = pendingGifImageQwc(data + pos, qwCount * 16u);
                 if (pendingImageQw != 0u)

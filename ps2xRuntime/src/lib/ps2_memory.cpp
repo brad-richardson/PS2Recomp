@@ -3,7 +3,6 @@
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_stream_capture.h"
-#include "runtime/gs/gs_worker.h"
 #include "ps2_log.h"
 #include "ps2_mtvu.h"
 #include <atomic>
@@ -410,54 +409,10 @@ PS2Memory::PS2Memory()
     // VUP1: specialized UNPACK decoders (default off).
     if (const char *vifUnpackFast = std::getenv("PS2X_VIF_UNPACK_FAST"))
         m_vifUnpackFast = std::strcmp(vifUnpackFast, "1") == 0;
-    // TRM1: the kick/VIF-stage buffer pool is always on (exact: pooled
-    // buffers are fully overwritten at every acquire site).
-    m_stagePool = std::make_unique<GsPacketPool>();
-    m_stagePool->setEnabled(true);
     // TRM1 piece 3a: kick-stability census (diag-only, default off).
     if (const char *census = std::getenv("PS2X_MTVU_KICK_CENSUS"))
         m_kickCensus = std::strcmp(census, "1") == 0;
     ps2SetScratchpadHostPtr(nullptr);
-}
-
-std::vector<uint8_t> PS2Memory::acquireStageBytes(size_t size)
-{
-    return m_stagePool ? m_stagePool->acquire(size) : std::vector<uint8_t>();
-}
-
-void PS2Memory::releaseStageBytes(std::vector<uint8_t> &&bytes)
-{
-    if (m_stagePool)
-        m_stagePool->release(std::move(bytes));
-}
-
-std::vector<uint8_t> *PS2Memory::allocStagedGif()
-{
-    {
-        std::lock_guard<std::mutex> lock(m_gifShellMutex);
-        if (!m_gifShells.empty())
-        {
-            std::vector<uint8_t> *out = m_gifShells.back();
-            m_gifShells.pop_back();
-            return out;
-        }
-    }
-    return new std::vector<uint8_t>();
-}
-
-void PS2Memory::freeStagedGif(std::vector<uint8_t> *bytes)
-{
-    if (!bytes)
-        return;
-    {
-        std::lock_guard<std::mutex> lock(m_gifShellMutex);
-        if (m_gifShells.size() < GsPacketPool::kMaxBuffers)
-        {
-            m_gifShells.push_back(bytes);
-            return;
-        }
-    }
-    delete bytes;
 }
 
 PS2Memory::~PS2Memory()
@@ -510,13 +465,6 @@ PS2Memory::~PS2Memory()
         delete[] iop_ram;
         iop_ram = nullptr;
     }
-
-    // TRM1: pooled GifCopy shells (the VifLog is drained and the VIF/MTVU
-    // threads joined before this runs; any shell still here is idle).
-    for (std::vector<uint8_t> *shell : m_gifShells)
-        delete shell;
-    m_gifShells.clear();
-
     // TRM1 piece 3a: census summary (diag-only; also emitted from main,
     // which bypasses this destructor via _Exit).
     printCensusSummary();
@@ -2151,7 +2099,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     // 4096 tags (RR1); the old 4096 cap silently dropped every object
                     // after the cut.
                     const int kMaxChainTags = 1 << 20;
-                    std::vector<uint8_t> chainBuf = acquireStageBytes(m_chainBufHint);
+                    std::vector<uint8_t> chainBuf;
                     chainBuf.reserve(m_chainBufHint);
                     // TRM1 piece 3a: source spans for the census (empty unless on).
                     std::vector<CensusSpan> chainSpans;
@@ -2511,10 +2459,7 @@ void PS2Memory::processPendingTransfers()
     auto mtvuPiece = [&](bool gif, bool scratch, uint32_t phys, size_t size)
     {
         const uint8_t *data = (scratch ? m_scratchpad : m_rdram) + phys;
-        // TRM1: pooled buffer; assign() overwrites every byte (PKB1 item 1).
-        std::vector<uint8_t> bytes = acquireStageBytes(size);
-        bytes.assign(data, data + size);
-        mtvuPieces.push_back(MtvuPiece{gif, std::move(bytes)});
+        mtvuPieces.push_back(MtvuPiece{gif, std::vector<uint8_t>(data, data + size)});
         if (m_kickCensus)
         {
             CensusPiece cp;
@@ -2641,10 +2586,6 @@ void PS2Memory::processPendingTransfers()
             }
         }
     }
-    // TRM1: inline-path chain buffers back to the pool (moved-from when
-    // the job took them; release() no-ops on those).
-    for (auto &p : m_pendingGifTransfers)
-        releaseStageBytes(std::move(p.chainData));
     m_pendingGifTransfers.clear();
 
     mtvuScope.pause();
@@ -2704,9 +2645,6 @@ void PS2Memory::processPendingTransfers()
             }
         }
     }
-    // TRM1: VIF0 always runs inline; its chain buffers return here.
-    for (auto &p : m_pendingVif0Transfers)
-        releaseStageBytes(std::move(p.chainData));
     m_pendingVif0Transfers.clear();
 
     mtvuScope.resume();
@@ -2815,9 +2753,6 @@ void PS2Memory::processPendingTransfers()
             }
         }
     }
-    // TRM1: inline-path chain buffers back to the pool (see GIF above).
-    for (auto &p : m_pendingVif1Transfers)
-        releaseStageBytes(std::move(p.chainData));
     m_pendingVif1Transfers.clear();
 
     if (mtvuSubmit)
@@ -2863,10 +2798,6 @@ void PS2Memory::processPendingTransfers()
                 else
                     processVIF1Data(piece.bytes.data(), size);
             }
-            // TRM1: piece bytes are fully consumed above; return the
-            // buffers to the pool (moved-from pieces free nothing).
-            for (MtvuPiece &piece : pieces)
-                releaseStageBytes(std::move(piece.bytes));
             if (m_gifArbiter)
                 arbDrain(); }, mtvuBytes, ps2_mtvu::currentFbrst(), true);
     }
@@ -3053,12 +2984,7 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t 
         // VPL2: the bytes are copied here (the source may be the job's
         // stream); the MTVU thread makes this same call, in order.
         if (data && sizeBytes >= 16u)
-        {
-            // TRM1: pooled buffer; assign() overwrites every byte.
-            std::vector<uint8_t> bytes = acquireStageBytes(sizeBytes);
-            bytes.assign(data, data + sizeBytes);
-            vifStageGif(pathId, std::move(bytes), drainImmediately, path2DirectHl);
-        }
+            vifStageGif(pathId, std::vector<uint8_t>(data, data + sizeBytes), drainImmediately, path2DirectHl);
         return;
     }
     ps2_mtvu::touch(ps2_mtvu::Site::Path3Fifo);
@@ -3175,8 +3101,7 @@ void PS2Memory::execGifStageOp(ps2_mtvu::GifOp &op)
 void PS2Memory::vifStageGif(GifPathId pathId, std::vector<uint8_t> &&bytes, bool drainImmediately,
                             bool path2DirectHl)
 {
-    auto *heap = allocStagedGif();
-    *heap = std::move(bytes);
+    auto *heap = new std::vector<uint8_t>(std::move(bytes));
     uint8_t payload[16] = {};
     std::memcpy(payload, &heap, sizeof(heap));
     const uint8_t f = static_cast<uint8_t>((static_cast<uint32_t>(pathId) & 3u) | (drainImmediately ? 4u : 0u) |
@@ -3259,10 +3184,7 @@ void PS2Memory::execVifStageRec(void *opaque, const ps2_mtvu::VifRec &rec)
         const bool drain = (rec.f & 4u) != 0u;
         const bool hl = (rec.f & 8u) != 0u;
         m.submitGifPacket(path, bytes->data(), static_cast<uint32_t>(bytes->size()), drain, hl);
-        // TRM1: the bytes are fully consumed above; the buffer returns to
-        // the pool and the empty shell to the shell pool.
-        m.releaseStageBytes(std::move(*bytes));
-        m.freeStagedGif(bytes);
+        delete bytes;
         break;
     }
     case K::Msk3:
