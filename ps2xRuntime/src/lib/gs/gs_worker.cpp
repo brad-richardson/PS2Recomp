@@ -4,6 +4,7 @@
 #include "ps2_mtvu.h"
 #include "ps2_perf_log.h"
 #include "ps2_thread_affinity.h"
+#include "ps2_tls_model.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -14,15 +15,15 @@
 namespace
 {
 // PT2 Part 2: per-thread enqueue-wait sink (see setEnqueueWaitSink).
-thread_local uint64_t *t_enqueueWaitSink = nullptr;
+thread_local uint64_t *t_enqueueWaitSink PS2X_TLS_HOT = nullptr;
 // MP1 L2: this thread's local batch depth (see beginLocalBatch).
-thread_local uint32_t t_localBatchDepth = 0;
+thread_local uint32_t t_localBatchDepth PS2X_TLS_HOT = 0;
 // GPK1: staged publish (see GsWorker::setStagedPublish).
 std::atomic<bool> s_stagedPublish{false};
 std::atomic<uint64_t> s_stagedRounds{0}; // receipts: staged publish rounds
-thread_local std::vector<GsCommand> t_staged;
-thread_local GsWorker *t_stagedWorker = nullptr;
-thread_local size_t t_stagedBytes = 0;
+thread_local std::vector<GsCommand> t_staged PS2X_TLS_HOT;
+thread_local GsWorker *t_stagedWorker PS2X_TLS_HOT = nullptr;
+thread_local size_t t_stagedBytes PS2X_TLS_HOT = 0;
 // GSB1: GIF batch command (see GsWorker::setGifBatch). One pending batch
 // per thread: concatenated bytes, the subs table, and the source vectors
 // (returned to the pool in bulk at publish). Pending iff subs is non-empty.
@@ -30,10 +31,10 @@ std::atomic<bool> s_gifBatch{false};
 std::atomic<size_t> s_gifBatchBytes{GsWorker::kGifBatchDefaultBytes};
 std::atomic<uint64_t> s_batchRounds{0}; // receipts: batches published
 std::atomic<uint64_t> s_batchedCmds{0}; // receipts: sub-packets batched
-thread_local std::vector<uint8_t> t_batch;
-thread_local std::vector<uint32_t> t_batchSubs;
-thread_local std::vector<std::vector<uint8_t>> t_batchSources;
-thread_local GsWorker *t_batchWorker = nullptr;
+thread_local std::vector<uint8_t> t_batch PS2X_TLS_HOT;
+thread_local std::vector<uint32_t> t_batchSubs PS2X_TLS_HOT;
+thread_local std::vector<std::vector<uint8_t>> t_batchSources PS2X_TLS_HOT;
+thread_local GsWorker *t_batchWorker PS2X_TLS_HOT = nullptr;
 // GSB2: the same pending batch in arena mode. Views append here (no byte
 // copy): one subs entry exactly as GSB1 builds it, one subOff entry pointing
 // into t_batchArenas, and the accumulated view bytes for the cap rule. The
@@ -41,9 +42,9 @@ thread_local GsWorker *t_batchWorker = nullptr;
 // the arena is on), so t_batch stays empty here and vice versa.
 std::atomic<bool> s_gifArena{false};
 std::atomic<uint64_t> s_arenaViews{0}; // receipts: views appended to batches
-thread_local std::vector<GsGifArenaRef> t_batchArenas;
-thread_local std::vector<uint32_t> t_batchSubOff;
-thread_local size_t t_batchViewBytes = 0u;
+thread_local std::vector<GsGifArenaRef> t_batchArenas PS2X_TLS_HOT;
+thread_local std::vector<uint32_t> t_batchSubOff PS2X_TLS_HOT;
+thread_local size_t t_batchViewBytes PS2X_TLS_HOT = 0u;
 // GSW2: GS queue wake hysteresis (PS2X_GS_WAKE_LOWWATER=<n>, default off =
 // 0/unset/invalid). In a GS-bound window the queue is full, so every pop
 // batch freed a little space and did m_hasSpace.notify_all(), waking the
