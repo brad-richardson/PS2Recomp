@@ -46,7 +46,6 @@
 #include <type_traits>
 #include <cstdint>
 #include <cstdio>
-#include "ps2_tls_model.h"
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -218,7 +217,7 @@ namespace ps2_mtvu
         inline std::atomic<uint64_t> g_finishEeUnmatched{0}; // unit PATH3 FINISH writes with no credit (set as before)
         // MQ2: the GIF path of the packet the arbiter is emitting on this
         // thread (0 = none, e.g. a direct XGKICK); set around the process call.
-        inline thread_local uint8_t t_gifEmitPath PS2X_TLS_HOT = 0u;
+        inline thread_local uint8_t t_gifEmitPath = 0u;
 
         inline int mode()
         {

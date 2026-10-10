@@ -1,6 +1,5 @@
 #include "runtime/gs/gs_frontend.h"
 #include "ps2_fpmode.h"
-#include "ps2_tls_model.h"
 #include "ps2_e7.h"
 #include "ps2_mtvu.h"
 #include "runtime/gs/gs_cpu_backend.h"
@@ -270,7 +269,7 @@ namespace
 // exact direct-call bodies without re-enqueueing.
 namespace
 {
-    thread_local bool t_inGsWorker PS2X_TLS_HOT = false;
+    thread_local bool t_inGsWorker = false;
 
     struct GsWorkerScope
     {
