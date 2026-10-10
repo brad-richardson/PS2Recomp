@@ -7,6 +7,7 @@
 #include "runtime/gs/ps2_gs_external_backend.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_mtvu.h"
+#include "ps2_tls_cache.h"
 
 #include <algorithm>
 #include <array>
@@ -1737,6 +1738,252 @@ void register_ps2_gs_queue_tests()
             t.Equals(cSmall, cOff, "small-cap arena digest should count the same commands");
             t.IsTrue(vOff == vArena, "arena execution should give the same VRAM");
             t.IsTrue(vOff == vSmall, "small-cap arena execution should give the same VRAM");
+        });
+
+        // TLS2: the cache gate engages only for the noted thread when on.
+        // Values are captured while faked and asserted after the restore, so
+        // the shared suite process never keeps test state.
+        tc.Run("TLS2 cached TLS engages only for the noted thread when on", [](TestCase &t)
+        {
+            ps2_tls_cache::setForTest(false);
+            ps2_mtvu::detail::g_gifTid.store(std::thread::id{}, std::memory_order_relaxed);
+            const bool offNoNote = GsWorker::tlsCacheLiveForTest();
+            const bool offNoNoteEmit = ps2_mtvu::hotGifEmitPath() != nullptr;
+            ps2_tls_cache::setForTest(true);
+            const bool onNoNote = GsWorker::tlsCacheLiveForTest();
+            const bool onNoNoteEmit = ps2_mtvu::hotGifEmitPath() != nullptr;
+            // Note as the GIF stage entry would (production notes on the real
+            // GIF thread; here the test thread stands in, as the GSB1/GSB2
+            // tests do when they fake g_gifTid).
+            ps2_mtvu::detail::g_gifTid.store(std::this_thread::get_id(),
+                                             std::memory_order_relaxed);
+            ps2_mtvu::detail::noteGifEmitPathCache();
+            ps2_tls_cache::noteGsWorkerCache();
+            ps2_tls_cache::noteGsFrontendCache();
+            const bool onNoted = GsWorker::tlsCacheLiveForTest();
+            uint8_t *const emitCached = ps2_mtvu::hotGifEmitPath();
+            // The cached emit path is the thread's own object: writes through
+            // the cache and through the thread-local read back identically.
+            // (Guarded: a null cache must fail the case, not segfault it.)
+            uint8_t viaCache = 0xFFu, viaTls = 0xFFu;
+            if (emitCached != nullptr)
+            {
+                *emitCached = 3u;
+                viaCache = ps2_mtvu::gifEmitPath();
+                ps2_mtvu::detail::t_gifEmitPath = 0u;
+                viaTls = ps2_mtvu::gifEmitPath();
+            }
+            // A thread that is not the noted one still falls back.
+            bool otherLive = true;
+            uint8_t *otherEmit = reinterpret_cast<uint8_t *>(0x1);
+            std::thread other([&]
+                              {
+                                  otherLive = GsWorker::tlsCacheLiveForTest();
+                                  otherEmit = ps2_mtvu::hotGifEmitPath();
+                              });
+            other.join();
+            ps2_mtvu::detail::g_gifTid.store(std::thread::id{}, std::memory_order_relaxed);
+            ps2_tls_cache::setForTest(false);
+            const bool afterClear = GsWorker::tlsCacheLiveForTest();
+            const bool afterClearEmit = ps2_mtvu::hotGifEmitPath() != nullptr;
+            t.IsTrue(!offNoNote, "knob off, no note: worker fallback");
+            t.IsTrue(!offNoNoteEmit, "knob off, no note: emit-path fallback");
+            t.IsTrue(!onNoNote, "knob on, no note: worker fallback");
+            t.IsTrue(!onNoNoteEmit, "knob on, no note: emit-path fallback");
+            t.IsTrue(onNoted, "knob on + noted: worker cache live");
+            t.IsTrue(emitCached != nullptr, "knob on + noted: emit-path cached");
+            t.Equals(viaCache, static_cast<uint8_t>(3u), "cached write reads back via the reader");
+            t.Equals(viaTls, static_cast<uint8_t>(0u), "TLS write reads back via the cached reader");
+            t.IsTrue(!otherLive, "other thread: worker fallback");
+            t.IsTrue(otherEmit == nullptr, "other thread: emit-path fallback");
+            t.IsTrue(!afterClear, "after clear: worker fallback");
+            t.IsTrue(!afterClearEmit, "after clear: emit-path fallback");
+        });
+
+        // TLS2: serving the batch/emit state from the cached addresses gives
+        // the identical GS stream (digest, count, VRAM, grouping) as the
+        // thread-locals, on the owned (GSB1) and view (GSB2 arena) paths.
+        tc.Run("TLS2 cached batching matches direct TLS: digest, count and VRAM", [](TestCase &t)
+        {
+            const std::vector<std::vector<uint8_t>> pkts = {
+                makePackedTriangle(200u, 10u, 30u), makeReglistPoints(),
+                makeImageUpload(0x100u, 0u, 0u, 8u, 8u, 3u), makePackedTriangle(5u, 250u, 60u),
+                makePackedTriangle(100u, 100u, 100u), makeReglistPoints()};
+            const GifPathId paths[] = {GifPathId::Path2, GifPathId::Path1, GifPathId::Path3,
+                                       GifPathId::Path2, GifPathId::Path1, GifPathId::Path1};
+            auto run = [&](bool arena, bool tlsCache, std::vector<uint8_t> &vramOut, uint64_t &seq,
+                           uint64_t &cmds, uint64_t &rounds, uint64_t &batched, uint64_t &views)
+            {
+                std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+                GSRegisters regs{};
+                initQueueTestRegs(regs);
+                GS gs;
+                gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+                gs.setQueueEnabled(true);
+                gs.setPktSeqEnabled(true);
+                gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
+                GsWorker::setGifBatch(true, GsWorker::kGifBatchDefaultBytes);
+                GsWorker::setGifArena(arena);
+                // Production wiring: the arbiter drains into the frontend.
+                GifArbiter arbiter([&](const uint8_t *data, uint32_t size)
+                                   { gs.processGIFPacket(data, size); });
+                arbiter.setProcessPathPacketFn([&](GifPathId path, std::vector<uint8_t> &bytes)
+                                               { gs.processGIFPacketWithPath(path, true, bytes); });
+                auto pool = GsGifArenaPool::create();
+                if (arena)
+                {
+                    arbiter.setArenaPool(pool);
+                    arbiter.setProcessViewFn(
+                        [&](GifPathId path, GsGifArenaRef ref, uint32_t off, uint32_t len)
+                        { gs.processViewWithPath(path, true, std::move(ref), off, len); });
+                }
+                // Feed as the GIF stage (the GSB2 tests' fake), with the TLS2
+                // note on the cache arm.
+                ps2_mtvu::detail::g_gifTid.store(std::this_thread::get_id(),
+                                                 std::memory_order_relaxed);
+                ps2_tls_cache::setForTest(tlsCache);
+                if (tlsCache)
+                {
+                    ps2_mtvu::detail::noteGifEmitPathCache();
+                    ps2_tls_cache::noteGsWorkerCache();
+                    ps2_tls_cache::noteGsFrontendCache();
+                }
+                const bool live = GsWorker::tlsCacheLiveForTest();
+                const uint64_t roundsBefore = GsWorker::gifBatchRounds();
+                const uint64_t batchedBefore = GsWorker::gifBatchedCmds();
+                const uint64_t viewsBefore = GsWorker::gifArenaViews();
+                GsWorker::beginLocalBatch();
+                for (size_t i = 0; i < pkts.size(); ++i)
+                {
+                    if (arena)
+                    {
+                        GsGifArenaRef ref;
+                        uint32_t off = 0u;
+                        t.IsTrue(arbiter.copyViewForSubmit(pkts[i].data(),
+                                                           static_cast<uint32_t>(pkts[i].size()),
+                                                           ref, off),
+                                 "test packets should fit the arena");
+                        arbiter.submitStagedView(paths[i], std::move(ref), off,
+                                                 static_cast<uint32_t>(pkts[i].size()), false);
+                    }
+                    else
+                        arbiter.submit(paths[i], pkts[i].data(),
+                                       static_cast<uint32_t>(pkts[i].size()), false);
+                }
+                arbiter.drain();
+                GsWorker::endLocalBatch();
+                GsWorker::flushGifBatch();
+                rounds = GsWorker::gifBatchRounds() - roundsBefore;
+                batched = GsWorker::gifBatchedCmds() - batchedBefore;
+                views = GsWorker::gifArenaViews() - viewsBefore;
+                ps2_mtvu::detail::g_gifTid.store(std::thread::id{}, std::memory_order_relaxed);
+                ps2_tls_cache::setForTest(false);
+                GsWorker::setGifBatch(false, 0u);
+                GsWorker::setGifArena(false);
+                gs.drainQueue();
+                seq = gs.pktSeqSnapshot();
+                cmds = gs.pktSeqSnapshotCommands();
+                vramOut = snapshotVramBytes(gs);
+                t.Equals(live, tlsCache, "cache arm should serve from the cache iff on");
+            };
+            std::vector<uint8_t> vOwnedOff, vOwnedOn, vArenaOff, vArenaOn;
+            uint64_t sOwnedOff = 0, sOwnedOn = 0, sArenaOff = 0, sArenaOn = 0;
+            uint64_t cOwnedOff = 0, cOwnedOn = 0, cArenaOff = 0, cArenaOn = 0;
+            uint64_t rOwnedOff = 0, rOwnedOn = 0, rArenaOff = 0, rArenaOn = 0;
+            uint64_t bOwnedOff = 0, bOwnedOn = 0, bArenaOff = 0, bArenaOn = 0;
+            uint64_t vOwnedOffN = 0, vOwnedOnN = 0, vArenaOffN = 0, vArenaOnN = 0;
+            run(false, false, vOwnedOff, sOwnedOff, cOwnedOff, rOwnedOff, bOwnedOff, vOwnedOffN);
+            run(false, true, vOwnedOn, sOwnedOn, cOwnedOn, rOwnedOn, bOwnedOn, vOwnedOnN);
+            run(true, false, vArenaOff, sArenaOff, cArenaOff, rArenaOff, bArenaOff, vArenaOffN);
+            run(true, true, vArenaOn, sArenaOn, cArenaOn, rArenaOn, bArenaOn, vArenaOnN);
+            t.IsTrue(cOwnedOff != 0u, "digest should count commands");
+            t.IsTrue(rOwnedOn == 1u && bOwnedOn == pkts.size(),
+                     "cache arm should batch every owned packet at once");
+            t.IsTrue(rArenaOn == 1u && bArenaOn == pkts.size() && vArenaOnN == pkts.size(),
+                     "cache arm should batch every packet as a view at once");
+            t.Equals(sOwnedOn, sOwnedOff, "owned digest should match direct TLS");
+            t.Equals(cOwnedOn, cOwnedOff, "owned digest should count the same commands");
+            t.Equals(rOwnedOn, rOwnedOff, "owned grouping should match direct TLS");
+            t.IsTrue(vOwnedOff == vOwnedOn, "owned execution should give the same VRAM");
+            t.Equals(sArenaOn, sArenaOff, "arena digest should match direct TLS");
+            t.Equals(cArenaOn, cArenaOff, "arena digest should count the same commands");
+            t.Equals(rArenaOn, rArenaOff, "arena grouping should match direct TLS");
+            t.IsTrue(vArenaOff == vArenaOn, "arena execution should give the same VRAM");
+        });
+
+        // TLS2: through the real GIF stage thread, PS2X_TLS_CACHE=1 (parsed
+        // per start, noted at thread entry) gives the identical GS stream.
+        tc.Run("TLS2 real GIF stage thread: knob on matches knob off", [](TestCase &t)
+        {
+            auto run = [](bool tlsCache)
+            {
+                if (tlsCache)
+                    ::setenv("PS2X_TLS_CACHE", "1", 1);
+                else
+                    ::unsetenv("PS2X_TLS_CACHE");
+                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Threaded, true, 0u);
+                PS2Memory mem;
+                mem.initialize();
+                GS gs;
+                gs.init(mem.getGSVRAM(), static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &mem.gs());
+                gs.setRasterBackend(ps2x_gs_external::create(&mem.gs()));
+                gs.setQueueEnabled(true);
+                gs.setPktSeqEnabled(true);
+                mem.setGsFrontend(&gs);
+                GifArbiter arbiter([&gs](const uint8_t *data, uint32_t size)
+                                   { gs.processGIFPacket(data, size); });
+                mem.setGifArbiter(&arbiter);
+                ps2_mtvu::startGifStage([&mem](ps2_mtvu::GifOp &op) { mem.execGifStageOp(op); });
+                auto label = [](uint64_t v)
+                {
+                    std::vector<uint8_t> b;
+                    appendGifTag(b, 1u, kFlgPacked, 1u, 0xEull);
+                    appendGifAd(b, v, GS_REG_LABEL);
+                    return b;
+                };
+                for (uint32_t i = 0; i < 60u; ++i)
+                {
+                    ps2_mtvu::submit(
+                        [&mem, i, label]()
+                        {
+                            const std::vector<uint8_t> p1 = label(0x100000ull + i);
+                            mem.submitGifPacket(GifPathId::Path1, p1.data(),
+                                                static_cast<uint32_t>(p1.size()));
+                            if (i % 3u == 0u)
+                            {
+                                const std::vector<uint8_t> p2 = label(0x200000ull + i);
+                                mem.submitGifPacket(GifPathId::Path2, p2.data(),
+                                                    static_cast<uint32_t>(p2.size()), true,
+                                                    (i & 1u) != 0u);
+                            }
+                            if (i % 5u == 0u)
+                            {
+                                const std::vector<uint8_t> p3 = label(0x300000ull + i);
+                                mem.submitGifPacket(GifPathId::Path3, p3.data(),
+                                                    static_cast<uint32_t>(p3.size()), false);
+                                const std::vector<uint8_t> p1b = label(0x400000ull + i);
+                                mem.submitGifPacket(GifPathId::Path1, p1b.data(),
+                                                    static_cast<uint32_t>(p1b.size()), true);
+                            }
+                        },
+                        64u, 0u);
+                }
+                ps2_mtvu::syncAll();
+                gs.drainQueue();
+                const std::array<uint64_t, 2> out{gs.pktSeqSnapshot(), gs.pktSeqSnapshotCommands()};
+                ps2_mtvu::stopGifStage();
+                mem.setGifArbiter(nullptr);
+                gs.setQueueEnabled(false);
+                mem.setGsFrontend(nullptr);
+                ps2_mtvu::setModeForTest(ps2_mtvu::Mode::Off);
+                ::unsetenv("PS2X_TLS_CACHE");
+                return out;
+            };
+            const auto off = run(false);
+            t.IsTrue(off[1] >= 60u, "digest should cover the packet stream");
+            const auto on = run(true);
+            t.Equals(on[0], off[0], "knob-on GS stream digest == knob-off");
+            t.Equals(on[1], off[1], "knob-on GS command count == knob-off");
         });
 
         // GSB2: a view that cannot batch (over the cap here) publishes the

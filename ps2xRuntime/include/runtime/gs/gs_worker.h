@@ -430,6 +430,9 @@ public:
     void enqueueView(uint8_t pathId, bool notePath, GsGifArenaRef arena, uint32_t off, uint32_t len);
     // Receipts: arena views batched (process-wide; tests read deltas).
     static uint64_t gifArenaViews();
+    // TLS2 test hook: true iff the calling thread is served from the cached
+    // TLS addresses (knob on + noted GIF thread). Production never calls this.
+    static bool tlsCacheLiveForTest();
 
     size_t pendingCount() const;
     size_t pendingBytes() const;

@@ -57,6 +57,7 @@
 #include "ps2_fpmode.h"
 #include "ps2_perf_log.h"
 #include "ps2_thread_affinity.h"
+#include "ps2_tls_cache.h"
 #include "runtime/gs/gs_gif_arena.h"
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
@@ -218,6 +219,15 @@ namespace ps2_mtvu
         // MQ2: the GIF path of the packet the arbiter is emitting on this
         // thread (0 = none, e.g. a direct XGKICK); set around the process call.
         inline thread_local uint8_t t_gifEmitPath = 0u;
+        // TLS2: cached address of the noted GIF thread's t_gifEmitPath,
+        // resolved once at its entry (knob on). Same object; only read while
+        // the current thread is the live noted GIF thread (see
+        // ps2_tls_cache.h), so no race.
+        inline uint8_t *g_hotGifEmitPath = nullptr;
+        inline void noteGifEmitPathCache()
+        {
+            g_hotGifEmitPath = &t_gifEmitPath;
+        }
 
         inline int mode()
         {
@@ -716,6 +726,15 @@ namespace ps2_mtvu
             {
                 const UnitThreadGuard unitGuard;
                 g_gifTid.store(std::this_thread::get_id(), std::memory_order_relaxed);
+                // TLS2: resolve the hot thread-locals' addresses once (knob
+                // on only; knob off leaves every TLS lazily constructed,
+                // exactly as today).
+                if (ps2_tls_cache::enabled())
+                {
+                    noteGifEmitPathCache();
+                    ps2_tls_cache::noteGsWorkerCache();
+                    ps2_tls_cache::noteGsFrontendCache();
+                }
                 ThreadNaming::SetCurrentThreadName("MTVU-GIF");
                 bool busy = false;
                 uint64_t busyT0 = 0;
@@ -1948,6 +1967,7 @@ namespace ps2_mtvu
     // exec runs Submit/Drain ops on the GIF thread.
     inline void startGifStage(std::function<void(GifOp &)> exec)
     {
+        ps2_tls_cache::configureFromEnv(); // TLS2: parsed per start (default off)
         detail::gifStage().start(std::move(exec));
         detail::g_gifStage.store(true, std::memory_order_release);
     }
@@ -2293,16 +2313,39 @@ namespace ps2_mtvu
             detail::g_vif1StatFreePending.fetch_add(1u, std::memory_order_relaxed);
     }
 
+    // TLS2: the cached t_gifEmitPath address when this thread is the live
+    // noted GIF thread and the knob is on; null otherwise (knob off or any
+    // other thread uses the thread-local directly, as today).
+    inline uint8_t *hotGifEmitPath()
+    {
+        if (!ps2_tls_cache::enabled() || !onGifStage())
+            return nullptr;
+        return detail::g_hotGifEmitPath;
+    }
     // Arbiter: marks the path of the packet being emitted on this thread.
     struct GifEmitPathScope
     {
-        explicit GifEmitPathScope(uint8_t path) { detail::t_gifEmitPath = path; }
-        ~GifEmitPathScope() { detail::t_gifEmitPath = 0u; }
+        explicit GifEmitPathScope(uint8_t path)
+        {
+            if (uint8_t *hot = hotGifEmitPath())
+                *hot = path;
+            else
+                detail::t_gifEmitPath = path;
+        }
+        ~GifEmitPathScope()
+        {
+            if (uint8_t *hot = hotGifEmitPath())
+                *hot = 0u;
+            else
+                detail::t_gifEmitPath = 0u;
+        }
         GifEmitPathScope(const GifEmitPathScope &) = delete;
         GifEmitPathScope &operator=(const GifEmitPathScope &) = delete;
     };
     inline uint8_t gifEmitPath()
     {
+        if (uint8_t *hot = hotGifEmitPath())
+            return *hot;
         return detail::t_gifEmitPath;
     }
 
