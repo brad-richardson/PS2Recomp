@@ -1510,6 +1510,18 @@ void GS::processNativeRecord(const uint8_t *data, uint32_t sizeBytes)
     // GE1 without the compact export, or the stream capture recording per
     // packet). Every byte the kick consumes is carried verbatim, so the
     // expanded packets kick identically.
+    // RZV1 S4a: a keyed record's fallback is its embedded compact record.
+    if (ge1_is_keyed_record(data, sizeBytes))
+    {
+        Ge1KeyedParts parts;
+        if (!ge1_keyed_record_parts(data, sizeBytes, parts))
+        {
+            std::fprintf(stderr, "[gs] malformed keyed record delivered\n");
+            std::exit(78);
+        }
+        data = parts.compact;
+        sizeBytes = parts.compactSize;
+    }
     if (ge1_is_compact_record(data, sizeBytes))
     {
         thread_local std::vector<uint8_t> expandScratch;

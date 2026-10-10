@@ -84,6 +84,13 @@ typedef struct Ge1CompactVertex
     uint32_t W3;
 } Ge1CompactVertex;
 GE1_API int ge1_gs_native_record_compact(const uint8_t* bytes, uint32_t byte_count);
+// RZV1 S4a: the keyed native record (PS2X_SSX3_NATIVE_KEYED=1). Layout and
+// field meanings in ps2xRuntime/include/runtime/gs/ge1_gs_api.h; mirrored here
+// per the buddy rule (sizes pinned below). The adapter ingests the embedded
+// compact record exactly as ge1_gs_native_record_compact does;
+// GE1_S4A_CHECK=1 first recomputes every pass's facts with GE1's own vertex
+// parse (ParseCompactXYZF2 / FmmPos) and counts mismatches.
+GE1_API int ge1_gs_native_record_keyed(const uint8_t* bytes, uint32_t byte_count);
 // HUD4: composite one Tricky HUD scene onto an already-exported AHB, on
 // GE1's own Vulkan queue (Android only). See the runtime-side contract in
 // ps2xRuntime/include/runtime/gs/ge1_gs_api.h. This struct mirrors it
@@ -155,4 +162,5 @@ inline bool ge1_is_native_record(const uint8_t* bytes, uint32_t size)
     __builtin_memcpy(&hi, bytes + 8, 8);
     return lo == GE1_NATIVE_RECORD_MAGIC_LO && hi == GE1_NATIVE_RECORD_MAGIC_HI;
 }
+#include "ge1_keyed.h"
 #endif

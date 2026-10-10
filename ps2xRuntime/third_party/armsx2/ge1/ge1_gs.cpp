@@ -4,6 +4,8 @@
 #include <set>
 #include "pcsx2/GS.h"
 #include "pcsx2/GS/GS.h"
+#include <atomic>
+#include <limits>
 #include "pcsx2/Host.h"
 #include "pcsx2/ImGui/ImGuiManager.h"
 #include "common/Console.h"
@@ -587,6 +589,63 @@ extern "C" GE1_API int ge1_gs_native_record_compact(const uint8_t* bytes, uint32
     // NRS1: the vendor ingests the record whole (dense vertices, same kick).
     // False (malformed) falls back to GIF packets at the runtime frontend.
     return GSgifTransferCompact(bytes, size) ? 1 : 0;
+}
+
+// RZV1 S4a: GE1_S4A_CHECK=1 recomputes each keyed pass's facts from the
+// compact packet it describes, through GE1's own parse (ParseCompactXYZF2 for
+// the kick's m0/m1, FmmPos for the trace's {x, y, z, fog}), and compares
+// every field bit for bit. Counts print every 65,536 records and at the first
+// eight mismatches.
+namespace
+{
+std::atomic<uint64_t> s_s4aRecords{0}, s_s4aPasses{0}, s_s4aBad{0};
+bool S4aCheckOn()
+{
+    static const bool on = [] {
+        const char* v = std::getenv("GE1_S4A_CHECK");
+        return v && !std::strcmp(v, "1");
+    }();
+    return on;
+}
+void S4aCheck(const Ge1KeyedParts& parts)
+{
+    u32 bad = 0, i = 0;
+    const u8* tris = parts.tris;
+    const u32 table = (8u + 4u * parts.passes + 15u) & ~15u;
+    u32 at = 16u + table;
+    for (; i < parts.passes; i++)
+    {
+        u32 n = 0;
+        std::memcpy(&n, parts.compact + 24 + 4 * i, 4);
+        if (!ge1_s4a_pass_matches(parts.compact + at, n, parts.pass[i], tris))
+            bad++;
+        tris += 3u * parts.pass[i].ntris;
+        at += n;
+    }
+    const u64 recs = s_s4aRecords.fetch_add(1, std::memory_order_relaxed) + 1;
+    s_s4aPasses.fetch_add(parts.passes, std::memory_order_relaxed);
+    u64 badTotal = s_s4aBad.load(std::memory_order_relaxed);
+    if (bad)
+        badTotal = s_s4aBad.fetch_add(bad, std::memory_order_relaxed) + bad;
+    if ((recs & 0xffffu) == 0 || (bad && badTotal <= 8))
+        std::fprintf(stderr, "[ge1] s4a check: records=%llu passes=%llu mismatched_passes=%llu%s key=%016llx kind=%u pc=0x%x\n",
+            static_cast<unsigned long long>(recs), static_cast<unsigned long long>(s_s4aPasses.load()),
+            static_cast<unsigned long long>(badTotal), bad ? " (this record)" : "",
+            static_cast<unsigned long long>(parts.job->key), parts.job->kind, parts.job->pc);
+}
+} // namespace
+
+extern "C" GE1_API int ge1_gs_native_record_keyed(const uint8_t* bytes, uint32_t size)
+{
+    if (!s_open)
+        return 0;
+    Ge1KeyedParts parts;
+    if (!ge1_keyed_record_parts(bytes, size, parts))
+        return 0; // malformed: the runtime refuses it loudly
+    if (S4aCheckOn())
+        S4aCheck(parts);
+    // The embedded compact record, exactly as ge1_gs_native_record_compact.
+    return GSgifTransferCompact(parts.compact, parts.compactSize) ? 1 : 0;
 }
 
 extern "C" GE1_API int ge1_gs_packet(uint8_t path, const uint8_t* bytes, uint32_t size)

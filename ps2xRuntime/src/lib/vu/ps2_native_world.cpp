@@ -22,7 +22,6 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/gs/ge1_gs_api.h"
 
-#define XXH_NO_XXH3
 #define XXH_INLINE_ALL
 #include "runtime/third_party/xxhash.h"
 
@@ -35,6 +34,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <unordered_map>
 
 #pragma clang fp contract(off)
 
@@ -80,6 +80,8 @@ struct Knobs
     bool instances = false; // scenery instances (image 2826c443)
     bool check = false;
     bool compact = false; // NRS1: emit compact records (dense vertices, no GIF padding)
+    bool keyed = false;   // RZV1 S4a: wrap compact records with key + constants + facts (needs compact)
+    uint32_t keyWindow = 8; // S4a pool simulation: a key unused for more than this many ticks is evicted
 };
 const Knobs &knobs()
 {
@@ -105,6 +107,10 @@ const Knobs &knobs()
             r.check = !std::strcmp(v, "1");
         if (const char *v = std::getenv("PS2X_SSX3_NATIVE_COMPACT"))
             r.compact = !std::strcmp(v, "1");
+        if (const char *v = std::getenv("PS2X_SSX3_NATIVE_KEYED"))
+            r.keyed = r.compact && !std::strcmp(v, "1");
+        if (const char *v = std::getenv("PS2X_SSX3_NATIVE_KEYED_WINDOW"))
+            r.keyWindow = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
         if (r.check)
             r.terrain = r.instances = false; // check mode routes nothing
         return r;
@@ -399,6 +405,51 @@ struct Kicks
         return cbytes.data();
     }
     const uint8_t *bodyBytes(uint32_t o) const { return body() + o; }
+    // RZV1 S4a: the keyed record into kbytes: header, job, per-packet facts,
+    // triangle lists, then the compact record verbatim (built first). The
+    // facts' float work runs under IEEE round-to-nearest without flush-to-zero
+    // (GE1's own threads), whatever mode the MTVU thread is in.
+    std::vector<uint8_t> kbytes;
+    const uint8_t *recordKeyed(const Ge1KeyedJob &jobIn, uint32_t &recSize)
+    {
+        uint32_t csize = 0;
+        const uint8_t *crec = recordCompact(csize);
+        Ge1KeyedPass pass[4];
+        uint8_t tris[4][3 * 64];
+        const uint64_t saved = ps2_fpmode::readControl();
+        ps2_fpmode::writeControl(saved & ~((uint64_t{3} << 22) | (uint64_t{1} << 24)));
+        const uint32_t table = (8u + 4u * count + 15u) & ~15u;
+        uint32_t at = 16u + table, triBytes = 0;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            uint32_t n = 0;
+            std::memcpy(&n, crec + 24 + 4 * i, 4);
+            ge1_keyed_pass_facts(crec + at, n, pass[i], tris[i]);
+            triBytes += 3u * pass[i].ntris;
+            at += n;
+        }
+        ps2_fpmode::writeControl(saved);
+        const uint32_t triPadded = (triBytes + 15u) & ~15u;
+        const uint32_t total = 32u + 256u + 128u * count + triPadded + csize;
+        kbytes.assign(total, 0);
+        const uint64_t magic[2] = {GE1_KEYED_RECORD_MAGIC_LO, GE1_KEYED_RECORD_MAGIC_HI};
+        const uint32_t hdr[4] = {total, count, triPadded, 0};
+        std::memcpy(kbytes.data(), magic, 16);
+        std::memcpy(kbytes.data() + 16, hdr, 16);
+        Ge1KeyedJob job = jobIn;
+        job.passes = count;
+        std::memcpy(kbytes.data() + 32, &job, 256);
+        std::memcpy(kbytes.data() + 288, pass, 128u * count);
+        uint8_t *t = kbytes.data() + 288 + 128u * count;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            std::memcpy(t, tris[i], 3u * pass[i].ntris);
+            t += 3u * pass[i].ntris;
+        }
+        std::memcpy(kbytes.data() + 288 + 128u * count + triPadded, crec, csize);
+        recSize = total;
+        return kbytes.data();
+    }
 };
 
 // Runs one terrain job of the routed set into g in place, and kicks. Returns
@@ -773,6 +824,9 @@ EntryStats g_sstats[3]; // scenery: header, continuation, second pass
 constexpr const char *kSceneKinds[3] = {"hdr", "cont", "pass2"};
 std::atomic<uint64_t> g_sceneUnmodelled{0};
 std::atomic<uint64_t> g_resumeAfterNative{0}, g_unmodelledTerrain{0}, g_checkSkipped{0};
+// RZV1 S4a: the resident-pool simulation (keys at MSCAL, window eviction).
+std::atomic<uint64_t> g_keyJobs{0}, g_keyHits{0}, g_keyCollide{0}, g_keyBytesAll{0}, g_keyBytesMiss{0}, g_keyDistinct{0},
+    g_keyEvicted{0}, g_keyRecBytes{0}, g_keyCompactBytes{0};
 std::atomic<int> g_mismatchDumps{8};
 
 void printStats()
@@ -815,6 +869,18 @@ void printStats()
                                  (unsigned long long)s.orphan.load());
     }
     std::fprintf(stderr, "%s vu1_by_flags=%llu\n", line, (unsigned long long)g_sceneUnmodelled.load());
+    if (knobs().keyed)
+    {
+        const uint64_t jobs = g_keyJobs.load(), hits = g_keyHits.load();
+        std::fprintf(stderr,
+                     "[nrt1] s4a keyed: jobs=%llu hits=%llu (%.2f%%, window %u ticks) distinct=%llu evicted=%llu "
+                     "collisions=%llu input_bytes=%llu miss_bytes=%llu record_bytes=%llu compact_bytes=%llu\n",
+                     (unsigned long long)jobs, (unsigned long long)hits, jobs ? 100.0 * double(hits) / double(jobs) : 0.0,
+                     knobs().keyWindow, (unsigned long long)g_keyDistinct.load(), (unsigned long long)g_keyEvicted.load(),
+                     (unsigned long long)g_keyCollide.load(), (unsigned long long)g_keyBytesAll.load(),
+                     (unsigned long long)g_keyBytesMiss.load(), (unsigned long long)g_keyRecBytes.load(),
+                     (unsigned long long)g_keyCompactBytes.load());
+    }
 }
 
 // Boots end on SIGTERM (no atexit), so the counts also print every 65,536 terrain events.
@@ -854,6 +920,15 @@ struct State
     bool firstLogged = false;
     SceneGroup scene;
     bool sceneFirstLogged = false;
+    // RZV1 S4a: the job being emitted (filled before emitKicks when keyed) and the pool simulation.
+    Ge1KeyedJob job{};
+    std::vector<uint8_t> keyIn;
+    struct PoolEntry
+    {
+        uint64_t check, lastTick;
+    };
+    std::unordered_map<uint64_t, PoolEntry> pool;
+    uint64_t poolTick = 0;
 };
 State &state()
 {
@@ -927,6 +1002,22 @@ void buildCompactRecord(const uint8_t *packets, const uint32_t *sizes, uint32_t 
     }
 }
 
+void buildKeyedRecord(const uint8_t *packets, const uint32_t *sizes, uint32_t count, const Ge1KeyedJob &job,
+                      std::vector<uint8_t> &out)
+{
+    Kicks k;
+    k.clear();
+    size_t off = 0;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        k.kickBytes(packets + off, sizes[i]);
+        off += sizes[i];
+    }
+    uint32_t size = 0;
+    const uint8_t *rec = k.recordKeyed(job, size);
+    out.assign(rec, rec + size);
+}
+
 bool active()
 {
     static const bool a = knobs().terrain || knobs().instances || knobs().check;
@@ -938,13 +1029,76 @@ namespace
 // The job's kicks to the GIF arbiter as one native record (ge1_gs_api.h
 // layout) in one PATH1 submission. Consecutive PATH1 packets of one job drain
 // together today, so one arbiter entry keeps their place against PATH2/PATH3.
+// RZV1 S4a: key the job's input bytes (gathered in keyIn by the caller) and
+// run the pool simulation: a hit is a key seen within keyWindow ticks.
+void keyJob(PS2Memory &memory, State &s)
+{
+    Ge1KeyedJob &j = s.job;
+    j.inputBytes = static_cast<uint32_t>(s.keyIn.size());
+    j.key = XXH3_64bits(s.keyIn.data(), s.keyIn.size());
+    j.check = XXH64(s.keyIn.data(), s.keyIn.size(), 0x5334);
+    const uint64_t tick = memory.gs().vsyncTick.load(std::memory_order_relaxed);
+    if (tick != s.poolTick)
+    {
+        s.poolTick = tick;
+        for (auto it = s.pool.begin(); it != s.pool.end();)
+        {
+            if (tick - it->second.lastTick > knobs().keyWindow)
+            {
+                it = s.pool.erase(it);
+                g_keyEvicted.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+                ++it;
+        }
+    }
+    g_keyJobs.fetch_add(1, std::memory_order_relaxed);
+    g_keyBytesAll.fetch_add(j.inputBytes, std::memory_order_relaxed);
+    auto it = s.pool.find(j.key);
+    if (it == s.pool.end())
+    {
+        s.pool.emplace(j.key, State::PoolEntry{j.check, tick});
+        g_keyDistinct.fetch_add(1, std::memory_order_relaxed);
+        g_keyBytesMiss.fetch_add(j.inputBytes, std::memory_order_relaxed);
+        return;
+    }
+    if (it->second.check != j.check)
+        g_keyCollide.fetch_add(1, std::memory_order_relaxed);
+    g_keyHits.fetch_add(1, std::memory_order_relaxed);
+    it->second.lastTick = tick;
+}
+// Appends nqw qwords of VU1 data memory at qw (wrapping like the model's loads).
+void keyAppend(State &s, const uint8_t *mem, uint32_t qw, uint32_t nqw)
+{
+    for (uint32_t i = 0; i < nqw; ++i)
+    {
+        const uint8_t *q = mem + (((qw + i) & 0x3ffu) << 4);
+        s.keyIn.insert(s.keyIn.end(), q, q + 16);
+    }
+}
+void keyHeader(State &s, uint32_t a, uint32_t b)
+{
+    const uint32_t h[4] = {a, b, 0, 0};
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(h);
+    s.keyIn.assign(p, p + 16);
+}
+
 bool emitKicks(PS2Memory &memory, State &s)
 {
     uint32_t recSize = 0;
     // NRS1: the compact record holds the same packets dense; same hook, same
     // VU1-memory writes, so the det hashes (vu1Data included) are unchanged.
-    const uint8_t *rec =
-        knobs().compact ? s.kicks.recordCompact(recSize) : s.kicks.record(recSize);
+    // RZV1 S4a: keyed wraps the same compact record (GE1 ingests it verbatim).
+    const uint8_t *rec;
+    if (knobs().keyed)
+    {
+        keyJob(memory, s);
+        rec = s.kicks.recordKeyed(s.job, recSize);
+        g_keyRecBytes.fetch_add(recSize, std::memory_order_relaxed);
+        g_keyCompactBytes.fetch_add(static_cast<uint32_t>(s.kicks.cbytes.size()), std::memory_order_relaxed);
+    }
+    else
+        rec = knobs().compact ? s.kicks.recordCompact(recSize) : s.kicks.record(recSize);
     memory.submitGifPacket(GifPathId::Path1, rec, recSize);
     return true;
 }
@@ -1030,6 +1184,27 @@ bool terrainBefore(PS2Memory &memory, State &s, uint32_t startPC, uint32_t top)
         s.firstLogged = true;
         std::fprintf(stderr, "[nrt1] first native terrain job pc=0x%x top=%u kicks=%u\n", startPC, top,
                      s.kicks.count);
+    }
+    if (knobs().keyed)
+    {
+        // RZV1 S4a: the job's geometry inputs (base positions, UV A, UV B) and constants.
+        const uint32_t n = s.group.n, nn = n * n;
+        keyHeader(s, 1u, startPC);
+        keyAppend(s, mem, s.group.baseTop, nn);
+        keyAppend(s, mem, top + 0x40, nn);
+        keyAppend(s, mem, top + 0x80, nn);
+        Ge1KeyedJob &j = s.job;
+        j = Ge1KeyedJob{};
+        j.kind = 1;
+        j.pc = startPC;
+        j.n = n;
+        std::memcpy(j.m, mem, 64);
+        std::memcpy(j.scale, mem + 4 * 16, 16);
+        std::memcpy(j.offset, mem + 5 * 16, 16);
+        std::memcpy(j.rgba, mem + 6 * 16, 16);
+        if (e.texgen)
+            for (int i = 0; i < 4; ++i)
+                std::memcpy(j.uvm + 4 * i, mem + (((top + 128 + i) & 0x3ffu) << 4), 16);
     }
     return emitKicks(memory, s);
 }
@@ -1177,6 +1352,29 @@ bool sceneBefore(PS2Memory &memory, State &s, uint32_t pc, uint32_t top, uint32_
         s.sceneFirstLogged = true;
         std::fprintf(stderr, "[nrt1] first native instance job pc=0x%x itop=%u top=%u verts=%u\n", pc, itop, top,
                      sl->pkt.nv);
+    }
+    if (knobs().keyed)
+    {
+        // RZV1 S4a: the chunk (tag, sizes, strip table, positions, UVs, colours) and the instance constants.
+        const uint32_t chunk = (header || (second && pc == 0x2270)) ? top + 0x1b : top;
+        const uint32_t ofs = ilw(mem, chunk + 1, 0), n = ilw(mem, chunk + 1, 2);
+        keyHeader(s, 2u, pc | (second ? 0x10000u : 0u));
+        keyAppend(s, mem, chunk, 2u + ofs + 3u * n);
+        Ge1KeyedJob &j = s.job;
+        j = Ge1KeyedJob{};
+        j.kind = 2;
+        j.pc = pc | (second ? 0x10000u : 0u);
+        j.n = n;
+        j.variant = (g.flags & 0x20u) ? 0u : 1u;
+        j.flags = g.flags;
+        for (int i = 0; i < 4; ++i)
+        {
+            vst1q_f32(j.m + 4 * i, g.comp[i]);
+            vst1q_f32(j.uvm + 4 * i, g.m[i]);
+        }
+        std::memcpy(j.scale, mem + 4 * 16, 16);
+        std::memcpy(j.offset, mem + 5 * 16, 16);
+        j.offset[3] = 1.0f;
     }
     return emitKicks(memory, s);
 }

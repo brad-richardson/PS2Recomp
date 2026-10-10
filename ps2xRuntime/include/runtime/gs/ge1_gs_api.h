@@ -101,6 +101,57 @@ typedef struct Ge1CompactVertex
     uint32_t W3;   // XYZF2.w3 verbatim (F + ADC)
 } Ge1CompactVertex;
 GE1_API int ge1_gs_native_record_compact(const uint8_t* bytes, uint32_t byte_count);
+// RZV1 S4a: a keyed native record (PS2X_SSX3_NATIVE_KEYED=1, needs
+// PS2X_SSX3_NATIVE_COMPACT=1): the job's compact record verbatim, preceded by
+// what a GPU-resident static world needs to know about it without the
+// vertices: a content key over the job's VU1 inputs, the job's transform
+// constants, and per packet the exact facts the CPU model already has (ADC
+// mask, triangle list, the vertex-trace bounds over referenced vertices).
+// GE1 ingests the embedded compact record exactly as
+// ge1_gs_native_record_compact does (same vertices, same kick); the header
+// is carried for S4b and checked by GE1_S4A_CHECK=1. Layout (16-byte aligned):
+//   qword 0: GE1_KEYED_RECORD_MAGIC_LO, GE1_KEYED_RECORD_MAGIC_HI
+//   u32 total size, u32 pass count, u32 triangle-list bytes (padded to 16), u32 0
+//   Ge1KeyedJob (256 B), Ge1KeyedPass x pass count (128 B each),
+//   the triangle lists (u8 vertex-index triples per pass, in pass order),
+//   the compact record (GE1_COMPACT_RECORD_MAGIC_*, its own sizes) to the end.
+// Pass i describes compact packet i. Buddy rule as for the compact record:
+// mirrored in the adapter (ge1_gs.h); sizes are pinned by static_asserts.
+#define GE1_KEYED_RECORD_MAGIC_LO 0x00002A4E524B0000ull
+#define GE1_KEYED_RECORD_MAGIC_HI 0x5245434F52440003ull
+typedef struct Ge1KeyedJob
+{
+    uint64_t key;        // XXH3-64 of the job's VU1 input bytes (geometry: positions, UVs, chunk)
+    uint64_t check;      // XXH64 (seed 0x5334) of the same bytes: a second hash for collision checks
+    uint32_t kind;       // 1 terrain, 2 scenery instance
+    uint32_t pc;         // VU1 entry; | 0x10000 for a scenery second pass
+    uint32_t n;          // terrain grid n; scenery chunk vertex count
+    uint32_t variant;    // terrain: 0; scenery: 0 clip (s = offset*1 + t*scale), 1 no-clip (M folded by the model)
+    uint32_t inputBytes; // bytes the key covers
+    uint32_t flags;      // scenery: the flags word (mem[34].w); terrain: 0
+    uint32_t passes;     // compact packets in this job
+    uint32_t reserved0;
+    float m[16];         // clip matrix rows (terrain mem[0..3]; scenery V x model, mem[6..9])
+    float scale[4];      // viewport scale (mem[4])
+    float offset[4];     // viewport offset (mem[5]; scenery: w forced to 1.0 as the model does)
+    uint32_t rgba[4];    // terrain constant vertex colour (mem[6]); scenery 0
+    float uvm[16];       // terrain texgen M2 (TOP+0x80..0x83) / scenery UV matrix (mem[10..13]); else 0
+    uint32_t reserved[8];
+} Ge1KeyedJob;
+typedef struct Ge1KeyedPass
+{
+    uint32_t nverts, ntris;
+    uint32_t prim;       // the packet tag's PRIM register value
+    uint32_t flags;      // bit 0 facts valid (triangle prim), bit 1 flat (every triangle one RGBA), bit 2 zeq
+    uint32_t adc[2];     // bit v: vertex v has ADC (no drawing kick)
+    uint32_t tnan;       // bit l: a NaN in t lane l (S/Q, T/Q, Q) among referenced vertices
+    uint32_t reserved0;
+    uint32_t pmin[4], pmax[4]; // u32 {x, y, z, fog} as GE1 parses them (XY 12.4, Z24, F) over referenced vertices
+    float tmin[4], tmax[4];    // {S/Q, T/Q, Q, Q} (Q == +0 -> FLT_MIN), NaNs excluded
+    uint8_t cmin[4], cmax[4];  // RGBA bytes; IIP=0: provoking (last) vertices only
+    uint32_t reserved[6];
+} Ge1KeyedPass;
+GE1_API int ge1_gs_native_record_keyed(const uint8_t* bytes, uint32_t byte_count);
 // HUD4: composite one Tricky HUD scene onto an already-exported AHB, on
 // GE1's own Vulkan queue (Android only). The AHB holds the final frame (the
 // export copy just submitted); GE1 submits the composite right behind it on
@@ -222,7 +273,15 @@ inline bool ge1_is_compact_record(const uint8_t* bytes, uint32_t size)
 }
 inline bool ge1_is_any_native_record(const uint8_t* bytes, uint32_t size)
 {
-    return ge1_is_native_record(bytes, size) || ge1_is_compact_record(bytes, size);
+    if (ge1_is_native_record(bytes, size) || ge1_is_compact_record(bytes, size))
+        return true;
+    // RZV1 S4a: keyed records (a compact record with its S4a header).
+    uint64_t lo = 0, hi = 0;
+    if (!bytes || size < 32u)
+        return false;
+    __builtin_memcpy(&lo, bytes, 8);
+    __builtin_memcpy(&hi, bytes + 8, 8);
+    return lo == GE1_KEYED_RECORD_MAGIC_LO && hi == GE1_KEYED_RECORD_MAGIC_HI;
 }
 // Expands one compact packet to the GIF packet bytes the kick is equivalent
 // to: the tag verbatim, then per vertex ST {S,T,Q,0}, RGBAQ {R,G,B,A} and the
@@ -255,5 +314,163 @@ inline bool ge1_compact_expand_packet(const uint8_t* pkt, uint32_t size, uint8_t
     }
     return true;
 }
+// RZV1 S4a: the keyed record's parts (all pointers into bytes); false on a malformed record.
+struct Ge1KeyedParts
+{
+    const Ge1KeyedJob* job;
+    const Ge1KeyedPass* pass;
+    uint32_t passes;
+    const uint8_t* tris;
+    uint32_t trisBytes;
+    const uint8_t* compact;
+    uint32_t compactSize;
+};
+inline bool ge1_is_keyed_record(const uint8_t* bytes, uint32_t size)
+{
+    uint64_t lo = 0, hi = 0;
+    if (!bytes || size < 32u)
+        return false;
+    __builtin_memcpy(&lo, bytes, 8);
+    __builtin_memcpy(&hi, bytes + 8, 8);
+    return lo == GE1_KEYED_RECORD_MAGIC_LO && hi == GE1_KEYED_RECORD_MAGIC_HI;
+}
+inline bool ge1_keyed_record_parts(const uint8_t* bytes, uint32_t size, Ge1KeyedParts& out)
+{
+    static_assert(sizeof(Ge1KeyedJob) == 256, "Ge1KeyedJob layout");
+    static_assert(sizeof(Ge1KeyedPass) == 128, "Ge1KeyedPass layout");
+    if (!ge1_is_keyed_record(bytes, size) || (size & 15u))
+        return false;
+    uint32_t hdr[4];
+    __builtin_memcpy(hdr, bytes + 16, 16);
+    const uint32_t total = hdr[0], passes = hdr[1], trisBytes = hdr[2];
+    if (total != size || passes == 0 || passes > 64u || (trisBytes & 15u))
+        return false;
+    const uint64_t fixed = 32ull + 256ull + 128ull * passes + trisBytes;
+    if (fixed + 32ull > size)
+        return false;
+    out.job = reinterpret_cast<const Ge1KeyedJob*>(bytes + 32);
+    out.pass = reinterpret_cast<const Ge1KeyedPass*>(bytes + 32 + 256);
+    out.passes = passes;
+    out.tris = bytes + 32 + 256 + 128u * passes;
+    out.trisBytes = trisBytes;
+    out.compact = bytes + fixed;
+    out.compactSize = size - static_cast<uint32_t>(fixed);
+    if (!ge1_is_compact_record(out.compact, out.compactSize) || out.job->passes != passes)
+        return false;
+    uint32_t count = 0;
+    __builtin_memcpy(&count, out.compact + 16, 4);
+    uint64_t tris = 0;
+    for (uint32_t i = 0; i < passes; ++i)
+        tris += 3ull * out.pass[i].ntris;
+    return count == passes && tris <= trisBytes;
+}
+// RZV1 S4a: the facts of one compact packet (16-byte tag + n x 32-byte
+// vertices), as the keyed record carries them: the GS drawing-kick rule for
+// triangle prims (a vertex without ADC, with two queued before it in this
+// packet, kicks (v-2, v-1, v); a list restarts its queue every three
+// vertices; a fan kicks (0, v-1, v)), then the bounds over the vertices those
+// triangles reference, fields parsed as GE1 parses them (ParseCompactXYZF2 /
+// FmmPos). Any non-triangle prim, or more than 64 vertices, leaves flags
+// bit 0 clear and no triangles. tris gets 3 x ntris u8 indices (capacity
+// 3 x 62). Float work assumes IEEE round-to-nearest without flush-to-zero.
+inline void ge1_keyed_pass_facts(const uint8_t* pkt, uint32_t size, Ge1KeyedPass& p, uint8_t* tris)
+{
+    __builtin_memset(&p, 0, sizeof(p));
+    const uint32_t nv = (size - 16u) / 32u;
+    uint64_t tag = 0;
+    __builtin_memcpy(&tag, pkt, 8);
+    p.nverts = nv;
+    p.prim = static_cast<uint32_t>((tag >> 47) & 0x7ffu);
+    const uint32_t type = p.prim & 7u;
+    const bool iip = (p.prim >> 3) & 1u;
+    auto vert = [&](uint32_t v) {
+        Ge1CompactVertex x;
+        __builtin_memcpy(&x, pkt + 16 + 32u * v, 32);
+        return x;
+    };
+    for (uint32_t v = 0; v < nv && v < 64u; ++v)
+        if (vert(v).W3 & 0x8000u)
+            p.adc[v >> 5] |= 1u << (v & 31u);
+    if (type < 3u || type > 5u || nv > 64u)
+        return;
+    p.flags = 1u;
+    bool any = false, flat = true, zeq = true;
+    uint32_t z0 = 0;
+    const float big = __builtin_huge_valf();
+    for (int l = 0; l < 4; ++l)
+    {
+        p.pmin[l] = 0xffffffffu;
+        p.cmin[l] = 0xffu;
+        p.tmin[l] = big;
+        p.tmax[l] = -big;
+    }
+    auto takeP = [&](const Ge1CompactVertex& x) {
+        const uint32_t q[4] = {x.X & 0xffffu, x.Y & 0xffffu, (x.Z >> 4) & 0x00ffffffu, (x.W3 >> 4) & 0xffu};
+        for (int l = 0; l < 4; ++l)
+        {
+            p.pmin[l] = q[l] < p.pmin[l] ? q[l] : p.pmin[l];
+            p.pmax[l] = q[l] > p.pmax[l] ? q[l] : p.pmax[l];
+        }
+        if (!any)
+            z0 = q[2];
+        else if (q[2] != z0)
+            zeq = false;
+        any = true;
+        float s, t, qf;
+        const uint32_t qb = x.Q == 0u ? 0x00800000u : x.Q;
+        __builtin_memcpy(&s, &x.S, 4);
+        __builtin_memcpy(&t, &x.T, 4);
+        __builtin_memcpy(&qf, &qb, 4);
+        const float tv[4] = {s / qf, t / qf, qf, qf};
+        for (int l = 0; l < 4; ++l)
+        {
+            if (tv[l] != tv[l])
+            {
+                p.tnan |= 1u << l;
+                continue;
+            }
+            p.tmin[l] = tv[l] < p.tmin[l] ? tv[l] : p.tmin[l];
+            p.tmax[l] = tv[l] > p.tmax[l] ? tv[l] : p.tmax[l];
+        }
+    };
+    auto takeC = [&](const Ge1CompactVertex& x) {
+        for (int l = 0; l < 4; ++l)
+        {
+            const uint8_t c = static_cast<uint8_t>(x.RGBA >> (8 * l));
+            p.cmin[l] = c < p.cmin[l] ? c : p.cmin[l];
+            p.cmax[l] = c > p.cmax[l] ? c : p.cmax[l];
+        }
+    };
+    uint32_t queued = 0;
+    for (uint32_t v = 0; v < nv; ++v)
+    {
+        ++queued;
+        if (type == 3u && queued > 3u)
+            queued = 1u;
+        const bool adc = (p.adc[v >> 5] >> (v & 31u)) & 1u;
+        if (adc || queued < 3u)
+            continue;
+        const uint32_t a = type == 5u ? 0u : v - 2u, b = v - 1u, c = v;
+        uint8_t* t3 = tris + 3u * p.ntris++;
+        t3[0] = static_cast<uint8_t>(a);
+        t3[1] = static_cast<uint8_t>(b);
+        t3[2] = static_cast<uint8_t>(c);
+        const Ge1CompactVertex va = vert(a), vb = vert(b), vc = vert(c);
+        takeP(va);
+        takeP(vb);
+        takeP(vc);
+        if (va.RGBA != vc.RGBA || vb.RGBA != vc.RGBA)
+            flat = false;
+        if (iip)
+        {
+            takeC(va);
+            takeC(vb);
+        }
+        takeC(vc);
+    }
+    if (flat)
+        p.flags |= 2u;
+    if (any && zeq)
+        p.flags |= 4u;
+}
 #endif
-

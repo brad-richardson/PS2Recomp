@@ -116,6 +116,8 @@ struct Ge1Api
     decltype(&ge1_gs_native_record) nativeRecord = nullptr;
     // NRS1: same for compact records (without it the frontend expands them).
     decltype(&ge1_gs_native_record_compact) nativeRecordCompact = nullptr;
+    // RZV1 S4a: same for keyed records (without it the embedded compact record goes to nativeRecordCompact).
+    decltype(&ge1_gs_native_record_keyed) nativeRecordKeyed = nullptr;
     // HUD4: optional, Android only (a missing symbol keeps the CPU stamp; the
     // static iOS path never binds it, so old iOS GE1 libs still link).
     decltype(&ge1_gs_hud_scene) hudScene = nullptr;
@@ -154,6 +156,7 @@ struct Ge1Api
             freezeLoad = ::ge1_gs_freeze_load;
             nativeRecord = ::ge1_gs_native_record; // NRT1: needs a GE1 build with the folded adapter
             nativeRecordCompact = ::ge1_gs_native_record_compact; // NRS1: same (compact records)
+            nativeRecordKeyed = ::ge1_gs_native_record_keyed;     // RZV1 S4a: same (keyed records)
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
             exportIOSurface = ::ge1_gs_export_iosurface;
 #endif
@@ -209,6 +212,8 @@ struct Ge1Api
         nativeRecord = reinterpret_cast<decltype(nativeRecord)>(dlsym(library, "ge1_gs_native_record"));
         nativeRecordCompact = reinterpret_cast<decltype(nativeRecordCompact)>(
             dlsym(library, "ge1_gs_native_record_compact"));
+        nativeRecordKeyed = reinterpret_cast<decltype(nativeRecordKeyed)>(
+            dlsym(library, "ge1_gs_native_record_keyed"));
 #if defined(__ANDROID__)
         // HUD4: optional (see above); never fails the load.
         hudScene = reinterpret_cast<decltype(hudScene)>(dlsym(library, "ge1_gs_hud_scene"));
@@ -1244,6 +1249,28 @@ public:
 
     bool RawNativeRecord(uint32_t path, const uint8_t *data, uint32_t sizeBytes) override
     {
+        // RZV1 S4a: a keyed record goes whole to the keyed export; without it,
+        // its embedded compact record continues below as a compact record.
+        if (ge1_is_keyed_record(data, sizeBytes))
+        {
+            Ge1KeyedParts parts;
+            if (!ge1_keyed_record_parts(data, sizeBytes, parts))
+                return false; // the frontend's fallback refuses it loudly
+            if (m_ge1Active && !m_log && path == 1u && m_ge1.nativeRecordKeyed &&
+                m_ge1.nativeRecordKeyed(data, sizeBytes))
+            {
+                m_ge1LastPath = 1u;
+                ge1_compact_record_for_each(parts.compact, parts.compactSize, [this](const uint8_t *, uint32_t n) {
+                    ++m_stats.gifPackets;
+                    m_stats.gifBytes += n;
+                    ++m_stats.gifPacketsByPath[1];
+                    m_stats.gifQwords[1] += n / 16u;
+                });
+                return true;
+            }
+            data = parts.compact;
+            sizeBytes = parts.compactSize;
+        }
         // NRS1: compact records need the compact export; without it the
         // frontend expands them to GIF packets.
         const bool compact = ge1_is_compact_record(data, sizeBytes);
