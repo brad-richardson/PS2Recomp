@@ -1409,7 +1409,7 @@ void GS::processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uin
     // GIF-drained), so set the bit now, in stream order. Decode keeps
     // Flush+Sync for backend ordering but no longer sets CSR.
     // NRT1 2b: a native record holds only vertex packets (no A+D, no FINISH).
-    if (!ge1_is_native_record(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size())))
+    if (!ge1_is_any_native_record(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size())))
         noteFinishTimingPcsx2(cmd.bytes.data(), static_cast<uint32_t>(cmd.bytes.size()));
     m_worker->enqueue(std::move(cmd));
 }
@@ -1433,7 +1433,7 @@ void GS::processViewWithPath(GifPathId path, bool notePath, GsGifArenaRef arena,
     ps2_mtvu::touch(ps2_mtvu::Site::GsProcess); // MT1: unit-owned
     const uint8_t *bytes = arena.get()->bytes + off;
     // NRT1 2b: a native record holds only vertex packets (no A+D, no FINISH).
-    if (!ge1_is_native_record(bytes, len))
+    if (!ge1_is_any_native_record(bytes, len))
         noteFinishTimingPcsx2(bytes, len);
     m_worker->enqueueView(static_cast<uint8_t>(path), notePath, std::move(arena), off, len);
 }
@@ -1480,7 +1480,9 @@ void GS::noteFinishTimingPcsx2(const uint8_t *data, uint32_t sizeBytes)
 // no A+D, no image, no FINISH, so the per-packet minimal decode, image-upload
 // check and FINISH scan are no-ops for them and are skipped. A backend that
 // takes records whole gets one call; otherwise (or while the stream capture
-// records per-packet) each packet runs the per-packet path in order.
+// records per-packet) each packet runs the per-packet path in order. NRS1:
+// compact records (dense vertices) take the same path; the fallback expands
+// them to GIF packets first.
 void GS::processNativeRecord(const uint8_t *data, uint32_t sizeBytes)
 {
     if (m_worker && !t_inGsWorker)
@@ -1504,13 +1506,40 @@ void GS::processNativeRecord(const uint8_t *data, uint32_t sizeBytes)
             m_backend->RawNativeRecord(static_cast<uint32_t>(GifPathId::Path1), data, sizeBytes))
             return;
     }
+    // NRS1: compact records expand to GIF packets on this fallback (an older
+    // GE1 without the compact export, or the stream capture recording per
+    // packet). Every byte the kick consumes is carried verbatim, so the
+    // expanded packets kick identically.
+    if (ge1_is_compact_record(data, sizeBytes))
+    {
+        thread_local std::vector<uint8_t> expandScratch;
+        const bool ok = ge1_compact_record_for_each(
+            data, sizeBytes, [this](const uint8_t *p, uint32_t n) {
+                const uint32_t nv = (n - 16u) / 32u;
+                expandScratch.resize(16u + 48u * nv);
+                if (!ge1_compact_expand_packet(p, n, expandScratch.data(),
+                                               static_cast<uint32_t>(expandScratch.size())))
+                {
+                    std::fprintf(stderr, "[gs] compact record packet failed to expand\n");
+                    std::exit(78);
+                }
+                processGIFPacket(expandScratch.data(),
+                                 static_cast<uint32_t>(expandScratch.size()));
+            });
+        if (!ok)
+        {
+            std::fprintf(stderr, "[gs] malformed compact record delivered\n");
+            std::exit(78);
+        }
+        return;
+    }
     ge1_native_record_for_each(data, sizeBytes, [this](const uint8_t *p, uint32_t n) { processGIFPacket(p, n); });
 }
 
 void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
 {
     ps2_mtvu::touch(ps2_mtvu::Site::GsProcess); // MT1: unit-owned
-    if (ge1_is_native_record(data, sizeBytes))
+    if (ge1_is_any_native_record(data, sizeBytes))
     {
         processNativeRecord(data, sizeBytes);
         return;

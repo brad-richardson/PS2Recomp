@@ -553,6 +553,15 @@ extern "C" GE1_API int ge1_gs_native_record(const uint8_t* bytes, uint32_t size)
     }) ? 1 : 0;
 }
 
+extern "C" GE1_API int ge1_gs_native_record_compact(const uint8_t* bytes, uint32_t size)
+{
+    if (!s_open)
+        return 0;
+    // NRS1: the vendor ingests the record whole (dense vertices, same kick).
+    // False (malformed) falls back to GIF packets at the runtime frontend.
+    return GSgifTransferCompact(bytes, size) ? 1 : 0;
+}
+
 extern "C" GE1_API int ge1_gs_packet(uint8_t path, const uint8_t* bytes, uint32_t size)
 {
     if (!s_open || !bytes || !size || (size & 15u))
