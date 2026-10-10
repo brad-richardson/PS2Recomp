@@ -1,9 +1,9 @@
 # GI1: static archive on iOS (the app links it directly; no dlopen), shared
 # library elsewhere (Mac replay, Android).
 if(IOS)
-  add_library(ge1_gs STATIC ge1_gs.cpp ge1_host.cpp)
+  add_library(ge1_gs STATIC ge1_gs.cpp ge1_host.cpp ge1_s4a_check.cpp)
 else()
-  add_library(ge1_gs SHARED ge1_gs.cpp ge1_host.cpp)
+  add_library(ge1_gs SHARED ge1_gs.cpp ge1_host.cpp ge1_s4a_check.cpp)
 endif()
 if(EXISTS "${CMAKE_SOURCE_DIR}/pcsx2/GS.h")
   set(GE1_PCSX2_ROOT "${CMAKE_SOURCE_DIR}")

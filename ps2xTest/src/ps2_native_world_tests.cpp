@@ -2,6 +2,8 @@
 #include "ps2_native_world.h"
 #include "runtime/gs/ge1_gs_api.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +31,173 @@ struct Vu1Image
         std::memcpy(mem + qw * 16, v, 16);
     }
 };
+
+// RZV1 S4a: an independent reference for the keyed pass facts, computed
+// from the GIF form of the packet (48-byte register triples), and a builder
+// for hand-made PACKED {ST, RGBAQ, XYZF2} packets.
+struct RefVert
+{
+    float s, t, q;
+    uint8_t r, g, b, a;
+    uint32_t x, y, z, f;
+    bool adc;
+};
+std::vector<uint8_t> gifPacket(uint32_t prim, const std::vector<RefVert> &vs)
+{
+    std::vector<uint8_t> p(16 + 48 * vs.size(), 0);
+    const uint64_t lo = uint64_t(vs.size()) | (1ull << 15) | (1ull << 46) | (uint64_t(prim) << 47) | (3ull << 60);
+    const uint64_t hi = 0x412;
+    std::memcpy(p.data(), &lo, 8);
+    std::memcpy(p.data() + 8, &hi, 8);
+    for (size_t i = 0; i < vs.size(); ++i)
+    {
+        const RefVert &v = vs[i];
+        uint32_t r[12] = {};
+        std::memcpy(&r[0], &v.s, 4);
+        std::memcpy(&r[1], &v.t, 4);
+        std::memcpy(&r[2], &v.q, 4);
+        r[4] = v.r;
+        r[5] = v.g;
+        r[6] = v.b;
+        r[7] = v.a;
+        r[8] = v.x;
+        r[9] = v.y;
+        r[10] = v.z << 4;
+        r[11] = (v.f << 4) | (v.adc ? 0x8000u : 0u);
+        std::memcpy(p.data() + 16 + 48 * i, r, 48);
+    }
+    return p;
+}
+bool refFactsMatch(TestCase &t, const std::vector<uint8_t> &g, const Ge1KeyedPass &ps, const uint8_t *tris)
+{
+    const uint32_t nv = (static_cast<uint32_t>(g.size()) - 16u) / 48u;
+    uint64_t lo;
+    std::memcpy(&lo, g.data(), 8);
+    const uint32_t prim = static_cast<uint32_t>((lo >> 47) & 0x7ff), type = prim & 7u;
+    const bool iip = (prim >> 3) & 1u;
+    auto reg = [&](uint32_t v, int i) {
+        uint32_t x;
+        std::memcpy(&x, g.data() + 16 + 48 * v + 4 * i, 4);
+        return x;
+    };
+    uint32_t adc[2] = {0, 0};
+    for (uint32_t v = 0; v < nv; ++v)
+        if (reg(v, 11) & 0x8000u)
+            adc[v / 32] |= 1u << (v % 32);
+    bool ok = ps.nverts == nv && ps.prim == prim && ps.adc[0] == adc[0] && ps.adc[1] == adc[1];
+    if (type < 3 || type > 5)
+        return ok && ps.flags == 0 && ps.ntris == 0;
+    std::vector<uint32_t> tri;
+    for (uint32_t v = 0; v < nv; ++v)
+    {
+        const uint32_t pos = type == 3 ? v % 3 : v; // queue position within the list triple / strip
+        if ((adc[v / 32] >> (v % 32)) & 1u)
+            continue;
+        if ((type == 3 && pos == 2) || (type != 3 && v >= 2))
+        {
+            tri.push_back(type == 5 ? 0 : v - 2);
+            tri.push_back(v - 1);
+            tri.push_back(v);
+        }
+    }
+    ok = ok && ps.ntris * 3 == tri.size();
+    for (size_t i = 0; ok && i < tri.size(); ++i)
+        ok = tris[i] == tri[i];
+    uint32_t pmin[4] = {~0u, ~0u, ~0u, ~0u}, pmax[4] = {0, 0, 0, 0}, tnan = 0;
+    uint8_t cmin[4] = {255, 255, 255, 255}, cmax[4] = {0, 0, 0, 0};
+    float tmin[4] = {INFINITY, INFINITY, INFINITY, INFINITY}, tmax[4] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY};
+    bool flat = true, zeq = true;
+    for (size_t i = 0; i < tri.size(); i += 3)
+    {
+        auto rgba = [&](uint32_t v) { return (reg(v, 4) & 0xff) | (reg(v, 5) & 0xff) << 8 | (reg(v, 6) & 0xff) << 16 | (reg(v, 7) & 0xff) << 24; };
+        if (rgba(tri[i]) != rgba(tri[i + 2]) || rgba(tri[i + 1]) != rgba(tri[i + 2]))
+            flat = false;
+        for (int k = 0; k < 3; ++k)
+        {
+            const uint32_t v = tri[i + k];
+            const uint32_t pv[4] = {reg(v, 8) & 0xffff, reg(v, 9) & 0xffff, (reg(v, 10) >> 4) & 0xffffff, (reg(v, 11) >> 4) & 0xff};
+            for (int l = 0; l < 4; ++l)
+            {
+                pmin[l] = std::min(pmin[l], pv[l]);
+                pmax[l] = std::max(pmax[l], pv[l]);
+            }
+            if (((reg(v, 10) >> 4) & 0xffffff) != ((reg(tri[0], 10) >> 4) & 0xffffff))
+                zeq = false;
+            float sf, tf, qf;
+            uint32_t qb = reg(v, 2) == 0 ? 0x00800000u : reg(v, 2), sb = reg(v, 0), tb = reg(v, 1);
+            std::memcpy(&sf, &sb, 4);
+            std::memcpy(&tf, &tb, 4);
+            std::memcpy(&qf, &qb, 4);
+            const float tv[4] = {sf / qf, tf / qf, qf, qf};
+            for (int l = 0; l < 4; ++l)
+            {
+                if (std::isnan(tv[l]))
+                    tnan |= 1u << l;
+                else
+                {
+                    tmin[l] = std::min(tmin[l], tv[l]);
+                    tmax[l] = std::max(tmax[l], tv[l]);
+                }
+            }
+            if (iip || k == 2)
+                for (int l = 0; l < 4; ++l)
+                {
+                    const uint8_t c = static_cast<uint8_t>(reg(v, 4 + l));
+                    cmin[l] = std::min(cmin[l], c);
+                    cmax[l] = std::max(cmax[l], c);
+                }
+        }
+    }
+    const uint32_t flags = 1u | (flat ? 2u : 0u) | (!tri.empty() && zeq ? 4u : 0u);
+    ok = ok && ps.flags == flags && ps.tnan == tnan && !std::memcmp(ps.pmin, pmin, 16) && !std::memcmp(ps.pmax, pmax, 16) &&
+         !std::memcmp(ps.cmin, cmin, 4) && !std::memcmp(ps.cmax, cmax, 4) && !std::memcmp(ps.tmin, tmin, 16) &&
+         !std::memcmp(ps.tmax, tmax, 16);
+    t.IsTrue(ok, "keyed pass facts == reference");
+    return ok;
+}
+// One keyed record over these GIF packets; checks every pass against the reference.
+void checkKeyed(TestCase &t, const std::vector<std::vector<uint8_t>> &k)
+{
+    std::vector<uint8_t> cat, comp, rec;
+    std::vector<uint32_t> sizes;
+    for (const auto &p : k)
+    {
+        cat.insert(cat.end(), p.begin(), p.end());
+        sizes.push_back(static_cast<uint32_t>(p.size()));
+    }
+    const uint32_t count = static_cast<uint32_t>(sizes.size());
+    Ge1KeyedJob job{};
+    job.key = 0x1122334455667788ull;
+    ps2_native_world::buildCompactRecord(cat.data(), sizes.data(), count, comp);
+    ps2_native_world::buildKeyedRecord(cat.data(), sizes.data(), count, job, rec);
+    t.IsTrue(ge1_is_keyed_record(rec.data(), static_cast<uint32_t>(rec.size())), "signature");
+    t.IsTrue(ge1_is_any_native_record(rec.data(), static_cast<uint32_t>(rec.size())), "routed as a native record");
+    t.IsFalse(ge1_is_compact_record(rec.data(), static_cast<uint32_t>(rec.size())), "not the compact kind");
+    t.Equals(rec.size() % 16, size_t(0), "16-byte aligned");
+    Ge1KeyedParts parts;
+    t.IsTrue(ge1_keyed_record_parts(rec.data(), static_cast<uint32_t>(rec.size()), parts), "well formed");
+    t.Equals(parts.passes, count, "one pass per packet");
+    t.Equals(parts.job->key, job.key, "key carried");
+    t.Equals(parts.job->passes, count, "job.passes filled");
+    t.Equals(parts.compactSize, static_cast<uint32_t>(comp.size()), "compact size");
+    t.IsTrue(std::memcmp(parts.compact, comp.data(), comp.size()) == 0, "compact record verbatim");
+    const uint8_t *tri = parts.tris;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        refFactsMatch(t, k[i], parts.pass[i], tri);
+        tri += 3 * parts.pass[i].ntris;
+    }
+    std::vector<uint8_t> bad = rec;
+    bad.resize(bad.size() - 16);
+    t.IsFalse(ge1_keyed_record_parts(bad.data(), static_cast<uint32_t>(bad.size()), parts), "truncated keyed record rejected");
+    bad = rec;
+    const uint32_t passesBad = count + 1u;
+    std::memcpy(bad.data() + 20, &passesBad, 4);
+    t.IsFalse(ge1_keyed_record_parts(bad.data(), static_cast<uint32_t>(bad.size()), parts), "pass count mismatch rejected");
+    bad = rec;
+    bad[32 + 256 + 128u * count + parts.trisBytes] ^= 1u;
+    t.IsFalse(ge1_keyed_record_parts(bad.data(), static_cast<uint32_t>(bad.size()), parts), "embedded magic checked");
+}
 
 uint32_t word(const std::vector<uint8_t> &pkt, uint32_t qw, int lane)
 {
@@ -271,6 +440,44 @@ void register_ps2_native_world_tests()
             t.IsFalse(ge1_compact_record_for_each(bad.data(), static_cast<uint32_t>(bad.size()),
                                                   [](const uint8_t *, uint32_t) {}),
                       "truncated compact record rejected"); });
+        tc.Run("keyed record (S4a): terrain patch wraps the compact record verbatim, facts == reference", [](TestCase &t)
+               {
+            ps2_native_world::testResetGroup();
+            Vu1Image im = patch4();
+            std::vector<std::vector<uint8_t>> k;
+            t.IsTrue(ps2_native_world::testModelTerrain(im.mem, 0x6b8, kTop, k), "servable");
+            checkKeyed(t, k); });
+        tc.Run("keyed record (S4a): scenery header and clip variant, facts == reference", [](TestCase &t)
+               {
+            for (uint32_t flags : {0u, 0x20u})
+            {
+                ps2_native_world::testResetGroup();
+                Vu1Image im = instance3(flags);
+                std::vector<uint8_t> p;
+                t.IsTrue(ps2_native_world::testModelScenery(im.mem, 0x2320, kSTop, 0, p), "header served");
+                checkKeyed(t, {p});
+            } });
+        tc.Run("keyed record (S4a): hand-made list/fan/strip/sprite packets, ADC, flat, Q=0, NaN", [](TestCase &t)
+               {
+            auto V = [](float s, float tt, float q, uint8_t c, uint32_t x, uint32_t y, uint32_t z, bool adc) {
+                return RefVert{s, tt, q, c, uint8_t(c + 1), uint8_t(c + 2), 0x80, x, y, z, 7, adc};
+            };
+            // Triangle list (IIP): the second triple's last vertex has ADC, so one triangle.
+            std::vector<RefVert> list = {V(0.5f, 0.25f, 1, 10, 100, 200, 5, false), V(1, 1, 2, 10, 300, 210, 5, false),
+                                         V(2, 1, 4, 10, 120, 400, 5, false), V(1, 2, 1, 20, 50, 60, 9, false),
+                                         V(1, 2, 1, 20, 70, 80, 9, false), V(1, 2, 1, 20, 90, 99, 9, true)};
+            // Fan (IIP), 5 vertices: (0,1,2), (0,2,3), (0,3,4); constant Z.
+            std::vector<RefVert> fan;
+            for (uint32_t i = 0; i < 5; ++i)
+                fan.push_back(V(float(i), float(i) * 0.5f, 1.5f, 30, 1000 + 16 * i, 2000 - 8 * i, 77, false));
+            // Strip, flat shaded (IIP=0), varying colour; vertex 0/1 ADC as the VU emits; Q=0 on one vertex; a NaN S.
+            std::vector<RefVert> strip;
+            for (uint32_t i = 0; i < 6; ++i)
+                strip.push_back(V(i == 4 ? NAN : float(i), 1, i == 3 ? 0.0f : 2.0f, uint8_t(40 + 3 * i), 500 + i, 600 - i, 1000 + i, i < 2));
+            std::vector<RefVert> sprite = {V(0, 0, 1, 5, 1, 2, 3, false), V(1, 1, 1, 5, 4, 5, 3, true)};
+            checkKeyed(t, {gifPacket(3 | 8, list), gifPacket(5 | 8, fan), gifPacket(4, strip), gifPacket(6, sprite)});
+            // The same strip with IIP: every referenced vertex's colour counts.
+            checkKeyed(t, {gifPacket(4 | 8, strip)}); });
         tc.Run("compact record: scenery packets dense identically", [](TestCase &t)
                {
             ps2_native_world::testResetGroup();

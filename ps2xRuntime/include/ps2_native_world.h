@@ -23,6 +23,7 @@
 #include <vector>
 
 class PS2Memory;
+struct Ge1KeyedJob; // runtime/gs/ge1_gs_api.h (RZV1 S4a)
 
 namespace ps2_native_world
 {
@@ -51,6 +52,10 @@ void buildRecord(const uint8_t *packets, const uint32_t *sizes, uint32_t count, 
 // NRS1: same packets as buildRecord's, dense (GIF-sized `sizes` in).
 void buildCompactRecord(const uint8_t *packets, const uint32_t *sizes, uint32_t count,
                         std::vector<uint8_t> &out);
+// RZV1 S4a: the keyed record the runtime emits for these packets and job
+// (job.passes is filled in), as PS2X_SSX3_NATIVE_KEYED=1 builds it.
+void buildKeyedRecord(const uint8_t *packets, const uint32_t *sizes, uint32_t count, const ::Ge1KeyedJob &job,
+                      std::vector<uint8_t> &out);
 
 // Test hooks (synthetic inputs only). Runs the terrain model for one job over
 // a 16 KiB VU1 data image; group state persists across calls until
