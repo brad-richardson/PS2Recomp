@@ -1197,7 +1197,7 @@ int main(int argc, char** argv)
 		MalformedCases();
 		RandomCases(5000, 120);
 		RandomCases(9000, 120);
-		RandomCases(7000, 120, true); // RZV1 S4c: shift 0
+		RandomCases(7000, 2000, true); // RZV1 S4c: shift 0
 	}
 	GSStaticStatsPrint(); // RZV1 S4c: how many packets the static fast path took (GE1_STATIC_FAST=1)
 	std::printf("ge1_compact_test: %d cases, %d failures\n", g_cases, g_fail);
