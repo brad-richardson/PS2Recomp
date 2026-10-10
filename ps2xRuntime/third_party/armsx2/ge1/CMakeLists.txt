@@ -30,6 +30,18 @@ if(NOT IOS)
   endif()
 endif()
 
+# NRS1: differential suite for the compact record ingest (ge1_compact_test.cpp).
+# Links the vendor PCSX2 target directly (like ge1_gs above) plus its StubHost;
+# no gtest, plain main. macOS only.
+if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  add_executable(ge1_compact_test
+    ge1_compact_test.cpp
+    "${GE1_PCSX2_ROOT}/tests/ctest/core/StubHost.cpp"
+  )
+  target_include_directories(ge1_compact_test PRIVATE ${GE1_PCSX2_ROOT} ${CMAKE_BINARY_DIR}/common/include)
+  target_link_libraries(ge1_compact_test PRIVATE PCSX2_FLAGS PCSX2)
+endif()
+
 # GI1: macOS metallibs for GE1_RENDERER=metal replays. Same sources and
 # std/target pairs as the desktop generateMetallib() in pcsx2/CMakeLists.txt.
 # At replay time, point GE1_GS_RESOURCES_DIR at a directory containing these
