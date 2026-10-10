@@ -211,12 +211,17 @@ private:
 // 60); displayHz() reads the environment once. Pure, so the Mac suite tests it.
 int displayHzFromEnv(const char *v);
 int displayHz();
+// OUT2: the Android AHB pool depth. ahbPoolSizeFromEnv parses
+// PS2X_PRESENT_AHB_POOL (an integer 4..8, else 4); ahbPoolSize() reads it
+// once. Default 4 = today's pool. Pure, so the Mac suite tests it.
 // OUT1 (c): pre-rotated (portrait) AHBs. prerotateFromEnv parses
 // PS2X_PRESENT_PREROTATE (1 = 90° CCW content, 2 = 90° CW, else 0/off);
 // prerotate() reads it once. The value meanings are shared with GE1's
 // GSConfig.Prerotate. Pure, so the Mac suite tests it.
 int prerotateFromEnv(const char *v);
 int prerotate();
+int ahbPoolSizeFromEnv(const char *v);
+int ahbPoolSize();
 // The setGeometry transform for a prerotate value (ROT_270 cancels the
 // landscape parent's ROT_90 so the HWC sees 0; 0 when off). Pure.
 int prerotateTransform(int prerotateValue);

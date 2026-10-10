@@ -2475,16 +2475,23 @@ private:
                 slot = {};
             }
         }
+        m_ahbSlots.clear();
     }
 
     bool presentAhb(uint64_t tick)
     {
-        if (m_ahbSlots[0].id && m_ahbEpoch != ps2x_present_vk::poolEpoch())
+        if (!m_ahbSlots.empty() && m_ahbEpoch != ps2x_present_vk::poolEpoch())
             retireAhbSlots();
         if (!queuePendingAhb())
             return false;
-        if (!m_ahbSlots[0].id)
+        if (m_ahbSlots.empty())
         {
+            // OUT2: under DEVICE composition the compositor holds each AHB
+            // ~4 frames, so the 4-deep pool leaves pick() polling the release
+            // fence ~2 ms/frame. A deeper pool restores the slack (N=6 covers
+            // the measured hold with margin); unset = today's 4.
+            const int poolSize = ps2x_present_vk::ahbPoolSize();
+            m_ahbSlots.resize(static_cast<size_t>(poolSize));
             for (AhbSlot &slot : m_ahbSlots)
             {
                 slot.id = ps2x_present_vk::allocateBuffer(m_exportW, m_exportH, &slot.buffer);
@@ -2496,20 +2503,22 @@ private:
                 }
             }
             m_ahbEpoch = ps2x_present_vk::bufferEpoch(m_ahbSlots[0].id);
-            std::fprintf(stderr, "[gs:external] GE1 AHB pool ready epoch=%u\n", m_ahbEpoch);
+            std::fprintf(stderr, "[gs:external] GE1 AHB pool ready epoch=%u size=%d\n", m_ahbEpoch,
+                         poolSize);
         }
-        uint64_t ids[4];
-        for (int i = 0; i < 4; ++i) ids[i] = m_ahbSlots[i].id;
+        const int poolN = static_cast<int>(m_ahbSlots.size());
+        uint64_t ids[8]; // ahbPoolSize() is clamped to 4..8
+        for (int i = 0; i < poolN; ++i) ids[i] = m_ahbSlots[static_cast<size_t>(i)].id;
         const ps2x_present_vk::Pick pick =
-            ps2x_present_vk::pickReusable(ids, 4, m_ahbStart, 1000, m_hudInFlight);
+            ps2x_present_vk::pickReusable(ids, poolN, m_ahbStart, 1000, m_hudInFlight);
         if (pick.index < 0)
         {
             if (pick.giveUp)
                 ps2x_present_vk::fallBack("GE1 AHB compositor release timeout");
             return false;
         }
-        AhbSlot &slot = m_ahbSlots[pick.index];
-        m_ahbStart = (pick.index + 1) % 4;
+        AhbSlot &slot = m_ahbSlots[static_cast<size_t>(pick.index)];
+        m_ahbStart = (pick.index + 1) % poolN;
         uint64_t fence = 0u;
         const int exported = m_ge1.exportAhb(slot.buffer, m_exportW, m_exportH, &fence);
         if (exported == 0)
@@ -2715,7 +2724,9 @@ private:
     // (default 640x480 = today).
     uint32_t m_exportW = 640u, m_exportH = 480u;
 #if defined(__ANDROID__)
-    std::array<AhbSlot, 4> m_ahbSlots{};
+    // OUT2: sized from PS2X_PRESENT_AHB_POOL at pool creation (default 4 =
+    // today). Empty = no pool (retired or never built).
+    std::vector<AhbSlot> m_ahbSlots;
     uint32_t m_ahbEpoch = 0u;
     int m_ahbStart = 0;
     int m_pendingAhb = -1;

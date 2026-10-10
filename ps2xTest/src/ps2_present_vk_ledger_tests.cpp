@@ -712,6 +712,21 @@ void register_ps2_present_vk_ledger_tests()
             t.Equals(ps2x_present_vk::prerotateTransform(2), 0x07, "sense 2 maps to ROT_270");
             t.Equals(ps2x_present_vk::prerotateTransform(3), 0, "bogus maps to 0"); });
 
+        tc.Run("OUT2: PS2X_PRESENT_AHB_POOL parses 4..8, else 4", [](TestCase &t)
+               {
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv(nullptr), 4, "unset is 4");
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv(""), 4, "empty is 4");
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv("4"), 4, "4 is 4");
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv("6"), 6, "6 is 6");
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv("8"), 8, "8 is 8");
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv("3"), 4, "3 fails closed to 4");
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv("9"), 4, "9 fails closed to 4");
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv("0"), 4, "0 fails closed to 4");
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv("16"), 4, "16 fails closed to 4");
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv("6x"), 4, "trailing junk is 4");
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv(" 6"), 4, "leading space is 4");
+            t.Equals(ps2x_present_vk::ahbPoolSizeFromEnv("-6"), 4, "sign is 4"); });
+
         tc.Run("OUT1: prerotate map/unmap corners + round-trip", [](TestCase &t)
                {
             using ps2x_present_vk::prerotateMap;

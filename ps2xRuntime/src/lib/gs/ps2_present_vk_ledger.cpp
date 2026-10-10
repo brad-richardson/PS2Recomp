@@ -618,6 +618,29 @@ int prerotate()
     return sense;
 }
 
+int ahbPoolSizeFromEnv(const char *v)
+{
+    // Strict digits, 4..8; anything else fails closed to today's 4.
+    if (!v || !*v)
+        return 4;
+    int n = 0;
+    for (const char *p = v; *p; ++p)
+    {
+        if (*p < '0' || *p > '9')
+            return 4;
+        n = n * 10 + (*p - '0');
+        if (n > 8)
+            return 4;
+    }
+    return n >= 4 ? n : 4;
+}
+
+int ahbPoolSize()
+{
+    static const int n = ahbPoolSizeFromEnv(std::getenv("PS2X_PRESENT_AHB_POOL"));
+    return n;
+}
+
 int prerotateTransform(int prerotateValue)
 {
     // NATIVE_WINDOW_TRANSFORM_ROTATE_270 (0x07); the NDK enum is
