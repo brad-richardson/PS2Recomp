@@ -696,5 +696,102 @@ void register_ps2_present_vk_ledger_tests()
             t.Equals(w.latched, 1ull, "one latch after the drain");
             t.Equals(w.intervals, 1ull, "the boundary interval counts (last latch is kept)");
             t.Equals(w.shortIntervals, 1ull, "8.33 ms is short"); });
+
+        tc.Run("OUT1: PS2X_PRESENT_PREROTATE parses 1|2, else off", [](TestCase &t)
+               {
+            t.Equals(ps2x_present_vk::prerotateFromEnv(nullptr), 0, "unset is off");
+            t.Equals(ps2x_present_vk::prerotateFromEnv(""), 0, "empty is off");
+            t.Equals(ps2x_present_vk::prerotateFromEnv("1"), 1, "1 is sense 1");
+            t.Equals(ps2x_present_vk::prerotateFromEnv("2"), 2, "2 is sense 2");
+            t.Equals(ps2x_present_vk::prerotateFromEnv("0"), 0, "0 is off");
+            t.Equals(ps2x_present_vk::prerotateFromEnv("3"), 0, "3 is off");
+            t.Equals(ps2x_present_vk::prerotateFromEnv("12"), 0, "12 is off");
+            t.Equals(ps2x_present_vk::prerotateFromEnv("1 "), 0, "trailing space is off");
+            t.Equals(ps2x_present_vk::prerotateTransform(0), 0, "off maps to transform 0");
+            t.Equals(ps2x_present_vk::prerotateTransform(1), 0x07, "sense 1 maps to ROT_270");
+            t.Equals(ps2x_present_vk::prerotateTransform(2), 0x07, "sense 2 maps to ROT_270");
+            t.Equals(ps2x_present_vk::prerotateTransform(3), 0, "bogus maps to 0"); });
+
+        tc.Run("OUT1: prerotate map/unmap corners + round-trip", [](TestCase &t)
+               {
+            using ps2x_present_vk::prerotateMap;
+            using ps2x_present_vk::prerotateUnmap;
+            // Sense 1 (CCW), 1920x1080 frame at origin: (x, y) -> (y, 1919 - x).
+            auto a = prerotateMap(1, 0, 0, 1920, 1080, 0, 0);
+            t.Equals(a.x, 0, "s1 TL x");
+            t.Equals(a.y, 1919, "s1 TL y");
+            a = prerotateMap(1, 1919, 0, 1920, 1080, 0, 0);
+            t.Equals(a.x, 0, "s1 TR x");
+            t.Equals(a.y, 0, "s1 TR y");
+            a = prerotateMap(1, 0, 1079, 1920, 1080, 0, 0);
+            t.Equals(a.x, 1079, "s1 BL x");
+            t.Equals(a.y, 1919, "s1 BL y");
+            a = prerotateMap(1, 1919, 1079, 1920, 1080, 0, 0);
+            t.Equals(a.x, 1079, "s1 BR x");
+            t.Equals(a.y, 0, "s1 BR y");
+            // Sense 2 (CW): (x, y) -> (1079 - y, x).
+            auto b = prerotateMap(2, 0, 0, 1920, 1080, 0, 0);
+            t.Equals(b.x, 1079, "s2 TL x");
+            t.Equals(b.y, 0, "s2 TL y");
+            b = prerotateMap(2, 1919, 0, 1920, 1080, 0, 0);
+            t.Equals(b.x, 1079, "s2 TR x");
+            t.Equals(b.y, 1919, "s2 TR y");
+            b = prerotateMap(2, 0, 1079, 1920, 1080, 0, 0);
+            t.Equals(b.x, 0, "s2 BL x");
+            t.Equals(b.y, 0, "s2 BL y");
+            // Origin offset applies after the rotation.
+            a = prerotateMap(1, 0, 0, 1920, 1080, 10, 20);
+            t.Equals(a.x, 10, "s1 origin x");
+            t.Equals(a.y, 1939, "s1 origin y");
+            // Round-trip over corners, edges and centre, both senses.
+            const int xs[] = {0, 1, 959, 960, 1918, 1919};
+            const int ys[] = {0, 1, 539, 540, 1078, 1079};
+            for (int sense = 1; sense <= 2; ++sense)
+            {
+                for (int x : xs)
+                {
+                    for (int y : ys)
+                    {
+                        const auto q = prerotateMap(sense, x, y, 1920, 1080, 10, 20);
+                        const auto r = prerotateUnmap(sense, q.x, q.y, 1920, 1080, 10, 20);
+                        t.Equals(r.x, x, "round-trip x");
+                        t.Equals(r.y, y, "round-trip y");
+                    }
+                }
+            } });
+
+        tc.Run("OUT1: prerotate region matches the mapped corners", [](TestCase &t)
+               {
+            using ps2x_present_vk::prerotateMap;
+            using ps2x_present_vk::prerotateRegion;
+            // Tricky-ish region in a 1920x1080 frame.
+            const int rx = 100, ry = 200, rw = 480, rh = 864;
+            const auto p1 = prerotateRegion(1, rx, ry, rw, rh, 1920, 1080);
+            t.Equals(p1.x, 200, "s1 region x");
+            t.Equals(p1.y, 1340, "s1 region y");
+            t.Equals(p1.w, 864, "s1 region w");
+            t.Equals(p1.h, 480, "s1 region h");
+            const auto p2 = prerotateRegion(2, rx, ry, rw, rh, 1920, 1080);
+            t.Equals(p2.x, 16, "s2 region x");
+            t.Equals(p2.y, 100, "s2 region y");
+            t.Equals(p2.w, 864, "s2 region w");
+            t.Equals(p2.h, 480, "s2 region h");
+            // Every mapped region corner lands on the portrait rect's corners.
+            const int cx[] = {rx, rx + rw - 1};
+            const int cy[] = {ry, ry + rh - 1};
+            for (int sense = 1; sense <= 2; ++sense)
+            {
+                const auto pr = sense == 1 ? p1 : p2;
+                for (int x : cx)
+                {
+                    for (int y : cy)
+                    {
+                        const auto q = prerotateMap(sense, x - rx, y - ry, rw, rh, pr.x, pr.y);
+                        const bool inside = q.x >= pr.x && q.x < pr.x + pr.w && q.y >= pr.y &&
+                                            q.y < pr.y + pr.h;
+                        t.Equals(inside, true, "mapped corner inside the portrait rect");
+                    }
+                }
+            } });
     });
 }

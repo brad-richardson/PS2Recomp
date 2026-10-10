@@ -1672,6 +1672,13 @@ private:
             m_exportW = w;
             m_exportH = h;
         }
+#if defined(__ANDROID__)
+        // OUT1 (c): the AHB pool is panel-oriented (portrait); GE1 writes the
+        // stretch pre-rotated into it. HUD scene builders still run against
+        // the unrotated (landscape) dims (see compositeTrickyHudGpu).
+        if (m_exportW && m_exportH && ps2x_present_vk::prerotate() != 0)
+            std::swap(m_exportW, m_exportH);
+#endif
         // IX1: GE1 keeps PCSX2's auto 4:3 unless a UR1 knob is set, and would
         // pillarbox a 4:3 picture inside a 16:9 export. Any UR1 knob switches it
         // to Stretch (the runtime owns the aspect); GE1_SNAPSHOT_SIZE=640x480
@@ -1782,7 +1789,12 @@ private:
         using namespace ps2_ssx3_tricky_hud;
         if (!buffer || imgW == 0u || imgH == 0u)
             return;
-        const ps2_ssx3_tricky_hud::Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
+        // OUT1 (c): the scene builds against the unrotated (landscape) dims;
+        // the AHB itself stays portrait.
+        const int pro = ps2x_present_vk::prerotate();
+        const int sceneW = pro ? static_cast<int>(imgH) : static_cast<int>(imgW);
+        const int sceneH = pro ? static_cast<int>(imgW) : static_cast<int>(imgH);
+        const ps2_ssx3_tricky_hud::Rect r = hudRegionRect(sceneW, sceneH);
         if (r.w <= 0 || r.h <= 0)
             return;
         // HUD2: cached fused layer (PS2X_TRICKY_HUD_CACHE=1). ensureHudLayer
@@ -1790,25 +1802,34 @@ private:
         // HUD4: the GPU composite (if any) already ran at export time; a
         // GPU-served slot never reaches this stamp (queuePendingAhb skips
         // it), so the cache arbitration below is CPU-only, as before.
+        // OUT1 (c): the fused layer stays in frame coords; the rotated CPU
+        // path (fallback-only: GPU serves play) stamps direct.
         const bool useCache =
-            m_hudCache && ensureHudLayer(m_hudCacheState, *p.atlas, static_cast<int>(imgW),
-                                         static_cast<int>(imgH), p.fill, p.full, tick,
-                                         p.splashUntil, p.litLetters, p.flashUntil);
-        if (m_hudCache && !useCache && ++m_hudCacheFallbacks == 1u)
+            !pro && m_hudCache &&
+            ensureHudLayer(m_hudCacheState, *p.atlas, sceneW, sceneH, p.fill, p.full, tick,
+                           p.splashUntil, p.litLetters, p.flashUntil);
+        if (m_hudCache && !useCache && !pro && ++m_hudCacheFallbacks == 1u)
             std::fprintf(stderr, "[ssx3-tricky-hud] vk: layer build failed, direct stamp fallback\n");
         // Pre-scaled art, once per run (the export size and atlas are fixed).
         // Skipped when the cached layer serves this composite.
         if (!useCache && (!m_hudSprites.ok || m_hudSprites.atlas != p.atlas ||
-                          m_hudSprites.fw != static_cast<int>(imgW) ||
-                          m_hudSprites.fh != static_cast<int>(imgH)))
+                          m_hudSprites.fw != sceneW || m_hudSprites.fh != sceneH))
         {
-            if (!buildHudSprites(m_hudSprites, *p.atlas, static_cast<int>(imgW), static_cast<int>(imgH)))
+            if (!buildHudSprites(m_hudSprites, *p.atlas, sceneW, sceneH))
             {
                 if (++m_hudBuildFails == 1u)
                     std::fprintf(stderr, "[ssx3-tricky-hud] vk: sprite build failed, overlay off\n");
                 return;
             }
-            std::fprintf(stderr, "[ssx3-tricky-hud] vk: sprites built %ux%u\n", imgW, imgH);
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: sprites built %dx%d\n", sceneW, sceneH);
+        }
+        // OUT1 (c): rotated stamp via a region temp (portrait pristine in,
+        // unrotated stamp, portrait composited out).
+        if (pro)
+        {
+            stampTrickyHudAhbRotated(buffer, imgW, imgH, tick, p, r, m_hudSprites, sceneW, sceneH,
+                                     pro);
+            return;
         }
         AHardwareBuffer_Desc desc = {};
         AHardwareBuffer_describe(buffer, &desc);
@@ -1847,6 +1868,116 @@ private:
                          static_cast<unsigned long long>(tick), r.w, r.h);
         else if (m_hudComposites % 600u == 0u)
             std::fprintf(stderr, "[ssx3-tricky-hud] vk: composites=%llu avg=%.1f us\n",
+                         static_cast<unsigned long long>(m_hudComposites),
+                         static_cast<double>(m_hudCompositeNs) / 1000.0 /
+                             static_cast<double>(m_hudComposites));
+    }
+
+    // OUT1 (c): shift a built sprite set from frame coords to region-local
+    // coords (subtract the region origin from every dest). The stamp then runs
+    // against a region-sized temp with r0 = {0, 0, w, h} and computes
+    // identical values (same ints: pre-shifted dst minus 0).
+    static ps2_ssx3_tricky_hud::HudSprites shiftHudSpritesToRegion(
+        const ps2_ssx3_tricky_hud::HudSprites &ss, int ox, int oy)
+    {
+        using namespace ps2_ssx3_tricky_hud;
+        HudSprites out = ss;
+        auto sh = [ox, oy](Rect &rc) {
+            rc.x -= ox;
+            rc.y -= oy;
+        };
+        sh(out.region);
+        sh(out.coilCover);
+        sh(out.poleDst);
+        for (int i = 0; i < kCoils; ++i)
+            sh(out.ringDst[i]);
+        sh(out.jewelDst);
+        out.smearX0 -= ox;
+        out.smearY0 -= oy;
+        out.smearX1 -= ox;
+        out.smearY1 -= oy;
+        for (int i = 0; i < 6; ++i)
+            sh(out.archDst[i]);
+        sh(out.pillDst);
+        sh(out.splashDst);
+        return out;
+    }
+
+    // OUT1 (c): the rotated CPU stamp (fallback-only: GPU serves play). The
+    // portrait pristine region un-transposes into a temp, the unrotated stamp
+    // runs against it with region-local sprites, and the composited region
+    // transposes back. r is the unrotated region; the AHB is portrait.
+    void stampTrickyHudAhbRotated(AHardwareBuffer *buffer, uint32_t imgW, uint32_t imgH,
+                                  uint64_t tick,
+                                  const ps2_ssx3_tricky_layer::PresentationPacket &p,
+                                  const ps2_ssx3_tricky_hud::Rect &r,
+                                  const ps2_ssx3_tricky_hud::HudSprites &sprites, int sceneW,
+                                  int sceneH, int sense)
+    {
+        using namespace ps2_ssx3_tricky_hud;
+        const ps2x_present_vk::PrerotateRect pr =
+            ps2x_present_vk::prerotateRegion(sense, r.x, r.y, r.w, r.h, sceneW, sceneH);
+        if (pr.x < 0 || pr.y < 0 || pr.w != r.h || pr.h != r.w ||
+            pr.x + pr.w > static_cast<int>(imgW) || pr.y + pr.h > static_cast<int>(imgH))
+            return;
+        AHardwareBuffer_Desc desc = {};
+        AHardwareBuffer_describe(buffer, &desc);
+        if (desc.stride < imgW)
+            return;
+        const auto t0 = std::chrono::steady_clock::now();
+        void *ptr = nullptr;
+        const ARect lockRect{pr.x, pr.y, pr.x + pr.w, pr.y + pr.h};
+        if (AHardwareBuffer_lock(buffer,
+                                 AHARDWAREBUFFER_USAGE_CPU_READ_RARELY |
+                                     AHARDWAREBUFFER_USAGE_CPU_WRITE_RARELY,
+                                 -1, &lockRect, &ptr) != 0 ||
+            !ptr)
+        {
+            if (++m_hudLockFails == 1u)
+                std::fprintf(stderr, "[ssx3-tricky-hud] vk: AHardwareBuffer_lock failed, overlay off\n");
+            return;
+        }
+        const size_t strideBytes = static_cast<size_t>(desc.stride) * 4u;
+        const uint8_t *ahb = static_cast<const uint8_t *>(ptr);
+        std::vector<uint8_t> temp(static_cast<size_t>(r.w) * r.h * 4u);
+        for (int y = 0; y < r.h; ++y)
+        {
+            for (int x = 0; x < r.w; ++x)
+            {
+                const ps2x_present_vk::PrerotatePos pp =
+                    ps2x_present_vk::prerotateMap(sense, x, y, r.w, r.h, pr.x, pr.y);
+                std::memcpy(&temp[(static_cast<size_t>(y) * r.w + x) * 4u],
+                            ahb + static_cast<size_t>(pp.y) * strideBytes +
+                                static_cast<size_t>(pp.x) * 4u,
+                            4u);
+            }
+        }
+        const HudSprites shifted = shiftHudSpritesToRegion(sprites, r.x, r.y);
+        const Rect r0{0, 0, r.w, r.h};
+        stampHudDirect(temp.data(), static_cast<size_t>(r.w) * 4u, r0, shifted, p.fill, p.full,
+                       tick, p.splashUntil, p.litLetters, p.flashUntil);
+        uint8_t *ahbW = static_cast<uint8_t *>(ptr);
+        for (int y = 0; y < r.h; ++y)
+        {
+            for (int x = 0; x < r.w; ++x)
+            {
+                const ps2x_present_vk::PrerotatePos pp =
+                    ps2x_present_vk::prerotateMap(sense, x, y, r.w, r.h, pr.x, pr.y);
+                std::memcpy(ahbW + static_cast<size_t>(pp.y) * strideBytes +
+                                static_cast<size_t>(pp.x) * 4u,
+                            &temp[(static_cast<size_t>(y) * r.w + x) * 4u], 4u);
+            }
+        }
+        AHardwareBuffer_unlock(buffer, nullptr);
+        const auto t1 = std::chrono::steady_clock::now();
+        m_hudCompositeNs +=
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        if (++m_hudComposites == 1u)
+            std::fprintf(stderr,
+                         "[ssx3-tricky-hud] vk: first composite tick=%llu region=%dx%d (rotated)\n",
+                         static_cast<unsigned long long>(tick), r.w, r.h);
+        else if (m_hudComposites % 600u == 0u)
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: composites=%llu avg=%.1f us (rotated)\n",
                          static_cast<unsigned long long>(m_hudComposites),
                          static_cast<double>(m_hudCompositeNs) / 1000.0 /
                              static_cast<double>(m_hudComposites));
@@ -1908,28 +2039,30 @@ private:
         ps2_ssx3_tricky_layer::PresentationPacket p;
         if (!trickyHudPacket(p))
             return false;
-        const Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
+        // OUT1 (c): the scene builds against the unrotated (landscape) dims;
+        // GE1 transposes the composite into the portrait AHB.
+        const int pro = ps2x_present_vk::prerotate();
+        const int sceneW = pro ? static_cast<int>(imgH) : static_cast<int>(imgW);
+        const int sceneH = pro ? static_cast<int>(imgW) : static_cast<int>(imgH);
+        const Rect r = hudRegionRect(sceneW, sceneH);
         if (r.w <= 0 || r.h <= 0 || !p.atlas || !p.atlas->ok)
             return false;
         // GS-worker-owned sprites (the GsHud helper owns m_hudSprites for the
         // CPU path; the two never share: see the member comment).
         if (!m_hudGpuSprites.ok || m_hudGpuSprites.atlas != p.atlas ||
-            m_hudGpuSprites.fw != static_cast<int>(imgW) ||
-            m_hudGpuSprites.fh != static_cast<int>(imgH))
+            m_hudGpuSprites.fw != sceneW || m_hudGpuSprites.fh != sceneH)
         {
-            if (!buildHudSprites(m_hudGpuSprites, *p.atlas, static_cast<int>(imgW),
-                                 static_cast<int>(imgH)))
+            if (!buildHudSprites(m_hudGpuSprites, *p.atlas, sceneW, sceneH))
             {
                 if (++m_hudGpuFallbacks == 1u)
                     std::fprintf(stderr,
                                  "[ssx3-tricky-hud] vk: GPU sprite build failed, CPU fallback\n");
                 return false;
             }
-            std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU sprites built %ux%u\n", imgW, imgH);
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU sprites built %dx%d\n", sceneW, sceneH);
         }
-        const HudVisualKey key =
-            visualKeyFor(p.atlas, static_cast<int>(imgW), static_cast<int>(imgH), p.fill, p.full,
-                         tick, p.splashUntil, p.litLetters, p.flashUntil);
+        const HudVisualKey key = visualKeyFor(p.atlas, sceneW, sceneH, p.fill, p.full, tick,
+                                              p.splashUntil, p.litLetters, p.flashUntil);
         HudScene sc;
         if (!buildHudScene(sc, m_hudGpuSprites, key))
         {
@@ -1972,8 +2105,10 @@ private:
                 m_hudDiagPending.packet = p;
                 m_hudDiagPending.sprites = m_hudGpuSprites;
                 m_hudDiagPending.tick = tick;
-                m_hudDiagPending.fw = static_cast<int>(imgW);
-                m_hudDiagPending.fh = static_cast<int>(imgH);
+                // OUT1 (c): the stash frame stays portrait; fw/fh are the
+                // unrotated scene dims the compare builds against.
+                m_hudDiagPending.fw = sceneW;
+                m_hudDiagPending.fh = sceneH;
             }
         }
         const auto t0 = std::chrono::steady_clock::now();
@@ -2020,27 +2155,28 @@ private:
         using namespace ps2_ssx3_tricky_hud;
         if (!m_hudGpu || !m_ge1.hudScene || !buffer || imgW == 0u || imgH == 0u)
             return false;
-        const Rect r = hudRegionRect(static_cast<int>(imgW), static_cast<int>(imgH));
+        // OUT1 (c): unrotated scene dims; the AHB stays portrait.
+        const int pro = ps2x_present_vk::prerotate();
+        const int sceneW = pro ? static_cast<int>(imgH) : static_cast<int>(imgW);
+        const int sceneH = pro ? static_cast<int>(imgW) : static_cast<int>(imgH);
+        const Rect r = hudRegionRect(sceneW, sceneH);
         if (r.w <= 0 || r.h <= 0 || !p.atlas || !p.atlas->ok)
             return false;
         if (!m_hudGpuAsyncSprites.ok || m_hudGpuAsyncSprites.atlas != p.atlas ||
-            m_hudGpuAsyncSprites.fw != static_cast<int>(imgW) ||
-            m_hudGpuAsyncSprites.fh != static_cast<int>(imgH))
+            m_hudGpuAsyncSprites.fw != sceneW || m_hudGpuAsyncSprites.fh != sceneH)
         {
-            if (!buildHudSprites(m_hudGpuAsyncSprites, *p.atlas, static_cast<int>(imgW),
-                                 static_cast<int>(imgH)))
+            if (!buildHudSprites(m_hudGpuAsyncSprites, *p.atlas, sceneW, sceneH))
             {
                 if (++m_hudGpuAsyncFallbacks == 1u)
                     std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU sprite build failed, "
                                          "CPU fallback (async)\n");
                 return false;
             }
-            std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU sprites built %ux%u (async)\n", imgW,
-                         imgH);
+            std::fprintf(stderr, "[ssx3-tricky-hud] vk: GPU sprites built %dx%d (async)\n",
+                         sceneW, sceneH);
         }
-        const HudVisualKey key =
-            visualKeyFor(p.atlas, static_cast<int>(imgW), static_cast<int>(imgH), p.fill, p.full,
-                         tick, p.splashUntil, p.litLetters, p.flashUntil);
+        const HudVisualKey key = visualKeyFor(p.atlas, sceneW, sceneH, p.fill, p.full, tick,
+                                              p.splashUntil, p.litLetters, p.flashUntil);
         HudScene sc;
         if (!buildHudScene(sc, m_hudGpuAsyncSprites, key))
         {
@@ -2081,8 +2217,9 @@ private:
                 m_hudGpuAsyncDiag.packet = p;
                 m_hudGpuAsyncDiag.sprites = m_hudGpuAsyncSprites;
                 m_hudGpuAsyncDiag.tick = tick;
-                m_hudGpuAsyncDiag.fw = static_cast<int>(imgW);
-                m_hudGpuAsyncDiag.fh = static_cast<int>(imgH);
+                // OUT1 (c): portrait stash, unrotated scene dims (see above).
+                m_hudGpuAsyncDiag.fw = sceneW;
+                m_hudGpuAsyncDiag.fh = sceneH;
             }
         }
         const auto t0 = std::chrono::steady_clock::now();
@@ -2185,6 +2322,15 @@ private:
         pend = HudDiagPending{};
         if (!st.armed || !buffer || st.frame.empty() || st.stride == 0u)
             return;
+        // OUT1 (c): fw/fh are the unrotated scene dims; the stash frame and
+        // the AHB are portrait. The reference stamps unrotated and compares
+        // in portrait space.
+        const int pro = ps2x_present_vk::prerotate();
+        if (pro)
+        {
+            hudGpuDiagCompareRotated(buffer, st, totPx, totMax, mode, pro);
+            return;
+        }
         const int fw = st.fw, fh = st.fh;
         const Rect r = hudRegionRect(fw, fh);
         if (r.w <= 0 || r.h <= 0 || !st.sprites.ok)
@@ -2227,6 +2373,84 @@ private:
         if (cmp.maxErr > totMax)
             totMax = cmp.maxErr;
         std::fprintf(stderr, "[ssx3-tricky-hud] vk gpu-diag t=%llu px=%llu max=%u (tot %llu max %u)%s\n",
+                     static_cast<unsigned long long>(st.tick),
+                     static_cast<unsigned long long>(cmp.diffPx), cmp.maxErr,
+                     static_cast<unsigned long long>(totPx), totMax, mode);
+    }
+
+    // OUT1 (c): the rotated diag compare. st.fw/fh are the unrotated scene
+    // dims; st.frame and the AHB are portrait. The reference un-transposes
+    // the portrait pristine region, stamps it unrotated, and compares in
+    // portrait space against the GPU region.
+    void hudGpuDiagCompareRotated(AHardwareBuffer *buffer, HudDiagPending &st, uint64_t &totPx,
+                                  unsigned &totMax, const char *mode, int sense)
+    {
+        using namespace ps2_ssx3_tricky_hud;
+        const int fw = st.fw, fh = st.fh;
+        const Rect r = hudRegionRect(fw, fh);
+        if (r.w <= 0 || r.h <= 0 || !st.sprites.ok)
+            return;
+        const ps2x_present_vk::PrerotateRect pr =
+            ps2x_present_vk::prerotateRegion(sense, r.x, r.y, r.w, r.h, fw, fh);
+        // Portrait stash dims: the stash frame is the portrait AHB (stride rows).
+        const int pw = fh, ph = fw;
+        if (pr.x < 0 || pr.y < 0 || pr.x + pr.w > pw || pr.y + pr.h > ph)
+            return;
+        AHardwareBuffer_Desc desc = {};
+        AHardwareBuffer_describe(buffer, &desc);
+        if (static_cast<size_t>(desc.stride) * 4u != st.stride)
+            return;
+        const ARect lockRect{pr.x, pr.y, pr.x + pr.w, pr.y + pr.h};
+        void *ptr = nullptr;
+        if (AHardwareBuffer_lock(buffer, AHARDWAREBUFFER_USAGE_CPU_READ_RARELY, -1, &lockRect,
+                                 &ptr) != 0 ||
+            !ptr)
+            return;
+        std::vector<uint8_t> gpuReg(static_cast<size_t>(pr.w) * pr.h * 4u);
+        const uint8_t *base = static_cast<const uint8_t *>(ptr);
+        for (int y = 0; y < pr.h; ++y)
+            std::memcpy(&gpuReg[static_cast<size_t>(y) * pr.w * 4u],
+                        base + static_cast<size_t>(pr.y + y) * st.stride +
+                            static_cast<size_t>(pr.x) * 4u,
+                        static_cast<size_t>(pr.w) * 4u);
+        AHardwareBuffer_unlock(buffer, nullptr);
+        // Unrotated pristine region from the portrait stash.
+        std::vector<uint8_t> temp(static_cast<size_t>(r.w) * r.h * 4u);
+        for (int y = 0; y < r.h; ++y)
+        {
+            for (int x = 0; x < r.w; ++x)
+            {
+                const ps2x_present_vk::PrerotatePos pp =
+                    ps2x_present_vk::prerotateMap(sense, x, y, r.w, r.h, pr.x, pr.y);
+                std::memcpy(&temp[(static_cast<size_t>(y) * r.w + x) * 4u],
+                            st.frame.data() + static_cast<size_t>(pp.y) * st.stride +
+                                static_cast<size_t>(pp.x) * 4u,
+                            4u);
+            }
+        }
+        const HudSprites shifted = shiftHudSpritesToRegion(st.sprites, r.x, r.y);
+        const Rect r0{0, 0, r.w, r.h};
+        stampHudDirect<false>(temp.data(), static_cast<size_t>(r.w) * 4u, r0, shifted,
+                              st.packet.fill, st.packet.full, st.tick, st.packet.splashUntil,
+                              st.packet.litLetters, st.packet.flashUntil);
+        std::vector<uint8_t> cpuReg(static_cast<size_t>(pr.w) * pr.h * 4u);
+        for (int y = 0; y < r.h; ++y)
+        {
+            for (int x = 0; x < r.w; ++x)
+            {
+                const ps2x_present_vk::PrerotatePos pp =
+                    ps2x_present_vk::prerotateMap(sense, x, y, r.w, r.h, 0, 0);
+                std::memcpy(&cpuReg[(static_cast<size_t>(pp.y) * pr.w + pp.x) * 4u],
+                            &temp[(static_cast<size_t>(y) * r.w + x) * 4u], 4u);
+            }
+        }
+        const HudRegCompare cmp = hudCompareRegion(cpuReg.data(), gpuReg.data(), pr.w, pr.h);
+        totPx += cmp.diffPx;
+        if (cmp.maxErr > totMax)
+            totMax = cmp.maxErr;
+        std::fprintf(stderr,
+                     "[ssx3-tricky-hud] vk gpu-diag t=%llu px=%llu max=%u (tot %llu max %u)%s "
+                     "(rotated)\n",
                      static_cast<unsigned long long>(st.tick),
                      static_cast<unsigned long long>(cmp.diffPx), cmp.maxErr,
                      static_cast<unsigned long long>(totPx), totMax, mode);

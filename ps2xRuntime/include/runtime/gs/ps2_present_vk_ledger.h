@@ -211,4 +211,34 @@ private:
 // 60); displayHz() reads the environment once. Pure, so the Mac suite tests it.
 int displayHzFromEnv(const char *v);
 int displayHz();
+// OUT1 (c): pre-rotated (portrait) AHBs. prerotateFromEnv parses
+// PS2X_PRESENT_PREROTATE (1 = 90° CCW content, 2 = 90° CW, else 0/off);
+// prerotate() reads it once. The value meanings are shared with GE1's
+// GSConfig.Prerotate. Pure, so the Mac suite tests it.
+int prerotateFromEnv(const char *v);
+int prerotate();
+// The setGeometry transform for a prerotate value (ROT_270 cancels the
+// landscape parent's ROT_90 so the HWC sees 0; 0 when off). Pure.
+int prerotateTransform(int prerotateValue);
+// Portrait write position of unrotated pixel (x, y) in a draw_w x draw_h frame
+// at portrait origin (ox, oy). Sense 1 (CCW): (ox + y, oy + draw_w - 1 - x);
+// sense 2 (CW): (ox + draw_h - 1 - y, oy + x). Must match GE1's
+// DrawStretchRectRotated corners and the HUD shader's rotFrame exactly.
+// Shared by the CPU HUD stamp, the diag compare, and the device PPM unrotate
+// tooling contract. Pure, so the Mac suite tests it.
+struct PrerotatePos
+{
+    int x, y;
+};
+PrerotatePos prerotateMap(int sense, int x, int y, int draw_w, int draw_h, int ox, int oy);
+// Inverse: unrotated position of portrait pixel (px, py). Pure, tested.
+PrerotatePos prerotateUnmap(int sense, int px, int py, int draw_w, int draw_h, int ox, int oy);
+// Portrait rect of unrotated rect (rx, ry, rw, rh) in a frameW x frameH frame.
+// Sense 1: (ry, frameW - (rx + rw), rh, rw); sense 2: (frameH - (ry + rh), rx,
+// rh, rw). Must match GE1's CompositeHudAHB copy rect. Pure, tested.
+struct PrerotateRect
+{
+    int x, y, w, h;
+};
+PrerotateRect prerotateRegion(int sense, int rx, int ry, int rw, int rh, int frameW, int frameH);
 } // namespace ps2x_present_vk

@@ -365,6 +365,7 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_PERF_LOG_DIR",
         "PS2X_PKB",
         "PS2X_PRESENT_FILTER",
+        "PS2X_PRESENT_PREROTATE",
         "PS2X_PRESENT_VULKAN",
         "PS2X_PRESENT_ZERO_COPY",
         "PS2X_PROFILE",

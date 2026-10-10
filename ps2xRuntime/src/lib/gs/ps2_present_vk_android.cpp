@@ -132,7 +132,10 @@ struct NdkPlatform final : ps2x_present_vk::Platform
         {
             const ARect src = {0, 0, g->srcW, g->srcH};
             const ARect dst = {g->left, g->top, g->right, g->bottom};
-            a.setGeometry(tx, sc, src, dst, 0);
+            // OUT1 (c): the pre-rotated portrait buffer cancels the landscape
+            // parent's ROT_90 with a ROT_270 layer transform (HWC sees 0).
+            a.setGeometry(tx, sc, src, dst,
+                ps2x_present_vk::prerotateTransform(ps2x_present_vk::prerotate()));
             a.setZOrder(tx, sc, g->z);
             a.setVisibility(tx, sc, kVisibilityShow);
             a.setBufferTransparency(tx, sc, kTransparencyOpaque); // PS2 alpha is not display alpha

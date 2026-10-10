@@ -383,11 +383,17 @@ bool Ledger::queue(uint64_t id, uint32_t w, uint32_t h)
     const LayerGeometry *geom = nullptr;
     if (!m_geometrySet || w != m_lastW || h != m_lastH)
     {
+        // OUT1 (c): the pre-rotated portrait buffer maps 1:1 onto the
+        // landscape parent through the ROT_270 layer transform (no aspect fit:
+        // the transform, not a dst rect, does the rotation).
+        const bool pro = prerotate() != 0;
         // Parent buffer space (VK1 V1: display pixels here were scaled again by
         // the parent's 796x448 -> 1920x1080 buffer scaling: a zoomed picture).
-        const ps2x::present::Rect r = ps2x::present::presentRect(
-            static_cast<float>(m_bufW), static_cast<float>(m_bufH), static_cast<float>(w), static_cast<float>(h),
-            static_cast<ps2x::present::Aspect>(m_aspect));
+        const ps2x::present::Rect r = pro ?
+            ps2x::present::Rect{0.0f, 0.0f, static_cast<float>(m_bufW), static_cast<float>(m_bufH)} :
+            ps2x::present::presentRect(
+                static_cast<float>(m_bufW), static_cast<float>(m_bufH), static_cast<float>(w), static_cast<float>(h),
+                static_cast<ps2x::present::Aspect>(m_aspect));
         // Round the size, then centre it: rounding the edges separately could
         // add a pixel (4:3 in 796x448: 598 wide = 1442 panel px instead of
         // 597 = exactly 1440). Bars are what the GL window shows (black).
@@ -593,5 +599,50 @@ int displayHz()
 {
     static const int hz = displayHzFromEnv(std::getenv("PS2X_DISPLAY_HZ"));
     return hz;
+}
+
+int prerotateFromEnv(const char *v)
+{
+    if (!v)
+        return 0;
+    if (std::strcmp(v, "1") == 0)
+        return 1;
+    if (std::strcmp(v, "2") == 0)
+        return 2;
+    return 0;
+}
+
+int prerotate()
+{
+    static const int sense = prerotateFromEnv(std::getenv("PS2X_PRESENT_PREROTATE"));
+    return sense;
+}
+
+int prerotateTransform(int prerotateValue)
+{
+    // NATIVE_WINDOW_TRANSFORM_ROTATE_270 (0x07); the NDK enum is
+    // Android-only, so the value is spelled out (verified against NDK 28).
+    return (prerotateValue == 1 || prerotateValue == 2) ? 0x07 : 0;
+}
+
+PrerotatePos prerotateMap(int sense, int x, int y, int draw_w, int draw_h, int ox, int oy)
+{
+    if (sense == 2)
+        return PrerotatePos{ox + draw_h - 1 - y, oy + x};
+    return PrerotatePos{ox + y, oy + draw_w - 1 - x};
+}
+
+PrerotatePos prerotateUnmap(int sense, int px, int py, int draw_w, int draw_h, int ox, int oy)
+{
+    if (sense == 2)
+        return PrerotatePos{py - oy, ox + draw_h - 1 - px};
+    return PrerotatePos{oy + draw_w - 1 - py, px - ox};
+}
+
+PrerotateRect prerotateRegion(int sense, int rx, int ry, int rw, int rh, int frameW, int frameH)
+{
+    if (sense == 2)
+        return PrerotateRect{frameH - (ry + rh), rx, rh, rw};
+    return PrerotateRect{ry, frameW - (rx + rw), rh, rw};
 }
 } // namespace ps2x_present_vk
