@@ -1192,7 +1192,10 @@ bool terrainBefore(PS2Memory &memory, State &s, uint32_t startPC, uint32_t top)
         keyHeader(s, 1u, startPC);
         keyAppend(s, mem, s.group.baseTop, nn);
         keyAppend(s, mem, top + 0x40, nn);
-        keyAppend(s, mem, top + 0x80, nn);
+        // Texgen follow-ups (0x8d8/0x910/0x948/0x980) generate UV B from M2 (at
+        // TOP+0x80, a per-frame constant carried in uvm), so UV B isn't an input.
+        if (!e.texgen)
+            keyAppend(s, mem, top + 0x80, nn);
         Ge1KeyedJob &j = s.job;
         j = Ge1KeyedJob{};
         j.kind = 1;
