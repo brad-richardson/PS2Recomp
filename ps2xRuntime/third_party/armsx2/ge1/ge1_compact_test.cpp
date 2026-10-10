@@ -1113,11 +1113,62 @@ bool RunFile(const char* path)
 	std::string err;
 	char name[512];
 	std::snprintf(name, sizeof(name), "file:%s", path);
-	if (!RunRecordPair(setup, tag.PRIM, packets, true, err))
+	// Model packets whose tags are not the compact shape (the synthetic
+	// suite images' tag words are arbitrary) refuse fail-closed, exactly as
+	// in production; the compact arm then expands and runs the GIF path,
+	// mirroring the frontend fallback. Either way the arms must agree.
+	AutoFlushScope af(setup);
+	auto a = MakeProbe(setup, tag.PRIM, true);
+	auto b = MakeProbe(setup, tag.PRIM, true);
+	for (const auto& p : packets)
+		a->Transfer<3>(p.gif.data(), static_cast<u32>(p.gif.size() / 16));
+	const std::vector<u8> rec = MakeCompactRecord(packets);
+	if (!b->TransferCompact(rec.data(), static_cast<u32>(rec.size())))
+	{
+		for (const auto& p : packets)
+		{
+			const u32 nv = static_cast<u32>((p.compact.size() - 16) / 32);
+			std::vector<u8> exp(16 + 48u * nv);
+			if (!ge1_compact_expand_packet(p.compact.data(),
+					static_cast<u32>(p.compact.size()), exp.data(),
+					static_cast<u32>(exp.size())))
+			{
+				std::printf("FAIL %s: expansion refused\n", name);
+				g_fail++;
+				return false;
+			}
+			b->Transfer<3>(exp.data(), static_cast<u32>(exp.size() / 16));
+		}
+	}
+	if (!ExpectSameKickResult(*a, *b, err))
 	{
 		std::printf("FAIL %s: %s\n", name, err.c_str());
 		g_fail++;
 		return false;
+	}
+	// Second run with compact-shaped tags (same vertex bytes): the real
+	// model packets through the compact ingest itself.
+	{
+		std::vector<PacketPair> norm = packets;
+		const u32 strip = PrimWord(GS_TRIANGLESTRIP, 1, 0, 0, 0, 0);
+		for (auto& p : norm)
+		{
+			const u32 nv = static_cast<u32>((p.gif.size() - 16) / 48);
+			u8 tagbytes[16];
+			EncodeTag(tagbytes, strip, nv);
+			std::memcpy(p.gif.data(), tagbytes, 16);
+			std::memcpy(p.compact.data(), tagbytes, 16);
+		}
+		g_cases++;
+		char name2[512];
+		std::snprintf(name2, sizeof(name2), "file-norm:%s", path);
+		std::string err2;
+		if (!RunRecordPair(setup, GS_TRIANGLESTRIP, norm, true, err2))
+		{
+			std::printf("FAIL %s: %s\n", name2, err2.c_str());
+			g_fail++;
+			return false;
+		}
 	}
 	return true;
 }
