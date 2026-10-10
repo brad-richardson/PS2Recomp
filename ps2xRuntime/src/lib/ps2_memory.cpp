@@ -517,20 +517,25 @@ PS2Memory::~PS2Memory()
         delete shell;
     m_gifShells.clear();
 
-    // TRM1 piece 3a: census summary (diag-only).
-    if (m_kickCensus)
-    {
-        const uint64_t gm = m_censusMatch[1][0].load(), gc = m_censusMatch[1][1].load();
-        const uint64_t vm = m_censusMatch[0][0].load(), vc = m_censusMatch[0][1].load();
-        const uint64_t gx = m_censusMismatch[1][0].load(), gcx = m_censusMismatch[1][1].load();
-        const uint64_t vx = m_censusMismatch[0][0].load(), vcx = m_censusMismatch[0][1].load();
-        std::fprintf(stderr,
-                     "[trm1-census] match gif-normal=%llu gif-chain=%llu vif1-normal=%llu vif1-chain=%llu "
-                     "MISMATCH gif-normal=%llu gif-chain=%llu vif1-normal=%llu vif1-chain=%llu\n",
-                     (unsigned long long)gm, (unsigned long long)gc, (unsigned long long)vm,
-                     (unsigned long long)vc, (unsigned long long)gx, (unsigned long long)gcx,
-                     (unsigned long long)vx, (unsigned long long)vcx);
-    }
+    // TRM1 piece 3a: census summary (diag-only; also emitted from main,
+    // which bypasses this destructor via _Exit).
+    printCensusSummary();
+}
+
+void PS2Memory::printCensusSummary() const
+{
+    if (!m_kickCensus)
+        return;
+    const uint64_t gm = m_censusMatch[1][0].load(), gc = m_censusMatch[1][1].load();
+    const uint64_t vm = m_censusMatch[0][0].load(), vc = m_censusMatch[0][1].load();
+    const uint64_t gx = m_censusMismatch[1][0].load(), gcx = m_censusMismatch[1][1].load();
+    const uint64_t vx = m_censusMismatch[0][0].load(), vcx = m_censusMismatch[0][1].load();
+    std::fprintf(stderr,
+                 "[trm1-census] match gif-normal=%llu gif-chain=%llu vif1-normal=%llu vif1-chain=%llu "
+                 "MISMATCH gif-normal=%llu gif-chain=%llu vif1-normal=%llu vif1-chain=%llu\n",
+                 (unsigned long long)gm, (unsigned long long)gc, (unsigned long long)vm,
+                 (unsigned long long)vc, (unsigned long long)gx, (unsigned long long)gcx,
+                 (unsigned long long)vx, (unsigned long long)vcx);
 }
 
 bool PS2Memory::censusCheckSpans(const std::vector<CensusSpan> &spans, const uint8_t *bytes,

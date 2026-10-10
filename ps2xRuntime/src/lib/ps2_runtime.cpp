@@ -5001,6 +5001,11 @@ void PS2Runtime::noteUnhandledRpc(uint32_t sid, uint32_t function)
     ps2x::tel::noteUnhandledRpc(sid, function); // TEL2
 }
 
+void PS2Runtime::printCensusSummary() const
+{
+    m_memory.printCensusSummary();
+}
+
 void PS2Runtime::printMissingFunctionCounts() const
 {
     std::lock_guard<std::mutex> lock(m_coverageMutex);

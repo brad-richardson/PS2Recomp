@@ -441,6 +441,7 @@ public:
     void noteUnknownSyscall(uint32_t id);
     void noteUnhandledRpc(uint32_t sid, uint32_t function);
     void printMissingFunctionCounts() const;
+    void printCensusSummary() const; // TRM1 piece 3a (diag-only)
 #if defined(PS2X_ENABLE_SBR_TRIPWIRE) && PS2X_ENABLE_SBR_TRIPWIRE
     // SB1 tripwire: kind 0=LT 1=GE 2=LE 3=GT. Evaluates the 32-bit and 64-bit
     // predicates, notes disagreements, returns the s32 selection (the

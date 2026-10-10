@@ -551,6 +551,9 @@ public:
     std::atomic<uint64_t> m_censusLogged{0};
     bool censusCheckSpans(const std::vector<CensusSpan> &spans, const uint8_t *bytes, size_t size) const;
     void censusNote(bool gif, bool chain, bool match, uint64_t vsyncTick, size_t size, size_t nspans);
+    // TRM1 piece 3a: summary line (main calls this after run(): main
+    // exits with _Exit, which bypasses destructors).
+    void printCensusSummary() const;
 
     struct CodeRegion
     {

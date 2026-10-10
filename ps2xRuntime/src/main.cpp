@@ -332,6 +332,7 @@ int main(int argc, char *argv[])
         // main exits with _Exit, which bypasses PS2Runtime's destructor.
         // Emit the per-target coverage summary on this normal return path.
         runtime.printMissingFunctionCounts();
+        runtime.printCensusSummary(); // TRM1 piece 3a (diag-only; silent unless on)
 
 #ifdef _DEBUG
         ps2_log::print_saved_location();
