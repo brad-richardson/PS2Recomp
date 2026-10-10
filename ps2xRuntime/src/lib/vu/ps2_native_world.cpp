@@ -469,30 +469,42 @@ struct Kicks
     // facts' float work runs under IEEE round-to-nearest without flush-to-zero
     // (GE1's own threads), whatever mode the MTVU thread is in.
     std::vector<uint8_t> kbytes;
+    // RZV1 S4c: s4c = the S4a per-pass facts are left zero (GE1's prepared
+    // outcomes supersede them; GE1_S4A_CHECK does not apply) and the record is
+    // written without a zero-fill pass (every byte is stored below).
     const uint8_t *recordKeyed(const Ge1KeyedJob &jobIn, uint32_t &recSize, const std::vector<uint8_t> *s4b = nullptr,
-                               bool compactBuilt = false)
+                               bool compactBuilt = false, bool s4c = false)
     {
         uint32_t csize = static_cast<uint32_t>(cbytes.size());
         const uint8_t *crec = compactBuilt ? cbytes.data() : recordCompact(csize);
         Ge1KeyedPass pass[4];
         uint8_t tris[4][3 * 64];
-        const uint64_t saved = ps2_fpmode::readControl();
-        ps2_fpmode::writeControl(saved & ~((uint64_t{3} << 22) | (uint64_t{1} << 24)));
-        const uint32_t table = (8u + 4u * count + 15u) & ~15u;
-        uint32_t at = 16u + table, triBytes = 0;
-        for (uint32_t i = 0; i < count; ++i)
+        uint32_t triBytes = 0;
+        if (s4c)
+            std::memset(pass, 0, sizeof(Ge1KeyedPass) * count);
+        else
         {
-            uint32_t n = 0;
-            std::memcpy(&n, crec + 24 + 4 * i, 4);
-            ge1_keyed_pass_facts(crec + at, n, pass[i], tris[i]);
-            triBytes += 3u * pass[i].ntris;
-            at += n;
+            const uint64_t saved = ps2_fpmode::readControl();
+            ps2_fpmode::writeControl(saved & ~((uint64_t{3} << 22) | (uint64_t{1} << 24)));
+            const uint32_t table = (8u + 4u * count + 15u) & ~15u;
+            uint32_t at = 16u + table;
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                uint32_t n = 0;
+                std::memcpy(&n, crec + 24 + 4 * i, 4);
+                ge1_keyed_pass_facts(crec + at, n, pass[i], tris[i]);
+                triBytes += 3u * pass[i].ntris;
+                at += n;
+            }
+            ps2_fpmode::writeControl(saved);
         }
-        ps2_fpmode::writeControl(saved);
         const uint32_t triPadded = (triBytes + 15u) & ~15u;
         const uint32_t s4bBytes = s4b ? static_cast<uint32_t>(s4b->size()) : 0u;
         const uint32_t total = 32u + 256u + 128u * count + triPadded + s4bBytes + csize;
-        kbytes.assign(total, 0);
+        if (s4c)
+            kbytes.resize(total); // fully overwritten below (no tris when s4c)
+        else
+            kbytes.assign(total, 0);
         const uint64_t magic[2] = {GE1_KEYED_RECORD_MAGIC_LO, GE1_KEYED_RECORD_MAGIC_HI};
         const uint32_t hdr[4] = {total, count, triPadded, s4bBytes};
         std::memcpy(kbytes.data(), magic, 16);
@@ -1027,6 +1039,7 @@ struct State
     // runtime-owned slot pool GE1 mirrors (LRU; a miss ships the inputs).
     std::vector<GenEntry> gen;
     std::vector<uint8_t> s4b;
+    std::vector<uint8_t> s4cScratch; // RZV1 S4c: ge1_gs_static_prepare's output
     std::unordered_map<uint64_t, std::pair<uint32_t, std::list<uint32_t>::iterator>> slots;
     std::list<uint32_t> slotLru; // front = most recent
     std::vector<uint64_t> slotKey;
@@ -1283,14 +1296,19 @@ bool emitKicks(PS2Memory &memory, State &s)
             uint32_t got = 0;
             if (auto fn = g_staticPrepare.load(std::memory_order_acquire))
             {
-                const size_t at = s.s4b.size();
-                const uint32_t cap = 16u * 1024u;
-                s.s4b.resize(at + cap);
+                // A scratch buffer sized once (a resize here would zero-fill the cap per record).
+                constexpr uint32_t cap = 16u * 1024u;
+                if (s.s4cScratch.size() < cap)
+                    s.s4cScratch.resize(cap);
                 const uint64_t saved = ps2_fpmode::readControl();
                 ps2_fpmode::writeControl(saved & ~((uint64_t{3} << 22) | (uint64_t{1} << 24)));
-                got = fn(crec, csize, s.s4b.data() + at, cap);
+                got = fn(crec, csize, s.s4cScratch.data(), cap);
                 ps2_fpmode::writeControl(saved);
-                s.s4b.resize(at + ((got + 15u) & ~15u));
+                if (got)
+                {
+                    s.s4b.insert(s.s4b.end(), s.s4cScratch.data(), s.s4cScratch.data() + got);
+                    s.s4b.resize(s.s4b.size() + (((got + 15u) & ~15u) - got));
+                }
             }
             if (got)
             {
@@ -1300,7 +1318,7 @@ bool emitKicks(PS2Memory &memory, State &s)
             else
                 g_s4cNone.fetch_add(1, std::memory_order_relaxed);
         }
-        rec = s.kicks.recordKeyed(s.job, recSize, knobs().s4b ? &s.s4b : nullptr, compactBuilt);
+        rec = s.kicks.recordKeyed(s.job, recSize, knobs().s4b ? &s.s4b : nullptr, compactBuilt, knobs().s4c);
         g_keyRecBytes.fetch_add(recSize, std::memory_order_relaxed);
         g_keyCompactBytes.fetch_add(static_cast<uint32_t>(s.kicks.cbytes.size()), std::memory_order_relaxed);
     }
