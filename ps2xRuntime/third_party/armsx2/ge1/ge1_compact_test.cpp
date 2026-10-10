@@ -137,6 +137,11 @@ struct KickSetup
 	u32 uv = 0; // latched m_v.UV at call entry
 	bool draw_buffering = false;
 	bool recent_buffer_switch = false;
+	// RZV1 S4c: buffered draws for CheckOverlapVertsSlow (used_buffers > 1 makes
+	// it look; cur_rect_full makes the current buffer's rect cover any prim, so
+	// the overlap check flushes at the first filled window).
+	int used_buffers = 0;
+	bool cur_rect_full = false;
 	int cull_shift = 4;
 	bool empty_scissor = false;
 	GSHWAutoFlushLevel autoflush = GSHWAutoFlushLevel::Disabled;
@@ -183,6 +188,8 @@ public:
 	using GSState::m_cull_bounds_band;
 	using GSState::m_cull_bounds_raw;
 	using GSState::m_env_buffers;
+	using GSState::m_used_buffers_idx;
+	using GSState::m_current_buffer_idx;
 	using GSState::m_index;
 	using GSState::m_kick_side_meta;
 	using GSState::m_kick_side_xyp;
@@ -247,6 +254,12 @@ public:
 		UpdateVertexKick();
 
 		m_recent_buffer_switch = s.recent_buffer_switch;
+		m_used_buffers_idx = s.used_buffers;
+		if (s.cur_rect_full)
+		{
+			m_env_buffers[m_current_buffer_idx].draw_rect = GSVector4i(-100000, -100000, 100000, 100000);
+			m_env_buffers[m_current_buffer_idx].native_draw_rect = GSVector4i(-100000, -100000, 100000, 100000);
+		}
 
 		m_v.UV = s.uv;
 		m_q = 1.0f;
@@ -743,6 +756,13 @@ void DirectedCases()
 		sw.recent_buffer_switch = true;
 		RunCase("bufswitch", sw, GS_TRIANGLESTRIP, {MakePair(strip, StripVerts(60))}, true);
 
+		// RZV1 S4c: the overlap check flushes at the first filled window.
+		KickSetup ov = sw;
+		ov.used_buffers = 2;
+		ov.cur_rect_full = true;
+		RunCase("bufswitch-overlap-flush", ov, GS_TRIANGLESTRIP, {MakePair(strip, StripVerts(60))}, true);
+		RunCase("bufswitch-overlap-flush-list", ov, GS_TRIANGLELIST, {MakePair(PrimWord(GS_TRIANGLELIST, 1, 0, 0, 0, 0), StripVerts(60))}, true);
+
 		KickSetup g2 = base;
 		g2.cull_shift = 2;
 		RunCase("grid-2x", g2, GS_TRIANGLESTRIP, {MakePair(strip, StripVerts(60))}, true);
@@ -983,7 +1003,7 @@ void MalformedCases()
 
 // Randomized sweeps over stream shapes and environments.
 // RZV1 S4c: shift0 = every stream at cull shift 0 (non-power-of-two upscale).
-void RandomCases(u32 seed0, u32 nstreams, bool shift0 = false)
+void RandomCases(u32 seed0, u32 nstreams, bool shift0 = false, bool buffers = false)
 {
 	std::mt19937 rng(seed0);
 	const u32 prims[7] = {GS_POINTLIST, GS_LINELIST, GS_LINESTRIP, GS_TRIANGLELIST,
@@ -1006,6 +1026,14 @@ void RandomCases(u32 seed0, u32 nstreams, bool shift0 = false)
 		setup.cull_shift = ((rng() % 2) == 0) ? 4 : 2;
 		if (shift0)
 			setup.cull_shift = 0;
+		if (buffers)
+		{
+			// RZV1 S4c: buffered draws behind a buffer switch, overlap flushes half the time.
+			setup.draw_buffering = true;
+			setup.recent_buffer_switch = true;
+			setup.used_buffers = 2;
+			setup.cur_rect_full = (s & 1) != 0;
+		}
 		setup.autoflush = ((rng() % 3) == 0) ? GSHWAutoFlushLevel::Enabled :
 		                     (((rng() % 2) == 0) ? GSHWAutoFlushLevel::SpritesOnly :
 		                                          GSHWAutoFlushLevel::Disabled);
@@ -1198,6 +1226,7 @@ int main(int argc, char** argv)
 		RandomCases(5000, 120);
 		RandomCases(9000, 120);
 		RandomCases(7000, 2000, true); // RZV1 S4c: shift 0
+		RandomCases(11000, 1000, false, true); // RZV1 S4c: buffered draws, overlap flushes
 	}
 	GSStaticStatsPrint(); // RZV1 S4c: how many packets the static fast path took (GE1_STATIC_FAST=1)
 	std::printf("ge1_compact_test: %d cases, %d failures\n", g_cases, g_fail);
