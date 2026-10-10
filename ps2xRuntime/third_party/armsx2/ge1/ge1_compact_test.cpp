@@ -180,6 +180,8 @@ public:
 	std::unique_ptr<GSPrivRegSet> m_regs_storage;
 
 	using GSState::GrowVertexBuffer;
+	using GSState::m_cull_bounds_band;
+	using GSState::m_cull_bounds_raw;
 	using GSState::m_env_buffers;
 	using GSState::m_index;
 	using GSState::m_kick_side_meta;
@@ -188,6 +190,7 @@ public:
 	using GSState::m_track_native_draw_rect;
 	using GSState::m_v;
 	using GSState::m_vertex;
+	using GSState::m_xyof;
 	using GSState::s_fused_kick_use_kernel;
 
 	void Configure(const KickSetup& s)
@@ -782,6 +785,15 @@ bool RunKernelPair(u32 prim, u32 count, bool clamp_on, u32 seed, std::string& er
 	auto a = MakeProbe(setup, prim, true);
 	auto b = MakeProbe(setup, prim, true);
 
+	// Primer: the kernel's contract needs itail != 0 (the driver's snapshot
+	// seam establishes it), so one accepted triangle goes through the GIF
+	// path on both probes first.
+	{
+		PacketPair primer = MakePair(PrimWord(prim, 1, 0, 0, 0, 0), StripVerts(3));
+		a->Transfer<3>(primer.gif.data(), static_cast<u32>(primer.gif.size() / 16));
+		b->Transfer<3>(primer.gif.data(), static_cast<u32>(primer.gif.size() / 16));
+	}
+
 	std::mt19937 rng(seed);
 	std::vector<GIFPackedReg> regs(count * 3);
 	std::vector<Ge1CompactVertex> dense(count);
@@ -801,7 +813,8 @@ bool RunKernelPair(u32 prim, u32 count, bool clamp_on, u32 seed, std::string& er
 		DenseFromRegs(&regs[i * 3], dense[i]);
 	}
 
-	// The driver's invariant build for a TripleXYZF2 call, both arms.
+	// The driver's invariant build for a TripleXYZF2 call, both arms (every
+	// field the kernel reads, mirrored from KickPackedBatchKernel).
 	auto buildInv = [&](KickProbe& p) {
 		GSVertexKickKernel::Invariants inv{};
 		u64 uvfog = 0;
@@ -813,6 +826,14 @@ bool RunKernelPair(u32 prim, u32 count, bool clamp_on, u32 seed, std::string& er
 			inv.clamp_keep, inv.clamp_shifted);
 		inv.last_out = &p.m_v;
 		inv.track_native_rect = p.m_track_native_draw_rect;
+		inv.xyof = p.m_xyof;
+		inv.grid = p.m_cull_grid;
+		inv.bounds = (inv.grid.shift == 4) ? p.m_cull_bounds_band : p.m_cull_bounds_raw;
+		inv.shift0_keepall = false; // the kernel cases run shift-4 grids only
+		inv.shade = (p.m_env.PRIM.TME ? 1u : 0u) | (p.m_env.PRIM.FST ? 2u : 0u) |
+		            (p.m_env.PRIM.IIP ? 4u : 0u);
+		inv.sprite_q_fix = (prim == GS_SPRITE) && (p.m_env.PRIM.FST == 0);
+		inv.carry_m0 = GSVector4i::zero(); // the triple never reads it
 		return inv;
 	};
 	GSVertexKickKernel::Invariants inva = buildInv(*a), invb = buildInv(*b);
@@ -870,7 +891,9 @@ void KernelCases()
 	{
 		for (bool clamp_on : {false, true})
 		{
-			for (u32 count = 1; count <= 140; count++)
+			// One chunk at most: the driver never calls the kernel with more
+			// (multi-chunk runs are the record-level cases' job).
+			for (u32 count = 1; count <= GSVertexKickKernel::kChunkVertices; count++)
 			{
 				g_cases++;
 				std::string err;
@@ -950,7 +973,7 @@ void MalformedCases()
 		r[32 + 8] ^= 0x01; // first REGS descriptor STQ(2) -> RGBAQ(1)... any change breaks the triple
 	}));
 	RunMalformedCase("tag-nopre", mutate([](std::vector<u8>& r) {
-		r[32 + 5] &= 0x7F; // PRE is tag bit 46 (byte 5 bit 6)
+		r[32 + 5] &= 0xBF; // PRE is tag bit 46 (byte 5 bit 6)
 	}));
 	// NLOOP/tag-count mismatch.
 	RunMalformedCase("nloop-mismatch", mutate([](std::vector<u8>& r) {
