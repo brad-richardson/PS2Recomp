@@ -324,6 +324,8 @@ struct Ge1KeyedParts
     uint32_t trisBytes;
     const uint8_t* compact;
     uint32_t compactSize;
+    const uint8_t* s4b; // RZV1 S4b block (KEYED=2), else null
+    uint32_t s4bBytes;
 };
 inline bool ge1_is_keyed_record(const uint8_t* bytes, uint32_t size)
 {
@@ -342,12 +344,14 @@ inline bool ge1_keyed_record_parts(const uint8_t* bytes, uint32_t size, Ge1Keyed
         return false;
     uint32_t hdr[4];
     __builtin_memcpy(hdr, bytes + 16, 16);
-    const uint32_t total = hdr[0], passes = hdr[1], trisBytes = hdr[2];
-    if (total != size || passes == 0 || passes > 64u || (trisBytes & 15u))
+    const uint32_t total = hdr[0], passes = hdr[1], trisBytes = hdr[2], s4bBytes = hdr[3];
+    if (total != size || passes == 0 || passes > 64u || (trisBytes & 15u) || (s4bBytes & 15u))
         return false;
-    const uint64_t fixed = 32ull + 256ull + 128ull * passes + trisBytes;
+    const uint64_t fixed = 32ull + 256ull + 128ull * passes + trisBytes + s4bBytes;
     if (fixed + 32ull > size)
         return false;
+    out.s4b = s4bBytes ? bytes + 32 + 256 + 128u * passes + trisBytes : nullptr;
+    out.s4bBytes = s4bBytes;
     out.job = reinterpret_cast<const Ge1KeyedJob*>(bytes + 32);
     out.pass = reinterpret_cast<const Ge1KeyedPass*>(bytes + 32 + 256);
     out.passes = passes;

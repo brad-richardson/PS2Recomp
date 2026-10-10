@@ -39,6 +39,8 @@ struct Ge1KeyedParts
     uint32_t trisBytes;
     const uint8_t* compact;
     uint32_t compactSize;
+    const uint8_t* s4b; // RZV1 S4b block (PS2X_SSX3_NATIVE_KEYED=2), else null
+    uint32_t s4bBytes;
 };
 inline bool ge1_keyed_record_parts(const uint8_t* bytes, uint32_t size, Ge1KeyedParts& out)
 {
@@ -53,12 +55,14 @@ inline bool ge1_keyed_record_parts(const uint8_t* bytes, uint32_t size, Ge1Keyed
         return false;
     uint32_t hdr[4];
     __builtin_memcpy(hdr, bytes + 16, 16);
-    const uint32_t total = hdr[0], passes = hdr[1], trisBytes = hdr[2];
-    if (total != size || passes == 0 || passes > 64u || (trisBytes & 15u))
+    const uint32_t total = hdr[0], passes = hdr[1], trisBytes = hdr[2], s4bBytes = hdr[3];
+    if (total != size || passes == 0 || passes > 64u || (trisBytes & 15u) || (s4bBytes & 15u))
         return false;
-    const uint64_t fixed = 32ull + 256ull + 128ull * passes + trisBytes;
+    const uint64_t fixed = 32ull + 256ull + 128ull * passes + trisBytes + s4bBytes;
     if (fixed + 32ull > size)
         return false;
+    out.s4b = s4bBytes ? bytes + 32 + 256 + 128u * passes + trisBytes : nullptr;
+    out.s4bBytes = s4bBytes;
     out.job = reinterpret_cast<const Ge1KeyedJob*>(bytes + 32);
     out.pass = reinterpret_cast<const Ge1KeyedPass*>(bytes + 32 + 256);
     out.passes = passes;
@@ -80,3 +84,10 @@ inline bool ge1_keyed_record_parts(const uint8_t* bytes, uint32_t size, Ge1Keyed
 // The check (ge1_s4a_check.cpp): the pass's facts recomputed from the
 // compact packet through GE1's parse, compared field for field.
 bool ge1_s4a_pass_matches(const uint8_t* pkt, uint32_t size, const Ge1KeyedPass& rec, const uint8_t* recTris);
+// RZV1 S4b (GE1_RESIDENT=1, ge1_resident.cpp): the resident pool and the
+// vertex generator, checked against the record's compact vertices (CPU every
+// record; Metal batched per vsync on the Mac). Called around the compact ingest.
+bool ge1_resident_on();
+void ge1_resident_before(const Ge1KeyedParts& parts);
+void ge1_resident_after();
+void ge1_resident_vsync();

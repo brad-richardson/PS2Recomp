@@ -644,8 +644,14 @@ extern "C" GE1_API int ge1_gs_native_record_keyed(const uint8_t* bytes, uint32_t
         return 0; // malformed: the runtime refuses it loudly
     if (S4aCheckOn())
         S4aCheck(parts);
+    const bool resident = ge1_resident_on();
+    if (resident)
+        ge1_resident_before(parts);
     // The embedded compact record, exactly as ge1_gs_native_record_compact.
-    return GSgifTransferCompact(parts.compact, parts.compactSize) ? 1 : 0;
+    const bool ok = GSgifTransferCompact(parts.compact, parts.compactSize);
+    if (resident)
+        ge1_resident_after();
+    return ok ? 1 : 0;
 }
 
 extern "C" GE1_API int ge1_gs_packet(uint8_t path, const uint8_t* bytes, uint32_t size)
@@ -666,6 +672,8 @@ extern "C" GE1_API int ge1_gs_vsync(uint32_t field, uint64_t csr, uint64_t smode
 {
     if (!s_open || field > 1)
         return 0;
+    if (ge1_resident_on())
+        ge1_resident_vsync(); // RZV1 S4b: the per-vsync GPU check batch
     std::memcpy(s_priv.data() + 0x1000, &csr, 8);
     std::memcpy(s_priv.data() + 0x0010, &smode1, 8);
     std::memcpy(s_priv.data() + 0x0060, &syncv, 8);

@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <list>
 #include <unordered_map>
 
 #pragma clang fp contract(off)
@@ -82,6 +83,8 @@ struct Knobs
     bool compact = false; // NRS1: emit compact records (dense vertices, no GIF padding)
     bool keyed = false;   // RZV1 S4a: wrap compact records with key + constants + facts (needs compact)
     uint32_t keyWindow = 8; // S4a pool simulation: a key unused for more than this many ticks is evicted
+    bool s4b = false;       // RZV1 S4b (KEYED=2): + the resident-pool block (slot, inputs on a miss, base constants, generation program)
+    uint32_t poolSlots = 32768; // S4b: the runtime-owned slot pool (GE1 mirrors it slot for slot)
 };
 const Knobs &knobs()
 {
@@ -108,7 +111,12 @@ const Knobs &knobs()
         if (const char *v = std::getenv("PS2X_SSX3_NATIVE_COMPACT"))
             r.compact = !std::strcmp(v, "1");
         if (const char *v = std::getenv("PS2X_SSX3_NATIVE_KEYED"))
-            r.keyed = r.compact && !std::strcmp(v, "1");
+        {
+            r.keyed = r.compact && (!std::strcmp(v, "1") || !std::strcmp(v, "2"));
+            r.s4b = r.keyed && !std::strcmp(v, "2");
+        }
+        if (const char *v = std::getenv("PS2X_SSX3_NATIVE_POOL_SLOTS"))
+            r.poolSlots = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
         if (const char *v = std::getenv("PS2X_SSX3_NATIVE_KEYED_WINDOW"))
             r.keyWindow = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
         if (r.check)
@@ -261,13 +269,57 @@ struct UvSrc
     uint32_t qw = 0;
     const F4 *local = nullptr;
     F4 at(uint32_t i) const { return local ? local[i] : ld4(mem, qw + i); }
+    // RZV1 S4b: how element 0 is read from the job's input blob (GenUv* below)
+    // and its blob qword index; used only when the generation program is captured.
+    uint8_t genKind = 0;
+    uint32_t genIdx0 = 0;
 };
+
+// RZV1 S4b: the per-vertex generation program (PS2X_SSX3_NATIVE_KEYED=2): for
+// every vertex the model kicks, which input-blob qwords it came from and how,
+// so GE1 can regenerate the vertex from its resident pool. The blob is the
+// job's key bytes (keyIn): a 16-byte header, then the regions keyAppend added.
+// Captured on the MTVU thread into g_gen while a job is modelled.
+enum : uint8_t
+{
+    GenTerrain = 0,      // c = M p, s = offset*1 + (c Q) scale, ST = uv Q
+    GenSceneNoclip = 1,  // M folded by the viewport, s = c Q
+    GenSceneClip = 2,    // as terrain, with the instance's composed M
+    GenUnsupported = 0xff,
+};
+enum : uint8_t
+{
+    GenUvA = 0,          // float UV at blob[uv]
+    GenUvB = 1,          // float UV at blob[uv] (UV set B)
+    GenUvTexPos = 2,     // M2 x blob[uv] (positions), zw = 1
+    GenUvTexUvA = 3,     // M2 x blob[uv] (UV set A), zw = 1
+    GenUvRaw = 4,        // scenery: ITOF12 of the int16 UV at blob[uv]
+    GenUvDecoded = 5,    // scenery format 2: FTOI12(m10 u + m11 v + (m12 + m13)) of blob[uv], then ITOF12
+};
+// flags: bit 0 a 0xc30 ST rewrite (XYZ/W3/Q from the base job: S,T = uv.xy (1 Q)),
+// bit 1 RGBA from the base job, bits 2-4 uv kind, bit 5 ADC
+struct GenEntry
+{
+    uint16_t pos, uv, col;
+    uint8_t kind, flags;
+};
+static_assert(sizeof(GenEntry) == 8, "GenEntry layout");
+std::vector<GenEntry> *g_gen = nullptr;
+inline void genPush(uint8_t kind, uint32_t pos, uint32_t uv, uint32_t col, uint8_t uvKind, bool rewrite, bool rgbaBase,
+                    bool adc)
+{
+    if (!g_gen)
+        return;
+    g_gen->push_back(GenEntry{static_cast<uint16_t>(pos), static_cast<uint16_t>(uv), static_cast<uint16_t>(col), kind,
+                              static_cast<uint8_t>((rewrite ? 1u : 0u) | (rgbaBase ? 2u : 0u) | (uvKind << 2) |
+                                                   (adc ? 32u : 0u))});
+}
 
 // The 0x1368 / 0x15a8 strip loop over nstrips strips of two grid rows.
 // writeRgba = false is the 0xd40 variant (the RGBA slot keeps its contents).
 // Returns false when a triangle would reach the clipper.
 bool strips(const TerrainConst &c, const uint8_t *mem, uint32_t pos, const UvSrc &uv, uint32_t n,
-            uint32_t nstrips, bool writeRgba, Pkt &pk)
+            uint32_t nstrips, bool writeRgba, Pkt &pk, uint32_t posIdx0 = 0)
 {
     bool ok = true;
     const float one = opaque(1.0f);
@@ -298,17 +350,21 @@ bool strips(const TerrainConst &c, const uint8_t *mem, uint32_t pos, const UvSrc
                     if (!trivialReject(hist))
                         ok = false;
                 }
+                genPush(GenTerrain, posIdx0 + a, uv.genIdx0 + a, 0, uv.genKind, false, !writeRgba, qx[3] == 0xffffffffu);
             }
     }
     return ok;
 }
 // 0x1ae8: ST.xy = UV.xy * ST.w for nv vertices, UVs in strip order.
-void rewriteSt(Pkt &pk, uint32_t nv, uint32_t n, const UvSrc &uv)
+void rewriteSt(Pkt &pk, uint32_t nv, uint32_t n, const UvSrc &uv, uint32_t posIdx0 = 0)
 {
     for (uint32_t v = 0; v < nv; ++v)
     {
         const uint32_t s = v / (2 * n), rem = v % (2 * n);
         uint32_t *qs = pk.q[1 + 3 * v];
+        // XYZ/W3/RGBA/Q stay the base pass's (same grid vertex, base constants).
+        genPush(GenTerrain, posIdx0 + (s + (rem & 1)) * n + rem / 2, uv.genIdx0 + (s + (rem & 1)) * n + rem / 2, 0,
+                uv.genKind, true, true, pk.q[3 + 3 * v][3] == 0xffffffffu);
         const F4 st = vmul4(uv.at((s + (rem & 1)) * n + rem / 2), vdupq_n_f32(ffrom(qs[3])));
         qs[0] = vgetq_lane_u32(vreinterpretq_u32_f32(st), 0);
         qs[1] = vgetq_lane_u32(vreinterpretq_u32_f32(st), 1);
@@ -337,6 +393,7 @@ struct Group
     uint32_t k = 0, n = 0, baseTop = 0;
     uint32_t clipTagQw = 9; // last writer of qw 452/480: 0x9b0 (mem[9]) or 0xd40 (mem[10])
     Pkt pk[2];
+    TerrainConst baseC{}; // RZV1 S4b: the base job's constants (follow-ups re-kick its XYZ/RGBA)
 };
 // Kicks of one job, snapshotted at kick time, written behind room for the
 // native record header so the record needs no second copy.
@@ -410,7 +467,7 @@ struct Kicks
     // facts' float work runs under IEEE round-to-nearest without flush-to-zero
     // (GE1's own threads), whatever mode the MTVU thread is in.
     std::vector<uint8_t> kbytes;
-    const uint8_t *recordKeyed(const Ge1KeyedJob &jobIn, uint32_t &recSize)
+    const uint8_t *recordKeyed(const Ge1KeyedJob &jobIn, uint32_t &recSize, const std::vector<uint8_t> *s4b = nullptr)
     {
         uint32_t csize = 0;
         const uint8_t *crec = recordCompact(csize);
@@ -430,10 +487,11 @@ struct Kicks
         }
         ps2_fpmode::writeControl(saved);
         const uint32_t triPadded = (triBytes + 15u) & ~15u;
-        const uint32_t total = 32u + 256u + 128u * count + triPadded + csize;
+        const uint32_t s4bBytes = s4b ? static_cast<uint32_t>(s4b->size()) : 0u;
+        const uint32_t total = 32u + 256u + 128u * count + triPadded + s4bBytes + csize;
         kbytes.assign(total, 0);
         const uint64_t magic[2] = {GE1_KEYED_RECORD_MAGIC_LO, GE1_KEYED_RECORD_MAGIC_HI};
-        const uint32_t hdr[4] = {total, count, triPadded, 0};
+        const uint32_t hdr[4] = {total, count, triPadded, s4bBytes};
         std::memcpy(kbytes.data(), magic, 16);
         std::memcpy(kbytes.data() + 16, hdr, 16);
         Ge1KeyedJob job = jobIn;
@@ -446,7 +504,9 @@ struct Kicks
             std::memcpy(t, tris[i], 3u * pass[i].ntris);
             t += 3u * pass[i].ntris;
         }
-        std::memcpy(kbytes.data() + 288 + 128u * count + triPadded, crec, csize);
+        if (s4bBytes)
+            std::memcpy(kbytes.data() + 288 + 128u * count + triPadded, s4b->data(), s4bBytes);
+        std::memcpy(kbytes.data() + 288 + 128u * count + triPadded + s4bBytes, crec, csize);
         recSize = total;
         return kbytes.data();
     }
@@ -487,21 +547,33 @@ __attribute__((noinline)) bool model(const uint8_t *mem, const Entry &e, uint32_
         return false;
     TerrainConst c;
     loadConst(mem, c);
+    if (e.base)
+        g.baseC = c;
     bool ok = true;
     if (e.base)
     {
         // 0x9b0: tags from mem[7], strips with UV set A, kick A, kick B.
         setTag(g.pk[0], nlA, mem, 7);
         setTag(g.pk[1], nlB, mem, 7);
-        ok &= strips(c, mem, top, UvSrc{mem, top + 0x40}, n, nsA, true, g.pk[0]);
+        const uint32_t nn = n * n;
+        UvSrc baseA{mem, top + 0x40};
+        baseA.genKind = GenUvA;
+        baseA.genIdx0 = 1 + nn;
+        UvSrc baseB{mem, top + 0x40 + offB};
+        baseB.genKind = GenUvA;
+        baseB.genIdx0 = 1 + nn + offB;
+        ok &= strips(c, mem, top, baseA, n, nsA, true, g.pk[0], 1);
         kicks.kick(g.pk[0]);
-        ok &= strips(c, mem, top + offB, UvSrc{mem, top + 0x40 + offB}, n, nsB, true, g.pk[1]);
+        ok &= strips(c, mem, top + offB, baseB, n, nsB, true, g.pk[1], 1 + offB);
         kicks.kick(g.pk[1]);
         g.clipTagQw = 9;
     }
     // UV set B as the pass-2 code reads it: VIF-uploaded, or the texgen output.
     F4 uvb[kMaxVerts];
     UvSrc uvA{mem, top + 0x80}, uvBsrc{mem, top + 0x80 + offB};
+    uvA.genKind = uvBsrc.genKind = GenUvB;
+    uvA.genIdx0 = 1 + 2 * n * n;
+    uvBsrc.genIdx0 = 1 + 2 * n * n + offB;
     if (e.texgen)
     {
         F4 m2[4];
@@ -517,15 +589,18 @@ __attribute__((noinline)) bool model(const uint8_t *mem, const Entry &e, uint32_
         }
         uvA = UvSrc{nullptr, 0, uvb};
         uvBsrc = UvSrc{nullptr, 0, uvb + offB};
+        uvA.genKind = uvBsrc.genKind = e.texgen == 1 ? GenUvTexPos : GenUvTexUvA;
+        uvA.genIdx0 = e.texgen == 1 ? 1 : 1 + n * n;
+        uvBsrc.genIdx0 = uvA.genIdx0 + offB;
     }
     if (e.pass2 == 1)
     {
         // 0xc30: tags y/z/w from mem[8], ST rewrite, re-kick A then B.
         setTagYzw(g.pk[0], mem, 8);
         setTagYzw(g.pk[1], mem, 8);
-        rewriteSt(g.pk[0], nlA, n, uvA);
+        rewriteSt(g.pk[0], nlA, n, uvA, 1);
         kicks.kick(g.pk[0]);
-        rewriteSt(g.pk[1], nlB, n, uvBsrc);
+        rewriteSt(g.pk[1], nlB, n, uvBsrc, 1 + offB);
         kicks.kick(g.pk[1]);
     }
     else if (e.pass2 == 2)
@@ -533,9 +608,9 @@ __attribute__((noinline)) bool model(const uint8_t *mem, const Entry &e, uint32_
         // 0xd40: tags y/z/w from mem[8], strips from the base positions with UV set B.
         setTagYzw(g.pk[0], mem, 8);
         setTagYzw(g.pk[1], mem, 8);
-        ok &= strips(c, mem, posTop, uvA, n, nsA, false, g.pk[0]);
+        ok &= strips(c, mem, posTop, uvA, n, nsA, false, g.pk[0], 1);
         kicks.kick(g.pk[0]);
-        ok &= strips(c, mem, posTop + offB, uvBsrc, n, nsB, false, g.pk[1]);
+        ok &= strips(c, mem, posTop + offB, uvBsrc, n, nsB, false, g.pk[1], 1 + offB);
         kicks.kick(g.pk[1]);
         g.clipTagQw = 10;
     }
@@ -741,6 +816,9 @@ bool sceneVerts(const uint8_t *mem, const SceneGroup &g, const SceneSlot &sl, ui
                         ok = false;
                 }
             }
+            genPush(clip ? GenSceneClip : GenSceneNoclip, 1 + (pos + vi - chunk), 1 + (uvq + vi - chunk),
+                    1 + (col + vi - chunk), (sl.decoded && sl.uvQw == uvq) ? GenUvDecoded : GenUvRaw, false, false,
+                    clip ? qx[3] == 0xffffffffu : k < 2);
         }
     }
     pk.nv = vi;
@@ -773,6 +851,7 @@ bool sceneStPass(const uint8_t *mem, uint32_t chunk, const SceneGroup &grp, Scen
         }
     for (uint32_t k = 0; k < n; ++k)
     {
+        genPush(GenUnsupported, 0, 0, 0, 0, false, false, false); // RZV1 S4b: second passes not generated yet
         const uint32_t *uvraw = texgen ? gen[k] : (g.decoded && g.uvQw == uvq) ? g.uv[k] : qwp(mem, uvq + k);
         F4 u = itofLanes(uvraw, 1.0f / 4096.0f, 2);
         u = vsetq_lane_f32(one, vsetq_lane_f32(one, u, 2), 3);
@@ -827,6 +906,7 @@ std::atomic<uint64_t> g_resumeAfterNative{0}, g_unmodelledTerrain{0}, g_checkSki
 // RZV1 S4a: the resident-pool simulation (keys at MSCAL, window eviction).
 std::atomic<uint64_t> g_keyJobs{0}, g_keyHits{0}, g_keyCollide{0}, g_keyBytesAll{0}, g_keyBytesMiss{0}, g_keyDistinct{0},
     g_keyEvicted{0}, g_keyRecBytes{0}, g_keyCompactBytes{0};
+std::atomic<uint64_t> g_s4bMiss{0}, g_s4bHit{0}, g_s4bGenBad{0}; // RZV1 S4b slot pool
 std::atomic<int> g_mismatchDumps{8};
 
 void printStats()
@@ -880,6 +960,10 @@ void printStats()
                      (unsigned long long)g_keyCollide.load(), (unsigned long long)g_keyBytesAll.load(),
                      (unsigned long long)g_keyBytesMiss.load(), (unsigned long long)g_keyRecBytes.load(),
                      (unsigned long long)g_keyCompactBytes.load());
+        if (knobs().s4b)
+            std::fprintf(stderr, "[nrt1] s4b pool: slots=%u hit=%llu miss=%llu gen_mismatch=%llu\n", knobs().poolSlots,
+                         (unsigned long long)g_s4bHit.load(), (unsigned long long)g_s4bMiss.load(),
+                         (unsigned long long)g_s4bGenBad.load());
     }
 }
 
@@ -929,6 +1013,13 @@ struct State
     };
     std::unordered_map<uint64_t, PoolEntry> pool;
     uint64_t poolTick = 0;
+    // RZV1 S4b: the generation program of the job being modelled, and the
+    // runtime-owned slot pool GE1 mirrors (LRU; a miss ships the inputs).
+    std::vector<GenEntry> gen;
+    std::vector<uint8_t> s4b;
+    std::unordered_map<uint64_t, std::pair<uint32_t, std::list<uint32_t>::iterator>> slots;
+    std::list<uint32_t> slotLru; // front = most recent
+    std::vector<uint64_t> slotKey;
 };
 State &state()
 {
@@ -1083,6 +1174,70 @@ void keyHeader(State &s, uint32_t a, uint32_t b)
     s.keyIn.assign(p, p + 16);
 }
 
+// RZV1 S4b: the resident-pool block: 'S4B1', slot, inline input qwords (0 on a
+// pool hit), generation entries; the base job's constants (terrain); the
+// inputs (the key bytes) on a miss; the generation program, 16-byte padded.
+// A generation program that doesn't cover the record's vertices ships empty.
+void buildS4b(State &s)
+{
+    const uint64_t key = s.job.key;
+    uint32_t slot;
+    bool miss = false;
+    auto it = s.slots.find(key);
+    if (it != s.slots.end())
+    {
+        slot = it->second.first;
+        s.slotLru.splice(s.slotLru.begin(), s.slotLru, it->second.second);
+        g_s4bHit.fetch_add(1, std::memory_order_relaxed);
+    }
+    else
+    {
+        miss = true;
+        g_s4bMiss.fetch_add(1, std::memory_order_relaxed);
+        if (s.slotKey.size() < knobs().poolSlots)
+        {
+            slot = static_cast<uint32_t>(s.slotKey.size());
+            s.slotKey.push_back(key);
+        }
+        else
+        {
+            slot = s.slotLru.back();
+            s.slotLru.pop_back();
+            s.slots.erase(s.slotKey[slot]);
+            s.slotKey[slot] = key;
+        }
+        s.slotLru.push_front(slot);
+        s.slots.emplace(key, std::make_pair(slot, s.slotLru.begin()));
+    }
+    uint32_t nverts = 0;
+    for (uint32_t i = 0; i < s.kicks.count; ++i)
+        nverts += (s.kicks.size[i] - 16u) / 48u;
+    const bool genOk = s.gen.size() == nverts;
+    if (!genOk)
+        g_s4bGenBad.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t nGen = genOk ? nverts : 0u;
+    const uint32_t inQw = miss ? static_cast<uint32_t>(s.keyIn.size() / 16u) : 0u;
+    const uint32_t genBytes = (8u * nGen + 15u) & ~15u;
+    s.s4b.assign(16u + 112u + 16u * inQw + genBytes, 0);
+    const uint32_t hdr[4] = {0x31423453u, slot, inQw, nGen};
+    std::memcpy(s.s4b.data(), hdr, 16);
+    if (s.job.kind == 1)
+    {
+        const Group &g = s.group;
+        float b[24];
+        for (int i = 0; i < 4; ++i)
+            vst1q_f32(b + 4 * i, g.baseC.m[i]);
+        vst1q_f32(b + 16, g.baseC.scale);
+        vst1q_f32(b + 20, g.baseC.offset);
+        std::memcpy(s.s4b.data() + 16, b, 96);
+        vst1q_u32(reinterpret_cast<uint32_t *>(s.s4b.data() + 112), g.baseC.rgba);
+    }
+    if (inQw)
+        std::memcpy(s.s4b.data() + 128, s.keyIn.data(), 16u * inQw);
+    if (nGen)
+        std::memcpy(s.s4b.data() + 128 + 16u * inQw, s.gen.data(), 8u * nGen);
+}
+
 bool emitKicks(PS2Memory &memory, State &s)
 {
     uint32_t recSize = 0;
@@ -1093,7 +1248,9 @@ bool emitKicks(PS2Memory &memory, State &s)
     if (knobs().keyed)
     {
         keyJob(memory, s);
-        rec = s.kicks.recordKeyed(s.job, recSize);
+        if (knobs().s4b)
+            buildS4b(s);
+        rec = s.kicks.recordKeyed(s.job, recSize, knobs().s4b ? &s.s4b : nullptr);
         g_keyRecBytes.fetch_add(recSize, std::memory_order_relaxed);
         g_keyCompactBytes.fetch_add(static_cast<uint32_t>(s.kicks.cbytes.size()), std::memory_order_relaxed);
     }
@@ -1127,7 +1284,10 @@ bool terrainBefore(PS2Memory &memory, State &s, uint32_t startPC, uint32_t top)
     const bool needBackup = !e.base && e.pass2 == 2 && !knobs().check;
     if (needBackup)
         s.work = s.group;
+    s.gen.clear();
+    g_gen = knobs().s4b ? &s.gen : nullptr;
     const bool servable = runModel(mem, e, top, s.group, s.kicks);
+    g_gen = nullptr;
 
     if (knobs().check)
     {
@@ -1285,7 +1445,10 @@ bool sceneBefore(PS2Memory &memory, State &s, uint32_t pc, uint32_t top, uint32_
     const bool check = knobs().check;
     s.kicks.clear();
     SceneSlot *sl = nullptr;
+    s.gen.clear();
+    g_gen = knobs().s4b ? &s.gen : nullptr;
     const bool servable = sceneModel(mem, g, pc, top, header, second, sl);
+    g_gen = nullptr;
 
     const bool groupNative = g.live && g.native;
     if (check)
