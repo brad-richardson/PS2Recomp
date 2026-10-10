@@ -31,6 +31,19 @@ namespace ps2_mtvu
 class GS;
 class GsPacketPool; // runtime/gs/gs_worker.h (TRM1: owned instance below)
 
+// TRM1 piece 3a: kick-stability census (PS2X_MTVU_KICK_CENSUS=1,
+// diag-only). One span = a contiguous guest-physical range copied into
+// a kick payload at kick time; the MTVU job re-reads the spans at
+// consume and memcmps against the kick-time copy. Spans store (memory,
+// phys, len) and re-derive the host base at consume, never raw
+// pointers (RDRAM realloc safety).
+struct CensusSpan
+{
+    bool fromScratchpad = false;
+    uint32_t phys = 0;
+    uint32_t len = 0;
+};
+
 constexpr uint32_t PS2_RAM_SIZE = 32u * 1024u * 1024u; // 32MB
 constexpr uint32_t PS2_RAM_MASK = PS2_RAM_SIZE - 1u;   // Mask for 32MB alignment
 constexpr uint32_t PS2_RAM_BASE = 0x00000000;          // Physical base of RDRAM
@@ -495,6 +508,8 @@ public:
         uint32_t srcAddr = 0;
         uint32_t qwc = 0;
         std::vector<uint8_t> chainData;
+        // TRM1 piece 3a: source spans for chainData (census on only).
+        std::vector<CensusSpan> censusSpans;
     };
     std::vector<PendingTransfer> m_pendingGifTransfers;
     std::vector<PendingTransfer> m_pendingVif0Transfers;
@@ -528,6 +543,14 @@ public:
     // / savestate-load clears); consume() locks only when non-zero.
     // Host-side mirror: never serialized.
     std::atomic<size_t> m_completedDmacCount{0};
+    // TRM1 piece 3a: kick-stability census (diag-only, never in play).
+    // [gif][chain] match/mismatch counts; the dtor prints the summary.
+    bool m_kickCensus = false;
+    std::atomic<uint64_t> m_censusMatch[2][2]{};
+    std::atomic<uint64_t> m_censusMismatch[2][2]{};
+    std::atomic<uint64_t> m_censusLogged{0};
+    bool censusCheckSpans(const std::vector<CensusSpan> &spans, const uint8_t *bytes, size_t size) const;
+    void censusNote(bool gif, bool chain, bool match, uint64_t vsyncTick, size_t size, size_t nspans);
 
     struct CodeRegion
     {

@@ -414,6 +414,9 @@ PS2Memory::PS2Memory()
     // buffers are fully overwritten at every acquire site).
     m_stagePool = std::make_unique<GsPacketPool>();
     m_stagePool->setEnabled(true);
+    // TRM1 piece 3a: kick-stability census (diag-only, default off).
+    if (const char *census = std::getenv("PS2X_MTVU_KICK_CENSUS"))
+        m_kickCensus = std::strcmp(census, "1") == 0;
     ps2SetScratchpadHostPtr(nullptr);
 }
 
@@ -513,6 +516,56 @@ PS2Memory::~PS2Memory()
     for (std::vector<uint8_t> *shell : m_gifShells)
         delete shell;
     m_gifShells.clear();
+
+    // TRM1 piece 3a: census summary (diag-only).
+    if (m_kickCensus)
+    {
+        const uint64_t gm = m_censusMatch[1][0].load(), gc = m_censusMatch[1][1].load();
+        const uint64_t vm = m_censusMatch[0][0].load(), vc = m_censusMatch[0][1].load();
+        const uint64_t gx = m_censusMismatch[1][0].load(), gcx = m_censusMismatch[1][1].load();
+        const uint64_t vx = m_censusMismatch[0][0].load(), vcx = m_censusMismatch[0][1].load();
+        std::fprintf(stderr,
+                     "[trm1-census] match gif-normal=%llu gif-chain=%llu vif1-normal=%llu vif1-chain=%llu "
+                     "MISMATCH gif-normal=%llu gif-chain=%llu vif1-normal=%llu vif1-chain=%llu\n",
+                     (unsigned long long)gm, (unsigned long long)gc, (unsigned long long)vm,
+                     (unsigned long long)vc, (unsigned long long)gx, (unsigned long long)gcx,
+                     (unsigned long long)vx, (unsigned long long)vcx);
+    }
+}
+
+bool PS2Memory::censusCheckSpans(const std::vector<CensusSpan> &spans, const uint8_t *bytes,
+                                 size_t size) const
+{
+    // Re-read every source span and compare against the kick-time copy.
+    // A difference means the EE rewrote the source between kick and MTVU
+    // consume: the S2 zero-copy hazard. (Deliberately racy reads: the
+    // race IS the signal. Diag-only.)
+    size_t off = 0;
+    for (const CensusSpan &sp : spans)
+    {
+        const uint32_t limit = sp.fromScratchpad ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
+        const uint8_t *base = sp.fromScratchpad ? m_scratchpad : m_rdram;
+        if (!base || sp.phys + sp.len > limit || off + sp.len > size)
+            return false;
+        if (std::memcmp(base + sp.phys, bytes + off, sp.len) != 0)
+            return false;
+        off += sp.len;
+    }
+    return off == size;
+}
+
+void PS2Memory::censusNote(bool gif, bool chain, bool match, uint64_t vsyncTick, size_t size, size_t nspans)
+{
+    if (match)
+    {
+        m_censusMatch[gif ? 1 : 0][chain ? 1 : 0].fetch_add(1u, std::memory_order_relaxed);
+        return;
+    }
+    m_censusMismatch[gif ? 1 : 0][chain ? 1 : 0].fetch_add(1u, std::memory_order_relaxed);
+    if (m_censusLogged.fetch_add(1u, std::memory_order_relaxed) < 32u)
+        std::fprintf(stderr, "[trm1-census] MISMATCH %s-%s tick=%llu bytes=%zu spans=%zu\n",
+                     gif ? "gif" : "vif1", chain ? "chain" : "normal", (unsigned long long)vsyncTick, size,
+                     nspans);
 }
 
 bool PS2Memory::initialize(size_t ramSize)
@@ -2095,6 +2148,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     const int kMaxChainTags = 1 << 20;
                     std::vector<uint8_t> chainBuf = acquireStageBytes(m_chainBufHint);
                     chainBuf.reserve(m_chainBufHint);
+                    // TRM1 piece 3a: source spans for the census (empty unless on).
+                    std::vector<CensusSpan> chainSpans;
 
                     auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
                     {
@@ -2127,6 +2182,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             if (chunk == 0)
                                 break;
                             chainBuf.insert(chainBuf.end(), base2 + src, base2 + src + chunk);
+                            if (m_kickCensus)
+                                chainSpans.push_back(CensusSpan{scratch, src, chunk});
                             bytes -= chunk;
                             src += chunk;
                         }
@@ -2252,6 +2309,8 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (vifTagTransfer)
                         {
                             chainBuf.insert(chainBuf.end(), tp + 8u, tp + 16u);
+                            if (m_kickCensus)
+                                chainSpans.push_back(CensusSpan{tagInSPR, physTag + 8u, 8u});
                         }
 
                         if (hasPayload)
@@ -2287,6 +2346,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         pt.srcAddr = 0;
                         pt.qwc = 0;
                         pt.chainData = std::move(chainBuf);
+                        pt.censusSpans = std::move(chainSpans);
                         if (channelBase == 0x1000A000)
                         {
                             m_pendingGifTransfers.push_back(std::move(pt));
@@ -2425,6 +2485,15 @@ void PS2Memory::processPendingTransfers()
         std::vector<uint8_t> bytes;
     };
     std::vector<MtvuPiece> mtvuPieces;
+    // TRM1 piece 3a: census records paralleling mtvuPieces by index
+    // (census on only; empty otherwise).
+    struct CensusPiece
+    {
+        bool gif;
+        bool chain;
+        std::vector<CensusSpan> spans;
+    };
+    std::vector<CensusPiece> censusPieces;
     size_t mtvuBytes = 0;
     bool mtvuSubmit = false;
     if (ps2_mtvu::threaded() && !ps2_mtvu::onWorker() && (hadGif || !m_pendingVif1Transfers.empty()))
@@ -2434,12 +2503,21 @@ void PS2Memory::processPendingTransfers()
         else
             mtvuSubmit = true;
     }
-    auto mtvuPiece = [&](bool gif, const uint8_t *data, size_t size)
+    auto mtvuPiece = [&](bool gif, bool scratch, uint32_t phys, size_t size)
     {
+        const uint8_t *data = (scratch ? m_scratchpad : m_rdram) + phys;
         // TRM1: pooled buffer; assign() overwrites every byte (PKB1 item 1).
         std::vector<uint8_t> bytes = acquireStageBytes(size);
         bytes.assign(data, data + size);
         mtvuPieces.push_back(MtvuPiece{gif, std::move(bytes)});
+        if (m_kickCensus)
+        {
+            CensusPiece cp;
+            cp.gif = gif;
+            cp.chain = false;
+            cp.spans.push_back(CensusSpan{scratch, phys, static_cast<uint32_t>(size)});
+            censusPieces.push_back(std::move(cp));
+        }
         mtvuBytes += size;
     };
     if (mtvuSubmit)
@@ -2452,6 +2530,14 @@ void PS2Memory::processPendingTransfers()
                 m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
                 mtvuBytes += p.chainData.size();
                 mtvuPieces.push_back(MtvuPiece{true, std::move(p.chainData)});
+                if (m_kickCensus)
+                {
+                    CensusPiece cp;
+                    cp.gif = true;
+                    cp.chain = true;
+                    cp.spans = std::move(p.censusSpans);
+                    censusPieces.push_back(std::move(cp));
+                }
                 continue;
             }
             if (p.qwc == 0)
@@ -2468,7 +2554,6 @@ void PS2Memory::processPendingTransfers()
                 continue;
             }
             const uint32_t limit = p.fromScratchpad ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
-            const uint8_t *base = p.fromScratchpad ? m_scratchpad : m_rdram;
             uint32_t bytesLeft = sizeBytes;
             while (bytesLeft >= 16)
             {
@@ -2481,7 +2566,7 @@ void PS2Memory::processPendingTransfers()
                     break;
                 m_seenGifCopy = true;
                 m_gifCopyCount.fetch_add(1, std::memory_order_relaxed);
-                mtvuPiece(true, base + srcPhys, chunk);
+                mtvuPiece(true, p.fromScratchpad, srcPhys, chunk);
                 bytesLeft -= chunk;
                 srcPhys += chunk;
             }
@@ -2629,6 +2714,14 @@ void PS2Memory::processPendingTransfers()
             {
                 mtvuBytes += p.chainData.size();
                 mtvuPieces.push_back(MtvuPiece{false, std::move(p.chainData)});
+                if (m_kickCensus)
+                {
+                    CensusPiece cp;
+                    cp.gif = false;
+                    cp.chain = true;
+                    cp.spans = std::move(p.censusSpans);
+                    censusPieces.push_back(std::move(cp));
+                }
                 continue;
             }
             if (p.qwc == 0)
@@ -2645,7 +2738,6 @@ void PS2Memory::processPendingTransfers()
                 continue;
             }
             const uint32_t limit = p.fromScratchpad ? PS2_SCRATCHPAD_SIZE : PS2_RAM_SIZE;
-            const uint8_t *base = p.fromScratchpad ? m_scratchpad : m_rdram;
             uint32_t bytesLeft = sizeBytes;
             while (bytesLeft > 0)
             {
@@ -2656,7 +2748,7 @@ void PS2Memory::processPendingTransfers()
                     chunk = limit - srcPhys;
                 if (chunk == 0)
                     break;
-                mtvuPiece(false, base + srcPhys, chunk);
+                mtvuPiece(false, p.fromScratchpad, srcPhys, chunk);
                 bytesLeft -= chunk;
                 srcPhys += chunk;
             }
@@ -2743,8 +2835,19 @@ void PS2Memory::processPendingTransfers()
                 ps2_mtvu::ge3EpOnSet(1u);
             }
         }
-        ps2_mtvu::submit([this, pieces = std::move(mtvuPieces)]() mutable
+        ps2_mtvu::submit([this, pieces = std::move(mtvuPieces), census = std::move(censusPieces)]() mutable
                          {
+            // TRM1 piece 3a: re-read every source span and compare against
+            // the kick-time copy (census on only; empty otherwise).
+            if (!census.empty())
+            {
+                const uint64_t tick = gs_regs.vsyncTick.load();
+                for (size_t i = 0; i < census.size() && i < pieces.size(); ++i)
+                    censusNote(census[i].gif, census[i].chain,
+                               censusCheckSpans(census[i].spans, pieces[i].bytes.data(),
+                                                pieces[i].bytes.size()),
+                               tick, pieces[i].bytes.size(), census[i].spans.size());
+            }
             for (MtvuPiece &piece : pieces)
             {
                 const uint32_t size = static_cast<uint32_t>(piece.bytes.size());
