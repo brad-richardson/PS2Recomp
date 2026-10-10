@@ -331,6 +331,33 @@ extern "C" GE1_API int ge1_gs_open(int blending_level)
     // UR2: upscale fixes (only > 1x), anisotropic + trilinear filtering. Unset = today.
     configure_filtering(config);
     configure_texture_replacement(config);
+    // OUT1: output-chain levers. All default off (config untouched when unset).
+    //   GE1_MERGE_SKIP=1           skip the single-circuit opaque merge (exact).
+    //   GE1_EXPORT_DIRECT=1        render the stretch straight into the AHB.
+    //   PS2X_PRESENT_PREROTATE=1|2 pre-rotated portrait AHB, sense 1 (CCW) / 2 (CW).
+    if (const char* ms = std::getenv("GE1_MERGE_SKIP"); ms && std::strcmp(ms, "1") == 0)
+    {
+        config.MergeSkip = true;
+        std::fprintf(stderr, "OUT1: merge skip on (thread-gated)\n");
+    }
+    if (const char* ed = std::getenv("GE1_EXPORT_DIRECT"); ed && std::strcmp(ed, "1") == 0)
+    {
+        config.ExportDirect = true;
+        std::fprintf(stderr, "OUT1: direct-to-AHB export on\n");
+    }
+    if (const char* pr = std::getenv("PS2X_PRESENT_PREROTATE"); pr && *pr)
+    {
+        const int sense = std::atoi(pr);
+        if (sense == 1 || sense == 2)
+        {
+            config.Prerotate = sense;
+            std::fprintf(stderr, "OUT1: prerotate sense %d on\n", sense);
+        }
+        else
+        {
+            std::fprintf(stderr, "OUT1: PS2X_PRESENT_PREROTATE=%s ignored (want 1|2)\n", pr);
+        }
+    }
     // GE4: Adreno sw-blend workaround (menu font static). Env-gated, default off.
     if (const char* bmix = std::getenv("GE1_ADRENO_BLEND_MIX"); bmix && std::strcmp(bmix, "1") == 0)
         config.AdrenoPreferBlendMix = true;
