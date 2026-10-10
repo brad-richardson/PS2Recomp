@@ -343,6 +343,7 @@ void EeScheduler::reset(uint8_t *rdram, const R5900Context &mainContext)
     {
         std::lock_guard lock(m_eventMutex);
         m_events.clear();
+        m_eventsQueued.store(0u, std::memory_order_relaxed);
         m_deadlines.clear();
         m_pendingInvocations.clear();
     }
@@ -977,6 +978,9 @@ void EeScheduler::postEvent(EeEvent event)
     {
         std::lock_guard lock(m_eventMutex);
         m_events.push_back(event);
+        // TRM1 (S1): count first, then the checkpoint flag (the consumer's
+        // re-check below depends on this order).
+        m_eventsQueued.store(m_events.size(), std::memory_order_release);
         m_checkpointPending.store(true, std::memory_order_release);
     }
     m_eventCv.notify_one();
@@ -2652,9 +2656,13 @@ void EeScheduler::processPendingEvents()
         }
     }
     std::deque<EeEvent> pending;
+    // TRM1 (S1): production never queues host events; skip the mutex when
+    // the queue is empty (the steady state).
+    if (m_eventsQueued.load(std::memory_order_acquire) != 0u)
     {
         std::lock_guard lock(m_eventMutex);
         pending.swap(m_events);
+        m_eventsQueued.store(0u, std::memory_order_relaxed);
     }
     for (const EeEvent &event : pending)
     {
@@ -2662,17 +2670,31 @@ void EeScheduler::processPendingEvents()
     }
 
     {
-        std::lock_guard lock(m_eventMutex);
+        // TRM1 (S1): the recompute reads atomics only (m_eeCycle is
+        // executor-owned); no mutex. The re-check after a false store
+        // closes the clear-vs-set race with postEvent: a push that lands
+        // before the second load re-stores true here, and one that lands
+        // after has its own store(true) ordered after our store(false).
         const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
         const bool cycleEventDue = nextEventCycle != 0u && m_eeCycle >= nextEventCycle;
-        const bool pendingWork = !m_events.empty() || cycleEventDue || m_stopRequested.load(std::memory_order_acquire);
+        const bool pendingWork = m_eventsQueued.load(std::memory_order_acquire) != 0u || cycleEventDue ||
+                                 m_stopRequested.load(std::memory_order_acquire);
         m_checkpointPending.store(pendingWork, std::memory_order_release);
+        if (!pendingWork && m_eventsQueued.load(std::memory_order_acquire) != 0u)
+            m_checkpointPending.store(true, std::memory_order_release);
     }
     applyPendingPreemption();
 }
 
 void EeScheduler::processDueDeadlines()
 {
+    // TRM1 (S1): no deadlines (the steady state) skips the mutex. Every
+    // scheduled deadline is strictly positive and every mutation calls
+    // updateNextDeadline, so 0 means the list is empty and both drain
+    // paths below would be no-ops (a stale non-zero after reset() only
+    // skips the skip, the safe direction).
+    if (m_nextDeadlineCycle.load(std::memory_order_acquire) == 0u)
+        return;
     for (;;)
     {
         std::vector<ScheduledEvent> due;

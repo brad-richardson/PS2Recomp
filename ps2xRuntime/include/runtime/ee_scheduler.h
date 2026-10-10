@@ -576,6 +576,11 @@ private:
     mutable std::mutex m_eventMutex;
     std::condition_variable m_eventCv;
     std::deque<EeEvent> m_events;
+    // TRM1 (S1): lock-free hint mirroring m_events.size(). Maintained
+    // under m_eventMutex at every mutation (postEvent, the per-iteration
+    // swap, reset, savestate load); the per-iteration takes lock only
+    // when non-zero. Host-side mirror: never serialized.
+    std::atomic<size_t> m_eventsQueued{0};
     std::vector<ScheduledEvent> m_deadlines;
     std::deque<GuestInvocation> m_pendingInvocations;
     uint64_t m_eventSequence = 0;

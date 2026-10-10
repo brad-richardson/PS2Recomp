@@ -523,6 +523,11 @@ public:
     void freeStagedGif(std::vector<uint8_t> *bytes);
     std::mutex m_completedDmacMutex;
     std::vector<uint32_t> m_completedDmacCauses;
+    // TRM1 (S1): lock-free hint mirroring m_completedDmacCauses.size().
+    // Maintained under m_completedDmacMutex (and at the same-thread init
+    // / savestate-load clears); consume() locks only when non-zero.
+    // Host-side mirror: never serialized.
+    std::atomic<size_t> m_completedDmacCount{0};
 
     struct CodeRegion
     {

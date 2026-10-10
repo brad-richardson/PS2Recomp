@@ -328,6 +328,9 @@ bool EeSchedulerSavestate::load(EeScheduler &s, Reader &r, PS2Runtime &runtime)
             r.pod(e);
             s.m_events.push_back(e);
         }
+        // TRM1 (S1): the load path rebuilds the host-side mirror (stuck-
+        // at-0 would skip a non-empty queue).
+        s.m_eventsQueued.store(s.m_events.size(), std::memory_order_relaxed);
         const int64_t nowNs = steadyNowNs();
         s.m_deadlines.resize(static_cast<size_t>(r.count(1u << 20)));
         for (auto &d : s.m_deadlines)

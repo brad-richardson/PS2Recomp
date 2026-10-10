@@ -26,6 +26,7 @@
 #include "runtime/ps2_vu0.h"
 #include "runtime/ps2_vu1.h"
 
+#include <atomic>
 #include <chrono>
 #include <algorithm>
 #include <cinttypes>
@@ -1344,6 +1345,20 @@ namespace ps2_savestate
             static QuickRequest q;
             return q;
         }
+        // TRM1 (S1): lock-free hint for the per-iteration polls. Bit0 =
+        // save live, bit1 = load live. Set by producers and recomputed
+        // from the strings by consumers/clearers, always under the mutex,
+        // so the bits mirror the strings exactly; consumers lock only
+        // when a bit is set and re-read the strings (source of truth).
+        std::atomic<uint32_t> &quickBits()
+        {
+            static std::atomic<uint32_t> bits{0u};
+            return bits;
+        }
+        uint32_t quickBitsFor(const QuickRequest &q)
+        {
+            return (!q.savePath.empty() ? 1u : 0u) | (!q.loadPath.empty() ? 2u : 0u);
+        }
         struct QuickStatus
         {
             std::mutex mutex;
@@ -1376,6 +1391,7 @@ namespace ps2_savestate
         if (!quickRequests().savePath.empty() || !quickRequests().loadPath.empty())
             return false;
         quickRequests().savePath = path;
+        quickBits().fetch_or(1u, std::memory_order_release);
         std::fprintf(stderr, "[savestate] quick-save requested path=%s\n", path.c_str());
         return true;
     }
@@ -1388,6 +1404,7 @@ namespace ps2_savestate
         if (!quickRequests().savePath.empty() || !quickRequests().loadPath.empty())
             return false;
         quickRequests().loadPath = path;
+        quickBits().fetch_or(2u, std::memory_order_release);
         std::fprintf(stderr, "[savestate] quick-load requested path=%s\n", path.c_str());
         return true;
     }
@@ -1412,19 +1429,34 @@ namespace ps2_savestate
 
     bool takePendingQuickLoad(std::string &path)
     {
+        // TRM1 (S1): no request in flight (the steady state) skips the
+        // mutex; the slow path re-reads the strings under the lock.
+        if ((quickBits().load(std::memory_order_acquire) & 2u) == 0u)
+            return false;
         std::lock_guard<std::mutex> lock(quickRequests().mutex);
         if (quickRequests().loadPath.empty())
+        {
+            quickBits().store(quickBitsFor(quickRequests()), std::memory_order_relaxed);
             return false;
+        }
         path = quickRequests().loadPath;
         quickRequests().loadPath.clear();
+        quickBits().store(quickBitsFor(quickRequests()), std::memory_order_relaxed);
         return true;
     }
 
     bool pendingQuickSavePath(std::string &path)
     {
+        // TRM1 (S1): same fast-out as takePendingQuickLoad (peek: the
+        // bits are unchanged on this path).
+        if ((quickBits().load(std::memory_order_acquire) & 1u) == 0u)
+            return false;
         std::lock_guard<std::mutex> lock(quickRequests().mutex);
         if (quickRequests().savePath.empty())
+        {
+            quickBits().store(quickBitsFor(quickRequests()), std::memory_order_relaxed);
             return false;
+        }
         path = quickRequests().savePath;
         return true;
     }
@@ -1433,6 +1465,7 @@ namespace ps2_savestate
     {
         std::lock_guard<std::mutex> lock(quickRequests().mutex);
         quickRequests().savePath.clear();
+        quickBits().store(quickBitsFor(quickRequests()), std::memory_order_relaxed);
     }
 
     void noteQuickStatus(const std::string &message)
@@ -1826,6 +1859,9 @@ bool PS2RuntimeSavestate::loadMemory(PS2Memory &m, Reader &r)
     m.m_pendingVif0Transfers.clear();
     m.m_pendingVif1Transfers.clear();
     m.m_completedDmacCauses.clear();
+    // TRM1 (S1): the load path rebuilds the host-side mirror (same thread
+    // as every producer; stuck-at-0 would skip a non-empty queue).
+    m.m_completedDmacCount.store(0u, std::memory_order_relaxed);
     // VU decode/recomp caches key on the code generation.
     m.markVU0CodeModified();
     m.markVU1CodeModified();

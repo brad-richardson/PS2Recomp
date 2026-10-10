@@ -548,6 +548,7 @@ bool PS2Memory::initialize(size_t ramSize)
     {
         std::lock_guard<std::mutex> lock(m_completedDmacMutex);
         m_completedDmacCauses.clear();
+        m_completedDmacCount.store(0u, std::memory_order_relaxed);
     }
     m_codeRegions.clear();
     m_path3Masked = false;
@@ -2820,13 +2821,19 @@ void PS2Memory::queueCompletedDmacCause(uint32_t cause)
 {
     std::lock_guard<std::mutex> lock(m_completedDmacMutex);
     m_completedDmacCauses.push_back(cause);
+    m_completedDmacCount.store(m_completedDmacCauses.size(), std::memory_order_relaxed);
 }
 
 std::vector<uint32_t> PS2Memory::consumeCompletedDmacCauses()
 {
+    // TRM1 (S1): nothing completed (the steady state) skips the mutex
+    // and the result vector; the slow path swaps under the lock.
+    if (m_completedDmacCount.load(std::memory_order_acquire) == 0u)
+        return {};
     std::lock_guard<std::mutex> lock(m_completedDmacMutex);
     std::vector<uint32_t> causes;
     causes.swap(m_completedDmacCauses);
+    m_completedDmacCount.store(0u, std::memory_order_relaxed);
     return causes;
 }
 
