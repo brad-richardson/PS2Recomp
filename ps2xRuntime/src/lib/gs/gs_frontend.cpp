@@ -2,7 +2,6 @@
 #include "ps2_fpmode.h"
 #include "ps2_e7.h"
 #include "ps2_mtvu.h"
-#include "ps2_tls_cache.h"
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_stream_capture.h"
 #include "runtime/gs/ge1_gs_api.h"
@@ -277,18 +276,6 @@ namespace
         GsWorkerScope() { t_inGsWorker = true; }
         ~GsWorkerScope() { t_inGsWorker = false; }
     };
-
-    // TLS2: cached address of the noted GIF thread's t_inGsWorker, resolved
-    // once at its entry (knob on). Same object; only the live noted GIF
-    // thread reads through it (see ps2_tls_cache.h). Hot submit paths use
-    // inGsWorker(); cold sites keep reading the thread-local directly.
-    bool *g_hotInGsWorker = nullptr;
-    bool inGsWorker()
-    {
-        if (ps2_tls_cache::enabled() && ps2_mtvu::onGifStage())
-            return *g_hotInGsWorker;
-        return t_inGsWorker;
-    }
 
     struct QueuedPreferredSource
     {
@@ -1399,7 +1386,7 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
 void GS::processGIFPacketWithPath(GifPathId path, bool notePath, std::vector<uint8_t> &bytes)
 {
     const uint32_t sizeBytes = static_cast<uint32_t>(bytes.size());
-    if (!m_worker || inGsWorker() || sizeBytes < 16u)
+    if (!m_worker || t_inGsWorker || sizeBytes < 16u)
     {
         if (notePath)
             noteGifPath(path);
@@ -1435,7 +1422,7 @@ void GS::processViewWithPath(GifPathId path, bool notePath, GsGifArenaRef arena,
     // (a view into the batch instead of a moved vector).
     const bool valid =
         arena && len >= 16u && static_cast<size_t>(off) + len <= GsGifArena::kBytes;
-    if (!m_worker || inGsWorker() || !valid)
+    if (!m_worker || t_inGsWorker || !valid)
     {
         if (notePath)
             noteGifPath(path);
@@ -2136,13 +2123,6 @@ std::array<uint64_t, 19> ge2SnapshotPrivRegs(const GSRegisters &r)
         r.siglblid.load(std::memory_order_acquire)};
 }
 } // namespace
-
-// TLS2 note (see ps2_tls_cache.h): resolve this thread's t_inGsWorker
-// address. Runs once, on the GIF stage thread, at its entry (knob on only).
-void ps2_tls_cache::noteGsFrontendCache()
-{
-    g_hotInGsWorker = &t_inGsWorker;
-}
 
 void GS::privWrite(std::function<void()> apply)
 {

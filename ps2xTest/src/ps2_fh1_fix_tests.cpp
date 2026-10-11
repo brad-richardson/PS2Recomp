@@ -246,22 +246,13 @@ void register_ps2_fh1_fix_tests()
             t.Equals(parseFix("vnret").main, static_cast<uint64_t>(kFixVnRet), "vnret alone");
         });
 
-        tc.Run("JMP5 springhold is opt-in at bit 51", [](TestCase &t)
+        tc.Run("KNC5 bit 51 stays reserved and parses (JMP5 springhold removed)", [](TestCase &t)
         {
-            t.Equals(static_cast<uint64_t>(kFixSpringHold), 1ull << 51, "springhold uses bit 51");
+            t.Equals(static_cast<uint64_t>(kFixSpringHold), 1ull << 51, "bit 51 reserved");
             t.IsTrue((kFixAll & kFixSpringHold) == 0u, "excluded from all");
-            t.Equals(parseFix("all,springhold").main, kFixAll | kFixSpringHold, "opt-in");
+            t.Equals(parseFix("all,springhold").main, kFixAll | kFixSpringHold, "old envs keep parsing");
             t.Equals(parseFix("all,springhold,-springhold").main, kFixAll, "opt-out");
             t.Equals(parseFix("springhold").main, static_cast<uint64_t>(kFixSpringHold), "springhold alone");
-        });
-
-        tc.Run("JMP5 springhold reuses only a fresh same-owner hold", [](TestCase &t)
-        {
-            t.IsTrue(springHoldQualify(0x144a130u, 41u, 0x144a130u, 42u), "capture from the preceding even update qualifies");
-            t.IsTrue(!springHoldQualify(0x144a130u, 41u, 0x144a130u, 43u), "a two-update-old capture is stale");
-            t.IsTrue(!springHoldQualify(0x144a130u, 41u, 0x144b200u, 42u), "another owner's slot never qualifies");
-            t.IsTrue(!springHoldQualify(0u, 41u, 0x144a130u, 42u), "an empty slot never qualifies");
-            t.IsTrue(!springHoldQualify(0x144a130u, 42u, 0x144a130u, 42u), "a same-update capture never qualifies");
         });
 
         tc.Run("all includes stick2 and clocksign (FH26, Brad 10-02) and both masks", [](TestCase &t)

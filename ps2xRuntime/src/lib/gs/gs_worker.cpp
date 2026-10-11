@@ -4,7 +4,6 @@
 #include "ps2_mtvu.h"
 #include "ps2_perf_log.h"
 #include "ps2_thread_affinity.h"
-#include "ps2_tls_cache.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -45,33 +44,6 @@ std::atomic<uint64_t> s_arenaViews{0}; // receipts: views appended to batches
 thread_local std::vector<GsGifArenaRef> t_batchArenas;
 thread_local std::vector<uint32_t> t_batchSubOff;
 thread_local size_t t_batchViewBytes = 0u;
-// TLS2: cached addresses of this thread's hot TLS above, resolved once at
-// GIF-stage entry (knob on). Same objects; hot functions bind local refs to
-// the cache when it is live, else to the thread-locals. Only the live noted
-// GIF thread ever sees a non-null cache (see ps2_tls_cache.h), so this
-// struct is effectively single-threaded.
-struct WorkerTlsCache
-{
-    uint64_t **enqueueWaitSink = nullptr;
-    uint32_t *localBatchDepth = nullptr;
-    std::vector<GsCommand> *staged = nullptr;
-    GsWorker **stagedWorker = nullptr;
-    size_t *stagedBytes = nullptr;
-    std::vector<uint8_t> *batch = nullptr;
-    std::vector<uint32_t> *batchSubs = nullptr;
-    std::vector<std::vector<uint8_t>> *batchSources = nullptr;
-    GsWorker **batchWorker = nullptr;
-    std::vector<GsGifArenaRef> *batchArenas = nullptr;
-    std::vector<uint32_t> *batchSubOff = nullptr;
-    size_t *batchViewBytes = nullptr;
-};
-WorkerTlsCache g_hotTlsCache{};
-WorkerTlsCache *hotTlsCache()
-{
-    if (!ps2_tls_cache::enabled() || !ps2_mtvu::onGifStage())
-        return nullptr;
-    return &g_hotTlsCache;
-}
 // GSW2: GS queue wake hysteresis (PS2X_GS_WAKE_LOWWATER=<n>, default off =
 // 0/unset/invalid). In a GS-bound window the queue is full, so every pop
 // batch freed a little space and did m_hasSpace.notify_all(), waking the
@@ -105,46 +77,15 @@ uint64_t steadyNowNs()
 }
 } // namespace
 
-// TLS2 note (see ps2_tls_cache.h): resolve this thread's hot TLS addresses.
-// Runs once, on the GIF stage thread, at its entry (knob on only).
-void ps2_tls_cache::noteGsWorkerCache()
-{
-    g_hotTlsCache.enqueueWaitSink = &t_enqueueWaitSink;
-    g_hotTlsCache.localBatchDepth = &t_localBatchDepth;
-    g_hotTlsCache.staged = &t_staged;
-    g_hotTlsCache.stagedWorker = &t_stagedWorker;
-    g_hotTlsCache.stagedBytes = &t_stagedBytes;
-    g_hotTlsCache.batch = &t_batch;
-    g_hotTlsCache.batchSubs = &t_batchSubs;
-    g_hotTlsCache.batchSources = &t_batchSources;
-    g_hotTlsCache.batchWorker = &t_batchWorker;
-    g_hotTlsCache.batchArenas = &t_batchArenas;
-    g_hotTlsCache.batchSubOff = &t_batchSubOff;
-    g_hotTlsCache.batchViewBytes = &t_batchViewBytes;
-}
-
 void GsWorker::beginLocalBatch()
 {
-    if (WorkerTlsCache *hot = hotTlsCache())
-        ++*hot->localBatchDepth;
-    else
-        ++t_localBatchDepth;
+    ++t_localBatchDepth;
 }
 
 void GsWorker::endLocalBatch()
 {
-    if (WorkerTlsCache *hot = hotTlsCache())
-    {
-        if (*hot->localBatchDepth != 0u)
-            --*hot->localBatchDepth;
-    }
-    else if (t_localBatchDepth != 0u)
+    if (t_localBatchDepth != 0u)
         --t_localBatchDepth;
-}
-
-bool GsWorker::tlsCacheLiveForTest()
-{
-    return hotTlsCache() != nullptr;
 }
 
 void GsWorker::setEnqueueWaitSink(uint64_t *sink)
@@ -159,40 +100,28 @@ void GsWorker::setStagedPublish(bool on)
 
 void GsWorker::flushStaged()
 {
-    // TLS2: same objects via the cache when it is live, else the thread-locals.
-    // The worker binds only past the empty check, so the fallback keeps
-    // today's TLS count on every path.
-    WorkerTlsCache *hot = hotTlsCache();
-    std::vector<GsCommand> &staged = hot ? *hot->staged : t_staged;
-    if (!staged.empty())
-    {
-        GsWorker *&stagedWorker = hot ? *hot->stagedWorker : t_stagedWorker;
-        stagedWorker->publishStaged();
-    }
+    if (!t_staged.empty())
+        t_stagedWorker->publishStaged();
 }
 
 void GsWorker::publishStaged()
 {
-    WorkerTlsCache *hot = hotTlsCache();
-    uint32_t &localDepth = hot ? *hot->localBatchDepth : t_localBatchDepth;
-    std::vector<GsCommand> &staged = hot ? *hot->staged : t_staged;
-    size_t &stagedBytes = hot ? *hot->stagedBytes : t_stagedBytes;
     s_stagedRounds.fetch_add(1u, std::memory_order_relaxed);
     // Staged commands were local-batch enqueues: admit them as such.
-    ++localDepth;
+    ++t_localBatchDepth;
     bool wake = false;
     {
         std::unique_lock<std::mutex> lock(m_mutex);
-        for (GsCommand &cmd : staged)
+        for (GsCommand &cmd : t_staged)
         {
             if (!lock.owns_lock())
                 lock.lock();
             wake |= admitLocked(lock, cmd);
         }
     }
-    --localDepth;
-    staged.clear();
-    stagedBytes = 0;
+    --t_localBatchDepth;
+    t_staged.clear();
+    t_stagedBytes = 0;
     if (wake)
     {
         m_wakes.fetch_add(1u, std::memory_order_relaxed);
@@ -209,13 +138,8 @@ void GsWorker::setGifBatch(bool on, size_t maxBytes)
 
 void GsWorker::flushGifBatch()
 {
-    WorkerTlsCache *hot = hotTlsCache();
-    std::vector<uint32_t> &batchSubs = hot ? *hot->batchSubs : t_batchSubs;
-    if (!batchSubs.empty())
-    {
-        GsWorker *&batchWorker = hot ? *hot->batchWorker : t_batchWorker;
-        batchWorker->publishBatch();
-    }
+    if (!t_batchSubs.empty())
+        t_batchWorker->publishBatch();
 }
 
 void GsWorker::setBatchPool(GsPacketPool *pool)
@@ -250,52 +174,44 @@ uint64_t GsWorker::gifArenaViews()
 
 void GsWorker::publishBatch()
 {
-    WorkerTlsCache *hot = hotTlsCache();
-    std::vector<uint32_t> &batchSubs = hot ? *hot->batchSubs : t_batchSubs;
-    if (batchSubs.empty())
+    if (t_batchSubs.empty())
         return;
-    uint32_t &localDepth = hot ? *hot->localBatchDepth : t_localBatchDepth;
-    std::vector<uint8_t> &batch = hot ? *hot->batch : t_batch;
-    std::vector<std::vector<uint8_t>> &batchSources = hot ? *hot->batchSources : t_batchSources;
-    std::vector<GsGifArenaRef> &batchArenas = hot ? *hot->batchArenas : t_batchArenas;
-    std::vector<uint32_t> &batchSubOff = hot ? *hot->batchSubOff : t_batchSubOff;
-    size_t &batchViewBytes = hot ? *hot->batchViewBytes : t_batchViewBytes;
     s_batchRounds.fetch_add(1u, std::memory_order_relaxed);
-    s_batchedCmds.fetch_add(batchSubs.size(), std::memory_order_relaxed);
+    s_batchedCmds.fetch_add(t_batchSubs.size(), std::memory_order_relaxed);
     // The sources are dead after the memcpy: return them to the pool under
     // one lock round, before the queue mutex (the worker never holds m_mutex
     // while pooling, so the order cannot invert).
     if (m_batchPool)
-        m_batchPool->releaseBulk(batchSources);
+        m_batchPool->releaseBulk(t_batchSources);
     else
-        batchSources.clear();
+        t_batchSources.clear();
     GsCommand cmd;
     cmd.kind = GsCmdKind::GifBatch;
-    if (!batchArenas.empty())
+    if (!t_batchArenas.empty())
     {
         // GSB2: the batch is views (no contiguous bytes were built): the
         // arenas move with it and retire when the worker consumes it.
-        cmd.arenas = std::move(batchArenas);
-        cmd.subOff = std::move(batchSubOff);
-        batchArenas.clear();
-        batchSubOff.clear();
-        batchViewBytes = 0u;
+        cmd.arenas = std::move(t_batchArenas);
+        cmd.subOff = std::move(t_batchSubOff);
+        t_batchArenas.clear();
+        t_batchSubOff.clear();
+        t_batchViewBytes = 0u;
     }
     else
     {
-        cmd.bytes = std::move(batch);
-        batch.clear();
+        cmd.bytes = std::move(t_batch);
+        t_batch.clear();
     }
-    cmd.subs = std::move(batchSubs);
-    batchSubs.clear();
+    cmd.subs = std::move(t_batchSubs);
+    t_batchSubs.clear();
     // Batched packets were local-batch enqueues: admit the batch as such.
-    ++localDepth;
+    ++t_localBatchDepth;
     bool wake = false;
     {
         std::unique_lock<std::mutex> lock(m_mutex);
         wake = admitLocked(lock, cmd);
     }
-    --localDepth;
+    --t_localBatchDepth;
     if (wake)
     {
         m_wakes.fetch_add(1u, std::memory_order_relaxed);
@@ -359,45 +275,36 @@ void GsWorker::enqueue(GsCommand cmd)
         ps2_mtvu::vifStageNoteEscape();
     if (s_gifBatch.load(std::memory_order_relaxed))
     {
-        // TLS2: same objects via the cache when it is live, else the thread-locals.
-        // The batch binds only inside the batchable arm, so the fallback keeps
-        // today's TLS count on the publish-first path too.
-        WorkerTlsCache *hot = hotTlsCache();
-        uint32_t &localDepth = hot ? *hot->localBatchDepth : t_localBatchDepth;
         // GSB1: append a local-batch GifPacket from the GIF stage to this
         // thread's batch; anything else publishes the batch first, so the
         // RPC keeps its stream position (GPK1 staging is bypassed on the
         // batching thread; see the header). GSB2: while the arena is on,
         // owned-byte packets are never appended (they enqueue alone below,
         // as oversize ones do); views arrive through enqueueView.
-        if (localDepth != 0u && !cmd.rpc && cmd.kind == GsCmdKind::GifPacket &&
+        if (t_localBatchDepth != 0u && !cmd.rpc && cmd.kind == GsCmdKind::GifPacket &&
             ps2_mtvu::onGifStage() && !s_gifArena.load(std::memory_order_relaxed))
         {
-            std::vector<uint8_t> &batch = hot ? *hot->batch : t_batch;
-            std::vector<uint32_t> &batchSubs = hot ? *hot->batchSubs : t_batchSubs;
-            std::vector<std::vector<uint8_t>> &batchSources = hot ? *hot->batchSources : t_batchSources;
-            GsWorker *&batchWorker = hot ? *hot->batchWorker : t_batchWorker;
-            if (batchWorker != this)
+            if (t_batchWorker != this)
                 flushGifBatch();
-            batchWorker = this;
+            t_batchWorker = this;
             const size_t cap = s_gifBatchBytes.load(std::memory_order_relaxed);
             const size_t size = cmd.bytes.size();
-            if (!batchSubs.empty() && batch.size() + size > cap)
+            if (!t_batchSubs.empty() && t_batch.size() + size > cap)
                 publishBatch();
             // Oversize (or unencodable) packets fall through and enqueue
             // alone, exactly as today; the pending batch went above.
             if (size <= cap && size <= kGsGifBatchSubLenMask)
             {
-                if (batchSubs.empty())
-                    batch.reserve(cap < kGifBatchDefaultBytes ? cap : kGifBatchDefaultBytes);
+                if (t_batchSubs.empty())
+                    t_batch.reserve(cap < kGifBatchDefaultBytes ? cap : kGifBatchDefaultBytes);
                 const uint32_t entry =
                     ((cmd.u32a & kGsGifPacketHasPath) != 0u ? kGsGifBatchSubNote : 0u) |
                     ((static_cast<uint32_t>(cmd.pathId) & kGsGifBatchSubPathMask)
                      << kGsGifBatchSubPathShift) |
                     static_cast<uint32_t>(size);
-                batchSubs.push_back(entry);
-                batch.insert(batch.end(), cmd.bytes.begin(), cmd.bytes.end());
-                batchSources.push_back(std::move(cmd.bytes));
+                t_batchSubs.push_back(entry);
+                t_batch.insert(t_batch.end(), cmd.bytes.begin(), cmd.bytes.end());
+                t_batchSources.push_back(std::move(cmd.bytes));
                 return;
             }
         }
@@ -406,21 +313,16 @@ void GsWorker::enqueue(GsCommand cmd)
     }
     else if (s_stagedPublish.load(std::memory_order_relaxed))
     {
-        WorkerTlsCache *hot = hotTlsCache();
-        uint32_t &localDepth = hot ? *hot->localBatchDepth : t_localBatchDepth;
         // GPK1: stage a fire-and-forget local-batch command from the GIF
         // stage; anything else publishes this thread's stage first.
-        if (localDepth != 0u && !cmd.rpc && ps2_mtvu::onGifStage())
+        if (t_localBatchDepth != 0u && !cmd.rpc && ps2_mtvu::onGifStage())
         {
-            std::vector<GsCommand> &staged = hot ? *hot->staged : t_staged;
-            GsWorker *&stagedWorker = hot ? *hot->stagedWorker : t_stagedWorker;
-            size_t &stagedBytes = hot ? *hot->stagedBytes : t_stagedBytes;
-            if (stagedWorker != this)
+            if (t_stagedWorker != this)
                 flushStaged();
-            stagedWorker = this;
-            stagedBytes += cmd.payloadBytes();
-            staged.push_back(std::move(cmd));
-            if (staged.size() >= kStageMaxCommands || stagedBytes >= kStageMaxBytes)
+            t_stagedWorker = this;
+            t_stagedBytes += cmd.payloadBytes();
+            t_staged.push_back(std::move(cmd));
+            if (t_staged.size() >= kStageMaxCommands || t_stagedBytes >= kStageMaxBytes)
                 publishStaged();
             return;
         }
@@ -449,38 +351,30 @@ void GsWorker::enqueueView(uint8_t pathId, bool notePath, GsGifArenaRef arena, u
     // GSB1's oversize packets do.
     const size_t size = static_cast<size_t>(len);
     bool batched = false;
-    // TLS2: same objects via the cache when it is live, else the thread-locals.
-    WorkerTlsCache *hot = hotTlsCache();
-    uint32_t &localDepth = hot ? *hot->localBatchDepth : t_localBatchDepth;
     if (s_gifBatch.load(std::memory_order_relaxed) && s_gifArena.load(std::memory_order_relaxed) &&
-        arena && localDepth != 0u && ps2_mtvu::onGifStage())
+        arena && t_localBatchDepth != 0u && ps2_mtvu::onGifStage())
     {
-        std::vector<uint32_t> &batchSubs = hot ? *hot->batchSubs : t_batchSubs;
-        GsWorker *&batchWorker = hot ? *hot->batchWorker : t_batchWorker;
-        std::vector<GsGifArenaRef> &batchArenas = hot ? *hot->batchArenas : t_batchArenas;
-        std::vector<uint32_t> &batchSubOff = hot ? *hot->batchSubOff : t_batchSubOff;
-        size_t &batchViewBytes = hot ? *hot->batchViewBytes : t_batchViewBytes;
-        if (batchWorker != this)
+        if (t_batchWorker != this)
             flushGifBatch();
-        batchWorker = this;
+        t_batchWorker = this;
         const size_t cap = s_gifBatchBytes.load(std::memory_order_relaxed);
         const bool newArena =
-            batchArenas.empty() || batchArenas.back().get() != arena.get();
-        if (!batchSubs.empty() &&
-            (batchViewBytes + size > cap ||
-             (newArena && batchArenas.size() > kGsGifBatchSubOffSlotMax)))
+            t_batchArenas.empty() || t_batchArenas.back().get() != arena.get();
+        if (!t_batchSubs.empty() &&
+            (t_batchViewBytes + size > cap ||
+             (newArena && t_batchArenas.size() > kGsGifBatchSubOffSlotMax)))
             publishBatch();
         if (size <= cap && size <= kGsGifBatchSubLenMask &&
-            batchArenas.size() <= kGsGifBatchSubOffSlotMax &&
+            t_batchArenas.size() <= kGsGifBatchSubOffSlotMax &&
             static_cast<size_t>(off) + size <= GsGifArena::kBytes)
         {
             uint32_t slot = 0u;
-            if (!batchArenas.empty() && batchArenas.back().get() == arena.get())
-                slot = static_cast<uint32_t>(batchArenas.size() - 1u);
+            if (!t_batchArenas.empty() && t_batchArenas.back().get() == arena.get())
+                slot = static_cast<uint32_t>(t_batchArenas.size() - 1u);
             else
             {
-                slot = static_cast<uint32_t>(batchArenas.size());
-                batchArenas.push_back(std::move(arena));
+                slot = static_cast<uint32_t>(t_batchArenas.size());
+                t_batchArenas.push_back(std::move(arena));
             }
             // Views of one arena arrive in fill order (the producer seals it
             // before opening the next), so consecutive views share the slot.
@@ -488,10 +382,10 @@ void GsWorker::enqueueView(uint8_t pathId, bool notePath, GsGifArenaRef arena, u
                                    ((static_cast<uint32_t>(pathId) & kGsGifBatchSubPathMask)
                                     << kGsGifBatchSubPathShift) |
                                    static_cast<uint32_t>(size);
-            batchSubs.push_back(entry);
-            batchSubOff.push_back((slot << kGsGifBatchSubOffSlotShift) |
-                                  (off & kGsGifBatchSubOffMask));
-            batchViewBytes += size;
+            t_batchSubs.push_back(entry);
+            t_batchSubOff.push_back((slot << kGsGifBatchSubOffSlotShift) |
+                                    (off & kGsGifBatchSubOffMask));
+            t_batchViewBytes += size;
             s_arenaViews.fetch_add(1u, std::memory_order_relaxed);
             batched = true;
         }
@@ -516,9 +410,6 @@ void GsWorker::enqueueView(uint8_t pathId, bool notePath, GsGifArenaRef arena, u
 
 bool GsWorker::admitLocked(std::unique_lock<std::mutex> &lock, GsCommand &cmd)
 {
-    // TLS2: same objects via the cache when it is live, else the thread-locals.
-    WorkerTlsCache *hot = hotTlsCache();
-    uint32_t &localDepth = hot ? *hot->localBatchDepth : t_localBatchDepth;
     const size_t bytes = cmd.payloadBytes();
     const bool hasRpc = cmd.rpc != nullptr;
     // Backpressure: a full ring blocks the producer (GIF FIFO-full stall).
@@ -555,8 +446,7 @@ bool GsWorker::admitLocked(std::unique_lock<std::mutex> &lock, GsCommand &cmd)
             m_hasWork.notify_one();
         }
         // PT2 Part 2: time the backpressure wait into the caller's sink.
-        uint64_t *&waitSink = hot ? *hot->enqueueWaitSink : t_enqueueWaitSink;
-        uint64_t *const sink = waitSink;
+        uint64_t *const sink = t_enqueueWaitSink;
         const uint64_t waitT0 = sink ? ps2x::perflog::steadyNs() : 0u;
         ++m_spaceWaiters;
         m_hasSpace.wait(lock, hasSpace);
@@ -580,7 +470,7 @@ bool GsWorker::admitLocked(std::unique_lock<std::mutex> &lock, GsCommand &cmd)
     // MP1 L2 (c): a local (unit-thread) batch behaves like an open batch
     // whose endBatch(mayDefer) runs after every enqueue: wake once the
     // deferred-wake thresholds are reached, else keep the wake pending.
-    const bool local = localDepth != 0u && m_wakeCommands != 0u;
+    const bool local = t_localBatchDepth != 0u && m_wakeCommands != 0u;
     // GF1 H3: with deferred wakes on, an RPC never rides a batch silently:
     // its caller waits for it (e.g. the main thread's present latch must
     // not wait for the unit's next flush).
@@ -661,12 +551,9 @@ void GsWorker::endBatch(bool mayDefer)
 
 void GsWorker::flushWake()
 {
-    WorkerTlsCache *hot = hotTlsCache();
-    GsWorker *&stagedWorker = hot ? *hot->stagedWorker : t_stagedWorker;
-    GsWorker *&batchWorker = hot ? *hot->batchWorker : t_batchWorker;
-    if (stagedWorker == this)
+    if (t_stagedWorker == this)
         flushStaged(); // GPK1: publish before delivering the wake
-    if (batchWorker == this)
+    if (t_batchWorker == this)
         flushGifBatch(); // GSB1: same for a pending batch
     std::unique_lock<std::mutex> lock(m_mutex);
     // GSW2: with wake hysteresis on, a flush also releases space-blocked
