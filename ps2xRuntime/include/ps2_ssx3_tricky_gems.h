@@ -65,7 +65,7 @@ constexpr uint32_t kShowLow = 0x03u;  // world-loaded alive low byte (reshow tar
 constexpr uint32_t kAliveLow2 = 0x23u; // lab-bound alive low byte (also hideable)
 constexpr uint32_t kMaxRes = 4u;       // instances per gem (stacked triples + 1)
 constexpr float kTeleportJump = 3000.0f;
-constexpr size_t kMaxGems = 512u;
+constexpr size_t kMaxGems = 640u; // MGX1: 483 existing rows + 38 Megaplex pickups
 constexpr uint32_t kScanChunk = 1u << 20;
 // TK55: visual spin. The static renderer draws each instance through its
 // matrix rows +0x10/+0x20/+0x30 (+0x40 translation): poking rows 0/1 turns
