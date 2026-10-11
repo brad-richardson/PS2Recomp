@@ -159,4 +159,19 @@ namespace ps2_stubs
     // PR3: emit the open span and fflush now (BG1 pause, so a force-stop
     // after backgrounding keeps every row). No-op when the recorder is off.
     void padRecordFlushNow(const char *reason);
+
+    // LIM1 DEV-ONLY input marker (PS2X_INPUT_MARKER=1). Test hooks: arm the
+    // marker on an explicit dir, drive the tick explicitly, inject latch
+    // samples (production fills them from the guest-call wrappers), point the
+    // read-time input2 snapshot at test RAM, finalize pending triggers
+    // (truncated, like exit) or reset. Production code paths never call these.
+    bool setPadMarkerDirForTest(const char *dir);
+    void setPadMarkerTickForTest(uint64_t tick);
+    void setPadMarkerTrackerForTest(uint32_t s, uint32_t in0, uint32_t grab, uint32_t phase,
+                                   uint32_t target);
+    void setPadMarkerGateForTest(uint32_t a0, uint32_t v0);
+    void setPadMarkerInput2ForTest(uint32_t bank, uint32_t count);
+    void setPadMarkerRdramForTest(const uint8_t *rdram);
+    void closePadMarkerForTest();
+    void clearPadMarkerForTest();
 }
