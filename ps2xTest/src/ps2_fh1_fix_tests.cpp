@@ -71,8 +71,8 @@ void register_ps2_fh1_fix_tests()
         });
         tc.Run("INP2 four-stock-frame guard and 24/12 repeats", [](TestCase &t)
         {
-            t.IsTrue((kFixAll & kFixInput2) == 0u, "input2 excluded from all");
-            t.Equals(parseFix("all,input2,-input2").main, kFixAll, "input2 parses and opts out");
+            t.IsTrue((kFixAll & kFixInput2) != 0u, "input2 in all (PRM1, Brad 10-11)");
+            t.Equals(parseFix("all,input2,-input2").main, kFixAll & ~static_cast<uint64_t>(kFixInput2), "input2 parses and opts out");
             for (unsigned step : {1u, 2u})
             {
                 Input2Record r{}; r.guard = 3u;
@@ -314,13 +314,15 @@ void register_ps2_fh1_fix_tests()
             t.Equals(parseFix("all,flare,-flare").fh12, kFix12All, "opt-out");
         });
 
-        tc.Run("FH28 jcam/pose/pid/c2cap/spawn are opt-in", [](TestCase &t)
+        tc.Run("FH28 jcam/pid stay opt-in; pose/c2cap/spawn in all (PRM1, Brad 10-11)", [](TestCase &t)
         {
-            const uint64_t fh28 = static_cast<uint64_t>(kFixJcam | kFixPose | kFixPid | kFixC2Cap | kFixSpawn);
-            t.IsTrue((kFixAll & fh28) == 0u, "none in all");
+            const uint64_t out = static_cast<uint64_t>(kFixJcam | kFixPid);
+            const uint64_t in = static_cast<uint64_t>(kFixPose | kFixC2Cap | kFixSpawn);
+            t.IsTrue((kFixAll & out) == 0u, "jcam/pid stay opt-in");
+            t.IsTrue((kFixAll & in) == in, "pose/c2cap/spawn in all");
             const FixMasks f = parseFix("all,-ground,jcam,pose,pid,c2cap,spawn");
             t.IsTrue(f.ok, "parses");
-            t.Equals(f.main, kFixAll | fh28, "all minus ground plus fh28");
+            t.Equals(f.main, kFixAll | out, "all minus ground plus jcam/pid");
             t.Equals(f.fh12, kFix12All, "fh12 untouched");
             t.Equals(parseFix("jcam").main, static_cast<uint64_t>(kFixJcam), "jcam alone");
             t.Equals(parseFix("pose").main, static_cast<uint64_t>(kFixPose), "pose alone");
@@ -335,9 +337,10 @@ void register_ps2_fh1_fix_tests()
             t.Equals(static_cast<uint64_t>(kFixTrails), 1ull << 48, "trails uses bit 48");
             t.Equals(static_cast<uint64_t>(kFixChase2), 1ull << 49, "chase2 uses bit 49");
             t.IsTrue(((kFixTrails|kFixChase2) & ((1ull << 46)|(1ull << 47)))==0u,"INP2 bits reserved");
-            t.IsTrue((kFixAll & (kFixTrails|kFixChase2))==0u,"both opt-in");
-            t.Equals(parseFix("all,trails,chase2").main,kFixAll|kFixTrails|kFixChase2,"adds both");
-            t.Equals(parseFix("all,trails,chase2,-trails,-chase2").main,kFixAll,"removes both");
+            t.IsTrue((kFixAll & kFixTrails)==0u,"trails stays opt-in");
+            t.IsTrue((kFixAll & kFixChase2)!=0u,"chase2 in all (PRM1, Brad 10-11)");
+            t.Equals(parseFix("all,trails,chase2").main,kFixAll|kFixTrails,"adds trails (chase2 already in)");
+            t.Equals(parseFix("all,trails,chase2,-trails,-chase2").main,kFixAll & ~static_cast<uint64_t>(kFixChase2),"removes both");
             const float half=fh35Float(0x3c088889u), stock=fh35Float(0x3c888889u);
             for (uint32_t pc : {0x345e4cu,0x345fdcu,0x34600cu,0x346028u})
             {

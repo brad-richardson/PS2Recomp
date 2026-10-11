@@ -116,13 +116,13 @@ void register_ps2_fh1_fh28_tests()
             }
             jcam2Reset();
         });
-        tc.Run("FH30 envfilt is opt-in and its table follows active events", [](TestCase &t)
+        tc.Run("FH30 envfilt is in all (PRM1, Brad 10-11) and its table follows active events", [](TestCase &t)
         {
-            t.IsTrue((kFixAll & kFixEnvFilt) == 0u, "not in all");
+            t.IsTrue((kFixAll & kFixEnvFilt) != 0u, "in all");
             const FixMasks f = parseFix("all,envfilt");
             t.IsTrue(f.ok, "parses");
-            t.Equals(f.main, kFixAll | kFixEnvFilt, "adds only envfilt");
-            t.Equals(parseFix("all,envfilt,-envfilt").main, kFixAll, "opt-out");
+            t.Equals(f.main, kFixAll, "already in all");
+            t.Equals(parseFix("all,envfilt,-envfilt").main, kFixAll & ~static_cast<uint64_t>(kFixEnvFilt), "opt-out");
             HookConfig c;
             c.mode = Mode::Events;
             c.main = kFixEnvFilt;
@@ -166,9 +166,9 @@ void register_ps2_fh1_fh28_tests()
                 static_cast<uint64_t>(kFixJcam | kFixPose | kFixPid | kFixC2Cap | kFixSpawn);
             // Each override fires only with its own bit.
             t.IsTrue(fh28PoolOverride(0x49f628u, static_cast<uint64_t>(kFixSpawn)), "spawn word");
-            t.IsFalse(fh28PoolOverride(0x49f628u, kFixAll), "spawn word needs spawn");
+            t.IsTrue(fh28PoolOverride(0x49f628u, kFixAll), "spawn word fires under all (PRM1)");
             t.IsTrue(fh28PoolOverride(0x49c5fcu, static_cast<uint64_t>(kFixC2Cap)), "c2cap word");
-            t.IsFalse(fh28PoolOverride(0x49c5fcu, kFixAll), "c2cap word needs c2cap");
+            t.IsTrue(fh28PoolOverride(0x49c5fcu, kFixAll), "c2cap word fires under all (PRM1)");
             t.IsFalse(fh28PoolOverride(0x49c624u, all28), "pid span stays patched");
             t.IsFalse(fh28PoolOverride(0x49c628u, all28), "pid base stays patched");
             // Nothing else is overridden, even with every FH28 bit on.
@@ -324,7 +324,7 @@ void register_ps2_fh1_fh28_tests()
             c.main = kFixAll;
             c.guestActive = true;
             t.IsFalse(hookTableHit(buildHookInterest(c), 0x000001u, 0x1635f8u), "jcam out of all");
-            t.IsFalse(hookTableHit(buildHookInterest(c), 0x000001u, 0x162998u), "c2cap out of all");
+            t.IsTrue(hookTableHit(buildHookInterest(c), 0x000001u, 0x162998u), "c2cap in all (PRM1)");
             t.IsFalse(hookTableHit(buildHookInterest(c), 0x000001u, 0x162c78u), "pid out of all");
             c.main |= static_cast<uint64_t>(kFixJcam | kFixPose | kFixPid | kFixC2Cap | kFixSpawn);
             const HookInterest hi = buildHookInterest(c);

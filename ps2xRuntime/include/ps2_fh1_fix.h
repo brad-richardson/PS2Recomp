@@ -185,12 +185,14 @@ inline uint64_t fixItem(const std::string &item) noexcept
 // "all": every group except kFixLift (FH8: no window where it binds),
 // kFixGround (GRD1: its force is already scaled by converted dt), and the
 // internal kFixRamp. FH26 adds stick2 + clocksign (Brad 10-02); DEF1 adds
-// bonusflip + loops2 (Brad 10-03).
+// bonusflip + loops2 (Brad 10-03). PRM1 adds pose,c2cap,spawn,envfilt,input2,chase2 (Brad 10-11);
+// life2 stays opt-in (lifecycle gates blocked: no finished race at clean tips).
 inline constexpr uint64_t kFixAll =
     kFixRider | kFixCountdown | kFixDrag | kFixEvent | kFixSlew | kFixClock | kFixRaceClock | kFixSession | kFixTimers |
     kFixCamera | kFixLaunch | kFixStick | kFixSpeedcap | kFixRng | kFixTrick | kFixAnim | kFixBonus | kFixAiGate |
     kFixTakeoff | kFixFlags | kFixSteer | kFixRail | kFixReset | kFixMeter | kFixBoost | kFixEntry |
-    kFixRclock | kFixEmitter | kFixFx | kFixClock2 | kFixHudfill | kFixStick2 | kFixClockSign | kFixBonusFlip;
+    kFixRclock | kFixEmitter | kFixFx | kFixClock2 | kFixHudfill | kFixStick2 | kFixClockSign | kFixBonusFlip |
+    kFixPose | kFixC2Cap | kFixSpawn | kFixEnvFilt | kFixInput2 | kFixChase2;
 inline constexpr uint32_t kFix12All = kFix12Spin | kFix12Texanim | kFix12Loops | kFix12Recover | kFix12Pulse |
                                       kFix12Crash | kFix12FxTimer | kFix12Bounce | kFix12Particles |
                                       kFix12CrashBody | kFix12Uber | kFix12Popups | kFix12SndDt | kFix12HudProg |
