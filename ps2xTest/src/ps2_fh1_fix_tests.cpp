@@ -486,5 +486,152 @@ void register_ps2_fh1_fix_tests()
             t.Equals(f.bad, std::string("stik2"), "names the item");
             t.IsTrue(!parseFix("-nope").ok, "unknown opt-out refused");
         });
+
+        tc.Run("SVL1 reverse FIX-name map matches the parser", [](TestCase &t)
+        {
+            // Every reverse entry must parse back to its bit (both masks).
+            for (unsigned b = 0u; b < 64u; ++b)
+            {
+                const char *name = fixMainBitName(b);
+                if (name == nullptr)
+                    continue;
+                t.Equals(fixItem(name), 1ull << b, std::string("main bit ") + std::to_string(b));
+            }
+            for (unsigned b = 0u; b < 32u; ++b)
+            {
+                const char *name = fix12BitName(b);
+                if (name == nullptr)
+                    continue;
+                t.Equals(fh12Item(name), 1u << b, std::string("mask12 bit ") + std::to_string(b));
+            }
+            // Every parsed name must have a reverse entry (read the parser,
+            // INP2 style, so future additions participate).
+            std::ifstream file("ps2xRuntime/include/ps2_fh1_fix.h");
+            t.IsTrue(file.is_open(), "run the suite from the fork worktree root");
+            if (!file.is_open())
+                return;
+            std::ostringstream buffer;
+            buffer << file.rdbuf();
+            const std::string source = buffer.str();
+            const std::regex item(R"(\(item == \"([a-z0-9]+)\"\) return)");
+            for (std::sregex_iterator it(source.begin(), source.end(), item), end; it != end; ++it)
+            {
+                const std::string name = (*it)[1].str();
+                const uint64_t main = fixItem(name);
+                const uint32_t m12 = fh12Item(name);
+                t.IsTrue((main != 0u) != (m12 != 0u), name + " lives in exactly one mask");
+                bool found = false;
+                if (main != 0u)
+                    for (unsigned b = 0u; b < 64u; ++b)
+                    {
+                        const char *rev = fixMainBitName(b);
+                        if (rev != nullptr && name == rev && main == (1ull << b))
+                            found = true;
+                    }
+                else
+                    for (unsigned b = 0u; b < 32u; ++b)
+                    {
+                        const char *rev = fix12BitName(b);
+                        if (rev != nullptr && name == rev && m12 == (1u << b))
+                            found = true;
+                    }
+                t.IsTrue(found, name + " has a reverse entry at its bit");
+            }
+        });
+
+        tc.Run("SVL1 renderFixDelta is deterministic", [](TestCase &t)
+        {
+            t.Equals(renderFixDelta(0u, 0u, 0u, 0u), std::string(""), "empty when equal");
+            t.Equals(renderFixDelta(0u, 0u, kFixQuery, 0u), std::string("+query"), "gain");
+            t.Equals(renderFixDelta(kFixQuery, 0u, 0u, 0u), std::string("-query"), "loss");
+            t.Equals(renderFixDelta(kFixBonus, 0u, kFixQuery, kFix12Flare), std::string("-bonus,+query,+flare"),
+                     "main ascending, then mask12");
+            t.Equals(renderFixDelta(0u, 0u, 1ull << 59, 1u << 16), std::string("+bit59,+bit12.16"),
+                     "unnamed bits render by index");
+            t.Equals(renderFixDelta(1ull << 14, 0u, 0u, 0u), std::string("-bit14"),
+                     "internal ramp renders unnamed");
+        });
+
+        tc.Run("SVL1 classifyFixDelta same/allow/refuse", [](TestCase &t)
+        {
+            const uint64_t all = kFixAll;
+            const uint32_t all12 = kFix12All;
+            FixDeltaVerdict v = classifyFixDelta(all, all12, all, all12);
+            t.IsTrue(v.allow && v.same && v.detail.empty(), "same mask allows empty");
+            v = classifyFixDelta(all, all12, all | kFixQuery, all12);
+            t.IsTrue(v.allow && !v.same, "+query allows");
+            t.Equals(v.detail, std::string("+query"), "+query render");
+            v = classifyFixDelta(all, all12, all, all12 | kFix12Flare);
+            t.IsTrue(v.allow, "+flare allows");
+            v = classifyFixDelta(all, all12, all & ~kFixBonusFlip, all12);
+            t.IsTrue(!v.allow, "-bonusflip refuses");
+            t.IsTrue(v.detail.find("bonusflip") != std::string::npos, "names bonusflip");
+            v = classifyFixDelta(all & ~kFixBonusFlip, all12, all, all12);
+            t.IsTrue(!v.allow, "+bonusflip refuses too (both directions)");
+            v = classifyFixDelta(all, all12, all & ~kFixInput2, all12);
+            t.IsTrue(!v.allow, "input2 ON->OFF refuses");
+            t.IsTrue(v.detail.find("input2") != std::string::npos, "names input2");
+            v = classifyFixDelta(all, all12, all | kFixInputChain, all12);
+            t.IsTrue(v.allow, "inputchain OFF->ON allows (self-converting)");
+            t.Equals(v.detail, std::string("+inputchain"), "inputchain render");
+            v = classifyFixDelta(kFixLife2, 0u, 0u, 0u);
+            t.IsTrue(!v.allow, "life2 ON->OFF refuses");
+            t.IsTrue(v.detail.find("life2") != std::string::npos, "names life2");
+            v = classifyFixDelta(0u, 0u, kFixLife2, 0u);
+            t.IsTrue(v.allow, "life2 OFF->ON allows through to the section gate");
+            v = classifyFixDelta(all, all12, all | (1ull << 63), all12);
+            t.IsTrue(!v.allow, "unknown main bit refuses");
+            t.IsTrue(v.detail.find("0x8000000000000000") != std::string::npos, "names the hex");
+            v = classifyFixDelta(all, all12, all, all12 | (1u << 31));
+            t.IsTrue(!v.allow, "unknown mask12 bit refuses");
+            v = classifyFixDelta(1ull << 14, 0u, 0u, 0u);
+            t.IsTrue(!v.allow, "internal ramp bit refuses as unknown");
+        });
+
+        tc.Run("SVL1 pair-boundary predicate truth table", [](TestCase &t)
+        {
+            // Boundary: savedOdd != runGroundStep, only when run has normcap.
+            t.IsTrue(fixDeltaPairBoundaryOk(true, false, true), "plain query: odd save ok");
+            t.IsTrue(!fixDeltaPairBoundaryOk(false, false, true), "plain query: even save refuses");
+            t.IsTrue(fixDeltaPairBoundaryOk(false, true, true), "groundstep: even save ok");
+            t.IsTrue(!fixDeltaPairBoundaryOk(true, true, true), "groundstep: odd save refuses");
+            t.IsTrue(fixDeltaPairBoundaryOk(false, false, false), "normcap off: no condition");
+            t.IsTrue(fixDeltaPairBoundaryOk(true, true, false), "normcap off: no condition either");
+        });
+
+        tc.Run("SVL1 parseFixPair accepts the header shape only", [](TestCase &t)
+        {
+            uint64_t main = 0u;
+            uint32_t f12 = 0u;
+            t.IsTrue(parseFixPair("123:456", main, f12), "valid");
+            t.IsTrue(main == 123u && f12 == 456u, "values");
+            t.IsTrue(parseFixPair("18446744073709551615:4294967295", main, f12), "maxima");
+            t.IsTrue(main == 0xffffffffffffffffull && f12 == 0xffffffffu, "maxima values");
+            t.IsTrue(!parseFixPair("", main, f12), "empty refuses");
+            t.IsTrue(!parseFixPair("123", main, f12), "no colon refuses");
+            t.IsTrue(!parseFixPair("1:2:3", main, f12), "two colons refuse");
+            t.IsTrue(!parseFixPair(":456", main, f12), "empty main refuses");
+            t.IsTrue(!parseFixPair("123:", main, f12), "empty mask12 refuses");
+            t.IsTrue(!parseFixPair("12a:456", main, f12), "junk refuses");
+            t.IsTrue(!parseFixPair("18446744073709551616:0", main, f12), "main overflow refuses");
+            t.IsTrue(!parseFixPair("0:4294967296", main, f12), "mask12 overflow refuses");
+            t.IsTrue(!parseFixPair("<missing>", main, f12), "missing marker refuses");
+        });
+
+        tc.Run("SVL1 sanctioned-load log lines are greppable", [](TestCase &t)
+        {
+            t.Equals(fixDeltaHeaderLog("2", "2", "111:222", "333:444", "+query"),
+                     std::string("[savestate] ALLOW_FIX_DELTA header: mode 2->2 fix 111:222->333:444 "
+                                 "delta=+query (section checks pending)"),
+                     "header line");
+            t.Equals(fixDeltaSectionLog("+query", true),
+                     std::string("[savestate] ALLOW_FIX_DELTA fh1: delta=+query saveparity=odd applied "
+                                 "bookkeeping, cleared pair caches"),
+                     "section line odd");
+            t.Equals(fixDeltaSectionLog("-input2", false),
+                     std::string("[savestate] ALLOW_FIX_DELTA fh1: delta=-input2 saveparity=even applied "
+                                 "bookkeeping, cleared pair caches"),
+                     "section line even");
+        });
     });
 }

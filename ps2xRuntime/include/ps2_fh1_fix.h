@@ -7,6 +7,7 @@
 // clears both). An unknown name refuses the whole value.
 
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 
 namespace ps2_fh1
@@ -254,5 +255,208 @@ inline FixMasks parseFix(const std::string &s)
         at = comma + 1u;
     }
     return r;
+}
+
+// SVL1 2a: same-mode sanctioned FIX-delta support
+// (PS2X_SAVESTATE_ALLOW_FIX_DELTA, diagnostic, default off). Pure unless
+// noted; the savestate header (R1) and the fh1 section (R2) share this so
+// the two layers cannot disagree. Mode changes are NOT classified here:
+// 2a refuses them at R1 with a "2b" message before masks are compared.
+inline bool fixDeltaKnobOn() noexcept
+{
+    const char *v = std::getenv("PS2X_SAVESTATE_ALLOW_FIX_DELTA");
+    return v != nullptr && v[0] == '1';
+}
+
+// Bit index -> parse name (nullptr when unnamed). Bit 14 (kFixRamp) is
+// internal: fixMask() never carries it (the word-table builder derives it
+// in a local), so it stays unnamed and any delta touching an unnamed bit
+// refuses (fail-closed for internal and future bits).
+inline const char *fixMainBitName(unsigned bit) noexcept
+{
+    static constexpr const char *kNames[59] = {
+        "rider", "countdown", "drag", "event", "slew", "clock", "raceclock", "session", // 0-7
+        "timers", "camera", "launch", "stick", "speedcap", "rng", nullptr, "trick", // 8-15 (14 = ramp)
+        "anim", "bonus", "lift", "aigate", "takeoff", "flags", "steer", "rail", // 16-23
+        "reset", "meter", "boost", "ground", "entry", "rclock", "emitter", "fx", // 24-31
+        "clock2", "hudfill", "stick2", "clocksign", "bonusflip", "jcam", "pose", "pid", // 32-39
+        "c2cap", "spawn", "envfilt", "ground2", "jcam2", "life2", "input2", "inputchain", // 40-47
+        "trails", "chase2", "query", "springhold", "vnret", "shadowpub", "groundstep", "trailring", // 48-55
+        "normcap", "sel5", "sel5b", // 56-58
+    };
+    return bit < 59u ? kNames[bit] : nullptr;
+}
+inline const char *fix12BitName(unsigned bit) noexcept
+{
+    static constexpr const char *kNames[16] = {
+        "spin", "texanim", "loops", "recover", "pulse", "crash", "fxtimer", "bounce", // 0-7
+        "particles", "crashbody", "uber", "popups", "snddt", "hudprog", "loops2", "flare", // 8-15
+    };
+    return bit < 16u ? kNames[bit] : nullptr;
+}
+
+inline std::string fixBitHex(uint64_t v)
+{
+    if (v == 0u)
+        return "0x0";
+    std::string out;
+    while (v != 0u)
+    {
+        out = "0123456789abcdef"[v & 0xfu] + out;
+        v >>= 4;
+    }
+    return "0x" + out;
+}
+
+// Deterministic delta render: main bits ascending, then mask-12 ascending;
+// run-side gains take '+', save-side losses take '-'; unnamed bits render
+// as bit<N>. Empty when the masks are equal.
+inline std::string renderFixDelta(uint64_t saveMain, uint32_t save12, uint64_t runMain, uint32_t run12)
+{
+    std::string out;
+    const uint64_t dMain = saveMain ^ runMain;
+    for (unsigned b = 0u; b < 64u; ++b)
+    {
+        if (((dMain >> b) & 1u) == 0u)
+            continue;
+        if (!out.empty())
+            out += ',';
+        out += ((runMain >> b) & 1u) != 0u ? '+' : '-';
+        const char *name = fixMainBitName(b);
+        out += name != nullptr ? name : ("bit" + std::to_string(b));
+    }
+    const uint32_t d12 = save12 ^ run12;
+    for (unsigned b = 0u; b < 32u; ++b)
+    {
+        if (((d12 >> b) & 1u) == 0u)
+            continue;
+        if (!out.empty())
+            out += ',';
+        out += ((run12 >> b) & 1u) != 0u ? '+' : '-';
+        const char *name = fix12BitName(b);
+        out += name != nullptr ? name : ("bit12." + std::to_string(b));
+    }
+    return out;
+}
+
+struct FixDeltaVerdict
+{
+    bool allow = false;
+    bool same = false; // delta empty (the allow path matches today's apply)
+    std::string detail; // allow: "+a,-b" render ("" when same); refuse: naming reason
+};
+
+// Same-mode mask-delta verdict. Directional residue (input2/inputchain,
+// life2) refuses save-ON -> run-OFF and allows OFF -> ON (self-converting);
+// bonusflip refuses both ways in 2a (no entry-rescale bridge); unnamed bits
+// refuse; everything else named allows (the fh1 section still enforces the
+// active-window, pair-boundary and post-armed rules).
+inline FixDeltaVerdict classifyFixDelta(uint64_t saveMain, uint32_t save12, uint64_t runMain, uint32_t run12)
+{
+    FixDeltaVerdict r;
+    const uint64_t dMain = saveMain ^ runMain;
+    const uint32_t d12 = save12 ^ run12;
+    if (dMain == 0u && d12 == 0u)
+    {
+        r.allow = true;
+        r.same = true;
+        return r;
+    }
+    uint64_t unknownMain = 0u;
+    for (unsigned b = 0u; b < 64u; ++b)
+        if (((dMain >> b) & 1u) != 0u && fixMainBitName(b) == nullptr)
+            unknownMain |= 1ull << b;
+    uint32_t unknown12 = 0u;
+    for (unsigned b = 0u; b < 32u; ++b)
+        if (((d12 >> b) & 1u) != 0u && fix12BitName(b) == nullptr)
+            unknown12 |= 1u << b;
+    if (unknownMain != 0u || unknown12 != 0u)
+    {
+        r.detail = "unknown FIX bit(s) " + fixBitHex(unknownMain) + ":" + fixBitHex(unknown12);
+        return r;
+    }
+    const uint64_t lost = saveMain & ~runMain; // bits the run drops
+    if ((lost & kFixInput2) != 0u || (lost & kFixInputChain) != 0u)
+    {
+        r.detail = "input2/inputchain ON->OFF needs the same mask (tagged guest records; delta " +
+                   renderFixDelta(saveMain, save12, runMain, run12) + ")";
+        return r;
+    }
+    if ((lost & kFixLife2) != 0u)
+    {
+        r.detail = "life2 ON->OFF needs the same mask (recording metadata; delta " +
+                   renderFixDelta(saveMain, save12, runMain, run12) + ")";
+        return r;
+    }
+    if ((dMain & kFixBonusFlip) != 0u)
+    {
+        r.detail = "bonusflip differs (entry rescale has no load bridge in 2a; delta " +
+                   renderFixDelta(saveMain, save12, runMain, run12) + ")";
+        return r;
+    }
+    r.allow = true;
+    r.detail = renderFixDelta(saveMain, save12, runMain, run12);
+    return r;
+}
+
+// SVL1 2a Gap 2: the normcap triple is captured on first halves
+// (g_rngOdd == run groundstep) and consumed on second halves, and it is not
+// saved. A sanctioned load whose run has normcap is seamless only when the
+// save sits on a pair boundary, i.e. the first post-load update (parity
+// !savedOdd) is a first half: savedOdd != runGroundStep.
+inline bool fixDeltaPairBoundaryOk(bool savedOdd, bool runGroundStep, bool runNormcap) noexcept
+{
+    return !runNormcap || savedOdd != runGroundStep;
+}
+
+// Parses the header's "main:mask12" decimal pair. False on any garbage
+// (fail-closed: unparsable values refuse with today's generic message).
+inline bool parseFixPair(const std::string &s, uint64_t &mainOut, uint32_t &f12Out) noexcept
+{
+    mainOut = 0u;
+    f12Out = 0u;
+    const size_t colon = s.find(':');
+    if (colon == std::string::npos || colon == 0u || colon + 1u >= s.size() ||
+        s.find(':', colon + 1u) != std::string::npos)
+        return false;
+    uint64_t main = 0u;
+    for (size_t i = 0u; i < colon; ++i)
+    {
+        const char c = s[i];
+        if (c < '0' || c > '9')
+            return false;
+        const uint64_t d = static_cast<uint64_t>(c - '0');
+        if (main > (0xffffffffffffffffull - d) / 10u)
+            return false;
+        main = main * 10u + d;
+    }
+    uint64_t f12 = 0u;
+    for (size_t i = colon + 1u; i < s.size(); ++i)
+    {
+        const char c = s[i];
+        if (c < '0' || c > '9')
+            return false;
+        const uint64_t d = static_cast<uint64_t>(c - '0');
+        if (f12 > (0xffffffffull - d) / 10u)
+            return false;
+        f12 = f12 * 10u + d;
+    }
+    mainOut = main;
+    f12Out = static_cast<uint32_t>(f12);
+    return true;
+}
+
+inline std::string fixDeltaHeaderLog(const std::string &saveMode, const std::string &runMode,
+                                     const std::string &saveFix, const std::string &runFix,
+                                     const std::string &delta)
+{
+    return "[savestate] ALLOW_FIX_DELTA header: mode " + saveMode + "->" + runMode + " fix " + saveFix +
+           "->" + runFix + " delta=" + delta + " (section checks pending)";
+}
+
+inline std::string fixDeltaSectionLog(const std::string &delta, bool savedOdd)
+{
+    return "[savestate] ALLOW_FIX_DELTA fh1: delta=" + delta + " saveparity=" +
+           std::string(savedOdd ? "odd" : "even") + " applied bookkeeping, cleared pair caches";
 }
 }

@@ -51,6 +51,82 @@ namespace
         }
     }
 
+    // SVL1 2a: same-mode sanctioned delta (knob on; the header already
+    // allowed the masks). Re-verifies the header verdict, then enforces the
+    // section-level rules the header cannot see: active-window, normcap
+    // pair-boundary (Gap 2) and saved-post-armed (Gap 4). On allow it applies
+    // the saved guest-time bookkeeping (more correct than fresh menu-path
+    // counters) and clears the unsaved pair/transient caches (matters for
+    // quick-loads; a no-op for fresh-process loads). Never mutates when
+    // validationOnly (pass-1 preflight).
+    bool fh1SanctionedDelta(Reader &r, uint64_t savedFix, uint32_t savedFix12, const bool b[15],
+                            const uint32_t u[11], const uint64_t q[6], int64_t rcOffset, int64_t rcEntryS,
+                            const std::array<ps2_fh1::BonusSeen, 8> &seen)
+    {
+        using namespace ps2_fh1;
+        const FixDeltaVerdict v = classifyFixDelta(savedFix, savedFix12, fixMask(), fixMask12());
+        if (!v.allow)
+            return r.fail("fh1: sanctioned-load disagree: " + v.detail);
+        if (converted(b[0], b[1], b[2], b[3], b[5]))
+            return r.fail("fh1: active converted state + FIX delta needs the same mask (delta " +
+                          v.detail + ")");
+        if (!fixDeltaPairBoundaryOk(b[6], groundStepFix(), normcapFix()))
+            return r.fail("fh1: normcap needs a pair-boundary save (saved parity " +
+                          std::string(b[6] ? "odd" : "even") + ", run needs " +
+                          std::string(groundStepFix() ? "even" : "odd") +
+                          "); re-save one tick later (delta " + v.detail + ")");
+        if (b[14])
+            return r.fail("fh1: saved post-call record armed + FIX delta (delta " + v.detail + ")");
+        if (r.validationOnly())
+            return true;
+        g_schedActive = b[0];
+        g_commitActive = b[1];
+        g_guestActive = b[2];
+        g_flipPending = b[3];
+        g_stockInit = b[4];
+        g_patched = b[5];
+        g_rngOdd = b[6];
+        g_lcgHeld = b[7];
+        g_passRan = b[8];
+        g_anyAir = b[9];
+        g_finished = b[10];
+        g_clockRan = b[11];
+        g_startEdge = b[12];
+        g_rcActive = b[13];
+        g_postArmed = false; // asserted disarmed above; zero the record below
+        g_divNext = u[0];
+        g_divThis = u[1];
+        g_divEnded = u[2];
+        g_producerCalls = u[3];
+        g_lastStamp10s = u[4];
+        g_raceTickCalls = u[5];
+        g_raceTick2Calls = u[6];
+        g_sessionCalls = u[7];
+        g_rngUpdates = u[8];
+        g_lcgSaved = u[9];
+        g_drawK = u[10];
+        g_stockHalf.store(q[0], std::memory_order_relaxed);
+        g_stockHalfExact.store(q[1], std::memory_order_relaxed);
+        g_drawn = q[2];
+        g_drawSkipped = q[3];
+        g_lastTick = q[4];
+        g_rcEntryHalf = q[5];
+        g_rcOffset = rcOffset;
+        g_rcEntryS = rcEntryS;
+        g_bonusSeen = seen;
+        g_post = PostCall{};
+        for (int i = 0; i < kNormcapSlots; ++i)
+        {
+            g_normcapSlots[i] = NormcapSlot{};
+            g_normcapOwners[i] = NormcapOwner{};
+        }
+        g_normcap = NormcapPost{};
+        g_normcapArmed = false;
+        queryHoldReset();
+        std::fprintf(stderr, "%s\n", fixDeltaSectionLog(v.detail, b[6]).c_str());
+        return true;
+    }
+
     bool fh1Load(Reader &r)
     {
         using namespace ps2_fh1;
@@ -86,6 +162,10 @@ namespace
                           (savedFix12 & ~kStateless12) == (fixMask12() & ~kStateless12);
         if (!same)
         {
+            // SVL1 2a: knob off, mode changes and flare-only deltas take
+            // today's path byte for byte (same == true covers flare-only).
+            if (fixDeltaKnobOn() && savedMode == static_cast<uint8_t>(mode()))
+                return fh1SanctionedDelta(r, savedFix, savedFix12, b, u, q, rcOffset, rcEntryS, seen);
             // INP2 tags guest counters even in inactive stock windows.
             if (((savedFix ^ fixMask()) & (kFixInput2 | kFixInputChain)) != 0u || converted(b[0], b[1], b[2], b[3], b[5]))
                 return r.fail("fh1: state saved with full-120 guest words converted (mode " +

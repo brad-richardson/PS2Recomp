@@ -844,6 +844,48 @@ namespace ps2_savestate
             }
             return out;
         }
+
+        // SVL1 2a: verdict for a full120_fix mismatch with the knob on.
+        // Allow carries the log line; RefuseNamed carries the naming reason;
+        // RefuseGeneric (missing keys, unparsable values) falls back to
+        // today's generic message. Only called with the knob on.
+        enum class FixDeltaHeader
+        {
+            Allow,
+            RefuseNamed,
+            RefuseGeneric,
+        };
+
+        FixDeltaHeader fixDeltaHeaderVerdict(const std::map<std::string, std::string> &saved,
+                                             const std::string &curFix, std::string &note)
+        {
+            const auto itMode = saved.find("full120_mode");
+            const auto itFix = saved.find("full120_fix");
+            if (itMode == saved.end() || itFix == saved.end())
+                return FixDeltaHeader::RefuseGeneric;
+            const std::string curMode = std::to_string(static_cast<unsigned>(ps2_fh1::mode()));
+            if (itMode->second != curMode)
+            {
+                note = "mode changes need Part 2b; 2a is same-mode only";
+                return FixDeltaHeader::RefuseNamed;
+            }
+            uint64_t saveMain = 0u, runMain = 0u;
+            uint32_t save12 = 0u, run12 = 0u;
+            if (!ps2_fh1::parseFixPair(itFix->second, saveMain, save12) ||
+                !ps2_fh1::parseFixPair(curFix, runMain, run12))
+                return FixDeltaHeader::RefuseGeneric;
+            const ps2_fh1::FixDeltaVerdict v =
+                ps2_fh1::classifyFixDelta(saveMain, save12, runMain, run12);
+            if (!v.allow)
+            {
+                note = v.detail;
+                return FixDeltaHeader::RefuseNamed;
+            }
+            if (v.same)
+                return FixDeltaHeader::RefuseGeneric; // unreachable (equal values continue earlier)
+            note = ps2_fh1::fixDeltaHeaderLog(itMode->second, curMode, itFix->second, curFix, v.detail);
+            return FixDeltaHeader::Allow;
+        }
     } // namespace
 
     // ---------------------------------------------------------------- save
@@ -1104,6 +1146,29 @@ namespace ps2_savestate
             }
             else if (line.refuse)
             {
+                // SVL1 2a: knob off takes today's refusal byte for byte.
+                if (ps2_fh1::fixDeltaKnobOn() && line.key == "full120_mode")
+                {
+                    error = "header mismatch " + line.key + ": file=" + have + " this=" + line.value +
+                            " (mode changes need Part 2b; 2a is same-mode only)";
+                    return false;
+                }
+                if (ps2_fh1::fixDeltaKnobOn() && line.key == "full120_fix")
+                {
+                    std::string note;
+                    const FixDeltaHeader verdict = fixDeltaHeaderVerdict(saved, line.value, note);
+                    if (verdict == FixDeltaHeader::Allow)
+                    {
+                        std::fprintf(stderr, "%s\n", note.c_str());
+                        continue;
+                    }
+                    if (verdict == FixDeltaHeader::RefuseNamed)
+                    {
+                        error = "header mismatch " + line.key + ": file=" + have + " this=" + line.value +
+                                " (" + note + ")";
+                        return false;
+                    }
+                }
                 error = "header mismatch " + line.key + ": file=" + have + " this=" + line.value;
                 return false;
             }
@@ -1197,6 +1262,24 @@ namespace ps2_savestate
                 if (!seen[k] && !sectionOptional(k))
                 {
                     error = "missing section " + k;
+                    return false;
+                }
+            }
+            // SVL1 2a: a sanctioned delta needs the save's fh1 bookkeeping
+            // (parity, counters) to apply; a pre-FH27 file without the
+            // section cannot prove inactive, so it refuses (pre-commit).
+            if (ps2_fh1::fixDeltaKnobOn() && seen.find("fh1") == seen.end())
+            {
+                const auto itMode = saved.find("full120_mode");
+                const auto itFix = saved.find("full120_fix");
+                const std::string curMode =
+                    std::to_string(static_cast<unsigned>(ps2_fh1::mode()));
+                const std::string curFix = std::to_string(ps2_fh1::fixMask()) + ":" +
+                                           std::to_string(ps2_fh1::fixMask12());
+                if (itMode != saved.end() && itFix != saved.end() && itMode->second == curMode &&
+                    itFix->second != curFix)
+                {
+                    error = "sanctioned FIX delta needs the save's fh1 section (pre-FH27 file?)";
                     return false;
                 }
             }
