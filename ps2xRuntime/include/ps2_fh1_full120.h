@@ -933,6 +933,9 @@ inline constexpr uint32_t kAppUpdateSite = 0x3171b4u;
 // FH7 RNG cadence state (FIX=rng, see rngHook); reset at an events entry flip.
 inline uint32_t g_rngUpdates = 0u, g_lcgSaved = 0u;
 inline bool g_rngOdd = false, g_lcgHeld = false;
+inline std::array<uint32_t, 6> g_trailRingRngSaved{};
+inline uint32_t g_trailRingRngSp = 0u;
+inline bool g_trailRingRngArmed = false;
 // DL1 draw-limiter pattern counter (see drawHook); reset at an events entry flip.
 inline uint32_t g_drawK = 0u;
 inline uint64_t g_drawn = 0u, g_drawSkipped = 0u;
@@ -1376,6 +1379,57 @@ inline bool rngFix() noexcept
     return on;
 }
 
+// CRV1: the guest's dynamic color emitter owns three heap allocations, sized
+// from +0x178: point and mark qwords, and one four-byte color per point. Grow
+// the capacity before its base allocator (0x370c60) runs, including during
+// stock-rate loading before events mode enters. The arrays remain guest-owned.
+inline constexpr uint32_t kTrailRingAlloc = 0x370c60u;
+inline constexpr uint32_t kTrailRingRngState = 0x4ff018u; // BXrand stream 0, six words
+inline bool trailRingFix() noexcept
+{
+    static const bool on = enabled() &&
+        (fixMask() & (kFixTrailRing | kFixRng)) == (kFixTrailRing | kFixRng);
+    return on;
+}
+inline void trailRingAllocPre(uint8_t *ram, R5900Context *ctx, uint32_t targetPc) noexcept
+{
+    if (targetPc != kTrailRingAlloc || !ctx)
+        return;
+    const uint32_t object = getRegU32(ctx, 4);
+    uint32_t capacity = 0u;
+    if (rd32(ram, object + 0x178u, capacity) && capacity > 0u && capacity <= 4096u)
+        wr32(ram, object + 0x178u, capacity * 2u);
+}
+inline void trailRingRngRestore(uint8_t *ram) noexcept
+{
+    if (!g_trailRingRngArmed)
+        return;
+    for (uint32_t i = 0u; i < g_trailRingRngSaved.size(); ++i)
+        wr32(ram, kTrailRingRngState + 4u * i, g_trailRingRngSaved[i]);
+    g_trailRingRngArmed = false;
+}
+inline void trailRingPushPre(uint8_t *ram, R5900Context *ctx, uint32_t targetPc) noexcept
+{
+    if (targetPc != kTrailPush || !ctx)
+        return;
+    // The source passes a stock 1/60 time step. Two pushes per stock frame
+    // advance the global trail phase and its fade by the same total amount.
+    ctx->f[12] *= 0.5f;
+    if (!g_rngOdd)
+        return;
+    for (uint32_t i = 0u; i < g_trailRingRngSaved.size(); ++i)
+        if (!rd32(ram, kTrailRingRngState + 4u * i, g_trailRingRngSaved[i]))
+            return;
+    g_trailRingRngSp = getRegU32(ctx, 29);
+    g_trailRingRngArmed = true;
+}
+inline void trailRingOnReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc) noexcept
+{
+    if (g_trailRingRngArmed && targetPc == kTrailPush && ctx &&
+        getRegU32(ctx, 29) == g_trailRingRngSp)
+        trailRingRngRestore(ram);
+}
+
 // FH7 trick group: 0x117638 (single caller 0x11a3f0 in 0x11a228) adds a
 // point award times a multiplier clamp((count+10)*k, 0.5, 2) where count
 // (+0x9c) is bumped per call; it runs once per update while a combo accrues,
@@ -1516,7 +1570,9 @@ inline bool rngHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t
 {
     if (!g_rngOdd)
         return false;
-    if (targetPc == kTrailPush || targetPc == kLookAt)
+    if (targetPc == kTrailPush)
+        return !trailRingFix();
+    if (targetPc == kLookAt)
         return true;
     if (targetPc == kRngDraw0 && (sourcePc == kLensRollSite || sourcePc == kFlashRollSite))
     {
@@ -2308,6 +2364,7 @@ inline bool g_postArmed = false;
 // loop ctor, ground2, chase2) need no RAM undo. Idempotent.
 inline void postUnwindRestore(uint8_t *ram) noexcept
 {
+    trailRingRngRestore(ram);
     pubRestore(ram); // JDR2: an unwound published call keeps no published word
     if (!g_postArmed)
         return;
@@ -2528,6 +2585,7 @@ inline void chase2OnReturn(uint8_t *ram, R5900Context *ctx)
 
 inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned)
 {
+    trailRingOnReturn(ram, ctx, targetPc);
     if (g_pubArmed)
         pubOnReturn(ram, ctx, targetPc);
     if (!g_postArmed)
@@ -2958,7 +3016,7 @@ inline void fh10OnVBlank(uint8_t *ram, uint64_t tick)
 struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
-        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2, trails, chase2, query,
+        particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2, trails, chase2, query, trailring,
         shadowpub;
     bool src, fh9, draw, tap;
 };
@@ -2974,6 +3032,7 @@ inline const BranchFlags &branchFlags() noexcept
         r.launch = launchFix();
         r.session = sessionFix();
         r.rng = rngFix();
+        r.trailring = trailRingFix();
         r.trick = trickFix();
         r.aiGate = aiGateFix();
         r.particles = particlesFix();
@@ -3106,6 +3165,8 @@ inline HookInterest buildHookInterest(const HookConfig &c)
         for (uint32_t pc : kLife2Targets) addTgt(pc);
         for (uint32_t pc : kLife2Sources) addSrc(pc);
     }
+    if (c.mode != Mode::Off && (c.main & (kFixTrailRing | kFixRng)) == (kFixTrailRing | kFixRng))
+        addTgt(kTrailRingAlloc); // allocation happens before the events flip
     if ((c.main & kFixClock) != 0u && on)
     {
         addTgt(kProducer);
@@ -3347,6 +3408,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         eventsOnBranch(ram, ctx, sourcePc, targetPc);
     if (flag(&BranchFlags::life2, life2Fix))
         life2Hook(ram, ctx, sourcePc, targetPc);
+    if (flag(&BranchFlags::trailring, trailRingFix))
+        trailRingAllocPre(ram, ctx, targetPc);
     const bool on = Fast ? (bf->always || (bf->events && g_guestActive)) : hooksOn();
     if (on && flag(&BranchFlags::clock, clockFix))
         clockPreHook(ram, targetPc);
@@ -3413,6 +3476,7 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
     const bool drawSkip = on && flag(&BranchFlags::draw, drawLimit) && !skip && drawHook(ctx, sourcePc, targetPc);
     skip = skip || drawSkip;
     if (on && !skip && flag(&BranchFlags::trails,trailsFix)) trailsPreHook(ctx,sourcePc,targetPc);
+    if (on && !skip && flag(&BranchFlags::trailring,trailRingFix)) trailRingPushPre(ram,ctx,targetPc);
     if (on && !skip && flag(&BranchFlags::chase2,chase2Fix)) chase2PreHook(ctx,sourcePc,targetPc);
     if (on && !skip && flag(&BranchFlags::shadowpub, shadowPubFix))
         shadowPubPreHook(ram, ctx, sourcePc, targetPc);
