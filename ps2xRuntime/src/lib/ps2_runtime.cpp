@@ -2893,6 +2893,15 @@ bool qsr1UiOn()
     return on;
 }
 
+bool qsr1AutoOn()
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_QUICKSTATE_AUTO");
+        return v && std::string(v) == "1";
+    }();
+    return on;
+}
+
 std::string qsr1SlotDir()
 {
     const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
@@ -2917,6 +2926,14 @@ std::string qsr1SlotPath(const char *tag) // tag = "manual" | "auto"
             c = '_';
     }
     return (fs::path(qsr1SlotDir()) / ("quick-" + std::string(tag) + "-" + leaf + ".state")).string();
+}
+
+bool qsr1RetryAvailable()
+{
+    if (!qsr1AutoOn())
+        return false;
+    std::error_code ec;
+    return std::filesystem::exists(qsr1SlotPath("auto"), ec) && !ec;
 }
 
 void qsr1Toast(const char *msg)
@@ -5721,7 +5738,7 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
     }
     // QSR1: 60-mode race-start detection (full-120 off only; the events
     // trigger owns Always/Events, so the two never double-fire).
-    if (qsr1UiOn() && ps2_fh1::mode() == ps2_fh1::Mode::Off)
+    if (qsr1UiOn() && qsr1AutoOn() && ps2_fh1::mode() == ps2_fh1::Mode::Off)
     {
         if (sourcePc == ps2_fh1::kRaceTick2CallSite && targetPc == ps2_fh1::kRaceTick2Callee)
             qsr1NoteRaceTick2(rdram, ctx, m_memory.gs().vsyncTick.load(std::memory_order_relaxed));
@@ -7787,7 +7804,7 @@ void PS2Runtime::run()
         // signal is g_guestActive, set by guestFlip on the enter flip
         // (ps2_fh1_full120.h); re-armed at every events exit, so each race
         // gets a fresh start-line snapshot. Events mode only.
-        if (qsr1UiOn())
+        if (qsr1UiOn() && qsr1AutoOn())
         {
             if (ps2_fh1::g_guestActive && ps2_fh1::mode() == ps2_fh1::Mode::Events)
             {
@@ -7819,8 +7836,10 @@ void PS2Runtime::run()
                 int qsr1Kept = 0;
                 for (int i = 0; i < touches; ++i)
                 {
-                    const int hit =
+                    int hit =
                         ps2x::vpad::qsr1MenuHit(qsr1g, qsr1Expanded, vpadTouches[i].x, vpadTouches[i].y);
+                    if (hit == 4 && !qsr1RetryAvailable())
+                        hit = 0;
                     if (hit == 0)
                     {
                         vpadTouches[qsr1Kept++] = vpadTouches[i];
@@ -7899,7 +7918,8 @@ void PS2Runtime::run()
                 if (qsr1Expanded)
                 {
                     static const char *labels[3] = {"SAVE", "LOAD", "RETRY"};
-                    for (int i = 0; i < 3; ++i)
+                    const int rows = qsr1RetryAvailable() ? 3 : 2;
+                    for (int i = 0; i < rows; ++i)
                     {
                         const Vector2 c{qsr1dg.rowX[i], qsr1dg.rowY};
                         DrawCircleV(c, qsr1dg.rowR, Color{255, 255, 255, 60});
