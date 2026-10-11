@@ -14,6 +14,7 @@ option(PS2X_DEV_NO_THINLTO "Dev builds only: skip ThinLTO IPO on the runner link
 # BF2: release flag candidates, all default-off (unset = byte-identical flags).
 option(PS2X_GAME_IPO "BF2: ThinLTO IPO on ps2_game_objects in Release (Android + Mac)" OFF)
 set(PS2X_ANDROID_MARCH "" CACHE STRING "BF2: Android-only -march value for the first-party runtime targets (empty = toolchain default)")
+set(PS2X_THINLTO_CACHE_DIR "" CACHE PATH "Persistent Android lld ThinLTO cache (empty = off)")
 
 option(PS2X_ENABLE_RUNTIME_LOGS "Enable PS2 runtime logs" OFF)
 option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
@@ -801,6 +802,17 @@ target_link_libraries(ps2EntryRunner
     PRIVATE
     ps2_runtime
 )
+
+if(PS2X_THINLTO_CACHE_DIR)
+    if(NOT PS2X_IS_ANDROID OR NOT IS_ABSOLUTE "${PS2X_THINLTO_CACHE_DIR}")
+        message(FATAL_ERROR "PS2X_THINLTO_CACHE_DIR requires Android and an absolute path")
+    endif()
+    file(MAKE_DIRECTORY "${PS2X_THINLTO_CACHE_DIR}")
+    target_link_options(ps2EntryRunner PRIVATE
+        "-Wl,--thinlto-cache-dir=${PS2X_THINLTO_CACHE_DIR}"
+        "-Wl,--thinlto-cache-policy=cache_size_bytes=8589934592:prune_interval=1h")
+    message(STATUS "PS2X: Android ThinLTO cache: ${PS2X_THINLTO_CACHE_DIR} (8 GiB, prune hourly)")
+endif()
 
 if(PS2X_GAME_CODEGEN_DIR)
     file(GLOB PS2X_GAME_SOURCES CONFIGURE_DEPENDS "${PS2X_GAME_CODEGEN_DIR}/*.cpp")
