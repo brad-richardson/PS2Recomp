@@ -72,6 +72,7 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixVnRet = 1ull << 52, // JMP6 opt-in: 0x13d818 per-update retentions: post-query normal-velocity removal 0x13ec18 and lean brake 0x13e028, r -> sqrt(r) (class a; not in all)
     kFixGroundStep = 1ull << 54, // JMP7 opt-in with query: publish cruise ground query at the stock-time boundary (class d; not in all)
     kFixTrailRing = 1ull << 55, // CRV1 opt-in with rng: 120 Hz carve-trail pushes, double ring capacity, half time step (trail state only; not in all)
+    kFixSel5 = 1ull << 57, // SEL1 opt-in: selector-5 handler 0x1391a8 private dt 1/60 -> 1/120 (class h; not in all; bit 56 reserved)
 };
 
 // FH12 groups live in their own mask (the main mask's bits are taken). Same
@@ -177,6 +178,7 @@ inline uint64_t fixItem(const std::string &item) noexcept
     if (item == "groundstep") return kFixGroundStep;
     if (item == "trailring") return kFixTrailRing;
     if (item == "shadowpub") return kFixShadowPub;
+    if (item == "sel5") return kFixSel5;
     return 0u;
 }
 

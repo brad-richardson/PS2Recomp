@@ -302,7 +302,7 @@ inline void patchAtManagerInit(uint8_t *ram)
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &masks)
 {
-    const std::array<Word, 124> words = {{
+    const std::array<Word, 125> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -539,6 +539,13 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &
         // are single GP readers (codegen grep). The -40 clamp is an immediate and stays per update.
         {kFixVnRet, 0x49c124u, 0xbecccccdu, 0xbe66d021u, "vn_retain_13ec18"},
         {kFixVnRet, 0x49c0a8u, 0x3f666666u, 0x3f72dce9u, "lean_brake_13e028"},
+        // SEL1 sel5: the selector-5 handler 0x1391a8 advances its elapsed S+0x88 by R+0x300 * [0x49beec]
+        // (1/60, single reader 0x1391ac, codegen grep) against duration S+0x84, and the same private dt
+        // scales the phase-1 angular step (0x139278: S+0x80 * dt * 0.5 into sincos). At 120 the timer and
+        // the angle run 2x per wall second (phase 1 0.167 s vs stock 0.351 s at matched S84); 1/120 restores
+        // the stock wall rates. The S84 initializer 0x138ba0 (f12 = 0.5 * clamp, unconverted pool inputs)
+        // and the phase-2 solver words are untouched.
+        {kFixSel5, 0x49beecu, kSixtieth, kHundredTwentieth, "sel5_dt_1391ac"},
     }};
     uint64_t mask = masks.main;
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
