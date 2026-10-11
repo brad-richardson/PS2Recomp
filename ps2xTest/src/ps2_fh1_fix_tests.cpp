@@ -9,11 +9,13 @@
 #include <algorithm>
 
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <vector>
 
 void register_ps2_fh1_fix_tests()
 {
@@ -306,6 +308,45 @@ void register_ps2_fh1_fix_tests()
                     worst = std::max(worst, std::abs(h2[c] - m[c]) / std::max(std::abs(m[c]), 1.0));
             }
             t.IsTrue(worst < 1e-3, "pair matches stock within 1e-3 across the boundary");
+        });
+
+        tc.Run("SEL2 sel5b is opt-in at bit 58 and needs sel5", [](TestCase &t)
+        {
+            t.Equals(static_cast<uint64_t>(kFixSel5b), 1ull << 58, "sel5b uses bit 58");
+            t.IsTrue((kFixAll & kFixSel5b) == 0u, "excluded from all");
+            t.Equals(parseFix("all,sel5,sel5b").main, kFixAll | kFixSel5 | kFixSel5b, "opt-in");
+            t.Equals(parseFix("all,sel5,sel5b,-sel5b").main, kFixAll | kFixSel5, "opt-out");
+            // The charge word flips only with sel5 alongside: sel5b alone is stripped.
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            const uint32_t a = 0x1000u;
+            auto poke = [&](uint32_t addr, uint32_t v) {
+                std::memcpy(ram.data() + (addr & 0x1FFFFFFFu), &v, 4);
+            };
+            auto peek = [&](uint32_t addr) {
+                uint32_t v = 0u;
+                std::memcpy(&v, ram.data() + (addr & 0x1FFFFFFFu), 4);
+                return v;
+            };
+            auto stock = [&]() {
+                poke(a + 0x10u, 60u);
+                poke(a + 0x14u, kSixtieth);
+                poke(a + 0x24u, 0x3f800000u);
+                poke(0x49beecu, kSixtieth);
+                poke(0x49bb90u, kSixtieth);
+            };
+            stock();
+            FixMasks solo;
+            solo.main = static_cast<uint64_t>(kFixSel5b);
+            applyWords(ram.data(), a, true, solo);
+            t.Equals(peek(0x49bb90u), kSixtieth, "sel5b alone leaves the charge word stock");
+            stock();
+            FixMasks both;
+            both.main = static_cast<uint64_t>(kFixSel5) | static_cast<uint64_t>(kFixSel5b);
+            applyWords(ram.data(), a, true, both);
+            t.Equals(peek(0x49bb90u), kHundredTwentieth, "sel5+sel5b flips the charge word");
+            t.Equals(peek(0x49beecu), kHundredTwentieth, "sel5 flips with it");
+            applyWords(ram.data(), a, false, both);
+            t.Equals(peek(0x49bb90u), kSixtieth, "exit restores stock");
         });
 
         tc.Run("KNC5 bit 51 stays reserved and parses (JMP5 springhold removed)", [](TestCase &t)

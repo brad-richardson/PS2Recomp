@@ -74,6 +74,7 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixTrailRing = 1ull << 55, // CRV1 opt-in with rng: 120 Hz carve-trail pushes, double ring capacity, half time step (trail state only; not in all)
     kFixNormcap = 1ull << 56, // NRM1 opt-in with vnret+query: G18 bounded normal-response exact half-map (cap budget carried across the pair, single rescale; class a; not in all)
     kFixSel5 = 1ull << 57, // SEL1 opt-in: selector-5 handler 0x1391a8 private dt 1/60 -> 1/120 (class h; not in all)
+    kFixSel5b = 1ull << 58, // SEL2 opt-in (needs sel5): circle-handler 0x132a30 charge step 1/60 -> 1/120 (class h; not in all)
 };
 
 // FH12 groups live in their own mask (the main mask's bits are taken). Same
@@ -181,6 +182,7 @@ inline uint64_t fixItem(const std::string &item) noexcept
     if (item == "normcap") return kFixNormcap;
     if (item == "shadowpub") return kFixShadowPub;
     if (item == "sel5") return kFixSel5;
+    if (item == "sel5b") return kFixSel5b;
     return 0u;
 }
 

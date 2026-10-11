@@ -303,7 +303,7 @@ inline void patchAtManagerInit(uint8_t *ram)
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &masks)
 {
-    const std::array<Word, 125> words = {{
+    const std::array<Word, 126> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -547,10 +547,21 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &
         // the stock wall rates. The S84 initializer 0x138ba0 (f12 = 0.5 * clamp, unconverted pool inputs)
         // and the phase-2 solver words are untouched.
         {kFixSel5, 0x49beecu, kSixtieth, kHundredTwentieth, "sel5_dt_1391ac"},
+        // SEL2 sel5b (needs sel5): the circle handler 0x132a30 charges R+0x250 toward R+0x258 by
+        // R+0x254 per update (slew applied at 0x121448); R+0x254 scales with f8 = R+0x300 *
+        // [0x49bb90] (1/60, single reader 0x132b34, codegen grep). The episode exits when
+        // |R+0x250| >= 1.0 (0x132b70 -> 0x132d44: 0x32c=5 -> 0x132dd8: sel 5->1): 65 state-2
+        // updates in every episode, stock and 120, so 120 exits at half the wall time and the
+        // still-true entry guard re-enters (5 episodes vs stock's 1). 1/120 restores the stock
+        // wall rate. Phase-2 words need no conversion ([0x49bef0] is a per-launch seed;
+        // [0x49bef8]'s consumer never runs; [0x49bef4]/[0x49befc] already converted by crash).
+        {kFixSel5b, 0x49bb90u, kSixtieth, kHundredTwentieth, "sel5b_charge_132b34"},
     }};
     uint64_t mask = masks.main;
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)
         mask |= kFixRamp;
+    if ((mask & kFixSel5) == 0u)
+        mask &= ~kFixSel5b; // sel5b needs sel5 (the phase-1 timer half of the selector-5 rate fix)
     std::vector<Word> all;
     for (const Word &w : words)
         if ((w.fix == 0u || (mask & w.fix) != 0u) && !fh28PoolOverride(w.address, mask))
