@@ -1554,6 +1554,14 @@ inline bool queryFix() noexcept
     return on;
 }
 
+// JMP7: with query enabled, publish the contact packet on the later half of
+// the stock interval. This leaves the ground solver's two motion steps intact.
+inline bool groundStepFix() noexcept
+{
+    static const bool on = queryFix() && (fixMask() & kFixGroundStep) != 0u;
+    return on;
+}
+
 // JMP4: the skipped query leaves its whole out-packet stale, not just the
 // instance slot. The caller (0x13D818) never writes the out region itself; it
 // reads [sp+0x110] (instance, 0x13EBC4: null for terrain skips the virtual
@@ -1600,7 +1608,7 @@ inline int queryHoldSelect(const uint32_t *ps, int n, uint32_t p) noexcept
 // true = skip this call (contact frame held; full out-packet + v0 restored).
 inline bool querySkip(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc) noexcept
 {
-    if (!queryFix() || !g_rngOdd)
+    if (!queryFix() || g_rngOdd != !groundStepFix())
         return false;
     if (sourcePc != kCruiseQuerySite || targetPc != kCruiseQuery || !ctx)
         return false;
@@ -2378,7 +2386,7 @@ inline void pidPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 // update uncaptured (the next odd update runs its query on the hold miss).
 inline void queryPreHook(R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc) noexcept
 {
-    if (!queryFix() || g_rngOdd || g_postArmed || !ctx)
+    if (!queryFix() || g_rngOdd != groundStepFix() || g_postArmed || !ctx)
         return;
     if (sourcePc != kCruiseQuerySite || targetPc != kCruiseQuery)
         return;

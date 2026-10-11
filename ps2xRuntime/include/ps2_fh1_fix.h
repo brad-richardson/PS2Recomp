@@ -70,6 +70,7 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixSpringHold = 1ull << 51, // KNC5: bit reserved (JMP5 springhold removed, no-op). The name still parses so older envs (fork ios/full120.env) don't strict-refuse.
     kFixShadowPub = 1ull << 53, // JDR2 opt-in (with query): on query-skipped updates the ground-frame readers 0x2e8938 (R+0x370/0x3a0) and 0x2ed490 (R+0xaac/0xab0) see a half-step extrapolation, restored on return (render-only; not in all)
     kFixVnRet = 1ull << 52, // JMP6 opt-in: 0x13d818 per-update retentions: post-query normal-velocity removal 0x13ec18 and lean brake 0x13e028, r -> sqrt(r) (class a; not in all)
+    kFixGroundStep = 1ull << 54, // JMP7 opt-in with query: publish cruise ground query at the stock-time boundary (class d; not in all)
 };
 
 // FH12 groups live in their own mask (the main mask's bits are taken). Same
@@ -172,6 +173,7 @@ inline uint64_t fixItem(const std::string &item) noexcept
     if (item == "query") return kFixQuery;
     if (item == "springhold") return kFixSpringHold;
     if (item == "vnret") return kFixVnRet;
+    if (item == "groundstep") return kFixGroundStep;
     if (item == "shadowpub") return kFixShadowPub;
     return 0u;
 }
