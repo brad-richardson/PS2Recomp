@@ -17,6 +17,7 @@
 #include "ps2_ssx3_tricky_menu.h"
 #include "ps2_ssx3_tricky_song.h"
 #include "ps2_ssx3_tricky_gems.h"
+#include "ps2_ssx3_tricky_resetvol.h"
 #include "ps2_ssx3_tricky_preview.h"
 #include <filesystem>
 #include "ps2_log.h"
@@ -5623,6 +5624,33 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
                                  (unsigned long long)m_memory.gs().vsyncTick.load(std::memory_order_relaxed), slot);
                 }
             }
+        }
+    }
+    // RSV1: one Tricky-only donor-volume test per rider update. Redirect this
+    // call into SSX 3's existing course-reset entry; that guest routine owns
+    // the fade, route respawn, camera, and contact state. Stock mode and the
+    // default-off knob leave both the call and guest memory untouched.
+    if (sourcePc == ps2_ssx3_tricky_resetvol::kRiderUpdateSource &&
+        targetPc == ps2_ssx3_tricky_resetvol::kRiderUpdateTarget &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) &&
+        ps2_ssx3_tricky_resetvol::enabled())
+    {
+        ps2_ssx3_course::Modes &modes = ps2_ssx3_course::courseModes();
+        const bool tricky = modes.armed && ps2_ssx3_course::modeCurrent(modes, rdram) != 0u;
+        const int event = ssx3ReadS32(rdram, 0x535c08u);
+        const std::string archive = event >= 0 && event < 32
+            ? ps2_ssx3_course::rdStr(rdram, ps2_ssx3_course::kEventBase +
+                                   static_cast<uint32_t>(event) * ps2_ssx3_course::kEventStride + 68u, 16u)
+            : std::string();
+        const int hit = ps2_ssx3_tricky_resetvol::poll(
+            ps2_ssx3_tricky_resetvol::state(), ps2_ssx3_tricky_resetvol::table(),
+            rdram, PS2_RAM_SIZE, tricky, event, archive, getRegU32(ctx, 4));
+        if (hit >= 0)
+        {
+            targetPc = ps2_ssx3_tricky_resetvol::kResetEntry;
+            std::fprintf(stderr, "[rsv1] RESET t=%llu event=%d archive=%s rider=%08x donor=%d\n",
+                         static_cast<unsigned long long>(m_memory.gs().vsyncTick.load(std::memory_order_relaxed)),
+                         event, archive.c_str(), getRegU32(ctx, 4), hit);
         }
     }
     // TK45c: Tricky gem multipliers (PS2X_SSX3_TRICKY_GEMS=1; default off).
