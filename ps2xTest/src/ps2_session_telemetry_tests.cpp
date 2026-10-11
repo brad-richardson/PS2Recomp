@@ -157,7 +157,7 @@ void register_ps2_session_telemetry_tests()
             put(ui + 0x1cu, tail1); put(tail1, tail1); put(tail1 + 4u, tail1);
             put(ui + 0x38u, tail2); put(tail2, tail2); put(tail2 + 4u, tail2);
             auto g = readGuestRaceState(ram.data(), ram.size());
-            t.IsTrue(g.session == session && g.finishedKnown && !g.finished, "session+0x610 readable zero");
+            t.IsTrue(g.session == session && g.finishedKnown && !g.finished, "session+0x0 readable race state");
             t.IsTrue(g.pauseKnown && !g.paused, "empty UI lists are not a pause");
             PauseEdges pause;
             t.IsTrue(pause.step(g) == nullptr, "adopt unpaused");
@@ -179,15 +179,18 @@ void register_ps2_session_telemetry_tests()
             put(ui + 0x38u, tail2);
             g = readGuestRaceState(ram.data(), ram.size());
             t.IsTrue(std::strcmp(pause.step(g), "resume") == 0, "pause template removed");
-            put(session + 0x610u, 1u);
+            put(session + 0x0u, 0xDu);
             g = readGuestRaceState(ram.data(), ram.size());
             t.IsTrue(g.finished && !g.paused, "finish is distinct from pause");
+            put(session + 0x0u, 0x0u);
+            g = readGuestRaceState(ram.data(), ram.size());
+            t.IsTrue(g.finishedKnown && !g.finished, "race state is not finished");
             put(ui + 0x1cu, node); put(node + 4u, node + 0x20u);
             put(node + 0x20u, node); put(node + 0x24u, node); put(node + 0xcu, 0u);
             t.IsFalse(readGuestRaceState(ram.data(), ram.size()).pauseKnown, "corrupt cycle is bounded/unknown");
             put(app + 0x48u, 0x007fffffu);
             t.IsFalse(readGuestRaceState(ram.data(), ram.size()).pauseKnown, "invalid UI pointer");
-            put(app + 0x28u, 0x007ffffcu);
+            put(app + 0x28u, 0x00800000u);
             t.IsFalse(readGuestRaceState(ram.data(), ram.size()).finishedKnown, "out of range finished word");
             std::memcpy(ram.data() + 0x43e7d0u + 4u * 60u, "Free Ride", 10u);
             t.IsTrue(readModeName(ram.data(), ram.size(), 4u) == "Free Ride", "mode name from guest table");
@@ -207,6 +210,9 @@ void register_ps2_session_telemetry_tests()
             t.IsTrue(std::strcmp(labels.end(101u).kind, "run") == 0, "pause explains a short segment");
             labels.start(100u, 1u, live); labels.stop(live);
             t.IsTrue(std::strcmp(labels.end(200u).kind, "aborted") == 0, "unfinished stop");
+            labels.start(100u, 1u, live); labels.stop(live); labels.observe(fin);
+            t.IsTrue(std::strcmp(labels.end(200u).outcome, "aborted") == 0,
+                     "post-stop results state (quit teardown) is not a finish");
             labels.start(100u, 99u, live);
             t.IsTrue(std::strcmp(labels.end(200u).kind, "post") == 0, "unexplained nonzero-clock segment");
             t.IsTrue(std::strcmp(labels.end(101u).kind, "glitch") == 0, "unexplained short segment"); });

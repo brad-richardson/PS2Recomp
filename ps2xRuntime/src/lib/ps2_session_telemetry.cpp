@@ -395,13 +395,19 @@ GuestRaceState readGuestRaceState(const uint8_t *ram, size_t size)
     if (!readGuestU32(ram, size, ps2_ssx3_tricky_hud::kChainRoot, 0u, root) || !root ||
         !readGuestU32(ram, size, root, 0x84u, app) || !app)
         return g;
-    // 0x230BB8/BC: a0=[app+0x28] → 0x26F4A8; FH1 observes [a0+0x610].
+    // 0x230BB8/BC: a0=[app+0x28] → 0x26F4A8, the race-session state
+    // machine. FIN1: its state word [session+0x0] is 0xD on the results
+    // screen (set at 0x26f5e4 once the finish-line crossing sets +0x60C
+    // at 0x12b3d0) and 0x0 through the race. The old word [session+0x610]
+    // never sets in a 2nd-place run (its only set-path is a saturating
+    // rider counter at 0x26d258: a win flag), so every finished race
+    // mislogged as aborted (RFN1).
     if (readGuestU32(ram, size, app, 0x28u, session) && session)
     {
-        uint32_t fin = 0u;
+        uint32_t state = 0u;
         g.session = session;
-        g.finishedKnown = readGuestU32(ram, size, session, 0x610u, fin);
-        g.finished = g.finishedKnown && fin != 0u;
+        g.finishedKnown = readGuestU32(ram, size, session, 0x0u, state);
+        g.finished = g.finishedKnown && state == 0xDu;
     }
     // Exact read-only equivalent of 0x20CBA0's pause predicate:
     // app+0x48 → UI; find nameHash("cOVTemplate_PauseMenu") in the two

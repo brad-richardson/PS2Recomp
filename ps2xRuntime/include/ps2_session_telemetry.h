@@ -272,13 +272,16 @@ struct SegmentLabels
     {
         pauseKnown = g.pauseKnown;
         pauseSeen = pauseSeen || (g.pauseKnown && g.paused);
-        finished = finished || (g.finishedKnown && g.finished);
+        // FIN1: finished is deliberately NOT latched here. A quit-to-title
+        // teardown also passes through the results state 0xD just before
+        // race-end; only the at-stop sample (stop()) may call a run finished.
     }
     void stop(const GuestRaceState &g)
     {
         observe(g);
         stopSeen = true;
         stopKnown = g.finishedKnown;
+        finished = g.finishedKnown && g.finished;
     }
     struct Result { const char *kind; const char *outcome; bool pending; };
     Result end(uint64_t tick) const
