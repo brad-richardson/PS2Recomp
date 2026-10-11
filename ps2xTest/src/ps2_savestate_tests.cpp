@@ -113,6 +113,64 @@ void register_ps2_savestate_tests()
 {
     MiniTest::Case("Ps2Savestate", [](TestCase &tc)
     {
+        tc.Run("SPR1: retired split120 stub loads quiescent v1, refuses split activity", [](TestCase &t)
+        {
+            const auto &hooks = ps2_savestate::registeredSections().at("split120");
+            t.Equals(hooks.version, 1u, "stub reads v1");
+            t.IsTrue(hooks.save == nullptr && hooks.optional && hooks.legacyReadOnly,
+                     "load-only stub; new saves omit the section");
+            // Frozen v1 layout (see split120StubLoad): str mode, 2x b enabled,
+            // u32/b/u64 bookkeeping, 2x b halves, 2x b refused, 8 thread slots
+            // (b used, u32 key, 56B pod), u32 nt + nt entries, 16 rider slots
+            // (b used, u32 key, 8B pod), u32 nr + nr entries.
+            auto payload = [](const std::string &mode, bool crashHalf, bool threadUsed, uint32_t nt) {
+                ps2_savestate::Writer w;
+                w.str(mode);
+                w.b(false); w.b(false);
+                w.u32(0u); w.b(false); w.u64(0u);
+                w.b(crashHalf); w.b(false);
+                w.b(false); w.b(false);
+                const uint8_t z56[56] = {0}, z8[8] = {0};
+                for (uint32_t i = 0; i < 8u; ++i)
+                {
+                    w.b(threadUsed && i == 0u); w.u32(7u); w.bytes(z56, sizeof(z56));
+                }
+                w.u32(nt);
+                for (uint32_t i = 0; i < nt; ++i) { w.u32(9u); w.bytes(z56, sizeof(z56)); }
+                for (uint32_t i = 0; i < 16u; ++i) { w.b(false); w.u32(0u); w.bytes(z8, sizeof(z8)); }
+                w.u32(0u);
+                return w;
+            };
+            auto loadOk = [&](ps2_savestate::Writer &w) {
+                ps2_savestate::Reader r(w.buf.data(), w.buf.size());
+                const bool ok = hooks.load(r) && r.ok() && r.atEnd();
+                return ok;
+            };
+            auto loadFails = [&](ps2_savestate::Writer &w) {
+                ps2_savestate::Reader r(w.buf.data(), w.buf.size());
+                const bool ok = hooks.load(r);
+                return std::make_pair(!ok, r.error());
+            };
+            ps2_savestate::Writer quiet = payload("stock", false, false, 0u);
+            t.IsTrue(loadOk(quiet), "quiescent v1 (stock) loads");
+            ps2_savestate::Writer quietEmpty = payload("", false, false, 0u);
+            t.IsTrue(loadOk(quietEmpty), "quiescent v1 (unset mode) loads");
+            {
+                ps2_savestate::Reader r(quiet.buf.data(), quiet.buf.size());
+                r.setValidationOnly(true);
+                t.IsTrue(hooks.validate(r) && r.ok() && r.atEnd(), "preflight validate accepts quiescent");
+            }
+            ps2_savestate::Writer split = payload("split120_render60_v1", false, false, 0u);
+            const auto [splitFails, splitErr] = loadFails(split);
+            t.IsTrue(splitFails && splitErr.find("split120") != std::string::npos, "split mode refuses loudly");
+            ps2_savestate::Writer halves = payload("stock", true, false, 0u);
+            t.IsTrue(loadFails(halves).first, "half-held words refuse");
+            ps2_savestate::Writer active = payload("stock", false, true, 0u);
+            t.IsTrue(loadFails(active).first, "used thread slot refuses");
+            ps2_savestate::Writer overflow = payload("stock", false, false, 1u);
+            t.IsTrue(loadFails(overflow).first, "thread overflow refuses");
+        });
+
         tc.Run("HMS2: TK34 grow map survives cold restore and pre-grow rewind", [](TestCase &t)
         {
             PS2Runtime runtime;

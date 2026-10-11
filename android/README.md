@@ -74,11 +74,10 @@ play path has not been validated here
 The 60 launcher reads only `ps2x.env`; the 120 launcher overlays `full120.env`
 in the same directory. Fully close the app before switching; env is read once
 per process ([launcher](app/src/main/java/com/ps2x/runner/LaunchActivity.java#L16),
-[loader](../ps2xRuntime/src/lib/ps2_android_runtime.cpp#L61)). The base default
-`PS2X_SSX3_SIM_MODE=split120_render60_v1` gives 120 physics with 60 drawing.
-The full-120 layer uses `PS2X_SSX3_SIM_MODE=stock` and
+[loader](../ps2xRuntime/src/lib/ps2_android_runtime.cpp#L61)). The 60 entry is
+the stock game (SPR1 retired split120); the full-120 layer uses
 `PS2X_SSX3_FULL120=events`, with the validated fix groups and display/pacing
-settings for that build. Full 120 is the intended play default; 60 drawing is
+settings for that build. Full 120 is the intended play default; stock 60 is
 the user's option. The separate layer must be staged: selecting the launcher
 alone does not generate it ([layer semantics](../ps2xRuntime/ios/full120.env#L5)).
 

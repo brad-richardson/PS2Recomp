@@ -372,14 +372,13 @@ void logRaceStart(State &s, uint64_t tick, const uint8_t *ram, size_t ramSize, b
                 tricky = ms.modes[cur - 1u].name;
         }
     }
-    const char *sim = std::getenv("PS2X_SSX3_SIM_MODE");
     char buf[512];
     std::snprintf(buf, sizeof(buf),
                   "race-start n=%llu event=%d name=\"%s\" loc=\"%s\" archive=\"%s\" disc=%d mode_b=%u game_b=%u "
-                  "sim=%s full120=%s course_mode=\"%s\" race_time=%u wall=%s kind=run mode=\"%s\"",
+                  "full120=%s course_mode=\"%s\" race_time=%u wall=%s kind=run mode=\"%s\"",
                   static_cast<unsigned long long>(s.races), ok ? static_cast<int>(ev) : -1, name.c_str(),
                   code.c_str(), archive.c_str(), static_cast<int>(disc == 0xffu ? -1 : static_cast<int>(disc)),
-                  static_cast<unsigned>(mode48), static_cast<unsigned>(game49), sim && sim[0] ? sim : "unset",
+                  static_cast<unsigned>(mode48), static_cast<unsigned>(game49),
                   fh1Events ? "events" : "off", tricky.c_str(), clock, utcIso().c_str(), s.modeName.c_str());
     (void)tick;
     sesLineLocked(s, buf);

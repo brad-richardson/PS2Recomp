@@ -13,7 +13,6 @@
 #include "ps2_ssx3_patch_grow_state.h"
 #include "ps2_ssx3_tricky_layer.h"
 #include "ps2_fh1_full120.h"
-#include "ps2_ts2_split60.h"
 #include "runtime/ps2_vfs.h"
 #include "ps2_iop_host.h"
 #include "ps2_pad_latch.h"
@@ -793,15 +792,12 @@ namespace ps2_savestate
             h.push_back({"hle_grow_capacity", std::to_string(grow.capacity), true});
             h.push_back({"hle_arena_base", std::to_string(ps2_hle_pools::kHleArenaBase), true});
             h.push_back({"hle_arena_bytes", std::to_string(ps2_hle_pools::kHleArenaBytes), true});
-            const char *sim = std::getenv("PS2X_SSX3_SIM_MODE");
-            h.push_back({"sim_mode", sim && *sim ? sim : "off", true});
             h.push_back({"full120_mode", std::to_string(static_cast<unsigned>(ps2_fh1::mode())), true});
             h.push_back({"full120_fix", std::to_string(ps2_fh1::fixMask()) + ":" +
                                              std::to_string(ps2_fh1::fixMask12()), true});
             env = std::getenv("PS2X_VIF1_REVERSE_DMA");
             h.push_back({"readback_mode", env && *env ? env : "0", true});
-            for (const char *knob : {"PS2X_SSX3_SPLIT120_CRASHBODY", "PS2X_SSX3_SPLIT120_BOUNCE",
-                                     "PS2X_SSX3_COURSE_PICKER", "PS2X_SSX3_TRICKY_MENU"})
+            for (const char *knob : {"PS2X_SSX3_COURSE_PICKER", "PS2X_SSX3_TRICKY_MENU"})
             {
                 env = std::getenv(knob);
                 h.push_back({knob, env && std::strcmp(env, "1") == 0 ? "1" : "0", true});
@@ -1006,6 +1002,8 @@ namespace ps2_savestate
         const VfsBindingScope vfsBinding(&runtime.vfs());
         for (const auto &[key, hooks] : registeredSections())
         {
+            if (hooks.legacyReadOnly)
+                continue; // SPR1: retired stub (split120); new saves omit it
             mark = w.beginSection(key, hooks.version);
             try
             {
@@ -1392,17 +1390,11 @@ namespace ps2_savestate
         // (aliases follow the restored mode; a new epoch retires stale
         // packets/bursts; run state resets). Single funnel: boot-time and
         // quick loads both land here.
-        // SSF2: derived gem instance addresses must come from restored RAM,
-        // and split120's half-word owner must point at this runtime's RAM.
+        // SSF2: derived gem instance addresses must come from restored RAM.
         ps2_tk45c::State &gems = ps2_tk45c::state();
         if (gems.scanCursor != 0u && ps2_ssx3_tricky_layer::config().gems)
             ps2_tk45c::rebuildResolved(gems, ps2_tk45c::table(), runtime.memory().getRDRAM(),
                                       PS2_RAM_SIZE, savedTick);
-        ps2_ts2_split60::g_state.ram =
-            (ps2_ts2_split60::g_state.crashBodyHalf || ps2_ts2_split60::g_state.bounceHalf)
-                ? runtime.memory().getRDRAM() : nullptr;
-        ps2_ts2_split60::g_state.cachedData = nullptr;
-        ps2_ts2_split60::g_state.cachedValid = false;
         ps2_ssx3_tricky_layer::onStateLoaded(runtime.memory().getRDRAM(), PS2_RAM_SIZE, savedTick);
         setResumeSkip();
         if (savedTickOut)
@@ -2169,64 +2161,83 @@ namespace
         return true;
     }
 
-    void split120Save(Writer &w)
+    // SPR1: split120 retired; this stub reads pre-removal v1 payloads only.
+    // The saver wrote every registered section unconditionally, so even
+    // stock/reference/full120 saves carry a (quiescent) split120 section.
+    // Quiescent payloads load (nothing to restore: stock state is the fresh
+    // state); anything showing split activity refuses loudly, never mis-loads.
+    // New saves omit the section (legacyReadOnly + optional). The stub stays
+    // until the pinned/lane savestates are re-minted (Part 1 gate decision).
+    // Frozen v1 layout (pod sizes are the deleted ThreadData/PredictorIdentity
+    // sizes, verified byte-exact against a pre-removal file):
+    //   str mode, b crashEnabled, b bounceEnabled,
+    //   u32 guestThread, b guestInterrupt, u64 scopeErrors,
+    //   b crashBodyHalf, b bounceHalf, b crashRefused, b bounceRefused,
+    //   8 x (b used, u32 key, 56B ThreadData),
+    //   u32 threadOverflowCount, count x (u32 key, 56B ThreadData),
+    //   16 x (b used, u32 key, 8B PredictorIdentity),
+    //   u32 riderOverflowCount, count x (u32 key, 8B PredictorIdentity).
+    constexpr size_t kSplit120ThreadDataSize = 56u;
+    constexpr size_t kSplit120PredictorSize = 8u;
+
+    bool split120StubSkip(Reader &r, size_t n)
     {
-        using namespace ps2_ts2_split60;
-        const State &s = g_state;
-        const char *mode = std::getenv("PS2X_SSX3_SIM_MODE");
-        w.str(mode ? mode : "");
-        w.b(crashBodyEnabled()); w.b(bounceEnabled());
-        w.u32(s.guestThread); w.b(s.guestInterrupt); w.u64(s.scopeErrors);
-        w.b(s.crashBodyHalf); w.b(s.bounceHalf);
-        w.b(g_crashWords.refused); w.b(g_bounceWords.refused);
-        for (const auto &slot : s.threads) { w.b(slot.used); w.u32(slot.key); w.pod(slot.data); }
-        w.u32(static_cast<uint32_t>(s.threadOverflow.size()));
-        for (const auto &[key, data] : s.threadOverflow) { w.u32(key); w.pod(data); }
-        for (const auto &slot : s.riders) { w.b(slot.used); w.u32(slot.key); w.pod(slot.id); }
-        w.u32(static_cast<uint32_t>(s.riderOverflow.size()));
-        for (const auto &[key, id] : s.riderOverflow) { w.u32(key); w.pod(id); }
+        uint8_t pad[64];
+        while (n > 0u && r.ok())
+        {
+            const size_t step = n < sizeof(pad) ? n : sizeof(pad);
+            r.bytes(pad, step);
+            n -= step;
+        }
+        return r.ok();
     }
 
-    bool split120Load(Reader &r)
+    bool split120StubLoad(Reader &r)
     {
-        using namespace ps2_ts2_split60;
-        State next{};
         const std::string savedMode = r.str();
-        const char *mode = std::getenv("PS2X_SSX3_SIM_MODE");
-        const bool crash = r.b(), bounce = r.b();
-        if (savedMode != (mode ? mode : "") || crash != crashBodyEnabled() || bounce != bounceEnabled())
-            return r.fail("split120: SIM_MODE or crash/bounce option differs");
-        next.guestThread = r.u32(); next.guestInterrupt = r.b(); next.scopeErrors = r.u64();
-        next.crashBodyHalf = r.b(); next.bounceHalf = r.b();
-        const bool crashRefused = r.b(), bounceRefused = r.b();
-        for (auto &slot : next.threads) { slot.used = r.b(); slot.key = r.u32(); r.pod(slot.data); }
+        r.b(); r.b(); // crash/bounce enabled: knobs-on with no pass state is quiescent
+        r.u32(); r.b(); r.u64(); // guestThread, guestInterrupt, scopeErrors: host bookkeeping
+        const bool crashHalf = r.b(), bounceHalf = r.b();
+        r.b(); r.b(); // refused flags: a refused set left RAM untouched
+        bool anyThread = false;
+        for (uint32_t i = 0; i < 8u; ++i)
+        {
+            anyThread = r.b() || anyThread;
+            r.u32(); // key
+            split120StubSkip(r, kSplit120ThreadDataSize);
+        }
         const uint32_t nt = r.u32();
         if (nt > 1024u) return r.fail("split120: too many threads");
         for (uint32_t i = 0; i < nt; ++i)
         {
-            const uint32_t key = r.u32(); ThreadData data{}; r.pod(data);
-            if (!next.threadOverflow.emplace(key, data).second) return r.fail("split120: duplicate thread");
+            r.u32(); // key
+            split120StubSkip(r, kSplit120ThreadDataSize);
         }
-        for (auto &slot : next.riders) { slot.used = r.b(); slot.key = r.u32(); r.pod(slot.id); }
+        bool anyRider = false;
+        for (uint32_t i = 0; i < 16u; ++i)
+        {
+            anyRider = r.b() || anyRider;
+            r.u32(); // key
+            split120StubSkip(r, kSplit120PredictorSize);
+        }
         const uint32_t nr = r.u32();
         if (nr > 1024u) return r.fail("split120: too many riders");
         for (uint32_t i = 0; i < nr; ++i)
         {
-            const uint32_t key = r.u32(); PredictorIdentity id{}; r.pod(id);
-            if (!next.riderOverflow.emplace(key, id).second) return r.fail("split120: duplicate rider");
+            r.u32(); // key
+            split120StubSkip(r, kSplit120PredictorSize);
         }
         if (!r.ok()) return false;
-        for (const auto &slot : next.threads)
-            if (slot.used && (slot.data.half > 1u || slot.data.ctx.halfIndex > 1u))
-                return r.fail("split120: invalid half");
-        for (const auto &[key, data] : next.threadOverflow)
-            if (data.half > 1u || data.ctx.halfIndex > 1u) return r.fail("split120: invalid overflow half");
-        if (!r.validationOnly())
-        {
-            g_state = std::move(next); // ram/cache pointers rebound after all sections.
-            g_crashWords.refused = crashRefused;
-            g_bounceWords.refused = bounceRefused;
-        }
+        const bool splitMode = savedMode.compare(0, 5, "split") == 0;
+        const bool knownQuiescentMode = savedMode.empty() || savedMode == "stock";
+        if (splitMode)
+            return r.fail("split120: save used retired split120 (mode=" + savedMode + "); split120 saves cannot load anymore");
+        if (crashHalf || bounceHalf)
+            return r.fail("split120: save holds retired half-rate words; cannot load");
+        if (!knownQuiescentMode)
+            return r.fail("split120: unknown retired mode '" + savedMode + "'; cannot load");
+        if (anyThread || nt != 0u || anyRider || nr != 0u)
+            return r.fail("split120: save holds retired split120 pass state; cannot load");
         return true;
     }
 
@@ -2814,6 +2825,6 @@ namespace
         ps2_savestate::registerSection("padlatch", {1u, &padLatchSave, &padLatchLoad, &padLatchReady});
     const bool kTrickyGemsRegistered =
         ps2_savestate::registerSection("trickygems", {1u, &trickyGemsSave, &trickyGemsLoad, nullptr, 0u, false, &trickyGemsLoad});
-    const bool kSplit120Registered =
-        ps2_savestate::registerSection("split120", {1u, &split120Save, &split120Load, nullptr, 0u, false, &split120Load});
+    const bool kSplit120Registered = ps2_savestate::registerSection(
+        "split120", {1u, nullptr, &split120StubLoad, nullptr, 0u, true, &split120StubLoad, true});
 } // namespace

@@ -36,7 +36,6 @@ add_library(ps2_test_lib STATIC
     src/ps2_ssx3_lod_tests.cpp
     src/ps2_native_world_tests.cpp
     src/ps2_ssx3_anim_pick_guard_tests.cpp
-    src/ps2_ts2_split60_tests.cpp
     src/ps2_ssx3_tricky_hud_tests.cpp
     src/ps2_ssx3_tricky_song_tests.cpp
     src/ps2_ssx3_tricky_gems_tests.cpp

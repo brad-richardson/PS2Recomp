@@ -13,7 +13,6 @@
 #endif
 
 #include "ps2_runtime.h"
-#include "ps2_ts2_split60.h"
 // N5: compile-time switch for the E41 guest-memory watch tap below.
 // PS2X_ENABLE_DIAG_TAPS=0 swaps the trace namespace for a constexpr stub, so
 // the tap (and its __func__/argument setup) compiles to nothing in every
@@ -427,22 +426,6 @@ static inline void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m128i value)
         : (PS2Runtime::isSpecialAddress(_addr, 4u)               \
             ? runtime->Load32(rdram, ctx, _addr)              \
             : FAST_READ32(_addr));                           \
-    /* HL2: no split120 hook here. The generator emits READ32_SPLIT only at */ \
-    /* the 12 conversion PCs (ps2_ts2_splitsites.h); every other load kept */ \
-    /* stock values through halfLoad's default case, so skipping the call is */ \
-    /* exact. */ \
-    return _rv; }())
-
-/* HL2: the pre-split READ32 body, emitted only at the 12 conversion PCs. */
-#define READ32_SPLIT(addr) ([&]() -> uint32_t {                     \
-    uint32_t _addr = (uint32_t)(addr);                        \
-    uint32_t _rv = _addr <= PS2_RAM_SIZE - sizeof(uint32_t) /* EX1 */ \
-        ? Ps2CanonicalRead32(rdram, _addr)                   \
-        : (PS2Runtime::isSpecialAddress(_addr, 4u)               \
-            ? runtime->Load32(rdram, ctx, _addr)              \
-            : FAST_READ32(_addr));                           \
-    if (ps2_ts2_split60::halfMode()) /* EE1P2: one product gate per 32-bit load */ \
-        _rv = ps2_ts2_split60::halfLoad(ctx->pc, _addr, _rv);  \
     return _rv; }())
 
 #define READ64(addr) ([&]() -> uint64_t {                     \

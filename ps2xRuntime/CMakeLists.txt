@@ -597,9 +597,8 @@ endif()
 
 # EE1P2: TS2 observer/G2b diagnostic tracers. They hook every dispatch, load
 # and store; keep them out of every generated function by default on all
-# platforms, diag/det builds opt back in via the build scripts. The split120
-# product path (ps2_ts2_split60 rider-pass continuation) stays always-on
-# behind one runtime gate per hot path.
+# platforms, diag/det builds opt back in via the build scripts. (SPR1
+# retired the split120 product path that used to stay always-on here.)
 option(PS2X_ENABLE_DET_HASH_TAP "Compile the bounded deterministic VBlank XXH64 tap" OFF)
 if(PS2X_ENABLE_DET_HASH_TAP)
     target_compile_definitions(ps2_runtime PUBLIC PS2X_ENABLE_DET_HASH_TAP=1)

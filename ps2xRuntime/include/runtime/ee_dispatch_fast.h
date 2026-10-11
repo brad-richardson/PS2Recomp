@@ -6,8 +6,7 @@
 //
 // - eeCheckpointDue: knob on, the generated backward edge runs the
 //   scheduler's inline checkpoint directly (no eeCheckpointDue ->
-//   EeScheduler::checkpointDue call pair). split120 half mode keeps the
-//   out-of-line path (its restart suppressor runs there).
+//   EeScheduler::checkpointDue call pair).
 // - dispatchGuestBranch: knob on, a lean front runs the common case (no
 //   dispatch-side hook can act, the target has a generated function) and
 //   hands everything else to the unchanged path (dispatchGuestBranchFull)
@@ -43,9 +42,8 @@ namespace ps2_dsp1
 // Set once at runtime construction from PS2X_EE_DISPATCH_FAST (unset/1 = on;
 // 0 = the exact out-of-line paths). A plain load on every checkpoint.
 inline bool g_fast = false;
-// g_fast minus split120 (PS2X_SSX3_SIM_MODE=split120_render60_v1, the only
-// mode where ps2_ts2_split60::halfMode() can be true): that mode keeps the
-// out-of-line checkpoint and its restart suppressor.
+// SPR1: split120 retired, so this always equals g_fast (set once at runtime
+// construction); the fast checkpoint runs on every path.
 inline bool g_fastCheckpoint = false;
 
 inline bool knobFromEnv() noexcept

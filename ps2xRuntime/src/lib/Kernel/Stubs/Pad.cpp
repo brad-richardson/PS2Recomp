@@ -363,8 +363,8 @@ namespace ps2_stubs
         // on replay. Such a file is a '# padrec v1' recording made in events
         // mode; v1 carries no full120 knob, so the stamps tell: only a 120 Hz
         // read lands on an odd stock half-tick, and FH5 events recordings put
-        // about half their rows there (PB11: 2472 of 4990), stock and split120
-        // ones none (FV1/FH1 cuts: 0-1). PS2X_PAD_SCRIPT_EVENTS_CLOCK=
+        // about half their rows there (PB11: 2472 of 4990), stock ones none
+        // (FV1/FH1 cuts: 0-1; SPR1 retired split120). PS2X_PAD_SCRIPT_EVENTS_CLOCK=
         // fh5|exact overrides this for any script.
         bool padScriptWantsLegacyEventsClock(const std::string &text, const std::vector<PadScriptEntry> &parsed)
         {
@@ -1203,8 +1203,7 @@ namespace ps2_stubs
             }
             char startUtc[32] = {0};
             padRecordUtc(startUtc, sizeof(startUtc), when, "%Y-%m-%dT%H:%M:%SZ");
-            char sim[64], vu1[64], mtvu[64], finish[64], det[64], vfloat[64], revdma[64], mcroot[512];
-            std::snprintf(sim, sizeof(sim), "%s", padRecordKnob("PS2X_SSX3_SIM_MODE"));
+            char vu1[64], mtvu[64], finish[64], det[64], vfloat[64], revdma[64], mcroot[512];
             std::snprintf(vu1, sizeof(vu1), "%s", padRecordKnob("PS2X_VU1_ENGINE"));
             std::snprintf(mtvu, sizeof(mtvu), "%s", padRecordKnob("PS2X_MTVU"));
             std::snprintf(finish, sizeof(finish), "%s", padRecordKnob("PS2X_GS_FINISH_TIMING"));
@@ -1212,7 +1211,6 @@ namespace ps2_stubs
             std::snprintf(vfloat, sizeof(vfloat), "%s", padRecordKnob("PS2X_VU_FLOAT"));
             std::snprintf(revdma, sizeof(revdma), "%s", padRecordKnob("PS2X_VIF1_REVERSE_DMA"));
             std::snprintf(mcroot, sizeof(mcroot), "%s", padRecordKnob("PS2X_MC_ROOT"));
-            padRecordSanitize(sim);
             padRecordSanitize(vu1);
             padRecordSanitize(mtvu);
             padRecordSanitize(finish);
@@ -1232,9 +1230,9 @@ namespace ps2_stubs
                          "# start_utc=%s\n"
                          "# build=%s\n"
                          "# env_sha=%s\n"
-                         "# knobs SIM_MODE=%s VU1_ENGINE=%s MTVU=%s FINISH_TIMING=%s "
+                         "# knobs VU1_ENGINE=%s MTVU=%s FINISH_TIMING=%s "
                          "DETERMINISTIC=%s VU_FLOAT=%s VIF1_REVERSE_DMA=%s\n",
-                         fh5Stamps ? "v1" : "v2", startUtc, ps2x::buildId(), ps2x::recordedEnvFileHash(), sim,
+                         fh5Stamps ? "v1" : "v2", startUtc, ps2x::buildId(), ps2x::recordedEnvFileHash(),
                          vu1, mtvu, finish, det, vfloat, revdma);
             {
                 char f120[64], fix[256];

@@ -160,8 +160,8 @@ namespace ps2recomp
 
         // HL3: codegen ABI marker. Game-object builds link the runtime guard
         // (ps2_codegen_abi_guard.cpp), which references this symbol: a
-        // pre-HL3 generated tree fails to link instead of silently dropping
-        // the split120 hook. This line changes register_functions.cpp, so the
+        // stale generated tree fails to link instead of silently running
+        // an old contract. This line changes register_functions.cpp, so the
         // register pin forces a re-pin on every ABI bump.
         ss << "// HL3: codegen ABI marker; see ps2_codegen_abi.h for the version history.\n";
         ss << "extern const uint32_t g_ps2xCodegenAbiVersion = " << std::dec << ps2_codegen_abi::kVersion << "u;\n\n";

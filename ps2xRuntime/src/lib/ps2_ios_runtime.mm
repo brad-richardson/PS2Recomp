@@ -65,8 +65,8 @@ bool autoRouteEnabled()
     return valid && value;
 }
 
-// IQ1: Settings.bundle "Target 120 fps" switch. Unset = ON (CFG1 D2: the
-// default is full 120; split120 serves only the user-picked 60 path).
+// IQ1: Settings.bundle "Target 120 fps" switch. Unset = ON (the default is
+// full 120; SPR1: the user-picked 60 path is the stock game).
 bool target120Enabled()
 {
     Boolean valid = false;

@@ -10,8 +10,9 @@
 namespace ps2_codegen_abi
 {
 // 1 == splitsites-v1: plain READ32 carries no split120 hook; the generator
-// emits READ32_SPLIT only at the 12 sites in ps2_ts2_splitsites.h.
-inline constexpr uint32_t kVersion = 1u;
+// emitted READ32_SPLIT only at the 12 sites in ps2_ts2_splitsites.h.
+// 2 == SPR1: split120 retired; the generator emits plain READ32 everywhere.
+inline constexpr uint32_t kVersion = 2u;
 } // namespace ps2_codegen_abi
 
 // Defined by the generated register_functions.cpp (NOT by the runtime, the

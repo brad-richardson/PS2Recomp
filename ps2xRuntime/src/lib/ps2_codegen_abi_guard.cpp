@@ -1,7 +1,7 @@
 // HL3: fail-loud codegen ABI guard. Game-object builds (PS2X_GAME_CODEGEN_DIR
 // set) link this TU into ps2EntryRunner; it references the ABI marker the
 // generator stamps into register_functions.cpp, so a pre-HL3 generated tree
-// fails to LINK instead of silently dropping the split120 hook, and it
+// fails to LINK instead of silently running a stale contract, and it
 // FATALs at startup if a marker value ever mismatches.
 #include "ps2_codegen_abi.h"
 

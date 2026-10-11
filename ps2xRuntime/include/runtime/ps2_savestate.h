@@ -419,6 +419,10 @@ namespace ps2_savestate
         // Pure payload validator run during preflight, before any owner is
         // allowed to restore live state. It must not mutate process state.
         LoadFn validate = nullptr;
+        // SPR1: retired section kept as a load-only stub for pre-removal
+        // files. New saves omit it (save must be nullptr); pair with
+        // optional so files without it still load.
+        bool legacyReadOnly = false;
     };
     bool registerSection(const std::string &key, SectionHooks hooks);
     const std::map<std::string, SectionHooks> &registeredSections();

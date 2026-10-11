@@ -1019,7 +1019,7 @@ void register_pad_input_tests()
                 if (f)
                 {
                     std::fputs("# padrec v1\n# start_utc=2026-09-28T01:00:00Z\n"
-                               "# knobs SIM_MODE=split120_render60_v1\n\n"
+                               "# knobs VU1_ENGINE=microvu\n\n"
                                "1000:start:500\n",
                                f);
                     std::fclose(f);

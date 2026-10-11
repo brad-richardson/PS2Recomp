@@ -34,8 +34,9 @@
 // (D1 microVU flag hack, D4 the MQ2+MQ3 probe-drain pair, D8 aniso 16x — all
 // det IDENTICAL) and deletes the dead GE1_VERTEX_KICK row (knob gone on the
 // ARMSX2 base; the Odin env line is inert). New per-platform literal tables
-// below do the same for iOS (D1/D4, AU13 sinc, CF4-explicit readback off, D2
-// split120 at 60, D8 aniso) and Mac (D1/D4, D5 movie skip, D8 aniso);
+// below do the same for iOS (D1/D4, AU13 sinc, CF4-explicit readback off,
+// D8 aniso; SPR1 retired the D2 split120 row with split120) and Mac
+// (D1/D4, D5 movie skip, D8 aniso);
 // PS2X_PROFILE=reference disables every table.
 //
 // Platform-neutral on purpose so the host unit test compiles this header
@@ -110,7 +111,6 @@ inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
         {"PS2X_VU0_DIRECT", "1", false, false, false},
         {"PS2X_GS_HANDOFF_DIET", "1", false, false, false},
         {"PS2X_GS_FINISH_TIMING", "pcsx2", false, false, false},
-        {"PS2X_SSX3_SIM_MODE", "split120_render60_v1", false, false, false},
         {"PS2X_VIF1_REVERSE_DMA", "0", false, false, false},
         {"PS2X_SKIP_MOVIE", "1", false, false, false},
         {"PS2X_SOUND", "1", false, false, false},
@@ -226,12 +226,11 @@ inline size_t cf2ApplyAndroidDefaults(const char *bootElf)
 // PS2X_PROFILE=reference disables the table, exactly like Android.
 
 // iOS bundled-play equivalent (D1 flag hack, D4 probe-drain pair, AU13 sinc
-// resample, CF4-explicit readback off, D2 split120 at 60, D8 aniso 16x).
+// resample, CF4-explicit readback off, D8 aniso 16x; SPR1 retired the D2
+// split120 row with split120: the user-picked 60 path is stock by absence).
 // Device-specific values (upscale, SSAA, scanout, zero-copy, paths) and the
 // 120-layer user toggle stay in the bundled env + Settings layers; D8 (AF16)
-// is decided (this table), not waiting. The Target 120 switch defaults ON, so
-// the D2 split120 line rules only the user-picked 60 path (the 120 preset
-// overrides to stock + full-120 events).
+// is decided (this table), not waiting.
 inline const Cf2AndroidDefault *cf2IosDefaults(size_t *countOut)
 {
     static const Cf2AndroidDefault kIosDefaults[] = {
@@ -240,7 +239,6 @@ inline const Cf2AndroidDefault *cf2IosDefaults(size_t *countOut)
         {"PS2X_MTVU_VIF1_STAT_FREE", "1", false, false, false},
         {"PS2X_AUDIO_RESAMPLE", "sinc", false, false, false},
         {"PS2X_VIF1_REVERSE_DMA", "0", false, false, false},
-        {"PS2X_SSX3_SIM_MODE", "split120_render60_v1", false, false, false},
         {"GE1_ANISO", "16", false, false, false},
         // AU19 (Brad 10-02): DC block on everywhere (same literal fields).
         {"PS2X_AUDIO_DC_BLOCK", "1", false, false, false},
@@ -389,7 +387,6 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_SSX3_LOD_SCALE",
         "PS2X_SSX3_MEGA_LAPS", // MGX1: guest-affecting, Tricky MEGA only, owner MGX1
         "PS2X_SSX3_REPLAY_RATE",
-        "PS2X_SSX3_SIM_MODE",
         "PS2X_SSX3_TRICKY_GEMS",
         "PS2X_SSX3_TRICKY_GEMS_TABLE",
         "PS2X_SSX3_TRICKY_GEM_SPIN",

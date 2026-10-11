@@ -1,7 +1,6 @@
 #include "ps2_runtime.h"
 #include "ps2_hle_pools.h"
 #include "ps2_ssx3_patch_grow_state.h"
-#include "ps2_ts2_split60.h"
 #include "ps2_mtvu.h"
 #include "ps2_microvu.h"
 #include "ps2_native_world.h"
@@ -2981,16 +2980,14 @@ void qsr1FireLoad(const char *tag, const char *what)
 
 // (QSR1 menu geometry lives in ps2_virtual_pad.h: pure + unit-tested.)
 
-// QSR1: race-start auto snapshot outside full-120 (RETRY at 60/split120).
+// QSR1: race-start auto snapshot outside full-120 (RETRY at 60).
 // The game's race-start transition is the race-tick call (jal 0x12a250 at
 // 0x113dcc, $s0 = race object; ps2_fh1::kRaceTick2CallSite, the same site
 // the events enter-request reads) with the race clock [$s0+0xc] at 0/1:
-// the first updates of a fresh race (FH5 entry rule). Full-120 off (the
-// shipped 60, split120_render60_v1) runs the full dispatch (the DSP1 lean
-// front is off in split mode), so the EE branch dispatch checks the two
-// PC pairs directly: negligible cost, knob-gated, stock dispatch pays
-// nothing when off. Stock-sim 60 (lean front on, sites unlisted) is not
-// covered; no shipped 60 uses it.
+// the first updates of a fresh race (FH5 entry rule). SPR1: split120 is
+// retired, so the shipped 60 is stock-sim 60 (DSP1 lean front on, sites
+// unlisted) and is NOT covered by this hook. Accepted: QSA1 made auto
+// snapshots opt-in, and no new host hooks go on the reference path here.
 // Armed at boot; a snapshot disarms; re-arm on race end (the session
 // finish flag at [a0+0x610] on calls to 0x26f4a8) or after 600 ticks
 // without a race-tick call (menus don't call the site). A backward tick
@@ -3671,14 +3668,11 @@ PS2Runtime::PS2Runtime()
     }
     m_missingFunctionPolicy.store(static_cast<uint32_t>(defaultPolicy), std::memory_order_relaxed);
     m_abortOnMissingFunction = defaultPolicy == MissingFunctionPolicy::Stop;
-    // DSP1: PS2X_EE_DISPATCH_FAST (default on; 0 = the exact paths). split120 keeps the
-    // out-of-line checkpoint (the only mode with half-mode restarts).
+    // DSP1: PS2X_EE_DISPATCH_FAST (default on; 0 = the exact paths).
+    // SPR1: split120 (the only mode with half-mode restarts) is retired,
+    // so the fast checkpoint follows the knob on every path.
     ps2_dsp1::g_fast = ps2_dsp1::knobFromEnv();
-    {
-        const char *simMode = std::getenv("PS2X_SSX3_SIM_MODE");
-        ps2_dsp1::g_fastCheckpoint =
-            ps2_dsp1::g_fast && !(simMode && std::strcmp(simMode, "split120_render60_v1") == 0);
-    }
+    ps2_dsp1::g_fastCheckpoint = ps2_dsp1::g_fast;
     m_iopHost = std::make_unique<PS2IopHostAdapter>(*this);
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
 
@@ -5422,9 +5416,8 @@ __attribute__((noinline, cold)) bool dspArm()
 {
     bool on = !PS2X_ENABLE_DIAG_TAPS; // lookupFunction's dispatch history
     // KNC1P2 B3 deleted the TS2 counting diag (PS2X_TS2_HALFLOAD_COUNT,
-    // PS2X_TS2_CASE_COUNT): counting is unconditionally off, so only the
-    // split-mode product check remains.
-    on = on && !ps2_ts2_split60::enabled();
+    // PS2X_TS2_CASE_COUNT): counting is unconditionally off. SPR1 deleted
+    // the split-mode product check with split120.
     on = on && diagPeriodMs() == 0u;
     g_dsp.fh1 = ps2_fh1::enabled() || ps2_fh1::tapOn();
     on = on && (!g_dsp.fh1 || ps2_fh1::hookPreclassify()); // chain mode runs every hook
@@ -5706,30 +5699,6 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
     {
         ssx3SpatialRestore(rdram);
     }
-    // EE1P2: one product gate per dispatch; rider-pass detail (boundary
-    // begin, helper tracking, prediction skip) runs only when a split mode
-    // is armed. The g2b/observer calls below fold away in release builds.
-    bool splitBoundary = false;
-    if (ps2_ts2_split60::enabled())
-    {
-        splitBoundary = sourcePc == 0x128ddcu && targetPc == 0x1216e0u &&
-                        kind == GuestBranchKind::DirectCall;
-        if (splitBoundary) ps2_ts2_split60::begin(rdram, ctx);
-        // TS3: an unconverted case in half 1 runs nothing for this rider;
-        // finishIfContinuation keeps the half 1->0 flip on the last rider.
-        if (splitBoundary && ps2_ts2_split60::skipSecondHalfUnconverted())
-        {
-            ctx->pc = fallthroughPc;
-            ps2_ts2_split60::finishIfContinuation(ctx);
-            return true;
-        }
-        ps2_ts2_split60::noteHelperCall(sourcePc, targetPc);
-        if (ps2_ts2_split60::skipSecondHalfPrediction(rdram, ctx, sourcePc, targetPc))
-        {
-            ctx->pc = fallthroughPc;
-            return true;
-        }
-    }
     // FH1: full120 manager patch at the init hook + env-only tap counts.
     if ((ps2_fh1::enabled() || ps2_fh1::tapOn()) && ps2_fh1::onBranch(rdram, ctx, sourcePc, targetPc, this))
     {
@@ -5917,7 +5886,6 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
     }
 
     const bool returned = ctx->pc == fallthroughPc;
-    if (splitBoundary && returned) ps2_ts2_split60::finishIfContinuation(ctx);
     return returned;
 }
 
@@ -7184,9 +7152,6 @@ void PS2Runtime::postEeEvent(EeEvent event)
 
 bool PS2Runtime::eeCheckpointDueSlow(uint32_t cycles) noexcept
 {
-    // EE1P2: one product gate per checkpoint; the restart suppressor runs
-    // only in split120 halves.
-    if (ps2_ts2_split60::halfMode() && ps2_ts2_split60::consumeRestartCheckpoint()) return false;
     if (!m_eeScheduler->checkpointDue(cycles))
     {
         return false;

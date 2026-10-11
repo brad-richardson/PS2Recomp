@@ -279,12 +279,6 @@ inline bool fh28PoolOverride(uint32_t address, uint64_t mainMask) noexcept
 // VBlank supplies the second update. Every word is verified before any write.
 inline void patchAtManagerInit(uint8_t *ram)
 {
-    const char *sim = std::getenv("PS2X_SSX3_SIM_MODE");
-    if (sim && std::strncmp(sim, "split", 5) == 0)
-    {
-        std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_SIM_MODE=%s (full120 replaces split120)\n", sim);
-        std::abort();
-    }
     uint32_t a = 0u;
     if (!rd32(ram, kMgrPtr, a) || !a || (a & 3u) || (a & 0x1FFFFFFFu) + 0x60u > PS2_RAM_SIZE)
     {
@@ -1201,12 +1195,6 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
     if (!rd32(ram, kMgrPtr, a) || !a || (a & 3u))
     {
         std::fprintf(stderr, "fh1-full120-refused events flip: manager ptr=%08x\n", a);
-        std::abort();
-    }
-    const char *sim = std::getenv("PS2X_SSX3_SIM_MODE");
-    if (sim && std::strncmp(sim, "split", 5) == 0)
-    {
-        std::fprintf(stderr, "fh1-full120-refused PS2X_SSX3_SIM_MODE=%s (full120 replaces split120)\n", sim);
         std::abort();
     }
     if (jcam2Fix()) jcam2Reset();

@@ -12,8 +12,6 @@
 #include "runtime/ee_guest_unwind.h"
 #include "ps2_fpmode.h"
 #include "ps2_e41_trace.h"
-#include "ps2_ts2_split60.h"
-#include "ps2_ts2_split60.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_ssx3_tricky_layer.h"
 #include "ps2_ach.h"
@@ -901,8 +899,6 @@ void EeScheduler::run()
             try
             {
                 m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
-                ps2_ts2_split60::setThread(static_cast<uint32_t>(m_currentThreadId), m_insideInterrupt);
-                ps2_ts2_split60::finishIfContinuation(&context);
                 m_guestExecuting.store(true, std::memory_order_release);
                 // EE1: unconditional (one relaxed store on a context switch);
                 // release builds compile the watch check out but E7 thread
