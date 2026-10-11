@@ -30,6 +30,7 @@
 #include "ps2_fh1_restamp.h"
 #include "ps2_fh1_fix.h"
 #include "ps2_fh1_ground2.h"
+#include "ps2_fh1_normcap.h"
 #include "ps2_fh1_input2.h"
 #include "ps2_fh1_fh35.h"
 #include "ps2_fh1_jcam2_scratch.h"
@@ -1625,6 +1626,248 @@ inline bool groundStepFix() noexcept
     return on;
 }
 
+// NRM1 normcap hooks (math in ps2_fh1_normcap.h). The clamp is a baked
+// codegen immediate, so the guest map still runs and normcap overwrites
+// R+0x1E0 on 0x13d818's return from pre-state captured at the query
+// (queryOnReturn on publish halves, the querySkip path on hold halves).
+// Own post record: g_post stays free for the nested query. Any miss or
+// invalid input leaves the guest value (safe fallback).
+inline bool normcapFix() noexcept
+{
+    static const bool on = enabled() &&
+                           (fixMask() & (kFixNormcap | kFixVnRet | kFixQuery)) ==
+                               (kFixNormcap | kFixVnRet | kFixQuery);
+    return on;
+}
+
+struct NormcapSlot
+{
+    uint32_t rider = 0u;
+    uint32_t tick = 0u; // update tick of the pre-capture
+    bool halfFirst = false;
+    bool preValid = false;
+    float preVel[3] = {};
+    float preN[3] = {};
+    float preU[3] = {};
+    uint32_t preState = 0u;
+    bool budgetValid = false;
+    uint32_t budgetTick = 0u; // first-half tick that stored the budget
+    double used1 = 0.0, e1 = 0.0, mag1 = 0.0;
+    bool correctedValid = false;
+    uint32_t correctedTick = 0u;
+    bool correctedFirst = false;
+};
+inline NormcapSlot g_normcapSlots[kNormcapSlots];
+
+struct NormcapPost
+{
+    uint32_t target = 0u, sp = 0u, obj = 0u;
+};
+inline NormcapPost g_normcap;
+inline bool g_normcapArmed = false;
+
+// Owner->rider mapping, learned on skip halves only. querySkip's chain
+// (R = [P+0x18]) is valid pre-call; after the query runs, [P+0x18] no
+// longer reads back the rider, so publish halves reuse the learned
+// mapping (any miss or stale entry safely skips the correction).
+struct NormcapOwner
+{
+    uint32_t pa = 0u, r = 0u;
+};
+inline NormcapOwner g_normcapOwners[kNormcapSlots];
+
+inline void normcapUnwind() noexcept
+{
+    // Disarm the in-flight record only. Slots/owners must survive routine
+    // inter-update unwinds (the pair budget spans two updates); tick checks
+    // (pre == now, budget == now-1) and continuous skip-half re-learning
+    // invalidate anything stale after a state load or mode transition.
+    g_normcap = NormcapPost{};
+    g_normcapArmed = false;
+}
+
+// First half = the publish half (frozen packet across the pair with query):
+// groundstep publishes on g_rngOdd, plain query on !g_rngOdd.
+inline bool normcapFirstHalf() noexcept
+{
+    return g_rngOdd == groundStepFix();
+}
+
+inline NormcapSlot *normcapSlot(uint32_t rider) noexcept
+{
+    NormcapSlot *victim = &g_normcapSlots[0];
+    for (int i = 0; i < kNormcapSlots; ++i)
+    {
+        NormcapSlot *s = &g_normcapSlots[i];
+        if (s->rider == rider && (s->preValid || s->budgetValid))
+            return s;
+        if (!s->preValid && !s->budgetValid)
+            return s;
+        if (s->tick < victim->tick)
+            victim = s;
+    }
+    return victim;
+}
+
+inline uint32_t normcapOwnerLookup(uint32_t pa) noexcept
+{
+    for (int i = 0; i < kNormcapSlots; ++i)
+        if (g_normcapOwners[i].pa == pa)
+            return g_normcapOwners[i].r;
+    return 0u;
+}
+
+inline void normcapOwnerLearn(uint32_t pa, uint32_t r) noexcept
+{
+    for (int i = 0; i < kNormcapSlots; ++i)
+        if (g_normcapOwners[i].pa == pa)
+        {
+            g_normcapOwners[i].r = r;
+            return;
+        }
+    for (int i = 0; i < kNormcapSlots; ++i)
+        if (g_normcapOwners[i].pa == 0u)
+        {
+            g_normcapOwners[i].pa = pa;
+            g_normcapOwners[i].r = r;
+            return;
+        }
+    g_normcapOwners[(pa >> 4) % kNormcapSlots].pa = pa;
+    g_normcapOwners[(pa >> 4) % kNormcapSlots].r = r;
+}
+
+inline void normcapCapturePre(uint8_t *ram, uint32_t pa, uint32_t rKnown, bool learn) noexcept
+{
+    const uint32_t r = learn ? rKnown : normcapOwnerLookup(pa);
+    uint32_t surf = 0u;
+    if (r == 0u || !rd32(ram, r + 0x438u, surf) || surf > 0xffffu)
+        return;
+    if (learn)
+        normcapOwnerLearn(pa, r);
+    NormcapSlot *s = normcapSlot(r);
+    if (s->rider != r || !(s->preValid || s->budgetValid))
+        *s = NormcapSlot{};
+    s->rider = r;
+    s->tick = static_cast<uint32_t>(g_lastTick);
+    s->halfFirst = normcapFirstHalf();
+    for (int i = 0; i < 3; ++i)
+    {
+        uint32_t b = 0u;
+        if (!rd32(ram, r + 0x1e0u + 4u * i, b))
+            return;
+        std::memcpy(&s->preVel[i], &b, 4);
+        if (!rd32(ram, r + 0x370u + 4u * i, b))
+            return;
+        std::memcpy(&s->preN[i], &b, 4);
+        if (!rd32(ram, r + 0x3d0u + 4u * i, b))
+            return;
+        std::memcpy(&s->preU[i], &b, 4);
+    }
+    s->preState = surf;
+    s->preValid = true;
+}
+
+inline void normcapPreHook(R5900Context *ctx, uint32_t targetPc)
+{
+    // No ram here: arm on the target match; the P->R chain is validated
+    // at fire time (an unexpected a0 convention corrects nothing).
+    if (targetPc != kNormcapGround || !ctx || g_normcapArmed)
+        return;
+    g_normcap.target = targetPc;
+    g_normcap.sp = getRegU32(ctx, 29);
+    g_normcap.obj = getRegU32(ctx, 4);
+    g_normcapArmed = true;
+}
+
+inline void normcapOnReturn(uint8_t *ram, R5900Context *ctx)
+{
+    const uint32_t pa = g_normcap.obj;
+    uint32_t r = 0u, state = 0u;
+    if (!rd32(ram, pa + 0x18u, r) || r == 0u || !rd32(ram, r + 0x438u, state))
+        return;
+    if (state == 2u || state == 3u || state == 13u)
+        return; // map gate excluded: the guest map did not run
+    NormcapSlot *s = normcapSlot(r);
+    const uint32_t tick = static_cast<uint32_t>(g_lastTick);
+    if (s->rider != r || !s->preValid || s->tick != tick)
+        return; // no pre-capture (hold miss): leave the guest value
+    const bool first = normcapFirstHalf();
+    if (first != s->halfFirst)
+        return;
+    if (s->correctedValid && s->correctedTick == tick && s->correctedFirst == first)
+        return; // idempotent: already corrected this half
+    uint32_t kb = 0u;
+    if (!rd32(ram, kNormcapPoolK, kb))
+        return;
+    float kf = 0.0f;
+    std::memcpy(&kf, &kb, 4);
+    if (!(kf > -1.0f && kf < 0.0f) || !std::isfinite(kf))
+        return;
+    const double k = kf;
+    double w[3], n[3], u[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        w[i] = (double)s->preVel[i] - (double)s->preU[i];
+        n[i] = s->preN[i];
+        u[i] = s->preU[i];
+    }
+    if (!std::isfinite(w[0] + w[1] + w[2] + n[0] + n[1] + n[2] + u[0] + u[1] + u[2]))
+        return;
+    double out[3];
+    if (first)
+    {
+        // Plain half-map: keep the guest value, store the budget triple.
+        double used1 = 0.0, e1 = 0.0, mag1 = 0.0;
+        if (!normcapFirst(w, n, k, out, used1, e1, mag1))
+            return;
+        s->used1 = used1;
+        s->e1 = e1;
+        s->mag1 = mag1;
+        s->budgetTick = tick;
+        s->budgetValid = true;
+        s->correctedValid = true;
+        s->correctedTick = tick;
+        s->correctedFirst = first;
+        return;
+    }
+    if (!s->budgetValid || s->budgetTick + 1u != tick)
+        return; // first half did not map: keep the plain half-map
+    bool binds = false;
+    if (!normcapSecond(w, n, k, s->used1, s->e1, s->mag1, out, binds))
+        return;
+    s->budgetValid = false;
+    if (!binds)
+    {
+        // Unbound pair: the guest value is already the plain half-map.
+        s->correctedValid = true;
+        s->correctedTick = tick;
+        s->correctedFirst = first;
+        return;
+    }
+    for (int i = 0; i < 3; ++i)
+    {
+        const float f = (float)(out[i] + u[i]);
+        uint32_t b = 0u;
+        std::memcpy(&b, &f, 4);
+        if (!wr32(ram, r + 0x1e0u + 4u * i, b))
+            return;
+    }
+    s->correctedValid = true;
+    s->correctedTick = tick;
+    s->correctedFirst = first;
+}
+
+inline void normcapReturnMatch(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned)
+{
+    if (!g_normcapArmed)
+        return;
+    if (targetPc != g_normcap.target || !ctx || getRegU32(ctx, 29) != g_normcap.sp)
+        return;
+    g_normcapArmed = false;
+    if (returned)
+        normcapOnReturn(ram, ctx);
+}
+
 // JMP4: the skipped query leaves its whole out-packet stale, not just the
 // instance slot. The caller (0x13D818) never writes the out region itself; it
 // reads [sp+0x110] (instance, 0x13EBC4: null for terrain skips the virtual
@@ -1695,6 +1938,8 @@ inline bool querySkip(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
             return false;
     SET_GPR_U32(ctx, 2, h->v0);
     shadowPubMarkSkip(ram, pa);
+    if (normcapFix())
+        normcapCapturePre(ram, pa, r, true);
     return true;
 }
 
@@ -2373,6 +2618,7 @@ inline void postUnwindRestore(uint8_t *ram) noexcept
 {
     trailRingRngRestore(ram);
     pubRestore(ram); // JDR2: an unwound published call keeps no published word
+    normcapUnwind();
     if (!g_postArmed)
         return;
     if (g_post.kind == 6u)
@@ -2485,6 +2731,8 @@ inline void queryOnReturn(uint8_t *ram, R5900Context *ctx) noexcept
     for (uint32_t i = 0u; i < kQueryHoldWords; ++i)
         g_queryHold[slot].w[i] = w[i];
     shadowPubSample(ram, pa);
+    if (normcapFix())
+        normcapCapturePre(ram, pa, 0u, false);
 }
 
 inline void jcamOnReturn(uint8_t *ram)
@@ -2595,6 +2843,7 @@ inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool re
     trailRingOnReturn(ram, ctx, targetPc);
     if (g_pubArmed)
         pubOnReturn(ram, ctx, targetPc);
+    normcapReturnMatch(ram, ctx, targetPc, returned);
     if (!g_postArmed)
         return;
     if (targetPc != g_post.target || !ctx || getRegU32(ctx, 29) != g_post.sp)
@@ -3024,7 +3273,7 @@ struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
         particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2, trails, chase2, query, trailring,
-        shadowpub;
+        shadowpub, normcap;
     bool src, fh9, draw, tap;
 };
 
@@ -3056,6 +3305,7 @@ inline const BranchFlags &branchFlags() noexcept
         r.chase2=chase2Fix();
         r.query = queryFix();
         r.shadowpub = shadowPubFix();
+        r.normcap = normcapFix();
         r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap || r.input2 || r.query || inputChainFix();
         r.bonus = bonusFix();
         r.lift = liftFix();
@@ -3227,6 +3477,8 @@ inline HookInterest buildHookInterest(const HookConfig &c)
     }
     if ((c.main & kFixGround2) != 0u && on)
         addTgt(0x113e80u);
+    if ((c.main & kFixNormcap) != 0u && on)
+        addTgt(kNormcapGround); // NRM1: pre-hook arms the post-map correction record (any source)
     if ((c.main & kFixJcam) != 0u && on)
         addTgt(kJcamJump); // FH28: countdown pre-hook + retention post-hook (any source)
     if ((c.main & kFixJcam2) != 0u && on)
@@ -3446,6 +3698,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = true;
     if (on && flag(&BranchFlags::ground2, ground2Fix))
         ground2PreHook(ctx, targetPc);
+    if (on && flag(&BranchFlags::normcap, normcapFix))
+        normcapPreHook(ctx, targetPc);
     if (on && flag(&BranchFlags::jcam2, jcam2Fix))
         skip = jcam2Hook(ram,ctx,sourcePc,targetPc,runtime) || skip;
     if (on && flag(&BranchFlags::jcam, jcamFix))

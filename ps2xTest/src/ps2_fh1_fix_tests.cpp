@@ -2,6 +2,7 @@
 #include "ps2_fh1_fix.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_fh1_ground2.h"
+#include "ps2_fh1_normcap.h"
 #include "ps2_fh1_input2.h"
 #include "ps2_fh1_fh35.h"
 #include <cmath>
@@ -244,6 +245,67 @@ void register_ps2_fh1_fix_tests()
             t.Equals(parseFix("all,vnret").main, kFixAll | kFixVnRet, "opt-in");
             t.Equals(parseFix("all,vnret,-vnret").main, kFixAll, "opt-out");
             t.Equals(parseFix("vnret").main, static_cast<uint64_t>(kFixVnRet), "vnret alone");
+        });
+
+        tc.Run("NRM1 normcap is opt-in at bit 56 and pairs to the bounded stock map", [](TestCase &t)
+        {
+            t.Equals(static_cast<uint64_t>(kFixNormcap), 1ull << 56, "normcap uses bit 56");
+            t.IsTrue((kFixAll & kFixNormcap) == 0u, "excluded from all");
+            t.Equals(parseFix("all,query,vnret,normcap").main, kFixAll | kFixQuery | kFixVnRet | kFixNormcap, "opt-in");
+            t.Equals(parseFix("all,query,vnret,normcap,-normcap").main, kFixAll | kFixQuery | kFixVnRet, "opt-out");
+            t.Equals(parseFix("normcap").main, static_cast<uint64_t>(kFixNormcap), "normcap alone");
+            const double kh = std::sqrt(0.6) - 1.0;
+            auto pair = [&](const double w[3], const double n[3], double out[3], bool &binds) {
+                double h1[3], used1 = 0.0, e1 = 0.0, mag1 = 0.0;
+                if (!normcapFirst(w, n, kh, h1, used1, e1, mag1))
+                    return false;
+                return normcapSecond(h1, n, kh, used1, e1, mag1, out, binds);
+            };
+            // Captured bound rows: A+100 takeoff/lip, A+100 landing, B late recontact.
+            const double rows[4][6] = {
+                {158.023941, 1609.033936, 358.280823, -0.05790357, -0.14487608, 0.98775405},
+                {-516.690308, 1908.668457, 290.626251, -0.45353130, 0.02129498, 0.89098603},
+                {-544.894531, 1892.244263, 191.545029, -0.30095994, -0.06139826, 0.95165825},
+                {835.014099, 177.890167, 1362.358521, -0.54401886, -0.28040093, 0.79083425},
+            };
+            for (const auto &row : rows)
+            {
+                const double *w = row, *n = row + 3;
+                double h2[3], m[3];
+                bool binds = false;
+                t.IsTrue(pair(w, n, h2, binds), "pair computes");
+                t.IsTrue(binds, "captured row binds");
+                t.IsTrue(normcapStock(w, n, -0.4, m), "stock computes");
+                for (int i = 0; i < 3; ++i)
+                    t.IsTrue(std::abs(h2[i] - m[i]) <= 1e-3 * std::max(std::abs(m[i]), 1.0),
+                             "bound pair matches stock within 1e-3");
+            }
+            // Unbound pair: the hook skips the write (guest value stands).
+            {
+                const double w[3] = {100.0, 2100.0, 300.0};
+                const double n[3] = {-0.3, -0.1, 0.9486833};
+                double h2[3];
+                bool binds = true;
+                t.IsTrue(pair(w, n, h2, binds), "unbound pair computes");
+                t.IsTrue(!binds, "unbound pair reports no bind");
+            }
+            // Sweep from deep saturation through the bind boundary to upward.
+            double worst = 0.0;
+            for (int i = 0; i <= 4000; ++i)
+            {
+                const double w[3] = {100.0 + i * 0.5, -1500.0 - i * 0.25, 300.0};
+                const double n[3] = {-0.3, -0.1, 0.9486833};
+                double h2[3], m[3];
+                bool binds = false;
+                if (!pair(w, n, h2, binds) || !normcapStock(w, n, -0.4, m))
+                {
+                    t.IsTrue(false, "sweep computes");
+                    return;
+                }
+                for (int c = 0; c < 3; ++c)
+                    worst = std::max(worst, std::abs(h2[c] - m[c]) / std::max(std::abs(m[c]), 1.0));
+            }
+            t.IsTrue(worst < 1e-3, "pair matches stock within 1e-3 across the boundary");
         });
 
         tc.Run("KNC5 bit 51 stays reserved and parses (JMP5 springhold removed)", [](TestCase &t)
