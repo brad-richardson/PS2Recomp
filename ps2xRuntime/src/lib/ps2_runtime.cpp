@@ -2595,6 +2595,63 @@ void dumpPresentationFrame(const uint8_t *rgba,
 // EE's immutable packet (tick + epoch) and never touches RDRAM, so the
 // det-hash cannot move. Active only on a non-Stock course-manifest mode:
 // SSX 3 courses skip untouched.
+std::atomic<uint8_t> g_mgx1HudLap{0};
+std::atomic<uint64_t> g_mgx1HudTick{0};
+
+// MGX1: small output-only lap badge on the Tricky Megaplex race. The guest
+// hook publishes a lap and tick; a stale publication cannot bleed into the
+// next course. Digits are drawn into the same final frame as the Tricky meter.
+void mgx1LapOverlay(uint8_t *rgba, uint32_t width, uint32_t height, uint64_t tick)
+{
+    const uint8_t lap = g_mgx1HudLap.load(std::memory_order_relaxed);
+    const uint64_t published = g_mgx1HudTick.load(std::memory_order_relaxed);
+    if (!rgba || lap < 1u || lap > 3u || tick < published || tick - published > 120u ||
+        width < 320u || height < 240u)
+        return;
+    ps2_ssx3_tricky_layer::PresentationPacket packet;
+    if (!ps2_ssx3_tricky_layer::latestPacket(packet) ||
+        packet.epoch != ps2_ssx3_tricky_layer::epoch() || !packet.draw)
+        return;
+    const int scale = std::max(1, static_cast<int>(width / 640u));
+    const int x0 = static_cast<int>(width / 2u) - 55 * scale;
+    const int y0 = 48 * scale;
+    auto pixel = [&](int x, int y, uint8_t r, uint8_t g, uint8_t b) {
+        if (x < 0 || y < 0 || x >= static_cast<int>(width) || y >= static_cast<int>(height)) return;
+        uint8_t *p = rgba + (static_cast<size_t>(y) * width + static_cast<size_t>(x)) * 4u;
+        p[0] = r; p[1] = g; p[2] = b; p[3] = 255;
+    };
+    for (int y = 0; y < 25 * scale; ++y)
+        for (int x = 0; x < 110 * scale; ++x)
+            pixel(x0 + x, y0 + y, (y < 2 * scale || y >= 23 * scale) ? 66 : 14,
+                  (y < 2 * scale || y >= 23 * scale) ? 176 : 20,
+                  (y < 2 * scale || y >= 23 * scale) ? 216 : 32);
+    const char label[8] = {'L', 'A', 'P', ' ', static_cast<char>('0' + lap), '/', '3', '\0'};
+    auto glyph = [](char c) -> const uint8_t * {
+        static constexpr uint8_t L[7] = {16,16,16,16,16,16,31};
+        static constexpr uint8_t A[7] = {14,17,17,31,17,17,17};
+        static constexpr uint8_t P[7] = {30,17,17,30,16,16,16};
+        static constexpr uint8_t one[7] = {4,12,4,4,4,4,14};
+        static constexpr uint8_t two[7] = {14,17,1,2,4,8,31};
+        static constexpr uint8_t three[7] = {30,1,1,14,1,1,30};
+        static constexpr uint8_t slash[7] = {1,2,2,4,8,8,16};
+        switch (c) { case 'L': return L; case 'A': return A; case 'P': return P;
+                     case '1': return one; case '2': return two; case '3': return three;
+                     case '/': return slash; default: return nullptr; }
+    };
+    for (int i = 0; i < 7; ++i)
+    {
+        const uint8_t *rows = glyph(label[i]);
+        if (!rows) continue;
+        for (int y = 0; y < 7; ++y)
+            for (int x = 0; x < 5; ++x)
+                if (rows[y] & (1u << (4 - x)))
+                    for (int yy = 0; yy < 2 * scale; ++yy)
+                        for (int xx = 0; xx < 2 * scale; ++xx)
+                            pixel(x0 + (11 + i * 13 + x * 2) * scale + xx,
+                                  y0 + 5 * scale + y * 2 * scale + yy, 240, 246, 252);
+    }
+}
+
 void trickyHudOverlay(PS2Runtime *rt, uint8_t *rgba, uint32_t width, uint32_t height, uint64_t tick)
 {
     // TKL1: the GL call site. The state decision is the layer's per-VBlank
@@ -3488,6 +3545,7 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint
         s_scratch.size() == static_cast<size_t>(width) * static_cast<size_t>(height) * 4u)
     {
         trickyHudOverlay(rt, s_scratch.data(), width, height, currentTick); // TK43a: output-only reskin
+        mgx1LapOverlay(s_scratch.data(), width, height, currentTick);
         dumpPresentationFrame(s_scratch.data(), width, height, currentTick, displayFbp, sourceFbp,
                               usedPreferredDisplaySource, false, rt->memory().gs().smode2,
                               rt->memory().gs().pmode, rt->memory().gs().display1, rt->memory().gs().display2,
@@ -5320,8 +5378,14 @@ __attribute__((noinline, cold)) void dspBuildFilter()
     for (uint32_t pc : {kSsx3PatchCacheAlloc, kSsx3PatchChainAppend, kSsx3PatchChainAppendCE, kSsx3GuestFree, kSsx3PatchCacheInit, kSsx3DrawKeyCall,
                         kSsx3DrawLookup, kSsx3DrawTexLookup, kSsx3SpatialItems12, kSsx3SpatialItems34,
                         kSsx3SpatialInside1, kSsx3SpatialInside3, kSsx3DrawReset, 0x00228C08u,
-                        0x001216E0u, 0x00117838u}) // TK45c: rider pass, bank-clear
+                        0x001216E0u, 0x00117838u}) // TK45c gems
         dspSet(g_dsp.tgt, pc);
+    const char *megaLaps = std::getenv("PS2X_SSX3_MEGA_LAPS");
+    if (megaLaps && std::strcmp(megaLaps, "1") == 0)
+    {
+        dspSet(g_dsp.tgt, 0x00125108u); // finish
+        dspSet(g_dsp.tgt, 0x00112FB0u); // rider route progress
+    }
     g_dsp.always = false;
     g_dsp.guestActive = ps2_fh1::g_guestActive;
     if (g_dsp.fh1)
@@ -5440,6 +5504,127 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
                                                                    GuestBranchKind kind,
                                                                    const char *debugName)
 {
+    struct Mgx1LapSlot { uint32_t rider = 0u; uint32_t clock = 0u; uint32_t ignored = 0u; uint8_t lap = 1u; bool beforeCheckpoint = false; bool armed = false; bool reseed = false; bool finished = false; };
+    static Mgx1LapSlot mgx1Laps[6];
+    static const bool mgx1MegaLaps = [] {
+        const char *v = std::getenv("PS2X_SSX3_MEGA_LAPS");
+        return v && std::strcmp(v, "1") == 0;
+    }();
+    // TK18's imported host checkpoint: donor event 11 at 28736.9 becomes
+    // 0.30817997 of host track 0 (51285.99 units), or 15805.3 units.
+    if (targetPc == 0x112fb0u && mgx1MegaLaps && ssx3ReadS32(rdram, 0x535c08u) == 15 &&
+        ps2_ssx3_course::modeCurrent(ps2_ssx3_course::courseModes(), rdram) != 0u &&
+        ps2_ssx3_course::rdStr(rdram, ps2_ssx3_course::kEventBase + 15u * ps2_ssx3_course::kEventStride + 68u,
+                                16u) == "MEGA")
+    {
+        const uint32_t r = getRegU32(ctx, 4) & PS2_RAM_MASK;
+        if (r != 0u && r + 0x870u < PS2_RAM_SIZE)
+        {
+            const uint32_t slot = static_cast<uint32_t>(ssx3ReadS32(rdram, r + 0x86cu));
+            if (slot < 6u)
+            {
+                Mgx1LapSlot &ls = mgx1Laps[slot];
+                if (ls.rider != r) ls = Mgx1LapSlot{};
+                uint32_t raceClock = 0u;
+                const uint32_t b = ps2_ssx3_tricky_hud::resolveChainB(rdram, PS2_RAM_SIZE);
+                if (b != 0u && ps2_ssx3_tricky_hud::readGuestU32(rdram, PS2_RAM_SIZE, b, 0xcu, raceClock))
+                {
+                    if (raceClock < ls.clock) ls = Mgx1LapSlot{};
+                    ls.clock = raceClock;
+                }
+                ls.rider = r;
+                if (slot == 0u)
+                {
+                    g_mgx1HudLap.store(ls.finished ? 0u : ls.lap, std::memory_order_relaxed);
+                    g_mgx1HudTick.store(m_memory.gs().vsyncTick.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                }
+                if (ls.reseed)
+                {
+                    ls.reseed = false;
+                    targetPc = 0x112180u;
+                    SET_GPR_U32(ctx, 5, 1u);
+                    std::fprintf(stderr, "[mgx1-lap] t=%llu slot=%u route reattach after placement\n",
+                                 (unsigned long long)m_memory.gs().vsyncTick.load(std::memory_order_relaxed), slot);
+                }
+                else if (!ls.armed)
+                {
+                    float rem = 0.0f, origin = 0.0f;
+                    std::memcpy(&rem, rdram + r + 0x4d4u, 4);
+                    std::memcpy(&origin, rdram + r + 0x4d8u, 4);
+                    const float progressed = origin - rem;
+                    if (std::isfinite(progressed) && progressed >= -1000.0f && progressed < 15805.3f)
+                        ls.beforeCheckpoint = true;
+                    else if (ls.beforeCheckpoint && std::isfinite(progressed) &&
+                             progressed >= 15805.3f && progressed < 35000.0f)
+                    {
+                        ls.armed = true;
+                        ls.beforeCheckpoint = false;
+                        std::fprintf(stderr, "[mgx1-lap] t=%llu slot=%u donor-checkpoint-11 armed progress=%.1f\n",
+                                     (unsigned long long)m_memory.gs().vsyncTick.load(std::memory_order_relaxed), slot, progressed);
+                    }
+                }
+            }
+        }
+    }
+    // MGX1 proof: Megaplex runs three laps. On the first two race-line
+    // crossings, place the rider at the course's own rolling start region.
+    // The event finish is left intact for the third crossing. This knob is
+    // default-off and requires the active Tricky mode and MEGA event row.
+    if (targetPc == 0x125108u && sourcePc == 0x10e70cu &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
+    {
+        if (mgx1MegaLaps && ssx3ReadS32(rdram, 0x535c08u) == 15 &&
+            ps2_ssx3_course::modeCurrent(ps2_ssx3_course::courseModes(), rdram) != 0u &&
+            ps2_ssx3_course::rdStr(rdram, ps2_ssx3_course::kEventBase + 15u * ps2_ssx3_course::kEventStride + 68u,
+                                    16u) == "MEGA")
+        {
+            const uint32_t r = getRegU32(ctx, 4) & PS2_RAM_MASK;
+            const uint32_t slot = r && r + 0x878u < PS2_RAM_SIZE ? static_cast<uint32_t>(ssx3ReadS32(rdram, r + 0x86cu)) : 6u;
+            uint32_t clock = 0u;
+            const uint32_t b = ps2_ssx3_tricky_hud::resolveChainB(rdram, PS2_RAM_SIZE);
+            if (b != 0u)
+                ps2_ssx3_tricky_hud::readGuestU32(rdram, PS2_RAM_SIZE, b, 0xcu, clock);
+            if (slot < 6u && r + 0x4dcu < PS2_RAM_SIZE)
+            {
+                Mgx1LapSlot &ls = mgx1Laps[slot];
+                if (ls.rider != r || clock < ls.clock)
+                    ls = Mgx1LapSlot{};
+                ls.rider = r;
+                ls.clock = clock;
+                if (!ls.armed)
+                {
+                    ctx->pc = fallthroughPc;
+                    if (ls.ignored++ < 3u || ls.ignored % 120u == 0u)
+                        std::fprintf(stderr, "[mgx1-lap] t=%llu slot=%u finish ignored before checkpoint n=%u\n",
+                                     (unsigned long long)m_memory.gs().vsyncTick.load(std::memory_order_relaxed), slot, ls.ignored);
+                    return true;
+                }
+                ls.armed = false;
+                if (ls.lap < 3u)
+                {
+                    ++ls.lap;
+                    ls.beforeCheckpoint = false;
+                    ls.reseed = true;
+                    // SSX 3's region placement handles pose, camera, velocity,
+                    // contact caches and course start. Arguments (rider, 0, 1).
+                    targetPc = 0x11de60u;
+                    SET_GPR_U32(ctx, 4, getRegU32(ctx, 4));
+                    SET_GPR_U32(ctx, 5, 0u);
+                    SET_GPR_U32(ctx, 6, 1u);
+                    std::fprintf(stderr, "[mgx1-lap] t=%llu slot=%u LAP %u/3 return-to-top\n",
+                                 (unsigned long long)m_memory.gs().vsyncTick.load(std::memory_order_relaxed),
+                                 slot, (unsigned)ls.lap);
+                }
+                else
+                {
+                    ls.finished = true;
+                    if (slot == 0u) g_mgx1HudLap.store(0u, std::memory_order_relaxed);
+                    std::fprintf(stderr, "[mgx1-lap] t=%llu slot=%u FINISH lap=3\n",
+                                 (unsigned long long)m_memory.gs().vsyncTick.load(std::memory_order_relaxed), slot);
+                }
+            }
+        }
+    }
     // TK45c: Tricky gem multipliers (PS2X_SSX3_TRICKY_GEMS=1; default off).
     // Boundary hook = the per-rider half-step pickup poll (player-1 only);
     // bank-clear hook clears +0x1c4 with +0x18. Listed in the DSP1 target
