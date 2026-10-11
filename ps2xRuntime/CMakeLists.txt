@@ -559,9 +559,11 @@ if(PS2X_ENABLE_RUNTIME_LOGS)
     )
 endif()
 
-# PL1: PUBLIC so the pad recorder and the APK marker TU (and the suite, which
-# links ps2_runtime) all see the same id. Always defined, possibly empty.
-target_compile_definitions(ps2_runtime PUBLIC PS2X_BUILD_ID="${PS2X_BUILD_ID_RESOLVED}")
+# Only the marker/accessor TU reads this macro. A new build id must not
+# invalidate every runtime and generated game object through a PUBLIC target
+# definition; those objects use buildId() at runtime instead.
+set_source_files_properties(src/lib/ps2_build_id.cpp PROPERTIES
+    COMPILE_DEFINITIONS "PS2X_BUILD_ID=\"${PS2X_BUILD_ID_RESOLVED}\"")
 
 # NRT1: the native-world model rounds like microVU (FPCR round toward zero):
 # no multiply-add contraction (NEON MUL and ADD stay separate). Its constants
