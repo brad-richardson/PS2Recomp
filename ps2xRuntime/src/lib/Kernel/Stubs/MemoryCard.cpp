@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "ps2_e41_trace.h"
+#include "ps2_rpl3_nv.h" // RPL3: recorded card dates (padrec v3)
 #include "MemoryCard.h"
 
 namespace ps2_stubs
@@ -302,6 +303,20 @@ namespace ps2_stubs
 
         void writeMcDateTime(SceMcStDateTime &out, std::time_t value)
         {
+            // RPL3: a recorded field-set wins (replay, sequential per call);
+            // the served values are noted per GetDir call at the build site.
+            uint16_t replay[6]{};
+            if (ps2_rpl3::takeMcDate(replay))
+            {
+                out.Resv2 = 0;
+                out.Sec = static_cast<uint8_t>(replay[0]);
+                out.Min = static_cast<uint8_t>(replay[1]);
+                out.Hour = static_cast<uint8_t>(replay[2]);
+                out.Day = static_cast<uint8_t>(replay[3]);
+                out.Month = static_cast<uint8_t>(replay[4]);
+                out.Year = replay[5];
+                return;
+            }
             if (mcFixedClock())
             {
                 out.Resv2 = 0;
@@ -847,6 +862,32 @@ namespace ps2_stubs
                                                 sizeBytes,
                                                 entryEc ? now : modifiedTime);
                             entries.push_back(tableEntry);
+                        }
+
+                        // RPL3: note every built entry in order (create then
+                        // modify per entry, matching writeMcDateTime's serve
+                        // order); maxEntries truncation only sets `served`.
+                        {
+                            std::vector<uint16_t> sets;
+                            sets.reserve(entries.size() * 12u);
+                            for (const SceMcTblGetDir &built : entries)
+                            {
+                                const SceMcStDateTime pair[2] = {built._Create, built._Modify};
+                                for (const SceMcStDateTime &dt : pair)
+                                {
+                                    sets.push_back(dt.Sec);
+                                    sets.push_back(dt.Min);
+                                    sets.push_back(dt.Hour);
+                                    sets.push_back(dt.Day);
+                                    sets.push_back(dt.Month);
+                                    sets.push_back(dt.Year);
+                                }
+                            }
+                            const size_t served =
+                                std::min(entries.size(),
+                                         maxEntries > 0 ? static_cast<size_t>(maxEntries) : 0u);
+                            ps2_rpl3::noteMc(ps2_e41_trace::lastVsyncTick(), rawPath.c_str(),
+                                             sets.data(), entries.size(), served);
                         }
 
                         const size_t entryCount =

@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "ps2_build_id.h"
 #include "ps2_record_env.h"
+#include "ps2_rpl3_nv.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "runtime/ps2_pad.h"
@@ -876,8 +877,10 @@ void register_pad_input_tests()
                 }
                 std::fclose(f);
             }
-            t.IsTrue(content.rfind("# padrec v2\n", 0) == 0,
-                     "recording starts with a header block (v2: exact stock-time stamps)");
+            // RPL3: new recordings are v3 (v2 stamps plus NV lines); v2 files
+            // still parse (covered below).
+            t.IsTrue(content.rfind("# padrec v3\n", 0) == 0,
+                     "recording starts with a header block (v3: exact stock-time stamps)");
             t.IsTrue(content.find("\n# full120 FULL120=") != std::string::npos &&
                          content.find("events_clock=exact") != std::string::npos,
                      "recording header carries the full120 knobs and its stamp clock");
@@ -1196,7 +1199,8 @@ void register_pad_input_tests()
                     }
                     std::fclose(f);
                 }
-                t.IsTrue(content.rfind("# padrec v2\n", 0) == 0, "session file has header");
+                // RPL3: new recordings are v3.
+                t.IsTrue(content.rfind("# padrec v3\n", 0) == 0, "session file has header");
                 std::vector<ps2_stubs::PadScriptEntry> entries;
                 t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries),
                          "session file parses as a script");
@@ -1912,6 +1916,162 @@ void register_pad_input_tests()
             ps2_stubs::clearPadMarkerForTest();
             closePadPort(ctx, rdram);
             fs::remove_all(dir);
+        });
+
+        tc.Run("rpl3: noted host values record as NV lines and serve back in order", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string recPath =
+                (fs::temp_directory_path() / "rpl3_nv_test.txt").string();
+            std::remove(recPath.c_str());
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::unsetenv("PS2X_PAD_SCRIPT");
+            Pl1EnvGuard recordGuard("PS2X_PAD_RECORD");
+            ::setenv("PS2X_PAD_RECORD", recPath.c_str(), 1);
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+
+            const uint8_t rtc0[8] = {0x00, 0x56, 0x34, 0x12, 0x00, 0x16, 0x07, 0x04};
+            const uint8_t rtc1[8] = {0x00, 0x57, 0x34, 0x12, 0x00, 0x16, 0x07, 0x04};
+            // Pre-arm (production: boot RTC reads precede the first pad read).
+            ps2_rpl3::noteRtc(12u, 0x31ae84u, rtc0);
+            t.IsTrue(ps2_stubs::setPadRecordForTest(recPath.c_str()), "recorder should arm");
+            const uint16_t mcSets[24] = {
+                1, 2, 3, 4, 5, 2026, 1, 2, 3, 4, 5, 2026,
+                6, 7, 8, 9, 10, 2025, 6, 7, 8, 9, 10, 2025,
+            };
+            ps2_rpl3::noteMc(118u, "mc0:/GAM*", mcSets, 2u, 2u);
+            ps2_rpl3::noteTz(ps2_rpl3::kTickUnknown, -420);
+            ps2_rpl3::noteRtc(13u, 0x2c75bcu, rtc1);
+            // One span so the stream parses.
+            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross),
+                                           0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(100u);
+            runPadRead(ctx, rdram);
+            ps2_stubs::setPadRecordTickForTest(110u);
+            runPadRead(ctx, rdram);
+            ps2_stubs::clearPadOverrideState();
+            ps2_stubs::closePadRecordForTest();
+
+            const std::string content = readFileBytes(recPath);
+            t.IsTrue(content.rfind("# padrec v3\n", 0) == 0, "recording is v3");
+            t.IsTrue(content.find("# NV rtc seq=0 tick=12 ra=0x31ae84 bytes=0056341200160704") !=
+                         std::string::npos,
+                     "rtc line recorded");
+            t.IsTrue(content.find("# NV mc seq=0 tick=118") != std::string::npos,
+                     "mc line recorded");
+            t.IsTrue(content.find("# NV tz seq=0 tick=* mins=-420") != std::string::npos,
+                     "tz line recorded");
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries),
+                     "v3 recording still parses as a script");
+
+            // Replay: the takes serve the recorded values in order.
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + recPath).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            uint8_t got[8] = {0};
+            t.IsTrue(ps2_rpl3::takeRtc(got), "first rtc serves");
+            t.IsTrue(std::memcmp(got, rtc0, 8u) == 0, "first rtc bytes match");
+            t.IsTrue(ps2_rpl3::takeRtc(got), "second rtc serves");
+            t.IsTrue(std::memcmp(got, rtc1, 8u) == 0, "second rtc bytes match");
+            t.IsTrue(!ps2_rpl3::takeRtc(got), "rtc exhausts");
+            uint16_t set[6] = {0};
+            for (int i = 0; i < 4; ++i)
+            {
+                char msg[64];
+                std::snprintf(msg, sizeof(msg), "mc date %d serves", i);
+                t.IsTrue(ps2_rpl3::takeMcDate(set), msg);
+                t.IsTrue(std::memcmp(set, mcSets + i * 6u, sizeof(set)) == 0,
+                         "mc date matches record order");
+            }
+            t.IsTrue(!ps2_rpl3::takeMcDate(set), "mc dates exhaust");
+            int tz = 0;
+            t.IsTrue(ps2_rpl3::takeTz(tz), "tz serves");
+            t.Equals(tz, -420, "tz matches");
+            t.IsTrue(ps2_rpl3::takeTz(tz), "tz is sticky");
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            closePadPort(ctx, rdram);
+            std::remove(recPath.c_str());
+        });
+
+        tc.Run("rpl3: v2 files take no values and parse as before", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string v2Path =
+                (fs::temp_directory_path() / "rpl3_nv_v2_test.txt").string();
+            {
+                std::FILE *f = std::fopen(v2Path.c_str(), "w");
+                t.IsTrue(f != nullptr, "v2 fixture writable");
+                if (f)
+                {
+                    std::fputs("# padrec v2\n# start_utc=2026-10-11T00:00:00Z\n"
+                               "1000:lx=128+ly=128+rx=128+ry=128:500,1500:cross:250\n",
+                               f);
+                    std::fclose(f);
+                }
+            }
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + v2Path).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            uint8_t rtc[8] = {0};
+            uint16_t set[6] = {0};
+            int tz = 0;
+            t.IsTrue(!ps2_rpl3::takeRtc(rtc), "v2 takes no rtc");
+            t.IsTrue(!ps2_rpl3::takeMcDate(set), "v2 takes no mc dates");
+            t.IsTrue(!ps2_rpl3::takeTz(tz), "v2 takes no tz");
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScriptFile(v2Path.c_str(), entries),
+                     "v2 still parses");
+            t.Equals(static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(2),
+                     "v2 entries unchanged");
+            ps2_rpl3::resetForTest();
+            std::remove(v2Path.c_str());
+        });
+
+        tc.Run("rpl3: malformed NV lines are ignored, good ones serve", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string badPath =
+                (fs::temp_directory_path() / "rpl3_nv_bad_test.txt").string();
+            {
+                std::FILE *f = std::fopen(badPath.c_str(), "w");
+                t.IsTrue(f != nullptr, "fixture writable");
+                if (f)
+                {
+                    std::fputs("# padrec v3\n"
+                               "# NV rtc seq=0 tick=12 ra=0x31ae84 bytes=ZZZ\n"
+                               "# NV mc seq=0 tick=118 q='x' built=1 served=1 n=1 e=1,2\n"
+                               "# NV bogus kind=1\n"
+                               "# NV rtc seq=1 tick=13 ra=0x2c75bc bytes=0057341200160704\n"
+                               "1000:lx=128+ly=128+rx=128+ry=128:500\n",
+                               f);
+                    std::fclose(f);
+                }
+            }
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + badPath).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            uint8_t rtc[8] = {0};
+            const uint8_t want[8] = {0x00, 0x57, 0x34, 0x12, 0x00, 0x16, 0x07, 0x04};
+            t.IsTrue(ps2_rpl3::takeRtc(rtc), "good rtc serves");
+            t.IsTrue(std::memcmp(rtc, want, 8u) == 0, "good rtc bytes match");
+            t.IsTrue(!ps2_rpl3::takeRtc(rtc), "only one rtc loaded");
+            uint16_t set[6] = {0};
+            t.IsTrue(!ps2_rpl3::takeMcDate(set), "truncated mc line ignored");
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScriptFile(badPath.c_str(), entries),
+                     "stream still parses around bad NV lines");
+            ps2_rpl3::resetForTest();
+            std::remove(badPath.c_str());
         });
     });
 }

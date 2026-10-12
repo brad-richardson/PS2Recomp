@@ -2,6 +2,7 @@
 #include "Common.h"
 #include "ps2_fh1_full120.h"
 #include "ps2_e41_trace.h"
+#include "ps2_rpl3_nv.h" // RPL3: recorded RTC bytes (padrec v3)
 
 #include "CD.h"
 #include "MPEG.h"
@@ -681,42 +682,58 @@ namespace ps2_stubs
             return;
         }
 
+        // RPL3: a recorded value wins over both branches below (replay);
+        // what was served is noted for the v3 recorder (no-op unless set).
+        uint8_t replayBytes[8]{};
+        const bool tookReplay = ps2_rpl3::takeRtc(replayBytes);
         std::tm localTm{};
         const char *deterministic = std::getenv("PS2X_DETERMINISTIC");
         const bool fixedClock = deterministic != nullptr && std::strcmp(deterministic, "1") == 0;
-        if (fixedClock)
+        if (!tookReplay)
         {
-            // Dev-only fixed UTC calendar; the BCD writer below is shared.
-            localTm.tm_year = 2004 - 1900;
-            localTm.tm_mon = 7 - 1;
-            localTm.tm_mday = 16;
-            localTm.tm_hour = 12;
-            localTm.tm_min = 34;
-            localTm.tm_sec = 56;
+            if (fixedClock)
+            {
+                // Dev-only fixed UTC calendar; the BCD writer below is shared.
+                localTm.tm_year = 2004 - 1900;
+                localTm.tm_mon = 7 - 1;
+                localTm.tm_mday = 16;
+                localTm.tm_hour = 12;
+                localTm.tm_min = 34;
+                localTm.tm_sec = 56;
+            }
+            else
+            {
+                std::time_t now = std::time(nullptr);
+#ifdef _WIN32
+                localtime_s(&localTm, &now);
+#else
+                localtime_r(&now, &localTm);
+#endif
+            }
+        }
+
+        if (tookReplay)
+        {
+            std::memcpy(clockData, replayBytes, 8u);
         }
         else
         {
-            std::time_t now = std::time(nullptr);
-#ifdef _WIN32
-            localtime_s(&localTm, &now);
-#else
-            localtime_r(&now, &localTm);
-#endif
+            // sceCdCLOCK format (BCD fields).
+            clockData[0] = 0;
+            clockData[1] = toBcd(static_cast<uint32_t>(localTm.tm_sec));
+            clockData[2] = toBcd(static_cast<uint32_t>(localTm.tm_min));
+            clockData[3] = toBcd(static_cast<uint32_t>(localTm.tm_hour));
+            clockData[4] = 0;
+            clockData[5] = toBcd(static_cast<uint32_t>(localTm.tm_mday));
+            clockData[6] = toBcd(static_cast<uint32_t>(localTm.tm_mon + 1));
+            clockData[7] = toBcd(static_cast<uint32_t>((localTm.tm_year + 1900) % 100));
         }
-
-        // sceCdCLOCK format (BCD fields).
-        clockData[0] = 0;
-        clockData[1] = toBcd(static_cast<uint32_t>(localTm.tm_sec));
-        clockData[2] = toBcd(static_cast<uint32_t>(localTm.tm_min));
-        clockData[3] = toBcd(static_cast<uint32_t>(localTm.tm_hour));
-        clockData[4] = 0;
-        clockData[5] = toBcd(static_cast<uint32_t>(localTm.tm_mday));
-        clockData[6] = toBcd(static_cast<uint32_t>(localTm.tm_mon + 1));
-        clockData[7] = toBcd(static_cast<uint32_t>((localTm.tm_year + 1900) % 100));
-        const char *clockSource = fixedClock ? "fixed-utc-2004-07-16" : "wallclock-local";
+        const char *clockSource =
+            tookReplay ? "replay-nv" : (fixedClock ? "fixed-utc-2004-07-16" : "wallclock-local");
         if (ps2_e41_trace::armed()) // E41 plant watch
             ps2_e41_trace::notePlantRange(currentCdStreamTick(runtime), clockAddr, 8u,
                                           rdram, "cd-clock", clockSource, 0u);
+        ps2_rpl3::noteRtc(currentCdStreamTick(runtime), getRegU32(ctx, 31), clockData);
         setReturnS32(ctx, 1);
     }
 

@@ -1,4 +1,5 @@
 #include "ps2_e41_trace.h" // E41 plant watch (default off)
+#include "ps2_rpl3_nv.h" // RPL3: recorded OSD timezone (padrec v3)
 #include <cstdlib> // getenv for the deterministic timezone override
 
 static void setRegU32(R5900Context *ctx, int reg, uint32_t value)
@@ -235,13 +236,23 @@ static int hostTimezoneOffsetMinutes()
 
 static int getTimezoneOffsetMinutes()
 {
+    // RPL3: a recorded offset wins (replay); what was served is noted (the
+    // OSD init has no tick: kTickUnknown).
+    int replay = 0;
+    if (ps2_rpl3::takeTz(replay))
+    {
+        ps2_rpl3::noteTz(ps2_rpl3::kTickUnknown, replay);
+        return replay;
+    }
     // LX1b: the OSD timezone leaked the host zone into deterministic runs
     // (Mac vs Linux split at det-hash tick 39). Pin it under deterministic
     // mode (the PS2X_TIMEZONE_MINUTES override is deleted: always 0).
     const char *deterministic = std::getenv("PS2X_DETERMINISTIC");
-    if (deterministic != nullptr && std::strcmp(deterministic, "1") == 0)
-        return 0;
-    return hostTimezoneOffsetMinutes();
+    int out = 0;
+    if (deterministic == nullptr || std::strcmp(deterministic, "1") != 0)
+        out = hostTimezoneOffsetMinutes();
+    ps2_rpl3::noteTz(ps2_rpl3::kTickUnknown, out);
+    return out;
 }
 
 static uint32_t packOsdConfig(uint32_t spdifMode, uint32_t screenType, uint32_t videoOutput,
