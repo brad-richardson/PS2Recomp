@@ -929,12 +929,12 @@ uint8_t PS2Memory::read8(uint32_t address)
     {
         uint32_t regAddr = physAddr & ~0x3;
         uint32_t value = readIORegister(regAddr);
-        // RPL4: xreg timeline on the full slot (see read32).
+        // RPL5: take-only on the full slot (see read32): EE-deterministic
+        // IO is no longer recorded; old-file notes still serve.
         const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
         uint64_t wide = value;
         if (ps2_rpl3::takeXreg(regAddr, tick, wide))
             value = static_cast<uint32_t>(wide);
-        ps2_rpl3::noteXreg(regAddr, tick, value);
         uint32_t shift = (physAddr & 3) * 8;
         return static_cast<uint8_t>((value >> shift) & 0xFF);
     }
@@ -970,12 +970,12 @@ uint16_t PS2Memory::read16(uint32_t address)
     {
         uint32_t regAddr = physAddr & ~0x3;
         uint32_t value = readIORegister(regAddr);
-        // RPL4: xreg timeline on the full slot (see read32).
+        // RPL5: take-only on the full slot (see read32): EE-deterministic
+        // IO is no longer recorded; old-file notes still serve.
         const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
         uint64_t wide = value;
         if (ps2_rpl3::takeXreg(regAddr, tick, wide))
             value = static_cast<uint32_t>(wide);
-        ps2_rpl3::noteXreg(regAddr, tick, value);
         uint32_t shift = (physAddr & 2) * 8;
         return static_cast<uint16_t>((value >> shift) & 0xFFFF);
     }
@@ -1051,15 +1051,17 @@ uint32_t PS2Memory::read32(uint32_t address)
     }
     else if (isIoRegister(physAddr))
     {
-        // RPL4: address-keyed timeline for IO regs (VIF/GIF/DMAC/timers).
-        // Direct readIORegister callers (stubs, panel) bypass this path and
-        // stay live, so only guest Load* reads consume timeline idx.
+        // RPL5: take-only for IO regs (VIF/GIF/DMAC/timers). RPL4 §1b-c
+        // proved every IO value EE-determined and six pairs replayed
+        // in-span silent, so recording stops here; takeXreg still serves
+        // old-file notes when present, else live. Direct readIORegister
+        // callers (stubs, panel) bypass this path and stay live, so only
+        // guest Load* reads consume timeline idx.
         uint32_t val = readIORegister(physAddr);
         const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
         uint64_t wide = val;
         if (ps2_rpl3::takeXreg(physAddr, tick, wide))
             val = static_cast<uint32_t>(wide);
-        ps2_rpl3::noteXreg(physAddr, tick, val);
         return val;
     }
 

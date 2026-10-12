@@ -1014,6 +1014,12 @@ namespace ps2_stubs
         {
             uint64_t cycle = 0u;
             std::vector<ps2_rpl3::SchedEvent> fired;
+            // RPL5: parsed `w=` count plus the `h=` withheld identities
+            // (absent on pre-RPL5 lines: count check still runs, identity
+            // check is skipped).
+            size_t withheldCount = 0u;
+            std::vector<ps2_rpl3::SchedEvent> withheld;
+            bool hasWithheld = false;
         };
         struct Rpl3State
         {
@@ -1100,6 +1106,8 @@ namespace ps2_stubs
             bool seqWarned = false;
             bool schedStaleWarned = false;
             bool schedMismatchWarned = false;
+            bool schedCountWarned = false;
+            bool schedWithheldWarned = false;
             bool idleStaleWarned = false;
             bool idleMismatchWarned = false;
         };
@@ -1325,7 +1333,7 @@ namespace ps2_stubs
                 int fpos = 0;
                 if (std::sscanf(p, "sched seq=%llu tick=%31s cycle=%llu nf=%llu w=%llu f=%n",
                                 &seq, tick, &cycle, &nf, &w, &fpos) != 5 ||
-                    fpos <= 0 || nf > 64u)
+                    fpos <= 0 || nf > 64u || w > 64u)
                 {
                     ++g_rpl3.ignored;
                     return;
@@ -1333,37 +1341,64 @@ namespace ps2_stubs
                 rpl3CheckSeq("sched", seq, g_rpl3.sched.size());
                 Rpl3SchedGate gate{};
                 gate.cycle = cycle;
+                gate.withheldCount = static_cast<size_t>(w);
                 const char *cur = p + fpos;
                 bool ok = true;
-                for (unsigned long long i = 0u; i < nf; ++i)
+                // Triple list: <mnemonic>,<id>,<cycle> (';' between).
+                auto parseTriples = [&](unsigned long long n, std::vector<ps2_rpl3::SchedEvent> &out)
                 {
-                    // Triple: <mnemonic>,<id>,<cycle>.
-                    const char m = cur[0];
-                    uint32_t type = 0u;
-                    unsigned long long id = 0u, c = 0u;
-                    int nch = 0;
-                    if (cur[0] == '\0' || cur[1] != ',' ||
-                        !ps2_rpl3::schedCharType(m, type) ||
-                        std::sscanf(cur + 2, "%llu,%llu%n", &id, &c, &nch) != 2 || nch <= 0 ||
-                        id > 0xFFFFFFFFu)
+                    for (unsigned long long i = 0u; i < n; ++i)
                     {
-                        ok = false;
-                        break;
-                    }
-                    ps2_rpl3::SchedEvent ev{};
-                    ev.type = type;
-                    ev.id = static_cast<uint32_t>(id);
-                    ev.cycle = c;
-                    gate.fired.push_back(ev);
-                    cur += 2 + nch;
-                    if (i + 1u < nf)
-                    {
-                        if (*cur != ';')
+                        const char m = cur[0];
+                        uint32_t type = 0u;
+                        unsigned long long id = 0u, c = 0u;
+                        int nch = 0;
+                        if (cur[0] == '\0' || cur[1] != ',' ||
+                            !ps2_rpl3::schedCharType(m, type) ||
+                            std::sscanf(cur + 2, "%llu,%llu%n", &id, &c, &nch) != 2 || nch <= 0 ||
+                            id > 0xFFFFFFFFu)
                         {
                             ok = false;
-                            break;
+                            return;
                         }
-                        ++cur;
+                        ps2_rpl3::SchedEvent ev{};
+                        ev.type = type;
+                        ev.id = static_cast<uint32_t>(id);
+                        ev.cycle = c;
+                        out.push_back(ev);
+                        cur += 2 + nch;
+                        if (i + 1u < n)
+                        {
+                            if (*cur != ';')
+                            {
+                                ok = false;
+                                return;
+                            }
+                            ++cur;
+                        }
+                    }
+                };
+                parseTriples(nf, gate.fired);
+                if (ok)
+                {
+                    // RPL5: `h=` withheld identities follow the fired list;
+                    // pre-RPL5 lines end here (count check still applies).
+                    if (*cur == '\0')
+                    {
+                        gate.hasWithheld = false;
+                    }
+                    else if (cur[0] == ' ' && cur[1] == 'h' && cur[2] == '=')
+                    {
+                        cur += 3;
+                        parseTriples(w, gate.withheld);
+                        if (ok && *cur == '\0' && gate.withheld.size() == w)
+                            gate.hasWithheld = true;
+                        else
+                            ok = false;
+                    }
+                    else
+                    {
+                        ok = false;
                     }
                 }
                 if (!ok || gate.fired.size() != nf)
@@ -4518,9 +4553,9 @@ namespace ps2_rpl3
     }
 
     void noteSched(uint64_t tick, uint64_t cycle, const SchedEvent *fired, size_t firedCount,
-                   size_t withheldCount)
+                   const SchedEvent *withheld, size_t withheldCount)
     {
-        if (!fired && firedCount != 0u)
+        if ((!fired && firedCount != 0u) || (!withheld && withheldCount != 0u))
             return;
         uint64_t seq = 0u;
         {
@@ -4534,14 +4569,20 @@ namespace ps2_rpl3
                            " nf=" + std::to_string(firedCount) + " w=" +
                            std::to_string(withheldCount) + " f=";
         char triple[64];
-        for (size_t i = 0u; i < firedCount; ++i)
+        auto appendTriples = [&](const SchedEvent *evs, size_t n)
         {
-            std::snprintf(triple, sizeof(triple), "%c,%u,%llu", schedTypeChar(fired[i].type),
-                          fired[i].id, static_cast<unsigned long long>(fired[i].cycle));
-            if (i != 0u)
-                line += ';';
-            line += triple;
-        }
+            for (size_t i = 0u; i < n; ++i)
+            {
+                std::snprintf(triple, sizeof(triple), "%c,%u,%llu", schedTypeChar(evs[i].type),
+                              evs[i].id, static_cast<unsigned long long>(evs[i].cycle));
+                if (i != 0u)
+                    line += ';';
+                line += triple;
+            }
+        };
+        appendTriples(fired, firedCount);
+        line += " h=";
+        appendTriples(withheld, withheldCount);
         rpl3EmitLine(std::move(line));
     }
 
@@ -4566,9 +4607,10 @@ namespace ps2_rpl3
         }
         if (g_rpl3.schedCur >= g_rpl3.sched.size() || g_rpl3.sched[g_rpl3.schedCur].cycle != cycle)
             return false;
+        const Rpl3SchedGate &gate = g_rpl3.sched[g_rpl3.schedCur];
         for (size_t i = 0u; i < dueCount; ++i)
             fire[i] = false;
-        for (const SchedEvent &g : g_rpl3.sched[g_rpl3.schedCur].fired)
+        for (const SchedEvent &g : gate.fired)
         {
             bool found = false;
             for (size_t i = 0u; i < dueCount; ++i)
@@ -4589,6 +4631,75 @@ namespace ps2_rpl3
                              "already diverged\n",
                              static_cast<unsigned long long>(cycle), schedTypeChar(g.type), g.id,
                              static_cast<unsigned long long>(g.cycle));
+            }
+        }
+        // RPL5: pending-set checks. Live's cycle-due set was exactly fired
+        // + withheld (one partition under one lock), so an aligned replay
+        // holds the same count and, with `h=`, the same withheld multiset.
+        const size_t recordedTotal = gate.fired.size() + gate.withheldCount;
+        if (dueCount != recordedTotal && !g_rpl3.schedCountWarned)
+        {
+            g_rpl3.schedCountWarned = true;
+            std::fprintf(stderr,
+                         "[rpl3] sched gate at cycle=%llu: replay holds %zu cycle-due, "
+                         "recording held %zu (nf=%zu w=%zu); already diverged\n",
+                         static_cast<unsigned long long>(cycle), dueCount, recordedTotal,
+                         gate.fired.size(), gate.withheldCount);
+        }
+        else if (gate.hasWithheld)
+        {
+            // Multiset match of the replay's non-fired due against `h=`; the
+            // first mismatch in either direction names the event.
+            std::vector<char> held(dueCount, 0);
+            const SchedEvent *missing = nullptr;
+            for (const SchedEvent &h : gate.withheld)
+            {
+                bool found = false;
+                for (size_t i = 0u; i < dueCount; ++i)
+                {
+                    if (!fire[i] && !held[i] && due[i].type == h.type && due[i].id == h.id &&
+                        due[i].cycle == h.cycle)
+                    {
+                        held[i] = 1;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    missing = &h;
+                    break;
+                }
+            }
+            const SchedEvent *extra = nullptr;
+            if (!missing)
+            {
+                for (size_t i = 0u; i < dueCount; ++i)
+                {
+                    if (!fire[i] && !held[i])
+                    {
+                        extra = &due[i];
+                        break;
+                    }
+                }
+            }
+            if ((missing || extra) && !g_rpl3.schedWithheldWarned)
+            {
+                g_rpl3.schedWithheldWarned = true;
+                if (missing)
+                    std::fprintf(stderr,
+                                 "[rpl3] sched gate at cycle=%llu: recorded withheld %c,%u,%llu "
+                                 "is not cycle-due on replay; already diverged\n",
+                                 static_cast<unsigned long long>(cycle),
+                                 schedTypeChar(missing->type), missing->id,
+                                 static_cast<unsigned long long>(missing->cycle));
+                else
+                    std::fprintf(stderr,
+                                 "[rpl3] sched gate at cycle=%llu: replay holds unrecorded "
+                                 "cycle-due %c,%u,%llu; already diverged\n",
+                                 static_cast<unsigned long long>(cycle),
+                                 schedTypeChar(extra->type), extra->id,
+                                 static_cast<unsigned long long>(extra->cycle));
             }
         }
         ++g_rpl3.schedCur;

@@ -2813,14 +2813,22 @@ void EeScheduler::processDueDeadlines()
             m_deadlines.erase(m_deadlines.begin(), firstFuture);
             updateNextDeadline();
             // RPL3: note split batches (fired a strict subset of the
-            // cycle-due set); gated replay reproduces them.
-            size_t withheld = 0u;
+            // cycle-due set); gated replay reproduces them. RPL5: the
+            // withheld identities ride along (`h=`) so replay checks the
+            // pending set, not just the fired subset.
+            std::vector<ps2_rpl3::SchedEvent> withheld;
             for (const ScheduledEvent &item : m_deadlines)
             {
                 if (item.deadlineCycle <= m_eeCycle)
-                    ++withheld;
+                {
+                    ps2_rpl3::SchedEvent ev{};
+                    ev.type = static_cast<uint32_t>(item.event.type);
+                    ev.id = item.event.id;
+                    ev.cycle = item.deadlineCycle;
+                    withheld.push_back(ev);
+                }
             }
-            if (withheld != 0u)
+            if (!withheld.empty())
             {
                 std::vector<ps2_rpl3::SchedEvent> fired;
                 fired.reserve(due.size());
@@ -2832,7 +2840,8 @@ void EeScheduler::processDueDeadlines()
                     ev.cycle = item.deadlineCycle;
                     fired.push_back(ev);
                 }
-                ps2_rpl3::noteSched(m_vsyncTick, m_eeCycle, fired.data(), fired.size(), withheld);
+                ps2_rpl3::noteSched(m_vsyncTick, m_eeCycle, fired.data(), fired.size(),
+                                    withheld.data(), withheld.size());
             }
             }
         }

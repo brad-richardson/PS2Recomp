@@ -4,6 +4,7 @@
 #include "ps2_rpl3_nv.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
+#include "runtime/ps2_memory.h"
 #include "runtime/ps2_pad.h"
 #include "Stubs/Pad.h"
 
@@ -2170,13 +2171,14 @@ void register_pad_input_tests()
             openPadPort(ctx, rdram);
             t.IsTrue(ps2_stubs::setPadRecordForTest(recPath.c_str()), "recorder should arm");
             const ps2_rpl3::SchedEvent fired[] = {{6u, 0u, 90u}};
-            ps2_rpl3::noteSched(10u, 100u, fired, 1u, 1u);
+            const ps2_rpl3::SchedEvent held[] = {{1u, 0u, 100u}};
+            ps2_rpl3::noteSched(10u, 100u, fired, 1u, held, 1u);
             ps2_stubs::closePadRecordForTest();
 
             const std::string content = readFileBytes(recPath);
-            t.IsTrue(content.find("# NV sched seq=0 tick=10 cycle=100 nf=1 w=1 f=T,0,90") !=
+            t.IsTrue(content.find("# NV sched seq=0 tick=10 cycle=100 nf=1 w=1 f=T,0,90 h=S,0,100") !=
                          std::string::npos,
-                     "sched line recorded");
+                     "sched line recorded with withheld identities");
             ::setenv("PS2X_PAD_SCRIPT", ("@" + recPath).c_str(), 1);
             ps2_rpl3::resetForTest();
             const ps2_rpl3::SchedEvent due[] = {{6u, 0u, 90u}, {1u, 0u, 100u}};
@@ -2189,6 +2191,54 @@ void register_pad_input_tests()
             ps2_rpl3::resetForTest();
             closePadPort(ctx, rdram);
             std::remove(recPath.c_str());
+        });
+
+        tc.Run("rpl5: sched gates check withheld counts and identities", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string gatePath =
+                (fs::temp_directory_path() / "rpl5_nv_sched_test.txt").string();
+            {
+                std::FILE *f = std::fopen(gatePath.c_str(), "w");
+                t.IsTrue(f != nullptr, "fixture writable");
+                if (f)
+                {
+                    std::fputs("# padrec v3\n"
+                               "# NV sched seq=0 tick=10 cycle=100 nf=1 w=1 f=T,0,90 h=S,0,100\n"
+                               "# NV sched seq=1 tick=20 cycle=200 nf=1 w=1 f=T,0,190 h=S,0,200\n"
+                               "# NV sched seq=2 tick=30 cycle=300 nf=1 w=1 f=T,0,290\n"
+                               "# NV sched seq=3 tick=40 cycle=400 nf=1 w=1 f=T,0,390 h=ZZZ\n"
+                               "1000:cross:250\n",
+                               f);
+                    std::fclose(f);
+                }
+            }
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + gatePath).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            // Aligned: fired + withheld both match, gate applies.
+            const ps2_rpl3::SchedEvent due0[] = {{6u, 0u, 90u}, {1u, 0u, 100u}};
+            bool fire0[2] = {false, false};
+            t.IsTrue(ps2_rpl3::takeSched(100u, due0, 2u, fire0), "withheld gate applies");
+            t.IsTrue(fire0[0] && !fire0[1], "fired subset marked, withheld held");
+            // Withheld identity differs (same count): gate still applies the
+            // fired subset (warns once on stderr); the held event stays due.
+            const ps2_rpl3::SchedEvent due1[] = {{6u, 0u, 190u}, {2u, 0u, 200u}};
+            bool fire1[2] = {false, false};
+            t.IsTrue(ps2_rpl3::takeSched(200u, due1, 2u, fire1), "identity-mismatch applies");
+            t.IsTrue(fire1[0] && !fire1[1], "fired subset still marked");
+            // Old line (no `h=`): count check still runs; a short due list
+            // applies the fired subset (warns once on stderr).
+            const ps2_rpl3::SchedEvent due2[] = {{6u, 0u, 290u}};
+            bool fire2[1] = {false};
+            t.IsTrue(ps2_rpl3::takeSched(300u, due2, 1u, fire2), "old line applies");
+            t.IsTrue(fire2[0], "old fired subset marked");
+            // Malformed `h=` drops the line: no gate at cycle 400.
+            const ps2_rpl3::SchedEvent due3[] = {{6u, 0u, 390u}, {1u, 0u, 400u}};
+            bool fire3[2] = {false, false};
+            t.IsTrue(!ps2_rpl3::takeSched(400u, due3, 2u, fire3), "malformed h= ignored");
+            ps2_rpl3::resetForTest();
+            std::remove(gatePath.c_str());
         });
 
         tc.Run("rpl3: idle gates force the recorded winner by cycle", [](TestCase &t)
@@ -2679,6 +2729,46 @@ void register_pad_input_tests()
                      "stream still parses around bad xreg lines");
             ps2_rpl3::resetForTest();
             std::remove(badPath.c_str());
+        });
+
+        tc.Run("rpl5: xreg records GS priv reads, not EE-deterministic IO", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string recPath =
+                (fs::temp_directory_path() / "rpl5_nv_xreg_thin.txt").string();
+            std::remove(recPath.c_str());
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::unsetenv("PS2X_PAD_SCRIPT");
+            Pl1EnvGuard recordGuard("PS2X_PAD_RECORD");
+            ::setenv("PS2X_PAD_RECORD", recPath.c_str(), 1);
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            t.IsTrue(ps2_stubs::setPadRecordForTest(recPath.c_str()), "recorder should arm");
+
+            PS2Memory mem;
+            (void)mem.read32(0x1000A000u); // GIF CHCR (IO): thinned, live on replay
+            (void)mem.read32(0x10000800u); // Timer1 COUNT (IO): thinned, live on replay
+            (void)mem.read32(0x12000070u); // DISPFB1 (GS priv): kept
+            ps2_stubs::closePadRecordForTest();
+
+            const std::string content = readFileBytes(recPath);
+            t.IsTrue(content.find("addr=1000a000") == std::string::npos,
+                     "GIF CHCR not recorded");
+            t.IsTrue(content.find("addr=10000800") == std::string::npos,
+                     "Timer1 COUNT not recorded");
+            t.IsTrue(content.find("addr=12000070") != std::string::npos, "DISPFB1 recorded");
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            closePadPort(ctx, rdram);
+            std::remove(recPath.c_str());
         });
     });
 }

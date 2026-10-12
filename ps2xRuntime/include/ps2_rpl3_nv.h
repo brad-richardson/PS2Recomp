@@ -123,13 +123,22 @@ namespace ps2_rpl3
     }
 
     // Record one split batch: the fired subset of the cycle-due set at this
-    // call (withheldCount = cycle-due but host-future, for diagnosis).
+    // call, plus the withheld identities (cycle-due but host-future).
+    // RPL5: the line carries `h=` (withheld triples) after `f=`; replay
+    // checks the withheld set, closing the RPL4 §7 gap (withheld counts
+    // alone let a non-min pending divergence through: P5/P6 at 1720).
     void noteSched(uint64_t tick, uint64_t cycle, const SchedEvent *fired, size_t firedCount,
-                   size_t withheldCount);
+                   const SchedEvent *withheld, size_t withheldCount);
     // Replay: if the next gate matches this call's eeCycle, mark the fired
     // subset of the current cycle-due list and return true. False = no gate
     // (the caller runs its existing branch). Stale gates (cycle < current,
     // i.e. already diverged) are dropped with one warning.
+    // RPL5: two pending-set checks run on every applied gate and warn once
+    // each (the gate still applies; a warning means already diverged):
+    // (1) the cycle-due count must equal fired + withheld (parsed `w`);
+    // this catches a missing/extra pending on old files too (no `h=`);
+    // (2) with `h=` present, the replay's non-fired due set must match the
+    // recorded withheld identities exactly (multiset).
     bool takeSched(uint64_t cycle, const SchedEvent *due, size_t dueCount, bool *fire);
     // Idle-path race gates: waitForEvent picks the timer-vs-event winner
     // by host order in play but cycle order in det; the two disagree
@@ -199,16 +208,22 @@ namespace ps2_rpl3
     uint64_t gsregMismatchCount();
 
     // RPL4: extended register timelines (xreg). Address-keyed value
-    // timelines for every other GS privileged register the guest reads
-    // plus every IO register it reads (VIF/GIF/DMAC/timers/...), same
-    // baseline-plus-changes shape and (tick, idx) service as gsreg (idx
-    // counts reads of that address within a tick, symmetric both sides).
-    // All xreg addresses use mask 0 (no known deterministic-bit subset).
-    // Files without `xreg` lines leave every address live, so v3 files
-    // replay exactly as before. A serve that differs from live logs the
-    // first mismatch per address (cap 256 lines total) and counts toward
-    // xregMismatchCount(): those lines name which timeline actually
-    // mattered, and silence proves an address replayed live-identical.
+    // timelines with the same baseline-plus-changes shape and (tick, idx)
+    // service as gsreg (idx counts reads of that address within a tick,
+    // symmetric both sides). All xreg addresses use mask 0 (no known
+    // deterministic-bit subset). Files without `xreg` lines leave every
+    // address live, so v3 files replay exactly as before. A serve that
+    // differs from live logs the first mismatch per address (cap 256
+    // lines total) and counts toward xregMismatchCount(): those lines
+    // name which timeline actually mattered, and silence proves an
+    // address replayed live-identical.
+    // RPL5 record set: GS privileged registers only (worker-visible
+    // state). EE-deterministic IO (GIF/VIF CHCR, timers, SPR, DMAC, ...)
+    // is no longer noted (ps2_memory.cpp keeps takeXreg but drops
+    // noteXreg on the IO paths): RPL4 §1b-c proved every IO value
+    // EE-determined and six pairs replayed in-span silent. Replay still
+    // serves any recorded address, so older full-xreg files replay
+    // exactly.
     struct XRegNote
     {
         uint64_t tick = 0u;
