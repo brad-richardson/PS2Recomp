@@ -3297,17 +3297,30 @@ void EeScheduler::waitForEvent()
         const uint64_t timerCycle = m_eeCycle + timerCycles;
         if (!m_deadlines.empty())
         {
-            // RPL3: record the race inputs when both sides are pending (the
-            // det and play rules can pick different winners; replay data).
+            // RPL3: both sides pending — the race. Gated replay forces the
+            // recorded winner; otherwise the det/play rule decides. Notes the
+            // served side when the cycle rule would not pick it (replay runs
+            // det=1, so those are exactly the gates replay needs — including
+            // chained replays, where served is the forced side).
             const bool cyclePicksTimer = timerCycle < deadlineCycle;
             const bool hostPicksTimer = timerHostDeadline < hostDeadline;
-            const bool tookTimer = m_cycleOnlyEvents ? cyclePicksTimer : hostPicksTimer;
+            char recordedWinner = 0;
+            const bool gated =
+                ps2_rpl3::takeIdle(m_eeCycle, timerCycle, deadlineCycle, recordedWinner);
+            const bool tookTimer = gated ? (recordedWinner == 'T')
+                                         : (m_cycleOnlyEvents ? cyclePicksTimer : hostPicksTimer);
             ps2_rpl3::noteIdle(m_vsyncTick, m_eeCycle, timerCycle, deadlineCycle,
-                               tookTimer ? 'T' : 'E', cyclePicksTimer == hostPicksTimer);
+                               tookTimer ? 'T' : 'E', cyclePicksTimer == tookTimer);
+            if (tookTimer)
+            {
+                deadlineCycle = timerCycle;
+                hostDeadline = timerHostDeadline;
+            }
         }
-        if (m_cycleOnlyEvents ? (m_deadlines.empty() || timerCycle < deadlineCycle)
-                              : (timerHostDeadline < hostDeadline))
+        else
         {
+            // No event pending: both rules take the timer (det: empty arm;
+            // play: any host deadline precedes time_point::max()).
             deadlineCycle = timerCycle;
             hostDeadline = timerHostDeadline;
         }

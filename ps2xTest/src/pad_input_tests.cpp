@@ -2191,6 +2191,92 @@ void register_pad_input_tests()
             std::remove(recPath.c_str());
         });
 
+        tc.Run("rpl3: idle gates force the recorded winner by cycle", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string gatePath =
+                (fs::temp_directory_path() / "rpl3_nv_idle_test.txt").string();
+            {
+                std::FILE *f = std::fopen(gatePath.c_str(), "w");
+                t.IsTrue(f != nullptr, "fixture writable");
+                if (f)
+                {
+                    std::fputs("# padrec v3\n"
+                               "# NV idlerace seq=0 tick=1 cycle=5062755 timer=7381472 event=9830598 "
+                               "winner=T agree=0\n"
+                               "# NV idlerace seq=1 tick=9 cycle=9000000 timer=9100000 event=9200000 "
+                               "winner=E agree=0\n"
+                               "1000:cross:250\n",
+                               f);
+                    std::fclose(f);
+                }
+            }
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + gatePath).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            char winner = 0;
+            t.IsTrue(!ps2_rpl3::takeIdle(100u, 7381472u, 9830598u, winner),
+                     "no gate before first");
+            t.IsTrue(ps2_rpl3::takeIdle(5062755u, 7381472u, 9830598u, winner),
+                     "gate matches cycle");
+            t.IsTrue(winner == 'T', "recorded winner served");
+            t.IsTrue(!ps2_rpl3::takeIdle(5062755u, 7381472u, 9830598u, winner),
+                     "gate consumed");
+            t.IsTrue(ps2_rpl3::takeIdle(9000000u, 9100000u, 9200000u, winner),
+                     "second gate matches");
+            t.IsTrue(winner == 'E', "second winner served");
+            t.IsTrue(!ps2_rpl3::takeIdle(9900000u, 9100000u, 9200000u, winner),
+                     "gates exhausted");
+            ps2_rpl3::resetForTest();
+            std::remove(gatePath.c_str());
+        });
+
+        tc.Run("rpl3: idle notes keep disagreements, drop agreements", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string recPath =
+                (fs::temp_directory_path() / "rpl3_nv_idle_rec.txt").string();
+            std::remove(recPath.c_str());
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::unsetenv("PS2X_PAD_SCRIPT");
+            Pl1EnvGuard recordGuard("PS2X_PAD_RECORD");
+            ::setenv("PS2X_PAD_RECORD", recPath.c_str(), 1);
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            t.IsTrue(ps2_stubs::setPadRecordForTest(recPath.c_str()), "recorder should arm");
+            // Leave the stream mid-line (open span, no trailing newline).
+            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross),
+                                           0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(100u);
+            runPadRead(ctx, rdram);
+            ps2_stubs::clearPadOverrideState();
+            ps2_rpl3::noteIdle(1u, 5062755u, 7381472u, 9830598u, 'E', true);
+            ps2_rpl3::noteIdle(9u, 9000000u, 9100000u, 9200000u, 'E', false);
+            ps2_stubs::closePadRecordForTest();
+
+            const std::string content = readFileBytes(recPath);
+            t.IsTrue(content.find("cycle=5062755") == std::string::npos,
+                     "agreement leaves no line");
+            t.IsTrue(content.find("\n# NV idlerace seq=0 tick=9 cycle=9000000 timer=9100000 "
+                                  "event=9200000 winner=E agree=0\n") != std::string::npos,
+                     "disagreement recorded on its own line (not glued to the stream)");
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries),
+                     "stream still parses around the NV line");
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            closePadPort(ctx, rdram);
+            std::remove(recPath.c_str());
+        });
+
         tc.Run("rpl3: malformed NV lines are ignored, good ones serve", [](TestCase &t)
                {
             namespace fs = std::filesystem;
