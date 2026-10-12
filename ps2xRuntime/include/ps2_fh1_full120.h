@@ -297,7 +297,7 @@ inline void patchAtManagerInit(uint8_t *ram)
 // replacement. Every word is verified before any write; a mismatch refuses.
 inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &masks)
 {
-    const std::array<Word, 126> words = {{
+    const std::array<Word, 127> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
         {0u, a + 0x14u, kSixtieth, kHundredTwentieth, "dt"},
         {0u, a + 0x24u, 0x3f800000u, 0x3f800000u, "mult(stock)"},
@@ -550,6 +550,14 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &
         // wall rate. Phase-2 words need no conversion ([0x49bef0] is a per-launch seed;
         // [0x49bef8]'s consumer never runs; [0x49bef4]/[0x49befc] already converted by crash).
         {kFixSel5b, 0x49bb90u, kSixtieth, kHundredTwentieth, "sel5b_charge_132b34"},
+        // BST1 boostfill: sq_boost_gate 0x114130 consumes boost fill R+0x2f8 by [0x49b4fc]
+        // (0.0015068, single reader 0x114220, codegen grep; no writers) per update while SQ is
+        // held (timer R+0x2e8 0, mode R+0x304 != 0, level R+0x2f4 < 10). At 120 the gate runs
+        // 2x per stock tick, so a held boost empties in half the wall time (PIP2: C60 drain
+        // 0.0015901/update = step + base 0.0000833; the base drain already halves via boost's
+        // [0x49b798] dt, and the R+0x2fc strength publish is immediates, so only this word
+        // converts). Halving is exact (power-of-two scale).
+        {kFixBoostFill, 0x49b4fcu, 0x3ac57fccu, 0x3a457fccu, "boostfill_consume_114220"},
     }};
     uint64_t mask = masks.main;
     if ((mask & kFixTimers) != 0u && (mask & kFixRng) == 0u)

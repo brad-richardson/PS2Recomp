@@ -349,6 +349,42 @@ void register_ps2_fh1_fix_tests()
             t.Equals(peek(0x49bb90u), kSixtieth, "exit restores stock");
         });
 
+        tc.Run("BST1 boostfill is opt-in at bit 59 and halves the consume step", [](TestCase &t)
+        {
+            t.Equals(static_cast<uint64_t>(kFixBoostFill), 1ull << 59, "boostfill uses bit 59");
+            t.IsTrue((kFixAll & kFixBoostFill) == 0u, "excluded from all");
+            t.Equals(parseFix("all,boostfill").main, kFixAll | kFixBoostFill, "opt-in");
+            t.Equals(parseFix("all,boostfill,-boostfill").main, kFixAll, "opt-out");
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            const uint32_t a = 0x1000u;
+            auto poke = [&](uint32_t addr, uint32_t v) {
+                std::memcpy(ram.data() + (addr & 0x1FFFFFFFu), &v, 4);
+            };
+            auto peek = [&](uint32_t addr) {
+                uint32_t v = 0u;
+                std::memcpy(&v, ram.data() + (addr & 0x1FFFFFFFu), 4);
+                return v;
+            };
+            auto stock = [&]() {
+                poke(a + 0x10u, 60u);
+                poke(a + 0x14u, kSixtieth);
+                poke(a + 0x24u, 0x3f800000u);
+                poke(0x49b4fcu, 0x3ac57fccu);
+            };
+            stock();
+            FixMasks off;
+            off.main = 0u;
+            applyWords(ram.data(), a, true, off);
+            t.Equals(peek(0x49b4fcu), 0x3ac57fccu, "bit off leaves the consume word stock");
+            stock();
+            FixMasks on;
+            on.main = static_cast<uint64_t>(kFixBoostFill);
+            applyWords(ram.data(), a, true, on);
+            t.Equals(peek(0x49b4fcu), 0x3a457fccu, "bit on halves the consume word");
+            applyWords(ram.data(), a, false, on);
+            t.Equals(peek(0x49b4fcu), 0x3ac57fccu, "exit restores stock");
+        });
+
         tc.Run("KNC5 bit 51 stays reserved and parses (JMP5 springhold removed)", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixSpringHold), 1ull << 51, "bit 51 reserved");
@@ -546,7 +582,7 @@ void register_ps2_fh1_fix_tests()
             t.Equals(renderFixDelta(kFixQuery, 0u, 0u, 0u), std::string("-query"), "loss");
             t.Equals(renderFixDelta(kFixBonus, 0u, kFixQuery, kFix12Flare), std::string("-bonus,+query,+flare"),
                      "main ascending, then mask12");
-            t.Equals(renderFixDelta(0u, 0u, 1ull << 59, 1u << 16), std::string("+bit59,+bit12.16"),
+            t.Equals(renderFixDelta(0u, 0u, 1ull << 60, 1u << 16), std::string("+bit60,+bit12.16"),
                      "unnamed bits render by index");
             t.Equals(renderFixDelta(1ull << 14, 0u, 0u, 0u), std::string("-bit14"),
                      "internal ramp renders unnamed");
