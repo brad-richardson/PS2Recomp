@@ -216,6 +216,10 @@ extern "C" void rlDrawRenderBatchActive(void);
 #if defined(PS2X_IOS)
 #include "ps2_ios_runtime.h"
 #endif
+#if defined(__ANDROID__)
+#include "ps2_android_env.h" // SET2: settingsEnvFilePath for the panel
+#include <cerrno>            // SET2: errno in the settings-write log
+#endif
 
 #include <iostream>
 #include <stdexcept>
@@ -3165,13 +3169,9 @@ uint16_t set2TestMask(const std::vector<Set2TestSpan> &spans, uint64_t hostFrame
 std::string set2SettingsPath()
 {
 #if defined(__ANDROID__)
-#if defined(PS2X_DEFAULT_BOOT_ELF)
-    namespace fs = std::filesystem;
-    const fs::path dir = fs::path(PS2X_DEFAULT_BOOT_ELF).parent_path();
-    if (!dir.empty())
-        return (dir / "settings.env").string();
-#endif
-    return std::string();
+    // This TU cannot see PS2X_DEFAULT_BOOT_ELF (PRIVATE on ps2EntryRunner);
+    // the accessor lives in the TU that can (ps2_android_runtime.cpp).
+    return ps2x::settingsEnvFilePath();
 #elif defined(PS2X_IOS)
     if (const char *docs = std::getenv("PS2X_IOS_DOCUMENTS"); docs && docs[0] != '\0')
         return std::string(docs) + "/settings.env";
@@ -3200,21 +3200,34 @@ bool set2WriteSettings(const ps2x::set2::SettingsPairs &pairs)
 {
     const std::string path = set2SettingsPath();
     if (path.empty())
+    {
+        std::fprintf(stderr, "[set2] settings write: no path on this platform\n");
         return false;
+    }
     const std::string tmp = path + ".tmp";
     {
         std::ofstream file(tmp, std::ios::trunc);
         if (!file.is_open())
+        {
+            std::fprintf(stderr, "[set2] settings write: cannot open %s (%s)\n", tmp.c_str(),
+                         std::strerror(errno));
             return false;
+        }
         file << ps2x::set2::formatSettingsEnv(pairs);
         file.flush();
         if (!file.good())
+        {
+            std::fprintf(stderr, "[set2] settings write: failed writing %s\n", tmp.c_str());
             return false;
+        }
     }
     std::error_code ec;
     std::filesystem::rename(tmp, path, ec);
     if (ec)
+    {
+        std::fprintf(stderr, "[set2] settings write: rename failed (%s)\n", ec.message().c_str());
         return false;
+    }
     std::fprintf(stderr, "[set2] settings written %s (%zu keys)\n", path.c_str(), pairs.size());
     return true;
 }
@@ -8228,7 +8241,8 @@ void PS2Runtime::run()
 #if defined(__ANDROID__)
             ps2x_present_vk::setUnderlay(false);
 #endif
-            set2Down.clear();
+            // NOTE: no set2Down.clear() here — the seed above must survive
+            // (a stale clear undid the seed and re-opened the panel).
             set2ShotIn = -1;
             std::fprintf(stderr, "[set2] close guestTick=%llu\n",
                          static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));

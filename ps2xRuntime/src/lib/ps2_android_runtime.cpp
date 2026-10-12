@@ -119,22 +119,26 @@ void loadSettingsEnvFile()
     // SET2: the user settings layer (<files dir>/settings.env, written by
     // the in-game panel) reads last, over every layer above. Allowlisted to
     // the keys the panel owns, so a hand-edited file can't brick the boot.
+    const std::string path = ps2x::settingsEnvFilePath();
+    if (!path.empty())
+    {
+        std::string content;
+        if (readWholeFile(path, &content))
+        {
+            for (const auto &entry : ps2x::parseEnvFileContent(content))
+            {
+                if (entry.first != "GE1_UPSCALE" && entry.first != "PS2X_SETTINGS_PERF")
+                    continue;
+                setenv(entry.first.c_str(), entry.second.c_str(), 1);
+                __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag,
+                                    (std::string("settings.env: set ") + entry.first).c_str());
+            }
+            return;
+        }
+    }
 #if defined(PS2X_DEFAULT_BOOT_ELF)
-    const std::string path = ps2x::siblingFilePathForBootElf(PS2X_DEFAULT_BOOT_ELF, "settings.env");
-    std::string content;
-    if (!readWholeFile(path, &content))
-    {
-        __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, ("settings.env: not found at " + path).c_str());
-        return;
-    }
-    for (const auto &entry : ps2x::parseEnvFileContent(content))
-    {
-        if (entry.first != "GE1_UPSCALE" && entry.first != "PS2X_SETTINGS_PERF")
-            continue;
-        setenv(entry.first.c_str(), entry.second.c_str(), 1);
-        __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag,
-                            (std::string("settings.env: set ") + entry.first).c_str());
-    }
+    __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag,
+                        ("settings.env: not found at " + ps2x::settingsEnvFilePath()).c_str());
 #else
     __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, "settings.env: no PS2X_DEFAULT_BOOT_ELF; skipped");
 #endif
@@ -169,5 +173,19 @@ struct Ps2xEnvLoader
 
 static Ps2xEnvLoader g_ps2xEnvLoader;
 } // namespace
+
+namespace ps2x
+{
+// SET2: files-dir settings path for the panel. Defined at file scope (not
+// in the anonymous namespace above — a nested ps2x would shadow ::ps2x).
+std::string settingsEnvFilePath()
+{
+#if defined(PS2X_DEFAULT_BOOT_ELF)
+    return siblingFilePathForBootElf(PS2X_DEFAULT_BOOT_ELF, "settings.env");
+#else
+    return std::string();
+#endif
+}
+} // namespace ps2x
 
 #endif // __ANDROID__

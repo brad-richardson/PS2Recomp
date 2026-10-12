@@ -119,6 +119,12 @@ inline std::string trickyEnvFilePathForBootElf(const char *bootElf)
     return siblingFilePathForBootElf(bootElf, "tricky.env");
 }
 
+// SET2: <bootElfDir>/settings.env — the user settings layer (the panel
+// writes it). Defined in ps2_android_runtime.cpp: that TU sees
+// PS2X_DEFAULT_BOOT_ELF (PRIVATE on ps2EntryRunner) while the runtime lib
+// does not, so the panel cannot compute the path itself.
+std::string settingsEnvFilePath();
+
 // TKO1: the "SSX 3 · Tricky" launcher entry sets PS2X_LAUNCH_LAYER=tricky
 // (Java, before the runner library loads). Only the exact text "tricky"
 // selects the layer; a 120 launch wins if both are set.
