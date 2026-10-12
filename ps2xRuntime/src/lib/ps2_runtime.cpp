@@ -3314,7 +3314,10 @@ bool set2MacRestart(bool want120, const char *upscaleOrNull)
     for (char **e = environ; e && *e; ++e)
     {
         const std::string entry(*e);
-        if (entry.compare(0, 18, "PS2X_SSX3_FULL120=") == 0 || entry.compare(0, 12, "GE1_UPSCALE=") == 0)
+        // Fresh boot: new Mode/Resolution, and the diag test spans + shot
+        // must not fire again (else the reboot would re-open and loop).
+        if (entry.compare(0, 18, "PS2X_SSX3_FULL120=") == 0 || entry.compare(0, 12, "GE1_UPSCALE=") == 0 ||
+            entry.compare(0, 19, "PS2X_SET2_TEST_PAD=") == 0 || entry.compare(0, 15, "PS2X_SET2_SHOT=") == 0)
             continue;
         keep.push_back(entry);
     }
