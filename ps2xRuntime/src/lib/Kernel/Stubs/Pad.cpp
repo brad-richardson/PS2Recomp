@@ -2048,7 +2048,7 @@ namespace ps2_stubs
                             "px\tpy\tpz\tvx\tvy\tvz\tmeter\tw438\twde0\twde4\ttr_v0\ttr_others\t"
                             "i2_bank\ti2_count\ti2_wrapped\ti2_recs\t"
                             "g_have\tg_tick\tg_half\ta0\ta1\ta2\ta3\tf0\tf1\tf12\tf20\tf21\tf13\tf14\tv0\tv1\tg_others\t"
-                            "r_have\tr\trpx\trpy\trpz\trvx\trvy\trvz\trspd\t"
+                            "r_have\tr_live\trpx\trpy\trpz\trvx\trvy\trvz\trspd\t"
                             "rsel\trctl\trp\trsel_tick\t"
                             "qnx\tqny\tqnz\tqdepth\tqmode\tqsurf\tqpx\tqpy\tqpz\t"
                             "umeter\tuboost\tutimer\t"
