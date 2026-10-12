@@ -11,6 +11,7 @@
 #include "runtime/ps2_savestate.h"
 #include "Pad.h"
 #include "ps2_log.h"
+#include "ps2_rpl3_nv.h" // RPL3: recorded host values (padrec v3)
 #include "ps2_turbo_boot.h" // BTS1: boot turbo input yield
 
 #include <algorithm>
@@ -994,6 +995,300 @@ namespace ps2_stubs
             std::strftime(out, outSize, fmt, &tm);
         }
 
+        // RPL3: recorded host values ("# NV ..." lines, padrec v3). The guest
+        // reads a handful of host values (CD clock bytes, card dates, the OSD
+        // timezone); the recorder notes each served value and replay serves
+        // it back in order. Notes before the padrec arms (boot RTC reads run
+        // before the first pad read) buffer in pending and flush in the
+        // header; later notes append inline with a flush per line, so a
+        // force-stop loses none. Replay loads lazily from the PS2X_PAD_SCRIPT
+        // @file at the first take* call. Lock rule: g_rpl3Mutex is never held
+        // while taking g_padRecord.mutex (drains take record outer, rpl3
+        // inner, briefly).
+        struct Rpl3McDateSet
+        {
+            uint16_t v[6]{};
+        };
+        struct Rpl3State
+        {
+            bool recordEnvChecked = false;
+            bool recordWanted = false;
+            uint64_t rtcSeq = 0u;
+            uint64_t mcSeq = 0u;
+            uint64_t tzSeq = 0u;
+            std::vector<std::string> pending;
+            bool replayLoaded = false;
+            struct RtcBytes
+            {
+                uint8_t b[8]{};
+            };
+            std::vector<RtcBytes> rtc;
+            size_t rtcCur = 0u;
+            std::vector<Rpl3McDateSet> mc;
+            size_t mcCur = 0u;
+            uint64_t mcReplayCalls = 0u;
+            bool haveTz = false;
+            int tz = 0;
+            uint64_t ignored = 0u;
+            bool rtcExhaustWarned = false;
+            bool mcExhaustWarned = false;
+            bool seqWarned = false;
+        };
+        Rpl3State g_rpl3;
+        std::mutex g_rpl3Mutex;
+
+        bool rpl3RecordWantedLocked()
+        {
+            if (!g_rpl3.recordEnvChecked)
+            {
+                g_rpl3.recordEnvChecked = true;
+                const char *rec = std::getenv("PS2X_PAD_RECORD");
+                const char *dir = std::getenv("PS2X_PAD_RECORD_DIR");
+                g_rpl3.recordWanted = (rec && rec[0] != '\0') || (dir && dir[0] != '\0');
+            }
+            // Armed covers the test seam (which arms without env).
+            return g_rpl3.recordWanted || g_padRecordArmed.load(std::memory_order_relaxed);
+        }
+
+        std::string rpl3FormatTick(uint64_t tick)
+        {
+            if (tick == ps2_rpl3::kTickUnknown)
+                return "*";
+            return std::to_string(tick);
+        }
+
+        std::string rpl3SanitizeQuery(const char *query)
+        {
+            std::string out = query ? query : "";
+            if (out.size() > 128u)
+                out.resize(128u);
+            for (char &c : out)
+            {
+                const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') || c == '/' || c == '_' || c == '-' ||
+                                c == '.' || c == '*' || c == '?';
+                if (!ok)
+                    c = '_';
+            }
+            return out;
+        }
+
+        void rpl3EmitLine(std::string line)
+        {
+            {
+                std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+                if (!rpl3RecordWantedLocked())
+                    return;
+                g_rpl3.pending.push_back(std::move(line));
+            }
+            std::lock_guard<std::mutex> recordLock(g_padRecord.mutex);
+            if (!g_padRecordArmed.load(std::memory_order_relaxed) || !g_padRecord.file)
+                return; // stays pending for the header flush
+            std::vector<std::string> drain;
+            {
+                std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+                drain.swap(g_rpl3.pending);
+            }
+            for (const std::string &l : drain)
+                std::fprintf(g_padRecord.file, "%s\n", l.c_str());
+            std::fflush(g_padRecord.file);
+        }
+
+        void rpl3FlushPendingToFile()
+        {
+            if (!g_padRecord.file)
+                return;
+            std::vector<std::string> drain;
+            {
+                std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+                drain.swap(g_rpl3.pending);
+            }
+            for (const std::string &l : drain)
+                std::fprintf(g_padRecord.file, "%s\n", l.c_str());
+        }
+
+        bool rpl3ParseHex8(const char *p, uint8_t out[8])
+        {
+            for (int i = 0; i < 8; ++i)
+            {
+                unsigned v = 0u;
+                for (int k = 0; k < 2; ++k)
+                {
+                    const char c = *p++;
+                    v <<= 4;
+                    if (c >= '0' && c <= '9')
+                        v |= static_cast<unsigned>(c - '0');
+                    else if (c >= 'a' && c <= 'f')
+                        v |= static_cast<unsigned>(c - 'a' + 10);
+                    else if (c >= 'A' && c <= 'F')
+                        v |= static_cast<unsigned>(c - 'A' + 10);
+                    else
+                        return false;
+                }
+                out[i] = static_cast<uint8_t>(v);
+            }
+            return *p == '\0' || *p == ' ' || *p == '\r' || *p == '\n';
+        }
+
+        void rpl3CheckSeq(const char *kind, uint64_t seq, size_t have)
+        {
+            if (seq != have && !g_rpl3.seqWarned)
+            {
+                g_rpl3.seqWarned = true;
+                std::fprintf(stderr, "[rpl3] %s seq=%llu but %zu loaded; serving in file order\n",
+                             kind, static_cast<unsigned long long>(seq), have);
+            }
+        }
+
+        void rpl3ParseNvLine(const std::string &line)
+        {
+            const char *p = line.c_str() + 5; // caller checked the "# NV " prefix
+            if (std::strncmp(p, "rtc ", 4) == 0)
+            {
+                unsigned long long seq = 0u;
+                char tick[32] = {0};
+                unsigned ra = 0u;
+                char bytes[32] = {0};
+                if (std::sscanf(p, "rtc seq=%llu tick=%31s ra=%x bytes=%31s", &seq, tick, &ra,
+                                bytes) != 4)
+                {
+                    ++g_rpl3.ignored;
+                    return;
+                }
+                uint8_t b[8]{};
+                if (!rpl3ParseHex8(bytes, b))
+                {
+                    ++g_rpl3.ignored;
+                    return;
+                }
+                rpl3CheckSeq("rtc", seq, g_rpl3.rtc.size());
+                Rpl3State::RtcBytes rec{};
+                std::memcpy(rec.b, b, sizeof(rec.b));
+                g_rpl3.rtc.push_back(rec);
+                return;
+            }
+            if (std::strncmp(p, "tz ", 3) == 0)
+            {
+                unsigned long long seq = 0u;
+                char tick[32] = {0};
+                int mins = 0;
+                if (std::sscanf(p, "tz seq=%llu tick=%31s mins=%d", &seq, tick, &mins) != 3)
+                {
+                    ++g_rpl3.ignored;
+                    return;
+                }
+                if (g_rpl3.haveTz)
+                {
+                    ++g_rpl3.ignored; // first wins; the OSD inits once
+                    return;
+                }
+                g_rpl3.haveTz = true;
+                g_rpl3.tz = mins;
+                return;
+            }
+            if (std::strncmp(p, "mc ", 3) == 0)
+            {
+                unsigned long long seq = 0u;
+                char tick[32] = {0};
+                char query[136] = {0};
+                unsigned long long built = 0u, served = 0u, n = 0u;
+                int epos = 0;
+                if (std::sscanf(p, "mc seq=%llu tick=%31s q='%135[^']' built=%llu served=%llu n=%llu e=%n",
+                                &seq, tick, query, &built, &served, &n, &epos) != 6 ||
+                    epos <= 0 || n > 100000u)
+                {
+                    ++g_rpl3.ignored;
+                    return;
+                }
+                rpl3CheckSeq("mc", seq, g_rpl3.mcReplayCalls);
+                const char *e = p + epos;
+                std::vector<Rpl3McDateSet> sets;
+                const char *cur = e;
+                for (unsigned long long i = 0u; i < n; ++i)
+                {
+                    const char *sep = std::strchr(cur, ';');
+                    const size_t len = sep ? static_cast<size_t>(sep - cur) : std::strlen(cur);
+                    if (len == 0u || len > 128u)
+                        break;
+                    char group[136] = {0};
+                    std::memcpy(group, cur, len);
+                    unsigned f[12] = {0u};
+                    if (std::sscanf(group, "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u", &f[0], &f[1],
+                                    &f[2], &f[3], &f[4], &f[5], &f[6], &f[7], &f[8], &f[9],
+                                    &f[10], &f[11]) != 12)
+                        break;
+                    bool rangeOk = true;
+                    for (unsigned k = 0u; k < 12u; ++k)
+                        rangeOk = rangeOk && f[k] <= 65535u;
+                    if (!rangeOk)
+                        break;
+                    Rpl3McDateSet c{}, m{};
+                    for (unsigned k = 0u; k < 6u; ++k)
+                    {
+                        c.v[k] = static_cast<uint16_t>(f[k]);
+                        m.v[k] = static_cast<uint16_t>(f[6u + k]);
+                    }
+                    sets.push_back(c);
+                    sets.push_back(m);
+                    if (!sep)
+                    {
+                        cur += len;
+                        break;
+                    }
+                    cur = sep + 1;
+                }
+                if (sets.size() != n * 2u)
+                {
+                    ++g_rpl3.ignored;
+                    return;
+                }
+                g_rpl3.mc.insert(g_rpl3.mc.end(), sets.begin(), sets.end());
+                ++g_rpl3.mcReplayCalls;
+                return;
+            }
+            ++g_rpl3.ignored;
+        }
+
+        void rpl3EnsureReplayLoadedLocked()
+        {
+            if (g_rpl3.replayLoaded)
+                return;
+            g_rpl3.replayLoaded = true;
+            const char *spec = std::getenv("PS2X_PAD_SCRIPT");
+            if (!spec || spec[0] != '@' || spec[1] == '\0')
+                return;
+            std::string content;
+            if (!padScriptReadFile(spec + 1, content))
+                return; // the script loader fatals; replay just stays inactive
+            size_t begin = 0u;
+            while (begin <= content.size())
+            {
+                const size_t end = content.find('\n', begin);
+                std::string line = content.substr(begin, end == std::string::npos
+                                                             ? std::string::npos
+                                                             : end - begin);
+                if (!line.empty() && line.back() == '\r')
+                    line.pop_back();
+                if (line.compare(0, 5u, "# NV ") == 0)
+                    rpl3ParseNvLine(line);
+                if (end == std::string::npos)
+                    break;
+                begin = end + 1u;
+            }
+            if (!g_rpl3.rtc.empty() || !g_rpl3.mc.empty() || g_rpl3.haveTz)
+            {
+                std::fprintf(stderr,
+                             "[rpl3] replay values from %s: rtc=%zu mc_dates=%zu tz=%s ignored=%llu\n",
+                             spec + 1, g_rpl3.rtc.size(), g_rpl3.mc.size(),
+                             g_rpl3.haveTz ? "1" : "0",
+                             static_cast<unsigned long long>(g_rpl3.ignored));
+                const char *det = std::getenv("PS2X_DETERMINISTIC");
+                if (!det || std::strcmp(det, "1") != 0)
+                    std::fprintf(stderr, "[rpl3] WARNING: replaying recorded values without "
+                                         "PS2X_DETERMINISTIC=1 (event order is host-timed)\n");
+            }
+        }
+
         uint64_t padRecordFnv1a(const void *data, size_t size, uint64_t hash)
         {
             const uint8_t *bytes = static_cast<const uint8_t *>(data);
@@ -1225,6 +1520,7 @@ namespace ps2_stubs
             // FH17: v2 = stamps are guest time in stock ms in every mode;
             // v1 = events-mode spans may be stamped on the FH5 clock (half a
             // tick early), which replays keep (padScriptWantsLegacyEventsClock).
+            // RPL3: v3 = v2 stamps plus "# NV ..." recorded host values.
             const bool fh5Stamps = ps2_fh1::eventsMode() && !ps2_fh1::exactStockClock();
             std::fprintf(f,
                          "# padrec %s\n"
@@ -1233,7 +1529,7 @@ namespace ps2_stubs
                          "# env_sha=%s\n"
                          "# knobs VU1_ENGINE=%s MTVU=%s FINISH_TIMING=%s "
                          "DETERMINISTIC=%s VU_FLOAT=%s VIF1_REVERSE_DMA=%s\n",
-                         fh5Stamps ? "v1" : "v2", startUtc, ps2x::buildId(), ps2x::recordedEnvFileHash(),
+                         fh5Stamps ? "v1" : "v3", startUtc, ps2x::buildId(), ps2x::recordedEnvFileHash(),
                          vu1, mtvu, finish, det, vfloat, revdma);
             {
                 char f120[64], fix[256];
@@ -1287,6 +1583,9 @@ namespace ps2_stubs
                 std::fprintf(f, "# load_tick=%llu (new segment after a mid-session state load)\n",
                              static_cast<unsigned long long>(g_padRecord.loadTickNote));
             }
+            // RPL3: host values noted before the arm (boot RTC reads precede
+            // the first pad read) flush here, right after the header.
+            rpl3FlushPendingToFile();
             std::fflush(f);
         }
 
@@ -3892,6 +4191,138 @@ namespace ps2_stubs
     // PS2X_INPUT_MARKER=1. Knob off: nothing is wrapped (zero cost, det-identical).
     PS2_REGISTER_GAME_OVERRIDE("ssx3-input-marker", "SLUS_207.72", 0x00100008u, 0u, lim1Apply);
 }
+
+// RPL3: recorded host values (ps2_rpl3_nv.h). Record and replay key off
+// existing env (record path / script path); play without either is one extra
+// call plus a relaxed check per host read.
+namespace ps2_rpl3
+{
+    using namespace ps2_stubs;
+
+    void noteRtc(uint64_t tick, uint32_t ra, const uint8_t bytes[8])
+    {
+        uint64_t seq = 0u;
+        {
+            std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+            if (!rpl3RecordWantedLocked())
+                return;
+            seq = g_rpl3.rtcSeq++;
+        }
+        char hex[17] = {0};
+        static const char *digits = "0123456789abcdef";
+        for (int i = 0; i < 8; ++i)
+        {
+            hex[2 * i] = digits[bytes[i] >> 4];
+            hex[2 * i + 1] = digits[bytes[i] & 0xF];
+        }
+        char line[128];
+        std::snprintf(line, sizeof(line), "# NV rtc seq=%llu tick=%s ra=0x%x bytes=%s",
+                      static_cast<unsigned long long>(seq), rpl3FormatTick(tick).c_str(), ra,
+                      hex);
+        rpl3EmitLine(line);
+    }
+
+    void noteMc(uint64_t tick, const char *query, const uint16_t *sets, size_t entryCount,
+                size_t served)
+    {
+        if (!sets && entryCount != 0u)
+            return;
+        uint64_t seq = 0u;
+        {
+            std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+            if (!rpl3RecordWantedLocked())
+                return;
+            seq = g_rpl3.mcSeq++;
+        }
+        std::string line = "# NV mc seq=" + std::to_string(seq) + " tick=" +
+                           rpl3FormatTick(tick) + " q='" + rpl3SanitizeQuery(query) + "' built=" +
+                           std::to_string(entryCount) + " served=" + std::to_string(served) +
+                           " n=" + std::to_string(entryCount) + " e=";
+        char group[160];
+        for (size_t i = 0u; i < entryCount; ++i)
+        {
+            const uint16_t *s = sets + i * 12u;
+            std::snprintf(group, sizeof(group), "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u", s[0],
+                          s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], s[10], s[11]);
+            if (i != 0u)
+                line += ';';
+            line += group;
+        }
+        rpl3EmitLine(std::move(line));
+    }
+
+    void noteTz(uint64_t tick, int minutes)
+    {
+        uint64_t seq = 0u;
+        {
+            std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+            if (!rpl3RecordWantedLocked())
+                return;
+            seq = g_rpl3.tzSeq++;
+        }
+        char line[96];
+        std::snprintf(line, sizeof(line), "# NV tz seq=%llu tick=%s mins=%d",
+                      static_cast<unsigned long long>(seq), rpl3FormatTick(tick).c_str(),
+                      minutes);
+        rpl3EmitLine(line);
+    }
+
+    bool takeRtc(uint8_t out[8])
+    {
+        std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+        rpl3EnsureReplayLoadedLocked();
+        if (g_rpl3.rtcCur >= g_rpl3.rtc.size())
+        {
+            if (!g_rpl3.rtc.empty() && !g_rpl3.rtcExhaustWarned)
+            {
+                g_rpl3.rtcExhaustWarned = true;
+                std::fprintf(stderr,
+                             "[rpl3] rtc values exhausted at seq=%zu; host behavior resumes\n",
+                             g_rpl3.rtcCur);
+            }
+            return false;
+        }
+        std::memcpy(out, g_rpl3.rtc[g_rpl3.rtcCur].b, 8u);
+        ++g_rpl3.rtcCur;
+        return true;
+    }
+
+    bool takeMcDate(uint16_t out[6])
+    {
+        std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+        rpl3EnsureReplayLoadedLocked();
+        if (g_rpl3.mcCur >= g_rpl3.mc.size())
+        {
+            if (!g_rpl3.mc.empty() && !g_rpl3.mcExhaustWarned)
+            {
+                g_rpl3.mcExhaustWarned = true;
+                std::fprintf(stderr,
+                             "[rpl3] mc dates exhausted at seq=%zu; host behavior resumes\n",
+                             g_rpl3.mcCur);
+            }
+            return false;
+        }
+        std::memcpy(out, g_rpl3.mc[g_rpl3.mcCur].v, sizeof(uint16_t) * 6u);
+        ++g_rpl3.mcCur;
+        return true;
+    }
+
+    bool takeTz(int &out)
+    {
+        std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+        rpl3EnsureReplayLoadedLocked();
+        if (!g_rpl3.haveTz)
+            return false;
+        out = g_rpl3.tz;
+        return true;
+    }
+
+    void resetForTest()
+    {
+        std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+        g_rpl3 = Rpl3State{};
+    }
+} // namespace ps2_rpl3
 
 // SS1 save states: pad ports and override. The pad script needs no cursor:
 // it recomputes from gs().vsyncTick, so a loaded run needs the same env.
