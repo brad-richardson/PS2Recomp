@@ -12,7 +12,7 @@ SSX 3 guest-code generation are separate steps.
 
 | Target | Toolchain / public source | Currently private or externally staged inputs |
 | --- | --- | --- |
-| macOS arm64 | Apple C/C++ compiler, CMake, Ninja; PS2Recomp and PCSX2 fork `armsx2-ssx3-one` | SSX 3 EE generation, matching VU0 inputs, renderer resources, GE1 dependency prefix, OM1RT sources/header trees and recordings used by the current microVU library recipe |
+| macOS arm64 | Apple C/C++ compiler, CMake, Ninja; PS2Recomp and PCSX2 fork `armsx2-ssx3-four` | SSX 3 EE generation, matching VU0 inputs, renderer resources, GE1 dependency prefix, OM1RT sources/header trees and recordings used by the current microVU library recipe |
 | Android arm64 | JDK 17, SDK 34, NDK 28.2.13676358, CMake 3.22.1; Gradle/AGP; PS2Recomp plus matching GE1/microVU sources | EE/VU0 generated directories, JNI libraries and shader resources; renderer script delegates to a private remote build recipe; optional locally built Mesa Turnip |
 | iOS arm64 / arm64 simulator | Xcode SDK/toolchain, CMake, Ninja; GE1 static archives and source headers | EE/VU0 generation, SDL2 staging, GE1 dependency bundle/resources, OM1 offline VU1 core + tables + matching archives; private app-staging recipe and signing setup |
 
@@ -64,7 +64,7 @@ validated here. Do not reuse a profile trained against different generated code.
 
 Credit [PS2Recomp upstream](https://github.com/ran-j/PS2Recomp) and preserve
 its [GPL v3 licence](../LICENSE). GE1/microVU build on
-[PCSX2/ARMSX2 fork sources](https://github.com/brad-richardson/pcsx2/tree/armsx2-ssx3-one);
+[PCSX2/ARMSX2 fork sources](https://github.com/brad-richardson/pcsx2/tree/armsx2-ssx3-four);
 these adapters are GPL-3.0-or-later. Optional Turnip comes from
 [Mesa fork sources](https://github.com/brad-richardson/mesa/tree/ssx3), mostly
 MIT with component-specific notices
