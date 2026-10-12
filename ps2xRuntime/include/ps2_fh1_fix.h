@@ -78,6 +78,7 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixSel5b = 1ull << 58, // SEL2 opt-in (needs sel5): circle-handler 0x132a30 charge step 1/60 -> 1/120 (class h; not in all)
     kFixBoostFill = 1ull << 59, // BST1 opt-in: sq_boost_gate 0x114130 fill consume [0x49b4fc] 0.0015068 -> half per update (class b; not in all)
     kFixStuntChg = 1ull << 60, // FLP2 opt-in: rider stunt-charge slew 0x1211f8 (R+0x2a4 spin / R+0x2b0 flip) at stock cadence (class d; not in all)
+    kFixAsymK = 1ull << 61, // TRN2 opt-in with query+vnret: publish-half stock k=0.4, skip-half k=0 at 0x49c124 (pair keeps stock 0.6; suppresses normcap; class d; not in all)
 };
 
 // FH12 groups live in their own mask (the main mask's bits are taken). Same
@@ -188,6 +189,7 @@ inline uint64_t fixItem(const std::string &item) noexcept
     if (item == "sel5b") return kFixSel5b;
     if (item == "boostfill") return kFixBoostFill;
     if (item == "stuntchg") return kFixStuntChg;
+    if (item == "asymk") return kFixAsymK;
     return 0u;
 }
 
@@ -278,7 +280,7 @@ inline bool fixDeltaKnobOn() noexcept
 // refuses (fail-closed for internal and future bits).
 inline const char *fixMainBitName(unsigned bit) noexcept
 {
-    static constexpr const char *kNames[61] = {
+    static constexpr const char *kNames[62] = {
         "rider", "countdown", "drag", "event", "slew", "clock", "raceclock", "session", // 0-7
         "timers", "camera", "launch", "stick", "speedcap", "rng", nullptr, "trick", // 8-15 (14 = ramp)
         "anim", "bonus", "lift", "aigate", "takeoff", "flags", "steer", "rail", // 16-23
@@ -286,9 +288,9 @@ inline const char *fixMainBitName(unsigned bit) noexcept
         "clock2", "hudfill", "stick2", "clocksign", "bonusflip", "jcam", "pose", "pid", // 32-39
         "c2cap", "spawn", "envfilt", "ground2", "jcam2", "life2", "input2", "inputchain", // 40-47
         "trails", "chase2", "query", "springhold", "vnret", "shadowpub", "groundstep", "trailring", // 48-55
-        "normcap", "sel5", "sel5b", "boostfill", "stuntchg", // 56-60
+        "normcap", "sel5", "sel5b", "boostfill", "stuntchg", "asymk", // 56-61
     };
-    return bit < 61u ? kNames[bit] : nullptr;
+    return bit < 62u ? kNames[bit] : nullptr;
 }
 inline const char *fix12BitName(unsigned bit) noexcept
 {

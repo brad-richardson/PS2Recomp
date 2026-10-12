@@ -1633,6 +1633,25 @@ inline bool groundStepFix() noexcept
     return on;
 }
 
+// TRN2 asymk: joint map+consumer composition. The 0x13de68 penetration
+// adjust zeroes entry normal velocity un-rescaled whenever v_n < 0; on
+// query-skip halves v_n is measured against the stale frame (wall rotation
+// skews it to -56..-110 here), so the skip-half firing removes far more
+// than stock's (-25..-82) and the turn scrubs. On pressed contact
+// (pre-query qdepth < 0) publish halves keep the stock k=0.4 (stock-sized
+// post-map v_n into the firing) and skip halves take k=0 (map identity);
+// the pair keeps stock 0.6 retention. Leaving/lip contact (qdepth >= 0)
+// keeps the config k (vnret), preserving lip contact and takeoff.
+// Suppresses normcap (its pair math assumes sqrt/sqrt halves).
+inline constexpr uint32_t kAsymKPoolK = 0x49c124u;
+inline constexpr uint32_t kAsymKStock = 0xbeccccddu; // float(-0.4)
+inline bool asymkFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixAsymK) != 0u && queryFix() &&
+                           ((fixMask() & kFixVnRet) != 0u || groundStepFix());
+    return on;
+}
+
 // NRM1 normcap hooks (math in ps2_fh1_normcap.h). The clamp is a baked
 // codegen immediate, so the guest map still runs and normcap overwrites
 // R+0x1E0 on 0x13d818's return from pre-state captured at the query
@@ -1641,7 +1660,7 @@ inline bool groundStepFix() noexcept
 // invalid input leaves the guest value (safe fallback).
 inline bool normcapFix() noexcept
 {
-    static const bool on = enabled() &&
+    static const bool on = enabled() && !asymkFix() &&
                            (fixMask() & (kFixNormcap | kFixVnRet | kFixQuery)) ==
                                (kFixNormcap | kFixVnRet | kFixQuery);
     return on;
@@ -3832,10 +3851,30 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         parityHook(ram, sourcePc);
     if (on && flag(&BranchFlags::rng, rngFix))
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
+    bool queryWasSkipped = false;
     if (on && flag(&BranchFlags::query, queryFix))
-        skip = querySkip(ram, ctx, sourcePc, targetPc) || skip;
+    {
+        queryWasSkipped = querySkip(ram, ctx, sourcePc, targetPc);
+        skip = queryWasSkipped || skip;
+    }
     if (on && flag(&BranchFlags::query, queryFix))
         queryPreHook(ctx, sourcePc, targetPc);
+    if (on && asymkFix() && sourcePc == kCruiseQuerySite && targetPc == kCruiseQuery)
+    {
+        // Scope to pressed contact (pre-query qdepth < 0, where the
+        // penetration adjust fires): leaving/lip approaches (qdepth >= 0)
+        // keep vnret, preserving lip contact and takeoff behavior.
+        uint32_t pa = getRegU32(ctx, 4), r = 0u, qd = 0u;
+        float qdepth = 0.0f;
+        if (rd32(ram, pa + 0x18u, r) && rd32(ram, r + 0x454u, qd))
+            std::memcpy(&qdepth, &qd, 4);
+        uint32_t k;
+        if (qdepth < 0.0f)
+            k = queryWasSkipped ? 0x00000000u : kAsymKStock;
+        else
+            k = (fixMask() & kFixVnRet) != 0u ? 0xbe66d021u : kAsymKStock; // status quo ante
+        wr32(ram, kAsymKPoolK, k);
+    }
     if (on && flag(&BranchFlags::trick, trickFix) && g_rngOdd && sourcePc == kComboSite && targetPc == kComboAccrue)
         skip = true;
     if (on && flag(&BranchFlags::aiGate, aiGateFix))

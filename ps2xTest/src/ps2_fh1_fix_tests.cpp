@@ -590,8 +590,8 @@ void register_ps2_fh1_fix_tests()
             t.Equals(renderFixDelta(kFixQuery, 0u, 0u, 0u), std::string("-query"), "loss");
             t.Equals(renderFixDelta(kFixBonus, 0u, kFixQuery, kFix12Flare), std::string("-bonus,+query,+flare"),
                      "main ascending, then mask12");
-            t.Equals(renderFixDelta(0u, 0u, 1ull << 61, 1u << 16), std::string("+bit61,+bit12.16"),
-                     "unnamed bits render by index"); // FLP2: bit 60 is now stuntchg
+            t.Equals(renderFixDelta(0u, 0u, 1ull << 62, 1u << 16), std::string("+bit62,+bit12.16"),
+                     "unnamed bits render by index"); // FLP2: bit 60 is now stuntchg; TRN2: bit 61 is now asymk
             t.Equals(renderFixDelta(1ull << 14, 0u, 0u, 0u), std::string("-bit14"),
                      "internal ramp renders unnamed");
         });
