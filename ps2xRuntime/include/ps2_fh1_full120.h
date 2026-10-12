@@ -292,6 +292,10 @@ inline void patchAtManagerInit(uint8_t *ram)
 }
 
 
+// TRN2 asymk owns 0x49c124 while on (asymkFix defined with the cruise hook below).
+inline bool asymkFix() noexcept;
+inline constexpr uint32_t kAsymKPoolK = 0x49c124u;
+
 // The word table, applied in either direction (FH5): toActive expects the
 // stock value and writes the replacement; the reverse expects the
 // replacement. Every word is verified before any write; a mismatch refuses.
@@ -624,6 +628,10 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &
             all.push_back(w.second);
     for (const Word &w : all)
     {
+        // TRN2 asymk owns 0x49c124 while on (per-update 0/stock/vnret by
+        // contact): skip the static verify, the restore below still resets it.
+        if (!toActive && asymkFix() && w.address == kAsymKPoolK)
+            continue;
         const uint32_t want = toActive ? w.expected : w.replacement;
         uint32_t got = 0u;
         if (!rd32(ram, w.address, got) || got != want)
@@ -1643,8 +1651,7 @@ inline bool groundStepFix() noexcept
 // the pair keeps stock 0.6 retention. Leaving/lip contact (qdepth >= 0)
 // keeps the config k (vnret), preserving lip contact and takeoff.
 // Suppresses normcap (its pair math assumes sqrt/sqrt halves).
-inline constexpr uint32_t kAsymKPoolK = 0x49c124u;
-inline constexpr uint32_t kAsymKStock = 0xbeccccddu; // float(-0.4)
+inline constexpr uint32_t kAsymKStock = 0xbecccccdu; // float(-0.4), exact stock (pool table)
 inline bool asymkFix() noexcept
 {
     static const bool on = enabled() && (fixMask() & kFixAsymK) != 0u && queryFix() &&
