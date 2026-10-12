@@ -7,6 +7,7 @@
 #include "ps2_telemetry.h"
 #include "ps2_adpf.h"
 #include "ps2_perf_log.h"
+#include "ps2_turbo_boot.h" // BTS2: skip presents while boot turbo is armed
 #include "runtime/gs/ge1_gs_api.h"
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
@@ -980,7 +981,11 @@ public:
     PresentationFrame Present(const GSPresentationRequest &request) override
     {
         PresentationFrame frame;
-        if (m_ge1Active)
+        // BTS2: while boot turbo is armed, don't present (no export, no
+        // queue, no CPU snapshot); the display holds its pre-turbo frame and
+        // the first post-yield VSync/latch goes live. Guest state untouched.
+        const bool turboArmed = ps2_turbo_boot::pacingSuspended();
+        if (m_ge1Active && !turboArmed)
         {
 #if defined(__ANDROID__)
             if (ps2x_present_vk::enabled() && !ps2x_present_vk::broken())
@@ -1029,7 +1034,7 @@ public:
             }
 #endif
         }
-        else if (m_inner)
+        else if (m_inner && !turboArmed)
             frame = m_inner->Present(request);
         ++m_stats.presents;
         const uint32_t hash =
@@ -1331,7 +1336,7 @@ public:
         // ~48 of ~100 guest frames/s). Only once the layer is live; before
         // that the latch path runs as before.
         if (m_ge1Active && presentPerVsync() && ps2x_present_vk::active() && ps2x_present_vk::layerLive() &&
-            !ps2x_present_vk::broken())
+            !ps2x_present_vk::broken() && !ps2_turbo_boot::pacingSuspended())
         {
             m_perVsyncLive = true;
             presentAhb(tick);
@@ -1341,7 +1346,7 @@ public:
         // guest frame into the IOSurface mailbox right after GE1's VSync; the
         // host loop stops latching once it shows a shared frame. A busy pool
         // drops this frame (the next VSync publishes a newer one).
-        if (m_ge1Active && iosPresentPerVsync())
+        if (m_ge1Active && iosPresentPerVsync() && !ps2_turbo_boot::pacingSuspended())
             presentIOSurface(tick);
 #endif
         if (m_lastVsyncTick != 0u && tick != m_lastVsyncTick + 1u)
