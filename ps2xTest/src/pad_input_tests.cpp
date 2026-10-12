@@ -2037,6 +2037,88 @@ void register_pad_input_tests()
             std::remove(v2Path.c_str());
         });
 
+        tc.Run("rpl3: sched gates fire the recorded subset by cycle", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string gatePath =
+                (fs::temp_directory_path() / "rpl3_nv_sched_test.txt").string();
+            {
+                std::FILE *f = std::fopen(gatePath.c_str(), "w");
+                t.IsTrue(f != nullptr, "fixture writable");
+                if (f)
+                {
+                    std::fputs("# padrec v3\n"
+                               "# NV sched seq=0 tick=10 cycle=100 nf=1 w=1 f=T,0,90\n"
+                               "# NV sched seq=1 tick=20 cycle=200 nf=2 w=0 f=S,0,200;E,0,205\n"
+                               "# NV idlerace seq=0 tick=30 cycle=300 timer=310 event=305 "
+                               "winner=E agree=1\n"
+                               "1000:cross:250\n",
+                               f);
+                    std::fclose(f);
+                }
+            }
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + gatePath).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            const ps2_rpl3::SchedEvent due0[] = {{6u, 0u, 90u}, {1u, 0u, 100u}};
+            bool fire0[2] = {true, true};
+            t.IsTrue(!ps2_rpl3::takeSched(50u, due0, 2u, fire0), "no gate before first");
+            t.IsTrue(ps2_rpl3::takeSched(100u, due0, 2u, fire0), "gate matches cycle");
+            t.IsTrue(fire0[0] && !fire0[1], "recorded subset marked");
+            t.IsTrue(!ps2_rpl3::takeSched(100u, due0, 2u, fire0), "gate consumed");
+            const ps2_rpl3::SchedEvent due1[] = {{1u, 0u, 200u}, {2u, 0u, 205u}, {6u, 0u, 150u}};
+            bool fire1[3] = {false, false, true};
+            t.IsTrue(ps2_rpl3::takeSched(200u, due1, 3u, fire1), "second gate matches");
+            t.IsTrue(fire1[0] && fire1[1] && !fire1[2], "second subset marked");
+            t.IsTrue(!ps2_rpl3::takeSched(300u, due1, 3u, fire1), "gates exhausted");
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScriptFile(gatePath.c_str(), entries),
+                     "stream still parses around sched lines");
+            ps2_rpl3::resetForTest();
+            std::remove(gatePath.c_str());
+        });
+
+        tc.Run("rpl3: sched batches record and serve back", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string recPath =
+                (fs::temp_directory_path() / "rpl3_nv_sched_rec.txt").string();
+            std::remove(recPath.c_str());
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::unsetenv("PS2X_PAD_SCRIPT");
+            Pl1EnvGuard recordGuard("PS2X_PAD_RECORD");
+            ::setenv("PS2X_PAD_RECORD", recPath.c_str(), 1);
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            t.IsTrue(ps2_stubs::setPadRecordForTest(recPath.c_str()), "recorder should arm");
+            const ps2_rpl3::SchedEvent fired[] = {{6u, 0u, 90u}};
+            ps2_rpl3::noteSched(10u, 100u, fired, 1u, 1u);
+            ps2_stubs::closePadRecordForTest();
+
+            const std::string content = readFileBytes(recPath);
+            t.IsTrue(content.find("# NV sched seq=0 tick=10 cycle=100 nf=1 w=1 f=T,0,90") !=
+                         std::string::npos,
+                     "sched line recorded");
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + recPath).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            const ps2_rpl3::SchedEvent due[] = {{6u, 0u, 90u}, {1u, 0u, 100u}};
+            bool fire[2] = {false, false};
+            t.IsTrue(ps2_rpl3::takeSched(100u, due, 2u, fire), "recorded gate serves");
+            t.IsTrue(fire[0] && !fire[1], "recorded subset marked");
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            closePadPort(ctx, rdram);
+            std::remove(recPath.c_str());
+        });
+
         tc.Run("rpl3: malformed NV lines are ignored, good ones serve", [](TestCase &t)
                {
             namespace fs = std::filesystem;

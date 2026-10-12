@@ -1009,6 +1009,11 @@ namespace ps2_stubs
         {
             uint16_t v[6]{};
         };
+        struct Rpl3SchedGate
+        {
+            uint64_t cycle = 0u;
+            std::vector<ps2_rpl3::SchedEvent> fired;
+        };
         struct Rpl3State
         {
             bool recordEnvChecked = false;
@@ -1016,6 +1021,8 @@ namespace ps2_stubs
             uint64_t rtcSeq = 0u;
             uint64_t mcSeq = 0u;
             uint64_t tzSeq = 0u;
+            uint64_t schedSeq = 0u;
+            uint64_t idleSeq = 0u;
             std::vector<std::string> pending;
             bool replayLoaded = false;
             struct RtcBytes
@@ -1029,10 +1036,15 @@ namespace ps2_stubs
             uint64_t mcReplayCalls = 0u;
             bool haveTz = false;
             int tz = 0;
+            std::vector<Rpl3SchedGate> sched;
+            size_t schedCur = 0u;
+            uint64_t idleLines = 0u;
             uint64_t ignored = 0u;
             bool rtcExhaustWarned = false;
             bool mcExhaustWarned = false;
             bool seqWarned = false;
+            bool schedStaleWarned = false;
+            bool schedMismatchWarned = false;
         };
         Rpl3State g_rpl3;
         std::mutex g_rpl3Mutex;
@@ -1246,6 +1258,80 @@ namespace ps2_stubs
                 ++g_rpl3.mcReplayCalls;
                 return;
             }
+            if (std::strncmp(p, "sched ", 6) == 0)
+            {
+                unsigned long long seq = 0u, cycle = 0u, nf = 0u, w = 0u;
+                char tick[32] = {0};
+                int fpos = 0;
+                if (std::sscanf(p, "sched seq=%llu tick=%31s cycle=%llu nf=%llu w=%llu f=%n",
+                                &seq, tick, &cycle, &nf, &w, &fpos) != 5 ||
+                    fpos <= 0 || nf > 64u)
+                {
+                    ++g_rpl3.ignored;
+                    return;
+                }
+                rpl3CheckSeq("sched", seq, g_rpl3.sched.size());
+                Rpl3SchedGate gate{};
+                gate.cycle = cycle;
+                const char *cur = p + fpos;
+                bool ok = true;
+                for (unsigned long long i = 0u; i < nf; ++i)
+                {
+                    // Triple: <mnemonic>,<id>,<cycle>.
+                    const char m = cur[0];
+                    uint32_t type = 0u;
+                    unsigned long long id = 0u, c = 0u;
+                    int nch = 0;
+                    if (cur[0] == '\0' || cur[1] != ',' ||
+                        !ps2_rpl3::schedCharType(m, type) ||
+                        std::sscanf(cur + 2, "%llu,%llu%n", &id, &c, &nch) != 2 || nch <= 0 ||
+                        id > 0xFFFFFFFFu)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    ps2_rpl3::SchedEvent ev{};
+                    ev.type = type;
+                    ev.id = static_cast<uint32_t>(id);
+                    ev.cycle = c;
+                    gate.fired.push_back(ev);
+                    cur += 2 + nch;
+                    if (i + 1u < nf)
+                    {
+                        if (*cur != ';')
+                        {
+                            ok = false;
+                            break;
+                        }
+                        ++cur;
+                    }
+                }
+                if (!ok || gate.fired.size() != nf)
+                {
+                    ++g_rpl3.ignored;
+                    return;
+                }
+                g_rpl3.sched.push_back(std::move(gate));
+                return;
+            }
+            if (std::strncmp(p, "idlerace ", 9) == 0)
+            {
+                unsigned long long seq = 0u, cycle = 0u, timer = 0u, event = 0u;
+                char tick[32] = {0};
+                char winner = 0;
+                int agree = -1;
+                if (std::sscanf(p,
+                                "idlerace seq=%llu tick=%31s cycle=%llu timer=%llu event=%llu "
+                                "winner=%c agree=%d",
+                                &seq, tick, &cycle, &timer, &event, &winner, &agree) != 7 ||
+                    (winner != 'T' && winner != 'E') || (agree != 0 && agree != 1))
+                {
+                    ++g_rpl3.ignored;
+                    return;
+                }
+                ++g_rpl3.idleLines; // record-only data (no replay use yet)
+                return;
+            }
             ++g_rpl3.ignored;
         }
 
@@ -1275,12 +1361,14 @@ namespace ps2_stubs
                     break;
                 begin = end + 1u;
             }
-            if (!g_rpl3.rtc.empty() || !g_rpl3.mc.empty() || g_rpl3.haveTz)
+            if (!g_rpl3.rtc.empty() || !g_rpl3.mc.empty() || g_rpl3.haveTz || !g_rpl3.sched.empty())
             {
                 std::fprintf(stderr,
-                             "[rpl3] replay values from %s: rtc=%zu mc_dates=%zu tz=%s ignored=%llu\n",
+                             "[rpl3] replay values from %s: rtc=%zu mc_dates=%zu tz=%s sched=%zu "
+                             "idle=%llu ignored=%llu\n",
                              spec + 1, g_rpl3.rtc.size(), g_rpl3.mc.size(),
-                             g_rpl3.haveTz ? "1" : "0",
+                             g_rpl3.haveTz ? "1" : "0", g_rpl3.sched.size(),
+                             static_cast<unsigned long long>(g_rpl3.idleLines),
                              static_cast<unsigned long long>(g_rpl3.ignored));
                 const char *det = std::getenv("PS2X_DETERMINISTIC");
                 if (!det || std::strcmp(det, "1") != 0)
@@ -4017,6 +4105,104 @@ namespace ps2_rpl3
             return false;
         out = g_rpl3.tz;
         return true;
+    }
+
+    void noteSched(uint64_t tick, uint64_t cycle, const SchedEvent *fired, size_t firedCount,
+                   size_t withheldCount)
+    {
+        if (!fired && firedCount != 0u)
+            return;
+        uint64_t seq = 0u;
+        {
+            std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+            if (!rpl3RecordWantedLocked())
+                return;
+            seq = g_rpl3.schedSeq++;
+        }
+        std::string line = "# NV sched seq=" + std::to_string(seq) + " tick=" +
+                           rpl3FormatTick(tick) + " cycle=" + std::to_string(cycle) +
+                           " nf=" + std::to_string(firedCount) + " w=" +
+                           std::to_string(withheldCount) + " f=";
+        char triple[64];
+        for (size_t i = 0u; i < firedCount; ++i)
+        {
+            std::snprintf(triple, sizeof(triple), "%c,%u,%llu", schedTypeChar(fired[i].type),
+                          fired[i].id, static_cast<unsigned long long>(fired[i].cycle));
+            if (i != 0u)
+                line += ';';
+            line += triple;
+        }
+        rpl3EmitLine(std::move(line));
+    }
+
+    bool takeSched(uint64_t cycle, const SchedEvent *due, size_t dueCount, bool *fire)
+    {
+        if (!due && dueCount != 0u)
+            return false;
+        std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+        rpl3EnsureReplayLoadedLocked();
+        while (g_rpl3.schedCur < g_rpl3.sched.size() && g_rpl3.sched[g_rpl3.schedCur].cycle < cycle)
+        {
+            if (!g_rpl3.schedStaleWarned)
+            {
+                g_rpl3.schedStaleWarned = true;
+                std::fprintf(stderr,
+                             "[rpl3] sched gate at cycle=%llu skipped (replay at %llu); "
+                             "already diverged\n",
+                             static_cast<unsigned long long>(g_rpl3.sched[g_rpl3.schedCur].cycle),
+                             static_cast<unsigned long long>(cycle));
+            }
+            ++g_rpl3.schedCur;
+        }
+        if (g_rpl3.schedCur >= g_rpl3.sched.size() || g_rpl3.sched[g_rpl3.schedCur].cycle != cycle)
+            return false;
+        for (size_t i = 0u; i < dueCount; ++i)
+            fire[i] = false;
+        for (const SchedEvent &g : g_rpl3.sched[g_rpl3.schedCur].fired)
+        {
+            bool found = false;
+            for (size_t i = 0u; i < dueCount; ++i)
+            {
+                if (!fire[i] && due[i].type == g.type && due[i].id == g.id &&
+                    due[i].cycle == g.cycle)
+                {
+                    fire[i] = true;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && !g_rpl3.schedMismatchWarned)
+            {
+                g_rpl3.schedMismatchWarned = true;
+                std::fprintf(stderr,
+                             "[rpl3] sched gate at cycle=%llu names %c,%u,%llu, not cycle-due; "
+                             "already diverged\n",
+                             static_cast<unsigned long long>(cycle), schedTypeChar(g.type), g.id,
+                             static_cast<unsigned long long>(g.cycle));
+            }
+        }
+        ++g_rpl3.schedCur;
+        return true;
+    }
+
+    void noteIdle(uint64_t tick, uint64_t cycle, uint64_t timerCycle, uint64_t eventCycle,
+                  char winner, bool agree)
+    {
+        uint64_t seq = 0u;
+        {
+            std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+            if (!rpl3RecordWantedLocked())
+                return;
+            seq = g_rpl3.idleSeq++;
+        }
+        char line[160];
+        std::snprintf(line, sizeof(line),
+                      "# NV idlerace seq=%llu tick=%s cycle=%llu timer=%llu event=%llu winner=%c "
+                      "agree=%d",
+                      static_cast<unsigned long long>(seq), rpl3FormatTick(tick).c_str(),
+                      static_cast<unsigned long long>(cycle), static_cast<unsigned long long>(timerCycle),
+                      static_cast<unsigned long long>(eventCycle), winner, agree ? 1 : 0);
+        rpl3EmitLine(line);
     }
 
     void resetForTest()
