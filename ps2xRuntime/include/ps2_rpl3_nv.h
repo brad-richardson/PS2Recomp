@@ -149,4 +149,34 @@ namespace ps2_rpl3
     // Replay: if the next idle gate matches this call, set winner and return
     // true. False = decide by the existing rule.
     bool takeIdle(uint64_t cycle, uint64_t timerCycle, uint64_t eventCycle, char &winner);
+
+    // GS register timelines (RPL3-P2): CSR/SIGLBLID bits set by host-threaded
+    // units (GIF SIGNAL/LABEL decode) are wall-timed; the guest vsync-polls
+    // them and branches (F1/F3 bifurcated on one such branch at tick 1008,
+    // eeCycle-identical until then, clocks never drifted). Record the full
+    // u64 per guest read as a (tick, idx) timeline: first read per reg is
+    // always noted (baseline), then value changes only, so spins cost
+    // nothing. Replay serves the latest note at or before the read's
+    // (tick, idx) (spins exit at the recorded idx, cycle-exact). idx counts
+    // reads within a tick and resets on any tick change, symmetric on both
+    // sides. No notes for a reg = never read = live (vacuous, v2-safe).
+    constexpr uint32_t kGsRegCsr = 0u;
+    constexpr uint32_t kGsRegSiglblid = 1u;
+    constexpr uint32_t kGsRegCount = 2u;
+    inline char gsRegChar(uint32_t reg)
+    {
+        return reg == kGsRegCsr ? 'C' : (reg == kGsRegSiglblid ? 'S' : '?');
+    }
+    struct GsRegNote
+    {
+        uint64_t tick = 0u;
+        uint64_t idx = 0u;
+        uint64_t value = 0u;
+    };
+    void noteGsReg(uint32_t reg, uint64_t tick, uint64_t value);
+    // Serve the latest note at or before (tick, readIdx-implied). False =
+    // no notes for this reg (live). Past the last note serves last-known
+    // (sticky values; warn once). Tick behind served progress = diverged
+    // (warn once, serve last-known).
+    bool takeGsReg(uint32_t reg, uint64_t tick, uint64_t &value);
 } // namespace ps2_rpl3

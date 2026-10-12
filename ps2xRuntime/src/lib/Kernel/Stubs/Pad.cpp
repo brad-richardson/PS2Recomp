@@ -1040,6 +1040,30 @@ namespace ps2_stubs
             size_t schedCur = 0u;
             std::vector<ps2_rpl3::IdleGate> idle;
             size_t idleCur = 0u;
+            // RPL3-P2: GS register timelines (CSR/SIGLBLID full-u64 values).
+            // Record counts reads per (reg, tick) (idx resets on any tick
+            // change); replay mirrors the counters and serves the latest
+            // note at or before the read's (tick, idx).
+            struct GsRegTimeline
+            {
+                bool recHave = false;
+                uint64_t recTick = 0u;
+                uint64_t recIdx = 0u;
+                uint64_t recValue = 0u;
+                std::vector<ps2_rpl3::GsRegNote> notes;
+                size_t cur = 0u;
+                bool haveCur = false;
+                uint64_t curTick = 0u;
+                uint64_t curIdx = 0u;
+                uint64_t curValue = 0u;
+                bool takeTickSet = false;
+                uint64_t takeTick = 0u;
+                uint64_t takeIdx = 0u;
+            };
+            GsRegTimeline gsreg[ps2_rpl3::kGsRegCount];
+            uint64_t gsregSeq = 0u;
+            bool gsregStaleWarned = false;
+            bool gsregExhaustWarned = false;
             uint64_t ignored = 0u;
             bool rtcExhaustWarned = false;
             bool mcExhaustWarned = false;
@@ -1344,6 +1368,27 @@ namespace ps2_stubs
                 g_rpl3.idle.push_back(gate);
                 return;
             }
+            if (std::strncmp(p, "gsreg ", 6) == 0)
+            {
+                unsigned long long seq = 0u, tick = 0u, idx = 0u, val = 0u;
+                char reg = 0;
+                if (std::sscanf(p, "gsreg seq=%llu tick=%llu idx=%llu reg=%c val=%llx",
+                                &seq, &tick, &idx, &reg, &val) != 5 ||
+                    (reg != 'C' && reg != 'S'))
+                {
+                    ++g_rpl3.ignored;
+                    return;
+                }
+                rpl3CheckSeq("gsreg", seq, g_rpl3.gsreg[ps2_rpl3::kGsRegCsr].notes.size() +
+                                              g_rpl3.gsreg[ps2_rpl3::kGsRegSiglblid].notes.size());
+                ps2_rpl3::GsRegNote note{};
+                note.tick = tick;
+                note.idx = idx;
+                note.value = val;
+                g_rpl3.gsreg[reg == 'C' ? ps2_rpl3::kGsRegCsr : ps2_rpl3::kGsRegSiglblid]
+                    .notes.push_back(note);
+                return;
+            }
             ++g_rpl3.ignored;
         }
 
@@ -1373,15 +1418,17 @@ namespace ps2_stubs
                     break;
                 begin = end + 1u;
             }
+            const size_t gsregNotes = g_rpl3.gsreg[ps2_rpl3::kGsRegCsr].notes.size() +
+                                          g_rpl3.gsreg[ps2_rpl3::kGsRegSiglblid].notes.size();
             if (!g_rpl3.rtc.empty() || !g_rpl3.mc.empty() || g_rpl3.haveTz || !g_rpl3.sched.empty() ||
-                !g_rpl3.idle.empty())
+                !g_rpl3.idle.empty() || gsregNotes != 0u)
             {
                 std::fprintf(stderr,
                              "[rpl3] replay values from %s: rtc=%zu mc_dates=%zu tz=%s sched=%zu "
-                             "idle=%zu ignored=%llu\n",
+                             "idle=%zu gsreg=%zu ignored=%llu\n",
                              spec + 1, g_rpl3.rtc.size(), g_rpl3.mc.size(),
                              g_rpl3.haveTz ? "1" : "0", g_rpl3.sched.size(), g_rpl3.idle.size(),
-                             static_cast<unsigned long long>(g_rpl3.ignored));
+                             gsregNotes, static_cast<unsigned long long>(g_rpl3.ignored));
                 const char *det = std::getenv("PS2X_DETERMINISTIC");
                 if (!det || std::strcmp(det, "1") != 0)
                     std::fprintf(stderr, "[rpl3] WARNING: replaying recorded values without "
@@ -4552,6 +4599,104 @@ namespace ps2_rpl3
         }
         winner = gate.winner;
         ++g_rpl3.idleCur;
+        return true;
+    }
+
+    void noteGsReg(uint32_t reg, uint64_t tick, uint64_t value)
+    {
+        if (reg >= kGsRegCount)
+            return;
+        uint64_t seq = 0u, idx = 0u;
+        bool emit = false;
+        {
+            std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+            if (!rpl3RecordWantedLocked())
+                return;
+            Rpl3State::GsRegTimeline &tl = g_rpl3.gsreg[reg];
+            if (!tl.recHave || tick != tl.recTick)
+            {
+                tl.recTick = tick;
+                tl.recIdx = 0u;
+            }
+            idx = tl.recIdx++;
+            emit = !tl.recHave || value != tl.recValue;
+            tl.recHave = true;
+            tl.recValue = value;
+            if (emit)
+                seq = g_rpl3.gsregSeq++;
+        }
+        if (!emit)
+            return;
+        char line[128];
+        std::snprintf(line, sizeof(line), "# NV gsreg seq=%llu tick=%llu idx=%llu reg=%c val=%016llx",
+                      static_cast<unsigned long long>(seq), static_cast<unsigned long long>(tick),
+                      static_cast<unsigned long long>(idx), gsRegChar(reg),
+                      static_cast<unsigned long long>(value));
+        rpl3EmitLine(line);
+    }
+
+    bool takeGsReg(uint32_t reg, uint64_t tick, uint64_t &value)
+    {
+        if (reg >= kGsRegCount)
+            return false;
+        std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+        rpl3EnsureReplayLoadedLocked();
+        Rpl3State::GsRegTimeline &tl = g_rpl3.gsreg[reg];
+        if (tl.notes.empty())
+            return false;
+        if (!tl.takeTickSet || tick != tl.takeTick)
+        {
+            tl.takeTickSet = true;
+            tl.takeTick = tick;
+            tl.takeIdx = 0u;
+        }
+        const uint64_t idx = tl.takeIdx++;
+        while (tl.cur < tl.notes.size() &&
+               (tl.notes[tl.cur].tick < tick ||
+                (tl.notes[tl.cur].tick == tick && tl.notes[tl.cur].idx <= idx)))
+        {
+            tl.haveCur = true;
+            tl.curTick = tl.notes[tl.cur].tick;
+            tl.curIdx = tl.notes[tl.cur].idx;
+            tl.curValue = tl.notes[tl.cur].value;
+            ++tl.cur;
+        }
+        if (!tl.haveCur)
+        {
+            // Read before the first note: diverged (reads earlier than recorded).
+            if (!g_rpl3.gsregStaleWarned)
+            {
+                g_rpl3.gsregStaleWarned = true;
+                std::fprintf(stderr,
+                             "[rpl3] gsreg read at tick=%llu before first note; live\n",
+                             static_cast<unsigned long long>(tick));
+            }
+            return false;
+        }
+        if (tick < tl.curTick || (tick == tl.curTick && idx < tl.curIdx))
+        {
+            // Read behind served progress: diverged.
+            if (!g_rpl3.gsregStaleWarned)
+            {
+                g_rpl3.gsregStaleWarned = true;
+                std::fprintf(stderr,
+                             "[rpl3] gsreg read went backward (tick=%llu); serving last-known\n",
+                             static_cast<unsigned long long>(tick));
+            }
+            value = tl.curValue;
+            return true;
+        }
+        if (tl.cur >= tl.notes.size() &&
+            (tick > tl.curTick || (tick == tl.curTick && idx > tl.curIdx)))
+        {
+            // Past the last note (open span / longer replay): sticky last-known.
+            if (!g_rpl3.gsregExhaustWarned)
+            {
+                g_rpl3.gsregExhaustWarned = true;
+                std::fprintf(stderr, "[rpl3] gsreg notes exhausted; serving last-known\n");
+            }
+        }
+        value = tl.curValue;
         return true;
     }
 

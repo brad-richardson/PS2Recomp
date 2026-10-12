@@ -1,5 +1,6 @@
 #include "runtime/ps2_memory.h"
 #include "ps2_e7.h"
+#include "ps2_rpl3_nv.h" // RPL3-P2: CSR/SIGLBLID timeline record/replay
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_stream_capture.h"
@@ -985,11 +986,23 @@ uint32_t PS2Memory::read32(uint32_t address)
         if (regOff == kGsCsrRegOffset)
         {
             uint64_t val = gs_regs.csr.load();
+            // RPL3-P2: worker-set CSR bits are wall-timed; serve the recorded
+            // timeline on replay, note what the guest saw.
+            const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
+            uint64_t served = val;
+            if (ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, tick, served))
+                val = served;
+            ps2_rpl3::noteGsReg(ps2_rpl3::kGsRegCsr, tick, val);
             return (uint32_t)(val >> (off * 8));
         }
         if (regOff == kGsSiglblidRegOffset)
         {
             uint64_t val = gs_regs.siglblid.load();
+            const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
+            uint64_t served = val;
+            if (ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegSiglblid, tick, served))
+                val = served;
+            ps2_rpl3::noteGsReg(ps2_rpl3::kGsRegSiglblid, tick, val);
             return (uint32_t)(val >> (off * 8));
         }
         uint64_t *reg = gsRegPtr(gs_regs, address);
@@ -1037,11 +1050,24 @@ uint64_t PS2Memory::read64(uint32_t address)
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
         if (regOff == kGsCsrRegOffset)
         {
-            return gs_regs.csr.load();
+            uint64_t val = gs_regs.csr.load();
+            // RPL3-P2: see read32.
+            const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
+            uint64_t served = val;
+            if (ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, tick, served))
+                val = served;
+            ps2_rpl3::noteGsReg(ps2_rpl3::kGsRegCsr, tick, val);
+            return val;
         }
         if (regOff == kGsSiglblidRegOffset)
         {
-            return gs_regs.siglblid.load();
+            uint64_t val = gs_regs.siglblid.load();
+            const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
+            uint64_t served = val;
+            if (ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegSiglblid, tick, served))
+                val = served;
+            ps2_rpl3::noteGsReg(ps2_rpl3::kGsRegSiglblid, tick, val);
+            return val;
         }
         uint64_t *reg = gsRegPtr(gs_regs, address);
         return reg ? *reg : 0;
