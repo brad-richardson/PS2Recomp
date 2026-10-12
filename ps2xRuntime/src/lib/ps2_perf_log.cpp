@@ -1078,7 +1078,7 @@ void poll(uint64_t vsyncTick)
     std::fflush(log.file);
     // TEL2: session-log hitch/race-window accounting (no-op when off). Not
     // while the BG1 gate holds the game thread (a paused window is no hitch).
-    if (!ps2x::androidPause::pausedFlag().load(std::memory_order_relaxed))
+    if (!ps2x::hostPause::pausedFlag().load(std::memory_order_relaxed))
         ps2x::tel::notePerfWindow(log.windowTick, vsyncTick, windowS, telemetryHz,
                                     s.vsyncsPerS, s.maxGapMs, stageMax, kStageCount, gaps16);
     log.windowStart = now;

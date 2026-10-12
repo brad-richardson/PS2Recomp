@@ -114,6 +114,32 @@ void loadPs2xEnvFile()
 #endif
 }
 
+void loadSettingsEnvFile()
+{
+    // SET2: the user settings layer (<files dir>/settings.env, written by
+    // the in-game panel) reads last, over every layer above. Allowlisted to
+    // the keys the panel owns, so a hand-edited file can't brick the boot.
+#if defined(PS2X_DEFAULT_BOOT_ELF)
+    const std::string path = ps2x::siblingFilePathForBootElf(PS2X_DEFAULT_BOOT_ELF, "settings.env");
+    std::string content;
+    if (!readWholeFile(path, &content))
+    {
+        __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, ("settings.env: not found at " + path).c_str());
+        return;
+    }
+    for (const auto &entry : ps2x::parseEnvFileContent(content))
+    {
+        if (entry.first != "GE1_UPSCALE" && entry.first != "PS2X_SETTINGS_PERF")
+            continue;
+        setenv(entry.first.c_str(), entry.second.c_str(), 1);
+        __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag,
+                            (std::string("settings.env: set ") + entry.first).c_str());
+    }
+#else
+    __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, "settings.env: no PS2X_DEFAULT_BOOT_ELF; skipped");
+#endif
+}
+
 struct Ps2xEnvLoader
 {
     Ps2xEnvLoader()
@@ -137,6 +163,7 @@ struct Ps2xEnvLoader
         std::snprintf(summary, sizeof(summary), "ps2x.env: %u compiled defaults applied",
                       static_cast<unsigned>(applied));
         __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag, summary);
+        loadSettingsEnvFile(); // SET2: the user layer reads last (skipped under reference above)
     }
 };
 

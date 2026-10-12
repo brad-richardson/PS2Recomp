@@ -971,7 +971,7 @@ void EeScheduler::requestStop()
     m_stopRequested.store(true, std::memory_order_release);
     m_checkpointPending.store(true, std::memory_order_release);
     m_eventCv.notify_all();
-    ps2x::androidPause::notifyStop(); // BG1: wake the game thread out of the pause gate
+    ps2x::hostPause::notifyStop(); // BG1: wake the game thread out of the pause gate
 }
 
 void EeScheduler::postEvent(EeEvent event)
@@ -2993,7 +2993,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         { // PT2: the gate sleep belongs to no frame; measure it so the cut
           // files it under waits instead of busy.
             const uint64_t gateT0 = m_perfTail ? ps2x::perflog::steadyNs() : 0u;
-            ps2x::androidPause::gate(m_stopRequested);
+            ps2x::hostPause::gate(m_stopRequested);
             m_perfGateNs = m_perfTail ? ps2x::perflog::steadyNs() - gateT0 : 0u;
         }
         if (m_vsyncPace && !ps2_turbo_boot::pacingSuspended())

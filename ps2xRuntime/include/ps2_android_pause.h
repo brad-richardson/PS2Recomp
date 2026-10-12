@@ -1,7 +1,9 @@
 #pragma once
 
-// BG1: Android pause-on-background gate (host-only; the guest cannot observe
-// it). The EE (game) thread calls gate() at the top of VBlankStart processing
+// BG1: pause gate (host-only; the guest cannot observe it), born as the
+// Android pause-on-background gate and generalised off Android by SET2 (the
+// in-game settings panel pauses through the same gate on every platform).
+// The EE (game) thread calls gate() at the top of VBlankStart processing
 // — a proven safe point between guest vsyncs, before the pacer, the MTVU
 // sync, the tick increment and the guest VSync callbacks. While paused the
 // thread sleeps on a condition variable (no spinning); everything downstream
@@ -12,8 +14,9 @@
 // there is no catch-up burst; the engine's own drain bound would resync
 // anyway (docs/research/ssx3-engine-timing.md S1 rules 2-3).
 //
-// Only the Android shell ever sets the flag (APP_CMD_PAUSE/RESUME in
-// vk1OnAppCmd); elsewhere gate() is one relaxed load. Det mode is unaffected.
+// Setters: the Android shell (APP_CMD_PAUSE/RESUME in vk1OnAppCmd) and the
+// SET2 settings panel (any platform); elsewhere gate() is one relaxed load.
+// Det mode is unaffected.
 
 #include <atomic>
 #include <chrono>
@@ -23,7 +26,7 @@
 #include <mutex>
 #include <thread>
 
-namespace ps2x::androidPause
+namespace ps2x::hostPause
 {
 
 // BG1 pause is always on (the PS2X_ANDROID_PAUSE_BG=0 pre-BG1 opt-out is
@@ -127,4 +130,4 @@ inline void notifyStop()
     gateCv().notify_all();
 }
 
-} // namespace ps2x::androidPause
+} // namespace ps2x::hostPause

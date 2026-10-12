@@ -26,6 +26,7 @@ void register_ps2_ssx3_tricky_layer_tests();
 void register_ps2_cd_overlay_tests();
 void register_ps2_android_env_tests();
 void register_ps2_knobs_tests();
+void register_ps2_settings_overlay_tests();
 void register_ps2_log_tests();
 void register_ps2_perf_log_tests();
 void register_ps2_telemetry_tests();
@@ -108,6 +109,7 @@ int main()
     register_ps2_cd_overlay_tests();
     register_ps2_android_env_tests();
     register_ps2_knobs_tests();
+    register_ps2_settings_overlay_tests();
     register_ps2_log_tests();
     register_ps2_perf_log_tests();
     register_ps2_telemetry_tests();

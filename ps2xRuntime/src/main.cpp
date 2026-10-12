@@ -31,6 +31,9 @@
 #if defined(PS2X_IOS)
 #include "ps2_ios_runtime.h"
 #endif
+#if defined(__APPLE__) && !defined(PS2X_IOS)
+#include "ps2_settings_overlay.h" // SET2: set2NoteExecArgs for the Mac restart
+#endif
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -243,6 +246,7 @@ int main(int argc, char *argv[])
     // CFG1 Part 2: compiled Mac play defaults (D1/D4/D5) for keys the launch
     // env did not set. PS2X_PROFILE=reference disables them all.
     ps2x::cf2ApplyMacDefaults();
+    ps2x::set2::set2NoteExecArgs(argc, argv); // SET2: the panel's Restart re-execs
 #endif
     setupTerminateLogger();
 

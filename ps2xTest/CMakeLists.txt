@@ -44,6 +44,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_cd_overlay_tests.cpp
     src/ps2_android_env_tests.cpp
     src/ps2_knobs_tests.cpp
+    src/ps2_settings_overlay_tests.cpp
     src/ps2_log_tests.cpp
     src/ps2_perf_log_tests.cpp
     src/ps2_telemetry_tests.cpp

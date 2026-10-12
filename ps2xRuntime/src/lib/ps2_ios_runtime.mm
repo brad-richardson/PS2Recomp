@@ -160,6 +160,21 @@ void prepareEnvironment(const char *argv0)
         setenv(key.c_str(), value.c_str(), 1);
         std::fprintf(stderr, "[ios-env] set %s=%s\n", key.c_str(), value.c_str());
     }
+    // SET2: the user settings layer (<Documents>/settings.env, written by
+    // the in-game panel) reads last, over every layer above. Allowlisted to
+    // the keys the panel owns; the launcher env still wins (test legs pass
+    // explicit env, which must survive a stale settings file).
+    {
+        const auto settings = readEnvFile(documents / "settings.env");
+        for (const auto &[key, value] : settings)
+        {
+            const bool owned = key == "GE1_UPSCALE" || key == "PS2X_SETTINGS_PERF";
+            if (!owned || launcherKeys.count(key) != 0)
+                continue;
+            setenv(key.c_str(), value.c_str(), 1);
+            std::fprintf(stderr, "[ios-env] settings set %s=%s\n", key.c_str(), value.c_str());
+        }
+    }
     for (const auto &key : launcherKeys)
     {
         std::fprintf(stderr, "[ios-env] launcher kept %s\n", key.c_str());
@@ -199,6 +214,19 @@ void prepareEnvironment(const char *argv0)
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     int pw = 0, ph = 0;
     panelSize(pw, ph); // IX1: cache it on the main thread (the GS opens on its worker)
+}
+
+bool target120()
+{
+    return target120Enabled();
+}
+
+void setTarget120(bool on)
+{
+    CFPreferencesSetAppValue(CFSTR("target120"), on ? kCFBooleanTrue : kCFBooleanFalse,
+                             kCFPreferencesCurrentApplication);
+    CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication);
+    std::fprintf(stderr, "[ios-env] Settings: Target 120 %s (panel write)\n", on ? "on" : "off");
 }
 
 bool panelSize(int &w, int &h)

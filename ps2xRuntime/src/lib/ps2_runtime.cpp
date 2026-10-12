@@ -30,6 +30,7 @@
 #include "ps2_vsync_lock.h"
 #include "ps2_virtual_pad.h"
 #include "ps2_ui_toast.h"
+#include "ps2_settings_overlay.h"
 #include "runtime/ps2_pad.h"
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
@@ -193,6 +194,10 @@ void rlDisableColorBlend(void);
 void rlEnableColorBlend(void);
 }
 #endif
+#if !defined(PS2X_IOS)
+// SET2: flush the draw batch before the panel screenshot (same pattern as above).
+extern "C" void rlDrawRenderBatchActive(void);
+#endif
 #include "ps2_e7.h"
 #include "ps2_e15.h"
 #include "runtime/ee_scheduler.h"
@@ -238,6 +243,11 @@ void rlEnableColorBlend(void);
 #include "ps2_session_telemetry.h" // TEL2
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#endif
+#if defined(__APPLE__) && !defined(PS2X_IOS)
+#include <unistd.h> // SET2: execve for the Mac restart
+#include <cerrno>
+extern char **environ; // SET2: global scope (an in-function extern mangles)
 #endif
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
@@ -3068,6 +3078,264 @@ void qsr1NoteSession(const uint8_t *rdram, R5900Context *ctx)
 
 } // namespace
 
+// SET2: in-game settings overlay (design B). Knob PS2X_SETTINGS_OVERLAY=1
+// (default off in code; on in play envs once Brad approves). Select+Start
+// (Select-first, ~150 ms window) pauses the guest through the hostPause gate
+// and opens a host-drawn panel (Mode / Resolution / Perf overlay). A gear
+// dot opens it touch-only. Guest-invisible: the panel owns the pad while
+// open (publish-zero) and draws only over the presented frame.
+namespace
+{
+bool set2OverlayOn()
+{
+    static const bool on = [] {
+        const char *v = std::getenv("PS2X_SETTINGS_OVERLAY");
+        return v && std::string(v) == "1";
+    }();
+    return on;
+}
+
+// True while the panel holds the pause gate (so BG1's resume path doesn't
+// steal it when the app backgrounds with the panel open).
+std::atomic<bool> &set2HoldsPause()
+{
+    static std::atomic<bool> holds{false};
+    return holds;
+}
+
+// PS2X_SET2_TEST_PAD=start:mask:dur,... (diag, host-frame addressed):
+// ORs mask (hex, PS2 button bits) into the sampled pad on host frames
+// [start, start+dur). The only way to drive the chord on headless Mac boots.
+struct Set2TestSpan
+{
+    uint64_t start = 0;
+    uint64_t dur = 0;
+    uint16_t mask = 0;
+};
+
+std::vector<Set2TestSpan> set2TestSpans()
+{
+    static const std::vector<Set2TestSpan> spans = [] {
+        std::vector<Set2TestSpan> out;
+        const char *env = std::getenv("PS2X_SET2_TEST_PAD");
+        if (!env || !env[0])
+            return out;
+        const char *p = env;
+        while (*p)
+        {
+            char *end = nullptr;
+            const unsigned long long start = std::strtoull(p, &end, 10);
+            if (end == p || *end != ':')
+                break;
+            p = end + 1;
+            const unsigned long mask = std::strtoul(p, &end, 0);
+            if (end == p || *end != ':')
+                break;
+            p = end + 1;
+            const unsigned long long dur = std::strtoull(p, &end, 10);
+            if (end == p || mask > 0xffffu || dur == 0u)
+                break;
+            out.push_back(Set2TestSpan{start, dur, static_cast<uint16_t>(mask)});
+            p = (*end == ',') ? end + 1 : end;
+            if (*p == '\0')
+                break;
+            if (*(p - 1) != ',')
+                break;
+        }
+        std::fprintf(stderr, "[set2] test-pad spans=%zu (%s)\n", out.size(), env);
+        return out;
+    }();
+    return spans;
+}
+
+uint16_t set2TestMask(const std::vector<Set2TestSpan> &spans, uint64_t hostFrame)
+{
+    uint16_t mask = 0u;
+    for (const Set2TestSpan &s : spans)
+    {
+        if (hostFrame >= s.start && hostFrame < s.start + s.dur)
+            mask = static_cast<uint16_t>(mask | s.mask);
+    }
+    return mask;
+}
+
+// The user settings layer (read last at boot; written by the panel).
+// Android: <files dir>/settings.env. iOS: <Documents>/settings.env. The Mac
+// has no settings file: Mode/Resolution apply through the relaunch env.
+std::string set2SettingsPath()
+{
+#if defined(__ANDROID__)
+#if defined(PS2X_DEFAULT_BOOT_ELF)
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::path(PS2X_DEFAULT_BOOT_ELF).parent_path();
+    if (!dir.empty())
+        return (dir / "settings.env").string();
+#endif
+    return std::string();
+#elif defined(PS2X_IOS)
+    if (const char *docs = std::getenv("PS2X_IOS_DOCUMENTS"); docs && docs[0] != '\0')
+        return std::string(docs) + "/settings.env";
+    return std::string();
+#else
+    return std::string();
+#endif
+}
+
+ps2x::set2::SettingsPairs set2ReadSettings()
+{
+    const std::string path = set2SettingsPath();
+    if (path.empty())
+        return {};
+    std::ifstream file(path);
+    if (!file.is_open())
+        return {};
+    std::ostringstream content;
+    content << file.rdbuf();
+    return ps2x::set2::parseSettingsEnv(content.str());
+}
+
+// Atomic write (tmp + rename) of the owned keys. False when there is no
+// settings file on this platform or the write fails.
+bool set2WriteSettings(const ps2x::set2::SettingsPairs &pairs)
+{
+    const std::string path = set2SettingsPath();
+    if (path.empty())
+        return false;
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream file(tmp, std::ios::trunc);
+        if (!file.is_open())
+            return false;
+        file << ps2x::set2::formatSettingsEnv(pairs);
+        file.flush();
+        if (!file.good())
+            return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    if (ec)
+        return false;
+    std::fprintf(stderr, "[set2] settings written %s (%zu keys)\n", path.c_str(), pairs.size());
+    return true;
+}
+
+bool set2Effective120()
+{
+#if defined(PS2X_IOS)
+    return ps2x::ios::target120();
+#elif defined(__ANDROID__)
+    const char *hz = std::getenv("PS2X_LAUNCH_HZ");
+    return hz && std::string(hz) == "120";
+#else
+    const char *v = std::getenv("PS2X_SSX3_FULL120");
+    return v && std::string(v) == "events";
+#endif
+}
+
+#if defined(__ANDROID__)
+// Relaunch through the matching launcher alias (.Launch120/.Launch60),
+// then kill this process (the Java side does both; modelled on UX1's toast
+// JNI: attach, resolve via the activity ClassLoader, clear exceptions).
+bool set2AndroidRelaunch(const char *target)
+{
+    struct android_app *app = GetAndroidApp();
+    if (!app || !app->activity || !app->activity->vm)
+        return false;
+    JNIEnv *env = nullptr;
+    JavaVMAttachArgs args = {JNI_VERSION_1_6, nullptr, nullptr};
+    if (app->activity->vm->AttachCurrentThread(&env, &args) != JNI_OK || !env)
+        return false;
+    bool launched = false;
+    jobject act = app->activity->clazz;
+    jclass actCls = env->GetObjectClass(act);
+    jmethodID getLoader =
+        actCls ? env->GetMethodID(actCls, "getClassLoader", "()Ljava/lang/ClassLoader;") : nullptr;
+    jobject loader = (actCls && getLoader) ? env->CallObjectMethod(act, getLoader) : nullptr;
+    jclass loaderCls = loader ? env->GetObjectClass(loader) : nullptr;
+    jmethodID loadClass = loaderCls ? env->GetMethodID(loaderCls, "loadClass",
+                                                       "(Ljava/lang/String;)Ljava/lang/Class;")
+                                    : nullptr;
+    jstring className = loadClass ? env->NewStringUTF("com.ps2x.runner.Set2Relaunch") : nullptr;
+    jclass relaunchCls =
+        (loader && className) ? static_cast<jclass>(env->CallObjectMethod(loader, loadClass, className))
+                              : nullptr;
+    jmethodID toHz = relaunchCls ? env->GetStaticMethodID(relaunchCls, "toHz",
+                                                           "(Landroid/app/Activity;Ljava/lang/String;)V")
+                                 : nullptr;
+    jstring jtarget = (relaunchCls && toHz) ? env->NewStringUTF(target) : nullptr;
+    if (jtarget && !env->ExceptionCheck())
+    {
+        env->CallStaticVoidMethod(relaunchCls, toHz, act, jtarget);
+        launched = !env->ExceptionCheck(); // on success the process dies inside toHz
+    }
+    if (env->ExceptionCheck())
+        env->ExceptionClear();
+    if (jtarget)
+        env->DeleteLocalRef(jtarget);
+    if (className)
+        env->DeleteLocalRef(className);
+    if (relaunchCls)
+        env->DeleteLocalRef(relaunchCls);
+    if (loaderCls)
+        env->DeleteLocalRef(loaderCls);
+    if (loader)
+        env->DeleteLocalRef(loader);
+    if (actCls)
+        env->DeleteLocalRef(actCls);
+    return launched;
+}
+#endif
+
+} // namespace
+
+#if defined(__APPLE__) && !defined(PS2X_IOS)
+namespace
+{
+int g_set2Argc = 0;
+char **g_set2Argv = nullptr;
+} // namespace
+
+// Stashed by main() so the panel's Restart can re-exec the runner.
+void ps2x::set2::set2NoteExecArgs(int argc, char **argv)
+{
+    g_set2Argc = argc;
+    g_set2Argv = argv;
+}
+
+namespace
+{
+// Re-exec the runner with Mode/Resolution applied through the env (the Mac
+// has no settings file). Returns false when exec fails (caller stays open).
+bool set2MacRestart(bool want120, const char *upscaleOrNull)
+{
+    if (g_set2Argc < 1 || !g_set2Argv || !g_set2Argv[0])
+        return false;
+    std::vector<std::string> keep;
+    for (char **e = environ; e && *e; ++e)
+    {
+        const std::string entry(*e);
+        if (entry.compare(0, 18, "PS2X_SSX3_FULL120=") == 0 || entry.compare(0, 12, "GE1_UPSCALE=") == 0)
+            continue;
+        keep.push_back(entry);
+    }
+    keep.push_back(want120 ? "PS2X_SSX3_FULL120=events" : "PS2X_SSX3_FULL120=");
+    if (upscaleOrNull && upscaleOrNull[0] != '\0')
+        keep.push_back(std::string("GE1_UPSCALE=") + upscaleOrNull);
+    std::vector<char *> envp;
+    for (std::string &s : keep)
+        envp.push_back(s.data());
+    envp.push_back(nullptr);
+    std::fprintf(stderr, "[set2] mac re-exec %s (120=%d upscale=%s)\n", g_set2Argv[0], want120 ? 1 : 0,
+                 upscaleOrNull && upscaleOrNull[0] ? upscaleOrNull : "(default)");
+    // Flush: exec keeps thefds but a buffered line could be lost on failure paths.
+    std::fflush(nullptr);
+    execve(g_set2Argv[0], g_set2Argv, envp.data());
+    std::fprintf(stderr, "[set2] mac re-exec failed: %s\n", std::strerror(errno));
+    return false;
+}
+} // namespace
+#endif
+
 // HR1: main-thread present cost split, reported by PS2X_THREAD_CPU_LOG=1.
 static std::atomic<uint64_t> g_hr1LatchNs{0}, g_hr1UploadNs{0}, g_hr1Uploads{0};
 #if defined(PS2X_IOS)
@@ -3323,13 +3591,13 @@ PS2Runtime *g_bg1Runtime = nullptr;
 
 void bg1OnPause()
 {
-    if (!ps2x::androidPause::requestPause())
+    if (!ps2x::hostPause::requestPause())
         return;
     const uint64_t tick =
         g_bg1Runtime ? g_bg1Runtime->eeScheduler().currentVSyncTick() : 0u;
     ps2_snd_audio_output::pausePlayback();
     // Bounded: a game thread stuck mid-frame must not hang the app-cmd pump.
-    const bool acked = ps2x::androidPause::waitGateAck(2000);
+    const bool acked = ps2x::hostPause::waitGateAck(2000);
     if (g_bg1Runtime)
         g_bg1Runtime->gs().flushExternalCaches();
     // PT2 Part 2a: kill-proof the stage rings (a swipe from the switcher is a
@@ -3350,7 +3618,14 @@ void bg1OnPause()
 
 void bg1OnResume()
 {
-    if (!ps2x::androidPause::requestResume())
+    if (set2HoldsPause().load(std::memory_order_acquire))
+    {
+        // SET2: the panel holds the pause (backgrounded while open); the
+        // guest stays frozen until the panel closes.
+        std::fprintf(stderr, "[bg1] resume skipped: the settings panel holds the pause\n");
+        return;
+    }
+    if (!ps2x::hostPause::requestResume())
         return;
     // The gate wakes the game thread first; the ring still holds its
     // pause-time fill, so the resumed stream drains real frames, no gap.
@@ -7485,6 +7760,39 @@ void PS2Runtime::run()
     const bool perfLog = ps2x::perflog::enabled();
     const bool vpadWanted = virtualPadWanted();
     PSChordState ds1Chord; // SELECT+L3 save / SELECT+R3 load, carried across frames
+    // SET2: settings panel state, carried across frames. Knob off: the chord
+    // path below is one bool check per frame (plus the always-on perf tick
+    // sample, one atomic load + one clock).
+    const bool set2On = set2OverlayOn();
+    const std::vector<Set2TestSpan> set2Test = set2On ? set2TestSpans() : std::vector<Set2TestSpan>();
+    const char *set2ShotPath = set2On ? std::getenv("PS2X_SET2_SHOT") : nullptr;
+    if (set2On)
+        std::fprintf(stderr, "[set2] overlay on (shot=%s)\n",
+                     (set2ShotPath && set2ShotPath[0]) ? set2ShotPath : "(none)");
+    ps2x::set2::ChordState set2Chord;
+    ps2x::set2::NavState set2Nav;
+    bool set2Open = false;
+    bool set2Eff120 = false;   // effective values, sampled at open
+    std::string set2EffUpscale; // effective GE1_UPSCALE (or the platform default)
+    ps2x::set2::Res set2ResAtOpen = ps2x::set2::Res::RDefault;
+    uint64_t set2HostFrame = 0;
+    uint16_t set2PrevUnion = 0; // nav edge detect
+    std::vector<int64_t> set2Down; // touch ids currently on the panel/dot
+    int set2ShotIn = -1;           // host frames until the panel screenshot (-1 idle)
+    bool set2Perf = false;         // live perf-overlay flag (env default at boot)
+    if (set2On)
+    {
+        const char *perf = std::getenv("PS2X_SETTINGS_PERF");
+        set2Perf = perf && std::string(perf) == "1";
+        set2Nav.perf = set2Perf;
+    }
+    // SET2 perf sampler: always-on lightweight vs/s + frame-time (one tick
+    // load + one clock per host frame; the line draws only when perf is on).
+    auto set2PerfWinStart = std::chrono::steady_clock::now();
+    uint64_t set2PerfWinTick = m_memory.gs().vsyncTick.load();
+    double set2PerfVs = 0.0;
+    double set2PerfMs = 0.0;
+    auto set2PerfLastFrame = std::chrono::steady_clock::now();
     bool qsr1Expanded = false; // QSR1 menu open, carried across frames
     std::vector<int64_t> qsr1Down; // touch ids currently on the menu (edge = new id)
     bool qsr1AutoDone = false; // auto snapshot taken for the current events window
@@ -7518,7 +7826,9 @@ void PS2Runtime::run()
         // swapping. PollInputEvents blocks in the looper once raylib is
         // disabled (backgrounded); while still enabled, sleep so a pause
         // without focus loss doesn't spin on an unchanged frame.
-        if (ps2x::androidPause::paused())
+        // SET2: exempt the panel pause (any platform): the loop must keep
+        // running to draw the panel over the frozen frame.
+        if (ps2x::hostPause::paused() && !set2Open)
         {
             PollInputEvents(); // delivers APP_CMD_RESUME / DESTROY
             if (WindowShouldClose())
@@ -7564,6 +7874,24 @@ void PS2Runtime::run()
         }
         if (perfLog)
             ps2x::perflog::poll(m_memory.gs().vsyncTick.load());
+        // SET2 perf sampler: one tick load + one clock per host frame (the
+        // line draws only when the perf overlay is on).
+        {
+            const auto set2Now = std::chrono::steady_clock::now();
+            const double set2FrameMs =
+                std::chrono::duration<double, std::milli>(set2Now - set2PerfLastFrame).count();
+            set2PerfLastFrame = set2Now;
+            set2PerfMs += (std::min(set2FrameMs, 1000.0) - set2PerfMs) * 0.05;
+            if (std::chrono::duration<double>(set2Now - set2PerfWinStart).count() >= 1.0)
+            {
+                const uint64_t vt = m_memory.gs().vsyncTick.load();
+                const double winS =
+                    std::chrono::duration<double>(set2Now - set2PerfWinStart).count();
+                set2PerfVs = static_cast<double>(vt - set2PerfWinTick) / winS;
+                set2PerfWinTick = vt;
+                set2PerfWinStart = set2Now;
+            }
+        }
         PS2_IF_AGRESSIVE_LOGS({
             tick++;
             if ((tick % 120) == 0)
@@ -7787,7 +8115,9 @@ void PS2Runtime::run()
         // to the pad latch every host frame (host ~60 Hz vs guest reads at
         // guest speed); readState consumes one presented mask per guest
         // read.
-        const uint16_t ds1RawPressed = ps2xSampleRaylibPad().pressed;
+        const uint16_t ds1TrueRaw = ps2xSampleRaylibPad().pressed;
+        // SET2: while the panel is open the panel owns the pad (DS1 suppressed).
+        const uint16_t ds1RawPressed = set2Open ? 0u : ds1TrueRaw;
         uint16_t raylibPressed = ds1RawPressed;
         // DS1: quick-save/load chord, edge-triggered. The chord is stripped from the guest
         // mask while engaged, so the game never sees it. Inert without a
@@ -7805,6 +8135,186 @@ void PS2Runtime::run()
                 (ds1RawPressed & (ps2x::vpad::kL3 | ps2x::vpad::kR3)) != 0u)
                 raylibPressed = static_cast<uint16_t>(
                     raylibPressed & ~(ps2x::vpad::kSelect | ps2x::vpad::kL3 | ps2x::vpad::kR3));
+        }
+        // SET2: chord (Select-first + Start edge, ~150 ms window) with Select
+        // hold-back, + panel nav/open/close. Runs on the post-DS1 mask, so a
+        // DS1 chord (Select already stripped) stays idle here. Knob off: the
+        // outer bool check only.
+        auto set2DoOpen = [&] {
+            set2Eff120 = set2Effective120();
+            if (const char *u = std::getenv("GE1_UPSCALE"); u && u[0] != '\0')
+                set2EffUpscale = u;
+            else
+                set2EffUpscale = "1x";
+            set2Nav.sel = ps2x::set2::Row::Mode;
+            set2Nav.mode = set2Eff120 ? ps2x::set2::Mode::M120 : ps2x::set2::Mode::M60;
+            set2Nav.res = ps2x::set2::Res::RDefault;
+            for (const auto &kv : set2ReadSettings())
+            {
+                if (kv.first == "GE1_UPSCALE")
+                {
+                    if (kv.second == "native")
+                        set2Nav.res = ps2x::set2::Res::Native;
+                    else if (kv.second == "2")
+                        set2Nav.res = ps2x::set2::Res::R2x;
+                }
+            }
+            set2ResAtOpen = set2Nav.res;
+            set2Nav.perf = set2Perf;
+            set2Nav.restartArmed = false;
+#if defined(__ANDROID__)
+            // The panel needs the GL overlay visible over the VK layer.
+            ps2x_present_vk::setUnderlay(true);
+#endif
+            ps2_snd_audio_output::pausePlayback();
+            const uint64_t openTick = m_memory.gs().vsyncTick.load();
+            ps2x::hostPause::requestPause();
+            const bool acked = ps2x::hostPause::waitGateAck(2000);
+            set2HoldsPause().store(true, std::memory_order_release);
+            set2Open = true;
+            // Seed: touches already down (incl. the dot tap that opened us)
+            // must not edge in the open branch next frame.
+            ps2x::vpad::TouchPoint seed[8];
+            const int nseed = virtualPadTouches(seed, 8, screenWidth, screenHeight);
+            set2Down.clear();
+            for (int i = 0; i < nseed; ++i)
+                set2Down.push_back(seed[i].id);
+            if (set2ShotPath && set2ShotPath[0] != '\0')
+                set2ShotIn = 45;
+            std::fprintf(stderr, "[set2] open guestTick=%llu gateAck=%d mode=%s upscale=%s\n",
+                         static_cast<unsigned long long>(openTick), acked ? 1 : 0,
+                         set2Eff120 ? "120" : "60", set2EffUpscale.c_str());
+        };
+        auto set2DoClose = [&] {
+            set2Open = false;
+            set2HoldsPause().store(false, std::memory_order_release);
+            ps2x::hostPause::requestResume();
+            ps2_snd_audio_output::resumePlayback();
+#if defined(__ANDROID__)
+            ps2x_present_vk::setUnderlay(false);
+#endif
+            set2Down.clear();
+            set2ShotIn = -1;
+            std::fprintf(stderr, "[set2] close guestTick=%llu\n",
+                         static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));
+        };
+        auto set2DoRestart = [&] {
+            const bool want120 = set2Nav.mode == ps2x::set2::Mode::M120;
+            const char *upscale = ps2x::set2::resToUpscale(set2Nav.res); // "" = platform default
+            std::fprintf(stderr, "[set2] restart want120=%d upscale=%s\n", want120 ? 1 : 0,
+                         upscale[0] ? upscale : "(default)");
+#if defined(PS2X_IOS)
+            auto pairs = set2ReadSettings();
+            pairs = ps2x::set2::upsertSettings(pairs, "GE1_UPSCALE", upscale);
+            pairs = ps2x::set2::upsertSettings(pairs, "PS2X_SETTINGS_PERF", set2Perf ? "1" : "0");
+            if (!set2WriteSettings(pairs))
+            {
+                std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
+                ps2x::ui::toast("Restart failed (settings)", 3.0f);
+                return;
+            }
+            ps2x::ios::setTarget120(want120);
+            // iOS cannot relaunch itself: quit and let the user tap the icon
+            // (turbo boot brings the menus back in ~1 s).
+            std::fprintf(stderr, "[set2] restart: quitting, relaunch the app to apply\n");
+            ps2_stubs::padRecordFlushNow("set2-restart");
+            std::fflush(nullptr);
+            std::_Exit(0);
+#elif defined(__ANDROID__)
+            auto pairs = set2ReadSettings();
+            pairs = ps2x::set2::upsertSettings(pairs, "GE1_UPSCALE", upscale);
+            pairs = ps2x::set2::upsertSettings(pairs, "PS2X_SETTINGS_PERF", set2Perf ? "1" : "0");
+            if (!set2WriteSettings(pairs))
+            {
+                std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
+                ps2x::ui::toast("Restart failed (settings)", 3.0f);
+                return;
+            }
+            if (!set2AndroidRelaunch(want120 ? "120" : "60"))
+            {
+                std::fprintf(stderr, "[set2] restart: relaunch failed, staying open\n");
+                ps2x::ui::toast("Restart failed", 3.0f);
+            }
+            // On success the process dies inside toHz.
+#else
+            if (!set2MacRestart(want120, upscale))
+            {
+                std::fprintf(stderr, "[set2] restart: re-exec failed, staying open\n");
+                ps2x::ui::toast("Restart failed", 3.0f);
+            }
+#endif
+        };
+        if (set2On)
+        {
+            ++set2HostFrame;
+            if (!set2Test.empty() && (set2HostFrame % 600u) == 0u)
+                std::fprintf(stderr, "[set2] hostFrame=%llu guestTick=%llu\n",
+                             static_cast<unsigned long long>(set2HostFrame),
+                             static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));
+            // Nav union: post-DS1 physical when closed, true physical when
+            // open (DS1 suppressed), plus the diag test spans.
+            const uint16_t set2Union = static_cast<uint16_t>(
+                (set2Open ? ds1TrueRaw : raylibPressed) | set2TestMask(set2Test, set2HostFrame));
+            const int64_t set2NowMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+            const bool set2WasHolding = set2Chord.holding;
+            const int set2WasPulse = set2Chord.pulseLeft;
+            const ps2x::set2::ChordOut set2ChordOut = ps2x::set2::chordStep(
+                set2Chord, (set2Union & ps2x::vpad::kSelect) != 0u,
+                (set2Union & ps2x::vpad::kStart) != 0u, set2NowMs);
+            if (!set2Open)
+            {
+                if (set2ChordOut.stripSelect)
+                    raylibPressed = static_cast<uint16_t>(raylibPressed & ~ps2x::vpad::kSelect);
+                if (set2ChordOut.stripStart)
+                    raylibPressed = static_cast<uint16_t>(raylibPressed & ~ps2x::vpad::kStart);
+                if (set2ChordOut.addSelect)
+                    raylibPressed = static_cast<uint16_t>(raylibPressed | ps2x::vpad::kSelect);
+                if (set2WasHolding && !set2Chord.holding && !set2ChordOut.openEdge &&
+                    (set2Union & ps2x::vpad::kSelect) != 0u)
+                    std::fprintf(stderr,
+                                 "[set2] select forwarded (lone, +%dms) hostFrame=%llu guestTick=%llu\n",
+                                 ps2x::set2::kChordWindowMs,
+                                 static_cast<unsigned long long>(set2HostFrame),
+                                 static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));
+                if (set2WasPulse == 0 && set2Chord.pulseLeft > 0)
+                    std::fprintf(stderr, "[set2] select pulse hostFrame=%llu guestTick=%llu\n",
+                                 static_cast<unsigned long long>(set2HostFrame),
+                                 static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));
+                if (set2ChordOut.openEdge)
+                    set2DoOpen();
+            }
+            else
+            {
+                const uint16_t set2Edge = static_cast<uint16_t>(set2Union & ~set2PrevUnion);
+                const ps2x::set2::NavOut navOut = ps2x::set2::navStep(
+                    set2Nav, (set2Edge & ps2x::vpad::kUp) != 0u,
+                    (set2Edge & ps2x::vpad::kDown) != 0u,
+                    (set2Edge & ps2x::vpad::kCross) != 0u,
+                    (set2Edge & ps2x::vpad::kTriangle) != 0u, set2ChordOut.openEdge);
+                if (navOut.action == ps2x::set2::Action::Changed &&
+                    set2Nav.sel == ps2x::set2::Row::Perf)
+                {
+                    // Perf is live: apply + persist immediately.
+                    set2Perf = set2Nav.perf;
+                    auto pairs = set2ReadSettings();
+                    pairs = ps2x::set2::upsertSettings(pairs, "PS2X_SETTINGS_PERF",
+                                                       set2Perf ? "1" : "0");
+                    set2WriteSettings(pairs); // false on the Mac (live-only there)
+                }
+                if (navOut.action != ps2x::set2::Action::None)
+                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d\n",
+                                 static_cast<int>(navOut.action), static_cast<int>(set2Nav.sel),
+                                 static_cast<int>(set2Nav.mode), static_cast<int>(set2Nav.res),
+                                 set2Nav.perf ? 1 : 0);
+                if (navOut.action == ps2x::set2::Action::Close)
+                    set2DoClose();
+                else if (navOut.action == ps2x::set2::Action::DoRestart)
+                    set2DoRestart();
+            }
+            set2PrevUnion = set2Union;
         }
         // QSR1: auto snapshot at events enter (Restart race loads it). The
         // signal is g_guestActive, set by guestFlip on the enter flip
@@ -7826,13 +8336,128 @@ void PS2Runtime::run()
             else
                 qsr1AutoDone = false;
         }
-        if (vpadWanted && !vpadPadConnected)
+        // SET2: no vpad path this frame (Odin play, desktop, or a controller
+        // in use): sample touches for the gear dot (they never reach the
+        // guest here, so nothing is dropped).
+        if (set2On && !set2Open && !(vpadWanted && !vpadPadConnected))
+        {
+            const ps2x::set2::PanelGeom set2g = ps2x::set2::panelLayout(screenWidth, screenHeight);
+            ps2x::vpad::TouchPoint set2ts[8];
+            const int set2n = virtualPadTouches(set2ts, 8, screenWidth, screenHeight);
+            std::vector<int64_t> set2Still;
+            for (int i = 0; i < set2n; ++i)
+            {
+                if (ps2x::set2::panelHit(set2g, false, set2ts[i].x, set2ts[i].y) != 4)
+                    continue;
+                set2Still.push_back(set2ts[i].id);
+                if (std::find(set2Down.begin(), set2Down.end(), set2ts[i].id) == set2Down.end())
+                {
+                    set2Down.push_back(set2ts[i].id);
+                    set2DoOpen();
+                    break;
+                }
+            }
+            if (!set2Open)
+            {
+                std::vector<int64_t> set2Left;
+                for (int64_t id : set2Down)
+                    if (std::find(set2Still.begin(), set2Still.end(), id) != set2Still.end())
+                        set2Left.push_back(id);
+                set2Down = set2Left;
+            }
+        }
+        if (set2Open)
+        {
+            // SET2: the panel owns the pad. Touches hit-test the panel (row
+            // taps act as X on that row, dot/outside taps close); nothing
+            // reaches the guest (publish-zero, frozen anyway).
+            const ps2x::set2::PanelGeom set2g = ps2x::set2::panelLayout(screenWidth, screenHeight);
+            ps2x::vpad::TouchPoint set2ts[8];
+            const int set2n = virtualPadTouches(set2ts, 8, screenWidth, screenHeight);
+            std::vector<int64_t> set2Still;
+            for (int i = 0; i < set2n && set2Open; ++i)
+            {
+                set2Still.push_back(set2ts[i].id);
+                if (std::find(set2Down.begin(), set2Down.end(), set2ts[i].id) != set2Down.end())
+                    continue;
+                set2Down.push_back(set2ts[i].id);
+                const int hit = ps2x::set2::panelHit(set2g, true, set2ts[i].x, set2ts[i].y);
+                if (hit >= 0 && hit <= 3)
+                {
+                    set2Nav.sel = static_cast<ps2x::set2::Row>(hit);
+                    set2Nav.restartArmed = (hit == 3) ? set2Nav.restartArmed : false;
+                    const ps2x::set2::NavOut tapOut =
+                        ps2x::set2::navStep(set2Nav, false, false, true, false, false);
+                    if (tapOut.action == ps2x::set2::Action::Changed &&
+                        set2Nav.sel == ps2x::set2::Row::Perf)
+                    {
+                        set2Perf = set2Nav.perf;
+                        auto pairs = set2ReadSettings();
+                        pairs = ps2x::set2::upsertSettings(pairs, "PS2X_SETTINGS_PERF",
+                                                           set2Perf ? "1" : "0");
+                        set2WriteSettings(pairs);
+                    }
+                    std::fprintf(stderr, "[set2] tap row=%d action=%d\n", hit,
+                                 static_cast<int>(tapOut.action));
+                    if (tapOut.action == ps2x::set2::Action::Close)
+                        set2DoClose();
+                    else if (tapOut.action == ps2x::set2::Action::DoRestart)
+                        set2DoRestart();
+                }
+                else
+                    set2DoClose(); // dot tap or outside tap closes
+            }
+            if (set2Open)
+            {
+                std::vector<int64_t> set2Left;
+                for (int64_t id : set2Down)
+                    if (std::find(set2Still.begin(), set2Still.end(), id) != set2Still.end())
+                        set2Left.push_back(id);
+                set2Down = set2Left;
+            }
+            publishPad(0, m_memory.gs().vsyncTick.load());
+            ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
+        }
+        else if (vpadWanted && !vpadPadConnected)
         {
             const ps2x::vpad::Layout layout = ps2x::vpad::makeLayout(screenWidth, screenHeight);
             ps2x::vpad::TouchPoint vpadTouches[8];
             int touches = virtualPadTouches(vpadTouches, 8, screenWidth, screenHeight);
             touches = ps2x::vpad::activeTestTouchesWithIds(vpadTestTouches, m_memory.gs().vsyncTick.load(), screenWidth,
                                                            screenHeight, vpadTouches, touches, 8);
+            // SET2: gear-dot taps toggle the panel; dot-zone touches are
+            // dropped here so they never reach the guest pad (QSR1 menu-zone
+            // precedent).
+            if (set2On && !set2Open)
+            {
+                const ps2x::set2::PanelGeom set2g = ps2x::set2::panelLayout(screenWidth, screenHeight);
+                std::vector<int64_t> set2Still;
+                int set2Kept = 0;
+                for (int i = 0; i < touches; ++i)
+                {
+                    if (ps2x::set2::panelHit(set2g, false, vpadTouches[i].x, vpadTouches[i].y) != 4)
+                    {
+                        vpadTouches[set2Kept++] = vpadTouches[i];
+                        continue;
+                    }
+                    set2Still.push_back(vpadTouches[i].id);
+                    if (std::find(set2Down.begin(), set2Down.end(), vpadTouches[i].id) ==
+                        set2Down.end())
+                    {
+                        set2Down.push_back(vpadTouches[i].id);
+                        set2DoOpen();
+                    }
+                }
+                touches = set2Kept;
+                if (!set2Open)
+                {
+                    std::vector<int64_t> set2Left;
+                    for (int64_t id : set2Down)
+                        if (std::find(set2Still.begin(), set2Still.end(), id) != set2Still.end())
+                            set2Left.push_back(id);
+                    set2Down = set2Left;
+                }
+            }
             // QSR1: menu taps fire on touch-down; menu-zone touches are
             // dropped here so they never reach the guest pad.
             if (qsr1UiOn())
@@ -8024,6 +8649,112 @@ void PS2Runtime::run()
                 if (vkUnder)
                     EndBlendMode();
 #endif
+            }
+        }
+        // SET2: gear dot (closed) / settings panel (open) / perf line, drawn
+        // by the host over the presented frame (never into the guest frame).
+        if (set2On && !skipGl)
+        {
+#if defined(__ANDROID__)
+            if (vkUnder)
+            {
+                rlSetBlendFactorsSeparate(0x0302 /*SRC_ALPHA*/, 0x0303 /*ONE_MINUS_SRC_ALPHA*/,
+                                          1 /*ONE*/, 0x0303, 0x8006 /*FUNC_ADD*/, 0x8006);
+                BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+            }
+#endif
+            const ps2x::set2::PanelGeom set2dg = ps2x::set2::panelLayout(screenWidth, screenHeight);
+            if (set2Open)
+            {
+#if defined(__ANDROID__)
+                // The play window is opaque, so the underlaid game cannot
+                // show through: dim the full window (the game is paused).
+                if (vkUnder)
+                    DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
+                                  Color{0, 0, 0, 215});
+                else
+#endif
+                    DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
+                                  Color{0, 0, 0, 120});
+                DrawRectangle(static_cast<int>(set2dg.px), static_cast<int>(set2dg.py),
+                              static_cast<int>(set2dg.pw), static_cast<int>(set2dg.ph),
+                              Color{8, 12, 20, 232});
+                DrawRectangleLines(static_cast<int>(set2dg.px), static_cast<int>(set2dg.py),
+                                   static_cast<int>(set2dg.pw), static_cast<int>(set2dg.ph),
+                                   Color{255, 140, 40, 255});
+                const int titleFont = std::max(16, static_cast<int>(screenHeight / 26.0f));
+                const int rowFont = std::max(12, static_cast<int>(screenHeight / 34.0f));
+                DrawText("SETTINGS (guest paused)", static_cast<int>(set2dg.px) + 14,
+                         static_cast<int>(set2dg.py) + 10, titleFont, Color{255, 170, 80, 255});
+                const bool modeDirty =
+                    (set2Nav.mode == ps2x::set2::Mode::M120) != set2Eff120;
+                const bool resDirty = set2Nav.res != set2ResAtOpen;
+                std::string resVal;
+                if (set2Nav.res == ps2x::set2::Res::Native)
+                    resVal = "native";
+                else if (set2Nav.res == ps2x::set2::Res::R2x)
+                    resVal = "2x";
+                else
+                    resVal = "default (" + set2EffUpscale + ")";
+                const std::string rows[4] = {
+                    std::string("Mode .......... ") +
+                        (set2Nav.mode == ps2x::set2::Mode::M120 ? "120" : "60") +
+                        (modeDirty ? "  (restart)" : ""),
+                    std::string("Resolution .... ") + resVal + (resDirty ? "  (restart)" : ""),
+                    std::string("Perf overlay .. ") + (set2Nav.perf ? "on" : "off"),
+                    set2Nav.restartArmed ? "RESTART NOW?  (X again to confirm)" : "Restart now"};
+                for (int i = 0; i < 4; ++i)
+                {
+                    if (static_cast<int>(set2Nav.sel) == i)
+                        DrawRectangle(static_cast<int>(set2dg.rowX) - 6, static_cast<int>(set2dg.rowY[i]),
+                                      static_cast<int>(set2dg.rowW) + 12, static_cast<int>(set2dg.rowH),
+                                      Color{255, 140, 40, 48});
+                    DrawText(rows[i].c_str(), static_cast<int>(set2dg.rowX),
+                             static_cast<int>(set2dg.rowY[i]) +
+                                 (static_cast<int>(set2dg.rowH) - rowFont) / 2,
+                             rowFont,
+                             static_cast<int>(set2Nav.sel) == i ? Color{255, 200, 130, 255}
+                                                                : Color{230, 235, 245, 255});
+                }
+                const char *hint = "Up/Down move - X change - Triangle/chord close";
+                DrawText(hint, static_cast<int>(set2dg.px) + 14,
+                         static_cast<int>(set2dg.py + set2dg.ph) - rowFont - 8, rowFont,
+                         Color{150, 160, 175, 255});
+            }
+            else
+            {
+                const Vector2 dot{set2dg.dotX, set2dg.dotY};
+                DrawCircleV(dot, set2dg.dotR, Color{255, 255, 255, 45});
+                DrawCircleLinesV(dot, set2dg.dotR, Color{255, 255, 255, 140});
+                int fs = 18;
+                while (fs > 10 && MeasureText("SET", fs) > static_cast<int>(set2dg.dotR * 1.6f))
+                    --fs;
+                const int tw = MeasureText("SET", fs);
+                DrawText("SET", static_cast<int>(set2dg.dotX) - tw / 2,
+                         static_cast<int>(set2dg.dotY) - fs / 2, fs, Color{255, 255, 255, 200});
+            }
+            if (set2Perf)
+            {
+                char line[64];
+                std::snprintf(line, sizeof(line), "%.1f vs/s  %.1f ms", set2PerfVs, set2PerfMs);
+                const int perfFont = std::max(12, static_cast<int>(screenHeight / 40.0f));
+                const int perfTw = MeasureText(line, perfFont);
+                DrawRectangle(8, 8, perfTw + 16, perfFont + 10, Color{0, 0, 0, 160});
+                DrawText(line, 16, 12, perfFont, Color{140, 255, 140, 230});
+            }
+#if defined(__ANDROID__)
+            if (vkUnder)
+                EndBlendMode();
+#endif
+            // SET2 screenshot (diag PS2X_SET2_SHOT): one host-composited frame
+            // shortly after open. Inside the Begin/EndDrawing span (SET1).
+            if (set2ShotIn > 0 && --set2ShotIn == 0 && set2ShotPath && set2ShotPath[0] != '\0')
+            {
+                rlDrawRenderBatchActive(); // flush the queued draws before the readback
+                TakeScreenshot(set2ShotPath);
+                std::fprintf(stderr, "[set2] shot %s hostFrame=%llu guestTick=%llu\n", set2ShotPath,
+                             static_cast<unsigned long long>(set2HostFrame),
+                             static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));
             }
         }
         if (m_debugUiInitialized && m_debugUiDrawCallback)

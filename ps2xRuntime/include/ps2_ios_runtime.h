@@ -54,4 +54,9 @@ void setAudioSession(bool ambient);
 // IP6: "hw_rate=<Hz> io_ms=<ms> out_ms=<ms> route=<port types>" from
 // AVAudioSession (the perf log's [perf-audio] session field). Main thread.
 std::string audioSessionState();
+// SET2: Settings.bundle "Target 120 fps" read/write (the panel's Mode row).
+// Read at boot by prepareEnvironment (IQ1 layer); the panel writes through
+// setTarget120 + synchronize, then restarts. Main thread.
+bool target120();
+void setTarget120(bool on);
 } // namespace ps2x::ios
