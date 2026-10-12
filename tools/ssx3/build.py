@@ -103,14 +103,18 @@ def prepare(a):
     if output.exists():
         raise ValueError('refusing existing codegen; choose a fresh --work directory')
     config = (ROOT / 'games/ssx3/ssx3.toml').read_text()
-    paths = {'input': elf, 'ghidra_output': ROOT / 'games/ssx3/ssx3-functions.sweep.csv', 'output': output}
+    # All local paths are anchored absolute: the recompiler resolves
+    # symbol_names next to the generated TOML (the work dir), so the
+    # in-tree relative entry would fail loud here (SYM2/SYM3).
+    paths = {'input': elf, 'ghidra_output': ROOT / 'games/ssx3/ssx3-functions.sweep.csv', 'output': output,
+             'symbol_names': ROOT / 'games/ssx3/ssx3-symbols.tsv'}
     for key, value in paths.items():
         config = re.sub(r'^' + key + r' = .*$', key + ' = ' + json.dumps(str(value)), config, flags=re.M)
     toml = a.work / 'generation.toml'
     toml.write_text(config)
     run(build / 'ps2xRecomp/ps2_recomp', toml)
     if sha(output / 'register_functions.cpp') != REGISTER_SHA:
-        raise ValueError('generated registration differs from EQG1 canonical pin')
+        raise ValueError('generated registration differs from the SPR1 play pin')
     (a.work / 'inputs.json').write_text(json.dumps({'iso': str(iso), 'iso_sha256': ISO_SHA,
         'elf_sha256': ELF_SHA, 'generator': GENERATOR, 'register_sha256': REGISTER_SHA, 'toml_sha256': sha(ROOT / 'games/ssx3/ssx3.toml'),
         'map_sha256': sha(ROOT / 'games/ssx3/ssx3-functions.sweep.csv')}, indent=2) + '\n')
