@@ -289,9 +289,44 @@ def android_libs(a):
     shutil.copytree(vendor / 'bin/resources', a.work / 'android-resources', dirs_exist_ok=True)
 
 
+def stage(a):
+    inputs = json.loads((a.work / 'inputs.json').read_text())
+    files = a.work / 'stage/files'
+    files.mkdir(parents=True, exist_ok=True)
+    presets = ROOT / 'tools/ssx3/presets'
+    for name in ('ps2x.env', 'full120.env'):
+        src = presets / name
+        if not src.is_file():
+            raise ValueError('missing shipped preset: ' + str(src))
+        shutil.copy2(src, files / name)
+    resources = a.work / 'android-resources'
+    if not resources.is_dir():
+        raise ValueError('stage requires android-libs first (missing android-resources in work dir)')
+    target = files / 'ge1-resources'
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(resources, target)
+    (files / 'ge1-data').mkdir(exist_ok=True)
+    (files / 'mc0').mkdir(exist_ok=True)
+    device = '/storage/emulated/0/Android/data/com.ps2x.runner/files'
+    apk = ROOT / 'android/app/build/outputs/apk/release/app-release.apk'
+    print('Staged device layout in ' + str(files))
+    print('Push it with these commands (stage prints them; it does not run them):')
+    print('  adb install -r ' + str(apk))
+    print('  adb shell am force-stop com.ps2x.runner')
+    print('  adb shell mkdir -p ' + device + '/ge1-resources ' + device + '/ge1-data ' + device + '/mc0')
+    print('  adb push ' + str(a.work / 'SLUS_207.72') + ' ' + device + '/SLUS_207.72')
+    print('  adb push "' + str(inputs['iso']) + '" ' + device + '/SSX3.iso')
+    print('  adb push ' + str(files / 'ps2x.env') + ' ' + device + '/ps2x.env')
+    print('  adb push ' + str(files / 'full120.env') + ' ' + device + '/full120.env')
+    print('  adb push ' + str(files / 'ge1-resources') + '/. ' + device + '/ge1-resources/')
+    print('The empty card dir is ' + str(files / 'mc0') + ' (created on device by the mkdir above).')
+    print('Back up your keystore; a different key forces an uninstall, which wipes saves.')
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('step', choices=['prepare', 'mac', 'mac-libs', 'run', 'android', 'android-libs'])
+    p.add_argument('step', choices=['prepare', 'mac', 'mac-libs', 'run', 'android', 'android-libs', 'stage'])
     p.add_argument('--work', type=Path, required=True, help='external private output directory')
     p.add_argument('--iso', type=Path, help='own supported USA disc image (prepare only)')
     p.add_argument('--jnilibs', type=Path, help='own source-built Android JNI libraries')
@@ -311,7 +346,7 @@ def main():
     if a.step != 'prepare' and not (a.work / 'inputs.json').is_file():
         p.error('run prepare in this work directory first')
     a.work.mkdir(parents=True, exist_ok=True)
-    {'prepare': prepare, 'mac': mac, 'android': android, 'mac-libs': libs, 'run': play, 'android-libs': android_libs}[a.step](a)
+    {'prepare': prepare, 'mac': mac, 'android': android, 'mac-libs': libs, 'run': play, 'android-libs': android_libs, 'stage': stage}[a.step](a)
 
 
 if __name__ == '__main__':

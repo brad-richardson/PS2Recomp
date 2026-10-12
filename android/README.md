@@ -42,7 +42,12 @@ adb push /absolute/local/SLUS_207.72 /storage/emulated/0/Android/data/com.ps2x.r
 adb push "/absolute/local/SSX 3 (USA).iso" "/storage/emulated/0/Android/data/com.ps2x.runner/files/SSX 3 (USA).iso"
 ```
 
-Create a local `ps2x.env` with these paths, then push it beside the ELF:
+Prefer `build.py stage`, which stages the shipped presets
+([ps2x.env](../tools/ssx3/presets/ps2x.env),
+[full120.env](../tools/ssx3/presets/full120.env), SET2 settings overlay on)
+plus `ge1-resources` and an empty card dir and prints the exact `adb`
+commands without running them. To stage by hand instead, create a local
+`ps2x.env` with these paths, then push it beside the ELF:
 
 ```ini
 PS2X_CD_IMAGE=/storage/emulated/0/Android/data/com.ps2x.runner/files/SSX 3 (USA).iso

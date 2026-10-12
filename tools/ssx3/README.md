@@ -77,7 +77,17 @@ shared with Android; no remote build host or PGO profile is needed:
 ```sh
 python3 tools/ssx3/build.py android-libs --work /path/to/private-build --ndk "$ANDROID_HOME/ndk/28.2.13676358" --jobs 4
 python3 tools/ssx3/build.py android --work /path/to/private-build --jnilibs /path/to/private-build/jniLibs --jobs 4
+python3 tools/ssx3/build.py stage --work /path/to/private-build
 ```
+
+`stage` writes the device-side layout (`ps2x.env`, `full120.env`,
+`ge1-resources`, plus empty `ge1-data` and `mc0` card dirs) into
+`<work>/stage/files` and prints the exact `adb` commands to install the APK
+and push the ELF, ISO, envs and resources. It does not run them. The shipped
+Android presets are [presets/ps2x.env](presets/ps2x.env) and
+[presets/full120.env](presets/full120.env), derived from the Odin play env
+with every private path removed and the SET2 settings overlay on
+(`PS2X_SETTINGS_OVERLAY=1`).
 
 JNI input must contain your locally source-built `arm64-v8a/libge1_gs.so`
 and `libmv2_microvu.so`; never include `libhardware.so`, which this fork builds
