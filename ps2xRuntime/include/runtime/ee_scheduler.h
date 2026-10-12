@@ -496,6 +496,7 @@ private:
     void perfTailCutFrame(uint64_t tick);
     void scheduleEvent(uint64_t deadlineCycle, std::chrono::steady_clock::time_point hostDeadline, EeEvent event);
     void updateNextDeadline();
+    void reanchorHostDeadlines(); // BTS2: collapse pending host deadlines to now at turbo yield
     [[nodiscard]] bool hasReadyAtOrAbovePriority(int priority) const;
     void renewTimeSlice();
     // EX1: outline checkpoint tails. checkpointDueFull is the legacy
@@ -604,6 +605,7 @@ private:
     bool m_vsyncLocked = false; // PX1: last VBlank was paced by ps2_vsync_lock
     ps2_vsync_pacer::HostPaceConfig m_hostPace{};
     bool m_vsyncPace = true;
+    bool m_turboWasSuspended = false; // BTS2: re-anchor the host chain on the armed->yield edge
     uint32_t m_vsyncFlagAddress = 0;
     uint32_t m_vsyncTickAddress = 0;
     uint32_t m_gsVSyncCallback = 0;

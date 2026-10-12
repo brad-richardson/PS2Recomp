@@ -2754,7 +2754,11 @@ void EeScheduler::processDueDeadlines()
                 }
                 updateNextDeadline();
             }
-            else if (m_cycleOnlyEvents)
+            // BTS2: while boot turbo is armed the host deadline doesn't gate
+            // the guest either (same cycle-only branch as det mode; the pacer
+            // skip alone leaves this 16.667 ms wait binding at 60.00/s).
+            // Gated RPL3 replay above still wins when it matches.
+            else if (m_cycleOnlyEvents || ps2_turbo_boot::pacingSuspended())
             {
                 // Take the whole cycle-due set before considering host time.
                 // Host deadlines cannot split a batch or change its order.
@@ -3066,6 +3070,16 @@ void EeScheduler::processEvent(const EeEvent &event)
         // check when the knob is off). After the tick increment, like every
         // sibling hook.
         ps2_turbo_boot::onVsyncTick(m_vsyncTick, ps2_snd_spike::pcmRing());
+        // BTS2: turbo outruns wall clock, so at yield the bypassed
+        // host-deadline chain points seconds into the future; collapse it to
+        // now or the first post-yield wait freezes for the skipped span. One
+        // branch when the knob is off.
+        {
+            const bool suspended = ps2_turbo_boot::pacingSuspended();
+            if (m_turboWasSuspended && !suspended)
+                reanchorHostDeadlines();
+            m_turboWasSuspended = suspended;
+        }
         if (ps2_fh1::eventsMode())
         {
             // FH5: the committed event state sets the EE budget and the pacer
@@ -3291,6 +3305,10 @@ void EeScheduler::waitForEvent()
         deadlineCycle = next->deadlineCycle;
         hostDeadline = next->hostDeadline;
     }
+    // BTS2: while boot turbo is armed the host deadline doesn't gate the
+    // guest (cycle-only comparison, no timed wait); the idle wait above and
+    // the event/stop predicate are untouched.
+    const bool turboArmed = ps2_turbo_boot::pacingSuspended();
     if (hasTimerDeadline)
     {
         const auto timerHostDeadline = std::chrono::steady_clock::now() + eeCyclesToHostDuration(timerCycles);
@@ -3307,8 +3325,10 @@ void EeScheduler::waitForEvent()
             char recordedWinner = 0;
             const bool gated =
                 ps2_rpl3::takeIdle(m_eeCycle, timerCycle, deadlineCycle, recordedWinner);
+            // BTS2: turbo-armed behaves cycle-only (same rule as det mode).
             const bool tookTimer = gated ? (recordedWinner == 'T')
-                                         : (m_cycleOnlyEvents ? cyclePicksTimer : hostPicksTimer);
+                                         : ((m_cycleOnlyEvents || turboArmed) ? cyclePicksTimer
+                                                                              : hostPicksTimer);
             ps2_rpl3::noteIdle(m_vsyncTick, m_eeCycle, timerCycle, deadlineCycle,
                                tookTimer ? 'T' : 'E', cyclePicksTimer == tookTimer);
             if (tookTimer)
@@ -3327,9 +3347,9 @@ void EeScheduler::waitForEvent()
     }
 
     const uint64_t perfT0 = m_perfTail ? ps2x::perflog::steadyNs() : 0u;
-    const bool signaled = m_eventCv.wait_until(lock, hostDeadline, [this]()
-                                               { return !m_events.empty() ||
-                                                        m_stopRequested.load(std::memory_order_acquire); });
+    const bool signaled = turboArmed ? false : m_eventCv.wait_until(lock, hostDeadline, [this]()
+                                                                    { return !m_events.empty() ||
+                                                                             m_stopRequested.load(std::memory_order_acquire); });
     if (m_perfTail)
         m_perfEventNs += ps2x::perflog::steadyNs() - perfT0;
     if (!signaled)
@@ -3357,6 +3377,18 @@ void EeScheduler::scheduleEvent(uint64_t deadlineCycle,
         updateNextDeadline();
     }
     m_eventCv.notify_one();
+}
+
+void EeScheduler::reanchorHostDeadlines()
+{
+    // BTS2: collapse every pending host deadline to now. Cycle order is
+    // untouched (the partition/sort still gate on deadlineCycle), so the
+    // next VBlank rebuilds the wall chain from here instead of from a
+    // turbo-stale future instant.
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard lock(m_eventMutex);
+    for (ScheduledEvent &d : m_deadlines)
+        d.hostDeadline = now;
 }
 
 void EeScheduler::updateNextDeadline()
