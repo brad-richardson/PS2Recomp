@@ -8152,6 +8152,15 @@ void PS2Runtime::run()
         // hold-back, + panel nav/open/close. Runs on the post-DS1 mask, so a
         // DS1 chord (Select already stripped) stays idle here. Knob off: the
         // outer bool check only.
+        auto set2SampleTouches = [&](ps2x::vpad::TouchPoint *out) {
+            // Real touches + the DEV-ONLY synthetic test touches (the same
+            // merge as the vpad branch, so edge tracking stays coherent
+            // when the panel opens/closes around a held test touch).
+            const int n = virtualPadTouches(out, 8, screenWidth, screenHeight);
+            return ps2x::vpad::activeTestTouchesWithIds(vpadTestTouches,
+                                                        m_memory.gs().vsyncTick.load(), screenWidth,
+                                                        screenHeight, out, n, 8);
+        };
         auto set2DoOpen = [&] {
             set2Eff120 = set2Effective120();
             if (const char *u = std::getenv("GE1_UPSCALE"); u && u[0] != '\0')
@@ -8187,7 +8196,7 @@ void PS2Runtime::run()
             // Seed: touches already down (incl. the dot tap that opened us)
             // must not edge in the open branch next frame.
             ps2x::vpad::TouchPoint seed[8];
-            const int nseed = virtualPadTouches(seed, 8, screenWidth, screenHeight);
+            const int nseed = set2SampleTouches(seed);
             set2Down.clear();
             for (int i = 0; i < nseed; ++i)
                 set2Down.push_back(seed[i].id);
@@ -8208,7 +8217,7 @@ void PS2Runtime::run()
             // the panel would instantly re-open (iPad legA caught this).
             {
                 ps2x::vpad::TouchPoint seed[8];
-                const int nseed = virtualPadTouches(seed, 8, screenWidth, screenHeight);
+                const int nseed = set2SampleTouches(seed);
                 set2Down.clear();
                 for (int i = 0; i < nseed; ++i)
                     set2Down.push_back(seed[i].id);
@@ -8373,7 +8382,7 @@ void PS2Runtime::run()
         {
             const ps2x::set2::PanelGeom set2g = ps2x::set2::panelLayout(screenWidth, screenHeight);
             ps2x::vpad::TouchPoint set2ts[8];
-            const int set2n = virtualPadTouches(set2ts, 8, screenWidth, screenHeight);
+            const int set2n = set2SampleTouches(set2ts);
             std::vector<int64_t> set2Still;
             for (int i = 0; i < set2n; ++i)
             {
@@ -8403,7 +8412,7 @@ void PS2Runtime::run()
             // reaches the guest (publish-zero, frozen anyway).
             const ps2x::set2::PanelGeom set2g = ps2x::set2::panelLayout(screenWidth, screenHeight);
             ps2x::vpad::TouchPoint set2ts[8];
-            const int set2n = virtualPadTouches(set2ts, 8, screenWidth, screenHeight);
+            const int set2n = set2SampleTouches(set2ts);
             std::vector<int64_t> set2Still;
             for (int i = 0; i < set2n && set2Open; ++i)
             {
