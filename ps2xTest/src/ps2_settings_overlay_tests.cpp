@@ -116,7 +116,16 @@ void register_ps2_settings_overlay_tests()
             auto tri = ps2x::set2::navStep(st, false, false, false, true, false);
             t.IsTrue(tri.action == ps2x::set2::Action::Close && !st.restartArmed, "triangle closes + disarms");
             auto chord = ps2x::set2::navStep(st, false, false, false, false, true);
-            t.IsTrue(chord.action == ps2x::set2::Action::Close, "chord closes"); }); });
+            t.IsTrue(chord.action == ps2x::set2::Action::Close, "chord closes"); });
+
+        tc.Run("close-press overhang strips until each button releases", [](TestCase &t)
+               {
+            ps2x::set2::SwallowState st;
+            st.mask = 0x1009u; // Triangle + Select + Start down at close
+            t.Equals(ps2x::set2::swallowStep(st, 0x1009u), static_cast<uint16_t>(0x1009u), "all held: all stripped");
+            t.Equals(ps2x::set2::swallowStep(st, 0x1008u), static_cast<uint16_t>(0x1008u), "Select released: drops out");
+            t.Equals(ps2x::set2::swallowStep(st, 0x5008u), static_cast<uint16_t>(0x1008u), "new X passes (never in mask)");
+            t.Equals(ps2x::set2::swallowStep(st, 0x4000u), static_cast<uint16_t>(0u), "all released: empty"); }); });
 
     MiniTest::Case("Set2Panel", [](TestCase &tc)
                    {

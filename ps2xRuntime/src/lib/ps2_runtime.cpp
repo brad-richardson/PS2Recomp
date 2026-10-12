@@ -7780,6 +7780,7 @@ void PS2Runtime::run()
     ps2x::set2::Res set2ResAtOpen = ps2x::set2::Res::RDefault;
     uint64_t set2HostFrame = 0;
     uint16_t set2PrevUnion = 0; // nav edge detect
+    ps2x::set2::SwallowState set2Swallow; // close-press overhang, stripped until release
     std::vector<int64_t> set2Down; // touch ids currently on the panel/dot
     int set2ShotIn = -1;           // host frames until the panel screenshot (-1 idle)
     bool set2Perf = false;         // live perf-overlay flag (env default at boot)
@@ -8198,6 +8199,10 @@ void PS2Runtime::run()
         };
         auto set2DoClose = [&] {
             set2Open = false;
+            // Swallow the close-press overhang: buttons down at close (the
+            // closing Triangle/chord, a held nav X) stay stripped until
+            // released, else they would fire in the game on resume.
+            set2Swallow.mask = ds1TrueRaw;
             set2HoldsPause().store(false, std::memory_order_release);
             ps2x::hostPause::requestResume();
             ps2_snd_audio_output::resumePlayback();
@@ -8282,6 +8287,11 @@ void PS2Runtime::run()
                     raylibPressed = static_cast<uint16_t>(raylibPressed & ~ps2x::vpad::kStart);
                 if (set2ChordOut.addSelect)
                     raylibPressed = static_cast<uint16_t>(raylibPressed | ps2x::vpad::kSelect);
+                // The close-press overhang drops out button by button as each
+                // releases; new presses pass (they were never in the mask).
+                const uint16_t set2Swallowed = ps2x::set2::swallowStep(set2Swallow, set2Union);
+                if (set2Swallowed != 0u)
+                    raylibPressed = static_cast<uint16_t>(raylibPressed & ~set2Swallowed);
                 if (set2WasHolding && !set2Chord.holding && !set2ChordOut.openEdge &&
                     (set2Union & ps2x::vpad::kSelect) != 0u)
                     std::fprintf(stderr,

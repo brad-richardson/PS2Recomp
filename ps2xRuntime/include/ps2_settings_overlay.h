@@ -155,6 +155,20 @@ struct NavOut
     Action action = Action::None;
 };
 
+// Close-press overhang: buttons down at close stay stripped from the game
+// mask until each releases (else the closing Triangle/chord would fire in
+// the game on resume). New presses pass (they were never in the mask).
+struct SwallowState
+{
+    uint16_t mask = 0;
+};
+
+inline uint16_t swallowStep(SwallowState &st, uint16_t unionMask)
+{
+    st.mask = static_cast<uint16_t>(st.mask & unionMask);
+    return st.mask;
+}
+
 inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, bool triangleEdge,
                       bool chordEdge)
 {
