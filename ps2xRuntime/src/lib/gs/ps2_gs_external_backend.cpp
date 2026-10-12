@@ -360,6 +360,11 @@ struct IOHudState
     bool asyncLogged = false;
     HudGlBackend *gl = nullptr; // HUD4 (from HUD3): lazy, owned; process-global like the rest
     uint64_t gpuFallbacks = 0u;
+    // HUD5: Metal composite through GE1 (PS2X_TRICKY_HUD_GPU=1). The EAGL
+    // backend above stays compiled but unexecuted (dead-code batch).
+    uint64_t mtlServed = 0u;
+    uint64_t mtlNs = 0u;
+    uint64_t mtlFallbacks = 0u;
     // HUD4 lane diag (diag knob): real GPU output vs the CPU stamp (BGRA
     // lane) every 30th composite.
     uint64_t diagSeen = 0u;
@@ -415,6 +420,103 @@ bool ioHudDiag()
     return on;
 }
 
+// HUD5: fill the GE1 scene blob from a built scene. Field order mirrors
+// Ge1HudScene (ge1_gs_api.h); the adapter + vendor check magic + size.
+// (The Android fillGe1HudScene is a class static in the Android section;
+// this is its iOS-section twin.)
+static bool fillIOHudScene(Ge1HudScene &out, const ps2_ssx3_tricky_hud::HudScene &sc)
+{
+    using namespace ps2_ssx3_tricky_hud;
+    std::memset(&out, 0, sizeof(out));
+    if (!sc.ok || sc.nsmears < 0 || sc.nsmears > 2 || sc.nquads <= 0 ||
+        sc.nquads > GE1_HUD_SCENE_MAX_QUADS)
+        return false;
+    out.magic = GE1_HUD_SCENE_MAGIC;
+    out.version = GE1_HUD_SCENE_VERSION;
+    out.regionX = sc.region.x;
+    out.regionY = sc.region.y;
+    out.regionW = sc.region.w;
+    out.regionH = sc.region.h;
+    out.nsmears = sc.nsmears;
+    for (int i = 0; i < sc.nsmears; ++i)
+    {
+        out.smearX0[i] = sc.smears[i].x0;
+        out.smearY0[i] = sc.smears[i].y0;
+        out.smearX1[i] = sc.smears[i].x1;
+        out.smearY1[i] = sc.smears[i].y1;
+        out.smearLX[i] = sc.smears[i].lx;
+        out.smearRX[i] = sc.smears[i].rx;
+    }
+    out.nquads = sc.nquads;
+    for (int i = 0; i < sc.nquads; ++i)
+    {
+        out.quadSrcX[i] = sc.quads[i].src.x;
+        out.quadSrcY[i] = sc.quads[i].src.y;
+        out.quadSrcW[i] = sc.quads[i].src.w;
+        out.quadSrcH[i] = sc.quads[i].src.h;
+        out.quadDX[i] = sc.quads[i].dx;
+        out.quadDY[i] = sc.quads[i].dy;
+        out.quadDW[i] = sc.quads[i].dw;
+        out.quadDH[i] = sc.quads[i].dh;
+        out.quadDim[i] = sc.quads[i].dim;
+    }
+    return true;
+}
+
+// HUD5: one Metal composite through GE1's queue (synchronous: this thread
+// waits inside the call). True = GPU-served; false = the CPU stamp fallback
+// serves. Any failure falls back silently after the first log line.
+static bool compositeIOHudMetal(void *surface, const ps2_ssx3_tricky_hud::Rect &r,
+                               uint64_t tick,
+                               const ps2_ssx3_tricky_layer::PresentationPacket &p,
+                               const ps2_ssx3_tricky_hud::HudVisualKey &key, IOHudState &st)
+{
+    using namespace ps2_ssx3_tricky_hud;
+    if (!surface || !p.atlas || !p.atlas->ok)
+        return false;
+    HudScene sc;
+    if (!buildHudScene(sc, st.sprites, key))
+    {
+        if (++st.mtlFallbacks == 1u)
+            std::fprintf(stderr,
+                         "[ssx3-tricky-hud] io: Metal scene build failed, CPU fallback\n");
+        return false;
+    }
+    Ge1HudScene abi;
+    if (!fillIOHudScene(abi, sc))
+    {
+        if (++st.mtlFallbacks == 1u)
+            std::fprintf(stderr,
+                         "[ssx3-tricky-hud] io: Metal scene fill failed, CPU fallback\n");
+        return false;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    uint64_t doneToken = 0u;
+    const int rc = ::ge1_gs_hud_scene(
+        surface, &abi, p.atlas->rgba.data(), static_cast<uint32_t>(p.atlas->w),
+        static_cast<uint32_t>(p.atlas->h),
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(p.atlas)), &doneToken);
+    const auto t1 = std::chrono::steady_clock::now();
+    if (rc != 1 || doneToken == 0u)
+    {
+        if (++st.mtlFallbacks == 1u)
+            std::fprintf(stderr, "[ssx3-tricky-hud] io: Metal composite failed, CPU fallback\n");
+        return false;
+    }
+    st.mtlNs +=
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    if (++st.mtlServed == 1u)
+        std::fprintf(stderr,
+                     "[ssx3-tricky-hud] io: first Metal composite tick=%llu region=%dx%d\n",
+                     static_cast<unsigned long long>(tick), r.w, r.h);
+    else if (st.mtlServed % 600u == 0u)
+        std::fprintf(stderr, "[ssx3-tricky-hud] io: Metal composites=%llu avg=%.1f us\n",
+                     static_cast<unsigned long long>(st.mtlServed),
+                     static_cast<double>(st.mtlNs) / 1000.0 /
+                         static_cast<double>(st.mtlServed));
+    return true;
+}
+
 // The composite proper. Runs on the GsHud helper (async) or on the completion
 // thread under the pool mutex (inline); each mode serializes it, so the state
 // above needs no lock. Not under the pool mutex in the async case: the slot is
@@ -446,8 +548,9 @@ bool stampIOSurfaceHud(void *surface, uint64_t tick,
         }
         std::fprintf(stderr, "[ssx3-tricky-hud] io: sprites built %ux%u\n", imgW, imgH);
     }
-    // HUD4 (from HUD3): GPU composite (PS2X_TRICKY_HUD_GPU=1). The sprites
+    // HUD5: Metal composite through GE1 (PS2X_TRICKY_HUD_GPU=1). The sprites
     // above supply the scene rects; any failure falls through to the CPU stamp.
+    // (The HUD4 EAGL backend stays compiled but unexecuted: dead-code batch.)
     if (ioHudGpu())
     {
         const ps2_ssx3_tricky_hud::HudVisualKey key =
@@ -467,11 +570,7 @@ bool stampIOSurfaceHud(void *surface, uint64_t tick,
             }
             IOSurfaceUnlock(ref, kIOSurfaceLockReadOnly, nullptr);
         }
-        if (!st.gl)
-            st.gl = hudGlCreate();
-        const bool gpuOk =
-            st.gl && hudGlComposite(st.gl, surface, static_cast<int>(imgW),
-                                    static_cast<int>(imgH), *p.atlas, st.sprites, key);
+        const bool gpuOk = compositeIOHudMetal(surface, r, tick, p, key, st);
         ++st.diagSeen;
         if (gpuOk && wantDiag && !pristine.empty())
         {
@@ -516,9 +615,8 @@ bool stampIOSurfaceHud(void *surface, uint64_t tick,
                          (unsigned long long)st.diagPx, st.diagMax);
         }
         if (gpuOk)
-            return true; // the GPU backend logs its own composites/avg line
-        if (++st.gpuFallbacks == 1u)
-            std::fprintf(stderr, "[ssx3-tricky-hud] io: GPU composite failed, CPU fallback\n");
+            return true; // the Metal path logs its own composites/avg line
+        // (The Metal path logs its own once-line; fall through to the CPU.)
     }
     const auto t0 = std::chrono::steady_clock::now();
     if (IOSurfaceLock(ref, 0, nullptr) != KERN_SUCCESS)

@@ -78,6 +78,9 @@ GE1_API int ge1_gs_native_record(const uint8_t* bytes, uint32_t byte_count);
 // the same queue and returns the composite fence in fence_counter (which
 // covers the export too, in order). Optional symbol; without it (or on any
 // failure, return != 1) the runtime keeps its CPU stamp.
+// HUD5: on iOS the same entry composites onto a completed IOSurface export
+// (BGRA) through GE1's Metal queue (synchronous; fence_counter takes a
+// nonzero done marker, never waited).
 //   scene: a Ge1HudScene blob (magic + version + fixed-size geometry).
 //   atlasPx: atlasW*atlasH*4 RGBA bytes, top-left origin; atlasId re-uploads
 //     the GPU atlas when (id, w, h) change (the runtime passes its Atlas*).
