@@ -131,8 +131,22 @@ namespace ps2_rpl3
     // (the caller runs its existing branch). Stale gates (cycle < current,
     // i.e. already diverged) are dropped with one warning.
     bool takeSched(uint64_t cycle, const SchedEvent *due, size_t dueCount, bool *fire);
-    // Idle-path race data (record-only): the timer-vs-event winner when both
-    // are pending. agree=1 when the host and cycle orders pick the same side.
+    // Idle-path race gates: waitForEvent picks the timer-vs-event winner
+    // by host order in play but cycle order in det; the two disagree
+    // ~10k times per session (SSX3 idles constantly), jumping to different
+    // cycles. The served side is noted when the cycle rule would not pick
+    // it (agree=false); gated replay (det=1) forces the recorded winner.
+    // The filter also keeps det recordings gateless and chains exact.
+    struct IdleGate
+    {
+        uint64_t cycle = 0; // eeCycle at the waitForEvent call
+        uint64_t timerCycle = 0;
+        uint64_t eventCycle = 0;
+        char winner = 0; // 'T' or 'E'
+    };
     void noteIdle(uint64_t tick, uint64_t cycle, uint64_t timerCycle, uint64_t eventCycle,
                   char winner, bool agree);
+    // Replay: if the next idle gate matches this call, set winner and return
+    // true. False = decide by the existing rule.
+    bool takeIdle(uint64_t cycle, uint64_t timerCycle, uint64_t eventCycle, char &winner);
 } // namespace ps2_rpl3

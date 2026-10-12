@@ -1038,13 +1038,16 @@ namespace ps2_stubs
             int tz = 0;
             std::vector<Rpl3SchedGate> sched;
             size_t schedCur = 0u;
-            uint64_t idleLines = 0u;
+            std::vector<ps2_rpl3::IdleGate> idle;
+            size_t idleCur = 0u;
             uint64_t ignored = 0u;
             bool rtcExhaustWarned = false;
             bool mcExhaustWarned = false;
             bool seqWarned = false;
             bool schedStaleWarned = false;
             bool schedMismatchWarned = false;
+            bool idleStaleWarned = false;
+            bool idleMismatchWarned = false;
         };
         Rpl3State g_rpl3;
         std::mutex g_rpl3Mutex;
@@ -1101,8 +1104,11 @@ namespace ps2_stubs
                 std::lock_guard<std::mutex> lock(g_rpl3Mutex);
                 drain.swap(g_rpl3.pending);
             }
+            // Leading newline: the stream writer leaves the file mid-line
+            // between splits, and a '#' glued mid-line would corrupt the
+            // script. Blank lines are skipped by both parsers.
             for (const std::string &l : drain)
-                std::fprintf(g_padRecord.file, "%s\n", l.c_str());
+                std::fprintf(g_padRecord.file, "\n%s\n", l.c_str());
             std::fflush(g_padRecord.file);
         }
 
@@ -1329,7 +1335,13 @@ namespace ps2_stubs
                     ++g_rpl3.ignored;
                     return;
                 }
-                ++g_rpl3.idleLines; // record-only data (no replay use yet)
+                rpl3CheckSeq("idlerace", seq, g_rpl3.idle.size());
+                ps2_rpl3::IdleGate gate{};
+                gate.cycle = cycle;
+                gate.timerCycle = timer;
+                gate.eventCycle = event;
+                gate.winner = winner;
+                g_rpl3.idle.push_back(gate);
                 return;
             }
             ++g_rpl3.ignored;
@@ -1361,14 +1373,14 @@ namespace ps2_stubs
                     break;
                 begin = end + 1u;
             }
-            if (!g_rpl3.rtc.empty() || !g_rpl3.mc.empty() || g_rpl3.haveTz || !g_rpl3.sched.empty())
+            if (!g_rpl3.rtc.empty() || !g_rpl3.mc.empty() || g_rpl3.haveTz || !g_rpl3.sched.empty() ||
+                !g_rpl3.idle.empty())
             {
                 std::fprintf(stderr,
                              "[rpl3] replay values from %s: rtc=%zu mc_dates=%zu tz=%s sched=%zu "
-                             "idle=%llu ignored=%llu\n",
+                             "idle=%zu ignored=%llu\n",
                              spec + 1, g_rpl3.rtc.size(), g_rpl3.mc.size(),
-                             g_rpl3.haveTz ? "1" : "0", g_rpl3.sched.size(),
-                             static_cast<unsigned long long>(g_rpl3.idleLines),
+                             g_rpl3.haveTz ? "1" : "0", g_rpl3.sched.size(), g_rpl3.idle.size(),
                              static_cast<unsigned long long>(g_rpl3.ignored));
                 const char *det = std::getenv("PS2X_DETERMINISTIC");
                 if (!det || std::strcmp(det, "1") != 0)
@@ -4188,6 +4200,8 @@ namespace ps2_rpl3
     void noteIdle(uint64_t tick, uint64_t cycle, uint64_t timerCycle, uint64_t eventCycle,
                   char winner, bool agree)
     {
+        if (agree)
+            return; // replay's cycle rule picks the agreed side; no line needed
         uint64_t seq = 0u;
         {
             std::lock_guard<std::mutex> lock(g_rpl3Mutex);
@@ -4203,6 +4217,44 @@ namespace ps2_rpl3
                       static_cast<unsigned long long>(cycle), static_cast<unsigned long long>(timerCycle),
                       static_cast<unsigned long long>(eventCycle), winner, agree ? 1 : 0);
         rpl3EmitLine(line);
+    }
+
+    bool takeIdle(uint64_t cycle, uint64_t timerCycle, uint64_t eventCycle, char &winner)
+    {
+        std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+        rpl3EnsureReplayLoadedLocked();
+        while (g_rpl3.idleCur < g_rpl3.idle.size() && g_rpl3.idle[g_rpl3.idleCur].cycle < cycle)
+        {
+            if (!g_rpl3.idleStaleWarned)
+            {
+                g_rpl3.idleStaleWarned = true;
+                std::fprintf(stderr,
+                             "[rpl3] idle gate at cycle=%llu skipped (replay at %llu); "
+                             "already diverged\n",
+                             static_cast<unsigned long long>(g_rpl3.idle[g_rpl3.idleCur].cycle),
+                             static_cast<unsigned long long>(cycle));
+            }
+            ++g_rpl3.idleCur;
+        }
+        if (g_rpl3.idleCur >= g_rpl3.idle.size() || g_rpl3.idle[g_rpl3.idleCur].cycle != cycle)
+            return false;
+        const IdleGate &gate = g_rpl3.idle[g_rpl3.idleCur];
+        if ((gate.timerCycle != timerCycle || gate.eventCycle != eventCycle) &&
+            !g_rpl3.idleMismatchWarned)
+        {
+            g_rpl3.idleMismatchWarned = true;
+            std::fprintf(stderr,
+                         "[rpl3] idle gate at cycle=%llu has timer=%llu event=%llu, replay has "
+                         "%llu/%llu; already diverged\n",
+                         static_cast<unsigned long long>(cycle),
+                         static_cast<unsigned long long>(gate.timerCycle),
+                         static_cast<unsigned long long>(gate.eventCycle),
+                         static_cast<unsigned long long>(timerCycle),
+                         static_cast<unsigned long long>(eventCycle));
+        }
+        winner = gate.winner;
+        ++g_rpl3.idleCur;
+        return true;
     }
 
     void resetForTest()
