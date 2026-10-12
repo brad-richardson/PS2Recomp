@@ -13,11 +13,11 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-GENERATOR = 'fc1f3effa3f2a79f4482ac0b7952191fa5f3a51e'
+GENERATOR = '9a6e02b26466f737e0ef419cc3da8d5d8ecdaf27'
 FORK = 'https://github.com/brad-richardson/PS2Recomp.git'
 ISO_SHA = '3c2f8eb182c9c6208a6e8172a41e61c98f420abe3f42c845f6829aeb9761ebf5'
 ELF_SHA = '1b49d05ca2793922180851b9e1ce9ae2291d61a7863565ac4e71f12e967af7bc'
-REGISTER_SHA = 'e982523ca1aa271500c5a40d9562fa27e2926ca87393f5d88cb40eb8157af789'
+REGISTER_SHA = 'ad96edb68ce78994684c736b745d79f02d88367eb4d5bfeb2d7b05d126b0867c'
 
 
 def run(*args, cwd=None):

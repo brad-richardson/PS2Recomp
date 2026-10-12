@@ -47,12 +47,15 @@ python3 tools/ssx3/build.py mac --work /path/to/private-build --suite
 ```
 
 Run that suite **from the checkout root**. The generator pin is
-`fc1f3effa3f2a79f4482ac0b7952191fa5f3a51e` (HL3); the current game TOML/map
-includes the Equip Gear extra entry. `prepare` checks ISO and extracted ELF
-SHA256, clones the historical generator from the public fork, builds it, writes
-absolute local TOML paths, and checks registration SHA256
-`e982523ca1aa271500c5a40d9562fa27e2926ca87393f5d88cb40eb8157af789`.
-Use a fresh work directory for regeneration; existing output is refused.
+`9a6e02b26466f737e0ef419cc3da8d5d8ecdaf27` (public `ssx3` tip; its
+`ps2xRecomp`/`ps2xAnalyzer` tree is identical to the SPR1 regen source, and
+the game TOML/map — including the Equip Gear extra entry — is unchanged
+since). `prepare` checks ISO and extracted ELF SHA256, clones the pinned
+generator from the public fork, builds it, writes absolute local TOML
+paths, and checks registration SHA256
+`ad96edb68ce78994684c736b745d79f02d88367eb4d5bfeb2d7b05d126b0867c`
+(the SPR1 play pin, ABI v2). Use a fresh work directory for regeneration;
+existing output is refused.
 
 `mac-libs` pins the public ARMSX2 fork to
 `ebdd3fd45f74a77f7dc52b53c6666591c05c5b4d` (`armsx2-ssx3-four`, the play vendor), builds plutovg v1.1.0 and plutosvg v0.0.7
