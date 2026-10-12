@@ -1845,7 +1845,7 @@ namespace
         g_tkMenuBuild(rdram, ctx, runtime);
     }
 
-    // Main-menu event handler (this, item, event): on X, Online takes the
+    // Main-menu event handler (this, item, event): on X, Previews takes the
     // Single Event state and turns Tricky mode on; any other row turns it off.
     void tkMenuEventWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -1855,10 +1855,11 @@ namespace
         if (getRegU32(ctx, 6) == kEventAccept && item && item + 0x40u < PS2_RAM_SIZE)
         {
             const uint32_t st = ps2_ssx3_tricky::rd32(rdram, item + kItemState);
-            bool online = false;
-            const uint32_t next = onMainMenuAccept(ps2_ssx3_tricky::rd32(rdram, item + kItemWidgetHash), st, online);
+            bool previews = false;
+            const uint32_t next =
+                onMainMenuAccept(ps2_ssx3_tricky::rd32(rdram, item + kItemWidgetHash), st, previews);
             std::string msg;
-            if (online)
+            if (previews)
             {
                 ps2_ssx3_tricky::wr32(rdram, item + kItemState, next);
                 s.tricky = true;
@@ -2197,7 +2198,7 @@ namespace
                 std::abort();
             }
         state().on = true;
-        std::fprintf(stderr, "[ssx3-tricky] armed: Online -> Tricky Courses, Select Event refresh after picker switches\n");
+        std::fprintf(stderr, "[ssx3-tricky] armed: Previews -> Tricky Courses, Select Event refresh after picker switches\n");
     }
 }
 

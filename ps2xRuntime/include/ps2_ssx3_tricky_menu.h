@@ -5,30 +5,33 @@
 // Three pieces, all installed only when the knob is 1 (knob off: nothing is
 // wrapped, nothing is read or written):
 //
-// (b) Main menu. The dead "Online" row becomes "Tricky Courses": it leads to
-//     Single Event with Tricky mode on; any other main-menu entry (and every
-//     main-menu build, i.e. backing out of Single Event or quitting to the
-//     title) turns the mode off, so plain Single Event stays stock.
+// (b) Main menu. The "Previews" row (widget "4bonus material", row 4) becomes
+//     "Tricky Courses": it leads to Single Event with Tricky mode on; any
+//     other main-menu entry (and every main-menu build, i.e. backing out of
+//     Single Event or quitting to the title) turns the mode off, so plain
+//     Single Event stays stock. TKM1 moved this off the "Online" row (TK11),
+//     which is stock again for a possible online revival.
 //     - Routing (TK11 t1/t2 taps + disassembly): the main-menu build calls
 //       0x194D18(this, item) once per row, which stores the row's next
 //       frontend state in item+0x18 (widget hash at item+0x38: "2quick play"
-//       -> 9, "5online" -> 0x31). On X the menu calls its event handler
-//       0x194EA8(this, item, event 5), which switches on item+0x18 (jump
-//       table 0x4600B0: state 9 -> 0x145108(gm, 1), Single Event; state 0x31
-//       -> 0x145108(gm, 2) + the network bring-up). The accept hook rewrites
-//       item+0x18 = 9 before the handler reads it, so "Online" runs the
+//       -> 9, "4bonus material" -> 5, "5online" -> 0x31). On X the menu calls
+//       its event handler 0x194EA8(this, item, event 5), which switches on
+//       item+0x18 (jump table 0x4600B0: state 9 -> 0x145108(gm, 1), Single
+//       Event; state 5 -> 0x194FC8, the previews screen; state 0x31 ->
+//       0x145108(gm, 2) + the network bring-up). The accept hook rewrites
+//       item+0x18 = 9 before the handler reads it, so "Previews" runs the
 //       Single Event case exactly.
-//     - Label: the row's text key 0x12F325 ("Online") is in CMNAMER.LOC,
+//     - Label: the row's text key 0x85EC05C ("Previews") is in CMNAMER.LOC,
 //       which the game keeps in RAM from boot (t63). The LOC is LOCH header,
 //       LOCT {u32 keyHash, u32 index} entries from +0x24, then LOCL at the
 //       pool offset (+0x10): {"LOCL", size, 0, count, u32 offsets[count]}
 //       and UTF-16 strings (offsets relative to the pool); in RAM the
 //       loader has replaced each LOCT index with the string's address. "Tricky Courses"
-//       does not fit in "Online"'s 6 characters, so the hook writes it over
-//       string 940 ("The SSX Lobby Server could not be located...", 89
-//       characters, shown only after an online connection) and points
-//       Online's LOCT entry at index 940. The Online help line (FEAMER.LOC key
-//       0x1537AE5, 47 characters) is rewritten in place.
+//       does not fit in "Previews"' 8 characters, so the hook writes it over
+//       string 941 ("No dial tone is detected...", 75 characters, shown only
+//       by a dial-up modem the runtime has never had) and points Previews'
+//       LOCT entry at index 941. The Previews help line (FEAMER.LOC key
+//       0x5C9A824, 33 characters) is rewritten in place.
 // (a) Select Event list refresh. The Map screen (Select Peak / Goal / Event)
 //     fills its row texts Peak%d{Race,Freestyle,Freeride}Loc%d from the event
 //     rows in 0x200DE8(controller), called once per Map-screen entry from
@@ -87,6 +90,7 @@ inline constexpr uint32_t kItemWidgetHash = 0x38u;
 inline constexpr uint32_t kEventAccept = 5u;
 inline constexpr uint32_t kStateSingleEvent = 9u;
 inline constexpr uint32_t kStateOnline = 0x31u;
+inline constexpr uint32_t kStatePreviews = 5u;
 
 // func_317618: PJW variant, h ^= g >> 23 (TK8 §1.2).
 inline uint32_t nameHash(const char *s)
@@ -116,11 +120,11 @@ struct LocFile
 inline constexpr LocFile kCmnAmer = {"CMNAMER.LOC", 0x2B74u, 0x3F691952u, 1386u};
 inline constexpr LocFile kFeAmer = {"FEAMER.LOC", 0x1A0Cu, 0x3F691951u, 829u};
 
-inline constexpr uint32_t kKeyOnline = 0x0012F325u;     // CMNAMER, index 375 "Online"
-inline constexpr uint32_t kOnlineIndex = 375u;
-inline constexpr uint32_t kDonorIndex = 940u;           // "The SSX Lobby Server could not be located..."
-inline constexpr uint32_t kKeyOnlineHelp = 0x01537AE5u; // FEAMER, index 6
-inline constexpr uint32_t kOnlineHelpIndex = 6u;
+inline constexpr uint32_t kKeyPreviews = 0x085EC05Cu;      // CMNAMER, index 1255 "Previews"
+inline constexpr uint32_t kPreviewsIndex = 1255u;
+inline constexpr uint32_t kDonorIndex = 941u;            // "No dial tone is detected..." (dial-up only)
+inline constexpr uint32_t kKeyPreviewsHelp = 0x05C9A824u; // FEAMER, index 672
+inline constexpr uint32_t kPreviewsHelpIndex = 672u;
 inline constexpr const char *kLabel = "Tricky Courses";
 inline constexpr const char *kHelp = "Ride the courses of SSX Tricky.";
 
@@ -207,15 +211,15 @@ inline uint32_t entryValue(const uint8_t *ram, uint32_t base, const LocFile &f, 
     return like < f.count ? index : (like & 0xE0000000u) | locString(ram, base, f, index);
 }
 
-// Relabels Online in the CMNAMER copy at `base`. 1 = patched now, 0 = already
+// Relabels Previews in the CMNAMER copy at `base`. 1 = patched now, 0 = already
 // patched, -1 = refused (layout or strings differ; nothing written).
 inline int patchLabel(uint8_t *ram, uint32_t ramSize, uint32_t base, std::string &msg)
 {
     const LocFile &f = kCmnAmer;
-    const uint32_t e = locAt(ram, ramSize, base, f) ? loctEntry(ram, base, f, kKeyOnline) : 0u;
+    const uint32_t e = locAt(ram, ramSize, base, f) ? loctEntry(ram, base, f, kKeyPreviews) : 0u;
     if (!e)
     {
-        msg = "label: no Online entry in CMNAMER";
+        msg = "label: no Previews entry in CMNAMER";
         return -1;
     }
     const uint32_t value = rd32(ram, e + 4u);
@@ -224,8 +228,8 @@ inline int patchLabel(uint8_t *ram, uint32_t ramSize, uint32_t base, std::string
     const std::string cur = utf16At(ram, ramSize, donor);
     if (target == donor && cur == kLabel)
         return 0;
-    if (target != locString(ram, base, f, kOnlineIndex) || utf16At(ram, ramSize, target) != "Online" ||
-        cur.rfind("The SSX Lobby Server", 0) != 0 || cur.size() < std::strlen(kLabel))
+    if (target != locString(ram, base, f, kPreviewsIndex) || utf16At(ram, ramSize, target) != "Previews" ||
+        cur.rfind("No dial tone is detected", 0) != 0 || cur.size() < std::strlen(kLabel))
     {
         char buf[160];
         std::snprintf(buf, sizeof(buf), "label: CMNAMER strings differ (entry 0x%x, donor \"%s\"); nothing written",
@@ -238,33 +242,33 @@ inline int patchLabel(uint8_t *ram, uint32_t ramSize, uint32_t base, std::string
     wr32(ram, e + 4u, next);
     char buf[192];
     std::snprintf(buf, sizeof(buf), "label: CMNAMER at 0x%06x, key 0x%x entry 0x%x -> 0x%x (\"%s\" at 0x%06x)", base,
-                  kKeyOnline, value, next, kLabel, donor);
+                  kKeyPreviews, value, next, kLabel, donor);
     msg = buf;
     return 1;
 }
 
-// Rewrites the Online help line in the FEAMER copy at `base` (in place, shorter).
+// Rewrites the Previews help line in the FEAMER copy at `base` (in place, shorter).
 inline int patchHelp(uint8_t *ram, uint32_t ramSize, uint32_t base, std::string &msg)
 {
     const LocFile &f = kFeAmer;
-    const uint32_t e = locAt(ram, ramSize, base, f) ? loctEntry(ram, base, f, kKeyOnlineHelp) : 0u;
+    const uint32_t e = locAt(ram, ramSize, base, f) ? loctEntry(ram, base, f, kKeyPreviewsHelp) : 0u;
     const uint32_t s = e ? entryString(ram, ramSize, base, f, rd32(ram, e + 4u)) : 0u;
-    if (!s || s != locString(ram, base, f, kOnlineHelpIndex))
+    if (!s || s != locString(ram, base, f, kPreviewsHelpIndex))
     {
-        msg = "help: no Online help entry in FEAMER";
+        msg = "help: no Previews help entry in FEAMER";
         return -1;
     }
     const std::string cur = utf16At(ram, ramSize, s);
     if (cur == kHelp)
         return 0;
-    if (cur.rfind("Compete against", 0) != 0 || cur.size() < std::strlen(kHelp))
+    if (cur.rfind("View trailers of other EA", 0) != 0 || cur.size() < std::strlen(kHelp))
     {
         msg = "help: FEAMER string differs (\"" + cur.substr(0, 24) + "\"); nothing written";
         return -1;
     }
     writeUtf16(ram, s, kHelp);
     char buf[128];
-    std::snprintf(buf, sizeof(buf), "help: FEAMER at 0x%06x, string %u at 0x%06x -> \"%s\"", base, kOnlineHelpIndex, s,
+    std::snprintf(buf, sizeof(buf), "help: FEAMER at 0x%06x, string %u at 0x%06x -> \"%s\"", base, kPreviewsHelpIndex, s,
                   kHelp);
     msg = buf;
     return 1;
@@ -367,11 +371,11 @@ inline bool knob()
 }
 
 // Accept on a main-menu row: returns the state to store in item+0x18 before
-// the handler reads it (unchanged unless the row is Online).
-inline uint32_t onMainMenuAccept(uint32_t widgetHash, uint32_t itemState, bool &online)
+// the handler reads it (unchanged unless the row is Previews).
+inline uint32_t onMainMenuAccept(uint32_t widgetHash, uint32_t itemState, bool &previews)
 {
-    online = widgetHash == nameHash("5online");
-    return online ? kStateSingleEvent : itemState;
+    previews = widgetHash == nameHash("4bonus material");
+    return previews ? kStateSingleEvent : itemState;
 }
 
 } // namespace ps2_ssx3_tricky

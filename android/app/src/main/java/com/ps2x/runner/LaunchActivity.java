@@ -10,13 +10,13 @@ import android.util.Log;
 import android.widget.Toast;
 
 // TG1: launcher trampoline behind the launcher entries ("SSX 3 · 60",
-// "SSX 3 · 120" = the Launch120 alias, TKO1 "SSX 3 · Tricky" = the
-// LaunchTricky alias). It runs before the runner library loads: for 120 it
-// sets PS2X_LAUNCH_HZ=120 and for Tricky PS2X_LAUNCH_LAYER=tricky in the
-// process env, and the native env loader (ps2_android_runtime.cpp, a static
-// initializer that runs when NativeActivity loads the library) then layers
-// files/full120.env or files/tricky.env over files/ps2x.env. The 60 entry
-// sets nothing, so it boots on today's env.
+// "SSX 3 · 120" = the Launch120 alias). It runs before the runner library
+// loads: for 120 it sets PS2X_LAUNCH_HZ=120 in the process env, and the
+// native env loader (ps2_android_runtime.cpp, a static initializer that runs
+// when NativeActivity loads the library) then layers files/full120.env over
+// files/ps2x.env. The 60 entry sets nothing, so it boots on today's env.
+// TKM1: the TKO1 "SSX 3 · Tricky" entry is gone; the Tricky layer is always
+// on in the base env. Nothing sets PS2X_LAUNCH_LAYER anymore.
 // The runtime reads the env once per process: switching needs the game
 // closed first (swipe it away in Recents).
 public final class LaunchActivity extends Activity {
@@ -27,9 +27,6 @@ public final class LaunchActivity extends Activity {
     private static String targetFor(String className) {
         if (className.endsWith(".Launch120")) {
             return "120";
-        }
-        if (className.endsWith(".LaunchTricky")) {
-            return "Tricky";
         }
         return "60";
     }
@@ -44,11 +41,6 @@ public final class LaunchActivity extends Activity {
                     Os.setenv("PS2X_LAUNCH_HZ", "120", true);
                 } else {
                     Os.unsetenv("PS2X_LAUNCH_HZ");
-                }
-                if ("Tricky".equals(target)) {
-                    Os.setenv("PS2X_LAUNCH_LAYER", "tricky", true);
-                } else {
-                    Os.unsetenv("PS2X_LAUNCH_LAYER");
                 }
                 sStartedTarget = target;
             } catch (ErrnoException e) {

@@ -123,38 +123,41 @@ void register_ps2_ssx3_tricky_menu_tests()
                {
             using ps2_ssx3_tricky::nameHash;
             t.Equals(nameHash("5online"), 0x0C653025u, "5online");
+            t.Equals(nameHash("4bonus material"), 0x0414CB5Cu, "4bonus material");
             t.Equals(nameHash("2quick play"), 0x09A46569u, "2quick play");
             t.Equals(nameHash("Peak1RaceLoc0"), 0x0AF9F920u, "Peak1RaceLoc0 (FE:Map row widget)");
             t.Equals(nameHash("Map"), 0x5380u, "Map"); });
 
-        tc.Run("Online accept takes the Single Event state; other rows are untouched", [](TestCase &t)
+        tc.Run("Previews accept takes the Single Event state; other rows are untouched", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky;
-            bool online = false;
-            t.Equals(onMainMenuAccept(nameHash("5online"), kStateOnline, online), kStateSingleEvent, "Online -> 9");
-            t.IsTrue(online, "online flagged");
-            t.Equals(onMainMenuAccept(nameHash("2quick play"), 9u, online), 9u, "Single Event unchanged");
-            t.IsFalse(online, "not online");
-            t.Equals(onMainMenuAccept(nameHash("3multi play"), 0x16u, online), 0x16u, "Multi Play unchanged"); });
+            bool previews = false;
+            t.Equals(onMainMenuAccept(nameHash("4bonus material"), kStatePreviews, previews), kStateSingleEvent, "Previews -> 9");
+            t.IsTrue(previews, "previews flagged");
+            t.Equals(onMainMenuAccept(nameHash("5online"), kStateOnline, previews), kStateOnline, "Online back to stock");
+            t.IsFalse(previews, "not previews");
+            t.Equals(onMainMenuAccept(nameHash("2quick play"), 9u, previews), 9u, "Single Event unchanged");
+            t.IsFalse(previews, "not previews");
+            t.Equals(onMainMenuAccept(nameHash("3multi play"), 0x16u, previews), 0x16u, "Multi Play unchanged"); });
 
-        tc.Run("label: finds CMNAMER, repoints Online to the donor string, idempotent", [](TestCase &t)
+        tc.Run("label: finds CMNAMER, repoints Previews to the donor string, idempotent", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky;
             std::vector<uint8_t> ram(ps2_ssx3_course::kRamSize, 0);
             const uint32_t base = 0x6A1230;
-            buildLoc(ram, base, kCmnAmer, {{0x11111111u, 3u}, {kKeyOnline, kOnlineIndex}, {0x22222222u, kDonorIndex}},
-                     {{kOnlineIndex, "Online"},
-                      {kDonorIndex, "The SSX Lobby Server could not be located.  Please check your network settings."}});
+            buildLoc(ram, base, kCmnAmer, {{0x11111111u, 3u}, {kKeyPreviews, kPreviewsIndex}, {0x22222222u, kDonorIndex}},
+                     {{kPreviewsIndex, "Previews"},
+                      {kDonorIndex, "No dial tone is detected. Please check your phone line and network adaptor."}});
             t.Equals(findLoc(ram.data(), ps2_ssx3_course::kRamSize, kCmnAmer), base, "found");
             t.Equals(findLoc(ram.data(), ps2_ssx3_course::kRamSize, kFeAmer), 0u, "other file not matched");
             std::string msg;
             t.Equals(patchLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 1, msg.c_str());
-            const uint32_t e = loctEntry(ram.data(), base, kCmnAmer, kKeyOnline);
-            t.Equals(ps2_ssx3_tricky::rd32(ram.data(), e + 4), kDonorIndex, "Online now reads the donor index");
+            const uint32_t e = loctEntry(ram.data(), base, kCmnAmer, kKeyPreviews);
+            t.Equals(ps2_ssx3_tricky::rd32(ram.data(), e + 4), kDonorIndex, "Previews now reads the donor index");
             t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, locString(ram.data(), base, kCmnAmer, kDonorIndex)),
                      std::string("Tricky Courses"), "label text");
-            t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, locString(ram.data(), base, kCmnAmer, kOnlineIndex)),
-                     std::string("Online"), "the Online string itself is untouched");
+            t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, locString(ram.data(), base, kCmnAmer, kPreviewsIndex)),
+                     std::string("Previews"), "the Previews string itself is untouched");
             t.Equals(patchLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 0, "second call: already patched"); });
 
         tc.Run("label + help: entries holding string addresses (the loader's form in RAM)", [](TestCase &t)
@@ -162,10 +165,10 @@ void register_ps2_ssx3_tricky_menu_tests()
             using namespace ps2_ssx3_tricky;
             std::vector<uint8_t> ram(ps2_ssx3_course::kRamSize, 0);
             const uint32_t base = 0xAB0000;
-            buildLoc(ram, base, kCmnAmer, {{kKeyOnline, kOnlineIndex}},
-                     {{kOnlineIndex, "Online"}, {kDonorIndex, "The SSX Lobby Server could not be located."}});
-            const uint32_t e = loctEntry(ram.data(), base, kCmnAmer, kKeyOnline);
-            put32(ram, e + 4, locString(ram.data(), base, kCmnAmer, kOnlineIndex)); // resolved as by the loader
+            buildLoc(ram, base, kCmnAmer, {{kKeyPreviews, kPreviewsIndex}},
+                     {{kPreviewsIndex, "Previews"}, {kDonorIndex, "No dial tone is detected. Please check your phone line."}});
+            const uint32_t e = loctEntry(ram.data(), base, kCmnAmer, kKeyPreviews);
+            put32(ram, e + 4, locString(ram.data(), base, kCmnAmer, kPreviewsIndex)); // resolved as by the loader
             std::string msg;
             t.Equals(patchLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 1, msg.c_str());
             const uint32_t donor = locString(ram.data(), base, kCmnAmer, kDonorIndex);
@@ -173,10 +176,10 @@ void register_ps2_ssx3_tricky_menu_tests()
             t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, donor), std::string("Tricky Courses"), "label");
             t.Equals(patchLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 0, "idempotent");
             const uint32_t fb = 0xC00000;
-            buildLoc(ram, fb, kFeAmer, {{kKeyOnlineHelp, kOnlineHelpIndex}},
-                     {{kOnlineHelpIndex, "Compete against SSX 3 players around the world."}});
-            const uint32_t he = loctEntry(ram.data(), fb, kFeAmer, kKeyOnlineHelp);
-            put32(ram, he + 4, locString(ram.data(), fb, kFeAmer, kOnlineHelpIndex));
+            buildLoc(ram, fb, kFeAmer, {{kKeyPreviewsHelp, kPreviewsHelpIndex}},
+                     {{kPreviewsHelpIndex, "View trailers of other EA games."}});
+            const uint32_t he = loctEntry(ram.data(), fb, kFeAmer, kKeyPreviewsHelp);
+            put32(ram, he + 4, locString(ram.data(), fb, kFeAmer, kPreviewsHelpIndex));
             t.Equals(patchHelp(ram.data(), ps2_ssx3_course::kRamSize, fb, msg), 1, msg.c_str()); });
 
         tc.Run("label: refuses a different CMNAMER without writing", [](TestCase &t)
@@ -184,30 +187,30 @@ void register_ps2_ssx3_tricky_menu_tests()
             using namespace ps2_ssx3_tricky;
             std::vector<uint8_t> ram(ps2_ssx3_course::kRamSize, 0);
             const uint32_t base = 0x600000;
-            buildLoc(ram, base, kCmnAmer, {{kKeyOnline, kOnlineIndex}},
-                     {{kOnlineIndex, "Online"}, {kDonorIndex, "Some other text that is long"}});
+            buildLoc(ram, base, kCmnAmer, {{kKeyPreviews, kPreviewsIndex}},
+                     {{kPreviewsIndex, "Previews"}, {kDonorIndex, "Some other text that is long"}});
             const std::vector<uint8_t> before(ram.begin() + base, ram.begin() + base + 0x10000);
             std::string msg;
             t.Equals(patchLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), -1, "refused");
             t.IsTrue(std::equal(before.begin(), before.end(), ram.begin() + base), "nothing written");
-            buildLoc(ram, base, kCmnAmer, {{kKeyOnline, 12u}},
-                     {{kOnlineIndex, "Online"}, {kDonorIndex, "The SSX Lobby Server could not be located."}});
+            buildLoc(ram, base, kCmnAmer, {{kKeyPreviews, 12u}},
+                     {{kPreviewsIndex, "Previews"}, {kDonorIndex, "No dial tone is detected. Please check your phone line."}});
             t.Equals(patchLabel(ram.data(), ps2_ssx3_course::kRamSize, base, msg), -1, "unexpected index refused"); });
 
-        tc.Run("help: Online help line rewritten in place", [](TestCase &t)
+        tc.Run("help: Previews help line rewritten in place", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky;
             std::vector<uint8_t> ram(ps2_ssx3_course::kRamSize, 0);
             const uint32_t base = 0x7B0000;
-            const std::string stock = "Compete against SSX 3 players around the world.";
-            buildLoc(ram, base, kFeAmer, {{kKeyOnlineHelp, kOnlineHelpIndex}},
-                     {{kOnlineHelpIndex, stock}, {kOnlineHelpIndex + 1, "Next string"}});
+            const std::string stock = "View trailers of other EA games.";
+            buildLoc(ram, base, kFeAmer, {{kKeyPreviewsHelp, kPreviewsHelpIndex}},
+                     {{kPreviewsHelpIndex, stock}, {kPreviewsHelpIndex + 1, "Next string"}});
             std::string msg;
             t.Equals(findLoc(ram.data(), ps2_ssx3_course::kRamSize, kFeAmer), base, "found");
             t.Equals(patchHelp(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 1, msg.c_str());
-            const uint32_t s = locString(ram.data(), base, kFeAmer, kOnlineHelpIndex);
+            const uint32_t s = locString(ram.data(), base, kFeAmer, kPreviewsHelpIndex);
             t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, s), std::string(kHelp), "help text");
-            t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, locString(ram.data(), base, kFeAmer, kOnlineHelpIndex + 1)),
+            t.Equals(utf16At(ram.data(), ps2_ssx3_course::kRamSize, locString(ram.data(), base, kFeAmer, kPreviewsHelpIndex + 1)),
                      std::string("Next string"), "next string intact");
             t.Equals(patchHelp(ram.data(), ps2_ssx3_course::kRamSize, base, msg), 0, "idempotent"); });
 
