@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "ps2_e41_trace.h"
 #include "FileIO.h"
+#include "ps2_turbo_boot.h" // BTS1: boot turbo FE.LUI latch
 
 namespace ps2_syscalls
 {
@@ -50,6 +51,9 @@ namespace ps2_syscalls
             g_fioOpenDescriptors.fetch_add(1, std::memory_order_relaxed);
             if (ps2_e41_trace::armed()) // E41 ioman-open log
                 ps2_e41_trace::noteFioOpen(ps2_e41_trace::lastVsyncTick(), ps2Path, ps2Path, descriptor);
+            // BTS1: boot turbo latches the first FE.LUI open as a yield
+            // anchor (one bool check when the knob is off).
+            ps2_turbo_boot::noteFileOpen(ps2Path, ps2_e41_trace::lastVsyncTick());
         }
         setReturnS32(ctx, descriptor);
     }

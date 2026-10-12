@@ -34,6 +34,7 @@
 #include "ps2_stubs.h"
 #include "ps2_syscalls.h"
 #include "game_overrides.h"
+#include "ps2_turbo_boot.h" // BTS1: boot turbo yield latches
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_stream_capture.h"
@@ -1766,6 +1767,45 @@ namespace
     }
 }
 PS2_REGISTER_GAME_OVERRIDE("ssx3-input2", "SLUS_207.72", 0x00100008u, 0u, applyInput2);
+
+// BTS1: turbo-boot screen-lookup latch (PS2X_TURBO_BOOT=1, default off;
+// knob off wraps nothing). The wrapper reads argument registers and host
+// latches only, then calls the original unchanged, so the det-hash cannot
+// move. It latches the first 06title screen-table lookup; the turbo yields
+// a fixed offset later (or on any pad input, or at the hard cap).
+namespace
+{
+PS2Runtime::RecompiledFunction g_turboBootScreenLookup = nullptr;
+
+void turboBootScreenLookupWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    if (ctx != nullptr)
+    {
+        const uint64_t tick =
+            runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
+        ps2_turbo_boot::noteScreenLookup(getRegU32(ctx, 4), getRegU32(ctx, 5), getRegU32(ctx, 6),
+                                         getRegU32(ctx, 7), tick);
+    }
+    if (g_turboBootScreenLookup != nullptr)
+        g_turboBootScreenLookup(rdram, ctx, runtime);
+}
+
+void applyTurboBoot(PS2Runtime &runtime)
+{
+    if (!ps2_turbo_boot::enabled())
+        return;
+    g_turboBootScreenLookup = runtime.lookupFunction(ps2_turbo_boot::kScreenLookupPc);
+    if (g_turboBootScreenLookup == nullptr ||
+        !runtime.replaceFunction(ps2_turbo_boot::kScreenLookupPc, &turboBootScreenLookupWrapper))
+    {
+        g_turboBootScreenLookup = nullptr;
+        std::fprintf(stderr, "[turbo-boot] refused: no function at 0x397cc0; "
+                             "FE.LUI/input/cap latches only\n");
+    }
+    ps2_turbo_boot::arm();
+}
+} // namespace
+PS2_REGISTER_GAME_OVERRIDE("ssx3-turbo-boot", "SLUS_207.72", 0x00100008u, 0u, applyTurboBoot);
 
 // TK11: Tricky mode frontend entry (PS2X_SSX3_TRICKY_MENU=1, default off;
 // ps2_ssx3_tricky_menu.h). Every wrapper acts at its function's entry (or,

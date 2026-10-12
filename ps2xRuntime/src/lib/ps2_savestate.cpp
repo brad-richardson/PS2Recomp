@@ -17,6 +17,7 @@
 #include "ps2_iop_host.h"
 #include "ps2_pad_latch.h"
 #include "ps2_snd_spike.h"
+#include "ps2_turbo_boot.h" // BTS1: disarm boot turbo on state load
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/gs_backend.h"
 #include "runtime/gs/gs_frontend.h"
@@ -1051,7 +1052,10 @@ namespace ps2_savestate
                   uint64_t *savedTickOut);
     bool load(PS2Runtime &runtime, const std::string &path, std::string &error)
     {
-        return loadImpl(runtime, path, error, config().strict, nullptr);
+        const bool ok = loadImpl(runtime, path, error, config().strict, nullptr);
+        if (ok)
+            ps2_turbo_boot::noteSavestateLoad(); // BTS1: a loaded state resumes paced
+        return ok;
     }
 
     bool loadQuick(PS2Runtime &runtime, const std::string &path, std::string &note, std::string &error)
@@ -1065,6 +1069,7 @@ namespace ps2_savestate
         setQuickLoadCardMode(false, nullptr);
         if (!ok)
             return false;
+        ps2_turbo_boot::noteSavestateLoad(); // BTS1: a loaded state resumes paced
         note = "loaded tick=" + std::to_string(savedTick);
         if (!cardNote.empty())
             note += " (card kept: " + cardNote + ")";

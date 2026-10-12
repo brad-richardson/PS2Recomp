@@ -5,6 +5,7 @@
 #include "ps2recomp/types.h"
 #include "ps2_hle_pools.h"
 #include "ps2_runtime.h"
+#include "ps2_turbo_boot.h"
 #include "runtime/ps2_memory.h"
 #include "ps2_syscalls.h"
 #include "ps2_stubs.h"
@@ -1971,6 +1972,33 @@ void register_ps2_runtime_expansion_tests()
             uint32_t directCmd = 0u;
             std::memcpy(&directCmd, rdram.data() + kBaseAddr + 12u, sizeof(directCmd));
             t.Equals(directCmd, 0x50000001u, "sceVif1PkCloseDirectCode should store a 1-QW DIRECT length");
+        });
+
+        tc.Run("turbo-boot yield rule fires at earliest latch plus offset, cap backstop", [](TestCase &t)
+        {
+            using ps2_turbo_boot::Yield;
+            // Earliest latch wins; no latch means no signal tick.
+            t.Equals(ps2_turbo_boot::signalTickFor(261u, 0u), 661u, "06title-only latch");
+            t.Equals(ps2_turbo_boot::signalTickFor(0u, 255u), 655u, "FE.LUI-only latch");
+            t.Equals(ps2_turbo_boot::signalTickFor(261u, 255u), 655u, "earliest of both latches");
+            t.Equals(ps2_turbo_boot::signalTickFor(0u, 0u), 0u, "no latch, no signal");
+            // Signal at/after the computed tick, cap at 2000, silence before.
+            t.IsTrue(ps2_turbo_boot::evalTick(660u, 661u) == Yield::None, "tick before signal");
+            t.IsTrue(ps2_turbo_boot::evalTick(661u, 661u) == Yield::Signal, "tick at signal");
+            t.IsTrue(ps2_turbo_boot::evalTick(1999u, 0u) == Yield::None, "tick before cap");
+            t.IsTrue(ps2_turbo_boot::evalTick(2000u, 0u) == Yield::Cap, "tick at cap");
+            t.IsTrue(ps2_turbo_boot::evalTick(2000u, 2500u) == Yield::Cap, "cap wins past cap");
+            // Title hash matches in any argument slot; latch floor is 200.
+            t.IsTrue(ps2_turbo_boot::hashMatchesTitle(0x03db0b45u, 0u, 0u, 0u), "title hash in a0");
+            t.IsTrue(ps2_turbo_boot::hashMatchesTitle(0u, 0u, 0u, 0x03db0b45u), "title hash in a3");
+            t.IsTrue(!ps2_turbo_boot::hashMatchesTitle(1u, 2u, 3u, 4u), "other hashes rejected");
+            t.IsTrue(!ps2_turbo_boot::latchable(199u), "tick 199 below latch floor");
+            t.IsTrue(ps2_turbo_boot::latchable(200u), "tick 200 latchable");
+            // FE.LUI path match is case-insensitive substring.
+            t.IsTrue(ps2_turbo_boot::pathIsFrontendLui("cdrom0:\\DATA\\UI\\FE.LUI;1"), "upper path");
+            t.IsTrue(ps2_turbo_boot::pathIsFrontendLui("host:Data/Ui/fe.lui"), "lower path");
+            t.IsTrue(!ps2_turbo_boot::pathIsFrontendLui("cdrom0:\\DATA\\UI\\FE.LU;1"), "prefix rejected");
+            t.IsTrue(!ps2_turbo_boot::pathIsFrontendLui(nullptr), "null path rejected");
         });
     });
 }

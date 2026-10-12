@@ -11,6 +11,7 @@
 #include "runtime/ps2_savestate.h"
 #include "Pad.h"
 #include "ps2_log.h"
+#include "ps2_turbo_boot.h" // BTS1: boot turbo input yield
 
 #include <algorithm>
 #include <cmath>
@@ -3003,6 +3004,12 @@ namespace ps2_stubs
                     pickerStatus))
                 ps2_savestate::noteQuickStatus(pickerStatus); // status line + Android toast (UX1)
         }
+        // BTS1: boot turbo yields on any pad button press (active-low bytes;
+        // sticks ignored so rest jitter cannot end the turbo). One bool check
+        // when the knob is off.
+        if (data[2] != 0xFFu || data[3] != 0xFFu)
+            ps2_turbo_boot::notePadInput(
+                runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u);
 
         PS2_IF_AGRESSIVE_LOGS({
             if (g_padReadLogCount < 48)

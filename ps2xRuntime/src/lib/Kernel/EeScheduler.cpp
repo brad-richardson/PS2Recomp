@@ -13,6 +13,7 @@
 #include "ps2_fpmode.h"
 #include "ps2_e41_trace.h"
 #include "ps2_fh1_full120.h"
+#include "ps2_turbo_boot.h" // BTS1: boot turbo pacing suspension + yield poll
 #include "ps2_ssx3_tricky_layer.h"
 #include "ps2_ach.h"
 #include "ps2_vsync_lock.h"
@@ -2904,7 +2905,7 @@ void EeScheduler::processEvent(const EeEvent &event)
             ps2x::androidPause::gate(m_stopRequested);
             m_perfGateNs = m_perfTail ? ps2x::perflog::steadyNs() - gateT0 : 0u;
         }
-        if (m_vsyncPace)
+        if (m_vsyncPace && !ps2_turbo_boot::pacingSuspended())
         {
             // AT1: dev-only forced guest rate (sleep only, like the pacer).
             if (m_hostPace.enabled)
@@ -2983,6 +2984,10 @@ void EeScheduler::processEvent(const EeEvent &event)
         // the tick increment, like every sibling hook: the sample belongs
         // to the interval that just completed.
         ps2_ssx3_tricky_layer::onVBlankTick(m_rdram, PS2_RAM_SIZE, m_vsyncTick);
+        // BTS1: boot turbo yield poll + host audio ring drain (one bool
+        // check when the knob is off). After the tick increment, like every
+        // sibling hook.
+        ps2_turbo_boot::onVsyncTick(m_vsyncTick, ps2_snd_spike::pcmRing());
         if (ps2_fh1::eventsMode())
         {
             // FH5: the committed event state sets the EE budget and the pacer

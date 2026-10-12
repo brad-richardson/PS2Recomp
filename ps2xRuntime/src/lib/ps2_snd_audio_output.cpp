@@ -4,6 +4,7 @@
 #include "ps2_audio_stretch.h"
 #include "ps2_ssx3_tricky_song.h"
 #include "ps2_snd_spike.h"
+#include "ps2_turbo_boot.h" // BTS1: boot turbo host mute
 #include "ps2_vsync_lock.h"
 #include "ps2_vsync_pacer.h"
 #include "raylib.h"
@@ -733,6 +734,20 @@ namespace
         static std::atomic<bool> s_named{false};
         if (!s_named.exchange(true, std::memory_order_relaxed))
             ThreadNaming::SetCurrentThreadName("Audio");
+        // BTS1: boot turbo mutes the host output. The guest side keeps the
+        // ring near the target-latency reserve, so the first unmuted callback
+        // after yield starts on fresh samples (no burst, no underrun); the
+        // stretch/direct state is never fed while muted, so no reset is needed.
+        if (ps2_turbo_boot::muted())
+        {
+            auto *output = static_cast<int16_t *>(buffer);
+            std::memset(output, 0, static_cast<size_t>(frames) * 2u * sizeof(int16_t));
+            recordWav(g_output.postWav, output, static_cast<size_t>(frames) * 2u);
+            probeSink("turbo-mute", output, frames);
+            noteWindowCallback(frames, true, 1.0f);
+            minuteStats(std::chrono::steady_clock::now());
+            return;
+        }
         if (g_output.stretch)
             audioCallbackStretch(buffer, frames);
         else
