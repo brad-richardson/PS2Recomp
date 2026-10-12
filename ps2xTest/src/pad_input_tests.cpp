@@ -1800,7 +1800,7 @@ void register_pad_input_tests()
                 std::snprintf(want, sizeof(want), "%.9g", static_cast<double>(tf));
                 t.IsTrue(content.find(want) != std::string::npos, "target float column");
             }
-            // LIM2 v2: header rev, column count (56 v1 + 36 v2), parse-back.
+            // LIM2 v2: header rev, column count (57 v1 + 36 v2), parse-back.
             t.IsTrue(content.find("# input-marker v2 #1 trigger_ms=" + std::to_string(trigMs)) !=
                          std::string::npos,
                      "header carries the v2 tag");
@@ -1812,13 +1812,13 @@ void register_pad_input_tests()
                 for (size_t i = hpos; i < hend; ++i)
                     if (content[i] == '\t')
                         ++tabs;
-                t.Equals(tabs + 1u, 92u, "v2 header has 92 columns");
+                t.Equals(tabs + 1u, 93u, "v2 header has 93 columns");
                 size_t rpos = content.find('\n', hend + 1u);
                 uint32_t rtabs = 0u;
                 for (size_t i = hend + 1u; i < rpos; ++i)
                     if (content[i] == '\t')
                         ++rtabs;
-                t.Equals(rtabs + 1u, 92u, "v2 data rows have 92 columns");
+                t.Equals(rtabs + 1u, 93u, "v2 data rows have 93 columns");
             }
             t.IsTrue(content.find("\t10\t20\t30\t3\t4\t0\t5\t") != std::string::npos,
                      "v2 live pos/vel/|v| columns");
