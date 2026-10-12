@@ -2822,6 +2822,33 @@ inline constexpr uint32_t kStuntChgUpdate = 0x1211f8u;
 // runs ~1.41x. Halving each update's charge delta restores the stock per-wall
 // charge rate (class d/h). Other words in 0x1211f8 keep their steps. (v1 held
 // on odd updates, but the staircase overshoots the saturating curve by ~9%.)
+// FLP3 (v4; FLP2-P2's v3 fresh-rise hold stayed local, buggy): the reset
+// fires early at 120 relative to the wall-matched takeoff (exact counts:
+// flip +4, spin +2 half-updates of rise), leaving +9%/+5.9%. A post-reset
+// rise delay per axis (spin 2, flip 4 half-updates) closes it. The reset
+// latch (high, then ~0, then rise) with consume-on-arm is v3's idle-latch
+// fix; the step needs no hold (headroom law: step tracks 1-|charge|).
+inline bool stuntchgPlayerR(const uint8_t *ram, uint32_t R) noexcept
+{
+    // TK43d player-1 rider chain; any miss falls back to v2 (no delay).
+    uint32_t g = 0u, a = 0u, b = 0u, p = 0u;
+    if (!rd32(ram, 0x4a28a8u, g) || g == 0u)
+        return false;
+    if (!rd32(ram, g + 0x84u, a) || a == 0u)
+        return false;
+    if (!rd32(ram, a + 0x0cu, b) || b == 0u)
+        return false;
+    if (!rd32(ram, b + 0x28u, p) || p == 0u)
+        return false;
+    return p == R;
+}
+inline bool g_stuntchgHigh[2] = {false, false};
+inline int g_stuntchgIdle[2] = {0, 0};
+inline int g_stuntchgDelay[2] = {0, 0};
+inline constexpr int kStuntChgDelay[2] = {2, 4}; // spin, flip (FLP3)
+inline constexpr float kStuntChgHigh = 0.05f;
+inline constexpr float kStuntChgZeroEps = 1e-6f;
+inline constexpr int kStuntChgMaxIdle = 128; // halves; gap-idle ~30, jumps ~100s
 inline void stuntchgPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 {
     if (targetPc != kStuntChgUpdate || !ctx || g_postArmed)
@@ -2839,19 +2866,82 @@ inline void stuntchgPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
 }
 inline void stuntchgOnReturn(uint8_t *ram)
 {
+    const bool eligible = stuntchgPlayerR(ram, g_post.obj);
     for (int i = 0; i < 2; ++i)
     {
         const uint32_t a = g_post.obj + (i == 0 ? 0x2a4u : 0x2b0u);
         uint32_t cur = 0u;
-        if (!rd32(ram, a, cur) || cur == g_post.saved[i])
+        if (!rd32(ram, a, cur))
             continue;
         float o = 0.0f, n = 0.0f;
         std::memcpy(&o, &g_post.saved[i], 4);
         std::memcpy(&n, &cur, 4);
+        const bool moved = (cur != g_post.saved[i]);
+        if (!eligible) // rival rider: exactly v2, no latch state.
+        {
+            if (!moved)
+                continue;
+            const float h = o + (n - o) * 0.5f;
+            uint32_t bits = 0u;
+            std::memcpy(&bits, &h, 4);
+            wr32(ram, a, bits);
+            continue;
+        }
+        if (!moved) // quiet: only ~0 idleness ages (long quiet purges stale arms).
+        {
+            if (std::fabs(o) <= kStuntChgZeroEps)
+            {
+                if (g_stuntchgIdle[i] <= kStuntChgMaxIdle)
+                    ++g_stuntchgIdle[i];
+                else
+                {
+                    g_stuntchgHigh[i] = false;
+                    g_stuntchgDelay[i] = 0;
+                }
+            }
+            continue;
+        }
+        if (g_stuntchgDelay[i] > 0) // hold the delayed rise at ~0 (state frozen).
+        {
+            wr32(ram, a, g_post.saved[i]);
+            --g_stuntchgDelay[i];
+            continue;
+        }
+        const bool freshRise =
+            (std::fabs(o) <= kStuntChgZeroEps && std::fabs(n) > std::fabs(o) &&
+             std::fabs(n) > kStuntChgZeroEps);
+        if (freshRise && g_stuntchgHigh[i] && g_stuntchgIdle[i] <= kStuntChgMaxIdle)
+        {
+            g_stuntchgHigh[i] = false; // consume-on-arm: the v3 re-trigger fix.
+            g_stuntchgIdle[i] = 0;
+            g_stuntchgDelay[i] = kStuntChgDelay[i] - 1;
+            wr32(ram, a, g_post.saved[i]);
+            continue;
+        }
         const float h = o + (n - o) * 0.5f;
         uint32_t bits = 0u;
         std::memcpy(&bits, &h, 4);
         wr32(ram, a, bits);
+        const float ah = std::fabs(h);
+        if (ah > kStuntChgHigh)
+        {
+            g_stuntchgHigh[i] = true;
+            g_stuntchgIdle[i] = 0;
+        }
+        else if (ah <= kStuntChgZeroEps)
+        {
+            if (g_stuntchgIdle[i] <= kStuntChgMaxIdle)
+                ++g_stuntchgIdle[i];
+            else
+            {
+                g_stuntchgHigh[i] = false;
+                g_stuntchgDelay[i] = 0;
+            }
+        }
+        else
+        {
+            g_stuntchgIdle[i] = 0;
+        }
     }
 }
 
