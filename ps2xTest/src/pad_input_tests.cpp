@@ -1667,6 +1667,37 @@ void register_pad_input_tests()
             }
             ps2_stubs::setPadMarkerTrackerForTest(0x00c00100u, 0xdeadbeefu, 2u, 1u, 0x40c90fdcu);
             ps2_stubs::setPadMarkerGateForTest(0x0badf00du, 0x42u);
+            // LIM2 v2: fake rider RAM. TK43d chain root 0x4a28a8 masks to
+            // 0x0a28a8 under rd32's 29-bit mask; R = 0x00300300.
+            const auto w32 = [&](uint32_t addr, uint32_t v) {
+                std::memcpy(&rdram[addr], &v, 4u);
+            };
+            w32(0x0a28a8u, 0x00300000u);
+            w32(0x00300084u, 0x00300100u);
+            w32(0x0030010cu, 0x00300200u);
+            w32(0x00300228u, 0x00300300u);
+            w32(0x00300300u + 0x110u, 0x41200000u); // 10.0
+            w32(0x00300300u + 0x114u, 0x41a00000u); // 20.0
+            w32(0x00300300u + 0x118u, 0x41f00000u); // 30.0
+            w32(0x00300300u + 0x1e0u, 0x40400000u); // 3.0
+            w32(0x00300300u + 0x1e4u, 0x40800000u); // 4.0
+            w32(0x00300300u + 0x1e8u, 0x00000000u); // 0.0 -> |v| = 5
+            w32(0x00300300u + 0x370u, 0x00000000u); // qn = (0,1,0)
+            w32(0x00300300u + 0x374u, 0x3f800000u);
+            w32(0x00300300u + 0x378u, 0x00000000u);
+            w32(0x00300300u + 0x454u, 0xc0000000u); // -2.0 depth
+            w32(0x00300300u + 0x438u, 0x0000000au);
+            w32(0x00300300u + 0x430u, 0x00000099u);
+            w32(0x00300300u + 0x460u, 0x40e00000u); // 7.0
+            w32(0x00300300u + 0x464u, 0x41000000u); // 8.0
+            w32(0x00300300u + 0x468u, 0x41100000u); // 9.0
+            w32(0x00300300u + 0x2f4u, 0x00000006u);
+            w32(0x00300300u + 0x2f8u, 0x3f000000u); // 0.5 boost
+            w32(0x00300300u + 0x2f0u, 0x41a00000u); // 20.0 timer
+            w32(0x00c00104u, 0x00000003u);          // S+4 stage 3
+            w32(0x00300400u + 0xde0u, 0x00000004u); // rail selector
+            w32(0x00300400u + 0xde4u, 0x00000007u);
+            ps2_stubs::setPadMarkerSelForTest(0x00300400u, 4u, 7u);
 
             const uint16_t relaxed = 0xFFFFu;
             const uint16_t chord =
@@ -1680,6 +1711,12 @@ void register_pad_input_tests()
                 ps2_stubs::setPadOverrideState(buttons, 0x80, 0x80, 0x80, 0x80);
                 ps2_stubs::setPadRecordTickForTest(tick);
                 ps2_stubs::setPadMarkerTickForTest(tick);
+                if (tick == 600u)
+                {
+                    // In-window award/boost arrivals: the row shows the deltas.
+                    ps2_stubs::setPadMarkerAwardForTest(2u, 777u, 0x1234u);
+                    ps2_stubs::setPadMarkerBoostForTest(1u, 778u, 0x3f800000u);
+                }
                 runPadRead(ctx, rdram);
                 if (tick == trigTick)
                 {
@@ -1753,8 +1790,8 @@ void register_pad_input_tests()
                          std::string::npos,
                      "input2 bank column");
             t.IsTrue(content.find("0badf00d") != std::string::npos, "gate a0 column");
-            t.IsTrue(content.find("00000042\t00000099\t0\n") != std::string::npos,
-                     "gate v0/v1/others columns");
+            t.IsTrue(content.find("00000042\t00000099\t0\t") != std::string::npos,
+                     "gate v0/v1/others columns (v2 appends after)");
             {
                 float tf = 0.0f;
                 const uint32_t tb = 0x40c90fdcu;
@@ -1763,6 +1800,41 @@ void register_pad_input_tests()
                 std::snprintf(want, sizeof(want), "%.9g", static_cast<double>(tf));
                 t.IsTrue(content.find(want) != std::string::npos, "target float column");
             }
+            // LIM2 v2: header rev, column count (56 v1 + 36 v2), parse-back.
+            t.IsTrue(content.find("# input-marker v2 #1 trigger_ms=" + std::to_string(trigMs)) !=
+                         std::string::npos,
+                     "header carries the v2 tag");
+            {
+                size_t hpos = content.find("\ntick\t");
+                t.IsTrue(hpos != std::string::npos, "header row found");
+                size_t hend = content.find('\n', hpos + 1u);
+                uint32_t tabs = 0u;
+                for (size_t i = hpos; i < hend; ++i)
+                    if (content[i] == '\t')
+                        ++tabs;
+                t.Equals(tabs + 1u, 92u, "v2 header has 92 columns");
+                size_t rpos = content.find('\n', hend + 1u);
+                uint32_t rtabs = 0u;
+                for (size_t i = hend + 1u; i < rpos; ++i)
+                    if (content[i] == '\t')
+                        ++rtabs;
+                t.Equals(rtabs + 1u, 92u, "v2 data rows have 92 columns");
+            }
+            t.IsTrue(content.find("\t10\t20\t30\t3\t4\t0\t5\t") != std::string::npos,
+                     "v2 live pos/vel/|v| columns");
+            t.IsTrue(content.find("\t00000004\t00000007\t00300400\t") != std::string::npos,
+                     "v2 live selector columns");
+            t.IsTrue(content.find("\t0\t1\t0\t-2\t0000000a\t00000099\t7\t8\t9\t") !=
+                         std::string::npos,
+                     "v2 query frame columns");
+            t.IsTrue(content.find("\t00000006\t0.5\t20\t") != std::string::npos,
+                     "v2 uber columns");
+            t.IsTrue(content.find("\t1\t00c00100\t3\t") != std::string::npos,
+                     "v2 live stage columns");
+            t.IsTrue(content.find("\t2\t0\t777\t00001234\t") != std::string::npos,
+                     "v2 award columns");
+            t.IsTrue(content.find("\t1\t0\t778\t1\n") != std::string::npos,
+                     "v2 boost columns");
             std::string rec;
             {
                 std::FILE *f = std::fopen(recPath.c_str(), "rb");

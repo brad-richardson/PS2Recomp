@@ -165,6 +165,7 @@ namespace ps2_stubs
     // samples (production fills them from the guest-call wrappers), point the
     // read-time input2 snapshot at test RAM, finalize pending triggers
     // (truncated, like exit) or reset. Production code paths never call these.
+    // LIM2 adds the sel/award/boost latch injectors (v2 columns).
     bool setPadMarkerDirForTest(const char *dir);
     void setPadMarkerTickForTest(uint64_t tick);
     void setPadMarkerTrackerForTest(uint32_t s, uint32_t in0, uint32_t grab, uint32_t phase,
@@ -172,6 +173,9 @@ namespace ps2_stubs
     void setPadMarkerGateForTest(uint32_t a0, uint32_t v0);
     void setPadMarkerInput2ForTest(uint32_t bank, uint32_t count);
     void setPadMarkerRdramForTest(const uint8_t *rdram);
+    void setPadMarkerSelForTest(uint32_t p, uint32_t sel, uint32_t ctl);
+    void setPadMarkerAwardForTest(uint64_t n, uint64_t tick, uint32_t a1);
+    void setPadMarkerBoostForTest(uint64_t n, uint64_t tick, uint32_t amt);
     void closePadMarkerForTest();
     void clearPadMarkerForTest();
 }
