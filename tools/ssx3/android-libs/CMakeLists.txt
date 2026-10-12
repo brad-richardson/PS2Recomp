@@ -18,9 +18,13 @@ set(USE_VULKAN ON CACHE BOOL "" FORCE)
 set(ENABLE_RECOMPILER_TEST_HOOKS ON CACHE BOOL "" FORCE)
 # CN1A (ARMSX2 base): the adapter links the bundled shaderc_combined itself.
 set(ARMSX2_USE_BUNDLED_SHADERC OFF CACHE BOOL "" FORCE)
-# The armsx2-ssx3-four vendor defaults X11/Wayland ON; Android has neither.
+# The armsx2-ssx3-four vendor defaults X11/Wayland/backtrace ON, and its
+# SearchForStuff requires each on non-Apple UNIX targets; Android has none
+# of them. This matches the private recipe's Android guard (the GE1 bundle's
+# BuildParameters forces the same three OFF under if(ANDROID)).
 set(X11_API OFF CACHE BOOL "" FORCE)
 set(WAYLAND_API OFF CACHE BOOL "" FORCE)
+set(USE_BACKTRACE OFF CACHE BOOL "" FORCE)
 
 include(Pcsx2Utils)
 check_no_parenthesis_in_path()
