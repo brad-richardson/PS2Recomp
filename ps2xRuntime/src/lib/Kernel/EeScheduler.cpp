@@ -13,6 +13,7 @@
 #include "ps2_fpmode.h"
 #include "ps2_e41_trace.h"
 #include "ps2_fh1_full120.h"
+#include "ps2_rpl3_nv.h" // RPL3: sched-gate record/replay (padrec v3)
 #include "ps2_turbo_boot.h" // BTS1: boot turbo pacing suspension + yield poll
 #include "ps2_ssx3_tricky_layer.h"
 #include "ps2_ach.h"
@@ -43,6 +44,15 @@
 #include <unordered_map>
 
 #include "ps2_session_telemetry.h" // TEL2
+
+// RPL3: sched-gate mnemonics follow the EeEventType order (ps2_rpl3_nv.h).
+static_assert(static_cast<uint32_t>(EeEventType::Stop) == 0u, "rpl3 mnemonic order");
+static_assert(static_cast<uint32_t>(EeEventType::VBlankStart) == 1u, "rpl3 mnemonic order");
+static_assert(static_cast<uint32_t>(EeEventType::VBlankEnd) == 2u, "rpl3 mnemonic order");
+static_assert(static_cast<uint32_t>(EeEventType::Dmac) == 3u, "rpl3 mnemonic order");
+static_assert(static_cast<uint32_t>(EeEventType::ExternalWake) == 4u, "rpl3 mnemonic order");
+static_assert(static_cast<uint32_t>(EeEventType::Alarm) == 5u, "rpl3 mnemonic order");
+static_assert(static_cast<uint32_t>(EeEventType::SoundTick) == 6u, "rpl3 mnemonic order");
 
 #if PS2X_ENABLE_DIAG_TAPS
 namespace ge1_wait_census { void clear(uint64_t tick); }
@@ -2698,7 +2708,53 @@ void EeScheduler::processDueDeadlines()
         std::chrono::steady_clock::time_point pacingDeadline{};
         {
             std::unique_lock lock(m_eventMutex);
-            if (m_cycleOnlyEvents)
+            // RPL3: gated replay — when a sched gate matches this call's
+            // eeCycle, fire the recorded subset (wall-independent). More than
+            // 32 cycle-due events never happens; fall through if it does.
+            ps2_rpl3::SchedEvent rpl3Due[32];
+            bool rpl3Fire[32] = {false};
+            size_t rpl3DueCount = 0u;
+            bool rpl3TooMany = false;
+            for (const ScheduledEvent &item : m_deadlines)
+            {
+                if (item.deadlineCycle > m_eeCycle)
+                    continue;
+                if (rpl3DueCount >= 32u)
+                {
+                    rpl3TooMany = true;
+                    break;
+                }
+                rpl3Due[rpl3DueCount].type = static_cast<uint32_t>(item.event.type);
+                rpl3Due[rpl3DueCount].id = item.event.id;
+                rpl3Due[rpl3DueCount].cycle = item.deadlineCycle;
+                ++rpl3DueCount;
+            }
+            const bool gated = !rpl3TooMany && rpl3DueCount != 0u &&
+                               ps2_rpl3::takeSched(m_eeCycle, rpl3Due, rpl3DueCount, rpl3Fire);
+            if (gated)
+            {
+                size_t view = 0u;
+                for (auto it = m_deadlines.begin(); it != m_deadlines.end();)
+                {
+                    bool moveIt = false;
+                    if (it->deadlineCycle <= m_eeCycle)
+                    {
+                        moveIt = view < rpl3DueCount && rpl3Fire[view];
+                        ++view;
+                    }
+                    if (moveIt)
+                    {
+                        due.push_back(std::move(*it));
+                        it = m_deadlines.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
+                updateNextDeadline();
+            }
+            else if (m_cycleOnlyEvents)
             {
                 // Take the whole cycle-due set before considering host time.
                 // Host deadlines cannot split a batch or change its order.
@@ -2752,6 +2808,28 @@ void EeScheduler::processDueDeadlines()
                        std::make_move_iterator(firstFuture));
             m_deadlines.erase(m_deadlines.begin(), firstFuture);
             updateNextDeadline();
+            // RPL3: note split batches (fired a strict subset of the
+            // cycle-due set); gated replay reproduces them.
+            size_t withheld = 0u;
+            for (const ScheduledEvent &item : m_deadlines)
+            {
+                if (item.deadlineCycle <= m_eeCycle)
+                    ++withheld;
+            }
+            if (withheld != 0u)
+            {
+                std::vector<ps2_rpl3::SchedEvent> fired;
+                fired.reserve(due.size());
+                for (const ScheduledEvent &item : due)
+                {
+                    ps2_rpl3::SchedEvent ev{};
+                    ev.type = static_cast<uint32_t>(item.event.type);
+                    ev.id = item.event.id;
+                    ev.cycle = item.deadlineCycle;
+                    fired.push_back(ev);
+                }
+                ps2_rpl3::noteSched(m_vsyncTick, m_eeCycle, fired.data(), fired.size(), withheld);
+            }
             }
         }
 
@@ -3217,6 +3295,16 @@ void EeScheduler::waitForEvent()
     {
         const auto timerHostDeadline = std::chrono::steady_clock::now() + eeCyclesToHostDuration(timerCycles);
         const uint64_t timerCycle = m_eeCycle + timerCycles;
+        if (!m_deadlines.empty())
+        {
+            // RPL3: record the race inputs when both sides are pending (the
+            // det and play rules can pick different winners; replay data).
+            const bool cyclePicksTimer = timerCycle < deadlineCycle;
+            const bool hostPicksTimer = timerHostDeadline < hostDeadline;
+            const bool tookTimer = m_cycleOnlyEvents ? cyclePicksTimer : hostPicksTimer;
+            ps2_rpl3::noteIdle(m_vsyncTick, m_eeCycle, timerCycle, deadlineCycle,
+                               tookTimer ? 'T' : 'E', cyclePicksTimer == hostPicksTimer);
+        }
         if (m_cycleOnlyEvents ? (m_deadlines.empty() || timerCycle < deadlineCycle)
                               : (timerHostDeadline < hostDeadline))
         {

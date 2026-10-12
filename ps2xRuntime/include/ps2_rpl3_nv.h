@@ -52,4 +52,87 @@ namespace ps2_rpl3
     // Test seam: drop all record/replay state (the env-gated record switch
     // re-reads on the next note* call).
     void resetForTest();
+
+    // Scheduling gates: host-timed event batching splits cycle-due batches by
+    // wall deadlines (a VBlank withheld while a SoundTick fires, with a guest
+    // slice between), which is wall-dependent and guest-visible. Live notes
+    // every split batch; gated replay fires the recorded subset instead of
+    // host-gating. Ticks/cycles are the live call's; replay matches gates by
+    // exact eeCycle (same guest => same slice boundaries).
+    struct SchedEvent
+    {
+        uint32_t type = 0; // EeEventType as a number (mnemonic below)
+        uint32_t id = 0;
+        uint64_t cycle = 0; // deadlineCycle
+    };
+
+    // One mnemonic per EeEventType (ee_scheduler.h order: Stop=0,
+    // VBlankStart=1, VBlankEnd=2, Dmac=3, ExternalWake=4, Alarm=5,
+    // SoundTick=6). Single source; EeScheduler.cpp static_asserts the order.
+    inline char schedTypeChar(uint32_t type)
+    {
+        switch (type)
+        {
+        case 0u:
+            return 'X';
+        case 1u:
+            return 'S';
+        case 2u:
+            return 'E';
+        case 3u:
+            return 'D';
+        case 4u:
+            return 'W';
+        case 5u:
+            return 'A';
+        case 6u:
+            return 'T';
+        default:
+            return '?';
+        }
+    }
+
+    inline bool schedCharType(char c, uint32_t &type)
+    {
+        switch (c)
+        {
+        case 'X':
+            type = 0u;
+            return true;
+        case 'S':
+            type = 1u;
+            return true;
+        case 'E':
+            type = 2u;
+            return true;
+        case 'D':
+            type = 3u;
+            return true;
+        case 'W':
+            type = 4u;
+            return true;
+        case 'A':
+            type = 5u;
+            return true;
+        case 'T':
+            type = 6u;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    // Record one split batch: the fired subset of the cycle-due set at this
+    // call (withheldCount = cycle-due but host-future, for diagnosis).
+    void noteSched(uint64_t tick, uint64_t cycle, const SchedEvent *fired, size_t firedCount,
+                   size_t withheldCount);
+    // Replay: if the next gate matches this call's eeCycle, mark the fired
+    // subset of the current cycle-due list and return true. False = no gate
+    // (the caller runs its existing branch). Stale gates (cycle < current,
+    // i.e. already diverged) are dropped with one warning.
+    bool takeSched(uint64_t cycle, const SchedEvent *due, size_t dueCount, bool *fire);
+    // Idle-path race data (record-only): the timer-vs-event winner when both
+    // are pending. agree=1 when the host and cycle orders pick the same side.
+    void noteIdle(uint64_t tick, uint64_t cycle, uint64_t timerCycle, uint64_t eventCycle,
+                  char winner, bool agree);
 } // namespace ps2_rpl3
