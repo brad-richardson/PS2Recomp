@@ -8118,7 +8118,15 @@ void PS2Runtime::run()
         // to the pad latch every host frame (host ~60 Hz vs guest reads at
         // guest speed); readState consumes one presented mask per guest
         // read.
-        const uint16_t ds1TrueRaw = ps2xSampleRaylibPad().pressed;
+        // SET2: the diag test spans inject here, as if from a real pad, so
+        // they flow through DS1 and the hold-back exactly like physical
+        // input (a forwarded test Select must reach the published mask).
+        if (set2On)
+            ++set2HostFrame;
+        const uint16_t set2Inject =
+            set2On ? set2TestMask(set2Test, set2HostFrame) : static_cast<uint16_t>(0u);
+        const uint16_t ds1TrueRaw =
+            static_cast<uint16_t>(ps2xSampleRaylibPad().pressed | set2Inject);
         // SET2: while the panel is open the panel owns the pad (DS1 suppressed).
         const uint16_t ds1RawPressed = set2Open ? 0u : ds1TrueRaw;
         uint16_t raylibPressed = ds1RawPressed;
@@ -8249,15 +8257,14 @@ void PS2Runtime::run()
         };
         if (set2On)
         {
-            ++set2HostFrame;
             if (!set2Test.empty() && (set2HostFrame % 600u) == 0u)
                 std::fprintf(stderr, "[set2] hostFrame=%llu guestTick=%llu\n",
                              static_cast<unsigned long long>(set2HostFrame),
                              static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));
             // Nav union: post-DS1 physical when closed, true physical when
-            // open (DS1 suppressed), plus the diag test spans.
-            const uint16_t set2Union = static_cast<uint16_t>(
-                (set2Open ? ds1TrueRaw : raylibPressed) | set2TestMask(set2Test, set2HostFrame));
+            // open (DS1 suppressed). The test spans are already in both
+            // (injected at the sample site above).
+            const uint16_t set2Union = set2Open ? ds1TrueRaw : raylibPressed;
             const int64_t set2NowMs =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch())
