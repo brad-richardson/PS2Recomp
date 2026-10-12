@@ -2347,32 +2347,6 @@ namespace ps2_stubs
             return bits;
         }
 
-        // Checked 32 MB-wrap u32 read: the game's own RDRAM semantics
-        // (FAST_READ32's PS2_RAM_MASK; the Tricky HUD chain walk uses the
-        // same mask). ps2_fh1::rd32's 29-bit mask cannot see the chain root
-        // 0x4a28a8 at all, so the chain must not use it (LIM2: LIM1's filter
-        // never engaged because of that mask).
-        bool lim1Rd32(const uint8_t *rdram, uint32_t addr, uint32_t &out)
-        {
-            if (!rdram)
-            {
-                return false;
-            }
-            // Fail closed on non-RAM segments (TKL1 F7); low/KSEG0/KSEG1 only.
-            const uint32_t seg = addr >> 28;
-            if (seg != 0u && seg != 8u && seg != 9u && seg != 0xAu && seg != 0xBu)
-            {
-                return false;
-            }
-            const uint32_t phys = addr & (PS2_RAM_SIZE - 1u);
-            if (phys + 4u > PS2_RAM_SIZE)
-            {
-                return false;
-            }
-            std::memcpy(&out, rdram + phys, 4u);
-            return true;
-        }
-
         // Player-rider identity (facts.md TK43d, course-independent, verified
         // through wipeouts/resets): R = [[[0x4a28a8]+0x84]+0xC]+0x28. False
         // when any link is unreadable or null (menus / no race object), in
@@ -2380,19 +2354,19 @@ namespace ps2_stubs
         bool lim1PlayerR(const uint8_t *rdram, uint32_t &out)
         {
             uint32_t w = 0u;
-            if (!lim1Rd32(rdram, 0x4a28a8u, w) || w == 0u)
+            if (!ps2_fh1::rd32(rdram, 0x4a28a8u, w) || w == 0u)
             {
                 return false;
             }
-            if (!lim1Rd32(rdram, w + 0x84u, w) || w == 0u)
+            if (!ps2_fh1::rd32(rdram, w + 0x84u, w) || w == 0u)
             {
                 return false;
             }
-            if (!lim1Rd32(rdram, w + 0x0cu, w) || w == 0u)
+            if (!ps2_fh1::rd32(rdram, w + 0x0cu, w) || w == 0u)
             {
                 return false;
             }
-            if (!lim1Rd32(rdram, w + 0x28u, w) || w == 0u)
+            if (!ps2_fh1::rd32(rdram, w + 0x28u, w) || w == 0u)
             {
                 return false;
             }

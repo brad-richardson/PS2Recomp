@@ -1667,12 +1667,12 @@ void register_pad_input_tests()
             }
             ps2_stubs::setPadMarkerTrackerForTest(0x00c00100u, 0xdeadbeefu, 2u, 1u, 0x40c90fdcu);
             ps2_stubs::setPadMarkerGateForTest(0x0badf00du, 0x42u);
-            // LIM2 v2: fake rider RAM. TK43d chain root 0x4a28a8 masks to
-            // 0x0a28a8 under rd32's 29-bit mask; R = 0x00300300.
+            // LIM2 v2: fake rider RAM. TK43d chain root 0x4a28a8 (4.8 MB, in
+            // RDRAM); R = 0x00300300.
             const auto w32 = [&](uint32_t addr, uint32_t v) {
                 std::memcpy(&rdram[addr], &v, 4u);
             };
-            w32(0x0a28a8u, 0x00300000u);
+            w32(0x4a28a8u, 0x00300000u);
             w32(0x00300084u, 0x00300100u);
             w32(0x0030010cu, 0x00300200u);
             w32(0x00300228u, 0x00300300u);
