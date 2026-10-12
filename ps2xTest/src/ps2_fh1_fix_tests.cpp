@@ -385,6 +385,14 @@ void register_ps2_fh1_fix_tests()
             t.Equals(peek(0x49b4fcu), 0x3ac57fccu, "exit restores stock");
         });
 
+        tc.Run("FLP2 stuntchg is opt-in at bit 60", [](TestCase &t)
+        {
+            t.Equals(static_cast<uint64_t>(kFixStuntChg), 1ull << 60, "stuntchg uses bit 60");
+            t.IsTrue((kFixAll & kFixStuntChg) == 0u, "excluded from all");
+            t.Equals(parseFix("all,stuntchg").main, kFixAll | kFixStuntChg, "opt-in");
+            t.Equals(parseFix("all,stuntchg,-stuntchg").main, kFixAll, "opt-out");
+        });
+
         tc.Run("KNC5 bit 51 stays reserved and parses (JMP5 springhold removed)", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixSpringHold), 1ull << 51, "bit 51 reserved");
@@ -582,8 +590,8 @@ void register_ps2_fh1_fix_tests()
             t.Equals(renderFixDelta(kFixQuery, 0u, 0u, 0u), std::string("-query"), "loss");
             t.Equals(renderFixDelta(kFixBonus, 0u, kFixQuery, kFix12Flare), std::string("-bonus,+query,+flare"),
                      "main ascending, then mask12");
-            t.Equals(renderFixDelta(0u, 0u, 1ull << 60, 1u << 16), std::string("+bit60,+bit12.16"),
-                     "unnamed bits render by index");
+            t.Equals(renderFixDelta(0u, 0u, 1ull << 61, 1u << 16), std::string("+bit61,+bit12.16"),
+                     "unnamed bits render by index"); // FLP2: bit 60 is now stuntchg
             t.Equals(renderFixDelta(1ull << 14, 0u, 0u, 0u), std::string("-bit14"),
                      "internal ramp renders unnamed");
         });

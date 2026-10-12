@@ -2610,7 +2610,7 @@ inline bool flagsFix() noexcept
 struct PostCall
 {
     uint32_t target = 0u, sp = 0u, obj = 0u;
-    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27), 5 jcam retention (FH28), 6 pid hold (FH29), 7 ground2 (FH33), 8 query hold (JMP4), 9 chase2 (FH35), 10 reserved (KNC5: JMP5 springhold removed)
+    uint32_t kind = 0u; // 0 flags, 1 texanim UV/rotation, 2 loop controller mode step, 3 fxtimer add-back, 4 loop ctor (FH27), 5 jcam retention (FH28), 6 pid hold (FH29), 7 ground2 (FH33), 8 query hold (JMP4), 9 chase2 (FH35), 10 reserved (KNC5: JMP5 springhold removed), 11 stuntchg (FLP2)
     uint32_t saved[7] = {};
 };
 inline PostCall g_post;
@@ -2810,6 +2810,38 @@ inline void ground2OnReturn(uint8_t *ram)
     uint32_t bits; std::memcpy(&bits, &bound, 4); wr32(ram, R+0x1f4u, bits);
 }
 
+inline bool stuntchgFix() noexcept
+{
+    static const bool on = enabled() && (fixMask() & kFixStuntChg) != 0u;
+    return on;
+}
+inline constexpr uint32_t kStuntChgUpdate = 0x1211f8u;
+// FLP2: sub_001211F8 slews the rider stunt charges (R+0x2a4 spin, R+0x2b0
+// flip) once per update with an unconverted step, so at 120 they charge 2x
+// per wall second and the takeoff flip/spin rate (R+0x2e0/0x2dc via 0x133250)
+// runs ~1.41x. Holding both charges on odd updates restores the stock
+// per-wall charge rate (class d). Other words in 0x1211f8 keep their steps.
+inline void stuntchgPreHook(uint8_t *ram, R5900Context *ctx, uint32_t targetPc)
+{
+    if (targetPc != kStuntChgUpdate || !ctx || !g_rngOdd || g_postArmed)
+        return;
+    const uint32_t R = getRegU32(ctx, 4);
+    if (!rd32(ram, R + 0x2a4u, g_post.saved[0]))
+        return;
+    if (!rd32(ram, R + 0x2b0u, g_post.saved[1]))
+        return;
+    g_post.target = targetPc;
+    g_post.sp = getRegU32(ctx, 29);
+    g_post.obj = R;
+    g_post.kind = 11u;
+    g_postArmed = true;
+}
+inline void stuntchgOnReturn(uint8_t *ram)
+{
+    wr32(ram, g_post.obj + 0x2a4u, g_post.saved[0]);
+    wr32(ram, g_post.obj + 0x2b0u, g_post.saved[1]);
+}
+
 // FH35: caller-specific trails and C1 interpolate-then-root, both opt-in.
 inline bool trailsFix() noexcept
 {
@@ -2876,6 +2908,11 @@ inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool re
     if (g_post.kind == 8u)
     {
         queryOnReturn(ram, ctx);
+        return;
+    }
+    if (g_post.kind == 11u)
+    {
+        stuntchgOnReturn(ram);
         return;
     }
     if (g_post.kind == 5u)
@@ -3280,7 +3317,7 @@ struct BranchFlags
 {
     bool always, events, clock, raceClock, launch, session, parity, rng, trick, aiGate, bonus, lift, flags, rclock, fh12,
         particles, flare, jcam, pid, c2cap, envFilt, ground2, jcam2, life2, input2, trails, chase2, query, trailring,
-        shadowpub, normcap;
+        shadowpub, normcap, stuntchg;
     bool src, fh9, draw, tap;
 };
 
@@ -3313,7 +3350,8 @@ inline const BranchFlags &branchFlags() noexcept
         r.query = queryFix();
         r.shadowpub = shadowPubFix();
         r.normcap = normcapFix();
-        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap || r.input2 || r.query || inputChainFix();
+        r.stuntchg = stuntchgFix();
+        r.parity = r.rng || r.trick || r.aiGate || r.particles || r.flare || r.jcam || r.pid || r.c2cap || r.input2 || r.query || r.stuntchg || inputChainFix();
         r.bonus = bonusFix();
         r.lift = liftFix();
         r.flags = flagsFix();
@@ -3484,6 +3522,8 @@ inline HookInterest buildHookInterest(const HookConfig &c)
     }
     if ((c.main & kFixGround2) != 0u && on)
         addTgt(0x113e80u);
+    if ((c.main & kFixStuntChg) != 0u && on)
+        addTgt(kStuntChgUpdate); // FLP2: stunt-charge hold pre-hook (any source)
     if ((c.main & kFixNormcap) != 0u && on)
         addTgt(kNormcapGround); // NRM1: pre-hook arms the post-map correction record (any source)
     if ((c.main & kFixJcam) != 0u && on)
@@ -3685,7 +3725,7 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         launchPreHook(ram, ctx, targetPc);
     bool skip = on && flag(&BranchFlags::session, sessionFix) && sessionSkip(sourcePc, targetPc);
     if (on && (Fast ? bf->parity : (rngFix() || trickFix() || aiGateFix() || particlesFix() || flareFix() || jcamFix() ||
-                                    pidFix() || c2capFix() || input2Fix() || inputChainFix())))
+                                    pidFix() || c2capFix() || input2Fix() || stuntchgFix() || inputChainFix())))
         parityHook(ram, sourcePc);
     if (on && flag(&BranchFlags::rng, rngFix))
         skip = rngHook(ram, ctx, sourcePc, targetPc) || skip;
@@ -3705,6 +3745,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         skip = true;
     if (on && flag(&BranchFlags::ground2, ground2Fix))
         ground2PreHook(ctx, targetPc);
+    if (on && flag(&BranchFlags::stuntchg, stuntchgFix))
+        stuntchgPreHook(ram, ctx, targetPc);
     if (on && flag(&BranchFlags::normcap, normcapFix))
         normcapPreHook(ctx, targetPc);
     if (on && flag(&BranchFlags::jcam2, jcam2Fix))
