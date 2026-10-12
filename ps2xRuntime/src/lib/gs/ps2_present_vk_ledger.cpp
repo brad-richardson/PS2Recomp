@@ -147,6 +147,12 @@ uint32_t Ledger::windowGeneration() const
     return m_windowGen;
 }
 
+uint64_t Ledger::geometrySeq() const
+{
+    std::lock_guard<std::mutex> lock(m_m);
+    return m_geomSeq;
+}
+
 uint32_t Ledger::epoch()
 {
     std::lock_guard<std::mutex> lock(m_m);
@@ -414,6 +420,7 @@ bool Ledger::queue(uint64_t id, uint32_t w, uint32_t h)
             std::fprintf(stderr, "[present-vk] geometry src %ux%u -> dst [%d,%d %d,%d] in parent buffer %dx%d aspect=%d\n",
                          w, h, m_geom.left, m_geom.top, m_geom.right, m_geom.bottom, m_bufW, m_bufH, m_aspect);
         m_geometrySet = true;
+        ++m_geomSeq;
         m_lastW = w;
         m_lastH = h;
     }

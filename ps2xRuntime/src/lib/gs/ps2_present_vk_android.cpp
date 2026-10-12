@@ -325,6 +325,7 @@ bool broken() { return ledger().broken(); }
 void fallBack(const char *why) { ledger().fallBack(why); }
 void setUnderlay(bool under) { ledger().setUnderlay(under); }
 bool underlay() { return ledger().underlay(); }
+uint64_t geometrySeq() { return ledger().geometrySeq(); }
 bool gameRect(int &left, int &top, int &right, int &bottom) { return ledger().gameRect(left, top, right, bottom); }
 uint32_t windowGeneration() { return ledger().windowGeneration(); }
 bool layerLive() { return ledger().layerLive(); }

@@ -8197,8 +8197,19 @@ void PS2Runtime::run()
             set2Nav.perf = set2Perf;
             set2Nav.restartArmed = false;
 #if defined(__ANDROID__)
-            // The panel needs the GL overlay visible over the VK layer.
+            // The panel needs the GL overlay visible over the VK layer. The Z
+            // applies in queue(), so wait for one geometry apply while the
+            // guest still runs: pausing first would freeze the queue with the
+            // reorder pending (leg3 open#1 hid the panel for 8+ s).
             ps2x_present_vk::setUnderlay(true);
+            if (ps2x_present_vk::active())
+            {
+                const uint64_t set2G0 = ps2x_present_vk::geometrySeq();
+                const auto set2T0 = std::chrono::steady_clock::now();
+                while (ps2x_present_vk::geometrySeq() == set2G0 &&
+                       std::chrono::steady_clock::now() - set2T0 < std::chrono::milliseconds(500))
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
 #endif
             ps2_snd_audio_output::pausePlayback();
             const uint64_t openTick = m_memory.gs().vsyncTick.load();

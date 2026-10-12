@@ -38,6 +38,10 @@ void fallBack(const char *why); // any thread: give up on the layer for this run
 // such as the virtual pad). The GL window must then be RGBA and clear the game rect to 0.
 void setUnderlay(bool under);
 bool underlay();
+// Bumped each time the worker applies geometry (the Z included). An opener
+// waits for this to move after setUnderlay(true) while the guest still runs,
+// so the reorder lands before the pause freezes the queue.
+uint64_t geometrySeq();
 // The current window's child has shown a buffer (the GL window is fully covered when
 // there is no underlay and the rect fills the window).
 bool layerLive();

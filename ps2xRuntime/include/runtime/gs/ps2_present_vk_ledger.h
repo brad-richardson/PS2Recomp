@@ -83,6 +83,7 @@ public:
     bool active() const; // not broken and a buffer has been queued
     bool layerLive();    // the current layer has been given a buffer
     uint32_t windowGeneration() const;
+    uint64_t geometrySeq() const; // bumped each time queue() applies geometry (the Z included)
     uint32_t epoch(); // buffers registered under an older epoch must be retired
     bool gameRect(int &left, int &top, int &right, int &bottom);
 
@@ -187,6 +188,7 @@ private:
     bool m_under = false;
     bool m_liveOnWindow = false;
     bool m_geometrySet = false;
+    uint64_t m_geomSeq = 0;
     void *m_window = nullptr;
     int m_aspect = 0;
     int m_bufW = 0, m_bufH = 0;
