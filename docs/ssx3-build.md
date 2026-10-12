@@ -2,7 +2,11 @@
 
 New local preparation/build entry: [tools/ssx3](../tools/ssx3/README.md). Supported build host: macOS Apple silicon; play targets: Android arm64 / iOS. Windows/x86 is unsupported.
 
-This is the maintainer build dependency inventory. The new public entry
+This is the maintainer build dependency inventory (**maintainer only**).
+The maintainer-only `ps2xRuntime/third_party/armsx2/build.sh` recipe below
+uses private pinned inputs and a private build host; strangers must not use
+it — build through the public entry, [tools/ssx3](../tools/ssx3/README.md),
+instead. The new public entry
 regenerates EE code and builds a Mac baseline without PGO or generated VU0;
 optimized device play builds still require additional local preparation. Prepare the
 [exact supported inputs](ssx3-inputs.md) locally first. Library compilation and
@@ -23,9 +27,10 @@ Evidence: [root CMake minimum](../CMakeLists.txt#L1),
 [iOS assembly](../ps2xRuntime/third_party/armsx2/build.sh#L122),
 [iOS runtime linking](../ps2xRuntime/CMakeLists.txt#L895).
 
-## What the existing script does
+## What the maintainer-only script does
 
-`ps2xRuntime/third_party/armsx2/build.sh` is the maintainer's host recipe.
+`ps2xRuntime/third_party/armsx2/build.sh` is **maintainer only**. Strangers
+must not use it; use [tools/ssx3](../tools/ssx3/README.md) instead. It is the maintainer's host recipe.
 Its interface is `build.sh <mac|android|ios|ios-sim> --armsx2 <checkout>
 [--build-root <scratch>] [--jobs N]`; it has no `--help` or dry-run mode
 ([parser](../ps2xRuntime/third_party/armsx2/build.sh#L29)). It requires clean
