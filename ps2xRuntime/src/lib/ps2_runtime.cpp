@@ -8203,6 +8203,16 @@ void PS2Runtime::run()
             // closing Triangle/chord, a held nav X) stay stripped until
             // released, else they would fire in the game on resume.
             set2Swallow.mask = ds1TrueRaw;
+            // Seed like open: touches still down (a finger resting on the
+            // dot, a long test hold) must not edge on the next frame, else
+            // the panel would instantly re-open (iPad legA caught this).
+            {
+                ps2x::vpad::TouchPoint seed[8];
+                const int nseed = virtualPadTouches(seed, 8, screenWidth, screenHeight);
+                set2Down.clear();
+                for (int i = 0; i < nseed; ++i)
+                    set2Down.push_back(seed[i].id);
+            }
             set2HoldsPause().store(false, std::memory_order_release);
             ps2x::hostPause::requestResume();
             ps2_snd_audio_output::resumePlayback();
