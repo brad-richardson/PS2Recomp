@@ -2360,27 +2360,37 @@ void register_pad_input_tests()
             Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
             ::setenv("PS2X_PAD_SCRIPT", ("@" + gatePath).c_str(), 1);
             ps2_rpl3::resetForTest();
-            uint64_t v = 0u;
+            // RPL4: take is in/out (live in, served out); live carries the
+            // deterministic masked bits (FIFO EMPTY here).
+            const uint64_t live = 0x4000u;
+            uint64_t v = live;
             // Spin at tick 100: idx 0-2 see baseline, idx 3+ see the change.
             for (int i = 0; i < 3; ++i)
             {
+                v = live;
                 t.IsTrue(ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, 100u, v), "spin serves");
                 t.Equals(v, static_cast<uint64_t>(0x4000u), "spin sees baseline");
             }
+            v = live;
             t.IsTrue(ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, 100u, v), "changeover serves");
             t.Equals(v, static_cast<uint64_t>(0x4001u), "changeover sees new value");
             // Stable tick 101 (no notes): last-known.
+            v = live;
             t.IsTrue(ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, 101u, v), "gap tick serves");
             t.Equals(v, static_cast<uint64_t>(0x4001u), "gap tick sees last-known");
             // Tick 102 note applies from its idx.
+            v = live;
             t.IsTrue(ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, 102u, v), "later note serves");
             t.Equals(v, static_cast<uint64_t>(0x4002u), "later note value matches");
             // Past the last note: sticky last-known.
+            v = live;
             t.IsTrue(ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, 500u, v), "exhaustion serves");
             t.Equals(v, static_cast<uint64_t>(0x4002u), "exhaustion is sticky");
-            // Untouched reg: live.
+            // Untouched reg: live (value untouched).
+            v = 0x1234u;
             t.IsTrue(!ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegSiglblid, 100u, v),
                      "unnoted reg stays live");
+            t.Equals(v, static_cast<uint64_t>(0x1234u), "live value passes through");
             ps2_rpl3::resetForTest();
             std::remove(gatePath.c_str());
         });
@@ -2418,12 +2428,255 @@ void register_pad_input_tests()
             t.IsTrue(!ps2_rpl3::takeRtc(rtc), "only one rtc loaded");
             uint16_t set[6] = {0};
             t.IsTrue(!ps2_rpl3::takeMcDate(set), "truncated mc line ignored");
-            uint64_t gs = 0u;
+            uint64_t gs = 0x4000u; // RPL4: live carries masked bits
             t.IsTrue(ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, 10u, gs), "good gsreg serves");
             t.Equals(gs, static_cast<uint64_t>(0x4001u), "good gsreg value matches");
             std::vector<ps2_stubs::PadScriptEntry> entries;
             t.IsTrue(ps2_stubs::parsePadScriptFile(badPath.c_str(), entries),
                      "stream still parses around bad NV lines");
+            ps2_rpl3::resetForTest();
+            std::remove(badPath.c_str());
+        });
+
+        tc.Run("rpl4: gsreg FIELD-only flips leave no notes", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string recPath =
+                (fs::temp_directory_path() / "rpl4_nv_mask_rec.txt").string();
+            std::remove(recPath.c_str());
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::unsetenv("PS2X_PAD_SCRIPT");
+            Pl1EnvGuard recordGuard("PS2X_PAD_RECORD");
+            ::setenv("PS2X_PAD_RECORD", recPath.c_str(), 1);
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            t.IsTrue(ps2_stubs::setPadRecordForTest(recPath.c_str()), "recorder should arm");
+            // FIELD flips every tick; only the SIGNAL change notes.
+            ps2_rpl3::noteGsReg(ps2_rpl3::kGsRegCsr, 100u, 0x4008u);
+            ps2_rpl3::noteGsReg(ps2_rpl3::kGsRegCsr, 101u, 0x6008u);
+            ps2_rpl3::noteGsReg(ps2_rpl3::kGsRegCsr, 102u, 0x4008u);
+            ps2_rpl3::noteGsReg(ps2_rpl3::kGsRegCsr, 103u, 0x6009u);
+            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross),
+                                           0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(100u);
+            runPadRead(ctx, rdram);
+            ps2_stubs::setPadRecordTickForTest(110u);
+            runPadRead(ctx, rdram);
+            ps2_stubs::clearPadOverrideState();
+            ps2_stubs::closePadRecordForTest();
+
+            const std::string content = readFileBytes(recPath);
+            t.IsTrue(content.find("# NV gsreg seq=0 tick=100 idx=0 reg=C val=0000000000004008\n") !=
+                         std::string::npos,
+                     "baseline noted");
+            t.IsTrue(content.find("# NV gsreg seq=1 tick=103 idx=0 reg=C val=0000000000006009\n") !=
+                         std::string::npos,
+                     "masked change noted with full value");
+            t.IsTrue(content.find("seq=2 tick=") == std::string::npos,
+                     "FIELD flips leave no lines");
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries),
+                     "stream still parses around masked lines");
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            closePadPort(ctx, rdram);
+            std::remove(recPath.c_str());
+        });
+
+        tc.Run("rpl4: gsreg serves recorded with live masked bits", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string gatePath =
+                (fs::temp_directory_path() / "rpl4_nv_mask_test.txt").string();
+            {
+                std::FILE *f = std::fopen(gatePath.c_str(), "w");
+                t.IsTrue(f != nullptr, "fixture writable");
+                if (f)
+                {
+                    std::fputs("# padrec v3\n"
+                               "# NV gsreg seq=0 tick=100 idx=0 reg=C val=0000000000004008\n"
+                               "# NV gsreg seq=1 tick=103 idx=0 reg=C val=0000000000006009\n"
+                               "1000:cross:250\n",
+                               f);
+                    std::fclose(f);
+                }
+            }
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + gatePath).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            uint64_t v = 0x4008u; // tick 100: live matches baseline
+            t.IsTrue(ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, 100u, v), "baseline serves");
+            t.Equals(v, static_cast<uint64_t>(0x4008u), "aligned serve is exact");
+            // Tick 101: no note (FIELD flip); live FIELD served through.
+            v = 0x6008u;
+            t.IsTrue(ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, 101u, v), "gap tick serves");
+            t.Equals(v, static_cast<uint64_t>(0x6008u), "live FIELD served");
+            // Tick 103: SIGNAL from the recording even though live lacks it.
+            v = 0x6008u;
+            t.IsTrue(ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, 103u, v), "change serves");
+            t.Equals(v, static_cast<uint64_t>(0x6009u), "recorded SIGNAL served");
+            t.Equals(ps2_rpl3::gsregMismatchCount(), static_cast<uint64_t>(1u),
+                     "one serve differed from live");
+            ps2_rpl3::resetForTest();
+            t.Equals(ps2_rpl3::gsregMismatchCount(), static_cast<uint64_t>(0u),
+                     "counter resets");
+            std::remove(gatePath.c_str());
+        });
+
+        tc.Run("rpl4: xreg round-trips per-address timelines", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string recPath =
+                (fs::temp_directory_path() / "rpl4_nv_xreg_rec.txt").string();
+            std::remove(recPath.c_str());
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::unsetenv("PS2X_PAD_SCRIPT");
+            Pl1EnvGuard recordGuard("PS2X_PAD_RECORD");
+            ::setenv("PS2X_PAD_RECORD", recPath.c_str(), 1);
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            t.IsTrue(ps2_stubs::setPadRecordForTest(recPath.c_str()), "recorder should arm");
+            constexpr uint32_t kVif = 0x10003c00u;
+            constexpr uint32_t kDfb = 0x12000070u;
+            ps2_rpl3::noteXreg(kVif, 50u, 0u);
+            ps2_rpl3::noteXreg(kVif, 50u, 0u);
+            ps2_rpl3::noteXreg(kVif, 50u, 4u);
+            ps2_rpl3::noteXreg(kDfb, 50u, 0x2800u);
+            ps2_rpl3::noteXreg(kDfb, 51u, 0x2800u);
+            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(0xFFFFu & ~kPadBtnCross),
+                                           0x80, 0x80, 0x80, 0x80);
+            ps2_stubs::setPadRecordTickForTest(50u);
+            runPadRead(ctx, rdram);
+            ps2_stubs::setPadRecordTickForTest(60u);
+            runPadRead(ctx, rdram);
+            ps2_stubs::clearPadOverrideState();
+            ps2_stubs::closePadRecordForTest();
+
+            const std::string content = readFileBytes(recPath);
+            t.IsTrue(content.find("# NV xreg seq=0 tick=50 idx=0 addr=10003c00 val=0000000000000000\n") !=
+                         std::string::npos,
+                     "first addr baseline noted");
+            t.IsTrue(content.find("# NV xreg seq=1 tick=50 idx=2 addr=10003c00 val=0000000000000004\n") !=
+                         std::string::npos,
+                     "change noted with spin idx");
+            t.IsTrue(content.find("# NV xreg seq=2 tick=50 idx=0 addr=12000070 val=0000000000002800\n") !=
+                         std::string::npos,
+                     "second addr has its own idx");
+            t.IsTrue(content.find("seq=3 tick=") == std::string::npos,
+                     "stable second addr leaves no line");
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries),
+                     "stream still parses around xreg lines");
+
+            // Serve the recording back: spins, changeover, last-known, live.
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + recPath).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            uint64_t v = 0u;
+            t.IsTrue(ps2_rpl3::takeXreg(kVif, 50u, v), "spin serves");
+            t.Equals(v, static_cast<uint64_t>(0u), "spin sees baseline");
+            v = 0u;
+            t.IsTrue(ps2_rpl3::takeXreg(kVif, 50u, v), "spin serves again");
+            t.Equals(v, static_cast<uint64_t>(0u), "spin still baseline");
+            v = 0u;
+            t.IsTrue(ps2_rpl3::takeXreg(kVif, 50u, v), "changeover serves");
+            t.Equals(v, static_cast<uint64_t>(4u), "changeover sees new value");
+            v = 0x2800u;
+            t.IsTrue(ps2_rpl3::takeXreg(kDfb, 51u, v), "other addr serves");
+            t.Equals(v, static_cast<uint64_t>(0x2800u), "other addr sticky");
+            v = 0xbeefu;
+            t.IsTrue(!ps2_rpl3::takeXreg(0x10003020u, 50u, v), "unnoted addr stays live");
+            t.Equals(v, static_cast<uint64_t>(0xbeefu), "live value passes through");
+            t.Equals(ps2_rpl3::xregMismatchCount(), static_cast<uint64_t>(1u),
+                     "changeover differed from live");
+            t.Equals(ps2_rpl3::xregNoteCount(), static_cast<size_t>(3u), "three notes loaded");
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            closePadPort(ctx, rdram);
+            std::remove(recPath.c_str());
+        });
+
+        tc.Run("rpl4: files without xreg replay as before", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string gatePath =
+                (fs::temp_directory_path() / "rpl4_nv_compat_test.txt").string();
+            {
+                std::FILE *f = std::fopen(gatePath.c_str(), "w");
+                t.IsTrue(f != nullptr, "fixture writable");
+                if (f)
+                {
+                    std::fputs("# padrec v3\n"
+                               "# NV gsreg seq=0 tick=9 idx=0 reg=C val=0000000000004008\n"
+                               "1000:cross:250\n",
+                               f);
+                    std::fclose(f);
+                }
+            }
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + gatePath).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            uint64_t v = 0x4008u;
+            t.IsTrue(ps2_rpl3::takeGsReg(ps2_rpl3::kGsRegCsr, 9u, v), "gsreg still serves");
+            t.Equals(v, static_cast<uint64_t>(0x4008u), "gsreg value matches");
+            v = 0x77u;
+            t.IsTrue(!ps2_rpl3::takeXreg(0x10003c00u, 9u, v), "xreg stays live");
+            t.Equals(v, static_cast<uint64_t>(0x77u), "live value passes through");
+            t.Equals(ps2_rpl3::xregNoteCount(), static_cast<size_t>(0u), "no xreg notes");
+            t.Equals(ps2_rpl3::xregMismatchCount(), static_cast<uint64_t>(0u), "no mismatches");
+            ps2_rpl3::resetForTest();
+            std::remove(gatePath.c_str());
+        });
+
+        tc.Run("rpl4: malformed xreg ignored, every mismatch counted", [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            const std::string badPath =
+                (fs::temp_directory_path() / "rpl4_nv_xbad_test.txt").string();
+            {
+                std::FILE *f = std::fopen(badPath.c_str(), "w");
+                t.IsTrue(f != nullptr, "fixture writable");
+                if (f)
+                {
+                    std::fputs("# padrec v3\n"
+                               "# NV xreg seq=0 tick=7 idx=0 addr=ZZZ val=0000000000000001\n"
+                               "# NV xreg seq=1 tick=7 idx=0 addr=10009000 val=ZZZ\n"
+                               "# NV xreg seq=2 tick=7 idx=0 addr=10009000\n"
+                               "# NV xreg seq=3 tick=7 idx=0 addr=10009000 val=0000000000000001\n"
+                               "1000:cross:250\n",
+                               f);
+                    std::fclose(f);
+                }
+            }
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + badPath).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            t.Equals(ps2_rpl3::xregNoteCount(), static_cast<size_t>(1u), "one good note loaded");
+            uint64_t v = 0u;
+            t.IsTrue(ps2_rpl3::takeXreg(0x10009000u, 7u, v), "good xreg serves");
+            t.Equals(v, static_cast<uint64_t>(1u), "good xreg value matches");
+            v = 0u;
+            t.IsTrue(ps2_rpl3::takeXreg(0x10009000u, 7u, v), "second serve works");
+            t.Equals(ps2_rpl3::xregMismatchCount(), static_cast<uint64_t>(2u),
+                     "both serves differed from live");
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            t.IsTrue(ps2_stubs::parsePadScriptFile(badPath.c_str(), entries),
+                     "stream still parses around bad xreg lines");
             ps2_rpl3::resetForTest();
             std::remove(badPath.c_str());
         });

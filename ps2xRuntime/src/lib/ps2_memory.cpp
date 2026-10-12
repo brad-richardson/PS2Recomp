@@ -929,6 +929,12 @@ uint8_t PS2Memory::read8(uint32_t address)
     {
         uint32_t regAddr = physAddr & ~0x3;
         uint32_t value = readIORegister(regAddr);
+        // RPL4: xreg timeline on the full slot (see read32).
+        const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
+        uint64_t wide = value;
+        if (ps2_rpl3::takeXreg(regAddr, tick, wide))
+            value = static_cast<uint32_t>(wide);
+        ps2_rpl3::noteXreg(regAddr, tick, value);
         uint32_t shift = (physAddr & 3) * 8;
         return static_cast<uint8_t>((value >> shift) & 0xFF);
     }
@@ -964,6 +970,12 @@ uint16_t PS2Memory::read16(uint32_t address)
     {
         uint32_t regAddr = physAddr & ~0x3;
         uint32_t value = readIORegister(regAddr);
+        // RPL4: xreg timeline on the full slot (see read32).
+        const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
+        uint64_t wide = value;
+        if (ps2_rpl3::takeXreg(regAddr, tick, wide))
+            value = static_cast<uint32_t>(wide);
+        ps2_rpl3::noteXreg(regAddr, tick, value);
         uint32_t shift = (physAddr & 2) * 8;
         return static_cast<uint16_t>((value >> shift) & 0xFFFF);
     }
@@ -1009,6 +1021,14 @@ uint32_t PS2Memory::read32(uint32_t address)
         if (!reg)
             return 0;
         uint64_t val = *reg;
+        // RPL4: address-keyed timeline for every other GS priv reg.
+        {
+            const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
+            uint64_t served = val;
+            if (ps2_rpl3::takeXreg(address, tick, served))
+                val = served;
+            ps2_rpl3::noteXreg(address, tick, val);
+        }
         return (uint32_t)(val >> (off * 8));
     }
 
@@ -1031,7 +1051,16 @@ uint32_t PS2Memory::read32(uint32_t address)
     }
     else if (isIoRegister(physAddr))
     {
-        return readIORegister(physAddr);
+        // RPL4: address-keyed timeline for IO regs (VIF/GIF/DMAC/timers).
+        // Direct readIORegister callers (stubs, panel) bypass this path and
+        // stay live, so only guest Load* reads consume timeline idx.
+        uint32_t val = readIORegister(physAddr);
+        const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
+        uint64_t wide = val;
+        if (ps2_rpl3::takeXreg(physAddr, tick, wide))
+            val = static_cast<uint32_t>(wide);
+        ps2_rpl3::noteXreg(physAddr, tick, val);
+        return val;
     }
 
     return 0;
@@ -1070,7 +1099,18 @@ uint64_t PS2Memory::read64(uint32_t address)
             return val;
         }
         uint64_t *reg = gsRegPtr(gs_regs, address);
-        return reg ? *reg : 0;
+        if (!reg)
+            return 0;
+        uint64_t val = *reg;
+        // RPL4: address-keyed timeline (see read32).
+        {
+            const uint64_t tick = gs_regs.vsyncTick.load(std::memory_order_relaxed);
+            uint64_t served = val;
+            if (ps2_rpl3::takeXreg(address, tick, served))
+                val = served;
+            ps2_rpl3::noteXreg(address, tick, val);
+        }
+        return val;
     }
 
     const bool scratch = isScratchpad(address);
@@ -1093,6 +1133,10 @@ uint64_t PS2Memory::read64(uint32_t address)
 
     // 64-bit IO read: compose from the two adjacent 32-bit IO register slots
     // to avoid any side-effects from read32 handlers.
+    // RPL4: deliberately no xreg timeline here: these raw (side-effect-free)
+    // slot reads would share timelines with read32's effected values for
+    // the same addresses. IO registers are EE-side deterministic, so live
+    // is exact; the census shows no 64-bit IO reads in the X2 window.
     if (isIoRegister(address))
     {
         uint32_t lo = m_ioRegisters.count(address) ? m_ioRegisters[address] : 0u;

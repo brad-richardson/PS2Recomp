@@ -178,5 +178,46 @@ namespace ps2_rpl3
     // no notes for this reg (live). Past the last note serves last-known
     // (sticky values; warn once). Tick behind served progress = diverged
     // (warn once, serve last-known).
+    //
+    // RPL4: deterministic-bit masking. CSR bits 15:14 (FIFO, HLE'd constant
+    // EMPTY) and 13 (FIELD, tick parity from the scheduler's VBlank store)
+    // never carry wall timing, so notes fire only on changes outside the
+    // mask (volume: FIELD flips every tick) while the line keeps the full
+    // value. `value` is in/out: live in, served out, where served is the
+    // recorded value with the live masked bits (identical to the recorded
+    // value when aligned; old full-timeline files replay bit-identically).
+    // A serve that differs from live logs one line per reg (cap 32 total)
+    // and counts toward gsregMismatchCount().
+    constexpr uint64_t kGsRegMaskCsr = 0xE000ull;
+    constexpr uint64_t kGsRegMaskSiglblid = 0ull;
+    inline uint64_t gsRegMask(uint32_t reg)
+    {
+        return reg == kGsRegCsr ? kGsRegMaskCsr
+                               : (reg == kGsRegSiglblid ? kGsRegMaskSiglblid : 0ull);
+    }
     bool takeGsReg(uint32_t reg, uint64_t tick, uint64_t &value);
+    uint64_t gsregMismatchCount();
+
+    // RPL4: extended register timelines (xreg). Address-keyed value
+    // timelines for every other GS privileged register the guest reads
+    // plus every IO register it reads (VIF/GIF/DMAC/timers/...), same
+    // baseline-plus-changes shape and (tick, idx) service as gsreg (idx
+    // counts reads of that address within a tick, symmetric both sides).
+    // All xreg addresses use mask 0 (no known deterministic-bit subset).
+    // Files without `xreg` lines leave every address live, so v3 files
+    // replay exactly as before. A serve that differs from live logs the
+    // first mismatch per address (cap 256 lines total) and counts toward
+    // xregMismatchCount(): those lines name which timeline actually
+    // mattered, and silence proves an address replayed live-identical.
+    struct XRegNote
+    {
+        uint64_t tick = 0u;
+        uint64_t idx = 0u;
+        uint32_t addr = 0u;
+        uint64_t value = 0u;
+    };
+    void noteXreg(uint32_t addr, uint64_t tick, uint64_t value);
+    bool takeXreg(uint32_t addr, uint64_t tick, uint64_t &value);
+    uint64_t xregMismatchCount();
+    size_t xregNoteCount();
 } // namespace ps2_rpl3

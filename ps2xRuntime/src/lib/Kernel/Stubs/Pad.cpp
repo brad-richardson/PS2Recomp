@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <mutex>
 #include <chrono>
 #include <cstdio>
@@ -1064,6 +1065,35 @@ namespace ps2_stubs
             uint64_t gsregSeq = 0u;
             bool gsregStaleWarned = false;
             bool gsregExhaustWarned = false;
+            // RPL4: masked-serve mismatch evidence (which timeline mattered).
+            uint64_t gsregMismatch = 0u;
+            uint64_t gsregMismatchLines = 0u;
+            // RPL4: address-keyed timelines (same shape as GsRegTimeline,
+            // one per address instead of per reg enum).
+            struct XRegTimeline
+            {
+                bool recHave = false;
+                uint64_t recTick = 0u;
+                uint64_t recIdx = 0u;
+                uint64_t recValue = 0u;
+                std::vector<ps2_rpl3::XRegNote> notes;
+                size_t cur = 0u;
+                bool haveCur = false;
+                uint64_t curTick = 0u;
+                uint64_t curIdx = 0u;
+                uint64_t curValue = 0u;
+                bool takeTickSet = false;
+                uint64_t takeTick = 0u;
+                uint64_t takeIdx = 0u;
+                bool mismatchLogged = false;
+            };
+            std::map<uint32_t, XRegTimeline> xreg;
+            size_t xregParsed = 0u;
+            uint64_t xregSeq = 0u;
+            bool xregStaleWarned = false;
+            bool xregExhaustWarned = false;
+            uint64_t xregMismatch = 0u;
+            uint64_t xregMismatchLines = 0u;
             uint64_t ignored = 0u;
             bool rtcExhaustWarned = false;
             bool mcExhaustWarned = false;
@@ -1389,6 +1419,26 @@ namespace ps2_stubs
                     .notes.push_back(note);
                 return;
             }
+            if (std::strncmp(p, "xreg ", 5) == 0)
+            {
+                unsigned long long seq = 0u, tick = 0u, idx = 0u, val = 0u;
+                unsigned int addr = 0u;
+                if (std::sscanf(p, "xreg seq=%llu tick=%llu idx=%llu addr=%x val=%llx",
+                                &seq, &tick, &idx, &addr, &val) != 5)
+                {
+                    ++g_rpl3.ignored;
+                    return;
+                }
+                rpl3CheckSeq("xreg", seq, g_rpl3.xregParsed);
+                ps2_rpl3::XRegNote note{};
+                note.tick = tick;
+                note.idx = idx;
+                note.addr = addr;
+                note.value = val;
+                g_rpl3.xreg[addr].notes.push_back(note);
+                ++g_rpl3.xregParsed;
+                return;
+            }
             ++g_rpl3.ignored;
         }
 
@@ -1420,15 +1470,18 @@ namespace ps2_stubs
             }
             const size_t gsregNotes = g_rpl3.gsreg[ps2_rpl3::kGsRegCsr].notes.size() +
                                           g_rpl3.gsreg[ps2_rpl3::kGsRegSiglblid].notes.size();
+            size_t xregNotes = 0u;
+            for (const auto &kv : g_rpl3.xreg)
+                xregNotes += kv.second.notes.size();
             if (!g_rpl3.rtc.empty() || !g_rpl3.mc.empty() || g_rpl3.haveTz || !g_rpl3.sched.empty() ||
-                !g_rpl3.idle.empty() || gsregNotes != 0u)
+                !g_rpl3.idle.empty() || gsregNotes != 0u || xregNotes != 0u)
             {
                 std::fprintf(stderr,
                              "[rpl3] replay values from %s: rtc=%zu mc_dates=%zu tz=%s sched=%zu "
-                             "idle=%zu gsreg=%zu ignored=%llu\n",
+                             "idle=%zu gsreg=%zu xreg=%zu ignored=%llu\n",
                              spec + 1, g_rpl3.rtc.size(), g_rpl3.mc.size(),
                              g_rpl3.haveTz ? "1" : "0", g_rpl3.sched.size(), g_rpl3.idle.size(),
-                             gsregNotes, static_cast<unsigned long long>(g_rpl3.ignored));
+                             gsregNotes, xregNotes, static_cast<unsigned long long>(g_rpl3.ignored));
                 const char *det = std::getenv("PS2X_DETERMINISTIC");
                 if (!det || std::strcmp(det, "1") != 0)
                     std::fprintf(stderr, "[rpl3] WARNING: replaying recorded values without "
@@ -4619,7 +4672,10 @@ namespace ps2_rpl3
                 tl.recIdx = 0u;
             }
             idx = tl.recIdx++;
-            emit = !tl.recHave || value != tl.recValue;
+            // RPL4: deterministic-bit masking (volume); the line keeps the
+            // full value so old and new files serve identically.
+            const uint64_t mask = gsRegMask(reg);
+            emit = !tl.recHave || (value & ~mask) != (tl.recValue & ~mask);
             tl.recHave = true;
             tl.recValue = value;
             if (emit)
@@ -4639,6 +4695,8 @@ namespace ps2_rpl3
     {
         if (reg >= kGsRegCount)
             return false;
+        const uint64_t live = value;
+        const uint64_t mask = gsRegMask(reg);
         std::lock_guard<std::mutex> lock(g_rpl3Mutex);
         rpl3EnsureReplayLoadedLocked();
         Rpl3State::GsRegTimeline &tl = g_rpl3.gsreg[reg];
@@ -4683,11 +4741,9 @@ namespace ps2_rpl3
                              "[rpl3] gsreg read went backward (tick=%llu); serving last-known\n",
                              static_cast<unsigned long long>(tick));
             }
-            value = tl.curValue;
-            return true;
         }
-        if (tl.cur >= tl.notes.size() &&
-            (tick > tl.curTick || (tick == tl.curTick && idx > tl.curIdx)))
+        else if (tl.cur >= tl.notes.size() &&
+                 (tick > tl.curTick || (tick == tl.curTick && idx > tl.curIdx)))
         {
             // Past the last note (open span / longer replay): sticky last-known.
             if (!g_rpl3.gsregExhaustWarned)
@@ -4696,8 +4752,156 @@ namespace ps2_rpl3
                 std::fprintf(stderr, "[rpl3] gsreg notes exhausted; serving last-known\n");
             }
         }
-        value = tl.curValue;
+        // RPL4: serve recorded with live masked bits; count serves that
+        // differ from live (the timeline mattered there).
+        value = (tl.curValue & ~mask) | (live & mask);
+        if (value != live)
+        {
+            ++g_rpl3.gsregMismatch;
+            if (g_rpl3.gsregMismatchLines < 32u)
+            {
+                ++g_rpl3.gsregMismatchLines;
+                std::fprintf(stderr,
+                             "[rpl3] gsreg serve mismatch reg=%c tick=%llu idx=%llu "
+                             "recorded=%016llx live=%016llx\n",
+                             gsRegChar(reg), static_cast<unsigned long long>(tick),
+                             static_cast<unsigned long long>(idx),
+                             static_cast<unsigned long long>(tl.curValue),
+                             static_cast<unsigned long long>(live));
+            }
+        }
         return true;
+    }
+
+    uint64_t gsregMismatchCount()
+    {
+        std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+        rpl3EnsureReplayLoadedLocked();
+        return g_rpl3.gsregMismatch;
+    }
+
+    void noteXreg(uint32_t addr, uint64_t tick, uint64_t value)
+    {
+        uint64_t seq = 0u, idx = 0u;
+        bool emit = false;
+        {
+            std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+            if (!rpl3RecordWantedLocked())
+                return;
+            Rpl3State::XRegTimeline &tl = g_rpl3.xreg[addr];
+            if (!tl.recHave || tick != tl.recTick)
+            {
+                tl.recTick = tick;
+                tl.recIdx = 0u;
+            }
+            idx = tl.recIdx++;
+            emit = !tl.recHave || value != tl.recValue;
+            tl.recHave = true;
+            tl.recValue = value;
+            if (emit)
+                seq = g_rpl3.xregSeq++;
+        }
+        if (!emit)
+            return;
+        char line[128];
+        std::snprintf(line, sizeof(line), "# NV xreg seq=%llu tick=%llu idx=%llu addr=%08x val=%016llx",
+                      static_cast<unsigned long long>(seq), static_cast<unsigned long long>(tick),
+                      static_cast<unsigned long long>(idx), addr,
+                      static_cast<unsigned long long>(value));
+        rpl3EmitLine(line);
+    }
+
+    bool takeXreg(uint32_t addr, uint64_t tick, uint64_t &value)
+    {
+        const uint64_t live = value;
+        std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+        rpl3EnsureReplayLoadedLocked();
+        auto it = g_rpl3.xreg.find(addr);
+        if (it == g_rpl3.xreg.end() || it->second.notes.empty())
+            return false;
+        Rpl3State::XRegTimeline &tl = it->second;
+        if (!tl.takeTickSet || tick != tl.takeTick)
+        {
+            tl.takeTickSet = true;
+            tl.takeTick = tick;
+            tl.takeIdx = 0u;
+        }
+        const uint64_t idx = tl.takeIdx++;
+        while (tl.cur < tl.notes.size() &&
+               (tl.notes[tl.cur].tick < tick ||
+                (tl.notes[tl.cur].tick == tick && tl.notes[tl.cur].idx <= idx)))
+        {
+            tl.haveCur = true;
+            tl.curTick = tl.notes[tl.cur].tick;
+            tl.curIdx = tl.notes[tl.cur].idx;
+            tl.curValue = tl.notes[tl.cur].value;
+            ++tl.cur;
+        }
+        if (!tl.haveCur)
+        {
+            if (!g_rpl3.xregStaleWarned)
+            {
+                g_rpl3.xregStaleWarned = true;
+                std::fprintf(stderr,
+                             "[rpl3] xreg read at tick=%llu before first note; live\n",
+                             static_cast<unsigned long long>(tick));
+            }
+            return false;
+        }
+        if (tick < tl.curTick || (tick == tl.curTick && idx < tl.curIdx))
+        {
+            if (!g_rpl3.xregStaleWarned)
+            {
+                g_rpl3.xregStaleWarned = true;
+                std::fprintf(stderr,
+                             "[rpl3] xreg read went backward (tick=%llu); serving last-known\n",
+                             static_cast<unsigned long long>(tick));
+            }
+        }
+        else if (tl.cur >= tl.notes.size() &&
+                 (tick > tl.curTick || (tick == tl.curTick && idx > tl.curIdx)))
+        {
+            if (!g_rpl3.xregExhaustWarned)
+            {
+                g_rpl3.xregExhaustWarned = true;
+                std::fprintf(stderr, "[rpl3] xreg notes exhausted; serving last-known\n");
+            }
+        }
+        value = tl.curValue;
+        if (value != live)
+        {
+            ++g_rpl3.xregMismatch;
+            if (!tl.mismatchLogged && g_rpl3.xregMismatchLines < 256u)
+            {
+                tl.mismatchLogged = true;
+                ++g_rpl3.xregMismatchLines;
+                std::fprintf(stderr,
+                             "[rpl3] xreg serve mismatch addr=%08x tick=%llu idx=%llu "
+                             "recorded=%016llx live=%016llx\n",
+                             addr, static_cast<unsigned long long>(tick),
+                             static_cast<unsigned long long>(idx),
+                             static_cast<unsigned long long>(tl.curValue),
+                             static_cast<unsigned long long>(live));
+            }
+        }
+        return true;
+    }
+
+    uint64_t xregMismatchCount()
+    {
+        std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+        rpl3EnsureReplayLoadedLocked();
+        return g_rpl3.xregMismatch;
+    }
+
+    size_t xregNoteCount()
+    {
+        std::lock_guard<std::mutex> lock(g_rpl3Mutex);
+        rpl3EnsureReplayLoadedLocked();
+        size_t n = 0u;
+        for (const auto &kv : g_rpl3.xreg)
+            n += kv.second.notes.size();
+        return n;
     }
 
     void resetForTest()
