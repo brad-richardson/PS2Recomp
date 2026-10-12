@@ -15,10 +15,11 @@ default native flags target `armv8.2-a+fp16+dotprod`, so arm64 alone does not
 establish device compatibility. See [AGP](build.gradle#L2) and
 [toolchain/ABI](app/build.gradle#L33). Arbitrary Android devices are not validated.
 
-From `android/`, using your local Gradle installation (no wrapper is committed):
+From `android/`, using the committed Gradle wrapper (Gradle 8.9; no separate
+Gradle installation is needed):
 
 ```sh
-gradle assembleRelease   -Pps2xBootElf=/storage/emulated/0/Android/data/com.ps2x.runner/files/SLUS_207.72   -Pps2xGameCodegenDir=/absolute/local/generated-ee   -Pps2xVu0RecompDir=/absolute/local/generated-vu0   -Pps2xJniLibsDir=/absolute/local/jniLibs
+./gradlew assembleRelease   -Pps2xBootElf=/storage/emulated/0/Android/data/com.ps2x.runner/files/SLUS_207.72   -Pps2xGameCodegenDir=/absolute/local/generated-ee   -Pps2xVu0RecompDir=/absolute/local/generated-vu0   -Pps2xJniLibsDir=/absolute/local/jniLibs
 ```
 
 The JNI directory contains an `arm64-v8a/` subdirectory with matching GE1 and
