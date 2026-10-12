@@ -35,6 +35,16 @@ include(SearchForStuff)
 get_git_version_info()
 write_svnrev_h()
 
+# Existing adapters name shaderc_combined (the adapter links it below), and
+# the public dependency recipe builds that archive. This must be defined
+# before the adapter subdir consumes the name: otherwise CMake records a
+# plain -lshaderc_combined that the linker cannot find. The private recipe
+# meets the same constraint the other way (its adapter builds the bundled
+# target itself; maintainer platform :19, adapter :16).
+add_library(shaderc_combined UNKNOWN IMPORTED)
+set_target_properties(shaderc_combined PROPERTIES IMPORTED_LOCATION "${SHADERC_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${SHADERC_INCLUDE_DIR}")
+
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../vendor-pcsx2/common" "${CMAKE_BINARY_DIR}/common")
 # Supply libretro headers if the vendor dependency search has not added them.
 if(NOT TARGET libretro-headers)
@@ -43,12 +53,6 @@ endif()
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../vendor-pcsx2/pcsx2" "${CMAKE_BINARY_DIR}/pcsx2")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../adapter" "${CMAKE_BINARY_DIR}/ge1-adapter")
 
-
-
-# Existing adapters name shaderc_combined; the public dependency recipe builds that archive.
-add_library(shaderc_combined UNKNOWN IMPORTED)
-set_target_properties(shaderc_combined PROPERTIES IMPORTED_LOCATION "${SHADERC_LIBRARY}"
-    INTERFACE_INCLUDE_DIRECTORIES "${SHADERC_INCLUDE_DIR}")
 add_library(android_chd_stubs STATIC "${CMAKE_CURRENT_SOURCE_DIR}/../adapter/ax4b_android_stubs.cpp")
 target_link_libraries(ge1_gs PRIVATE android_chd_stubs)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../mv2-adapter" "${CMAKE_BINARY_DIR}/mv2-adapter")
