@@ -96,9 +96,12 @@ compilation and on-device playback have not been validated by this lane;
 record errors locally rather than substituting another user's binary pins.
 
 After building, follow [Android setup/save protection](../../android/README.md)
-for local ISO/ELF/resource staging and the 60/120 launcher layers. Use your own
-signing key and preserve it for upgrades. Do not distribute generated code or
-apps containing it.
+for local ISO/ELF/resource staging and the 60/120 launcher layers. `build.py
+android` creates a per-user signing keystore once in your work directory
+(`ssx3-signing.keystore`) and reuses it on every later build, with a
+monotonic `versionCode` from `version-code.txt` in the same directory.
+**Back up your keystore; a different key forces an uninstall, which wipes
+saves.** Do not distribute generated code or apps containing it.
 
 ## Optional local optimization and iOS
 

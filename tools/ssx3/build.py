@@ -128,13 +128,64 @@ def mac(a):
         '--target', 'ps2EntryRunner', *(['ps2x_tests'] if a.suite else []))
 
 
+SIGNING_KEYSTORE = 'ssx3-signing.keystore'
+SIGNING_ALIAS = 'ssx3'
+SIGNING_PASSWORD = 'ssx3local'
+
+
+def ensure_keystore(work):
+    # Per-user signing key, created once in the work dir (never in the
+    # checkout) and reused on every later build. The password is not a
+    # secret; possession of this file is what must be preserved.
+    keystore = work / SIGNING_KEYSTORE
+    if keystore.exists():
+        return keystore
+    keytool = shutil.which('keytool')
+    if not keytool and os.environ.get('JAVA_HOME'):
+        candidate = Path(os.environ['JAVA_HOME'], 'bin/keytool')
+        if candidate.exists():
+            keytool = str(candidate)
+    if not keytool:
+        raise ValueError('keytool not found; install JDK 17 and set JAVA_HOME')
+    print('Creating local signing keystore: ' + str(keystore))
+    print('Back up your keystore; a different key forces an uninstall, which wipes saves.')
+    run(keytool, '-genkeypair', '-keystore', keystore, '-alias', SIGNING_ALIAS,
+        '-storepass', SIGNING_PASSWORD, '-keypass', SIGNING_PASSWORD,
+        '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000',
+        '-dname', 'CN=SSX3 Local Build, OU=Local, O=Local, L=Local, ST=Local, C=US',
+        '-noprompt')
+    return keystore
+
+
+def next_version_code(work):
+    counter = work / 'version-code.txt'
+    last = 1
+    if counter.exists():
+        try:
+            last = int(counter.read_text().strip())
+        except ValueError:
+            last = 1
+    code = last + 1
+    counter.write_text(str(code) + '\n')
+    return code
+
+
 def android(a):
     if not a.jnilibs:
         raise ValueError('android requires --jnilibs; see tools/ssx3/README.md for library recipe')
+    keystore = ensure_keystore(a.work)
+    version_code = next_version_code(a.work)
+    print('Signing with local keystore ' + str(keystore) + ' (versionCode ' + str(version_code) + ').')
+    print('Back up your keystore; a different key forces an uninstall, which wipes saves.')
     run('bash', ROOT / 'android/gradlew', '-p', ROOT / 'android', 'assembleRelease',
         '-Pps2xGameCodegenDir=' + str(a.work / 'codegen'),
         '-Pps2xJniLibsDir=' + str(a.jnilibs.resolve()), '-Pps2xVu0RecompDir=',
         '-Pps2xPgoData=', '-Pps2xBootElf=/storage/emulated/0/Android/data/com.ps2x.runner/files/SLUS_207.72',
+        '-Pps2xVersionCode=' + str(version_code),
+        '-Pps2xKeystoreFile=' + str(keystore),
+        '-Pps2xKeystorePassword=' + SIGNING_PASSWORD,
+        '-Pps2xKeyAlias=' + SIGNING_ALIAS,
+        '-Pps2xKeyPassword=' + SIGNING_PASSWORD,
         '--max-workers=' + str(a.jobs))
 
 

@@ -99,8 +99,14 @@ elsewhere via `PS2X_MC_ROOT`, back up that directory and its port-1 directory to
 Never seed or overwrite an existing card when staging a new build. Keep backups
 private. Restore only deliberately, with the app stopped.
 
-Release builds currently use the debug signing key, `versionCode=1` and
-`versionName=0.1.0` ([configuration](app/build.gradle#L41),
-[signing](app/build.gradle#L119)). Another machine's debug key may prevent an
-in-place upgrade. Preserve your key; a signing error is not a reason to
-uninstall a save-bearing app. See [troubleshooting](../docs/ssx3-troubleshooting.md).
+Builds through `tools/ssx3/build.py android` sign with a per-user keystore
+created once in your work directory (`ssx3-signing.keystore`, never in the
+checkout) and reused on every later build, with a monotonic `versionCode`
+from a counter in the same directory (`version-code.txt`); `versionName`
+stays `0.1.0` ([configuration](app/build.gradle#L41)). **Back up your
+keystore; a different key forces an uninstall, which wipes saves.** Copy
+both files with your backups and restore them before rebuilding on another
+machine. A direct Gradle invocation without the `ps2xKeystore*` /
+`ps2xVersionCode` properties still uses the debug key and `versionCode 1`.
+Preserve your key; a signing error is not a reason to uninstall a
+save-bearing app. See [troubleshooting](../docs/ssx3-troubleshooting.md).

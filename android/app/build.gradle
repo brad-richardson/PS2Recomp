@@ -39,6 +39,15 @@ def ps2xThinLtoCacheDir = project.hasProperty('ps2xThinLtoCacheDir')
 // OFF). Override with --gradle-prop (e.g. ps2xGameIpo=OFF for a control).
 def ps2xGameIpo = project.findProperty('ps2xGameIpo') ?: 'ON'
 def ps2xAndroidMarch = project.findProperty('ps2xAndroidMarch') ?: 'armv8.2-a+fp16+dotprod'
+// PUB1: per-user signing supplied by tools/ssx3/build.py (keystore created
+// once in the caller's work dir, monotonic versionCode from a work-dir
+// counter). Direct Gradle invocations without these properties keep the
+// previous behaviour (debug key, versionCode 1).
+def ps2xVersionCode = (project.findProperty('ps2xVersionCode') ?: '1').toString().toInteger()
+def ps2xKeystoreFile = project.findProperty('ps2xKeystoreFile') ?: ''
+def ps2xKeystorePassword = project.findProperty('ps2xKeystorePassword') ?: ''
+def ps2xKeyAlias = project.findProperty('ps2xKeyAlias') ?: ''
+def ps2xKeyPassword = project.findProperty('ps2xKeyPassword') ?: ''
 
 android {
     androidResources {
@@ -55,7 +64,7 @@ android {
         applicationId 'com.ps2x.runner'
         minSdk 29
         targetSdk 34
-        versionCode 1
+        versionCode ps2xVersionCode
         versionName '0.1.0'
         if (ps2xPgoGen) {
             versionNameSuffix '-pgogen'
@@ -122,6 +131,17 @@ android {
         }
     }
 
+    if (ps2xKeystoreFile) {
+        signingConfigs {
+            ssx3Local {
+                storeFile file(ps2xKeystoreFile)
+                storePassword ps2xKeystorePassword
+                keyAlias ps2xKeyAlias
+                keyPassword ps2xKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         debug {
             externalNativeBuild {
@@ -132,7 +152,7 @@ android {
         }
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            signingConfig ps2xKeystoreFile ? signingConfigs.ssx3Local : signingConfigs.debug
             // PG5 GEN only (see ps2xPgoGenerate): wrap.sh + run-as profile pull.
             debuggable ps2xPgoGen
         }
