@@ -2709,17 +2709,19 @@ void EeScheduler::processDueDeadlines()
         {
             std::unique_lock lock(m_eventMutex);
             // RPL3: gated replay — when a sched gate matches this call's
-            // eeCycle, fire the recorded subset (wall-independent). More than
-            // 32 cycle-due events never happens; fall through if it does.
-            ps2_rpl3::SchedEvent rpl3Due[32];
-            bool rpl3Fire[32] = {false};
+            // eeCycle, fire the recorded subset (wall-independent). The due
+            // buffer takes the shared recorder/parser cap (REV1); a larger
+            // cycle-due set falls through ungated, as the recorder noted no
+            // gate for it (warned at record time).
+            ps2_rpl3::SchedEvent rpl3Due[ps2_rpl3::kSchedGateMaxEvents];
+            bool rpl3Fire[ps2_rpl3::kSchedGateMaxEvents] = {false};
             size_t rpl3DueCount = 0u;
             bool rpl3TooMany = false;
             for (const ScheduledEvent &item : m_deadlines)
             {
                 if (item.deadlineCycle > m_eeCycle)
                     continue;
-                if (rpl3DueCount >= 32u)
+                if (rpl3DueCount >= ps2_rpl3::kSchedGateMaxEvents)
                 {
                     rpl3TooMany = true;
                     break;

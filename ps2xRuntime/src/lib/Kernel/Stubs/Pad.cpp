@@ -1108,6 +1108,7 @@ namespace ps2_stubs
             bool schedMismatchWarned = false;
             bool schedCountWarned = false;
             bool schedWithheldWarned = false;
+            bool schedOversizeWarned = false;
             bool idleStaleWarned = false;
             bool idleMismatchWarned = false;
         };
@@ -1333,7 +1334,10 @@ namespace ps2_stubs
                 int fpos = 0;
                 if (std::sscanf(p, "sched seq=%llu tick=%31s cycle=%llu nf=%llu w=%llu f=%n",
                                 &seq, tick, &cycle, &nf, &w, &fpos) != 5 ||
-                    fpos <= 0 || nf > 64u || w > 64u)
+                    fpos <= 0 ||
+                    nf > static_cast<unsigned long long>(ps2_rpl3::kSchedGateMaxEvents) ||
+                    w > static_cast<unsigned long long>(ps2_rpl3::kSchedGateMaxEvents) ||
+                    nf + w > static_cast<unsigned long long>(ps2_rpl3::kSchedGateMaxEvents))
                 {
                     ++g_rpl3.ignored;
                     return;
@@ -4562,6 +4566,21 @@ namespace ps2_rpl3
             std::lock_guard<std::mutex> lock(g_rpl3Mutex);
             if (!rpl3RecordWantedLocked())
                 return;
+            if (firedCount + withheldCount > kSchedGateMaxEvents)
+            {
+                // REV1: never emit a line the parser would drop; name the
+                // lost gate once instead of diverging silently on replay.
+                if (!g_rpl3.schedOversizeWarned)
+                {
+                    g_rpl3.schedOversizeWarned = true;
+                    std::fprintf(stderr,
+                                 "[rpl3] sched batch at cycle=%llu holds %zu cycle-due events "
+                                 "(cap %zu); not recorded, replay has no gate there\n",
+                                 static_cast<unsigned long long>(cycle),
+                                 firedCount + withheldCount, kSchedGateMaxEvents);
+                }
+                return;
+            }
             seq = g_rpl3.schedSeq++;
         }
         std::string line = "# NV sched seq=" + std::to_string(seq) + " tick=" +

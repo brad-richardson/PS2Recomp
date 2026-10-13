@@ -2241,6 +2241,66 @@ void register_pad_input_tests()
             std::remove(gatePath.c_str());
         });
 
+        tc.Run("REV1: sched caps symmetric (w=65 gates; oversize batch not recorded)",
+               [](TestCase &t)
+               {
+            namespace fs = std::filesystem;
+            // 65 withheld events exceed the old parser cap (w>64 was dropped
+            // wholesale while the recorder emitted it unbounded).
+            std::vector<ps2_rpl3::SchedEvent> withheld;
+            for (uint32_t i = 0; i < 65u; ++i)
+                withheld.push_back({1u, 100u + i, 100u});
+            const ps2_rpl3::SchedEvent fired[] = {{6u, 0u, 90u}};
+
+            const std::string recPath =
+                (fs::temp_directory_path() / "rev1_sched_cap_test.txt").string();
+            std::remove(recPath.c_str());
+            Pl1EnvGuard scriptGuard("PS2X_PAD_SCRIPT");
+            ::unsetenv("PS2X_PAD_SCRIPT");
+            Pl1EnvGuard recordGuard("PS2X_PAD_RECORD");
+            ::setenv("PS2X_PAD_RECORD", recPath.c_str(), 1);
+
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0);
+            R5900Context ctx;
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            ps2_stubs::scePadInit(rdram.data(), &ctx, nullptr);
+            openPadPort(ctx, rdram);
+            t.IsTrue(ps2_stubs::setPadRecordForTest(recPath.c_str()), "recorder should arm");
+            ps2_rpl3::noteSched(10u, 100u, fired, 1u, withheld.data(), withheld.size());
+            // Fired+withheld one past the shared cap: nothing is noted for it.
+            std::vector<ps2_rpl3::SchedEvent> huge(ps2_rpl3::kSchedGateMaxEvents, {1u, 7u, 200u});
+            ps2_rpl3::noteSched(20u, 200u, fired, 1u, huge.data(), huge.size());
+            ps2_stubs::closePadRecordForTest();
+
+            const std::string content = readFileBytes(recPath);
+            t.IsTrue(content.find("nf=1 w=65") != std::string::npos, "w=65 batch recorded");
+            t.IsTrue(content.find("cycle=200") == std::string::npos,
+                     "oversize batch not recorded (warned once)");
+
+            ::setenv("PS2X_PAD_SCRIPT", ("@" + recPath).c_str(), 1);
+            ps2_rpl3::resetForTest();
+            std::vector<ps2_rpl3::SchedEvent> due = {{6u, 0u, 90u}};
+            due.insert(due.end(), withheld.begin(), withheld.end());
+            // takeSched writes one bool per due event (vector<bool> would be
+            // bit-packed, so a plain array).
+            bool *fire = new bool[due.size()]();
+            t.IsTrue(ps2_rpl3::takeSched(100u, due.data(), due.size(), fire),
+                     "w=65 gate applies on replay");
+            bool onlyFirst = fire[0];
+            for (size_t i = 1; i < due.size(); ++i)
+                onlyFirst = onlyFirst && !fire[i];
+            t.IsTrue(onlyFirst, "only the recorded fired event is marked");
+            delete[] fire;
+
+            ps2_stubs::clearPadScriptForTest();
+            ps2_stubs::clearPadRecordForTest();
+            ps2_rpl3::resetForTest();
+            closePadPort(ctx, rdram);
+            std::remove(recPath.c_str());
+        });
+
         tc.Run("rpl3: idle gates force the recorded winner by cycle", [](TestCase &t)
                {
             namespace fs = std::filesystem;

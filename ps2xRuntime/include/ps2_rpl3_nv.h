@@ -66,6 +66,14 @@ namespace ps2_rpl3
         uint64_t cycle = 0; // deadlineCycle
     };
 
+    // REV1 (RV27 F4): one batch-size cap shared by the recorder (noteSched),
+    // the replay parser and the scheduler's gated-replay due buffer, counted
+    // over the whole cycle-due batch (fired + withheld). The old parser
+    // dropped w>64 lines the recorder emitted unbounded, losing the gate
+    // silently; a batch past this cap now warns once at record time and is
+    // not noted. Due sets are normally a handful; 256 covers host hitches.
+    inline constexpr size_t kSchedGateMaxEvents = 256u;
+
     // One mnemonic per EeEventType (ee_scheduler.h order: Stop=0,
     // VBlankStart=1, VBlankEnd=2, Dmac=3, ExternalWake=4, Alarm=5,
     // SoundTick=6). Single source; EeScheduler.cpp static_asserts the order.
