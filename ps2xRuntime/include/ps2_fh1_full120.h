@@ -3891,9 +3891,14 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
         // Scope to pressed contact (pre-query qdepth < 0, where the
         // penetration adjust fires): leaving/lip approaches (qdepth >= 0)
         // keep vnret, preserving lip contact and takeoff behavior.
-        uint32_t pa = getRegU32(ctx, 4), r = 0u, qd = 0u;
+        // REV1 (RV27 F3): trust the chain only under querySkip's surf sanity
+        // ([R+0x438] <= 0xffff); a stale [P+0x18] otherwise leaves qdepth at
+        // its safe 0.0f default (the vnret/status-quo branch, as on a read
+        // failure before) instead of classifying on arbitrary RAM bits.
+        uint32_t pa = getRegU32(ctx, 4), r = 0u, surf = 0u, qd = 0u;
         float qdepth = 0.0f;
-        if (rd32(ram, pa + 0x18u, r) && rd32(ram, r + 0x454u, qd))
+        if (rd32(ram, pa + 0x18u, r) && rd32(ram, r + 0x438u, surf) && surf <= 0xffffu &&
+            rd32(ram, r + 0x454u, qd))
             std::memcpy(&qdepth, &qd, 4);
         uint32_t k;
         if (qdepth < 0.0f)
