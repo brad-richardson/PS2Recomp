@@ -138,4 +138,44 @@ inline bool guardEntry(uint8_t *ram, R5900Context *ctx, Decision *out = nullptr)
     ctx->pc = getRegU32(ctx, 31);
     return true;
 }
+// HNG3 (Brad 10-12 21:35, PB61): the second path. cRiderAnimBase_play
+// (0x3128e8: a0 this, a1 event, a2 arg, f12 blend) asks the picker through
+// the RiderAnim vtable (0x312924 -> 0x104cf8 -> 0x311710) and then, with the
+// SAME event, indexes the static AIAnimEventMap record table 0x446990
+// (0x1C bytes per event; 437 events, the heap map being allocated as
+// 0x6D4 = 437*4 bytes at 0x31187c) through 0x3115c8 and reads [rec+0xC] as
+// an index into the table at 0x48d808 (0x312994 lw $t1). Event 0x6873
+// (26739) got past the picker (the HNG2 guard above returned anim 0 for its
+// zero weight) and the "record" at 0x4fd624 fed a garbage index, so the
+// load at 0x312994 hit 0xfca0cfc8: address error -> 0x80000080, EE frozen.
+// Stock has no range check here; every table the wrapper indexes stops at
+// event 436, so a valid run never passes an event >= 437 and the guard
+// changes only runs that would fault.
+//
+// Guarded result: the wrapper's own "no animation" exit (anim 0x207 at
+// 0x312934 -> epilogue 0x3129b8): $v0 = 0x1B6 and return to $ra. Nothing is
+// skipped that stock would have kept: the first store in 0x3128e8 is at
+// 0x3129b4, after the faulting load. The sibling 0x3129e0 (play by event,
+// no picker) reads the same record and is not wrapped here (HNG3 report).
+inline constexpr uint32_t kPlay = 0x3128e8u;
+inline constexpr uint32_t kEventCount = 437u;       // AIAnimEventMap events 0..436
+inline constexpr uint32_t kPlayNoneResult = 0x1b6u; // what the 0x207 path returns in $v0
+
+inline bool playEventOutOfRange(uint32_t event) noexcept { return event >= kEventCount; }
+
+// The wrapper's work at the play entry. Only a fresh call (pc == entry) is
+// examined; a checkpoint resume inside the function runs the original.
+// Guard: $v0 = kPlayNoneResult and return to $ra, as the 0x207 path would
+// (callee-saved registers and $sp are untouched: the prologue has not run).
+// Returns true when the original must not run.
+inline bool guardPlayEntry(R5900Context *ctx) noexcept
+{
+    if (!ctx || ctx->pc != kPlay)
+        return false;
+    if (!playEventOutOfRange(getRegU32(ctx, 5)))
+        return false;
+    setReturnU32(ctx, kPlayNoneResult);
+    ctx->pc = getRegU32(ctx, 31);
+    return true;
+}
 } // namespace ps2_ssx3_anim_pick

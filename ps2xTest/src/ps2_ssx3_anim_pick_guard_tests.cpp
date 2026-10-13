@@ -44,6 +44,28 @@ namespace
         return ram;
     }
 
+    constexpr uint32_t kThis = 0x0144b6c4u;
+    constexpr uint32_t kSp = 0x01fffd00u;
+    constexpr uint32_t kPlayRa = 0x124d50u;
+
+    // cRiderAnimBase_play(this, event, arg) as the dispatcher presents it at entry.
+    R5900Context playCall(uint32_t event, uint32_t pc = kPlay)
+    {
+        R5900Context ctx{};
+        setReg(ctx, 4, kThis);
+        setReg(ctx, 5, event);
+        setReg(ctx, 6, 0u);
+        setReg(ctx, 16, 0x11111111u);
+        setReg(ctx, 17, 0x22222222u);
+        setReg(ctx, 18, 0x33333333u);
+        setReg(ctx, 28, kGp);
+        setReg(ctx, 29, kSp);
+        setReg(ctx, 31, kPlayRa);
+        setReg(ctx, 2, 0xdeadbeefu);
+        ctx.pc = pc;
+        return ctx;
+    }
+
     R5900Context call(uint32_t event, uint32_t mask, uint32_t pc = kPicker)
     {
         R5900Context ctx{};
@@ -120,4 +142,46 @@ void register_ps2_ssx3_anim_pick_guard_tests()
             t.IsTrue(decide(ram.data(), 0x01fffffeu, 0, 2, kGp) == Decision::Stock, "entry past RAM");
             entry(ram, 9, 0, 0x7fff);
             t.IsTrue(decide(ram.data(), kEventTable, 9, 2, kGp) == Decision::Stock, "span over the cap"); }); });
+
+    // HNG3: the play-wrapper event-range guard (Brad 10-12: event 0x6873 at 0x3128e8).
+    MiniTest::Case("Ps2Ssx3AnimPlayGuard", [](TestCase &tc)
+                   {
+        tc.Run("event range: 0..436 in, 437 and above out", [](TestCase &t)
+               {
+            t.IsFalse(playEventOutOfRange(0u), "0");
+            t.IsFalse(playEventOutOfRange(432u), "432 (count-0 event, still in range)");
+            t.IsFalse(playEventOutOfRange(kEventCount - 1u), "436");
+            t.IsTrue(playEventOutOfRange(kEventCount), "437");
+            t.IsTrue(playEventOutOfRange(0x1b6u), "0x1B6 (the none result is not an event)");
+            t.IsTrue(playEventOutOfRange(0x6873u), "Brad's 0x6873");
+            t.IsTrue(playEventOutOfRange(0xffffffffu), "negative"); });
+        tc.Run("Brad's event at the play entry returns the none result to ra", [](TestCase &t)
+               {
+            auto ctx = playCall(0x6873u);
+            t.IsTrue(guardPlayEntry(&ctx), "guarded");
+            t.Equals(getRegU32(&ctx, 2), kPlayNoneResult, "v0 = 0x1B6");
+            t.Equals(ctx.pc, kPlayRa, "returns to ra");
+            t.Equals(getRegU32(&ctx, 4), kThis, "a0 untouched");
+            t.Equals(getRegU32(&ctx, 5), 0x6873u, "a1 untouched");
+            t.Equals(getRegU32(&ctx, 29), kSp, "sp untouched (prologue never ran)");
+            t.Equals(getRegU32(&ctx, 16), 0x11111111u, "s0 untouched");
+            t.Equals(getRegU32(&ctx, 18), 0x33333333u, "s2 untouched"); });
+        tc.Run("first out-of-range event is guarded, last valid one runs the original", [](TestCase &t)
+               {
+            auto out = playCall(kEventCount);
+            t.IsTrue(guardPlayEntry(&out), "437 guarded");
+            auto in = playCall(kEventCount - 1u);
+            t.IsFalse(guardPlayEntry(&in), "436 original");
+            t.Equals(in.pc, kPlay, "pc untouched");
+            t.Equals(getRegU32(&in, 2), 0xdeadbeefu, "v0 untouched");
+            auto zero = playCall(0u);
+            t.IsFalse(guardPlayEntry(&zero), "event 0 original"); });
+        tc.Run("checkpoint resume inside play runs the original", [](TestCase &t)
+               {
+            auto ctx = playCall(0x6873u, 0x312974u);
+            t.IsFalse(guardPlayEntry(&ctx), "resume label");
+            t.Equals(ctx.pc, 0x312974u, "pc untouched");
+            t.Equals(getRegU32(&ctx, 2), 0xdeadbeefu, "v0 untouched"); });
+        tc.Run("null context is a no-op", [](TestCase &t)
+               { t.IsFalse(guardPlayEntry(nullptr), "null"); }); });
 }

@@ -2452,6 +2452,26 @@ namespace
         g_animPick(rdram, ctx, runtime);
     }
 
+    // HNG3: the same knob also wraps cRiderAnimBase_play (0x3128e8). An event
+    // past the 437-entry AIAnimEventMap takes the wrapper's own "no animation"
+    // exit ($v0 = 0x1B6) instead of indexing the record table out of range
+    // (0x312994 address error -> 0x80000080 freeze; Brad 10-12 21:35).
+    PS2Runtime::RecompiledFunction g_animPlay = nullptr;
+
+    void animPlayWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t event = getRegU32(ctx, 5);
+        if (ps2_ssx3_anim_pick::guardPlayEntry(ctx))
+        {
+            static std::atomic<bool> logged{false};
+            if (!logged.exchange(true))
+                std::fprintf(stderr, "[hng3] out-of-range anim event guarded in play event=%u (table %u)\n", event,
+                             ps2_ssx3_anim_pick::kEventCount);
+            return;
+        }
+        g_animPlay(rdram, ctx, runtime);
+    }
+
     void applyAnimPickGuard(PS2Runtime &runtime)
     {
         if (!ps2_ssx3_anim_pick::enabled())
@@ -2463,6 +2483,12 @@ namespace
         if (!g_animPick || !runtime.replaceFunction(ps2_ssx3_anim_pick::kPicker, &animPickWrapper))
         {
             std::fprintf(stderr, "[hng2] cannot wrap 0x%x\n", ps2_ssx3_anim_pick::kPicker);
+            std::abort();
+        }
+        g_animPlay = runtime.lookupFunction(ps2_ssx3_anim_pick::kPlay);
+        if (!g_animPlay || !runtime.replaceFunction(ps2_ssx3_anim_pick::kPlay, &animPlayWrapper))
+        {
+            std::fprintf(stderr, "[hng3] cannot wrap 0x%x\n", ps2_ssx3_anim_pick::kPlay);
             std::abort();
         }
     }
