@@ -466,7 +466,7 @@ void register_ps2_fh1_fix_tests()
                 t.Equals(fixItem(name), 1ull << bit, "bit name parses back to its bit");
                 t.IsTrue(seen.insert(name).second, "main bit names are unique");
             }
-            t.Equals(seen.size(), size_t{61u}, "61 named main bits (62 slots, ramp internal)");
+            t.Equals(seen.size(), size_t{60u}, "60 named main bits (62 slots, ramp internal, bit 51 reserved)");
             seen.clear();
             for (unsigned bit = 0; bit < 16u; ++bit)
             {
@@ -507,16 +507,14 @@ void register_ps2_fh1_fix_tests()
                 }
                 t.IsTrue(renders, "every parse name renders under a bit: " + name);
             }
-            t.Equals(parsed, size_t{61u + 16u}, "parser accepts exactly the named bits");
+            t.Equals(parsed, size_t{60u + 16u}, "parser accepts exactly the named bits");
         });
 
-        tc.Run("KNC5 bit 51 stays reserved and parses (JMP5 springhold removed)", [](TestCase &t)
+        tc.Run("KNC6 bit 51 stays reserved; retired springhold name refuses", [](TestCase &t)
         {
-            t.Equals(static_cast<uint64_t>(kFixSpringHold), 1ull << 51, "bit 51 reserved");
-            t.IsTrue((kFixAll & kFixSpringHold) == 0u, "excluded from all");
-            t.Equals(parseFix("all,springhold").main, kFixAll | kFixSpringHold, "old envs keep parsing");
-            t.Equals(parseFix("all,springhold,-springhold").main, kFixAll, "opt-out");
-            t.Equals(parseFix("springhold").main, static_cast<uint64_t>(kFixSpringHold), "springhold alone");
+            t.IsTrue((kFixAll & (1ull << 51)) == 0u, "reserved bit excluded from all");
+            t.IsTrue(fixMainBitName(51u) == nullptr, "reserved bit has no name");
+            t.IsTrue(!parseFix("all,springhold").ok, "retired name refuses");
         });
 
         tc.Run("all includes stick2 and clocksign (FH26, Brad 10-02) and both masks", [](TestCase &t)

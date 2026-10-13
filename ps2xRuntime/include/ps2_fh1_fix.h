@@ -68,7 +68,7 @@ enum Fix : uint64_t // FH17: 64-bit (bits 0-31 used by FH13)
     kFixLife2 = 1ull << 45, // LCY2 opt-in: streaming live-age units and replay snapshot input ordinals (class e/d; owner LCY2)
     kFixEnvFilt = 1ull << 42, // FH30 opt-in: 0x2c096c -> 0x2bcf38 squared-gain response at 120 (class a; not in all)
     kFixQuery = 1ull << 50, // JMP3 opt-in: cruise ground query 0x13d1b8 at stock cadence (skip on odd updates; class d; not in all)
-    kFixSpringHold = 1ull << 51, // KNC5: bit reserved (JMP5 springhold removed, no-op). The name still parses so older envs (fork ios/full120.env) don't strict-refuse.
+    // Bit 51 stays reserved (KNC6: retired JMP5 springhold name removed).
     kFixShadowPub = 1ull << 53, // JDR2 opt-in (with query): on query-skipped updates the ground-frame readers 0x2e8938 (R+0x370/0x3a0) and 0x2ed490 (R+0xaac/0xab0) see a half-step extrapolation, restored on return (render-only; not in all)
     kFixVnRet = 1ull << 52, // JMP6 opt-in: 0x13d818 per-update retentions: post-query normal-velocity removal 0x13ec18 and lean brake 0x13e028, r -> sqrt(r) (class a; not in all)
     kFixGroundStep = 1ull << 54, // JMP7 opt-in with query: publish cruise ground query at the stock-time boundary (class d; not in all)
@@ -179,7 +179,6 @@ inline uint64_t fixItem(const std::string &item) noexcept
     if (item == "trails") return kFixTrails;
     if (item == "chase2") return kFixChase2;
     if (item == "query") return kFixQuery;
-    if (item == "springhold") return kFixSpringHold;
     if (item == "vnret") return kFixVnRet;
     if (item == "groundstep") return kFixGroundStep;
     if (item == "trailring") return kFixTrailRing;
@@ -309,7 +308,8 @@ inline bool fixDeltaKnobOn() noexcept
 // Bit index -> parse name (nullptr when unnamed). Bit 14 (kFixRamp) is
 // internal: fixMask() never carries it (the word-table builder derives it
 // in a local), so it stays unnamed and any delta touching an unnamed bit
-// refuses (fail-closed for internal and future bits).
+// refuses (fail-closed for internal and future bits). Bit 51 is reserved
+// after removal of the JMP5 effect and its retired name.
 inline const char *fixMainBitName(unsigned bit) noexcept
 {
     static constexpr const char *kNames[62] = {
@@ -319,7 +319,7 @@ inline const char *fixMainBitName(unsigned bit) noexcept
         "reset", "meter", "boost", "ground", "entry", "rclock", "emitter", "fx", // 24-31
         "clock2", "hudfill", "stick2", "clocksign", "bonusflip", "jcam", "pose", "pid", // 32-39
         "c2cap", "spawn", "envfilt", "ground2", "jcam2", "life2", "input2", "inputchain", // 40-47
-        "trails", "chase2", "query", "springhold", "vnret", "shadowpub", "groundstep", "trailring", // 48-55
+        "trails", "chase2", "query", nullptr, "vnret", "shadowpub", "groundstep", "trailring", // 48-55
         "normcap", "sel5", "sel5b", "boostfill", "stuntchg", "asymk", // 56-61
     };
     return bit < 62u ? kNames[bit] : nullptr;

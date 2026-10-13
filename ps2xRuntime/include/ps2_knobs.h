@@ -319,7 +319,6 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "GE1_RENDERER",
         "GE1_TFX_PREWARM",
         "GE1_UPSCALE",
-        "GE1_VERTEX_KICK",
         "GE1_VK_TURNIP",
         "PS2RECOMP_SCE_SYMBOL_DB",
         "PS2X_ASPECT",
