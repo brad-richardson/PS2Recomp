@@ -566,6 +566,8 @@ namespace ps2_stubs
             uint32_t pictureTraceCount = 0u;
             uint32_t isEndTraceCount = 0u;
             uint32_t devSkipMovieTraceCount = 0u;
+            uint32_t currentMovieLba = 0u;
+            bool currentMovieHole = false;
             std::unordered_map<uint32_t, std::vector<MpegRegisteredCallback>> callbacksByMpeg;
             std::unordered_map<uint32_t, MpegPlaybackState> playbackByMpeg;
             std::unordered_map<uint64_t, std::weak_ptr<MpegNonStreamDelivery>> nonStreamDeliveries;
@@ -1932,6 +1934,8 @@ namespace ps2_stubs
             g_mpeg_stub_state.pictureTraceCount = 0u;
             g_mpeg_stub_state.isEndTraceCount = 0u;
             g_mpeg_stub_state.devSkipMovieTraceCount = 0u;
+            g_mpeg_stub_state.currentMovieLba = 0u;
+            g_mpeg_stub_state.currentMovieHole = false;
             g_mpeg_stub_state.callbacksByMpeg.clear();
             g_mpeg_stub_state.playbackByMpeg.clear();
         }
@@ -1984,6 +1988,24 @@ namespace ps2_stubs
         MpegPlaybackState &playback = getPlaybackState(mpegAddr);
         playback.sawInput = true;
         playback.decodedFrames.push_back(std::move(frame));
+    }
+
+    void notifyMpegCdRead(uint32_t lbn, uint32_t sectors, bool movieHole)
+    {
+        // The supported SSX 3 image puts all MPC extents in this interval.
+        // THX/EABIG/INTRO/INTRO_DJ occupy its tail from 1291697 onward;
+        // Previews, challenge clips and MTNALIVE precede it. Preserve the last movie read
+        // across nonmovie reads so GetPicture knows which target it serves.
+        constexpr uint32_t movieFirst = 1133130u;
+        constexpr uint32_t movieEnd = 1467473u;
+        if (sectors == 0u || lbn >= movieEnd ||
+            static_cast<uint64_t>(lbn) + sectors <= movieFirst)
+        {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
+        g_mpeg_stub_state.currentMovieLba = std::max(lbn, movieFirst);
+        g_mpeg_stub_state.currentMovieHole = movieHole;
     }
 
     void notifyMpegCdStreamStart(PS2Runtime *runtime)
@@ -2515,6 +2537,7 @@ namespace ps2_stubs
         std::shared_ptr<MpegNonStreamDelivery> delivery;
         bool dispatchInput = false;
         bool publishEnd = false;
+        bool retainMovieTarget = false;
         {
             std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
             // Original GetPicture's IPU-busy input request produces cbData
@@ -2566,18 +2589,29 @@ namespace ps2_stubs
         {
             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-            // DEV-ONLY (PS2X_SKIP_MOVIE=1) startup-movie bypass. NOT a fix, and
-            // not on any default path. Bounded to ONE thing: thread 1 does not
-            // PARK in the picture wait below. Everything before this point --
-            // the non-stream delivery, the producer dispatch, the guest's
-            // sceMpegAddBs, the parser feed -- runs exactly as it does with the
-            // flag off. Marking the playback ended puts the state machine in the
+            // A movie omitted by the slim image, or selected by the dev-only
+            // skip knob, exits through the guest's normal end-of-stream word.
+            // Thread 1 does not PARK in the picture wait below. Before this point,
+            // the non-stream delivery, producer dispatch, guest sceMpegAddBs,
+            // and parser feed run normally. Marking playback ended puts the state machine in the
             // same state finishPlaybackStream() and the program-end path already
             // produce, so the guest takes its OWN end-of-stream exit (the RCMP
             // player's counter-bounded re-ask loop at guest 0x3b1050) instead of
             // blocking on a picture this runtime cannot yet deliver. The decoder
             // is deliberately NOT flushed: the bypass synthesizes no frames.
-            if (devSkipMovie() && playback.decodedFrames.empty() && !playback.streamEnded)
+            const bool skipThisMovie = devSkipMovie() || g_mpeg_stub_state.currentMovieHole;
+            // A skipped movie has no final decoded picture. Writing
+            // the fallback black macroblocks into its guest image buffer
+            // leaves the caller's render target black after the end word is
+            // published. Preserve that buffer for nonstartup movies; the
+            // three boot logos keep their previous behavior for det keys.
+            const uint32_t movieLba = g_mpeg_stub_state.currentMovieLba;
+            const bool startupMovie =
+                (movieLba >= 1291697u && movieLba < 1293477u) ||
+                (movieLba >= 1380475u && movieLba < 1467473u);
+            retainMovieTarget = skipThisMovie &&
+                movieLba >= 1133130u && movieLba < 1467473u && !startupMovie;
+            if (skipThisMovie && playback.decodedFrames.empty() && !playback.streamEnded)
             {
                 playback.streamEnded = true;
                 playback.cdStreamGeneration = g_mpeg_stub_state.cdStreamGeneration;
@@ -2726,7 +2760,7 @@ namespace ps2_stubs
         {
             writeDecodedFrameToGuest(rdram, imageAddr, frame);
         }
-        else if (frameCount == 0u)
+        else if (frameCount == 0u && !retainMovieTarget)
         {
             writeBlankMpegFrame(rdram, imageAddr, width, height);
         }
@@ -2758,6 +2792,8 @@ namespace ps2_stubs
         const uint64_t cdStreamBytesDemuxed = g_mpeg_stub_state.cdStreamBytesDemuxed;
         const bool cdStreamEofPending = g_mpeg_stub_state.cdStreamEofPending;
         const bool currentCdStreamEofSeen = g_mpeg_stub_state.currentCdStreamEofSeen;
+        const uint32_t currentMovieLba = g_mpeg_stub_state.currentMovieLba;
+        const bool currentMovieHole = g_mpeg_stub_state.currentMovieHole;
         resetMpegStubStateUnlocked();
         g_mpeg_stub_state.initialized = true;
         g_mpeg_stub_state.cdStreamGeneration = cdStreamGeneration;
@@ -2765,6 +2801,8 @@ namespace ps2_stubs
         g_mpeg_stub_state.cdStreamBytesDemuxed = cdStreamBytesDemuxed;
         g_mpeg_stub_state.cdStreamEofPending = cdStreamEofPending;
         g_mpeg_stub_state.currentCdStreamEofSeen = currentCdStreamEofSeen;
+        g_mpeg_stub_state.currentMovieLba = currentMovieLba;
+        g_mpeg_stub_state.currentMovieHole = currentMovieHole;
         setReturnU32(ctx, 0u);
     }
 

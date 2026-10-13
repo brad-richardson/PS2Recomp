@@ -318,6 +318,11 @@ namespace ps2_stubs
             }
 
             const bool e3ok = readCdSectors(args.lbn, args.sectors, rdram + offset, bytes);
+            if (e3ok)
+            {
+                notifyMpegCdRead(args.lbn, args.sectors,
+                                 ps2x::slim_cd::load(getCdImagePath()).movieHole(args.lbn, args.sectors));
+            }
             if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
             {
                 const uint64_t tick = currentCdStreamTick(runtime);
@@ -642,6 +647,8 @@ namespace ps2_stubs
             }
 
             const bool e3ok = readCdSectors(lbn, sectors, rdram + offset, bytes);
+            if (e3ok)
+                notifyMpegCdRead(lbn, sectors, ps2x::slim_cd::load(getCdImagePath()).movieHole(lbn, sectors));
             if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
             {
                 const uint64_t tick = currentCdStreamTick(runtime);
@@ -1045,6 +1052,9 @@ namespace ps2_stubs
                 const uint32_t readLbn = g_cdStreamingLbn;
                 const size_t readBytes = static_cast<size_t>(sectors) * kCdSectorSize;
                 const bool e3ok = readCdSectors(readLbn, sectors, rdram + offset, readBytes);
+                if (e3ok)
+                    notifyMpegCdRead(readLbn, sectors,
+                                     ps2x::slim_cd::load(getCdImagePath()).movieHole(readLbn, sectors));
                 if (e3ok && ps2_e41_trace::armed()) // E41 cdread log + plant watch
                 {
                     const uint64_t tick = currentCdStreamTick(runtime);

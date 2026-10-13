@@ -1,5 +1,6 @@
 #include "ps2_mtvu.h"
 #include "ps2_cd_overlay.h"
+#include "ps2x/iop/slim_cd_image.h"
 #include <algorithm>
 #include <cctype>
 
@@ -194,6 +195,18 @@ namespace
         if (imagePath.empty())
         {
             return false;
+        }
+
+        const auto slim = ps2x::slim_cd::load(imagePath);
+        if (slim.status == ps2x::slim_cd::Status::Invalid)
+        {
+            std::cerr << "[cd-slim] REFUSED: " << slim.error << std::endl;
+            return false;
+        }
+        if (slim.status == ps2x::slim_cd::Status::Slim)
+        {
+            totalSectorsOut = slim.logicalSectors;
+            return true;
         }
 
         if (!g_cdImageSizeValid || g_cdImageSizePath != imagePath)
@@ -439,6 +452,25 @@ namespace
         return true;
     }
 
+    bool readSlimSectors(const std::filesystem::path &image, const ps2x::slim_cd::Table &table,
+                         uint32_t lbn, uint32_t sectors, uint8_t *dst, size_t byteCount)
+    {
+        if (!dst || uint64_t(lbn) + sectors > table.logicalSectors)
+        { g_lastCdError = -1; return false; }
+        size_t remaining = byteCount;
+        for (const auto &piece : table.pieces(lbn, sectors))
+        {
+            const size_t bytes = std::min(remaining, size_t(piece.sectors) * kCdSectorSize);
+            if (!bytes) break;
+            if (piece.zero) std::memset(dst, 0, bytes);
+            else if (!readHostRange(image, piece.payloadOffset, dst, bytes)) return false;
+            dst += bytes;
+            remaining -= bytes;
+        }
+        g_lastCdError = 0;
+        return true;
+    }
+
     // Serves `f`'s bytes [offset, offset + byteCount) through its TK10
     // composite segments (Image = the disc image, Host = a host file). Shared
     // by the TK3 overlay branch and the TK25c mode alias below.
@@ -594,6 +626,15 @@ namespace
         const std::filesystem::path cdImage = getCdImagePath();
         if (!cdImage.empty())
         {
+            const auto slim = ps2x::slim_cd::load(cdImage);
+            if (slim.status == ps2x::slim_cd::Status::Invalid)
+            { std::cerr << "[cd-slim] REFUSED: " << slim.error << std::endl; g_lastCdError = -1; return false; }
+            if (slim.status == ps2x::slim_cd::Status::Slim)
+            {
+                if (byteCount > size_t(sectors) * kCdSectorSize)
+                { g_lastCdError = -1; return false; }
+                return readSlimSectors(cdImage, slim, lbn, sectors, dst, byteCount);
+            }
             uint64_t totalSectors = 0;
             if (tryGetCdImageTotalSectors(totalSectors))
             {

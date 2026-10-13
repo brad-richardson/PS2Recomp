@@ -20,6 +20,8 @@ ISO_SHA = '3c2f8eb182c9c6208a6e8172a41e61c98f420abe3f42c845f6829aeb9761ebf5'
 ELF_SHA = '1b49d05ca2793922180851b9e1ce9ae2291d61a7863565ac4e71f12e967af7bc'
 PUBLIC_APP_ID = 'com.ssx3.recomp'
 PLAY_APP_ID = 'com.ps2x.runner'
+SECTOR = 2048
+SLIM_MAGIC = b'PS2XSLM1'
 
 
 def run(*args, cwd=None):
@@ -64,6 +66,96 @@ def extract_elf(iso, dest):
     raise ValueError('SLUS_207.72 missing from disc root')
 
 
+def iso_records(iso):
+    """Yield (path, first LBA, byte size) from the pinned ISO9660 tree."""
+    with iso.open('rb') as f:
+        f.seek(16 * SECTOR)
+        pvd = f.read(SECTOR)
+        if pvd[:7] != b'\x01CD001\x01':
+            raise ValueError('expected ISO9660 primary volume descriptor')
+
+        def walk(path, extent, length):
+            f.seek(extent * SECTOR)
+            directory = f.read(length)
+            pos = 0
+            while pos < length:
+                size = directory[pos]
+                if not size:
+                    pos = (pos // SECTOR + 1) * SECTOR
+                    continue
+                entry = directory[pos:pos + size]
+                pos += size
+                if len(entry) < 34 or entry[32] == 1 and entry[33] in (0, 1):
+                    continue
+                name = entry[33:33 + entry[32]].decode('ascii').split(';')[0]
+                lba = struct.unpack_from('<I', entry, 2)[0]
+                bytes_ = struct.unpack_from('<I', entry, 10)[0]
+                child = path + '/' + name if path else name
+                if entry[25] & 2:
+                    yield from walk(child, lba, bytes_)
+                else:
+                    yield child, lba, bytes_
+
+        root = pvd[156:190]
+        yield from walk('', struct.unpack_from('<I', root, 2)[0],
+                        struct.unpack_from('<I', root, 10)[0])
+
+
+def slim_holes(iso):
+    entries = list(iso_records(iso))
+    holes = []
+    names = set()
+    for name, lba, size in entries:
+        upper = name.upper()
+        kind = 1 if upper in ('PAD0.000', 'PAD1.000') else (
+            2 if upper.startswith('DATA/MOVIES/') and upper.endswith('.MPC') else 0)
+        if kind:
+            holes.append((lba, (size + SECTOR - 1) // SECTOR, kind))
+            names.add(upper)
+    if not {'PAD0.000', 'PAD1.000'} <= names or len([h for h in holes if h[2] == 2]) != 14:
+        raise ValueError('expected two pads and fourteen movies')
+    holes.sort()
+    total = iso.stat().st_size // SECTOR
+    for i, (start, count, _) in enumerate(holes):
+        if not count or start + count > total or (i and start < holes[i - 1][0] + holes[i - 1][1]):
+            raise ValueError('overlapping or out-of-range slim hole')
+    return holes
+
+
+def write_slim(iso, output, holes, source_sha):
+    """Write retained sectors and an adjacent versioned LBA table atomically."""
+    if iso.stat().st_size % SECTOR:
+        raise ValueError('ISO size is not sector aligned')
+    total = iso.stat().st_size // SECTOR
+    if output.exists() or Path(str(output) + '.holes').exists():
+        raise ValueError('refusing existing slim image or sidecar')
+    ranges = sorted(holes)
+    if not ranges or len(ranges) > 64:
+        raise ValueError('invalid hole count')
+    cursor = 0
+    with iso.open('rb') as src, output.open('xb') as dst:
+        for start, count, kind in ranges + [(total, 0, 0)]:
+            if start < cursor or start + count > total or kind not in (0, 1, 2):
+                raise ValueError('invalid hole range')
+            src.seek(cursor * SECTOR)
+            remaining = (start - cursor) * SECTOR
+            while remaining:
+                block = src.read(min(8 * 1024 * 1024, remaining))
+                if not block:
+                    raise ValueError('short ISO read')
+                dst.write(block)
+                remaining -= len(block)
+            cursor = start + count
+    if output.stat().st_size != (total - sum(h[1] for h in ranges)) * SECTOR:
+        raise ValueError('slim payload size mismatch')
+    header = SLIM_MAGIC + source_sha.encode('ascii') + struct.pack('<QI', total, len(ranges))
+    if len(source_sha) != 64 or len(header) != 84:
+        raise ValueError('invalid source SHA')
+    table = header + b''.join(struct.pack('<III', *hole) for hole in ranges)
+    Path(str(output) + '.holes').write_bytes(table)
+    return output
+
+
 def compiler():
     # LLVM 20+ is required by the runtime; use caller's CXX or an installed LLVM.
     cxx = os.environ.get('CXX') or shutil.which('clang++')
@@ -91,6 +183,7 @@ def prepare(a):
     extract_elf(iso, elf)
     if sha(elf) != ELF_SHA:
         raise ValueError('extracted ELF SHA256 mismatch')
+    slim = write_slim(iso, a.work / 'SSX3.iso', slim_holes(iso), ISO_SHA)
     gen = a.work / 'generator-source'
     if not gen.exists():
         run('git', 'clone', '--filter=blob:none', '--no-checkout', FORK, gen)
@@ -119,6 +212,8 @@ def prepare(a):
     run(build / 'ps2xRecomp/ps2_recomp', toml)
     register_sha = sha(output / 'register_functions.cpp')
     (a.work / 'inputs.json').write_text(json.dumps({'iso': str(iso), 'iso_sha256': ISO_SHA,
+        'slim_iso': str(slim), 'slim_sha256': sha(slim),
+        'slim_table_sha256': sha(Path(str(slim) + '.holes')),
         'elf_sha256': ELF_SHA, 'generator': GENERATOR, 'register_sha256': register_sha,
         'symbol_names_sha256': sha(a.symbol_names) if a.symbol_names else None,
         'toml_sha256': sha(ROOT / 'games/ssx3/ssx3.toml'),
@@ -249,7 +344,7 @@ def libs(a):
 def play(a):
     inputs = json.loads((a.work / 'inputs.json').read_text())
     env = os.environ.copy()
-    env.update({'PS2X_CD_IMAGE': inputs['iso'], 'PS2X_MC_ROOT': str(a.work / 'mc0'),
+    env.update({'PS2X_CD_IMAGE': inputs['slim_iso'], 'PS2X_MC_ROOT': str(a.work / 'mc0'),
         'PS2X_SKIP_MOVIE': '1', 'PS2X_GS_BACKEND': 'external',
         'PS2X_GS_EXTERNAL_LIBRARY': str(a.work / 'libs-build/ge1-adapter/libge1_gs.dylib'),
         'PS2X_MICROVU_LIB': str(a.work / 'libs-build/libmv2_microvu.dylib'),
@@ -336,7 +431,8 @@ def stage(a):
     print('  adb shell am force-stop ' + a.app_id)
     print('  adb shell mkdir -p ' + device + '/ge1-resources ' + device + '/ge1-data ' + device + '/mc0')
     print('  adb push ' + str(a.work / 'SLUS_207.72') + ' ' + device + '/SLUS_207.72')
-    print('  adb push "' + str(inputs['iso']) + '" ' + device + '/SSX3.iso')
+    print('  adb push "' + str(inputs['slim_iso']) + '" ' + device + '/SSX3.iso')
+    print('  adb push "' + str(inputs['slim_iso']) + '.holes" ' + device + '/SSX3.iso.holes')
     print('  adb push ' + str(files / 'ps2x.env') + ' ' + device + '/ps2x.env')
     print('  adb push ' + str(files / 'full120.env') + ' ' + device + '/full120.env')
     print('  adb push ' + str(files / 'ge1-resources') + '/. ' + device + '/ge1-resources/')
@@ -362,19 +458,33 @@ def apk_package(apk):
     return subprocess.check_output([str(tools[0]), 'dump', 'packagename', str(apk)], text=True).strip()
 
 
+def verified_disc_payload(work, inputs):
+    iso = Path(inputs['iso'])
+    slim = Path(inputs['slim_iso'])
+    table = Path(str(slim) + '.holes')
+    if sha(iso) != inputs['iso_sha256'] or sha(work / 'SLUS_207.72') != inputs['elf_sha256']:
+        raise ValueError('disc or extracted ELF changed since prepare')
+    if sha(slim) != inputs['slim_sha256'] or sha(table) != inputs['slim_table_sha256']:
+        raise ValueError('slim image or table changed since prepare')
+    return [(slim, 'SSX3.iso'), (table, 'SSX3.iso.holes'),
+            (work / 'SLUS_207.72', 'SLUS_207.72')]
+
+
 def install(a):
     if a.app_id == PLAY_APP_ID:
         raise ValueError('public install refuses the maintainer play package')
+    inputs = json.loads((a.work / 'inputs.json').read_text())
+    disc_sources = verified_disc_payload(a.work, inputs)
+    if a.dry_run:
+        for source_path, relative in disc_sources:
+            print(f'Would copy {source_path} ({source_path.stat().st_size} bytes) to {relative}')
+        return
     files = stage(a)
     apk = ROOT / 'android/app/build/outputs/apk/release/app-release.apk'
     if not apk.is_file():
         raise ValueError('missing release APK; run android first')
     if apk_package(apk) != a.app_id:
         raise ValueError('release APK package differs from --app-id; refusing install')
-    inputs = json.loads((a.work / 'inputs.json').read_text())
-    iso = Path(inputs['iso'])
-    if sha(iso) != inputs['iso_sha256'] or sha(a.work / 'SLUS_207.72') != inputs['elf_sha256']:
-        raise ValueError('disc or extracted ELF changed since prepare')
     device = '/sdcard/Android/data/' + a.app_id + '/files'
     # The APK contains code and libraries only. adb install -r preserves app data.
     adb(a, 'install', '-r', apk)
@@ -383,8 +493,8 @@ def install(a):
     adb(a, 'shell', 'am', 'force-stop', a.app_id)
     adb(a, 'shell', 'mkdir', '-p', *(shlex.quote(p) for p in
         (device, device + '/ge1-resources', device + '/ge1-data', device + '/mc0')))
-    sources = [(iso, 'SSX3.iso'), (a.work / 'SLUS_207.72', 'SLUS_207.72'),
-               (files / 'ps2x.env', 'ps2x.env'), (files / 'full120.env', 'full120.env')]
+    sources = disc_sources + [(files / 'ps2x.env', 'ps2x.env'),
+                              (files / 'full120.env', 'full120.env')]
     sources += [(p, 'ge1-resources/' + p.relative_to(files / 'ge1-resources').as_posix())
                 for p in sorted((files / 'ge1-resources').rglob('*')) if p.is_file()]
     for source_path, relative in sources:
@@ -412,6 +522,7 @@ def main():
     p.add_argument('--iso', type=Path, help='own supported USA disc image (prepare only)')
     p.add_argument('--symbol-names', type=Path, help='optional local names sidecar for development codegen')
     p.add_argument('--serial', help='adb device serial for install')
+    p.add_argument('--dry-run', action='store_true', help='check and list install disc payload without touching a device')
     p.add_argument('--jnilibs', type=Path, help='own source-built Android JNI libraries')
     p.add_argument('--ndk', type=Path, help='local Android NDK 28.2.13676358')
     p.add_argument('--suite', action='store_true', help='also build optional Mac development suite and its analyzer/recompiler fixtures')

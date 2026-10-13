@@ -5,6 +5,7 @@
 #include "../core/iop_memory.h"
 #include "ps2x/iop/iop_host.h"
 #include "ps2x/iop/ps2_path.h"
+#include "ps2x/iop/slim_cd_image.h"
 
 #include <algorithm>
 #include <array>
@@ -671,17 +672,49 @@ namespace ps2x::iop::detail
             const std::string imagePath = host.hostPath(HostPathKind::CdImage);
             if (!imagePath.empty())
             {
+                const auto slim = ps2x::slim_cd::load(imagePath);
+                if (slim.status == ps2x::slim_cd::Status::Invalid ||
+                    (slim.status == ps2x::slim_cd::Status::Slim &&
+                     uint64_t(lsn) + sectors > slim.logicalSectors))
+                {
+                    lastError = kCdvdErrorRead;
+                    return false;
+                }
                 if (imageHandle == 0u)
                     imageHandle = host.openHostFile(imagePath);
                 if (imageHandle != 0u)
                 {
-                    size_t bytesRead = 0u;
-                    read = host.readHostFile(imageHandle,
-                                             static_cast<uint64_t>(lsn) * kSectorSize,
-                                             bytes.data(),
-                                             byteCount,
-                                             bytesRead) &&
-                           bytesRead == byteCount;
+                    if (slim.status == ps2x::slim_cd::Status::Slim)
+                    {
+                        read = true;
+                        size_t offset = 0;
+                        for (const auto &piece : slim.pieces(lsn, sectors))
+                        {
+                            const size_t length = size_t(piece.sectors) * kSectorSize;
+                            if (!piece.zero)
+                            {
+                                size_t bytesRead = 0u;
+                                if (!host.readHostFile(imageHandle, piece.payloadOffset,
+                                                       bytes.data() + offset, length, bytesRead) ||
+                                    bytesRead != length)
+                                { read = false; break; }
+                            }
+                            offset += length;
+                        }
+                    }
+                    else
+                    {
+                        size_t bytesRead = 0u;
+                        read = host.readHostFile(imageHandle,
+                                                 static_cast<uint64_t>(lsn) * kSectorSize,
+                                                 bytes.data(), byteCount, bytesRead) &&
+                               bytesRead == byteCount;
+                    }
+                }
+                if (slim.status == ps2x::slim_cd::Status::Slim && !read)
+                {
+                    lastError = kCdvdErrorRead;
+                    return false;
                 }
             }
 
