@@ -101,6 +101,13 @@ namespace ps2_net
         {
             return (handle * 7u + tick * 13u) % 17u;
         }
+        // SEC1: bound per-handle held bytes. The hold accumulates socket
+        // bytes across polls; a malicious server could otherwise grow it
+        // without bound by streaming. Legit traffic is one <=64 KB
+        // message per delivery and drains every poll, so this never
+        // triggers legitimately. When full we stop reading and let TCP
+        // backpressure hold the sender instead of dropping stream bytes.
+        constexpr size_t kRecvHoldCap = 256u * 1024u;
         std::map<uint32_t, std::vector<uint8_t>> g_recvHold;
         std::atomic<bool> g_lockstepLink{false};  // any gmlk link up (ONL5-P3)
         std::map<uint32_t, uint32_t> g_recvReady;
@@ -775,6 +782,12 @@ namespace ps2_net
     std::map<uint32_t, P2pUtil> g_p2pUtil;  // gmut handle
     std::map<uint32_t, P2pLink> g_p2pLink;  // gmlk handle
     constexpr uint32_t kCommRefBase = 0x00C00000u;
+    // SEC1: bound queued P2P packets. A flooder that can reach the UDP
+    // port could otherwise grow rxq/pendq without bound (each datagram
+    // <= ~2 KB, 64 per pump, no drain without an armed guest record).
+    // Legit traffic drains every pump, so the cap never triggers
+    // legitimately; newest packets win (oldest dropped first).
+    constexpr size_t kP2pRxCap = 512u;
 
     uint16_t envPort(const char *name, uint16_t dflt)
     {
@@ -882,10 +895,37 @@ namespace ps2_net
                 {
                     break;
                 }
-                if (!u.peerKnown || (u.mode & 1u))
+                // SEC1: learn-then-enforce the peer source address. Connect
+                // mode pins the spec address at conn time; listen mode
+                // learns it from the first hello (the connect side hellos
+                // until acked, and no race packet flows before the
+                // hello/ack exchange, so this cannot deadlock legit play).
+                // Afterwards datagrams from any other source address are
+                // dropped: without this any host that can reach the UDP
+                // port can inject race packets, force the link connected,
+                // or keep a dead link's 30 s last-receive check fresh.
+                // Only the address is checked, never the port, so NAT
+                // source-port remapping still works. Residual: a blind
+                // off-path spoofer forging the peer's source address;
+                // closing that needs a lobby-issued session token (SEC1).
+                const bool isListen = (u.mode & 1u) != 0u;
+                if (!u.peerKnown && !isListen)
                 {
+                    u.peerKnown = true;
+                }
+                if (isListen && !u.peerKnown)
+                {
+                    if (std::memcmp(buf, "O5HI", 4) != 0)
+                    {
+                        continue;
+                    }
                     u.peer = from;
                     u.peerKnown = true;
+                }
+                if (u.peerKnown &&
+                    from.sin_addr.s_addr != u.peer.sin_addr.s_addr)
+                {
+                    continue;
                 }
                 u.lastRxMs = static_cast<uint32_t>(hostMillis());
                 if (std::memcmp(buf, "O5HI", 4) == 0)
@@ -915,6 +955,11 @@ namespace ps2_net
                     {
                         if (lk.second.util == kv.first)
                         {
+                            // SEC1: drop oldest at the cap (see kP2pRxCap).
+                            if (lk.second.rxq.size() >= kP2pRxCap)
+                            {
+                                lk.second.rxq.erase(lk.second.rxq.begin());
+                            }
                             lk.second.rxq.emplace_back(buf + 4, buf + r);
                             lk.second.rxPkts++;
                             queued = true;
@@ -922,6 +967,10 @@ namespace ps2_net
                     }
                     if (!queued)
                     {
+                        if (u.pendq.size() >= kP2pRxCap)
+                        {
+                            u.pendq.erase(u.pendq.begin());
+                        }
                         u.pendq.emplace_back(buf + 4, buf + r);
                     }
                 }
@@ -1581,8 +1630,12 @@ namespace ps2_net
                     {
                         auto hn = g_recvHold.find(w4);
                         const bool fresh = (hn == g_recvHold.end());
+                        const size_t held = fresh ? 0u : hn->second.size();
                         const int fd = getSocket(w4);
-                        if (fd >= 0)
+                        // SEC1: stop reading at the cap; TCP backpressure
+                        // (kernel-bounded socket buffers) holds the sender
+                        // while the guest drains the hold via deliveries.
+                        if (fd >= 0 && held < kRecvHoldCap)
                         {
                             uint8_t tmp[65536];
                             const ssize_t r = ::recv(fd, tmp, sizeof(tmp), 0);
