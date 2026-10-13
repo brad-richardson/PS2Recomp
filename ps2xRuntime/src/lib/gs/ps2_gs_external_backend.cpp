@@ -1114,6 +1114,17 @@ public:
                 std::exit(78);
             }
             std::fprintf(stderr, "[gs:external] GE1 Full live GS loaded: %s\n", path);
+#if defined(__ANDROID__)
+            // PUB4: the [tier] line logs the preset choice before the load
+            // attempt; the vendor loader falls back to the system driver
+            // (flipping GE1_VK_TURNIP to "0"), so log what actually loaded.
+            if (const char *pub = std::getenv("PS2X_PUBLIC_APP"); pub && std::strcmp(pub, "1") == 0)
+            {
+                const char *loaded = std::getenv("GE1_VK_TURNIP");
+                std::fprintf(stderr, "[tier] driver_loaded=%s\n",
+                             loaded && std::strcmp(loaded, "1") == 0 ? "Turnip" : "system");
+            }
+#endif
             // AD1: ADPF reuses this accounting, so it turns it on too.
             m_perfTail = ps2x::perflog::enabled() || ps2x::adpf::enabled();
         }
