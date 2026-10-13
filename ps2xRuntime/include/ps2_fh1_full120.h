@@ -99,9 +99,28 @@ inline std::atomic<uint64_t> g_stockHalf{0};       // FH5 accumulator (half a ti
 inline std::atomic<uint64_t> g_stockHalfExact{0};  // FH17: elapsed stock half-periods = guest time
 inline bool g_stockInit = false;
 
+// REV1 (RV32 F10): a pool-word mismatch in a play build disables full-120
+// for the session (the session continues at stock 60) instead of aborting
+// the app; dev/test builds keep the abort so gates surface the surprise.
+// Play builds are the shipped Android/iOS apps; the Mac runner and the
+// suite are dev/test.
+#if defined(__ANDROID__) || defined(PS2X_IOS)
+inline constexpr bool kFull120PlayBuild = true;
+#else
+inline constexpr bool kFull120PlayBuild = false;
+#endif
+inline std::atomic<bool> g_full120Refused{false};
+inline bool full120Refused() noexcept
+{
+    return g_full120Refused.load(std::memory_order_relaxed);
+}
+inline void refuseFull120ForSession(const char *why) noexcept; // after g_patched
+
 // Guest VBlanks per stock VBlank period (static view: 2 in always mode).
 inline uint32_t vblankDivisor() noexcept
 {
+    if (full120Refused())
+        return 1u;
     if (mode() == Mode::Always)
         return 2u;
     if (mode() == Mode::Events)
@@ -122,7 +141,8 @@ inline uint32_t schedDivisor() noexcept
 // mode only while the guest flip is active.
 inline bool hooksOn() noexcept
 {
-    return mode() == Mode::Always || (mode() == Mode::Events && g_guestActive);
+    return !full120Refused() &&
+           (mode() == Mode::Always || (mode() == Mode::Events && g_guestActive));
 }
 
 // log2 of the EE clock multiplier (charged cycles = cycles >> shift).
@@ -140,6 +160,8 @@ inline uint32_t eeClockShift() noexcept
 // Current EE shift (events: only while committed active).
 inline uint32_t eeClockShiftNow() noexcept
 {
+    if (full120Refused())
+        return 0u;
     if (mode() == Mode::Events)
         return g_commitActive ? eeClockShift() : 0u;
     return eeClockShift();
@@ -253,7 +275,11 @@ inline void inputChainPoolStep(uint8_t *ram, bool odd) noexcept
         wr32(ram, w.address, odd ? 0u : w.expected);
 }
 
-inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &masks = fixMasks());
+// False only on a play-build pool-word mismatch (REV1): on enter nothing
+// was written (verification precedes every write); on exit the stock words
+// were force-written so the caller can still complete the flip to stock.
+inline bool applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &masks = fixMasks(),
+                       bool playBuild = kFull120PlayBuild);
 
 #include "ps2_fh1_life2.inl"
 
@@ -285,7 +311,11 @@ inline void patchAtManagerInit(uint8_t *ram)
         std::fprintf(stderr, "fh1-full120-refused manager ptr=%08x\n", a);
         std::abort();
     }
-    applyWords(ram, a, true);
+    if (!applyWords(ram, a, true))
+    {
+        refuseFull120ForSession("pool word mismatch at manager init");
+        return;
+    }
     std::fprintf(stderr, "fh1-full120-armed manager=%08x rate=120 dt=%08x vblank_div=%u ee_x=%u fix=0x%llx\n",
                  a, kHundredTwentieth, vblankDivisor(), 1u << eeClockShift(),
                  static_cast<unsigned long long>(fixMask()));
@@ -299,7 +329,7 @@ inline constexpr uint32_t kAsymKPoolK = 0x49c124u;
 // The word table, applied in either direction (FH5): toActive expects the
 // stock value and writes the replacement; the reverse expects the
 // replacement. Every word is verified before any write; a mismatch refuses.
-inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &masks)
+inline bool applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &masks, bool playBuild)
 {
     const std::array<Word, 127> words = {{
         {0u, a + 0x10u, 60u, 120u, "rate"},
@@ -626,6 +656,7 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &
     for (const auto &w : words12)
         if ((masks.fh12 & w.first) != 0u)
             all.push_back(w.second);
+    bool mismatch = false;
     for (const Word &w : all)
     {
         // TRN2 asymk owns 0x49c124 while on (per-update 0/stock/vnret by
@@ -640,7 +671,16 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &
         {
             std::fprintf(stderr, "fh1-full120-refused word=%s addr=%08x got=%08x expected=%08x (%s)\n",
                          w.label, w.address, got, want, toActive ? "enter" : "exit");
-            std::abort();
+            if (!playBuild)
+                std::abort();
+            // REV1 play build: on enter nothing has been written yet, so the
+            // guest keeps its (unexpected-content) stock words untouched; on
+            // exit fall through and force-write the stock words so the flip
+            // to stock still completes. The caller disables the session.
+            if (toActive)
+                return false;
+            mismatch = true;
+            break;
         }
     }
     for (const Word &w : all)
@@ -648,6 +688,7 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &
     if ((mask & kFixInputChain) != 0u)
         inputChainPoolFlip(ram, toActive);
     std::fprintf(stderr, "fh1-full120 words=%zu %s\n", all.size(), toActive ? "active" : "stock");
+    return !mismatch;
 }
 
 // ---- Observation tap (PS2X_FH1_TAP=1; env-only, any build) ----------------
@@ -750,6 +791,18 @@ inline bool tapOn() noexcept
 
 // Set once the manager words are converted (EE thread only).
 inline bool g_patched = false;
+
+// REV1: latch full-120 off for the rest of the session (play-build
+// pool-word mismatch). Clears every staged events transition so the
+// scheduler, pacer and EE shift all settle at stock from the next
+// interval; onBranch early-outs while refused, so no new request is made.
+inline void refuseFull120ForSession(const char *why) noexcept
+{
+    if (g_full120Refused.exchange(true, std::memory_order_relaxed))
+        return;
+    g_schedActive = g_commitActive = g_flipPending = g_guestActive = g_patched = false;
+    std::fprintf(stderr, "fh1-full120-disabled %s: full-120 off for this session (stock 60)\n", why);
+}
 
 inline bool clockFix() noexcept
 {
@@ -1216,12 +1269,20 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
         std::fprintf(stderr, "fh1-full120-refused events flip: manager ptr=%08x\n", a);
         std::abort();
     }
+    // REV1: words first, so a play-build enter mismatch returns with no
+    // flip side effect yet applied (the side effects below commute with the
+    // word writes inside this dispatch).
+    const bool wordsOk = applyWords(ram, a, toActive);
+    if (!wordsOk && toActive)
+    {
+        refuseFull120ForSession("pool word mismatch on events enter");
+        return;
+    }
     if (jcam2Fix()) jcam2Reset();
     if (toActive && queryFix()) queryHoldReset();
     pubReset(); // JDR2: no publication sample survives a flip
     stuntchgReset(); // REV1: no FLP3 latch/delay survives a flip (idle cannot age at stock rate)
     if (life2Fix()) life2Flip(ram, a, toActive);
-    applyWords(ram, a, toActive);
     if (clockFix())
         restamp10s(ram, a, toActive);
     if (!toActive)
@@ -1241,6 +1302,8 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
     if (lines++ < 64u)
         std::fprintf(stderr, "fh1-events flip %s tick=%llu\n", toActive ? "enter" : "exit",
                      static_cast<unsigned long long>(tick));
+    if (!wordsOk) // exit mismatch: stock words were force-restored above
+        refuseFull120ForSession("pool word mismatch on events exit (stock force-restored)");
 }
 
 inline uint64_t g_lastTick = 0u;
@@ -4017,6 +4080,8 @@ inline bool onBranchT(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32
 // miss is provably inert (census §1) and returns "don't skip" directly.
 __attribute__((noinline)) inline bool onBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc, PS2Runtime *runtime = nullptr)
 {
+    if (full120Refused())
+        return false; // REV1: session disabled after a play-build mismatch
     if (hookPreclassify())
     {
         const HookInterest &hi = activeHookInterest();
@@ -4212,7 +4277,7 @@ inline void onVBlank(uint8_t *ram, uint64_t tick, GS &gs)
                              static_cast<unsigned long long>(stockHalfTicksLegacy()));
         }
     }
-    if (mode() == Mode::Always && !g_patched)
+    if (mode() == Mode::Always && !g_patched && !full120Refused())
     {
         uint32_t a = 0u, rate = 0u, dt = 0u;
         if (rd32(ram, kMgrPtr, a) && a && !(a & 3u) && rd32(ram, a + 0x10u, rate) &&

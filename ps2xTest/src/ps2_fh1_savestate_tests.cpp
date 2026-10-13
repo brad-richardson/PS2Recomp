@@ -308,6 +308,57 @@ void register_ps2_fh1_savestate_tests()
             ps2_fh1::clearHostCachesForLoad();
         });
 
+        tc.Run("REV1: play-build pool-word mismatch returns false, never aborts", [](TestCase &t)
+        {
+            using namespace ps2_fh1;
+            t.IsFalse(kFull120PlayBuild, "the suite is a dev/test build (abort path compiled in)");
+            std::vector<uint8_t> ram(PS2_RAM_SIZE);
+            constexpr uint32_t manager = 0x1000u;
+            auto stock = [&]() {
+                wr32(ram.data(), manager + 0x10u, 60u);
+                wr32(ram.data(), manager + 0x14u, kSixtieth);
+                wr32(ram.data(), manager + 0x24u, 0x3f800000u);
+                wr32(ram.data(), 0x49c124u, 0xbecccccdu);
+                wr32(ram.data(), 0x49c0a8u, 0x3f666666u);
+            };
+            const FixMasks masks = parseFix("vnret");
+            // Enter with an unexpected pool word: refused, nothing written.
+            stock();
+            wr32(ram.data(), 0x49c124u, 0xdeadbeefu);
+            t.IsFalse(applyWords(ram.data(), manager, true, masks, true),
+                      "enter mismatch refused (play build)");
+            uint32_t v = 0u;
+            rd32(ram.data(), manager + 0x10u, v);
+            t.Equals(v, 60u, "manager untouched after enter refusal");
+            rd32(ram.data(), 0x49c124u, v);
+            t.Equals(v, 0xdeadbeefu, "unexpected word left as found");
+            // Clean enter, then exit with a corrupted converted word: stock
+            // words are force-written and the refusal is still reported.
+            stock();
+            t.IsTrue(applyWords(ram.data(), manager, true, masks, true), "clean enter applies");
+            wr32(ram.data(), 0x49c0a8u, 0xdeadbeefu);
+            t.IsFalse(applyWords(ram.data(), manager, false, masks, true),
+                      "exit mismatch refused (play build)");
+            rd32(ram.data(), manager + 0x10u, v);
+            t.Equals(v, 60u, "manager stock after forced exit");
+            rd32(ram.data(), 0x49c124u, v);
+            t.Equals(v, 0xbecccccdu, "vnret word stock after forced exit");
+            rd32(ram.data(), 0x49c0a8u, v);
+            t.Equals(v, 0x3f666666u, "lean word stock after forced exit");
+            // Session refusal settles every staged transition at stock.
+            g_schedActive = g_commitActive = g_flipPending = g_guestActive = g_patched = true;
+            refuseFull120ForSession("test");
+            t.IsTrue(full120Refused(), "refusal latched");
+            t.IsTrue(!g_schedActive && !g_commitActive && !g_flipPending && !g_guestActive &&
+                         !g_patched,
+                     "staged transitions cleared");
+            t.Equals(vblankDivisor(), 1u, "stock divisor while refused");
+            t.Equals(eeClockShiftNow(), 0u, "stock EE shift while refused");
+            t.IsFalse(hooksOn(), "hooks off while refused");
+            g_full120Refused.store(false); // leave the process as we found it
+            setFresh();
+        });
+
         tc.Run("truncated payload refuses", [](TestCase &t)
         {
             setFresh();
