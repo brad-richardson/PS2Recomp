@@ -11,10 +11,8 @@ input = "/path/to/your/SLUS_207.72"
 # Path to Ghidra exported function map (optional CSV)
 ghidra_output = "/path/to/ssx3-functions.sweep.csv"
 
-# SYM2/SYM3: ssxdecomp names (resolved next to this file) as "// Name:"
-# banner lines and as the C++ symbol (BXrand_0x3177f0; _u = unverified).
-# File names, Function::name and stub selection keep sub_ names.
-symbol_names = "ssx3-symbols.tsv"
+# Optional development names are supplied by build.py --symbol-names.
+# Public builds generate default sub_… identifiers without a names file.
 
 # Path to output directory
 output = "/path/to/private-output/"

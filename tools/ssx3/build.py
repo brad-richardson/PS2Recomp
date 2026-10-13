@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -17,8 +18,8 @@ GENERATOR = '9a6e02b26466f737e0ef419cc3da8d5d8ecdaf27'
 FORK = 'https://github.com/brad-richardson/PS2Recomp.git'
 ISO_SHA = '3c2f8eb182c9c6208a6e8172a41e61c98f420abe3f42c845f6829aeb9761ebf5'
 ELF_SHA = '1b49d05ca2793922180851b9e1ce9ae2291d61a7863565ac4e71f12e967af7bc'
-REGISTER_SHA = 'ad96edb68ce78994684c736b745d79f02d88367eb4d5bfeb2d7b05d126b0867c'
-PUBLIC_APP_ID = 'io.github.ps2recomp.ssx3'
+PUBLIC_APP_ID = 'com.ssx3.recomp'
+PLAY_APP_ID = 'com.ps2x.runner'
 
 
 def run(*args, cwd=None):
@@ -104,20 +105,22 @@ def prepare(a):
     if output.exists():
         raise ValueError('refusing existing codegen; choose a fresh --work directory')
     config = (ROOT / 'games/ssx3/ssx3.toml').read_text()
-    # All local paths are anchored absolute: the recompiler resolves
-    # symbol_names next to the generated TOML (the work dir), so the
-    # in-tree relative entry would fail loud here (SYM2/SYM3).
+    # All local paths are anchored absolute in the private work directory.
     paths = {'input': elf, 'ghidra_output': ROOT / 'games/ssx3/ssx3-functions.sweep.csv', 'output': output,
-             'symbol_names': ROOT / 'games/ssx3/ssx3-symbols.tsv'}
+             'symbol_names': a.symbol_names.resolve() if a.symbol_names else None}
     for key, value in paths.items():
-        config = re.sub(r'^' + key + r' = .*$', key + ' = ' + json.dumps(str(value)), config, flags=re.M)
+        if value is not None:
+            config = re.sub(r'^' + key + r' = .*$', key + ' = ' + json.dumps(str(value)), config, flags=re.M)
+    if a.symbol_names and not a.symbol_names.is_file():
+        raise ValueError('missing optional symbol names sidecar: ' + str(a.symbol_names))
     toml = a.work / 'generation.toml'
     toml.write_text(config)
     run(build / 'ps2xRecomp/ps2_recomp', toml)
-    if sha(output / 'register_functions.cpp') != REGISTER_SHA:
-        raise ValueError('generated registration differs from the SPR1 play pin')
+    register_sha = sha(output / 'register_functions.cpp')
     (a.work / 'inputs.json').write_text(json.dumps({'iso': str(iso), 'iso_sha256': ISO_SHA,
-        'elf_sha256': ELF_SHA, 'generator': GENERATOR, 'register_sha256': REGISTER_SHA, 'toml_sha256': sha(ROOT / 'games/ssx3/ssx3.toml'),
+        'elf_sha256': ELF_SHA, 'generator': GENERATOR, 'register_sha256': register_sha,
+        'symbol_names_sha256': sha(a.symbol_names) if a.symbol_names else None,
+        'toml_sha256': sha(ROOT / 'games/ssx3/ssx3.toml'),
         'map_sha256': sha(ROOT / 'games/ssx3/ssx3-functions.sweep.csv')}, indent=2) + '\n')
     print('Prepared local game sources. Keep this work directory private.')
 
@@ -319,14 +322,14 @@ def stage(a):
     if not resources.is_dir():
         raise ValueError('stage requires android-libs first (missing android-resources in work dir)')
     target = files / 'ge1-resources'
-    if target.exists():
-        shutil.rmtree(target)
-    shutil.copytree(resources, target)
+    shutil.copytree(resources, target, dirs_exist_ok=True)
     (files / 'ge1-data').mkdir(exist_ok=True)
     (files / 'mc0').mkdir(exist_ok=True)
     device = '/storage/emulated/0/Android/data/' + a.app_id + '/files'
     apk = ROOT / 'android/app/build/outputs/apk/release/app-release.apk'
     print('Staged device layout in ' + str(files))
+    if a.step != 'stage':
+        return files
     print('Push it with these commands (stage prints them; it does not run them):')
     print('  adb install -r ' + str(apk))
     print('  adb shell am force-stop ' + a.app_id)
@@ -338,18 +341,81 @@ def stage(a):
     print('  adb push ' + str(files / 'ge1-resources') + '/. ' + device + '/ge1-resources/')
     print('The empty card dir is ' + str(files / 'mc0') + ' (created on device by the mkdir above).')
     print('Back up your keystore; a different key forces an uninstall, which wipes saves.')
+    return files
+
+
+def adb(a, *args, capture=False):
+    command = ['adb'] + (['-s', a.serial] if a.serial else []) + list(map(str, args))
+    if capture:
+        return subprocess.check_output(command, text=True).strip()
+    run(*command)
+
+
+def apk_package(apk):
+    sdk = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+    if not sdk:
+        raise ValueError('set ANDROID_HOME to verify the APK package before install')
+    tools = sorted(Path(sdk, 'build-tools').glob('*/aapt2'), reverse=True)
+    if not tools:
+        raise ValueError('aapt2 missing from Android SDK build-tools')
+    return subprocess.check_output([str(tools[0]), 'dump', 'packagename', str(apk)], text=True).strip()
+
+
+def install(a):
+    if a.app_id == PLAY_APP_ID:
+        raise ValueError('public install refuses the maintainer play package')
+    files = stage(a)
+    apk = ROOT / 'android/app/build/outputs/apk/release/app-release.apk'
+    if not apk.is_file():
+        raise ValueError('missing release APK; run android first')
+    if apk_package(apk) != a.app_id:
+        raise ValueError('release APK package differs from --app-id; refusing install')
+    inputs = json.loads((a.work / 'inputs.json').read_text())
+    iso = Path(inputs['iso'])
+    if sha(iso) != inputs['iso_sha256'] or sha(a.work / 'SLUS_207.72') != inputs['elf_sha256']:
+        raise ValueError('disc or extracted ELF changed since prepare')
+    device = '/sdcard/Android/data/' + a.app_id + '/files'
+    # The APK contains code and libraries only. adb install -r preserves app data.
+    adb(a, 'install', '-r', apk)
+    if not adb(a, 'shell', 'pm', 'path', a.app_id, capture=True).startswith('package:'):
+        raise ValueError('installed public package not found')
+    adb(a, 'shell', 'am', 'force-stop', a.app_id)
+    adb(a, 'shell', 'mkdir', '-p', *(shlex.quote(p) for p in
+        (device, device + '/ge1-resources', device + '/ge1-data', device + '/mc0')))
+    sources = [(iso, 'SSX3.iso'), (a.work / 'SLUS_207.72', 'SLUS_207.72'),
+               (files / 'ps2x.env', 'ps2x.env'), (files / 'full120.env', 'full120.env')]
+    sources += [(p, 'ge1-resources/' + p.relative_to(files / 'ge1-resources').as_posix())
+                for p in sorted((files / 'ge1-resources').rglob('*')) if p.is_file()]
+    for source_path, relative in sources:
+        remote = device + '/' + relative
+        expected = sha(source_path)
+        parent = remote.rsplit('/', 1)[0]
+        adb(a, 'shell', 'mkdir', '-p', shlex.quote(parent))
+        exists = subprocess.run(['adb'] + (['-s', a.serial] if a.serial else []) +
+                                ['shell', 'test', '-f', shlex.quote(remote)], check=False).returncode == 0
+        current = adb(a, 'shell', 'sha256sum', shlex.quote(remote), capture=True).split()[0] if exists else None
+        if current == expected:
+            print('SHA256 match, skip ' + relative)
+            continue
+        adb(a, 'push', source_path, remote)
+        actual = adb(a, 'shell', 'sha256sum', shlex.quote(remote), capture=True).split()[0]
+        if actual != expected:
+            raise ValueError('device SHA256 mismatch: ' + relative)
+    print('Installed ' + a.app_id + ' with matching files; existing cards and saves were not removed.')
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('step', choices=['prepare', 'mac', 'mac-libs', 'run', 'android', 'android-libs', 'stage'])
+    p.add_argument('step', choices=['prepare', 'mac', 'mac-libs', 'run', 'android', 'android-libs', 'stage', 'install'])
     p.add_argument('--work', type=Path, required=True, help='external private output directory')
     p.add_argument('--iso', type=Path, help='own supported USA disc image (prepare only)')
+    p.add_argument('--symbol-names', type=Path, help='optional local names sidecar for development codegen')
+    p.add_argument('--serial', help='adb device serial for install')
     p.add_argument('--jnilibs', type=Path, help='own source-built Android JNI libraries')
     p.add_argument('--ndk', type=Path, help='local Android NDK 28.2.13676358')
     p.add_argument('--suite', action='store_true', help='also build optional Mac development suite and its analyzer/recompiler fixtures')
     p.add_argument('--jobs', type=int, default=8)
-    p.add_argument('--app-id', default=PUBLIC_APP_ID, help='Android package id for android and stage')
+    p.add_argument('--app-id', default=PUBLIC_APP_ID, help='Android package id for android, stage and install')
     a = p.parse_args()
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
         p.error('supported build host: macOS Apple silicon; Windows/x86 is unsupported')
@@ -365,7 +431,8 @@ def main():
     if a.step != 'prepare' and not (a.work / 'inputs.json').is_file():
         p.error('run prepare in this work directory first')
     a.work.mkdir(parents=True, exist_ok=True)
-    {'prepare': prepare, 'mac': mac, 'android': android, 'mac-libs': libs, 'run': play, 'android-libs': android_libs, 'stage': stage}[a.step](a)
+    {'prepare': prepare, 'mac': mac, 'android': android, 'mac-libs': libs, 'run': play,
+     'android-libs': android_libs, 'stage': stage, 'install': install}[a.step](a)
 
 
 if __name__ == '__main__':

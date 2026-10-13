@@ -8,8 +8,7 @@ provide game downloads or game-bearing app binaries. Start with the
 This entry provides a local EE generator, Mac runner build and native Metal
 GS/microVU library build. The baseline uses interpreted VU0 and no PGO;
 it is not the optimized device play build. A fresh clone built a signed
-Android APK on macOS Apple silicon in PUB1 (2026-10-12); PUB2 repeated the
-build with a separate public app id (2026-10-13). Neither build is an
+Android APK on macOS Apple silicon in PUB1 (2026-10-12). That build is not an
 on-device acceptance result. iOS offline-VU1 preparation remains incomplete.
 
 The runner-only path and source-built Metal/microVU libraries were validated
@@ -53,10 +52,18 @@ Run that suite **from the checkout root**. The generator pin is
 the game TOML/map — including the Equip Gear extra entry — is unchanged
 since). `prepare` checks ISO and extracted ELF SHA256, clones the pinned
 generator from the public fork, builds it, writes absolute local TOML
-paths, and checks registration SHA256
+paths, and records the generated registration SHA256. Brad's optional local
+play names sidecar reproduces SHA256
 `ad96edb68ce78994684c736b745d79f02d88367eb4d5bfeb2d7b05d126b0867c`
 (the SPR1 play pin, ABI v2). Use a fresh work directory for regeneration;
 existing output is refused.
+
+Names are optional. The public tree contains no game symbol names and
+`prepare` uses the generator's default `sub_…` identifiers. For local
+development, supply your own untracked sidecar with
+`prepare --symbol-names /path/to/local/ssx3-symbols.tsv`; the file remains
+outside the checkout. The sidecar changes identifiers and comments, so
+its generated registration SHA can be compared with the play pin above.
 
 `mac-libs` pins the public ARMSX2 fork to
 `ebdd3fd45f74a77f7dc52b53c6666591c05c5b4d` (`armsx2-ssx3-four`, the play vendor), builds plutovg v1.1.0 and plutosvg v0.0.7
@@ -81,20 +88,23 @@ shared with Android; no remote build host or PGO profile is needed:
 ```sh
 python3 tools/ssx3/build.py android-libs --work /path/to/private-build --ndk "$ANDROID_HOME/ndk/28.2.13676358" --jobs 4
 python3 tools/ssx3/build.py android --work /path/to/private-build --jnilibs /path/to/private-build/jniLibs --jobs 4
-python3 tools/ssx3/build.py stage --work /path/to/private-build
+python3 tools/ssx3/build.py install --work /path/to/private-build
 ```
 
-The signed public build defaults to `io.github.ps2recomp.ssx3`, with its own
+The signed public build defaults to `com.ssx3.recomp`, with its own
 Android `files/` directory and card. Use `--app-id your.dotted.package` on
-**both** `android` and `stage` to choose another id; stage checks that it
+**both** `android` and `install` to choose another id; install checks that it
 matches the built APK and rewrites the staged env paths. The Java and JNI
 helper classes retain the `com.ps2x.runner` source namespace. The separate
 package id allows side-by-side installation with an existing play build.
 
-`stage` writes the device-side layout (`ps2x.env`, `full120.env`,
-`ge1-resources`, plus empty `ge1-data` and `mc0` card dirs) into
-`<work>/stage/files` and prints the exact `adb` commands to install the APK
-and push the ELF, ISO, envs and resources. It does not run them. The shipped
+`install` uses adb to install the APK and SHA-check the ISO, ELF, envs and
+GE1 resources in `/sdcard/Android/data/com.ssx3.recomp/files/`. A repeat
+install skips files already matching by SHA and preserves existing cards and
+saves. The ISO stays outside the APK. On Android 11+, the installed app uses
+its own external files directory; adb has shell access to push those files.
+Use `--serial DEVICE` if adb sees more than one device. `stage` remains a
+local layout preview and prints manual adb commands. The shipped
 Android presets are [presets/ps2x.env](presets/ps2x.env) and
 [presets/full120.env](presets/full120.env), derived from the Odin play env
 with every private path removed and the SET2 settings overlay on
@@ -113,13 +123,13 @@ that local prefix. The dependency recipe has its own parallelism setting
 (based on host CPU count). It stages JNI libraries and public renderer
 resources into your work directory. This source-only route avoids the old
 private remote helper and bundled dependency directory. Android library/APK
-compilation and signing were validated on macOS Apple silicon by PUB1 and
-PUB2. Installation, title, a finished race, controls, sound, and save/reload
+compilation and signing were validated on macOS Apple silicon by PUB1.
+Installation, title, a finished race, controls, sound, and save/reload
 remain for device acceptance. Linux hosts, the remaster pack and Tricky
 preparation have not been validated by this route.
 
 After building, follow [Android setup/save protection](../../android/README.md)
-for local ISO/ELF/resource staging and the 60/120 launcher layers. `build.py
+for the 60/120 launcher layers. `build.py
 android` creates a per-user signing keystore once in your work directory
 (`ssx3-signing.keystore`) and reuses it on every later build, with a
 monotonic `versionCode` from `version-code.txt` in the same directory.

@@ -4,7 +4,7 @@ New local preparation/build entry: [tools/ssx3](../tools/ssx3/README.md). Suppor
 
 Read the [input contract](../docs/ssx3-inputs.md) and the
 [public build recipe](../tools/ssx3/README.md) first. That recipe produced a
-signed APK from a fresh clone on macOS Apple silicon in PUB1 and PUB2. Device
+signed APK from a fresh clone on macOS Apple silicon in PUB1. Device
 installation, a finished race, controls, sound, and save/reload remain to be
 validated. No game-bearing APK is provided.
 
@@ -21,7 +21,7 @@ direct Gradle build with inputs you prepared yourself, run from `android/`
 with the committed wrapper (Gradle 8.9):
 
 ```sh
-./gradlew assembleRelease   -Pps2xBootElf=/storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/SLUS_207.72   -Pps2xGameCodegenDir=/absolute/local/generated-ee   -Pps2xVu0RecompDir=/absolute/local/generated-vu0   -Pps2xJniLibsDir=/absolute/local/jniLibs   -Pps2xAppId=io.github.ps2recomp.ssx3
+./gradlew assembleRelease   -Pps2xBootElf=/storage/emulated/0/Android/data/com.ssx3.recomp/files/SLUS_207.72   -Pps2xGameCodegenDir=/absolute/local/generated-ee   -Pps2xVu0RecompDir=/absolute/local/generated-vu0   -Pps2xJniLibsDir=/absolute/local/jniLibs   -Pps2xAppId=com.ssx3.recomp
 ```
 
 The JNI directory contains an `arm64-v8a/` subdirectory with matching GE1 and
@@ -36,30 +36,26 @@ properties retains the existing maintainer package `com.ps2x.runner`.
 
 ## Install and place your inputs
 
-Stop the app and back up existing saves before an upgrade. Install over the
-existing app with the same signing key; do not uninstall or clear app storage:
+Stop the app and back up existing saves before an upgrade. From the fork root,
+use the public builder's install step with the same work directory and signing
+key. It installs over the existing app and SHA-checks the ISO, ELF, presets and
+GE1 resources in this app's external files directory. It never removes cards
+or saves and never packages the ISO in the APK:
 
 ```sh
-adb shell am force-stop io.github.ps2recomp.ssx3
-adb install -r app/build/outputs/apk/release/app-release.apk
-adb shell mkdir -p /storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files
-adb push /absolute/local/SLUS_207.72 /storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/SLUS_207.72
-adb push "/absolute/local/SSX 3 (USA).iso" "/storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/SSX 3 (USA).iso"
+python3 tools/ssx3/build.py install --work /path/to/private-build
 ```
 
-Prefer `build.py stage`, which uses the built APK's package id and stages the shipped presets
+`build.py stage` is a local layout preview. It uses the built APK's package id and stages the shipped presets
 ([ps2x.env](../tools/ssx3/presets/ps2x.env),
 [full120.env](../tools/ssx3/presets/full120.env), SET2 settings overlay on)
 plus `ge1-resources` and an empty card dir and prints the exact `adb`
-commands without running them. To stage by hand instead, create a local
-`ps2x.env` with these paths, then push it beside the ELF:
+commands without running them. A hand-written minimal `ps2x.env` would use:
 
 ```ini
-PS2X_CD_IMAGE=/storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/SSX 3 (USA).iso
-PS2X_MC_ROOT=/storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/mc0
+PS2X_CD_IMAGE=/storage/emulated/0/Android/data/com.ssx3.recomp/files/SSX3.iso
+PS2X_MC_ROOT=/storage/emulated/0/Android/data/com.ssx3.recomp/files/mc0
 ```
-
-`adb push /absolute/local/ps2x.env /storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/ps2x.env`
 
 The compiled boot path determines the env directory; `PS2X_CD_IMAGE` selects
 the ISO and `PS2X_MC_ROOT` the card directory
@@ -101,7 +97,7 @@ by `PS2X_MC_ROOT`. When that directory is named `mc0`, port 1 uses its sibling
 app stopped, copy the entire files directory to a **new** local backup directory:
 
 ```sh
-adb pull /storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files /absolute/local/new-backup-directory
+adb pull /storage/emulated/0/Android/data/com.ssx3.recomp/files /absolute/local/new-backup-directory
 ```
 
 Verify the copy contains your active card directory and settings. If cards live
