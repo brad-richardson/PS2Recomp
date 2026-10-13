@@ -4,6 +4,7 @@
 #include <set>
 #include "pcsx2/GS.h"
 #include "pcsx2/GS/GS.h"
+#include "pcsx2/GS/GSBackgroundWriter.h"
 #include "pcsx2/Host.h"
 #include "pcsx2/ImGui/ImGuiManager.h"
 #include "common/Console.h"
@@ -23,6 +24,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -52,6 +55,34 @@ std::string s_prewarm_path;
 std::chrono::steady_clock::time_point s_last_vsync{}; // SH1: stats CSV wall_us
 constexpr std::uint32_t kSelectorTakeBatch = 1024;
 
+// PCF2: the GS thread only takes the recorded selectors; the file is rewritten (old contents plus
+// the new records, temp file, fsync, rename) on s_selector_writer. Records taken while a write is
+// queued join s_selector_pending, so a coalesced job writes them all.
+GSBackgroundWriter s_selector_writer;
+std::mutex s_selector_mutex;
+std::vector<u8> s_selector_pending;
+
+void write_pending_selectors(const std::string& path)
+{
+    std::vector<u8> add;
+    {
+        std::lock_guard<std::mutex> lock(s_selector_mutex);
+        add.swap(s_selector_pending);
+    }
+    if (add.empty())
+        return;
+    std::vector<u8> out;
+    if (std::ifstream in{path, std::ios::binary})
+        out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    out.insert(out.end(), add.begin(), add.end());
+    if (!GSBackgroundWriter::WriteFileDurable(path, out.data(), out.size()))
+    {
+        Console.Error("PW1: cannot write TFX selectors to '%s'", path.c_str());
+        std::lock_guard<std::mutex> lock(s_selector_mutex);
+        s_selector_pending.insert(s_selector_pending.begin(), add.begin(), add.end());
+    }
+}
+
 void persist_recorded_selectors()
 {
     if (s_prewarm_path.empty())
@@ -59,26 +90,26 @@ void persist_recorded_selectors()
     const std::uint32_t sel_size = GSGetTFXSelectorSize();
     if (sel_size == 0)
         return;
-    std::FILE* f = std::fopen(s_prewarm_path.c_str(), "ab");
-    if (!f)
-    {
-        Console.Error("PW1: cannot append TFX selectors to '%s'", s_prewarm_path.c_str());
-        return;
-    }
     std::vector<u8> buf(static_cast<std::size_t>(sel_size) * kSelectorTakeBatch);
+    bool took = false;
     for (;;)
     {
         const std::uint32_t n = GSTakeRecordedTFXSelectors(buf.data(), kSelectorTakeBatch);
         if (n == 0)
             break;
-        if (std::fwrite(buf.data(), sel_size, n, f) != n)
-        {
-            Console.Error("PW1: short write appending TFX selectors to '%s'", s_prewarm_path.c_str());
-            break;
-        }
+        std::lock_guard<std::mutex> lock(s_selector_mutex);
+        s_selector_pending.insert(s_selector_pending.end(), buf.begin(), buf.begin() + static_cast<std::size_t>(sel_size) * n);
+        took = true;
     }
-    std::fflush(f);
-    std::fclose(f);
+    if (took)
+        s_selector_writer.Submit(s_prewarm_path, [path = s_prewarm_path] { write_pending_selectors(path); });
+}
+
+// PCF2: app pause and close wait for both cache writers, so neither file is left half-written.
+void wait_cache_writes()
+{
+    GSWaitPipelineCacheWrites();
+    s_selector_writer.Drain();
 }
 // UR1: SSX 3's displayed frame height (NTSC 640x448, the src rect every
 // export scales from). native = display height / this.
@@ -528,7 +559,8 @@ extern "C" GE1_API void ge1_gs_close(void)
     if (s_open)
     {
         persist_recorded_selectors();
-        GSclose();
+        s_selector_writer.Drain();
+        GSclose(); // drains the pipeline cache writer (VKShaderCache teardown)
     }
     if (s_stats)
     {
@@ -615,6 +647,7 @@ extern "C" GE1_API int ge1_gs_vsync(uint32_t field, uint64_t csr, uint64_t smode
     }
     // Consume once at the first menu/pause boundary, after GSvsync drains the back queue.
     // No live Vulkan objects cross threads and no serialization runs in active events.
+    // PCF2: flush_us is now the snapshot and the hand-off; the file writes run in the background.
     if (s_flush_pending && !s_flush_deferred)
     {
         const auto t0 = std::chrono::steady_clock::now();
@@ -857,6 +890,7 @@ extern "C" GE1_API int ge1_gs_flush_caches(void)
     GSSetPipelineCacheFlushDeferred(false);
     GSFlushPipelineCache();
     persist_recorded_selectors();
+    wait_cache_writes();
     GSSetPipelineCacheFlushDeferred(s_flush_deferred);
     s_flush_pending = false;
     return 1;
