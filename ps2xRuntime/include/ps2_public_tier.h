@@ -35,6 +35,9 @@ struct Choice
     std::string render;
     std::string output;
     std::string cas;
+    // Empty leaves GE1_ANISO alone (capable keeps the compiled 16x);
+    // "0" disables it (low tier, MAL2 +8.7% on Mali-G57).
+    std::string aniso;
 };
 
 inline bool automatic(const char *value) { return !value || !*value || std::strcmp(value, "auto") == 0; }
@@ -71,6 +74,7 @@ inline Choice choose(const Input &in)
     if (!automatic(in.output))
         out.output = in.output;
     out.cas = automatic(in.cas) ? (out.capable ? "0.25" : "0") : in.cas;
+    out.aniso = out.capable ? "" : "0";
     return out;
 }
 } // namespace ps2x::public_tier

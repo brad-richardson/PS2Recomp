@@ -189,8 +189,8 @@ bool configure_output(Pcsx2Config::GSOptions& config)
 //       UpscaleMultiplier > 1 (1x stays byte-identical). Tokens: half-pixel
 //       offset off|normal|special|aggressive|native|nativetex (GameDB default
 //       special), round1|round2 (round sprite), align (align sprite X), none.
-//   GE1_ANISO=2|4|8|16                 PCSX2 MaxAnisotropy (shader aniso on
-//       non-mipmapped triangle draws)
+//   GE1_ANISO=0|2|4|8|16               PCSX2 MaxAnisotropy (shader aniso on
+//       non-mipmapped triangle draws; 0 disables it: MAL2 +8.7% on Mali-G57)
 //   GE1_TRILINEAR=off|ps2|forced       PCSX2 TriFilter (default automatic = ps2)
 void configure_filtering(Pcsx2Config::GSOptions& config)
 {
@@ -222,7 +222,8 @@ void configure_filtering(Pcsx2Config::GSOptions& config)
     if (const char* af = std::getenv("GE1_ANISO"); af && *af)
     {
         const int n = std::atoi(af);
-        if (n == 2 || n == 4 || n == 8 || n == 16)
+        // MAL2: 0 disables aniso (low public tier sets it); otherwise unchanged.
+        if (n == 0 || n == 2 || n == 4 || n == 8 || n == 16)
         {
             config.MaxAnisotropy = static_cast<u8>(n);
             std::fprintf(stderr, "UR2: anisotropic %dx\n", n);

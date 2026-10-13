@@ -140,6 +140,8 @@ void resolvePublicTier(int panelW, int panelH)
     setenv("GE1_UPSCALE", choice.render.c_str(), 1);
     setenv("PS2X_GE1_EXPORT_SIZE", choice.output.c_str(), 1);
     setenv("GE1_CAS", choice.cas.c_str(), 1);
+    if (!choice.aniso.empty())
+        setenv("GE1_ANISO", choice.aniso.c_str(), 1);
     if (choice.capable)
     {
         // PUB4: the play env precaches replacements (GE1_TEX_PRELOAD=1) and

@@ -360,11 +360,12 @@ void register_ps2_knobs_tests()
             in.panelH = 1080;
             auto c = choose(in);
             t.IsTrue(!c.capable && c.driver == "1" && c.render == "1" && c.output == "640x448" &&
-                     c.cas == "0", "under 5 GiB uses low output but Adreno Turnip");
+                     c.cas == "0" && c.aniso == "0",
+                     "under 5 GiB uses low output but Adreno Turnip, aniso off");
             in.ramBytes = kCapableRam;
             c = choose(in);
-            t.IsTrue(c.capable && c.render == "native" && c.output == "display" && c.cas == "0.25",
-                     "5 GiB and 1080p use capable native/CAS");
+            t.IsTrue(c.capable && c.render == "native" && c.output == "display" && c.cas == "0.25" &&
+                     c.aniso.empty(), "5 GiB and 1080p use capable native/CAS, aniso untouched");
             in.panelW = 2400;
             in.panelH = 1080;
             t.IsTrue(choose(in).render == "native", "landscape 1080p panel");
@@ -394,7 +395,8 @@ void register_ps2_knobs_tests()
             in.savedResolution = nullptr;
             c = choose(in);
             t.IsTrue(c.capable && c.driver == "0" && c.render == "2" && c.output == "display" &&
-                     c.cas == "0.25", "public iOS uses capable tier and 2x off 1080p");
+                     c.cas == "0.25" && c.aniso.empty(),
+                     "public iOS uses capable tier and 2x off 1080p, aniso untouched");
         });
     });
 }
