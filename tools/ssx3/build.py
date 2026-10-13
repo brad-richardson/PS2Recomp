@@ -106,13 +106,14 @@ def prepare(a):
         raise ValueError('refusing existing codegen; choose a fresh --work directory')
     config = (ROOT / 'games/ssx3/ssx3.toml').read_text()
     # All local paths are anchored absolute in the private work directory.
-    paths = {'input': elf, 'ghidra_output': ROOT / 'games/ssx3/ssx3-functions.sweep.csv', 'output': output,
-             'symbol_names': a.symbol_names.resolve() if a.symbol_names else None}
+    paths = {'input': elf, 'ghidra_output': ROOT / 'games/ssx3/ssx3-functions.sweep.csv', 'output': output}
     for key, value in paths.items():
-        if value is not None:
-            config = re.sub(r'^' + key + r' = .*$', key + ' = ' + json.dumps(str(value)), config, flags=re.M)
+        config = re.sub(r'^' + key + r' = .*$', key + ' = ' + json.dumps(str(value)), config, flags=re.M)
     if a.symbol_names and not a.symbol_names.is_file():
         raise ValueError('missing optional symbol names sidecar: ' + str(a.symbol_names))
+    if a.symbol_names:
+        config = config.replace('[general]\n',
+            '[general]\nsymbol_names = ' + json.dumps(str(a.symbol_names.resolve())) + '\n', 1)
     toml = a.work / 'generation.toml'
     toml.write_text(config)
     run(build / 'ps2xRecomp/ps2_recomp', toml)
