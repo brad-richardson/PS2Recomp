@@ -312,8 +312,10 @@ inline void logLocked(State &s, const char *fmt, ...)
     std::vfprintf(s.log, fmt, ap);
     va_end(ap);
     std::fputc('\n', s.log);
-    if ((++s.lines & 63u) == 0u)
-        std::fflush(s.log);
+    ++s.lines;
+    // TLB1: diagnostic boots stop with SIGTERM, bypassing stdio teardown.
+    // Persist every complete record before returning to guest execution.
+    std::fflush(s.log);
 }
 
 inline uint32_t rd32(const uint8_t *rdram, uint32_t addr)

@@ -4,9 +4,15 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <cstdio>
+#include <memory>
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace
 {
@@ -20,6 +26,31 @@ void register_ps2_snd_tests()
 {
     MiniTest::Case("Ps2SoundHle", [](TestCase &tc)
     {
+#if !defined(_WIN32)
+        tc.Run("SND diagnostic record reaches the file before stop-kill", [](TestCase &t)
+        {
+            auto s = std::make_unique<ps2_snd_spike::State>();
+            s->log = std::tmpfile();
+            t.IsTrue(s->log != nullptr, "temporary sound log opens");
+            if (!s->log)
+                return;
+            // Force full buffering: neither newline nor this small record can
+            // reach the file unless the production logger flushes it.
+            std::array<char, 8192> buffer{};
+            std::setvbuf(s->log, buffer.data(), _IOFBF, buffer.size());
+            ps2_snd_spike::logLocked(*s, "tick probe=%u", 1u);
+            struct stat info{};
+            const int rc = fstat(fileno(s->log), &info);
+            // fstat reads kernel metadata without flushing the FILE stream.
+            t.Equals(rc, 0, "file metadata readable before fclose");
+            t.Equals(info.st_size, static_cast<off_t>(sizeof("tick probe=1\n") - 1u),
+                     "first complete record persisted before the 64-record boundary");
+            t.Equals(s->lines, uint64_t(1), "record count unchanged");
+            std::fclose(s->log);
+            s->log = nullptr;
+        });
+#endif
+
         tc.Run("SND tick cadence follows guest cycles at 93.75 Hz", [](TestCase &t)
         {
         using namespace ps2_snd_spike;
