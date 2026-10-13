@@ -288,6 +288,12 @@ inline bool normcapMaskOk(uint64_t mask) noexcept
 {
     return normcapMaskRequested(mask) && !asymkMaskOk(mask);
 }
+// Requested in full but inert because asymk is on (RV32 F9: the play strings
+// carry both bits, so this is the shipped configuration, not an edge case).
+inline bool normcapMaskSuppressed(uint64_t mask) noexcept
+{
+    return normcapMaskRequested(mask) && asymkMaskOk(mask);
+}
 
 // SVL1 2a: same-mode sanctioned FIX-delta support
 // (PS2X_SAVESTATE_ALLOW_FIX_DELTA, diagnostic, default off). Pure unless

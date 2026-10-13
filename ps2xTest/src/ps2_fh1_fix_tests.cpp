@@ -409,6 +409,12 @@ void register_ps2_fh1_fix_tests()
             t.IsTrue(!normcapMaskOk(m("query,vnret,normcap,asymk")),
                      "asymk suppresses normcap");
             t.IsTrue(!normcapMaskOk(m("query,normcap")), "normcap without vnret: off");
+            t.IsTrue(normcapMaskSuppressed(m("query,vnret,normcap,asymk")),
+                     "play-shaped set: normcap requested but suppressed");
+            t.IsTrue(!normcapMaskSuppressed(m("query,vnret,normcap")),
+                     "no asymk: not suppressed");
+            t.IsTrue(!normcapMaskSuppressed(m("query,vnret,asymk")),
+                     "no normcap: not suppressed");
             // With vnret owning the word, the exit flip restores stock even
             // when asymk's last per-update write left k=0.
             std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);

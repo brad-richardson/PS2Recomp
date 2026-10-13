@@ -1736,7 +1736,16 @@ inline bool asymkFix() noexcept
 // invalid input leaves the guest value (safe fallback).
 inline bool normcapFix() noexcept
 {
-    static const bool on = enabled() && normcapMaskOk(fixMask());
+    static const bool on = [] {
+        // REV1 (RV32 F9): name the suppression once, at first arm. The
+        // play FIX strings carry normcap+asymk together, so without this
+        // line normcap reads as active while asymk silently replaces it.
+        if (enabled() && normcapMaskSuppressed(fixMask()))
+            std::fprintf(stderr,
+                         "fh1-normcap: requested but suppressed by asymk (asymk owns the "
+                         "pair retention); normcap inert this session\n");
+        return enabled() && normcapMaskOk(fixMask());
+    }();
     return on;
 }
 
