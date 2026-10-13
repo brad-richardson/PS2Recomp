@@ -457,6 +457,13 @@ namespace
     {
         if (!dst || uint64_t(lbn) + sectors > table.logicalSectors)
         { g_lastCdError = -1; return false; }
+        if (table.movieTail(lbn, sectors))
+        {
+            std::cerr << "[cd-slim] ERROR: movie read beyond retained prefix lbn=0x"
+                      << std::hex << lbn << std::dec << " sectors=" << sectors << std::endl;
+            g_lastCdError = -1;
+            return false;
+        }
         size_t remaining = byteCount;
         for (const auto &piece : table.pieces(lbn, sectors))
         {

@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cstring>
 #include <filesystem>
+#include <iostream>
 #include <limits>
 #include <string>
 #include <system_error>
@@ -677,6 +678,13 @@ namespace ps2x::iop::detail
                     (slim.status == ps2x::slim_cd::Status::Slim &&
                      uint64_t(lsn) + sectors > slim.logicalSectors))
                 {
+                    lastError = kCdvdErrorRead;
+                    return false;
+                }
+                if (slim.status == ps2x::slim_cd::Status::Slim && slim.movieTail(lsn, sectors))
+                {
+                    std::cerr << "[cd-slim] ERROR: movie read beyond retained prefix lbn=0x"
+                              << std::hex << lsn << std::dec << " sectors=" << sectors << std::endl;
                     lastError = kCdvdErrorRead;
                     return false;
                 }

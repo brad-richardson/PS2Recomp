@@ -15,7 +15,7 @@ namespace ps2x::slim_cd
 {
     constexpr uint64_t SectorBytes = 2048;
     constexpr char PinnedSourceSha[] = "3c2f8eb182c9c6208a6e8172a41e61c98f420abe3f42c845f6829aeb9761ebf5";
-    struct Hole { uint32_t first = 0, count = 0, kind = 0; }; // kind 1 pad, 2 movie
+    struct Hole { uint32_t first = 0, count = 0, kind = 0; }; // 1 pad hole, 2 movie tail hole, 3 retained movie prefix
     struct Piece { uint64_t payloadOffset = 0; uint32_t sectors = 0; bool zero = false; };
     enum class Status { Plain, Slim, Invalid };
     struct Table
@@ -25,20 +25,25 @@ namespace ps2x::slim_cd
         std::vector<Hole> holes;
         std::string error;
 
-        bool movieHole(uint32_t lba, uint32_t sectors = 1) const
+        bool movieRange(uint32_t lba, uint32_t sectors, uint32_t kind) const
         {
             for (const Hole &h : holes)
-                if (h.kind == 2 && lba < uint64_t(h.first) + h.count &&
+                if (h.kind == kind && lba < uint64_t(h.first) + h.count &&
                     uint64_t(lba) + sectors > h.first)
                     return true;
             return false;
         }
+        bool moviePrefix(uint32_t lba, uint32_t sectors = 1) const
+        { return movieRange(lba, sectors, 3); }
+        bool movieTail(uint32_t lba, uint32_t sectors = 1) const
+        { return movieRange(lba, sectors, 2); }
         std::vector<Piece> pieces(uint32_t lba, uint32_t count) const
         {
             std::vector<Piece> out;
             uint64_t at = lba, end = at + count, omitted = 0;
             for (const Hole &h : holes)
             {
+                if (h.kind == 3) continue;
                 if (at >= end) break;
                 if (uint64_t(h.first) + h.count <= at) { omitted += h.count; continue; }
                 if (at < h.first)
@@ -80,7 +85,7 @@ namespace ps2x::slim_cd
         std::ifstream f(sidecar, std::ios::binary);
         if (!f.read(reinterpret_cast<char *>(b.data()), std::streamsize(b.size())))
         { t.error = "cannot read sidecar"; return t; }
-        if (std::memcmp(b.data(), "PS2XSLM1", 8) != 0 ||
+        if (std::memcmp(b.data(), "PS2XSLM2", 8) != 0 ||
             std::memcmp(b.data() + 8, PinnedSourceSha, 64) != 0)
         { t.error = "format or pinned source SHA mismatch"; return t; }
         // Header is 8 magic + 64 ASCII SHA + 8 logical sectors + 4 count.
@@ -95,10 +100,10 @@ namespace ps2x::slim_cd
             const uint8_t *p = b.data() + 84 + i * 12;
             const Hole h{le32(p), le32(p + 4), le32(p + 8)};
             if (!h.count || h.first < previousEnd || uint64_t(h.first) + h.count > t.logicalSectors ||
-                (h.kind != 1 && h.kind != 2))
+                (h.kind != 1 && h.kind != 2 && h.kind != 3))
             { t.error = "invalid hole range"; return t; }
             previousEnd = uint64_t(h.first) + h.count;
-            omitted += h.count;
+            if (h.kind != 3) omitted += h.count;
             t.holes.push_back(h);
         }
         const uint64_t payloadSize = std::filesystem::file_size(image, ec);

@@ -18,13 +18,13 @@ class SlimWriterTest(unittest.TestCase):
             source = root / 'source.iso'
             source.write_bytes(b''.join(bytes([i]) * build.SECTOR for i in range(8)))
             output = root / 'SSX3.iso'
-            build.write_slim(source, output, [(1, 2, 1), (5, 1, 2)], build.ISO_SHA)
+            build.write_slim(source, output, [(1, 2, 1), (5, 1, 3), (6, 1, 2)], build.ISO_SHA)
             self.assertEqual(output.read_bytes(),
-                             b''.join(bytes([i]) * build.SECTOR for i in (0, 3, 4, 6, 7)))
+                             b''.join(bytes([i]) * build.SECTOR for i in (0, 3, 4, 5, 7)))
             table = Path(str(output) + '.holes').read_bytes()
             self.assertEqual(table[:8], build.SLIM_MAGIC)
             self.assertEqual(table[8:72], build.ISO_SHA.encode('ascii'))
-            self.assertEqual(len(table), 108)
+            self.assertEqual(len(table), 120)
 
 
 if __name__ == '__main__':

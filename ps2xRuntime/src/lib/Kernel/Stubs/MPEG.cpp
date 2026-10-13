@@ -567,7 +567,7 @@ namespace ps2_stubs
             uint32_t isEndTraceCount = 0u;
             uint32_t devSkipMovieTraceCount = 0u;
             uint32_t currentMovieLba = 0u;
-            bool currentMovieHole = false;
+            bool currentMovieOmitted = false;
             std::unordered_map<uint32_t, std::vector<MpegRegisteredCallback>> callbacksByMpeg;
             std::unordered_map<uint32_t, MpegPlaybackState> playbackByMpeg;
             std::unordered_map<uint64_t, std::weak_ptr<MpegNonStreamDelivery>> nonStreamDeliveries;
@@ -1935,7 +1935,7 @@ namespace ps2_stubs
             g_mpeg_stub_state.isEndTraceCount = 0u;
             g_mpeg_stub_state.devSkipMovieTraceCount = 0u;
             g_mpeg_stub_state.currentMovieLba = 0u;
-            g_mpeg_stub_state.currentMovieHole = false;
+            g_mpeg_stub_state.currentMovieOmitted = false;
             g_mpeg_stub_state.callbacksByMpeg.clear();
             g_mpeg_stub_state.playbackByMpeg.clear();
         }
@@ -1990,7 +1990,7 @@ namespace ps2_stubs
         playback.decodedFrames.push_back(std::move(frame));
     }
 
-    void notifyMpegCdRead(uint32_t lbn, uint32_t sectors, bool movieHole)
+    void notifyMpegCdRead(uint32_t lbn, uint32_t sectors, bool omittedMoviePrefix)
     {
         // The supported SSX 3 image puts all MPC extents in this interval.
         // THX/EABIG/INTRO/INTRO_DJ occupy its tail from 1291697 onward;
@@ -2005,7 +2005,7 @@ namespace ps2_stubs
         }
         std::lock_guard<std::mutex> lock(g_mpeg_stub_mutex);
         g_mpeg_stub_state.currentMovieLba = std::max(lbn, movieFirst);
-        g_mpeg_stub_state.currentMovieHole = movieHole;
+        g_mpeg_stub_state.currentMovieOmitted = omittedMoviePrefix;
     }
 
     void notifyMpegCdStreamStart(PS2Runtime *runtime)
@@ -2589,7 +2589,7 @@ namespace ps2_stubs
         {
             std::unique_lock<std::mutex> lock(g_mpeg_stub_mutex);
             MpegPlaybackState &playback = getPlaybackState(mpegAddr);
-            // A movie omitted by the slim image, or selected by the dev-only
+            // A movie whose tail is omitted by the slim image, or selected by the dev-only
             // skip knob, exits through the guest's normal end-of-stream word.
             // Thread 1 does not PARK in the picture wait below. Before this point,
             // the non-stream delivery, producer dispatch, guest sceMpegAddBs,
@@ -2599,7 +2599,7 @@ namespace ps2_stubs
             // player's counter-bounded re-ask loop at guest 0x3b1050) instead of
             // blocking on a picture this runtime cannot yet deliver. The decoder
             // is deliberately NOT flushed: the bypass synthesizes no frames.
-            const bool skipThisMovie = devSkipMovie() || g_mpeg_stub_state.currentMovieHole;
+            const bool skipThisMovie = devSkipMovie() || g_mpeg_stub_state.currentMovieOmitted;
             // A skipped movie has no final decoded picture. Writing
             // the fallback black macroblocks into its guest image buffer
             // leaves the caller's render target black after the end word is
@@ -2618,7 +2618,8 @@ namespace ps2_stubs
                 if (g_mpeg_stub_state.devSkipMovieTraceCount < 32u)
                 {
                     PS2_IF_AGRESSIVE_LOGS({
-                        std::cerr << "[MPEG:DEV-SKIP-MOVIE] bypass armed (PS2X_SKIP_MOVIE=1), mpeg=0x"
+                        std::cerr << "[MPEG:SKIP-MOVIE] bypass armed (dev=" << devSkipMovie()
+                                  << " slim=" << g_mpeg_stub_state.currentMovieOmitted << "), mpeg=0x"
                                   << std::hex << mpegAddr << std::dec
                                   << " n=" << (g_mpeg_stub_state.devSkipMovieTraceCount + 1u)
                                   << " requestInput=" << requestInput
@@ -2793,7 +2794,7 @@ namespace ps2_stubs
         const bool cdStreamEofPending = g_mpeg_stub_state.cdStreamEofPending;
         const bool currentCdStreamEofSeen = g_mpeg_stub_state.currentCdStreamEofSeen;
         const uint32_t currentMovieLba = g_mpeg_stub_state.currentMovieLba;
-        const bool currentMovieHole = g_mpeg_stub_state.currentMovieHole;
+        const bool currentMovieOmitted = g_mpeg_stub_state.currentMovieOmitted;
         resetMpegStubStateUnlocked();
         g_mpeg_stub_state.initialized = true;
         g_mpeg_stub_state.cdStreamGeneration = cdStreamGeneration;
@@ -2802,7 +2803,7 @@ namespace ps2_stubs
         g_mpeg_stub_state.cdStreamEofPending = cdStreamEofPending;
         g_mpeg_stub_state.currentCdStreamEofSeen = currentCdStreamEofSeen;
         g_mpeg_stub_state.currentMovieLba = currentMovieLba;
-        g_mpeg_stub_state.currentMovieHole = currentMovieHole;
+        g_mpeg_stub_state.currentMovieOmitted = currentMovieOmitted;
         setReturnU32(ctx, 0u);
     }
 

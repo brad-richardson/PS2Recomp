@@ -21,7 +21,8 @@ ELF_SHA = '1b49d05ca2793922180851b9e1ce9ae2291d61a7863565ac4e71f12e967af7bc'
 PUBLIC_APP_ID = 'com.ssx3.recomp'
 PLAY_APP_ID = 'com.ps2x.runner'
 SECTOR = 2048
-SLIM_MAGIC = b'PS2XSLM1'
+SLIM_MAGIC = b'PS2XSLM2'
+MOVIE_PREFIX_SECTORS = 512  # 1 MiB; observed reads end by sector 272.
 
 
 def run(*args, cwd=None):
@@ -110,9 +111,16 @@ def slim_holes(iso):
         kind = 1 if upper in ('PAD0.000', 'PAD1.000') else (
             2 if upper.startswith('DATA/MOVIES/') and upper.endswith('.MPC') else 0)
         if kind:
-            holes.append((lba, (size + SECTOR - 1) // SECTOR, kind))
+            sectors = (size + SECTOR - 1) // SECTOR
+            if kind == 2:
+                prefix = min(sectors, MOVIE_PREFIX_SECTORS)
+                holes.append((lba, prefix, 3))  # retained movie prefix
+                if sectors > prefix:
+                    holes.append((lba + prefix, sectors - prefix, 2))
+            else:
+                holes.append((lba, sectors, kind))
             names.add(upper)
-    if not {'PAD0.000', 'PAD1.000'} <= names or len([h for h in holes if h[2] == 2]) != 14:
+    if not {'PAD0.000', 'PAD1.000'} <= names or len([h for h in holes if h[2] == 3]) != 14:
         raise ValueError('expected two pads and fourteen movies')
     holes.sort()
     total = iso.stat().st_size // SECTOR
@@ -135,10 +143,10 @@ def write_slim(iso, output, holes, source_sha):
     cursor = 0
     with iso.open('rb') as src, output.open('xb') as dst:
         for start, count, kind in ranges + [(total, 0, 0)]:
-            if start < cursor or start + count > total or kind not in (0, 1, 2):
+            if start < cursor or start + count > total or kind not in (0, 1, 2, 3):
                 raise ValueError('invalid hole range')
             src.seek(cursor * SECTOR)
-            remaining = (start - cursor) * SECTOR
+            remaining = (start - cursor + (count if kind == 3 else 0)) * SECTOR
             while remaining:
                 block = src.read(min(8 * 1024 * 1024, remaining))
                 if not block:
@@ -146,7 +154,7 @@ def write_slim(iso, output, holes, source_sha):
                 dst.write(block)
                 remaining -= len(block)
             cursor = start + count
-    if output.stat().st_size != (total - sum(h[1] for h in ranges)) * SECTOR:
+    if output.stat().st_size != (total - sum(h[1] for h in ranges if h[2] != 3)) * SECTOR:
         raise ValueError('slim payload size mismatch')
     header = SLIM_MAGIC + source_sha.encode('ascii') + struct.pack('<QI', total, len(ranges))
     if len(source_sha) != 64 or len(header) != 84:

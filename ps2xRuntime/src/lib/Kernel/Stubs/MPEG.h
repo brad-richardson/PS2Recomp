@@ -7,7 +7,7 @@ namespace ps2_stubs
     void resetMpegStubState();
     void invalidateMpegNonStreamDeliveriesForRuntime(PS2Runtime *runtime);
     void enqueueMpegDecodedFrameForTesting(uint32_t mpegAddr);
-    void notifyMpegCdRead(uint32_t lbn, uint32_t sectors, bool movieHole);
+    void notifyMpegCdRead(uint32_t lbn, uint32_t sectors, bool omittedMoviePrefix);
     void notifyMpegCdStreamStart(PS2Runtime *runtime = nullptr);
     void notifyMpegCdStreamDataProduced(uint32_t byteCount, bool endOfStream);
     void notifyMpegCdStreamEof(PS2Runtime *runtime = nullptr);
