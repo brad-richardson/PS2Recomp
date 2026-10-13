@@ -115,15 +115,7 @@ namespace
         g_rcEntryS = rcEntryS;
         g_bonusSeen = seen;
         g_post = PostCall{};
-        for (int i = 0; i < kNormcapSlots; ++i)
-        {
-            g_normcapSlots[i] = NormcapSlot{};
-            g_normcapOwners[i] = NormcapOwner{};
-        }
-        g_normcap = NormcapPost{};
-        g_normcapArmed = false;
-        queryHoldReset();
-        stuntchgReset(); // REV1: unsaved FLP3 latch (see the same-mask path)
+        clearHostCachesForLoad(); // REV1: every unsaved cache, as on the same-mask path
         std::fprintf(stderr, "%s\n", fixDeltaSectionLog(v.detail, b[6]).c_str());
         return true;
     }
@@ -173,6 +165,11 @@ namespace
                               std::to_string(savedMode) + ") needs the same PS2X_SSX3_FULL120 mode and FIX masks");
             std::fprintf(stderr, "[savestate] fh1: saved in mode %u, running mode %u; full-120 state left fresh\n",
                          savedMode, static_cast<unsigned>(mode()));
+            // REV1: serialized fh1 fields stay as they were on this path, but
+            // the unsaved caches still clear (fresh-process state, quick
+            // load included).
+            if (!r.validationOnly())
+                clearHostCachesForLoad();
             return true;
         }
         if (r.validationOnly())
@@ -213,7 +210,7 @@ namespace
         g_rcEntryS = rcEntryS;
         g_post = post;
         g_bonusSeen = seen;
-        stuntchgReset(); // REV1: the FLP3 latch is not serialized; a load starts fresh
+        clearHostCachesForLoad(); // REV1: unsaved caches never cross a load (RV32 F1)
         return true;
     }
 

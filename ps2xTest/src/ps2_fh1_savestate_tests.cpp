@@ -77,6 +77,67 @@ namespace
         ps2_savestate::Reader r(buf.data(), buf.size());
         return ps2_savestate::registeredSections().at("fh1").load(r) && r.ok() && r.atEnd();
     }
+
+    // REV1/RV32 F1: every unsaved host cache (the events+query play set),
+    // dirtied as a mid-race quick load would find it.
+    void dirtyUnsavedCaches()
+    {
+        using namespace ps2_fh1;
+        for (uint32_t i = 0; i < kQueryHoldSlots; ++i)
+        {
+            g_queryHold[i].p = 0x10000u + i;
+            g_queryHold[i].v0 = 7u + i;
+            g_queryHold[i].w[0] = 9u + i;
+        }
+        for (int i = 0; i < kNormcapSlots; ++i)
+        {
+            g_normcapSlots[i].rider = 0x20000u + static_cast<uint32_t>(i);
+            g_normcapSlots[i].preValid = true;
+            g_normcapSlots[i].budgetValid = true;
+            g_normcapOwners[i].pa = 0x30000u + static_cast<uint32_t>(i);
+            g_normcapOwners[i].r = 0x40000u + static_cast<uint32_t>(i);
+        }
+        g_normcap.target = 1u;
+        g_normcapArmed = true;
+        g_shadowPub[0].key = 0x50000u;
+        g_shadowPub[0].cur[0] = 3u;
+        g_pub.target = 2u;
+        g_pub.n = 4u;
+        g_pubArmed = true;
+        g_trailRingRngSaved[0] = 5u;
+        g_trailRingRngSp = 6u;
+        g_trailRingRngArmed = true;
+        for (int i = 0; i < 2; ++i)
+        {
+            g_stuntchgHigh[i] = true;
+            g_stuntchgIdle[i] = 5;
+            g_stuntchgDelay[i] = 3;
+        }
+    }
+
+    bool unsavedCachesClear()
+    {
+        using namespace ps2_fh1;
+        for (uint32_t i = 0; i < kQueryHoldSlots; ++i)
+            if (g_queryHold[i].p != 0u || g_queryHold[i].v0 != 0u || g_queryHold[i].w[0] != 0u)
+                return false;
+        for (int i = 0; i < kNormcapSlots; ++i)
+            if (g_normcapSlots[i].rider != 0u || g_normcapSlots[i].preValid ||
+                g_normcapSlots[i].budgetValid || g_normcapOwners[i].pa != 0u ||
+                g_normcapOwners[i].r != 0u)
+                return false;
+        if (g_normcap.target != 0u || g_normcapArmed)
+            return false;
+        if (g_shadowPub[0].key != 0u || g_shadowPub[0].cur[0] != 0u || g_pub.target != 0u ||
+            g_pub.n != 0u || g_pubArmed)
+            return false;
+        if (g_trailRingRngSaved[0] != 0u || g_trailRingRngSp != 0u || g_trailRingRngArmed)
+            return false;
+        for (int i = 0; i < 2; ++i)
+            if (g_stuntchgHigh[i] || g_stuntchgIdle[i] != 0 || g_stuntchgDelay[i] != 0)
+                return false;
+        return true;
+    }
 } // namespace
 
 void register_ps2_fh1_savestate_tests()
@@ -226,6 +287,25 @@ void register_ps2_fh1_savestate_tests()
                 t.Equals(ps2_fh1::g_stuntchgDelay[i], 0, "delay cleared on load");
             }
             setFresh();
+        });
+
+        tc.Run("REV1 host det: quick load equals fresh load for unsaved caches", [](TestCase &t)
+        {
+            // Fresh-process baseline: serialized state fresh, caches zeroed.
+            setFresh();
+            ps2_fh1::clearHostCachesForLoad();
+            t.IsTrue(unsavedCachesClear(), "fresh baseline caches are zero");
+            const std::vector<uint8_t> buf = saveFh1();
+            // Quick load: the same buffer loaded over dirtied live caches
+            // (events+query play set) must land on the fresh baseline, and
+            // the serialized round trip must be unaffected by the clear.
+            dirtyUnsavedCaches();
+            t.IsTrue(!unsavedCachesClear(), "caches dirtied before the load");
+            t.IsTrue(loadFh1(buf), "quick load applies");
+            t.IsTrue(unsavedCachesClear(), "quick load caches equal fresh load");
+            t.IsTrue(saveFh1() == buf, "serialized state round-trips across the clear");
+            setFresh();
+            ps2_fh1::clearHostCachesForLoad();
         });
 
         tc.Run("truncated payload refuses", [](TestCase &t)

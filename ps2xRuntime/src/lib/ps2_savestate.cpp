@@ -1401,6 +1401,10 @@ namespace ps2_savestate
             ps2_tk45c::rebuildResolved(gems, ps2_tk45c::table(), runtime.memory().getRDRAM(),
                                       PS2_RAM_SIZE, savedTick);
         ps2_ssx3_tricky_layer::onStateLoaded(runtime.memory().getRDRAM(), PS2_RAM_SIZE, savedTick);
+        // REV1 (RV32 F1): a pre-FH27 file has no fh1 section, so no fh1 load
+        // hook ran; its unsaved host caches clear here like on every load.
+        if (loaded.count("fh1") == 0u)
+            ps2_fh1::clearHostCachesForLoad();
         setResumeSkip();
         if (savedTickOut)
             *savedTickOut = savedTick;

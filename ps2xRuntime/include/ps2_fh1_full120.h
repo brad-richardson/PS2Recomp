@@ -3026,6 +3026,33 @@ inline void chase2OnReturn(uint8_t *ram, R5900Context *ctx)
 
 #include "ps2_fh1_pub.h"
 
+// REV1 (RV32 F1): one savestate semantics for every host cache the fh1
+// section does not serialize — clear on every load, matching a fresh
+// process, instead of inheriting the pre-load timeline on a quick load.
+// Covers the query hold (owner-keyed, no tick stamp), the normcap
+// slots/owners/post, shadowpub samples + the armed publication record,
+// the trailring RNG hold and the stuntchg latch. Serialized state
+// (jcam2 via fh32, life2, rpl1, the fh1 core fields incl. g_post) is
+// restored by its own section and untouched here. Disarming the
+// trailring/pub records must NOT restore their saved words: RAM now
+// holds the loaded image, not the pre-load one.
+inline void clearHostCachesForLoad() noexcept
+{
+    queryHoldReset();
+    for (int i = 0; i < kNormcapSlots; ++i)
+    {
+        g_normcapSlots[i] = NormcapSlot{};
+        g_normcapOwners[i] = NormcapOwner{};
+    }
+    g_normcap = NormcapPost{};
+    g_normcapArmed = false;
+    pubReset();
+    g_trailRingRngSaved = {};
+    g_trailRingRngSp = 0u;
+    g_trailRingRngArmed = false;
+    stuntchgReset();
+}
+
 inline void onReturn(uint8_t *ram, R5900Context *ctx, uint32_t targetPc, bool returned)
 {
     trailRingOnReturn(ram, ctx, targetPc);
