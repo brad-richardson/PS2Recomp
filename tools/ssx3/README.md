@@ -108,7 +108,9 @@ local layout preview and prints manual adb commands. The shipped
 Android presets are [presets/ps2x.env](presets/ps2x.env) and
 [presets/full120.env](presets/full120.env), derived from the Odin play env
 with every private path removed and the SET2 settings overlay on
-(`PS2X_SETTINGS_OVERLAY=1`).
+(`PS2X_SETTINGS_OVERLAY=1`). The public preset selects the system Vulkan
+driver (`GE1_VK_TURNIP=0`) and interpreted VU0 (`PS2X_VU0_RECOMP=0`) to match
+the libraries built by this recipe.
 
 JNI input must contain your locally source-built `arm64-v8a/libge1_gs.so`
 and `libmv2_microvu.so`; never include `libhardware.so`, which this fork builds
