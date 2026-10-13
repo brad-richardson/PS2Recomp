@@ -54,10 +54,6 @@ static_assert(static_cast<uint32_t>(EeEventType::ExternalWake) == 4u, "rpl3 mnem
 static_assert(static_cast<uint32_t>(EeEventType::Alarm) == 5u, "rpl3 mnemonic order");
 static_assert(static_cast<uint32_t>(EeEventType::SoundTick) == 6u, "rpl3 mnemonic order");
 
-#if PS2X_ENABLE_DIAG_TAPS
-namespace ge1_wait_census { void clear(uint64_t tick); }
-#endif
-
 // P1c histogram flushers owned by other translation units (defined in
 // Kernel/Syscalls/Dispatcher.cpp and ps2_runtime.cpp). Called from the
 // periodic tick below so quiet periods still emit blocks.
@@ -3054,10 +3050,6 @@ void EeScheduler::processEvent(const EeEvent &event)
         if (m_perfTail)
             perfTailCutFrame(m_vsyncTick + 1u);
         ++m_vsyncTick;
-#if PS2X_ENABLE_DIAG_TAPS
-        if ((m_vsyncTick % 300u) == 0u)
-            ge1_wait_census::clear(m_vsyncTick);
-#endif
         if (m_vsyncTick == coverageTick())
         {
             std::cerr << "[coverage:tick] vsync=" << m_vsyncTick << std::endl;

@@ -450,9 +450,9 @@ void register_ps2_fh1_fix_tests()
             for (unsigned bit = 0; bit < 64u; ++bit)
             {
                 const char *name = fixMainBitName(bit);
-                if (bit == 14u)
+                if (bit == 14u || bit == 51u)
                 {
-                    t.IsTrue(name == nullptr, "internal ramp bit stays unnamed");
+                    t.IsTrue(name == nullptr, "internal ramp and reserved bit 51 stay unnamed");
                     continue;
                 }
                 if (bit >= 62u)
