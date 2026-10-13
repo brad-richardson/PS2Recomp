@@ -140,6 +140,24 @@ void resolvePublicTier(int panelW, int panelH)
     setenv("GE1_UPSCALE", choice.render.c_str(), 1);
     setenv("PS2X_GE1_EXPORT_SIZE", choice.output.c_str(), 1);
     setenv("GE1_CAS", choice.cas.c_str(), 1);
+    if (choice.capable)
+    {
+        // PUB4: the play env precaches replacements (GE1_TEX_PRELOAD=1) and
+        // prewarms TFX pipelines. The replacement pack is private to play
+        // builds, so PRELOAD is a no-op without GE1_TEX_REPLACE; it still
+        // matches play for users who supply their own pack. TFX prewarm
+        // needs no game file: pointing GE1_TFX_PREWARM at the app's ge1-data
+        // enables the VK coverage shipped inside the library (plus any
+        // recorded file that lands there); the CF2 default skips it only
+        // because the file is absent.
+        setenv("GE1_TEX_PRELOAD", "1", 1);
+        const char *dataDir = std::getenv("GE1_GS_DATA_DIR");
+        if (dataDir && *dataDir)
+        {
+            const std::string prewarm = std::string(dataDir) + "/tfx-selectors.bin";
+            setenv("GE1_TFX_PREWARM", prewarm.c_str(), 1);
+        }
+    }
     const char *vendor = gpu.vendor == ps2x::public_tier::kQualcommVendor ? "Adreno"
                        : gpu.vendor == 0x13B5 ? "Mali" : "other";
     std::fprintf(stderr, "[tier] platform=android tier=%s vendor=%s vendorID=0x%04x gpu=\"%s\" ram=%llu "
