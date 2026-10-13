@@ -12,6 +12,8 @@ import shutil
 import struct
 import subprocess
 import sys
+import urllib.request
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 GENERATOR = '9a6e02b26466f737e0ef419cc3da8d5d8ecdaf27'
@@ -287,11 +289,56 @@ def android(a):
         raise ValueError('android requires --jnilibs; see tools/ssx3/README.md for library recipe')
     keystore = ensure_keystore(a.work)
     version_code = next_version_code(a.work)
+    jnilibs = a.work / ('public-jniLibs-' + str(version_code))
+    shutil.copytree(a.jnilibs.resolve(), jnilibs, dirs_exist_ok=True)
+    turnip_path = jnilibs / 'arm64-v8a/libvulkan_freedreno.so'
+    notices_dir = a.work / ('public-notices-' + str(version_code))
+    notices_dir.mkdir(parents=True, exist_ok=True)
+    if a.no_turnip:
+        turnip_path.unlink(missing_ok=True)
+        print('Turnip disabled by --no-turnip; system Vulkan driver will be used.')
+    else:
+        manifest = json.loads((ROOT / 'tools/ssx3/turnip.json').read_text())
+        cache = a.work / 'turnip-cache'
+        cache.mkdir(exist_ok=True)
+        def verified_asset(name, entry):
+            dest = cache / name
+            if dest.is_file() and sha(dest) == entry['sha256']:
+                return dest
+            dest.unlink(missing_ok=True)
+            tmp = cache / (name + '.download')
+            tmp.unlink(missing_ok=True)
+            try:
+                with urllib.request.urlopen(entry['url'], timeout=60) as src, tmp.open('wb') as out:
+                    shutil.copyfileobj(src, out)
+                if sha(tmp) != entry['sha256']:
+                    raise ValueError(name + ' SHA-256 mismatch')
+                tmp.replace(dest)
+                return dest
+            finally:
+                tmp.unlink(missing_ok=True)
+        try:
+            binary = verified_asset('libvulkan_freedreno.so', manifest['binary'])
+            notices = verified_asset('turnip-notices.zip', manifest['notices'])
+            # Release archives are pinned by SHA; also reject paths that could escape the asset root.
+            with zipfile.ZipFile(notices) as z:
+                for member in z.namelist():
+                    parts = Path(member).parts
+                    if member.startswith('/') or '..' in parts:
+                        raise ValueError('unsafe Turnip notice path: ' + member)
+                z.extractall(notices_dir / 'third_party/turnip')
+            turnip_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(binary, turnip_path)
+            print('Turnip included (SHA-256 ' + manifest['binary']['sha256'] + ').')
+        except (OSError, ValueError, zipfile.BadZipFile) as e:
+            turnip_path.unlink(missing_ok=True)
+            print('Turnip unavailable (' + str(e) + '); continuing with system Vulkan.', file=sys.stderr)
     print('Signing with local keystore ' + str(keystore) + ' (versionCode ' + str(version_code) + ').')
     print('Back up your keystore; a different key forces an uninstall, which wipes saves.')
     run('bash', ROOT / 'android/gradlew', '-p', ROOT / 'android', 'assembleRelease',
         '-Pps2xGameCodegenDir=' + str(a.work / 'codegen'),
-        '-Pps2xJniLibsDir=' + str(a.jnilibs.resolve()), '-Pps2xVu0RecompDir=',
+        '-Pps2xJniLibsDir=' + str(jnilibs), '-Pps2xPublicNoticesDir=' + str(notices_dir),
+        '-Pps2xVu0RecompDir=',
         '-Pps2xPgoData=', '-Pps2xBootElf=/storage/emulated/0/Android/data/' + a.app_id + '/files/SLUS_207.72',
         '-Pps2xAppId=' + a.app_id,
         '-Pps2xVersionCode=' + str(version_code),
@@ -369,7 +416,7 @@ def android_libs(a):
         raise ValueError('android-libs requires --ndk (NDK 28.2.13676358)')
     vendor = a.work / 'android-assembly/vendor-pcsx2'
     source('https://github.com/brad-richardson/pcsx2.git',
-           '02561a9c9ae54171d40e043fb450efdbbe0108f1', vendor)
+           'a33b8730eb0c2d097ccc714dcf560a5ef5465a0c', vendor)
     prefix = a.work / 'android-deps'
     prefix.mkdir(exist_ok=True)
     env = os.environ.copy()
@@ -532,6 +579,7 @@ def main():
     p.add_argument('--serial', help='adb device serial for install')
     p.add_argument('--dry-run', action='store_true', help='check and list install disc payload without touching a device')
     p.add_argument('--jnilibs', type=Path, help='own source-built Android JNI libraries')
+    p.add_argument('--no-turnip', action='store_true', help='omit the optional Turnip driver')
     p.add_argument('--ndk', type=Path, help='local Android NDK 28.2.13676358')
     p.add_argument('--suite', action='store_true', help='also build optional Mac development suite and its analyzer/recompiler fixtures')
     p.add_argument('--jobs', type=int, default=8)

@@ -1,8 +1,10 @@
 package com.ps2x.runner;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.NativeActivity;
 import android.content.Intent;
+import android.graphics.Point;
 import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -41,6 +43,18 @@ public final class LaunchActivity extends Activity {
                     Os.setenv("PS2X_LAUNCH_HZ", "120", true);
                 } else {
                     Os.unsetenv("PS2X_LAUNCH_HZ");
+                }
+                // The public package asks the native GS for one device-tier decision.
+                // Play builds keep their explicit env and compiled defaults.
+                if (!"com.ps2x.runner".equals(getPackageName())) {
+                    final ActivityManager manager = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+                    final ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
+                    manager.getMemoryInfo(memory);
+                    final Point panel = new Point();
+                    getWindowManager().getDefaultDisplay().getRealSize(panel);
+                    Os.setenv("PS2X_PUBLIC_APP", "1", true);
+                    Os.setenv("PS2X_PUBLIC_RAM_BYTES", Long.toString(memory.totalMem), true);
+                    Os.setenv("PS2X_PUBLIC_PANEL", panel.x + "x" + panel.y, true);
                 }
                 sStartedTarget = target;
             } catch (ErrnoException e) {

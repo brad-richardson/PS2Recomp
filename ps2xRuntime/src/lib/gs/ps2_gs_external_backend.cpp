@@ -8,6 +8,7 @@
 #include "ps2_adpf.h"
 #include "ps2_perf_log.h"
 #include "ps2_turbo_boot.h" // BTS2: skip presents while boot turbo is armed
+#include "ps2_public_tier.h"
 #include "runtime/gs/ge1_gs_api.h"
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
@@ -25,6 +26,7 @@
 #if defined(__ANDROID__)
 #include <android/hardware_buffer.h>
 #include <android/rect.h>
+#include <vulkan/vulkan.h>
 #endif
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
 #include "runtime/gs/ps2_present_share.h"
@@ -57,6 +59,119 @@
 
 namespace
 {
+#if defined(__ANDROID__)
+struct PublicGpu
+{
+    uint32_t vendor = 0;
+    std::string name = "unknown";
+};
+
+PublicGpu publicSystemGpu()
+{
+    PublicGpu gpu;
+    void *lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib)
+        return gpu;
+    auto getProc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr"));
+    auto create = getProc ? reinterpret_cast<PFN_vkCreateInstance>(getProc(VK_NULL_HANDLE, "vkCreateInstance"))
+                          : nullptr;
+    if (create)
+    {
+        const VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO, nullptr, "SSX 3 tier probe", 1,
+                                        nullptr, 0, VK_API_VERSION_1_0};
+        const VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, nullptr, 0, &appInfo,
+                                        0, nullptr, 0, nullptr};
+        VkInstance instance = VK_NULL_HANDLE;
+        if (create(&info, nullptr, &instance) == VK_SUCCESS)
+        {
+            auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+                getProc(instance, "vkEnumeratePhysicalDevices"));
+            auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+                getProc(instance, "vkGetPhysicalDeviceProperties"));
+            auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(getProc(instance, "vkDestroyInstance"));
+            uint32_t count = 0;
+            if (enumerate && properties && enumerate(instance, &count, nullptr) == VK_SUCCESS && count > 0)
+            {
+                std::vector<VkPhysicalDevice> devices(count);
+                if (enumerate(instance, &count, devices.data()) == VK_SUCCESS && count > 0)
+                {
+                    VkPhysicalDeviceProperties props{};
+                    properties(devices[0], &props);
+                    gpu.vendor = props.vendorID;
+                    gpu.name = props.deviceName;
+                }
+            }
+            if (destroy)
+                destroy(instance, nullptr);
+        }
+    }
+    dlclose(lib);
+    return gpu;
+}
+
+bool publicTurnipAvailable()
+{
+    void *lib = dlopen("libvulkan_freedreno.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib)
+        return false;
+    dlclose(lib);
+    return true;
+}
+
+void resolvePublicTier(int panelW, int panelH)
+{
+    const char *enabled = std::getenv("PS2X_PUBLIC_APP");
+    if (!enabled || std::strcmp(enabled, "1") != 0)
+        return;
+    if (panelW <= 0 || panelH <= 0)
+    {
+        const char *launchPanel = std::getenv("PS2X_PUBLIC_PANEL");
+        if (launchPanel)
+            std::sscanf(launchPanel, "%dx%d", &panelW, &panelH);
+    }
+    const PublicGpu gpu = publicSystemGpu();
+    const char *ramText = std::getenv("PS2X_PUBLIC_RAM_BYTES");
+    const uint64_t ram = ramText ? std::strtoull(ramText, nullptr, 10) : 0;
+    const ps2x::public_tier::Input input{false, ram, gpu.vendor, panelW, panelH, publicTurnipAvailable(),
+                                         std::getenv("GE1_VK_TURNIP"), std::getenv("GE1_UPSCALE"),
+                                         std::getenv("PS2X_GE1_EXPORT_SIZE"), std::getenv("GE1_CAS"), nullptr};
+    const auto choice = ps2x::public_tier::choose(input);
+    setenv("GE1_VK_TURNIP", choice.driver.c_str(), 1);
+    setenv("GE1_UPSCALE", choice.render.c_str(), 1);
+    setenv("PS2X_GE1_EXPORT_SIZE", choice.output.c_str(), 1);
+    setenv("GE1_CAS", choice.cas.c_str(), 1);
+    const char *vendor = gpu.vendor == ps2x::public_tier::kQualcommVendor ? "Adreno"
+                       : gpu.vendor == 0x13B5 ? "Mali" : "other";
+    std::fprintf(stderr, "[tier] platform=android tier=%s vendor=%s vendorID=0x%04x gpu=\"%s\" ram=%llu "
+                         "panel=%dx%d driver=%s render=%s output=%s cas=%s\n",
+                 choice.capable ? "capable" : "low", vendor, gpu.vendor, gpu.name.c_str(),
+                 static_cast<unsigned long long>(ram), panelW, panelH,
+                 choice.driver == "1" ? "Turnip" : "system", choice.render.c_str(),
+                 choice.output.c_str(), choice.cas == "0" ? "off" : choice.cas.c_str());
+}
+#endif
+#if defined(PS2X_GE1_STATIC_IOSURFACE)
+void resolvePublicIosTier(int panelW, int panelH)
+{
+    // The public iOS preset uses auto; play bundles use explicit values.
+    const char *render = std::getenv("GE1_UPSCALE");
+    const char *output = std::getenv("PS2X_GE1_EXPORT_SIZE");
+    const char *cas = std::getenv("GE1_CAS");
+    const auto isAuto = [](const char *value) { return value && std::strcmp(value, "auto") == 0; };
+    if (!isAuto(render) && !isAuto(output) && !isAuto(cas))
+        return;
+    const ps2x::public_tier::Input input{true, 0, 0, panelW, panelH, false, nullptr, render,
+                                         output, cas, nullptr};
+    const auto choice = ps2x::public_tier::choose(input);
+    setenv("GE1_UPSCALE", choice.render.c_str(), 1);
+    setenv("PS2X_GE1_EXPORT_SIZE", choice.output.c_str(), 1);
+    setenv("GE1_CAS", choice.cas.c_str(), 1);
+    std::fprintf(stderr, "[tier] platform=ios tier=capable vendor=apple panel=%dx%d driver=system "
+                         "render=%s output=%s cas=%s\n", panelW, panelH, choice.render.c_str(),
+                 choice.output.c_str(), choice.cas.c_str());
+}
+#endif
+
 constexpr uint64_t kLogCapBytes = 1ull * 1024ull * 1024ull * 1024ull;
 constexpr char kSaveMagic[8] = {'P', 'S', '2', 'X', 'E', 'G', 'S', '1'};
 // DS1: v2 appends the GE1 freeze blob (v1 never completed a GE1-live save;
@@ -1764,8 +1879,10 @@ private:
         int pw = 0, ph = 0;
 #if defined(__ANDROID__)
         const bool panel = ps2x_present_vk::panelSize(pw, ph);
+        resolvePublicTier(pw, ph);
 #else
         const bool panel = ps2x::ios::panelSize(pw, ph);
+        resolvePublicIosTier(pw, ph);
 #endif
         ps2x::present::Rect game{0.0f, 0.0f, 0.0f, 0.0f};
         if (panel)

@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_knobs.h"
+#include "ps2_public_tier.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -347,6 +348,53 @@ void register_ps2_knobs_tests()
             t.IsTrue(line.size() < 4300, "dump under 4300 bytes");
             t.IsTrue(line.find(" PS2X_GS_BACKEND=external") != std::string::npos, "default visible");
             t.IsTrue(line.find(" PS2X_VIF1_REVERSE_DMA=0") != std::string::npos, "readback-off default visible");
+        });
+        tc.Run("public tier chooses RAM boundary, GPU driver, panel and output together", [](TestCase &t)
+               {
+            using namespace ps2x::public_tier;
+            Input in{};
+            in.ramBytes = kCapableRam - 1;
+            in.vendorId = kQualcommVendor;
+            in.turnipAvailable = true;
+            in.panelW = 1920;
+            in.panelH = 1080;
+            auto c = choose(in);
+            t.IsTrue(!c.capable && c.driver == "1" && c.render == "1" && c.output == "640x448" &&
+                     c.cas == "0", "under 5 GiB uses low output but Adreno Turnip");
+            in.ramBytes = kCapableRam;
+            c = choose(in);
+            t.IsTrue(c.capable && c.render == "native" && c.output == "display" && c.cas == "0.25",
+                     "5 GiB and 1080p use capable native/CAS");
+            in.panelW = 2400;
+            in.panelH = 1080;
+            t.IsTrue(choose(in).render == "native", "landscape 1080p panel");
+            in.panelH = 1200;
+            t.IsTrue(choose(in).render == "2", "non-1080p capable panel uses 2x");
+            in.vendorId = 0x13B5;
+            t.IsTrue(choose(in).driver == "0", "Mali uses system driver");
+            in.vendorId = kQualcommVendor;
+            in.turnipAvailable = false;
+            t.IsTrue(choose(in).driver == "0", "missing Turnip uses system driver");
+            in.driver = "0";
+            in.render = "2";
+            in.output = "1280x896";
+            in.cas = "0";
+            c = choose(in);
+            t.IsTrue(c.driver == "0" && c.render == "2" && c.output == "1280x896" && c.cas == "0",
+                     "explicit env wins over auto tier");
+            in.savedResolution = "native";
+            t.IsTrue(choose(in).render == "native", "saved SET2 Resolution wins over preset");
+            in.ios = true;
+            in.driver = nullptr;
+            in.render = "auto";
+            in.output = "auto";
+            in.cas = "auto";
+            in.panelW = 2048;
+            in.panelH = 1536;
+            in.savedResolution = nullptr;
+            c = choose(in);
+            t.IsTrue(c.capable && c.driver == "0" && c.render == "2" && c.output == "display" &&
+                     c.cas == "0.25", "public iOS uses capable tier and 2x off 1080p");
         });
     });
 }

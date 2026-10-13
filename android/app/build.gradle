@@ -5,6 +5,7 @@ plugins {
 // Override with: gradlew assembleRelease -Pps2xBootElf=/absolute/path/on/device.elf
 def ps2xGameCodegenDir = project.findProperty('ps2xGameCodegenDir') ?: ''
 def ps2xJniLibsDir = project.findProperty('ps2xJniLibsDir') ?: ''
+def ps2xPublicNoticesDir = project.findProperty('ps2xPublicNoticesDir') ?: ''
 // Private game-derived assets enter only at build time, outside the source tree.
 def ps2xPackDir = project.findProperty('ps2xPackDir') ?: ''
 // VR3: generated VU0 images (vu0_<hash>.cpp); used only with PS2X_VU0_RECOMP=1 at run time.
@@ -126,6 +127,9 @@ android {
         if (halDup.exists()) {
             throw new GradleException("libhardware.so is now built from source (android/hwcompat); remove ${halDup} from ps2xJniLibsDir")
         }
+    }
+    if (ps2xPublicNoticesDir) {
+        sourceSets.main.assets.srcDirs += [ps2xPublicNoticesDir]
     }
 
     externalNativeBuild {

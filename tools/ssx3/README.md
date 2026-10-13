@@ -110,14 +110,22 @@ local layout preview and prints manual adb commands. The shipped
 Android presets are [presets/ps2x.env](presets/ps2x.env) and
 [presets/full120.env](presets/full120.env), derived from the Odin play env
 with every private path removed and the SET2 settings overlay on
-(`PS2X_SETTINGS_OVERLAY=1`). The public preset selects the system Vulkan
-driver (`GE1_VK_TURNIP=0`) and interpreted VU0 (`PS2X_VU0_RECOMP=0`) to match
-the libraries built by this recipe.
+(`PS2X_SETTINGS_OVERLAY=1`). The public preset selects the driver by Vulkan
+GPU vendor and uses interpreted VU0 (`PS2X_VU0_RECOMP=0`). Reported RAM at
+or above 5 GiB uses panel-native rendering on a 1080p panel, otherwise 2×,
+with display-size export and CAS. Lower RAM uses 1× and 1:1 export with no
+CAS; Android scales that output to the panel. The in-game Resolution setting
+persists and overrides the render default.
 
 JNI input must contain your locally source-built `arm64-v8a/libge1_gs.so`
 and `libmv2_microvu.so`; never include `libhardware.so`, which this fork builds
 from [HAL source](../../android/hwcompat/hwcompat.c). Optional custom Vulkan
 comes from [Mesa sources](https://github.com/brad-richardson/mesa/tree/ssx3).
+The public `android` step downloads the pinned release in
+[`turnip.json`](turnip.json), verifies the binary and notices by SHA-256, and
+packages both. `--no-turnip` omits them. A failed download prints a warning
+and builds with the system Vulkan driver. Adreno selects Turnip when present;
+a load failure falls back to the system driver.
 The APK stays under `android/app/build/outputs/apk/release` locally.
 
 `android-libs` invokes the pinned ARMSX2 public source dependency recipe
