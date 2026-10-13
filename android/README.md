@@ -4,8 +4,9 @@ New local preparation/build entry: [tools/ssx3](../tools/ssx3/README.md). Suppor
 
 Read the [input contract](../docs/ssx3-inputs.md) and the
 [public build recipe](../tools/ssx3/README.md) first. That recipe produced a
-signed APK from a fresh clone on macOS Apple silicon in PUB1. Device
-installation, a finished race, controls, sound, and save/reload remain to be
+signed APK from a fresh clone on macOS Apple silicon in PUB1 and rebuilt one
+from a second fresh clone in PUB2 (2026-10-13, package `com.ssx3.recomp`).
+Device installation, a finished race, controls, sound, and save/reload remain to be
 validated. No game-bearing APK is provided.
 
 ## Build a locally prepared preview

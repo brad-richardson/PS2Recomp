@@ -8,8 +8,10 @@ provide game downloads or game-bearing app binaries. Start with the
 This entry provides a local EE generator, Mac runner build and native Metal
 GS/microVU library build. The baseline uses interpreted VU0 and no PGO;
 it is not the optimized device play build. A fresh clone built a signed
-Android APK on macOS Apple silicon in PUB1 (2026-10-12). That build is not an
-on-device acceptance result. iOS offline-VU1 preparation remains incomplete.
+Android APK on macOS Apple silicon in PUB1 (2026-10-12). PUB2 rebuilt a signed
+APK from a second fresh clone on 2026-10-13 with package id
+`com.ssx3.recomp`; the ISO is outside the APK. Neither build is an on-device
+acceptance result. iOS offline-VU1 preparation remains incomplete.
 
 The runner-only path and source-built Metal/microVU libraries were validated
 on macOS Apple silicon from an isolated fresh clone on 2026-10-06, using only
@@ -52,8 +54,8 @@ Run that suite **from the checkout root**. The generator pin is
 the game TOML/map — including the Equip Gear extra entry — is unchanged
 since). `prepare` checks ISO and extracted ELF SHA256, clones the pinned
 generator from the public fork, builds it, writes absolute local TOML
-paths, and records the generated registration SHA256. Brad's optional local
-play names sidecar reproduces SHA256
+paths, and records the generated registration SHA256. An optional local play
+names sidecar reproduces SHA256
 `ad96edb68ce78994684c736b745d79f02d88367eb4d5bfeb2d7b05d126b0867c`
 (the SPR1 play pin, ABI v2). Use a fresh work directory for regeneration;
 existing output is refused.
@@ -125,7 +127,7 @@ that local prefix. The dependency recipe has its own parallelism setting
 (based on host CPU count). It stages JNI libraries and public renderer
 resources into your work directory. This source-only route avoids the old
 private remote helper and bundled dependency directory. Android library/APK
-compilation and signing were validated on macOS Apple silicon by PUB1.
+compilation and signing were validated on macOS Apple silicon by PUB1 and PUB2.
 Installation, title, a finished race, controls, sound, and save/reload
 remain for device acceptance. Linux hosts, the remaster pack and Tricky
 preparation have not been validated by this route.
