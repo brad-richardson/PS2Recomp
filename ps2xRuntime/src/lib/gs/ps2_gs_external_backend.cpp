@@ -34,6 +34,7 @@
 #include "runtime/gs/ps2_tricky_hud_gl.h" // HUD4 (from HUD3): iOS EAGL composite
 #include <IOSurface/IOSurfaceRef.h>
 #include <atomic>
+#include <future>
 #include <mach/kern_return.h>
 #endif
 
@@ -365,6 +366,8 @@ struct IOHudState
     uint64_t mtlServed = 0u;
     uint64_t mtlNs = 0u;
     uint64_t mtlFallbacks = 0u;
+    uint64_t mtlTimeouts = 0u; // REV1: composites past the bounded wait
+    bool mtlDisabled = false;  // REV1: latched off after the first timeout
     // HUD4 lane diag (diag knob): real GPU output vs the CPU stamp (BGRA
     // lane) every 30th composite.
     uint64_t diagSeen = 0u;
@@ -463,16 +466,22 @@ static bool fillIOHudScene(Ge1HudScene &out, const ps2_ssx3_tricky_hud::HudScene
     return true;
 }
 
-// HUD5: one Metal composite through GE1's queue (synchronous: this thread
-// waits inside the call). True = GPU-served; false = the CPU stamp fallback
-// serves. Any failure falls back silently after the first log line.
+// REV1 (RV26 F7): the vendor composite is synchronous — it waits on GE1's
+// Metal queue inside the call — so the wait is bounded from here. Normal
+// composites average well under a millisecond (the mtl avg log below); one
+// past this bound is the wedge shape HUD5 §0 froze on, not a slow frame.
+inline constexpr std::chrono::milliseconds kMtlHudTimeout{16};
+
+// HUD5: one Metal composite through GE1's queue. True = GPU-served; false =
+// the CPU stamp fallback serves. Any failure falls back silently after the
+// first log line; a timeout also latches Metal off for the session.
 static bool compositeIOHudMetal(void *surface, const ps2_ssx3_tricky_hud::Rect &r,
                                uint64_t tick,
                                const ps2_ssx3_tricky_layer::PresentationPacket &p,
                                const ps2_ssx3_tricky_hud::HudVisualKey &key, IOHudState &st)
 {
     using namespace ps2_ssx3_tricky_hud;
-    if (!surface || !p.atlas || !p.atlas->ok)
+    if (!surface || !p.atlas || !p.atlas->ok || st.mtlDisabled)
         return false;
     HudScene sc;
     if (!buildHudScene(sc, st.sprites, key))
@@ -491,13 +500,57 @@ static bool compositeIOHudMetal(void *surface, const ps2_ssx3_tricky_hud::Rect &
         return false;
     }
     const auto t0 = std::chrono::steady_clock::now();
-    uint64_t doneToken = 0u;
-    const int rc = ::ge1_gs_hud_scene(
-        surface, &abi, p.atlas->rgba.data(), static_cast<uint32_t>(p.atlas->w),
-        static_cast<uint32_t>(p.atlas->h),
-        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(p.atlas)), &doneToken);
+    // REV1: run the synchronous vendor call on a one-shot task and wait at
+    // most kMtlHudTimeout for it. The scene blob is copied into the task and
+    // the atlas is immutable once ok, so a task outliving the wait only
+    // still names this surface; if it ever completes it draws this same HUD
+    // scene over the CPU stamp (output-only, one slot). Calls stay serial:
+    // this function is only ever entered from the serialized stamp path,
+    // and the normal path joins the task before returning.
+    struct MtlHudResult
+    {
+        int rc = 0;
+        uint64_t token = 0u;
+    };
+    const uint8_t *atlasPx = p.atlas->rgba.data();
+    const uint32_t atlasW = static_cast<uint32_t>(p.atlas->w);
+    const uint32_t atlasH = static_cast<uint32_t>(p.atlas->h);
+    const uint64_t atlasId = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(p.atlas));
+    std::future<MtlHudResult> fut;
+    try
+    {
+        fut = std::async(std::launch::async,
+                         [surface, abi, atlasPx, atlasW, atlasH, atlasId]() mutable {
+                             MtlHudResult res;
+                             res.rc = ::ge1_gs_hud_scene(surface, &abi, atlasPx, atlasW, atlasH,
+                                                         atlasId, &res.token);
+                             return res;
+                         });
+    }
+    catch (const std::system_error &)
+    {
+        if (++st.mtlFallbacks == 1u)
+            std::fprintf(stderr, "[ssx3-tricky-hud] io: Metal task launch failed, CPU fallback\n");
+        return false;
+    }
+    if (fut.wait_for(kMtlHudTimeout) != std::future_status::ready)
+    {
+        ++st.mtlTimeouts;
+        ++st.mtlFallbacks;
+        st.mtlDisabled = true;
+        std::fprintf(stderr,
+                     "[ssx3-tricky-hud] io: Metal composite past %lld ms bound; CPU "
+                     "fallback, Metal HUD off for this session\n",
+                     static_cast<long long>(kMtlHudTimeout.count()));
+        // Never block on the wedged task (an async future's destructor
+        // would): leak it, on purpose. At most one exists — mtlDisabled
+        // keeps every later composite on the CPU stamp.
+        (void)new std::future<MtlHudResult>(std::move(fut));
+        return false;
+    }
+    const MtlHudResult res = fut.get();
     const auto t1 = std::chrono::steady_clock::now();
-    if (rc != 1 || doneToken == 0u)
+    if (res.rc != 1 || res.token == 0u)
     {
         if (++st.mtlFallbacks == 1u)
             std::fprintf(stderr, "[ssx3-tricky-hud] io: Metal composite failed, CPU fallback\n");
