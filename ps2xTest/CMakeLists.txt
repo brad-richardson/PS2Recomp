@@ -92,6 +92,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_tc1_vf0_tests.cpp
     src/ps2_ach_tests.cpp
     src/ps2_session_telemetry_tests.cpp
+    src/ps2_net_nolink_tests.cpp
 )
 
 if(PS2X_ENABLE_DIAG_TAPS)

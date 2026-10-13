@@ -3,6 +3,7 @@
 #include "../../ps2_iop_transport.h"
 #include "game_overrides.h"
 #include "ps2_e41_trace.h"
+#include "ps2_net_nolink.h"
 #include "ps2_snd_spike.h"
 
 namespace ps2_syscalls
@@ -1065,6 +1066,15 @@ namespace ps2_syscalls
             ps2_snd_spike::onSendCmd(rdram, ps2_e41_trace::lastVsyncTick(), sendCmdRa, cid, packetAddr, packetSize,
                                      [runtime](GuestInvocation invocation)
                                      { runtime->eeScheduler().queueInvocation(std::move(invocation)); });
+        }
+        if (runtime)
+        {
+            // OFL1: minimal DirtySock responder (no-op unless cid=1; the
+            // full PS2X_NET HLE, when it lands, is tried first and this
+            // call is skipped when it replies).
+            (void)ps2_nolink::onSendCmd(rdram, ctx, runtime, cid, packetAddr, packetSize,
+                                        srcExtra, destExtra, sizeExtra,
+                                        ps2_e41_trace::lastVsyncTick());
         }
 
         if (sizeExtra > 0 && srcExtra && destExtra)

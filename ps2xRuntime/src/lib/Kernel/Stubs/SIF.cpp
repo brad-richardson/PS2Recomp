@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "ps2_e41_trace.h"
+#include "ps2_net_nolink.h"
 #include "ps2_snd_spike.h"
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
@@ -1037,6 +1038,23 @@ namespace ps2_stubs
         {
             setReturnS32(ctx, 0);
             return;
+        }
+
+        // OFL1: record sifbuf payloads for the minimal DirtySock
+        // responder (no-op until the EE net state is live).
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const uint8_t *entry = getConstMemPtr(rdram, dmatAddr + i * 16u);
+            if (entry)
+            {
+                Ps2SifDmaTransfer xfer{};
+                std::memcpy(&xfer, entry, sizeof(xfer));
+                if (xfer.size > 0)
+                {
+                    ps2_nolink::noteDma(xfer.src & 0x1FFFFFFFu, xfer.dest,
+                                        static_cast<uint32_t>(xfer.size), rdram);
+                }
+            }
         }
 
         std::array<Ps2SifDmaTransfer, 32u> pending{};

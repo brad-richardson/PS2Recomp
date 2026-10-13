@@ -552,6 +552,7 @@ add_library(ps2_runtime STATIC
     src/lib/games_database.cpp
     src/lib/ps2_ach.cpp # ACH2: local achievements runtime
     src/lib/ps2_session_telemetry.cpp # TEL2: coverage + session log
+    src/lib/ps2_net_nolink.cpp # OFL1: minimal DirtySock responder (link down)
 )
 
 if(PS2X_ENABLE_RUNTIME_LOGS)
