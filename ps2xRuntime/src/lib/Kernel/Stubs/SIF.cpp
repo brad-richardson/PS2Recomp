@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "ps2_e41_trace.h"
 #include "ps2_net_nolink.h"
+#include "ps2_net_dirtysock.h"
 #include "ps2_snd_spike.h"
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
@@ -1051,8 +1052,12 @@ namespace ps2_stubs
                 std::memcpy(&xfer, entry, sizeof(xfer));
                 if (xfer.size > 0)
                 {
-                    ps2_nolink::noteDma(xfer.src & 0x1FFFFFFFu, xfer.dest,
-                                        static_cast<uint32_t>(xfer.size), rdram);
+                    if (ps2_net::enabled())
+                        ps2_net::noteDma(xfer.src & 0x1FFFFFFFu, xfer.dest,
+                                         static_cast<uint32_t>(xfer.size), rdram);
+                    else
+                        ps2_nolink::noteDma(xfer.src & 0x1FFFFFFFu, xfer.dest,
+                                            static_cast<uint32_t>(xfer.size), rdram);
                 }
             }
         }

@@ -4,6 +4,7 @@
 #include "game_overrides.h"
 #include "ps2_e41_trace.h"
 #include "ps2_net_nolink.h"
+#include "ps2_net_dirtysock.h"
 #include "ps2_snd_spike.h"
 
 namespace ps2_syscalls
@@ -1069,12 +1070,12 @@ namespace ps2_syscalls
         }
         if (runtime)
         {
-            // OFL1: minimal DirtySock responder (no-op unless cid=1; the
-            // full PS2X_NET HLE, when it lands, is tried first and this
-            // call is skipped when it replies).
-            (void)ps2_nolink::onSendCmd(rdram, ctx, runtime, cid, packetAddr, packetSize,
-                                        srcExtra, destExtra, sizeExtra,
-                                        ps2_e41_trace::lastVsyncTick());
+            if (ps2_net::enabled())
+                (void)ps2_net::onSendCmd(rdram, ctx, runtime, cid, packetAddr, packetSize,
+                                       srcExtra, destExtra, sizeExtra, ps2_e41_trace::lastVsyncTick());
+            else
+                (void)ps2_nolink::onSendCmd(rdram, ctx, runtime, cid, packetAddr, packetSize,
+                                          srcExtra, destExtra, sizeExtra, ps2_e41_trace::lastVsyncTick());
         }
 
         if (sizeExtra > 0 && srcExtra && destExtra)
