@@ -263,6 +263,32 @@ inline FixMasks parseFix(const std::string &s)
     return r;
 }
 
+// REV1 (RV27 F2 / RV30 #1 / RV32 F4): asymk writes pool word 0x49c124 every
+// cruise update, and the only apply/restore entry for that word is keyed to
+// kFixVnRet. asymk therefore requires vnret: with query+groundstep+asymk but
+// no vnret the word was driven per-update yet never restored at the exit
+// flip, leaving k=0 in stock-rate play. Requiring vnret is the smaller exact
+// change (an asymk-owned word-table entry would duplicate the vnret entry
+// and need dedup in applyWords); the play masks all carry vnret. Pure, so
+// the suite can pin the accepted mask sets (asymkFix adds enabled()).
+inline bool asymkMaskOk(uint64_t mask) noexcept
+{
+    return (mask & (kFixAsymK | kFixQuery | kFixVnRet)) ==
+           (static_cast<uint64_t>(kFixAsymK) | kFixQuery | kFixVnRet);
+}
+
+// NRM1 normcap's complete requested bit set. normcap is effective only when
+// asymk is not (asymk suppresses it: its pair math assumes sqrt/sqrt halves).
+inline bool normcapMaskRequested(uint64_t mask) noexcept
+{
+    return (mask & (kFixNormcap | kFixVnRet | kFixQuery)) ==
+           (static_cast<uint64_t>(kFixNormcap) | kFixVnRet | kFixQuery);
+}
+inline bool normcapMaskOk(uint64_t mask) noexcept
+{
+    return normcapMaskRequested(mask) && !asymkMaskOk(mask);
+}
+
 // SVL1 2a: same-mode sanctioned FIX-delta support
 // (PS2X_SAVESTATE_ALLOW_FIX_DELTA, diagnostic, default off). Pure unless
 // noted; the savestate header (R1) and the fh1 section (R2) share this so

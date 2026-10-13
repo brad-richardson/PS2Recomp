@@ -630,7 +630,9 @@ inline void applyWords(uint8_t *ram, uint32_t a, bool toActive, const FixMasks &
     {
         // TRN2 asymk owns 0x49c124 while on (per-update 0/stock/vnret by
         // contact): skip the static verify, the restore below still resets it.
-        if (!toActive && asymkFix() && w.address == kAsymKPoolK)
+        // REV1: keyed on the applied mask (asymkMaskOk), the same set asymkFix
+        // accepts, so the word-table seam stays testable without the env.
+        if (!toActive && asymkMaskOk(mask) && w.address == kAsymKPoolK)
             continue;
         const uint32_t want = toActive ? w.expected : w.replacement;
         uint32_t got = 0u;
@@ -1656,8 +1658,10 @@ inline bool groundStepFix() noexcept
 inline constexpr uint32_t kAsymKStock = 0xbecccccdu; // float(-0.4), exact stock (pool table)
 inline bool asymkFix() noexcept
 {
-    static const bool on = enabled() && (fixMask() & kFixAsymK) != 0u && queryFix() &&
-                           ((fixMask() & kFixVnRet) != 0u || groundStepFix());
+    // REV1: vnret is required (asymkMaskOk) — it owns the 0x49c124
+    // apply/restore entry asymk's per-update writes rely on. groundstep
+    // alone no longer substitutes (its parity role in querySkip is separate).
+    static const bool on = enabled() && asymkMaskOk(fixMask());
     return on;
 }
 
@@ -1669,9 +1673,7 @@ inline bool asymkFix() noexcept
 // invalid input leaves the guest value (safe fallback).
 inline bool normcapFix() noexcept
 {
-    static const bool on = enabled() && !asymkFix() &&
-                           (fixMask() & (kFixNormcap | kFixVnRet | kFixQuery)) ==
-                               (kFixNormcap | kFixVnRet | kFixQuery);
+    static const bool on = enabled() && normcapMaskOk(fixMask());
     return on;
 }
 

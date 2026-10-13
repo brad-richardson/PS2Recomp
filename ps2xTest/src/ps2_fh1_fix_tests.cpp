@@ -393,6 +393,48 @@ void register_ps2_fh1_fix_tests()
             t.Equals(parseFix("all,stuntchg,-stuntchg").main, kFixAll, "opt-out");
         });
 
+        tc.Run("REV1: asymk requires vnret so 0x49c124 always has an owner", [](TestCase &t)
+        {
+            auto m = [](const char *fix) { return parseFix(fix).main; };
+            t.IsTrue(asymkMaskOk(m("query,vnret,asymk")), "query+vnret+asymk on");
+            t.IsTrue(asymkMaskOk(m("query,vnret,groundstep,asymk")), "play-shaped set on");
+            t.IsTrue(!asymkMaskOk(m("query,groundstep,asymk")),
+                     "groundstep no longer substitutes for vnret");
+            t.IsTrue(!asymkMaskOk(m("query,asymk")), "no vnret: off");
+            t.IsTrue(!asymkMaskOk(m("vnret,asymk")), "no query: off");
+            t.IsTrue(!asymkMaskOk(m("query,vnret")), "no asymk bit: off");
+            t.IsTrue(!asymkMaskOk(m("all")), "all does not imply asymk");
+            // normcap effectiveness across the same boundary (unchanged sets).
+            t.IsTrue(normcapMaskOk(m("query,vnret,normcap")), "normcap set effective");
+            t.IsTrue(!normcapMaskOk(m("query,vnret,normcap,asymk")),
+                     "asymk suppresses normcap");
+            t.IsTrue(!normcapMaskOk(m("query,normcap")), "normcap without vnret: off");
+            // With vnret owning the word, the exit flip restores stock even
+            // when asymk's last per-update write left k=0.
+            std::vector<uint8_t> ram(PS2_RAM_SIZE, 0u);
+            const uint32_t a = 0x1000u;
+            auto poke = [&](uint32_t addr, uint32_t v) {
+                std::memcpy(ram.data() + (addr & 0x1FFFFFFFu), &v, 4);
+            };
+            auto peek = [&](uint32_t addr) {
+                uint32_t v = 0u;
+                std::memcpy(&v, ram.data() + (addr & 0x1FFFFFFFu), 4);
+                return v;
+            };
+            poke(a + 0x10u, 60u);
+            poke(a + 0x14u, kSixtieth);
+            poke(a + 0x24u, 0x3f800000u);
+            poke(0x49c124u, 0xbecccccdu); // vnret word (stock)
+            poke(0x49c0a8u, 0x3f666666u); // vnret lean-brake word (stock)
+            FixMasks masks;
+            masks.main = m("query,vnret,groundstep,asymk");
+            applyWords(ram.data(), a, true, masks);
+            t.Equals(peek(0x49c124u), 0xbe66d021u, "enter writes the vnret value");
+            poke(0x49c124u, 0u); // asymk skip-half k=0 at the exit flip
+            applyWords(ram.data(), a, false, masks);
+            t.Equals(peek(0x49c124u), 0xbecccccdu, "exit restores stock k");
+        });
+
         tc.Run("KNC5 bit 51 stays reserved and parses (JMP5 springhold removed)", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixSpringHold), 1ull << 51, "bit 51 reserved");
