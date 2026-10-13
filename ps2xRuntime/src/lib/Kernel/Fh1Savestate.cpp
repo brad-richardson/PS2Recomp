@@ -123,6 +123,7 @@ namespace
         g_normcap = NormcapPost{};
         g_normcapArmed = false;
         queryHoldReset();
+        stuntchgReset(); // REV1: unsaved FLP3 latch (see the same-mask path)
         std::fprintf(stderr, "%s\n", fixDeltaSectionLog(v.detail, b[6]).c_str());
         return true;
     }
@@ -212,6 +213,7 @@ namespace
         g_rcEntryS = rcEntryS;
         g_post = post;
         g_bonusSeen = seen;
+        stuntchgReset(); // REV1: the FLP3 latch is not serialized; a load starts fresh
         return true;
     }
 

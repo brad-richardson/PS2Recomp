@@ -1204,6 +1204,7 @@ inline void shadowPubSample(uint8_t *ram, uint32_t pa) noexcept;
 inline void shadowPubMarkSkip(uint8_t *ram, uint32_t pa) noexcept;
 inline void pubRestore(uint8_t *ram) noexcept;
 inline void pubReset() noexcept;
+inline void stuntchgReset() noexcept; // FLP3 latch, defined with it below
 
 inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
 {
@@ -1216,6 +1217,7 @@ inline void guestFlip(uint8_t *ram, uint64_t tick, bool toActive)
     if (jcam2Fix()) jcam2Reset();
     if (toActive && queryFix()) queryHoldReset();
     pubReset(); // JDR2: no publication sample survives a flip
+    stuntchgReset(); // REV1: no FLP3 latch/delay survives a flip (idle cannot age at stock rate)
     if (life2Fix()) life2Flip(ram, a, toActive);
     applyWords(ram, a, toActive);
     if (clockFix())
@@ -2871,6 +2873,18 @@ inline bool stuntchgPlayerR(const uint8_t *ram, uint32_t R) noexcept
 inline bool g_stuntchgHigh[2] = {false, false};
 inline int g_stuntchgIdle[2] = {0, 0};
 inline int g_stuntchgDelay[2] = {0, 0};
+// REV1: fresh-process latch state. Called at every guestFlip and on every
+// fh1 savestate load (the latch is not serialized): a stale high/idle pair
+// would spuriously delay the next race's first rise (RV27 F1).
+inline void stuntchgReset() noexcept
+{
+    for (int i = 0; i < 2; ++i)
+    {
+        g_stuntchgHigh[i] = false;
+        g_stuntchgIdle[i] = 0;
+        g_stuntchgDelay[i] = 0;
+    }
+}
 inline constexpr int kStuntChgDelay[2] = {2, 4}; // spin, flip (FLP3)
 inline constexpr float kStuntChgHigh = 0.05f;
 inline constexpr float kStuntChgZeroEps = 1e-6f;
@@ -2917,6 +2931,10 @@ inline void stuntchgOnReturn(uint8_t *ram)
         {
             if (std::fabs(o) <= kStuntChgZeroEps)
             {
+                // REV1 (RV30 #2): a quiet ~0 return is an aborted rise (the
+                // stick neutralised inside the delay window); drop the
+                // pending delay now instead of billing it to the next rise.
+                g_stuntchgDelay[i] = 0;
                 if (g_stuntchgIdle[i] <= kStuntChgMaxIdle)
                     ++g_stuntchgIdle[i];
                 else

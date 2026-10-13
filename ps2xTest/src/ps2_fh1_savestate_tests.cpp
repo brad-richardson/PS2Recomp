@@ -208,6 +208,26 @@ void register_ps2_fh1_savestate_tests()
             setFresh();
         });
 
+        tc.Run("REV1: fh1 load clears the unsaved stuntchg latch", [](TestCase &t)
+        {
+            setFresh();
+            const std::vector<uint8_t> buf = saveFh1();
+            for (int i = 0; i < 2; ++i)
+            {
+                ps2_fh1::g_stuntchgHigh[i] = true;
+                ps2_fh1::g_stuntchgIdle[i] = 5;
+                ps2_fh1::g_stuntchgDelay[i] = 3;
+            }
+            t.IsTrue(loadFh1(buf), "loads");
+            for (int i = 0; i < 2; ++i)
+            {
+                t.IsFalse(ps2_fh1::g_stuntchgHigh[i], "high latch cleared on load");
+                t.Equals(ps2_fh1::g_stuntchgIdle[i], 0, "idle cleared on load");
+                t.Equals(ps2_fh1::g_stuntchgDelay[i], 0, "delay cleared on load");
+            }
+            setFresh();
+        });
+
         tc.Run("truncated payload refuses", [](TestCase &t)
         {
             setFresh();

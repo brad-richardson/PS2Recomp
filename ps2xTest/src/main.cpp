@@ -70,6 +70,7 @@ void register_ps2_fh1_replay_rate_tests();
 void register_ps2_fh1_fix_tests();
 void register_ps2_fh1_savestate_tests();
 void register_ps2_fh1_hooktable_tests();
+void register_ps2_fh1_stuntchg_tests();
 void register_ps2_fh1_fh28_tests();
 void register_ps2_fh1_jcam2_scratch_tests();
 int ps2_fh1_jcam2_protection_probe();
@@ -153,6 +154,7 @@ int main()
     register_ps2_fh1_fix_tests();
     register_ps2_fh1_savestate_tests();
     register_ps2_fh1_hooktable_tests();
+    register_ps2_fh1_stuntchg_tests();
     register_ps2_fh1_fh28_tests();
     register_ps2_fh1_jcam2_scratch_tests();
     register_ps2_savestate_tests();
