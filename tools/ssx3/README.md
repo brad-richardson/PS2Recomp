@@ -7,9 +7,10 @@ provide game downloads or game-bearing app binaries. Start with the
 
 This entry provides a local EE generator, Mac runner build and native Metal
 GS/microVU library build. The baseline uses interpreted VU0 and no PGO;
-it is not the optimized device play build. Android dependency/library and APK construction is exposed
-below but is unvalidated here. iOS offline-VU1 preparation remains incomplete. No Android or iOS acceptance is
-claimed by a Mac title boot.
+it is not the optimized device play build. A fresh clone built a signed
+Android APK on macOS Apple silicon in PUB1 (2026-10-12); PUB2 repeated the
+build with a separate public app id (2026-10-13). Neither build is an
+on-device acceptance result. iOS offline-VU1 preparation remains incomplete.
 
 The runner-only path and source-built Metal/microVU libraries were validated
 on macOS Apple silicon from an isolated fresh clone on 2026-10-06, using only
@@ -83,6 +84,13 @@ python3 tools/ssx3/build.py android --work /path/to/private-build --jnilibs /pat
 python3 tools/ssx3/build.py stage --work /path/to/private-build
 ```
 
+The signed public build defaults to `io.github.ps2recomp.ssx3`, with its own
+Android `files/` directory and card. Use `--app-id your.dotted.package` on
+**both** `android` and `stage` to choose another id; stage checks that it
+matches the built APK and rewrites the staged env paths. The Java and JNI
+helper classes retain the `com.ps2x.runner` source namespace. The separate
+package id allows side-by-side installation with an existing play build.
+
 `stage` writes the device-side layout (`ps2x.env`, `full120.env`,
 `ge1-resources`, plus empty `ge1-data` and `mc0` card dirs) into
 `<work>/stage/files` and prints the exact `adb` commands to install the APK
@@ -105,8 +113,10 @@ that local prefix. The dependency recipe has its own parallelism setting
 (based on host CPU count). It stages JNI libraries and public renderer
 resources into your work directory. This source-only route avoids the old
 private remote helper and bundled dependency directory. Android library/APK
-compilation and on-device playback have not been validated by this lane;
-record errors locally rather than substituting another user's binary pins.
+compilation and signing were validated on macOS Apple silicon by PUB1 and
+PUB2. Installation, title, a finished race, controls, sound, and save/reload
+remain for device acceptance. Linux hosts, the remaster pack and Tricky
+preparation have not been validated by this route.
 
 After building, follow [Android setup/save protection](../../android/README.md)
 for local ISO/ELF/resource staging and the 60/120 launcher layers. `build.py

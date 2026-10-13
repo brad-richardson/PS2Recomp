@@ -61,7 +61,7 @@ function(ps2x_bf2_android_march_target TGT)
     endif()
 endfunction()
 # BF2b: echo the effective release-flag values at configure time (visible in
-# the bradflix APK build log; Mac default is OFF/empty).
+# the remote APK build log; Mac default is OFF/empty).
 message(STATUS "BF2: PS2X_GAME_IPO=${PS2X_GAME_IPO} PS2X_ANDROID_MARCH=${PS2X_ANDROID_MARCH}")
 
 set(PS2X_IS_IOS OFF)
@@ -77,7 +77,7 @@ set(PS2X_VITA_VERSION "01.00" CACHE STRING "Vita app version")
 set(PS2X_DEFAULT_BOOT_ELF "" CACHE STRING "Guest ELF path passed directly to main() when argv is unavailable")
 # PL1: build id for the pad-recording header (fork SHA + dirty flag). Empty =
 # auto-detect from git at configure time (worktree builds); archive exports
-# (no .git) and explicit -DPS2X_BUILD_ID=<sha12> (bradflix drivers) skip it.
+# (no .git) and explicit -DPS2X_BUILD_ID=<sha12> (remote drivers) skip it.
 set(PS2X_BUILD_ID "" CACHE STRING "Build id baked into the binary (padrec header + PS2X-BUILD-ID marker)")
 set(PS2X_BUILD_ID_RESOLVED "${PS2X_BUILD_ID}")
 if(NOT PS2X_BUILD_ID_RESOLVED)

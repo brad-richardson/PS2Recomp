@@ -18,6 +18,7 @@ FORK = 'https://github.com/brad-richardson/PS2Recomp.git'
 ISO_SHA = '3c2f8eb182c9c6208a6e8172a41e61c98f420abe3f42c845f6829aeb9761ebf5'
 ELF_SHA = '1b49d05ca2793922180851b9e1ce9ae2291d61a7863565ac4e71f12e967af7bc'
 REGISTER_SHA = 'ad96edb68ce78994684c736b745d79f02d88367eb4d5bfeb2d7b05d126b0867c'
+PUBLIC_APP_ID = 'io.github.ps2recomp.ssx3'
 
 
 def run(*args, cwd=None):
@@ -184,13 +185,15 @@ def android(a):
     run('bash', ROOT / 'android/gradlew', '-p', ROOT / 'android', 'assembleRelease',
         '-Pps2xGameCodegenDir=' + str(a.work / 'codegen'),
         '-Pps2xJniLibsDir=' + str(a.jnilibs.resolve()), '-Pps2xVu0RecompDir=',
-        '-Pps2xPgoData=', '-Pps2xBootElf=/storage/emulated/0/Android/data/com.ps2x.runner/files/SLUS_207.72',
+        '-Pps2xPgoData=', '-Pps2xBootElf=/storage/emulated/0/Android/data/' + a.app_id + '/files/SLUS_207.72',
+        '-Pps2xAppId=' + a.app_id,
         '-Pps2xVersionCode=' + str(version_code),
         '-Pps2xKeystoreFile=' + str(keystore),
         '-Pps2xKeystorePassword=' + SIGNING_PASSWORD,
         '-Pps2xKeyAlias=' + SIGNING_ALIAS,
         '-Pps2xKeyPassword=' + SIGNING_PASSWORD,
         '--max-workers=' + str(a.jobs))
+    (a.work / 'app-id.txt').write_text(a.app_id + '\n')
 
 
 def source(url, revision, destination):
@@ -294,6 +297,12 @@ def android_libs(a):
 
 
 def stage(a):
+    app_id_file = a.work / 'app-id.txt'
+    if not app_id_file.is_file():
+        raise ValueError('stage requires a completed android build in this work directory')
+    built_id = app_id_file.read_text().strip()
+    if built_id != a.app_id:
+        raise ValueError('stage --app-id must match the built APK: ' + built_id)
     inputs = json.loads((a.work / 'inputs.json').read_text())
     files = a.work / 'stage/files'
     files.mkdir(parents=True, exist_ok=True)
@@ -302,7 +311,10 @@ def stage(a):
         src = presets / name
         if not src.is_file():
             raise ValueError('missing shipped preset: ' + str(src))
-        shutil.copy2(src, files / name)
+        if name == 'ps2x.env':
+            (files / name).write_text(src.read_text().replace(PUBLIC_APP_ID, a.app_id))
+        else:
+            shutil.copy2(src, files / name)
     resources = a.work / 'android-resources'
     if not resources.is_dir():
         raise ValueError('stage requires android-libs first (missing android-resources in work dir)')
@@ -312,12 +324,12 @@ def stage(a):
     shutil.copytree(resources, target)
     (files / 'ge1-data').mkdir(exist_ok=True)
     (files / 'mc0').mkdir(exist_ok=True)
-    device = '/storage/emulated/0/Android/data/com.ps2x.runner/files'
+    device = '/storage/emulated/0/Android/data/' + a.app_id + '/files'
     apk = ROOT / 'android/app/build/outputs/apk/release/app-release.apk'
     print('Staged device layout in ' + str(files))
     print('Push it with these commands (stage prints them; it does not run them):')
     print('  adb install -r ' + str(apk))
-    print('  adb shell am force-stop com.ps2x.runner')
+    print('  adb shell am force-stop ' + a.app_id)
     print('  adb shell mkdir -p ' + device + '/ge1-resources ' + device + '/ge1-data ' + device + '/mc0')
     print('  adb push ' + str(a.work / 'SLUS_207.72') + ' ' + device + '/SLUS_207.72')
     print('  adb push "' + str(inputs['iso']) + '" ' + device + '/SSX3.iso')
@@ -337,6 +349,7 @@ def main():
     p.add_argument('--ndk', type=Path, help='local Android NDK 28.2.13676358')
     p.add_argument('--suite', action='store_true', help='also build optional Mac development suite and its analyzer/recompiler fixtures')
     p.add_argument('--jobs', type=int, default=8)
+    p.add_argument('--app-id', default=PUBLIC_APP_ID, help='Android package id for android and stage')
     a = p.parse_args()
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
         p.error('supported build host: macOS Apple silicon; Windows/x86 is unsupported')
@@ -345,6 +358,8 @@ def main():
         p.error('--work must be outside the source checkout')
     if a.jobs < 1 or a.jobs > 16:
         p.error('--jobs must be 1..16')
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+', a.app_id):
+        p.error('--app-id must be a dotted Android application id')
     if a.step == 'prepare' and not a.iso:
         p.error('prepare requires --iso')
     if a.step != 'prepare' and not (a.work / 'inputs.json').is_file():

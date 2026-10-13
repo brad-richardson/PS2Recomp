@@ -18,8 +18,8 @@
             android:name="android.game_mode_config"
             android:resource="@xml/game_mode_config" />
 
-        <!-- TG1: exported (no launcher entry) so tooling keeps using
-             am start -n com.ps2x.runner/android.app.NativeActivity (60, base
+        <!-- TG1: exported (no launcher entry) so tooling can use
+             am start -n <applicationId>/android.app.NativeActivity (60, base
              env). singleTask: one runtime per process; a relaunch brings the
              running game forward. -->
         <activity

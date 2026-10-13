@@ -7,7 +7,8 @@ set -euo pipefail
 WT=$1; OUT=$2
 CXX=${CXX:-/opt/homebrew/opt/llvm/bin/clang++}
 [ -x "$CXX" ] || CXX=clang++
-NEON=${SSE2NEON:-$HOME/dev/ssx3-work/VRB1/sse2neon}
+NEON=${SSE2NEON:-}
+[ -n "$NEON" ] || { echo "Set SSE2NEON to a local sse2neon checkout" >&2; exit 2; }
 # Same ARM recipe as the root CMakeLists: sse2neon shim, E53 no-FP-contraction.
 "$CXX" -std=c++20 -O3 -DNDEBUG -DPS2X_VU1_FMAC_SIMD=1 -DUSE_SSE2NEON -ffp-contract=off \
   -I "$NEON" \

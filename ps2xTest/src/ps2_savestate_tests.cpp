@@ -807,9 +807,9 @@ void register_ps2_savestate_tests()
             namespace fs = std::filesystem;
             t.Equals(ps2_savestate::quickSlotPath("/app/files", "/app/files/mc0"),
                      (fs::path("/app/files") / "states" / "quicksave-mc0.state").string(), "play mc0 slot");
-            t.Equals(ps2_savestate::quickSlotPath("/app/files", "/app/files/mc0-allpeak"),
-                     (fs::path("/app/files") / "states" / "quicksave-mc0-allpeak.state").string(),
-                     "P3R root keeps a separate slot");
+            t.Equals(ps2_savestate::quickSlotPath("/app/files", "/app/files/mc0-test"),
+                     (fs::path("/app/files") / "states" / "quicksave-mc0-test.state").string(),
+                     "distinct root keeps a separate slot");
             t.Equals(ps2_savestate::quickSlotPath("/app/files", ""),
                      (fs::path("/app/files") / "states" / "quicksave-mc0.state").string(), "empty root is mc0");
             const std::string weird = ps2_savestate::quickSlotPath("/app/files", "/x/weird/root*name?");

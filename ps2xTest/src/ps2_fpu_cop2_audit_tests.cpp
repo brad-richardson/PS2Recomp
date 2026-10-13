@@ -4,7 +4,7 @@
 // (e52_snippets.h, written at build time by tools/e52_snippet_gen.cpp) on a
 // fresh R5900Context and compares the result bits with PCSX2's.
 //
-// Reference: PCSX2 9056c0834 (the T-lane tree on bytesize).
+// Reference: PCSX2 9056c0834.
 // - EE FPU: pcsx2/FPU.cpp (fpuDouble operands, checkOverflow/checkUnderflow
 //   results, CVT_W, DIV_S, SQRT_S, fp_max/fp_min, C_cond_S).
 // - VU0 macro ops: pcsx2/VUops.cpp (vuDouble, VU_MAC_UPDATE in VUflags.cpp,

@@ -5,7 +5,7 @@
 //
 // The id is "<12-hex fork SHA>" plus "-dirty" when the worktree had tracked
 // modifications at configure time. It arrives as -DPS2X_BUILD_ID (the
-// bradflix drivers pass the exported commit; gradle maps -Pps2xBuildId), or
+// remote build drivers pass the exported commit; gradle maps -Pps2xBuildId), or
 // CMake detects it from git when the define is empty; archive exports and
 // non-git trees read "unavailable".
 

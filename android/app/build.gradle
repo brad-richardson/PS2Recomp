@@ -3,7 +3,6 @@ plugins {
 }
 
 // Override with: gradlew assembleRelease -Pps2xBootElf=/absolute/path/on/device.elf
-def ps2xBootElf = project.findProperty('ps2xBootElf') ?: '/storage/emulated/0/Android/data/com.ps2x.runner/files/game.elf'
 def ps2xGameCodegenDir = project.findProperty('ps2xGameCodegenDir') ?: ''
 def ps2xJniLibsDir = project.findProperty('ps2xJniLibsDir') ?: ''
 // Private game-derived assets enter only at build time, outside the source tree.
@@ -30,7 +29,7 @@ def ps2xDiagTaps = project.findProperty('ps2xDiagTaps') ?: 'OFF'
 // PL1: fork SHA baked into the binary (padrec header + PS2X-BUILD-ID marker);
 // empty = CMake auto-detects from git (worktree builds).
 def ps2xBuildId = project.findProperty('ps2xBuildId') ?: ''
-// GRADLE_USER_HOME persists between bradflix pool builds (one home per APK
+// GRADLE_USER_HOME persists between remote build pool jobs (one home per APK
 // slot). An explicit empty property disables the linker cache for controls.
 def ps2xThinLtoCacheDir = project.hasProperty('ps2xThinLtoCacheDir')
         ? project.property('ps2xThinLtoCacheDir')
@@ -48,6 +47,11 @@ def ps2xKeystoreFile = project.findProperty('ps2xKeystoreFile') ?: ''
 def ps2xKeystorePassword = project.findProperty('ps2xKeystorePassword') ?: ''
 def ps2xKeyAlias = project.findProperty('ps2xKeyAlias') ?: ''
 def ps2xKeyPassword = project.findProperty('ps2xKeyPassword') ?: ''
+// Signed public builder invocations use their own package. The existing
+// maintainer/debug Gradle recipe supplies no keystore property and retains
+// its installed package and card directory.
+def ps2xAppId = project.findProperty('ps2xAppId') ?: (ps2xKeystoreFile ? 'io.github.ps2recomp.ssx3' : 'com.ps2x.runner')
+def ps2xBootElf = project.findProperty('ps2xBootElf') ?: "/storage/emulated/0/Android/data/${ps2xAppId}/files/game.elf"
 
 android {
     androidResources {
@@ -61,7 +65,7 @@ android {
     ndkVersion '28.2.13676358'
 
     defaultConfig {
-        applicationId 'com.ps2x.runner'
+        applicationId ps2xAppId
         minSdk 29
         targetSdk 34
         versionCode ps2xVersionCode

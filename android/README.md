@@ -2,10 +2,11 @@
 
 New local preparation/build entry: [tools/ssx3](../tools/ssx3/README.md). Supported build host: macOS Apple silicon; play targets: Android arm64 / iOS. Windows/x86 is unsupported.
 
-Read the [input contract](../docs/ssx3-inputs.md) and
-[private dependency gaps](../docs/ssx3-build.md) first. These commands assume
-already prepared, matching EE/VU0 code, JNI libraries and GS resources. They
-are not a verified disc-to-app recipe; no game-bearing APK is provided.
+Read the [input contract](../docs/ssx3-inputs.md) and the
+[public build recipe](../tools/ssx3/README.md) first. That recipe produced a
+signed APK from a fresh clone on macOS Apple silicon in PUB1 and PUB2. Device
+installation, a finished race, controls, sound, and save/reload remain to be
+validated. No game-bearing APK is provided.
 
 ## Build a locally prepared preview
 
@@ -15,11 +16,12 @@ default native flags target `armv8.2-a+fp16+dotprod`, so arm64 alone does not
 establish device compatibility. See [AGP](build.gradle#L2) and
 [toolchain/ABI](app/build.gradle#L33). Arbitrary Android devices are not validated.
 
-From `android/`, using the committed Gradle wrapper (Gradle 8.9; no separate
-Gradle installation is needed):
+The public builder supplies signing, version code, package id and paths. For a
+direct Gradle build with inputs you prepared yourself, run from `android/`
+with the committed wrapper (Gradle 8.9):
 
 ```sh
-./gradlew assembleRelease   -Pps2xBootElf=/storage/emulated/0/Android/data/com.ps2x.runner/files/SLUS_207.72   -Pps2xGameCodegenDir=/absolute/local/generated-ee   -Pps2xVu0RecompDir=/absolute/local/generated-vu0   -Pps2xJniLibsDir=/absolute/local/jniLibs
+./gradlew assembleRelease   -Pps2xBootElf=/storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/SLUS_207.72   -Pps2xGameCodegenDir=/absolute/local/generated-ee   -Pps2xVu0RecompDir=/absolute/local/generated-vu0   -Pps2xJniLibsDir=/absolute/local/jniLibs   -Pps2xAppId=io.github.ps2recomp.ssx3
 ```
 
 The JNI directory contains an `arm64-v8a/` subdirectory with matching GE1 and
@@ -28,6 +30,9 @@ microVU libraries (plus their runtime dependencies and Turnip if enabled).
 rejects a duplicate. PGO is off unless supplied; omit `ps2xPgoData` for a no-PGO
 build ([properties](app/build.gradle#L6), [JNI guard](app/build.gradle#L93)).
 Output: `app/build/outputs/apk/release/app-release.apk`.
+This direct command uses the debug key; the public builder uses a per-user
+keystore. A direct Gradle invocation without `ps2xAppId` or public signing
+properties retains the existing maintainer package `com.ps2x.runner`.
 
 ## Install and place your inputs
 
@@ -35,14 +40,14 @@ Stop the app and back up existing saves before an upgrade. Install over the
 existing app with the same signing key; do not uninstall or clear app storage:
 
 ```sh
-adb shell am force-stop com.ps2x.runner
+adb shell am force-stop io.github.ps2recomp.ssx3
 adb install -r app/build/outputs/apk/release/app-release.apk
-adb shell mkdir -p /storage/emulated/0/Android/data/com.ps2x.runner/files
-adb push /absolute/local/SLUS_207.72 /storage/emulated/0/Android/data/com.ps2x.runner/files/SLUS_207.72
-adb push "/absolute/local/SSX 3 (USA).iso" "/storage/emulated/0/Android/data/com.ps2x.runner/files/SSX 3 (USA).iso"
+adb shell mkdir -p /storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files
+adb push /absolute/local/SLUS_207.72 /storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/SLUS_207.72
+adb push "/absolute/local/SSX 3 (USA).iso" "/storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/SSX 3 (USA).iso"
 ```
 
-Prefer `build.py stage`, which stages the shipped presets
+Prefer `build.py stage`, which uses the built APK's package id and stages the shipped presets
 ([ps2x.env](../tools/ssx3/presets/ps2x.env),
 [full120.env](../tools/ssx3/presets/full120.env), SET2 settings overlay on)
 plus `ge1-resources` and an empty card dir and prints the exact `adb`
@@ -50,11 +55,11 @@ commands without running them. To stage by hand instead, create a local
 `ps2x.env` with these paths, then push it beside the ELF:
 
 ```ini
-PS2X_CD_IMAGE=/storage/emulated/0/Android/data/com.ps2x.runner/files/SSX 3 (USA).iso
-PS2X_MC_ROOT=/storage/emulated/0/Android/data/com.ps2x.runner/files/mc0
+PS2X_CD_IMAGE=/storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/SSX 3 (USA).iso
+PS2X_MC_ROOT=/storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/mc0
 ```
 
-`adb push /absolute/local/ps2x.env /storage/emulated/0/Android/data/com.ps2x.runner/files/ps2x.env`
+`adb push /absolute/local/ps2x.env /storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files/ps2x.env`
 
 The compiled boot path determines the env directory; `PS2X_CD_IMAGE` selects
 the ISO and `PS2X_MC_ROOT` the card directory
@@ -96,7 +101,7 @@ by `PS2X_MC_ROOT`. When that directory is named `mc0`, port 1 uses its sibling
 app stopped, copy the entire files directory to a **new** local backup directory:
 
 ```sh
-adb pull /storage/emulated/0/Android/data/com.ps2x.runner/files /absolute/local/new-backup-directory
+adb pull /storage/emulated/0/Android/data/io.github.ps2recomp.ssx3/files /absolute/local/new-backup-directory
 ```
 
 Verify the copy contains your active card directory and settings. If cards live

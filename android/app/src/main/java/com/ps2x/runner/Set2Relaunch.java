@@ -15,7 +15,7 @@ public final class Set2Relaunch {
         final String alias = "120".equals(target) ? ".Launch120" : ".Launch60";
         final Intent game = new Intent();
         game.setComponent(new ComponentName(activity.getPackageName(),
-                activity.getPackageName() + alias));
+                LaunchActivity.class.getPackage().getName() + alias));
         game.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
         activity.startActivity(game);
         Process.killProcess(Process.myPid());

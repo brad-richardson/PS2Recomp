@@ -538,8 +538,8 @@ namespace ps2_savestate
                        bool skipPadLatchReady, std::string &why);
     // One quick-save slot per memory-card root: "<elfDir>/states/
     // quicksave-<leaf>.state" (the leaf sanitized; "<slot>.info" sits next
-    // to it). Two roots with the same leaf share a slot (play's mc0 and
-    // mc0-allpeak don't collide).
+    // to it). Two roots with the same leaf share a slot; distinct leaves
+    // get distinct slots.
     std::string quickSlotPath(const std::string &elfDir, const std::string &mcRoot);
     // QSR1 completion toasts fire for the touch menu's slots only (DS1
     // chord slots keep the status line alone). Pure; unit-tested.

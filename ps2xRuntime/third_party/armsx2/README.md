@@ -3,7 +3,7 @@
 New local preparation/build entry: [tools/ssx3](../../../tools/ssx3/README.md). Supported build host: macOS Apple silicon; play targets: Android arm64 / iOS. Windows/x86 is unsupported.
 
 The ARMSX2-side carry (GS + microVU on ARMSX2 master) lives on the PCSX2
-fork branch `armsx2-ssx3-one` (12 in-tree fix groups SG01–SG12; class table
+fork branch `armsx2-ssx3-four` (12 in-tree fix groups SG01–SG12; class table
 and group list: `SSX3-CARRY.md` at that branch's root). Everything additive
 moved here, so adapter edits no longer need a fork commit + pin bump.
 
@@ -14,13 +14,13 @@ time and fail fast when unset).
 ## External-user build status
 
 The new tools/ssx3 entry supplies a public Mac dependency/library build and
-an unvalidated Android source dependency/library command. The older `build.sh`
+an Android source dependency/library command. The older `build.sh`
 is the maintainer's host recipe: Mac requires private pinned GE1 dependencies
-and OM1RT inputs; Android delegates to a private remote build helper; iOS
+and OM1RT inputs; Android delegates to a configured remote build helper; iOS
 requires a pre-staged dependency bundle. The script has no `--help`/dry-run
 mode and does not pin or fetch the supplied ARMSX2 checkout
-([parser and checks](build.sh#L29), [Mac inputs](build.sh#L55),
-[Android delegation](build.sh#L95), [iOS bundle](build.sh#L124)).
+([parser and checks](build.sh), [Mac inputs](build.sh),
+ [Android delegation](build.sh), [iOS bundle](build.sh)).
 
 Building GE1 does not generate SSX 3 EE/VU0 code or iOS offline VU1 tables.
 Those stay in external, user-owned input directories. See the
@@ -56,7 +56,7 @@ All moved files are byte-identical to their `ax4-one` paths except the
 
 - **Mac** `libge1_gs.dylib` + `ge1_replay` (Metal + MoltenVK), and
   `libmv2_microvu.dylib` from the om1rt recipe (the Mac det lib).
-- **Android** `libge1_gs.so` via a private remote Docker recipe
+- **Android** `libge1_gs.so` via a configured remote Docker recipe
   ([delegation](build.sh#L120)); the staged tree also carries mv2 sources.
 - **iOS** static `libge1_gs.a` (+ `libPCSX2.a`, `libcommon.a`) via the IG1
   recipe (device + sim). mv2 is not wired on iOS (needs `shaderc_combined`;
@@ -67,5 +67,5 @@ All moved files are byte-identical to their `ax4-one` paths except the
 Our code (adapters/knobs here) first; hooks over logic; driver bugs go to
 our Mesa series; policy goes in ARMSX2's own policy tables; real bugs get
 their own upstream-style commit on the branch; diagnostics compile out.
-Carry budget: `git diff armsx2/master...armsx2-ssx3-one -- pcsx2 common`
+Carry budget: `git diff armsx2/master...armsx2-ssx3-four -- pcsx2 common`
 (excl. `microVU_OM1-arm64.inl`) stays under ~1,900 changed lines.

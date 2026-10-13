@@ -1,15 +1,15 @@
 #!/bin/bash
 # AX4b (SP02): one script builds libge1_gs + libmv2_microvu from one ARMSX2
-# SHA on every platform. Unifies microvu_libs.sh, bradflix_ge1_lib.sh, the
+# SHA on every platform. Unifies the platform-specific maintainer recipes, the
 # GE1S Mac recipe and the GI1/IG1 iOS recipes; only this file's location
 # changed (PS2Recomp ps2xRuntime/third_party/armsx2, AX4 §2.2).
 #
-# Usage: build.sh <mac|android|ios|ios-sim> --armsx2 <dir> [--build-root <dir>] [--jobs N]
+# Usage: build.sh <mac|android|ios|ios-sim> --armsx2 <dir> --build-root <dir> [--jobs N]
 #   mac:      libge1_gs.dylib + ge1_replay (Metal + MoltenVK) + libmv2_microvu.dylib
 #             (om1rt recipe, pinned OM1RT_* inputs) via platform/mac.
 #   android:  assembles a fork-shaped srcdir (vendor = --armsx2 HEAD, adapter +
-#             platform from this repo's HEAD) and runs bradflix_ge1_lib.sh
-#             <srcdir> ax4b-<sha12> on bradflix (Docker ssx3-android, memory =
+#             platform from this repo's HEAD) and runs a configured helper
+#             <srcdir> ax4b-<sha12> on a configured Docker build host (memory =
 #             memory-swap, oom-score-adj 500, shared ccache). Produces the
 #             canonical ge1lib-* + pull; the srcdir also carries ssx3-ge1/mv2
 #             (PB20) for the mv recipe (which stages mv2-adapter remotely with
@@ -21,13 +21,14 @@
 #   ios-sim:  static ge1 (simulator, iphonesimulator) via platform/ios (IG1 recipe).
 #             mv2 is not wired on iOS: mv2-adapter links shaderc_combined, which
 #             does not exist on iOS (the app runs VU1 from the OM1 offline stage).
-# Inputs (mini): ~/dev/ssx3-work/pinned (PI1; pinned.py verify) for OM1RT_*,
-#   mac ge1-deps and the GE1 android-platform bundle seed (iOS deps).
-# Scratch: fresh dirs under --build-root (default ~/dev/ssx3-work/AX4b/build).
+# Maintainer inputs: SSX3_MAINTAINER_PIN_ROOT for OM1RT and Mac GE1 deps;
+#   SSX3_IOS_DEPS for the iOS bundle; SSX3_ANDROID_HOST and
+#   SSX3_ANDROID_HELPER for the private Android Docker recipe.
+# Scratch: fresh dirs under required --build-root.
 set -euo pipefail
 
 PLAT=${1:-}; shift || true
-ARMSX2=""; BUILD_ROOT="$HOME/dev/ssx3-work/AX4b/build"; JOBS=8
+ARMSX2=""; BUILD_ROOT=""; JOBS=8
 while [ $# -gt 0 ]; do
   case "$1" in
     --armsx2) ARMSX2=$2; shift 2;;
@@ -36,8 +37,9 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
-case "$PLAT" in mac|android|ios|ios-sim) ;; *) echo "usage: build.sh <mac|android|ios|ios-sim> --armsx2 <dir> [--build-root <dir>] [--jobs N]" >&2; exit 2;; esac
+case "$PLAT" in mac|android|ios|ios-sim) ;; *) echo "usage: build.sh <mac|android|ios|ios-sim> --armsx2 <dir> --build-root <dir> [--jobs N]" >&2; exit 2;; esac
 [ -n "$ARMSX2" ] || { echo "missing --armsx2 <ARMSX2 worktree>" >&2; exit 2; }
+[ -n "$BUILD_ROOT" ] || { echo "missing --build-root <scratch dir>" >&2; exit 2; }
 [ -d "$ARMSX2/pcsx2" ] || { echo "not an ARMSX2 tree: $ARMSX2" >&2; exit 2; }
 ARMSX2_SHA=$(git -C "$ARMSX2" rev-parse HEAD) || { echo "not a git checkout: $ARMSX2" >&2; exit 2; }
 [ -n "$(git -C "$ARMSX2" status --short)" ] && { echo "refusing dirty ARMSX2 tree: $ARMSX2" >&2; exit 2; }
@@ -47,12 +49,13 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 [ -n "$(git -C "$HERE" status --short -- .)" ] && { echo "refusing dirty $HERE (commit SP moves first)" >&2; exit 2; }
 REPO_SHA=$(git -C "$HERE" rev-parse HEAD)
 
-PIN=$HOME/dev/ssx3-work/pinned
+PIN=${SSX3_MAINTAINER_PIN_ROOT:-}
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 sha2() { shasum -a 256 "$1"; shasum -a 256 "$1"; }
 
 case "$PLAT" in
   mac)
+    [ -n "$PIN" ] || { echo "mac requires SSX3_MAINTAINER_PIN_ROOT" >&2; exit 2; }
     for d in "$PIN/microvu/om1rt-inputs" "$PIN/mac/ge1-deps/lib/cmake"; do
       [ -d "$d" ] || { echo "missing pinned input $d" >&2; exit 2; }
     done
@@ -93,7 +96,8 @@ case "$PLAT" in
     echo "BUILD_DIR=$BLD"
     ;;
   android)
-    command -v ssh >/dev/null && ssh -o ConnectTimeout=10 bradflix 'echo ok' >/dev/null || { echo "bradflix unreachable" >&2; exit 2; }
+    [ -n "${SSX3_ANDROID_HOST:-}" ] && [ -f "${SSX3_ANDROID_HELPER:-}" ] || { echo "android requires SSX3_ANDROID_HOST and SSX3_ANDROID_HELPER" >&2; exit 2; }
+    command -v ssh >/dev/null && ssh -o ConnectTimeout=10 "$SSX3_ANDROID_HOST" 'echo ok' >/dev/null || { echo "Android build host unreachable" >&2; exit 2; }
     SRC=$BUILD_ROOT/android-src-$STAMP
     [ -e "$SRC" ] && { echo "refusing to reuse $SRC" >&2; exit 2; }
     mkdir -p "$SRC/ssx3-ge1"
@@ -117,11 +121,12 @@ case "$PLAT" in
     S12=$(git -C "$ARMSX2" rev-parse --short=12 HEAD)
     # A retry after a failed remote scratch (which the recipe keeps) needs a
     # fresh scratch name; content addressing still dedups the published lib.
-    bash ~/dev/ssx3/local/tooling/build/bradflix_ge1_lib.sh "$SRC" "ax4b-$S12${BUILD_SUFFIX:-}"
+    bash "$SSX3_ANDROID_HELPER" "$SRC" "ax4b-$S12${BUILD_SUFFIX:-}"
     ;;
   ios|ios-sim)
     if [ "$PLAT" = "ios" ]; then SYSROOT=iphoneos; else SYSROOT=iphonesimulator; fi
-    BUNDLE=$HOME/dev/ssx3-work/GE1/android-platform/3rdparty
+    BUNDLE=${SSX3_IOS_DEPS:-}
+    [ -n "$BUNDLE" ] || { echo "iOS requires SSX3_IOS_DEPS" >&2; exit 2; }
     [ -d "$BUNDLE" ] || { echo "missing GE1 bundle: $BUNDLE" >&2; exit 2; }
     ASM=$BUILD_ROOT/ios-asm-$STAMP; BLD=$BUILD_ROOT/ios-build-$STAMP; DEPS=$BUILD_ROOT/ios-deps-$STAMP
     [ -e "$ASM" ] || [ -e "$BLD" ] || [ -e "$DEPS" ] && { echo "refusing to reuse $ASM/$BLD/$DEPS" >&2; exit 2; }
