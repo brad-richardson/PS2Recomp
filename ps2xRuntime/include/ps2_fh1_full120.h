@@ -35,6 +35,7 @@
 #include "ps2_fh1_fh35.h"
 #include "ps2_fh1_jcam2_scratch.h"
 #include "ps2_fh1_replay_rate.h"
+#include "ps2_net_dirtysock.h"
 
 #include <algorithm>
 #include <array>
@@ -1369,6 +1370,21 @@ inline void replayRateHook(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
         forget(g_rpl, input);
 }
 
+// ONL6: online v0 uses stock lockstep. The post-v0 experiment is opt-in.
+inline bool netLockstep120() noexcept
+{
+    static const bool on = eventsMode() && [] {
+        const char *e = std::getenv("PS2X_NET_LOCKSTEP120");
+        return e && *e && std::strcmp(e, "0") != 0;
+    }();
+    return on;
+}
+
+inline bool onlineStock60() noexcept
+{
+    return ps2_net::lockstepLinkActive() && !netLockstep120();
+}
+
 inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, uint32_t targetPc)
 {
     if (targetPc == kTrickPass && sourcePc == kTrickPassSite && ctx && bonusFlipFix())
@@ -1388,7 +1404,7 @@ inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
         g_clockRan = true;
         uint32_t raceTime = 0u;
         // The bump's store sits in the call's delay slot, so +0xc is already the new value.
-        if (entryFix() && ctx && !g_schedActive && rd32(ram, getRegU32(ctx, 16) + 0xcu, raceTime) && raceTime <= 1u)
+        if (!onlineStock60() && entryFix() && ctx && !g_schedActive && rd32(ram, getRegU32(ctx, 16) + 0xcu, raceTime) && raceTime <= 1u)
         {
             g_schedActive = true;
             g_startEdge = true;
@@ -1409,7 +1425,7 @@ inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
     {
         // RPL1: in playback the update about to run gets the recorded rate of
         // the sample it consumes (mid-burst too); the request follows it.
-        const int forced = replayRateOn() && ctx ? ps2_fh1_rpl::forcedRate(g_rpl, ram, getRegU32(ctx, 28)) : -1;
+        const int forced = onlineStock60() ? 0 : (replayRateOn() && ctx ? ps2_fh1_rpl::forcedRate(g_rpl, ram, getRegU32(ctx, 28)) : -1);
         if (forced >= 0)
         {
             g_flipPending = false;
@@ -1425,7 +1441,18 @@ inline void eventsOnBranch(uint8_t *ram, R5900Context *ctx, uint32_t sourcePc, u
                 guestFlip(ram, g_lastTick, g_commitActive);
         }
         // A start-edge request stands until its flip (the drop is airborne; the flip precedes this test).
-        const bool want = forced >= 0 ? forced != 0 : g_passRan && g_clockRan && (g_guestActive || g_startEdge || !g_anyAir);
+        bool want = forced >= 0 ? forced != 0 : g_passRan && g_clockRan && (g_guestActive || g_startEdge || !g_anyAir);
+        const bool link = ps2_net::lockstepLinkActive();
+        if (link)
+            want = netLockstep120();
+        static bool held = false;
+        if (held != link)
+        {
+            held = link;
+            std::fprintf(stderr, "fh1-events online hold=%s mode=%s tick=%llu\n",
+                         link ? "on" : "off", netLockstep120() ? "120" : "60",
+                         static_cast<unsigned long long>(g_lastTick));
+        }
         if (g_guestActive || !want)
             g_startEdge = false;
         if (want != g_schedActive)
