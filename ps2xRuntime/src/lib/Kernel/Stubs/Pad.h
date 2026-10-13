@@ -88,8 +88,10 @@ namespace ps2_stubs
     // milliseconds (vsyncTick * 1000/59.94) when PS2X_PAD_SCRIPT_CLOCK=vsync.
     struct PadScriptEntry
     {
+        // Legacy names: v4 values are ticks, v1-v3/ordinary scripts are ms.
         uint64_t atMs = 0u;
         uint64_t holdMs = 0u;
+        bool guestTicks = false;
         uint16_t pressMask = 0u;
         bool hasLx = false;
         bool hasLy = false;
@@ -104,6 +106,9 @@ namespace ps2_stubs
     // Parses "t_ms:spec:hold_ms,..." where spec is '+'-joined button names
     // (select/l3/r3/start/up/right/down/left/l2/r2/l1/r1/triangle/circle/
     // cross/square) and/or axis assignments (lx/ly/rx/ry = 0..255).
+    // A first-line "# padrec v4" selects guest-vsync tick units for both
+    // numbers, independent of PS2X_PAD_SCRIPT_CLOCK and full120 transitions.
+    // v1-v3 keep stock-time milliseconds (v1 events uses the FH5 clock).
     // Returns false (entries untouched) on any malformed entry.
     bool parsePadScript(const char *spec, std::vector<PadScriptEntry> &entries);
 

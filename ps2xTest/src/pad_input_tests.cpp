@@ -815,6 +815,25 @@ void register_pad_input_tests()
             closePadPort(ctx, rdram);
         });
 
+        tc.Run("prc1: v4 tick grammar and legacy ms units", [](TestCase &t)
+               {
+            std::vector<ps2_stubs::PadScriptEntry> entries;
+            for (const char *header : {"# padrec v1\n", "# padrec v2\n", "# padrec v3\n"})
+            {
+                const std::string spec = std::string(header) + "1000:cross:17\n";
+                t.IsTrue(ps2_stubs::parsePadScript(spec.c_str(), entries), "legacy format parses");
+                t.IsTrue(!entries[0].guestTicks, "legacy units remain ms");
+            }
+            t.IsTrue(ps2_stubs::parsePadScript("# padrec v4\r\n# NV rtc tick=1\r\n1000:cross:1\r\n", entries),
+                     "v4 CRLF and comments parse");
+            t.IsTrue(entries[0].guestTicks, "v4 selects ticks");
+            t.IsTrue(!ps2_stubs::parsePadScript("# padrec v4\n1:cross:0", entries), "zero span rejected");
+            t.IsTrue(!ps2_stubs::parsePadScript("# padrec v4\n18446744073709551615:cross:1", entries),
+                     "tick end overflow rejected");
+            t.IsTrue(entries[0].guestTicks && entries[0].atMs == 1000u,
+                     "failed parse leaves entries untouched");
+        });
+
         tc.Run("pad recorder emits a replayable script", [](TestCase &t)
                {
             const std::string recPath =
@@ -878,10 +897,10 @@ void register_pad_input_tests()
                 }
                 std::fclose(f);
             }
-            // RPL3: new recordings are v3 (v2 stamps plus NV lines); v2 files
-            // still parse (covered below).
-            t.IsTrue(content.rfind("# padrec v3\n", 0) == 0,
-                     "recording starts with a header block (v3: exact stock-time stamps)");
+            // PRC1: v4 records guest ticks plus NV lines; old formats still
+            // parse with their original ms clock (covered below).
+            t.IsTrue(content.rfind("# padrec v4\n", 0) == 0,
+                     "recording starts with a header block (v4: guest-vsync tick stamps)");
             t.IsTrue(content.find("\n# full120 FULL120=") != std::string::npos &&
                          content.find("events_clock=exact") != std::string::npos,
                      "recording header carries the full120 knobs and its stamp clock");
@@ -901,8 +920,13 @@ void register_pad_input_tests()
             // must reproduce the recorded buttons and exact analog bytes.
             t.IsTrue(ps2_stubs::setPadScriptForTest(content.c_str()),
                      "recording should install as a script");
-            ps2_stubs::setPadScriptVsyncClockForTest(true);
-            for (uint64_t tick = 100; tick <= 140; ++tick)
+            // v4 must ignore the wall-ms setting and use guest ticks.
+            ps2_stubs::setPadScriptVsyncClockForTest(false);
+            ps2_stubs::setPadScriptNowMsForTest(999999u);
+            t.IsTrue(entries[0].guestTicks, "v4 parser selects tick units");
+            t.Equals(entries[0].atMs, uint64_t(100), "writer stamps the first guest tick");
+            t.Equals(entries[0].holdMs, uint64_t(10), "writer stores a tick duration");
+            for (uint64_t tick = 99; tick <= 141; ++tick)
             {
                 const Step *want = &steps[0];
                 for (const Step &s : steps)
@@ -915,6 +939,9 @@ void register_pad_input_tests()
                 ps2_stubs::setPadScriptVsyncTickForTest(tick);
                 runPadRead(ctx, rdram);
                 const uint8_t *data = rdram.data() + kPadDataAddr;
+                const Step idle{0, relaxed, 0x80, 0x80, 0x80, 0x80};
+                if (tick < 100u || tick > 140u)
+                    want = &idle;
                 t.Equals(readButtons(rdram), want->buttons,
                          "replay buttons at tick " + std::to_string(tick));
                 t.Equals(data[6], want->lx, "replay lx at tick " + std::to_string(tick));
@@ -1200,8 +1227,8 @@ void register_pad_input_tests()
                     }
                     std::fclose(f);
                 }
-                // RPL3: new recordings are v3.
-                t.IsTrue(content.rfind("# padrec v3\n", 0) == 0, "session file has header");
+                // PRC1: new recordings are v4.
+                t.IsTrue(content.rfind("# padrec v4\n", 0) == 0, "session file has header");
                 std::vector<ps2_stubs::PadScriptEntry> entries;
                 t.IsTrue(ps2_stubs::parsePadScript(content.c_str(), entries),
                          "session file parses as a script");
@@ -1536,8 +1563,8 @@ void register_pad_input_tests()
             // split the rewound reads would be dropped and the tail would
             // carry the stale pre-load state ([110,116) cross: 2 entries).
             t.Equals(static_cast<uint32_t>(entries.size()), static_cast<uint32_t>(4), "two segments, 4 spans");
-            // Entries store ms (tick * 100000 / 5994); the rewound span is at tick 106.
-            const uint64_t rewoundMs = (106u * 100000ull) / 5994ull;
+            // v4 entries store guest ticks; the rewound span is at tick 106.
+            const uint64_t rewoundMs = 106u;
             bool rewound = false;
             for (const auto &e : entries)
             {
@@ -2033,7 +2060,7 @@ void register_pad_input_tests()
             ps2_stubs::closePadRecordForTest();
 
             const std::string content = readFileBytes(recPath);
-            t.IsTrue(content.rfind("# padrec v3\n", 0) == 0, "recording is v3");
+            t.IsTrue(content.rfind("# padrec v4\n", 0) == 0, "recording is v4");
             t.IsTrue(content.find("# NV rtc seq=0 tick=12 ra=0x31ae84 bytes=0056341200160704") !=
                          std::string::npos,
                      "rtc line recorded");

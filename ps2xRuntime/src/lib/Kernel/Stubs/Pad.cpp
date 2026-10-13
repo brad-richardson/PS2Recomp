@@ -277,8 +277,12 @@ namespace ps2_stubs
             // Entry text itself is unchanged: no '#' or newline may appear
             // inside an entry. A trailing '\r' per line is tolerated.
             std::string text;
+            // PRC1: v4 uses the scheduler's guest-vsync ticks for both span
+            // endpoints. Older recordings and ordinary scripts retain ms.
+            const std::string raw(spec);
+            const bool guestTicks = raw.rfind("# padrec v4\n", 0) == 0 ||
+                                    raw.rfind("# padrec v4\r\n", 0) == 0;
             {
-                const std::string raw(spec);
                 size_t lineBegin = 0u;
                 while (lineBegin <= raw.size())
                 {
@@ -323,6 +327,7 @@ namespace ps2_stubs
                     return false;
                 }
                 PadScriptEntry entry{};
+                entry.guestTicks = guestTicks;
                 if (!padScriptParseU64(item.substr(0, c1), entry.atMs))
                 {
                     return false;
@@ -331,6 +336,8 @@ namespace ps2_stubs
                 {
                     return false;
                 }
+                if (entry.atMs > UINT64_MAX - entry.holdMs)
+                    return false;
                 if (!padScriptParseSpec(item.substr(c1 + 1u, c2 - c1 - 1u), entry))
                 {
                     return false;
@@ -729,7 +736,9 @@ namespace ps2_stubs
             {
                 PadScriptRuntimeEntry &runtime = g_padScript.entries[i];
                 const PadScriptEntry &entry = runtime.entry;
-                const bool active = nowMs >= entry.atMs && nowMs < entry.atMs + entry.holdMs;
+                const uint64_t now = entry.guestTicks
+                    ? (g_padScript.testVsyncSet ? g_padScript.testVsyncTick : guestVsyncTick) : nowMs;
+                const bool active = now >= entry.atMs && now < entry.atMs + entry.holdMs;
                 if (active)
                 {
                     state.buttons = static_cast<uint16_t>(state.buttons & ~entry.pressMask);
@@ -753,37 +762,30 @@ namespace ps2_stubs
                     {
                         runtime.loggedPress = true;
                         std::fprintf(stderr,
-                                     "[padscript] press i=%llu now=%llums at=%llums hold=%llums "
+                                     "[padscript] press i=%llu now=%llu%s at=%llu%s hold=%llu%s "
                                      "buttons=0x%04x\n",
                                      static_cast<unsigned long long>(i),
-                                     static_cast<unsigned long long>(nowMs),
-                                     static_cast<unsigned long long>(entry.atMs),
-                                     static_cast<unsigned long long>(entry.holdMs),
+                                     static_cast<unsigned long long>(now), entry.guestTicks ? "tick" : "ms",
+                                     static_cast<unsigned long long>(entry.atMs), entry.guestTicks ? "tick" : "ms",
+                                     static_cast<unsigned long long>(entry.holdMs), entry.guestTicks ? "tick" : "ms",
                                      entry.pressMask);
                     }
                 }
-                else if (nowMs >= entry.atMs + entry.holdMs && !runtime.loggedDone)
+                else if (now >= entry.atMs + entry.holdMs && !runtime.loggedDone)
                 {
                     runtime.loggedDone = true;
-                    std::fprintf(stderr, "[padscript] release i=%llu now=%llums\n",
+                    std::fprintf(stderr, "[padscript] release i=%llu now=%llu%s\n",
                                  static_cast<unsigned long long>(i),
-                                 static_cast<unsigned long long>(nowMs));
+                                 static_cast<unsigned long long>(now), entry.guestTicks ? "tick" : "ms");
                 }
             }
         }
 
-        // IR1 DEV-ONLY pad recorder (PS2X_PAD_RECORD=<path>). Unset/empty
-        // (default) = one relaxed atomic check per pad read, zero behavior
-        // change. When armed, each port-0 pad read appends the effective
-        // guest-visible state (post stimulation/script, pre read-log) keyed
-        // by guest vsync tick, emitted directly as PS2X_PAD_SCRIPT
-        // (vsync-clock) entries: one entry per state change, contiguous and
-        // non-overlapping, each carrying the full button mask plus all four
-        // analog bytes, so replay reproduces every recorded tick exactly
-        // (tick ms are strictly increasing, so [ms(T0),ms(T1)) covers the
-        // recorded ticks [T0,T1) exactly). The open tail entry is split
-        // every 600 ticks and the file flushed, so a force-stop keeps all
-        // but ~10 s; a clean exit finalizes the tail via atexit.
+        // IR1 DEV-ONLY pad recorder (PS2X_PAD_RECORD=<path>). PRC1 v4
+        // records [guestTick, endTick) spans on the scheduler's vsync clock,
+        // shared with NV/GS notes. Rate changes do not alter the span clock.
+        // Each span carries the complete buttons and four analog bytes.
+        // Idle spans split every 600 ticks; clean exit finalizes the tail.
         // IR1b: PS2X_PAD_RECORD_DIR=<dir> (when PAD_RECORD is unset) writes
         // one file per session (padrec-<UTC>.txt) and prunes to the newest
         // PS2X_PAD_RECORD_KEEP files (default 30) at arm time. Every
@@ -813,10 +815,8 @@ namespace ps2_stubs
             std::string path;
             bool haveOpen = false;
             uint64_t openTick = 0u;
-            uint64_t openMs = 0u; // script-clock ms of openTick (PR3)
             PadInputState openState{};
             uint64_t lastTick = 0u;
-            uint64_t lastNextMs = 0u; // script-clock ms of lastTick + 1 (PR3)
             bool firstEntry = true;
             uint64_t lastFlushTick = 0u;
             uint64_t entriesSinceFlush = 0u;
@@ -867,35 +867,21 @@ namespace ps2_stubs
                    a.rx == b.rx && a.ry == b.ry;
         }
 
-        // PR3: the script-clock ms of a read at `tick` (next: of tick + 1),
-        // sampled at read time. FH5 events mode keeps the script clock on the
-        // stock-time accumulator, which only knows "now": converting ticks
-        // later (at emit) gave every span at == end and dropped every row.
-        uint64_t padRecordReadMs(uint64_t tick, bool next)
-        {
-            if (ps2_fh1::eventsMode() && !g_padRecord.testTickSet)
-            {
-                const uint64_t half = ps2_fh1::stockHalfTicks() + (next ? ps2_fh1::stockHalfStepNext() : 0u);
-                return (half * 100000ull) / (5994ull * 2ull);
-            }
-            return padScriptVsyncTickToMs(next ? tick + 1u : tick);
-        }
-
-        void padRecordEmitLocked(uint64_t atMs, uint64_t endMs)
+        void padRecordEmitLocked(uint64_t atTick, uint64_t endTick)
         {
             if (!g_padRecord.file)
             {
                 return;
             }
-            if (endMs <= atMs)
+            if (endTick <= atTick)
             {
-                // Cannot happen (stock ms strictly increase per tick); loud
+                // Cannot happen (guest ticks strictly increase); loud
                 // so an empty recording never goes unnoticed again (PR3).
                 static uint32_t lines = 0u;
                 if (lines++ < 8u)
-                    std::fprintf(stderr, "[padrecord] dropped empty span at=%llums end=%llums\n",
-                                 static_cast<unsigned long long>(atMs),
-                                 static_cast<unsigned long long>(endMs));
+                    std::fprintf(stderr, "[padrecord] dropped empty span at=%llutick end=%llutick\n",
+                                 static_cast<unsigned long long>(atTick),
+                                 static_cast<unsigned long long>(endTick));
                 return;
             }
             std::string spec;
@@ -923,8 +909,8 @@ namespace ps2_stubs
             spec += axes;
             std::fprintf(g_padRecord.file, "%s%llu:%s:%llu",
                          g_padRecord.firstEntry ? "" : ",",
-                         static_cast<unsigned long long>(atMs), spec.c_str(),
-                         static_cast<unsigned long long>(endMs - atMs));
+                         static_cast<unsigned long long>(atTick), spec.c_str(),
+                         static_cast<unsigned long long>(endTick - atTick));
             g_padRecord.firstEntry = false;
             ++g_padRecord.totalEntries;
             ++g_padRecord.entriesSinceFlush;
@@ -944,7 +930,7 @@ namespace ps2_stubs
             if (g_padRecord.haveOpen && !g_padRecord.capped)
             {
                 // Tail: cover through the last observed read tick.
-                padRecordEmitLocked(g_padRecord.openMs, g_padRecord.lastNextMs);
+                padRecordEmitLocked(g_padRecord.openTick, g_padRecord.lastTick + 1u);
                 g_padRecord.haveOpen = false;
             }
             std::fflush(g_padRecord.file);
@@ -1760,15 +1746,18 @@ namespace ps2_stubs
             // v1 = events-mode spans may be stamped on the FH5 clock (half a
             // tick early), which replays keep (padScriptWantsLegacyEventsClock).
             // RPL3: v3 = v2 stamps plus "# NV ..." recorded host values.
+            // PRC1: v4 = guest-vsync tick spans plus the same NV notes.
+            // The events_clock field still describes the other ms notes.
             const bool fh5Stamps = ps2_fh1::eventsMode() && !ps2_fh1::exactStockClock();
             std::fprintf(f,
-                         "# padrec %s\n"
+                         "# padrec v4\n"
+                         "# pad_clock=guest_vsync_tick\n"
                          "# start_utc=%s\n"
                          "# build=%s\n"
                          "# env_sha=%s\n"
                          "# knobs VU1_ENGINE=%s MTVU=%s FINISH_TIMING=%s "
                          "DETERMINISTIC=%s VU_FLOAT=%s VIF1_REVERSE_DMA=%s\n",
-                         fh5Stamps ? "v1" : "v3", startUtc, ps2x::buildId(), ps2x::recordedEnvFileHash(),
+                         startUtc, ps2x::buildId(), ps2x::recordedEnvFileHash(),
                          vu1, mtvu, finish, det, vfloat, revdma);
             {
                 char f120[64], fix[256];
@@ -2037,10 +2026,8 @@ namespace ps2_stubs
             g_padRecord.path.clear();
             g_padRecord.haveOpen = false;
             g_padRecord.openTick = 0u;
-            g_padRecord.openMs = 0u;
             g_padRecord.openState = PadInputState{};
             g_padRecord.lastTick = 0u;
-            g_padRecord.lastNextMs = 0u;
             g_padRecord.firstEntry = true;
             g_padRecord.lastFlushTick = 0u;
             g_padRecord.entriesSinceFlush = 0u;
@@ -2115,31 +2102,26 @@ namespace ps2_stubs
                 return;
             }
             const uint64_t tick = g_padRecord.testTickSet ? g_padRecord.testTick : guestVsyncTick;
-            const uint64_t nowMs = padRecordReadMs(tick, false);
             if (!g_padRecord.haveOpen)
             {
                 g_padRecord.haveOpen = true;
                 g_padRecord.openTick = tick;
-                g_padRecord.openMs = nowMs;
                 g_padRecord.openState = state;
                 g_padRecord.lastTick = tick;
-                g_padRecord.lastNextMs = padRecordReadMs(tick, true);
                 g_padRecord.lastFlushTick = tick;
                 return;
             }
             if (tick > g_padRecord.lastTick)
             {
                 g_padRecord.lastTick = tick;
-                g_padRecord.lastNextMs = padRecordReadMs(tick, true);
             }
             if (padRecordSameState(state, g_padRecord.openState))
             {
                 if (tick >= g_padRecord.openTick + kPadRecordSplitTicks)
                 {
                     // Split the long tail so a force-stop keeps all but ~10 s.
-                    padRecordEmitLocked(g_padRecord.openMs, nowMs);
+                    padRecordEmitLocked(g_padRecord.openTick, tick);
                     g_padRecord.openTick = tick;
-                    g_padRecord.openMs = nowMs;
                     std::fflush(g_padRecord.file);
                     g_padRecord.lastFlushTick = tick;
                     g_padRecord.entriesSinceFlush = 0u;
@@ -2156,9 +2138,8 @@ namespace ps2_stubs
             {
                 return; // clock moved backwards; keep the open entry (cannot happen)
             }
-            padRecordEmitLocked(g_padRecord.openMs, nowMs);
+            padRecordEmitLocked(g_padRecord.openTick, tick);
             g_padRecord.openTick = tick;
-            g_padRecord.openMs = nowMs;
             g_padRecord.openState = state;
             if (g_padRecord.totalEntries >= kPadRecordMaxEntries)
             {
@@ -4219,9 +4200,8 @@ namespace ps2_stubs
         }
         if (g_padRecord.haveOpen)
         {
-            padRecordEmitLocked(g_padRecord.openMs, g_padRecord.lastNextMs);
+            padRecordEmitLocked(g_padRecord.openTick, g_padRecord.lastTick + 1u);
             g_padRecord.openTick = g_padRecord.lastTick + 1u;
-            g_padRecord.openMs = g_padRecord.lastNextMs;
         }
         std::fflush(g_padRecord.file);
         g_padRecord.lastFlushTick = g_padRecord.lastTick;
@@ -4243,7 +4223,7 @@ namespace ps2_stubs
         // observed tick so the file stays contiguous.
         if (g_padRecord.haveOpen && g_padRecord.file)
         {
-            padRecordEmitLocked(g_padRecord.openMs, g_padRecord.lastNextMs);
+            padRecordEmitLocked(g_padRecord.openTick, g_padRecord.lastTick + 1u);
             g_padRecord.haveOpen = false;
         }
         if (g_padRecord.dirMode)
@@ -4286,10 +4266,8 @@ namespace ps2_stubs
         // catches up, then emits a span with the stale pre-load state.
         g_padRecord.haveOpen = false;
         g_padRecord.openTick = 0u;
-        g_padRecord.openMs = 0u;
         g_padRecord.openState = PadInputState{};
         g_padRecord.lastTick = 0u;
-        g_padRecord.lastNextMs = 0u;
         g_padRecord.lastFlushTick = 0u;
         g_padRecord.entriesSinceFlush = 0u;
         std::fprintf(stderr, "[padrecord] new segment after state load (tick %llu) path=%s\n",
