@@ -441,6 +441,75 @@ void register_ps2_fh1_fix_tests()
             t.Equals(peek(0x49c124u), 0xbecccccdu, "exit restores stock k");
         });
 
+        // REV1 (RV32 F6): the three name tables (fixItem, fh12Item and the
+        // bit-name renders) must stay in lockstep, or a FIX bit parses to a
+        // different bit than deltas/logs report.
+        tc.Run("REV1: FIX parse names and bit names stay in sync", [](TestCase &t)
+        {
+            std::set<std::string> seen;
+            for (unsigned bit = 0; bit < 64u; ++bit)
+            {
+                const char *name = fixMainBitName(bit);
+                if (bit == 14u)
+                {
+                    t.IsTrue(name == nullptr, "internal ramp bit stays unnamed");
+                    continue;
+                }
+                if (bit >= 62u)
+                {
+                    t.IsTrue(name == nullptr, "unallocated main bits stay unnamed");
+                    continue;
+                }
+                t.IsTrue(name != nullptr, "every allocated main bit has a name");
+                if (!name)
+                    continue;
+                t.Equals(fixItem(name), 1ull << bit, "bit name parses back to its bit");
+                t.IsTrue(seen.insert(name).second, "main bit names are unique");
+            }
+            t.Equals(seen.size(), size_t{61u}, "61 named main bits (62 slots, ramp internal)");
+            seen.clear();
+            for (unsigned bit = 0; bit < 16u; ++bit)
+            {
+                const char *name = fix12BitName(bit);
+                t.IsTrue(name != nullptr, "every fh12 bit has a name");
+                if (!name)
+                    continue;
+                t.Equals(fh12Item(name), 1u << bit, "fh12 name parses back to its bit");
+                t.IsTrue(seen.insert(name).second, "fh12 bit names are unique");
+            }
+            t.IsTrue(fix12BitName(16u) == nullptr, "fh12 names stop at bit 15");
+            // Reverse direction, from the parser bodies in the source: every
+            // name fixItem/fh12Item accepts must render under some bit.
+            std::ifstream file("ps2xRuntime/include/ps2_fh1_fix.h");
+            t.IsTrue(file.is_open(), "run the suite from the fork worktree root");
+            if (!file.is_open())
+                return;
+            std::ostringstream buffer;
+            buffer << file.rdbuf();
+            const std::string source = buffer.str();
+            const std::regex itemRe(R"(item == \"([a-z0-9]+)\"\) return (kFix))");
+            size_t parsed = 0;
+            for (auto it = std::sregex_iterator(source.begin(), source.end(), itemRe);
+                 it != std::sregex_iterator(); ++it)
+            {
+                const std::string name = (*it)[1].str();
+                ++parsed;
+                bool renders = false;
+                for (unsigned bit = 0; bit < 62u && !renders; ++bit)
+                {
+                    const char *n = fixMainBitName(bit);
+                    renders = n && name == n;
+                }
+                for (unsigned bit = 0; bit < 16u && !renders; ++bit)
+                {
+                    const char *n = fix12BitName(bit);
+                    renders = n && name == n;
+                }
+                t.IsTrue(renders, "every parse name renders under a bit: " + name);
+            }
+            t.Equals(parsed, size_t{61u + 16u}, "parser accepts exactly the named bits");
+        });
+
         tc.Run("KNC5 bit 51 stays reserved and parses (JMP5 springhold removed)", [](TestCase &t)
         {
             t.Equals(static_cast<uint64_t>(kFixSpringHold), 1ull << 51, "bit 51 reserved");
