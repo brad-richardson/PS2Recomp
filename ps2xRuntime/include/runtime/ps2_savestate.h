@@ -111,6 +111,10 @@ namespace ps2_savestate
         }
     };
 
+    // Preserve the save-file layout while normalizing the EE context's
+    // alignas(16) tail padding in the canonical byte stream.
+    void writeEeContext(Writer &w, const R5900Context &context);
+
     class Reader
     {
     public:

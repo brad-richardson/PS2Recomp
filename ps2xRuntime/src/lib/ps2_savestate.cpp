@@ -53,6 +53,16 @@ void ps2_fh1_linkSavestateSection();      // Kernel/Fh1Savestate.cpp (FH27)
 
 namespace ps2_savestate
 {
+    void writeEeContext(Writer &w, const R5900Context &context)
+    {
+        if (!w.canonical) { w.pod(context); return; }
+        constexpr size_t namedBytes = offsetof(R5900Context, fcr31) + sizeof(context.fcr31);
+        static_assert(sizeof(R5900Context) == namedBytes + 4u,
+                      "audit EE context padding before changing canonical schema");
+        w.bytes(&context, namedBytes);
+        w.u32(0u); // four unnamed alignment bytes; no guest or host field
+    }
+
     // ---------------------------------------------------------------- registry
     namespace
     {
@@ -2312,7 +2322,7 @@ bool PS2RuntimeSavestate::loadMemory(PS2Memory &m, Reader &r)
 // ==================================================================== kernel
 void PS2RuntimeSavestate::saveKernel(const PS2Runtime &rt, Writer &w)
 {
-    w.pod(rt.m_cpuContext);
+    writeEeContext(w, rt.m_cpuContext);
     writeOrdered(w, rt.m_eeExitHandlers, [](Writer &ww, const auto &e) {
         ww.pod(e.first);
         ww.u64(e.second.size());

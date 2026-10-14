@@ -120,7 +120,7 @@ namespace
         w.u8(static_cast<uint8_t>(inv.kind));
         w.u64(inv.sequence);
         w.u64(inv.tag);
-        w.pod(inv.context);
+        writeEeContext(w, inv.context);
     }
     void readInvocation(Reader &r, GuestInvocation &inv)
     {
@@ -167,7 +167,7 @@ void EeSchedulerSavestate::save(const EeScheduler &s, Writer &w)
         const GuestThread &t = entry.second;
         ww.pod(entry.first);
         ww.pod(t.id);
-        ww.pod(t.context);
+        writeEeContext(ww, t.context);
         for (uint32_t v : {t.entry, t.stack, t.stackSize, t.gp, t.attr, t.option, t.arg})
             ww.u32(v);
         ww.pod(t.initialPriority);
