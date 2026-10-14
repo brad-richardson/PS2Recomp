@@ -554,15 +554,23 @@ def stage(a):
         return files
     print('Push it with these commands (stage prints them; it does not run them):')
     print('  adb install -r ' + str(apk))
+    print('  adb shell am start -n ' + a.app_id + '/android.app.NativeActivity')
     print('  adb shell am force-stop ' + a.app_id)
-    print('  adb shell mkdir -p ' + device + '/ge1-resources ' + device + '/ge1-data ' + device + '/mc0')
+    print('  adb shell test -d ' + device + '/ge1-data')
+    print('  adb shell test -d ' + device + '/mc0')
     print('  adb push ' + str(a.work / 'SLUS_207.72') + ' ' + device + '/SLUS_207.72')
     print('  adb push "' + str(inputs['slim_iso']) + '" ' + device + '/SSX3.iso')
     print('  adb push "' + str(inputs['slim_iso']) + '.holes" ' + device + '/SSX3.iso.holes')
     print('  adb push ' + str(files / 'ps2x.env') + ' ' + device + '/ps2x.env')
     print('  adb push ' + str(files / 'full120.env') + ' ' + device + '/full120.env')
-    print('  adb push ' + str(files / 'ge1-resources') + '/. ' + device + '/ge1-resources/')
-    print('The empty card dir is ' + str(files / 'mc0') + ' (created on device by the mkdir above).')
+    print('  adb push ' + str(files / 'ge1-resources') + ' ' + device + '/')
+    if (files / 'font-pack').is_dir():
+        print('  adb push ' + str(files / 'font-pack') + ' ' + device + '/')
+        print('  adb shell chmod -R o+rX ' + device + '/font-pack')
+    print('  adb shell chmod -R o+rX ' + device + '/ge1-resources')
+    print('  adb shell chmod o+r ' + device + '/SLUS_207.72 ' + device + '/SSX3.iso ' +
+          device + '/SSX3.iso.holes ' + device + '/ps2x.env ' + device + '/full120.env')
+    print('The app creates ge1-data and the empty mc0 card dir on first launch.')
     print('Back up your keystore; a different key forces an uninstall, which wipes saves.')
     return files
 
@@ -616,29 +624,44 @@ def install(a):
     adb(a, 'install', '-r', apk)
     if not adb(a, 'shell', 'pm', 'path', a.app_id, capture=True).startswith('package:'):
         raise ValueError('installed public package not found')
-    adb(a, 'shell', 'am', 'force-stop', a.app_id)
-    adb(a, 'shell', 'mkdir', '-p', *(shlex.quote(p) for p in
-        (device, device + '/ge1-resources', device + '/ge1-data', device + '/mc0')))
+    # Application.onCreate creates writable external data/card directories as
+    # the app before the native activity loads. A boot without staged disc data
+    # may exit immediately; only directory creation is needed here.
+    try:
+        adb(a, 'shell', 'am', 'start', '-n', a.app_id + '/android.app.NativeActivity')
+    finally:
+        adb(a, 'shell', 'am', 'force-stop', a.app_id)
+    for directory in ('ge1-data', 'mc0'):
+        adb(a, 'shell', 'test', '-d', shlex.quote(device + '/' + directory))
     sources = disc_sources + [(files / 'ps2x.env', 'ps2x.env'),
                               (files / 'full120.env', 'full120.env')]
-    sources += [(p, 'ge1-resources/' + p.relative_to(files / 'ge1-resources').as_posix())
-                for p in sorted((files / 'ge1-resources').rglob('*')) if p.is_file()]
-    sources += font_pack_sources(files)
     for source_path, relative in sources:
         remote = device + '/' + relative
         expected = sha(source_path)
-        parent = remote.rsplit('/', 1)[0]
-        adb(a, 'shell', 'mkdir', '-p', shlex.quote(parent))
         exists = subprocess.run(['adb'] + (['-s', a.serial] if a.serial else []) +
                                 ['shell', 'test', '-f', shlex.quote(remote)], check=False).returncode == 0
         current = adb(a, 'shell', 'sha256sum', shlex.quote(remote), capture=True).split()[0] if exists else None
         if current == expected:
             print('SHA256 match, skip ' + relative)
+            adb(a, 'shell', 'chmod', 'o+r', shlex.quote(remote))
             continue
         adb(a, 'push', source_path, remote)
         actual = adb(a, 'shell', 'sha256sum', shlex.quote(remote), capture=True).split()[0]
         if actual != expected:
             raise ValueError('device SHA256 mismatch: ' + relative)
+        adb(a, 'shell', 'chmod', 'o+r', shlex.quote(remote))
+    for tree in ('ge1-resources', 'font-pack'):
+        local = files / tree
+        if not local.is_dir():
+            continue
+        adb(a, 'push', local, device + '/')
+        adb(a, 'shell', 'chmod', '-R', 'o+rX', shlex.quote(device + '/' + tree))
+        for source_path in sorted(local.rglob('*')):
+            if source_path.is_file():
+                remote = device + '/' + tree + '/' + source_path.relative_to(local).as_posix()
+                actual = adb(a, 'shell', 'sha256sum', shlex.quote(remote), capture=True).split()[0]
+                if actual != sha(source_path):
+                    raise ValueError('device SHA256 mismatch: ' + remote)
     print('Installed ' + a.app_id + ' with matching files; existing cards and saves were not removed.')
 
 

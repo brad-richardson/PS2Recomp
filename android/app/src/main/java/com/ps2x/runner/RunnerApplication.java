@@ -57,6 +57,17 @@ public final class RunnerApplication extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
+        // Public adb staging starts this process once before pushing resources.
+        // Android 15 denies the app access to shell-created directories in its
+        // external tree, so create writable data/card directories as the app.
+        File external = getExternalFilesDir(null);
+        File ge1Data = external == null ? null : new File(external, "ge1-data");
+        File card = external == null ? null : new File(external, "mc0");
+        if (external == null || !external.isDirectory()
+                || (!ge1Data.mkdirs() && !ge1Data.isDirectory())
+                || (!card.mkdirs() && !card.isDirectory())) {
+            throw new IllegalStateException("Cannot prepare external app directories");
+        }
         final long start = android.os.SystemClock.elapsedRealtime();
         try {
             final AssetManager assets = getAssets();
