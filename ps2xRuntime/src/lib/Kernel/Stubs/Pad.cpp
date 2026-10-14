@@ -12,6 +12,7 @@
 #include "Pad.h"
 #include "ps2_log.h"
 #include "ps2_net_dirtysock.h" // ONL10: navigator milestone snapshot
+#include "ps2_net_protocol.h"
 #include "ps2_rpl3_nv.h" // RPL3: recorded host values (padrec v3)
 #include "ps2_turbo_boot.h" // BTS1: boot turbo input yield
 
@@ -1438,7 +1439,8 @@ namespace ps2_stubs
             if (g_qpNav.onlineMode && !g_qpNav.armed)
             {
                 const ps2_net::QpNavMilestones wm = ps2_net::qpNavMilestones();
-                if (wm.creaCount == 0u || wm.creaCount == g_qpNav.seenCreaCount)
+                if (!ps2_net_protocol::shouldArmOnline(2, g_qpNav.armed,
+                                                       wm.creaCount, g_qpNav.seenCreaCount))
                 {
                     return;
                 }

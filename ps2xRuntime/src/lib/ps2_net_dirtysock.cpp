@@ -12,6 +12,7 @@
 
 #include "game_overrides.h"
 #include "ps2_e41_trace.h"
+#include "ps2_net_protocol.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
@@ -166,26 +167,8 @@ namespace ps2_net
         int qpNavModeImpl()
         {
             static const int mode = [] {
-                const char *qp = std::getenv("PS2X_NET_QUICKPLAY");
-                if (!qp || std::string(qp) != "1")
-                {
-                    return 0;
-                }
-                const char *nav = std::getenv("PS2X_NET_QUICKPLAY_NAV");
-                if (!nav)
-                {
-                    return 0;
-                }
-                const std::string v(nav);
-                if (v == "1")
-                {
-                    return 1;
-                }
-                if (v == "online")
-                {
-                    return 2;
-                }
-                return 0;
+                return ps2_net_protocol::navMode(std::getenv("PS2X_NET_QUICKPLAY"),
+                                                 std::getenv("PS2X_NET_QUICKPLAY_NAV"));
             }();
             return mode;
         }
@@ -272,27 +255,12 @@ namespace ps2_net
             {
                 return false;
             }
-            while (!line.empty() &&
-                   (line.back() == '\r' || line.back() == '\n' ||
-                    line.back() == ' ' || line.back() == '\t'))
-            {
-                line.pop_back();
-            }
-            while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
-            {
-                line.erase(line.begin());
-            }
-            const size_t colon = line.find(':');
-            if (colon == std::string::npos || colon == 0u ||
-                colon + 1u >= line.size() || colon > 64u ||
-                line.size() - colon - 1u > 64u || line.size() - colon - 1u == 0u)
+            if (!ps2_net_protocol::parseLoginLine(line, g_loginName, g_loginPass))
             {
                 std::cerr << "[net] quickplay login file malformed (want name:pass)"
                           << std::endl;
                 return false;
             }
-            g_loginName = line.substr(0u, colon);
-            g_loginPass = line.substr(colon + 1u);
             return true;
         }
 
@@ -882,7 +850,7 @@ namespace ps2_net
             if (cached < 0)
             {
                 const char *env = std::getenv("PS2X_NET_RELAY_REGISTER");
-                cached = (!env || !*env || env[0] != '0') ? 1 : 0;
+                cached = ps2_net_protocol::relayRegisterEnabled(env) ? 1 : 0;
             }
             return cached == 1;
         }
@@ -1254,19 +1222,7 @@ namespace ps2_net
                     {
                         continue;
                     }
-                    size_t cur = 0u;
-                    bool nameLike = true;
-                    while (cur < 64u && dst[cur])
-                    {
-                        const char c = static_cast<char>(dst[cur]);
-                        if (c < 32 || c >= 127)
-                        {
-                            nameLike = false;
-                            break;
-                        }
-                        ++cur;
-                    }
-                    if (!nameLike || cur == 64u)
+                    if (!ps2_net_protocol::canOverwriteLoginField(dst))
                     {
                         continue;
                     }
@@ -1495,11 +1451,11 @@ namespace ps2_net
             if ((u.mode & 1u) && !u.peerKnown && relayRegister())
             {
                 const uint64_t nowMs = hostMillis();
-                if (nowMs - u.connMs < 30000u && nowMs - u.lastRegMs >= 250u)
+                if (ps2_net_protocol::relayRegisterDue(u.mode, u.peerKnown, true,
+                                                       nowMs, u.connMs, u.lastRegMs))
                 {
                     u.lastRegMs = nowMs;
-                    std::string reg("SSX3RLY1");
-                    reg += g_sesToken;
+                    const std::string reg = ps2_net_protocol::relayRegistration(g_sesToken);
                     p2pSendBytes(u,
                                  reinterpret_cast<const uint8_t *>(reg.data()),
                                  reg.size(), true);

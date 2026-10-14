@@ -53,6 +53,7 @@ void register_ps2_snd_tests();
 void register_ps2_audio_stretch_tests();
 void register_ps2_sif_dma_tests();
 void register_ps2_net_nolink_tests();
+void register_ps2_net_protocol_tests();
 void register_ps2_recompiler_tests();
 void register_ps2_runtime_expansion_tests();
 #if PS2X_ENABLE_DIAG_TAPS
@@ -138,6 +139,7 @@ int main()
     register_ps2_audio_stretch_tests();
     register_ps2_sif_dma_tests();
     register_ps2_net_nolink_tests();
+    register_ps2_net_protocol_tests();
     register_ps2_recompiler_tests();
     register_ps2_runtime_expansion_tests();
 #if PS2X_ENABLE_DIAG_TAPS
