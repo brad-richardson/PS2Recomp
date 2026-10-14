@@ -1476,7 +1476,6 @@ namespace ps2_stubs
                 g_qpNav.cancelled = true;
                 // ONL11: backing out disarms until the next Online entry.
                 g_qpNav.armed = !g_qpNav.onlineMode;
-                ps2_net::qpNoteNavAbort(); // ONL11 addendum: collision rename
                 std::fprintf(stderr, "[qpnav] cancel: user input at tick=%llu\n",
                              static_cast<unsigned long long>(guestVsyncTick));
                 return;
@@ -1509,7 +1508,6 @@ namespace ps2_stubs
             {
                 g_qpNav.aborted = true;
                 g_qpNav.armed = !g_qpNav.onlineMode; // ONL11: wait for next entry
-                ps2_net::qpNoteNavAbort();          // ONL11 addendum: collision rename
                 std::fprintf(stderr, "QP-NAV abort %s menu=0x%x/0x%x at tick=%llu\n", s.name,
                              menuMain, menuSub,
                              static_cast<unsigned long long>(guestVsyncTick));
@@ -1527,7 +1525,6 @@ namespace ps2_stubs
                 {
                     g_qpNav.aborted = true;
                     g_qpNav.armed = !g_qpNav.onlineMode; // ONL11: wait for next entry
-                    ps2_net::qpNoteNavAbort();          // ONL11 addendum: collision rename
                     std::fprintf(stderr, "QP-NAV abort %s (dance-title) at tick=%llu\n",
                                  s.name, static_cast<unsigned long long>(guestVsyncTick));
                     return;
@@ -1554,7 +1551,6 @@ namespace ps2_stubs
             {
                 g_qpNav.aborted = true;
                 g_qpNav.armed = !g_qpNav.onlineMode; // ONL11: wait for next entry
-                ps2_net::qpNoteNavAbort();          // ONL11 addendum: collision rename
                 std::fprintf(stderr, "QP-NAV abort %s (sess-conn-failed) at tick=%llu\n", s.name,
                              static_cast<unsigned long long>(guestVsyncTick));
                 return;

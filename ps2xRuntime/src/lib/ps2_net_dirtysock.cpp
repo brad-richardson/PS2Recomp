@@ -158,11 +158,7 @@ namespace ps2_net
         std::atomic<uint64_t> g_qpRget{0u};
         std::atomic<uint64_t> g_qpQuik{0u};
         std::atomic<uint64_t> g_qpQuikCount{0u};
-        // ONL11 addendum: first sess/disc tick (0 = none), behind the
-        // qpNavNote gate. The abort-time check (pers sent, disc after
-        // pers, abort while navigating) isolates the name-collision
-        // signature (ONL9 Q2): a lone waiter never drops, and post-pairing
-        // link loss lands after the navigator is done.
+        // First sess/disc tick (0 = none), behind the qpNavNote gate.
         std::atomic<uint64_t> g_qpSessDisc{0u};
         // ONL11: navigator arming mode. 0 = off (NAV unset or any other
         // value, or QUICKPLAY off), 1 = launch-flag (arm at boot, ONL10),
@@ -331,7 +327,7 @@ namespace ps2_net
             return true;
         }
 
-        // ONL11 addendum: generated identity word lists (~100 clean words
+        // Generated identity word lists (~100 clean words
         // each, lowercase ASCII, game-font-safe). Persona = adjective +
         // "-" + noun (e.g. swift-otter); "-" renders in the game font
         // (challenge strings use it) and rides the lobby NAME field.
@@ -369,53 +365,6 @@ namespace ps2_net
             "ferry", "canoe", "kayak", "sled", "skis", "board", "boots",
             "goggles", "helmet", "mittens", "parka", "lynx", "newt", "vole",
         };
-        // Whether the identity came from PS2X_NET_LOGIN (fixed: never
-        // renamed) or the login file (ours: collision-suffix allowed).
-        bool g_loginFromEnv = false;
-
-        bool writeQuickplayLoginFile(const std::string &path,
-                                     const std::string &name,
-                                     const std::string &pass)
-        {
-#if !PS2_NET_HAVE_POSIX_SOCKETS
-            (void)path;
-            (void)name;
-            (void)pass;
-            return false;
-#else
-            const std::string tmp = path + ".tmp";
-            const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-            if (fd < 0)
-            {
-                return false;
-            }
-            ::fchmod(fd, 0600);
-            const std::string line = name + ":" + pass + "\n";
-            size_t done = 0u;
-            while (done < line.size())
-            {
-                const ssize_t w =
-                    ::write(fd, line.data() + done, line.size() - done);
-                if (w <= 0)
-                {
-                    break;
-                }
-                done += static_cast<size_t>(w);
-            }
-            ::close(fd);
-            if (done != line.size())
-            {
-                return false;
-            }
-            // Atomic publish (tmp + rename); failure keeps the old file.
-            if (::rename(tmp.c_str(), path.c_str()) != 0)
-            {
-                return false;
-            }
-            return true;
-#endif
-        }
-
         std::string genPersonaName(std::mt19937 &gen)
         {
             std::uniform_int_distribution<size_t> adj(0u, 99u);
@@ -441,14 +390,11 @@ namespace ps2_net
         // ONL11: first-Online-entry login creation. When quickplay is on
         // but no login is configured (no PS2X_NET_LOGIN and no stored file
         // at boot), the first observed Online entry generates an
-        // adjective-noun persona with a random password, persists it
+        // adjective-noun persona with a random password, persists it once
         // (mode 600), and arms the login path. Runs on the netw/crea
         // handler, well before the submit, so the preload and the
-        // submit-fill carry it. The lobby auto-registers unknown accounts
-        // (Rust lobby main.rs "auth": open mode accepts any non-empty NAME;
-        // password mode creates on first connect; only an empty/oversize
-        // NAME, a known-account password mismatch, or the account cap
-        // closes). Secrets are never logged: only the path.
+        // submit-fill carry it. The name remains stable for this install;
+        // the lobby adds a temporary number only on a live collision.
         void ensureQuickplayLogin(uint64_t tick)
         {
             (void)tick;
@@ -467,8 +413,7 @@ namespace ps2_net
             if (readQuickplayLoginFile())
             {
                 g_loginOn = true;
-                std::cerr << "[net] quickplay prefill login name='" << g_loginName
-                          << "' src=file (late)" << std::endl;
+                std::cerr << "[net] quickplay login loaded from file" << std::endl;
                 return;
             }
             std::random_device rd;
@@ -481,12 +426,11 @@ namespace ps2_net
                 if (errno == EEXIST && readQuickplayLoginFile())
                 {
                     g_loginOn = true;
-                    std::cerr << "[net] quickplay prefill login name='" << g_loginName
-                              << "' src=file (late)" << std::endl;
+                    std::cerr << "[net] quickplay login loaded from file" << std::endl;
                     return;
                 }
-                std::cerr << "[net] quickplay: cannot create login file at '" << path
-                          << "' (" << std::strerror(errno) << ")" << std::endl;
+                std::cerr << "[net] quickplay: cannot create login file ("
+                          << std::strerror(errno) << ")" << std::endl;
                 return;
             }
             ::fchmod(fd, 0600);
@@ -505,13 +449,11 @@ namespace ps2_net
             ::close(fd);
             if (done != line.size() || !readQuickplayLoginFile())
             {
-                std::cerr << "[net] quickplay: login file write failed at '" << path
-                          << "'" << std::endl;
+                std::cerr << "[net] quickplay: login file write failed" << std::endl;
                 return;
             }
             g_loginOn = true;
-            std::cerr << "[net] quickplay created login file at '" << path << "'"
-                      << std::endl;
+            std::cerr << "[net] quickplay created login file" << std::endl;
 #else
             return;
 #endif
@@ -548,53 +490,6 @@ namespace ps2_net
 #endif
         }
 
-        // ONL11 addendum: collision recovery. Called by the navigator when
-        // it aborts while navigating. Renames ONLY on the collision
-        // signature: pers sent, then a login-socket sess/disc, never
-        // paired (ONL9 Q2). A lone waiter (no drop) and a post-pairing
-        // link loss (navigator already done) never reach this. The
-        // 2-digit suffix keeps the adjective-noun stem readable.
-        // Env-fixed identities are never renamed (logged instead).
-        void qpNoteNavAbortImpl()
-        {
-            if (!quickplayOn() || !g_loginOn || g_loginFromEnv)
-            {
-                return;
-            }
-            const uint64_t pers = g_qpPers.load(std::memory_order_relaxed);
-            const uint64_t disc = g_qpSessDisc.load(std::memory_order_relaxed);
-            if (pers == 0u || disc <= pers)
-            {
-                return;
-            }
-            const std::string path = quickplayLoginPath();
-            if (path.empty())
-            {
-                return;
-            }
-            std::random_device rd;
-            std::mt19937 gen(rd());
-            std::uniform_int_distribution<unsigned> digits(0u, 99u);
-            char suffix[4] = {};
-            std::snprintf(suffix, sizeof(suffix), "%02u",
-                          digits(gen));
-            std::string stem = g_loginName;
-            if (stem.size() + 2u > 32u)
-            {
-                stem.resize(30u);
-            }
-            const std::string renamed = stem + suffix;
-            if (!writeQuickplayLoginFile(path, renamed, g_loginPass))
-            {
-                std::cerr << "[net] quickplay: collision-suspect '" << g_loginName
-                          << "' but file rewrite failed; keeping it" << std::endl;
-                return;
-            }
-            g_loginName = renamed;
-            std::cerr << "[net] quickplay: collision-suspect login renamed to '"
-                      << renamed << "' for the next Online entry" << std::endl;
-        }
-
         void parseLoginKnob()
         {
             if (g_loginParsed)
@@ -603,7 +498,6 @@ namespace ps2_net
             }
             g_loginParsed = true;
             const char *env = std::getenv("PS2X_NET_LOGIN");
-            g_loginFromEnv = (env && *env && *env != '0');
             if (!env || !*env || *env == '0')
             {
                 if (!quickplayOn())
@@ -620,8 +514,7 @@ namespace ps2_net
                     return;
                 }
                 g_loginOn = true;
-                std::cerr << "[net] quickplay prefill login name='" << g_loginName
-                          << "' src=file" << std::endl;
+                std::cerr << "[net] quickplay login loaded from file" << std::endl;
                 return;
             }
             std::string v(env);
@@ -659,7 +552,7 @@ namespace ps2_net
                 g_loginPass = v.substr(colon + 1u);
             }
             g_loginOn = true;
-            std::cerr << "[net] PS2X_NET_LOGIN name='" << g_loginName << "'"
+            std::cerr << "[net] PS2X_NET_LOGIN configured"
                       << (quickplayOn() ? " quickplay=1" : "") << std::endl;
         }
 
@@ -818,8 +711,7 @@ namespace ps2_net
             {
                 std::memset(strPtr, 0, sizeof(kServerStringOrig));
                 std::memcpy(strPtr, serverValue.data(), serverValue.size());
-                std::cerr << "[net] server override: '" << kServerStringOrig << "' -> '"
-                          << serverValue << "'" << std::endl;
+                std::cerr << "[net] server override applied" << std::endl;
             }
             else
             {
@@ -971,11 +863,6 @@ namespace ps2_net
     bool qpCardHasEaLogin()
     {
         return qpCardHasEaLoginImpl();
-    }
-
-    void qpNoteNavAbort()
-    {
-        qpNoteNavAbortImpl();
     }
 
     QpNavMilestones qpNavMilestones()
@@ -1217,7 +1104,7 @@ namespace ps2_net
         capture("tcp-tx", hostMillis(), tick, msg.data(),
                 static_cast<uint32_t>(msg.size()));
         std::cerr << "[net] login: synth auth h=" << g_loginConn
-                  << " name='" << g_loginName << "' sent=" << sent
+                  << " sent=" << sent
                   << "/" << msg.size() << " tick=" << tick << std::endl;
         g_loginSentConn = g_loginConn;
 #else
@@ -1836,12 +1723,6 @@ namespace ps2_net
                               << " a1=0x" << w5 << " a2=0x" << w0 << " a3=0x" << w1
                               << " eeBuf=0x" << (w2 & 0x1FFFFFFFu) << " max=" << std::dec << w3
                               << std::dec;
-                    // ONL5-P2: P2P families (mngl/gmlk/gmut): log the
-                    // payload (address strings, link args) too.
-                    if (method >= 26u && method <= 46u && w1 > 0u)
-                    {
-                        std::cerr << " pay=" << dmaHex(w0, 64u);
-                    }
                 }
                 uint32_t status = 0u;
                 uint32_t outlen = 0u;
@@ -1850,7 +1731,6 @@ namespace ps2_net
                     // netw/list: a2 = IOP addr of the source string
                     // ("mc0:"/"mc1:"). One fake broadband config on mc0:.
                     const std::string src = dmaString(w0);
-                    std::cerr << " src='" << src << "'";
                     if (src == "mc0:")
                     {
                         const uint32_t n = writeFakeConfig(rdram, w2 & 0x1FFFFFFFu, w3);
@@ -1869,7 +1749,6 @@ namespace ps2_net
                     // (0x101 listen / 0x102 connect), a2/a3 =
                     // "addr:lport:rport".
                     const std::string spec = dmaString(w0);
-                    std::cerr << " spec='" << spec << "'";
                     uint32_t ip = 0x7F000001u;
                     uint16_t lport = 3658u, rport = 3658u;
                     {
@@ -2066,7 +1945,6 @@ namespace ps2_net
                     // flow; the SP dance is net-silent). ONL11: arms the
                     // online navigator mode and the first-Online-entry
                     // login creation.
-                    std::cerr << " domain='" << dmaString(w0) << "'";
                     status = 0u;
                     if (qpNavNote())
                     {
@@ -2078,7 +1956,6 @@ namespace ps2_net
                 else if (method == 2u)
                 {
                     // netw/star: a2 = IOP addr of the selected config path.
-                    std::cerr << " path='" << dmaString(w0) << "'";
                     g_linkUp = true;
                     status = 0u;
                     if (qpNavNote())
@@ -2117,7 +1994,6 @@ namespace ps2_net
                 {
                     // name/look: a2 = IOP addr of the hostname (a3 = len
                     // incl NUL). Resolve only through the configured lobby override.
-                    std::cerr << " host='" << dmaString(w0) << "' hex=" << dmaHex(w0, 64u);
                     g_dnsResolved = lobbyAddress() != 0u;
                     status = 0u;
                 }
@@ -2146,7 +2022,7 @@ namespace ps2_net
                 {
                     // */crea: hand out a host handle in status.
                     status = ++g_nextHandle;
-                    std::cerr << " h=" << status << " hex=" << dmaHex(w0, 64u);
+                    std::cerr << " h=" << status;
                 }
                 else if (method == 13u)
                 {
@@ -2219,9 +2095,7 @@ namespace ps2_net
                                (static_cast<uint32_t>(sa[5]) << 16) |
                                (static_cast<uint32_t>(sa[6]) << 8) | sa[7];
                     }
-                    std::cerr << " h=" << w4 << " port=" << port << " addr=0x"
-                              << std::hex << addr << std::dec
-                              << " hex=" << dmaHex(w0, 16u);
+                    std::cerr << " h=" << w4 << " port=" << port;
 #if PS2_NET_HAVE_POSIX_SOCKETS
                     closeSocket(w4);
                     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -2300,8 +2174,7 @@ namespace ps2_net
                 else if (method == 15u)
                 {
                     // sess/disc: a0 = handle; close (no-op when fresh).
-                    // ONL11 addendum: first-drop milestone for the
-                    // collision signature (checked at navigator aborts).
+                    // First-drop milestone for navigator diagnostics.
                     closeSocket(w4);
                     std::cerr << " h=" << w4;
                     status = 0u;
@@ -2317,7 +2190,7 @@ namespace ps2_net
                     // the byte count in status.
                     const std::vector<uint8_t> bytes = dmaBytes(w0);
                     const uint32_t len = (w1 <= bytes.size()) ? w1 : static_cast<uint32_t>(bytes.size());
-                    std::cerr << " h=" << w4 << " n=" << len << " hex=" << dmaHex(w0, 64u);
+                    std::cerr << " h=" << w4 << " n=" << len;
                     status = 0u;
                     if (len > 0u)
                     {
@@ -2547,7 +2420,7 @@ namespace ps2_net
                 {
                     // gmlk/send: P2P/race bytes out; capture them.
                     const std::vector<uint8_t> bytes = dmaBytes(w0);
-                    std::cerr << " n=" << bytes.size() << " hex=" << dmaHex(w0, 64u);
+                    std::cerr << " n=" << bytes.size();
                     if (!bytes.empty())
                     {
                         capture("udp-tx", hostMillis(), tick, bytes.data(),

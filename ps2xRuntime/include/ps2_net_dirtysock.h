@@ -15,7 +15,7 @@ class PS2Runtime;
 
 namespace ps2_net
 {
-    // True with PS2X_NET=1 and an explicit valid IPv4 PS2X_NET_SERVER.
+    // True with PS2X_NET=1 and an explicit PS2X_NET_SERVER.
     bool enabled();
 
     // True from gmlk/crea until the last gmlk/dest. Events mode holds
@@ -91,6 +91,4 @@ namespace ps2_net
     // save (PSCD10088slogin); called by the navigator to answer the save
     // prompt (Yes only when no save exists). Read-only: never writes.
     bool qpCardHasEaLogin();
-    // ONL11 addendum: rename-on-collision hook for navigator aborts.
-    void qpNoteNavAbort();
 } // namespace ps2_net
