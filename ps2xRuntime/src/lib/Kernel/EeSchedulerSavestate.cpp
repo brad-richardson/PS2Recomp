@@ -218,7 +218,8 @@ void EeSchedulerSavestate::save(const EeScheduler &s, Writer &w)
     w.u32(s.m_count);
     w.u64(s.m_sliceEndCycle);
     w.b(s.m_checkpointPending.load());
-    w.u32(s.m_debugPublishCountdown);
+    // Snapshot-publisher cadence has no guest consumer.
+    w.u32(w.canonical ? 0u : s.m_debugPublishCountdown);
     {
         std::lock_guard lock(s.m_eventMutex);
         w.u64(s.m_events.size());
@@ -232,7 +233,9 @@ void EeSchedulerSavestate::save(const EeScheduler &s, Writer &w)
             const int64_t hostNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                        d.hostDeadline.time_since_epoch())
                                        .count();
-            w.pod(static_cast<int64_t>(hostNs - nowNs)); // rebased on load
+            // Canonical mode schedules solely by guest cycles. Host clock
+            // offsets can delay wall time but must never choose an event.
+            w.pod(w.canonical ? int64_t{0} : static_cast<int64_t>(hostNs - nowNs));
             w.pod(d.event);
             w.u64(d.sequence);
         }

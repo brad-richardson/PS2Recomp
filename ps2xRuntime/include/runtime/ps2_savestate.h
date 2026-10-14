@@ -54,6 +54,9 @@ namespace ps2_savestate
     {
     public:
         std::vector<uint8_t> buf;
+        // NP0A: oracle sections omit explicitly host/render-only fields.
+        // Ordinary save files retain their existing layout.
+        bool canonical = false;
 
         void bytes(const void *data, size_t size)
         {
@@ -263,7 +266,9 @@ namespace ps2_savestate
     template <typename Map, typename WriteEntry>
     void writeOrdered(Writer &w, const Map &map, WriteEntry writeEntry)
     {
-        w.u64(map.bucket_count());
+        // Bucket count is a host STL implementation detail. Preserve live
+        // iteration order, which can affect guest allocation decisions.
+        w.u64(w.canonical ? 0u : map.bucket_count());
         w.u64(map.size());
         for (const auto &entry : map)
             writeEntry(w, entry);
@@ -470,6 +475,19 @@ namespace ps2_savestate
     // save(): returns true when written; `why` names the deferral otherwise.
     bool trySave(PS2Runtime &runtime, uint64_t vsyncTick, std::string &why);
     bool load(PS2Runtime &runtime, const std::string &path, std::string &error);
+
+    // NP0A diagnostic canonical profile. The full oracle runs on the EE
+    // thread after an event pass, every 120 VBlanks and at rate transitions.
+    bool canonicalEnabled();
+    bool canonicalOracle(PS2Runtime &runtime, uint64_t tick, bool transition,
+                         std::string &why);
+    void canonicalRecordPad(uint64_t tick, int port, int slot, const uint8_t *bytes, size_t size);
+    void canonicalRecordEvent(uint64_t tick, uint64_t eeCycle, uint32_t type,
+                              uint32_t id, uint64_t deadline, uint64_t sequence);
+    void canonicalRecordIdle(uint64_t tick, uint64_t eeCycle, uint64_t timerCycle,
+                             uint64_t eventCycle, bool timerWon);
+    void canonicalRecordReadback(uint64_t tick, uint64_t ticket, uint32_t address,
+                                 uint32_t bytes, uint64_t digest);
 
     // Traversal/read failures while saving a directory tree. trySave turns
     // it into a deferral reason; a partial tree is never written.

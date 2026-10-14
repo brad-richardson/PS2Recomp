@@ -510,6 +510,7 @@ private:
     void publishIdleDebugContext();
 
     PS2Runtime &m_runtime;
+    const bool m_netplayCanon;
     const bool m_cycleOnlyEvents;
 #if PS2X_ENABLE_DET_HASH_TAP
     uint64_t m_detHashEvery = 0;

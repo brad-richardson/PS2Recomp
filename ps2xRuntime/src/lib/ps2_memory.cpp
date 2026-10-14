@@ -4,6 +4,7 @@
 #include "runtime/ps2_address.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/gs_stream_capture.h"
+#include "runtime/ps2_savestate.h"
 #include "ps2_log.h"
 #include "ps2_mtvu.h"
 #include <atomic>
@@ -1847,9 +1848,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 // timing-dependent, never the bytes. Short/empty serves keep
                 // the RB1 remainder semantics (EE past the served bytes is
                 // untouched, the rest stays in QWC).
-                if (vif1Reverse && vif1ReverseDmaModeLocal() >= 2)
+                const bool cpuVisibleProbe = vif1Reverse && ps2_savestate::canonicalEnabled();
+                if (vif1Reverse && (vif1ReverseDmaModeLocal() >= 2 || cpuVisibleProbe))
                 {
                     static const uint32_t rb2LogMax = [] {
+                        if (ps2_savestate::canonicalEnabled()) return 0u;
                         const char *env = std::getenv("PS2X_RB2_LOG_MAX");
                         if (!env || env[0] == '\0')
                             return 8u;
@@ -1863,10 +1866,11 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     uint64_t rb2SpinUs = 0u;
                     bool rb2Timeout = false;
                     // LT1b: lagF keys by (EE vsync tick, ordinal) instead of sequence.
-                    const bool lagF = vif1ReverseDmaModeLocal() == 4;
+                    const bool lagF = !cpuVisibleProbe && vif1ReverseDmaModeLocal() == 4;
                     GS::LagfServeInfo lagfInfo;
                     const uint32_t rb2Avail =
-                        !m_gsFrontend ? 0u
+                        cpuVisibleProbe ? rb2Want
+                        : !m_gsFrontend ? 0u
                         : lagF ? m_gsFrontend->serveLagFrameReadback(
                                      rb2Buf, sizeof(rb2Buf), gs_regs.vsyncTick.load(std::memory_order_acquire),
                                      lagfInfo)
@@ -1915,8 +1919,21 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             rb2Chunk = rb2Limit - rb2Dst;
                         if (rb2Chunk == 0u)
                             break;
-                        std::memcpy(rb2Base + rb2Dst, rb2Buf + rb2Done, rb2Chunk);
+                        if (cpuVisibleProbe)
+                            std::memset(rb2Base + rb2Dst, 0xff, rb2Chunk);
+                        else
+                            std::memcpy(rb2Base + rb2Dst, rb2Buf + rb2Done, rb2Chunk);
                         rb2Done += rb2Chunk;
+                    }
+                    if (cpuVisibleProbe)
+                    {
+                        static uint64_t nextTicket = 0u; // EE-owned request order
+                        uint64_t digest = 14695981039346656037ull;
+                        for (uint32_t i = 0u; i < rb2Done; ++i)
+                            digest = (digest ^ 0xffu) * 1099511628211ull;
+                        ps2_savestate::canonicalRecordReadback(
+                            gs_regs.vsyncTick.load(std::memory_order_relaxed), nextTicket++,
+                            madr, rb2Done, digest);
                     }
                     {
                         static std::atomic<uint32_t> rb2LogCount{0};

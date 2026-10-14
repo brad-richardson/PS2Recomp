@@ -4664,6 +4664,10 @@ namespace ps2_stubs
         if (data[2] != 0xFFu || data[3] != 0xFFu)
             ps2_turbo_boot::notePadInput(
                 runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u);
+        if (ps2_savestate::canonicalEnabled())
+            ps2_savestate::canonicalRecordPad(
+                runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u,
+                port, slot, data, 32u);
 
         PS2_IF_AGRESSIVE_LOGS({
             if (g_padReadLogCount < 48)

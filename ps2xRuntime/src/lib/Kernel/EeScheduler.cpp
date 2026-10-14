@@ -188,9 +188,11 @@ namespace
 
 EeScheduler::EeScheduler(PS2Runtime &runtime)
     : m_runtime(runtime),
+      m_netplayCanon(ps2_savestate::canonicalEnabled()),
       m_cycleOnlyEvents([] {
           const char *flag = std::getenv("PS2X_DETERMINISTIC");
-          return flag != nullptr && std::strcmp(flag, "1") == 0;
+          return (flag != nullptr && std::strcmp(flag, "1") == 0) ||
+                 ps2_savestate::canonicalEnabled();
       }()),
       m_hostPace(ps2_vsync_pacer::hostPaceFromProcessEnv()),
       m_vsyncPace(!ps2_vsync_pacer::unpacedFromProcessEnv() || m_hostPace.enabled)
@@ -441,6 +443,8 @@ void EeScheduler::run()
     static constexpr uint32_t kBudgetParkedDeferCapTicks = 600u;
     uint32_t ssBudgetParkedDefers = 0u;
     uint64_t ssLastParkedTick = ~0ull;
+    uint64_t canonicalLastTick = 0u;
+    bool canonicalLastRate = ps2_fh1::g_commitActive;
 
     while (!m_stopRequested.load(std::memory_order_acquire))
     {
@@ -467,6 +471,24 @@ void EeScheduler::run()
                 ps2_savestate::requestAutoSave(path);
             else
                 std::fprintf(stderr, "[autosave] skipped: PS2X_AUTOSAVE_PATH missing\n");
+        }
+        if (m_netplayCanon && m_vsyncTick != canonicalLastTick)
+        {
+            const bool rate = ps2_fh1::g_commitActive;
+            const bool transition = rate != canonicalLastRate;
+            canonicalLastTick = m_vsyncTick;
+            canonicalLastRate = rate;
+            if (m_vsyncTick != 0u && ((m_vsyncTick % 120u) == 0u || transition))
+            {
+                std::string why;
+                if (!ps2_savestate::canonicalOracle(m_runtime, m_vsyncTick, transition, why))
+                {
+                    std::fprintf(stderr, "[netplay-canon] FATAL tick=%llu: %s\n",
+                                 static_cast<unsigned long long>(m_vsyncTick), why.c_str());
+                    requestStop();
+                    break;
+                }
+            }
         }
         // DS1: chord/hotkey quick-load (one-shot: applies now or refuses
         // loudly; a refused file leaves the live machine untouched).
@@ -2687,6 +2709,13 @@ void EeScheduler::processPendingEvents()
     }
     for (const EeEvent &event : pending)
     {
+        if (m_netplayCanon)
+        {
+            std::fprintf(stderr, "[netplay-canon] FATAL asynchronous host event at tick=%llu\n",
+                         static_cast<unsigned long long>(m_vsyncTick));
+            requestStop();
+            return;
+        }
         processEvent(event);
     }
 
@@ -2745,7 +2774,7 @@ void EeScheduler::processDueDeadlines()
                 rpl3Due[rpl3DueCount].cycle = item.deadlineCycle;
                 ++rpl3DueCount;
             }
-            const bool gated = !rpl3TooMany && rpl3DueCount != 0u &&
+            const bool gated = !m_netplayCanon && !rpl3TooMany && rpl3DueCount != 0u &&
                                ps2_rpl3::takeSched(m_eeCycle, rpl3Due, rpl3DueCount, rpl3Fire);
             if (gated)
             {
@@ -2885,6 +2914,10 @@ void EeScheduler::processDueDeadlines()
 
         for (ScheduledEvent &scheduled : due)
         {
+            if (m_netplayCanon)
+                ps2_savestate::canonicalRecordEvent(m_vsyncTick, m_eeCycle,
+                    static_cast<uint32_t>(scheduled.event.type), scheduled.event.id,
+                    scheduled.deadlineCycle, scheduled.sequence);
             if (scheduled.event.type == EeEventType::VBlankStart)
             {
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,
@@ -3059,9 +3092,9 @@ void EeScheduler::processEvent(const EeEvent &event)
         {
             bool hashTick = true;
 #if PS2X_ENABLE_DET_HASH_TAP
-            hashTick = m_detHashEvery != 0 && ((m_vsyncTick + 1u) % m_detHashEvery) == 0u;
+            hashTick = m_netplayCanon || (m_detHashEvery != 0 && ((m_vsyncTick + 1u) % m_detHashEvery) == 0u);
 #else
-            hashTick = false;
+            hashTick = m_netplayCanon;
 #endif
             ps2_mtvu::vblank(m_vsyncTick + 1u, hashTick);
         }
@@ -3344,12 +3377,15 @@ void EeScheduler::waitForEvent()
             const bool cyclePicksTimer = timerCycle < deadlineCycle;
             const bool hostPicksTimer = timerHostDeadline < hostDeadline;
             char recordedWinner = 0;
-            const bool gated =
+            const bool gated = !m_netplayCanon &&
                 ps2_rpl3::takeIdle(m_eeCycle, timerCycle, deadlineCycle, recordedWinner);
             // BTS2: turbo-armed behaves cycle-only (same rule as det mode).
             const bool tookTimer = gated ? (recordedWinner == 'T')
                                          : ((m_cycleOnlyEvents || turboArmed) ? cyclePicksTimer
                                                                               : hostPicksTimer);
+            if (m_netplayCanon)
+                ps2_savestate::canonicalRecordIdle(m_vsyncTick, m_eeCycle,
+                                                   timerCycle, deadlineCycle, tookTimer);
             ps2_rpl3::noteIdle(m_vsyncTick, m_eeCycle, timerCycle, deadlineCycle,
                                tookTimer ? 'T' : 'E', cyclePicksTimer == tookTimer);
             if (tookTimer)
@@ -3368,7 +3404,10 @@ void EeScheduler::waitForEvent()
     }
 
     const uint64_t perfT0 = m_perfTail ? ps2x::perflog::steadyNs() : 0u;
-    const bool signaled = turboArmed ? false : m_eventCv.wait_until(lock, hostDeadline, [this]()
+    // In canonical mode a host deadline is bookkeeping for pacing only.
+    // Advance to the chosen virtual deadline immediately; the VBlank pacer
+    // can still sleep later without choosing an event.
+    const bool signaled = (m_netplayCanon || turboArmed) ? false : m_eventCv.wait_until(lock, hostDeadline, [this]()
                                                                     { return !m_events.empty() ||
                                                                              m_stopRequested.load(std::memory_order_acquire); });
     if (m_perfTail)

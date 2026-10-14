@@ -1051,6 +1051,203 @@ namespace ps2_savestate
         return true;
     }
 
+    // NP0A: a diagnostic, versioned full-state oracle. The ordinary save
+    // format stays unchanged. Every writer below is the corresponding save
+    // section writer, with the canonical-only omissions documented at the
+    // write sites. A due tick that is not quiescent fails loudly; it is never
+    // silently shifted to a later tick.
+    bool canonicalEnabled()
+    {
+        static const bool on = [] {
+            const char *v = std::getenv("PS2X_NETPLAY_CANON");
+            return v && std::strcmp(v, "1") == 0;
+        }();
+        return on;
+    }
+
+    namespace
+    {
+        std::string canonicalDir()
+        {
+            const char *v = std::getenv("PS2X_NETPLAY_CANON_DIR");
+            return v && *v ? std::string(v) : std::string();
+        }
+        FILE *canonicalTrace()
+        {
+            static FILE *out = []() -> FILE * {
+                if (!canonicalEnabled() || canonicalDir().empty())
+                    return nullptr;
+                std::error_code ec;
+                std::filesystem::create_directories(canonicalDir(), ec);
+                if (ec)
+                    return nullptr;
+                FILE *f = std::fopen((canonicalDir() + "/transcript.tsv").c_str(), "w");
+                if (f)
+                    std::setvbuf(f, nullptr, _IOFBF, 1u << 20);
+                return f;
+            }();
+            return out;
+        }
+        std::mutex &canonicalTraceMutex()
+        {
+            static std::mutex mutex;
+            return mutex;
+        }
+    }
+
+    void canonicalRecordPad(uint64_t tick, int port, int slot, const uint8_t *bytes, size_t size)
+    {
+        if (!canonicalEnabled()) return;
+        FILE *f = canonicalTrace();
+        if (!f) return;
+        std::lock_guard<std::mutex> lock(canonicalTraceMutex());
+        std::fprintf(f, "P\t%" PRIu64 "\t%d\t%d\t", tick, port, slot);
+        for (size_t i = 0; i < size; ++i) std::fprintf(f, "%02x", bytes[i]);
+        std::fputc('\n', f);
+    }
+
+    void canonicalRecordEvent(uint64_t tick, uint64_t eeCycle, uint32_t type,
+                              uint32_t id, uint64_t deadline, uint64_t sequence)
+    {
+        if (!canonicalEnabled()) return;
+        FILE *f = canonicalTrace();
+        if (!f) return;
+        std::lock_guard<std::mutex> lock(canonicalTraceMutex());
+        std::fprintf(f, "E\t%" PRIu64 "\t%" PRIu64 "\t%u\t%u\t%" PRIu64 "\t%" PRIu64 "\n",
+                     tick, eeCycle, type, id, deadline, sequence);
+    }
+
+    void canonicalRecordReadback(uint64_t tick, uint64_t ticket, uint32_t address,
+                                 uint32_t bytes, uint64_t digest)
+    {
+        if (!canonicalEnabled()) return;
+        FILE *f = canonicalTrace();
+        if (!f) return;
+        std::lock_guard<std::mutex> lock(canonicalTraceMutex());
+        std::fprintf(f, "R\t%" PRIu64 "\t%" PRIu64 "\t%u\t%u\t%016" PRIx64 "\n",
+                     tick, ticket, address, bytes, digest);
+    }
+
+    void canonicalRecordIdle(uint64_t tick, uint64_t eeCycle, uint64_t timerCycle,
+                             uint64_t eventCycle, bool timerWon)
+    {
+        if (!canonicalEnabled()) return;
+        FILE *f = canonicalTrace();
+        if (!f) return;
+        std::lock_guard<std::mutex> lock(canonicalTraceMutex());
+        std::fprintf(f, "I\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\t%c\n",
+                     tick, eeCycle, timerCycle, eventCycle, timerWon ? 'T' : 'E');
+    }
+
+    bool canonicalOracle(PS2Runtime &runtime, uint64_t tick, bool transition, std::string &why)
+    {
+        if (!canonicalEnabled()) return true;
+        const std::string dir = canonicalDir();
+        if (dir.empty() || !canonicalTrace()) { why = "PS2X_NETPLAY_CANON_DIR missing/unwritable"; return false; }
+        if (!config().deterministic) { why = "PS2X_DETERMINISTIC=1 required for fixed RTC/card times"; return false; }
+        EeScheduler &sched = runtime.eeScheduler();
+        why = EeSchedulerSavestate::ready(sched);
+        if (why.empty()) why = PS2RuntimeSavestate::ready(runtime);
+        if (why.empty() && hostRandUsed()) why = "host std::rand used";
+        for (const auto &[key, hooks] : registeredSections())
+            if (why.empty() && hooks.ready) {
+                why = hooks.ready();
+                if (!why.empty()) why = key + ": " + why;
+            }
+        if (!why.empty()) return false;
+
+        // The approved phase-0a boundary explicitly waits for unit and GS
+        // work. Both hash-on and hash-off runs use the same VBlank barrier
+        // policy in EeScheduler; this extra wait must not alter guest state.
+        const auto t0 = std::chrono::steady_clock::now();
+        const uint64_t wait0 = ps2_mtvu::threadedWaitNsTotal();
+        ps2_mtvu::sync(ps2_mtvu::Reason::SaveState);
+        GS &gs = runtime.gs();
+        gs.drainQueue();
+        Writer gsWriter;
+        gsWriter.canonical = true;
+        gs.privWrite([&] {
+            why = GSSavestate::ready(gs);
+            if (!why.empty() && GSSavestate::quiesce(gs)) why = GSSavestate::ready(gs);
+            if (why.empty()) GSSavestate::save(gs, gsWriter);
+        });
+        gs.drainQueue();
+        if (!why.empty()) { why = "gs: " + why; return false; }
+
+        static bool manifestWritten = false;
+        if (!manifestWritten) {
+            std::ofstream manifest(dir + "/manifest-v1.txt", std::ios::trunc);
+            if (!manifest) { why = "manifest write failed"; return false; }
+            manifest << "manifest_version=1\nchecksum_schema=1\npad_schema=ps2-status-32-v1\n"
+                     << "scheduler=cycle-only\nreadback=cpu-visible-v1\n"
+                     << "rate_transitions=fh1-events-v1\n";
+            for (const HeaderLine &line : makeHeader(tick, true))
+                manifest << line.key << '=' << line.value << '\n';
+            manifest << "codegen_id=" << runnerShaCached() << '\n';
+            manifest << "initial_card=" << contentIdentity(std::getenv("PS2X_MC_ROOT")) << '\n';
+            const char *tz = std::getenv("TZ");
+            manifest << "timezone=" << (tz ? tz : "host-default") << '\n';
+            const char *seed = std::getenv("PS2X_NETPLAY_SEED");
+            manifest << "seed=" << (seed ? seed : "unset") << '\n';
+            const char *epoch = std::getenv("PS2X_NETPLAY_EPOCH");
+            manifest << "epoch=" << (epoch ? epoch : "unset") << '\n';
+            for (const char *knob : {"PS2X_SSX3_FULL120", "PS2X_SSX3_FULL120_FIX",
+                                     "PS2X_SSX3_FULL120_FASTHOOKS", "PS2X_SSX3_SIM_MODE",
+                                     "PS2X_GS_FINISH_TIMING", "PS2X_MTVU", "PS2X_MTVU_LAG",
+                                     "PS2X_MICROVU_FLAG_HACK", "PS2X_MTVU_FINISH_EE",
+                                     "PS2X_MTVU_VIF1_STAT_FREE", "PS2X_PAD_SCRIPT_CLOCK",
+                                     "PS2X_NET_QUICKPLAY", "PS2X_NET_QUICKPLAY_NAV"}) {
+                const char *value = std::getenv(knob);
+                manifest << knob << '=' << (value ? value : "unset") << '\n';
+            }
+            if (!manifest) { why = "manifest write failed"; return false; }
+            manifestWritten = true;
+        }
+
+        Writer w;
+        w.canonical = true;
+        std::vector<std::pair<std::string, uint64_t>> parts;
+        auto section = [&](const std::string &key, uint32_t version, const auto &save) {
+            const size_t begin = w.buf.size();
+            const size_t mark = w.beginSection(key, version);
+            save();
+            w.endSection(mark);
+            parts.emplace_back(key, sectionDigest(w.buf.data() + begin, w.buf.size() - begin));
+        };
+        runtime.memory().flushEeTimers();
+        section("memory", kMemoryVersion, [&] { PS2RuntimeSavestate::saveMemory(runtime.memory(), w); });
+        section("kernel", kRuntimeVersion, [&] { PS2RuntimeSavestate::saveKernel(runtime, w); });
+        section("scheduler", kSchedulerVersion, [&] { EeSchedulerSavestate::save(sched, w); });
+        section("vu0", kVuVersion, [&] { VuSavestate::save(runtime.vu0(), w); });
+        section("vu1", kVuVersion, [&] { VuSavestate::save(runtime.vu1(), w); });
+        section("gs", kGsVersion, [&] { w.bytes(gsWriter.buf.data(), gsWriter.buf.size()); });
+        const VfsBindingScope binding(&runtime.vfs());
+        try {
+            for (const auto &[key, hooks] : registeredSections())
+                if (!hooks.legacyReadOnly)
+                    section(key, hooks.version, [&] { hooks.save(w); });
+        } catch (const dir_tree_error &e) { why = e.what(); return false; }
+        const uint64_t combined = sectionDigest(w.buf.data(), w.buf.size());
+        const uint64_t waitNs = ps2_mtvu::threadedWaitNsTotal() - wait0;
+        const uint64_t us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t0).count());
+        std::ofstream out(dir + "/oracle-v1.tsv", std::ios::app);
+        if (!out) { why = "oracle write failed"; return false; }
+        out << tick << '\t' << (transition ? 1 : 0) << '\t' << combined << '\t' << us
+            << '\t' << waitNs << '\t' << w.buf.size();
+        for (const auto &[key, digest] : parts) out << '\t' << key << '=' << digest;
+        out << '\n';
+        if (!out) { why = "oracle write failed"; return false; }
+        {
+            std::lock_guard<std::mutex> lock(canonicalTraceMutex());
+            std::fflush(canonicalTrace());
+        }
+        std::fprintf(stderr, "[netplay-canon:v1] tick=%" PRIu64 " digest=%016" PRIx64
+                             " us=%" PRIu64 " mtvu_wait_ns=%" PRIu64 " bytes=%zu\n",
+                     tick, combined, us, waitNs, w.buf.size());
+        return true;
+    }
+
     // ---------------------------------------------------------------- load
     bool loadImpl(PS2Runtime &runtime, const std::string &path, std::string &error, bool strict,
                   uint64_t *savedTickOut);
@@ -1960,7 +2157,10 @@ void PS2RuntimeSavestate::saveMemory(const PS2Memory &m, Writer &w)
     w.bytes(m.m_rdram, PS2_RAM_SIZE);
     w.bytes(m.m_scratchpad, PS2_SCRATCHPAD_SIZE);
     w.bytes(m.iop_ram, 2u * 1024u * 1024u);
-    w.bytes(m.m_gsVRAM, PS2_GS_VRAM_SIZE);
+    // Rendered pixels differ by backend/scale. Canonical reverse DMA below
+    // supplies CPU bytes; privileged GS registers remain in this section.
+    if (!w.canonical)
+        w.bytes(m.m_gsVRAM, PS2_GS_VRAM_SIZE);
     w.bytes(m.m_vu0Code, PS2_VU0_CODE_SIZE);
     w.bytes(m.m_vu0Data, PS2_VU0_DATA_SIZE);
     w.bytes(m.m_vu1Code, PS2_VU1_CODE_SIZE);
@@ -2592,7 +2792,7 @@ void GSSavestate::save(GS &gs, Writer &w)
     w.u32(gs.m_preferredDisplayDestFbp);
     w.b(gs.m_hasPreferredDisplaySource);
     std::vector<uint8_t> backendState;
-    if (gs.m_backend)
+    if (gs.m_backend && !w.canonical)
         gs.m_backend->SavestateSave(backendState);
     w.blob(backendState);
     // DS1: lag ring tail. RB2 Part 3 made the slots a ring (lagV serves 24
@@ -2604,7 +2804,7 @@ void GSSavestate::save(GS &gs, Writer &w)
     {
         std::lock_guard<std::mutex> lagLock(gs.m_rb2Mutex);
         const uint64_t snaps = gs.m_rb2Snaps.load(std::memory_order_relaxed);
-        if (snaps != 0u)
+        if (snaps != 0u && !w.canonical)
         {
             w.u32(kRb2RingTailMagic);
             w.u64(snaps);
@@ -2630,7 +2830,9 @@ void GSSavestate::save(GS &gs, Writer &w)
     // diagnostics and stay behind.
     {
         std::lock_guard<std::mutex> lagfLock(gs.m_lagfMutex);
-        if (gs.m_lagfSets != 0u && gs.m_lagfSlots)
+        // The canonical CPU policy never consumes GPU probe slots. Delivered
+        // ticket/byte pairs are in the ordered transcript instead.
+        if (gs.m_lagfSets != 0u && gs.m_lagfSlots && !w.canonical)
         {
             w.u32(kLagfTailMagic);
             w.u64(gs.m_lagfSets);
