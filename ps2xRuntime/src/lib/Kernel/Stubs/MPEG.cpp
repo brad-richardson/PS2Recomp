@@ -2951,7 +2951,19 @@ namespace
         w.b(s.currentCdStreamEofSeen);
         ps2_savestate::writeOrdered(w, s.callbacksByMpeg, [](ps2_savestate::Writer &ww, const auto &e) {
             ww.u32(e.first);
-            ww.podVec(e.second);
+            if (!ww.canonical) { ww.podVec(e.second); return; }
+            // The three bytes after stream are struct padding. They are not
+            // callback state, and their raw values differ across hosts.
+            static_assert(sizeof(MpegRegisteredCallback) == 24 &&
+                          offsetof(MpegRegisteredCallback, stream) == 20);
+            ww.u64(e.second.size());
+            for (const MpegRegisteredCallback &cb : e.second)
+            {
+                for (uint32_t v : {cb.type, cb.streamId, cb.func, cb.data, cb.handle}) ww.u32(v);
+                ww.b(cb.stream);
+                const uint8_t pad[3]{};
+                ww.bytes(pad, sizeof(pad));
+            }
         });
         // Playback bookkeeping without a live decoder (ready() refuses one).
         ps2_savestate::writeOrdered(w, s.playbackByMpeg, [](ps2_savestate::Writer &ww, const auto &e) {
