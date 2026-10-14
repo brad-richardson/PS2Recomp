@@ -1096,6 +1096,20 @@ public:
         m_vramSize = vramSize;
         if (const char *path = std::getenv("PS2X_GS_EXTERNAL_LIBRARY"); path && *path)
         {
+#if defined(__ANDROID__)
+            // MLI1: GE1's folder setup creates its data tree with
+            // non-recursive libc mkdir(), so a fresh install (no ge1-data
+            // yet) fails GE1 open silently. Pre-create the configured dir
+            // here with the recursive helper before GE1 runs.
+            if (const char *dataDir = std::getenv("GE1_GS_DATA_DIR"); dataDir && *dataDir)
+            {
+                std::error_code ec;
+                std::filesystem::create_directories(dataDir, ec);
+                if (ec)
+                    std::fprintf(stderr, "[gs:external] GE1 data dir pre-create failed path=%s err=%s\n",
+                                 dataDir, ec.message().c_str());
+            }
+#endif
 #if defined(__ANDROID__) || defined(PS2X_GE1_STATIC_IOSURFACE)
             configureOutputSize();
 #endif
