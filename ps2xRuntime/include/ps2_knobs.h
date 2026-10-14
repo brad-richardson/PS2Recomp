@@ -322,8 +322,9 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "GE1_VK_TURNIP",
         "PS2RECOMP_SCE_SYMBOL_DB",
         "PS2X_ASPECT",
-        "PS2X_AUTOSAVE", // ASV1: lifecycle snapshot, host only, default off
         "PS2X_AUDIO_STRETCH",
+        "PS2X_AUTOSAVE", // ASV1: lifecycle snapshot, host only, default off
+        "PS2X_AUTOSAVE_AUTORESUME_S", // ASV1: silent-resume age limit, default 600 s
         "PS2X_BOOT_ELF",
         "PS2X_CD_IMAGE",
         "PS2X_CD_OVERLAY",

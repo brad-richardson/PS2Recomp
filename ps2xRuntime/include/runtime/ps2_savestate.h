@@ -523,6 +523,13 @@ namespace ps2_savestate
     // session skips it even before a peer connects. Uses the quick-save
     // writer and its atomic temp+rename path.
     bool requestAutoSave(const std::string &path);
+    enum class AutoResumeDecision { Silent, Ask };
+    // The wall timestamp is embedded in the state header, not inferred from
+    // filesystem mtime. Zero means absent or unreadable (older state files).
+    uint64_t autosaveWallTime(const std::string &path);
+    uint64_t autoResumeThresholdSeconds();
+    AutoResumeDecision autoResumeDecision(uint64_t savedWallSeconds, uint64_t nowWallSeconds,
+                                          uint64_t thresholdSeconds);
     bool requestQuickLoad(const std::string &path);
     bool quickSavePending(); // a save waits (UI: "saving…")
     // Consumed by the scheduler on the game thread. takePendingQuickLoad is

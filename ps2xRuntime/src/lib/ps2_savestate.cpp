@@ -28,6 +28,7 @@
 #include "runtime/ps2_vu1.h"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <algorithm>
 #include <cinttypes>
@@ -826,6 +827,8 @@ namespace ps2_savestate
                 out += l.key + "=" + l.value + "\n";
             out += "save_tick=" + std::to_string(tick) + "\n";
             out += "ee_cycle=" + std::to_string(eeCycle) + "\n";
+            const std::time_t wallNow = std::time(nullptr);
+            out += "saved_wall_unix_s=" + std::to_string(wallNow > 0 ? static_cast<uint64_t>(wallNow) : 0u) + "\n";
             return out;
         }
 
@@ -1498,6 +1501,55 @@ namespace ps2_savestate
         }
         std::fprintf(stderr, "[autosave] requested path=%s\n", path.c_str());
         return true;
+    }
+
+    uint64_t autoResumeThresholdSeconds()
+    {
+        const char *value = std::getenv("PS2X_AUTOSAVE_AUTORESUME_S");
+        if (!value || !*value || *value == '-')
+            return 600u;
+        char *end = nullptr;
+        errno = 0;
+        const unsigned long long seconds = std::strtoull(value, &end, 10);
+        return errno == 0 && end && *end == '\0' ? static_cast<uint64_t>(seconds) : 600u;
+    }
+
+    AutoResumeDecision autoResumeDecision(uint64_t savedWallSeconds, uint64_t nowWallSeconds,
+                                          uint64_t thresholdSeconds)
+    {
+        if (savedWallSeconds == 0u || nowWallSeconds == 0u || nowWallSeconds < savedWallSeconds)
+            return AutoResumeDecision::Ask;
+        return nowWallSeconds - savedWallSeconds < thresholdSeconds ? AutoResumeDecision::Silent
+                                                                    : AutoResumeDecision::Ask;
+    }
+
+    uint64_t autosaveWallTime(const std::string &path)
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (!in)
+            return 0u;
+        std::array<uint8_t, 65536> prefix{};
+        in.read(reinterpret_cast<char *>(prefix.data()), static_cast<std::streamsize>(prefix.size()));
+        const size_t size = static_cast<size_t>(in.gcount());
+        Reader r(prefix.data(), size);
+        char magic[8]{};
+        if (!r.bytes(magic, sizeof(magic)) || std::memcmp(magic, kMagic, sizeof(magic)) != 0 ||
+            r.u32() != kFormatVersion)
+            return 0u;
+        std::string key;
+        uint32_t version = 0u;
+        if (!r.beginSection(key, version) || key != "header" || version != kHeaderVersion)
+            return 0u;
+        const auto header = parseHeader(r.str());
+        if (!r.endSection(key) || !r.ok())
+            return 0u;
+        const auto it = header.find("saved_wall_unix_s");
+        if (it == header.end() || it->second.empty() || it->second[0] == '-')
+            return 0u;
+        char *end = nullptr;
+        errno = 0;
+        const unsigned long long seconds = std::strtoull(it->second.c_str(), &end, 10);
+        return errno == 0 && end && *end == '\0' ? static_cast<uint64_t>(seconds) : 0u;
     }
 
     bool requestQuickLoad(const std::string &path)

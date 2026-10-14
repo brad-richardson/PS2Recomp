@@ -113,6 +113,31 @@ void register_ps2_savestate_tests()
 {
     MiniTest::Case("Ps2Savestate", [](TestCase &tc)
     {
+        tc.Run("ASV1: slot wall time and silent-resume boundary", [](TestCase &t)
+        {
+            using ps2_savestate::AutoResumeDecision;
+            const std::string path = tmpPath("asv1-wall-time.state");
+            Writer w;
+            w.bytes(ps2_savestate::kMagic, sizeof(ps2_savestate::kMagic));
+            w.u32(ps2_savestate::kFormatVersion);
+            const size_t mark = w.beginSection("header", ps2_savestate::kHeaderVersion);
+            w.str("format=1\nsaved_wall_unix_s=1000\n");
+            w.endSection(mark);
+            writeFile(path, w.buf);
+            t.Equals(ps2_savestate::autosaveWallTime(path), uint64_t{1000}, "reads embedded wall time");
+            std::filesystem::remove(path);
+            t.Equals(ps2_savestate::autosaveWallTime(path), uint64_t{0}, "missing slot has unknown age");
+            t.IsTrue(ps2_savestate::autoResumeDecision(1000, 1599, 600) == AutoResumeDecision::Silent,
+                     "under ten minutes resumes silently");
+            t.IsTrue(ps2_savestate::autoResumeDecision(1000, 1600, 600) == AutoResumeDecision::Ask,
+                     "at ten minutes asks");
+            t.IsTrue(ps2_savestate::autoResumeDecision(1000, 999, 600) == AutoResumeDecision::Ask,
+                     "backwards clock asks");
+            t.IsTrue(ps2_savestate::autoResumeDecision(0, 1000, 600) == AutoResumeDecision::Ask,
+                     "unknown age asks");
+            t.IsTrue(ps2_savestate::autoResumeDecision(1000, 1000, 0) == AutoResumeDecision::Ask,
+                     "zero threshold always asks");
+        });
         tc.Run("SPR1: retired split120 stub loads quiescent v1, refuses split activity", [](TestCase &t)
         {
             const auto &hooks = ps2_savestate::registeredSections().at("split120");
