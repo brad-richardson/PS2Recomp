@@ -14,6 +14,17 @@ the user's own ISO image (--iso). Region boxes and fill predicates for
 the baked menu sprites (70/80) are measurements, not art. No game data,
 glyph images, outlines or atlases ship in this file.
 
+Part-7 ISO survey (lane REM3): the ISO does not carry dump-equal atlas
+pixels anywhere byte-contiguous. FEFONT/HUDFONT.SFN hold the glyph
+metric table plus kerning/toolchain tables only (head decodes as
+codepoint/adjust kerning pairs, then a "Buy ERTS" tag; value histogram
+and packed-bit searches rule out 1bpp/AA rasters, and no 64-byte run
+from any stock atlas appears anywhere in the 3 GB image). The baked
+word sprites (70/80) match no texture in any UI/TEXTURES/FONTS pack
+(28 256x256 SHPS decoded; exact, alpha, mask and superset probes all
+miss) and no byte run on the disc. All four atlases therefore need the
+user's own dump; the ISO-alone path stays a clean skip, never a guess.
+
 Recipe (defaults reproduce the shipped pack): stock atlas RGBA is
 upscaled to pack resolution (RGB bilinear 4x, alpha box 4x) and only
 the ink-cell alpha is replaced — EDGE x8 upsample, smoothstep tone map

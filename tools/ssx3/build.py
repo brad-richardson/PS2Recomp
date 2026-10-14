@@ -420,6 +420,49 @@ def font_pack(a, inputs):
     return out
 
 
+def font_pack_sources(files):
+    """(source_path, device_relative) pairs for a staged font pack.
+
+    Pure helper so install() and tests share the layout: every file
+    under <files>/font-pack pushes to <device>/font-pack/<name>.
+    Returns [] when no pack was staged (dump missing or --skip-fonts).
+    """
+    staged = files / 'font-pack'
+    if not staged.is_dir():
+        return []
+    return [(p, 'font-pack/' + p.relative_to(staged).as_posix())
+            for p in sorted(staged.rglob('*')) if p.is_file()]
+
+
+def stage_fonts(a, inputs, files, device):
+    """Build the font pack into the staged device layout (APK path).
+
+    On by default; --skip-fonts out; skips cleanly when no stock dump
+    is present (the ISO carries glyph metrics but no atlas pixels, so
+    the pack cannot be built from the disc alone). When a pack is
+    built it is copied to <files>/font-pack and files/ps2x.env gains
+    GE1_TEX_REPLACE (+ PRELOAD) pointing at the device copy; without
+    a pack the env is left untouched so the game boots stock fonts.
+    Returns the staged dir, or None when skipped.
+    """
+    pack = font_pack(a, inputs)
+    target = files / 'font-pack'
+    if pack is None:
+        if target.is_dir():
+            shutil.rmtree(target)
+        return None
+    if target.is_dir():
+        shutil.rmtree(target)
+    shutil.copytree(pack, target)
+    env_file = files / 'ps2x.env'
+    lines = [line for line in env_file.read_text().splitlines()
+             if not line.startswith('GE1_TEX_REPLACE=')
+             and not line.startswith('GE1_TEX_PRELOAD=')]
+    lines += ['GE1_TEX_REPLACE=' + device + '/font-pack', 'GE1_TEX_PRELOAD=1']
+    env_file.write_text('\n'.join(lines) + '\n')
+    return target
+
+
 def play(a):
     inputs = json.loads((a.work / 'inputs.json').read_text())
     env = os.environ.copy()
@@ -504,6 +547,7 @@ def stage(a):
     (files / 'ge1-data').mkdir(exist_ok=True)
     (files / 'mc0').mkdir(exist_ok=True)
     device = '/storage/emulated/0/Android/data/' + a.app_id + '/files'
+    stage_fonts(a, inputs, files, device)
     apk = ROOT / 'android/app/build/outputs/apk/release/app-release.apk'
     print('Staged device layout in ' + str(files))
     if a.step != 'stage':
@@ -579,6 +623,7 @@ def install(a):
                               (files / 'full120.env', 'full120.env')]
     sources += [(p, 'ge1-resources/' + p.relative_to(files / 'ge1-resources').as_posix())
                 for p in sorted((files / 'ge1-resources').rglob('*')) if p.is_file()]
+    sources += font_pack_sources(files)
     for source_path, relative in sources:
         remote = device + '/' + relative
         expected = sha(source_path)

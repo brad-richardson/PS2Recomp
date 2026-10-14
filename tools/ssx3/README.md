@@ -54,6 +54,15 @@ untouched. Output lands in `<work>/font-pack` and is applied via
 `GE1_TEX_REPLACE` for that run. No game data, glyph images, outlines or
 atlases ship in the builder — only the recipe and measured constants.
 
+`stage` builds the same pack into the device layout (`stage/files/font-pack`)
+and appends `GE1_TEX_REPLACE` (+ `GE1_TEX_PRELOAD=1`) to
+`stage/files/ps2x.env`, so `install` pushes the font with the APK files;
+with `--skip-fonts` or no dump the env is left untouched and the game
+boots stock fonts. A Part-7 survey of the USA disc proved the ISO carries
+no dump-equal atlas pixels (SFN files hold metrics/kerning only; the word
+sprites match no packed texture), so all four atlases still need the
+user's own dump — there is no iOS bundle path in this builder.
+
 The default Mac target is the runner. The development suite is optional and
 requires analyzer/recompiler fixture targets; it is separate from the external
 runner/title acceptance:
