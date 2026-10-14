@@ -753,7 +753,7 @@ void pruneTailFiles(const std::string &dir)
     }
 }
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__linux__)
 // PT2 Part 2b: read a small sysfs value (kgsl). No locks, main thread only.
 bool readSysfs(const char *path, char *buf, size_t cap)
 {

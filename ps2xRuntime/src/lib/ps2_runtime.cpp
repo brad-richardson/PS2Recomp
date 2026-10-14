@@ -8496,11 +8496,19 @@ void PS2Runtime::run()
             }
             // On success the process dies inside toHz.
 #else
+#if defined(__APPLE__)
             if (!set2MacRestart(want120, upscale))
             {
                 std::fprintf(stderr, "[set2] restart: re-exec failed, staying open\n");
                 ps2x::ui::toast("Restart failed", 3.0f);
             }
+#else
+            // Desktop Linux has no settings-panel re-exec path.
+            (void)want120;
+            (void)upscale;
+            std::fprintf(stderr, "[set2] restart: unsupported on this host, staying open\n");
+            ps2x::ui::toast("Restart failed", 3.0f);
+#endif
 #endif
         };
         if (set2On)
