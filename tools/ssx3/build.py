@@ -396,6 +396,30 @@ def libs(a):
         shutil.copy2(metallib, resources)
 
 
+def font_pack(a, inputs):
+    """Build the raster-edge font pack (on by default; --skip-fonts out).
+
+    Stock atlas pixels come from the user's own texture dump
+    (work/stock-dump, or --stock-dump); glyph metrics come from the
+    user's own disc image. Returns the pack dir, or None when skipped
+    or no dump is present. Code only: remaster_font.py ships no game
+    data, images, geometry or atlases.
+    """
+    if a.skip_fonts:
+        return None
+    dump = Path(a.stock_dump) if a.stock_dump else a.work / 'stock-dump'
+    if not dump.is_dir():
+        print('no stock texture dump at ' + str(dump) + '; font pack '
+              'skipped (pass --stock-dump with your own dump, or '
+              '--skip-fonts to silence this)')
+        return None
+    out = a.work / 'font-pack'
+    subprocess.run([sys.executable, str(ROOT / 'tools/ssx3/remaster_font.py'),
+                    '--iso', inputs['iso'], '--stock-dump', str(dump),
+                    '--out', str(out)], check=True, cwd=a.work)
+    return out
+
+
 def play(a):
     inputs = json.loads((a.work / 'inputs.json').read_text())
     env = os.environ.copy()
@@ -406,6 +430,9 @@ def play(a):
         'PS2X_VU1_ENGINE': 'microvu', 'PS2X_MTVU': '1', 'PS2X_VU0_RECOMP': '0',
         'GE1_RENDERER': 'metal', 'GE1_GS_RESOURCES_DIR': str(a.work / 'resources'),
         'GE1_GS_DATA_DIR': str(a.work / 'gs-data')})
+    pack = font_pack(a, inputs)
+    if pack is not None:
+        env['GE1_TEX_REPLACE'] = str(pack)
     (a.work / 'gs-data').mkdir(exist_ok=True)
     subprocess.run([str(a.work / 'runner-build/ps2xRuntime/ps2EntryRunner'),
                     str(a.work / 'SLUS_207.72')], env=env, check=True, cwd=a.work)
@@ -580,6 +607,8 @@ def main():
     p.add_argument('--dry-run', action='store_true', help='check and list install disc payload without touching a device')
     p.add_argument('--jnilibs', type=Path, help='own source-built Android JNI libraries')
     p.add_argument('--no-turnip', action='store_true', help='omit the optional Turnip driver')
+    p.add_argument('--stock-dump', type=Path, help='own texture dump holding the four stock font atlases (play builds the font pack from it)')
+    p.add_argument('--skip-fonts', action='store_true', help='skip the default raster-edge font pack build in play')
     p.add_argument('--ndk', type=Path, help='local Android NDK 28.2.13676358')
     p.add_argument('--suite', action='store_true', help='also build optional Mac development suite and its analyzer/recompiler fixtures')
     p.add_argument('--jobs', type=int, default=8)

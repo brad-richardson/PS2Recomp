@@ -39,6 +39,21 @@ python3 tools/ssx3/build.py mac --work /path/to/private-build
 python3 tools/ssx3/build.py run --work /path/to/private-build
 ```
 
+## Font pack (on by default)
+
+`run` rebuilds the four font atlases with the raster-edge recipe before
+launching, unless `--skip-fonts` is passed. It needs one input the build
+cannot make from the disc alone: a texture dump holding the four stock
+font atlases, dumped from your own copy (place it at
+`<work>/stock-dump`, or pass `--stock-dump <dir>`). Glyph metrics come
+from the SFN tables in your own ISO. The builder
+(`tools/ssx3/remaster_font.py`, numpy + Pillow) upscales the stock atlas
+RGBA to 4x, replaces only the ink-cell alpha (edge-directed 8x upsample,
+smoothstep, box downsample, clipped to the stock mask), and leaves RGB
+untouched. Output lands in `<work>/font-pack` and is applied via
+`GE1_TEX_REPLACE` for that run. No game data, glyph images, outlines or
+atlases ship in the builder — only the recipe and measured constants.
+
 The default Mac target is the runner. The development suite is optional and
 requires analyzer/recompiler fixture targets; it is separate from the external
 runner/title acceptance:
