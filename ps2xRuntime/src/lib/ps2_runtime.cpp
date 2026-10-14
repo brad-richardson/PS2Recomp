@@ -4785,7 +4785,10 @@ bool PS2Runtime::initialize(const char *title)
             SetTargetFPS(ps2_vsync_lock::enabled() ? loopHz * 105 / 100 : loopHz);
         }
 #else
-        SetTargetFPS(60);
+        // NP0A: exercise 60/120 host present cadence on the Mac without
+        // changing the ordinary desktop loop. Guest VBlank remains paced by
+        // the scheduler; this only changes the raylib present loop.
+        SetTargetFPS(ps2_savestate::canonicalEnabled() ? ps2x_present_vk::displayHz() : 60);
 #endif
         if (m_debugUiInitCallback)
         {
