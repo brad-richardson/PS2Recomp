@@ -125,6 +125,39 @@ namespace ps2_net
         uint32_t g_loginSentConn = 0u;
         bool g_gameAuthSeen = false;
         uint64_t g_submitTick = 0u;
+        // ONL10: navigator milestones. First-observed guest tick per
+        // event (0 = unseen); set only when the NAV knob wants them
+        // (qpNavNote gate below), so the knob-off path keeps one
+        // cached branch per handler site and zero guest-visible change.
+        std::atomic<uint64_t> g_qpNetwCrea{0u};
+        std::atomic<uint64_t> g_qpNetwList{0u};
+        std::atomic<uint64_t> g_qpNetwStar{0u};
+        std::atomic<uint64_t> g_qpSessConnOk{0u};
+        std::atomic<uint32_t> g_qpSessConnPort{0u};
+        std::atomic<uint64_t> g_qpSessConnFail{0u};
+        std::atomic<uint64_t> g_qpGameAuth{0u};
+        std::atomic<uint64_t> g_qpPers{0u};
+        std::atomic<uint64_t> g_qpOnln{0u};
+        std::atomic<uint64_t> g_qpNews{0u};
+        std::atomic<uint64_t> g_qpPset{0u};
+        std::atomic<uint64_t> g_qpRget{0u};
+        std::atomic<uint64_t> g_qpQuik{0u};
+        std::atomic<uint64_t> g_qpQuikCount{0u};
+        bool qpNavNote()
+        {
+            static const bool want = [] {
+                const char *nav = std::getenv("PS2X_NET_QUICKPLAY_NAV");
+                const char *qp = std::getenv("PS2X_NET_QUICKPLAY");
+                return nav && std::string(nav) == "1" && qp &&
+                       std::string(qp) == "1";
+            }();
+            return want;
+        }
+        void qpSetFirst(std::atomic<uint64_t> &slot, uint64_t tick)
+        {
+            uint64_t z = 0u;
+            slot.compare_exchange_strong(z, tick, std::memory_order_relaxed);
+        }
         // ONL4-P2 PS2X_NET_LOGIN creds (parsed once): auto generates
         // rider-<4hex> from the hostname; name:pass uses both.
         bool g_loginParsed = false;
@@ -547,6 +580,41 @@ namespace ps2_net
 #else
         return false;
 #endif
+    }
+
+    // ONL10: navigator milestone snapshot + knob reads (see the header).
+    bool qpNavQuickplayOn()
+    {
+        return quickplayOn();
+    }
+
+    bool qpNavWanted()
+    {
+        static const bool want = [] {
+            const char *nav = std::getenv("PS2X_NET_QUICKPLAY_NAV");
+            return nav && std::string(nav) == "1";
+        }();
+        return want && quickplayOn();
+    }
+
+    QpNavMilestones qpNavMilestones()
+    {
+        QpNavMilestones m;
+        m.netwCrea = g_qpNetwCrea.load(std::memory_order_relaxed);
+        m.netwList = g_qpNetwList.load(std::memory_order_relaxed);
+        m.netwStar = g_qpNetwStar.load(std::memory_order_relaxed);
+        m.sessConnOk = g_qpSessConnOk.load(std::memory_order_relaxed);
+        m.sessConnPort = g_qpSessConnPort.load(std::memory_order_relaxed);
+        m.sessConnFail = g_qpSessConnFail.load(std::memory_order_relaxed);
+        m.gameAuth = g_qpGameAuth.load(std::memory_order_relaxed);
+        m.pers = g_qpPers.load(std::memory_order_relaxed);
+        m.onln = g_qpOnln.load(std::memory_order_relaxed);
+        m.news = g_qpNews.load(std::memory_order_relaxed);
+        m.pset = g_qpPset.load(std::memory_order_relaxed);
+        m.rget = g_qpRget.load(std::memory_order_relaxed);
+        m.quik = g_qpQuik.load(std::memory_order_relaxed);
+        m.quikCount = g_qpQuikCount.load(std::memory_order_relaxed);
+        return m;
     }
 
     uint32_t lobbyAddress()
@@ -1370,6 +1438,10 @@ namespace ps2_net
                         const uint32_t n = writeFakeConfig(rdram, w2 & 0x1FFFFFFFu, w3);
                         status = n;
                         outlen = n * 256u;
+                        if (qpNavNote())
+                        {
+                            qpSetFirst(g_qpNetwList, tick);
+                        }
                     }
                 }
 #if PS2_NET_HAVE_POSIX_SOCKETS
@@ -1571,6 +1643,10 @@ namespace ps2_net
                     // netw/crea: a2 = IOP addr of the domain ("www.ea.com").
                     std::cerr << " domain='" << dmaString(w0) << "'";
                     status = 0u;
+                    if (qpNavNote())
+                    {
+                        qpSetFirst(g_qpNetwCrea, tick);
+                    }
                 }
                 else if (method == 2u)
                 {
@@ -1578,6 +1654,10 @@ namespace ps2_net
                     std::cerr << " path='" << dmaString(w0) << "'";
                     g_linkUp = true;
                     status = 0u;
+                    if (qpNavNote())
+                    {
+                        qpSetFirst(g_qpNetwStar, tick);
+                    }
                 }
                 else if (method == 4u)
                 {
@@ -1747,6 +1827,11 @@ namespace ps2_net
                         setSocket(w4, fd);
                         g_loginConn = w4;
                         std::cerr << " connected";
+                        if (qpNavNote())
+                        {
+                            qpSetFirst(g_qpSessConnOk, tick);
+                            g_qpSessConnPort.store(port, std::memory_order_relaxed);
+                        }
                         status = 0u;
                         // ONL5: the real IRX connects asynchronously
                         // (RpcProtoAriesUpdate, DRTYSCKF .text 0x5738):
@@ -1774,6 +1859,10 @@ namespace ps2_net
                         }
                         std::cerr << " CONNECT-FAILED";
                         status = 1u;
+                        if (qpNavNote())
+                        {
+                            qpSetFirst(g_qpSessConnFail, tick);
+                        }
                     }
 #else
                     std::cerr << " NO-SOCKETS";
@@ -1809,6 +1898,47 @@ namespace ps2_net
                             g_gameAuthSeen = true;
                             std::cerr << " [net] login: GAME AUTH seen n=" << len
                                       << " tick=" << tick << std::endl;
+                            if (qpNavNote())
+                            {
+                                qpSetFirst(g_qpGameAuth, tick);
+                            }
+                        }
+                        // ONL10: navigator lobby milestones. sess/send
+                        // carries every client->lobby message with a
+                        // 4-char type in bytes[0..3]; record first-seen
+                        // ticks for the persona/online-main/filter gates
+                        // (pers sent only after the persona-screen Cross,
+                        // quik only on the filter confirm).
+                        if (qpNavNote() && len >= 4u)
+                        {
+                            const uint32_t t4 = (static_cast<uint32_t>(bytes[0]) << 24) |
+                                                (static_cast<uint32_t>(bytes[1]) << 16) |
+                                                (static_cast<uint32_t>(bytes[2]) << 8) |
+                                                static_cast<uint32_t>(bytes[3]);
+                            switch (t4)
+                            {
+                            case 0x70657273u: // pers
+                                qpSetFirst(g_qpPers, tick);
+                                break;
+                            case 0x6F6E6C6Eu: // onln
+                                qpSetFirst(g_qpOnln, tick);
+                                break;
+                            case 0x6E657773u: // news
+                                qpSetFirst(g_qpNews, tick);
+                                break;
+                            case 0x50534554u: // PSET
+                                qpSetFirst(g_qpPset, tick);
+                                break;
+                            case 0x52474554u: // RGET
+                                qpSetFirst(g_qpRget, tick);
+                                break;
+                            case 0x7175696Bu: // quik
+                                qpSetFirst(g_qpQuik, tick);
+                                g_qpQuikCount.fetch_add(1u, std::memory_order_relaxed);
+                                break;
+                            default:
+                                break;
+                            }
                         }
 #if PS2_NET_HAVE_POSIX_SOCKETS
                         const int fd = getSocket(w4);

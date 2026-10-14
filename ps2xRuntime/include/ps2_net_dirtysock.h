@@ -54,4 +54,32 @@ namespace ps2_net
     // Raw payload bytes previously pushed to an IOP address (empty when
     // unknown). Used for capture call sites.
     std::vector<uint8_t> dmaBytes(uint32_t dst);
+
+    // ONL10: Quick Play navigator milestones (PS2X_NET_QUICKPLAY_NAV=1,
+    // class net, owner ONL10). First-observed guest vsync tick per event,
+    // 0 = not yet seen. Relaxed host-side atomics; recording them never
+    // touches guest state. Read by the pad-layer navigator (Pad.cpp),
+    // written at the HLE handler sites below.
+    struct QpNavMilestones
+    {
+        uint64_t netwCrea = 0u;   // Online entered (RpcNetworkCreate)
+        uint64_t netwList = 0u;   // config list served (screen #8 open)
+        uint64_t netwStar = 0u;   // saved config accepted (screen #8 OK)
+        uint64_t sessConnOk = 0u; // lobby TCP connected (login submitted)
+        uint32_t sessConnPort = 0u;
+        uint64_t sessConnFail = 0u; // CONNECT-FAILED (no lobby -> abort nav)
+        uint64_t gameAuth = 0u;     // game's own auth carried the login
+        uint64_t pers = 0u;         // persona picked (screen #12 Cross)
+        uint64_t onln = 0u;         // Online-main population started
+        uint64_t news = 0u;
+        uint64_t pset = 0u; // buddy PSET (Online-main populated)
+        uint64_t rget = 0u;
+        uint64_t quik = 0u; // filter confirm (must stay 0: user confirms)
+        uint64_t quikCount = 0u;
+    };
+    QpNavMilestones qpNavMilestones();
+
+    // ONL10: cached knob reads. navWanted() = NAV=1 && QUICKPLAY=1.
+    bool qpNavQuickplayOn();
+    bool qpNavWanted();
 } // namespace ps2_net

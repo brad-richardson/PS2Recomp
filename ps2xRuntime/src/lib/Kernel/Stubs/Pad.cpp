@@ -11,6 +11,7 @@
 #include "runtime/ps2_savestate.h"
 #include "Pad.h"
 #include "ps2_log.h"
+#include "ps2_net_dirtysock.h" // ONL10: navigator milestone snapshot
 #include "ps2_rpl3_nv.h" // RPL3: recorded host values (padrec v3)
 #include "ps2_turbo_boot.h" // BTS1: boot turbo input yield
 
@@ -779,6 +780,598 @@ namespace ps2_stubs
                                  static_cast<unsigned long long>(now), entry.guestTicks ? "tick" : "ms");
                 }
             }
+        }
+
+        // ONL10: runtime Quick Play navigator (PS2X_NET_QUICKPLAY_NAV=1,
+        // class net, owner ONL10). One tap from the main menu to the Quick
+        // Matchup confirm (screen #14): a state machine that injects pad
+        // presses through this same pad-merge point (never by writing
+        // guest RAM). Every press fires only when its observed-guest-state
+        // gate holds at fire time: net-HLE milestones (ps2_net qpNav
+        // snapshot) plus EE RAM menu ids read from runtime RDRAM. Gaps
+        // between presses are floors (debounce), never absolute-tick
+        // scheduling: a late milestone delays the press, it never fires
+        // blind. Every step has a timeout -> "QP-NAV abort <step>" and the
+        // user keeps a normal game. Any real user pad input (pre-merge
+        // port-0 buttons != idle) cancels immediately. Stops at #14 with
+        // OK highlighted; never presses confirm (quik must stay 0).
+        // Cluster guardrails (kQpNavPhases) pin each step range to its
+        // D1-calibrated menu-word pair (REPORT §2 table); milestone gates
+        // (QG_*) pin the cluster transitions. Step gaps are debounce
+        // floors from the R1 route's relative spacing.
+        enum QpNavGate : uint8_t
+        {
+            QG_TICK,       // chained: fire at lastFire + gap (debounce only)
+            QG_NETW_CREA,  // Online entered
+            QG_NETW_LIST,  // config list served (screen #8 open)
+            QG_NETW_STAR,  // saved config accepted
+            QG_SESS_CONN,  // lobby TCP connected (login submitted)
+            QG_GAME_AUTH,  // game's own auth carried the login
+            QG_PERS,       // persona picked (screen #12 Cross landed)
+            QG_PSET,       // buddy traffic (Online-main populated)
+            QG_MENU,       // EE menu word == expect
+            QG_FILTER_STOP // EE filter word == expect && quik == 0
+        };
+
+        struct QpNavStep
+        {
+            const char *name;
+            uint16_t press; // 0 = wait step (gate only, no injection)
+            uint64_t atMs;  // route ms (gap source only, vs R1 o11 route)
+            uint64_t holdMs;
+            QpNavGate gate;
+            uint32_t menuAddr;   // for QG_MENU / QG_FILTER_STOP (0 = uncal)
+            uint32_t menuExpect; // EE u32 value identifying the screen
+            uint64_t timeout;    // guest ticks after step start -> abort
+        };
+
+        // Route: full o11 dance (R1 receipt) from title to QM entry.
+        // atMs values are byte-identical to the proven R1 pad script;
+        // the navigator turns consecutive differences into relative
+        // floors and anchors every cluster on an observed gate.
+        const QpNavStep kQpNavRoute[] = {
+            {"title-start", kPadBtnStart, 10610, 250, QG_TICK, 0, 0, 900},
+            {"char-1", kPadBtnCross, 12779, 250, QG_TICK, 0, 0, 900},
+            {"char-2", kPadBtnCross, 14748, 250, QG_TICK, 0, 0, 900},
+            {"char-3", kPadBtnCross, 16566, 250, QG_TICK, 0, 0, 900},
+            {"char-4", kPadBtnCross, 18335, 250, QG_TICK, 0, 0, 900},
+            {"char-5", kPadBtnCross, 19769, 250, QG_TICK, 0, 0, 900},
+            {"back-1", kPadBtnTriangle, 22522, 200, QG_TICK, 0, 0, 1200},
+            {"back-2", kPadBtnTriangle, 23523, 200, QG_TICK, 0, 0, 900},
+            {"back-3", kPadBtnTriangle, 24524, 200, QG_TICK, 0, 0, 900},
+            {"back-4", kPadBtnTriangle, 25525, 200, QG_TICK, 0, 0, 900},
+            {"back-5", kPadBtnTriangle, 26526, 200, QG_TICK, 0, 0, 900},
+            {"dive-1", kPadBtnCross, 28361, 250, QG_TICK, 0, 0, 1200},
+            {"dive-2", kPadBtnCross, 30330, 250, QG_TICK, 0, 0, 900},
+            {"dive-3", kPadBtnCross, 32148, 250, QG_TICK, 0, 0, 900},
+            {"dive-4", kPadBtnCross, 33917, 250, QG_TICK, 0, 0, 900},
+            {"dive-5", kPadBtnCross, 35352, 250, QG_TICK, 0, 0, 900},
+            {"out-1", kPadBtnTriangle, 37537, 200, QG_TICK, 0, 0, 1200},
+            {"out-2", kPadBtnTriangle, 38538, 200, QG_TICK, 0, 0, 900},
+            {"out-3", kPadBtnTriangle, 39539, 200, QG_TICK, 0, 0, 900},
+            {"out-4", kPadBtnTriangle, 40540, 200, QG_TICK, 0, 0, 900},
+            {"out-5", kPadBtnTriangle, 41541, 200, QG_TICK, 0, 0, 900},
+            {"menu-down-1", kPadBtnDown, 43376, 150, QG_TICK, 0, 0, 1200},
+            {"menu-down-2", kPadBtnDown, 44377, 150, QG_TICK, 0, 0, 900},
+            {"menu-down-3", kPadBtnDown, 45378, 150, QG_TICK, 0, 0, 900},
+            {"menu-down-4", kPadBtnDown, 46379, 150, QG_TICK, 0, 0, 900},
+            {"online-entry", kPadBtnCross, 48381, 250, QG_TICK, 0, 0, 900},
+            {"wait-crea", 0, 48381, 0, QG_NETW_CREA, 0, 0, 900},
+            {"cfg-1", kPadBtnCross, 52000, 250, QG_NETW_LIST, 0, 0, 1500},
+            {"cfg-2", kPadBtnCross, 53000, 250, QG_TICK, 0, 0, 900},
+            {"cfg-3", kPadBtnCross, 54000, 250, QG_TICK, 0, 0, 900},
+            {"cfg-ok", kPadBtnCross, 65500, 250, QG_NETW_STAR, 0, 0, 1800},
+            {"wait-star", 0, 65500, 0, QG_NETW_STAR, 0, 0, 900},
+            {"login-down-1", kPadBtnDown, 68000, 150, QG_TICK, 0, 0, 1800},
+            {"login-down-2", kPadBtnDown, 68500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-1", kPadBtnRight, 69000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-2", kPadBtnRight, 69500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-3", kPadBtnRight, 70000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-4", kPadBtnRight, 70500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-5", kPadBtnRight, 71000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-6", kPadBtnRight, 71500, 150, QG_TICK, 0, 0, 900},
+            {"login-char-1", kPadBtnCross, 72000, 150, QG_TICK, 0, 0, 900},
+            {"login-left-1", kPadBtnLeft, 72500, 150, QG_TICK, 0, 0, 900},
+            {"login-left-2", kPadBtnLeft, 73000, 150, QG_TICK, 0, 0, 900},
+            {"login-left-3", kPadBtnLeft, 73500, 150, QG_TICK, 0, 0, 900},
+            {"login-left-4", kPadBtnLeft, 74000, 150, QG_TICK, 0, 0, 900},
+            {"login-char-2", kPadBtnCross, 74500, 150, QG_TICK, 0, 0, 900},
+            {"login-up-1", kPadBtnUp, 75000, 150, QG_TICK, 0, 0, 900},
+            {"login-up-2", kPadBtnUp, 75500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-7", kPadBtnRight, 76000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-8", kPadBtnRight, 76500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-9", kPadBtnRight, 77000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-10", kPadBtnRight, 77500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-11", kPadBtnRight, 78000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-12", kPadBtnRight, 78500, 150, QG_TICK, 0, 0, 900},
+            {"login-char-3", kPadBtnCross, 79000, 150, QG_TICK, 0, 0, 900},
+            {"login-up-3", kPadBtnUp, 79500, 150, QG_TICK, 0, 0, 900},
+            {"login-left-5", kPadBtnLeft, 80000, 150, QG_TICK, 0, 0, 900},
+            {"login-left-6", kPadBtnLeft, 80500, 150, QG_TICK, 0, 0, 900},
+            {"login-left-7", kPadBtnLeft, 81000, 150, QG_TICK, 0, 0, 900},
+            {"login-left-8", kPadBtnLeft, 81500, 150, QG_TICK, 0, 0, 900},
+            {"login-left-9", kPadBtnLeft, 82000, 150, QG_TICK, 0, 0, 900},
+            {"login-left-10", kPadBtnLeft, 82500, 150, QG_TICK, 0, 0, 900},
+            {"login-left-11", kPadBtnLeft, 83000, 150, QG_TICK, 0, 0, 900},
+            {"login-left-12", kPadBtnLeft, 83500, 150, QG_TICK, 0, 0, 900},
+            {"login-char-4", kPadBtnCross, 84000, 150, QG_TICK, 0, 0, 900},
+            {"login-down-3", kPadBtnDown, 84500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-13", kPadBtnRight, 85000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-14", kPadBtnRight, 85500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-15", kPadBtnRight, 86000, 150, QG_TICK, 0, 0, 900},
+            {"login-char-5", kPadBtnCross, 86500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-16", kPadBtnRight, 87000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-17", kPadBtnRight, 87500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-18", kPadBtnRight, 88000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-19", kPadBtnRight, 88500, 150, QG_TICK, 0, 0, 900},
+            {"login-char-6", kPadBtnCross, 89000, 150, QG_TICK, 0, 0, 900},
+            {"login-down-4", kPadBtnDown, 89500, 150, QG_TICK, 0, 0, 900},
+            {"login-left-13", kPadBtnLeft, 90000, 150, QG_TICK, 0, 0, 900},
+            {"login-left-14", kPadBtnLeft, 90500, 150, QG_TICK, 0, 0, 900},
+            {"login-left-15", kPadBtnLeft, 91000, 150, QG_TICK, 0, 0, 900},
+            {"login-left-16", kPadBtnLeft, 91500, 150, QG_TICK, 0, 0, 900},
+            {"login-left-17", kPadBtnLeft, 92000, 150, QG_TICK, 0, 0, 900},
+            {"login-char-7", kPadBtnCross, 92500, 150, QG_TICK, 0, 0, 900},
+            {"login-up-4", kPadBtnUp, 93000, 150, QG_TICK, 0, 0, 900},
+            {"login-char-8", kPadBtnCross, 93500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-20", kPadBtnRight, 94000, 150, QG_TICK, 0, 0, 900},
+            {"login-char-9", kPadBtnCross, 94500, 150, QG_TICK, 0, 0, 900},
+            {"login-up-5", kPadBtnUp, 95000, 150, QG_TICK, 0, 0, 900},
+            {"login-left-18", kPadBtnLeft, 95500, 150, QG_TICK, 0, 0, 900},
+            {"login-left-19", kPadBtnLeft, 96000, 150, QG_TICK, 0, 0, 900},
+            {"login-left-20", kPadBtnLeft, 96500, 150, QG_TICK, 0, 0, 900},
+            {"login-char-10", kPadBtnCross, 97000, 150, QG_TICK, 0, 0, 900},
+            {"login-down-5", kPadBtnDown, 97500, 150, QG_TICK, 0, 0, 900},
+            {"login-down-6", kPadBtnDown, 98000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-21", kPadBtnRight, 98500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-22", kPadBtnRight, 99000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-23", kPadBtnRight, 99500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-24", kPadBtnRight, 100000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-25", kPadBtnRight, 100500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-26", kPadBtnRight, 101000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-27", kPadBtnRight, 101500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-28", kPadBtnRight, 102000, 150, QG_TICK, 0, 0, 900},
+            {"login-right-29", kPadBtnRight, 102500, 150, QG_TICK, 0, 0, 900},
+            {"login-right-30", kPadBtnRight, 103000, 150, QG_TICK, 0, 0, 900},
+            {"login-char-11", kPadBtnCross, 103500, 150, QG_TICK, 0, 0, 900},
+            {"login-next-down", kPadBtnDown, 106000, 150, QG_TICK, 0, 0, 1200},
+            {"login-next-ok", kPadBtnCross, 106500, 250, QG_TICK, 0, 0, 900},
+            {"pw-down", kPadBtnDown, 108000, 150, QG_TICK, 0, 0, 1200},
+            {"pw-char-1", kPadBtnCross, 108500, 150, QG_TICK, 0, 0, 900},
+            {"pw-char-2", kPadBtnCross, 109000, 150, QG_TICK, 0, 0, 900},
+            {"pw-char-3", kPadBtnCross, 109500, 150, QG_TICK, 0, 0, 900},
+            {"pw-char-4", kPadBtnCross, 110000, 150, QG_TICK, 0, 0, 900},
+            {"pw-right-1", kPadBtnRight, 110500, 150, QG_TICK, 0, 0, 900},
+            {"pw-right-2", kPadBtnRight, 111000, 150, QG_TICK, 0, 0, 900},
+            {"pw-right-3", kPadBtnRight, 111500, 150, QG_TICK, 0, 0, 900},
+            {"pw-right-4", kPadBtnRight, 112000, 150, QG_TICK, 0, 0, 900},
+            {"pw-right-5", kPadBtnRight, 112500, 150, QG_TICK, 0, 0, 900},
+            {"pw-right-6", kPadBtnRight, 113000, 150, QG_TICK, 0, 0, 900},
+            {"pw-right-7", kPadBtnRight, 113500, 150, QG_TICK, 0, 0, 900},
+            {"pw-right-8", kPadBtnRight, 114000, 150, QG_TICK, 0, 0, 900},
+            {"pw-right-9", kPadBtnRight, 114500, 150, QG_TICK, 0, 0, 900},
+            {"pw-right-10", kPadBtnRight, 115000, 150, QG_TICK, 0, 0, 900},
+            {"pw-char-5", kPadBtnCross, 115500, 150, QG_TICK, 0, 0, 900},
+            {"submit-down-1", kPadBtnDown, 117000, 150, QG_TICK, 0, 0, 1200},
+            {"submit-down-2", kPadBtnDown, 117500, 150, QG_TICK, 0, 0, 900},
+            {"submit-down-3", kPadBtnDown, 118000, 150, QG_TICK, 0, 0, 900},
+            {"submit-ok", kPadBtnCross, 118500, 250, QG_TICK, 0, 0, 900},
+            {"wait-conn", 0, 118500, 0, QG_SESS_CONN, 0, 0, 1500},
+            {"wait-auth", 0, 118500, 0, QG_GAME_AUTH, 0, 0, 900},
+            {"save-no-down", kPadBtnDown, 120000, 150, QG_TICK, 0, 0, 1200},
+            {"save-no-cross", kPadBtnCross, 120500, 250, QG_TICK, 0, 0, 900},
+            {"persona-pick", kPadBtnCross, 126800, 250, QG_TICK, 0, 0, 1800},
+            {"wait-pers", 0, 126800, 0, QG_PERS, 0, 0, 1200},
+            {"qm-entry", kPadBtnCross, 130200, 250, QG_TICK, 0, 0, 1800},
+            {"filter-stop", 0, 130200, 0, QG_FILTER_STOP, 0, 0, 1800},
+        };
+        constexpr size_t kQpNavSteps = sizeof(kQpNavRoute) / sizeof(kQpNavRoute[0]);
+
+        // D1-calibrated menu words (EE RAM u32, evidence: REPORT §2 table
+        // + screenshots; `ee-at` says data region, not recompiled code).
+        // Main word 0x053da6c: 1 title, 2 frontend menu, 3 modal dialog,
+        // 4 net screens, 7 Quick Matchup filter. Sub word 0x053dc18
+        // separates screens that share the main word (char 0xf vs main
+        // 0x9; config 0xc; login 0x16 vs save 0x4; persona 0x2 vs online
+        // main 0x4; filter 0x16). Every pair below is distinct across the
+        // 10 visited screens.
+        constexpr uint32_t kQpNavMenuMain = 0x053da6cu;
+        constexpr uint32_t kQpNavMenuSub = 0x053dc18u;
+
+        struct QpNavPhase
+        {
+            const char *from; // first step name (inclusive)
+            const char *to;   // last step name (inclusive)
+            uint32_t expectMain;
+            uint32_t expectSub; // 0 = main word only
+            bool needPset;      // additionally require buddy PSET seen
+        };
+        static const QpNavPhase kQpNavPhases[] = {
+            {"title-start", "title-start", 1u, 7u, false},
+            {"char-1", "char-1", 2u, 9u, false},
+            // S1c: cfg-1/2 act on the config screen (4/0xc @3132/3192);
+            // the link modal (3/4, up by 4092 without cfg-3 ever firing)
+            // hosts cfg-3/cfg-ok. cfg-ok still skips when login is up.
+            {"cfg-1", "cfg-2", 4u, 0u, false},
+            {"cfg-3", "cfg-ok", 3u, 0u, false},
+            {"login-down-1", "submit-ok", 3u, 0u, false},
+            {"save-no-down", "save-no-cross", 3u, 4u, false},
+            {"persona-pick", "persona-pick", 4u, 2u, false},
+            {"qm-entry", "qm-entry", 4u, 4u, true},
+            {"filter-stop", "filter-stop", 7u, 0x16u, false},
+        };
+        constexpr size_t kQpNavPhaseCount =
+            sizeof(kQpNavPhases) / sizeof(kQpNavPhases[0]);
+
+        uint64_t qpNavMsToTicks(uint64_t ms)
+        {
+            return (ms * 5994ull + 50000ull) / 100000ull;
+        }
+
+        uint32_t qpNavReadMenu(uint8_t *rdram, uint32_t addr)
+        {
+            if (!rdram || addr == 0u || (addr & PS2_RAM_MASK) + 4u > PS2_RAM_SIZE)
+            {
+                return 0u;
+            }
+            uint32_t v = 0u;
+            std::memcpy(&v, rdram + (addr & PS2_RAM_MASK), 4u);
+            return v;
+        }
+
+        bool qpNavMenuIs(uint8_t *rdram, uint32_t addr, uint32_t expect)
+        {
+            if (addr == 0u)
+            {
+                return true;
+            }
+            return qpNavReadMenu(rdram, addr) == expect;
+        }
+
+        struct QpNav
+        {
+            std::mutex mutex;
+            bool initDone = false;
+            bool armed = false;
+            size_t idx = 0u;
+            uint64_t stepStart = 0u;
+            uint64_t lastFire = 0u;
+            uint64_t holdUntil = 0u;
+            uint16_t holdMask = 0u;
+            bool done = false;
+            bool aborted = false;
+            bool cancelled = false;
+            bool armLogged = false;
+            // Per-step relative floors (guest ticks) + holds, from atMs.
+            uint64_t gaps[kQpNavSteps]{};
+            uint64_t holds[kQpNavSteps]{};
+            uint64_t uncalibrated = 0u;
+            // Phase guardrail per step (index into kQpNavPhases, or
+            // kQpNavPhaseCount for milestone-only wait steps).
+            size_t stepPhase[kQpNavSteps]{};
+            // Dance-mid relative chain (char-2..online-entry): the dance
+            // is net-silent deterministic UI (D1: first guest net call
+            // is netw/crea @2900), so these steps chain relatively with
+            // guardrails instead of per-screen ids (peak/mode/event ids
+            // unprobed). waitCrea/loginDown1 are jump targets.
+            size_t danceFrom = kQpNavSteps;
+            size_t danceTo = kQpNavSteps;
+            size_t waitCreaIdx = kQpNavSteps;
+            size_t loginDown1Idx = kQpNavSteps;
+        };
+
+        size_t qpNavFindStep(const char *name)
+        {
+            for (size_t i = 0u; i < kQpNavSteps; ++i)
+            {
+                if (std::strcmp(kQpNavRoute[i].name, name) == 0)
+                {
+                    return i;
+                }
+            }
+            return kQpNavSteps;
+        }
+        QpNav g_qpNav;
+        std::atomic<bool> g_qpNavInitDone{false};
+        std::atomic<bool> g_qpNavArmed{false};
+
+        void qpNavInitLocked()
+        {
+            if (g_qpNav.initDone)
+            {
+                return;
+            }
+            g_qpNav.initDone = true;
+            g_qpNav.armed = ps2_net::qpNavWanted();
+            if (!g_qpNav.armed)
+            {
+                return;
+            }
+            uint64_t prevMs = 0u;
+            for (size_t i = 0u; i < kQpNavSteps; ++i)
+            {
+                const QpNavStep &s = kQpNavRoute[i];
+                g_qpNav.gaps[i] = (i == 0u) ? qpNavMsToTicks(s.atMs)
+                                            : qpNavMsToTicks(s.atMs - prevMs);
+                g_qpNav.holds[i] = qpNavMsToTicks(s.holdMs);
+                if (g_qpNav.holds[i] < 6u && s.press != 0u)
+                {
+                    g_qpNav.holds[i] = 6u;
+                }
+                if ((s.gate == QG_MENU || s.gate == QG_FILTER_STOP) && s.menuAddr == 0u)
+                {
+                    g_qpNav.uncalibrated++;
+                }
+                g_qpNav.stepPhase[i] = kQpNavPhaseCount;
+                prevMs = s.atMs;
+            }
+            // Resolve phase guardrails by step name (robust to table
+            // reordering; a missing name disarms loudly, never blind).
+            for (size_t p = 0u; p < kQpNavPhaseCount; ++p)
+            {
+                size_t from = kQpNavSteps, to = kQpNavSteps;
+                for (size_t i = 0u; i < kQpNavSteps; ++i)
+                {
+                    if (std::strcmp(kQpNavRoute[i].name, kQpNavPhases[p].from) == 0)
+                    {
+                        from = i;
+                    }
+                    if (std::strcmp(kQpNavRoute[i].name, kQpNavPhases[p].to) == 0)
+                    {
+                        to = i;
+                    }
+                }
+                if (from > to || to >= kQpNavSteps)
+                {
+                    std::fprintf(stderr, "[qpnav] phase %llu unresolved (%s..%s): disarmed\n",
+                                 static_cast<unsigned long long>(p), kQpNavPhases[p].from,
+                                 kQpNavPhases[p].to);
+                    g_qpNav.armed = false;
+                    return;
+                }
+                for (size_t i = from; i <= to; ++i)
+                {
+                    g_qpNav.stepPhase[i] = p;
+                }
+            }
+            g_qpNav.danceFrom = qpNavFindStep("char-2");
+            g_qpNav.danceTo = qpNavFindStep("online-entry");
+            g_qpNav.waitCreaIdx = qpNavFindStep("wait-crea");
+            g_qpNav.loginDown1Idx = qpNavFindStep("login-down-1");
+            if (g_qpNav.danceFrom >= g_qpNav.danceTo || g_qpNav.danceTo >= kQpNavSteps ||
+                g_qpNav.waitCreaIdx >= kQpNavSteps || g_qpNav.loginDown1Idx >= kQpNavSteps)
+            {
+                std::fprintf(stderr, "[qpnav] dance/jump targets unresolved: disarmed\n");
+                g_qpNav.armed = false;
+                return;
+            }
+        }
+
+        void qpNavEnsureInit()
+        {
+            if (g_qpNavInitDone.load(std::memory_order_relaxed))
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(g_qpNav.mutex);
+            qpNavInitLocked();
+            g_qpNavInitDone.store(true, std::memory_order_relaxed);
+            if (g_qpNav.armed)
+            {
+                g_qpNavArmed.store(true, std::memory_order_relaxed);
+            }
+        }
+
+        bool qpNavGateHolds(const QpNavStep &s, const ps2_net::QpNavMilestones &m, uint8_t *rdram)
+        {
+            switch (s.gate)
+            {
+            case QG_TICK:
+                return true;
+            case QG_NETW_CREA:
+                return m.netwCrea != 0u;
+            case QG_NETW_LIST:
+                return m.netwList != 0u;
+            case QG_NETW_STAR:
+                return m.netwStar != 0u;
+            case QG_SESS_CONN:
+                return m.sessConnOk != 0u;
+            case QG_GAME_AUTH:
+                return m.gameAuth != 0u;
+            case QG_PERS:
+                return m.pers != 0u;
+            case QG_PSET:
+                return m.pset != 0u;
+            case QG_MENU:
+                return qpNavMenuIs(rdram, s.menuAddr, s.menuExpect);
+            case QG_FILTER_STOP:
+                return qpNavMenuIs(rdram, s.menuAddr, s.menuExpect) && m.quik == 0u;
+            default:
+                return false;
+            }
+        }
+
+        bool qpNavPhaseHolds(size_t phaseIdx, const ps2_net::QpNavMilestones &m, uint8_t *rdram)
+        {
+            if (phaseIdx >= kQpNavPhaseCount)
+            {
+                return true; // milestone-only wait step
+            }
+            if (!rdram)
+            {
+                return true; // tests have no RDRAM; real boots always do
+            }
+            const QpNavPhase &ph = kQpNavPhases[phaseIdx];
+            if (qpNavReadMenu(rdram, kQpNavMenuMain) != ph.expectMain)
+            {
+                return false;
+            }
+            if (ph.expectSub != 0u && qpNavReadMenu(rdram, kQpNavMenuSub) != ph.expectSub)
+            {
+                return false;
+            }
+            if (ph.needPset && m.pset == 0u)
+            {
+                return false;
+            }
+            return true;
+        }
+
+        void qpNavOnRead(PadInputState &state, uint64_t guestVsyncTick, PS2Runtime *runtime, int port,
+                         bool userActive)
+        {
+            qpNavEnsureInit();
+            if (!g_qpNavArmed.load(std::memory_order_relaxed))
+            {
+                return;
+            }
+            if (port != 0)
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(g_qpNav.mutex);
+            if (!g_qpNav.armed || g_qpNav.done || g_qpNav.aborted || g_qpNav.cancelled)
+            {
+                return;
+            }
+            if (!g_qpNav.armLogged)
+            {
+                g_qpNav.armLogged = true;
+                std::fprintf(stderr, "[qpnav] armed route=%llu steps uncalibrated-menu=%llu\n",
+                             static_cast<unsigned long long>(kQpNavSteps),
+                             static_cast<unsigned long long>(g_qpNav.uncalibrated));
+            }
+            // Any real user pad input (pre-merge port-0 buttons, so pad
+            // scripts never trip this) cancels the navigator immediately.
+            if (userActive)
+            {
+                g_qpNav.cancelled = true;
+                std::fprintf(stderr, "[qpnav] cancel: user input at tick=%llu\n",
+                             static_cast<unsigned long long>(guestVsyncTick));
+                return;
+            }
+            if (g_qpNav.idx >= kQpNavSteps)
+            {
+                return;
+            }
+            // A fired press holds its buttons until holdUntil.
+            if (g_qpNav.holdMask != 0u)
+            {
+                if (guestVsyncTick < g_qpNav.holdUntil)
+                {
+                    state.buttons =
+                        static_cast<uint16_t>(state.buttons & ~g_qpNav.holdMask);
+                    return;
+                }
+                g_qpNav.holdMask = 0u;
+            }
+            const QpNavStep &s = kQpNavRoute[g_qpNav.idx];
+            if (g_qpNav.idx == 0u && g_qpNav.stepStart == 0u && g_qpNav.lastFire == 0u)
+            {
+                g_qpNav.stepStart = guestVsyncTick;
+            }
+            uint8_t *rdram = (runtime != nullptr) ? runtime->memory().getRDRAM() : nullptr;
+            const ps2_net::QpNavMilestones m = ps2_net::qpNavMilestones();
+            const uint32_t menuMain = qpNavReadMenu(rdram, kQpNavMenuMain);
+            const uint32_t menuSub = qpNavReadMenu(rdram, kQpNavMenuSub);
+            if (guestVsyncTick >= g_qpNav.stepStart + s.timeout)
+            {
+                g_qpNav.aborted = true;
+                std::fprintf(stderr, "QP-NAV abort %s menu=0x%x/0x%x at tick=%llu\n", s.name,
+                             menuMain, menuSub,
+                             static_cast<unsigned long long>(guestVsyncTick));
+                return;
+            }
+            // Dance-mid guardrails (S1b lesson: Select Peak leaves menu
+            // family 2, so no per-screen id here): title means a
+            // triangle overshot out of the menus (lost); netw/crea means
+            // the online-entry Cross already landed (jump to wait-crea).
+            const bool inDance =
+                (g_qpNav.idx >= g_qpNav.danceFrom && g_qpNav.idx <= g_qpNav.danceTo);
+            if (inDance && rdram)
+            {
+                if (menuMain == 1u)
+                {
+                    g_qpNav.aborted = true;
+                    std::fprintf(stderr, "QP-NAV abort %s (dance-title) at tick=%llu\n",
+                                 s.name, static_cast<unsigned long long>(guestVsyncTick));
+                    return;
+                }
+                if (m.netwCrea != 0u)
+                {
+                    std::fprintf(stderr, "[qpnav] jump %s -> wait-crea (crea @%llu)\n", s.name,
+                                 static_cast<unsigned long long>(m.netwCrea));
+                    g_qpNav.idx = g_qpNav.waitCreaIdx;
+                    g_qpNav.stepStart = guestVsyncTick;
+                    g_qpNav.lastFire = guestVsyncTick;
+                    g_qpNav.holdMask = 0u;
+                    return;
+                }
+            }
+            if (guestVsyncTick < g_qpNav.lastFire + g_qpNav.gaps[g_qpNav.idx])
+            {
+                return;
+            }
+            // A failed lobby connect aborts whatever the current step is
+            // (the game shows "Connecting to your ISP..." instead of the
+            // login flow; OFL1 default, untouched by the knob).
+            if (m.sessConnFail != 0u)
+            {
+                g_qpNav.aborted = true;
+                std::fprintf(stderr, "QP-NAV abort %s (sess-conn-failed) at tick=%llu\n", s.name,
+                             static_cast<unsigned long long>(guestVsyncTick));
+                return;
+            }
+            if (!qpNavGateHolds(s, m, rdram))
+            {
+                return;
+            }
+            if (!qpNavPhaseHolds(g_qpNav.stepPhase[g_qpNav.idx], m, rdram))
+            {
+                return;
+            }
+            // cfg-ok skip: the login dialog (3/0x16) already up means the
+            // config flow advanced without this press (its purpose is
+            // fulfilled); pressing Cross into the login dialog would be
+            // wrong, so jump to the login cluster instead of firing.
+            if (std::strcmp(s.name, "cfg-ok") == 0 && menuMain == 3u && menuSub == 0x16u)
+            {
+                std::fprintf(stderr, "[qpnav] jump cfg-ok -> login-down-1 (login up)\n");
+                g_qpNav.idx = g_qpNav.loginDown1Idx;
+                g_qpNav.stepStart = guestVsyncTick;
+                g_qpNav.lastFire = guestVsyncTick;
+                return;
+            }
+            if (s.gate == QG_FILTER_STOP)
+            {
+                g_qpNav.done = true;
+                std::fprintf(stderr,
+                             "[qpnav] done: filter reached with OK highlighted, quik=%llu "
+                             "menu=0x%x/0x%x at tick=%llu\n",
+                             static_cast<unsigned long long>(m.quikCount), menuMain, menuSub,
+                             static_cast<unsigned long long>(guestVsyncTick));
+                return;
+            }
+            if (s.press != 0u)
+            {
+                state.buttons = static_cast<uint16_t>(state.buttons & ~s.press);
+                g_qpNav.holdMask = s.press;
+                g_qpNav.holdUntil = guestVsyncTick + g_qpNav.holds[g_qpNav.idx];
+                std::fprintf(stderr,
+                             "[qpnav] press %s mask=0x%04x menu=0x%x/0x%x at tick=%llu hold=%llu\n",
+                             s.name, s.press, menuMain, menuSub,
+                             static_cast<unsigned long long>(guestVsyncTick),
+                             static_cast<unsigned long long>(g_qpNav.holds[g_qpNav.idx]));
+            }
+            else
+            {
+                std::fprintf(stderr, "[qpnav] gate %s met menu=0x%x/0x%x at tick=%llu\n", s.name,
+                             menuMain, menuSub,
+                             static_cast<unsigned long long>(guestVsyncTick));
+            }
+            g_qpNav.lastFire = guestVsyncTick;
+            g_qpNav.idx++;
+            g_qpNav.stepStart = guestVsyncTick;
         }
 
         // IR1 DEV-ONLY pad recorder (PS2X_PAD_RECORD=<path>). PRC1 v4
@@ -3422,7 +4015,14 @@ namespace ps2_stubs
             // tick; wall-clock scripts ignore it. Null runtime (tests) = 0.
             const uint64_t guestVsyncTick =
                 runtime ? runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed) : 0u;
+            // ONL10: capture pre-merge user input for the navigator cancel
+            // gate (pad scripts merge below, so they never trip it).
+            // Knob-off cost: one word compare; guest-identical.
+            const bool qpNavUserActive =
+                (port == 0) && (state.buttons != 0xFFFFu);
             padScriptOnRead(state, guestVsyncTick); // E31 DEV-ONLY: no-op unless PS2X_PAD_SCRIPT set
+            qpNavOnRead(state, guestVsyncTick, runtime, port,
+                        qpNavUserActive); // ONL10: no-op unless NAV=1+QUICKPLAY=1
             tk12OnRead(state, guestVsyncTick, runtime, port); // APH1 DEV-ONLY: no-op unless PS2X_TK12_AP_ROUTE set
             padRecordOnRead(state, guestVsyncTick, port, slot); // IR1 DEV-ONLY: no-op unless PS2X_PAD_RECORD set
             padMarkerOnRead(state, guestVsyncTick, port, slot,
