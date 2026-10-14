@@ -1174,6 +1174,12 @@ namespace ps2_savestate
         gs.drainQueue();
         if (!why.empty()) { why = "gs: " + why; return false; }
 
+        // Comparison control: keep the same VBlank and worker drains while
+        // omitting the state serialization and digest. The ordered guest
+        // transcript still records the run for the hash-on/off comparison.
+        const char *hashEnv = std::getenv("PS2X_NETPLAY_CANON_HASH");
+        const bool hashOn = !hashEnv || std::strcmp(hashEnv, "0") != 0;
+
         static bool manifestWritten = false;
         if (!manifestWritten) {
             std::ofstream manifest(dir + "/manifest-v1.txt", std::ios::trunc);
@@ -1181,6 +1187,7 @@ namespace ps2_savestate
             manifest << "manifest_version=1\nchecksum_schema=1\npad_schema=ps2-status-32-v1\n"
                      << "scheduler=cycle-only\nreadback=cpu-visible-v1\n"
                      << "rate_transitions=fh1-events-v1\n";
+            manifest << "hash_enabled=" << (hashOn ? 1 : 0) << '\n';
             for (const HeaderLine &line : makeHeader(tick, true))
                 manifest << line.key << '=' << line.value << '\n';
             manifest << "codegen_id=" << runnerShaCached() << '\n';
@@ -1202,6 +1209,23 @@ namespace ps2_savestate
             }
             if (!manifest) { why = "manifest write failed"; return false; }
             manifestWritten = true;
+        }
+
+        if (!hashOn)
+        {
+            const uint64_t waitNs = ps2_mtvu::threadedWaitNsTotal() - wait0;
+            const uint64_t us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - t0).count());
+            std::ofstream out(dir + "/oracle-v1.tsv", std::ios::app);
+            if (!out) { why = "oracle write failed"; return false; }
+            out << tick << '\t' << (transition ? 1 : 0) << "\tskipped\t"
+                << us << '\t' << waitNs << "\t0\n";
+            if (!out) { why = "oracle write failed"; return false; }
+            {
+                std::lock_guard<std::mutex> lock(canonicalTraceMutex());
+                std::fflush(canonicalTrace());
+            }
+            return true;
         }
 
         Writer w;
