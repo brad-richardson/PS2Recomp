@@ -2,6 +2,7 @@
 // PS2Memory / PS2Runtime / VU / GS / SND sections. See ps2_savestate.h.
 
 #include "runtime/ps2_savestate.h"
+#include "ps2_net_dirtysock.h"
 #include "ps2_android_toast.h"
 #include "ps2_mtvu.h"
 #include "ps2_microvu.h"
@@ -1477,6 +1478,25 @@ namespace ps2_savestate
         quickRequests().savePath = path;
         quickBits().fetch_or(1u, std::memory_order_release);
         std::fprintf(stderr, "[savestate] quick-save requested path=%s\n", path.c_str());
+        return true;
+    }
+
+    bool requestAutoSave(const std::string &path)
+    {
+        const char *enabled = std::getenv("PS2X_AUTOSAVE");
+        if (!enabled || std::strcmp(enabled, "1") != 0)
+            return false;
+        if (ps2_net::enabled())
+        {
+            std::fprintf(stderr, "[autosave] skipped: online mode enabled\n");
+            return false;
+        }
+        if (!requestQuickSave(path))
+        {
+            std::fprintf(stderr, "[autosave] skipped: quick request busy or path unavailable\n");
+            return false;
+        }
+        std::fprintf(stderr, "[autosave] requested path=%s\n", path.c_str());
         return true;
     }
 

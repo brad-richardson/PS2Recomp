@@ -519,6 +519,10 @@ namespace ps2_savestate
     // records deterministic=0). Called from any thread; consumed on the game
     // thread. requestSave creates the path's parent dirs.
     bool requestQuickSave(const std::string &path);
+    // ASV1: lifecycle snapshot request. Default off; a configured online
+    // session skips it even before a peer connects. Uses the quick-save
+    // writer and its atomic temp+rename path.
+    bool requestAutoSave(const std::string &path);
     bool requestQuickLoad(const std::string &path);
     bool quickSavePending(); // a save waits (UI: "saving…")
     // Consumed by the scheduler on the game thread. takePendingQuickLoad is

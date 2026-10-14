@@ -425,6 +425,13 @@ void EeScheduler::run()
     // skips its first event pass: the save was taken right after one.
     const ps2_savestate::Config &ssConfig = ps2_savestate::config();
     uint64_t ssSaveAt = ssConfig.saveAt;
+    // ASV1 Mac harness: inject the same request as Android onPause at a
+    // known guest boundary. No live product path reads this diagnostic knob.
+    const uint64_t autosaveTestAt = [] {
+        const char *v = std::getenv("PS2X_AUTOSAVE_TEST_AT");
+        return v && *v ? std::strtoull(v, nullptr, 10) : 0ull;
+    }();
+    bool autosaveTestFired = false;
     uint64_t ssLastDeferTick = ~0ull;
     uint32_t ssDeferLines = 0u;
     // SS5: the vu1 budget-parked defer cannot be permanent. A park clears on
@@ -449,6 +456,17 @@ void EeScheduler::run()
         if (m_stopRequested.load(std::memory_order_acquire))
         {
             break;
+        }
+        if (!autosaveTestFired && autosaveTestAt != 0u && m_vsyncTick >= autosaveTestAt)
+        {
+            autosaveTestFired = true;
+            const char *path = std::getenv("PS2X_AUTOSAVE_PATH");
+            std::fprintf(stderr, "[autosave] simulated pause tick=%llu\n",
+                         static_cast<unsigned long long>(m_vsyncTick));
+            if (path && *path)
+                ps2_savestate::requestAutoSave(path);
+            else
+                std::fprintf(stderr, "[autosave] skipped: PS2X_AUTOSAVE_PATH missing\n");
         }
         // DS1: chord/hotkey quick-load (one-shot: applies now or refuses
         // loudly; a refused file leaves the live machine untouched).

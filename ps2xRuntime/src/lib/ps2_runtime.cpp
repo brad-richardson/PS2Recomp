@@ -3633,6 +3633,22 @@ PS2Runtime *g_bg1Runtime = nullptr;
 
 void bg1OnPause()
 {
+    // ASV1: save while the EE can still reach the scheduler's safe point.
+    // BG1's gate closes only after this bounded wait. A slow or deferred
+    // save leaves the previous atomic slot intact.
+    const char *autosave = std::getenv("PS2X_AUTOSAVE");
+    if (!ps2x::hostPause::paused() && autosave && std::strcmp(autosave, "1") == 0)
+    {
+        const std::string path = (std::filesystem::path(qsr1SlotDir()) / "autosave.ps2xstate").string();
+        if (ps2_savestate::requestAutoSave(path))
+        {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+            while (ps2_savestate::quickSavePending() && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (ps2_savestate::quickSavePending())
+                std::fprintf(stderr, "[autosave] background deadline: previous slot retained\n");
+        }
+    }
     if (!ps2x::hostPause::requestPause())
         return;
     const uint64_t tick =
