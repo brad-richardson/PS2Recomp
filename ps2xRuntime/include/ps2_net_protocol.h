@@ -61,15 +61,15 @@ namespace ps2_net_protocol
         return !value || !*value || value[0] != '0';
     }
 
-    inline bool relayRegisterDue(uint32_t mode, bool peerKnown, bool enabled,
+    inline bool relayRegisterDue(uint32_t mode, bool connected, bool enabled,
                                  uint64_t nowMs, uint64_t connMs, uint64_t lastRegMs)
     {
-        return (mode & 1u) && !peerKnown && enabled && nowMs - connMs < 30000u &&
+        return (mode & 3u) && !connected && enabled && nowMs - connMs < 30000u &&
                nowMs - lastRegMs >= 250u;
     }
 
-    inline std::string relayRegistration(const std::string &token)
+    inline std::string relayRegistration(char role, const std::string &token)
     {
-        return "SSX3RLY1" + token;
+        return "SSX3RLY2" + std::string(1u, role) + token;
     }
 }

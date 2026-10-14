@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <map>
 #include <vector>
@@ -30,11 +31,13 @@
 #include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 
 #if defined(__APPLE__) || defined(__linux__)
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -236,6 +239,70 @@ namespace ps2_net
             }
             return std::string();
 #endif
+        }
+
+        // Stored beside the login save, so an install keeps one anonymous
+        // identity across launches without exposing it to guest memory.
+        const std::string &installDeviceId()
+        {
+            static const std::string id = [] {
+#if PS2_NET_HAVE_POSIX_SOCKETS
+                const std::string login = quickplayLoginPath();
+                if (login.empty()) return std::string();
+                const std::string path = login + ".device-id";
+                auto valid = [](const std::string &s) {
+                    if (s.size() != 32u) return false;
+                    for (const char c : s)
+                        if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
+                    return true;
+                };
+                auto read = [&]() {
+                    std::ifstream in(path);
+                    std::string value;
+                    if (in && std::getline(in, value) && valid(value)) return value;
+                    return std::string();
+                };
+                if (std::string existing = read(); !existing.empty()) return existing;
+                unsigned char random[16]{};
+                const int entropy = ::open("/dev/urandom", O_RDONLY);
+                if (entropy < 0) return std::string();
+                const ssize_t got = ::read(entropy, random, sizeof(random));
+                ::close(entropy);
+                if (got != static_cast<ssize_t>(sizeof(random))) return std::string();
+                constexpr char hex[] = "0123456789abcdef";
+                std::string value;
+                for (unsigned char byte : random) {
+                    value.push_back(hex[byte >> 4]);
+                    value.push_back(hex[byte & 15]);
+                }
+                const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+                if (fd < 0) return read();
+                const ssize_t written = ::write(fd, value.data(), value.size());
+                if (written == static_cast<ssize_t>(value.size())) ::fsync(fd);
+                ::close(fd);
+                if (written != static_cast<ssize_t>(value.size())) return std::string();
+                return value;
+#else
+                return std::string();
+#endif
+            }();
+            return id;
+        }
+
+        std::vector<uint8_t> withDeviceId(const std::vector<uint8_t> &bytes, uint32_t len)
+        {
+            if (len < 13u || bytes[len - 1u] != 0u ||
+                !((std::memcmp(bytes.data(), "auth", 4u) == 0) ||
+                  (std::memcmp(bytes.data(), "AUTH", 4u) == 0)))
+                return std::vector<uint8_t>(bytes.begin(), bytes.begin() + len);
+            const std::string &id = installDeviceId();
+            if (id.empty()) return std::vector<uint8_t>(bytes.begin(), bytes.begin() + len);
+            std::vector<uint8_t> wire(bytes.begin(), bytes.begin() + len);
+            const std::string field = "DID=" + id + "\n";
+            wire.insert(wire.end() - 1, field.begin(), field.end());
+            const uint32_t total = static_cast<uint32_t>(wire.size());
+            for (int i = 0; i < 4; ++i) wire[8 + i] = static_cast<uint8_t>(total >> (24 - 8 * i));
+            return wire;
         }
 
         bool readQuickplayLoginFile()
@@ -744,7 +811,7 @@ namespace ps2_net
 
             // Explicit self-hosted server override; DNS also returns lobbyAddress().
             const char *server = std::getenv("PS2X_NET_SERVER");
-            const std::string serverValue = server; // enabled() validated this IPv4 value
+            const std::string serverValue = server;
             uint8_t *strPtr = getMemPtr(rdram, kServerStringAddr);
             if (strPtr && std::memcmp(strPtr, kServerStringOrig, sizeof(kServerStringOrig) - 1u) == 0 &&
                 serverValue.size() < sizeof(kServerStringOrig))
@@ -936,23 +1003,55 @@ namespace ps2_net
 
     uint32_t lobbyAddress()
     {
-        static const uint32_t address = [] {
+        static std::atomic<uint32_t> address{0u};
+        static const bool started = [] {
 #if PS2_NET_HAVE_POSIX_SOCKETS
             const char *server = std::getenv("PS2X_NET_SERVER");
             in_addr parsed{};
-            if (server && ::inet_pton(AF_INET, server, &parsed) == 1)
-                return ntohl(parsed.s_addr);
+            if (!server || !*server) return true;
+            if (::inet_pton(AF_INET, server, &parsed) == 1)
+            {
+                address.store(ntohl(parsed.s_addr), std::memory_order_release);
+                return true;
+            }
+            const std::string host(server);
+            std::thread([host] {
+                addrinfo hints{};
+                hints.ai_family = AF_INET;
+                hints.ai_socktype = SOCK_STREAM;
+                addrinfo *result = nullptr;
+                if (::getaddrinfo(host.c_str(), nullptr, &hints, &result) == 0)
+                {
+                    for (addrinfo *it = result; it; it = it->ai_next)
+                    {
+                        if (it->ai_family == AF_INET)
+                        {
+                            const auto *v4 = reinterpret_cast<const sockaddr_in *>(it->ai_addr);
+                            address.store(ntohl(v4->sin_addr.s_addr), std::memory_order_release);
+                            break;
+                        }
+                    }
+                    ::freeaddrinfo(result);
+                }
+            }).detach();
 #endif
-            return uint32_t{0};
+            return true;
         }();
-        return address;
+        (void)started;
+        return address.load(std::memory_order_acquire);
     }
 
     bool enabled()
     {
         static const bool on = [] {
             const char *env = std::getenv("PS2X_NET");
-            return env && *env && env[0] != '0' && lobbyAddress() != 0;
+            const char *server = std::getenv("PS2X_NET_SERVER");
+            if (env && *env && env[0] != '0' && server && *server)
+            {
+                (void)lobbyAddress();
+                return true;
+            }
+            return false;
         }();
         return on;
     }
@@ -1094,6 +1193,7 @@ namespace ps2_net
         body += "PASS=" + g_loginPass + "\n";
         body += "TOS=1\nMID=1\nPID=1\nHWFLAG=0\nHWMASK=0\n";
         body += "PROD=SSX-PS2-2004\nVERS=PS2/Beta 1.04-Sep 17 2003\nLANG=en\nSLUS=SLUS-20772\n";
+        body += "DID=" + installDeviceId() + "\n";
         std::vector<uint8_t> msg;
         msg.insert(msg.end(), {'a', 'u', 't', 'h'});
         msg.insert(msg.end(), {0u, 0u, 0u, 0u});
@@ -1322,11 +1422,12 @@ namespace ps2_net
         std::vector<std::vector<uint8_t>> rxq;
         uint32_t txPkts = 0u, rxPkts = 0u;
     };
-    // LOB1: the +ses session token (if the server sent one), parsed
-    // from the +ses message on the game-TCP socket. Included in relay
-    // registrations so the relay can verify them. Process-lifetime:
-    // one game session per process. Never logged.
+    // Server-issued route for the current +ses. Cleared and refreshed on
+    // every match so a second race cannot reuse the first match's token.
     std::string g_sesToken;
+    std::string g_relayToken;
+    uint16_t g_relayPort = 0u;
+    char g_relayRole = '\0';
     std::map<uint32_t, P2pUtil> g_p2pUtil;  // gmut handle
     std::map<uint32_t, P2pLink> g_p2pLink;  // gmlk handle
     constexpr uint32_t kCommRefBase = 0x00C00000u;
@@ -1440,22 +1541,19 @@ namespace ps2_net
                 u.lastHello = tick;
                 p2pSendRaw(u, "O5HI", nullptr, 0u);
             }
-            // LOB1: relay registration (PS2X_NET_RELAY_REGISTER,
-            // default ON). The listen side emits 'SSX3RLY1' + the +ses
-            // session token to the spec peer until it learns the peer,
-            // so a relay can learn the listen endpoint. The peer HLE
-            // discards unknown tags silently and the relay drops
-            // registrations without forwarding, so game traffic stays
-            // byte-identical to stock. Bounded: every 250 wall ms for
-            // at most 30 wall s per util.
-            if ((u.mode & 1u) && !u.peerKnown && relayRegister())
+            // Both roles enroll with a distinct capability. The server
+            // challenges the source socket before forwarding game traffic.
+            // Retries cover UDP loss; the relay discards these host packets.
+            if (relayRegister() && g_relayToken.size() == 32u &&
+                ((u.mode & 1u) || (u.mode & 2u)) && !u.connected)
             {
                 const uint64_t nowMs = hostMillis();
-                if (ps2_net_protocol::relayRegisterDue(u.mode, u.peerKnown, true,
+                if (ps2_net_protocol::relayRegisterDue(u.mode, u.connected, true,
                                                        nowMs, u.connMs, u.lastRegMs))
                 {
                     u.lastRegMs = nowMs;
-                    const std::string reg = ps2_net_protocol::relayRegistration(g_sesToken);
+                    const std::string reg =
+                        ps2_net_protocol::relayRegistration(g_relayRole, g_relayToken);
                     p2pSendBytes(u,
                                  reinterpret_cast<const uint8_t *>(reg.data()),
                                  reg.size(), true);
@@ -1463,7 +1561,7 @@ namespace ps2_net
                     {
                         u.regLogged = true;
                         std::cerr << "[net] p2p: util=" << kv.first
-                                  << " relay-reg tx token_len=" << g_sesToken.size()
+                                  << " relay-reg tx role=" << g_relayRole
                                   << " tick=" << tick << std::endl;
                     }
                 }
@@ -1488,6 +1586,21 @@ namespace ps2_net
                 if (r < 4)
                 {
                     break;
+                }
+                if (g_relayToken.size() == 32u && r == 17 &&
+                    std::memcmp(buf, "SSX3CHL1", 8) == 0 &&
+                    buf[8] == static_cast<uint8_t>(g_relayRole) &&
+                    from.sin_addr.s_addr == u.peer.sin_addr.s_addr &&
+                    from.sin_port == u.peer.sin_port)
+                {
+                    std::string proof("SSX3PRF1");
+                    proof.push_back(g_relayRole);
+                    proof.append(reinterpret_cast<const char *>(buf + 9), 8);
+                    proof += g_relayToken;
+                    p2pSendBytes(u,
+                        reinterpret_cast<const uint8_t *>(proof.data()),
+                        proof.size(), true);
+                    continue;
                 }
                 // SEC1: learn-then-enforce the peer source address. Connect
                 // mode pins the spec address at conn time; listen mode
@@ -1785,7 +1898,9 @@ namespace ps2_net
                     u = P2pUtil();
                     u.mode = w5;
                     const uint16_t bindPort = envPort("PS2X_NET_PORT_BASE", lport);
-                    const uint16_t peerPort = envPort("PS2X_NET_PEER_PORT", rport);
+                    const uint16_t peerPort =
+                        (relayRegister() && g_relayToken.size() == 32u && g_relayPort != 0u)
+                            ? g_relayPort : envPort("PS2X_NET_PEER_PORT", rport);
                     u.fd = ::socket(AF_INET, SOCK_DGRAM, 0);
                     struct sockaddr_in sin;
                     std::memset(&sin, 0, sizeof(sin));
@@ -2003,12 +2118,13 @@ namespace ps2_net
                     // name/look: a2 = IOP addr of the hostname (a3 = len
                     // incl NUL). Resolve only through the configured lobby override.
                     std::cerr << " host='" << dmaString(w0) << "' hex=" << dmaHex(w0, 64u);
-                    g_dnsResolved = true;
+                    g_dnsResolved = lobbyAddress() != 0u;
                     status = 0u;
                 }
                 else if (method == 23u)
                 {
                     // name/done: completion poll; 1 once resolved.
+                    g_dnsResolved = lobbyAddress() != 0u;
                     status = g_dnsResolved ? 1u : 0u;
                 }
                 else if (method == 25u)
@@ -2262,17 +2378,18 @@ namespace ps2_net
                         const int fd = getSocket(w4);
                         if (fd >= 0)
                         {
+                            const std::vector<uint8_t> wire = withDeviceId(bytes, len);
                             uint32_t sent = 0u;
-                            while (sent < len)
+                            while (sent < wire.size())
                             {
-                                const ssize_t r = ::send(fd, bytes.data() + sent, len - sent, 0);
+                                const ssize_t r = ::send(fd, wire.data() + sent, wire.size() - sent, 0);
                                 if (r <= 0)
                                 {
                                     break;
                                 }
                                 sent += static_cast<uint32_t>(r);
                             }
-                            status = sent;
+                            status = sent == wire.size() ? len : 0u;
                         }
 #else
                         status = len;
@@ -2358,48 +2475,53 @@ namespace ps2_net
                                 std::cerr << " h=" << w4 << " n=" << n << " lagged";
                                 status = 0u;
                                 outlen = n;
-                                // LOB1: stash the +ses session token
-                                // (if the server sent one) for relay
-                                // registrations. The game ignores
-                                // unknown +ses keys, so this changes no
-                                // game-visible bytes. The token itself
-                                // is never logged.
-                                if (n > 20u && std::memcmp(dst, "+ses", 4) == 0 &&
-                                    g_sesToken.empty())
+                                if (n > 12u && std::memcmp(dst, "+ses", 4) == 0)
                                 {
-                                    // Our lobby names the session token
-                                    // SESSTOK (TOKEN accepted as a fallback).
                                     const char *body =
                                         reinterpret_cast<const char *>(dst + 12);
                                     const size_t bodyLen = static_cast<size_t>(n) - 12u;
-                                    const char *keys[] = {"SESSTOK=", "TOKEN="};
-                                    for (const char *key : keys)
+                                    const auto field = [&](const char *key) -> std::string
                                     {
                                         const size_t klen = std::strlen(key);
-                                        bool found = false;
-                                        for (size_t i = 0u; i + klen + 1u <= bodyLen; ++i)
+                                        for (size_t i = 0u; i + klen < bodyLen; ++i)
                                         {
                                             if ((i == 0u || body[i - 1u] == '\n') &&
-                                                std::memcmp(body + i, key, klen) == 0)
+                                                std::memcmp(body + i, key, klen) == 0 &&
+                                                body[i + klen] == '=')
                                             {
-                                                size_t j = i + klen;
+                                                size_t j = i + klen + 1u;
                                                 while (j < bodyLen && body[j] != '\n' &&
-                                                       body[j] != '\0' && (j - i) < 140u)
+                                                       body[j] != '\0' &&
+                                                       j - (i + klen + 1u) < 128u)
                                                 {
                                                     ++j;
                                                 }
-                                                g_sesToken.assign(body + i + klen, j - i - klen);
-                                                std::cerr << " [net] login: +ses token seen len="
-                                                          << g_sesToken.size() << " tick=" << tick
-                                                          << std::endl;
-                                                found = true;
-                                                break;
+                                                return std::string(body + i + klen + 1u,
+                                                                   body + j);
                                             }
                                         }
-                                        if (found)
-                                        {
-                                            break;
-                                        }
+                                        return {};
+                                    };
+                                    g_sesToken = field("SESSTOK");
+                                    if (g_sesToken.empty()) g_sesToken = field("TOKEN");
+                                    g_relayToken.clear();
+                                    g_relayPort = 0u;
+                                    g_relayRole = '\0';
+                                    const std::string port = field("RLYPORT");
+                                    const std::string role = field("RLYROLE");
+                                    const std::string token = field("RLYTOK");
+                                    const long parsedPort = std::strtol(port.c_str(), nullptr, 10);
+                                    if (parsedPort > 0 && parsedPort < 65536 &&
+                                        role.size() == 1u && (role[0] == '0' || role[0] == '1') &&
+                                        token.size() == 32u &&
+                                        token.find_first_not_of("0123456789abcdef") == std::string::npos)
+                                    {
+                                        g_relayPort = static_cast<uint16_t>(parsedPort);
+                                        g_relayRole = role[0];
+                                        g_relayToken = token;
+                                        std::cerr << " [net] login: +ses relay route port="
+                                                  << g_relayPort << " role=" << g_relayRole
+                                                  << " tick=" << tick << std::endl;
                                     }
                                 }
                             }

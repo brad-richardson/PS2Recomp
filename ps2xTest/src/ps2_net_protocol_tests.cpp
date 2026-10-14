@@ -74,17 +74,23 @@ namespace
         {
             t.IsTrue(ps2_net_protocol::relayRegisterEnabled(nullptr), "default on");
             t.IsFalse(ps2_net_protocol::relayRegisterEnabled("0"), "off override");
-            t.Equals(ps2_net_protocol::relayRegistration("abc"), std::string("SSX3RLY1abc"),
-                     "relay packet prefix and token");
+            t.Equals(ps2_net_protocol::relayRegistration('L', "abc"),
+                     std::string("SSX3RLY2Labc"), "listen role and token");
+            t.Equals(ps2_net_protocol::relayRegistration('C', "xyz"),
+                     std::string("SSX3RLY2Cxyz"), "connect role and token");
             const uint64_t conn = 1000, last = 1000;
             t.IsFalse(ps2_net_protocol::relayRegisterDue(1, false, true, 1249, conn, last),
                       "before 250 ms cadence");
             t.IsTrue(ps2_net_protocol::relayRegisterDue(1, false, true, 1250, conn, last),
                      "cadence edge");
             t.IsFalse(ps2_net_protocol::relayRegisterDue(1, true, true, 1250, conn, last),
-                      "peer learned");
-            t.IsFalse(ps2_net_protocol::relayRegisterDue(2, false, true, 1250, conn, last),
-                      "connect side never registers");
+                      "connected listen side stops");
+            t.IsTrue(ps2_net_protocol::relayRegisterDue(2, false, true, 1250, conn, last),
+                     "connect side registers");
+            t.IsFalse(ps2_net_protocol::relayRegisterDue(2, true, true, 1250, conn, last),
+                      "connected connect side stops");
+            t.IsFalse(ps2_net_protocol::relayRegisterDue(0, false, true, 1250, conn, last),
+                      "non-relay mode never registers");
             t.IsFalse(ps2_net_protocol::relayRegisterDue(1, false, false, 1250, conn, last),
                       "override disabled");
             t.IsFalse(ps2_net_protocol::relayRegisterDue(1, false, true, 31000, conn, last),
