@@ -201,9 +201,31 @@ void EeSchedulerSavestate::save(const EeScheduler &s, Writer &w)
             ww.u32(x);
         writeIntDeque(ww, v.waiters);
     });
-    writeOrderedPod(w, s.m_alarms);
-    writeOrderedPod(w, s.m_intcHandlers);
-    writeOrderedPod(w, s.m_dmacHandlers);
+    writeOrdered(w, s.m_alarms, [](Writer &ww, const auto &entry) {
+        ww.pod(entry.first);
+        const EeAlarm &v = entry.second;
+        if (!ww.canonical) { ww.pod(v); return; }
+        static_assert(sizeof(EeAlarm) == 24 && offsetof(EeAlarm, handler) == 8);
+        ww.pod(v.id);
+        ww.pod(v.ticks);
+        const uint8_t pad[2]{};
+        ww.bytes(pad, sizeof(pad));
+        for (uint32_t x : {v.handler, v.argument, v.gp, v.sp}) ww.u32(x);
+    });
+    const auto writeIrq = [](Writer &ww, const auto &entry) {
+        ww.pod(entry.first);
+        const EeIrqHandler &v = entry.second;
+        if (!ww.canonical) { ww.pod(v); return; }
+        static_assert(sizeof(EeIrqHandler) == 32 && offsetof(EeIrqHandler, order) == 28);
+        ww.pod(v.id);
+        for (uint32_t x : {v.cause, v.handler, v.argument, v.gp, v.sp}) ww.u32(x);
+        ww.b(v.enabled);
+        const uint8_t pad[3]{};
+        ww.bytes(pad, sizeof(pad));
+        ww.pod(v.order);
+    };
+    writeOrdered(w, s.m_intcHandlers, writeIrq);
+    writeOrdered(w, s.m_dmacHandlers, writeIrq);
     for (int v : {s.m_nextThreadId, s.m_nextInvocationThreadId, s.m_nextSemaphoreId, s.m_nextEventFlagId,
                   s.m_nextAlarmId, s.m_nextIntcHandlerId, s.m_nextDmacHandlerId, s.m_intcHeadOrder, s.m_intcTailOrder,
                   s.m_dmacHeadOrder, s.m_dmacTailOrder, s.m_currentThreadId})

@@ -2651,7 +2651,40 @@ void VuSavestate::saveXgkick(const VU1Interpreter::XgkickPipeline &x, Writer &w)
 template <class D>
 void VuSavestate::saveCore(const D &vu, Writer &w)
 {
-    w.pod(vu.m_state);
+    if (w.canonical)
+    {
+        VuState state = vu.m_state;
+        // VI registers are architectural 16-bit values; engines disagree
+        // about the unused high half of the host int32_t slot.
+        for (int32_t &vi : state.vi) vi = static_cast<int16_t>(vi);
+        // Execution cycles and an inactive branch target belong to the VU
+        // engine, not to the committed register file.
+        state.cycles = 0;
+        if (!state.branchPending)
+        {
+            state.branchTarget = 0;
+            state.branchDelay = 0;
+        }
+        auto *bytes = reinterpret_cast<uint8_t *>(&state);
+        std::memset(bytes + offsetof(VuState, stoppedByT) + sizeof(state.stoppedByT), 0,
+                    offsetof(VuState, top) - offsetof(VuState, stoppedByT) - sizeof(state.stoppedByT));
+        std::memset(bytes + offsetof(VuState, branchPending) + sizeof(state.branchPending), 0,
+                    offsetof(VuState, branchTarget) - offsetof(VuState, branchPending) - sizeof(state.branchPending));
+        std::memset(bytes + offsetof(VuState, branchDelay) + sizeof(state.branchDelay), 0,
+                    sizeof(VuState) - offsetof(VuState, branchDelay) - sizeof(state.branchDelay));
+        w.pod(state);
+    }
+    else
+        w.pod(vu.m_state);
+    const auto enginePod = [&w](const auto &value) {
+        if (w.canonical)
+        {
+            const std::array<uint8_t, sizeof(value)> zero{};
+            w.bytes(zero.data(), zero.size());
+        }
+        else
+            w.pod(value);
+    };
 #if PS2X_ENABLE_DET_HASH_TAP
     // Execution count depends on the selected VU engine and is only read by
     // the legacy diagnostic tap; it is not guest-visible state.
@@ -2659,45 +2692,49 @@ void VuSavestate::saveCore(const D &vu, Writer &w)
 #else
     w.u64(0u);
 #endif
-    w.pod(vu.m_flagPipeline);
-    w.pod(vu.m_fdiv);
-    w.pod(vu.m_efu);
-    w.pod(vu.m_storePipeline);
-    w.pod(vu.m_vfWritePipeline);
-    w.pod(vu.m_viWritePipeline);
-    w.pod(vu.m_accWritePipeline);
+    enginePod(vu.m_flagPipeline);
+    enginePod(vu.m_fdiv);
+    enginePod(vu.m_efu);
+    enginePod(vu.m_storePipeline);
+    enginePod(vu.m_vfWritePipeline);
+    enginePod(vu.m_viWritePipeline);
+    enginePod(vu.m_accWritePipeline);
     if constexpr (kVuHasXgkick<D>)
-        saveXgkick(vu.m_xgkick, w);
+    {
+        if (w.canonical)
+        {
+            const std::array<uint8_t, VU1Interpreter::kXgkickSavestateBytes> zero{};
+            w.bytes(zero.data(), zero.size());
+        }
+        else
+            saveXgkick(vu.m_xgkick, w);
+    }
     else
     {
         static const std::array<uint8_t, VU1Interpreter::kXgkickSavestateBytes> kZeroXgkick{};
         w.pod(kZeroXgkick);
     }
-    w.pod(vu.m_vfReady);
-    w.pod(vu.m_viReady);
-    w.pod(vu.m_accReady);
+    enginePod(vu.m_vfReady);
+    enginePod(vu.m_viReady);
+    enginePod(vu.m_accReady);
     for (uint32_t mask : {vu.m_flagValidMask, vu.m_storeValidMask, vu.m_vfWriteValidMask, vu.m_viWriteValidMask,
                           vu.m_accWriteValidMask})
-        w.u32(mask);
-    w.u64(vu.m_nextCommitCycle);
-    w.pod(vu.m_vfLatestWrite);
-    w.pod(vu.m_viLatestWrite);
-    w.pod(vu.m_accLatestWrite);
-    w.u64(vu.m_cycle);
-    w.u64(vu.m_nextWriteSequence);
-    w.u64(vu.m_efuResourceReady);
-    w.u32(vu.m_workingClip);
-    w.u32(vu.m_currentUpperInstruction);
-    w.pod(vu.m_viBranchBackupValue);
-    w.u8(vu.m_viBranchBackupReg);
-    w.b(vu.m_viBranchBackupValid);
-    w.b(vu.m_stopRequested);
-    w.b(vu.m_pendingHaltD);
-    w.b(vu.m_pendingHaltT);
-    w.b(vu.m_directStores);
-    w.b(vu.m_directFlags);
-    w.u64(vu.m_directPendingUntil);
-    w.pod(vu.m_storeScratch);
+        w.u32(w.canonical ? 0u : mask);
+    w.u64(w.canonical ? 0u : vu.m_nextCommitCycle);
+    enginePod(vu.m_vfLatestWrite);
+    enginePod(vu.m_viLatestWrite);
+    enginePod(vu.m_accLatestWrite);
+    for (uint64_t v : {vu.m_cycle, vu.m_nextWriteSequence, vu.m_efuResourceReady})
+        w.u64(w.canonical ? 0u : v);
+    for (uint32_t v : {vu.m_workingClip, vu.m_currentUpperInstruction})
+        w.u32(w.canonical ? 0u : v);
+    enginePod(vu.m_viBranchBackupValue);
+    w.u8(w.canonical ? 0u : vu.m_viBranchBackupReg);
+    for (bool v : {vu.m_viBranchBackupValid, vu.m_stopRequested, vu.m_pendingHaltD,
+                   vu.m_pendingHaltT, vu.m_directStores, vu.m_directFlags})
+        w.b(w.canonical ? false : v);
+    w.u64(w.canonical ? 0u : vu.m_directPendingUntil);
+    enginePod(vu.m_storeScratch);
 }
 
 template <class D>
@@ -2802,36 +2839,48 @@ void GSSavestate::save(GS &gs, Writer &w)
 {
     ps2_mtvu::sync(ps2_mtvu::Reason::SaveState); // MT1: no unit job spans a state
     std::lock_guard<std::recursive_mutex> lock(gs.m_stateMutex);
-    w.pod(gs.m_ctx);
-    w.pod(gs.m_prim);
-    w.pod(gs.m_curGifPath);
-    w.pod(gs.m_primRegister);
-    w.pod(gs.m_prmodeRegister);
+    // These are raster/frontend state. Privileged registers and the VIF/GIF
+    // transfer controls that the guest can read are in the memory section;
+    // canonical reverse-DMA writes fixed CPU bytes there as well.
+    const auto renderPod = [&w](const auto &value) {
+        if (w.canonical)
+        {
+            const std::array<uint8_t, sizeof(value)> zero{};
+            w.bytes(zero.data(), zero.size());
+        }
+        else
+            w.pod(value);
+    };
+    renderPod(gs.m_ctx);
+    renderPod(gs.m_prim);
+    renderPod(gs.m_curGifPath);
+    renderPod(gs.m_primRegister);
+    renderPod(gs.m_prmodeRegister);
     for (uint8_t v : {gs.m_curR, gs.m_curG, gs.m_curB, gs.m_curA})
-        w.u8(v);
-    w.pod(gs.m_curQ);
-    w.pod(gs.m_curS);
-    w.pod(gs.m_curT);
-    w.pod(gs.m_curU);
-    w.pod(gs.m_curV);
+        w.u8(w.canonical ? 0u : v);
+    renderPod(gs.m_curQ);
+    renderPod(gs.m_curS);
+    renderPod(gs.m_curT);
+    renderPod(gs.m_curU);
+    renderPod(gs.m_curV);
     for (uint8_t v : {gs.m_curFog, gs.m_fogR, gs.m_fogG, gs.m_fogB})
-        w.u8(v);
-    w.b(gs.m_prmodecont);
-    w.b(gs.m_pabe);
+        w.u8(w.canonical ? 0u : v);
+    w.b(w.canonical ? false : gs.m_prmodecont);
+    w.b(w.canonical ? false : gs.m_pabe);
     for (uint64_t v : {gs.m_scanmsk, gs.m_dimx, gs.m_dthe, gs.m_colclamp})
-        w.u64(v);
-    w.pod(gs.m_texa);
-    w.pod(gs.m_texclut);
-    w.pod(gs.m_bitbltbuf);
-    w.pod(gs.m_trxpos);
-    w.pod(gs.m_trxreg);
-    w.u32(gs.m_trxdir);
-    w.pod(gs.m_vtxQueue);
-    w.pod(gs.m_vtxCount);
-    w.pod(gs.m_vtxIndex);
-    w.pod(gs.m_preferredDisplaySourceFrame);
-    w.u32(gs.m_preferredDisplayDestFbp);
-    w.b(gs.m_hasPreferredDisplaySource);
+        w.u64(w.canonical ? 0u : v);
+    renderPod(gs.m_texa);
+    renderPod(gs.m_texclut);
+    renderPod(gs.m_bitbltbuf);
+    renderPod(gs.m_trxpos);
+    renderPod(gs.m_trxreg);
+    w.u32(w.canonical ? 0u : gs.m_trxdir);
+    renderPod(gs.m_vtxQueue);
+    renderPod(gs.m_vtxCount);
+    renderPod(gs.m_vtxIndex);
+    renderPod(gs.m_preferredDisplaySourceFrame);
+    w.u32(w.canonical ? 0u : gs.m_preferredDisplayDestFbp);
+    w.b(w.canonical ? false : gs.m_hasPreferredDisplaySource);
     std::vector<uint8_t> backendState;
     if (gs.m_backend && !w.canonical)
         gs.m_backend->SavestateSave(backendState);
