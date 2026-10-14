@@ -1029,11 +1029,31 @@ namespace ps2_stubs
         // Re-applied on sight (title + main menu) because the table
         // rebuilds per screen (char-select clears it). Same font (same
         // renderer); narrower than "Conquer The Mountain".
+        // f3 lesson: the handle page is a per-screen pool — a patched
+        // handle left in place goes stale into submenu screens (the
+        // dance stuck at char select). Two guards: (1) patch only when
+        // all six menu handles match (a submenu reusing one slot never
+        // replicates the set); (2) restore stock + zero the text when
+        // the menu is left while our patch is in place.
         constexpr uint32_t kQpLabelSlot = 0x5AB2B4u;
         constexpr uint32_t kQpLabelStockPtr = 0x540510u;
         constexpr uint32_t kQpLabelStockLen = 7u;
         constexpr uint32_t kQpLabelNewLen = 11u; // "Quick Play" + NUL
         constexpr uint32_t kQpLabelBytes = 22u;
+        struct QpLabelHandle
+        {
+            uint32_t slot;
+            uint32_t ptr;
+            uint32_t len;
+        };
+        constexpr QpLabelHandle kQpLabelSet[6] = {
+            {0x5AB0B4u, 0x543140u, 10u}, // Main Menu (header)
+            {0x5AB2B4u, 0x540510u, 7u},  // Online (the item)
+            {0x5AB3B4u, 0x543120u, 9u},  // Previews
+            {0x5AB4B4u, 0x543100u, 11u}, // Multi Play
+            {0x5AB5B4u, 0x549B40u, 21u}, // Conquer The Mountain
+            {0x5AB6B4u, 0x5430E0u, 13u}, // Single Event
+        };
         bool qpNavReadBytes(uint8_t *rdram, uint32_t addr, uint8_t *out, uint32_t n)
         {
             if (!rdram || !out || addr == 0u || (addr & PS2_RAM_MASK) + n > PS2_RAM_SIZE)
@@ -1052,6 +1072,21 @@ namespace ps2_stubs
             std::memcpy(rdram + (addr & PS2_RAM_MASK), in, n);
             return true;
         }
+        // The full six-handle set must match: a submenu screen reusing
+        // one pool slot never replicates the menu's set (f3 lesson).
+        bool qpNavLabelSetMatches(uint8_t *rdram)
+        {
+            for (uint32_t i = 0u; i < 6u; ++i)
+            {
+                const uint32_t ptr = qpNavReadMenu(rdram, kQpLabelSet[i].slot);
+                const uint32_t len = qpNavReadMenu(rdram, kQpLabelSet[i].slot + 4u);
+                if (ptr != kQpLabelSet[i].ptr || len != kQpLabelSet[i].len)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
         void qpNavPatchMenuLabel(uint8_t *rdram, uint64_t tick)
         {
             static const uint8_t kStockText[14] = {'O', 0, 'n', 0, 'l', 0, 'i', 0,
@@ -1065,14 +1100,14 @@ namespace ps2_stubs
             {
                 return; // already patched
             }
-            if (ptr != kQpLabelStockPtr || len != kQpLabelStockLen)
+            if (ptr != kQpLabelStockPtr || len != kQpLabelStockLen || !qpNavLabelSetMatches(rdram))
             {
                 static bool logged = false;
                 if (!logged)
                 {
                     logged = true;
                     std::fprintf(stderr,
-                                 "[qpnav] label: slot not stock (ptr=0x%x len=%u), skipped\n",
+                                 "[qpnav] label: menu set not stock (ptr=0x%x len=%u), skipped\n",
                                  ptr, len);
                 }
                 return;
@@ -1107,6 +1142,33 @@ namespace ps2_stubs
                 return;
             }
             std::fprintf(stderr, "[qpnav] label: main-menu Online -> Quick Play at tick=%llu\n",
+                         static_cast<unsigned long long>(tick));
+        }
+        // f3 lesson: restore stock + zero the text when the menu is left
+        // while our patch is in place, so no stale handle rides into a
+        // submenu screen's pool reuse. Safe: the condition (ptr/len are
+        // ours) means no screen claims the slot.
+        void qpNavRestoreMenuLabel(uint8_t *rdram, uint64_t tick)
+        {
+            const uint32_t ptr = qpNavReadMenu(rdram, kQpLabelSlot);
+            const uint32_t len = qpNavReadMenu(rdram, kQpLabelSlot + 4u);
+            if (ptr != kQpLabelSlot + 8u || len != kQpLabelNewLen)
+            {
+                return;
+            }
+            static const uint8_t kZero[kQpLabelBytes] = {};
+            if (!qpNavWriteBytes(rdram, kQpLabelSlot + 8u, kZero, sizeof(kZero)))
+            {
+                return;
+            }
+            uint8_t handle[8] = {};
+            std::memcpy(handle, &kQpLabelStockPtr, 4u);
+            std::memcpy(handle + 4u, &kQpLabelStockLen, 4u);
+            if (!qpNavWriteBytes(rdram, kQpLabelSlot, handle, sizeof(handle)))
+            {
+                return;
+            }
+            std::fprintf(stderr, "[qpnav] label: restored stock at tick=%llu\n",
                          static_cast<unsigned long long>(tick));
         }
 
@@ -1337,7 +1399,9 @@ namespace ps2_stubs
             // ONL11 addendum: menu label on sight, online mode only, ahead
             // of the armed gate: the main menu shows before the first
             // Online entry (pre-arm), and the handle table rebuilds per
-            // screen, so re-apply whenever title/main is seen.
+            // screen, so re-apply whenever title/main is seen. Leaving
+            // the menu restores stock (f3: no stale handles into
+            // submenu pool reuse).
             if (g_qpNav.onlineMode && port == 0 && runtime != nullptr)
             {
                 uint8_t *labelRam = runtime->memory().getRDRAM();
@@ -1349,6 +1413,10 @@ namespace ps2_stubs
                         (labelMain == 2u && labelSub == 9u))
                     {
                         qpNavPatchMenuLabel(labelRam, guestVsyncTick);
+                    }
+                    else
+                    {
+                        qpNavRestoreMenuLabel(labelRam, guestVsyncTick);
                     }
                 }
             }
