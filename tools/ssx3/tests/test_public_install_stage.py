@@ -31,6 +31,7 @@ class PublicInstallStageTest(unittest.TestCase):
             elf = work / 'SLUS_207.72'
             elf.write_bytes(b'elf')
             calls = []
+            directory_checks = {}
             def fake_adb(_args, *parts, capture=False):
                 calls.append(parts)
                 if parts[:3] == ('shell', 'pm', 'path'):
@@ -41,6 +42,12 @@ class PublicInstallStageTest(unittest.TestCase):
                             (files / remote.rsplit('/', 1)[-1]) if remote.endswith('.env') else elf
                     return build.sha(local) + '  ' + remote
                 return ''
+            def fake_run(command, **_kwargs):
+                if command[-3:-1] == ['test', '-d']:
+                    remote = command[-1]
+                    directory_checks[remote] = directory_checks.get(remote, 0) + 1
+                    return types.SimpleNamespace(returncode=directory_checks[remote] == 1)
+                return types.SimpleNamespace(returncode=1)
             args = types.SimpleNamespace(work=work, app_id='com.ssx3.recomp',
                                          dry_run=False, serial='test')
             with patch.object(build, 'ROOT', root), \
@@ -48,7 +55,8 @@ class PublicInstallStageTest(unittest.TestCase):
                  patch.object(build, 'verified_disc_payload', return_value=[(elf, 'SLUS_207.72')]), \
                  patch.object(build, 'apk_package', return_value=args.app_id), \
                  patch.object(build, 'adb', side_effect=fake_adb), \
-                 patch.object(build.subprocess, 'run', return_value=types.SimpleNamespace(returncode=1)):
+                 patch.object(build.subprocess, 'run', side_effect=fake_run), \
+                 patch.object(build.time, 'sleep'):
                 build.install(args)
             self.assertFalse(any('mkdir' in str(part) for call in calls for part in call))
             self.assertLess(calls.index(('shell', 'am', 'start', '-n',
@@ -56,8 +64,10 @@ class PublicInstallStageTest(unittest.TestCase):
                             next(i for i, call in enumerate(calls) if call[0] == 'push'))
             self.assertIn(('shell', 'chmod', '-R', 'o+rX',
                            '/sdcard/Android/data/com.ssx3.recomp/files/ge1-resources'), calls)
-            self.assertIn(('shell', 'test', '-d',
-                           '/sdcard/Android/data/com.ssx3.recomp/files/mc0'), calls)
+            self.assertEqual(directory_checks, {
+                '/sdcard/Android/data/com.ssx3.recomp/files/ge1-data': 2,
+                '/sdcard/Android/data/com.ssx3.recomp/files/mc0': 2,
+            })
 
 
 if __name__ == '__main__':

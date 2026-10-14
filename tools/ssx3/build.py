@@ -12,6 +12,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 import urllib.request
 import zipfile
 
@@ -629,10 +630,18 @@ def install(a):
     # may exit immediately; only directory creation is needed here.
     try:
         adb(a, 'shell', 'am', 'start', '-n', a.app_id + '/android.app.NativeActivity')
+        # am start returns before Application.onCreate runs. Wait for the app
+        # to create both directories before stopping its bootstrap process.
+        deadline = time.monotonic() + 30
+        for directory in ('ge1-data', 'mc0'):
+            remote = device + '/' + directory
+            while subprocess.run(['adb'] + (['-s', a.serial] if a.serial else []) +
+                                 ['shell', 'test', '-d', remote], check=False).returncode:
+                if time.monotonic() >= deadline:
+                    raise ValueError('app did not create ' + remote)
+                time.sleep(0.25)
     finally:
         adb(a, 'shell', 'am', 'force-stop', a.app_id)
-    for directory in ('ge1-data', 'mc0'):
-        adb(a, 'shell', 'test', '-d', shlex.quote(device + '/' + directory))
     sources = disc_sources + [(files / 'ps2x.env', 'ps2x.env'),
                               (files / 'full120.env', 'full120.env')]
     for source_path, relative in sources:
