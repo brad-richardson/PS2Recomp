@@ -125,6 +125,11 @@ inline std::string trickyEnvFilePathForBootElf(const char *bootElf)
 // does not, so the panel cannot compute the path itself.
 std::string settingsEnvFilePath();
 
+// ONL11: <bootElfDir>/quickplay.login — the stored Quick Play login (the
+// net layer reads it, creating it on first Online entry). Same split as
+// settingsEnvFilePath: defined in ps2_android_runtime.cpp.
+std::string quickplayLoginFilePath();
+
 // TKO1: the "SSX 3 · Tricky" launcher entry sets PS2X_LAUNCH_LAYER=tricky
 // (Java, before the runner library loads). Only the exact text "tricky"
 // selects the layer; a 120 launch wins if both are set.

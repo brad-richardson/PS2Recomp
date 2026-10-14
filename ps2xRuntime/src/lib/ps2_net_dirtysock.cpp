@@ -17,6 +17,7 @@
 #include "runtime/ps2_memory.h"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <map>
@@ -26,6 +27,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <random>
 #include <string>
 
 #if defined(__APPLE__) || defined(__linux__)
@@ -33,10 +35,15 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #define PS2_NET_HAVE_POSIX_SOCKETS 1
 #else
 #define PS2_NET_HAVE_POSIX_SOCKETS 0
+#endif
+
+#if defined(__ANDROID__)
+#include "ps2_android_env.h" // ONL11: files-dir login path accessor
 #endif
 
 namespace ps2_net
@@ -130,6 +137,10 @@ namespace ps2_net
         // (qpNavNote gate below), so the knob-off path keeps one
         // cached branch per handler site and zero guest-visible change.
         std::atomic<uint64_t> g_qpNetwCrea{0u};
+        // ONL11: Online-entry count (incremented per netw/crea call, only
+        // behind the qpNavNote gate). The online arming mode watches for
+        // advances: each new entry re-arms the navigator after a back-out.
+        std::atomic<uint64_t> g_qpNetwCreaCount{0u};
         std::atomic<uint64_t> g_qpNetwList{0u};
         std::atomic<uint64_t> g_qpNetwStar{0u};
         std::atomic<uint64_t> g_qpSessConnOk{0u};
@@ -143,15 +154,38 @@ namespace ps2_net
         std::atomic<uint64_t> g_qpRget{0u};
         std::atomic<uint64_t> g_qpQuik{0u};
         std::atomic<uint64_t> g_qpQuikCount{0u};
+        // ONL11: navigator arming mode. 0 = off (NAV unset or any other
+        // value, or QUICKPLAY off), 1 = launch-flag (arm at boot, ONL10),
+        // 2 = online (dormant until the player enters Online, ONL11).
+        int qpNavModeImpl()
+        {
+            static const int mode = [] {
+                const char *qp = std::getenv("PS2X_NET_QUICKPLAY");
+                if (!qp || std::string(qp) != "1")
+                {
+                    return 0;
+                }
+                const char *nav = std::getenv("PS2X_NET_QUICKPLAY_NAV");
+                if (!nav)
+                {
+                    return 0;
+                }
+                const std::string v(nav);
+                if (v == "1")
+                {
+                    return 1;
+                }
+                if (v == "online")
+                {
+                    return 2;
+                }
+                return 0;
+            }();
+            return mode;
+        }
         bool qpNavNote()
         {
-            static const bool want = [] {
-                const char *nav = std::getenv("PS2X_NET_QUICKPLAY_NAV");
-                const char *qp = std::getenv("PS2X_NET_QUICKPLAY");
-                return nav && std::string(nav) == "1" && qp &&
-                       std::string(qp) == "1";
-            }();
-            return want;
+            return qpNavModeImpl() != 0;
         }
         void qpSetFirst(std::atomic<uint64_t> &slot, uint64_t tick)
         {
@@ -180,18 +214,45 @@ namespace ps2_net
             return on;
         }
 
-        bool readQuickplayLoginFile()
+        // ONL11: login-file path. Explicit PS2X_NET_QUICKPLAY_FILE wins;
+        // otherwise the app's own data dir, resolved like other app-dir
+        // paths (Android files dir via the boot-ELF sibling accessor, iOS
+        // Documents via PS2X_IOS_DOCUMENTS), falling back to the
+        // Mac/desktop dotfile. Empty when no location resolves.
+        std::string quickplayLoginPath()
         {
-            std::string path;
             if (const char *env = std::getenv("PS2X_NET_QUICKPLAY_FILE"))
             {
-                path = env;
+                if (*env)
+                {
+                    return std::string(env);
+                }
             }
-            else if (const char *home = std::getenv("HOME"))
+#if defined(__ANDROID__)
+            return ps2x::quickplayLoginFilePath();
+#else
+            if (const char *docs = std::getenv("PS2X_IOS_DOCUMENTS"))
             {
-                path = std::string(home) + "/.config/ssx3-quickplay-login";
+                if (*docs)
+                {
+                    return std::string(docs) + "/quickplay.login";
+                }
             }
-            else
+            if (const char *home = std::getenv("HOME"))
+            {
+                if (*home)
+                {
+                    return std::string(home) + "/.config/ssx3-quickplay-login";
+                }
+            }
+            return std::string();
+#endif
+        }
+
+        bool readQuickplayLoginFile()
+        {
+            const std::string path = quickplayLoginPath();
+            if (path.empty())
             {
                 return false;
             }
@@ -229,6 +290,95 @@ namespace ps2_net
             return true;
         }
 
+        // ONL11: first-Online-entry login creation. When quickplay is on
+        // but no login is configured (no PS2X_NET_LOGIN and no stored file
+        // at boot), the first observed Online entry generates persona
+        // "rider"+4 random digits with a random password, persists it
+        // (mode 600), and arms the login path. Runs on the netw/crea
+        // handler, well before the submit (~tick 7100), so the preload and
+        // the submit-fill carry it. The lobby auto-registers unknown
+        // accounts (Rust lobby main.rs "auth": open mode accepts any
+        // non-empty NAME; password mode creates on first connect; only an
+        // empty/oversize NAME, a known-account password mismatch, or the
+        // account cap closes). Secrets are never logged: only the path.
+        void ensureQuickplayLogin(uint64_t tick)
+        {
+            (void)tick;
+            if (!quickplayOn() || g_loginOn)
+            {
+                return;
+            }
+#if PS2_NET_HAVE_POSIX_SOCKETS
+            const std::string path = quickplayLoginPath();
+            if (path.empty())
+            {
+                return;
+            }
+            // Appeared since boot (or a second entry after one created it):
+            // just read it.
+            if (readQuickplayLoginFile())
+            {
+                g_loginOn = true;
+                std::cerr << "[net] quickplay prefill login name='" << g_loginName
+                          << "' src=file (late)" << std::endl;
+                return;
+            }
+            std::random_device rd;
+            std::mt19937 gen(rd());
+            std::uniform_int_distribution<uint32_t> digits(0u, 9999u);
+            char name[16] = {};
+            std::snprintf(name, sizeof(name), "rider%04u",
+                          static_cast<unsigned>(digits(gen)));
+            static const char kPassChars[] =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            std::uniform_int_distribution<size_t> pick(0u, sizeof(kPassChars) - 2u);
+            char pass[17] = {};
+            for (size_t i = 0u; i < 16u; ++i)
+            {
+                pass[i] = kPassChars[pick(gen)];
+            }
+            const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+            if (fd < 0)
+            {
+                if (errno == EEXIST && readQuickplayLoginFile())
+                {
+                    g_loginOn = true;
+                    std::cerr << "[net] quickplay prefill login name='" << g_loginName
+                              << "' src=file (late)" << std::endl;
+                    return;
+                }
+                std::cerr << "[net] quickplay: cannot create login file at '" << path
+                          << "' (" << std::strerror(errno) << ")" << std::endl;
+                return;
+            }
+            ::fchmod(fd, 0600);
+            const std::string line = std::string(name) + ":" + pass + "\n";
+            size_t done = 0u;
+            while (done < line.size())
+            {
+                const ssize_t w =
+                    ::write(fd, line.data() + done, line.size() - done);
+                if (w <= 0)
+                {
+                    break;
+                }
+                done += static_cast<size_t>(w);
+            }
+            ::close(fd);
+            if (done != line.size() || !readQuickplayLoginFile())
+            {
+                std::cerr << "[net] quickplay: login file write failed at '" << path
+                          << "'" << std::endl;
+                return;
+            }
+            g_loginOn = true;
+            std::cerr << "[net] quickplay created login file at '" << path << "'"
+                      << std::endl;
+#else
+            return;
+#endif
+        }
+
         void parseLoginKnob()
         {
             if (g_loginParsed)
@@ -245,8 +395,10 @@ namespace ps2_net
                 }
                 if (!readQuickplayLoginFile())
                 {
-                    std::cerr << "[net] quickplay=1 on, no stored login file; "
-                                 "set PS2X_NET_LOGIN or PS2X_NET_QUICKPLAY_FILE"
+                    std::cerr << "[net] quickplay=1 on, no stored login file "
+                                 "(set PS2X_NET_LOGIN or PS2X_NET_QUICKPLAY_FILE "
+                                 "to fix the identity); a fresh login is created "
+                                 "on first Online entry"
                               << std::endl;
                     return;
                 }
@@ -583,6 +735,7 @@ namespace ps2_net
     }
 
     // ONL10: navigator milestone snapshot + knob reads (see the header).
+    // ONL11: qpNavMode 0/1/2 (off/launch/online); wanted = mode != 0.
     bool qpNavQuickplayOn()
     {
         return quickplayOn();
@@ -590,17 +743,19 @@ namespace ps2_net
 
     bool qpNavWanted()
     {
-        static const bool want = [] {
-            const char *nav = std::getenv("PS2X_NET_QUICKPLAY_NAV");
-            return nav && std::string(nav) == "1";
-        }();
-        return want && quickplayOn();
+        return qpNavModeImpl() != 0;
+    }
+
+    int qpNavMode()
+    {
+        return qpNavModeImpl();
     }
 
     QpNavMilestones qpNavMilestones()
     {
         QpNavMilestones m;
         m.netwCrea = g_qpNetwCrea.load(std::memory_order_relaxed);
+        m.creaCount = g_qpNetwCreaCount.load(std::memory_order_relaxed);
         m.netwList = g_qpNetwList.load(std::memory_order_relaxed);
         m.netwStar = g_qpNetwStar.load(std::memory_order_relaxed);
         m.sessConnOk = g_qpSessConnOk.load(std::memory_order_relaxed);
@@ -1641,12 +1796,19 @@ namespace ps2_net
                 else if (method == 0u)
                 {
                     // netw/crea: a2 = IOP addr of the domain ("www.ea.com").
+                    // Observed when the player enters Online from the main
+                    // menu (ONL10 D1: first guest net call of the Online
+                    // flow; the SP dance is net-silent). ONL11: arms the
+                    // online navigator mode and the first-Online-entry
+                    // login creation.
                     std::cerr << " domain='" << dmaString(w0) << "'";
                     status = 0u;
                     if (qpNavNote())
                     {
                         qpSetFirst(g_qpNetwCrea, tick);
+                        g_qpNetwCreaCount.fetch_add(1u, std::memory_order_relaxed);
                     }
+                    ensureQuickplayLogin(tick);
                 }
                 else if (method == 2u)
                 {

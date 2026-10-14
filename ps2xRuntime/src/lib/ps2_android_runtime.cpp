@@ -186,6 +186,17 @@ std::string settingsEnvFilePath()
     return std::string();
 #endif
 }
+
+// ONL11: files-dir Quick Play login path (read, created on first Online
+// entry when missing). Same boot-ELF sibling shape as settings.env.
+std::string quickplayLoginFilePath()
+{
+#if defined(PS2X_DEFAULT_BOOT_ELF)
+    return siblingFilePathForBootElf(PS2X_DEFAULT_BOOT_ELF, "quickplay.login");
+#else
+    return std::string();
+#endif
+}
 } // namespace ps2x
 
 #endif // __ANDROID__

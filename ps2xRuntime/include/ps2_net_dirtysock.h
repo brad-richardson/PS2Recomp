@@ -63,6 +63,7 @@ namespace ps2_net
     struct QpNavMilestones
     {
         uint64_t netwCrea = 0u;   // Online entered (RpcNetworkCreate)
+        uint64_t creaCount = 0u;  // ONL11: netw/crea calls this boot
         uint64_t netwList = 0u;   // config list served (screen #8 open)
         uint64_t netwStar = 0u;   // saved config accepted (screen #8 OK)
         uint64_t sessConnOk = 0u; // lobby TCP connected (login submitted)
@@ -79,7 +80,10 @@ namespace ps2_net
     };
     QpNavMilestones qpNavMilestones();
 
-    // ONL10: cached knob reads. navWanted() = NAV=1 && QUICKPLAY=1.
+    // ONL10: cached knob reads. navWanted() = NAV set && QUICKPLAY=1.
+    // ONL11: qpNavMode() 0 = off, 1 = launch-flag (arm at boot), 2 =
+    // online (dormant until Online entry, re-arms after a back-out).
     bool qpNavQuickplayOn();
     bool qpNavWanted();
+    int qpNavMode();
 } // namespace ps2_net

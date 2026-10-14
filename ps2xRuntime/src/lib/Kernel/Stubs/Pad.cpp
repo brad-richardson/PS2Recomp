@@ -1033,6 +1033,11 @@ namespace ps2_stubs
             std::mutex mutex;
             bool initDone = false;
             bool armed = false;
+            // ONL11 online mode (=online): dormant until the player enters
+            // Online; seenCreaCount is the netw/crea count consumed by the
+            // last arming (a fresh advance re-arms after a back-out).
+            bool onlineMode = false;
+            uint64_t seenCreaCount = 0u;
             size_t idx = 0u;
             uint64_t stepStart = 0u;
             uint64_t lastFire = 0u;
@@ -1082,11 +1087,17 @@ namespace ps2_stubs
                 return;
             }
             g_qpNav.initDone = true;
-            g_qpNav.armed = ps2_net::qpNavWanted();
-            if (!g_qpNav.armed)
+            // ONL11: launch mode arms at boot (ONL10 shape); online mode
+            // stays dormant until the first netw/crea (see qpNavOnRead).
+            // Tables are built for both modes so arming is cheap later.
+            const int navMode = ps2_net::qpNavMode();
+            if (navMode == 0)
             {
+                g_qpNav.armed = false;
                 return;
             }
+            g_qpNav.onlineMode = (navMode == 2);
+            g_qpNav.armed = !g_qpNav.onlineMode;
             uint64_t prevMs = 0u;
             for (size_t i = 0u; i < kQpNavSteps; ++i)
             {
@@ -1156,7 +1167,10 @@ namespace ps2_stubs
             std::lock_guard<std::mutex> lock(g_qpNav.mutex);
             qpNavInitLocked();
             g_qpNavInitDone.store(true, std::memory_order_relaxed);
-            if (g_qpNav.armed)
+            // ONL11: the fast-path atomic means "navigator enabled" (armed
+            // now, or online mode waiting for an Online entry). Knob-off
+            // keeps it false: one load per pad read, zero guest change.
+            if (g_qpNav.armed || g_qpNav.onlineMode)
             {
                 g_qpNavArmed.store(true, std::memory_order_relaxed);
             }
@@ -1230,6 +1244,33 @@ namespace ps2_stubs
                 return;
             }
             std::lock_guard<std::mutex> lock(g_qpNav.mutex);
+            // ONL11 online mode: dormant through boot, title, menus and
+            // single-player. A fresh netw/crea (the player entering Online
+            // from the main menu; the SP dance is net-silent) arms at
+            // wait-crea, skipping the dance the user just drove. Any
+            // terminal state disarms back to waiting (see below), so
+            // backing out of Online re-arms on the next entry.
+            if (g_qpNav.onlineMode && !g_qpNav.armed)
+            {
+                const ps2_net::QpNavMilestones wm = ps2_net::qpNavMilestones();
+                if (wm.creaCount == 0u || wm.creaCount == g_qpNav.seenCreaCount)
+                {
+                    return;
+                }
+                g_qpNav.armed = true;
+                g_qpNav.done = false;
+                g_qpNav.aborted = false;
+                g_qpNav.cancelled = false;
+                g_qpNav.armLogged = false;
+                g_qpNav.idx = g_qpNav.waitCreaIdx;
+                g_qpNav.stepStart = guestVsyncTick;
+                g_qpNav.lastFire = guestVsyncTick;
+                g_qpNav.holdMask = 0u;
+                g_qpNav.seenCreaCount = wm.creaCount;
+                std::fprintf(stderr, "[qpnav] online-arm creaCount=%llu at tick=%llu\n",
+                             static_cast<unsigned long long>(wm.creaCount),
+                             static_cast<unsigned long long>(guestVsyncTick));
+            }
             if (!g_qpNav.armed || g_qpNav.done || g_qpNav.aborted || g_qpNav.cancelled)
             {
                 return;
@@ -1246,6 +1287,8 @@ namespace ps2_stubs
             if (userActive)
             {
                 g_qpNav.cancelled = true;
+                // ONL11: backing out disarms until the next Online entry.
+                g_qpNav.armed = !g_qpNav.onlineMode;
                 std::fprintf(stderr, "[qpnav] cancel: user input at tick=%llu\n",
                              static_cast<unsigned long long>(guestVsyncTick));
                 return;
@@ -1277,6 +1320,7 @@ namespace ps2_stubs
             if (guestVsyncTick >= g_qpNav.stepStart + s.timeout)
             {
                 g_qpNav.aborted = true;
+                g_qpNav.armed = !g_qpNav.onlineMode; // ONL11: wait for next entry
                 std::fprintf(stderr, "QP-NAV abort %s menu=0x%x/0x%x at tick=%llu\n", s.name,
                              menuMain, menuSub,
                              static_cast<unsigned long long>(guestVsyncTick));
@@ -1293,6 +1337,7 @@ namespace ps2_stubs
                 if (menuMain == 1u)
                 {
                     g_qpNav.aborted = true;
+                    g_qpNav.armed = !g_qpNav.onlineMode; // ONL11: wait for next entry
                     std::fprintf(stderr, "QP-NAV abort %s (dance-title) at tick=%llu\n",
                                  s.name, static_cast<unsigned long long>(guestVsyncTick));
                     return;
@@ -1318,6 +1363,7 @@ namespace ps2_stubs
             if (m.sessConnFail != 0u)
             {
                 g_qpNav.aborted = true;
+                g_qpNav.armed = !g_qpNav.onlineMode; // ONL11: wait for next entry
                 std::fprintf(stderr, "QP-NAV abort %s (sess-conn-failed) at tick=%llu\n", s.name,
                              static_cast<unsigned long long>(guestVsyncTick));
                 return;
@@ -1345,6 +1391,7 @@ namespace ps2_stubs
             if (s.gate == QG_FILTER_STOP)
             {
                 g_qpNav.done = true;
+                g_qpNav.armed = !g_qpNav.onlineMode; // ONL11: wait for next entry
                 std::fprintf(stderr,
                              "[qpnav] done: filter reached with OK highlighted, quik=%llu "
                              "menu=0x%x/0x%x at tick=%llu\n",
