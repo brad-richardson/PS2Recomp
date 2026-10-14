@@ -132,6 +132,70 @@ namespace ps2_net
         std::string g_loginName;
         std::string g_loginPass;
 
+        // ONL9: one-tap Quick Play prefill (knob PS2X_NET_QUICKPLAY=1,
+        // default off, class net). When on and PS2X_NET_LOGIN is unset,
+        // credentials come from a local, gitignored file
+        // (PS2X_NET_QUICKPLAY_FILE, or ~/.config/ssx3-quickplay-login;
+        // first line "name:pass"). Inert when the knob is off: no file
+        // read, no log, no guest-visible change.
+        bool quickplayOn()
+        {
+            static const bool on = [] {
+                const char *env = std::getenv("PS2X_NET_QUICKPLAY");
+                return env && std::string(env) == "1";
+            }();
+            return on;
+        }
+
+        bool readQuickplayLoginFile()
+        {
+            std::string path;
+            if (const char *env = std::getenv("PS2X_NET_QUICKPLAY_FILE"))
+            {
+                path = env;
+            }
+            else if (const char *home = std::getenv("HOME"))
+            {
+                path = std::string(home) + "/.config/ssx3-quickplay-login";
+            }
+            else
+            {
+                return false;
+            }
+            std::ifstream in(path);
+            if (!in)
+            {
+                return false;
+            }
+            std::string line;
+            if (!std::getline(in, line) || line.size() > 256u)
+            {
+                return false;
+            }
+            while (!line.empty() &&
+                   (line.back() == '\r' || line.back() == '\n' ||
+                    line.back() == ' ' || line.back() == '\t'))
+            {
+                line.pop_back();
+            }
+            while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
+            {
+                line.erase(line.begin());
+            }
+            const size_t colon = line.find(':');
+            if (colon == std::string::npos || colon == 0u ||
+                colon + 1u >= line.size() || colon > 64u ||
+                line.size() - colon - 1u > 64u || line.size() - colon - 1u == 0u)
+            {
+                std::cerr << "[net] quickplay login file malformed (want name:pass)"
+                          << std::endl;
+                return false;
+            }
+            g_loginName = line.substr(0u, colon);
+            g_loginPass = line.substr(colon + 1u);
+            return true;
+        }
+
         void parseLoginKnob()
         {
             if (g_loginParsed)
@@ -142,6 +206,20 @@ namespace ps2_net
             const char *env = std::getenv("PS2X_NET_LOGIN");
             if (!env || !*env || *env == '0')
             {
+                if (!quickplayOn())
+                {
+                    return;
+                }
+                if (!readQuickplayLoginFile())
+                {
+                    std::cerr << "[net] quickplay=1 on, no stored login file; "
+                                 "set PS2X_NET_LOGIN or PS2X_NET_QUICKPLAY_FILE"
+                              << std::endl;
+                    return;
+                }
+                g_loginOn = true;
+                std::cerr << "[net] quickplay prefill login name='" << g_loginName
+                          << "' src=file" << std::endl;
                 return;
             }
             std::string v(env);
@@ -179,7 +257,8 @@ namespace ps2_net
                 g_loginPass = v.substr(colon + 1u);
             }
             g_loginOn = true;
-            std::cerr << "[net] PS2X_NET_LOGIN name='" << g_loginName << "'" << std::endl;
+            std::cerr << "[net] PS2X_NET_LOGIN name='" << g_loginName << "'"
+                      << (quickplayOn() ? " quickplay=1" : "") << std::endl;
         }
 
         void closeSocket(uint32_t handle)
