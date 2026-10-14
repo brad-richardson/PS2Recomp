@@ -1221,6 +1221,10 @@ namespace ps2_savestate
             manifestWritten = true;
         }
 
+        // Timer state is part of the committed VBlank boundary in both
+        // comparison modes, even when serialization/digest is skipped.
+        runtime.memory().flushEeTimers();
+
         if (!hashOn)
         {
             const uint64_t waitNs = ps2_mtvu::threadedWaitNsTotal() - wait0;
@@ -1248,7 +1252,6 @@ namespace ps2_savestate
             w.endSection(mark);
             parts.emplace_back(key, sectionDigest(w.buf.data() + begin, w.buf.size() - begin));
         };
-        runtime.memory().flushEeTimers();
         section("memory", kMemoryVersion, [&] { PS2RuntimeSavestate::saveMemory(runtime.memory(), w); });
         section("kernel", kRuntimeVersion, [&] { PS2RuntimeSavestate::saveKernel(runtime, w); });
         section("scheduler", kSchedulerVersion, [&] { EeSchedulerSavestate::save(sched, w); });
