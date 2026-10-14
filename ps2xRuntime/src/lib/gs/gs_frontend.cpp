@@ -477,6 +477,9 @@ void GS::noteConsumedCommand(const GsCommand &cmd)
         pktSeqMixU64(d, cmd.regValue);
         pktSeqMixU32(d, cmd.u32a);
         break;
+    case GsCmdKind::SetOndeviceUpscale:
+        pktSeqMixU32(d, cmd.u32a);
+        break;
     default:
         // Side RPCs (Consume/ReadVram/RefreshSnapshot/DiagPresent/…)
         // carry no packet bytes: kind tag only, still counted so the
@@ -653,6 +656,12 @@ void GS::executeQueuedCommand(GsCommand &cmd)
         // order); the backend call above stays the vsync's only guest effect.
         if (m_gsEmpty.noteVsync(cmd.u32b != 0u))
             ps2x::perflog::noteGsEmptyWindow();
+        break;
+    case GsCmdKind::SetOndeviceUpscale:
+        // REM3 P11 Phase 2: the ordered toggle command lands here, on the
+        // host GS worker, after all prior packets (FIFO drained by order).
+        if (m_backend)
+            m_backend->SetOndeviceUpscale(cmd.u32a != 0u);
         break;
     case GsCmdKind::Consume:
     {
@@ -2182,6 +2191,22 @@ void GS::noteGuestVsync(uint64_t tick, bool deferCacheFlush)
     m_backend->GuestVsync(tick, field);
     if (ps2_rb1_reverseDmaMode() == 4)
         lagfOnGuestVsync(tick); // LT1b
+}
+
+void GS::setOndeviceUpscale(bool on)
+{
+    if (!m_backend)
+        return;
+    if (m_worker && !t_inGsWorker)
+    {
+        GsCommand cmd;
+        cmd.kind = GsCmdKind::SetOndeviceUpscale;
+        cmd.u32a = on ? 1u : 0u;
+        m_worker->enqueue(std::move(cmd));
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+    m_backend->SetOndeviceUpscale(on);
 }
 
 void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)

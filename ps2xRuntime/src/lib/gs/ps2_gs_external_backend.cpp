@@ -229,6 +229,9 @@ struct Ge1Api
     // BG1: optional (pre-PW1 libraries lack it; a missing symbol only skips the pause flush).
     decltype(&ge1_gs_flush_caches) flushCaches = nullptr;
     decltype(&ge1_gs_set_cache_flush_deferred) deferCacheFlush = nullptr;
+    // REM3 P11 Phase 2: optional (pre-Phase-2 libraries lack it; without it
+    // the panel row persists but the toggle is a no-op).
+    decltype(&ge1_gs_set_ondevice_upscale) setOndeviceUpscale = nullptr;
     // LT1b: optional probe quartet (pre-LT1b libraries lack it; lagF then reads
     // synchronously at the set).
     decltype(&ge1_gs_probe_request) probeRequest = nullptr;
@@ -274,6 +277,7 @@ struct Ge1Api
             backMs = ::ge1_gs_back_ms; // PT2 Part 2: static bind (same ABI)
             flushCaches = ::ge1_gs_flush_caches; // BG1 fold: static bind (same ABI)
             deferCacheFlush = ::ge1_gs_set_cache_flush_deferred;
+            setOndeviceUpscale = ::ge1_gs_set_ondevice_upscale;
             // IOSL1: static probe bind (LT1b quartet). iOS links GE1
             // statically, so lagF uses the linked symbols directly. Unlike
             // the dlsym path this needs the symbols at link time (the
@@ -327,6 +331,11 @@ struct Ge1Api
         // PCF1: optional for older GE1 libraries (their periodic policy is unchanged).
         deferCacheFlush = reinterpret_cast<decltype(deferCacheFlush)>(
             dlsym(library, "ge1_gs_set_cache_flush_deferred"));
+        // REM3 P11 Phase 2: optional (see above); never fails the load.
+        setOndeviceUpscale = reinterpret_cast<decltype(setOndeviceUpscale)>(
+            dlsym(library, "ge1_gs_set_ondevice_upscale"));
+        if (!setOndeviceUpscale)
+            std::fprintf(stderr, "[gs:external] GE1 library predates ge1_gs_set_ondevice_upscale; panel toggle persists only\n");
         // DS1: optional freeze trio (see above); never fails the load.
         freezeSize = reinterpret_cast<decltype(freezeSize)>(dlsym(library, "ge1_gs_freeze_size"));
         freezeSave = reinterpret_cast<decltype(freezeSave)>(dlsym(library, "ge1_gs_freeze_save"));
@@ -1597,6 +1606,12 @@ public:
     {
         if (m_ge1Active && m_ge1.deferCacheFlush)
             m_ge1.deferCacheFlush(deferred ? 1 : 0);
+    }
+
+    void SetOndeviceUpscale(bool on) override
+    {
+        if (m_ge1Active && m_ge1.setOndeviceUpscale)
+            m_ge1.setOndeviceUpscale(on ? 1 : 0);
     }
 
     void GuestVsync(uint64_t tick, uint32_t field) override

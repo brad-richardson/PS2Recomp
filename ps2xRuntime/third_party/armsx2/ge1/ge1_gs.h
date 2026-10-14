@@ -47,6 +47,11 @@ GE1_API float ge1_gs_back_ms(void);
 GE1_API int ge1_gs_flush_caches(void);
 // PCF1: GS-thread policy setter; explicit app-pause flush still overrides it.
 GE1_API void ge1_gs_set_cache_flush_deferred(int deferred);
+// REM3 P11 Phase 2: live "On-device upscale" toggle. Must be called on the
+// host GS worker (the GsCmdKind::SetOndeviceUpscale dispatch does): applies
+// the vendor flag with a fresh sequence and purges the texture cache so
+// replacements re-resolve with no reboot. No-op when closed.
+GE1_API void ge1_gs_set_ondevice_upscale(int on);
 // DS1: quick-save support. Thin wrappers over GSfreeze (the GS runs
 // single-threaded, GSVSyncMode::Disabled, so the caller owns the renderer).
 // freeze_size returns the blob bytes (>0) or 0 when closed/failed;

@@ -5,6 +5,8 @@
 #include "pcsx2/GS.h"
 #include "pcsx2/GS/GS.h"
 #include "pcsx2/GS/GSBackgroundWriter.h"
+#include "pcsx2/GS/Renderers/HW/GSTextureOnDeviceUpscale.h"
+#include "pcsx2/GS/Renderers/Common/GSRenderer.h"
 #include "pcsx2/Host.h"
 #include "pcsx2/ImGui/ImGuiManager.h"
 #include "common/Console.h"
@@ -257,6 +259,14 @@ void configure_texture_replacement(Pcsx2Config::GSOptions& config)
     config.LoadTextureReplacements = want_repl;
     config.PrecacheTextureReplacements = want_repl && pre && std::strcmp(pre, "1") == 0;
     config.LoadTextureReplacementsAsync = !(want_repl && pre && std::strcmp(pre, "sync") == 0);
+    // REM3 P11 Phase 2: seed the live toggle's config bit from the open-time
+    // env so it matches the vendor flag (InitializeFromEnvironment reads the
+    // same var). Phase 2's worker command drives it live after open.
+    if (const char* odu = std::getenv("GE1_ONDEVICE_UPSCALE"); odu && std::strcmp(odu, "1") == 0)
+    {
+        config.OnDeviceUpscale = true;
+        std::fprintf(stderr, "ODU: config bit on (env)\n");
+    }
     if (want_dump || want_repl)
         std::fprintf(stderr, "RMT1: tex dump=%s replace=%s precache=%d async=%d\n", want_dump ? dump : "off",
             want_repl ? repl : "off", config.PrecacheTextureReplacements ? 1 : 0,
@@ -881,6 +891,23 @@ extern "C" GE1_API void ge1_gs_set_cache_flush_deferred(int deferred)
 {
     s_flush_deferred = deferred != 0;
     GSSetPipelineCacheFlushDeferred(s_flush_deferred);
+}
+
+extern "C" GE1_API void ge1_gs_set_ondevice_upscale(int on)
+{
+    // REM3 P11 Phase 2: the worker-thread half of the ordered toggle command
+    // (GsCmdKind::SetOndeviceUpscale dispatch). GE1 runs the GS
+    // single-threaded (MTGS closed), so GSUpdateConfig never runs here: apply
+    // the vendor flag directly with a fresh sequence, then purge so the next
+    // draws re-resolve. Same-thread-as-draws by construction (the dispatch),
+    // fonts sync-only, so nothing outlives the purge. No-op when closed.
+    if (!s_open)
+        return;
+    static unsigned s_seq = 0;
+    GE1OnDeviceUpscale::ApplyOnDeviceUpscale(on != 0, ++s_seq);
+    if (g_gs_renderer)
+        g_gs_renderer->PurgeTextureCache(true, false, true);
+    std::fprintf(stderr, "ODU: live %s (adapter seq %u).\n", on != 0 ? "ON" : "off", s_seq);
 }
 
 extern "C" GE1_API int ge1_gs_flush_caches(void)

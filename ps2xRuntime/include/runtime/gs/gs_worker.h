@@ -68,6 +68,8 @@ enum class GsCmdKind : uint8_t
     FlushCaches = 25, // BG1: persist host-side caches on the worker at stream position (RPC)
     GifBatch = 26,    // GSB1: concatenated GifPackets (bytes + subs table); the worker
                       // runs each sub-packet through the per-packet path in order
+    SetOndeviceUpscale = 27, // REM3 P11 Phase 2: live "On-device upscale"
+                             // toggle (on/off in u32a), fire-and-forget
 };
 
 // Base fence for RPC commands. The worker signals it after executing the

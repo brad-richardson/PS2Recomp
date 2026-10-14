@@ -54,6 +54,8 @@ GE1_API int ge1_gs_export_iosurface(void* iosurface, uint32_t width, uint32_t he
 GE1_API int ge1_gs_flush_caches(void);
 // PCF1: GS-thread policy setter; explicit app-pause flush still overrides it.
 GE1_API void ge1_gs_set_cache_flush_deferred(int deferred);
+// REM3 P11 Phase 2: live "On-device upscale" toggle (worker thread only).
+GE1_API void ge1_gs_set_ondevice_upscale(int on);
 // DS1: quick-save support over GSfreeze. freeze_size returns the blob bytes
 // (>0) or 0 when closed/failed; freeze_save writes exactly that many bytes
 // (1 ok, 0 fail); freeze_load restores (1 ok, 0 fail).

@@ -3276,7 +3276,8 @@ void qsr1NoteSession(const uint8_t *rdram, R5900Context *ctx)
 // SET2: in-game settings overlay (design B). Knob PS2X_SETTINGS_OVERLAY=1
 // (default off in code; on in play envs once Brad approves). Select+Start
 // (Select-first, ~150 ms window) pauses the guest through the hostPause gate
-// and opens a host-drawn panel (Mode / Resolution / Perf overlay). A gear
+// and opens a host-drawn panel (Mode / Resolution / Perf overlay /
+// On-device upscale). A gear
 // dot opens it touch-only. Guest-invisible: the panel owns the pad while
 // open (publish-zero) and draws only over the presented frame.
 namespace
@@ -8171,11 +8172,15 @@ void PS2Runtime::run()
     std::vector<int64_t> set2HeldTouches; // touches still down at close, masked until release
     int set2ShotIn = -1;           // host frames until the panel screenshot (-1 idle)
     bool set2Perf = false;         // live perf-overlay flag (env default at boot)
+    bool set2Upscale = false;      // live on-device-upscale flag (env default at boot)
     if (set2On)
     {
         const char *perf = std::getenv("PS2X_SETTINGS_PERF");
         set2Perf = perf && std::string(perf) == "1";
         set2Nav.perf = set2Perf;
+        const char *upscale = std::getenv("GE1_ONDEVICE_UPSCALE");
+        set2Upscale = upscale && std::string(upscale) == "1";
+        set2Nav.upscale = set2Upscale;
     }
     // SET2 perf sampler: always-on lightweight vs/s + frame-time (one tick
     // load + one clock per host frame; the line draws only when perf is on).
@@ -8578,6 +8583,7 @@ void PS2Runtime::run()
             }
             set2ResAtOpen = set2Nav.res;
             set2Nav.perf = set2Perf;
+            set2Nav.upscale = set2Upscale;
             set2Nav.restartArmed = false;
 #if defined(__ANDROID__)
             // The panel needs the GL overlay visible over the VK layer. The Z
@@ -8765,11 +8771,24 @@ void PS2Runtime::run()
                                                        set2Perf ? "1" : "0");
                     set2WriteSettings(pairs); // false on the Mac (live-only there)
                 }
+                if (navOut.action == ps2x::set2::Action::Changed &&
+                    set2Nav.sel == ps2x::set2::Row::Upscale)
+                {
+                    // REM3 P11 Phase 2: Upscale is live like Perf. The ordered
+                    // host-GS-worker command carries it (FIFO after prior
+                    // packets); the vendor applies + purges, no reboot.
+                    set2Upscale = set2Nav.upscale;
+                    m_gs.setOndeviceUpscale(set2Upscale);
+                    auto pairs = set2ReadSettings();
+                    pairs = ps2x::set2::upsertSettings(pairs, "GE1_ONDEVICE_UPSCALE",
+                                                       set2Upscale ? "1" : "0");
+                    set2WriteSettings(pairs); // false on the Mac (live-only there)
+                }
                 if (navOut.action != ps2x::set2::Action::None)
-                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d\n",
+                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d\n",
                                  static_cast<int>(navOut.action), static_cast<int>(set2Nav.sel),
                                  static_cast<int>(set2Nav.mode), static_cast<int>(set2Nav.res),
-                                 set2Nav.perf ? 1 : 0);
+                                 set2Nav.perf ? 1 : 0, set2Nav.upscale ? 1 : 0);
                 if (navOut.action == ps2x::set2::Action::Close)
                     set2DoClose();
                 else if (navOut.action == ps2x::set2::Action::DoRestart)
@@ -8808,7 +8827,7 @@ void PS2Runtime::run()
             std::vector<int64_t> set2Still;
             for (int i = 0; i < set2n; ++i)
             {
-                if (ps2x::set2::panelHit(set2g, false, set2ts[i].x, set2ts[i].y) != 4)
+                if (ps2x::set2::panelHit(set2g, false, set2ts[i].x, set2ts[i].y) != 5)
                     continue;
                 set2Still.push_back(set2ts[i].id);
                 if (std::find(set2Down.begin(), set2Down.end(), set2ts[i].id) == set2Down.end())
@@ -8843,10 +8862,10 @@ void PS2Runtime::run()
                     continue;
                 set2Down.push_back(set2ts[i].id);
                 const int hit = ps2x::set2::panelHit(set2g, true, set2ts[i].x, set2ts[i].y);
-                if (hit >= 0 && hit <= 3)
+                if (hit >= 0 && hit <= 4)
                 {
                     set2Nav.sel = static_cast<ps2x::set2::Row>(hit);
-                    set2Nav.restartArmed = (hit == 3) ? set2Nav.restartArmed : false;
+                    set2Nav.restartArmed = (hit == 4) ? set2Nav.restartArmed : false;
                     const ps2x::set2::NavOut tapOut =
                         ps2x::set2::navStep(set2Nav, false, false, true, false, false);
                     if (tapOut.action == ps2x::set2::Action::Changed &&
@@ -8856,6 +8875,17 @@ void PS2Runtime::run()
                         auto pairs = set2ReadSettings();
                         pairs = ps2x::set2::upsertSettings(pairs, "PS2X_SETTINGS_PERF",
                                                            set2Perf ? "1" : "0");
+                        set2WriteSettings(pairs);
+                    }
+                    if (tapOut.action == ps2x::set2::Action::Changed &&
+                        set2Nav.sel == ps2x::set2::Row::Upscale)
+                    {
+                        // REM3 P11 Phase 2: touch tap, same live command as the pad path.
+                        set2Upscale = set2Nav.upscale;
+                        m_gs.setOndeviceUpscale(set2Upscale);
+                        auto pairs = set2ReadSettings();
+                        pairs = ps2x::set2::upsertSettings(pairs, "GE1_ONDEVICE_UPSCALE",
+                                                           set2Upscale ? "1" : "0");
                         set2WriteSettings(pairs);
                     }
                     std::fprintf(stderr, "[set2] tap row=%d action=%d\n", hit,
@@ -8914,7 +8944,7 @@ void PS2Runtime::run()
                 int set2Kept = 0;
                 for (int i = 0; i < touches; ++i)
                 {
-                    if (ps2x::set2::panelHit(set2g, false, vpadTouches[i].x, vpadTouches[i].y) != 4)
+                    if (ps2x::set2::panelHit(set2g, false, vpadTouches[i].x, vpadTouches[i].y) != 5)
                     {
                         vpadTouches[set2Kept++] = vpadTouches[i];
                         continue;
@@ -9175,14 +9205,15 @@ void PS2Runtime::run()
                     resVal = "2x";
                 else
                     resVal = "default (" + set2EffUpscale + ")";
-                const std::string rows[4] = {
+                const std::string rows[5] = {
                     std::string("Mode .......... ") +
                         (set2Nav.mode == ps2x::set2::Mode::M120 ? "120" : "60") +
                         (modeDirty ? "  (restart)" : ""),
                     std::string("Resolution .... ") + resVal + (resDirty ? "  (restart)" : ""),
                     std::string("Perf overlay .. ") + (set2Nav.perf ? "on" : "off"),
+                    std::string("On-device up.. ") + (set2Nav.upscale ? "on" : "off"),
                     set2Nav.restartArmed ? "RESTART NOW?  (X again to confirm)" : "Restart now"};
-                for (int i = 0; i < 4; ++i)
+                for (int i = 0; i < 5; ++i)
                 {
                     if (static_cast<int>(set2Nav.sel) == i)
                         DrawRectangle(static_cast<int>(set2dg.rowX) - 6, static_cast<int>(set2dg.rowY[i]),

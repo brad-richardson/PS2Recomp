@@ -80,6 +80,10 @@ public:
     virtual bool WantsGuestVsync() const { return false; }
     // PCF1: host-only persistence policy, delivered before the matching VSync.
     virtual void SetCacheFlushDeferred(bool deferred) { (void)deferred; }
+    // REM3 P11 Phase 2: live "On-device upscale" toggle, delivered on the
+    // host GS worker in stream order (GsCmdKind::SetOndeviceUpscale).
+    // Defaults: no-op.
+    virtual void SetOndeviceUpscale(bool on) { (void)on; }
     virtual void GuestVsync(uint64_t tick, uint32_t field)
     {
         (void)tick;

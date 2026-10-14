@@ -205,6 +205,11 @@ public:
     // command (stream-ordered after the CSR FIELD PrivWrite); direct mode
     // calls the backend now. No-op unless the backend opted in.
     void noteGuestVsync(uint64_t tick, bool deferCacheFlush = false);
+    // REM3 P11 Phase 2: live "On-device upscale" toggle. Enqueues a
+    // GsCmdKind::SetOndeviceUpscale command (fire-and-forget, stream-ordered
+    // after prior packets); direct mode calls the backend now. No-op unless
+    // a backend is installed.
+    void setOndeviceUpscale(bool on);
 
     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
     // GF1 H1 (PS2X_GS_HANDOFF_DIET): noteGifPath(path) when notePath, then

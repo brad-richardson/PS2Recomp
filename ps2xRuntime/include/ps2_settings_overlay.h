@@ -109,17 +109,18 @@ inline ChordOut chordStep(ChordState &st, bool selectDown, bool startDown, int64
 
 // --- Panel navigation (pad edges; touch taps map to the same edges) ---
 //
-// Rows: Mode, Resolution, Perf overlay, Restart. X changes the pending
-// value (Mode/Resolution apply on restart; Perf is live). Restart arms on
-// the first X ("one-line confirm") and fires on the second. Triangle or the
-// chord closes.
+// Rows: Mode, Resolution, Perf overlay, On-device upscale, Restart. X
+// changes the pending value (Mode/Resolution apply on restart; Perf and
+// Upscale are live). Restart arms on the first X ("one-line confirm") and
+// fires on the second. Triangle or the chord closes.
 enum class Row : uint8_t
 {
     Mode = 0,
     Res = 1,
     Perf = 2,
-    Restart = 3,
-    Count = 4
+    Upscale = 3,
+    Restart = 4,
+    Count = 5
 };
 enum class Mode : uint8_t
 {
@@ -147,6 +148,7 @@ struct NavState
     Mode mode = Mode::M120; // pending (applied on restart)
     Res res = Res::RDefault; // pending (applied on restart)
     bool perf = false;       // live
+    bool upscale = false;    // live (REM3 P11 Phase 2)
     bool restartArmed = false;
 };
 
@@ -204,6 +206,10 @@ inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, 
         st.perf = !st.perf;
         out.action = Action::Changed;
         break;
+    case Row::Upscale:
+        st.upscale = !st.upscale;
+        out.action = Action::Changed;
+        break;
     case Row::Restart:
         if (st.restartArmed)
             out.action = Action::DoRestart;
@@ -221,14 +227,14 @@ inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, 
 
 // --- Panel geometry + hit test (QSR1 precedent: pure, render loop draws) ---
 //
-// Hit values: 0..3 = row tap (same as X on that row), 4 = gear-dot tap
+// Hit values: 0..4 = row tap (same as X on that row), 5 = gear-dot tap
 // (closed panel: open; open panel: close), -1 = miss (open panel: tap
 // outside closes).
 struct PanelGeom
 {
     float px = 0, py = 0, pw = 0, ph = 0; // panel rect
     float rowX = 0, rowW = 0;
-    float rowY[4] = {0, 0, 0, 0};
+    float rowY[5] = {0, 0, 0, 0, 0};
     float rowH = 0;
     float dotX = 0, dotY = 0, dotR = 0; // gear dot (closed state)
 };
@@ -242,10 +248,10 @@ inline PanelGeom panelLayout(float w, float h)
     g.py = (h - g.ph) * 0.5f;
     g.rowX = g.px + 22.0f;
     g.rowW = g.pw - 44.0f;
-    // Title block, then 4 even rows (the draw code uses these rects).
+    // Title block, then 5 even rows (the draw code uses these rects).
     const float titleH = h / 26.0f + 22.0f;
-    g.rowH = (g.ph - titleH - 34.0f) / 4.0f;
-    for (int i = 0; i < 4; ++i)
+    g.rowH = (g.ph - titleH - 34.0f) / 5.0f;
+    for (int i = 0; i < 5; ++i)
         g.rowY[i] = g.py + titleH + i * g.rowH;
     // Gear dot top-right: clear of the QSR1 dot (top-centre) and the vpad
     // shoulders (top corners at 0.10u with 0.07u discs).
@@ -259,12 +265,12 @@ inline int panelHit(const PanelGeom &g, bool open, float x, float y)
 {
     const float ddx = x - g.dotX, ddy = y - g.dotY;
     if (ddx * ddx + ddy * ddy <= g.dotR * g.dotR)
-        return 4;
+        return 5;
     if (!open)
         return -1;
     if (x < g.rowX || x > g.rowX + g.rowW)
         return -1;
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 5; ++i)
     {
         if (y >= g.rowY[i] && y < g.rowY[i] + g.rowH)
             return i;
@@ -282,7 +288,8 @@ inline bool settingsKeyAllowed(const char *key)
     if (!key)
         return false;
     const std::string k(key);
-    return k == "GE1_UPSCALE" || k == "PS2X_SETTINGS_PERF";
+    return k == "GE1_UPSCALE" || k == "PS2X_SETTINGS_PERF" ||
+           k == "GE1_ONDEVICE_UPSCALE"; // REM3 P11 Phase 2: the live toggle persists under its env name
 }
 
 using SettingsPairs = std::vector<std::pair<std::string, std::string>>;
