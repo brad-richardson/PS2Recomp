@@ -802,6 +802,73 @@ namespace ps2_net
         {
             return;
         }
+        // ONL9-P2: submit-window authoritative fill (STATE-GATED, not a
+        // tick delay). The submit copy (~tick 7104) races the
+        // traffic-driven preload: when the HLE observes phase 3, (re)fill
+        // the field AND the struct's pointed-to name/pass buffers —
+        // whichever the submit installed (alias at 0x54332C, or a dup of
+        // the dialog buffer). The game's own auth send (~7126) reads
+        // through the struct pointers, so it carries the prefill
+        // regardless of which write landed last at submit. Login-gated
+        // (all login sources share the race); inert when off. A target is
+        // only overwritten when it maps and currently holds name-like
+        // bytes (printable, NUL-terminated within 64), never blind.
+        {
+            const size_t nameLen = g_loginName.size() + 1u;
+            const size_t passLen = g_loginPass.size() + 1u;
+            if (nameLen <= 64u && passLen <= 64u)
+            {
+                preloadPersona(rdram, tick);
+                const uint32_t targets[2] = {
+                    readEeU32(rdram, authObj + 0x48u),
+                    readEeU32(rdram, authObj + 0x4Cu)};
+                const char *wanted[2] = {g_loginName.c_str(),
+                                         g_loginPass.c_str()};
+                const size_t wantLen[2] = {nameLen, passLen};
+                for (int i = 0; i < 2; ++i)
+                {
+                    const uint32_t fieldAddr = 0x54332Cu + (i ? 64u : 0u);
+                    if (targets[i] == 0u || targets[i] == fieldAddr)
+                    {
+                        continue;
+                    }
+                    uint8_t *dst = getMemPtr(rdram, targets[i]);
+                    if (!dst)
+                    {
+                        continue;
+                    }
+                    size_t cur = 0u;
+                    bool nameLike = true;
+                    while (cur < 64u && dst[cur])
+                    {
+                        const char c = static_cast<char>(dst[cur]);
+                        if (c < 32 || c >= 127)
+                        {
+                            nameLike = false;
+                            break;
+                        }
+                        ++cur;
+                    }
+                    if (!nameLike || cur == 64u)
+                    {
+                        continue;
+                    }
+                    for (size_t k = 0u; k < wantLen[i]; ++k)
+                    {
+                        dst[k] = static_cast<uint8_t>(wanted[i][k]);
+                    }
+                    static bool logged = false;
+                    if (!logged)
+                    {
+                        logged = true;
+                        std::cerr << "[net] quickplay submit-fill target=0x"
+                                  << std::hex << targets[i] << std::dec
+                                  << " slot=" << (i ? "pass" : "name")
+                                  << " tick=" << tick << std::endl;
+                    }
+                }
+            }
+        }
         if (g_submitTick == 0u)
         {
             g_submitTick = tick;
