@@ -544,13 +544,15 @@ namespace ps2_savestate
         for (const auto &[rel, mtime] : dirs)
         {
             w.str(rel);
-            w.pod(mtime);
+            // DET=1 serves a fixed card date to the guest; filesystem copy
+            // times are host metadata, even when the card bytes agree.
+            w.pod(w.canonical ? int64_t{0} : mtime);
         }
         w.u64(files.size());
         for (const auto &f : files)
         {
             w.str(f.rel);
-            w.pod(f.mtime);
+            w.pod(w.canonical ? int64_t{0} : f.mtime);
             w.blob(f.bytes);
         }
     }
@@ -2651,7 +2653,9 @@ void VuSavestate::saveCore(const D &vu, Writer &w)
 {
     w.pod(vu.m_state);
 #if PS2X_ENABLE_DET_HASH_TAP
-    w.u64(vu.m_programStartCount);
+    // Execution count depends on the selected VU engine and is only read by
+    // the legacy diagnostic tap; it is not guest-visible state.
+    w.u64(w.canonical ? 0u : vu.m_programStartCount);
 #else
     w.u64(0u);
 #endif
