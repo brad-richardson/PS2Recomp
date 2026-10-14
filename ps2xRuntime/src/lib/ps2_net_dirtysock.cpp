@@ -154,6 +154,12 @@ namespace ps2_net
         std::atomic<uint64_t> g_qpRget{0u};
         std::atomic<uint64_t> g_qpQuik{0u};
         std::atomic<uint64_t> g_qpQuikCount{0u};
+        // ONL11 addendum: first sess/disc tick (0 = none), behind the
+        // qpNavNote gate. The abort-time check (pers sent, disc after
+        // pers, abort while navigating) isolates the name-collision
+        // signature (ONL9 Q2): a lone waiter never drops, and post-pairing
+        // link loss lands after the navigator is done.
+        std::atomic<uint64_t> g_qpSessDisc{0u};
         // ONL11: navigator arming mode. 0 = off (NAV unset or any other
         // value, or QUICKPLAY off), 1 = launch-flag (arm at boot, ONL10),
         // 2 = online (dormant until the player enters Online, ONL11).
@@ -290,17 +296,124 @@ namespace ps2_net
             return true;
         }
 
+        // ONL11 addendum: generated identity word lists (~100 clean words
+        // each, lowercase ASCII, game-font-safe). Persona = adjective +
+        // "-" + noun (e.g. swift-otter); "-" renders in the game font
+        // (challenge strings use it) and rides the lobby NAME field.
+        const char *kQpAdjectives[100] = {
+            "swift", "brave", "calm", "clever", "bright", "bold", "brisk",
+            "cedar", "cheerful", "cobalt", "copper", "coral", "cosmic",
+            "cozy", "crimson", "crisp", "daring", "dawn", "deft",
+            "ebony", "eager", "early", "ember", "fair", "frosty", "gentle",
+            "glad", "golden", "grand", "happy", "hasty", "hidden", "honest",
+            "humble", "icy", "iron", "ivory", "jade", "jolly", "keen",
+            "kind", "lively", "loyal", "lucky", "lunar", "merry", "misty",
+            "modest", "noble", "nimble", "north", "ocean", "onyx", "patient",
+            "peppy", "plucky", "polar", "proud", "quick", "quiet", "rapid",
+            "ready", "rough", "royal", "rustic", "shiny", "silent", "silver",
+            "sleek", "smart", "smooth", "snowy", "solar", "solid", "spry",
+            "steady", "sturdy", "sunny", "tidal", "timber", "topaz", "tranquil",
+            "vivid", "warm", "witty", "wooden", "zesty", "zippy",
+            "agile", "amber", "arctic", "ashen", "candid", "cinder",
+            "civic", "docile", "earnest", "even", "fluent", "frugal",
+        };
+        const char *kQpNouns[100] = {
+            "otter", "fox", "bear", "wolf", "eagle", "shark", "falcon",
+            "raven", "badger", "moose", "bison", "cobra", "panda", "gecko",
+            "finch", "heron", "trout", "wren", "lark", "robin", "jay",
+            "owl", "hawk", "dove", "salmon", "pike", "bass", "cod", "crab",
+            "shrimp", "clam", "pine", "spruce", "maple", "oak",
+            "willow", "stone", "pebble", "boulder", "ridge", "peak", "slope",
+            "drift", "flake", "frost", "glacier", "powder", "comet", "rocket",
+            "sail", "anchor", "beacon", "lantern", "compass", "paddle",
+            "summit", "trail", "cabin", "meadow", "brook", "grove", "canyon",
+            "mesa", "butte", "dune", "reef", "lagoon", "harbor", "island",
+            "fjord", "tundra", "savanna", "prairie", "orchard", "vineyard",
+            "sparrow", "oyster", "mussel", "kelp",
+            "atoll", "strait", "inlet", "cove", "bay", "port", "dock",
+            "ferry", "canoe", "kayak", "sled", "skis", "board", "boots",
+            "goggles", "helmet", "mittens", "parka", "lynx", "newt", "vole",
+        };
+        // Whether the identity came from PS2X_NET_LOGIN (fixed: never
+        // renamed) or the login file (ours: collision-suffix allowed).
+        bool g_loginFromEnv = false;
+
+        bool writeQuickplayLoginFile(const std::string &path,
+                                     const std::string &name,
+                                     const std::string &pass)
+        {
+#if !PS2_NET_HAVE_POSIX_SOCKETS
+            (void)path;
+            (void)name;
+            (void)pass;
+            return false;
+#else
+            const std::string tmp = path + ".tmp";
+            const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (fd < 0)
+            {
+                return false;
+            }
+            ::fchmod(fd, 0600);
+            const std::string line = name + ":" + pass + "\n";
+            size_t done = 0u;
+            while (done < line.size())
+            {
+                const ssize_t w =
+                    ::write(fd, line.data() + done, line.size() - done);
+                if (w <= 0)
+                {
+                    break;
+                }
+                done += static_cast<size_t>(w);
+            }
+            ::close(fd);
+            if (done != line.size())
+            {
+                return false;
+            }
+            // Atomic publish (tmp + rename); failure keeps the old file.
+            if (::rename(tmp.c_str(), path.c_str()) != 0)
+            {
+                return false;
+            }
+            return true;
+#endif
+        }
+
+        std::string genPersonaName(std::mt19937 &gen)
+        {
+            std::uniform_int_distribution<size_t> adj(0u, 99u);
+            std::uniform_int_distribution<size_t> noun(0u, 99u);
+            return std::string(kQpAdjectives[adj(gen)]) + "-" +
+                   kQpNouns[noun(gen)];
+        }
+
+        std::string genPassword(std::mt19937 &gen)
+        {
+            static const char kPassChars[] =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            std::uniform_int_distribution<size_t> pick(0u, sizeof(kPassChars) - 2u);
+            std::string pass;
+            pass.reserve(16u);
+            for (size_t i = 0u; i < 16u; ++i)
+            {
+                pass += kPassChars[pick(gen)];
+            }
+            return pass;
+        }
+
         // ONL11: first-Online-entry login creation. When quickplay is on
         // but no login is configured (no PS2X_NET_LOGIN and no stored file
-        // at boot), the first observed Online entry generates persona
-        // "rider"+4 random digits with a random password, persists it
+        // at boot), the first observed Online entry generates an
+        // adjective-noun persona with a random password, persists it
         // (mode 600), and arms the login path. Runs on the netw/crea
-        // handler, well before the submit (~tick 7100), so the preload and
-        // the submit-fill carry it. The lobby auto-registers unknown
-        // accounts (Rust lobby main.rs "auth": open mode accepts any
-        // non-empty NAME; password mode creates on first connect; only an
-        // empty/oversize NAME, a known-account password mismatch, or the
-        // account cap closes). Secrets are never logged: only the path.
+        // handler, well before the submit, so the preload and the
+        // submit-fill carry it. The lobby auto-registers unknown accounts
+        // (Rust lobby main.rs "auth": open mode accepts any non-empty NAME;
+        // password mode creates on first connect; only an empty/oversize
+        // NAME, a known-account password mismatch, or the account cap
+        // closes). Secrets are never logged: only the path.
         void ensureQuickplayLogin(uint64_t tick)
         {
             (void)tick;
@@ -325,18 +438,8 @@ namespace ps2_net
             }
             std::random_device rd;
             std::mt19937 gen(rd());
-            std::uniform_int_distribution<uint32_t> digits(0u, 9999u);
-            char name[16] = {};
-            std::snprintf(name, sizeof(name), "rider%04u",
-                          static_cast<unsigned>(digits(gen)));
-            static const char kPassChars[] =
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-            std::uniform_int_distribution<size_t> pick(0u, sizeof(kPassChars) - 2u);
-            char pass[17] = {};
-            for (size_t i = 0u; i < 16u; ++i)
-            {
-                pass[i] = kPassChars[pick(gen)];
-            }
+            const std::string name = genPersonaName(gen);
+            const std::string pass = genPassword(gen);
             const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
             if (fd < 0)
             {
@@ -352,7 +455,7 @@ namespace ps2_net
                 return;
             }
             ::fchmod(fd, 0600);
-            const std::string line = std::string(name) + ":" + pass + "\n";
+            const std::string line = name + ":" + pass + "\n";
             size_t done = 0u;
             while (done < line.size())
             {
@@ -379,6 +482,84 @@ namespace ps2_net
 #endif
         }
 
+        // ONL11 addendum: the game's own EA Login save. fYes proved the
+        // filename empirically: card dir `PSCD10088slogin` holding the
+        // data file `PSCD10088slogin` (58-byte obfuscated blob, EA
+        // "Electro" SDK format — opaque to us, never parsed), `view.ico`
+        // and `icon.sys` (title "EA Login"). Writer chain (read-only):
+        // sub_00265E80 -> sub_003F7F48 -> sub_003F8258 -> sub_003FA380
+        // with the "EA Login" title record (ELF vaddr 0x497390). The card
+        // path is detected (never modified) here; the navigator answers
+        // the save prompt from it. NEVER delete or overwrite: only the
+        // game's own Yes path writes, and only when no save exists.
+        bool qpCardHasEaLoginImpl()
+        {
+#if PS2_NET_HAVE_POSIX_SOCKETS
+            const char *mc = std::getenv("PS2X_MC_ROOT");
+            if (!mc || !*mc)
+            {
+                return false;
+            }
+            const std::string data =
+                std::string(mc) + "/PSCD10088slogin/PSCD10088slogin";
+            struct stat st{};
+            if (::stat(data.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+            {
+                return false;
+            }
+            return true;
+#else
+            return false;
+#endif
+        }
+
+        // ONL11 addendum: collision recovery. Called by the navigator when
+        // it aborts while navigating. Renames ONLY on the collision
+        // signature: pers sent, then a login-socket sess/disc, never
+        // paired (ONL9 Q2). A lone waiter (no drop) and a post-pairing
+        // link loss (navigator already done) never reach this. The
+        // 2-digit suffix keeps the adjective-noun stem readable.
+        // Env-fixed identities are never renamed (logged instead).
+        void qpNoteNavAbortImpl()
+        {
+            if (!quickplayOn() || !g_loginOn || g_loginFromEnv)
+            {
+                return;
+            }
+            const uint64_t pers = g_qpPers.load(std::memory_order_relaxed);
+            const uint64_t disc = g_qpSessDisc.load(std::memory_order_relaxed);
+            if (pers == 0u || disc <= pers)
+            {
+                return;
+            }
+            const std::string path = quickplayLoginPath();
+            if (path.empty())
+            {
+                return;
+            }
+            std::random_device rd;
+            std::mt19937 gen(rd());
+            std::uniform_int_distribution<unsigned> digits(0u, 99u);
+            char suffix[4] = {};
+            std::snprintf(suffix, sizeof(suffix), "%02u",
+                          digits(gen));
+            std::string stem = g_loginName;
+            if (stem.size() + 2u > 32u)
+            {
+                stem.resize(30u);
+            }
+            const std::string renamed = stem + suffix;
+            if (!writeQuickplayLoginFile(path, renamed, g_loginPass))
+            {
+                std::cerr << "[net] quickplay: collision-suspect '" << g_loginName
+                          << "' but file rewrite failed; keeping it" << std::endl;
+                return;
+            }
+            g_loginName = renamed;
+            std::cerr << "[net] quickplay: collision-suspect login renamed to '"
+                      << renamed << "' for the next Online entry" << std::endl;
+        }
+
         void parseLoginKnob()
         {
             if (g_loginParsed)
@@ -387,6 +568,7 @@ namespace ps2_net
             }
             g_loginParsed = true;
             const char *env = std::getenv("PS2X_NET_LOGIN");
+            g_loginFromEnv = (env && *env && *env != '0');
             if (!env || !*env || *env == '0')
             {
                 if (!quickplayOn())
@@ -751,11 +933,23 @@ namespace ps2_net
         return qpNavModeImpl();
     }
 
+    bool qpCardHasEaLogin()
+    {
+        return qpCardHasEaLoginImpl();
+    }
+
+    void qpNoteNavAbort()
+    {
+        qpNoteNavAbortImpl();
+    }
+
     QpNavMilestones qpNavMilestones()
     {
         QpNavMilestones m;
         m.netwCrea = g_qpNetwCrea.load(std::memory_order_relaxed);
         m.creaCount = g_qpNetwCreaCount.load(std::memory_order_relaxed);
+        m.pers = g_qpPers.load(std::memory_order_relaxed);
+        m.sessDisc = g_qpSessDisc.load(std::memory_order_relaxed);
         m.netwList = g_qpNetwList.load(std::memory_order_relaxed);
         m.netwStar = g_qpNetwStar.load(std::memory_order_relaxed);
         m.sessConnOk = g_qpSessConnOk.load(std::memory_order_relaxed);
@@ -2034,9 +2228,15 @@ namespace ps2_net
                 else if (method == 15u)
                 {
                     // sess/disc: a0 = handle; close (no-op when fresh).
+                    // ONL11 addendum: first-drop milestone for the
+                    // collision signature (checked at navigator aborts).
                     closeSocket(w4);
                     std::cerr << " h=" << w4;
                     status = 0u;
+                    if (qpNavNote())
+                    {
+                        qpSetFirst(g_qpSessDisc, tick);
+                    }
                 }
                 else if (method == 16u)
                 {

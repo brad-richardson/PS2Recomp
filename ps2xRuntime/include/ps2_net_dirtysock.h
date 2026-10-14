@@ -64,6 +64,7 @@ namespace ps2_net
     {
         uint64_t netwCrea = 0u;   // Online entered (RpcNetworkCreate)
         uint64_t creaCount = 0u;  // ONL11: netw/crea calls this boot
+        uint64_t sessDisc = 0u;   // ONL11 addendum: first sess/disc tick
         uint64_t netwList = 0u;   // config list served (screen #8 open)
         uint64_t netwStar = 0u;   // saved config accepted (screen #8 OK)
         uint64_t sessConnOk = 0u; // lobby TCP connected (login submitted)
@@ -86,4 +87,10 @@ namespace ps2_net
     bool qpNavQuickplayOn();
     bool qpNavWanted();
     int qpNavMode();
+    // ONL11 addendum: true when the card holds the game's own EA Login
+    // save (PSCD10088slogin); called by the navigator to answer the save
+    // prompt (Yes only when no save exists). Read-only: never writes.
+    bool qpCardHasEaLogin();
+    // ONL11 addendum: rename-on-collision hook for navigator aborts.
+    void qpNoteNavAbort();
 } // namespace ps2_net

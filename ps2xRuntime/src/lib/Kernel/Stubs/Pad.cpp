@@ -1019,6 +1019,97 @@ namespace ps2_stubs
             return v;
         }
 
+        // ONL11 addendum: main-menu "Online" -> "Quick Play" label
+        // (online mode only). D1 RAM survey: the menu item is the
+        // string-handle slot 0x5AB2B4 {text_ptr, len}; at menu time it
+        // holds {0x540510, 7} = UTF-16 "Online". No instance has inline
+        // room for 10 chars, so the handle is redirected at its own +8
+        // slack (zeros at every surveyed tick). Verify everything: any
+        // mismatch -> skip loudly, stock text, zero corruption risk.
+        // Re-applied on sight (title + main menu) because the table
+        // rebuilds per screen (char-select clears it). Same font (same
+        // renderer); narrower than "Conquer The Mountain".
+        constexpr uint32_t kQpLabelSlot = 0x5AB2B4u;
+        constexpr uint32_t kQpLabelStockPtr = 0x540510u;
+        constexpr uint32_t kQpLabelStockLen = 7u;
+        constexpr uint32_t kQpLabelNewLen = 11u; // "Quick Play" + NUL
+        constexpr uint32_t kQpLabelBytes = 22u;
+        bool qpNavReadBytes(uint8_t *rdram, uint32_t addr, uint8_t *out, uint32_t n)
+        {
+            if (!rdram || !out || addr == 0u || (addr & PS2_RAM_MASK) + n > PS2_RAM_SIZE)
+            {
+                return false;
+            }
+            std::memcpy(out, rdram + (addr & PS2_RAM_MASK), n);
+            return true;
+        }
+        bool qpNavWriteBytes(uint8_t *rdram, uint32_t addr, const uint8_t *in, uint32_t n)
+        {
+            if (!rdram || !in || addr == 0u || (addr & PS2_RAM_MASK) + n > PS2_RAM_SIZE)
+            {
+                return false;
+            }
+            std::memcpy(rdram + (addr & PS2_RAM_MASK), in, n);
+            return true;
+        }
+        void qpNavPatchMenuLabel(uint8_t *rdram, uint64_t tick)
+        {
+            static const uint8_t kStockText[14] = {'O', 0, 'n', 0, 'l', 0, 'i', 0,
+                                                  'n', 0, 'e', 0, 0,   0};
+            static const uint8_t kNewText[22] = {'Q', 0, 'u', 0, 'i', 0, 'c', 0,
+                                                'k', 0, ' ', 0, 'P', 0, 'l', 0,
+                                                'a', 0, 'y', 0, 0,   0};
+            const uint32_t ptr = qpNavReadMenu(rdram, kQpLabelSlot);
+            const uint32_t len = qpNavReadMenu(rdram, kQpLabelSlot + 4u);
+            if (ptr == kQpLabelSlot + 8u && len == kQpLabelNewLen)
+            {
+                return; // already patched
+            }
+            if (ptr != kQpLabelStockPtr || len != kQpLabelStockLen)
+            {
+                static bool logged = false;
+                if (!logged)
+                {
+                    logged = true;
+                    std::fprintf(stderr,
+                                 "[qpnav] label: slot not stock (ptr=0x%x len=%u), skipped\n",
+                                 ptr, len);
+                }
+                return;
+            }
+            uint8_t text[14] = {};
+            uint8_t slack[kQpLabelBytes] = {};
+            if (!qpNavReadBytes(rdram, ptr, text, sizeof(text)) ||
+                std::memcmp(text, kStockText, sizeof(text)) != 0 ||
+                !qpNavReadBytes(rdram, kQpLabelSlot + 8u, slack, sizeof(slack)))
+            {
+                std::fprintf(stderr, "[qpnav] label: text verify failed, skipped\n");
+                return;
+            }
+            for (uint32_t i = 0u; i < sizeof(slack); ++i)
+            {
+                if (slack[i] != 0u)
+                {
+                    std::fprintf(stderr, "[qpnav] label: slack in use, skipped\n");
+                    return;
+                }
+            }
+            if (!qpNavWriteBytes(rdram, kQpLabelSlot + 8u, kNewText, sizeof(kNewText)))
+            {
+                return;
+            }
+            uint8_t handle[8] = {};
+            const uint32_t newPtr = kQpLabelSlot + 8u;
+            std::memcpy(handle, &newPtr, 4u);
+            std::memcpy(handle + 4u, &kQpLabelNewLen, 4u);
+            if (!qpNavWriteBytes(rdram, kQpLabelSlot, handle, sizeof(handle)))
+            {
+                return;
+            }
+            std::fprintf(stderr, "[qpnav] label: main-menu Online -> Quick Play at tick=%llu\n",
+                         static_cast<unsigned long long>(tick));
+        }
+
         bool qpNavMenuIs(uint8_t *rdram, uint32_t addr, uint32_t expect)
         {
             if (addr == 0u)
@@ -1038,6 +1129,9 @@ namespace ps2_stubs
             // last arming (a fresh advance re-arms after a back-out).
             bool onlineMode = false;
             uint64_t seenCreaCount = 0u;
+            // ONL11 addendum: card-path shortcut indices.
+            size_t submitOkIdx = 0u;
+            size_t personaPickIdx = 0u;
             size_t idx = 0u;
             uint64_t stepStart = 0u;
             uint64_t lastFire = 0u;
@@ -1149,8 +1243,13 @@ namespace ps2_stubs
             g_qpNav.danceTo = qpNavFindStep("online-entry");
             g_qpNav.waitCreaIdx = qpNavFindStep("wait-crea");
             g_qpNav.loginDown1Idx = qpNavFindStep("login-down-1");
+            // ONL11 addendum: card-path shortcut (gameAuth before our
+            // submit) jumps to persona-pick, skipping typing + save.
+            g_qpNav.submitOkIdx = qpNavFindStep("submit-ok");
+            g_qpNav.personaPickIdx = qpNavFindStep("persona-pick");
             if (g_qpNav.danceFrom >= g_qpNav.danceTo || g_qpNav.danceTo >= kQpNavSteps ||
-                g_qpNav.waitCreaIdx >= kQpNavSteps || g_qpNav.loginDown1Idx >= kQpNavSteps)
+                g_qpNav.waitCreaIdx >= kQpNavSteps || g_qpNav.loginDown1Idx >= kQpNavSteps ||
+                g_qpNav.submitOkIdx >= kQpNavSteps || g_qpNav.personaPickIdx >= kQpNavSteps)
             {
                 std::fprintf(stderr, "[qpnav] dance/jump targets unresolved: disarmed\n");
                 g_qpNav.armed = false;
@@ -1235,6 +1334,24 @@ namespace ps2_stubs
                          bool userActive)
         {
             qpNavEnsureInit();
+            // ONL11 addendum: menu label on sight, online mode only, ahead
+            // of the armed gate: the main menu shows before the first
+            // Online entry (pre-arm), and the handle table rebuilds per
+            // screen, so re-apply whenever title/main is seen.
+            if (g_qpNav.onlineMode && port == 0 && runtime != nullptr)
+            {
+                uint8_t *labelRam = runtime->memory().getRDRAM();
+                if (labelRam)
+                {
+                    const uint32_t labelMain = qpNavReadMenu(labelRam, kQpNavMenuMain);
+                    const uint32_t labelSub = qpNavReadMenu(labelRam, kQpNavMenuSub);
+                    if ((labelMain == 1u && labelSub == 7u) ||
+                        (labelMain == 2u && labelSub == 9u))
+                    {
+                        qpNavPatchMenuLabel(labelRam, guestVsyncTick);
+                    }
+                }
+            }
             if (!g_qpNavArmed.load(std::memory_order_relaxed))
             {
                 return;
@@ -1289,6 +1406,7 @@ namespace ps2_stubs
                 g_qpNav.cancelled = true;
                 // ONL11: backing out disarms until the next Online entry.
                 g_qpNav.armed = !g_qpNav.onlineMode;
+                ps2_net::qpNoteNavAbort(); // ONL11 addendum: collision rename
                 std::fprintf(stderr, "[qpnav] cancel: user input at tick=%llu\n",
                              static_cast<unsigned long long>(guestVsyncTick));
                 return;
@@ -1321,6 +1439,7 @@ namespace ps2_stubs
             {
                 g_qpNav.aborted = true;
                 g_qpNav.armed = !g_qpNav.onlineMode; // ONL11: wait for next entry
+                ps2_net::qpNoteNavAbort();          // ONL11 addendum: collision rename
                 std::fprintf(stderr, "QP-NAV abort %s menu=0x%x/0x%x at tick=%llu\n", s.name,
                              menuMain, menuSub,
                              static_cast<unsigned long long>(guestVsyncTick));
@@ -1338,6 +1457,7 @@ namespace ps2_stubs
                 {
                     g_qpNav.aborted = true;
                     g_qpNav.armed = !g_qpNav.onlineMode; // ONL11: wait for next entry
+                    ps2_net::qpNoteNavAbort();          // ONL11 addendum: collision rename
                     std::fprintf(stderr, "QP-NAV abort %s (dance-title) at tick=%llu\n",
                                  s.name, static_cast<unsigned long long>(guestVsyncTick));
                     return;
@@ -1364,6 +1484,7 @@ namespace ps2_stubs
             {
                 g_qpNav.aborted = true;
                 g_qpNav.armed = !g_qpNav.onlineMode; // ONL11: wait for next entry
+                ps2_net::qpNoteNavAbort();          // ONL11 addendum: collision rename
                 std::fprintf(stderr, "QP-NAV abort %s (sess-conn-failed) at tick=%llu\n", s.name,
                              static_cast<unsigned long long>(guestVsyncTick));
                 return;
@@ -1386,6 +1507,37 @@ namespace ps2_stubs
                 g_qpNav.idx = g_qpNav.loginDown1Idx;
                 g_qpNav.stepStart = guestVsyncTick;
                 g_qpNav.lastFire = guestVsyncTick;
+                return;
+            }
+            // ONL11 addendum: card-path shortcut (f2: the game
+            // auto-submits the saved EA login with zero typing, and shows
+            // no save prompt). GAME AUTH before our submit fired means the
+            // login came from the card: skip the typing + save clusters
+            // and wait at persona-pick, whose phase gate fires the pick
+            // when 4/2 is up. Typing-path auth lands past submit-ok, so
+            // this never fires there.
+            if (m.gameAuth != 0u && g_qpNav.idx >= g_qpNav.loginDown1Idx &&
+                g_qpNav.idx <= g_qpNav.submitOkIdx)
+            {
+                std::fprintf(stderr, "[qpnav] jump %s -> persona-pick (early auth @%llu)\n",
+                             s.name, static_cast<unsigned long long>(m.gameAuth));
+                g_qpNav.idx = g_qpNav.personaPickIdx;
+                g_qpNav.stepStart = guestVsyncTick;
+                g_qpNav.lastFire = guestVsyncTick;
+                g_qpNav.holdMask = 0u;
+                return;
+            }
+            // ONL11 addendum: the Save EA Login answer, online mode only
+            // (launch mode keeps No). Yes (skip the Down) only when the
+            // card holds no save: the game's own Yes path then writes it
+            // (fYes). A card save present means preserve it: answer No.
+            if (std::strcmp(s.name, "save-no-down") == 0 && g_qpNav.onlineMode &&
+                !ps2_net::qpCardHasEaLogin())
+            {
+                std::fprintf(stderr, "[qpnav] skip save-no-down (no card save: Yes)\n");
+                g_qpNav.lastFire = guestVsyncTick;
+                g_qpNav.idx++;
+                g_qpNav.stepStart = guestVsyncTick;
                 return;
             }
             if (s.gate == QG_FILTER_STOP)
