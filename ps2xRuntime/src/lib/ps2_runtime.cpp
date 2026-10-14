@@ -172,7 +172,7 @@ void vk1OnAppCmd(struct android_app *app, int32_t cmd)
     // STOP / TERM_WINDOW); APP_CMD_RESUME precedes GAINED_FOCUS on return.
     // Both run on the main thread inside raylib's PollInputEvents. The pause
     // waits for the game thread's gate ack (bounded) and flushes GS caches.
-    if (cmd == APP_CMD_PAUSE)
+    if (cmd == APP_CMD_PAUSE || (cmd == APP_CMD_STOP && !ps2x::hostPause::paused()))
         bg1OnPause();
     else if (cmd == APP_CMD_RESUME)
         bg1OnResume();
