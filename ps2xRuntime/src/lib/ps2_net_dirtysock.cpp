@@ -420,6 +420,27 @@ namespace ps2_net
             return cached == 1;
         }
 
+        // LOB1: PS2X_NET_RELAY_REGISTER=1 (default ON) makes the
+        // listen (0x101) side emit a NON-game registration datagram
+        // ('SSX3RLY1' + the +ses session token) to the +ses peer until
+        // it learns the peer, so a relay can learn the listen endpoint
+        // even though the stock game handshake is connect-driven.
+        // Bounded: every 250 wall ms for at most 30 wall seconds per
+        // util. =0 restores stock (no registrations). The peer HLE
+        // discards unknown datagram tags silently, and the relay drops
+        // registrations without forwarding, so the game handshake stays
+        // byte-identical to stock either way.
+        bool relayRegister()
+        {
+            static int cached = -1;
+            if (cached < 0)
+            {
+                const char *env = std::getenv("PS2X_NET_RELAY_REGISTER");
+                cached = (!env || !*env || env[0] != '0') ? 1 : 0;
+            }
+            return cached == 1;
+        }
+
         // Non-consuming check for pending socket bytes (MSG_PEEK), so
         // the quiet-poll decision can see first-seen data.
         bool socketHasData(uint32_t handle)
@@ -761,6 +782,9 @@ namespace ps2_net
         bool connected = false;
         struct sockaddr_in peer;
         uint64_t lastHello = 0u;
+        uint64_t connMs = 0u;  // LOB1: wall clock at gmut/conn (registration 30 s bound)
+        uint64_t lastRegMs = 0u;  // LOB1: wall clock of last relay registration
+        bool regLogged = false;  // LOB1: first-registration log already emitted
         uint32_t lastRxMs = 0u;  // stat +0x20 (last receive, ms)
         // Packets that arrive after gmut/conn but before gmlk/crea (the
         // peer's first NetGame packet can beat our link): CommUDP buffers
@@ -779,6 +803,11 @@ namespace ps2_net
         std::vector<std::vector<uint8_t>> rxq;
         uint32_t txPkts = 0u, rxPkts = 0u;
     };
+    // LOB1: the +ses session token (if the server sent one), parsed
+    // from the +ses message on the game-TCP socket. Included in relay
+    // registrations so the relay can verify them. Process-lifetime:
+    // one game session per process. Never logged.
+    std::string g_sesToken;
     std::map<uint32_t, P2pUtil> g_p2pUtil;  // gmut handle
     std::map<uint32_t, P2pLink> g_p2pLink;  // gmlk handle
     constexpr uint32_t kCommRefBase = 0x00C00000u;
@@ -812,6 +841,20 @@ namespace ps2_net
             d.insert(d.end(), data, data + n);
         }
         ::sendto(u.fd, d.data(), d.size(), 0,
+                 reinterpret_cast<const struct sockaddr *>(&u.peer), sizeof(u.peer));
+    }
+
+    // LOB1: raw datagram send for relay registrations (payload is not
+    // a 4-byte game tag). force bypasses the peerKnown gate: the
+    // registration goes to the spec peer precisely because the peer is
+    // not learned yet. Uncaptured, like game hellos.
+    void p2pSendBytes(P2pUtil &u, const uint8_t *data, size_t n, bool force = false)
+    {
+        if (u.fd < 0 || n == 0u || (!u.peerKnown && !force))
+        {
+            return;
+        }
+        ::sendto(u.fd, data, n, 0,
                  reinterpret_cast<const struct sockaddr *>(&u.peer), sizeof(u.peer));
     }
 
@@ -869,10 +912,42 @@ namespace ps2_net
             {
                 continue;
             }
+            // Stock hello burst: the connect side hellos until
+            // connected. The listen side stays silent here (its game
+            // handshake traffic starts at crea); LOB1 registration
+            // below is a non-game datagram and never touches O5.
             if (!u.connected && (u.mode & 2u) && tick >= u.lastHello + 15u)
             {
                 u.lastHello = tick;
                 p2pSendRaw(u, "O5HI", nullptr, 0u);
+            }
+            // LOB1: relay registration (PS2X_NET_RELAY_REGISTER,
+            // default ON). The listen side emits 'SSX3RLY1' + the +ses
+            // session token to the spec peer until it learns the peer,
+            // so a relay can learn the listen endpoint. The peer HLE
+            // discards unknown tags silently and the relay drops
+            // registrations without forwarding, so game traffic stays
+            // byte-identical to stock. Bounded: every 250 wall ms for
+            // at most 30 wall s per util.
+            if ((u.mode & 1u) && !u.peerKnown && relayRegister())
+            {
+                const uint64_t nowMs = hostMillis();
+                if (nowMs - u.connMs < 30000u && nowMs - u.lastRegMs >= 250u)
+                {
+                    u.lastRegMs = nowMs;
+                    std::string reg("SSX3RLY1");
+                    reg += g_sesToken;
+                    p2pSendBytes(u,
+                                 reinterpret_cast<const uint8_t *>(reg.data()),
+                                 reg.size(), true);
+                    if (!u.regLogged)
+                    {
+                        u.regLogged = true;
+                        std::cerr << "[net] p2p: util=" << kv.first
+                                  << " relay-reg tx token_len=" << g_sesToken.size()
+                                  << " tick=" << tick << std::endl;
+                    }
+                }
             }
             // Link keep-alive: the IRX NetGameLink sends its own sync
             // packets while idle (_NetGameLinkProcess ->
@@ -1209,9 +1284,14 @@ namespace ps2_net
                     u.peer.sin_port = htons(peerPort);
                     u.peer.sin_addr.s_addr = htonl(ip);
                     u.peerKnown = (w5 & 2u) != 0u;
+                    u.connMs = hostMillis();
                     std::cerr << " [net] p2p: util=" << w4 << " mode=0x" << std::hex << w5
                               << std::dec << " bind=" << bindPort << (bound ? "" : "(FAILED)")
                               << " peer=" << peerPort << " tick=" << tick;
+                    if ((w5 & 1u) && relayRegister())
+                    {
+                        std::cerr << " relay-reg=on";
+                    }
                     status = 0u;
                 }
                 else if (method == 40u)
@@ -1684,6 +1764,50 @@ namespace ps2_net
                                 std::cerr << " h=" << w4 << " n=" << n << " lagged";
                                 status = 0u;
                                 outlen = n;
+                                // LOB1: stash the +ses session token
+                                // (if the server sent one) for relay
+                                // registrations. The game ignores
+                                // unknown +ses keys, so this changes no
+                                // game-visible bytes. The token itself
+                                // is never logged.
+                                if (n > 20u && std::memcmp(dst, "+ses", 4) == 0 &&
+                                    g_sesToken.empty())
+                                {
+                                    // Our lobby names the session token
+                                    // SESSTOK (TOKEN accepted as a fallback).
+                                    const char *body =
+                                        reinterpret_cast<const char *>(dst + 12);
+                                    const size_t bodyLen = static_cast<size_t>(n) - 12u;
+                                    const char *keys[] = {"SESSTOK=", "TOKEN="};
+                                    for (const char *key : keys)
+                                    {
+                                        const size_t klen = std::strlen(key);
+                                        bool found = false;
+                                        for (size_t i = 0u; i + klen + 1u <= bodyLen; ++i)
+                                        {
+                                            if ((i == 0u || body[i - 1u] == '\n') &&
+                                                std::memcmp(body + i, key, klen) == 0)
+                                            {
+                                                size_t j = i + klen;
+                                                while (j < bodyLen && body[j] != '\n' &&
+                                                       body[j] != '\0' && (j - i) < 140u)
+                                                {
+                                                    ++j;
+                                                }
+                                                g_sesToken.assign(body + i + klen, j - i - klen);
+                                                std::cerr << " [net] login: +ses token seen len="
+                                                          << g_sesToken.size() << " tick=" << tick
+                                                          << std::endl;
+                                                found = true;
+                                                break;
+                                            }
+                                        }
+                                        if (found)
+                                        {
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                             hi->second.erase(hi->second.begin(), hi->second.begin() + n);
                         }
