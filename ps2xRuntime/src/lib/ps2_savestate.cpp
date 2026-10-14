@@ -1523,11 +1523,13 @@ namespace ps2_savestate
                                                                     : AutoResumeDecision::Ask;
     }
 
-    uint64_t autosaveWallTime(const std::string &path)
+    namespace
+    {
+    bool readAutosaveHeader(const std::string &path, std::map<std::string, std::string> &header)
     {
         std::ifstream in(path, std::ios::binary);
         if (!in)
-            return 0u;
+            return false;
         std::array<uint8_t, 65536> prefix{};
         in.read(reinterpret_cast<char *>(prefix.data()), static_cast<std::streamsize>(prefix.size()));
         const size_t size = static_cast<size_t>(in.gcount());
@@ -1535,14 +1537,19 @@ namespace ps2_savestate
         char magic[8]{};
         if (!r.bytes(magic, sizeof(magic)) || std::memcmp(magic, kMagic, sizeof(magic)) != 0 ||
             r.u32() != kFormatVersion)
-            return 0u;
+            return false;
         std::string key;
         uint32_t version = 0u;
         if (!r.beginSection(key, version) || key != "header" || version != kHeaderVersion)
-            return 0u;
-        const auto header = parseHeader(r.str());
+            return false;
+        header = parseHeader(r.str());
         if (!r.endSection(key) || !r.ok())
-            return 0u;
+            return false;
+        return true;
+    }
+
+    uint64_t wallTimeFromHeader(const std::map<std::string, std::string> &header)
+    {
         const auto it = header.find("saved_wall_unix_s");
         if (it == header.end() || it->second.empty() || it->second[0] == '-')
             return 0u;
@@ -1550,6 +1557,60 @@ namespace ps2_savestate
         errno = 0;
         const unsigned long long seconds = std::strtoull(it->second.c_str(), &end, 10);
         return errno == 0 && end && *end == '\0' ? static_cast<uint64_t>(seconds) : 0u;
+    }
+    } // namespace
+
+    uint64_t autosaveWallTime(const std::string &path)
+    {
+        std::map<std::string, std::string> header;
+        return readAutosaveHeader(path, header) ? wallTimeFromHeader(header) : 0u;
+    }
+
+    bool autosaveHeaderEligible(const std::string &path, uint64_t &savedWallSeconds,
+                                std::string &reason)
+    {
+        savedWallSeconds = 0u;
+        std::map<std::string, std::string> header;
+        if (!readAutosaveHeader(path, header))
+        {
+            reason = "unreadable state header";
+            return false;
+        }
+        const auto tickIt = header.find("save_tick");
+        if (tickIt == header.end() || tickIt->second.empty() || tickIt->second[0] == '-')
+        {
+            reason = "missing save tick";
+            return false;
+        }
+        char *end = nullptr;
+        errno = 0;
+        const uint64_t savedTick = std::strtoull(tickIt->second.c_str(), &end, 10);
+        if (errno != 0 || !end || *end != '\0')
+        {
+            reason = "invalid save tick";
+            return false;
+        }
+        for (const HeaderLine &line : makeHeader(savedTick, true))
+        {
+            const auto it = header.find(line.key);
+            const std::string have = it == header.end() ? "<missing>" : it->second;
+            if (line.key == "runner_sha" || line.key == "microvu_lib_sha")
+            {
+                if (checkRunnerSha(have, line.value, true) != RunnerShaVerdict::Accept)
+                {
+                    reason = "header mismatch " + line.key;
+                    return false;
+                }
+            }
+            else if (line.refuse && have != line.value)
+            {
+                reason = "header mismatch " + line.key;
+                return false;
+            }
+        }
+        savedWallSeconds = wallTimeFromHeader(header);
+        reason.clear();
+        return true;
     }
 
     bool requestQuickLoad(const std::string &path)

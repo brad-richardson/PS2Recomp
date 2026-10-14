@@ -527,6 +527,11 @@ namespace ps2_savestate
     // The wall timestamp is embedded in the state header, not inferred from
     // filesystem mtime. Zero means absent or unreadable (older state files).
     uint64_t autosaveWallTime(const std::string &path);
+    // Header-only launch preflight. The full quick-load validates every
+    // section before applying the state. This check keeps incompatible slots
+    // out of the prompt (and never changes the on-disk slot).
+    bool autosaveHeaderEligible(const std::string &path, uint64_t &savedWallSeconds,
+                                std::string &reason);
     uint64_t autoResumeThresholdSeconds();
     AutoResumeDecision autoResumeDecision(uint64_t savedWallSeconds, uint64_t nowWallSeconds,
                                           uint64_t thresholdSeconds);

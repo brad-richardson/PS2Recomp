@@ -4,6 +4,8 @@
 #include "ps2_mtvu.h"
 #include "ps2_microvu.h"
 #include "ps2_native_world.h"
+#include "ps2_net_dirtysock.h"
+#include "ps2_android_toast.h"
 #include "ps2_e7.h"
 #include "ps2_e41_trace.h"
 #include "ps2_ssx3_vis_native.h"
@@ -2982,6 +2984,73 @@ bool qsr1AutoOn()
     return on;
 }
 
+#if defined(__ANDROID__)
+// ASV1: the choice is made before the game thread starts, so a rejected or
+// "Start fresh" slot cannot advance the guest even one tick. Touch and pad
+// input both work here; Resume is the selected/default action.
+bool asv1AskToResume(bool &closed)
+{
+    closed = false;
+    bool resumeSelected = true;
+    int lastTouchId = -1;
+    std::fprintf(stderr, "[autosave] prompt: Resume where you left off / Start fresh (default Resume)\n");
+    while (!WindowShouldClose())
+    {
+        if (ps2x::hostPause::paused())
+        {
+            PollInputEvents();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+        const int w = GetScreenWidth(), h = GetScreenHeight();
+        const int buttonW = std::min(w / 3, 430), buttonH = std::max(64, h / 10);
+        const int gap = std::max(24, w / 32);
+        const int x = (w - 2 * buttonW - gap) / 2, y = h / 2;
+        const Rectangle resumeBox{static_cast<float>(x), static_cast<float>(y),
+                                  static_cast<float>(buttonW), static_cast<float>(buttonH)};
+        const Rectangle freshBox{static_cast<float>(x + buttonW + gap), static_cast<float>(y),
+                                 static_cast<float>(buttonW), static_cast<float>(buttonH)};
+        if (IsKeyPressed(KEY_LEFT))
+            resumeSelected = true;
+        if (IsKeyPressed(KEY_RIGHT))
+            resumeSelected = false;
+        if (IsKeyPressed(KEY_ENTER) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
+            return resumeSelected;
+        if (GetTouchPointCount() > 0)
+        {
+            const int id = GetTouchPointId(0);
+            if (id != lastTouchId)
+            {
+                const Vector2 p = GetTouchPosition(0);
+                if (CheckCollisionPointRec(p, resumeBox))
+                    return true;
+                if (CheckCollisionPointRec(p, freshBox))
+                    return false;
+            }
+            lastTouchId = id;
+        }
+        else
+            lastTouchId = -1;
+        BeginDrawing();
+        ClearBackground(Color{19, 25, 36, 255});
+        const char *title = "Resume where you left off?";
+        const int titleSize = std::max(28, h / 18);
+        DrawText(title, (w - MeasureText(title, titleSize)) / 2, h / 3, titleSize, RAYWHITE);
+        DrawRectangleRec(resumeBox, resumeSelected ? Color{62, 132, 91, 255} : Color{48, 61, 74, 255});
+        DrawRectangleRec(freshBox, resumeSelected ? Color{48, 61, 74, 255} : Color{62, 132, 91, 255});
+        const int labelSize = std::max(20, h / 28);
+        const char *resume = "Resume", *fresh = "Start fresh";
+        DrawText(resume, x + (buttonW - MeasureText(resume, labelSize)) / 2,
+                 y + (buttonH - labelSize) / 2, labelSize, RAYWHITE);
+        DrawText(fresh, x + buttonW + gap + (buttonW - MeasureText(fresh, labelSize)) / 2,
+                 y + (buttonH - labelSize) / 2, labelSize, RAYWHITE);
+        EndDrawing();
+    }
+    closed = true;
+    return false;
+}
+#endif
+
 std::string qsr1SlotDir()
 {
     const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
@@ -3630,6 +3699,7 @@ namespace
 // BG1: the live runtime for the pause hook (set in initialize(), before the
 // game thread starts; the hook runs on the main thread).
 PS2Runtime *g_bg1Runtime = nullptr;
+std::atomic<bool> g_bg1GuestStarted{false};
 
 void bg1OnPause()
 {
@@ -3637,7 +3707,8 @@ void bg1OnPause()
     // BG1's gate closes only after this bounded wait. A slow or deferred
     // save leaves the previous atomic slot intact.
     const char *autosave = std::getenv("PS2X_AUTOSAVE");
-    if (!ps2x::hostPause::paused() && autosave && std::strcmp(autosave, "1") == 0)
+    if (g_bg1GuestStarted.load(std::memory_order_acquire) && !ps2x::hostPause::paused() &&
+        autosave && std::strcmp(autosave, "1") == 0)
     {
         const std::string path = (std::filesystem::path(qsr1SlotDir()) / "autosave.ps2xstate").string();
         if (ps2_savestate::requestAutoSave(path))
@@ -3655,7 +3726,8 @@ void bg1OnPause()
         g_bg1Runtime ? g_bg1Runtime->eeScheduler().currentVSyncTick() : 0u;
     ps2_snd_audio_output::pausePlayback();
     // Bounded: a game thread stuck mid-frame must not hang the app-cmd pump.
-    const bool acked = ps2x::hostPause::waitGateAck(2000);
+    const bool acked = !g_bg1GuestStarted.load(std::memory_order_acquire) ||
+                       ps2x::hostPause::waitGateAck(2000);
     if (g_bg1Runtime)
         g_bg1Runtime->gs().flushExternalCaches();
     // PT2 Part 2a: kill-proof the stage rings (a swipe from the switcher is a
@@ -7704,6 +7776,59 @@ void PS2Runtime::run()
     Texture2D frameTex = LoadTextureFromImage(blank);
     UnloadImage(blank);
 
+    std::string asv1ColdLoadPath;
+#if defined(__ANDROID__)
+    const char *asv1Enabled = std::getenv("PS2X_AUTOSAVE");
+    if (asv1Enabled && std::strcmp(asv1Enabled, "1") == 0 &&
+        ps2_savestate::config().loadPath.empty())
+    {
+        if (ps2_net::enabled())
+            std::fprintf(stderr, "[autosave] launch skipped: online mode enabled\n");
+        else
+        {
+            const std::string slot = (std::filesystem::path(qsr1SlotDir()) / "autosave.ps2xstate").string();
+            std::error_code ec;
+            if (std::filesystem::exists(slot, ec) && !ec)
+            {
+                uint64_t savedWall = 0u;
+                std::string reason;
+                if (!ps2_savestate::autosaveHeaderEligible(slot, savedWall, reason))
+                {
+                    std::fprintf(stderr, "[autosave] launch refused: %s\n", reason.c_str());
+                    ps2x::postQuickStatusToast("Saved session unavailable: build or settings changed");
+                }
+                else
+                {
+                    const std::time_t wallNow = std::time(nullptr);
+                    const uint64_t now = wallNow > 0 ? static_cast<uint64_t>(wallNow) : 0u;
+                    const auto choice = ps2_savestate::autoResumeDecision(
+                        savedWall, now, ps2_savestate::autoResumeThresholdSeconds());
+                    if (choice == ps2_savestate::AutoResumeDecision::Silent)
+                    {
+                        std::fprintf(stderr, "[autosave] auto-resume age=%llu s\n",
+                                     static_cast<unsigned long long>(now - savedWall));
+                        asv1ColdLoadPath = slot;
+                    }
+                    else
+                    {
+                        bool closed = false;
+                        const bool resume = asv1AskToResume(closed);
+                        if (closed)
+                        {
+                            UnloadTexture(frameTex);
+                            CloseWindow();
+                            return;
+                        }
+                        if (resume)
+                            asv1ColdLoadPath = slot;
+                        std::fprintf(stderr, "[autosave] prompt choice=%s\n", resume ? "resume" : "fresh");
+                    }
+                }
+            }
+        }
+    }
+#endif
+
     std::atomic<bool> gameThreadFinished{false};
 
     // F4-2b: PS2X_GAME_THREAD_STACK_KB=N (default-off test knob) creates the
@@ -7747,6 +7872,25 @@ void PS2Runtime::run()
                 if (!savestateOk)
                     std::fprintf(stderr, "[savestate] load refused: %s\n", ssError.c_str());
             }
+#if defined(__ANDROID__)
+            else if (!asv1ColdLoadPath.empty())
+            {
+                std::string note, error;
+                if (ps2_savestate::loadQuick(*this, asv1ColdLoadPath, note, error))
+                {
+                    std::fprintf(stderr, "[autosave] cold-load ok: %s\n", note.c_str());
+                    ps2_savestate::noteQuickStatus(note);
+                }
+                else
+                {
+                    // Full validation precedes mutation; a bad slot leaves
+                    // the fresh machine intact and the slot available for
+                    // investigation rather than deleting it.
+                    std::fprintf(stderr, "[autosave] cold-load refused: %s\n", error.c_str());
+                    ps2x::postQuickStatusToast("Saved session could not be resumed");
+                }
+            }
+#endif
             if (savestateOk)
                 m_eeScheduler->run();
             uint32_t pc = m_debugPc.load(std::memory_order_relaxed);
@@ -7764,6 +7908,9 @@ void PS2Runtime::run()
         gameThreadFinished.store(true, std::memory_order_release);
     };
 
+#if defined(__ANDROID__)
+    g_bg1GuestStarted.store(true, std::memory_order_release);
+#endif
     bool gameUsesPthread = false;
     std::thread gameThread;
 #if defined(__unix__) || defined(__APPLE__)
@@ -8937,6 +9084,9 @@ void PS2Runtime::run()
     {
         gameThread.join();
     }
+#if defined(__ANDROID__)
+    g_bg1GuestStarted.store(false, std::memory_order_release);
+#endif
 
     if (m_debugUiInitialized && m_debugUiShutdownCallback)
     {
