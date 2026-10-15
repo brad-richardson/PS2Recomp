@@ -8,6 +8,7 @@ def ps2xJobs = (project.findProperty('ps2xJobs') ?: '4').toString().toInteger()
 if (ps2xJobs < 1 || ps2xJobs > 16) {
     throw new GradleException('ps2xJobs must be 1..16')
 }
+def ps2xNativeBuildDir = project.findProperty('ps2xNativeBuildDir') ?: ''
 def ps2xPrebuiltDir = project.findProperty('ps2xPrebuiltDir') ?: ''
 def ps2xJniLibsDir = project.findProperty('ps2xJniLibsDir') ?: ''
 def ps2xPublicNoticesDir = project.findProperty('ps2xPublicNoticesDir') ?: ''
@@ -147,6 +148,9 @@ android {
     externalNativeBuild {
         cmake {
             path '../../CMakeLists.txt'
+            if (ps2xNativeBuildDir) {
+                buildStagingDirectory file(ps2xNativeBuildDir)
+            }
             version '3.22.1'
         }
     }

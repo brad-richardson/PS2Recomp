@@ -504,6 +504,7 @@ def android(a):
         '-Pps2xAppId=' + a.app_id,
         '-Pps2xPrebuiltDir=' + (str(bundle) if bundle else ''),
         '-Pps2xJobs=' + str(a.jobs),
+        '-Pps2xNativeBuildDir=' + str(a.work / 'android-native-build'),
         '-Pps2xVersionCode=' + str(version_code),
         '-Pps2xKeystoreFile=' + str(keystore),
         '-Pps2xKeystorePassword=' + SIGNING_PASSWORD,
