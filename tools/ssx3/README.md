@@ -1,7 +1,8 @@
 # Build SSX 3 from your own disc
 
-Supported build host: **macOS on Apple silicon**. Play targets are **Android
-arm64 and iOS**. **Windows/x86 is unsupported.** This source preview does not
+Build hosts: **macOS on Apple silicon** and **Linux x86_64/arm64** for
+Android arm64. Windows users run the Linux path inside **WSL2 Ubuntu**.
+Mac runner and Metal library builds require macOS; iOS preparation remains incomplete. This source preview does not
 provide game downloads or game-bearing app binaries. Start with the
 [disc identity contract](../../docs/ssx3-inputs.md).
 
@@ -38,6 +39,54 @@ python3 tools/ssx3/build.py mac-libs --work /path/to/private-build
 python3 tools/ssx3/build.py mac --work /path/to/private-build
 python3 tools/ssx3/build.py run --work /path/to/private-build
 ```
+
+## Linux and Windows (WSL2) hosts
+
+Use Ubuntu 24.04 with native Python, Git, CMake, Ninja, Clang, a C++ standard
+library and JDK 17. Windows users first install WSL2 Ubuntu, then run every
+command inside Ubuntu; keep the checkout and work directory on its Linux
+filesystem, rather than `/mnt/c`. The builder does not install system packages
+or accept SDK licenses for you.
+
+```sh
+sudo apt-get update
+sudo apt-get install -y python3 git cmake ninja-build clang lld g++ pkg-config curl ca-certificates unzip zip make autoconf automake libtool bison flex openjdk-17-jdk
+python3 tools/ssx3/build.py doctor --target prepare
+python3 tools/ssx3/build.py prepare --tools-only --work /path/to/private-build --jobs 4
+```
+
+`prepare --tools-only` builds the pinned native recompiler without a disc and
+without generating game code. A later normal `prepare --iso ...` reuses that
+compiler. `doctor` needs no work directory or disc and changes no files. It
+prints failed checks and fixes and exits nonzero until prerequisites pass.
+`CC`/`CXX` override compiler selection; versioned Clang names such as
+`clang-18`/`clang++-18` are supported. Mac keeps its Homebrew LLVM preference.
+
+Install Google's Android command-line tools into an SDK directory, set
+`ANDROID_HOME` and `JAVA_HOME` (JDK 17), and put the JDK's `bin` on `PATH`.
+Use the platform's command-line tools from the
+[Android SDK downloads](https://developer.android.com/studio#command-tools).
+Then install the exact components and review the licenses:
+
+```sh
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;28.2.13676358" "cmake;3.22.1" "platform-tools"
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+python3 tools/ssx3/build.py doctor --target android
+```
+
+**Linux arm64:** Google's Linux NDK and SDK native build tools are x86_64
+executables. Configure x86_64 binfmt translation and its x86_64 userspace
+libraries before building (for example, the Mac Linux VM's translation
+support). Python, JDK and the generator can run as native arm64. Doctor
+executes NDK Clang, SDK CMake/Ninja and aapt2 to catch missing translation;
+merely having the files installed is insufficient. This is a translated
+Android toolchain, not a native Linux-arm64 NDK. See
+[Google's NDK host packages](https://developer.android.com/ndk/downloads).
+
+With doctor passing, use the Android commands below, starting with normal
+`prepare --iso ...` using your own disc. `android-libs` accepts `--ndk` or
+finds the exact pinned version beneath `ANDROID_HOME`. `mac`, `mac-libs`
+and `run` are Mac-only; Linux host support does not add a Linux play target.
 
 ## Font pack (on by default)
 

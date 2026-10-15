@@ -28,6 +28,147 @@ SLIM_MAGIC = b'PS2XSLM2'
 MOVIE_PREFIX_SECTORS = 512  # 1 MiB; observed reads end by sector 272.
 
 
+NDK_VERSION = '28.2.13676358'
+SDK_PACKAGES = ['platforms;android-34', 'build-tools;34.0.0',
+                'ndk;' + NDK_VERSION, 'cmake;3.22.1', 'platform-tools']
+
+
+def supported_host():
+    system, machine = platform.system(), platform.machine().lower()
+    return (system == 'Darwin' and machine == 'arm64' or
+            system == 'Linux' and machine in ('x86_64', 'aarch64', 'arm64'))
+
+
+def probe(command):
+    try:
+        result = subprocess.run(list(map(str, command)), text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=30, check=False)
+        return result.returncode == 0, result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return False, str(error)
+
+
+def compiler():
+    """Respect overrides; otherwise prefer installed LLVM over Apple Clang."""
+    cxx = os.environ.get('CXX')
+    if not cxx and platform.system() == 'Darwin' and shutil.which('brew'):
+        ok, prefix = probe(['brew', '--prefix', 'llvm'])
+        if ok and Path(prefix, 'bin/clang++').is_file():
+            cxx = str(Path(prefix, 'bin/clang++'))
+    if not cxx:
+        cxx = next((shutil.which(name) for name in
+                    ['clang++-' + str(v) for v in range(24, 17, -1)] + ['clang++']
+                    if shutil.which(name)), None)
+    if not cxx:
+        raise ValueError('install Clang (Ubuntu: apt install clang lld g++); set CC/CXX if needed')
+    # clang++-18 must pair with clang-18, not a non-existent sibling clang.
+    cc = os.environ.get('CC') or str(Path(cxx).with_name(
+        Path(cxx).name.replace('clang++', 'clang').replace('g++', 'gcc')))
+    for name in (cc, cxx):
+        ok, detail = probe([name, '--version'])
+        if not ok:
+            raise ValueError('compiler cannot run: ' + name + ': ' + detail)
+    return ['-DCMAKE_C_COMPILER=' + cc, '-DCMAKE_CXX_COMPILER=' + cxx]
+
+
+def sdk_root():
+    value = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+    return Path(value).expanduser().resolve() if value else None
+
+
+def ndk_root(explicit=None):
+    if explicit:
+        return explicit.expanduser().resolve()
+    sdk = sdk_root()
+    return sdk / 'ndk' / NDK_VERSION if sdk else None
+
+
+def doctor(a):
+    """Check actual executability, including translated SDK tools on Linux arm64."""
+    failures = []
+
+    def check(label, ok, detail, fix):
+        print(('OK   ' if ok else 'MISS ') + label + ': ' + detail)
+        if not ok:
+            failures.append(label)
+            print('     Fix: ' + fix)
+
+    system, machine = platform.system(), platform.machine()
+    check('host', supported_host(), system + ' ' + machine,
+          'use macOS Apple silicon or Linux x86_64/arm64; on Windows use Ubuntu in WSL2')
+    linux = system == 'Linux'
+    packages = ('sudo apt-get update && sudo apt-get install -y python3 git cmake '
+                'ninja-build clang lld g++ pkg-config curl ca-certificates unzip zip '
+                'make autoconf automake libtool bison flex openjdk-17-jdk') if linux else (
+                'brew install cmake ninja llvm python pkg-config autoconf automake libtool bison')
+    for tool in ('git', 'cmake', 'ninja', 'pkg-config'):
+        ok, detail = probe([tool, '--version'])
+        check(tool, ok, detail.splitlines()[0] if detail else 'missing', packages)
+    try:
+        flags = compiler()
+        check('host compiler', True, ' '.join(flags), packages)
+    except ValueError as error:
+        check('host compiler', False, str(error), packages)
+    if a.target == 'prepare':
+        if failures:
+            raise ValueError('doctor: missing prerequisites: ' + ', '.join(failures))
+        print('Doctor passed for native generator preparation (no disc needed).')
+        return
+    if a.target == 'mac':
+        check('Mac target', system == 'Darwin' and machine == 'arm64', system + ' ' + machine,
+              'mac/mac-libs/run require macOS Apple silicon; select --target android on Linux')
+        for tool in ('clang', 'metal', 'metallib'):
+            ok, detail = probe(['xcrun', '--find', tool])
+            check('Xcode ' + tool, ok, detail, 'install Xcode and its Metal toolchain')
+        ok, detail = probe(['brew', '--prefix'])
+        check('Homebrew', ok, detail, 'install Homebrew and the dependencies in tools/ssx3/README.md')
+    else:
+        java_home = os.environ.get('JAVA_HOME')
+        java = str(Path(java_home, 'bin/java')) if java_home else 'java'
+        keytool = str(Path(java_home, 'bin/keytool')) if java_home else 'keytool'
+        ok, detail = probe([java, '-version'])
+        match = re.search(r'version "(\d+)', detail)
+        check('JDK 17', ok and bool(match) and match[1] == '17', detail.splitlines()[0] if detail else 'missing',
+              packages + '; set JAVA_HOME to the JDK 17 installation')
+        ok, detail = probe([keytool, '-help'])
+        check('keytool', ok, detail.splitlines()[0] if detail else 'missing', 'install JDK 17 and set JAVA_HOME/PATH')
+        sdk = sdk_root()
+        sdk_fix = ('install Android command-line tools; export ANDROID_HOME=/path/to/sdk; '
+                   'run "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ' +
+                   ' '.join('"' + package + '"' for package in SDK_PACKAGES) +
+                   '; review and accept the SDK licenses with sdkmanager --licenses')
+        check('ANDROID_HOME', bool(sdk and sdk.is_dir()), str(sdk), sdk_fix)
+        if sdk:
+            check('SDK platform 34', (sdk / 'platforms/android-34/android.jar').is_file(),
+                  str(sdk / 'platforms/android-34'), sdk_fix)
+            for label, path, arg in (
+                ('SDK aapt2', sdk / 'build-tools/34.0.0/aapt2', 'version'),
+                ('SDK CMake', sdk / 'cmake/3.22.1/bin/cmake', '--version'),
+                ('SDK Ninja', sdk / 'cmake/3.22.1/bin/ninja', '--version')):
+                ok, detail = probe([path, arg])
+                check(label, ok, detail.splitlines()[0] if detail else str(path), sdk_fix +
+                      '; Linux arm64 also needs working x86_64 binfmt translation and x86_64 runtime libraries')
+        ndk = ndk_root(a.ndk)
+        revision = ''
+        if ndk and (ndk / 'source.properties').is_file():
+            revision = (ndk / 'source.properties').read_text()
+        check('NDK revision', bool(re.search(r'Pkg.Revision\s*=\s*' + re.escape(NDK_VERSION) + r'\s*$', revision, re.M)),
+              str(ndk), sdk_fix)
+        if ndk:
+            tag = 'darwin-x86_64' if system == 'Darwin' else 'linux-x86_64'
+            clang = ndk / 'toolchains/llvm/prebuilt' / tag / 'bin/clang'
+            ok, detail = probe([clang, '--version'])
+            check('NDK host execution', ok, detail.splitlines()[0] if detail else str(clang),
+                  sdk_fix + '; Linux arm64 requires x86_64 binfmt translation (NDK tools are x86_64)')
+        for tool in ('make', 'bison', 'flex'):
+            ok, detail = probe([tool, '--version'])
+            check(tool, ok, detail.splitlines()[0] if detail else 'missing', packages)
+    if failures:
+        raise ValueError('doctor: missing prerequisites: ' + ', '.join(failures))
+    print('Doctor passed for ' + a.target + '. No files or devices changed.')
+
+
 def run(*args, cwd=None):
     print('+', ' '.join(map(str, args)), flush=True)
     subprocess.run(list(map(str, args)), cwd=cwd, check=True)
@@ -167,34 +308,12 @@ def write_slim(iso, output, holes, source_sha):
     return output
 
 
-def compiler():
-    # LLVM 20+ is required by the runtime; use caller's CXX or an installed LLVM.
-    cxx = os.environ.get('CXX') or shutil.which('clang++')
-    brew = shutil.which('brew')
-    if not os.environ.get('CXX') and brew:
-        prefix = subprocess.check_output([brew, '--prefix', 'llvm'], text=True).strip()
-        if Path(prefix, 'bin/clang++').exists():
-            cxx = str(Path(prefix, 'bin/clang++'))
-    if not cxx:
-        raise ValueError('install LLVM and set CC/CXX')
-    cc = os.environ.get('CC') or str(Path(cxx).with_name('clang'))
-    return ['-DCMAKE_C_COMPILER=' + cc, '-DCMAKE_CXX_COMPILER=' + cxx]
-
-
 def configure(src, dst, *flags):
     run('cmake', '-S', src, '-B', dst, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
         '-DPS2X_BUILD_STUDIO=OFF', '-DPS2X_ENABLE_SCCACHE=OFF', *compiler(), *flags)
 
 
-def prepare(a):
-    iso = a.iso.resolve()
-    if sha(iso) != ISO_SHA:
-        raise ValueError('unsupported disc SHA256; see docs/ssx3-inputs.md')
-    elf = a.work / 'SLUS_207.72'
-    extract_elf(iso, elf)
-    if sha(elf) != ELF_SHA:
-        raise ValueError('extracted ELF SHA256 mismatch')
-    slim = write_slim(iso, a.work / 'SSX3.iso', slim_holes(iso), ISO_SHA)
+def prepare_generator(a):
     gen = a.work / 'generator-source'
     if not gen.exists():
         run('git', 'clone', '--filter=blob:none', '--no-checkout', FORK, gen)
@@ -205,6 +324,23 @@ def prepare(a):
     build = a.work / 'generator-build'
     configure(gen, build, '-DPS2X_BUILD_RUNTIME=OFF', '-DPS2X_BUILD_ANALYZER=OFF', '-DPS2X_BUILD_TEST=OFF')
     run('cmake', '--build', build, '--parallel', a.jobs, '--target', 'ps2_recomp')
+    return build
+
+
+def prepare(a):
+    if a.tools_only:
+        prepare_generator(a)
+        print('Native generator prepared; no disc read and no game sources generated.')
+        return
+    iso = a.iso.resolve()
+    if sha(iso) != ISO_SHA:
+        raise ValueError('unsupported disc SHA256; see docs/ssx3-inputs.md')
+    elf = a.work / 'SLUS_207.72'
+    extract_elf(iso, elf)
+    if sha(elf) != ELF_SHA:
+        raise ValueError('extracted ELF SHA256 mismatch')
+    slim = write_slim(iso, a.work / 'SSX3.iso', slim_holes(iso), ISO_SHA)
+    build = prepare_generator(a)
     output = a.work / 'codegen'
     if output.exists():
         raise ValueError('refusing existing codegen; choose a fresh --work directory')
@@ -483,6 +619,7 @@ def play(a):
 
 
 def android_libs(a):
+    a.ndk = ndk_root(a.ndk)
     if not a.ndk or not (a.ndk / 'build/cmake/android.toolchain.cmake').is_file():
         raise ValueError('android-libs requires --ndk (NDK 28.2.13676358)')
     vendor = a.work / 'android-assembly/vendor-pcsx2'
@@ -492,9 +629,14 @@ def android_libs(a):
     prefix.mkdir(exist_ok=True)
     env = os.environ.copy()
     env.update({'ANDROID_NDK': str(a.ndk.resolve()), 'ANDROID_ABI': 'arm64-v8a', 'ANDROID_API': '29'})
-    # The pinned vendor recipe downloads and builds source dependencies locally.
-    subprocess.run(['bash', str(vendor / '.github/workflows/scripts/android/build-dependencies.sh'),
-                    str(prefix)], env=env, cwd=a.work, check=True)
+    # Bound the pinned recipe's host-core parallelism to the user's build budget.
+    recipe = (vendor / '.github/workflows/scripts/android/build-dependencies.sh').read_text()
+    marker = 'NPROCS="$(getconf _NPROCESSORS_ONLN)"'
+    if recipe.count(marker) != 1:
+        raise ValueError('dependency recipe parallelism changed; review the vendor pin')
+    recipe_path = a.work / 'android-dependencies.sh'
+    recipe_path.write_text(recipe.replace(marker, 'NPROCS=' + str(a.jobs)))
+    subprocess.run(['bash', str(recipe_path), str(prefix)], env=env, cwd=a.work, check=True)
     assembly = vendor.parent
     for src, dest in [(ROOT / 'ps2xRuntime/third_party/armsx2/ge1', assembly / 'adapter'),
                       (ROOT / 'ps2xRuntime/third_party/armsx2/mv2', assembly / 'mv2-adapter'),
@@ -676,8 +818,10 @@ def install(a):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('step', choices=['prepare', 'mac', 'mac-libs', 'run', 'android', 'android-libs', 'stage', 'install'])
-    p.add_argument('--work', type=Path, required=True, help='external private output directory')
+    p.add_argument('step', choices=['doctor', 'prepare', 'mac', 'mac-libs', 'run', 'android', 'android-libs', 'stage', 'install'])
+    p.add_argument('--work', type=Path, help='external private output directory')
+    p.add_argument('--target', choices=['prepare', 'android', 'mac'], default='android', help='doctor prerequisite set')
+    p.add_argument('--tools-only', action='store_true', help='prepare the native generator without reading a disc')
     p.add_argument('--iso', type=Path, help='own supported USA disc image (prepare only)')
     p.add_argument('--symbol-names', type=Path, help='optional local names sidecar for development codegen')
     p.add_argument('--serial', help='adb device serial for install')
@@ -691,8 +835,17 @@ def main():
     p.add_argument('--jobs', type=int, default=8)
     p.add_argument('--app-id', default=PUBLIC_APP_ID, help='Android package id for android, stage and install')
     a = p.parse_args()
-    if platform.system() != 'Darwin' or platform.machine() != 'arm64':
-        p.error('supported build host: macOS Apple silicon; Windows/x86 is unsupported')
+    if a.step == 'doctor':
+        doctor(a)
+        return
+    if not supported_host():
+        p.error('supported hosts: macOS Apple silicon, Linux x86_64/arm64; Windows users run Ubuntu in WSL2')
+    if a.step in ('mac', 'mac-libs', 'run') and platform.system() != 'Darwin':
+        p.error(a.step + ' requires macOS Apple silicon; Linux hosts build Android APKs')
+    if not a.work:
+        p.error('--work is required for build steps')
+    if a.tools_only and a.step != 'prepare':
+        p.error('--tools-only is only valid with prepare')
     a.work = a.work.resolve()
     if a.work == ROOT or ROOT in a.work.parents:
         p.error('--work must be outside the source checkout')
@@ -700,7 +853,7 @@ def main():
         p.error('--jobs must be 1..16')
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+', a.app_id):
         p.error('--app-id must be a dotted Android application id')
-    if a.step == 'prepare' and not a.iso:
+    if a.step == 'prepare' and not a.iso and not a.tools_only:
         p.error('prepare requires --iso')
     if a.step != 'prepare' and not (a.work / 'inputs.json').is_file():
         p.error('run prepare in this work directory first')
