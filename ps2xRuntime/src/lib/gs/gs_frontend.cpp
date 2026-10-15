@@ -5,6 +5,7 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_stream_capture.h"
 #include "runtime/gs/ge1_gs_api.h"
+#include "runtime/ps2_savestate.h"
 #include "ps2_log.h"
 #include "runtime/ps2_memory.h"
 #include <array>
@@ -1449,6 +1450,11 @@ void GS::noteFinishTimingPcsx2(const uint8_t *data, uint32_t sizeBytes)
     if (!m_finishTimingPcsx2 || !m_privRegs || !data || sizeBytes < 16u)
         return;
     if (!packetHasFinishAD(data, sizeBytes))
+        return;
+    // A queued GIF packet has already passed this scan on its submitting
+    // thread. Canonical mode takes FINISH from that guest stream point; a
+    // backend worker must not re-raise it after the guest has cleared CSR.
+    if (ps2_savestate::canonicalEnabled() && t_inGsWorker)
         return;
     // MQ2: a PATH3 packet the EE already applied at its DMA-kick submit.
     if (ps2_mtvu::finishEe() && !t_inGsWorker && ps2_mtvu::gifEmitPath() == 3u &&
