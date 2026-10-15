@@ -1,10 +1,10 @@
 #pragma once
 // np-fix-1 (F7/F8): tick-stamped remote-script rider state and decision logic.
 //
-// B0 scaffold: Config/loadOnce/findEntry moved VERBATIM from ps2_runtime.cpp
-// (same lenient behavior). Pure helpers (parseScriptText, Session, decide)
-// expose the logic to unit tests with the OLD lenient semantics; the strict
-// fix tightens them. Production hook behavior is unchanged by this move.
+// Config/loadOnce moved from ps2_runtime.cpp; the strict fix adds F7 loader
+// strictness (malformed/conflicting/overlong/unreadable scripts refuse the
+// run) and the F8 per-call consumption contract (session/actor generation
+// binding, backward-tick cursor re-derivation, per-tick ordinals).
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -31,7 +31,6 @@ struct Config
     int slot = -1;
     uint64_t dropTick = 0u; // 0 = never; first tick that reverts to AI
     std::vector<Entry> script;
-    size_t cursor = 0u; // tick-stamped scripts are consumed in order
     bool loaded = false;
     bool loadError = false;
     // F8 session binding (B0: present but unused by decide; the fix binds).
@@ -46,55 +45,87 @@ inline Config &config()
     return cfg;
 }
 
-// Split file content the way fgets(line, 256) would chunk it: a chunk that
-// does not end at a newline while more data follows is a truncated (overlong)
-// line. B0 keeps the raw chunks; the strict fix rejects truncated ones.
-inline std::vector<std::string> splitFgetsChunks(const std::string &content, size_t width = 256)
-{
-    std::vector<std::string> chunks;
-    size_t pos = 0;
-    const size_t cap = width > 1 ? width - 1 : 1;
-    while (pos < content.size())
-    {
-        size_t nl = content.find('\n', pos);
-        bool hasNl = nl != std::string::npos;
-        size_t end = hasNl ? nl + 1 : content.size();
-        while (pos < end)
-        {
-            size_t take = end - pos;
-            bool truncated = false;
-            if (take > cap)
-            {
-                take = cap;
-                truncated = true;
-            }
-            chunks.push_back(content.substr(pos, take));
-            (void)truncated;
-            pos += take;
-        }
-        (void)hasNl;
-    }
-    return chunks;
-}
+// (fgets(256) chunking is emulated inside parseScriptText so overlong lines
+// are detected exactly as the old file reader split them.)
 
-// B0 lenient core (verbatim old semantics): skip #/blank, keep sscanf==4
-// lines silently, sort by tick only. error is always empty here; the strict
-// fix reports malformed/conflicting/overlong/unreadable input.
+// np-fix-1 F7: strict loader. Malformed lines, truncated (overlong) lines,
+// conflicting duplicate ticks and unreadable files are errors that refuse
+// the whole run; only byte-identical duplicate ticks dedup. error is empty
+// on success and the script is sorted by tick.
 inline void parseScriptText(const std::string &content, std::vector<Entry> &entries, std::string &error)
 {
     entries.clear();
     error.clear();
-    for (const std::string &line : splitFgetsChunks(content))
+    struct Chunk
     {
+        std::string text;
+        bool truncated = false;
+    };
+    std::vector<Chunk> chunks;
+    {
+        const size_t cap = 255u; // fgets(line, 256) chunking
+        size_t pos = 0u;
+        while (pos < content.size())
+        {
+            size_t nl = content.find('\n', pos);
+            const size_t end = (nl == std::string::npos) ? content.size() : nl + 1u;
+            while (pos < end)
+            {
+                size_t take = end - pos;
+                bool trunc = false;
+                if (take > cap)
+                {
+                    take = cap;
+                    trunc = true;
+                }
+                chunks.push_back(Chunk{content.substr(pos, take), trunc});
+                pos += take;
+            }
+        }
+    }
+    std::vector<Entry> parsed;
+    size_t lineno = 0u;
+    for (const Chunk &c : chunks)
+    {
+        ++lineno;
+        const std::string &line = c.text;
         if (line.empty() || line[0] == '#' || line[0] == '\n')
             continue;
+        if (c.truncated)
+        {
+            error = "overlong line " + std::to_string(lineno);
+            entries.clear();
+            return;
+        }
         unsigned long long tick = 0u;
         unsigned de4 = 0u, w0 = 0u, w1 = 0u;
-        if (std::sscanf(line.c_str(), "%llu %x %x %x", &tick, &de4, &w0, &w1) == 4)
-            entries.push_back(Entry{static_cast<uint64_t>(tick), de4, w0, w1});
+        if (std::sscanf(line.c_str(), "%llu %x %x %x", &tick, &de4, &w0, &w1) != 4)
+        {
+            error = "malformed line " + std::to_string(lineno);
+            entries.clear();
+            return;
+        }
+        parsed.push_back(Entry{static_cast<uint64_t>(tick), de4, w0, w1});
     }
-    std::sort(entries.begin(), entries.end(),
+    std::sort(parsed.begin(), parsed.end(),
               [](const Entry &a, const Entry &b) { return a.tick < b.tick; });
+    for (size_t i = 0u; i < parsed.size();)
+    {
+        size_t j = i + 1u;
+        while (j < parsed.size() && parsed[j].tick == parsed[i].tick)
+        {
+            if (parsed[j].de4 != parsed[i].de4 || parsed[j].w0 != parsed[i].w0 ||
+                parsed[j].w1 != parsed[i].w1)
+            {
+                error = "conflicting duplicate tick " + std::to_string(parsed[i].tick);
+                entries.clear();
+                return;
+            }
+            ++j; // byte-identical duplicate: keep one
+        }
+        entries.push_back(parsed[i]);
+        i = j;
+    }
 }
 
 inline bool readScriptFile(const std::string &path, std::string &content, std::string &error)
@@ -146,20 +177,22 @@ inline void loadOnce()
         return;
     }
     parseScriptText(content, cfg.script, error);
-    // B0: lenient — error is always empty here, script applies as before.
+    if (!error.empty())
+    {
+        // np-fix-1 F7: a malformed script refuses the run (fail closed with
+        // a clear error) instead of silently driving a partial script.
+        cfg.loadError = true;
+        cfg.script.clear();
+        std::fprintf(stderr, "[np-rider] FATAL: strict script '%s': %s; refusing applies\n",
+                     path.c_str(), error.c_str());
+        return;
+    }
     std::fprintf(stderr, "[np-rider] slot=%d drop=%llu entries=%zu\n", cfg.slot,
                  (unsigned long long)cfg.dropTick, cfg.script.size());
 }
 
-inline const Entry *findEntry(uint64_t tick)
-{
-    Config &cfg = config();
-    while (cfg.cursor < cfg.script.size() && cfg.script[cfg.cursor].tick < tick)
-        ++cfg.cursor;
-    if (cfg.cursor < cfg.script.size() && cfg.script[cfg.cursor].tick == tick)
-        return &cfg.script[cfg.cursor];
-    return nullptr;
-}
+// (The old global-cursor findEntry is retired: decide() carries the cursor
+// in its Session, with backward-tick re-derivation.)
 
 // Per-call consumption state. B0: advance-only cursor mirror; the fix adds
 // generation binding, backward-tick re-derivation and ordinal tracking.
@@ -183,21 +216,40 @@ struct Decision
     uint32_t ordinal = 0u;
 };
 
-// B0 verbatim hook logic as a pure function (loadError ignored, actor
-// binding absent, no rewind, ordinal always 0). The hook keeps calling the
-// global path; tests drive this directly with explicit state.
+// np-fix-1 F8: per-call consumption contract with a session/actor
+// generation. The first apply in a session binds (generation, actor); a
+// foreign actor in the same generation is refused (slot reuse/retire
+// cannot hijack the drive). A backward tick (load/rewind) resets the
+// cursor and the binding so the cursor is re-derived. Same-tick calls
+// share the entry's words with distinct ordinals (idempotent re-apply).
 inline Decision decide(Session &s, const Config &cfg, uint64_t tick, bool isTarget, uint32_t actor,
                        uint32_t de4, bool aiOwned, uint32_t w0, uint32_t w1)
 {
-    (void)actor; // B0: no session/actor generation binding yet (F8 fix binds it).
     Decision d;
     d.outW0 = w0;
     d.outW1 = w1;
+    if (cfg.loadError)
+    {
+        d.why = "load-error";
+        return d;
+    }
     if (!isTarget)
     {
         d.why = "slot0";
         return d;
     }
+    if (!s.hasLastTick || tick != s.lastTick)
+    {
+        if (s.hasLastTick && tick < s.lastTick)
+        {
+            s.cursor = 0u; // backward tick: re-derive from the script start
+            s.boundActorValid = false;
+        }
+        s.lastTick = tick;
+        s.hasLastTick = true;
+        s.ordinal = 0u;
+    }
+    d.ordinal = s.ordinal++;
     while (s.cursor < cfg.script.size() && cfg.script[s.cursor].tick < tick)
         ++s.cursor;
     const Entry *e = (s.cursor < cfg.script.size() && cfg.script[s.cursor].tick == tick)
@@ -207,6 +259,16 @@ inline Decision decide(Session &s, const Config &cfg, uint64_t tick, bool isTarg
     const bool protectedState = de4 == 9u || de4 == 10u || de4 == 13u;
     if (e && !pastDrop && !protectedState && aiOwned && e->de4 == de4)
     {
+        if (!s.boundActorValid)
+        {
+            s.boundActor = actor;
+            s.boundActorValid = true;
+        }
+        if (s.boundActor != actor)
+        {
+            d.why = "gen-mismatch";
+            return d;
+        }
         d.applied = true;
         d.outW0 = e->w0;
         d.outW1 = e->w1;

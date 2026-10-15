@@ -6203,6 +6203,10 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
                         {
                             std::memcpy(rdram + rec, &commit.w0, 4u);
                             std::memcpy(rdram + rec + 4u, &commit.w1, 4u);
+                            // np-fix-1 F12: relay-commit applies join the
+                            // canonical transcript like script applies.
+                            ps2_savestate::canonicalRecordRider(linkTick, slot, 0u, de4,
+                                                                "link-applied", true);
                             std::fprintf(stderr,
                                          "[np-link] tick=%llu slot=%u de4=%u ai=%08x,%08x out=%08x,%08x applied\n",
                                          (unsigned long long)linkTick, slot, de4, w0, w1, commit.w0,
@@ -6250,24 +6254,25 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
                 const bool isTarget = valid && slot == static_cast<uint32_t>(cfg.slot < 0 ? 6 : cfg.slot);
                 if (valid && (slot == 0u || isTarget))
                 {
-                    const ps2_np_rider::Entry *e = isTarget ? ps2_np_rider::findEntry(tick) : nullptr;
-                    const bool pastDrop = cfg.dropTick != 0u && tick >= cfg.dropTick;
-                    const bool protectedState = de4 == 9u || de4 == 10u || de4 == 13u;
+                    // np-fix-1 F7/F8: strict decision with session/actor
+                    // generation, cursor re-derivation and per-call
+                    // ordinals. stderr format is unchanged; the decision
+                    // also goes to the canonical transcript (F12).
+                    static ps2_np_rider::Session hookSession;
                     const bool aiOwned = srcDesc == ps2_np_rider::kAiSourceDesc;
-                    bool applied = false;
-                    if (e && !pastDrop && !protectedState && aiOwned && e->de4 == de4)
+                    const ps2_np_rider::Decision d = ps2_np_rider::decide(
+                        hookSession, cfg, tick, isTarget, actor, de4, aiOwned, w0, w1);
+                    if (d.applied)
                     {
-                        std::memcpy(rdram + rec, &e->w0, 4u);
-                        std::memcpy(rdram + rec + 4u, &e->w1, 4u);
-                        applied = true;
+                        std::memcpy(rdram + rec, &d.outW0, 4u);
+                        std::memcpy(rdram + rec + 4u, &d.outW1, 4u);
                     }
-                    const char *why = !isTarget ? "slot0" : !e ? "no-entry"
-                        : pastDrop ? "dropped" : protectedState ? "protected"
-                        : !aiOwned ? "src-mismatch" : e->de4 != de4 ? "state-mismatch" : "applied";
+                    ps2_savestate::canonicalRecordRider(tick, slot, d.ordinal, de4, d.why,
+                                                        d.applied);
                     std::fprintf(stderr,
                                  "[np-rider] tick=%llu slot=%u ctl=%08x de4=%u ai=%08x,%08x out=%08x,%08x %s\n",
                                  (unsigned long long)tick, slot, getRegU32(ctx, 4), de4, w0, w1,
-                                 applied ? e->w0 : w0, applied ? e->w1 : w1, why);
+                                 d.applied ? d.outW0 : w0, d.applied ? d.outW1 : w1, d.why);
                 }
             }
         }
