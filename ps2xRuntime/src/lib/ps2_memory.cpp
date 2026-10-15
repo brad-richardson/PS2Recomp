@@ -1375,7 +1375,16 @@ void PS2Memory::write32(uint32_t address, uint32_t value, uint32_t guestPc)
                 if (m_finishTimingPcsx2 && (value & ~0x2u) == 0u)
                     ps2_mtvu::ge3EpOnClear(guestPc);
                 else
+                {
                     ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address);
+                    // np-fix-1 F3: a SIGNAL/FINISH W1C clear must apply
+                    // after the GS worker has decoded earlier packets
+                    // (submit order, as in direct mode). The unit sync
+                    // above does not cover the GS worker; without the
+                    // drain the clear can overtake a queued SIGNAL set.
+                    if (m_gsFrontend)
+                        m_gsFrontend->drainQueue();
+                }
             }
             writeCsrHalf(gs_regs.csr, address & 7u, value);
             return;
@@ -1458,7 +1467,13 @@ void PS2Memory::write64(uint32_t address, uint64_t value, uint32_t guestPc)
                 if (m_finishTimingPcsx2 && (value & ~0x2ull) == 0u)
                     ps2_mtvu::ge3EpOnClear(guestPc);
                 else
+                {
                     ps2_mtvu::sync(ps2_mtvu::Reason::GsPrivWrite, address);
+                    // np-fix-1 F3: as in write32, order the W1C clear after
+                    // the GS worker has drained (submit order).
+                    if (m_gsFrontend)
+                        m_gsFrontend->drainQueue();
+                }
             }
             writeCsrFull(gs_regs.csr, value);
             return;
