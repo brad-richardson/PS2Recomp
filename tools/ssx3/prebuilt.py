@@ -36,18 +36,98 @@ def digest(path):
     return h.hexdigest()
 
 
-def contract():
-    """Content identity avoids commit/tag self-reference and rejects stale headers."""
-    paths = [ROOT / 'CMakeLists.txt', Path(__file__), ROOT / 'tools/ssx3/prebuilt-consumer.cmake',
-             ROOT / 'tools/ssx3/build.py', ROOT / 'android/app/build.gradle']
-    for name in ('ps2xRuntime', 'ps2xIOP', 'android/hwcompat', 'tools/ssx3/android-libs'):
+CONTRACT_FILES = ['CMakeLists.txt', 'tools/ssx3/prebuilt.py',
+                  'tools/ssx3/prebuilt-consumer.cmake', 'tools/ssx3/build.py',
+                  'android/app/build.gradle']
+CONTRACT_DIRS = ('ps2xRuntime', 'ps2xIOP', 'android/hwcompat', 'tools/ssx3/android-libs')
+
+# Names that never describe sources, filtered when no .git is available to
+# enumerate the tracked set (Finder/Explorer droppings, editor backups).
+JUNK_NAMES = frozenset({'.DS_Store', 'Thumbs.db', 'desktop.ini'})
+
+
+def _is_junk(path):
+    name = path.name
+    return name.startswith('._') or name.endswith('~') or name in JUNK_NAMES
+
+
+def _tracked_entries():
+    """(relpath, blob) pairs from git, or None when .git is unavailable."""
+    if not (ROOT / '.git').exists():
+        return None
+    try:
+        out = subprocess.check_output(
+            ['git', '-C', str(ROOT), 'ls-files', '-s', '--',
+             *CONTRACT_FILES, *CONTRACT_DIRS],
+            stderr=subprocess.DEVNULL, text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    entries = []
+    for line in out.splitlines():
+        head, _, path = line.partition('\t')
+        fields = head.split()
+        if len(fields) != 3:
+            continue
+        mode, blob, _ = fields
+        if mode == '120000' or Path(path).name.startswith('._'):
+            continue  # symlinks and AppleDouble were never hashed
+        entries.append((path, blob))
+    return sorted(entries)
+
+
+def _walked_entries():
+    paths = [ROOT / name for name in CONTRACT_FILES]
+    for name in CONTRACT_DIRS:
         paths.extend(p for p in (ROOT / name).rglob('*') if p.is_file()
-                     and not p.is_symlink() and not p.name.startswith('._'))
+                     and not p.is_symlink() and not _is_junk(p))
+    return sorted((p.relative_to(ROOT).as_posix(), digest(p))
+                  for p in set(paths))
+
+
+def contract():
+    """Content identity avoids commit/tag self-reference and rejects stale headers.
+
+    With a .git checkout the tracked blob set is hashed, so Finder
+    droppings, gitignored build outputs and other stray files cannot move
+    the stamp. Without .git (a source bundle) the walked files are hashed
+    with junk names filtered.
+    """
     h = hashlib.sha256(json.dumps(RECIPE, sort_keys=True).encode())
-    for p in sorted(set(paths)):
-        h.update(p.relative_to(ROOT).as_posix().encode() + b'\0')
-        h.update(digest(p).encode() + b'\n')
+    tracked = _tracked_entries()
+    entries = tracked if tracked is not None else _walked_entries()
+    for rel, ident in entries:
+        h.update(rel.encode() + b'\0')
+        h.update(ident.encode() + b'\n')
     return h.hexdigest()
+
+
+def contract_drift():
+    """Working-tree paths that should move the build off the prebuilt.
+
+    Tracked-set stamping is blind to working-tree edits and new files, so
+    the consumer checks this separately: modified tracked files and new
+    non-junk files under the contract paths fall back to the source build
+    with these paths named. Junk droppings and gitignored outputs are
+    ignored. Returns [] when git is unavailable.
+    """
+    try:
+        out = subprocess.check_output(
+            ['git', '-C', str(ROOT), 'status', '--porcelain',
+             '--untracked-files=all', '--',
+             *CONTRACT_FILES, *CONTRACT_DIRS],
+            stderr=subprocess.DEVNULL, text=True)
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    drift = []
+    for line in out.splitlines():
+        if len(line) < 4:
+            continue
+        # "XY <path>[ -> <new>]" — renames report the new path.
+        path = line[3:].split(' -> ')[-1].strip('"')
+        if line[:2] == '??' and _is_junk(Path(path)):
+            continue
+        drift.append(path)
+    return drift
 
 
 def safe_name(name):
@@ -124,6 +204,14 @@ def fetch(cache, mode='auto'):
     try:
         if bundle.is_dir():
             verify(bundle, stamp)
+            drift = contract_drift()
+            if drift:
+                print('Prebuilt cache ignored: working-tree drift under the contract paths;',
+                      file=sys.stderr)
+                for path in drift:
+                    print('  drift: ' + path, file=sys.stderr)
+                print('Building from source.', file=sys.stderr)
+                return None
             print('Verified offline prebuilt cache: ' + str(bundle))
             return bundle
         cache.mkdir(parents=True, exist_ok=True)
@@ -149,6 +237,14 @@ def fetch(cache, mode='auto'):
             unpacked.rename(bundle)
         print('Verified prebuilt release: ' + tag)
         return bundle
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print('No prebuilt release for contract ' + stamp + ' (' + tag + ').',
+                  file=sys.stderr)
+            for path in contract_drift():
+                print('  contract drift: ' + path, file=sys.stderr)
+        print('Prebuilt unavailable (' + str(e) + '); building from source.', file=sys.stderr)
+        return None
     except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as e:
         print('Prebuilt unavailable (' + str(e) + '); building from source.', file=sys.stderr)
         return None

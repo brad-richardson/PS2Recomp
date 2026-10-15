@@ -22,6 +22,8 @@ class PrebuiltTests(unittest.TestCase):
         self.bundle.mkdir(parents=True)
         self.contract_patch = patch.object(prebuilt, 'contract', return_value=STAMP)
         self.contract_patch.start()
+        self.drift_patch = patch.object(prebuilt, 'contract_drift', return_value=[])
+        self.drift_patch.start()
         paths = ['lib/' + x for x in prebuilt.ARCHIVES]
         paths += ['jniLibs/arm64-v8a/' + x for x in prebuilt.SHARED]
         paths += ['include/sse2neon.h', 'runtime-definitions.txt', 'notices/PS2Recomp-LICENSE', 'notices/SOURCES.json']
@@ -35,6 +37,7 @@ class PrebuiltTests(unittest.TestCase):
 
     def tearDown(self):
         self.contract_patch.stop()
+        self.drift_patch.stop()
         self.tmp.cleanup()
 
     def write_manifest(self):
@@ -125,6 +128,56 @@ class PrebuiltTests(unittest.TestCase):
         with patch.object(prebuilt.urllib.request, 'urlopen', side_effect=responses):
             self.assertEqual(prebuilt.fetch(cache), cache / STAMP)
         prebuilt.verify(cache / STAMP)
+
+    def test_junk_names_are_filtered(self):
+        for name in ('.DS_Store', 'Thumbs.db', 'desktop.ini', '._AppleDouble', 'notes~'):
+            self.assertTrue(prebuilt._is_junk(Path(name)), name)
+        for name in ('hwcompat.c', 'CMakeLists.txt', 'libps2_runtime.a'):
+            self.assertFalse(prebuilt._is_junk(Path(name)), name)
+
+    def test_stray_files_do_not_move_contract(self):
+        # M3: Finder droppings and editor backups under the contract paths
+        # must not move the stamp or appear as drift.
+        self.contract_patch.stop()
+        self.drift_patch.stop()
+        try:
+            before = prebuilt.contract()
+            strays = [prebuilt.ROOT / 'ps2xRuntime/.DS_Store',
+                      prebuilt.ROOT / 'ps2xRuntime/._AppleDouble',
+                      prebuilt.ROOT / 'ps2xIOP/junk~']
+            for p in strays:
+                p.write_bytes(b'synthetic stray, no game input\n')
+            try:
+                self.assertEqual(prebuilt.contract(), before)
+                drift = prebuilt.contract_drift()
+                for p in strays:
+                    self.assertNotIn(p.relative_to(prebuilt.ROOT).as_posix(), drift)
+            finally:
+                for p in strays:
+                    p.unlink(missing_ok=True)
+        finally:
+            self.contract_patch.start()
+            self.drift_patch.start()
+
+    def test_release_miss_names_contract_and_drift(self):
+        import contextlib
+        err = io.StringIO()
+        with patch.object(prebuilt.urllib.request, 'urlopen',
+                          side_effect=urllib.error.HTTPError('url', 404, 'missing', {}, None)), \
+             patch.object(prebuilt, 'contract_drift',
+                          return_value=['ps2xRuntime/edited.cpp']), \
+             contextlib.redirect_stderr(err):
+            self.assertIsNone(prebuilt.fetch(self.root / 'miss-cache'))
+        output = err.getvalue()
+        self.assertIn(STAMP, output)
+        self.assertIn('ps2xRuntime/edited.cpp', output)
+
+    def test_cache_drift_falls_back_without_network(self):
+        with patch.object(prebuilt, 'contract_drift',
+                          return_value=['ps2xRuntime/edited.cpp']), \
+             patch.object(prebuilt.urllib.request, 'urlopen',
+                          side_effect=AssertionError('network used')):
+            self.assertIsNone(prebuilt.fetch(self.cache))
 
 
 if __name__ == '__main__':
