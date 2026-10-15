@@ -339,6 +339,7 @@ namespace
         noteWindowCallback(frames, true, 1.0f);
         // TK43c: the Tricky song burst mixes over the final output (no-op
         // when idle or unloaded), before the DC blocker and WAV taps.
+        recordWav(g_output.wav, output, samples); // tk-audio-1: synchronized pre-host output
         // snd-seam-1 family #4: the mix comes from the module provider;
         // null (or no module) is silence, as with the knob off.
         if (const ps2_game_module::Module *songModule = ps2_game_module::installed();
@@ -346,7 +347,6 @@ namespace
             songModule->sndTrickySongMix(output, frames, "direct");
         if (g_output.dcBlock)
             dcBlockFrames(output, frames);
-        recordWav(g_output.wav, output, samples);
         recordWav(g_output.postWav, output, samples);
         probeSink("direct", output, frames);
         minuteStats(std::chrono::steady_clock::now());
@@ -718,13 +718,8 @@ namespace
             }
         }
 
-        // Source WAV: the consumed ring frames at source rate (pre-stretch).
-        if (g_output.wav.file.is_open() && !fed.empty())
-        {
-            g_output.srcBuf.resize(fed.size() * 2u);
-            unpackFrames(fed.data(), fed.size(), g_output.srcBuf.data());
-            recordWav(g_output.wav, g_output.srcBuf.data(), fed.size() * 2u);
-        }
+        // tk-audio-1: same callback/timebase as post-host capture.
+        recordWav(g_output.wav, output, static_cast<size_t>(frames) * 2u);
         // TK43c: the Tricky song burst mixes over the final output (no-op
         // when idle or unloaded), before the DC blocker and WAV taps.
         // snd-seam-1 family #4: module provider (null = silence).
@@ -755,6 +750,7 @@ namespace
         {
             auto *output = static_cast<int16_t *>(buffer);
             std::memset(output, 0, static_cast<size_t>(frames) * 2u * sizeof(int16_t));
+            recordWav(g_output.wav, output, static_cast<size_t>(frames) * 2u);
             recordWav(g_output.postWav, output, static_cast<size_t>(frames) * 2u);
             probeSink("turbo-mute", output, frames);
             noteWindowCallback(frames, true, 1.0f);
@@ -891,8 +887,17 @@ bool initialize()
         }
     }
     SetAudioStreamCallback(g_output.stream, audioCallback);
-    openWav(g_output.wav, nullptr, g_output.stretch ? kSourceRate : g_output.rate); // KNC4: file dump off
-    openWav(g_output.postWav, nullptr, g_output.rate);                             // (knobs removed)
+#if PS2X_ENABLE_DIAG_TAPS || PS2X_ENABLE_DET_HASH_TAP
+    // Temporary tk-audio-1 diagnostics, removed before lane close.
+    // Stock key boots have no staged Tricky song and produce no capture.
+    const char *capture = std::getenv("PS2X_SSX3_TRICKY_SONG");
+    const bool captureAudio = capture && *capture;
+    openWav(g_output.wav, captureAudio ? "tk-audio-pre-host.wav" : nullptr, g_output.rate);
+    openWav(g_output.postWav, captureAudio ? "tk-audio-post-host.wav" : nullptr, g_output.rate);
+#else
+    openWav(g_output.wav, nullptr, g_output.rate);
+    openWav(g_output.postWav, nullptr, g_output.rate);
+#endif
     PlayAudioStream(g_output.stream);
     g_output.ready = true;
     std::cerr << "[snd-output] stream rate=" << g_output.rate << " channels=2 bits=16\n";

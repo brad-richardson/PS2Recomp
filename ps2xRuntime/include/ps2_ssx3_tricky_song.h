@@ -3,6 +3,8 @@
 //
 // When the boost meter becomes full, the host mixer plays ~5 s of the
 // staged song (PS2X_SSX3_TRICKY_SONG=<48 kHz stereo 16-bit WAV path>),
+// only when PS2X_SSX3_TRICKY_SONG=legacy:<wav> explicitly enables the legacy overlay.
+// tk-audio-1: default off, including presets that already stage a song path.
 // resuming where the last burst left off and wrapping at the song end.
 // Mixed at the output stage after the SPU mix (the runtime cannot separate
 // the game's music bus: a single mixed ring feeds the callbacks), at a
@@ -182,6 +184,15 @@ inline void initFromEnv()
     const char *path = std::getenv("PS2X_SSX3_TRICKY_SONG");
     if (!path || !*path)
         return;
+    // A staged asset is not an opt-in to a second soundtrack. Keep the
+    // exact additive player available for comparisons without ducking SFX.
+    constexpr const char *kLegacyPrefix = "legacy:";
+    if (std::strncmp(path, kLegacyPrefix, 7u) != 0)
+    {
+        std::fprintf(stderr, "[ssx3-tricky-song] host burst off (opt in: PS2X_SSX3_TRICKY_SONG=legacy:<wav>)\n");
+        return;
+    }
+    path += 7u;
     Player &p = player();
     p.song = loadSongFile(path);
     std::fprintf(stderr, "[ssx3-tricky-song] file '%s': %s\n", path,

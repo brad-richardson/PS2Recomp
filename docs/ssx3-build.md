@@ -82,3 +82,11 @@ Software licences do not authorize distributing game-derived assets.
 
 Continue with [Android setup](../android/README.md) or
 [troubleshooting and validation](ssx3-troubleshooting.md).
+
+### Tricky host song overlay
+
+The five-second host “It’s Tricky” burst is off by default. A plain
+`PS2X_SSX3_TRICKY_SONG=/path/to/tricky-song.wav` left in an older preset
+does not enable it. To compare the previous additive mix, explicitly set
+`PS2X_SSX3_TRICKY_SONG=legacy:/path/to/tricky-song.wav`. This output-only
+option leaves guest music, effects, speech, and meter/letter events unchanged.
