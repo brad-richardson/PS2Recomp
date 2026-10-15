@@ -15,7 +15,9 @@
 //   - Reverse-DMA readbacks: canonical mode answers fixed bytes through
 //     guest RAM without touching the backend; outside canonical mode this
 //     backend serves nothing (0 bytes), so readback-on routes must use a
-//     raster backend.
+//     raster backend. Under CANON the HLE store-image route additionally
+//     fills canonical bytes here (np-fix-1 F2), so even that route never
+//     succeeds with 0 bytes.
 // The VU1 microprograms still execute; only the GS draw is skipped.
 
 #include "runtime/gs/gs_backend.h"

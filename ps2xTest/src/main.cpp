@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include <cstdlib>
 #include <iostream>
+#include <string>
 
 void register_code_generator_tests();
 void register_r5900_decoder_tests();
@@ -82,9 +83,12 @@ void register_ps2_tc1_vf0_tests();
 void register_ps2_ach_tests();
 void register_ps2_session_telemetry_tests();
 void reset_ps2_test_function_table();
+int np_fix_child_main(const std::string &name);
 
-int main()
+int main(int argc, char **argv)
 {
+    if (argc == 3 && std::string(argv[1]) == "--np-fix-child")
+        return np_fix_child_main(argv[2]);
     if (std::getenv("PS2X_JCAM2_PROBE"))
         return ps2_fh1_jcam2_protection_probe();
     MiniTest::BeforeEach(reset_ps2_test_function_table);

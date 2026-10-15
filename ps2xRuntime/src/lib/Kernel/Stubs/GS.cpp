@@ -3,10 +3,15 @@
 #include "GS.h"
 #include "ps2_log.h"
 #include "ps2_mtvu.h"
+#include "runtime/gs/gs_headless_backend.h" // np-fix-1 F2: headless fail-closed
 #include "runtime/gs/ps2_gs_common.h"
 #include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_savestate.h" // np-fix-1 F2: canonical HLE readback
 #include "../Syscalls/System.h"
+
+#include <atomic>
+#include <cstring>
 
 namespace ps2_stubs
 {
@@ -764,7 +769,29 @@ namespace ps2_stubs
                                           totalImageBytes, rdram, "gs-store-image",
                                           "gs-image", 0u);
         ps2_mtvu::sync(ps2_mtvu::Reason::GsHle); // MT1: GS->host readback
-        runtime->gs().consumeLocalToHostBytes(dst, totalImageBytes);
+        const uint32_t gotBytes = runtime->gs().consumeLocalToHostBytes(dst, totalImageBytes);
+        // np-fix-1 F2: this HLE route used to bypass the canonical readback
+        // path and report success even when zero bytes were produced.
+        // Under CANON the guest sees canonical 0xff bytes (the same policy
+        // as the VIF1 probe path) with a transcript ticket; outside CANON a
+        // short headless serve fails closed instead of succeeding empty.
+        if (ps2_savestate::canonicalEnabled() && totalImageBytes != 0u)
+        {
+            std::memset(dst, 0xff, totalImageBytes);
+            uint64_t digest = 14695981039346656037ull;
+            for (uint32_t i = 0u; i < totalImageBytes; ++i)
+                digest = (digest ^ 0xffu) * 1099511628211ull;
+            ps2_savestate::canonicalRecordReadback(
+                mem.gs().vsyncTick.load(std::memory_order_relaxed),
+                ps2_savestate::canonicalNextReadbackTicket(), dstAddr, totalImageBytes, digest);
+        }
+        else if (gotBytes == 0u && totalImageBytes != 0u && ps2x_gs_headless::requested())
+        {
+            runtime->guestFree(pktAddr);
+            ps2_log::emitDrop("stub/sceGsExecStoreImage", "error");
+            setReturnS32(ctx, -1);
+            return;
+        }
         runtime->guestFree(pktAddr);
 
         setReturnS32(ctx, 0);

@@ -1176,8 +1176,10 @@ namespace ps2_savestate
 
     uint64_t canonicalNextReadbackTicket()
     {
-        static uint64_t next = 0u; // B0: never reset; the fix restarts it per session.
-        return next++;
+        // F2: VIF1-probe and HLE store-image tickets share one namespace;
+        // F12 restarts it per session. EE-thread issued, like the callers.
+        static std::atomic<uint64_t> next{0u};
+        return next.fetch_add(1u, std::memory_order_relaxed);
     }
 
     bool canonicalOracle(PS2Runtime &runtime, uint64_t tick, bool transition, std::string &why)

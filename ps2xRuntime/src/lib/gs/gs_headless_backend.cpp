@@ -4,6 +4,7 @@
 // defers on backend work that does not exist.
 
 #include "runtime/gs/gs_headless_backend.h"
+#include "runtime/ps2_savestate.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -89,6 +90,14 @@ bool GSHeadlessBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba
 
 uint32_t GSHeadlessBackend::ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
 {
+    // np-fix-1 F2: under CANON the referee backend serves canonical bytes
+    // (the same fixed-0xff policy as the VIF1 probe path) instead of
+    // nothing, so no guest readback route can succeed with 0 bytes.
+    if (dst && maxBytes != 0u && ps2_savestate::canonicalEnabled())
+    {
+        std::memset(dst, 0xff, maxBytes);
+        return maxBytes;
+    }
     (void)dst;
     (void)maxBytes;
     return 0u;

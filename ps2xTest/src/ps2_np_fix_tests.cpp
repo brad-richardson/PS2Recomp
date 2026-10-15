@@ -19,6 +19,9 @@
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 namespace
@@ -49,16 +52,44 @@ struct EnvGuard
 };
 
 #if defined(__unix__) || defined(__APPLE__)
-int runForked(int (*child)())
+// fork+exec isolation: CANON statics (enabled cache, trace file) are
+// process-global and order-sensitive, so CANON tests re-exec the suite
+// binary with --np-fix-child <name> for truly fresh state. This also avoids
+// fork-with-threads hazards (exec clears the thread list).
+std::string selfExePath()
 {
+#if defined(__APPLE__)
+    uint32_t size = 0u;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string buf(size, '\0');
+    if (_NSGetExecutablePath(buf.data(), &size) == 0)
+    {
+        buf.resize(std::strlen(buf.c_str()));
+        return buf;
+    }
+    return {};
+#else
+    char buf[4096];
+    const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1u);
+    if (n <= 0)
+        return {};
+    buf[n] = '\0';
+    return std::string(buf);
+#endif
+}
+
+int runChild(const char *name)
+{
+    const std::string self = selfExePath();
+    if (self.empty())
+        return 1002;
     pid_t pid = ::fork();
     if (pid < 0)
         return 1000;
     if (pid == 0)
     {
-        int rc = child();
-        std::fflush(nullptr);
-        _exit(rc);
+        ::execl(self.c_str(), self.c_str(), "--np-fix-child", name, nullptr);
+        _exit(127);
     }
     int status = 0;
     while (::waitpid(pid, &status, 0) < 0 && errno == EINTR)
@@ -197,7 +228,7 @@ void register_np_fix_tests_body(TestCase &tc)
     tc.Run("F2 headless consume serves canonical bytes under CANON", [](TestCase &t)
            {
 #if defined(__unix__) || defined(__APPLE__)
-               const int rc = runForked(f2Child);
+               const int rc = runChild("f2");
                t.Equals(rc, 0, "headless consume returns want-bytes of 0xff under CANON");
 #else
             t.Fail("fork unavailable on this platform");
@@ -362,7 +393,7 @@ void register_np_fix_tests_body(TestCase &tc)
 #if defined(__unix__) || defined(__APPLE__)
                std::error_code ec;
                std::filesystem::remove_all(std::string(kWorkRoot) + "/e", ec);
-               const int rc = runForked(f12EventChild);
+               const int rc = runChild("e");
                t.Equals(rc, 0, "event child runs");
                bool found = false;
                for (const std::string &line : splitLines(readFile(std::string(kWorkRoot) + "/e/transcript.tsv")))
@@ -384,7 +415,7 @@ void register_np_fix_tests_body(TestCase &tc)
 #if defined(__unix__) || defined(__APPLE__)
                std::error_code ec;
                std::filesystem::remove_all(std::string(kWorkRoot) + "/d", ec);
-               const int rc = runForked(f12RiderChild);
+               const int rc = runChild("d");
                t.Equals(rc, 0, "rider child runs");
                size_t decisions = 0;
                for (const std::string &line : splitLines(readFile(std::string(kWorkRoot) + "/d/transcript.tsv")))
@@ -402,7 +433,7 @@ void register_np_fix_tests_body(TestCase &tc)
                std::error_code ec;
                std::filesystem::remove_all(std::string(kWorkRoot) + "/s1", ec);
                std::filesystem::remove_all(std::string(kWorkRoot) + "/s2", ec);
-               const int rc = runForked(f12SessionChild);
+               const int rc = runChild("s");
                t.Equals(rc, 0, "session child runs");
                const std::string s2 = readFile(std::string(kWorkRoot) + "/s2/transcript.tsv");
                bool found = false;
@@ -427,4 +458,24 @@ void register_np_fix_tests_body(TestCase &tc)
 void register_np_fix_tests()
 {
     MiniTest::Case("ZzNpFix", register_np_fix_tests_body);
+}
+
+int np_fix_child_main(const std::string &name)
+{
+#if defined(__unix__) || defined(__APPLE__)
+    int rc = 99;
+    if (name == "f2")
+        rc = f2Child();
+    else if (name == "e")
+        rc = f12EventChild();
+    else if (name == "d")
+        rc = f12RiderChild();
+    else if (name == "s")
+        rc = f12SessionChild();
+    std::fflush(nullptr);
+    return rc;
+#else
+    (void)name;
+    return 99;
+#endif
 }

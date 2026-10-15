@@ -1927,13 +1927,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     }
                     if (cpuVisibleProbe)
                     {
-                        static uint64_t nextTicket = 0u; // EE-owned request order
                         uint64_t digest = 14695981039346656037ull;
                         for (uint32_t i = 0u; i < rb2Done; ++i)
                             digest = (digest ^ 0xffu) * 1099511628211ull;
                         ps2_savestate::canonicalRecordReadback(
-                            gs_regs.vsyncTick.load(std::memory_order_relaxed), nextTicket++,
-                            madr, rb2Done, digest);
+                            gs_regs.vsyncTick.load(std::memory_order_relaxed),
+                            ps2_savestate::canonicalNextReadbackTicket(), madr, rb2Done, digest);
                     }
                     {
                         static std::atomic<uint32_t> rb2LogCount{0};
