@@ -31,9 +31,12 @@
 #include <cstddef>
 #include <cstdint>
 
+struct R5900Context;
+
 namespace ps2_game_module
 {
-    inline constexpr uint32_t kAbiVersion = 1u;
+    // 2 (module-seam-2): the kernel syscall hooks below.
+    inline constexpr uint32_t kAbiVersion = 2u;
 
     struct Module
     {
@@ -43,6 +46,14 @@ namespace ps2_game_module
         // built-in registry), applied in table order after the built-ins.
         const ps2_game_overrides::Descriptor *overrides = nullptr;
         size_t overrideCount = 0u;
+        // Kernel syscall hooks. SetSyscall reports each install after the
+        // runtime records it. A syscall whose installed handler has no
+        // recompiled function (code the guest copied at run time) is offered
+        // to the module before the runtime's KE_ERROR drop; true means the
+        // module served it and set the return registers.
+        void (*noteSyscallInstall)(uint32_t syscallIndex, uint32_t handler) = nullptr;
+        bool (*serveUnmappedSyscall)(uint32_t syscallNumber, uint32_t handler, uint8_t *rdram,
+                                     R5900Context *ctx) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).

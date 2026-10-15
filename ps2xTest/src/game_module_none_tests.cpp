@@ -1,7 +1,12 @@
 #include "MiniTest.h"
 #include "game_overrides.h"
 #include "ps2_runtime.h"
+#include "ps2_runtime_macros.h"
+#include "ps2_syscalls.h"
 #include "runtime/game_module.h"
+
+#include <cstring>
+#include <vector>
 
 void reset_ps2_test_function_table();
 
@@ -41,6 +46,26 @@ void register_game_module_none_tests()
             reset_ps2_test_function_table();
             ps2_game_overrides::applyMatching(runtime, "SLUS_207.72", 0x00100008u, 0u, false);
             t.IsTrue(!runtime.hleIopMode(), "IOP emulator mode stays");
+            reset_ps2_test_function_table();
+        });
+        // module-seam-2: K1. Without a module, a syscall handler with no
+        // recompiled function drops to KE_ERROR even after the SSX 3 pass
+        // and with SSX 3's copied payload intact in RAM.
+        tc.Run("an unmapped syscall handler drops to KE_ERROR", [](TestCase &t)
+               {
+            PS2Runtime runtime;
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+            reset_ps2_test_function_table();
+            ps2_game_overrides::applyMatching(runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+            constexpr uint32_t kSrc = 0x4561C0u, kDstPhys = 0x75000u, kSize = 0x330u;
+            for (uint32_t i = 0; i < kSize; ++i)
+                rdram[kSrc + i] = static_cast<uint8_t>((i * 31u + 7u) & 0xFFu);
+            std::memcpy(rdram.data() + kDstPhys, rdram.data() + kSrc, kSize);
+            runtime.setEeSyscallOverride(rdram.data(), 0x5Bu, 0x80075000u);
+            SET_GPR_U32(&ctx, 4, 0x55u);
+            t.IsTrue(ps2_syscalls::dispatchNumericSyscall(0x5Bu, rdram.data(), &ctx, &runtime), "dispatched");
+            t.Equals(static_cast<int32_t>(getRegU32(&ctx, 2)), -1, "KE_ERROR");
             reset_ps2_test_function_table();
         }); });
 }

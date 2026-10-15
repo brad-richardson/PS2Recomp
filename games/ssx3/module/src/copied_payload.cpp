@@ -1,6 +1,16 @@
+// module-seam-2: moved from ps2xRuntime/src/lib/Kernel/Syscalls/
+// Ssx3CopiedPayload.cpp (fork c71407e9). The kernel reaches it through the
+// module's syscall hooks (runtime/game_module.h); state and helpers are
+// unchanged.
 #include "Ssx3CopiedPayload.h"
-#include "Common.h"
-#include "game_overrides.h"
+#include "ssx3_module_internal.h"
+
+#include "ps2_runtime.h"
+#include "runtime/ps2_memory.h"
+
+#include <atomic>
+#include <cstring>
+#include <iostream>
 
 namespace ps2_syscalls
 {
@@ -38,13 +48,6 @@ std::atomic<uint64_t> g_installLogged{0};
 std::atomic<uint64_t> g_provenanceFail{0};
 // HLE stand-in for the COP0 Wired register the 0x59 helper allocates from.
 std::atomic<uint32_t> g_wiredAlloc{0};
-
-void applySsx3CopiedPayload(PS2Runtime &runtime)
-{
-    (void)runtime;
-    g_k1Enabled.store(true, std::memory_order_relaxed);
-    std::cerr << "[k1] armed name=ssx3-copied-payload elf=SLUS_207.72" << std::endl;
-}
 
 bool copyIntact(const uint8_t *rdram)
 {
@@ -179,11 +182,13 @@ bool emulateHelper(uint32_t syscallNumber, uint8_t *rdram, R5900Context *ctx)
 }
 } // namespace
 
-PS2_REGISTER_GAME_OVERRIDE("ssx3-copied-payload",
-                           "SLUS_207.72",
-                           0x00100008u,
-                           0u,
-                           applySsx3CopiedPayload);
+// Registered by the module table (ssx3_module.cpp) as "ssx3-copied-payload".
+void applySsx3CopiedPayload(PS2Runtime &runtime)
+{
+    (void)runtime;
+    g_k1Enabled.store(true, std::memory_order_relaxed);
+    std::cerr << "[k1] armed name=ssx3-copied-payload elf=SLUS_207.72" << std::endl;
+}
 
 bool tryDispatchSsx3CopiedPayload(uint32_t syscallNumber, uint32_t handler, uint8_t *rdram, R5900Context *ctx)
 {

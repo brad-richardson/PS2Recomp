@@ -14,3 +14,9 @@ namespace ps2_ssx3_hle_iop
 {
 void applySsx3HleIop(PS2Runtime &runtime); // "ssx3-hle-iop" (UPR1)
 }
+
+namespace ps2_syscalls
+{
+// "ssx3-copied-payload" (K1); its syscall hooks are in Ssx3CopiedPayload.h.
+void applySsx3CopiedPayload(PS2Runtime &runtime);
+}

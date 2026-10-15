@@ -452,7 +452,9 @@ void register_ps2_savestate_tests()
         {
             (void)ps2_savestate::config(); // pulls the syscall section's object in
             const auto &sections = ps2_savestate::registeredSections();
-            for (const char *key : {"syscalls", "syscalls:k1", "syscalls:deci2", "stub:cd", "stub:sif", "stub:mc",
+            // module-seam-2: "syscalls:k1" moved with the SSX 3 module
+            // (games/ssx3/module/tests/ps2_ssx3_copied_payload_tests.cpp).
+            for (const char *key : {"syscalls", "syscalls:deci2", "stub:cd", "stub:sif", "stub:mc",
                                     "stub:pad", "stub:audio", "stub:dma", "stub:mpeg", "stub:mcdir", "snd", "padlatch",
                                     "support:Stubs/CD.cpp"})
                 t.IsTrue(sections.count(key) == 1u, std::string("section registered: ") + key);
