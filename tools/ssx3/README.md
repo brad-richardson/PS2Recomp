@@ -125,18 +125,16 @@ Run that suite **from the checkout root**. The generator pin is
 `03c10b5aeccd4fb673fecaea3cf4a5f5064afe14`. It selects overlapping resume owners by greatest candidate function start,
 independent of host hash-table order. `prepare` checks ISO and extracted ELF SHA256, fetches the pinned
 generator from the local checkout when present (otherwise the public fork), builds it, writes absolute local TOML
-paths, and records the generated registration SHA256. An optional local play
-names sidecar reproduces SHA256
-`ad96edb68ce78994684c736b745d79f02d88367eb4d5bfeb2d7b05d126b0867c`
-(the SPR1 play pin, ABI v2). Use a fresh work directory for regeneration;
-existing output is refused.
+paths, and records the generated registration SHA256. Use a fresh work
+directory for regeneration; existing output is refused. Registration hashes
+from earlier generator pins do not describe the deterministic ownership rule.
 
 Names are optional. The public tree contains no game symbol names and
 `prepare` uses the generator's default `sub_…` identifiers. For local
 development, supply your own untracked sidecar with
 `prepare --symbol-names /path/to/local/ssx3-symbols.tsv`; the file remains
 outside the checkout. The sidecar changes identifiers and comments, so
-its generated registration SHA can be compared with the play pin above.
+its generated registration SHA differs from the default name-free output.
 
 `mac-libs` pins the public ARMSX2 fork to
 `0c7a2987477617ea6eab46d05dffb990ed200f6a` (`armsx2-ssx3-four` tip, the play vendor; carries the on-device
