@@ -12,6 +12,7 @@
 #include "Pad.h"
 #include "ps2_log.h"
 #include "ps2_net_dirtysock.h" // ONL10: navigator milestone snapshot
+#include "ps2_net_link.h" // np-link-1: delay-lockstep client (default off)
 #include "ps2_net_protocol.h"
 #include "ps2_rpl3_nv.h" // RPL3: recorded host values (padrec v3)
 #include "ps2_turbo_boot.h" // BTS1: boot turbo input yield
@@ -4241,6 +4242,25 @@ namespace ps2_stubs
                     return false;
                 }
                 portState = *sharedPortState;
+            }
+
+            // np-link-1 (SRVP1 P1a; default off): commit-gated slot-0 drive.
+            // At/after FIRST_TICK the pad state comes only from the echoed
+            // relay commit (waitCommit stalls the sim thread until both
+            // inputs for this tick are committed; the network thread keeps
+            // receiving). The existing override block below then installs it.
+            // Pre-FIRST ticks and knob-off never reach link code.
+            if (port == 0 && runtime && ps2x::nplink::enabled())
+            {
+                const uint64_t linkTick =
+                    runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed);
+                if (linkTick >= ps2x::nplink::firstTick())
+                {
+                    ps2x::nplink::onTick(linkTick);
+                    ps2x::nplink::Commit commit;
+                    if (ps2x::nplink::waitCommit(linkTick, commit))
+                        setPadOverrideState(commit.buttons, commit.lx, commit.ly, commit.rx, commit.ry);
+                }
             }
 
             PadInputState state;

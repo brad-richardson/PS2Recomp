@@ -554,6 +554,7 @@ add_library(ps2_runtime STATIC
     src/lib/ps2_ach.cpp # ACH2: local achievements runtime
     src/lib/ps2_session_telemetry.cpp # TEL2: coverage + session log
     src/lib/ps2_net_dirtysock.cpp # ONL6: configured self-hosted lobby and P2P
+    src/lib/ps2_net_link.cpp # np-link-1: delay-lockstep client (default off)
     src/lib/ps2_net_nolink.cpp # OFL1: minimal DirtySock responder (link down)
 )
 

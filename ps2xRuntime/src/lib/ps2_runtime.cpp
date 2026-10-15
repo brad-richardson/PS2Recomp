@@ -5,6 +5,7 @@
 #include "ps2_microvu.h"
 #include "ps2_native_world.h"
 #include "ps2_net_dirtysock.h"
+#include "ps2_net_link.h" // np-link-1: delay-lockstep client (default off)
 #include "ps2_android_toast.h"
 #include "ps2_e7.h"
 #include "ps2_e41_trace.h"
@@ -5965,6 +5966,11 @@ __attribute__((noinline, cold)) void dspBuildFilter()
     const char *npRider = std::getenv("PS2X_NP_RIDER_ENABLE");
     if (npRider && std::strcmp(npRider, "1") == 0)
         dspSet(g_dsp.tgt, 0x00111728u);
+    // np-link-1: the same input-consumer call carries the commit-gated
+    // remote drive. Knob off leaves the filter untouched.
+    const char *npLink = std::getenv("PS2X_NP_LINK_ENABLE");
+    if (npLink && std::strcmp(npLink, "1") == 0)
+        dspSet(g_dsp.tgt, 0x00111728u);
     g_dsp.always = false;
     g_dsp.guestActive = ps2_fh1::g_guestActive;
     if (g_dsp.fh1)
@@ -6228,6 +6234,63 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
             std::fprintf(stderr, "[rsv1] RESET t=%llu event=%d archive=%s rider=%08x donor=%d\n",
                          static_cast<unsigned long long>(m_memory.gs().vsyncTick.load(std::memory_order_relaxed)),
                          event, archive.c_str(), getRegU32(ctx, 4), hit);
+        }
+    }
+    // np-link-1 (SRVP1 P1a; default off): commit-gated remote drive of one
+    // AI slot at the same 0x111728 pre-call boundary. Local inputs are
+    // applied only via the echoed relay commit (waitCommit), never direct.
+    // Logs [np-link] rows only when a live commit replaces AI words.
+    if (targetPc == ps2_np_rider::kInputConsumer &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) &&
+        ps2x::nplink::enabled())
+    {
+        const uint64_t linkTick = m_memory.gs().vsyncTick.load(std::memory_order_relaxed);
+        if (linkTick >= ps2x::nplink::firstTick())
+        {
+            ps2x::nplink::onTick(linkTick);
+            ps2x::nplink::Commit commit;
+            if (ps2x::nplink::waitCommit(linkTick, commit) && commit.bLive)
+            {
+                const uint32_t ctl = getRegU32(ctx, 4) & PS2_RAM_MASK;
+                const uint32_t rec = getRegU32(ctx, 5) & PS2_RAM_MASK;
+                if (ctl + 0xDF0u <= PS2_RAM_SIZE && rec + 8u <= PS2_RAM_SIZE)
+                {
+                    uint32_t actor = 0u, de4 = 0u, w0 = 0u, w1 = 0u, slot = 6u, srcDesc = 0u;
+                    bool valid = false;
+                    std::memcpy(&actor, rdram + ctl + 0x18u, 4u);
+                    actor &= PS2_RAM_MASK;
+                    std::memcpy(&de4, rdram + ctl + 0xDE4u, 4u);
+                    std::memcpy(&srcDesc, rdram + ctl + 0xDE8u, 4u);
+                    std::memcpy(&w0, rdram + rec, 4u);
+                    std::memcpy(&w1, rdram + rec + 4u, 4u);
+                    if (actor + 0x870u <= PS2_RAM_SIZE)
+                    {
+                        int32_t s = 0;
+                        std::memcpy(&s, rdram + actor + 0x86Cu, 4u);
+                        if (s >= 0 && s <= 5)
+                        {
+                            slot = static_cast<uint32_t>(s);
+                            valid = true;
+                        }
+                    }
+                    const int wantSlot = ps2x::nplink::riderSlot();
+                    const bool isTarget = valid && slot == static_cast<uint32_t>(wantSlot < 0 ? 6 : wantSlot);
+                    if (isTarget)
+                    {
+                        const bool protectedState = de4 == 9u || de4 == 10u || de4 == 13u;
+                        const bool aiOwned = srcDesc == ps2_np_rider::kAiSourceDesc;
+                        if (!protectedState && aiOwned && commit.de4 == de4)
+                        {
+                            std::memcpy(rdram + rec, &commit.w0, 4u);
+                            std::memcpy(rdram + rec + 4u, &commit.w1, 4u);
+                            std::fprintf(stderr,
+                                         "[np-link] tick=%llu slot=%u de4=%u ai=%08x,%08x out=%08x,%08x applied\n",
+                                         (unsigned long long)linkTick, slot, de4, w0, w1, commit.w0,
+                                         commit.w1);
+                        }
+                    }
+                }
+            }
         }
     }
     // np-rider-1 (SRVP1 P0b candidate; default off): replace one AI slot's
