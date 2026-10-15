@@ -155,6 +155,87 @@ bool ap1HideSystemBars(struct android_app *app)
                  applied ? mode : "", applied ? ")" : "");
     return applied;
 }
+
+#if defined(__ANDROID__)
+// android-touch-1b: OS-level gamepad presence via InputManager. raylib only
+// reports a pad after its first input event, so a paired-but-idle pad (the
+// Odin's controls before the first press) would otherwise show the overlay.
+// Returns false on any JNI failure (fail-safe: the raylib/in-use polls below
+// still hide once the pad is used, so an error can only show, never hide).
+// Source constants are stable platform API values (InputDevice#SOURCE_GAMEPAD
+// 0x400, #SOURCE_JOYSTICK 0x1000000).
+bool androidInputManagerGamepad()
+{
+    struct android_app *app = GetAndroidApp();
+    if (!app || !app->activity || !app->activity->vm)
+        return false;
+    JNIEnv *env = nullptr;
+    char name[16] = {};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    JavaVMAttachArgs args = {JNI_VERSION_1_6, name[0] ? name : nullptr, nullptr};
+    if (app->activity->vm->AttachCurrentThread(&env, &args) != JNI_OK || !env)
+        return false;
+    bool found = false;
+    jobject act = app->activity->clazz;
+    jclass actCls = env->GetObjectClass(act);
+    jmethodID getSys =
+        actCls ? env->GetMethodID(actCls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : nullptr;
+    jclass ctxCls = env->FindClass("android/content/Context");
+    jfieldID inputKey =
+        ctxCls ? env->GetStaticFieldID(ctxCls, "INPUT_SERVICE", "Ljava/lang/String;") : nullptr;
+    jstring key = (ctxCls && inputKey) ? (jstring)env->GetStaticObjectField(ctxCls, inputKey) : nullptr;
+    jobject im = (getSys && key) ? env->CallObjectMethod(act, getSys, key) : nullptr;
+    if (im && !env->ExceptionCheck())
+    {
+        jclass imCls = env->GetObjectClass(im);
+        jmethodID getIdsArr = imCls ? env->GetMethodID(imCls, "getInputDeviceIds", "()[I") : nullptr;
+        jmethodID getDev =
+            imCls ? env->GetMethodID(imCls, "getInputDevice", "(I)Landroid/view/InputDevice;") : nullptr;
+        jintArray ids = (getIdsArr && !env->ExceptionCheck()) ? (jintArray)env->CallObjectMethod(im, getIdsArr) : nullptr;
+        if (ids && !env->ExceptionCheck())
+        {
+            const jsize n = env->GetArrayLength(ids);
+            jint *buf = env->GetIntArrayElements(ids, nullptr);
+            if (buf)
+            {
+                for (jsize i = 0; i < n && !found; ++i)
+                {
+                    jobject dev = getDev ? env->CallObjectMethod(im, getDev, buf[i]) : nullptr;
+                    if (dev && !env->ExceptionCheck())
+                    {
+                        jclass devCls = env->GetObjectClass(dev);
+                        jmethodID getSources =
+                            devCls ? env->GetMethodID(devCls, "getSources", "()I") : nullptr;
+                        const jint sources =
+                            getSources ? env->CallIntMethod(dev, getSources) : 0;
+                        if (!env->ExceptionCheck() && (sources & (0x400 | 0x1000000)) != 0)
+                            found = true;
+                        if (devCls)
+                            env->DeleteLocalRef(devCls);
+                        env->DeleteLocalRef(dev);
+                    }
+                    if (env->ExceptionCheck())
+                        env->ExceptionClear();
+                }
+                env->ReleaseIntArrayElements(ids, buf, JNI_ABORT);
+            }
+            env->DeleteLocalRef(ids);
+        }
+        if (imCls)
+            env->DeleteLocalRef(imCls);
+        env->DeleteLocalRef(im);
+    }
+    if (key)
+        env->DeleteLocalRef(key);
+    if (ctxCls)
+        env->DeleteLocalRef(ctxCls);
+    if (actCls)
+        env->DeleteLocalRef(actCls);
+    if (env->ExceptionCheck())
+        env->ExceptionClear();
+    return found;
+}
+#endif
 // VK1: raylib's app-command handler, wrapped so the SurfaceControl child is
 // detached before the window goes (TERM_WINDOW) and remade after it returns
 // (the ANativeWindow pointer can be reused across background/foreground).
@@ -8015,6 +8096,10 @@ void PS2Runtime::run()
     std::thread([] { ps2_savestate::warmRunnerSha(); }).detach();
     bool vpadLastPadConnected = true; // forces the first [vpad] line when the overlay shows
     bool vpadFirstFrame = true;       // android-touch-1: evaluate underlay on frame one either way
+#if defined(__ANDROID__)
+    bool vpadImPresent = false; // android-touch-1b: cached InputManager presence
+    int vpadImCache = 0;        // ... re-queried every 30 host frames (~0.5 s)
+#endif
     const std::vector<ps2x::vpad::TestTouch> vpadTestTouches =
         ps2x::vpad::parseTestTouches(std::getenv("PS2X_VPAD_TEST_TOUCHES")); // DEV-ONLY
     ps2x::vpad::PadState vpadPad; // VT1: touch ownership + stick anchor, carried across frames
@@ -8334,7 +8419,15 @@ void PS2Runtime::run()
         // required first (the iOS Simulator reports a fake Gamepad).
         const bool vpadForcedOn = (vpadTouchMode == ps2x::set2::Touch::On);
 #if defined(__ANDROID__)
-        const bool vpadPadHides = gamepadConnected();
+        // android-touch-1b: OS presence (cached) OR raylib-connected OR
+        // pad-in-use: the overlay never shows while any physical pad
+        // exists, even before its first press (Odin default hidden).
+        if (--vpadImCache <= 0)
+        {
+            vpadImPresent = androidInputManagerGamepad();
+            vpadImCache = 30;
+        }
+        const bool vpadPadHides = vpadImPresent || gamepadConnected() || gamepadInUse();
 #else
         const bool vpadPadHides = gamepadInUse();
 #endif
