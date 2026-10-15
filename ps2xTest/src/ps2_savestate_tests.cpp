@@ -189,6 +189,11 @@ void register_ps2_savestate_tests()
             t.Equals(cache.finish(), current, "retention preserves root");
             cache.begin(240, true);
             t.IsTrue(!cache.retain("memory", 1), "full boundary cannot retain coarse partition");
+            ram.assign(65537, 0);
+            run(cache, 0, true);
+            ram.back() = 1; ram.push_back(0);
+            t.Equals(run(cache, 1, false), run(fresh, 1, true),
+                     "growth refreshes the old partial-page prefix even outside its phase");
         });
         tc.Run("np-checksum-1: sorted maps ignore insertion and rehash history", [](TestCase &t)
         {

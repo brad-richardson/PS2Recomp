@@ -59,6 +59,17 @@ public:
         while (n)
         {
             const size_t index = s.cursor / pageSize;
+            // Jump whole unsampled ranges, instead of visiting ~11k pages
+            // just to reject 119/120 of them. Keep the old partial final page
+            // in the normal path: growth must refresh its entire old prefix.
+            const size_t oldWholeEnd = s.previousSize / pageSize * pageSize;
+            if (partition && index % 120 != phase && s.cursor < oldWholeEnd) {
+                const size_t distance = (phase + 120 - index % 120) % 120;
+                const size_t skip = std::min({n, distance * pageSize - s.cursor % pageSize,
+                                              oldWholeEnd - s.cursor});
+                s.cursor += skip; p += skip; n -= skip;
+                continue;
+            }
             const size_t chunk = std::min(n, pageSize - s.cursor % pageSize);
             if (!partition || index % 120 == phase || s.cursor + chunk > s.previousSize)
             {
