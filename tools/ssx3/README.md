@@ -141,7 +141,7 @@ its generated registration SHA differs from the default name-free output.
 
 `mac-libs` pins the public ARMSX2 fork to
 `afad5a04c2668a10e12adadaa51d54c46f832236` (`armsx2-ssx3-four` tip, the play vendor; carries the on-device
-upscale provider the adapter includes and the PB66 VMA allocator fix), builds plutovg v1.1.0 and plutosvg v0.0.7
+upscale provider the adapter includes and the VMA multi-thread allocator fix), builds plutovg v1.1.0 and plutosvg v0.0.7
 locally, builds GE1 and the JIT bridge, and stages public renderer resources
 and metallibs. It requires no OM1 recordings, offline stage or private header
 checkout. Libraries stay in the build directory and use installed system

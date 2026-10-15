@@ -492,7 +492,6 @@ namespace ps2_savestate
                              uint64_t eventCycle, bool timerWon);
     void canonicalRecordReadback(uint64_t tick, uint64_t ticket, uint32_t address,
                                  uint32_t bytes, uint64_t digest);
-    // np-fix-1 scaffolds (B0: behavior-neutral; the fix implements them).
     // F4: CANON establishes its own input path (rejects wall-clock pad
     // scripts / non-canonical drivers); called first by canonicalOracle.
     bool canonicalInputProfileOk(std::string &why);

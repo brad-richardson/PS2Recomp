@@ -6109,6 +6109,14 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
                                          (unsigned long long)linkTick, slot, de4, w0, w1, commit.w0,
                                          commit.w1);
                         }
+                        else
+                        {
+                            // day-fix-1 L5: refusals leave a row too, so a
+                            // transcript with no applies is distinguishable
+                            // from one that never saw the link.
+                            ps2_savestate::canonicalRecordRider(linkTick, slot, 0u, de4,
+                                                                "link-refused", false);
+                        }
                     }
                 }
             }

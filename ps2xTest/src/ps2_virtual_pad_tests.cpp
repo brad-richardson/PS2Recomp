@@ -636,14 +636,14 @@ void register_ps2_virtual_pad_tests()
         });
 
         // Android has no PS2X_IOS_DOCUMENTS, so the slot sits next to the card:
-        // the Odin play env's mc0-run2 gives exactly the PB65 on-disk path. The
+        // the maintainer play env's card gives exactly the on-disk path. The
         // full path (dir + fixed leaf) must not drift across refactors/renames.
-        tc.Run("asv1: autosave slot path is byte-identical (Android/Odin)", [](TestCase &t)
+        tc.Run("asv1: autosave slot path is byte-identical (Android)", [](TestCase &t)
                {
             t.Equals(autosaveSlotPathFor(nullptr,
                           "/storage/emulated/0/Android/data/com.ps2x.runner/files/mc0-run2", "/elf"),
                      "/storage/emulated/0/Android/data/com.ps2x.runner/files/states/autosave.ps2xstate",
-                     "Odin mc0-run2 -> files/states/autosave.ps2xstate");
+                     "play card dir -> files/states/autosave.ps2xstate");
             t.Equals(autosaveSlotPathFor("", "/run/mc0", "/pinned/cd"),
                      "/run/states/autosave.ps2xstate", "empty docs = Android");
             t.Equals(autosaveSlotPathFor("/docs", "/run/mc0", "/pinned/cd"),

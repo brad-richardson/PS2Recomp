@@ -74,8 +74,12 @@ bool target120Enabled()
     return !valid || value;
 }
 
-// ASV1: one background task spans the whole autosave so iOS keeps the process
-// runnable while it writes (main thread only; endBg is the expiration path).
+// ASV1: one background task keeps the process runnable across the bounded
+// background pause (at most a 1.5 s save wait plus the 2 s gate ack in
+// ps2_runtime.cpp): it does not span the whole save. If the EE cannot reach
+// the save point within that window, iOS suspends the app and the request
+// runs when the user returns; a kill from the switcher keeps the previous
+// slot (tmp+rename write). (Main thread only; endBg is the expiration path.)
 UIBackgroundTaskIdentifier g_autosaveTask = UIBackgroundTaskInvalid;
 
 void endAutosaveTask()

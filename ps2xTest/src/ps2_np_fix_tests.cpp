@@ -367,22 +367,20 @@ void register_np_fix_tests_body(TestCase &tc)
                t.IsFalse(d.applied, "load error must refuse applies");
            });
 
-    // F8: session/actor generation + per-call consumption contract.
-    tc.Run("F8 a foreign actor in the same generation is refused", [](TestCase &t)
+    // F8: per-actor binding + per-call consumption contract.
+    tc.Run("F8 a foreign actor in the same session is refused", [](TestCase &t)
            {
                ps2_np_rider::Config cfg;
                cfg.enabled = true;
                cfg.slot = 1;
-               cfg.generation = 7u;
                cfg.script.push_back(ps2_np_rider::Entry{100u, 0u, 0x11111111u, 0x22222222u});
                ps2_np_rider::Session s;
-               s.generation = 7u;
                const ps2_np_rider::Decision d1 =
                    ps2_np_rider::decide(s, cfg, 100u, true, 0x1000u, 0u, true, 0u, 0u);
                t.IsTrue(d1.applied, "bound actor applies");
                const ps2_np_rider::Decision d2 =
                    ps2_np_rider::decide(s, cfg, 100u, true, 0x2000u, 0u, true, 0u, 0u);
-               t.IsFalse(d2.applied, "foreign actor refused in the same generation");
+               t.IsFalse(d2.applied, "foreign actor refused in the same session");
            });
 
     tc.Run("F8 a backward tick re-derives the cursor", [](TestCase &t)

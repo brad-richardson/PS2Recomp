@@ -41,8 +41,10 @@ int riderSlot();
 void onTick(uint64_t tick);
 
 // Block until COMMIT(tick) is in the map, then copy it to out. Returns false
-// only when disabled. Never returns without the commit (no timeout): the
-// sim thread stalls while the network thread keeps receiving.
+// only when disabled. No timeout while the relay is healthy: the sim thread
+// stalls while the network thread keeps receiving. A dead relay (write/select
+// failure, closed or malformed COMMIT) exits the process, as does a tick past
+// the input queue cap, so a lost relay reads as a link failure, not a hang.
 bool waitCommit(uint64_t tick, Commit &out);
 
 } // namespace nplink

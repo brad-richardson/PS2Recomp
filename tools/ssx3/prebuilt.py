@@ -383,9 +383,16 @@ def build(a):
     notices(libraries / 'deps-build', notice_dir, 'vendor-dependencies')
     notices(runtime / '_deps', notice_dir, 'runtime-dependencies')
     source_sha = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    pins_file = libraries / 'deps-build' / 'android-dependency-pins.json'
+    if not pins_file.is_file():
+        raise ValueError('missing resolved dependency pins: ' + str(pins_file))
+    pins = json.loads(pins_file.read_text())
+    if ({n for n, _, _, _ in recipe.ANDROID_DEPS} != set(pins)
+            or any(pins[n] != sha for n, _, _, sha in recipe.ANDROID_DEPS)):
+        raise ValueError('resolved dependency pins do not match the recipe table')
     sources = {'PS2Recomp': 'https://github.com/brad-richardson/PS2Recomp/tree/' + source_sha,
                'armsx2': 'https://github.com/brad-richardson/armsx2/tree/' + VENDOR,
-               'recipe_contract': stamp, 'ndk': NDK}
+               'recipe_contract': stamp, 'ndk': NDK, 'dependencies': pins}
     (notice_dir / 'SOURCES.json').write_text(json.dumps(sources, indent=2) + '\n')
     files = {p.relative_to(bundle).as_posix(): digest(p) for p in sorted(bundle.rglob('*')) if p.is_file()}
     (bundle / 'manifest.json').write_text(json.dumps({'recipe': RECIPE, 'contract': stamp,

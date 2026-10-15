@@ -2,9 +2,9 @@
 // np-fix-1 (F7/F8): tick-stamped remote-script rider state and decision logic.
 //
 // Config/loadOnce moved from ps2_runtime.cpp; the strict fix adds F7 loader
-// strictness (malformed/conflicting/overlong/unreadable scripts refuse the
-// run) and the F8 per-call consumption contract (session/actor generation
-// binding, backward-tick cursor re-derivation, per-tick ordinals).
+// strictness (malformed/conflicting/overlong scripts refuse the whole run;
+// unreadable files stay trace-only) and the F8 per-call consumption contract
+// (per-actor binding, backward-tick cursor re-derivation, per-tick ordinals).
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -33,8 +33,8 @@ struct Config
     std::vector<Entry> script;
     bool loaded = false;
     bool loadError = false;
-    // F8 session binding (B0: present but unused by decide; the fix binds).
-    uint64_t generation = 0u;
+    // F8 actor binding: the first apply binds the actor, and a foreign actor
+    // in the same session is refused (slot reuse/retire cannot hijack it).
     uint32_t boundActor = 0u;
     bool boundActorValid = false;
 };
@@ -48,10 +48,10 @@ inline Config &config()
 // (fgets(256) chunking is emulated inside parseScriptText so overlong lines
 // are detected exactly as the old file reader split them.)
 
-// np-fix-1 F7: strict loader. Malformed lines, truncated (overlong) lines,
-// conflicting duplicate ticks and unreadable files are errors that refuse
-// the whole run; only byte-identical duplicate ticks dedup. error is empty
-// on success and the script is sorted by tick.
+// np-fix-1 F7: strict loader. Malformed lines, truncated (overlong) lines and
+// conflicting duplicate ticks are errors that refuse the whole run; only
+// byte-identical duplicate ticks dedup. error is empty on success and the
+// script is sorted by tick.
 inline void parseScriptText(const std::string &content, std::vector<Entry> &entries, std::string &error)
 {
     entries.clear();
@@ -180,12 +180,12 @@ inline void loadOnce()
     if (!error.empty())
     {
         // np-fix-1 F7: a malformed script refuses the run (fail closed with
-        // a clear error) instead of silently driving a partial script.
-        cfg.loadError = true;
-        cfg.script.clear();
-        std::fprintf(stderr, "[np-rider] FATAL: strict script '%s': %s; refusing applies\n",
+        // a clear error and a non-zero exit) instead of silently driving a
+        // partial script.
+        std::fprintf(stderr, "[np-rider] FATAL: strict script '%s': %s; refusing the run\n",
                      path.c_str(), error.c_str());
-        return;
+        std::fflush(stderr);
+        std::exit(3);
     }
     std::fprintf(stderr, "[np-rider] slot=%d drop=%llu entries=%zu\n", cfg.slot,
                  (unsigned long long)cfg.dropTick, cfg.script.size());
@@ -194,15 +194,14 @@ inline void loadOnce()
 // (The old global-cursor findEntry is retired: decide() carries the cursor
 // in its Session, with backward-tick re-derivation.)
 
-// Per-call consumption state. B0: advance-only cursor mirror; the fix adds
-// generation binding, backward-tick re-derivation and ordinal tracking.
+// Per-call consumption state: advance-only cursor mirror with per-actor
+// binding, backward-tick re-derivation and ordinal tracking.
 struct Session
 {
     size_t cursor = 0u;
     uint64_t lastTick = 0u;
     bool hasLastTick = false;
     uint32_t ordinal = 0u;
-    uint64_t generation = 0u;
     uint32_t boundActor = 0u;
     bool boundActorValid = false;
 };
@@ -216,11 +215,10 @@ struct Decision
     uint32_t ordinal = 0u;
 };
 
-// np-fix-1 F8: per-call consumption contract with a session/actor
-// generation. The first apply in a session binds (generation, actor); a
-// foreign actor in the same generation is refused (slot reuse/retire
-// cannot hijack the drive). A backward tick (load/rewind) resets the
-// cursor and the binding so the cursor is re-derived. Same-tick calls
+// np-fix-1 F8: per-call consumption contract with per-actor binding. The
+// first apply in a session binds the actor; a foreign actor is refused (slot
+// reuse/retire cannot hijack the drive). A backward tick (load/rewind) resets
+// the cursor and the binding so the cursor is re-derived. Same-tick calls
 // share the entry's words with distinct ordinals (idempotent re-apply).
 inline Decision decide(Session &s, const Config &cfg, uint64_t tick, bool isTarget, uint32_t actor,
                        uint32_t de4, bool aiOwned, uint32_t w0, uint32_t w1)
@@ -266,7 +264,7 @@ inline Decision decide(Session &s, const Config &cfg, uint64_t tick, bool isTarg
         }
         if (s.boundActor != actor)
         {
-            d.why = "gen-mismatch";
+            d.why = "actor-mismatch";
             return d;
         }
         d.applied = true;
@@ -281,10 +279,9 @@ inline Decision decide(Session &s, const Config &cfg, uint64_t tick, bool isTarg
     return d;
 }
 
-inline void resetSession(Session &s, uint64_t generation = 0u)
+inline void resetSession(Session &s)
 {
     s = Session{};
-    s.generation = generation;
 }
 
 } // namespace ps2_np_rider

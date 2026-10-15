@@ -47,6 +47,10 @@ constexpr uint16_t kLagLimit = 30u;
 constexpr uint32_t kRosterRev = 1u;
 constexpr uint8_t kPad6 = 0u, kRider12 = 1u;
 constexpr uint32_t kSentinelDe4 = 0xFFFFFFFFu;
+// Input queue bound past firstTick (about 2.3 h at 120 Hz). Reaching it
+// means the relay died or the clock ran away: onTick refuses to advance
+// past it instead of hanging the sim in waitCommit.
+constexpr uint64_t kMaxQueueTicks = 1000000u;
 
 struct PadTuple
 {
@@ -514,9 +518,7 @@ void netThreadMain()
             }
             if (!writeAll(fd, out.data(), out.size()))
             {
-                std::fprintf(stderr, "[np-link] relay write failed; stalling forever (no advance)\n");
-                std::fflush(stderr);
-                std::this_thread::sleep_for(std::chrono::hours(24 * 365));
+                fatal("relay write failed (no advance)");
                 return;
             }
         }
@@ -529,9 +531,7 @@ void netThreadMain()
         int r = ::select(fd + 1, &rfds, nullptr, nullptr, &tv);
         if (r < 0)
         {
-            std::fprintf(stderr, "[np-link] relay select failed; stalling forever (no advance)\n");
-            std::fflush(stderr);
-            std::this_thread::sleep_for(std::chrono::hours(24 * 365));
+            fatal("relay select failed (no advance)");
             return;
         }
         if (r == 0)
@@ -542,9 +542,7 @@ void netThreadMain()
         // (2+1+6) + (2+1+12) + 32 chain = 78.
         if (!readFrame(fd, kCommit, kRelaySender, 78u, "COMMIT", payload, seq))
         {
-            std::fprintf(stderr, "[np-link] relay closed/bad COMMIT; stalling forever\n");
-            std::fflush(stderr);
-            std::this_thread::sleep_for(std::chrono::hours(24 * 365));
+            fatal("relay closed/bad COMMIT");
             return;
         }
         if (seq != s.relaySeq + 1u)
@@ -756,8 +754,13 @@ void onTick(uint64_t tick)
     State &s = state();
     if (!s.ok)
         return;
+    // About 2.3 h at 120 Hz: inputs past this are never queued, so waiting
+    // on them would hang until the harness kills the run. Fail loudly.
+    const uint64_t cap = s.firstTick + kMaxQueueTicks;
+    if (tick + s.delay >= cap)
+        fatal("tick beyond the input queue cap (relay or runaway clock?)");
     const uint64_t due = tick + s.delay;
-    while (s.sendUpTo <= due && s.sendUpTo < s.firstTick + 1000000u)
+    while (s.sendUpTo <= due && s.sendUpTo < cap)
     {
         queueInput(s, s.sendUpTo);
         ++s.sendUpTo;
