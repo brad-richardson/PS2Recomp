@@ -122,11 +122,9 @@ python3 tools/ssx3/build.py mac --work /path/to/private-build --suite
 ```
 
 Run that suite **from the checkout root**. The generator pin is
-`9a6e02b26466f737e0ef419cc3da8d5d8ecdaf27` (public `ssx3` tip; its
-`ps2xRecomp`/`ps2xAnalyzer` tree is identical to the SPR1 regen source, and
-the game TOML/map — including the Equip Gear extra entry — is unchanged
-since). `prepare` checks ISO and extracted ELF SHA256, clones the pinned
-generator from the public fork, builds it, writes absolute local TOML
+`03c10b5aeccd4fb673fecaea3cf4a5f5064afe14`. It selects overlapping resume owners by greatest candidate function start,
+independent of host hash-table order. `prepare` checks ISO and extracted ELF SHA256, fetches the pinned
+generator from the local checkout when present (otherwise the public fork), builds it, writes absolute local TOML
 paths, and records the generated registration SHA256. An optional local play
 names sidecar reproduces SHA256
 `ad96edb68ce78994684c736b745d79f02d88367eb4d5bfeb2d7b05d126b0867c`
