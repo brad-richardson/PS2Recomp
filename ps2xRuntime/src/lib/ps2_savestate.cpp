@@ -1153,9 +1153,26 @@ namespace ps2_savestate
 
     // np-fix-1 B0 scaffolds: behavior-neutral no-ops. The fix implements
     // validation (F4), rider rows + checked writes (F12) and session reset.
+    // np-fix-1 F4: CANON establishes its own canonical input path. A
+    // wall-clock pad script is rejected (fail closed with a clear error);
+    // only vsync-clocked scripts are deterministic. Live host input is
+    // refused separately by the padlatch readiness hook at the oracle.
+    // Fresh env reads (no cached globals) so unit tests control it.
     bool canonicalInputProfileOk(std::string &why)
     {
-        (void)why;
+        const char *canon = std::getenv("PS2X_NETPLAY_CANON");
+        if (!canon || std::strcmp(canon, "1") != 0)
+            return true;
+        const char *script = std::getenv("PS2X_PAD_SCRIPT");
+        if (script && script[0] != '\0')
+        {
+            const char *clock = std::getenv("PS2X_PAD_SCRIPT_CLOCK");
+            if (!clock || std::strcmp(clock, "vsync") != 0)
+            {
+                why = "CANON rejects wall-clock PS2X_PAD_SCRIPT (set PS2X_PAD_SCRIPT_CLOCK=vsync)";
+                return false;
+            }
+        }
         return true;
     }
 
@@ -1187,6 +1204,7 @@ namespace ps2_savestate
         if (!canonicalEnabled()) return true;
         const std::string dir = canonicalDir();
         if (dir.empty() || !canonicalTrace()) { why = "PS2X_NETPLAY_CANON_DIR missing/unwritable"; return false; }
+        if (!canonicalInputProfileOk(why)) return false; // np-fix-1 F4: fail closed before any other check
         if (!config().deterministic) { why = "PS2X_DETERMINISTIC=1 required for fixed RTC/card times"; return false; }
         EeScheduler &sched = runtime.eeScheduler();
         why = EeSchedulerSavestate::ready(sched);
