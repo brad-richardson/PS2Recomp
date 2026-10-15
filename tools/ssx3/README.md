@@ -92,7 +92,8 @@ outside the checkout. The sidecar changes identifiers and comments, so
 its generated registration SHA can be compared with the play pin above.
 
 `mac-libs` pins the public ARMSX2 fork to
-`02561a9c9ae54171d40e043fb450efdbbe0108f1` (`armsx2-ssx3-four`, the play vendor), builds plutovg v1.1.0 and plutosvg v0.0.7
+`0c7a2987477617ea6eab46d05dffb990ed200f6a` (`armsx2-ssx3-four` tip, the play vendor; carries the on-device
+upscale provider the adapter includes), builds plutovg v1.1.0 and plutosvg v0.0.7
 locally, builds GE1 and the JIT bridge, and stages public renderer resources
 and metallibs. It requires no OM1 recordings, offline stage or private header
 checkout. Libraries stay in the build directory and use installed system
