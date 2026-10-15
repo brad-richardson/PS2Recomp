@@ -107,8 +107,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # IPO emits slim LTO objects: plain ar writes an archive index the
+          # linker cannot resolve (undefined refs at link). gcc-ar/gcc-ranlib
+          # understand slim objects and are drop-in otherwise.
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DPS2X_BUILD_STUDIO=OFF -DPS2X_ENABLE_SCCACHE=OFF
+            -DPS2X_BUILD_STUDIO=OFF -DPS2X_ENABLE_SCCACHE=OFF \
+            "-DCMAKE_AR=$(command -v gcc-ar)" "-DCMAKE_RANLIB=$(command -v gcc-ranlib)"
 
       - name: Build suite
         shell: bash
