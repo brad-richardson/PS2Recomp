@@ -817,6 +817,53 @@ void register_code_generator_tests()
                  "multiple resume pcs should register to the same owner wrapper");
     });
 
+    tc.Run("overlapping resume owners are independent of hash order", [](TestCase &t) {
+        std::vector<Function> functions;
+        for (uint32_t start : {0x7000u, 0x7010u, 0x7020u})
+        {
+            Function function;
+            function.name = "owner";
+            function.start = start;
+            function.end = 0x7060u;
+            function.isRecompiled = true;
+            function.isStub = false;
+            functions.push_back(function);
+        }
+        const std::unordered_map<uint32_t, std::string> names{
+            {0x7000u, "outer_0x7000"}, {0x7010u, "inner_0x7010"},
+            {0x7020u, "nearest_0x7020"}};
+        std::string previous;
+        for (bool reverse : {false, true})
+        {
+            std::unordered_map<uint32_t, std::vector<uint32_t>> targets;
+            targets.reserve(reverse ? 97u : 3u);
+            for (uint32_t start : reverse ? std::vector<uint32_t>{0x7020u, 0x7010u, 0x7000u}
+                                          : std::vector<uint32_t>{0x7000u, 0x7010u, 0x7020u})
+            {
+                targets[start] = {0x7028u};
+            }
+            targets[0x7000u].insert(targets[0x7000u].end(), {0x7010u, 0x7018u, 0x7050u});
+            targets[0x7010u].push_back(0x7018u);
+            CodeGenerator gen({}, {});
+            gen.setRenamedFunctions(names);
+            gen.setResumeEntryTargets(targets);
+            const std::string registration = gen.generateFunctionRegistration(functions, {});
+            t.IsTrue(registration.find("inner_0x7010; // 0x7010") != std::string::npos,
+                     "explicit function entry must outrank an outer resume");
+            t.IsTrue(registration.find("inner_0x7010; // 0x7018") != std::string::npos,
+                     "choose the nearest preceding candidate owner");
+            t.IsTrue(registration.find("nearest_0x7020; // 0x7028") != std::string::npos,
+                     "choose the nearest of three overlapping owners");
+            t.IsTrue(registration.find("outer_0x7000; // 0x7050") != std::string::npos,
+                     "a discovery-pinned owner must remain authoritative");
+            if (!previous.empty())
+            {
+                t.IsTrue(registration == previous, "insertion and bucket order must not affect output");
+            }
+            previous = registration;
+        }
+    });
+
     tc.Run("registration stamps the codegen ABI marker", [](TestCase &t) {
         Function func;
         func.name = "abi_owner";

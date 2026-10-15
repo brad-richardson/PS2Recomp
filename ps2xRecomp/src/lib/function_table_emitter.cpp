@@ -106,8 +106,24 @@ namespace ps2recomp
             addEntry(address, name);
         }
 
+        // Overlapping wrappers can both resume at the same guest PC. Prefer
+        // the nearest containing owner (greatest function start), as entry
+        // discovery's findContainingFunction does. addEntry is first-wins:
+        // sorting only the final table would leave this choice dependent on
+        // the host standard library's unordered_map iteration order.
+        // Explicit function entries above still take priority, and discovery
+        // can still pin a resume to one owner by removing other candidates.
+        std::vector<uint32_t> resumeOwners;
+        resumeOwners.reserve(cg.m_resumeEntryTargetsByOwner.size());
         for (const auto &[ownerStart, targets] : cg.m_resumeEntryTargetsByOwner)
         {
+            resumeOwners.push_back(ownerStart);
+        }
+        std::sort(resumeOwners.begin(), resumeOwners.end(),
+                  [](uint32_t a, uint32_t b) { return a > b; });
+        for (uint32_t ownerStart : resumeOwners)
+        {
+            const auto &targets = cg.m_resumeEntryTargetsByOwner.at(ownerStart);
             const std::string ownerName = cg.getFunctionName(ownerStart);
             if (ownerName.empty())
             {
