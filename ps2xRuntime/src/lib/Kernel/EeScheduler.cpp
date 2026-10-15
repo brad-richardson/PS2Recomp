@@ -2917,7 +2917,7 @@ void EeScheduler::processDueDeadlines()
             if (m_netplayCanon)
                 ps2_savestate::canonicalRecordEvent(m_vsyncTick, m_eeCycle,
                     static_cast<uint32_t>(scheduled.event.type), scheduled.event.id,
-                    scheduled.deadlineCycle, scheduled.sequence);
+                    scheduled.event.value, scheduled.deadlineCycle, scheduled.sequence);
             if (scheduled.event.type == EeEventType::VBlankStart)
             {
                 scheduleEvent(scheduled.deadlineCycle + kVBlankDurationCycles,

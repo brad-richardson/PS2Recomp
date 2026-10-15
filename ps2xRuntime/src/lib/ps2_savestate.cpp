@@ -1079,6 +1079,13 @@ namespace ps2_savestate
 
     namespace
     {
+        // np-fix-1 F12: session-owned canonical statics (one session per
+        // process in P1a; canonicalNewSession resets them all).
+        FILE *g_traceOut = nullptr;
+        std::string g_traceOpenDir;
+        std::string g_manifestDir;
+        std::string g_writeError;
+        std::atomic<uint64_t> g_readbackTicket{0u};
         std::string canonicalDir()
         {
             const char *v = std::getenv("PS2X_NETPLAY_CANON_DIR");
@@ -1086,24 +1093,48 @@ namespace ps2_savestate
         }
         FILE *canonicalTrace()
         {
-            static FILE *out = []() -> FILE * {
-                if (!canonicalEnabled() || canonicalDir().empty())
-                    return nullptr;
+            // np-fix-1 F12: session-owned transcript handle. Reopens when
+            // the directory changes (or after canonicalNewSession closes
+            // it) so two sessions in one process never share a file epoch.
+            // Single session+dir behaves exactly as before (open once).
+            if (!canonicalEnabled() || canonicalDir() != g_traceOpenDir)
+            {
+                if (g_traceOut)
+                {
+                    std::fclose(g_traceOut);
+                    g_traceOut = nullptr;
+                }
+                g_traceOpenDir.clear();
+            }
+            if (!canonicalEnabled() || canonicalDir().empty())
+                return nullptr;
+            if (!g_traceOut)
+            {
+                const std::string dir = canonicalDir();
                 std::error_code ec;
-                std::filesystem::create_directories(canonicalDir(), ec);
+                std::filesystem::create_directories(dir, ec);
                 if (ec)
                     return nullptr;
-                FILE *f = std::fopen((canonicalDir() + "/transcript.tsv").c_str(), "w");
-                if (f)
-                    std::setvbuf(f, nullptr, _IOFBF, 1u << 20);
-                return f;
-            }();
-            return out;
+                g_traceOut = std::fopen((dir + "/transcript.tsv").c_str(), "w");
+                if (g_traceOut)
+                {
+                    std::setvbuf(g_traceOut, nullptr, _IOFBF, 1u << 20);
+                    g_traceOpenDir = dir;
+                }
+            }
+            return g_traceOut;
         }
         std::mutex &canonicalTraceMutex()
         {
             static std::mutex mutex;
             return mutex;
+        }
+        // First transcript write/flush failure wins; the oracle fails closed.
+        // Callers hold canonicalTraceMutex().
+        void noteTraceWriteError(const char *what)
+        {
+            if (g_writeError.empty())
+                g_writeError = what;
         }
     }
 
@@ -1113,20 +1144,28 @@ namespace ps2_savestate
         FILE *f = canonicalTrace();
         if (!f) return;
         std::lock_guard<std::mutex> lock(canonicalTraceMutex());
-        std::fprintf(f, "P\t%" PRIu64 "\t%d\t%d\t", tick, port, slot);
-        for (size_t i = 0; i < size; ++i) std::fprintf(f, "%02x", bytes[i]);
-        std::fputc('\n', f);
+        // np-fix-1 F12: transcript writes are checked; the first failure
+        // latches and the oracle fails closed (never a silent short row).
+        bool ok = std::fprintf(f, "P\t%" PRIu64 "\t%d\t%d\t", tick, port, slot) >= 0;
+        for (size_t i = 0; i < size && ok; ++i) ok = std::fprintf(f, "%02x", bytes[i]) >= 0;
+        if (ok)
+            ok = std::fputc('\n', f) != EOF;
+        if (!ok)
+            noteTraceWriteError("transcript P row write failed");
     }
 
     void canonicalRecordEvent(uint64_t tick, uint64_t eeCycle, uint32_t type,
-                              uint32_t id, uint64_t deadline, uint64_t sequence)
+                              uint32_t id, uint64_t value, uint64_t deadline, uint64_t sequence)
     {
         if (!canonicalEnabled()) return;
         FILE *f = canonicalTrace();
         if (!f) return;
         std::lock_guard<std::mutex> lock(canonicalTraceMutex());
-        std::fprintf(f, "E\t%" PRIu64 "\t%" PRIu64 "\t%u\t%u\t%" PRIu64 "\t%" PRIu64 "\n",
-                     tick, eeCycle, type, id, deadline, sequence);
+        // np-fix-1 F12: the event value (wake/sound payload) is part of the
+        // row; a value mismatch is a real divergence, not wall data.
+        if (std::fprintf(f, "E\t%" PRIu64 "\t%" PRIu64 "\t%u\t%u\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\n",
+                         tick, eeCycle, type, id, value, deadline, sequence) < 0)
+            noteTraceWriteError("transcript E row write failed");
     }
 
     void canonicalRecordReadback(uint64_t tick, uint64_t ticket, uint32_t address,
@@ -1136,8 +1175,9 @@ namespace ps2_savestate
         FILE *f = canonicalTrace();
         if (!f) return;
         std::lock_guard<std::mutex> lock(canonicalTraceMutex());
-        std::fprintf(f, "R\t%" PRIu64 "\t%" PRIu64 "\t%u\t%u\t%016" PRIx64 "\n",
-                     tick, ticket, address, bytes, digest);
+        if (std::fprintf(f, "R\t%" PRIu64 "\t%" PRIu64 "\t%u\t%u\t%016" PRIx64 "\n",
+                         tick, ticket, address, bytes, digest) < 0)
+            noteTraceWriteError("transcript R row write failed");
     }
 
     void canonicalRecordIdle(uint64_t tick, uint64_t eeCycle, uint64_t timerCycle,
@@ -1147,8 +1187,9 @@ namespace ps2_savestate
         FILE *f = canonicalTrace();
         if (!f) return;
         std::lock_guard<std::mutex> lock(canonicalTraceMutex());
-        std::fprintf(f, "I\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\t%c\n",
-                     tick, eeCycle, timerCycle, eventCycle, timerWon ? 'T' : 'E');
+        if (std::fprintf(f, "I\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\t%c\n",
+                         tick, eeCycle, timerCycle, eventCycle, timerWon ? 'T' : 'E') < 0)
+            noteTraceWriteError("transcript I row write failed");
     }
 
     // np-fix-1 B0 scaffolds: behavior-neutral no-ops. The fix implements
@@ -1179,24 +1220,69 @@ namespace ps2_savestate
     void canonicalRecordRider(uint64_t tick, uint32_t slot, uint32_t ordinal,
                               uint32_t de4, const char *decision, bool applied)
     {
-        (void)tick;
-        (void)slot;
-        (void)ordinal;
-        (void)de4;
-        (void)decision;
-        (void)applied;
+        // np-fix-1 F12: rider/commit decisions belong in the canonical
+        // transcript (not stderr alone) so a wrong input mapping is
+        // distinguished from packet loss offline.
+        if (!canonicalEnabled()) return;
+        FILE *f = canonicalTrace();
+        if (!f) return;
+        std::lock_guard<std::mutex> lock(canonicalTraceMutex());
+        if (std::fprintf(f, "D\t%" PRIu64 "\t%u\t%u\t%u\t%s\t%d\n", tick, slot, ordinal,
+                         de4, decision ? decision : "?", applied ? 1 : 0) < 0)
+            noteTraceWriteError("transcript D row write failed");
     }
 
-    void canonicalNewSession() {}
+    void canonicalNewSession()
+    {
+        // np-fix-1 F12: session-owned handle/manifest/ticket lifetime. A
+        // second session in one process starts clean: the trace is closed
+        // (fclose flushes; a flush failure latches), the manifest is
+        // rewritten for the new directory, tickets restart at 0 and the
+        // write-error latch clears. P1a runs one session per process; this
+        // is the bounded lifecycle contract, not silent epoch mixing.
+        std::lock_guard<std::mutex> lock(canonicalTraceMutex());
+        if (g_traceOut)
+        {
+            if (std::fflush(g_traceOut) == EOF)
+                noteTraceWriteError("transcript flush failed at session close");
+            std::fclose(g_traceOut);
+            g_traceOut = nullptr;
+        }
+        g_traceOpenDir.clear();
+        g_manifestDir.clear();
+        g_readbackTicket.store(0u, std::memory_order_relaxed);
+        g_writeError.clear();
+    }
 
-    std::string canonicalLastWriteError() { return {}; }
+    std::string canonicalLastWriteError()
+    {
+        std::lock_guard<std::mutex> lock(canonicalTraceMutex());
+        return g_writeError;
+    }
+
+    // Flush at a canonical boundary; fail closed on error (F12).
+    bool canonicalTraceFlush(std::string &why)
+    {
+        std::lock_guard<std::mutex> lock(canonicalTraceMutex());
+        if (g_traceOut && std::fflush(g_traceOut) == EOF)
+        {
+            noteTraceWriteError("transcript flush failed");
+            why = g_writeError;
+            return false;
+        }
+        if (!g_writeError.empty())
+        {
+            why = g_writeError;
+            return false;
+        }
+        return true;
+    }
 
     uint64_t canonicalNextReadbackTicket()
     {
         // F2: VIF1-probe and HLE store-image tickets share one namespace;
         // F12 restarts it per session. EE-thread issued, like the callers.
-        static std::atomic<uint64_t> next{0u};
-        return next.fetch_add(1u, std::memory_order_relaxed);
+        return g_readbackTicket.fetch_add(1u, std::memory_order_relaxed);
     }
 
     bool canonicalOracle(PS2Runtime &runtime, uint64_t tick, bool transition, std::string &why)
@@ -1241,8 +1327,11 @@ namespace ps2_savestate
         const char *hashEnv = std::getenv("PS2X_NETPLAY_CANON_HASH");
         const bool hashOn = !hashEnv || std::strcmp(hashEnv, "0") != 0;
 
-        static bool manifestWritten = false;
-        if (!manifestWritten) {
+        // np-fix-1 F12: the manifest is per session+directory, not per
+        // process. A second session (or directory) rewrites it; reusing a
+        // directory without a NewSession keeps the first manifest, which
+        // the transcript's own session rows then contradict loudly.
+        if (g_manifestDir != dir) {
             std::ofstream manifest(dir + "/manifest-v1.txt", std::ios::trunc);
             if (!manifest) { why = "manifest write failed"; return false; }
             manifest << "manifest_version=1\nchecksum_schema=1\npad_schema=ps2-status-32-v1\n"
@@ -1269,7 +1358,7 @@ namespace ps2_savestate
                 manifest << knob << '=' << (value ? value : "unset") << '\n';
             }
             if (!manifest) { why = "manifest write failed"; return false; }
-            manifestWritten = true;
+            g_manifestDir = dir;
         }
 
         // Timer state is part of the committed VBlank boundary in both
@@ -1286,10 +1375,7 @@ namespace ps2_savestate
             out << tick << '\t' << (transition ? 1 : 0) << "\tskipped\t"
                 << us << '\t' << waitNs << "\t0\n";
             if (!out) { why = "oracle write failed"; return false; }
-            {
-                std::lock_guard<std::mutex> lock(canonicalTraceMutex());
-                std::fflush(canonicalTrace());
-            }
+            if (!canonicalTraceFlush(why)) return false; // np-fix-1 F12: fail closed
             return true;
         }
 
@@ -1326,10 +1412,7 @@ namespace ps2_savestate
         for (const auto &[key, digest] : parts) out << '\t' << key << '=' << digest;
         out << '\n';
         if (!out) { why = "oracle write failed"; return false; }
-        {
-            std::lock_guard<std::mutex> lock(canonicalTraceMutex());
-            std::fflush(canonicalTrace());
-        }
+        if (!canonicalTraceFlush(why)) return false; // np-fix-1 F12: fail closed
         std::fprintf(stderr, "[netplay-canon:v1] tick=%" PRIu64 " digest=%016" PRIx64
                              " us=%" PRIu64 " mtvu_wait_ns=%" PRIu64 " bytes=%zu\n",
                      tick, combined, us, waitNs, w.buf.size());

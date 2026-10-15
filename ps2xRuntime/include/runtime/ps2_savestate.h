@@ -487,7 +487,7 @@ namespace ps2_savestate
                          std::string &why);
     void canonicalRecordPad(uint64_t tick, int port, int slot, const uint8_t *bytes, size_t size);
     void canonicalRecordEvent(uint64_t tick, uint64_t eeCycle, uint32_t type,
-                              uint32_t id, uint64_t deadline, uint64_t sequence);
+                              uint32_t id, uint64_t value, uint64_t deadline, uint64_t sequence);
     void canonicalRecordIdle(uint64_t tick, uint64_t eeCycle, uint64_t timerCycle,
                              uint64_t eventCycle, bool timerWon);
     void canonicalRecordReadback(uint64_t tick, uint64_t ticket, uint32_t address,

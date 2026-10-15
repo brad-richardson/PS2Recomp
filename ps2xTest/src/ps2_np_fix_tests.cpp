@@ -195,7 +195,7 @@ int f12EventChild()
 {
     ::setenv("PS2X_NETPLAY_CANON", "1", 1);
     ::setenv("PS2X_NETPLAY_CANON_DIR", (std::string(kWorkRoot) + "/e").c_str(), 1);
-    ps2_savestate::canonicalRecordEvent(120u, 999u, 3u, 7u, 4242u, 5u);
+    ps2_savestate::canonicalRecordEvent(120u, 999u, 3u, 7u, 555u, 4242u, 5u);
     return 0;
 }
 
