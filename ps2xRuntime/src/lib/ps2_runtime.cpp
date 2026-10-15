@@ -6,6 +6,7 @@
 #include "ps2_native_world.h"
 #include "ps2_net_dirtysock.h"
 #include "ps2_net_link.h" // np-link-1: delay-lockstep client (default off)
+#include "ps2_np_rider.h" // np-fix-1 (F7/F8): rider script state, verbatim move
 #include "ps2_android_toast.h"
 #include "ps2_e7.h"
 #include "ps2_e41_trace.h"
@@ -2996,90 +2997,9 @@ bool qsr1AutoOn()
 // no ctl+0xDE8 swap, no players[0] write. Reset (9), finish (10) and 13 are
 // never replaced. Knob off: this code is unreachable (DSP1 filter lists
 // 0x111728 only when enabled) and guest state is untouched.
-namespace ps2_np_rider
-{
-constexpr uint32_t kInputConsumer = 0x00111728u;
-constexpr uint32_t kAiSourceDesc = 0x004585F0u;
-
-struct Entry
-{
-    uint64_t tick = 0u;
-    uint32_t de4 = 0u;
-    uint32_t w0 = 0u;
-    uint32_t w1 = 0u;
-};
-
-struct Config
-{
-    bool enabled = false;
-    int slot = -1;
-    uint64_t dropTick = 0u; // 0 = never; first tick that reverts to AI
-    std::vector<Entry> script;
-    size_t cursor = 0u; // tick-stamped scripts are consumed in order
-    bool loaded = false;
-    bool loadError = false;
-};
-
-inline Config &config()
-{
-    static Config cfg;
-    return cfg;
-}
-
-inline void loadOnce()
-{
-    Config &cfg = config();
-    if (cfg.loaded)
-        return;
-    cfg.loaded = true;
-    const char *en = std::getenv("PS2X_NP_RIDER_ENABLE");
-    cfg.enabled = en && std::string(en) == "1";
-    if (!cfg.enabled)
-        return;
-    if (const char *s = std::getenv("PS2X_NP_RIDER_SLOT"))
-        cfg.slot = std::atoi(s);
-    if (const char *d = std::getenv("PS2X_NP_RIDER_DROP_TICK"))
-        cfg.dropTick = static_cast<uint64_t>(std::strtoull(d, nullptr, 0));
-    const char *spec = std::getenv("PS2X_NP_RIDER_SCRIPT");
-    if (!spec || !spec[0])
-        return; // trace-only: log, never replace
-    std::string path = spec;
-    if (path.rfind("@", 0) == 0)
-        path = path.substr(1);
-    FILE *f = std::fopen(path.c_str(), "r");
-    if (!f)
-    {
-        cfg.loadError = true;
-        std::fprintf(stderr, "[np-rider] cannot read script '%s'; trace-only\n", path.c_str());
-        return;
-    }
-    char line[256];
-    while (std::fgets(line, sizeof(line), f))
-    {
-        if (line[0] == '#' || line[0] == '\n')
-            continue;
-        unsigned long long tick = 0u;
-        unsigned de4 = 0u, w0 = 0u, w1 = 0u;
-        if (std::sscanf(line, "%llu %x %x %x", &tick, &de4, &w0, &w1) == 4)
-            cfg.script.push_back(Entry{static_cast<uint64_t>(tick), de4, w0, w1});
-    }
-    std::fclose(f);
-    std::sort(cfg.script.begin(), cfg.script.end(),
-              [](const Entry &a, const Entry &b) { return a.tick < b.tick; });
-    std::fprintf(stderr, "[np-rider] slot=%d drop=%llu entries=%zu\n", cfg.slot,
-                 (unsigned long long)cfg.dropTick, cfg.script.size());
-}
-
-inline const Entry *findEntry(uint64_t tick)
-{
-    Config &cfg = config();
-    while (cfg.cursor < cfg.script.size() && cfg.script[cfg.cursor].tick < tick)
-        ++cfg.cursor;
-    if (cfg.cursor < cfg.script.size() && cfg.script[cfg.cursor].tick == tick)
-        return &cfg.script[cfg.cursor];
-    return nullptr;
-}
-} // namespace ps2_np_rider
+// np-fix-1 (F7/F8): rider script state lives in ps2_np_rider.h (verbatim move
+// of the namespace below in the B0 scaffold; strictness + generation added by
+// the fix). Kept here as a comment so the move is reviewable as behavior-neutral.
 
 #if defined(__ANDROID__)
 // ASV1: the choice is made before the game thread starts, so a rejected or

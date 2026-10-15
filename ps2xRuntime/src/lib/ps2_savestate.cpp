@@ -1151,6 +1151,35 @@ namespace ps2_savestate
                      tick, eeCycle, timerCycle, eventCycle, timerWon ? 'T' : 'E');
     }
 
+    // np-fix-1 B0 scaffolds: behavior-neutral no-ops. The fix implements
+    // validation (F4), rider rows + checked writes (F12) and session reset.
+    bool canonicalInputProfileOk(std::string &why)
+    {
+        (void)why;
+        return true;
+    }
+
+    void canonicalRecordRider(uint64_t tick, uint32_t slot, uint32_t ordinal,
+                              uint32_t de4, const char *decision, bool applied)
+    {
+        (void)tick;
+        (void)slot;
+        (void)ordinal;
+        (void)de4;
+        (void)decision;
+        (void)applied;
+    }
+
+    void canonicalNewSession() {}
+
+    std::string canonicalLastWriteError() { return {}; }
+
+    uint64_t canonicalNextReadbackTicket()
+    {
+        static uint64_t next = 0u; // B0: never reset; the fix restarts it per session.
+        return next++;
+    }
+
     bool canonicalOracle(PS2Runtime &runtime, uint64_t tick, bool transition, std::string &why)
     {
         if (!canonicalEnabled()) return true;

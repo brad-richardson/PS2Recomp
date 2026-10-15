@@ -492,6 +492,23 @@ namespace ps2_savestate
                              uint64_t eventCycle, bool timerWon);
     void canonicalRecordReadback(uint64_t tick, uint64_t ticket, uint32_t address,
                                  uint32_t bytes, uint64_t digest);
+    // np-fix-1 scaffolds (B0: behavior-neutral; the fix implements them).
+    // F4: CANON establishes its own input path (rejects wall-clock pad
+    // scripts / non-canonical drivers); called first by canonicalOracle.
+    bool canonicalInputProfileOk(std::string &why);
+    // F12: rider/commit decisions in the canonical transcript ("D" rows).
+    void canonicalRecordRider(uint64_t tick, uint32_t slot, uint32_t ordinal,
+                              uint32_t de4, const char *decision, bool applied);
+    // F12: end the current transcript/manifest/ticket session so a second
+    // session in one process starts clean (fresh manifest, retargeted trace,
+    // restarted ticket counter).
+    void canonicalNewSession();
+    // F12: first transcript write/flush failure latched since process start
+    // (or the last NewSession); empty when healthy.
+    std::string canonicalLastWriteError();
+    // F12: process-wide readback ticket issuer (VIF1 + HLE share one
+    // namespace); restarted by canonicalNewSession.
+    uint64_t canonicalNextReadbackTicket();
 
     // Traversal/read failures while saving a directory tree. trySave turns
     // it into a deferral reason; a partial tree is never written.
