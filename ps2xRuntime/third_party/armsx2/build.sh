@@ -116,9 +116,18 @@ case "$PLAT" in
       -v "$ASM:/asm" -v "$BLD:/build" -v "$PIN/microvu/om1rt-inputs:/om1rt:ro" \
       "$IMAGE" bash -lc '
 set -euo pipefail
+# Vendored plutovg/plutosvg (PCSX2 3rdparty sources; SearchForStuff wants their
+# CMake configs, which the Mac dep bundle supplies prebuilt).
+cmake -S /asm/vendor-pcsx2/3rdparty/plutovg -B /tmp/plutovg -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_SHARED_LIBS=ON -DCMAKE_C_COMPILER=clang
+cmake --build /tmp/plutovg -j 4 && cmake --install /tmp/plutovg
+cmake -S /asm/vendor-pcsx2/3rdparty/plutosvg -B /tmp/plutosvg -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_SHARED_LIBS=ON -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_C_COMPILER=clang
+cmake --build /tmp/plutosvg -j 4 && cmake --install /tmp/plutosvg
 cmake -S /asm/linux-platform -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
   -DCMAKE_CXX_FLAGS="-stdlib=libc++" -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++" \
+  -DCMAKE_PREFIX_PATH=/usr/local \
   -DOM1RT_WORKTREE=/om1rt/ps2recomp-4f1a953 -DOM1RT_SRC=/om1rt/rt-src \
   -DOM1_REC_DIR=/om1rt -DOM1_WORKTREE=/om1rt/ps2recomp-4f1a953 \
   -DOM1_CAPTURE_INCLUDE=/om1rt/capture-include
