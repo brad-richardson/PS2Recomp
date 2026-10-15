@@ -133,5 +133,21 @@ void register_ps2_pad_latch_tests()
             t.Equals(static_cast<uint32_t>(~static_cast<uint16_t>(data[2] | (data[3] << 8)) & 0xFFFFu),
                      static_cast<uint32_t>(kCross), "port 0 still consumes the press");
             sharedLatch().resetForTest(); });
+
+        tc.Run("panel gate discards queued and in-panel edges", [](TestCase &t)
+               {
+            sharedLatch().resetForTest();
+            sharedLatch().publish(kCross); // queued before a guest read
+            sharedLatch().setPanelOpen(true);
+            t.Equals(static_cast<uint32_t>(sharedLatch().consume()), 0u, "pre-open edge discarded");
+            sharedLatch().publish(kCircle);
+            t.Equals(static_cast<uint32_t>(sharedLatch().consume()), 0u, "in-panel edge hidden");
+            t.Equals(static_cast<uint32_t>(sharedLatch().peekLive()), 0u, "other ports see neutral");
+            sharedLatch().setPanelOpen(false);
+            t.Equals(static_cast<uint32_t>(sharedLatch().consume()), 0u, "no edge after close");
+            sharedLatch().publish(kCross);
+            t.Equals(static_cast<uint32_t>(sharedLatch().consume()), static_cast<uint32_t>(kCross),
+                     "new post-close press passes");
+            sharedLatch().resetForTest(); });
                    });
 }

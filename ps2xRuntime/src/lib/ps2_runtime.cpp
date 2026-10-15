@@ -7984,6 +7984,7 @@ void PS2Runtime::run()
     uint16_t set2PrevUnion = 0; // nav edge detect
     ps2x::set2::SwallowState set2Swallow; // close-press overhang, stripped until release
     std::vector<int64_t> set2Down; // touch ids currently on the panel/dot
+    std::vector<int64_t> set2HeldTouches; // touches still down at close, masked until release
     int set2ShotIn = -1;           // host frames until the panel screenshot (-1 idle)
     bool set2Perf = false;         // live perf-overlay flag (env default at boot)
     if (set2On)
@@ -8402,6 +8403,7 @@ void PS2Runtime::run()
 #endif
             ps2_snd_audio_output::pausePlayback();
             const uint64_t openTick = m_memory.gs().vsyncTick.load();
+            ps2x::padlatch::sharedLatch().setPanelOpen(true);
             ps2x::hostPause::requestPause();
             const bool acked = ps2x::hostPause::waitGateAck(2000);
             set2HoldsPause().store(true, std::memory_order_release);
@@ -8432,9 +8434,14 @@ void PS2Runtime::run()
                 ps2x::vpad::TouchPoint seed[8];
                 const int nseed = set2SampleTouches(seed);
                 set2Down.clear();
+                set2HeldTouches.clear();
                 for (int i = 0; i < nseed; ++i)
+                {
                     set2Down.push_back(seed[i].id);
+                    set2HeldTouches.push_back(seed[i].id);
+                }
             }
+            ps2x::padlatch::sharedLatch().setPanelOpen(false);
             set2HoldsPause().store(false, std::memory_order_release);
             ps2x::hostPause::requestResume();
             ps2_snd_audio_output::resumePlayback();
@@ -8678,6 +8685,24 @@ void PS2Runtime::run()
             int touches = virtualPadTouches(vpadTouches, 8, screenWidth, screenHeight);
             touches = ps2x::vpad::activeTestTouchesWithIds(vpadTestTouches, m_memory.gs().vsyncTick.load(), screenWidth,
                                                            screenHeight, vpadTouches, touches, 8);
+            // A finger held while the panel closes must not become a fresh
+            // virtual-pad press. Keep its ID masked until it leaves the screen.
+            if (set2On && !set2HeldTouches.empty())
+            {
+                std::vector<int64_t> stillHeld;
+                int kept = 0;
+                for (int i = 0; i < touches; ++i)
+                {
+                    const int64_t id = vpadTouches[i].id;
+                    if (std::find(set2HeldTouches.begin(), set2HeldTouches.end(), id) !=
+                        set2HeldTouches.end())
+                        stillHeld.push_back(id);
+                    else
+                        vpadTouches[kept++] = vpadTouches[i];
+                }
+                touches = kept;
+                set2HeldTouches = stillHeld;
+            }
             // SET2: gear-dot taps toggle the panel; dot-zone touches are
             // dropped here so they never reach the guest pad (QSR1 menu-zone
             // precedent).

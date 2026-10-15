@@ -152,11 +152,32 @@ namespace ps2x::padlatch
     class SharedLatch
     {
     public:
+        // The settings panel owns the pad. Discard both live and queued
+        // edges at either transition so a pre-pause tap cannot surface on
+        // the first guest read after resume.
+        void setPanelOpen(bool open)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_panelOpen != open)
+            {
+                m_latch = Latch{};
+                m_panelOpen = open;
+            }
+        }
+
+        bool panelOpen()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_panelOpen;
+        }
+
         void publish(uint16_t mask)
         {
             uint16_t rose = 0u, fell = 0u;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_panelOpen)
+                    mask = 0u;
                 rose = static_cast<uint16_t>(mask & ~m_latch.live);
                 fell = static_cast<uint16_t>(m_latch.live & ~mask);
                 m_latch.noteSample(mask);
@@ -183,12 +204,16 @@ namespace ps2x::padlatch
         uint16_t consume()
         {
             std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_panelOpen)
+                return 0u;
             return m_latch.consumeRead();
         }
 
         uint16_t peekLive()
         {
             std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_panelOpen)
+                return 0u;
             return m_latch.peekLive();
         }
 
@@ -196,6 +221,7 @@ namespace ps2x::padlatch
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_latch = Latch{};
+            m_panelOpen = false;
         }
 
         // SS1 save states: copy of / overwrite of the whole state machine.
@@ -213,6 +239,7 @@ namespace ps2x::padlatch
     private:
         std::mutex m_mutex;
         Latch m_latch;
+        bool m_panelOpen = false;
     };
 
     inline SharedLatch &sharedLatch()

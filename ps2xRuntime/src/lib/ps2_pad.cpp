@@ -140,6 +140,11 @@ bool PSPadBackend::readState(int port, int /*slot*/, uint8_t *data, size_t size)
     data[3] = 0xFF;
     data[4] = data[5] = data[6] = data[7] = kPadStickCenter;
 
+    // The host settings panel has exclusive input. Keep sticks neutral too;
+    // the button latch also discards queued edges at open and close.
+    if (ps2x::padlatch::sharedLatch().panelOpen())
+        return true;
+
     uint16_t btns = 0xFFFFu;
     const PSRaylibPadSample ray = ps2xSampleRaylibPad();
     if (ray.useGamepad)
