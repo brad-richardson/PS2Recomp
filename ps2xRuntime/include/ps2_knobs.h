@@ -369,7 +369,6 @@ inline const char *const *cf2DumpKnobs(size_t *countOut)
         "PS2X_PRESENT_VULKAN",
         "PS2X_PRESENT_ZERO_COPY",
         "PS2X_PROFILE",
-        "PS2X_QUICKSTATE_AUTO", // QSA1: race-start snapshot opt-in; default off
         "PS2X_SAVESTATE_EXIT_AFTER_SAVE",
         "PS2X_SAVESTATE_LOAD",
         "PS2X_SAVESTATE_PATH",

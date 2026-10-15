@@ -241,6 +241,9 @@ int main(int argc, char *argv[])
     SetTraceLogCallback(raylibTraceToLineWriter);
 #if defined(PS2X_IOS)
     ps2x::ios::prepareEnvironment(argc > 0 ? argv[0] : nullptr);
+    // ASV1: background/lock autosave + resume gate (the iOS stand-in for the
+    // Android APP_CMD_PAUSE/RESUME handler). Main thread, before SDL starts.
+    ps2x::ios::installLifecycleObservers();
 #endif
 #if defined(__APPLE__) && !defined(PS2X_IOS) && !defined(__ANDROID__)
     // CFG1 Part 2: compiled Mac play defaults (D1/D4/D5) for keys the launch

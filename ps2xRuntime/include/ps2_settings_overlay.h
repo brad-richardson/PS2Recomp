@@ -253,8 +253,8 @@ inline PanelGeom panelLayout(float w, float h)
     g.rowH = (g.ph - titleH - 34.0f) / 5.0f;
     for (int i = 0; i < 5; ++i)
         g.rowY[i] = g.py + titleH + i * g.rowH;
-    // Gear dot top-right: clear of the QSR1 dot (top-centre) and the vpad
-    // shoulders (top corners at 0.10u with 0.07u discs).
+    // Gear dot top-right: clear of the vpad shoulders (top corners at 0.10u
+    // with 0.07u discs).
     g.dotX = w - 0.055f * h;
     g.dotY = 0.20f * h;
     g.dotR = 0.045f * h;

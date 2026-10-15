@@ -15,6 +15,19 @@ namespace ps2x::ios
 // thing in main(), before anything reads the environment or starts SDL.
 void prepareEnvironment(const char *argv0);
 
+// ASV1 (iOS): install UIApplicationWillResignActive / DidEnterBackground /
+// DidBecomeActive observers. WillResignActive and DidEnterBackground both run
+// the host autosave inside a UIKit background-task window and then close the
+// BG1 pause gate (coalesced: the second notification finds the guest already
+// paused). DidBecomeActive reopens the gate. Call once on the main thread
+// after prepareEnvironment(). Inert unless PS2X_AUTOSAVE=1 for the save half;
+// the pause/resume half always runs like Android's APP_CMD_PAUSE/RESUME.
+void installLifecycleObservers();
+// ASV1: the iOS shell's background/foreground hooks, defined in
+// ps2_runtime.cpp (the same autosave + BG1 gate path as the Android handler).
+void onAppBackground();
+void onAppForeground();
+
 // Attach SDL's UIWindow to the app's window scene (once it has connected)
 // and forward UIKit's window size to raylib whenever it changes, so the
 // viewport and GetScreenWidth/Height match. Call after InitWindow and once

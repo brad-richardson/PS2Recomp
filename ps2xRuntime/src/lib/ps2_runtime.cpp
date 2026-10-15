@@ -2822,7 +2822,7 @@ int virtualPadTouches(ps2x::vpad::TouchPoint *ts, int max, float screenWidth, fl
     }
     return n;
 #elif defined(__ANDROID__)
-    // QSR1: the touchscreen drives the overlay (vpad + quick menu) on
+    // Android: the touchscreen drives the overlay (vpad) on
     // Android; the mouse fallback below never fires on a phone. Positions
     // are pixels, matching the mouse branch.
     (void)screenWidth;
@@ -2963,30 +2963,6 @@ void ds1FireQuickLoad()
     }
 }
 
-// QSR1 prototype: touch quick save/load/restart, behind PS2X_QUICKSTATE_UI=1
-// (default off). iOS slots live in Documents/states (PS2X_IOS_DOCUMENTS, set
-// by the iOS launcher): the bundle elfDirectory is read-only, so DS1's
-// elfDirectory/states path can never work on iOS. Elsewhere slots sit next
-// to the memory card (mcRoot's parent), never under elfDirectory: on Mac
-// det boots elfDirectory is the pinned CD tree (PI1: read-only).
-bool qsr1UiOn()
-{
-    static const bool on = [] {
-        const char *v = std::getenv("PS2X_QUICKSTATE_UI");
-        return v && std::string(v) == "1";
-    }();
-    return on;
-}
-
-bool qsr1AutoOn()
-{
-    static const bool on = [] {
-        const char *v = std::getenv("PS2X_QUICKSTATE_AUTO");
-        return v && std::string(v) == "1";
-    }();
-    return on;
-}
-
 // np-rider-1 (SRVP1 P0b candidate): drive one AI rider from a tick-stamped
 // remote script. Diagnostic knobs, all default off. At the 0x111728 pre-call
 // boundary (called from 0x121068 after the rider's own source provider has
@@ -3001,7 +2977,7 @@ bool qsr1AutoOn()
 // of the namespace below in the B0 scaffold; strictness + generation added by
 // the fix). Kept here as a comment so the move is reviewable as behavior-neutral.
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(PS2X_IOS)
 // ASV1: the choice is made before the game thread starts, so a rejected or
 // "Start fresh" slot cannot advance the guest even one tick. Touch and pad
 // input both work here; Resume is the selected/default action.
@@ -3068,128 +3044,15 @@ bool asv1AskToResume(bool &closed)
 }
 #endif
 
-std::string qsr1SlotDir()
+// ASV1: the launch/background autosave slot dir (host-only). iOS Documents
+// wins (PS2X_IOS_DOCUMENTS, set by the iOS launcher: the bundle elfDirectory
+// is read-only); elsewhere it sits next to the memory card, never under
+// elfDirectory (on Mac det boots that is the pinned CD tree, PI1 read-only).
+std::string autosaveSlotDir()
 {
     const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
-    return ps2x::vpad::qsr1SlotDirFor(std::getenv("PS2X_IOS_DOCUMENTS"), paths.mcRoot.string(),
-                                      paths.elfDirectory.string());
-}
-
-std::string qsr1SlotPath(const char *tag) // tag = "manual" | "auto"
-{
-    namespace fs = std::filesystem;
-    const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
-    const std::string mcRoot =
-        paths.mcRoot.empty() ? (paths.elfDirectory / "mc0").string() : paths.mcRoot.string();
-    std::string leaf = fs::path(mcRoot).filename().string();
-    if (leaf.empty() || leaf == "." || leaf == "/")
-        leaf = "mc0";
-    for (char &c : leaf)
-    {
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                        c == '-' || c == '_' || c == '.';
-        if (!ok)
-            c = '_';
-    }
-    return (fs::path(qsr1SlotDir()) / ("quick-" + std::string(tag) + "-" + leaf + ".state")).string();
-}
-
-bool qsr1RetryAvailable()
-{
-    if (!qsr1AutoOn())
-        return false;
-    std::error_code ec;
-    return std::filesystem::exists(qsr1SlotPath("auto"), ec) && !ec;
-}
-
-void qsr1Toast(const char *msg)
-{
-    std::fprintf(stderr, "[qsr1-toast] %s\n", msg);
-    ps2x::ui::toast(msg, 3.0f);
-}
-
-void qsr1FireSave()
-{
-    const std::string slot = qsr1SlotPath("manual");
-    std::fprintf(stderr, "[qsr1] save tapped slot=%s\n", slot.c_str());
-    if (!ps2_savestate::requestQuickSave(slot))
-    {
-        if (ps2_savestate::quickRequestPending())
-            ps2_savestate::noteQuickStatus("busy (save/load already pending)");
-        else
-            ps2_savestate::noteQuickStatus("quick-save failed (see log)");
-    }
-    // Completion toasts "Saved" from the scheduler (QSR1 slots only).
-}
-
-void qsr1FireLoad(const char *tag, const char *what)
-{
-    const std::string slot = qsr1SlotPath(tag);
-    std::fprintf(stderr, "[qsr1] %s tapped slot=%s\n", what, slot.c_str());
-    std::error_code ec;
-    if (!std::filesystem::exists(slot, ec) || ec)
-    {
-        std::fprintf(stderr, "[qsr1] %s: no snapshot in slot %s\n", what, slot.c_str());
-        ps2_savestate::noteQuickStatus("no snapshot in this slot yet");
-        return;
-    }
-    if (!ps2_savestate::requestQuickLoad(slot))
-    {
-        if (ps2_savestate::quickRequestPending())
-            ps2_savestate::noteQuickStatus("busy (save/load already pending)");
-        else
-            ps2_savestate::noteQuickStatus("quick-load failed (see log)");
-    }
-    else if (std::strcmp(what, "retry") == 0)
-        qsr1Toast("Retrying");
-    // Manual loads toast "Loaded" on completion from the scheduler.
-}
-
-// (QSR1 menu geometry lives in ps2_virtual_pad.h: pure + unit-tested.)
-
-// QSR1: race-start auto snapshot outside full-120 (RETRY at 60).
-// The game's race-start transition is the race-tick call (jal 0x12a250 at
-// 0x113dcc, $s0 = race object; ps2_fh1::kRaceTick2CallSite, the same site
-// the events enter-request reads) with the race clock [$s0+0xc] at 0/1:
-// the first updates of a fresh race (FH5 entry rule). SPR1: split120 is
-// retired, so the shipped 60 is stock-sim 60 (DSP1 lean front on, sites
-// unlisted) and is NOT covered by this hook. Accepted: QSA1 made auto
-// snapshots opt-in, and no new host hooks go on the reference path here.
-// Armed at boot; a snapshot disarms; re-arm on race end (the session
-// finish flag at [a0+0x610] on calls to 0x26f4a8) or after 600 ticks
-// without a race-tick call (menus don't call the site). A backward tick
-// jump (quick-load) also re-arms; the re-fire then writes the same
-// start-line state it loaded, so it is harmless.
-namespace
-{
-bool g_qsr1RaceArmed = true;
-uint64_t g_qsr1LastRaceTickVsync = 0u;
-} // namespace
-
-void qsr1NoteRaceTick2(const uint8_t *rdram, R5900Context *ctx, uint64_t vsyncTick)
-{
-    if (vsyncTick < g_qsr1LastRaceTickVsync || vsyncTick - g_qsr1LastRaceTickVsync > 600u)
-        g_qsr1RaceArmed = true;
-    g_qsr1LastRaceTickVsync = vsyncTick;
-    if (!g_qsr1RaceArmed)
-        return;
-    uint32_t raceTime = 0u;
-    // The bump's store sits in the call's delay slot, so +0xc is already the new value.
-    if (!ctx || !ps2_fh1::rd32(rdram, ::getRegU32(ctx, 16) + 0xcu, raceTime) || raceTime > 1u)
-        return;
-    g_qsr1RaceArmed = false;
-    const std::string autoSlot = qsr1SlotPath("auto");
-    std::fprintf(stderr, "[qsr1] 60-mode auto snapshot at race start tick=%llu slot=%s\n",
-                 static_cast<unsigned long long>(vsyncTick), autoSlot.c_str());
-    if (!ps2_savestate::requestQuickSave(autoSlot))
-        std::fprintf(stderr, "[qsr1] 60-mode auto snapshot busy/failed (see log)\n");
-}
-
-void qsr1NoteSession(const uint8_t *rdram, R5900Context *ctx)
-{
-    uint32_t fin = 0u;
-    if (ctx && ps2_fh1::rd32(rdram, ::getRegU32(ctx, 4) + 0x610u, fin) && fin != 0u)
-        g_qsr1RaceArmed = true;
+    return ps2x::vpad::autosaveSlotDirFor(std::getenv("PS2X_IOS_DOCUMENTS"), paths.mcRoot.string(),
+                                          paths.elfDirectory.string());
 }
 
 } // namespace
@@ -3711,11 +3574,12 @@ static void logThreadCpu(uint64_t tick)
 }
 #endif
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(PS2X_IOS)
 namespace
 {
 // BG1: the live runtime for the pause hook (set in initialize(), before the
-// game thread starts; the hook runs on the main thread).
+// game thread starts; the hook runs on the main thread). ASV1: the same gate
+// now serves the iOS willResignActive/DidEnterBackground observers.
 PS2Runtime *g_bg1Runtime = nullptr;
 std::atomic<bool> g_bg1GuestStarted{false};
 
@@ -3728,7 +3592,7 @@ void bg1OnPause()
     if (g_bg1GuestStarted.load(std::memory_order_acquire) && !ps2x::hostPause::paused() &&
         autosave && std::strcmp(autosave, "1") == 0)
     {
-        const std::string path = (std::filesystem::path(qsr1SlotDir()) / "autosave.ps2xstate").string();
+        const std::string path = (std::filesystem::path(autosaveSlotDir()) / "autosave.ps2xstate").string();
         if (ps2_savestate::requestAutoSave(path))
         {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
@@ -3784,6 +3648,26 @@ void bg1OnResume()
     ps2x::tel::onAppResume(tick); // TEL2
 }
 } // namespace
+#endif
+
+#if defined(PS2X_IOS)
+namespace ps2x::ios
+{
+// ASV1: the iOS shell's lifecycle hooks (ps2_ios_runtime.mm observes
+// UIApplicationWillResignActive / DidEnterBackground / DidBecomeActive). The
+// autosave and the BG1 pause gate are the same path as Android's
+// APP_CMD_PAUSE/RESUME; a second background notification finds the guest
+// already paused and coalesces.
+void onAppBackground()
+{
+    bg1OnPause();
+}
+
+void onAppForeground()
+{
+    bg1OnResume();
+}
+} // namespace ps2x::ios
 #endif
 
 static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint32_t &outHeight)
@@ -4779,6 +4663,9 @@ bool PS2Runtime::initialize(const char *title)
 #if defined(PS2X_IOS)
         ps2x::ios::syncWindowSize();
         SetTraceLogLevel(LOG_ERROR);
+        // ASV1: register the runtime for the iOS background pause hook (the
+        // observers installed in main() call ps2x::ios::onAppBackground()).
+        g_bg1Runtime = this;
 #endif
 #if defined(PS2X_IOS)
         // IA1: PS2X_IOS_AUDIO_SESSION=playback|ambient|off. playback (default)
@@ -6318,15 +6205,6 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
     {
         ctx->pc = fallthroughPc;
         return true;
-    }
-    // QSR1: 60-mode race-start detection (full-120 off only; the events
-    // trigger owns Always/Events, so the two never double-fire).
-    if (qsr1UiOn() && qsr1AutoOn() && ps2_fh1::mode() == ps2_fh1::Mode::Off)
-    {
-        if (sourcePc == ps2_fh1::kRaceTick2CallSite && targetPc == ps2_fh1::kRaceTick2Callee)
-            qsr1NoteRaceTick2(rdram, ctx, m_memory.gs().vsyncTick.load(std::memory_order_relaxed));
-        else if (targetPc == ps2_fh1::kSession)
-            qsr1NoteSession(rdram, ctx);
     }
     if (targetPc == kSsx3PatchCacheAlloc &&
         (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall) &&
@@ -7950,7 +7828,7 @@ void PS2Runtime::run()
     UnloadImage(blank);
 
     std::string asv1ColdLoadPath;
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(PS2X_IOS)
     const char *asv1Enabled = std::getenv("PS2X_AUTOSAVE");
     if (asv1Enabled && std::strcmp(asv1Enabled, "1") == 0 &&
         ps2_savestate::config().loadPath.empty())
@@ -7959,7 +7837,7 @@ void PS2Runtime::run()
             std::fprintf(stderr, "[autosave] launch skipped: online mode enabled\n");
         else
         {
-            const std::string slot = (std::filesystem::path(qsr1SlotDir()) / "autosave.ps2xstate").string();
+            const std::string slot = (std::filesystem::path(autosaveSlotDir()) / "autosave.ps2xstate").string();
             std::error_code ec;
             if (std::filesystem::exists(slot, ec) && !ec)
             {
@@ -8045,7 +7923,7 @@ void PS2Runtime::run()
                 if (!savestateOk)
                     std::fprintf(stderr, "[savestate] load refused: %s\n", ssError.c_str());
             }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(PS2X_IOS)
             else if (!asv1ColdLoadPath.empty())
             {
                 std::string note, error;
@@ -8081,7 +7959,7 @@ void PS2Runtime::run()
         gameThreadFinished.store(true, std::memory_order_release);
     };
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(PS2X_IOS)
     g_bg1GuestStarted.store(true, std::memory_order_release);
 #endif
     bool gameUsesPthread = false;
@@ -8177,9 +8055,6 @@ void PS2Runtime::run()
     double set2PerfVs = 0.0;
     double set2PerfMs = 0.0;
     auto set2PerfLastFrame = std::chrono::steady_clock::now();
-    bool qsr1Expanded = false; // QSR1 menu open, carried across frames
-    std::vector<int64_t> qsr1Down; // touch ids currently on the menu (edge = new id)
-    bool qsr1AutoDone = false; // auto snapshot taken for the current events window
     // DS1: hash the runner for save/load identity on a background thread
     // while the game boots (a ~200 MB pass; the first quick-save would
     // otherwise hitch on it). The cache mutex guards the result.
@@ -8205,7 +8080,7 @@ void PS2Runtime::run()
     uint64_t vsyncRateTick = m_memory.gs().vsyncTick.load();
     while (!isStopRequested() && !gameThreadFinished.load(std::memory_order_acquire))
     {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(PS2X_IOS)
         // BG1: backgrounded (or pre-focus pause): no guest, no presents, no
         // swapping. PollInputEvents blocks in the looper once raylib is
         // disabled (backgrounded); while still enabled, sleep so a pause
@@ -8214,7 +8089,7 @@ void PS2Runtime::run()
         // running to draw the panel over the frozen frame.
         if (ps2x::hostPause::paused() && !set2Open)
         {
-            PollInputEvents(); // delivers APP_CMD_RESUME / DESTROY
+            PollInputEvents(); // delivers APP_CMD_RESUME / DESTROY (iOS: pumps SDL)
             if (WindowShouldClose())
             {
                 requestStop();
@@ -8784,26 +8659,6 @@ void PS2Runtime::run()
             }
             set2PrevUnion = set2Union;
         }
-        // QSR1: auto snapshot at events enter (Restart race loads it). The
-        // signal is g_guestActive, set by guestFlip on the enter flip
-        // (ps2_fh1_full120.h); re-armed at every events exit, so each race
-        // gets a fresh start-line snapshot. Events mode only.
-        if (qsr1UiOn() && qsr1AutoOn())
-        {
-            if (ps2_fh1::g_guestActive && ps2_fh1::mode() == ps2_fh1::Mode::Events)
-            {
-                if (!qsr1AutoDone)
-                {
-                    qsr1AutoDone = true;
-                    const std::string autoSlot = qsr1SlotPath("auto");
-                    std::fprintf(stderr, "[qsr1] auto snapshot at events enter slot=%s\n", autoSlot.c_str());
-                    if (!ps2_savestate::requestQuickSave(autoSlot))
-                        std::fprintf(stderr, "[qsr1] auto snapshot busy/failed (see log)\n");
-                }
-            }
-            else
-                qsr1AutoDone = false;
-        }
         // SET2: no vpad path this frame (Odin play, desktop, or a controller
         // in use): sample touches for the gear dot (they never reach the
         // guest here, so nothing is dropped).
@@ -8923,8 +8778,7 @@ void PS2Runtime::run()
                 set2HeldTouches = stillHeld;
             }
             // SET2: gear-dot taps toggle the panel; dot-zone touches are
-            // dropped here so they never reach the guest pad (QSR1 menu-zone
-            // precedent).
+            // dropped here so they never reach the guest pad.
             if (set2On && !set2Open)
             {
                 const ps2x::set2::PanelGeom set2g = ps2x::set2::panelLayout(screenWidth, screenHeight);
@@ -8955,56 +8809,6 @@ void PS2Runtime::run()
                     set2Down = set2Left;
                 }
             }
-            // QSR1: menu taps fire on touch-down; menu-zone touches are
-            // dropped here so they never reach the guest pad.
-            if (qsr1UiOn())
-            {
-                const ps2x::vpad::Qsr1MenuGeom qsr1g = ps2x::vpad::qsr1MenuLayout(screenWidth, screenHeight);
-                std::vector<int64_t> qsr1Still;
-                int qsr1Kept = 0;
-                for (int i = 0; i < touches; ++i)
-                {
-                    int hit =
-                        ps2x::vpad::qsr1MenuHit(qsr1g, qsr1Expanded, vpadTouches[i].x, vpadTouches[i].y);
-                    if (hit == 4 && !qsr1RetryAvailable())
-                        hit = 0;
-                    if (hit == 0)
-                    {
-                        vpadTouches[qsr1Kept++] = vpadTouches[i];
-                        continue;
-                    }
-                    qsr1Still.push_back(vpadTouches[i].id);
-                    if (std::find(qsr1Down.begin(), qsr1Down.end(), vpadTouches[i].id) != qsr1Down.end())
-                        continue;
-                    qsr1Down.push_back(vpadTouches[i].id);
-                    if (hit == 1)
-                    {
-                        qsr1Expanded = !qsr1Expanded;
-                        std::fprintf(stderr, "[qsr1] menu %s\n", qsr1Expanded ? "expanded" : "collapsed");
-                    }
-                    else if (hit == 2)
-                    {
-                        qsr1FireSave();
-                        qsr1Expanded = false;
-                    }
-                    else if (hit == 3)
-                    {
-                        qsr1FireLoad("manual", "load");
-                        qsr1Expanded = false;
-                    }
-                    else if (hit == 4)
-                    {
-                        qsr1FireLoad("auto", "retry");
-                        qsr1Expanded = false;
-                    }
-                }
-                touches = qsr1Kept;
-                std::vector<int64_t> qsr1Left;
-                for (int64_t id : qsr1Down)
-                    if (std::find(qsr1Still.begin(), qsr1Still.end(), id) != qsr1Still.end())
-                        qsr1Left.push_back(id);
-                qsr1Down = qsr1Left;
-            }
             ps2x::vpad::PadFrame vpadFrame =
                 ps2x::vpad::updatePad(vpadPad, layout, vpadTouches, touches, vpadShoulderBand);
             uint16_t pressed = vpadFrame.pressed;
@@ -9030,38 +8834,6 @@ void PS2Runtime::run()
             if (vkUnder)
                 EndBlendMode();
 #endif
-            // QSR1: menu dot + expanded Save/Load/Retry row.
-            if (qsr1UiOn())
-            {
-                const ps2x::vpad::Qsr1MenuGeom qsr1dg = ps2x::vpad::qsr1MenuLayout(screenWidth, screenHeight);
-                const Vector2 qsr1dc{qsr1dg.dotX, qsr1dg.dotY};
-                DrawCircleV(qsr1dc, qsr1dg.dotR, Color{255, 255, 255, 45});
-                DrawCircleLinesV(qsr1dc, qsr1dg.dotR, Color{255, 255, 255, 140});
-                {
-                    const int fs = 20;
-                    const int tw = MeasureText("...", fs);
-                    DrawText("...", static_cast<int>(qsr1dg.dotX) - tw / 2,
-                             static_cast<int>(qsr1dg.dotY) - fs / 2, fs, Color{255, 255, 255, 200});
-                }
-                if (qsr1Expanded)
-                {
-                    static const char *labels[3] = {"SAVE", "LOAD", "RETRY"};
-                    const int rows = qsr1RetryAvailable() ? 3 : 2;
-                    for (int i = 0; i < rows; ++i)
-                    {
-                        const Vector2 c{qsr1dg.rowX[i], qsr1dg.rowY};
-                        DrawCircleV(c, qsr1dg.rowR, Color{255, 255, 255, 60});
-                        DrawCircleLinesV(c, qsr1dg.rowR, Color{255, 255, 255, 160});
-                        // Shrink the label until it fits inside the disc.
-                        int fs = 18;
-                        while (fs > 10 && MeasureText(labels[i], fs) > static_cast<int>(qsr1dg.rowR * 1.6f))
-                            --fs;
-                        const int tw = MeasureText(labels[i], fs);
-                        DrawText(labels[i], static_cast<int>(qsr1dg.rowX[i]) - tw / 2,
-                                 static_cast<int>(qsr1dg.rowY) - fs / 2, fs, Color{255, 255, 255, 220});
-                    }
-                }
-            }
         }
         else if (vpadWanted)
         {
@@ -9119,8 +8891,7 @@ void PS2Runtime::run()
 #endif
             }
         }
-        // ACH2: reusable toast (ps2x::ui::toast; QSR1 reuses it after the
-        // merge). Same host-drawn placement as the DS1 line, one row lower.
+        // ACH2: reusable toast (ps2x::ui::toast). Same host-drawn placement as the DS1 line, one row lower.
         if (!skipGl)
         {
             std::string toastMsg;
@@ -9329,7 +9100,7 @@ void PS2Runtime::run()
     {
         gameThread.join();
     }
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(PS2X_IOS)
     g_bg1GuestStarted.store(false, std::memory_order_release);
 #endif
 

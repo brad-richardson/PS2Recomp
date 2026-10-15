@@ -73,6 +73,29 @@ bool target120Enabled()
     const Boolean value = CFPreferencesGetAppBooleanValue(CFSTR("target120"), kCFPreferencesCurrentApplication, &valid);
     return !valid || value;
 }
+
+// ASV1: one background task spans the whole autosave so iOS keeps the process
+// runnable while it writes (main thread only; endBg is the expiration path).
+UIBackgroundTaskIdentifier g_autosaveTask = UIBackgroundTaskInvalid;
+
+void endAutosaveTask()
+{
+    if (g_autosaveTask != UIBackgroundTaskInvalid)
+    {
+        [UIApplication.sharedApplication endBackgroundTask:g_autosaveTask];
+        g_autosaveTask = UIBackgroundTaskInvalid;
+    }
+}
+
+void runBackgroundAutosave()
+{
+    endAutosaveTask();
+    g_autosaveTask = [UIApplication.sharedApplication
+        beginBackgroundTaskWithName:@"ps2x-autosave"
+                 expirationHandler:^{ endAutosaveTask(); }];
+    ps2x::ios::onAppBackground();
+    endAutosaveTask();
+}
 } // namespace
 
 // IQ1: the display link carries the 120 Hz frame-rate request.
@@ -97,6 +120,31 @@ bool target120Enabled()
 
 namespace ps2x::ios
 {
+// ASV1: register the UIKit lifecycle observers. WillResignActive fires first
+// (lock, Home, app switch); DidEnterBackground repeats the request, which the
+// pause gate coalesces. DidBecomeActive reopens the gate. Never removed: the
+// process is single-session and the tokens must outlive the run loop.
+void installLifecycleObservers()
+{
+    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+    static id s_resign = [center addObserverForName:UIApplicationWillResignActiveNotification
+                                             object:nil
+                                              queue:nil
+                                         usingBlock:^(NSNotification *) { runBackgroundAutosave(); }];
+    static id s_enter = [center addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                            object:nil
+                                             queue:nil
+                                        usingBlock:^(NSNotification *) { runBackgroundAutosave(); }];
+    static id s_active = [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                                             object:nil
+                                              queue:nil
+                                         usingBlock:^(NSNotification *) { ps2x::ios::onAppForeground(); }];
+    (void)s_resign;
+    (void)s_enter;
+    (void)s_active;
+    std::fprintf(stderr, "[ios-lifecycle] background/foreground observers installed\n");
+}
+
 void prepareEnvironment(const char *argv0)
 {
     std::set<std::string> launcherKeys;
@@ -123,7 +171,7 @@ void prepareEnvironment(const char *argv0)
     }
     const char *home = std::getenv("HOME");
     const std::filesystem::path documents = home ? std::filesystem::path(home) / "Documents" : std::filesystem::path();
-    // QSR1: publish Documents for the touch-slot dir (PS2X_IOS_DOCUMENTS/states).
+    // ASV1: publish Documents for the autosave slot dir (PS2X_IOS_DOCUMENTS/states).
     if (!documents.empty())
         setenv("PS2X_IOS_DOCUMENTS", documents.string().c_str(), 1);
     const std::map<std::string, std::string> vars{
