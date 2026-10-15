@@ -9,3 +9,8 @@ namespace ps2_ssx3_anim_pick
 {
 void applyAnimPickGuard(PS2Runtime &runtime); // "ssx3-anim-pick-guard" (HNG2/HNG3)
 }
+
+namespace ps2_ssx3_hle_iop
+{
+void applySsx3HleIop(PS2Runtime &runtime); // "ssx3-hle-iop" (UPR1)
+}

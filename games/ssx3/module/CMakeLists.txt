@@ -4,6 +4,7 @@
 add_library(ssx3_game_module STATIC
     src/ssx3_module.cpp
     src/anim_pick_guard.cpp
+    src/hle_iop.cpp
 )
 target_include_directories(ssx3_game_module
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include

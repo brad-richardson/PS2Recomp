@@ -57,7 +57,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("override table: the moved families, in order, with their old match", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            const char *kExpected[] = {"ssx3-anim-pick-guard"};
+            const char *kExpected[] = {"ssx3-anim-pick-guard", "ssx3-hle-iop"};
             t.Equals(m.overrideCount, std::size(kExpected), "override count");
             for (size_t i = 0; i < m.overrideCount && i < std::size(kExpected); ++i)
             {
@@ -103,6 +103,16 @@ void register_ps2_ssx3_module_tests()
             const Bound b = bindFor(runtime, "SLUS_999.99");
             t.IsTrue(b.pick == &sentinelPick, "picker untouched");
             t.IsTrue(b.play == &sentinelPlay, "play untouched");
+            t.IsTrue(!runtime.hleIopMode(), "IOP mode untouched");
+            reset_ps2_test_function_table();
+        });
+        // module-seam-2: ssx3-hle-iop (UPR1) selects the HLE IOP for SSX 3.
+        tc.Run("the override pass selects HLE IOP mode for SSX 3", [](TestCase &t)
+               {
+            PS2Runtime runtime;
+            t.IsTrue(!runtime.hleIopMode(), "emulator mode before the pass");
+            bindFor(runtime, "SLUS_207.72");
+            t.IsTrue(runtime.hleIopMode(), "HLE IOP mode after the pass");
             reset_ps2_test_function_table();
         }); });
 }

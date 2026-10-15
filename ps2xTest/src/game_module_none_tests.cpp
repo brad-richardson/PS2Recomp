@@ -33,5 +33,14 @@ void register_game_module_none_tests()
             for (uint32_t pc : kModuleOwnedPcs)
                 t.IsTrue(runtime.lookupFunction(pc) == &sentinel, "untouched");
             reset_ps2_test_function_table();
+        });
+        // module-seam-2: the SSX 3 module, not the runtime, picks the HLE IOP.
+        tc.Run("the override pass leaves the IOP mode to the module", [](TestCase &t)
+               {
+            PS2Runtime runtime;
+            reset_ps2_test_function_table();
+            ps2_game_overrides::applyMatching(runtime, "SLUS_207.72", 0x00100008u, 0u, false);
+            t.IsTrue(!runtime.hleIopMode(), "IOP emulator mode stays");
+            reset_ps2_test_function_table();
         }); });
 }

@@ -12,6 +12,7 @@ namespace
 
     const ps2_game_overrides::Descriptor kOverrides[] = {
         {"ssx3-anim-pick-guard", "SLUS_207.72", kSsx3Entry, 0u, &ps2_ssx3_anim_pick::applyAnimPickGuard},
+        {"ssx3-hle-iop", "SLUS_207.72", kSsx3Entry, 0u, &ps2_ssx3_hle_iop::applySsx3HleIop},
     };
 
     const ps2_game_module::Module kModule{ps2_game_module::kAbiVersion, "ssx3", kOverrides, std::size(kOverrides)};

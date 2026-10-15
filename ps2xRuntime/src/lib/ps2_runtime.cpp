@@ -1714,22 +1714,6 @@ void PS2Runtime::importVu0Context(const R5900Context *ctx, VuState &state, bool 
     copyVu0ContextToStateImpl(ctx, state, lean);
 }
 
-// UPR1: SSX 3 runs on the fork's HLE IOP/SIF/RPC paths, never upstream's IOP
-// emulator (its IRX modules stay tracked-only loads).
-namespace
-{
-    void applySsx3HleIop(PS2Runtime &runtime)
-    {
-        runtime.setHleIopMode(true);
-    }
-}
-
-PS2_REGISTER_GAME_OVERRIDE("ssx3-hle-iop",
-                           "SLUS_207.72",
-                           0x00100008u,
-                           0u,
-                           applySsx3HleIop);
-
 PS2_REGISTER_GAME_OVERRIDE("ssx3-widescreen-default",
                            "SLUS_207.72",
                            0x00100008u,

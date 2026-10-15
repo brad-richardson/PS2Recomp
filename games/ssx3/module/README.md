@@ -18,6 +18,7 @@ behind the plug-in point in `ps2xRuntime/include/runtime/game_module.h`
 | Override | Knob | Source | Tests |
 | --- | --- | --- | --- |
 | `ssx3-anim-pick-guard` (HNG2/HNG3) | `PS2X_SSX3_ANIM_PICK_GUARD` (default on) | `src/anim_pick_guard.cpp`, `include/ps2_ssx3_anim_pick_guard.h` | `tests/ps2_ssx3_anim_pick_guard_tests.cpp`, `tests/ps2_ssx3_module_tests.cpp` |
+| `ssx3-hle-iop` (UPR1) | none (always on for SSX 3) | `src/hle_iop.cpp` | `tests/ps2_ssx3_module_tests.cpp`; generic: `GameModuleNone` |
 
 ## Moving the next family
 
