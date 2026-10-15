@@ -272,8 +272,16 @@ Preserve dependency licences from their source checkouts.
 ### Android prebuilt support libraries
 
 `android-libs` and `android` default to `--prebuilt=auto`. A release matching
-this checkout's source and toolchain contract is downloaded, checked against
-`SHA256SUMS`, unpacked with a strict file allowlist, and verified file by file.
+this checkout's source and toolchain contract is downloaded, required to match
+the archive hash pinned in [`prebuilt-releases.json`](prebuilt-releases.json),
+unpacked with a strict file allowlist, and verified file by file.
+`SHA256SUMS` only guards the download in transit; it is the committed pin
+that authenticates the archive, so a tampered re-upload under the same tag is
+refused and falls back to the source build. Releases also carry SLSA
+build-provenance attestations (`gh attestation verify --repo
+brad-richardson/PS2Recomp <archive>`). No release exists for contracts without
+a pin entry yet, so `auto` still builds from source there; the maintainer
+prints the pin entry to commit after `prebuilt.py build`.
 The runtime and platform bootstrap are static archives; GE1, microVU and the
 hardware shim remain shared libraries. Your generated game library is linked
 locally. Neither the support archive nor CI contains your generated game code,

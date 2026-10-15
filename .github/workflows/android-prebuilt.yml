@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       NDK_VERSION: '28.2.13676358'
       PS2X_GAME_CODEGEN_DIR: ''
@@ -53,6 +55,9 @@ jobs:
           path: ${{ runner.temp }}/ssx3-support/release/*
           if-no-files-found: error
           retention-days: 14
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: ${{ runner.temp }}/ssx3-support/release/*.zip
       - name: Attach checksummed assets and matching-source links
         env:
           GH_TOKEN: ${{ github.token }}

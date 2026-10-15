@@ -24,6 +24,12 @@ class PrebuiltTests(unittest.TestCase):
         self.contract_patch.start()
         self.drift_patch = patch.object(prebuilt, 'contract_drift', return_value=[])
         self.drift_patch.start()
+        self.pin_entry = {'tag': 'android-prebuilt-' + STAMP,
+                          'asset': 'android-arm64-' + STAMP + '.zip',
+                          'sha256': '0' * 64}
+        self.pins_patch = patch.object(prebuilt, 'release_pins',
+                                       return_value={STAMP: self.pin_entry})
+        self.pins_patch.start()
         paths = ['lib/' + x for x in prebuilt.ARCHIVES]
         paths += ['jniLibs/arm64-v8a/' + x for x in prebuilt.SHARED]
         paths += ['include/sse2neon.h', 'runtime-definitions.txt', 'notices/PS2Recomp-LICENSE', 'notices/SOURCES.json']
@@ -38,6 +44,7 @@ class PrebuiltTests(unittest.TestCase):
     def tearDown(self):
         self.contract_patch.stop()
         self.drift_patch.stop()
+        self.pins_patch.stop()
         self.tmp.cleanup()
 
     def write_manifest(self):
@@ -125,9 +132,42 @@ class PrebuiltTests(unittest.TestCase):
         asset = 'android-arm64-' + STAMP + '.zip'
         responses = [io.BytesIO((sha + '  ' + asset + '\n').encode()), io.BytesIO(data)]
         cache = self.root / 'download-cache'
-        with patch.object(prebuilt.urllib.request, 'urlopen', side_effect=responses):
+        pins = {STAMP: dict(self.pin_entry, sha256=sha)}
+        with patch.object(prebuilt.urllib.request, 'urlopen', side_effect=responses), \
+             patch.object(prebuilt, 'release_pins', return_value=pins):
             self.assertEqual(prebuilt.fetch(cache), cache / STAMP)
         prebuilt.verify(cache / STAMP)
+
+    def _bundle_payload(self):
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, 'w') as z:
+            for p in sorted(self.bundle.rglob('*')):
+                if p.is_file():
+                    z.write(p, p.relative_to(self.bundle).as_posix())
+        return payload.getvalue()
+
+    def test_unpinned_release_refuses_download(self):
+        data = self._bundle_payload()
+        sha = prebuilt.hashlib.sha256(data).hexdigest()
+        asset = 'android-arm64-' + STAMP + '.zip'
+        responses = [io.BytesIO((sha + '  ' + asset + '\n').encode()), io.BytesIO(data)]
+        cache = self.root / 'unpinned-cache'
+        with patch.object(prebuilt.urllib.request, 'urlopen', side_effect=responses), \
+             patch.object(prebuilt, 'release_pins', return_value={}):
+            self.assertIsNone(prebuilt.fetch(cache))
+        self.assertFalse((cache / STAMP).exists())
+
+    def test_pin_mismatch_refuses_download(self):
+        data = self._bundle_payload()
+        sha = prebuilt.hashlib.sha256(data).hexdigest()
+        asset = 'android-arm64-' + STAMP + '.zip'
+        responses = [io.BytesIO((sha + '  ' + asset + '\n').encode()), io.BytesIO(data)]
+        cache = self.root / 'mismatch-cache'
+        pins = {STAMP: dict(self.pin_entry, sha256='f' * 64)}
+        with patch.object(prebuilt.urllib.request, 'urlopen', side_effect=responses), \
+             patch.object(prebuilt, 'release_pins', return_value=pins):
+            self.assertIsNone(prebuilt.fetch(cache))
+        self.assertFalse((cache / STAMP).exists())
 
     def test_junk_names_are_filtered(self):
         for name in ('.DS_Store', 'Thumbs.db', 'desktop.ini', '._AppleDouble', 'notes~'):

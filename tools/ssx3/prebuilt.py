@@ -28,6 +28,18 @@ RECIPE = {'format': FORMAT, 'ndk': NDK, 'api': 29, 'abi': 'arm64-v8a',
           'vendor': VENDOR, 'app_id': 'com.ssx3.recomp', 'codegen_abi': 2}
 
 
+RELEASES_FILE = 'tools/ssx3/prebuilt-releases.json'
+
+
+def release_pins():
+    """Committed archive hashes by contract stamp ({} before the first release)."""
+    try:
+        pins = json.loads((ROOT / RELEASES_FILE).read_text())
+    except (OSError, ValueError):
+        return {}
+    return pins if isinstance(pins, dict) else {}
+
+
 def digest(path):
     h = hashlib.sha256()
     with Path(path).open('rb') as f:
@@ -69,8 +81,8 @@ def _tracked_entries():
         if len(fields) != 3:
             continue
         mode, blob, _ = fields
-        if mode == '120000' or Path(path).name.startswith('._'):
-            continue  # symlinks and AppleDouble were never hashed
+        if mode == '120000' or path == RELEASES_FILE or Path(path).name.startswith('._'):
+            continue  # symlinks, the release-pin file and AppleDouble were never hashed
         entries.append((path, blob))
     return sorted(entries)
 
@@ -80,6 +92,7 @@ def _walked_entries():
     for name in CONTRACT_DIRS:
         paths.extend(p for p in (ROOT / name).rglob('*') if p.is_file()
                      and not p.is_symlink() and not _is_junk(p))
+    paths = [p for p in paths if p.relative_to(ROOT).as_posix() != RELEASES_FILE]
     return sorted((p.relative_to(ROOT).as_posix(), digest(p))
                   for p in set(paths))
 
@@ -228,6 +241,11 @@ def fetch(cache, mode='auto'):
             archive = tmp / asset
             with urllib.request.urlopen(base + asset, timeout=60) as response, archive.open('wb') as dst:
                 shutil.copyfileobj(response, dst, 1024 * 1024)
+            pin = release_pins().get(stamp)
+            if not isinstance(pin, dict) or pin.get('tag') != tag or pin.get('asset') != asset:
+                raise ValueError('no committed release pin for contract ' + stamp)
+            if digest(archive) != pin.get('sha256'):
+                raise ValueError('release asset does not match the committed pin')
             if digest(archive) != matches[0][0]:
                 raise ValueError('release asset SHA-256 mismatch')
             unpacked = tmp / 'bundle'
@@ -385,6 +403,10 @@ def build(a):
     (output / 'SOURCE.json').write_text(json.dumps(sources, indent=2) + '\n')
     print('Release tag: android-prebuilt-' + stamp)
     print('Release assets: ' + str(output))
+    print('Commit this pin to ' + RELEASES_FILE + ' before users can fetch the release:')
+    print(json.dumps({stamp: {'tag': 'android-prebuilt-' + stamp,
+                              'asset': archive.name,
+                              'sha256': digest(archive)}}, indent=2))
 
 
 def main():
