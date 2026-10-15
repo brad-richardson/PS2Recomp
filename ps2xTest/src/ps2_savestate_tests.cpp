@@ -1,3 +1,4 @@
+#include "runtime/ps2_canonical_pages.h"
 #include "MiniTest.h"
 #include "ps2_microvu.h"
 #include "ps2_runtime.h"
@@ -113,6 +114,58 @@ void register_ps2_savestate_tests()
 {
     MiniTest::Case("Ps2Savestate", [](TestCase &tc)
     {
+        tc.Run("np-checksum-1: every byte, page boundaries and structural faults", [](TestCase &t)
+        {
+            ps2_savestate::CanonicalPages cache;
+            std::vector<uint8_t> bytes(8193, 0);
+            const auto digest = [&](auto &c, const std::string &key, uint32_t version) {
+                c.begin(); c.section(key, version);
+                // Deliberately fragmented writes, including page crossings.
+                c.append(bytes.data(), 3);
+                c.append(bytes.data() + 3, bytes.size() - 3);
+                return c.finish();
+            };
+            const uint64_t base = digest(cache, "memory", 1);
+            t.Equals(cache.changedPages, size_t{3}, "initial pages all hashed");
+            t.Equals(digest(cache, "memory", 1), base, "unchanged root");
+            t.Equals(cache.changedPages, size_t{0}, "unchanged pages not hashed");
+            size_t missed = 0, wrong = 0;
+            for (size_t i = 0; i < bytes.size(); ++i) {
+                bytes[i] ^= 1;
+                const auto changed = digest(cache, "memory", 1);
+                if (changed == base) ++missed;
+                ps2_savestate::CanonicalPages fresh;
+                if (digest(fresh, "memory", 1) != changed) ++wrong;
+                bytes[i] ^= 1;
+                if (digest(cache, "memory", 1) != base) ++wrong;
+            }
+            t.Equals(missed, size_t{0}, "single-byte faults detected at all 8193 offsets");
+            t.Equals(wrong, size_t{0}, "cold rebuild and reverted writes agree");
+            t.IsTrue(digest(cache, "other", 1) != base, "section identity included");
+            t.IsTrue(digest(cache, "memory", 2) != base, "section version included");
+            bytes.resize(4096);
+            const auto smaller = digest(cache, "memory", 1);
+            ps2_savestate::CanonicalPages fresh;
+            t.Equals(smaller, digest(fresh, "memory", 1), "shrink drops old pages");
+            bytes.resize(8193);
+            t.Equals(digest(cache, "memory", 1), base, "zero growth hashes all new bytes");
+            cache.begin(); cache.section("empty", 1);
+            const auto emptySection = cache.finish();
+            cache.begin();
+            t.IsTrue(cache.finish() != emptySection, "missing vs empty section differ");
+        });
+        tc.Run("np-checksum-1: sorted maps ignore insertion and rehash history", [](TestCase &t)
+        {
+            std::unordered_map<int, uint32_t> a, b;
+            for (int i = 0; i < 32; ++i) a[i] = i * 7;
+            b.rehash(256);
+            for (int i = 31; i >= 0; --i) b[i] = i * 7;
+            Writer wa, wb;
+            wa.canonical = wa.canonicalSorted = wb.canonical = wb.canonicalSorted = true;
+            ps2_savestate::writeOrderedPod(wa, a);
+            ps2_savestate::writeOrderedPod(wb, b);
+            t.IsTrue(wa.buf == wb.buf, "canonical sorted payload is independent of hash buckets");
+        });
         tc.Run("ASV1: slot wall time and silent-resume boundary", [](TestCase &t)
         {
             using ps2_savestate::AutoResumeDecision;

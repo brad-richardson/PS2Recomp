@@ -969,6 +969,31 @@ void register_ps2_vu1_tests()
                      "ILW-to-IALU dependency should account for all stalled cycles");
         });
 
+        tc.Run("np-checksum-1: pending VU0 Q is covered before resume", [](TestCase &t)
+        {
+            Vu1Fixture fx;
+            t.IsTrue(fx.initialize(), "fixture initializes");
+            writeVuInstructionPair(fx.code, 0u, makeVuDiv(1u, 2u, 1u, 2u), kVuUpperNop);
+            writeVuInstructionPair(fx.code, 8u, makeVuLowerSpecial(0x3Bu, 0u), kVuUpperNop);
+            auto a = std::make_unique<VU0Interpreter>();
+            auto b = std::make_unique<VU0Interpreter>();
+            a->state().vf[1][1] = 18.0f; b->state().vf[1][1] = 21.0f;
+            a->state().vf[2][2] = b->state().vf[2][2] = 3.0f;
+            a->execute(fx.code, PS2_VU0_CODE_SIZE, fx.data, PS2_VU0_DATA_SIZE, fx.gs, &fx.mem, 0, 0, 0, 1);
+            b->execute(fx.code, PS2_VU0_CODE_SIZE, fx.data, PS2_VU0_DATA_SIZE, fx.gs, &fx.mem, 0, 0, 0, 1);
+            // Equalize the architected inputs AFTER issuing different pending Q values.
+            b->state().vf[1][1] = a->state().vf[1][1];
+            ps2_savestate::Writer oldA, oldB, newA, newB;
+            oldA.canonical = oldB.canonical = true;
+            VuSavestate::save(*a, oldA); VuSavestate::save(*b, oldB);
+            VuSavestate::saveResume(*a, newA); VuSavestate::saveResume(*b, newB);
+            t.IsTrue(oldA.buf == oldB.buf, "legacy oracle hides pending Q difference");
+            t.IsTrue(newA.buf != newB.buf, "resume section covers pending Q");
+            a->resume(fx.code, PS2_VU0_CODE_SIZE, fx.data, PS2_VU0_DATA_SIZE, fx.gs, &fx.mem, 0, 0, 7);
+            b->resume(fx.code, PS2_VU0_CODE_SIZE, fx.data, PS2_VU0_DATA_SIZE, fx.gs, &fx.mem, 0, 0, 7);
+            t.Equals(a->state().q, 6.0f, "first pending result consumed");
+            t.Equals(b->state().q, 7.0f, "second pending result consumed");
+        });
         tc.Run("DIV and SQRT update the Q register from selected vector components", [](TestCase &t)
         {
             Vu1Fixture fx;

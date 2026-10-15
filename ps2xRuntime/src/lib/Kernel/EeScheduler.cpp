@@ -478,7 +478,19 @@ void EeScheduler::run()
             const bool transition = rate != canonicalLastRate;
             canonicalLastTick = m_vsyncTick;
             canonicalLastRate = rate;
-            if (m_vsyncTick != 0u && ((m_vsyncTick % 120u) == 0u || transition))
+            const bool full = (m_vsyncTick % 120u) == 0u || transition;
+            if (m_vsyncTick != 0u && ps2_savestate::canonicalIncrementalEnabled())
+            {
+                std::string why;
+                if (!ps2_savestate::canonicalIncremental(m_runtime, m_vsyncTick, full, why))
+                {
+                    std::fprintf(stderr, "[netplay-canon:v2] FATAL tick=%llu: %s\n",
+                                 static_cast<unsigned long long>(m_vsyncTick), why.c_str());
+                    requestStop();
+                    break;
+                }
+            }
+            if (m_vsyncTick != 0u && full)
             {
                 std::string why;
                 if (!ps2_savestate::canonicalOracle(m_runtime, m_vsyncTick, transition, why))
@@ -2508,13 +2520,18 @@ int EeScheduler::allocateThreadId()
 
 GuestThread &EeScheduler::acquireInvocationThread()
 {
+    GuestThread *canonicalChoice = nullptr;
+    const bool ordered = ps2_savestate::canonicalIncrementalEnabled();
     for (auto &[id, candidate] : m_threads)
     {
         if (id < 0 && candidate.status == EeThreadStatus::Dormant && candidate.invocations.empty())
         {
-            return candidate;
+            if (!ordered) return candidate;
+            // Schema 2: reuse highest negative ID, independent of STL buckets.
+            if (!canonicalChoice || id > canonicalChoice->id) canonicalChoice = &candidate;
         }
     }
+    if (canonicalChoice) return *canonicalChoice;
 
     GuestThread dispatcher{};
     dispatcher.id = m_nextInvocationThreadId--;

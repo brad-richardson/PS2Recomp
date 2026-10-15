@@ -57,10 +57,14 @@ namespace ps2_savestate
         // NP0A: oracle sections omit explicitly host/render-only fields.
         // Ordinary save files retain their existing layout.
         bool canonical = false;
+        bool canonicalSorted = false; // schema 2 only; v1/save files unchanged
+        std::function<void(const uint8_t *, size_t)> sink;
 
         void bytes(const void *data, size_t size)
         {
             const auto *p = static_cast<const uint8_t *>(data);
+            if (!size) return;
+            if (sink) { sink(p, size); return; }
             buf.insert(buf.end(), p, p + size);
         }
         template <typename T>
@@ -274,6 +278,20 @@ namespace ps2_savestate
         // iteration order, which can affect guest allocation decisions.
         w.u64(w.canonical ? 0u : map.bucket_count());
         w.u64(map.size());
+        if (w.canonicalSorted)
+        {
+            std::vector<const typename Map::value_type *> entries;
+            for (const auto &entry : map) entries.push_back(&entry);
+            const auto key = [](const auto &entry) -> const auto & {
+                if constexpr (requires { entry.first; }) return entry.first;
+                else return entry;
+            };
+            std::sort(entries.begin(), entries.end(), [&](const auto *a, const auto *b) {
+                return key(*a) < key(*b);
+            });
+            for (const auto *entry : entries) writeEntry(w, *entry);
+            return;
+        }
         for (const auto &entry : map)
             writeEntry(w, entry);
     }
@@ -483,6 +501,8 @@ namespace ps2_savestate
     // NP0A diagnostic canonical profile. The full oracle runs on the EE
     // thread after an event pass, every 120 VBlanks and at rate transitions.
     bool canonicalEnabled();
+    bool canonicalIncrementalEnabled();
+    bool canonicalIncremental(PS2Runtime &runtime, uint64_t tick, bool full, std::string &why);
     bool canonicalOracle(PS2Runtime &runtime, uint64_t tick, bool transition,
                          std::string &why);
     void canonicalRecordPad(uint64_t tick, int port, int slot, const uint8_t *bytes, size_t size);

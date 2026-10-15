@@ -53,6 +53,7 @@ struct PS2RuntimeSavestate
 // its XGKICK pipeline (VU0 never had a live one).
 struct VuSavestate
 {
+    static void saveResume(const VU0Interpreter &vu, ps2_savestate::Writer &w);
     static void save(const VU0Interpreter &vu, ps2_savestate::Writer &w);
     static void save(const VU1Interpreter &vu, ps2_savestate::Writer &w);
     static bool load(VU0Interpreter &vu, ps2_savestate::Reader &r);

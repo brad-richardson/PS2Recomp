@@ -1,3 +1,4 @@
+#include "runtime/ps2_canonical_pages.h"
 // SS1 (DEV, default off): save-state file, header, orchestration and the
 // PS2Memory / PS2Runtime / VU / GS / SND sections. See ps2_savestate.h.
 
@@ -1077,6 +1078,15 @@ namespace ps2_savestate
         return on;
     }
 
+    bool canonicalIncrementalEnabled()
+    {
+        static const bool on = [] {
+            const char *v = std::getenv("PS2X_NETPLAY_CANON_HASH");
+            return v && std::strcmp(v, "incremental") == 0;
+        }();
+        return canonicalEnabled() && on;
+    }
+
     namespace
     {
         // np-fix-1 F12: session-owned canonical statics (one session per
@@ -1285,6 +1295,109 @@ namespace ps2_savestate
         return g_readbackTicket.fetch_add(1u, std::memory_order_relaxed);
     }
 
+    bool canonicalIncremental(PS2Runtime &runtime, uint64_t tick, bool full, std::string &why)
+    {
+        if (!canonicalIncrementalEnabled()) return true;
+        const auto start = std::chrono::steady_clock::now();
+        const auto elapsed = [](auto a, auto b) {
+            return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count();
+        };
+        if (!canonicalTrace()) { why = "missing/unwritable canonical transcript"; return false; }
+        if (!config().deterministic) { why = "deterministic mode required"; return false; }
+        ps2_mtvu::sync(ps2_mtvu::Reason::SaveState);
+        if (!ps2_microvu::selected()) { why = "schema 2 requires microVU"; return false; }
+        why = ps2_microvu::saveReady(runtime.vu1().state());
+        if (why.empty()) why = ps2_native_world::saveReady();
+        if (why.empty()) why = EeSchedulerSavestate::ready(runtime.eeScheduler());
+        if (why.empty()) why = PS2RuntimeSavestate::ready(runtime);
+        if (why.empty() && hostRandUsed()) why = "host std::rand used";
+        for (const auto &[key, hooks] : registeredSections())
+            if (why.empty() && !hooks.legacyReadOnly && hooks.ready) {
+                why = hooks.ready();
+                if (!why.empty()) why = key + ": " + why;
+            }
+        if (!why.empty()) return false;
+        GS &gs = runtime.gs();
+        gs.drainQueue();
+        Writer gsWriter;
+        gsWriter.canonical = gsWriter.canonicalSorted = true;
+        gs.privWrite([&] {
+            why = GSSavestate::ready(gs);
+            if (!why.empty() && GSSavestate::quiesce(gs)) why = GSSavestate::ready(gs);
+            if (why.empty()) GSSavestate::save(gs, gsWriter);
+        });
+        gs.drainQueue();
+        if (!why.empty()) return false;
+        runtime.memory().flushEeTimers();
+        const auto drained = std::chrono::steady_clock::now();
+
+        // One process/epoch per diagnostic run. All consumers run on this EE
+        // executor, after drains, before the next guest dispatch.
+        static CanonicalPages cache;
+        cache.begin();
+        const VfsBindingScope binding(&runtime.vfs());
+        const auto visit = [&](const auto &section) {
+            section("memory", kMemoryVersion, [&](Writer &w) { PS2RuntimeSavestate::saveMemory(runtime.memory(), w); });
+            section("kernel", kRuntimeVersion, [&](Writer &w) { PS2RuntimeSavestate::saveKernel(runtime, w); });
+            section("scheduler", kSchedulerVersion, [&](Writer &w) { EeSchedulerSavestate::save(runtime.eeScheduler(), w); });
+            section("vu0", kVuVersion, [&](Writer &w) { VuSavestate::save(runtime.vu0(), w); });
+            section("vu0-resume", 1u, [&](Writer &w) { VuSavestate::saveResume(runtime.vu0(), w); });
+            section("vu1", kVuVersion, [&](Writer &w) { VuSavestate::save(runtime.vu1(), w); });
+            section("gs", kGsVersion, [&](Writer &w) { w.bytes(gsWriter.buf.data(), gsWriter.buf.size()); });
+            for (const auto &[key, hooks] : registeredSections())
+                if (!hooks.legacyReadOnly)
+                    section(key, hooks.version, [&](Writer &w) { hooks.save(w); });
+        };
+        try {
+            visit([&](const std::string &key, uint32_t version, const auto &save) {
+                cache.section(key, version);
+                Writer w;
+                w.canonical = w.canonicalSorted = true;
+                w.sink = [&](const uint8_t *p, size_t n) { cache.append(p, n); };
+                save(w);
+            });
+        } catch (const std::exception &e) { why = e.what(); return false; }
+        const uint64_t root = cache.finish();
+        const auto captured = std::chrono::steady_clock::now();
+        uint64_t rebuilt = 0;
+        if (full) {
+            // Independent full serialization, exact payload comparison, and
+            // cold tree rebuild. Never "audit" by reusing cached leaf hashes.
+            CanonicalPages fresh;
+            fresh.begin();
+            try {
+                visit([&](const std::string &key, uint32_t version, const auto &save) {
+                    Writer w;
+                    w.canonical = w.canonicalSorted = true;
+                    save(w);
+                    if (w.buf != cache.data().at(key).bytes)
+                        throw std::runtime_error("full oracle payload differs: " + key);
+                    fresh.section(key, version);
+                    fresh.append(w.buf.data(), w.buf.size());
+                });
+            } catch (const std::exception &e) { why = e.what(); return false; }
+            rebuilt = fresh.finish();
+            if (rebuilt != root) { why = "full oracle page root differs"; return false; }
+        }
+        const auto audited = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(canonicalTraceMutex());
+            FILE *trace = canonicalTrace();
+            if (std::ferror(trace) || std::fflush(trace) != 0) {
+                why = "canonical transcript write/flush failed"; return false;
+            }
+        }
+        std::ofstream out(canonicalDir() + "/pages-v2.tsv", std::ios::app);
+        out << tick << '\t' << full << '\t' << root << '\t' << rebuilt
+            << '\t' << cache.changedPages << '\t' << cache.totalPages
+            << '\t' << cache.totalBytes << '\t' << elapsed(start, drained)
+            << '\t' << elapsed(drained, captured) << '\t' << elapsed(captured, audited)
+            << '\t' << elapsed(start, audited) << '\n';
+        out.close();
+        if (!out) { why = "canonical page result write/close failed"; return false; }
+        return true;
+    }
+
     bool canonicalOracle(PS2Runtime &runtime, uint64_t tick, bool transition, std::string &why)
     {
         if (!canonicalEnabled()) return true;
@@ -1338,6 +1451,9 @@ namespace ps2_savestate
                      << "scheduler=cycle-only\nreadback=cpu-visible-v1\n"
                      << "rate_transitions=fh1-events-v1\n";
             manifest << "hash_enabled=" << (hashOn ? 1 : 0) << '\n';
+            if (canonicalIncrementalEnabled())
+                manifest << "incremental_schema=2\nincremental_algorithm=fnv64-pages-4096\n"
+                         << "dispatcher_order=highest-negative-id\n";
             for (const HeaderLine &line : makeHeader(tick, true))
                 manifest << line.key << '=' << line.value << '\n';
             manifest << "codegen_id=" << runnerShaCached() << '\n';
@@ -1358,6 +1474,8 @@ namespace ps2_savestate
                 manifest << knob << '=' << (value ? value : "unset") << '\n';
             }
             if (!manifest) { why = "manifest write failed"; return false; }
+            manifest.close();
+            if (!manifest) { why = "manifest close failed"; return false; }
             g_manifestDir = dir;
         }
 
@@ -1412,6 +1530,8 @@ namespace ps2_savestate
         for (const auto &[key, digest] : parts) out << '\t' << key << '=' << digest;
         out << '\n';
         if (!out) { why = "oracle write failed"; return false; }
+        out.close();
+        if (!out) { why = "oracle write/close failed"; return false; }
         if (!canonicalTraceFlush(why)) return false; // np-fix-1 F12: fail closed
         std::fprintf(stderr, "[netplay-canon:v1] tick=%" PRIu64 " digest=%016" PRIx64
                              " us=%" PRIu64 " mtvu_wait_ns=%" PRIu64 " bytes=%zu\n",
@@ -2926,6 +3046,73 @@ bool VuSavestate::loadCore(D &vu, Reader &r)
     vu.m_recompProgram = nullptr;
     vu.m_recompCode = nullptr;
     return r.ok();
+}
+
+// np-checksum-1: VU0 can yield with pending Q/flags/register writes. Encode
+// named fields (no struct padding), keeping queue order and absolute clocks.
+// Invalid queue payloads cannot be consumed and are normalized to zero.
+void VuSavestate::saveResume(const VU0Interpreter &vu, Writer &w)
+{
+    w.u64(vu.m_state.cycles);
+    w.b(vu.m_pcsx2Float);
+    for (const auto &live : vu.m_flagPipeline) {
+        using T = std::remove_cvref_t<decltype(live)>;
+        const T e = live.valid ? live : T{};
+        w.u64(e.readyCycle); w.u64(e.issueCycle);
+        for (auto v : {e.mac, e.status, e.extraSticky, e.clip}) w.u32(v);
+        for (bool v : {e.valid, e.writesMac, e.writesStatus, e.writesSticky,
+                       e.writesClip, e.writesStickyOr}) w.b(v);
+    }
+    const auto scalar = [&](const auto &live) {
+        using T = std::remove_cvref_t<decltype(live)>;
+        const T e = live.valid ? live : T{};
+        w.u64(e.readyCycle); w.pod(e.value); w.u32(e.statusDi); w.b(e.valid);
+    };
+    scalar(vu.m_fdiv);
+    for (const auto &e : vu.m_efu) scalar(e);
+    for (const auto &live : vu.m_storePipeline) {
+        using T = std::remove_cvref_t<decltype(live)>;
+        const T e = live.valid ? live : T{};
+        w.u64(e.readyCycle); w.u32(e.address);
+        for (auto v : e.words) w.u32(v);
+        w.u8(e.laneMask); w.b(e.valid);
+    }
+    for (const auto &live : vu.m_vfWritePipeline) {
+        using T = std::remove_cvref_t<decltype(live)>;
+        const T e = live.valid ? live : T{};
+        w.u64(e.readyCycle); w.u64(e.sequence);
+        for (auto v : e.value) w.pod(v);
+        w.u8(e.reg); w.u8(e.laneMask); w.b(e.valid);
+    }
+    for (const auto &live : vu.m_viWritePipeline) {
+        using T = std::remove_cvref_t<decltype(live)>;
+        const T e = live.valid ? live : T{};
+        w.u64(e.readyCycle); w.u64(e.sequence); w.pod(e.value);
+        w.u8(e.reg); w.b(e.valid);
+    }
+    for (const auto &live : vu.m_accWritePipeline) {
+        using T = std::remove_cvref_t<decltype(live)>;
+        const T e = live.valid ? live : T{};
+        w.u64(e.readyCycle); w.u64(e.sequence);
+        for (auto v : e.value) w.pod(v);
+        w.u8(e.laneMask); w.b(e.valid);
+    }
+    for (const auto &r : vu.m_vfReady) for (auto v : r) w.u64(v);
+    for (auto v : vu.m_viReady) w.u64(v);
+    for (auto v : vu.m_accReady) w.u64(v);
+    for (auto v : {vu.m_flagValidMask, vu.m_storeValidMask, vu.m_vfWriteValidMask,
+                  vu.m_viWriteValidMask, vu.m_accWriteValidMask}) w.u32(v);
+    w.u64(vu.m_nextCommitCycle);
+    for (const auto &r : vu.m_vfLatestWrite) for (auto v : r) w.u64(v);
+    for (auto v : vu.m_viLatestWrite) w.u64(v);
+    for (auto v : vu.m_accLatestWrite) w.u64(v);
+    for (auto v : {vu.m_cycle, vu.m_nextWriteSequence, vu.m_efuResourceReady}) w.u64(v);
+    w.u32(vu.m_workingClip); w.u32(vu.m_currentUpperInstruction);
+    w.pod(vu.m_viBranchBackupValue); w.u8(vu.m_viBranchBackupReg);
+    for (bool v : {vu.m_viBranchBackupValid, vu.m_stopRequested, vu.m_pendingHaltD,
+                   vu.m_pendingHaltT, vu.m_directStores, vu.m_directFlags}) w.b(v);
+    w.u64(vu.m_directPendingUntil);
+    for (auto v : vu.m_storeScratch) w.u32(v);
 }
 
 void VuSavestate::save(const VU0Interpreter &vu, Writer &w) { saveCore(vu, w); }
