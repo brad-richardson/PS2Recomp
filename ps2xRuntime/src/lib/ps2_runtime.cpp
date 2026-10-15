@@ -2985,6 +2985,101 @@ bool qsr1AutoOn()
     return on;
 }
 
+// np-rider-1 (SRVP1 P0b candidate): drive one AI rider from a tick-stamped
+// remote script. Diagnostic knobs, all default off. At the 0x111728 pre-call
+// boundary (called from 0x121068 after the rider's own source provider has
+// produced its two-word command), the target AI slot's 8-byte record is
+// replaced by the script entry for this vsync tick. The AI provider keeps
+// running as a shadow every tick; reversion is tick-stamped. Never touches
+// vtable, flags, roster slot, controller, source descriptor or NPC state;
+// no ctl+0xDE8 swap, no players[0] write. Reset (9), finish (10) and 13 are
+// never replaced. Knob off: this code is unreachable (DSP1 filter lists
+// 0x111728 only when enabled) and guest state is untouched.
+namespace ps2_np_rider
+{
+constexpr uint32_t kInputConsumer = 0x00111728u;
+constexpr uint32_t kAiSourceDesc = 0x004585F0u;
+
+struct Entry
+{
+    uint64_t tick = 0u;
+    uint32_t de4 = 0u;
+    uint32_t w0 = 0u;
+    uint32_t w1 = 0u;
+};
+
+struct Config
+{
+    bool enabled = false;
+    int slot = -1;
+    uint64_t dropTick = 0u; // 0 = never; first tick that reverts to AI
+    std::vector<Entry> script;
+    size_t cursor = 0u; // tick-stamped scripts are consumed in order
+    bool loaded = false;
+    bool loadError = false;
+};
+
+inline Config &config()
+{
+    static Config cfg;
+    return cfg;
+}
+
+inline void loadOnce()
+{
+    Config &cfg = config();
+    if (cfg.loaded)
+        return;
+    cfg.loaded = true;
+    const char *en = std::getenv("PS2X_NP_RIDER_ENABLE");
+    cfg.enabled = en && std::string(en) == "1";
+    if (!cfg.enabled)
+        return;
+    if (const char *s = std::getenv("PS2X_NP_RIDER_SLOT"))
+        cfg.slot = std::atoi(s);
+    if (const char *d = std::getenv("PS2X_NP_RIDER_DROP_TICK"))
+        cfg.dropTick = static_cast<uint64_t>(std::strtoull(d, nullptr, 0));
+    const char *spec = std::getenv("PS2X_NP_RIDER_SCRIPT");
+    if (!spec || !spec[0])
+        return; // trace-only: log, never replace
+    std::string path = spec;
+    if (path.rfind("@", 0) == 0)
+        path = path.substr(1);
+    FILE *f = std::fopen(path.c_str(), "r");
+    if (!f)
+    {
+        cfg.loadError = true;
+        std::fprintf(stderr, "[np-rider] cannot read script '%s'; trace-only\n", path.c_str());
+        return;
+    }
+    char line[256];
+    while (std::fgets(line, sizeof(line), f))
+    {
+        if (line[0] == '#' || line[0] == '\n')
+            continue;
+        unsigned long long tick = 0u;
+        unsigned de4 = 0u, w0 = 0u, w1 = 0u;
+        if (std::sscanf(line, "%llu %x %x %x", &tick, &de4, &w0, &w1) == 4)
+            cfg.script.push_back(Entry{static_cast<uint64_t>(tick), de4, w0, w1});
+    }
+    std::fclose(f);
+    std::sort(cfg.script.begin(), cfg.script.end(),
+              [](const Entry &a, const Entry &b) { return a.tick < b.tick; });
+    std::fprintf(stderr, "[np-rider] slot=%d drop=%llu entries=%zu\n", cfg.slot,
+                 (unsigned long long)cfg.dropTick, cfg.script.size());
+}
+
+inline const Entry *findEntry(uint64_t tick)
+{
+    Config &cfg = config();
+    while (cfg.cursor < cfg.script.size() && cfg.script[cfg.cursor].tick < tick)
+        ++cfg.cursor;
+    if (cfg.cursor < cfg.script.size() && cfg.script[cfg.cursor].tick == tick)
+        return &cfg.script[cfg.cursor];
+    return nullptr;
+}
+} // namespace ps2_np_rider
+
 #if defined(__ANDROID__)
 // ASV1: the choice is made before the game thread starts, so a rejected or
 // "Start fresh" slot cannot advance the guest even one tick. Touch and pad
@@ -5863,6 +5958,12 @@ __attribute__((noinline, cold)) void dspBuildFilter()
         dspSet(g_dsp.tgt, 0x00125108u); // finish
         dspSet(g_dsp.tgt, 0x00112FB0u); // rider route progress
     }
+    // np-rider-1: route the 0x111728 input-consumer call through the full
+    // (exact) path only while the remote-script knob is on, so the hook
+    // above sees every per-rider call. Knob off leaves the filter untouched.
+    const char *npRider = std::getenv("PS2X_NP_RIDER_ENABLE");
+    if (npRider && std::strcmp(npRider, "1") == 0)
+        dspSet(g_dsp.tgt, 0x00111728u);
     g_dsp.always = false;
     g_dsp.guestActive = ps2_fh1::g_guestActive;
     if (g_dsp.fh1)
@@ -6126,6 +6227,65 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
             std::fprintf(stderr, "[rsv1] RESET t=%llu event=%d archive=%s rider=%08x donor=%d\n",
                          static_cast<unsigned long long>(m_memory.gs().vsyncTick.load(std::memory_order_relaxed)),
                          event, archive.c_str(), getRegU32(ctx, 4), hit);
+        }
+    }
+    // np-rider-1 (SRVP1 P0b candidate; default off): replace one AI slot's
+    // 8-byte command record at the 0x111728 pre-call boundary with the
+    // tick-stamped remote script. Listed in the DSP1 target filter above
+    // only when enabled.
+    if (targetPc == ps2_np_rider::kInputConsumer &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
+    {
+        ps2_np_rider::loadOnce();
+        const ps2_np_rider::Config &cfg = ps2_np_rider::config();
+        if (cfg.enabled)
+        {
+            const uint64_t tick = m_memory.gs().vsyncTick.load(std::memory_order_relaxed);
+            const uint32_t ctl = getRegU32(ctx, 4) & PS2_RAM_MASK;
+            const uint32_t rec = getRegU32(ctx, 5) & PS2_RAM_MASK;
+            if (ctl + 0xDF0u <= PS2_RAM_SIZE && rec + 8u <= PS2_RAM_SIZE)
+            {
+                uint32_t actor = 0u, de4 = 0u, w0 = 0u, w1 = 0u, slot = 6u, srcDesc = 0u;
+                bool valid = false;
+                std::memcpy(&actor, rdram + ctl + 0x18u, 4u);
+                actor &= PS2_RAM_MASK;
+                std::memcpy(&de4, rdram + ctl + 0xDE4u, 4u);
+                std::memcpy(&srcDesc, rdram + ctl + 0xDE8u, 4u);
+                std::memcpy(&w0, rdram + rec, 4u);
+                std::memcpy(&w1, rdram + rec + 4u, 4u);
+                if (actor + 0x870u <= PS2_RAM_SIZE)
+                {
+                    int32_t s = 0;
+                    std::memcpy(&s, rdram + actor + 0x86Cu, 4u);
+                    if (s >= 0 && s <= 5)
+                    {
+                        slot = static_cast<uint32_t>(s);
+                        valid = true;
+                    }
+                }
+                const bool isTarget = valid && slot == static_cast<uint32_t>(cfg.slot < 0 ? 6 : cfg.slot);
+                if (valid && (slot == 0u || isTarget))
+                {
+                    const ps2_np_rider::Entry *e = isTarget ? ps2_np_rider::findEntry(tick) : nullptr;
+                    const bool pastDrop = cfg.dropTick != 0u && tick >= cfg.dropTick;
+                    const bool protectedState = de4 == 9u || de4 == 10u || de4 == 13u;
+                    const bool aiOwned = srcDesc == ps2_np_rider::kAiSourceDesc;
+                    bool applied = false;
+                    if (e && !pastDrop && !protectedState && aiOwned && e->de4 == de4)
+                    {
+                        std::memcpy(rdram + rec, &e->w0, 4u);
+                        std::memcpy(rdram + rec + 4u, &e->w1, 4u);
+                        applied = true;
+                    }
+                    const char *why = !isTarget ? "slot0" : !e ? "no-entry"
+                        : pastDrop ? "dropped" : protectedState ? "protected"
+                        : !aiOwned ? "src-mismatch" : e->de4 != de4 ? "state-mismatch" : "applied";
+                    std::fprintf(stderr,
+                                 "[np-rider] tick=%llu slot=%u ctl=%08x de4=%u ai=%08x,%08x out=%08x,%08x %s\n",
+                                 (unsigned long long)tick, slot, getRegU32(ctx, 4), de4, w0, w1,
+                                 applied ? e->w0 : w0, applied ? e->w1 : w1, why);
+                }
+            }
         }
     }
     // TK45c: Tricky gem multipliers (PS2X_SSX3_TRICKY_GEMS=1; default off).
