@@ -265,3 +265,57 @@ converted course/audio, memory card, capture, PGO profile or compiled app is
 included here. Source pins, identity hashes, configuration and build recipes
 can be shared; game-derived outputs and personal keys/settings stay local.
 Preserve dependency licences from their source checkouts.
+
+### Android prebuilt support libraries
+
+`android-libs` and `android` default to `--prebuilt=auto`. A release matching
+this checkout's source and toolchain contract is downloaded, checked against
+`SHA256SUMS`, unpacked with a strict file allowlist, and verified file by file.
+The runtime and platform bootstrap are static archives; GE1, microVU and the
+hardware shim remain shared libraries. Your generated game library is linked
+locally. Neither the support archive nor CI contains your generated game code,
+ELF, ISO, saves or APK. MComm is not built or included.
+
+Verified bundles are cached in `WORK/prebuilt-cache`; `--prebuilt-cache PATH`
+selects another cache. A matching cache works offline. A missing release,
+checksum mismatch, invalid archive, or source/toolchain mismatch falls back to
+the source build. Source fallback needs the NDK and the usual public source
+build dependencies. `--prebuilt=off` always selects source libraries. Custom
+application IDs also use source libraries because the prebuilt bootstrap binds
+the public app's external-data path.
+
+```sh
+python3 tools/ssx3/build.py android-libs --work /path/to/private-build --ndk /path/to/ndk/28.2.13676358
+python3 tools/ssx3/build.py android --work /path/to/private-build
+# Explicit source reference:
+python3 tools/ssx3/build.py android-libs --prebuilt=off --work /path/to/private-build --ndk /path/to/ndk/28.2.13676358
+python3 tools/ssx3/build.py android --prebuilt=off --work /path/to/private-build
+```
+
+The consumer checks the source contract again at CMake configure time. At
+load, separate guards check the generated-code ABI and the requested runtime
+contract; stale combinations fail loudly. Static runtime archives preserve the
+existing final game-library link and avoid a cyclic runtime/game shared-library
+dependency. The exact source route remains available with `--prebuilt=off`.
+
+Maintainer release recipe (game-free, on an Android build host):
+
+```sh
+python3 tools/ssx3/prebuilt.py contract
+python3 tools/ssx3/prebuilt.py build --work /path/to/empty-support-work --ndk /path/to/ndk/28.2.13676358 --jobs 4
+```
+
+The tag `android-prebuilt-<full-contract-hash>` triggers
+`.github/workflows/android-prebuilt.yml`. Actions are pinned by commit; the
+workflow uses NDK `28.2.13676358` and builds the paired renderer/microVU sources
+from `brad-richardson/armsx2` at the recipe's exact vendor revision. The export
+rejects generated-code inputs, scans the compilation graph and defined binary
+symbols, and packages only the allowed support files. It omits inherited arcade
+cards and unrelated UI assets from the vendor resources.
+
+The release archive includes GPL/third-party notices and `notices/SOURCES.json`;
+`SOURCE.json` beside the archive links the exact source revisions and recipe.
+`SHA256SUMS` covers the archive. There is no separate vendor release dependency:
+the PS2Recomp workflow builds and publishes the complete paired bundle. The
+initial tag/release and CI acceptance must be completed before claiming a
+prebuilt download is available; until then `auto` uses the source fallback.

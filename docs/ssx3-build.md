@@ -69,7 +69,7 @@ validated here. Do not reuse a profile trained against different generated code.
 
 Credit [PS2Recomp upstream](https://github.com/ran-j/PS2Recomp) and preserve
 its [GPL v3 licence](../LICENSE). GE1/microVU build on
-[PCSX2/ARMSX2 fork sources](https://github.com/brad-richardson/pcsx2/tree/armsx2-ssx3-four);
+[PCSX2/ARMSX2 fork sources](https://github.com/brad-richardson/armsx2/tree/armsx2-ssx3-four);
 these adapters are GPL-3.0-or-later. Optional Turnip comes from
 [Mesa fork sources](https://github.com/brad-richardson/mesa/tree/ssx3), mostly
 MIT with component-specific notices

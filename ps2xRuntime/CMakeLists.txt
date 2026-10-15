@@ -720,7 +720,7 @@ elseif(EXISTS "${ROOT_MAIN_CPP}")
     list(APPEND RUNNER_SRC_FILES "${ROOT_MAIN_CPP}")
 endif()
 
-if(PS2X_GAME_CODEGEN_DIR)
+if(PS2X_GAME_CODEGEN_DIR OR PS2X_PREBUILT_EXPORT)
     list(REMOVE_ITEM RUNNER_SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/runner/register_functions.cpp")
     # I21: E17 landed in-tree game objects (sub_*.cpp) beside the stub table.
     # The ps2_game_objects static lib already carries these symbols (unity
@@ -732,9 +732,12 @@ if(PS2X_GAME_CODEGEN_DIR)
 endif()
 
 if(PS2X_IS_ANDROID)
-    add_library(ps2EntryRunner SHARED
-        ${RUNNER_SRC_FILES}
-    )
+    if(PS2X_PREBUILT_EXPORT)
+        # No in-tree registration stub or generated objects enter this archive.
+        add_library(ps2EntryRunner STATIC ${RUNNER_SRC_FILES})
+    else()
+        add_library(ps2EntryRunner SHARED ${RUNNER_SRC_FILES})
+    endif()
 
     target_link_options(ps2EntryRunner PRIVATE "-Wl,--undefined=ANativeActivity_onCreate")
     # NP1: bind intra-.so calls locally (no PLT round-trip for our own
@@ -1375,3 +1378,19 @@ endif()
 install(DIRECTORY include/
     DESTINATION include
 )
+
+# The export target never links a game or the registration-table stub. Its
+# unresolved ABI/table references are resolved only in the user's final APK.
+if(PS2X_PREBUILT_EXPORT)
+    if(NOT PS2X_PREBUILT_STAMP MATCHES "^[0-9a-f]+$")
+        message(FATAL_ERROR "Prebuilt export requires its source contract stamp")
+    endif()
+    target_sources(ps2EntryRunner PRIVATE src/lib/ps2_codegen_abi_guard.cpp
+        src/lib/ps2_prebuilt_abi_guard.cpp)
+    target_compile_definitions(ps2EntryRunner PRIVATE
+        PS2X_PREBUILT_STAMP="${PS2X_PREBUILT_STAMP}")
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/prebuilt-definitions.txt"
+        CONTENT "$<JOIN:$<TARGET_PROPERTY:ps2_runtime,INTERFACE_COMPILE_DEFINITIONS>,\n>\n")
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/prebuilt-archives.txt" CONTENT
+        "$<TARGET_FILE:ps2EntryRunner>\n$<TARGET_FILE:ps2_runtime>\n$<TARGET_FILE:ps2_gs_shadow>\n$<TARGET_FILE:ps2_iop>\n$<TARGET_FILE:ps2x_soundtouch>\n$<TARGET_FILE:ps2x_rcheevos>\n$<TARGET_FILE:raylib>\n")
+endif()

@@ -428,15 +428,33 @@ def next_version_code(work):
 
 
 def android(a):
+    bundle = support_bundle(a)
+    if bundle is not None:
+        a.jnilibs = bundle / 'jniLibs'
     if not a.jnilibs:
-        raise ValueError('android requires --jnilibs; see tools/ssx3/README.md for library recipe')
+        a.jnilibs = a.work / 'jniLibs'
+        # Re-run the source recipe on a fallback: an existing staging directory
+        # may contain libraries from a different source contract.
+        if not a.ndk:
+            sdk = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+            a.ndk = Path(sdk) / 'ndk/28.2.13676358' if sdk else None
+        original = a.prebuilt
+        a.prebuilt = 'off'
+        try:
+            android_libs(a)
+        finally:
+            a.prebuilt = original
     keystore = ensure_keystore(a.work)
     version_code = next_version_code(a.work)
     jnilibs = a.work / ('public-jniLibs-' + str(version_code))
     shutil.copytree(a.jnilibs.resolve(), jnilibs, dirs_exist_ok=True)
+    if bundle is None:
+        (jnilibs / 'arm64-v8a/libhardware.so').unlink(missing_ok=True)
     turnip_path = jnilibs / 'arm64-v8a/libvulkan_freedreno.so'
     notices_dir = a.work / ('public-notices-' + str(version_code))
     notices_dir.mkdir(parents=True, exist_ok=True)
+    if bundle is not None:
+        shutil.copytree(bundle / 'notices', notices_dir / 'third_party/support', dirs_exist_ok=True)
     if a.no_turnip:
         turnip_path.unlink(missing_ok=True)
         print('Turnip disabled by --no-turnip; system Vulkan driver will be used.')
@@ -484,6 +502,8 @@ def android(a):
         '-Pps2xVu0RecompDir=',
         '-Pps2xPgoData=', '-Pps2xBootElf=/storage/emulated/0/Android/data/' + a.app_id + '/files/SLUS_207.72',
         '-Pps2xAppId=' + a.app_id,
+        '-Pps2xPrebuiltDir=' + (str(bundle) if bundle else ''),
+        '-Pps2xJobs=' + str(a.jobs),
         '-Pps2xVersionCode=' + str(version_code),
         '-Pps2xKeystoreFile=' + str(keystore),
         '-Pps2xKeystorePassword=' + SIGNING_PASSWORD,
@@ -505,7 +525,7 @@ def source(url, revision, destination):
 
 def libs(a):
     vendor = a.work / 'mac-assembly/vendor-pcsx2'
-    source('https://github.com/brad-richardson/pcsx2.git',
+    source('https://github.com/brad-richardson/armsx2.git',
            '0c7a2987477617ea6eab46d05dffb990ed200f6a', vendor)
     prefix = a.work / 'deps'
     brew_prefix = subprocess.check_output(['brew', '--prefix'], text=True).strip()
@@ -624,12 +644,28 @@ def play(a):
                     str(a.work / 'SLUS_207.72')], env=env, check=True, cwd=a.work)
 
 
+def support_bundle(a):
+    if a.prebuilt == 'off':
+        return None
+    if getattr(a, 'app_id', PUBLIC_APP_ID) != PUBLIC_APP_ID:
+        print('Custom package ID requires source libraries.')
+        return None
+    import prebuilt
+    return prebuilt.fetch(a.prebuilt_cache or a.work / 'prebuilt-cache', a.prebuilt)
+
+
 def android_libs(a):
     a.ndk = ndk_root(a.ndk)
+    bundle = support_bundle(a)
+    if bundle is not None:
+        # Stage precisely the verified files; retain the existing command sequence.
+        shutil.copytree(bundle / 'jniLibs', a.work / 'jniLibs', dirs_exist_ok=True)
+        shutil.copytree(bundle / 'resources', a.work / 'android-resources', dirs_exist_ok=True)
+        return
     if not a.ndk or not (a.ndk / 'build/cmake/android.toolchain.cmake').is_file():
         raise ValueError('android-libs requires --ndk (NDK 28.2.13676358)')
     vendor = a.work / 'android-assembly/vendor-pcsx2'
-    source('https://github.com/brad-richardson/pcsx2.git',
+    source('https://github.com/brad-richardson/armsx2.git',
            '0c7a2987477617ea6eab46d05dffb990ed200f6a', vendor)
     prefix = a.work / 'android-deps'
     prefix.mkdir(exist_ok=True)
@@ -833,6 +869,8 @@ def main():
     p.add_argument('--serial', help='adb device serial for install')
     p.add_argument('--dry-run', action='store_true', help='check and list install disc payload without touching a device')
     p.add_argument('--jnilibs', type=Path, help='own source-built Android JNI libraries')
+    p.add_argument('--prebuilt', choices=['auto', 'off'], default='auto', help='verified Android support libraries, or build all libraries from source')
+    p.add_argument('--prebuilt-cache', type=Path, help='verified offline support cache (default: WORK/prebuilt-cache)')
     p.add_argument('--no-turnip', action='store_true', help='omit the optional Turnip driver')
     p.add_argument('--stock-dump', type=Path, help='own texture dump holding the four stock font atlases (play builds the font pack from it)')
     p.add_argument('--skip-fonts', action='store_true', help='skip the default raster-edge font pack build in play')

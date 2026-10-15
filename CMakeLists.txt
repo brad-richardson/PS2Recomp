@@ -13,6 +13,17 @@ project(PS2RetroX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Game-free Android release archives and their local game-code consumer.
+option(PS2X_PREBUILT_EXPORT "Build game-free Android support archives" OFF)
+set(PS2X_PREBUILT_DIR "" CACHE PATH "Verified Android support bundle")
+if(PS2X_PREBUILT_EXPORT AND (NOT ANDROID OR PS2X_GAME_CODEGEN_DIR OR PS2X_VU0_RECOMP_DIR))
+    message(FATAL_ERROR "Prebuilt export requires Android and forbids generated game/VU sources")
+endif()
+if(PS2X_PREBUILT_DIR)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/tools/ssx3/prebuilt-consumer.cmake")
+    return()
+endif()
+
 option(PS2X_BUILD_RECOMP "Build ps2xRecomp" ON)
 option(PS2X_BUILD_RUNTIME "Build ps2xRuntime" ON)
 option(PS2X_BUILD_ANALYZER "Build ps2xAnalyzer" ON)

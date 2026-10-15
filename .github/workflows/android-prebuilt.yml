@@ -1,0 +1,78 @@
+name: Android game-free support libraries
+
+on:
+  push:
+    tags:
+      - 'android-prebuilt-*'
+
+permissions:
+  contents: read
+
+jobs:
+  android-arm64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      NDK_VERSION: '28.2.13676358'
+      PS2X_GAME_CODEGEN_DIR: ''
+      PS2X_VU0_RECOMP_DIR: ''
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          stamp="$(python3 tools/ssx3/prebuilt.py contract)"
+          test "$GITHUB_REF_NAME" = "android-prebuilt-$stamp"
+          test -z "$(git diff --name-only c5a9d02573410a2085a4b4b831b0b68ba3515440 HEAD -- ps2xRuntime/src/runner/)"
+      - name: Install build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake pkg-config autoconf automake libtool gettext
+          sdkmanager "ndk;$NDK_VERSION" 'cmake;3.22.1'
+      - name: Check download/cache contract
+        run: python3 tools/ssx3/test_prebuilt.py
+      - name: Build and audit support artifacts (no disc, no game sources)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/ssx3/prebuilt.py build \
+            --work "$RUNNER_TEMP/ssx3-support" \
+            --ndk "$ANDROID_HOME/ndk/$NDK_VERSION" \
+            --cmake "$ANDROID_HOME/cmake/3.22.1/bin/cmake" --jobs 4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-arm64-support
+          path: ${{ runner.temp }}/ssx3-support/release/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Attach checksummed assets and matching-source links
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/ssx3-support/release"
+          python3 - "$output" "$GITHUB_SHA" <<'PY'
+          import json, pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          sources = json.loads((p / 'SOURCE.json').read_text())
+          assert sources['PS2Recomp'].endswith('/' + sys.argv[2])
+          (p / 'release-notes.txt').write_text(
+              'Game-free Android arm64 support libraries. No disc, generated guest code, APK or MComm.\n\n'
+              'Matching source and reproducible recipe:\n' +
+              '\n'.join(f'- {k}: {v}' for k, v in sources.items()) +
+              '\n\nGPL and third-party notices are included beside the binaries in the archive.\n')
+          PY
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+              --notes-file "$output/release-notes.txt"
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$output"/*.zip "$output/SHA256SUMS" "$output/SOURCE.json"

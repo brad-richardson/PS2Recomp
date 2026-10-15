@@ -4,6 +4,11 @@ plugins {
 
 // Override with: gradlew assembleRelease -Pps2xBootElf=/absolute/path/on/device.elf
 def ps2xGameCodegenDir = project.findProperty('ps2xGameCodegenDir') ?: ''
+def ps2xJobs = (project.findProperty('ps2xJobs') ?: '4').toString().toInteger()
+if (ps2xJobs < 1 || ps2xJobs > 16) {
+    throw new GradleException('ps2xJobs must be 1..16')
+}
+def ps2xPrebuiltDir = project.findProperty('ps2xPrebuiltDir') ?: ''
 def ps2xJniLibsDir = project.findProperty('ps2xJniLibsDir') ?: ''
 def ps2xPublicNoticesDir = project.findProperty('ps2xPublicNoticesDir') ?: ''
 // Private game-derived assets enter only at build time, outside the source tree.
@@ -77,7 +82,10 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments '-DPS2X_BUILD_RECOMP=OFF',
+                arguments "-DCMAKE_JOB_POOLS=ps2x_compile=${ps2xJobs};ps2x_link=1",
+                        '-DCMAKE_JOB_POOL_COMPILE=ps2x_compile',
+                        '-DCMAKE_JOB_POOL_LINK=ps2x_link',
+                        '-DPS2X_BUILD_RECOMP=OFF',
                         '-DPS2X_BUILD_ANALYZER=OFF',
                         '-DPS2X_BUILD_TEST=OFF',
                         '-DPS2X_BUILD_STUDIO=OFF',
@@ -95,6 +103,7 @@ android {
                         "-DPS2X_THINLTO_CACHE_DIR=${ps2xThinLtoCacheDir}",
                         "-DPS2X_DEFAULT_BOOT_ELF=${ps2xBootElf}",
                         "-DPS2X_GAME_CODEGEN_DIR=${ps2xGameCodegenDir}",
+                        "-DPS2X_PREBUILT_DIR=${ps2xPrebuiltDir}",
                         "-DPS2X_VU0_RECOMP_DIR=${ps2xVu0RecompDir}",
                         "-DPS2X_VU1_FMAC_SIMD=${ps2xVu1FmacSimd}",
                         "-DPS2X_PGO_GENERATE=${ps2xPgoGen ? 'ON' : 'OFF'}",
@@ -105,7 +114,10 @@ android {
                         "-DPS2X_ANDROID_MARCH=${ps2xAndroidMarch}",
                         '-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG',
                         '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O3 -g -DNDEBUG'
-                targets 'ps2EntryRunner', 'hardware'
+                targets 'ps2EntryRunner'
+                if (!ps2xPrebuiltDir) {
+                    targets 'hardware'
+                }
             }
         }
 
@@ -124,7 +136,7 @@ android {
         // 'hardware' cmake target above. A jniLibs copy must never silently
         // win the merge, so it is a hard error: strip it from the jniLibs dir.
         def halDup = new File(ps2xJniLibsDir, 'arm64-v8a/libhardware.so')
-        if (halDup.exists()) {
+        if (halDup.exists() && !ps2xPrebuiltDir) {
             throw new GradleException("libhardware.so is now built from source (android/hwcompat); remove ${halDup} from ps2xJniLibsDir")
         }
     }
