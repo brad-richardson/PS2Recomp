@@ -513,7 +513,7 @@ public:
     {
         uint32_t start;
         uint32_t end;
-        std::vector<bool> modified; // Bitmap of modified 4-byte blocks
+        std::vector<uint8_t> modified; // Boolean bytes: batched canonical serialization
     };
     std::vector<CodeRegion> m_codeRegions;
 

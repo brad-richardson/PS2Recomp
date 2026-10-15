@@ -475,22 +475,34 @@ void EeScheduler::run()
         if (m_netplayCanon && m_vsyncTick != canonicalLastTick)
         {
             const bool rate = ps2_fh1::g_commitActive;
-            const bool transition = rate != canonicalLastRate;
+            bool transition = rate != canonicalLastRate;
             canonicalLastTick = m_vsyncTick;
             canonicalLastRate = rate;
-            const bool full = (m_vsyncTick % 120u) == 0u || transition;
-            if (m_vsyncTick != 0u && ps2_savestate::canonicalIncrementalEnabled())
+            bool full = (m_vsyncTick % 120u) == 0u || transition;
+            bool deferred = false;
+            if (m_vsyncTick)
             {
                 std::string why;
-                if (!ps2_savestate::canonicalIncremental(m_runtime, m_vsyncTick, full, why))
+                if (!ps2_savestate::canonicalSchedule(m_vsyncTick, full, transition, deferred, why))
                 {
-                    std::fprintf(stderr, "[netplay-canon:v2] FATAL tick=%llu: %s\n",
+                    std::fprintf(stderr, "[netplay-canon] FATAL tick=%llu: %s\n",
                                  static_cast<unsigned long long>(m_vsyncTick), why.c_str());
                     requestStop();
                     break;
                 }
             }
-            if (m_vsyncTick != 0u && full)
+            if (m_vsyncTick != 0u && !deferred && ps2_savestate::canonicalIncrementalEnabled())
+            {
+                std::string why;
+                if (!ps2_savestate::canonicalIncremental(m_runtime, m_vsyncTick, full, why))
+                {
+                    std::fprintf(stderr, "[netplay-canon:v3] FATAL tick=%llu: %s\n",
+                                 static_cast<unsigned long long>(m_vsyncTick), why.c_str());
+                    requestStop();
+                    break;
+                }
+            }
+            if (m_vsyncTick != 0u && !deferred && full)
             {
                 std::string why;
                 if (!ps2_savestate::canonicalOracle(m_runtime, m_vsyncTick, transition, why))

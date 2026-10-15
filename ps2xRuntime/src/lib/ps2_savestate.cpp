@@ -1295,6 +1295,39 @@ namespace ps2_savestate
         return g_readbackTicket.fetch_add(1u, std::memory_order_relaxed);
     }
 
+    bool canonicalSchedule(uint64_t tick, bool &full, bool &transition, bool &deferred, std::string &why)
+    {
+        // A deferred checksum represents its eventual boundary, NEVER the
+        // earlier requested tick. Retain full/rate requests while cards are open.
+        static bool pendingFull = false, pendingTransition = false;
+        static uint64_t since = 0;
+        if (!canonicalIncrementalEnabled() && !full && !pendingFull) return true;
+        pendingFull |= full;
+        pendingTransition |= transition;
+        const auto &hooks = registeredSections().at("stub:mc");
+        const std::string reason = hooks.ready ? hooks.ready() : std::string();
+        if (!reason.empty() && reason != "memory-card files open") {
+            why = "stub:mc: " + reason; return false;
+        }
+        deferred = !reason.empty();
+        if (deferred || since) {
+            if (!canonicalTrace()) { why = "deferral transcript unavailable"; return false; }
+            std::ofstream out(canonicalDir() + "/defer-v3.tsv", std::ios::app);
+            out << tick << '\t' << (deferred ? "defer" : "resume") << '\t'
+                << (since ? since : tick) << '\t' << pendingFull << '\t' << pendingTransition << '\n';
+            out.close();
+            if (!out) { why = "deferral log write failed"; return false; }
+            if (!since || !deferred)
+                std::fprintf(stderr, "[netplay-canon] %s tick=%llu since=%llu: memory-card files %s\n",
+                    deferred ? "DEFER" : "RESUME", (unsigned long long)tick,
+                    (unsigned long long)(since ? since : tick), deferred ? "open" : "closed");
+        }
+        if (deferred) { if (!since) since = tick; return true; }
+        full = pendingFull; transition = pendingTransition;
+        pendingFull = pendingTransition = false; since = 0;
+        return true;
+    }
+
     bool canonicalIncremental(PS2Runtime &runtime, uint64_t tick, bool full, std::string &why)
     {
         if (!canonicalIncrementalEnabled()) return true;
@@ -1305,7 +1338,7 @@ namespace ps2_savestate
         if (!canonicalTrace()) { why = "missing/unwritable canonical transcript"; return false; }
         if (!config().deterministic) { why = "deterministic mode required"; return false; }
         ps2_mtvu::sync(ps2_mtvu::Reason::SaveState);
-        if (!ps2_microvu::selected()) { why = "schema 2 requires microVU"; return false; }
+        if (!ps2_microvu::selected()) { why = "schema 3 requires microVU"; return false; }
         why = ps2_microvu::saveReady(runtime.vu1().state());
         if (why.empty()) why = ps2_native_world::saveReady();
         if (why.empty()) why = EeSchedulerSavestate::ready(runtime.eeScheduler());
@@ -1317,24 +1350,31 @@ namespace ps2_savestate
                 if (!why.empty()) why = key + ": " + why;
             }
         if (!why.empty()) return false;
+        // The canonical GS payload normalizes raster/backend state; guest
+        // observable GS registers are captured in memory. Sample this coarse
+        // section only at full boundaries, retaining readiness checks there.
+        static std::vector<uint8_t> gsBytes;
         GS &gs = runtime.gs();
-        gs.drainQueue();
-        Writer gsWriter;
-        gsWriter.canonical = gsWriter.canonicalSorted = true;
-        gs.privWrite([&] {
-            why = GSSavestate::ready(gs);
-            if (!why.empty() && GSSavestate::quiesce(gs)) why = GSSavestate::ready(gs);
-            if (why.empty()) GSSavestate::save(gs, gsWriter);
-        });
-        gs.drainQueue();
-        if (!why.empty()) return false;
+        if (full || gsBytes.empty()) {
+            gs.drainQueue();
+            Writer gw;
+            gw.canonical = gw.canonicalSorted = true;
+            gs.privWrite([&] {
+                why = GSSavestate::ready(gs);
+                if (!why.empty() && GSSavestate::quiesce(gs)) why = GSSavestate::ready(gs);
+                if (why.empty()) GSSavestate::save(gs, gw);
+            });
+            gs.drainQueue();
+            if (!why.empty()) return false;
+            gsBytes = std::move(gw.buf);
+        }
         runtime.memory().flushEeTimers();
         const auto drained = std::chrono::steady_clock::now();
 
         // One process/epoch per diagnostic run. All consumers run on this EE
         // executor, after drains, before the next guest dispatch.
         static CanonicalPages cache;
-        cache.begin();
+        cache.begin(tick, full);
         const VfsBindingScope binding(&runtime.vfs());
         const auto visit = [&](const auto &section) {
             section("memory", kMemoryVersion, [&](Writer &w) { PS2RuntimeSavestate::saveMemory(runtime.memory(), w); });
@@ -1343,24 +1383,59 @@ namespace ps2_savestate
             section("vu0", kVuVersion, [&](Writer &w) { VuSavestate::save(runtime.vu0(), w); });
             section("vu0-resume", 1u, [&](Writer &w) { VuSavestate::saveResume(runtime.vu0(), w); });
             section("vu1", kVuVersion, [&](Writer &w) { VuSavestate::save(runtime.vu1(), w); });
-            section("gs", kGsVersion, [&](Writer &w) { w.bytes(gsWriter.buf.data(), gsWriter.buf.size()); });
+            section("gs", kGsVersion, [&](Writer &w) {
+                if (w.sink) w.bytes(gsBytes.data(), gsBytes.size());
+                else GSSavestate::save(gs, w); // independent full serialization
+            });
             for (const auto &[key, hooks] : registeredSections())
                 if (!hooks.legacyReadOnly)
                     section(key, hooks.version, [&](Writer &w) { hooks.save(w); });
         };
+        struct Profile { uint64_t calls = 0, ns = 0, bytes = 0, hashed = 0; };
+        static std::map<std::string, Profile> profile;
         try {
             visit([&](const std::string &key, uint32_t version, const auto &save) {
+                const auto t = std::chrono::steady_clock::now();
+                const size_t hash0 = cache.hashedBytes;
+                if (key == "stub:mcdir" && cache.retain(key, version)) return;
                 cache.section(key, version);
                 Writer w;
                 w.canonical = w.canonicalSorted = true;
-                w.sink = [&](const uint8_t *p, size_t n) { cache.append(p, n); };
+                // Coalesce scalar fields, retaining large spans so their
+                // partition schedule depends on canonical offsets, not buffer IO.
+                std::array<uint8_t, 4096> pending;
+                size_t used = 0;
+                const auto flush = [&] {
+                    if (used) { cache.append(pending.data(), used); used = 0; }
+                };
+                w.sink = [&](const uint8_t *p, size_t n) {
+                    if (n >= 128) { flush(); cache.append(p, n); return; }
+                    if (used + n > pending.size()) flush();
+                    std::memcpy(pending.data() + used, p, n); used += n;
+                };
                 save(w);
+                flush();
+                cache.endSection();
+                auto &p = profile[key];
+                ++p.calls;
+                p.ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t).count();
+                p.bytes += cache.data().at(key).bytes.size();
+                p.hashed += cache.hashedBytes - hash0;
             });
         } catch (const std::exception &e) { why = e.what(); return false; }
+        const auto rootStart = std::chrono::steady_clock::now();
         const uint64_t root = cache.finish();
+        auto &rp = profile["<root>"]; ++rp.calls;
+        rp.ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - rootStart).count();
         const auto captured = std::chrono::steady_clock::now();
         uint64_t rebuilt = 0;
         if (full) {
+            std::ofstream timing(canonicalDir() + "/profile-v3.tsv", std::ios::app);
+            for (const auto &[key, p] : profile)
+                timing << tick << '\t' << key << '\t' << p.calls << '\t' << p.ns << '\t' << p.bytes << '\t' << p.hashed << '\n';
+            timing.close();
+            if (!timing) { why = "profile write failed"; return false; }
+            profile.clear();
             // Independent full serialization, exact payload comparison, and
             // cold tree rebuild. Never "audit" by reusing cached leaf hashes.
             CanonicalPages fresh;
@@ -1383,18 +1458,25 @@ namespace ps2_savestate
         {
             std::lock_guard<std::mutex> lock(canonicalTraceMutex());
             FILE *trace = canonicalTrace();
-            if (std::ferror(trace) || std::fflush(trace) != 0) {
+            if (std::ferror(trace) || (full && std::fflush(trace) != 0)) {
                 why = "canonical transcript write/flush failed"; return false;
             }
         }
-        std::ofstream out(canonicalDir() + "/pages-v2.tsv", std::ios::app);
+        static std::ofstream out(canonicalDir() + "/pages-v3.tsv", std::ios::app);
         out << tick << '\t' << full << '\t' << root << '\t' << rebuilt
             << '\t' << cache.changedPages << '\t' << cache.totalPages
             << '\t' << cache.totalBytes << '\t' << elapsed(start, drained)
             << '\t' << elapsed(drained, captured) << '\t' << elapsed(captured, audited)
-            << '\t' << elapsed(start, audited) << '\n';
-        out.close();
-        if (!out) { why = "canonical page result write/close failed"; return false; }
+            << '\t' << elapsed(start, audited) << '\t' << cache.comparedBytes << '\t' << cache.hashedBytes << '\n';
+        if (full) out.flush();
+        if (!out) { why = "canonical page result write/flush failed"; return false; }
+        // Include primary transcript/result IO in the ordinary overhead
+        // receipt. This tiny buffered timing record itself is outside the timer.
+        static FILE *cost = std::fopen((canonicalDir() + "/cost-v3.tsv").c_str(), "a");
+        if (!cost) { why = "cost receipt unavailable"; return false; }
+        std::fprintf(cost, "%llu\t%d\t%lld\n", (unsigned long long)tick, int(full),
+            (long long)elapsed(start, std::chrono::steady_clock::now()));
+        if (std::ferror(cost) || (full && std::fflush(cost) != 0)) { why = "cost receipt write failed"; return false; }
         return true;
     }
 
@@ -1452,7 +1534,7 @@ namespace ps2_savestate
                      << "rate_transitions=fh1-events-v1\n";
             manifest << "hash_enabled=" << (hashOn ? 1 : 0) << '\n';
             if (canonicalIncrementalEnabled())
-                manifest << "incremental_schema=2\nincremental_algorithm=fnv64-pages-4096\n"
+                manifest << "incremental_schema=3\nincremental_algorithm=fnv64-merkle-partitions-4096\npartition_period_ticks=120\nordinary_root=rolling-window\n"
                          << "dispatcher_order=highest-negative-id\n";
             for (const HeaderLine &line : makeHeader(tick, true))
                 manifest << line.key << '=' << line.value << '\n';
@@ -2490,8 +2572,7 @@ void PS2RuntimeSavestate::saveMemory(const PS2Memory &m, Writer &w)
         w.u32(region.start);
         w.u32(region.end);
         w.u64(region.modified.size());
-        for (bool bit : region.modified)
-            w.b(bit);
+        w.bytes(region.modified.data(), region.modified.size());
     }
     for (const auto &t : m.m_eeTimers)
     {

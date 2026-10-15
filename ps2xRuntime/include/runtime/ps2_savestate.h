@@ -502,6 +502,7 @@ namespace ps2_savestate
     // thread after an event pass, every 120 VBlanks and at rate transitions.
     bool canonicalEnabled();
     bool canonicalIncrementalEnabled();
+    bool canonicalSchedule(uint64_t tick, bool &full, bool &transition, bool &deferred, std::string &why);
     bool canonicalIncremental(PS2Runtime &runtime, uint64_t tick, bool full, std::string &why);
     bool canonicalOracle(PS2Runtime &runtime, uint64_t tick, bool transition,
                          std::string &why);

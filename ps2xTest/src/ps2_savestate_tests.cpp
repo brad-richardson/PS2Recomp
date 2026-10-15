@@ -154,6 +154,42 @@ void register_ps2_savestate_tests()
             cache.begin();
             t.IsTrue(cache.finish() != emptySection, "missing vs empty section differ");
         });
+        tc.Run("np-checksum-1: partition detection window and full audit", [](TestCase &t)
+        {
+            using ps2_savestate::CanonicalPages;
+            CanonicalPages cache, fresh;
+            std::vector<uint8_t> ram(240 * 4096 + 17, 0);
+            const auto run = [&](auto &c, uint64_t tick, bool full) {
+                c.begin(tick, full); c.section("memory", 1);
+                c.append(ram.data(), ram.size()); return c.finish();
+            };
+            const auto base = run(cache, 0, true);
+            // Faults at both ends of EVERY page, crossing every phase and tree
+            // level, followed by one complete sweep. No producer hooks used.
+            for (size_t p = 0; p < 241; ++p) {
+                ram[p * 4096] = 1;
+                ram[std::min(ram.size(), (p+1) * 4096) - 1] ^= 2;
+            }
+            const auto expected = run(fresh, 0, true);
+            uint64_t last = base;
+            for (uint64_t tick = 1; tick <= 120; ++tick) {
+                last = run(cache, tick, false);
+                t.IsTrue(cache.comparedBytes <= 3 * 4096, "ordinary scan bounded by one stripe");
+            }
+            t.Equals(last, expected, "all persistent page faults detected within 120 ticks");
+            t.IsTrue(last != base, "partition faults change root");
+            // A just-missed write is intentionally stale until its phase or a
+            // full boundary; never label this ordinary root an instantaneous one.
+            ram[17 * 4096 + 37] ^= 4;
+            t.Equals(run(cache, 18, false), last, "unsampled stripe retains previous bytes");
+            const auto current = run(cache, 120, true);
+            t.Equals(current, run(fresh, 120, true), "full boundary refreshes every byte");
+            cache.begin(121, false);
+            t.IsTrue(cache.retain("memory", 1), "coarse partition retained");
+            t.Equals(cache.finish(), current, "retention preserves root");
+            cache.begin(240, true);
+            t.IsTrue(!cache.retain("memory", 1), "full boundary cannot retain coarse partition");
+        });
         tc.Run("np-checksum-1: sorted maps ignore insertion and rehash history", [](TestCase &t)
         {
             std::unordered_map<int, uint32_t> a, b;
