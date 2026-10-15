@@ -827,4 +827,15 @@ namespace ps2x::vpad
             return (card.parent_path() / "states").string();
         return (fs::path(elfDir) / "states").string();
     }
+
+    // ASV1: the full autosave slot path (dir + fixed leaf). Pure; unit-tested so
+    // the Android on-disk path stays byte-identical across refactors/renames
+    // (Android has no PS2X_IOS_DOCUMENTS -> the memory card's parent, exactly
+    // the PB65 path).
+    inline std::string autosaveSlotPathFor(const char *iosDocs, const std::string &mcRoot,
+                                           const std::string &elfDir)
+    {
+        return (std::filesystem::path(autosaveSlotDirFor(iosDocs, mcRoot, elfDir)) / "autosave.ps2xstate")
+            .string();
+    }
 }

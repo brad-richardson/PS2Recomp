@@ -3044,15 +3044,17 @@ bool asv1AskToResume(bool &closed)
 }
 #endif
 
-// ASV1: the launch/background autosave slot dir (host-only). iOS Documents
+// ASV1: the launch/background autosave slot path (host-only). iOS Documents
 // wins (PS2X_IOS_DOCUMENTS, set by the iOS launcher: the bundle elfDirectory
 // is read-only); elsewhere it sits next to the memory card, never under
 // elfDirectory (on Mac det boots that is the pinned CD tree, PI1 read-only).
-std::string autosaveSlotDir()
+// The leaf is fixed ("autosave.ps2xstate"); the pure rule is unit-tested in
+// ps2_virtual_pad.h so the Android on-disk path cannot drift.
+std::string autosaveSlotPath()
 {
     const PS2Runtime::IoPaths &paths = PS2Runtime::getIoPaths();
-    return ps2x::vpad::autosaveSlotDirFor(std::getenv("PS2X_IOS_DOCUMENTS"), paths.mcRoot.string(),
-                                          paths.elfDirectory.string());
+    return ps2x::vpad::autosaveSlotPathFor(std::getenv("PS2X_IOS_DOCUMENTS"), paths.mcRoot.string(),
+                                           paths.elfDirectory.string());
 }
 
 } // namespace
@@ -3592,7 +3594,7 @@ void bg1OnPause()
     if (g_bg1GuestStarted.load(std::memory_order_acquire) && !ps2x::hostPause::paused() &&
         autosave && std::strcmp(autosave, "1") == 0)
     {
-        const std::string path = (std::filesystem::path(autosaveSlotDir()) / "autosave.ps2xstate").string();
+        const std::string path = autosaveSlotPath();
         if (ps2_savestate::requestAutoSave(path))
         {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
@@ -7837,7 +7839,7 @@ void PS2Runtime::run()
             std::fprintf(stderr, "[autosave] launch skipped: online mode enabled\n");
         else
         {
-            const std::string slot = (std::filesystem::path(autosaveSlotDir()) / "autosave.ps2xstate").string();
+            const std::string slot = autosaveSlotPath();
             std::error_code ec;
             if (std::filesystem::exists(slot, ec) && !ec)
             {
