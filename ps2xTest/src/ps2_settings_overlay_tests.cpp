@@ -72,7 +72,7 @@ void register_ps2_settings_overlay_tests()
 
     MiniTest::Case("Set2Nav", [](TestCase &tc)
                    {
-        tc.Run("Up/Down wrap across the five rows", [](TestCase &t)
+        tc.Run("Up/Down wrap across the six rows", [](TestCase &t)
                {
             ps2x::set2::NavState st;
             auto up = ps2x::set2::navStep(st, true, false, false, false, false);
@@ -101,6 +101,17 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(u.action == ps2x::set2::Action::Changed && st.upscale, "upscale on");
             auto u2 = ps2x::set2::navStep(st, false, false, true, false, false);
             t.IsTrue(u2.action == ps2x::set2::Action::Changed && !st.upscale, "upscale off"); });
+
+        tc.Run("X cycles Touch auto -> on -> off -> auto", [](TestCase &t)
+               {
+            ps2x::set2::NavState st;
+            st.sel = ps2x::set2::Row::Touch;
+            auto o1 = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(o1.action == ps2x::set2::Action::Changed && st.touch == ps2x::set2::Touch::On, "auto -> on");
+            auto o2 = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(o2.action == ps2x::set2::Action::Changed && st.touch == ps2x::set2::Touch::Off, "on -> off");
+            auto o3 = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(o3.action == ps2x::set2::Action::Changed && st.touch == ps2x::set2::Touch::Auto, "off -> auto"); });
 
         tc.Run("Restart needs the one-line confirm; nav away disarms", [](TestCase &t)
                {
@@ -134,16 +145,16 @@ void register_ps2_settings_overlay_tests()
 
     MiniTest::Case("Set2Panel", [](TestCase &tc)
                    {
-        tc.Run("row taps hit 0..4, dot taps hit 5, misses read -1", [](TestCase &t)
+        tc.Run("row taps hit 0..5, dot taps hit 6, misses read -1", [](TestCase &t)
                {
             const auto g = ps2x::set2::panelLayout(1280.0f, 720.0f);
-            for (int i = 0; i < 5; ++i)
+            for (int i = 0; i < 6; ++i)
             {
                 const int hit = ps2x::set2::panelHit(g, true, g.rowX + g.rowW * 0.5f, g.rowY[i] + g.rowH * 0.5f);
                 t.IsTrue(hit == i, "row centre hits");
             }
-            t.IsTrue(ps2x::set2::panelHit(g, true, g.dotX, g.dotY) == 5, "dot hits while open");
-            t.IsTrue(ps2x::set2::panelHit(g, false, g.dotX, g.dotY) == 5, "dot hits while closed");
+            t.IsTrue(ps2x::set2::panelHit(g, true, g.dotX, g.dotY) == 6, "dot hits while open");
+            t.IsTrue(ps2x::set2::panelHit(g, false, g.dotX, g.dotY) == 6, "dot hits while closed");
             t.IsTrue(ps2x::set2::panelHit(g, true, g.px * 0.25f, g.py * 0.25f) == -1, "outside misses");
             // The dot clears the panel rect (taps can't be ambiguous).
             const bool dotInPanel =
@@ -155,11 +166,12 @@ void register_ps2_settings_overlay_tests()
         tc.Run("parses owned keys only, trims, skips comments and junk", [](TestCase &t)
                {
             const auto e = ps2x::set2::parseSettingsEnv(
-                "# panel file\n  GE1_UPSCALE = 2 \nPS2X_SETTINGS_PERF=1\nGE1_ONDEVICE_UPSCALE=1\nPS2X_SOUND=1\nnoequals\n=novalue\n");
-            t.Equals(e.size(), static_cast<size_t>(3), "allowlisted keys only");
+                "# panel file\n  GE1_UPSCALE = 2 \nPS2X_SETTINGS_PERF=1\nGE1_ONDEVICE_UPSCALE=1\nPS2X_VIRTUAL_PAD=0\nPS2X_SOUND=1\nnoequals\n=novalue\n");
+            t.Equals(e.size(), static_cast<size_t>(4), "allowlisted keys only");
             t.IsTrue(e[0] == std::make_pair(std::string("GE1_UPSCALE"), std::string("2")), "trimmed UPSCALE");
             t.IsTrue(e[1] == std::make_pair(std::string("PS2X_SETTINGS_PERF"), std::string("1")), "PERF");
-            t.IsTrue(e[2] == std::make_pair(std::string("GE1_ONDEVICE_UPSCALE"), std::string("1")), "ODU"); });
+            t.IsTrue(e[2] == std::make_pair(std::string("GE1_ONDEVICE_UPSCALE"), std::string("1")), "ODU");
+            t.IsTrue(e[3] == std::make_pair(std::string("PS2X_VIRTUAL_PAD"), std::string("0")), "VPAD"); });
 
         tc.Run("upsert replaces, appends and removes; format round-trips", [](TestCase &t)
                {
@@ -177,5 +189,15 @@ void register_ps2_settings_overlay_tests()
                {
             t.IsTrue(std::string(ps2x::set2::resToUpscale(ps2x::set2::Res::Native)) == "native", "native");
             t.IsTrue(std::string(ps2x::set2::resToUpscale(ps2x::set2::Res::R2x)) == "2", "2x");
-            t.IsTrue(std::string(ps2x::set2::resToUpscale(ps2x::set2::Res::RDefault)).empty(), "default clears"); }); });
+            t.IsTrue(std::string(ps2x::set2::resToUpscale(ps2x::set2::Res::RDefault)).empty(), "default clears"); });
+
+        tc.Run("touch maps to the VIRTUAL_PAD line (auto clears it)", [](TestCase &t)
+               {
+            t.IsTrue(ps2x::set2::touchFromSetting("1") == ps2x::set2::Touch::On, "1 -> on");
+            t.IsTrue(ps2x::set2::touchFromSetting("0") == ps2x::set2::Touch::Off, "0 -> off");
+            t.IsTrue(ps2x::set2::touchFromSetting("") == ps2x::set2::Touch::Auto, "unset -> auto");
+            t.IsTrue(ps2x::set2::touchFromSetting("yes") == ps2x::set2::Touch::Auto, "junk -> auto");
+            t.IsTrue(std::string(ps2x::set2::touchToSetting(ps2x::set2::Touch::On)) == "1", "on -> 1");
+            t.IsTrue(std::string(ps2x::set2::touchToSetting(ps2x::set2::Touch::Off)) == "0", "off -> 0");
+            t.IsTrue(std::string(ps2x::set2::touchToSetting(ps2x::set2::Touch::Auto)).empty(), "auto clears"); }); });
 }

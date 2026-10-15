@@ -109,18 +109,19 @@ inline ChordOut chordStep(ChordState &st, bool selectDown, bool startDown, int64
 
 // --- Panel navigation (pad edges; touch taps map to the same edges) ---
 //
-// Rows: Mode, Resolution, Perf overlay, On-device upscale, Restart. X
-// changes the pending value (Mode/Resolution apply on restart; Perf and
-// Upscale are live). Restart arms on the first X ("one-line confirm") and
-// fires on the second. Triangle or the chord closes.
+// Rows: Mode, Resolution, Perf overlay, On-device upscale, Touch
+// controls, Restart. X changes the pending value (Mode/Resolution apply on
+// restart; Perf, Upscale and Touch are live). Restart arms on the first X
+// ("one-line confirm") and fires on the second. Triangle or the chord closes.
 enum class Row : uint8_t
 {
     Mode = 0,
     Res = 1,
     Perf = 2,
     Upscale = 3,
-    Restart = 4,
-    Count = 5
+    Touch = 4,
+    Restart = 5,
+    Count = 6
 };
 enum class Mode : uint8_t
 {
@@ -132,6 +133,15 @@ enum class Res : uint8_t
     Native = 0,  // GE1_UPSCALE=native
     R2x = 1,     // GE1_UPSCALE=2
     RDefault = 2 // no override: the platform default
+};
+// Touch controls (android-touch-1): Auto shows the overlay only when no
+// physical gamepad is present (Odin hides by default); On/Off force it.
+// Persisted as PS2X_VIRTUAL_PAD (On="1", Off="0", Auto=key absent).
+enum class Touch : uint8_t
+{
+    Auto = 0,
+    On = 1,
+    Off = 2
 };
 enum class Action : uint8_t
 {
@@ -149,6 +159,7 @@ struct NavState
     Res res = Res::RDefault; // pending (applied on restart)
     bool perf = false;       // live
     bool upscale = false;    // live (REM3 P11 Phase 2)
+    Touch touch = Touch::Auto; // live (android-touch-1)
     bool restartArmed = false;
 };
 
@@ -210,6 +221,10 @@ inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, 
         st.upscale = !st.upscale;
         out.action = Action::Changed;
         break;
+    case Row::Touch:
+        st.touch = (st.touch == Touch::Auto) ? Touch::On : (st.touch == Touch::On ? Touch::Off : Touch::Auto);
+        out.action = Action::Changed;
+        break;
     case Row::Restart:
         if (st.restartArmed)
             out.action = Action::DoRestart;
@@ -227,14 +242,14 @@ inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, 
 
 // --- Panel geometry + hit test (QSR1 precedent: pure, render loop draws) ---
 //
-// Hit values: 0..4 = row tap (same as X on that row), 5 = gear-dot tap
+// Hit values: 0..5 = row tap (same as X on that row), 6 = gear-dot tap
 // (closed panel: open; open panel: close), -1 = miss (open panel: tap
 // outside closes).
 struct PanelGeom
 {
     float px = 0, py = 0, pw = 0, ph = 0; // panel rect
     float rowX = 0, rowW = 0;
-    float rowY[5] = {0, 0, 0, 0, 0};
+    float rowY[6] = {0, 0, 0, 0, 0, 0};
     float rowH = 0;
     float dotX = 0, dotY = 0, dotR = 0; // gear dot (closed state)
 };
@@ -248,10 +263,10 @@ inline PanelGeom panelLayout(float w, float h)
     g.py = (h - g.ph) * 0.5f;
     g.rowX = g.px + 22.0f;
     g.rowW = g.pw - 44.0f;
-    // Title block, then 5 even rows (the draw code uses these rects).
+    // Title block, then 6 even rows (the draw code uses these rects).
     const float titleH = h / 26.0f + 22.0f;
-    g.rowH = (g.ph - titleH - 34.0f) / 5.0f;
-    for (int i = 0; i < 5; ++i)
+    g.rowH = (g.ph - titleH - 34.0f) / 6.0f;
+    for (int i = 0; i < 6; ++i)
         g.rowY[i] = g.py + titleH + i * g.rowH;
     // Gear dot top-right: clear of the vpad shoulders (top corners at 0.10u
     // with 0.07u discs).
@@ -265,12 +280,12 @@ inline int panelHit(const PanelGeom &g, bool open, float x, float y)
 {
     const float ddx = x - g.dotX, ddy = y - g.dotY;
     if (ddx * ddx + ddy * ddy <= g.dotR * g.dotR)
-        return 5;
+        return 6;
     if (!open)
         return -1;
     if (x < g.rowX || x > g.rowX + g.rowW)
         return -1;
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < 6; ++i)
     {
         if (y >= g.rowY[i] && y < g.rowY[i] + g.rowH)
             return i;
@@ -289,6 +304,7 @@ inline bool settingsKeyAllowed(const char *key)
         return false;
     const std::string k(key);
     return k == "GE1_UPSCALE" || k == "PS2X_SETTINGS_PERF" ||
+           k == "PS2X_VIRTUAL_PAD" || // android-touch-1: Touch row persists under its env name
            k == "GE1_ONDEVICE_UPSCALE"; // REM3 P11 Phase 2: the live toggle persists under its env name
 }
 
@@ -377,6 +393,44 @@ inline const char *resToUpscale(Res r)
         return "2";
     default:
         return ""; // RDefault: no override line
+    }
+}
+
+// android-touch-1: Touch row <-> PS2X_VIRTUAL_PAD. On="1", Off="0",
+// Auto=absent (upsert drops empty). Unset or anything but "0"/"1" reads
+// as Auto, so a hand-edited file can't brick the overlay.
+inline Touch touchFromSetting(const std::string &val)
+{
+    if (val == "1")
+        return Touch::On;
+    if (val == "0")
+        return Touch::Off;
+    return Touch::Auto;
+}
+
+inline const char *touchToSetting(Touch t)
+{
+    switch (t)
+    {
+    case Touch::On:
+        return "1";
+    case Touch::Off:
+        return "0";
+    default:
+        return ""; // Auto: no override line
+    }
+}
+
+inline const char *touchName(Touch t)
+{
+    switch (t)
+    {
+    case Touch::On:
+        return "on";
+    case Touch::Off:
+        return "off";
+    default:
+        return "auto";
     }
 }
 

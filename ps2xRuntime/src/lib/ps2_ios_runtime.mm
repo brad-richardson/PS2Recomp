@@ -216,7 +216,8 @@ void prepareEnvironment(const char *argv0)
         const auto settings = readEnvFile(documents / "settings.env");
         for (const auto &[key, value] : settings)
         {
-            const bool owned = key == "GE1_UPSCALE" || key == "PS2X_SETTINGS_PERF";
+            const bool owned = key == "GE1_UPSCALE" || key == "PS2X_SETTINGS_PERF" ||
+                                key == "PS2X_VIRTUAL_PAD"; // android-touch-1: Touch row
             if (!owned || launcherKeys.count(key) != 0)
                 continue;
             setenv(key.c_str(), value.c_str(), 1);

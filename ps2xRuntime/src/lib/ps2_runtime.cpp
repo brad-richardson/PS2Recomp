@@ -2689,10 +2689,31 @@ bool virtualPadWanted()
     const char *env = std::getenv("PS2X_VIRTUAL_PAD");
 #if defined(PS2X_IOS)
     return ps2x::vpad::enabledFromEnv(env); // Settings > Virtual controls; default on
+#elif defined(__ANDROID__)
+    // android-touch-1: phones without a controller need touch controls, so
+    // the overlay defaults on like iOS (the Touch panel row forces on/off,
+    // persisted as PS2X_VIRTUAL_PAD). Visibility is decided per frame
+    // below (auto-hides when a gamepad is present).
+    return ps2x::vpad::enabledFromEnv(env);
 #else
     return env && env[0] == '1'; // desktop: dev-only, the mouse is the finger
 #endif
 }
+
+// android-touch-1: any physical gamepad present (no press needed). Auto
+// mode shows the overlay iff this is false, so the Odin (built-in
+// controller) defaults to hidden while the A14 (no controller) shows it.
+#if defined(__ANDROID__)
+bool gamepadConnected()
+{
+    for (int i = 0; i < 4; ++i)
+    {
+        if (IsGamepadAvailable(i))
+            return true;
+    }
+    return false;
+}
+#endif
 
 // A connected controller hides the overlay once it has been used (any
 // button, or a stick past half-way) since it connected. The iOS Simulator
@@ -7938,7 +7959,15 @@ void PS2Runtime::run()
     // IP3: PS2X_PERF_LOG=1 appends one line per wall second to the perf log
     // (off = one bool check per frame, zero cost).
     const bool perfLog = ps2x::perflog::enabled();
-    const bool vpadWanted = virtualPadWanted();
+    bool vpadWanted = virtualPadWanted();
+    // android-touch-1: Touch panel row (Auto/On/Off), live like Perf.
+    // Auto (PS2X_VIRTUAL_PAD unset) shows the overlay only when no gamepad
+    // is present; On ("1")/Off ("0") force it. vpadWanted tracks
+    // (mode != Off) so the existing branches keep working.
+    ps2x::set2::Touch vpadTouchMode = [] {
+        const char *v = std::getenv("PS2X_VIRTUAL_PAD");
+        return ps2x::set2::touchFromSetting(v ? v : "");
+    }();
     PSChordState ds1Chord; // SELECT+L3 save / SELECT+R3 load, carried across frames
     // SET2: settings panel state, carried across frames. Knob off: the chord
     // path below is one bool check per frame (plus the always-on perf tick
@@ -7971,6 +8000,7 @@ void PS2Runtime::run()
         const char *upscale = std::getenv("GE1_ONDEVICE_UPSCALE");
         set2Upscale = upscale && std::string(upscale) == "1";
         set2Nav.upscale = set2Upscale;
+        set2Nav.touch = vpadTouchMode;
     }
     // SET2 perf sampler: always-on lightweight vs/s + frame-time (one tick
     // load + one clock per host frame; the line draws only when perf is on).
@@ -7984,6 +8014,7 @@ void PS2Runtime::run()
     // otherwise hitch on it). The cache mutex guards the result.
     std::thread([] { ps2_savestate::warmRunnerSha(); }).detach();
     bool vpadLastPadConnected = true; // forces the first [vpad] line when the overlay shows
+    bool vpadFirstFrame = true;       // android-touch-1: evaluate underlay on frame one either way
     const std::vector<ps2x::vpad::TestTouch> vpadTestTouches =
         ps2x::vpad::parseTestTouches(std::getenv("PS2X_VPAD_TEST_TOUCHES")); // DEV-ONLY
     ps2x::vpad::PadState vpadPad; // VT1: touch ownership + stick anchor, carried across frames
@@ -8019,6 +8050,13 @@ void PS2Runtime::run()
                 requestStop();
                 break;
             }
+            // android-touch-1: a backgrounding (or focus loss) with fingers
+            // down must not stick buttons: the touch list is gone on resume,
+            // so drop ownership now and clear the latch while the guest is
+            // frozen (no reads happen paused, so this is just the release).
+            vpadPad = ps2x::vpad::PadState{};
+            publishPad(0, m_memory.gs().vsyncTick.load());
+            ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
@@ -8289,9 +8327,23 @@ void PS2Runtime::run()
 #endif
         DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
         // I26: virtual controls, hidden while a connected game controller is in use.
-        const bool vpadPadConnected = vpadWanted && gamepadInUse();
-        if (vpadWanted && vpadPadConnected != vpadLastPadConnected)
+        // android-touch-1: Touch=On forces the overlay even with a pad;
+        // otherwise it hides when a pad would drive the game. On Android
+        // that is presence (the Odin always enumerates its built-in
+        // controller, so it defaults to hidden); elsewhere a press is
+        // required first (the iOS Simulator reports a fake Gamepad).
+        const bool vpadForcedOn = (vpadTouchMode == ps2x::set2::Touch::On);
+#if defined(__ANDROID__)
+        const bool vpadPadHides = gamepadConnected();
+#else
+        const bool vpadPadHides = gamepadInUse();
+#endif
+        const bool vpadPadConnected = vpadWanted && !vpadForcedOn && vpadPadHides;
+        // First frame always evaluates (Odin starts hidden on the fast
+        // path; a phone starts shown underlaid).
+        if (vpadWanted && (vpadFirstFrame || vpadPadConnected != vpadLastPadConnected))
         {
+            vpadFirstFrame = false;
             int padIndex = -1;
             for (int i = 0; i < 4 && padIndex < 0; ++i)
             {
@@ -8302,6 +8354,13 @@ void PS2Runtime::run()
             std::fprintf(stderr, "[vpad] on=1 pad_in_use=%d first_pad=%d name=\"%s\" -> overlay %s\n", vpadPadConnected ? 1 : 0,
                          padIndex, padName ? padName : "", vpadPadConnected ? "hidden" : "shown");
             vpadLastPadConnected = vpadPadConnected;
+#if defined(__ANDROID__)
+            // Keep the present path on the fast path while hidden (VK above,
+            // GL skipped) and underlaid while shown (translucent GL over the
+            // game). The panel manages its own underlay while open.
+            if (!set2Open)
+                ps2x_present_vk::setUnderlay(!vpadPadConnected);
+#endif
         }
         // IN2: the render thread publishes the vpad + raylib button union
         // to the pad latch every host frame (host ~60 Hz vs guest reads at
@@ -8371,6 +8430,7 @@ void PS2Runtime::run()
             set2ResAtOpen = set2Nav.res;
             set2Nav.perf = set2Perf;
             set2Nav.upscale = set2Upscale;
+            set2Nav.touch = vpadTouchMode;
             set2Nav.restartArmed = false;
 #if defined(__ANDROID__)
             // The panel needs the GL overlay visible over the VK layer. The Z
@@ -8571,11 +8631,24 @@ void PS2Runtime::run()
                                                        set2Upscale ? "1" : "0");
                     set2WriteSettings(pairs); // false on the Mac (live-only there)
                 }
+                if (navOut.action == ps2x::set2::Action::Changed &&
+                    set2Nav.sel == ps2x::set2::Row::Touch)
+                {
+                    // android-touch-1: Touch is live like Perf. Auto shows
+                    // the overlay only with no gamepad; On/Off force it.
+                    vpadTouchMode = set2Nav.touch;
+                    vpadWanted = (vpadTouchMode != ps2x::set2::Touch::Off);
+                    auto pairs = set2ReadSettings();
+                    pairs = ps2x::set2::upsertSettings(pairs, "PS2X_VIRTUAL_PAD",
+                                                       ps2x::set2::touchToSetting(vpadTouchMode));
+                    set2WriteSettings(pairs); // false on the Mac (live-only there)
+                }
                 if (navOut.action != ps2x::set2::Action::None)
-                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d\n",
+                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d touch=%d\n",
                                  static_cast<int>(navOut.action), static_cast<int>(set2Nav.sel),
                                  static_cast<int>(set2Nav.mode), static_cast<int>(set2Nav.res),
-                                 set2Nav.perf ? 1 : 0, set2Nav.upscale ? 1 : 0);
+                                 set2Nav.perf ? 1 : 0, set2Nav.upscale ? 1 : 0,
+                                 static_cast<int>(set2Nav.touch));
                 if (navOut.action == ps2x::set2::Action::Close)
                     set2DoClose();
                 else if (navOut.action == ps2x::set2::Action::DoRestart)
@@ -8594,7 +8667,7 @@ void PS2Runtime::run()
             std::vector<int64_t> set2Still;
             for (int i = 0; i < set2n; ++i)
             {
-                if (ps2x::set2::panelHit(set2g, false, set2ts[i].x, set2ts[i].y) != 5)
+                if (ps2x::set2::panelHit(set2g, false, set2ts[i].x, set2ts[i].y) != 6)
                     continue;
                 set2Still.push_back(set2ts[i].id);
                 if (std::find(set2Down.begin(), set2Down.end(), set2ts[i].id) == set2Down.end())
@@ -8629,10 +8702,10 @@ void PS2Runtime::run()
                     continue;
                 set2Down.push_back(set2ts[i].id);
                 const int hit = ps2x::set2::panelHit(set2g, true, set2ts[i].x, set2ts[i].y);
-                if (hit >= 0 && hit <= 4)
+                if (hit >= 0 && hit <= 5)
                 {
                     set2Nav.sel = static_cast<ps2x::set2::Row>(hit);
-                    set2Nav.restartArmed = (hit == 4) ? set2Nav.restartArmed : false;
+                    set2Nav.restartArmed = (hit == 5) ? set2Nav.restartArmed : false;
                     const ps2x::set2::NavOut tapOut =
                         ps2x::set2::navStep(set2Nav, false, false, true, false, false);
                     if (tapOut.action == ps2x::set2::Action::Changed &&
@@ -8653,6 +8726,17 @@ void PS2Runtime::run()
                         auto pairs = set2ReadSettings();
                         pairs = ps2x::set2::upsertSettings(pairs, "GE1_ONDEVICE_UPSCALE",
                                                            set2Upscale ? "1" : "0");
+                        set2WriteSettings(pairs);
+                    }
+                    if (tapOut.action == ps2x::set2::Action::Changed &&
+                        set2Nav.sel == ps2x::set2::Row::Touch)
+                    {
+                        // android-touch-1: touch tap, same live apply as the pad path.
+                        vpadTouchMode = set2Nav.touch;
+                        vpadWanted = (vpadTouchMode != ps2x::set2::Touch::Off);
+                        auto pairs = set2ReadSettings();
+                        pairs = ps2x::set2::upsertSettings(pairs, "PS2X_VIRTUAL_PAD",
+                                                           ps2x::set2::touchToSetting(vpadTouchMode));
                         set2WriteSettings(pairs);
                     }
                     std::fprintf(stderr, "[set2] tap row=%d action=%d\n", hit,
@@ -8710,7 +8794,7 @@ void PS2Runtime::run()
                 int set2Kept = 0;
                 for (int i = 0; i < touches; ++i)
                 {
-                    if (ps2x::set2::panelHit(set2g, false, vpadTouches[i].x, vpadTouches[i].y) != 5)
+                    if (ps2x::set2::panelHit(set2g, false, vpadTouches[i].x, vpadTouches[i].y) != 6)
                     {
                         vpadTouches[set2Kept++] = vpadTouches[i];
                         continue;
@@ -8888,15 +8972,16 @@ void PS2Runtime::run()
                     resVal = "2x";
                 else
                     resVal = "default (" + set2EffUpscale + ")";
-                const std::string rows[5] = {
+                const std::string rows[6] = {
                     std::string("Mode .......... ") +
                         (set2Nav.mode == ps2x::set2::Mode::M120 ? "120" : "60") +
                         (modeDirty ? "  (restart)" : ""),
                     std::string("Resolution .... ") + resVal + (resDirty ? "  (restart)" : ""),
                     std::string("Perf overlay .. ") + (set2Nav.perf ? "on" : "off"),
                     std::string("On-device up.. ") + (set2Nav.upscale ? "on" : "off"),
+                    std::string("Touch controls ") + ps2x::set2::touchName(set2Nav.touch),
                     set2Nav.restartArmed ? "RESTART NOW?  (X again to confirm)" : "Restart now"};
-                for (int i = 0; i < 5; ++i)
+                for (int i = 0; i < 6; ++i)
                 {
                     if (static_cast<int>(set2Nav.sel) == i)
                         DrawRectangle(static_cast<int>(set2dg.rowX) - 6, static_cast<int>(set2dg.rowY[i]),
