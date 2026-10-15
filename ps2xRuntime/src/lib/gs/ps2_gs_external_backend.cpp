@@ -1689,7 +1689,16 @@ public:
         // library) keep refusing the incomplete save, as before.
         if (m_ge1Active && !m_ge1.freezeBound())
             return false;
-        const bool innerIdle = m_inner ? m_inner->SavestateIdle() : true;
+        // ASV1: GE1 consumes the raw GIF stream and its freeze blob owns
+        // host->local upload progress. The CPU backend is only a shadow in
+        // that mode. A partial shadow upload can survive a cold load even
+        // after GE1 has moved on, so it must not veto a new snapshot.
+        // Keep refusing unread local->host bytes: those are guest-visible.
+        const GSTransferSnapshot shadow = m_inner ? m_inner->GetTransferSnapshot() : GSTransferSnapshot{};
+        const bool shadowUploadOnly = m_ge1Active && shadow.direction == 0u &&
+                                      shadow.localToHostPendingBytes == 0u &&
+                                      shadow.copiedPixels < shadow.totalPixels;
+        const bool innerIdle = !m_inner || m_inner->SavestateIdle() || shadowUploadOnly;
         const bool fifoDrained = !m_fifoValid || m_fifoCursor >= m_fifo.size();
         return innerIdle && fifoDrained;
     }

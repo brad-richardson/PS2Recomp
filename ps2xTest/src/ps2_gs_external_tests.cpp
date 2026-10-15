@@ -259,6 +259,9 @@ void register_ps2_gs_external_tests()
             auto be2 = ps2x_gs_external::create(nullptr);
             be2->Initialize(vram.data(), kVramSize);
             t.IsTrue(be2->SavestateLoad(blob.data(), blob.size()), "blob loads");
+            std::vector<uint8_t> roundtrip;
+            be2->SavestateSave(roundtrip);
+            t.IsTrue(roundtrip == blob, "save-load-save backend blob is byte-equal");
             const std::vector<uint8_t> rest2 = drain(*be2);
             t.IsTrue(rest == rest2, "loaded fifo continues the same bytes");
             const auto st = ps2x_gs_external::stats();
