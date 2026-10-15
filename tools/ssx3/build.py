@@ -527,7 +527,7 @@ def source(url, revision, destination):
 def libs(a):
     vendor = a.work / 'mac-assembly/vendor-pcsx2'
     source('https://github.com/brad-richardson/armsx2.git',
-           '0c7a2987477617ea6eab46d05dffb990ed200f6a', vendor)
+           'afad5a04c2668a10e12adadaa51d54c46f832236', vendor)
     prefix = a.work / 'deps'
     brew_prefix = subprocess.check_output(['brew', '--prefix'], text=True).strip()
     prefixes = str(prefix) + ';' + brew_prefix
@@ -667,7 +667,7 @@ def android_libs(a):
         raise ValueError('android-libs requires --ndk (NDK 28.2.13676358)')
     vendor = a.work / 'android-assembly/vendor-pcsx2'
     source('https://github.com/brad-richardson/armsx2.git',
-           '0c7a2987477617ea6eab46d05dffb990ed200f6a', vendor)
+           'afad5a04c2668a10e12adadaa51d54c46f832236', vendor)
     prefix = a.work / 'android-deps'
     prefix.mkdir(exist_ok=True)
     env = os.environ.copy()

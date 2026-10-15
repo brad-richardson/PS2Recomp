@@ -17,7 +17,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 NDK = '28.2.13676358'
-VENDOR = '0c7a2987477617ea6eab46d05dffb990ed200f6a'
+VENDOR = 'afad5a04c2668a10e12adadaa51d54c46f832236'
 RELEASES = 'https://github.com/brad-richardson/PS2Recomp/releases/download/'
 FORMAT = 1
 ARCHIVES = ('libps2EntryRunner.a', 'libps2_runtime.a', 'libps2_gs_shadow.a',
