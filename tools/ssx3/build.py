@@ -17,7 +17,7 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
-GENERATOR = '03c10b5aeccd4fb673fecaea3cf4a5f5064afe14'
+GENERATOR = '467e86e85fee4dd73c8252f40a02c6394116888e'
 FORK = 'https://github.com/brad-richardson/PS2Recomp.git'
 ISO_SHA = '3c2f8eb182c9c6208a6e8172a41e61c98f420abe3f42c845f6829aeb9761ebf5'
 ELF_SHA = '1b49d05ca2793922180851b9e1ce9ae2291d61a7863565ac4e71f12e967af7bc'
@@ -318,9 +318,22 @@ def prepare_generator(a):
     if not gen.exists():
         # Prefer the exact pinned commit already present in this checkout.
         # This also validates an unpublished lane commit without a fork push.
-        local_pin = subprocess.run(
+        # Public-safe: the shortcut applies only when the pin is part of the
+        # published fork history (a lane-only object must never satisfy it).
+        # A clean public clone therefore falls through to the FORK fetch,
+        # which is the path the release check exercises.
+        has_pin = subprocess.run(
             ['git', '-C', str(ROOT), 'cat-file', '-e', GENERATOR + '^{commit}'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0
+        published = False
+        for ref in ('fork/ssx3', 'origin/ssx3', 'HEAD'):
+            if subprocess.run(
+                    ['git', '-C', str(ROOT), 'merge-base', '--is-ancestor', GENERATOR, ref],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False).returncode == 0:
+                published = True
+                break
+        local_pin = has_pin and published
         run('git', 'init', gen)
         run('git', '-C', gen, 'fetch', '--depth=1', str(ROOT) if local_pin else FORK, GENERATOR)
         run('git', '-C', gen, 'checkout', '--detach', GENERATOR)

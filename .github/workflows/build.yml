@@ -3,6 +3,26 @@ name: build
 on: [push, pull_request]
 
 jobs:
+  generator-pin:
+    name: generator-pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Pinned generator is fetchable from the public fork
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin="$(python3 -c 'import sys; sys.path.insert(0, "tools/ssx3"); import build; print(build.GENERATOR)')"
+          fork="$(python3 -c 'import sys; sys.path.insert(0, "tools/ssx3"); import build; print(build.FORK)')"
+          rm -rf /tmp/generator-pin-check
+          git init /tmp/generator-pin-check
+          git -C /tmp/generator-pin-check fetch --depth=1 "$fork" "$pin"
+          git -C /tmp/generator-pin-check cat-file -e "$pin^{commit}"
+
   linux-gcc-clang:
     strategy:
       fail-fast: false

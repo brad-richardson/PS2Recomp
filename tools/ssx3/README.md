@@ -122,10 +122,13 @@ python3 tools/ssx3/build.py mac --work /path/to/private-build --suite
 ```
 
 Run that suite **from the checkout root**. The generator pin is
-`03c10b5aeccd4fb673fecaea3cf4a5f5064afe14`. It selects overlapping resume owners by greatest candidate function start,
+`467e86e85fee4dd73c8252f40a02c6394116888e`. It selects overlapping resume owners by greatest candidate function start,
 independent of host hash-table order. `prepare` checks ISO and extracted ELF SHA256, fetches the pinned
-generator from the local checkout when present (otherwise the public fork), builds it, writes absolute local TOML
-paths, and records the generated registration SHA256. Use a fresh work
+generator from the local checkout when the pin is part of the published fork
+history (otherwise the public fork), builds it, writes absolute local TOML
+paths, and records the generated registration SHA256. A release check fetches
+the pin from the public fork into an empty repo (see the `generator-pin` CI
+job); a pin that exists only on a local branch fails that check. Use a fresh work
 directory for regeneration; existing output is refused. Registration hashes
 from earlier generator pins do not describe the deterministic ownership rule.
 
