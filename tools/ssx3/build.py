@@ -380,7 +380,7 @@ def mac(a):
         '-DPS2X_VU0_RECOMP_DIR=', '-DPS2X_BUILD_RECOMP=' + extra, '-DPS2X_BUILD_ANALYZER=' + extra,
         '-DPS2X_BUILD_TEST=' + extra, '-DPS2X_ENABLE_DEBUG_UI=OFF', '-DPS2X_ENABLE_RUNTIME_LOGS=OFF',
         '-DPS2X_ENABLE_AGRESSIVE_LOGS=OFF', '-DPS2X_ENABLE_DIAG_TAPS=OFF',
-        '-DPS2X_ENABLE_DIAG_WATCH=OFF', '-DPS2X_ENABLE_TS2_DIAG=OFF')
+        '-DPS2X_ENABLE_DIAG_WATCH=OFF', '-DPS2X_ENABLE_TS2_DIAG=OFF', '-DPS2X_GAME_PCH=ON')
     run('cmake', '--build', a.work / 'runner-build', '--parallel', a.jobs,
         '--target', 'ps2EntryRunner', *(['ps2x_tests'] if a.suite else []))
 
@@ -500,6 +500,7 @@ def android(a):
         '-Pps2xGameCodegenDir=' + str(a.work / 'codegen'),
         '-Pps2xJniLibsDir=' + str(jnilibs), '-Pps2xPublicNoticesDir=' + str(notices_dir),
         '-Pps2xVu0RecompDir=',
+        '-Pps2xGamePch=ON',  # build-time-1: cold one-shot build, no ccache
         '-Pps2xPgoData=', '-Pps2xBootElf=/storage/emulated/0/Android/data/' + a.app_id + '/files/SLUS_207.72',
         '-Pps2xAppId=' + a.app_id,
         '-Pps2xPrebuiltDir=' + (str(bundle) if bundle else ''),

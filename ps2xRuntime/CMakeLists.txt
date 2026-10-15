@@ -13,6 +13,7 @@ option(PS2X_ENABLE_SCCACHE "Use sccache as compiler launcher when available" ON)
 option(PS2X_DEV_NO_THINLTO "Dev builds only: skip ThinLTO IPO on the runner link chain (ps2_runtime, ps2EntryRunner) for faster incremental links; Release untouched" OFF)
 # BF2: release flag candidates, all default-off (unset = byte-identical flags).
 option(PS2X_GAME_IPO "BF2: ThinLTO IPO on ps2_game_objects in Release (Android + Mac)" OFF)
+option(PS2X_GAME_PCH "Precompile the generated-code prelude for ps2_game_objects (off: ccache cannot cache PCH users)" OFF)
 set(PS2X_ANDROID_MARCH "" CACHE STRING "BF2: Android-only -march value for the first-party runtime targets (empty = toolchain default)")
 set(PS2X_THINLTO_CACHE_DIR "" CACHE PATH "Persistent Android lld ThinLTO cache (empty = off)")
 
@@ -841,6 +842,15 @@ if(PS2X_GAME_CODEGEN_DIR)
     endif()
     target_include_directories(ps2_game_objects PRIVATE "${PS2X_GAME_CODEGEN_DIR}")
     target_link_libraries(ps2_game_objects PUBLIC ps2_runtime)
+    if(PS2X_GAME_PCH)
+        # build-time-1: every generated function opens with this prelude, and
+        # each unity TU re-parses it (~1.4 s of front end per TU). Same
+        # objects with or without it; for cold one-shot builds (build.py).
+        target_precompile_headers(ps2_game_objects PRIVATE
+            <stdexcept> [["ps2_runtime_macros.h"]] [["ps2_runtime.h"]]
+            <ps2_recompiled_functions.h> <ps2_recompiled_stubs.h>
+            [["ps2_syscalls.h"]] [["ps2_stubs.h"]])
+    endif()
     # BF2: optional ThinLTO on the generated game objects (Android + Mac).
     # Default OFF: unset = no property, Release flags byte-identical.
     if(PS2X_GAME_IPO AND IPO_SUPPORTED)
