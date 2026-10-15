@@ -329,9 +329,11 @@ void register_ps2_ssx3_tricky_hud_tests()
             t.IsTrue(pxAt(f, 640, 625, 110) == 65, "Y");
             t.IsTrue(pxAt(f, 640, 570, 74) == 62, "I raised");
             t.IsTrue(pxAt(f, 640, 540, 90) == 1, "T starts lower");
-            t.IsTrue(pxAt(f, 640, 563, 78, 1) == 2, "gap shows smear, no panel"); });
-        tc.Run("label smear covers band, feathers, spares surroundings", [](TestCase &t)
+            t.IsTrue(pxAt(f, 640, 563, 78, 1) == 2, "gap shows the scene, no panel"); });
+        tc.Run("no cover smears: the scene shows beside and between the Tricky parts", [](TestCase &t)
                {
+            // tk-meter-1: the stock meter is hidden at its owner (the HUD-1P
+            // element bit), so the overlay paints nothing but its own sprites.
             using namespace ps2_ssx3_tricky_hud;
             Atlas a = synthAtlas();
             std::vector<uint8_t> f(static_cast<size_t>(640) * 480u * 4u);
@@ -339,64 +341,18 @@ void register_ps2_ssx3_tricky_hud_tests()
                 for (int x = 0; x < 640; ++x)
                 {
                     uint8_t *d = &f[(static_cast<size_t>(y) * 640u + static_cast<size_t>(x)) * 4u];
-                    if (x <= 534) // sky left
-                    {
-                        d[0] = 200;
-                        d[1] = 0;
-                        d[2] = 0;
-                    }
-                    else if (x >= 630) // sky right
-                    {
-                        d[0] = 0;
-                        d[1] = 0;
-                        d[2] = 200;
-                    }
-                    else // the "label"
-                    {
-                        d[0] = 0;
-                        d[1] = 200;
-                        d[2] = 0;
-                    }
+                    d[0] = 0;
+                    d[1] = 200; // the scene (green)
+                    d[2] = 0;
                     d[3] = 255;
                 }
             composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u, 0, 0u);
-            // (545,70): left of R, above T, t=9/92 -> (180,0,20), label green gone.
-            t.IsTrue(pxAt(f, 640, 545, 70) == 180, "smear mid r");
-            t.IsTrue(pxAt(f, 640, 545, 70, 1) == 0, "smear mid g");
-            t.IsTrue(pxAt(f, 640, 545, 70, 2) == 20, "smear mid b");
-            t.IsTrue(pxAt(f, 640, 530, 60) == 200, "left of smear kept");
-            t.IsTrue(pxAt(f, 640, 635, 60, 2) == 200, "right of smear kept");
-            t.IsTrue(pxAt(f, 640, 582, 20, 1) == 200, "above smear kept");
-            // (582,50): top feather row a=1/3 over green -> (33,133,33).
-            t.IsTrue(pxAt(f, 640, 582, 50) == 33, "feather r");
-            t.IsTrue(pxAt(f, 640, 582, 50, 1) == 133, "feather g");
-            t.IsTrue(pxAt(f, 640, 582, 50, 2) == 33, "feather b"); });
-        tc.Run("coil cover hides the stock meter behind the rings", [](TestCase &t)
-               {
-            using namespace ps2_ssx3_tricky_hud;
-            Atlas a = synthAtlas();
-            std::vector<uint8_t> f(static_cast<size_t>(640) * 480u * 4u);
-            for (int y = 0; y < 480; ++y)
-                for (int x = 0; x < 640; ++x)
-                {
-                    uint8_t *d = &f[(static_cast<size_t>(y) * 640u + static_cast<size_t>(x)) * 4u];
-                    d[0] = x <= 551 ? 200 : 0;              // sky left (cover x0-2 = 551)
-                    d[1] = x > 551 && x < 610 ? 200 : 0;    // the stock coil (green)
-                    d[2] = x >= 610 ? 200 : 0;              // sky right (cover x1+2 = 610)
-                    d[3] = 255;
-                }
-            composeOverlay(f.data(), 640, 480, a, 0.0f, false, 1000u, 0u, 0, 0u);
-            // (570,386): ring gap (ring 0 y389, ring 1 ends y385), off the pole;
-            // t = 17/55 -> (138,0,62), stock green gone.
-            t.IsTrue(pxAt(f, 640, 570, 386) == 138, "gap r");
-            t.IsTrue(pxAt(f, 640, 570, 386, 1) == 0, "gap g");
-            t.IsTrue(pxAt(f, 640, 570, 386, 2) == 62, "gap b");
-            // (556,300): left of the rings (x563), t = 3/55 -> (189,0,11).
-            t.IsTrue(pxAt(f, 640, 556, 300) == 189, "left sliver r");
-            t.IsTrue(pxAt(f, 640, 556, 300, 1) == 0, "left sliver g");
-            t.IsTrue(pxAt(f, 640, 552, 300, 1) == 200, "left of cover kept");
-            t.IsTrue(pxAt(f, 640, 580, 450, 1) == 200, "below cover kept");
-            t.IsTrue(pxAt(f, 640, ringCx(), ringCy(0)) == 50, "rings draw over the cover"); });
+            // (570,386): ring gap off the pole; (556,300): left of the rings;
+            // (545,70): the old label band left of R. All keep the scene.
+            t.IsTrue(pxAt(f, 640, 570, 386, 1) == 200 && pxAt(f, 640, 570, 386) == 0, "ring gap kept");
+            t.IsTrue(pxAt(f, 640, 556, 300, 1) == 200 && pxAt(f, 640, 556, 300) == 0, "left sliver kept");
+            t.IsTrue(pxAt(f, 640, 545, 70, 1) == 200 && pxAt(f, 640, 545, 70) == 0, "label band kept");
+            t.IsTrue(pxAt(f, 640, ringCx(), ringCy(0)) == 50, "rings still draw"); });
         tc.Run("layout scales to export size", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;
@@ -417,17 +373,6 @@ void register_ps2_ssx3_tricky_hud_tests()
 
     MiniTest::Case("Ps2Ssx3TrickyHudLetters", [](TestCase &tc)
                    {
-        tc.Run("uber post filter matches accepted 0x2133 posts only", [](TestCase &t)
-               {
-            using namespace ps2_ssx3_tricky_hud;
-            t.IsTrue(kUberSpeechEvent == 0x2133u, "Arcade_Uber event");
-            t.IsTrue(kSpeechPostFunc == 0x2b1458u, "post function");
-            t.IsTrue(isUberPost(0x2133u, 1u), "accepted uber post");
-            t.IsTrue(isUberPost(0x2133u, 0xffffffu), "nonzero v0 counts");
-            t.IsTrue(!isUberPost(0x2133u, 0u), "refused post ignored");
-            t.IsTrue(!isUberPost(0x20a7u, 1u), "Power_Ups post ignored");
-            t.IsTrue(!isUberPost(0x2145u, 1u), "Icons post ignored");
-            t.IsTrue(!isUberPost(0u, 1u), "null event ignored"); });
         tc.Run("letter machine lights, flashes, resets", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_hud;

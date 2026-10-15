@@ -110,9 +110,8 @@ void resetLayerForTest()
     r.inTricky = false;
     r.atlasTried = false;
     r.atlas = ps2_ssx3_tricky_hud::Atlas{};
-    PostQueue &q = postQueue();
-    q.head = q.tail = 0u;
-    q.count = 0u;
+    r.letterEvents = 0u;
+    r.letters.seen = 0u;
     ps2_ssx3_tricky_song::Player &p = ps2_ssx3_tricky_song::player();
     p.song = ps2_ssx3_tricky_song::Song{};
     p.cmd.store(0u, std::memory_order_relaxed);
@@ -329,11 +328,8 @@ void register_ps2_ssx3_tricky_layer_tests()
             fakeLive(ram, 0.0f, 0, 101u);
             onVBlankTick(ram.data(), ram.size(), 1001u);
             t.IsTrue(latestPacket(p) && !p.draw, "no art, no draw");
-            // A post lights a letter even though nothing draws.
-            noteUberPost(1001u);
             fakeLive(ram, 0.0f, 0, 102u);
             onVBlankTick(ram.data(), ram.size(), 1002u);
-            t.IsTrue(latestPacket(p) && p.litLetters == 1, "letter lights without art");
             // The empty->full edge bursts without art (the song is staged
             // directly: initFromEnv's file shape is proven elsewhere).
             ps2_ssx3_tricky_song::Player &pl = ps2_ssx3_tricky_song::player();
@@ -346,6 +342,10 @@ void register_ps2_ssx3_tricky_layer_tests()
                          ps2_ssx3_tricky_song::kBurstFrames,
                      "edge bursts without art");
             t.IsTrue(latestPacket(p) && !p.draw && p.splashUntil == 1003u + 45u, "splash set, not drawn");
+            // An uber level-up lights a letter even though nothing draws.
+            fakeLive(ram, 1.0f, 2, 104u);
+            onVBlankTick(ram.data(), ram.size(), 1004u);
+            t.IsTrue(latestPacket(p) && p.litLetters == 1, "letter lights without art");
             resetLayerForTest();
             clearConfigForTest(); });
         tc.Run("draws while racing, hides in pause, suspends the song", [](TestCase &t)
@@ -407,9 +407,8 @@ void register_ps2_ssx3_tricky_layer_tests()
             pl.song.ok = true;
             fakeLive(ram, 0.0f, 0, 100u);
             onVBlankTick(ram.data(), ram.size(), 3000u);
-            fakeLive(ram, 1.0f, 1, 101u);
-            noteUberPost(3000u);
-            onVBlankTick(ram.data(), ram.size(), 3001u); // racing, T lit, burst open
+            fakeLive(ram, 1.0f, 2, 101u);
+            onVBlankTick(ram.data(), ram.size(), 3001u); // racing, level 0->2: full edge + T
             PresentationPacket p;
             t.IsTrue(latestPacket(p) && p.draw && p.litLetters == 1, "lit before the retry");
             t.IsTrue((pl.cmd.load(std::memory_order_relaxed) & 0xffffffffull) != 0u, "burst open");
@@ -422,11 +421,100 @@ void register_ps2_ssx3_tricky_layer_tests()
             t.IsTrue(epoch() == e + 1u, "boundary bumps the epoch");
             t.IsTrue(latestPacket(p) && p.litLetters == 0 && p.splashUntil == 0u, "letters+splash reset");
             t.IsTrue(pl.cmd.load(std::memory_order_relaxed) == 0u, "in-flight burst cancelled");
-            // A post after the boundary starts a fresh spelling.
-            noteUberPost(3002u);
-            fakeLive(ram, 0.2f, 0, 6u);
+            // The guest's re-init level adopts inside the window; a level-up
+            // after it starts a fresh spelling.
+            fakeLive(ram, 1.0f, 2, 6u);
             onVBlankTick(ram.data(), ram.size(), 3003u);
+            t.IsTrue(latestPacket(p) && p.litLetters == 0, "adopt window lights nothing");
+            const uint64_t after = 3002u + kGoAdoptTicks + 1u;
+            fakeLive(ram, 1.0f, 2, 7u);
+            onVBlankTick(ram.data(), ram.size(), after);
+            fakeLive(ram, 1.0f, 3, 8u);
+            onVBlankTick(ram.data(), ram.size(), after + 1u);
             t.IsTrue(latestPacket(p) && p.litLetters == 1, "fresh spelling after the boundary");
+            resetLayerForTest();
+            clearConfigForTest(); });
+        tc.Run("letters follow SSX 3 uber level-ups (tk-meter-1)", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_layer;
+            using namespace ps2_ssx3_tricky_hud;
+            // Pure rule: no letter for reaching level 1 (meter full), one per
+            // level above it, none for drops or repeats.
+            t.IsTrue(lettersFromLevel(0, 1) == 0, "0->1 full, no letter");
+            t.IsTrue(lettersFromLevel(1, 2) == 1, "1->2 one letter");
+            t.IsTrue(lettersFromLevel(2, 3) == 1, "2->3 one letter");
+            t.IsTrue(lettersFromLevel(0, 3) == 2, "0->3 two letters");
+            t.IsTrue(lettersFromLevel(3, 3) == 0, "repeat none");
+            t.IsTrue(lettersFromLevel(3, 1) == 0, "drop none");
+            t.IsTrue(lettersFromLevel(-1, 2) == 1, "unknown last counts from 1");
+            resetLayerForTest();
+            setConfigForTest(parseConfig("1", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+            std::vector<uint8_t> ram(kRamSize, 0);
+            armOneMode(ram, false);
+            ramToMode(ram, true);
+            Reducer &r = reducer();
+            r.atlas = synthAtlas256();
+            r.atlasTried = true;
+            PresentationPacket p;
+            // D1's sequence: level 0, then 1 (full), 2, 3 while racing.
+            uint32_t clock = 100u;
+            uint64_t tick = 5000u;
+            const int32_t seq[] = {0, 0, 1, 1, 2, 2, 3, 3};
+            for (int32_t lv : seq)
+            {
+                fakeLive(ram, 0.9f, lv, clock++);
+                onVBlankTick(ram.data(), ram.size(), tick++);
+            }
+            t.IsTrue(latestPacket(p) && p.litLetters == 2, "levels 1,2,3 light T,R");
+            // A level step while paused (frozen clock) adopts silently and
+            // never lights later.
+            for (int i = 0; i < 7; ++i)
+            {
+                fakeLive(ram, 0.9f, i < 4 ? 3 : 4, clock); // frozen; level steps once hidden
+                onVBlankTick(ram.data(), ram.size(), tick++);
+            }
+            fakeLive(ram, 0.9f, 4, clock++);
+            onVBlankTick(ram.data(), ram.size(), tick++);
+            t.IsTrue(latestPacket(p) && p.litLetters == 2, "pause step adopted, no retro letter");
+            // Racing again: the next level lights the next letter.
+            fakeLive(ram, 0.9f, 5, clock++);
+            onVBlankTick(ram.data(), ram.size(), tick++);
+            t.IsTrue(latestPacket(p) && p.litLetters == 3, "next level lights I");
+            // Speech posts no longer feed letters: nothing else changes them.
+            fakeLive(ram, 0.9f, 5, clock++);
+            onVBlankTick(ram.data(), ram.size(), tick++);
+            t.IsTrue(latestPacket(p) && p.litLetters == 3, "steady level, steady letters");
+            resetLayerForTest();
+            clearConfigForTest(); });
+        tc.Run("stock meter suppression: Tricky + HUD + atlas only; bit masks", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_layer;
+            using namespace ps2_ssx3_tricky_hud;
+            t.IsTrue(meterHiddenFlags(0xffffffffu) == 0xffdfffffu, "clears 0x200000 only");
+            t.IsTrue(meterHiddenFlags(0x00000401u) == 0x00000401u, "bit already clear");
+            t.IsTrue(meterRestoredFlags(0x00200401u, 0x00000401u) == 0x00200401u, "bit put back");
+            t.IsTrue(meterRestoredFlags(0x00000401u, 0x00000401u) == 0x00000401u, "clear stays clear");
+            t.IsTrue(meterRestoredFlags(0x00200000u, 0x00000010u) == 0x00200010u, "render's own writes kept");
+            resetLayerForTest();
+            setConfigForTest(parseConfig("1", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+            std::vector<uint8_t> ram(kRamSize, 0);
+            armOneMode(ram, false);
+            ramToMode(ram, false); // Stock
+            Reducer &r = reducer();
+            r.atlas = synthAtlas256();
+            r.atlasTried = true;
+            fakeLive(ram, 0.5f, 0, 100u);
+            onVBlankTick(ram.data(), ram.size(), 6000u);
+            t.IsTrue(!suppressStockMeter(), "Stock course keeps the stock meter");
+            ramToMode(ram, true);
+            onVBlankTick(ram.data(), ram.size(), 6001u);
+            t.IsTrue(suppressStockMeter(), "Tricky + atlas hides it");
+            r.atlas = Atlas{};
+            t.IsTrue(!suppressStockMeter(), "no Tricky art keeps it (no meter at all otherwise)");
+            r.atlas = synthAtlas256();
+            clearConfigForTest();
+            setConfigForTest(parseConfig("0", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
+            t.IsTrue(!suppressStockMeter(), "HUD layer off keeps it");
             resetLayerForTest();
             clearConfigForTest(); });
         tc.Run("leaving Tricky cancels the burst and retires the epoch", [](TestCase &t)

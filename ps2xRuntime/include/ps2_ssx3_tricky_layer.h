@@ -12,8 +12,8 @@
 //   F4 (shared engine knobs in the Tricky launcher) is out of scope.
 //
 // Threading: the reducer runs on the EE thread at VBlankStart, once per
-// guest vsync, after the interval's EE work. The uber-post wrapper (TK47)
-// runs on the same thread and only enqueues tick-tagged post events. The
+// guest vsync, after the interval's EE work. The HUD-1P render wrapper
+// (tk-meter-1) runs on the same thread and only asks suppressStockMeter(). The
 // present paths (host loop, GS worker) and the audio callbacks consume the
 // immutable packet / song commands without touching guest memory.
 //
@@ -283,43 +283,19 @@ inline uint64_t epoch()
     return detail::liveEpoch().load(std::memory_order_acquire);
 }
 
-// ---- Stage 2: tick-tagged uber-post events (EE only) -----------------------
-// The TK47 wrapper runs on the EE thread and enqueues here; the VBlank
-// reducer (same thread) drains the queue. Letters light at the post's own
-// tick, exactly as the game posted them, with no presentation dependence.
-struct PostQueue
+// ---- Letters (tk-meter-1): SSX 3's own uber level-ups ----------------------
+// SSX 3 lights one SUPER UBER label letter per uber level-up above level 1
+// (R+0x2F4: level 1 = meter full, each further topping while the uber timer
+// runs adds one; 0x29B430 is the guest's letter handler). TRICKY letters
+// follow the same steps, one per level, so they no longer depend on the
+// announcer accepting an Arcade_Uber 0x2133 line (TK47's source: three
+// milestones, behind four speech gates; tk-meter-1 measured three SSX 3
+// letters with zero posts). Returns the letters earned by a level change
+// from `last` to `now` (no letter for reaching level 1; drops earn none).
+inline int lettersFromLevel(int32_t last, int32_t now)
 {
-    static constexpr size_t kCap = 64u;
-    uint64_t ticks[kCap] = {0u};
-    size_t head = 0u; // consumed
-    size_t tail = 0u; // produced
-    uint64_t count = 0u;
-};
-
-inline PostQueue &postQueue()
-{
-    static PostQueue q;
-    return q;
-}
-
-// Records one accepted uber post (a2 == 0x2133, v0 != 0). Keeps TK47's log
-// line. Drops (loudly) only past 64 unconsumed posts, which cannot happen:
-// the reducer drains every VBlank and posts are minutes apart.
-inline void noteUberPost(uint64_t tick)
-{
-    PostQueue &q = postQueue();
-    const uint64_t n = q.count + 1u;
-    if (q.tail - q.head < PostQueue::kCap)
-    {
-        q.ticks[q.tail % PostQueue::kCap] = tick;
-        ++q.tail;
-    }
-    else
-        std::fprintf(stderr, "[ssx3-tricky-hud] uber #%llu tick=%llu DROPPED (queue full)\n",
-                     static_cast<unsigned long long>(n), static_cast<unsigned long long>(tick));
-    q.count = n;
-    std::fprintf(stderr, "[ssx3-tricky-hud] uber #%llu tick=%llu\n", static_cast<unsigned long long>(n),
-                 static_cast<unsigned long long>(tick));
+    const int32_t from = last < 1 ? 1 : last;
+    return now > from ? static_cast<int>(now - from) : 0;
 }
 
 // ---- Stages 2-3: the EE-owned reducer --------------------------------------
@@ -329,6 +305,8 @@ struct Reducer
     bool atlasTried = false;
     ps2_ssx3_tricky_hud::Atlas atlas;
     ps2_ssx3_tricky_hud::LetterState letters;
+    uint64_t letterEvents = 0u; // letters earned this process (LetterState count)
+    int32_t lastLevel = -1;     // -1 = adopt the next sample silently
     bool lastFull = false;
     uint64_t splashUntil = 0u;
     ps2_ssx3_tricky_hud::RaceClock raceClock;
@@ -353,7 +331,8 @@ inline Reducer &reducer()
 inline void resetRunState(Reducer &r)
 {
     r.letters = ps2_ssx3_tricky_hud::LetterState{};
-    r.letters.seen = postQueue().count;
+    r.letters.seen = r.letterEvents;
+    r.lastLevel = -1;
     r.lastFull = false;
     r.splashUntil = 0u;
     r.raceClock = ps2_ssx3_tricky_hud::RaceClock{};
@@ -377,7 +356,8 @@ inline void onRaceBoundary(Reducer &r, uint64_t tick, const char *reason)
     const uint64_t e = detail::liveEpoch().fetch_add(1u, std::memory_order_acq_rel) + 1u;
     r.letters.lit = 0;
     r.letters.flashUntil = 0;
-    r.letters.seen = postQueue().count;
+    r.letters.seen = r.letterEvents;
+    r.lastLevel = -1;
     r.lastFull = false;
     r.splashUntil = 0u;
     r.lastRacing = false;
@@ -422,7 +402,8 @@ inline void onVBlankTick(uint8_t *rdram, size_t ramSize, uint64_t tick)
     if (!r.inTricky)
     {
         r.inTricky = true;
-        r.letters.seen = postQueue().count;
+        r.letters.seen = r.letterEvents;
+        r.lastLevel = -1;
         r.letters.lit = cfg.lettersPreset >= 0 ? cfg.lettersPreset : 0;
         r.letters.flashUntil = 0;
         if (cfg.lettersPreset >= 0)
@@ -436,39 +417,14 @@ inline void onVBlankTick(uint8_t *rdram, size_t ramSize, uint64_t tick)
         std::fprintf(stderr, "[ssx3-tricky-hud] art '%s': %s\n", cfg.artPath.c_str(),
                      r.atlas.ok ? "loaded" : "missing/invalid, overlay off");
     }
-    // Letters consume posts even when the meter words are unreadable, so no
-    // stale backlog lights letters late. Each post lights at its own tick.
+    // Fanfare expiry runs every tick (letters themselves light below, from
+    // the level edge).
     {
-        PostQueue &q = postQueue();
-        while (q.head < q.tail)
-        {
-            const uint64_t pt = q.ticks[q.head % PostQueue::kCap];
-            ++q.head;
-            const int wasLit = r.letters.lit;
-            const uint64_t wasFlash = r.letters.flashUntil;
-            ps2_ssx3_tricky_hud::updateLetters(r.letters, r.letters.seen + 1u, pt);
-            if (r.letters.lit != wasLit && r.letters.lit > 0)
-            {
-                static const char kName[7] = "TRICKY";
-                std::fprintf(stderr, "[ssx3-tricky-hud] letter %c lit (%d/6) tick=%llu\n",
-                             kName[r.letters.lit - 1], r.letters.lit,
-                             static_cast<unsigned long long>(pt));
-            }
-            if (r.letters.flashUntil != 0u && wasFlash == 0u)
-                std::fprintf(stderr, "[ssx3-tricky-hud] TRICKY spelled: fanfare flash until=%llu\n",
-                             static_cast<unsigned long long>(r.letters.flashUntil));
-            if (r.letters.lit == 0 && wasLit == 6)
-                std::fprintf(stderr, "[ssx3-tricky-hud] letters reset tick=%llu\n",
-                             static_cast<unsigned long long>(pt));
-        }
-        // Fanfare expiry runs every tick, with or without new posts.
-        {
-            const int wasLit = r.letters.lit;
-            ps2_ssx3_tricky_hud::updateLetters(r.letters, r.letters.seen, tick);
-            if (r.letters.lit == 0 && wasLit == 6)
-                std::fprintf(stderr, "[ssx3-tricky-hud] letters reset tick=%llu\n",
-                             static_cast<unsigned long long>(tick));
-        }
+        const int wasLit = r.letters.lit;
+        ps2_ssx3_tricky_hud::updateLetters(r.letters, r.letterEvents, tick);
+        if (r.letters.lit == 0 && wasLit == 6)
+            std::fprintf(stderr, "[ssx3-tricky-hud] letters reset tick=%llu\n",
+                         static_cast<unsigned long long>(tick));
     }
     // Rider + meter + race clock (F7-validated reads; failures skip the
     // edge but keep the letters above).
@@ -594,6 +550,33 @@ inline void onVBlankTick(uint8_t *rdram, size_t ramSize, uint64_t tick)
             r.lastFull = full;
         }
     }
+    // Letters from SSX 3's uber level-ups, on the same `racing` predicate as
+    // the full edge: a hidden stretch (pause, results replay) or the
+    // post-boundary adopt window adopts the level silently, so the replay's
+    // re-run never lights letters.
+    if (meterOk)
+    {
+        const int earned = (racing && r.lastLevel >= 0 && tick > r.raceClock.adoptUntil)
+                               ? lettersFromLevel(r.lastLevel, mf.level)
+                               : 0;
+        for (int k = 0; k < earned; ++k)
+        {
+            const int wasLit = r.letters.lit;
+            const uint64_t wasFlash = r.letters.flashUntil;
+            ps2_ssx3_tricky_hud::updateLetters(r.letters, ++r.letterEvents, tick);
+            if (r.letters.lit != wasLit && r.letters.lit > 0)
+            {
+                static const char kName[7] = "TRICKY";
+                std::fprintf(stderr, "[ssx3-tricky-hud] letter %c lit (%d/6) level=%d tick=%llu\n",
+                             kName[r.letters.lit - 1], r.letters.lit, mf.level,
+                             static_cast<unsigned long long>(tick));
+            }
+            if (r.letters.flashUntil != 0u && wasFlash == 0u)
+                std::fprintf(stderr, "[ssx3-tricky-hud] TRICKY spelled: fanfare flash until=%llu\n",
+                             static_cast<unsigned long long>(r.letters.flashUntil));
+        }
+        r.lastLevel = mf.level;
+    }
     // Pause suspends the song; leaving the race (above) cancels it. Racing
     // resumes an in-flight burst exactly where it suspended (mixInto never
     // consumes while suspended).
@@ -662,14 +645,40 @@ inline void onStateLoaded(uint8_t *rdram, size_t ramSize, uint64_t tick)
     Reducer &r = reducer();
     resetRunState(r);
     r.inTricky = false;
-    PostQueue &q = postQueue();
-    q.head = q.tail; // drop pre-load posts (the old timeline's events)
     ps2_ssx3_tricky_song::cancelBurst();
     ps2_ssx3_tricky_song::setSuspended(false);
     PresentationPacket p;
     p.tick = tick;
     p.epoch = epoch();
     publishPacket(p);
+}
+
+// ---- H1 (tk-meter-1): the stock SSX 3 meter on Tricky courses -------------
+// True while the Tricky meter replaces SSX 3's: Tricky course, HUD layer on,
+// atlas valid. The HUD-1P render wrapper then clears the guest's own meter
+// element bit for that render (no paint-over). EE thread only (same thread
+// as the reducer, which owns inTricky and the atlas).
+inline bool suppressStockMeter()
+{
+    const Reducer &r = reducer();
+    return config().hud && r.inTricky && r.atlas.ok;
+}
+
+// SSX 3's HUD element flags ([hud+0x3CC], read by cOVStateHUD1P_onRender2D
+// at 0x1ecb08): bit 0x200000 gates the meter's message cases (types 5, 6, 8)
+// and the post-loop block with the coil, ball and SUPER UBER label.
+constexpr uint32_t kHudFlagsOff = 0x3ccu;
+constexpr uint32_t kHudMeterBit = 0x200000u;
+
+// Pure seam: the flags the render sees, and the word restored afterwards
+// (the render's own writes kept; only our cleared bit put back).
+inline uint32_t meterHiddenFlags(uint32_t flags)
+{
+    return flags & ~kHudMeterBit;
+}
+inline uint32_t meterRestoredFlags(uint32_t before, uint32_t after)
+{
+    return after | (before & kHudMeterBit);
 }
 
 } // namespace ps2_ssx3_tricky_layer

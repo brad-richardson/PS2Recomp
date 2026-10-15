@@ -2331,81 +2331,104 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-menu",
                            0u,
                            applyTrickyMenu);
 
-// TK47: TRICKY letters from the game's own uber post (output-only). The game
-// posts Arcade_Uber (event 0x2133) through the speech-queue post function at
-// 0x2B1458, called only from func_2A3DE0 (jal at 0x2a3e68); func_2A3DE0 has
-// exactly three callers (jal at 0x29b704/0x29b7b4/0x29b804), so every
-// uber-post source converges on this one call. The wrapper records the post
-// when a2 == 0x2133 and the post is accepted (v0 != 0, the game's own
-// success test at 0x2a3e70), on Tricky courses only. It reads regs/RAM and
-// writes only host counters, so the det-hash cannot move. Knob off: nothing
-// is wrapped.
+// tk-meter-1: the stock SSX 3 meter is not drawn on Tricky courses. SSX 3's
+// HUD-1P renderer (cOVStateHUD1P_onRender2D, 0x1EC3F8) builds its element
+// mask from [hud+0x3CC] (0x1ecb08) and skips the meter (coil fill cases 5/6,
+// case 8, and the post-loop coil/ball/SUPER UBER block at 0x1efc50) when bit
+// 0x200000 is clear. While the Tricky meter replaces it
+// (ps2_ssx3_tricky_layer::suppressStockMeter), the wrapper clears that bit
+// for this render only and puts it back afterwards, so the guest's own
+// element switch hides the meter: nothing is painted over (TR3's covers are
+// gone). Tricky-only and render-only: the bit is restored before the guest
+// runs anything else, and the rider/meter/race words are identical with the
+// meter hidden (tk-meter-1 D1-D4, V-runs). Knob off (PS2X_SSX3_TRICKY_HUD
+// unset) wraps nothing.
 namespace
 {
-    PS2Runtime::RecompiledFunction g_tkUberPost = nullptr;
+    PS2Runtime::RecompiledFunction g_tkHud1pRender = nullptr;
+    bool g_tkMeterHiddenLogged = false;
 
-    void tkUberPostWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    void tkHud1pRenderWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        const uint32_t a2 = (ctx != nullptr) ? getRegU32(ctx, 6) : 0u;
-        if (g_tkUberPost)
-            g_tkUberPost(rdram, ctx, runtime);
-        const uint32_t v0 = (ctx != nullptr) ? getRegU32(ctx, 2) : 0u;
-        if (!ps2_ssx3_tricky_hud::isUberPost(a2, v0))
-            return;
-        if (rdram != nullptr)
+        uint32_t off = 0u;
+        const bool hide = rdram && ctx && ps2_ssx3_tricky_layer::suppressStockMeter() &&
+                          ps2_ssx3_tricky_hud::validateGuestPtr(
+                              getRegU32(ctx, 4), ps2_ssx3_tricky_layer::kHudFlagsOff + 4u, PS2_RAM_SIZE, off);
+        uint32_t before = 0u;
+        if (hide)
         {
-            ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
-            if (!ms.armed || ps2_ssx3_course::modeCurrent(ms, rdram) == 0u)
-                return; // Stock course: letters are Tricky-only
+            off += ps2_ssx3_tricky_layer::kHudFlagsOff;
+            std::memcpy(&before, rdram + off, 4u);
+            const uint32_t hidden = ps2_ssx3_tricky_layer::meterHiddenFlags(before);
+            std::memcpy(rdram + off, &hidden, 4u);
+            if (!g_tkMeterHiddenLogged)
+            {
+                g_tkMeterHiddenLogged = true;
+                std::fprintf(stderr, "[ssx3-tricky-hud] stock meter hidden (HUD flags 0x%08x -> 0x%08x)\n",
+                             before, hidden);
+            }
         }
-        const uint64_t tick = (runtime != nullptr)
-                                  ? static_cast<uint64_t>(runtime->memory().gs().vsyncTick.load(
-                                        std::memory_order_relaxed))
-                                  : 0ull;
-        ps2_ssx3_tricky_layer::noteUberPost(tick);
+        if (g_tkHud1pRender)
+            g_tkHud1pRender(rdram, ctx, runtime);
+        if (hide)
+        {
+            uint32_t after = 0u;
+            std::memcpy(&after, rdram + off, 4u);
+            const uint32_t restored = ps2_ssx3_tricky_layer::meterRestoredFlags(before, after);
+            std::memcpy(rdram + off, &restored, 4u);
+        }
     }
 
-    void applyTrickyUberPost(PS2Runtime &runtime)
+    void applyTrickyStockMeter(PS2Runtime &runtime)
     {
         const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD");
         if (!env || env[0] != '1')
             return;
-        constexpr uint32_t kPc = ps2_ssx3_tricky_hud::kSpeechPostFunc;
-        constexpr uint32_t kWord = 0x0080582du; // daddu $t3,$a0,$zero @0x2b1458
+        // Entry and layout words: the render's prologue, the flags load and
+        // the meter-block gate (refuse on any other ELF).
+        struct Guard
+        {
+            uint32_t pc, word;
+        };
+        static const Guard kGuards[] = {
+            {0x1ec3f8u, 0x27bdfb90u}, // addiu $sp,$sp,-0x470
+            {0x1ecb08u, 0x8ec203ccu}, // lw $v0,0x3cc($s6)
+            {0x1efc50u, 0x1040017bu}, // beqz $v0 (bit 0x200000) over the meter block
+        };
         const uint8_t *ram = runtime.memory().getRDRAM();
-        uint32_t word = 0u;
-        if (ram)
-            std::memcpy(&word, ram + (kPc & PS2_RAM_MASK), 4u);
-        if (!ram || word != kWord)
+        for (const Guard &g : kGuards)
         {
-            std::fprintf(stderr,
-                         "[ssx3-tricky-hud] refused: 0x%x reads 0x%08x, expected 0x%08x; "
-                         "uber post not wrapped\n",
-                         kPc, word, kWord);
+            uint32_t word = 0u;
+            if (ram)
+                std::memcpy(&word, ram + (g.pc & PS2_RAM_MASK), 4u);
+            if (!ram || word != g.word)
+            {
+                std::fprintf(stderr,
+                             "[ssx3-tricky-hud] refused: 0x%x reads 0x%08x, expected 0x%08x; stock meter kept\n",
+                             g.pc, word, g.word);
+                return;
+            }
+        }
+        g_tkHud1pRender = runtime.lookupFunction(0x1ec3f8u);
+        if (!g_tkHud1pRender)
+        {
+            std::fprintf(stderr, "[ssx3-tricky-hud] refused: no function at 0x1ec3f8; stock meter kept\n");
             return;
         }
-        g_tkUberPost = runtime.lookupFunction(kPc);
-        if (!g_tkUberPost)
+        if (!runtime.replaceFunction(0x1ec3f8u, &tkHud1pRenderWrapper))
         {
-            std::fprintf(stderr, "[ssx3-tricky-hud] refused: no function at 0x%x; uber post not wrapped\n",
-                         kPc);
-            return;
-        }
-        if (!runtime.replaceFunction(kPc, &tkUberPostWrapper))
-        {
-            std::fprintf(stderr, "[ssx3-tricky-hud] cannot wrap 0x%x\n", kPc);
+            std::fprintf(stderr, "[ssx3-tricky-hud] cannot wrap 0x1ec3f8\n");
             std::abort();
         }
-        std::fprintf(stderr, "[ssx3-tricky-hud] uber post wrapped at 0x%x (letters from the game's 0x2133 post)\n",
-                     kPc);
+        std::fprintf(stderr, "[ssx3-tricky-hud] HUD-1P render wrapped at 0x1ec3f8 (stock meter hidden on Tricky)\n");
     }
 }
 
-PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-uber-post",
+PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-stock-meter",
                            "SLUS_207.72",
                            0x00100008u,
                            0u,
-                           applyTrickyUberPost);
+                           applyTrickyStockMeter);
 
 // LOD1: draw distance (PS2X_SSX3_LOD_SCALE=<f>, default off;
 // ps2_ssx3_lod.h). The wrapper scales the far argument ($f14) at the entry

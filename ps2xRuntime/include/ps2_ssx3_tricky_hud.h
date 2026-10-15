@@ -40,9 +40,7 @@
 // menus and on the pre-race card). The uber tap moved to the CD serve path
 // (it never fired: noteCdRead's callers are trace-armed-gated).
 //
-// TK47: letters count the game's own uber post (0x2133 through 0x2B1458,
-// wrapped in ps2_runtime.cpp) instead of the deleted CD-LBN tap; a
-// post-boundary adopt window (restart or GO from a frozen 0) swallows the
+// TK47: a post-boundary adopt window (restart or GO from a frozen 0) swallows the
 // guest's post-GO meter init writes (no spurious GO burst).
 
 #include <cmath>
@@ -447,36 +445,11 @@ inline ForceValue parseForce(const char *s)
     return v;
 }
 
-// TK47: uber-post event counter. The game posts the uber speech event
-// (a2=0x2133, Arcade_Uber) through the speech-queue post function at
-// 0x2B1458, called only from func_2A3DE0 (jal at 0x2a3e68; the 0x2133
-// immediate exists nowhere else in the game). func_2A3DE0 itself has
-// exactly three callers (jal at 0x29b704/0x29b7b4/0x29b804 in
-// sub_0029B430/0029B738/0029B7E0: the uber-level transition and the
-// trick-bank handler), so every uber-post source converges on this one
-// call (ee-at/ee-xref citation in local/research/TK47/REPORT.md). The
-// runtime wraps 0x2B1458 (ps2_runtime.cpp, TK47; armed only when
-// PS2X_SSX3_TRICKY_HUD=1) and records the post when the event is 0x2133
-// and the post is accepted (v0 != 0, the game's own success test at
-// 0x2a3e70); Stock courses return early without recording. This replaces
-// the TK43c/TK44 CD-LBN tap (deleted: the game serves 0x61413/14/16 at a
-// top, never the table's 0x61417/7d/da, TK44 section 7; the LBN proxy was
-// the wrong contract anyway, TKA1 F9). One count per post = one letter
-// per uber (Brad: "one per any uber, like SSX 3").
-constexpr uint32_t kUberSpeechEvent = 0x2133u; // Arcade_Uber (TK43 section 2.2)
-constexpr uint32_t kSpeechPostFunc = 0x2b1458u;
-
-inline bool isUberPost(uint32_t a2, uint32_t v0)
-{
-    return a2 == kUberSpeechEvent && v0 != 0u;
-}
-
-// TKL1: the post counter moved to the layer's tick-tagged PostQueue
-// (ps2_ssx3_tricky_layer.h); the EE wrapper records there and the VBlank
-// reducer drains it. This header keeps only the filter + constants.
+// tk-meter-1: letters follow SSX 3's uber level-ups (the layer's reducer,
+// lettersFromLevel), not the announcer's Arcade_Uber 0x2133 post (TK47).
 
 // TK43c: letter state machine (pure; the overlay owns the state).
-// One lit letter per uber tap, T->R->I->C->K->Y. Triggers arriving during
+// One lit letter per earned uber step, T->R->I->C->K->Y. Triggers arriving during
 // the fanfare flash are consumed but light nothing (triggers are minutes
 // apart; a mid-flash trigger cannot spell). The 6th letter opens the
 // 64-tick all-red flash; when it lapses the letters reset.
@@ -772,9 +745,9 @@ inline void composeHudInto(uint8_t *dst, int bw, int bh, int ox, int oy, int fw,
     L.sx = static_cast<float>(fw) / 640.0f;
     L.sy = static_cast<float>(fh) / 480.0f;
     L.fw = fw;
-    // TR3: coil cover, first, so every Tricky part lands on it.
-    const Rect cc = coilCoverRect(L);
-    smearCover(dst, bw, bh, cc.x - ox, cc.y - oy, cc.x + cc.w - ox, cc.y + cc.h - oy);
+    // tk-meter-1: no cover smears. The stock SSX 3 meter is no longer drawn
+    // on Tricky courses (the HUD-1P render wrapper clears its element bit),
+    // so the TR3 coil cover and the label cover would only blur the scene.
     // Pole through the stack (covers the SSX 3 red center line, x582-586):
     // Tricky's grey cylinder profile stretched across its width.
     blit(a, poleRect(), dst, bw, bh, L.X(584) - ox, L.Y(140) - oy, L.W(5), L.H(260));
@@ -793,9 +766,6 @@ inline void composeHudInto(uint8_t *dst, int bw, int bh, int ox, int oy, int fw,
     const Rect jewel = full ? jewelRedRect() : jewelGreyRect();
     const float dim = (full && ((tick >> 3) & 1u) != 0u) ? 0.82f : 1.0f;
     blit(a, jewel, dst, bw, bh, L.X(568) - ox, L.Y(107) - oy, L.W(40), L.H(36), dim);
-    // Label cover: feathered sky smear, no panel (Part 3). The chrome arch
-    // draws over it; the score (above y49) and jewel (below y101) are spared.
-    smearCover(dst, bw, bh, L.X(536) - ox, L.Y(49) - oy, L.X(628) - ox, L.Y(101) - oy);
     // Chrome arch (TK43a2): the 6 pre-rotated letter sprites at native size,
     // each placed at its offset from the stack center (x587.5) and jewel top
     // (y107) template-matched in Brad's recording (t135, t460).
@@ -994,8 +964,6 @@ inline void stampHudInto(uint8_t *tmp, int bw, int bh, int ox, int oy, const Hud
 {
     if (!tmp || !ss.ok || bw <= 0 || bh <= 0)
         return;
-    const Rect &cc = ss.coilCover;
-    smearCover(tmp, bw, bh, cc.x - ox, cc.y - oy, cc.x + cc.w - ox, cc.y + cc.h - oy);
     stampSprite(ss.pole, tmp, bw, bh, ss.poleDst.x - ox, ss.poleDst.y - oy);
     const int lit = litCoils(fill);
     for (int i = 0; i < kCoils; ++i)
@@ -1006,7 +974,6 @@ inline void stampHudInto(uint8_t *tmp, int bw, int bh, int ox, int oy, const Hud
     const bool dim = full && (((tick >> 3) & 1u) != 0u);
     stampSprite(full ? (dim ? ss.jewelImg[2] : ss.jewelImg[1]) : ss.jewelImg[0], tmp, bw, bh,
                 ss.jewelDst.x - ox, ss.jewelDst.y - oy);
-    smearCover(tmp, bw, bh, ss.smearX0 - ox, ss.smearY0 - oy, ss.smearX1 - ox, ss.smearY1 - oy);
     if (litLetters < 0)
         litLetters = 0;
     if (litLetters > 6)
@@ -1117,9 +1084,6 @@ inline void stampHudDirect(uint8_t *ahbBase, size_t strideBytes, const Rect &r, 
         return;
     uint8_t *base = ahbBase + static_cast<size_t>(r.y) * strideBytes + static_cast<size_t>(r.x) * 4u;
     const int bw = r.w, bh = r.h, ox = r.x, oy = r.y;
-    const Rect &cc = ss.coilCover;
-    smearCoverS<SwapRB>(base, strideBytes, bw, bh, cc.x - ox, cc.y - oy, cc.x + cc.w - ox,
-                        cc.y + cc.h - oy);
     stampSpriteS<SwapRB>(ss.pole, base, strideBytes, bw, bh, ss.poleDst.x - ox, ss.poleDst.y - oy);
     const int lit = litCoils(fill);
     for (int i = 0; i < kCoils; ++i)
@@ -1130,8 +1094,6 @@ inline void stampHudDirect(uint8_t *ahbBase, size_t strideBytes, const Rect &r, 
     const bool dim = full && (((tick >> 3) & 1u) != 0u);
     stampSpriteS<SwapRB>(full ? (dim ? ss.jewelImg[2] : ss.jewelImg[1]) : ss.jewelImg[0], base,
                          strideBytes, bw, bh, ss.jewelDst.x - ox, ss.jewelDst.y - oy);
-    smearCoverS<SwapRB>(base, strideBytes, bw, bh, ss.smearX0 - ox, ss.smearY0 - oy, ss.smearX1 - ox,
-                        ss.smearY1 - oy);
     if (litLetters < 0)
         litLetters = 0;
     if (litLetters > 6)
@@ -1258,32 +1220,9 @@ inline bool buildHudScene(HudScene &sc, const HudSprites &ss, const HudVisualKey
     if (!ss.ok || ss.region.w <= 0 || ss.region.h <= 0)
         return false;
     sc.region = ss.region;
-    const int ox = ss.region.x, oy = ss.region.y;
-    const int bw = ss.region.w, bh = ss.region.h;
-    (void)oy;
-    (void)bh;
-    // P1 smears, in stampHudDirect order (coil cover, then the label smear).
-    const int sx0[2] = {ss.coilCover.x, ss.smearX0};
-    const int sy0[2] = {ss.coilCover.y, ss.smearY0};
-    const int sx1[2] = {ss.coilCover.x + ss.coilCover.w, ss.smearX1};
-    const int sy1[2] = {ss.coilCover.y + ss.coilCover.h, ss.smearY1};
-    for (int i = 0; i < 2; ++i)
-    {
-        if (sx1[i] <= sx0[i] || sy1[i] <= sy0[i])
-            continue;
-        HudSceneSmear &sm = sc.smears[sc.nsmears++];
-        sm.x0 = sx0[i];
-        sm.y0 = sy0[i];
-        sm.x1 = sx1[i];
-        sm.y1 = sy1[i];
-        // smearCoverS edge columns (region coords), expressed in frame
-        // coords: lx = max(x0-2, ox), rx = min(x1+2, ox+bw-1).
-        const int rx0 = sx0[i] - ox, rx1 = sx1[i] - ox;
-        const int lx = rx0 - 2 < 0 ? 0 : rx0 - 2;
-        const int rx = rx1 + 2 > bw - 1 ? bw - 1 : rx1 + 2;
-        sm.lx = ox + lx;
-        sm.rx = ox + rx;
-    }
+    // P1 smears: none since tk-meter-1 (the stock meter is not drawn on
+    // Tricky courses, so nothing needs covering); nsmears stays 0 and the
+    // backends' P1 loop is empty.
     // P2 quads, in stampHudDirect draw order (pole, rings, jewel, arch,
     // pill, splash). Variant selection mirrors hudDrawList (same
     // expressions); dest rects are the same HudSprites rects. Degenerate
