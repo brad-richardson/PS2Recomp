@@ -26,7 +26,35 @@
 
 namespace
 {
-const char *kWorkRoot = "/Users/brad/dev/ssx3-work/np-fix-1/canon-test";
+// Canonical-transcript scratch space. The parent test creates a unique
+// directory per test under the platform temp root (overridable with
+// PS2X_NP_FIX_WORKROOT) and publishes it to re-exec children through the
+// environment, since fork+exec children cannot share test-local state.
+// Nothing under a lane or checkout directory is ever touched.
+std::string workRoot()
+{
+    if (const char *v = std::getenv("PS2X_NP_FIX_WORKROOT"))
+        return std::string(v);
+    std::error_code ec;
+    std::filesystem::path base = std::filesystem::temp_directory_path(ec);
+    if (ec)
+        base = std::filesystem::path("/tmp");
+    return (base / "ps2x-np-fix").string();
+}
+
+#if defined(__unix__) || defined(__APPLE__)
+std::string makeUniqueWorkRoot()
+{
+    std::error_code ec;
+    std::filesystem::path base = std::filesystem::temp_directory_path(ec);
+    if (ec)
+        base = std::filesystem::path("/tmp");
+    std::string tmpl = (base / "ps2x-np-fix-XXXXXX").string();
+    if (::mkdtemp(tmpl.data()) == nullptr)
+        return (base / "ps2x-np-fix-fallback").string();
+    return tmpl;
+}
+#endif
 
 struct EnvGuard
 {
@@ -171,7 +199,7 @@ void appendGifAd(std::vector<uint8_t> &dst, uint64_t value, uint64_t reg)
 int f2Child()
 {
     ::setenv("PS2X_NETPLAY_CANON", "1", 1);
-    ::setenv("PS2X_NETPLAY_CANON_DIR", (std::string(kWorkRoot) + "/f2").c_str(), 1);
+    ::setenv("PS2X_NETPLAY_CANON_DIR", (workRoot() + "/f2").c_str(), 1);
     auto be = ps2x_gs_headless::create();
     if (!be)
         return 20;
@@ -194,7 +222,7 @@ int f2Child()
 int f12EventChild()
 {
     ::setenv("PS2X_NETPLAY_CANON", "1", 1);
-    ::setenv("PS2X_NETPLAY_CANON_DIR", (std::string(kWorkRoot) + "/e").c_str(), 1);
+    ::setenv("PS2X_NETPLAY_CANON_DIR", (workRoot() + "/e").c_str(), 1);
     ps2_savestate::canonicalRecordEvent(120u, 999u, 3u, 7u, 555u, 4242u, 5u);
     return 0;
 }
@@ -202,7 +230,7 @@ int f12EventChild()
 int f12RiderChild()
 {
     ::setenv("PS2X_NETPLAY_CANON", "1", 1);
-    ::setenv("PS2X_NETPLAY_CANON_DIR", (std::string(kWorkRoot) + "/d").c_str(), 1);
+    ::setenv("PS2X_NETPLAY_CANON_DIR", (workRoot() + "/d").c_str(), 1);
     ps2_savestate::canonicalRecordRider(120u, 1u, 0u, 5u, "applied", true);
     ps2_savestate::canonicalRecordRider(120u, 1u, 1u, 5u, "applied", true);
     return 0;
@@ -211,11 +239,11 @@ int f12RiderChild()
 int f12SessionChild()
 {
     ::setenv("PS2X_NETPLAY_CANON", "1", 1);
-    ::setenv("PS2X_NETPLAY_CANON_DIR", (std::string(kWorkRoot) + "/s1").c_str(), 1);
+    ::setenv("PS2X_NETPLAY_CANON_DIR", (workRoot() + "/s1").c_str(), 1);
     ps2_savestate::canonicalRecordReadback(100u, ps2_savestate::canonicalNextReadbackTicket(),
                                             0x10u, 4u, 0x1234u);
     ps2_savestate::canonicalNewSession();
-    ::setenv("PS2X_NETPLAY_CANON_DIR", (std::string(kWorkRoot) + "/s2").c_str(), 1);
+    ::setenv("PS2X_NETPLAY_CANON_DIR", (workRoot() + "/s2").c_str(), 1);
     ps2_savestate::canonicalRecordReadback(100u, ps2_savestate::canonicalNextReadbackTicket(),
                                             0x10u, 4u, 0x1234u);
     return 0;
@@ -228,10 +256,14 @@ void register_np_fix_tests_body(TestCase &tc)
     tc.Run("F2 headless consume serves canonical bytes under CANON", [](TestCase &t)
            {
 #if defined(__unix__) || defined(__APPLE__)
+               EnvGuard root("PS2X_NP_FIX_WORKROOT");
+               root.set(makeUniqueWorkRoot().c_str());
                const int rc = runChild("f2");
                t.Equals(rc, 0, "headless consume returns want-bytes of 0xff under CANON");
+               std::error_code ecF2;
+               std::filesystem::remove_all(workRoot(), ecF2);
 #else
-            t.Fail("fork unavailable on this platform");
+            std::puts("[np-fix] SKIP F2: fork unavailable on this platform");
 #endif
            });
 
@@ -391,12 +423,14 @@ void register_np_fix_tests_body(TestCase &tc)
     tc.Run("F12 event rows carry the event value", [](TestCase &t)
            {
 #if defined(__unix__) || defined(__APPLE__)
+               EnvGuard root("PS2X_NP_FIX_WORKROOT");
+               root.set(makeUniqueWorkRoot().c_str());
                std::error_code ec;
-               std::filesystem::remove_all(std::string(kWorkRoot) + "/e", ec);
+               std::filesystem::remove_all(workRoot() + "/e", ec);
                const int rc = runChild("e");
                t.Equals(rc, 0, "event child runs");
                bool found = false;
-               for (const std::string &line : splitLines(readFile(std::string(kWorkRoot) + "/e/transcript.tsv")))
+               for (const std::string &line : splitLines(readFile(workRoot() + "/e/transcript.tsv")))
                {
                    if (line.rfind("E\t", 0) != 0)
                        continue;
@@ -405,37 +439,43 @@ void register_np_fix_tests_body(TestCase &tc)
                    t.Equals(splitTabs(line).size(), size_t{8}, "event row has the value column");
                }
                t.IsTrue(found, "an event row was recorded");
+               std::filesystem::remove_all(workRoot(), ec);
 #else
-            t.Fail("fork unavailable on this platform");
+            std::puts("[np-fix] SKIP F12 event rows: fork unavailable on this platform");
 #endif
            });
 
     tc.Run("F12 rider decisions are recorded in the transcript", [](TestCase &t)
            {
 #if defined(__unix__) || defined(__APPLE__)
+               EnvGuard root("PS2X_NP_FIX_WORKROOT");
+               root.set(makeUniqueWorkRoot().c_str());
                std::error_code ec;
-               std::filesystem::remove_all(std::string(kWorkRoot) + "/d", ec);
+               std::filesystem::remove_all(workRoot() + "/d", ec);
                const int rc = runChild("d");
                t.Equals(rc, 0, "rider child runs");
                size_t decisions = 0;
-               for (const std::string &line : splitLines(readFile(std::string(kWorkRoot) + "/d/transcript.tsv")))
+               for (const std::string &line : splitLines(readFile(workRoot() + "/d/transcript.tsv")))
                    if (line.rfind("D\t", 0) == 0)
                        ++decisions;
                t.Equals(decisions, size_t{2}, "both rider decisions recorded");
+               std::filesystem::remove_all(workRoot(), ec);
 #else
-            t.Fail("fork unavailable on this platform");
+            std::puts("[np-fix] SKIP F12 rider decisions: fork unavailable on this platform");
 #endif
            });
 
     tc.Run("F12 a new session retargets the trace and restarts tickets", [](TestCase &t)
            {
 #if defined(__unix__) || defined(__APPLE__)
+               EnvGuard root("PS2X_NP_FIX_WORKROOT");
+               root.set(makeUniqueWorkRoot().c_str());
                std::error_code ec;
-               std::filesystem::remove_all(std::string(kWorkRoot) + "/s1", ec);
-               std::filesystem::remove_all(std::string(kWorkRoot) + "/s2", ec);
+               std::filesystem::remove_all(workRoot() + "/s1", ec);
+               std::filesystem::remove_all(workRoot() + "/s2", ec);
                const int rc = runChild("s");
                t.Equals(rc, 0, "session child runs");
-               const std::string s2 = readFile(std::string(kWorkRoot) + "/s2/transcript.tsv");
+               const std::string s2 = readFile(workRoot() + "/s2/transcript.tsv");
                bool found = false;
                for (const std::string &line : splitLines(s2))
                {
@@ -448,8 +488,9 @@ void register_np_fix_tests_body(TestCase &tc)
                        t.Equals(f[2], std::string("0"), "ticket restarts in the new session");
                }
                t.IsTrue(found, "second session wrote its own transcript");
+               std::filesystem::remove_all(workRoot(), ec);
 #else
-            t.Fail("fork unavailable on this platform");
+            std::puts("[np-fix] SKIP F12 session retarget: fork unavailable on this platform");
 #endif
            });
 }
