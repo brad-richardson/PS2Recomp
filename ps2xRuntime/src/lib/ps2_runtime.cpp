@@ -40,6 +40,7 @@
 #include "ps2_turbo_boot.h" // BTS1: boot turbo yield latches
 #include "ps2_runtime_macros.h"
 #include "runtime/gs/gs_frontend.h"
+#include "runtime/gs/gs_headless_backend.h" // HDL1: no-raster referee backend
 #include "runtime/gs/gs_stream_capture.h"
 #include "runtime/gs/ps2_gs_external_backend.h"
 #include "runtime/gs/ps2_present_share.h"
@@ -4360,6 +4361,16 @@ bool PS2Runtime::syncCoreSubsystems()
             std::cerr << "[gs:external] live backend selected (PS2X_GS_BACKEND=external)" << std::endl;
         }
     }
+    // HDL1: PS2X_GS_BACKEND=headless installs the no-raster referee
+    // backend. The frontend still decodes every packet for guest-visible
+    // state; only rasterization, texture upload, VRAM maintenance,
+    // presents and the window are skipped. Every other value (including
+    // unset) keeps the previous backend selection exactly.
+    if (ps2x_gs_headless::requested())
+    {
+        m_gs.setRasterBackend(ps2x_gs_headless::create());
+        std::cerr << "[gs:headless] no-raster backend selected (PS2X_GS_BACKEND=headless)" << std::endl;
+    }
     m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
                                     { m_gs.processGIFPacket(data, size); });
     // GF1 (PS2X_GS_HANDOFF_DIET=1, default off): a cheaper unit -> GS worker
@@ -4741,7 +4752,12 @@ bool PS2Runtime::initialize(const char *title)
             initApp->onAppCmd = vk1OnAppCmd;
         }
 #else
-        InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
+        // HDL1: headless referee opens no window (PS2X_GS_BACKEND=headless).
+        // IsWindowReady() stays false, so teardown skips CloseWindow.
+        if (ps2x_gs_headless::requested())
+            std::cerr << "[gs:headless] no window (PS2X_GS_BACKEND=headless)" << std::endl;
+        else
+            InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
 #endif
 #if defined(PS2X_IOS)
         ps2x::ios::syncWindowSize();
@@ -7776,7 +7792,12 @@ void PS2Runtime::run()
 
     // A blank image to use as a framebuffer
     Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, BLANK);
-    Texture2D frameTex = LoadTextureFromImage(blank);
+    // HDL1: headless opens no window, so there is no GL context to load
+    // the frame texture into; the draw block below is skipped entirely.
+    const bool headlessNoRaster = ps2x_gs_headless::requested();
+    Texture2D frameTex = {0};
+    if (!headlessNoRaster)
+        frameTex = LoadTextureFromImage(blank);
     UnloadImage(blank);
 
     std::string asv1ColdLoadPath;
@@ -8185,6 +8206,15 @@ void PS2Runtime::run()
                                            static_cast<int>(presentAspect), bufW, bufH);
         }
 #endif
+        // HDL1: headless referee: no latch, no upload, no draw, no input
+        // poll, no swap. The guest runs on the game thread; scripted pad
+        // input needs nothing from the host window. The loop condition
+        // still joins on game-thread completion and stop requests.
+        if (headlessNoRaster)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
         UploadFrame(frameTex, this, presentWidth, presentHeight);
 
 #if defined(PS2X_IOS)
@@ -9129,8 +9159,12 @@ void PS2Runtime::run()
         m_debugUiShutdownCallback(*this, m_debugUiUserData);
         m_debugUiInitialized = false;
     }
-    UnloadTexture(frameTex);
-    CloseWindow();
+    // HDL1: headless never created the frame texture nor the window.
+    if (!headlessNoRaster)
+    {
+        UnloadTexture(frameTex);
+        CloseWindow();
+    }
 
     RUNTIME_LOG("[run] exiting loop");
 
