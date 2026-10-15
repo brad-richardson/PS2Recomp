@@ -46,18 +46,18 @@ namespace
             alignas(16) uint32_t words[4];
             for (uint32_t lane = 0; lane < 4u; ++lane)
                 words[lane] = leanEdgeBits(rnd);
-            ctx.vu0_vf[reg] = _mm_loadu_si128(reinterpret_cast<const __m128i *>(words));
+            ctx.vu0_vf[reg] = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i *>(words)));
         }
         for (uint32_t reg = 0; reg < 16u; ++reg)
             ctx.vi[reg] = static_cast<uint16_t>(rnd.next(0x10000u));
         alignas(16) uint32_t accWords[4];
         for (uint32_t lane = 0; lane < 4u; ++lane)
             accWords[lane] = leanEdgeBits(rnd);
-        ctx.vu0_acc = _mm_loadu_si128(reinterpret_cast<const __m128i *>(accWords));
+        ctx.vu0_acc = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i *>(accWords)));
         alignas(16) uint32_t rWords[4];
         for (uint32_t lane = 0; lane < 4u; ++lane)
             rWords[lane] = leanEdgeBits(rnd);
-        ctx.vu0_r = _mm_loadu_si128(reinterpret_cast<const __m128i *>(rWords));
+        ctx.vu0_r = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i *>(rWords)));
         {
             uint32_t qBits = leanEdgeBits(rnd);
             float q = 0.0f;
