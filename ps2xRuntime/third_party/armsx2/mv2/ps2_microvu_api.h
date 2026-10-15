@@ -15,6 +15,16 @@
 extern "C" {
 #endif
 
+// Architectural STATUS is 12 bits; microVU stores current/sticky Z and S
+// as lane masks and shifts U/O/I/D into bits 16..25. Match PCSX2 arm64
+// SFLAGd (microVU_Alloc-arm64.inl), inverse of SFLAGc at export. In
+// particular architectural sticky D (0x800) must seed packed 0x02000000.
+static inline uint32_t ps2x_microvu_pack_status(uint32_t status)
+{
+    return ((status >> 3) & 0x18u) | ((status << 11) & 0x1800u) |
+           ((status << 14) & 0x03cf0000u);
+}
+
 typedef struct ps2x_microvu_state {
     uint32_t vf[32][4];
     uint32_t vi[16];

@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_microvu.h"
+#include "ps2_microvu_api.h"
 #include "runtime/gs/ps2_gif_arbiter.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
@@ -494,6 +495,33 @@ void register_ps2_vu1_tests()
 {
     MiniTest::Case("PS2VU1", [](TestCase &tc)
     {
+        tc.Run("microVU bridge STATUS packing preserves all architectural flags", [](TestCase &t)
+        {
+            // PCSX2 arm64 SFLAGc: lane-mask reductions plus U/O/I/D.
+            const auto exportedStatus = [](uint32_t packed) -> uint32_t {
+                return uint32_t((packed & 0x0f00u) != 0) |
+                       (uint32_t((packed & 0xf000u) != 0) << 1) |
+                       (uint32_t((packed & 0x000fu) != 0) << 6) |
+                       (uint32_t((packed & 0x00f0u) != 0) << 7) |
+                       ((packed & 0xffff0000u) >> 14);
+            };
+            for (uint32_t status = 0; status < 4096; ++status)
+                t.Equals(exportedStatus(ps2x_microvu_pack_status(status)), status,
+                         "all 12 current and sticky flags survive seed/export");
+            t.Equals(ps2x_microvu_pack_status(0), uint32_t{0},
+                     "zero initial STATUS leaves JIT startup unchanged");
+            t.Equals(ps2x_microvu_pack_status(0x8c3), uint32_t{0x02001818},
+                     "first race divergence retains sticky divide-by-zero");
+            uint32_t sticky = 0xfc0u;
+            for (unsigned job = 0; job < 16; ++job)
+            {
+                // A fresh job exports and re-seeds all four live flag slots.
+                // With no flag-writing instruction, sticky flags must persist.
+                const uint32_t packed = ps2x_microvu_pack_status(sticky);
+                sticky = exportedStatus(packed);
+                t.Equals(sticky, uint32_t{0xfc0}, "sticky flags survive fresh jobs");
+            }
+        });
 #if PS2X_ENABLE_DET_HASH_TAP
         tc.Run("deterministic count includes VU1 starts, excludes resume and VU0, resets with instance", [](TestCase &t)
         {
