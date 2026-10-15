@@ -110,18 +110,22 @@ case "$PLAT" in
     ln -s vendor-pcsx2/common "$ASM/common"
     ln -s vendor-pcsx2/cmake "$ASM/cmake"
     cp -a "$HERE/platform/linux" "$ASM/linux-platform"
+    # Submodule contents are not in the git archive; the platform's ../ refs use
+    # the ARMSX2 worktree 3rdparty (mounted into the container at /armsx2-3rdparty).
+    ln -s /armsx2-3rdparty "$ASM/linux-platform/3rdparty"
     IMAGE=${MVU_LINUX_IMAGE:-ssx3-srv2}
     docker run --rm --platform linux/arm64 \
       --memory 16g --memory-swap 16g --oom-score-adj=500 \
       -v "$ASM:/asm" -v "$BLD:/build" -v "$PIN/microvu/om1rt-inputs:/om1rt:ro" \
+      -v "$ARMSX2/3rdparty:/armsx2-3rdparty:ro" \
       "$IMAGE" bash -lc '
 set -euo pipefail
 # Vendored plutovg/plutosvg (PCSX2 3rdparty sources; SearchForStuff wants their
 # CMake configs, which the Mac dep bundle supplies prebuilt).
-cmake -S /asm/vendor-pcsx2/3rdparty/plutovg -B /tmp/plutovg -G Ninja -DCMAKE_BUILD_TYPE=Release \
+cmake -S /armsx2-3rdparty/plutovg -B /tmp/plutovg -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_SHARED_LIBS=ON -DCMAKE_C_COMPILER=clang
 cmake --build /tmp/plutovg -j 4 && cmake --install /tmp/plutovg
-cmake -S /asm/vendor-pcsx2/3rdparty/plutosvg -B /tmp/plutosvg -G Ninja -DCMAKE_BUILD_TYPE=Release \
+cmake -S /armsx2-3rdparty/plutosvg -B /tmp/plutosvg -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_SHARED_LIBS=ON -DCMAKE_PREFIX_PATH=/usr/local -DCMAKE_C_COMPILER=clang
 cmake --build /tmp/plutosvg -j 4 && cmake --install /tmp/plutosvg
 cmake -S /asm/linux-platform -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
