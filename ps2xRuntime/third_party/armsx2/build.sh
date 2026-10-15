@@ -4,7 +4,7 @@
 # GE1S Mac recipe and the GI1/IG1 iOS recipes; only this file's location
 # changed (PS2Recomp ps2xRuntime/third_party/armsx2, AX4 §2.2).
 #
-# Usage: build.sh <mac|android|ios|ios-sim> --armsx2 <dir> --build-root <dir> [--jobs N]
+# Usage: build.sh <mac|linux|android|ios|ios-sim> --armsx2 <dir> --build-root <dir> [--jobs N]
 #   mac:      libge1_gs.dylib + ge1_replay (Metal + MoltenVK) + libmv2_microvu.dylib
 #             (om1rt recipe, pinned OM1RT_* inputs) via platform/mac.
 #   android:  assembles a fork-shaped srcdir (vendor = --armsx2 HEAD, adapter +
@@ -37,7 +37,7 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
-case "$PLAT" in mac|android|ios|ios-sim) ;; *) echo "usage: build.sh <mac|android|ios|ios-sim> --armsx2 <dir> --build-root <dir> [--jobs N]" >&2; exit 2;; esac
+case "$PLAT" in mac|linux|android|ios|ios-sim) ;; *) echo "usage: build.sh <mac|linux|android|ios|ios-sim> --armsx2 <dir> --build-root <dir> [--jobs N]" >&2; exit 2;; esac
 [ -n "$ARMSX2" ] || { echo "missing --armsx2 <ARMSX2 worktree>" >&2; exit 2; }
 [ -n "$BUILD_ROOT" ] || { echo "missing --build-root <scratch dir>" >&2; exit 2; }
 [ -d "$ARMSX2/pcsx2" ] || { echo "not an ARMSX2 tree: $ARMSX2" >&2; exit 2; }
@@ -93,6 +93,37 @@ case "$PLAT" in
     echo "== libs (armsx2=$ARMSX2_SHA repo=$REPO_SHA)"
     sha2 "$BLD/ge1-adapter/libge1_gs.dylib"
     sha2 "$BLD/om1rt-adapter/libmv2_microvu.dylib"
+    echo "BUILD_DIR=$BLD"
+    ;;
+  linux)
+    [ -n "$PIN" ] || { echo "linux requires SSX3_MAINTAINER_PIN_ROOT" >&2; exit 2; }
+    [ -d "$PIN/microvu/om1rt-inputs" ] || { echo "missing pinned input $PIN/microvu/om1rt-inputs" >&2; exit 2; }
+    command -v docker >/dev/null || { echo "linux needs docker" >&2; exit 2; }
+    ASM=$BUILD_ROOT/linux-asm-$STAMP; BLD=$BUILD_ROOT/linux-build-$STAMP
+    [ -e "$ASM" ] || [ -e "$BLD" ] && { echo "refusing to reuse $ASM or $BLD" >&2; exit 2; }
+    mkdir -p "$ASM/vendor-pcsx2" "$BLD"
+    git -C "$ARMSX2" archive HEAD | tar -x -C "$ASM/vendor-pcsx2"
+    cp -a "$HERE/om1/rt" "$ASM/om1rt-adapter"
+    ln -s vendor-pcsx2/pcsx2 "$ASM/pcsx2"
+    ln -s vendor-pcsx2/tests "$ASM/tests"
+    ln -s vendor-pcsx2/3rdparty "$ASM/3rdparty"
+    ln -s vendor-pcsx2/common "$ASM/common"
+    ln -s vendor-pcsx2/cmake "$ASM/cmake"
+    cp -a "$HERE/platform/linux" "$ASM/linux-platform"
+    docker run --rm --platform linux/arm64 \
+      --memory 16g --memory-swap 16g --oom-score-adj=500 \
+      -v "$ASM:/asm" -v "$BLD:/build" -v "$PIN/microvu/om1rt-inputs:/om1rt:ro" \
+      ssx3-srv2 bash -lc '
+set -euo pipefail
+cmake -S /asm/linux-platform -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_CXX_FLAGS="-stdlib=libc++" -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++" \
+  -DOM1RT_WORKTREE=/om1rt/ps2recomp-4f1a953 -DOM1RT_SRC=/om1rt/rt-src \
+  -DOM1_REC_DIR=/om1rt -DOM1_WORKTREE=/om1rt/ps2recomp-4f1a953 \
+  -DOM1_CAPTURE_INCLUDE=/om1rt/capture-include
+cmake --build /build --target mv2_microvu -j 8'
+    echo "== libs (armsx2=$ARMSX2_SHA repo=$REPO_SHA)"
+    sha2 "$BLD/om1rt-adapter/libmv2_microvu.so"
     echo "BUILD_DIR=$BLD"
     ;;
   android)

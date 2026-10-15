@@ -22,7 +22,7 @@
 #include <mach/mach.h>
 #endif
 
-#if defined(PS2X_MICROVU_STATIC) || defined(__ANDROID__) || defined(__APPLE__)
+#if defined(PS2X_MICROVU_STATIC) || defined(__ANDROID__) || defined(__APPLE__) || defined(__linux__)
 #define PS2X_MICROVU_LOADABLE 1
 #endif
 #if defined(PS2X_MICROVU_LOADABLE) && !defined(PS2X_MICROVU_STATIC)
@@ -204,7 +204,7 @@ bool configure(bool mtvu_threaded, std::string& error)
     const char* lib = std::getenv("PS2X_MICROVU_LIB");
     std::string fallback;
     if (!lib || !*lib) {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || (defined(__linux__) && !defined(__APPLE__))
         fallback = offline ? "libom1_offline.so" : "libmv2_microvu.so";
 #else
         fallback = offline ? "libom1_offline.dylib" : "libmv2_microvu.dylib";
