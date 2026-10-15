@@ -311,6 +311,7 @@ extern "C" void rlDrawRenderBatchActive(void);
 #include <fstream>
 #include <algorithm>
 #include <array>
+#include <utility>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -2332,51 +2333,45 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-menu",
                            applyTrickyMenu);
 
 // tk-meter-1: the stock SSX 3 meter is not drawn on Tricky courses. SSX 3's
-// HUD-1P renderer (cOVStateHUD1P_onRender2D, 0x1EC3F8) builds its element
-// mask from [hud+0x3CC] (0x1ecb08) and skips the meter (coil fill cases 5/6,
-// case 8, and the post-loop coil/ball/SUPER UBER block at 0x1efc50) when bit
-// 0x200000 is clear. While the Tricky meter replaces it
-// (ps2_ssx3_tricky_layer::suppressStockMeter), the wrapper clears that bit
-// for this render only and puts it back afterwards, so the guest's own
-// element switch hides the meter: nothing is painted over (TR3's covers are
-// gone). Tricky-only and render-only: the bit is restored before the guest
-// runs anything else, and the rider/meter/race words are identical with the
-// meter hidden (tk-meter-1 D1-D4, V-runs). Knob off (PS2X_SSX3_TRICKY_HUD
-// unset) wraps nothing.
+// HUD-1P renderer (cOVStateHUD1P_onRender2D, 0x1EC3F8) draws the meter
+// through three helpers; while the Tricky meter replaces it
+// (ps2_ssx3_tricky_layer::suppressStockMeter) the wrappers below skip exactly
+// the meter's call sites (kStockMeterSites: coil fill, gold coil + glow, coil
+// base, ball, SUPER UBER label + letter boxes) and pass every other call
+// through. Nothing is painted over (TR3's covers are gone). Render-only: the
+// rider/meter/race words and the AP trajectory are byte-identical with the
+// sites skipped (tk-meter-1 V-runs). Knob off (PS2X_SSX3_TRICKY_HUD unset)
+// wraps nothing; a different ELF (call-site words) refuses and keeps the
+// stock meter.
 namespace
 {
-    PS2Runtime::RecompiledFunction g_tkHud1pRender = nullptr;
+    constexpr uint32_t kTkMeterFns[] = {0x21d1a0u, 0x1f1190u, 0x21ed48u};
+    constexpr size_t kTkMeterFnN = sizeof(kTkMeterFns) / sizeof(kTkMeterFns[0]);
+    PS2Runtime::RecompiledFunction g_tkMeterOrig[kTkMeterFnN] = {};
     bool g_tkMeterHiddenLogged = false;
 
-    void tkHud1pRenderWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    template <size_t I>
+    void tkStockMeterWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        uint32_t off = 0u;
-        const bool hide = rdram && ctx && ps2_ssx3_tricky_layer::suppressStockMeter() &&
-                          ps2_ssx3_tricky_hud::validateGuestPtr(
-                              getRegU32(ctx, 4), ps2_ssx3_tricky_layer::kHudFlagsOff + 4u, PS2_RAM_SIZE, off);
-        uint32_t before = 0u;
-        if (hide)
+        if (ctx && ps2_ssx3_tricky_layer::isStockMeterSite(kTkMeterFns[I], getRegU32(ctx, 31)) &&
+            ps2_ssx3_tricky_layer::suppressStockMeter())
         {
-            off += ps2_ssx3_tricky_layer::kHudFlagsOff;
-            std::memcpy(&before, rdram + off, 4u);
-            const uint32_t hidden = ps2_ssx3_tricky_layer::meterHiddenFlags(before);
-            std::memcpy(rdram + off, &hidden, 4u);
             if (!g_tkMeterHiddenLogged)
             {
                 g_tkMeterHiddenLogged = true;
-                std::fprintf(stderr, "[ssx3-tricky-hud] stock meter hidden (HUD flags 0x%08x -> 0x%08x)\n",
-                             before, hidden);
+                std::fprintf(stderr, "[ssx3-tricky-hud] stock meter hidden (first skipped call 0x%x from 0x%x)\n",
+                             kTkMeterFns[I], getRegU32(ctx, 31));
             }
+            return; // skipped draw: the dispatcher resumes at the return address
         }
-        if (g_tkHud1pRender)
-            g_tkHud1pRender(rdram, ctx, runtime);
-        if (hide)
-        {
-            uint32_t after = 0u;
-            std::memcpy(&after, rdram + off, 4u);
-            const uint32_t restored = ps2_ssx3_tricky_layer::meterRestoredFlags(before, after);
-            std::memcpy(rdram + off, &restored, 4u);
-        }
+        if (g_tkMeterOrig[I])
+            g_tkMeterOrig[I](rdram, ctx, runtime);
+    }
+
+    template <size_t... I>
+    constexpr std::array<PS2Runtime::RecompiledFunction, sizeof...(I)> tkStockMeterTable(std::index_sequence<I...>)
+    {
+        return {{&tkStockMeterWrapper<I>...}};
     }
 
     void applyTrickyStockMeter(PS2Runtime &runtime)
@@ -2384,43 +2379,43 @@ namespace
         const char *env = std::getenv("PS2X_SSX3_TRICKY_HUD");
         if (!env || env[0] != '1')
             return;
-        // Entry and layout words: the render's prologue, the flags load and
-        // the meter-block gate (refuse on any other ELF).
-        struct Guard
-        {
-            uint32_t pc, word;
-        };
-        static const Guard kGuards[] = {
-            {0x1ec3f8u, 0x27bdfb90u}, // addiu $sp,$sp,-0x470
-            {0x1ecb08u, 0x8ec203ccu}, // lw $v0,0x3cc($s6)
-            {0x1efc50u, 0x1040017bu}, // beqz $v0 (bit 0x200000) over the meter block
-        };
+        // Every listed call site must hold `jal <helper>` (ra - 8): refuse on
+        // any other ELF and keep the stock meter.
         const uint8_t *ram = runtime.memory().getRDRAM();
-        for (const Guard &g : kGuards)
+        for (const ps2_ssx3_tricky_layer::StockMeterSite &st : ps2_ssx3_tricky_layer::kStockMeterSites)
         {
+            const uint32_t want = 0x0c000000u | ((st.fn >> 2) & 0x03ffffffu);
             uint32_t word = 0u;
             if (ram)
-                std::memcpy(&word, ram + (g.pc & PS2_RAM_MASK), 4u);
-            if (!ram || word != g.word)
+                std::memcpy(&word, ram + ((st.ra - 8u) & PS2_RAM_MASK), 4u);
+            if (!ram || word != want)
             {
                 std::fprintf(stderr,
                              "[ssx3-tricky-hud] refused: 0x%x reads 0x%08x, expected 0x%08x; stock meter kept\n",
-                             g.pc, word, g.word);
+                             st.ra - 8u, word, want);
                 return;
             }
         }
-        g_tkHud1pRender = runtime.lookupFunction(0x1ec3f8u);
-        if (!g_tkHud1pRender)
+        static const auto table = tkStockMeterTable(std::make_index_sequence<kTkMeterFnN>{});
+        for (size_t i = 0; i < kTkMeterFnN; ++i)
         {
-            std::fprintf(stderr, "[ssx3-tricky-hud] refused: no function at 0x1ec3f8; stock meter kept\n");
-            return;
+            g_tkMeterOrig[i] = runtime.lookupFunction(kTkMeterFns[i]);
+            if (!g_tkMeterOrig[i])
+            {
+                std::fprintf(stderr, "[ssx3-tricky-hud] refused: no function at 0x%x; stock meter kept\n",
+                             kTkMeterFns[i]);
+                return;
+            }
         }
-        if (!runtime.replaceFunction(0x1ec3f8u, &tkHud1pRenderWrapper))
-        {
-            std::fprintf(stderr, "[ssx3-tricky-hud] cannot wrap 0x1ec3f8\n");
-            std::abort();
-        }
-        std::fprintf(stderr, "[ssx3-tricky-hud] HUD-1P render wrapped at 0x1ec3f8 (stock meter hidden on Tricky)\n");
+        for (size_t i = 0; i < kTkMeterFnN; ++i)
+            if (!runtime.replaceFunction(kTkMeterFns[i], table[i]))
+            {
+                std::fprintf(stderr, "[ssx3-tricky-hud] cannot wrap 0x%x\n", kTkMeterFns[i]);
+                std::abort();
+            }
+        std::fprintf(stderr, "[ssx3-tricky-hud] stock meter draws wrapped (%zu sites; hidden on Tricky)\n",
+                     sizeof(ps2_ssx3_tricky_layer::kStockMeterSites) /
+                         sizeof(ps2_ssx3_tricky_layer::kStockMeterSites[0]));
     }
 }
 

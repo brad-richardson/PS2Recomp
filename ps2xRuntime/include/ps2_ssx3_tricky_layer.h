@@ -12,8 +12,8 @@
 //   F4 (shared engine knobs in the Tricky launcher) is out of scope.
 //
 // Threading: the reducer runs on the EE thread at VBlankStart, once per
-// guest vsync, after the interval's EE work. The HUD-1P render wrapper
-// (tk-meter-1) runs on the same thread and only asks suppressStockMeter(). The
+// guest vsync, after the interval's EE work. The stock-meter draw wrappers
+// (tk-meter-1) run on the same thread and only ask suppressStockMeter(). The
 // present paths (host loop, GS worker) and the audio callbacks consume the
 // immutable packet / song commands without touching guest memory.
 //
@@ -655,30 +655,43 @@ inline void onStateLoaded(uint8_t *rdram, size_t ramSize, uint64_t tick)
 
 // ---- H1 (tk-meter-1): the stock SSX 3 meter on Tricky courses -------------
 // True while the Tricky meter replaces SSX 3's: Tricky course, HUD layer on,
-// atlas valid. The HUD-1P render wrapper then clears the guest's own meter
-// element bit for that render (no paint-over). EE thread only (same thread
-// as the reducer, which owns inTricky and the atlas).
+// atlas valid. The draw wrappers in ps2_runtime.cpp then skip the stock
+// meter's own draw calls (no paint-over). EE thread only (same thread as
+// the reducer, which owns inTricky and the atlas).
 inline bool suppressStockMeter()
 {
     const Reducer &r = reducer();
     return config().hud && r.inTricky && r.atlas.ok;
 }
 
-// SSX 3's HUD element flags ([hud+0x3CC], read by cOVStateHUD1P_onRender2D
-// at 0x1ecb08): bit 0x200000 gates the meter's message cases (types 5, 6, 8)
-// and the post-loop block with the coil, ball and SUPER UBER label.
-constexpr uint32_t kHudFlagsOff = 0x3ccu;
-constexpr uint32_t kHudMeterBit = 0x200000u;
+// The stock meter's draw calls inside cOVStateHUD1P_onRender2D (0x1EC3F8),
+// as (helper, return address). Measured by tk-meter-1 (D1/D4 call-site skips
+// and the level-3 call log): 0x21D1A0 draws the coil fill colour (message
+// types 5/6), the gold uber coil with its glow, and the coil base; 0x1F1190
+// the ball; 0x21ED48 the SUPER UBER label with its lit-letter boxes. Every
+// other call of these helpers (score popups, trick names, timer) is kept.
+// Skipping at the leaf is deliberate: the render itself can unwind at a
+// scheduler checkpoint and resume outside any wrapper, so state toggled
+// around the whole render does not hold (tk-meter-1 V-after).
+struct StockMeterSite
+{
+    uint32_t fn;
+    uint32_t ra;
+};
+constexpr StockMeterSite kStockMeterSites[] = {
+    {0x21d1a0u, 0x1ecff4u}, // coil fill (types 5/6, jal at 0x1ecfec)
+    {0x21d1a0u, 0x1eff08u}, // gold uber coil + glow (jal at 0x1eff00)
+    {0x21d1a0u, 0x1f0044u}, // coil base (jal at 0x1f003c)
+    {0x1f1190u, 0x1efdb4u}, // ball (jal at 0x1efdac)
+    {0x21ed48u, 0x1f019cu}, // SUPER UBER label + letter boxes (jal at 0x1f0194)
+};
 
-// Pure seam: the flags the render sees, and the word restored afterwards
-// (the render's own writes kept; only our cleared bit put back).
-inline uint32_t meterHiddenFlags(uint32_t flags)
+inline bool isStockMeterSite(uint32_t fn, uint32_t ra)
 {
-    return flags & ~kHudMeterBit;
-}
-inline uint32_t meterRestoredFlags(uint32_t before, uint32_t after)
-{
-    return after | (before & kHudMeterBit);
+    for (const StockMeterSite &s : kStockMeterSites)
+        if (s.fn == fn && s.ra == ra)
+            return true;
+    return false;
 }
 
 } // namespace ps2_ssx3_tricky_layer

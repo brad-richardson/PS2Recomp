@@ -486,15 +486,19 @@ void register_ps2_ssx3_tricky_layer_tests()
             t.IsTrue(latestPacket(p) && p.litLetters == 3, "steady level, steady letters");
             resetLayerForTest();
             clearConfigForTest(); });
-        tc.Run("stock meter suppression: Tricky + HUD + atlas only; bit masks", [](TestCase &t)
+        tc.Run("stock meter suppression: Tricky + HUD + atlas only; meter call sites", [](TestCase &t)
                {
             using namespace ps2_ssx3_tricky_layer;
             using namespace ps2_ssx3_tricky_hud;
-            t.IsTrue(meterHiddenFlags(0xffffffffu) == 0xffdfffffu, "clears 0x200000 only");
-            t.IsTrue(meterHiddenFlags(0x00000401u) == 0x00000401u, "bit already clear");
-            t.IsTrue(meterRestoredFlags(0x00200401u, 0x00000401u) == 0x00200401u, "bit put back");
-            t.IsTrue(meterRestoredFlags(0x00000401u, 0x00000401u) == 0x00000401u, "clear stays clear");
-            t.IsTrue(meterRestoredFlags(0x00200000u, 0x00000010u) == 0x00200010u, "render's own writes kept");
+            t.IsTrue(isStockMeterSite(0x21d1a0u, 0x1ecff4u), "coil fill site");
+            t.IsTrue(isStockMeterSite(0x21d1a0u, 0x1eff08u), "gold coil site");
+            t.IsTrue(isStockMeterSite(0x21d1a0u, 0x1f0044u), "coil base site");
+            t.IsTrue(isStockMeterSite(0x1f1190u, 0x1efdb4u), "ball site");
+            t.IsTrue(isStockMeterSite(0x21ed48u, 0x1f019cu), "label site");
+            t.IsTrue(!isStockMeterSite(0x21ed48u, 0x1ed894u), "label helper elsewhere kept");
+            t.IsTrue(!isStockMeterSite(0x1f1190u, 0x21f614u), "popup glow kept");
+            t.IsTrue(!isStockMeterSite(0x1f1190u, 0x1f036cu), "other 0x1f1190 call kept");
+            t.IsTrue(!isStockMeterSite(0x1f16c0u, 0x1f0f3cu), "race timer kept");
             resetLayerForTest();
             setConfigForTest(parseConfig("1", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
             std::vector<uint8_t> ram(kRamSize, 0);

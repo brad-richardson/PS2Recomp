@@ -746,7 +746,7 @@ inline void composeHudInto(uint8_t *dst, int bw, int bh, int ox, int oy, int fw,
     L.sy = static_cast<float>(fh) / 480.0f;
     L.fw = fw;
     // tk-meter-1: no cover smears. The stock SSX 3 meter is no longer drawn
-    // on Tricky courses (the HUD-1P render wrapper clears its element bit),
+    // on Tricky courses (its draw calls are skipped at the HUD-1P renderer),
     // so the TR3 coil cover and the label cover would only blur the scene.
     // Pole through the stack (covers the SSX 3 red center line, x582-586):
     // Tricky's grey cylinder profile stretched across its width.
