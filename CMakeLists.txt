@@ -161,6 +161,18 @@ if(PS2X_BUILD_RUNTIME)
     add_subdirectory("ps2xRuntime")
 endif()
 
+# module-seam-1: the SSX 3 game module (games/ssx3/module), attached to the
+# runner here and to the product suite in ps2xTest. "none" builds the
+# generic runtime with no game module.
+set(PS2X_GAME_MODULE "ssx3" CACHE STRING "Game module linked into the runner and ps2x_tests (ssx3|none)")
+set_property(CACHE PS2X_GAME_MODULE PROPERTY STRINGS ssx3 none)
+if(PS2X_BUILD_RUNTIME AND PS2X_GAME_MODULE STREQUAL "ssx3")
+    add_subdirectory("games/ssx3/module")
+    ps2x_attach_game_module(ps2EntryRunner ssx3_game_module)
+elseif(NOT PS2X_GAME_MODULE STREQUAL "none")
+    message(FATAL_ERROR "PS2X_GAME_MODULE=${PS2X_GAME_MODULE}: want ssx3 or none")
+endif()
+
 # HAL1: app-local libhardware shim from source (Android only). The 'hardware'
 # target builds libhardware.so, which the APK packages from this build, not
 # from -Pps2xJniLibsDir (a jniLibs copy is a hard gradle error).

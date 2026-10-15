@@ -518,6 +518,7 @@ endfunction()
 add_library(ps2_runtime STATIC
     src/lib/ps2_build_id.cpp
     src/lib/game_overrides.cpp
+    src/lib/game_module_none.cpp
     src/lib/gs/ps2_gif_arbiter.cpp
     src/lib/gs/gs_stream_capture.cpp
     src/lib/gs/gs_worker.cpp
@@ -677,6 +678,12 @@ if(TARGET raylib)
 endif()
 
 target_link_libraries(ps2_runtime PUBLIC ps2_gs_shadow)
+# module-seam-1: the no-module default must stay its own archive member
+# (never merged into another object), or it would collide with attach glue.
+set_source_files_properties(src/lib/game_module_none.cpp PROPERTIES
+    SKIP_UNITY_BUILD_INCLUSION ON
+    SKIP_PRECOMPILE_HEADERS ON)
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GameModule.cmake")
 target_link_libraries(ps2_runtime PRIVATE ${CMAKE_DL_LIBS}) # GE1: load the swappable GS C API at runtime.
 
 if(PS2X_ENABLE_IOP_RPC_TRACE)

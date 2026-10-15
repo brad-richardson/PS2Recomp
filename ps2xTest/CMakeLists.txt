@@ -35,7 +35,6 @@ add_library(ps2_test_lib STATIC
     src/ps2_ssx3_tricky_menu_tests.cpp
     src/ps2_ssx3_lod_tests.cpp
     src/ps2_native_world_tests.cpp
-    src/ps2_ssx3_anim_pick_guard_tests.cpp
     src/ps2_ssx3_tricky_hud_tests.cpp
     src/ps2_ssx3_tricky_song_tests.cpp
     src/ps2_ssx3_tricky_gems_tests.cpp
@@ -157,40 +156,68 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(ps2_test_lib PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
-add_executable(ps2x_tests
-    src/main.cpp
-    $<TARGET_OBJECTS:ps2_test_function_table>
-)
+# module-seam-1: ps2x_tests is the product suite (the attached game module
+# and its tests, see below); ps2x_tests_generic is the same suite with no
+# game module linked, proving the runtime builds and passes without one.
+set(PS2X_TEST_BINARIES ps2x_tests ps2x_tests_generic)
+foreach(_ps2x_test_bin IN LISTS PS2X_TEST_BINARIES)
+    add_executable(${_ps2x_test_bin}
+        src/main.cpp
+        $<TARGET_OBJECTS:ps2_test_function_table>
+    )
+endforeach()
 
 option(PRINT_GENERATED_CODE "Print generated code in tests" OFF)
 if(PRINT_GENERATED_CODE)
 
-    target_compile_definitions(ps2x_tests PRIVATE PRINT_GENERATED_CODE)
+    foreach(_ps2x_test_bin IN LISTS PS2X_TEST_BINARIES)
+        target_compile_definitions(${_ps2x_test_bin} PRIVATE PRINT_GENERATED_CODE)
+    endforeach()
     target_compile_definitions(ps2_test_lib PRIVATE PRINT_GENERATED_CODE)
 endif()
 
-target_include_directories(ps2x_tests PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/ps2xRecomp/include
-    ${CMAKE_SOURCE_DIR}/ps2xAnalyzer/include
-    ${CMAKE_SOURCE_DIR}/ps2xRuntime/include
-)
+foreach(_ps2x_test_bin IN LISTS PS2X_TEST_BINARIES)
+    target_include_directories(${_ps2x_test_bin} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/ps2xRecomp/include
+        ${CMAKE_SOURCE_DIR}/ps2xAnalyzer/include
+        ${CMAKE_SOURCE_DIR}/ps2xRuntime/include
+    )
 
-target_link_libraries(ps2x_tests PRIVATE
-    ps2_test_lib
-    ps2_recomp_lib
-    ps2_analyzer_lib
-    ps2_runtime
-)
+    target_link_libraries(${_ps2x_test_bin} PRIVATE
+        ps2_test_lib
+        ps2_recomp_lib
+        ps2_analyzer_lib
+        ps2_runtime
+    )
+endforeach()
+
+# module-seam-1: the game module (games/ssx3/module) and its tests go into the
+# product suite only. With PS2X_GAME_MODULE=none both binaries are generic.
+if(TARGET ssx3_game_module)
+    get_target_property(PS2X_SSX3_MODULE_TESTS ssx3_game_module PS2X_GAME_MODULE_TESTS)
+    target_sources(ps2x_tests PRIVATE ${PS2X_SSX3_MODULE_TESTS})
+    target_compile_definitions(ps2x_tests PRIVATE PS2X_TEST_GAME_MODULE_SSX3=1)
+    ps2x_attach_game_module(ps2x_tests ssx3_game_module)
+    set(PS2X_TEST_NO_MODULE_BINARIES ps2x_tests_generic)
+else()
+    set(PS2X_TEST_NO_MODULE_BINARIES ${PS2X_TEST_BINARIES})
+endif()
+foreach(_ps2x_test_bin IN LISTS PS2X_TEST_NO_MODULE_BINARIES)
+    target_sources(${_ps2x_test_bin} PRIVATE src/game_module_none_tests.cpp)
+    target_compile_definitions(${_ps2x_test_bin} PRIVATE PS2X_TEST_NO_GAME_MODULE=1)
+endforeach()
 
 # VU/GS tests intentionally instantiate large interpreter state.
 # Windows executables default to a much smaller stack than Linux, and
 # sanitizer/debug instrumentation can push these test frames over 1 MiB.
-if(MSVC)
-    target_link_options(ps2x_tests PRIVATE "/STACK:8388608")
-elseif(MINGW)
-    target_link_options(ps2x_tests PRIVATE "--stack,8388608")
-endif()
+foreach(_ps2x_test_bin IN LISTS PS2X_TEST_BINARIES)
+    if(MSVC)
+        target_link_options(${_ps2x_test_bin} PRIVATE "/STACK:8388608")
+    elseif(MINGW)
+        target_link_options(${_ps2x_test_bin} PRIVATE "--stack,8388608")
+    endif()
+endforeach()
 
 # VR3: generated-vs-interpreter VU0 differential test. vu1_fixture_gen runs the
 # runtime's emitter over synthetic code images (random programs, not game data)
@@ -215,7 +242,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         COMMAND $<TARGET_FILE:vu1_fixture_gen> ${VU1_FIXTURE_DIR}
         DEPENDS vu1_fixture_gen
         VERBATIM)
-    target_sources(ps2x_tests PRIVATE ${VU1_FIXTURE_SOURCES})
+    foreach(_ps2x_test_bin IN LISTS PS2X_TEST_BINARIES)
+        target_sources(${_ps2x_test_bin} PRIVATE ${VU1_FIXTURE_SOURCES})
+    endforeach()
     set_source_files_properties(${VU1_FIXTURE_SOURCES} PROPERTIES
         GENERATED ON
         SKIP_UNITY_BUILD_INCLUSION ON
@@ -231,7 +260,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # removed VU1 image header.
     get_property(PS2X_TEST_VU0_SOURCES GLOBAL PROPERTY PS2X_VU0_RECOMP_SOURCES_ALL)
     if(PS2X_VU0_RECOMP_DIR AND PS2X_TEST_VU0_SOURCES)
-        target_sources(ps2x_tests PRIVATE ${PS2X_TEST_VU0_SOURCES})
+        foreach(_ps2x_test_bin IN LISTS PS2X_TEST_BINARIES)
+            target_sources(${_ps2x_test_bin} PRIVATE ${PS2X_TEST_VU0_SOURCES})
+        endforeach()
         set_source_files_properties(${PS2X_TEST_VU0_SOURCES} TARGET_DIRECTORY ps2x_tests PROPERTIES
             SKIP_UNITY_BUILD_INCLUSION ON
             SKIP_PRECOMPILE_HEADERS ON
@@ -240,12 +271,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 if(COMMAND ps2x_stage_ffmpeg_runtime_dlls)
-    ps2x_stage_ffmpeg_runtime_dlls(ps2x_tests)
+    foreach(_ps2x_test_bin IN LISTS PS2X_TEST_BINARIES)
+        ps2x_stage_ffmpeg_runtime_dlls(${_ps2x_test_bin})
+    endforeach()
 endif()
 
 include("${CMAKE_SOURCE_DIR}/ps2xRuntime/cmake/ReleaseMode.cmake")
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
     EnableFastReleaseMode(ps2_test_lib)
-    EnableFastReleaseMode(ps2x_tests)
+    foreach(_ps2x_test_bin IN LISTS PS2X_TEST_BINARIES)
+        EnableFastReleaseMode(${_ps2x_test_bin})
+    endforeach()
 endif()

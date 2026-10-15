@@ -1,4 +1,5 @@
 #include "game_overrides.h"
+#include "runtime/game_module.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_calls.h"
 #include "ps2_stubs.h"
@@ -6,6 +7,8 @@
 #include "ps2_log.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <mutex>
@@ -87,6 +90,26 @@ namespace
         return std::nullopt;
     }
 }
+namespace ps2_game_module
+{
+    const Module *installed()
+    {
+        const Module *module = linkedModule();
+        if (module == nullptr)
+        {
+            return nullptr;
+        }
+        if (module->abiVersion != kAbiVersion || (module->overrideCount != 0u && module->overrides == nullptr))
+        {
+            std::fprintf(stderr, "[game-module] refused '%s': abi %u (runtime %u), %zu override(s) at %p\n",
+                         module->name ? module->name : "", module->abiVersion, kAbiVersion,
+                         module->overrideCount, static_cast<const void *>(module->overrides));
+            std::abort();
+        }
+        return module;
+    }
+}
+
 namespace ps2_game_overrides
 {
     AutoRegister::AutoRegister(const Descriptor &descriptor)
@@ -130,6 +153,18 @@ namespace ps2_game_overrides
         {
             std::lock_guard<std::mutex> lock(registryMutex());
             descriptors = descriptorRegistry();
+        }
+        // module-seam-1: the linked game module's overrides follow the
+        // built-ins, in table order (runtime/game_module.h).
+        if (const ps2_game_module::Module *module = ps2_game_module::installed())
+        {
+            std::fprintf(stderr, "[game-module] %s (abi %u): %zu override(s) after %zu built-in(s)\n",
+                         module->name ? module->name : "", module->abiVersion, module->overrideCount,
+                         descriptors.size());
+            for (size_t i = 0; i < module->overrideCount; ++i)
+            {
+                descriptors.push_back(module->overrides[i]);
+            }
         }
 
         if (descriptors.empty())

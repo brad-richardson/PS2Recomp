@@ -1,0 +1,32 @@
+# module-seam-1: the SSX 3 game module (runtime/game_module.h). A static
+# library attached to final targets with ps2x_attach_game_module(); the
+# runtime never includes these headers. Moved families: README.md.
+add_library(ssx3_game_module STATIC
+    src/ssx3_module.cpp
+    src/anim_pick_guard.cpp
+)
+target_include_directories(ssx3_game_module
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(ssx3_game_module PUBLIC ps2_runtime)
+set_target_properties(ssx3_game_module PROPERTIES
+    PS2X_GAME_MODULE_ENTRY ps2x_ssx3_game_module
+    PS2X_GAME_MODULE_HEADER ps2_ssx3_module.h
+    # Product suite sources; ps2xTest adds them to ps2x_tests.
+    PS2X_GAME_MODULE_TESTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_anim_pick_guard_tests.cpp;${CMAKE_CURRENT_SOURCE_DIR}/tests/ps2_ssx3_module_tests.cpp"
+)
+
+# Same release flags as ps2_runtime, where this code compiled before the move.
+include("${CMAKE_SOURCE_DIR}/ps2xRuntime/cmake/ReleaseMode.cmake")
+get_property(_ssx3_module_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo" OR _ssx3_module_multi_config)
+    EnableFastReleaseMode(ssx3_game_module)
+    if(PS2X_DEV_NO_THINLTO)
+        set_property(TARGET ssx3_game_module PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    endif()
+endif()
+if(ANDROID AND NOT MSVC)
+    target_compile_options(ssx3_game_module PRIVATE -gline-tables-only)
+endif()
+ps2x_bf2_android_march_target(ssx3_game_module)

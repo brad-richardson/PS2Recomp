@@ -18,7 +18,14 @@ void register_ps2_ssx3_course_manifest_tests();
 void register_ps2_ssx3_tricky_menu_tests();
 void register_ps2_ssx3_lod_tests();
 void register_ps2_native_world_tests();
+// module-seam-1: game-module tests, per binary (ps2xTest/CMakeLists.txt).
+#if PS2X_TEST_GAME_MODULE_SSX3
 void register_ps2_ssx3_anim_pick_guard_tests();
+void register_ps2_ssx3_module_tests();
+#endif
+#if PS2X_TEST_NO_GAME_MODULE
+void register_game_module_none_tests();
+#endif
 void register_ps2_ssx3_tricky_hud_tests();
 void register_ps2_ssx3_tricky_song_tests();
 void register_ps2_ssx3_tricky_gems_tests();
@@ -108,7 +115,13 @@ int main(int argc, char **argv)
     register_ps2_ssx3_tricky_menu_tests();
     register_ps2_ssx3_lod_tests();
     register_ps2_native_world_tests();
+#if PS2X_TEST_GAME_MODULE_SSX3
     register_ps2_ssx3_anim_pick_guard_tests();
+    register_ps2_ssx3_module_tests();
+#endif
+#if PS2X_TEST_NO_GAME_MODULE
+    register_game_module_none_tests();
+#endif
     register_ps2_ssx3_tricky_hud_tests();
     register_ps2_ssx3_tricky_song_tests();
     register_ps2_ssx3_tricky_gems_tests();
