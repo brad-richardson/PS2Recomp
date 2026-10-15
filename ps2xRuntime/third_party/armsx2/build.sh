@@ -110,10 +110,11 @@ case "$PLAT" in
     ln -s vendor-pcsx2/common "$ASM/common"
     ln -s vendor-pcsx2/cmake "$ASM/cmake"
     cp -a "$HERE/platform/linux" "$ASM/linux-platform"
+    IMAGE=${MVU_LINUX_IMAGE:-ssx3-srv2}
     docker run --rm --platform linux/arm64 \
       --memory 16g --memory-swap 16g --oom-score-adj=500 \
       -v "$ASM:/asm" -v "$BLD:/build" -v "$PIN/microvu/om1rt-inputs:/om1rt:ro" \
-      ssx3-srv2 bash -lc '
+      "$IMAGE" bash -lc '
 set -euo pipefail
 cmake -S /asm/linux-platform -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
