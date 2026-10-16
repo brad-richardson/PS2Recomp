@@ -134,10 +134,11 @@ inline const Route *routeTable(size_t *countOut)
         {0x2145u, 0x204eu, 0x2145u, 0x0u}, // Icons natural posts (multiplier)
         // Agression responses: gate in place (rider-wide MC curation).
         {0x207eu, 0x204fu, 0x207eu, 0x0u},
-        // Part 3c: start cues pass through (no routes for venue, radio,
-        // artist or greeting) — only the sponsor/finish stock lines retire.
-        // The flyover voices from the venue bank (bb natural) and the call
-        // from the artist bank (cf natural) via the 2d composite.
+        // Part 3h: the flyover is removed, so the venue natural retires
+        // again (loading silence; v0=0 kills the fetch). The call voices
+        // from the artist bank (cf natural) via the 2f composite; only the
+        // sponsor/finish stock lines retire alongside venue.
+        {0x20bbu, kRetireFamily, 0x20bbu, 0x0u},
         {0x20c0u, kRetireFamily, 0x20c0u, 0x0u},
         {0x20c5u, kRetireFamily, 0x20c5u, 0x0u},
     };

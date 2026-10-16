@@ -56,20 +56,19 @@ void register_ps2_ssx3_tricky_mc_tests()
             ::setenv("PS2X_SSX3_TRICKY_MC", "1", 1);
             t.IsTrue(translatorEnabled(), "=1 is on"); });
 
-            tc.Run("Part 3c start cues pass through (no routes)", [](TestCase &t)
+            tc.Run("Part 3h start cues: venue retires, rest pass through", [](TestCase &t)
                    {
-            // Only naturals through replaced banks voice: the translator
-            // owns no start cue, so all four pass through untouched.
+            // The flyover is removed: the venue natural retires (loading
+            // silence). Radio/artist/greeting pass through untouched.
+            const Route *r = route(0x20bbu);
+            t.IsTrue(r != nullptr && r->mcEvent == kRetireFamily, "venue retires");
             t.IsTrue(route(0x20e5u) == nullptr, "radio intro untouched");
             t.IsTrue(route(0x20cfu) == nullptr, "artist intro untouched");
-            t.IsTrue(route(0x20bcu) == nullptr, "menu greeting untouched");
-            t.IsTrue(route(0x20bbu) == nullptr, "venue natural untouched");
-            t.IsTrue(findRule(0x2020u) == nullptr, "no VenueIntro rule");
-            t.IsTrue(findRule(0x201eu) == nullptr, "no Go rule"); });
+            t.IsTrue(route(0x20bcu) == nullptr, "menu greeting untouched"); });
 
-            tc.Run("retirements drop sponsor/finish naturals", [](TestCase &t)
+            tc.Run("retirements drop venue/sponsor/finish naturals", [](TestCase &t)
                    {
-            for (uint32_t a2 : {0x20c0u, 0x20c5u})
+            for (uint32_t a2 : {0x20bbu, 0x20c0u, 0x20c5u})
             {
                 const Route *rt = route(a2);
                 t.IsTrue(rt != nullptr && rt->mcEvent == kRetireFamily, "retire route");
