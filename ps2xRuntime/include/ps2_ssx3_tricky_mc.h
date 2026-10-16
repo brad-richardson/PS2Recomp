@@ -37,6 +37,11 @@ inline bool translatorEnabled()
 // decide() always drops naturals. Medals (0x20C7) is untouched.
 constexpr uint32_t kRetireFamily = 0x20f0u;
 
+// Synthetic start-cue family (Part 3b): the flyover remap's arbitration tag.
+// Not a Tricky MC event (no flyover family in mc-events-full.tsv); unique
+// alongside kRetireFamily so familyState() never collides.
+constexpr uint32_t kFlyoverFamily = 0x20f1u;
+
 // Tricky MC rule row (Part 1 receipts/mc-events-full.tsv): prob = signed
 // acceptance byte +9 (0..100); rep = repeat-limit byte +8 (0 = unlimited);
 // hold = re-post holdoff in ticks (age field +2, conservative: raw value);
