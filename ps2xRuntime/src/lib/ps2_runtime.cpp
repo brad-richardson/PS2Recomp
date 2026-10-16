@@ -2343,6 +2343,7 @@ void applyTrickyMcPost(PS2Runtime &runtime)
     g_mcEmitImpl.prev = prev;
     g_mcEmitImpl.runtime = &runtime;
     runtime.replaceFunction(kPc, &tkMcPostWrapper);
+    std::fprintf(stderr, "[ssx3-tricky-mc] translator armed at 0x%x\n", kPc);
     ps2_ssx3_tricky_mc::PollControl &poll = ps2_ssx3_tricky_mc::pollControl();
     poll.armed = true;
     poll.emit = &mcEmitPost;
