@@ -461,7 +461,7 @@ def android(a):
             sdk = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
             a.ndk = Path(sdk) / 'ndk/28.2.13676358' if sdk else None
         original = a.prebuilt
-        a.prebuilt = 'off'
+        a.prebuilt = False
         try:
             android_libs(a)
         finally:
@@ -683,18 +683,22 @@ def play(a):
 
 
 def support_bundle(a):
-    if a.prebuilt == 'off':
+    """Verified prebuilt support release, only when explicitly opted in.
+
+    Source libraries are the default (Brad 10-16): `--prebuilt` opts in.
+    """
+    if not getattr(a, 'prebuilt', False):
         return None
     if getattr(a, 'jnilibs', None):
         # An explicit --jnilibs names the APK's libraries: a release bundle
-        # must never silently replace them, so this counts as --prebuilt=off.
+        # must never silently replace them, so this counts as source.
         print('Explicit --jnilibs given; ignoring prebuilt releases.')
         return None
     if getattr(a, 'app_id', PUBLIC_APP_ID) != PUBLIC_APP_ID:
         print('Custom package ID requires source libraries.')
         return None
     import prebuilt
-    return prebuilt.fetch(a.prebuilt_cache or a.work / 'prebuilt-cache', a.prebuilt)
+    return prebuilt.fetch(a.prebuilt_cache or a.work / 'prebuilt-cache', 'auto')
 
 
 # The vendor recipe (build-dependencies.sh at the VENDOR pin) clones these by
@@ -986,7 +990,7 @@ def main():
     p.add_argument('--serial', help='adb device serial for install')
     p.add_argument('--dry-run', action='store_true', help='check and list install disc payload without touching a device')
     p.add_argument('--jnilibs', type=Path, help='own source-built Android JNI libraries')
-    p.add_argument('--prebuilt', choices=['auto', 'off'], default='auto', help='verified Android support libraries, or build all libraries from source')
+    p.add_argument('--prebuilt', action='store_true', help='opt in to verified prebuilt Android support libraries (default: build them from source)')
     p.add_argument('--prebuilt-cache', type=Path, help='verified offline support cache (default: WORK/prebuilt-cache)')
     p.add_argument('--no-turnip', action='store_true', help='omit the optional Turnip driver')
     p.add_argument('--stock-dump', type=Path, help='own texture dump holding the four stock font atlases (play builds the font pack from it)')
