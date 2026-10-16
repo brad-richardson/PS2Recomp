@@ -273,7 +273,7 @@ int f2Child()
 int lagfDrainBoundChild()
 {
     ::setenv("PS2X_NETPLAY_CANON", "1", 1);
-    ::setenv("PS2X_NETPLAY_CANON_DIR", (std::string(kWorkRoot) + "/lagfbound").c_str(), 1);
+    ::setenv("PS2X_NETPLAY_CANON_DIR", (workRoot() + "/lagfbound").c_str(), 1);
     auto be = ps2x_gs_headless::create();
     if (!be)
         return 20;
