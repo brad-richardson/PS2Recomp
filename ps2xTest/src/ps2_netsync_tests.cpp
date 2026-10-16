@@ -78,6 +78,5 @@ namespace
 
 void register_ps2_netsync_tests()
 {
-    TestCase &tc = TestCase::Instance();
-    register_ps2_netsync_tests_body(tc);
+    MiniTest::Case("ZzNetSync", register_ps2_netsync_tests_body);
 }

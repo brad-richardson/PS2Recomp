@@ -441,6 +441,7 @@ inline void encodeState(uint8_t *o, uint16_t slot, uint64_t tick, const Sample &
     putU32(o + 95, w0);
     putU32(o + 99, w1);
     putU64(o + 103, fnv64(o, 103u));
+}
 
 // Decode one STATE frame payload+tail into a sample. Returns false on any
 // shape/digest/slot violation (caller counts).
@@ -510,8 +511,7 @@ inline void maybeLog(uint64_t tick)
         return;
     cfg.lastLogTick = (int64_t)tick;
     fprintf(stderr,
-            "[netsync] tick=%llu sent=%llu recvd=%llu stale=%llu applied=%llu kept=%llu show=%llu ring=%zu alive=%d
-",
+            "[netsync] tick=%llu sent=%llu recvd=%llu stale=%llu applied=%llu kept=%llu show=%llu ring=%zu alive=%d\n",
             (unsigned long long)tick, (unsigned long long)cfg.sent, (unsigned long long)cfg.recvd,
             (unsigned long long)cfg.stale, (unsigned long long)cfg.applied,
             (unsigned long long)cfg.kept, (unsigned long long)cfg.showWrites, cfg.ring.size(),
