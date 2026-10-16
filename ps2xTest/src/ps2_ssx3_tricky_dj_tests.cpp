@@ -58,5 +58,36 @@ void register_ps2_ssx3_tricky_dj_tests()
             ::setenv("PS2X_SSX3_TRICKY_DJ_GATE", "", 1);
             t.IsTrue(!gateEnabled(), "empty is off");
             ::setenv("PS2X_SSX3_TRICKY_DJ_GATE", "1", 1);
-            t.IsTrue(gateEnabled(), "=1 is on"); }); });
+            t.IsTrue(gateEnabled(), "=1 is on"); });
+
+        tc.Run("venue alias detected by manifest row, not course name", [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_dj;
+            using ps2_ssx3_course::Mode;
+            t.IsTrue(!modeHasVenueAlias(nullptr), "null (Stock) has no alias");
+            Mode plain;
+            t.IsTrue(!modeHasVenueAlias(&plain), "mode without aliases");
+            Mode speechOnly;
+            speechOnly.aliases.push_back({"/DATA/AUDIO/SPEECH.BIG", "speech-comp"});
+            t.IsTrue(!modeHasVenueAlias(&speechOnly), "SPEECH-only alias is not venue");
+            Mode venue;
+            venue.name = "GARI";
+            venue.aliases.push_back({"/DATA/AUDIO/ENGLISH.BIG", "english-comp"});
+            t.IsTrue(modeHasVenueAlias(&venue), "ENGLISH alias row detected"); });
+
+        tc.Run("0x20bb passes with venue alias, drops without; radio/artist always drop",
+               [](TestCase &t)
+               {
+            using namespace ps2_ssx3_tricky_dj;
+            using ps2_ssx3_course::Mode;
+            Mode venue;
+            venue.aliases.push_back({"/DATA/AUDIO/ENGLISH.BIG", "english-comp"});
+            Mode plain;
+            t.IsTrue(!shouldDrop(0x20bbu, &venue), "venue passes with alias");
+            t.IsTrue(shouldDrop(0x20bbu, &plain), "venue drops without alias");
+            t.IsTrue(shouldDrop(0x20bbu, nullptr), "venue drops on Stock");
+            t.IsTrue(shouldDrop(0x20cfu, &venue), "artist drops with alias");
+            t.IsTrue(shouldDrop(0x20e5u, &venue), "radio drops with alias");
+            t.IsTrue(!shouldDrop(0x2088u, &plain), "rider post never drops");
+            t.IsTrue(!shouldDrop(0x2133u, &venue), "uber post never drops"); }); });
 }

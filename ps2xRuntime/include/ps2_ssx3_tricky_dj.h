@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <cstdlib>
 
+#include "ps2_ssx3_course_manifest.h"
+
 namespace ps2_ssx3_tricky_dj
 {
 // Speech-queue event IDs (guest 0x2B1458 a2; post-arg mapping, tk-audio-1).
@@ -21,9 +23,38 @@ constexpr uint32_t kDjArtistIntroEvent = 0x20cfu; // DJ_Artist_Intro_2 bank
 constexpr uint32_t kPaVenueIntroEvent = 0x20bbu;  // PA_Venue_Intro bank
 constexpr uint32_t kDjRadioIntroEvent = 0x20e5u;  // DJ_Radio_Big_Intro bank
 
+// The disc file whose replacement carries the Tricky venue call
+// (tk-audio-1 step 4: PA_Venue stream 0 in the ENGLISH composite).
+constexpr char kVenueAliasDisc[] = "/DATA/AUDIO/ENGLISH.BIG";
+
 inline bool isGatedEvent(uint32_t a2)
 {
     return a2 == kDjArtistIntroEvent || a2 == kPaVenueIntroEvent || a2 == kDjRadioIntroEvent;
+}
+
+// True when the current mode installs an ENGLISH replacement: the venue
+// post then plays Tricky audio, so it is not a stock line to drop.
+// Detected by the manifest alias row, never by course name. A null mode
+// (Stock) has no aliases.
+inline bool modeHasVenueAlias(const ps2_ssx3_course::Mode *mode)
+{
+    if (mode == nullptr)
+        return false;
+    for (const ps2_ssx3_course::ModeAlias &a : mode->aliases)
+        if (a.disc == kVenueAliasDisc)
+            return true;
+    return false;
+}
+
+// Drop decision for a gated post on a Tricky course. The venue post passes
+// when the venue composite is installed; radio/artist always drop.
+inline bool shouldDrop(uint32_t a2, const ps2_ssx3_course::Mode *mode)
+{
+    if (!isGatedEvent(a2))
+        return false;
+    if (a2 == kPaVenueIntroEvent && modeHasVenueAlias(mode))
+        return false;
+    return true;
 }
 
 // PS2X_SSX3_TRICKY_DJ_GATE=1 drops the gated posts on Tricky courses.

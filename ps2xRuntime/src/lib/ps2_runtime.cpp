@@ -2071,8 +2071,10 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-turbo-boot", "SLUS_207.72", 0x00100008u, 0u, ap
 // PA_Venue_Intro (0x20bb) and DJ_Radio_Big_Intro (0x20e5, gated via the
 // header). On Tricky courses the wrapper drops the gated posts before the
 // game queues them; the caller observes v0=0 (rejected), the same value the
-// queue returns when it cannot accept a post. Default off: nothing is wrapped
-// and every post calls the original (det-identical). Chains with the MC
+// queue returns when it cannot accept a post. The venue post is exempt while
+// the mode installs an ENGLISH replacement (its content is then the Tricky
+// call, detected by alias row, never by course name). Default off: nothing is
+// wrapped and every post calls the original (det-identical). Chains with the MC
 // translator wrapper in either registration order (predecessor chaining); a
 // different ELF (post-func word) refuses and keeps stock speech. tk-meter-1's
 // stock-meter suppression (game module row "ssx3-tricky-stock-meter") is untouched.
@@ -2081,17 +2083,21 @@ namespace
     PS2Runtime::RecompiledFunction g_tkDjPostPrev = nullptr;
     bool g_tkDjGate = false; // PS2X_SSX3_TRICKY_DJ_GATE=1 (tk-audio-1 step 3)
     uint64_t g_tkDjDropped = 0u;
+    bool g_tkVenuePassLogged = false;
 
     void tkDjPostWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t a2 = (ctx != nullptr) ? getRegU32(ctx, 6) : 0u;
-        bool tricky = false;
+        const ps2_ssx3_course::Mode *mode = nullptr;
         if (rdram != nullptr)
         {
             ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
-            tricky = ms.armed && ps2_ssx3_course::modeCurrent(ms, rdram) != 0u;
+            const size_t cur = ms.armed ? ps2_ssx3_course::modeCurrent(ms, rdram) : 0u;
+            if (cur != 0u)
+                mode = &ms.modes[cur - 1u];
         }
-        if (g_tkDjGate && tricky && ps2_ssx3_tricky_dj::isGatedEvent(a2))
+        if (g_tkDjGate && mode != nullptr &&
+            ps2_ssx3_tricky_dj::shouldDrop(a2, mode))
         {
             if (ctx != nullptr)
                 ctx->r[2] = _mm_set_epi64x(0, 0);
@@ -2104,6 +2110,17 @@ namespace
                          a2, static_cast<unsigned long long>(tick),
                          static_cast<unsigned long long>(g_tkDjDropped));
             return;
+        }
+        if (a2 == ps2_ssx3_tricky_dj::kPaVenueIntroEvent && mode != nullptr &&
+            ps2_ssx3_tricky_dj::modeHasVenueAlias(mode) && !g_tkVenuePassLogged)
+        {
+            g_tkVenuePassLogged = true;
+            const uint64_t tick = (runtime != nullptr)
+                                      ? static_cast<uint64_t>(runtime->memory().gs().vsyncTick.load(
+                                            std::memory_order_relaxed))
+                                      : 0ull;
+            std::fprintf(stderr, "[ssx3-tricky-dj] venue post passes (ENGLISH alias) tick=%llu\n",
+                         static_cast<unsigned long long>(tick));
         }
         if (g_tkDjPostPrev)
             g_tkDjPostPrev(rdram, ctx, runtime);
