@@ -1,6 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_runtime.h"
-#include "../../ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h"
+#include "../../ps2xRuntime/src/lib/Kernel/Stubs/Common.h"
 
 #include <cstdlib>
 #include <cstring>
