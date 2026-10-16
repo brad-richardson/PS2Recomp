@@ -9089,6 +9089,8 @@ void PS2Runtime::run()
                     {
                         tkOpen = true;
                         tkLatchedOn = false;
+                        tkList.step = 0; // every open starts on the course list
+                        tkList.mode = 0;
                         std::fprintf(stderr, "[tklist] tick=%llu open scr=%d peak=%u type=%u entries=%llu\n",
                                      static_cast<unsigned long long>(tkTick), tkView.screen, tkView.peak,
                                      tkView.type,
@@ -9152,27 +9154,49 @@ void PS2Runtime::run()
                 else if (tkTarget)
                 {
                     // Browsing: pad edges drive the list (only on a live Map
-                    // target; stale words arm nothing).
+                    // target; stale words arm nothing). Two steps: Cross on a
+                    // course opens its mode list (single-mode courses ride
+                    // directly); Cross on a mode rides; Triangle steps back
+                    // (out of the overlay on step 0). Left/Right do nothing.
+                    const auto tkArmRide = [&] {
+                        const tkl::Course &c = tkl::kCourses[tkList.sel];
+                        tkl::driveArm(tkl::listGoal(tkList), c.event, tkTick);
+                        std::fprintf(stderr, "[tklist] tick=%llu ride %s [%s] (peak %u type %u row %u ev %d)\n",
+                                     static_cast<unsigned long long>(tkTick), c.name,
+                                     c.modeName[tkList.step == 1 ? tkList.mode : 0],
+                                     tkl::listGoal(tkList).peak, tkl::listGoal(tkList).type,
+                                     tkl::listGoal(tkList).row, c.event);
+                    };
+                    const auto tkCross = [&] {
+                        const tkl::Course &c = tkl::kCourses[tkList.sel];
+                        if (tkList.step == 0 && c.nOpts > 1)
+                        {
+                            tkList.step = 1;
+                            tkList.mode = 0;
+                        }
+                        else
+                            tkArmRide();
+                    };
+                    const auto tkTriangle = [&] {
+                        if (tkList.step == 1)
+                        {
+                            tkList.step = 0;
+                            tkList.mode = 0;
+                        }
+                        else
+                            tkl::driveArmBackOut(tkTick);
+                    };
                     const uint16_t tkEdge = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
                     if (tkEdge & ps2x::vpad::kUp)
                         tkl::listMove(tkList, true);
                     else if (tkEdge & ps2x::vpad::kDown)
                         tkl::listMove(tkList, false);
-                    if (tkEdge & (ps2x::vpad::kLeft | ps2x::vpad::kRight))
-                        tkl::listToggle(tkList);
                     if (tkEdge & ps2x::vpad::kTriangle)
-                        tkl::driveArmBackOut(tkTick);
+                        tkTriangle();
                     else if (tkEdge & ps2x::vpad::kCross)
-                    {
-                        const tkl::Course &c = tkl::kCourses[tkList.sel];
-                        tkl::driveArm(tkl::listGoal(tkList), c.event, tkTick);
-                        std::fprintf(stderr, "[tklist] tick=%llu ride %s (peak %u type %u row %u ev %d)\n",
-                                     static_cast<unsigned long long>(tkTick), c.name,
-                                     tkl::listGoal(tkList).peak, tkl::listGoal(tkList).type,
-                                     tkl::listGoal(tkList).row, c.event);
-                    }
+                        tkCross();
                     // Touch: row taps highlight (a tap on the highlighted
-                    // row rides), toggle/select/back legends act.
+                    // row advances), select/back legends act per step.
                     const tkl::ListGeom tkGeom = tkl::listLayout(screenWidth, screenHeight);
                     ps2x::vpad::TouchPoint tkts[8];
                     const int tkn = set2SampleTouches(tkts);
@@ -9184,25 +9208,35 @@ void PS2Runtime::run()
                             continue;
                         tkDown.push_back(tkts[i].id);
                         const int hit = tkl::listHit(tkGeom, tkts[i].x, tkts[i].y);
-                        if (hit >= 0 && hit <= 9)
+                        if (tkList.step == 0)
                         {
-                            if (tkList.sel == hit)
+                            if (hit >= 0 && hit <= 9)
                             {
-                                const tkl::Course &c = tkl::kCourses[tkList.sel];
-                                tkl::driveArm(tkl::listGoal(tkList), c.event, tkTick);
+                                if (tkList.sel == hit)
+                                    tkCross();
+                                else
+                                    tkList.sel = static_cast<uint8_t>(hit);
                             }
-                            else
-                                tkList.sel = static_cast<uint8_t>(hit);
+                            else if (hit == 11)
+                                tkCross();
+                            else if (hit == 12)
+                                tkTriangle();
                         }
-                        else if (hit == 10)
-                            tkl::listToggle(tkList);
-                        else if (hit == 11)
+                        else
                         {
-                            const tkl::Course &c = tkl::kCourses[tkList.sel];
-                            tkl::driveArm(tkl::listGoal(tkList), c.event, tkTick);
+                            const int nModes = tkl::kCourses[tkList.sel].nOpts;
+                            if (hit >= 0 && hit < nModes)
+                            {
+                                if (tkList.mode == hit)
+                                    tkArmRide();
+                                else
+                                    tkList.mode = static_cast<uint8_t>(hit);
+                            }
+                            else if (hit == 11)
+                                tkArmRide();
+                            else if (hit == 12)
+                                tkTriangle();
                         }
-                        else if (hit == 12)
-                            tkl::driveArmBackOut(tkTick);
                     }
                     std::vector<int64_t> tkLeft;
                     for (int64_t id : tkDown)
@@ -9560,17 +9594,20 @@ void PS2Runtime::run()
                 DrawRectangle(static_cast<int>(tkg.titleX), static_cast<int>(tkg.titleY),
                               static_cast<int>(tkg.titleW), static_cast<int>(tkg.titleH), Color{154, 62, 2, 255});
                 {
-                    tkDraw("Select Event", tkg.titleX + 12, tkg.titleY + tkg.titleH * 0.08f,
+                    // Step 1 re-titles the same bar (geometry unchanged).
+                    const char *tkTitle = (tkList.step == 1) ? "Select Mode" : "Select Event";
+                    const char *tkSub = (tkList.step == 1) ? tkl::kCourses[tkList.sel].name
+                                                           : "SSX Tricky courses in Tricky order";
+                    tkDraw(tkTitle, tkg.titleX + 12, tkg.titleY + tkg.titleH * 0.08f,
                            tkg.titleH * 0.40f, Color{250, 248, 244, 255}, false);
-                    tkDraw("SSX Tricky courses in Tricky order", tkg.titleX + 14,
+                    tkDraw(tkSub, tkg.titleX + 14,
                            tkg.titleY + tkg.titleH * 0.52f, tkg.titleH * 0.24f,
                            Color{200, 210, 225, 255}, false);
                 }
-                // Course rows, Part 2: ONE glyph size for every row; names
-                // left-aligned in a fixed column, the < Race >/< Jam > tag in
-                // its own right-aligned column with a reserved width, so the
-                // longest row can never overflow the panel (it shrinks every
-                // row uniformly instead). Glyph colour matches stock: the
+                // Course rows, Part 2 amendment: step 0 lists the 10 course
+                // names (ONE uniform size, left-aligned, no tags); step 1
+                // lists the course's own modes top-aligned (data-driven:
+                // whatever modeName holds). Glyph colour matches stock: the
                 // selected row's near-white face (sampled D t21250: face
                 // pixels > 225 on the orange bar); unselected rows a dimmer
                 // white on the dark boxes (stock's dark-on-light rows don't
@@ -9586,37 +9623,43 @@ void PS2Runtime::run()
                     const int px = static_cast<int>(hPx + 0.5f);
                     return static_cast<float>(MeasureText(s, px));
                 };
+                const tkl::Course &tkStepCourse = tkl::kCourses[tkList.sel];
+                const char *tkRows[10] = {};
+                int tkNRows = 0;
+                int tkRowSel = 0;
+                if (tkList.step == 0)
+                {
+                    for (int i = 0; i < 10; ++i)
+                        tkRows[i] = tkl::kCourses[i].name;
+                    tkNRows = 10;
+                    tkRowSel = tkList.sel;
+                }
+                else
+                {
+                    for (int k = 0; k < tkStepCourse.nOpts; ++k)
+                        tkRows[k] = tkStepCourse.modeName[k] ? tkStepCourse.modeName[k] : "?";
+                    tkNRows = tkStepCourse.nOpts;
+                    tkRowSel = tkList.mode;
+                }
                 float tkRowS = tkg.rowH * 0.58f;
                 for (int pass = 0; pass < 2; ++pass)
                 {
-                    float tagW = 0.0f, nameW = 0.0f;
-                    for (int i = 0; i < 10; ++i)
-                    {
-                        const tkl::Course &c = tkl::kCourses[i];
-                        nameW = std::max(nameW, tkW(c.name, tkRowS));
-                        if (c.nOpts > 1)
-                        {
-                            tagW = std::max(tagW, tkW("< Race >", tkRowS));
-                            tagW = std::max(tagW, tkW("< Jam >", tkRowS));
-                        }
-                    }
-                    const float avail = tkg.rowW - 20.0f - tagW - 8.0f;
+                    float nameW = 0.0f;
+                    for (int i = 0; i < tkNRows; ++i)
+                        nameW = std::max(nameW, tkW(tkRows[i], tkRowS));
+                    const float avail = tkg.rowW - 20.0f;
                     if (nameW > avail && nameW > 0.0f)
                         tkRowS *= avail / nameW;
                 }
-                for (int i = 0; i < 10; ++i)
+                for (int i = 0; i < tkNRows; ++i)
                 {
-                    const tkl::Course &c = tkl::kCourses[i];
-                    const bool sel = (tkList.sel == i);
+                    const bool sel = (tkRowSel == i);
                     DrawRectangle(static_cast<int>(tkg.rowX), static_cast<int>(tkg.rowY[i]),
                                   static_cast<int>(tkg.rowW), static_cast<int>(tkg.rowH) - 2,
                                   sel ? Color{154, 62, 2, 255} : Color{24, 36, 62, 255});
                     const Color tkInk = sel ? Color{250, 248, 244, 255} : Color{205, 212, 224, 255};
                     const float tkRy = tkg.rowY[i] + (tkg.rowH - 2 - tkRowS) * 0.5f;
-                    tkDraw(c.name, tkg.rowX + 10, tkRy, tkRowS, tkInk, false);
-                    if (c.nOpts > 1)
-                        tkDraw(tkList.opt[i] == 0 ? "< Race >" : "< Jam >", tkg.rowX + tkg.rowW - 10,
-                               tkRy, tkRowS, tkInk, true);
+                    tkDraw(tkRows[i], tkg.rowX + 10, tkRy, tkRowS, tkInk, false);
                 }
                 // Preview/event pane.
                 DrawRectangle(static_cast<int>(tkg.paneX), static_cast<int>(tkg.paneY),
@@ -9626,9 +9669,18 @@ void PS2Runtime::run()
                 {
                     const tkl::Course &c = tkl::kCourses[tkList.sel];
                     const tkl::CourseOption &goal = tkl::listGoal(tkList);
-                    const char *etype = (c.nOpts > 1 && tkList.opt[tkList.sel] == 1)
-                                            ? "Jam"
-                                            : (c.raceLabel ? c.raceLabel : "Race");
+                    // Step 0 names every mode the course has (data-driven);
+                    // step 1 the highlighted one.
+                    std::string tkModeList;
+                    for (int m = 0; m < c.nOpts; ++m)
+                    {
+                        if (m)
+                            tkModeList += " / ";
+                        tkModeList += c.modeName[m] ? c.modeName[m] : "?";
+                    }
+                    const char *etype = (tkList.step == 1 && c.modeName[tkList.mode])
+                                            ? c.modeName[tkList.mode]
+                                            : tkModeList.c_str();
                     // Preview quad (Megaplex sel 8: text card, no preview).
                     float tkPy = tkg.paneY + 8;
                     char tkpn[16];
@@ -9658,7 +9710,8 @@ void PS2Runtime::run()
                     // step 4; the lane diag knobs are gone with tk-menu-1).
                 }
                 // Help bar (font module; was baked legend sprites).
-                tkDraw("X Select   Triangle Previous   Up/Down pick   Left/Right Race/Jam",
+                tkDraw(tkList.step == 1 ? "X Ride   Triangle Courses   Up/Down pick mode"
+                                        : "X Select   Triangle Previous   Up/Down pick course",
                        tkg.titleX, screenHeight * 0.905f, static_cast<float>(tkSmall), RAYWHITE, false);
                 if (!tkDirect)
                 {

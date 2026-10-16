@@ -38,11 +38,19 @@ inline bool knob()
 // ---- Course table (Tricky order; Part 1 §1 + receipts/ssx3-events-nav.txt)
 //
 // Each course names its SSX 3 event id and, per event-type option, the
-// (peak, mode-type, list row) the navigator must accept. Dual-type courses
-// (Elysium, Aloha, Megaplex) offer the race-list row ("Race", nav type 5)
-// and the freestyle-list row ("Jam", nav type 6); the default is Race with a
-// Left/Right toggle (Part 1 Q2). `tp` is the TP*.SSH preview code, or null
-// when the overlay ships none (Megaplex: text card, Part 1 Q3).
+// (peak, mode-type, list row) the navigator must accept. Dual-mode courses
+// (Elysium, Aloha, Megaplex) offer the race-list row and the freestyle-list
+// row, picked on a second step (Part 2 amendment: no in-row toggle).
+// Mode labels are SSX 3's own event-type names: the singles' labels match
+// the stock pane headers, and the Jam rows' "Backcountry" is the game's own
+// discipline for their donor events (event table 23x8B at ISO 0x435820 =
+// RAM 0x442820: events 14/15/16 read discipline 6; enum 2 race, 3
+// slopestyle, 4 big air, 5 halfpipe, 6 backcountry per
+// ps2_ssx3_course_manifest.h; cross-checks: event 11 reads 5 and its label
+// is the stock "Super Pipe" word, event 8 reads 4 and the stock hover pane
+// says "Big Air", events 6/7 read 3 "Slopestyle"). `tp` is the TP*.SSH
+// preview code, or null when the overlay ships none (Megaplex: text card,
+// Part 1 Q3).
 struct CourseOption
 {
     uint8_t peak; // 0..2 (P1..P3)
@@ -56,48 +64,52 @@ struct Course
     const char *tp; // TP preview code, or nullptr
     int event;      // SSX 3 event id (both options share it)
     CourseOption opts[2];
-    uint8_t nOpts;
-    const char *raceLabel; // pane header for opts[0]
-    const char *jamLabel;  // pane header for opts[1] (dual courses only)
+    uint8_t nOpts;            // modes on the step-2 list (data-driven)
+    const char *modeName[2];  // step-2 labels, SSX 3's own event-type names
 };
 
 inline constexpr Course kCourses[10] = {
-    {"Garibaldi", "GARI", 0, {{0, 0, 0}, {0, 0, 0}}, 1, "Race", nullptr},
-    {"Snowdream", "SNOW", 1, {{0, 0, 1}, {0, 0, 0}}, 1, "Race", nullptr},
-    {"Elysium Alps", "ELYS", 16, {{2, 0, 1}, {2, 1, 3}}, 2, "Race", "Jam"},
-    {"Mesablanca", "MESA", 2, {{1, 0, 0}, {0, 0, 0}}, 1, "Race", nullptr},
-    {"Merqury City", "MERQ", 4, {{2, 0, 0}, {0, 0, 0}}, 1, "Race", nullptr},
-    {"Aloha Ice Jam", "ALOHA", 14, {{0, 0, 2}, {0, 1, 3}}, 2, "Race", "Jam"},
-    {"Pipedream", "PIPE", 11, {{0, 1, 2}, {0, 0, 0}}, 1, "Super Pipe", nullptr},
-    {"Untracked", "UNTRACK", 7, {{2, 1, 0}, {0, 0, 0}}, 1, "Slopestyle", nullptr},
-    {"Tokyo Megaplex", nullptr, 15, {{1, 0, 2}, {1, 1, 3}}, 2, "Race", "Jam"},
-    {"Alaska", "ALASKA", 6, {{1, 1, 0}, {0, 0, 0}}, 1, "Slopestyle", nullptr},
+    {"Garibaldi", "GARI", 0, {{0, 0, 0}, {0, 0, 0}}, 1, {"Race", nullptr}},
+    {"Snowdream", "SNOW", 1, {{0, 0, 1}, {0, 0, 0}}, 1, {"Race", nullptr}},
+    {"Elysium Alps", "ELYS", 16, {{2, 0, 1}, {2, 1, 3}}, 2, {"Race", "Backcountry"}},
+    {"Mesablanca", "MESA", 2, {{1, 0, 0}, {0, 0, 0}}, 1, {"Race", nullptr}},
+    {"Merqury City", "MERQ", 4, {{2, 0, 0}, {0, 0, 0}}, 1, {"Race", nullptr}},
+    {"Aloha Ice Jam", "ALOHA", 14, {{0, 0, 2}, {0, 1, 3}}, 2, {"Race", "Backcountry"}},
+    {"Pipedream", "PIPE", 11, {{0, 1, 2}, {0, 0, 0}}, 1, {"Super Pipe", nullptr}},
+    {"Untracked", "UNTRACK", 7, {{2, 1, 0}, {0, 0, 0}}, 1, {"Slopestyle", nullptr}},
+    {"Tokyo Megaplex", nullptr, 15, {{1, 0, 2}, {1, 1, 3}}, 2, {"Race", "Backcountry"}},
+    {"Alaska", "ALASKA", 6, {{1, 1, 0}, {0, 0, 0}}, 1, {"Slopestyle", nullptr}},
 };
 
 inline constexpr uint32_t kCourseCount = 10u;
 
 // ---- List navigation (pad edges and touch taps map to the same steps) ----
+// Two steps (Part 2 amendment): step 0 picks the course (10 names, Tricky
+// order); step 1 picks the mode from the course's own modeName list
+// (data-driven: later modes appear with no UI change). A single-mode
+// course skips step 1 (Cross launches it directly). Triangle steps back.
 struct ListState
 {
-    uint8_t sel = 0;      // highlighted course 0..9 (kept across re-opens)
-    uint8_t opt[10] = {}; // per-course option (0 = Race/first, 1 = Jam)
+    uint8_t sel = 0;  // highlighted course 0..9 (kept across re-opens)
+    uint8_t step = 0; // 0 courses, 1 modes
+    uint8_t mode = 0; // highlighted mode 0..nOpts-1 on step 1
 };
 
 inline void listMove(ListState &s, bool up)
 {
-    s.sel = static_cast<uint8_t>((s.sel + (up ? kCourseCount - 1u : 1u)) % kCourseCount);
-}
-
-inline void listToggle(ListState &s)
-{
-    if (kCourses[s.sel].nOpts > 1)
-        s.opt[s.sel] ^= 1u;
+    if (s.step == 0)
+    {
+        s.sel = static_cast<uint8_t>((s.sel + (up ? kCourseCount - 1u : 1u)) % kCourseCount);
+        return;
+    }
+    const uint8_t n = kCourses[s.sel].nOpts;
+    s.mode = static_cast<uint8_t>((s.mode + (up ? n - 1u : 1u)) % n);
 }
 
 inline const CourseOption &listGoal(const ListState &s)
 {
     const Course &c = kCourses[s.sel];
-    return c.opts[c.nOpts > 1 ? s.opt[s.sel] : 0];
+    return c.opts[s.step == 1 ? s.mode : 0];
 }
 
 // ---- Guest FE view (read each tick; the navigator derives from this) ----

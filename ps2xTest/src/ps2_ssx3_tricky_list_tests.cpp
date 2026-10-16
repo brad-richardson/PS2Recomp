@@ -156,18 +156,18 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(kCourses[8].nOpts, 2, "Megaplex dual");
             t.IsTrue(kCourses[8].tp == nullptr, "Megaplex has no preview art");
             ListState s;
-            t.Equals(listGoal(s).row, 0, "default goal is the Race row");
+            t.Equals(listGoal(s).row, 0, "step 0 goal is opts[0]");
             s.sel = 2;
-            t.Equals(listGoal(s).row, 1, "Elysium default is Race");
-            listToggle(s);
-            t.Equals(listGoal(s).row, 3, "toggle picks the Jam row");
-            listToggle(s);
-            t.Equals(listGoal(s).row, 1, "toggle flips back");
-            s.sel = 0;
-            listToggle(s);
-            t.Equals(listGoal(s).row, 0, "single-type toggle is a no-op"); });
+            t.Equals(listGoal(s).row, 1, "Elysium step 0 is the Race row");
+            s.step = 1;
+            s.mode = 1;
+            t.Equals(listGoal(s).row, 3, "step 1 mode 1 is the Backcountry row");
+            s.mode = 0;
+            t.Equals(listGoal(s).row, 1, "step 1 mode 0 is Race");
+            t.Equals(std::strcmp(kCourses[2].modeName[1], "Backcountry"), 0, "Jam mode name");
+            t.Equals(kCourses[6].nOpts, 1, "Pipedream single-mode"); });
 
-        tc.Run("list nav wraps; toggle is per-course", [](TestCase &t)
+        tc.Run("list nav wraps per step; single-mode cursor stays put", [](TestCase &t)
                {
             ListState s;
             listMove(s, true);
@@ -175,10 +175,15 @@ void register_ps2_ssx3_tricky_list_tests()
             listMove(s, false);
             t.Equals(s.sel, 0, "down wraps back");
             s.sel = 2;
-            listToggle(s);
-            s.sel = 5;
-            t.Equals(s.opt[5], 0, "Aloha keeps its own option");
-            t.Equals(s.opt[2], 1, "Elysium toggle kept"); });
+            s.step = 1;
+            listMove(s, false);
+            t.Equals(s.mode, 1, "Elysium mode down to Backcountry");
+            listMove(s, false);
+            t.Equals(s.mode, 0, "mode wraps over the course's own modes");
+            s.sel = 0;
+            listMove(s, false);
+            t.Equals(s.sel, 0, "step 1 moves modes, not courses");
+            t.Equals(s.mode, 0, "single-mode course has one mode"); });
 
         tc.Run("readView gates on the Map sub-state and short RAM", [](TestCase &t)
                {
