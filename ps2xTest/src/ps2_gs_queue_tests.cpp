@@ -446,6 +446,21 @@ namespace
         }
         return true;
     }
+
+    // ci-flake-1: the GS-worker deferred-wake watchdog is a real-time
+    // liveness fallback, not an ordering guarantee. It fires when a producer
+    // thread is descheduled for >=100 ms with a deferred wake still pending,
+    // which a shared CI runner can do even though every job-end flushWake was
+    // delivered (mac-suite observed ~99-119 ms stalls on the arm64 runners).
+    // "The watchdog never fired" therefore tests the host scheduler, not the
+    // queue order, batching or flush points. Those checks stay in the default
+    // (CI) run; the wall-clock watchdog expectation is opt-in locally with
+    // PS2X_TEST_TIMING=1 (documented in local/research/ci-flake-1/REPORT.md).
+    bool timingAssertionsOn()
+    {
+        const char *v = std::getenv("PS2X_TEST_TIMING");
+        return v && v[0] == '1';
+    }
 }
 
 void register_ps2_gs_queue_tests()
@@ -1094,7 +1109,8 @@ void register_ps2_gs_queue_tests()
             for (size_t i = 0; i < seen.size(); ++i)
                 ordered = ordered && seen[i] == static_cast<uint32_t>(i);
             t.IsTrue(ordered, "commands should execute in FIFO order");
-            t.Equals(worker.watchdogCount(), 0ull, "no deferred wake should go stale with job-end flushes");
+            if (timingAssertionsOn())
+                t.Equals(worker.watchdogCount(), 0ull, "no deferred wake should go stale with job-end flushes");
             t.IsTrue(worker.wakeCount() < static_cast<uint64_t>(next), "deferred wakes should notify less than once per drain");
         });
 
@@ -1186,7 +1202,9 @@ void register_ps2_gs_queue_tests()
                         }
                     });
                 unit.join();
-                for (int i = 0; i < 400 && !worker.isQuiescent(); ++i)
+                // ci-flake-1: generous bounded wait (5 s), not a fixed 400 ms
+                // window a loaded runner can miss while draining the last job.
+                for (int i = 0; i < 5000 && !worker.isQuiescent(); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 quiet = worker.isQuiescent();
                 worker.stop();
@@ -1203,7 +1221,9 @@ void register_ps2_gs_queue_tests()
             for (size_t i = 0; i < seenLean.size(); ++i)
                 ordered = ordered && seenLean[i] == static_cast<uint32_t>(i);
             t.IsTrue(ordered, "lean commands should execute in FIFO order");
-            t.Equals(wdLean, 0ull, "no deferred wake should go stale with job-end flushes");
+            if (timingAssertionsOn())
+                t.Equals(wdLean, 0ull, "no deferred wake should go stale with job-end flushes");
+            t.IsTrue(wakesLean < static_cast<uint64_t>(nLean), "lean deferred wakes should notify less than once per drain");
             t.IsTrue(quietLean, "the worker should reach quiescence after the last flush");
         });
 
@@ -1358,7 +1378,8 @@ void register_ps2_gs_queue_tests()
                 ordered = ordered && v == expect++;
             }
             t.IsTrue(ordered && expect == next, "staged commands should execute in FIFO order");
-            t.Equals(worker.watchdogCount(), 0ull, "no deferred wake should go stale");
+            if (timingAssertionsOn())
+                t.Equals(worker.watchdogCount(), 0ull, "no deferred wake should go stale");
         });
 
         // GSB1: the GIF batch command keeps FIFO order, holds packets until
@@ -1522,7 +1543,8 @@ void register_ps2_gs_queue_tests()
             }
             t.IsTrue(pathsOk, "each sub-packet should carry its path and note flag");
             t.Equals(worker.enqueuedCount(), worker.executedCount(), "every command should execute");
-            t.Equals(worker.watchdogCount(), 0ull, "no deferred wake should go stale");
+            if (timingAssertionsOn())
+                t.Equals(worker.watchdogCount(), 0ull, "no deferred wake should go stale");
         });
 
         // GSB1: batch on matches batch off through a real GS + worker: the
