@@ -164,6 +164,65 @@ inline FeView readView(const uint8_t *ram, uint32_t size, uint32_t controller)
     return v;
 }
 
+// Lane RE probe: log every widget hash + its +0x94/+0x95 bytes on a screen
+// (called under DIAG; the +0x95 byte is the cursor row on the Event list
+// widget — this hunts the Peak/Mode cursor the same way).
+inline void dumpWidgets(const uint8_t *ram, uint32_t size, uint32_t controller, int want,
+                        void (*log)(const char *))
+{
+    const auto inRange = [&](uint32_t addr, uint32_t len) {
+        return addr <= size && len <= size && addr <= size - len;
+    };
+    const auto read32 = [&](uint32_t addr) {
+        uint32_t v = 0;
+        std::memcpy(&v, ram + addr, 4);
+        return v;
+    };
+    char line[768];
+    if (!ram || !inRange(controller, 0x2f0u))
+    {
+        std::snprintf(line, sizeof(line), "widgets scr=%d no-controller", want);
+        log(line);
+        return;
+    }
+    const uint32_t scr = read32(controller + 0x2e8u);
+    if (!inRange(scr, 0x40u))
+    {
+        std::snprintf(line, sizeof(line), "widgets scr=%d no-screen", want);
+        log(line);
+        return;
+    }
+    const uint32_t countPtr = read32(scr + 0x38u);
+    if (!inRange(countPtr, 4u))
+    {
+        std::snprintf(line, sizeof(line), "widgets scr=%d no-count", want);
+        log(line);
+        return;
+    }
+    uint32_t count = read32(countPtr);
+    if (count > 24u)
+        count = 24u;
+    const uint32_t objects = read32(scr + 0x3cu);
+    if (!inRange(objects, 4u * count))
+    {
+        std::snprintf(line, sizeof(line), "widgets scr=%d no-objects", want);
+        log(line);
+        return;
+    }
+    int n = std::snprintf(line, sizeof(line), "widgets scr=%d n=%u", want, count);
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const uint32_t obj = read32(objects + 4u * i);
+        if (!inRange(obj, 0x96u))
+            continue;
+        n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), " [%08x %02x%02x]", read32(obj + 0x38u),
+                           ram[obj + 0x94u], ram[obj + 0x95u]);
+        if (n > 700)
+            break;
+    }
+    log(line);
+}
+
 // ---- Closed-loop navigator -----------------------------------------------
 // Drives the hidden stock screens to (peak, type, row) and accepts. One
 // navStep call per guest tick; the caller holds the returned mask until the
@@ -172,9 +231,9 @@ inline FeView readView(const uint8_t *ram, uint32_t size, uint32_t controller)
 // each screen change the reader settles kSettleTicks before trusting the
 // cursor. Anything unexpected (unreadable view, budget spent) aborts with
 // the pad released: the overlay stays open and the user picks again.
-inline constexpr uint64_t kHoldTicks = 4u;
-inline constexpr uint64_t kGapTicks = 3u;
-inline constexpr uint64_t kSettleTicks = 6u;
+inline constexpr uint64_t kHoldTicks = 12u; // human-like holds (ONL10 uses 15); 4 proved too short
+inline constexpr uint64_t kGapTicks = 6u;
+inline constexpr uint64_t kSettleTicks = 10u;
 inline constexpr uint64_t kBlindTicks = 30u; // screen transitions may pass through non-Map states
 inline constexpr int kPressBudget = 48;
 
@@ -207,6 +266,9 @@ struct NavState
     int lastPos = -2; // peak/type/row seen at the last evaluation
     int tries = 0;    // accept-only attempts (ToPeak/ToMode fallback)
     int sub = 0;      // accept-only sub-step (0 step, 1 accept, 2 verify, 3 back)
+    int anchor = 0;   // assumed Peak/Mode cursor (top on entry; the accepted
+                      // word after each attempt). The pre-accept words are
+                      // stale (m4), so the fallback never trusts them.
     bool handedOff = false; // Done via Accept (race loading), else backed out
 };
 
@@ -300,6 +362,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         n.lastPos = -2;
         n.tries = 0;
         n.sub = 0;
+        n.anchor = 0;
     }
     n.lastTick = tick;
     // A press in flight: keep holding it for the full hold window (the
@@ -354,6 +417,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.lastPos = -2;
             n.tries = 0;
             n.sub = 0;
+            n.anchor = 0;
             return navStep(n, v, tick, peakLive, modeLive);
         }
         if (v.screen == 1 || v.screen == 2)
@@ -370,41 +434,53 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
                 {
                     n.phase = NavPhase::ToMode;
                     n.dir = 0;
+                    n.lastPos = -2;
                     n.tries = 0;
                     n.sub = 0;
+                    n.anchor = 0; // Mode cursor starts at the top (Race)
                     n.settleUntil = tick + kSettleTicks;
                     return out;
                 }
-                // Stagnant (the step+accept left the accepted peak
-                // unchanged: no wrap or a lock): flip direction.
-                if (v.peakOk && v.peak == static_cast<uint32_t>(n.lastPos))
-                    n.dir = (n.dir >= 0) ? -1 : 1;
-                n.lastPos = v.peakOk ? static_cast<int>(v.peak) : -2;
-                if (++n.tries >= 6)
-                    return abort(); // both directions exhausted (or locked)
+                // Mismatch: the accepted word is ground truth for where the
+                // cursor was. Re-anchor there and step again. Stagnant (same
+                // accepted twice: a no-wrap edge or a lock): force the step
+                // away from the edge next time instead of the wrap-shortest.
+                {
+                    const int acc = v.peakOk ? static_cast<int>(v.peak) : 0;
+                    if (v.peakOk && acc == n.lastPos)
+                        n.dir = (acc == 0) ? 1 : -1;
+                    else
+                        n.dir = 0;
+                    n.lastPos = acc;
+                    n.anchor = acc;
+                }
+                if (++n.tries >= 8)
+                    return abort(); // never converging (or locked)
                 n.sub = 3;
                 return press(kPadTriangle);
             }
-            // Accepted onto Select Mode (live cursor, or the direct match).
+            // Accepted onto Select Mode (live cursor).
             n.phase = NavPhase::ToMode;
             n.dir = 0;
+            n.lastPos = -2;
             n.tries = 0;
             n.sub = 0;
+            n.anchor = 0;
             n.settleUntil = tick + kSettleTicks;
             return out;
         }
         if (v.screen != 0)
             return abort();
-        if (!v.peakOk)
-            return abort();
-        if (v.peak == n.goal.peak)
-        {
-            n.tries = 0;
-            n.sub = 0;
-            return press(kPadCross);
-        }
         if (peakLive)
         {
+            if (!v.peakOk)
+                return abort();
+            if (v.peak == n.goal.peak)
+            {
+                n.tries = 0;
+                n.sub = 0;
+                return press(kPadCross);
+            }
             // Adaptive: first step Down; keep the direction while the peak
             // moves, flip when it does not (3 peaks: bounded either way).
             if (n.lastPos != -2 && v.peak == static_cast<uint32_t>(n.lastPos) && n.dir)
@@ -414,16 +490,34 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.lastPos = static_cast<int>(v.peak);
             return press(n.dir > 0 ? kPadDown : kPadUp);
         }
-        // Accept-only fallback: step, accept, verify the outcome, back out
-        // and retry (both directions, then the peak is locked).
-        if (n.tries >= 6)
+        // Accept-only fallback: the pre-accept word is stale (m4), so step
+        // the anchor (top on entry, the accepted word after each attempt),
+        // accept, and verify. Each attempt re-anchors on ground truth.
+        if (n.tries >= 8)
             return abort();
         if (n.sub == 3)
-            n.sub = 0; // backed out; step again
+            n.sub = 0; // backed out; step from the anchor
         if (n.sub == 0)
         {
-            n.sub = 1;
-            return press(n.dir >= 0 ? kPadDown : kPadUp);
+            if (n.anchor == static_cast<int>(n.goal.peak))
+            {
+                n.sub = 1;
+            }
+            else
+            {
+                // Shortest wrap step from the anchor (3 peaks), or the
+                // forced edge step after stagnation.
+                int step;
+                if (n.dir != 0)
+                    step = n.dir;
+                else
+                {
+                    const int d = (static_cast<int>(n.goal.peak) - n.anchor + 3) % 3;
+                    step = (d == 2) ? -1 : 1;
+                }
+                n.anchor = (n.anchor + step + 3) % 3;
+                return press(step > 0 ? kPadDown : kPadUp);
+            }
         }
         if (n.sub == 1)
         {
@@ -454,11 +548,19 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
                     n.settleUntil = tick + kSettleTicks;
                     return out;
                 }
-                if (v.typeOk && v.type == static_cast<uint32_t>(n.lastPos))
-                    n.dir = (n.dir >= 0) ? -1 : 1;
-                n.lastPos = v.typeOk ? static_cast<int>(v.type) : -2;
-                if (++n.tries >= 4)
-                    return abort(); // both modes tried, both ways
+                // Mismatch: re-anchor on the accepted word and step again,
+                // forcing away from the edge on stagnation (same shape).
+                {
+                    const int acc = v.typeOk ? static_cast<int>(v.type) : 0;
+                    if (v.typeOk && acc == n.lastPos)
+                        n.dir = (acc == 0) ? 1 : -1;
+                    else
+                        n.dir = 0;
+                    n.lastPos = acc;
+                    n.anchor = acc;
+                }
+                if (++n.tries >= 6)
+                    return abort(); // never converging
                 n.sub = 3;
                 return press(kPadTriangle);
             }
@@ -478,6 +580,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.lastPos = -2;
             n.tries = 0;
             n.sub = 0;
+            n.anchor = 0;
             return navStep(n, v, tick, peakLive, modeLive);
         }
         if (v.screen != 1)
@@ -499,15 +602,30 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             n.lastPos = static_cast<int>(v.type);
             return press(n.dir > 0 ? kPadDown : kPadUp);
         }
-        // Accept-only fallback: same shape as the peak (2 mode rows).
-        if (n.tries >= 4)
+        // Accept-only fallback: same anchor shape as the peak (top on
+        // entry = Race, the accepted word after each attempt).
+        if (n.tries >= 6)
             return abort();
         if (n.sub == 3)
-            n.sub = 0; // backed out; step again
+            n.sub = 0; // backed out; step from the anchor
         if (n.sub == 0)
         {
-            n.sub = 1;
-            return press(n.dir >= 0 ? kPadDown : kPadUp);
+            if (n.anchor == static_cast<int>(n.goal.type))
+            {
+                n.sub = 1;
+            }
+            else
+            {
+                // Two rows: one step either way lands it (forced edge
+                // step after stagnation, else away from the anchor).
+                int step;
+                if (n.dir != 0)
+                    step = n.dir;
+                else
+                    step = (n.anchor == 0) ? 1 : -1;
+                n.anchor = (n.anchor + step + 3) % 3;
+                return press(step > 0 ? kPadDown : kPadUp);
+            }
         }
         if (n.sub == 1)
         {

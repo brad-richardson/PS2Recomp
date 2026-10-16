@@ -1656,7 +1656,8 @@ namespace ps2_stubs
             if (!ps2_ssx3_tricky_list::drive().armed && ps2_ssx3_tricky_list::diag())
             {
                 // Lane diag mapping mode: log the FE view on change (the
-                // Part 2 state-word survey), without arming anything.
+                // Part 2 state-word survey), without arming anything. Widget
+                // bytes hunt the Peak/Mode cursor the Event +0x95 way.
                 uint8_t *mapRam = runtime->memory().getRDRAM();
                 if (mapRam)
                 {
@@ -1671,6 +1672,10 @@ namespace ps2_stubs
                         std::fprintf(stderr, "[tklist-map] tick=%llu map=%d scr=%d pk=%u ty=%u row=%d ev=%d\n",
                                      static_cast<unsigned long long>(guestVsyncTick), v.mapLive ? 1 : 0,
                                      v.screen, v.peak, v.type, v.row, v.event);
+                        if (v.screen == 0 || v.screen == 1)
+                            ps2_ssx3_tricky_list::dumpWidgets(
+                                mapRam, ps2_ssx3_course::kRamSize, ps2_ssx3_tricky::state().mapController,
+                                v.screen, [](const char *s) { std::fprintf(stderr, "[tklist-%s]\n", s); });
                         s_pSub = v.screen;
                         s_pRow = v.row;
                         s_pEv = v.event;
@@ -1685,9 +1690,11 @@ namespace ps2_stubs
             if (!rdram)
                 return;
             bool done = false, handedOff = false, aborted = false;
+            // r1 DIAG_WATCH: the peak/type words write on accept only, never
+            // on cursor moves, so both drives use the accept-only fallback.
             const uint16_t mask = ps2_ssx3_tricky_list::driveOnRead(
                 rdram, ps2_ssx3_course::kRamSize, ps2_ssx3_tricky::state().mapController, guestVsyncTick, true,
-                true, true, done, handedOff, aborted);
+                false, false, done, handedOff, aborted);
             if (mask != 0u)
                 state.buttons = static_cast<uint16_t>(state.buttons & ~mask);
             if (!ps2_ssx3_tricky_list::diag())
@@ -1706,6 +1713,12 @@ namespace ps2_stubs
                              ps2_ssx3_tricky_list::navPhaseName(prog.phase), prog.presses, v.mapLive ? 1 : 0,
                              v.screen, v.peak, v.type, v.row, v.event, done ? (handedOff ? " DONE-handoff" : " DONE-back") : "",
                              aborted ? " ABORT" : "");
+                // RE probe: widget bytes around every drive decision (the
+                // guest cursor moves under the anchor steps here).
+                if ((v.screen == 0 || v.screen == 1) && phase != s_lastPhase)
+                    ps2_ssx3_tricky_list::dumpWidgets(rdram, ps2_ssx3_course::kRamSize,
+                                                       ps2_ssx3_tricky::state().mapController, v.screen,
+                                                       [](const char *s) { std::fprintf(stderr, "[tklist-%s]\n", s); });
                 s_lastMask = mask;
                 s_lastPhase = phase;
             }

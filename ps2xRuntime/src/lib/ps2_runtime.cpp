@@ -8803,8 +8803,9 @@ void PS2Runtime::run()
                 if (!tkOpen && ++tkOpenDeb >= 4)
                 {
                     tkOpen = true;
-                    std::fprintf(stderr, "[tklist] open scr=%d peak=%u type=%u\n", tkView.screen,
-                                 tkView.peak, tkView.type);
+                    std::fprintf(stderr, "[tklist] tick=%llu open scr=%d peak=%u type=%u\n",
+                                 static_cast<unsigned long long>(tkTick), tkView.screen, tkView.peak,
+                                 tkView.type);
                 }
             }
             else
@@ -8815,7 +8816,8 @@ void PS2Runtime::run()
                     tkOpen = false;
                     tkl::driveDisarm();
                     tkDown.clear();
-                    std::fprintf(stderr, "[tklist] close\n");
+                    std::fprintf(stderr, "[tklist] tick=%llu close\n",
+                                 static_cast<unsigned long long>(tkTick));
                 }
             }
             if (tkOpen)
@@ -8832,7 +8834,8 @@ void PS2Runtime::run()
                 {
                     tkl::driveDisarm();
                     ps2x::ui::toast("Tricky list: couldn't reach it", 3.0f);
-                    std::fprintf(stderr, "[tklist] aborted after %d presses\n", prog.presses);
+                    std::fprintf(stderr, "[tklist] tick=%llu aborted after %d presses\n",
+                                 static_cast<unsigned long long>(tkTick), prog.presses);
                 }
                 else if (prog.driving)
                 {
@@ -8840,7 +8843,8 @@ void PS2Runtime::run()
                     if ((ds1TrueRaw & ~tkPrevUnion) != 0u)
                     {
                         tkl::driveDisarm();
-                        std::fprintf(stderr, "[tklist] drive cancelled by user\n");
+                        std::fprintf(stderr, "[tklist] tick=%llu drive cancelled by user\n",
+                                     static_cast<unsigned long long>(tkTick));
                     }
                 }
                 else if (tkMapLive)
@@ -8861,7 +8865,8 @@ void PS2Runtime::run()
                     {
                         const tkl::Course &c = tkl::kCourses[tkList.sel];
                         tkl::driveArm(tkl::listGoal(tkList), c.event, tkTick);
-                        std::fprintf(stderr, "[tklist] ride %s (peak %u type %u row %u ev %d)\n", c.name,
+                        std::fprintf(stderr, "[tklist] tick=%llu ride %s (peak %u type %u row %u ev %d)\n",
+                                     static_cast<unsigned long long>(tkTick), c.name,
                                      tkl::listGoal(tkList).peak, tkl::listGoal(tkList).type,
                                      tkl::listGoal(tkList).row, c.event);
                     }
