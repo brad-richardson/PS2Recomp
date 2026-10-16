@@ -72,4 +72,83 @@ namespace ps2_net_protocol
     {
         return "SSX3RLY2" + std::string(1u, role) + token;
     }
+
+    // Availability policy (online-default-1; Brad 10-15 tentative:
+    // online is 120-only). THE ONE-LINE SWITCH: flip kOnlineRequires120
+    // to true and stock-60 builds go offline (net HLE stays dormant, the
+    // panel row greys out with "needs 120") with no preset reshuffle.
+    // False today: identical behavior in both modes.
+    constexpr bool kOnlineRequires120 = false;
+
+    // True when full120Value (PS2X_SSX3_FULL120, non-empty = 120 mode)
+    // satisfies the policy. Pure; unit-tested both branches.
+    inline bool onlineAllowedByMode(const char *full120Value, bool requires120)
+    {
+        return !requires120 || (full120Value && *full120Value);
+    }
+
+    // Unavailable-service recovery (online-default-1): bounded connect
+    // timeout + backoff with equal jitter. Pure decisions (clocks and
+    // randomness stay with the caller), unit-tested in
+    // ps2_net_protocol_tests.cpp.
+    constexpr uint64_t kConnectTimeoutMs = 8000u;
+    constexpr uint64_t kConnectBackoffBaseMs = 1000u;
+    constexpr uint64_t kConnectBackoffCapMs = 30000u;
+    constexpr uint64_t kDnsGiveUpMs = 10000u;
+
+    // Doubling backoff base for consecFails consecutive failures
+    // (1-indexed: first failure -> 1 s), capped at 30 s. 0 failures = 0.
+    inline uint64_t connectBackoffBaseMs(unsigned consecFails)
+    {
+        if (consecFails == 0u)
+            return 0u;
+        uint64_t base = kConnectBackoffBaseMs;
+        for (unsigned i = 1u; i < consecFails && base < kConnectBackoffCapMs; ++i)
+        {
+            base *= 2u;
+            if (base > kConnectBackoffCapMs)
+                base = kConnectBackoffCapMs;
+        }
+        return base;
+    }
+
+    // Equal jitter: half the base is guaranteed spacing, the other half is
+    // random. rand01 in [0,1]; values outside clamp. Returns the ms to wait
+    // after a failure before the next real SYN.
+    inline uint64_t connectBackoffDelayMs(uint64_t baseMs, double rand01)
+    {
+        if (rand01 < 0.0)
+            rand01 = 0.0;
+        if (rand01 > 1.0)
+            rand01 = 1.0;
+        const uint64_t half = baseMs / 2u;
+        return half + static_cast<uint64_t>(rand01 * static_cast<double>(baseMs - half));
+    }
+
+    // True when a new real connect attempt may start: first attempt, a past
+    // success (consecFails == 0), or the backoff window has elapsed.
+    inline bool mayAttemptConnect(uint64_t nowMs, uint64_t lastAttemptMs, unsigned consecFails,
+                                  double rand01)
+    {
+        if (consecFails == 0u)
+            return true;
+        if (nowMs < lastAttemptMs)
+            return false;
+        return nowMs - lastAttemptMs >=
+               connectBackoffDelayMs(connectBackoffBaseMs(consecFails), rand01);
+    }
+
+    // DNS give-up: the async resolver thread may block indefinitely (dead
+    // DNS). After kDnsGiveUpMs with no resolution the client fails fast
+    // into the refused-connection path instead of polling name/done
+    // forever. A late resolution still heals later entries (the thread
+    // keeps writing the address).
+    inline bool dnsGiveUp(uint64_t resolveStartMs, uint64_t nowMs, bool resolved)
+    {
+        if (resolved)
+            return false;
+        if (nowMs < resolveStartMs)
+            return false;
+        return nowMs - resolveStartMs >= kDnsGiveUpMs;
+    }
 }

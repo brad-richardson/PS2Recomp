@@ -1405,7 +1405,7 @@ namespace ps2_stubs
             // screen, so re-apply whenever title/main is seen. Leaving
             // the menu restores stock (f3: no stale handles into
             // submenu pool reuse).
-            if (g_qpNav.onlineMode && port == 0 && runtime != nullptr)
+            if (g_qpNav.onlineMode && port == 0 && runtime != nullptr && ps2_net::enabled())
             {
                 uint8_t *labelRam = runtime->memory().getRDRAM();
                 if (labelRam)

@@ -127,8 +127,10 @@ void loadSettingsEnvFile()
         {
             for (const auto &entry : ps2x::parseEnvFileContent(content))
             {
+                // android-touch-1: Touch row persists under its env name.
+                // online-default-1: PS2X_NET joins the panel-owned keys.
                 if (entry.first != "GE1_UPSCALE" && entry.first != "PS2X_SETTINGS_PERF" &&
-                    entry.first != "PS2X_VIRTUAL_PAD") // android-touch-1: Touch row
+                    entry.first != "PS2X_VIRTUAL_PAD" && entry.first != "PS2X_NET")
                     continue;
                 setenv(entry.first.c_str(), entry.second.c_str(), 1);
                 __android_log_write(ANDROID_LOG_INFO, kPs2xLogTag,

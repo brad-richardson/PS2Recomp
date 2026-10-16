@@ -7,6 +7,7 @@
 #include "ps2_net_dirtysock.h"
 #include "ps2_net_link.h" // np-link-1: delay-lockstep client (default off)
 #include "ps2_np_rider.h" // np-fix-1 (F7/F8): rider script state, verbatim move
+#include "ps2_net_protocol.h" // online-default-1: 120-only policy switch
 #include "ps2_android_toast.h"
 #include "ps2_e7.h"
 #include "ps2_e41_trace.h"
@@ -3508,7 +3509,7 @@ namespace
 {
 // Re-exec the runner with Mode/Resolution applied through the env (the Mac
 // has no settings file). Returns false when exec fails (caller stays open).
-bool set2MacRestart(bool want120, const char *upscaleOrNull)
+bool set2MacRestart(bool want120, const char *upscaleOrNull, bool online)
 {
     if (g_set2Argc < 1 || !g_set2Argv || !g_set2Argv[0])
         return false;
@@ -3516,22 +3517,26 @@ bool set2MacRestart(bool want120, const char *upscaleOrNull)
     for (char **e = environ; e && *e; ++e)
     {
         const std::string entry(*e);
-        // Fresh boot: new Mode/Resolution, and the diag test spans + shot
-        // must not fire again (else the reboot would re-open and loop).
+        // Fresh boot: new Mode/Resolution/Online, and the diag test spans
+        // + shot must not fire again (else the reboot would re-open and
+        // loop).
         if (entry.compare(0, 18, "PS2X_SSX3_FULL120=") == 0 || entry.compare(0, 12, "GE1_UPSCALE=") == 0 ||
-            entry.compare(0, 19, "PS2X_SET2_TEST_PAD=") == 0 || entry.compare(0, 15, "PS2X_SET2_SHOT=") == 0)
+            entry.compare(0, 10, "PS2X_NET=") == 0 || entry.compare(0, 19, "PS2X_SET2_TEST_PAD=") == 0 ||
+            entry.compare(0, 15, "PS2X_SET2_SHOT=") == 0)
             continue;
         keep.push_back(entry);
     }
     keep.push_back(want120 ? "PS2X_SSX3_FULL120=events" : "PS2X_SSX3_FULL120=");
     if (upscaleOrNull && upscaleOrNull[0] != '\0')
         keep.push_back(std::string("GE1_UPSCALE=") + upscaleOrNull);
+    keep.push_back(online ? "PS2X_NET=1" : "PS2X_NET=0");
     std::vector<char *> envp;
     for (std::string &s : keep)
         envp.push_back(s.data());
     envp.push_back(nullptr);
-    std::fprintf(stderr, "[set2] mac re-exec %s (120=%d upscale=%s)\n", g_set2Argv[0], want120 ? 1 : 0,
-                 upscaleOrNull && upscaleOrNull[0] ? upscaleOrNull : "(default)");
+    std::fprintf(stderr, "[set2] mac re-exec %s (120=%d upscale=%s online=%d)\n", g_set2Argv[0],
+                 want120 ? 1 : 0, upscaleOrNull && upscaleOrNull[0] ? upscaleOrNull : "(default)",
+                 online ? 1 : 0);
     // Flush: exec keeps thefds but a buffered line could be lost on failure paths.
     std::fflush(nullptr);
     execve(g_set2Argv[0], g_set2Argv, envp.data());
@@ -8052,6 +8057,16 @@ void set2SafePad(float &left, float &top)
 }
 } // namespace
 
+// 120-only policy veto (online-default-1; Brad 10-15 tentative): true
+// when the switch is armed and this boot runs stock-60. Dormant today
+// (kOnlineRequires120 is false): always false. File scope: the SET2
+// state below lives inside run().
+bool set2OnlineVeto()
+{
+    return !ps2_net_protocol::onlineAllowedByMode(std::getenv("PS2X_SSX3_FULL120"),
+                                                 ps2_net_protocol::kOnlineRequires120);
+}
+
 void PS2Runtime::run()
 {
     m_stopRequested.store(false, std::memory_order_relaxed);
@@ -8293,6 +8308,7 @@ void PS2Runtime::run()
     std::string set2EffUpscale; // effective GE1_UPSCALE (or the platform default)
     unsigned set2MeasuredH = 0;  // panel-polish-1: last real game-frame height px
     ps2x::set2::Res set2ResAtOpen = ps2x::set2::Res::RDefault;
+    bool set2OnlineAtOpen = false; // effective PS2X_NET, sampled at open
     uint64_t set2HostFrame = 0;
     uint16_t set2PrevUnion = 0; // nav edge detect
     ps2x::set2::SwallowState set2Swallow; // close-press overhang, stripped until release
@@ -8777,6 +8793,12 @@ void PS2Runtime::run()
             set2Nav.perf = set2Perf;
             set2Nav.upscale = set2Upscale;
             set2Nav.touch = vpadTouchMode;
+            // Online reflects the effective boot env (preset + settings
+            // layer); the toggle below persists immediately and takes
+            // effect on the next launch (restart-class, like Mode/Res).
+            // Under the 120-only veto the row is forced off (greyed).
+            set2Nav.online = ps2x::set2::onlineEnvOn(std::getenv("PS2X_NET")) && !set2OnlineVeto();
+            set2OnlineAtOpen = set2Nav.online;
             set2Nav.restartArmed = false;
 #if defined(__ANDROID__)
             // The panel needs the GL overlay visible over the VK layer. The Z
@@ -8855,6 +8877,7 @@ void PS2Runtime::run()
             auto pairs = set2ReadSettings();
             pairs = ps2x::set2::upsertSettings(pairs, "GE1_UPSCALE", upscale);
             pairs = ps2x::set2::upsertSettings(pairs, "PS2X_SETTINGS_PERF", set2Perf ? "1" : "0");
+            pairs = ps2x::set2::upsertSettings(pairs, "PS2X_NET", set2Nav.online ? "1" : "0");
             if (!set2WriteSettings(pairs))
             {
                 std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
@@ -8872,6 +8895,7 @@ void PS2Runtime::run()
             auto pairs = set2ReadSettings();
             pairs = ps2x::set2::upsertSettings(pairs, "GE1_UPSCALE", upscale);
             pairs = ps2x::set2::upsertSettings(pairs, "PS2X_SETTINGS_PERF", set2Perf ? "1" : "0");
+            pairs = ps2x::set2::upsertSettings(pairs, "PS2X_NET", set2Nav.online ? "1" : "0");
             if (!set2WriteSettings(pairs))
             {
                 std::fprintf(stderr, "[set2] restart: settings write failed, staying open\n");
@@ -8886,7 +8910,7 @@ void PS2Runtime::run()
             // On success the process dies inside toHz.
 #else
 #if defined(__APPLE__)
-            if (!set2MacRestart(want120, upscale))
+            if (!set2MacRestart(want120, upscale, set2Nav.online))
             {
                 std::fprintf(stderr, "[set2] restart: re-exec failed, staying open\n");
                 ps2x::ui::toast("Restart failed", 3.0f);
@@ -8989,12 +9013,32 @@ void PS2Runtime::run()
                                                        ps2x::set2::touchToSetting(vpadTouchMode));
                     set2WriteSettings(pairs); // false on the Mac (live-only there)
                 }
+                if (navOut.action == ps2x::set2::Action::Changed &&
+                    set2Nav.sel == ps2x::set2::Row::Online)
+                {
+                    // online-default-1: restart-class (the net HLE reads
+                    // PS2X_NET once at boot). Persist immediately so a
+                    // plain app quit keeps the choice; the row shows
+                    // "(restart)" until relaunched. Under the 120-only
+                    // veto the toggle is a no-op (stays off, unpersisted).
+                    if (set2OnlineVeto())
+                    {
+                        set2Nav.online = false;
+                    }
+                    else
+                    {
+                        auto pairs = set2ReadSettings();
+                        pairs = ps2x::set2::upsertSettings(pairs, "PS2X_NET",
+                                                           set2Nav.online ? "1" : "0");
+                        set2WriteSettings(pairs); // false on the Mac (live-only there)
+                    }
+                }
                 if (navOut.action != ps2x::set2::Action::None)
-                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d touch=%d\n",
+                    std::fprintf(stderr, "[set2] nav action=%d sel=%d mode=%d res=%d perf=%d upscale=%d touch=%d online=%d\n",
                                  static_cast<int>(navOut.action), static_cast<int>(set2Nav.sel),
                                  static_cast<int>(set2Nav.mode), static_cast<int>(set2Nav.res),
                                  set2Nav.perf ? 1 : 0, set2Nav.upscale ? 1 : 0,
-                                 static_cast<int>(set2Nav.touch));
+                                 static_cast<int>(set2Nav.touch), set2Nav.online ? 1 : 0);
                 if (navOut.action == ps2x::set2::Action::Close)
                     set2DoClose();
                 else if (navOut.action == ps2x::set2::Action::DoRestart)
@@ -9593,6 +9637,22 @@ void PS2Runtime::run()
                                                            ps2x::set2::touchToSetting(vpadTouchMode));
                         set2WriteSettings(pairs);
                     }
+                    if (tapOut.action == ps2x::set2::Action::Changed &&
+                        set2Nav.sel == ps2x::set2::Row::Online)
+                    {
+                        // online-default-1: touch tap, same veto/persist as the pad path.
+                        if (set2OnlineVeto())
+                        {
+                            set2Nav.online = false;
+                        }
+                        else
+                        {
+                            auto pairs = set2ReadSettings();
+                            pairs = ps2x::set2::upsertSettings(pairs, "PS2X_NET",
+                                                               set2Nav.online ? "1" : "0");
+                            set2WriteSettings(pairs);
+                        }
+                    }
                     std::fprintf(stderr, "[set2] tap row=%d action=%d\n", hit,
                                  static_cast<int>(tapOut.action));
                     if (tapOut.action == ps2x::set2::Action::Close)
@@ -9780,6 +9840,53 @@ void PS2Runtime::run()
                     EndBlendMode();
 #endif
             }
+            // online-default-1: first-run privacy notice card (multi-line,
+            // posted once per install). Below the toast, same host-drawn
+            // placement; never into the guest frame.
+            std::string noticeMsg;
+            if (ps2x::ui::pollNotice(noticeMsg) && !noticeMsg.empty())
+            {
+                std::vector<std::string> noticeLines;
+                {
+                    size_t pos = 0u;
+                    for (size_t i = 0u; i < ps2x::ui::kNoticeMaxLines; ++i)
+                    {
+                        const size_t end = noticeMsg.find('\n', pos);
+                        noticeLines.push_back(noticeMsg.substr(pos, end == std::string::npos
+                                                                       ? end
+                                                                       : end - pos));
+                        if (end == std::string::npos)
+                            break;
+                        pos = end + 1u;
+                    }
+                }
+                const int noticeFont = std::max(14, static_cast<int>(screenHeight / 44.0f));
+                int noticeW = 0;
+                for (const std::string &line : noticeLines)
+                    noticeW = std::max(noticeW, MeasureText(line.c_str(), noticeFont));
+                const int noticeH =
+                    static_cast<int>(noticeLines.size()) * (noticeFont + 6) + 26;
+                const int noticeX = static_cast<int>(screenWidth / 2.0f) - noticeW / 2;
+                const int noticeY = static_cast<int>(screenHeight * 0.20f);
+#if defined(__ANDROID__)
+                if (vkUnder)
+                {
+                    rlSetBlendFactorsSeparate(0x0302 /*SRC_ALPHA*/, 0x0303 /*ONE_MINUS_SRC_ALPHA*/,
+                                              1 /*ONE*/, 0x0303, 0x8006 /*FUNC_ADD*/, 0x8006);
+                    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+                }
+#endif
+                DrawRectangle(noticeX - 14, noticeY - 10, noticeW + 28, noticeH, Color{8, 12, 20, 220});
+                DrawRectangleLines(noticeX - 14, noticeY - 10, noticeW + 28, noticeH,
+                                   Color{255, 170, 80, 255});
+                for (size_t i = 0u; i < noticeLines.size(); ++i)
+                    DrawText(noticeLines[i].c_str(), noticeX, noticeY + static_cast<int>(i) * (noticeFont + 6),
+                             noticeFont, Color{255, 255, 255, 235});
+#if defined(__ANDROID__)
+                if (vkUnder)
+                    EndBlendMode();
+#endif
+            }
         }
         // SET2: gear dot (closed) / settings panel (open) / perf line, drawn
         // by the host over the presented frame (never into the guest frame).
@@ -9847,6 +9954,7 @@ void PS2Runtime::run()
                 // panel-polish-1: the real render height (measured pixels),
                 // never the scale factor. Pending options project from the
                 // measured height; default shows the measured height itself.
+                const bool onlineDirty = set2Nav.online != set2OnlineAtOpen;
                 std::string resVal;
                 if (set2Nav.res == ps2x::set2::Res::RDefault)
                 {
@@ -9869,6 +9977,9 @@ void PS2Runtime::run()
                 const std::string perfVal(set2Nav.perf ? "on" : "off");
                 const std::string upscaleVal(set2Nav.upscale ? "on" : "off");
                 const std::string touchVal(ps2x::set2::touchName(set2Nav.touch));
+                const std::string onlineVal =
+                    std::string(set2Nav.online ? "on" : "off") +
+                    (set2OnlineVeto() ? "  (needs 120)" : (onlineDirty ? "  (restart)" : ""));
                 const std::string restartVal =
                     set2Nav.restartArmed ? "RESTART NOW?  (X again to confirm)" : "Restart now";
                 for (int i = 0; i < ps2x::set2::kRowCount; ++i)
@@ -9901,6 +10012,8 @@ void PS2Runtime::run()
                         value = &upscaleVal;
                     else if (row == ps2x::set2::Row::Touch)
                         value = &touchVal;
+                    else if (row == ps2x::set2::Row::Online)
+                        value = &onlineVal;
                     DrawText(label, static_cast<int>(set2dg.rowX), rowY, rowFont, rowCol);
                     const int valW = MeasureText(value->c_str(), rowFont);
                     DrawText(value->c_str(),

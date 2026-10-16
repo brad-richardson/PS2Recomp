@@ -96,6 +96,53 @@ namespace
             t.IsFalse(ps2_net_protocol::relayRegisterDue(1, false, true, 31000, conn, last),
                       "30 second cap");
         });
+
+        tc.Run("connect backoff doubles with a cap, jitter stays in half-open half", [](TestCase &t)
+        {
+            t.Equals(ps2_net_protocol::connectBackoffBaseMs(0), static_cast<uint64_t>(0), "no failures");
+            t.Equals(ps2_net_protocol::connectBackoffBaseMs(1), static_cast<uint64_t>(1000), "first");
+            t.Equals(ps2_net_protocol::connectBackoffBaseMs(2), static_cast<uint64_t>(2000), "second");
+            t.Equals(ps2_net_protocol::connectBackoffBaseMs(5), static_cast<uint64_t>(16000), "fifth");
+            t.Equals(ps2_net_protocol::connectBackoffBaseMs(6), static_cast<uint64_t>(30000), "capped");
+            t.Equals(ps2_net_protocol::connectBackoffBaseMs(100), static_cast<uint64_t>(30000),
+                     "huge stays capped");
+            t.Equals(ps2_net_protocol::connectBackoffDelayMs(1000, 0.0), static_cast<uint64_t>(500),
+                     "equal jitter floor");
+            t.Equals(ps2_net_protocol::connectBackoffDelayMs(1000, 1.0), static_cast<uint64_t>(1000),
+                     "equal jitter ceiling");
+            t.Equals(ps2_net_protocol::connectBackoffDelayMs(1000, -1.0), static_cast<uint64_t>(500),
+                     "rand clamps low");
+            t.Equals(ps2_net_protocol::connectBackoffDelayMs(1000, 2.0), static_cast<uint64_t>(1000),
+                     "rand clamps high");
+            t.IsTrue(ps2_net_protocol::mayAttemptConnect(5000, 0, 0, 0.0), "first attempt");
+            t.IsFalse(ps2_net_protocol::mayAttemptConnect(500, 1000, 1, 0.0), "clock ran back");
+            t.IsFalse(ps2_net_protocol::mayAttemptConnect(1200, 1000, 1, 0.0),
+                      "200 ms inside the 500 ms floor");
+            t.IsTrue(ps2_net_protocol::mayAttemptConnect(1500, 1000, 1, 0.0),
+                     "500 ms floor elapsed");
+            t.IsTrue(ps2_net_protocol::mayAttemptConnect(1000, 1000, 3, 1.0) == false,
+                     "4000 ms base needs its window");
+        });
+
+        tc.Run("120-only policy switch is permissive until armed", [](TestCase &t)
+        {
+            t.IsTrue(ps2_net_protocol::onlineAllowedByMode(nullptr, false), "switch off, unset");
+            t.IsTrue(ps2_net_protocol::onlineAllowedByMode("", false), "switch off, empty");
+            t.IsTrue(ps2_net_protocol::onlineAllowedByMode("events", false), "switch off, 120");
+            t.IsTrue(ps2_net_protocol::onlineAllowedByMode("events", true), "switch on, 120");
+            t.IsFalse(ps2_net_protocol::onlineAllowedByMode(nullptr, true), "switch on, unset");
+            t.IsFalse(ps2_net_protocol::onlineAllowedByMode("", true), "switch on, stock 60");
+            t.IsFalse(ps2_net_protocol::kOnlineRequires120, "ships dormant (Brad 10-15 tentative)");
+        });
+
+        tc.Run("DNS give-up fails fast only after the deadline", [](TestCase &t)
+        {
+            t.IsFalse(ps2_net_protocol::dnsGiveUp(1000, 1000, false), "just started");
+            t.IsFalse(ps2_net_protocol::dnsGiveUp(1000, 10999, false), "before the deadline");
+            t.IsTrue(ps2_net_protocol::dnsGiveUp(1000, 11000, false), "deadline edge");
+            t.IsFalse(ps2_net_protocol::dnsGiveUp(1000, 60000, true), "resolved never gives up");
+            t.IsFalse(ps2_net_protocol::dnsGiveUp(5000, 1000, false), "clock ran back");
+        });
     }
 }
 

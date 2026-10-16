@@ -94,4 +94,89 @@ inline void clearToastForTest()
     s.text.clear();
 }
 
+namespace notice_detail
+{
+// A longer-lived multi-line card (online-default-1: first-run privacy
+// notice). Same contract as the toast: any thread posts, the render
+// thread draws, output-only, latest wins, at most one live.
+struct Card
+{
+    std::mutex mutex;
+    std::string text; // '\n'-separated lines, up to kNoticeMaxLines
+    std::chrono::steady_clock::time_point expiry{};
+    bool live = false;
+};
+inline Card &card()
+{
+    static Card c;
+    return c;
+}
+} // namespace notice_detail
+
+constexpr size_t kNoticeMaxLines = 4u;
+constexpr float kNoticeSeconds = 12.0f;
+
+// Post a multi-line notice card (empty text clears). Mirrors to the Java
+// Toast on Android like toast() (the play config skips GL).
+inline void notice(const std::string &text, float seconds = kNoticeSeconds)
+{
+    notice_detail::Card &c = notice_detail::card();
+    {
+        std::lock_guard<std::mutex> lock(c.mutex);
+        if (text.empty() || !(seconds > 0.0f))
+        {
+            c.live = false;
+            c.text.clear();
+        }
+        else
+        {
+            std::string clipped = text;
+            size_t lines = 0u;
+            for (size_t pos = 0; (pos = clipped.find('\n', pos)) != std::string::npos; ++pos)
+            {
+                if (++lines >= kNoticeMaxLines)
+                {
+                    clipped.resize(pos);
+                    break;
+                }
+            }
+            c.text = clipped;
+            c.expiry = std::chrono::steady_clock::now() +
+                       std::chrono::milliseconds(static_cast<long long>(seconds * 1000.0f));
+            c.live = true;
+        }
+    }
+#if defined(__ANDROID__)
+    if (!text.empty() && seconds > 0.0f)
+        ps2x::postQuickStatusToast(text);
+#else
+    (void)0;
+#endif
+}
+
+// Render thread: the live notice text, or false when none.
+inline bool pollNotice(std::string &textOut)
+{
+    notice_detail::Card &c = notice_detail::card();
+    std::lock_guard<std::mutex> lock(c.mutex);
+    if (!c.live)
+        return false;
+    if (std::chrono::steady_clock::now() >= c.expiry)
+    {
+        c.live = false;
+        c.text.clear();
+        return false;
+    }
+    textOut = c.text;
+    return true;
+}
+
+inline void clearNoticeForTest()
+{
+    notice_detail::Card &c = notice_detail::card();
+    std::lock_guard<std::mutex> lock(c.mutex);
+    c.live = false;
+    c.text.clear();
+}
+
 } // namespace ps2x::ui

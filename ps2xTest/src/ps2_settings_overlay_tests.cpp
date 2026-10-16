@@ -100,7 +100,19 @@ void register_ps2_settings_overlay_tests()
             auto u = ps2x::set2::navStep(st, false, false, true, false, false);
             t.IsTrue(u.action == ps2x::set2::Action::Changed && st.upscale, "upscale on");
             auto u2 = ps2x::set2::navStep(st, false, false, true, false, false);
-            t.IsTrue(u2.action == ps2x::set2::Action::Changed && !st.upscale, "upscale off"); });
+            t.IsTrue(u2.action == ps2x::set2::Action::Changed && !st.upscale, "upscale off");
+            st.sel = ps2x::set2::Row::Online;
+            auto n = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(n.action == ps2x::set2::Action::Changed && st.online, "online on");
+            auto n2 = ps2x::set2::navStep(st, false, false, true, false, false);
+            t.IsTrue(n2.action == ps2x::set2::Action::Changed && !st.online, "online off"); });
+
+        tc.Run("Online row follows the PS2X_NET env truthiness", [](TestCase &t)
+               {
+            t.IsTrue(ps2x::set2::onlineEnvOn("1"), "preset on");
+            t.IsFalse(ps2x::set2::onlineEnvOn("0"), "toggled off");
+            t.IsFalse(ps2x::set2::onlineEnvOn(""), "empty off");
+            t.IsFalse(ps2x::set2::onlineEnvOn(nullptr), "unset off"); });
 
         tc.Run("X cycles Touch auto -> on -> off -> auto", [](TestCase &t)
                {
@@ -171,6 +183,7 @@ void register_ps2_settings_overlay_tests()
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Perf)) == "Perf", "perf");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Upscale)) == "Upscale", "upscale");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Touch)) == "Touch", "touch");
+            t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Online)) == "Online", "online");
             t.IsTrue(std::string(ps2x::set2::rowLabel(Row::Restart)) == "Restart", "restart");
             for (int i = 0; i < ps2x::set2::kRowCount; ++i)
             {
@@ -213,12 +226,13 @@ void register_ps2_settings_overlay_tests()
         tc.Run("parses owned keys only, trims, skips comments and junk", [](TestCase &t)
                {
             const auto e = ps2x::set2::parseSettingsEnv(
-                "# panel file\n  GE1_UPSCALE = 2 \nPS2X_SETTINGS_PERF=1\nGE1_ONDEVICE_UPSCALE=1\nPS2X_VIRTUAL_PAD=0\nPS2X_SOUND=1\nnoequals\n=novalue\n");
-            t.Equals(e.size(), static_cast<size_t>(4), "allowlisted keys only");
+                "# panel file\n  GE1_UPSCALE = 2 \nPS2X_SETTINGS_PERF=1\nGE1_ONDEVICE_UPSCALE=1\nPS2X_VIRTUAL_PAD=0\nPS2X_NET=0\nPS2X_SOUND=1\nnoequals\n=novalue\n");
+            t.Equals(e.size(), static_cast<size_t>(5), "allowlisted keys only");
             t.IsTrue(e[0] == std::make_pair(std::string("GE1_UPSCALE"), std::string("2")), "trimmed UPSCALE");
             t.IsTrue(e[1] == std::make_pair(std::string("PS2X_SETTINGS_PERF"), std::string("1")), "PERF");
             t.IsTrue(e[2] == std::make_pair(std::string("GE1_ONDEVICE_UPSCALE"), std::string("1")), "ODU");
-            t.IsTrue(e[3] == std::make_pair(std::string("PS2X_VIRTUAL_PAD"), std::string("0")), "VPAD"); });
+            t.IsTrue(e[3] == std::make_pair(std::string("PS2X_VIRTUAL_PAD"), std::string("0")), "VPAD");
+            t.IsTrue(e[4] == std::make_pair(std::string("PS2X_NET"), std::string("0")), "NET"); });
 
         tc.Run("upsert replaces, appends and removes; format round-trips", [](TestCase &t)
                {

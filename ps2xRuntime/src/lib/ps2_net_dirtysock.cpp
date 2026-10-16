@@ -15,6 +15,7 @@
 #include "ps2_net_protocol.h"
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
+#include "ps2_ui_toast.h"
 #include "runtime/ps2_memory.h"
 
 #include <atomic>
@@ -38,6 +39,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -94,6 +96,10 @@ namespace ps2_net
         // DNS state: name/look resolves instantly; name/done reports
         // complete once a lookup has been issued.
         bool g_dnsResolved = false;
+        // online-default-1: host-ms when the async resolver started (0 =
+        // never). Exceeded without a resolution -> fail fast (see
+        // dnsDoneState).
+        std::atomic<uint64_t> g_dnsStartMs{0u};
         // Unified session-handle namespace (all */crea methods; the EE
         // lib passes status back as the handle, e.g. sess/disc(a0=1)).
         uint32_t g_nextHandle = 0u;
@@ -556,6 +562,73 @@ namespace ps2_net
                       << (quickplayOn() ? " quickplay=1" : "") << std::endl;
         }
 
+        // online-default-1: unavailable-service recovery. Per-destination
+        // consecutive-failure count + last real attempt (host ms). A
+        // sess/conn inside the backoff window fails immediately with no
+        // SYN (equal jitter from the protocol helper), so a dead lobby
+        // never sees a retry storm. Success resets the count.
+        struct ConnAttempt
+        {
+            uint64_t lastAttemptMs = 0u;
+            unsigned consecFails = 0u;
+            bool everAttempted = false;
+        };
+        std::mutex g_connMutex;
+        std::map<std::pair<uint32_t, uint16_t>, ConnAttempt> g_connAttempts;
+        std::mt19937_64 g_connRand{[] {
+            std::random_device rd;
+            return rd();
+        }()};
+
+        double connRand01()
+        {
+            std::lock_guard<std::mutex> lock(g_connMutex);
+            std::uniform_real_distribution<double> pick(0.0, 1.0);
+            return pick(g_connRand);
+        }
+
+        // Toast copy for a failed real attempt (<=120 chars: the overlay
+        // draw truncates). The game's own error dialog carries the
+        // back-out buttons; this line says it in plain words.
+        constexpr char kToastConnRefused[] =
+            "Online unavailable (server refused). Offline play works - retry from the Online menu.";
+        constexpr char kToastConnTimeout[] =
+            "Online unavailable (no answer). Offline play works - retry from the Online menu.";
+        constexpr char kToastConnDns[] =
+            "Online unavailable (address lookup failed). Offline play works - check connection.";
+
+        // G6 privacy notice (online-default-1): short first-run card of
+        // what is logged, per the plan's logging section. Posted once per
+        // install (flag file beside the Quick Play login), non-blocking.
+        // Full text goes to REPORT.md for Brad's review.
+        constexpr char kOnlineNotice[] =
+            "Quick Play races relay through ssx.bradr.dev - no peer IPs.\n"
+            "Names are unowned labels; leaderboard names are just names.\n"
+            "Debug logs may contain IPs: share them privately.";
+
+        void maybeFirstRunNotice()
+        {
+#if PS2_NET_HAVE_POSIX_SOCKETS
+            const std::string login = quickplayLoginPath();
+            if (login.empty())
+            {
+                return;
+            }
+            const std::string flag = login + ".notice-v1";
+            const int fd = ::open(flag.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+            if (fd < 0)
+            {
+                return; // already shown (or unwritable: stay silent, retry next entry)
+            }
+            ::close(fd);
+            std::cerr << "[net] online notice (first Online entry):\n"
+                      << kOnlineNotice << std::endl;
+            ps2x::ui::notice(kOnlineNotice);
+#else
+            return;
+#endif
+        }
+
         void closeSocket(uint32_t handle)
         {
 #if PS2_NET_HAVE_POSIX_SOCKETS
@@ -902,6 +975,11 @@ namespace ps2_net
                 return true;
             }
             const std::string host(server);
+            g_dnsStartMs.store(static_cast<uint64_t>(
+                                   std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count()),
+                               std::memory_order_release);
             std::thread([host] {
                 addrinfo hints{};
                 hints.ai_family = AF_INET;
@@ -940,7 +1018,13 @@ namespace ps2_net
             }
             return false;
         }();
-        return on;
+        // Availability policy (online-default-1; Brad 10-15 tentative
+        // 120-only): one line (kOnlineRequires120) flips stock-60 builds
+        // offline. Dormant while false: the helper returns true without
+        // consulting the mode, so today's behavior is unchanged.
+        return on && ps2_net_protocol::onlineAllowedByMode(
+                          std::getenv("PS2X_SSX3_FULL120"),
+                          ps2_net_protocol::kOnlineRequires120);
     }
 
     void capture(const char *direction, uint64_t hostTick, uint64_t guestTick,
@@ -1055,6 +1139,32 @@ namespace ps2_net
     {
         bool ok = false;
         return readU32(rdram, addr, ok);
+    }
+
+    // online-default-1: DNS done-state with give-up. Resolved -> done with
+    // the address; gave up (dead DNS past the deadline) -> done with
+    // address 0, so the game fails fast into the refused-connection path
+    // instead of polling name/done forever; otherwise not done yet.
+    // Returns the name/done value; gaveUp reports the fail-fast case.
+    uint32_t dnsDoneState(bool &gaveUp)
+    {
+        gaveUp = false;
+        const uint32_t addr = lobbyAddress();
+        if (addr != 0u)
+        {
+            return 1u;
+        }
+        const uint64_t start = g_dnsStartMs.load(std::memory_order_acquire);
+        if (start == 0u)
+        {
+            return 0u; // resolver never started (no server env)
+        }
+        if (ps2_net_protocol::dnsGiveUp(start, hostMillis(), false))
+        {
+            gaveUp = true;
+            return 1u;
+        }
+        return 0u;
     }
 
     // ONL4-P2: send one synthetic auth on the newest lobby socket.
@@ -1952,6 +2062,7 @@ namespace ps2_net
                         g_qpNetwCreaCount.fetch_add(1u, std::memory_order_relaxed);
                     }
                     ensureQuickplayLogin(tick);
+                    maybeFirstRunNotice();
                 }
                 else if (method == 2u)
                 {
@@ -1994,13 +2105,16 @@ namespace ps2_net
                 {
                     // name/look: a2 = IOP addr of the hostname (a3 = len
                     // incl NUL). Resolve only through the configured lobby override.
-                    g_dnsResolved = lobbyAddress() != 0u;
+                    bool gaveUp = false;
+                    g_dnsResolved = dnsDoneState(gaveUp) != 0u;
                     status = 0u;
                 }
                 else if (method == 23u)
                 {
-                    // name/done: completion poll; 1 once resolved.
-                    g_dnsResolved = lobbyAddress() != 0u;
+                    // name/done: completion poll; 1 once resolved (or once
+                    // the resolver gave up: addr 0 fails fast downstream).
+                    bool gaveUp = false;
+                    g_dnsResolved = dnsDoneState(gaveUp) != 0u;
                     status = g_dnsResolved ? 1u : 0u;
                 }
                 else if (method == 25u)
@@ -2008,6 +2122,7 @@ namespace ps2_net
                     // name/addr: the resolved address comes back in STATUS
                     // (eeBuf=0/max=0 in practice; the EE lib builds the
                     // sockaddr itself). Same convention as netw/stat addr.
+                    // 0 after DNS give-up: sess/conn fails fast there.
                     status = lobbyAddress();
                     const uint32_t eeBuf = w2 & 0x1FFFFFFFu;
                     uint8_t *dst = (w3 >= 4u) ? getMemPtr(rdram, eeBuf) : nullptr;
@@ -2082,8 +2197,10 @@ namespace ps2_net
                 else if (method == 14u)
                 {
                     // sess/conn: a0 = handle, a2/a3 = sockaddr (16 B:
-                    // family LE, port BE, addr BE). Blocking TCP connect;
-                    // loopback is instant. Non-blocking afterwards: the
+                    // family LE, port BE, addr BE). Bounded non-blocking
+                    // TCP connect (online-default-1: the old blocking
+                    // connect hung the runner on a dead/blackhole lobby
+                    // for the OS timeout); non-blocking afterwards: the
                     // game polls sess/recv.
                     const std::vector<uint8_t> sa = dmaBytes(w0);
                     uint16_t port = 0u;
@@ -2097,9 +2214,39 @@ namespace ps2_net
                     }
                     std::cerr << " h=" << w4 << " port=" << port;
 #if PS2_NET_HAVE_POSIX_SOCKETS
+                    // Backoff gate: a recent failure to this destination
+                    // fails immediately with no SYN (no retry storm).
+                    // The jitter draw happens before the lock (the draw
+                    // takes the same mutex).
+                    const std::pair<uint32_t, uint16_t> dest(addr, port);
+                    const double backoffRand = connRand01();
+                    bool backedOff = false;
+                    {
+                        std::lock_guard<std::mutex> lock(g_connMutex);
+                        auto it = g_connAttempts.find(dest);
+                        if (it != g_connAttempts.end() && it->second.everAttempted &&
+                            !ps2_net_protocol::mayAttemptConnect(
+                                hostMillis(), it->second.lastAttemptMs,
+                                it->second.consecFails, backoffRand))
+                        {
+                            backedOff = true;
+                        }
+                    }
+                    if (backedOff)
+                    {
+                        std::cerr << " CONNECT-BACKOFF";
+                        status = 1u;
+                        if (qpNavNote())
+                        {
+                            qpSetFirst(g_qpSessConnFail, tick);
+                        }
+                    }
+                    else
+                    {
                     closeSocket(w4);
                     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
                     bool ok = (fd >= 0);
+                    int failKind = 0; // 0 ok, 1 refused/fast, 2 timed out
 #ifdef SO_NOSIGPIPE
                     // ONL5-P2: a send on a socket the server reset must
                     // fail (as on the IRX), not SIGPIPE the runner (o7a).
@@ -2116,15 +2263,103 @@ namespace ps2_net
                         sin.sin_family = AF_INET;
                         sin.sin_port = htons(port);
                         sin.sin_addr.s_addr = htonl(addr);
-                        ok = (::connect(fd, reinterpret_cast<struct sockaddr *>(&sin),
-                                        sizeof(sin)) == 0);
+                        const int fl = ::fcntl(fd, F_GETFL, 0);
+                        int rc = -1;
+                        bool nonblock = false;
+                        if (fl >= 0 && ::fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0)
+                        {
+                            nonblock = true;
+                            rc = ::connect(fd, reinterpret_cast<struct sockaddr *>(&sin),
+                                           sizeof(sin));
+                        }
+                        else
+                        {
+                            // Cannot go non-blocking: fail rather than
+                            // risk the old unbounded blocking connect.
+                            failKind = 1;
+                        }
+                        if (nonblock && rc != 0 && errno == EINPROGRESS)
+                        {
+                            // Bounded wait for the handshake (select on
+                            // writability, then SO_ERROR). EINTR resumes
+                            // against the same deadline.
+                            const uint64_t deadline =
+                                hostMillis() + ps2_net_protocol::kConnectTimeoutMs;
+                            rc = -1;
+                            for (;;)
+                            {
+                                const uint64_t now = hostMillis();
+                                if (now >= deadline)
+                                {
+                                    failKind = 2;
+                                    break;
+                                }
+                                const uint64_t left = deadline - now;
+                                struct timeval tv;
+                                tv.tv_sec = static_cast<long>(left / 1000u);
+                                tv.tv_usec = static_cast<long>((left % 1000u) * 1000u);
+                                fd_set wfds;
+                                FD_ZERO(&wfds);
+                                FD_SET(fd, &wfds);
+                                const int n =
+                                    ::select(fd + 1, nullptr, &wfds, nullptr, &tv);
+                                if (n > 0)
+                                {
+                                    int soErr = 0;
+                                    socklen_t soLen = sizeof(soErr);
+                                    if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr,
+                                                      &soLen) == 0 &&
+                                        soErr == 0)
+                                    {
+                                        rc = 0;
+                                    }
+                                    else
+                                    {
+                                        failKind = 1;
+                                    }
+                                    break;
+                                }
+                                if (n == 0)
+                                {
+                                    failKind = 2;
+                                    break;
+                                }
+                                if (errno != EINTR)
+                                {
+                                    failKind = 1;
+                                    break;
+                                }
+                            }
+                        }
+                        else if (rc != 0)
+                        {
+                            failKind = 1;
+                        }
+                        else
+                        {
+                            rc = 0;
+                        }
+                        ok = (rc == 0);
+                    }
+                    else
+                    {
+                        failKind = 1;
                     }
                     if (ok)
                     {
+                        // Already non-blocking from the bounded handshake
+                        // above; keep the flag set idempotent.
                         const int flags = ::fcntl(fd, F_GETFL, 0);
                         if (flags >= 0)
                         {
                             ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(g_connMutex);
+                            ConnAttempt &st = g_connAttempts[dest];
+                            st.consecFails = 0u;
+                            st.everAttempted = true;
+                            st.lastAttemptMs = hostMillis();
                         }
                         setSocket(w4, fd);
                         g_loginConn = w4;
@@ -2159,13 +2394,33 @@ namespace ps2_net
                         {
                             ::close(fd);
                         }
-                        std::cerr << " CONNECT-FAILED";
+                        {
+                            std::lock_guard<std::mutex> lock(g_connMutex);
+                            ConnAttempt &st = g_connAttempts[dest];
+                            st.everAttempted = true;
+                            st.lastAttemptMs = hostMillis();
+                            if (st.consecFails < 1000u)
+                            {
+                                ++st.consecFails;
+                            }
+                        }
+                        // Cause-specific plain-words toast. addr 0 means
+                        // the resolver gave up (DNS leg); a timeout is
+                        // the silent/blackhole case; anything fast is a
+                        // refusal (down/full/rate-limited all RST or
+                        // reset here). Backed-off attempts stay silent.
+                        const char *toast = (addr == 0u) ? kToastConnDns
+                                            : (failKind == 2) ? kToastConnTimeout
+                                                              : kToastConnRefused;
+                        std::cerr << ((failKind == 2) ? " CONNECT-TIMEOUT" : " CONNECT-FAILED");
+                        ps2x::ui::toast(toast, 8.0f);
                         status = 1u;
                         if (qpNavNote())
                         {
                             qpSetFirst(g_qpSessConnFail, tick);
                         }
                     }
+                    } // end backoff-gate else: a real attempt ran
 #else
                     std::cerr << " NO-SOCKETS";
                     status = 1u;
