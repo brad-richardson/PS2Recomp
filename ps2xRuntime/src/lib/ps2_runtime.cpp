@@ -9022,6 +9022,98 @@ void PS2Runtime::run()
                 const int tkTitle = std::max(18, static_cast<int>(screenHeight / 24.0f));
                 const int tkRow = std::max(14, static_cast<int>(screenHeight / 32.0f));
                 const int tkSmall = std::max(12, static_cast<int>(screenHeight / 44.0f));
+                // Staged overlay atlas (PS2X_SSX3_TRICKY_LIST_ART): FEFONT
+                // strings + disc art baked offline by make_list_atlas.py
+                // (TKLIST1). Missing or unparseable file = the plain
+                // fallback draw; every textured element below keeps one.
+                struct TkAtlasRect { float x, y, w, h; };
+                static Texture2D tkAtlasTex = {0};
+                static std::string tkAtlasPixels;
+                static std::map<std::string, TkAtlasRect> tkAtlasRects;
+                static bool tkAtlasTried = false;
+                if (!tkAtlasTried)
+                {
+                    tkAtlasTried = true;
+                    if (const char *art = std::getenv("PS2X_SSX3_TRICKY_LIST_ART"))
+                    {
+                        std::ifstream f(art, std::ios::binary);
+                        const std::string blob((std::istreambuf_iterator<char>(f)),
+                                               std::istreambuf_iterator<char>());
+                        const uint8_t *d = reinterpret_cast<const uint8_t *>(blob.data());
+                        const size_t n = blob.size();
+                        auto u32 = [&](size_t o) -> uint32_t {
+                            uint32_t v = 0;
+                            if (o + 4 <= n)
+                                std::memcpy(&v, d + o, 4);
+                            return v;
+                        };
+                        if (n >= 20 && std::memcmp(d, "TKLIST1\0", 8) == 0)
+                        {
+                            const uint32_t aw = u32(8), ah = u32(12), nr = u32(16);
+                            const size_t px = 20 + static_cast<size_t>(nr) * 40;
+                            if (aw >= 64 && aw <= 4096 && ah >= 64 && ah <= 4096 && nr > 0 && nr <= 256 &&
+                                px <= n && px + static_cast<size_t>(aw) * ah * 4 == n)
+                            {
+                                bool ok = true;
+                                std::map<std::string, TkAtlasRect> rects;
+                                for (uint32_t i = 0; ok && i < nr; ++i)
+                                {
+                                    const size_t ro = 20 + static_cast<size_t>(i) * 40;
+                                    const char *nm = reinterpret_cast<const char *>(d + ro);
+                                    if (std::memchr(nm, '\0', 24) == nullptr)
+                                    {
+                                        ok = false;
+                                        break;
+                                    }
+                                    const float rx = static_cast<float>(u32(ro + 24));
+                                    const float ry = static_cast<float>(u32(ro + 28));
+                                    const float rw = static_cast<float>(u32(ro + 32));
+                                    const float rh = static_cast<float>(u32(ro + 36));
+                                    if (rw <= 0 || rh <= 0 || rx < 0 || ry < 0 || rx + rw > aw || ry + rh > ah)
+                                    {
+                                        ok = false;
+                                        break;
+                                    }
+                                    rects[nm] = TkAtlasRect{rx, ry, rw, rh};
+                                }
+                                if (ok && rects.count("moun") && rects.count("title"))
+                                {
+                                    tkAtlasPixels.assign(reinterpret_cast<const char *>(d + px),
+                                                         static_cast<size_t>(aw) * ah * 4);
+                                    Image img{};
+                                    img.data = tkAtlasPixels.data();
+                                    img.width = static_cast<int>(aw);
+                                    img.height = static_cast<int>(ah);
+                                    img.mipmaps = 1;
+                                    img.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+                                    tkAtlasTex = LoadTextureFromImage(img);
+                                    tkAtlasRects = rects;
+                                }
+                            }
+                        }
+                    }
+                }
+                const auto tkSpr = [&](const char *name, TkAtlasRect &r) -> bool {
+                    const auto it = tkAtlasRects.find(name);
+                    if (it == tkAtlasRects.end())
+                        return false;
+                    r = it->second;
+                    return true;
+                };
+                // Atlas sprite at height hPx (aspect kept), top at y; left
+                // edge at x, or right edge when right. Returns drawn width.
+                const auto tkImg = [&](const char *name, float x, float y, float hPx, Color tint,
+                                       bool right) -> float {
+                    TkAtlasRect r;
+                    if (tkAtlasTex.id == 0u || !tkSpr(name, r) || r.h <= 0 || hPx <= 0)
+                        return 0.0f;
+                    const float wPx = r.w * hPx / r.h;
+                    DrawTexturePro(tkAtlasTex, Rectangle{r.x, r.y, r.w, r.h},
+                                   Rectangle{right ? x - wPx : x, y, wPx, hPx}, Vector2{0, 0}, 0.0f,
+                                   tint);
+                    return wPx;
+                };
+                const bool tkArt = (tkAtlasTex.id != 0u);
                 // Off-screen first: the mini is headless, so host screenshots
                 // come from this texture (blitted below), not the window.
                 const int tkTw = static_cast<int>(screenWidth), tkTh = static_cast<int>(screenHeight);
@@ -9036,18 +9128,45 @@ void PS2Runtime::run()
                     tkTexH = tkTh;
                 }
                 BeginTextureMode(tkTex);
-                // Backdrop (the styling pass brings the disc mountain art).
-                DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
-                              Color{10, 18, 38, 255});
-                DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(tkg.titleY + tkg.titleH),
-                              Color{16, 28, 56, 255});
+                // Backdrop: staged disc mountain art, dimmed for legibility.
+                if (tkArt)
+                {
+                    TkAtlasRect tkm;
+                    if (tkSpr("moun", tkm))
+                        DrawTexturePro(tkAtlasTex, Rectangle{tkm.x, tkm.y, tkm.w, tkm.h},
+                                       Rectangle{0, 0, screenWidth, screenHeight}, Vector2{0, 0}, 0.0f,
+                                       WHITE);
+                    else
+                        DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
+                                      Color{10, 18, 38, 255});
+                    DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
+                                  Color{6, 10, 24, 170});
+                }
+                else
+                {
+                    DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
+                                  Color{10, 18, 38, 255});
+                    DrawRectangle(0, 0, static_cast<int>(screenWidth),
+                                  static_cast<int>(tkg.titleY + tkg.titleH), Color{16, 28, 56, 255});
+                }
                 // Title bar (stock bar colour 154,62,2, Part 1 §4).
                 DrawRectangle(static_cast<int>(tkg.titleX), static_cast<int>(tkg.titleY),
                               static_cast<int>(tkg.titleW), static_cast<int>(tkg.titleH), Color{154, 62, 2, 255});
-                DrawText("SELECT EVENT", static_cast<int>(tkg.titleX) + 12, static_cast<int>(tkg.titleY) + 6,
-                         tkTitle, RAYWHITE);
-                DrawText("SSX Tricky courses in Tricky order", static_cast<int>(tkg.titleX) + 14,
-                         static_cast<int>(tkg.titleY + tkg.titleH) + 4, tkSmall, Color{200, 210, 225, 255});
+                if (tkArt)
+                {
+                    tkImg("title", tkg.titleX + 12, tkg.titleY + tkg.titleH * 0.19f, tkg.titleH * 0.62f,
+                          RAYWHITE, false);
+                    tkImg("subtitle", tkg.titleX + 14, tkg.titleY + tkg.titleH + 4,
+                          static_cast<float>(tkSmall) * 1.6f, Color{200, 210, 225, 255}, false);
+                }
+                else
+                {
+                    DrawText("SELECT EVENT", static_cast<int>(tkg.titleX) + 12,
+                             static_cast<int>(tkg.titleY) + 6, tkTitle, RAYWHITE);
+                    DrawText("SSX Tricky courses in Tricky order", static_cast<int>(tkg.titleX) + 14,
+                             static_cast<int>(tkg.titleY + tkg.titleH) + 4, tkSmall,
+                             Color{200, 210, 225, 255});
+                }
                 // Course rows (right-aligned near-black on light rows in the
                 // stock screen; v1: light text on dark rows, orange select).
                 for (int i = 0; i < 10; ++i)
@@ -9057,15 +9176,34 @@ void PS2Runtime::run()
                     DrawRectangle(static_cast<int>(tkg.rowX), static_cast<int>(tkg.rowY[i]),
                                   static_cast<int>(tkg.rowW), static_cast<int>(tkg.rowH) - 2,
                                   sel ? Color{154, 62, 2, 255} : Color{24, 36, 62, 255});
-                    std::string label = c.name;
-                    if (c.nOpts > 1)
+                    const Color tkInk = sel ? RAYWHITE : Color{200, 210, 225, 255};
+                    char tkn[16];
+                    std::snprintf(tkn, sizeof(tkn), "course%d", i);
+                    const float tkRh = tkg.rowH * 0.62f;
+                    const float tkRy = tkg.rowY[i] + (tkg.rowH - 2 - tkRh) * 0.5f;
+                    if (tkArt)
                     {
-                        label += (tkList.opt[i] == 0 ? "   < Race >" : "   < Jam >");
+                        float cx = tkg.rowX + tkg.rowW - 10;
+                        if (c.nOpts > 1)
+                        {
+                            char tke[24];
+                            std::snprintf(tke, sizeof(tke), "etype_%s", tkList.opt[i] == 0 ? "race" : "jam");
+                            cx -= tkImg(tke, cx, tkRy, tkRh, tkInk, true);
+                            cx -= 8;
+                        }
+                        tkImg(tkn, cx, tkRy, tkRh, tkInk, true);
                     }
-                    const int tw = MeasureText(label.c_str(), tkRow);
-                    DrawText(label.c_str(), static_cast<int>(tkg.rowX + tkg.rowW) - tw - 10,
-                             static_cast<int>(tkg.rowY[i]) + 2, tkRow,
-                             sel ? RAYWHITE : Color{200, 210, 225, 255});
+                    else
+                    {
+                        std::string label = c.name;
+                        if (c.nOpts > 1)
+                        {
+                            label += (tkList.opt[i] == 0 ? "   < Race >" : "   < Jam >");
+                        }
+                        const int tw = MeasureText(label.c_str(), tkRow);
+                        DrawText(label.c_str(), static_cast<int>(tkg.rowX + tkg.rowW) - tw - 10,
+                                 static_cast<int>(tkg.rowY[i]) + 2, tkRow, tkInk);
+                    }
                 }
                 // Preview/event pane.
                 DrawRectangle(static_cast<int>(tkg.paneX), static_cast<int>(tkg.paneY),
@@ -9078,29 +9216,88 @@ void PS2Runtime::run()
                     const char *etype = (c.nOpts > 1 && tkList.opt[tkList.sel] == 1)
                                             ? "Jam"
                                             : (c.raceLabel ? c.raceLabel : "Race");
-                    DrawText(etype, static_cast<int>(tkg.paneX) + 10, static_cast<int>(tkg.paneY) + 6, tkRow,
-                             Color{255, 170, 60, 255});
-                    DrawText(c.name, static_cast<int>(tkg.paneX) + 10,
-                             static_cast<int>(tkg.paneY) + 10 + tkRow, tkTitle, RAYWHITE);
+                    float tkPy = tkg.paneY + 8;
+                    if (tkArt)
+                    {
+                        // Preview quad (Megaplex sel 8: text card, no preview).
+                        char tkpn[16];
+                        std::snprintf(tkpn, sizeof(tkpn), "prev%d", tkList.sel);
+                        TkAtlasRect tkpr;
+                        const float tkq = std::min(tkg.paneW - 20, tkg.paneH * 0.40f);
+                        if (tkSpr(tkpn, tkpr))
+                            DrawTexturePro(tkAtlasTex, Rectangle{tkpr.x, tkpr.y, tkpr.w, tkpr.h},
+                                           Rectangle{tkg.paneX + 10, tkPy, tkq, tkq}, Vector2{0, 0}, 0.0f,
+                                           WHITE);
+                        else
+                            tkImg("nopreview", tkg.paneX + 10, tkPy + tkq * 0.4f,
+                                  static_cast<float>(tkSmall) * 1.6f, Color{200, 210, 225, 255}, false);
+                        tkPy += tkq + 6;
+                        char tkeh[24];
+                        const char *tkes = "race";
+                        if (c.nOpts > 1 && tkList.opt[tkList.sel] == 1)
+                            tkes = "jam";
+                        else if (c.raceLabel && std::strcmp(c.raceLabel, "Jam") == 0)
+                            tkes = "jam";
+                        else if (c.raceLabel && std::strcmp(c.raceLabel, "Super Pipe") == 0)
+                            tkes = "pipe";
+                        std::snprintf(tkeh, sizeof(tkeh), "etype_%s", tkes);
+                        const float tkEh = static_cast<float>(tkRow) * 0.9f;
+                        tkImg(tkeh, tkg.paneX + 10, tkPy, tkEh, Color{255, 170, 60, 255}, false);
+                        tkPy += tkEh;
+                        char tkcn[16];
+                        std::snprintf(tkcn, sizeof(tkcn), "course%d", tkList.sel);
+                        const float tkCh = static_cast<float>(tkTitle) * 0.8f;
+                        tkImg(tkcn, tkg.paneX + 10, tkPy + 2, tkCh, RAYWHITE, false);
+                        tkPy += tkCh + 2;
+                    }
+                    else
+                    {
+                        DrawText(etype, static_cast<int>(tkg.paneX) + 10, static_cast<int>(tkg.paneY) + 6,
+                                 tkRow, Color{255, 170, 60, 255});
+                        DrawText(c.name, static_cast<int>(tkg.paneX) + 10,
+                                 static_cast<int>(tkg.paneY) + 10 + tkRow, tkTitle, RAYWHITE);
+                        tkPy = tkg.paneY + 14 + tkRow + tkTitle;
+                    }
                     char sub[128];
                     std::snprintf(sub, sizeof(sub), "Peak %u - event %d%s", goal.peak + 1, c.event,
                                   c.tp ? "" : " - text card (no preview on disc)");
-                    DrawText(sub, static_cast<int>(tkg.paneX) + 10,
-                             static_cast<int>(tkg.paneY) + 14 + tkRow + tkTitle, tkSmall,
+                    DrawText(sub, static_cast<int>(tkg.paneX) + 10, static_cast<int>(tkPy) + 4, tkSmall,
                              Color{200, 210, 225, 255});
+                    float tkFy = tkg.paneY + tkg.paneH - tkSmall - 8;
+                    if (tkArt)
+                    {
+                        char tkrn[16];
+                        std::snprintf(tkrn, sizeof(tkrn), "ride%d", tkList.sel);
+                        tkImg(tkrn, tkg.paneX + 10, tkFy - tkSmall * 2 - 4,
+                              static_cast<float>(tkSmall) * 1.7f, RAYWHITE, false);
+                        if (tkProg.driving)
+                            tkImg("loading", tkg.paneX + 10, tkFy - tkSmall * 4 - 8,
+                                  static_cast<float>(tkSmall) * 1.6f, Color{255, 220, 120, 255}, false);
+                    }
                     if (tkProg.driving)
                     {
                         char drv[128];
                         std::snprintf(drv, sizeof(drv), "driving: %s (%d presses)",
                                       tkl::navPhaseName(tkProg.phase), tkProg.presses);
-                        DrawText(drv, static_cast<int>(tkg.paneX) + 10,
-                                 static_cast<int>(tkg.paneY + tkg.paneH) - tkSmall - 8, tkSmall,
+                        DrawText(drv, static_cast<int>(tkg.paneX) + 10, static_cast<int>(tkFy), tkSmall,
                                  Color{255, 220, 120, 255});
                     }
                 }
                 // Help bar.
-                DrawText("X Select      Triangle Previous      Up/Down pick      Left/Right Race/Jam",
-                         static_cast<int>(tkg.titleX), static_cast<int>(screenHeight * 0.905f), tkSmall, RAYWHITE);
+                if (tkArt)
+                {
+                    float tkHx = tkg.titleX;
+                    const float tkHh = static_cast<float>(tkSmall);
+                    const float tkHy = screenHeight * 0.905f;
+                    tkHx += tkImg("leg_select", tkHx, tkHy, tkHh, RAYWHITE, false) + tkHh * 1.2f;
+                    tkHx += tkImg("leg_prev", tkHx, tkHy, tkHh, RAYWHITE, false) + tkHh * 1.2f;
+                    tkHx += tkImg("leg_pick", tkHx, tkHy, tkHh, RAYWHITE, false) + tkHh * 1.2f;
+                    tkImg("leg_lr", tkHx, tkHy, tkHh, RAYWHITE, false);
+                }
+                else
+                    DrawText("X Select      Triangle Previous      Up/Down pick      Left/Right Race/Jam",
+                             static_cast<int>(tkg.titleX), static_cast<int>(screenHeight * 0.905f), tkSmall,
+                             RAYWHITE);
                 EndTextureMode();
                 DrawTextureRec(tkTex.texture,
                                Rectangle{0.0f, 0.0f, static_cast<float>(tkTw), static_cast<float>(-tkTh)},
