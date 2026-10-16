@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 
 #include "ps2_ssx3_tricky_gems.h"
+#include "runtime/game_module.h"
 #include "runtime/ps2_savestate.h"
 
 #include <cmath>
@@ -125,18 +126,28 @@ void register_ps2_ssx3_tricky_gems_tests()
         s.prev[0] = 12.5f; s.lastR = kR; s.lastClock = 40u;
         s.pendingClear = true; s.raceClock.init = true; s.raceClock.lastTick = 100u;
         ps2_tk45c::setCollected(s, 2u);
-        const auto &hooks = ps2_savestate::registeredSections().at("trickygems");
-        ps2_savestate::Writer w;
-        hooks.save(w);
-        s = State{};
-        ps2_savestate::Reader r(w.buf.data(), w.buf.size());
-        tc.Equals(hooks.version, 1u, "section version");
-        tc.IsTrue(hooks.load(r) && r.ok() && r.atEnd(), "section round trip");
-        tc.IsTrue(s.init && s.wasTricky && s.prevValid && s.pendingClear, "race and pending state");
-        tc.IsTrue(ps2_tk45c::isCollected(s, 2u), "collection bitmap");
-        tc.Equals(s.lastClock, 40u, "race clock");
-        tc.Equals(s.raceClock.lastTick, 100ull, "clock epoch");
-        tc.IsTrue(s.nres[2] == 0u, "lookup not restored from old process");
+        // snd-seam-1 family #8: the section lives in the game module. With
+        // no module it is absent and fail-closed (pinned in
+        // game_module_none_tests.cpp); only the module binary round-trips.
+        const auto &sections = ps2_savestate::registeredSections();
+        const auto gemsIt = sections.find("trickygems");
+        if (gemsIt == sections.end())
+            tc.IsTrue(ps2_game_module::installed() == nullptr, "no module, no trickygems section");
+        else
+        {
+            const auto &hooks = gemsIt->second;
+            ps2_savestate::Writer w;
+            hooks.save(w);
+            s = State{};
+            ps2_savestate::Reader r(w.buf.data(), w.buf.size());
+            tc.Equals(hooks.version, 1u, "section version");
+            tc.IsTrue(hooks.load(r) && r.ok() && r.atEnd(), "section round trip");
+            tc.IsTrue(s.init && s.wasTricky && s.prevValid && s.pendingClear, "race and pending state");
+            tc.IsTrue(ps2_tk45c::isCollected(s, 2u), "collection bitmap");
+            tc.Equals(s.lastClock, 40u, "race clock");
+            tc.Equals(s.raceClock.lastTick, 100ull, "clock epoch");
+            tc.IsTrue(s.nres[2] == 0u, "lookup not restored from old process");
+        }
         s = saved;
 
         std::vector<uint8_t> ram(3u * ps2_tk45c::kScanChunk);

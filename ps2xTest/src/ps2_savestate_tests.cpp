@@ -4,6 +4,7 @@
 #include "ps2_runtime.h"
 #include "ps2_ssx3_patch_grow_state.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/game_module.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_savestate.h"
 #include "runtime/ps2_vfs.h"
@@ -294,6 +295,21 @@ void register_ps2_savestate_tests()
         {
             PS2Runtime runtime;
             Writer before, grown;
+            if (ps2_game_module::installed() == nullptr)
+            {
+                // snd-seam-1 family #8: no module, no game state — the
+                // kernel save omits the TK34 patch-grow field, so it
+                // fails closed on validate and load (absence is pinned
+                // in game_module_none_tests.cpp).
+                PS2RuntimeSavestate::saveKernel(runtime, before);
+                Reader noval(before.buf.data(), before.buf.size());
+                t.IsTrue(!PS2RuntimeSavestate::validateKernel(runtime, noval),
+                         "no-module kernel save fails validation");
+                Reader noload(before.buf.data(), before.buf.size());
+                t.IsTrue(!PS2RuntimeSavestate::loadKernel(runtime, noload),
+                         "no-module kernel save fails load");
+                return;
+            }
             PS2RuntimeSavestate::saveKernel(runtime, before);
 
             ps2_ssx3_patch_grow::State state;
@@ -552,6 +568,8 @@ void register_ps2_savestate_tests()
             // same way (section presence + version in
             // games/ssx3/module/tests/ps2_ssx3_module_tests.cpp; absence
             // without a module in game_module_none_tests.cpp).
+            // snd-seam-1 family #8: "trickygems" moved the same way, and
+            // the TK34 patch-grow kernel field fails closed without one.
             for (const char *key : {"syscalls", "syscalls:deci2", "stub:cd", "stub:sif", "stub:mc",
                                     "stub:pad", "stub:audio", "stub:dma", "stub:mpeg", "stub:mcdir", "padlatch",
                                     "support:Stubs/CD.cpp"})

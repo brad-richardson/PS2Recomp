@@ -8,6 +8,7 @@ add_library(ssx3_game_module STATIC
     src/copied_payload.cpp
     src/sif_handshake.cpp
     src/tricky_song.cpp
+    src/tricky_savestate.cpp
 )
 target_include_directories(ssx3_game_module
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include

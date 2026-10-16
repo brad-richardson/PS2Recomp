@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "Ssx3TrickySong.h"
+#include "Ssx3TrickyState.h"
 #include "ps2_snd_spike.h"
 #include "ps2_ssx3_anim_pick_guard.h"
 #include "ps2_ssx3_module.h"
@@ -76,7 +77,7 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the SND progress hooks point at the moved HLE (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 5u, "abi");
+            t.Equals(m.abiVersion, 6u, "abi");
             t.IsTrue(m.noteSndAddCmdHandler == &ps2_snd_spike::noteAddCmdHandler, "addcmdhandler");
             t.IsTrue(m.noteSndRpc == &ps2_snd_spike::noteRpc, "rpc snoop");
             t.IsTrue(m.onSndSendCmd == &ps2_snd_spike::onSendCmd, "sendcmd");
@@ -96,10 +97,25 @@ void register_ps2_ssx3_module_tests()
         tc.Run("the Tricky song mix hooks point at the provider (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 5u, "abi");
+            t.Equals(m.abiVersion, 6u, "abi");
             t.IsTrue(m.sndTrickySongInit == &ps2_snd_tricky_song::initFromEnvHook, "init");
             t.IsTrue(m.sndTrickySongMix == &ps2_snd_tricky_song::mixIntoHook, "mix");
             t.IsTrue(m.sndTrickySongProbe == &ps2_snd_tricky_song::probeSnapshot, "probe");
+        });
+        tc.Run("the TK34 patch-grow providers point at the module (ABI 6)", [](TestCase &t)
+               {
+            const ps2_game_module::Module &m = ps2x_ssx3_game_module();
+            t.Equals(m.abiVersion, 6u, "abi");
+            t.IsTrue(m.patchGrowSave == &ps2_tricky_state::patchGrowSave, "save");
+            t.IsTrue(m.patchGrowValidate == &ps2_tricky_state::patchGrowValidate, "validate");
+            t.IsTrue(m.patchGrowLoad == &ps2_tricky_state::patchGrowLoad, "load");
+            const auto &sections = ps2_savestate::registeredSections();
+            const auto gems = sections.find("trickygems");
+            t.IsTrue(gems != sections.end(), "trickygems section registered by the module");
+            t.Equals(gems->second.version, 1u, "trickygems version frozen for old saves");
+            t.IsTrue(gems->second.save == &ps2_tricky_state::trickyGemsSave, "gems save hook");
+            t.IsTrue(gems->second.load == &ps2_tricky_state::trickyGemsLoad, "gems load hook");
+            t.IsTrue(gems->second.validate == &ps2_tricky_state::trickyGemsLoad, "gems validate hook");
         });
         tc.Run("the override pass wraps both anim entries and chains to the originals", [](TestCase &t)
                {

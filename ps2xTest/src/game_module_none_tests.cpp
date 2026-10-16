@@ -87,6 +87,15 @@ void register_game_module_none_tests()
             const auto &sections = ps2_savestate::registeredSections();
             t.IsTrue(sections.find("snd") == sections.end(), "no snd section with no module");
         });
+        // snd-seam-1 family #8: "trickygems" and the TK34 patch-grow
+        // kernel field belong to the module too. Without one, the section
+        // is absent (a product save's "trickygems" section fails closed as
+        // unknown) and the kernel save fails closed at the grow field.
+        tc.Run("no Tricky savestate section is registered without the module", [](TestCase &t)
+               {
+            const auto &sections = ps2_savestate::registeredSections();
+            t.IsTrue(sections.find("trickygems") == sections.end(), "no trickygems section with no module");
+        });
         // module-seam-2: K1. Without a module, a syscall handler with no
         // recompiled function drops to KE_ERROR even after the SSX 3 pass
         // and with SSX 3's copied payload intact in RAM.

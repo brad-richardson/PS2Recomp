@@ -49,7 +49,8 @@ namespace ps2_game_module
     // 3 (sif-handshake-1): the SIF SendCmd hook below.
     // 4 (snd-seam-1 family A): the SND progress hooks below.
     // 5 (snd-seam-1 family #4): the Tricky song mix hooks below.
-    inline constexpr uint32_t kAbiVersion = 5u;
+    // 6 (snd-seam-1 family #8): the TK34 patch-grow field providers below.
+    inline constexpr uint32_t kAbiVersion = 6u;
 
     // Song-side snapshot for the TK47 probe line (plain scalars: the song
     // player type stays with the game). `path` points at a static label
@@ -128,6 +129,13 @@ namespace ps2_game_module
         void (*sndTrickySongInit)() = nullptr;
         void (*sndTrickySongMix)(int16_t *out, size_t frames, const char *path) = nullptr;
         void (*sndTrickySongProbe)(TrickySongProbe *out) = nullptr;
+        // TK34 patch-grow providers (snd-seam-1 family #8). The kernel
+        // save/validate/load call these at the exact field position, in
+        // the same order and with the same bytes. Null (or no module)
+        // fails closed: a no-module binary never round-trips game state.
+        void (*patchGrowSave)(ps2_savestate::Writer &w) = nullptr;
+        bool (*patchGrowValidate)(ps2_savestate::Reader &r) = nullptr;
+        bool (*patchGrowLoad)(ps2_savestate::Reader &r) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).
