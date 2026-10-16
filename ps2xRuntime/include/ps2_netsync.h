@@ -90,6 +90,7 @@ struct Config {
     uint64_t sent = 0u, recvd = 0u, stale = 0u;
     uint64_t applied = 0u, kept = 0u, showWrites = 0u;
     uint64_t chainFail = 0u, sampleFail = 0u; // send-gate diagnostics
+    uint8_t lastFinSent = 0u; // fin edge detector for finish forensics
     int64_t lastSendTick = -1, lastShowTick = -1, lastLogTick = -1;
     int64_t joinOff = 0;
     bool joined = false;
@@ -549,8 +550,8 @@ inline bool maybeApplyResult(uint8_t *r, uint64_t tick)
         writeU32(r, kResBase + (uint32_t)s * 4u, rowTicks);
     }
     cfg.resultApplied = true;
-    fprintf(stderr, "[netsync] RESULT applied canonical ms=(%u,%u)\n", cfg.canonMs[0],
-            cfg.canonMs[1]);
+    fprintf(stderr, "[netsync] RESULT applied canonical (ms,rank)=(%u,%u)+(%u,%u)\n",
+            cfg.canonMs[0], cfg.canonRank[0], cfg.canonMs[1], cfg.canonRank[1]);
     return true;
 }
 
@@ -697,6 +698,12 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
             {
                 s.fin = 1u;
                 s.ftime = (float)res / 60.0f;
+            }
+            if (s.fin != cfg.lastFinSent)
+            {
+                fprintf(stderr, "[netsync] fin edge=%u tick=%llu ftime=%.3f res=0x%08x\n",
+                        s.fin, (unsigned long long)tick, (double)s.ftime, res);
+                cfg.lastFinSent = s.fin;
             }
             encodeState(pay, (uint16_t)cfg.slot, tick, s, cfg.ownDe4, cfg.ownW0, cfg.ownW1,
                         cfg.ownInTick, cfg.ghostFinTick, cfg.ghostFinMs);
