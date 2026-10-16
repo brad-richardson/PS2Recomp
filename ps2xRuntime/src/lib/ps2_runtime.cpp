@@ -37,6 +37,7 @@
 #include "ps2_adpf.h"
 #include "ps2_perf_log.h"
 #include "ps2_vsync_lock.h"
+#include "ps2_vsync_pacer.h"
 #include "ps2_virtual_pad.h"
 #include "ps2_ui_toast.h"
 #include "ps2_settings_overlay.h"
@@ -4929,7 +4930,16 @@ bool PS2Runtime::initialize(const char *title)
         // NP0A: exercise 60/120 host present cadence on the Mac without
         // changing the ordinary desktop loop. Guest VBlank remains paced by
         // the scheduler; this only changes the raylib present loop.
-        SetTargetFPS(ps2_savestate::canonicalEnabled() ? ps2x_present_vk::displayHz() : 60);
+        // mac-speed-1: FULL120 events also presents at displayHz (uncaps the
+        // 60 host loop that gated every Air cell at 60.00); stock unchanged.
+        SetTargetFPS((ps2_savestate::canonicalEnabled() || set2Effective120())
+                         ? ps2x_present_vk::displayHz()
+                         : 60);
+        // mac-speed-1 Part 2 (PS2X_LAB_UNCAPPED=1, lab-only): drop the host
+        // present waits entirely (raylib limiter) so unpaced lab boots
+        // measure true headroom. Default off; guest state untouched.
+        if (ps2_vsync_pacer::labUncappedFromEnv(std::getenv("PS2X_LAB_UNCAPPED")))
+            SetTargetFPS(0);
 #endif
         if (m_debugUiInitCallback)
         {
