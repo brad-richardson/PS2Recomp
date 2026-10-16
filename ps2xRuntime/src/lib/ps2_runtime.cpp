@@ -8104,6 +8104,11 @@ void PS2Runtime::run()
     uint16_t tkPrevUnion = 0; // list nav edge detect (physical + test spans)
     std::vector<int64_t> tkDown; // touch ids currently on the list
     uint64_t tkHostFrame = 0; // diag mapping: host frames <-> guest ticks
+    // Lane diag shots: PS2X_TK_MENU_1_SHOT=<prefix> saves the host present
+    // (overlay included) every 300 host frames while the list is open.
+    const char *tkShotPrefix = ps2_ssx3_tricky_list::diag() ? std::getenv("PS2X_TK_MENU_1_SHOT") : nullptr;
+    if (tkShotPrefix && !tkShotPrefix[0])
+        tkShotPrefix = nullptr;
     if (tkListOn)
         std::fprintf(stderr, "[tklist] overlay on (PS2X_SSX3_TRICKY_LIST=1)\n");
     // SET2 perf sampler: always-on lightweight vs/s + frame-time (one tick
@@ -8972,6 +8977,20 @@ void PS2Runtime::run()
                 const int tkTitle = std::max(18, static_cast<int>(screenHeight / 24.0f));
                 const int tkRow = std::max(14, static_cast<int>(screenHeight / 32.0f));
                 const int tkSmall = std::max(12, static_cast<int>(screenHeight / 44.0f));
+                // Off-screen first: the mini is headless, so host screenshots
+                // come from this texture (blitted below), not the window.
+                const int tkTw = static_cast<int>(screenWidth), tkTh = static_cast<int>(screenHeight);
+                static RenderTexture2D tkTex = {0};
+                static int tkTexW = 0, tkTexH = 0;
+                if (tkTex.id == 0u || tkTexW != tkTw || tkTexH != tkTh)
+                {
+                    if (tkTex.id != 0u)
+                        UnloadRenderTexture(tkTex);
+                    tkTex = LoadRenderTexture(tkTw, tkTh);
+                    tkTexW = tkTw;
+                    tkTexH = tkTh;
+                }
+                BeginTextureMode(tkTex);
                 // Backdrop (the styling pass brings the disc mountain art).
                 DrawRectangle(0, 0, static_cast<int>(screenWidth), static_cast<int>(screenHeight),
                               Color{10, 18, 38, 255});
@@ -9037,6 +9056,20 @@ void PS2Runtime::run()
                 // Help bar.
                 DrawText("X Select      Triangle Previous      Up/Down pick      Left/Right Race/Jam",
                          static_cast<int>(tkg.titleX), static_cast<int>(screenHeight * 0.905f), tkSmall, RAYWHITE);
+                EndTextureMode();
+                DrawTextureRec(tkTex.texture,
+                               Rectangle{0.0f, 0.0f, static_cast<float>(tkTw), static_cast<float>(-tkTh)},
+                               Vector2{0.0f, 0.0f}, WHITE);
+                if (tkShotPrefix && (tkHostFrame % 300u) == 0u)
+                {
+                    char shotPath[512];
+                    std::snprintf(shotPath, sizeof(shotPath), "%s-%llu.png", tkShotPrefix,
+                                  static_cast<unsigned long long>(tkHostFrame));
+                    Image tkImg = LoadImageFromTexture(tkTex.texture);
+                    ImageFlipVertical(&tkImg);
+                    ExportImage(tkImg, shotPath);
+                    UnloadImage(tkImg);
+                }
             }
         }
         else if (set2Open)

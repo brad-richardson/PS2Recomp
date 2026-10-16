@@ -74,6 +74,7 @@ struct FakeGuest
     int goalEvent = -1;
     CourseOption goal = {};
     bool left = false;
+    int acceptsNeeded = 1; // the guest misses this many Event accepts first
 
     FeView view()
     {
@@ -109,7 +110,7 @@ struct FakeGuest
                 screen = 1;
             else if (screen == 1)
                 screen = 2;
-            else if (row == goal.row && goalEvent >= 0)
+            else if (row == goal.row && goalEvent >= 0 && --acceptsNeeded <= 0)
                 left = true;
         }
         else if (mask == kPadTriangle)
@@ -227,7 +228,8 @@ void register_ps2_ssx3_tricky_list_tests()
 
         tc.Run("navigator steps the Event row monotonically and verifies the event", [](TestCase &t)
                {
-            // Goal: Aloha Race, P1 row 2 (event 14). Cursor starts at row 0.
+            // Goal: Aloha Race, P1 row 2 (event 14). Cursor starts at row 0,
+            // and the guest misses the first Event accept (retry covers it).
             FakeGuest g;
             g.screen = 2;
             g.peak = 0;
@@ -235,19 +237,35 @@ void register_ps2_ssx3_tricky_list_tests()
             g.row = 0;
             g.goal = kCourses[5].opts[0];
             g.goalEvent = 14;
+            g.acceptsNeeded = 2;
             NavState n;
             navStart(n, g.goal, 14, 0);
             uint64_t tick = 0;
             uint16_t lastOut = 0;
-            for (int i = 0; i < 600 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            bool toreDown = false;
+            uint64_t restoreAt = 0;
+            for (int i = 0; i < 900 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
             {
                 NavOut o = navStep(n, g.view(), tick, true, true);
                 if (lastOut != 0 && o.mask == 0)
+                {
                     g.applyFinished(lastOut);
+                    if (!toreDown && n.phase == NavPhase::Accept && lastOut == kPadCross)
+                    {
+                        // m6: the Event widget tears down after the accept
+                        // (row reads -1 briefly). The retry must not abort.
+                        toreDown = true;
+                        g.row = 255;
+                        restoreAt = tick + 60;
+                    }
+                }
+                if (toreDown && tick >= restoreAt)
+                    g.row = 2;
                 lastOut = o.mask;
                 ++tick;
             }
-            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "accepted on row 2");
+            t.IsTrue(toreDown, "teardown simulated");
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "retry rides through teardown");
             t.Equals(g.row, 2, "cursor reached row 2, never the row-3 copy"); });
 
         tc.Run("navigator aborts with the pad released when the view goes blind", [](TestCase &t)

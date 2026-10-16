@@ -678,9 +678,12 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         }
     case NavPhase::Accept:
         // The accept press is in flight (or done); leaving the Map screens
-        // completes it (handled above). Still here: settle, then re-check.
-        if (v.screen == 2 && v.row == n.goal.row && v.event == n.event)
-            return press(kPadCross); // guest missed it; press once more
+        // completes it (handled above). Still on the Event screen: press
+        // again, whether the row reads matched (missed) or not (landed but
+        // the widget tore down: the retry advances My Rules, which the flow
+        // needs anyway). The press budget bounds this either way.
+        if (v.screen == 2)
+            return press(kPadCross);
         n.phase = NavPhase::ToEvent; // knocked elsewhere; re-drive
         return navStep(n, v, tick, peakLive, modeLive);
     case NavPhase::BackOut:
