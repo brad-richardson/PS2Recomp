@@ -8,7 +8,10 @@
 #include "runtime/ps2_savestate.h"
 
 #include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cstdint>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -127,6 +130,45 @@ int runChild(const char *name)
         return 1001;
     return WEXITSTATUS(status);
 }
+
+// np-checksum-1: bounded child wait. A regression that hangs the child must
+// fail the test, not hang the suite: on deadline, kill and report timeout.
+int runChildTimeout(const char *name, unsigned timeoutSec)
+{
+    const std::string self = selfExePath();
+    if (self.empty())
+        return 1002;
+    pid_t pid = ::fork();
+    if (pid < 0)
+        return 1000;
+    if (pid == 0)
+    {
+        ::execl(self.c_str(), self.c_str(), "--np-fix-child", name, nullptr);
+        _exit(127);
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSec);
+    int status = 0;
+    for (;;)
+    {
+        pid_t r = ::waitpid(pid, &status, WNOHANG);
+        if (r == pid)
+            break;
+        if (r < 0 && errno != EINTR)
+            return 1004;
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            ::kill(pid, SIGKILL);
+            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR)
+            {
+            }
+            return 1003; // timeout: child hung
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (!WIFEXITED(status))
+        return 1001;
+    return WEXITSTATUS(status);
+}
 #endif
 
 std::string readFile(const std::string &path)
@@ -215,6 +257,27 @@ int f2Child()
             return 11;
     return 0;
 }
+
+// np-checksum-1: lagf remainder drain must terminate on a backend that never
+// reports exhaustion. Pre-fix, the headless canonical full-serve spun the
+// lagfRequest drain loop forever (live wedge: MTVU in memset, EE on queue
+// backpressure); the 1 MiB bound makes it return marked truncated.
+int lagfDrainBoundChild()
+{
+    ::setenv("PS2X_NETPLAY_CANON", "1", 1);
+    ::setenv("PS2X_NETPLAY_CANON_DIR", (std::string(kWorkRoot) + "/lagfbound").c_str(), 1);
+    auto be = ps2x_gs_headless::create();
+    if (!be)
+        return 20;
+    std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
+    GSRegisters regs{};
+    GS gs;
+    gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
+    gs.setRasterBackend(std::move(be));
+    const GSTransferCommand cmd{};
+    gs.lagfRequest(cmd);
+    return 0;
+}
 #endif
 
 // ---------------------------------------------------------------- F12 children
@@ -264,6 +327,18 @@ void register_np_fix_tests_body(TestCase &tc)
                std::filesystem::remove_all(workRoot(), ecF2);
 #else
             std::puts("[np-fix] SKIP F2: fork unavailable on this platform");
+#endif
+           });
+
+    // np-checksum-1: the lagf remainder drain terminates even when the
+    // backend never reports exhaustion (bounded at 1 MiB, marked truncated).
+    tc.Run("np-checksum-1 lagf drain terminates on never-exhausting backends", [](TestCase &t)
+           {
+#if defined(__unix__) || defined(__APPLE__)
+               const int rc = runChildTimeout("lagfbound", 60);
+               t.Equals(rc, 0, "lagfRequest returns promptly on headless (0=ok, 1003=hung)");
+#else
+            t.Fail("fork unavailable on this platform");
 #endif
            });
 
@@ -505,6 +580,8 @@ int np_fix_child_main(const std::string &name)
     int rc = 99;
     if (name == "f2")
         rc = f2Child();
+    else if (name == "lagfbound")
+        rc = lagfDrainBoundChild();
     else if (name == "e")
         rc = f12EventChild();
     else if (name == "d")

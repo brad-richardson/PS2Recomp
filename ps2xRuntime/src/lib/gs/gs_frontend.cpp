@@ -3031,13 +3031,22 @@ void GS::lagfRequest(const GSTransferCommand &command)
         // Same consume + remainder drain as snapshotLaggedReadback.
         n = consumeLocalToHostBytes(buf, kRb2LagSlotBytes);
         uint8_t drain[1024];
+        // np-checksum-1: bound the remainder drain. A backend that never
+        // reports exhaustion (full-serve with no FIFO, e.g. headless canonical
+        // fill) would otherwise spin this loop forever on the worker thread
+        // while the EE blocks on queue backpressure. Healthy backends break
+        // on m == 0 long before the cap, so the cap is a no-op for them;
+        // hitting it marks truncation exactly like a short serve (slot bytes
+        // stay 0, matching the pre-fill headless outcome).
+        uint32_t drained = 0u;
         for (;;)
         {
             const uint32_t m = consumeLocalToHostBytes(drain, sizeof(drain));
             if (m == 0u)
                 break;
             truncated = true;
-            if (m < sizeof(drain))
+            drained += m;
+            if (m < sizeof(drain) || drained >= kLagfDrainCapBytes)
                 break;
         }
     }

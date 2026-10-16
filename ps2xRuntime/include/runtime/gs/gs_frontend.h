@@ -312,6 +312,11 @@ public:
     // (max 17 probes/vsync observed on Odin SP1), so the EE spin-waits on the
     // Adreno worker; lagV's depth (24 > 17) restores >1 frame of slack.
     static constexpr uint32_t kRb2LagSlotBytes = 4096u;
+    // np-checksum-1: bound for the lagfRequest remainder drain. Real FIFO
+    // remainders are KBs (the slot itself is 4 KiB); 1 MiB is 256x headroom
+    // and drains in ~1 ms, while guaranteeing termination when a backend
+    // never reports exhaustion.
+    static constexpr uint32_t kLagfDrainCapBytes = 1u << 20;
     static constexpr uint64_t kRb2LagVDepth = 24u;
     static constexpr uint64_t kRb2LagRing = kRb2LagVDepth + 1u;
     // Serves the snapshot D back into dst (<= maxBytes). Returns bytes
