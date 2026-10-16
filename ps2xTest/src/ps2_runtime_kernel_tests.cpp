@@ -74,13 +74,6 @@ struct EeSchedulerTestAccess
     }
 };
 
-namespace ps2_syscalls
-{
-    // Defined in ps2xRuntime Syscalls/RPC.cpp; TU-local forward declaration
-    // (same pattern as the resetSifState declaration in ps2_runtime.cpp).
-    void resetSsx3SifHandshakeForTesting();
-}
-
 namespace
 {
     constexpr uint32_t K_PARAM_ADDR = 0x1000u;
@@ -2412,108 +2405,6 @@ void register_ps2_runtime_kernel_tests()
             t.Equals(static_cast<uint32_t>(getRegS32(env.ctx, 2)),
                      kExpectedHandler,
                      "GetEntryAddress should read and return the handler address from the table");
-        });
-
-        tc.Run("SIF handshake stays off without the SSX3 override (P1ac gate)", [](TestCase &t)
-        {
-            TestEnv env;
-            resetSsx3SifHandshakeForTesting();
-
-            constexpr uint32_t kPacketAddr = 0x00009000u;
-            constexpr uint32_t kSregs1Addr = 0x52BE04u;
-            constexpr uint32_t kPacket[] = {0u, 0u, 0u, 0u, 1u, 1u};
-            writeGuestWords(env.rdram.data(), kPacketAddr, kPacket, std::size(kPacket));
-
-            setRegU32(env.ctx, 4, 0x80000001u);
-            setRegU32(env.ctx, 5, kPacketAddr);
-            setRegU32(env.ctx, 6, 0x18u);
-            setRegU32(env.ctx, 7, 0u);
-            setRegU32(env.ctx, 29, 0x00100000u);
-            sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
-
-            t.Equals(getRegS32(env.ctx, 2), 1, "SendCmd must still return 1 with the gate off");
-            t.Equals(readGuestU32(env.rdram.data(), kSregs1Addr), 0u,
-                     "sregs[1] must stay 0 when the SSX3 override did not apply");
-            resetSsx3SifHandshakeForTesting();
-        });
-
-        tc.Run("SIF handshake writes sregs[1]=1 for SSX3 SET_SREG(1,1) (P1ac)", [](TestCase &t)
-        {
-            TestEnv env;
-            resetSsx3SifHandshakeForTesting();
-            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
-
-            constexpr uint32_t kPacketAddr = 0x00009000u;
-            constexpr uint32_t kSregs1Addr = 0x52BE04u;
-            constexpr uint32_t kPacket[] = {0u, 0u, 0u, 0u, 1u, 1u};
-            writeGuestWords(env.rdram.data(), kPacketAddr, kPacket, std::size(kPacket));
-
-            setRegU32(env.ctx, 4, 0x80000001u);
-            setRegU32(env.ctx, 5, kPacketAddr);
-            setRegU32(env.ctx, 6, 0x18u);
-            setRegU32(env.ctx, 7, 0u);
-            setRegU32(env.ctx, 29, 0x00100000u);
-            sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
-
-            t.Equals(getRegS32(env.ctx, 2), 1, "SendCmd must still return 1");
-            t.Equals(readGuestU32(env.rdram.data(), kSregs1Addr), 1u,
-                     "SSX3 SET_SREG(1,1) must complete the handshake with sregs[1]=1");
-            resetSsx3SifHandshakeForTesting();
-        });
-
-        tc.Run("private SIF SendCmd uses seven registers for SET_SREG", [](TestCase &t)
-        {
-            TestEnv env;
-            resetSsx3SifHandshakeForTesting();
-            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
-
-            constexpr uint32_t kPacketAddr = 0x00009000u;
-            constexpr uint32_t kPacket[] = {0u, 0u, 0u, 0u, 1u, 1u};
-            writeGuestWords(env.rdram.data(), kPacketAddr, kPacket, std::size(kPacket));
-            setRegU32(env.ctx, 4, 0x80000001u);
-            setRegU32(env.ctx, 5, 1u); // mode, not packet address
-            setRegU32(env.ctx, 6, kPacketAddr);
-            setRegU32(env.ctx, 7, 0x18u);
-            setRegU32(env.ctx, 8, 0u);
-            setRegU32(env.ctx, 9, 0u);
-            setRegU32(env.ctx, 10, 0u);
-            _sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
-
-            t.Equals(getRegS32(env.ctx, 2), 1, "private SendCmd must return success");
-            t.Equals(readGuestU32(env.rdram.data(), 0x52BE04u), 1u,
-                     "private SendCmd must read the packet from a2");
-            resetSsx3SifHandshakeForTesting();
-        });
-
-        tc.Run("SIF handshake ignores other cids and sreg slots (P1ac)", [](TestCase &t)
-        {
-            TestEnv env;
-            resetSsx3SifHandshakeForTesting();
-            ps2_game_overrides::applyMatching(env.runtime, "SLUS_207.72", 0x00100008u, 0u, false);
-
-            constexpr uint32_t kPacketAddr = 0x00009000u;
-            constexpr uint32_t kSregs1Addr = 0x52BE04u;
-
-            constexpr uint32_t kBindPacket[] = {0u, 0u, 0u, 0u, 1u, 1u};
-            writeGuestWords(env.rdram.data(), kPacketAddr, kBindPacket, std::size(kBindPacket));
-            setRegU32(env.ctx, 4, 0x00000019u);
-            setRegU32(env.ctx, 5, kPacketAddr);
-            setRegU32(env.ctx, 6, 0x18u);
-            setRegU32(env.ctx, 7, 0u);
-            setRegU32(env.ctx, 29, 0x00100000u);
-            sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), 1, "SendCmd must still return 1 for other cids");
-            t.Equals(readGuestU32(env.rdram.data(), kSregs1Addr), 0u,
-                     "a non-SET_SREG cid must not touch sregs[1]");
-
-            constexpr uint32_t kOtherSlot[] = {0u, 0u, 0u, 0u, 2u, 1u};
-            writeGuestWords(env.rdram.data(), kPacketAddr, kOtherSlot, std::size(kOtherSlot));
-            setRegU32(env.ctx, 4, 0x80000001u);
-            sceSifSendCmd(env.rdram.data(), &env.ctx, &env.runtime);
-            t.Equals(getRegS32(env.ctx, 2), 1, "SendCmd must still return 1 for other sreg slots");
-            t.Equals(readGuestU32(env.rdram.data(), kSregs1Addr), 0u,
-                     "SET_SREG for a slot other than 1 must not touch sregs[1]");
-            resetSsx3SifHandshakeForTesting();
         });
 
         tc.Run("SetSyscall publishes markers the scanner cross-checks (K1)", [](TestCase &t)

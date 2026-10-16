@@ -6,6 +6,7 @@
 #include "runtime/game_module.h"
 
 #include <cstring>
+#include <iterator>
 #include <vector>
 
 void reset_ps2_test_function_table();
@@ -19,17 +20,6 @@ namespace
     // plus the SIF private SendCmd entry the handshake override binds).
     constexpr uint32_t kModuleOwnedPcs[] = {0x311710u, 0x3128e8u, 0x426078u};
 }
-
-namespace ps2_syscalls
-{
-// sif-handshake-1: no-module stub for the shared kernel SIF tests' reset
-// call, so the generic binary still links. The handshake flag lives in the
-// SSX 3 module, so nothing here arms it; the product suite covers the armed
-// behavior.
-void resetSsx3SifHandshakeForTesting()
-{
-}
-} // namespace ps2_syscalls
 
 void register_game_module_none_tests()
 {
@@ -58,6 +48,34 @@ void register_game_module_none_tests()
             reset_ps2_test_function_table();
             ps2_game_overrides::applyMatching(runtime, "SLUS_207.72", 0x00100008u, 0u, false);
             t.IsTrue(!runtime.hleIopMode(), "IOP emulator mode stays");
+            reset_ps2_test_function_table();
+        });
+        // snd-seam-1: without a module, no SIF handshake can arm. A
+        // SET_SREG(1,1) SendCmd still returns success but leaves sregs[1]
+        // alone; the armed behavior lives in the module suite.
+        tc.Run("SendCmd without the module leaves sregs[1] alone", [](TestCase &t)
+               {
+            std::vector<uint8_t> rdram(PS2_RAM_SIZE, 0u);
+            R5900Context ctx{};
+            constexpr uint32_t kPacketAddr = 0x00009000u;
+            constexpr uint32_t kSregs1Addr = 0x52BE04u;
+            constexpr uint32_t kPacket[] = {0u, 0u, 0u, 0u, 1u, 1u};
+            for (size_t i = 0; i < std::size(kPacket); ++i)
+                std::memcpy(rdram.data() + kPacketAddr + i * sizeof(uint32_t), &kPacket[i],
+                            sizeof(uint32_t));
+            SET_GPR_U32(&ctx, 4, 0x80000001u);
+            SET_GPR_U32(&ctx, 5, kPacketAddr);
+            SET_GPR_U32(&ctx, 6, 0x18u);
+            SET_GPR_U32(&ctx, 7, 0u);
+            SET_GPR_U32(&ctx, 29, 0x00100000u);
+            {
+                PS2Runtime runtime;
+                ps2_syscalls::sceSifSendCmd(rdram.data(), &ctx, &runtime);
+            }
+            t.Equals(static_cast<int32_t>(getRegU32(&ctx, 2)), 1, "SendCmd still returns 1");
+            uint32_t sregs1 = 0u;
+            std::memcpy(&sregs1, rdram.data() + kSregs1Addr, sizeof(sregs1));
+            t.Equals(sregs1, 0u, "sregs[1] stays 0 with no module");
             reset_ps2_test_function_table();
         });
         // module-seam-2: K1. Without a module, a syscall handler with no
