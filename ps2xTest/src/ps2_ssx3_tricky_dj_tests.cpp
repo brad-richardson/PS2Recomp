@@ -39,9 +39,11 @@ void register_ps2_ssx3_tricky_dj_tests()
             using namespace ps2_ssx3_tricky_dj;
             t.IsTrue(isGatedEvent(0x20cfu), "DJ_Artist_Intro");
             t.IsTrue(isGatedEvent(0x20bbu), "PA_Venue_Intro");
+            t.IsTrue(isGatedEvent(0x20e5u), "DJ_Radio_Big_Intro");
             t.IsTrue(!isGatedEvent(0x2133u), "uber post passes through");
-            t.IsTrue(!isGatedEvent(0x20ccu), "unmapped Event_Intro passes through");
-            t.IsTrue(!isGatedEvent(0x212fu), "unmapped High_Trick_Score passes through");
+            t.IsTrue(!isGatedEvent(0x2088u), "rider Wipeout passes through");
+            t.IsTrue(!isGatedEvent(0x20a8u), "uber payoff passes through");
+            t.IsTrue(!isGatedEvent(0x20bcu), "menu greeting passes through");
             t.IsTrue(!isGatedEvent(0u), "zero passes through");
             t.IsTrue(!isGatedEvent(0xffffffffu), "wild passes through"); });
 
