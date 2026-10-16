@@ -238,12 +238,14 @@ bool androidInputManagerGamepad()
 }
 #endif
 #if defined(__ANDROID__)
-// panel-polish-1: display safe insets in raylib screen coordinates (Brad
-// 10-15: the perf overlay must clear rounded corners and the camera cutout).
-// JNI shape mirrors ap1HideSystemBars above. Root system-bars insets maxed
-// per side with the DisplayCutout safe insets (immersive mode zeroes the
-// bars; the cutout side survives). Queried at most 1/s and on window change;
-// zeros on any failure (fail-static: the overlay draws where it always did).
+// panel-polish-1: display safe insets in physical pixels (Brad 10-15: the
+// perf overlay must clear rounded corners and the camera cutout). JNI shape
+// mirrors ap1HideSystemBars above. Root system-bars insets maxed per side
+// with the DisplayCutout safe insets (immersive mode zeroes the bars; the
+// cutout side survives). Queried at most 1/s and on window change; zeros on
+// any failure (fail-static: the overlay draws where it always did). The
+// caller converts to raylib screen coordinates (this helper sits above the
+// mid-file includes that declare GetScreenWidth/GetRenderWidth).
 static bool androidSafeInsets(float &left, float &top, float &right, float &bottom)
 {
     left = top = right = bottom = 0.0f;
@@ -404,14 +406,10 @@ static bool androidSafeInsets(float &left, float &top, float &right, float &bott
         env->DeleteLocalRef(insets);
     if (!got)
         return failed();
-    // Pixels -> raylib screen coordinates (same space DrawText uses).
-    const float screenW = static_cast<float>(GetScreenWidth());
-    const float dpi = (screenW > 0.0f) ? static_cast<float>(GetRenderWidth()) / screenW : 1.0f;
-    const float inv = (dpi > 0.0f) ? 1.0f / dpi : 1.0f;
-    cL = pxL * inv;
-    cT = pxT * inv;
-    cR = pxR * inv;
-    cB = pxB * inv;
+    cL = pxL;
+    cT = pxT;
+    cR = pxR;
+    cB = pxB;
     lastWindow = app->window;
     lastQuery = now;
     have = true;
@@ -8034,7 +8032,19 @@ void set2SafePad(float &left, float &top)
     top = 0.0f;
 #if defined(__ANDROID__)
     float right = 0.0f, bottom = 0.0f;
-    (void)androidSafeInsets(left, top, right, bottom);
+    if (androidSafeInsets(left, top, right, bottom))
+    {
+        // Physical pixels -> raylib screen coordinates (same space DrawText
+        // uses; the mid-file includes above declare these).
+        const float screenW = static_cast<float>(GetScreenWidth());
+        const float dpi =
+            (screenW > 0.0f) ? static_cast<float>(GetRenderWidth()) / screenW : 1.0f;
+        if (dpi > 0.0f)
+        {
+            left /= dpi;
+            top /= dpi;
+        }
+    }
 #elif defined(PS2X_IOS)
     float right = 0.0f, bottom = 0.0f;
     (void)ps2x::ios::safeInsets(left, top, right, bottom);
