@@ -314,7 +314,12 @@ void resolveGpuDefaults()
         return;
     const PublicGpu sys = publicSystemGpu();
     const bool adreno = ps2x::gpu_resolve::isAdreno(sys.vendor, sys.name.c_str());
-    // H2/H6 land in the next commit (GPU-aware blend-mix/fetch defaults).
+    // H2/H6: Adreno keeps the current behavior ("1"); other GPUs get the
+    // upstream default ("0"). Null, empty and "auto" resolve; explicit wins.
+    const char *bmix = ps2x::gpu_resolve::resolveWorkaround(std::getenv("GE1_ADRENO_BLEND_MIX"), adreno);
+    setenv("GE1_ADRENO_BLEND_MIX", bmix, 1);
+    const char *fetch = ps2x::gpu_resolve::resolveWorkaround(std::getenv("GE1_ADRENO_FETCH_WORKAROUND"), adreno);
+    setenv("GE1_ADRENO_FETCH_WORKAROUND", fetch, 1);
     // H3: Turnip requested but the HAL is unusable -> system driver, not exit 78.
     const char *turnip = std::getenv("GE1_VK_TURNIP");
     if (turnip && std::strcmp(turnip, "1") == 0)

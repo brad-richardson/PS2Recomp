@@ -430,8 +430,14 @@ extern "C" GE1_API int ge1_gs_open(int blending_level)
     // Odin/Adreno default: preserve destination reads through texture barriers
     // while avoiding the broken framebuffer-fetch path. GE1_ADRENO_SAFE and
     // GE1_ADRENO_ORIGINAL are gone (CU3-dead; no env/test/bench sets them).
-    config.OverrideTextureBarriers = 1;
-    config.DisableFramebufferFetch = true;
+    // device-gates-1 (H6): was unconditional on every Android GPU. Now the
+    // backend resolves GE1_ADRENO_FETCH_WORKAROUND from the vendorID
+    // (Adreno "1", others upstream "0"); explicit 1/0 still wins.
+    if (const char *fwa = std::getenv("GE1_ADRENO_FETCH_WORKAROUND"); fwa && std::strcmp(fwa, "1") == 0)
+    {
+        config.OverrideTextureBarriers = 1;
+        config.DisableFramebufferFetch = true;
+    }
 #endif
     // GE7: exact Adreno destination reads (all platforms; the Mac gate runs it).
     // Default AUTO (Brad sign-off): split on Adreno, barrier road elsewhere.

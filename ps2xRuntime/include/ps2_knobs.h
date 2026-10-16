@@ -87,7 +87,10 @@ struct Cf2AndroidDefault
 };
 
 // CF1 §Q2 Android column minus GE1_ADRENO_DSTREAD (already AUTO in the
-// adapter). Every value is the signed-off play value (S1 = the P3 set,
+// adapter) and minus GE1_ADRENO_BLEND_MIX (device-gates-1: GPU-aware AUTO
+// resolved from the vendorID in the backend; Adreno keeps "1", others get
+// the upstream "0"; explicit env still wins). Every value is the signed-off
+// play value (S1 = the P3 set,
 // S3 = lagV, CF4 = readback off: the VIF1_REVERSE_DMA default is "0";
 // CU3 = the Odin default set; CFG1 Part 2 = D1 flag hack + D4 probe-drain
 // pair + D8 anisotropic 16x, minus the dead GE1_VERTEX_KICK row).
@@ -101,7 +104,6 @@ inline const Cf2AndroidDefault *cf2AndroidDefaults(size_t *countOut)
         {"GE1_GS_RESOURCES_DIR", "/ge1-resources", true, false, false},
         {"GE1_GS_DATA_DIR", "/ge1-data", true, false, false},
         {"GE1_GS_AHB_EXPORT", "1", false, false, false},
-        {"GE1_ADRENO_BLEND_MIX", "1", false, false, false},
         {"GE1_TFX_PREWARM", "/ge1-data/tfx-selectors.bin", true, true, false},
         {"GE1_PIPE_FLUSH_VSYNCS", "600", false, false, false},
         {"PS2X_VU1_ENGINE", "microvu", false, false, false},

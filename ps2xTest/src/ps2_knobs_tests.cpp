@@ -72,14 +72,14 @@ void register_ps2_knobs_tests()
 {
     MiniTest::Case("Ps2Knobs", [](TestCase &tc)
                    {
-        tc.Run("android defaults table is exactly the 33 S1+S3+CF4+CU3+CFG1+AU19 play keys (VX2: minus VU1_BLOCKS/FLAG_ELIDE; CFG1: minus VERTEX_KICK; SPR1: minus SIM_MODE)", [](TestCase &t)
+        tc.Run("android defaults table is exactly the 32 S1+S3+CF4+CU3+CFG1+AU19 play keys (VX2: minus VU1_BLOCKS/FLAG_ELIDE; CFG1: minus VERTEX_KICK; SPR1: minus SIM_MODE; device-gates-1: minus BLEND_MIX, GPU-aware AUTO)", [](TestCase &t)
                {
             size_t n = 0;
             const ps2x::Cf2AndroidDefault *defs = ps2x::cf2AndroidDefaults(&n);
-            t.Equals(n, static_cast<size_t>(33), "33 defaults");
+            t.Equals(n, static_cast<size_t>(32), "32 defaults");
             const char *want[] = {
                 "PS2X_GS_BACKEND", "PS2X_GS_EXTERNAL_LIBRARY", "GE1_GS_RESOURCES_DIR",
-                "GE1_GS_DATA_DIR", "GE1_GS_AHB_EXPORT", "GE1_ADRENO_BLEND_MIX",
+                "GE1_GS_DATA_DIR", "GE1_GS_AHB_EXPORT",
                 "GE1_TFX_PREWARM", "GE1_PIPE_FLUSH_VSYNCS", "PS2X_VU1_ENGINE",
                 "PS2X_MTVU", "PS2X_MTVU_LAG", "PS2X_VU0_RECOMP",
                 "PS2X_VU0_DIRECT", "PS2X_GS_HANDOFF_DIET",
