@@ -57,7 +57,8 @@ void register_ps2_ssx3_module_tests()
         tc.Run("override table: the moved families, in order, with their old match", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            const char *kExpected[] = {"ssx3-anim-pick-guard", "ssx3-hle-iop", "ssx3-copied-payload"};
+            const char *kExpected[] = {
+                "ssx3-anim-pick-guard", "ssx3-hle-iop", "ssx3-copied-payload", "ssx3-sif-handshake"};
             t.Equals(m.overrideCount, std::size(kExpected), "override count");
             for (size_t i = 0; i < m.overrideCount && i < std::size(kExpected); ++i)
             {

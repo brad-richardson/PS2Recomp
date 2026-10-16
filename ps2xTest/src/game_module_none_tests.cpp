@@ -15,9 +15,21 @@ void reset_ps2_test_function_table();
 namespace
 {
     void sentinel(uint8_t *, R5900Context *, PS2Runtime *) {}
-    // Guest PCs the SSX 3 module wraps today (its anim pick guard family).
-    constexpr uint32_t kModuleOwnedPcs[] = {0x311710u, 0x3128e8u};
+    // Guest PCs the SSX 3 module wraps today (its anim pick guard entries
+    // plus the SIF private SendCmd entry the handshake override binds).
+    constexpr uint32_t kModuleOwnedPcs[] = {0x311710u, 0x3128e8u, 0x426078u};
 }
+
+namespace ps2_syscalls
+{
+// sif-handshake-1: no-module stub for the shared kernel SIF tests' reset
+// call, so the generic binary still links. The handshake flag lives in the
+// SSX 3 module, so nothing here arms it; the product suite covers the armed
+// behavior.
+void resetSsx3SifHandshakeForTesting()
+{
+}
+} // namespace ps2_syscalls
 
 void register_game_module_none_tests()
 {

@@ -20,6 +20,7 @@ behind the plug-in point in `ps2xRuntime/include/runtime/game_module.h`
 | `ssx3-anim-pick-guard` (HNG2/HNG3) | `PS2X_SSX3_ANIM_PICK_GUARD` (default on) | `src/anim_pick_guard.cpp`, `include/ps2_ssx3_anim_pick_guard.h` | `tests/ps2_ssx3_anim_pick_guard_tests.cpp`, `tests/ps2_ssx3_module_tests.cpp` |
 | `ssx3-hle-iop` (UPR1) | none (always on for SSX 3) | `src/hle_iop.cpp` | `tests/ps2_ssx3_module_tests.cpp`; generic: `GameModuleNone` |
 | `ssx3-copied-payload` (K1) + syscall hooks (ABI 2) | none (always on for SSX 3) | `src/copied_payload.cpp`, `include/Ssx3CopiedPayload.h`; savestate section `syscalls:k1` | `tests/ps2_ssx3_copied_payload_tests.cpp`; generic: `GameModuleNone` |
+| `ssx3-sif-handshake` (P1ac) + SendCmd hook (ABI 3) | none (always on for SSX 3) | `src/sif_handshake.cpp`, `include/Ssx3SifHandshake.h` | `tests/ps2_ssx3_sif_handshake_tests.cpp`; shared kernel SIF tests stay in `ps2_runtime_kernel_tests.cpp`; generic: `GameModuleNone` stub + owned PC |
 
 ## Moving the next family
 

@@ -36,7 +36,8 @@ struct R5900Context;
 namespace ps2_game_module
 {
     // 2 (module-seam-2): the kernel syscall hooks below.
-    inline constexpr uint32_t kAbiVersion = 2u;
+    // 3 (sif-handshake-1): the SIF SendCmd hook below.
+    inline constexpr uint32_t kAbiVersion = 3u;
 
     struct Module
     {
@@ -54,6 +55,11 @@ namespace ps2_game_module
         void (*noteSyscallInstall)(uint32_t syscallIndex, uint32_t handler) = nullptr;
         bool (*serveUnmappedSyscall)(uint32_t syscallNumber, uint32_t handler, uint8_t *rdram,
                                      R5900Context *ctx) = nullptr;
+        // SIF hook. Offered every SendCmd after the runtime's SND/net
+        // handling and extra copy, before the return register is set. The
+        // module completes game-specific ready-handshakes host-side.
+        void (*onSifSendCmd)(uint32_t cid, uint32_t packetAddr, uint32_t packetSize,
+                             uint8_t *rdram) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).
