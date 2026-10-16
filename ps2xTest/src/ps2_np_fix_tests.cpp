@@ -27,6 +27,14 @@
 #endif
 #endif
 
+// np-checksum-1: test-only access to GS::lagfRequest (global scope to match
+// the friend declaration in gs_frontend.h; an anonymous-namespace struct
+// would be a different entity and stay private).
+struct GsLagfDrainTestAccess
+{
+    static void request(GS &gs, const GSTransferCommand &cmd) { gs.lagfRequest(cmd); }
+};
+
 namespace
 {
 // Canonical-transcript scratch space. The parent test creates a unique
@@ -275,7 +283,7 @@ int lagfDrainBoundChild()
     gs.init(vram.data(), static_cast<uint32_t>(vram.size()), &regs);
     gs.setRasterBackend(std::move(be));
     const GSTransferCommand cmd{};
-    gs.lagfRequest(cmd);
+    GsLagfDrainTestAccess::request(gs, cmd);
     return 0;
 }
 #endif
