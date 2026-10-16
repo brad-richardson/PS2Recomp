@@ -58,6 +58,26 @@ def main():
     w4, h4 = big.size
     assert (w4, h4) == (w1 * 4, h1 * 4), (stock.size, big.size)
 
+    # The guest uploads mid-grey texels (128,128,128, alpha <= 128) but the
+    # stock menus show near-white glyphs (sampled D t21250: selected-row face
+    # pixels > 225): the game's text pipeline maps this grey ramp to white
+    # on screen. Normalize here so the overlay matches stock's output: every
+    # inked texel is exactly 128 grey, so no shape is lost; white face with
+    # the coverage doubled (the game's max alpha 128 = full ink).
+    def whiten(im):
+        import numpy as np
+
+        a = np.array(im.convert("RGBA"))
+        ink = a[:, :, 3] > 0
+        a[ink, 0] = 255
+        a[ink, 1] = 255
+        a[ink, 2] = 255
+        a[ink, 3] = np.minimum(255, a[ink, 3].astype(np.uint16) * 2).astype(np.uint8)
+        return Image.fromarray(a)
+
+    stock = whiten(stock)
+    big = whiten(big)
+
     outdir = Path(a.out)
     outdir.mkdir(parents=True, exist_ok=True)
     dest = outdir / "tkfont.bin"

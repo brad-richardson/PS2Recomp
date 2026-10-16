@@ -9494,12 +9494,33 @@ void PS2Runtime::run()
                     return tkUseUp ? tkUpDraw(s, x, yTop, hPx, tint, right)
                                    : tkTxDraw(s, x, yTop, hPx, tint, right);
                 };
-                // Off-screen first: the mini is headless, so host screenshots
-                // come from this texture (blitted below), not the window.
+                // Part 2 iOS: the FBO path below drops every draw on iOS GLES
+                // (browse5: open fired, zero pixels composited, no shot file);
+                // direct draws composite there (vpad/SET2 prove it), and the
+                // device screenshot is the oracle. Mac keeps the FBO: the
+                // mini is headless, so host screenshots come from this
+                // texture (blitted below), not the window.
+#if defined(PS2X_IOS)
+                const bool tkDirect = true;
+#else
+                const bool tkDirect = false;
+#endif
+                {
+                    static bool tkDrawLogged = false;
+                    if (!tkDrawLogged)
+                    {
+                        tkDrawLogged = true;
+                        std::fprintf(stderr,
+                                     "[tklist] draw %s %dx%d art=%d font=%d neuro=%d upscale=%d\n",
+                                     tkDirect ? "direct" : "fbo", static_cast<int>(screenWidth),
+                                     static_cast<int>(screenHeight), tkArt ? 1 : 0,
+                                     tkUseUp ? 1 : 0, tkNeuroOk ? 1 : 0, tkUpscale ? 1 : 0);
+                    }
+                }
                 const int tkTw = static_cast<int>(screenWidth), tkTh = static_cast<int>(screenHeight);
                 static RenderTexture2D tkTex = {0};
                 static int tkTexW = 0, tkTexH = 0;
-                if (tkTex.id == 0u || tkTexW != tkTw || tkTexH != tkTh)
+                if (!tkDirect && (tkTex.id == 0u || tkTexW != tkTw || tkTexH != tkTh))
                 {
                     if (tkTex.id != 0u)
                         UnloadRenderTexture(tkTex);
@@ -9507,7 +9528,8 @@ void PS2Runtime::run()
                     tkTexW = tkTw;
                     tkTexH = tkTh;
                 }
-                BeginTextureMode(tkTex);
+                if (!tkDirect)
+                    BeginTextureMode(tkTex);
                 // Backdrop: staged disc mountain art, dimmed for legibility.
                 if (tkArt)
                 {
@@ -9529,20 +9551,59 @@ void PS2Runtime::run()
                     DrawRectangle(0, 0, static_cast<int>(screenWidth),
                                   static_cast<int>(tkg.titleY + tkg.titleH), Color{16, 28, 56, 255});
                 }
-                // Title bar (stock bar colour 154,62,2, Part 1 §4). Text via
-                // the font module (FEFONT upload primary, Neuropol fallback).
+                // Title bar (stock bar colour 154,62,2 sampled D t21250).
+                // Part 2: title and subtitle each get their own band inside
+                // the bar (title 8..48%, subtitle 52..76% of the bar height),
+                // so nothing overlaps, spills, or clips at any window size.
+                // Text via the font module (FEFONT upload primary, Neuropol
+                // fallback); near-white face like the stock selected row.
                 DrawRectangle(static_cast<int>(tkg.titleX), static_cast<int>(tkg.titleY),
                               static_cast<int>(tkg.titleW), static_cast<int>(tkg.titleH), Color{154, 62, 2, 255});
                 {
-                    const float tkTitleH = tkg.titleH * 0.62f;
-                    tkDraw("Select Event", tkg.titleX + 12, tkg.titleY + (tkg.titleH - tkTitleH) * 0.5f,
-                           tkTitleH, RAYWHITE, false);
+                    tkDraw("Select Event", tkg.titleX + 12, tkg.titleY + tkg.titleH * 0.08f,
+                           tkg.titleH * 0.40f, Color{250, 248, 244, 255}, false);
                     tkDraw("SSX Tricky courses in Tricky order", tkg.titleX + 14,
-                           tkg.titleY + tkg.titleH + 4, static_cast<float>(tkSmall) * 1.6f,
+                           tkg.titleY + tkg.titleH * 0.52f, tkg.titleH * 0.24f,
                            Color{200, 210, 225, 255}, false);
                 }
-                // Course rows (right-aligned near-black on light rows in the
-                // stock screen; v1: light text on dark rows, orange select).
+                // Course rows, Part 2: ONE glyph size for every row; names
+                // left-aligned in a fixed column, the < Race >/< Jam > tag in
+                // its own right-aligned column with a reserved width, so the
+                // longest row can never overflow the panel (it shrinks every
+                // row uniformly instead). Glyph colour matches stock: the
+                // selected row's near-white face (sampled D t21250: face
+                // pixels > 225 on the orange bar); unselected rows a dimmer
+                // white on the dark boxes (stock's dark-on-light rows don't
+                // apply to this dark-row design).
+                const auto tkW = [&](const char *s, float hPx) -> float {
+                    if (tkUseUp)
+                    {
+                        const tkf::Metrics m = tkf::measure(tkFontBaked, s);
+                        return m.width * tkf::scaleFor(m, hPx);
+                    }
+                    if (tkNeuroOk)
+                        return MeasureTextEx(tkNeuro, s, hPx, hPx * 0.06f).x;
+                    const int px = static_cast<int>(hPx + 0.5f);
+                    return static_cast<float>(MeasureText(s, px));
+                };
+                float tkRowS = tkg.rowH * 0.58f;
+                for (int pass = 0; pass < 2; ++pass)
+                {
+                    float tagW = 0.0f, nameW = 0.0f;
+                    for (int i = 0; i < 10; ++i)
+                    {
+                        const tkl::Course &c = tkl::kCourses[i];
+                        nameW = std::max(nameW, tkW(c.name, tkRowS));
+                        if (c.nOpts > 1)
+                        {
+                            tagW = std::max(tagW, tkW("< Race >", tkRowS));
+                            tagW = std::max(tagW, tkW("< Jam >", tkRowS));
+                        }
+                    }
+                    const float avail = tkg.rowW - 20.0f - tagW - 8.0f;
+                    if (nameW > avail && nameW > 0.0f)
+                        tkRowS *= avail / nameW;
+                }
                 for (int i = 0; i < 10; ++i)
                 {
                     const tkl::Course &c = tkl::kCourses[i];
@@ -9550,13 +9611,12 @@ void PS2Runtime::run()
                     DrawRectangle(static_cast<int>(tkg.rowX), static_cast<int>(tkg.rowY[i]),
                                   static_cast<int>(tkg.rowW), static_cast<int>(tkg.rowH) - 2,
                                   sel ? Color{154, 62, 2, 255} : Color{24, 36, 62, 255});
-                    const Color tkInk = sel ? RAYWHITE : Color{200, 210, 225, 255};
-                    const float tkRh = tkg.rowH * 0.62f;
-                    const float tkRy = tkg.rowY[i] + (tkg.rowH - 2 - tkRh) * 0.5f;
-                    std::string label = c.name;
+                    const Color tkInk = sel ? Color{250, 248, 244, 255} : Color{205, 212, 224, 255};
+                    const float tkRy = tkg.rowY[i] + (tkg.rowH - 2 - tkRowS) * 0.5f;
+                    tkDraw(c.name, tkg.rowX + 10, tkRy, tkRowS, tkInk, false);
                     if (c.nOpts > 1)
-                        label += (tkList.opt[i] == 0 ? "  < Race >" : "  < Jam >");
-                    tkDraw(label.c_str(), tkg.rowX + tkg.rowW - 10, tkRy, tkRh, tkInk, true);
+                        tkDraw(tkList.opt[i] == 0 ? "< Race >" : "< Jam >", tkg.rowX + tkg.rowW - 10,
+                               tkRy, tkRowS, tkInk, true);
                 }
                 // Preview/event pane.
                 DrawRectangle(static_cast<int>(tkg.paneX), static_cast<int>(tkg.paneY),
@@ -9600,11 +9660,14 @@ void PS2Runtime::run()
                 // Help bar (font module; was baked legend sprites).
                 tkDraw("X Select   Triangle Previous   Up/Down pick   Left/Right Race/Jam",
                        tkg.titleX, screenHeight * 0.905f, static_cast<float>(tkSmall), RAYWHITE, false);
-                EndTextureMode();
-                DrawTextureRec(tkTex.texture,
-                               Rectangle{0.0f, 0.0f, static_cast<float>(tkTw), static_cast<float>(-tkTh)},
-                               Vector2{0.0f, 0.0f}, WHITE);
-                if (tkShotPrefix)
+                if (!tkDirect)
+                {
+                    EndTextureMode();
+                    DrawTextureRec(tkTex.texture,
+                                   Rectangle{0.0f, 0.0f, static_cast<float>(tkTw), static_cast<float>(-tkTh)},
+                                   Vector2{0.0f, 0.0f}, WHITE);
+                }
+                if (tkShotPrefix && !tkDirect)
                 {
                     static uint64_t tkShotTick = 0;
                     if ((tkShotTick++ % 300u) == 0u)
