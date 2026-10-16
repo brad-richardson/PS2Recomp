@@ -16,6 +16,7 @@
 #include "ps2_rpl3_nv.h" // RPL3: sched-gate record/replay (padrec v3)
 #include "ps2_turbo_boot.h" // BTS1: boot turbo pacing suspension + yield poll
 #include "ps2_ssx3_tricky_layer.h"
+#include "ps2_ssx3_tricky_mc.h" // tk-announcer-1 (2b): air-edge poll
 #include "ps2_ach.h"
 #include "ps2_vsync_lock.h"
 #include "ps2_e15.h"
@@ -3162,6 +3163,10 @@ void EeScheduler::processEvent(const EeEvent &event)
             trickyModule->trickyLayerTick(m_rdram, PS2_RAM_SIZE, m_vsyncTick);
         else
             ps2_ssx3_tricky_layer::onVBlankTick(m_rdram, PS2_RAM_SIZE, m_vsyncTick);
+        // tk-announcer-1 (2b): Tricky MC air-edge poll. One branch when the
+        // PS2X_SSX3_TRICKY_MC knob is off; read-only otherwise (synth posts
+        // go through the registered emitter only).
+        ps2_ssx3_tricky_mc::pollMcTick(m_rdram, PS2_RAM_SIZE, m_vsyncTick);
         // BTS1: boot turbo yield poll + host audio ring drain (one bool
         // check when the knob is off). After the tick increment, like every
         // sibling hook.

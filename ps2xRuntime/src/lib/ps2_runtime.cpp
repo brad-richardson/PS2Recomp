@@ -18,6 +18,7 @@
 #include "ps2_ssx3_tricky_dj.h"
 #include "ps2_ssx3_tricky_hud.h"
 #include "ps2_ssx3_tricky_layer.h"
+#include "ps2_ssx3_tricky_mc.h"
 #include "ps2_ssx3_tricky_menu.h"
 #include "ps2_ssx3_tricky_list.h"
 #include "ps2_tk_font.h" // tk-menu-2: shared FEFONT module (upload primary, Neuropol fallback)
@@ -2232,6 +2233,131 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-netsync-online",
                            0x00100008u,
                            0u,
                            applyNetsyncOnline);
+
+// tk-announcer-1 Part 2: queue-time Tricky MC translator. Separate override
+// on the same post function so it chains with the uber-post (and DJ-gate)
+// wrappers in either registration order.
+namespace
+{
+PS2Runtime::RecompiledFunction g_mcPostPrev = nullptr;
+struct McEmitImpl
+{
+    PS2Runtime::RecompiledFunction prev = nullptr;
+    PS2Runtime *runtime = nullptr;
+};
+McEmitImpl g_mcEmitImpl;
+
+void setGuestRegU32(R5900Context *ctx, int reg, uint32_t value)
+{
+    ctx->r[reg] = _mm_set_epi64x(0, static_cast<int64_t>(static_cast<int32_t>(value)));
+}
+
+// Scheduler-side emitter: one synthesized guest post with no live ctx.
+void mcEmitPost(void *impl, uint8_t *rdram, uint32_t a0, uint32_t a2, uint8_t t0, uint64_t tick)
+{
+    (void)tick;
+    auto *e = static_cast<McEmitImpl *>(impl);
+    if (e == nullptr || e->prev == nullptr || e->runtime == nullptr || rdram == nullptr)
+        return;
+    R5900Context synth{};
+    setGuestRegU32(&synth, 4, a0);
+    setGuestRegU32(&synth, 6, a2);
+    setGuestRegU32(&synth, 8, t0);
+    e->prev(rdram, &synth, e->runtime);
+}
+
+uint64_t mcTickNow(PS2Runtime *runtime)
+{
+    if (runtime == nullptr)
+        return 0ull;
+    return static_cast<uint64_t>(runtime->memory().gs().vsyncTick.load(std::memory_order_relaxed));
+}
+
+void tkMcPostWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+{
+    using namespace ps2_ssx3_tricky_mc;
+    const uint32_t a2 = getRegU32(ctx, 6);
+    if (g_mcPostPrev == nullptr || isForeignEvent(a2))
+    {
+        if (g_mcPostPrev != nullptr)
+            g_mcPostPrev(rdram, ctx, runtime);
+        return;
+    }
+    ps2_ssx3_course::Modes &ms = ps2_ssx3_course::courseModes();
+    if (!ms.armed || ps2_ssx3_course::modeCurrent(ms, rdram) == 0u)
+    {
+        g_mcPostPrev(rdram, ctx, runtime);
+        return;
+    }
+    const Route *route = findRoute(a2);
+    if (route == nullptr)
+    {
+        g_mcPostPrev(rdram, ctx, runtime);
+        return;
+    }
+    const Rule *rule = findRule(route->mcEvent);
+    if (rule == nullptr)
+    {
+        g_mcPostPrev(rdram, ctx, runtime);
+        return;
+    }
+    const uint64_t tick = mcTickNow(runtime);
+    TranslatorState &s = translatorState();
+    const uint32_t rr = ps2_ssx3_tricky_hud::resolveChainR(rdram, PS2_RAM_SIZE);
+    noteBoundary(s, static_cast<uint64_t>(rr), tick);
+    Decision d = decide(s, *route, *rule, tick, false);
+    if (d.verdict == Verdict::Drop)
+    {
+        std::fprintf(stderr, "[ssx3-tricky-mc] tick=%llu a2=0x%x mc=0x%x DROP (silence)\n",
+                     static_cast<unsigned long long>(tick), a2, route->mcEvent);
+        setReturnU32(ctx, 0u);
+        return;
+    }
+    if (d.outEvent != a2)
+        setGuestRegU32(ctx, 6, d.outEvent);
+    if (d.outT0 != 0u)
+        setGuestRegU32(ctx, 8, d.outT0);
+    g_mcPostPrev(rdram, ctx, runtime);
+    if (getRegU32(ctx, 2) != 0u)
+    {
+        noteAccepted(s, route->mcEvent, tick);
+        std::fprintf(stderr, "[ssx3-tricky-mc] tick=%llu a2=0x%x -> 0x%x ACCEPT\n",
+                     static_cast<unsigned long long>(tick), a2, d.outEvent);
+    }
+}
+
+void applyTrickyMcPost(PS2Runtime &runtime, uint32_t gameId, uint32_t /*version*/, uint32_t pc)
+{
+    (void)gameId;
+    (void)pc;
+    const char *env = std::getenv("PS2X_SSX3_TRICKY_MC");
+    if (!env || env[0] != '1')
+        return; // Default off: the original runs for every post (det-identical)
+    constexpr uint32_t kPc = ps2_ssx3_tricky_hud::kSpeechPostFunc;
+    PS2Runtime::RecompiledFunction prev = runtime.lookupFunction(kPc);
+    if (prev == nullptr)
+        return;
+    // Chain: whatever is installed (uber-post wrapper, DJ gate, or the
+    // original) becomes our predecessor.
+    if (prev == &tkMcPostWrapper)
+        return;
+    g_mcPostPrev = prev;
+    g_mcEmitImpl.prev = prev;
+    g_mcEmitImpl.runtime = &runtime;
+    runtime.replaceFunction(kPc, &tkMcPostWrapper);
+    ps2_ssx3_tricky_mc::PollControl &poll = ps2_ssx3_tricky_mc::pollControl();
+    poll.armed = true;
+    poll.emit = &mcEmitPost;
+    poll.emitImpl = &g_mcEmitImpl;
+}
+} // namespace
+
+PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-mc",
+                           "SLUS_207.72",
+                           0x00100008u,
+                           0u,
+                           applyTrickyMcPost);
+
 
 // K1 P0: env-gated presentation-frame capture (PS2X_FRAME_DUMP_DIR).
 // Unset/empty = disabled (zero behavior change). When set, saves the

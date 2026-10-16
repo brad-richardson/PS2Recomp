@@ -42,6 +42,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_ssx3_tricky_gems_tests.cpp
     src/ps2_ssx3_tricky_resetvol_tests.cpp
     src/ps2_ssx3_tricky_layer_tests.cpp
+    src/ps2_ssx3_tricky_mc_tests.cpp
     src/ps2_cd_overlay_tests.cpp
     src/ps2_cd_dirpatch_tests.cpp
     src/ps2_android_env_tests.cpp
