@@ -1363,7 +1363,24 @@ if(PS2X_IS_IOS)
         set_source_files_properties(${PS2X_GE1_FONTS} PROPERTIES
             MACOSX_PACKAGE_LOCATION "Resources/fonts"
         )
+        # tk-menu-2: Neuropol CC0 fallback in the same bundle fonts dir.
+        target_sources(ps2EntryRunner PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/Neuropol-CC0.otf")
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/Neuropol-CC0.otf" PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources/fonts"
+        )
     endif()
+endif()
+
+# tk-menu-2: Neuropol CC0 beside the desktop runner (exe-relative lookup).
+if(NOT PS2X_IS_ANDROID AND NOT PS2X_IS_IOS)
+    add_custom_command(TARGET ps2EntryRunner POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:ps2EntryRunner>/fonts"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/Neuropol-CC0.otf"
+            "$<TARGET_FILE_DIR:ps2EntryRunner>/fonts/Neuropol-CC0.otf"
+        COMMENT "tk-menu-2 fonts/Neuropol-CC0.otf"
+        VERBATIM
+    )
 endif()
 
 if(APPLE)

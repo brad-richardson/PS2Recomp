@@ -1,5 +1,6 @@
 #include "MiniTest.h"
 #include "ps2_ssx3_tricky_list.h"
+#include "ps2_tk_font.h"
 
 #include <algorithm>
 #include <cstring>
@@ -541,5 +542,88 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(listHit(g, g.rowX - 4, g.rowY[3] + 2), -1, "miss left");
             t.Equals(listHit(g, g.selectX + 2, g.selectY + 2), 11, "select legend");
             t.Equals(listHit(g, g.backX + 2, g.backY + 2), 12, "back legend");
-            t.Equals(listHit(g, g.toggleX + 2, g.toggleY + 2), 10, "toggle"); }); });
+            t.Equals(listHit(g, g.toggleX + 2, g.toggleY + 2), 10, "toggle"); });
+
+        // tk-menu-2 shared font module: synthetic TKFONT1 (no game bytes).
+        auto tkfontBlob = [](uint32_t w1, uint32_t h1, uint32_t w4, uint32_t h4,
+                             const std::vector<ps2_tk_font::Glyph> &gs) {
+            std::string b("TKFONT1\0", 8);
+            auto u32 = [&](uint32_t v) {
+                char tmp[4];
+                std::memcpy(tmp, &v, 4);
+                b.append(tmp, 4);
+            };
+            u32(w1);
+            u32(h1);
+            u32(w4);
+            u32(h4);
+            u32(static_cast<uint32_t>(gs.size()));
+            for (const auto &g : gs)
+            {
+                char rec[16];
+                std::memcpy(rec, &g.code, 2);
+                std::memcpy(rec + 2, &g.x, 2);
+                std::memcpy(rec + 4, &g.y, 2);
+                std::memcpy(rec + 6, &g.w, 2);
+                std::memcpy(rec + 8, &g.h, 2);
+                std::memcpy(rec + 10, &g.xoff, 2);
+                std::memcpy(rec + 12, &g.yoff, 2);
+                std::memcpy(rec + 14, &g.adv, 2);
+                b.append(rec, 16);
+            }
+            b.append(w1 * h1 * 4, '\0');
+            b.append(w4 * h4 * 4, '\0');
+            return b;
+        };
+        tc.Run("tkfont rejects bad magic and short reads", [&](TestCase &t)
+               {
+            ps2_tk_font::Baked b;
+            t.IsFalse(ps2_tk_font::parseTkFont(nullptr, 0, b), "null rejected");
+            const std::string junk("garbage-bytes-here!!!!!!!!", 24);
+            t.IsFalse(ps2_tk_font::parseTkFont(reinterpret_cast<const uint8_t *>(junk.data()), junk.size(), b),
+                      "bad magic rejected");
+            const std::string head("TKFONT1\0", 8);
+            t.IsFalse(ps2_tk_font::parseTkFont(reinterpret_cast<const uint8_t *>(head.data()), head.size(), b),
+                      "short header rejected"); });
+        tc.Run("tkfont parses one glyph and measures", [&](TestCase &t)
+               {
+            ps2_tk_font::Glyph g;
+            g.code = 65;
+            g.x = 1;
+            g.y = 2;
+            g.w = 10;
+            g.h = 12;
+            g.xoff = 1;
+            g.yoff = 2;
+            g.adv = 11;
+            const std::string blob = tkfontBlob(16, 16, 64, 64, {g});
+            ps2_tk_font::Baked b;
+            t.IsTrue(ps2_tk_font::parseTkFont(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), b),
+                     "one glyph parses");
+            t.Equals(b.glyphs.size(), size_t(1), "glyph count");
+            t.Equals(b.px1.size(), size_t(16 * 16 * 4), "1x bytes");
+            t.Equals(b.px4.size(), size_t(64 * 64 * 4), "4x bytes");
+            t.IsTrue(ps2_tk_font::findGlyph(b, 65) != nullptr, "A found");
+            t.IsTrue(ps2_tk_font::findGlyph(b, 66) == nullptr, "B missing");
+            const ps2_tk_font::Metrics m = ps2_tk_font::measure(b, "A");
+            t.Equals(m.width, 11.0f, "advance width");
+            t.Equals(m.top, 2.0f, "ink top");
+            t.Equals(m.bot, 14.0f, "ink bottom");
+            t.Equals(ps2_tk_font::scaleFor(m, 24.0f), 2.0f, "scale fills band");
+            const ps2_tk_font::Metrics e = ps2_tk_font::measure(b, "");
+            t.Equals(e.width, 0.0f, "empty width");
+            t.Equals(ps2_tk_font::scaleFor(e, 24.0f), 0.0f, "empty scale"); });
+        tc.Run("tkfont rejects out-of-atlas cells", [&](TestCase &t)
+               {
+            ps2_tk_font::Glyph g;
+            g.code = 65;
+            g.x = 10;
+            g.y = 0;
+            g.w = 10;
+            g.h = 4;
+            g.adv = 11;
+            const std::string blob = tkfontBlob(16, 16, 64, 64, {g});
+            ps2_tk_font::Baked b;
+            t.IsFalse(ps2_tk_font::parseTkFont(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), b),
+                      "oob cell rejected"); }); });
 }

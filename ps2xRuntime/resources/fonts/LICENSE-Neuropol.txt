@@ -1,0 +1,21 @@
+Neuropol CC0 — font provenance (tk-menu-2, Brad 10-16)
+
+Font: Neuropol (1996) by Typodermic Fonts, released as public domain.
+Source archive (official, Typodermic):
+  https://typodermicfonts.com/assets/downloads/cc0-fonts/neuropol.zip
+Licence: CC0 1.0 Universal (public-domain dedication).
+  The packaged read-this.html states "CC0 1.0 Universal" and links its
+  terms (https://creativecommons.org/publicdomain/zero/1.0/).
+  You may use it for personal or commercial work without buying a
+  license, paying a fee, or asking permission. No Neuropol X (the
+  modified game font, not distributable) is used anywhere.
+
+SHA-256 (verified 2026-10-16):
+  neuropol.zip   4898228f06e37335d0f46eee01d67b3fbcb784b24e5ca19c23ecbe0dd6fe3567
+  Neuropol.otf   5b6b7b0536019ebda9c73c48dd1f71ae079a11ae7e3590fd4017f5759f338fc5
+  read-this.html 4e7b5a58c9b26ac66c79b7ea50cd3b73e654c8a46332c67cb12ca71217c8bac3
+
+This copy (Neuropol-CC0.otf) is byte-for-byte the archive member
+Neuropol.otf. Pinned upstream copy:
+  ~/dev/ssx3-work/pinned/fonts/neuropol-cc0/
+Full CC0 1.0 legal text: https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt
