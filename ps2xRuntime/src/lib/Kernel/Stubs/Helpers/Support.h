@@ -636,26 +636,37 @@ namespace
             const auto slim = ps2x::slim_cd::load(cdImage);
             if (slim.status == ps2x::slim_cd::Status::Invalid)
             { std::cerr << "[cd-slim] REFUSED: " << slim.error << std::endl; g_lastCdError = -1; return false; }
+            // One patch step for every image mode: the slim branch used to
+            // return before patchDirSectors, hiding overlay/alias directory
+            // entries on slim images (the guest then loads stock bytes).
+            bool ok = false;
             if (slim.status == ps2x::slim_cd::Status::Slim)
             {
                 if (byteCount > size_t(sectors) * kCdSectorSize)
-                { g_lastCdError = -1; return false; }
-                return readSlimSectors(cdImage, slim, lbn, sectors, dst, byteCount);
+                { g_lastCdError = -1; }
+                else
+                { ok = readSlimSectors(cdImage, slim, lbn, sectors, dst, byteCount); }
             }
-            uint64_t totalSectors = 0;
-            if (tryGetCdImageTotalSectors(totalSectors))
+            else
             {
-                const uint64_t start = static_cast<uint64_t>(lbn);
-                const uint64_t end = start + static_cast<uint64_t>(sectors);
-                if (start >= totalSectors || end > totalSectors)
+                bool inRange = true;
+                uint64_t totalSectors = 0;
+                if (tryGetCdImageTotalSectors(totalSectors))
                 {
-                    g_lastCdError = -1;
-                    return false;
+                    const uint64_t start = static_cast<uint64_t>(lbn);
+                    const uint64_t end = start + static_cast<uint64_t>(sectors);
+                    if (start >= totalSectors || end > totalSectors)
+                    {
+                        g_lastCdError = -1;
+                        inRange = false;
+                    }
+                }
+                if (inRange)
+                {
+                    const uint64_t offset = static_cast<uint64_t>(lbn) * kCdSectorSize;
+                    ok = readHostRange(cdImage, offset, dst, byteCount);
                 }
             }
-
-            const uint64_t offset = static_cast<uint64_t>(lbn) * kCdSectorSize;
-            const bool ok = readHostRange(cdImage, offset, dst, byteCount);
             if (ok && overlay)
             {
                 overlay->patchDirSectors(lbn, sectors, dst, byteCount);

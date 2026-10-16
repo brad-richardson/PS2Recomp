@@ -35,6 +35,7 @@ void register_ps2_ssx3_tricky_gems_tests();
 void register_ps2_ssx3_tricky_resetvol_tests();
 void register_ps2_ssx3_tricky_layer_tests();
 void register_ps2_cd_overlay_tests();
+void register_ps2_cd_dirpatch_tests();
 void register_ps2_android_env_tests();
 void register_ps2_knobs_tests();
 void register_ps2_settings_overlay_tests();
@@ -134,6 +135,7 @@ int main(int argc, char **argv)
     register_ps2_ssx3_tricky_resetvol_tests();
     register_ps2_ssx3_tricky_layer_tests();
     register_ps2_cd_overlay_tests();
+    register_ps2_cd_dirpatch_tests();
     register_ps2_android_env_tests();
     register_ps2_knobs_tests();
     register_ps2_settings_overlay_tests();

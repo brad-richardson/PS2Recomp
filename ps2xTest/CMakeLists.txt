@@ -42,6 +42,7 @@ add_library(ps2_test_lib STATIC
     src/ps2_ssx3_tricky_resetvol_tests.cpp
     src/ps2_ssx3_tricky_layer_tests.cpp
     src/ps2_cd_overlay_tests.cpp
+    src/ps2_cd_dirpatch_tests.cpp
     src/ps2_android_env_tests.cpp
     src/ps2_knobs_tests.cpp
     src/ps2_settings_overlay_tests.cpp
@@ -141,6 +142,7 @@ target_include_directories(ps2_test_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/ps2xAnalyzer/include
     ${CMAKE_SOURCE_DIR}/ps2xRuntime/include
     ${CMAKE_SOURCE_DIR}/ps2xRuntime/src/lib
+    ${CMAKE_SOURCE_DIR}/ps2xIOP/include
 )
 
 target_link_libraries(ps2_test_lib PRIVATE
