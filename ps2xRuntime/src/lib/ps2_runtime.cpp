@@ -473,6 +473,11 @@ void rlEnableColorBlend(void);
 // SET2: flush the draw batch before the panel screenshot (same pattern as above).
 extern "C" void rlDrawRenderBatchActive(void);
 #endif
+#if defined(__APPLE__) && !defined(PS2X_IOS)
+// mac-speed-1: manual GLFW decl (no GLFW headers in this TU); defined by the
+// raylib-bundled GLFW the runner links.
+extern "C" void glfwSwapInterval(int interval);
+#endif
 #include "ps2_e7.h"
 #include "ps2_e15.h"
 #include "runtime/ee_scheduler.h"
@@ -4936,10 +4941,15 @@ bool PS2Runtime::initialize(const char *title)
                          ? ps2x_present_vk::displayHz()
                          : 60);
         // mac-speed-1 Part 2 (PS2X_LAB_UNCAPPED=1, lab-only): drop the host
-        // present waits entirely (raylib limiter) so unpaced lab boots
-        // measure true headroom. Default off; guest state untouched.
+        // present waits (raylib limiter, GL vsync swap) so unpaced lab
+        // boots measure true headroom. Default off; guest state untouched.
         if (ps2_vsync_pacer::labUncappedFromEnv(std::getenv("PS2X_LAB_UNCAPPED")))
+        {
             SetTargetFPS(0);
+#if defined(__APPLE__) && !defined(PS2X_IOS)
+            glfwSwapInterval(0);
+#endif
+        }
 #endif
         if (m_debugUiInitCallback)
         {
