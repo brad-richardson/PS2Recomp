@@ -548,8 +548,12 @@ void register_ps2_savestate_tests()
             const auto &sections = ps2_savestate::registeredSections();
             // module-seam-2: "syscalls:k1" moved with the SSX 3 module
             // (games/ssx3/module/tests/ps2_ssx3_copied_payload_tests.cpp).
+            // snd-seam-1 family B: "snd" moved with the SSX 3 module the
+            // same way (section presence + version in
+            // games/ssx3/module/tests/ps2_ssx3_module_tests.cpp; absence
+            // without a module in game_module_none_tests.cpp).
             for (const char *key : {"syscalls", "syscalls:deci2", "stub:cd", "stub:sif", "stub:mc",
-                                    "stub:pad", "stub:audio", "stub:dma", "stub:mpeg", "stub:mcdir", "snd", "padlatch",
+                                    "stub:pad", "stub:audio", "stub:dma", "stub:mpeg", "stub:mcdir", "padlatch",
                                     "support:Stubs/CD.cpp"})
                 t.IsTrue(sections.count(key) == 1u, std::string("section registered: ") + key);
         });

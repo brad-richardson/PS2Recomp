@@ -4,6 +4,7 @@
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
 #include "runtime/game_module.h"
+#include "runtime/ps2_savestate.h"
 
 #include <cstring>
 #include <iterator>
@@ -77,6 +78,14 @@ void register_game_module_none_tests()
             std::memcpy(&sregs1, rdram.data() + kSregs1Addr, sizeof(sregs1));
             t.Equals(sregs1, 0u, "sregs[1] stays 0 with no module");
             reset_ps2_test_function_table();
+        });
+        // snd-seam-1 family B: the "snd" savestate section belongs to the
+        // module now. Without one, no SND state is registered (a product
+        // save's "snd" section fails closed as unknown, like "syscalls:k1").
+        tc.Run("no SND savestate section is registered without the module", [](TestCase &t)
+               {
+            const auto &sections = ps2_savestate::registeredSections();
+            t.IsTrue(sections.find("snd") == sections.end(), "no snd section with no module");
         });
         // module-seam-2: K1. Without a module, a syscall handler with no
         // recompiled function drops to KE_ERROR even after the SSX 3 pass

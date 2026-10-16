@@ -2,6 +2,7 @@
 #include "ps2_snd_spike.h"
 #include "ps2_ssx3_anim_pick_guard.h"
 #include "ps2_ssx3_module.h"
+#include "runtime/ps2_savestate.h"
 
 #include <cstring>
 #include <iterator>
@@ -84,6 +85,12 @@ void register_ps2_ssx3_module_tests()
             t.Equals(m.sndTickCycles, 3145728ull, "one tick is exactly 3,145,728 EE cycles");
             t.IsTrue(m.sndSaveState == &ps2_snd_spike::saveSndState, "save provider");
             t.IsTrue(m.sndLoadState == &ps2_snd_spike::loadSndState, "load provider");
+            const auto &sections = ps2_savestate::registeredSections();
+            const auto snd = sections.find("snd");
+            t.IsTrue(snd != sections.end(), "snd section registered by the module");
+            t.Equals(snd->second.version, 1u, "snd version frozen for old saves");
+            t.IsTrue(snd->second.save == &ps2_snd_spike::saveSndState, "snd save hook");
+            t.IsTrue(snd->second.load == &ps2_snd_spike::loadSndState, "snd load hook");
         });
         tc.Run("the override pass wraps both anim entries and chains to the originals", [](TestCase &t)
                {

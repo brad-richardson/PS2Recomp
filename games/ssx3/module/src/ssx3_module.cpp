@@ -6,6 +6,7 @@
 #include "Ssx3SifHandshake.h"
 #include "ps2_snd_spike.h"
 #include "ssx3_module_internal.h"
+#include "runtime/ps2_savestate.h"
 
 #include <iterator>
 
@@ -27,6 +28,14 @@ namespace
     // snd-seam-1 family A: the SSX 3 SND progress hooks (ps2_snd_spike.h).
     // Always on for SSX 3 (the HLE runs on guest time with sound on or
     // off); the SND savestate providers follow in the same family.
+    // snd-seam-1 family B: the SND savestate section lives here now (name,
+    // version, registration). Same static-registration pattern as K1's
+    // "syscalls:k1": this TU is always linked (it defines the module
+    // entry), and section order is key-sorted, so registration timing is
+    // inert. The version stays 1 (was ps2_savestate::kSndVersion): old
+    // saves keep loading through the unchanged provider bodies.
+    const bool kSndSavestateRegistered = ps2_savestate::registerSection(
+        "snd", {1u, &ps2_snd_spike::saveSndState, &ps2_snd_spike::loadSndState, nullptr});
     const ps2_game_module::Module kModule{ps2_game_module::kAbiVersion,
                                           "ssx3",
                                           kOverrides,

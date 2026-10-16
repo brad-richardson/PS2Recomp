@@ -18,7 +18,6 @@
 #include "runtime/ps2_vfs.h"
 #include "ps2_iop_host.h"
 #include "ps2_pad_latch.h"
-#include "runtime/game_module.h"
 #include "ps2_turbo_boot.h" // BTS1: disarm boot turbo on state load
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/gs_backend.h"
@@ -3563,37 +3562,6 @@ bool GSSavestate::load(GS &gs, Reader &r)
     return true;
 }
 
-// ==================================================================== SND
-// snd-seam-1 family A: the section bodies live in the game module now
-// (`ps2_snd_spike::saveSndState`/`loadSndState`); this struct only forwards.
-// The section name, version and registration below stay with the runtime
-// until family B moves them. Serialized bytes are unchanged.
-struct SndSavestate
-{
-    static void save(ps2_savestate::Writer &w)
-    {
-        const ps2_game_module::Module *sndModule = ps2_game_module::installed();
-        if (sndModule && sndModule->sndSaveState)
-        {
-            sndModule->sndSaveState(w);
-            return;
-        }
-        // No module: defined empty payload (a no-module binary never
-        // produces SND state; see the design §2 field-delegation rule).
-    }
-    static bool load(ps2_savestate::Reader &r)
-    {
-        const ps2_game_module::Module *sndModule = ps2_game_module::installed();
-        if (sndModule && sndModule->sndLoadState)
-            return sndModule->sndLoadState(r);
-        // No module: the defined empty payload loads (zero bytes, so the
-        // framed section is already fully consumed). A non-empty "snd"
-        // section fails closed at `endSection` instead of being silently
-        // dropped.
-        return r.ok();
-    }
-};
-
 namespace
 {
     void padLatchSave(ps2_savestate::Writer &w) { w.pod(ps2x::padlatch::sharedLatch().savestateGet()); }
@@ -3614,8 +3582,8 @@ namespace
         return {};
     }
 
-    const bool kSndRegistered = ps2_savestate::registerSection(
-        "snd", {ps2_savestate::kSndVersion, &SndSavestate::save, &SndSavestate::load, nullptr});
+    // snd-seam-1 family B: the "snd" section (name, version 1,
+    // registration) lives in the game module now (ssx3_module.cpp).
     const bool kPadLatchRegistered =
         ps2_savestate::registerSection("padlatch", {1u, &padLatchSave, &padLatchLoad, &padLatchReady});
     const bool kTrickyGemsRegistered =

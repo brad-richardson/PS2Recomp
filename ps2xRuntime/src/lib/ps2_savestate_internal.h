@@ -23,7 +23,8 @@ namespace ps2_savestate
     inline constexpr uint32_t kSchedulerVersion = 1u;
     inline constexpr uint32_t kVuVersion = 1u;
     inline constexpr uint32_t kGsVersion = 3u; // v3: CLUT tail + palette indices (S2), vertex queue (S3), footer
-    inline constexpr uint32_t kSndVersion = 1u;
+    // snd-seam-1 family B: the SND section version (1u) lives in the game
+    // module now, next to its registration (ssx3_module.cpp).
 
     // Resume hand-off: a loaded run skips the first processPendingEvents()
     // (the save was taken right after one).

@@ -41,8 +41,8 @@ void saveSndState(ps2_savestate::Writer &w);
 bool loadSndState(ps2_savestate::Reader &r);
 } // namespace ps2_snd_spike
 
-// ::SndSavestate (family A forwarder in ps2_savestate.cpp; family B moves it).
-struct SndSavestate;
+// (The old runtime `::SndSavestate` forwarder is gone as of family B; the
+// providers below are befriended directly.)
 
 namespace ps2_snd_spu
 {
