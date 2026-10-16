@@ -8681,6 +8681,17 @@ void PS2Runtime::run()
         const bool vpadPadHides = gamepadInUse();
 #endif
         const bool vpadPadConnected = vpadWanted && !vpadForcedOn && vpadPadHides;
+#if defined(__ANDROID__)
+        // android-touch-1c: the present path follows the overlay every
+        // frame (deduped in the ledger): panel open or overlay shown →
+        // underlaid translucent GL (VK child below, hole punched);
+        // otherwise VK above, GL skipped (fast path). Touch=Off keeps the
+        // SET dot drawable via set2On so the panel stays reachable; the
+        // Odin default path (Auto+pad, panel closed) is unaffected (fast).
+        // set2DoOpen re-asserts true with its geometry wait; set2DoClose
+        // needs no call (next frame's rule already covers it).
+        ps2x_present_vk::setUnderlay(set2Open || (vpadWanted ? !vpadPadConnected : set2On));
+#endif
         // First frame always evaluates (Odin starts hidden on the fast
         // path; a phone starts shown underlaid).
         if (vpadWanted && (vpadFirstFrame || vpadPadConnected != vpadLastPadConnected))
@@ -8696,13 +8707,6 @@ void PS2Runtime::run()
             std::fprintf(stderr, "[vpad] on=1 pad_in_use=%d first_pad=%d name=\"%s\" -> overlay %s\n", vpadPadConnected ? 1 : 0,
                          padIndex, padName ? padName : "", vpadPadConnected ? "hidden" : "shown");
             vpadLastPadConnected = vpadPadConnected;
-#if defined(__ANDROID__)
-            // Keep the present path on the fast path while hidden (VK above,
-            // GL skipped) and underlaid while shown (translucent GL over the
-            // game). The panel manages its own underlay while open.
-            if (!set2Open)
-                ps2x_present_vk::setUnderlay(!vpadPadConnected);
-#endif
         }
         // IN2: the render thread publishes the vpad + raylib button union
         // to the pad latch every host frame (host ~60 Hz vs guest reads at
@@ -8833,9 +8837,9 @@ void PS2Runtime::run()
             set2HoldsPause().store(false, std::memory_order_release);
             ps2x::hostPause::requestResume();
             ps2_snd_audio_output::resumePlayback();
-#if defined(__ANDROID__)
-            ps2x_present_vk::setUnderlay(false);
-#endif
+            // android-touch-1c: no underlay call here (it used to force
+            // false and strand a shown overlay with GL skipped): the
+            // per-frame rule above re-asserts next frame.
             // NOTE: no set2Down.clear() here — the seed above must survive
             // (a stale clear undid the seed and re-opened the panel).
             set2ShotIn = -1;
