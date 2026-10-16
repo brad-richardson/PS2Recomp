@@ -376,6 +376,13 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
     // Release gap: no mask until the gap expires.
     if (tick < n.releaseUntil)
         return out;
+    // Transition blackout: after every press the screens may pass through
+    // non-Map or cursorless states (m5: the Event widget reads row=-1 for a
+    // dozen ticks after the accept). Never evaluate screen/cursor content
+    // inside the blind window; a persistent absence completes below.
+    const bool blind = tick < n.blindUntil;
+    if (blind && v.mapLive)
+        return out;
     const auto press = [&](uint16_t mask) -> NavOut {
         if (++n.presses > kPressBudget)
             return abort();

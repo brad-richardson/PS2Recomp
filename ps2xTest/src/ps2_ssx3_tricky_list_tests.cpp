@@ -1,6 +1,7 @@
 #include "MiniTest.h"
 #include "ps2_ssx3_tricky_list.h"
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -276,7 +277,8 @@ void register_ps2_ssx3_tricky_list_tests()
                 NavOut o = navStep(n, v, tick, true, true);
                 if (o.mask == kPadTriangle)
                     sawTriangle = true;
-                tick = n.releaseUntil > tick ? n.releaseUntil : tick + 1;
+                const uint64_t next = std::max(n.releaseUntil, n.blindUntil);
+                tick = next > tick ? next : tick + 1;
             }
             t.IsTrue(sawTriangle, "Triangle pressed");
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "Done after leaving");
@@ -453,7 +455,8 @@ void register_ps2_ssx3_tricky_list_tests()
             {
                 // The peak never moves (locked): every press is wasted.
                 navStep(n, v, tick, true, true);
-                tick = n.releaseUntil > tick ? n.releaseUntil : tick + 1;
+                const uint64_t next = std::max(n.releaseUntil, n.blindUntil);
+                tick = next > tick ? next : tick + 1;
             }
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Aborted), "budget aborts"); });
 
