@@ -89,6 +89,7 @@ struct Config {
     uint64_t seq = 1u;
     uint64_t sent = 0u, recvd = 0u, stale = 0u;
     uint64_t applied = 0u, kept = 0u, showWrites = 0u;
+    uint64_t chainFail = 0u, sampleFail = 0u; // send-gate diagnostics
     int64_t lastSendTick = -1, lastShowTick = -1, lastLogTick = -1;
     int64_t joinOff = 0;
     bool joined = false;
@@ -511,11 +512,12 @@ inline void maybeLog(uint64_t tick)
         return;
     cfg.lastLogTick = (int64_t)tick;
     fprintf(stderr,
-            "[netsync] tick=%llu sent=%llu recvd=%llu stale=%llu applied=%llu kept=%llu show=%llu ring=%zu alive=%d\n",
+            "[netsync] tick=%llu sent=%llu recvd=%llu stale=%llu applied=%llu kept=%llu show=%llu ring=%zu alive=%d chainfail=%llu samplefail=%llu\n",
             (unsigned long long)tick, (unsigned long long)cfg.sent, (unsigned long long)cfg.recvd,
             (unsigned long long)cfg.stale, (unsigned long long)cfg.applied,
             (unsigned long long)cfg.kept, (unsigned long long)cfg.showWrites, cfg.ring.size(),
-            cfg.peerAlive ? 1 : 0);
+            cfg.peerAlive ? 1 : 0, (unsigned long long)cfg.chainFail,
+            (unsigned long long)cfg.sampleFail);
 }
 
 // RESULT application: write canonical times into guest result rows when the
@@ -666,14 +668,26 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
     }
     // send own STATE at cadence (once per tick)
     uint32_t b = 0u, r0 = 0u;
-    if (resolveChain(r, b, r0) && (tick % cfg.every) == 0u && (int64_t)tick != cfg.lastSendTick &&
-        inRam(r0, 0x240u))
+    if ((tick % cfg.every) == 0u && (int64_t)tick != cfg.lastSendTick)
     {
-        Sample s;
-        uint32_t actor = r0;
-        if (readSample(r, actor, s, tick))
+        if (!resolveChain(r, b, r0) || !inRam(r0, 0x240u))
+            ++cfg.chainFail;
+        else
         {
-            uint8_t pay[kStateLen];
+            Sample s;
+            // own slot's rider (slot0 base r0 doubles as slot0's actor)
+            uint32_t actor = r0;
+            if (cfg.slot != 0)
+            {
+                uint32_t rs = 0u;
+                if (resolveSlot(r, b, cfg.slot, rs))
+                    actor = rs;
+            }
+            if (!readSample(r, actor, s, tick))
+                ++cfg.sampleFail;
+            else
+            {
+                uint8_t pay[kStateLen];
             // finish latch: own res row filled + ramped => fin
             uint32_t res = 0u;
             uint32_t finSt = 0u;
@@ -697,6 +711,7 @@ inline void onTick(const uint8_t *rdramConst, uint64_t tick)
                 ++cfg.seq;
             }
             cfg.lastSendTick = (int64_t)tick;
+            }
         }
     }
 #endif
