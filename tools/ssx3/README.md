@@ -48,9 +48,15 @@ command inside Ubuntu; keep the checkout and work directory on its Linux
 filesystem, rather than `/mnt/c`. The builder does not install system packages
 or accept SDK licenses for you.
 
+Install the host packages **before** cloning — a clean machine has no Git yet —
+then clone the public source tree and run the steps from its root. `sudo` is
+omitted when you are already root (for example in a container):
+
 ```sh
 sudo apt-get update
 sudo apt-get install -y python3 git cmake ninja-build clang lld g++ pkg-config curl ca-certificates unzip zip make autoconf automake libtool bison flex openjdk-17-jdk
+git clone --branch ssx3 https://github.com/brad-richardson/PS2Recomp.git
+cd PS2Recomp
 python3 tools/ssx3/build.py doctor --target prepare
 python3 tools/ssx3/build.py prepare --tools-only --work /path/to/private-build --jobs 4
 ```
@@ -64,13 +70,25 @@ prints failed checks and fixes and exits nonzero until prerequisites pass.
 
 Install Google's Android command-line tools into an SDK directory, set
 `ANDROID_HOME` and `JAVA_HOME` (JDK 17), and put the JDK's `bin` on `PATH`.
-Use the platform's command-line tools from the
-[Android SDK downloads](https://developer.android.com/studio#command-tools).
-Then install the exact components and review the licenses:
+Download the current Linux zip from the "Command line tools only" table on the
+[Android SDK downloads](https://developer.android.com/studio#command-tools)
+page, then unpack it so that `sdkmanager` lands at
+`$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager`. For example (replace the
+zip name with the current Linux build):
 
 ```sh
-"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;28.2.13676358" "cmake;3.22.1" "platform-tools"
+export ANDROID_HOME="$HOME/android-sdk"
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64   # Linux arm64: /usr/lib/jvm/java-17-openjdk-arm64
+export PATH="$JAVA_HOME/bin:$PATH"
+
+unzip commandlinetools-linux-*_latest.zip -d /tmp/android-cmdline-tools
+mkdir -p "$ANDROID_HOME/cmdline-tools"
+mv /tmp/android-cmdline-tools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+
+# Accept the licenses first: until then the install below silently installs
+# nothing and still exits 0.
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;28.2.13676358" "cmake;3.22.1" "platform-tools"
 python3 tools/ssx3/build.py doctor --target android
 ```
 
@@ -158,7 +176,19 @@ the source census, not a promise that every diagnostic knob is supported.
 
 Use JDK 17, Android SDK 34, NDK 28.2.13676358 and CMake 3.22.1. Set
 `ANDROID_HOME` and `JAVA_HOME` to your installs. EE output from `prepare` is
-shared with Android; no remote build host or PGO profile is needed:
+shared with Android; no remote build host or PGO profile is needed. **Do not
+pass `--jnilibs`:** with no `--jnilibs`, `android` first uses the verified
+prebuilt support release pinned for this checkout when one exists (see
+[Android prebuilt support libraries](#android-prebuilt-support-libraries)),
+and otherwise falls back to building the JNI libraries from source:
+
+```sh
+python3 tools/ssx3/build.py android --work /path/to/private-build --jobs 4
+python3 tools/ssx3/build.py install --work /path/to/private-build
+```
+
+To force the source route instead, run `android-libs` first and point `android`
+at its output:
 
 ```sh
 python3 tools/ssx3/build.py android-libs --work /path/to/private-build --ndk "$ANDROID_HOME/ndk/28.2.13676358" --jobs 4
