@@ -8835,14 +8835,11 @@ void PS2Runtime::run()
                             {
                                 for (int ev = 0; ev < 23; ++ev)
                                 {
-                                    const uint32_t cp = tkRam[0x442950u + ev * 4] |
-                                                        (tkRam[0x442951u + ev * 4] << 8) |
-                                                        (tkRam[0x442952u + ev * 4] << 16) |
-                                                        (tkRam[0x442953u + ev * 4] << 24);
-                                const uint32_t base = ps2_ssx3_course::kRamSize;
-                                    if (cp + 4u < base && cp >= 0x1000u)
-                                        std::fprintf(stderr, "[tklist] filecode ev=%d %.4s\n", ev,
-                                                     reinterpret_cast<const char *>(tkRam + cp));
+                                    // Overflow-safe: unwritten slots are
+                                    // 0xFFFFFFFF and must not be dereferenced.
+                                    if (const char *code = tkl::readFilecode(
+                                            tkRam, ps2_ssx3_course::kRamSize, ev))
+                                        std::fprintf(stderr, "[tklist] filecode ev=%d %.4s\n", ev, code);
                                 }
                             }
                         }

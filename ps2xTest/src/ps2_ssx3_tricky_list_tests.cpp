@@ -513,6 +513,27 @@ void register_ps2_ssx3_tricky_list_tests()
             }
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Aborted), "budget aborts"); });
 
+        tc.Run("filecode rejects unwritten and wild slots", [](TestCase &t)
+               {
+            t.IsFalse(filecodeOk(0xFFFFFFFFu, 0x2000000u), "FFFFFFFF rejected (no wrap)");
+            t.IsFalse(filecodeOk(0u, 0x2000000u), "null rejected");
+            t.IsFalse(filecodeOk(0xFFFu, 0x2000000u), "below 0x1000 rejected");
+            t.IsFalse(filecodeOk(0x1FFFFFEu, 0x2000000u), "overrun rejected");
+            t.IsTrue(filecodeOk(0x1000u, 0x2000000u), "low edge accepted");
+            t.IsTrue(filecodeOk(0x1FFFFFCu, 0x2000000u), "high edge accepted");
+            std::vector<uint8_t> ram(0x2000000u, 0xFFu);
+            // ev 0 -> valid code, ev 1 -> 0xFFFFFFFF, ev 2 -> null.
+            auto put32 = [&](uint32_t addr, uint32_t v) { std::memcpy(ram.data() + addr, &v, 4); };
+            put32(0x442950u, 0x500000u);
+            std::memcpy(ram.data() + 0x500000u, "ARA1", 4);
+            put32(0x442954u, 0xFFFFFFFFu);
+            put32(0x442958u, 0u);
+            t.IsNotNull(readFilecode(ram.data(), 0x2000000u, 0), "valid code read");
+            t.IsNull(readFilecode(ram.data(), 0x2000000u, 1), "FFFFFFFF unread");
+            t.IsNull(readFilecode(ram.data(), 0x2000000u, 2), "null unread");
+            t.Equals(std::strncmp(readFilecode(ram.data(), 0x2000000u, 0), "ARA1", 4), 0,
+                     "code bytes match"); });
+
         tc.Run("geometry hits rows, toggle and legends", [](TestCase &t)
                {
             ListGeom g = listLayout(640.0f, 480.0f);

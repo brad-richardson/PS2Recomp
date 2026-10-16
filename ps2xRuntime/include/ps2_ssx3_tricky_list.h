@@ -129,6 +129,27 @@ struct FeView
     int event = -1; // cursorEvent(), or -1
 };
 
+// Event filecode table (DIAG dump + atlas bake): word 0x442950+ev*4 points at
+// a 4-char code. Unwritten slots hold 0xFFFFFFFF, whose +4 wraps to 3 and
+// would pass a naive bounds check (m9a SIGSEGV/SIGBUS): compare without
+// wrapping, and read the code through the same gate.
+inline bool filecodeOk(uint32_t cp, uint32_t size)
+{
+    return size >= 4u && cp >= 0x1000u && cp <= size - 4u;
+}
+
+inline const char *readFilecode(const uint8_t *ram, uint32_t size, int ev)
+{
+    if (!ram || ev < 0 || ev > 63)
+        return nullptr;
+    const uint32_t tab = 0x442950u + static_cast<uint32_t>(ev) * 4u;
+    if (tab > size - 4u)
+        return nullptr;
+    uint32_t cp = 0;
+    std::memcpy(&cp, ram + tab, 4);
+    return filecodeOk(cp, size) ? reinterpret_cast<const char *>(ram + cp) : nullptr;
+}
+
 inline FeView readView(const uint8_t *ram, uint32_t size, uint32_t controller)
 {
     using namespace ps2_ssx3_tricky;
