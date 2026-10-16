@@ -235,6 +235,7 @@ inline constexpr uint64_t kHoldTicks = 12u; // human-like holds (ONL10 uses 15);
 inline constexpr uint64_t kGapTicks = 6u;
 inline constexpr uint64_t kSettleTicks = 10u;
 inline constexpr uint64_t kBlindTicks = 30u; // screen transitions may pass through non-Map states
+inline constexpr uint64_t kGoneDoneTicks = 60u; // a dead Event widget this long after accept = handed off
 inline constexpr int kPressBudget = 48;
 
 enum class NavPhase : uint8_t
@@ -266,6 +267,7 @@ struct NavState
     int lastPos = -2; // peak/type/row seen at the last evaluation
     int tries = 0;    // accept-only attempts (ToPeak/ToMode fallback)
     int sub = 0;      // accept-only sub-step (0 step, 1 accept, 2 verify, 3 back)
+    uint64_t goneSince = 0; // Accept: first tick the Event widget read dead
     int anchor = 0;   // assumed Peak/Mode cursor (top on entry; the accepted
                       // word after each attempt). The pre-accept words are
                       // stale (m4), so the fallback never trusts them.
@@ -658,6 +660,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         if (v.row == n.goal.row && v.event == n.event)
         {
             n.phase = NavPhase::Accept;
+            n.goneSince = 0u;
             return press(kPadCross);
         }
         {
@@ -681,9 +684,28 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         // completes it (handled above). Still on the Event screen: press
         // again, whether the row reads matched (missed) or not (landed but
         // the widget tore down: the retry advances My Rules, which the flow
-        // needs anyway). The press budget bounds this either way.
+        // needs anyway). The press budget bounds this either way. But a
+        // landed accept kills the Event widget (m7: row stays -1 while the
+        // guest loads and races, the sub word never clears): a dead widget
+        // sustained past kGoneDoneTicks IS the handoff.
         if (v.screen == 2)
+        {
+            if (v.row < 0)
+            {
+                if (n.goneSince == 0u)
+                    n.goneSince = tick;
+                if (tick - n.goneSince >= kGoneDoneTicks)
+                {
+                    n.handedOff = true;
+                    n.phase = NavPhase::Done;
+                    out.done = true;
+                    return out;
+                }
+            }
+            else
+                n.goneSince = 0u;
             return press(kPadCross);
+        }
         n.phase = NavPhase::ToEvent; // knocked elsewhere; re-drive
         return navStep(n, v, tick, peakLive, modeLive);
     case NavPhase::BackOut:

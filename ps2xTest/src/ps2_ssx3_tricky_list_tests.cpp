@@ -280,6 +280,41 @@ void register_ps2_ssx3_tricky_list_tests()
             t.Equals(o.mask, 0, "pad released");
             t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Aborted), "phase Aborted"); });
 
+        tc.Run("a dead Event widget after accept is the handoff", [](TestCase &t)
+               {
+            // m7: the accept lands, the Event widget tears down (row -1)
+            // and the sub word never clears. Sustained death = Done.
+            FakeGuest g;
+            g.screen = 2;
+            g.peak = 0;
+            g.type = 0;
+            g.row = 0;
+            g.goal = kCourses[0].opts[0]; // Garibaldi P1 Race row 0
+            g.goalEvent = 0;
+            NavState n;
+            navStart(n, g.goal, 0, 0);
+            uint64_t tick = 0;
+            uint16_t lastOut = 0;
+            bool toreDown = false;
+            for (int i = 0; i < 900 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            {
+                NavOut o = navStep(n, g.view(), tick, false, false);
+                if (lastOut != 0 && o.mask == 0)
+                {
+                    g.applyFinished(lastOut);
+                    if (!toreDown && n.phase == NavPhase::Accept && lastOut == kPadCross)
+                    {
+                        toreDown = true;
+                        g.row = 255; // widget dead, never restored
+                    }
+                }
+                lastOut = o.mask;
+                ++tick;
+            }
+            t.IsTrue(toreDown, "accept fired");
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "Done on sustained death");
+            t.IsTrue(n.handedOff, "counts as a handoff"); });
+
         tc.Run("back-out Triangles until the Map screens are left", [](TestCase &t)
                {
             NavState n;

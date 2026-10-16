@@ -2008,6 +2008,7 @@ namespace
     void tkMapFillWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         ps2_ssx3_tricky::state().mapController = getRegU32(ctx, 4);
+        ++ps2_ssx3_tricky::state().mapEntries; // tk-menu-1: the overlay's reopen latch
         g_tkMapFill(rdram, ctx, runtime);
     }
 
@@ -8099,8 +8100,11 @@ void PS2Runtime::run()
     const bool tkListOn = ps2_ssx3_tricky_list::knob();
     ps2_ssx3_tricky_list::ListState tkList;
     bool tkOpen = false;
-    int tkOpenDeb = 0;  // consecutive Map-live frames (open at kTkDeb)
-    int tkShutDeb = 0;  // consecutive non-Map frames (close at kTkDeb)
+    int tkOpenDeb = 0;  // consecutive on-target frames (open at 4)
+    int tkShutDeb = 0;  // consecutive off-target frames (close at 12)
+    bool tkLatchedOn = false; // reopen needs a NEW Map entry (stale words can't)
+    uint64_t tkLatchGen = 0;
+    bool tkCodesDone = false; // filecode table dump (diag, once per boot)
     uint16_t tkPrevUnion = 0; // list nav edge detect (physical + test spans)
     std::vector<int64_t> tkDown; // touch ids currently on the list
     uint64_t tkHostFrame = 0; // diag mapping: host frames <-> guest ticks
@@ -8802,27 +8806,61 @@ void PS2Runtime::run()
                     tkMapLive = tkView.mapLive;
                 }
             }
-            if (tkMapLive)
+            // Refined target (m7): the Map words go stale after the handoff
+            // (sub stays 2 with a dead widget through loading, race and
+            // results), so a live Event widget is required on screen 2. The
+            // open/close evaluation suspends while a drive owns the guest.
+            const tkl::DriveProgress tkProgEarly = tkl::driveProgress();
+            const bool tkTarget =
+                tkMapLive && (tkView.screen != 2 || tkView.row >= 0) &&
+                (!tkLatchedOn || ps2_ssx3_tricky::state().mapEntries != tkLatchGen);
+            if (!tkProgEarly.driving)
             {
-                tkShutDeb = 0;
-                if (!tkOpen && ++tkOpenDeb >= 4)
+                if (tkTarget)
                 {
-                    tkOpen = true;
-                    std::fprintf(stderr, "[tklist] tick=%llu open scr=%d peak=%u type=%u\n",
-                                 static_cast<unsigned long long>(tkTick), tkView.screen, tkView.peak,
-                                 tkView.type);
+                    tkShutDeb = 0;
+                    if (!tkOpen && ++tkOpenDeb >= 4)
+                    {
+                        tkOpen = true;
+                        tkLatchedOn = false;
+                        std::fprintf(stderr, "[tklist] tick=%llu open scr=%d peak=%u type=%u entries=%llu\n",
+                                     static_cast<unsigned long long>(tkTick), tkView.screen, tkView.peak,
+                                     tkView.type,
+                                     static_cast<unsigned long long>(
+                                         ps2_ssx3_tricky::state().mapEntries));
+                        if (tkl::diag() && !tkCodesDone)
+                        {
+                            tkCodesDone = true;
+                            if (uint8_t *tkRam = m_memory.getRDRAM())
+                            {
+                                for (int ev = 0; ev < 23; ++ev)
+                                {
+                                    const uint32_t cp = tkRam[0x442950u + ev * 4] |
+                                                        (tkRam[0x442951u + ev * 4] << 8) |
+                                                        (tkRam[0x442952u + ev * 4] << 16) |
+                                                        (tkRam[0x442953u + ev * 4] << 24);
+                                const uint32_t base = ps2_ssx3_course::kRamSize;
+                                    if (cp + 4u < base && cp >= 0x1000u)
+                                        std::fprintf(stderr, "[tklist] filecode ev=%d %.4s\n", ev,
+                                                     reinterpret_cast<const char *>(tkRam + cp));
+                                }
+                            }
+                        }
+                    }
                 }
-            }
-            else
-            {
-                tkOpenDeb = 0;
-                if (tkOpen && ++tkShutDeb >= 6)
+                else
                 {
-                    tkOpen = false;
-                    tkl::driveDisarm();
-                    tkDown.clear();
-                    std::fprintf(stderr, "[tklist] tick=%llu close\n",
-                                 static_cast<unsigned long long>(tkTick));
+                    tkOpenDeb = 0;
+                    if (tkOpen && ++tkShutDeb >= 12)
+                    {
+                        tkOpen = false;
+                        tkl::driveDisarm();
+                        tkDown.clear();
+                        tkLatchedOn = true;
+                        tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
+                        std::fprintf(stderr, "[tklist] tick=%llu close\n",
+                                     static_cast<unsigned long long>(tkTick));
+                    }
                 }
             }
             if (tkOpen)
@@ -8831,9 +8869,20 @@ void PS2Runtime::run()
                 const tkl::DriveProgress prog = tkl::driveProgress();
                 if (prog.done)
                 {
+                    // Done either way closes the overlay and latches reopen
+                    // on a new Map entry (m7: the words stay stale through
+                    // loading/race/results; only a fresh entry re-arms).
                     tkl::driveDisarm();
-                    if (!prog.handedOff)
-                        tkOpen = false; // backed out: the guest already left
+                    if (tkOpen)
+                    {
+                        tkOpen = false;
+                        tkDown.clear();
+                        tkLatchedOn = true;
+                        tkLatchGen = ps2_ssx3_tricky::state().mapEntries;
+                        std::fprintf(stderr, "[tklist] tick=%llu close (%s)\n",
+                                     static_cast<unsigned long long>(tkTick),
+                                     prog.handedOff ? "handoff" : "backout");
+                    }
                 }
                 else if (prog.aborted)
                 {
@@ -8852,11 +8901,10 @@ void PS2Runtime::run()
                                      static_cast<unsigned long long>(tkTick));
                     }
                 }
-                else if (tkMapLive)
+                else if (tkTarget)
                 {
-                    // Browsing: pad edges drive the list (only while the
-                    // guest is on a Map screen; during the handoff gap the
-                    // overlay waits for the close debounce, arming nothing).
+                    // Browsing: pad edges drive the list (only on a live Map
+                    // target; stale words arm nothing).
                     const uint16_t tkEdge = static_cast<uint16_t>(ds1TrueRaw & ~tkPrevUnion);
                     if (tkEdge & ps2x::vpad::kUp)
                         tkl::listMove(tkList, true);

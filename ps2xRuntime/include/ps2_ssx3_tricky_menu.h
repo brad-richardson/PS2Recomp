@@ -356,6 +356,9 @@ struct State
     uint32_t returnPc = 0u;
     uint32_t sp = 0u;
     uint32_t refreshes = 0u;
+    // tk-menu-1: Map-screen entries served (the fill runs once per entry;
+    // the list overlay's reopen latch keys on this advancing).
+    uint64_t mapEntries = 0u;
 };
 
 inline State &state()
