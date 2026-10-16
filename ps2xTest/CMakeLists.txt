@@ -67,7 +67,6 @@ add_library(ps2_test_lib STATIC
     src/ps2_gs_external_tests.cpp
     src/ps2_iop_tests.cpp
     src/ps2_sif_rpc_tests.cpp
-    src/ps2_snd_tests.cpp
     src/ps2_audio_stretch_tests.cpp
     src/ps2_sif_dma_tests.cpp
     src/ps2_recompiler_tests.cpp

@@ -3,7 +3,7 @@
 #include "ThreadNaming.h"
 #include "ps2_audio_stretch.h"
 #include "ps2_ssx3_tricky_song.h"
-#include "ps2_snd_spike.h"
+#include "runtime/ps2_pcm_ring.h"
 #include "ps2_turbo_boot.h" // BTS1: boot turbo host mute
 #include "ps2_vsync_lock.h"
 #include "ps2_vsync_pacer.h"
@@ -265,9 +265,9 @@ namespace
 
     bool nextInputFrame(uint32_t &frame)
     {
-        if (ps2_snd_spike::pcmRing().pop(frame))
+        if (ps2_pcm_ring::pcmRing().pop(frame))
             return true;
-        ps2_snd_spike::pcmRing().noteUnderrun();
+        ps2_pcm_ring::pcmRing().noteUnderrun();
         frame = 0;
         return false;
     }
@@ -278,8 +278,8 @@ namespace
             g_output.statsAt = now;
         if (now - g_output.statsAt >= std::chrono::minutes(1))
         {
-            const uint64_t underruns = ps2_snd_spike::pcmRing().underruns();
-            const uint64_t overflows = ps2_snd_spike::pcmRing().overflows();
+            const uint64_t underruns = ps2_pcm_ring::pcmRing().underruns();
+            const uint64_t overflows = ps2_pcm_ring::pcmRing().overflows();
             std::cerr << "[snd-output] wall-minute underruns=" << (underruns - g_output.lastUnderruns)
                       << " overflows=" << (overflows - g_output.lastOverflows)
                       << " total-underruns=" << underruns << " total-overflows=" << overflows << '\n';
@@ -383,7 +383,7 @@ namespace
     size_t popRing(uint32_t *frames, size_t want)
     {
         size_t got = 0;
-        while (got < want && ps2_snd_spike::pcmRing().pop(frames[got]))
+        while (got < want && ps2_pcm_ring::pcmRing().pop(frames[got]))
             ++got;
         return got;
     }
@@ -430,7 +430,7 @@ namespace
         }
         if (g_output.stQueuePos >= g_output.stQueue.size())
         {
-            ps2_snd_spike::pcmRing().noteUnderrun();
+            ps2_pcm_ring::pcmRing().noteUnderrun();
             frame = 0;
             return false;
         }
@@ -487,8 +487,8 @@ namespace
         const auto &st = g_output.controller.stats();
         const double mean = st.callbacks ? st.sumTempo / st.callbacks : 1.0;
         const double bypassPct = st.callbacks ? 100.0 * st.bypassed / st.callbacks : 100.0;
-        std::cerr << "[snd-stretch] underruns=" << ps2_snd_spike::pcmRing().underruns()
-                  << " overflows=" << ps2_snd_spike::pcmRing().overflows()
+        std::cerr << "[snd-stretch] underruns=" << ps2_pcm_ring::pcmRing().underruns()
+                  << " overflows=" << ps2_pcm_ring::pcmRing().overflows()
                   << " tempo min=" << st.minTempo << " mean=" << mean << " max=" << st.maxTempo
                   << " bypass=" << bypassPct << "% engages=" << st.engages
                   << " callbacks=" << st.callbacks;
@@ -521,7 +521,7 @@ namespace
             dt = std::chrono::duration<double>(now - g_output.lastCallback).count();
         g_output.lastCallback = now;
 
-        const uint64_t fill = ps2_snd_spike::pcmRing().size();
+        const uint64_t fill = ps2_pcm_ring::pcmRing().size();
         const float lockRatio =
             g_output.lockTempo ? ps2_vsync_lock::audioRatio(ps2_vsync_pacer::steadyNowNs()) : 0.0f;
         const ps2_audio_stretch::StepResult step = g_output.controller.update(fill, dt, lockRatio);
@@ -903,7 +903,7 @@ WindowCounters takeWindowCounters()
     w.ready = g_output.ready;
     w.stretch = g_output.stretch;
     w.streamRate = g_output.rate;
-    auto &ring = ps2_snd_spike::pcmRing();
+    auto &ring = ps2_pcm_ring::pcmRing();
     const uint64_t write = ring.writeTotal();
     const uint64_t read = ring.readTotal();
     const uint64_t underruns = ring.underruns();

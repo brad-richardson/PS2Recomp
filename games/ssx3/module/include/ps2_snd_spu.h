@@ -27,7 +27,22 @@
 #include <cstring>
 #include <vector>
 
-struct SndSavestate; // SS1 save states (ps2_savestate.cpp)
+namespace ps2_savestate
+{
+class Writer;
+class Reader;
+} // namespace ps2_savestate
+
+namespace ps2_snd_spike
+{
+// Savestate providers (defined in ps2_snd_spike.h); the classes below
+// befriend them instead of the old runtime forwarder.
+void saveSndState(ps2_savestate::Writer &w);
+bool loadSndState(ps2_savestate::Reader &r);
+} // namespace ps2_snd_spike
+
+// ::SndSavestate (family A forwarder in ps2_savestate.cpp; family B moves it).
+struct SndSavestate;
 
 namespace ps2_snd_spu
 {
@@ -240,7 +255,8 @@ inline int32_t volumeValue(uint16_t reg)
 
 class Spu
 {
-    friend struct ::SndSavestate;
+    friend void ps2_snd_spike::saveSndState(ps2_savestate::Writer &);
+    friend bool ps2_snd_spike::loadSndState(ps2_savestate::Reader &);
 
 public:
     Spu() : m_ram(kRamBytes, 0) {}
@@ -437,7 +453,8 @@ private:
 // u16 pitch, s8 volume L, s8 volume R), plus the EE status slots it fills.
 class Driver
 {
-    friend struct ::SndSavestate;
+    friend void ps2_snd_spike::saveSndState(ps2_savestate::Writer &);
+    friend bool ps2_snd_spike::loadSndState(ps2_savestate::Reader &);
 
 public:
     void update(const uint8_t *tag3, Spu &spu)
@@ -521,7 +538,8 @@ private:
 // 0.75 j - 0.5 (the previous tick's last sample is position -1). AU8 E7.
 class Upsampler34
 {
-    friend struct ::SndSavestate;
+    friend void ps2_snd_spike::saveSndState(ps2_savestate::Writer &);
+    friend bool ps2_snd_spike::loadSndState(ps2_savestate::Reader &);
 
 public:
     void run(const int16_t *in, int32_t *out, size_t outStride)
@@ -549,7 +567,8 @@ private:
 // The cutoff sits at 96.7 % of the source's 18 kHz Nyquist.
 class SincUpsampler34
 {
-    friend struct ::SndSavestate;
+    friend void ps2_snd_spike::saveSndState(ps2_savestate::Writer &);
+    friend bool ps2_snd_spike::loadSndState(ps2_savestate::Reader &);
 
 public:
     static constexpr int kHalf = 16;

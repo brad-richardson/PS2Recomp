@@ -2,7 +2,7 @@
 #include "ps2_e41_trace.h"
 #include "ps2_net_nolink.h"
 #include "ps2_net_dirtysock.h"
-#include "ps2_snd_spike.h"
+#include "runtime/game_module.h"
 #include "SIF.h"
 #include "../Syscalls/RPC.h"
 #include "../../ps2_iop_transport.h"
@@ -609,7 +609,12 @@ namespace ps2_stubs
         const uint32_t cid = getRegU32(ctx, 4);
         const uint32_t handler = getRegU32(ctx, 5);
         const uint32_t argument = getRegU32(ctx, 6);
-        if (ps2_snd_spike::noteAddCmdHandler(cid, handler, argument, getRegU32(ctx, 28)) && runtime)
+        // snd-seam-1 family A: the cid-1 handler record lives in the game
+        // module now; a true return arms the runtime's sound clock below.
+        // Null (or no module) records nothing generically here.
+        const ps2_game_module::Module *sndModule = ps2_game_module::installed();
+        if (sndModule && sndModule->noteSndAddCmdHandler &&
+            sndModule->noteSndAddCmdHandler(cid, handler, argument, getRegU32(ctx, 28)) && runtime)
             runtime->eeScheduler().startSoundClock();
         std::lock_guard<std::mutex> lock(g_sifCmdStateMutex);
         g_sifCmdHandlers[cid] = SifCmdHandler{handler, argument};
@@ -1106,11 +1111,16 @@ namespace ps2_stubs
             for (uint32_t i = 0; i < pendingCount; ++i)
             {
                 const Ps2SifDmaTransfer &xfer = pending[i];
-                // SND HLE: SND-library transfers go to the spike's IOP
-                // capture instead of low EE RDRAM (always on, AU10).
-                if (ps2_snd_spike::onSetDma(rdram, ps2_e41_trace::lastVsyncTick(), getRegU32(ctx, 31),
-                                            xfer.src, xfer.dest, static_cast<uint32_t>(xfer.size),
-                                            static_cast<uint32_t>(xfer.attr)))
+                // snd-seam-1 family A: SND-library transfers go to the game
+                // module's IOP capture instead of low EE RDRAM (always on
+                // for SSX 3, AU10). A true return consumes the transfer, as
+                // today; null (or no module) falls through to the generic
+                // copy below.
+                const ps2_game_module::Module *sndModule = ps2_game_module::installed();
+                if (sndModule && sndModule->onSndSetDma &&
+                    sndModule->onSndSetDma(rdram, ps2_e41_trace::lastVsyncTick(), getRegU32(ctx, 31),
+                                           xfer.src, xfer.dest, static_cast<uint32_t>(xfer.size),
+                                           static_cast<uint32_t>(xfer.attr)))
                 {
                     continue;
                 }

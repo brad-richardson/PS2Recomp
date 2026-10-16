@@ -5,6 +5,7 @@
 #include "ps2_call_list.h"
 #include <mutex>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -33,6 +34,29 @@ namespace ps2_syscalls
     void TODO(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t encodedSyscallId);
     uint64_t GetCurrentVSyncTick(PS2Runtime *runtime);
     void WaitVSyncTick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, int fixedResult = -1);
+
+    // snd-seam-1 family A: `sceSifSendCmd` argument decoding. The public
+    // six-argument entry reads (cid, packet, size, src, dst, esize) from
+    // a0/a1/a2/a3+stack; the private `0x426078` entry reads the same fields
+    // from seven registers (cid, mode, pkt, size, src, dst, esize). Moved
+    // here from the SSX 3 SND header: it is generic SendCmd ABI knowledge,
+    // needed by both the kernel entry points and the module's SND tests.
+    struct SendCmdArgs
+    {
+        uint32_t cid = 0;
+        uint32_t packet = 0;
+        uint32_t packetSize = 0;
+        uint32_t srcExtra = 0;
+        uint32_t dstExtra = 0;
+        uint32_t extraSize = 0;
+    };
+
+    inline SendCmdArgs decodeSendCmdArgs(const uint32_t *gpr, size_t count)
+    {
+        if (!gpr || count < 11u)
+            return {};
+        return {gpr[4], gpr[6], gpr[7], gpr[8], gpr[9], gpr[10]};
+    }
 }
 
 #endif // PS2_SYSCALLS_H

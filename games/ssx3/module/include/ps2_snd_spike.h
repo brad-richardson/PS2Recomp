@@ -28,12 +28,12 @@
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ps2_pcm_ring.h"
+#include "runtime/ps2_savestate.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_snd_spu.h"
 
 #include <algorithm>
-#include <array>
-#include <atomic>
 #include <chrono>
 #include <cstdarg>
 
@@ -54,7 +54,6 @@ inline constexpr uint64_t kMaxLines = 60000ull;
 inline constexpr uint64_t kTickCycles = 3145728ull; // 294,912,000 * 384 / 36,000
 inline constexpr uint32_t kPcmFramesPerTick = 384u;
 inline constexpr uint32_t kPcmBytesPerTick = kPcmFramesPerTick * 2u * sizeof(int16_t);
-inline constexpr uint32_t kPcmRingFrames = 1u << 15;
 inline constexpr uint32_t kPacketAddr = 0x01F31000u;   // after the runtime's HLE pools
 inline constexpr uint32_t kDonePacketBase = 0x01F31100u; // ring of 16 x 0x20
 inline constexpr uint32_t kTagbufIopAddr = 0x0000B3C4u; // SNDDRV's own value (state+0xE0)
@@ -156,118 +155,9 @@ inline const uint8_t *findTag3(const uint8_t *data, size_t size)
     return nullptr;
 }
 
-// One EE-thread producer and one miniaudio callback consumer. Packed atomic
-// frames avoid data races when the producer overwrites an old slot on overflow.
-class PcmRing
-{
-public:
-    // The tag-1 payload is planar: 384 s16 for one channel, then 384 for the
-    // other (SNDDRV SNDIOP_ee36_iop24_spu48 steps its EE input by 0x300 per
-    // channel). PCSX2's SPU2 input carries the first block on the right and
-    // the second on the left. The ring holds interleaved L|R frames.
-    void push(const uint8_t *pcm, size_t bytes)
-    {
-        if (!pcm)
-            return;
-        const size_t frames = bytes / sizeof(uint32_t);
-        const uint8_t *left = pcm + frames * sizeof(uint16_t);
-        for (size_t i = 0; i < frames; ++i)
-        {
-            uint16_t l = 0, r = 0;
-            std::memcpy(&l, left + i * sizeof(l), sizeof(l));
-            std::memcpy(&r, pcm + i * sizeof(r), sizeof(r));
-            const uint32_t frame = static_cast<uint32_t>(l) | (static_cast<uint32_t>(r) << 16);
-            const uint64_t write = m_write.load(std::memory_order_relaxed);
-            uint64_t read = m_read.load(std::memory_order_acquire);
-            while (write - read >= kPcmRingFrames)
-            {
-                if (m_read.compare_exchange_weak(read, read + 1u, std::memory_order_acq_rel))
-                {
-                    m_overflows.fetch_add(1u, std::memory_order_relaxed);
-                    break;
-                }
-            }
-            m_frames[write & (kPcmRingFrames - 1u)].store(frame, std::memory_order_relaxed);
-            m_write.store(write + 1u, std::memory_order_release);
-        }
-    }
-
-    void pushFrame(uint32_t frame)
-    {
-        const uint64_t write = m_write.load(std::memory_order_relaxed);
-        uint64_t read = m_read.load(std::memory_order_acquire);
-        while (write - read >= kPcmRingFrames)
-        {
-            if (m_read.compare_exchange_weak(read, read + 1u, std::memory_order_acq_rel))
-            {
-                m_overflows.fetch_add(1u, std::memory_order_relaxed);
-                break;
-            }
-        }
-        m_frames[write & (kPcmRingFrames - 1u)].store(frame, std::memory_order_relaxed);
-        m_write.store(write + 1u, std::memory_order_release);
-    }
-
-    bool pop(uint32_t &frame)
-    {
-        uint64_t read = m_read.load(std::memory_order_acquire);
-        if (read >= m_write.load(std::memory_order_acquire))
-            return false;
-        frame = m_frames[read & (kPcmRingFrames - 1u)].load(std::memory_order_relaxed);
-        return m_read.compare_exchange_strong(read, read + 1u, std::memory_order_acq_rel);
-    }
-
-    // IP6: lifetime cursors for the perf log's [perf-audio] rates (frames
-    // pushed = writeTotal delta; frames consumed = readTotal delta minus
-    // overflow drops).
-    uint64_t writeTotal() const { return m_write.load(std::memory_order_relaxed); }
-    uint64_t readTotal() const { return m_read.load(std::memory_order_relaxed); }
-    void noteUnderrun() { m_underruns.fetch_add(1u, std::memory_order_relaxed); }
-    uint64_t underruns() const { return m_underruns.load(std::memory_order_relaxed); }
-    uint64_t overflows() const { return m_overflows.load(std::memory_order_relaxed); }
-    // DS1: drop buffered frames (a mid-session state load: the buffered PCM
-    // belonged to the pre-load timeline). The consumer then underruns once
-    // and resumes on fresh post-load audio.
-    void dropAll() { m_read.store(m_write.load(std::memory_order_acquire), std::memory_order_release); }
-    // AT1: frames currently buffered (producer pushes minus consumer pops).
-    // Relaxed: the stretch control loop tolerates a slightly stale depth.
-    uint64_t size() const
-    {
-        const uint64_t write = m_write.load(std::memory_order_relaxed);
-        const uint64_t read = m_read.load(std::memory_order_relaxed);
-        return write >= read ? write - read : 0u;
-    }
-
-private:
-    std::array<std::atomic<uint32_t>, kPcmRingFrames> m_frames{};
-    std::atomic<uint64_t> m_read{0};
-    std::atomic<uint64_t> m_write{0};
-    std::atomic<uint64_t> m_underruns{0};
-    std::atomic<uint64_t> m_overflows{0};
-};
-
-inline PcmRing &pcmRing()
-{
-    static PcmRing ring;
-    return ring;
-}
-
-struct SendCmdArgs
-{
-    uint32_t cid = 0;
-    uint32_t packet = 0;
-    uint32_t packetSize = 0;
-    uint32_t srcExtra = 0;
-    uint32_t dstExtra = 0;
-    uint32_t extraSize = 0;
-};
-
-inline SendCmdArgs decodeSendCmdArgs(const uint32_t *gpr, size_t count)
-{
-    if (!gpr || count < 11u)
-        return {};
-    return {gpr[4], gpr[6], gpr[7], gpr[8], gpr[9], gpr[10]};
-}
+// The PCM ring itself is generic host-audio infrastructure
+// (`ps2_pcm_ring::PcmRing` in runtime/ps2_pcm_ring.h); this family only
+// produces frames into it (mixTickLocked below).
 
 inline uint64_t ticksForGuestCycles(uint64_t cycles)
 {
@@ -388,15 +278,18 @@ inline void noteRpc(const uint8_t *rdram, uint32_t sid, uint32_t fno, uint32_t s
 }
 
 // EeScheduler::processEvent(SoundTick): deliver one IOP tick in guest time.
-template <typename Queue>
-inline void onSoundTick(uint8_t *rdram, uint64_t guestCycle, Queue &&queue)
+// Module hook (runtime/game_module.h `onSndSoundTick`): reports through
+// `out` the one handler invocation the runtime must queue; the return tells
+// whether an invocation was produced. All state transitions are identical
+// to the direct call this replaces.
+inline bool onSoundTick(uint8_t *rdram, uint64_t guestCycle, GuestInvocation *out)
 {
     if (!rdram || !enabled())
-        return;
+        return false;
     State &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     if (s.handler == 0u)
-        return;
+        return false;
     ++s.serial;
     if (s.statusAddr != 0u)
     {
@@ -414,14 +307,17 @@ inline void onSoundTick(uint8_t *rdram, uint64_t guestCycle, Queue &&queue)
             wr32(rdram, s.statusAddr + o, 0xFFFFFFFFu);
     }
     writePacket(rdram, kPacketAddr, 0u, kTagbufIopAddr);
-    queue(makeHandlerCall(s, kPacketAddr));
+    if (out != nullptr)
+        *out = makeHandlerCall(s, kPacketAddr);
     ++s.ticks;
     if (s.ticks <= 8u || (s.ticks % 94u) == 0u)
         logLocked(s, "tick cycle=%llu ticks=%llu counter=0x%x cid0=%llu dmq=%llu done=%llu setdma=%llu tagbufs=%llu underruns=%llu overflows=%llu",
                   (unsigned long long)guestCycle, (unsigned long long)s.ticks, rd32(rdram, kTickCounterAddr),
                   (unsigned long long)s.cid0, (unsigned long long)s.dmq, (unsigned long long)s.done,
                   (unsigned long long)s.setdma, (unsigned long long)s.tagbufs,
-                  (unsigned long long)pcmRing().underruns(), (unsigned long long)pcmRing().overflows());
+                  (unsigned long long)ps2_pcm_ring::pcmRing().underruns(),
+                  (unsigned long long)ps2_pcm_ring::pcmRing().overflows());
+    return true;
 }
 
 // One sound tick: tag-3 voice updates, 512 frames of SPU voices, the tag-1
@@ -453,7 +349,9 @@ inline void mixTickLocked(State &s, const uint8_t *pcm, const uint8_t *tag3)
     {
         const int16_t l = clamp16(clamp16(music[2 * i] + dry0[2 * i]) + dry1[2 * i]);
         const int16_t r = clamp16(clamp16(music[2 * i + 1] + dry0[2 * i + 1]) + dry1[2 * i + 1]);
-        pcmRing().pushFrame(static_cast<uint16_t>(l) | (static_cast<uint32_t>(static_cast<uint16_t>(r)) << 16));
+        const uint32_t frame =
+            static_cast<uint16_t>(l) | (static_cast<uint32_t>(static_cast<uint16_t>(r)) << 16);
+        ps2_pcm_ring::pcmRing().pushFrame(frame);
     }
 }
 
@@ -489,12 +387,15 @@ inline bool onSetDma(const uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t
 }
 
 // Syscalls/RPC.cpp sceSifSendCmd (both entry points). cid 0 = SND command.
-template <typename Queue>
-inline void onSendCmd(uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t cid, uint32_t packet,
-                      uint32_t psize, Queue &&queue)
+// Module hook (runtime/game_module.h `onSndSendCmd`): reports through `out`
+// the one done-callback invocation the runtime must queue; the return tells
+// whether an invocation was produced. All state transitions are identical
+// to the direct call this replaces.
+inline bool onSendCmd(uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t cid, uint32_t packet,
+                      uint32_t psize, GuestInvocation *out)
 {
     if (!rdram || cid != 0u || !enabled())
-        return;
+        return false;
     State &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     ++s.cid0;
@@ -507,7 +408,7 @@ inline void onSendCmd(uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t cid,
     logLocked(s, "cid0 vsync=%llu ra=0x%x psize=%u type=%u id=0x%x iop=0x%x spu=0x%x size=%u prio=%d w9=0x%x w10=0x%x w11=0x%x",
               (unsigned long long)vsync, ra, psize, type, id, iopSrc, spuDst, size, prio, w[9], w[10], w[11]);
     if (type != 1u)
-        return;
+        return false;
     ++s.dmq;
     auto it = s.iopMem.upper_bound(iopSrc);
     if (it != s.iopMem.begin())
@@ -524,9 +425,83 @@ inline void onSendCmd(uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t cid,
     {
         const uint32_t at = kDonePacketBase + 0x20u * (s.doneRing++ & 15u);
         writePacket(rdram, at, 2u, id);
-        queue(makeHandlerCall(s, at));
+        if (out != nullptr)
+            *out = makeHandlerCall(s, at);
         ++s.done;
+        return true;
     }
+    return false;
+}
+
+// Savestate providers (runtime/game_module.h `sndSaveState`/`sndLoadState`).
+// Moved verbatim from `ps2_savestate.cpp`'s `SndSavestate`, which becomes a
+// thin forwarder; the section name, version and registration stay with the
+// runtime until family B moves them. Serialized bytes are unchanged.
+inline void saveSndState(ps2_savestate::Writer &w)
+{
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    for (uint32_t v : {s.handler, s.handlerData, s.handlerGp, s.statusAddr, s.serial})
+        w.u32(v);
+    for (uint64_t v : {s.ticks, s.cid0, s.dmq, s.done, s.setdma, s.tagbufs})
+        w.u64(v);
+    w.u32(s.doneRing);
+    w.u64(s.iopMem.size());
+    for (const auto &[addr, bytes] : s.iopMem)
+    {
+        w.u32(addr);
+        w.blob(bytes);
+    }
+    w.blob(s.spu.m_ram);
+    w.pod(s.spu.m_voices);
+    w.u64(s.spu.m_uploads);
+    w.u64(s.spu.m_uploadBytes);
+    w.pod(s.driver.m_word);
+    w.pod(s.driver.m_statusWord);
+    w.pod(s.driver.m_statusNax);
+    w.pod(s.driver.m_statusAddr);
+    w.pod(s.driver.m_statusTriggered);
+    w.pod(s.driver.m_pitch);
+    w.pod(s.driver.m_vol);
+    w.u64(s.driver.m_keyOns);
+    w.pod(s.upLeft.m_history);
+    w.pod(s.upRight.m_history);
+}
+
+inline bool loadSndState(ps2_savestate::Reader &r)
+{
+    State &s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    for (uint32_t *v : {&s.handler, &s.handlerData, &s.handlerGp, &s.statusAddr, &s.serial})
+        *v = r.u32();
+    for (uint64_t *v : {&s.ticks, &s.cid0, &s.dmq, &s.done, &s.setdma, &s.tagbufs})
+        *v = r.u64();
+    s.doneRing = r.u32();
+    s.iopMem.clear();
+    const uint64_t n = r.count(1u << 20);
+    for (uint64_t i = 0; i < n && r.ok(); ++i)
+    {
+        const uint32_t addr = r.u32();
+        s.iopMem[addr] = r.blob();
+    }
+    std::vector<uint8_t> ram = r.blob();
+    if (ram.size() != s.spu.m_ram.size())
+        return r.fail("SPU RAM size mismatch");
+    s.spu.m_ram = std::move(ram);
+    r.pod(s.spu.m_voices);
+    s.spu.m_uploads = r.u64();
+    s.spu.m_uploadBytes = r.u64();
+    r.pod(s.driver.m_word);
+    r.pod(s.driver.m_statusWord);
+    r.pod(s.driver.m_statusNax);
+    r.pod(s.driver.m_statusAddr);
+    r.pod(s.driver.m_statusTriggered);
+    r.pod(s.driver.m_pitch);
+    r.pod(s.driver.m_vol);
+    s.driver.m_keyOns = r.u64();
+    r.pod(s.upLeft.m_history);
+    r.pod(s.upRight.m_history);
+    return r.ok();
 }
 
 } // namespace ps2_snd_spike

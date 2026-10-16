@@ -18,7 +18,7 @@
 #include "runtime/ps2_vfs.h"
 #include "ps2_iop_host.h"
 #include "ps2_pad_latch.h"
-#include "ps2_snd_spike.h"
+#include "runtime/game_module.h"
 #include "ps2_turbo_boot.h" // BTS1: disarm boot turbo on state load
 #include "runtime/ee_scheduler.h"
 #include "runtime/gs/gs_backend.h"
@@ -3564,71 +3564,32 @@ bool GSSavestate::load(GS &gs, Reader &r)
 }
 
 // ==================================================================== SND
+// snd-seam-1 family A: the section bodies live in the game module now
+// (`ps2_snd_spike::saveSndState`/`loadSndState`); this struct only forwards.
+// The section name, version and registration below stay with the runtime
+// until family B moves them. Serialized bytes are unchanged.
 struct SndSavestate
 {
     static void save(ps2_savestate::Writer &w)
     {
-        ps2_snd_spike::State &s = ps2_snd_spike::state();
-        std::lock_guard<std::mutex> lock(s.mutex);
-        for (uint32_t v : {s.handler, s.handlerData, s.handlerGp, s.statusAddr, s.serial})
-            w.u32(v);
-        for (uint64_t v : {s.ticks, s.cid0, s.dmq, s.done, s.setdma, s.tagbufs})
-            w.u64(v);
-        w.u32(s.doneRing);
-        w.u64(s.iopMem.size());
-        for (const auto &[addr, bytes] : s.iopMem)
+        const ps2_game_module::Module *sndModule = ps2_game_module::installed();
+        if (sndModule && sndModule->sndSaveState)
         {
-            w.u32(addr);
-            w.blob(bytes);
+            sndModule->sndSaveState(w);
+            return;
         }
-        w.blob(s.spu.m_ram);
-        w.pod(s.spu.m_voices);
-        w.u64(s.spu.m_uploads);
-        w.u64(s.spu.m_uploadBytes);
-        w.pod(s.driver.m_word);
-        w.pod(s.driver.m_statusWord);
-        w.pod(s.driver.m_statusNax);
-        w.pod(s.driver.m_statusAddr);
-        w.pod(s.driver.m_statusTriggered);
-        w.pod(s.driver.m_pitch);
-        w.pod(s.driver.m_vol);
-        w.u64(s.driver.m_keyOns);
-        w.pod(s.upLeft.m_history);
-        w.pod(s.upRight.m_history);
+        // No module: defined empty payload (a no-module binary never
+        // produces SND state; see the design §2 field-delegation rule).
     }
     static bool load(ps2_savestate::Reader &r)
     {
-        ps2_snd_spike::State &s = ps2_snd_spike::state();
-        std::lock_guard<std::mutex> lock(s.mutex);
-        for (uint32_t *v : {&s.handler, &s.handlerData, &s.handlerGp, &s.statusAddr, &s.serial})
-            *v = r.u32();
-        for (uint64_t *v : {&s.ticks, &s.cid0, &s.dmq, &s.done, &s.setdma, &s.tagbufs})
-            *v = r.u64();
-        s.doneRing = r.u32();
-        s.iopMem.clear();
-        const uint64_t n = r.count(1u << 20);
-        for (uint64_t i = 0; i < n && r.ok(); ++i)
-        {
-            const uint32_t addr = r.u32();
-            s.iopMem[addr] = r.blob();
-        }
-        std::vector<uint8_t> ram = r.blob();
-        if (ram.size() != s.spu.m_ram.size())
-            return r.fail("SPU RAM size mismatch");
-        s.spu.m_ram = std::move(ram);
-        r.pod(s.spu.m_voices);
-        s.spu.m_uploads = r.u64();
-        s.spu.m_uploadBytes = r.u64();
-        r.pod(s.driver.m_word);
-        r.pod(s.driver.m_statusWord);
-        r.pod(s.driver.m_statusNax);
-        r.pod(s.driver.m_statusAddr);
-        r.pod(s.driver.m_statusTriggered);
-        r.pod(s.driver.m_pitch);
-        r.pod(s.driver.m_vol);
-        s.driver.m_keyOns = r.u64();
-        r.pod(s.upLeft.m_history);
-        r.pod(s.upRight.m_history);
+        const ps2_game_module::Module *sndModule = ps2_game_module::installed();
+        if (sndModule && sndModule->sndLoadState)
+            return sndModule->sndLoadState(r);
+        // No module: the defined empty payload loads (zero bytes, so the
+        // framed section is already fully consumed). A non-empty "snd"
+        // section fails closed at `endSection` instead of being silently
+        // dropped.
         return r.ok();
     }
 };

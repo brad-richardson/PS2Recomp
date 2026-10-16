@@ -1,4 +1,5 @@
 #include "MiniTest.h"
+#include "ps2_snd_spike.h"
 #include "ps2_ssx3_anim_pick_guard.h"
 #include "ps2_ssx3_module.h"
 
@@ -69,6 +70,20 @@ void register_ps2_ssx3_module_tests()
                 t.Equals(d.crc32, 0u, "crc");
                 t.IsTrue(d.apply != nullptr, "apply");
             }
+        });
+        tc.Run("the SND progress hooks point at the moved HLE (ABI 4)", [](TestCase &t)
+               {
+            const ps2_game_module::Module &m = ps2x_ssx3_game_module();
+            t.Equals(m.abiVersion, 4u, "abi");
+            t.IsTrue(m.noteSndAddCmdHandler == &ps2_snd_spike::noteAddCmdHandler, "addcmdhandler");
+            t.IsTrue(m.noteSndRpc == &ps2_snd_spike::noteRpc, "rpc snoop");
+            t.IsTrue(m.onSndSendCmd == &ps2_snd_spike::onSendCmd, "sendcmd");
+            t.IsTrue(m.onSndSetDma == &ps2_snd_spike::onSetDma, "setdma");
+            t.IsTrue(m.onSndSoundTick == &ps2_snd_spike::onSoundTick, "soundtick");
+            t.Equals(m.sndTickCycles, ps2_snd_spike::kTickCycles, "tick period");
+            t.Equals(m.sndTickCycles, 3145728ull, "one tick is exactly 3,145,728 EE cycles");
+            t.IsTrue(m.sndSaveState == &ps2_snd_spike::saveSndState, "save provider");
+            t.IsTrue(m.sndLoadState == &ps2_snd_spike::loadSndState, "load provider");
         });
         tc.Run("the override pass wraps both anim entries and chains to the originals", [](TestCase &t)
                {

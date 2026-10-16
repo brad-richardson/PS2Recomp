@@ -25,6 +25,7 @@ void register_ps2_ssx3_anim_pick_guard_tests();
 void register_ps2_ssx3_module_tests();
 void register_ps2_ssx3_copied_payload_tests();
 void register_ps2_ssx3_sif_handshake_tests();
+void register_ps2_snd_tests();
 #endif
 #if PS2X_TEST_NO_GAME_MODULE
 void register_game_module_none_tests();
@@ -61,7 +62,6 @@ void register_ps2_gs_replay_tests();
 void register_ps2_gs_external_tests();
 void register_ps2_iop_tests();
 void register_ps2_sif_rpc_tests();
-void register_ps2_snd_tests();
 void register_ps2_audio_stretch_tests();
 void register_ps2_sif_dma_tests();
 void register_ps2_net_nolink_tests();
@@ -125,6 +125,7 @@ int main(int argc, char **argv)
     register_ps2_ssx3_module_tests();
     register_ps2_ssx3_copied_payload_tests();
     register_ps2_ssx3_sif_handshake_tests();
+    register_ps2_snd_tests();
 #endif
 #if PS2X_TEST_NO_GAME_MODULE
     register_game_module_none_tests();
@@ -161,7 +162,6 @@ int main(int argc, char **argv)
     register_ps2_gs_external_tests();
     register_ps2_iop_tests();
     register_ps2_sif_rpc_tests();
-    register_ps2_snd_tests();
     register_ps2_audio_stretch_tests();
     register_ps2_sif_dma_tests();
     register_ps2_net_nolink_tests();

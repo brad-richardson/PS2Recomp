@@ -32,12 +32,23 @@
 #include <cstdint>
 
 struct R5900Context;
+// A guest invocation the runtime must queue (defined in
+// runtime/ee_scheduler.h); hooks report one through an out-parameter and
+// return whether an invocation was produced.
+struct GuestInvocation;
+
+namespace ps2_savestate
+{
+class Writer;
+class Reader;
+} // namespace ps2_savestate
 
 namespace ps2_game_module
 {
     // 2 (module-seam-2): the kernel syscall hooks below.
     // 3 (sif-handshake-1): the SIF SendCmd hook below.
-    inline constexpr uint32_t kAbiVersion = 3u;
+    // 4 (snd-seam-1 family A): the SND progress hooks below.
+    inline constexpr uint32_t kAbiVersion = 4u;
 
     struct Module
     {
@@ -60,6 +71,37 @@ namespace ps2_game_module
         // module completes game-specific ready-handshakes host-side.
         void (*onSifSendCmd)(uint32_t cid, uint32_t packetAddr, uint32_t packetSize,
                              uint8_t *rdram) = nullptr;
+        // SND progress hooks (family A). Each is called at the exact site
+        // the SSX 3 SND HLE ran, in the same order (SND before net, the
+        // extra copy, and `onSifSendCmd`). A null field (or no module)
+        // skips that site, which is the generic no-SND behavior.
+        //
+        // `noteSndAddCmdHandler` records the cid-1 handler; true arms the
+        // runtime's sound clock (the generic queue machinery stays with the
+        // runtime; `sndTickCycles` below is the game timing policy).
+        bool (*noteSndAddCmdHandler)(uint32_t cid, uint32_t handler, uint32_t data,
+                                     uint32_t gp) = nullptr;
+        // `noteSndRpc` snoops the SND init RPC (status-block address).
+        void (*noteSndRpc)(const uint8_t *rdram, uint32_t sid, uint32_t fno, uint32_t send,
+                           uint32_t size) = nullptr;
+        // `onSndSendCmd` handles cid-0 SND commands (SPU uploads, done
+        // callbacks); `onSndSetDma` captures SND-library SetDma transfers
+        // (true consumes the transfer: the runtime skips the EE copy, as
+        // today); `onSndSoundTick` delivers one guest-time tick. Each
+        // reports its at-most-one queued invocation through `out`.
+        bool (*onSndSendCmd)(uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t cid,
+                             uint32_t packet, uint32_t psize, GuestInvocation *out) = nullptr;
+        bool (*onSndSetDma)(const uint8_t *rdram, uint64_t vsync, uint32_t ra, uint32_t src,
+                            uint32_t dst, uint32_t size, uint32_t attr) = nullptr;
+        bool (*onSndSoundTick)(uint8_t *rdram, uint64_t guestCycle, GuestInvocation *out) = nullptr;
+        // EE cycles per sound tick (the old `kTickCycles`); 0 means no SND
+        // clock. Read by the scheduler's SoundTick arming and chain.
+        uint64_t sndTickCycles = 0u;
+        // SND savestate providers (family A bodies; family B moves the
+        // section registration). The runtime forwards its "snd" section to
+        // these; with no module it writes/reads a defined empty payload.
+        void (*sndSaveState)(ps2_savestate::Writer &w) = nullptr;
+        bool (*sndLoadState)(ps2_savestate::Reader &r) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).

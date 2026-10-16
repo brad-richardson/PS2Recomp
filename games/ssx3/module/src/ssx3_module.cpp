@@ -4,6 +4,7 @@
 #include "ps2_ssx3_module.h"
 #include "Ssx3CopiedPayload.h"
 #include "Ssx3SifHandshake.h"
+#include "ps2_snd_spike.h"
 #include "ssx3_module_internal.h"
 
 #include <iterator>
@@ -23,13 +24,24 @@ namespace
     // hooks are no-ops until "ssx3-copied-payload" arms the quirk.
     // P1ac: the SIF ready-handshake (Ssx3SifHandshake.h). The hook is a
     // no-op until "ssx3-sif-handshake" arms the quirk.
+    // snd-seam-1 family A: the SSX 3 SND progress hooks (ps2_snd_spike.h).
+    // Always on for SSX 3 (the HLE runs on guest time with sound on or
+    // off); the SND savestate providers follow in the same family.
     const ps2_game_module::Module kModule{ps2_game_module::kAbiVersion,
                                           "ssx3",
                                           kOverrides,
                                           std::size(kOverrides),
                                           &ps2_syscalls::noteSsx3CopiedPayloadInstall,
                                           &ps2_syscalls::tryDispatchSsx3CopiedPayload,
-                                          &ps2_syscalls::onSsx3SifSendCmd};
+                                          &ps2_syscalls::onSsx3SifSendCmd,
+                                          &ps2_snd_spike::noteAddCmdHandler,
+                                          &ps2_snd_spike::noteRpc,
+                                          &ps2_snd_spike::onSendCmd,
+                                          &ps2_snd_spike::onSetDma,
+                                          &ps2_snd_spike::onSoundTick,
+                                          ps2_snd_spike::kTickCycles,
+                                          &ps2_snd_spike::saveSndState,
+                                          &ps2_snd_spike::loadSndState};
 }
 
 const ps2_game_module::Module &ps2x_ssx3_game_module() noexcept

@@ -1,5 +1,7 @@
 #include "MiniTest.h"
 #include "ps2_snd_spike.h"
+#include "ps2_syscalls.h"
+#include "runtime/ps2_pcm_ring.h"
 
 #include <algorithm>
 #include <array>
@@ -95,7 +97,7 @@ void register_ps2_snd_tests()
             std::memcpy(pcm.data() + 2u * i, &r, 2u);
             std::memcpy(pcm.data() + 2u * (frames + i), &l, 2u);
         }
-        static PcmRing ring; // 128 KiB of slots: keep it off the stack
+        static ps2_pcm_ring::PcmRing ring; // 128 KiB of slots: keep it off the stack
         ring.push(pcm.data(), pcm.size());
         uint32_t frame = 0;
         t.IsTrue(ring.pop(frame), "first frame");
@@ -119,14 +121,14 @@ void register_ps2_snd_tests()
         gpr[8] = 0x55u; // source extra
         gpr[9] = 0x66u; // destination extra
         gpr[10] = 0x77u; // extra size
-        const SendCmdArgs args = decodeSendCmdArgs(gpr.data(), gpr.size());
+        const ps2_syscalls::SendCmdArgs args = ps2_syscalls::decodeSendCmdArgs(gpr.data(), gpr.size());
         t.Equals(args.cid, 0x11u, "a0 supplies cid");
         t.Equals(args.packet, 0x33u, "a2 supplies packet");
         t.Equals(args.packetSize, 0x44u, "a3 supplies packet size");
         t.Equals(args.srcExtra, 0x55u, "a4 supplies extra source");
         t.Equals(args.dstExtra, 0x66u, "a5 supplies extra destination");
         t.Equals(args.extraSize, 0x77u, "a6 supplies extra size");
-        const SendCmdArgs shortArgs = decodeSendCmdArgs(gpr.data(), 10u);
+        const ps2_syscalls::SendCmdArgs shortArgs = ps2_syscalls::decodeSendCmdArgs(gpr.data(), 10u);
         t.Equals(shortArgs.packet, 0u, "incomplete register frame is rejected");
         });
 

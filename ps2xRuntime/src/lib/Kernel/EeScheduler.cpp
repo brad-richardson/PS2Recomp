@@ -26,7 +26,8 @@
 #define XXH_INLINE_ALL
 #include "runtime/third_party/xxhash.h"
 #endif
-#include "ps2_snd_spike.h"
+#include "runtime/game_module.h"
+#include "runtime/ps2_pcm_ring.h"
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
@@ -526,7 +527,7 @@ void EeScheduler::run()
                 // saved latch edges and PCM belonged to the pre-load
                 // timeline (SS1 §Dropping det: clear, don't refuse).
                 ps2x::padlatch::sharedLatch().savestateSet(ps2x::padlatch::Latch{});
-                ps2_snd_spike::pcmRing().dropAll();
+                ps2_pcm_ring::pcmRing().dropAll();
                 ps2_stubs::padRecordNoteLoad(m_vsyncTick);
                 std::fprintf(stderr, "[savestate] quick-load ok: %s\n", note.c_str());
                 ps2_savestate::noteQuickStatus(note);
@@ -1937,10 +1938,15 @@ void EeScheduler::queueInvocation(GuestInvocation invocation)
 void EeScheduler::startSoundClock()
 {
     assertExecutor();
-    if (m_soundClockStarted || !ps2_snd_spike::enabled())
+    // snd-seam-1 family A: the SND tick period is game timing policy from
+    // the module now. The clock arms only on the module's arming path
+    // (SIF AddCmdHandler above); null (or no module) never starts it.
+    const ps2_game_module::Module *sndModule = ps2_game_module::installed();
+    const uint64_t tickCycles = sndModule ? sndModule->sndTickCycles : 0u;
+    if (m_soundClockStarted || tickCycles == 0u)
         return;
     m_soundClockStarted = true;
-    const uint64_t deadline = m_eeCycle + ps2_snd_spike::kTickCycles;
+    const uint64_t deadline = m_eeCycle + tickCycles;
     scheduleEvent(deadline, std::chrono::steady_clock::now(),
                   EeEvent{EeEventType::SoundTick, 0u, deadline});
 }
@@ -3152,7 +3158,7 @@ void EeScheduler::processEvent(const EeEvent &event)
         // BTS1: boot turbo yield poll + host audio ring drain (one bool
         // check when the knob is off). After the tick increment, like every
         // sibling hook.
-        ps2_turbo_boot::onVsyncTick(m_vsyncTick, ps2_snd_spike::pcmRing());
+        ps2_turbo_boot::onVsyncTick(m_vsyncTick, ps2_pcm_ring::pcmRing());
         // BTS2: turbo outruns wall clock, so at yield the bypassed
         // host-deadline chain points seconds into the future; collapse it to
         // now or the first post-yield wait freezes for the skipped span. One
@@ -3228,14 +3234,28 @@ void EeScheduler::processEvent(const EeEvent &event)
     case EeEventType::Dmac:
         break;
     case EeEventType::SoundTick:
-        ps2_snd_spike::onSoundTick(m_rdram, event.value, [this](GuestInvocation invocation)
-                                   { queueInvocation(std::move(invocation)); });
+    {
+        // snd-seam-1 family A: one guest-time tick runs in the game module
+        // at this same point; the hook reports the invocation to queue.
+        // The guest-cycle chain (not wall time) is preserved below with the
+        // module's tick period. The clock only ever starts with a module
+        // attached, so a null module here just idles the chain.
+        const ps2_game_module::Module *sndModule = ps2_game_module::installed();
+        if (sndModule && sndModule->onSndSoundTick)
         {
-            const uint64_t deadline = event.value + ps2_snd_spike::kTickCycles;
+            GuestInvocation invocation{};
+            if (sndModule->onSndSoundTick(m_rdram, event.value, &invocation))
+                queueInvocation(std::move(invocation));
+        }
+        const uint64_t tickCycles = sndModule ? sndModule->sndTickCycles : 0u;
+        if (tickCycles != 0u)
+        {
+            const uint64_t deadline = event.value + tickCycles;
             scheduleEvent(deadline, std::chrono::steady_clock::now(),
                           EeEvent{EeEventType::SoundTick, 0u, deadline});
         }
         break;
+    }
     case EeEventType::Alarm:
     {
         auto it = m_alarms.find(static_cast<int>(event.id));

@@ -5,7 +5,6 @@
 #include "ps2_e41_trace.h"
 #include "ps2_net_nolink.h"
 #include "ps2_net_dirtysock.h"
-#include "ps2_snd_spike.h"
 
 namespace ps2_syscalls
 {
@@ -546,7 +545,12 @@ namespace ps2_syscalls
             }
         }
 
-        ps2_snd_spike::noteRpc(rdram, sid, rpcNum, sendBuf, sendSize); // SND HLE (always on, AU10)
+        // snd-seam-1 family A: the SND init RPC snoop lives in the game
+        // module now (always on for SSX 3, AU10); null (or no module) is a
+        // no-op snoop that falls through to the generic handling below.
+        if (const ps2_game_module::Module *sndModule = ps2_game_module::installed();
+            sndModule && sndModule->noteSndRpc)
+            sndModule->noteSndRpc(rdram, sid, rpcNum, sendBuf, sendSize);
 
         const uint32_t serverPtr = client->server;
         auto *server = serverPtr
@@ -1024,7 +1028,7 @@ namespace ps2_syscalls
     }
 
     static void sendCmdDecoded(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime,
-                               const ps2_snd_spike::SendCmdArgs &args)
+                               const SendCmdArgs &args)
     {
         const uint32_t cid = args.cid;
         uint32_t packetAddr = args.packet;
@@ -1033,11 +1037,19 @@ namespace ps2_syscalls
         uint32_t destExtra = args.dstExtra;
         uint32_t sizeExtra = args.extraSize;
         const uint32_t sendCmdRa = getRegU32(ctx, 31);
+        // snd-seam-1 family A: cid-0 SND commands are handled by the game
+        // module at this same point (before net, the extra copy and the SIF
+        // hook). The hook reports the one done-callback invocation to queue.
         if (runtime)
         {
-            ps2_snd_spike::onSendCmd(rdram, ps2_e41_trace::lastVsyncTick(), sendCmdRa, cid, packetAddr, packetSize,
-                                     [runtime](GuestInvocation invocation)
-                                     { runtime->eeScheduler().queueInvocation(std::move(invocation)); });
+            const ps2_game_module::Module *sndModule = ps2_game_module::installed();
+            if (sndModule && sndModule->onSndSendCmd)
+            {
+                GuestInvocation invocation{};
+                if (sndModule->onSndSendCmd(rdram, ps2_e41_trace::lastVsyncTick(), sendCmdRa, cid,
+                                            packetAddr, packetSize, &invocation))
+                    runtime->eeScheduler().queueInvocation(std::move(invocation));
+            }
         }
         if (runtime)
         {
@@ -1081,7 +1093,7 @@ namespace ps2_syscalls
     {
         // Public six-argument entry (also used by the kernel path).
         const uint32_t sp = getRegU32(ctx, 29);
-        ps2_snd_spike::SendCmdArgs args{};
+        SendCmdArgs args{};
         args.cid = getRegU32(ctx, 4);
         args.packet = getRegU32(ctx, 5);
         args.packetSize = getRegU32(ctx, 6);
@@ -1097,7 +1109,7 @@ namespace ps2_syscalls
         std::array<uint32_t, 11> gpr{};
         for (uint32_t i = 4; i <= 10; ++i)
             gpr[i] = getRegU32(ctx, static_cast<int>(i));
-        const auto args = ps2_snd_spike::decodeSendCmdArgs(gpr.data(), gpr.size());
+        const auto args = decodeSendCmdArgs(gpr.data(), gpr.size());
         sendCmdDecoded(rdram, ctx, runtime, args);
     }
 
