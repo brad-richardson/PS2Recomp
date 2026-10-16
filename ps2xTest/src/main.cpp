@@ -60,6 +60,7 @@ void register_ps2_gs_tests();
 void register_ps2_gs_queue_tests();
 void register_ps2_gs_replay_tests();
 void register_ps2_gs_external_tests();
+void register_ps2_gpu_resolve_tests();
 void register_ps2_iop_tests();
 void register_ps2_sif_rpc_tests();
 void register_ps2_audio_stretch_tests();
@@ -160,6 +161,7 @@ int main(int argc, char **argv)
     register_ps2_gs_queue_tests();
     register_ps2_gs_replay_tests();
     register_ps2_gs_external_tests();
+    register_ps2_gpu_resolve_tests();
     register_ps2_iop_tests();
     register_ps2_sif_rpc_tests();
     register_ps2_audio_stretch_tests();

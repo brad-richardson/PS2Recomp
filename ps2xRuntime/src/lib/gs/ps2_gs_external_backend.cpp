@@ -9,6 +9,7 @@
 #include "ps2_perf_log.h"
 #include "ps2_turbo_boot.h" // BTS2: skip presents while boot turbo is armed
 #include "ps2_public_tier.h"
+#include "ps2_gpu_resolve.h"
 #include "runtime/gs/ge1_gs_api.h"
 #if defined(__ANDROID__)
 #include "runtime/gs/ps2_present_vk.h"
@@ -168,6 +169,172 @@ void resolvePublicTier(int panelW, int panelH)
                  static_cast<unsigned long long>(ram), panelW, panelH,
                  choice.driver == "1" ? "Turnip" : "system", choice.render.c_str(),
                  choice.output.c_str(), choice.cas == "0" ? "off" : choice.cas.c_str());
+}
+
+// device-gates-1 (H3): pre-flight probe of the bundled Turnip HAL.
+// GE1_VK_TURNIP=1 hands Vulkan creation to the vendor GE1 HAL slot, which
+// returns Ge1LoadTurnipHAL with no system fallback: on a non-Adreno device
+// the HAL open fails (no kgsl) or enumerates zero devices, GS open fails,
+// and the backend exits 78. Probing the same path here before GE1 opens
+// lets the backend flip GE1_VK_TURNIP to "0" (logged once) so the system
+// Vulkan driver serves instead of the boot dying.
+struct TurnipProbeDevice
+{
+    std::uint32_t vendor = 0;
+    std::string name;
+};
+
+struct TurnipProbe
+{
+    bool available = false;
+    const char *reason = "unprobed";
+    std::vector<TurnipProbeDevice> devices;
+};
+
+// HMI layout mirrored from the vendor GE1 HAL slot (VKLoader.cpp).
+struct TurnipHalMethods
+{
+    int (*open)(const void *, const char *, void **);
+};
+struct TurnipHalModule
+{
+    std::uint32_t tag;
+    std::uint16_t moduleApiVersion;
+    std::uint16_t halApiVersion;
+    const char *id;
+    const char *name;
+    const char *author;
+    TurnipHalMethods *methods;
+};
+struct TurnipHalDevice
+{
+    std::uint32_t tag;
+    std::uint32_t version;
+    void *module;
+    std::uint64_t reserved[12];
+    int (*close)(void *);
+    void *enumerateInstanceExtensions;
+    void *createInstance;
+    PFN_vkGetInstanceProcAddr getInstanceProcAddr;
+};
+
+TurnipProbe probeTurnipHAL()
+{
+    TurnipProbe out;
+    void *lib = dlopen("libvulkan_freedreno.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib)
+    {
+        out.reason = "dlopen-fail";
+        return out;
+    }
+    auto *hmi = static_cast<TurnipHalModule *>(dlsym(lib, "HMI"));
+    if (!hmi || hmi->tag != 0x48574d54u || !hmi->methods || !hmi->methods->open)
+    {
+        out.reason = "no-HMI";
+        dlclose(lib);
+        return out;
+    }
+    void *device = nullptr;
+    if (hmi->methods->open(hmi, "vulkan0", &device) != 0 || !device)
+    {
+        out.reason = "hal-open-fail";
+        dlclose(lib);
+        return out;
+    }
+    auto *hal = static_cast<TurnipHalDevice *>(device);
+    auto getProc = hal->getInstanceProcAddr;
+    auto create = getProc ? reinterpret_cast<PFN_vkCreateInstance>(getProc(VK_NULL_HANDLE, "vkCreateInstance"))
+                          : nullptr;
+    VkInstance instance = VK_NULL_HANDLE;
+    if (create)
+    {
+        const VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO, nullptr, "SSX 3 turnip probe", 1,
+                                        nullptr, 0, VK_API_VERSION_1_0};
+        const VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, nullptr, 0, &appInfo,
+                                        0, nullptr, 0, nullptr};
+        if (create(&info, nullptr, &instance) != VK_SUCCESS)
+            instance = VK_NULL_HANDLE;
+    }
+    if (instance == VK_NULL_HANDLE)
+    {
+        out.reason = "no-instance";
+        if (hal->close)
+            hal->close(device);
+        dlclose(lib);
+        return out;
+    }
+    auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(getProc(instance, "vkEnumeratePhysicalDevices"));
+    auto properties =
+        reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(getProc(instance, "vkGetPhysicalDeviceProperties"));
+    auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(getProc(instance, "vkDestroyInstance"));
+    std::uint32_t count = 0;
+    if (!enumerate || !properties || enumerate(instance, &count, nullptr) != VK_SUCCESS || count == 0)
+    {
+        out.reason = "zero-devices";
+        if (destroy)
+            destroy(instance, nullptr);
+        if (hal->close)
+            hal->close(device);
+        dlclose(lib);
+        return out;
+    }
+    std::vector<VkPhysicalDevice> devices(count);
+    if (enumerate(instance, &count, devices.data()) == VK_SUCCESS && count > 0)
+    {
+        for (std::uint32_t i = 0; i < count; ++i)
+        {
+            VkPhysicalDeviceProperties props{};
+            properties(devices[i], &props);
+            out.devices.push_back(TurnipProbeDevice{props.vendorID, props.deviceName});
+        }
+    }
+    if (destroy)
+        destroy(instance, nullptr);
+    if (hal->close)
+        hal->close(device);
+    dlclose(lib);
+    if (out.devices.empty())
+    {
+        out.reason = "zero-devices";
+        return out;
+    }
+    out.available = true;
+    out.reason = "ok";
+    return out;
+}
+
+// device-gates-1: GPU-aware Android defaults (H2/H3/H5/H6). Runs for every
+// Android boot (play and public) after resolvePublicTier, before GE1 opens.
+// Skipped under PS2X_PROFILE=reference (exact path). On the Odin every
+// answer equals the old blanket behavior.
+void resolveGpuDefaults()
+{
+    const char *profile = std::getenv("PS2X_PROFILE");
+    if (profile && std::strcmp(profile, "reference") == 0)
+        return;
+    const PublicGpu sys = publicSystemGpu();
+    const bool adreno = ps2x::gpu_resolve::isAdreno(sys.vendor, sys.name.c_str());
+    // H2/H6 land in the next commit (GPU-aware blend-mix/fetch defaults).
+    // H3: Turnip requested but the HAL is unusable -> system driver, not exit 78.
+    const char *turnip = std::getenv("GE1_VK_TURNIP");
+    if (turnip && std::strcmp(turnip, "1") == 0)
+    {
+        const TurnipProbe probe = probeTurnipHAL();
+        if (!probe.available)
+        {
+            std::fprintf(stderr, "[gs:external] GE1 Turnip HAL unavailable (%s); using system Vulkan driver\n",
+                         probe.reason);
+            setenv("GE1_VK_TURNIP", "0", 1);
+        }
+    }
+    // Resolved-knob line: the effective values GE1 is about to open with.
+    const char *effTurnip = std::getenv("GE1_VK_TURNIP");
+    const char *effBmix = std::getenv("GE1_ADRENO_BLEND_MIX");
+    const char *effFetch = std::getenv("GE1_ADRENO_FETCH_WORKAROUND");
+    const char *effTune = std::getenv("TU_AUTOTUNE_ALGO");
+    std::fprintf(stderr, "[ge1-resolve] vendorID=0x%04x adreno=%d turnip=%s blend_mix=%s fetch_wa=%s autotune=%s\n",
+                 sys.vendor, adreno ? 1 : 0, effTurnip ? effTurnip : "unset", effBmix ? effBmix : "unset",
+                 effFetch ? effFetch : "unset", effTune ? effTune : "unset");
 }
 #endif
 #if defined(PS2X_GE1_STATIC_IOSURFACE)
@@ -1140,9 +1307,11 @@ public:
             }
             std::fprintf(stderr, "[gs:external] GE1 Full live GS loaded: %s\n", path);
 #if defined(__ANDROID__)
-            // PUB4: the [tier] line logs the preset choice before the load
-            // attempt; the vendor loader falls back to the system driver
-            // (flipping GE1_VK_TURNIP to "0"), so log what actually loaded.
+            // device-gates-1 (H3): the vendor HAL slot has no system
+            // fallback (Ge1LoadTurnipHAL returns without retrying), so the
+            // backend pre-probes the Turnip HAL in resolveGpuDefaults and
+            // flips GE1_VK_TURNIP to "0" itself when the HAL is unusable;
+            // log what actually loaded.
             if (const char *pub = std::getenv("PS2X_PUBLIC_APP"); pub && std::strcmp(pub, "1") == 0)
             {
                 const char *loaded = std::getenv("GE1_VK_TURNIP");
@@ -1949,6 +2118,8 @@ private:
 #if defined(__ANDROID__)
         const bool panel = ps2x_present_vk::panelSize(pw, ph);
         resolvePublicTier(pw, ph);
+        // device-gates-1 (H3): Turnip pre-probe fallback before GE1 opens.
+        resolveGpuDefaults();
 #else
         const bool panel = ps2x::ios::panelSize(pw, ph);
         resolvePublicIosTier(pw, ph);
