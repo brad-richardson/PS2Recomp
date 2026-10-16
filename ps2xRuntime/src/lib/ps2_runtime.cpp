@@ -9304,9 +9304,10 @@ void PS2Runtime::run()
                 };
                 const bool tkArt = (tkAtlasTex.id != 0u);
                 // tk-menu-2 font (shared module, ps2_tk_font.h): staged
-                // FEFONT primary (TKFONT1 via PS2X_SSX3_TRICKY_LIST_FONTDATA,
-                // stock 1x raster, raster-edge 4x when upscale is on),
-                // Neuropol CC0 TTF fallback, raylib default last resort.
+                // FEFONT primary (TKFONT1 baked beside the ART atlas as
+                // tkfont.bin: stock 1x raster, raster-edge 4x when upscale
+                // is on), Neuropol CC0 TTF fallback, raylib default last
+                // resort. One knob (ART) covers both staged files.
                 namespace tkf = ps2_tk_font;
                 static tkf::Baked tkFontBaked;
                 static Texture2D tkFontTex1 = {0}, tkFontTex4 = {0};
@@ -9317,7 +9318,16 @@ void PS2Runtime::run()
                 if (!tkFontTried)
                 {
                     tkFontTried = true;
-                    if (const char *fd = std::getenv("PS2X_SSX3_TRICKY_LIST_FONTDATA"))
+                    // tkfont.bin sits beside the ART atlas (same bake dir).
+                    std::string fd;
+                    if (const char *art = std::getenv("PS2X_SSX3_TRICKY_LIST_ART"))
+                    {
+                        std::string a(art);
+                        const size_t sl = a.find_last_of('/');
+                        fd = (sl == std::string::npos ? std::string("tkfont.bin")
+                                                      : a.substr(0, sl) + "/tkfont.bin");
+                    }
+                    if (!fd.empty())
                     {
                         std::ifstream f(fd, std::ios::binary);
                         const std::string blob((std::istreambuf_iterator<char>(f)),

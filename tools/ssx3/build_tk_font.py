@@ -7,9 +7,10 @@ uploads, hash name 3be92b30fd7ab98a-372720106ade32f4-00002254.png, as made
 by GE1_TEX_DUMP). The 4x cells reuse the public raster-edge recipe
 (remaster_font.build_atlas: the same pixels the stock menus show with
 on-device upscale on); the 1x cells are the stock raster (upscale off).
-Writes (scratch only, never git): tkfont.bin. No game pixel, glyph image
-or metric table is committed; the runtime loads the staged file via
-PS2X_SSX3_TRICKY_LIST_FONTDATA (missing file = Neuropol fallback).
+Writes (scratch only, never git): tkfont.bin, baked into the same dir as
+the ART atlas. No game pixel, glyph image or metric table is committed;
+the runtime finds it beside PS2X_SSX3_TRICKY_LIST_ART (missing file =
+Neuropol fallback).
 
 TKFONT1 layout: magic "TKFONT1\\0" + u32le w1,h1,w4,h4,nglyphs, then per
 glyph: u16 codepoint, u16 x,y,w,h (1x cell), i16 xoff,yoff, u16 advance
