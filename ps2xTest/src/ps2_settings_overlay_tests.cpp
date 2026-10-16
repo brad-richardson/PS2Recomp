@@ -145,7 +145,7 @@ void register_ps2_settings_overlay_tests()
 
     MiniTest::Case("Set2Panel", [](TestCase &tc)
                    {
-        tc.Run("row taps hit 0..Count-1, dot taps hit Count, misses read -1", [](TestCase &t)
+        tc.Run("row taps hit 0..Count-1, misses read -1, closed panel has no tap target", [](TestCase &t)
                {
             const auto g = ps2x::set2::panelLayout(1280.0f, 720.0f);
             for (int i = 0; i < ps2x::set2::kRowCount; ++i)
@@ -153,15 +153,16 @@ void register_ps2_settings_overlay_tests()
                 const int hit = ps2x::set2::panelHit(g, true, g.rowX + g.rowW * 0.5f, g.rowY[i] + g.rowH * 0.5f);
                 t.IsTrue(hit == i, "row centre hits");
             }
-            t.IsTrue(ps2x::set2::panelHit(g, true, g.dotX, g.dotY) == ps2x::set2::kRowCount,
-                     "dot hits while open");
-            t.IsTrue(ps2x::set2::panelHit(g, false, g.dotX, g.dotY) == ps2x::set2::kRowCount,
-                     "dot hits while closed");
             t.IsTrue(ps2x::set2::panelHit(g, true, g.px * 0.25f, g.py * 0.25f) == -1, "outside misses");
-            // The dot clears the panel rect (taps can't be ambiguous).
-            const bool dotInPanel =
-                g.dotX >= g.px && g.dotX <= g.px + g.pw && g.dotY >= g.py && g.dotY <= g.py + g.ph;
-            t.IsTrue(!dotInPanel, "dot outside the panel"); });
+            // set2-polish-1 (Brad 10-16): the gear dot is gone — the old
+            // dot corner is a plain miss now, and every closed-panel tap
+            // misses (the chord / two-finger tap opens it instead).
+            t.IsTrue(ps2x::set2::panelHit(g, true, 1280.0f - 0.055f * 720.0f, 0.20f * 720.0f) == -1,
+                     "old dot corner misses while open");
+            t.IsTrue(ps2x::set2::panelHit(g, false, g.rowX + g.rowW * 0.5f, g.rowY[0] + g.rowH * 0.5f) == -1,
+                     "row centre misses while closed");
+            t.IsTrue(ps2x::set2::panelHit(g, false, g.px * 0.25f, g.py * 0.25f) == -1,
+                     "outside misses while closed"); });
 
         tc.Run("row labels are short and complete (panel-polish-1, no truncation)", [](TestCase &t)
                {

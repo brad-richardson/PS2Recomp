@@ -2,7 +2,9 @@
 
 // SET2: in-game settings overlay (design B, Brad 10-12): Select+Start opens a
 // minimal paused panel (Mode, Resolution, Perf overlay, On-device upscale,
-// Restart).
+// Restart). set2-polish-1 (Brad 10-16): the chord is the only opener — the
+// gear dot is gone. On touch: hold SELECT + tap START on the overlay, or
+// two-finger-tap with no overlay up.
 // Pure logic here (unit-tested by ps2_settings_overlay_tests.cpp); the render
 // loop in ps2_runtime.cpp owns pause/draw/restart, and the platform shells
 // own the settings file layer + relaunch.
@@ -299,15 +301,14 @@ inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, 
 // --- Panel geometry + hit test (QSR1 precedent: pure, render loop draws) ---
 //
 // Hit values: 0..kRowCount-1 = row tap (same as X on that row),
-// kRowCount = gear-dot tap (closed panel: open; open panel: close),
-// -1 = miss (open panel: tap outside closes).
+// -1 = miss (open panel: tap outside closes; closed panel: no tap target —
+// the Select+Start chord, or a two-finger tap with no touch overlay, opens).
 struct PanelGeom
 {
     float px = 0, py = 0, pw = 0, ph = 0; // panel rect
     float rowX = 0, rowW = 0;
     float rowY[kRowCount] = {};
     float rowH = 0;
-    float dotX = 0, dotY = 0, dotR = 0; // gear dot (closed state)
 };
 
 inline PanelGeom panelLayout(float w, float h)
@@ -324,19 +325,13 @@ inline PanelGeom panelLayout(float w, float h)
     g.rowH = (g.ph - titleH - 34.0f) / static_cast<float>(kRowCount);
     for (int i = 0; i < kRowCount; ++i)
         g.rowY[i] = g.py + titleH + i * g.rowH;
-    // Gear dot top-right: clear of the vpad shoulders (top corners at 0.10u
-    // with 0.07u discs).
-    g.dotX = w - 0.055f * h;
-    g.dotY = 0.20f * h;
-    g.dotR = 0.045f * h;
     return g;
 }
 
 inline int panelHit(const PanelGeom &g, bool open, float x, float y)
 {
-    const float ddx = x - g.dotX, ddy = y - g.dotY;
-    if (ddx * ddx + ddy * ddy <= g.dotR * g.dotR)
-        return kRowCount;
+    // set2-polish-1 (Brad 10-16): no gear dot — a closed panel has no tap
+    // target, so any closed-panel tap misses.
     if (!open)
         return -1;
     if (x < g.rowX || x > g.rowX + g.rowW)

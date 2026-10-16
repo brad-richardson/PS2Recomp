@@ -3279,8 +3279,9 @@ std::string autosaveSlotPath()
 // (default off in code; on in play envs once Brad approves). Select+Start
 // (Select-first, ~150 ms window) pauses the guest through the hostPause gate
 // and opens a host-drawn panel (Mode / Resolution / Perf overlay /
-// On-device upscale). A gear
-// dot opens it touch-only. Guest-invisible: the panel owns the pad while
+// On-device upscale). Touch: hold SELECT + tap START on the overlay, or
+// two-finger-tap with no overlay up (set2-polish-1: no gear dot).
+// Guest-invisible: the panel owns the pad while
 // open (publish-zero) and draws only over the presented frame.
 namespace
 {
@@ -8294,6 +8295,11 @@ void PS2Runtime::run()
         std::fprintf(stderr, "[set2] overlay on (shot=%s)\n",
                      (set2ShotPath && set2ShotPath[0]) ? set2ShotPath : "(none)");
     ps2x::set2::ChordState set2Chord;
+    // set2-polish-1 (Brad 10-16): the chord also listens to the touch
+    // SELECT/START buttons (previous host frame's vpad mask), with the same
+    // hold-back applied to the touch path before it publishes.
+    uint16_t set2VpadStrip = 0u;
+    uint16_t set2VpadAdd = 0u;
     ps2x::set2::NavState set2Nav;
     bool set2Open = false;
     bool set2Eff120 = false;   // effective values, sampled at open
@@ -8357,6 +8363,7 @@ void PS2Runtime::run()
     const std::vector<ps2x::vpad::TestTouch> vpadTestTouches =
         ps2x::vpad::parseTestTouches(std::getenv("PS2X_VPAD_TEST_TOUCHES")); // DEV-ONLY
     ps2x::vpad::PadState vpadPad; // VT1: touch ownership + stick anchor, carried across frames
+    uint16_t vpadPressedPrev = 0u; // set2-polish-1: last frame's touch mask, for the panel chord
     // VT3: PS2X_VPAD_SHOULDER_BAND=0 restores the VT1 hit test (1.0x discs,
     // no shoulder band, no slide-on); unset or anything but "0" = on.
     const bool vpadShoulderBand = ps2x::vpad::enabledFromEnv(std::getenv("PS2X_VPAD_SHOULDER_BAND"));
@@ -8394,6 +8401,7 @@ void PS2Runtime::run()
             // so drop ownership now and clear the latch while the guest is
             // frozen (no reads happen paused, so this is just the release).
             vpadPad = ps2x::vpad::PadState{};
+            vpadPressedPrev = 0u; // set2-polish-1: no stale touch chord across the pause
             publishPad(0, m_memory.gs().vsyncTick.load());
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -8691,12 +8699,17 @@ void PS2Runtime::run()
         // android-touch-1c: the present path follows the overlay every
         // frame (deduped in the ledger): panel open or overlay shown →
         // underlaid translucent GL (VK child below, hole punched);
-        // otherwise VK above, GL skipped (fast path). Touch=Off keeps the
-        // SET dot drawable via set2On so the panel stays reachable; the
-        // Odin default path (Auto+pad, panel closed) is unaffected (fast).
+        // otherwise VK above, GL skipped (fast path). Touch=Off keeps GL
+        // composited via set2On so the panel stays reachable; the Odin
+        // default path (Auto+pad, panel closed) is unaffected (fast).
         // set2DoOpen re-asserts true with its geometry wait; set2DoClose
         // needs no call (next frame's rule already covers it).
-        ps2x_present_vk::setUnderlay(set2Open || (vpadWanted ? !vpadPadConnected : set2On));
+        // set2-polish-1 (Brad 10-16): the perf overlay draws whenever it is
+        // enabled, independent of the panel — so Perf on also holds the
+        // underlay (same composition as the open panel, no dim). Perf
+        // defaults off, so the play fast path is unchanged until enabled.
+        ps2x_present_vk::setUnderlay(set2Open || (set2On && set2Perf) ||
+                                     (vpadWanted ? !vpadPadConnected : set2On));
 #endif
         // First frame always evaluates (Odin starts hidden on the fast
         // path; a phone starts shown underlaid).
@@ -8806,7 +8819,7 @@ void PS2Runtime::run()
             const bool acked = ps2x::hostPause::waitGateAck(2000);
             set2HoldsPause().store(true, std::memory_order_release);
             set2Open = true;
-            // Seed: touches already down (incl. the dot tap that opened us)
+            // Seed: touches already down (incl. the tap/chord that opened us)
             // must not edge in the open branch next frame.
             ps2x::vpad::TouchPoint seed[8];
             const int nseed = set2SampleTouches(seed);
@@ -8825,9 +8838,9 @@ void PS2Runtime::run()
             // closing Triangle/chord, a held nav X) stay stripped until
             // released, else they would fire in the game on resume.
             set2Swallow.mask = ds1TrueRaw;
-            // Seed like open: touches still down (a finger resting on the
-            // dot, a long test hold) must not edge on the next frame, else
-            // the panel would instantly re-open (iPad legA caught this).
+            // Seed like open: touches still down (a resting finger, a long
+            // test hold) must not edge on the next frame, else the panel
+            // would instantly re-open (iPad legA caught this).
             {
                 ps2x::vpad::TouchPoint seed[8];
                 const int nseed = set2SampleTouches(seed);
@@ -8912,10 +8925,13 @@ void PS2Runtime::run()
                 std::fprintf(stderr, "[set2] hostFrame=%llu guestTick=%llu\n",
                              static_cast<unsigned long long>(set2HostFrame),
                              static_cast<unsigned long long>(m_memory.gs().vsyncTick.load()));
-            // Nav union: post-DS1 physical when closed, true physical when
+            // Nav union: post-DS1 physical + the touch buttons when closed
+            // (set2-polish-1: hold SELECT + tap START on the overlay is the
+            // chord, one host frame behind the touch), true physical when
             // open (DS1 suppressed). The test spans are already in both
             // (injected at the sample site above).
-            const uint16_t set2Union = set2Open ? ds1TrueRaw : raylibPressed;
+            const uint16_t set2Union =
+                set2Open ? ds1TrueRaw : static_cast<uint16_t>(raylibPressed | vpadPressedPrev);
             const int64_t set2NowMs =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch())
@@ -8933,6 +8949,13 @@ void PS2Runtime::run()
                     raylibPressed = static_cast<uint16_t>(raylibPressed & ~ps2x::vpad::kStart);
                 if (set2ChordOut.addSelect)
                     raylibPressed = static_cast<uint16_t>(raylibPressed | ps2x::vpad::kSelect);
+                // set2-polish-1: carry the same hold-back for the touch
+                // path (applied at the vpad publish below, like the
+                // close-press mask, so a touch Select never leaks ahead).
+                set2VpadStrip = static_cast<uint16_t>(
+                    (set2ChordOut.stripSelect ? ps2x::vpad::kSelect : 0u) |
+                    (set2ChordOut.stripStart ? ps2x::vpad::kStart : 0u));
+                set2VpadAdd = set2ChordOut.addSelect ? ps2x::vpad::kSelect : static_cast<uint16_t>(0u);
                 // The close-press overhang drops out button by button as each
                 // releases; new presses pass (they were never in the mask).
                 const uint16_t set2Swallowed = ps2x::set2::swallowStep(set2Swallow, set2Union);
@@ -9186,34 +9209,16 @@ void PS2Runtime::run()
             }
         }
         // SET2: no vpad path this frame (Odin play, desktop, or a controller
-        // in use): sample touches for the gear dot (they never reach the
-        // guest here, so nothing is dropped).
+        // in use). set2-polish-1 (Brad 10-16): the gear dot is gone — a
+        // two-finger tap opens the panel instead (touches here never reach
+        // the guest, so gameplay cannot trip it). This keeps Touch=Off
+        // phones (no overlay, no pad) able to reach the panel at all.
         if (set2On && !set2Open && !(vpadWanted && !vpadPadConnected))
         {
-            const ps2x::set2::PanelGeom set2g = ps2x::set2::panelLayout(screenWidth, screenHeight);
             ps2x::vpad::TouchPoint set2ts[8];
             const int set2n = set2SampleTouches(set2ts);
-            std::vector<int64_t> set2Still;
-            for (int i = 0; i < set2n; ++i)
-            {
-                if (ps2x::set2::panelHit(set2g, false, set2ts[i].x, set2ts[i].y) != ps2x::set2::kRowCount)
-                    continue;
-                set2Still.push_back(set2ts[i].id);
-                if (std::find(set2Down.begin(), set2Down.end(), set2ts[i].id) == set2Down.end())
-                {
-                    set2Down.push_back(set2ts[i].id);
-                    set2DoOpen();
-                    break;
-                }
-            }
-            if (!set2Open)
-            {
-                std::vector<int64_t> set2Left;
-                for (int64_t id : set2Down)
-                    if (std::find(set2Still.begin(), set2Still.end(), id) != set2Still.end())
-                        set2Left.push_back(id);
-                set2Down = set2Left;
-            }
+            if (set2n >= 2)
+                set2DoOpen();
         }
         if (tkPublishOwn)
         {
@@ -9598,7 +9603,7 @@ void PS2Runtime::run()
         else if (set2Open)
         {
             // SET2: the panel owns the pad. Touches hit-test the panel (row
-            // taps act as X on that row, dot/outside taps close); nothing
+            // taps act as X on that row, taps outside close); nothing
             // reaches the guest (publish-zero, frozen anyway).
             const ps2x::set2::PanelGeom set2g = ps2x::set2::panelLayout(screenWidth, screenHeight);
             ps2x::vpad::TouchPoint set2ts[8];
@@ -9658,7 +9663,7 @@ void PS2Runtime::run()
                         set2DoRestart();
                 }
                 else
-                    set2DoClose(); // dot tap or outside tap closes
+                    set2DoClose(); // taps outside the rows close
             }
             if (set2Open)
             {
@@ -9670,6 +9675,7 @@ void PS2Runtime::run()
             }
             publishPad(0, m_memory.gs().vsyncTick.load());
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
+            vpadPressedPrev = 0u; // set2-polish-1: panel owns the pad while open
         }
         else if (vpadWanted && !vpadPadConnected)
         {
@@ -9696,41 +9702,18 @@ void PS2Runtime::run()
                 touches = kept;
                 set2HeldTouches = stillHeld;
             }
-            // SET2: gear-dot taps toggle the panel; dot-zone touches are
-            // dropped here so they never reach the guest pad.
-            if (set2On && !set2Open)
-            {
-                const ps2x::set2::PanelGeom set2g = ps2x::set2::panelLayout(screenWidth, screenHeight);
-                std::vector<int64_t> set2Still;
-                int set2Kept = 0;
-                for (int i = 0; i < touches; ++i)
-                {
-                    if (ps2x::set2::panelHit(set2g, false, vpadTouches[i].x, vpadTouches[i].y) != ps2x::set2::kRowCount)
-                    {
-                        vpadTouches[set2Kept++] = vpadTouches[i];
-                        continue;
-                    }
-                    set2Still.push_back(vpadTouches[i].id);
-                    if (std::find(set2Down.begin(), set2Down.end(), vpadTouches[i].id) ==
-                        set2Down.end())
-                    {
-                        set2Down.push_back(vpadTouches[i].id);
-                        set2DoOpen();
-                    }
-                }
-                touches = set2Kept;
-                if (!set2Open)
-                {
-                    std::vector<int64_t> set2Left;
-                    for (int64_t id : set2Down)
-                        if (std::find(set2Still.begin(), set2Still.end(), id) != set2Still.end())
-                            set2Left.push_back(id);
-                    set2Down = set2Left;
-                }
-            }
             ps2x::vpad::PadFrame vpadFrame =
                 ps2x::vpad::updatePad(vpadPad, layout, vpadTouches, touches, vpadShoulderBand);
-            uint16_t pressed = vpadFrame.pressed;
+            // set2-polish-1 (Brad 10-16): the gear dot is gone — every touch
+            // here drives the game, and hold-SELECT + tap-START on the
+            // overlay is the panel chord (fed from last frame's mask above).
+            // The chord's hold-back applies here like on the physical path.
+            uint16_t pressed = static_cast<uint16_t>(
+                (vpadFrame.pressed & ~set2VpadStrip) | set2VpadAdd);
+            // Raw (pre-hold-back) for the chord union above: the union reads
+            // the pre-strip mask on the physical path too, so a held touch
+            // SELECT sustains the window instead of pulsing every frame.
+            vpadPressedPrev = vpadFrame.pressed;
             // IN4: touch-source layer (transition only, zero cost off).
             ps2x::inputdiag::noteVpad(pressed, m_memory.gs().vsyncTick.load());
             publishPad(static_cast<uint16_t>(pressed | raylibPressed), m_memory.gs().vsyncTick.load());
@@ -9758,11 +9741,13 @@ void PS2Runtime::run()
         {
             publishPad(raylibPressed, m_memory.gs().vsyncTick.load());
             ps2x::vpad::liveStick().store(ps2x::vpad::kStickNoOverride, std::memory_order_relaxed);
+            vpadPressedPrev = 0u; // set2-polish-1: overlay hidden, no touch chord
         }
         else
         {
             // Overlay off (desktop default): raylib buttons still feed the latch.
             publishPad(raylibPressed, m_memory.gs().vsyncTick.load());
+            vpadPressedPrev = 0u; // set2-polish-1: no overlay, no touch chord
         }
         // IN4: input-diagnostics per-frame (SDL watch install, 1 s stat line,
         // 5 s timer flush; no-ops unless PS2X_INPUT_DIAG=1, except the
@@ -9885,8 +9870,10 @@ void PS2Runtime::run()
 #endif
             }
         }
-        // SET2: gear dot (closed) / settings panel (open) / perf line, drawn
-        // by the host over the presented frame (never into the guest frame).
+        // SET2: settings panel (open) / perf line, drawn by the host over
+        // the presented frame (never into the guest frame). set2-polish-1
+        // (Brad 10-16): no gear dot — a closed panel draws nothing here
+        // except the perf line, and the chord is the only opener.
         if (set2On && !skipGl)
         {
 #if defined(__ANDROID__)
@@ -10015,18 +10002,6 @@ void PS2Runtime::run()
                 DrawText(hint, static_cast<int>(set2dg.px) + 14,
                          static_cast<int>(set2dg.py + set2dg.ph) - rowFont - 8, rowFont,
                          Color{150, 160, 175, 255});
-            }
-            else
-            {
-                const Vector2 dot{set2dg.dotX, set2dg.dotY};
-                DrawCircleV(dot, set2dg.dotR, Color{255, 255, 255, 45});
-                DrawCircleLinesV(dot, set2dg.dotR, Color{255, 255, 255, 140});
-                int fs = 18;
-                while (fs > 10 && MeasureText("SET", fs) > static_cast<int>(set2dg.dotR * 1.6f))
-                    --fs;
-                const int tw = MeasureText("SET", fs);
-                DrawText("SET", static_cast<int>(set2dg.dotX) - tw / 2,
-                         static_cast<int>(set2dg.dotY) - fs / 2, fs, Color{255, 255, 255, 200});
             }
             if (set2Perf)
             {

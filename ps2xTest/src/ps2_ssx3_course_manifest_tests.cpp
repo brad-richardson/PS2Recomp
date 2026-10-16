@@ -196,9 +196,13 @@ void register_ps2_ssx3_course_manifest_tests()
             t.Equals(appUpdateFn(ram.data()), kGameUpdate, "pointer chain");
             pickerOnPadRead(ram.data(), idle.data(), 9, status);
             auto live = padBuffer(kBtnL3 | kBtnR3);
-            pickerOnPadRead(ram.data(), live.data(), 10, status);
+            // set2-polish-1 (Brad 10-16): a refused chord shares the L3+R3
+            // input-mark chord, so it only logs — no status/toast. The
+            // marker keeps its own "input marked" confirm instead.
+            t.IsFalse(pickerOnPadRead(ram.data(), live.data(), 10, status), "refused: no confirm");
             t.Equals(topoLocation(ram, 0), 0, "refused while an event is live");
-            t.IsTrue(status.find("an event is live") != std::string::npos, status.c_str());
+            t.Equals(status, std::string("Course: Snow Jam"), "status keeps the last real switch");
+            t.Equals(live[2], static_cast<uint8_t>(0xFF), "refused chord still hidden from the guest");
             const uint32_t frontend = 0x2F0000u, zero = 0u, requested = 8u;
             std::memcpy(&ram[0xC00200 + kAppUpdateSlot], &frontend, 4);
             std::memcpy(&ram[kSlotBase + 49u * kSlotStride + 8u], &requested, 4);

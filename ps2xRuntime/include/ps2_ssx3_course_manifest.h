@@ -1024,8 +1024,10 @@ inline int modeNext(Modes &ms, uint8_t *ram, std::string &msg, std::vector<std::
 
 // Called for every guest scePadRead (port 0) with the 32-byte pad buffer
 // the guest receives. `vsyncTick` only labels the log line. Returns true
-// with `status` set when the chord fired (the caller shows it: status line
-// + Android toast via ps2_savestate::noteQuickStatus).
+// with `status` set only when the chord switched something (the caller shows
+// it: status line + Android toast via ps2_savestate::noteQuickStatus).
+// A refused chord (event live/loading) only logs and returns false, so the
+// L3+R3 input-mark confirm keeps its own toast.
 inline bool pickerOnPadRead(uint8_t *ram, uint8_t *pad, uint64_t vsyncTick, std::string &status)
 {
     Picker &p = picker();
@@ -1037,6 +1039,10 @@ inline bool pickerOnPadRead(uint8_t *ram, uint8_t *pad, uint64_t vsyncTick, std:
     const uint16_t buttons = static_cast<uint16_t>(pad[2] | (pad[3] << 8));
     const bool chord = (buttons & (kBtnL3 | kBtnR3)) == 0u && (buttons & kBtnSelect) != 0u;
     const bool fired = chord && !p.chordWas;
+    // set2-polish-1 (Brad 10-16): a refusal ("not now, an event is live")
+    // shares the L3+R3 input-mark chord, so it stays in the log only — no
+    // status/toast. Only a real switch confirms ("Mode: X" / "Course: X").
+    bool confirm = false;
     if (fired)
     {
         std::string msg;
@@ -1048,20 +1054,28 @@ inline bool pickerOnPadRead(uint8_t *ram, uint8_t *pad, uint64_t vsyncTick, std:
                          msg.c_str());
             for (const std::string &w : writes)
                 std::fprintf(stderr, "[ssx3-course]   %s\n", w.c_str());
-            status = idx < 0 ? msg : "Mode: " + std::string(idx ? ms.modes[static_cast<size_t>(idx) - 1u].name : "Stock");
+            if (idx >= 0)
+            {
+                status = "Mode: " + std::string(idx ? ms.modes[static_cast<size_t>(idx) - 1u].name : "Stock");
+                confirm = true;
+            }
         }
         else
         {
             const int idx = pickerNext(p, ram, msg);
             std::fprintf(stderr, "[ssx3-course] tick=%llu %s\n", static_cast<unsigned long long>(vsyncTick),
                          msg.c_str());
-            status = idx >= 0 ? "Course: " + p.entries[static_cast<size_t>(idx)].name : msg;
+            if (idx >= 0)
+            {
+                status = "Course: " + p.entries[static_cast<size_t>(idx)].name;
+                confirm = true;
+            }
         }
     }
     p.chordWas = chord;
     if (chord)
         pad[2] = static_cast<uint8_t>(pad[2] | kBtnL3 | kBtnR3);
-    return fired;
+    return fired && confirm;
 }
 
 // Runtime entry: called once from loadELF. Unset or empty knob = no-op.
