@@ -399,8 +399,8 @@ struct PollControl
     uint32_t lastClock = 0u;
     bool clockInit = false;
     // Part 3 start-sequence state (all guest-tick domain, deterministic).
-    bool prevRacing = false;     // race clock advanced on the previous poll
-    uint64_t lastGoTick = 0u;    // last GO edge served (1200-tick cooldown)
+    uint64_t lastAdvanceTick = 0u; // last tick with a clock advance
+    uint64_t lastGoTick = 0u;    // last GO edge served (wrapper guard)
     uint64_t goPendingTick = 0u; // Go synth due (venue + 120 ticks)
     bool flyoverFired = false;   // flyover synth fired once (wrapper)
 };
@@ -426,6 +426,9 @@ inline void pollMcTick(uint8_t *rdram, size_t ramSize, uint64_t tick)
     if (rr == 0u)
         return;
     // Live-race predicate (layer shape): readable advancing clock, no replay.
+    // A stuck or unreadable clock reads as still (never as racing): clock
+    // granularity and single-poll read misses must not flap the GO edge, so
+    // the edge keys on stillness duration, not on the previous poll.
     const uint32_t b = ps2_ssx3_tricky_hud::resolveChainB(rdram, ramSize);
     bool racing = false;
     uint32_t clock = 0u;
@@ -435,28 +438,31 @@ inline void pollMcTick(uint8_t *rdram, size_t ramSize, uint64_t tick)
     {
         uint32_t rs = 0u;
         const bool rsOk = ps2_ssx3_tricky_hud::readReplayState(rdram, ramSize, rs);
-        racing = (!rsOk || rs == 0u) && (!pc.clockInit || clock != pc.lastClock);
+        racing = (!rsOk || rs == 0u) && pc.clockInit && clock != pc.lastClock;
         pc.clockInit = true;
         pc.lastClock = clock;
     }
     // Part 3 start sequence (Tricky courses only; deterministic in the
-    // guest-tick domain). GO edge = race clock starts advancing (the same
-    // signal TK44 uses for meter visibility). Venue re-posts 0x20BB at the
-    // edge (its member carries the Tricky call); the start GO (0x20C5
-    // vessel) follows 120 ticks later, Tricky's VenueIntro->Go order. The
-    // flyover fires from the wrapper (live ctx, no chain needed).
+    // guest-tick domain). GO edge = race clock advances after >240 ticks of
+    // stillness (same signal TK44 uses for meter visibility). Venue re-posts
+    // 0x20BB at the edge (its member carries the Tricky call); the start GO
+    // (0x20C5 vessel) follows 120 ticks later, Tricky's VenueIntro->Go
+    // order. The flyover fires from the wrapper (live ctx, no chain needed).
+    // Pause/resume replays the pair (documented human-path wart); a slow
+    // restart replays it as a new race.
     if (pc.emit != nullptr)
     {
-        if (racing && !pc.prevRacing &&
-            (pc.lastGoTick == 0u || (tick >= pc.lastGoTick && tick - pc.lastGoTick > 1200u)))
+        if (racing && tick - pc.lastAdvanceTick > 240u)
         {
+            pc.lastAdvanceTick = tick;
             pc.lastGoTick = tick;
             pc.goPendingTick = tick + 120u;
             std::fprintf(stderr, "[ssx3-tricky-mc] venue synth a2=0x20bb tick=%llu\n",
                          static_cast<unsigned long long>(tick));
             pc.emit(pc.emitImpl, rdram, rr, 0x20bbu, 0xbu, tick);
         }
-        pc.prevRacing = racing;
+        if (racing)
+            pc.lastAdvanceTick = tick;
         if (pc.goPendingTick != 0u && tick >= pc.goPendingTick)
         {
             pc.goPendingTick = 0u;
