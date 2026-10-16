@@ -224,6 +224,18 @@ The public `android` step downloads the pinned release in
 packages both. `--no-turnip` omits them. A failed download prints a warning
 and builds with the system Vulkan driver. Adreno selects Turnip when present;
 a load failure falls back to the system driver.
+Third-party driver trust: the pinned `binary` is a community Mesa build
+(StevenMXZ Gen8 V37, Odin-validated in Part 3), not our CI artifact, so it
+carries no build-provenance attestation, so the manifest's double SHA-256
+pin — the archive bytes plus the extracted `library` member — is the
+integrity check, enforced identically by `build.py` and `verify-turnip.sh`
+(fail closed). New assets we publish must carry attestation
+(`verify-turnip.sh` requires it unless the manifest entry says otherwise);
+both current pins are documented SHA-only exceptions — the driver because it
+is third-party, `notices` because it comes from our ad094bb9 release, which
+predates attestation (the r1/r2/r3 releases were never published: those runs
+failed). The next green CI build regenerates attested notices. Mesa itself is
+MIT-licensed; its licence texts ship via `notices`.
 The APK stays under `android/app/build/outputs/apk/release` locally.
 
 `android-libs` invokes the pinned ARMSX2 public source dependency recipe

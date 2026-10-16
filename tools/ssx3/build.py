@@ -191,6 +191,42 @@ def sha(path):
     return h.hexdigest()
 
 
+def verified_driver(name, entry, cache):
+    """Fetch a Vulkan driver .so that ships inside a release archive.
+
+    entry carries: url, archive_sha256 (the whole download), library (the
+    member path inside the archive), sha256 (the member bytes that must end
+    up as the driver). Only `library` is ever extracted. Any mismatch
+    raises ValueError; callers fail closed to the system Vulkan driver, as
+    with verified_asset.
+    """
+    dest = cache / name
+    if dest.is_file() and sha(dest) == entry['sha256']:
+        return dest
+    tmp = cache / (name + '.download')
+    tmp.unlink(missing_ok=True)
+    try:
+        with urllib.request.urlopen(entry['url'], timeout=60) as src, tmp.open('wb') as out:
+            shutil.copyfileobj(src, out)
+        if sha(tmp) != entry['archive_sha256']:
+            raise ValueError(name + ' archive SHA-256 mismatch')
+        with zipfile.ZipFile(tmp) as z:
+            lib = entry['library']
+            if lib.startswith('/') or '..' in Path(lib).parts:
+                raise ValueError('unsafe Turnip library path: ' + lib)
+            try:
+                data = z.read(lib)
+            except KeyError:
+                raise ValueError('Turnip library missing from archive: ' + lib)
+        if hashlib.sha256(data).hexdigest() != entry['sha256']:
+            raise ValueError(name + ' driver SHA-256 mismatch')
+        dest.unlink(missing_ok=True)
+        dest.write_bytes(data)
+        return dest
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def extract_elf(iso, dest):
     # Read the ISO9660 root directly; no mounting, BIOS or external extraction tool.
     with iso.open('rb') as f:
@@ -485,6 +521,8 @@ def android(a):
         cache = a.work / 'turnip-cache'
         cache.mkdir(exist_ok=True)
         def verified_asset(name, entry):
+            if 'archive_sha256' in entry:
+                return verified_driver(name, entry, cache)
             dest = cache / name
             if dest.is_file() and sha(dest) == entry['sha256']:
                 return dest
