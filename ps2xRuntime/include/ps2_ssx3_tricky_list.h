@@ -35,16 +35,6 @@ inline bool knob()
     return on;
 }
 
-// Lane diag: PS2X_TK_MENU_1_DIAG=1 logs one line per navigator decision.
-inline bool diag()
-{
-    static const bool on = [] {
-        const char *v = std::getenv("PS2X_TK_MENU_1_DIAG");
-        return v && std::strcmp(v, "1") == 0;
-    }();
-    return on;
-}
-
 // ---- Course table (Tricky order; Part 1 §1 + receipts/ssx3-events-nav.txt)
 //
 // Each course names its SSX 3 event id and, per event-type option, the
@@ -129,7 +119,7 @@ struct FeView
     int event = -1; // cursorEvent(), or -1
 };
 
-// Event filecode table (DIAG dump + atlas bake): word 0x442950+ev*4 points at
+// Event filecode table (lane atlas bake): word 0x442950+ev*4 points at
 // a 4-char code. Unwritten slots hold 0xFFFFFFFF, whose +4 wraps to 3 and
 // would pass a naive bounds check (m9a SIGSEGV/SIGBUS): compare without
 // wrapping, and read the code through the same gate.
@@ -183,65 +173,6 @@ inline FeView readView(const uint8_t *ram, uint32_t size, uint32_t controller)
         }
     }
     return v;
-}
-
-// Lane RE probe: log every widget hash + its +0x94/+0x95 bytes on a screen
-// (called under DIAG; the +0x95 byte is the cursor row on the Event list
-// widget — this hunts the Peak/Mode cursor the same way).
-inline void dumpWidgets(const uint8_t *ram, uint32_t size, uint32_t controller, int want,
-                        void (*log)(const char *))
-{
-    const auto inRange = [&](uint32_t addr, uint32_t len) {
-        return addr <= size && len <= size && addr <= size - len;
-    };
-    const auto read32 = [&](uint32_t addr) {
-        uint32_t v = 0;
-        std::memcpy(&v, ram + addr, 4);
-        return v;
-    };
-    char line[768];
-    if (!ram || !inRange(controller, 0x2f0u))
-    {
-        std::snprintf(line, sizeof(line), "widgets scr=%d no-controller", want);
-        log(line);
-        return;
-    }
-    const uint32_t scr = read32(controller + 0x2e8u);
-    if (!inRange(scr, 0x40u))
-    {
-        std::snprintf(line, sizeof(line), "widgets scr=%d no-screen", want);
-        log(line);
-        return;
-    }
-    const uint32_t countPtr = read32(scr + 0x38u);
-    if (!inRange(countPtr, 4u))
-    {
-        std::snprintf(line, sizeof(line), "widgets scr=%d no-count", want);
-        log(line);
-        return;
-    }
-    uint32_t count = read32(countPtr);
-    if (count > 24u)
-        count = 24u;
-    const uint32_t objects = read32(scr + 0x3cu);
-    if (!inRange(objects, 4u * count))
-    {
-        std::snprintf(line, sizeof(line), "widgets scr=%d no-objects", want);
-        log(line);
-        return;
-    }
-    int n = std::snprintf(line, sizeof(line), "widgets scr=%d n=%u", want, count);
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        const uint32_t obj = read32(objects + 4u * i);
-        if (!inRange(obj, 0x96u))
-            continue;
-        n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), " [%08x %02x%02x]", read32(obj + 0x38u),
-                           ram[obj + 0x94u], ram[obj + 0x95u]);
-        if (n > 700)
-            break;
-    }
-    log(line);
 }
 
 // ---- Closed-loop navigator -----------------------------------------------

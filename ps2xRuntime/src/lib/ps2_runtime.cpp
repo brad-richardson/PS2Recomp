@@ -8323,15 +8323,8 @@ void PS2Runtime::run()
     int tkShutDeb = 0;  // consecutive off-target frames (close at 12)
     bool tkLatchedOn = false; // reopen needs a NEW Map entry (stale words can't)
     uint64_t tkLatchGen = 0;
-    bool tkCodesDone = false; // filecode table dump (diag, once per boot)
     uint16_t tkPrevUnion = 0; // list nav edge detect (physical + test spans)
     std::vector<int64_t> tkDown; // touch ids currently on the list
-    uint64_t tkHostFrame = 0; // diag mapping: host frames <-> guest ticks
-    // Lane diag shots: PS2X_TK_MENU_1_SHOT=<prefix> saves the host present
-    // (overlay included) every 300 host frames while the list is open.
-    const char *tkShotPrefix = ps2_ssx3_tricky_list::diag() ? std::getenv("PS2X_TK_MENU_1_SHOT") : nullptr;
-    if (tkShotPrefix && !tkShotPrefix[0])
-        tkShotPrefix = nullptr;
     if (tkListOn)
         std::fprintf(stderr, "[tklist] overlay on (PS2X_SSX3_TRICKY_LIST=1)\n");
     // SET2 perf sampler: always-on lightweight vs/s + frame-time (one tick
@@ -9015,10 +9008,6 @@ void PS2Runtime::run()
         {
             namespace tkl = ps2_ssx3_tricky_list;
             const uint64_t tkTick = m_memory.gs().vsyncTick.load(std::memory_order_relaxed);
-            if (tkl::diag() && (++tkHostFrame % 600u) == 0u)
-                std::fprintf(stderr, "[tklist] hostframe=%llu guestTick=%llu\n",
-                             static_cast<unsigned long long>(tkHostFrame),
-                             static_cast<unsigned long long>(tkTick));
             bool tkMapLive = false;
             tkl::FeView tkView;
             if (ps2_ssx3_tricky::state().on && ps2_ssx3_tricky::state().tricky)
@@ -9052,21 +9041,6 @@ void PS2Runtime::run()
                                      tkView.type,
                                      static_cast<unsigned long long>(
                                          ps2_ssx3_tricky::state().mapEntries));
-                        if (tkl::diag() && !tkCodesDone)
-                        {
-                            tkCodesDone = true;
-                            if (uint8_t *tkRam = m_memory.getRDRAM())
-                            {
-                                for (int ev = 0; ev < 23; ++ev)
-                                {
-                                    // Overflow-safe: unwritten slots are
-                                    // 0xFFFFFFFF and must not be dereferenced.
-                                    if (const char *code = tkl::readFilecode(
-                                            tkRam, ps2_ssx3_course::kRamSize, ev))
-                                        std::fprintf(stderr, "[tklist] filecode ev=%d %.4s\n", ev, code);
-                                }
-                            }
-                        }
                     }
                 }
                 else
@@ -9529,16 +9503,6 @@ void PS2Runtime::run()
                 DrawTextureRec(tkTex.texture,
                                Rectangle{0.0f, 0.0f, static_cast<float>(tkTw), static_cast<float>(-tkTh)},
                                Vector2{0.0f, 0.0f}, WHITE);
-                if (tkShotPrefix && (tkHostFrame % 300u) == 0u)
-                {
-                    char shotPath[512];
-                    std::snprintf(shotPath, sizeof(shotPath), "%s-%llu.png", tkShotPrefix,
-                                  static_cast<unsigned long long>(tkHostFrame));
-                    Image tkImg = LoadImageFromTexture(tkTex.texture);
-                    ImageFlipVertical(&tkImg);
-                    ExportImage(tkImg, shotPath);
-                    UnloadImage(tkImg);
-                }
             }
         }
         else if (set2Open)
