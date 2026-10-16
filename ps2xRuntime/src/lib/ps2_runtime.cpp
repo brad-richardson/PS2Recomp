@@ -27,6 +27,7 @@
 #include "ps2_ssx3_tricky_gems.h"
 #include "ps2_ssx3_tricky_resetvol.h"
 #include "ps2_ssx3_tricky_preview.h"
+#include "ps2_netsync.h" // netsync-spike-1-p3: SNP2 state sync (default off)
 #include <filesystem>
 #include "ps2_log.h"
 #include "ps2_android_pause.h"
@@ -6019,6 +6020,13 @@ __attribute__((noinline, cold)) void dspBuildFilter()
     const char *npLink = std::getenv("PS2X_NP_LINK_ENABLE");
     if (npLink && std::strcmp(npLink, "1") == 0)
         dspSet(g_dsp.tgt, 0x00111728u);
+    // netsync-spike-1-p3: input-consumer hook for ghost drive.
+    // Knob off leaves the filter untouched.
+    {
+        const char *sync = std::getenv("PS2X_NETSYNC");
+        if (sync && (std::strcmp(sync, "1") == 0 || std::strcmp(sync, "on") == 0))
+            dspSet(g_dsp.tgt, 0x00111728u);
+    }
     g_dsp.always = false;
     g_dsp.guestActive = ps2_fh1::g_guestActive;
     if (g_dsp.fh1)
@@ -6136,6 +6144,8 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
                                                                    GuestBranchKind kind,
                                                                    const char *debugName)
 {
+    // netsync-spike-1-p3: SNP2 state sync (no-op unless PS2X_NETSYNC=1).
+    ps2_netsync::onTick(rdram, m_memory.gs().vsyncTick.load(std::memory_order_relaxed));
     struct Mgx1LapSlot { uint32_t rider = 0u; uint32_t clock = 0u; uint32_t ignored = 0u; uint8_t lap = 1u; bool beforeCheckpoint = false; bool armed = false; bool reseed = false; bool finished = false; };
     static Mgx1LapSlot mgx1Laps[6];
     static const bool mgx1MegaLaps = [] {
@@ -6405,6 +6415,59 @@ __attribute__((noinline)) bool PS2Runtime::dispatchGuestBranchFull(uint8_t *rdra
                     }
                     ps2_savestate::canonicalRecordRider(tick, slot, d.ordinal, de4, d.why,
                                                         d.applied);
+    // netsync-spike-1-p3 (default off): SNP2 ghost drive at the same
+    // input-consumer boundary. Listed in the DSP1 target filter above
+    // only while PS2X_NETSYNC=1.
+    if (targetPc == 0x00111728u &&
+        (kind == GuestBranchKind::DirectCall || kind == GuestBranchKind::IndirectCall))
+    {
+        const uint64_t syncTick = m_memory.gs().vsyncTick.load(std::memory_order_relaxed);
+        const uint32_t syncCtl = getRegU32(ctx, 4) & PS2_RAM_MASK;
+        const uint32_t syncRec = getRegU32(ctx, 5) & PS2_RAM_MASK;
+        uint32_t liveW0 = 0u, liveW1 = 0u;
+        if (syncCtl + 0xDF0u <= PS2_RAM_SIZE && syncRec + 8u <= PS2_RAM_SIZE)
+        {
+            uint32_t pre0 = 0u, pre1 = 0u;
+            std::memcpy(&pre0, rdram + syncRec, 4u);
+            std::memcpy(&pre1, rdram + syncRec + 4u, 4u);
+            const char *why = "off";
+            if (ps2_netsync::onInput(syncTick, syncCtl, syncRec, rdram, liveW0, liveW1, why))
+            {
+                std::memcpy(rdram + syncRec, &liveW0, 4u);
+                std::memcpy(rdram + syncRec + 4u, &liveW1, 4u);
+            }
+            ps2_netsync::Config &syncCfg = ps2_netsync::config();
+            if (syncCfg.enabled)
+            {
+                uint32_t lgDe4 = 0u;
+                int lgSlot = -1;
+                uint32_t a = 0u;
+                std::memcpy(&a, rdram + syncCtl + 0x18u, 4u);
+                a &= PS2_RAM_MASK;
+                std::memcpy(&lgDe4, rdram + syncCtl + 0xDE4u, 4u);
+                if (a + 0x870u <= PS2_RAM_SIZE)
+                {
+                    int32_t sv = -1;
+                    std::memcpy(&sv, rdram + a + 0x86Cu, 4u);
+                    if (sv >= 0 && sv <= 5)
+                        lgSlot = sv;
+                }
+                if (lgSlot == syncCfg.peer || lgSlot == syncCfg.slot)
+                {
+                    uint32_t out0 = pre0, out1 = pre1;
+                    if (std::strcmp(why, "applied") == 0)
+                    {
+                        std::memcpy(&out0, rdram + syncRec, 4u);
+                        std::memcpy(&out1, rdram + syncRec + 4u, 4u);
+                    }
+                    std::fprintf(stderr,
+                                 "[netsync] I tick=%llu slot=%d de4=%u ai=%08x,%08x out=%08x,%08x %s\n",
+                                 (unsigned long long)syncTick, lgSlot, lgDe4, pre0, pre1,
+                                 out0, out1, why);
+                }
+            }
+        }
+    }
                     std::fprintf(stderr,
                                  "[np-rider] tick=%llu slot=%u ctl=%08x de4=%u ai=%08x,%08x out=%08x,%08x %s\n",
                                  (unsigned long long)tick, slot, getRegU32(ctx, 4), de4, w0, w1,
