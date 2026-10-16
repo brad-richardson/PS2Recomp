@@ -2,7 +2,7 @@
 
 #include "ThreadNaming.h"
 #include "ps2_audio_stretch.h"
-#include "ps2_ssx3_tricky_song.h"
+#include "runtime/game_module.h"
 #include "runtime/ps2_pcm_ring.h"
 #include "ps2_turbo_boot.h" // BTS1: boot turbo host mute
 #include "ps2_vsync_lock.h"
@@ -201,10 +201,16 @@ namespace
     void probeSink(const char *path, const int16_t *output, size_t frames)
     {
         const bool stretch = path && path[0] == 's';
-        ps2_ssx3_tricky_song::Player &pl = ps2_ssx3_tricky_song::player();
-        if (pl.burstsStarted != g_output.probeBurstsSeen)
+        // snd-seam-1 family #4: the song side of the TK47 line comes from
+        // the module provider now (zeros without one — the same silence as
+        // the knob-off player, so no probe lines fire).
+        ps2_game_module::TrickySongProbe song{};
+        const ps2_game_module::Module *songModule = ps2_game_module::installed();
+        if (songModule && songModule->sndTrickySongProbe)
+            songModule->sndTrickySongProbe(&song);
+        if (song.burstsStarted != g_output.probeBurstsSeen)
         {
-            g_output.probeBurstsSeen = pl.burstsStarted;
+            g_output.probeBurstsSeen = song.burstsStarted;
             g_output.winSinkDirect = 0;
             g_output.winSinkStretch = 0;
             g_output.wav.tapWinPeak = 0;
@@ -238,18 +244,18 @@ namespace
                     g_output.winSinkDirect = peak;
             }
         }
-        if (pl.burstsDone != g_output.probeBurstsReported)
+        if (song.burstsDone != g_output.probeBurstsReported)
         {
-            g_output.probeBurstsReported = pl.burstsDone;
-            const ps2_ssx3_tricky_song::BurstStats &b = pl.last;
+            g_output.probeBurstsReported = song.burstsDone;
             std::fprintf(stderr,
                          "[snd-output] tricky-probe burstsDone=%llu mixPath=%s consumed=%llu "
                          "songPeak=%d busBefore=%d busAfter=%d sat=%llu winSinkDirect=%d "
                          "winSinkStretch=%d winTapWav=%d winTapPost=%d sinkDirect=%d/%llu "
                          "sinkStretch=%d/%llu tapWav=%d/%llu tapPost=%d/%llu\n",
-                         static_cast<unsigned long long>(pl.burstsDone), b.path,
-                         static_cast<unsigned long long>(b.consumed), b.songPeak, b.busBefore,
-                         b.busAfter, static_cast<unsigned long long>(b.sat),
+                         static_cast<unsigned long long>(song.burstsDone), song.path,
+                         static_cast<unsigned long long>(song.consumed), song.songPeak,
+                         song.busBefore, song.busAfter,
+                         static_cast<unsigned long long>(song.sat),
                          g_output.winSinkDirect, g_output.winSinkStretch,
                          g_output.wav.tapWinPeak, g_output.postWav.tapWinPeak,
                          g_output.sinkPeakDirect,
@@ -333,7 +339,11 @@ namespace
         noteWindowCallback(frames, true, 1.0f);
         // TK43c: the Tricky song burst mixes over the final output (no-op
         // when idle or unloaded), before the DC blocker and WAV taps.
-        ps2_ssx3_tricky_song::mixInto(output, frames, "direct");
+        // snd-seam-1 family #4: the mix comes from the module provider;
+        // null (or no module) is silence, as with the knob off.
+        if (const ps2_game_module::Module *songModule = ps2_game_module::installed();
+            songModule && songModule->sndTrickySongMix)
+            songModule->sndTrickySongMix(output, frames, "direct");
         if (g_output.dcBlock)
             dcBlockFrames(output, frames);
         recordWav(g_output.wav, output, samples);
@@ -717,7 +727,10 @@ namespace
         }
         // TK43c: the Tricky song burst mixes over the final output (no-op
         // when idle or unloaded), before the DC blocker and WAV taps.
-        ps2_ssx3_tricky_song::mixInto(output, frames, "stretch");
+        // snd-seam-1 family #4: module provider (null = silence).
+        if (const ps2_game_module::Module *songModule = ps2_game_module::installed();
+            songModule && songModule->sndTrickySongMix)
+            songModule->sndTrickySongMix(output, frames, "stretch");
         if (g_output.dcBlock)
             dcBlockFrames(output, frames);
         recordWav(g_output.postWav, output, static_cast<size_t>(frames) * 2u);
@@ -828,7 +841,10 @@ bool initialize()
     if (g_output.dcBlock)
         std::cerr << "[snd-output] dc-block=on (AU18: 1-pole 5 Hz high-pass on the final output)\n";
     // TK43c: stage the Tricky song for meter-full bursts (silent unless set).
-    ps2_ssx3_tricky_song::initFromEnv();
+    // snd-seam-1 family #4: staging lives in the module (null = unstaged).
+    if (const ps2_game_module::Module *songModule = ps2_game_module::installed();
+        songModule && songModule->sndTrickySongInit)
+        songModule->sndTrickySongInit();
     if (!g_output.stretch)
         std::cerr << "[snd-output] stretch=off (PS2X_AUDIO_STRETCH=0)\n";
     if (g_output.stretch)

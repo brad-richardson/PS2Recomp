@@ -23,6 +23,7 @@ behind the plug-in point in `ps2xRuntime/include/runtime/game_module.h`
 | `ssx3-sif-handshake` (P1ac) + SendCmd hook (ABI 3) | none (always on for SSX 3) | `src/sif_handshake.cpp`, `include/Ssx3SifHandshake.h` | `tests/ps2_ssx3_sif_handshake_tests.cpp`; shared kernel SIF tests stay in `ps2_runtime_kernel_tests.cpp`; generic: `GameModuleNone` stub + owned PC |
 | SND progress hooks + savestate providers (ABI 4, snd-seam-1 family A) | none (always on for SSX 3; AU10: guest time with sound on or off) | `include/ps2_snd_spike.h`, `include/ps2_snd_spu.h`, `include/ps2_snd_spu_gauss.h` (moved from `ps2xRuntime/include/`); generic PCM ring stays runtime-owned (`ps2xRuntime/include/runtime/ps2_pcm_ring.h`) | `tests/ps2_snd_tests.cpp` (moved from `ps2xTest/src/`); `tests/ps2_ssx3_module_tests.cpp` (hook + section wiring); generic: `GameModuleNone` (null hooks = no SND, no `snd` section) |
 | SND section ownership (snd-seam-1 family B) | none | `src/ssx3_module.cpp` (`snd` section, version 1, K1 registration pattern) | `tests/ps2_ssx3_module_tests.cpp` (section present, version 1); generic: `GameModuleNone` (section absent) |
+| Tricky song mix provider (ABI 5, snd-seam-1 family #4) | none (output-only; default silent) | `src/tricky_song.cpp`, `include/Ssx3TrickySong.h` (forwards to `ps2_ssx3_tricky_song.h`, which stays runtime-side until the Tricky families move) | `tests/ps2_ssx3_tricky_song_provider_tests.cpp` (hook-path exact bytes); `tests/ps2_ssx3_module_tests.cpp` (hook wiring); shared song tests keep asserting the mix math |
 
 ## Moving the next family
 

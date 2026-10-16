@@ -4,6 +4,7 @@
 #include "ps2_ssx3_module.h"
 #include "Ssx3CopiedPayload.h"
 #include "Ssx3SifHandshake.h"
+#include "Ssx3TrickySong.h"
 #include "ps2_snd_spike.h"
 #include "ssx3_module_internal.h"
 #include "runtime/ps2_savestate.h"
@@ -50,7 +51,10 @@ namespace
                                           &ps2_snd_spike::onSoundTick,
                                           ps2_snd_spike::kTickCycles,
                                           &ps2_snd_spike::saveSndState,
-                                          &ps2_snd_spike::loadSndState};
+                                          &ps2_snd_spike::loadSndState,
+                                          &ps2_snd_tricky_song::initFromEnvHook,
+                                          &ps2_snd_tricky_song::mixIntoHook,
+                                          &ps2_snd_tricky_song::probeSnapshot};
 }
 
 const ps2_game_module::Module &ps2x_ssx3_game_module() noexcept

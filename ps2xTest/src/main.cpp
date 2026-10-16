@@ -26,6 +26,7 @@ void register_ps2_ssx3_module_tests();
 void register_ps2_ssx3_copied_payload_tests();
 void register_ps2_ssx3_sif_handshake_tests();
 void register_ps2_snd_tests();
+void register_ps2_ssx3_tricky_song_provider_tests();
 #endif
 #if PS2X_TEST_NO_GAME_MODULE
 void register_game_module_none_tests();
@@ -127,6 +128,7 @@ int main(int argc, char **argv)
     register_ps2_ssx3_copied_payload_tests();
     register_ps2_ssx3_sif_handshake_tests();
     register_ps2_snd_tests();
+    register_ps2_ssx3_tricky_song_provider_tests();
 #endif
 #if PS2X_TEST_NO_GAME_MODULE
     register_game_module_none_tests();

@@ -1,4 +1,5 @@
 #include "MiniTest.h"
+#include "Ssx3TrickySong.h"
 #include "ps2_snd_spike.h"
 #include "ps2_ssx3_anim_pick_guard.h"
 #include "ps2_ssx3_module.h"
@@ -72,10 +73,10 @@ void register_ps2_ssx3_module_tests()
                 t.IsTrue(d.apply != nullptr, "apply");
             }
         });
-        tc.Run("the SND progress hooks point at the moved HLE (ABI 4)", [](TestCase &t)
+        tc.Run("the SND progress hooks point at the moved HLE (ABI 5)", [](TestCase &t)
                {
             const ps2_game_module::Module &m = ps2x_ssx3_game_module();
-            t.Equals(m.abiVersion, 4u, "abi");
+            t.Equals(m.abiVersion, 5u, "abi");
             t.IsTrue(m.noteSndAddCmdHandler == &ps2_snd_spike::noteAddCmdHandler, "addcmdhandler");
             t.IsTrue(m.noteSndRpc == &ps2_snd_spike::noteRpc, "rpc snoop");
             t.IsTrue(m.onSndSendCmd == &ps2_snd_spike::onSendCmd, "sendcmd");
@@ -91,6 +92,14 @@ void register_ps2_ssx3_module_tests()
             t.Equals(snd->second.version, 1u, "snd version frozen for old saves");
             t.IsTrue(snd->second.save == &ps2_snd_spike::saveSndState, "snd save hook");
             t.IsTrue(snd->second.load == &ps2_snd_spike::loadSndState, "snd load hook");
+        });
+        tc.Run("the Tricky song mix hooks point at the provider (ABI 5)", [](TestCase &t)
+               {
+            const ps2_game_module::Module &m = ps2x_ssx3_game_module();
+            t.Equals(m.abiVersion, 5u, "abi");
+            t.IsTrue(m.sndTrickySongInit == &ps2_snd_tricky_song::initFromEnvHook, "init");
+            t.IsTrue(m.sndTrickySongMix == &ps2_snd_tricky_song::mixIntoHook, "mix");
+            t.IsTrue(m.sndTrickySongProbe == &ps2_snd_tricky_song::probeSnapshot, "probe");
         });
         tc.Run("the override pass wraps both anim entries and chains to the originals", [](TestCase &t)
                {

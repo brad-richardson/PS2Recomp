@@ -48,7 +48,23 @@ namespace ps2_game_module
     // 2 (module-seam-2): the kernel syscall hooks below.
     // 3 (sif-handshake-1): the SIF SendCmd hook below.
     // 4 (snd-seam-1 family A): the SND progress hooks below.
-    inline constexpr uint32_t kAbiVersion = 4u;
+    // 5 (snd-seam-1 family #4): the Tricky song mix hooks below.
+    inline constexpr uint32_t kAbiVersion = 5u;
+
+    // Song-side snapshot for the TK47 probe line (plain scalars: the song
+    // player type stays with the game). `path` points at a static label
+    // ("direct"/"stretch"/"?").
+    struct TrickySongProbe
+    {
+        uint64_t burstsStarted = 0;
+        uint64_t burstsDone = 0;
+        uint64_t consumed = 0;
+        int32_t songPeak = 0;
+        int32_t busBefore = 0;
+        int32_t busAfter = 0;
+        uint64_t sat = 0;
+        const char *path = "?";
+    };
 
     struct Module
     {
@@ -102,6 +118,16 @@ namespace ps2_game_module
         // these; with no module it writes/reads a defined empty payload.
         void (*sndSaveState)(ps2_savestate::Writer &w) = nullptr;
         bool (*sndLoadState)(ps2_savestate::Reader &r) = nullptr;
+        // Tricky song mix hooks (snd-seam-1 family #4). The host audio
+        // output calls these around its sink: init stages the song from
+        // the environment, mix adds one burst over the final frames, and
+        // probe snapshots the song side of the TK47 burst line. Null (or
+        // no module) is silence: no staging, no mix, no probe lines —
+        // the same as the knob-off player. Output-only: guest hashes
+        // never cover PCM.
+        void (*sndTrickySongInit)() = nullptr;
+        void (*sndTrickySongMix)(int16_t *out, size_t frames, const char *path) = nullptr;
+        void (*sndTrickySongProbe)(TrickySongProbe *out) = nullptr;
     };
 
     // The module linked into this binary, or nullptr (see above).
