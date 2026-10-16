@@ -668,7 +668,7 @@ inline bool suppressStockMeter()
 // as (helper, return address). Measured by tk-meter-1 (D1/D4 call-site skips
 // and the level-3 call log): 0x21D1A0 draws the coil fill colour (message
 // types 5/6), the gold uber coil with its glow, and the coil base; 0x1F1190
-// the ball; 0x21ED48 the SUPER UBER label with its lit-letter boxes. Every
+// the ball and the S at the foot; 0x21ED48 the SUPER UBER label with its lit-letter boxes. Every
 // other call of these helpers (score popups, trick names, timer) is kept.
 // Skipping at the leaf is deliberate: the render itself can unwind at a
 // scheduler checkpoint and resume outside any wrapper, so state toggled
@@ -683,6 +683,7 @@ constexpr StockMeterSite kStockMeterSites[] = {
     {0x21d1a0u, 0x1eff08u}, // gold uber coil + glow (jal at 0x1eff00)
     {0x21d1a0u, 0x1f0044u}, // coil base (jal at 0x1f003c)
     {0x1f1190u, 0x1efdb4u}, // ball (jal at 0x1efdac)
+    {0x1f1190u, 0x1f036cu}, // S at the foot (jal at 0x1f0364)
     {0x21ed48u, 0x1f019cu}, // SUPER UBER label + letter boxes (jal at 0x1f0194)
 };
 

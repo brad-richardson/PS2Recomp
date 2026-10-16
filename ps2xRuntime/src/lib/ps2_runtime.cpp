@@ -2337,7 +2337,7 @@ PS2_REGISTER_GAME_OVERRIDE("ssx3-tricky-menu",
 // through three helpers; while the Tricky meter replaces it
 // (ps2_ssx3_tricky_layer::suppressStockMeter) the wrappers below skip exactly
 // the meter's call sites (kStockMeterSites: coil fill, gold coil + glow, coil
-// base, ball, SUPER UBER label + letter boxes) and pass every other call
+// base, ball, S, SUPER UBER label + letter boxes) and pass every other call
 // through. Nothing is painted over (TR3's covers are gone). Render-only: the
 // rider/meter/race words and the AP trajectory are byte-identical with the
 // sites skipped (tk-meter-1 V-runs). Knob off (PS2X_SSX3_TRICKY_HUD unset)

@@ -497,7 +497,8 @@ void register_ps2_ssx3_tricky_layer_tests()
             t.IsTrue(isStockMeterSite(0x21ed48u, 0x1f019cu), "label site");
             t.IsTrue(!isStockMeterSite(0x21ed48u, 0x1ed894u), "label helper elsewhere kept");
             t.IsTrue(!isStockMeterSite(0x1f1190u, 0x21f614u), "popup glow kept");
-            t.IsTrue(!isStockMeterSite(0x1f1190u, 0x1f036cu), "other 0x1f1190 call kept");
+            t.IsTrue(isStockMeterSite(0x1f1190u, 0x1f036cu), "S site");
+            t.IsTrue(!isStockMeterSite(0x1f1190u, 0x21e490u), "other 0x1f1190 call kept");
             t.IsTrue(!isStockMeterSite(0x1f16c0u, 0x1f0f3cu), "race timer kept");
             resetLayerForTest();
             setConfigForTest(parseConfig("1", nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
