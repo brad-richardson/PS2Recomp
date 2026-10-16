@@ -2326,10 +2326,8 @@ void tkMcPostWrapper(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     }
 }
 
-void applyTrickyMcPost(PS2Runtime &runtime, uint32_t gameId, uint32_t /*version*/, uint32_t pc)
+void applyTrickyMcPost(PS2Runtime &runtime)
 {
-    (void)gameId;
-    (void)pc;
     const char *env = std::getenv("PS2X_SSX3_TRICKY_MC");
     if (!env || env[0] != '1')
         return; // Default off: the original runs for every post (det-identical)
