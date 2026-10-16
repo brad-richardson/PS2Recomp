@@ -351,6 +351,9 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
         {
             n.phase = NavPhase::ToPeak;
             n.dir = 0;
+            n.lastPos = -2;
+            n.tries = 0;
+            n.sub = 0;
             return navStep(n, v, tick, peakLive, modeLive);
         }
         if (v.screen == 1 || v.screen == 2)
@@ -372,8 +375,13 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
                     n.settleUntil = tick + kSettleTicks;
                     return out;
                 }
-                if (++n.tries >= 3)
-                    return abort(); // every peak tried (or locked)
+                // Stagnant (the step+accept left the accepted peak
+                // unchanged: no wrap or a lock): flip direction.
+                if (v.peakOk && v.peak == static_cast<uint32_t>(n.lastPos))
+                    n.dir = (n.dir >= 0) ? -1 : 1;
+                n.lastPos = v.peakOk ? static_cast<int>(v.peak) : -2;
+                if (++n.tries >= 6)
+                    return abort(); // both directions exhausted (or locked)
                 n.sub = 3;
                 return press(kPadTriangle);
             }
@@ -407,15 +415,15 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             return press(n.dir > 0 ? kPadDown : kPadUp);
         }
         // Accept-only fallback: step, accept, verify the outcome, back out
-        // and retry (3 peaks: at most 3 attempts, then the peak is locked).
-        if (n.tries >= 3)
+        // and retry (both directions, then the peak is locked).
+        if (n.tries >= 6)
             return abort();
         if (n.sub == 3)
-            n.sub = 0; // backed out; step to the next peak
+            n.sub = 0; // backed out; step again
         if (n.sub == 0)
         {
             n.sub = 1;
-            return press(kPadDown);
+            return press(n.dir >= 0 ? kPadDown : kPadUp);
         }
         if (n.sub == 1)
         {
@@ -446,8 +454,11 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
                     n.settleUntil = tick + kSettleTicks;
                     return out;
                 }
-                if (++n.tries >= 2)
-                    return abort(); // both modes tried
+                if (v.typeOk && v.type == static_cast<uint32_t>(n.lastPos))
+                    n.dir = (n.dir >= 0) ? -1 : 1;
+                n.lastPos = v.typeOk ? static_cast<int>(v.type) : -2;
+                if (++n.tries >= 4)
+                    return abort(); // both modes tried, both ways
                 n.sub = 3;
                 return press(kPadTriangle);
             }
@@ -464,6 +475,7 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             // Kicked back to Peak (lock?): re-sync.
             n.phase = NavPhase::ToPeak;
             n.dir = 0;
+            n.lastPos = -2;
             n.tries = 0;
             n.sub = 0;
             return navStep(n, v, tick, peakLive, modeLive);
@@ -488,14 +500,14 @@ inline NavOut navStep(NavState &n, const FeView &v, uint64_t tick, bool peakLive
             return press(n.dir > 0 ? kPadDown : kPadUp);
         }
         // Accept-only fallback: same shape as the peak (2 mode rows).
-        if (n.tries >= 2)
+        if (n.tries >= 4)
             return abort();
         if (n.sub == 3)
-            n.sub = 0; // backed out; step to the next mode
+            n.sub = 0; // backed out; step again
         if (n.sub == 0)
         {
             n.sub = 1;
-            return press(kPadDown);
+            return press(n.dir >= 0 ? kPadDown : kPadUp);
         }
         if (n.sub == 1)
         {

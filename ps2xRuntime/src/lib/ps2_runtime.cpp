@@ -8103,6 +8103,7 @@ void PS2Runtime::run()
     int tkShutDeb = 0;  // consecutive non-Map frames (close at kTkDeb)
     uint16_t tkPrevUnion = 0; // list nav edge detect (physical + test spans)
     std::vector<int64_t> tkDown; // touch ids currently on the list
+    uint64_t tkHostFrame = 0; // diag mapping: host frames <-> guest ticks
     if (tkListOn)
         std::fprintf(stderr, "[tklist] overlay on (PS2X_SSX3_TRICKY_LIST=1)\n");
     // SET2 perf sampler: always-on lightweight vs/s + frame-time (one tick
@@ -8781,6 +8782,10 @@ void PS2Runtime::run()
         {
             namespace tkl = ps2_ssx3_tricky_list;
             const uint64_t tkTick = m_memory.gs().vsyncTick.load(std::memory_order_relaxed);
+            if (tkl::diag() && (++tkHostFrame % 600u) == 0u)
+                std::fprintf(stderr, "[tklist] hostframe=%llu guestTick=%llu\n",
+                             static_cast<unsigned long long>(tkHostFrame),
+                             static_cast<unsigned long long>(tkTick));
             bool tkMapLive = false;
             tkl::FeView tkView;
             if (ps2_ssx3_tricky::state().on && ps2_ssx3_tricky::state().tricky)

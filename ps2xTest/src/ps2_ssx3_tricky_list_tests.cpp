@@ -332,6 +332,7 @@ void register_ps2_ssx3_tricky_list_tests()
             // The guest reports the ACCEPTED peak/type (cursor invisible).
             // Goal Merqury P3 Race row 0: Down+Cross accepts P2 (wrong),
             // Triangle backs out, Down+Cross accepts P3, then Mode, Event.
+            // The Peak cursor wraps here (flip coverage is the next test).
             int cursorPeak = 0, acceptedPeak = 0;
             int cursorType = 0, acceptedType = 0;
             int screen = 2, row = 0;
@@ -389,6 +390,57 @@ void register_ps2_ssx3_tricky_list_tests()
             t.IsTrue(n.handedOff, "handoff");
             t.Equals(acceptedPeak, 2, "P3 accepted after one retry");
             t.Equals(n.tries, 0, "tries reset on the verified accept"); });
+
+        tc.Run("accept-only Peak flips direction when the cursor is stuck", [](TestCase &t)
+               {
+            // No-wrap Peak cursor clamped at P3, starting there; goal
+            // Garibaldi P1. Downs never move it, so the fallback flips to
+            // Up and walks down to P1. Mode matches (Race), Event row 0.
+            int cursorPeak = 2, acceptedPeak = 2;
+            int screen = 0, row = 0;
+            bool left = false;
+            NavState n;
+            navStart(n, kCourses[0].opts[0], 0, 0);
+            uint64_t tick = 0;
+            uint16_t lastOut = 0;
+            const auto view = [&]() {
+                FeView v;
+                if (left)
+                    return v;
+                auto ram = viewRam(static_cast<uint32_t>(screen), static_cast<uint32_t>(acceptedPeak), 0u,
+                                   static_cast<uint8_t>(row), 0x600000, 0x601000, 0x602000);
+                return readView(ram.data(), static_cast<uint32_t>(ram.size()), 0x600000);
+            };
+            const auto apply = [&](uint16_t mask) {
+                if (mask == kPadDown)
+                    cursorPeak = cursorPeak < 2 ? cursorPeak + 1 : 2;
+                else if (mask == kPadUp)
+                    cursorPeak = cursorPeak > 0 ? cursorPeak - 1 : 0;
+                else if (mask == kPadCross)
+                {
+                    if (screen == 0)
+                    {
+                        acceptedPeak = cursorPeak;
+                        screen = 1;
+                    }
+                    else if (screen == 1)
+                        screen = 2;
+                    else if (row == 0)
+                        left = true;
+                }
+                else if (mask == kPadTriangle && screen > 0)
+                    --screen;
+            };
+            for (int i = 0; i < 1200 && n.phase != NavPhase::Done && n.phase != NavPhase::Aborted; ++i)
+            {
+                NavOut o = navStep(n, view(), tick, false, true);
+                if (lastOut != 0 && o.mask == 0)
+                    apply(lastOut);
+                lastOut = o.mask;
+                ++tick;
+            }
+            t.Equals(static_cast<int>(n.phase), static_cast<int>(NavPhase::Done), "flip completes");
+            t.Equals(acceptedPeak, 0, "P1 accepted after flipping to Up"); });
 
         tc.Run("press budget aborts a stuck drive", [](TestCase &t)
                {
