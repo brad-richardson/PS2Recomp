@@ -75,8 +75,8 @@ namespace ps2_net_protocol
 
     // Availability policy (online-default-1; Brad 10-15 tentative:
     // online is 120-only). THE ONE-LINE SWITCH: flip kOnlineRequires120
-    // to true and stock-60 builds go offline (net HLE stays dormant, the
-    // panel row greys out with "needs 120") with no preset reshuffle.
+    // to true and stock-60 builds go offline (the net HLE stays dormant)
+    // with no preset reshuffle.
     // False today: identical behavior in both modes.
     constexpr bool kOnlineRequires120 = false;
 

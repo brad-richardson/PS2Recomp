@@ -2,7 +2,7 @@
 
 // SET2: in-game settings overlay (design B, Brad 10-12): Select+Start opens a
 // minimal paused panel (Mode, Resolution, Perf overlay, On-device upscale,
-// Online, Restart).
+// Restart).
 // Pure logic here (unit-tested by ps2_settings_overlay_tests.cpp); the render
 // loop in ps2_runtime.cpp owns pause/draw/restart, and the platform shells
 // own the settings file layer + relaunch.
@@ -112,8 +112,8 @@ inline ChordOut chordStep(ChordState &st, bool selectDown, bool startDown, int64
 
 // --- Panel navigation (pad edges; touch taps map to the same edges) ---
 //
-// Rows: Mode, Resolution, Perf, Upscale, Touch, Online, Restart. X changes
-// the pending value (Mode/Resolution/Online apply on restart; Perf, Upscale
+// Rows: Mode, Resolution, Perf, Upscale, Touch, Restart. X changes
+// the pending value (Mode/Resolution apply on restart; Perf, Upscale
 // and Touch are live). Restart arms on the first X ("one-line confirm") and
 // fires on the second. Triangle or the chord closes. Row::Count drives the
 // geometry, hit test and draw loops, so appending a row needs no layout
@@ -125,9 +125,8 @@ enum class Row : uint8_t
     Perf = 2,
     Upscale = 3,
     Touch = 4,
-    Online = 5,
-    Restart = 6,
-    Count = 7
+    Restart = 5,
+    Count = 6
 };
 static constexpr int kRowCount = static_cast<int>(Row::Count);
 
@@ -147,8 +146,6 @@ inline const char *rowLabel(Row r)
         return "Upscale";
     case Row::Touch:
         return "Touch";
-    case Row::Online:
-        return "Online";
     case Row::Restart:
         return "Restart";
     default:
@@ -219,18 +216,8 @@ struct NavState
     bool perf = false;       // live
     bool upscale = false;    // live (REM3 P11 Phase 2)
     Touch touch = Touch::Auto; // live (android-touch-1)
-    bool online = false;     // pending (applied on restart; online-default-1)
     bool restartArmed = false;
 };
-
-// SET2 Online row (online-default-1): the panel-owned persistence key.
-// Off writes PS2X_NET=0 (settings layer reads last, so it beats the
-// preset); on writes PS2X_NET=1. Same truthiness as the net HLE gate:
-// set and not starting with '0'.
-inline bool onlineEnvOn(const char *value)
-{
-    return value && *value && value[0] != '0';
-}
 
 struct NavOut
 {
@@ -292,10 +279,6 @@ inline NavOut navStep(NavState &st, bool upEdge, bool downEdge, bool crossEdge, 
         break;
     case Row::Touch:
         st.touch = (st.touch == Touch::Auto) ? Touch::On : (st.touch == Touch::On ? Touch::Off : Touch::Auto);
-        out.action = Action::Changed;
-        break;
-    case Row::Online:
-        st.online = !st.online;
         out.action = Action::Changed;
         break;
     case Row::Restart:
@@ -378,8 +361,7 @@ inline bool settingsKeyAllowed(const char *key)
     const std::string k(key);
     return k == "GE1_UPSCALE" || k == "PS2X_SETTINGS_PERF" ||
            k == "PS2X_VIRTUAL_PAD" || // android-touch-1: Touch row persists under its env name
-           k == "GE1_ONDEVICE_UPSCALE" || // REM3 P11 Phase 2: the live toggle persists under its env name
-           k == "PS2X_NET"; // online-default-1: the Online row persists under its env name
+           k == "GE1_ONDEVICE_UPSCALE"; // REM3 P11 Phase 2: the live toggle persists under its env name
 }
 
 using SettingsPairs = std::vector<std::pair<std::string, std::string>>;
@@ -426,7 +408,7 @@ inline SettingsPairs parseSettingsEnv(const std::string &content)
 
 inline std::string formatSettingsEnv(const SettingsPairs &pairs)
 {
-    std::string s = "# set2: written by the in-game settings panel (Mode/Resolution/Perf/Upscale/Touch/Online).\n"
+    std::string s = "# set2: written by the in-game settings panel (Mode/Resolution/Perf/Upscale/Touch).\n"
                     "# Delete lines (or this file) to return to the platform defaults.\n";
     for (const auto &kv : pairs)
         s += kv.first + "=" + kv.second + "\n";

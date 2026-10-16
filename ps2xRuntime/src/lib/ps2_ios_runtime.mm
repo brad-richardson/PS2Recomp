@@ -220,10 +220,9 @@ void prepareEnvironment(const char *argv0)
         const auto settings = readEnvFile(documents / "settings.env");
         for (const auto &[key, value] : settings)
         {
-            // android-touch-1: Touch row. online-default-1: PS2X_NET joins
-            // the panel-owned keys (the Online row persists under its name).
+            // android-touch-1: Touch row.
             const bool owned = key == "GE1_UPSCALE" || key == "PS2X_SETTINGS_PERF" ||
-                               key == "PS2X_VIRTUAL_PAD" || key == "PS2X_NET";
+                               key == "PS2X_VIRTUAL_PAD";
             if (!owned || launcherKeys.count(key) != 0)
                 continue;
             setenv(key.c_str(), value.c_str(), 1);
